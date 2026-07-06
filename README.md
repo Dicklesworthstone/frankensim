@@ -13,6 +13,7 @@
 ![Status](https://img.shields.io/badge/status-design%20plan-blue)
 ![Language](https://img.shields.io/badge/language-Rust-orange)
 ![Runtime deps](https://img.shields.io/badge/runtime%20deps-Franken--only-lightgrey)
+![License](https://img.shields.io/badge/license-MIT%20%2B%20OpenAI%2FAnthropic%20Rider-blue)
 
 </div>
 
@@ -611,5 +612,5 @@ Bug reports are welcome. The contribution policy below is intentionally strict.
 
 ## License
 
-No license file is present yet. Treat this repository as public planning
-material until a license is added.
+FrankenSim is licensed under the MIT License with the OpenAI/Anthropic rider.
+See [LICENSE](LICENSE) for the exact terms.
