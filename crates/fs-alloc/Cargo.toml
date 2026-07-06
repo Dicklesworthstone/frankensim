@@ -11,6 +11,7 @@ description = "Scope arenas with O(1) cancel reclaim, 128-byte alignment, hugepa
 layer = "L0"
 
 [dependencies]
+fs-obs = { path = "../fs-obs" }
 
 [dev-dependencies]
 

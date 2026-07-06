@@ -750,6 +750,9 @@ dependencies = [
 [[package]]
 name = "fs-alloc"
 version = "0.0.1"
+dependencies = [
+ "fs-obs",
+]
 
 [[package]]
 name = "fs-exec"
