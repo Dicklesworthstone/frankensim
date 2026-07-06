@@ -8,11 +8,14 @@
 //! table's tier choice is an optimization, not a soundness precondition.
 #![allow(unsafe_code)] // registered capsule — see SAFETY.md beside this file
 
+// Only the intrinsics the WIRED ops (axpy/dot/sum) use; mul intrinsics
+// return here when scale/mul_elem get vector paths (caught by the CI
+// both-ISA clippy gate — unused imports never compile on local aarch64).
 #[cfg(target_arch = "x86_64")]
 use core::arch::x86_64::{
-    __m256d, _mm256_add_pd, _mm256_fmadd_pd, _mm256_loadu_pd, _mm256_mul_pd, _mm256_set1_pd,
-    _mm256_storeu_pd, _mm512_add_pd, _mm512_fmadd_pd, _mm512_loadu_pd, _mm512_mul_pd,
-    _mm512_reduce_add_pd, _mm512_set1_pd, _mm512_storeu_pd,
+    __m256d, _mm256_add_pd, _mm256_fmadd_pd, _mm256_loadu_pd, _mm256_set1_pd, _mm256_storeu_pd,
+    _mm512_add_pd, _mm512_fmadd_pd, _mm512_loadu_pd, _mm512_reduce_add_pd, _mm512_set1_pd,
+    _mm512_storeu_pd,
 };
 
 /// Horizontal sum of a __m256d, fixed low-to-high lane order.

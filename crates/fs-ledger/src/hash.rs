@@ -121,8 +121,9 @@ fn compress(
 /// Little-endian words from a (zero-padded) 64-byte block.
 fn words_from_block(block: &[u8; BLOCK_LEN]) -> [u32; 16] {
     let mut words = [0u32; 16];
-    for (word, bytes) in words.iter_mut().zip(block.chunks_exact(4)) {
-        *word = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    let (quads, _) = block.as_chunks::<4>();
+    for (word, bytes) in words.iter_mut().zip(quads) {
+        *word = u32::from_le_bytes(*bytes);
     }
     words
 }
@@ -164,8 +165,9 @@ impl Output {
             self.flags | ROOT,
         );
         let mut bytes = [0u8; 32];
-        for (chunk, word) in bytes.chunks_exact_mut(4).zip(words.iter()) {
-            chunk.copy_from_slice(&word.to_le_bytes());
+        let (quads, _) = bytes.as_chunks_mut::<4>();
+        for (chunk, word) in quads.iter_mut().zip(words.iter()) {
+            *chunk = word.to_le_bytes();
         }
         bytes
     }
@@ -375,7 +377,8 @@ impl ContentHash {
             return None;
         }
         let mut out = [0u8; 32];
-        for (dst, pair) in out.iter_mut().zip(raw.chunks_exact(2)) {
+        let (pairs, _) = raw.as_chunks::<2>();
+        for (dst, pair) in out.iter_mut().zip(pairs) {
             let hi = (pair[0] as char).to_digit(16)?;
             let lo = (pair[1] as char).to_digit(16)?;
             *dst = (hi * 16 + lo) as u8;
