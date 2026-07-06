@@ -11,6 +11,7 @@ description = "Forward-mode duals (generic, nestable), the Real scalar contract;
 layer = "L1"
 
 [dependencies]
+fs-la = { path = "../fs-la" }
 fs-math = { path = "../fs-math" }
 
 [dev-dependencies]

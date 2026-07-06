@@ -12,12 +12,20 @@
 //! over `Real` cannot silently reintroduce platform libm — genericity and
 //! cross-ISA bit-determinism compose instead of fighting.
 //!
-//! Reverse mode (FrankenTorch tape bridge) and adjoint-by-construction (IFT,
-//! revolve checkpointing) are the fs-ad-adjoint-infra bead's scope.
+//! Adjoint infrastructure lives here too: [`ift`] (differentiate through
+//! solutions), [`revolve`] (checkpointed reverse sweeps), [`gradcheck`]
+//! (the CI gradient-gate primitive). The FrankenTorch tape bridge is the
+//! recorded follow-up.
 
 pub mod dual;
+pub mod gradcheck;
+pub mod ift;
+pub mod revolve;
 
 pub use dual::{Dual, Dual64, gradient, jvp, second_directional};
+pub use gradcheck::{GradCheckReport, gradcheck};
+pub use ift::{IftReport, ift_gradient};
+pub use revolve::{RevolveStats, checkpointed_adjoint, full_adjoint, min_budget};
 
 /// Crate version, re-exported for provenance stamping.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
