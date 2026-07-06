@@ -172,6 +172,63 @@ impl TiledSdf {
         self.h
     }
 
+    /// Re-sample every grid sample whose position lies inside `region`
+    /// (inflated by one spline-support cell so reconstruction around the
+    /// edit seam sees fresh data) — the incremental path for locally
+    /// edited sources. Samples are recomputed at EXACTLY the original
+    /// positions, so an incremental update is bit-identical to a full
+    /// rebuild of the same source (the converter beads' G5 law). Returns
+    /// the number of samples refreshed.
+    ///
+    /// # Errors
+    /// [`fs_exec::Cancelled`] mid-update (the field stays valid: every
+    /// written sample is complete).
+    pub fn resample_box(
+        &mut self,
+        source: &dyn Chart,
+        region: fs_geom::Aabb,
+        cx: &Cx<'_>,
+    ) -> Result<u64, fs_exec::Cancelled> {
+        let pad = 2.0 * self.h[0].max(self.h[1]).max(self.h[2]);
+        let r = region.inflate(pad);
+        let lo = |axis: usize, min: f64| -> u32 {
+            let base = match axis {
+                0 => self.box_.min.x,
+                1 => self.box_.min.y,
+                _ => self.box_.min.z,
+            };
+            (((min - base) / self.h[axis]).floor().max(0.0)) as u32
+        };
+        let hi = |axis: usize, max: f64, n: u32| -> u32 {
+            let base = match axis {
+                0 => self.box_.min.x,
+                1 => self.box_.min.y,
+                _ => self.box_.min.z,
+            };
+            (((max - base) / self.h[axis]).ceil() as u32).min(n - 1)
+        };
+        let (i0, i1) = (lo(0, r.min.x), hi(0, r.max.x, self.n[0]));
+        let (j0, j1) = (lo(1, r.min.y), hi(1, r.max.y, self.n[1]));
+        let (k0, k1) = (lo(2, r.min.z), hi(2, r.max.z, self.n[2]));
+        let mut updated = 0u64;
+        for k in k0..=k1 {
+            for j in j0..=j1 {
+                cx.checkpoint()?;
+                for i in i0..=i1 {
+                    let p = Point3::new(
+                        self.box_.min.x + f64::from(i) * self.h[0],
+                        self.box_.min.y + f64::from(j) * self.h[1],
+                        self.box_.min.z + f64::from(k) * self.h[2],
+                    );
+                    let sd = source.eval(p, cx).signed_distance;
+                    self.field.set([i, j, k], sd as f32);
+                    updated += 1;
+                }
+            }
+        }
+        Ok(updated)
+    }
+
     /// Quadratic B-spline basis at fractional offset `t ∈ [0,1)` for the
     /// three support samples (standard uniform quadratic B-spline).
     fn bspline_w(t: f64) -> [f64; 3] {

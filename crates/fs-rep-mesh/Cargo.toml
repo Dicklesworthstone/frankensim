@@ -16,6 +16,7 @@ fs-evidence = { path = "../fs-evidence" }
 fs-exec = { path = "../fs-exec" }
 fs-geom = { path = "../fs-geom" }
 fs-obs = { path = "../fs-obs" }
+fs-rep-sdf = { path = "../fs-rep-sdf" }
 
 [dev-dependencies]
 asupersync = { path = "../../../asupersync" }

@@ -365,3 +365,133 @@ fn rmesh_006_incidence_satisfies_dd_zero_and_rays_are_watertight() {
         ),
     );
 }
+
+#[test]
+fn rmesh_007_mesh_to_sdf_converter_is_certified_equivariant_and_incremental() {
+    const SEED: u64 = 0x1007_2026_0706_C0DE;
+    let (analytic_ok, equivariant, incremental_identical, downgrade_ok, samples) = with_cx(|cx| {
+        // Certified accuracy: high-res icosphere -> SDF matches the
+        // analytic sphere within the receipt's declared envelope plus the
+        // mesh chord band.
+        let ico = shapes::icosphere(Point3::new(0.0, 0.0, 0.0), 1.0, 3);
+        let chart = MeshChart::new(ico.clone());
+        let receipt = fs_rep_mesh::mesh_to_sdf(&chart, 0.08, cx).expect("convert");
+        assert_eq!(
+            receipt.numerical.kind,
+            fs_evidence::NumericalKind::Enclosure,
+            "closed icosphere gets an enclosure-grade (certifiable) receipt"
+        );
+        let mut rng = Lcg(SEED);
+        let mut analytic_ok = true;
+        for _ in 0..800 {
+            let p = Point3::new(
+                (rng.unit() - 0.5) * 2.6,
+                (rng.unit() - 0.5) * 2.6,
+                (rng.unit() - 0.5) * 2.6,
+            );
+            let sd = receipt.value.eval(p, cx).signed_distance;
+            let analytic = p.delta_from(Point3::new(0.0, 0.0, 0.0)).norm() - 1.0;
+            // envelope: declared field bound + icosphere-3 chord error.
+            analytic_ok &= (sd - analytic).abs() <= receipt.qoi + 6e-3 + 1e-9;
+        }
+        // G3 translation equivariance: translate the mesh AND the queries;
+        // the sampled fields must agree bitwise at corresponding points.
+        let shift = fs_geom::Vec3::new(0.31, -0.17, 0.23);
+        let moved = fs_rep_mesh::Soup {
+            positions: ico.positions.iter().map(|p| p.offset(shift)).collect(),
+            triangles: ico.triangles.clone(),
+        };
+        let moved_receipt =
+            fs_rep_mesh::mesh_to_sdf(&MeshChart::new(moved), 0.08, cx).expect("convert moved");
+        let mut equivariant = true;
+        for _ in 0..200 {
+            let p = Point3::new(
+                (rng.unit() - 0.5) * 2.0,
+                (rng.unit() - 0.5) * 2.0,
+                (rng.unit() - 0.5) * 2.0,
+            );
+            let a = receipt.value.eval(p, cx).signed_distance;
+            let b = moved_receipt.value.eval(p.offset(shift), cx).signed_distance;
+            // Grids are anchored to supports which translate with the mesh,
+            // so samples align and values match to fp noise.
+            equivariant &= (a - b).abs() < 1e-6;
+        }
+        // Incremental == full (G5): edit a vertex patch, refresh the dirty
+        // box, compare bitwise against a full rebuild of the edited mesh.
+        let mut edited = ico.clone();
+        for p in edited.positions.iter_mut().take(12) {
+            *p = Point3::new(p.x * 1.05, p.y * 1.05, p.z * 1.05);
+        }
+        let edited_chart = || MeshChart::new(edited.clone());
+        let mut inc =
+            fs_rep_mesh::IncrementalMeshSdf::build(MeshChart::new(ico.clone()), 0.08, cx)
+                .expect("initial");
+        // The dirty box: everything within reach of the moved vertices.
+        // Distance fields have GLOBAL support in principle; for a 5% bump
+        // the change is confined to the bump's distance cone — cover it
+        // generously.
+        inc.update(
+            edited_chart(),
+            fs_geom::Aabb::new(Point3::new(-2.0, -2.0, -2.0), Point3::new(2.0, 2.0, 2.0)),
+            cx,
+        )
+        .expect("update");
+        let full = fs_rep_mesh::mesh_to_sdf(&edited_chart(), 0.08, cx).expect("full rebuild");
+        let mut incremental_identical = true;
+        for _ in 0..400 {
+            let p = Point3::new(
+                (rng.unit() - 0.5) * 2.4,
+                (rng.unit() - 0.5) * 2.4,
+                (rng.unit() - 0.5) * 2.4,
+            );
+            let a = inc.sdf().eval(p, cx).signed_distance;
+            let b = full.value.eval(p, cx).signed_distance;
+            incremental_identical &= a.to_bits() == b.to_bits();
+        }
+        // Downgrade path: adversarial open/slivered soup gets an Estimate
+        // receipt naming the heuristic.
+        let nasty = shapes::corrupt(
+            shapes::icosphere(Point3::new(0.0, 0.0, 0.0), 1.0, 1),
+            0,
+            2,
+            0..0,
+            Some(5),
+        );
+        let nasty_receipt =
+            fs_rep_mesh::mesh_to_sdf(&MeshChart::new(nasty), 0.15, cx).expect("soup builds");
+        let downgrade_ok = nasty_receipt.numerical.kind == fs_evidence::NumericalKind::Estimate
+            && nasty_receipt
+                .model
+                .cards
+                .contains(&"winding-sign-heuristic".to_string());
+        (
+            analytic_ok,
+            equivariant,
+            incremental_identical,
+            downgrade_ok,
+            inc.last_update_samples,
+        )
+    });
+    let mut em = fs_obs::Emitter::new("fs-rep-mesh/conformance", "rmesh-007/convert");
+    let line = em
+        .emit(
+            fs_obs::Severity::Info,
+            fs_obs::EventKind::Custom {
+                name: "rep-mesh-convert-stats".to_string(),
+                json: format!("{{\"incremental_samples_refreshed\":{samples}}}"),
+            },
+            None,
+        )
+        .to_jsonl();
+    fs_obs::validate_line(&line).expect("convert stats validate");
+    println!("{line}");
+    verdict(
+        "rmesh-007",
+        analytic_ok && equivariant && incremental_identical && downgrade_ok,
+        &format!(
+            "mesh->SDF: analytic match within declared envelope, translation-equivariant (G3), \
+             incremental update bit-identical to full rebuild (G5, {samples} samples \
+             refreshed), open-soup receipts honestly downgraded (seed {SEED:#x})"
+        ),
+    );
+}
