@@ -1,0 +1,90 @@
+# Rust build output
+/target/
+target/
+
+# Cargo temporary files
+**/*.rs.bk
+
+# Keep Cargo.lock tracked by default for this workspace.
+# If a future crate is a pure library with a deliberate policy to omit it,
+# change that policy explicitly instead of ignoring it here.
+
+# Rust profiling and coverage output
+*.profraw
+*.profdata
+/coverage/
+/tarpaulin-report.html
+/lcov.info
+/cobertura.xml
+
+# Criterion and benchmark scratch output outside target/
+/criterion/
+/bench-output/
+/bench-results/
+
+# Flamegraph and perf artifacts
+perf.data
+perf.data.old
+flamegraph.svg
+flamegraph.folded
+
+# Generated docs
+/doc/
+/docs/generated/
+
+# Local databases and ledgers
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+
+# Logs and local scratch files
+*.log
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+*.orig
+/tmp/
+/scratch/
+
+# Environment and local secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.p12
+
+# macOS and editor metadata
+.DS_Store
+._*
+.AppleDouble
+.LSOverride
+.idea/
+.vscode/
+*.iml
+
+# Linux and Windows metadata
+*~
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# RCH and local remote-build scratch directories
+/rch_target*/
+/remote-target*/
+
+# Generated package artifacts
+*.crate
+*.tar.gz
+*.zip
+*.dSYM/
+
+# Source illustration asset. The README uses the compressed WebP.
+frankensim_illustration.png
