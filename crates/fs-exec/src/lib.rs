@@ -43,6 +43,7 @@ mod pool;
 mod race;
 pub mod reduce;
 pub mod solver;
+mod tune;
 
 pub use cx::{CancelGate, Cancelled, Cx, ExecMode, StreamKey};
 pub use kernel::{Reduce, TileKernel, TilePlan};
@@ -50,6 +51,7 @@ pub use kill::{CandidateId, KillRegistry};
 pub use latency::{LaneError, LatencyLane};
 pub use pool::{PoolConfig, RunError, RunReport, TilePool, victim_order, weighted_ranges};
 pub use race::{BranchOutcome, BranchReport, NoWinner, RaceBranch, RaceRun, Racer, RacerConfig};
+pub use tune::{ScheduleKind, TuneError, TuneRow, TuneSource, Tuner, TuningDecision};
 
 /// Crate version, re-exported for provenance stamping (the Five Explicits'
 /// "versions" pillar reaches down to individual crates).

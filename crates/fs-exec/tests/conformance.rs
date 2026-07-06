@@ -723,3 +723,65 @@ fn exec_012_kill_handles_reclaim_a_deep_candidate_tree_mid_flight() {
         ),
     );
 }
+
+#[test]
+fn exec_013_autotuner_calibrates_persists_and_pins_reproducibly() {
+    use fs_exec::{TuneSource, Tuner};
+    let probe = fs_substrate::CapabilityProbe::topology_only();
+    let fingerprint = probe.fingerprint();
+    let mut tuner = Tuner::cold(fingerprint);
+    assert!(tuner.needs_calibration());
+    // Calibrate: real stencil sweep through the real pool; report ledgered.
+    let report = tuner.calibrate(&probe);
+    let mut em = fs_obs::Emitter::new("fs-exec/conformance", "exec-013/tune");
+    let line = em
+        .emit(
+            fs_obs::Severity::Info,
+            fs_obs::EventKind::Custom {
+                name: "fs-exec-calibration-report".to_string(),
+                json: report.clone(),
+            },
+            None,
+        )
+        .to_jsonl();
+    fs_obs::validate_line(&line).expect("calibration report validates");
+    println!("{line}");
+    // Rows carry the fingerprint + confidence (acceptance).
+    let fp_hex = format!("{fingerprint:016x}");
+    let rows_keyed = report.contains(&fp_hex) && report.contains("\"confidence\":");
+    // Tuned decision now answers (source = tuned), and recalibration is
+    // idempotent (same keys, refresh increments — visible in the report).
+    let (_edge_first, src) = tuner.tile_edge_for("stencil7-f32");
+    let tuned = src == TuneSource::Tuned;
+    let report2 = tuner.calibrate(&probe);
+    let idempotent = report2.contains("\"refresh\":2");
+    // Persist -> reload -> consume; foreign fingerprints go stale.
+    let dir = std::env::temp_dir().join("fs-exec-tune-conf");
+    std::fs::create_dir_all(&dir).expect("tmp dir");
+    let path = dir.join("tune.jsonl");
+    tuner.save(&path).expect("save");
+    let mut reloaded = Tuner::load(&path, fingerprint).expect("load");
+    let (edge_reloaded, src_reloaded) = reloaded.tile_edge_for("stencil7-f32");
+    let (edge_tuner, _) = tuner.tile_edge_for("stencil7-f32");
+    let persisted = src_reloaded == TuneSource::Tuned && edge_reloaded == edge_tuner;
+    let stale = Tuner::load(&path, fingerprint ^ 1)
+        .expect("foreign load")
+        .needs_calibration();
+    // Replay fidelity: pin the recorded decision on a COLD tuner — the
+    // choice reproduces without any calibration data.
+    let recorded = reloaded.decisions()[0].clone();
+    let mut replay = Tuner::cold(0);
+    replay.pin(recorded.kernel.clone(), recorded.params.clone());
+    let (edge_replayed, src_replayed) = replay.tile_edge_for("stencil7-f32");
+    let replayable = src_replayed == TuneSource::Pinned && edge_replayed == edge_reloaded;
+    verdict(
+        "exec-013",
+        rows_keyed && tuned && idempotent && persisted && stale && replayable,
+        &format!(
+            "calibrate->persist->consume round trip on machine {fp_hex}: rows fingerprinted \
+             with confidence, recalibration idempotent (refresh=2), foreign fingerprints \
+             stale, pinned replay reproduces the recorded plan (edge={})",
+            edge_reloaded.cells()
+        ),
+    );
+}
