@@ -18,6 +18,7 @@ members = [
     "crates/fs-ad",
     "crates/fs-eproc",
     "crates/fs-ledger",
+    "crates/fs-ir",
     "crates/fs-roofline",
     "crates/fs-geom",
     "crates/fs-rep-sdf",
