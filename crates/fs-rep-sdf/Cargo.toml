@@ -1,0 +1,25 @@
+[package]
+name = "fs-rep-sdf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Signed-distance-field charts: dense tiled grids (f32 store/f64 eval, C1 interpolation), FrankenVDB sparse tree, adaptive octree SDF, narrow-band evolution."
+
+[package.metadata.frankensim]
+layer = "L2"
+
+[dependencies]
+fs-alloc = { path = "../fs-alloc" }
+fs-evidence = { path = "../fs-evidence" }
+fs-exec = { path = "../fs-exec" }
+fs-geom = { path = "../fs-geom" }
+fs-obs = { path = "../fs-obs" }
+fs-substrate = { path = "../fs-substrate" }
+
+[dev-dependencies]
+asupersync = { path = "../../../asupersync" }
+
+[lints]
+workspace = true
