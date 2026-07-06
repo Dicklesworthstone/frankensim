@@ -789,6 +789,9 @@ dependencies = [
 [[package]]
 name = "fs-ivl"
 version = "0.0.1"
+dependencies = [
+ "fs-math",
+]
 
 [[package]]
 name = "fs-la"
