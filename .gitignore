@@ -41,6 +41,14 @@ flamegraph.folded
 *.sqlite3-shm
 *.sqlite3-wal
 
+# Beads local runtime state. Keep durable issue exports tracked.
+.beads/.br_history/
+.beads/*.lock
+.beads/.*.lock
+.beads/beads.db
+.beads/beads.db-*
+.beads/last-touched
+
 # Logs and local scratch files
 *.log
 *.tmp
