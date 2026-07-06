@@ -851,6 +851,14 @@ name = "fs-obs"
 version = "0.0.1"
 
 [[package]]
+name = "fs-plan"
+version = "0.0.1"
+dependencies = [
+ "fs-geom",
+ "fs-ledger",
+]
+
+[[package]]
 name = "fs-qty"
 version = "0.0.1"
 
@@ -871,6 +879,7 @@ dependencies = [
  "fs-exec",
  "fs-geom",
  "fs-obs",
+ "fs-rep-sdf",
 ]
 
 [[package]]
