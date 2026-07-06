@@ -177,10 +177,10 @@ fn qr_orthogonality_reconstruction_least_squares() {
                 col[i] = f.r(i, j);
             }
             f.apply_q(&mut col);
-            for i in 0..m {
+            for (i, &cv) in col.iter().enumerate() {
                 let want = a[i * n + j];
                 assert!(
-                    (col[i] - want).abs() < 1e-12 * (1.0 + want.abs()),
+                    (cv - want).abs() < 1e-12 * (1.0 + want.abs()),
                     "A != QR at ({i},{j}) for {m}x{n}"
                 );
             }
@@ -347,7 +347,7 @@ fn degenerate_shapes() {
     assert!(cholesky(&[], 0).is_ok());
     assert!(lu(&[], 0).is_ok());
     let f = qr(&[], 0, 0);
-    assert_eq!(f.r(0, 0), 0.0);
+    assert_eq!(f.r(0, 0).to_bits(), 0.0f64.to_bits());
     // 1×1.
     let c = cholesky(&[9.0], 1).unwrap();
     assert!((c.l(0, 0) - 3.0).abs() < 1e-15);
