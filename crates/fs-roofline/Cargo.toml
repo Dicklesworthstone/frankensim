@@ -1,0 +1,21 @@
+[package]
+name = "fs-roofline"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Roofline harness: measured machine axes, kernel attainment vs falsifiable targets, ledgered with fingerprints."
+
+[package.metadata.frankensim]
+layer = "L6"
+
+[dependencies]
+fs-substrate = { path = "../fs-substrate" }
+fs-simd = { path = "../fs-simd" }
+fs-ledger = { path = "../fs-ledger" }
+
+[dev-dependencies]
+
+[lints]
+workspace = true

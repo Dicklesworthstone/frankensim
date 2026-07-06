@@ -824,6 +824,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-roofline"
+version = "0.0.1"
+dependencies = [
+ "fs-ledger",
+ "fs-simd",
+ "fs-substrate",
+]
+
+[[package]]
 name = "fs-simd"
 version = "0.0.1"
 dependencies = [

@@ -16,6 +16,7 @@ members = [
     "crates/fs-ad",
     "crates/fs-eproc",
     "crates/fs-ledger",
+    "crates/fs-roofline",
     "crates/fs-vskeleton",
     "xtask",
 ]

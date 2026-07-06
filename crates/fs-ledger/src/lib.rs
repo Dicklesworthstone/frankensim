@@ -1376,6 +1376,52 @@ impl Ledger {
         }))
     }
 
+    /// All autotuner cache rows for one kernel, across shape classes and
+    /// machine fingerprints (staleness scans: "a target that was never
+    /// re-measured is a lie waiting to happen", plan §14.1).
+    ///
+    /// # Errors
+    /// Engine errors; an unknown kernel is an empty vec.
+    pub fn tune_rows(&self, kernel: &str) -> Result<Vec<TuneRow>, LedgerError> {
+        let rows = self
+            .conn
+            .query_with_params(
+                "SELECT shape_class, machine, params, measured FROM tune \
+                 WHERE kernel = ?1 ORDER BY shape_class",
+                &[text_param(kernel)],
+            )
+            .map_err(|e| sql_err("tune scan", &e))?;
+        let mut out = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let text_at = |idx: usize| -> Result<String, LedgerError> {
+                match row.get(idx) {
+                    Some(SqliteValue::Text(t)) => Ok(t.as_str().to_string()),
+                    other => Err(LedgerError::Sql {
+                        context: "tune scan".to_string(),
+                        detail: format!("column {idx}: expected TEXT, got {other:?}"),
+                    }),
+                }
+            };
+            let machine = match row.get(1) {
+                Some(SqliteValue::Blob(b)) => b.to_vec(),
+                other => {
+                    return Err(LedgerError::Sql {
+                        context: "tune scan".to_string(),
+                        detail: format!("machine: expected BLOB, got {other:?}"),
+                    });
+                }
+            };
+            out.push(TuneRow {
+                kernel: kernel.to_string(),
+                shape_class: text_at(0)?,
+                machine,
+                params: text_at(2)?,
+                measured: text_at(3)?,
+            });
+        }
+        Ok(out)
+    }
+
     // -- Rev S extension tables ----------------------------------------------
 
     /// Upsert a named record in one of the Rev S extension tables.
@@ -1812,6 +1858,22 @@ mod tests {
         let row = l.tune_get("gemm", "f64-512", b"m1").unwrap().unwrap();
         assert_eq!(row.params, r#"{"mc":384}"#);
         assert!(l.tune_get("gemm", "f64-512", b"m2").unwrap().is_none());
+    }
+
+    #[test]
+    fn tune_rows_scans_across_machines() {
+        let l = mem();
+        l.tune_put("axpy", "roofline-v1", b"m1", "{}", r#"{"gbs":50}"#)
+            .unwrap();
+        l.tune_put("axpy", "roofline-v1", b"m2", "{}", r#"{"gbs":60}"#)
+            .unwrap();
+        l.tune_put("gemm", "f64-512", b"m1", "{}", "{}").unwrap();
+        let rows = l.tune_rows("axpy").unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|r| r.kernel == "axpy"));
+        assert!(rows.iter().any(|r| r.machine == b"m1"));
+        assert!(rows.iter().any(|r| r.machine == b"m2"));
+        assert!(l.tune_rows("nonexistent").unwrap().is_empty());
     }
 
     #[test]
