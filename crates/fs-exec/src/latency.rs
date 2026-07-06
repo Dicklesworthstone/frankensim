@@ -84,12 +84,15 @@ mod tests {
 
     #[test]
     fn lane_supports_structured_spawn_and_join() {
+        // The canonical asupersync shape: spawn a ROOT task through the
+        // runtime handle; inside it, the ambient Cx spawns owned children.
         let lane = LatencyLane::new(1).expect("lane");
-        let joined = lane.block_on(async {
-            let cx = asupersync::Cx::current().expect("block_on installs the ambient Cx");
+        let root = lane.runtime().handle().spawn(async {
+            let cx = asupersync::Cx::current().expect("task Cx");
             let mut task = cx.spawn(|_child| async move { 7u64 }).expect("spawn child");
             task.join(&cx).await.expect("child joins")
         });
+        let joined = lane.block_on(root);
         assert_eq!(joined, 7);
     }
 }

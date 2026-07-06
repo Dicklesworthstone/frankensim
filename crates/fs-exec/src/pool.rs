@@ -193,7 +193,7 @@ impl RunReport {
 
 /// Compute worker `w`'s CCD index under `topo` for `workers` total workers:
 /// contiguous blocks, so workers `[k*W/C, (k+1)*W/C)` share CCD `k`.
-fn ccd_of_worker(w: usize, workers: usize, topo: &CcdTopology) -> usize {
+fn ccd_of_worker(w: usize, workers: usize, topo: CcdTopology) -> usize {
     let ccds = (topo.ccds as usize).max(1);
     (w * ccds) / workers.max(1)
 }
@@ -204,12 +204,12 @@ fn ccd_of_worker(w: usize, workers: usize, topo: &CcdTopology) -> usize {
 /// topologies verifies the runtime behavior.
 #[must_use]
 pub fn victim_order(w: usize, workers: usize, topo: &CcdTopology) -> Vec<usize> {
-    let my_ccd = ccd_of_worker(w, workers, topo);
+    let my_ccd = ccd_of_worker(w, workers, *topo);
     let ring = (1..workers).map(|d| (w + d) % workers);
     let mut same: Vec<usize> = Vec::new();
     let mut other: Vec<usize> = Vec::new();
     for v in ring {
-        if ccd_of_worker(v, workers, topo) == my_ccd {
+        if ccd_of_worker(v, workers, *topo) == my_ccd {
             same.push(v);
         } else {
             other.push(v);
@@ -286,6 +286,10 @@ impl TilePool {
 
     /// Run a kernel under an external cancel gate; returns the outcome and
     /// the measured [`RunReport`].
+    // One coherent protocol (seed deques -> worker loops -> fold + report);
+    // splitting it would scatter the drain/containment invariants the
+    // storm suite audits as a unit.
+    #[allow(clippy::too_many_lines)]
     pub fn run_with_gate<K: TileKernel>(
         &self,
         kernel: &K,
@@ -351,12 +355,12 @@ impl TilePool {
                                 if take == 0 {
                                     continue;
                                 }
-                                let stolen: VecDeque<u64> =
-                                    vd.split_off(vd.len() - take);
+                                let split_at = vd.len() - take;
+                                let stolen: VecDeque<u64> = vd.split_off(split_at);
                                 drop(vd);
                                 steals.fetch_add(1, Ordering::Relaxed);
-                                if ccd_of_worker(v, workers, &config.topo)
-                                    != ccd_of_worker(w, workers, &config.topo)
+                                if ccd_of_worker(v, workers, config.topo)
+                                    != ccd_of_worker(w, workers, config.topo)
                                 {
                                     cross_steals.fetch_add(1, Ordering::Relaxed);
                                 }
@@ -376,7 +380,13 @@ impl TilePool {
                             iteration,
                         };
                         let outcome = arenas.scope(|arena| {
-                            let cx = Cx::new(gate, arena, key, asupersync::types::Budget::INFINITE, config.mode);
+                            let cx = Cx::new(
+                                gate,
+                                arena,
+                                key,
+                                asupersync::types::Budget::INFINITE,
+                                config.mode,
+                            );
                             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                                 kernel.run(tile, &cx)
                             }))
@@ -511,11 +521,7 @@ mod tests {
     }
 
     fn pool(workers: usize) -> TilePool {
-        TilePool::new(PoolConfig::new(
-            workers,
-            CcdTopology::APPLE_M_CLASS,
-            0x5EED,
-        ))
+        TilePool::new(PoolConfig::new(workers, CcdTopology::APPLE_M_CLASS, 0x5EED))
     }
 
     #[test]
@@ -575,7 +581,10 @@ mod tests {
             other => panic!("expected Cancelled, got {other:?}"),
         }
         assert_eq!(report.total, 64);
-        assert!(p.arena_pool().stats().quiescent(), "cancelled work must reclaim");
+        assert!(
+            p.arena_pool().stats().quiescent(),
+            "cancelled work must reclaim"
+        );
     }
 
     #[test]
@@ -596,7 +605,9 @@ mod tests {
         let p = pool(4);
         let err = p.run(&Bomb).expect_err("must fail");
         match &err {
-            RunError::TilePanicked { tile: 9, message, .. } => {
+            RunError::TilePanicked {
+                tile: 9, message, ..
+            } => {
                 assert!(message.contains("exploded"), "{message}");
             }
             other => panic!("expected TilePanicked{{tile:9}}, got {other:?}"),

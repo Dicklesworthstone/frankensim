@@ -106,7 +106,7 @@ mod tests {
         assert!((f64::identity().merge(1.5) - 1.5).abs() < f64::EPSILON);
         let v = Vec::<u32>::identity().merge(vec![1, 2]);
         assert_eq!(v, vec![1, 2]);
-        <() as Reduce>::identity().merge(());
+        let _: () = <() as Reduce>::identity();
     }
 
     #[test]
