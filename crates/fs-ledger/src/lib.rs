@@ -14,8 +14,8 @@
 //! lost write. Multi-process multi-writer use is a no-claim boundary
 //! (CONTRACT.md).
 //!
-//! Time travel, forkable worlds, and `explain()` belong to the follow-on
-//! bead (`fs-ledger` time travel) and are deliberately absent here.
+//! Time travel, forkable worlds, `explain()`, the replay audit, and GC
+//! live in the [`travel`] module (schema v2).
 
 pub mod hash;
 pub mod schema;
@@ -1724,7 +1724,9 @@ mod tests {
         let l = mem();
         assert_eq!(l.schema_version().unwrap(), SCHEMA_VERSION);
         for table in ALL_TABLES {
-            assert_eq!(l.table_count(table).unwrap(), 0, "{table} empty");
+            // A fresh ledger is empty except the seeded main branch row.
+            let expected = u64::from(*table == "branches");
+            assert_eq!(l.table_count(table).unwrap(), expected, "{table} fresh count");
         }
     }
 
