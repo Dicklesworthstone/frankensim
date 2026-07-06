@@ -3,7 +3,7 @@
 //! Newton/Krawczyk certification incl. the double-root honesty case,
 //! Lipschitz extraction, and the cross-ISA golden hash.
 
-use fs_ivl::{Interval, RootBox, TaylorModel1, krawczyk_step, lipschitz_bound, newton_roots};
+use fs_ivl::{Interval, TaylorModel1, krawczyk_step, lipschitz_bound, newton_roots};
 
 /// f(x) = x·sin(x) + exp(x·0.3) as a Taylor model (order 5).
 fn model_f(domain: Interval) -> TaylorModel1 {
