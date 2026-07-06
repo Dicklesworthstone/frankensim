@@ -18,6 +18,7 @@
 //! bits (counter words 0–1). 2⁶⁴ draws per (seed, kernel, tile) stream.
 
 pub mod philox;
+pub mod qmc;
 
 use fs_math::det;
 

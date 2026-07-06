@@ -45,8 +45,22 @@ Random123 KATs (3 vectors), avalanche battery, random-access≡sequential,
 chi-square/moment gates (uniform/normal/exponential), Lemire bias +
 rejection-replay, checkpoint-resume equality.
 
+## QMC (qmc module)
+- `Sobol::new(dim)` / `Sobol::scrambled(dim, seed)` — base-2 Sobol,
+  embedded Joe-Kuo head (dims 1..=10, preconditions asserted at load),
+  Gray-code + RANDOM ACCESS `point(n)`; TRUE Owen nested-uniform scrambling
+  via Philox-derived lazy random tree (zero storage, seed-replayable,
+  net-preserving — all tested). Verified: exact per-dim stratification
+  (m 1..=8) and 2D elementary intervals; scrambled-Sobol RMSE 3.17e-6 vs MC
+  1.53e-3 at n=4096/dim=5 on Genz product-peak (~480x).
+- `Lattice::cbc(n, dim)` — rank-1 CBC in the gamma=1 Korobov space (B2
+  kernel), `korobov_error_sq` diagnostic (verified decay 4.46e-4@257 ->
+  5.26e-5@1031, beats naive vectors), `baker` periodization.
+
 ## No-claim boundaries
-- Sobol/Owen/lattice QMC: the separate fs-rand-qmc bead.
+- Sobol dims > 10 (full Joe-Kuo table import = recorded follow-up).
+- Owen scrambling performance (correct lazy-tree v1 is 32 Philox calls per
+  point-dim; hash-based fast path = recorded follow-up).
 - Gamma/beta/Dirichlet/categorical-alias/von-Mises–Fisher/truncated
   distributions: follow-up bead (consumer-driven: UQ/BO/rendering).
 - Ziggurat normal (perf) — Box–Muller chosen v1 FOR strict-mode determinism.
