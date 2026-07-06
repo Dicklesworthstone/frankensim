@@ -14,7 +14,7 @@
 //! re-applies harmlessly on the next open.
 
 /// The schema version this crate writes and reads.
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 /// Storage chunk length for large artifacts (bytes). Artifacts strictly
 /// larger than this are stored as `artifact_chunks` rows of at most this
@@ -23,7 +23,7 @@ pub const STORAGE_CHUNK_LEN: usize = 4 * 1024 * 1024;
 
 /// Migration ladder: `MIGRATIONS[i]` migrates a database at `user_version`
 /// `i` to `i + 1`. Append-only; never edit a shipped batch.
-pub(crate) const MIGRATIONS: &[&[&str]] = &[V1];
+pub(crate) const MIGRATIONS: &[&[&str]] = &[V1, V2];
 
 /// v1: the six core tables (Appendix D), chunk storage, and the Rev S
 /// extension tables (sparse in v0 but present EARLY so downstream crates can
@@ -144,6 +144,32 @@ const V1: &[&str] = &[
     ) STRICT",
 ];
 
+/// v2: forkable worlds and replay provenance (plan §11.2 time travel).
+/// `branches` models the op-log branch tree (main = row 1, created here);
+/// `ops` gains its branch and the recorded execution mode (replays of
+/// `deterministic` ops must reproduce artifact hashes exactly; `fast` ops
+/// may diverge and the replay audit reports them separately).
+///
+/// `ADD COLUMN` keeps the defaults NON-NULL so every pre-v2 op lands on the
+/// main branch as a deterministic op — the correct reading of v1 history.
+/// The `INSERT ... WHERE NOT EXISTS` seed is idempotent (crash between DDL
+/// and the version bump re-applies harmlessly, like every batch here).
+const V2: &[&str] = &[
+    "CREATE TABLE IF NOT EXISTS branches(
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE CHECK(length(name) > 0),
+        parent INTEGER,
+        fork_op INTEGER,
+        created_at INTEGER NOT NULL
+    ) STRICT",
+    "INSERT INTO branches(id, name, parent, fork_op, created_at)
+     SELECT 1, 'main', NULL, NULL, 0
+     WHERE NOT EXISTS (SELECT 1 FROM branches WHERE id = 1)",
+    "ALTER TABLE ops ADD COLUMN branch INTEGER NOT NULL DEFAULT 1",
+    "ALTER TABLE ops ADD COLUMN exec_mode TEXT NOT NULL DEFAULT 'deterministic'",
+    "CREATE INDEX IF NOT EXISTS idx_ops_branch ON ops(branch)",
+];
+
 /// Names of every table the v1 schema owns (used by lint and tests).
 pub const V1_TABLES: &[&str] = &[
     "artifacts",
@@ -161,4 +187,25 @@ pub const V1_TABLES: &[&str] = &[
     "capability_probes",
     "imports",
     "unsafe_capsules",
+];
+
+/// Every table the CURRENT schema owns (v1 set + v2 additions); the
+/// `table_count`/lint whitelist.
+pub const ALL_TABLES: &[&str] = &[
+    "artifacts",
+    "artifact_chunks",
+    "ops",
+    "edges",
+    "metrics",
+    "tune",
+    "events",
+    "requirements",
+    "model_cards",
+    "evidence",
+    "scenarios",
+    "constraints",
+    "capability_probes",
+    "imports",
+    "unsafe_capsules",
+    "branches",
 ];

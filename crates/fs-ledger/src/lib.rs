@@ -19,9 +19,14 @@
 
 pub mod hash;
 pub mod schema;
+pub mod travel;
 
 pub use hash::{Blake3, ContentHash, hash_bytes};
-pub use schema::{SCHEMA_VERSION, STORAGE_CHUNK_LEN, V1_TABLES};
+pub use schema::{ALL_TABLES, SCHEMA_VERSION, STORAGE_CHUNK_LEN, V1_TABLES};
+pub use travel::{
+    BranchDiff, BranchInfo, ExecMode, ExplainNode, ExplainOp, GcReport, MAIN_BRANCH,
+    ReplayMismatch, ReplayVerdict, ViewSnapshot,
+};
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -407,6 +412,10 @@ pub struct LintReport {
     pub orphan_chunks: u64,
     /// Ops with exactly one of (t_end, outcome) set.
     pub half_finished_ops: u64,
+    /// Ops whose branch id does not exist (v2).
+    pub orphan_op_branches: u64,
+    /// Branches whose parent id does not exist (v2).
+    pub orphan_branch_parents: u64,
 }
 
 impl LintReport {
@@ -1027,9 +1036,11 @@ impl Ledger {
 
     // -- ops and lineage ----------------------------------------------------
 
-    /// Record the start of an op with its frozen Five Explicits (P4). The
-    /// caller controls `t_start_ns` so deterministic replays can use logical
-    /// time; [`now_wall_ns`] is the conventional wall-clock source.
+    /// Record the start of an op with its frozen Five Explicits (P4) on the
+    /// main branch in deterministic mode (see [`Ledger::begin_op_on`] for
+    /// forks and fast mode). The caller controls `t_start_ns` so
+    /// deterministic replays can use logical time; [`now_wall_ns`] is the
+    /// conventional wall-clock source.
     ///
     /// # Errors
     /// [`LedgerError::MissingExplicit`] naming the offending field;
@@ -1041,33 +1052,7 @@ impl Ledger {
         explicits: &FiveExplicits<'_>,
         t_start_ns: i64,
     ) -> Result<i64, LedgerError> {
-        if explicits.seed.is_empty() {
-            return Err(LedgerError::MissingExplicit {
-                field: "seed".to_string(),
-                problem: "empty; record the RNG seed bytes that reproduce this op".to_string(),
-            });
-        }
-        self.require_json("ir", ir, false)?;
-        self.require_json("versions", explicits.versions, true)?;
-        self.require_json("budget", explicits.budget, true)?;
-        self.require_json("capability", explicits.capability, true)?;
-        self.conn
-            .prepare(
-                "INSERT INTO ops(session, ir, seed, versions, budget, capability, t_start) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            )
-            .map_err(|e| sql_err("op insert prepare", &e))?
-            .execute_with_params(&[
-                opt_blob_param(session),
-                text_param(ir),
-                blob_param(explicits.seed),
-                text_param(explicits.versions),
-                text_param(explicits.budget),
-                text_param(explicits.capability),
-                SqliteValue::Integer(t_start_ns),
-            ])
-            .map_err(|e| sql_err("op insert", &e))?;
-        Ok(self.conn.last_insert_rowid())
+        self.begin_op_on(MAIN_BRANCH, ExecMode::Deterministic, session, ir, explicits, t_start_ns)
     }
 
     /// Record an op's outcome. Each op finishes exactly once.
@@ -1286,10 +1271,10 @@ impl Ledger {
     /// # Errors
     /// Engine errors.
     pub fn table_count(&self, table: &str) -> Result<u64, LedgerError> {
-        if !V1_TABLES.contains(&table) {
+        if !ALL_TABLES.contains(&table) {
             return Err(LedgerError::Invalid {
                 field: "table".to_string(),
-                problem: format!("unknown table {table:?}; see fs_ledger::V1_TABLES"),
+                problem: format!("unknown table {table:?}; see fs_ledger::ALL_TABLES"),
             });
         }
         let row = self
@@ -1542,6 +1527,16 @@ impl Ledger {
                  (t_end IS NOT NULL AND outcome IS NULL)",
                 "lint half_finished_ops",
             )?,
+            orphan_op_branches: count(
+                "SELECT COUNT(*) FROM ops o LEFT JOIN branches b ON o.branch = b.id \
+                 WHERE b.id IS NULL",
+                "lint orphan_op_branches",
+            )?,
+            orphan_branch_parents: count(
+                "SELECT COUNT(*) FROM branches c LEFT JOIN branches p ON c.parent = p.id \
+                 WHERE c.parent IS NOT NULL AND p.id IS NULL",
+                "lint orphan_branch_parents",
+            )?,
         })
     }
 }
@@ -1728,7 +1723,7 @@ mod tests {
     fn open_migrates_to_current_version() {
         let l = mem();
         assert_eq!(l.schema_version().unwrap(), SCHEMA_VERSION);
-        for table in V1_TABLES {
+        for table in ALL_TABLES {
             assert_eq!(l.table_count(table).unwrap(), 0, "{table} empty");
         }
     }
