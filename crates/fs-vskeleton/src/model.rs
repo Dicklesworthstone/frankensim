@@ -253,14 +253,14 @@ pub fn evaluate(
             if ix + 1 < n {
                 let a = idx(ix, iy);
                 let b = idx(ix + 1, iy);
-                let d_edge = 0.5 * (drho[a] + drho[b]);
+                let d_edge = f64::midpoint(drho[a], drho[b]);
                 let du = u[a] - u[b];
                 d_compliance -= d_edge * du * du; // (h² and 1/h² cancel)
             }
             if iy + 1 < n {
                 let a = idx(ix, iy);
                 let b = idx(ix, iy + 1);
-                let d_edge = 0.5 * (drho[a] + drho[b]);
+                let d_edge = f64::midpoint(drho[a], drho[b]);
                 let du = u[a] - u[b];
                 d_compliance -= d_edge * du * du;
             }
@@ -323,7 +323,7 @@ fn map_nodes_deterministic(
                 for (k, v) in slice.iter_mut().enumerate() {
                     let i = start + k;
                     // Poll point at row granularity (P7 in miniature).
-                    if i % n == 0 && cancel.load(Ordering::Relaxed) {
+                    if i.is_multiple_of(n) && cancel.load(Ordering::Relaxed) {
                         return true;
                     }
                     let (ix, iy) = (i % n, i / n);
@@ -355,7 +355,7 @@ fn apply_k(n: usize, h: f64, rho: &[f64], u: &[f64], out: &mut [f64]) {
             let mut acc = 0.0;
             for (jx, jy) in [(ix - 1, iy), (ix + 1, iy), (ix, iy - 1), (ix, iy + 1)] {
                 let j = idx(jx, jy);
-                let rho_e = 0.5 * (rho[i] + rho[j]);
+                let rho_e = f64::midpoint(rho[i], rho[j]);
                 acc += rho_e * (u[i] - u[j]);
             }
             out[i] = acc * inv_h2;
