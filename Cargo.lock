@@ -770,6 +770,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-evidence"
+version = "0.0.1"
+dependencies = [
+ "fs-obs",
+]
+
+[[package]]
 name = "fs-exec"
 version = "0.0.1"
 dependencies = [
