@@ -453,7 +453,11 @@ fn exec_009_g5_audit_compensated_reductions_bit_stable_across_thread_counts() {
             }
             let mut acc = Compensated::zero();
             for i in 0..97u64 {
-                let sgn = if (tile + i).is_multiple_of(2) { 1.0 } else { -1.0 };
+                let sgn = if (tile + i).is_multiple_of(2) {
+                    1.0
+                } else {
+                    -1.0
+                };
                 acc = acc.accumulate(sgn * 1e15);
                 acc = acc.accumulate(1.0 / ((tile * 97 + i + 1) as f64));
             }
@@ -463,9 +467,7 @@ fn exec_009_g5_audit_compensated_reductions_bit_stable_across_thread_counts() {
     let p = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
     let mut hashes = Vec::new();
     for workers in [1usize, 2, p, 2 * p] {
-        let got = pool_with(workers, 0xE009)
-            .run(&CompKernel)
-            .expect("run");
+        let got = pool_with(workers, 0xE009).run(&CompKernel).expect("run");
         hashes.push(fs_obs::fnv1a64(&got.value().to_bits().to_le_bytes()));
     }
     let bit_stable = hashes.windows(2).all(|w| w[0] == w[1]);

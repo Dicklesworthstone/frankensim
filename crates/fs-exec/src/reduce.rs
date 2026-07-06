@@ -335,8 +335,12 @@ mod tests {
         let whole = det_sum(&xs);
         // Same values, different BLOCK boundary simulation: accumulate as
         // one compensated stream, then as merged halves via Reduce.
-        let a = xs[..500].iter().fold(Compensated::zero(), |c, &x| c.accumulate(x));
-        let b = xs[500..].iter().fold(Compensated::zero(), |c, &x| c.accumulate(x));
+        let a = xs[..500]
+            .iter()
+            .fold(Compensated::zero(), |c, &x| c.accumulate(x));
+        let b = xs[500..]
+            .iter()
+            .fold(Compensated::zero(), |c, &x| c.accumulate(x));
         let merged = a.merge(b).value();
         assert!((whole - merged).abs() <= 1e-12 * whole.abs());
     }
@@ -348,9 +352,13 @@ mod tests {
         assert_eq!(det_argmax(&[2.0, 7.0, 7.0]), Some(1));
         let with_nan = [f64::NAN, 2.0, -1.0];
         assert_eq!(det_min(&with_nan), Some(-1.0));
-        assert_eq!(det_max(&with_nan).map(f64::is_nan), Some(true), "NaN after +inf");
+        assert_eq!(
+            det_max(&with_nan).map(f64::is_nan),
+            Some(true),
+            "NaN after +inf"
+        );
         assert_eq!(det_argmin(&with_nan), Some(2));
-        assert_eq!(det_argmin::<>(&[]), None);
+        assert_eq!(det_argmin(&[]), None);
     }
 
     #[test]
