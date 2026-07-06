@@ -5,6 +5,11 @@
 //! of the FrankenSim workspace; the layer dependency direction is enforced by
 //! `cargo run -p xtask -- check-all`.
 
+pub mod factor;
+pub mod gemm;
+
+pub use gemm::{gemm_f32, gemm_f64, gemm_mixed};
+
 /// Crate version, re-exported for provenance stamping (the Five Explicits'
 /// "versions" pillar reaches down to individual crates).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
