@@ -1,0 +1,20 @@
+[package]
+name = "fs-plan"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Per-operator cost/error models, Error Ledger and Time Ledger attribution, Rep Router cost oracle."
+
+[package.metadata.frankensim]
+layer = "L6"
+
+[dependencies]
+fs-geom = { path = "../fs-geom" }
+fs-ledger = { path = "../fs-ledger" }
+
+[dev-dependencies]
+
+[lints]
+workspace = true
