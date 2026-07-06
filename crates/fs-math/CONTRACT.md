@@ -1,39 +1,58 @@
 # CONTRACT: fs-math
 
-> Status: SKELETON. This contract gains force as the crate's beads land; a crate
-> must have a complete contract before it becomes a dependency target of other
-> crates' real code (AGENTS.md).
-
 ## Purpose and layer
-Deterministic elementary functions with ULP budgets and FMA/subnormal/NaN policy. Layer: L0.
+Deterministic elementary functions (strict mode) and the workspace
+floating-point POLICY: FMA contraction, subnormals, NaN, ULP budgets
+(patch Rev O; plan §5.4/§6.4). Layer: L0.
 
 ## Public types and semantics
-Skeleton only: `VERSION`. Populated by this crate's implementation beads.
+- `det::{exp, expm1, ln, sin, cos, tanh, sqrt}` — strict-mode functions
+  built EXCLUSIVELY from IEEE arithmetic (+,−,×,÷, mul_add, sqrt): bit-
+  identical cross-ISA BY CONSTRUCTION, empirically PROVEN (golden hash
+  0xeb79cab7a01643e5 identical on aarch64-apple M4 Pro and x86-64 TR 5995WX).
+- Declared ULP budgets (measured maxima in parentheses, vs platform-libm
+  oracle, 200k samples + edges): exp 3 (1), expm1 3 (2), ln 3 (1),
+  sin 3 (2), cos 3 (2), tanh 5 (3). sqrt is 0 ULP (IEEE-correctly-rounded
+  hardware).
+- `det::TRIG_DOMAIN` = 2²⁰: trig budgets valid within |x| ≤ 2²⁰ (4-part
+  Cody–Waite reduction); beyond → deterministic but budget-void (no-claim).
+- Policy vocabulary: `canonical_nan`, `next_up/next_down`, `nudge_out`
+  (fs-ivl's directed-rounding primitive), `ulp_distance`.
 
 ## Invariants
-None claimed yet. No-claim until stated.
+- No platform libm on any strict path (sqrt excepted: IEEE-exact).
+- Reduction constants are EXACT bit patterns with trailing-zero mantissas
+  (j·part products exact) — decimal literals are forbidden there (a 184-ULP
+  bug class, regression-tested).
+- tanh/sin odd and cos even BITWISE (symmetry by construction).
+- exp(0)=1, ln(1)=+0, sin(0)=0, cos(0)=1 exactly; NaN in → NaN out;
+  subnormals never flushed.
+- Golden hash changes require a schema-bump-style justification.
 
 ## Error model
-No fallible APIs yet. Errors will be structured values with machine-readable
-diagnoses (Decalogue P10), never panics across the crate boundary.
+Total functions; domain violations return NaN/±inf per IEEE conventions.
 
 ## Determinism class
-Target: Deterministic (bit-stable across runs and thread counts per ISA) unless
-a section here documents a narrower class. Not yet verified — see G5.
+Deterministic CROSS-ISA (the strongest class in the workspace) — proven.
 
 ## Cancellation behavior
-All future hot paths poll cancellation at tile boundaries (Decalogue P7).
-No compute paths exist yet.
+Straight-line arithmetic; no poll points needed.
 
 ## Unsafe boundary
-None. `unsafe_code` is denied workspace-wide; any future capsule must be
-registered per docs/CONVENTIONS.md and ship a SAFETY.md.
+None.
 
 ## Feature flags
-None. Frontier features use `frontier-*`, moonshots `moonshot-*`, default off.
+None (fast-mode platform-libm variants are recorded follow-up scope).
 
 ## Conformance tests
-tests/conformance.rs (placeholder). Any reimplementation must pass this suite.
+Per-function ULP batteries (budget-gated, measured maxima printed as JSONL),
+tiny-x expm1 cancellation battery, near-1 ln battery, bitwise symmetry
+sweeps, special-value policy table, nudge bracketing, cross-ISA golden hash,
+core-only + worst-case-point + constant-integrity regressions
+(tests/core_regression.rs). All verified on BOTH reference ISAs.
 
 ## No-claim boundaries
-Everything: this is a skeleton. No numerical, performance, or safety claims.
+- tan/atan2/pow/cbrt/log1p/erf: not yet implemented (follow-up bead).
+- Trig beyond |x| > 2²⁰ (Payne–Hanek is recorded follow-up scope).
+- Correctly-rounded (0.5 ULP) results: NOT claimed — budgets above.
+- dd-oracle billions-scale nightly battery arrives with fs-ivl.
