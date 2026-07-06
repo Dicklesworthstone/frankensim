@@ -53,14 +53,20 @@ fn up_k(mut x: f64, k: u32) -> f64 {
 
 impl Interval {
     /// The whole extended real line — the "no useful enclosure" answer.
-    pub const WHOLE: Interval = Interval { lo: f64::NEG_INFINITY, hi: f64::INFINITY };
+    pub const WHOLE: Interval = Interval {
+        lo: f64::NEG_INFINITY,
+        hi: f64::INFINITY,
+    };
 
     /// Construct from endpoints. Panics (structured) on NaN or inverted
     /// endpoints — an invalid interval silently propagating would void
     /// every certificate downstream.
     #[must_use]
     pub fn new(lo: f64, hi: f64) -> Interval {
-        assert!(!lo.is_nan() && !hi.is_nan(), "interval endpoints must not be NaN");
+        assert!(
+            !lo.is_nan() && !hi.is_nan(),
+            "interval endpoints must not be NaN"
+        );
         assert!(lo <= hi, "inverted interval [{lo}, {hi}]");
         Interval { lo, hi }
     }
@@ -117,7 +123,10 @@ impl Interval {
     /// Convex hull of two intervals.
     #[must_use]
     pub fn hull(self, o: Interval) -> Interval {
-        Interval { lo: self.lo.min(o.lo), hi: self.hi.max(o.hi) }
+        Interval {
+            lo: self.lo.min(o.lo),
+            hi: self.hi.max(o.hi),
+        }
     }
 
     /// Intersection; `None` when disjoint.
@@ -131,7 +140,10 @@ impl Interval {
     /// Negation (exact: IEEE negation is sign-bit flip).
     #[must_use]
     pub fn neg(self) -> Interval {
-        Interval { lo: -self.hi, hi: -self.lo }
+        Interval {
+            lo: -self.hi,
+            hi: -self.lo,
+        }
     }
 
     /// Absolute value (exact endpoint selection).
@@ -142,20 +154,29 @@ impl Interval {
         } else if self.hi <= 0.0 {
             self.neg()
         } else {
-            Interval { lo: 0.0, hi: self.hi.max(-self.lo) }
+            Interval {
+                lo: 0.0,
+                hi: self.hi.max(-self.lo),
+            }
         }
     }
 
     /// Addition, outward-rounded.
     #[must_use]
     pub fn add(self, o: Interval) -> Interval {
-        Interval { lo: down_k(self.lo + o.lo, 1), hi: up_k(self.hi + o.hi, 1) }
+        Interval {
+            lo: down_k(self.lo + o.lo, 1),
+            hi: up_k(self.hi + o.hi, 1),
+        }
     }
 
     /// Subtraction, outward-rounded.
     #[must_use]
     pub fn sub(self, o: Interval) -> Interval {
-        Interval { lo: down_k(self.lo - o.hi, 1), hi: up_k(self.hi - o.lo, 1) }
+        Interval {
+            lo: down_k(self.lo - o.hi, 1),
+            hi: up_k(self.hi - o.lo, 1),
+        }
     }
 
     /// Multiplication, outward-rounded (min/max over endpoint products).
@@ -163,7 +184,12 @@ impl Interval {
     /// conservative, never wrong.
     #[must_use]
     pub fn mul(self, o: Interval) -> Interval {
-        let ps = [self.lo * o.lo, self.lo * o.hi, self.hi * o.lo, self.hi * o.hi];
+        let ps = [
+            self.lo * o.lo,
+            self.lo * o.hi,
+            self.hi * o.lo,
+            self.hi * o.hi,
+        ];
         if ps.iter().any(|p| p.is_nan()) {
             return Interval::WHOLE;
         }
@@ -173,7 +199,10 @@ impl Interval {
             lo = lo.min(p);
             hi = hi.max(p);
         }
-        Interval { lo: down_k(lo, 1), hi: up_k(hi, 1) }
+        Interval {
+            lo: down_k(lo, 1),
+            hi: up_k(hi, 1),
+        }
     }
 
     /// Division, outward-rounded. A zero-containing divisor yields
@@ -184,7 +213,12 @@ impl Interval {
         if o.contains_zero() {
             return Interval::WHOLE;
         }
-        let qs = [self.lo / o.lo, self.lo / o.hi, self.hi / o.lo, self.hi / o.hi];
+        let qs = [
+            self.lo / o.lo,
+            self.lo / o.hi,
+            self.hi / o.lo,
+            self.hi / o.hi,
+        ];
         if qs.iter().any(|q| q.is_nan()) {
             return Interval::WHOLE;
         }
@@ -194,7 +228,10 @@ impl Interval {
             lo = lo.min(q);
             hi = hi.max(q);
         }
-        Interval { lo: down_k(lo, 1), hi: up_k(hi, 1) }
+        Interval {
+            lo: down_k(lo, 1),
+            hi: up_k(hi, 1),
+        }
     }
 
     /// Square root. Requires hi ≥ 0; the sub-zero part of a straddling
@@ -202,9 +239,21 @@ impl Interval {
     /// Panics (structured) if the entire interval is negative.
     #[must_use]
     pub fn sqrt(self) -> Interval {
-        assert!(self.hi >= 0.0, "sqrt of entirely negative interval [{}, {}]", self.lo, self.hi);
-        let lo = if self.lo <= 0.0 { 0.0 } else { down_k(self.lo.sqrt(), 1).max(0.0) };
-        Interval { lo, hi: up_k(self.hi.sqrt(), 1) }
+        assert!(
+            self.hi >= 0.0,
+            "sqrt of entirely negative interval [{}, {}]",
+            self.lo,
+            self.hi
+        );
+        let lo = if self.lo <= 0.0 {
+            0.0
+        } else {
+            down_k(self.lo.sqrt(), 1).max(0.0)
+        };
+        Interval {
+            lo,
+            hi: up_k(self.hi.sqrt(), 1),
+        }
     }
 
     /// e^x (monotone; endpoints nudged by the declared budget). The exact
@@ -222,9 +271,21 @@ impl Interval {
     /// hi ≤ 0.
     #[must_use]
     pub fn ln(self) -> Interval {
-        assert!(self.hi > 0.0, "ln of non-positive interval [{}, {}]", self.lo, self.hi);
-        let lo = if self.lo <= 0.0 { f64::NEG_INFINITY } else { down_k(det::ln(self.lo), ULP_LN) };
-        Interval { lo, hi: up_k(det::ln(self.hi), ULP_LN) }
+        assert!(
+            self.hi > 0.0,
+            "ln of non-positive interval [{}, {}]",
+            self.lo,
+            self.hi
+        );
+        let lo = if self.lo <= 0.0 {
+            f64::NEG_INFINITY
+        } else {
+            down_k(det::ln(self.lo), ULP_LN)
+        };
+        Interval {
+            lo,
+            hi: up_k(det::ln(self.hi), ULP_LN),
+        }
     }
 
     /// tanh (monotone, odd; budget 5).
@@ -305,7 +366,9 @@ mod tests {
     use fs_math::dd::Dd;
 
     fn lcg(seed: &mut u64) -> f64 {
-        *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        *seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         ((*seed >> 11) as f64) / (1u64 << 53) as f64 - 0.5
     }
 
@@ -364,14 +427,16 @@ mod tests {
             let form_a = x.mul(y.add(z));
             let form_b = x.mul(y).add(x.mul(z));
             let (px, py, pz) = (x.midpoint(), y.midpoint(), z.midpoint());
-            let truth =
-                Dd::from_f64(px).mul(Dd::from_f64(py).add(Dd::from_f64(pz)));
+            let truth = Dd::from_f64(px).mul(Dd::from_f64(py).add(Dd::from_f64(pz)));
             assert!(form_a.contains(truth.hi), "factored form lost truth");
             assert!(form_b.contains(truth.hi), "distributed form lost truth");
             // Sub-distributivity: the factored form is never wider than the
             // distributed one on these shapes... NOT asserted (not a law);
             // what IS a law: they intersect (both contain truth).
-            assert!(form_a.intersect(form_b).is_some(), "rewrites disjoint — impossible");
+            assert!(
+                form_a.intersect(form_b).is_some(),
+                "rewrites disjoint — impossible"
+            );
         }
     }
 
@@ -406,7 +471,10 @@ mod tests {
         // An interval straddling π/2 must have sin upper bound exactly 1.
         let x = Interval::new(1.4, 1.8);
         let s = x.sin();
-        assert!((s.hi() - 1.0).abs() < 1e-15 && s.hi() >= 1.0, "sin peak missed: {s:?}");
+        assert!(
+            (s.hi() - 1.0).abs() < 1e-15 && s.hi() >= 1.0,
+            "sin peak missed: {s:?}"
+        );
         // Straddling π: cos lower bound −1.
         let y = Interval::new(3.0, 3.3);
         let c = y.cos();
@@ -417,7 +485,10 @@ mod tests {
         // Narrow monotone stretch must NOT include ±1.
         let narrow = Interval::new(0.1, 0.2);
         let sn = narrow.sin();
-        assert!(sn.hi() < 0.21 && sn.lo() > 0.09, "narrow sin too loose: {sn:?}");
+        assert!(
+            sn.hi() < 0.21 && sn.lo() > 0.09,
+            "narrow sin too loose: {sn:?}"
+        );
     }
 
     #[test]
@@ -465,7 +536,10 @@ mod tests {
         );
         // And the naive f64 answer is NOT presented as certain: the interval
         // is honestly wide (width >> 1).
-        assert!(f.width() > 1.0, "suspiciously narrow for this cancellation: {f:?}");
+        assert!(
+            f.width() > 1.0,
+            "suspiciously narrow for this cancellation: {f:?}"
+        );
         println!(
             "{{\"suite\":\"fs-ivl\",\"case\":\"rump\",\"verdict\":\"pass\",\"detail\":\"enclosure [{:.3e}, {:.3e}] contains -54767/66192\"}}",
             f.lo(),

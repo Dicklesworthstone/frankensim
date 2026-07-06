@@ -46,7 +46,11 @@ impl AffineCtx {
         let rad = (x.hi() - mid).max(mid - x.lo()).next_up();
         let sym = self.next;
         self.next += 1;
-        Affine { center: mid, terms: vec![(sym, rad)], err: 0.0 }
+        Affine {
+            center: mid,
+            terms: vec![(sym, rad)],
+            err: 0.0,
+        }
     }
 }
 
@@ -65,7 +69,11 @@ impl Affine {
     /// A constant (no noise symbols, no slack).
     #[must_use]
     pub fn constant(c: f64) -> Affine {
-        Affine { center: c, terms: Vec::new(), err: 0.0 }
+        Affine {
+            center: c,
+            terms: Vec::new(),
+            err: 0.0,
+        }
     }
 
     /// The center value.
@@ -175,7 +183,11 @@ impl Affine {
         let sx = self.scale_terms_only(o.center, &mut err);
         let sy = o.scale_terms_only(self.center, &mut err);
         let merged = merge_terms(&sx, &sy, &mut err);
-        Affine { center, terms: merged, err }
+        Affine {
+            center,
+            terms: merged,
+            err,
+        }
     }
 
     /// Helper: terms scaled by k (center untouched), rounding absorbed.
@@ -222,7 +234,9 @@ mod tests {
     use super::*;
 
     fn lcg(seed: &mut u64) -> f64 {
-        *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        *seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         ((*seed >> 11) as f64) / (1u64 << 53) as f64 - 0.5
     }
 
@@ -252,7 +266,9 @@ mod tests {
         let one = Affine::constant(1.0);
         let aa = one.add(&x).mul(&one.sub(&x)).to_interval();
         let xi = Interval::new(-0.5, 0.5);
-        let ia = Interval::point(1.0).add(xi).mul(Interval::point(1.0).sub(xi));
+        let ia = Interval::point(1.0)
+            .add(xi)
+            .mul(Interval::point(1.0).sub(xi));
         // Containment first (both must hold), tightness second.
         for t in 0..=10 {
             let p = -0.5 + f64::from(t) / 10.0;
@@ -279,8 +295,10 @@ mod tests {
         let mut seed = 0xAFF_u64;
         for _ in 0..5_000 {
             let (a, b) = (lcg(&mut seed) * 4.0, lcg(&mut seed) * 4.0);
-            let (wa, wb) =
-                ((lcg(&mut seed) + 0.5).abs() + 0.01, (lcg(&mut seed) + 0.5).abs() + 0.01);
+            let (wa, wb) = (
+                (lcg(&mut seed) + 0.5).abs() + 0.01,
+                (lcg(&mut seed) + 0.5).abs() + 0.01,
+            );
             let ix = Interval::new(a - wa, a + wa);
             let iy = Interval::new(b - wb, b + wb);
             let mut ctx = AffineCtx::new();
@@ -309,7 +327,10 @@ mod tests {
         let x1 = ctx.from_interval(Interval::new(1.0, 2.0));
         let x2 = ctx.from_interval(Interval::new(1.0, 2.0));
         let diff = x1.sub(&x2).to_interval();
-        assert!(diff.width() > 0.9, "independent symbols must not cancel: {diff:?}");
+        assert!(
+            diff.width() > 0.9,
+            "independent symbols must not cancel: {diff:?}"
+        );
         assert!(diff.contains(0.9) && diff.contains(-0.9));
     }
 

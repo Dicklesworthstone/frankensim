@@ -51,7 +51,9 @@ mod tests {
     use super::*;
 
     fn lcg(seed: &mut u64) -> f64 {
-        *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        *seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         ((*seed >> 11) as f64) / (1u64 << 53) as f64 - 0.5
     }
 
@@ -122,6 +124,10 @@ mod tests {
         // 2^-104; the tail 2^-104 cannot fit and is exactly the residual.
         let x = 1.0 + f64::EPSILON;
         let (_, e) = two_prod(x, x);
-        assert_eq!(e, f64::EPSILON * f64::EPSILON, "residual of (1+2^-52)^2 is 2^-104");
+        assert_eq!(
+            e,
+            f64::EPSILON * f64::EPSILON,
+            "residual of (1+2^-52)^2 is 2^-104"
+        );
     }
 }

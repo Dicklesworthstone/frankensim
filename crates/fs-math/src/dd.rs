@@ -52,13 +52,20 @@ impl Dd {
     /// Negation (exact).
     #[must_use]
     pub const fn neg(self) -> Dd {
-        Dd { hi: -self.hi, lo: -self.lo }
+        Dd {
+            hi: -self.hi,
+            lo: -self.lo,
+        }
     }
 
     /// Absolute value (exact).
     #[must_use]
     pub fn abs(self) -> Dd {
-        if self.hi < 0.0 || (self.hi == 0.0 && self.lo < 0.0) { self.neg() } else { self }
+        if self.hi < 0.0 || (self.hi == 0.0 && self.lo < 0.0) {
+            self.neg()
+        } else {
+            self
+        }
     }
 
     /// Addition (Knuth accurate variant; relative error ≤ 2⁻¹⁰⁴).
@@ -123,7 +130,9 @@ mod tests {
     use super::*;
 
     fn lcg(seed: &mut u64) -> f64 {
-        *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        *seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         ((*seed >> 11) as f64) / (1u64 << 53) as f64 - 0.5
     }
 
@@ -144,7 +153,10 @@ mod tests {
         // sqrt(2)² = 2.
         let r2 = Dd::from_f64(2.0).sqrt();
         let two = r2.mul(r2);
-        assert!(rel_err_le(two, Dd::from_f64(2.0), 1e-30), "sqrt(2)^2 = {two:?}");
+        assert!(
+            rel_err_le(two, Dd::from_f64(2.0), 1e-30),
+            "sqrt(2)^2 = {two:?}"
+        );
         // The dd value of sqrt(2) must match the known decimal expansion:
         // 1.41421356237309504880168872420969807856967...
         // hi + lo reconstructed against 1.4142135623730950488016887242097 via
@@ -187,12 +199,22 @@ mod tests {
             let a = Dd::from_f64(lcg(&mut seed) * 100.0).add(Dd::from_f64(lcg(&mut seed) * 1e-14));
             let b = Dd::from_f64(lcg(&mut seed) * 100.0).add(Dd::from_f64(lcg(&mut seed) * 1e-14));
             let c = Dd::from_f64(lcg(&mut seed) * 100.0);
-            // a + b − b ≈ a (round-trip through cancellation).
-            assert!(rel_err_le(a.add(b).sub(b), a, 1e-29), "add/sub round trip");
-            // Distributivity residual at dd scale.
+            // a + b − b ≈ a: the round trip loses ~2⁻¹⁰⁵ of the LARGEST
+            // intermediate (|a+b| or |b|), not of |a| — near-cancelling
+            // pairs (a ≈ −b, or tiny a against b ~ 50) otherwise blow up
+            // the relative-to-a error by |b|/|a|.
+            let scale = a.abs().hi.max(b.abs().hi).max(f64::MIN_POSITIVE);
+            let round_trip = a.add(b).sub(b).sub(a).abs();
+            assert!(round_trip.hi <= 1e-29 * scale, "add/sub round trip");
+            // Distributivity residual, scaled by the products' magnitude
+            // (b + c may itself nearly cancel).
             let lhs = a.mul(b.add(c));
             let rhs = a.mul(b).add(a.mul(c));
-            assert!(rel_err_le(lhs, rhs, 1e-28), "distributivity residual too big");
+            let pscale = (a.abs().hi * (b.abs().hi + c.abs().hi)).max(f64::MIN_POSITIVE);
+            assert!(
+                lhs.sub(rhs).abs().hi <= 1e-28 * pscale,
+                "distributivity residual too big"
+            );
             // Division inverse.
             if b.hi.abs() > 1e-3 {
                 assert!(rel_err_le(a.div(b).mul(b), a, 1e-29), "a/b*b round trip");
