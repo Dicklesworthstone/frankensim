@@ -254,9 +254,8 @@ impl Label {
         let le = self.cost <= other.cost
             && self.err <= other.err
             && self.uncertified <= other.uncertified;
-        let lt = self.cost < other.cost
-            || self.err < other.err
-            || self.uncertified < other.uncertified;
+        let lt =
+            self.cost < other.cost || self.err < other.err || self.uncertified < other.uncertified;
         le && lt
     }
 }
@@ -282,14 +281,14 @@ impl Router {
         if spec.name.is_empty() || spec.from.is_empty() || spec.to.is_empty() {
             return Err(RouterError::InvalidSpec("empty name/from/to".to_string()));
         }
-        if !(spec.base_cost_s >= 0.0) {
+        if spec.base_cost_s.is_nan() || spec.base_cost_s < 0.0 {
             return Err(RouterError::InvalidSpec(format!(
                 "base_cost_s must be ≥ 0, got {}",
                 spec.base_cost_s
             )));
         }
         if let ErrorModel::AdditiveAbs(a) | ErrorModel::MultiplicativeRel(a) = spec.error
-            && !(a >= 0.0)
+            && (a.is_nan() || a < 0.0)
         {
             return Err(RouterError::InvalidSpec(format!(
                 "error magnitude must be ≥ 0, got {a}"
@@ -312,14 +311,16 @@ impl Router {
 
     /// Effective cost of an edge: measured mean when the oracle has one,
     /// else the a-priori base cost.
-    fn edge_cost(&self, spec: &ConverterSpec, oracle: &dyn CostOracle) -> f64 {
-        oracle.measured_cost_s(&spec.name).unwrap_or(spec.base_cost_s)
+    fn edge_cost(spec: &ConverterSpec, oracle: &dyn CostOracle) -> f64 {
+        oracle
+            .measured_cost_s(&spec.name)
+            .unwrap_or(spec.base_cost_s)
     }
 
     /// Effective error model: learned measurements may replace the
     /// declared magnitude ONLY on uncertified additive edges (estimates
     /// learn; certificates are never learned away).
-    fn edge_error(&self, spec: &ConverterSpec, oracle: &dyn CostOracle) -> ErrorModel {
+    fn edge_error(spec: &ConverterSpec, oracle: &dyn CostOracle) -> ErrorModel {
         if spec.certified {
             return spec.error;
         }
@@ -343,14 +344,18 @@ impl Router {
         fronts.insert(req.from.clone(), vec![start.clone()]);
         let mut queue = vec![start];
         while let Some(label) = queue.pop() {
-            let at = label.nodes.last().expect("labels always have a node").clone();
+            let at = label
+                .nodes
+                .last()
+                .expect("labels always have a node")
+                .clone();
             for (idx, spec) in self.edges.iter().enumerate() {
                 if spec.from != at || label.nodes.iter().any(|n| n == &spec.to) {
                     continue; // not outgoing, or would revisit (simple paths)
                 }
                 let next = Label {
-                    cost: label.cost + self.edge_cost(spec, oracle),
-                    err: self.edge_error(spec, oracle).compose(label.err, req.scale),
+                    cost: label.cost + Self::edge_cost(spec, oracle),
+                    err: Self::edge_error(spec, oracle).compose(label.err, req.scale),
                     uncertified: label.uncertified + u32::from(!spec.certified),
                     path: {
                         let mut p = label.path.clone();
@@ -410,7 +415,7 @@ impl Router {
                 all_certified: winner.uncertified == 0,
             });
         }
-        Err(self.refusal(req, &front))
+        Err(Self::refusal(req, &front))
     }
 
     fn pick_winner<'a>(&self, admissible: &[&'a Label]) -> Option<&'a Label> {
@@ -426,7 +431,7 @@ impl Router {
             .copied()
     }
 
-    fn refusal(&self, req: &RouteRequest, front: &[Label]) -> RouteRefusal {
+    fn refusal(req: &RouteRequest, front: &[Label]) -> RouteRefusal {
         if front.is_empty() {
             return RouteRefusal {
                 binding: Binding::NoPath,
@@ -496,11 +501,7 @@ impl Router {
             .filter(|l| l.err <= req.max_abs_error && l.cost <= req.max_cost_s)
             .collect();
         let winner_label = self.pick_winner(&admissible);
-        let winner = winner_label.and_then(|w| {
-            front
-                .iter()
-                .position(|l| l.path == w.path)
-        });
+        let winner = winner_label.and_then(|w| front.iter().position(|l| l.path == w.path));
         let reason = match winner_label {
             Some(w) if w.uncertified == 0 => format!(
                 "fully certified chain at minimal cost {}s within error budget",
@@ -511,9 +512,13 @@ impl Router {
                  edge(s) at cost {}s",
                 w.uncertified, w.cost
             ),
-            None => self.refusal(req, &front).to_string(),
+            None => Self::refusal(req, &front).to_string(),
         };
-        RouteExplanation { candidates, winner, reason }
+        RouteExplanation {
+            candidates,
+            winner,
+            reason,
+        }
     }
 
     /// Execute a plan through per-edge runners: composes the edges'
@@ -536,9 +541,10 @@ impl Router {
                 edge: edge.clone(),
                 detail: "no runner registered for this edge".to_string(),
             })?;
-            let outcome = runner
-                .run(cx)
-                .map_err(|detail| ExecuteError { edge: edge.clone(), detail })?;
+            let outcome = runner.run(cx).map_err(|detail| ExecuteError {
+                edge: edge.clone(),
+                detail,
+            })?;
             oracle.record(edge, outcome.measured_cost_s, outcome.receipt.qoi);
             total_cost += outcome.measured_cost_s;
             composed = Some(match composed {
@@ -549,10 +555,12 @@ impl Router {
                 }
             });
         }
-        let receipt = composed.unwrap_or_else(|| {
-            Evidence::exact(0.0, ProvenanceHash::of_bytes(b"identity-route"))
-        });
-        Ok(ChainOutcome { receipt, measured_cost_s: total_cost })
+        let receipt = composed
+            .unwrap_or_else(|| Evidence::exact(0.0, ProvenanceHash::of_bytes(b"identity-route")));
+        Ok(ChainOutcome {
+            receipt,
+            measured_cost_s: total_cost,
+        })
     }
 }
 
@@ -595,7 +603,11 @@ pub struct ExecuteError {
 
 impl fmt::Display for ExecuteError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "route execution failed at edge {:?}: {}", self.edge, self.detail)
+        write!(
+            f,
+            "route execution failed at edge {:?}: {}",
+            self.edge, self.detail
+        )
     }
 }
 
@@ -613,7 +625,12 @@ mod tests {
             let cx = Cx::new(
                 &gate,
                 arena,
-                StreamKey { seed: 1, kernel_id: 1, tile: 0, iteration: 0 },
+                StreamKey {
+                    seed: 1,
+                    kernel_id: 1,
+                    tile: 0,
+                    iteration: 0,
+                },
                 asupersync::types::Budget::INFINITE,
                 ExecMode::Deterministic,
             );
@@ -643,13 +660,62 @@ mod tests {
     fn test_router() -> Router {
         let mut r = Router::new();
         for spec in [
-            edge("frep", "sdf", "frep->sdf/coarse", 1.0, ErrorModel::AdditiveAbs(0.02), true),
-            edge("frep", "sdf", "frep->sdf/fine", 4.0, ErrorModel::AdditiveAbs(0.005), true),
-            edge("sdf", "mesh", "sdf->mesh/dc", 2.0, ErrorModel::AdditiveAbs(0.01), true),
-            edge("mesh", "sdf", "mesh->sdf/wind", 1.5, ErrorModel::Exact, true),
-            edge("frep", "mesh", "frep->mesh/direct", 2.5, ErrorModel::AdditiveAbs(0.05), false),
-            edge("mesh", "spline", "mesh->spline/fit", 3.0, ErrorModel::MultiplicativeRel(0.01), false),
-            edge("sdf", "spline", "sdf->spline/fit", 8.0, ErrorModel::AdditiveAbs(0.008), true),
+            edge(
+                "frep",
+                "sdf",
+                "frep->sdf/coarse",
+                1.0,
+                ErrorModel::AdditiveAbs(0.02),
+                true,
+            ),
+            edge(
+                "frep",
+                "sdf",
+                "frep->sdf/fine",
+                4.0,
+                ErrorModel::AdditiveAbs(0.005),
+                true,
+            ),
+            edge(
+                "sdf",
+                "mesh",
+                "sdf->mesh/dc",
+                2.0,
+                ErrorModel::AdditiveAbs(0.01),
+                true,
+            ),
+            edge(
+                "mesh",
+                "sdf",
+                "mesh->sdf/wind",
+                1.5,
+                ErrorModel::Exact,
+                true,
+            ),
+            edge(
+                "frep",
+                "mesh",
+                "frep->mesh/direct",
+                2.5,
+                ErrorModel::AdditiveAbs(0.05),
+                false,
+            ),
+            edge(
+                "mesh",
+                "spline",
+                "mesh->spline/fit",
+                3.0,
+                ErrorModel::MultiplicativeRel(0.01),
+                false,
+            ),
+            edge(
+                "sdf",
+                "spline",
+                "sdf->spline/fit",
+                8.0,
+                ErrorModel::AdditiveAbs(0.008),
+                true,
+            ),
         ] {
             r.register(spec).unwrap();
         }
@@ -670,7 +736,13 @@ mod tests {
     fn oracle_front(r: &Router, request: &RouteRequest) -> Vec<(f64, f64, u32)> {
         let oracle = MemoryCostOracle::new();
         let mut paths: Vec<(f64, f64, u32)> = Vec::new();
-        let mut stack = vec![(request.from.clone(), 0.0f64, 0.0f64, 0u32, vec![request.from.clone()])];
+        let mut stack = vec![(
+            request.from.clone(),
+            0.0f64,
+            0.0f64,
+            0u32,
+            vec![request.from.clone()],
+        )];
         while let Some((at, cost, err, unc, nodes)) = stack.pop() {
             if at == request.to {
                 paths.push((cost, err, unc));
@@ -682,8 +754,8 @@ mod tests {
                     n2.push(spec.to.clone());
                     stack.push((
                         spec.to.clone(),
-                        cost + r.edge_cost(spec, &oracle),
-                        r.edge_error(spec, &oracle).compose(err, request.scale),
+                        cost + Router::edge_cost(spec, &oracle),
+                        Router::edge_error(spec, &oracle).compose(err, request.scale),
                         unc + u32::from(!spec.certified),
                         n2,
                     ));
@@ -699,7 +771,11 @@ mod tests {
                 front.push(*p);
             }
         }
-        front.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.total_cmp(&b.0)).then(a.2.cmp(&b.2)));
+        front.sort_by(|a, b| {
+            a.1.total_cmp(&b.1)
+                .then(a.0.total_cmp(&b.0))
+                .then(a.2.cmp(&b.2))
+        });
         front.dedup();
         front
     }
@@ -716,7 +792,11 @@ mod tests {
                 .iter()
                 .map(|c| (c.cost_s, c.abs_error, c.uncertified_edges))
                 .collect();
-            got.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.total_cmp(&b.0)).then(a.2.cmp(&b.2)));
+            got.sort_by(|a, b| {
+                a.1.total_cmp(&b.1)
+                    .then(a.0.total_cmp(&b.0))
+                    .then(a.2.cmp(&b.2))
+            });
             got.dedup();
             let want = oracle_front(&r, &request);
             assert_eq!(got, want, "Pareto front mismatch for target {target}");
@@ -732,7 +812,10 @@ mod tests {
         // certified 2-hop (3.0s, 0.03) are admissible: certified must win
         // despite costing more.
         let plan = r.plan(&req("mesh", 0.06, 10.0), &oracle).unwrap();
-        assert!(plan.all_certified, "certified chain must be preferred: {plan:?}");
+        assert!(
+            plan.all_certified,
+            "certified chain must be preferred: {plan:?}"
+        );
         assert_eq!(plan.edges, vec!["frep->sdf/coarse", "sdf->mesh/dc"]);
         // Determinism across rebuilds with shuffled registration order.
         let mut r2 = Router::new();
@@ -820,10 +903,18 @@ mod tests {
             let mut runners: BTreeMap<String, Box<dyn EdgeRunner>> = BTreeMap::new();
             runners.insert(
                 "frep->sdf/coarse".to_string(),
-                Box::new(FixedRunner { err: 0.015, cost: 0.9 }),
+                Box::new(FixedRunner {
+                    err: 0.015,
+                    cost: 0.9,
+                }),
             );
-            runners
-                .insert("sdf->mesh/dc".to_string(), Box::new(FixedRunner { err: 0.007, cost: 1.8 }));
+            runners.insert(
+                "sdf->mesh/dc".to_string(),
+                Box::new(FixedRunner {
+                    err: 0.007,
+                    cost: 1.8,
+                }),
+            );
             let out = r.execute(&plan, &runners, &mut oracle, cx).unwrap();
             // Composed receipt: errors add; the chain's measured error must
             // sit inside the plan's composed certificate (G3).
@@ -867,8 +958,8 @@ mod tests {
                         receipt: Evidence {
                             value: converted.qoi,
                             qoi: converted.qoi,
-                            numerical: converted.numerical.clone(),
-                            statistical: converted.statistical.clone(),
+                            numerical: converted.numerical,
+                            statistical: converted.statistical,
                             model: converted.model.clone(),
                             sensitivity: converted.sensitivity.clone(),
                             provenance: converted.provenance,

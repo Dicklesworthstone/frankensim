@@ -46,6 +46,20 @@ Depends on fs-exec (Cx), fs-evidence, fs-alloc, fs-obs.
   models, known Betti numbers) and `LyingSphereChart` (deliberately biased
   with a lying error model) for detection tests.
 
+- `router` (the Rep Router, Bet 1): converter-edge registry
+  (`ConverterSpec`: cost model, error model with declared composition rule,
+  certificate availability), exact Pareto label-correcting planner over
+  (cost, composed absolute error, uncertified-edge count) with the
+  deterministic winner rule certified-preferred → min cost → min error →
+  lexicographic path; `explain()` returns every Pareto candidate and why
+  the winner won; refusals name the binding constraint (error/cost/
+  no-path) with ranked relaxations; `execute()` runs chains through
+  `EdgeRunner`s, composes per-edge Evidence receipts additively, and
+  records actuals through `CostOracle` (an L2-clean abstraction — HELM
+  wires the ledger tune table behind it; `MemoryCostOracle` in-process).
+  Learned measurements replace declared error magnitudes ONLY on
+  uncertified additive edges; certificates are never learned away.
+
 ## Invariants
 1. Trait laws (G0, geo-001, 12k seeded queries): `inside(x)` ⇔ `sd(x) <
    0`; `support()` bounds the region (no negative sd outside, to

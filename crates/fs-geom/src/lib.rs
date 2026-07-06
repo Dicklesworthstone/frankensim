@@ -33,16 +33,16 @@ use fs_exec::Cx;
 
 mod convert;
 pub mod fixtures;
-pub mod router;
 mod region;
+pub mod router;
 
 pub use convert::{Convert, ConvertDiag, ErrBudget, SampledSdf};
+pub use region::{AgreementConfig, AgreementReport, Disagreement, Region, RegionChart};
 pub use router::{
     Binding, ChainOutcome, ConverterSpec, CostOracle, EdgeOutcome, EdgeRunner, ErrorModel,
     ExecuteError, MemoryCostOracle, RouteCandidate, RouteExplanation, RoutePlan, RouteRefusal,
     RouteRequest, Router, RouterError,
 };
-pub use region::{AgreementConfig, AgreementReport, Disagreement, Region, RegionChart};
 
 /// Crate version, re-exported for provenance stamping.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
