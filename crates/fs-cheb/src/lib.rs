@@ -33,8 +33,11 @@ pub struct Cheb1 {
     coeffs: Vec<f64>,
 }
 
-/// Relative plateau threshold for adaptive truncation.
-const PLATEAU_REL: f64 = 8.9e-16; // ~4·2⁻⁵²: machine-precision plateau
+/// Relative plateau threshold for adaptive truncation. Sits ABOVE the
+/// DCT rounding floor (~n·eps effects at large n): 10·2⁻⁵² — chasing the
+/// floor itself inflates degrees ~20× for oscillatory functions (measured
+/// during bring-up: sin(20x) resolved at 1090 instead of ~45).
+const PLATEAU_REL: f64 = 2.2e-15;
 
 impl Cheb1 {
     /// Build adaptively from a scalar function on [a, b]: sample at
@@ -48,7 +51,10 @@ impl Cheb1 {
         let mut n = 16usize;
         loop {
             let coeffs = Self::coeffs_at(f, a, b, n);
-            let maxc = coeffs.iter().fold(0.0f64, |m, &c| m.max(c.abs())).max(f64::MIN_POSITIVE);
+            let maxc = coeffs
+                .iter()
+                .fold(0.0f64, |m, &c| m.max(c.abs()))
+                .max(f64::MIN_POSITIVE);
             let tail = &coeffs[3 * n / 4..];
             if tail.iter().all(|&c| c.abs() <= PLATEAU_REL * maxc) {
                 // Truncate at the last coefficient above the plateau.
@@ -56,7 +62,11 @@ impl Cheb1 {
                     .iter()
                     .rposition(|&c| c.abs() > PLATEAU_REL * maxc)
                     .map_or(1, |p| p + 1);
-                return Cheb1 { a, b, coeffs: coeffs[..keep].to_vec() };
+                return Cheb1 {
+                    a,
+                    b,
+                    coeffs: coeffs[..keep].to_vec(),
+                };
             }
             n *= 2;
             assert!(
@@ -125,7 +135,11 @@ impl Cheb1 {
     pub fn differentiate(&self) -> Cheb1 {
         let n = self.coeffs.len();
         if n == 1 {
-            return Cheb1 { a: self.a, b: self.b, coeffs: vec![0.0] };
+            return Cheb1 {
+                a: self.a,
+                b: self.b,
+                coeffs: vec![0.0],
+            };
         }
         // Series with halved-c0 semantics: work on the "true" coefficients.
         let mut d = vec![0.0f64; n];
@@ -133,7 +147,7 @@ impl Cheb1 {
         // where the stored c[0] is un-halved but T0's coefficient never
         // enters the derivative sums.
         for k in (1..n).rev() {
-            let above = if k + 2 <= n - 1 { d[k + 1] } else { 0.0 };
+            let above = if k + 2 < n { d[k + 1] } else { 0.0 };
             d[k - 1] = (2.0 * k as f64).mul_add(self.coeffs[k], above);
         }
         // Chain rule for [a,b] → factor 2/(b−a); d[0] doubles under the
@@ -143,7 +157,11 @@ impl Cheb1 {
         if out.is_empty() {
             out.push(0.0);
         }
-        Cheb1 { a: self.a, b: self.b, coeffs: out }
+        Cheb1 {
+            a: self.a,
+            b: self.b,
+            coeffs: out,
+        }
     }
 
     /// Definite integral over the whole domain: only even coefficients
@@ -170,7 +188,11 @@ impl Cheb1 {
             *c = self.coeffs.get(i).copied().unwrap_or(0.0)
                 + o.coeffs.get(i).copied().unwrap_or(0.0);
         }
-        Cheb1 { a: self.a, b: self.b, coeffs }
+        Cheb1 {
+            a: self.a,
+            b: self.b,
+            coeffs,
+        }
     }
 
     /// Product via resampling at a grid resolving the sum of degrees.
@@ -180,14 +202,25 @@ impl Cheb1 {
             (self.a - o.a).abs() < 1e-14 && (self.b - o.b).abs() < 1e-14,
             "domain mismatch"
         );
-        let n = (self.coeffs.len() + o.coeffs.len()).next_power_of_two().max(16);
+        let n = (self.coeffs.len() + o.coeffs.len())
+            .next_power_of_two()
+            .max(16);
         let f = |x: f64| self.eval(x) * o.eval(x);
         let coeffs = Cheb1::coeffs_at(&f, self.a, self.b, n);
         // Truncate at plateau.
-        let maxc = coeffs.iter().fold(0.0f64, |m, &c| m.max(c.abs())).max(f64::MIN_POSITIVE);
-        let keep =
-            coeffs.iter().rposition(|&c| c.abs() > PLATEAU_REL * maxc).map_or(1, |p| p + 1);
-        Cheb1 { a: self.a, b: self.b, coeffs: coeffs[..keep].to_vec() }
+        let maxc = coeffs
+            .iter()
+            .fold(0.0f64, |m, &c| m.max(c.abs()))
+            .max(f64::MIN_POSITIVE);
+        let keep = coeffs
+            .iter()
+            .rposition(|&c| c.abs() > PLATEAU_REL * maxc)
+            .map_or(1, |p| p + 1);
+        Cheb1 {
+            a: self.a,
+            b: self.b,
+            coeffs: coeffs[..keep].to_vec(),
+        }
     }
 
     /// All real roots in [a, b] by recursive subdivision on sign changes
@@ -293,7 +326,7 @@ pub fn diff_matrix(n: usize) -> Vec<f64> {
     let m = n + 1;
     let c = |i: usize| -> f64 {
         let ci = if i == 0 || i == n { 2.0 } else { 1.0 };
-        if i % 2 == 0 { ci } else { -ci }
+        if i.is_multiple_of(2) { ci } else { -ci }
     };
     let mut d = vec![0.0f64; m * m];
     for i in 0..m {
@@ -317,10 +350,12 @@ pub fn diff_matrix(n: usize) -> Vec<f64> {
 }
 
 /// Smallest `k` eigenvalues of the Dirichlet problem −u″ = λu on [−1, 1]
-/// by collocation: interior block of −D², solved by INVERSE POWER
-/// ITERATION with deflation (deterministic; validates the collocation
-/// path without a general nonsymmetric eigensolver — that solver is the
-/// Orr–Sommerfeld follow-up's first deliverable).
+/// by collocation: interior block of −D², solved by SHIFT-INVERTED power
+/// iteration. Shifts come from a coarse FINITE-DIFFERENCE surrogate (a
+/// symmetric tridiagonal whose spectrum `fs_la::eigen::jacobi_eigh`
+/// handles) — deterministic, independent of the analytic answer, and it
+/// sidesteps the missing general nonsymmetric eigensolver (that solver
+/// is the Orr–Sommerfeld follow-up's first deliverable).
 #[must_use]
 pub fn dirichlet_laplace_eigs(n: usize, k: usize) -> Vec<f64> {
     let m = n + 1;
@@ -343,29 +378,43 @@ pub fn dirichlet_laplace_eigs(n: usize, k: usize) -> Vec<f64> {
             a[i * ni + j] = -d2[(i + 1) * m + (j + 1)];
         }
     }
-    let lu = fs_la::factor::lu(&a, ni).expect("interior collocation operator is nonsingular");
+    // FD surrogate on a uniform interior grid: (-1, 2, -1)/h² tridiag —
+    // symmetric, so the landed dense Jacobi handles it. Its k smallest
+    // eigenvalues approximate the true ones well enough to be shifts.
+    let nf = 64usize;
+    let h = 2.0 / (nf as f64 + 1.0);
+    let mut fd = vec![0.0f64; nf * nf];
+    for i in 0..nf {
+        fd[i * nf + i] = 2.0 / (h * h);
+        if i + 1 < nf {
+            fd[i * nf + i + 1] = -1.0 / (h * h);
+            fd[(i + 1) * nf + i] = -1.0 / (h * h);
+        }
+    }
+    let (fd_eigs, _) = fs_la::eigen::jacobi_eigh(&fd, nf);
     let mut eigs = Vec::with_capacity(k);
-    let mut vecs: Vec<Vec<f64>> = Vec::new();
-    for _ in 0..k {
-        // Deterministic start, deflated against found vectors.
+    for &fd_est in fd_eigs.iter().take(k) {
+        // Shift slightly BELOW the surrogate estimate (FD underestimates
+        // continuum eigenvalues; the offset keeps the shifted matrix
+        // definite and the iteration locked to the intended eigenvalue).
+        let mu = fd_est * 0.95;
+        let mut shifted = a.clone();
+        for i in 0..ni {
+            shifted[i * ni + i] -= mu;
+        }
+        let lu =
+            fs_la::factor::lu(&shifted, ni).expect("shifted collocation operator is nonsingular");
         let mut v: Vec<f64> = (0..ni)
             .map(|i| 1.0 + 0.25 * (((i * 7 + 3) % 11) as f64))
             .collect();
-        for _ in 0..200 {
-            // Deflate (Gram–Schmidt against found eigenvectors).
-            for u in &vecs {
-                let dot: f64 = v.iter().zip(u).map(|(a, b)| a * b).sum();
-                for (vi, &ui) in v.iter_mut().zip(u) {
-                    *vi = (-dot).mul_add(ui, *vi);
-                }
-            }
+        for _ in 0..100 {
             let nrm = v.iter().map(|x| x * x).sum::<f64>().sqrt();
             for x in &mut v {
                 *x /= nrm;
             }
             lu.solve(&mut v);
         }
-        // Rayleigh quotient λ = vᵀAv / vᵀv.
+        // Rayleigh quotient λ = vᵀAv / vᵀv on the UNSHIFTED operator.
         let nrm2: f64 = v.iter().map(|x| x * x).sum();
         let mut av = vec![0.0f64; ni];
         for i in 0..ni {
@@ -375,10 +424,7 @@ pub fn dirichlet_laplace_eigs(n: usize, k: usize) -> Vec<f64> {
             }
             av[i] = acc;
         }
-        let lam: f64 = v.iter().zip(&av).map(|(x, y)| x * y).sum::<f64>() / nrm2;
-        eigs.push(lam);
-        let nrm = v.iter().map(|x| x * x).sum::<f64>().sqrt();
-        vecs.push(v.iter().map(|x| x / nrm).collect());
+        eigs.push(v.iter().zip(&av).map(|(x, y)| x * y).sum::<f64>() / nrm2);
     }
     eigs
 }
