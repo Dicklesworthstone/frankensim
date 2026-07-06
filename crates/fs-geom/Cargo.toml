@@ -1,0 +1,23 @@
+[package]
+name = "fs-geom"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Region/Chart abstraction: charts present abstract regions, agreement is checkable, conversions carry Certified receipts."
+
+[package.metadata.frankensim]
+layer = "L2"
+
+[dependencies]
+fs-alloc = { path = "../fs-alloc" }
+fs-evidence = { path = "../fs-evidence" }
+fs-exec = { path = "../fs-exec" }
+fs-obs = { path = "../fs-obs" }
+
+[dev-dependencies]
+asupersync = { path = "../../../asupersync" }
+
+[lints]
+workspace = true
