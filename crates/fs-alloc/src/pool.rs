@@ -68,16 +68,13 @@ impl<T> ShardedPool<T> {
         let value = {
             let mut s = home.get().lock().expect("fs-alloc shard poisoned");
             s.live += 1;
-            match s.free.pop() {
-                Some(v) => {
-                    s.recycled += 1;
-                    Some(v)
-                }
-                None => {
-                    s.created += 1;
-                    None
-                }
+            let recycled = s.free.pop();
+            if recycled.is_some() {
+                s.recycled += 1;
+            } else {
+                s.created += 1;
             }
+            recycled
         };
         // Construction happens OUTSIDE the lock, on the acquiring thread.
         let value = value.unwrap_or_else(make);

@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::ALLOC_ALIGN;
 use crate::hugepage::{HugepageDecision, HugepagePolicy};
-use crate::raw::{Chunk, Full, RawArena};
+use crate::raw::{Chunk, RawArena};
 
 /// An allocation-site tag: a static name under which bytes are accounted,
 /// so memory usage feeds the Ledger and regressions are diffable between
