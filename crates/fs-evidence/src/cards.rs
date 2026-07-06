@@ -228,7 +228,10 @@ impl ModelRegistry {
     /// All rows, sorted by card name (the `model_cards` table dump).
     #[must_use]
     pub fn to_ledger_rows_json(&self) -> Vec<String> {
-        self.cards.values().map(ModelCard::to_ledger_row_json).collect()
+        self.cards
+            .values()
+            .map(ModelCard::to_ledger_row_json)
+            .collect()
     }
 }
 

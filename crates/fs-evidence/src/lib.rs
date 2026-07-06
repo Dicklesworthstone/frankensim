@@ -284,9 +284,9 @@ impl ValidityDomain {
     /// True when the point satisfies every constraint.
     #[must_use]
     pub fn contains(&self, point: &BTreeMap<String, f64>) -> bool {
-        self.bounds.iter().all(|(k, &(lo, hi))| {
-            point.get(k).is_some_and(|&v| v >= lo && v <= hi)
-        })
+        self.bounds
+            .iter()
+            .all(|(k, &(lo, hi))| point.get(k).is_some_and(|&v| v >= lo && v <= hi))
     }
 
     /// Per-parameter intersection (the composition law: composed validity
@@ -856,7 +856,9 @@ mod tests {
     #[test]
     fn validity_intersection_and_containment_laws() {
         let a = ValidityDomain::unconstrained().with("Re", 1e4, 1e5);
-        let b = ValidityDomain::unconstrained().with("Re", 5e4, 2e5).with("Ma", 0.0, 0.3);
+        let b = ValidityDomain::unconstrained()
+            .with("Re", 5e4, 2e5)
+            .with("Ma", 0.0, 0.3);
         let i = a.intersect(&b);
         assert_eq!(i.bound("Re"), Some((5e4, 1e5)));
         assert_eq!(i.bound("Ma"), Some((0.0, 0.3)));
@@ -871,7 +873,10 @@ mod tests {
         assert!(e.is_empty());
         // Missing keys are unconstrained.
         assert!(a.contains(&point(&[("Re", 5e4)])));
-        assert!(!a.contains(&point(&[("Ma", 0.1)])), "missing constrained key fails");
+        assert!(
+            !a.contains(&point(&[("Ma", 0.1)])),
+            "missing constrained key fails"
+        );
     }
 
     #[test]
@@ -891,9 +896,14 @@ mod tests {
             discrepancy_rel: 0.1,
             in_domain: false,
         };
-        let err = out_of_domain.certified().expect_err("out of domain refused");
+        let err = out_of_domain
+            .certified()
+            .expect_err("out of domain refused");
         assert!(err.to_string().contains("validity"), "{err}");
-        assert!(Evidence::exact(1.5, p).certified().is_ok(), "pure math certifies");
+        assert!(
+            Evidence::exact(1.5, p).certified().is_ok(),
+            "pure math certifies"
+        );
     }
 
     #[test]
@@ -938,7 +948,13 @@ mod tests {
         let row = ev.to_ledger_row_json();
         assert_eq!(row, ev.to_ledger_row_json(), "deterministic");
         assert!(!row.contains('\n'));
-        for key in ["\"provenance\":", "\"numerical\":", "\"statistical\":", "\"model\":", "\"adjoint\":"] {
+        for key in [
+            "\"provenance\":",
+            "\"numerical\":",
+            "\"statistical\":",
+            "\"model\":",
+            "\"adjoint\":",
+        ] {
             assert!(row.contains(key), "missing {key} in {row}");
         }
     }

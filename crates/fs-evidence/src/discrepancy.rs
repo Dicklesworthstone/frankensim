@@ -345,7 +345,11 @@ mod tests {
             .evidence(ProvenanceHash::of_bytes(b"vessel-lip"))
             .expect("nonempty bracket");
         assert!(ev.numerical.lo <= 0.90 && ev.numerical.hi >= 1.16);
-        assert!(ev.model.discrepancy_rel > 0.2, "{}", ev.model.discrepancy_rel);
+        assert!(
+            ev.model.discrepancy_rel > 0.2,
+            "{}",
+            ev.model.discrepancy_rel
+        );
         assert!(ev.model.assumptions[0].contains("model-bracketed"));
         assert!(ModelBracket::new().evidence(ProvenanceHash(0)).is_none());
     }

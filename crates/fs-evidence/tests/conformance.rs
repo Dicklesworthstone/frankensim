@@ -120,7 +120,9 @@ fn evd_001_g0_composition_conservativeness_battery() {
 #[test]
 fn evd_002_model_card_registration_lint() {
     let mut reg = ModelRegistry::new();
-    let refused = reg.register_solver("flux.lbm-les", "les-smagorinsky").is_err();
+    let refused = reg
+        .register_solver("flux.lbm-les", "les-smagorinsky")
+        .is_err();
     reg.register_card(ModelCard::new(
         "les-smagorinsky",
         "1.0.0",
@@ -130,7 +132,9 @@ fn evd_002_model_card_registration_lint() {
         vec!["under-predicts separation".into()],
         0.10,
     ));
-    let accepted = reg.register_solver("flux.lbm-les", "les-smagorinsky").is_ok();
+    let accepted = reg
+        .register_solver("flux.lbm-les", "les-smagorinsky")
+        .is_ok();
     // Rows ride the observability schema toward the ledger.
     let mut em = fs_obs::Emitter::new("fs-evidence/conformance", "evd-002/cards");
     let mut rows_valid = true;
@@ -234,7 +238,9 @@ fn evd_004_discrepancy_model_flags_out_of_distribution_queries() {
         .expect_err("out-of-distribution must refuse");
     let teaching = err.to_string().contains("extrapolation") && err.param == "Re";
     // The refusal also blocks certification through evidence_at.
-    let ood_blocked = model.evidence_at("panel-vs-les", &pt(&[("Re", 1e6)])).is_err();
+    let ood_blocked = model
+        .evidence_at("panel-vs-les", &pt(&[("Re", 1e6)]))
+        .is_err();
     verdict(
         "evd-004",
         band_sane && teaching && ood_blocked,
@@ -259,7 +265,10 @@ fn evd_005_bracketing_reports_spread_and_rows_are_deterministic() {
         .expect("bracket evidence");
     let enclosing = ev.numerical.lo <= 0.90 && ev.numerical.hi >= 1.16;
     let spread_reported = ev.model.discrepancy_rel > 0.2
-        && ev.sensitivity.d_qoi.contains_key("model-choice(bracket-spread)");
+        && ev
+            .sensitivity
+            .d_qoi
+            .contains_key("model-choice(bracket-spread)");
     // A bracket is honest evidence but NOT certifiable past a threshold
     // that its spread violates.
     let status = ev.assess(0.05);
