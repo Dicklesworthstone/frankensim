@@ -77,9 +77,13 @@ mod tests {
     fn bandwidth_is_physically_plausible() {
         // Small, fast variant for CI: 8 MiB per array.
         let single = triad_gbs_once(1 << 20);
+        // Wide bounds ON PURPOSE: this guards against ACCOUNTING bugs
+        // (wrong BYTES_PER_ELEM, ms-vs-s confusion produce 1000x errors),
+        // not against slow machines — a debug build on a loaded 128-thread
+        // box legitimately measures under 1 GB/s (learned on trj, load 27).
         assert!(
-            (1.0..=2000.0).contains(&single),
-            "single-thread triad {single} GB/s outside plausible bounds"
+            (0.01..=20_000.0).contains(&single),
+            "single-thread triad {single} GB/s outside sanity bounds (accounting bug?)"
         );
     }
 
