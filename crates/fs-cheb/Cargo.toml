@@ -1,0 +1,21 @@
+[package]
+name = "fs-cheb"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Chebfun-style function objects: adaptive Chebyshev expansions, spectral collocation."
+
+[package.metadata.frankensim]
+layer = "L1"
+
+[dependencies]
+fs-fft = { path = "../fs-fft" }
+fs-la = { path = "../fs-la" }
+fs-math = { path = "../fs-math" }
+
+[dev-dependencies]
+
+[lints]
+workspace = true

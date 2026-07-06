@@ -11,6 +11,7 @@ members = [
     "crates/fs-math",
     "crates/fs-la",
     "crates/fs-sparse",
+    "crates/fs-cheb",
     "crates/fs-fft",
     "crates/fs-ivl",
     "crates/fs-rand",
