@@ -58,7 +58,10 @@ where
         "snapshot budget {budget} < required {} for {steps} steps (binary treeverse)",
         min_budget(steps)
     );
-    let mut stats = RevolveStats { forward_steps: 0, peak_snapshots: 0 };
+    let mut stats = RevolveStats {
+        forward_steps: 0,
+        peak_snapshots: 0,
+    };
     if steps == 0 {
         return (seed, stats);
     }
@@ -69,13 +72,7 @@ where
 /// Full-storage reference adjoint (stores every state) — the oracle the
 /// checkpointed sweep must match BITWISE, and a fine choice when memory
 /// is plentiful.
-pub fn full_adjoint<S, B, F, R>(
-    x0: &S,
-    steps: usize,
-    forward: &F,
-    reverse: &R,
-    seed: B,
-) -> B
+pub fn full_adjoint<S, B, F, R>(x0: &S, steps: usize, forward: &F, reverse: &R, seed: B) -> B
 where
     S: Clone,
     F: Fn(usize, &S) -> S,
@@ -156,8 +153,16 @@ mod tests {
         let full = full_adjoint(&X0, STEPS, &f, &r, (1.0, 0.0));
         let budget = min_budget(STEPS);
         let (ck, stats) = checkpointed_adjoint(&X0, STEPS, budget, &f, &r, (1.0, 0.0));
-        assert_eq!(full.0.to_bits(), ck.0.to_bits(), "xbar must be BIT-identical");
-        assert_eq!(full.1.to_bits(), ck.1.to_bits(), "thetabar must be BIT-identical");
+        assert_eq!(
+            full.0.to_bits(),
+            ck.0.to_bits(),
+            "xbar must be BIT-identical"
+        );
+        assert_eq!(
+            full.1.to_bits(),
+            ck.1.to_bits(),
+            "thetabar must be BIT-identical"
+        );
         // Resource bounds hold.
         assert!(
             stats.peak_snapshots <= budget,
@@ -181,8 +186,7 @@ mod tests {
         // dx_L/dθ via the adjoint sweep must equal the forward-dual run.
         let f = fwd(THETA);
         let r = rev(THETA);
-        let (bar, _) =
-            checkpointed_adjoint(&X0, STEPS, min_budget(STEPS), &f, &r, (1.0, 0.0));
+        let (bar, _) = checkpointed_adjoint(&X0, STEPS, min_budget(STEPS), &f, &r, (1.0, 0.0));
         // Forward dual: seed θ.
         let mut x = Dual64::<1>::constant(X0);
         let th = Dual64::<1>::variable(THETA, 0);
@@ -213,9 +217,7 @@ mod tests {
     fn insufficient_budget_is_refused() {
         let f = fwd(THETA);
         let r = rev(THETA);
-        let res = std::panic::catch_unwind(|| {
-            checkpointed_adjoint(&X0, 64, 2, &f, &r, (1.0, 0.0))
-        });
+        let res = std::panic::catch_unwind(|| checkpointed_adjoint(&X0, 64, 2, &f, &r, (1.0, 0.0)));
         assert!(res.is_err(), "budget 2 for 64 steps must be refused loudly");
     }
 

@@ -84,7 +84,14 @@ where
             worst_index = k;
         }
     }
-    GradCheckReport { grad, fd, max_rel_err, worst_index, tol, pass: max_rel_err <= tol }
+    GradCheckReport {
+        grad,
+        fd,
+        max_rel_err,
+        worst_index,
+        tol,
+        pass: max_rel_err <= tol,
+    }
 }
 
 #[cfg(test)]
@@ -100,7 +107,10 @@ mod tests {
             5e-6,
         );
         assert!(rep.pass, "correct derivative must pass: {rep}");
-        assert!(rep.max_rel_err < 1e-8, "central FD should be much tighter: {rep}");
+        assert!(
+            rep.max_rel_err < 1e-8,
+            "central FD should be much tighter: {rep}"
+        );
     }
 
     #[test]
@@ -127,7 +137,10 @@ mod tests {
     fn report_serializes_as_json_line() {
         let rep = gradcheck(|[x]: [Dual64<1>; 1]| x * x, [2.0], 5e-6);
         let line = format!("{rep}");
-        assert!(line.starts_with('{') && line.ends_with('}'), "JSON-ish line: {line}");
+        assert!(
+            line.starts_with('{') && line.ends_with('}'),
+            "JSON-ish line: {line}"
+        );
         assert!(line.contains("\"pass\":true"));
     }
 }

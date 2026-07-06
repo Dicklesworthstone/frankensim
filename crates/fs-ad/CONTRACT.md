@@ -7,6 +7,26 @@ kernels run unchanged on values or derivatives. Layer: L1. (Reverse mode /
 IFT adjoint infrastructure = the fs-ad-adjoint-infra bead.)
 
 ## Public types and semantics
+- `ift::{ift_gradient, IftReport}` — implicit-function-theorem adjoints:
+  dJ/dp at a solution of F(u,p)=0 via one adjoint solve
+  ((∂F/∂u)ᵀλ = ∂J/∂u through fs-la LU `solve_transpose`); Jacobians built
+  densely column-by-column with single-lane duals (deterministic seeding
+  order). `IftReport` carries the PRIMAL residual (the gradient formula is
+  exact only at F = 0 — callers get the honesty number) and the adjoint
+  residual. Singular ∂F/∂u surfaces as `FactorError` (the IFT hypothesis
+  failed), never a wrong gradient.
+- `revolve::{checkpointed_adjoint, full_adjoint, min_budget,
+  RevolveStats}` — binary-treeverse checkpointed reverse sweeps: peak
+  snapshots ≤ ⌈log₂L⌉+1 (asserted via instrumentation), forward
+  re-evaluations ≤ L·⌈log₂L⌉ (asserted). HEADLINE INVARIANT: the
+  checkpointed adjoint is BITWISE equal to the full-storage adjoint
+  (deterministic recomputation reproduces identical states) — tested.
+  Insufficient budget is a structured panic, not a silent overrun.
+- `gradcheck::{gradcheck, GradCheckReport}` — the CI gradient-gate
+  primitive: dual gradient vs central FD with scale-aware relative error;
+  JSON-line Display. Catches the derivative-killing bug class (tested on
+  a value()/from_f64 round-trip specimen: O(1) error detected).
+
 - `Real` — the scalar contract (zero/one/from_f64/value, arithmetic ops,
   mul_add, recip, sqrt, abs, exp, ln, sin, cos, tanh, powi). `f64`'s impl
   routes elementary functions through fs-math STRICT det — genericity

@@ -51,9 +51,8 @@ where
 {
     let n = u_star.len();
     let m = p.len();
-    let lift = |xs: &[f64]| -> Vec<Dual64<1>> {
-        xs.iter().map(|&v| Dual64::<1>::constant(v)).collect()
-    };
+    let lift =
+        |xs: &[f64]| -> Vec<Dual64<1>> { xs.iter().map(|&v| Dual64::<1>::constant(v)).collect() };
     // Primal residual (dual constants; primal channel is bit-exact).
     let u0 = lift(u_star);
     let p0 = lift(p);
@@ -117,7 +116,13 @@ where
         }
         *g -= acc;
     }
-    Ok((grad, IftReport { primal_residual, adjoint_residual }))
+    Ok((
+        grad,
+        IftReport {
+            primal_residual,
+            adjoint_residual,
+        },
+    ))
 }
 
 #[cfg(test)]
@@ -172,8 +177,14 @@ mod tests {
         let p = [3.0, 2.0];
         let u = newton_solve(&f_sys, &[1.0, 1.0], &p, 40);
         let (grad, rep) = ift_gradient(&f_sys, &j_obj, &u, &p).unwrap();
-        assert!(rep.primal_residual < 1e-12, "Newton must have converged: {rep:?}");
-        assert!(rep.adjoint_residual < 1e-12, "adjoint solve must be tight: {rep:?}");
+        assert!(
+            rep.primal_residual < 1e-12,
+            "Newton must have converged: {rep:?}"
+        );
+        assert!(
+            rep.adjoint_residual < 1e-12,
+            "adjoint solve must be tight: {rep:?}"
+        );
         // Central differences through the FULL pipeline (re-solve at p±h).
         let h = 1e-6;
         for k in 0..2 {
@@ -217,8 +228,7 @@ mod tests {
             // Newton generic over Real, seeded in direction e_k of p.
             let mut pd: Vec<Dual64<1>> = p.iter().map(|&v| Dual64::constant(v)).collect();
             pd[k] = Dual64::variable(p[k], 0);
-            let mut ud: Vec<Dual64<1>> =
-                vec![Dual64::constant(1.0), Dual64::constant(1.0)];
+            let mut ud: Vec<Dual64<1>> = vec![Dual64::constant(1.0), Dual64::constant(1.0)];
             for _ in 0..60 {
                 // One Newton step in dual arithmetic (2×2 solved in closed
                 // form to stay generic).
