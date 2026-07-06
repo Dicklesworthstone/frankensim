@@ -70,7 +70,15 @@ impl Bsr {
             brow_ptr[rb + 1] = brow_ptr[rb] + present.len();
             bcol_idx.extend_from_slice(&present);
         }
-        Bsr { br, bc, nrows: a.nrows(), ncols: a.ncols(), brow_ptr, bcol_idx, blocks }
+        Bsr {
+            br,
+            bc,
+            nrows: a.nrows(),
+            ncols: a.ncols(),
+            brow_ptr,
+            bcol_idx,
+            blocks,
+        }
     }
 
     /// Expand back to CSR. Fill zeros introduced by blocking are DROPPED
@@ -122,8 +130,18 @@ impl Bsr {
     /// y = A·x, bit-identical to CSR SpMV (ascending-column accumulation with
     /// fused mul_add; fill zeros provably inert — see module docs).
     pub fn spmv(&self, x: &[f64], y: &mut [f64]) {
-        assert_eq!(x.len(), self.ncols, "spmv: x length must equal ncols {}", self.ncols);
-        assert_eq!(y.len(), self.nrows, "spmv: y length must equal nrows {}", self.nrows);
+        assert_eq!(
+            x.len(),
+            self.ncols,
+            "spmv: x length must equal ncols {}",
+            self.ncols
+        );
+        assert_eq!(
+            y.len(),
+            self.nrows,
+            "spmv: y length must equal nrows {}",
+            self.nrows
+        );
         for rb in 0..self.brow_ptr.len() - 1 {
             for i in 0..self.br {
                 let mut acc = 0.0f64;
@@ -163,7 +181,11 @@ mod tests {
         for blk in 0..4 {
             for i in 0..3 {
                 for j in 0..3 {
-                    coo.push(blk * 3 + i, blk * 3 + j, f64::from(u32::try_from(blk * 9 + i * 3 + j).unwrap()) + 1.0);
+                    coo.push(
+                        blk * 3 + i,
+                        blk * 3 + j,
+                        f64::from(u32::try_from(blk * 9 + i * 3 + j).unwrap()) + 1.0,
+                    );
                 }
             }
         }
@@ -182,7 +204,9 @@ mod tests {
     fn spmv_bitwise_equals_csr() {
         let mut seed = 21u64;
         let mut lcg = move || {
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             ((seed >> 11) as f64) / (1u64 << 53) as f64 - 0.5
         };
         for (n, br, bc) in [(64usize, 2usize, 2usize), (64, 4, 4), (60, 3, 5)] {

@@ -53,8 +53,10 @@ impl Sell {
         let row_len: Vec<usize> = perm.iter().map(|&r| a.row(r).0.len()).collect();
         let mut chunk_ptr = vec![0usize; nchunks + 1];
         for ch in 0..nchunks {
-            let width =
-                (ch * c..((ch + 1) * c).min(nrows)).map(|p| row_len[p]).max().unwrap_or(0);
+            let width = (ch * c..((ch + 1) * c).min(nrows))
+                .map(|p| row_len[p])
+                .max()
+                .unwrap_or(0);
             chunk_ptr[ch + 1] = chunk_ptr[ch] + width * c;
         }
         let total = chunk_ptr[nchunks];
@@ -68,7 +70,17 @@ impl Sell {
                 vals[chunk_ptr[ch] + k * c + lane] = vv;
             }
         }
-        Sell { c, sigma, nrows, ncols: a.ncols(), perm, row_len, chunk_ptr, col_idx, vals }
+        Sell {
+            c,
+            sigma,
+            nrows,
+            ncols: a.ncols(),
+            perm,
+            row_len,
+            chunk_ptr,
+            col_idx,
+            vals,
+        }
     }
 
     /// Exact (bitwise-lossless) expansion back to CSR: true row lengths are
@@ -130,8 +142,18 @@ impl Sell {
     /// entries in ascending-column order with fused mul_add, iterating to the
     /// TRUE row length (pads never read).
     pub fn spmv(&self, x: &[f64], y: &mut [f64]) {
-        assert_eq!(x.len(), self.ncols, "spmv: x length must equal ncols {}", self.ncols);
-        assert_eq!(y.len(), self.nrows, "spmv: y length must equal nrows {}", self.nrows);
+        assert_eq!(
+            x.len(),
+            self.ncols,
+            "spmv: x length must equal ncols {}",
+            self.ncols
+        );
+        assert_eq!(
+            y.len(),
+            self.nrows,
+            "spmv: y length must equal nrows {}",
+            self.nrows
+        );
         for (pos, &orig) in self.perm.iter().enumerate() {
             let (ch, lane) = (pos / self.c, pos % self.c);
             let mut acc = 0.0f64;
@@ -169,7 +191,9 @@ mod tests {
     fn spmv_bitwise_equals_csr() {
         let mut seed = 31u64;
         let mut lcg = move || {
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             ((seed >> 11) as f64) / (1u64 << 53) as f64 - 0.5
         };
         // Mixed shapes including a ragged final chunk and heavy row-length
@@ -220,6 +244,9 @@ mod tests {
         let lap = laplacian_2d(16);
         let s = Sell::from_csr(&lap, 8, 64);
         let overhead = s.physical_slots() as f64 / lap.nnz() as f64;
-        assert!(overhead < 1.35, "Laplacian SELL overhead {overhead} unexpectedly high");
+        assert!(
+            overhead < 1.35,
+            "Laplacian SELL overhead {overhead} unexpectedly high"
+        );
     }
 }

@@ -5,10 +5,12 @@
 //! aarch64-apple and required to match on x86-64 (the same evidence
 //! discipline as fs-math/fs-fft).
 
-use fs_sparse::{ops, Bsr, Coo, Csr, Sell};
+use fs_sparse::{Bsr, Coo, Csr, Sell, ops};
 
 fn lcg(seed: &mut u64) -> f64 {
-    *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+    *seed = seed
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407);
     ((*seed >> 11) as f64) / (1u64 << 53) as f64 - 0.5
 }
 

@@ -51,40 +51,26 @@ pub fn symmetrize(a: &Csr) -> Csr {
     for r in 0..n {
         let (ca, va) = a.row(r);
         let (cb, vb) = at.row(r);
-        // Two-pointer merge over sorted column lists.
+        // Two-pointer merge over sorted column lists; a missing side
+        // contributes exactly 0.0. `midpoint` is commutative in IEEE
+        // arithmetic, so the bitwise-symmetry argument is preserved.
         let (mut i, mut j) = (0usize, 0usize);
         while i < ca.len() || j < cb.len() {
-            let (c, v) = match (ca.get(i), cb.get(j)) {
-                (Some(&x), Some(&y)) if x == y => {
-                    let v = 0.5 * (va[i] + vb[j]);
-                    i += 1;
-                    j += 1;
-                    (x, v)
-                }
-                (Some(&x), Some(&y)) if x < y => {
-                    let v = 0.5 * (va[i] + 0.0);
-                    i += 1;
-                    (x, v)
-                }
-                (Some(_), Some(&y)) => {
-                    let v = 0.5 * (0.0 + vb[j]);
-                    j += 1;
-                    (y, v)
-                }
-                (Some(&x), None) => {
-                    let v = 0.5 * (va[i] + 0.0);
-                    i += 1;
-                    (x, v)
-                }
-                (None, Some(&y)) => {
-                    let v = 0.5 * (0.0 + vb[j]);
-                    j += 1;
-                    (y, v)
-                }
-                (None, None) => unreachable!(),
-            };
+            let next_a = ca.get(i).copied().unwrap_or(usize::MAX);
+            let next_b = cb.get(j).copied().unwrap_or(usize::MAX);
+            let c = next_a.min(next_b);
+            let mut x = 0.0f64;
+            let mut y = 0.0f64;
+            if next_a == c {
+                x = va[i];
+                i += 1;
+            }
+            if next_b == c {
+                y = vb[j];
+                j += 1;
+            }
             col_idx.push(c);
-            vals.push(v);
+            vals.push(f64::midpoint(x, y));
         }
         row_ptr[r + 1] = col_idx.len();
     }
@@ -142,8 +128,8 @@ pub fn spgemm(a: &Csr, b: &Csr) -> Csr {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tests::{laplacian_2d, random_coo};
     use crate::Coo;
+    use crate::tests::{laplacian_2d, random_coo};
 
     fn bitwise_eq(a: &Csr, b: &Csr) -> bool {
         if a.nrows() != b.nrows() || a.ncols() != b.ncols() || a.nnz() != b.nnz() {
@@ -184,11 +170,17 @@ mod tests {
         let a = random_coo(40, 40, 6, 0x51).assemble();
         let s = symmetrize(&a);
         let st = transpose(&s);
-        assert!(bitwise_eq(&s, &st), "symmetrize output not bitwise symmetric");
+        assert!(
+            bitwise_eq(&s, &st),
+            "symmetrize output not bitwise symmetric"
+        );
         // Already-symmetric input is a fixed point (Laplacian).
         let lap = laplacian_2d(6);
         let sl = symmetrize(&lap);
-        assert!(bitwise_eq(&lap, &sl), "symmetric input must be a fixed point");
+        assert!(
+            bitwise_eq(&lap, &sl),
+            "symmetric input must be a fixed point"
+        );
     }
 
     #[test]
@@ -226,7 +218,7 @@ mod tests {
         let lap = laplacian_2d(8);
         let sq = spgemm(&lap, &lap);
         let interior = 3 * 8 + 3; // (3,3) — fully interior node
-        assert_eq!(sq.get(interior, interior), 20.0);
+        assert_eq!(sq.get(interior, interior).to_bits(), 20.0f64.to_bits());
         assert!(sq.nnz() > lap.nnz(), "A^2 must widen the pattern");
     }
 

@@ -45,7 +45,13 @@ impl Coo {
     /// Empty staging buffer with fixed dimensions.
     #[must_use]
     pub fn new(nrows: usize, ncols: usize) -> Coo {
-        Coo { nrows, ncols, rows: Vec::new(), cols: Vec::new(), vals: Vec::new() }
+        Coo {
+            nrows,
+            ncols,
+            rows: Vec::new(),
+            cols: Vec::new(),
+            vals: Vec::new(),
+        }
     }
 
     /// Stage one contribution. Panics (structured) on out-of-range indices —
@@ -103,7 +109,13 @@ impl Coo {
         for r in 0..self.nrows {
             row_ptr[r + 1] += row_ptr[r];
         }
-        Csr { nrows: self.nrows, ncols: self.ncols, row_ptr, col_idx, vals }
+        Csr {
+            nrows: self.nrows,
+            ncols: self.ncols,
+            row_ptr,
+            col_idx,
+            vals,
+        }
     }
 }
 
@@ -135,12 +147,23 @@ impl Csr {
         col_idx: Vec<usize>,
         vals: Vec<f64>,
     ) -> Csr {
-        assert_eq!(row_ptr.len(), nrows + 1, "row_ptr must have nrows+1 entries");
+        assert_eq!(
+            row_ptr.len(),
+            nrows + 1,
+            "row_ptr must have nrows+1 entries"
+        );
         assert_eq!(row_ptr[0], 0, "row_ptr must start at 0");
-        assert_eq!(*row_ptr.last().unwrap(), col_idx.len(), "row_ptr end must equal nnz");
+        assert_eq!(
+            *row_ptr.last().unwrap(),
+            col_idx.len(),
+            "row_ptr end must equal nnz"
+        );
         assert_eq!(col_idx.len(), vals.len(), "col_idx/vals length mismatch");
         for r in 0..nrows {
-            assert!(row_ptr[r] <= row_ptr[r + 1], "row_ptr must be monotone (row {r})");
+            assert!(
+                row_ptr[r] <= row_ptr[r + 1],
+                "row_ptr must be monotone (row {r})"
+            );
             let cols = &col_idx[row_ptr[r]..row_ptr[r + 1]];
             for w in cols.windows(2) {
                 assert!(w[0] < w[1], "row {r}: columns must be strictly ascending");
@@ -149,7 +172,13 @@ impl Csr {
                 assert!(last < ncols, "row {r}: column {last} out of range {ncols}");
             }
         }
-        Csr { nrows, ncols, row_ptr, col_idx, vals }
+        Csr {
+            nrows,
+            ncols,
+            row_ptr,
+            col_idx,
+            vals,
+        }
     }
 
     /// An n×n identity.
@@ -205,15 +234,25 @@ impl Csr {
     /// arithmetic every format's kernel uses (bitwise cross-format equality
     /// is tested, not hoped for).
     pub fn spmv(&self, x: &[f64], y: &mut [f64]) {
-        assert_eq!(x.len(), self.ncols, "spmv: x length must equal ncols {}", self.ncols);
-        assert_eq!(y.len(), self.nrows, "spmv: y length must equal nrows {}", self.nrows);
-        for r in 0..self.nrows {
+        assert_eq!(
+            x.len(),
+            self.ncols,
+            "spmv: x length must equal ncols {}",
+            self.ncols
+        );
+        assert_eq!(
+            y.len(),
+            self.nrows,
+            "spmv: y length must equal nrows {}",
+            self.nrows
+        );
+        for (r, out) in y.iter_mut().enumerate() {
             let (cols, vals) = self.row(r);
             let mut acc = 0.0f64;
             for (&c, &v) in cols.iter().zip(vals) {
                 acc = v.mul_add(x[c], acc);
             }
-            y[r] = acc;
+            *out = acc;
         }
     }
 
@@ -255,7 +294,9 @@ mod tests {
     use super::*;
 
     fn lcg(seed: &mut u64) -> f64 {
-        *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        *seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         ((*seed >> 11) as f64) / (1u64 << 53) as f64 - 0.5
     }
 
@@ -306,9 +347,9 @@ mod tests {
         coo.push(0, 0, -1.0);
         let a = coo.assemble();
         assert_eq!(a.nnz(), 3);
-        assert_eq!(a.get(0, 0), -1.0);
-        assert_eq!(a.get(0, 1), 2.0);
-        assert_eq!(a.get(1, 2), 1.5);
+        assert_eq!(a.get(0, 0).to_bits(), (-1.0f64).to_bits());
+        assert_eq!(a.get(0, 1).to_bits(), 2.0f64.to_bits());
+        assert_eq!(a.get(1, 2).to_bits(), 1.5f64.to_bits());
         let (cols, _) = a.row(0);
         assert_eq!(cols, &[0, 1], "columns must come out sorted");
     }
@@ -324,7 +365,10 @@ mod tests {
         let n = base.staged();
         // Deterministic pseudo-shuffles: stride permutations of the stream.
         for stride in [7usize, 13, 29] {
-            assert!(n % stride != 0, "stride must not divide n for full cycle");
+            assert!(
+                !n.is_multiple_of(stride),
+                "stride must not divide n for full cycle"
+            );
             let mut shuffled = Coo::new(40, 40);
             let mut idx = 0;
             // Visit indices in a stride cycle, but PUSH in insertion order of
@@ -347,7 +391,10 @@ mod tests {
             let b = shuffled.assemble();
             assert_eq!(a.nnz(), b.nnz());
             assert!(
-                a.vals.iter().zip(&b.vals).all(|(x, y)| x.to_bits() == y.to_bits()),
+                a.vals
+                    .iter()
+                    .zip(&b.vals)
+                    .all(|(x, y)| x.to_bits() == y.to_bits()),
                 "assembly depended on tile interleaving (stride {stride})"
             );
         }
@@ -460,7 +507,8 @@ mod tests {
             (vec![0, 1], vec![5], "column out of range"),
         ] {
             let vals = vec![1.0; ci.len()];
-            let r = std::panic::catch_unwind(|| Csr::from_parts(1, 2, rp.clone(), ci.clone(), vals));
+            let r =
+                std::panic::catch_unwind(|| Csr::from_parts(1, 2, rp.clone(), ci.clone(), vals));
             assert!(r.is_err(), "must reject: {why}");
         }
     }
