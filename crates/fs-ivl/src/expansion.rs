@@ -49,8 +49,9 @@ pub fn fast_expansion_sum_zeroelim(e: &[f64], f: &[f64]) -> Vec<f64> {
     let mut h = Vec::with_capacity(e.len() + f.len());
     let (mut ei, mut fi) = (0usize, 0usize);
     let smaller_is_e = |ei: usize, fi: usize| -> bool {
-        // True when e[ei] has the smaller magnitude (take it first).
-        !((f[fi] > e[ei]) == (f[fi] > -e[ei]))
+        // Shewchuk's branchless |f| > |e| test: true when e[ei] has the
+        // smaller magnitude (take it first).
+        (f[fi] > e[ei]) == (f[fi] > -e[ei])
     };
     let mut q = if smaller_is_e(ei, fi) {
         ei += 1;
