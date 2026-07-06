@@ -10,7 +10,6 @@
 //! branch conventions that disagree across paths. Tested on a seeded
 //! specimen of that class.
 
-use crate::Real;
 use crate::dual::Dual64;
 
 /// Verdict + evidence from a gradient check.
@@ -91,6 +90,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Real;
 
     #[test]
     fn correct_gradient_passes() {

@@ -130,7 +130,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Real;
     use crate::dual::Dual64;
 
     /// Step: x ← x − 0.1·(x³ − θ). Adjoint state (x̄, θ̄).
@@ -165,7 +164,7 @@ mod tests {
             "peak {} exceeded budget {budget}",
             stats.peak_snapshots
         );
-        let log2 = (usize::BITS - STEPS.leading_zeros()) as u64;
+        let log2 = u64::from(usize::BITS - STEPS.leading_zeros());
         assert!(
             stats.forward_steps <= (STEPS as u64) * log2,
             "forward steps {} above the L*log2(L) bound",

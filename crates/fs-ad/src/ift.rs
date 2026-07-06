@@ -17,7 +17,6 @@
 //! large N join the solver-stack work; the FrankenTorch reverse bridge is
 //! the recorded follow-up.
 
-use crate::Real;
 use crate::dual::Dual64;
 use fs_la::factor::{FactorError, lu};
 
@@ -124,6 +123,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Real;
 
     /// Solve F(u, p) = 0 by Newton on f64 (test scaffolding).
     fn newton_solve<F>(f: &F, u0: &[f64], p: &[f64], iters: usize) -> Vec<f64>
