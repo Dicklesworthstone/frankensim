@@ -26,19 +26,30 @@
 //! gate, and the run returns a structured [`RunError`] with full tile
 //! provenance — never a process abort mid-campaign (Decalogue P10/P7).
 //!
+//! On top of the lanes, the three executor behaviors most HPC runtimes
+//! lack (plan §5.2): speculative races with loser-cancellation and
+//! deterministic victory ([`Racer`]), resumable/forkable solvers with
+//! bit-exact pause-serialize-resume ([`solver`]), and the statistical-
+//! preemption kill-handle registry ([`KillRegistry`], Bet 8's machinery).
+//!
 //! See CONTRACT.md for invariants, determinism class, cancellation
 //! behavior, and no-claim boundaries.
 
 mod cx;
 mod kernel;
+mod kill;
 mod latency;
 mod pool;
+mod race;
 pub mod reduce;
+pub mod solver;
 
 pub use cx::{CancelGate, Cancelled, Cx, ExecMode, StreamKey};
 pub use kernel::{Reduce, TileKernel, TilePlan};
+pub use kill::{CandidateId, KillRegistry};
 pub use latency::{LaneError, LatencyLane};
 pub use pool::{PoolConfig, RunError, RunReport, TilePool, victim_order, weighted_ranges};
+pub use race::{BranchOutcome, BranchReport, NoWinner, RaceBranch, RaceRun, Racer, RacerConfig};
 
 /// Crate version, re-exported for provenance stamping (the Five Explicits'
 /// "versions" pillar reaches down to individual crates).

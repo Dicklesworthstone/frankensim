@@ -502,3 +502,224 @@ fn exec_009_g5_audit_compensated_reductions_bit_stable_across_thread_counts() {
         ),
     );
 }
+
+#[test]
+fn exec_010_race_winner_is_deterministic_and_losers_fully_drain() {
+    use fs_exec::{BranchOutcome, RaceBranch, Racer, RacerConfig};
+    // Ten repeats with jittered branch timing: the winner (index AND bits)
+    // must never move in Deterministic mode.
+    let mut winners = Vec::new();
+    for round in 0..10u64 {
+        let racer = Racer::new(RacerConfig::new(0xE010));
+        let run = racer
+            .race(
+                vec![
+                    RaceBranch::new("workhorse", move |cx| {
+                        let mut acc = 0x9E37_79B9u64;
+                        // Jitter the workload per round: timing changes,
+                        // outcome must not.
+                        for i in 0..(50_000 + round * 7_919) {
+                            if i % 4096 == 0 && cx.checkpoint().is_err() {
+                                return Err(fs_exec::Cancelled);
+                            }
+                            acc = acc.wrapping_mul(6364136223846793005).wrapping_add(i);
+                        }
+                        Ok(0xACCE_57ED_u64)
+                    }),
+                    RaceBranch::new("spinner", |cx| {
+                        loop {
+                            cx.checkpoint()?;
+                            std::hint::spin_loop();
+                        }
+                    }),
+                    RaceBranch::new("sprinter", |_cx| Ok(0xFA57_u64)),
+                ],
+                |v| *v > 0,
+            )
+            .expect("race has a winner");
+        assert!(
+            racer.arena_pool().stats().quiescent(),
+            "losers must drain before race returns"
+        );
+        assert_eq!(run.reports[1].outcome, BranchOutcome::Cancelled);
+        winners.push((run.winner, run.value));
+    }
+    let stable = winners.windows(2).all(|w| w[0] == w[1]);
+    verdict(
+        "exec-010",
+        stable && winners[0] == (0, 0xACCE_57ED),
+        &format!(
+            "deterministic victory rule: lowest accepted index wins across 10 jittered \
+             repeats (got branch {} = {:#x}); spinner killed and drained every time",
+            winners[0].0, winners[0].1
+        ),
+    );
+}
+
+#[test]
+fn exec_011_solver_checkpoint_resume_fork_is_bit_exact() {
+    use fs_exec::solver::{
+        ResumableSolver, SolverProgress, SolverState, StepVerdict, codec, drive, fork,
+    };
+    /// Logistic-map style iteration: chaotic enough that ANY perturbation
+    /// of the trajectory shows up in the bits.
+    struct Chaotic {
+        steps: u64,
+    }
+    #[derive(Clone)]
+    struct ChaoticState {
+        x: f64,
+        iter: u64,
+    }
+    impl SolverState for ChaoticState {
+        fn encode(&self, enc: &mut codec::Enc) {
+            enc.put_f64(self.x);
+            enc.put_u64(self.iter);
+        }
+        fn decode(dec: &mut codec::Dec<'_>) -> Result<Self, codec::CodecError> {
+            Ok(ChaoticState {
+                x: dec.get_f64()?,
+                iter: dec.get_u64()?,
+            })
+        }
+    }
+    impl ResumableSolver for Chaotic {
+        type State = ChaoticState;
+        type Out = f64;
+        fn step(&self, s: &mut ChaoticState, _cx: &Cx<'_>) -> StepVerdict<f64> {
+            s.x = 3.9 * s.x * (1.0 - s.x);
+            s.iter += 1;
+            if s.iter >= self.steps {
+                StepVerdict::Done(s.x)
+            } else {
+                StepVerdict::Continue
+            }
+        }
+    }
+    let solver = Chaotic { steps: 10_000 };
+    let s0 = ChaoticState { x: 0.372, iter: 0 };
+    let arenas = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+    let run_under_cx =
+        |state: ChaoticState, cancel_at: Option<u64>| -> SolverProgress<ChaoticState, f64> {
+            let gate = CancelGate::new();
+            arenas.scope(|arena| {
+                let cx = Cx::new(
+                    &gate,
+                    arena,
+                    fs_exec::StreamKey {
+                        seed: 0xE011,
+                        kernel_id: 1,
+                        tile: 0,
+                        iteration: 0,
+                    },
+                    asupersync::types::Budget::INFINITE,
+                    fs_exec::ExecMode::Deterministic,
+                );
+                if let Some(at) = cancel_at {
+                    // Drive manually until `at`, then request and let drive pause.
+                    let mut st = state;
+                    for _ in 0..at {
+                        let StepVerdict::Continue = solver.step(&mut st, &cx) else {
+                            panic!("cancel point must precede completion");
+                        };
+                    }
+                    gate.request();
+                    drive(&solver, st, &cx)
+                } else {
+                    drive(&solver, state, &cx)
+                }
+            })
+        };
+    let SolverProgress::Done(x_ref) = run_under_cx(s0.clone(), None) else {
+        panic!("reference finishes");
+    };
+    // Pause at three different depths; serialize; resume; compare bits.
+    let mut all_exact = true;
+    for cancel_at in [1u64, 137, 9_999] {
+        let SolverProgress::Paused(paused) = run_under_cx(s0.clone(), Some(cancel_at)) else {
+            panic!("requested gate must pause");
+        };
+        let bytes = paused.to_bytes();
+        let restored = ChaoticState::from_bytes(&bytes).expect("round trip");
+        let forked = fork(&restored).expect("fork proves serializability");
+        assert_eq!(restored.content_hash(), forked.content_hash());
+        let SolverProgress::Done(x_resumed) = run_under_cx(restored, None) else {
+            panic!("resume finishes");
+        };
+        all_exact &= x_resumed.to_bits() == x_ref.to_bits();
+    }
+    verdict(
+        "exec-011",
+        all_exact,
+        &format!(
+            "pause-serialize-resume reproduces the uninterrupted chaotic trajectory bit-exactly \
+             at depths 1/137/9999 (G4 law): x = {x_ref:e}"
+        ),
+    );
+}
+
+#[test]
+fn exec_012_kill_handles_reclaim_a_deep_candidate_tree_mid_flight() {
+    use fs_exec::KillRegistry;
+    struct GrindKernel;
+    impl TileKernel for GrindKernel {
+        type Out = u64;
+        fn tiles(&self) -> TilePlan {
+            TilePlan::new("conf/grind", 1_000_000)
+        }
+        fn run(&self, tile: u64, cx: &Cx<'_>) -> ControlFlow<Cancelled, u64> {
+            if cx.checkpoint().is_err() {
+                return ControlFlow::Break(Cancelled);
+            }
+            let mut acc = tile;
+            for i in 0..200 {
+                acc = acc.wrapping_mul(6364136223846793005).wrapping_add(i);
+            }
+            ControlFlow::Continue(acc & 1)
+        }
+    }
+    let registry = KillRegistry::new();
+    let gate = registry.register(42);
+    let pool = pool_with(4, 0xE012);
+    // The candidate's "deep tree": a tile-pool run under the registry gate,
+    // killed from outside mid-flight (the e-process elimination path).
+    let (result, report) = std::thread::scope(|s| {
+        let gate2 = std::sync::Arc::clone(&gate);
+        let registry = &registry;
+        s.spawn(move || {
+            while gate2.now_ns() < 2_000_000 {
+                std::hint::spin_loop();
+            }
+            assert!(registry.kill(42), "registered candidate is killable");
+        });
+        pool.run_with_gate(&GrindKernel, &gate)
+    });
+    let cancelled = matches!(result, Err(RunError::Cancelled { .. }));
+    let quiescent = pool.arena_pool().stats().quiescent();
+    assert!(registry.release(42));
+    // Ledger the observed kill-to-drain latency (measured, never assumed).
+    let mut em = fs_obs::Emitter::new("fs-exec/conformance", "exec-012/kill");
+    let line = em
+        .emit(
+            fs_obs::Severity::Info,
+            fs_obs::EventKind::Custom {
+                name: "fs-exec-kill-latency".to_string(),
+                json: report.to_json(),
+            },
+            None,
+        )
+        .to_jsonl();
+    fs_obs::validate_line(&line).expect("kill event validates");
+    println!("{line}");
+    let p99 = report.cancel_latency_p99_ns().unwrap_or(u64::MAX);
+    verdict(
+        "exec-012",
+        cancelled && quiescent && p99 < 250_000_000,
+        &format!(
+            "registry kill drained the candidate tree ({}/{} tiles) with arenas quiescent; \
+             observed p99 = {p99} ns (measured, ledgered; the 200 µs gate is the perf \
+             harness's)",
+            report.completed, report.total
+        ),
+    );
+}
