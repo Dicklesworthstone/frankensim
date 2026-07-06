@@ -774,6 +774,13 @@ name = "fs-la"
 version = "0.0.1"
 
 [[package]]
+name = "fs-ledger"
+version = "0.0.1"
+dependencies = [
+ "fsqlite",
+]
+
+[[package]]
 name = "fs-math"
 version = "0.0.1"
 

@@ -1,0 +1,19 @@
+[package]
+name = "fs-ledger"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Design Ledger v0: content-addressed artifacts, event-sourced ops, lineage, metrics, tune cache, events on FrankenSQLite."
+
+[package.metadata.frankensim]
+layer = "L6"
+
+[dependencies]
+fsqlite = { path = "../../../frankensqlite/crates/fsqlite" }
+
+[dev-dependencies]
+
+[lints]
+workspace = true

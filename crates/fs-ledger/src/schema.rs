@@ -58,7 +58,8 @@ const V1: &[&str] = &[
         t_end INTEGER,
         outcome TEXT CHECK(outcome IN ('ok','error','cancelled')),
         diag TEXT CHECK(diag IS NULL OR json_valid(diag)),
-        CHECK((t_end IS NULL) = (outcome IS NULL))
+        CHECK((t_end IS NULL AND outcome IS NULL) OR
+              (t_end IS NOT NULL AND outcome IS NOT NULL))
     ) STRICT",
     "CREATE TABLE IF NOT EXISTS edges(
         op INTEGER NOT NULL REFERENCES ops(id),

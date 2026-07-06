@@ -209,7 +209,11 @@ impl ChunkState {
     }
 
     fn start_flag(&self) -> u32 {
-        if self.blocks_compressed == 0 { CHUNK_START } else { 0 }
+        if self.blocks_compressed == 0 {
+            CHUNK_START
+        } else {
+            0
+        }
     }
 
     fn update(&mut self, mut input: &[u8]) {
@@ -355,9 +359,9 @@ impl ContentHash {
     /// Lowercase hex rendering (64 chars).
     #[must_use]
     pub fn to_hex(&self) -> String {
+        use core::fmt::Write as _;
         let mut s = String::with_capacity(64);
         for b in &self.0 {
-            use core::fmt::Write;
             let _ = write!(s, "{b:02x}");
         }
         s
