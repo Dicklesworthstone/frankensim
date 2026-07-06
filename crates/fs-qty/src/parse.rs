@@ -395,6 +395,18 @@ pub fn parse_qty(input: &str) -> Result<QtyAny, ParseError> {
             value *= factor_scale;
             dims = dims.plus(factor_dims);
         }
+        // Semantic sanity: physically meaningful exponents are tiny. Reject
+        // accumulations beyond ±60 with a structured error well before the
+        // (saturating) i8 arithmetic could mask an adversarial chain.
+        if dims.0.iter().any(|&d| d.abs() > 60) {
+            return Err(err(
+                input,
+                pos,
+                ParseErrorKind::BadExponent,
+                "accumulated unit exponent beyond ±60 is not physically meaningful; \
+                 check for a runaway unit chain",
+            ));
+        }
 
         // separator or end
         rest = rest.trim_start();
@@ -560,7 +572,7 @@ mod tests {
 
 #[cfg(test)]
 mod hardening {
-    use super::parse_qty;
+    use super::{ParseErrorKind, parse_qty};
 
     /// The parser sits behind fs-ir admission and will see agent-supplied
     /// text. It must never panic — every outcome is Ok or a structured
@@ -633,8 +645,18 @@ mod hardening {
                 }
             }
         }
-        // A pathologically long but valid chain must parse fine.
-        let long = format!("1{}", "m/s*".repeat(200) + "m");
-        assert!(parse_qty(&long).is_ok());
+        // A moderate chain parses fine; a runaway 200-deep chain must return
+        // a STRUCTURED error, never panic (this exact case found the i8
+        // overflow this battery exists to catch).
+        let moderate = format!("1{}", "m/s*".repeat(20) + "m");
+        assert!(parse_qty(&moderate).is_ok(), "moderate chain should parse");
+        let runaway = format!("1{}", "m/s*".repeat(200) + "m");
+        let e = parse_qty(&runaway).expect_err("runaway chain must be rejected");
+        assert_eq!(e.kind, ParseErrorKind::BadExponent);
+        assert!(
+            e.help.contains("runaway"),
+            "teaching help expected: {}",
+            e.help
+        );
     }
 }
