@@ -15,9 +15,12 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# Pushes to main each run to completion (agents push every few minutes;
+# cancel-in-progress was killing the slower macOS lane before it could ever
+# report). Only PR branches cancel their own stale runs.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.event_name == 'pull_request' && format('pr-{0}', github.ref) || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
