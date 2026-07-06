@@ -163,7 +163,7 @@ impl Cholesky {
 #[derive(Debug, Clone)]
 pub struct Lu {
     n: usize,
-    lu: Vec<f64>,
+    data: Vec<f64>,
     /// Row permutation: factored row i came from original row `perm[i]`.
     perm: Vec<usize>,
     /// Growth statistic max|U| / max|A| (pivot-growth ledger entry).
@@ -254,7 +254,7 @@ pub fn lu(a: &[f64], n: usize) -> Result<Lu, FactorError> {
         .flat_map(|i| (i..n).map(move |j| (i, j)))
         .fold(0.0f64, |acc, (i, j)| acc.max(m[i * n + j].abs()));
     let growth = if max_a > 0.0 { max_u / max_a } else { 1.0 };
-    Ok(Lu { n, lu: m, perm, growth })
+    Ok(Lu { n, data: m, perm, growth })
 }
 
 impl Lu {
@@ -273,16 +273,16 @@ impl Lu {
         for i in 0..n {
             let mut v = b[i];
             for (k, &bk) in b.iter().enumerate().take(i) {
-                v = (-self.lu[i * n + k]).mul_add(bk, v);
+                v = (-self.data[i * n + k]).mul_add(bk, v);
             }
             b[i] = v;
         }
         for i in (0..n).rev() {
             let mut v = b[i];
             for (k, &bk) in b.iter().enumerate().take(n).skip(i + 1) {
-                v = (-self.lu[i * n + k]).mul_add(bk, v);
+                v = (-self.data[i * n + k]).mul_add(bk, v);
             }
-            b[i] = v / self.lu[i * n + i];
+            b[i] = v / self.data[i * n + i];
         }
     }
 
@@ -294,14 +294,14 @@ impl Lu {
         for i in 0..n {
             let mut v = b[i];
             for (k, &bk) in b.iter().enumerate().take(i) {
-                v = (-self.lu[k * n + i]).mul_add(bk, v);
+                v = (-self.data[k * n + i]).mul_add(bk, v);
             }
-            b[i] = v / self.lu[i * n + i];
+            b[i] = v / self.data[i * n + i];
         }
         for i in (0..n).rev() {
             let mut v = b[i];
             for (k, &bk) in b.iter().enumerate().take(n).skip(i + 1) {
-                v = (-self.lu[k * n + i]).mul_add(bk, v);
+                v = (-self.data[k * n + i]).mul_add(bk, v);
             }
             b[i] = v;
         }
