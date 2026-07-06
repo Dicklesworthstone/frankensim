@@ -1,0 +1,89 @@
+# PR/push gates on both target ISA families (plan §13.3: "done" is
+# conformance green on both ISAs). See docs/CI_GATES.md for the Decalogue →
+# gate mapping and which specialty gates are wired vs deferred.
+#
+# Layout note: the workspace path-depends on Franken constellation siblings
+# at ../<repo>; scripts/ci/checkout_constellation.sh materializes them at the
+# exact pins in constellation.lock, and `xtask check-constellation` then
+# verifies there is no drift.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+  # Keep caches lean; matches the repo's line-tables-only release philosophy.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+
+jobs:
+  gates:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14 # Apple Silicon (aarch64, NEON)
+            isa: aarch64-apple
+          - os: ubuntu-24.04 # x86-64 (SIMD tier = whatever the runner exposes; see docs/CI_GATES.md)
+            isa: x86-64-linux
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: frankensim
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: frankensim
+
+      - name: Check out constellation at lock pins
+        run: scripts/ci/checkout_constellation.sh
+
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            frankensim/target
+          key: ci-${{ matrix.isa }}-${{ hashFiles('frankensim/Cargo.lock', 'frankensim/rust-toolchain.toml') }}
+          restore-keys: |
+            ci-${{ matrix.isa }}-
+
+      - name: Format gate
+        run: cargo fmt --check
+
+      - name: Clippy gate (-D warnings)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test gate (unit + conformance, JSONL verdicts retained)
+        run: |
+          mkdir -p ci-logs
+          cargo test --workspace 2>&1 | tee "ci-logs/test-${{ matrix.isa }}.log"
+
+      - name: Policy gates (layers, deps, contracts, unsafe capsules)
+        run: |
+          cargo run -p xtask -- check-all | tee "ci-logs/xtask-${{ matrix.isa }}.jsonl"
+
+      - name: Constellation drift gate
+        run: cargo run -p xtask -- check-constellation
+
+      - name: Retain gate verdict logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-logs-${{ matrix.isa }}
+          path: frankensim/ci-logs/
+          retention-days: 14

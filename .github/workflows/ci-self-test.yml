@@ -1,0 +1,67 @@
+# Meta-tests for the CI gates themselves (foundations CI/CD bead acceptance:
+# "test the gates"). Each job injects a known failure and asserts the gate
+# step goes red — proving a real failure would block. Manual trigger only;
+# green here means "the gates demonstrably trip".
+name: ci-self-test
+
+on:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+
+jobs:
+  gates-trip-on-failure:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: frankensim
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: frankensim
+
+      - name: Check out constellation at lock pins
+        run: scripts/ci/checkout_constellation.sh
+
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - name: Seeded failing test blocks the test gate
+        run: |
+          set +e
+          FS_CI_INJECT_FAILURE=1 cargo test -p xtask -- ci_gate_self_test_injected_failure
+          code=$?
+          set -e
+          if [ "$code" -eq 0 ]; then
+            echo '{"gate":"test","verdict":"BROKEN","detail":"injected failure did not trip the gate"}'
+            exit 1
+          fi
+          echo '{"gate":"test","verdict":"trips","detail":"injected failing test made the step red"}'
+
+      - name: Seeded format violation blocks the fmt gate
+        run: |
+          cp src/lib.rs /tmp/fs-qty-lib.rs.bak
+          printf '\nfn     badly_formatted    ()->u8{0}\n' >> src/lib.rs
+          set +e
+          cargo fmt --check -p fs-qty
+          code=$?
+          set -e
+          mv /tmp/fs-qty-lib.rs.bak src/lib.rs
+          if [ "$code" -eq 0 ]; then
+            echo '{"gate":"fmt","verdict":"BROKEN","detail":"format violation did not trip the gate"}'
+            exit 1
+          fi
+          echo '{"gate":"fmt","verdict":"trips","detail":"injected misformatting made the step red"}'
+        working-directory: frankensim/crates/fs-qty
+
+      - name: Seeded layer violation blocks the policy gate
+        run: |
+          # A TOOL-layer probe crate depending on nothing, mislabeled to
+          # depend upward, must trip check-layers. Simulated via the xtask
+          # unit suite, which seeds exactly this violation.
+          cargo test -p xtask -- seeded 2>&1 | tee /tmp/policy-selftest.log
+          grep -q 'test result: ok' /tmp/policy-selftest.log
+          echo '{"gate":"policy","verdict":"trips","detail":"seeded layer/dependency violations are caught by the xtask unit battery"}'

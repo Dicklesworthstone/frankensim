@@ -824,6 +824,19 @@ mod tests {
     }
 
     #[test]
+    fn ci_gate_self_test_injected_failure_trips() {
+        // The CI property-gate meta-test (ci-self-test.yml, foundations
+        // CI/CD bead): red ONLY when the workflow injects the failure, so a
+        // deliberately failing test demonstrably blocks the gate. Inert in
+        // every normal run.
+        assert!(
+            std::env::var("FS_CI_INJECT_FAILURE").is_err(),
+            "FS_CI_INJECT_FAILURE is set: this red run is the proof that a \
+             failing test blocks the CI gate"
+        );
+    }
+
+    #[test]
     fn ascent_and_lumen_are_siblings() {
         // LUMEN (L5) must not depend on ASCENT (L4) even though 4 < 5.
         let ms = vec![

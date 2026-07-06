@@ -1,0 +1,84 @@
+# Nightly Gauntlet lanes on both ISA families (plan §13, §14.4). Runs the
+# full workspace suites in dev and release, then records the run into an
+# fs-ledger database retained as an artifact — the golden-ledger convention
+# (plan §16.2) applied to CI itself. Tier gates beyond G0/unit (G1 slope, G4
+# storms at scale, G5 determinism audits, roofline bands) are wired here as
+# the owning crates land; docs/CI_GATES.md tracks which are live.
+name: nightly
+
+on:
+  schedule:
+    - cron: "17 9 * * *" # 09:17 UTC daily
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+
+jobs:
+  gauntlet:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            isa: aarch64-apple
+          - os: ubuntu-24.04
+            isa: x86-64-linux
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 180
+    defaults:
+      run:
+        working-directory: frankensim
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: frankensim
+
+      - name: Check out constellation at lock pins
+        run: scripts/ci/checkout_constellation.sh
+
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            frankensim/target
+          key: nightly-${{ matrix.isa }}-${{ hashFiles('frankensim/Cargo.lock', 'frankensim/rust-toolchain.toml') }}
+          restore-keys: |
+            nightly-${{ matrix.isa }}-
+            ci-${{ matrix.isa }}-
+
+      - name: Full suite (dev profile)
+        run: |
+          mkdir -p ci-logs
+          cargo test --workspace 2>&1 | tee "ci-logs/nightly-dev-${{ matrix.isa }}.log"
+
+      - name: Full suite (release profile — optimized numerics)
+        run: |
+          cargo test --workspace --release 2>&1 | tee "ci-logs/nightly-release-${{ matrix.isa }}.log"
+
+      - name: Policy gates
+        run: cargo run -p xtask -- check-all | tee "ci-logs/nightly-xtask-${{ matrix.isa }}.jsonl"
+
+      - name: Record run into a retained ledger (golden-ledger convention)
+        if: always()
+        run: |
+          outcome=ok
+          if [ "${{ job.status }}" != "success" ]; then outcome=error; fi
+          cargo run -p fs-ledger --bin nightly_ledger -- \
+            "ci-logs/nightly-${{ matrix.isa }}.db" "$outcome" \
+            "nightly_gauntlet_pass" "1" | tee -a "ci-logs/nightly-ledger-${{ matrix.isa }}.jsonl"
+
+      - name: Retain nightly logs and ledger
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-${{ matrix.isa }}
+          path: frankensim/ci-logs/
+          retention-days: 30
