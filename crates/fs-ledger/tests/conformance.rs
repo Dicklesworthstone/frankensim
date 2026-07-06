@@ -603,3 +603,38 @@ fn ledger_009_version_is_stamped() {
     assert!(!fs_ledger::VERSION.is_empty());
     verdict("ledger-009", "crate version stamped");
 }
+
+#[test]
+fn ledger_010_nightly_writer_records_run() {
+    let db = temp_db("nightly");
+    let exe = env!("CARGO_BIN_EXE_nightly_ledger");
+    let out = std::process::Command::new(exe)
+        .args([db.as_str(), "ok", "nightly_gauntlet_pass", "1"])
+        .output()
+        .expect("run nightly_ledger");
+    assert!(
+        out.status.success(),
+        "nightly_ledger failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let l = Ledger::open(&db).expect("open nightly db");
+    assert_eq!(l.table_count("ops").unwrap(), 1);
+    assert_eq!(l.table_count("metrics").unwrap(), 1);
+    assert_eq!(l.table_count("events").unwrap(), 1);
+    let op = l.op(1).unwrap().expect("op row");
+    assert_eq!(op.outcome.as_deref(), Some("ok"));
+    assert!(l.lint().unwrap().is_clean());
+    // Bad arguments are structured refusals on stderr, never panics.
+    let bad = std::process::Command::new(exe)
+        .args([db.as_str(), "bogus", "x", "y"])
+        .output()
+        .expect("run nightly_ledger with bad args");
+    assert!(!bad.status.success());
+    assert!(String::from_utf8_lossy(&bad.stderr).contains("NightlyLedger"));
+    drop(l);
+    cleanup_db(&db);
+    verdict(
+        "ledger-010",
+        "nightly_ledger records op+metric+event into a lint-clean ledger; bad args refuse structurally",
+    );
+}
