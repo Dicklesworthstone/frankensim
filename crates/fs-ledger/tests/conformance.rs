@@ -411,13 +411,14 @@ fn ledger_006_concurrent_snapshot_readers_during_sweep() {
 
 /// One atomic writer unit: op + artifact + edge + metric + event.
 fn write_unit(l: &Ledger, i: u64) -> Result<(), fs_ledger::LedgerError> {
+    let ti = i64::try_from(i).expect("test counter fits i64");
     l.begin()?;
     let result = (|| {
         let op = l.begin_op(
             Some(b"stress".as_slice()),
             &format!("{{\"unit\":{i}}}"),
             &FX,
-            i as i64,
+            ti,
         )?;
         let bytes: Vec<u8> = (0..2048u64)
             .map(|j| ((i * 31 + j * 7) % 251) as u8)
@@ -427,11 +428,11 @@ fn write_unit(l: &Ledger, i: u64) -> Result<(), fs_ledger::LedgerError> {
         l.record_metric(op, 0, "unit", i as f64)?;
         l.append_event(&EventRow {
             session: Some(b"stress".as_slice()),
-            t: i as i64,
+            t: ti,
             kind: "tile_complete",
             payload: None,
         })?;
-        l.finish_op(op, OpOutcome::Ok, None, i as i64 + 1)?;
+        l.finish_op(op, OpOutcome::Ok, None, ti + 1)?;
         Ok(())
     })();
     match result {
