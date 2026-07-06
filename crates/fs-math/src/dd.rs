@@ -49,60 +49,14 @@ impl Dd {
         self.hi
     }
 
-    /// Negation (exact).
-    #[must_use]
-    pub const fn neg(self) -> Dd {
-        Dd {
-            hi: -self.hi,
-            lo: -self.lo,
-        }
-    }
-
     /// Absolute value (exact).
     #[must_use]
     pub fn abs(self) -> Dd {
         if self.hi < 0.0 || (self.hi == 0.0 && self.lo < 0.0) {
-            self.neg()
+            -self
         } else {
             self
         }
-    }
-
-    /// Addition (Knuth accurate variant; relative error ≤ 2⁻¹⁰⁴).
-    #[must_use]
-    pub fn add(self, o: Dd) -> Dd {
-        let (s1, s2) = two_sum(self.hi, o.hi);
-        let (t1, t2) = two_sum(self.lo, o.lo);
-        let (s1, s2) = quick_two_sum(s1, s2 + t1);
-        let (hi, lo) = quick_two_sum(s1, s2 + t2);
-        Dd { hi, lo }
-    }
-
-    /// Subtraction.
-    #[must_use]
-    pub fn sub(self, o: Dd) -> Dd {
-        self.add(o.neg())
-    }
-
-    /// Multiplication (relative error ≤ 2⁻¹⁰⁴).
-    #[must_use]
-    pub fn mul(self, o: Dd) -> Dd {
-        let (p1, p2) = two_prod(self.hi, o.hi);
-        let p2 = p2 + (self.hi * o.lo + self.lo * o.hi);
-        let (hi, lo) = quick_two_sum(p1, p2);
-        Dd { hi, lo }
-    }
-
-    /// Division (long-division refinement; relative error ≤ 2⁻¹⁰³).
-    #[must_use]
-    pub fn div(self, o: Dd) -> Dd {
-        let q1 = self.hi / o.hi;
-        let r = self.sub(o.mul(Dd::from_f64(q1)));
-        let q2 = r.hi / o.hi;
-        let r = r.sub(o.mul(Dd::from_f64(q2)));
-        let q3 = r.hi / o.hi;
-        let (s, e) = quick_two_sum(q1, q2);
-        Dd::from_pair(s, e + q3)
     }
 
     /// Square root (Karp's method; relative error ≤ 2⁻¹⁰³). Negative input
@@ -114,14 +68,73 @@ impl Dd {
         }
         let s = self.hi.sqrt(); // IEEE-correctly-rounded (0 ULP)
         let sd = Dd::from_f64(s);
-        let e = self.sub(sd.mul(sd)).hi / (2.0 * s);
+        let e = (self - sd * sd).hi / (2.0 * s);
         Dd::from_pair(s, e)
     }
 
     /// Compare by value (total on non-NaN).
     #[must_use]
+    // Lexicographic dd comparison REQUIRES exact hi equality: only when the
+    // leading components are identical does the trailing component decide.
+    // A tolerance here would mis-order values differing by ~1 ulp of hi.
+    #[allow(clippy::float_cmp)]
     pub fn lt(self, o: Dd) -> bool {
         self.hi < o.hi || (self.hi == o.hi && self.lo < o.lo)
+    }
+}
+
+impl core::ops::Neg for Dd {
+    type Output = Dd;
+    /// Negation (exact: componentwise sign flip).
+    fn neg(self) -> Dd {
+        Dd {
+            hi: -self.hi,
+            lo: -self.lo,
+        }
+    }
+}
+
+impl core::ops::Add for Dd {
+    type Output = Dd;
+    /// Addition (Knuth accurate variant; relative error ≤ 2⁻¹⁰⁴).
+    fn add(self, o: Dd) -> Dd {
+        let (s1, s2) = two_sum(self.hi, o.hi);
+        let (t1, t2) = two_sum(self.lo, o.lo);
+        let (s1, s2) = quick_two_sum(s1, s2 + t1);
+        let (hi, lo) = quick_two_sum(s1, s2 + t2);
+        Dd { hi, lo }
+    }
+}
+
+impl core::ops::Sub for Dd {
+    type Output = Dd;
+    fn sub(self, o: Dd) -> Dd {
+        self + (-o)
+    }
+}
+
+impl core::ops::Mul for Dd {
+    type Output = Dd;
+    /// Multiplication (relative error ≤ 2⁻¹⁰⁴).
+    fn mul(self, o: Dd) -> Dd {
+        let (p1, p2) = two_prod(self.hi, o.hi);
+        let p2 = p2 + (self.hi * o.lo + self.lo * o.hi);
+        let (hi, lo) = quick_two_sum(p1, p2);
+        Dd { hi, lo }
+    }
+}
+
+impl core::ops::Div for Dd {
+    type Output = Dd;
+    /// Division (long-division refinement; relative error ≤ 2⁻¹⁰³).
+    fn div(self, o: Dd) -> Dd {
+        let q1 = self.hi / o.hi;
+        let r = self - o * Dd::from_f64(q1);
+        let q2 = r.hi / o.hi;
+        let r = r - o * Dd::from_f64(q2);
+        let q3 = r.hi / o.hi;
+        let (s, e) = quick_two_sum(q1, q2);
+        Dd::from_pair(s, e + q3)
     }
 }
 
@@ -138,7 +151,7 @@ mod tests {
 
     /// |a − b| as dd, compared against a relative bound.
     fn rel_err_le(a: Dd, b: Dd, bound: f64) -> bool {
-        let d = a.sub(b).abs();
+        let d = (a - b).abs();
         let scale = b.abs().hi.max(f64::MIN_POSITIVE);
         d.hi <= bound * scale
     }
@@ -147,40 +160,39 @@ mod tests {
     fn known_values() {
         // 1/3 to dd precision: hi = fl(1/3), lo = the residual; verify by
         // multiplying back: 3 · (1/3) must equal 1 to ≤ 2⁻¹⁰³ relative.
-        let third = Dd::ONE.div(Dd::from_f64(3.0));
-        let back = third.mul(Dd::from_f64(3.0));
+        let third = Dd::ONE / Dd::from_f64(3.0);
+        let back = third * Dd::from_f64(3.0);
         assert!(rel_err_le(back, Dd::ONE, 1e-30), "3·(1/3) = {back:?}");
         // sqrt(2)² = 2.
         let r2 = Dd::from_f64(2.0).sqrt();
-        let two = r2.mul(r2);
+        let two = r2 * r2;
         assert!(
             rel_err_le(two, Dd::from_f64(2.0), 1e-30),
             "sqrt(2)^2 = {two:?}"
         );
         // The dd value of sqrt(2) must match the known decimal expansion:
-        // 1.41421356237309504880168872420969807856967...
-        // hi + lo reconstructed against 1.4142135623730950488016887242097 via
-        // a dd computed from two exact halves.
-        let known = Dd::from_pair(1.4142135623730951, -9.667293313452913e-17);
+        // 1.41421356237309504880168872420969807856967... — hi is the f64
+        // constant, lo the published dd residual.
+        let known = Dd::from_pair(std::f64::consts::SQRT_2, -9.667293313452913e-17);
         assert!(rel_err_le(r2, known, 1e-31), "sqrt(2) dd = {r2:?}");
     }
 
     #[test]
     fn addition_recovers_cancellation() {
         // (1e16 + 1) − 1e16 in f64 loses the 1; in dd it survives exactly.
-        let a = Dd::from_f64(1e16).add(Dd::ONE);
-        let b = a.sub(Dd::from_f64(1e16));
-        assert_eq!(b.hi, 1.0);
-        assert_eq!(b.lo, 0.0);
+        let a = Dd::from_f64(1e16) + Dd::ONE;
+        let b = a - Dd::from_f64(1e16);
+        assert_eq!(b.hi.to_bits(), 1.0f64.to_bits());
+        assert_eq!(b.lo.to_bits(), 0.0f64.to_bits());
     }
 
     #[test]
     fn normalization_invariant_holds() {
         let mut seed = 0xDD_u64;
         for _ in 0..200_000 {
-            let a = Dd::from_f64(lcg(&mut seed) * 1e10).add(Dd::from_f64(lcg(&mut seed)));
-            let b = Dd::from_f64(lcg(&mut seed) * 1e-6).add(Dd::from_f64(lcg(&mut seed)));
-            for v in [a.add(b), a.sub(b), a.mul(b), a.div(b)] {
+            let a = Dd::from_f64(lcg(&mut seed) * 1e10) + Dd::from_f64(lcg(&mut seed));
+            let b = Dd::from_f64(lcg(&mut seed) * 1e-6) + Dd::from_f64(lcg(&mut seed));
+            for v in [a + b, a - b, a * b, a / b] {
                 if v.hi.is_finite() && v.hi != 0.0 {
                     assert_eq!(
                         (v.hi + v.lo).to_bits(),
@@ -196,28 +208,28 @@ mod tests {
     fn field_properties_to_dd_precision() {
         let mut seed = 0xF1E1D_u64;
         for _ in 0..50_000 {
-            let a = Dd::from_f64(lcg(&mut seed) * 100.0).add(Dd::from_f64(lcg(&mut seed) * 1e-14));
-            let b = Dd::from_f64(lcg(&mut seed) * 100.0).add(Dd::from_f64(lcg(&mut seed) * 1e-14));
+            let a = Dd::from_f64(lcg(&mut seed) * 100.0) + Dd::from_f64(lcg(&mut seed) * 1e-14);
+            let b = Dd::from_f64(lcg(&mut seed) * 100.0) + Dd::from_f64(lcg(&mut seed) * 1e-14);
             let c = Dd::from_f64(lcg(&mut seed) * 100.0);
             // a + b − b ≈ a: the round trip loses ~2⁻¹⁰⁵ of the LARGEST
             // intermediate (|a+b| or |b|), not of |a| — near-cancelling
             // pairs (a ≈ −b, or tiny a against b ~ 50) otherwise blow up
             // the relative-to-a error by |b|/|a|.
             let scale = a.abs().hi.max(b.abs().hi).max(f64::MIN_POSITIVE);
-            let round_trip = a.add(b).sub(b).sub(a).abs();
+            let round_trip = (a + b - b - a).abs();
             assert!(round_trip.hi <= 1e-29 * scale, "add/sub round trip");
             // Distributivity residual, scaled by the products' magnitude
             // (b + c may itself nearly cancel).
-            let lhs = a.mul(b.add(c));
-            let rhs = a.mul(b).add(a.mul(c));
+            let lhs = a * (b + c);
+            let rhs = a * b + a * c;
             let pscale = (a.abs().hi * (b.abs().hi + c.abs().hi)).max(f64::MIN_POSITIVE);
             assert!(
-                lhs.sub(rhs).abs().hi <= 1e-28 * pscale,
+                (lhs - rhs).abs().hi <= 1e-28 * pscale,
                 "distributivity residual too big"
             );
             // Division inverse.
             if b.hi.abs() > 1e-3 {
-                assert!(rel_err_le(a.div(b).mul(b), a, 1e-29), "a/b*b round trip");
+                assert!(rel_err_le(a / b * b, a, 1e-29), "a/b*b round trip");
             }
         }
         println!(

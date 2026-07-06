@@ -79,12 +79,16 @@ mod tests {
             // where the sum is exact, e must be exactly zero.
             let (s3, e3) = two_sum(a, a); // 2a is exact (no rounding)
             assert_eq!(s3.to_bits(), (2.0 * a).to_bits());
-            assert_eq!(e3, 0.0, "2a is exact; e must be 0");
+            assert_eq!(e3.to_bits(), 0.0f64.to_bits(), "2a is exact; e must be 0");
         }
         // Catastrophic-cancellation classic: (1e16 + 1) - 1e16.
         let (s, e) = two_sum(1e16, 1.0);
-        assert_eq!(s, 1e16, "1.0 is absorbed");
-        assert_eq!(e, 1.0, "two_sum must recover the absorbed 1.0 exactly");
+        assert_eq!(s.to_bits(), 1e16f64.to_bits(), "1.0 is absorbed");
+        assert_eq!(
+            e.to_bits(),
+            1.0f64.to_bits(),
+            "two_sum must recover the absorbed 1.0 exactly"
+        );
     }
 
     #[test]
@@ -118,15 +122,15 @@ mod tests {
         }
         // Exact product: powers of two.
         let (p, e) = two_prod(3.0, 0.5);
-        assert_eq!(p, 1.5);
-        assert_eq!(e, 0.0);
+        assert_eq!(p.to_bits(), 1.5f64.to_bits());
+        assert_eq!(e.to_bits(), 0.0f64.to_bits());
         // Inexact product with known residual: (1 + 2^-52)² = 1 + 2^-51 +
         // 2^-104; the tail 2^-104 cannot fit and is exactly the residual.
         let x = 1.0 + f64::EPSILON;
         let (_, e) = two_prod(x, x);
         assert_eq!(
-            e,
-            f64::EPSILON * f64::EPSILON,
+            e.to_bits(),
+            (f64::EPSILON * f64::EPSILON).to_bits(),
             "residual of (1+2^-52)^2 is 2^-104"
         );
     }

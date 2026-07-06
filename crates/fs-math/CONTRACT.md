@@ -18,6 +18,16 @@ floating-point POLICY: FMA contraction, subnormals, NaN, ULP budgets
   Cody–Waite reduction); beyond → deterministic but budget-void (no-claim).
 - Policy vocabulary: `canonical_nan`, `next_up/next_down`, `nudge_out`
   (fs-ivl's directed-rounding primitive), `ulp_distance`.
+- `eft::{two_sum, quick_two_sum, two_prod}` — error-free transformations:
+  the returned (result, error) pair reconstructs the EXACT real value
+  (bitwise-testable identities; `quick_two_sum` requires |a| ≥ |b|,
+  debug-asserted). Relocated here from fs-la's mixed-precision scope so
+  fs-ivl and fs-la share one implementation (beads 6ys.8/6ys.12).
+- `dd::Dd` — double-double (~106-bit significand) via std operator traits
+  (+, −, ×, ÷) plus `abs/sqrt/lt`. Documented error bounds: add/sub/mul
+  ≤ 2⁻¹⁰⁴ relative, div/sqrt ≤ 2⁻¹⁰³, finite non-over/underflowing
+  operands. Normalization invariant `hi = fl(hi+lo)` property-tested.
+  Quad-double is recorded follow-up scope (not needed by current oracles).
 
 ## Invariants
 - No platform libm on any strict path (sqrt excepted: IEEE-exact).
