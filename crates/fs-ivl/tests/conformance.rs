@@ -111,10 +111,12 @@ fn expression_tree_containment() {
         }
         let enc = eval_interval(leaves_i, &ops);
         for t in [0.0, 0.31, 0.5, 0.77, 1.0] {
+            // Clamped into each box: the affine sample can round outside at
+            // the ends, and containment only speaks for interior points.
             let pts = [
-                lo[0] + t * wid[0],
-                lo[1] + (1.0 - t) * wid[1],
-                lo[2] + t * 0.5 * wid[2],
+                (lo[0] + t * wid[0]).clamp(leaves_i[0].lo(), leaves_i[0].hi()),
+                (lo[1] + (1.0 - t) * wid[1]).clamp(leaves_i[1].lo(), leaves_i[1].hi()),
+                (lo[2] + t * 0.5 * wid[2]).clamp(leaves_i[2].lo(), leaves_i[2].hi()),
             ];
             let p = eval_point(pts, &ops);
             if p.is_finite() {

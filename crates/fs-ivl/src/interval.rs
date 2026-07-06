@@ -386,8 +386,11 @@ mod tests {
             let x = Interval::new(c1 - w1, c1 + w1);
             let y = Interval::new(c2 - w2, c2 + w2);
             for t in [0.0, 0.25, 0.5, 0.75, 1.0] {
-                let px = x.lo() + t * (x.hi() - x.lo());
-                let py = y.lo() + (1.0 - t) * (y.hi() - y.lo());
+                // Clamp: the affine sample can round OUTSIDE the box at the
+                // ends (t = 1), and the containment law only speaks for
+                // points inside the inputs.
+                let px = (x.lo() + t * (x.hi() - x.lo())).clamp(x.lo(), x.hi());
+                let py = (y.lo() + (1.0 - t) * (y.hi() - y.lo())).clamp(y.lo(), y.hi());
                 let (dx, dy) = (Dd::from_f64(px), Dd::from_f64(py));
                 for (iv, dd) in [
                     (x.add(y), dx.add(dy)),
