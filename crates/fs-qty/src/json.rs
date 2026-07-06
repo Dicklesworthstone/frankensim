@@ -44,7 +44,10 @@ pub fn to_json(q: QtyAny) -> Result<String, JsonError> {
         });
     }
     let [m, kg, s, k, a] = q.dims.0;
-    Ok(format!("{{\"value\":{},\"dims\":[{m},{kg},{s},{k},{a}]}}", q.value))
+    Ok(format!(
+        "{{\"value\":{},\"dims\":[{m},{kg},{s},{k},{a}]}}",
+        q.value
+    ))
 }
 
 struct Cursor<'a> {
@@ -52,7 +55,7 @@ struct Cursor<'a> {
     i: usize,
 }
 
-impl<'a> Cursor<'a> {
+impl Cursor<'_> {
     fn skip_ws(&mut self) {
         while self.i < self.s.len() && matches!(self.s[self.i], b' ' | b'\t' | b'\n' | b'\r') {
             self.i += 1;
@@ -76,14 +79,20 @@ impl<'a> Cursor<'a> {
         self.skip_ws();
         let start = self.i;
         while self.i < self.s.len()
-            && matches!(self.s[self.i], b'0'..=b'9' | b'-' | b'+' | b'.' | b'e' | b'E')
+            && matches!(
+                self.s[self.i],
+                b'0'..=b'9' | b'-' | b'+' | b'.' | b'e' | b'E'
+            )
         {
             self.i += 1;
         }
         core::str::from_utf8(&self.s[start..self.i])
             .ok()
             .and_then(|t| t.parse().ok())
-            .ok_or(JsonError { at: start, message: "expected a JSON number".to_string() })
+            .ok_or(JsonError {
+                at: start,
+                message: "expected a JSON number".to_string(),
+            })
     }
 
     fn int_i8(&mut self) -> Result<i8, JsonError> {
@@ -106,7 +115,10 @@ impl<'a> Cursor<'a> {
 /// canonical shape — this parser is intentionally strict: the writer is ours,
 /// so any deviation indicates corruption, not dialect.
 pub fn from_json(text: &str) -> Result<QtyAny, JsonError> {
-    let mut c = Cursor { s: text.as_bytes(), i: 0 };
+    let mut c = Cursor {
+        s: text.as_bytes(),
+        i: 0,
+    };
     c.expect("{")?;
     c.expect("\"value\"")?;
     c.expect(":")?;
@@ -128,7 +140,10 @@ pub fn from_json(text: &str) -> Result<QtyAny, JsonError> {
     c.expect("}")?;
     c.skip_ws();
     if c.i != text.len() {
-        return Err(JsonError { at: c.i, message: "trailing input after object".to_string() });
+        return Err(JsonError {
+            at: c.i,
+            message: "trailing input after object".to_string(),
+        });
     }
     Ok(QtyAny::new(value, Dims([m, kg, s, k, a])))
 }
@@ -164,7 +179,10 @@ mod tests {
     #[test]
     fn canonical_shape_matches_spec() {
         let q = DynViscosity::new(0.12).erase();
-        assert_eq!(to_json(q).unwrap(), r#"{"value":0.12,"dims":[-1,1,-1,0,0]}"#);
+        assert_eq!(
+            to_json(q).unwrap(),
+            r#"{"value":0.12,"dims":[-1,1,-1,0,0]}"#
+        );
     }
 
     #[test]
@@ -190,8 +208,8 @@ mod tests {
 
     #[test]
     fn whitespace_tolerant_parse() {
-        let q = from_json(" { \"value\" : 2.5 , \"dims\" : [ 1 , 0 , -1 , 0 , 0 ] } ")
-            .expect("parses");
+        let q =
+            from_json(" { \"value\" : 2.5 , \"dims\" : [ 1 , 0 , -1 , 0 , 0 ] } ").expect("parses");
         assert!((q.value - 2.5).abs() < 1e-15);
         assert_eq!(q.dims, Dims([1, 0, -1, 0, 0]));
     }

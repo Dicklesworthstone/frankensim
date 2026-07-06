@@ -42,28 +42,52 @@ impl Dims {
     /// The dimensionless vector.
     pub const NONE: Dims = Dims([0; 5]);
 
-    /// Component-wise sum (dimension of a product). Panics on `i8` overflow,
-    /// which for physically meaningful exponents (|e| ≤ ~12) cannot occur.
+    /// Component-wise sum (dimension of a product). SATURATING at the `i8`
+    /// bounds: this type flows through agent-facing paths (parser, IR), so
+    /// overflow must not panic. Physically meaningful exponents are |e| ≤ ~12;
+    /// consumers that care (the parser) reject long before saturation, and
+    /// a saturated dimension can never silently equal a legitimate one that a
+    /// well-formed pipeline produces.
     #[must_use]
     pub const fn plus(self, other: Dims) -> Dims {
         let a = self.0;
         let b = other.0;
-        Dims([a[0] + b[0], a[1] + b[1], a[2] + b[2], a[3] + b[3], a[4] + b[4]])
+        Dims([
+            a[0].saturating_add(b[0]),
+            a[1].saturating_add(b[1]),
+            a[2].saturating_add(b[2]),
+            a[3].saturating_add(b[3]),
+            a[4].saturating_add(b[4]),
+        ])
     }
 
-    /// Component-wise difference (dimension of a quotient).
+    /// Component-wise difference (dimension of a quotient). Saturating; see
+    /// [`Dims::plus`].
     #[must_use]
     pub const fn minus(self, other: Dims) -> Dims {
         let a = self.0;
         let b = other.0;
-        Dims([a[0] - b[0], a[1] - b[1], a[2] - b[2], a[3] - b[3], a[4] - b[4]])
+        Dims([
+            a[0].saturating_sub(b[0]),
+            a[1].saturating_sub(b[1]),
+            a[2].saturating_sub(b[2]),
+            a[3].saturating_sub(b[3]),
+            a[4].saturating_sub(b[4]),
+        ])
     }
 
-    /// Scale every exponent (dimension of an integer power).
+    /// Scale every exponent (dimension of an integer power). Saturating; see
+    /// [`Dims::plus`].
     #[must_use]
     pub const fn times(self, n: i8) -> Dims {
         let a = self.0;
-        Dims([a[0] * n, a[1] * n, a[2] * n, a[3] * n, a[4] * n])
+        Dims([
+            a[0].saturating_mul(n),
+            a[1].saturating_mul(n),
+            a[2].saturating_mul(n),
+            a[3].saturating_mul(n),
+            a[4].saturating_mul(n),
+        ])
     }
 
     /// True if all exponents are zero.
@@ -85,7 +109,11 @@ impl Dims {
                 e => parts.push(format!("{sym}^{e}")),
             }
         }
-        if parts.is_empty() { "1".to_string() } else { parts.join("·") }
+        if parts.is_empty() {
+            "1".to_string()
+        } else {
+            parts.join("·")
+        }
     }
 }
 
@@ -171,7 +199,10 @@ impl<const M: i8, const KG: i8, const S: i8, const K: i8, const A: i8> Qty<M, KG
     /// Erase the compile-time dimensions into a runtime-checked [`QtyAny`].
     #[must_use]
     pub const fn erase(self) -> QtyAny {
-        QtyAny { value: self.0, dims: Self::DIMS }
+        QtyAny {
+            value: self.0,
+            dims: Self::DIMS,
+        }
     }
 }
 
@@ -191,27 +222,21 @@ impl<const M: i8, const KG: i8, const S: i8, const K: i8, const A: i8> fmt::Disp
     }
 }
 
-impl<const M: i8, const KG: i8, const S: i8, const K: i8, const A: i8> Add
-    for Qty<M, KG, S, K, A>
-{
+impl<const M: i8, const KG: i8, const S: i8, const K: i8, const A: i8> Add for Qty<M, KG, S, K, A> {
     type Output = Self;
     fn add(self, rhs: Self) -> Self {
         Qty(self.0 + rhs.0)
     }
 }
 
-impl<const M: i8, const KG: i8, const S: i8, const K: i8, const A: i8> Sub
-    for Qty<M, KG, S, K, A>
-{
+impl<const M: i8, const KG: i8, const S: i8, const K: i8, const A: i8> Sub for Qty<M, KG, S, K, A> {
     type Output = Self;
     fn sub(self, rhs: Self) -> Self {
         Qty(self.0 - rhs.0)
     }
 }
 
-impl<const M: i8, const KG: i8, const S: i8, const K: i8, const A: i8> Neg
-    for Qty<M, KG, S, K, A>
-{
+impl<const M: i8, const KG: i8, const S: i8, const K: i8, const A: i8> Neg for Qty<M, KG, S, K, A> {
     type Output = Self;
     fn neg(self) -> Self {
         Qty(-self.0)
@@ -514,7 +539,10 @@ impl QtyAny {
     /// A dimensionless value.
     #[must_use]
     pub const fn dimensionless(value: f64) -> Self {
-        QtyAny { value, dims: Dims::NONE }
+        QtyAny {
+            value,
+            dims: Dims::NONE,
+        }
     }
 
     /// Construct from value and dimension vector.
@@ -529,9 +557,16 @@ impl QtyAny {
     /// Returns [`DimensionMismatch`] when the dimensions differ.
     pub fn try_add(self, rhs: QtyAny) -> Result<QtyAny, DimensionMismatch> {
         if self.dims == rhs.dims {
-            Ok(QtyAny { value: self.value + rhs.value, dims: self.dims })
+            Ok(QtyAny {
+                value: self.value + rhs.value,
+                dims: self.dims,
+            })
         } else {
-            Err(DimensionMismatch { op: "add", left: self.dims, right: rhs.dims })
+            Err(DimensionMismatch {
+                op: "add",
+                left: self.dims,
+                right: rhs.dims,
+            })
         }
     }
 
@@ -541,16 +576,26 @@ impl QtyAny {
     /// Returns [`DimensionMismatch`] when the dimensions differ.
     pub fn try_sub(self, rhs: QtyAny) -> Result<QtyAny, DimensionMismatch> {
         if self.dims == rhs.dims {
-            Ok(QtyAny { value: self.value - rhs.value, dims: self.dims })
+            Ok(QtyAny {
+                value: self.value - rhs.value,
+                dims: self.dims,
+            })
         } else {
-            Err(DimensionMismatch { op: "sub", left: self.dims, right: rhs.dims })
+            Err(DimensionMismatch {
+                op: "sub",
+                left: self.dims,
+                right: rhs.dims,
+            })
         }
     }
 
     /// Integer power: dimensions scale.
     #[must_use]
     pub fn powi(self, n: i8) -> QtyAny {
-        QtyAny { value: self.value.powi(i32::from(n)), dims: self.dims.times(n) }
+        QtyAny {
+            value: self.value.powi(i32::from(n)),
+            dims: self.dims.times(n),
+        }
     }
 
     /// Downcast to a compile-time `Qty`, checking the dimension.
@@ -565,7 +610,11 @@ impl QtyAny {
         if self.dims == want {
             Ok(Qty(self.value))
         } else {
-            Err(DimensionMismatch { op: "convert", left: self.dims, right: want })
+            Err(DimensionMismatch {
+                op: "convert",
+                left: self.dims,
+                right: want,
+            })
         }
     }
 }
@@ -574,7 +623,10 @@ impl QtyAny {
 impl Mul for QtyAny {
     type Output = QtyAny;
     fn mul(self, rhs: QtyAny) -> QtyAny {
-        QtyAny { value: self.value * rhs.value, dims: self.dims.plus(rhs.dims) }
+        QtyAny {
+            value: self.value * rhs.value,
+            dims: self.dims.plus(rhs.dims),
+        }
     }
 }
 
@@ -582,7 +634,10 @@ impl Mul for QtyAny {
 impl Div for QtyAny {
     type Output = QtyAny;
     fn div(self, rhs: QtyAny) -> QtyAny {
-        QtyAny { value: self.value / rhs.value, dims: self.dims.minus(rhs.dims) }
+        QtyAny {
+            value: self.value / rhs.value,
+            dims: self.dims.minus(rhs.dims),
+        }
     }
 }
 
@@ -634,7 +689,10 @@ mod tests {
         let err = p.try_add(t).unwrap_err();
         assert_eq!(err.op, "add");
         let msg = err.to_string();
-        assert!(msg.contains("dimension mismatch"), "teaching message expected, got: {msg}");
+        assert!(
+            msg.contains("dimension mismatch"),
+            "teaching message expected, got: {msg}"
+        );
     }
 
     #[test]

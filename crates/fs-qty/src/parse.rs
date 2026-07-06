@@ -92,22 +92,86 @@ const D_M3: Dims = Dims([3, 0, 0, 0, 0]);
 /// Longest-match table. Order does not matter (lookup takes the longest
 /// symbol that matches the whole token before falling back to prefix+unit).
 const UNITS: &[Unit] = &[
-    Unit { symbol: "m", scale: 1.0, dims: D_M },
-    Unit { symbol: "g", scale: 1e-3, dims: D_KG }, // gram; kg arrives via prefix
-    Unit { symbol: "s", scale: 1.0, dims: D_S },
-    Unit { symbol: "K", scale: 1.0, dims: D_K },
-    Unit { symbol: "A", scale: 1.0, dims: D_A },
-    Unit { symbol: "N", scale: 1.0, dims: D_N },
-    Unit { symbol: "Pa", scale: 1.0, dims: D_PA },
-    Unit { symbol: "J", scale: 1.0, dims: D_J },
-    Unit { symbol: "W", scale: 1.0, dims: D_W },
-    Unit { symbol: "Hz", scale: 1.0, dims: D_HZ },
-    Unit { symbol: "L", scale: 1e-3, dims: D_M3 },
-    Unit { symbol: "min", scale: 60.0, dims: D_S },
-    Unit { symbol: "h", scale: 3600.0, dims: D_S },
-    Unit { symbol: "rad", scale: 1.0, dims: D_NONE },
-    Unit { symbol: "deg", scale: core::f64::consts::PI / 180.0, dims: D_NONE },
-    Unit { symbol: "%", scale: 1e-2, dims: D_NONE },
+    Unit {
+        symbol: "m",
+        scale: 1.0,
+        dims: D_M,
+    },
+    Unit {
+        symbol: "g",
+        scale: 1e-3,
+        dims: D_KG,
+    }, // gram; kg arrives via prefix
+    Unit {
+        symbol: "s",
+        scale: 1.0,
+        dims: D_S,
+    },
+    Unit {
+        symbol: "K",
+        scale: 1.0,
+        dims: D_K,
+    },
+    Unit {
+        symbol: "A",
+        scale: 1.0,
+        dims: D_A,
+    },
+    Unit {
+        symbol: "N",
+        scale: 1.0,
+        dims: D_N,
+    },
+    Unit {
+        symbol: "Pa",
+        scale: 1.0,
+        dims: D_PA,
+    },
+    Unit {
+        symbol: "J",
+        scale: 1.0,
+        dims: D_J,
+    },
+    Unit {
+        symbol: "W",
+        scale: 1.0,
+        dims: D_W,
+    },
+    Unit {
+        symbol: "Hz",
+        scale: 1.0,
+        dims: D_HZ,
+    },
+    Unit {
+        symbol: "L",
+        scale: 1e-3,
+        dims: D_M3,
+    },
+    Unit {
+        symbol: "min",
+        scale: 60.0,
+        dims: D_S,
+    },
+    Unit {
+        symbol: "h",
+        scale: 3600.0,
+        dims: D_S,
+    },
+    Unit {
+        symbol: "rad",
+        scale: 1.0,
+        dims: D_NONE,
+    },
+    Unit {
+        symbol: "deg",
+        scale: core::f64::consts::PI / 180.0,
+        dims: D_NONE,
+    },
+    Unit {
+        symbol: "%",
+        scale: 1e-2,
+        dims: D_NONE,
+    },
 ];
 
 /// SI prefixes accepted before a named unit.
@@ -129,7 +193,12 @@ const PREFIXES: &[(&str, f64)] = &[
 const INFORMATION_UNITS: &[&str] = &["B", "iB", "KiB", "MiB", "GiB", "TiB", "bit"];
 
 fn err(input: &str, at: usize, kind: ParseErrorKind, help: &str) -> ParseError {
-    ParseError { input: input.to_string(), at, kind, help: help.to_string() }
+    ParseError {
+        input: input.to_string(),
+        at,
+        kind,
+        help: help.to_string(),
+    }
 }
 
 /// Resolve one unit token (no exponent) to (scale, dims).
@@ -169,17 +238,10 @@ fn resolve_token(input: &str, at: usize, tok: &str) -> Result<(f64, Dims), Parse
     ))
 }
 
-/// Parse a quantity literal into a [`QtyAny`].
-///
-/// # Errors
-/// Returns a [`ParseError`] with position, kind, and a suggested fix.
-pub fn parse_qty(input: &str) -> Result<QtyAny, ParseError> {
-    let s = input.trim();
-    let base = input.len() - input.trim_start().len();
-
-    // --- number ---
-    let mut end = 0;
+/// Scan the leading number of a quantity literal; returns its byte length.
+fn scan_number(s: &str) -> usize {
     let bytes = s.as_bytes();
+    let mut end = 0;
     let mut seen_digit = false;
     while end < bytes.len() {
         let c = bytes[end] as char;
@@ -188,9 +250,9 @@ pub fn parse_qty(input: &str) -> Result<QtyAny, ParseError> {
             || (end == 0 && (c == '+' || c == '-'))
             || ((c == 'e' || c == 'E')
                 && seen_digit
-                && bytes.get(end + 1).is_some_and(|&n| {
-                    (n as char).is_ascii_digit() || n == b'+' || n == b'-'
-                }));
+                && bytes
+                    .get(end + 1)
+                    .is_some_and(|&n| (n as char).is_ascii_digit() || n == b'+' || n == b'-'));
         if !is_num {
             break;
         }
@@ -202,8 +264,76 @@ pub fn parse_qty(input: &str) -> Result<QtyAny, ParseError> {
         }
         end += 1;
     }
+    end
+}
+
+/// Parse an optional exponent (`^`? `-`? digits) at the head of `rest`.
+/// Returns `(exponent, bytes_consumed)`; the default exponent is 1.
+fn parse_exponent(input: &str, pos: usize, rest: &str) -> Result<(i8, usize), ParseError> {
+    let mut r = rest;
+    let mut consumed = 0;
+    if let Some(stripped) = r.strip_prefix('^') {
+        r = stripped;
+        consumed += 1;
+    }
+    let neg = if let Some(stripped) = r.strip_prefix('-') {
+        r = stripped;
+        consumed += 1;
+        true
+    } else {
+        false
+    };
+    let dig_len = r
+        .char_indices()
+        .find(|(_, c)| !c.is_ascii_digit())
+        .map_or(r.len(), |(i, _)| i);
+    if dig_len == 0 {
+        if consumed > 0 {
+            return Err(err(
+                input,
+                pos,
+                ParseErrorKind::BadExponent,
+                "dangling ^ or - without digits",
+            ));
+        }
+        return Ok((1, 0));
+    }
+    let parsed: i32 = r[..dig_len].parse().map_err(|_| {
+        err(
+            input,
+            pos,
+            ParseErrorKind::BadExponent,
+            "exponent must be a small integer",
+        )
+    })?;
+    let signed = if neg { -parsed } else { parsed };
+    let exp = i8::try_from(signed).map_err(|_| {
+        err(
+            input,
+            pos,
+            ParseErrorKind::BadExponent,
+            "exponent magnitude too large",
+        )
+    })?;
+    Ok((exp, consumed + dig_len))
+}
+
+/// Parse a quantity literal into a [`QtyAny`].
+///
+/// # Errors
+/// Returns a [`ParseError`] with position, kind, and a suggested fix.
+pub fn parse_qty(input: &str) -> Result<QtyAny, ParseError> {
+    let s = input.trim();
+    let base = input.len() - input.trim_start().len();
+
+    let end = scan_number(s);
     let num: f64 = s[..end].parse().map_err(|_| {
-        err(input, base, ParseErrorKind::MissingNumber, "a quantity starts with a number, e.g. 0.12Pa*s")
+        err(
+            input,
+            base,
+            ParseErrorKind::MissingNumber,
+            "a quantity starts with a number, e.g. 0.12Pa*s",
+        )
     })?;
     let mut rest = s[end..].trim_start();
     let mut pos = base + end;
@@ -229,7 +359,12 @@ pub fn parse_qty(input: &str) -> Result<QtyAny, ParseError> {
             .find(|(_, c)| !(c.is_alphabetic() || *c == 'µ' || *c == '%'))
             .map_or(rest.len(), |(i, _)| i);
         if tok_len == 0 {
-            return Err(err(input, pos, ParseErrorKind::TrailingInput, "expected a unit symbol here"));
+            return Err(err(
+                input,
+                pos,
+                ParseErrorKind::TrailingInput,
+                "expected a unit symbol here",
+            ));
         }
         let tok = &rest[..tok_len];
         if tok.contains("degC") {
@@ -246,38 +381,9 @@ pub fn parse_qty(input: &str) -> Result<QtyAny, ParseError> {
         pos += tok_len;
 
         // optional exponent: '^'? '-'? digits
-        let mut exp: i8 = 1;
-        {
-            let mut r = rest;
-            let mut consumed = 0;
-            if let Some(stripped) = r.strip_prefix('^') {
-                r = stripped;
-                consumed += 1;
-            }
-            let neg = if let Some(stripped) = r.strip_prefix('-') {
-                r = stripped;
-                consumed += 1;
-                true
-            } else {
-                false
-            };
-            let dig_len =
-                r.char_indices().find(|(_, c)| !c.is_ascii_digit()).map_or(r.len(), |(i, _)| i);
-            if dig_len > 0 {
-                let parsed: i32 = r[..dig_len]
-                    .parse()
-                    .map_err(|_| err(input, pos, ParseErrorKind::BadExponent, "exponent must be a small integer"))?;
-                let signed = if neg { -parsed } else { parsed };
-                exp = i8::try_from(signed).map_err(|_| {
-                    err(input, pos, ParseErrorKind::BadExponent, "exponent magnitude too large")
-                })?;
-                consumed += dig_len;
-                rest = &rest[consumed..];
-                pos += consumed;
-            } else if consumed > 0 {
-                return Err(err(input, pos, ParseErrorKind::BadExponent, "dangling ^ or - without digits"));
-            }
-        }
+        let (exp, consumed) = parse_exponent(input, pos, rest)?;
+        rest = &rest[consumed..];
+        pos += consumed;
 
         // apply factor
         let factor_scale = scale.powi(i32::from(exp));
@@ -297,7 +403,7 @@ pub fn parse_qty(input: &str) -> Result<QtyAny, ParseError> {
             Some('*' | '·') => {
                 divide = false;
                 let c = rest.chars().next().expect("just matched");
-                rest = &rest[c.len_utf8()..].trim_start();
+                rest = rest[c.len_utf8()..].trim_start();
                 pos += c.len_utf8();
             }
             Some('/') => {
@@ -399,14 +505,25 @@ mod tests {
         assert!((t.value - 293.15).abs() < 1e-9);
         let e = parse_qty("20degC/s").unwrap_err();
         assert_eq!(e.kind, ParseErrorKind::AffineUnitInCompound);
-        assert!(e.help.contains("kelvin"), "teaching help expected: {}", e.help);
+        assert!(
+            e.help.contains("kelvin"),
+            "teaching help expected: {}",
+            e.help
+        );
     }
 
     #[test]
     fn information_units_are_refused_with_guidance() {
         let e = parse_qty("96GiB").unwrap_err();
-        assert!(matches!(e.kind, ParseErrorKind::InformationUnit(_)), "{e:?}");
-        assert!(e.help.contains("fs-ir"), "help must point at budget syntax: {}", e.help);
+        assert!(
+            matches!(e.kind, ParseErrorKind::InformationUnit(_)),
+            "{e:?}"
+        );
+        assert!(
+            e.help.contains("fs-ir"),
+            "help must point at budget syntax: {}",
+            e.help
+        );
     }
 
     #[test]
@@ -438,5 +555,86 @@ mod tests {
             assert_eq!(q.value.to_bits(), v.to_bits());
             assert!(q.dims.is_none());
         }
+    }
+}
+
+#[cfg(test)]
+mod hardening {
+    use super::parse_qty;
+
+    /// The parser sits behind fs-ir admission and will see agent-supplied
+    /// text. It must never panic — every outcome is Ok or a structured
+    /// ParseError. Deterministic pseudo-random garbage battery (an LCG, not
+    /// fs-rand, because UTIL crates cannot depend on L1).
+    #[test]
+    fn no_panic_on_garbage_input() {
+        const ALPHABET: &[&str] = &[
+            "0",
+            "9",
+            ".",
+            "-",
+            "+",
+            "e",
+            "E",
+            "m",
+            "g",
+            "s",
+            "K",
+            "A",
+            "N",
+            "P",
+            "a",
+            "z",
+            "µ",
+            "·",
+            "*",
+            "/",
+            "^",
+            "%",
+            " ",
+            "\t",
+            "deg",
+            "C",
+            "GiB",
+            "\u{1F980}",
+            "min",
+        ];
+        let mut state: u64 = 0x5EED_0001;
+        let mut next = move || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 33) as usize
+        };
+        for _case in 0..20_000 {
+            let len = next() % 24;
+            let mut s = String::new();
+            for _ in 0..len {
+                s.push_str(ALPHABET[next() % ALPHABET.len()]);
+            }
+            // Must not panic; the Result content is irrelevant here.
+            let _ = parse_qty(&s);
+        }
+    }
+
+    /// Boundary battery: empty, lone signs, huge exponents, deep unit chains.
+    #[test]
+    fn boundary_inputs_return_structured_errors() {
+        for bad in [
+            "", " ", "+", "-", ".", "e5", "1m^", "1m^-", "1s^999", "3", "1//s", "1m**s",
+        ] {
+            match parse_qty(bad) {
+                Ok(q) => assert!(
+                    q.dims.is_none() || !bad.is_empty(),
+                    "unexpected acceptance of {bad:?} -> {q:?}"
+                ),
+                Err(e) => {
+                    assert!(!e.help.is_empty(), "error for {bad:?} must carry guidance");
+                }
+            }
+        }
+        // A pathologically long but valid chain must parse fine.
+        let long = format!("1{}", "m/s*".repeat(200) + "m");
+        assert!(parse_qty(&long).is_ok());
     }
 }
