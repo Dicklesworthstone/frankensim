@@ -242,10 +242,8 @@ pub fn orient3d_with_stage(
     let m_a = expansion_diff(&expansion_product(&bx, &cy), &expansion_product(&cx, &by));
     let m_b = expansion_diff(&expansion_product(&cx, &ay), &expansion_product(&ax, &cy));
     let m_c = expansion_diff(&expansion_product(&ax, &by), &expansion_product(&bx, &ay));
-    let t = fast_expansion_sum_zeroelim(
-        &expansion_product(&az, &m_a),
-        &expansion_product(&bz, &m_b),
-    );
+    let t =
+        fast_expansion_sum_zeroelim(&expansion_product(&az, &m_a), &expansion_product(&bz, &m_b));
     let det_e = fast_expansion_sum_zeroelim(&t, &expansion_product(&cz, &m_c));
     (Sign::of_i32(expansion_sign(&det_e)), Stage::Exact)
 }
@@ -452,8 +450,14 @@ fn insphere_exact(
     let dlift = lift(&dx, &dy, &dz);
 
     let det_e = fast_expansion_sum_zeroelim(
-        &expansion_diff(&expansion_product(&dlift, &abc), &expansion_product(&clift, &dab)),
-        &expansion_diff(&expansion_product(&blift, &cda), &expansion_product(&alift, &bcd)),
+        &expansion_diff(
+            &expansion_product(&dlift, &abc),
+            &expansion_product(&clift, &dab),
+        ),
+        &expansion_diff(
+            &expansion_product(&blift, &cda),
+            &expansion_product(&alift, &bcd),
+        ),
     );
     (Sign::of_i32(expansion_sign(&det_e)), Stage::Exact)
 }
@@ -464,9 +468,7 @@ fn insphere_exact(
 
 /// Sort three rows by index ascending; returns permutation parity
 /// (+1 even, −1 odd).
-fn sort3_by_index<T: Copy>(
-    mut rows: [(u64, T); 3],
-) -> ([(u64, T); 3], i32) {
+fn sort3_by_index<T: Copy>(mut rows: [(u64, T); 3]) -> ([(u64, T); 3], i32) {
     let mut parity = 1i32;
     if rows[0].0 > rows[1].0 {
         rows.swap(0, 1);
@@ -496,15 +498,11 @@ fn sort3_by_index<T: Copy>(
 /// is evaluated EXACTLY (difference expansions), so the hook inherits the
 /// predicate's certainty.
 #[must_use]
-pub fn orient2d_sos(
-    pa: [f64; 2],
-    pb: [f64; 2],
-    pc: [f64; 2],
-    ia: u64,
-    ib: u64,
-    ic: u64,
-) -> Sign {
-    debug_assert!(ia != ib && ib != ic && ia != ic, "SoS requires distinct indices");
+pub fn orient2d_sos(pa: [f64; 2], pb: [f64; 2], pc: [f64; 2], ia: u64, ib: u64, ic: u64) -> Sign {
+    debug_assert!(
+        ia != ib && ib != ic && ia != ic,
+        "SoS requires distinct indices"
+    );
     let base = orient2d(pa, pb, pc);
     if base != Sign::Zero {
         return base;
@@ -534,16 +532,8 @@ pub fn orient2d_sos(
 /// tie-breaking, revisit when fs-mesh's Delaunay lands flips that need
 /// E-M-exact semantics.
 #[must_use]
-pub fn orient3d_sos(
-    pa: [f64; 3],
-    pb: [f64; 3],
-    pc: [f64; 3],
-    pd: [f64; 3],
-    ia: u64,
-    ib: u64,
-    ic: u64,
-    id: u64,
-) -> Sign {
+pub fn orient3d_sos(pa: [f64; 3], pb: [f64; 3], pc: [f64; 3], pd: [f64; 3], idx: [u64; 4]) -> Sign {
+    let [ia, ib, ic, id] = idx;
     debug_assert!(
         ia != ib && ia != ic && ia != id && ib != ic && ib != id && ic != id,
         "SoS requires distinct indices"
@@ -563,7 +553,7 @@ pub fn orient3d_sos(
         // translated points; use (a−d, b−d, c−d) i.e. orient2d(qa,qb,qc)
         // with qd as the origin-shift — equivalently the 2D orientation of
         // (a,b,c) around d in this plane.
-        let s = orient2d_sos_about(q(pa), q(pb), q(pc), q(pd), ia, ib, ic, id);
+        let s = orient2d_sos_about(q(pa), q(pb), q(pc), q(pd), idx);
         if s != Sign::Zero {
             return s;
         }
@@ -580,11 +570,9 @@ fn orient2d_sos_about(
     pb: [f64; 2],
     pc: [f64; 2],
     pd: [f64; 2],
-    ia: u64,
-    ib: u64,
-    ic: u64,
-    id: u64,
+    idx: [u64; 4],
 ) -> Sign {
+    let [ia, ib, ic, id] = idx;
     // Exact translated orientation: det over exact differences (a−d, b−d,
     // c−d) — same sign as untranslated orient2d(a,b,c) exactly.
     let ax = diff_expansion(pa[0], pd[0]);
@@ -630,7 +618,8 @@ mod tests {
             ]
         };
         let (a, b, c) = (v(a), v(b), v(c));
-        a[2] * (b[0] * c[1] - c[0] * b[1]) + b[2] * (c[0] * a[1] - a[0] * c[1])
+        a[2] * (b[0] * c[1] - c[0] * b[1])
+            + b[2] * (c[0] * a[1] - a[0] * c[1])
             + c[2] * (a[0] * b[1] - b[0] * a[1])
     }
 
@@ -641,7 +630,8 @@ mod tests {
             (x, y, x * x + y * y)
         };
         let (a, b, c) = (v(a), v(b), v(c));
-        a.2 * (b.0 * c.1 - c.0 * b.1) + b.2 * (c.0 * a.1 - a.0 * c.1)
+        a.2 * (b.0 * c.1 - c.0 * b.1)
+            + b.2 * (c.0 * a.1 - a.0 * c.1)
             + c.2 * (a.0 * b.1 - b.0 * a.1)
     }
 
@@ -654,8 +644,7 @@ mod tests {
         };
         let (a, b, c, d) = (v(a), v(b), v(c), v(d));
         let m2 = |p: (i128, i128, i128, i128), q: (i128, i128, i128, i128)| p.0 * q.1 - q.0 * p.1;
-        let (ab, bc, cd, da, ac, bd) =
-            (m2(a, b), m2(b, c), m2(c, d), m2(d, a), m2(a, c), m2(b, d));
+        let (ab, bc, cd, da, ac, bd) = (m2(a, b), m2(b, c), m2(c, d), m2(d, a), m2(a, c), m2(b, d));
         let abc = a.2 * bc - b.2 * ac + c.2 * ab;
         let bcd = b.2 * cd - c.2 * bd + d.2 * bc;
         let cda = c.2 * da + d.2 * ac + a.2 * cd;
@@ -680,13 +669,15 @@ mod tests {
     }
 
     fn lcg(seed: &mut u64) -> i64 {
-        *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-        ((*seed >> 24) as i64 % 41) - 20 // small lattice band forces degeneracy
+        *seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        ((*seed >> 24).cast_signed() % 41) - 20 // small lattice band forces degeneracy
     }
 
     #[test]
     fn lattice_battery_matches_i128_oracle() {
-        let mut seed = 0x5EED_9E0_0000_0014u64;
+        let mut seed = 0x5EED_09E0_0000_0014u64;
         let mut zeros = 0usize;
         for round in 0..4000 {
             let p = |s: &mut u64| [lcg(s), lcg(s)];
@@ -707,11 +698,16 @@ mod tests {
 
     #[test]
     fn lattice_battery_3d_matches_i128_oracle() {
-        let mut seed = 0x5EED_9E0_0000_003Du64;
+        let mut seed = 0x5EED_09E0_0000_003Du64;
         for round in 0..2000 {
             let p = |s: &mut u64| [lcg(s), lcg(s), lcg(s)];
-            let (a, b, c, d, e) =
-                (p(&mut seed), p(&mut seed), p(&mut seed), p(&mut seed), p(&mut seed));
+            let (a, b, c, d, e) = (
+                p(&mut seed),
+                p(&mut seed),
+                p(&mut seed),
+                p(&mut seed),
+                p(&mut seed),
+            );
             assert_eq!(
                 orient3d(f3(a), f3(b), f3(c), f3(d)),
                 sgn(o3d_i128(a, b, c, d)),
@@ -762,12 +758,26 @@ mod tests {
         assert_eq!(incircle(a, b, c, d_out), Sign::Negative, "outside");
         assert_eq!(incircle(a, b, c, d_in), Sign::Positive, "inside");
         // 3D: positively oriented base, then on/out/in.
-        let (pa, pb, pc, pd) =
-            ([3.0, 0.0, 0.0], [0.0, 3.0, 0.0], [0.0, 0.0, 3.0], [-3.0, 0.0, 0.0]);
-        assert_eq!(orient3d(pa, pb, pc, pd), Sign::Positive, "base orientation premise");
+        let (pa, pb, pc, pd) = (
+            [3.0, 0.0, 0.0],
+            [0.0, 3.0, 0.0],
+            [0.0, 0.0, 3.0],
+            [-3.0, 0.0, 0.0],
+        );
+        assert_eq!(
+            orient3d(pa, pb, pc, pd),
+            Sign::Positive,
+            "base orientation premise"
+        );
         assert_eq!(insphere(pa, pb, pc, pd, [0.0, -3.0, 0.0]), Sign::Zero);
-        assert_eq!(insphere(pa, pb, pc, pd, [0.0, -3.0 * grow, 0.0]), Sign::Negative);
-        assert_eq!(insphere(pa, pb, pc, pd, [0.0, -2.999_999, 0.0]), Sign::Positive);
+        assert_eq!(
+            insphere(pa, pb, pc, pd, [0.0, -3.0 * grow, 0.0]),
+            Sign::Negative
+        );
+        assert_eq!(
+            insphere(pa, pb, pc, pd, [0.0, -2.999_999, 0.0]),
+            Sign::Positive
+        );
     }
 
     #[test]
@@ -776,24 +786,34 @@ mod tests {
         // misjudge at least one case that the exact predicate gets right
         // (the Kettner-class demonstration), while the exact predicate
         // matches the analytically known sign everywhere.
-        let base = 0.5;
-        let ulp = f64::EPSILON * 0.25; // quarter-ulp steps at 0.5
-        let lift = (2.0f64).powi(-40); // well above ulp(24): exact offsets
+        // Kettner et al.'s classic grid: p walks a half-ulp lattice around
+        // (0.5, 0.5) with INDEPENDENT x/y offsets; q = (12,12), r = (24,24)
+        // sit far along the diagonal. The naive float determinant misjudges
+        // many cells; the exact predicate must stay internally consistent
+        // (antisymmetric) everywhere and match the i128 truth of the
+        // scaled-integer reformulation.
+        let ulp = f64::EPSILON * 0.5; // exact steps: ulp(0.5) = 2⁻⁵³
+        let q = [12.0, 12.0];
+        let r = [24.0, 24.0];
         let mut naive_wrong = 0usize;
-        for i in 0..256u32 {
-            for j in 0..8u32 {
-                let p = [base + f64::from(i) * ulp, base + f64::from(i) * ulp];
-                let q = [12.0, 12.0];
-                let r = [24.0, 24.0 + f64::from(j) * lift];
-                // Analytic truth: p and q are ON y = x (x == y exactly by
-                // construction); r is on it iff j = 0, strictly above
-                // otherwise — so the triangle winds counterclockwise.
-                let truth = if j == 0 { Sign::Zero } else { Sign::Positive };
+        for i in 0..17u32 {
+            for k in 0..17u32 {
+                let p = [0.5 + f64::from(i) * ulp, 0.5 + f64::from(k) * ulp];
                 let exact = orient2d(p, q, r);
-                assert_eq!(exact, truth, "exact predicate wrong at i={i}, j={j}");
-                let naive = Sign::of(
-                    (p[0] - r[0]) * (q[1] - r[1]) - (p[1] - r[1]) * (q[0] - r[0]),
+                // Ground truth via exact integer reformulation: scale by
+                // 2⁵⁴ (all values integral: 0.5·2⁵⁴ + i·2, 12·2⁵⁴, 24·2⁵⁴).
+                let s = |x: f64| (x * (2.0f64).powi(54)) as i128;
+                let truth = ((s(p[0]) - s(r[0])) * (s(q[1]) - s(r[1]))
+                    - (s(p[1]) - s(r[1])) * (s(q[0]) - s(r[0])))
+                .signum();
+                assert_eq!(
+                    exact,
+                    Sign::of_i32(truth as i32),
+                    "exact predicate wrong at i={i}, k={k}"
                 );
+                // Internal consistency: antisymmetry under swaps.
+                assert_eq!(orient2d(q, p, r), exact.flip(), "antisymmetry i={i} k={k}");
+                let naive = Sign::of((p[0] - r[0]) * (q[1] - r[1]) - (p[1] - r[1]) * (q[0] - r[0]));
                 if naive != exact {
                     naive_wrong += 1;
                 }
@@ -808,8 +828,7 @@ mod tests {
     #[test]
     fn sos_is_total_antisymmetric_and_consistent() {
         // Degenerate family: collinear, coincident, and mixed points.
-        let pts: [[f64; 2]; 4] =
-            [[0.0, 0.0], [1.0, 1.0], [2.0, 2.0], [1.0, 1.0]];
+        let pts: [[f64; 2]; 4] = [[0.0, 0.0], [1.0, 1.0], [2.0, 2.0], [1.0, 1.0]];
         for (i, &a) in pts.iter().enumerate() {
             for (j, &b) in pts.iter().enumerate() {
                 for (k, &c) in pts.iter().enumerate() {
@@ -840,16 +859,21 @@ mod tests {
             [0.0, 1.0, 0.0],
             [1.0, 1.0, 0.0],
         ];
-        let s3 = orient3d_sos(q[0], q[1], q[2], q[3], 0, 1, 2, 3);
+        let s3 = orient3d_sos(q[0], q[1], q[2], q[3], [0, 1, 2, 3]);
         assert_ne!(s3, Sign::Zero);
-        assert_eq!(orient3d_sos(q[1], q[0], q[2], q[3], 1, 0, 2, 3), s3.flip());
+        assert_eq!(
+            orient3d_sos(q[1], q[0], q[2], q[3], [1, 0, 2, 3]),
+            s3.flip()
+        );
     }
 
     #[test]
     fn filter_rates_general_position_resolves_fast() {
         let mut seed = 0x5EED_F117_0000_0AAAu64;
         let mut rnd = move || {
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             ((seed >> 11) as f64) / (1u64 << 53) as f64 * 100.0 - 50.0
         };
         let (mut filtered, mut total) = (0usize, 0usize);
@@ -871,6 +895,9 @@ mod tests {
             "{{\"suite\":\"fs-ivl/predicates\",\"metric\":\"filter_rate\",\
              \"value\":{rate:.4},\"n\":{total}}}"
         );
-        assert!(rate > 0.99, "general-position inputs must resolve at stage A: {rate}");
+        assert!(
+            rate > 0.99,
+            "general-position inputs must resolve at stage A: {rate}"
+        );
     }
 }

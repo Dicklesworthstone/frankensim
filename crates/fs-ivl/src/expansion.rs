@@ -146,10 +146,9 @@ pub fn expansion_diff(a: &[f64], b: &[f64]) -> Vec<f64> {
 #[must_use]
 pub fn expansion_sign(e: &[f64]) -> i32 {
     match e.last() {
-        None => 0,
         Some(&x) if x > 0.0 => 1,
         Some(&x) if x < 0.0 => -1,
-        Some(_) => 0,
+        _ => 0,
     }
 }
 
@@ -193,7 +192,9 @@ mod tests {
     use super::*;
 
     fn lcg(seed: &mut u64) -> f64 {
-        *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        *seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         ((*seed >> 11) as f64) / (1u64 << 53) as f64 - 0.5
     }
 
@@ -202,7 +203,10 @@ mod tests {
     /// expansion — no tolerance, no oracle precision ceiling.
     fn assert_exactly_zero(e: &[f64], law: &str) {
         assert_eq!(expansion_sign(e), 0, "{law}: nonzero residual {e:?}");
-        assert!(e.is_empty(), "{law}: zero-sign residual with components {e:?}");
+        assert!(
+            e.is_empty(),
+            "{law}: zero-sign residual with components {e:?}"
+        );
     }
 
     #[test]
@@ -250,7 +254,11 @@ mod tests {
         // Exact a·b = 1 − ε², but fl(a·b) = 1.0: the difference is the
         // 2⁻¹⁰⁴ the naive float determinant silently throws away.
         let fl_ab = a * b;
-        assert_eq!(fl_ab, 1.0, "premise: float product rounds to 1");
+        assert_eq!(
+            fl_ab.to_bits(),
+            1.0f64.to_bits(),
+            "premise: float product rounds to 1"
+        );
         assert_eq!(expansion_sign(&prod_diff(a, b, 1.0, fl_ab)), -1);
         assert_eq!(expansion_sign(&prod_diff(1.0, fl_ab, a, b)), 1);
     }

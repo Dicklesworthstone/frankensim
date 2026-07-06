@@ -37,6 +37,19 @@ implementation shared with fs-la — recorded relocation, beads
   operator impls (`&x + &y`), `scale`, `to_interval` (rigorous collapse),
   `radius`. Symbol ids are deterministic (context counter — replay-stable).
 
+- `expansion` — Shewchuk floating-point expansion arithmetic (exact sums,
+  scaled products, expansion×expansion products, exact-diff two-component
+  constructors, sign extraction). Every op is error-free: the output's
+  exact sum equals the exact real result (residual-law tested).
+- `predicates` — adaptive-precision EXACT `orient2d`/`orient3d`/`incircle`/
+  `insphere` (+ `*_with_stage` telemetry variants): fast float evaluation
+  guarded by Shewchuk's proven stage-A error bounds (arrangement-specific
+  constants with ε = 2⁻⁵³), escalating to exact expansion evaluation of
+  the standard difference determinants (orient2d runs the full faithful
+  B/C/D adaptive ladder). `orient2d_sos` implements the Edelsbrunner–Mücke
+  tie-breaking ladder (total, antisymmetric, deterministic);
+  `orient3d_sos` is a deterministic projection cascade.
+
 ## Invariants
 1. **Containment law (G0)**: for every op and every point tuple inside the
    inputs, the true result lies inside the output. Tested: 100k arithmetic
@@ -81,6 +94,14 @@ None.
 
 ## Conformance tests
 `tests/conformance.rs`: random-DAG containment battery + golden hash.
+`tests/predicates.rs`: adversarial degeneracy batteries (cocircular /
+cospherical / collinear lattice configurations), dyadic and 1-ulp
+perturbation classification, SoS tie determinism, measured stage-A filter
+rates. In-crate predicate batteries: i128 lattice oracle agreement (2D and
+3D, thousands of rounds with degeneracy hits asserted), the Kettner-class
+half-ulp grid where the naive float determinant demonstrably misjudges
+while the exact ladder matches integer ground truth, expansion residual
+laws, and SoS totality/antisymmetry.
 In-crate: dd-oracle arithmetic containment, rewrite pairs, elementary
 containment vs libm oracle, trig extrema capture, zero-divisor semantics,
 Rump's polynomial, set operations, affine cancellation/tightness/
@@ -92,8 +113,17 @@ golden-hash case bit-for-bit.
   enforced there): if a budget were violated, elementary enclosures could
   under-cover by the violation amount. Basic-op enclosures are
   unconditionally rigorous.
-- No Taylor models, no exact geometric predicates yet (crate description
-  scope; future beads).
+- No Taylor models yet (future bead 6ys.13).
+- Predicates are certified for inputs whose difference monomials (degree
+  ≤ 5) stay inside the normal f64 range — no intermediate overflow or
+  underflow (Shewchuk's standard caveat, inherited; out-of-range inputs
+  are outside the certificate).
+- `incircle`/`insphere` symbolic perturbation is NOT provided (hooks and
+  2D/3D orientation SoS only); the full 3D Edelsbrunner–Mücke ladder for
+  `orient3d_sos` is replaced by a documented deterministic projection
+  cascade — revisit when fs-mesh's Delaunay needs E-M-exact semantics.
+- Predicate throughput: only stage-A filter rates are measured; the exact
+  tail is Vec-based and deliberately unoptimized (cold path).
 - No quad-double (dd suffices for current oracles; recorded on 6ys.12).
 - No SIMD lanes: scalar everywhere v1 (correctness-over-lanes, per plan).
 - Affine elementary functions (exp/sin on affine forms via Chebyshev
