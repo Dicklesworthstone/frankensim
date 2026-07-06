@@ -1,0 +1,63 @@
+# SAFETY: fs-simd/src/neon/mod.rs
+
+> THE exemplar capsule (obligation transferred from the unsafe-safety-cases
+> bead). Registered in unsafe-capsules.json; enforced by
+> `cargo run -p xtask -- check-unsafe` (registration, <300 lines, this file).
+
+## Invariants
+All `unsafe` is confined to NEON load/store/arithmetic intrinsics operating
+on pointers derived from `as_chunks::<2>()` fixed-size arrays (and
+`.add(2)` within `as_chunks::<4>()` blocks) over live `&[f64]`/`&mut [f64]`
+slices. Every access is inside the borrow-checked allocation, correctly
+typed, and exactly 2 lanes wide. Tails are handled by the scalar twin in
+safe code; no partial-lane intrinsic access exists.
+
+## Aliasing assumptions
+Input slices are `&[f64]`, outputs `&mut [f64]`; Rust's borrow rules already
+guarantee no mutable aliasing at the façade. No function both reads and
+writes overlapping memory except through a single `&mut` chunk (`axpy`,
+`scale`), where load-then-store to the same chunk is a plain read-modify-write
+of exclusively-borrowed memory.
+
+## Alignment assumptions
+None. `vld1q_f64`/`vst1q_f64` support unaligned access architecturally; the
+capsule imposes NO alignment precondition (fs-alloc's 128-byte policy is a
+performance choice upstream, not a soundness requirement here).
+
+## Lifetime assumptions
+No pointers escape the loop iteration that derives them; all lifetimes are
+those of the borrowed slices.
+
+## Panic behavior
+Length-mismatch `assert_eq!` fires BEFORE any unsafe block (programmer-error
+contract, documented in CONTRACT.md). No unwinding can occur between an
+intrinsic load and its paired store.
+
+## Cancellation behavior
+No poll points: every function is a bounded, allocation-free loop over its
+input (microseconds at kernel sizes). Tile-level cancellation happens in the
+callers that chunk work (fs-exec discipline).
+
+## Concurrency behavior
+No shared state, no interior mutability, no atomics. `Send`/`Sync` are the
+slices' own properties. Nothing here can data-race.
+
+## Miri coverage
+Miri cannot interpret NEON intrinsics; under `cfg(miri)` the dispatch layer
+routes to the scalar twin and this module is not exercised (documented
+limitation). Compensating checks: the tier-equivalence property battery runs
+the capsule against the scalar twin on every native test run, including
+subnormals, NaN, ±0, and lengths 0..67 covering all tail shapes.
+
+## Model-checking coverage
+N/A (no concurrency — see Concurrency behavior).
+
+## Fuzz/property coverage
+`tier_equivalence_battery` in fs-simd's tests: seeded LCG inputs across
+special values and every tail length; elementwise ops bitwise-equal to the
+scalar twin (both fused per the FMA policy); reductions within the
+documented cross-shape envelope and bit-stable per tier.
+
+## Proof obligations discharged by callers
+None. The façade functions are safe and total for all slice inputs
+(mismatched lengths panic by documented contract before any unsafe code).

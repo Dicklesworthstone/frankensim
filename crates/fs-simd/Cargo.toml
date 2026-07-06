@@ -11,6 +11,7 @@ description = "SIMD tiers: scalar baseline, NEON/AVX-512 capsules behind safe fa
 layer = "L0"
 
 [dependencies]
+fs-substrate = { path = "../fs-substrate" }
 
 [dev-dependencies]
 
