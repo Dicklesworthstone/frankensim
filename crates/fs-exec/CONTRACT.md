@@ -51,6 +51,24 @@ fs-substrate, fs-obs.
 - `victim_order(worker, workers, topo)` / `weighted_ranges(tiles, weights)`
   — pure, deterministic; these functions ARE what workers use, so fixture
   verification verifies runtime behavior.
+- `Racer` / `RacerConfig` / `RaceBranch` / `RaceRun` / `BranchReport` /
+  `NoWinner` — speculative races (plan §5.2 behavior 1). Victory rule:
+  Deterministic = lowest-index accepted result, recomputed from OUTCOMES
+  (timing moves when kills land, never who wins); Fast = first accepted
+  arrival, recorded. Early kills: branch j dies once any i<j is accepted;
+  a parent gate (kill-handle) cancels the whole tree via a bounded-stride
+  watcher. Liveness caveat documented: below-leader branches must
+  terminate on their own budgets before the decision seals.
+- `solver` module (behavior 2): `SolverState` (in-house little-endian
+  codec, floats as raw bits, self-contained bytes — no pointers, content-
+  hash references — so "migrate" can someday mean another machine),
+  `ResumableSolver::step` (bounded pause granularity), `drive` (pause IS
+  the cancellation path), `fork` (round-trips through bytes, proving
+  serializability at fork time), `StepVerdict`, `SolverProgress`.
+- `KillRegistry` (behavior 3, Bet 8): candidate id -> `Arc<CancelGate>`;
+  `kill` (idempotent; unknown id is a non-event), `kill_where` (batch
+  elimination, ascending order), `release`. Everything a candidate
+  evaluates — pool runs, races, drives — shares its registered gate.
 
 ## Invariants
 1. Completeness: a non-cancelled, non-panicked run executes every tile in
@@ -73,6 +91,15 @@ fs-substrate, fs-obs.
    quanta are weight-proportional within one tile (exec-006).
 7. Per-tile arenas come from one `ArenaPool` (chunk-recycled); the pool's
    quiescence oracle is the leak check after every run.
+8. Race losers are FULLY drained before `race` returns (scope join), their
+   arenas reclaimed (quiescence oracle); the winner (index and bits) is
+   identical across timing jitter in Deterministic mode (exec-010).
+9. Pause -> serialize -> deserialize -> resume reproduces the
+   uninterrupted solver trajectory bit-exactly at any pause depth
+   (exec-011, chaotic-map witness); forks are independent and
+   serialization-proven at fork time.
+10. A registry kill drains the candidate's whole tree at its next poll
+    points with arenas quiescent (exec-012, latency ledgered).
 
 ## Error model
 All fallible APIs return structured values (`RunError`, `LaneError`) with
@@ -116,9 +143,12 @@ cases carry seeds): completeness/arena hygiene, G5 bit-identity across
 worker counts, stream-key worker-independence, external-cancel drain with
 ledgered latency histogram, the 300-run G4 storm with panic injection,
 steal-order/quanta fixtures, latency-lane responsiveness under saturation,
-reduction-shape invariance, and the exec-009 G5 audit (compensated
+reduction-shape invariance, the exec-009 G5 audit (compensated
 artifact hashes bit-stable across {1,2,P,2P} workers; seeded arrival-order
-bug caught with prefix localization). tests/constellation_smoke.rs pins the
+bug caught with prefix localization), exec-010 (deterministic race victory
+under jitter + loser drain), exec-011 (bit-exact checkpoint/resume/fork on
+a chaotic trajectory), and exec-012 (kill-handle drains a deep tree,
+latency ledgered). tests/constellation_smoke.rs pins the
 asupersync Budget vocabulary. In-module unit suites cover the gate, keys,
 Reduce laws, partitioning, victim orders, self-cancellation, and pool
 survival after panics.
@@ -143,11 +173,15 @@ survival after panics.
   lands; `Budget` here is vocabulary and provenance.
 - The latency lane's ≤100 ms conversational guarantee is HELM's gate;
   exec-007 measures and ledgers turnaround without claiming it.
-- Speculative races and resumable-solver checkpointing (plan §5.2 items
-  1–2) are the NEXT fs-exec beads (wf9.8), not this one.
 - `ExecMode::Fast`'s 5–15% relaxed-reduction throughput claim is NOT made:
   Fast currently shares the deterministic tree; the relaxation (and its
   measured delta) waits for the roofline harness.
+- Race kill-propagation from a parent gate polls at a 50 µs stride
+  (measurement-class latency, ledgered); sub-poll-interval propagation
+  needs the perf harness like every other latency claim.
+- Ledger SPILL of solver checkpoints (revolve-style schedules, artifact
+  rows) is fs-ad/fs-ledger territory; this crate owns the snapshot bytes
+  and their bit-exactness only.
 - Deterministic hash-map wrappers are not shipped: the contract's rule is
   "no HashMap iteration order in results" (BTreeMap or index-keyed slots
   in hot paths); an enforcement lint belongs to CI tooling.
