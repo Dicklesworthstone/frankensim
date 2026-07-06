@@ -1,7 +1,8 @@
 # CONTRACT: fs-la
 
-> Status: PARTIAL — the GEMM and FACTORIZATION sections below are in
-> force; batched small-dense and eigensolvers are still skeleton scope.
+> Status: PARTIAL — the GEMM, FACTORIZATION, and MIXED-PRECISION
+> sections below are in force; batched small-dense and eigensolvers are
+> still skeleton scope.
 
 ## Purpose and layer
 Dense linear algebra: GEMM, batched small dense, factorizations, eigensolvers. Layer: L1.
@@ -25,6 +26,18 @@ Dense linear algebra: GEMM, batched small dense, factorizations, eigensolvers. L
   diagonal) R over a binary combine tree whose shape is a pure function
   of (m, row_block, n). `svd_jacobi` is one-sided cyclic Jacobi (thin
   U·Σ·Vᵀ, σ descending, deterministic order and tie-breaks).
+- `mixed::{solve_adaptive, ResidualTarget, Ladder, RefineReport}` —
+  precision-ladder solves with iterative refinement AS POLICY:
+  f32-factor/f64-refine → f64-direct → f64-factor/dd-refine. `backward`
+  targets the normwise backward error; `forward` (optional) targets the
+  relative forward error — the distinction is load-bearing: any stable
+  f64 solve is backward-accurate to ~eps, but beating κ·eps FORWARD
+  requires the dd (extended-residual) rung, and that is exactly when it
+  engages. Every solve returns a `RefineReport` (rung, steps, achieved,
+  escalations, condition estimate, correction-ratio forward estimate,
+  full residual trajectory) — a precision decision is EVIDENCE, never a
+  silent downgrade. Run-dry is reported honestly (converged = false,
+  best-achieved recorded), never panicked.
 - `VERSION` for provenance stamping.
 
 ## Invariants
@@ -46,6 +59,18 @@ Dense linear algebra: GEMM, batched small dense, factorizations, eigensolvers. L
    (Hilbert-8 spectral condition lands in the known ~1.5e10 band).
 6. Factorizations are bit-deterministic given the blocking constants
    (fixed loop orders; GEMM's KC contract inherited; TSQR tree fixed).
+7. The mixed-precision LADDER DECISION is deterministic: fixed thresholds
+   (κ·eps32·16 < 1 admits the f32 rung; κ·eps64·16 < forward-target
+   admits working-precision rungs), fixed stall rule (two consecutive
+   steps without halving), deterministic condition estimator — same
+   input, same ladder, same trajectory bits (tested). f32 singularity
+   escalates automatically (tested with an f32-collapsing matrix).
+8. dd-refinement demonstrably converges to the exact solution of the
+   STORED problem: at κ = 1e10 it beats the direct solve's forward error
+   by ≥100× against a past-convergence reference (tested). Note the
+   no-claim: it cannot recover accuracy already lost when b was rounded
+   to f64 — ground truth is A⁻¹·fl(b), not the user's pre-rounding
+   intent.
 
 ## Error model
 Slice-length/shape mismatches panic with structured messages (programmer
@@ -60,7 +85,9 @@ fused mul_add, no threading in v1). Evidence: FNV-64 golden hash over a
 aarch64-apple, required to match on x86-64 in the test suite.
 Factorizations: same class; golden hash over Cholesky L + LU solve +
 TSQR R + SVD σ = `0x181f_8f95_82d6_87ed`, verified identical on both
-reference ISAs.
+reference ISAs. Mixed precision: ladder decisions + solutions + reports
+hashed over a κ ∈ {1e3, 1e7, 1e11} battery = `0xfeaa_02d5_a8b3_5aa9`,
+same cross-ISA discipline.
 
 ## Cancellation behavior
 All future hot paths poll cancellation at tile boundaries (Decalogue P7).
@@ -97,3 +124,8 @@ placeholder remains for the shared-harness migration.
   bound in theory) — not a certified bound (fs-ivl owns certified claims).
 - Jacobi SVD targets small/medium n (O(n²·m) per sweep); no blocked
   driver yet. Batched small-dense and eigensolvers: skeleton scope.
+- `condition_estimate` in `RefineReport` is a Hager-style ESTIMATE (not
+  a certified bound); the ladder thresholds are engineering headroom,
+  not proofs. Componentwise (per-entry) backward targets, Krylov
+  inner/outer precision splits, and ledger event emission are recorded
+  follow-up scope (fs-obs schema wiring + consumers do not exist yet).
