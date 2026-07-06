@@ -1,0 +1,19 @@
+[package]
+name = "fs-evidence"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Evidence<T>/Certified<T>: numerical + statistical + model-form certificates with conservative composition, model cards, bracketing, and decision-aware escalation."
+
+[package.metadata.frankensim]
+layer = "UTIL"
+
+[dependencies]
+fs-obs = { path = "../fs-obs" }
+
+[dev-dependencies]
+
+[lints]
+workspace = true
