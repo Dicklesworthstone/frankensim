@@ -20,7 +20,7 @@ pub struct SphereChart {
 
 impl Chart for SphereChart {
     fn eval(&self, x: Point3, _cx: &Cx<'_>) -> ChartSample {
-        let d = x.sub(self.center);
+        let d = x.delta_from(self.center);
         let dist = d.norm();
         let gradient = if dist > 1e-12 {
             Some(d.scale(1.0 / dist))
@@ -66,16 +66,16 @@ pub struct BoxChart {
 impl Chart for BoxChart {
     fn eval(&self, x: Point3, _cx: &Cx<'_>) -> ChartSample {
         let c = Point3::new(
-            0.5 * (self.aabb.min.x + self.aabb.max.x),
-            0.5 * (self.aabb.min.y + self.aabb.max.y),
-            0.5 * (self.aabb.min.z + self.aabb.max.z),
+            f64::midpoint(self.aabb.min.x, self.aabb.max.x),
+            f64::midpoint(self.aabb.min.y, self.aabb.max.y),
+            f64::midpoint(self.aabb.min.z, self.aabb.max.z),
         );
         let h = Vec3::new(
             0.5 * (self.aabb.max.x - self.aabb.min.x),
             0.5 * (self.aabb.max.y - self.aabb.min.y),
             0.5 * (self.aabb.max.z - self.aabb.min.z),
         );
-        let p = x.sub(c);
+        let p = x.delta_from(c);
         let q = Vec3::new(p.x.abs() - h.x, p.y.abs() - h.y, p.z.abs() - h.z);
         let outside = Vec3::new(q.x.max(0.0), q.y.max(0.0), q.z.max(0.0));
         let sd = outside.norm() + q.x.max(q.y.max(q.z)).min(0.0);
@@ -113,7 +113,7 @@ pub struct TorusChart {
 
 impl Chart for TorusChart {
     fn eval(&self, x: Point3, _cx: &Cx<'_>) -> ChartSample {
-        let p = x.sub(self.center);
+        let p = x.delta_from(self.center);
         let ring = (p.x * p.x + p.y * p.y).sqrt() - self.major;
         let sd = (ring * ring + p.z * p.z).sqrt() - self.minor;
         ChartSample {

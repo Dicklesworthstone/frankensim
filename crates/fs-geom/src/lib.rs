@@ -62,7 +62,7 @@ impl Point3 {
 
     /// Difference vector `self - other`.
     #[must_use]
-    pub fn sub(self, other: Point3) -> Vec3 {
+    pub fn delta_from(self, other: Point3) -> Vec3 {
         Vec3 {
             x: self.x - other.x,
             y: self.y - other.y,
@@ -307,7 +307,7 @@ mod tests {
 
     #[test]
     fn vec_ops_are_the_usual_ones() {
-        let v = Point3::new(1.0, 2.0, 2.0).sub(Point3::new(0.0, 0.0, 0.0));
+        let v = Point3::new(1.0, 2.0, 2.0).delta_from(Point3::new(0.0, 0.0, 0.0));
         assert!((v.norm() - 3.0).abs() < 1e-12);
         assert!((v.dot(Vec3::new(1.0, 0.0, 0.0)) - 1.0).abs() < 1e-12);
         assert_eq!(v.scale(2.0), Vec3::new(2.0, 4.0, 4.0));

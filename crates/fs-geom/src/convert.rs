@@ -136,7 +136,7 @@ impl Chart for SampledSdf {
             x.y.clamp(self.box_.min.y, self.box_.max.y),
             x.z.clamp(self.box_.min.z, self.box_.max.z),
         );
-        let dist_out = x.sub(clamped).norm();
+        let dist_out = x.delta_from(clamped).norm();
         let base = self.interp(clamped);
         if dist_out == 0.0 {
             ChartSample {

@@ -104,7 +104,7 @@ fn geo_001_g0_trait_laws_on_the_fixture_zoo() {
                         (rng.unit() - 0.5) * 0.6,
                     ));
                     let sq = chart.eval(q, cx);
-                    let step = q.sub(p).norm();
+                    let step = q.delta_from(p).norm();
                     assert!(
                         (sq.signed_distance - s.signed_distance).abs() <= l * step + 1e-9,
                         "{}: Lipschitz {l} violated",
