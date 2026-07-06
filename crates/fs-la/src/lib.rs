@@ -7,6 +7,7 @@
 
 pub mod factor;
 pub mod gemm;
+pub mod mixed;
 
 pub use gemm::{gemm_f32, gemm_f64, gemm_mixed};
 

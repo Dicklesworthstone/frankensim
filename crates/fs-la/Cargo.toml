@@ -11,6 +11,7 @@ description = "Dense linear algebra: GEMM, batched small dense, factorizations, 
 layer = "L1"
 
 [dependencies]
+fs-math = { path = "../fs-math" }
 
 [dev-dependencies]
 

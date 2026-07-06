@@ -803,6 +803,9 @@ dependencies = [
 [[package]]
 name = "fs-la"
 version = "0.0.1"
+dependencies = [
+ "fs-math",
+]
 
 [[package]]
 name = "fs-ledger"
