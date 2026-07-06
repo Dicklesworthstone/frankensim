@@ -797,6 +797,9 @@ version = "0.0.1"
 [[package]]
 name = "fs-substrate"
 version = "0.0.1"
+dependencies = [
+ "fs-obs",
+]
 
 [[package]]
 name = "fs-vskeleton"
