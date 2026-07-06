@@ -88,3 +88,6 @@ Desktop.ini
 
 # Source illustration asset. The README uses the compressed WebP.
 frankensim_illustration.png
+
+# bv (beads viewer) local config and caches
+.bv/
