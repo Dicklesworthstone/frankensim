@@ -173,8 +173,8 @@ fn qr_orthogonality_reconstruction_least_squares() {
         // Reconstruction: column j of A equals Q·[R eⱼ; 0].
         for j in 0..n {
             let mut col = vec![0.0; m];
-            for i in 0..=j {
-                col[i] = f.r(i, j);
+            for (i, cv) in col.iter_mut().enumerate().take(j + 1) {
+                *cv = f.r(i, j);
             }
             f.apply_q(&mut col);
             for (i, &cv) in col.iter().enumerate() {
