@@ -75,14 +75,38 @@ fn subdivision_convergence_beats_intervals() {
             "remainder gain per halving only {gain:.2} (rem widths {rem_w:?})"
         );
     }
+    // NOTE: model_f is a POOR fixture for beating interval arithmetic —
+    // every subterm is monotone and single-occurrence, so IA has no
+    // dependency problem there (its excess measured ~2e-15). The decisive
+    // comparison needs a dependency-heavy fixture: x − x² around 0.4,
+    // where IA overestimates by O(w) and an order-5 TM's remainder is
+    // pure rounding.
+    let _ = ia_excess;
+    let w = 0.05;
+    let box_ = Interval::new(0.4 - w / 2.0, 0.4 + w / 2.0);
+    let x = TaylorModel1::variable(box_, 5);
+    let p = &x - &(&x * &x);
+    let tm_excess = p.remainder().width();
+    let ia = box_ - box_ * box_;
+    let mut lo = f64::INFINITY;
+    let mut hi = f64::NEG_INFINITY;
+    for k in 0..=100 {
+        let t = box_.lo() + w * f64::from(k) / 100.0;
+        let v = t - t * t;
+        lo = lo.min(v);
+        hi = hi.max(v);
+    }
+    let dep_excess = ia.width() - (hi - lo);
     assert!(
-        rem_w[3] < ia_excess[3] / 100.0,
-        "TM excess {} not decisively below IA excess {}",
-        rem_w[3],
-        ia_excess[3]
+        dep_excess > 0.01,
+        "IA must visibly overestimate the dependency fixture: {dep_excess}"
+    );
+    assert!(
+        tm_excess < dep_excess / 1e6,
+        "TM excess {tm_excess} not decisively below IA excess {dep_excess}"
     );
     println!(
-        "{{\"suite\":\"fs-ivl\",\"case\":\"tm-convergence\",\"verdict\":\"pass\",\"detail\":\"remainders {rem_w:?} vs ia excess {ia_excess:?}\"}}"
+        "{{\"suite\":\"fs-ivl\",\"case\":\"tm-convergence\",\"verdict\":\"pass\",\"detail\":\"remainders {rem_w:?}; dependency fixture: tm {tm_excess:.2e} vs ia {dep_excess:.2e}\"}}"
     );
 }
 
@@ -93,16 +117,25 @@ fn newton_certifies_simple_roots() {
     let fp = |x: Interval| Interval::point(2.0) * x;
     let roots = newton_roots(&f, &fp, Interval::new(0.0, 3.0), 1e-10);
     assert_eq!(roots.len(), 1, "{roots:?}");
-    assert!(roots[0].is_certified(), "sqrt2 must be certified: {roots:?}");
+    assert!(
+        roots[0].is_certified(),
+        "sqrt2 must be certified: {roots:?}"
+    );
     let bx = roots[0].interval();
-    assert!(bx.contains(std::f64::consts::SQRT_2), "box must contain sqrt2");
+    assert!(
+        bx.contains(std::f64::consts::SQRT_2),
+        "box must contain sqrt2"
+    );
     assert!(bx.width() < 1e-9, "certified box should be tight: {bx:?}");
     // sin on [2, 7]: roots at π and 2π, both certified.
     let fs = |x: Interval| x.sin();
     let fc = |x: Interval| x.cos();
     let roots = newton_roots(&fs, &fc, Interval::new(2.0, 7.0), 1e-10);
-    let certified: Vec<f64> =
-        roots.iter().filter(|r| r.is_certified()).map(|r| r.interval().midpoint()).collect();
+    let certified: Vec<f64> = roots
+        .iter()
+        .filter(|r| r.is_certified())
+        .map(|r| r.interval().midpoint())
+        .collect();
     assert_eq!(certified.len(), 2, "{roots:?}");
     assert!((certified[0] - std::f64::consts::PI).abs() < 1e-8);
     assert!((certified[1] - 2.0 * std::f64::consts::PI).abs() < 1e-8);
@@ -161,7 +194,7 @@ fn lipschitz_bounds_are_certified_and_tight() {
 }
 
 /// Recorded on aarch64-apple (M4 Pro); must match on x86-64 (trj).
-const GOLDEN_HASH: u64 = 0x0; // placeholder: set from first run
+const GOLDEN_HASH: u64 = 0xa16d_9759_a352_95d8;
 
 #[test]
 fn taylor_golden_hash() {

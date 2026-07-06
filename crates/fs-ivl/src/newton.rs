@@ -124,8 +124,7 @@ where
     out.sort_by(|a, b| a.interval().lo().partial_cmp(&b.interval().lo()).unwrap());
     let mut merged: Vec<RootBox> = Vec::new();
     for r in out {
-        if let (Some(RootBox::Possible(prev)), RootBox::Possible(cur)) =
-            (merged.last().copied(), r)
+        if let (Some(RootBox::Possible(prev)), RootBox::Possible(cur)) = (merged.last().copied(), r)
             && prev.hi() >= cur.lo()
         {
             let joined = prev.hull(cur);
@@ -152,8 +151,8 @@ where
         return Some((x, false));
     }
     let y = Interval::point(1.0) / dm;
-    let k = Interval::point(m) - y * fm
-        + (Interval::point(1.0) - y * fp(x)) * (x - Interval::point(m));
+    let k =
+        Interval::point(m) - y * fm + (Interval::point(1.0) - y * fp(x)) * (x - Interval::point(m));
     let contracted = k.intersect(x)?;
     let strict = k.lo() > x.lo() && k.hi() < x.hi();
     Some((contracted, strict))
@@ -170,5 +169,9 @@ where
 {
     let d = fp(domain);
     let mag = d.lo().abs().max(d.hi().abs());
-    if mag.is_finite() { fs_math::next_up(mag) } else { f64::INFINITY }
+    if mag.is_finite() {
+        fs_math::next_up(mag)
+    } else {
+        f64::INFINITY
+    }
 }

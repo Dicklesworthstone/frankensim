@@ -45,7 +45,12 @@ impl TaylorModel1 {
         let mut poly = vec![0.0; order + 1];
         poly[0] = c;
         poly[1] = 1.0;
-        TaylorModel1 { c, domain, poly, rem: Interval::point(0.0) }
+        TaylorModel1 {
+            c,
+            domain,
+            poly,
+            rem: Interval::point(0.0),
+        }
     }
 
     /// A constant.
@@ -53,7 +58,12 @@ impl TaylorModel1 {
     pub fn constant(v: f64, domain: Interval, order: usize) -> TaylorModel1 {
         let mut poly = vec![0.0; order + 1];
         poly[0] = v;
-        TaylorModel1 { c: domain.midpoint(), domain, poly, rem: Interval::point(0.0) }
+        TaylorModel1 {
+            c: domain.midpoint(),
+            domain,
+            poly,
+            rem: Interval::point(0.0),
+        }
     }
 
     /// Order (polynomial degree bound).
@@ -105,7 +115,12 @@ impl TaylorModel1 {
         for (slot, &p) in poly.iter_mut().zip(&self.poly) {
             *slot = split_mid(Interval::point(p) * Interval::point(k), &mut rem);
         }
-        TaylorModel1 { c: self.c, domain: self.domain, poly, rem }
+        TaylorModel1 {
+            c: self.c,
+            domain: self.domain,
+            poly,
+            rem,
+        }
     }
 
     /// exp ∘ self with a Lagrange remainder: writes exp(m + g) =
@@ -116,8 +131,7 @@ impl TaylorModel1 {
         let order = self.order();
         let range = self.bound();
         let m = range.midpoint();
-        let em = Interval::point(fs_math::det::exp(m))
-            * Interval::new(1.0 - 1e-15, 1.0 + 1e-15); // covers the 3-ulp exp budget
+        let em = Interval::point(fs_math::det::exp(m)) * Interval::new(1.0 - 1e-15, 1.0 + 1e-15); // covers the 3-ulp exp budget
         // g = self − m (a TM with small range).
         let g = self - &TaylorModel1::constant(m, self.domain, order);
         // Σ gᵏ/k! via Horner-free accumulation of powers.
@@ -185,7 +199,12 @@ impl TaylorModel1 {
                         &mut rem,
                     );
                 }
-                TaylorModel1 { c: self.c, domain: self.domain, poly, rem }
+                TaylorModel1 {
+                    c: self.c,
+                    domain: self.domain,
+                    poly,
+                    rem,
+                }
             };
             sum = &sum + &term;
         }
@@ -230,7 +249,12 @@ impl core::ops::Add<&TaylorModel1> for &TaylorModel1 {
             let b = o.poly.get(i).copied().unwrap_or(0.0);
             *slot = split_mid(Interval::point(a) + Interval::point(b), &mut rem);
         }
-        TaylorModel1 { c: self.c, domain: self.domain, poly, rem }
+        TaylorModel1 {
+            c: self.c,
+            domain: self.domain,
+            poly,
+            rem,
+        }
     }
 }
 
@@ -247,7 +271,12 @@ impl core::ops::Sub<&TaylorModel1> for &TaylorModel1 {
             let b = o.poly.get(i).copied().unwrap_or(0.0);
             *slot = split_mid(Interval::point(a) - Interval::point(b), &mut rem);
         }
-        TaylorModel1 { c: self.c, domain: self.domain, poly, rem }
+        TaylorModel1 {
+            c: self.c,
+            domain: self.domain,
+            poly,
+            rem,
+        }
     }
 }
 
@@ -283,7 +312,12 @@ impl core::ops::Mul<&TaylorModel1> for &TaylorModel1 {
         let b1 = self.poly_bound();
         let b2 = o.poly_bound();
         rem = rem + b1 * o.rem + b2 * self.rem + self.rem * o.rem;
-        TaylorModel1 { c: self.c, domain: self.domain, poly, rem }
+        TaylorModel1 {
+            c: self.c,
+            domain: self.domain,
+            poly,
+            rem,
+        }
     }
 }
 

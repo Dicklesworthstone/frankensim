@@ -30,6 +30,25 @@ implementation shared with fs-la — recorded relocation, beads
   against an interval enclosure of π; "possibly contains a critical point"
   counts as containment. Width ≥ 2π (or beyond `det::TRIG_DOMAIN`, or
   unbounded) → [−1, 1] (honest, always correct).
+- `TaylorModel1` — univariate Taylor models: f64 polynomial in (x−c)
+  plus a RIGOROUS interval remainder; the containment law extended to
+  FUNCTIONS (f(x) ∈ P(x−c) + rem for all x in the domain, tested).
+  Coefficient rounding absorbed into the remainder via interval
+  arithmetic (the affine-module pattern); elementary compositions
+  (exp, sin) carry Lagrange remainders with declared-budget slack.
+  Remainders shrink SUPERLINEARLY under subdivision (>20× per halving
+  at order 5, tested) and beat plain interval excess by ≥1e6 on
+  dependency-problem fixtures (x − x², tested). NOTE (measured, kept as
+  documentation): expressions whose subterms are monotone and
+  single-occurrence give interval arithmetic near-zero excess — TMs pay
+  off exactly where the dependency problem lives.
+- `newton::{newton_roots, krawczyk_step, RootBox, lipschitz_bound}` —
+  certified roots: `Certified` ONLY under strict-interior contraction
+  (existence + uniqueness); double roots come back `Possible`, never
+  falsely certified (tested); empty Newton intersections certify
+  ABSENCE. `lipschitz_bound` = outward-rounded derivative-enclosure
+  magnitude (∞ when unbounded — never understated); the primitive the
+  fs-geom certified-Lipschitz chart contract consumes.
 - `AffineCtx`/`Affine` — affine forms `c₀ + Σ cᵢ·εᵢ + [−err, +err]`.
   Symbol identity IS correlation (same-context symbols cancel; fresh
   symbols don't). All rounding and the first-order mul residue
