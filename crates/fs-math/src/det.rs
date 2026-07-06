@@ -317,3 +317,315 @@ fn scale_by_2k(v: f64, k: i64) -> f64 {
     }
     v
 }
+
+// ---------------------------------------------------------------------------
+// Extension family (bead wf9.14): tan, atan, atan2, erf, erfc, pow.
+// Additive only — nothing above this line changed (the original golden
+// hash is untouched by construction).
+// ---------------------------------------------------------------------------
+
+/// Declared ULP budget for [`tan`] (|x| ≤ [`TRIG_DOMAIN`]; the ratio of
+/// two ≤3-ULP cores on a SHARED reduced argument).
+pub const TAN_ULP_BUDGET: u64 = 8;
+/// Declared ULP budget for [`atan`]/[`atan2`].
+pub const ATAN_ULP_BUDGET: u64 = 4;
+/// Declared ULP budget for [`erf`].
+pub const ERF_ULP_BUDGET: u64 = 6;
+/// Declared ULP budget for [`erfc`].
+pub const ERFC_ULP_BUDGET: u64 = 10;
+/// [`pow`] budget FORMULA (honest: the y·ln x magnification is real):
+/// ≈ 3·(|y·ln x| + 1) + 5 ULP. The dd-ln refinement that removes the
+/// magnification is recorded follow-up scope.
+#[must_use]
+pub fn pow_ulp_budget(x: f64, y: f64) -> u64 {
+    let t = (y * ln(x.abs().max(f64::MIN_POSITIVE))).abs();
+    (3.0 * (t + 1.0) + 5.0) as u64
+}
+
+/// tan(x), deterministic strict mode; budget valid for |x| ≤
+/// [`TRIG_DOMAIN`]. Odd BITWISE by construction (shared symmetric
+/// reduction + odd/even cores). Pole neighborhoods return the honest
+/// ratio (huge but finite until the reduced argument actually hits a
+/// core zero).
+#[must_use]
+pub fn tan(x: f64) -> f64 {
+    if x.is_nan() || x.is_infinite() {
+        return f64::NAN;
+    }
+    let (r, quadrant) = reduce_pio2(x);
+    let s = sin_core(r);
+    let c = cos_core(r);
+    if quadrant & 1 == 0 { s / c } else { -(c / s) }
+}
+
+/// Odd Taylor core for atan on |t| ≤ tan(π/12) ≈ 0.2679: 16 terms of
+/// t·Σ (−1)ᵏ·z^k/(2k+1); the k = 16 tail is ≈ 0.2679³³/33 ≈ 2.5e-21.
+fn atan_core(t: f64) -> f64 {
+    let z = t * t;
+    let mut p = -1.0 / 31.0;
+    // Descending Horner over the exact rational coefficients.
+    let coeffs = [
+        29.0, 27.0, 25.0, 23.0, 21.0, 19.0, 17.0, 15.0, 13.0, 11.0, 9.0, 7.0, 5.0, 3.0,
+    ];
+    let mut sign = 1.0;
+    for &d in &coeffs {
+        p = z.mul_add(p, sign / d);
+        sign = -sign;
+    }
+    let p = z.mul_add(p, 1.0); // leading (k = 0) term: +1
+
+    t * p
+}
+
+// π/2 and π/6 as hi/lo pairs (hi = nearest f64; lo = the residual, well
+// below hi's ULP): summing (hi − small) + lo keeps the constant's full
+// accuracy in the combined result.
+const PI_2_HI: f64 = std::f64::consts::FRAC_PI_2;
+const PI_2_LO: f64 = 6.123_233_995_736_766e-17;
+const PI_6_HI: f64 = std::f64::consts::FRAC_PI_6;
+const PI_6_LO: f64 = -1.643_486_876_741_777e-17;
+/// tan(π/12) rounded UP (the reduction threshold; overlap is harmless).
+const TAN_PI_12: f64 = 0.267_949_192_431_123_05;
+const SQRT_3: f64 = 1.732_050_807_568_877_2;
+const SQRT_3_LO: f64 = 1.020_508_405_819_248_3e-16;
+
+/// atan(x), deterministic strict mode. Odd BITWISE by construction
+/// (sign folded at entry). atan(±∞) = ±π/2.
+#[must_use]
+pub fn atan(x: f64) -> f64 {
+    if x.is_nan() {
+        return f64::NAN;
+    }
+    let sign = if x.is_sign_negative() { -1.0 } else { 1.0 };
+    let a = x.abs();
+    if a.is_infinite() {
+        return sign * (PI_2_HI + PI_2_LO);
+    }
+    // Range reduction: a > 1 → π/2 − atan(1/a).
+    let (invert, t0) = if a > 1.0 { (true, 1.0 / a) } else { (false, a) };
+    // Second reduction to |t| ≤ tan(π/12) via the π/6 rotation:
+    // atan(t) = π/6 + atan((√3·t − 1)/(√3 + t)).
+    let (rotated, t) = if t0 > TAN_PI_12 {
+        let num = SQRT_3.mul_add(t0, -1.0) + SQRT_3_LO * t0;
+        (true, num / (SQRT_3 + t0))
+    } else {
+        (false, t0)
+    };
+    let base = atan_core(t);
+    let mut v = if rotated {
+        (PI_6_HI + base) + PI_6_LO
+    } else {
+        base
+    };
+    if invert {
+        v = (PI_2_HI - v) + PI_2_LO;
+    }
+    sign * v
+}
+
+/// atan2(y, x) with IEEE special-case conventions, deterministic strict
+/// mode. Sign symmetries hold bitwise (sign of y folded at entry).
+#[must_use]
+pub fn atan2(y: f64, x: f64) -> f64 {
+    if x.is_nan() || y.is_nan() {
+        return f64::NAN;
+    }
+    let sign = if y.is_sign_negative() { -1.0 } else { 1.0 };
+    let ay = y.abs();
+    const PI_HI: f64 = std::f64::consts::PI;
+    const PI_LO: f64 = 1.224_646_799_147_353_2e-16;
+    // Special cases (IEEE 754 / libm conventions).
+    if ay == 0.0 {
+        return if x.is_sign_negative() { sign * (PI_HI + PI_LO) } else { sign * 0.0 };
+    }
+    if x == 0.0 {
+        return sign * (PI_2_HI + PI_2_LO);
+    }
+    if x.is_infinite() {
+        return match (x > 0.0, ay.is_infinite()) {
+            (true, true) => sign * (PI_2_HI / 2.0 + PI_2_LO / 2.0), // π/4
+            (true, false) => sign * 0.0,
+            (false, true) => sign * 3.0f64.mul_add(PI_2_HI / 2.0, 3.0 * (PI_2_LO / 2.0)), // 3π/4
+            (false, false) => sign * (PI_HI + PI_LO),
+        };
+    }
+    if ay.is_infinite() {
+        return sign * (PI_2_HI + PI_2_LO);
+    }
+    let base = atan(ay / x.abs());
+    if x > 0.0 { sign * base } else { sign * ((PI_HI - base) + PI_LO) }
+}
+
+/// 2/√π and π as double-double values, derived at runtime from exact
+/// integer-free dd arithmetic (deterministic; avoids hand-transcribed
+/// low limbs).
+fn two_over_sqrt_pi_dd() -> crate::dd::Dd {
+    use crate::dd::Dd;
+    let pi = Dd::from_pair(std::f64::consts::PI, 1.224_646_799_147_353_2e-16);
+    Dd::from_f64(2.0) / pi.sqrt()
+}
+
+/// erf(x), deterministic strict mode. Odd BITWISE by construction. The
+/// Taylor sum runs in DOUBLE-DOUBLE (the reason dd lives at L0): at
+/// x = 3 the alternating series cancels ~4 digits, which dd absorbs.
+#[must_use]
+pub fn erf(x: f64) -> f64 {
+    use crate::dd::Dd;
+    if x.is_nan() {
+        return f64::NAN;
+    }
+    let sign = if x.is_sign_negative() { -1.0 } else { 1.0 };
+    let a = x.abs();
+    if a >= 6.0 {
+        return sign; // erf(6) − 1 ≈ −2e-17: rounds to ±1
+    }
+    if a <= 3.0 {
+        sign * erf_dd_small(a).to_f64()
+    } else {
+        // 1 − erfc via the continued fraction (erfc ≤ 2.2e-5 here, so the
+        // subtraction from 1 loses nothing).
+        sign * (Dd::from_f64(1.0) - erfc_dd_large(a)).to_f64()
+    }
+}
+
+/// erfc(x), deterministic strict mode; full-precision even in the far
+/// tail (exact-dd x², Laplace continued fraction).
+#[must_use]
+pub fn erfc(x: f64) -> f64 {
+    use crate::dd::Dd;
+    if x.is_nan() {
+        return f64::NAN;
+    }
+    if x == 0.0 {
+        return 1.0;
+    }
+    if x < 0.0 {
+        // erfc(−a) = 2 − erfc(a) = 1 + erf(a): no cancellation.
+        let a = -x;
+        return if a >= 6.0 {
+            2.0
+        } else if a <= 3.0 {
+            (Dd::from_f64(1.0) + erf_dd_small(a)).to_f64()
+        } else {
+            (Dd::from_f64(2.0) - erfc_dd_large(a)).to_f64()
+        };
+    }
+    if x <= 3.0 {
+        // 1 − erf in dd: the cancellation near x = 3 (erfc ~ 2e-5) is
+        // exactly why the dd sum exists.
+        (crate::dd::Dd::from_f64(1.0) - erf_dd_small(x)).to_f64()
+    } else if x >= 27.5 {
+        0.0 // exp(−x²) underflows past every subnormal
+    } else {
+        erfc_dd_large(x).to_f64()
+    }
+}
+
+/// dd Taylor sum of erf on [0, 3].
+fn erf_dd_small(a: f64) -> crate::dd::Dd {
+    use crate::dd::Dd;
+    let x = Dd::from_f64(a);
+    let x2 = x * x;
+    let mut term = x; // x^(2k+1)/k! at k = 0
+    let mut sum = x; // k = 0 contribution: x/1
+    for k in 1..=90 {
+        term = term * x2 / Dd::from_f64(k as f64);
+        let contrib = term / Dd::from_f64(2.0 * k as f64 + 1.0);
+        sum = if k % 2 == 1 { sum - contrib } else { sum + contrib };
+        if contrib.hi.abs() < 1e-35 * sum.hi.abs() {
+            break;
+        }
+    }
+    sum * two_over_sqrt_pi_dd()
+}
+
+/// dd Laplace continued fraction for erfc on x > 3:
+/// erfc(x) = exp(−x²)/√π · 1/(x + (1/2)/(x + 1/(x + (3/2)/(x + …)))).
+fn erfc_dd_large(x: f64) -> crate::dd::Dd {
+    use crate::dd::Dd;
+    let xd = Dd::from_f64(x);
+    let mut cf = xd; // innermost tail ≈ x
+    for k in (1..=60).rev() {
+        cf = xd + Dd::from_f64(k as f64 / 2.0) / cf;
+    }
+    // exp(−x²) with the EXACT dd square (f64 x² alone would cost ~x²/2
+    // ULP of relative error — hundreds at x = 25).
+    let x2 = xd * xd;
+    let e = Dd::from_f64(exp(-x2.hi)) * (Dd::from_f64(1.0) - Dd::from_f64(x2.lo));
+    let pi = Dd::from_pair(std::f64::consts::PI, 1.224_646_799_147_353_2e-16);
+    e / pi.sqrt() / cf
+}
+
+/// pow(x, y), deterministic strict mode, IEEE special cases. Budget is
+/// the HONEST formula [`pow_ulp_budget`] (the |y·ln x| magnification is
+/// intrinsic to the exp∘ln route; dd-ln refinement recorded). Fast
+/// paths: integer y (repeated squaring), y = ±0.5 (exact sqrt).
+#[must_use]
+pub fn pow(x: f64, y: f64) -> f64 {
+    // IEEE special cases first.
+    if y == 0.0 {
+        return 1.0;
+    }
+    if x.is_nan() || y.is_nan() {
+        return f64::NAN;
+    }
+    if x == 1.0 {
+        return 1.0;
+    }
+    let y_int = y.fract() == 0.0 && y.abs() < 9.0e15;
+    let y_odd = y_int && (y / 2.0).fract() != 0.0;
+    if x == 0.0 {
+        return match (y > 0.0, y_odd && x.is_sign_negative()) {
+            (true, true) => -0.0,
+            (true, false) => 0.0,
+            (false, true) => f64::NEG_INFINITY,
+            (false, false) => f64::INFINITY,
+        };
+    }
+    if x.is_infinite() || y.is_infinite() {
+        // Delegate the (finite) magnitude comparison logic.
+        let ax = x.abs();
+        let big = if y.is_infinite() {
+            if (ax > 1.0) == (y > 0.0) { f64::INFINITY } else { 0.0 }
+        } else if y > 0.0 {
+            f64::INFINITY
+        } else {
+            0.0
+        };
+        let neg = x.is_sign_negative() && y_odd;
+        return if neg { -big } else { big };
+    }
+    if x < 0.0 {
+        if !y_int {
+            return f64::NAN; // complex result: refused per IEEE
+        }
+        let mag = pow(-x, y);
+        return if y_odd { -mag } else { mag };
+    }
+    // Integer fast path: repeated squaring (error ~ log2|y| ULP).
+    if y_int && y.abs() <= 512.0 {
+        let mut base = if y > 0.0 { x } else { 1.0 / x };
+        let mut n = y.abs() as u64;
+        let mut acc = 1.0f64;
+        while n > 0 {
+            if n & 1 == 1 {
+                acc *= base;
+            }
+            base *= base;
+            n >>= 1;
+        }
+        return acc;
+    }
+    if y == 0.5 {
+        return sqrt(x);
+    }
+    if y == -0.5 {
+        return 1.0 / sqrt(x);
+    }
+    // General path: exp(y·ln x) with the product carried in dd.
+    let lx = ln(x);
+    let (p_hi, p_lo) = crate::eft::two_prod(y, lx);
+    // exp(hi + lo) = exp(hi)·exp(lo) ≈ exp(hi)·(1 + lo): lo ≤ ½ulp(hi),
+    // so the first-order correction is exact to ~2⁻¹⁰⁶.
+    exp(p_hi) * (1.0 + p_lo)
+}
