@@ -48,7 +48,7 @@ permitted only in registered capsule modules: `<300` lines, a safe façade, a
 `SAFETY.md` per the unsafe-capsule bead (invariants, aliasing, alignment,
 lifetimes, panic/cancellation/concurrency behavior, Miri/model-check/fuzz
 coverage, caller obligations). The capsule registry is the source of truth;
-unregistered `#[allow(unsafe_code)]` fails CI once the registry lint lands.
+unregistered `#[allow(unsafe_code)]` or `unsafe` fails CI via `cargo run -p xtask -- check-unsafe` (part of check-all).
 
 Panic policy (decided, per plan §5.2): panics are captured inside tile scopes
 and converted to structured diagnostics before crossing layers — never

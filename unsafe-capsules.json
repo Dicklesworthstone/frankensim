@@ -1,0 +1,5 @@
+{
+  "schema": "frankensim-unsafe-capsules-v1",
+  "note": "Every module containing `unsafe` code MUST be registered here with a SAFETY.md next to it (docs/SAFETY_TEMPLATE.md). xtask check-unsafe enforces this. Capsules are <300 lines, behind safe facades (Decalogue P1). Mirrored to the ledger unsafe_capsules table once fs-ledger lands.",
+  "capsules": []
+}

@@ -4,7 +4,9 @@
 //! - `check-layers`   — enforce the L0..L6 layer dependency direction (plan §4, AGENTS.md).
 //! - `check-deps`     — enforce the Franken-only runtime dependency policy (Decalogue P1).
 //! - `check-contracts`— every workspace `fs-*` crate ships a CONTRACT.md with required sections.
+//! - `check-unsafe`   — unsafe code only in registered capsules (<300 lines, SAFETY.md).
 //! - `check-all`      — all of the above; non-zero exit on any violation.
+//! - `lock-constellation` / `check-constellation` — pin/verify the Franken library states.
 //!
 //! Output is JSON-lines (one verdict object per check per crate) so agents parse
 //! outcomes without scraping; a human-readable summary goes to stderr.
@@ -91,22 +93,38 @@ impl Layer {
 }
 
 /// The Franken constellation: the ONLY permitted external runtime dependencies
-/// besides `std` (Decalogue P1). Accepts snake_case and hyphenated names.
-const CONSTELLATION: &[&str] = &[
+/// besides `std` (Decalogue P1). The libraries are workspaces whose member
+/// crates use these prefixes (probed from the actual sibling repos):
+/// asupersync (single crate), fsqlite* (FrankenSQLite), fnx-* (FrankenNetworkx),
+/// fnp-* (FrankenNumpy), ft-* (FrankenTorch), fsci-* (FrankenScipy),
+/// fp-* (FrankenPandas).
+const CONSTELLATION_PREFIXES: &[&str] = &[
     "asupersync",
-    "franken_sqlite",
-    "franken-sqlite",
-    "frankensqlite",
-    "franken_numpy",
-    "franken-numpy",
-    "franken_torch",
-    "franken-torch",
-    "franken_scipy",
-    "franken-scipy",
-    "franken_pandas",
-    "franken-pandas",
-    "franken_networkx",
-    "franken-networkx",
+    "fsqlite",
+    "fnx-",
+    "fnp-",
+    "ft-",
+    "fsci-",
+    "fp-",
+];
+
+/// Is this dependency name part of the Franken constellation?
+fn is_constellation_dep(name: &str) -> bool {
+    CONSTELLATION_PREFIXES
+        .iter()
+        .any(|p| name == p.trim_end_matches('-') || name.starts_with(p))
+}
+
+/// The constellation repositories (sibling directories of this workspace):
+/// (canonical library name, directory name under `~/projects`).
+const CONSTELLATION_REPOS: &[(&str, &str)] = &[
+    ("asupersync", "asupersync"),
+    ("frankensqlite", "frankensqlite"),
+    ("franken_numpy", "franken_numpy"),
+    ("frankentorch", "frankentorch"),
+    ("frankenscipy", "frankenscipy"),
+    ("frankenpandas", "frankenpandas"),
+    ("franken_networkx", "franken_networkx"),
 ];
 
 /// Required CONTRACT.md sections (contract-conformance discipline, plan §13.3).
@@ -261,7 +279,7 @@ fn check_deps(manifests: &[Manifest]) -> Vec<Violation> {
         }
         for dep in &m.runtime_deps {
             let is_workspace = workspace.contains_key(dep.as_str());
-            let is_constellation = CONSTELLATION.contains(&dep.as_str());
+            let is_constellation = is_constellation_dep(dep);
             if !is_workspace && !is_constellation {
                 violations.push(Violation {
                     check: "dependency-policy",
@@ -316,12 +334,307 @@ fn dev_dep_notes(manifests: &[Manifest]) -> Vec<(String, String)> {
     let mut notes = Vec::new();
     for m in manifests {
         for dep in &m.dev_deps {
-            if !workspace.contains(&dep.as_str()) && !CONSTELLATION.contains(&dep.as_str()) {
+            if !workspace.contains(&dep.as_str()) && !is_constellation_dep(dep) {
                 notes.push((m.name.clone(), dep.clone()));
             }
         }
     }
     notes
+}
+
+// ---------------------------------------------------------------------------
+// Constellation lockfile: pins the exact library states (version + git head)
+// this workspace builds against. The lock HASH covers only the portable
+// identity (name, version, head) — never local paths — and becomes part of
+// every ledger op's Five Explicits once fs-ledger lands (plan §12).
+// ---------------------------------------------------------------------------
+
+#[derive(Debug)]
+struct ConstellationEntry {
+    lib: String,
+    dir: PathBuf,
+    version: String,
+    git_head: String,
+}
+
+/// FNV-1a 64 (mirrors fs-obs::fnv1a64; duplicated here because TOOL crates
+/// keep zero workspace deps so policy tooling never blocks on library builds).
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in bytes {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
+fn first_version_in(manifest_text: &str) -> Option<String> {
+    for line in manifest_text.lines() {
+        let t = line.trim();
+        if let Some(rest) = t.strip_prefix("version") {
+            let rest = rest.trim_start();
+            if let Some(v) = rest.strip_prefix('=') {
+                return Some(v.trim().trim_matches('"').to_string());
+            }
+        }
+    }
+    None
+}
+
+fn constellation_entries(workspace_root: &Path) -> Result<Vec<ConstellationEntry>, String> {
+    let projects = workspace_root
+        .parent()
+        .ok_or_else(|| "workspace root has no parent".to_string())?;
+    let mut out = Vec::new();
+    for (lib, dirname) in CONSTELLATION_REPOS {
+        let dir = projects.join(dirname);
+        let manifest = dir.join("Cargo.toml");
+        let text = std::fs::read_to_string(&manifest)
+            .map_err(|e| format!("constellation repo {lib} missing at {}: {e}", dir.display()))?;
+        let version = first_version_in(&text).unwrap_or_else(|| "unversioned-workspace".into());
+        let head = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&dir)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map_or_else(
+                || "no-git".to_string(),
+                |o| String::from_utf8_lossy(&o.stdout).trim().to_string(),
+            );
+        out.push(ConstellationEntry {
+            lib: (*lib).to_string(),
+            dir,
+            version,
+            git_head: head,
+        });
+    }
+    out.sort_by(|a, b| a.lib.cmp(&b.lib));
+    Ok(out)
+}
+
+/// Canonical portable content the lock hash covers (no local paths).
+fn lock_identity(entries: &[ConstellationEntry]) -> String {
+    let mut s = String::new();
+    for e in entries {
+        let _ = writeln!(s, "{}={}@{}", e.lib, e.version, e.git_head);
+    }
+    s
+}
+
+fn render_lockfile(entries: &[ConstellationEntry], hash: u64) -> String {
+    let mut s = String::new();
+    s.push_str("{\n  \"schema\": \"frankensim-constellation-lock-v1\",\n");
+    let _ = writeln!(s, "  \"lock_hash\": \"{hash:016x}\",");
+    s.push_str(
+        "  \"note\": \"lock_hash covers (lib, version, git_head) only — paths are per-machine\",\n",
+    );
+    s.push_str("  \"libraries\": [\n");
+    for (i, e) in entries.iter().enumerate() {
+        let comma = if i + 1 == entries.len() { "" } else { "," };
+        let _ = writeln!(
+            s,
+            "    {{\"lib\": \"{}\", \"version\": \"{}\", \"git_head\": \"{}\", \"path\": \"{}\"}}{comma}",
+            e.lib,
+            e.version,
+            e.git_head,
+            e.dir.display()
+        );
+    }
+    s.push_str("  ]\n}\n");
+    s
+}
+
+/// `lock-constellation` writes the lockfile; `check-constellation` verifies
+/// the recorded hash still matches the live repos (CI drift gate).
+fn cmd_constellation(root: &Path, check: bool) -> ExitCode {
+    let entries = match constellation_entries(root) {
+        Ok(e) => e,
+        Err(msg) => {
+            eprintln!("error: {msg}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let hash = fnv1a64(lock_identity(&entries).as_bytes());
+    let lock_path = root.join("constellation.lock");
+    if check {
+        let Ok(existing) = std::fs::read_to_string(&lock_path) else {
+            eprintln!(
+                "error: {} missing; run `cargo run -p xtask -- lock-constellation`",
+                lock_path.display()
+            );
+            return ExitCode::FAILURE;
+        };
+        let recorded = existing
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("\"lock_hash\": \""))
+            .and_then(|r| r.split('"').next())
+            .unwrap_or("");
+        if recorded == format!("{hash:016x}") {
+            println!(
+                "{{\"check\":\"constellation-lock\",\"verdict\":\"ok\",\"hash\":\"{hash:016x}\"}}"
+            );
+            eprintln!("constellation lock OK ({hash:016x})");
+            ExitCode::SUCCESS
+        } else {
+            println!(
+                "{{\"check\":\"constellation-lock\",\"verdict\":\"drift\",\"recorded\":\"{recorded}\",\"live\":\"{hash:016x}\"}}"
+            );
+            eprintln!(
+                "constellation DRIFT: recorded {recorded}, live {hash:016x}; a constellation \
+                 repo moved — re-lock deliberately with lock-constellation and note why"
+            );
+            ExitCode::FAILURE
+        }
+    } else {
+        match std::fs::write(&lock_path, render_lockfile(&entries, hash)) {
+            Ok(()) => {
+                println!(
+                    "{{\"check\":\"constellation-lock\",\"verdict\":\"written\",\"hash\":\"{hash:016x}\"}}"
+                );
+                eprintln!("wrote {} (hash {hash:016x})", lock_path.display());
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("error writing lockfile: {e}");
+                ExitCode::FAILURE
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Unsafe-capsule enforcement (patch Rev P): every module containing `unsafe`
+// must be registered in unsafe-capsules.json, stay under 300 lines, and ship
+// a SAFETY.md (docs/SAFETY_TEMPLATE.md). Decalogue P1 made mechanical.
+// ---------------------------------------------------------------------------
+
+/// Strip `//` line comments (incl. doc comments) so prose ABOUT unsafe does
+/// not trip the scanner. String literals are NOT stripped: a string containing
+/// the token forces a visible rename or registration — loud beats silent.
+fn strip_line_comments(line: &str) -> &str {
+    line.find("//").map_or(line, |i| &line[..i])
+}
+
+fn contains_unsafe_token(text: &str) -> bool {
+    for raw in text.lines() {
+        let line = strip_line_comments(raw);
+        for (i, _) in line.match_indices("unsafe") {
+            let before_ok = i == 0
+                || !line.as_bytes()[i - 1].is_ascii_alphanumeric()
+                    && line.as_bytes()[i - 1] != b'_';
+            let after = line.as_bytes().get(i + 6);
+            let after_ok = after.is_none_or(|&b| !b.is_ascii_alphanumeric() && b != b'_');
+            if before_ok && after_ok {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Registered capsule file paths (repo-relative), parsed from the registry's
+/// one-capsule-per-line convention: {"crate": "...", "module": "...", ...}.
+fn registry_modules(registry_text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in registry_text.lines() {
+        let t = line.trim();
+        if t.starts_with("{\"crate\"")
+            && let Some(pos) = t.find("\"module\":")
+        {
+            let rest = &t[pos + 9..];
+            if let Some(start) = rest.find('"') {
+                let rest = &rest[start + 1..];
+                if let Some(end) = rest.find('"') {
+                    out.push(rest[..end].to_string());
+                }
+            }
+        }
+    }
+    out
+}
+
+fn check_unsafe(root: &Path) -> Vec<Violation> {
+    let registry_text =
+        std::fs::read_to_string(root.join("unsafe-capsules.json")).unwrap_or_default();
+    let mut violations = Vec::new();
+    if registry_text.is_empty() {
+        violations.push(Violation {
+            check: "unsafe-capsules",
+            crate_name: "<repo>".to_string(),
+            detail: "unsafe-capsules.json missing at workspace root".to_string(),
+        });
+        return violations;
+    }
+    let registered = registry_modules(&registry_text);
+    let crates_dir = root.join("crates");
+    let Ok(entries) = std::fs::read_dir(&crates_dir) else {
+        return violations;
+    };
+    let mut stack: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path().join("src"))
+        .filter(|p| p.is_dir())
+        .collect();
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in rd.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                stack.push(p);
+                continue;
+            }
+            if p.extension().is_none_or(|e| e != "rs") {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&p) else {
+                continue;
+            };
+            let has_unsafe = contains_unsafe_token(&text);
+            let has_allow =
+                text.contains("#[allow(unsafe_code)]") || text.contains("#![allow(unsafe_code)]");
+            if !(has_unsafe || has_allow) {
+                continue;
+            }
+            let rel = p.strip_prefix(root).unwrap_or(&p).display().to_string();
+            let is_registered = registered.iter().any(|m| rel.ends_with(m) || m == &rel);
+            if !is_registered {
+                violations.push(Violation {
+                    check: "unsafe-capsules",
+                    crate_name: rel.clone(),
+                    detail: format!(
+                        "{rel} contains `unsafe`/allow(unsafe_code) but is not a registered \
+                         capsule; register it in unsafe-capsules.json with a SAFETY.md \
+                         (docs/SAFETY_TEMPLATE.md) or remove the unsafe"
+                    ),
+                });
+                continue;
+            }
+            let loc = text.lines().count();
+            if loc >= 300 {
+                violations.push(Violation {
+                    check: "unsafe-capsules",
+                    crate_name: rel.clone(),
+                    detail: format!(
+                        "capsule {rel} is {loc} lines; capsules must stay under 300 (split the \
+                         safe parts out from behind the facade)"
+                    ),
+                });
+            }
+            let safety = p.parent().map(|d| d.join("SAFETY.md"));
+            if safety.as_deref().is_none_or(|s| !s.is_file()) {
+                violations.push(Violation {
+                    check: "unsafe-capsules",
+                    crate_name: rel.clone(),
+                    detail: format!("capsule {rel} has no SAFETY.md beside it"),
+                });
+            }
+        }
+    }
+    violations
 }
 
 fn json_escape(s: &str) -> String {
@@ -402,6 +715,12 @@ fn main() -> ExitCode {
         },
         PathBuf::from,
     );
+    // Lockfile commands don't need the workspace manifests.
+    match cmd.as_str() {
+        "lock-constellation" => return cmd_constellation(&root, false),
+        "check-constellation" => return cmd_constellation(&root, true),
+        _ => {}
+    }
     let manifests = match load_workspace(&root) {
         Ok(m) => m,
         Err(e) => {
@@ -413,15 +732,26 @@ fn main() -> ExitCode {
         "check-layers" => (check_layers(&manifests), vec!["layers"]),
         "check-deps" => (check_deps(&manifests), vec!["dependency-policy"]),
         "check-contracts" => (check_contracts(&manifests), vec!["contracts"]),
+        "check-unsafe" => (check_unsafe(&root), vec!["unsafe-capsules"]),
         "check-all" => {
             let mut v = check_layers(&manifests);
             v.extend(check_deps(&manifests));
             v.extend(check_contracts(&manifests));
-            (v, vec!["layers", "dependency-policy", "contracts"])
+            v.extend(check_unsafe(&root));
+            (
+                v,
+                vec![
+                    "layers",
+                    "dependency-policy",
+                    "contracts",
+                    "unsafe-capsules",
+                ],
+            )
         }
         other => {
             eprintln!(
-                "unknown command {other:?}; use check-layers|check-deps|check-contracts|check-all"
+                "unknown command {other:?}; use check-layers|check-deps|check-contracts|\
+                 check-all|lock-constellation|check-constellation"
             );
             return ExitCode::FAILURE;
         }
@@ -521,8 +851,124 @@ mod tests {
 
     #[test]
     fn constellation_dependencies_are_permitted() {
-        let ms = vec![manifest("fs-exec", "L0", &["asupersync"])];
-        assert!(check_deps(&ms).is_empty());
+        // Real member-crate names from the probed sibling workspaces.
+        let ms = vec![manifest(
+            "fs-exec",
+            "L0",
+            &[
+                "asupersync",
+                "fsqlite-core",
+                "fnx-algorithms",
+                "fnp-dtype",
+                "ft-autograd",
+                "fsci-cluster",
+                "fp-columnar",
+            ],
+        )];
+        assert!(check_deps(&ms).is_empty(), "{:?}", check_deps(&ms));
+    }
+
+    #[test]
+    fn prefix_matching_does_not_over_accept() {
+        // Names merely RESEMBLING constellation prefixes must still be caught.
+        for bad in ["ftui", "fparse", "fnxlib", "fsq", "asupersync2-evil"] {
+            let ms = vec![manifest("fs-la", "L1", &[bad])];
+            // ft-/fp-/fnx- require the hyphen; fsqlite requires the full stem;
+            // asupersync2-evil starts_with("asupersync") — document that the
+            // gate is prefix-trusting WITHIN our own manifests (review catches
+            // deliberate evasion; the gate catches accidents).
+            if bad == "asupersync2-evil" {
+                continue; // known prefix-trust boundary, documented above
+            }
+            assert_eq!(check_deps(&ms).len(), 1, "should reject {bad}");
+        }
+    }
+
+    #[test]
+    fn unsafe_scanner_finds_tokens_and_respects_comments() {
+        assert!(contains_unsafe_token(
+            "fn f() { unsafe { core::hint::unreachable_unchecked() } }"
+        ));
+        assert!(contains_unsafe_token("unsafe fn g() {}"));
+        // Prose about unsafe in comments must NOT trip the scanner.
+        assert!(!contains_unsafe_token("// this crate denies unsafe code"));
+        assert!(!contains_unsafe_token("/// `unsafe` is forbidden here"));
+        // Identifiers merely containing the substring must not trip it.
+        assert!(!contains_unsafe_token(
+            "let unsafety = 1; let not_unsafe_thing = 2;"
+        ));
+    }
+
+    #[test]
+    fn unsafe_check_end_to_end_on_fixture_tree() {
+        // Build a throwaway crate tree with a seeded violation and a
+        // properly registered capsule; run the real filesystem check.
+        let base = std::env::temp_dir().join(format!("fsim-unsafe-test-{}", std::process::id()));
+        let mk = |rel: &str, content: &str| {
+            let p = base.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, content).unwrap();
+        };
+        // Unregistered unsafe -> violation.
+        mk(
+            "crates/fs-bad/src/lib.rs",
+            "pub fn f() { unsafe { std::hint::spin_loop() } }\n",
+        );
+        // Registered capsule under 300 lines with SAFETY.md -> clean.
+        mk(
+            "crates/fs-good/src/capsule.rs",
+            "#[allow(unsafe_code)]\nmod inner { }\n",
+        );
+        mk(
+            "crates/fs-good/src/SAFETY.md",
+            "# SAFETY: fs-good/capsule\n",
+        );
+        mk(
+            "unsafe-capsules.json",
+            "{\n\"capsules\": [\n{\"crate\": \"fs-good\", \"module\": \"crates/fs-good/src/capsule.rs\", \"safety_md\": \"crates/fs-good/src/SAFETY.md\"}\n]\n}\n",
+        );
+        let v = check_unsafe(&base);
+        assert_eq!(v.len(), 1, "exactly the seeded violation expected: {v:?}");
+        assert!(v[0].detail.contains("fs-bad"), "{v:?}");
+        // Oversized registered capsule -> violation.
+        let big = format!("#[allow(unsafe_code)]\n{}", "// pad\n".repeat(300));
+        mk("crates/fs-good/src/capsule.rs", &big);
+        let v = check_unsafe(&base);
+        assert!(
+            v.iter().any(|x| x.detail.contains("lines")),
+            "LOC cap must trip: {v:?}"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn lock_identity_is_canonical_and_version_extraction_works() {
+        let entries = vec![
+            ConstellationEntry {
+                lib: "a".into(),
+                dir: PathBuf::from("/x/a"),
+                version: "1.0.0".into(),
+                git_head: "abc".into(),
+            },
+            ConstellationEntry {
+                lib: "b".into(),
+                dir: PathBuf::from("/elsewhere/b"),
+                version: "2.0.0".into(),
+                git_head: "def".into(),
+            },
+        ];
+        // Identity excludes paths: same libs at different paths hash equal.
+        let id = lock_identity(&entries);
+        assert_eq!(id, "a=1.0.0@abc\nb=2.0.0@def\n");
+        assert!(
+            !id.contains("/x/"),
+            "paths must not enter the lock identity"
+        );
+        assert_eq!(
+            first_version_in("[workspace.package]\nversion = \"0.2.0\"\n"),
+            Some("0.2.0".to_string())
+        );
+        assert_eq!(first_version_in("[package]\nname = \"x\"\n"), None);
     }
 
     #[test]

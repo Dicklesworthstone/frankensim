@@ -11,6 +11,7 @@ description = "Two-lane executor: latency lane on asupersync, work-stealing tile
 layer = "L0"
 
 [dependencies]
+asupersync = { path = "../../../asupersync" }
 
 [dev-dependencies]
 

@@ -1,0 +1,14 @@
+{
+  "schema": "frankensim-constellation-lock-v1",
+  "lock_hash": "f92683cc4572a198",
+  "note": "lock_hash covers (lib, version, git_head) only — paths are per-machine",
+  "libraries": [
+    {"lib": "asupersync", "version": "0.3.5", "git_head": "86bcbb1b54b3bcdb7003e5eab6e466b0feee7351", "path": "/Users/jemanuel/projects/asupersync"},
+    {"lib": "franken_networkx", "version": "0.2.0", "git_head": "87ae99ea5dec304bdae42be09472b3dc917b1725", "path": "/Users/jemanuel/projects/franken_networkx"},
+    {"lib": "franken_numpy", "version": "0.1.0", "git_head": "02d8881b4d1379edc2ddaba9ffba049532b7fb75", "path": "/Users/jemanuel/projects/franken_numpy"},
+    {"lib": "frankenpandas", "version": "0.1.2", "git_head": "9eb046207bed4f2851ec4c428d7f1756b9e62f5d", "path": "/Users/jemanuel/projects/frankenpandas"},
+    {"lib": "frankenscipy", "version": "0.1.0", "git_head": "00349db772ee2639cef96d8833f4cc28c475c710", "path": "/Users/jemanuel/projects/frankenscipy"},
+    {"lib": "frankensqlite", "version": "unversioned-workspace", "git_head": "fcb4a87a992602a91822141cf27aa3d8af156b24", "path": "/Users/jemanuel/projects/frankensqlite"},
+    {"lib": "frankentorch", "version": "0.1.0", "git_head": "4c53be832dd76c81edc52091d88d9cc9d8a16383", "path": "/Users/jemanuel/projects/frankentorch"}
+  ]
+}
