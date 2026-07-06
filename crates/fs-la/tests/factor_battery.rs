@@ -7,7 +7,9 @@ use fs_la::factor::{FactorError, cholesky, lu, qr, svd_jacobi, tsqr_r};
 use fs_la::gemm_f64;
 
 fn lcg(seed: &mut u64) -> f64 {
-    *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+    *seed = seed
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407);
     ((*seed >> 11) as f64) / (1u64 << 53) as f64 - 0.5
 }
 
@@ -34,7 +36,9 @@ fn frob(m: &[f64]) -> f64 {
 
 /// Hilbert matrix H[i][j] = 1/(i+j+1) — the classic ill-conditioned case.
 fn hilbert(n: usize) -> Vec<f64> {
-    (0..n * n).map(|i| 1.0 / ((i / n + i % n + 1) as f64)).collect()
+    (0..n * n)
+        .map(|i| 1.0 / ((i / n + i % n + 1) as f64))
+        .collect()
 }
 
 /// Kahan matrix (upper triangular, pivot-adversarial): K[i][j] =
@@ -73,7 +77,10 @@ fn cholesky_residual_and_solve() {
         }
         let diff: Vec<f64> = a.iter().zip(&llt).map(|(x, y)| x - y).collect();
         let rel = frob(&diff) / frob(&a);
-        assert!(rel <= 1e-14 * (n as f64), "chol residual {rel:.2e} at n={n}");
+        assert!(
+            rel <= 1e-14 * (n as f64),
+            "chol residual {rel:.2e} at n={n}"
+        );
         // Solve check: A·x = b round trip.
         let x_true: Vec<f64> = (0..n).map(|i| (i as f64).sin() + 1.0).collect();
         let mut b = vec![0.0; n];
@@ -156,7 +163,12 @@ fn lu_residual_permutation_and_tiebreak() {
 
 #[test]
 fn qr_orthogonality_reconstruction_least_squares() {
-    for (m, n, seed) in [(1usize, 1usize, 21u64), (9, 4, 22), (60, 24, 23), (65, 33, 24)] {
+    for (m, n, seed) in [
+        (1usize, 1usize, 21u64),
+        (9, 4, 22),
+        (60, 24, 23),
+        (65, 33, 24),
+    ] {
         let a = rand_mat(m, n, seed);
         let f = qr(&a, m, n);
         // Orthogonality: ‖Qᵀ·Q − I‖ via applying Qᵀ then Q to unit vectors.
@@ -257,7 +269,10 @@ fn tsqr_matches_direct_qr_and_is_deterministic() {
     let mut rtr = vec![0.0; n * n];
     gemm_f64(n, n, n, 1.0, &rt, &r, 0.0, &mut rtr);
     for i in 0..n * n {
-        assert!((rtr[i] - ata[i]).abs() < 1e-10 * (1.0 + ata[i].abs()), "Gram identity at {i}");
+        assert!(
+            (rtr[i] - ata[i]).abs() < 1e-10 * (1.0 + ata[i].abs()),
+            "Gram identity at {i}"
+        );
     }
     println!(
         "{{\"suite\":\"fs-la\",\"case\":\"tsqr\",\"verdict\":\"pass\",\"detail\":\"3 tree shapes agree with direct QR; fixed tree bitwise stable\"}}"
@@ -360,7 +375,7 @@ fn degenerate_shapes() {
 }
 
 /// Recorded on aarch64-apple (M4 Pro); must match on x86-64 (trj).
-const GOLDEN_HASH: u64 = 0x0; // placeholder: set from first run
+const GOLDEN_HASH: u64 = 0x181f_8f95_82d6_87ed;
 
 #[test]
 fn factorization_golden_hash() {

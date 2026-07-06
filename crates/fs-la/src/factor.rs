@@ -254,7 +254,12 @@ pub fn lu(a: &[f64], n: usize) -> Result<Lu, FactorError> {
         .flat_map(|i| (i..n).map(move |j| (i, j)))
         .fold(0.0f64, |acc, (i, j)| acc.max(m[i * n + j].abs()));
     let growth = if max_a > 0.0 { max_u / max_a } else { 1.0 };
-    Ok(Lu { n, data: m, perm, growth })
+    Ok(Lu {
+        n,
+        data: m,
+        perm,
+        growth,
+    })
 }
 
 impl Lu {
@@ -326,7 +331,10 @@ impl Lu {
         for _ in 0..5 {
             self.solve(&mut x);
             let new_est: f64 = x.iter().map(|v| v.abs()).sum();
-            let z: Vec<f64> = x.iter().map(|&v| if v >= 0.0 { 1.0 } else { -1.0 }).collect();
+            let z: Vec<f64> = x
+                .iter()
+                .map(|&v| if v >= 0.0 { 1.0 } else { -1.0 })
+                .collect();
             let mut zt = z;
             self.solve_transpose(&mut zt);
             // Pick the max-magnitude unit vector (lowest index on ties).
@@ -435,7 +443,11 @@ impl Qr {
     /// R entry (upper triangle).
     #[must_use]
     pub fn r(&self, i: usize, j: usize) -> f64 {
-        if i <= j && i < self.n { self.data[i * self.n + j] } else { 0.0 }
+        if i <= j && i < self.n {
+            self.data[i * self.n + j]
+        } else {
+            0.0
+        }
     }
 
     /// Apply Qᵀ to a length-m vector in place (reflectors in order).
@@ -650,5 +662,9 @@ pub fn svd_jacobi(a: &[f64], m: usize, n: usize) -> Svd {
             v_out[i * n + slot] = v[i * n + src];
         }
     }
-    Svd { u: u_out, sigma: s_out, v: v_out }
+    Svd {
+        u: u_out,
+        sigma: s_out,
+        v: v_out,
+    }
 }
