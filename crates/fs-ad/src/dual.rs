@@ -106,8 +106,8 @@ impl<T: Real, const N: usize> Mul for Dual<T, N> {
     fn mul(self, rhs: Self) -> Self {
         // (a + ε u)(b + ε v) = ab + ε (av + bu); fused where T provides it.
         let mut eps = [T::zero(); N];
-        for i in 0..N {
-            eps[i] = self.re.mul_add(rhs.eps[i], rhs.re * self.eps[i]);
+        for ((e, &u), &v) in eps.iter_mut().zip(self.eps.iter()).zip(rhs.eps.iter()) {
+            *e = self.re.mul_add(v, rhs.re * u);
         }
         Dual {
             re: self.re * rhs.re,
@@ -123,8 +123,8 @@ impl<T: Real, const N: usize> Div for Dual<T, N> {
         let q = self.re / rhs.re;
         let inv = T::one() / rhs.re;
         let mut eps = [T::zero(); N];
-        for i in 0..N {
-            eps[i] = (self.eps[i] - q * rhs.eps[i]) * inv;
+        for ((e, &u), &v) in eps.iter_mut().zip(self.eps.iter()).zip(rhs.eps.iter()) {
+            *e = (u - q * v) * inv;
         }
         Dual { re: q, eps }
     }
@@ -159,7 +159,19 @@ impl<T: Real, const N: usize> Real for Dual<T, N> {
     }
 
     fn mul_add(self, a: Self, b: Self) -> Self {
-        self * a + b
+        // The PRIMAL must stay fused (one rounding) so dual evaluation is
+        // bit-identical to the scalar path — desugaring to mul+add here broke
+        // the primal-bitwise test and would have corrupted every gradient
+        // check that compares against fused kernels (fs-simd's FMA policy).
+        let re = self.re.mul_add(a.re, b.re);
+        let mut eps = [T::zero(); N];
+        // d(x·a + b) = x'·a + x·a' + b', fused pairwise.
+        for (i, e) in eps.iter_mut().enumerate() {
+            *e = self
+                .re
+                .mul_add(a.eps[i], a.re.mul_add(self.eps[i], b.eps[i]));
+        }
+        Dual { re, eps }
     }
 
     fn recip(self) -> Self {

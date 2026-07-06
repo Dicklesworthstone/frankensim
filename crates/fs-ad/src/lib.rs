@@ -261,11 +261,15 @@ mod tests {
     #[test]
     fn abs_kink_and_sqrt_zero_conventions() {
         let (_, g) = gradient([0.0], |[x]| x.abs());
-        assert_eq!(g[0], 0.0, "abs'(0) = 0 by documented convention");
+        assert_eq!(
+            g[0].to_bits(),
+            0.0f64.to_bits(),
+            "abs'(0) = 0 by documented convention"
+        );
         let (_, g) = gradient([2.0], |[x]| x.abs());
-        assert_eq!(g[0], 1.0);
+        assert_eq!(g[0].to_bits(), 1.0f64.to_bits());
         let (_, g) = gradient([-2.0], |[x]| x.abs());
-        assert_eq!(g[0], -1.0);
+        assert_eq!(g[0].to_bits(), (-1.0f64).to_bits());
         // sqrt at 0: derivative is honestly unbounded (inf), never silently
         // clamped.
         let (_, g) = gradient([0.0], |[x]| x.sqrt());
