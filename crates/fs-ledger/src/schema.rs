@@ -27,8 +27,9 @@ pub(crate) const MIGRATIONS: &[&[&str]] = &[V1, V2];
 
 /// v1: the six core tables (Appendix D), chunk storage, and the Rev S
 /// extension tables (sparse in v0 but present EARLY so downstream crates can
-/// rely on them existing).
-const V1: &[&str] = &[
+/// rely on them existing). Public so migration tests can construct genuine
+/// v1 databases and prove the upgrade path.
+pub const V1: &[&str] = &[
     // -- core six ---------------------------------------------------------
     "CREATE TABLE IF NOT EXISTS artifacts(
         hash BLOB PRIMARY KEY CHECK(length(hash) = 32),
@@ -154,7 +155,7 @@ const V1: &[&str] = &[
 /// main branch as a deterministic op — the correct reading of v1 history.
 /// The `INSERT ... WHERE NOT EXISTS` seed is idempotent (crash between DDL
 /// and the version bump re-applies harmlessly, like every batch here).
-const V2: &[&str] = &[
+pub const V2: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS branches(
         id INTEGER PRIMARY KEY,
         name TEXT NOT NULL UNIQUE CHECK(length(name) > 0),
