@@ -290,8 +290,9 @@ fn pmg_iteration_counts_flat_across_ladders() {
                 *bi = 0.0;
             }
         }
-        // Chebyshev degree grows with r (standard for p-independence).
-        let pmg = PMultigrid::new(m, r, r + 2);
+        // Two Schwarz sweeps per pre/post smooth (Dirichlet blocks
+        // are strong; degree scaling with r is unnecessary).
+        let pmg = PMultigrid::new(m, r, 2);
         let mut st = CgState::new(&op, &pmg, &b);
         let rep = st.run(&op, &pmg, 1e-10, 100);
         assert!(rep.converged, "pMG-CG failed at m={m} r={r}: {rep:?}");
