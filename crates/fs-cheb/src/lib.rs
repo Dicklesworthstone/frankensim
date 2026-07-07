@@ -16,6 +16,8 @@
 //! kernels — NO platform libm in any path that feeds function state
 //! (workspace contract rule).
 
+pub mod orr_sommerfeld;
+
 use fs_fft::{dct2, dct3};
 
 /// Crate version, re-exported for provenance stamping.
