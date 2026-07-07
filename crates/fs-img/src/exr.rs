@@ -56,7 +56,7 @@ pub fn f32_to_f16_bits(x: f32) -> u16 {
         // Inf / NaN (keep a NaN payload bit).
         return sign | 0x7C00 | u16::from(man != 0) << 9;
     }
-    let unbiased = exp as i32 - 127;
+    let unbiased = exp.cast_signed() - 127;
     if unbiased > 15 {
         return sign | 0x7C00; // overflow → ±inf
     }
@@ -94,7 +94,7 @@ pub fn f16_bits_to_f32(h: u16) -> f32 {
         (0, 0) => sign,
         (0, m) => {
             // Subnormal half = m·2⁻²⁴: normalize around the highest bit.
-            let h = 31 - m.leading_zeros();
+            let h = m.ilog2();
             let e = 103 + h; // 127 + (h − 24)
             let mant = (m << (23 - h)) & 0x007F_FFFF;
             sign | (e << 23) | mant
@@ -131,6 +131,11 @@ pub fn write_exr(width: u32, height: u32, channels: &[Channel]) -> Result<Vec<u8
             context: "write_exr needs a nonempty image and channel set",
         });
     }
+    let (Ok(wi), Ok(hi)) = (i32::try_from(width), i32::try_from(height)) else {
+        return Err(ImgError::Malformed {
+            what: format!("dimensions {width}x{height} exceed the EXR i32 data window"),
+        });
+    };
     let n = width as usize * height as usize;
     let mut sorted: BTreeMap<&str, &Channel> = BTreeMap::new();
     for c in channels {
@@ -173,8 +178,8 @@ pub fn write_exr(width: u32, height: u32, channels: &[Channel]) -> Result<Vec<u8
     let mut window = Vec::with_capacity(16);
     window.extend_from_slice(&0i32.to_le_bytes());
     window.extend_from_slice(&0i32.to_le_bytes());
-    window.extend_from_slice(&(width as i32 - 1).to_le_bytes());
-    window.extend_from_slice(&(height as i32 - 1).to_le_bytes());
+    window.extend_from_slice(&(wi - 1).to_le_bytes());
+    window.extend_from_slice(&(hi - 1).to_le_bytes());
     push_attr(&mut out, "dataWindow", "box2i", &window);
     push_attr(&mut out, "displayWindow", "box2i", &window);
     push_attr(&mut out, "lineOrder", "lineOrder", &[0]); // increasing y
@@ -196,7 +201,7 @@ pub fn write_exr(width: u32, height: u32, channels: &[Channel]) -> Result<Vec<u8
     for y in 0..height as usize {
         let offset = out.len() as u64;
         out[table_pos + 8 * y..table_pos + 8 * (y + 1)].copy_from_slice(&offset.to_le_bytes());
-        out.extend_from_slice(&(y as i32).to_le_bytes());
+        out.extend_from_slice(&i32::try_from(y).expect("y < height <= i32::MAX").to_le_bytes());
         out.extend_from_slice(&(line_bytes as u32).to_le_bytes());
         for c in sorted.values() {
             let row = &c.data[y * width as usize..(y + 1) * width as usize];

@@ -85,7 +85,7 @@ pub fn atrous_denoise(
             context: "albedo guide shape",
         });
     }
-    let (w, h) = (noisy.width as isize, noisy.height as isize);
+    let (w, h) = (noisy.width.cast_signed(), noisy.height.cast_signed());
     let mut current = noisy.data.clone();
     for it in 0..params.iterations {
         let step = 1isize << it;
@@ -98,8 +98,8 @@ pub fn atrous_denoise(
                 let mut wsum = 0.0f64;
                 for (kj, &wy) in B3.iter().enumerate() {
                     for (ki, &wx) in B3.iter().enumerate() {
-                        let sx = (x + (ki as isize - 2) * step).clamp(0, w - 1);
-                        let sy = (y + (kj as isize - 2) * step).clamp(0, h - 1);
+                        let sx = (x + (ki.cast_signed() - 2) * step).clamp(0, w - 1);
+                        let sy = (y + (kj.cast_signed() - 2) * step).clamp(0, h - 1);
                         let sample = current[(sy * w + sx) as usize];
                         let mut weight = f64::from(wx * wy);
                         let dc = f64::from(sample - center) / f64::from(params.sigma_color);
