@@ -24,6 +24,7 @@
 //!   MEASURED maximum against it (platform-libm oracle now; the
 //!   double-double oracle battery arrives with fs-ivl).
 
+pub mod c64;
 pub mod dd;
 pub mod det;
 pub mod eft;
