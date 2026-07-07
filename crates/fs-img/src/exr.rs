@@ -201,7 +201,11 @@ pub fn write_exr(width: u32, height: u32, channels: &[Channel]) -> Result<Vec<u8
     for y in 0..height as usize {
         let offset = out.len() as u64;
         out[table_pos + 8 * y..table_pos + 8 * (y + 1)].copy_from_slice(&offset.to_le_bytes());
-        out.extend_from_slice(&i32::try_from(y).expect("y < height <= i32::MAX").to_le_bytes());
+        out.extend_from_slice(
+            &i32::try_from(y)
+                .expect("y < height <= i32::MAX")
+                .to_le_bytes(),
+        );
         out.extend_from_slice(&(line_bytes as u32).to_le_bytes());
         for c in sorted.values() {
             let row = &c.data[y * width as usize..(y + 1) * width as usize];

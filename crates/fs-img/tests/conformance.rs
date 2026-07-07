@@ -123,7 +123,7 @@ fn im_003_denoiser_improves_mse_and_label_propagates() {
     // MSE vs the clean image, and the output must carry the bias tag.
     let (w, h) = (32usize, 32usize);
     let clean: Vec<f32> = (0..w * h)
-        .map(|i| ((i % w) as f32 / w as f32 + (i / w) as f32 / h as f32) / 2.0)
+        .map(|i| f32::midpoint((i % w) as f32 / w as f32, (i / w) as f32 / h as f32))
         .collect();
     let mut seed = 0x5EED_D401_5E00_0003u64;
     let noisy_data: Vec<f32> = clean
