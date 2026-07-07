@@ -1,0 +1,27 @@
+[package]
+name = "fs-verify"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Certified speculation verifier: equilibrated-flux a-posteriori error bounds, interval-evaluated to verified color; warm-start fallback for the nonlinear class."
+
+[package.metadata.frankensim]
+layer = "L3"
+
+[features]
+# The verifier (bead lmp4.1): OFF by default per the Ambition-Tag
+# gating rule until its Gauntlet tier + kill-metric stay green.
+certified-speculation = []
+
+[dependencies]
+fs-evidence = { path = "../fs-evidence" }
+fs-obs = { path = "../fs-obs" }
+
+[[test]]
+name = "conformance"
+required-features = ["certified-speculation"]
+
+[lints]
+workspace = true
