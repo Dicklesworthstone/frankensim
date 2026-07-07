@@ -13,6 +13,7 @@ layer = "L1"
 [dependencies]
 fs-math = { path = "../fs-math" }
 fs-rand = { path = "../fs-rand" }
+fs-soa = { path = "../fs-soa" }
 
 [dev-dependencies]
 

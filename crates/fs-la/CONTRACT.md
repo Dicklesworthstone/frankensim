@@ -1,8 +1,7 @@
 # CONTRACT: fs-la
 
-> Status: PARTIAL — the GEMM, FACTORIZATION, MIXED-PRECISION, and
-> EIGENSOLVER sections below are in force; batched small-dense remains
-> skeleton scope.
+> Status: PARTIAL — the GEMM, FACTORIZATION, MIXED-PRECISION,
+> EIGENSOLVER, and BATCHED SMALL-DENSE sections below are in force.
 
 ## Purpose and layer
 Dense linear algebra: GEMM, batched small dense, factorizations, eigensolvers. Layer: L1.
@@ -77,6 +76,36 @@ Dense linear algebra: GEMM, batched small dense, factorizations, eigensolvers. L
   Hutchinson at matched probe budgets (measured, not cited).
 - `VERSION` for provenance stamping.
 
+- `batched::{BatchMat, BatchVec}` — batches of n dense k×k matrices /
+  k-vectors in entry-plane SoA layout (one 128-byte-aligned plane per
+  entry across the batch; `fs_soa::FieldBuf` storage, plane stride
+  padded to 16 f64). Gather/scatter to row-major AoS; plane accessors
+  are the SIMD surface (lanes run across ELEMENTS, never within one
+  small matrix).
+- `batched::batch_gemm` — per matrix C = α·A·B + β·C (β = 0 overwrites,
+  the house convention); size classes {4, 6, 8, 12, 16, 24, 32, 48}
+  dispatch to monomorphized kernels, other k run the same code
+  generically.
+- `batched::{batch_det, batch_inv}` — closed forms for k ≤ 4 (Jacobian
+  hot path); exactly-zero determinants flagged `Singular`, batch
+  continues (flagged outputs unspecified).
+- `batched::{batch_cholesky, batch_solve_lower, batch_solve_upper,
+  batch_cholesky_solve}` — non-positive pivots flagged
+  `NotSpd { index: diagonal step }` per member with the pivot replaced
+  by 1.0 (finite continuation, no NaN storm); flag list authoritative.
+- `batched::{batch_lu, BatchLu}` — partial pivoting per matrix
+  (strictly-greater comparison = lowest row among maximal |pivot|,
+  `factor::lu`'s tie-break); compact LU + per-step permutations +
+  `Singular` flags; `BatchLu::solve` applies P, L, U in place.
+- `batched::{batch_eigh3_values, batch_eigh}` — symmetric 3×3
+  eigenvalues in closed form (deterministic trigonometric method
+  through strict kernels, ascending); general small k (the 6×6 path)
+  per-matrix through `eigen::jacobi_eigh` (values + orthogonal
+  vectors).
+- Per-element failures reuse `factor::FactorError` as
+  `Vec<(matrix_index, FactorError)>` — empty means every member
+  succeeded.
+
 ## Invariants
 1. Packing is ARITHMETIC-NEUTRAL: the packed/blocked f64 path is bitwise
    identical to a same-order naive loop (tested across a 9-shape sweep
@@ -129,11 +158,20 @@ exp/ln). Eigensolvers: Lanczos + LOBPCG outputs on the 1D Laplacian =
 `0x87da_0cb3_2344_b097` (bumped once: start vectors moved from platform
 sin to strict sin after an ACTUAL cross-ISA divergence — the golden
 discipline catching its first real bug). All verified identical on both
-reference ISAs.
+reference ISAs. Batched small-dense: bit-deterministic by CONSTRUCTION
+and additionally BATCH-MEMBERSHIP INVARIANT — a matrix factored in a
+batch of N is bitwise-equal to the same matrix alone in a batch of 1
+(each member's arithmetic is independent, all loops fixed-order
+mul_add; tested per op family). Golden hash over GEMM + Cholesky solve
++ LU + det/inv + eigh3 = `0x0377_a8c9_5992_aee9`, verified identical on
+both reference ISAs.
 
 ## Cancellation behavior
 All future hot paths poll cancellation at tile boundaries (Decalogue P7).
-No compute paths exist yet.
+Batched kernels are bounded synchronous loops; chunking a large batch to
+tile quanta (and Cx poll points between chunks) is the fs-exec driver's
+job — no cancellation hooks inside the kernels, matching the fs-simd
+discipline.
 
 ## Unsafe boundary
 None. `unsafe_code` is denied workspace-wide; any future capsule must be
@@ -148,6 +186,15 @@ edge semantics (β=0 NaN overwrite, α=0, k=0, empty m/n), transpose
 identity, submatrix consistency, mixed == widened-f64 bitwise, f32
 tolerance battery, determinism + golden hash. tests/conformance.rs
 placeholder remains for the shared-harness migration.
+Batched battery (tests/batched_battery.rs): GEMM vs scalar oracle
+across size classes + β-accumulate path; batch-membership bitwise
+invariance for Cholesky and pivoted LU; L·Lᵀ reconstruction and solve
+for k ∈ {4, 6, 12, 24, 48}; NotSpd/Singular members flagged while 8/9
+healthy neighbors stay bit-correct; PA = LU residual + solve; det
+closed forms cross-checked against LU diagonal-product-with-parity;
+inv·A = I; eigh3 closed form vs per-matrix Jacobi as sorted sets plus
+trace identity and eigenvector residuals, degenerate (isotropic and
+diagonal) fixtures; 128-byte plane alignment; cross-ISA golden hash.
 
 ## No-claim boundaries
 - **No performance claims yet**: v1 microkernel is safe auto-vectorized
@@ -165,7 +212,15 @@ placeholder remains for the shared-harness migration.
 - `condition_1` is an estimate (typically within a small factor; a lower
   bound in theory) — not a certified bound (fs-ivl owns certified claims).
 - Jacobi SVD targets small/medium n (O(n²·m) per sweep); no blocked
-  driver yet. Batched small-dense remains skeleton scope.
+  driver yet.
+- Batched small-dense makes NO performance claims yet: kernels are safe
+  auto-vectorized Rust (plane loops shaped for lanes-across-elements).
+  The >=60%-of-peak roofline acceptance, arch-specific capsule
+  microkernels, autotuned interleave width, and a lane-vectorized
+  pivoted LU join the recorded batched perf follow-up bead (same split
+  discipline as the GEMM perf lane). Batched QR/SVD, f32/mixed batched
+  precisions, and eigh3 closed-form EIGENVECTORS (currently via
+  per-matrix Jacobi) are recorded follow-up scope.
 - `eigen_complex::eig` runs UNBALANCED explicit shifted QR (O(n²) per
   sweep; implicit bulge-chasing and a balancing pass are recorded perf/
   robustness refinements) and returns eigenvalues only (eigenvectors
