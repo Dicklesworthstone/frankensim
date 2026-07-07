@@ -1020,6 +1020,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-probe"
+version = "0.0.1"
+dependencies = [
+ "fs-evidence",
+ "fs-ladder",
+]
+
+[[package]]
 name = "fs-qty"
 version = "0.0.1"
 
@@ -1239,6 +1247,14 @@ dependencies = [
  "fs-obs",
  "fs-rep-frep",
  "fs-rep-mesh",
+]
+
+[[package]]
+name = "fs-verify"
+version = "0.0.1"
+dependencies = [
+ "fs-evidence",
+ "fs-obs",
 ]
 
 [[package]]
