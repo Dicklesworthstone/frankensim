@@ -41,7 +41,12 @@ impl HeatAdjoint {
                 coo.push(r, c, h * v);
             }
         }
-        HeatAdjoint { sys: CsrOp::symmetric(coo.assemble()), mass, h, steps }
+        HeatAdjoint {
+            sys: CsrOp::symmetric(coo.assemble()),
+            mass,
+            h,
+            steps,
+        }
     }
 
     /// One forward step: solve (M + hK)·u⁺ = M·u.
@@ -84,17 +89,12 @@ impl HeatAdjoint {
 /// (gradient, total forward evaluations) — the recompute count is the
 /// price of O(log N) memory and is reported, not hidden.
 #[must_use]
-pub fn heat_initial_gradient(
-    problem: &HeatAdjoint,
-    u0: &[f64],
-    target: &[f64],
-) -> (Vec<f64>, u64) {
+pub fn heat_initial_gradient(problem: &HeatAdjoint, u0: &[f64], target: &[f64]) -> (Vec<f64>, u64) {
     let steps = problem.steps;
     let budget = min_budget(steps);
     let forward = |_i: usize, u: &Vec<f64>| -> Vec<f64> { problem.step_forward(u) };
-    let reverse = |_i: usize, _u: &Vec<f64>, bar: Vec<f64>| -> Vec<f64> {
-        problem.step_reverse(&bar)
-    };
+    let reverse =
+        |_i: usize, _u: &Vec<f64>, bar: Vec<f64>| -> Vec<f64> { problem.step_reverse(&bar) };
     // Terminal cotangent: ∂J/∂u_N = u_N − target.
     let u_n = problem.forward(u0);
     let seed: Vec<f64> = u_n.iter().zip(target).map(|(a, b)| a - b).collect();

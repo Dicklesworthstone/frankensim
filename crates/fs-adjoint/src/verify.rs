@@ -45,5 +45,9 @@ pub fn verify_gradient(
         worst = worst.max((analytic - fd).abs() / scale);
         pairs.push((analytic, fd));
     }
-    GradientVerdict { max_rel_err: worst, pairs, pass: worst < tol }
+    GradientVerdict {
+        max_rel_err: worst,
+        pairs,
+        pass: worst < tol,
+    }
 }

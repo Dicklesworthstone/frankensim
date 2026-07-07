@@ -73,7 +73,11 @@ fn face_normal_area(
         (pa[1] + pb[1] + pc[1]) / 3.0,
         (pa[2] + pb[2] + pc[2]) / 3.0,
     ];
-    let to_opp = [po[0] - centroid[0], po[1] - centroid[1], po[2] - centroid[2]];
+    let to_opp = [
+        po[0] - centroid[0],
+        po[1] - centroid[1],
+        po[2] - centroid[2],
+    ];
     let dot = n[0].mul_add(to_opp[0], n[1].mul_add(to_opp[1], n[2] * to_opp[2]));
     if dot > 0.0 {
         for c in &mut n {

@@ -18,11 +18,18 @@ use fs_solver::{CgState, CsrOp, LinearOp};
 use fs_sparse::precond::IdentityPrecond;
 
 fn log(case: &str, verdict: &str, detail: &str) {
-    println!("{{\"suite\":\"fs-adjoint\",\"case\":\"{case}\",\"verdict\":\"{verdict}\",\"detail\":\"{detail}\"}}");
+    println!(
+        "{{\"suite\":\"fs-adjoint\",\"case\":\"{case}\",\"verdict\":\"{verdict}\",\"detail\":\"{detail}\"}}"
+    );
 }
 
 fn rand_vec(n: usize, tile: u32) -> Vec<f64> {
-    let mut s = StreamKey { seed: 31, kernel: 0xAD10, tile }.stream();
+    let mut s = StreamKey {
+        seed: 31,
+        kernel: 0xAD10,
+        tile,
+    }
+    .stream();
     (0..n).map(|_| 2.0f64.mul_add(s.next_f64(), -1.0)).collect()
 }
 
@@ -82,7 +89,11 @@ fn ift_source_gradient_triangle() {
     };
     let j = |p: &[f64]| -> f64 {
         let u = solve_u(p);
-        0.5 * u.iter().zip(&target).map(|(a, b)| (a - b) * (a - b)).sum::<f64>()
+        0.5 * u
+            .iter()
+            .zip(&target)
+            .map(|(a, b)| (a - b) * (a - b))
+            .sum::<f64>()
     };
     // Adjoint: Kᵀλ = (u − t); dJ/dp = +Mᵀλ (R = Ku − Mp ⇒ ∂R/∂p = −M).
     let u = solve_u(&p0);
@@ -113,7 +124,10 @@ fn ift_source_gradient_triangle() {
     log(
         "ift-source",
         "pass",
-        &format!("rel_err={:.2e} adjoint_iters={}", verdict.max_rel_err, rep.iters),
+        &format!(
+            "rel_err={:.2e} adjoint_iters={}",
+            verdict.max_rel_err, rep.iters
+        ),
     );
 }
 
@@ -132,7 +146,11 @@ fn density_chain_rule_simp() {
         let pr = DensityPoisson::new(&complex, &positions, rho.to_vec());
         let op = DensityOp::new(&pr);
         let u = solve_spd_op(&op, &b);
-        0.5 * u.iter().zip(&target).map(|(a, c)| (a - c) * (a - c)).sum::<f64>()
+        0.5 * u
+            .iter()
+            .zip(&target)
+            .map(|(a, c)| (a - c) * (a - c))
+            .sum::<f64>()
     };
     // Adjoint at rho0.
     let op = DensityOp::new(&problem);
@@ -150,7 +168,11 @@ fn density_chain_rule_simp() {
         "SIMP density gradient failed FD check: {:?}",
         verdict.max_rel_err
     );
-    log("density-simp", "pass", &format!("rel_err={:.2e}", verdict.max_rel_err));
+    log(
+        "density-simp",
+        "pass",
+        &format!("rel_err={:.2e}", verdict.max_rel_err),
+    );
 }
 
 fn solve_spd_op<A: LinearOp>(a: &A, b: &[f64]) -> Vec<f64> {
@@ -258,7 +280,10 @@ fn hadamard_volume_matches_fd_exactly() {
     };
     let fd = (vol(&perturb(1.0)) - vol(&perturb(-1.0))) / (2.0 * eps);
     let rel = (analytic - fd).abs() / fd.abs().max(1e-30);
-    assert!(rel < 1e-7, "volume Hadamard vs FD: {analytic:.10e} vs {fd:.10e} (rel {rel:.2e})");
+    assert!(
+        rel < 1e-7,
+        "volume Hadamard vs FD: {analytic:.10e} vs {fd:.10e} (rel {rel:.2e})"
+    );
     log("hadamard-volume", "pass", &format!("rel={rel:.2e}"));
 }
 
@@ -274,7 +299,11 @@ fn heat_adjoint_gradient_vs_fd() {
     let (g, fwd_evals) = heat_initial_gradient(&heat, &u0, &target);
     let j = |u0v: &[f64]| -> f64 {
         let un = heat.forward(u0v);
-        0.5 * un.iter().zip(&target).map(|(a, b)| (a - b) * (a - b)).sum::<f64>()
+        0.5 * un
+            .iter()
+            .zip(&target)
+            .map(|(a, b)| (a - b) * (a - b))
+            .sum::<f64>()
     };
     let dirs: Vec<Vec<f64>> = (0..2).map(|k| rand_vec(n, 50 + k)).collect();
     let verdict = verify_gradient(&j, &u0, &g, &dirs, 1e-5, 1e-6);
@@ -310,7 +339,7 @@ fn verification_gate_catches_corruption() {
     log("verify-gate", "pass", "accepts correct, rejects corrupted");
 }
 
-const GOLDEN_HASH: u64 = 0; // recorded on first run, then frozen
+const GOLDEN_HASH: u64 = 0x0896_7e37_81b3_c044; // recorded at tfz.24 landing, frozen
 
 #[test]
 fn adjoint_golden_hash() {

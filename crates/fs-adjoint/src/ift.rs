@@ -88,7 +88,13 @@ impl<'c> DensityPoisson<'c> {
         for (i, &v) in interior.iter().enumerate() {
             slot[v] = i;
         }
-        DensityPoisson { complex, geo, interior, slot, rho }
+        DensityPoisson {
+            complex,
+            geo,
+            interior,
+            slot,
+            rho,
+        }
     }
 
     /// Interior dof count.
