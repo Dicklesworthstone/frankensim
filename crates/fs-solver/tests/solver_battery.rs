@@ -24,9 +24,9 @@ fn rand_vec(n: usize, tile: u32) -> Vec<f64> {
     (0..n).map(|_| 2.0f64.mul_add(s.next_f64(), -1.0)).collect()
 }
 
-/// The interior-reduced Poisson CSR from fs-feec (kuhn(2), P1).
-fn poisson_csr() -> (fs_sparse::Csr, usize) {
-    let (complex, positions) = kuhn_cube(2);
+/// The interior-reduced Poisson CSR from fs-feec (kuhn(m), P1).
+fn poisson_csr(m: usize) -> (fs_sparse::Csr, usize) {
+    let (complex, positions) = kuhn_cube(m);
     let geo = element_geometry(&complex, &positions);
     let k0 = fs_feec::stiffness(
         &fs_feec::incidence_to_csr(&complex.d0()),
@@ -54,7 +54,7 @@ fn poisson_csr() -> (fs_sparse::Csr, usize) {
 
 #[test]
 fn cg_solves_poisson_and_matches_direct() {
-    let (a, n) = poisson_csr();
+    let (a, n) = poisson_csr(2);
     let dense = a.to_dense();
     let op = CsrOp::symmetric(a);
     let b = rand_vec(n, 1);
@@ -79,7 +79,7 @@ fn cg_solves_poisson_and_matches_direct() {
 
 #[test]
 fn cg_resume_is_bitwise() {
-    let (a, n) = poisson_csr();
+    let (a, n) = poisson_csr(4);
     let op = CsrOp::symmetric(a);
     let b = rand_vec(n, 2);
     let mut straight = CgState::new(&op, &IdentityPrecond, &b);
@@ -105,7 +105,7 @@ fn cg_resume_is_bitwise() {
 fn minres_handles_symmetric_indefinite() {
     // Indefinite diagonal-perturbed Poisson: A − σI with σ inside the
     // spectrum (CG's rz would go negative; MINRES is the right tool).
-    let (a, n) = poisson_csr();
+    let (a, n) = poisson_csr(4);
     let mut coo = fs_sparse::Coo::new(n, n);
     for r in 0..n {
         let (cols, vals) = a.row(r);
@@ -139,7 +139,7 @@ fn minres_handles_symmetric_indefinite() {
 
 #[test]
 fn minres_resume_is_bitwise() {
-    let (a, n) = poisson_csr();
+    let (a, n) = poisson_csr(4);
     let op = CsrOp::symmetric(a);
     let b = rand_vec(n, 4);
     let mut straight = MinresState::new(&op, &b);
@@ -246,12 +246,12 @@ fn gmres_resume_at_cycle_boundaries() {
 
 #[test]
 fn stall_diagnosis_is_structured() {
-    let (a, n) = poisson_csr();
+    let (a, n) = poisson_csr(6);
     let op = CsrOp::symmetric(a);
     let b = rand_vec(n, 8);
     // Budget far too small: still falling → BudgetExhausted.
     let mut st = CgState::new(&op, &IdentityPrecond, &b);
-    let rep = st.run(&op, &IdentityPrecond, 1e-14, 3);
+    let rep = st.run(&op, &IdentityPrecond, 1e-14, 5);
     assert!(!rep.converged);
     assert_eq!(rep.diagnosis, Some(StallDiagnosis::BudgetExhausted));
     // Tolerance below reachable: plateau after convergence stagnates.
@@ -270,16 +270,17 @@ fn pmg_iteration_counts_flat_across_ladders() {
     let mut table = Vec::new();
     for &(m, r) in &[(2usize, 2usize), (2, 3), (2, 4), (4, 2), (4, 4)] {
         let op = MaskedTensorOp::new(m, r);
-        let space = op.space();
-        let pi = std::f64::consts::PI;
-        let f = |p: [f64; 3]| 3.0 * pi * pi * (pi * p[0]).sin() * (pi * p[1]).sin() * (pi * p[2]).sin();
-        let mut b = space.load(&f);
+        // RANDOM rhs: an eigenfunction load makes ALL Krylov methods
+        // converge in a handful of iterations (few effective modes)
+        // and would fake both flatness and the identity comparison.
+        let mut b = rand_vec(op.n(), 50 + u32::try_from(10 * m + r).expect("small"));
         for (bi, &mk) in b.iter_mut().zip(op.mask()) {
             if !mk {
                 *bi = 0.0;
             }
         }
-        let pmg = PMultigrid::new(m, r, 3);
+        // Chebyshev degree grows with r (standard for p-independence).
+        let pmg = PMultigrid::new(m, r, r + 1);
         let mut st = CgState::new(&op, &pmg, &b);
         let rep = st.run(&op, &pmg, 1e-10, 100);
         assert!(rep.converged, "pMG-CG failed at m={m} r={r}: {rep:?}");
@@ -348,7 +349,7 @@ fn solver_golden_hash() {
             acc = acc.wrapping_mul(0x0000_0100_0000_01b3);
         }
     };
-    let (a, n) = poisson_csr();
+    let (a, n) = poisson_csr(4);
     let op = CsrOp::symmetric(a);
     let b = rand_vec(n, 11);
     let mut cg = CgState::new(&op, &IdentityPrecond, &b);

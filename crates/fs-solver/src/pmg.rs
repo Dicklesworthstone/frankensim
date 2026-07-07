@@ -168,7 +168,9 @@ impl PMultigrid {
     fn smooth(&self, li: usize, x: &mut [f64], b: &[f64]) {
         let lv = &self.levels[li];
         let n = lv.space.ndof();
-        let (lmax, lmin) = (lv.lambda_max, lv.lambda_max / 30.0);
+        // Standard MG smoothing band: damp the upper 3/4 of the
+        // spectrum hard; the injection coarse space owns the rest.
+        let (lmax, lmin) = (lv.lambda_max, lv.lambda_max / 4.0);
         let theta = f64::midpoint(lmax, lmin);
         let delta = f64::midpoint(lmax, -lmin);
         let masked_scaled_residual = |x: &[f64]| -> Vec<f64> {
