@@ -864,6 +864,17 @@ name = "fs-obs"
 version = "0.0.1"
 
 [[package]]
+name = "fs-opt"
+version = "0.0.1"
+dependencies = [
+ "asupersync 0.3.5",
+ "fs-alloc",
+ "fs-exec",
+ "fs-obs",
+ "fs-qty",
+]
+
+[[package]]
 name = "fs-plan"
 version = "0.0.1"
 dependencies = [
