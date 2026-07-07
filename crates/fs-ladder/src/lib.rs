@@ -118,7 +118,10 @@ impl fmt::Display for LadderError {
                  fix: stop descending, or add a coarser rung"
             ),
             LadderError::NoKernel { kernel } => {
-                write!(f, "no kernel '{kernel}' is registered; fix: register its ladder first")
+                write!(
+                    f,
+                    "no kernel '{kernel}' is registered; fix: register its ladder first"
+                )
             }
         }
     }
@@ -132,6 +135,17 @@ pub struct Ladder {
     kernel: String,
     rungs: Vec<Rung>,
     transfers: Vec<Box<dyn Transfer>>,
+}
+
+impl fmt::Debug for Ladder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // `Transfer` is not `Debug`; summarize it by count.
+        f.debug_struct("Ladder")
+            .field("kernel", &self.kernel)
+            .field("rungs", &self.rungs)
+            .field("transfers", &self.transfers.len())
+            .finish()
+    }
 }
 
 impl Ladder {
@@ -207,11 +221,13 @@ impl Ladder {
     /// # Errors
     /// [`LadderError::NoSuchRung`] if out of range.
     pub fn rung(&self, index: u32) -> Result<&Rung, LadderError> {
-        self.rungs.get(index as usize).ok_or_else(|| LadderError::NoSuchRung {
-            kernel: self.kernel.clone(),
-            index,
-            len: self.len(),
-        })
+        self.rungs
+            .get(index as usize)
+            .ok_or_else(|| LadderError::NoSuchRung {
+                kernel: self.kernel.clone(),
+                index,
+                len: self.len(),
+            })
     }
 
     /// The finer/coarser neighbours of a rung (empty in the correct direction
@@ -229,7 +245,11 @@ impl Ladder {
         }
         Ok(AdjacentRungs {
             coarser: index.checked_sub(1),
-            finer: if index + 1 < self.len() { Some(index + 1) } else { None },
+            finer: if index + 1 < self.len() {
+                Some(index + 1)
+            } else {
+                None
+            },
         })
     }
 
@@ -246,10 +266,13 @@ impl Ladder {
                 len: self.len(),
             });
         }
-        let t = self.transfers.get(from as usize).ok_or_else(|| LadderError::AtTop {
-            kernel: self.kernel.clone(),
-            index: from,
-        })?;
+        let t = self
+            .transfers
+            .get(from as usize)
+            .ok_or_else(|| LadderError::AtTop {
+                kernel: self.kernel.clone(),
+                index: from,
+            })?;
         Ok(t.prolongate(coarse))
     }
 
@@ -302,9 +325,11 @@ impl LadderRegistry {
     /// # Errors
     /// [`LadderError::NoKernel`] if the kernel is not registered.
     pub fn ladder(&self, kernel: &str) -> Result<&Ladder, LadderError> {
-        self.ladders.get(kernel).ok_or_else(|| LadderError::NoKernel {
-            kernel: kernel.to_string(),
-        })
+        self.ladders
+            .get(kernel)
+            .ok_or_else(|| LadderError::NoKernel {
+                kernel: kernel.to_string(),
+            })
     }
 
     /// Registered kernel names, sorted.
@@ -352,7 +377,7 @@ impl Transfer for Refine1d {
         let mut fine = Vec::with_capacity(coarse.len() * 2 - 1);
         for i in 0..coarse.len() - 1 {
             fine.push(coarse[i]);
-            fine.push(0.5 * (coarse[i] + coarse[i + 1]));
+            fine.push(f64::midpoint(coarse[i], coarse[i + 1]));
         }
         fine.push(coarse[coarse.len() - 1]);
         fine
