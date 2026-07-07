@@ -71,6 +71,7 @@ impl Iv {
 
     /// Outward-rounded sum.
     #[must_use]
+    #[allow(clippy::should_implement_trait)] // deliberate: no operator sugar for rigor-bearing ops
     pub fn add(self, o: Iv) -> Iv {
         Iv {
             lo: down(self.lo + o.lo),
@@ -80,6 +81,7 @@ impl Iv {
 
     /// Outward-rounded difference.
     #[must_use]
+    #[allow(clippy::should_implement_trait)]
     pub fn sub(self, o: Iv) -> Iv {
         Iv {
             lo: down(self.lo - o.hi),
@@ -89,6 +91,7 @@ impl Iv {
 
     /// Outward-rounded product.
     #[must_use]
+    #[allow(clippy::should_implement_trait)]
     pub fn mul(self, o: Iv) -> Iv {
         let c = [
             self.lo * o.lo,
