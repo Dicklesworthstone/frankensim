@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/fs-qty",
     "crates/fs-obs",
+    "crates/fs-opt",
     "crates/fs-evidence",
     "crates/fs-substrate",
     "crates/fs-simd",
@@ -27,6 +28,7 @@ members = [
     "crates/fs-rep-mesh",
     "crates/fs-rep-frep",
     "crates/fs-mesh",
+    "crates/fs-opt",
     "crates/fs-vskeleton",
     "xtask",
 ]
