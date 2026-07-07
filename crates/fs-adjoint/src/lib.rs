@@ -27,7 +27,7 @@ pub mod timedep;
 pub mod verify;
 
 pub use hadamard::{compliance_shape_gradient, volume_shape_gradient};
-pub use ift::{AdjointReport, DensityPoisson, ift_gradient_matfree};
+pub use ift::{AdjointReport, DensityOp, DensityPoisson, ift_gradient_matfree};
 pub use sobolev::sobolev_smooth;
 pub use timedep::{HeatAdjoint, heat_initial_gradient};
 pub use verify::{GradientVerdict, verify_gradient};

@@ -31,8 +31,8 @@ pub struct AdjointReport {
 ///
 /// Returns (gradient, report). The adjoint system is solved with
 /// transposed GMRES sharing the operator's infrastructure.
-pub fn ift_gradient_matfree(
-    jacobian: &dyn LinearOp,
+pub fn ift_gradient_matfree<A: LinearOp>(
+    jacobian: &A,
     djdu: &[f64],
     djdp: &[f64],
     drdp_t: &dyn Fn(&[f64]) -> Vec<f64>,
