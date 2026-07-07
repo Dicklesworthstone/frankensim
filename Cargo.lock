@@ -880,6 +880,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-material"
+version = "0.0.1"
+dependencies = [
+ "fs-ad",
+ "fs-evidence",
+ "fs-math",
+ "fs-qty",
+]
+
+[[package]]
 name = "fs-math"
 version = "0.0.1"
 

@@ -1,0 +1,22 @@
+[package]
+name = "fs-material"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Constitutive-law kernel: elasticity/hyperelasticity/J2 plasticity/RC fiber laws with algorithmically consistent tangents, thermodynamic admissibility, model cards, calibration."
+
+[package.metadata.frankensim]
+layer = "L3"
+
+[dependencies]
+fs-ad = { path = "../fs-ad" }
+fs-evidence = { path = "../fs-evidence" }
+fs-math = { path = "../fs-math" }
+fs-qty = { path = "../fs-qty" }
+
+[dev-dependencies]
+
+[lints]
+workspace = true
