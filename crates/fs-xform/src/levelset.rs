@@ -163,7 +163,10 @@ mod tests {
             0u64,
             "outside band"
         );
-        assert_eq!(band.jacobian_action(&theta, x, 0.9).unwrap().to_bits(), 0u64);
+        assert_eq!(
+            band.jacobian_action(&theta, x, 0.9).unwrap().to_bits(),
+            0u64
+        );
         assert!(matches!(
             band.velocity(&[1.0], x, 0.0),
             Err(XformError::DofMismatch {
