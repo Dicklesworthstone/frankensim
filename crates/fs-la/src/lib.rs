@@ -10,6 +10,7 @@ pub mod eigen_complex;
 pub mod factor;
 pub mod gemm;
 pub mod mixed;
+pub mod rand_nla;
 
 pub use gemm::{gemm_f32, gemm_f64, gemm_mixed};
 
