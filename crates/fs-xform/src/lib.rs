@@ -72,7 +72,11 @@ impl fmt::Display for XformError {
                 f,
                 "theta length {got} does not match the parameterization's {expected} DOFs"
             ),
-            XformError::OutOfBounds { index, value, bound } => {
+            XformError::OutOfBounds {
+                index,
+                value,
+                bound,
+            } => {
                 write!(f, "theta[{index}] = {value} violates {bound}")
             }
             XformError::FoldOver { at, det } => write!(
@@ -107,12 +111,8 @@ pub trait Parameterization {
     ///
     /// # Errors
     /// [`XformError::DofMismatch`] on wrong-length θ or δθ.
-    fn jacobian_action(
-        &self,
-        theta: &[f64],
-        dtheta: &[f64],
-        x: Point3,
-    ) -> Result<Vec3, XformError>;
+    fn jacobian_action(&self, theta: &[f64], dtheta: &[f64], x: Point3)
+    -> Result<Vec3, XformError>;
 
     /// The spatial Jacobian `∂T/∂x` (rows = output components).
     ///
@@ -165,7 +165,10 @@ impl Composed<'_> {
     fn split<'t>(&self, theta: &'t [f64]) -> Result<(&'t [f64], &'t [f64]), XformError> {
         let (a, b) = (self.first.dof(), self.then.dof());
         if theta.len() != a + b {
-            return Err(XformError::DofMismatch { expected: a + b, got: theta.len() });
+            return Err(XformError::DofMismatch {
+                expected: a + b,
+                got: theta.len(),
+            });
         }
         Ok(theta.split_at(a))
     }
@@ -198,7 +201,11 @@ impl Parameterization for Composed<'_> {
             jb[1][0] * inner.x + jb[1][1] * inner.y + jb[1][2] * inner.z,
             jb[2][0] * inner.x + jb[2][1] * inner.y + jb[2][2] * inner.z,
         );
-        Ok(Vec3::new(outer.x + carried.x, outer.y + carried.y, outer.z + carried.z))
+        Ok(Vec3::new(
+            outer.x + carried.x,
+            outer.y + carried.y,
+            outer.z + carried.z,
+        ))
     }
 
     fn spatial_jacobian(&self, theta: &[f64], x: Point3) -> Result<[[f64; 3]; 3], XformError> {

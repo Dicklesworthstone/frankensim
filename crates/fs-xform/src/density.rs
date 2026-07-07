@@ -26,7 +26,10 @@ impl DensityField {
     /// [`XformError::DofMismatch`] / [`XformError::OutOfBounds`].
     pub fn validate(&self, theta: &[f64]) -> Result<(), XformError> {
         if theta.len() != self.cells {
-            return Err(XformError::DofMismatch { expected: self.cells, got: theta.len() });
+            return Err(XformError::DofMismatch {
+                expected: self.cells,
+                got: theta.len(),
+            });
         }
         for (index, &value) in theta.iter().enumerate() {
             if !(value.is_finite() && (0.0..=1.0).contains(&value)) {
@@ -47,7 +50,10 @@ impl DensityField {
     /// [`XformError::DofMismatch`] on a wrong-length δθ.
     pub fn perturbation<'a>(&self, dtheta: &'a [f64]) -> Result<&'a [f64], XformError> {
         if dtheta.len() != self.cells {
-            return Err(XformError::DofMismatch { expected: self.cells, got: dtheta.len() });
+            return Err(XformError::DofMismatch {
+                expected: self.cells,
+                got: dtheta.len(),
+            });
         }
         Ok(dtheta)
     }
@@ -62,15 +68,23 @@ mod tests {
         let field = DensityField { cells: 3 };
         assert!(field.validate(&[0.0, 0.5, 1.0]).is_ok());
         match field.validate(&[0.0, 1.5, 1.0]) {
-            Err(XformError::OutOfBounds { index: 1, value, .. }) => {
+            Err(XformError::OutOfBounds {
+                index: 1, value, ..
+            }) => {
                 assert!((value - 1.5).abs() < 1e-15);
             }
             other => panic!("expected OutOfBounds at index 1, got {other:?}"),
         }
         assert!(matches!(
             field.validate(&[0.0]),
-            Err(XformError::DofMismatch { expected: 3, got: 1 })
+            Err(XformError::DofMismatch {
+                expected: 3,
+                got: 1
+            })
         ));
-        assert_eq!(field.perturbation(&[0.1, 0.2, 0.3]).unwrap(), &[0.1, 0.2, 0.3]);
+        assert_eq!(
+            field.perturbation(&[0.1, 0.2, 0.3]).unwrap(),
+            &[0.1, 0.2, 0.3]
+        );
     }
 }

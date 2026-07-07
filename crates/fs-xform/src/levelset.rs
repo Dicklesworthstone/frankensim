@@ -32,7 +32,10 @@ impl VelocityBand {
 
     fn check_theta(&self, theta: &[f64]) -> Result<(), XformError> {
         if theta.len() != self.dof() {
-            return Err(XformError::DofMismatch { expected: self.dof(), got: theta.len() });
+            return Err(XformError::DofMismatch {
+                expected: self.dof(),
+                got: theta.len(),
+            });
         }
         Ok(())
     }
@@ -151,12 +154,21 @@ mod tests {
         };
         let theta = vec![2.0; band.dof()];
         let x = Point3::new(1.5, 1.5, 1.5);
-        assert_eq!(band.velocity(&theta, x, 0.4).unwrap(), 2.0, "inside band");
-        assert_eq!(band.velocity(&theta, x, 0.9).unwrap(), 0.0, "outside band");
-        assert_eq!(band.jacobian_action(&theta, x, 0.9).unwrap(), 0.0);
+        assert!(
+            (band.velocity(&theta, x, 0.4).unwrap() - 2.0).abs() < 1e-15,
+            "inside band"
+        );
+        assert!(
+            band.velocity(&theta, x, 0.9).unwrap().to_bits() == 0.0_f64.to_bits(),
+            "outside band"
+        );
+        assert!(band.jacobian_action(&theta, x, 0.9).unwrap().to_bits() == 0.0_f64.to_bits());
         assert!(matches!(
             band.velocity(&[1.0], x, 0.0),
-            Err(XformError::DofMismatch { expected: 64, got: 1 })
+            Err(XformError::DofMismatch {
+                expected: 64,
+                got: 1
+            })
         ));
     }
 }

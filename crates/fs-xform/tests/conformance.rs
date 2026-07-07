@@ -18,7 +18,9 @@ fn verdict(case: &str, detail: &str) {
 }
 
 fn lcg(seed: &mut u64) -> f64 {
-    *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+    *seed = seed
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407);
     ((*seed >> 11) as f64) / (1u64 << 53) as f64
 }
 
@@ -52,9 +54,15 @@ fn xf_001_jacobian_action_matches_finite_differences_and_is_linear() {
             let action = lever.jacobian_action(&theta, &dtheta, x).unwrap();
             // These levers are LINEAR in θ: the secant is exact.
             let eps = 1e-3;
-            let plus: Vec<f64> =
-                theta.iter().zip(&dtheta).map(|(t, d)| t + eps * d).collect();
-            let fd = sub(lever.apply(&plus, x).unwrap(), lever.apply(&theta, x).unwrap());
+            let plus: Vec<f64> = theta
+                .iter()
+                .zip(&dtheta)
+                .map(|(t, d)| t + eps * d)
+                .collect();
+            let fd = sub(
+                lever.apply(&plus, x).unwrap(),
+                lever.apply(&theta, x).unwrap(),
+            );
             for (a, f) in [(action.x, fd.x), (action.y, fd.y), (action.z, fd.z)] {
                 assert!(
                     (a - f / eps).abs() < 1e-9,
@@ -68,7 +76,10 @@ fn xf_001_jacobian_action_matches_finite_differences_and_is_linear() {
             assert!((double.x - 2.0 * action.x).abs() < 1e-12);
         }
     }
-    verdict("xf-001", "FFD + RBF actions exact against secants; linear in delta-theta");
+    verdict(
+        "xf-001",
+        "FFD + RBF actions exact against secants; linear in delta-theta",
+    );
 }
 
 #[test]
@@ -90,7 +101,10 @@ fn xf_002_dual_number_gate_on_the_ffd_warp() {
             let seed_dir = &dtheta;
             let mut vars = vec![fs_ad::Dual64::<1>::constant(0.0); n];
             for (i, v) in vars.iter_mut().enumerate() {
-                *v = fs_ad::Dual64::<1> { re: theta[i], eps: [seed_dir[i]] };
+                *v = fs_ad::Dual64::<1> {
+                    re: theta[i],
+                    eps: [seed_dir[i]],
+                };
             }
             let (u, v, w) = (x.x, x.y, x.z);
             let b = |t: f64| [1.0 - t, t];
@@ -109,14 +123,20 @@ fn xf_002_dual_number_gate_on_the_ffd_warp() {
         };
         let applied = ffd.apply(&theta, x).unwrap();
         let expected_value = [applied.x, applied.y, applied.z][comp];
-        assert!((value - expected_value).abs() < 1e-12, "dual primal drifted");
+        assert!(
+            (value - expected_value).abs() < 1e-12,
+            "dual primal drifted"
+        );
         let expected_dir = [action.x, action.y, action.z][comp];
         assert!(
             (derivative - expected_dir).abs() < 1e-12,
             "dual JVP {derivative} vs jacobian_action {expected_dir} (comp {comp})"
         );
     }
-    verdict("xf-002", "FFD jacobian_action agrees with dual-number JVP to 1e-12");
+    verdict(
+        "xf-002",
+        "FFD jacobian_action agrees with dual-number JVP to 1e-12",
+    );
 }
 
 #[test]
@@ -127,8 +147,14 @@ fn xf_003_rbf_frame_equivariance_and_foldover_refusal() {
     let rot_v = |v: [f64; 3]| [-v[1], v[0], v[2]];
     let centers = vec![Point3::new(0.2, 0.1, 0.0), Point3::new(-0.3, 0.4, 0.2)];
     let theta = [0.05, -0.02, 0.01, 0.03, 0.04, -0.06];
-    let morph = RbfMorph { centers: centers.clone(), radius: 1.0 };
-    let rotated = RbfMorph { centers: centers.iter().map(|&c| rot(c)).collect(), radius: 1.0 };
+    let morph = RbfMorph {
+        centers: centers.clone(),
+        radius: 1.0,
+    };
+    let rotated = RbfMorph {
+        centers: centers.iter().map(|&c| rot(c)).collect(),
+        radius: 1.0,
+    };
     let mut theta_rot = [0.0; 6];
     for i in 0..2 {
         let r = rot_v([theta[3 * i], theta[3 * i + 1], theta[3 * i + 2]]);
@@ -138,29 +164,43 @@ fn xf_003_rbf_frame_equivariance_and_foldover_refusal() {
     let y = morph.apply(&theta, x).unwrap();
     let y_rot = rotated.apply(&theta_rot, rot(x)).unwrap();
     let expect = rot(y);
-    for (a, b) in [(y_rot.x, expect.x), (y_rot.y, expect.y), (y_rot.z, expect.z)] {
+    for (a, b) in [
+        (y_rot.x, expect.x),
+        (y_rot.y, expect.y),
+        (y_rot.z, expect.z),
+    ] {
         assert!((a - b).abs() < 1e-14, "equivariance broke: {a} vs {b}");
     }
     // Fold-over: a violent handle collapse must refuse with location+det.
     // The fold forms on the COMPRESSION side of the handle, so probe a
     // line through the center covering both sides.
     let violent = [-3.0, 0.0, 0.0, 0.0, 0.0, 0.0];
-    let samples: Vec<Point3> =
-        (0..40).map(|i| Point3::new(-0.3 + 0.025 * f64::from(i), 0.1, 0.0)).collect();
+    let samples: Vec<Point3> = (0..40)
+        .map(|i| Point3::new(-0.3 + 0.025 * f64::from(i), 0.1, 0.0))
+        .collect();
     match detect_foldover(&morph, &violent, &samples) {
         Err(XformError::FoldOver { det, .. }) => assert!(det <= 0.0),
         other => panic!("violent collapse must fold: {other:?}"),
     }
     // The gentle θ does not fold.
     detect_foldover(&morph, &theta, &samples).expect("gentle morph stays invertible");
-    verdict("xf-003", "RBF equivariant under rotation; fold-over refuses structurally");
+    verdict(
+        "xf-003",
+        "RBF equivariant under rotation; fold-over refuses structurally",
+    );
 }
 
 #[test]
 fn xf_004_composition_chain_rule_converges_at_second_order() {
     let ffd = unit_ffd();
-    let rbf = RbfMorph { centers: vec![Point3::new(0.5, 0.5, 0.5)], radius: 0.9 };
-    let composed = Composed { first: &ffd, then: &rbf };
+    let rbf = RbfMorph {
+        centers: vec![Point3::new(0.5, 0.5, 0.5)],
+        radius: 0.9,
+    };
+    let composed = Composed {
+        first: &ffd,
+        then: &rbf,
+    };
     let n = composed.dof();
     let mut seed = 0x5EED_C0A2_0000_0041u64;
     let theta: Vec<f64> = (0..n).map(|_| 0.15 * (lcg(&mut seed) - 0.5)).collect();
@@ -170,8 +210,16 @@ fn xf_004_composition_chain_rule_converges_at_second_order() {
     // Central differences at ε and ε/2: the composed map is nonlinear in
     // θ jointly, so the FD error is O(ε²) — the ratio must approach 4.
     let fd = |eps: f64| -> Vec3 {
-        let plus: Vec<f64> = theta.iter().zip(&dtheta).map(|(t, d)| t + eps * d).collect();
-        let minus: Vec<f64> = theta.iter().zip(&dtheta).map(|(t, d)| t - eps * d).collect();
+        let plus: Vec<f64> = theta
+            .iter()
+            .zip(&dtheta)
+            .map(|(t, d)| t + eps * d)
+            .collect();
+        let minus: Vec<f64> = theta
+            .iter()
+            .zip(&dtheta)
+            .map(|(t, d)| t - eps * d)
+            .collect();
         let d = sub(
             composed.apply(&plus, x).unwrap(),
             composed.apply(&minus, x).unwrap(),
@@ -233,7 +281,8 @@ fn xf_005_levelset_velocity_drives_advection() {
         let phi_snapshot = phi.clone();
         let v = |i: usize, j: usize, k: usize| -> f64 {
             let idx = (i * dims[1] + j) * dims[2] + k;
-            band.velocity(&theta, node_pos(i, j, k), phi_snapshot[idx]).unwrap()
+            band.velocity(&theta, node_pos(i, j, k), phi_snapshot[idx])
+                .unwrap()
         };
         advect_sdf(&mut phi, dims, spacing, &v, dt);
     }
@@ -269,10 +318,23 @@ fn xf_006_density_and_dof_diagnostics_teach() {
     }
     let ffd = unit_ffd();
     match ffd.apply(&[1.0, 2.0], Point3::new(0.5, 0.5, 0.5)) {
-        Err(XformError::DofMismatch { expected: 24, got: 2 }) => {}
+        Err(XformError::DofMismatch {
+            expected: 24,
+            got: 2,
+        }) => {}
         other => panic!("dof mismatch must teach: {other:?}"),
     }
-    let msg = XformError::FoldOver { at: Point3::new(1.0, 2.0, 3.0), det: -0.5 }.to_string();
-    assert!(msg.contains("reduce the step"), "refusals must teach: {msg}");
-    verdict("xf-006", "structured diagnostics name index, expected DOFs, and fixes");
+    let msg = XformError::FoldOver {
+        at: Point3::new(1.0, 2.0, 3.0),
+        det: -0.5,
+    }
+    .to_string();
+    assert!(
+        msg.contains("reduce the step"),
+        "refusals must teach: {msg}"
+    );
+    verdict(
+        "xf-006",
+        "structured diagnostics name index, expected DOFs, and fixes",
+    );
 }

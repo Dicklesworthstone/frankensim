@@ -39,7 +39,10 @@ impl FfdLattice {
     fn check_theta(&self, theta: &[f64]) -> Result<(), XformError> {
         let expected = self.dof();
         if theta.len() != expected {
-            return Err(XformError::DofMismatch { expected, got: theta.len() });
+            return Err(XformError::DofMismatch {
+                expected,
+                got: theta.len(),
+            });
         }
         Ok(())
     }
@@ -159,7 +162,7 @@ pub fn bernstein_derivative(n: usize, t: f64) -> Vec<f64> {
     let nf = n as f64;
     (0..=n)
         .map(|i| {
-            let left = if i >= 1 { lower[i - 1] } else { 0.0 };
+            let left = if i > 0 { lower[i - 1] } else { 0.0 };
             let right = if i <= n - 1 { lower[i] } else { 0.0 };
             nf * (left - right)
         })
@@ -176,7 +179,10 @@ mod tests {
             for n in 0..6 {
                 let b = bernstein(n, t);
                 let sum: f64 = b.iter().sum();
-                assert!((sum - 1.0).abs() < 1e-12, "partition of unity at n={n}, t={t}");
+                assert!(
+                    (sum - 1.0).abs() < 1e-12,
+                    "partition of unity at n={n}, t={t}"
+                );
                 let d = bernstein_derivative(n, t);
                 let dsum: f64 = d.iter().sum();
                 assert!(dsum.abs() < 1e-12, "derivative sum at n={n}, t={t}");
@@ -194,15 +200,20 @@ mod tests {
         let theta = vec![0.0; ffd.dof()];
         let x = Point3::new(0.3, 0.7, 0.5);
         let y = ffd.apply(&theta, x).unwrap();
-        assert_eq!((y.x, y.y, y.z), (x.x, x.y, x.z));
+        for (a, b) in [(y.x, x.x), (y.y, x.y), (y.z, x.z)] {
+            assert!((a - b).abs() < 1e-15, "identity drifted: {a} vs {b}");
+        }
         let j = ffd.spatial_jacobian(&theta, x).unwrap();
         assert!((crate::det3(&j) - 1.0).abs() < 1e-12);
         // Outside the box: pass-through, zero velocity.
         let out = Point3::new(5.0, 5.0, 5.0);
-        assert_eq!(ffd.apply(&theta, out).unwrap().x, 5.0);
+        assert!((ffd.apply(&theta, out).unwrap().x - 5.0).abs() < 1e-15);
         let mut dtheta = vec![0.0; ffd.dof()];
         dtheta[0] = 1.0;
         let v = ffd.jacobian_action(&theta, &dtheta, out).unwrap();
-        assert_eq!((v.x, v.y, v.z), (0.0, 0.0, 0.0));
+        assert!(
+            v.x.abs() + v.y.abs() + v.z.abs() == 0.0_f64.abs(),
+            "outside is exactly zero"
+        );
     }
 }

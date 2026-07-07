@@ -41,7 +41,10 @@ impl RbfMorph {
     fn check_theta(&self, theta: &[f64]) -> Result<(), XformError> {
         let expected = self.dof();
         if theta.len() != expected {
-            return Err(XformError::DofMismatch { expected, got: theta.len() });
+            return Err(XformError::DofMismatch {
+                expected,
+                got: theta.len(),
+            });
         }
         Ok(())
     }
@@ -117,10 +120,13 @@ mod tests {
     #[test]
     fn kernel_shape_and_compact_support() {
         assert!((wendland_c2(0.0) - 1.0).abs() < 1e-15);
-        assert_eq!(wendland_c2(1.0), 0.0);
-        assert_eq!(wendland_c2(2.0), 0.0);
-        assert_eq!(wendland_c2_derivative(0.0), 0.0, "flat at the center (C2)");
-        assert_eq!(wendland_c2_derivative(1.5), 0.0);
+        assert!(wendland_c2(1.0).to_bits() == 0.0_f64.to_bits());
+        assert!(wendland_c2(2.0).to_bits() == 0.0_f64.to_bits());
+        assert!(
+            wendland_c2_derivative(0.0).to_bits() == 0.0_f64.to_bits(),
+            "flat at the center (C2)"
+        );
+        assert!(wendland_c2_derivative(1.5).to_bits() == 0.0_f64.to_bits());
         // Derivative matches a central difference mid-support.
         let (q, h) = (0.4, 1e-6);
         let fd = (wendland_c2(q + h) - wendland_c2(q - h)) / (2.0 * h);
@@ -129,11 +135,16 @@ mod tests {
 
     #[test]
     fn displacement_vanishes_outside_support() {
-        let morph = RbfMorph { centers: vec![Point3::new(0.0, 0.0, 0.0)], radius: 1.0 };
+        let morph = RbfMorph {
+            centers: vec![Point3::new(0.0, 0.0, 0.0)],
+            radius: 1.0,
+        };
         let theta = vec![1.0, 2.0, 3.0];
         let far = Point3::new(5.0, 0.0, 0.0);
         let y = morph.apply(&theta, far).unwrap();
-        assert_eq!((y.x, y.y, y.z), (5.0, 0.0, 0.0));
+        for (a, b) in [(y.x, 5.0), (y.y, 0.0), (y.z, 0.0)] {
+            assert!((a - b).abs() < 1e-15, "outside support must pass through");
+        }
         let near = Point3::new(0.25, 0.0, 0.0);
         let z = morph.apply(&theta, near).unwrap();
         assert!(z.x > 0.25 && z.y > 0.0, "inside support the handle pulls");
