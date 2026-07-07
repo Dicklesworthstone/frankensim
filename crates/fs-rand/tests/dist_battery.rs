@@ -10,9 +10,9 @@ const KEY: StreamKey = StreamKey { seed: 0xD157_0001, kernel: 11, tile: 3 };
 
 #[test]
 fn gamma_moments_and_replay() {
+    const N: usize = 200_000;
     for &alpha in &[0.5f64, 1.0, 2.5, 7.0] {
         let mut s = KEY.stream();
-        const N: usize = 200_000;
         let (mut m1, mut m2) = (0.0f64, 0.0f64);
         for _ in 0..N {
             let g = s.next_gamma(alpha);
@@ -52,8 +52,8 @@ fn gamma_moments_and_replay() {
 
 #[test]
 fn beta_and_dirichlet_moments() {
-    let mut s = KEY.stream();
     const N: usize = 100_000;
+    let mut s = KEY.stream();
     let (a, b) = (2.0f64, 5.0f64);
     let mut m1 = 0.0f64;
     for _ in 0..N {
@@ -91,6 +91,7 @@ fn beta_and_dirichlet_moments() {
 
 #[test]
 fn alias_table_bitwise_construction_and_chi_square() {
+    const N: usize = 200_000;
     let weights = [1.0f64, 2.0, 3.0, 10.0, 0.5];
     let t1 = AliasTable::new(&weights);
     let t2 = AliasTable::new(&weights);
@@ -106,7 +107,6 @@ fn alias_table_bitwise_construction_and_chi_square() {
     let _ = t1.sample(&mut s);
     assert_eq!(s.index() - before, 1, "alias sampling must consume exactly 1 draw");
     // Chi-square against the pmf.
-    const N: usize = 200_000;
     let total: f64 = weights.iter().sum();
     let mut counts = [0u32; 5];
     let mut st = Stream::resume(KEY, 90_000);
@@ -133,9 +133,9 @@ fn vmf_geometry_and_fixed_consumption() {
         let n = (raw[0] * raw[0] + raw[1] * raw[1] + raw[2] * raw[2]).sqrt();
         [raw[0] / n, raw[1] / n, raw[2] / n]
     };
+    const N: usize = 50_000;
     for &kappa in &[1.0f64, 10.0, 100.0] {
         let mut s = KEY.stream();
-        const N: usize = 50_000;
         let mut resultant = [0.0f64; 3];
         for _ in 0..N {
             let before = s.index();
@@ -171,8 +171,8 @@ fn vmf_geometry_and_fixed_consumption() {
 
 #[test]
 fn truncated_variants_respect_bounds() {
-    let mut s = KEY.stream();
     const N: usize = 100_000;
+    let mut s = KEY.stream();
     // Truncated exponential: in [0, cap], exactly 1 draw each.
     let cap = 1.5f64;
     for _ in 0..N / 10 {
@@ -204,7 +204,7 @@ fn truncated_variants_respect_bounds() {
 }
 
 /// Recorded on aarch64-apple (M4 Pro); must match on x86-64 (trj).
-const GOLDEN_HASH: u64 = 0x0; // placeholder: set from first run
+const GOLDEN_HASH: u64 = 0x4224_6e28_56de_673c;
 
 #[test]
 fn dist_golden_hash() {
