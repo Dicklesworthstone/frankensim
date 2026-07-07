@@ -1,0 +1,25 @@
+[package]
+name = "fs-constraint"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Constraint calculus: typed kinds with optimizer treatments, evidence-typed evaluations, minimal unsat cores, and ranked calibrated repairs."
+
+[package.metadata.frankensim]
+layer = "L4"
+
+[dependencies]
+fs-evidence = { path = "../fs-evidence" }
+fs-exec = { path = "../fs-exec" }
+fs-obs = { path = "../fs-obs" }
+fs-opt = { path = "../fs-opt" }
+fs-qty = { path = "../fs-qty" }
+
+[dev-dependencies]
+asupersync = { path = "../../../asupersync" }
+fs-alloc = { path = "../fs-alloc" }
+
+[lints]
+workspace = true

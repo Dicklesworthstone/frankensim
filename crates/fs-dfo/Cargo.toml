@@ -1,0 +1,21 @@
+[package]
+name = "fs-dfo"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Derivative-free optimization engines: CMA-ES (IGO form), BIPOP restarts, Nelder-Mead."
+
+[package.metadata.frankensim]
+layer = "L4"
+
+[dependencies]
+fs-la = { path = "../fs-la" }
+fs-math = { path = "../fs-math" }
+fs-rand = { path = "../fs-rand" }
+
+[dev-dependencies]
+
+[lints]
+workspace = true

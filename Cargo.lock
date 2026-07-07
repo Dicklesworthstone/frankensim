@@ -772,6 +772,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-constraint"
+version = "0.0.1"
+dependencies = [
+ "asupersync 0.3.5",
+ "fs-alloc",
+ "fs-evidence",
+ "fs-exec",
+ "fs-obs",
+ "fs-opt",
+ "fs-qty",
+]
+
+[[package]]
+name = "fs-dfo"
+version = "0.0.1"
+dependencies = [
+ "fs-la",
+ "fs-math",
+ "fs-rand",
+]
+
+[[package]]
 name = "fs-eproc"
 version = "0.0.1"
 dependencies = [
@@ -798,6 +820,13 @@ dependencies = [
 
 [[package]]
 name = "fs-fft"
+version = "0.0.1"
+dependencies = [
+ "fs-math",
+]
+
+[[package]]
+name = "fs-ga"
 version = "0.0.1"
 dependencies = [
  "fs-math",
