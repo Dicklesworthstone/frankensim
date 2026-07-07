@@ -11,6 +11,7 @@ description = "Design Ledger v0: content-addressed artifacts, event-sourced ops,
 layer = "L6"
 
 [dependencies]
+fs-evidence = { path = "../fs-evidence" }
 fsqlite = { path = "../../../frankensqlite/crates/fsqlite" }
 
 [dev-dependencies]

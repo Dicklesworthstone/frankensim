@@ -52,6 +52,20 @@ on fs-obs only.
 - `to_ledger_row_json` on evidence and cards — the `evidence` /
   `model_cards` table rows (canonical order, no clocks, no addresses).
 
+- `color` module (bead qmao.1): the THREE-COLOR epistemic schema —
+  `Color::{Verified{lo,hi}, Validated{regime: ValidityDomain, dataset},
+  Estimated{estimator, dispersion}}` with the `ColorRank` lattice
+  (verified > validated > estimated), the TOTAL conservative pairwise
+  `compose` (result rank = min of operands; verified intervals combine
+  per `IntervalOp`; validated regimes INTERSECT; estimated absorbs
+  everything with additive dispersion), `check_regime` (validated is a
+  REGIONAL property: exiting or failing to report a regime axis
+  AUTO-DEMOTES to estimated with a `Demotion` flag), `verified_from`
+  (the only door to a verified color — non-enclosure certificates
+  refuse with the laundering teaching error), and `color_of` (the
+  honest bridge from existing Evidence receipts). Write-time
+  enforcement lives HELM-side in fs-ledger over these types.
+
 ## Invariants
 1. Conservativeness (G0, evd-001): composed enclosures contain every
    propagation of operand-enclosed true values (300k seeded samples);
@@ -103,6 +117,14 @@ out-of-distribution refusal on a synthetic two-fidelity corpus, bracketing
 spread reporting with deterministic schema-valid rows, and certification
 poisoning. In-module suites cover the certificate algebra, validity laws,
 tie-breaking, provenance chaining, and card rendering.
+
+## No-claim boundaries (colors)
+
+- Verified-interval composition here covers Add/Mul/Hull; the full
+  ledger operation algebra (and outward rounding) composes through
+  fs-ivl when wired.
+- Estimated dispersion combines additively (conservative); calibrated
+  dispersion algebra joins the color-probes bead.
 
 ## No-claim boundaries
 - Statistical composition is CONSERVATIVE-WEAKEST v1 (half-widths add,

@@ -36,9 +36,14 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 mod cards;
+pub mod color;
 mod discrepancy;
 
 pub use cards::{Ambition, ModelCard, ModelRegistry, RegistryError};
+pub use color::{
+    Color, ColorError, ColorRank, Demotion, IntervalOp, check_regime, color_of, compose,
+    intersect_domains, verified_from,
+};
 pub use discrepancy::{
     DiscrepancyBand, DiscrepancyModel, FidelityPair, FitError, ModelBracket, OutOfDomain,
 };
@@ -266,6 +271,12 @@ impl ValidityDomain {
     #[must_use]
     pub fn unconstrained() -> Self {
         ValidityDomain::default()
+    }
+
+    /// The declared axis bounds (read-only view).
+    #[must_use]
+    pub fn bounds(&self) -> &BTreeMap<String, (f64, f64)> {
+        &self.bounds
     }
 
     /// Constrain one parameter to `[lo, hi]`.

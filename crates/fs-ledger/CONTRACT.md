@@ -119,6 +119,20 @@ consistency, and a kill -9 battery during fork traffic. Unit tests in
 `src/lib.rs`, `src/hash.rs`, and `src/travel.rs` cover the API surface and
 edge cases.
 
+## Three-color write gate (bead qmao.1)
+
+`colors::ColorGraph` is the WRITE-TIME gatekeeper over fs-evidence's
+color schema: derived nodes' colors are COMPUTED from their parents
+(with regime re-checks against the current execution state,
+auto-demoting validated parents whose regime the state has exited,
+demotion events logged); a claimed color that outranks the derivation
+REFUSES with the capping parents named (the laundering refusal, G3
+gauntlet-tested); the only override is a signed `Waiver` that appears
+in the ledger row AND participates in the node's provenance hash —
+it cannot be dropped without changing history. Rows are canonical
+JSON lines for the event stream. Note: this module adds fs-evidence
+as a runtime dependency (the colors are its types).
+
 ## No-claim boundaries
 
 - Multi-process multi-writer access: unclaimed (FrankenSQLite documents this

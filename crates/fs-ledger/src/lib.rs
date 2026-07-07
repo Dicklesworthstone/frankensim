@@ -17,10 +17,12 @@
 //! Time travel, forkable worlds, `explain()`, the replay audit, and GC
 //! live in the [`travel`] module (schema v2).
 
+pub mod colors;
 pub mod hash;
 pub mod schema;
 pub mod travel;
 
+pub use colors::{ColorGraph, ColorNode, ColorWriteError, Waiver};
 pub use hash::{Blake3, ContentHash, hash_bytes};
 pub use schema::{ALL_TABLES, SCHEMA_VERSION, STORAGE_CHUNK_LEN, V1_TABLES};
 pub use travel::{
