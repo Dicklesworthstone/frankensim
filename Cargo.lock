@@ -886,8 +886,14 @@ dependencies = [
  "fs-alloc",
  "fs-evidence",
  "fs-exec",
+ "fs-ivl",
  "fs-obs",
+ "fs-sparse",
 ]
+
+[[package]]
+name = "fs-iface"
+version = "0.0.1"
 
 [[package]]
 name = "fs-img"
@@ -932,6 +938,10 @@ dependencies = [
  "fs-rand",
  "fs-soa",
 ]
+
+[[package]]
+name = "fs-ladder"
+version = "0.0.1"
 
 [[package]]
 name = "fs-ledger"
@@ -1170,6 +1180,19 @@ dependencies = [
 [[package]]
 name = "fs-soa-derive"
 version = "0.0.1"
+
+[[package]]
+name = "fs-solver"
+version = "0.0.1"
+dependencies = [
+ "fs-feec",
+ "fs-la",
+ "fs-math",
+ "fs-opdsl",
+ "fs-rand",
+ "fs-sparse",
+ "fs-tilelang",
+]
 
 [[package]]
 name = "fs-sparse"
