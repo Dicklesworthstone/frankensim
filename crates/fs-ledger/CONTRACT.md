@@ -56,6 +56,22 @@ STRICT-legal `TEXT` with `json_valid()` CHECKs (Appendix D as written is not
 valid STRICT SQL), and `artifacts` gains `len`/`chunk_count` +
 `artifact_chunks` for bounded-memory large-field storage.
 
+- `tombstone` module (addendum Proposal E, bead lmp4.13): the TOMBSTONE
+  LEDGER — swarm memory's cheap half. `Descriptor` (name + dimensioned
+  params) computes a π-space signature via fs-regime's exact Buckingham
+  machinery (the PRIMARY, domain-native index: dimensionally-equivalent
+  deaths collide across raw parameters) and a deterministic hashed
+  feature-vector embedding (tokens + magnitude decades; Franken-only, no
+  external model). `TombstoneIndex`: automatic appends on falsification
+  kills (carrying the Proposal-6 falsifier JSON) and on abandoned
+  branches ABOVE a cost threshold; `pre_exploration_check` (the
+  orchestrator gate — π-space first, embedding second);
+  `fund_with_distinguisher` VALIDATES the cited feature (must name a
+  real parameter differing by ≥ 0.05 decades — free text refused) and
+  logs accepted distinguishers on the tombstone so they accumulate;
+  `re_exploration_rate` is the proposal's kill-criterion metric;
+  `flush_to_ledger` persists rows as `tombstone` events.
+
 ## Invariants
 
 1. Artifact identity = BLAKE3 of content; identical bytes dedupe to one row
@@ -151,3 +167,17 @@ as a runtime dependency (the colors are its types).
 - Multi-GiB single artifacts: chunk storage bounds row sizes, but the
   streaming path is verified at the tens-of-MiB scale only so far; fsqlite
   transaction memory behavior at multi-GiB scale is unmeasured.
+
+## No-claim boundaries (tombstones)
+
+- Retrieval is exact-scan over in-memory indexes (linear); ANN/sublinear
+  retrieval and the FrankenTorch encoder upgrade land when volume
+  demands them — the deterministic feature vector is the documented
+  degradation path (polish note honored in reverse).
+- π-signature comparison requires the SAME group structure; explorations
+  with different physics never collide (and are never suppressed).
+- The orchestrator PROTOCOL (querying before funding) is enforced by the
+  agent-orchestration layer; this module provides the gate, the
+  validation, and the metric.
+- Descriptor parameters must be positive (π-space is multiplicative);
+  signed features belong in the embedding text, not the signature.

@@ -8,9 +8,7 @@
 //! accumulate); the re-exploration-rate metric and ledger persistence
 //! round out the loop.
 
-use fs_ledger::tombstone::{
-    Descriptor, ExplorationVerdict, TombstoneIndex, pi_distance,
-};
+use fs_ledger::tombstone::{Descriptor, ExplorationVerdict, TombstoneIndex, pi_distance};
 use fs_qty::{Dims, QtyAny};
 use std::collections::BTreeMap;
 
@@ -24,10 +22,19 @@ fn verdict(case: &str, detail: &str) {
 /// A bracket-in-crossflow descriptor: (ρ, V, L, μ) → one π group (Re).
 fn bracket(name: &str, rho: f64, v: f64, l: f64, mu: f64) -> Descriptor {
     let mut params = BTreeMap::new();
-    params.insert("density".to_string(), QtyAny::new(rho, Dims([-3, 1, 0, 0, 0])));
-    params.insert("velocity".to_string(), QtyAny::new(v, Dims([1, 0, -1, 0, 0])));
+    params.insert(
+        "density".to_string(),
+        QtyAny::new(rho, Dims([-3, 1, 0, 0, 0])),
+    );
+    params.insert(
+        "velocity".to_string(),
+        QtyAny::new(v, Dims([1, 0, -1, 0, 0])),
+    );
     params.insert("length".to_string(), QtyAny::new(l, Dims([1, 0, 0, 0, 0])));
-    params.insert("viscosity".to_string(), QtyAny::new(mu, Dims([-1, 1, -1, 0, 0])));
+    params.insert(
+        "viscosity".to_string(),
+        QtyAny::new(mu, Dims([-1, 1, -1, 0, 0])),
+    );
     Descriptor {
         name: name.to_string(),
         params,
@@ -48,7 +55,10 @@ fn tb_001_automatic_appends() {
     );
     assert_eq!(index.len(), 1);
     let t = index.get(idx).expect("present");
-    assert!(t.evidence.contains("conservation"), "falsifier evidence carried");
+    assert!(
+        t.evidence.contains("conservation"),
+        "falsifier evidence carried"
+    );
     // Abandoned branch: appends ONLY above the cost threshold.
     let below = index.record_abandoned_branch(
         bracket("cheap probe", 1000.0, 0.5, 0.01, 1e-3),
@@ -109,10 +119,13 @@ fn tb_002_pi_space_unifies_equivalent_deaths_with_precision() {
         index.pi_neighbors(&creeping).is_empty(),
         "π-different exploration is NOT suppressed"
     );
-    match index.pre_exploration_check(&creeping) {
-        ExplorationVerdict::Clear => {}
-        other => panic!("novel work must fund: {other:?}"),
-    }
+    assert!(
+        matches!(
+            index.pre_exploration_check(&creeping),
+            ExplorationVerdict::Clear
+        ),
+        "novel work must fund"
+    );
     verdict(
         "tb-002",
         "±5% Re collides across materials; decades-different Re stays fundable \
@@ -133,11 +146,21 @@ fn tb_003_embedding_index_recall_and_precision() {
     );
     // Near-duplicate descriptor (same tokens, same decades): recalled.
     let near = bracket("wing spar lattice infill", 2650.0, 11.0, 0.42, 1.8e-5);
-    assert_eq!(index.embed_neighbors(&near), vec![0], "token+decade twin recalled");
+    assert_eq!(
+        index.embed_neighbors(&near),
+        vec![0],
+        "token+decade twin recalled"
+    );
     // Distinct problem (different tokens AND decades): not matched.
     let far = bracket("heat sink fin array", 8000.0, 0.02, 0.003, 1.0e-3);
-    assert!(index.embed_neighbors(&far).is_empty(), "distinct work not matched");
-    verdict("tb-003", "embedding recalls token/decade twins, passes distinct work");
+    assert!(
+        index.embed_neighbors(&far).is_empty(),
+        "distinct work not matched"
+    );
+    verdict(
+        "tb-003",
+        "embedding recalls token/decade twins, passes distinct work",
+    );
 }
 
 #[test]
@@ -167,12 +190,17 @@ fn tb_004_gate_blocks_and_validates_distinguishers() {
     // A named parameter that BARELY differs is refused with the delta.
     let same = index.fund_with_distinguisher(&retry, neighbor, "velocity");
     let refusal = same.expect_err("2% velocity is the same death");
-    assert!(refusal.what.contains("decades"), "teaches the threshold: {}", refusal.what);
+    assert!(
+        refusal.what.contains("decades"),
+        "teaches the threshold: {}",
+        refusal.what
+    );
     // A genuinely different named parameter funds — and is LOGGED.
     let mut novel = retry.clone();
-    novel
-        .params
-        .insert("velocity".to_string(), QtyAny::new(90.0, Dims([1, 0, -1, 0, 0])));
+    novel.params.insert(
+        "velocity".to_string(),
+        QtyAny::new(90.0, Dims([1, 0, -1, 0, 0])),
+    );
     index
         .fund_with_distinguisher(&novel, neighbor, "velocity")
         .expect("3.7x velocity is a real distinguisher");
@@ -203,7 +231,10 @@ fn tb_005_metrics_and_ledger_persistence() {
     let _ = index.pre_exploration_check(&bracket("retry", 1.225, 24.1, 0.12, 1.81e-5));
     let (clear, blocked, funded, rate) = index.re_exploration_rate();
     assert_eq!((clear, blocked, funded), (2, 1, 0));
-    assert!((rate - 1.0 / 3.0).abs() < 1e-12, "rate = blocked/(clear+blocked)");
+    assert!(
+        (rate - 1.0 / 3.0).abs() < 1e-12,
+        "rate = blocked/(clear+blocked)"
+    );
     // Ledger persistence: tombstone events written and payload-complete.
     let dir = std::env::temp_dir().join(format!("fs-tombstone-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("mkdir");

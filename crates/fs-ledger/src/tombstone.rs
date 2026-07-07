@@ -108,9 +108,7 @@ impl Descriptor {
     #[must_use]
     pub fn embedding(&self) -> [f64; EMBED_DIM] {
         let mut v = [0.0f64; EMBED_DIM];
-        let bucket = |text: &str| -> usize {
-            (fs_obs_fnv(text.as_bytes()) as usize) % EMBED_DIM
-        };
+        let bucket = |text: &str| -> usize { (fs_obs_fnv(text.as_bytes()) as usize) % EMBED_DIM };
         for token in self.name.split(|c: char| !c.is_alphanumeric()) {
             if !token.is_empty() {
                 v[bucket(&token.to_ascii_lowercase())] += 1.0;
