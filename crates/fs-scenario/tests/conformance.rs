@@ -1,0 +1,550 @@
+//! fs-scenario conformance suite (the tfz.1 bead). Acceptance: scenario
+//! values round-trip IR ↔ memory ↔ ledger; compatibility checks catch
+//! seeded violations with structured fixes; ensembles reproduce bitwise
+//! from seed; Kanai–Tajimi realizations match the target spectrum
+//! statistically; frame transforms obey G0 composition laws; unit
+//! coherence holds through non-SI spellings (G3).
+
+use fs_ga::{Motor, Point, Quat, Vec3};
+use fs_qty::{Dims, QtyAny};
+use fs_scenario::{
+    BcKind, BcValue, BoundaryCondition, ChebProfile, Combination, Compat, ContactLaw, ContactModel,
+    Environment, Frame, FrameId, FrameMotion, Interp, LoadCase, Physics, Scenario, SpectrumModel,
+    StochasticEnsemble, TimeSignal,
+    ir::{parse_ir, write_ir},
+};
+
+fn verdict(case: &str, detail: &str) {
+    println!(
+        "{{\"suite\":\"fs-scenario/conformance\",\"case\":\"{case}\",\"verdict\":\"pass\",\
+         \"detail\":\"{detail}\"}}"
+    );
+}
+
+const MASS_FLOW: Dims = Dims([0, 1, -1, 0, 0]);
+const PRESSURE: Dims = Dims([-1, 1, -2, 0, 0]);
+const RATE: Dims = Dims([0, 0, -1, 0, 0]);
+const TIME: Dims = Dims([0, 0, 1, 0, 0]);
+
+/// The fixture's ensemble battery (all three model families).
+fn fixture_ensembles() -> Vec<StochasticEnsemble> {
+    vec![
+        StochasticEnsemble {
+            name: "gm".to_string(),
+            seed: 42,
+            members: 8,
+            duration: QtyAny::new(20.48, TIME),
+            dt: QtyAny::new(0.04, TIME),
+            model: SpectrumModel::KanaiTajimi {
+                s0: 0.011,
+                omega_g: QtyAny::new(12.5, RATE),
+                zeta_g: 0.6,
+            },
+        },
+        StochasticEnsemble {
+            name: "gusts".to_string(),
+            seed: 42,
+            members: 4,
+            duration: QtyAny::new(10.0, TIME),
+            dt: QtyAny::new(0.05, TIME),
+            model: SpectrumModel::Dryden {
+                sigma: QtyAny::new(1.8, Dims([1, 0, -1, 0, 0])),
+                length_scale: QtyAny::new(200.0, Dims([1, 0, 0, 0, 0])),
+                mean_speed: QtyAny::new(12.0, Dims([1, 0, -1, 0, 0])),
+            },
+        },
+        StochasticEnsemble {
+            name: "rheology".to_string(),
+            seed: 42,
+            members: 16,
+            duration: QtyAny::new(1.0, TIME),
+            dt: QtyAny::new(1.0, TIME),
+            model: SpectrumModel::CarreauBand {
+                eta_zero: [
+                    QtyAny::new(8.0, Dims([-1, 1, -1, 0, 0])),
+                    QtyAny::new(15.0, Dims([-1, 1, -1, 0, 0])),
+                ],
+                eta_inf: [
+                    QtyAny::new(0.08, Dims([-1, 1, -1, 0, 0])),
+                    QtyAny::new(0.15, Dims([-1, 1, -1, 0, 0])),
+                ],
+                lambda: [QtyAny::new(0.5, TIME), QtyAny::new(2.0, TIME)],
+                n: [0.3, 0.6],
+            },
+        },
+    ]
+}
+
+/// The fixture's base boundary conditions (all value kinds).
+fn fixture_base_bcs() -> Vec<BoundaryCondition> {
+    let mut s = Scenario::new("tmp", 0, Environment::earth_lab());
+    s.base_bcs.push(BoundaryCondition {
+        region: "inlet".to_string(),
+        physics: Physics::IncompressibleFlow,
+        kind: BcKind::MassFlowInlet,
+        value: Some(BcValue::Signal(TimeSignal::Table {
+            times: vec![0.0, 1.0, 2.5],
+            values: vec![0.0, 0.75, 0.75],
+            dims: MASS_FLOW,
+            interp: Interp::Linear,
+        })),
+        compatibility: Some(Compat::Incompressible),
+        frame: 1,
+    });
+    s.base_bcs.push(BoundaryCondition {
+        region: "spout".to_string(),
+        physics: Physics::IncompressibleFlow,
+        kind: BcKind::PressureOutlet,
+        value: Some(BcValue::Uniform(QtyAny::new(101_325.0, PRESSURE))),
+        compatibility: None,
+        frame: 0,
+    });
+    s.base_bcs.push(BoundaryCondition {
+        region: "walls".to_string(),
+        physics: Physics::IncompressibleFlow,
+        kind: BcKind::WallNoSlip,
+        value: None,
+        compatibility: None,
+        frame: 0,
+    });
+    s.base_bcs.push(BoundaryCondition {
+        region: "inlet".to_string(),
+        physics: Physics::Thermal,
+        kind: BcKind::Dirichlet,
+        value: Some(BcValue::Profile(ChebProfile {
+            cheb: fs_cheb::Cheb1::build(&|x: f64| 350.0 + 5.0 * x * x, 0.0, 1.0, 8),
+            dims: Dims([0, 0, 0, 1, 0]),
+        })),
+        compatibility: None,
+        frame: 0,
+    });
+    s.base_bcs
+}
+
+/// The vessel-pour flavored fixture: every construct exercised at once.
+fn rich_scenario() -> Scenario {
+    let mut s = Scenario::new("spout-pour", 42, Environment::earth_lab());
+    let tilt_end = fs_qty::parse::parse_qty("65deg").expect("fs-qty parses degrees");
+    s.frames.add(Frame {
+        id: FrameId(1),
+        name: "vessel".to_string(),
+        parent: FrameId(0),
+        motion: FrameMotion::Tilt {
+            axis: [0.0, 1.0, 0.0],
+            center: Vec3::new(0.2, 0.0, 0.35),
+            angle: TimeSignal::Ramp {
+                t_start: 0.0,
+                t_end: 3.0,
+                from: QtyAny::dimensionless(0.0),
+                to: tilt_end,
+            },
+        },
+    });
+    s.frames.add(Frame {
+        id: FrameId(2),
+        name: "stirrer".to_string(),
+        parent: FrameId(1),
+        motion: FrameMotion::Rotating {
+            axis: [0.0, 0.0, 1.0],
+            center: Vec3::new(0.0, 0.0, 0.0),
+            rate: QtyAny::new(3.5, RATE),
+        },
+    });
+    s.frames.add(Frame {
+        id: FrameId(3),
+        name: "gauge".to_string(),
+        parent: FrameId(2),
+        motion: FrameMotion::Fixed {
+            orientation: Quat::from_axis_angle(Vec3::new(1.0, 0.0, 0.0), 0.25),
+            translation: Vec3::new(0.0, 0.05, -0.125),
+        },
+    });
+    s.base_bcs = fixture_base_bcs();
+    s.cases.push(LoadCase {
+        name: "dead".to_string(),
+        bcs: vec![BoundaryCondition {
+            region: "base".to_string(),
+            physics: Physics::Elasticity,
+            kind: BcKind::Traction,
+            value: Some(BcValue::Uniform(QtyAny::new(-2.4e4, PRESSURE))),
+            compatibility: None,
+            frame: 0,
+        }],
+    });
+    s.cases.push(LoadCase {
+        name: "live".to_string(),
+        bcs: vec![BoundaryCondition {
+            region: "base".to_string(),
+            physics: Physics::Elasticity,
+            kind: BcKind::Traction,
+            value: Some(BcValue::Uniform(QtyAny::new(-1.05e4, PRESSURE))),
+            compatibility: None,
+            frame: 0,
+        }],
+    });
+    s.combinations.push(Combination {
+        name: "1.2D+1.6L".to_string(),
+        terms: vec![("dead".to_string(), 1.2), ("live".to_string(), 1.6)],
+    });
+    s.ensembles = fixture_ensembles();
+    s.contacts.push(ContactLaw {
+        region_a: "lid".to_string(),
+        region_b: "rim".to_string(),
+        model: ContactModel::Coulomb {
+            mu_s: 0.5,
+            mu_k: 0.38,
+        },
+    });
+    s
+}
+
+#[test]
+fn sc_001_ir_round_trip_memory_and_ledger() {
+    let s = rich_scenario();
+    assert_eq!(s.validate(), Vec::new(), "the fixture must be admissible");
+    let text = write_ir(&s);
+    assert_eq!(text, write_ir(&s), "canonical IR must be byte-stable");
+    let back = parse_ir(&text).expect("canonical IR parses");
+    assert_eq!(back, s, "IR round trip must be lossless");
+    // Ledger round trip (dev-dependency: the L6 integration exercised
+    // from tests, keeping the L3 runtime dependency graph clean).
+    let dir = std::env::temp_dir().join(format!("fs-scenario-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    let db = dir.join("scenario.led");
+    let ledger = fs_ledger::Ledger::open(db.to_str().expect("utf8 path")).expect("open ledger");
+    let receipt = ledger
+        .put_artifact("scenario-ir", text.as_bytes(), None)
+        .expect("store scenario IR");
+    let bytes = ledger
+        .get_artifact(&receipt.hash)
+        .expect("fetch")
+        .expect("present");
+    let from_ledger = parse_ir(std::str::from_utf8(&bytes).expect("utf8")).expect("parses");
+    assert_eq!(from_ledger, s, "ledger round trip must be lossless");
+    let _ = std::fs::remove_dir_all(&dir);
+    verdict(
+        "sc-001",
+        "scenario == parse(write(scenario)) in memory and through a ledger artifact",
+    );
+}
+
+#[test]
+fn sc_002_compatibility_checks_catch_seeded_violations() {
+    // (a) Incompressible inlets with no outlet and unbalanced flux.
+    let mut s = Scenario::new("bad-flux", 1, Environment::earth_lab());
+    s.base_bcs.push(BoundaryCondition {
+        region: "in".to_string(),
+        physics: Physics::IncompressibleFlow,
+        kind: BcKind::MassFlowInlet,
+        value: Some(BcValue::Uniform(QtyAny::new(0.9, MASS_FLOW))),
+        compatibility: Some(Compat::Incompressible),
+        frame: 0,
+    });
+    let violations = s.validate();
+    let flux = violations
+        .iter()
+        .find(|v| v.code == "flux-imbalance")
+        .expect("net-flux violation must be caught");
+    assert!(
+        flux.fix.contains("pressure outlet"),
+        "fix must be actionable"
+    );
+    // Adding the outlet repairs it.
+    s.base_bcs.push(BoundaryCondition {
+        region: "out".to_string(),
+        physics: Physics::IncompressibleFlow,
+        kind: BcKind::PressureOutlet,
+        value: Some(BcValue::Uniform(QtyAny::new(0.0, PRESSURE))),
+        compatibility: None,
+        frame: 0,
+    });
+    assert!(
+        s.validate().iter().all(|v| v.code != "flux-imbalance"),
+        "outlet must absorb the imbalance"
+    );
+
+    // (b) Inconsistent frame chains: a cycle and a dangling parent.
+    let mut s2 = Scenario::new("bad-frames", 1, Environment::earth_lab());
+    let spin = |id: u32, name: &str, parent: u32| Frame {
+        id: FrameId(id),
+        name: name.to_string(),
+        parent: FrameId(parent),
+        motion: FrameMotion::Rotating {
+            axis: [0.0, 0.0, 1.0],
+            center: Vec3::new(0.0, 0.0, 0.0),
+            rate: QtyAny::new(1.0, RATE),
+        },
+    };
+    s2.frames.add(spin(1, "a", 2));
+    s2.frames.add(spin(2, "b", 1));
+    s2.frames.add(spin(3, "c", 99));
+    let v2 = s2.validate();
+    assert!(v2.iter().any(|v| v.code == "frame-chain-cyclic"));
+    assert!(v2.iter().any(|v| v.code == "frame-parent-missing"));
+
+    // (c) Dimension violations + missing compatibility + bad combos.
+    let mut s3 = Scenario::new("bad-dims", 1, Environment::earth_lab());
+    s3.base_bcs.push(BoundaryCondition {
+        region: "in".to_string(),
+        physics: Physics::IncompressibleFlow,
+        kind: BcKind::Dirichlet,
+        value: Some(BcValue::Uniform(QtyAny::new(300.0, Dims([0, 0, 0, 1, 0])))),
+        compatibility: None,
+        frame: 7, // undefined frame
+    });
+    s3.base_bcs.push(BoundaryCondition {
+        region: "in2".to_string(),
+        physics: Physics::IncompressibleFlow,
+        kind: BcKind::MassFlowInlet,
+        value: Some(BcValue::Uniform(QtyAny::new(0.1, MASS_FLOW))),
+        compatibility: None, // flux inlet must declare a regime
+        frame: 0,
+    });
+    s3.combinations.push(Combination {
+        name: "c".to_string(),
+        terms: vec![("ghost".to_string(), 1.4)],
+    });
+    s3.contacts.push(ContactLaw {
+        region_a: "a".to_string(),
+        region_b: "b".to_string(),
+        model: ContactModel::Coulomb {
+            mu_s: 0.2,
+            mu_k: 0.5, // kinetic above static
+        },
+    });
+    let v3 = s3.validate();
+    for code in [
+        "bc-dims",
+        "bc-frame-missing",
+        "bc-compat-missing",
+        "combo-case-missing",
+        "contact-coulomb-range",
+    ] {
+        let hit = v3.iter().find(|v| v.code == code);
+        assert!(hit.is_some(), "expected violation {code}");
+        assert!(
+            !hit.expect("present").fix.is_empty(),
+            "{code} must carry a fix"
+        );
+    }
+    verdict(
+        "sc-002",
+        "flux imbalance, cyclic/dangling frames, dims, compat, combos, contacts all caught \
+         with structured fixes",
+    );
+}
+
+#[test]
+fn sc_003_ensembles_reproduce_bitwise_from_seed() {
+    let s = rich_scenario();
+    for e in &s.ensembles {
+        for member in 0..e.members.min(4) {
+            let a = e.realize(member).expect("realize");
+            let b = e.realize(member).expect("realize again");
+            assert_eq!(a.values.len(), b.values.len());
+            for (x, y) in a.values.iter().zip(b.values.iter()) {
+                assert_eq!(
+                    x.to_bits(),
+                    y.to_bits(),
+                    "{}: member must be bitwise",
+                    e.name
+                );
+            }
+            if member > 0 {
+                let prev = e.realize(member - 1).expect("prev member");
+                assert_ne!(
+                    a.values, prev.values,
+                    "{}: members must differ from each other",
+                    e.name
+                );
+            }
+        }
+        // A different seed produces a different realization.
+        let mut reseeded = e.clone();
+        reseeded.seed ^= 0xDEAD_BEEF;
+        assert_ne!(
+            e.realize(0).expect("a").values,
+            reseeded.realize(0).expect("b").values,
+            "{}: seed must matter",
+            e.name
+        );
+    }
+    // Carreau draws stay inside their declared bands.
+    let rheo = &s.ensembles[2];
+    for member in 0..rheo.members {
+        let r = rheo.realize(member).expect("carreau");
+        assert!(r.values[0] >= 8.0 && r.values[0] <= 15.0, "eta0 in band");
+        assert!(r.values[1] >= 0.08 && r.values[1] <= 0.15, "etainf in band");
+        assert!(r.values[2] >= 0.5 && r.values[2] <= 2.0, "lambda in band");
+        assert!(r.values[3] >= 0.3 && r.values[3] <= 0.6, "n in band");
+    }
+    verdict(
+        "sc-003",
+        "KT/Dryden/Carreau members bitwise from (seed, model, member); bands respected",
+    );
+}
+
+#[test]
+fn sc_004_kanai_tajimi_matches_target_spectrum() {
+    let members = 48u32;
+    let n = 512usize;
+    let dt = 0.05f64;
+    let ens = StochasticEnsemble {
+        name: "kt".to_string(),
+        seed: 2026,
+        members,
+        duration: QtyAny::new(n as f64 * dt, TIME),
+        dt: QtyAny::new(dt, TIME),
+        model: SpectrumModel::KanaiTajimi {
+            s0: 0.02,
+            omega_g: QtyAny::new(12.0, RATE),
+            zeta_g: 0.55,
+        },
+    };
+    let d_omega = 2.0 * std::f64::consts::PI / (n as f64 * dt);
+    // Ensemble-averaged periodogram at a band of harmonics.
+    let band: Vec<usize> = (4..40).collect();
+    let mut est = vec![0.0f64; band.len()];
+    for member in 0..members {
+        let r = ens.realize(member).expect("realize");
+        for (slot, &k) in est.iter_mut().zip(band.iter()) {
+            let (mut re, mut im) = (0.0f64, 0.0f64);
+            for (j, &x) in r.values.iter().enumerate() {
+                let phase = 2.0 * std::f64::consts::PI * (k * j % n) as f64 / n as f64;
+                re += x * phase.cos();
+                im -= x * phase.sin();
+            }
+            *slot += 2.0 * (re * re + im * im) / (n as f64 * n as f64 * d_omega);
+        }
+    }
+    let mut rel_sum = 0.0f64;
+    let mut rel_max = 0.0f64;
+    for (avg, &k) in est.iter().map(|e| e / f64::from(members)).zip(band.iter()) {
+        let target = ens.model.psd(k as f64 * d_omega);
+        let rel = (avg - target).abs() / target;
+        rel_sum += rel;
+        rel_max = rel_max.max(rel);
+        assert!(
+            rel < 0.75,
+            "periodogram bin k={k} off by {rel:.3} (est {avg:.4e} vs target {target:.4e})"
+        );
+    }
+    let rel_mean = rel_sum / band.len() as f64;
+    assert!(
+        rel_mean < 0.15,
+        "band-averaged spectral mismatch {rel_mean:.3} exceeds statistical tolerance"
+    );
+    println!(
+        "{{\"suite\":\"fs-scenario/conformance\",\"metric\":\"kt_spectrum_match\",\
+         \"members\":{members},\"rel_mean\":{rel_mean:.4},\"rel_max\":{rel_max:.4}}}"
+    );
+    verdict(
+        "sc-004",
+        "48-member KT ensemble periodogram matches the target PSD across the band",
+    );
+}
+
+#[test]
+fn sc_005_frame_g0_laws_and_moving_frames() {
+    let s = rich_scenario();
+    let t = 1.5f64;
+    // G0 composition: world pose of a chain equals the manual composition
+    // of the locals, top-down.
+    let f1 = &s.frames.frames[0];
+    let f2 = &s.frames.frames[1];
+    let f3 = &s.frames.frames[2];
+    let manual = fs_scenario::FrameTree::local_pose(f1, t)
+        .expect("l1")
+        .compose(&fs_scenario::FrameTree::local_pose(f2, t).expect("l2"))
+        .compose(&fs_scenario::FrameTree::local_pose(f3, t).expect("l3"));
+    let chained = s.frames.world_pose(FrameId(3), t).expect("chain");
+    let p = Point::new(0.3, -0.2, 0.7);
+    let a = manual.transform_point(p).expect("manual");
+    let b = chained.transform_point(p).expect("chained");
+    assert!(
+        (Vec3::new(a.x - b.x, a.y - b.y, a.z - b.z)).norm() < 1e-12,
+        "composition law"
+    );
+    // The tilt schedule clamps and matches a directly-built motor.
+    let tilt_at = |time: f64| -> Motor {
+        let angle = match &f1.motion {
+            FrameMotion::Tilt { angle, .. } => angle.eval(time).expect("angle").value,
+            _ => unreachable!(),
+        };
+        let c = Vec3::new(0.2, 0.0, 0.35);
+        Motor::translator(c.x, c.y, c.z)
+            .compose(&Motor::rotor([0.0, 1.0, 0.0], angle))
+            .compose(&Motor::translator(-c.x, -c.y, -c.z))
+    };
+    for time in [0.0, 0.7, 1.5, 3.0, 5.0] {
+        let via_tree = s.frames.world_pose(FrameId(1), time).expect("pose");
+        let direct = tilt_at(time);
+        let pa = via_tree.transform_point(p).expect("a");
+        let pb = direct.transform_point(p).expect("b");
+        assert!(
+            (Vec3::new(pa.x - pb.x, pa.y - pb.y, pa.z - pb.z)).norm() < 1e-12,
+            "tilt schedule pose at t={time}"
+        );
+    }
+    // Clamp: past the ramp end the pose freezes at 65°.
+    let end = s.frames.world_pose(FrameId(1), 3.0).expect("end");
+    let later = s.frames.world_pose(FrameId(1), 30.0).expect("later");
+    let pe = end.transform_point(p).expect("e");
+    let pl = later.transform_point(p).expect("l");
+    assert!(
+        (Vec3::new(pe.x - pl.x, pe.y - pl.y, pe.z - pl.z)).norm() < 1e-12,
+        "ramp must clamp"
+    );
+    // A rotating frame leaves its own axis fixed.
+    let center_point = Point::new(0.0, 0.0, 0.9);
+    let spin = s.frames.frames[1].clone();
+    let local = fs_scenario::FrameTree::local_pose(&spin, 2.0).expect("spin");
+    let moved = local.transform_point(center_point).expect("fixed axis");
+    assert!(
+        (Vec3::new(moved.x, moved.y, moved.z - 0.9)).norm() < 1e-12,
+        "points on the rotation axis must not move"
+    );
+    verdict(
+        "sc-005",
+        "chain composition == manual motor product; tilt ramp matches, clamps; axis fixed",
+    );
+}
+
+#[test]
+fn sc_006_unit_rescaling_coherence() {
+    // G3: the same physics expressed through different unit spellings
+    // must land on the same SI values and identical canonical IR.
+    let deg = fs_qty::parse::parse_qty("65deg").expect("deg");
+    let rad = fs_qty::parse::parse_qty("1.1344640137963142rad").expect("rad");
+    assert_eq!(deg.dims, rad.dims, "angles agree on dimensions");
+    assert!((deg.value - rad.value).abs() < 1e-15, "same SI value");
+    let mm = fs_qty::parse::parse_qty("350mm").expect("mm");
+    let m = fs_qty::parse::parse_qty("0.35m").expect("m");
+    assert_eq!(mm.dims, m.dims);
+    assert!((mm.value - m.value).abs() < 1e-15);
+    // A scenario whose inputs came through either spelling validates
+    // identically (dimension checks see only SI exponents).
+    let mut a = Scenario::new("g3", 9, Environment::earth_lab());
+    a.base_bcs.push(BoundaryCondition {
+        region: "in".to_string(),
+        physics: Physics::Thermal,
+        kind: BcKind::Dirichlet,
+        value: Some(BcValue::Uniform(
+            fs_qty::parse::parse_qty("350K").expect("kelvin"),
+        )),
+        compatibility: None,
+        frame: 0,
+    });
+    assert_eq!(a.validate(), Vec::new());
+    let mut b = a.clone();
+    b.base_bcs[0].value = Some(BcValue::Uniform(QtyAny::new(350.0, Dims([0, 0, 0, 1, 0]))));
+    assert_eq!(
+        write_ir(&a),
+        write_ir(&b),
+        "spellings converge to one canonical IR"
+    );
+    verdict(
+        "sc-006",
+        "deg/rad and mm/m spellings converge; validation + canonical IR are spelling-blind",
+    );
+}

@@ -978,6 +978,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-scenario"
+version = "0.0.1"
+dependencies = [
+ "fs-cheb",
+ "fs-ga",
+ "fs-ledger",
+ "fs-math",
+ "fs-qty",
+ "fs-rand",
+]
+
+[[package]]
 name = "fs-simd"
 version = "0.0.1"
 dependencies = [

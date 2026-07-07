@@ -1,0 +1,24 @@
+[package]
+name = "fs-scenario"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Typed boundary-condition and load-case algebra: dimensioned BCs, moving frames via motors, time histories, seeded stochastic ensembles, compatibility checks."
+
+[package.metadata.frankensim]
+layer = "L3"
+
+[dependencies]
+fs-cheb = { path = "../fs-cheb" }
+fs-ga = { path = "../fs-ga" }
+fs-math = { path = "../fs-math" }
+fs-qty = { path = "../fs-qty" }
+fs-rand = { path = "../fs-rand" }
+
+[dev-dependencies]
+fs-ledger = { path = "../fs-ledger" }
+
+[lints]
+workspace = true
