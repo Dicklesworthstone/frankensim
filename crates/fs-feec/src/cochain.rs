@@ -40,7 +40,11 @@ impl Cochain {
         for _ in 0..n {
             values.push(0.0);
         }
-        Cochain { values, degree, dims: Dims([0; 5]) }
+        Cochain {
+            values,
+            degree,
+            dims: Dims([0; 5]),
+        }
     }
 
     /// Cochain from per-cell values.
@@ -58,7 +62,11 @@ impl Cochain {
         for &v in vals {
             values.push(v);
         }
-        Cochain { values, degree, dims }
+        Cochain {
+            values,
+            degree,
+            dims,
+        }
     }
 
     /// Degree k.
@@ -119,6 +127,10 @@ impl Cochain {
         for &v in &out {
             values.push(v);
         }
-        Cochain { values, degree: self.degree + 1, dims: self.dims }
+        Cochain {
+            values,
+            degree: self.degree + 1,
+            dims: self.dims,
+        }
     }
 }

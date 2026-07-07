@@ -80,10 +80,5 @@ pub fn betti_numbers(complex: &TetComplex) -> [usize; 4] {
     let r0 = integer_rank(&d0.rows, d0.cols);
     let r1 = integer_rank(&d1.rows, d1.cols);
     let r2 = integer_rank(&d2.rows, d2.cols);
-    [
-        nv - r0,
-        ne - r0 - r1,
-        nf - r1 - r2,
-        nt - r2,
-    ]
+    [nv - r0, ne - r0 - r1, nf - r1 - r2, nt - r2]
 }

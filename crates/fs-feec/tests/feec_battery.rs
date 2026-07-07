@@ -17,7 +17,9 @@ use fs_rand::StreamKey;
 use fs_rep_mesh::TetComplex;
 
 fn log(case: &str, verdict: &str, detail: &str) {
-    println!("{{\"suite\":\"fs-feec\",\"case\":\"{case}\",\"verdict\":\"{verdict}\",\"detail\":\"{detail}\"}}");
+    println!(
+        "{{\"suite\":\"fs-feec\",\"case\":\"{case}\",\"verdict\":\"{verdict}\",\"detail\":\"{detail}\"}}"
+    );
 }
 
 fn zoo() -> Vec<(&'static str, TetComplex, Vec<[f64; 3]>)> {
@@ -37,7 +39,12 @@ fn zoo() -> Vec<(&'static str, TetComplex, Vec<[f64; 3]>)> {
 
 #[test]
 fn dd_is_zero_exactly_on_the_zoo() {
-    let mut stream = StreamKey { seed: 5, kernel: 0xFEEC, tile: 1 }.stream();
+    let mut stream = StreamKey {
+        seed: 5,
+        kernel: 0xFEEC,
+        tile: 1,
+    }
+    .stream();
     for (name, complex, _) in zoo() {
         let (d0, d1, d2) = (complex.d0(), complex.d1(), complex.d2());
         // Integer path: d(d(x)) == 0 for random integer cochains.
@@ -190,9 +197,16 @@ fn deram_maps_commute_with_d() {
             }
             worst_d = worst_d.max((acc - r3_div[t]).abs());
         }
-        assert!(worst_d < 1e-13, "div({name}) commutation residual {worst_d:.3e}");
+        assert!(
+            worst_d < 1e-13,
+            "div({name}) commutation residual {worst_d:.3e}"
+        );
     }
-    log("commutation", "pass", "grad/curl/div all commute with d (signs pinned)");
+    log(
+        "commutation",
+        "pass",
+        "grad/curl/div all commute with d (signs pinned)",
+    );
 }
 
 #[test]
@@ -231,12 +245,26 @@ fn whitney_masses_reproduce_constants_exactly() {
     let e3 = energy(&m3, &r3);
     assert!((e3 - 6.25).abs() < 1e-12, "M3 constant energy: {e3}");
     // SPD: positive energy on deterministic pseudo-random vectors.
-    let mut stream = StreamKey { seed: 9, kernel: 0xFEEC, tile: 2 }.stream();
-    for (k, m) in [(0u8, &m0), (1, &m1), (2, &m2), (3, &m3)] {
-        let x: Vec<f64> = (0..m.nrows()).map(|_| 2.0f64.mul_add(stream.next_f64(), -1.0)).collect();
-        assert!(energy(m, &x) > 0.0, "M{k} not positive definite on random vector");
+    let mut stream = StreamKey {
+        seed: 9,
+        kernel: 0xFEEC,
+        tile: 2,
     }
-    log("whitney-patch", "pass", "constant fields exact for k=0..3, masses PD");
+    .stream();
+    for (k, m) in [(0u8, &m0), (1, &m1), (2, &m2), (3, &m3)] {
+        let x: Vec<f64> = (0..m.nrows())
+            .map(|_| 2.0f64.mul_add(stream.next_f64(), -1.0))
+            .collect();
+        assert!(
+            energy(m, &x) > 0.0,
+            "M{k} not positive definite on random vector"
+        );
+    }
+    log(
+        "whitney-patch",
+        "pass",
+        "constant fields exact for k=0..3, masses PD",
+    );
 }
 
 #[test]
@@ -245,7 +273,10 @@ fn stiffness_composition_kills_affine_fields() {
     // classical patch test, derived from the complex).
     let (complex, positions) = kuhn_cube(2);
     let geo = element_geometry(&complex, &positions);
-    let k0 = stiffness(&incidence_to_csr(&complex.d0()), &mass_matrix(&complex, &geo, 1));
+    let k0 = stiffness(
+        &incidence_to_csr(&complex.d0()),
+        &mass_matrix(&complex, &geo, 1),
+    );
     let u: Vec<f64> = positions
         .iter()
         .map(|&p| 0.3f64.mul_add(p[0], 1.2f64.mul_add(p[1], -0.5 * p[2])) + 2.0)
@@ -269,7 +300,11 @@ fn stiffness_composition_kills_affine_fields() {
         }
     }
     assert!(asym < 1e-14, "K0 asymmetry {asym:.3e}");
-    log("stiffness-patch", "pass", &format!("affine residual {worst:.2e}, asym {asym:.2e}"));
+    log(
+        "stiffness-patch",
+        "pass",
+        &format!("affine residual {worst:.2e}, asym {asym:.2e}"),
+    );
 }
 
 #[test]
@@ -281,16 +316,20 @@ fn mms_poisson_primal_converges_at_second_order() {
     let u_exact = |p: [f64; 3]| (pi * p[0]).sin() * (pi * p[1]).sin() * (pi * p[2]).sin();
     let f_rhs = move |p: [f64; 3]| 3.0 * pi * pi * u_exact(p);
     let mut errs = Vec::new();
-    for n in [3usize, 6, 12] {
+    for n in [4usize, 8, 16] {
         let (complex, positions) = kuhn_cube(n);
         let geo = element_geometry(&complex, &positions);
         let m0 = mass_matrix(&complex, &geo, 0);
-        let k0 = stiffness(&incidence_to_csr(&complex.d0()), &mass_matrix(&complex, &geo, 1));
+        let k0 = stiffness(
+            &incidence_to_csr(&complex.d0()),
+            &mass_matrix(&complex, &geo, 1),
+        );
         // RHS b = M0 · R0(f).
         let r0f = deram0(&positions, &f_rhs);
         let mut b = vec![0.0f64; r0f.len()];
         m0.spmv(&r0f, &mut b);
-        // Reduce to interior vertices, dense-solve (fixture scale).
+        // Reduce to interior vertices and PCG-solve (SPD stiffness;
+        // solver tolerance far below discretization error).
         let interior: Vec<usize> = (0..positions.len())
             .filter(|&v| !on_unit_cube_boundary(positions[v]))
             .collect();
@@ -299,19 +338,27 @@ fn mms_poisson_primal_converges_at_second_order() {
         for (i, &v) in interior.iter().enumerate() {
             slot[v] = i;
         }
-        let mut a = vec![0.0f64; ni * ni];
+        let mut red = fs_sparse::Coo::new(ni, ni);
         for (i, &v) in interior.iter().enumerate() {
             let (cols, vals) = k0.row(v);
             for (&c, &val) in cols.iter().zip(vals) {
                 if slot[c] != usize::MAX {
-                    a[i * ni + slot[c]] = val;
+                    red.push(i, slot[c], val);
                 }
             }
         }
+        let a = red.assemble();
         let rhs: Vec<f64> = interior.iter().map(|&v| b[v]).collect();
-        let lu = fs_la::factor::lu(&a, ni).expect("interior stiffness nonsingular");
-        let mut x = rhs;
-        lu.solve(&mut x);
+        let mut x = vec![0.0f64; ni];
+        let report = fs_sparse::precond::pcg(
+            &a,
+            &rhs,
+            &mut x,
+            &fs_sparse::precond::IdentityPrecond,
+            1e-12,
+            10_000,
+        );
+        assert!(report.converged, "PCG failed at n={n}: {report:?}");
         // M0-weighted L2 error over ALL vertices (boundary exact).
         let mut e = vec![0.0f64; positions.len()];
         for (i, &v) in interior.iter().enumerate() {
@@ -346,15 +393,20 @@ fn hodge_stars_positive_and_consistent() {
         log(
             "hodge",
             "pass",
-            &format!("k={k} diag range [{:.3e}, {:.3e}]",
+            &format!(
+                "k={k} diag range [{:.3e}, {:.3e}]",
                 diag.iter().copied().fold(f64::INFINITY, f64::min),
-                diag.iter().copied().fold(0.0f64, f64::max)),
+                diag.iter().copied().fold(0.0f64, f64::max)
+            ),
         );
     }
     // Total dual volume at k=0 equals the domain volume.
     let d0 = hodge_diagonal_barycentric(&complex, &positions, &geo, 0);
     let total: f64 = d0.iter().sum();
-    assert!((total - 1.0).abs() < 1e-12, "dual volumes must sum to |Ω|: {total}");
+    assert!(
+        (total - 1.0).abs() < 1e-12,
+        "dual volumes must sum to |Ω|: {total}"
+    );
 }
 
 #[test]
@@ -378,7 +430,7 @@ fn cochain_container_semantics() {
     log("cochain", "pass", "dims tag + view + container dd=0");
 }
 
-const GOLDEN_HASH: u64 = 0; // recorded on first run, then frozen
+const GOLDEN_HASH: u64 = 0xa973_ca6b_07c3_9639; // recorded at tfz.5 landing, frozen
 
 #[test]
 fn feec_golden_hash() {
@@ -401,7 +453,10 @@ fn feec_golden_hash() {
             feed(*v);
         }
     }
-    let k0 = stiffness(&incidence_to_csr(&complex.d0()), &mass_matrix(&complex, &geo, 1));
+    let k0 = stiffness(
+        &incidence_to_csr(&complex.d0()),
+        &mass_matrix(&complex, &geo, 1),
+    );
     for v in k0.to_dense().iter().step_by(11) {
         feed(*v);
     }

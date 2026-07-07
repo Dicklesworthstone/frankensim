@@ -49,18 +49,20 @@ pub fn element_geometry(complex: &TetComplex, positions: &[[f64; 3]]) -> Element
     let mut vol_signed = Vec::with_capacity(nt);
     let mut grads = Vec::with_capacity(nt);
     let mut gram = Vec::with_capacity(nt);
-    for m in 0..nt {
-        vol_signed.push(dets[m] / 6.0);
+    for (m, &det_m) in dets.iter().enumerate() {
+        vol_signed.push(det_m / 6.0);
         // ∇λ_a for a = 1..3 is row a−1 of J⁻¹; ∇λ_0 = −Σ.
         let mut g = [[0.0f64; 3]; 4];
-        for a in 1..4 {
-            for c in 0..3 {
-                g[a][c] = jinv.get(m, a - 1, c);
+        for (a, ga) in g.iter_mut().enumerate().skip(1) {
+            for (c, gac) in ga.iter_mut().enumerate() {
+                *gac = jinv.get(m, a - 1, c);
             }
         }
-        for c in 0..3 {
-            g[0][c] = -(g[1][c] + g[2][c] + g[3][c]);
-        }
+        g[0] = [
+            -(g[1][0] + g[2][0] + g[3][0]),
+            -(g[1][1] + g[2][1] + g[3][1]),
+            -(g[1][2] + g[2][2] + g[3][2]),
+        ];
         let mut gr = [[0.0f64; 4]; 4];
         for a in 0..4 {
             for b in 0..4 {
@@ -70,7 +72,11 @@ pub fn element_geometry(complex: &TetComplex, positions: &[[f64; 3]]) -> Element
         grads.push(g);
         gram.push(gr);
     }
-    ElementGeometry { vol_signed, grads, gram }
+    ElementGeometry {
+        vol_signed,
+        grads,
+        gram,
+    }
 }
 
 /// Local index (0..4) of a global vertex within a tet.
@@ -109,15 +115,17 @@ fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
 /// If `degree > 3` or geometry/complex sizes mismatch.
 #[must_use]
 pub fn mass_matrix(complex: &TetComplex, geo: &ElementGeometry, degree: u8) -> Csr {
-    assert_eq!(geo.vol_signed.len(), complex.tets.len(), "geometry mismatch");
+    assert_eq!(
+        geo.vol_signed.len(),
+        complex.tets.len(),
+        "geometry mismatch"
+    );
     let n = crate::cochain::cell_count(complex, degree);
     let mut coo = Coo::new(n, n);
     // ∫ λ_p λ_q dV = V/20·(1 + δ_pq) — the only scalar integral needed.
     for (m, &tet) in complex.tets.iter().enumerate() {
         let vol = geo.vol_signed[m].abs();
-        let s = |p: usize, q: usize| -> f64 {
-            if p == q { vol / 10.0 } else { vol / 20.0 }
-        };
+        let s = |p: usize, q: usize| -> f64 { if p == q { vol / 10.0 } else { vol / 20.0 } };
         match degree {
             0 => {
                 for a in 0..4 {
@@ -142,10 +150,7 @@ pub fn mass_matrix(complex: &TetComplex, geo: &ElementGeometry, degree: u8) -> C
                     for &(f, cc, d) in &locals {
                         let val = s(a, cc).mul_add(
                             gr[b][d],
-                            s(b, d).mul_add(
-                                gr[a][cc],
-                                -s(a, d) * gr[b][cc] - s(b, cc) * gr[a][d],
-                            ),
+                            s(b, d).mul_add(gr[a][cc], -s(a, d) * gr[b][cc] - s(b, cc) * gr[a][d]),
                         );
                         coo.push(e, f, val);
                     }
@@ -254,7 +259,7 @@ pub fn deram2<F: Fn([f64; 3]) -> [f64; 3]>(
             );
             let e1 = [pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2]];
             let e2 = [pc[0] - pa[0], pc[1] - pa[1], pc[2] - pa[2]];
-            let ndA = cross(e1, e2).map(|c| 0.5 * c);
+            let nd_a = cross(e1, e2).map(|c| 0.5 * c);
             let mids = [
                 [
                     f64::midpoint(pa[0], pb[0]),
@@ -279,7 +284,7 @@ pub fn deram2<F: Fn([f64; 3]) -> [f64; 3]>(
                     avg[c] += bm[c] / 3.0;
                 }
             }
-            dot(avg, ndA)
+            dot(avg, nd_a)
         })
         .collect()
 }
@@ -296,7 +301,11 @@ pub fn sort_parity(tet: [u32; 4]) -> f64 {
             }
         }
     }
-    if inversions % 2 == 0 { 1.0 } else { -1.0 }
+    if inversions.is_multiple_of(2) {
+        1.0
+    } else {
+        -1.0
+    }
 }
 
 /// De-Rham map, degree 3: signed cell integrals — centroid quadrature

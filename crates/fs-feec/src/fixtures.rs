@@ -7,6 +7,17 @@
 
 use fs_rep_mesh::TetComplex;
 
+/// The 6 permutations of unit steps (x, y, z): each axis ordering
+/// gives one Kuhn tet 0 → e_{p0} → e_{p0}+e_{p1} → 1.
+const PERMS: [[usize; 3]; 6] = [
+    [0, 1, 2],
+    [0, 2, 1],
+    [1, 0, 2],
+    [1, 2, 0],
+    [2, 0, 1],
+    [2, 1, 0],
+];
+
 /// One reference tetrahedron (vertices 0..4).
 #[must_use]
 pub fn single_tet() -> (TetComplex, Vec<[f64; 3]>) {
@@ -62,16 +73,6 @@ pub fn kuhn_cube(n: usize) -> (TetComplex, Vec<[f64; 3]>) {
             }
         }
     }
-    // The 6 permutations of unit steps (x, y, z): each ordering of the
-    // three axes gives one tet 0 → e_{p0} → e_{p0}+e_{p1} → 1.
-    const PERMS: [[usize; 3]; 6] = [
-        [0, 1, 2],
-        [0, 2, 1],
-        [1, 0, 2],
-        [1, 2, 0],
-        [2, 0, 1],
-        [2, 1, 0],
-    ];
     let mut tets = Vec::with_capacity(6 * n * n * n);
     for i in 0..n {
         for j in 0..n {
@@ -84,10 +85,7 @@ pub fn kuhn_cube(n: usize) -> (TetComplex, Vec<[f64; 3]>) {
                         corners[step + 1] = corners[step];
                         corners[step + 1][axis] += 1;
                     }
-                    let v: Vec<u32> = corners
-                        .iter()
-                        .map(|c| idx(c[0], c[1], c[2]))
-                        .collect();
+                    let v: Vec<u32> = corners.iter().map(|c| idx(c[0], c[1], c[2])).collect();
                     // Positive orientation in stored order: the path
                     // tets alternate parity with the permutation sign;
                     // swap the middle pair on odd permutations.
@@ -109,5 +107,6 @@ pub fn kuhn_cube(n: usize) -> (TetComplex, Vec<[f64; 3]>) {
 /// (fixture helper for Dirichlet pinning in tests).
 #[must_use]
 pub fn on_unit_cube_boundary(p: [f64; 3]) -> bool {
-    p.iter().any(|&c| c == 0.0 || c == 1.0)
+    p.iter()
+        .any(|&c| c.to_bits() == 0.0f64.to_bits() || c.to_bits() == 1.0f64.to_bits())
 }
