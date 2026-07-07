@@ -191,15 +191,17 @@ fn sobolev_smoothing_rescues_noisy_gradient() {
         dot / (na * nb)
     };
     let raw_cos = cosine(&g_raw, &g_true);
-    let h = 1.0 / 6.0;
-    let (g_smooth, iters) = sobolev_smooth(&m0, &k0, h * h, &g_raw, 1e-12);
+    // α well above h² = 0.028: the signal is near-affine (almost in
+    // the smoother's kernel) while the noise is grid-frequency, so a
+    // stronger metric costs little signal and kills more noise.
+    let (g_smooth, iters) = sobolev_smooth(&m0, &k0, 0.2, &g_raw, 1e-12);
     let smooth_cos = cosine(&g_smooth, &g_true);
     assert!(
-        smooth_cos > 0.98,
-        "smoothed gradient poorly aligned: cos={smooth_cos:.4}"
+        smooth_cos > 0.95,
+        "smoothed gradient poorly aligned: cos={smooth_cos:.4} (raw {raw_cos:.4})"
     );
     assert!(
-        smooth_cos > raw_cos + 0.1,
+        smooth_cos > raw_cos + 0.15,
         "smoothing must materially improve alignment: raw={raw_cos:.4} smooth={smooth_cos:.4}"
     );
     log(
@@ -215,11 +217,14 @@ fn hadamard_volume_matches_fd_exactly() {
     // mesh volume under vertex perturbation x ← x + ε·V(x): both are
     // polynomial in ε, so agreement is tight.
     let (complex, positions) = kuhn_cube(2);
+    // NONZERO divergence on purpose: a divergence-free field has
+    // dVol = 0 exactly, which would make the relative comparison
+    // meaningless (the first draft hit exactly that: two zeros).
     let velocity = |p: [f64; 3]| -> [f64; 3] {
         [
-            0.3 + 0.2 * p[1],
-            -0.1 + 0.4 * p[2],
-            0.25 * p[0] - 0.15,
+            0.3f64.mul_add(p[0], 0.2 * p[1]),
+            0.1f64.mul_add(p[1], -0.4 * p[2]),
+            0.5f64.mul_add(p[2], 0.25 * p[0]),
         ]
     };
     let analytic = volume_shape_gradient(&complex, &positions, &velocity);

@@ -27,7 +27,7 @@ use crate::quad::{CutRules, cut_cell_rules, tensor_gauss};
 use crate::sdf::CutSdf;
 use fs_solver::krylov::CgState;
 use fs_solver::op::CsrOp;
-use fs_sparse::precond::IdentityPrecond;
+use fs_sparse::precond::Precond;
 use fs_sparse::{Coo, Csr};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -532,8 +532,12 @@ impl<'g> Space<'g> {
         g: &dyn Fn(f64, f64) -> f64,
     ) -> Result<Solution, CutFemError> {
         let (a, b) = self.assemble(f, g);
+        // Jacobi (diagonal) preconditioning: on cut systems the
+        // Nitsche penalty and small-cut supports skew the diagonal
+        // scale by orders of magnitude; symmetric diagonal scaling
+        // removes exactly that imbalance, deterministically.
+        let m = JacobiPrecond::new(&a);
         let op = CsrOp::symmetric(a);
-        let m = IdentityPrecond;
         let mut st = CgState::new(&op, &m, &b);
         let _ = st.run(&op, &m, self.params.solver_tol, self.params.solver_max_iters);
         let rr = st.rel_residual();
@@ -628,6 +632,32 @@ impl<'g> Space<'g> {
             }
         }
         (l2.max(0.0).sqrt(), h1.max(0.0).sqrt())
+    }
+}
+
+/// SPD diagonal (Jacobi) preconditioner.
+struct JacobiPrecond {
+    inv_diag: Vec<f64>,
+}
+
+impl JacobiPrecond {
+    fn new(a: &Csr) -> JacobiPrecond {
+        let n = a.nrows();
+        let inv_diag = (0..n)
+            .map(|i| {
+                let d = a.get(i, i);
+                if d > 0.0 { 1.0 / d } else { 1.0 }
+            })
+            .collect();
+        JacobiPrecond { inv_diag }
+    }
+}
+
+impl Precond for JacobiPrecond {
+    fn apply(&self, r: &[f64], z: &mut [f64]) {
+        for (zi, (ri, di)) in z.iter_mut().zip(r.iter().zip(&self.inv_diag)) {
+            *zi = ri * di;
+        }
     }
 }
 
