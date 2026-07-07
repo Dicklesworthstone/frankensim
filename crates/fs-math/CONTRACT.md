@@ -31,6 +31,12 @@ floating-point POLICY: FMA contraction, subnormals, NaN, ULP budgets
   Cody–Waite reduction); beyond → deterministic but budget-void (no-claim).
 - Policy vocabulary: `canonical_nan`, `next_up/next_down`, `nudge_out`
   (fs-ivl's directed-rounding primitive), `ulp_distance`.
+- `c64::C64` — complex f64 (bead urvw): operator traits with strict
+  arithmetic, overflow-safe magnitude (max-scaled, no libm hypot —
+  tested at 1e±300), Smith division/reciprocal (scaling-robust),
+  principal sqrt via stable half-angle formulas (both half-planes
+  tested). The shared complex home going forward; fs-fft's private
+  mini-type migration is recorded cleanup.
 - `eft::{two_sum, quick_two_sum, two_prod}` — error-free transformations:
   the returned (result, error) pair reconstructs the EXACT real value
   (bitwise-testable identities; `quick_two_sum` requires |a| ≥ |b|,

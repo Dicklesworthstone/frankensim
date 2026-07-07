@@ -52,6 +52,16 @@ Dense linear algebra: GEMM, batched small dense, factorizations, eigensolvers. L
   golden-hash divergence, caught by the trj pipeline and fixed; this is
   now a contract rule: NO platform libm in any path that feeds solver
   state.
+- `eigen_complex::{eig, det_complex, EigFailure}` — general complex
+  nonsymmetric eigenvalues: Givens Hessenberg reduction + explicitly
+  shifted QR (Wilkinson shifts with total_cmp tie-breaks, exceptional
+  shifts every 12 iterations, standard deflation, closed-form 2×2
+  blocks). Canonical (re, im)-sorted output. Convergence exhaustion is
+  a typed `EigFailure`, never a wrong answer. Tested: companion roots
+  of unity, rotation conjugate pairs, agreement with `jacobi_eigh` on
+  embedded symmetric matrices (1e-10), trace/determinant identities
+  against an independent Gaussian-elimination `det_complex` oracle,
+  Hermitian spectral reality, T6 colleague-matrix roots.
 - `VERSION` for provenance stamping.
 
 ## Invariants
@@ -142,7 +152,13 @@ placeholder remains for the shared-harness migration.
 - `condition_1` is an estimate (typically within a small factor; a lower
   bound in theory) — not a certified bound (fs-ivl owns certified claims).
 - Jacobi SVD targets small/medium n (O(n²·m) per sweep); no blocked
-  driver yet. Batched small-dense and eigensolvers: skeleton scope.
+  driver yet. Batched small-dense remains skeleton scope.
+- `eigen_complex::eig` runs UNBALANCED explicit shifted QR (O(n²) per
+  sweep; implicit bulge-chasing and a balancing pass are recorded perf/
+  robustness refinements) and returns eigenvalues only (eigenvectors
+  via inverse iteration are follow-up). Canonical output ordering is
+  roundoff-sensitive for near-tied real parts — consumers comparing
+  spectra should match as SETS (the battery does).
 - Lanczos v1 uses FULL reorthogonalization (selective ω-recurrence is a
   recorded refinement); LOBPCG has no deflation/soft-locking yet and
   identity preconditioning by default. Eigenvector adjoints are recorded
