@@ -48,6 +48,22 @@ structure; FLUX/UQ execute it.
   with line numbers.
 - `eval`: memoized evaluation of algebraic subgraphs; PDE/stochastic
   nodes refuse with `Unevaluable` NAMING their executor.
+- `GoodhartGuard` (addendum Proposal D): treats an optimizer `Endpoint`
+  (`design`, `objective`, `label`; `from_descent` bridges `DescentReport`)
+  as an adversarial example. A FIXED four-step escalation ladder
+  (`EscalationKind::ORDER` = rung-k+1, cross-representation, δ-perturbation,
+  estimator-independence) runs pluggable `EscalationStep`s; each yields a
+  `StepOutcome` (`Passed` / `Vetoed{reason}` / `NotPerformed{reason}`).
+  Aggregation: any veto → `GuardStatus::Failed` (+ a `GuardFinding` the
+  caller files as a tombstone/bug report); else any unregistered step →
+  `Provisional`; else `Cleared`. `is_honored()` is true ONLY on `Cleared`
+  — the endpoint certificate stays provisional on any skipped check (never
+  a false clear). `converged_and_guard_cleared(converged, &report)` is the
+  amended contract ("converged AND guard-cleared"). One concrete step ships:
+  `DeltaPerturbationStep` re-evaluates a supplied objective at deterministic
+  `±δ` coordinate probes and vetoes a found-better point (not a true optimum)
+  or a sharp crack (optimum not in a smooth basin), failing closed on
+  non-finite values.
 
 ## Invariants
 
@@ -115,6 +131,16 @@ seeded LCG randomness, fs-obs Custom event carrying the fixture
 problem hash and routing refusal. Any reimplementation must pass the
 suite unchanged.
 
+`tests/guard.rs` (Proposal D, 15 cases): no-steps→provisional-not-honored;
+all-pass→cleared→honored; a veto→failed with a finding; an unregistered
+step keeps the endpoint provisional (never cleared on a skipped check);
+fixed step order; the amended contract needs BOTH converged and cleared;
+determinism; first-registered-step-of-a-kind wins; `from_descent` bridge;
+and δ-perturbation passes a smooth optimum, vetoes found-better and
+sharp-crack exploits, fails closed on non-finite, and treats an empty
+design as vacuously robust — plus the realistic v0 state (δ-only →
+provisional).
+
 ## No-claim boundaries
 
 - Gradients here are FD-through-retraction toys; exact adjoints and
@@ -132,3 +158,12 @@ suite unchanged.
 - `Stiefel` descent uses ambient FD directions (overcomplete but
   convergent with the QR retraction); proper tangent bases join with
   the gradient stack.
+- The Goodhart guard is the POLICY ENGINE only. Three of its four steps
+  (rung-k+1, cross-representation, estimator-independence) need machinery
+  that does not exist yet (the fidelity-ladder registry, a live Rep Router
+  re-solve, ≥2 estimator families) and are `NotPerformed` until callers
+  inject them — so a v0 endpoint clears to `Provisional`, never `Cleared`,
+  by design. `GuardFinding`s are PRODUCED here (L4); writing them to the
+  ledger as tombstones/bug reports is HELM's job (no upward dependency).
+  The endpoint-vs-random catch-rate kill measurement (G4/statistical) is a
+  Gauntlet harness bead, not this crate.

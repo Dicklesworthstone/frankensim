@@ -24,10 +24,15 @@
 //!   files cannot smuggle ill-typed graphs.
 
 mod eval;
+mod guard;
 mod ir;
 mod serial;
 
 pub use eval::{DescentOptions, DescentReport, Value, descend_fn, descend_ir, eval};
+pub use guard::{
+    DeltaPerturbationStep, Endpoint, EscalationKind, EscalationStep, GoodhartGuard, GuardFinding,
+    GuardReport, GuardStatus, StepOutcome, StepReport, converged_and_guard_cleared,
+};
 pub use ir::{
     Class, Constraint, ConstraintKind, EvalBudget, Expr, Manifold, NodeId, Objective, OptError,
     OptimizerFamily, Problem, ProblemBuilder, ProblemTag, Sense, Shape, VarId, Variable,
