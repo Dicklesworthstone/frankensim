@@ -22,6 +22,7 @@ members = [
     "crates/fs-ir",
     "crates/fs-plan",
     "crates/fs-xform",
+    "crates/fs-img",
     "crates/fs-roofline",
     "crates/fs-geom",
     "crates/fs-rep-sdf",
