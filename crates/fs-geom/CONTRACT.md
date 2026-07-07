@@ -60,6 +60,23 @@ Depends on fs-exec (Cx), fs-evidence, fs-alloc, fs-obs.
   Learned measurements replace declared error magnitudes ONLY on
   uncertified additive edges; certificates are never learned away.
 
+- `sheaf` module (bead wqd.13, Bet 11 [F/M]): cellular-sheaf
+  WATERTIGHTNESS certificates. `SheafComplex::from_charts` discovers
+  interfaces by support overlap + shared zero-band sampling
+  (geometry-seeded, index-free — re-index invariance is exact), plus
+  triple junctions as 2-cells. δ⁰/δ¹ assemble as fs-sparse matrices with
+  entries in {−1, 0, +1}; `δ¹·δ⁰ = 0` holds BITWISE (small-integer f64).
+  `watertightness(tol)` returns `Evidence<SheafVerdict>`: PASS requires
+  every sample's |mismatch| enclosure INSIDE `[0, tol]` via fs-ivl's
+  sound predicates (no bound extraction); FAIL requires an enclosure
+  ENTIRELY above tol — the H¹ obstruction with the offending interface
+  cells and magnitudes attached; anything else is an honest Unknown.
+  `section_solve` computes per-patch gauge offsets over the adjacency
+  Laplacian, splitting mismatch into a reconcilable coboundary share and
+  the structural residual — the exact split Proposal 10's merge
+  semantics reuses. `ray_parity_falsifier` is the independent
+  cross-examination (registry pairing: watertightness → ray-parity).
+
 ## Invariants
 1. Trait laws (G0, geo-001, 12k seeded queries): `inside(x)` ⇔ `sd(x) <
    0`; `support()` bounds the region (no negative sd outside, to
@@ -130,3 +147,19 @@ values, agreement determinism, and cancellation.
   certificates are wqd.19's).
 - Cost models, chart selection, and the Pareto routing plane are the Rep
   Router bead's; `Region::primary` is insertion-order only.
+
+## No-claim boundaries (sheaf)
+
+- Restriction maps are POINT SAMPLERS on the shared zero band;
+  spline-trace and mesh-edge restriction assemblies land with their
+  consuming beads (fs-iga mortar, MORPH conformance).
+- Reported margins are midpoint±width reconstructions (≤1 ulp); the
+  VERDICT itself is decided only by fs-ivl's sound interval predicates.
+- BDDC-style coarse spaces from harmonic sections (the second consumer)
+  belong to the solver-dd bead; the spectral-gap confidence signal to
+  Proposal 5.
+- Scaling target (hundreds of patches) is structural (O(P²) overlap
+  discovery + linear sampling); measured perf gates land with MORPH
+  conformance.
+- Charts with NoClaim error certificates poison their interfaces to
+  infinite enclosures — such models can only ever be Unknown (honest).
