@@ -8,6 +8,7 @@ members = [
     "crates/fs-query",
     "crates/fs-geocon",
     "crates/fs-topo",
+    "crates/fs-recompute",
     "crates/fs-evidence",
     "crates/fs-substrate",
     "crates/fs-soa",

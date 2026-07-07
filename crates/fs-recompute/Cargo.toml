@@ -1,0 +1,21 @@
+[package]
+name = "fs-recompute"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Incremental-recompute store: content-addressed Merkle DAG with first-class slack, skip soundness certificates, pinning, and the determinism contract."
+
+[package.metadata.frankensim]
+layer = "L6"
+
+[dependencies]
+fs-ledger = { path = "../fs-ledger" }
+
+[dev-dependencies]
+fs-exec = { path = "../fs-exec" }
+fs-obs = { path = "../fs-obs" }
+
+[lints]
+workspace = true

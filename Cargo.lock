@@ -1035,6 +1035,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-recompute"
+version = "0.0.1"
+dependencies = [
+ "fs-exec",
+ "fs-ledger",
+ "fs-obs",
+]
+
+[[package]]
 name = "fs-regime"
 version = "0.0.1"
 dependencies = [
