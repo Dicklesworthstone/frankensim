@@ -873,6 +873,7 @@ version = "0.0.1"
 dependencies = [
  "fs-math",
  "fs-rand",
+ "fs-soa",
 ]
 
 [[package]]
@@ -1028,11 +1029,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-session"
+version = "0.0.1"
+dependencies = [
+ "fs-exec",
+ "fs-ir",
+ "fs-ledger",
+ "fs-obs",
+ "fs-plan",
+ "fs-qty",
+ "fs-regime",
+]
+
+[[package]]
 name = "fs-simd"
 version = "0.0.1"
 dependencies = [
  "fs-substrate",
 ]
+
+[[package]]
+name = "fs-soa"
+version = "0.0.1"
+dependencies = [
+ "fs-qty",
+ "fs-rand",
+ "fs-soa-derive",
+]
+
+[[package]]
+name = "fs-soa-derive"
+version = "0.0.1"
 
 [[package]]
 name = "fs-sparse"
