@@ -7,18 +7,25 @@
 //! signed permutation) and physics invariance at r = 4 (vertex point
 //! values, energy, and L2 error are label-independent).
 
-use fs_feec::highorder::simplex::{LocalFn, SimplexSpace, duffy_quadrature, entity_dofs};
+use fs_feec::highorder::simplex::{SimplexSpace, duffy_quadrature, entity_dofs};
 use fs_feec::kuhn_cube;
 use fs_rand::StreamKey;
 use fs_rep_mesh::TetComplex;
 use fs_sparse::precond::{IdentityPrecond, pcg};
 
 fn log(case: &str, verdict: &str, detail: &str) {
-    println!("{{\"suite\":\"fs-feec-ho\",\"case\":\"{case}\",\"verdict\":\"{verdict}\",\"detail\":\"{detail}\"}}");
+    println!(
+        "{{\"suite\":\"fs-feec-ho\",\"case\":\"{case}\",\"verdict\":\"{verdict}\",\"detail\":\"{detail}\"}}"
+    );
 }
 
 fn rand_vec(n: usize, tile: u32) -> Vec<f64> {
-    let mut s = StreamKey { seed: 11, kernel: 0x51E3, tile }.stream();
+    let mut s = StreamKey {
+        seed: 11,
+        kernel: 0x51E3,
+        tile,
+    }
+    .stream();
     (0..n).map(|_| 2.0f64.mul_add(s.next_f64(), -1.0)).collect()
 }
 
@@ -45,7 +52,10 @@ fn quadrature_and_dof_counts() {
         let (pe, pf, pi) = entity_dofs(r);
         let local = 4 + 6 * pe + 4 * pf + pi;
         let dim = (r + 1) * (r + 2) * (r + 3) / 6;
-        assert_eq!(local, dim, "r={r}: local dof count {local} vs dim P_r = {dim}");
+        assert_eq!(
+            local, dim,
+            "r={r}: local dof count {local} vs dim P_r = {dim}"
+        );
     }
     log("counts", "pass", "Duffy volumes + P_r dimensions r=1..6");
 }
@@ -98,8 +108,15 @@ fn conformity_across_shared_face() {
         let v1 = eval_elem(1, [a, b, c, 0.0]);
         worst = worst.max((v0 - v1).abs());
     }
-    assert!(worst < 1e-13, "conformity broken across shared face: {worst:.3e}");
-    log("conformity", "pass", &format!("r=4 trace agreement {worst:.1e}"));
+    assert!(
+        worst < 1e-13,
+        "conformity broken across shared face: {worst:.3e}"
+    );
+    log(
+        "conformity",
+        "pass",
+        &format!("r=4 trace agreement {worst:.1e}"),
+    );
 }
 
 fn solve_poisson(
@@ -161,7 +178,11 @@ fn mms_orders_r1_through_r4() {
             order > r as f64 + 0.6,
             "r={r}: simplicial order {order:.2} (errors {errs:?})"
         );
-        log("mms-simplex-order", "pass", &format!("r={r} order={order:.2}"));
+        log(
+            "mms-simplex-order",
+            "pass",
+            &format!("r={r} order={order:.2}"),
+        );
     }
 }
 
@@ -174,7 +195,14 @@ fn permute(
     let tets: Vec<[u32; 4]> = complex
         .tets
         .iter()
-        .map(|t| [perm[t[0] as usize], perm[t[1] as usize], perm[t[2] as usize], perm[t[3] as usize]])
+        .map(|t| {
+            [
+                perm[t[0] as usize],
+                perm[t[1] as usize],
+                perm[t[2] as usize],
+                perm[t[3] as usize],
+            ]
+        })
         .collect();
     let mut pos = vec![[0.0f64; 3]; positions.len()];
     for (v, &p) in perm.iter().zip(positions) {
@@ -185,7 +213,12 @@ fn permute(
 
 /// Deterministic pseudo-random permutation of 0..n.
 fn random_perm(n: usize, seed_tile: u32) -> Vec<u32> {
-    let mut s = StreamKey { seed: 12, kernel: 0x51E3, tile: seed_tile }.stream();
+    let mut s = StreamKey {
+        seed: 12,
+        kernel: 0x51E3,
+        tile: seed_tile,
+    }
+    .stream();
     let mut p: Vec<u32> = (0..u32::try_from(n).expect("small")).collect();
     for i in (1..n).rev() {
         let j = usize::try_from(s.next_below(i as u64 + 1)).expect("small");
@@ -225,7 +258,10 @@ fn orientation_signed_permutation_equivariance_r3() {
         let (pa, pb) = (perm[a as usize], perm[b as usize]);
         let flipped = pa > pb;
         let key = if flipped { [pb, pa] } else { [pa, pb] };
-        let ep = complex_p.edges.binary_search(&key).expect("edge in permuted table");
+        let ep = complex_p
+            .edges
+            .binary_search(&key)
+            .expect("edge in permuted table");
         for kk in 0..sp.per_edge {
             map[sp.edge_off + e * sp.per_edge + kk] = sp_p.edge_off + ep * sp.per_edge + kk;
             if flipped && kk % 2 == 1 {
@@ -240,7 +276,10 @@ fn orientation_signed_permutation_equivariance_r3() {
             perm[tri[2] as usize],
         ];
         key.sort_unstable();
-        let fp = complex_p.faces.binary_search(&key).expect("face in permuted table");
+        let fp = complex_p
+            .faces
+            .binary_search(&key)
+            .expect("face in permuted table");
         for kk in 0..sp.per_face {
             map[sp.face_off + f * sp.per_face + kk] = sp_p.face_off + fp * sp.per_face + kk;
         }
@@ -269,7 +308,11 @@ fn orientation_signed_permutation_equivariance_r3() {
         worst < 1e-12 * scale,
         "orientation equivariance broken: {worst:.3e} (scale {scale:.3e})"
     );
-    log("orientation-r2", "pass", &format!("signed-permutation equivariance {worst:.1e}"));
+    log(
+        "orientation-r2",
+        "pass",
+        &format!("signed-permutation equivariance {worst:.1e}"),
+    );
 }
 
 #[test]
@@ -297,9 +340,15 @@ fn orientation_physics_invariance_r4() {
     for v in 0..complex.vertex_count {
         worst_v = worst_v.max((u1[v] - u2[perm[v] as usize]).abs());
     }
-    assert!(worst_v < 1e-9, "vertex values differ under relabeling: {worst_v:.3e}");
+    assert!(
+        worst_v < 1e-9,
+        "vertex values differ under relabeling: {worst_v:.3e}"
+    );
     let rel = (err1 - err2).abs() / err1.max(1e-30);
-    assert!(rel < 1e-6, "L2 error differs under relabeling: {err1:.6e} vs {err2:.6e}");
+    assert!(
+        rel < 1e-6,
+        "L2 error differs under relabeling: {err1:.6e} vs {err2:.6e}"
+    );
     log(
         "orientation-r4",
         "pass",
@@ -307,7 +356,7 @@ fn orientation_physics_invariance_r4() {
     );
 }
 
-const GOLDEN_HASH: u64 = 0; // recorded on first run, then frozen
+const GOLDEN_HASH: u64 = 0xf37d_c95f_9ce6_c195; // recorded at tfz.6 slice 3, frozen
 
 #[test]
 fn simplex_golden_hash() {

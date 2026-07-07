@@ -23,7 +23,11 @@ use fs_sparse::{Coo, Csr};
 pub fn entity_dofs(r: usize) -> (usize, usize, usize) {
     let e = r.saturating_sub(1);
     let f = if r >= 3 { (r - 1) * (r - 2) / 2 } else { 0 };
-    let i = if r >= 4 { (r - 1) * (r - 2) * (r - 3) / 6 } else { 0 };
+    let i = if r >= 4 {
+        (r - 1) * (r - 2) * (r - 3) / 6
+    } else {
+        0
+    };
     (e, f, i)
 }
 
@@ -92,9 +96,16 @@ impl<'c> SimplexSpace<'c> {
             for q in (p + 1)..4 {
                 let (la, lb) = if tet[p] < tet[q] { (p, q) } else { (q, p) };
                 let key = [tet[la], tet[lb]];
-                let e = self.complex.edges.binary_search(&key).expect("edge in table");
+                let e = self
+                    .complex
+                    .edges
+                    .binary_search(&key)
+                    .expect("edge in table");
                 for k in 0..self.per_edge {
-                    out.push((self.edge_off + e * self.per_edge + k, LocalFn::Edge(la, lb, k)));
+                    out.push((
+                        self.edge_off + e * self.per_edge + k,
+                        LocalFn::Edge(la, lb, k),
+                    ));
                 }
             }
         }
@@ -108,7 +119,11 @@ impl<'c> SimplexSpace<'c> {
                     kk.sort_unstable();
                     kk
                 };
-                let f = self.complex.faces.binary_search(&key).expect("face in table");
+                let f = self
+                    .complex
+                    .faces
+                    .binary_search(&key)
+                    .expect("face in table");
                 let mut k = 0usize;
                 for i in 0..self.r.saturating_sub(2) {
                     for j in 0..self.r.saturating_sub(2) {
@@ -160,9 +175,9 @@ impl<'c> SimplexSpace<'c> {
                 for (_, f) in &dofs {
                     let dl = f.d_lambda(lam, self.r);
                     let mut g = [0.0f64; 3];
-                    for a in 0..4 {
-                        for c in 0..3 {
-                            g[c] = dl[a].mul_add(geo.grads[t][a][c], g[c]);
+                    for (a, dla) in dl.iter().enumerate() {
+                        for (c, gc) in g.iter_mut().enumerate() {
+                            *gc = dla.mul_add(geo.grads[t][a][c], *gc);
                         }
                     }
                     grads.push(g);
