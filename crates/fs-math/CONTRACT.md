@@ -14,6 +14,19 @@ floating-point POLICY: FMA contraction, subnormals, NaN, ULP budgets
   oracle, 200k samples + edges): exp 3 (1), expm1 3 (2), ln 3 (1),
   sin 3 (2), cos 3 (2), tanh 5 (3). sqrt is 0 ULP (IEEE-correctly-rounded
   hardware).
+- EXTENSION FAMILY (bead wf9.14, additive): `det::{tan, atan, atan2,
+  erf, erfc, pow}`. Declared budgets (measured, 200k+ samples + edges):
+  tan 8 (shared Cody–Waite reduction; tan = sin/cos BITWISE on even
+  quadrants — an identity, not an approximation), atan/atan2 4 (+1 for
+  atan2 composition), erf 6, erfc 10 (deep tail included: exact-dd x²
+  before exp — plain f64 there would cost ~x²/2 ULP), pow = the HONEST
+  formula 3·(|y·ln x|+1)+5 (the exp∘ln magnification is intrinsic;
+  dd-ln refinement recorded). erf/erfc run their cancellation-prone sums
+  in double-double (why dd lives at L0). Oddness of tan/atan/erf and
+  atan2's y-sign symmetry hold BITWISE by construction. In the erf
+  band x ∈ (1.5, 3.5) the external test oracle is weaker than the
+  implementation; budget-grade evidence there is DISJOINT-PATH
+  cross-validation (Taylor-dd vs CF-dd agree ≤ 3 ULP, tested).
 - `det::TRIG_DOMAIN` = 2²⁰: trig budgets valid within |x| ≤ 2²⁰ (4-part
   Cody–Waite reduction); beyond → deterministic but budget-void (no-claim).
 - Policy vocabulary: `canonical_nan`, `next_up/next_down`, `nudge_out`

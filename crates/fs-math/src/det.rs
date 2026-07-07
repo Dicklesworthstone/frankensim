@@ -427,16 +427,20 @@ pub fn atan(x: f64) -> f64 {
 /// mode. Sign symmetries hold bitwise (sign of y folded at entry).
 #[must_use]
 pub fn atan2(y: f64, x: f64) -> f64 {
+    const PI_HI: f64 = std::f64::consts::PI;
+    const PI_LO: f64 = 1.224_646_799_147_353_2e-16;
     if x.is_nan() || y.is_nan() {
         return f64::NAN;
     }
     let sign = if y.is_sign_negative() { -1.0 } else { 1.0 };
     let ay = y.abs();
-    const PI_HI: f64 = std::f64::consts::PI;
-    const PI_LO: f64 = 1.224_646_799_147_353_2e-16;
     // Special cases (IEEE 754 / libm conventions).
     if ay == 0.0 {
-        return if x.is_sign_negative() { sign * (PI_HI + PI_LO) } else { sign * 0.0 };
+        return if x.is_sign_negative() {
+            sign * (PI_HI + PI_LO)
+        } else {
+            sign * 0.0
+        };
     }
     if x == 0.0 {
         return sign * (PI_2_HI + PI_2_LO);
@@ -453,7 +457,11 @@ pub fn atan2(y: f64, x: f64) -> f64 {
         return sign * (PI_2_HI + PI_2_LO);
     }
     let base = atan(ay / x.abs());
-    if x > 0.0 { sign * base } else { sign * ((PI_HI - base) + PI_LO) }
+    if x > 0.0 {
+        sign * base
+    } else {
+        sign * ((PI_HI - base) + PI_LO)
+    }
 }
 
 /// 2/√π and π as double-double values, derived at runtime from exact
@@ -521,6 +529,20 @@ pub fn erfc(x: f64) -> f64 {
     }
 }
 
+/// BOTH erf paths at the same x (Taylor-dd and CF-dd) — exposed for the
+/// conformance battery's path-consistency check: the two constructions
+/// are algorithmically disjoint, so their agreement at shared x is
+/// genuine cross-validation (the external oracle is weaker than the
+/// implementation in the cancellation band).
+#[doc(hidden)]
+#[must_use]
+pub fn erf_both_paths(x: f64) -> (f64, f64) {
+    use crate::dd::Dd;
+    let taylor = erf_dd_small(x).to_f64();
+    let cf = (Dd::from_f64(1.0) - erfc_dd_large(x)).to_f64();
+    (taylor, cf)
+}
+
 /// dd Taylor sum of erf on [0, 3].
 fn erf_dd_small(a: f64) -> crate::dd::Dd {
     use crate::dd::Dd;
@@ -528,10 +550,14 @@ fn erf_dd_small(a: f64) -> crate::dd::Dd {
     let x2 = x * x;
     let mut term = x; // x^(2k+1)/k! at k = 0
     let mut sum = x; // k = 0 contribution: x/1
-    for k in 1..=90 {
-        term = term * x2 / Dd::from_f64(k as f64);
-        let contrib = term / Dd::from_f64(2.0 * k as f64 + 1.0);
-        sum = if k % 2 == 1 { sum - contrib } else { sum + contrib };
+    for k in 1..=90i32 {
+        term = term * x2 / Dd::from_f64(f64::from(k));
+        let contrib = term / Dd::from_f64(2.0f64.mul_add(f64::from(k), 1.0));
+        sum = if k % 2 == 1 {
+            sum - contrib
+        } else {
+            sum + contrib
+        };
         if contrib.hi.abs() < 1e-35 * sum.hi.abs() {
             break;
         }
@@ -545,8 +571,8 @@ fn erfc_dd_large(x: f64) -> crate::dd::Dd {
     use crate::dd::Dd;
     let xd = Dd::from_f64(x);
     let mut cf = xd; // innermost tail ≈ x
-    for k in (1..=60).rev() {
-        cf = xd + Dd::from_f64(k as f64 / 2.0) / cf;
+    for k in (1..=60i32).rev() {
+        cf = xd + Dd::from_f64(f64::from(k) / 2.0) / cf;
     }
     // exp(−x²) with the EXACT dd square (f64 x² alone would cost ~x²/2
     // ULP of relative error — hundreds at x = 25).
@@ -561,6 +587,9 @@ fn erfc_dd_large(x: f64) -> crate::dd::Dd {
 /// intrinsic to the exp∘ln route; dd-ln refinement recorded). Fast
 /// paths: integer y (repeated squaring), y = ±0.5 (exact sqrt).
 #[must_use]
+// Exact equality against special VALUES (1.0, ±0.5, integers) is the
+// IEEE-mandated special-case detection, not tolerance arithmetic.
+#[allow(clippy::float_cmp)]
 pub fn pow(x: f64, y: f64) -> f64 {
     // IEEE special cases first.
     if y == 0.0 {
@@ -586,7 +615,11 @@ pub fn pow(x: f64, y: f64) -> f64 {
         // Delegate the (finite) magnitude comparison logic.
         let ax = x.abs();
         let big = if y.is_infinite() {
-            if (ax > 1.0) == (y > 0.0) { f64::INFINITY } else { 0.0 }
+            if (ax > 1.0) == (y > 0.0) {
+                f64::INFINITY
+            } else {
+                0.0
+            }
         } else if y > 0.0 {
             f64::INFINITY
         } else {
