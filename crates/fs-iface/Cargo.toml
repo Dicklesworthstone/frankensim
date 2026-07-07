@@ -1,0 +1,18 @@
+[package]
+name = "fs-iface"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Interface types + coupling-graph static checker (addendum Proposal 13): the FEEC periodic-table type lattice and an inf-sup-certified pairing registry that turn ill-posed couplings into compile-time errors before any solve."
+
+[package.metadata.frankensim]
+layer = "L3"
+
+[dependencies]
+
+[dev-dependencies]
+
+[lints]
+workspace = true
