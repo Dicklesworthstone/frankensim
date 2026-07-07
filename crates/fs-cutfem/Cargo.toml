@@ -1,0 +1,20 @@
+[package]
+name = "fs-cutfem"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "CutFEM on SDFs: certified cut-cell classification, cut quadrature with error control, ghost-penalty stabilization, aggregation fallback, Nitsche embedded BCs on quadtree background grids."
+
+[package.metadata.frankensim]
+layer = "L3"
+
+[dependencies]
+fs-ivl = { path = "../fs-ivl" }
+fs-la = { path = "../fs-la" }
+fs-solver = { path = "../fs-solver" }
+fs-sparse = { path = "../fs-sparse" }
+
+[lints]
+workspace = true
