@@ -1,0 +1,18 @@
+[package]
+name = "fs-ladder"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Fidelity-ladder registry (addendum Proposal 3): per-kernel rungs with typed prolongation/restriction between adjacent rungs — the shared substrate the speculation proposer, the query planner, the Goodhart guard, and tolerance allocation all walk."
+
+[package.metadata.frankensim]
+layer = "L3"
+
+[dependencies]
+
+[dev-dependencies]
+
+[lints]
+workspace = true
