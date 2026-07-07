@@ -37,7 +37,10 @@ impl C64 {
     /// Complex conjugate.
     #[must_use]
     pub const fn conj(self) -> C64 {
-        C64 { re: self.re, im: -self.im }
+        C64 {
+            re: self.re,
+            im: -self.im,
+        }
     }
 
     /// Magnitude, overflow/underflow-safe (max-scaled — no libm hypot).
@@ -72,10 +75,16 @@ impl C64 {
         let m = self.abs();
         let t = det::sqrt(f64::midpoint(m, self.re.abs()));
         if self.re >= 0.0 {
-            C64 { re: t, im: self.im / (2.0 * t) }
+            C64 {
+                re: t,
+                im: self.im / (2.0 * t),
+            }
         } else {
             let sign = if self.im >= 0.0 { 1.0 } else { -1.0 };
-            C64 { re: self.im.abs() / (2.0 * t), im: sign * t }
+            C64 {
+                re: self.im.abs() / (2.0 * t),
+                im: sign * t,
+            }
         }
     }
 
@@ -85,39 +94,57 @@ impl C64 {
         if self.re.abs() >= self.im.abs() {
             let r = self.im / self.re;
             let d = self.re.mul_add(1.0, self.im * r); // re + im·r
-            C64 { re: 1.0 / d, im: -r / d }
+            C64 {
+                re: 1.0 / d,
+                im: -r / d,
+            }
         } else {
             let r = self.re / self.im;
             let d = self.re.mul_add(r, self.im); // re·r + im
-            C64 { re: r / d, im: -1.0 / d }
+            C64 {
+                re: r / d,
+                im: -1.0 / d,
+            }
         }
     }
 
     /// Scale by a real.
     #[must_use]
     pub fn scale(self, k: f64) -> C64 {
-        C64 { re: self.re * k, im: self.im * k }
+        C64 {
+            re: self.re * k,
+            im: self.im * k,
+        }
     }
 }
 
 impl core::ops::Add for C64 {
     type Output = C64;
     fn add(self, o: C64) -> C64 {
-        C64 { re: self.re + o.re, im: self.im + o.im }
+        C64 {
+            re: self.re + o.re,
+            im: self.im + o.im,
+        }
     }
 }
 
 impl core::ops::Sub for C64 {
     type Output = C64;
     fn sub(self, o: C64) -> C64 {
-        C64 { re: self.re - o.re, im: self.im - o.im }
+        C64 {
+            re: self.re - o.re,
+            im: self.im - o.im,
+        }
     }
 }
 
 impl core::ops::Neg for C64 {
     type Output = C64;
     fn neg(self) -> C64 {
-        C64 { re: -self.re, im: -self.im }
+        C64 {
+            re: -self.re,
+            im: -self.im,
+        }
     }
 }
 
@@ -166,13 +193,19 @@ mod tests {
         // Division at scale extremes (Smith robustness).
         let big = C64::new(1e300, 1e300);
         let q = big / big;
-        assert!((q - C64::ONE).abs() < 1e-14, "extreme-scale division: {q:?}");
+        assert!(
+            (q - C64::ONE).abs() < 1e-14,
+            "extreme-scale division: {q:?}"
+        );
         let tiny = C64::new(1e-300, -1e-300);
         let q2 = tiny / tiny;
         assert!((q2 - C64::ONE).abs() < 1e-14);
         // sqrt: both half-planes, principal branch.
         let s = C64::new(-4.0, 0.0).sqrt();
-        assert!((s.re).abs() < 1e-15 && (s.im - 2.0).abs() < 1e-15, "sqrt(-4) = {s:?}");
+        assert!(
+            (s.re).abs() < 1e-15 && (s.im - 2.0).abs() < 1e-15,
+            "sqrt(-4) = {s:?}"
+        );
         let z = C64::new(3.0, 4.0);
         let r = z.sqrt();
         assert!(((r * r) - z).abs() < 1e-14, "sqrt round trip: {r:?}");

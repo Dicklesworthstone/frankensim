@@ -23,7 +23,11 @@ pub struct EigFailure {
 
 impl core::fmt::Display for EigFailure {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "QR iteration failed to converge (window ending {})", self.window_hi)
+        write!(
+            f,
+            "QR iteration failed to converge (window ending {})",
+            self.window_hi
+        )
     }
 }
 
@@ -124,9 +128,7 @@ pub fn eig(a: &[C64], n: usize) -> Result<Vec<C64>, EigFailure> {
         loop {
             if hi == 0 {
                 eigs.push(h[0]);
-                eigs.sort_by(|x, y| {
-                    x.re.total_cmp(&y.re).then_with(|| x.im.total_cmp(&y.im))
-                });
+                eigs.sort_by(|x, y| x.re.total_cmp(&y.re).then_with(|| x.im.total_cmp(&y.im)));
                 return Ok(eigs);
             }
             if h[hi * n + (hi - 1)].abs() == 0.0 {
@@ -135,9 +137,7 @@ pub fn eig(a: &[C64], n: usize) -> Result<Vec<C64>, EigFailure> {
                 iters_here = 0;
                 continue;
             }
-            if hi >= 1
-                && (hi == 1 || h[(hi - 1) * n + (hi - 2)].abs() == 0.0)
-            {
+            if hi >= 1 && (hi == 1 || h[(hi - 1) * n + (hi - 2)].abs() == 0.0) {
                 // Isolated 2×2 block: closed form, deflate both.
                 let (l1, l2) = eig2(
                     h[(hi - 1) * n + (hi - 1)],
@@ -148,9 +148,7 @@ pub fn eig(a: &[C64], n: usize) -> Result<Vec<C64>, EigFailure> {
                 eigs.push(l1);
                 eigs.push(l2);
                 if hi == 1 {
-                    eigs.sort_by(|x, y| {
-                        x.re.total_cmp(&y.re).then_with(|| x.im.total_cmp(&y.im))
-                    });
+                    eigs.sort_by(|x, y| x.re.total_cmp(&y.re).then_with(|| x.im.total_cmp(&y.im)));
                     return Ok(eigs);
                 }
                 hi -= 2;
