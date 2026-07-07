@@ -138,7 +138,7 @@ impl PointCloud {
         let n = self.points.len();
         let mut normals = vec![[0.0f64; 3]; n];
         let mut neighborhoods = Vec::with_capacity(n);
-        for i in 0..n {
+        for (i, slot) in normals.iter_mut().enumerate() {
             let nb: Vec<usize> = self
                 .knn(self.points[i], k + 1)
                 .into_iter()
@@ -147,8 +147,8 @@ impl PointCloud {
                 .collect();
             let mut mean = [0.0f64; 3];
             for &j in &nb {
-                for a in 0..3 {
-                    mean[a] += self.points[j][a];
+                for (m, &c) in mean.iter_mut().zip(&self.points[j]) {
+                    *m += c;
                 }
             }
             #[allow(clippy::cast_precision_loss)]
@@ -165,7 +165,7 @@ impl PointCloud {
                     }
                 }
             }
-            normals[i] = smallest_eigenvector(cov);
+            *slot = smallest_eigenvector(cov);
             neighborhoods.push(nb);
         }
         // Orientation propagation: BFS from the topmost point, aligning
@@ -244,10 +244,15 @@ fn smallest_eigenvector(mut a: [[f64; 3]; 3]) -> [f64; 3] {
             let t = theta.signum() / (theta.abs() + det::sqrt(theta * theta + 1.0));
             let c = 1.0 / det::sqrt(t * t + 1.0);
             let s = t * c;
-            for k in 0..3 {
-                let (apk, aqk) = (a[p][k], a[q][k]);
-                a[p][k] = c * apk - s * aqk;
-                a[q][k] = s * apk + c * aqk;
+            {
+                // Row rotation: split borrows of rows p and q (p < q).
+                let (head, tail) = a.split_at_mut(q);
+                let (row_p, row_q) = (&mut head[p], &mut tail[0]);
+                for (ap, aq) in row_p.iter_mut().zip(row_q.iter_mut()) {
+                    let (apk, aqk) = (*ap, *aq);
+                    *ap = c.mul_add(apk, -s * aqk);
+                    *aq = s.mul_add(apk, c * aqk);
+                }
             }
             for k in 0..3 {
                 let (akp, akq) = (a[k][p], a[k][q]);

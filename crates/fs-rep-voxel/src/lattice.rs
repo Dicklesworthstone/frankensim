@@ -56,7 +56,8 @@ impl LatticeGraph {
     /// [`VoxelError::Lattice`] with the offending element named.
     pub fn new(nodes: Vec<LatticeNode>, struts: Vec<Strut>) -> Result<Self, VoxelError> {
         for (i, n) in nodes.iter().enumerate() {
-            if n.pos.iter().any(|v| !v.is_finite()) || !(n.radius > 0.0) {
+            let radius_ok = n.radius.is_finite() && n.radius > 0.0;
+            if n.pos.iter().any(|v| !v.is_finite()) || !radius_ok {
                 return Err(VoxelError::Lattice {
                     what: format!("node {i}: non-finite position or non-positive radius"),
                 });
@@ -122,7 +123,8 @@ impl LatticeGraph {
         let float_attr = |attrs: &fnx_classes::AttrMap, key: &str| -> Result<f64, VoxelError> {
             match attrs.get(key) {
                 Some(CgseValue::Float(v)) => Ok(*v),
-                Some(CgseValue::Int(v)) => {
+                Some(CgseValue::Int(v)) =>
+                {
                     #[allow(clippy::cast_precision_loss)]
                     Ok(*v as f64)
                 }
@@ -152,9 +154,11 @@ impl LatticeGraph {
             });
         }
         let index_of = |id: &str| -> Result<usize, VoxelError> {
-            ids.iter().position(|x| x == id).ok_or_else(|| VoxelError::Graph {
-                what: format!("edge references unknown node {id}"),
-            })
+            ids.iter()
+                .position(|x| x == id)
+                .ok_or_else(|| VoxelError::Graph {
+                    what: format!("edge references unknown node {id}"),
+                })
         };
         let mut struts = Vec::new();
         for (i, id) in ids.iter().enumerate() {

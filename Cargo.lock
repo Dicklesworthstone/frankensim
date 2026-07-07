@@ -1134,6 +1134,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-tilelang"
+version = "0.0.1"
+dependencies = [
+ "fs-rand",
+ "fs-substrate",
+ "fs-tilelang-macros",
+]
+
+[[package]]
+name = "fs-tilelang-macros"
+version = "0.0.1"
+
+[[package]]
 name = "fs-time"
 version = "0.0.1"
 dependencies = [

@@ -31,17 +31,17 @@ impl DistanceField {
     fn index(&self, coord: [i32; 3]) -> Option<usize> {
         let mut idx = 0usize;
         let mut stride = 1usize;
-        for k in 0..3 {
-            let rel = coord[k].checked_sub(self.min[k])?;
+        for ((&c, &lo), &dim) in coord.iter().zip(&self.min).zip(&self.dims) {
+            let rel = c.checked_sub(lo)?;
             if rel < 0 {
                 return None;
             }
             let rel = usize::try_from(rel).ok()?;
-            if rel >= self.dims[k] {
+            if rel >= dim {
                 return None;
             }
             idx += rel * stride;
-            stride *= self.dims[k];
+            stride *= dim;
         }
         Some(idx)
     }
@@ -113,9 +113,8 @@ pub fn euclidean_dt(field: &OccupancyField) -> Option<DistanceField> {
     if min[0] == i32::MAX {
         return None;
     }
-    let dims: [usize; 3] = core::array::from_fn(|k| {
-        usize::try_from(max[k] - min[k] + 1).expect("bounded box")
-    });
+    let dims: [usize; 3] =
+        core::array::from_fn(|k| usize::try_from(max[k] - min[k] + 1).expect("bounded box"));
     let total = dims[0] * dims[1] * dims[2];
     let mut sq = vec![f64::INFINITY; total];
     let at = |x: usize, y: usize, z: usize| x + dims[0] * (y + dims[1] * z);

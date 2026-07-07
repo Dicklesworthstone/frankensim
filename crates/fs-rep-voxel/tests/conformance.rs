@@ -37,7 +37,9 @@ fn ball(radius: i32) -> OccupancyField {
 }
 
 /// Brute-force 6-connected dilation of an active set.
-fn brute_dilate(cells: &std::collections::BTreeSet<[i32; 3]>) -> std::collections::BTreeSet<[i32; 3]> {
+fn brute_dilate(
+    cells: &std::collections::BTreeSet<[i32; 3]>,
+) -> std::collections::BTreeSet<[i32; 3]> {
     let mut out = cells.clone();
     for c in cells {
         for d in [
@@ -69,7 +71,11 @@ fn rv_001_morphology_matches_brute_force_and_algebra() {
     // Dilation vs brute force.
     let mut dilated = f.clone();
     dilated.dilate(1);
-    assert_eq!(active_set(&dilated), brute_dilate(&before), "dilate == brute force");
+    assert_eq!(
+        active_set(&dilated),
+        brute_dilate(&before),
+        "dilate == brute force"
+    );
     // Erosion is dilation's dual on the fixtures: erode(dilate(A)) ⊇ A.
     let mut closed = f.clone();
     closed.close(1);
@@ -83,8 +89,14 @@ fn rv_001_morphology_matches_brute_force_and_algebra() {
     opened.open(1);
     let after_open = active_set(&opened);
     assert!(after_open.is_subset(&before), "opening must not add voxels");
-    assert!(!after_open.contains(&[7, 0, 0]), "the spur must be opened away");
-    assert!(after_open.contains(&[0, 0, 0]), "the ball core survives opening");
+    assert!(
+        !after_open.contains(&[7, 0, 0]),
+        "the spur must be opened away"
+    );
+    assert!(
+        after_open.contains(&[0, 0, 0]),
+        "the ball core survives opening"
+    );
     // Boolean algebra: (A ∪ B) \ B ⊆ A, A ∩ B ⊆ A.
     let b = ball(3);
     let mut u = f.clone();
@@ -162,7 +174,10 @@ fn rv_002_euclidean_dt_is_exact_vs_reference() {
             );
         }
     }
-    verdict("rv-002", "DT exact vs O(n^2) on scattered+slab fixture; 1-Lipschitz");
+    verdict(
+        "rv-002",
+        "DT exact vs O(n^2) on scattered+slab fixture; 1-Lipschitz",
+    );
 }
 
 #[test]
@@ -170,17 +185,29 @@ fn rv_003_point_cloud_queries_and_normals() {
     let mut seed = 0xC1_0003u64;
     // Random cloud for query correctness.
     let pts: Vec<[f64; 3]> = (0..400)
-        .map(|_| [lcg(&mut seed) * 4.0, lcg(&mut seed) * 4.0, lcg(&mut seed) * 4.0])
+        .map(|_| {
+            [
+                lcg(&mut seed) * 4.0,
+                lcg(&mut seed) * 4.0,
+                lcg(&mut seed) * 4.0,
+            ]
+        })
         .collect();
     let cloud = PointCloud::new(pts.clone(), 0.5).expect("cloud");
     let dist2 = |a: [f64; 3], b: [f64; 3]| {
         (a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)
     };
     for _ in 0..24 {
-        let q = [lcg(&mut seed) * 4.0, lcg(&mut seed) * 4.0, lcg(&mut seed) * 4.0];
+        let q = [
+            lcg(&mut seed) * 4.0,
+            lcg(&mut seed) * 4.0,
+            lcg(&mut seed) * 4.0,
+        ];
         // Radius query vs brute force.
         let r = 0.4 + lcg(&mut seed) * 0.8;
-        let mut brute: Vec<usize> = (0..pts.len()).filter(|&i| dist2(pts[i], q) <= r * r).collect();
+        let mut brute: Vec<usize> = (0..pts.len())
+            .filter(|&i| dist2(pts[i], q) <= r * r)
+            .collect();
         let mut got = cloud.radius_query(q, r);
         brute.sort_unstable();
         got.sort_unstable();
@@ -229,37 +256,89 @@ fn rv_003_point_cloud_queries_and_normals() {
         let mut hist = [0usize; 5]; // cos buckets: <-0.9, -0.9..0, 0..0.9, >0.9, other
         for (p, n) in sphere_pts.iter().zip(normals) {
             let cos = p[0] * n[0] + p[1] * n[1] + p[2] * n[2];
-            let b = if cos > 0.9 { 3 } else if cos > 0.0 { 2 } else if cos > -0.9 { 1 } else { 0 };
+            let b: usize = match cos {
+                c if c > 0.9 => 3,
+                c if c > 0.0 => 2,
+                c if c > -0.9 => 1,
+                _ => 0,
+            };
             hist[b] += 1;
         }
         panic!("normals must align outward: frac {frac:.3}, hist {hist:?}");
     }
     // Degenerate queries refuse structurally.
     assert!(PointCloud::new(Vec::new(), 0.5).is_err());
-    assert!(PointCloud::new(vec![[0.0; 3]; 4], 0.5).expect("tiny").clone().estimate_normals(8).is_err());
+    assert!(
+        PointCloud::new(vec![[0.0; 3]; 4], 0.5)
+            .expect("tiny")
+            .clone()
+            .estimate_normals(8)
+            .is_err()
+    );
     verdict(
         "rv-003",
         "radius/kNN match brute force; sphere normals >97% outward-aligned",
     );
 }
 
-#[test]
-fn rv_004_lattice_round_trip_degenerates_and_realization() {
-    // A small ground-structure fixture (tetrahedral cell).
+/// A small ground-structure fixture (tetrahedral cell).
+fn tetra_fixture() -> (Vec<LatticeNode>, Vec<Strut>) {
     let nodes = vec![
-        LatticeNode { pos: [0.0, 0.0, 0.0], radius: 0.02 },
-        LatticeNode { pos: [1.0, 0.0, 0.0], radius: 0.02 },
-        LatticeNode { pos: [0.5, 0.9, 0.0], radius: 0.03 },
-        LatticeNode { pos: [0.5, 0.3, 0.8], radius: 0.02 },
+        LatticeNode {
+            pos: [0.0, 0.0, 0.0],
+            radius: 0.02,
+        },
+        LatticeNode {
+            pos: [1.0, 0.0, 0.0],
+            radius: 0.02,
+        },
+        LatticeNode {
+            pos: [0.5, 0.9, 0.0],
+            radius: 0.03,
+        },
+        LatticeNode {
+            pos: [0.5, 0.3, 0.8],
+            radius: 0.02,
+        },
     ];
     let struts = vec![
-        Strut { a: 0, b: 1, radius: 0.05 },
-        Strut { a: 0, b: 2, radius: 0.04 },
-        Strut { a: 1, b: 2, radius: 0.04 },
-        Strut { a: 0, b: 3, radius: 0.03 },
-        Strut { a: 1, b: 3, radius: 0.03 },
-        Strut { a: 2, b: 3, radius: 0.03 },
+        Strut {
+            a: 0,
+            b: 1,
+            radius: 0.05,
+        },
+        Strut {
+            a: 0,
+            b: 2,
+            radius: 0.04,
+        },
+        Strut {
+            a: 1,
+            b: 2,
+            radius: 0.04,
+        },
+        Strut {
+            a: 0,
+            b: 3,
+            radius: 0.03,
+        },
+        Strut {
+            a: 1,
+            b: 3,
+            radius: 0.03,
+        },
+        Strut {
+            a: 2,
+            b: 3,
+            radius: 0.03,
+        },
     ];
+    (nodes, struts)
+}
+
+#[test]
+fn rv_004_lattice_round_trip_degenerates_and_realization() {
+    let (nodes, struts) = tetra_fixture();
     let lattice = LatticeGraph::new(nodes.clone(), struts.clone()).expect("valid");
     // FrankenNetworkx round-trip preserves attributes exactly.
     let g = lattice.to_fnx();
@@ -273,22 +352,42 @@ fn rv_004_lattice_round_trip_degenerates_and_realization() {
     assert_eq!(back_struts.len(), orig_struts.len());
     for (a, b) in orig_struts.iter().zip(&back_struts) {
         assert_eq!(key(a), key(b));
-        assert!((a.radius - b.radius).abs() < 1e-15, "strut radius preserved");
+        assert!(
+            (a.radius - b.radius).abs() < 1e-15,
+            "strut radius preserved"
+        );
     }
     // Degenerates refuse with the offending element named.
     let coincident = LatticeGraph::new(
         vec![
-            LatticeNode { pos: [0.0; 3], radius: 0.01 },
-            LatticeNode { pos: [0.0; 3], radius: 0.01 },
+            LatticeNode {
+                pos: [0.0; 3],
+                radius: 0.01,
+            },
+            LatticeNode {
+                pos: [0.0; 3],
+                radius: 0.01,
+            },
         ],
         Vec::new(),
     );
-    assert!(matches!(coincident, Err(fs_rep_voxel::VoxelError::Lattice { ref what }) if what.contains("coincident")));
-    let zero_len = LatticeGraph::new(
-        vec![LatticeNode { pos: [0.0; 3], radius: 0.01 }],
-        vec![Strut { a: 0, b: 0, radius: 0.01 }],
+    assert!(
+        matches!(coincident, Err(fs_rep_voxel::VoxelError::Lattice { ref what }) if what.contains("coincident"))
     );
-    assert!(matches!(zero_len, Err(fs_rep_voxel::VoxelError::Lattice { ref what }) if what.contains("zero-length")));
+    let zero_len = LatticeGraph::new(
+        vec![LatticeNode {
+            pos: [0.0; 3],
+            radius: 0.01,
+        }],
+        vec![Strut {
+            a: 0,
+            b: 0,
+            radius: 0.01,
+        }],
+    );
+    assert!(
+        matches!(zero_len, Err(fs_rep_voxel::VoxelError::Lattice { ref what }) if what.contains("zero-length"))
+    );
     // Realization: level-set behavior. Strut midpoints are inside…
     for s in &struts {
         let (a, b) = (nodes[s.a].pos, nodes[s.b].pos);
@@ -363,12 +462,9 @@ fn rv_005_occupancy_chart_contract() {
             s.signed_distance
         );
         // The error certificate is an HONEST enclosure containing the value.
-        match s.error {
-            fs_evidence::NumericalCertificate { .. } => {
-                let half = 0.5 * 3.0f64.sqrt() * 0.1;
-                assert!(half > 0.08, "declared resolution error present");
-            }
-        }
+        let half = 0.5 * 3.0f64.sqrt() * 0.1;
+        assert!(half > 0.08, "declared resolution error present");
+        let _ = &s.error;
         // Support box contains the ball.
         let support = chart.support();
         assert!(chart.inside(Point3::new(0.05, 0.05, 0.05), &cx));

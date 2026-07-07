@@ -11,6 +11,8 @@ members = [
     "crates/fs-substrate",
     "crates/fs-soa",
     "crates/fs-feec",
+    "crates/fs-tilelang",
+    "crates/fs-tilelang-macros",
     "crates/fs-soa-derive",
     "crates/fs-time",
     "crates/fs-simd",

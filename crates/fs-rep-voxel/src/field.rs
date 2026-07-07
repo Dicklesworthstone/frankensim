@@ -189,7 +189,11 @@ impl Clone for MaterialField {
 
 impl fmt::Debug for MaterialField {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "MaterialField {{ active: {} }}", self.grid.active_count())
+        write!(
+            f,
+            "MaterialField {{ active: {} }}",
+            self.grid.active_count()
+        )
     }
 }
 
