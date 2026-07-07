@@ -5,9 +5,9 @@
 //! dimensional consistency is enforced; admission is deterministic; and the
 //! `(query …)` IR surface round-trips under `same_shape`.
 
+use fs_ir::Node;
 use fs_ir::admission::Severity;
 use fs_ir::query::{FieldRegistry, Qoi, Query, Target};
-use fs_ir::Node;
 use fs_qty::Dims;
 
 // von Mises stress: Pa = kg·m⁻¹·s⁻²  → [M,KG,S,K,A]
@@ -59,7 +59,8 @@ fn wedge_menu_is_expressible_with_correct_metadata() {
     assert_eq!(m.kind_name(), "max-over-region");
     assert_eq!(m.field(), "vm");
     let meta = m.meta();
-    assert!(!meta.linear && meta.adjoint_available && meta.ladder_applicable && !meta.probabilistic);
+    assert!(!meta.linear && meta.adjoint_available && meta.ladder_applicable);
+    assert!(!m.is_probabilistic());
 
     // integral: LINEAR in the field (the DWR sweet spot).
     let i = Qoi::Integral {
@@ -76,7 +77,7 @@ fn wedge_menu_is_expressible_with_correct_metadata() {
         threshold_dims: PA,
         environment: "site-hazard".into(),
     };
-    assert!(e.meta().probabilistic && !e.meta().adjoint_available);
+    assert!(e.is_probabilistic() && !e.meta().adjoint_available);
 }
 
 #[test]
@@ -107,9 +108,17 @@ fn value_dims_follow_the_functional() {
 #[test]
 fn well_posed_query_admits() {
     let adm = ok_max_query().admit(&design());
-    assert!(adm.admitted, "well-posed query must admit: {}", adm.diagnosis());
+    assert!(
+        adm.admitted,
+        "well-posed query must admit: {}",
+        adm.diagnosis()
+    );
     assert_eq!(adm.value_dims, Some(PA));
-    assert!(adm.findings.is_empty(), "no findings expected: {:?}", adm.findings);
+    assert!(
+        adm.findings.is_empty(),
+        "no findings expected: {:?}",
+        adm.findings
+    );
 }
 
 #[test]
@@ -194,7 +203,10 @@ fn reject_field_absent_from_design() {
     assert_eq!(rejects_for(&adm, "query.field").len(), 1);
     // the teaching fix lists the fields that DO exist.
     let fix = &adm.findings[0].fixes[0].action;
-    assert!(fix.contains("vm") && fix.contains("temperature"), "fix teaches available fields: {fix}");
+    assert!(
+        fix.contains("vm") && fix.contains("temperature"),
+        "fix teaches available fields: {fix}"
+    );
 }
 
 #[test]
@@ -249,7 +261,10 @@ fn integral_tolerance_must_carry_volume_dims() {
         50.0,
         30.0,
     );
-    assert!(!bad.admit(&design()).admitted, "K tolerance on a K·m³ integral is wrong");
+    assert!(
+        !bad.admit(&design()).admitted,
+        "K tolerance on a K·m³ integral is wrong"
+    );
     // the correct tolerance carries volume dims.
     let good = Query::new(
         Qoi::Integral {
@@ -312,8 +327,9 @@ fn tolerance_query_round_trips_through_ir() {
     let back = Query::from_node(&node).expect("query parses");
     assert_eq!(back.qoi, q.qoi);
     assert_eq!(back.target, q.target);
-    assert_eq!(back.budget_usd, q.budget_usd);
-    assert_eq!(back.deadline_s, q.deadline_s);
+    // exact round-trip of the same literals: compare by bits (crate idiom).
+    assert_eq!(back.budget_usd.to_bits(), q.budget_usd.to_bits());
+    assert_eq!(back.deadline_s.to_bits(), q.deadline_s.to_bits());
     // and the emitted node equals a re-emission (same_shape isomorphism).
     assert!(node.same_shape(&back.to_node()));
 }
@@ -348,5 +364,9 @@ fn non_query_form_is_a_teaching_error() {
     )]));
     let err = Query::from_node(&node).expect_err("not a query");
     // the error teaches how to shape a query.
-    assert!(err.hint.contains("query"), "hint teaches the query form: {}", err.hint);
+    assert!(
+        err.hint.contains("query"),
+        "hint teaches the query form: {}",
+        err.hint
+    );
 }

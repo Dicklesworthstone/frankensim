@@ -39,6 +39,8 @@ use fs_qty::Dims;
 
 /// Volume dimensions (`m³`) — the measure a spatial integral multiplies by.
 const VOLUME_DIMS: Dims = Dims([3, 0, 0, 0, 0]);
+/// Time dimensions (`s`) — the deadline's expected dimension.
+const TIME_DIMS: Dims = Dims([0, 0, 1, 0, 0]);
 
 /// The QoI functional menu (v0). A fixed set of forms covering the wedge
 /// vertical's real questions — NOT a general programming surface.
@@ -208,7 +210,9 @@ impl Target {
     #[must_use]
     pub fn confidence(&self) -> Option<f64> {
         match self {
-            Target::Confidence(c) | Target::ToleranceAndConfidence { confidence: c, .. } => Some(*c),
+            Target::Confidence(c) | Target::ToleranceAndConfidence { confidence: c, .. } => {
+                Some(*c)
+            }
             Target::Tolerance { .. } => None,
         }
     }
@@ -304,7 +308,7 @@ impl QueryAdmission {
 }
 
 impl Query {
-    /// A tolerance-targeted query with a default (unset) span.
+    /// A query with a default (unset) span.
     #[must_use]
     pub fn new(qoi: Qoi, target: Target, budget_usd: f64, deadline_s: f64) -> Query {
         Query {
@@ -318,183 +322,19 @@ impl Query {
 
     /// Admit the query against a field registry: type-check it and return a
     /// verdict with ranked teaching fixes for anything ill-posed. Pure and
-    /// deterministic; runs in constant time (no solves).
-    ///
-    /// The checks, in fixed order, are:
-    /// 1. `query.field` — the QoI's field must exist in the design;
-    /// 2. `query.budget` — the dollar budget must be finite and positive;
-    /// 3. `query.deadline` — the wall deadline must be finite and positive;
-    /// 4. `query.confidence` — any confidence must lie strictly in `(0, 1)`
-    ///    (100% is uncertifiable; 0% is meaningless);
-    /// 5. `query.target` — any tolerance half-width must be finite and
-    ///    positive;
-    /// 6. `query.dimensions` — a tolerance's dims must match the QoI value
-    ///    dims, and an exceedance threshold's dims must match the field's
-    ///    (a stress tolerance on a probability, or a "5 second" tolerance on
-    ///    a stress, is self-contradictory).
+    /// deterministic; runs in constant time (no solves). The checks, in fixed
+    /// order: field existence, budget, deadline, confidence, tolerance value,
+    /// and dimensional consistency (see the per-check helpers).
     #[must_use]
     pub fn admit(&self, fields: &FieldRegistry) -> QueryAdmission {
-        let mut findings = Vec::new();
         let field_dims = fields.dims_of(self.qoi.field());
-
-        // 1. Field existence.
-        if field_dims.is_none() {
-            let available = fields.names().join(", ");
-            findings.push(Finding {
-                check: "query.field",
-                severity: Severity::Reject,
-                span: self.span,
-                what: format!(
-                    "QoI names field '{}', which is not a field of this design",
-                    self.qoi.field()
-                ),
-                fixes: vec![RankedFix {
-                    action: if available.is_empty() {
-                        "declare the field on the design before querying it".to_string()
-                    } else {
-                        format!("use one of the design's fields: {available}")
-                    },
-                    predicted_wall_s: None,
-                    qoi_impact: "query cannot be planned against a nonexistent field".to_string(),
-                }],
-            });
-        }
-
-        // 2. Budget.
-        if !(self.budget_usd.is_finite() && self.budget_usd > 0.0) {
-            findings.push(Finding {
-                check: "query.budget",
-                severity: Severity::Reject,
-                span: self.span,
-                what: format!(
-                    "budget must be a finite positive dollar amount, got {}",
-                    self.budget_usd
-                ),
-                fixes: vec![RankedFix {
-                    action: "grant a positive compute budget, e.g. (budget 50)".to_string(),
-                    predicted_wall_s: None,
-                    qoi_impact: "a zero budget can discharge no query".to_string(),
-                }],
-            });
-        }
-
-        // 3. Deadline.
-        if !(self.deadline_s.is_finite() && self.deadline_s > 0.0) {
-            findings.push(Finding {
-                check: "query.deadline",
-                severity: Severity::Reject,
-                span: self.span,
-                what: format!(
-                    "deadline must be a finite positive number of seconds, got {}",
-                    self.deadline_s
-                ),
-                fixes: vec![RankedFix {
-                    action: "give a future deadline, e.g. (deadline 30s)".to_string(),
-                    predicted_wall_s: None,
-                    qoi_impact: "a past/zero deadline leaves no time to answer".to_string(),
-                }],
-            });
-        }
-
-        // 4. Confidence bounds.
-        if let Some(c) = self.target.confidence()
-            && !(c.is_finite() && c > 0.0 && c < 1.0)
-        {
-            let (what, action) = if c >= 1.0 {
-                (
-                    format!("confidence {c} is uncertifiable — no finite evidence proves 100%"),
-                    "request a confidence strictly below 1.0, e.g. (confidence 0.95)".to_string(),
-                )
-            } else {
-                (
-                    format!("confidence {c} must be strictly greater than 0"),
-                    "request a confidence in (0, 1), e.g. (confidence 0.95)".to_string(),
-                )
-            };
-            findings.push(Finding {
-                check: "query.confidence",
-                severity: Severity::Reject,
-                span: self.span,
-                what,
-                fixes: vec![RankedFix {
-                    action,
-                    predicted_wall_s: None,
-                    qoi_impact: "an uncertifiable target can never be met".to_string(),
-                }],
-            });
-        }
-
-        // 5. Tolerance value positivity.
-        if let Some((value, _)) = self.target.tolerance()
-            && !(value.is_finite() && value > 0.0)
-        {
-            findings.push(Finding {
-                check: "query.target",
-                severity: Severity::Reject,
-                span: self.span,
-                what: format!("tolerance half-width must be finite and positive, got {value}"),
-                fixes: vec![RankedFix {
-                    action: "request a positive tolerance, e.g. (tolerance 5MPa)".to_string(),
-                    predicted_wall_s: None,
-                    qoi_impact: "a zero/negative tolerance demands exactness no solve can certify"
-                        .to_string(),
-                }],
-            });
-        }
-
-        // 6. Dimensional consistency (only meaningful once the field exists).
-        if let Some(fd) = field_dims {
-            let value_dims = self.qoi.value_dims(fd);
-            if let Some((_, tol_dims)) = self.target.tolerance()
-                && tol_dims != value_dims
-            {
-                findings.push(Finding {
-                    check: "query.dimensions",
-                    severity: Severity::Reject,
-                    span: self.span,
-                    what: format!(
-                        "tolerance dims {:?} do not match the QoI value dims {:?} \
-                         (a {} of field '{}')",
-                        tol_dims,
-                        value_dims,
-                        self.qoi.kind_name(),
-                        self.qoi.field()
-                    ),
-                    fixes: vec![RankedFix {
-                        action: format!(
-                            "state the tolerance in units matching the QoI value dims {value_dims:?}"
-                        ),
-                        predicted_wall_s: None,
-                        qoi_impact: "a dimensionally-inconsistent tolerance is meaningless"
-                            .to_string(),
-                    }],
-                });
-            }
-            if let Qoi::Exceedance {
-                threshold_dims, ..
-            } = &self.qoi
-                && *threshold_dims != fd
-            {
-                findings.push(Finding {
-                    check: "query.dimensions",
-                    severity: Severity::Reject,
-                    span: self.span,
-                    what: format!(
-                        "exceedance threshold dims {:?} do not match field '{}' dims {:?}",
-                        threshold_dims,
-                        self.qoi.field(),
-                        fd
-                    ),
-                    fixes: vec![RankedFix {
-                        action: format!("state the threshold in the field's units (dims {fd:?})"),
-                        predicted_wall_s: None,
-                        qoi_impact: "an off-dimension threshold compares incomparable quantities"
-                            .to_string(),
-                    }],
-                });
-            }
-        }
-
+        let mut findings = Vec::new();
+        findings.extend(self.check_field(fields, field_dims));
+        findings.extend(self.check_budget());
+        findings.extend(self.check_deadline());
+        findings.extend(self.check_confidence());
+        findings.extend(self.check_tolerance_value());
+        findings.extend(self.check_dimensions(field_dims));
         let admitted = !findings.iter().any(|f| f.severity == Severity::Reject);
         QueryAdmission {
             qoi_kind: self.qoi.kind_name(),
@@ -502,6 +342,164 @@ impl Query {
             admitted,
             findings,
         }
+    }
+
+    /// Build a single-fix rejection finding pointing at this query's span.
+    fn reject(
+        &self,
+        check: &'static str,
+        what: String,
+        action: String,
+        qoi_impact: &str,
+    ) -> Finding {
+        Finding {
+            check,
+            severity: Severity::Reject,
+            span: self.span,
+            what,
+            fixes: vec![RankedFix {
+                action,
+                predicted_wall_s: None,
+                qoi_impact: qoi_impact.to_string(),
+            }],
+        }
+    }
+
+    /// The QoI's field must exist in the design.
+    fn check_field(&self, fields: &FieldRegistry, field_dims: Option<Dims>) -> Option<Finding> {
+        if field_dims.is_some() {
+            return None;
+        }
+        let available = fields.names().join(", ");
+        let action = if available.is_empty() {
+            "declare the field on the design before querying it".to_string()
+        } else {
+            format!("use one of the design's fields: {available}")
+        };
+        Some(self.reject(
+            "query.field",
+            format!(
+                "QoI names field '{}', which is not a field of this design",
+                self.qoi.field()
+            ),
+            action,
+            "query cannot be planned against a nonexistent field",
+        ))
+    }
+
+    /// The dollar budget must be finite and positive.
+    fn check_budget(&self) -> Option<Finding> {
+        if self.budget_usd.is_finite() && self.budget_usd > 0.0 {
+            return None;
+        }
+        Some(self.reject(
+            "query.budget",
+            format!(
+                "budget must be a finite positive dollar amount, got {}",
+                self.budget_usd
+            ),
+            "grant a positive compute budget, e.g. (budget 50)".to_string(),
+            "a zero budget can discharge no query",
+        ))
+    }
+
+    /// The wall deadline must be finite and positive.
+    fn check_deadline(&self) -> Option<Finding> {
+        if self.deadline_s.is_finite() && self.deadline_s > 0.0 {
+            return None;
+        }
+        Some(self.reject(
+            "query.deadline",
+            format!(
+                "deadline must be a finite positive number of seconds, got {}",
+                self.deadline_s
+            ),
+            "give a future deadline, e.g. (deadline 30s)".to_string(),
+            "a past/zero deadline leaves no time to answer",
+        ))
+    }
+
+    /// Any confidence must lie strictly in `(0, 1)` — 100% is uncertifiable.
+    fn check_confidence(&self) -> Option<Finding> {
+        let c = self.target.confidence()?;
+        if c.is_finite() && c > 0.0 && c < 1.0 {
+            return None;
+        }
+        let (what, action) = if c >= 1.0 {
+            (
+                format!("confidence {c} is uncertifiable — no finite evidence proves 100%"),
+                "request a confidence strictly below 1.0, e.g. (confidence 0.95)".to_string(),
+            )
+        } else {
+            (
+                format!("confidence {c} must be strictly greater than 0"),
+                "request a confidence in (0, 1), e.g. (confidence 0.95)".to_string(),
+            )
+        };
+        Some(self.reject(
+            "query.confidence",
+            what,
+            action,
+            "an uncertifiable target can never be met",
+        ))
+    }
+
+    /// Any tolerance half-width must be finite and positive.
+    fn check_tolerance_value(&self) -> Option<Finding> {
+        let (value, _) = self.target.tolerance()?;
+        if value.is_finite() && value > 0.0 {
+            return None;
+        }
+        Some(self.reject(
+            "query.target",
+            format!("tolerance half-width must be finite and positive, got {value}"),
+            "request a positive tolerance, e.g. (tolerance 5MPa)".to_string(),
+            "a zero/negative tolerance demands exactness no solve can certify",
+        ))
+    }
+
+    /// A tolerance's dims must match the QoI value dims, and an exceedance
+    /// threshold's dims must match the field's (a stress tolerance on a
+    /// probability, or a "5 second" tolerance on a stress, is
+    /// self-contradictory). Only meaningful once the field exists.
+    fn check_dimensions(&self, field_dims: Option<Dims>) -> Vec<Finding> {
+        let Some(fd) = field_dims else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        let value_dims = self.qoi.value_dims(fd);
+        if let Some((_, tol_dims)) = self.target.tolerance()
+            && tol_dims != value_dims
+        {
+            out.push(self.reject(
+                "query.dimensions",
+                format!(
+                    "tolerance dims {:?} do not match the QoI value dims {:?} (a {} of field '{}')",
+                    tol_dims,
+                    value_dims,
+                    self.qoi.kind_name(),
+                    self.qoi.field()
+                ),
+                format!("state the tolerance in units matching the QoI value dims {value_dims:?}"),
+                "a dimensionally-inconsistent tolerance is meaningless",
+            ));
+        }
+        if let Qoi::Exceedance { threshold_dims, .. } = &self.qoi
+            && *threshold_dims != fd
+        {
+            out.push(self.reject(
+                "query.dimensions",
+                format!(
+                    "exceedance threshold dims {:?} do not match field '{}' dims {:?}",
+                    threshold_dims,
+                    self.qoi.field(),
+                    fd
+                ),
+                format!("state the threshold in the field's units (dims {fd:?})"),
+                "an off-dimension threshold compares incomparable quantities",
+            ));
+        }
+        out
     }
 
     /// Recognize a query from its concrete IR form:
@@ -516,10 +514,28 @@ impl Query {
     pub fn from_node(node: &Node) -> Result<Query, IrError> {
         let items = match node.head() {
             Some("query") => node.items().expect("head implies list"),
-            _ => return Err(malformed(node.span, "expected a (query …) form", "wrap it as (query <qoi> <target> (budget N) (deadline T))")),
+            _ => {
+                return Err(malformed(
+                    node.span,
+                    "expected a (query …) form",
+                    "wrap it as (query <qoi> <target> (budget N) (deadline T))",
+                ));
+            }
         };
-        let qoi = parse_qoi(items.get(1).ok_or_else(|| malformed(node.span, "query has no QoI", "add a QoI form, e.g. (max :field \"vm\" :region \"bracket\")"))?)?;
-        let target = parse_target(items.get(2).ok_or_else(|| malformed(node.span, "query has no target", "add a target, e.g. (confidence 0.95)"))?)?;
+        let qoi = parse_qoi(items.get(1).ok_or_else(|| {
+            malformed(
+                node.span,
+                "query has no QoI",
+                "add a QoI form, e.g. (max :field \"vm\" :region \"bracket\")",
+            )
+        })?)?;
+        let target = parse_target(items.get(2).ok_or_else(|| {
+            malformed(
+                node.span,
+                "query has no target",
+                "add a target, e.g. (confidence 0.95)",
+            )
+        })?)?;
         let mut budget_usd = f64::NAN;
         let mut deadline_s = f64::NAN;
         for clause in &items[3..] {
@@ -549,13 +565,16 @@ impl Query {
     /// ignores spans and quantity presentation text).
     #[must_use]
     pub fn to_node(&self) -> Node {
-        let mut items = vec![sym("query"), self.qoi_node(), self.target_node()];
-        items.push(list(vec![sym("budget"), Node::synthetic(NodeKind::Float(self.budget_usd))]));
-        items.push(list(vec![
-            sym("deadline"),
-            qty(self.deadline_s, Dims([0, 0, 1, 0, 0])),
-        ]));
-        list(items)
+        list(vec![
+            sym("query"),
+            self.qoi_node(),
+            self.target_node(),
+            list(vec![
+                sym("budget"),
+                Node::synthetic(NodeKind::Float(self.budget_usd)),
+            ]),
+            list(vec![sym("deadline"), qty(self.deadline_s, TIME_DIMS)]),
+        ])
     }
 
     fn qoi_node(&self) -> Node {
@@ -596,10 +615,11 @@ impl Query {
 
     fn target_node(&self) -> Node {
         match &self.target {
-            Target::Tolerance { value, dims } => {
-                list(vec![sym("tolerance"), qty(*value, *dims)])
-            }
-            Target::Confidence(c) => list(vec![sym("confidence"), Node::synthetic(NodeKind::Float(*c))]),
+            Target::Tolerance { value, dims } => list(vec![sym("tolerance"), qty(*value, *dims)]),
+            Target::Confidence(c) => list(vec![
+                sym("confidence"),
+                Node::synthetic(NodeKind::Float(*c)),
+            ]),
             Target::ToleranceAndConfidence {
                 value,
                 dims,
@@ -689,13 +709,21 @@ fn kw_qty(args: &[(&str, &Node)], key: &str, span: Span) -> Result<(f64, Dims), 
             ));
         }
     }
-    Err(malformed(span, "missing required quantity keyword", "add it"))
+    Err(malformed(
+        span,
+        "missing required quantity keyword",
+        "add it",
+    ))
 }
 
 fn parse_qoi(node: &Node) -> Result<Qoi, IrError> {
-    let items = node
-        .items()
-        .ok_or_else(|| malformed(node.span, "QoI must be a form", "e.g. (max :field \"vm\" :region \"bracket\")"))?;
+    let items = node.items().ok_or_else(|| {
+        malformed(
+            node.span,
+            "QoI must be a form",
+            "e.g. (max :field \"vm\" :region \"bracket\")",
+        )
+    })?;
     let args = keyword_args(items);
     match node.head() {
         Some("max") => Ok(Qoi::MaxOverRegion {
@@ -752,9 +780,16 @@ fn parse_target(node: &Node) -> Result<Target, IrError> {
                 Ok(Target::Tolerance { value, dims })
             }
         }
-        Some("confidence") => Ok(Target::Confidence(float_of(items.get(1).ok_or_else(
-            || malformed(node.span, "confidence needs a number", "e.g. (confidence 0.95)"),
-        )?)?)),
+        Some("confidence") => {
+            let n = items.get(1).ok_or_else(|| {
+                malformed(
+                    node.span,
+                    "confidence needs a number",
+                    "e.g. (confidence 0.95)",
+                )
+            })?;
+            Ok(Target::Confidence(float_of(n)?))
+        }
         _ => Err(malformed(
             node.span,
             "unknown target form",
@@ -772,15 +807,22 @@ fn float_of(node: &Node) -> Result<f64, IrError> {
 }
 
 fn clause_number(clause: &Node) -> Result<f64, IrError> {
-    let items = clause.items().ok_or_else(|| malformed(clause.span, "malformed clause", "e.g. (budget 50)"))?;
-    float_of(items.get(1).ok_or_else(|| malformed(clause.span, "clause needs a value", "e.g. (budget 50)"))?)
+    let items = clause
+        .items()
+        .ok_or_else(|| malformed(clause.span, "malformed clause", "e.g. (budget 50)"))?;
+    let n = items
+        .get(1)
+        .ok_or_else(|| malformed(clause.span, "clause needs a value", "e.g. (budget 50)"))?;
+    float_of(n)
 }
 
 fn clause_seconds(clause: &Node) -> Result<f64, IrError> {
-    let items = clause.items().ok_or_else(|| malformed(clause.span, "malformed clause", "e.g. (deadline 30s)"))?;
+    let items = clause
+        .items()
+        .ok_or_else(|| malformed(clause.span, "malformed clause", "e.g. (deadline 30s)"))?;
     match items.get(1).map(|n| &n.kind) {
         // accept a time quantity (dims = seconds) or a bare number of seconds.
-        Some(NodeKind::Qty { value, dims, .. }) if *dims == Dims([0, 0, 1, 0, 0]) => Ok(*value),
+        Some(NodeKind::Qty { value, dims, .. }) if *dims == TIME_DIMS => Ok(*value),
         Some(NodeKind::Qty { .. }) => Err(malformed(
             items[1].span,
             "deadline must have time dimensions",
@@ -788,6 +830,10 @@ fn clause_seconds(clause: &Node) -> Result<f64, IrError> {
         )),
         Some(NodeKind::Float(f)) => Ok(*f),
         Some(NodeKind::Int(i)) => Ok(*i as f64),
-        _ => Err(malformed(clause.span, "deadline needs a time", "e.g. (deadline 30s)")),
+        _ => Err(malformed(
+            clause.span,
+            "deadline needs a time",
+            "e.g. (deadline 30s)",
+        )),
     }
 }
