@@ -97,6 +97,21 @@ Depends on fs-exec (Cx), fs-evidence, fs-alloc, fs-obs.
   early-warning metric. `DiffReport::filter` triages by
   region/quantity/magnitude.
 
+- `sheaf_repair` module (patch Rev L, bead wqd.14; [M], behind the
+  `sheaf-repair` feature until certifier trials pass): DIAGNOSIS →
+  CONSTRUCTIVE REPAIR. `hodge_decompose` splits the interface mismatch
+  cochain into exact ⊕ coexact ⊕ harmonic over the skeleton
+  (Gauss–Seidel normal equations; dense-oracle-verified), with the
+  INTERPRETATION CONTRACT: exact → local gauge repair (auto-appliable
+  ONLY when every per-patch offset fits that chart's declared error
+  budget — a repair never silently distorts geometry); coexact →
+  circulation around triple junctions, diagnosed CONVERTER-side (not a
+  geometry edit); harmonic → true topological obstruction, declared
+  unrepairable-locally with the interface cut-set. `plan_repair` emits
+  ranked agent-facing proposals (expected post-repair norms; optional
+  Rep-Router reroute with modeled cost); `apply_gauge` is the
+  constructive, idempotent step.
+
 ## Invariants
 1. Trait laws (G0, geo-001, 12k seeded queries): `inside(x)` ⇔ `sd(x) <
    0`; `support()` bounds the region (no negative sd outside, to
@@ -197,3 +212,18 @@ values, agreement determinism, and cancellation.
   bead, which owns deterministic replay.
 - The R3 kill-metric wiring (quarterly fallback-fraction review) is
   governance (xpck.6); this module measures and reports the number.
+
+## No-claim boundaries (repair)
+
+- Solves are Gauss–Seidel over small complexes; fs-la eigensolver
+  integration (spectral gap → merge confidence, Proposal 5) lands with
+  the knh1.3 bead.
+- Gauge repair adjusts patch potentials (constant offsets); non-constant
+  boundary control-point projection (the NURBS example) lands with the
+  converter beads that own those charts.
+- The auto-apply POLICY (when to apply without human acceptance) is
+  session governance; this module computes `auto_repairable` and
+  refuses over-budget repairs in the proposal text.
+- The harmonic cut-set is the harmonic component's support, minimal for
+  the reported cochain; graph-min-cut refinement over weighted
+  topologies is future work if fixtures demand it.
