@@ -20,6 +20,7 @@
 pub mod colors;
 pub mod hash;
 pub mod schema;
+pub mod tombstone;
 pub mod travel;
 
 pub use colors::{ColorGraph, ColorNode, ColorWriteError, Waiver};

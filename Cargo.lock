@@ -938,6 +938,8 @@ name = "fs-ledger"
 version = "0.0.1"
 dependencies = [
  "fs-evidence",
+ "fs-qty",
+ "fs-regime",
  "fsqlite",
 ]
 

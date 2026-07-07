@@ -12,6 +12,8 @@ layer = "L6"
 
 [dependencies]
 fs-evidence = { path = "../fs-evidence" }
+fs-qty = { path = "../fs-qty" }
+fs-regime = { path = "../fs-regime" }
 fsqlite = { path = "../../../frankensqlite/crates/fsqlite" }
 
 [dev-dependencies]
