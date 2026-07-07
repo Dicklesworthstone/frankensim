@@ -164,13 +164,15 @@ impl PMultigrid {
     }
 
     /// Matrix-free Chebyshev smoothing on level `li`: x ← x + p(D⁻¹A)
-    /// applied to the residual, damping [λ_max/30, λ_max].
+    /// applied to the residual.
     fn smooth(&self, li: usize, x: &mut [f64], b: &[f64]) {
         let lv = &self.levels[li];
         let n = lv.space.ndof();
-        // Standard MG smoothing band: damp the upper 3/4 of the
-        // spectrum hard; the injection coarse space owns the rest.
-        let (lmax, lmin) = (lv.lambda_max, lv.lambda_max / 4.0);
+        // Smoothing band: with the hierarchical-injection coarse space
+        // the complement modes spread well below λ_max/4, so the band
+        // reaches down to λ_max/16 and the degree grows with r to keep
+        // per-sweep damping strong (tuned on the ladder battery).
+        let (lmax, lmin) = (lv.lambda_max, lv.lambda_max / 16.0);
         let theta = f64::midpoint(lmax, lmin);
         let delta = f64::midpoint(lmax, -lmin);
         let masked_scaled_residual = |x: &[f64]| -> Vec<f64> {
