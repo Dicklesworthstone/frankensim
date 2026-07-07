@@ -25,6 +25,8 @@ pub mod fem1d;
 #[cfg(feature = "certified-speculation")]
 pub mod interval;
 #[cfg(feature = "certified-speculation")]
+pub mod economics;
+#[cfg(feature = "certified-speculation")]
 pub mod zoo;
 
 /// Crate version, re-exported for provenance stamping.

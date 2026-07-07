@@ -200,6 +200,11 @@ impl Registry {
     pub fn names(&self) -> Vec<&'static str> {
         self.proposers.iter().map(|p| p.name()).collect()
     }
+
+    /// Iterate registered proposers (the economics loop's view).
+    pub fn proposers_dyn(&self) -> impl Iterator<Item = &dyn Proposer> {
+        self.proposers.iter().map(AsRef::as_ref)
+    }
 }
 
 /// Drive one speculation: gather proposals from enabled proposers,
