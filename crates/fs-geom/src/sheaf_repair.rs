@@ -263,54 +263,10 @@ pub fn plan_repair(
             .all(|(off, budget)| off.abs() <= *budget);
     let mut proposals = Vec::new();
     if split.fractions.0 > COMPONENT_FLOOR {
-        let worst = split
-            .potential
-            .iter()
-            .enumerate()
-            .max_by(|a, b| a.1.abs().total_cmp(&b.1.abs()))
-            .map_or(0, |(i, _)| i);
-        let mut action = format!(
-            "project patch P{worst} gauge by {:+.3e} (exact-component section \
-             projection; offsets per patch: [",
-            split.potential[worst]
-        );
-        for (i, off) in split.potential.iter().enumerate() {
-            if i > 0 {
-                action.push_str(", ");
-            }
-            let _ = write!(action, "{off:+.3e}");
-        }
-        action.push_str("])");
-        if !auto_repairable {
-            let _ = write!(action, " — EXCEEDS a patch budget; needs acceptance");
-        }
-        proposals.push(RepairProposal {
-            action,
-            expected_post_norm: expected_after_gauge,
-            cost_s: 0.001, // local gauge arithmetic
-        });
+        proposals.push(gauge_proposal(&split, auto_repairable, expected_after_gauge));
     }
     if split.fractions.1 > COMPONENT_FLOOR {
-        // Coexact: converter-side diagnosis, localized to triangles.
-        let worst_tri = skeleton
-            .triangles
-            .iter()
-            .enumerate()
-            .max_by(|a, b| {
-                let d1m = skeleton.d1(mismatch);
-                d1m[a.0].abs().total_cmp(&d1m[b.0].abs())
-            })
-            .map(|(_, t)| *t);
-        proposals.push(RepairProposal {
-            action: format!(
-                "coexact circulation detected around triple junction {worst_tri:?}: check \
-                 CONVERTER orientation/trace conventions (not a geometry edit)"
-            ),
-            expected_post_norm: (norm2(&split.harmonic)
-                + norm2(&split.exact))
-            .sqrt(),
-            cost_s: 0.0,
-        });
+        proposals.push(coexact_proposal(skeleton, mismatch, &split));
     }
     let mut obstruction_cutset: Vec<((usize, usize), f64)> = skeleton
         .edges
@@ -359,6 +315,60 @@ pub fn plan_repair(
         proposals,
         auto_repairable,
         obstruction_cutset,
+    }
+}
+
+/// The exact-component proposal: the concrete per-patch gauge projection.
+fn gauge_proposal(split: &HodgeSplit, auto_repairable: bool, expected: f64) -> RepairProposal {
+    let worst = split
+        .potential
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.abs().total_cmp(&b.1.abs()))
+        .map_or(0, |(i, _)| i);
+    let mut action = format!(
+        "project patch P{worst} gauge by {:+.3e} (exact-component section \
+         projection; offsets per patch: [",
+        split.potential[worst]
+    );
+    for (i, off) in split.potential.iter().enumerate() {
+        if i > 0 {
+            action.push_str(", ");
+        }
+        let _ = write!(action, "{off:+.3e}");
+    }
+    action.push_str("])");
+    if !auto_repairable {
+        let _ = write!(action, " — EXCEEDS a patch budget; needs acceptance");
+    }
+    RepairProposal {
+        action,
+        expected_post_norm: expected,
+        cost_s: 0.001, // local gauge arithmetic
+    }
+}
+
+/// The coexact-component proposal: converter-side diagnosis, localized
+/// to the worst triple junction.
+fn coexact_proposal(
+    skeleton: &SheafSkeleton,
+    mismatch: &[f64],
+    split: &HodgeSplit,
+) -> RepairProposal {
+    let d1m = skeleton.d1(mismatch);
+    let worst_tri = skeleton
+        .triangles
+        .iter()
+        .enumerate()
+        .max_by(|a, b| d1m[a.0].abs().total_cmp(&d1m[b.0].abs()))
+        .map(|(_, t)| *t);
+    RepairProposal {
+        action: format!(
+            "coexact circulation detected around triple junction {worst_tri:?}: check \
+             CONVERTER orientation/trace conventions (not a geometry edit)"
+        ),
+        expected_post_norm: (norm2(&split.harmonic) + norm2(&split.exact)).sqrt(),
+        cost_s: 0.0,
     }
 }
 

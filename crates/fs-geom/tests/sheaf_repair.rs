@@ -8,9 +8,7 @@
 #![cfg(feature = "sheaf-repair")]
 
 use fs_geom::router::{ConverterSpec, ErrorModel, MemoryCostOracle, RouteRequest, Router};
-use fs_geom::sheaf_repair::{
-    SheafSkeleton, apply_gauge, hodge_decompose, plan_repair,
-};
+use fs_geom::sheaf_repair::{SheafSkeleton, apply_gauge, hodge_decompose, plan_repair};
 
 fn verdict(case: &str, detail: &str) {
     println!(
@@ -183,12 +181,18 @@ fn sr_002_exact_defect_auto_repairs_within_budget() {
         plan2.gauge
     );
     let repaired2 = apply_gauge(&sk, &repaired, &plan2.gauge);
-    assert!((norm_inf(&repaired2) - actual).abs() < 1e-12, "no-op repair");
+    assert!(
+        (norm_inf(&repaired2) - actual).abs() < 1e-12,
+        "no-op repair"
+    );
     // Over-budget variant: the SAME defect with a tight budget must NOT
     // auto-apply (needs explicit acceptance).
     let tight = [0.001, 0.001, 0.001];
     let gated = plan_repair(&sk, &mismatch, &tight, None);
-    assert!(!gated.auto_repairable, "budget gate blocks silent distortion");
+    assert!(
+        !gated.auto_repairable,
+        "budget gate blocks silent distortion"
+    );
     assert!(
         gated.proposals[0].action.contains("EXCEEDS"),
         "the proposal says so: {}",
