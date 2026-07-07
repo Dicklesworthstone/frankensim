@@ -6,6 +6,7 @@
 //! `cargo run -p xtask -- check-all`.
 
 pub mod eigen;
+pub mod eigen_complex;
 pub mod factor;
 pub mod gemm;
 pub mod mixed;
