@@ -252,7 +252,7 @@ fn hutch_pp_beats_hutchinson_variance() {
 }
 
 /// Recorded on aarch64-apple (M4 Pro); must match on x86-64 (trj).
-const GOLDEN_HASH: u64 = 0x0; // placeholder: set from first run
+const GOLDEN_HASH: u64 = 0x3e92_8bac_8cf9_fd48; // pinned from first run (arm64), cross-checked on x86_64
 
 #[test]
 fn rand_nla_golden_hash() {
@@ -271,7 +271,7 @@ fn rand_nla_golden_hash() {
         feed(v);
     }
     feed(rep.est_error);
-    let h = hutchinson(&a[..n * n].to_vec(), n, 16, 77);
+    let h = hutchinson(&a[..n * n], n, 16, 77);
     feed(h.estimate);
     feed(h.variance_est);
     println!(
