@@ -186,7 +186,16 @@ impl Parser<'_> {
 
 /// Classify one atom token (shared with the JSON side's qty re-parsing).
 pub(crate) fn classify_atom(text: &str, span: Span) -> Result<Node, IrError> {
-    debug_assert!(!text.is_empty());
+    if text.is_empty() {
+        // Reachable when the scanner meets a byte only the atom reader
+        // treats as a delimiter (fuzz-found): refuse, never panic (P10).
+        return Err(IrError {
+            span,
+            kind: IrErrorKind::UnexpectedChar,
+            detail: "empty token (stray delimiter byte)".to_string(),
+            hint: "remove the stray character".to_string(),
+        });
+    }
     if let Some(name) = text.strip_prefix(':') {
         if name.is_empty() {
             return Err(IrError {

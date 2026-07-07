@@ -55,7 +55,7 @@ const FRAME: &str = r#"(study "frame-seismic-cvar-v9"
     :emit (frame frag report ledger)))"#;
 
 /// A cost model fitted so `predict(4096).p90` is ~410 s (fits a 2-hour
-/// budget alongside the rest).
+/// budget alongside the rest). Keyed to the verb that carries `:dof`.
 fn lbm_cost_model() -> CostModel {
     let obs: Vec<CostObservation> = (1..=12)
         .map(|k| {
@@ -104,7 +104,7 @@ fn spout_regime() -> fs_regime::RegimeReport {
 
 fn full_context(regime: &fs_regime::RegimeReport) -> AdmissionContext<'_> {
     let mut cost_models = BTreeMap::new();
-    cost_models.insert("flux.free-surface-lbm".to_string(), lbm_cost_model());
+    cost_models.insert("xform.level-set-velocity".to_string(), lbm_cost_model());
     AdmissionContext {
         router: None,
         chart_requirements: Vec::new(),
