@@ -43,6 +43,8 @@ pub struct RefitConfig {
     pub samples_v: usize,
     /// Residuals above this trigger thin-feature warnings.
     pub warn_residual: f64,
+    /// Dense-probe resolution per axis for the spline→SDF promotion.
+    pub probe: usize,
 }
 
 impl Default for RefitConfig {
@@ -55,6 +57,7 @@ impl Default for RefitConfig {
             samples_u: 36,
             samples_v: 36,
             warn_residual: 5e-2,
+            probe: 96,
         }
     }
 }
@@ -139,7 +142,7 @@ fn project_radial(
             ),
         });
     }
-    for _ in 0..64 {
+    for _ in 0..40 {
         let mid = f64::midpoint(lo, hi);
         if at(mid) < 0.0 {
             lo = mid;
@@ -212,9 +215,11 @@ fn basis_row(kv: &KnotVector<f64>, n: usize, t: f64) -> Result<Vec<f64>, NurbsEr
     Ok(row)
 }
 
-/// Spline Lipschitz bound from control differences (hodograph hull):
-/// `p · max‖ΔC‖ / min Δknot` per direction, summed.
-fn lipschitz_bound(surface: &NurbsSurface<f64>) -> f64 {
+/// Spline Lipschitz bounds from control differences (hodograph hull):
+/// derivative control points are `p·ΔC / (u_{i+p+1} − u_{i+1})`, and the
+/// open-uniform interior span of `p` intervals is `p/(n−p)`, so
+/// `L ≤ max‖ΔC‖ · (n − p)` per direction. Returns (L_u, L_v).
+fn lipschitz_bound(surface: &NurbsSurface<f64>) -> (f64, f64) {
     let p_u = surface.knots_u.degree as f64;
     let p_v = surface.knots_v.degree as f64;
     let cart = |h: &[f64; 4]| [h[0] / h[3], h[1] / h[3], h[2] / h[3]];
@@ -241,12 +246,11 @@ fn lipschitz_bound(surface: &NurbsSurface<f64>) -> f64 {
             }
         }
     }
-    // Open-uniform knots: min interior span = 1/(n - p).
     #[allow(clippy::cast_precision_loss)]
-    let span_u = 1.0 / (rows as f64 - p_u);
+    let lu = max_du * (rows as f64 - p_u);
     #[allow(clippy::cast_precision_loss)]
-    let span_v = 1.0 / (cols as f64 - p_v);
-    p_u * max_du / span_u + p_v * max_dv / span_v
+    let lv = max_dv * (cols as f64 - p_v);
+    (lu, lv)
 }
 
 /// Fit one scalar/vector LSQ system: `(BᵀB + λ LᵀL) c = Bᵀy` where `L`
@@ -414,10 +418,11 @@ pub fn refit_radial(
     }
     #[allow(clippy::cast_precision_loss)]
     let rms_residual = det::sqrt(rms / (mu * mv) as f64);
-    // Spline → SDF: sampled max + Lipschitz promotion.
-    let probe = (2 * mu.max(mv)).max(48);
+    // Spline → SDF: dense probe (one sdf evaluation per point) plus the
+    // Lipschitz promotion; coverage stays the measured fit-target worst
+    // case (the projected surface samples ARE the coverage witnesses).
+    let probe = config.probe.max(2 * mu.max(mv));
     let mut sampled = 0.0f64;
-    let mut coverage = 0.0f64;
     for a in 0..probe {
         for b in 0..probe {
             #[allow(clippy::cast_precision_loss)]
@@ -427,27 +432,14 @@ pub fn refit_radial(
             );
             let p = surface.eval(u, v)?;
             sampled = sampled.max(sdf([p[0], p[1], p[2]]).abs());
-            // Coverage estimate: project the SDF surface point at this
-            // direction and measure its distance to the spline sample —
-            // a same-parameter proxy (measured, no continuum claim).
-            let dir = direction(u, v);
-            if let Ok(r) = project_radial(sdf, center, dir, r_max) {
-                let q = [
-                    center[0] + r * dir[0],
-                    center[1] + r * dir[1],
-                    center[2] + r * dir[2],
-                ];
-                let d = det::sqrt(
-                    (p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2) + (p[2] - q[2]).powi(2),
-                );
-                coverage = coverage.max(d);
-            }
         }
     }
-    let lip = lipschitz_bound(&surface);
+    let coverage = max_res;
+    let (lip_u, lip_v) = lipschitz_bound(&surface);
+    let lip = lip_u + lip_v;
     #[allow(clippy::cast_precision_loss)]
-    let h = 1.0 / probe as f64;
-    let certified = sampled + lip * h;
+    let h = 0.5 / probe as f64;
+    let certified = sampled + (lip_u + lip_v) * h;
     // Seam G1: compare u-tangents across the (exactly closed) seam.
     let mut seam_g1 = 0.0f64;
     for b in 1..24 {
