@@ -42,6 +42,13 @@ structured stall diagnoses, never timeout mysteries).
   V-cycle a VARYING preconditioner and demonstrably breaks plain CG).
 - `MaskedTensorOp` — the homogeneous-Dirichlet high-order Poisson
   apply as a `LinearOp`.
+- `mixed::{CsrF32, mixed_cg_refine, MixedReport}` — f32 INNER CG
+  (storage AND arithmetic: half the memory traffic per iteration)
+  under f64 iterative refinement with TRUE f64 residuals and scaled
+  corrections; f64-grade accuracy whenever κ(A) ≪ 1/ε_f32; stalls set
+  `escalate` in the report (drivers fall back to the f64 path —
+  reported, never silently absorbed). Deterministic (bitwise repeat
+  tested).
 - `dot`/`norm2` — deterministic fixed-shape reductions (fs-tilelang
   combiner; shape depends on length only).
 
@@ -97,6 +104,8 @@ convergence within 2× of primal — adjoint readiness) + cycle-boundary
 bitwise resume; structured diagnoses (BudgetExhausted on a
 short-budget solve; Plateau on the classic restarted-GMRES stagnation
 fixture — a cyclic shift matrix where every cycle reproduces x = 0);
+mixed precision: f32-inner refinement reaching 5e−15 true relative
+residual, matching plain f64 CG to 1e−9 and bitwise-repeatable;
 p-MG ladder gates: converges everywhere with iteration counts inside
 a fixed envelope (≤ 80) while identity-preconditioned counts blow up
 (≥ 10× advantage at the hard corner: measured 1192 vs ≈70 at
@@ -117,10 +126,13 @@ regression (singular-system CG diverges — must never read Plateau).
   flexible-GMRES (varying preconditioners) are follow-up scope; plain
   CG with a varying preconditioner is known-broken (observed) — use
   GMRES or fix the preconditioner.
-- Mixed-precision Krylov (f32 inner + f64 refinement via fs-la's
-  policy engine) and saddle-point block preconditioners
-  (Stokes-class, Schur approximations) are the bead's remaining
-  slices — not yet claimed by this contract.
+- Saddle-point block preconditioners (Stokes-class, Schur
+  approximations over the fs-feec mixed spaces) are split scope (the
+  vector-MMS machinery they need is itself gated on the simplicial
+  vector families). The mixed-precision path measures its bandwidth
+  SPEEDUP on the perf lane (fz2.4 release-profile), not here; no
+  ladder policy engine yet (fs-la's `Ladder` decides for
+  factorizations; a Krylov-side policy joins when consumers exist).
 - No dense output of Krylov bases, no eigenvalue estimation service,
   no threading (fs-exec drivers own parallelism), no G4 cancellation
   storms yet (needs the Cx wiring).

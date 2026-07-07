@@ -20,10 +20,12 @@
 //! structured stall diagnosis instead of a timeout mystery.
 
 pub mod krylov;
+pub mod mixed;
 pub mod op;
 pub mod pmg;
 
 pub use krylov::{CgState, GmresState, MinresState, SolveReport, StallDiagnosis};
+pub use mixed::{CsrF32, MixedReport, mixed_cg_refine};
 pub use op::{CsrOp, LinearOp};
 pub use pmg::{MaskedTensorOp, PMultigrid};
 

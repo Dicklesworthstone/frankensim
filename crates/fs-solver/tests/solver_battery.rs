@@ -10,8 +10,8 @@
 use fs_feec::{element_geometry, kuhn_cube};
 use fs_rand::StreamKey;
 use fs_solver::{
-    CgState, CsrOp, GmresState, LinearOp, MaskedTensorOp, MinresState, PMultigrid, StallDiagnosis,
-    dot, norm2,
+    CgState, CsrF32, CsrOp, GmresState, LinearOp, MaskedTensorOp, MinresState, PMultigrid,
+    StallDiagnosis, dot, mixed_cg_refine, norm2,
 };
 use fs_sparse::precond::IdentityPrecond;
 
@@ -474,4 +474,52 @@ fn solver_golden_hash() {
         "solver bits changed: {acc:#018x} vs {GOLDEN_HASH:#018x} — bump only with semantic \
          justification (golden-evidence policy)"
     );
+}
+
+#[test]
+fn mixed_precision_reaches_f64_accuracy() {
+    // f32 inner CG + f64 refinement must hit f64-grade residuals on
+    // the Poisson fixture (κ ≪ 1/ε_f32), with the work split visible
+    // in the report; the total f32 inner iterations replace what a
+    // plain f64 CG would spend, at half the memory traffic per
+    // iteration (the bandwidth win — measured on the perf lane, not
+    // asserted here).
+    let (a, n) = poisson_csr(4);
+    let a32 = CsrF32::from_csr(&a);
+    let op = CsrOp::symmetric(a);
+    let b = rand_vec(n, 60);
+    let mut x = vec![0.0f64; n];
+    let rep = mixed_cg_refine(&op, &a32, &b, &mut x, 1e-12, 20, 2_000);
+    assert!(rep.converged, "mixed refinement failed: {rep:?}");
+    assert!(rep.rel_residual < 1e-12);
+    assert!(
+        rep.refine_steps >= 2,
+        "expected multiple refinement passes: {rep:?}"
+    );
+    // f64-grade solution: compare against plain f64 CG.
+    let mut st = CgState::new(&op, &IdentityPrecond, &b);
+    st.run(&op, &IdentityPrecond, 1e-13, 5_000);
+    let dev = x
+        .iter()
+        .zip(&st.x)
+        .map(|(p, q)| (p - q).abs())
+        .fold(0.0f64, f64::max);
+    let scale = st.x.iter().map(|v| v.abs()).fold(0.0f64, f64::max);
+    assert!(
+        dev < 1e-9 * scale.max(1.0),
+        "mixed vs f64 CG deviation {dev:.3e}"
+    );
+    log(
+        "mixed-precision",
+        "pass",
+        &format!(
+            "refines={} inner_f32_iters={} rel={:.2e}",
+            rep.refine_steps, rep.inner_iters, rep.rel_residual
+        ),
+    );
+    // Determinism: repeat run bitwise.
+    let mut x2 = vec![0.0f64; n];
+    let rep2 = mixed_cg_refine(&op, &a32, &b, &mut x2, 1e-12, 20, 2_000);
+    assert_eq!(rep.inner_iters, rep2.inner_iters);
+    assert!(x.iter().zip(&x2).all(|(p, q)| p.to_bits() == q.to_bits()));
 }
