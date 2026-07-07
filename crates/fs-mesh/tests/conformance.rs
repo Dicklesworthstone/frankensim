@@ -488,19 +488,16 @@ fn tmesh_007_isotropic_sphere() {
         // the equivariant claim is the QUALITY PROFILE: validity, edge
         // conformity, drift, and element count all match.
         let lens_s = metric_edge_lengths(&out_s, &metric);
-        let frac_s = lens_s.iter().filter(|&&l| (0.7..=1.4).contains(&l)).count() as f64
-            / lens_s.len() as f64;
+        let band = |ls: &[f64]| {
+            ls.iter().filter(|&&l| (0.7..=1.4).contains(&l)).count() as f64 / ls.len() as f64
+        };
+        let (frac_s, frac_base) = (band(&lens_s), band(&lens));
+        let count_gap = (out_s.triangles.len() as f64 - out.triangles.len() as f64).abs()
+            / out.triangles.len() as f64;
         let g3 = valid_closed(&out_s).is_ok()
-            && (frac_s - {
-                let in_band = lens.iter().filter(|&&l| (0.7..=1.4).contains(&l)).count();
-                in_band as f64 / lens.len() as f64
-            })
-            .abs()
-                < 0.03
+            && (frac_s - frac_base).abs() < 0.03
             && stats_s.worst_chart_drift < 1e-6
-            && (out_s.triangles.len() as f64 - out.triangles.len() as f64).abs()
-                / out.triangles.len() as f64
-                < 0.03;
+            && count_gap < 0.03;
         let mut em = fs_obs::Emitter::new("fs-mesh/conformance", "tmesh-007/isotropic");
         let line = em
             .emit(
@@ -532,6 +529,7 @@ fn tmesh_007_isotropic_sphere() {
                  metric length, vertex drift {:.1e} and centroid sag {:.1e} off the \
                  chart, output closed/manifold/outward, BITWISE deterministic, and \
                  translation-equivariant to 1e-8 (bitwise={bitwise} g3={g3}                  w={w:.4}; {}; {:?})",
+                stats_s.worst_chart_drift,
                 frac * 100.0,
                 stats.worst_chart_drift,
                 worst_centroid,
