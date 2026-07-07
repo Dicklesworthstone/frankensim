@@ -39,6 +39,8 @@ pub mod ident;
 mod region;
 pub mod router;
 pub mod sheaf;
+#[cfg(feature = "sheaf-repair")]
+pub mod sheaf_repair;
 
 pub use convert::{Convert, ConvertDiag, ErrBudget, SampledSdf};
 pub use region::{AgreementConfig, AgreementReport, Disagreement, Region, RegionChart};

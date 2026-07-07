@@ -25,6 +25,9 @@ asupersync = { path = "../../../asupersync" }
 # [F]-gated per the Ambition-Tag rule: semantic diff ships disabled until
 # its Gauntlet tier + kill metric (R3 fallback fraction) are green.
 semantic-diff = []
+# [M]-gated per the Ambition-Tag rule: sheaf repair ships disabled until
+# certifier trials pass (milestone P6).
+sheaf-repair = []
 
 [lints]
 workspace = true
