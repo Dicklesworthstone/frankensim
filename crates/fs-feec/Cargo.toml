@@ -1,0 +1,25 @@
+[package]
+name = "fs-feec"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "FEEC core: cochains on tet complexes, Whitney forms, Hodge stars, exact-sequence assembly (d transposes through mass matrices)."
+
+[package.metadata.frankensim]
+layer = "L3"
+
+[dependencies]
+fs-la = { path = "../fs-la" }
+fs-math = { path = "../fs-math" }
+fs-qty = { path = "../fs-qty" }
+fs-rep-mesh = { path = "../fs-rep-mesh" }
+fs-soa = { path = "../fs-soa" }
+fs-sparse = { path = "../fs-sparse" }
+
+[dev-dependencies]
+fs-rand = { path = "../fs-rand" }
+
+[lints]
+workspace = true
