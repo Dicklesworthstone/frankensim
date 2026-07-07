@@ -25,7 +25,7 @@ pub mod pmg;
 
 pub use krylov::{CgState, GmresState, MinresState, SolveReport, StallDiagnosis};
 pub use op::{CsrOp, LinearOp};
-pub use pmg::PMultigrid;
+pub use pmg::{MaskedTensorOp, PMultigrid};
 
 /// Deterministic inner product: elementwise products folded through
 /// the fixed-shape chunked combiner (shape = f(length) only).
