@@ -14,7 +14,7 @@
 //! re-applies harmlessly on the next open.
 
 /// The schema version this crate writes and reads.
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 /// Storage chunk length for large artifacts (bytes). Artifacts strictly
 /// larger than this are stored as `artifact_chunks` rows of at most this
@@ -23,7 +23,7 @@ pub const STORAGE_CHUNK_LEN: usize = 4 * 1024 * 1024;
 
 /// Migration ladder: `MIGRATIONS[i]` migrates a database at `user_version`
 /// `i` to `i + 1`. Append-only; never edit a shipped batch.
-pub(crate) const MIGRATIONS: &[&[&str]] = &[V1, V2];
+pub(crate) const MIGRATIONS: &[&[&str]] = &[V1, V2, V3];
 
 /// v1: the six core tables (Appendix D), chunk storage, and the Rev S
 /// extension tables (sparse in v0 but present EARLY so downstream crates can
@@ -190,7 +190,20 @@ pub const V1_TABLES: &[&str] = &[
     "unsafe_capsules",
 ];
 
-/// Every table the CURRENT schema owns (v1 set + v2 additions); the
+/// v3 (bead lmp4.3): speculation telemetry — solve nodes gain
+/// `(proposer_id, accepted, bound, iterations_saved)` as speculation
+/// records keyed by solve-op identity. Additive: every existing query
+/// is untouched (the migration regression test proves it).
+pub const V3: &[&str] = &[
+    "CREATE TABLE IF NOT EXISTS speculation(
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE CHECK(length(name) > 0),
+        body TEXT NOT NULL CHECK(json_valid(body)),
+        created_at INTEGER NOT NULL
+    ) STRICT",
+];
+
+/// Every table the CURRENT schema owns (v1 set + v2/v3 additions); the
 /// `table_count`/lint whitelist.
 pub const ALL_TABLES: &[&str] = &[
     "artifacts",
@@ -209,4 +222,5 @@ pub const ALL_TABLES: &[&str] = &[
     "imports",
     "unsafe_capsules",
     "branches",
+    "speculation",
 ];

@@ -378,6 +378,10 @@ pub enum ExtensionTable {
     Imports,
     /// Unsafe-capsule registry mirror.
     UnsafeCapsules,
+    /// Speculation telemetry: solve-node records carrying
+    /// `(proposer_id, accepted, bound, iterations_saved)` (v3,
+    /// bead lmp4.3).
+    Speculation,
 }
 
 impl ExtensionTable {
@@ -386,6 +390,7 @@ impl ExtensionTable {
     pub fn table_name(self) -> &'static str {
         match self {
             ExtensionTable::Requirements => "requirements",
+            ExtensionTable::Speculation => "speculation",
             ExtensionTable::ModelCards => "model_cards",
             ExtensionTable::Evidence => "evidence",
             ExtensionTable::Scenarios => "scenarios",
