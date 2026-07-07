@@ -937,6 +937,22 @@ name = "fs-qty"
 version = "0.0.1"
 
 [[package]]
+name = "fs-query"
+version = "0.0.1"
+dependencies = [
+ "asupersync 0.3.5",
+ "fs-alloc",
+ "fs-evidence",
+ "fs-exec",
+ "fs-geom",
+ "fs-mesh",
+ "fs-obs",
+ "fs-rep-frep",
+ "fs-rep-mesh",
+ "fs-rep-sdf",
+]
+
+[[package]]
 name = "fs-rand"
 version = "0.0.1"
 dependencies = [
@@ -1027,6 +1043,15 @@ name = "fs-substrate"
 version = "0.0.1"
 dependencies = [
  "fs-obs",
+]
+
+[[package]]
+name = "fs-time"
+version = "0.0.1"
+dependencies = [
+ "fs-ad",
+ "fs-la",
+ "fs-math",
 ]
 
 [[package]]

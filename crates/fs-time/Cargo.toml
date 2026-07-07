@@ -1,0 +1,21 @@
+[package]
+name = "fs-time"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Structure-preserving time integration: symplectic, Lie-group, generalized-alpha, IMEX, exponential, adaptive."
+
+[package.metadata.frankensim]
+layer = "L3"
+
+[dependencies]
+fs-ad = { path = "../fs-ad" }
+fs-la = { path = "../fs-la" }
+fs-math = { path = "../fs-math" }
+
+[dev-dependencies]
+
+[lints]
+workspace = true
