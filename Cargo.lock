@@ -795,6 +795,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-bisect"
+version = "0.0.1"
+
+[[package]]
 name = "fs-cheb"
 version = "0.0.1"
 dependencies = [
@@ -822,6 +826,16 @@ version = "0.0.1"
 dependencies = [
  "fs-evidence",
  "fs-iface",
+]
+
+[[package]]
+name = "fs-cutfem"
+version = "0.0.1"
+dependencies = [
+ "fs-ivl",
+ "fs-la",
+ "fs-solver",
+ "fs-sparse",
 ]
 
 [[package]]
