@@ -15,6 +15,25 @@ distributions (plan §6.7; P2's seed pillar). Layer: L1.
   fs-math strict fns — cross-ISA deterministic SAMPLES), `next_exponential`
   (inversion), `fill_f64`.
 
+### Extended distributions (bead 6ys.19, module `dist`)
+- `Stream::{next_gamma, next_beta, next_dirichlet, next_truncated_normal,
+  next_truncated_exponential, next_vmf3}` + `dist::AliasTable`.
+- CONSUMPTION CONTRACTS: rejection samplers (gamma via Marsaglia–Tsang,
+  truncated normal via Robert) advance the index on every proposal —
+  consumed count is a pure function of stream content (replay-tested,
+  including mid-stream interleaving). Fixed-consumption samplers are
+  documented and TESTED as such: truncated exponential 1 draw, vMF 2
+  draws (Ulrich inversion — no rejection), alias sampling 1 draw.
+- AliasTable construction is DETERMINISTIC (index-order worklists,
+  P2 on setup): same weights, same table, bitwise.
+- All arithmetic routes through fs-math strict kernels (incl. the wf9.14
+  pow for the α < 1 gamma boost) — sampled VALUES are cross-ISA
+  bit-deterministic, golden-hashed (`0x4224_6e28_56de_673c`, verified on
+  both reference ISAs).
+- vMF mean-resultant lengths match the analytic coth(κ) − 1/κ at
+  κ ∈ {1, 10, 100} (tested); truncated-normal mean matches the analytic
+  hazard ratio via erfc (tested).
+
 ## Invariants
 - A draw is a pure function of (seed, kernel, tile, index) — never of
   thread/worker/order (shuffle-invariance is a test).
