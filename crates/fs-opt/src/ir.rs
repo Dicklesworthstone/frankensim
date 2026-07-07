@@ -222,7 +222,7 @@ pub enum ProblemTag {
 
 /// Evaluation budget (P4: attached to the problem, enforced by
 /// consumers like the toy descent).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct EvalBudget {
     /// Maximum objective evaluations (0 = unlimited).
     pub max_evals: u64,
@@ -348,6 +348,13 @@ pub enum OptError {
         /// What went wrong.
         what: String,
     },
+    /// A node the IR carries but cannot execute (PDE/stochastic).
+    Unevaluable {
+        /// The node.
+        node: u32,
+        /// What it is and who executes it.
+        kind: String,
+    },
     /// Cancelled mid-run (descent).
     Cancelled,
     /// Budget exhausted (P4 receipt, not a failure of the math).
@@ -410,6 +417,10 @@ impl core::fmt::Display for OptError {
                 f,
                 "PDE node {node} (study `{study}`) has no adjoint path; a \
                  gradient-based family cannot differentiate through it"
+            ),
+            OptError::Unevaluable { node, kind } => write!(
+                f,
+                "node {node} is carried by the IR but not evaluable here: {kind}"
             ),
             OptError::Parse { line, what } => write!(f, "parse error at line {line}: {what}"),
             OptError::Cancelled => write!(f, "cancelled between descent steps"),
