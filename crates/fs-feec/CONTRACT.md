@@ -67,6 +67,14 @@ checkerboarding structurally instead of by stabilization folklore.
   1D reference operators, exact Kronecker Jacobi diagonal,
   tensor-quadrature load and L2 error, and `pcg_matfree` (P6: never
   assemble what we can apply).
+- `highorder::simplex::SimplexSpace` — hierarchical high-order H¹ on
+  tet complexes (slice 3): Szabó–Babuška entity hierarchy (vertex λ,
+  edge λλ·P_k, face λλλ·P_iP_j, interior bubble products) with the
+  DETERMINISTIC GLOBAL ORIENTATION convention — every entity's kernel
+  arguments use sorted-global-index vertex order, so shared-entity
+  traces agree without sign tables; collapsed Duffy tensor quadrature;
+  deterministic COO assembly of stiffness/mass/load; entity-based
+  boundary masks. Matrix-free/perf paths are slice-4 scope.
 - `highorder::derham::TensorDeRham` — the full tensor de Rham complex
   (slice 2): C_r/D_{r−1} 1D factor pair (Lobatto/Legendre; derivative
   operator G in closed form via the integrated-Legendre identity,
@@ -153,6 +161,18 @@ matrix-free Jacobi-PCG path with slope gates ≥ r + 0.6 for r = 1..6
 `tests/ho_probe.rs`: per-mode convergence regression — the diagnosis
 that single-cell symmetric fixtures superconverge at even r (a metric
 trap, so MMS ladders start at m ≥ 2).
+`tests/simplex_battery.rs` (slice 3): Duffy weight/volume exactness
+and P_r dimension counts (local dofs = C(r+3,3), r = 1..6);
+unisolvence via mass SPD (r = 1..5); conformity across the shared
+two-tet face (traces from both elements agree ≤ 1e−13 at sampled
+face barycentrics); G1 MMS r = 1..4 with slope gates ≥ r + 0.6
+(ladders [4,8] for r = 1, [2,4] above); ORIENTATION battery (G3):
+signed-permutation operator equivariance at r = 3 (edge P₁ kernels
+flip sign under sort-order reversal, K′(Su) = S(Ku) ≤ 1e−12) and
+physics invariance at r = 4 under random relabeling (vertex point
+values ≤ 1e−9, L2 error relative deviation ≤ 1e−6 — face bases mix
+under relabeling, so operator-level identity is the WRONG gate
+there); its own golden hash.
 `tests/derham_battery.rs` (slice 2): curl∘grad and div∘curl ≤ 1e−13
 relative on four (m, r) fixtures; exact-sequence dimensions
 (χ = 1 for m = 1..3 × r = 1..6); commuting diagram 1D
@@ -169,14 +189,15 @@ form; its own golden hash.
   negative dual measures, so shipping it without well-centeredness
   machinery would be a certificate without evidence. Follow-up scope
   together with mesh quality certificates.
-- Simplicial families remain LOWEST order (P_r Λᵏ on tets for r > 1
-  is tfz.6's remaining scope). The tensor-product side now covers all
-  four space types with exact derivatives and the commuting diagram
-  (slices 1–2); full 3D VECTOR MMS solves (curl-curl, mixed Poisson)
-  need the solver stack (tfz.10) — projection G1 ladders stand in,
-  honestly labeled. Unstructured-hex orientation and the ≥30%-peak
-  perf gate are tfz.6's later slices. `HexComplex` incidence is still
-  not consumed (structured grids build their own lattice).
+- Simplicial H¹ now reaches high order (slice 3, MMS-gated at
+  r = 1..4; the basis is valid to r = 6 by the unisolvence/count
+  gates). Simplicial H(curl)/H(div)/L² high-order families (the
+  Nédélec/RT tree) remain OPEN scope — split assessment pending. The
+  tensor-product side covers all four space types (slices 1–2); full
+  3D VECTOR MMS solves need tfz.10 — projection ladders stand in,
+  labeled. Unstructured-hex orientation and the ≥30%-peak perf gate
+  are later-slice scope. `HexComplex` incidence is still not
+  consumed.
 - MMS covers the PRIMAL Poisson form; the mixed-form MMS (flux
   variable through M₂/d₂) joins the solver-stack lane (tfz.10) where
   saddle-point solvers live.
