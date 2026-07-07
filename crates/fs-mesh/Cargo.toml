@@ -1,0 +1,25 @@
+[package]
+name = "fs-mesh"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Body-fitted tet meshing: BRIO incremental Delaunay on exact predicates, quality refinement, exact audits."
+
+[package.metadata.frankensim]
+layer = "L2"
+
+[dependencies]
+fs-exec = { path = "../fs-exec" }
+fs-geom = { path = "../fs-geom" }
+fs-ivl = { path = "../fs-ivl" }
+fs-obs = { path = "../fs-obs" }
+fs-rep-mesh = { path = "../fs-rep-mesh" }
+
+[dev-dependencies]
+asupersync = { path = "../../../asupersync" }
+fs-alloc = { path = "../fs-alloc" }
+
+[lints]
+workspace = true
