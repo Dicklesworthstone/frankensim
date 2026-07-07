@@ -72,6 +72,24 @@ valid STRICT SQL), and `artifacts` gains `len`/`chunk_count` +
   `re_exploration_rate` is the proposal's kill-criterion metric;
   `flush_to_ledger` persists rows as `tombstone` events.
 
+- `vcs` module (addendum Proposal 10 base verbs, bead lmp4.9): VERSION
+  CONTROL FOR PHYSICS — commits/branches/checkout over Merkle roots,
+  free-riding on `travel`'s forkable worlds. A COMMIT is the binary
+  Merkle root of a branch's visible frozen ops (leaf = BLAKE3 of the
+  Five Explicits + outcome + diag + sorted linked-artifact hashes;
+  wall times and rowids EXCLUDED, so logically identical histories
+  produce identical roots across ledgers and runs); commits chain to
+  their branch predecessor and persist as `vcs-commit` events.
+  CHECKOUT materializes a committed view; `checkout_delta` returns the
+  symmetric-difference op frontier (the `perturb()`-style delta a
+  recompute solver consumes — nearby checkouts cost |delta|, not
+  |history|). `merge_views` splits base/only-A/only-B for the
+  diff/bisect/merge consumers; `storage_audit` measures the
+  "N branches ≈ 1× + deltas" sharing claim; `op_artifact_hashes` and
+  `commit_leaf` are the public leaf surface. GC safety is inherited:
+  `gc_unreferenced_artifacts` walks lineage reachability, and the VCS
+  suite proves no live-branch artifact is ever collected.
+
 ## Invariants
 
 1. Artifact identity = BLAKE3 of content; identical bytes dedupe to one row
@@ -181,3 +199,15 @@ as a runtime dependency (the colors are its types).
   validation, and the metric.
 - Descriptor parameters must be positive (π-space is multiplicative);
   signed features belong in the embedding text, not the signature.
+
+## No-claim boundaries (vcs)
+
+- The `Vcs` registry is in-session (commits also persist as events);
+  cross-session registry reconstruction from event rows lands with the
+  diff/bisect beads that need it.
+- `checkout_delta` names the ops to reconcile; executing the delta-solve
+  is fs-recompute's contract (lmp4.7/8), not this module's.
+- Merge ADJUDICATION (the sheaf Hodge split) is lmp4.12's crown jewel;
+  this module supplies its base/only-A/only-B views.
+- Commit leaves fold linked-artifact HASHES (content-addressed);
+  artifact bytes are shared by the store, not re-hashed per commit.

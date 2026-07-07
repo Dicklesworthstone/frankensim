@@ -54,7 +54,13 @@ fn vc_001_commits_are_reproducible_merkle_roots() {
     // Two ledgers, identical LOGICAL histories, different wall times.
     for (ledger, t0) in [(&ledger_a, 100i64), (&ledger_b, 9_999i64)] {
         run_op(ledger, 1, "{\"op\":\"solve\",\"dof\":64}", b"field-v1", t0);
-        run_op(ledger, 1, "{\"op\":\"optimize\",\"steps\":3}", b"design-v1", t0 + 50);
+        run_op(
+            ledger,
+            1,
+            "{\"op\":\"optimize\",\"steps\":3}",
+            b"design-v1",
+            t0 + 50,
+        );
     }
     let mut vcs_a = Vcs::new();
     let mut vcs_b = Vcs::new();
@@ -69,13 +75,31 @@ fn vc_001_commits_are_reproducible_merkle_roots() {
     assert_eq!(ca2.root, ca.root, "same state, same root");
     assert_eq!(ca2.parent, Some(ca.root), "commits chain");
     // A new op changes the root.
-    run_op(&ledger_a, 1, "{\"op\":\"solve\",\"dof\":128}", b"field-v2", 300);
+    run_op(
+        &ledger_a,
+        1,
+        "{\"op\":\"solve\",\"dof\":128}",
+        b"field-v2",
+        300,
+    );
     let ca3 = vcs_a.commit(&ledger_a, 1).expect("commit 3");
     assert_ne!(ca3.root, ca.root, "state change changes the root");
     // Different artifact content changes the root even with the same IR.
     let (ledger_c, dir_c) = open_ledger("repro-c");
-    run_op(&ledger_c, 1, "{\"op\":\"solve\",\"dof\":64}", b"DIFFERENT", 100);
-    run_op(&ledger_c, 1, "{\"op\":\"optimize\",\"steps\":3}", b"design-v1", 150);
+    run_op(
+        &ledger_c,
+        1,
+        "{\"op\":\"solve\",\"dof\":64}",
+        b"DIFFERENT",
+        100,
+    );
+    run_op(
+        &ledger_c,
+        1,
+        "{\"op\":\"optimize\",\"steps\":3}",
+        b"design-v1",
+        150,
+    );
     let mut vcs_c = Vcs::new();
     let cc = vcs_c.commit(&ledger_c, 1).expect("commit c");
     assert_ne!(cc.root, ca.root, "artifact hashes are folded into leaves");
@@ -94,13 +118,25 @@ fn vc_002_branches_share_artifacts_by_hash() {
     let (ledger, dir) = open_ledger("share");
     // A common history of 6 artifacts…
     for k in 0..6 {
-        run_op(&ledger, 1, &format!("{{\"op\":{k}}}"), format!("shared-{k}").as_bytes(), 10 + k);
+        run_op(
+            &ledger,
+            1,
+            &format!("{{\"op\":{k}}}"),
+            format!("shared-{k}").as_bytes(),
+            10 + k,
+        );
     }
     // …then 4 branches, each adding ONE delta op.
     let mut branch_ids = vec![1i64];
     for b in 0..4 {
         let id = ledger.fork(&format!("exp-{b}"), 1).expect("fork");
-        run_op(&ledger, id, "{\"op\":\"delta\"}", format!("delta-{b}").as_bytes(), 100 + b);
+        run_op(
+            &ledger,
+            id,
+            "{\"op\":\"delta\"}",
+            format!("delta-{b}").as_bytes(),
+            100 + b,
+        );
         branch_ids.push(id);
     }
     let vcs = Vcs::new();
@@ -117,14 +153,23 @@ fn vc_002_branches_share_artifacts_by_hash() {
     );
     let _ = branch_ids;
     let _ = std::fs::remove_dir_all(&dir);
-    verdict("vc-002", "storage audit: 10 physical rows serve 34 logical references");
+    verdict(
+        "vc-002",
+        "storage audit: 10 physical rows serve 34 logical references",
+    );
 }
 
 #[test]
 fn vc_003_checkout_and_nearby_delta() {
     let (ledger, dir) = open_ledger("checkout");
     for k in 0..20 {
-        run_op(&ledger, 1, &format!("{{\"base\":{k}}}"), format!("b{k}").as_bytes(), 10 + k);
+        run_op(
+            &ledger,
+            1,
+            &format!("{{\"base\":{k}}}"),
+            format!("b{k}").as_bytes(),
+            10 + k,
+        );
     }
     let exp = ledger.fork("exp", 1).expect("fork");
     run_op(&ledger, exp, "{\"tweak\":1}", b"t1", 100);
@@ -171,7 +216,13 @@ fn vc_003_checkout_and_nearby_delta() {
 fn vc_004_merge_views_and_branch_independence() {
     let (ledger, dir) = open_ledger("merge");
     for k in 0..5 {
-        run_op(&ledger, 1, &format!("{{\"base\":{k}}}"), format!("b{k}").as_bytes(), 10 + k);
+        run_op(
+            &ledger,
+            1,
+            &format!("{{\"base\":{k}}}"),
+            format!("b{k}").as_bytes(),
+            10 + k,
+        );
     }
     let a = ledger.fork("a", 1).expect("fork a");
     let b = ledger.fork("b", 1).expect("fork b");
@@ -190,7 +241,10 @@ fn vc_004_merge_views_and_branch_independence() {
     let ops_a = ledger.visible_op_ids(a, None).expect("a view");
     assert!(!ops_a.contains(&op_b1) && !ops_a.contains(&op_b2));
     let _ = std::fs::remove_dir_all(&dir);
-    verdict("vc-004", "merge views split base/only-A/only-B exactly; branches independent");
+    verdict(
+        "vc-004",
+        "merge views split base/only-A/only-B exactly; branches independent",
+    );
 }
 
 #[test]
@@ -199,12 +253,24 @@ fn vc_005_gc_never_collects_live_branch_artifacts() {
     // Many-branch fixture: shared history + per-branch deltas.
     let mut expected_alive = Vec::new();
     for k in 0..4 {
-        run_op(&ledger, 1, &format!("{{\"base\":{k}}}"), format!("keep-b{k}").as_bytes(), 10 + k);
+        run_op(
+            &ledger,
+            1,
+            &format!("{{\"base\":{k}}}"),
+            format!("keep-b{k}").as_bytes(),
+            10 + k,
+        );
         expected_alive.push(fs_ledger::hash_bytes(format!("keep-b{k}").as_bytes()));
     }
     for br in 0..6 {
         let id = ledger.fork(&format!("live-{br}"), 1).expect("fork");
-        run_op(&ledger, id, "{\"op\":\"delta\"}", format!("keep-d{br}").as_bytes(), 100 + br);
+        run_op(
+            &ledger,
+            id,
+            "{\"op\":\"delta\"}",
+            format!("keep-d{br}").as_bytes(),
+            100 + br,
+        );
         expected_alive.push(fs_ledger::hash_bytes(format!("keep-d{br}").as_bytes()));
     }
     // An UNREFERENCED artifact (no op links it): the only legal victim.

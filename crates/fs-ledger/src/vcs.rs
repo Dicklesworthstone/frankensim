@@ -202,7 +202,8 @@ impl Vcs {
              \"parent\":{}}}",
             root.to_hex(),
             branch,
-            info.frontier_op.map_or("null".to_string(), |o| o.to_string()),
+            info.frontier_op
+                .map_or("null".to_string(), |o| o.to_string()),
             info.parent
                 .map_or("null".to_string(), |p| format!("\"{}\"", p.to_hex())),
         );
