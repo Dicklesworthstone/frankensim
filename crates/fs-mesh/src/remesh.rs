@@ -142,6 +142,11 @@ fn ekey(a: u32, b: u32) -> (u32, u32) {
     if a < b { (a, b) } else { (b, a) }
 }
 
+/// Endpoints of locked edges: excluded from smoothing and collapse.
+fn feature_verts(creases: &BTreeSet<(u32, u32)>) -> BTreeSet<u32> {
+    creases.iter().flat_map(|&(a, b)| [a, b]).collect()
+}
+
 /// Newton projection onto the chart's zero set (needs a gradient claim;
 /// silently keeps the point where the chart offers none).
 fn project(chart: &dyn Chart, mut p: Point3, cx: &Cx<'_>) -> Point3 {
@@ -194,10 +199,6 @@ impl Passes<'_> {
         creases
     }
 
-    fn feature_verts(&self, creases: &BTreeSet<(u32, u32)>) -> BTreeSet<u32> {
-        creases.iter().flat_map(|&(a, b)| [a, b]).collect()
-    }
-
     fn len(&self, a: u32, b: u32) -> f64 {
         metric_len(
             self.metric,
@@ -213,10 +214,7 @@ impl Passes<'_> {
         let mut mids: BTreeMap<(u32, u32), u32> = BTreeMap::new();
         for &e in edge_faces.keys() {
             if self.len(e.0, e.1) > 4.0 / 3.0 {
-                let mut m = midpoint(
-                    self.positions[e.0 as usize],
-                    self.positions[e.1 as usize],
-                );
+                let mut m = midpoint(self.positions[e.0 as usize], self.positions[e.1 as usize]);
                 // Project ALL midpoints: on straight creases (the zoo's
                 // box edges) the chord lies ON the chart, so projection
                 // is a no-op there — while transiently mis-classified
@@ -260,8 +258,7 @@ impl Passes<'_> {
                     // that (c,a) is the UNMARKED edge.
                     let rot = (0..3)
                         .find(|&r| {
-                            marked[r].is_some()
-                                && (count == 1 || marked[(r + 1) % 3].is_some())
+                            marked[r].is_some() && (count == 1 || marked[(r + 1) % 3].is_some())
                         })
                         .expect("a marked rotation exists");
                     let (a, b, c) = (f[rot], f[(rot + 1) % 3], f[(rot + 2) % 3]);
@@ -285,7 +282,7 @@ impl Passes<'_> {
     fn collapse_pass(&mut self, cx: &Cx<'_>) {
         let edge_faces = self.edge_faces();
         let creases = self.crease_edges(&edge_faces);
-        let features = self.feature_verts(&creases);
+        let features = feature_verts(&creases);
         let mut neighbors: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
         let mut vert_faces: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
         for (fi, f) in self.faces.iter().enumerate() {
@@ -324,7 +321,9 @@ impl Passes<'_> {
             // Guard: no new over-long edges from the merged vertex.
             let ring: BTreeSet<u32> = nu.union(nv).copied().collect();
             if ring.iter().any(|&w| {
-                w != u && w != v && metric_len(self.metric, m, self.positions[w as usize]) > 4.0 / 3.0
+                w != u
+                    && w != v
+                    && metric_len(self.metric, m, self.positions[w as usize]) > 4.0 / 3.0
             }) {
                 continue;
             }
@@ -394,7 +393,7 @@ impl Passes<'_> {
         let creases = self.crease_edges(&edge_faces);
         let mut valence: BTreeMap<u32, i64> = BTreeMap::new();
         let mut edge_set: BTreeSet<(u32, u32)> = BTreeSet::new();
-        for (&e, _) in &edge_faces {
+        for &e in edge_faces.keys() {
             *valence.entry(e.0).or_insert(0) += 1;
             *valence.entry(e.1).or_insert(0) += 1;
             edge_set.insert(e);
@@ -447,7 +446,10 @@ impl Passes<'_> {
             };
             let p = &self.positions;
             let add = |x: Vec3, y: Vec3| Vec3::new(x.x + y.x, x.y + y.y, x.z + y.z);
-            let sum_old = add(face_normal(p, self.faces[f1]), face_normal(p, self.faces[f2]));
+            let sum_old = add(
+                face_normal(p, self.faces[f1]),
+                face_normal(p, self.faces[f2]),
+            );
             let (n1, n2) = (face_normal(p, t1), face_normal(p, t2));
             if n1.norm() < 1e-30 || n2.norm() < 1e-30 || sum_old.dot(add(n1, n2)) <= 0.0 {
                 continue;
@@ -463,10 +465,7 @@ impl Passes<'_> {
             *valence.entry(d).or_insert(0) += 1;
             pair.remove(&e);
             pair.insert(ekey(c, d), [f1, f2]);
-            for (edge2, fi_old, fi_new) in [
-                (ekey(u, d), f2, f1),
-                (ekey(v, c), f1, f2),
-            ] {
+            for (edge2, fi_old, fi_new) in [(ekey(u, d), f2, f1), (ekey(v, c), f1, f2)] {
                 if let Some(fs) = pair.get_mut(&edge2) {
                     for slot in fs.iter_mut() {
                         if *slot == fi_old {
@@ -487,7 +486,7 @@ impl Passes<'_> {
         }
         let edge_faces = self.edge_faces();
         let creases = self.crease_edges(&edge_faces);
-        let features = self.feature_verts(&creases);
+        let features = feature_verts(&creases);
         let mut neighbors: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
         for &(a, b) in edge_faces.keys() {
             neighbors.entry(a).or_default().insert(b);
@@ -576,11 +575,7 @@ pub fn remesh(
     for (&old, &new) in &used {
         positions[new as usize] = passes.positions[old as usize];
     }
-    let triangles: Vec<[u32; 3]> = passes
-        .faces
-        .iter()
-        .map(|f| f.map(|v| used[&v]))
-        .collect();
+    let triangles: Vec<[u32; 3]> = passes.faces.iter().map(|f| f.map(|v| used[&v])).collect();
     let mut stats = passes.stats;
     if let Some(chart) = chart {
         for p in &positions {
