@@ -306,7 +306,7 @@ pub fn read_png(bytes: &[u8]) -> Result<DecodedPng, ImgError> {
                 what: "truncated chunk crc".to_string(),
             })?;
         let mut crc_input = Vec::with_capacity(4 + len);
-        crc_input.extend_from_slice(&kind);
+        crc_input.extend_from_slice(kind);
         crc_input.extend_from_slice(data);
         if u32::from_be_bytes([crc[0], crc[1], crc[2], crc[3]]) != crc32(&crc_input) {
             return Err(ImgError::Malformed {

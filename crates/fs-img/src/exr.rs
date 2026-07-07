@@ -289,9 +289,12 @@ fn parse_chlist(value: &[u8]) -> Result<Vec<(String, PixelType)>, ImgError> {
     Ok(specs)
 }
 
-/// Parse the header attributes; returns (channel specs, width, height) and
-/// leaves `pos` just past the header terminator.
-fn parse_header(bytes: &[u8], pos: &mut usize) -> Result<(Vec<(String, PixelType)>, u32, u32), ImgError> {
+/// Parsed header: (channel specs, width, height).
+type HeaderInfo = (Vec<(String, PixelType)>, u32, u32);
+
+/// Parse the header attributes; returns [`HeaderInfo`] and leaves `pos`
+/// just past the header terminator.
+fn parse_header(bytes: &[u8], pos: &mut usize) -> Result<HeaderInfo, ImgError> {
     let mut specs: Vec<(String, PixelType)> = Vec::new();
     let mut window = (0u32, 0u32);
     let mut compression_seen = false;
