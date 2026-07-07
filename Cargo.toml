@@ -17,6 +17,7 @@ members = [
     "crates/fs-tilelang",
     "crates/fs-opdsl",
     "crates/fs-solver",
+    "crates/fs-adjoint",
     "crates/fs-tilelang-macros",
     "crates/fs-soa-derive",
     "crates/fs-time",

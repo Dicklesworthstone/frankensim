@@ -774,6 +774,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-adjoint"
+version = "0.0.1"
+dependencies = [
+ "fs-ad",
+ "fs-feec",
+ "fs-la",
+ "fs-math",
+ "fs-rand",
+ "fs-rep-mesh",
+ "fs-solver",
+ "fs-sparse",
+]
+
+[[package]]
 name = "fs-alloc"
 version = "0.0.1"
 dependencies = [

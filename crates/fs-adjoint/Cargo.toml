@@ -1,0 +1,26 @@
+[package]
+name = "fs-adjoint"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Gradient truth: IFT discrete adjoints through solvers, time-dependent adjoints under revolve checkpointing, Hadamard shape gradients, density chain rules, Sobolev gradient smoothing, and the gradient-verification gate."
+
+[package.metadata.frankensim]
+layer = "L3"
+
+[dependencies]
+fs-ad = { path = "../fs-ad" }
+fs-feec = { path = "../fs-feec" }
+fs-la = { path = "../fs-la" }
+fs-math = { path = "../fs-math" }
+fs-rep-mesh = { path = "../fs-rep-mesh" }
+fs-solver = { path = "../fs-solver" }
+fs-sparse = { path = "../fs-sparse" }
+
+[dev-dependencies]
+fs-rand = { path = "../fs-rand" }
+
+[lints]
+workspace = true
