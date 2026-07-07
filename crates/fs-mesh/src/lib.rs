@@ -26,9 +26,11 @@
 
 mod delaunay;
 mod refine;
+mod remesh;
 
 pub use delaunay::{AuditReport, DelaunayStats, GHOST, MeshError, Tetrahedralization, delaunay};
 pub use refine::{RefineOptions, RefineStats, refine};
+pub use remesh::{MetricField, RemeshOptions, RemeshStats, UniformMetric, remesh};
 
 /// Crate version, re-exported for provenance stamping.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

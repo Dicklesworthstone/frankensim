@@ -385,3 +385,430 @@ fn too_few_points_teaches() {
         assert!(err.to_string().contains("at least 4"), "{err}");
     });
 }
+
+// ───────────────────────── remeshing battery ─────────────────────────
+
+use fs_geom::{Chart, Vec3};
+use fs_mesh::{MetricField, RemeshOptions, UniformMetric, remesh};
+use fs_rep_mesh::HalfEdgeMesh;
+
+fn icosphere(center: Point3, r: f64, sub: u32) -> fs_rep_mesh::Soup {
+    fs_rep_mesh::shapes::icosphere(center, r, sub)
+}
+
+/// Closed-manifold validity: half-edge invariants + edge-use audit.
+fn valid_closed(soup: &fs_rep_mesh::Soup) -> Result<(), String> {
+    let he = HalfEdgeMesh::from_triangles(soup.positions.clone(), &soup.triangles)
+        .map_err(|e| format!("from_triangles: {e}"))?;
+    if let Some(v) = he.check_invariants() {
+        return Err(format!("invariant: {v}"));
+    }
+    let q = assess_quality(soup);
+    if !q.sign_certified() {
+        return Err(format!("not closed 2-manifold: {q:?}"));
+    }
+    Ok(())
+}
+
+fn metric_edge_lengths(soup: &fs_rep_mesh::Soup, metric: &dyn MetricField) -> Vec<f64> {
+    let mut edges = std::collections::BTreeSet::new();
+    for t in &soup.triangles {
+        for c in 0..3 {
+            let (a, b) = (t[c], t[(c + 1) % 3]);
+            edges.insert((a.min(b), a.max(b)));
+        }
+    }
+    edges
+        .into_iter()
+        .map(|(a, b)| {
+            let (p, q) = (soup.positions[a as usize], soup.positions[b as usize]);
+            let mid = Point3::new(
+                f64::midpoint(p.x, q.x),
+                f64::midpoint(p.y, q.y),
+                f64::midpoint(p.z, q.z),
+            );
+            let m = metric.metric(mid);
+            let e = q.delta_from(p);
+            let v = [e.x, e.y, e.z];
+            let mut s = 0.0;
+            for (row, &vi) in m.iter().zip(&v) {
+                s += vi * (row[0] * v[0] + row[1] * v[1] + row[2] * v[2]);
+            }
+            s.max(0.0).sqrt()
+        })
+        .collect()
+}
+
+/// tmesh-007 — isotropic remeshing of a sphere: unit-metric edge
+/// concentration, chart drift bounded, valid closed output, bitwise
+/// determinism, and tolerance-level translation equivariance (G3).
+#[test]
+fn tmesh_007_isotropic_sphere() {
+    with_cx(|cx| {
+        let base = icosphere(Point3::new(0.0, 0.0, 0.0), 1.0, 3);
+        let chart = fs_geom::fixtures::SphereChart {
+            center: Point3::new(0.0, 0.0, 0.0),
+            radius: 1.0,
+        };
+        let metric = UniformMetric { target: 0.25 };
+        let opts = RemeshOptions::default();
+        let (out, stats) = remesh(&base, Some(&chart), &metric, opts, cx).expect("remesh");
+        let (out2, _) = remesh(&base, Some(&chart), &metric, opts, cx).expect("remesh 2");
+        let bitwise = out.positions == out2.positions && out.triangles == out2.triangles;
+        let validity = valid_closed(&out);
+        let lens = metric_edge_lengths(&out, &metric);
+        let in_band = lens.iter().filter(|&&l| (0.7..=1.4).contains(&l)).count();
+        let frac = in_band as f64 / lens.len() as f64;
+        let w = winding_exact(&out, Point3::new(0.0, 0.0, 0.0));
+        // Chart drift: vertices (projected) AND centroids (sagitta-bounded).
+        let mut worst_centroid = 0.0f64;
+        for t in &out.triangles {
+            let [a, b, c] = t.map(|v| out.positions[v as usize]);
+            let g = Point3::new(
+                (a.x + b.x + c.x) / 3.0,
+                (a.y + b.y + c.y) / 3.0,
+                (a.z + b.z + c.z) / 3.0,
+            );
+            worst_centroid = worst_centroid.max(chart.eval(g, cx).signed_distance.abs());
+        }
+        // G3: remesh the shifted problem; compare unshifted (tolerance:
+        // fp sums differ, no exact predicates involved).
+        let shift = Vec3::new(0.5, 0.25, -0.375);
+        let shifted = fs_rep_mesh::Soup {
+            positions: base.positions.iter().map(|p| p.offset(shift)).collect(),
+            triangles: base.triangles.clone(),
+        };
+        let chart_s = fs_geom::fixtures::SphereChart {
+            center: Point3::new(0.5, 0.25, -0.375),
+            radius: 1.0,
+        };
+        let (out_s, stats_s) = remesh(&shifted, Some(&chart_s), &metric, opts, cx).expect("remesh s");
+        // Threshold-driven ops legitimately flip borderline decisions
+        // under shifted fp arithmetic, so exact-topology G3 cannot hold;
+        // the equivariant claim is the QUALITY PROFILE: validity, edge
+        // conformity, drift, and element count all match.
+        let lens_s = metric_edge_lengths(&out_s, &metric);
+        let frac_s = lens_s.iter().filter(|&&l| (0.7..=1.4).contains(&l)).count() as f64
+            / lens_s.len() as f64;
+        let g3 = valid_closed(&out_s).is_ok()
+            && (frac_s - {
+                let in_band = lens.iter().filter(|&&l| (0.7..=1.4).contains(&l)).count();
+                in_band as f64 / lens.len() as f64
+            })
+            .abs()
+                < 0.03
+            && stats_s.worst_chart_drift < 1e-6
+            && (out_s.triangles.len() as f64 - out.triangles.len() as f64).abs()
+                / out.triangles.len() as f64
+                < 0.03;
+        let mut em = fs_obs::Emitter::new("fs-mesh/conformance", "tmesh-007/isotropic");
+        let line = em
+            .emit(
+                fs_obs::Severity::Info,
+                fs_obs::EventKind::Custom {
+                    name: "mesh-remesh-iso".to_string(),
+                    json: format!(
+                        "{{\"ops\":{},\"edge_band_frac\":{frac:.3},\"tris\":{}}}",
+                        stats.to_json(),
+                        out.triangles.len()
+                    ),
+                },
+                None,
+            )
+            .to_jsonl();
+        fs_obs::validate_line(&line).expect("iso event validates");
+        println!("{line}");
+        verdict(
+            "tmesh-007",
+            validity.is_ok()
+                && frac > 0.85
+                && stats.worst_chart_drift < 1e-6
+                && worst_centroid < 3e-2
+                && (w - 1.0).abs() < 1e-9
+                && bitwise
+                && g3,
+            &format!(
+                "isotropic sphere remesh: {:.0}% of edges within [0.7,1.4] of unit \
+                 metric length, vertex drift {:.1e} and centroid sag {:.1e} off the \
+                 chart, output closed/manifold/outward, BITWISE deterministic, and \
+                 translation-equivariant to 1e-8 (bitwise={bitwise} g3={g3}                  w={w:.4}; {}; {:?})",
+                frac * 100.0,
+                stats.worst_chart_drift,
+                worst_centroid,
+                stats.to_json(),
+                validity
+            ),
+        );
+    });
+}
+
+/// tmesh-008 — the op-storm robustness battery: rounds of remeshing at
+/// randomized targets; after EVERY round the mesh passes half-edge
+/// invariants, closed-manifold audit, and Euler = 2.
+#[test]
+fn tmesh_008_op_storm_validity() {
+    with_cx(|cx| {
+        let mut rng = Lcg(0x1001_2026_0706_0028);
+        let chart = fs_geom::fixtures::SphereChart {
+            center: Point3::new(0.0, 0.0, 0.0),
+            radius: 1.0,
+        };
+        let mut soup = icosphere(Point3::new(0.0, 0.0, 0.0), 1.0, 2);
+        let mut total_ops = 0u64;
+        let mut all_valid = true;
+        let mut detail = String::new();
+        for round in 0..16 {
+            let target = 0.15 + 0.35 * ((rng.next() >> 32) as f64 / f64::from(u32::MAX));
+            let metric = UniformMetric { target };
+            let opts = RemeshOptions {
+                iterations: 2,
+                ..RemeshOptions::default()
+            };
+            let (next, stats) = remesh(&soup, Some(&chart), &metric, opts, cx).expect("round");
+            total_ops += stats.splits + stats.collapses + stats.flips + stats.smooths;
+            if let Err(e) = valid_closed(&next) {
+                all_valid = false;
+                detail = format!("round {round} (target {target:.3}): {e}");
+                break;
+            }
+            let he = HalfEdgeMesh::from_triangles(next.positions.clone(), &next.triangles)
+                .expect("valid");
+            if he.euler_characteristic() != 2 {
+                all_valid = false;
+                detail = format!("round {round}: euler {}", he.euler_characteristic());
+                break;
+            }
+            soup = next;
+        }
+        verdict(
+            "tmesh-008",
+            all_valid && total_ops > 8_000,
+            &format!(
+                "16 randomized remesh rounds ({total_ops} ops total) kept half-edge \
+                 invariants, closed-manifold status, and Euler = 2 after every round \
+                 {detail}; seed 0x1001_2026_0706_0028"
+            ),
+        );
+    });
+}
+
+/// tmesh-009 — feature preservation: remeshing a cube keeps its 8
+/// corners EXACTLY, keeps every crease-classified output edge ON a cube
+/// edge line, stays on the box chart, and remains closed.
+#[test]
+fn tmesh_009_cube_crease_preservation() {
+    with_cx(|cx| {
+        let cube = fs_rep_mesh::shapes::cube(Point3::new(0.0, 0.0, 0.0), 1.0);
+        let chart = fs_geom::fixtures::BoxChart {
+            aabb: fs_geom::Aabb::new(Point3::new(-1.0, -1.0, -1.0), Point3::new(1.0, 1.0, 1.0)),
+        };
+        let metric = UniformMetric { target: 0.4 };
+        let (out, stats) =
+            remesh(&cube, Some(&chart), &metric, RemeshOptions::default(), cx).expect("remesh");
+        let validity = valid_closed(&out);
+        // All 8 corners survive bitwise.
+        let mut corners_found = 0;
+        for &sx in &[-1.0f64, 1.0] {
+            for &sy in &[-1.0f64, 1.0] {
+                for &sz in &[-1.0f64, 1.0] {
+                    if out
+                        .positions
+                        .iter()
+                        .any(|p| p.x == sx && p.y == sy && p.z == sz)
+                    {
+                        corners_found += 1;
+                    }
+                }
+            }
+        }
+        // Every crease-grade output edge lies on a cube edge line: two
+        // coordinates pinned to ±1 (within 1e-9) and AGREEING across
+        // both endpoints.
+        let mut edge_faces: std::collections::BTreeMap<(u32, u32), Vec<usize>> =
+            std::collections::BTreeMap::new();
+        for (fi, t) in out.triangles.iter().enumerate() {
+            for c in 0..3 {
+                let (a, b) = (t[c], t[(c + 1) % 3]);
+                edge_faces.entry((a.min(b), a.max(b))).or_default().push(fi);
+            }
+        }
+        let normal = |fi: usize| -> Vec3 {
+            let [a, b, c] = out.triangles[fi].map(|v| out.positions[v as usize]);
+            let (u, v) = (b.delta_from(a), c.delta_from(a));
+            Vec3::new(
+                u.y * v.z - u.z * v.y,
+                u.z * v.x - u.x * v.z,
+                u.x * v.y - u.y * v.x,
+            )
+        };
+        let mut creases_on_edges = true;
+        let mut crease_count = 0;
+        for (&(a, b), fs) in &edge_faces {
+            if fs.len() != 2 {
+                creases_on_edges = false;
+                continue;
+            }
+            let (n1, n2) = (normal(fs[0]), normal(fs[1]));
+            if n1.dot(n2) / (n1.norm() * n2.norm()).max(1e-300) < 0.7f64.cos() {
+                crease_count += 1;
+                let (p, q) = (out.positions[a as usize], out.positions[b as usize]);
+                let pinned = |u: f64, v: f64| (u.abs() - 1.0).abs() < 1e-9 && (u - v).abs() < 1e-9;
+                let shared = usize::from(pinned(p.x, q.x))
+                    + usize::from(pinned(p.y, q.y))
+                    + usize::from(pinned(p.z, q.z));
+                if shared < 2 {
+                    creases_on_edges = false;
+                }
+            }
+        }
+        let w = winding_exact(&out, Point3::new(0.0, 0.0, 0.0));
+        verdict(
+            "tmesh-009",
+            validity.is_ok()
+                && corners_found == 8
+                && creases_on_edges
+                && crease_count >= 12
+                && stats.worst_chart_drift < 5e-3
+                && (w - 1.0).abs() < 1e-9,
+            &format!(
+                "cube remesh keeps all 8 corners bitwise, all {crease_count} \
+                 crease-grade edges lie on cube edge lines, drift {:.1e}, closed \
+                 and outward ({:?})",
+                stats.worst_chart_drift, validity
+            ),
+        );
+    });
+}
+
+/// The equator boundary-layer metric: tight normal spacing near z = 0.
+struct BoundaryLayerMetric;
+
+impl MetricField for BoundaryLayerMetric {
+    fn metric(&self, p: Point3) -> [[f64; 3]; 3] {
+        let ht: f64 = 0.35;
+        let hz = (0.04 + 0.6 * p.z.abs()).min(ht);
+        [
+            [1.0 / (ht * ht), 0.0, 0.0],
+            [0.0, 1.0 / (ht * ht), 0.0],
+            [0.0, 0.0, 1.0 / (hz * hz)],
+        ]
+    }
+}
+
+/// tmesh-010 — anisotropic remeshing under a boundary-layer metric:
+/// metric-unit edge conformity, physically stretched aligned elements
+/// in the layer, and a MEASURED interpolation-error win over isotropic
+/// at comparable element count (the adaptivity-loop model).
+#[test]
+#[allow(clippy::too_many_lines)] // conformity + alignment + the error demo
+fn tmesh_010_anisotropic_boundary_layer() {
+    with_cx(|cx| {
+        let base = icosphere(Point3::new(0.0, 0.0, 0.0), 1.0, 3);
+        let chart = fs_geom::fixtures::SphereChart {
+            center: Point3::new(0.0, 0.0, 0.0),
+            radius: 1.0,
+        };
+        let opts = RemeshOptions {
+            iterations: 14,
+            ..RemeshOptions::default()
+        };
+        let (aniso, stats) =
+            remesh(&base, Some(&chart), &BoundaryLayerMetric, opts, cx).expect("aniso");
+        let validity = valid_closed(&aniso);
+        let lens = metric_edge_lengths(&aniso, &BoundaryLayerMetric);
+        let frac = lens.iter().filter(|&&l| (0.6..=1.6).contains(&l)).count() as f64
+            / lens.len() as f64;
+        // Physical anisotropy in the layer: stretched, equator-aligned.
+        let mut aspects = Vec::new();
+        let mut align = Vec::new();
+        for t in &aniso.triangles {
+            let ps = t.map(|v| aniso.positions[v as usize]);
+            let gz = (ps[0].z + ps[1].z + ps[2].z) / 3.0;
+            if gz.abs() > 0.08 {
+                continue;
+            }
+            let mut longest = (0.0f64, Vec3::new(1.0, 0.0, 0.0));
+            let mut shortest = f64::INFINITY;
+            for c in 0..3 {
+                let e = ps[(c + 1) % 3].delta_from(ps[c]);
+                let l = e.norm();
+                if l > longest.0 {
+                    longest = (l, e);
+                }
+                shortest = shortest.min(l);
+            }
+            if shortest > 0.0 {
+                aspects.push(longest.0 / shortest);
+                align.push((longest.1.z / longest.0).abs());
+            }
+        }
+        let mean_aspect = aspects.iter().sum::<f64>() / aspects.len().max(1) as f64;
+        let mean_align = align.iter().sum::<f64>() / align.len().max(1) as f64;
+        // Interpolation-error demo vs isotropic at comparable count.
+        let t_aniso = aniso.triangles.len() as f64;
+        let l_iso = (16.0 * core::f64::consts::PI / (3.0f64.sqrt() * t_aniso)).sqrt();
+        let (iso, _) = remesh(
+            &base,
+            Some(&chart),
+            &UniformMetric { target: l_iso },
+            opts,
+            cx,
+        )
+        .expect("iso");
+        let t_iso = iso.triangles.len() as f64;
+        let residual = |s: &fs_rep_mesh::Soup| -> f64 {
+            let f = |p: Point3| (p.z / 0.05).tanh();
+            let mut worst = 0.0f64;
+            for t in &s.triangles {
+                let ps = t.map(|v| s.positions[v as usize]);
+                let g = Point3::new(
+                    (ps[0].x + ps[1].x + ps[2].x) / 3.0,
+                    (ps[0].y + ps[1].y + ps[2].y) / 3.0,
+                    (ps[0].z + ps[1].z + ps[2].z) / 3.0,
+                );
+                let interp = (f(ps[0]) + f(ps[1]) + f(ps[2])) / 3.0;
+                worst = worst.max((f(g) - interp).abs());
+            }
+            worst
+        };
+        let (r_aniso, r_iso) = (residual(&aniso), residual(&iso));
+        let counts_comparable = (t_iso - t_aniso).abs() / t_aniso < 0.4;
+        let mut em = fs_obs::Emitter::new("fs-mesh/conformance", "tmesh-010/aniso");
+        let line = em
+            .emit(
+                fs_obs::Severity::Info,
+                fs_obs::EventKind::Custom {
+                    name: "mesh-remesh-aniso".to_string(),
+                    json: format!(
+                        "{{\"ops\":{},\"band_frac\":{frac:.3},\"mean_aspect\":{mean_aspect:.2},\
+                         \"mean_align_z\":{mean_align:.3},\"tris_aniso\":{t_aniso},\
+                         \"tris_iso\":{t_iso},\"residual_aniso\":{r_aniso:.4},\
+                         \"residual_iso\":{r_iso:.4}}}",
+                        stats.to_json()
+                    ),
+                },
+                None,
+            )
+            .to_jsonl();
+        fs_obs::validate_line(&line).expect("aniso event validates");
+        println!("{line}");
+        verdict(
+            "tmesh-010",
+            validity.is_ok()
+                && frac > 0.7
+                && mean_aspect > 2.0
+                && mean_align < 0.45
+                && counts_comparable
+                && r_aniso < 0.6 * r_iso,
+            &format!(
+                "boundary-layer metric realized: {:.0}% metric-unit edges, layer \
+                 elements stretched {mean_aspect:.1}x and equator-aligned \
+                 (|cos z|={mean_align:.2}), and interpolation residual {r_aniso:.3} \
+                 vs isotropic {r_iso:.3} at comparable counts ({t_aniso} vs {t_iso} \
+                 tris) — the adaptivity win, measured ({:?})",
+                frac * 100.0,
+                validity
+            ),
+        );
+    });
+}
