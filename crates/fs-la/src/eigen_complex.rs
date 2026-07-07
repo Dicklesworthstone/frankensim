@@ -166,7 +166,7 @@ pub fn eig(a: &[C64], n: usize) -> Result<Vec<C64>, EigFailure> {
             return Err(EigFailure { window_hi: hi });
         }
         let hnn = h[hi * n + hi];
-        let mu = if iters_here % 12 == 0 {
+        let mu = if iters_here.is_multiple_of(12) {
             // Exceptional: perturb by the subdiagonal magnitude.
             hnn + C64::from_re(h[hi * n + (hi - 1)].abs())
         } else {
@@ -177,17 +177,15 @@ pub fn eig(a: &[C64], n: usize) -> Result<Vec<C64>, EigFailure> {
                 hnn,
             );
             let (d1, d2) = ((l1 - hnn).abs(), (l2 - hnn).abs());
-            // Deterministic tie-break: smaller |λ|, then (re, im).
-            if d1 < d2
-                || (d1 == d2
-                    && (l1.abs() < l2.abs()
-                        || (l1.abs() == l2.abs()
-                            && (l1.re, l1.im) <= (l2.re, l2.im))))
-            {
-                l1
-            } else {
-                l2
-            }
+            // Deterministic tie-break via total_cmp chains: distance to
+            // h_nn, then |λ|, then (re, im) lexicographic.
+            let pick_l1 = d1
+                .total_cmp(&d2)
+                .then_with(|| l1.abs().total_cmp(&l2.abs()))
+                .then_with(|| l1.re.total_cmp(&l2.re))
+                .then_with(|| l1.im.total_cmp(&l2.im))
+                .is_le();
+            if pick_l1 { l1 } else { l2 }
         };
         // Explicit shifted QR sweep on the window: H − μI = QR (Givens
         // zeroing the subdiagonal), then H ← RQ + μI (apply the same
