@@ -209,7 +209,7 @@ pub fn cmaes<F: FnMut(&[f64]) -> f64>(
         sigma *= fs_math::det::exp((cs / damps) * (ps_norm / chi_n - 1.0));
         // Rank-1 path with stall indicator h_σ.
         let h_sig = ps_norm
-            / fs_math::det::sqrt(1.0 - (1.0 - cs).powi(2 * (generations as i32)))
+            / fs_math::det::sqrt(1.0 - (1.0 - cs).powi(2 * i32::try_from(generations.min(100_000)).expect("generation count")))
             < (1.4 + 2.0 / (nf + 1.0)) * chi_n;
         let ccn = fs_math::det::sqrt(cc * (2.0 - cc) * mu_eff);
         for i in 0..n {

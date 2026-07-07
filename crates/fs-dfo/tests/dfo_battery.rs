@@ -32,9 +32,11 @@ fn ellipsoid(x: &[f64]) -> f64 {
 }
 
 fn rastrigin(x: &[f64]) -> f64 {
-    let a = 10.0;
+    let a = 10.0f64;
     x.iter()
-        .map(|&t| a.mul_add(1.0, t.mul_add(t, -a * fs_math::det::cos(2.0 * std::f64::consts::PI * t))))
+        .map(|&t| {
+            a + t.mul_add(t, -a * fs_math::det::cos(2.0 * std::f64::consts::PI * t))
+        })
         .sum()
 }
 
@@ -42,17 +44,17 @@ fn rastrigin(x: &[f64]) -> f64 {
 fn benchmark_convergence() {
     // Sphere(10): trivial, fast.
     let mut f = |x: &[f64]| sphere(x);
-    let rep = cmaes(&mut f, &vec![3.0; 10], &CmaParams::standard(10, 2.0, 20_000, 1e-10), 1);
+    let rep = cmaes(&mut f, &[3.0; 10], &CmaParams::standard(10, 2.0, 20_000, 1e-10), 1);
     assert!(rep.converged, "sphere must converge: {rep:?}");
     // Rosenbrock(10): the classic valley.
     let mut f = |x: &[f64]| rosenbrock(x);
     let rep =
-        cmaes(&mut f, &vec![0.0; 10], &CmaParams::standard(10, 0.5, 120_000, 1e-8), 2);
+        cmaes(&mut f, &[0.0; 10], &CmaParams::standard(10, 0.5, 120_000, 1e-8), 2);
     assert!(rep.converged, "rosenbrock(10) must converge: evals {}", rep.evals);
     // Ellipsoid(10) at condition 1e6: adaptation must handle it.
     let mut f = |x: &[f64]| ellipsoid(x);
     let rep =
-        cmaes(&mut f, &vec![1.0; 10], &CmaParams::standard(10, 1.0, 120_000, 1e-8), 3);
+        cmaes(&mut f, &[1.0; 10], &CmaParams::standard(10, 1.0, 120_000, 1e-8), 3);
     assert!(rep.converged, "ellipsoid must converge: evals {}", rep.evals);
     println!(
         "{{\"suite\":\"fs-dfo\",\"case\":\"benchmarks\",\"verdict\":\"pass\",\"detail\":\"sphere/rosenbrock/ellipsoid(cond 1e6) all to target\"}}"
@@ -64,8 +66,8 @@ fn deterministic_evolution_from_seed() {
     let mut f1 = |x: &[f64]| rosenbrock(x);
     let mut f2 = |x: &[f64]| rosenbrock(x);
     let p = CmaParams::standard(6, 0.5, 8_000, -1.0); // run full budget
-    let r1 = cmaes(&mut f1, &vec![0.2; 6], &p, 42);
-    let r2 = cmaes(&mut f2, &vec![0.2; 6], &p, 42);
+    let r1 = cmaes(&mut f1, &[0.2; 6], &p, 42);
+    let r2 = cmaes(&mut f2, &[0.2; 6], &p, 42);
     assert_eq!(r1.f_best.to_bits(), r2.f_best.to_bits(), "same seed → same bits");
     assert_eq!(r1.evals, r2.evals);
     for (a, b) in r1.x_best.iter().zip(&r2.x_best) {
@@ -73,7 +75,7 @@ fn deterministic_evolution_from_seed() {
     }
     // Different seed → different trajectory (sanity that seeding matters).
     let mut f3 = |x: &[f64]| rosenbrock(x);
-    let r3 = cmaes(&mut f3, &vec![0.2; 6], &p, 43);
+    let r3 = cmaes(&mut f3, &[0.2; 6], &p, 43);
     assert_ne!(r1.f_best.to_bits(), r3.f_best.to_bits());
 }
 
@@ -84,10 +86,10 @@ fn monotone_transform_invariance_is_bitwise() {
     // — the IGO invariance, tested bitwise on the search trajectory.
     let p = CmaParams::standard(5, 0.7, 6_000, -1.0);
     let mut plain = |x: &[f64]| sphere(x);
-    let r_plain = cmaes(&mut plain, &vec![1.5; 5], &p, 7);
+    let r_plain = cmaes(&mut plain, &[1.5; 5], &p, 7);
     // exp is strictly monotone; sphere ≥ 0 so cube is monotone there too.
     let mut expf = |x: &[f64]| fs_math::det::exp(sphere(x).min(700.0));
-    let r_exp = cmaes(&mut expf, &vec![1.5; 5], &p, 7);
+    let r_exp = cmaes(&mut expf, &[1.5; 5], &p, 7);
     for (a, b) in r_plain.x_best.iter().zip(&r_exp.x_best) {
         assert_eq!(
             a.to_bits(),
@@ -96,7 +98,7 @@ fn monotone_transform_invariance_is_bitwise() {
         );
     }
     let mut cubef = |x: &[f64]| sphere(x).powi(3);
-    let r_cube = cmaes(&mut cubef, &vec![1.5; 5], &p, 7);
+    let r_cube = cmaes(&mut cubef, &[1.5; 5], &p, 7);
     for (a, b) in r_plain.x_best.iter().zip(&r_cube.x_best) {
         assert_eq!(a.to_bits(), b.to_bits(), "cube transform must not change it either");
     }
@@ -113,7 +115,7 @@ fn translation_equivariance() {
     let shift = [2.5f64, -1.0, 0.5, 3.0, -2.0];
     let p = CmaParams::standard(5, 1.0, 40_000, 1e-10);
     let mut f0 = |x: &[f64]| sphere(x);
-    let r0 = cmaes(&mut f0, &vec![1.0; 5], &p, 11);
+    let r0 = cmaes(&mut f0, &[1.0; 5], &p, 11);
     let mut fs = |x: &[f64]| {
         let shifted: Vec<f64> = x.iter().zip(&shift).map(|(a, s)| a - s).collect();
         sphere(&shifted)
@@ -129,7 +131,7 @@ fn translation_equivariance() {
 #[test]
 fn bipop_solves_multimodal_and_reports_schedule() {
     let mut f = |x: &[f64]| rastrigin(x);
-    let rep = bipop_cmaes(&mut f, &vec![3.0; 5], 2.0, 400_000, 1e-8, 17);
+    let rep = bipop_cmaes(&mut f, &[3.0; 5], 2.0, 400_000, 1e-8, 17);
     assert!(
         rep.best.f_best < 1e-6,
         "BIPOP must reach the global basin on rastrigin(5): {}",
@@ -179,14 +181,14 @@ fn dfo_golden_hash() {
     };
     let p = CmaParams::standard(6, 0.8, 6_000, -1.0);
     let mut f = |x: &[f64]| rosenbrock(x);
-    let rep = cmaes(&mut f, &vec![0.1; 6], &p, 99);
+    let rep = cmaes(&mut f, &[0.1; 6], &p, 99);
     feed(rep.f_best);
     feed(rep.sigma);
     for &v in &rep.x_best {
         feed(v);
     }
     let mut g = |x: &[f64]| ellipsoid(x);
-    let rep2 = cmaes(&mut g, &vec![1.0; 6], &p, 100);
+    let rep2 = cmaes(&mut g, &[1.0; 6], &p, 100);
     feed(rep2.f_best);
     let mut h = |x: &[f64]| rosenbrock(x);
     let (xnm, fnm, _) = nelder_mead(&mut h, &[0.3, -0.2], 0.2, 2_000, -1.0);
