@@ -26,6 +26,7 @@ pub use assembly::{incidence_to_csr, stiffness};
 pub use betti::{betti_numbers, integer_rank};
 pub use cochain::{Cochain, cell_count};
 pub use fixtures::{kuhn_cube, on_unit_cube_boundary, single_tet, two_tets};
+pub use highorder::derham::TensorDeRham;
 pub use highorder::hex::{TensorSpace, pcg_matfree};
 pub use highorder::quad1d::{element_matrices, gauss_legendre, legendre, lobatto_shapes};
 pub use hodge::{galerkin_star, hodge_diagonal_barycentric};

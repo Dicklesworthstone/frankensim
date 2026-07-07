@@ -67,6 +67,15 @@ checkerboarding structurally instead of by stabilization folklore.
   1D reference operators, exact Kronecker Jacobi diagonal,
   tensor-quadrature load and L2 error, and `pcg_matfree` (P6: never
   assemble what we can apply).
+- `highorder::derham::TensorDeRham` — the full tensor de Rham complex
+  (slice 2): C_r/D_{r−1} 1D factor pair (Lobatto/Legendre; derivative
+  operator G in closed form via the integrated-Legendre identity,
+  Legendre mass DIAGONAL), Kronecker-assembled grad/curl/div between
+  the component spaces E = ((D,C,C),…), F = ((C,D,D),…), W = (D,D,D);
+  curl∘grad and div∘curl vanish to machine cancellation (tested);
+  canonical commuting projections π_C (endpoint values + derivative
+  Legendre moments) and π_D (Legendre coefficients) with
+  d∘π_C = π_D∘d by construction.
 
 ## Invariants
 
@@ -144,6 +153,14 @@ matrix-free Jacobi-PCG path with slope gates ≥ r + 0.6 for r = 1..6
 `tests/ho_probe.rs`: per-mode convergence regression — the diagnosis
 that single-cell symmetric fixtures superconverge at even r (a metric
 trap, so MMS ladders start at m ≥ 2).
+`tests/derham_battery.rs` (slice 2): curl∘grad and div∘curl ≤ 1e−13
+relative on four (m, r) fixtures; exact-sequence dimensions
+(χ = 1 for m = 1..3 × r = 1..6); commuting diagram 1D
+(G·π_C f = π_D f′ ≤ 1e−11) and 3D on product fields; projection
+G1 ladders for both 1D families at r = 1..6 (C: order ≥ r + 0.6
+gate, measured ≈ r + 1; D: ≥ r − 0.4 gate, measured ≈ r) — these
+drive all four 3D tensor space types' rates; Legendre mass closed
+form; its own golden hash.
 
 ## No-claim boundaries
 
@@ -153,11 +170,13 @@ trap, so MMS ladders start at m ≥ 2).
   machinery would be a certificate without evidence. Follow-up scope
   together with mesh quality certificates.
 - Simplicial families remain LOWEST order (P_r Λᵏ on tets for r > 1
-  is tfz.6's remaining scope). The tensor-product side now covers H¹
-  (slice 1); H(curl)/H(div)/L² tensor families, the commuting diagram
-  at high order, unstructured-hex orientation, and the ≥30%-peak perf
-  gate are tfz.6's later slices. `HexComplex` incidence is still not
-  consumed (structured grids build their own lattice).
+  is tfz.6's remaining scope). The tensor-product side now covers all
+  four space types with exact derivatives and the commuting diagram
+  (slices 1–2); full 3D VECTOR MMS solves (curl-curl, mixed Poisson)
+  need the solver stack (tfz.10) — projection G1 ladders stand in,
+  honestly labeled. Unstructured-hex orientation and the ≥30%-peak
+  perf gate are tfz.6's later slices. `HexComplex` incidence is still
+  not consumed (structured grids build their own lattice).
 - MMS covers the PRIMAL Poisson form; the mixed-form MMS (flux
   variable through M₂/d₂) joins the solver-stack lane (tfz.10) where
   saddle-point solvers live.
