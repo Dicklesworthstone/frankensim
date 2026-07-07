@@ -60,14 +60,23 @@ fn inject_1d(m: usize, rc: usize, rf: usize) -> Vec<usize> {
 }
 
 /// Fixed-iteration power method for λ_max of the Jacobi-scaled masked
-/// operator (deterministic start, 20 iterations, 10% safety margin).
+/// operator (deterministic OSCILLATORY start — the top eigenvector is
+/// grid-oscillatory, so a smooth start converges slowly and
+/// UNDERESTIMATES, which Chebyshev punishes by amplifying above-band
+/// modes; 40 iterations, 20% safety margin).
 fn lambda_max(space: &TensorSpace, mask: &[bool], diag: &[f64]) -> f64 {
     let n = space.ndof();
     let mut v: Vec<f64> = (0..n)
-        .map(|i| if mask[i] { 1.0 + (i % 7) as f64 / 7.0 } else { 0.0 })
+        .map(|i| {
+            if mask[i] {
+                (if i % 2 == 0 { 1.0 } else { -1.0 }) * (1.0 + (i % 7) as f64 / 7.0)
+            } else {
+                0.0
+            }
+        })
         .collect();
     let mut lam = 1.0f64;
-    for _ in 0..20 {
+    for _ in 0..40 {
         let mut av = space.apply_stiffness(&v);
         for i in 0..n {
             av[i] = if mask[i] { av[i] / diag[i] } else { 0.0 };
@@ -78,7 +87,7 @@ fn lambda_max(space: &TensorSpace, mask: &[bool], diag: &[f64]) -> f64 {
             *vi = ai / norm;
         }
     }
-    lam * 1.1
+    lam * 1.2
 }
 
 impl PMultigrid {
