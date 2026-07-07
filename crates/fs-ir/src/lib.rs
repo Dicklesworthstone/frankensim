@@ -16,6 +16,7 @@
 //!
 //! Layer: L6 (HELM). Runtime deps: `std` + fs-qty.
 
+pub mod admission;
 pub mod ast;
 pub mod json;
 pub mod lower;

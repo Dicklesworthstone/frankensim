@@ -1,0 +1,788 @@
+//! STATIC ADMISSION (plan §11.1, the gp3.5 bead): before anything
+//! executes, the study passes admission — an ill-typed study is rejected
+//! in MILLISECONDS with a structured, spans-attached diagnosis and RANKED
+//! FIXES, not discovered at hour six.
+//!
+//! Six dimensions, each timed: the Five Explicits (structure), dimensional
+//! analysis (fs-qty dims through the expression graph), chart routability
+//! (the Rep Router as an admission predicate), budget feasibility (learned
+//! fs-plan cost models with cost-derived fix estimates), capability
+//! sufficiency (session token globs), and regime gating (fs-regime
+//! reports; `(assert (regime.allows …))` is enforced, and `flux.*` verbs
+//! are checked against the report's model verdicts).
+
+use crate::ast::{CountUnit, Node, NodeKind, Span};
+use crate::study::Study;
+use fs_geom::{CostOracle, RouteRequest, Router};
+use fs_plan::CostModel;
+use fs_qty::Dims;
+use fs_regime::RegimeReport;
+use std::collections::BTreeMap;
+use std::fmt::Write as _;
+use std::time::Instant;
+
+/// Finding severity: `Reject` blocks admission, `Warn` admits with notice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Severity {
+    /// Advisory; the study still admits.
+    Warn,
+    /// Blocks admission.
+    Reject,
+}
+
+/// One ranked, actionable fix.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RankedFix {
+    /// What to change, concretely.
+    pub action: String,
+    /// Predicted total wall after the fix (cost-model-derived), if known.
+    pub predicted_wall_s: Option<f64>,
+    /// The QoI/accuracy consequence, stated honestly.
+    pub qoi_impact: String,
+}
+
+/// One admission finding.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Finding {
+    /// Which admission dimension produced it.
+    pub check: &'static str,
+    /// Reject or Warn.
+    pub severity: Severity,
+    /// The source span the finding points at.
+    pub span: Span,
+    /// The diagnosis.
+    pub what: String,
+    /// Ranked fixes (best first).
+    pub fixes: Vec<RankedFix>,
+}
+
+/// The session's capability token (fs-session owns issuance; admission
+/// only checks sufficiency).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionCapability {
+    /// Granted operator globs (`flux.*`, `ascent.optimize`, …).
+    pub ops: Vec<String>,
+    /// Core grant.
+    pub cores: f64,
+    /// Memory grant in bytes.
+    pub mem_bytes: f64,
+    /// Wall grant in seconds.
+    pub wall_s: f64,
+}
+
+/// What to do when a solver choice violates the regime report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegimePolicy {
+    /// Violations reject.
+    Reject,
+    /// Violations warn (exploratory sessions).
+    Warn,
+}
+
+/// A chart-conversion requirement extracted by lowering (or declared by
+/// the caller): admission asks the Router whether a route exists.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChartRequirement {
+    /// Source chart kind.
+    pub from: String,
+    /// Destination chart kind.
+    pub to: String,
+    /// Reference magnitude for error grounding.
+    pub scale: f64,
+    /// Absolute error budget.
+    pub max_abs_error: f64,
+    /// Cost budget, seconds.
+    pub max_cost_s: f64,
+}
+
+/// Everything admission checks against.
+pub struct AdmissionContext<'a> {
+    /// The Rep Router and its cost oracle (chart feasibility).
+    pub router: Option<(&'a Router, &'a dyn CostOracle)>,
+    /// Conversion requirements to verify.
+    pub chart_requirements: Vec<ChartRequirement>,
+    /// Learned wall-cost models keyed by verb head.
+    pub cost_models: BTreeMap<String, CostModel>,
+    /// The session capability token.
+    pub capability: Option<SessionCapability>,
+    /// The regime report for the study's physics, when computed.
+    pub regime: Option<&'a RegimeReport>,
+    /// Violation policy for regime gating.
+    pub regime_policy: RegimePolicy,
+}
+
+/// Per-check timing (the milliseconds-class evidence).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckTiming {
+    /// Check name.
+    pub check: &'static str,
+    /// Elapsed microseconds.
+    pub micros: u128,
+}
+
+/// The admission verdict.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AdmissionReport {
+    /// Study name ("<unparsed>" when recognition failed).
+    pub study: String,
+    /// True iff no Reject findings.
+    pub admitted: bool,
+    /// All findings, deterministic order (check, then span).
+    pub findings: Vec<Finding>,
+    /// Per-check wall timings.
+    pub timings: Vec<CheckTiming>,
+}
+
+impl AdmissionReport {
+    /// A canonical, deterministic diagnosis rendering (logs + G0 test).
+    #[must_use]
+    pub fn diagnosis(&self) -> String {
+        let mut out = format!(
+            "admission {} for {:?}: {} finding(s)\n",
+            if self.admitted { "PASSED" } else { "REJECTED" },
+            self.study,
+            self.findings.len()
+        );
+        for f in &self.findings {
+            let _ = writeln!(
+                out,
+                "[{}] {} @{}..{}: {}",
+                f.check,
+                match f.severity {
+                    Severity::Warn => "warn",
+                    Severity::Reject => "REJECT",
+                },
+                f.span.start,
+                f.span.end,
+                f.what
+            );
+            for (rank, fix) in f.fixes.iter().enumerate() {
+                let wall = fix
+                    .predicted_wall_s
+                    .map_or(String::new(), |w| format!(" (predicted wall {w:.1}s)"));
+                let _ = writeln!(out, "  fix#{rank}: {}{wall} — {}", fix.action, fix.qoi_impact);
+            }
+        }
+        out
+    }
+}
+
+/// Run every admission dimension over a parsed study form.
+#[must_use]
+pub fn admit(node: &Node, cx: &AdmissionContext<'_>) -> AdmissionReport {
+    let mut findings: Vec<Finding> = Vec::new();
+    let mut timings = Vec::new();
+    let study = match Study::from_node(node) {
+        Ok(s) => s,
+        Err(e) => {
+            return AdmissionReport {
+                study: "<unparsed>".to_string(),
+                admitted: false,
+                findings: vec![Finding {
+                    check: "structure",
+                    severity: Severity::Reject,
+                    span: e.span,
+                    what: e.detail,
+                    fixes: vec![RankedFix {
+                        action: e.hint,
+                        predicted_wall_s: None,
+                        qoi_impact: "structural fix; no QoI impact".to_string(),
+                    }],
+                }],
+                timings,
+            };
+        }
+    };
+    let mut run = |name: &'static str,
+                   f: &mut dyn FnMut(&mut Vec<Finding>),
+                   findings: &mut Vec<Finding>| {
+        let t0 = Instant::now();
+        f(findings);
+        timings.push(CheckTiming {
+            check: name,
+            micros: t0.elapsed().as_micros(),
+        });
+    };
+    run("explicits", &mut |f| check_explicits(node, &study, cx, f), &mut findings);
+    run("dimensional", &mut |f| check_dimensional(&study, f), &mut findings);
+    run("budget", &mut |f| check_budget(&study, cx, f), &mut findings);
+    run("capability", &mut |f| check_capability(&study, cx, f), &mut findings);
+    run("charts", &mut |f| check_charts(cx, f), &mut findings);
+    run("regime", &mut |f| check_regime(&study, cx, f), &mut findings);
+    findings.sort_by(|a, b| a.check.cmp(b.check).then(a.span.start.cmp(&b.span.start)));
+    AdmissionReport {
+        study: study.name.to_string(),
+        admitted: !findings.iter().any(|f| f.severity == Severity::Reject),
+        findings,
+        timings,
+    }
+}
+
+fn reject(check: &'static str, span: Span, what: String, action: String) -> Finding {
+    Finding {
+        check,
+        severity: Severity::Reject,
+        span,
+        what,
+        fixes: vec![RankedFix {
+            action,
+            predicted_wall_s: None,
+            qoi_impact: "structural fix; no QoI impact".to_string(),
+        }],
+    }
+}
+
+// ------------------------------------------------------- Five Explicits
+
+fn check_explicits(
+    node: &Node,
+    study: &Study<'_>,
+    cx: &AdmissionContext<'_>,
+    out: &mut Vec<Finding>,
+) {
+    if study.seed.is_none() {
+        out.push(reject(
+            "explicits",
+            node.span,
+            "the seed pillar is missing".to_string(),
+            "add (seed 0x…) — every stochastic draw keys off it".to_string(),
+        ));
+    }
+    match study.versions {
+        None => out.push(reject(
+            "explicits",
+            node.span,
+            "the versions pillar is missing".to_string(),
+            "add (versions (constellation :lock \"…\"))".to_string(),
+        )),
+        Some(v) if study.constellation_lock().is_none() => out.push(reject(
+            "explicits",
+            v.span,
+            "versions clause carries no constellation lock".to_string(),
+            "pin (constellation :lock \"YYYY-MM\") inside (versions …)".to_string(),
+        )),
+        Some(_) => {}
+    }
+    if study.budget.is_none() {
+        out.push(reject(
+            "explicits",
+            node.span,
+            "the budget pillar is missing".to_string(),
+            "add (budget (wall …) (mem …) …) or a qoi-precision budget".to_string(),
+        ));
+    }
+    // Capabilities: satisfied by a session token OR an explicit clause.
+    if study.capability.is_none() && cx.capability.is_none() {
+        out.push(reject(
+            "explicits",
+            node.span,
+            "no capability grant: neither a session token nor a (capability …) clause"
+                .to_string(),
+            "attach the session's capability token to admission, or declare \
+             (capability :cores … :mem … :wall … :ops (…))"
+                .to_string(),
+        ));
+    }
+}
+
+// ---------------------------------------------------------- dimensional
+
+const ARITH_SAME_DIMS: &[&str] = &["+", "-", "min", "max"];
+const COMPARE: &[&str] = &["=", "<", ">", "<=", ">="];
+
+fn infer_dims(
+    node: &Node,
+    env: &BTreeMap<&str, Option<Dims>>,
+    out: &mut Vec<Finding>,
+) -> Option<Dims> {
+    match &node.kind {
+        NodeKind::Int(_) | NodeKind::Float(_) => Some(Dims::NONE),
+        NodeKind::Qty { dims, .. } => Some(*dims),
+        NodeKind::Symbol(s) => env.get(s.as_str()).copied().flatten(),
+        NodeKind::Count { .. }
+        | NodeKind::Seed(_)
+        | NodeKind::Str(_)
+        | NodeKind::Keyword(_) => None,
+        NodeKind::List(items) => {
+            let head = node.head();
+            let args = &items[1..];
+            if let Some(h) = head
+                && (ARITH_SAME_DIMS.contains(&h) || COMPARE.contains(&h))
+            {
+                let mut known: Option<(Dims, Span)> = None;
+                for a in args {
+                    let d = infer_dims(a, env, out);
+                    if let Some(d) = d {
+                        match known {
+                            None => known = Some((d, a.span)),
+                            Some((expect, first_span)) if expect != d => {
+                                out.push(Finding {
+                                    check: "dimensional",
+                                    severity: Severity::Reject,
+                                    span: a.span,
+                                    what: format!(
+                                        "({h} …): operand dims {:?} disagree with {:?} \
+                                         (first operand at {}..{})",
+                                        d.0, expect.0, first_span.start, first_span.end
+                                    ),
+                                    fixes: vec![RankedFix {
+                                        action: format!(
+                                            "express both operands of ({h} …) in the same \
+                                             physical dimensions"
+                                        ),
+                                        predicted_wall_s: None,
+                                        qoi_impact: "unit error; the study is meaningless \
+                                                     until fixed"
+                                            .to_string(),
+                                    }],
+                                });
+                            }
+                            Some(_) => {}
+                        }
+                    }
+                }
+                return if COMPARE.contains(&head.unwrap_or_default()) {
+                    Some(Dims::NONE)
+                } else {
+                    known.map(|(d, _)| d)
+                };
+            }
+            if head == Some("*") || head == Some("/") {
+                let mut acc = Dims::NONE;
+                let mut all_known = true;
+                for (i, a) in args.iter().enumerate() {
+                    match infer_dims(a, env, out) {
+                        Some(d) => {
+                            acc = if head == Some("/") && i > 0 {
+                                acc.minus(d)
+                            } else {
+                                acc.plus(d)
+                            };
+                        }
+                        None => all_known = false,
+                    }
+                }
+                return all_known.then_some(acc);
+            }
+            // Unknown verb: recurse for nested errors, result unknown.
+            for a in args {
+                let _ = infer_dims(a, env, out);
+            }
+            None
+        }
+    }
+}
+
+fn check_dimensional(study: &Study<'_>, out: &mut Vec<Finding>) {
+    let mut env: BTreeMap<&str, Option<Dims>> = BTreeMap::new();
+    for (name, expr) in &study.lets {
+        let d = infer_dims(expr, &env, out);
+        env.insert(name, d);
+    }
+    for clause in &study.body {
+        let _ = infer_dims(clause, &env, out);
+    }
+}
+
+// --------------------------------------------------------------- budget
+
+fn qty_seconds(node: &Node) -> Option<f64> {
+    if let NodeKind::Qty { value, dims, .. } = &node.kind
+        && *dims == Dims([0, 0, 1, 0, 0])
+    {
+        return Some(*value);
+    }
+    None
+}
+
+fn count_bytes(node: &Node) -> Option<f64> {
+    if let NodeKind::Count { value, unit } = &node.kind {
+        let factor = match unit {
+            CountUnit::B => 1.0,
+            CountUnit::KiB => 1024.0,
+            CountUnit::MiB => 1024.0 * 1024.0,
+            CountUnit::GiB => 1024.0 * 1024.0 * 1024.0,
+            CountUnit::Cores => return None,
+        };
+        return Some(value * factor);
+    }
+    None
+}
+
+/// The declared wall budget: `(budget (wall 2h) …)`, else the capability
+/// clause's `:wall`, else the session token's grant.
+fn wall_budget_s(study: &Study<'_>, cx: &AdmissionContext<'_>) -> Option<f64> {
+    if let Some(budget) = study.budget
+        && let Some(items) = budget.items()
+    {
+        for clause in items {
+            if clause.head() == Some("wall")
+                && let Some(w) = clause.items().and_then(|i| i.get(1)).and_then(qty_seconds)
+            {
+                return Some(w);
+            }
+        }
+    }
+    if let Some(cap) = study.capability
+        && let Some(items) = cap.items()
+    {
+        for pair in items.windows(2) {
+            if let NodeKind::Keyword(k) = &pair[0].kind
+                && k == "wall"
+                && let Some(w) = qty_seconds(&pair[1])
+            {
+                return Some(w);
+            }
+        }
+    }
+    cx.capability.as_ref().map(|c| c.wall_s)
+}
+
+/// Size feature for a verb call: `:dof`/`:size`/`:modes` argument, else 1.
+fn size_of_call(items: &[Node]) -> f64 {
+    for pair in items.windows(2) {
+        if let NodeKind::Keyword(k) = &pair[0].kind
+            && (k == "dof" || k == "size" || k == "modes")
+        {
+            match &pair[1].kind {
+                NodeKind::Int(i) => return *i as f64,
+                NodeKind::Float(f) => return *f,
+                _ => {}
+            }
+        }
+    }
+    1.0
+}
+
+/// Collect (verb, size, span) for every modeled call in the tree.
+fn modeled_calls<'a>(
+    node: &'a Node,
+    models: &BTreeMap<String, CostModel>,
+    out: &mut Vec<(&'a str, f64, Span)>,
+) {
+    if let NodeKind::List(items) = &node.kind {
+        if let Some(h) = node.head()
+            && models.contains_key(h)
+        {
+            out.push((h, size_of_call(items), node.span));
+        }
+        for child in items {
+            modeled_calls(child, models, out);
+        }
+    }
+}
+
+fn check_budget(study: &Study<'_>, cx: &AdmissionContext<'_>, out: &mut Vec<Finding>) {
+    let Some(wall) = wall_budget_s(study, cx) else {
+        return; // qoi-precision-only budgets carry no wall bound to screen
+    };
+    let mut calls = Vec::new();
+    for (_, expr) in &study.lets {
+        modeled_calls(expr, &cx.cost_models, &mut calls);
+    }
+    for clause in &study.body {
+        modeled_calls(clause, &cx.cost_models, &mut calls);
+    }
+    if calls.is_empty() {
+        return;
+    }
+    let predict = |verb: &str, size: f64| -> Option<f64> {
+        cx.cost_models
+            .get(verb)
+            .and_then(|m| m.predict(size).ok())
+            .map(|p| p.p90)
+    };
+    let mut total = 0.0f64;
+    let mut costed: Vec<(&str, f64, f64, Span)> = Vec::new();
+    for (verb, size, span) in &calls {
+        if let Some(p90) = predict(verb, *size) {
+            total += p90;
+            costed.push((verb, *size, p90, *span));
+        }
+    }
+    if total <= wall {
+        return;
+    }
+    // BudgetInfeasible with RANKED, cost-model-derived fixes (§11.3).
+    costed.sort_by(|a, b| b.2.total_cmp(&a.2));
+    let mut fixes = Vec::new();
+    if let Some((verb, size, p90, _)) = costed.first() {
+        if let Some(halved) = predict(verb, size / 2.0) {
+            fixes.push(RankedFix {
+                action: format!("coarsen {verb}: halve its size feature ({size} -> {})", size / 2.0),
+                predicted_wall_s: Some(total - p90 + halved),
+                qoi_impact: "resolution halves; the verb's error model governs the \
+                             QoI degradation"
+                    .to_string(),
+            });
+        }
+        fixes.push(RankedFix {
+            action: format!("surrogate-screen {verb} (evaluate candidates on the surrogate, \
+                             verify winners at full fidelity)"),
+            predicted_wall_s: Some(total - p90 + 0.2 * p90),
+            qoi_impact: "screening decisions carry surrogate error; final verdicts are \
+                         re-verified"
+                .to_string(),
+        });
+    }
+    fixes.push(RankedFix {
+        action: format!("relax the wall budget to {:.0}s", (total * 1.2).ceil()),
+        predicted_wall_s: Some(total),
+        qoi_impact: "no QoI impact; costs more wall".to_string(),
+    });
+    fixes.sort_by(|a, b| {
+        a.predicted_wall_s
+            .unwrap_or(f64::INFINITY)
+            .total_cmp(&b.predicted_wall_s.unwrap_or(f64::INFINITY))
+    });
+    let span = costed.first().map_or(Span::default(), |c| c.3);
+    out.push(Finding {
+        check: "budget",
+        severity: Severity::Reject,
+        span,
+        what: format!(
+            "BudgetInfeasible: predicted p90 wall {total:.1}s exceeds the {wall:.1}s bound \
+             ({} modeled op(s))",
+            costed.len()
+        ),
+        fixes,
+    });
+}
+
+// ----------------------------------------------------------- capability
+
+fn glob_matches(pattern: &str, verb: &str) -> bool {
+    pattern.strip_suffix('*').map_or(pattern == verb, |prefix| verb.starts_with(prefix))
+}
+
+fn namespaced_verbs<'a>(node: &'a Node, out: &mut Vec<(&'a str, Span)>) {
+    if let NodeKind::List(items) = &node.kind {
+        if let Some(h) = node.head()
+            && h.contains('.')
+        {
+            out.push((h, node.span));
+        }
+        for child in items {
+            namespaced_verbs(child, out);
+        }
+    }
+}
+
+fn check_capability(study: &Study<'_>, cx: &AdmissionContext<'_>, out: &mut Vec<Finding>) {
+    let Some(token) = &cx.capability else {
+        return; // absence handled by the explicits check
+    };
+    let mut verbs = Vec::new();
+    for (_, expr) in &study.lets {
+        namespaced_verbs(expr, &mut verbs);
+    }
+    for clause in &study.body {
+        namespaced_verbs(clause, &mut verbs);
+    }
+    for (verb, span) in verbs {
+        if !token.ops.iter().any(|p| glob_matches(p, verb)) {
+            out.push(Finding {
+                check: "capability",
+                severity: Severity::Reject,
+                span,
+                what: format!("operator {verb} is outside the session token's grants"),
+                fixes: vec![RankedFix {
+                    action: format!(
+                        "request a token covering {}.* or remove the {verb} op",
+                        verb.split('.').next().unwrap_or(verb)
+                    ),
+                    predicted_wall_s: None,
+                    qoi_impact: "capability change; no QoI impact".to_string(),
+                }],
+            });
+        }
+    }
+    // Declared asks must fit inside the token.
+    if let Some(cap) = study.capability
+        && let Some(items) = cap.items()
+    {
+        for pair in items.windows(2) {
+            let NodeKind::Keyword(k) = &pair[0].kind else {
+                continue;
+            };
+            let over = match k.as_str() {
+                "cores" => match &pair[1].kind {
+                    NodeKind::Int(i) => (*i as f64 > token.cores)
+                        .then(|| format!("{i} cores asked, {} granted", token.cores)),
+                    NodeKind::Count {
+                        value,
+                        unit: CountUnit::Cores,
+                    } => (*value > token.cores)
+                        .then(|| format!("{value} cores asked, {} granted", token.cores)),
+                    _ => None,
+                },
+                "mem" => count_bytes(&pair[1]).and_then(|b| {
+                    (b > token.mem_bytes).then(|| {
+                        format!("{:.0} MiB asked, {:.0} MiB granted", b / 1048576.0, token.mem_bytes / 1048576.0)
+                    })
+                }),
+                "wall" => qty_seconds(&pair[1]).and_then(|w| {
+                    (w > token.wall_s)
+                        .then(|| format!("{w:.0}s wall asked, {:.0}s granted", token.wall_s))
+                }),
+                _ => None,
+            };
+            if let Some(what) = over {
+                out.push(Finding {
+                    check: "capability",
+                    severity: Severity::Reject,
+                    span: pair[1].span,
+                    what: format!("capability ask exceeds the session token: {what}"),
+                    fixes: vec![RankedFix {
+                        action: "lower the ask or obtain a larger session token".to_string(),
+                        predicted_wall_s: None,
+                        qoi_impact: "resource change; no QoI impact".to_string(),
+                    }],
+                });
+            }
+        }
+    }
+}
+
+// --------------------------------------------------------------- charts
+
+fn check_charts(cx: &AdmissionContext<'_>, out: &mut Vec<Finding>) {
+    if cx.chart_requirements.is_empty() {
+        return;
+    }
+    let Some((router, oracle)) = cx.router else {
+        out.push(Finding {
+            check: "charts",
+            severity: Severity::Warn,
+            span: Span::default(),
+            what: format!(
+                "{} chart requirement(s) declared but no Router attached — feasibility \
+                 unverified",
+                cx.chart_requirements.len()
+            ),
+            fixes: vec![RankedFix {
+                action: "attach the Rep Router (and cost oracle) to the admission context"
+                    .to_string(),
+                predicted_wall_s: None,
+                qoi_impact: "verification gap only".to_string(),
+            }],
+        });
+        return;
+    };
+    for req in &cx.chart_requirements {
+        let request = RouteRequest {
+            from: req.from.clone(),
+            to: req.to.clone(),
+            scale: req.scale,
+            max_abs_error: req.max_abs_error,
+            max_cost_s: req.max_cost_s,
+        };
+        if let Err(refusal) = router.plan(&request, oracle) {
+            out.push(Finding {
+                check: "charts",
+                severity: Severity::Reject,
+                span: Span::default(),
+                what: format!("no conversion route {} -> {}: {refusal}", req.from, req.to),
+                fixes: refusal
+                    .fixes
+                    .iter()
+                    .map(|f| RankedFix {
+                        action: f.clone(),
+                        predicted_wall_s: refusal.best_cost_s,
+                        qoi_impact: refusal.best_abs_error.map_or_else(
+                            || "route feasibility change".to_string(),
+                            |e| format!("best achievable composed error {e:.3e}"),
+                        ),
+                    })
+                    .collect(),
+            });
+        }
+    }
+}
+
+// --------------------------------------------------------------- regime
+
+fn regime_asserts<'a>(node: &'a Node, out: &mut Vec<(&'a str, Span)>) {
+    if let NodeKind::List(items) = &node.kind {
+        if node.head() == Some("assert")
+            && let Some(inner) = items.get(1)
+            && inner.head() == Some("regime.allows")
+            && let Some(model) = inner.items().and_then(|i| i.get(1))
+            && let NodeKind::Symbol(name) = &model.kind
+        {
+            out.push((name, inner.span));
+        }
+        for child in items {
+            regime_asserts(child, out);
+        }
+    }
+}
+
+fn check_regime(study: &Study<'_>, cx: &AdmissionContext<'_>, out: &mut Vec<Finding>) {
+    let severity = match cx.regime_policy {
+        RegimePolicy::Reject => Severity::Reject,
+        RegimePolicy::Warn => Severity::Warn,
+    };
+    // Explicit asserts + flux.* solver verbs both face the report.
+    let mut asks: Vec<(&str, Span)> = Vec::new();
+    let mut verbs = Vec::new();
+    for (_, expr) in &study.lets {
+        regime_asserts(expr, &mut asks);
+        namespaced_verbs(expr, &mut verbs);
+    }
+    for clause in &study.body {
+        regime_asserts(clause, &mut asks);
+        namespaced_verbs(clause, &mut verbs);
+    }
+    asks.extend(verbs.into_iter().filter(|(v, _)| v.starts_with("flux.")));
+    if asks.is_empty() {
+        return;
+    }
+    let Some(report) = cx.regime else {
+        out.push(Finding {
+            check: "regime",
+            severity: Severity::Warn,
+            span: asks[0].1,
+            what: "solver choices present but no RegimeReport attached — regime validity \
+                   unverified"
+                .to_string(),
+            fixes: vec![RankedFix {
+                action: "run fs_regime::assess over the study's physical inputs and attach \
+                         the report"
+                    .to_string(),
+                predicted_wall_s: None,
+                qoi_impact: "verification gap only".to_string(),
+            }],
+        });
+        return;
+    };
+    for (model, span) in asks {
+        if report.valid_models.iter().any(|m| m == model) {
+            continue;
+        }
+        if let Some((_, reason)) = report.invalid_models.iter().find(|(m, _)| m == model) {
+            let mut fixes: Vec<RankedFix> = report
+                .valid_models
+                .iter()
+                .map(|alt| RankedFix {
+                    action: format!("switch to {alt} (valid in this regime)"),
+                    predicted_wall_s: None,
+                    qoi_impact: "model change inside the validity domain".to_string(),
+                })
+                .collect();
+            fixes.truncate(3);
+            out.push(Finding {
+                check: "regime",
+                severity,
+                span,
+                what: format!(
+                    "{model} is outside its validity domain here ({reason}); dominant \
+                     balance: {}",
+                    report.dominant_balance
+                ),
+                fixes,
+            });
+        }
+        // Unknown to the registry: silence (cards land with their solvers).
+    }
+}
