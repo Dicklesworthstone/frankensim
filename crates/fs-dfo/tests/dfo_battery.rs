@@ -34,9 +34,7 @@ fn ellipsoid(x: &[f64]) -> f64 {
 fn rastrigin(x: &[f64]) -> f64 {
     let a = 10.0f64;
     x.iter()
-        .map(|&t| {
-            a + t.mul_add(t, -a * fs_math::det::cos(2.0 * std::f64::consts::PI * t))
-        })
+        .map(|&t| a + t.mul_add(t, -a * fs_math::det::cos(2.0 * std::f64::consts::PI * t)))
         .sum()
 }
 
@@ -44,18 +42,39 @@ fn rastrigin(x: &[f64]) -> f64 {
 fn benchmark_convergence() {
     // Sphere(10): trivial, fast.
     let mut f = |x: &[f64]| sphere(x);
-    let rep = cmaes(&mut f, &[3.0; 10], &CmaParams::standard(10, 2.0, 20_000, 1e-10), 1);
+    let rep = cmaes(
+        &mut f,
+        &[3.0; 10],
+        &CmaParams::standard(10, 2.0, 20_000, 1e-10),
+        1,
+    );
     assert!(rep.converged, "sphere must converge: {rep:?}");
     // Rosenbrock(10): the classic valley.
     let mut f = |x: &[f64]| rosenbrock(x);
-    let rep =
-        cmaes(&mut f, &[0.0; 10], &CmaParams::standard(10, 0.5, 120_000, 1e-8), 2);
-    assert!(rep.converged, "rosenbrock(10) must converge: evals {}", rep.evals);
+    let rep = cmaes(
+        &mut f,
+        &[0.0; 10],
+        &CmaParams::standard(10, 0.5, 120_000, 1e-8),
+        2,
+    );
+    assert!(
+        rep.converged,
+        "rosenbrock(10) must converge: evals {}",
+        rep.evals
+    );
     // Ellipsoid(10) at condition 1e6: adaptation must handle it.
     let mut f = |x: &[f64]| ellipsoid(x);
-    let rep =
-        cmaes(&mut f, &[1.0; 10], &CmaParams::standard(10, 1.0, 120_000, 1e-8), 3);
-    assert!(rep.converged, "ellipsoid must converge: evals {}", rep.evals);
+    let rep = cmaes(
+        &mut f,
+        &[1.0; 10],
+        &CmaParams::standard(10, 1.0, 120_000, 1e-8),
+        3,
+    );
+    assert!(
+        rep.converged,
+        "ellipsoid must converge: evals {}",
+        rep.evals
+    );
     println!(
         "{{\"suite\":\"fs-dfo\",\"case\":\"benchmarks\",\"verdict\":\"pass\",\"detail\":\"sphere/rosenbrock/ellipsoid(cond 1e6) all to target\"}}"
     );
@@ -63,20 +82,33 @@ fn benchmark_convergence() {
 
 #[test]
 fn deterministic_evolution_from_seed() {
+    // Budget SHORT of convergence: at full convergence every seed lands
+    // on the exact minimum (f = +0.0 bits) and cross-seed comparisons go
+    // vacuous — measured during bring-up.
     let mut f1 = |x: &[f64]| rosenbrock(x);
     let mut f2 = |x: &[f64]| rosenbrock(x);
-    let p = CmaParams::standard(6, 0.5, 8_000, -1.0); // run full budget
+    let p = CmaParams::standard(6, 0.5, 1_500, -1.0);
     let r1 = cmaes(&mut f1, &[0.2; 6], &p, 42);
     let r2 = cmaes(&mut f2, &[0.2; 6], &p, 42);
-    assert_eq!(r1.f_best.to_bits(), r2.f_best.to_bits(), "same seed → same bits");
+    assert_eq!(
+        r1.f_best.to_bits(),
+        r2.f_best.to_bits(),
+        "same seed → same bits"
+    );
     assert_eq!(r1.evals, r2.evals);
     for (a, b) in r1.x_best.iter().zip(&r2.x_best) {
         assert_eq!(a.to_bits(), b.to_bits());
     }
-    // Different seed → different trajectory (sanity that seeding matters).
+    // Different seed → different mid-flight trajectory.
     let mut f3 = |x: &[f64]| rosenbrock(x);
     let r3 = cmaes(&mut f3, &[0.2; 6], &p, 43);
-    assert_ne!(r1.f_best.to_bits(), r3.f_best.to_bits());
+    assert!(
+        r1.x_best
+            .iter()
+            .zip(&r3.x_best)
+            .any(|(a, b)| a.to_bits() != b.to_bits()),
+        "different seeds must explore differently mid-flight"
+    );
 }
 
 #[test]
@@ -84,7 +116,13 @@ fn monotone_transform_invariance_is_bitwise() {
     // Rank-based selection sees only the ORDER of fitness values: any
     // strictly monotone transform of f must give the IDENTICAL evolution
     // — the IGO invariance, tested bitwise on the search trajectory.
-    let p = CmaParams::standard(5, 0.7, 6_000, -1.0);
+    // Budget kept SHORT of deep convergence: near machine precision the
+    // transforms stop being injective in f64 (x³ underflows below
+    // ~1e-108, exp(x) saturates to 1.0 below ~1e-16), which creates
+    // ties the plain objective does not have — measured during bring-up.
+    // Strict monotonicity at the RESOLUTION OF THE SAMPLES is the real
+    // precondition, and it holds on this budget.
+    let p = CmaParams::standard(5, 0.7, 800, -1.0);
     let mut plain = |x: &[f64]| sphere(x);
     let r_plain = cmaes(&mut plain, &[1.5; 5], &p, 7);
     // exp is strictly monotone; sphere ≥ 0 so cube is monotone there too.
@@ -100,7 +138,11 @@ fn monotone_transform_invariance_is_bitwise() {
     let mut cubef = |x: &[f64]| sphere(x).powi(3);
     let r_cube = cmaes(&mut cubef, &[1.5; 5], &p, 7);
     for (a, b) in r_plain.x_best.iter().zip(&r_cube.x_best) {
-        assert_eq!(a.to_bits(), b.to_bits(), "cube transform must not change it either");
+        assert_eq!(
+            a.to_bits(),
+            b.to_bits(),
+            "cube transform must not change it either"
+        );
     }
     println!(
         "{{\"suite\":\"fs-dfo\",\"case\":\"igo-invariance\",\"verdict\":\"pass\",\"detail\":\"exp/cube monotone transforms: bitwise-identical trajectories\"}}"
@@ -124,7 +166,11 @@ fn translation_equivariance() {
     let rs = cmaes(&mut fs, &start, &p, 11);
     assert!(r0.converged && rs.converged);
     for (got, want) in rs.x_best.iter().zip(&shift) {
-        assert!((got - want).abs() < 1e-4, "shifted optimum: {:?}", rs.x_best);
+        assert!(
+            (got - want).abs() < 1e-4,
+            "shifted optimum: {:?}",
+            rs.x_best
+        );
     }
 }
 
@@ -157,7 +203,10 @@ fn bipop_solves_multimodal_and_reports_schedule() {
 fn nelder_mead_polishes() {
     let mut f = |x: &[f64]| rosenbrock(x);
     let (x, fv, evals) = nelder_mead(&mut f, &[0.8, 0.6], 0.1, 5_000, 1e-12);
-    assert!(fv < 1e-10, "NM must polish rosenbrock(2): f={fv:.2e} after {evals} evals");
+    assert!(
+        fv < 1e-10,
+        "NM must polish rosenbrock(2): f={fv:.2e} after {evals} evals"
+    );
     assert!((x[0] - 1.0).abs() < 1e-4 && (x[1] - 1.0).abs() < 1e-4);
     // Fully deterministic: identical reruns bitwise.
     let mut g = |x: &[f64]| rosenbrock(x);
@@ -168,7 +217,7 @@ fn nelder_mead_polishes() {
 }
 
 /// Recorded on aarch64-apple (M4 Pro); must match on x86-64 (trj).
-const GOLDEN_HASH: u64 = 0x0; // placeholder: set from first run
+const GOLDEN_HASH: u64 = 0x5441_10a6_afb1_70a1; // bumped: TolFun stagnation criterion added (semantic change)
 
 #[test]
 fn dfo_golden_hash() {

@@ -37,7 +37,13 @@ impl CmaParams {
     #[must_use]
     pub fn standard(n: usize, sigma0: f64, max_evals: usize, f_target: f64) -> CmaParams {
         let lambda = 4 + (3.0 * fs_math::det::ln(n as f64)).floor() as usize;
-        CmaParams { lambda, sigma0, max_evals, f_target, eigen_interval: 1 }
+        CmaParams {
+            lambda,
+            sigma0,
+            max_evals,
+            f_target,
+            eigen_interval: 1,
+        }
     }
 }
 
@@ -74,8 +80,7 @@ pub fn cmaes<F: FnMut(&[f64]) -> f64>(
     // Log-rank recombination weights (Hansen standard).
     let raw: Vec<f64> = (0..mu)
         .map(|i| {
-            fs_math::det::ln(f64::midpoint(lambda as f64, 1.0))
-                - fs_math::det::ln(i as f64 + 1.0)
+            fs_math::det::ln(f64::midpoint(lambda as f64, 1.0)) - fs_math::det::ln(i as f64 + 1.0)
         })
         .collect();
     let wsum: f64 = raw.iter().sum();
@@ -86,14 +91,11 @@ pub fn cmaes<F: FnMut(&[f64]) -> f64>(
     let cc = (4.0 + mu_eff / nf) / (nf + 4.0 + 2.0 * mu_eff / nf);
     let cs = (mu_eff + 2.0) / (nf + mu_eff + 5.0);
     let c1 = 2.0 / ((nf + 1.3) * (nf + 1.3) + mu_eff);
-    let cmu = (1.0 - c1)
-        .min(2.0 * (mu_eff - 2.0 + 1.0 / mu_eff) / ((nf + 2.0) * (nf + 2.0) + mu_eff));
-    let damps = 1.0
-        + 2.0 * (fs_math::det::sqrt((mu_eff - 1.0) / (nf + 1.0)) - 1.0).max(0.0)
-        + cs;
+    let cmu =
+        (1.0 - c1).min(2.0 * (mu_eff - 2.0 + 1.0 / mu_eff) / ((nf + 2.0) * (nf + 2.0) + mu_eff));
+    let damps = 1.0 + 2.0 * (fs_math::det::sqrt((mu_eff - 1.0) / (nf + 1.0)) - 1.0).max(0.0) + cs;
     // E‖N(0,I)‖ (Hansen's approximation).
-    let chi_n = fs_math::det::sqrt(nf)
-        * (1.0 - 1.0 / (4.0 * nf) + 1.0 / (21.0 * nf * nf));
+    let chi_n = fs_math::det::sqrt(nf) * (1.0 - 1.0 / (4.0 * nf) + 1.0 / (21.0 * nf * nf));
 
     let mut mean = x0.to_vec();
     let mut sigma = params.sigma0;
@@ -106,12 +108,19 @@ pub fn cmaes<F: FnMut(&[f64]) -> f64>(
     // Eigen state: C = B·diag(d²)·Bᵀ; sqrt factors refreshed on cadence.
     let mut b_mat = cov.clone();
     let mut d_sqrt = vec![1.0f64; n];
-    let mut stream = StreamKey { seed, kernel: K_CMA, tile: 0 }.stream();
+    let mut stream = StreamKey {
+        seed,
+        kernel: K_CMA,
+        tile: 0,
+    }
+    .stream();
 
     let mut x_best = mean.clone();
     let mut f_best = f(&mean);
     let mut evals = 1usize;
     let mut generations = 0usize;
+    // TolFun stagnation: generations since a meaningful f_best improvement.
+    let mut gens_since_improve = 0usize;
 
     let mut zs: Vec<Vec<f64>> = vec![vec![0.0; n]; lambda];
     let mut ys: Vec<Vec<f64>> = vec![vec![0.0; n]; lambda];
@@ -149,14 +158,22 @@ pub fn cmaes<F: FnMut(&[f64]) -> f64>(
                 }
                 y[i] = acc;
             }
-            let x: Vec<f64> = mean.iter().zip(y.iter()).map(|(m, yi)| sigma.mul_add(*yi, *m)).collect();
+            let x: Vec<f64> = mean
+                .iter()
+                .zip(y.iter())
+                .map(|(m, yi)| sigma.mul_add(*yi, *m))
+                .collect();
             fitness[k] = f(&x);
             evals += 1;
             if fitness[k] < f_best {
+                if f_best - fitness[k] > 1e-12 * (1.0 + f_best.abs()) {
+                    gens_since_improve = 0;
+                }
                 f_best = fitness[k];
                 x_best = x;
             }
         }
+        gens_since_improve += 1;
         if f_best <= params.f_target {
             return CmaReport {
                 x_best,
@@ -207,9 +224,26 @@ pub fn cmaes<F: FnMut(&[f64]) -> f64>(
         let ps_norm = fs_math::det::sqrt(p_s.iter().map(|t| t * t).sum::<f64>());
         // Step-size update (the natural-gradient-consistent coupling).
         sigma *= fs_math::det::exp((cs / damps) * (ps_norm / chi_n - 1.0));
+        // STAGNATION STOP: once the search distribution has collapsed
+        // (σ·√λmax(C) negligible vs σ₀) the run is dead — keep sampling
+        // and it just burns budget polishing whatever basin it's in.
+        // BIPOP's restart ladder DEPENDS on dead runs terminating
+        // (measured during bring-up: without this, failed runs consumed
+        // their entire 120k budget at f ≈ 1 on rastrigin).
+        let spread = sigma * d_sqrt.iter().fold(0.0f64, |m, &d| m.max(d));
+        if spread < 1e-12 * params.sigma0 || gens_since_improve > 120 {
+            // TolX OR TolFun: σ-collapse alone fires too slowly inside a
+            // per-run budget (measured: a λ=150 local-basin run burned
+            // 120k evals with f stalled for hundreds of generations) —
+            // the f-stall criterion is what actually frees the budget.
+            break;
+        }
         // Rank-1 path with stall indicator h_σ.
         let h_sig = ps_norm
-            / fs_math::det::sqrt(1.0 - (1.0 - cs).powi(2 * i32::try_from(generations.min(100_000)).expect("generation count")))
+            / fs_math::det::sqrt(
+                1.0 - (1.0 - cs)
+                    .powi(2 * i32::try_from(generations.min(100_000)).expect("generation count")),
+            )
             < (1.4 + 2.0 / (nf + 1.0)) * chi_n;
         let ccn = fs_math::det::sqrt(cc * (2.0 - cc) * mu_eff);
         for i in 0..n {
@@ -232,7 +266,14 @@ pub fn cmaes<F: FnMut(&[f64]) -> f64>(
             }
         }
     }
-    CmaReport { x_best, f_best, evals, generations, converged: false, sigma }
+    CmaReport {
+        x_best,
+        f_best,
+        evals,
+        generations,
+        converged: false,
+        sigma,
+    }
 }
 
 /// BIPOP restart evidence.
@@ -268,24 +309,44 @@ pub fn bipop_cmaes<F: FnMut(&[f64]) -> f64>(
     let mut restart = 0u64;
     let mut small_budget_used = 0usize;
     let mut large_budget_used = 0usize;
+    // Deterministic restart-start perturbations (a restart from the SAME
+    // point with a tiny sigma is just a polish run and cannot escape a
+    // local basin — measured during bring-up on rastrigin).
+    let mut restart_stream = StreamKey {
+        seed,
+        kernel: K_CMA,
+        tile: 1,
+    }
+    .stream();
     while total_evals < total_budget {
         // BIPOP rule: run LARGE next if its cumulative budget lags.
         let run_large = large_budget_used <= small_budget_used;
         let lambda = if run_large {
             base_lambda * (1usize << large_runs)
         } else {
-            // Small run: random budget fraction, λ near default.
             base_lambda
         };
-        let budget = ((total_budget - total_evals) / 2).max(lambda * 20);
+        // Per-run budget scales with the population (≈250 generations):
+        // handing a small-λ run half the TOTAL budget just polishes one
+        // local minimum expensively — the doubling ladder must be reached
+        // (measured during bring-up on rastrigin).
+        let budget = (lambda * 250).min(total_budget - total_evals);
         let params = CmaParams {
             lambda,
-            sigma0: if run_large { sigma0 } else { sigma0 / 100.0 },
-            max_evals: budget.min(total_budget - total_evals),
+            sigma0,
+            max_evals: budget,
             f_target,
             eigen_interval: 1,
         };
-        let rep = cmaes(f, x0, &params, seed.wrapping_add(restart * 0x9E37_79B9));
+        // Restarts after the first launch from a perturbed start point.
+        let start: Vec<f64> = if restart == 0 {
+            x0.to_vec()
+        } else {
+            x0.iter()
+                .map(|&v| sigma0.mul_add(restart_stream.next_normal(), v))
+                .collect()
+        };
+        let rep = cmaes(f, &start, &params, seed.wrapping_add(restart * 0x9E37_79B9));
         total_evals += rep.evals;
         if run_large {
             large_budget_used += rep.evals;
@@ -302,9 +363,16 @@ pub fn bipop_cmaes<F: FnMut(&[f64]) -> f64>(
             break;
         }
         restart += 1;
-        if restart > 12 {
-            break; // hard cap on restarts
+        if large_runs > 8 {
+            // Cap the LADDER, not total restarts: small runs are cheap
+            // and interleave freely; counting them against the cap
+            // stalled the ladder at λ ≈ 64 (measured during bring-up).
+            break;
         }
     }
-    BipopReport { best: best.expect("at least one run"), schedule, total_evals }
+    BipopReport {
+        best: best.expect("at least one run"),
+        schedule,
+        total_evals,
+    }
 }
