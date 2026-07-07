@@ -380,9 +380,8 @@ pub fn evaluate(
         penalty: 0.0,
     };
     match &spec.kind {
-        ConstraintKind::Hard
-        | ConstraintKind::Fabrication { .. }
-        | ConstraintKind::Code { .. } => {}
+        ConstraintKind::Hard | ConstraintKind::Fabrication { .. } | ConstraintKind::Code { .. } => {
+        }
         ConstraintKind::Soft(law) => {
             ev.penalty = match *law {
                 PenaltyLaw::Quadratic { weight } => weight * violation * violation,
@@ -404,8 +403,7 @@ pub fn evaluate(
             let mut hits = 0u32;
             for s in 0..samples {
                 let draw = noise(u64::from(s));
-                let shifted: Vec<f64> =
-                    x.iter().zip(&draw).map(|(a, b)| a + b).collect();
+                let shifted: Vec<f64> = x.iter().zip(&draw).map(|(a, b)| a + b).collect();
                 if scalar_at(problem, spec.node, &shifted)? <= 0.0 {
                     hits += 1;
                 }
@@ -565,9 +563,7 @@ pub fn serialize_specs(specs: &[ConstraintSpec]) -> String {
 /// [`ConError::Parse`] with line numbers.
 #[allow(clippy::too_many_lines)] // one grammar rule per kind
 pub fn parse_specs(text: &str) -> Result<Vec<ConstraintSpec>, ConError> {
-    let unhex = |s: &str| -> Option<f64> {
-        u64::from_str_radix(s, 16).ok().map(f64::from_bits)
-    };
+    let unhex = |s: &str| -> Option<f64> { u64::from_str_radix(s, 16).ok().map(f64::from_bits) };
     let perr = |line: usize, what: &str| ConError::Parse {
         line,
         what: what.to_string(),
@@ -606,9 +602,7 @@ pub fn parse_specs(text: &str) -> Result<Vec<ConstraintSpec>, ConError> {
                             Some("quadratic") => {
                                 ConstraintKind::Soft(PenaltyLaw::Quadratic { weight: w })
                             }
-                            Some("hinge") => {
-                                ConstraintKind::Soft(PenaltyLaw::Hinge { weight: w })
-                            }
+                            Some("hinge") => ConstraintKind::Soft(PenaltyLaw::Hinge { weight: w }),
                             _ => return Err(perr(ln, "unknown penalty law")),
                         }
                     }
@@ -635,11 +629,9 @@ pub fn parse_specs(text: &str) -> Result<Vec<ConstraintSpec>, ConError> {
                     }
                     Some("robust") => {
                         let ws = toks.get(5).ok_or_else(|| perr(ln, "missing widths"))?;
-                        let half_widths: Option<Vec<f64>> =
-                            ws.split(',').map(unhex).collect();
+                        let half_widths: Option<Vec<f64>> = ws.split(',').map(unhex).collect();
                         ConstraintKind::Robust {
-                            half_widths: half_widths
-                                .ok_or_else(|| perr(ln, "bad widths"))?,
+                            half_widths: half_widths.ok_or_else(|| perr(ln, "bad widths"))?,
                         }
                     }
                     Some("certification") => match toks.get(5).copied() {
@@ -695,7 +687,10 @@ mod tests {
 
     #[test]
     fn treatments_map_per_kind() {
-        assert_eq!(ConstraintKind::Hard.treatment(), Treatment::FeasibilityRestoration);
+        assert_eq!(
+            ConstraintKind::Hard.treatment(),
+            Treatment::FeasibilityRestoration
+        );
         assert_eq!(
             ConstraintKind::Soft(PenaltyLaw::Hinge { weight: 1.0 }).treatment(),
             Treatment::PenaltyTerm

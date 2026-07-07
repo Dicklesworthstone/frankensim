@@ -176,9 +176,7 @@ fn ival_at(problem: &Problem, node: NodeId, boxes: &[(f64, f64)]) -> Result<IvVa
         Expr::Component { of, index } => {
             let v = ival_at(problem, *of, boxes)?;
             match v {
-                IvVal::V(xs) => IvVal::S(
-                    *xs.get(*index as usize).ok_or(IvalError::BadBindings)?,
-                ),
+                IvVal::V(xs) => IvVal::S(*xs.get(*index as usize).ok_or(IvalError::BadBindings)?),
                 IvVal::S(_) => unreachable!("builder enforced vector shape"),
             }
         }
@@ -287,12 +285,12 @@ fn ival_at(problem: &Problem, node: NodeId, boxes: &[(f64, f64)]) -> Result<IvVa
             }
             IvVal::S(_) => unreachable!("builder enforced vector"),
         },
-        Expr::Min(a, b) => IvVal::S(
-            s(ival_at(problem, *a, boxes)?).min_iv(s(ival_at(problem, *b, boxes)?)),
-        ),
-        Expr::Max(a, b) => IvVal::S(
-            s(ival_at(problem, *a, boxes)?).max_iv(s(ival_at(problem, *b, boxes)?)),
-        ),
+        Expr::Min(a, b) => {
+            IvVal::S(s(ival_at(problem, *a, boxes)?).min_iv(s(ival_at(problem, *b, boxes)?)))
+        }
+        Expr::Max(a, b) => {
+            IvVal::S(s(ival_at(problem, *a, boxes)?).max_iv(s(ival_at(problem, *b, boxes)?)))
+        }
         Expr::Abs(a) => IvVal::S(s(ival_at(problem, *a, boxes)?).abs()),
         Expr::PdeResidual { .. }
         | Expr::Expectation { .. }

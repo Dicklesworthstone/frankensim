@@ -71,7 +71,7 @@ pub fn elastic_solve(
     let n = domain.ranges.len();
     let active: Vec<usize> = (0..specs.len()).filter(|i| !skip.contains(i)).collect();
     let mut evals = 0u64;
-    let mut total = |x: &[f64], evals: &mut u64| -> Result<f64, ConError> {
+    let total = |x: &[f64], evals: &mut u64| -> Result<f64, ConError> {
         let mut t = 0.0;
         for &i in &active {
             t += scalar_at(problem, specs[i].node, x)?.max(0.0);
@@ -258,10 +258,7 @@ fn feasible_fraction(
             if Some(i) == drop {
                 continue;
             }
-            let slack = relax
-                .iter()
-                .find(|(j, _)| *j == i)
-                .map_or(0.0, |(_, s)| *s);
+            let slack = relax.iter().find(|(j, _)| *j == i).map_or(0.0, |(_, s)| *s);
             if scalar_at(problem, spec.node, &x)? > slack {
                 ok = false;
                 break;
@@ -311,9 +308,7 @@ pub fn diagnose_infeasibility(
     let mut k = 0;
     while k < core.len() {
         let member = core[k];
-        let mut skip: Vec<usize> = (0..specs.len())
-            .filter(|i| !core.contains(i))
-            .collect();
+        let mut skip: Vec<usize> = (0..specs.len()).filter(|i| !core.contains(i)).collect();
         skip.push(member);
         let without = elastic_solve(problem, specs, domain, &skip, cx)?;
         if without.total_violation <= FEAS_TOL {
@@ -331,10 +326,7 @@ pub fn diagnose_infeasibility(
             let slack = scale * factor;
             let est = feasible_fraction(problem, specs, domain, &[(i, slack)], None, 400)?;
             repairs.push(RepairAction {
-                description: format!(
-                    "relax `{}` by {slack:.3} (g <= {slack:.3})",
-                    specs[i].name
-                ),
+                description: format!("relax `{}` by {slack:.3} (g <= {slack:.3})", specs[i].name),
                 kind: RepairKind::RelaxBound { index: i, slack },
                 feasibility_estimate: est,
             });
