@@ -78,8 +78,9 @@ fn dense_projection(m: &[f64], columns: &[Vec<f64>]) -> Vec<f64> {
         for r in 0..n {
             if r != col {
                 let f = aug[r][col] / p;
-                for k in col..=n {
-                    aug[r][k] -= f * aug[col][k];
+                let pivot_row = aug[col].clone();
+                for (k, cell) in aug[r].iter_mut().enumerate().skip(col) {
+                    *cell -= f * pivot_row[k];
                 }
             }
         }
