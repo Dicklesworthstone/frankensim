@@ -1,0 +1,21 @@
+[package]
+name = "fs-soa-derive"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "In-house #[derive(Soa)] proc-macro: AoS struct to structure-of-arrays container (no external macro deps)."
+
+[package.metadata.frankensim]
+layer = "UTIL"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+
+[dev-dependencies]
+
+[lints]
+workspace = true

@@ -1,0 +1,21 @@
+[package]
+name = "fs-soa"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Structure-of-arrays runtime: 128-byte-aligned per-field buffers, chunked SIMD-friendly access, AoS gather/scatter, strided view descriptors."
+
+[package.metadata.frankensim]
+layer = "L0"
+
+[dependencies]
+fs-soa-derive = { path = "../fs-soa-derive" }
+
+[dev-dependencies]
+fs-qty = { path = "../fs-qty" }
+fs-rand = { path = "../fs-rand" }
+
+[lints]
+workspace = true
