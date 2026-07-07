@@ -1,0 +1,21 @@
+[package]
+name = "fs-tilelang"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Safe tile-kernel DSL runtime: kernel metadata (arithmetic intensity, determinism class), tier dispatch, deterministic reductions, and generated twin-test helpers."
+
+[package.metadata.frankensim]
+layer = "L0"
+
+[dependencies]
+fs-substrate = { path = "../fs-substrate" }
+fs-tilelang-macros = { path = "../fs-tilelang-macros" }
+
+[dev-dependencies]
+fs-rand = { path = "../fs-rand" }
+
+[lints]
+workspace = true

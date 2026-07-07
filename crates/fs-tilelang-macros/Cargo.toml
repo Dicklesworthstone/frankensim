@@ -1,0 +1,21 @@
+[package]
+name = "fs-tilelang-macros"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "In-house kernel! proc-macro: one restricted kernel body lowers to scalar reference + lane-shaped variants with static analysis and metadata (no external macro deps)."
+
+[package.metadata.frankensim]
+layer = "UTIL"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+
+[dev-dependencies]
+
+[lints]
+workspace = true
