@@ -11,13 +11,15 @@
 //! Evidence<T> integration point.
 
 use crate::factor::qr;
-use fs_rand::{Stream, StreamKey};
+use fs_rand::StreamKey;
 
 /// Kernel ids for stream keying (stable registry — changing one is a
 /// golden-evidence event).
 const K_RANGE: u32 = 0x5A01;
 const K_SKETCH: u32 = 0x5A02;
 const K_TRACE: u32 = 0x5A03;
+/// Probes used by the rangefinder's posterior error estimator.
+const PROBES: usize = 8;
 
 /// Evidence attached to a range approximation.
 #[derive(Debug, Clone)]
@@ -52,7 +54,7 @@ pub fn range_finder(
     let mut omega_col = vec![0.0f64; n];
     let mut ycol = vec![0.0f64; m];
     for j in 0..k {
-        for w in omega_col.iter_mut() {
+        for w in &mut omega_col {
             *w = s.next_normal();
         }
         matvec(a, m, n, &omega_col, &mut ycol);
@@ -89,13 +91,12 @@ pub fn range_finder(
         }
         basis = orthonormal_columns(&y2, m, k);
     }
-    // Posterior error estimate: s probe vectors through the residual.
-    const PROBES: usize = 8;
+    // Posterior error estimate: PROBES probe vectors through the residual.
     let mut est = 0.0f64;
     let mut probe = vec![0.0f64; n];
     let mut aw = vec![0.0f64; m];
     for _ in 0..PROBES {
-        for w in probe.iter_mut() {
+        for w in &mut probe {
             *w = s.next_normal();
         }
         matvec(a, m, n, &probe, &mut aw);
@@ -167,7 +168,7 @@ pub fn nystrom_psd(a: &[f64], n: usize, rank: usize, oversample: usize, seed: u6
     let mut s = StreamKey { seed, kernel: K_RANGE, tile: 1 }.stream();
     // Y = A·Ω (n×k), C = Ωᵀ·Y (k×k, PSD).
     let mut omega = vec![0.0f64; n * k];
-    for w in omega.iter_mut() {
+    for w in &mut omega {
         *w = s.next_normal();
     }
     let mut y = vec![0.0f64; n * k];
@@ -252,8 +253,8 @@ pub fn sketch_ls(a: &[f64], m: usize, n: usize, b: &[f64], seed: u64) -> (Vec<f6
         // R⁻¹·v (back substitution on the stored R).
         for i in (0..n).rev() {
             let mut acc = v[i];
-            for k in i + 1..n {
-                acc = (-f.r(i, k)).mul_add(v[k], acc);
+            for (k, &vk) in v.iter().enumerate().take(n).skip(i + 1) {
+                acc = (-f.r(i, k)).mul_add(vk, acc);
             }
             v[i] = acc / f.r(i, i);
         }
@@ -262,8 +263,8 @@ pub fn sketch_ls(a: &[f64], m: usize, n: usize, b: &[f64], seed: u64) -> (Vec<f6
         // R⁻ᵀ·v (forward substitution).
         for i in 0..n {
             let mut acc = v[i];
-            for k in 0..i {
-                acc = (-f.r(k, i)).mul_add(v[k], acc);
+            for (k, &vk) in v.iter().enumerate().take(i) {
+                acc = (-f.r(k, i)).mul_add(vk, acc);
             }
             v[i] = acc / f.r(i, i);
         }
@@ -335,7 +336,7 @@ pub fn hutchinson(a: &[f64], n: usize, probes: usize, seed: u64) -> TraceReport 
     let mut az = vec![0.0f64; n];
     let (mut m1, mut m2) = (0.0f64, 0.0f64);
     for _ in 0..probes {
-        for zi in z.iter_mut() {
+        for zi in &mut z {
             *zi = if s.next_below(2) == 0 { 1.0 } else { -1.0 };
         }
         matvec(a, n, n, &z, &mut az);
@@ -377,7 +378,7 @@ pub fn hutch_pp(a: &[f64], n: usize, probes: usize, seed: u64) -> TraceReport {
     let mut az = vec![0.0f64; n];
     let (mut m1, mut m2) = (0.0f64, 0.0f64);
     for _ in 0..rem {
-        for zi in z.iter_mut() {
+        for zi in &mut z {
             *zi = if s.next_below(2) == 0 { 1.0 } else { -1.0 };
         }
         project_out(&q, n, kq, &mut z);
@@ -406,9 +407,8 @@ fn matvec(a: &[f64], m: usize, n: usize, x: &[f64], out: &mut [f64]) {
 }
 
 fn matvec_t(a: &[f64], m: usize, n: usize, x: &[f64], out: &mut [f64]) {
-    for j in 0..n {
-        out[j] = 0.0;
-    }
+    out.fill(0.0);
+    let _ = n;
     for i in 0..m {
         let xi = x[i];
         if xi == 0.0 {
