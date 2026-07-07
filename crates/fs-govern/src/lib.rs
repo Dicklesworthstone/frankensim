@@ -15,6 +15,17 @@
 //! `instrumented` defaults to `false` for every risk (nothing is wired yet —
 //! the honest baseline); a risk flips to instrumented only when its
 //! early-warning metric is live on a dashboard.
+//!
+//! Sibling modules encode the rest of the addendum's governance as data: the
+//! design principles + governance rules ([`doctrine`]) and the nineteen
+//! proposals with their kill metrics + owning beads + a completeness audit
+//! ([`proposals`]).
+
+pub mod doctrine;
+pub mod proposals;
+
+pub use doctrine::{GovernanceRule, PRINCIPLES, Principle, RULES, principles, rules};
+pub use proposals::{GovernanceAudit, Proposal, governance_audit, proposals, proposals_json};
 
 /// The ten addendum risks (Part V).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -278,7 +289,7 @@ pub fn audit_slice(risks: &[Risk]) -> RiskAudit {
 }
 
 /// Escape a string for embedding in JSON.
-fn json_escape(s: &str) -> String {
+pub(crate) fn json_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     for c in s.chars() {
         match c {

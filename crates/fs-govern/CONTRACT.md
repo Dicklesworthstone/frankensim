@@ -1,14 +1,27 @@
 # CONTRACT: fs-govern
 
-The addendum's machine-readable risk register (Part V, R1–R10) with a
+The addendum's governance as machine-readable data: the design principles
+(P1–P8), the governance rules, the nineteen proposals (with kill metrics +
+owning beads), and the risk register (Part V, R1–R10) — each with a
 CI-gateable completeness audit.
 
 ## Purpose and layer
 
-Layer UTIL. Pure data + audit — no dependencies. Encodes the ten named risks,
-each with its mitigation, early-warning metric, action threshold, and owning
-bead, and audits that none survives unmeasured (design principle P8 /
-Governance Rule 2).
+Layer UTIL. Pure data + audit — no dependencies. Encodes the doctrine, the
+proposals, and the ten named risks, and audits that nothing survives
+unmeasured (design principle P8 / Governance Rule 2).
+
+## Doctrine and proposals (`doctrine`, `proposals` modules)
+
+- `principles() -> &[Principle]` — the eight design principles P1–P8 (id, name,
+  statement); `rules() -> &[GovernanceRule]` — the four governance rules
+  (number, name, statement).
+- `proposals() -> &[Proposal]` — the nineteen proposals in composite (Mean)
+  order, each `{ id, name, phase, mean, kill_metric, owning_bead, instrumented
+  }`. `governance_audit() -> GovernanceAudit` enforces that every proposal
+  DECLARES a kill metric AND an owning bead (Governance Rule 2), counting how
+  many are instrumented; `proposals_json()` emits the deterministic
+  machine-readable record.
 
 ## Public types and semantics
 
@@ -62,6 +75,13 @@ every risk has a metric/owner/mitigation; owners are real bead ids; lookup;
 the canonical audit is complete with an honest zero-instrumented baseline;
 `audit_slice` detects missing metric AND owner on an incomplete entry (the
 audit is not vacuous); JSON is well-formed + complete; determinism.
+
+`tests/governance.rs` (8 cases): eight principles P1–P8; four rules numbered
+1–4 (Rule 2 = kill-criteria enforcement); all nineteen proposals present with
+unique ids and in descending composite order; every proposal declares a kill
+metric + bead-id owner; the governance audit is complete with a zero
+instrumented baseline; owner mapping spot-checks; `proposals_json` is
+well-formed + deterministic.
 
 ## No-claim boundaries
 
