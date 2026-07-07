@@ -1,0 +1,20 @@
+[package]
+name = "fs-xform"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Design parameterizations: FFD, RBF morphs, level-set velocity, SIMP densities — with exact Jacobian actions and composition."
+
+[package.metadata.frankensim]
+layer = "L2"
+
+[dependencies]
+fs-geom = { path = "../fs-geom" }
+
+[dev-dependencies]
+fs-ad = { path = "../fs-ad" }
+
+[lints]
+workspace = true
