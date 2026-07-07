@@ -21,6 +21,9 @@
 //! Pinning: nodes referenced by evidence packages or contracts are
 //! NEVER evicted — the eviction pass can only touch unpinned nodes.
 
+#[cfg(feature = "tolerance-invalidation")]
+pub mod invalidate;
+
 use fs_ledger::{ContentHash, hash_bytes};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -133,10 +136,12 @@ pub enum PinReason {
     Contract(String),
 }
 
-/// A stored node.
+/// A stored node. The RECORD is immutable (it IS the content
+/// identity); absorbed perturbations accumulate in `burned`, mutable
+/// runtime state that never touches the hash.
 #[derive(Debug, Clone)]
 pub struct StoredNode {
-    /// The record.
+    /// The record (immutable identity).
     pub record: NodeRecord,
     /// Hash of the artifact bytes this record produced.
     pub artifact_hash: ContentHash,
@@ -144,6 +149,16 @@ pub struct StoredNode {
     pub pins: Vec<PinReason>,
     /// Insertion order (deterministic eviction).
     pub seq: u64,
+    /// Slack burned by absorbed perturbations (runtime state).
+    pub burned: f64,
+}
+
+impl StoredNode {
+    /// Slack remaining after burns: `record.slack() − burned`.
+    #[must_use]
+    pub fn effective_slack(&self) -> f64 {
+        self.record.slack() - self.burned
+    }
 }
 
 /// Outcome of a put.
@@ -291,6 +306,7 @@ impl Store {
                 artifact_hash,
                 pins: Vec::new(),
                 seq: self.seq,
+                burned: 0.0,
             },
         );
         self.seq += 1;
@@ -327,7 +343,7 @@ impl Store {
             norm.achieved_error = 0.0;
             norm.required_tolerance = 0.0;
             if norm.content_hash() == probe_hash {
-                let slack = new_tolerance - stored.record.achieved_error;
+                let slack = new_tolerance - (stored.record.achieved_error + stored.burned);
                 if slack >= 0.0 {
                     return SkipDecision::Hit {
                         node: stored.record.content_hash(),
@@ -375,6 +391,26 @@ impl Store {
             evicted += 1;
         }
         evicted
+    }
+
+    /// Iterate stored nodes (BTree key order; deterministic).
+    pub fn iter(&self) -> impl Iterator<Item = ([u8; 32], &StoredNode)> {
+        self.nodes.iter().map(|(k, v)| (*k, v))
+    }
+
+    /// Burn absorbed perturbation into a node's achieved error (the
+    /// slack is a SPENDABLE resource: repeat perturbations see the
+    /// reduced remainder).
+    ///
+    /// # Errors
+    /// [`StoreError::UnknownNode`].
+    pub fn burn_slack(&mut self, node: &ContentHash, amount: f64) -> Result<(), StoreError> {
+        let entry = self
+            .nodes
+            .get_mut(&key(node))
+            .ok_or(StoreError::UnknownNode { node: *node })?;
+        entry.burned += amount;
+        Ok(())
     }
 
     /// Serialize the store to its canonical text form (round-trips;

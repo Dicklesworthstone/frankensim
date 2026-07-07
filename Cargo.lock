@@ -1040,6 +1040,7 @@ dependencies = [
 name = "fs-recompute"
 version = "0.0.1"
 dependencies = [
+ "fs-evidence",
  "fs-exec",
  "fs-ledger",
  "fs-obs",

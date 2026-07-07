@@ -10,12 +10,22 @@ description = "Incremental-recompute store: content-addressed Merkle DAG with fi
 [package.metadata.frankensim]
 layer = "L6"
 
+[features]
+# Tolerance-aware invalidation (bead lmp4.7): OFF by default per the
+# Ambition-Tag gating rule until its Gauntlet tier stays green.
+tolerance-invalidation = ["dep:fs-evidence"]
+
 [dependencies]
+fs-evidence = { path = "../fs-evidence", optional = true }
 fs-ledger = { path = "../fs-ledger" }
 
 [dev-dependencies]
 fs-exec = { path = "../fs-exec" }
 fs-obs = { path = "../fs-obs" }
+
+[[test]]
+name = "invalidation"
+required-features = ["tolerance-invalidation"]
 
 [lints]
 workspace = true
