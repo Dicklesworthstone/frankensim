@@ -27,9 +27,7 @@
 mod delaunay;
 mod refine;
 
-pub use delaunay::{
-    AuditReport, DelaunayStats, MeshError, Tetrahedralization, delaunay, GHOST,
-};
+pub use delaunay::{AuditReport, DelaunayStats, GHOST, MeshError, Tetrahedralization, delaunay};
 pub use refine::{RefineOptions, RefineStats, refine};
 
 /// Crate version, re-exported for provenance stamping.
