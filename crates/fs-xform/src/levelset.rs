@@ -158,11 +158,12 @@ mod tests {
             (band.velocity(&theta, x, 0.4).unwrap() - 2.0).abs() < 1e-15,
             "inside band"
         );
-        assert!(
-            band.velocity(&theta, x, 0.9).unwrap().to_bits() == 0.0_f64.to_bits(),
+        assert_eq!(
+            band.velocity(&theta, x, 0.9).unwrap().to_bits(),
+            0u64,
             "outside band"
         );
-        assert!(band.jacobian_action(&theta, x, 0.9).unwrap().to_bits() == 0.0_f64.to_bits());
+        assert_eq!(band.jacobian_action(&theta, x, 0.9).unwrap().to_bits(), 0u64);
         assert!(matches!(
             band.velocity(&[1.0], x, 0.0),
             Err(XformError::DofMismatch {

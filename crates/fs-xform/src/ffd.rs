@@ -163,7 +163,7 @@ pub fn bernstein_derivative(n: usize, t: f64) -> Vec<f64> {
     (0..=n)
         .map(|i| {
             let left = if i > 0 { lower[i - 1] } else { 0.0 };
-            let right = if i <= n - 1 { lower[i] } else { 0.0 };
+            let right = if i < n { lower[i] } else { 0.0 };
             nf * (left - right)
         })
         .collect()
@@ -211,8 +211,9 @@ mod tests {
         let mut dtheta = vec![0.0; ffd.dof()];
         dtheta[0] = 1.0;
         let v = ffd.jacobian_action(&theta, &dtheta, out).unwrap();
-        assert!(
-            v.x.abs() + v.y.abs() + v.z.abs() == 0.0_f64.abs(),
+        assert_eq!(
+            (v.x.abs() + v.y.abs() + v.z.abs()).to_bits(),
+            0u64,
             "outside is exactly zero"
         );
     }

@@ -120,14 +120,15 @@ mod tests {
     #[test]
     fn kernel_shape_and_compact_support() {
         assert!((wendland_c2(0.0) - 1.0).abs() < 1e-15);
-        assert!(wendland_c2(1.0).to_bits() == 0.0_f64.to_bits());
-        assert!(wendland_c2(2.0).to_bits() == 0.0_f64.to_bits());
+        assert_eq!(wendland_c2(1.0).to_bits(), 0u64);
+        assert_eq!(wendland_c2(2.0).to_bits(), 0u64);
         // −0.0 is a legitimate exact zero here (the product form).
-        assert!(
-            wendland_c2_derivative(0.0).abs().to_bits() == 0.0_f64.to_bits(),
+        assert_eq!(
+            wendland_c2_derivative(0.0).abs().to_bits(),
+            0u64,
             "flat at the center (C2)"
         );
-        assert!(wendland_c2_derivative(1.5).to_bits() == 0.0_f64.to_bits());
+        assert_eq!(wendland_c2_derivative(1.5).to_bits(), 0u64);
         // Derivative matches a central difference mid-support.
         let (q, h) = (0.4, 1e-6);
         let fd = (wendland_c2(q + h) - wendland_c2(q - h)) / (2.0 * h);
