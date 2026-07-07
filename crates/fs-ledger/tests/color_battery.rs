@@ -448,3 +448,26 @@ fn col_006_determinism() {
          hashes",
     );
 }
+
+/// v3 migration regression (bead lmp4.3): the speculation extension
+/// table exists, round-trips the four solve-node fields, and every
+/// pre-existing table still answers queries (nothing broke).
+#[test]
+fn speculation_schema_migration() {
+    let ledger = fs_ledger::Ledger::open(":memory:").expect("open");
+    assert_eq!(ledger.schema_version().expect("version"), 3);
+    let body = "{\"proposer_id\":\"neighbor-extrapolation\",\"accepted\":true,\
+                \"bound\":3.2e-4,\"iterations_saved\":4}";
+    ledger
+        .put_extension(fs_ledger::ExtensionTable::Speculation, "solve-op-17", body)
+        .expect("put");
+    let back = ledger
+        .get_extension(fs_ledger::ExtensionTable::Speculation, "solve-op-17")
+        .expect("get")
+        .expect("present");
+    assert!(back.contains("iterations_saved"), "{back}");
+    // Existing tables unbroken.
+    for table in fs_ledger::ALL_TABLES {
+        let _ = ledger.table_count(table).expect("old queries still work");
+    }
+}

@@ -194,14 +194,12 @@ pub const V1_TABLES: &[&str] = &[
 /// `(proposer_id, accepted, bound, iterations_saved)` as speculation
 /// records keyed by solve-op identity. Additive: every existing query
 /// is untouched (the migration regression test proves it).
-pub const V3: &[&str] = &[
-    "CREATE TABLE IF NOT EXISTS speculation(
+pub const V3: &[&str] = &["CREATE TABLE IF NOT EXISTS speculation(
         id INTEGER PRIMARY KEY,
         name TEXT NOT NULL UNIQUE CHECK(length(name) > 0),
         body TEXT NOT NULL CHECK(json_valid(body)),
         created_at INTEGER NOT NULL
-    ) STRICT",
-];
+    ) STRICT"];
 
 /// Every table the CURRENT schema owns (v1 set + v2/v3 additions); the
 /// `table_count`/lint whitelist.
