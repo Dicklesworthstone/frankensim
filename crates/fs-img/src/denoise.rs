@@ -48,7 +48,11 @@ pub struct DenoiseParams {
 
 impl Default for DenoiseParams {
     fn default() -> Self {
-        DenoiseParams { iterations: 3, sigma_color: 0.25, sigma_albedo: 0.1 }
+        DenoiseParams {
+            iterations: 3,
+            sigma_color: 0.25,
+            sigma_albedo: 0.1,
+        }
     }
 }
 
@@ -66,7 +70,11 @@ pub fn atrous_denoise(
 ) -> Result<LabeledPlane, ImgError> {
     let n = noisy.width * noisy.height;
     if noisy.data.len() != n {
-        return Err(ImgError::Shape { expected: n, got: noisy.data.len(), context: "noisy plane" });
+        return Err(ImgError::Shape {
+            expected: n,
+            got: noisy.data.len(),
+            context: "noisy plane",
+        });
     }
     if let Some(a) = albedo
         && (a.width != noisy.width || a.height != noisy.height || a.data.len() != n)
@@ -105,8 +113,11 @@ pub fn atrous_denoise(
                         wsum += weight;
                     }
                 }
-                next[(y * w + x) as usize] =
-                    if wsum > 0.0 { (acc / wsum) as f32 } else { center };
+                next[(y * w + x) as usize] = if wsum > 0.0 {
+                    (acc / wsum) as f32
+                } else {
+                    center
+                };
             }
         }
         current = next;
@@ -115,7 +126,9 @@ pub fn atrous_denoise(
         width: noisy.width,
         height: noisy.height,
         data: current,
-        provenance: PixelProvenance::BiasedDenoised { iterations: params.iterations },
+        provenance: PixelProvenance::BiasedDenoised {
+            iterations: params.iterations,
+        },
     })
 }
 
@@ -125,7 +138,11 @@ pub fn atrous_denoise(
 /// [`ImgError::Shape`] on length disagreement.
 pub fn mse(a: &[f32], b: &[f32]) -> Result<f64, ImgError> {
     if a.len() != b.len() {
-        return Err(ImgError::Shape { expected: a.len(), got: b.len(), context: "mse operands" });
+        return Err(ImgError::Shape {
+            expected: a.len(),
+            got: b.len(),
+            context: "mse operands",
+        });
     }
     if a.is_empty() {
         return Ok(0.0);
@@ -154,7 +171,10 @@ mod tests {
             provenance: PixelProvenance::RawEstimate,
         };
         let out = atrous_denoise(&noisy, None, &DenoiseParams::default()).unwrap();
-        assert_eq!(out.provenance, PixelProvenance::BiasedDenoised { iterations: 3 });
+        assert_eq!(
+            out.provenance,
+            PixelProvenance::BiasedDenoised { iterations: 3 }
+        );
         // A constant image stays constant (partition of unity).
         for &v in &out.data {
             assert!((v - 0.5).abs() < 1e-6);

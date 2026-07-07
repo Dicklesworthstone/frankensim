@@ -104,16 +104,22 @@ fn zlib_stored(raw: &[u8]) -> Vec<u8> {
 /// Un-wrap a zlib stream of STORED blocks (our writer's subset).
 fn unzlib_stored(z: &[u8]) -> Result<Vec<u8>, ImgError> {
     if z.len() < 6 {
-        return Err(ImgError::Malformed { what: "zlib stream too short".to_string() });
+        return Err(ImgError::Malformed {
+            what: "zlib stream too short".to_string(),
+        });
     }
     if z[0] & 0x0F != 8 {
-        return Err(ImgError::Malformed { what: "not a deflate zlib stream".to_string() });
+        return Err(ImgError::Malformed {
+            what: "not a deflate zlib stream".to_string(),
+        });
     }
     let mut pos = 2usize;
     let mut out = Vec::new();
     loop {
         let Some(&header) = z.get(pos) else {
-            return Err(ImgError::Malformed { what: "truncated deflate block".to_string() });
+            return Err(ImgError::Malformed {
+                what: "truncated deflate block".to_string(),
+            });
         };
         if header & 0x06 != 0 {
             return Err(ImgError::Unsupported {
@@ -123,17 +129,21 @@ fn unzlib_stored(z: &[u8]) -> Result<Vec<u8>, ImgError> {
             });
         }
         let bfinal = header & 1 == 1;
-        let len_bytes = z
-            .get(pos + 1..pos + 5)
-            .ok_or_else(|| ImgError::Malformed { what: "truncated block header".to_string() })?;
+        let len_bytes = z.get(pos + 1..pos + 5).ok_or_else(|| ImgError::Malformed {
+            what: "truncated block header".to_string(),
+        })?;
         let len = u16::from_le_bytes([len_bytes[0], len_bytes[1]]) as usize;
         let nlen = u16::from_le_bytes([len_bytes[2], len_bytes[3]]);
         if nlen != !(len as u16) {
-            return Err(ImgError::Malformed { what: "stored block NLEN mismatch".to_string() });
+            return Err(ImgError::Malformed {
+                what: "stored block NLEN mismatch".to_string(),
+            });
         }
-        let data = z.get(pos + 5..pos + 5 + len).ok_or_else(|| ImgError::Malformed {
-            what: "stored block data truncated".to_string(),
-        })?;
+        let data = z
+            .get(pos + 5..pos + 5 + len)
+            .ok_or_else(|| ImgError::Malformed {
+                what: "stored block data truncated".to_string(),
+            })?;
         out.extend_from_slice(data);
         pos += 5 + len;
         if bfinal {
@@ -144,7 +154,9 @@ fn unzlib_stored(z: &[u8]) -> Result<Vec<u8>, ImgError> {
         what: "missing adler32 trailer".to_string(),
     })?;
     if u32::from_be_bytes([adler[0], adler[1], adler[2], adler[3]]) != adler32(&out) {
-        return Err(ImgError::Malformed { what: "adler32 mismatch (corrupt data)".to_string() });
+        return Err(ImgError::Malformed {
+            what: "adler32 mismatch (corrupt data)".to_string(),
+        });
     }
     Ok(out)
 }
@@ -269,7 +281,9 @@ impl DecodedPng {
 /// [`ImgError::Malformed`] / [`ImgError::Unsupported`].
 pub fn read_png(bytes: &[u8]) -> Result<DecodedPng, ImgError> {
     if bytes.len() < 8 || bytes[..8] != SIGNATURE {
-        return Err(ImgError::Malformed { what: "missing PNG signature".to_string() });
+        return Err(ImgError::Malformed {
+            what: "missing PNG signature".to_string(),
+        });
     }
     let mut pos = 8usize;
     let mut header: Option<(u32, u32, u8, PngColor)> = None;
@@ -278,39 +292,50 @@ pub fn read_png(bytes: &[u8]) -> Result<DecodedPng, ImgError> {
         let len_bytes = bytes.get(pos..pos + 8).ok_or_else(|| ImgError::Malformed {
             what: "truncated chunk header".to_string(),
         })?;
-        let len = u32::from_be_bytes([len_bytes[0], len_bytes[1], len_bytes[2], len_bytes[3]])
-            as usize;
+        let len =
+            u32::from_be_bytes([len_bytes[0], len_bytes[1], len_bytes[2], len_bytes[3]]) as usize;
         let kind = &len_bytes[4..8];
-        let data = bytes.get(pos + 8..pos + 8 + len).ok_or_else(|| ImgError::Malformed {
-            what: "truncated chunk data".to_string(),
-        })?;
-        let crc = bytes.get(pos + 8 + len..pos + 12 + len).ok_or_else(|| {
-            ImgError::Malformed { what: "truncated chunk crc".to_string() }
-        })?;
+        let data = bytes
+            .get(pos + 8..pos + 8 + len)
+            .ok_or_else(|| ImgError::Malformed {
+                what: "truncated chunk data".to_string(),
+            })?;
+        let crc = bytes
+            .get(pos + 8 + len..pos + 12 + len)
+            .ok_or_else(|| ImgError::Malformed {
+                what: "truncated chunk crc".to_string(),
+            })?;
         let mut crc_input = Vec::with_capacity(4 + len);
         crc_input.extend_from_slice(kind);
         crc_input.extend_from_slice(data);
         if u32::from_be_bytes([crc[0], crc[1], crc[2], crc[3]]) != crc32(&crc_input) {
-            return Err(ImgError::Malformed { what: "chunk crc mismatch".to_string() });
+            return Err(ImgError::Malformed {
+                what: "chunk crc mismatch".to_string(),
+            });
         }
         match kind {
             b"IHDR" => {
                 if data.len() != 13 {
-                    return Err(ImgError::Malformed { what: "IHDR length".to_string() });
+                    return Err(ImgError::Malformed {
+                        what: "IHDR length".to_string(),
+                    });
                 }
                 let w = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
                 let h = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
                 let depth = data[8];
-                let color = PngColor::from_type_byte(data[9]).ok_or_else(|| {
-                    ImgError::Unsupported { what: format!("color type {}", data[9]) }
-                })?;
+                let color =
+                    PngColor::from_type_byte(data[9]).ok_or_else(|| ImgError::Unsupported {
+                        what: format!("color type {}", data[9]),
+                    })?;
                 if depth != 8 && depth != 16 {
                     return Err(ImgError::Unsupported {
                         what: format!("bit depth {depth}"),
                     });
                 }
                 if data[12] != 0 {
-                    return Err(ImgError::Unsupported { what: "interlacing".to_string() });
+                    return Err(ImgError::Unsupported {
+                        what: "interlacing".to_string(),
+                    });
                 }
                 header = Some((w, h, depth, color));
             }
@@ -321,14 +346,20 @@ pub fn read_png(bytes: &[u8]) -> Result<DecodedPng, ImgError> {
         pos += 12 + len;
     }
     let Some((width, height, depth, color)) = header else {
-        return Err(ImgError::Malformed { what: "no IHDR before IEND".to_string() });
+        return Err(ImgError::Malformed {
+            what: "no IHDR before IEND".to_string(),
+        });
     };
     let raw = unzlib_stored(&idat)?;
     let bpp = color.channels() * (depth as usize / 8);
     let row = width as usize * bpp;
     let expected = (row + 1) * height as usize;
     if raw.len() != expected {
-        return Err(ImgError::Shape { expected, got: raw.len(), context: "decoded scanlines" });
+        return Err(ImgError::Shape {
+            expected,
+            got: raw.len(),
+            context: "decoded scanlines",
+        });
     }
     let mut out = Vec::with_capacity(row * height as usize);
     for y in 0..height as usize {
@@ -340,7 +371,13 @@ pub fn read_png(bytes: &[u8]) -> Result<DecodedPng, ImgError> {
         }
         out.extend_from_slice(&line[1..]);
     }
-    Ok(DecodedPng { width, height, depth, color, bytes: out })
+    Ok(DecodedPng {
+        width,
+        height,
+        depth,
+        color,
+        bytes: out,
+    })
 }
 
 #[cfg(test)]
@@ -380,7 +417,11 @@ mod tests {
     fn shape_and_malformed_rejections_teach() {
         assert!(matches!(
             write_png8(4, 4, PngColor::Rgb, &[0u8; 5]),
-            Err(ImgError::Shape { expected: 48, got: 5, .. })
+            Err(ImgError::Shape {
+                expected: 48,
+                got: 5,
+                ..
+            })
         ));
         assert!(read_png(b"not a png").is_err());
         // Corrupt one IDAT byte: crc must catch it.
@@ -388,6 +429,9 @@ mod tests {
         let mut bytes = write_png8(2, 2, PngColor::Rgb, &px).unwrap();
         let idx = bytes.len() - 30;
         bytes[idx] ^= 0xFF;
-        assert!(read_png(&bytes).is_err(), "corruption must not decode silently");
+        assert!(
+            read_png(&bytes).is_err(),
+            "corruption must not decode silently"
+        );
     }
 }

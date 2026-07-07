@@ -12,8 +12,9 @@ pub mod film;
 pub mod png;
 
 pub use denoise::{DenoiseParams, LabeledPlane, PixelProvenance, atrous_denoise, mse};
-pub use exr::{Channel, DecodedExr, PixelType, f16_bits_to_f32, f32_to_f16_bits, read_exr,
-    write_exr};
+pub use exr::{
+    Channel, DecodedExr, PixelType, f16_bits_to_f32, f32_to_f16_bits, read_exr, write_exr,
+};
 pub use png::{DecodedPng, PngColor, read_png, write_png8, write_png16};
 
 use core::fmt;
@@ -49,7 +50,11 @@ pub enum ImgError {
 impl fmt::Display for ImgError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ImgError::Shape { expected, got, context } => {
+            ImgError::Shape {
+                expected,
+                got,
+                context,
+            } => {
                 write!(f, "{context}: expected {expected} elements, got {got}")
             }
             ImgError::Malformed { what } => write!(f, "malformed image data: {what}"),

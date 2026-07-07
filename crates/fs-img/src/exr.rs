@@ -180,19 +180,22 @@ pub fn write_exr(width: u32, height: u32, channels: &[Channel]) -> Result<Vec<u8
     push_attr(&mut out, "lineOrder", "lineOrder", &[0]); // increasing y
     push_attr(&mut out, "pixelAspectRatio", "float", &1.0f32.to_le_bytes());
     push_attr(&mut out, "screenWindowCenter", "v2f", &[0u8; 8]);
-    push_attr(&mut out, "screenWindowWidth", "float", &1.0f32.to_le_bytes());
+    push_attr(
+        &mut out,
+        "screenWindowWidth",
+        "float",
+        &1.0f32.to_le_bytes(),
+    );
     out.push(0); // end of header
 
     // Scanline offset table placeholder.
     let table_pos = out.len();
     out.resize(out.len() + 8 * height as usize, 0);
 
-    let line_bytes: usize =
-        sorted.values().map(|c| width as usize * c.ty.bytes()).sum();
+    let line_bytes: usize = sorted.values().map(|c| width as usize * c.ty.bytes()).sum();
     for y in 0..height as usize {
         let offset = out.len() as u64;
-        out[table_pos + 8 * y..table_pos + 8 * (y + 1)]
-            .copy_from_slice(&offset.to_le_bytes());
+        out[table_pos + 8 * y..table_pos + 8 * (y + 1)].copy_from_slice(&offset.to_le_bytes());
         out.extend_from_slice(&(y as i32).to_le_bytes());
         out.extend_from_slice(&(line_bytes as u32).to_le_bytes());
         for c in sorted.values() {
@@ -238,7 +241,9 @@ pub fn read_exr(bytes: &[u8]) -> Result<DecodedExr, ImgError> {
         })
     };
     if take(0, 4)? != MAGIC {
-        return Err(ImgError::Malformed { what: "missing EXR magic".to_string() });
+        return Err(ImgError::Malformed {
+            what: "missing EXR magic".to_string(),
+        });
     }
     let version = u32::from_le_bytes(take(4, 4)?.try_into().expect("4 bytes"));
     if version != 2 {
@@ -253,7 +258,9 @@ pub fn read_exr(bytes: &[u8]) -> Result<DecodedExr, ImgError> {
             *pos += 1;
         }
         if *pos >= bytes.len() {
-            return Err(ImgError::Malformed { what: "unterminated string".to_string() });
+            return Err(ImgError::Malformed {
+                what: "unterminated string".to_string(),
+            });
         }
         let s = String::from_utf8_lossy(&bytes[start..*pos]).into_owned();
         *pos += 1;
@@ -270,8 +277,7 @@ pub fn read_exr(bytes: &[u8]) -> Result<DecodedExr, ImgError> {
         }
         let name = read_cstr(&mut pos)?;
         let _ty = read_cstr(&mut pos)?;
-        let size =
-            u32::from_le_bytes(take(pos, 4)?.try_into().expect("4 bytes")) as usize;
+        let size = u32::from_le_bytes(take(pos, 4)?.try_into().expect("4 bytes")) as usize;
         pos += 4;
         let value = take(pos, size)?.to_vec();
         pos += size;
@@ -317,7 +323,9 @@ pub fn read_exr(bytes: &[u8]) -> Result<DecodedExr, ImgError> {
             }
             "dataWindow" => {
                 if value.len() != 16 {
-                    return Err(ImgError::Malformed { what: "box2i size".to_string() });
+                    return Err(ImgError::Malformed {
+                        what: "box2i size".to_string(),
+                    });
                 }
                 let x2 = i32::from_le_bytes(value[8..12].try_into().expect("4"));
                 let y2 = i32::from_le_bytes(value[12..16].try_into().expect("4"));
@@ -337,11 +345,14 @@ pub fn read_exr(bytes: &[u8]) -> Result<DecodedExr, ImgError> {
     let n = width as usize * height as usize;
     let mut channels: Vec<Channel> = specs
         .iter()
-        .map(|(name, ty)| Channel { name: name.clone(), ty: *ty, data: vec![0.0; n] })
+        .map(|(name, ty)| Channel {
+            name: name.clone(),
+            ty: *ty,
+            data: vec![0.0; n],
+        })
         .collect();
     for y in 0..height as usize {
-        let block_y =
-            i32::from_le_bytes(take(pos, 4)?.try_into().expect("4 bytes")) as usize;
+        let block_y = i32::from_le_bytes(take(pos, 4)?.try_into().expect("4 bytes")) as usize;
         pos += 8; // y + declared size
         if block_y != y {
             return Err(ImgError::Malformed {
@@ -366,7 +377,11 @@ pub fn read_exr(bytes: &[u8]) -> Result<DecodedExr, ImgError> {
             }
         }
     }
-    Ok(DecodedExr { width, height, channels })
+    Ok(DecodedExr {
+        width,
+        height,
+        channels,
+    })
 }
 
 #[cfg(test)]
@@ -409,7 +424,11 @@ mod tests {
             ch("depth.Z", PixelType::Float, 1.5),
         ];
         let bytes = write_exr(w, h, &channels).unwrap();
-        assert_eq!(bytes, write_exr(w, h, &channels).unwrap(), "byte-exact determinism");
+        assert_eq!(
+            bytes,
+            write_exr(w, h, &channels).unwrap(),
+            "byte-exact determinism"
+        );
         let decoded = read_exr(&bytes).unwrap();
         assert_eq!((decoded.width, decoded.height), (w, h));
         // Alphabetical order per spec.
@@ -426,7 +445,11 @@ mod tests {
     #[test]
     fn malformed_and_unsupported_reject() {
         assert!(read_exr(b"nope").is_err());
-        let ch = Channel { name: "R".to_string(), ty: PixelType::Float, data: vec![0.0; 4] };
+        let ch = Channel {
+            name: "R".to_string(),
+            ty: PixelType::Float,
+            data: vec![0.0; 4],
+        };
         let mut bytes = write_exr(2, 2, std::slice::from_ref(&ch)).unwrap();
         // Flip compression byte to ZIP: structured Unsupported.
         let pos = bytes
@@ -436,7 +459,10 @@ mod tests {
         // name + NUL + type("compression") + NUL + size(4) → value byte.
         let value_at = pos + 12 + 12 + 4;
         bytes[value_at] = 3;
-        assert!(matches!(read_exr(&bytes), Err(ImgError::Unsupported { .. })));
+        assert!(matches!(
+            read_exr(&bytes),
+            Err(ImgError::Unsupported { .. })
+        ));
         // Duplicate channel names refuse at write time.
         assert!(write_exr(2, 2, &[ch.clone(), ch]).is_err());
     }
