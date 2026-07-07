@@ -1028,7 +1028,11 @@ name = "fs-probe"
 version = "0.0.1"
 dependencies = [
  "fs-evidence",
+ "fs-iface",
  "fs-ladder",
+ "fs-ledger",
+ "fs-opt",
+ "fs-qty",
 ]
 
 [[package]]

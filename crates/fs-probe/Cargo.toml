@@ -15,6 +15,11 @@ fs-evidence = { path = "../fs-evidence" }
 fs-ladder = { path = "../fs-ladder" }
 
 [dev-dependencies]
+# Spine-gate integration (xpck.2): dev-deps are layer-exempt.
+fs-iface = { path = "../fs-iface" }
+fs-ledger = { path = "../fs-ledger" }
+fs-opt = { path = "../fs-opt" }
+fs-qty = { path = "../fs-qty" }
 
 [lints]
 workspace = true
