@@ -122,8 +122,9 @@ mod tests {
         assert!((wendland_c2(0.0) - 1.0).abs() < 1e-15);
         assert!(wendland_c2(1.0).to_bits() == 0.0_f64.to_bits());
         assert!(wendland_c2(2.0).to_bits() == 0.0_f64.to_bits());
+        // −0.0 is a legitimate exact zero here (the product form).
         assert!(
-            wendland_c2_derivative(0.0).to_bits() == 0.0_f64.to_bits(),
+            wendland_c2_derivative(0.0).abs().to_bits() == 0.0_f64.to_bits(),
             "flat at the center (C2)"
         );
         assert!(wendland_c2_derivative(1.5).to_bits() == 0.0_f64.to_bits());
