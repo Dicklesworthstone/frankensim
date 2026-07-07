@@ -1,0 +1,18 @@
+[package]
+name = "fs-spececo"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Certified-speculation accept/reject economics (addendum Proposal 9): the decision rule (accept outright iff the certified bound meets tolerance, else warm-start), per-proposer/per-regime telemetry, and drift demotion with hysteresis — the flywheel's decision-and-learning layer over the verifier."
+
+[package.metadata.frankensim]
+layer = "L6"
+
+[dependencies]
+
+[dev-dependencies]
+
+[lints]
+workspace = true

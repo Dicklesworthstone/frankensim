@@ -57,6 +57,7 @@ members = [
     "crates/fs-ladder",
     "crates/fs-probe",
     "crates/fs-govern",
+    "crates/fs-spececo",
     "xtask",
 ]
 
