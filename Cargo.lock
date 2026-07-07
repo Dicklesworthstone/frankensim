@@ -944,6 +944,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-xform"
+version = "0.0.1"
+dependencies = [
+ "fs-ad",
+ "fs-geom",
+]
+
+[[package]]
 name = "fsqlite"
 version = "0.1.14"
 dependencies = [
