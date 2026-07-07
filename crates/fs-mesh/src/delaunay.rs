@@ -124,6 +124,7 @@ impl AuditReport {
     }
 }
 
+#[derive(Debug)]
 pub(crate) struct Mesh {
     pub points: Vec<[f64; 3]>,
     /// Tet vertex slots (GHOST allowed in slot 3 only).
@@ -455,6 +456,7 @@ fn brio_order(points: &[[f64; 3]]) -> Vec<u32> {
 
 /// The finished tetrahedralization: points (input order, Steiner points
 /// appended by refinement), live tets, and the exact self-audit.
+#[derive(Debug)]
 pub struct Tetrahedralization {
     pub(crate) mesh: Mesh,
     /// Index of the first refinement (Steiner) vertex, `== points_in`
