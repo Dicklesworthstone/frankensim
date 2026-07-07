@@ -12,7 +12,7 @@ fn lcg(seed: &mut u64) -> f64 {
     ((*seed >> 11) as f64) / (1u64 << 53) as f64 - 0.5
 }
 
-fn cmat(n: usize, f: impl Fn(usize, usize) -> C64) -> Vec<C64> {
+fn cmat(n: usize, mut f: impl FnMut(usize, usize) -> C64) -> Vec<C64> {
     let mut m = vec![C64::ZERO; n * n];
     for i in 0..n {
         for j in 0..n {
@@ -36,18 +36,18 @@ fn companion_matrix_gives_roots_of_unity() {
         }
     });
     let eigs = eig(&m, n).expect("companion converges");
-    // Sorted by (re, im): −1, ±i (im asc), +1.
+    // SET comparison (canonical ordering is roundoff-fragile when real
+    // parts tie at ±1e-16): every expected root has exactly one close
+    // computed eigenvalue.
     let want = [
         C64::new(-1.0, 0.0),
         C64::new(0.0, -1.0),
         C64::new(0.0, 1.0),
         C64::new(1.0, 0.0),
     ];
-    for (got, w) in eigs.iter().zip(&want) {
-        assert!(
-            (*got - *w).abs() < 1e-12,
-            "roots of unity: {got:?} vs {w:?} (all: {eigs:?})"
-        );
+    for w in &want {
+        let hits = eigs.iter().filter(|g| (**g - *w).abs() < 1e-12).count();
+        assert_eq!(hits, 1, "root {w:?} not found once: {eigs:?}");
     }
     println!(
         "{{\"suite\":\"fs-la\",\"case\":\"eigc-companion\",\"verdict\":\"pass\",\"detail\":\"z^4-1 roots of unity to 1e-12\"}}"
