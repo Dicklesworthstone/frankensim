@@ -931,6 +931,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-regime"
+version = "0.0.1"
+dependencies = [
+ "fs-evidence",
+ "fs-math",
+ "fs-qty",
+]
+
+[[package]]
 name = "fs-rep-frep"
 version = "0.0.1"
 dependencies = [

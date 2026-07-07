@@ -1,0 +1,21 @@
+[package]
+name = "fs-regime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Physics-regime kernel: Buckingham-Pi group extraction, nondimensionalization/scaling maps, solver-validity model cards, similarity matching, admission gating."
+
+[package.metadata.frankensim]
+layer = "L3"
+
+[dependencies]
+fs-evidence = { path = "../fs-evidence" }
+fs-math = { path = "../fs-math" }
+fs-qty = { path = "../fs-qty" }
+
+[dev-dependencies]
+
+[lints]
+workspace = true

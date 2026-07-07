@@ -29,6 +29,7 @@ members = [
     "crates/fs-geom",
     "crates/fs-ga",
     "crates/fs-scenario",
+    "crates/fs-regime",
     "crates/fs-rep-sdf",
     "crates/fs-rep-mesh",
     "crates/fs-rep-frep",
