@@ -21,9 +21,11 @@
 //! proposals with their kill metrics + owning beads + a completeness audit
 //! ([`proposals`]).
 
+pub mod crates;
 pub mod doctrine;
 pub mod proposals;
 
+pub use crates::{AddendumCrate, CrateAudit, addendum_crates, crate_audit, crates_json};
 pub use doctrine::{GovernanceRule, PRINCIPLES, Principle, RULES, principles, rules};
 pub use proposals::{GovernanceAudit, Proposal, governance_audit, proposals, proposals_json};
 

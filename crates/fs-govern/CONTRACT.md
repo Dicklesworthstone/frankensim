@@ -11,6 +11,15 @@ Layer UTIL. Pure data + audit — no dependencies. Encodes the doctrine, the
 proposals, and the ten named risks, and audits that nothing survives
 unmeasured (design principle P8 / Governance Rule 2).
 
+## Crate registry (`crates` module)
+
+- `addendum_crates() -> &[AddendumCrate]` — the seven net-new crates the
+  addendum introduced, each `{ name, purpose, owning_proposal, layer, no_claim
+  }`. `crate_audit() -> CrateAudit` confirms each declares a purpose, an owner,
+  and a no-claim boundary (the AGENTS.md contract discipline made
+  governance-legible); `crates_json()` emits the deterministic record. Actual
+  `CONTRACT.md` file presence is enforced separately by `xtask check-contracts`.
+
 ## Doctrine and proposals (`doctrine`, `proposals` modules)
 
 - `principles() -> &[Principle]` — the eight design principles P1–P8 (id, name,
