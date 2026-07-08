@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/fs-flywheel-e2e",
     "crates/fs-qty",
     "crates/fs-obs",
     "crates/fs-opt",
@@ -75,6 +76,7 @@ members = [
     "crates/fs-robust",
     "crates/fs-benchmark",
     "crates/fs-epi-e2e",
+    "crates/fs-asbuilt",
     "crates/fs-cutfem",
     "crates/fs-solid",
     "crates/fs-dwr",

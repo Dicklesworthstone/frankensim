@@ -1,0 +1,19 @@
+[package]
+name = "fs-asbuilt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "As-built ingestion: reality as another chart (addendum Proposal 11). Registers scan data (point clouds) to the design by a closed-form rigid fit made well-posed by fiducials/datums, carries the registration error forward, checks it against the certified deviation (R8 signal-vs-noise), and emits a validated-color as-built delta anchored to the metrology calibration certificate."
+
+[package.metadata.frankensim]
+layer = "L2"
+
+[dependencies]
+fs-evidence = { path = "../fs-evidence" }
+
+[dev-dependencies]
+
+[lints]
+workspace = true
