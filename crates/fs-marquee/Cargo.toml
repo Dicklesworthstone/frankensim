@@ -19,6 +19,7 @@ fs-ledger = { path = "../fs-ledger" }
 
 [dev-dependencies]
 asupersync = { path = "../../../asupersync" }
+fs-evidence = { path = "../fs-evidence" }
 fs-adjoint = { path = "../fs-adjoint", features = ["ledger-transpose"] }
 fs-alloc = { path = "../fs-alloc" }
 fs-exec = { path = "../fs-exec" }
