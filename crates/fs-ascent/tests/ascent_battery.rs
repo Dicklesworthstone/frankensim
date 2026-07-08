@@ -47,6 +47,24 @@ fn rosenbrock(x: &[f64]) -> (f64, Vec<f64>) {
 }
 
 #[test]
+fn lbfgs_at_a_stationary_start_does_not_panic() {
+    // regression: g = 0 at x0 makes dphi0 = 0; the steepest-descent fallback
+    // left dphi0 = 0, which used to trip strong_wolfe's `dphi0 < 0` assert.
+    let mut fg = |x: &[f64]| {
+        let f: f64 = x.iter().map(|xi| xi * xi).sum();
+        let g: Vec<f64> = x.iter().map(|xi| 2.0 * xi).collect();
+        (f, g)
+    };
+    let x0 = vec![0.0f64, 0.0];
+    let mut st = LbfgsState::new(&x0, 8, &mut fg);
+    // Budget-only rule does NOT catch grad=0 up front, so run() reaches the
+    // line search with a zero descent slope.
+    let rep = st.run(&mut fg, &StopRule::Budget(1_000), 100);
+    assert_eq!(rep.reason, StopReason::GradNorm);
+    assert!(rep.f.abs() < 1e-30);
+}
+
+#[test]
 fn lbfgs_rosenbrock_envelope_and_certificate() {
     let n = 10usize;
     let x0 = vec![-1.2f64; n];

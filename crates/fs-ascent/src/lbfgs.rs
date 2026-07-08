@@ -123,6 +123,17 @@ impl LbfgsState {
                 d = self.g.iter().map(|g| -g).collect();
                 dphi0 = -self.g.iter().map(|g| g * g).sum::<f64>();
             }
+            if dphi0 >= 0.0 || dphi0.is_nan() {
+                // No usable descent direction: a stationary point (dphi0 == 0,
+                // i.e. g == 0) or a degenerate/non-finite gradient. Stop here
+                // rather than tripping strong_wolfe's `dphi0 < 0` assert.
+                reason = if dphi0 == 0.0 {
+                    StopReason::GradNorm
+                } else {
+                    StopReason::Stall
+                };
+                break;
+            }
             let x0 = self.x.clone();
             let f0 = self.f;
             let mut evals_here = 0usize;
