@@ -25,10 +25,12 @@
 //! recorded as CONTRACT no-claims, not silently absent.
 
 mod delaunay;
+mod exude;
 mod refine;
 mod remesh;
 
 pub use delaunay::{AuditReport, DelaunayStats, GHOST, MeshError, Tetrahedralization, delaunay};
+pub use exude::{ExudeOptions, ExudeStats, exude};
 pub use refine::{RefineOptions, RefineStats, refine};
 pub use remesh::{MetricField, RemeshOptions, RemeshStats, UniformMetric, remesh};
 

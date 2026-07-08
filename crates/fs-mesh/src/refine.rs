@@ -1,11 +1,19 @@
-//! Radius-edge quality refinement (Ruppert/Shewchuk-style first cut):
-//! insert circumcenters of the worst tets until every tet's
-//! radius-edge ratio meets the bound, a Steiner budget is spent, or the
-//! remaining offenders' circumcenters fall outside the hull (a bounded
-//! DOMAIN's encroachment handling is the successor bead's constrained
-//! recovery — skipping is the honest v1 policy, and it is COUNTED).
-//! Deterministic: worst-first with a canonical tie-break, sequential
-//! inserts through the same exact-predicate kernel.
+//! Radius-edge quality refinement with the Ruppert policy floor (bead
+//! uee3): insert circumcenters of the worst tets; the SMALL-INPUT-ANGLE
+//! POLICY is a minimum-edge floor from the input's closest-pair
+//! spacing — any insertion that would land closer than the floor to an
+//! existing vertex YIELDS (counted as protected) instead of cascading;
+//! escapes are skipped and counted. `split_hull_facets` additionally
+//! splits the hull facet a circumcenter escapes through (in-plane
+//! split point blended strictly into the facet) — the infrastructure
+//! is exact-audit-clean and deterministic, but MEASURED to degrade
+//! radius-edge quality on convex-hull boundaries WITHOUT the PLC
+//! protection machinery (diametral encroachment balls, segment
+//! protection): the flag defaults OFF and true full-Ruppert quality is
+//! coupled to the constrained-boundary-recovery successor, exactly as
+//! the classical termination theory says it must be. Deterministic:
+//! worst-first with a canonical tie-break, sequential inserts through
+//! the exact-predicate kernel; the exact audit is the trip-wire.
 
 use crate::delaunay::{GHOST, MeshError, Tetrahedralization};
 use fs_exec::Cx;
@@ -17,6 +25,12 @@ pub struct RefineOptions {
     pub max_radius_edge: f64,
     /// Steiner-point budget.
     pub max_steiner: u32,
+    /// Split encroached hull facets instead of skipping offenders
+    /// whose circumcenters escape (the full-Ruppert upgrade).
+    pub split_hull_facets: bool,
+    /// Small-angle policy: minimum new-edge floor as a fraction of the
+    /// input closest-pair spacing (insertions below it yield).
+    pub min_edge_factor: f64,
 }
 
 impl Default for RefineOptions {
@@ -24,6 +38,8 @@ impl Default for RefineOptions {
         RefineOptions {
             max_radius_edge: 2.0,
             max_steiner: 2000,
+            split_hull_facets: false,
+            min_edge_factor: 0.25,
         }
     }
 }
@@ -39,11 +55,15 @@ pub struct RefineStats {
     pub worst_before: f64,
     /// Worst radius-edge ratio after.
     pub worst_after: f64,
-    /// Offenders left whose circumcenters escape the hull (boundary
-    /// handling is the successor bead — these are COUNTED, not hidden).
+    /// Offenders left whose action was blocked (policy-protected or
+    /// facet-splitting disabled) — COUNTED, not hidden.
     pub unrefinable_remaining: u32,
     /// Offenders left that were still refinable when budgets ran out.
     pub refinable_remaining: u32,
+    /// Encroached hull facets split (the full-Ruppert path).
+    pub hull_facets_split: u32,
+    /// Insertions yielded by the minimum-edge (small-angle) policy.
+    pub protected_by_policy: u32,
 }
 
 impl RefineStats {
@@ -53,13 +73,16 @@ impl RefineStats {
         format!(
             "{{\"steiner_inserted\":{},\"skipped_outside_hull\":{},\
              \"worst_before\":{:.4},\"worst_after\":{:.4},\
-             \"unrefinable_remaining\":{},\"refinable_remaining\":{}}}",
+             \"unrefinable_remaining\":{},\"refinable_remaining\":{},\
+             \"hull_facets_split\":{},\"protected_by_policy\":{}}}",
             self.steiner_inserted,
             self.skipped_outside_hull,
             self.worst_before,
             self.worst_after,
             self.unrefinable_remaining,
-            self.refinable_remaining
+            self.refinable_remaining,
+            self.hull_facets_split,
+            self.protected_by_policy
         )
     }
 }
@@ -114,11 +137,82 @@ fn radius_edge(pts: &[[f64; 3]; 4]) -> Option<f64> {
     (shortest > 0.0).then(|| r / shortest)
 }
 
+/// The hull-facet split point: the in-plane circumcenter when it lies
+/// INSIDE the triangle, else the longest edge's midpoint — an obtuse
+/// facet's circumcenter sits outside the facet (still on the hull
+/// plane) and inserting it manufactures degenerate flat tets (the
+/// battery measured radius-edge ratios of 1e16 before this cascade
+/// rule; Ruppert's lower-dimensional split is the classical cure).
+fn facet_split_point(a: [f64; 3], b: [f64; 3], c: [f64; 3]) -> Option<[f64; 3]> {
+    let (u, v) = (sub(b, a), sub(c, a));
+    let uu = dot(u, u);
+    let vv = dot(v, v);
+    let uv = dot(u, v);
+    let den = 2.0 * (uu * vv - uv * uv);
+    if den.abs() < 1e-300 {
+        return None;
+    }
+    let s = (vv * (uu - uv)) / den;
+    let t = (uu * (vv - uv)) / den;
+    let eps = 1e-6;
+    let candidate = if s >= eps && t >= eps && s + t <= 1.0 - eps {
+        [
+            a[0] + s * u[0] + t * v[0],
+            a[1] + s * u[1] + t * v[1],
+            a[2] + s * u[2] + t * v[2],
+        ]
+    } else {
+        // Longest-edge midpoint (the lower-dimensional cascade).
+        let w = sub(c, b);
+        let (lu, lv, lw) = (uu, vv, dot(w, w));
+        let (p, q) = if lu >= lv && lu >= lw {
+            (a, b)
+        } else if lv >= lw {
+            (a, c)
+        } else {
+            (b, c)
+        };
+        [
+            f64::midpoint(p[0], q[0]),
+            f64::midpoint(p[1], q[1]),
+            f64::midpoint(p[2], q[2]),
+        ]
+    };
+    // Pull strictly into the facet interior (a point EXACTLY on a hull
+    // edge is collinear-degenerate for the kernel — the audit went red
+    // before this blend; 1/32 is dyadic, preserving G3 behavior).
+    let centroid = [
+        (a[0] + b[0] + c[0]) / 3.0,
+        (a[1] + b[1] + c[1]) / 3.0,
+        (a[2] + b[2] + c[2]) / 3.0,
+    ];
+    let blend = 1.0 / 32.0;
+    Some([
+        candidate[0] + blend * (centroid[0] - candidate[0]),
+        candidate[1] + blend * (centroid[1] - candidate[1]),
+        candidate[2] + blend * (centroid[2] - candidate[2]),
+    ])
+}
+
+/// The input's closest-pair spacing (deterministic O(n²) at fixture
+/// scale — the perf lane owns bigger inputs).
+fn closest_pair(points: &[[f64; 3]], upto: usize) -> f64 {
+    let mut best = f64::INFINITY;
+    for i in 0..upto.min(points.len()) {
+        for j in (i + 1)..upto.min(points.len()) {
+            let d = sub(points[i], points[j]);
+            best = best.min(dot(d, d));
+        }
+    }
+    best.sqrt()
+}
+
 /// Refine in place until the radius-edge bound holds or budgets run out.
 /// Steiner points append after [`Tetrahedralization::steiner_from`].
 ///
 /// # Errors
 /// [`MeshError::Cancelled`] between insertions.
+#[allow(clippy::too_many_lines)] // one worst-first loop with full accounting
 pub fn refine(
     tetra: &mut Tetrahedralization,
     opts: RefineOptions,
@@ -150,6 +244,8 @@ pub fn refine(
     };
     let initial = worst_ratio(tetra);
     stats.worst_before = initial.first().map_or(0.0, |o| o.0);
+    let edge_floor =
+        opts.min_edge_factor * closest_pair(&tetra.mesh.points, tetra.steiner_from as usize);
     // A skipped tet's identity never recurs after it dies (points only
     // accumulate), so the skip set is PERMANENT — each unrefinable tet
     // is counted once.
@@ -175,18 +271,49 @@ pub fn refine(
                 skipped.insert(key);
                 continue;
             };
-            // Insertable only if the circumcenter lands strictly inside
-            // the hull (the conflict seed is a real tet).
+            // Where does the circumcenter land? Inside → interior
+            // insertion; on a ghost → the FULL-RUPPERT path splits the
+            // encroached hull facet instead of skipping.
             let new_idx = tetra.mesh.points.len() as u32;
             let seed = tetra.mesh.locate(cc, new_idx);
-            if tetra.mesh.tets[seed as usize][3] == GHOST {
+            let escaped = tetra.mesh.tets[seed as usize][3] == GHOST;
+            let candidate = if !escaped {
+                Some(cc)
+            } else if opts.split_hull_facets {
+                stats.skipped_outside_hull += 1;
+                let g = tetra.mesh.tets[seed as usize];
+                let pts = &tetra.mesh.points;
+                facet_split_point(pts[g[0] as usize], pts[g[1] as usize], pts[g[2] as usize])
+            } else {
                 stats.skipped_outside_hull += 1;
                 skipped.insert(key);
                 continue;
+            };
+            let Some(point) = candidate else {
+                skipped.insert(key);
+                continue;
+            };
+            // Small-angle policy: yield if the new point would create
+            // an edge below the floor.
+            let nearest = {
+                let mut best = f64::INFINITY;
+                for p in &tetra.mesh.points {
+                    let d = sub(*p, point);
+                    best = best.min(dot(d, d));
+                }
+                best.sqrt()
+            };
+            if nearest < edge_floor {
+                stats.protected_by_policy += 1;
+                skipped.insert(key);
+                continue;
             }
-            tetra.mesh.points.push(cc);
+            tetra.mesh.points.push(point);
             if tetra.mesh.insert(new_idx) {
                 stats.steiner_inserted += 1;
+                if escaped {
+                    stats.hull_facets_split += 1;
+                }
                 progressed = true;
                 live = live_set(tetra);
             } else {

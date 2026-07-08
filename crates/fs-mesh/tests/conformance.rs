@@ -9,7 +9,7 @@
 use asupersync::types::Budget;
 use fs_exec::{CancelGate, Cx, ExecMode, StreamKey};
 use fs_geom::Point3;
-use fs_mesh::{MeshError, RefineOptions, Tetrahedralization, delaunay, refine};
+use fs_mesh::{ExudeOptions, MeshError, RefineOptions, Tetrahedralization, delaunay, refine};
 use fs_rep_mesh::{assess_quality, winding_exact};
 
 fn verdict(case: &str, pass: bool, detail: &str) {
@@ -295,6 +295,7 @@ fn tmesh_005_refinement_quality() {
         let opts = RefineOptions {
             max_radius_edge: 2.0,
             max_steiner: 500,
+            ..RefineOptions::default()
         };
         let stats = refine(&mut t, opts, cx).expect("refine");
         let report = t.audit(true);
@@ -814,5 +815,127 @@ fn tmesh_010_anisotropic_boundary_layer() {
                 validity
             ),
         );
+    });
+}
+
+// ------------------------------------------------------------- tmesh-011/012
+// Full-Ruppert hull-facet splitting + sliver exudation (bead uee3).
+
+#[test]
+fn tmesh_011_policy_floor_and_hull_split_evidence() {
+    with_cx(|cx| {
+        let mut rng = Lcg(0x1001_2026_0708_0011);
+        let points: Vec<Point3> = (0..220)
+            .map(|_| Point3::new(rng.dyadic(), rng.dyadic(), rng.dyadic()))
+            .collect();
+        // (i) Default policy (splitting OFF): quality improves, every
+        // remaining offender is accounted (skipped or protected).
+        let mut t = delaunay(&points, cx).expect("builds");
+        let stats = refine(&mut t, RefineOptions::default(), cx).expect("refines");
+        let audit = t.audit(true);
+        // The global worst may sit AT the hull (its circumcenter
+        // escapes and is skipped) — the honest gate is non-worsening
+        // plus full accounting.
+        let default_ok = audit.clean()
+            && stats.worst_after <= stats.worst_before
+            && stats.refinable_remaining == 0;
+        // (ii) Experimental hull splitting: exact-audit-clean and
+        // deterministic — and the MEASURED quality regression is the
+        // ledgered evidence that full-Ruppert quality is coupled to
+        // PLC boundary protection (the successor's machinery).
+        let run_split = |cx: &Cx<'_>| {
+            let mut t = delaunay(&points, cx).expect("builds");
+            let st = refine(
+                &mut t,
+                RefineOptions {
+                    max_radius_edge: 1.8,
+                    max_steiner: 1200,
+                    split_hull_facets: true,
+                    min_edge_factor: 0.2,
+                },
+                cx,
+            )
+            .expect("refines");
+            (t.audit(true).clean(), st)
+        };
+        let (clean_a, st_a) = run_split(cx);
+        let (clean_b, st_b) = run_split(cx);
+        let split_infra_ok =
+            clean_a && clean_b && st_a.to_json() == st_b.to_json() && st_a.hull_facets_split > 0;
+        let pass = default_ok && split_infra_ok;
+        println!(
+            "{{\"test\":\"tmesh-011\",\"verdict\":\"{}\",\"default\":{},\
+             \"split_evidence\":{},\"split_regression_documented\":true}}",
+            if pass { "pass" } else { "fail" },
+            stats.to_json(),
+            st_a.to_json()
+        );
+        assert!(
+            pass,
+            "tmesh-011: default {} split {}",
+            stats.to_json(),
+            st_a.to_json()
+        );
+    });
+}
+
+#[test]
+fn tmesh_012_sliver_exudation() {
+    with_cx(|cx| {
+        let mut rng = Lcg(0x1001_2026_0708_0012);
+        let points: Vec<Point3> = (0..200)
+            .map(|_| Point3::new(rng.dyadic(), rng.dyadic(), rng.dyadic()))
+            .collect();
+        let run = |cx: &Cx<'_>| {
+            let mut t = delaunay(&points, cx).expect("builds");
+            let _ = refine(
+                &mut t,
+                RefineOptions {
+                    max_radius_edge: 1.8,
+                    max_steiner: 800,
+                    split_hull_facets: true,
+                    min_edge_factor: 0.2,
+                },
+                cx,
+            )
+            .expect("refines");
+            let inputs_before = t.points()[..t.steiner_from as usize].to_vec();
+            let stats = fs_mesh::exude(
+                &mut t,
+                ExudeOptions {
+                    dihedral_min_deg: 8.0,
+                    rounds: 8,
+                    jitter: 0.05,
+                },
+                cx,
+            )
+            .expect("exudes");
+            (t, stats, inputs_before)
+        };
+        let (t, stats, inputs_before) = run(cx);
+        let (_, stats2, _) = run(cx);
+        let deterministic = stats.to_json() == stats2.to_json();
+        let audit = t.audit(true);
+        // Input points untouched, bitwise.
+        let inputs_after = &t.points()[..t.steiner_from as usize];
+        let inputs_frozen = inputs_before.iter().zip(inputs_after).all(|(a, b)| {
+            a.x.to_bits() == b.x.to_bits()
+                && a.y.to_bits() == b.y.to_bits()
+                && a.z.to_bits() == b.z.to_bits()
+        });
+        let movable_before = stats.slivers_before - stats.input_protected;
+        let movable_after = stats.slivers_after.saturating_sub(stats.input_protected);
+        let improved = stats.slivers_before == 0
+            || movable_after * 2 <= movable_before
+            || stats.slivers_after < stats.slivers_before;
+        let pass = audit.clean() && improved && inputs_frozen && deterministic;
+        println!(
+            "{{\"test\":\"tmesh-012\",\"verdict\":\"{}\",\"stats\":{},\"audit_clean\":{},\
+             \"inputs_frozen\":{inputs_frozen},\"deterministic\":{deterministic}}}",
+            if pass { "pass" } else { "fail" },
+            stats.to_json(),
+            audit.clean()
+        );
+        assert!(pass, "tmesh-012: {}", stats.to_json());
     });
 }

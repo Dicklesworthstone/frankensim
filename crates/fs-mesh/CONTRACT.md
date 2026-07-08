@@ -140,7 +140,35 @@ verdicts, seeded LCG randomness, fs-obs Custom events for kernel
 stats, refinement stats, and scale/walk-locality stats. Any
 reimplementation must pass the suite unchanged.
 
+### Addendum (bead uee3, partial): policy floor, hull-split evidence, exudation
+
+- `RefineOptions` gains `min_edge_factor` (the SMALL-INPUT-ANGLE
+  POLICY: a minimum-new-edge floor from the input's closest-pair
+  spacing; insertions below it YIELD and are counted as
+  `protected_by_policy`) and `split_hull_facets` (default OFF): the
+  hull-facet split infrastructure — in-plane split point blended
+  strictly into the facet interior (a point exactly on a hull edge is
+  collinear-degenerate: the audit went red before the blend) — is
+  exact-audit-clean and deterministic, but MEASURED to degrade
+  radius-edge quality on convex-hull boundaries without PLC
+  protection machinery (tmesh-011 ledgers the regression). True
+  full-Ruppert quality is coupled to constrained boundary recovery,
+  exactly as the classical termination theory requires.
+- `exude` / `ExudeOptions` / `ExudeStats`: sliver removal by
+  deterministic Steiner PERTURBATION — offending Steiner vertices
+  nudged by seeded deterministic offsets, full rebuild through the
+  exact kernel, rounds kept only when the sliver census strictly
+  drops AND the exact audit stays clean; input points are never
+  touched (bitwise-checked). The weighted-Delaunay exudation pump
+  needs a weighted exact predicate — recorded no-claim below.
+
 ## No-claim boundaries
+
+- Weighted exact insphere predicate (the Edelsbrunner weight-pump
+  exudation variant; the perturbation flavor ships).
+- PLC constrained boundary recovery, deterministic parallel domain
+  coloring, and the 1e7-point perf lane (bead uee3's remaining
+  items — tracked there).
 
 - Constrained boundary recovery (PLC conformity with Steiner edge/face
   insertion) and chart-boundary correspondence are the successor bead;
