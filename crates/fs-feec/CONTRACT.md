@@ -84,6 +84,23 @@ checkerboarding structurally instead of by stabilization folklore.
   canonical commuting projections π_C (endpoint values + derivative
   Legendre moments) and π_D (Legendre coefficients) with
   d∘π_C = π_D∘d by construction.
+- `highorder::vecfam` (bead dcng) — the simplicial VECTOR families:
+  first-kind Nédélec H(curl) and Raviart–Thomas H(div) on tets at
+  r = 1..4 plus discontinuous L² P_{r−1}, completing the simplicial
+  P_rΛᵏ tree. NO hand-derived shape functions: per element, Koszul
+  bases in centered/scaled Cartesian monomials (RT_r = (P_{r−1})³ ⊕
+  ξ·H̃_{r−1}; N_r with the independent cross-product subset α₀ = 0
+  when i = 0 — both exact direct sums), square dof-Vandermonde by
+  pivoted LU (normal equations were measured at √ε trace error and
+  rejected). Dofs are classical moments in sorted-GLOBAL frames:
+  edge Legendre moments signed toward the larger global index
+  (deram1's direction), face tangential/normal moments in the
+  sorted-triple frame and circulation normal (deram2's normal) —
+  conformity by construction. `VecSpace` (mass, canonical
+  interpolation, L2 error, per-entity global dof layout), `DgSpace`,
+  and the chain maps `grad_matrix`/`curl_matrix`/`div_matrix` as
+  global interpolation matrices (derivatives exact in monomial
+  coefficients).
 
 - `cohomology` module (plan §8.1, bead tfz.7): harmonic cochains and
   the discrete Hodge decomposition — the correct treatment of
@@ -116,6 +133,18 @@ checkerboarding structurally instead of by stabilization folklore.
   rows (patch test).
 - Assembly is deterministic: canonical cell order + fs-sparse's
   push-order-independent COO accumulation.
+- Vector families (vecfam battery): dimension counts r = 1..4 match
+  the closed forms (N: 6/20/45/84, RT: 4/15/36/70 per tet) and the
+  exact-sequence Euler identity Σ(−1)ᵏ dim Vᵏ = 1 holds on
+  contractible fixtures; dof-Kronecker unisolvence to 5.8e-13 and
+  mass SPD at r = 2, 3; tangential (2.3e-12) and normal (1.4e-11)
+  trace continuity across shared entities at r = 2..4; curl∘grad ≤
+  1.7e-14 and div∘curl ≤ 1.4e-13 through the discrete chain at
+  r = 2, 3; canonical-interpolation ladders at order r (slopes
+  1.90/1.88 at r = 2, 2.92/2.89 at r = 3); the two-tier G3 battery —
+  edge dofs transform with definite parity (−1)^{k+1} under
+  relabeling (1.1e-16), interpolated fields are label-invariant
+  (6.6e-13); r = 1 members reproduce the Whitney forms to 4.4e-16.
 
 ## Error model
 
@@ -177,6 +206,13 @@ matrix-free Jacobi-PCG path with slope gates ≥ r + 0.6 for r = 1..6
 `tests/ho_probe.rs`: per-mode convergence regression — the diagnosis
 that single-cell symmetric fixtures superconverge at even r (a metric
 trap, so MMS ladders start at m ≥ 2).
+`tests/vecfam_battery.rs` (bead dcng): vec-001 dims + Euler
+alternating sum; vec-002 dof-Kronecker + mass SPD; vec-003
+tangential/normal conformity; vec-004 dd = 0 through grad/curl/div;
+vec-005 interpolation ladders; vec-006 two-tier G3 relabeling;
+vec-007 Whitney cross-checks + frozen golden (cross-ISA row LEDGERED
+PENDING, same policy as the simplex golden).
+
 `tests/simplex_battery.rs` (slice 3): Duffy weight/volume exactness
 and P_r dimension counts (local dofs = C(r+3,3), r = 1..6);
 unisolvence via mass SPD (r = 1..5); conformity across the shared
@@ -207,11 +243,12 @@ form; its own golden hash.
   together with mesh quality certificates.
 - Simplicial H¹ now reaches high order (slice 3, MMS-gated at
   r = 1..4; the basis is valid to r = 6 by the unisolvence/count
-  gates). Simplicial H(curl)/H(div)/L² high-order families (the
-  Nédélec/RT tree) remain OPEN scope — split assessment pending. The
-  tensor-product side covers all four space types (slices 1–2); full
-  3D VECTOR MMS solves need tfz.10 — projection ladders stand in,
-  labeled. Unstructured-hex orientation and the ≥30%-peak perf gate
+  gates). Simplicial H(curl)/H(div)/L² families now ship at r = 1..4
+  (bead dcng, vecfam battery); r ≥ 5 needs conditioning work on the
+  monomial Vandermondes (recorded successor). Full 3D VECTOR MMS
+  (curl-curl / mixed Darcy solves) need tfz.10 — canonical
+  interpolation ladders stand in, labeled. The tensor-product side
+  covers all four space types (slices 1–2). Unstructured-hex orientation and the ≥30%-peak perf gate
   are later-slice scope. `HexComplex` incidence is still not
   consumed.
 - MMS covers the PRIMAL Poisson form; the mixed-form MMS (flux
