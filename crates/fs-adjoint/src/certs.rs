@@ -175,13 +175,7 @@ pub fn certify(
                     None,
                 )
             } else if let Some(bound) = residual_bound {
-                (
-                    Color::Verified {
-                        lo: 0.0,
-                        hi: bound,
-                    },
-                    None,
-                )
+                (Color::Verified { lo: 0.0, hi: bound }, None)
             } else {
                 (
                     Color::Estimated {
@@ -227,8 +221,7 @@ impl std::fmt::Display for GateRefusal {
 pub fn merge_gate(cert: &GradientCertificate) -> Result<(), GateRefusal> {
     if cert.fd_checks.is_empty() {
         return Err(GateRefusal {
-            what: "no FD spot checks were run (the falsifier pairing is mandatory)"
-                .to_string(),
+            what: "no FD spot checks were run (the falsifier pairing is mandatory)".to_string(),
         });
     }
     if let Some(bad) = cert.fd_checks.iter().find(|v| !v.consistent) {
