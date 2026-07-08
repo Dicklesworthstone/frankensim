@@ -1,0 +1,19 @@
+[package]
+name = "fs-package"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Machine-checkable evidence packages (addendum Proposal 12): a content-addressed Merkle bundle of color-typed claims + provenance that a standalone checker can re-verify without solvers, enforcing completeness (validated claims carry a regime tag and anchoring dataset)."
+
+[package.metadata.frankensim]
+layer = "L6"
+
+[dependencies]
+fs-evidence = { path = "../fs-evidence" }
+
+[dev-dependencies]
+
+[lints]
+workspace = true
