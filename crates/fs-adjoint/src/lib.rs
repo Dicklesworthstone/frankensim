@@ -25,6 +25,7 @@ pub mod certs;
 #[cfg(feature = "dwr-accept")]
 pub mod dwr_accept;
 pub mod hadamard;
+pub mod hessian;
 pub mod ift;
 #[cfg(feature = "diff-mitigations")]
 pub mod mitigate;
@@ -35,6 +36,7 @@ pub mod transpose;
 pub mod verify;
 
 pub use hadamard::{compliance_shape_gradient, volume_shape_gradient};
+pub use hessian::density_misfit_hvp;
 pub use ift::{AdjointReport, DensityOp, DensityPoisson, ift_gradient_matfree};
 pub use sobolev::sobolev_smooth;
 pub use timedep::{HeatAdjoint, heat_initial_gradient};

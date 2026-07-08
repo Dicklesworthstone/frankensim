@@ -126,6 +126,16 @@ impl<'c> DensityPoisson<'c> {
         }
     }
 
+    /// Apply K(density)·x for an ARBITRARY (possibly signed) density
+    /// vector — the operator family is linear in ρ, so this is the
+    /// directional operator K(v) the second-order adjoints need.
+    #[must_use]
+    pub fn apply_density(&self, density: &[f64], x: &[f64]) -> Vec<f64> {
+        let mut y = vec![0.0f64; self.n()];
+        self.apply_k(density, x, &mut y);
+        y
+    }
+
     /// Per-cell chain rule: out[t] = λᵀ·K_t·u (the exact
     /// ∂(K(ρ)u)/∂ρ_t pullback — the SIMP volumetric derivative).
     #[must_use]
