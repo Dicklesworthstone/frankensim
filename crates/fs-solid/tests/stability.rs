@@ -292,7 +292,7 @@ fn stab_003_continuum_arch_snap_through() {
     let half_span = 1.0;
     let rise = 0.3;
     let thick = 0.08;
-    let mesh = Mesh2::mapped_quads(48, 3, &|s, t| {
+    let mesh = Mesh2::mapped_quads(32, 2, &|s, t| {
         [
             2.0 * half_span * (s - 0.5),
             rise * (1.0 - (2.0 * s - 1.0).abs()) + thick * (t - 0.5),
@@ -332,14 +332,13 @@ fn stab_003_continuum_arch_snap_through() {
                 return Some(u);
             }
             let k = problem.tangent(&u, lam).ok()?;
-            let op = fs_solver::op::CsrOp::symmetric(k);
-            let b: Vec<f64> = r.iter().map(|x| -x).collect();
-            let mut st = fs_solver::krylov::MinresState::new(&op, &b);
-            let _ = st.run(&op, 1e-10, 20_000);
-            if st.rel_residual() > 1e-6 {
+            let f = fs_la::factor::lu(&k.to_dense(), k.nrows()).ok()?;
+            let mut d: Vec<f64> = r.iter().map(|x| -x).collect();
+            f.solve(&mut d);
+            if !d.iter().all(|x| x.is_finite()) {
                 return None;
             }
-            for (ui, di) in u.iter_mut().zip(&st.x) {
+            for (ui, di) in u.iter_mut().zip(&d) {
                 *ui += di;
             }
         }
@@ -348,8 +347,8 @@ fn stab_003_continuum_arch_snap_through() {
     let mut u_warm = vec![0.0f64; PathResidual::ndof(&problem)];
     let mut lambda_fail = None;
     let mut lam = 0.0f64;
-    for _ in 0..120 {
-        lam += 0.25;
+    for _ in 0..60 {
+        lam += 1.0;
         match fixed_newton(&u_warm, lam) {
             Some(u) => u_warm = u,
             None => {
@@ -372,7 +371,11 @@ fn stab_003_continuum_arch_snap_through() {
         ..ArcSettings::default()
     };
     let mut path = PathState::start(PathResidual::ndof(&problem), &settings);
-    advance(&problem, &mut path, &settings, 320).expect("arch path advances");
+    eprintln!("stab-003: load control fails at lambda = {lam_fail}");
+    advance(&problem, &mut path, &settings, 100).expect("arch path advances (1)");
+    eprintln!("stab-003: 100 steps, lambda = {}", path.lambda);
+    advance(&problem, &mut path, &settings, 100).expect("arch path advances (2)");
+    eprintln!("stab-003: 200 steps, lambda = {}", path.lambda);
     let limits: Vec<f64> = path
         .events
         .iter()

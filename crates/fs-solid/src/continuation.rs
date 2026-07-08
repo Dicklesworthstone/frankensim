@@ -150,6 +150,30 @@ impl PathState {
 }
 
 fn minres_solve(k: &Csr, b: &[f64]) -> Result<Vec<f64>, SolidError> {
+    let n = k.nrows();
+    if n <= 1024 {
+        // Fixture scale: one pivoted dense LU per solve —
+        // indefinite-capable (limit points!), deterministic, and an
+        // order faster than unpreconditioned Krylov on thin-structure
+        // tangents. Production scale falls through to MINRES.
+        if let Ok(f) = fs_la::factor::lu(&k.to_dense(), n) {
+            let mut x = b.to_vec();
+            f.solve(&mut x);
+            // Residual gate (LU on a singular tangent can be junk).
+            let mut r = vec![0.0f64; n];
+            k.spmv(&x, &mut r);
+            let bn: f64 = b.iter().map(|v| v * v).sum::<f64>().sqrt();
+            let rn: f64 = r
+                .iter()
+                .zip(b)
+                .map(|(a, v)| (a - v) * (a - v))
+                .sum::<f64>()
+                .sqrt();
+            if rn <= 1e-6 * bn.max(1e-300) {
+                return Ok(x);
+            }
+        }
+    }
     let op = CsrOp::symmetric(k.clone());
     let mut st = MinresState::new(&op, b);
     let _ = st.run(&op, 1e-11, 20_000);
