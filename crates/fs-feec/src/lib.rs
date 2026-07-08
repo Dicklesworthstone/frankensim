@@ -34,6 +34,10 @@ pub use highorder::derham::TensorDeRham;
 pub use highorder::hex::{TensorSpace, pcg_matfree};
 pub use highorder::quad1d::{element_matrices, gauss_legendre, legendre, lobatto_shapes};
 pub use highorder::simplex::SimplexSpace;
+pub use highorder::vecfam::{
+    DgSpace, Family, VecSpace, build_element, curl_matrix, dg_cell_dofs, div_matrix, grad_matrix,
+    nedelec_entity_dofs, rt_entity_dofs, tri_quad3d,
+};
 pub use hodge::{galerkin_star, hodge_diagonal_barycentric};
 pub use whitney::{
     ElementGeometry, deram0, deram1, deram2, deram3, element_geometry, mass_matrix, sort_parity,
