@@ -42,6 +42,23 @@ solver without a passing gradient check cannot merge.
   relative error + per-direction pairs). The gate itself is tested to
   REJECT a corrupted gradient — a gate that cannot fail is not a gate.
 
+- `transpose` module (addendum Proposal 1, bead bk0o.1; [F], behind
+  the `ledger-transpose` feature until its Gauntlet tier + kill metric
+  are green): TRANSPOSE THE LEDGER. `VjpRegistry` makes the op-spec
+  amendment executable — every op registers a VJP or declares itself
+  non-differentiable WITH color consequences; `Tape::transpose` chains
+  the VJPs across seams in deterministic reverse order (bit-equal
+  re-runs). A missing VJP or a declared op inside a differentiation
+  path is a STRUCTURED, LOUD block — never a silent zero (the Goodhart
+  trap the review named). `check_transpose` is the ⟨Av,w⟩=⟨v,Aᵀw⟩ G0
+  battery; `fd_falsifier` is conditioning-aware (the FD self-error at
+  two step sizes widens the band so ill-conditioned seams don't fire
+  false hits). `CheckpointStore` is the content-addressed spill
+  contract shared with Proposal 2's cache discipline: `spilled_adjoint`
+  reproduces BIT-EQUAL gradients with and without spill (f64↔bytes
+  round-trips are exact), verified against the real fs-ledger CAS via
+  dev-deps.
+
 ## Invariants
 
 - No differentiation through Krylov iterations anywhere: adjoints are
@@ -117,3 +134,19 @@ gradient and REJECTING a corrupted one; cross-ISA golden hash.
 - The ci-gauntlet WIRING of `verify_gradient` (merge-blocking) is
   that pipeline bead's scope; the gate helper and its self-test live
   here.
+
+## No-claim boundaries (transpose)
+
+- The registry chains VJPs the ops SUPPLY; per-solver adjoint
+  correctness (IFT, revolve schedules, Hadamard forms) is the base
+  modules' contract, not re-verified here.
+- Solver VJPs must be TRANSPOSED solves; nothing in this module
+  differentiates through Krylov iterations, and non-symmetric transposed
+  preconditioner plumbing (BDDC transposes) lands with the solver-dd
+  bead.
+- The kill criterion (adjoint-driven optimization beating derivative-free
+  baselines on ≥70% of wedge tasks) is a QUARTERLY measurement owned by
+  governance; this module ships the machinery and the falsifier.
+- Tape recording is caller-driven (the forward code applies ops and
+  records); automatic capture from live ledger op rows lands with the
+  Proposal-2 integration.

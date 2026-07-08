@@ -1357,6 +1357,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-topopt"
+version = "0.0.1"
+dependencies = [
+ "fs-adjoint",
+ "fs-ascent",
+ "fs-feec",
+ "fs-la",
+ "fs-material",
+ "fs-math",
+ "fs-rand",
+ "fs-rep-mesh",
+ "fs-solver",
+ "fs-sparse",
+]
+
+[[package]]
 name = "fs-verify"
 version = "0.0.1"
 dependencies = [
