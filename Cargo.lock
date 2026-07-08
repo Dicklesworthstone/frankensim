@@ -1328,6 +1328,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-symmetry"
+version = "0.0.1"
+
+[[package]]
 name = "fs-tilelang"
 version = "0.0.1"
 dependencies = [

@@ -139,6 +139,7 @@ fn norm_inf(v: &[f64]) -> f64 {
 
 /// Dense symmetric eigenvalues by cyclic Jacobi (small matrices —
 /// patch counts, not DOF counts).
+#[allow(clippy::needless_range_loop)] // rotations touch (k,p),(k,q) pairs
 fn jacobi_eigenvalues(mut a: Vec<Vec<f64>>) -> Vec<f64> {
     let n = a.len();
     for _sweep in 0..64 {

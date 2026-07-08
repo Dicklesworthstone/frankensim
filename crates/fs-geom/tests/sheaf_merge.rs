@@ -12,8 +12,7 @@
 use std::collections::BTreeMap;
 
 use fs_geom::sheaf_merge::{
-    BranchState, Confidence, MergeOutcome, harmonic_conflict_rate, spectral_gap,
-    three_way_merge,
+    BranchState, Confidence, MergeOutcome, harmonic_conflict_rate, spectral_gap, three_way_merge,
 };
 use fs_geom::sheaf_repair::SheafSkeleton;
 
@@ -198,9 +197,7 @@ fn sm_004_sev0_escalates_instead_of_false_certificate() {
     // And the trivial fast paths themselves.
     let same = branch("s", sk.d0(&[0.0, 0.01, 0.0]));
     let t1 = three_way_merge(&sk, &base, &same, &same.clone(), None, 1e-9, 1e-6);
-    assert!(
-        matches!(t1, MergeOutcome::Trivial { reason, .. } if reason == "branches identical")
-    );
+    assert!(matches!(t1, MergeOutcome::Trivial { reason, .. } if reason == "branches identical"));
     let unchanged = branch("u", base.clone());
     let t2 = three_way_merge(&sk, &base, &unchanged, &same, None, 1e-9, 1e-6);
     assert!(
@@ -267,7 +264,10 @@ fn sm_005_type_conflicts_and_degraded_gap() {
     }
     // A healthy complex at the same threshold is Normal.
     let healthy_gap = spectral_gap(&sk, None);
-    assert!(healthy_gap > 1e-3, "triangle is well-coupled: {healthy_gap}");
+    assert!(
+        healthy_gap > 1e-3,
+        "triangle is well-coupled: {healthy_gap}"
+    );
     verdict(
         "sm-005",
         "same-key load-case collision caught before decomposition; the weak-link \

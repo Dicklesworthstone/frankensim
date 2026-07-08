@@ -112,6 +112,27 @@ Depends on fs-exec (Cx), fs-evidence, fs-alloc, fs-obs.
   Rep-Router reroute with modeled cost); `apply_gauge` is the
   constructive, idempotent step.
 
+- `sheaf_merge` module (Proposal 10's CROWN JEWEL, bead lmp4.12; [M],
+  behind the `sheaf-merge` feature — which enables `sheaf-repair` —
+  until its Gauntlet tier + kill metric are green): the sheaf machinery
+  as a merge-conflict classifier. `three_way_merge` forms the union of
+  edits (X + Y − B at the cochain level), Hodge-decomposes, applies the
+  canonical least-squares gauge reconciliation, and RE-VERIFIES the
+  reconciled state's own certificate before reporting resolved (Sev-0:
+  a passing certificate is never attached over a failing state).
+  Verification failures classify: a dominant harmonic residue above
+  tolerance is a STRUCTURAL CONFLICT localized to its supporting cells
+  with both parents' provenance; anything else (coexact circulation)
+  ESCALATES unresolved. Auto-resolution is licensed exactly when the
+  reconciled state passes — a harmonic remnant below the watertightness
+  tolerance is not an obstruction (a lesson the kill-criterion harness
+  taught: machine-floor triggers made every noisy merge conflict).
+  Type-level collisions (same key, different values) are caught BEFORE
+  decomposition; trust is conditioned on `spectral_gap` (weighted
+  algebraic connectivity, Jacobi eigenvalues) with LowGap flagging
+  (R5). `harmonic_conflict_rate` is the kill-criterion measurement
+  (25% line).
+
 ## Invariants
 1. Trait laws (G0, geo-001, 12k seeded queries): `inside(x)` ⇔ `sd(x) <
    0`; `support()` bounds the region (no negative sd outside, to
@@ -227,3 +248,16 @@ values, agreement determinism, and cancellation.
 - The harmonic cut-set is the harmonic component's support, minimal for
   the reported cochain; graph-min-cut refinement over weighted
   topologies is future work if fixtures demand it.
+
+## No-claim boundaries (merge)
+
+- The gap proxy is the weighted VERTEX-Laplacian algebraic
+  connectivity; full sheaf-Laplacian edge spectra land with the
+  Proposal-5/eigensolver integration (knh1.3).
+- Coupling-graph LEGALITY of merged assignments is fs-iface's contract
+  at its own layer; this module catches keyed collisions.
+- Merge operates on interface cochains (gauge states); merging chart
+  GEOMETRY payloads routes through the converters + semantic diff.
+- The kill measurement here is the harness; the quarterly swarm
+  concurrency TRIAL and any fallback to ownership partitioning are
+  governance decisions (xpck.6).
