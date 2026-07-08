@@ -681,3 +681,220 @@ fn eigenfreq_golden_hash() {
          semantic justification (golden-evidence policy)"
     );
 }
+
+#[test]
+fn stress_aggregate_fd_and_singularity_trap() {
+    use fs_topopt::stress_aggregate;
+    let (complex, positions, force, _vol) = cantilever(2);
+    let nt = complex.tets.len();
+    let pipeline = DesignPipeline {
+        filter: DensityFilter::new(&complex, &positions, 0.12),
+        params: SimpParams {
+            e_min: 1e-6,
+            penal: 3.0,
+            beta: 2.0,
+            eta: 0.5,
+        },
+    };
+    let mut el = DensityElasticity::new(&complex, &positions, 1.0, 0.3, &|p: [f64; 3]| {
+        p[0].to_bits() == 0.0f64.to_bits()
+    });
+    let rho0: Vec<f64> = rand_vec(nt, 140).iter().map(|v| 0.4 + 0.4 * v).collect();
+    // The stress-aggregate design gradient is NOT self-adjoint (one
+    // extra solve) — FD-gate it through the whole chain at two
+    // continuation stages.
+    for (penal, beta) in [(2.0f64, 1.0f64), (3.0, 4.0)] {
+        let pl = DesignPipeline {
+            filter: DensityFilter::new(&complex, &positions, 0.12),
+            params: SimpParams {
+                e_min: 1e-6,
+                penal,
+                beta,
+                eta: 0.5,
+            },
+        };
+        let rep = stress_aggregate(&pl, &mut el, &rho0, &force, 0.5, 8.0);
+        let j = |rho: &[f64]| -> f64 {
+            let mut el2 = DensityElasticity::new(&complex, &positions, 1.0, 0.3, &|p: [f64; 3]| {
+                p[0].to_bits() == 0.0f64.to_bits()
+            });
+            stress_aggregate(&pl, &mut el2, rho, &force, 0.5, 8.0).pnorm
+        };
+        let dirs: Vec<Vec<f64>> = (0..2).map(|k| rand_vec(nt, 150 + k)).collect();
+        let verdict = fs_adjoint::verify_gradient(&j, &rho0, &rep.gradient, &dirs, 1e-5, 1e-3);
+        assert!(
+            verdict.pass,
+            "stress gradient failed FD at (p={penal}, beta={beta}): {:.3e}",
+            verdict.max_rel_err
+        );
+        log(
+            "stress-fd",
+            "pass",
+            &format!(
+                "p={penal} beta={beta} rel {:.2e}, PN {:.3e}, c_adapt {:.2}",
+                verdict.max_rel_err, rep.pnorm, rep.adaptive_c
+            ),
+        );
+    }
+    // SINGULARITY-TRAP regression: drive a block of cells to the void
+    // floor — their RELAXED measures must be a NEGLIGIBLE share of the
+    // aggregate (the qp-relaxation claim: ρ^q·E(ρ)·vm → 0 at the void
+    // floor even though E_min keeps displacements finite), and the
+    // gradient must stay FD-verifiable AT the void design (no
+    // numerical blowup at the floor — the trap's practical symptom).
+    let mut rho_void = rho0.clone();
+    for r in rho_void.iter_mut().take(nt / 3) {
+        *r = 1e-3;
+    }
+    let rep_v = stress_aggregate(&pipeline, &mut el, &rho_void, &force, 0.5, 8.0);
+    assert!(
+        rep_v.pnorm.is_finite() && rep_v.sigma_max.is_finite(),
+        "void design produced non-finite stress measures"
+    );
+    let (_, rho_bar_v, _) = pipeline.forward(&rho_void);
+    let void_max = rep_v
+        .relaxed
+        .iter()
+        .zip(&rho_bar_v)
+        .filter(|&(_, &rb)| rb < 0.1)
+        .map(|(t, _)| *t)
+        .fold(0.0f64, f64::max);
+    assert!(
+        void_max < 0.05 * rep_v.sigma_max,
+        "void cells must not drive the constraint: void max {:.3e} vs sigma_max {:.3e}",
+        void_max,
+        rep_v.sigma_max
+    );
+    let j_void = |rho: &[f64]| -> f64 {
+        let mut el2 = DensityElasticity::new(&complex, &positions, 1.0, 0.3, &|p: [f64; 3]| {
+            p[0].to_bits() == 0.0f64.to_bits()
+        });
+        stress_aggregate(&pipeline, &mut el2, rho, &force, 0.5, 8.0).pnorm
+    };
+    let dirs_v: Vec<Vec<f64>> = (0..2).map(|k| rand_vec(nt, 170 + k)).collect();
+    let verdict_v =
+        fs_adjoint::verify_gradient(&j_void, &rho_void, &rep_v.gradient, &dirs_v, 1e-5, 1e-3);
+    assert!(
+        verdict_v.pass,
+        "gradient blew up at the void floor: {:.3e}",
+        verdict_v.max_rel_err
+    );
+    log(
+        "stress-trap",
+        "pass",
+        &format!(
+            "void max share {:.3}%, FD at floor rel {:.2e}",
+            100.0 * void_max / rep_v.sigma_max,
+            verdict_v.max_rel_err
+        ),
+    );
+}
+
+#[test]
+fn stress_descent_reduces_max_stress() {
+    use fs_topopt::stress_aggregate;
+    // The acceptance-style comparison: descend on the stress aggregate
+    // at fixed volume and verify the TRUE max relaxed stress drops vs
+    // the uniform start (measured; compliance-optimal-baseline
+    // comparisons join the L-bracket fixture in the CutFEM lane where
+    // stress concentrations are geometrically meaningful).
+    let (complex, positions, force, vol) = cantilever(2);
+    let nt = complex.tets.len();
+    let pipeline = DesignPipeline {
+        filter: DensityFilter::new(&complex, &positions, 0.12),
+        params: SimpParams {
+            e_min: 1e-6,
+            penal: 3.0,
+            beta: 2.0,
+            eta: 0.5,
+        },
+    };
+    let mut el = DensityElasticity::new(&complex, &positions, 1.0, 0.3, &|p: [f64; 3]| {
+        p[0].to_bits() == 0.0f64.to_bits()
+    });
+    let vol_frac = 0.5f64;
+    let total: f64 = vol.iter().sum();
+    let project = |rho: &mut Vec<f64>| {
+        for _ in 0..40 {
+            let v: f64 = rho.iter().zip(&vol).map(|(r, w)| r * w).sum::<f64>() / total;
+            let s = vol_frac / v.max(1e-12);
+            for r in rho.iter_mut() {
+                *r = (*r * s).clamp(1e-3, 1.0);
+            }
+            if (v - vol_frac).abs() < 1e-6 {
+                break;
+            }
+        }
+    };
+    let mut rho = vec![vol_frac; nt];
+    project(&mut rho);
+    let rep0 = stress_aggregate(&pipeline, &mut el, &rho, &force, 0.5, 8.0);
+    for _ in 0..10 {
+        let rep = stress_aggregate(&pipeline, &mut el, &rho, &force, 0.5, 8.0);
+        let gnorm = rep
+            .gradient
+            .iter()
+            .map(|x| x.abs())
+            .fold(0.0f64, f64::max)
+            .max(1e-30);
+        for (r, gi) in rho.iter_mut().zip(&rep.gradient) {
+            *r = (*r - 0.08 * gi / gnorm).clamp(1e-3, 1.0);
+        }
+        project(&mut rho);
+    }
+    let rep_final = stress_aggregate(&pipeline, &mut el, &rho, &force, 0.5, 8.0);
+    assert!(
+        rep_final.sigma_max < 0.9 * rep0.sigma_max,
+        "descent must reduce the true max stress: {:.4e} -> {:.4e}",
+        rep0.sigma_max,
+        rep_final.sigma_max
+    );
+    log(
+        "stress-descent",
+        "pass",
+        &format!(
+            "sigma_max {:.4e} -> {:.4e} (-{:.0}%), PN tracks via c {:.2}",
+            rep0.sigma_max,
+            rep_final.sigma_max,
+            100.0 * (1.0 - rep_final.sigma_max / rep0.sigma_max),
+            rep_final.adaptive_c
+        ),
+    );
+}
+
+const STRESS_GOLDEN_HASH: u64 = 0; // recorded on first run, then frozen
+
+#[test]
+fn stress_golden_hash() {
+    use fs_topopt::{stress_aggregate, von_mises};
+    let mut acc: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut feed = |v: f64| {
+        for byte in v.to_bits().to_le_bytes() {
+            acc ^= u64::from(byte);
+            acc = acc.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    };
+    feed(von_mises(&[1.0, 0.5, -0.2, 0.3, 0.0, 0.1]));
+    let (complex, positions, force, _vol) = cantilever(2);
+    let nt = complex.tets.len();
+    let pipeline = DesignPipeline {
+        filter: DensityFilter::new(&complex, &positions, 0.15),
+        params: SimpParams::default(),
+    };
+    let mut el = DensityElasticity::new(&complex, &positions, 1.0, 0.3, &|p: [f64; 3]| {
+        p[0].to_bits() == 0.0f64.to_bits()
+    });
+    let rho: Vec<f64> = rand_vec(nt, 160).iter().map(|v| 0.4 + 0.4 * v).collect();
+    let rep = stress_aggregate(&pipeline, &mut el, &rho, &force, 0.5, 8.0);
+    feed(rep.pnorm);
+    feed(rep.sigma_max);
+    for v in rep.gradient.iter().step_by(9) {
+        feed(*v);
+    }
+    log("stress-golden", "info", &format!("{acc:#018x}"));
+    assert_eq!(
+        acc, STRESS_GOLDEN_HASH,
+        "stress bits changed: {acc:#018x} vs {STRESS_GOLDEN_HASH:#018x} — bump only with \
+         semantic justification (golden-evidence policy)"
+    );
+}

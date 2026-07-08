@@ -20,6 +20,9 @@ pub struct DensityElasticity {
     /// the P1 tet pattern (|V|/20)·(1 + δ_ab) per displacement
     /// component — kept separate like `ke` for exact chain rules.
     me: Vec<[f64; 144]>,
+    /// Per-cell C·B products (6×12 row-major): unit-modulus stress
+    /// recovery σ = CB·u_local (constant per P1 tet).
+    cb: Vec<[f64; 72]>,
     /// Cell → 4 vertex ids.
     tets: Vec<[u32; 4]>,
     /// Vector-dof count (3 per vertex).
@@ -48,6 +51,7 @@ impl DensityElasticity {
         let c = law.tangent(&[0.0; 6], &());
         let geo = fs_feec::element_geometry(complex, positions);
         let mut ke = Vec::with_capacity(complex.tets.len());
+        let mut cb = Vec::with_capacity(complex.tets.len());
         for (t, _tet) in complex.tets.iter().enumerate() {
             let vol = geo.vol_signed[t].abs();
             // Bᵀ rows per node (3×6), from ∇λ_a.
@@ -78,6 +82,24 @@ impl DensityElasticity {
                 }
             }
             ke.push(k);
+            // CB (6×12): stress = C·(B·u); B rows are the bt blocks
+            // transposed.
+            let mut cbm = [0.0f64; 72];
+            for bnode in 0..4 {
+                let btb = bt(bnode);
+                for si in 0..6 {
+                    // σ_si column (3b+comp) = Σ_q C[si][q]·B[q][3b+comp],
+                    // and B row q at that column is btb[comp][q].
+                    for (comp, btbc) in btb.iter().enumerate() {
+                        let mut v = 0.0f64;
+                        for q in 0..6 {
+                            v = c[si][q].mul_add(btbc[q], v);
+                        }
+                        cbm[si * 12 + 3 * bnode + comp] = v;
+                    }
+                }
+            }
+            cb.push(cbm);
         }
         // Consistent unit-density mass blocks.
         let mut me = Vec::with_capacity(complex.tets.len());
@@ -106,6 +128,7 @@ impl DensityElasticity {
         DensityElasticity {
             ke,
             me,
+            cb,
             tets: complex.tets.clone(),
             n,
             free,
@@ -167,6 +190,58 @@ impl DensityElasticity {
             }
         }
         (kd, md, free_idx)
+    }
+
+    /// Per-cell UNIT-MODULUS stress vectors σ = CB·u_local (6 Voigt
+    /// components per cell; multiply by the stress interpolation
+    /// outside) and the von Mises scalar per cell.
+    #[must_use]
+    pub fn cell_stress(&self, u: &[f64]) -> Vec<[f64; 6]> {
+        let mut out = Vec::with_capacity(self.cb.len());
+        for (cbm, tet) in self.cb.iter().zip(&self.tets) {
+            let mut ul = [0.0f64; 12];
+            for (a, &v) in tet.iter().enumerate() {
+                for comp in 0..3 {
+                    let d = 3 * v as usize + comp;
+                    ul[3 * a + comp] = if self.free[d] { u[d] } else { 0.0 };
+                }
+            }
+            let mut sig = [0.0f64; 6];
+            for (si, sv) in sig.iter_mut().enumerate() {
+                let mut acc = 0.0f64;
+                for (j, uj) in ul.iter().enumerate() {
+                    acc = cbm[si * 12 + j].mul_add(*uj, acc);
+                }
+                *sv = acc;
+            }
+            out.push(sig);
+        }
+        out
+    }
+
+    /// Pullback of per-cell stress sensitivities to the dof vector:
+    /// given dJ/dσ per cell (6 Voigt each), returns Σ_c (CB_c)ᵀ·dJ/dσ_c
+    /// scattered to free dofs — the RHS of the stress adjoint solve.
+    #[must_use]
+    pub fn stress_pullback(&self, dj_dsigma: &[[f64; 6]]) -> Vec<f64> {
+        let mut rhs = vec![0.0f64; self.n];
+        for ((cbm, tet), ds) in self.cb.iter().zip(&self.tets).zip(dj_dsigma) {
+            for (a, &v) in tet.iter().enumerate() {
+                for comp in 0..3 {
+                    let d = 3 * v as usize + comp;
+                    if !self.free[d] {
+                        continue;
+                    }
+                    let col = 3 * a + comp;
+                    let mut acc = 0.0f64;
+                    for (si, dsi) in ds.iter().enumerate() {
+                        acc = cbm[si * 12 + col].mul_add(*dsi, acc);
+                    }
+                    rhs[d] += acc;
+                }
+            }
+        }
+        rhs
     }
 
     /// Per-cell KINETIC quadratic form m_c = uᵀ·M_c·u (unit density —

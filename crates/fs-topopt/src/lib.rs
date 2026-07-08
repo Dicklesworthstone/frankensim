@@ -26,6 +26,7 @@ pub mod filter;
 pub mod oc;
 pub mod pipeline;
 pub mod robust;
+pub mod stress;
 
 pub use eigenfreq::{
     eigenfrequency_objective, eigenvalue_gradient, lowest_eigenpairs, mass_interp, smooth_min,
@@ -35,6 +36,7 @@ pub use filter::{DensityFilter, heaviside, heaviside_derivative};
 pub use oc::{OcReport, optimality_criteria};
 pub use pipeline::{DesignPipeline, SimpParams};
 pub use robust::{RobustPipeline, RobustReport, ThreeField, robust_optimality_criteria};
+pub use stress::{StressReport, stress_aggregate, von_mises, von_mises_derivative};
 
 /// Crate version, re-exported for provenance stamping.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
