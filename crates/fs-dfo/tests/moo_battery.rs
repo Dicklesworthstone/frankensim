@@ -7,8 +7,8 @@
 //! form; bitwise replay (G5); and the golden hash.
 
 use fs_dfo::{
-    Individual, NsgaParams, cvar_rockafellar_uryasev, hypervolume, knee_point, non_dominated_sort,
-    nsga2,
+    Individual, NsgaParams, crowding_distance, cvar_rockafellar_uryasev, hypervolume, knee_point,
+    non_dominated_sort, nsga2,
 };
 use fs_rand::StreamKey;
 
@@ -72,6 +72,13 @@ fn hypervolume_hand_computed() {
         &[1.0, 1.0, 1.0],
     );
     assert!((hv6 - 0.14).abs() < 1e-12, "{hv6}");
+    // 1D and malformed-dimensional points are public helper edge cases:
+    // 1D measures the interval to the best point, while malformed points
+    // are ignored rather than panicking.
+    let hv7 = hypervolume(&[vec![0.4], vec![0.2]], &[1.0]);
+    assert!((hv7 - 0.8).abs() < 1e-12, "{hv7}");
+    let hv8 = hypervolume(&[vec![0.2, 0.3], vec![0.4]], &[1.0, 1.0]);
+    assert!((hv8 - 0.56).abs() < 1e-12, "{hv8}");
     log(
         "hypervolume",
         "pass",
@@ -96,6 +103,18 @@ fn non_dominated_sort_laws() {
     assert_eq!(fronts[3], 1);
     assert_eq!(fronts[4], 2);
     log("nds", "pass", "front assignment exact");
+}
+
+#[test]
+fn helper_edges_do_not_panic() {
+    let empty: [&Individual; 0] = [];
+    assert!(crowding_distance(&empty).is_empty());
+    let one = Individual {
+        x: vec![],
+        f: vec![1.0, 2.0],
+    };
+    assert_eq!(crowding_distance(&[&one]), vec![f64::INFINITY]);
+    log("helper-edges", "pass", "degenerate public helpers handled");
 }
 
 #[test]
@@ -236,6 +255,15 @@ fn cvar_matches_gaussian_closed_form() {
         "pass",
         &format!("cvar {cvar:.4}/{cvar_true:.4}, var {alpha:.4}/{var_true:.4}"),
     );
+}
+
+#[test]
+fn cvar_handles_ties_in_linear_tail_pass() {
+    let losses = [0.0, 0.0, 10.0, 10.0];
+    let (cvar, alpha) = cvar_rockafellar_uryasev(&losses, 0.5);
+    assert_eq!(alpha, 0.0);
+    assert!((cvar - 10.0).abs() < 1e-12, "{cvar}");
+    log("cvar-ties", "pass", "duplicate order statistics handled");
 }
 
 const GOLDEN_HASH: u64 = 0xaf70_6167_593f_51cc; // recorded at 7tv.16 slice 1, frozen

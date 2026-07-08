@@ -78,6 +78,9 @@ pub fn non_dominated_sort(pop: &[Individual]) -> Vec<usize> {
 #[must_use]
 pub fn crowding_distance(front: &[&Individual]) -> Vec<f64> {
     let n = front.len();
+    if n == 0 {
+        return Vec::new();
+    }
     let m = front[0].f.len();
     let mut dist = vec![0.0f64; n];
     for obj in 0..m {
@@ -263,9 +266,12 @@ fn mutate(x: &mut [f64], eta: f64, p_mut: f64, lo: f64, hi: f64, stream: &mut fs
 /// Higher m (≤ 4 intended): recursive exclusive contributions.
 #[must_use]
 pub fn hypervolume(front: &[Vec<f64>], reference: &[f64]) -> f64 {
+    if reference.is_empty() {
+        return 0.0;
+    }
     let pts: Vec<Vec<f64>> = front
         .iter()
-        .filter(|p| p.iter().zip(reference).all(|(a, r)| a < r))
+        .filter(|p| p.len() == reference.len() && p.iter().zip(reference).all(|(a, r)| a < r))
         .cloned()
         .collect();
     if pts.is_empty() {
@@ -276,6 +282,14 @@ pub fn hypervolume(front: &[Vec<f64>], reference: &[f64]) -> f64 {
 
 fn hv_recursive(pts: &[Vec<f64>], reference: &[f64]) -> f64 {
     let m = reference.len();
+    if m == 1 {
+        let best = pts
+            .iter()
+            .map(|p| p[0])
+            .min_by(f64::total_cmp)
+            .unwrap_or(reference[0]);
+        return (reference[0] - best).max(0.0);
+    }
     if m == 2 {
         // Sort by f1 ascending, deterministic tie-break on f2.
         let mut sorted = pts.to_vec();
@@ -363,18 +377,23 @@ pub fn knee_point(front: &[Vec<f64>]) -> usize {
 /// (deterministic; no inner optimizer needed).
 #[must_use]
 pub fn cvar_rockafellar_uryasev(losses: &[f64], beta: f64) -> (f64, f64) {
-    assert!(beta > 0.0 && beta < 1.0);
+    assert!(beta.is_finite() && beta > 0.0 && beta < 1.0);
+    assert!(!losses.is_empty(), "CVaR needs at least one loss sample");
+    assert!(
+        losses.iter().all(|l| l.is_finite()),
+        "CVaR loss samples must be finite"
+    );
     let n = losses.len() as f64;
     let mut sorted = losses.to_vec();
     sorted.sort_by(f64::total_cmp);
     let mut best = (f64::INFINITY, 0.0f64);
-    for &alpha in &sorted {
-        let excess: f64 = sorted
-            .iter()
-            .rev()
-            .take_while(|&&l| l > alpha)
-            .map(|l| l - alpha)
-            .sum();
+    let mut suffix_sum = vec![0.0f64; sorted.len() + 1];
+    for i in (0..sorted.len()).rev() {
+        suffix_sum[i] = suffix_sum[i + 1] + sorted[i];
+    }
+    for (i, &alpha) in sorted.iter().enumerate() {
+        let tail_count = sorted.len() - i - 1;
+        let excess = (suffix_sum[i + 1] - alpha * tail_count as f64).max(0.0);
         let val = alpha + excess / (n * (1.0 - beta));
         if val < best.0 {
             best = (val, alpha);
