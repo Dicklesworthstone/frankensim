@@ -799,6 +799,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-asbuilt"
+version = "0.0.1"
+dependencies = [
+ "fs-evidence",
+]
+
+[[package]]
 name = "fs-ascent"
 version = "0.0.1"
 dependencies = [
@@ -971,6 +978,19 @@ name = "fs-fft"
 version = "0.0.1"
 dependencies = [
  "fs-math",
+]
+
+[[package]]
+name = "fs-flywheel-e2e"
+version = "0.0.1"
+dependencies = [
+ "fs-benchmark",
+ "fs-evidence",
+ "fs-geom",
+ "fs-ledger",
+ "fs-qty",
+ "fs-recompute",
+ "fs-spececo",
 ]
 
 [[package]]

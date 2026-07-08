@@ -1,0 +1,31 @@
+[package]
+name = "fs-flywheel-e2e"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "FLYWHEEL CLOSES: the whole-loop e2e harness proving 9->2->10->E compound (super-additive speedup, colors end-to-end, G4 storm + G5 determinism across the loop)."
+
+[package.metadata.frankensim]
+layer = "L6"
+
+[dependencies]
+fs-benchmark = { path = "../fs-benchmark" }
+fs-evidence = { path = "../fs-evidence" }
+fs-geom = { path = "../fs-geom", features = ["sheaf-merge"] }
+fs-ledger = { path = "../fs-ledger" }
+fs-qty = { path = "../fs-qty" }
+fs-recompute = { path = "../fs-recompute" }
+fs-spececo = { path = "../fs-spececo" }
+
+[dev-dependencies]
+fs-ledger = { path = "../fs-ledger" }
+
+[features]
+# [F]-gated per the Ambition-Tag rule: the flagship loop harness ships
+# disabled until its Gauntlet tier + kill metric are green.
+flywheel-e2e = []
+
+[lints]
+workspace = true
