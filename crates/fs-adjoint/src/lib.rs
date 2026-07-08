@@ -22,6 +22,8 @@
 
 pub mod hadamard;
 pub mod ift;
+#[cfg(feature = "diff-mitigations")]
+pub mod mitigate;
 pub mod sobolev;
 pub mod timedep;
 #[cfg(feature = "ledger-transpose")]

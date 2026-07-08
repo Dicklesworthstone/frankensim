@@ -12,7 +12,9 @@ layer = "L3"
 
 [dependencies]
 fs-ad = { path = "../fs-ad" }
+fs-evidence = { path = "../fs-evidence" }
 fs-feec = { path = "../fs-feec" }
+fs-geom = { path = "../fs-geom" }
 fs-la = { path = "../fs-la" }
 fs-math = { path = "../fs-math" }
 fs-rep-mesh = { path = "../fs-rep-mesh" }
@@ -23,6 +25,9 @@ fs-sparse = { path = "../fs-sparse" }
 # [F]-gated per the Ambition-Tag rule: the ledger-DAG transposition
 # layer ships disabled until its Gauntlet tier + kill metric are green.
 ledger-transpose = []
+# [F]-gated: the non-differentiable meshing mitigations (routing term,
+# Hadamard path, estimated+flag downgrade).
+diff-mitigations = ["ledger-transpose"]
 
 [dev-dependencies]
 fs-ledger = { path = "../fs-ledger" }
