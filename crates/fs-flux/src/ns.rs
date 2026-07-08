@@ -5,8 +5,9 @@
 //! upwinded DG convection on the normal-continuous advecting field
 //! (w·n is single-valued on faces — H(div)'s gift to upwinding),
 //! Picard iteration for steady NS, IMEX BDF1 for transients, and the
-//! discrete adjoint of the linearized system. Pressure is pinned in
-//! cell 0 (pure-Dirichlet fixtures determine it up to a constant).
+//! discrete adjoint of the linearized system. No pressure pin: weak velocity
+//! BCs put boundary fluxes in the test space, so the pressure level
+//! is determined by the formulation itself.
 
 use crate::bdm::{CellBasis, cell_basis, eval_basis, tri_quad};
 use crate::trimesh::TriMesh;
@@ -253,9 +254,11 @@ impl<'m> FluxSystem<'m> {
         if let Some(wfield) = advect {
             self.add_convection(&mut coo, &mut rhs, wfield, g);
         }
-        // Pressure pin (cell 0).
-        let pin = self.n_u;
-        coo.push(pin, pin, 1.0);
+        // No pressure pin: with fully weak Dirichlet BCs the constant
+        // is NOT in null(B^T) — boundary-edge dofs carry net flux, so
+        // b(v, 1) = -boundary flux of v is nonzero and the saddle is
+        // nonsingular as assembled. (A pin ADDED to the cell-0
+        // continuity row would break exact div-freeness there.)
         (coo.assemble(), rhs)
     }
 
