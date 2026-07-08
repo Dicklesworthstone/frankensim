@@ -1,0 +1,18 @@
+[package]
+name = "fs-surrogate"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Learned accelerators with guarantees (fs-surrogate): classical reduced-order models permitted ONLY inside certified validity bands — ML proposes, certified numerics disposes. A POD reduced-order model (method of snapshots), distribution-free conformal prediction bands with empirical coverage, and the certify-or-escalate policy that uses the surrogate only when its band is narrow enough for the decision."
+
+[package.metadata.frankensim]
+layer = "L4"
+
+[dependencies]
+
+[dev-dependencies]
+
+[lints]
+workspace = true
