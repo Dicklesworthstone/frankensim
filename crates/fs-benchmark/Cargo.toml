@@ -1,0 +1,19 @@
+[package]
+name = "fs-benchmark"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "The wedge-vertical benchmark & trace corpus (addendum Proposal 7): a single versioned, deterministic artifact — conjugate-heat-transfer query set, optimizer design tasks, edit traces, MMS battery, merge trials — with measurement helpers so the kill criteria of six+ proposals are instrumented rather than killed-by-default (Governance Rule 2)."
+
+[package.metadata.frankensim]
+layer = "UTIL"
+
+[dependencies]
+fs-evidence = { path = "../fs-evidence" }
+
+[dev-dependencies]
+
+[lints]
+workspace = true
