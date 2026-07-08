@@ -787,11 +787,72 @@ mod wasm {
         super::compensated_sum(count, log10_big)
     }
 
+    /* ------------------------------------------------------------------- */
+    /*  Tier-2 demos (3D / WebGL): fields, meshes, trajectories             */
+    /* ------------------------------------------------------------------- */
+
+    #[wasm_bindgen]
+    pub fn topopt_frames(nx: usize, ny: usize, iters: usize, volfrac: f64) -> Vec<f64> {
+        super::topopt_frames(nx, ny, iters, volfrac)
+    }
+
+    #[wasm_bindgen]
+    pub fn marching_cubes(res: usize, kind: u32, iso: f64) -> Vec<f64> {
+        super::marching_cubes(res, kind, iso)
+    }
+
+    #[wasm_bindgen]
+    pub fn sdf_volume(res: usize, kind: u32, t: f64) -> Vec<f64> {
+        super::sdf_volume(res, kind, t)
+    }
+
+    #[wasm_bindgen]
+    pub fn ga_motor_orbit(n_points: usize, steps: usize) -> Vec<f64> {
+        super::ga_motor_orbit(n_points, steps)
+    }
+
+    #[wasm_bindgen]
+    pub fn symplectic_vs_euler(steps: usize, dt: f64) -> Vec<f64> {
+        super::symplectic_vs_euler(steps, dt)
+    }
+
+    #[wasm_bindgen]
+    pub fn lorenz_points(steps: usize, dt: f64, rho: f64) -> Vec<f64> {
+        super::lorenz_points(steps, dt, rho)
+    }
+
+    #[wasm_bindgen]
+    pub fn wave2d_frames(n: usize, frames: usize, steps_per_frame: usize) -> Vec<f64> {
+        super::wave2d_frames(n, frames, steps_per_frame)
+    }
+
+    #[wasm_bindgen]
+    pub fn gray_scott_frames(n: usize, frames: usize, feed: f64, kill: f64) -> Vec<f64> {
+        super::gray_scott_frames(n, frames, feed, kill)
+    }
+
+    #[wasm_bindgen]
+    pub fn mandelbrot_certified(
+        w: usize,
+        h: usize,
+        cx: f64,
+        cy: f64,
+        scale: f64,
+        maxiter: usize,
+    ) -> Vec<f64> {
+        super::mandelbrot_certified(w, h, cx, cy, scale, maxiter)
+    }
+
+    #[wasm_bindgen]
+    pub fn fluid_frames(n: usize, frames: usize) -> Vec<f64> {
+        super::fluid_frames(n, frames)
+    }
+
     /// A build stamp so the page can prove it's running the real engine.
     #[wasm_bindgen]
     pub fn engine() -> String {
         "fs-wasm · FrankenSim numerical kernels (fs-sparse · fs-cheb · fs-rand · fs-ivl · \
-         fs-ad · fs-fft · fs-la · fs-math)"
+         fs-ad · fs-fft · fs-la · fs-ga · fs-math)"
             .into()
     }
 }
