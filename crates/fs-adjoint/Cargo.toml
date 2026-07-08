@@ -17,6 +17,7 @@ fs-feec = { path = "../fs-feec" }
 fs-geom = { path = "../fs-geom" }
 fs-ivl = { path = "../fs-ivl" }
 fs-la = { path = "../fs-la" }
+fs-ledger = { path = "../fs-ledger", optional = true }
 fs-math = { path = "../fs-math" }
 fs-rep-mesh = { path = "../fs-rep-mesh" }
 fs-solver = { path = "../fs-solver" }
@@ -24,6 +25,8 @@ fs-verify = { path = "../fs-verify", features = ["certified-speculation"], optio
 fs-sparse = { path = "../fs-sparse" }
 
 [features]
+# [F]-gated per the Ambition-Tag rule (bead knh1.5, Proposal B).
+explanation-objects = ["dep:fs-ledger"]
 # [F]-gated per the Ambition-Tag rule: the ledger-DAG transposition
 # layer ships disabled until its Gauntlet tier + kill metric are green.
 ledger-transpose = []

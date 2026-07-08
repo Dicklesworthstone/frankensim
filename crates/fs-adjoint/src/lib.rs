@@ -24,6 +24,8 @@
 pub mod certs;
 #[cfg(feature = "dwr-accept")]
 pub mod dwr_accept;
+#[cfg(feature = "explanation-objects")]
+pub mod explain;
 pub mod hadamard;
 pub mod hessian;
 pub mod ift;
