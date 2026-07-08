@@ -252,9 +252,7 @@ fn mq_005_sphere_traced_render_no_meshing() {
         .expect("plate");
     let mut shape = plate;
     for (c, r) in report.design.centers.iter().zip(&report.design.radii) {
-        let hole = b
-            .cylinder(Point3::new(c[0], c[1], 0.0), *r)
-            .expect("hole");
+        let hole = b.cylinder(Point3::new(c[0], c[1], 0.0), *r).expect("hole");
         shape = b
             .boolean(
                 fs_rep_frep::BoolOp::Difference,

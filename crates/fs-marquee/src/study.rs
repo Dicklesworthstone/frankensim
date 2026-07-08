@@ -107,7 +107,9 @@ impl CutSdf for PlateWithHoles {
                 da.total_cmp(&db)
             })
             .expect("at least one hole");
-        let d = ((p[0] - c[0]).powi(2) + (p[1] - c[1]).powi(2)).sqrt().max(1e-12);
+        let d = ((p[0] - c[0]).powi(2) + (p[1] - c[1]).powi(2))
+            .sqrt()
+            .max(1e-12);
         [-(p[0] - c[0]) / d, -(p[1] - c[1]) / d]
     }
 
@@ -272,7 +274,10 @@ fn sample_nodal(grid: &Quadtree, nodal: &BTreeMap<(u32, u32), f64>, p: [f64; 2])
     let fx = (p[0].clamp(0.0, 1.0)) * scale;
     let fy = (p[1].clamp(0.0, 1.0)) * scale;
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let (ix, iy) = ((fx.floor() as u32).min(n - 2), (fy.floor() as u32).min(n - 2));
+    let (ix, iy) = (
+        (fx.floor() as u32).min(n - 2),
+        (fy.floor() as u32).min(n - 2),
+    );
     let (tx, ty) = (fx - f64::from(ix), fy - f64::from(iy));
     let v = |a: u32, b: u32| nodal.get(&(a, b)).copied().unwrap_or(0.0);
     (1.0 - tx) * (1.0 - ty) * v(ix, iy)
