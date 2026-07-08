@@ -1,0 +1,19 @@
+[package]
+name = "fs-toleralloc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Adjoint-driven tolerance allocation (addendum Proposal 11's commercial kicker): spend tight manufacturing tolerances only where dQoI/dgeometry is large, provably loosen elsewhere by first-order variance propagation, check the linearization at tolerance-band extremes, and emit a GD&T report where every loosened tolerance carries its certified sensitivity."
+
+[package.metadata.frankensim]
+layer = "L4"
+
+[dependencies]
+fs-evidence = { path = "../fs-evidence" }
+
+[dev-dependencies]
+
+[lints]
+workspace = true
