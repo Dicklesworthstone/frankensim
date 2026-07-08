@@ -100,8 +100,10 @@ fn source_velocity(foil: &Airfoil2d, g: &Geometry, j: usize, p: [f64; 2]) -> [f6
     let theta1 = yl.atan2(xl);
     let theta2 = yl.atan2(xl - l);
     let two_pi = std::f64::consts::TAU;
+    // v_n = (θ₂ − θ₁)/2π — the panel-probe battery pinned the
+    // reversed order (a source panel must push AWAY on both sides).
     let ul = (r1 / r2).ln() / two_pi;
-    let vl = (theta1 - theta2) / two_pi;
+    let vl = (theta2 - theta1) / two_pi;
     [ul * t[0] + vl * nrm[0], ul * t[1] + vl * nrm[1]]
 }
 
@@ -340,3 +342,4 @@ fn output_cl(foil: &Airfoil2d, g: &Geometry, x: &[f64], alpha: f64) -> f64 {
     }
     fy * alpha.cos() - fx * alpha.sin()
 }
+
