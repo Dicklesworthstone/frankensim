@@ -2,9 +2,9 @@
 //! the exact-sequence Euler identity, dof-Kronecker unisolvence + mass
 //! SPD, tangential/normal trace CONFORMITY across shared entities,
 //! dd = 0 through the discrete grad/curl/div chain, interpolation
-//! ladders at order r, the G3 relabeling battery (sorted-global
-//! frames make entity bases pointwise label-independent), r = 1
-//! cross-checks against the Whitney forms, and a frozen golden.
+//! ladders at order r, the two-tier G3 relabeling battery (edge dofs
+//! transform with definite parity; interpolated fields are label-
+//! invariant), r = 1 Whitney cross-checks, and a frozen golden.
 
 use fs_feec::highorder::simplex::SimplexSpace;
 use fs_feec::highorder::vecfam::{
@@ -66,7 +66,11 @@ fn vec_001_dimensions() {
         }
     }
     assert_eq!(dg_cell_dofs(3), 10, "P_2 dim");
-    log("vec-001", "pass", "dims + Euler alternating sum = 1, r=1..4");
+    log(
+        "vec-001",
+        "pass",
+        "dims + Euler alternating sum = 1, r=1..4",
+    );
 }
 
 /// vec-002: unisolvence — every element basis reproduces its defining
@@ -86,8 +90,7 @@ fn vec_002_unisolvence() {
                 let space = VecSpace::new(&complex, &positions, r, family);
                 let dofs = space.element_dofs(t);
                 for (j, f) in el.funcs.iter().enumerate() {
-                    let field =
-                        |p: [f64; 3]| f.eval_local(&el.monos, el.chart.local(p));
+                    let field = |p: [f64; 3]| f.eval_local(&el.monos, el.chart.local(p));
                     let vals = space.interpolate(&positions, &field);
                     for (i, &g) in dofs.iter().enumerate() {
                         let want = if i == j { 1.0 } else { 0.0 };
@@ -113,7 +116,11 @@ fn vec_002_unisolvence() {
             assert!(f.is_ok(), "mass SPD r={r}");
         }
     }
-    log("vec-002", "pass", &format!("Kronecker worst {worst:.2e}; mass SPD r=2,3"));
+    log(
+        "vec-002",
+        "pass",
+        &format!("Kronecker worst {worst:.2e}; mass SPD r=2,3"),
+    );
 }
 
 /// vec-003: conformity across the shared face of two_tets — for every
@@ -291,7 +298,10 @@ fn vec_005_interpolation_ladder() {
             log(
                 "vec-005",
                 "pass",
-                &format!("{fam} r={r}: errs {:.3e}/{:.3e} slope {slope:.2}", errs[0], errs[1]),
+                &format!(
+                    "{fam} r={r}: errs {:.3e}/{:.3e} slope {slope:.2}",
+                    errs[0], errs[1]
+                ),
             );
         }
     }
@@ -346,8 +356,8 @@ fn vec_006_relabeling() {
                         } else {
                             1.0
                         };
-                        let d = (u2[e2 * sp2.per_edge + k] - sign * u1[e1 * sp1.per_edge + k])
-                            .abs();
+                        let d =
+                            (u2[e2 * sp2.per_edge + k] - sign * u1[e1 * sp1.per_edge + k]).abs();
                         worst_sign = worst_sign.max(d);
                     }
                 }
@@ -453,11 +463,12 @@ fn vec_007_whitney_and_golden() {
         "pass",
         &format!("whitney edge {worst:.2e} face {worst_rt:.2e}; golden {acc:#018x}"),
     );
-    // Cross-ISA golden row: recorded on this platform; the second-ISA
-    // confirmation is LEDGERED PENDING (same policy as the simplex
-    // golden — see CONTRACT).
-    if let Ok(want) = std::env::var("FS_FEEC_VECFAM_GOLDEN") {
-        let want = u64::from_str_radix(want.trim_start_matches("0x"), 16).expect("hex");
-        assert_eq!(acc, want, "vecfam golden drift");
-    }
+    // Frozen on this platform (bead dcng); the cross-ISA confirmation
+    // is LEDGERED PENDING, same policy as the simplex golden.
+    const GOLDEN_HASH: u64 = 0x2737_401f_72b4_99f2;
+    assert_eq!(
+        acc, GOLDEN_HASH,
+        "vecfam bits changed: {acc:#018x} vs {GOLDEN_HASH:#018x} — bump only with semantic \
+         justification (golden-evidence policy)"
+    );
 }

@@ -858,8 +858,7 @@ impl<'c> VecSpace<'c> {
                     .collect();
                 for i in 0..nl {
                     for j in 0..nl {
-                        me[i * nl + j] =
-                            (w * vol6).mul_add(dot3(vals[i], vals[j]), me[i * nl + j]);
+                        me[i * nl + j] = (w * vol6).mul_add(dot3(vals[i], vals[j]), me[i * nl + j]);
                     }
                 }
             }
@@ -893,14 +892,8 @@ impl<'c> VecSpace<'c> {
         let nq = self.r + 7;
         for t in 0..self.complex.tets.len() {
             let el = &self.elements[t];
-            let fns = element_dof_functionals(
-                self.complex,
-                positions,
-                t,
-                self.r,
-                self.family,
-                el.chart,
-            );
+            let fns =
+                element_dof_functionals(self.complex, positions, t, self.r, self.family, el.chart);
             for (l, &g) in self.element_dofs(t).iter().enumerate() {
                 if !done[g] {
                     out[g] = fns[l].apply(u, nq);
@@ -1045,8 +1038,7 @@ pub fn curl_matrix(ned: &VecSpace<'_>, rt: &VecSpace<'_>, positions: &[[f64; 3]]
     let nq = rt.r + 3;
     for t in 0..rt.complex.tets.len() {
         let rt_el = &rt.elements[t];
-        let fns =
-            element_dof_functionals(rt.complex, positions, t, rt.r, Family::Rt, rt_el.chart);
+        let fns = element_dof_functionals(rt.complex, positions, t, rt.r, Family::Rt, rt_el.chart);
         let rt_dofs = rt.element_dofs(t);
         let ned_dofs = ned.element_dofs(t);
         let ned_el = &ned.elements[t];
