@@ -41,6 +41,19 @@ pub fn time_reps(f: &mut dyn FnMut(), warmup: usize, reps: usize) -> Sample {
 /// Order statistics from raw times (meta-tested against hand calculations).
 #[must_use]
 pub fn sample_from_times(times: Vec<f64>) -> Sample {
+    if times.is_empty() {
+        // No measurements: a defined zero sample rather than an index/underflow
+        // panic on the empty slice.
+        return Sample {
+            median: 0.0,
+            p25: 0.0,
+            p75: 0.0,
+            min: 0.0,
+            max: 0.0,
+            dispersion: 0.0,
+            times,
+        };
+    }
     let mut sorted = times.clone();
     sorted.sort_by(f64::total_cmp);
     let q = |p: f64| -> f64 {
@@ -80,6 +93,15 @@ mod tests {
         assert!((s.min - 1.0).abs() < 1e-15);
         assert!((s.max - 5.0).abs() < 1e-15);
         assert!((s.dispersion - 2.0 / 3.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn empty_times_is_defined_not_a_panic() {
+        // regression: sorted.len() - 1 underflowed and indexed an empty slice.
+        let s = sample_from_times(vec![]);
+        assert!((s.median - 0.0).abs() < 1e-15);
+        assert!((s.min - 0.0).abs() < 1e-15 && (s.max - 0.0).abs() < 1e-15);
+        assert!(s.times.is_empty());
     }
 
     #[test]
