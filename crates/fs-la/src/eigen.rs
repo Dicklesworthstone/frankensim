@@ -295,7 +295,13 @@ impl LobpcgState {
     /// Deterministic orthonormal start block (fixed pattern, QR-cleaned).
     #[must_use]
     pub fn new(n: usize, b: usize) -> LobpcgState {
-        assert!(b >= 1 && b <= n, "block size {b} out of range for n={n}");
+        // The search block Z = [X | W | P] has up to 3b columns, and its QR
+        // requires n >= columns; enforce that here rather than panicking deep
+        // inside `lobpcg_run`'s second iteration.
+        assert!(
+            b >= 1 && 3 * b <= n,
+            "block size {b} needs 3b <= n for the [X|W|P] search space; got n={n}"
+        );
         let mut x0 = vec![0.0f64; n * b];
         for j in 0..b {
             for i in 0..n {

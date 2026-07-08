@@ -267,6 +267,14 @@ fn resumability_is_bitwise() {
     );
 }
 
+#[test]
+#[should_panic(expected = "3b <= n")]
+fn lobpcg_rejects_a_block_too_large_for_the_search_space() {
+    // regression: n=6, b=3 passed the old `b <= n` assert then panicked deep in
+    // the second iteration's QR (search space [X|W|P] has zc = 3b = 9 > n = 6).
+    let _ = LobpcgState::new(6, 3);
+}
+
 /// Recorded on aarch64-apple (M4 Pro); must match on x86-64 (trj).
 const GOLDEN_HASH: u64 = 0x87da_0cb3_2344_b097;
 
