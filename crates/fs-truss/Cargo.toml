@@ -1,0 +1,21 @@
+[package]
+name = "fs-truss"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Ground-structure truss layout optimization: fnx candidate graphs, PDHG plastic-design LP with duality-gap certificates, Euler/code sizing with catalog snapping, fs-solid rod buckling spot checks."
+
+[package.metadata.frankensim]
+layer = "L4"
+
+[dependencies]
+fnx-classes = { path = "../../../franken_networkx/crates/fnx-classes" }
+fnx-runtime = { path = "../../../franken_networkx/crates/fnx-runtime" }
+fs-constraint = { path = "../fs-constraint" }
+fs-solid = { path = "../fs-solid" }
+fs-sparse = { path = "../fs-sparse" }
+
+[lints]
+workspace = true
