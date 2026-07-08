@@ -99,3 +99,6 @@ frankensim_illustration.png
 
 # bv (beads viewer) local config and caches
 .bv/
+
+# Beads compliance audit dir (managed by /beads-compliance-and-completion-verification skill)
+/beads_compliance_audit/
