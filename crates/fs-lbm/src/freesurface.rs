@@ -80,11 +80,11 @@ impl FreeSurface {
                     continue;
                 }
                 for q in 1..Q {
-                    if let Some(nb) = neighbor(&grid, x, y, q) {
-                        if grid.flags[nb] == Cell::Gas {
-                            promote.push(i);
-                            break;
-                        }
+                    if let Some(nb) = neighbor(&grid, x, y, q)
+                        && grid.flags[nb] == Cell::Gas
+                    {
+                        promote.push(i);
+                        break;
                     }
                 }
             }
@@ -93,10 +93,10 @@ impl FreeSurface {
             grid.flags[i] = Cell::Interface;
         }
         let mut mass = vec![0.0f64; nx * ny];
-        for i in 0..nx * ny {
+        for (i, m) in mass.iter_mut().enumerate().take(nx * ny) {
             match grid.flags[i] {
-                Cell::Fluid => mass[i] = grid.f[i].iter().sum(),
-                Cell::Interface => mass[i] = 0.5 * grid.f[i].iter().sum::<f64>(),
+                Cell::Fluid => *m = grid.f[i].iter().sum(),
+                Cell::Interface => *m = 0.5 * grid.f[i].iter().sum::<f64>(),
                 _ => {}
             }
         }
@@ -178,11 +178,12 @@ impl FreeSurface {
             while let Some(i) = stack.pop() {
                 let (x, y) = (i % nx, i / nx);
                 for q in [1usize, 2, 3, 4] {
-                    if let Some(nb) = neighbor(&self.grid, x, y, q) {
-                        if wet(nb) && !seen[nb] {
-                            seen[nb] = true;
-                            stack.push(nb);
-                        }
+                    if let Some(nb) = neighbor(&self.grid, x, y, q)
+                        && wet(nb)
+                        && !seen[nb]
+                    {
+                        seen[nb] = true;
+                        stack.push(nb);
                     }
                 }
             }
@@ -219,8 +220,8 @@ impl FreeSurface {
         // Normal components at the four face neighbors via one-sided
         // gradients of the smoothed field; divergence by differencing.
         let phi = |dx: i32, dy: i32| -> f64 {
-            let xx = wrap(x as i32 + dx, g.nx as i32, g.periodic_x);
-            let yy = wrap(y as i32 + dy, g.ny as i32, g.periodic_y);
+            let xx = offset_coord(x, dx, g.nx, g.periodic_x);
+            let yy = offset_coord(y, dy, g.ny, g.periodic_y);
             match (xx, yy) {
                 (Some(a), Some(b)) => self.phi_at(g.idx(a, b), i),
                 _ => self.fill_smooth[i],
@@ -249,11 +250,11 @@ impl FreeSurface {
                 let mut acc = raw[i];
                 let mut count = 1.0;
                 for q in 1..Q {
-                    if let Some(nb) = neighbor(&self.grid, x, y, q) {
-                        if self.grid.flags[nb] != Cell::Wall {
-                            acc += raw[nb];
-                            count += 1.0;
-                        }
+                    if let Some(nb) = neighbor(&self.grid, x, y, q)
+                        && self.grid.flags[nb] != Cell::Wall
+                    {
+                        acc += raw[nb];
+                        count += 1.0;
                     }
                 }
                 self.fill_smooth[i] = acc / count;
@@ -316,6 +317,11 @@ impl FreeSurface {
         }
         self.grid.f = new_f;
         self.scratch = post;
+        self.apply_conversions();
+    }
+
+    fn apply_conversions(&mut self) {
+        let (nx, ny) = (self.grid.nx, self.grid.ny);
         // Fluid mass is Σf; interface mass tracked. Conversions:
         let mut excess_pool = std::mem::take(&mut self.carry);
         let mut to_fluid = Vec::new();
@@ -341,36 +347,36 @@ impl FreeSurface {
             self.conversions.to_fluid += 1;
             let (x, y) = (i % nx, i / nx);
             for q in 1..Q {
-                if let Some(nb) = neighbor(&self.grid, x, y, q) {
-                    if self.grid.flags[nb] == Cell::Gas {
-                        // Initialize from the average of wet neighbors.
-                        let (nbx, nby) = (nb % nx, nb / nx);
-                        let mut rho_avg = 0.0;
-                        let mut u_avg = [0.0f64; 2];
-                        let mut cnt = 0.0;
-                        for q2 in 1..Q {
-                            if let Some(nn) = neighbor(&self.grid, nbx, nby, q2) {
-                                if matches!(self.grid.flags[nn], Cell::Fluid | Cell::Interface) {
-                                    let m2 = self.grid.moments(nn);
-                                    rho_avg += m2.rho;
-                                    u_avg[0] += m2.u[0];
-                                    u_avg[1] += m2.u[1];
-                                    cnt += 1.0;
-                                }
-                            }
+                if let Some(nb) = neighbor(&self.grid, x, y, q)
+                    && self.grid.flags[nb] == Cell::Gas
+                {
+                    // Initialize from the average of wet neighbors.
+                    let (nbx, nby) = (nb % nx, nb / nx);
+                    let mut rho_avg = 0.0;
+                    let mut u_avg = [0.0f64; 2];
+                    let mut cnt = 0.0;
+                    for q2 in 1..Q {
+                        if let Some(nn) = neighbor(&self.grid, nbx, nby, q2)
+                            && matches!(self.grid.flags[nn], Cell::Fluid | Cell::Interface)
+                        {
+                            let m2 = self.grid.moments(nn);
+                            rho_avg += m2.rho;
+                            u_avg[0] += m2.u[0];
+                            u_avg[1] += m2.u[1];
+                            cnt += 1.0;
                         }
-                        if cnt > 0.0 {
-                            rho_avg /= cnt;
-                            u_avg[0] /= cnt;
-                            u_avg[1] /= cnt;
-                        } else {
-                            rho_avg = 1.0;
-                        }
-                        self.grid.f[nb] = equilibrium(rho_avg, u_avg[0], u_avg[1]);
-                        self.grid.flags[nb] = Cell::Interface;
-                        self.mass[nb] = 0.0;
-                        self.conversions.gas_to_interface += 1;
                     }
+                    if cnt > 0.0 {
+                        rho_avg /= cnt;
+                        u_avg[0] /= cnt;
+                        u_avg[1] /= cnt;
+                    } else {
+                        rho_avg = 1.0;
+                    }
+                    self.grid.f[nb] = equilibrium(rho_avg, u_avg[0], u_avg[1]);
+                    self.grid.flags[nb] = Cell::Interface;
+                    self.mass[nb] = 0.0;
+                    self.conversions.gas_to_interface += 1;
                 }
             }
         }
@@ -386,12 +392,12 @@ impl FreeSurface {
             self.conversions.to_gas += 1;
             let (x, y) = (i % nx, i / nx);
             for q in 1..Q {
-                if let Some(nb) = neighbor(&self.grid, x, y, q) {
-                    if self.grid.flags[nb] == Cell::Fluid {
-                        self.grid.flags[nb] = Cell::Interface;
-                        self.mass[nb] = self.grid.f[nb].iter().sum();
-                        self.conversions.fluid_to_interface += 1;
-                    }
+                if let Some(nb) = neighbor(&self.grid, x, y, q)
+                    && self.grid.flags[nb] == Cell::Fluid
+                {
+                    self.grid.flags[nb] = Cell::Interface;
+                    self.mass[nb] = self.grid.f[nb].iter().sum();
+                    self.conversions.fluid_to_interface += 1;
                 }
             }
         }
@@ -410,32 +416,43 @@ impl FreeSurface {
     }
 }
 
-fn wrap(v: i32, n: i32, periodic: bool) -> Option<usize> {
-    if v < 0 || v >= n {
-        if periodic {
-            Some(usize::try_from(v.rem_euclid(n)).expect("non-negative"))
-        } else {
-            None
+fn offset_coord(coord: usize, delta: i32, n: usize, periodic: bool) -> Option<usize> {
+    assert!(n > 0, "grid dimension must be positive");
+    let mut out = coord;
+    if delta >= 0 {
+        for _ in 0..delta {
+            if out + 1 == n {
+                if periodic {
+                    out = 0;
+                } else {
+                    return None;
+                }
+            } else {
+                out += 1;
+            }
         }
     } else {
-        Some(usize::try_from(v).expect("non-negative"))
+        for _ in 0..(-delta) {
+            if out == 0 {
+                if periodic {
+                    out = n - 1;
+                } else {
+                    return None;
+                }
+            } else {
+                out -= 1;
+            }
+        }
     }
+    Some(out)
 }
 
 /// Neighbor cell index in direction q (None across non-periodic
 /// boundaries).
 fn neighbor(grid: &Grid, x: usize, y: usize, q: usize) -> Option<usize> {
     let (ex, ey) = E[q];
-    let xx = wrap(
-        x as i32 + i32::from(ex as i8),
-        grid.nx as i32,
-        grid.periodic_x,
-    )?;
-    let yy = wrap(
-        y as i32 + i32::from(ey as i8),
-        grid.ny as i32,
-        grid.periodic_y,
-    )?;
+    let xx = offset_coord(x, ex, grid.nx, grid.periodic_x)?;
+    let yy = offset_coord(y, ey, grid.ny, grid.periodic_y)?;
     Some(grid.idx(xx, yy))
 }
 
