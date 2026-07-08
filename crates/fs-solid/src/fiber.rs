@@ -86,12 +86,15 @@ impl Section {
         let mut out = SectionState::default();
         for (f, st) in self.fibers.iter().zip(&self.states) {
             let eps = eps0 - f.y * kappa;
+            // Section convention is tension-positive; the Mander card
+            // is compression-positive (tension returns zero) — flip in
+            // and out for concrete.
             let (sig, tan) = match (&f.law, st) {
                 (FiberLaw::Steel(l), FiberState::Steel(s)) => {
                     (l.stress(eps, s), l.tangent(eps, s))
                 }
                 (FiberLaw::Concrete(l), FiberState::Concrete(s)) => {
-                    (l.stress(eps, s), l.tangent(eps, s))
+                    (-l.stress(-eps, s), l.tangent(-eps, s))
                 }
                 _ => unreachable!("law/state pairing fixed at construction"),
             };
@@ -112,7 +115,9 @@ impl Section {
             let eps = eps0 - f.y * kappa;
             match (&f.law, st) {
                 (FiberLaw::Steel(l), FiberState::Steel(s)) => *s = l.update_state(eps, s),
-                (FiberLaw::Concrete(l), FiberState::Concrete(s)) => *s = l.update_state(eps, s),
+                (FiberLaw::Concrete(l), FiberState::Concrete(s)) => {
+                    *s = l.update_state(-eps, s);
+                }
                 _ => unreachable!("law/state pairing fixed at construction"),
             }
         }
@@ -182,8 +187,8 @@ pub fn update_sections_batched(
 #[must_use]
 #[allow(clippy::cast_precision_loss)]
 pub fn rc_section(d: f64, b: f64, layers: usize, steel_area: f64) -> Section {
-    let core = ManderConcrete::new(-42e6, -0.004, 32e9, -0.015).expect("core card");
-    let cover = ManderConcrete::new(-30e6, -0.002, 30e9, -0.005).expect("cover card");
+    let core = ManderConcrete::new(42e6, 0.004, 32e9, 0.015).expect("core card");
+    let cover = ManderConcrete::new(30e6, 0.002, 30e9, 0.005).expect("cover card");
     let steel = MenegottoPintoSteel::new(200e9, 450e6, 0.01).expect("steel card");
     let cover_t = 0.1 * d;
     let mut fibers = Vec::new();

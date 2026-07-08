@@ -173,7 +173,10 @@ impl Rod {
     fn residual(&self, load: &TipLoad, factor: f64) -> Vec<f64> {
         let n = self.ndof();
         let mut r = vec![0.0f64; n];
-        let eps = 1e-7;
+        // FD scales: the tangent is FD-of-FD — the residual step must
+        // sit well above energy roundoff or the nested difference is
+        // noise (measured: a junk Newton direction that creeps).
+        let eps = 3e-6;
         let mut probe = self.clone();
         for k in 0..n {
             let mut d = vec![0.0f64; n];
@@ -220,7 +223,7 @@ impl Rod {
                     break;
                 }
                 // FD tangent (fixture-scale dense).
-                let eps = 1e-6;
+                let eps = 3e-4;
                 let mut kmat = vec![0.0f64; n * n];
                 let mut probe = self.clone();
                 for col in 0..n {
