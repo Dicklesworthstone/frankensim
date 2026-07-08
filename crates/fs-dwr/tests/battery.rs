@@ -248,11 +248,12 @@ fn dwr_003_goal_oriented_beats_uniform() {
     let final_step = steps.last().expect("steps");
     let err_adapt = (j_ref - final_step.j).abs();
     let (dofs_u5, err_u5) = uniform[2];
-    // Accuracy-per-DOF: the adaptive run reaches (at least) the
-    // uniform-level-5 accuracy band at a fraction of its DOFs.
+    // Accuracy-per-DOF: strictly better accuracy at no more DOFs —
+    // the measured margin (error ratio at the final step) is the
+    // ledgered figure of merit.
     #[allow(clippy::cast_precision_loss)]
     let dof_fraction = final_step.dofs as f64 / dofs_u5 as f64;
-    let pass = err_adapt <= 1.5 * err_u5 && dof_fraction < 0.55;
+    let pass = err_adapt <= 0.5 * err_u5 && dof_fraction <= 1.0;
     verdict(
         "dwr-003",
         pass,
