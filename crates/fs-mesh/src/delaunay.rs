@@ -515,9 +515,7 @@ pub struct Tetrahedralization {
 /// Shared construction prologue: BRIO order, bootstrap quad, first
 /// tet + ghosts — used by both the sequential kernel and the colored
 /// (parallel) driver so their meshes start bitwise identical.
-pub(crate) fn bootstrap_mesh(
-    points: &[Point3],
-) -> Result<(Mesh, [u32; 4], Vec<u32>), MeshError> {
+pub(crate) fn bootstrap_mesh(points: &[Point3]) -> Result<(Mesh, [u32; 4], Vec<u32>), MeshError> {
     if points.len() < 4 {
         return Err(MeshError::TooFewPoints { got: points.len() });
     }

@@ -173,15 +173,12 @@ fn conflict_region(mesh: &Mesh, p_idx: u32) -> Option<BTreeSet<u32>> {
 fn assign_colors(regions: &[(u32, Option<BTreeSet<u32>>)]) -> Vec<Vec<u32>> {
     let mut colors: Vec<(Vec<u32>, BTreeSet<u32>)> = Vec::new();
     for (p_idx, reg) in regions {
-        let footprint: &BTreeSet<u32> = match reg {
-            Some(r) => r,
-            None => {
-                if colors.is_empty() {
-                    colors.push((Vec::new(), BTreeSet::new()));
-                }
-                colors[0].0.push(*p_idx);
-                continue;
+        let Some(footprint) = reg else {
+            if colors.is_empty() {
+                colors.push((Vec::new(), BTreeSet::new()));
             }
+            colors[0].0.push(*p_idx);
+            continue;
         };
         let k = colors
             .iter()
@@ -218,7 +215,11 @@ pub fn delaunay_colored(
     cx: &Cx<'_>,
 ) -> Result<(Tetrahedralization, ColoredStats), MeshError> {
     let (mut mesh, quad, order) = bootstrap_mesh(points)?;
-    let work: Vec<u32> = order.iter().copied().filter(|i| !quad.contains(i)).collect();
+    let work: Vec<u32> = order
+        .iter()
+        .copied()
+        .filter(|i| !quad.contains(i))
+        .collect();
     let threads = threads.max(1);
     let window = window.max(1);
     let mut stats = ColoredStats {
@@ -270,13 +271,7 @@ pub fn delaunay_colored(
         .filter(|&t| mesh.alive[t as usize] && !mesh.is_ghost(t))
         .count() as u64;
     let steiner_from = u32::try_from(points.len()).expect("point count fits u32");
-    Ok((
-        Tetrahedralization {
-            mesh,
-            steiner_from,
-        },
-        stats,
-    ))
+    Ok((Tetrahedralization { mesh, steiner_from }, stats))
 }
 
 /// Apply each prefix batch REVERSED — the adversarial commutativity
@@ -292,7 +287,11 @@ pub fn delaunay_colored_reversed(
     cx: &Cx<'_>,
 ) -> Result<Tetrahedralization, MeshError> {
     let (mut mesh, quad, order) = bootstrap_mesh(points)?;
-    let work: Vec<u32> = order.iter().copied().filter(|i| !quad.contains(i)).collect();
+    let work: Vec<u32> = order
+        .iter()
+        .copied()
+        .filter(|i| !quad.contains(i))
+        .collect();
     let window = window.max(1);
     for win in work.chunks(window.max(1)) {
         let mesh_ref = &mesh;
@@ -312,8 +311,5 @@ pub fn delaunay_colored_reversed(
         .filter(|&t| mesh.alive[t as usize] && !mesh.is_ghost(t))
         .count() as u64;
     let steiner_from = u32::try_from(points.len()).expect("point count fits u32");
-    Ok(Tetrahedralization {
-        mesh,
-        steiner_from,
-    })
+    Ok(Tetrahedralization { mesh, steiner_from })
 }

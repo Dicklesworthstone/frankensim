@@ -114,9 +114,24 @@ Fully deterministic and sequential in v1: fixed-seed BRIO shuffle,
 exact predicate signs, canonical conflict rules, index-ordered
 tie-breaks, `BTreeMap`/`BTreeSet` only. Identical input bytes →
 identical output bytes (tmesh-003 is the trip-wire). The bead's
-"same mesh at any thread count" criterion is trivially met by v1's
-sequential kernel; the parallel domain-coloring successor must
-preserve it against this crate's outputs.
+"same mesh at any thread count" criterion is met NON-trivially by
+`delaunay_colored` (uee3 item 4): read-parallel conflict regions
+(cavity + growth repair + one-ring, mirroring the insert transaction)
+across scoped threads, FLIP-SAFE coloring (k = 1 + the largest
+overlapping color — same-color members pairwise disjoint AND every
+order-flipped cross-color pair disjoint, so cospherical TIE groups
+keep their original order), canonical application. Thread count can
+change only the wall clock; tmesh-013 gates raw thread-count
+invariance, canonical kernel merge on general-position AND degenerate
+fixtures, exact audits, adversarial within-color commutativity
+(reversed application), and the width ledger. Two designs were
+REJECTED on measurement: first-fit coloring (flipped tied pairs —
+diverged on the 6×6×6 grid) and stop-at-first-clash prefix batching
+(raw-order-preserving but BRIO locality collapsed width to ~3). Batch
+width is STRUCTURAL (~6 at window 256: Hilbert-ordered windows form
+mutually-overlapping chains, one color per chain element); strided
+sampling would widen batches but reorders ties — rejected; the read
+phase parallelizes independently of width.
 
 ## Cancellation behavior
 
