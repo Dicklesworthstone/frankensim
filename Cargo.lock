@@ -870,6 +870,7 @@ name = "fs-cheb"
 version = "0.0.1"
 dependencies = [
  "fs-fft",
+ "fs-ivl",
  "fs-la",
  "fs-math",
 ]

@@ -16,6 +16,8 @@
 pub mod adaptive;
 pub mod galpha;
 pub mod lie;
+#[cfg(feature = "time-slabs")]
+pub mod slabs;
 pub mod stiff;
 pub mod symplectic;
 

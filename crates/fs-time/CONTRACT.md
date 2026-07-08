@@ -47,6 +47,16 @@ stepper — are discharged where claimed below.
   update h ← h·safety·err^{−0.14}·err_prev^{0.08} clamped to
   [0.2, 5.0]; rejections shrink with the classical −1/5 exponent.
 
+- `slabs` module (addendum Proposal 4, bead bk0o.7; [F], behind
+  `time-slabs`): time slabs as CELLS. `SlabEntry` carries the TEMPORAL
+  COCYCLE — the split step's defect against the monolithic residual
+  over the slab — and `SlabLedger::attribute` is the budget pie
+  pointed at time ("your error is in the coupling handoff at
+  t ∈ [2.0, 2.5]"). `march_adaptive` doubles subcycles where the
+  cocycle exceeds tolerance (cap 64). `activation_report` encodes the
+  Proposal-4 SEQUENCING gate: splitting error under 20% of budget →
+  INSTRUMENT-ONLY (measure it, don't control it).
+
 ## Invariants
 
 - Verlet is symplectic ⇒ **bounded** (non-secular) energy error;
@@ -134,3 +144,17 @@ max(q, v) error).
   RK45 adjoints are the fs-ad integration lane (o3ui).
 - `Imex2`/`GeneralizedAlpha` take dense row-major operators; sparse
   variants belong to the fs-sparse integration lane.
+
+## No-claim boundaries (slabs)
+
+- Visibility and control of SPLITTING error only — NO claim of
+  coupling STABILITY: added-mass FSI instabilities and stiff
+  time-scale pathologies are per-coupling analysis problems (the
+  proposal's own honest scope, verbatim).
+- The monolithic reference is a fine RK4 over the slab — a numerical
+  reference, not an exact solution; defects below its own error floor
+  are not resolvable.
+- The fixture family is the linear two-field testbed; PDE couplings
+  ride fs-couple's port-Hamiltonian interconnection when both land.
+- Parallel-in-time coarse propagators (the BDDC-pattern extension) are
+  explicitly deferred.

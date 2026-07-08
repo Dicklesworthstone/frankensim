@@ -17,5 +17,9 @@ fs-math = { path = "../fs-math" }
 
 [dev-dependencies]
 
+[features]
+# [F]-gated per the Ambition-Tag rule (bead bk0o.7, Proposal 4).
+time-slabs = []
+
 [lints]
 workspace = true
