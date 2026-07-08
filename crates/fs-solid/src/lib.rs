@@ -94,6 +94,12 @@ pub enum SolidError {
         /// What was requested.
         what: String,
     },
+    /// A caller supplied inconsistent or non-finite input. Repair:
+    /// fix the named input before entering the solver.
+    InvalidInput {
+        /// What was invalid.
+        what: String,
+    },
 }
 
 impl core::fmt::Display for SolidError {
@@ -126,6 +132,7 @@ impl core::fmt::Display for SolidError {
                 f,
                 "fs-scenario condition outside the elasticity surface: {what}"
             ),
+            SolidError::InvalidInput { what } => write!(f, "invalid input: {what}"),
         }
     }
 }

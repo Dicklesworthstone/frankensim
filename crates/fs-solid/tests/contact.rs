@@ -88,11 +88,12 @@ fn cnt_002_003_torture_and_balance() {
     let mesh = Mesh2::quads(1.0, 1.0, 6, 6);
     let material = card();
     let q = 0.25; // strong downward traction per unit length
+    let press = move |_: f64, _: f64| [0.0, -q];
     let hyper = HyperProblem {
         mesh: &mesh,
         material: &material,
         dirichlet: vec![],
-        traction: vec![(Patch::Top, &|_, _| [0.0, -q])],
+        traction: vec![(Patch::Top, &press)],
         settings: NewtonSettings::default(),
     };
     let floor = HalfPlane {
