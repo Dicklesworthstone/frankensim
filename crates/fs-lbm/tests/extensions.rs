@@ -332,8 +332,8 @@ fn lbm_107_bracketing_and_jet() {
     let mid = ny / 2;
     for x in 0..nx {
         // Thickness 5 with a 2-cell varicose perturbation, two waves.
-        let pert = (2.0 * (std::f64::consts::TAU * 2.0 * x as f64 / nx as f64).cos()).round()
-            as i64;
+        let pert =
+            (2.0 * (std::f64::consts::TAU * 2.0 * x as f64 / nx as f64).cos()).round() as i64;
         let half = (5 + pert.max(-4)) / 2;
         let half = usize::try_from(half.max(1)).expect("positive");
         for y in mid.saturating_sub(half)..=(mid + half).min(ny - 2) {
@@ -352,6 +352,8 @@ fn lbm_107_bracketing_and_jet() {
     verdict(
         "lbm-107-jet-breakup",
         frags0 == 1 && frags >= 2 && drift < 1e-10,
-        &format!("fragments {frags0} -> {frags} after 800 steps (QUALITATIVE gate), ledger drift {drift:.2e}"),
+        &format!(
+            "fragments {frags0} -> {frags} after 800 steps (QUALITATIVE gate), ledger drift {drift:.2e}"
+        ),
     );
 }
