@@ -24,6 +24,22 @@ eigensolver for the method of snapshots).
   tight as the decision tolerance, else `Escalate`.
 - `SurrogateError` — `NoSnapshots` / `DimMismatch` / `BadThreshold`.
 
+- `ladder` module (addendum Proposal A, bead knh1.4; [F], behind
+  `abstraction-ladder`): the certified abstraction ladder.
+  `TruthModel` (the P1 full-order elliptic family — level 0's DECLARED
+  semantics: "truth" means the FE model, discretization honesty stated
+  here rather than hidden in a bound), `RbLevel` (offline snapshots +
+  energy-orthonormal basis; online k×k Galerkin with the textbook
+  a-posteriori bound ‖u−u_rb‖_a ≤ ‖r‖_{V′}/√α_LB via the exact Riesz
+  representer and the exact affine coercivity floor; compliance QoI
+  bound = energy bound SQUARED by Galerkin symmetry), `ConceptLevel`
+  (interpolation lookup, ESTIMATED color, dispersion calibrated by
+  cross-rung discrepancy probes), `Ladder`/`at_level(k).query(μ, tol)`
+  (AUTOMATIC CERTIFIED DESCENT: a rung answers only when its
+  certificate meets the tolerance; leaks are recorded and descended
+  past — invisible until it leaks), `rb_coverage` (the kill
+  measurement).
+
 ## Invariants
 
 - POD reproduces an exactly-representable (low-rank) snapshot set to roundoff;
@@ -78,3 +94,16 @@ determinism.
   conformal-hardening follow-on.
 - Continuous training from the ledger, versioned/model-carded surrogate
   artifacts, and design-family-respecting splits are downstream integrations.
+
+## No-claim boundaries (ladder)
+
+- The beachhead covers the AFFINE-PARAMETRIC ELLIPTIC regime (1-D
+  fixture family here); nonlinear/transient coarse levels are the
+  research frontier and enter only as estimated-color concept rungs.
+- Level 0's bound is zero BY DECLARATION (the FE model is the truth
+  semantics); the FE discretization error is a separate ledger entry,
+  not this module's claim.
+- The concept rung's dispersion is a probe MAXIMUM, not a bound — the
+  Estimated color is load-bearing.
+- Per-REGION (spatial) RB decomposition and the fs-ir at_level query
+  integration are the named growth seams.

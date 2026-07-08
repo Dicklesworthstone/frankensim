@@ -11,8 +11,14 @@ description = "Learned accelerators with guarantees (fs-surrogate): classical re
 layer = "L4"
 
 [dependencies]
+fs-evidence = { path = "../fs-evidence", optional = true }
+
+[features]
+# [F]-gated per the Ambition-Tag rule (bead knh1.4, Proposal A).
+abstraction-ladder = ["dep:fs-evidence"]
 
 [dev-dependencies]
+fs-evidence = { path = "../fs-evidence" }
 
 [lints]
 workspace = true

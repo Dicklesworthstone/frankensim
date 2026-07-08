@@ -1174,6 +1174,7 @@ name = "fs-lattice"
 version = "0.0.1"
 dependencies = [
  "fs-cutfem",
+ "fs-ivl",
  "fs-la",
  "fs-material",
  "fs-solid",
@@ -1556,6 +1557,9 @@ dependencies = [
 [[package]]
 name = "fs-surrogate"
 version = "0.0.1"
+dependencies = [
+ "fs-evidence",
+]
 
 [[package]]
 name = "fs-symmetry"

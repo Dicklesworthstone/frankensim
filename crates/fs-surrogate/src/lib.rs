@@ -16,6 +16,9 @@
 //!
 //! Deterministic; no dependencies (an in-house symmetric eigensolver).
 
+#[cfg(feature = "abstraction-ladder")]
+pub mod ladder;
+
 /// A structured failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SurrogateError {
