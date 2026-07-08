@@ -503,29 +503,25 @@ impl Bddc {
             let ni = sub.interior.len();
             let xb: Vec<f64> = sub.boundary.iter().map(|g| x_gamma[self.gpos[g]]).collect();
             // K_BB x_B
-            let mut yb = vec![0.0f64; nb];
-            for i in 0..nb {
-                for j in 0..nb {
-                    yb[i] += sub.k_bb[i][j] * xb[j];
-                }
-            }
+            let mut yb: Vec<f64> = sub
+                .k_bb
+                .iter()
+                .map(|row| row.iter().zip(&xb).map(|(a, b)| a * b).sum())
+                .collect();
             if ni > 0 {
                 // w = K_II^{-1} K_IB x_B ; y_B -= K_IB^T w
-                let mut rhs = vec![0.0f64; ni];
-                for i in 0..ni {
-                    for j in 0..nb {
-                        rhs[i] += sub.k_ib[i][j] * xb[j];
-                    }
-                }
+                let rhs: Vec<f64> = sub
+                    .k_ib
+                    .iter()
+                    .map(|row| row.iter().zip(&xb).map(|(a, b)| a * b).sum())
+                    .collect();
                 let w = cholesky_solve(&sub.l_ii, &rhs);
-                for j in 0..nb {
-                    let mut acc = 0.0f64;
-                    for i in 0..ni {
-                        acc += sub.k_ib[i][j] * w[i];
-                    }
-                    yb[j] -= acc;
+                for (j, y) in yb.iter_mut().enumerate() {
+                    let acc: f64 = sub.k_ib.iter().zip(&w).map(|(row, wi)| row[j] * wi).sum();
+                    *y -= acc;
                 }
             }
+            let _ = nb;
             for (i, &g) in sub.boundary.iter().enumerate() {
                 out[self.gpos[&g]] += yb[i];
             }
