@@ -1,0 +1,23 @@
+[package]
+name = "fs-bem"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Laplace BEM panel methods: 3D exterior potential flow with FMM-accelerated GMRES, 2D Hess-Smith airfoils with Kutta condition and adjoint gradients, unsteady free-wake vortex shedding."
+
+[package.metadata.frankensim]
+layer = "L3"
+
+[dependencies]
+fs-fmm = { path = "../fs-fmm" }
+fs-geom = { path = "../fs-geom" }
+fs-la = { path = "../fs-la" }
+fs-rep-mesh = { path = "../fs-rep-mesh" }
+fs-solver = { path = "../fs-solver" }
+
+[dev-dependencies]
+
+[lints]
+workspace = true
