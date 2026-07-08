@@ -800,6 +800,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-archive"
+version = "0.0.1"
+
+[[package]]
 name = "fs-asbuilt"
 version = "0.0.1"
 dependencies = [
@@ -1026,6 +1030,16 @@ name = "fs-fft"
 version = "0.0.1"
 dependencies = [
  "fs-math",
+]
+
+[[package]]
+name = "fs-flux"
+version = "0.0.1"
+dependencies = [
+ "fs-la",
+ "fs-solid",
+ "fs-solver",
+ "fs-sparse",
 ]
 
 [[package]]
@@ -1593,6 +1607,10 @@ dependencies = [
  "fs-evidence",
  "fs-obs",
 ]
+
+[[package]]
+name = "fs-viz"
+version = "0.0.1"
 
 [[package]]
 name = "fs-voi"
