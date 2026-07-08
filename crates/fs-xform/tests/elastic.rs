@@ -9,8 +9,8 @@
 #![cfg(feature = "elastic-shapes")]
 
 use fs_xform::elastic::{
-    Curve, deformation_energy, elastic_distance, karcher_mean, pullback_metric, srv_distance,
-    srv_geodesic, straighten_path, within_trust_region,
+    Curve, elastic_distance, karcher_mean, pullback_metric, srv_distance, srv_geodesic,
+    straighten_path, within_trust_region,
 };
 use fs_xform::harmonics::{ManifoldBasis, Surface};
 
@@ -219,8 +219,8 @@ fn ec_003_surface_path_straightening() {
         let bulge = 0.25 * (std::f64::consts::PI * k as f64 / steps as f64).sin();
         for p in &mut shape.positions {
             let r = (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt().max(1e-9);
-            for c in 0..3 {
-                p[c] *= 1.0 + bulge / r * 0.4;
+            for pc in p.iter_mut() {
+                *pc *= 1.0 + bulge / r * 0.4;
             }
         }
     }
@@ -252,8 +252,8 @@ fn ec_003_surface_path_straightening() {
     // Path endpoints are the inputs; interior shapes are genuinely
     // intermediate (bounding-box between the two).
     assert_eq!(path.len(), 6);
-    for k in 1..5 {
-        let max_x = path[k]
+    for (k, shape) in path.iter().enumerate().take(5).skip(1) {
+        let max_x = shape
             .positions
             .iter()
             .map(|p| p[0].abs())

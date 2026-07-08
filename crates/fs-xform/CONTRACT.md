@@ -50,6 +50,20 @@ rule). Layer: L2 (MORPH). Runtime deps: `std`, fs-geom.
   `needs_refresh` (bbox-relative drift criterion),
   `dirichlet_energy` (== λⱼ for M-orthonormal modes).
 
+- `elastic` module (plan Bet 6 / §9, bead wqd.27; [F], behind
+  `elastic-shapes`, implies `manifold-harmonics`): elastic shape-space
+  metrics. Curves: SRV transform (`q = c′/√|c′|`), closed-form L²
+  geodesics (`srv_geodesic` — the midpoint bisects the distance),
+  reparameterization-invariant `elastic_distance` via slope-constrained
+  DP matching, `karcher_mean` with per-iteration shift evidence.
+  Surfaces (same connectivity): `deformation_energy`
+  (membrane + bending via the cotan machinery), `crossfade_path` /
+  `straighten_from` / `straighten_path` (monotone-energy discrete
+  geodesics; for affinely related shapes the crossfade IS the fixed
+  point). `pullback_metric` — the elastic form through the harmonics
+  basis is DIAGONAL with weights λ + λ² — and `within_trust_region`
+  (step size = bounded deformation, not bounded coefficients).
+
 ## Invariants
 
 1. Every lever's `jacobian_action` is linear in δθ and consistent with
@@ -126,3 +140,15 @@ lattices, and validity refusals.
   certified enclosures.
 - `transfer` assumes refresh-in-place (shared vertex set); remeshing
   transfers need a resampling front end.
+
+## No-claim boundaries (elastic)
+
+- Curve SRV distances are computed over translations + monotone
+  reparameterizations; rotation/scale alignment and CLOSED-curve seam
+  search are follow-up scope.
+- Surface paths require shared connectivity (refresh-in-place); SRNF
+  with remeshing correspondence is the [F] growth path the plan names.
+- The DP matching is slope-constrained (1/3..3) on a fixed lattice —
+  invariance holds to the documented ~5% grid tolerance, not exactly.
+- Trust-region superiority is demonstrated on the seeded fixture
+  (median-calibrated, ledgered), not claimed universally.
