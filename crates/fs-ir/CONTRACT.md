@@ -76,6 +76,23 @@ typed AST. Layer: L6 (HELM). Runtime deps: `std` + fs-qty.
   fs-regime report; policy-graded Reject/Warn). Findings carry spans,
   diagnoses, and `RankedFix { action, predicted_wall_s, qoi_impact }`.
 
+- `planner` module (addendum Proposal 8, bead lmp4.16; [F], behind
+  `ladder-planner` → optional fs-verify dep): the GREEDY LADDER WALK —
+  not a general planner (Governance Rule 1). The operator menu
+  `{cache, speculate, solve-rung, refine-to-target, climb}` runs
+  greedily with costs LEARNED from telemetry (`CostTable`; cold
+  entries fall back to the conservative default). Speculation
+  verifies a prolongated coarse answer WITHOUT solving; refinement is
+  the textbook equidistribution criterion (split every element above
+  the per-element target `tol²/n` with per-element depth from its own
+  gap). A discharged answer's bound is a REAL equilibrated enclosure
+  (VERIFIED color) and never violates the query's certified-accuracy
+  contract; the cannot-discharge boundary refuses with the best
+  achieved certified interval (never a false in-budget answer);
+  operator choice tie-breaks deterministically (G5 replay).
+  `baseline_uniform` is the fixed control the kill criterion measures
+  against.
+
 ## Invariants
 
 1. Isomorphism: `parse(print(x))` has the same shape as `x`, per syntax
@@ -177,3 +194,16 @@ structured refusal).
   budget distinct from the wall/memory/core grants of the `(budget …)` study
   clause. The returned answer's COLOR (verified/validated/estimated) is
   attached by the query result, not here.
+
+## No-claim boundaries (planner)
+
+- v0 discharges the verifier's 1-D elliptic kernel class; the 2-D
+  cutfem DWR (fs-dwr) and real physics kernels plug into the same walk
+  as the ladder registry grows rungs.
+- Cost units are solved cells (the flywheel's telemetry currency);
+  wall-clock costs arrive with the perf-CI lane.
+- Confidence targets (`Target::Confidence`) are the e-process beads'
+  contract; v0 discharges tolerance targets.
+- The kill measurement (>=2x vs mid-rung+uniform; measured 4.31x on the
+  steep-feature fixture) is per-fixture evidence, not a universal claim
+  — the wedge query set re-measures it as kernels land.

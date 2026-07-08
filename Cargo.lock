@@ -1082,6 +1082,10 @@ name = "fs-iface"
 version = "0.0.1"
 
 [[package]]
+name = "fs-iga"
+version = "0.0.1"
+
+[[package]]
 name = "fs-img"
 version = "0.0.1"
 dependencies = [
@@ -1535,6 +1539,17 @@ dependencies = [
 [[package]]
 name = "fs-tropical"
 version = "0.0.1"
+
+[[package]]
+name = "fs-truss"
+version = "0.0.1"
+dependencies = [
+ "fnx-classes",
+ "fnx-runtime",
+ "fs-constraint",
+ "fs-solid",
+ "fs-sparse",
+]
 
 [[package]]
 name = "fs-uq"

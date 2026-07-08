@@ -17,8 +17,9 @@ fn uniform_bound_curve() {
         kernel: "steep".to_string(),
     };
     for cells in [12, 24, 48, 96, 192, 384] {
-        #[allow(clippy::cast_precision_loss)]
-        let mesh: Vec<f64> = (0..=cells).map(|k| k as f64 / cells as f64).collect();
+        let mesh: Vec<f64> = (0..=cells)
+            .map(|k| f64::from(k) / f64::from(cells))
+            .collect();
         let p = family.at(1.0, mesh);
         let u = solve_p1(&p);
         let rep = verify(&p, &u, 1e-9);
