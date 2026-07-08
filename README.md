@@ -8,16 +8,16 @@
 
 [![Status](https://img.shields.io/badge/status-active%20Rust%20workspace-2ea44f)](#implemented-workspace)
 [![Rust](https://img.shields.io/badge/rust-nightly%202024-b7410e)](rust-toolchain.toml)
-[![Crates](https://img.shields.io/badge/workspace-71%20fs--%2A%20crates-0969da)](#implemented-workspace)
-[![Contracts](https://img.shields.io/badge/contracts-71%20of%2071%20crates-8250df)](#contracts-and-verification)
-[![Tests](https://img.shields.io/badge/tests-116%20crate%20test%20files-1f883d)](#contracts-and-verification)
+[![Crates](https://img.shields.io/badge/workspace-72%20fs--%2A%20crates-0969da)](#implemented-workspace)
+[![Contracts](https://img.shields.io/badge/contracts-72%20of%2072%20crates-8250df)](#contracts-and-verification)
+[![Tests](https://img.shields.io/badge/tests-118%20crate%20test%20files-1f883d)](#contracts-and-verification)
 [![License](https://img.shields.io/badge/license-MIT%20%2B%20AI%20rider-yellow)](LICENSE)
 
 </div>
 
 FrankenSim is a working Rust workspace for deterministic geometry, certified numerics, meshing, execution, evidence, and design-ledger infrastructure for simulation and design optimization.
 
-The tree contains a real Cargo workspace with 71 `fs-*` crates, repository policy tooling, conformance contracts, integration tests, and working implementations across substrate/runtime, numerical kernels, geometry representations, meshing, physics, solvers, adjoints, optimization, imaging, evidence, packaging, and ledger layers.
+The tree contains a real Cargo workspace with 72 `fs-*` crates, repository policy tooling, conformance contracts, integration tests, and working implementations across substrate/runtime, numerical kernels, geometry representations, meshing, physics, solvers, adjoints, optimization, imaging, evidence, packaging, and ledger layers.
 
 There is not yet a packaged end-user simulation application or crates.io release. Today, FrankenSim is usable as a source workspace and library substrate.
 
@@ -31,14 +31,14 @@ There is not yet a packaged end-user simulation application or crates.io release
 
 | Area | Current implementation |
 |------|------------------------|
-| Workspace | Rust 2024 nightly Cargo workspace with 71 `fs-*` crates plus `xtask` |
-| Contracts | 71 of 71 `fs-*` crates have `CONTRACT.md` files |
+| Workspace | Rust 2024 nightly Cargo workspace with 72 `fs-*` crates plus `xtask` |
+| Contracts | 72 of 72 `fs-*` crates have `CONTRACT.md` files |
 | Runtime substrate | Capability probing, SIMD facades, aligned arenas, two-lane execution, cancellation contexts, tile pools, tuner and race scaffolding |
 | Numerics | Deterministic elementary math, dense/sparse linear algebra, FFT/DCT, interval/affine/Taylor arithmetic, Chebyshev collocation, random/QMC streams, AD/adjoint infrastructure, e-process inference |
 | Geometry | Region/chart abstraction, SDF, mesh and F-rep charts, representation conversion hooks, transformations, tet meshing, remeshing, quality audits |
 | Evidence and ledger | Composable `Evidence<T>`/`Certified<T>`, model cards, bracketing, FrankenSQLite-backed design ledger, artifact hashes, event streams, tune cache, roofline recording |
 | Policy tooling | `xtask` checks for layer direction, Franken-only runtime dependencies, contracts, unsafe capsules, and constellation lock verification |
-| Tests | 116 crate-level conformance and integration test files exercising the implemented contracts |
+| Tests | 118 crate-level conformance and integration test files exercising the implemented contracts |
 
 ### What You Can Use Today
 
@@ -64,6 +64,7 @@ There is not yet a packaged end-user simulation application or crates.io release
 | Record artifacts, operations, metrics, events, and tune rows | `fs_ledger` on FrankenSQLite |
 | Package solver evidence for independent review | `fs_package`, `fs_checker`, and `fs_crosswalk` |
 | Check plugin conformance and restriction-map behavior | `fs_conform` restriction-map compatibility checks and diagnostics |
+| Keep the go-to-market wedge explicit | `fs_wedge` vertical ranking, proposal mapping, and cycle-time kill-criterion data |
 | Probe machine axes and record roofline measurements | `fs_roofline` plus `fs_substrate` |
 
 ## Quick Start
@@ -191,7 +192,7 @@ The workspace has grown beyond the first substrate and geometry layer. These cra
 | `fs-constraint`, `fs-ascent`, `fs-dfo`, `fs-dimine`, `fs-regime`, `fs-topopt` | ASCENT layer: typed constraints with unsat cores and repairs, L-BFGS/TR-Newton/augmented-Lagrangian/Riemannian optimizers, derivative-free CMA-ES/BIPOP/Nelder-Mead, dimensional law mining, regime/validity-domain machinery, and density-based topology optimization |
 | `fs-contract`, `fs-verify`, `fs-bisect`, `fs-conform` | Verification layer: assume-guarantee component contracts, certified speculation verification, bisect-style proof/debug infrastructure, and restriction-map plugin conformance |
 | `fs-package`, `fs-checker`, `fs-crosswalk` | Evidence distribution layer: content-addressed evidence packages, a solver-free standalone checker, and a standards-language crosswalk for ASME V&V and FAA/EASA certification-by-analysis concepts |
-| `fs-recompute`, `fs-session`, `fs-govern`, `fs-probe`, `fs-iface`, `fs-ladder`, `fs-spececo`, `fs-io` | HELM and utility layer: incremental recomputation, sessions/resource governance, machine-readable proposal governance, probes, interfaces, degradation ladders, specialization ecology, and I/O boundaries |
+| `fs-recompute`, `fs-session`, `fs-govern`, `fs-probe`, `fs-iface`, `fs-ladder`, `fs-spececo`, `fs-wedge`, `fs-io` | HELM and utility layer: incremental recomputation, sessions/resource governance, machine-readable proposal governance, probes, interfaces, degradation ladders, specialization ecology, wedge-selection data, and I/O boundaries |
 
 ## Examples
 
@@ -491,7 +492,7 @@ Different readers should start in different places.
 
 ## Contracts and Verification
 
-The workspace currently has 71 `CONTRACT.md` files for 71 `fs-*` crates.
+The workspace currently has 72 `CONTRACT.md` files for 72 `fs-*` crates.
 
 Existing contracts use these required sections:
 
@@ -532,7 +533,7 @@ The current DSR setup is preferred over GitHub Actions for this repository. If a
 |-- Cargo.toml                         # Workspace manifest
 |-- Cargo.lock                         # Committed lockfile
 |-- rust-toolchain.toml                # Nightly toolchain and components
-|-- crates/                            # 71 fs-* crates; selected entries shown below
+|-- crates/                            # 72 fs-* crates; selected entries shown below
 |   |-- fs-qty/                        # Dimensional quantities
 |   |-- fs-obs/                        # Structured observability
 |   |-- fs-evidence/                   # Evidence and certification wrappers
