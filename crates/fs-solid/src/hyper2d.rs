@@ -331,6 +331,36 @@ impl HyperProblem<'_> {
     }
 }
 
+/// Continuation plumbing: a [`HyperProblem`] with HOMOGENEOUS
+/// Dirichlet data (clamps) is a [`crate::continuation::PathResidual`]
+/// — the load parameter scales the dead tractions.
+impl crate::continuation::PathResidual for HyperProblem<'_> {
+    fn ndof(&self) -> usize {
+        2 * self.mesh.node_count()
+    }
+
+    fn residual(&self, u: &[f64], lambda: f64) -> Result<Vec<f64>, SolidError> {
+        let fixed = self.fixed_dofs(lambda)?;
+        Ok(self.assemble(u, lambda, &fixed)?.0)
+    }
+
+    fn tangent(&self, u: &[f64], lambda: f64) -> Result<fs_sparse::Csr, SolidError> {
+        let fixed = self.fixed_dofs(lambda)?;
+        Ok(self.assemble(u, lambda, &fixed)?.1)
+    }
+
+    fn load_vector(&self) -> Vec<f64> {
+        let mut f = vec![0.0f64; 2 * self.mesh.node_count()];
+        let fixed = self.fixed_dofs(1.0).unwrap_or_default();
+        let _ = self.for_traction(1.0, |dof, v| {
+            if !fixed.contains_key(&dof) {
+                f[dof] += v;
+            }
+        });
+        f
+    }
+}
+
 fn norm(v: &[f64]) -> f64 {
     v.iter().map(|x| x * x).sum::<f64>().sqrt()
 }

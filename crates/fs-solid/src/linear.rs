@@ -171,7 +171,7 @@ impl LinearProblem<'_> {
 
     /// One element's stiffness and body-force load (B-matrix form,
     /// Voigt [εxx, εyy, γxy]).
-    fn element(&self, conn: &[usize], lambda: f64, mu: f64) -> (Vec<Vec<f64>>, Vec<f64>) {
+    pub(crate) fn element(&self, conn: &[usize], lambda: f64, mu: f64) -> (Vec<Vec<f64>>, Vec<f64>) {
         let nn = conn.len();
         let d = [
             [lambda + 2.0 * mu, lambda, 0.0],

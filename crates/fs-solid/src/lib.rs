@@ -27,15 +27,24 @@
 //! TDNNS-proper (normal-normal-stress continuity) awaits the
 //! simplicial H(div)-family bead and is a recorded no-claim.
 
+pub mod continuation;
 pub mod cutfront;
 pub mod hyper2d;
+#[cfg(feature = "koiter-asymptotics")]
+pub mod koiter;
 pub mod linear;
 pub mod mesh2;
+pub mod stability;
 
+pub use continuation::{ArcSettings, PathEvent, PathResidual, PathState, advance, switch_branch};
 pub use cutfront::{CutElasticity, CutSolution};
 pub use hyper2d::{HyperProblem, NewtonReport, NewtonSettings};
 pub use linear::{Formulation, LinearProblem, PlaneKind};
 pub use mesh2::{Mesh2, Patch};
+pub use stability::{
+    BucklingResult, buckling_loads, eigenvalue_derivative, expand_mode, group_stiffness,
+    ks_aggregate, ks_aggregate_derivative, lambda_indicator, reduced_pencil,
+};
 
 /// Crate version, re-exported for provenance stamping.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

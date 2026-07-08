@@ -10,12 +10,22 @@ description = "Elasticity core: small-strain and finite-strain hyperelasticity (
 [package.metadata.frankensim]
 layer = "L3"
 
+[features]
+# Koiter post-buckling asymptotics: plan-flagged [F]; off by default
+# per the Ambition-Tag gating rule.
+koiter-asymptotics = []
+
 [dependencies]
 fs-cutfem = { path = "../fs-cutfem" }
+fs-la = { path = "../fs-la" }
 fs-material = { path = "../fs-material" }
 fs-scenario = { path = "../fs-scenario" }
 fs-solver = { path = "../fs-solver" }
 fs-sparse = { path = "../fs-sparse" }
+
+[[test]]
+name = "koiter"
+required-features = ["koiter-asymptotics"]
 
 [lints]
 workspace = true
