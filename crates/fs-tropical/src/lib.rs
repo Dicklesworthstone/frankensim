@@ -103,6 +103,13 @@ impl TaskDag {
     /// out-of-range endpoint.
     pub fn critical_path(&self) -> Result<CriticalPath, TropicalError> {
         let n = self.latency.len();
+        if n == 0 {
+            return Ok(CriticalPath {
+                makespan: 0.0,
+                path: Vec::new(),
+                slack: Vec::new(),
+            });
+        }
         let mut adj = vec![Vec::new(); n];
         let mut preds = vec![Vec::new(); n];
         let mut indeg = vec![0usize; n];
@@ -137,14 +144,16 @@ impl TaskDag {
         let mut ef = vec![0.0_f64; n];
         let mut best_pred = vec![None; n];
         for &u in &order {
-            let mut es = 0.0_f64;
+            // track the max-ef predecessor without the 0.0 bias, so a
+            // zero-earliest-finish predecessor is still recorded on the path.
+            let mut best_ef = f64::NEG_INFINITY;
             for &p in &preds[u] {
-                if ef[p] > es {
-                    es = ef[p];
+                if ef[p] > best_ef {
+                    best_ef = ef[p];
                     best_pred[u] = Some(p);
                 }
             }
-            ef[u] = es + self.latency[u];
+            ef[u] = best_ef.max(0.0) + self.latency[u];
         }
         let makespan = ef.iter().copied().fold(0.0_f64, f64::max);
         let sink = ef

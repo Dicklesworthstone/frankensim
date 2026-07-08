@@ -54,6 +54,26 @@ fn a_cyclic_dag_has_no_critical_path() {
 }
 
 #[test]
+fn an_empty_dag_has_an_empty_critical_path() {
+    // regression: must not panic (previously indexed best_pred[0] on an empty Vec).
+    let cp = TaskDag::new(vec![]).critical_path().unwrap();
+    assert!((cp.makespan - 0.0).abs() < 1e-12);
+    assert!(cp.path.is_empty() && cp.slack.is_empty());
+}
+
+#[test]
+fn a_zero_latency_source_stays_on_the_path() {
+    // regression: a predecessor with earliest-finish 0 was dropped from the
+    // back-traced path by the old strict `ef[p] > es` (es started at 0.0).
+    let dag = TaskDag::new(vec![0.0, 10.0, 5.0])
+        .with_edge(0, 1)
+        .with_edge(1, 2);
+    let cp = dag.critical_path().unwrap();
+    assert!((cp.makespan - 15.0).abs() < 1e-12);
+    assert_eq!(cp.path, vec![0, 1, 2]); // task 0 (zero latency) is retained
+}
+
+#[test]
 fn the_tropical_eigenvalue_matches_brute_force() {
     // 0→1 (3), 1→0 (5): the max cycle mean is (3+5)/2 = 4.
     let m = vec![vec![NEG_INF, 3.0], vec![5.0, NEG_INF]];
