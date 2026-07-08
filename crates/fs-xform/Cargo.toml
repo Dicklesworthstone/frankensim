@@ -11,10 +11,15 @@ description = "Design parameterizations: FFD, RBF morphs, level-set velocity, SI
 layer = "L2"
 
 [dependencies]
+fs-la = { path = "../fs-la", optional = true }
 fs-geom = { path = "../fs-geom" }
 
 [dev-dependencies]
 fs-ad = { path = "../fs-ad" }
+
+[features]
+# [F]-gated per the Ambition-Tag rule.
+manifold-harmonics = ["dep:fs-la"]
 
 [lints]
 workspace = true

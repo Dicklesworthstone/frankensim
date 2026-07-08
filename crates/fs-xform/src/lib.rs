@@ -97,6 +97,9 @@ impl std::error::Error for XformError {}
 /// sense `T(θ + ε·δθ)(x) − T(θ)(x) = ε·jacobian_action(θ, δθ, x) + o(ε)`
 /// (for the linear levers here, exactly, with no `o(ε)` term) — the G0
 /// consistency law of the conformance battery.
+#[cfg(feature = "manifold-harmonics")]
+pub mod harmonics;
+
 pub trait Parameterization {
     /// Number of design DOFs.
     fn dof(&self) -> usize;
