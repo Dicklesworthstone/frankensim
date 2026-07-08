@@ -40,6 +40,20 @@ cubical homology), so the optimization stack lives here.
   general path): multiplicative update with move limits, volume
   multiplier by fixed 80-step bisection on the PROJECTED volume —
   fully deterministic, whole runs replay bitwise.
+- `eigenfreq` — generalized eigenproblems K(ρ̄)φ = λM(ρ̄)φ (per-cell
+  consistent P1 mass blocks; Cholesky reduction + Jacobi at fixture
+  scale), exact eigenvalue design gradients through the full chain,
+  the MASS-INTERPOLATION trap handled (linear mass above ρ = 0.1,
+  continuously-matched ρ⁶ below — spurious void modes gated by
+  regression), smooth-min aggregation with exact weighted gradients
+  for CLUSTERED eigenvalues (FD-verified near a designed crossing).
+- `stress` — relaxed von Mises measures with qp-RELAXATION (exponent
+  q < penal; void cells cannot drive the constraint — share and
+  floor-stability gated), p-norm aggregation with the ADAPTIVE
+  normalization c = σ_max/PN reported per evaluation, and the
+  NON-self-adjoint design gradient (one extra adjoint solve via
+  `stress_pullback`, cross terms by the polarization identity on
+  cell energies).
 - `robust::{RobustPipeline, robust_optimality_criteria}` — the
   erode/dilate three-field formulation: one filter, three projections
   (η ± δ), POINTWISE-ORDERED realizations (tested); minimize ERODED
@@ -103,20 +117,34 @@ random designs + eroded-compliance sensitivity FD gate (rel ≤ 2e−4);
 robust OC vs the non-robust baseline AUDITED WITH THE SAME
 three-field probe — eroded compliance descends, volumes ordered,
 nominal volume on budget, and erosion retention at least matching
-the baseline (the min-length-scale claim, measured); two cross-ISA
-golden hashes (slice-1 pipeline + robust). Plus
+the baseline (the min-length-scale claim, measured); EIGENFREQUENCY —
+aggregate gradient vs FD through the whole chain (rel 1.9e−10),
+clustered aggregate FD-verified near the symmetric-bending
+near-crossing (3.0e−8), spurious-void-mode gate (λ_min stays at
+9.3e−2 on a mostly-void design), +67% λ_agg ascent demo at fixed
+volume; STRESS — aggregate gradient FD at two continuation stages
+(≤1.3e−8; non-self-adjoint path), singularity-trap regression (void
+share 0.000% of σ_max AND the gradient FD-verifiable AT the void
+floor), −22% max-stress descent demo at fixed volume; FOUR cross-ISA
+golden hashes (pipeline, robust, eigenfrequency
+`0xbb7e_5ad3_851a_2bf1`, stress `0xc539_ad97_34d8_1b66`). Plus
 `tests/probe_robust.rs`: the limit-cycle regression.
 
 ## No-claim boundaries
 
-- Slices 1–2 scope: compliance + volume (+ robust three-field) on
-  FIXED kuhn meshes. Eigenfrequency objectives (clustered-eigenvalue
-  handling), stress p-norm aggregation (singularity-trap treatment),
-  the medial-axis thickness oracle (the geometry-layer audit beyond
-  the erosion-retention signal), and the CutFEM-octree marquee (zero
-  remeshing + DWR adaptivity + literature-benchmark envelopes on
-  MBB/L-bracket class fixtures) are the bead's later slices /
-  recorded splits.
+- Scope: compliance/volume, robust three-field, eigenfrequency, and
+  stress-aggregate objectives on FIXED kuhn meshes. The medial-axis
+  thickness oracle (geometry-layer audit) and the CutFEM-octree
+  marquee (zero remeshing + DWR adaptivity + literature-benchmark
+  envelopes on MBB/L-bracket class fixtures — where stress
+  concentrations are geometrically meaningful and
+  compliance-baseline comparisons live) are recorded splits
+  (frankensim-b7d0).
+- Eigen solves are dense (fixture scale); LOBPCG-scale pencils join
+  via fs-solid stability's machinery when the consumer needs them.
+- Stress constraints ship as the aggregate + gradient; the
+  constrained DRIVER (AL with adaptive c_k updates per iteration)
+  composes from fs-ascent's augmented Lagrangian at the consumer.
 - OC is the compliance/volume driver; MMA is not implemented
   (fs-ascent AL is the general constrained path — documented
   choice).
