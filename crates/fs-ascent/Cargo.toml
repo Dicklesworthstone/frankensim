@@ -1,0 +1,27 @@
+[package]
+name = "fs-ascent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "The gradient-based optimizer stack: L-BFGS with strong-Wolfe search, trust-region Newton-Krylov (Steihaug), augmented-Lagrangian constraints with KKT certificates, Riemannian variants, and the stopping-condition algebra."
+
+[package.metadata.frankensim]
+layer = "L4"
+
+[dependencies]
+fs-adjoint = { path = "../fs-adjoint" }
+fs-la = { path = "../fs-la" }
+fs-math = { path = "../fs-math" }
+fs-opt = { path = "../fs-opt" }
+fs-solver = { path = "../fs-solver" }
+
+[dev-dependencies]
+fs-ad = { path = "../fs-ad" }
+fs-feec = { path = "../fs-feec" }
+fs-rand = { path = "../fs-rand" }
+fs-sparse = { path = "../fs-sparse" }
+
+[lints]
+workspace = true
