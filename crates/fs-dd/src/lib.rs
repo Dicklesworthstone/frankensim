@@ -175,8 +175,11 @@ fn cholesky_factor(a: &mut [Vec<f64>]) {
     for i in 0..n {
         for j in 0..=i {
             let mut sum = a[i][j];
-            for k in 0..j {
-                sum -= a[i][k] * a[j][k];
+            {
+                let (ri, rj) = (&a[i], &a[j]);
+                for (x, y) in ri[..j].iter().zip(&rj[..j]) {
+                    sum -= x * y;
+                }
             }
             if i == j {
                 assert!(sum > 0.0, "local matrix must be SPD");
@@ -407,22 +410,13 @@ impl Bddc {
             let nf = free.len();
             let mut s_loc = vec![vec![0.0f64; nf]; nf];
             for (a, &fa) in free.iter().enumerate() {
-                let mut col = vec![0.0f64; nb];
-                for i in 0..nb {
-                    col[i] = sub.k_bb[i][fa];
-                }
+                let mut col: Vec<f64> = sub.k_bb.iter().map(|row| row[fa]).collect();
                 if ni > 0 {
-                    let mut rhs = vec![0.0f64; ni];
-                    for i in 0..ni {
-                        rhs[i] = sub.k_ib[i][fa];
-                    }
+                    let rhs: Vec<f64> = sub.k_ib.iter().map(|row| row[fa]).collect();
                     let w = cholesky_solve(&sub.l_ii, &rhs);
-                    for i in 0..nb {
-                        let mut acc = 0.0f64;
-                        for k in 0..ni {
-                            acc += sub.k_ib[k][i] * w[k];
-                        }
-                        col[i] -= acc;
+                    for (i, c) in col.iter_mut().enumerate() {
+                        let acc: f64 = sub.k_ib.iter().zip(&w).map(|(row, wk)| row[i] * wk).sum();
+                        *c -= acc;
                     }
                 }
                 for (b, &fb) in free.iter().enumerate() {
