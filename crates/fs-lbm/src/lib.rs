@@ -15,11 +15,19 @@
 
 pub use fs_evidence::Color;
 
+pub mod core2;
+pub mod rheology;
+pub mod thermal;
+
+pub use core2::{Cell, Grid};
+pub use rheology::Rheology;
+pub use thermal::ThermalLbm;
+
 /// The D2Q9 population count.
 pub const Q: usize = 9;
 
 /// The D2Q9 lattice velocities.
-const E: [(i32, i32); Q] = [
+pub(crate) const E: [(i32, i32); Q] = [
     (0, 0),
     (1, 0),
     (0, 1),
@@ -32,7 +40,7 @@ const E: [(i32, i32); Q] = [
 ];
 
 /// The D2Q9 lattice weights.
-const W: [f64; Q] = [
+pub(crate) const W: [f64; Q] = [
     4.0 / 9.0,
     1.0 / 9.0,
     1.0 / 9.0,
@@ -45,7 +53,7 @@ const W: [f64; Q] = [
 ];
 
 /// Opposite-direction indices (for bounce-back).
-const OPP: [usize; Q] = [0, 3, 4, 1, 2, 7, 8, 5, 6];
+pub(crate) const OPP: [usize; Q] = [0, 3, 4, 1, 2, 7, 8, 5, 6];
 
 /// The lattice sound speed squared `c_s² = 1/3`.
 pub const CS2: f64 = 1.0 / 3.0;
