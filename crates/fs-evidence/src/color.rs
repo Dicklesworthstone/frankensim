@@ -256,14 +256,27 @@ pub fn compose(a: &Color, b: &Color, op: IntervalOp) -> Color {
                 regime: r2,
                 dataset: d2,
             },
-        ) => Color::Validated {
-            regime: intersect_domains(r1, r2),
-            dataset: if d1 == d2 {
-                d1.clone()
+        ) => {
+            let regime = intersect_domains(r1, r2);
+            if regime.is_empty() {
+                // Mutually unsatisfiable regimes: there is NO state where both
+                // anchors hold, so the composition cannot honestly stay
+                // Validated — demote to Estimated (min-rank, no laundering).
+                Color::Estimated {
+                    estimator: format!("disjoint-regimes:{d1}&{d2}"),
+                    dispersion: 0.0,
+                }
             } else {
-                format!("{d1}&{d2}")
-            },
-        },
+                Color::Validated {
+                    regime,
+                    dataset: if d1 == d2 {
+                        d1.clone()
+                    } else {
+                        format!("{d1}&{d2}")
+                    },
+                }
+            }
+        }
         // Anything ⊕ estimated → estimated. No exceptions here; the
         // waiver door lives at the LEDGER, in provenance.
         (
@@ -301,25 +314,15 @@ pub fn compose(a: &Color, b: &Color, op: IntervalOp) -> Color {
 }
 
 /// Intersection of two validity domains (axis-wise; an axis present in
-/// either constrains the result — both anchors must hold).
+/// either constrains the result — both anchors must hold). Delegates to
+/// [`ValidityDomain::intersect`], which PRESERVES emptiness (`lo > hi`) on a
+/// disjoint axis so callers can detect an unsatisfiable regime via
+/// [`ValidityDomain::is_empty`]. (A previous `hi.max(lo)` clamp here collapsed a
+/// disjoint intersection into a phantom single point, silently claiming
+/// validity at a state where neither anchor holds.)
 #[must_use]
 pub fn intersect_domains(a: &ValidityDomain, b: &ValidityDomain) -> ValidityDomain {
-    let mut out = ValidityDomain::unconstrained();
-    let mut keys: Vec<&String> = a.bounds().keys().collect();
-    keys.extend(b.bounds().keys());
-    keys.sort();
-    keys.dedup();
-    for k in keys {
-        let ra = a.bounds().get(k);
-        let rb = b.bounds().get(k);
-        let (lo, hi) = match (ra, rb) {
-            (Some(&(a0, a1)), Some(&(b0, b1))) => (a0.max(b0), a1.min(b1)),
-            (Some(&r), None) | (None, Some(&r)) => r,
-            (None, None) => continue,
-        };
-        out = out.with(k.clone(), lo, hi.max(lo));
-    }
-    out
+    a.intersect(b)
 }
 
 /// Check a validated color against the CURRENT execution state:

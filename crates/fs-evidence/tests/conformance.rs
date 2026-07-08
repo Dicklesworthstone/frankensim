@@ -321,3 +321,38 @@ fn evd_006_certified_discipline_composes() {
          chains (kind severity is monotone)",
     );
 }
+
+#[test]
+fn evd_007_disjoint_validated_regimes_demote_not_launder() {
+    use fs_evidence::{Color, ColorRank, IntervalOp, compose};
+    let a = Color::Validated {
+        regime: ValidityDomain::unconstrained().with("Re", 1e5, 2e5),
+        dataset: "A".into(),
+    };
+    // Overlapping regimes: stays Validated with the (narrower) intersection.
+    let b_overlap = Color::Validated {
+        regime: ValidityDomain::unconstrained().with("Re", 1.5e5, 3e5),
+        dataset: "B".into(),
+    };
+    let overlap = compose(&a, &b_overlap, IntervalOp::Add);
+    let overlap_ok = if let Color::Validated { regime, .. } = &overlap {
+        let (lo, hi) = regime.bound("Re").unwrap_or((0.0, 0.0));
+        (lo - 1.5e5).abs() < 1.0 && (hi - 2e5).abs() < 1.0
+    } else {
+        false
+    };
+    // DISJOINT regimes: no state satisfies both anchors, so the composition must
+    // NOT stay Validated (previously it laundered a phantom [3e5,3e5] regime).
+    let b_disjoint = Color::Validated {
+        regime: ValidityDomain::unconstrained().with("Re", 3e5, 4e5),
+        dataset: "B".into(),
+    };
+    let disjoint = compose(&a, &b_disjoint, IntervalOp::Add);
+    let demoted = disjoint.rank() == ColorRank::Estimated;
+    verdict(
+        "evd-007",
+        overlap_ok && demoted,
+        "validated⊕validated intersects when overlapping; disjoint regimes demote to \
+         Estimated instead of laundering a phantom point regime",
+    );
+}
