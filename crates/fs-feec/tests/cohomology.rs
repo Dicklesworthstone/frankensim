@@ -32,13 +32,13 @@ fn ring(nx: usize, hole_w: usize) -> (TetComplex, Vec<[f64; 3]>) {
 
 #[test]
 fn ch_001_harmonic_dimensions_match_betti() {
+    type Fixture = (TetComplex, Vec<[f64; 3]>);
     // The zoo: ball, ring (1 handle), two-hole slab (2 handles),
     // hollow cube (1 void).
     let ball = kuhn_cube(2);
     let ring1 = ring(4, 2);
     let two_hole = masked_cube_grid(5, 3, 1, &|i, j, _| !((i == 1 || i == 3) && j == 1));
     let hollow = masked_cube_grid(3, 3, 3, &|i, j, k| !(i == 1 && j == 1 && k == 1));
-    type Fixture = (TetComplex, Vec<[f64; 3]>);
     let zoo: [(&str, &Fixture, [usize; 3]); 4] = [
         ("ball", &ball, [1, 0, 0]),
         ("ring", &ring1, [1, 1, 0]),

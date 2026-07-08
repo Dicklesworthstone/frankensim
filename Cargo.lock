@@ -823,6 +823,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-checker"
+version = "0.0.1"
+dependencies = [
+ "fs-evidence",
+ "fs-package",
+]
+
+[[package]]
 name = "fs-constraint"
 version = "0.0.1"
 dependencies = [

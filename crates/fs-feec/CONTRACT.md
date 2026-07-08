@@ -85,6 +85,22 @@ checkerboarding structurally instead of by stabilization folklore.
   Legendre moments) and π_D (Legendre coefficients) with
   d∘π_C = π_D∘d by construction.
 
+- `cohomology` module (plan §8.1, bead tfz.7): harmonic cochains and
+  the discrete Hodge decomposition — the correct treatment of
+  multiply-connected domains. `hodge_decompose` splits any k-cochain
+  into exact ⊕ coexact ⊕ harmonic in the diagonal-star inner products
+  (matrix-free CG on the projection normal equations; components
+  re-sum exactly, M-orthogonality residuals reported).
+  `harmonic_basis` computes an M-orthonormal kernel basis whose
+  dimension equals `b_k` — cross-checked against the integer-rank
+  Betti computation (geometry and physics agreeing). `circulation` is
+  the cycle pairing extracting Γ from harmonic components
+  (Kutta–Joukowski lift); `deflate_harmonics` supplies the
+  orthogonality constraints that make saddle systems on handled
+  domains well-posed. `fixtures::masked_cube_grid` builds the
+  multiply-connected zoo (rings, multi-hole slabs, hollow shells) with
+  compacted vertices.
+
 ## Invariants
 
 - dd = 0 EXACTLY: integer path (i64 `apply`) and f64 CSR path (sums
@@ -208,3 +224,17 @@ form; its own golden hash.
   solver-stack scope).
 - `betti` is a fixture-scale certifier, not persistent homology at
   scale (fs-topo).
+
+## No-claim boundaries (cohomology)
+
+- Stars are the DIAGONAL barycentric variant; Galerkin-star (full mass)
+  decompositions and LOBPCG spectral harmonic solvers land when the
+  eigensolver bead's machinery is consumed here — the projection route
+  needs no eigen machinery and is deterministic.
+- Γ recovery is G1-graded (midpoint-sampled line integrals; the
+  coexact component of a sampled irrotational field is discretization
+  noise, not exactly zero) — tolerances are measured and ledgered, not
+  asserted tight.
+- The thin-airfoil WING benchmark (BEM + Kutta condition) belongs to
+  fs-bem-fmm (tfz.20), which consumes this module's circulation
+  functional; the fixture here is the cylinder-vortex ring.
