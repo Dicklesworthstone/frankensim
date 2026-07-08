@@ -1,19 +1,21 @@
 //! Multi-objective battery (7tv.16 slice 1): hypervolume vs
-//! hand-computed values (2D/3D, degenerate cases), non-dominated-sort
-//! laws, NSGA-II on ZDT1/ZDT2 (known Pareto fronts) with convergence
-//! + diversity gates and the hypervolume advantage over QMC-random
-//! MEASURED at matched evaluations, knee detection on an asymmetric
-//! synthetic front, CVaR Rockafellar–Uryasev vs the Gaussian closed
-//! form, bitwise replay (G5), and the golden hash.
+//! hand-computed values (2D/3D, degenerate cases); non-dominated-sort
+//! laws; NSGA-II on ZDT1/ZDT2 (known Pareto fronts) with convergence
+//! and diversity gates and the hypervolume advantage over QMC-random
+//! MEASURED at matched evaluations; knee detection on an asymmetric
+//! synthetic front; CVaR Rockafellar–Uryasev vs the Gaussian closed
+//! form; bitwise replay (G5); and the golden hash.
 
 use fs_dfo::{
-    Individual, NsgaParams, cvar_rockafellar_uryasev, hypervolume, knee_point,
-    non_dominated_sort, nsga2,
+    Individual, NsgaParams, cvar_rockafellar_uryasev, hypervolume, knee_point, non_dominated_sort,
+    nsga2,
 };
 use fs_rand::StreamKey;
 
 fn log(case: &str, verdict: &str, detail: &str) {
-    println!("{{\"suite\":\"fs-dfo-moo\",\"case\":\"{case}\",\"verdict\":\"{verdict}\",\"detail\":\"{detail}\"}}");
+    println!(
+        "{{\"suite\":\"fs-dfo-moo\",\"case\":\"{case}\",\"verdict\":\"{verdict}\",\"detail\":\"{detail}\"}}"
+    );
 }
 
 fn zdt1(x: &[f64]) -> Vec<f64> {
@@ -59,7 +61,11 @@ fn hypervolume_hand_computed() {
         &[1.0, 1.0, 1.0],
     );
     assert!((hv6 - 0.14).abs() < 1e-12, "{hv6}");
-    log("hypervolume", "pass", "2D/3D hand-computed incl. degenerate");
+    log(
+        "hypervolume",
+        "pass",
+        "2D/3D hand-computed incl. degenerate",
+    );
 }
 
 #[test]
@@ -113,14 +119,20 @@ fn nsga2_zdt_convergence_and_beats_random() {
             .map(|ind| (ind.f[1] - true_f2(ind.f[0])).abs())
             .sum::<f64>()
             / front.len() as f64;
-        assert!(mean_gap < 0.05, "{name}: front not converged, gap {mean_gap:.4}");
+        assert!(
+            mean_gap < 0.05,
+            "{name}: front not converged, gap {mean_gap:.4}"
+        );
         // Diversity: f1 range covers most of [0,1].
         let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
         for ind in &front {
             lo = lo.min(ind.f[0]);
             hi = hi.max(ind.f[0]);
         }
-        assert!(hi - lo > 0.7, "{name}: diversity collapsed: [{lo:.3},{hi:.3}]");
+        assert!(
+            hi - lo > 0.7,
+            "{name}: diversity collapsed: [{lo:.3},{hi:.3}]"
+        );
         // Hypervolume beats QMC-random at MATCHED total evaluations.
         let pts: Vec<Vec<f64>> = front.iter().map(|i| i.f.clone()).collect();
         let hv_nsga = hypervolume(&pts, &reference);
@@ -140,7 +152,10 @@ fn nsga2_zdt_convergence_and_beats_random() {
         log(
             name,
             "pass",
-            &format!("gap {mean_gap:.4}, spread {:.2}, HV {hv_nsga:.4} vs random {hv_rand:.4}", hi - lo),
+            &format!(
+                "gap {mean_gap:.4}, spread {:.2}, HV {hv_nsga:.4} vs random {hv_rand:.4}",
+                hi - lo
+            ),
         );
     }
     // G5: bitwise replay.
@@ -150,7 +165,11 @@ fn nsga2_zdt_convergence_and_beats_random() {
     let b = nsga2(&mut f2, 8, (0.0, 1.0), &params);
     assert_eq!(a.len(), b.len());
     for (p, q) in a.iter().zip(&b) {
-        assert!(p.f.iter().zip(&q.f).all(|(u, v)| u.to_bits() == v.to_bits()));
+        assert!(
+            p.f.iter()
+                .zip(&q.f)
+                .all(|(u, v)| u.to_bits() == v.to_bits())
+        );
     }
     log("nsga2-replay", "pass", "bitwise");
 }
@@ -183,15 +202,20 @@ fn cvar_matches_gaussian_closed_form() {
     // CVaR_β of N(μ, σ²) = μ + σ·φ(z_β)/(1−β). Sample estimate via
     // RU must converge to it.
     let (mu, sigma, beta) = (2.0f64, 1.5f64, 0.9f64);
-    let mut s = StreamKey { seed: 101, kernel: 0xC7A2, tile: 0 }.stream();
+    let mut s = StreamKey {
+        seed: 101,
+        kernel: 0xC7A2,
+        tile: 0,
+    }
+    .stream();
     let n = 200_000usize;
     let losses: Vec<f64> = (0..n).map(|_| sigma.mul_add(s.next_normal(), mu)).collect();
     let (cvar, alpha) = cvar_rockafellar_uryasev(&losses, beta);
     // z_0.9 (standard normal 90% quantile) — fixed constant; fs-bo has
     // the general quantile but depends on fs-dfo (dev-cycle avoided).
     let z_beta = 1.281_551_565_544_600_4_f64;
-    let pdf = fs_math::det::exp(-0.5 * z_beta * z_beta)
-        / fs_math::det::sqrt(2.0 * core::f64::consts::PI);
+    let pdf =
+        fs_math::det::exp(-0.5 * z_beta * z_beta) / fs_math::det::sqrt(2.0 * core::f64::consts::PI);
     let cvar_true = sigma.mul_add(pdf / (1.0 - beta), mu);
     let var_true = sigma.mul_add(z_beta, mu);
     assert!(
@@ -209,7 +233,7 @@ fn cvar_matches_gaussian_closed_form() {
     );
 }
 
-const GOLDEN_HASH: u64 = 0; // recorded on first run, then frozen
+const GOLDEN_HASH: u64 = 0xaf70_6167_593f_51cc; // recorded at 7tv.16 slice 1, frozen
 
 #[test]
 fn moo_golden_hash() {
@@ -236,7 +260,12 @@ fn moo_golden_hash() {
     }
     let pts: Vec<Vec<f64>> = front.iter().map(|i| i.f.clone()).collect();
     feed(hypervolume(&pts, &[1.1, 1.1]));
-    let mut s = StreamKey { seed: 6, kernel: 0xC7A2, tile: 1 }.stream();
+    let mut s = StreamKey {
+        seed: 6,
+        kernel: 0xC7A2,
+        tile: 1,
+    }
+    .stream();
     let losses: Vec<f64> = (0..500).map(|_| s.next_normal()).collect();
     let (cv, al) = cvar_rockafellar_uryasev(&losses, 0.85);
     feed(cv);

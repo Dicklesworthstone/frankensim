@@ -82,19 +82,14 @@ pub fn crowding_distance(front: &[&Individual]) -> Vec<f64> {
     let mut dist = vec![0.0f64; n];
     for obj in 0..m {
         let mut order: Vec<usize> = (0..n).collect();
-        order.sort_by(|&a, &b| {
-            front[a].f[obj]
-                .total_cmp(&front[b].f[obj])
-                .then(a.cmp(&b))
-        });
+        order.sort_by(|&a, &b| front[a].f[obj].total_cmp(&front[b].f[obj]).then(a.cmp(&b)));
         let lo = front[order[0]].f[obj];
         let hi = front[order[n - 1]].f[obj];
         let span = (hi - lo).max(1e-30);
         dist[order[0]] = f64::INFINITY;
         dist[order[n - 1]] = f64::INFINITY;
         for w in 1..n - 1 {
-            dist[order[w]] +=
-                (front[order[w + 1]].f[obj] - front[order[w - 1]].f[obj]) / span;
+            dist[order[w]] += (front[order[w + 1]].f[obj] - front[order[w - 1]].f[obj]) / span;
         }
     }
     dist
@@ -153,7 +148,9 @@ pub fn nsga2(
                 let b = s.next_below(pop.len() as u64) as usize;
                 if fronts[a] < fronts[b]
                     || (fronts[a] == fronts[b] && crowd[a] > crowd[b])
-                    || (fronts[a] == fronts[b] && crowd[a] == crowd[b] && a <= b)
+                    || (fronts[a] == fronts[b]
+                        && crowd[a].to_bits() == crowd[b].to_bits()
+                        && a <= b)
                 {
                     a
                 } else {
@@ -162,14 +159,7 @@ pub fn nsga2(
             };
             let p1 = pick(&mut stream);
             let p2 = pick(&mut stream);
-            let (mut c1, mut c2) = sbx(
-                &pop[p1].x,
-                &pop[p2].x,
-                params.eta_c,
-                lo,
-                hi,
-                &mut stream,
-            );
+            let (mut c1, mut c2) = sbx(&pop[p1].x, &pop[p2].x, params.eta_c, lo, hi, &mut stream);
             mutate(&mut c1, params.eta_m, params.p_mut, lo, hi, &mut stream);
             mutate(&mut c2, params.eta_m, params.p_mut, lo, hi, &mut stream);
             let f1 = objectives(&c1);
@@ -244,8 +234,8 @@ fn sbx(
             } else {
                 fs_math::det::pow(1.0 / (2.0 * (1.0 - u)), 1.0 / (eta + 1.0))
             };
-            let a = 0.5 * ((1.0 + beta) * p1[i] + (1.0 - beta) * p2[i]);
-            let b = 0.5 * ((1.0 - beta) * p1[i] + (1.0 + beta) * p2[i]);
+            let a = f64::midpoint((1.0 + beta) * p1[i], (1.0 - beta) * p2[i]);
+            let b = f64::midpoint((1.0 - beta) * p1[i], (1.0 + beta) * p2[i]);
             c1[i] = a.clamp(lo, hi);
             c2[i] = b.clamp(lo, hi);
         }
@@ -254,14 +244,7 @@ fn sbx(
 }
 
 /// Polynomial mutation.
-fn mutate(
-    x: &mut [f64],
-    eta: f64,
-    p_mut: f64,
-    lo: f64,
-    hi: f64,
-    stream: &mut fs_rand::Stream,
-) {
+fn mutate(x: &mut [f64], eta: f64, p_mut: f64, lo: f64, hi: f64, stream: &mut fs_rand::Stream) {
     for xi in x.iter_mut() {
         if stream.next_f64() < p_mut {
             let u = stream.next_f64();
@@ -310,11 +293,7 @@ fn hv_recursive(pts: &[Vec<f64>], reference: &[f64]) -> f64 {
     // Inclusion-exclusion by slicing on the last objective (WFG-style
     // exclusive contributions; exponential worst case — m ≤ 4 scope).
     let mut order: Vec<usize> = (0..pts.len()).collect();
-    order.sort_by(|&a, &b| {
-        pts[a][m - 1]
-            .total_cmp(&pts[b][m - 1])
-            .then(a.cmp(&b))
-    });
+    order.sort_by(|&a, &b| pts[a][m - 1].total_cmp(&pts[b][m - 1]).then(a.cmp(&b)));
     let mut hv = 0.0f64;
     for (k, &i) in order.iter().enumerate() {
         let z_hi = if k + 1 < order.len() {
