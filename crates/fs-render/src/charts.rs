@@ -102,7 +102,7 @@ pub fn sphere_trace(
         if relaxed_pending && safe + prev_radius < (omega - 1.0) * prev_radius + prev_radius {
             // The relaxed step's sphere does not overlap the previous
             // safe sphere: retreat to the certified step.
-            t = t - (omega - 1.0) * prev_radius;
+            t -= (omega - 1.0) * prev_radius;
             relaxed_pending = false;
             steps += 1;
             continue;
@@ -179,9 +179,7 @@ pub fn ray_intersect_nurbs(
     let mut best: Option<Hit> = None;
     for &(_, u0, v0, t0) in seeds.iter().take(6) {
         let (mut u, mut v, mut t) = (u0, v0, t0);
-        let mut iters = 0u32;
-        for _ in 0..24 {
-            iters += 1;
+        for iter_count in 1..=24u32 {
             let Ok((pos, su, sv)) = surface.partials(u, v) else {
                 break;
             };
@@ -202,7 +200,7 @@ pub fn ray_intersect_nurbs(
                     t,
                     point: ray.at(t),
                     normal: (nn > 1e-12).then(|| n.scale(1.0 / nn)),
-                    steps: iters,
+                    steps: iter_count,
                 };
                 if t > 1e-9 && best.as_ref().is_none_or(|b| hit.t < b.t) {
                     best = Some(hit);
@@ -295,8 +293,8 @@ impl TriMesh {
         let t = self.triangles[tri as usize];
         let mut c = [0.0f64; 3];
         for &vi in &t {
-            for k in 0..3 {
-                c[k] += self.vertices[vi as usize][k] / 3.0;
+            for (ck, &pv) in c.iter_mut().zip(&self.vertices[vi as usize]) {
+                *ck += pv / 3.0;
             }
         }
         c
