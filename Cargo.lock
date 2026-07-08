@@ -795,6 +795,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-ascent"
+version = "0.0.1"
+dependencies = [
+ "fs-ad",
+ "fs-adjoint",
+ "fs-feec",
+ "fs-la",
+ "fs-math",
+ "fs-opt",
+ "fs-rand",
+ "fs-solver",
+ "fs-sparse",
+]
+
+[[package]]
 name = "fs-bisect"
 version = "0.0.1"
 
@@ -845,6 +860,13 @@ dependencies = [
  "fs-la",
  "fs-math",
  "fs-rand",
+]
+
+[[package]]
+name = "fs-dimine"
+version = "0.0.1"
+dependencies = [
+ "fs-evidence",
 ]
 
 [[package]]
@@ -1052,6 +1074,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-package"
+version = "0.0.1"
+dependencies = [
+ "fs-evidence",
+]
+
+[[package]]
 name = "fs-plan"
 version = "0.0.1"
 dependencies = [
@@ -1243,6 +1272,7 @@ name = "fs-solid"
 version = "0.0.1"
 dependencies = [
  "fs-cutfem",
+ "fs-la",
  "fs-material",
  "fs-scenario",
  "fs-solver",
