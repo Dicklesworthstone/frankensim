@@ -262,8 +262,8 @@ pub fn crossfade_path(a: &Surface, b: &Surface, interior: usize) -> Vec<Surface>
             let t = k as f64 / steps as f64;
             let mut s = a.clone();
             for (i, p) in s.positions.iter_mut().enumerate() {
-                for c in 0..3 {
-                    p[c] = a.positions[i][c] + t * (b.positions[i][c] - a.positions[i][c]);
+                for (c, pc) in p.iter_mut().enumerate() {
+                    *pc = a.positions[i][c] + t * (b.positions[i][c] - a.positions[i][c]);
                 }
             }
             s
