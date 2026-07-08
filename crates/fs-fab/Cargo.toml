@@ -1,0 +1,19 @@
+[package]
+name = "fs-fab"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Manufacturing, fabrication, and code compliance as its own layer (fs-fab): optimization without fabrication semantics produces fantasy artifacts. Checkable, differentiable-where-possible constraints across additive/subtractive/casting/structural-steel/concrete processes (each declaring its differentiability class, certificate availability, and Fabrication/Code kind), with repair suggestions and Evidence-typed cost + embodied-carbon models."
+
+[package.metadata.frankensim]
+layer = "L4"
+
+[dependencies]
+fs-evidence = { path = "../fs-evidence" }
+
+[dev-dependencies]
+
+[lints]
+workspace = true

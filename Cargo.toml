@@ -82,10 +82,12 @@ members = [
     "crates/fs-assimilate",
     "crates/fs-diffreal-e2e",
     "crates/fs-voi",
+    "crates/fs-fab",
     "crates/fs-cutfem",
     "crates/fs-solid",
     "crates/fs-dwr",
     "crates/fs-topols",
+    "crates/fs-fmm",
     "xtask",
 ]
 
