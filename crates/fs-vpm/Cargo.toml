@@ -1,0 +1,18 @@
+[package]
+name = "fs-vpm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Vortex particle method (fs-vpm): 2-D inviscid vortex dynamics by direct desingularized Biot-Savart induction and RK4 advection. A single vortex induces the analytic tangential field; a counter-rotating pair self-propels at Gamma/(2 pi d); total circulation is conserved. Deterministic; verified against analytic vortex fixtures."
+
+[package.metadata.frankensim]
+layer = "L3"
+
+[dependencies]
+
+[dev-dependencies]
+
+[lints]
+workspace = true
