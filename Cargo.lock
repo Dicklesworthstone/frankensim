@@ -1314,6 +1314,13 @@ name = "fs-spececo"
 version = "0.0.1"
 
 [[package]]
+name = "fs-spectral"
+version = "0.0.1"
+dependencies = [
+ "fs-evidence",
+]
+
+[[package]]
 name = "fs-substrate"
 version = "0.0.1"
 dependencies = [
