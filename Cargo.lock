@@ -821,6 +821,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-assimilate"
+version = "0.0.1"
+dependencies = [
+ "fs-evidence",
+]
+
+[[package]]
 name = "fs-benchmark"
 version = "0.0.1"
 dependencies = [
