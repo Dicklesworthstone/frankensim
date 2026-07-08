@@ -1,0 +1,18 @@
+[package]
+name = "fs-report"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Automatic lab notebooks + semantic design diffs (fs-report): every study emits a deterministic, content-addressed, human-readable report that INCLUDES THE EXACT IR TO REPRODUCE IT — reproducibility as a side effect, not a virtue. Plus semantic_diff, a per-feature geometric attribution (moved/thinned features with units) rather than a file diff."
+
+[package.metadata.frankensim]
+layer = "L6"
+
+[dependencies]
+
+[dev-dependencies]
+
+[lints]
+workspace = true

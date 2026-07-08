@@ -95,6 +95,7 @@ members = [
     "crates/fs-sos",
     "crates/fs-archive",
     "crates/fs-viz",
+    "crates/fs-report",
     "crates/fs-cutfem",
     "crates/fs-solid",
     "crates/fs-dwr",
