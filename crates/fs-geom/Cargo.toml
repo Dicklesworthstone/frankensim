@@ -28,6 +28,10 @@ semantic-diff = []
 # [M]-gated per the Ambition-Tag rule: sheaf repair ships disabled until
 # certifier trials pass (milestone P6).
 sheaf-repair = []
+# [M]-gated: the sheaf-adjudicated merge (crown jewel) ships disabled
+# until its Gauntlet tier + kill metric are green. Reuses the repair
+# Hodge machinery.
+sheaf-merge = ["sheaf-repair"]
 
 [lints]
 workspace = true

@@ -39,6 +39,8 @@ pub mod ident;
 mod region;
 pub mod router;
 pub mod sheaf;
+#[cfg(feature = "sheaf-merge")]
+pub mod sheaf_merge;
 #[cfg(feature = "sheaf-repair")]
 pub mod sheaf_repair;
 
