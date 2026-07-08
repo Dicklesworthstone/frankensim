@@ -245,7 +245,8 @@ pub fn write_png8(
     samples: &[u8],
 ) -> Result<Vec<u8>, ImgError> {
     let channels = color.channels();
-    let expected = checked_sample_count(width, height, channels, samples.len(), "write_png8 samples")?;
+    let expected =
+        checked_sample_count(width, height, channels, samples.len(), "write_png8 samples")?;
     if samples.len() != expected {
         return Err(ImgError::Shape {
             expected,
@@ -277,7 +278,13 @@ pub fn write_png16(
     samples: &[u16],
 ) -> Result<Vec<u8>, ImgError> {
     let channels = color.channels();
-    let expected = checked_sample_count(width, height, channels, samples.len(), "write_png16 samples")?;
+    let expected = checked_sample_count(
+        width,
+        height,
+        channels,
+        samples.len(),
+        "write_png16 samples",
+    )?;
     if samples.len() != expected {
         return Err(ImgError::Shape {
             expected,
@@ -564,5 +571,51 @@ mod tests {
             read_png(&bytes).is_err(),
             "corruption must not decode silently"
         );
+    }
+
+    fn rewrite_ihdr_crc(bytes: &mut [u8]) {
+        let crc = crc32(&bytes[12..29]).to_be_bytes();
+        bytes[29..33].copy_from_slice(&crc);
+    }
+
+    #[test]
+    fn png_subset_validation_rejects_bad_headers_and_trailing_bytes() {
+        let px = vec![1u8; 12];
+        let good = write_png8(2, 2, PngColor::Rgb, &px).unwrap();
+
+        let mut bad_compression = good.clone();
+        bad_compression[26] = 1;
+        rewrite_ihdr_crc(&mut bad_compression);
+        assert!(matches!(
+            read_png(&bad_compression),
+            Err(ImgError::Unsupported { .. })
+        ));
+
+        let mut bad_filter = good.clone();
+        bad_filter[27] = 1;
+        rewrite_ihdr_crc(&mut bad_filter);
+        assert!(matches!(
+            read_png(&bad_filter),
+            Err(ImgError::Unsupported { .. })
+        ));
+
+        let mut trailing = good;
+        trailing.push(0);
+        assert!(matches!(
+            read_png(&trailing),
+            Err(ImgError::Malformed { .. })
+        ));
+    }
+
+    #[test]
+    fn png_writer_rejects_zero_dimensions() {
+        assert!(matches!(
+            write_png8(0, 2, PngColor::Rgb, &[]),
+            Err(ImgError::Shape { .. })
+        ));
+        assert!(matches!(
+            write_png16(2, 0, PngColor::Gray, &[]),
+            Err(ImgError::Shape { .. })
+        ));
     }
 }
