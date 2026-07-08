@@ -18,6 +18,9 @@ fs-package = { path = "../fs-package" }
 
 [dev-dependencies]
 fs-evidence = { path = "../fs-evidence" }
+fs-ledger = { path = "../fs-ledger" }
+fs-opt = { path = "../fs-opt" }
+fs-robust = { path = "../fs-robust" }
 
 [lints]
 workspace = true
