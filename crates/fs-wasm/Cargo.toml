@@ -1,0 +1,28 @@
+[package]
+name = "fs-wasm"
+version = "0.0.1"
+edition = "2024"
+publish = false
+description = "Browser (WASM) surface over FrankenSim's pure numerical leaves — real math in the browser, no mocks."
+
+# Its own workspace (like asupersync-wasm / franken_markdown): the wasm binding
+# crate is decoupled from the native workspace so a browser build never depends
+# on the state of unrelated in-progress crates.
+[workspace]
+
+[lib]
+name = "fs_wasm"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+fs-sparse = { path = "../fs-sparse" }
+fs-cheb = { path = "../fs-cheb" }
+fs-rand = { path = "../fs-rand" }
+fs-math = { path = "../fs-math" }
+
+# wasm-bindgen only enters the wasm32 build — native builds stay dependency-clean.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+
+[lints.rust]
+unsafe_code = "forbid"
