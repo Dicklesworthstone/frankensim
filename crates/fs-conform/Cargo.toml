@@ -1,0 +1,18 @@
+[package]
+name = "fs-conform"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Restriction-map plugin conformance SDK (addendum Proposal 7): third-party chart-to-chart converters are certified into tiers by an auto-generated suite that checks the sheaf axioms — functoriality, adjoint consistency, and manufactured-solution tolerance honesty — so a bad converter is caught, not certified. Owns risk R6."
+
+[package.metadata.frankensim]
+layer = "L2"
+
+[dependencies]
+
+[dev-dependencies]
+
+[lints]
+workspace = true

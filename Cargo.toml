@@ -69,6 +69,7 @@ members = [
     "crates/fs-crosswalk",
     "crates/fs-spectral",
     "crates/fs-symmetry",
+    "crates/fs-conform",
     "crates/fs-cutfem",
     "crates/fs-solid",
     "xtask",
