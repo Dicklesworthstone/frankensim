@@ -64,11 +64,29 @@ None.
 tests/dfo_battery.rs (benchmarks incl. condition-1e6 ellipsoid,
 determinism, invariance, BIPOP schedule, NM polish, golden hash);
 tests/probe_tmp.rs (success-rate + stagnation-stop regression; filename
-is bring-up history).
+is bring-up history); tests/moo_battery.rs (7 cases): hypervolume vs
+hand-computed 2D/3D values including dominated/out-of-reference
+degenerate cases; non-dominated-sort front assignment exact;
+NSGA-II on ZDT1/ZDT2 at standard budgets (pop 80 × 200 generations —
+short runs measurably leave the f2-minimal arm unexplored, documented
+in the test) with mean front gap ≤ 0.05 (measured ≤ 0.0008), full f1
+spread, hypervolume beating scrambled-Sobol random at MATCHED
+evaluations (0.87 vs 0.19 / 0.54 vs 0.00), and bitwise replay; knee
+detection hitting a synthetic elbow exactly; CVaR Rockafellar–Uryasev
+on 2·10⁵ Gaussian samples vs the closed form μ + σφ(z_β)/(1−β) within
+0.02 (and the RU minimizer matching the VaR); MOO golden hash
+`0xaf70_6167_593f_51cc`.
 
 ## No-claim boundaries
 - No published-ERT-table parity claims yet (in-repo BBOB-class fixtures
   only; the external COCO battery is follow-up).
+- MOO slice-1 scope (module `moo`): NSGA-II, exact hypervolume m ≤ 4,
+  knee, sample-CVaR. NSGA-III reference directions / MOEA/D
+  (many-objective), MC hypervolume beyond m = 4,
+  hypervolume-contribution archiving, gradient-based Pareto tracing
+  (fs-ascent continuation), ledger world-forking steering, Wasserstein
+  DRO + Sinkhorn OT, and chance constraints are the bead's recorded
+  split lanes.
 - Sep-CMA/low-rank (dim > ~200), NES, DE, DIRECT, TR-DFO: not built.
 - No constraint handling (fs-constraint owns kinds; integration later).
 - No parallel evaluation waves yet (fs-exec bead).
