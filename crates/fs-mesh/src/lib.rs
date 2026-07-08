@@ -29,12 +29,14 @@
 mod delaunay;
 mod exude;
 mod parallel;
+mod recovery;
 mod refine;
 mod remesh;
 
 pub use delaunay::{AuditReport, DelaunayStats, GHOST, MeshError, Tetrahedralization, delaunay};
 pub use exude::{ExudeOptions, ExudeStats, exude};
 pub use parallel::{ColoredStats, delaunay_colored, delaunay_colored_reversed};
+pub use recovery::{Correspondence, RecoveryOptions, RecoveryStats, recover_segments};
 pub use refine::{RefineOptions, RefineStats, refine};
 pub use remesh::{MetricField, RemeshOptions, RemeshStats, UniformMetric, remesh};
 

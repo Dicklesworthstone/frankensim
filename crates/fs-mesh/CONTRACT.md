@@ -181,19 +181,26 @@ reimplementation must pass the suite unchanged.
 
 - Weighted exact insphere predicate (the Edelsbrunner weight-pump
   exudation variant; the perturbation flavor ships).
-- PLC constrained boundary recovery, deterministic parallel domain
-  coloring, and the 1e7-point perf lane (bead uee3's remaining
-  items — tracked there).
+- CONSTRAINED-Delaunay facet recovery (interior/non-convex facets),
+  full-Ruppert QUALITY (needs PLC protection machinery — the measured
+  hull-split regression is ledgered in tmesh-011), and the 1e7-point
+  perf lane (bead uee3's remaining items — tracked there).
 
-- Constrained boundary recovery (PLC conformity with Steiner edge/face
-  insertion) and chart-boundary correspondence are the successor bead;
-  v1 meshes the convex hull of the point set.
-- Refinement is radius-edge only: no local-feature-size Ruppert
-  guarantees, no small-input-angle handling, no sliver exudation —
-  hull-encroaching offenders are skipped and counted instead of
-  boundary-split (successor bead).
-- Parallel domain coloring (deterministic merges at any thread count)
-  is deferred; v1 is sequential.
+- SEGMENT recovery now ships in CONFORMING form (`recover_segments`,
+  tmesh-014): recursive midpoint Steiner bisection with twin-vertex
+  ADOPTION at shared midpoints (the four body diagonals of a box meet
+  at its center — abandoning bitwise-duplicate midpoints was measured
+  to strand 3 of 4 segments before adoption landed), a boundary
+  CORRESPONDENCE table mapping every sub-edge to its parent segment
+  (built by construction, re-verified against the finished mesh), and
+  honest `unrecovered` counters at depth/budget caps. Convex
+  hull-facet conformity is gated test-side; interior/non-convex FACET
+  recovery (true constrained DT) remains the successor.
+- Refinement is radius-edge with the minimum-new-edge policy floor;
+  full local-feature-size Ruppert guarantees remain successor scope
+  (sliver exudation ships in `exude`).
+- Parallel domain coloring SHIPS (`delaunay_colored`, tmesh-013) —
+  see Determinism; v1 is sequential.
 - The 10⁷-point perf lane belongs to the perf harness; tmesh-006
   pins 10⁴-scale behavior in CI.
 - Remeshing no-claims: curved creases round under midpoint projection

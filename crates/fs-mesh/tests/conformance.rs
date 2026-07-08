@@ -10,8 +10,8 @@ use asupersync::types::Budget;
 use fs_exec::{CancelGate, Cx, ExecMode, StreamKey};
 use fs_geom::Point3;
 use fs_mesh::{
-    ExudeOptions, MeshError, RefineOptions, Tetrahedralization, delaunay, delaunay_colored,
-    delaunay_colored_reversed, refine,
+    ExudeOptions, MeshError, RecoveryOptions, RefineOptions, Tetrahedralization, delaunay,
+    delaunay_colored, delaunay_colored_reversed, recover_segments, refine,
 };
 use fs_rep_mesh::{assess_quality, winding_exact};
 
@@ -1060,6 +1060,140 @@ fn tmesh_013_parallel_coloring() {
                 gcol.tets().len(),
                 gstats.to_json()
             ),
+        );
+    });
+}
+
+/// tmesh-014: conforming-Delaunay SEGMENT recovery + boundary
+/// correspondence (uee3 item 1, conforming slice). Long diagonals of
+/// a box stuffed with an interior cloud are not Delaunay edges; after
+/// recovery every segment is a verified chain of mesh edges, the
+/// correspondence table walks each chain endpoint-to-endpoint, the
+/// exact audit stays clean, the build is bitwise replayable, and the
+/// convex hull remains exactly on the box planes (hull-facet
+/// conformity). Interior/non-convex FACET recovery (true constrained
+/// DT) is the recorded successor.
+#[test]
+#[allow(clippy::too_many_lines)] // one recovery narrative, four gates
+#[allow(clippy::float_cmp)] // box-plane membership is DELIBERATELY bitwise
+fn tmesh_014_segment_recovery() {
+    with_cx(|cx| {
+        // Box corners 0..8, then a strictly interior cloud.
+        let mut pts: Vec<Point3> = Vec::new();
+        for i in 0..2i32 {
+            for j in 0..2i32 {
+                for k in 0..2i32 {
+                    pts.push(Point3::new(f64::from(i), f64::from(j), f64::from(k)));
+                }
+            }
+        }
+        let mut rng = Lcg(0x1001_2026_0708_0014);
+        for _ in 0..48 {
+            let d = |r: &mut Lcg| 0.44f64.mul_add(r.dyadic(), 0.5); // (0.06, 0.94)
+            pts.push(Point3::new(d(&mut rng), d(&mut rng), d(&mut rng)));
+        }
+        // Segments: the four body diagonals (corner index pairs).
+        let segments: Vec<[u32; 2]> = vec![[0, 7], [1, 6], [2, 5], [3, 4]];
+        let run = |cx: &Cx<'_>| -> (
+            Tetrahedralization,
+            fs_mesh::RecoveryStats,
+            Vec<([u32; 2], u32)>,
+        ) {
+            let mut t = delaunay(&pts, cx).expect("delaunay");
+            let (stats, table) =
+                recover_segments(&mut t, &segments, RecoveryOptions::default(), cx)
+                    .expect("recovery");
+            (t, stats, table.rows)
+        };
+        let (t1, stats, rows) = run(cx);
+        // Recovery did real work and finished everything.
+        verdict(
+            "tmesh-014-recovered",
+            stats.recovered == 4 && stats.unrecovered == 0 && stats.steiner_inserted > 0,
+            &format!("segment recovery ledger: {}", stats.to_json()),
+        );
+        // Correspondence: each segment's rows form a path from a to b
+        // (endpoints degree 1, interior degree 2), and every sub-edge
+        // midpoint lies on the parent segment.
+        let ptsv = t1.points();
+        let mut path_ok = true;
+        let mut on_line = 0.0f64;
+        for (sid, &[a, b]) in segments.iter().enumerate() {
+            let subs: Vec<[u32; 2]> = rows
+                .iter()
+                .filter(|(_, s)| *s == u32::try_from(sid).expect("small"))
+                .map(|(e, _)| *e)
+                .collect();
+            let mut degree: std::collections::BTreeMap<u32, u32> =
+                std::collections::BTreeMap::new();
+            for e in &subs {
+                *degree.entry(e[0]).or_insert(0) += 1;
+                *degree.entry(e[1]).or_insert(0) += 1;
+            }
+            for (&v, &d) in &degree {
+                let want = if v == a || v == b { 1 } else { 2 };
+                if d != want {
+                    path_ok = false;
+                }
+            }
+            let (pa, pb) = (ptsv[a as usize], ptsv[b as usize]);
+            let dir = [pb.x - pa.x, pb.y - pa.y, pb.z - pa.z];
+            for e in &subs {
+                let m = [
+                    f64::midpoint(ptsv[e[0] as usize].x, ptsv[e[1] as usize].x),
+                    f64::midpoint(ptsv[e[0] as usize].y, ptsv[e[1] as usize].y),
+                    f64::midpoint(ptsv[e[0] as usize].z, ptsv[e[1] as usize].z),
+                ];
+                let w = [m[0] - pa.x, m[1] - pa.y, m[2] - pa.z];
+                let c = [
+                    w[1].mul_add(dir[2], -(w[2] * dir[1])),
+                    w[2].mul_add(dir[0], -(w[0] * dir[2])),
+                    w[0].mul_add(dir[1], -(w[1] * dir[0])),
+                ];
+                on_line = on_line.max((c[0] * c[0] + c[1] * c[1] + c[2] * c[2]).sqrt());
+            }
+        }
+        verdict(
+            "tmesh-014-correspondence",
+            path_ok && on_line < 1e-12 && !rows.is_empty(),
+            &format!(
+                "{} sub-edge rows; chain degrees valid; worst off-line residual {on_line:.2e}",
+                rows.len()
+            ),
+        );
+        // Audit + hull-facet conformity (box planes, exact).
+        let audit = t1.audit(true);
+        let hull = t1.hull();
+        let mut hull_on_planes = true;
+        for tri in &hull.triangles {
+            let q: [[f64; 3]; 3] = core::array::from_fn(|k| {
+                let p = ptsv[tri[k] as usize];
+                [p.x, p.y, p.z]
+            });
+            let planar = (0..3).any(|axis| {
+                let v = q[0][axis];
+                (v == 0.0 || v == 1.0) && q[1][axis] == v && q[2][axis] == v
+            });
+            if !planar {
+                hull_on_planes = false;
+            }
+        }
+        verdict(
+            "tmesh-014-audit-and-hull",
+            audit.clean() && hull_on_planes,
+            &format!(
+                "exact audit clean; all {} hull triangles exactly on the 6 box planes",
+                hull.triangles.len()
+            ),
+        );
+        // Bitwise replay.
+        let (t2, stats2, rows2) = run(cx);
+        verdict(
+            "tmesh-014-replay",
+            canonical_tets(&t1) == canonical_tets(&t2)
+                && rows == rows2
+                && stats.to_json() == stats2.to_json(),
+            "recovery replays bitwise (mesh, correspondence, ledger)",
         );
     });
 }
