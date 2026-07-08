@@ -76,8 +76,7 @@ impl ThermalLbm {
         }
         for y in 1..=ny {
             // Linear conduction profile between the halfway wall planes.
-            let t = t_bottom
-                + (t_top - t_bottom) * ((y as f64 - 0.5) / ny as f64);
+            let t = t_bottom + (t_top - t_bottom) * ((y as f64 - 0.5) / ny as f64);
             for x in 0..nx {
                 gpop[y * nx + x] = geq(t, 0.0, 0.0);
             }
@@ -115,8 +114,7 @@ impl ThermalLbm {
                 let s = (std::f64::consts::TAU * x as f64 / nx as f64).sin()
                     * (std::f64::consts::PI * (y as f64 - 0.5) / (ny as f64 - 2.0)).sin();
                 let mm = self.grid.moments(i);
-                self.grid.f[i] =
-                    crate::equilibrium(mm.rho, mm.u[0], amplitude.mul_add(s, mm.u[1]));
+                self.grid.f[i] = crate::equilibrium(mm.rho, mm.u[0], amplitude.mul_add(s, mm.u[1]));
             }
         }
     }

@@ -1,6 +1,8 @@
 # CONTRACT: fs-lbm
 
-Lattice Boltzmann core (D2Q9 BGK) with the lattice-scaling assistant.
+Lattice Boltzmann core (D2Q9 BGK) with the lattice-scaling assistant plus
+frontier-facing dense-grid extension scaffolding for vector forcing, local
+rheology, and thermal double-population fixtures.
 
 ## Purpose and layer
 
@@ -16,6 +18,17 @@ Evidence-typed scaling plan). Pure, deterministic (fixed cell order).
   bounce-back y-walls). `step`/`run` (collide + Guo forcing + stream +
   bounce-back); `density`, `velocity` (Guo-corrected), `total_mass`,
   `viscosity` (`ν = (τ−½)/3`), `x_velocity_profile`.
+- `core2::Grid` / re-exported `Grid` — a general dense D2Q9 grid with cell
+  flags, vector gravity, per-cell relaxation time, per-cell external force,
+  periodicity flags, deterministic collide/stream steps, and gas/wall
+  boundary bounce handling for the plain non-free-surface step.
+- `rheology::Rheology`, `rheology::update_tau`, and
+  `rheology::channel_flow` — local apparent-viscosity laws and explicit
+  τ updates with floor/cap counts for cells outside the representable
+  relaxation window.
+- `thermal::ThermalLbm` and `thermal::gbeta_for_rayleigh` — D2Q9 flow plus
+  D2Q5 temperature populations for Rayleigh-Bénard-style onset fixtures with
+  fixed-temperature wall rows.
 - `plan_scaling(reynolds, char_length_lu, u_lattice) -> ScalingPlan { tau,
   viscosity, u_lattice, mach, tau_margin, stable }` — the lattice-scaling
   assistant. `ScalingPlan::color()` (verified when comfortably stable, else
@@ -31,11 +44,23 @@ Evidence-typed scaling plan). Pure, deterministic (fixed cell order).
   (halfway bounce-back resolves the quadratic profile).
 - `plan_scaling` derives `τ = 3ν + ½`, flags `stable` iff `τ > ½` AND
   `Mach < MACH_LIMIT`.
+- General dense-grid constructors reject zero dimensions and nonphysical
+  relaxation times before arithmetic can produce NaNs.
+- Gas cells do not act as fluid population sources in the plain dense-grid
+  stream step; absent gas-side populations bounce at the fluid boundary until
+  explicit free-surface bookkeeping lands.
+- Rheology laws reject non-finite or non-positive physical parameters, and
+  every update reports floor/cap counts when viscosity leaves the representable
+  τ window.
+- Thermal wall populations encode the declared wall temperatures, so the
+  public `temperature` query is consistent on wall and fluid rows.
 
 ## Error model
 
-Total functions; the only panic is a nonsensical scaling request (non-positive
-Reynolds / length).
+Most operations are total over physically admissible inputs. Constructors and
+parameter helpers panic on nonsensical requests: zero dimensions, non-finite
+forces/relaxation times, non-positive viscosities/rheology indices, non-positive
+Rayleigh height, or non-positive Reynolds/length in the scaling assistant.
 
 ## Determinism class
 
@@ -56,10 +81,15 @@ None.
 
 ## Conformance tests
 
-`tests/lbm.rs` (7 cases): equilibrium moments; mass conservation; Poiseuille
-flow matches the analytic parabola (symmetric, centered); the scaling assistant
-derives τ + flags stability + colors the plan; it rejects a high-Mach plan and
-nonsense inputs; determinism.
+`tests/lbm.rs` covers the v0 core: equilibrium moments; mass conservation;
+Poiseuille flow matches the analytic parabola (symmetric, centered); the
+scaling assistant derives τ + flags stability + colors the plan; it rejects a
+high-Mach plan and nonsense inputs; determinism.
+
+`tests/extensions.rs` covers the current extension scaffolding: power-law and
+Newtonian-limit channel profiles, Carreau plateaus, Rayleigh-Bénard onset
+bracketing and Nusselt heat transport, gas-neighbor streaming behavior, thermal
+wall-temperature queries, and invalid-parameter rejection.
 
 ## No-claim boundaries
 
@@ -68,6 +98,12 @@ nonsense inputs; determinism.
   collision (BGK's high-Re replacement), interpolated Bouzidi curved boundaries
   sampled from SDF charts, momentum-exchange drag/lift, and the bandwidth
   roofline / fs-tilelang kernels — is staged.
+- Interface and gas flags exist so the plain core can share the future data
+  model, but free-surface mass/VOF bookkeeping is not implemented in
+  `Grid::step`; gas-side pulls currently bounce rather than reconstructing
+  missing free-surface populations.
+- Thermal and rheology fixtures are dense-grid correctness scaffolding, not
+  validated LES, cumulant, sparse-tile, or production multiphase solvers.
 - The scaling assistant covers the `τ`/`ν`/`Mach` core; consuming fs-regime's
   dimensionless groups and emitting a full `dx`/`dt` unit conversion with
   Evidence provenance is the fuller deliverable.
