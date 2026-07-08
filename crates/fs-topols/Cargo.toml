@@ -1,0 +1,21 @@
+[package]
+name = "fs-topols"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Level-set topology optimization: WENO narrow-band advection, fast-iterative-method redistancing, normal velocity extension, topological-derivative hole nucleation, CutFEM-coupled compliance descent."
+
+[package.metadata.frankensim]
+layer = "L4"
+
+[dependencies]
+fs-adjoint = { path = "../fs-adjoint" }
+fs-cutfem = { path = "../fs-cutfem" }
+fs-ivl = { path = "../fs-ivl" }
+fs-solid = { path = "../fs-solid" }
+fs-sparse = { path = "../fs-sparse" }
+
+[lints]
+workspace = true
