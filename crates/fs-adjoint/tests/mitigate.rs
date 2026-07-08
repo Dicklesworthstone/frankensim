@@ -39,9 +39,15 @@ fn edge(name: &str, from: &str, to: &str, cost: f64) -> ConverterSpec {
 /// non-differentiable remesh edge) and a pricier direct smooth path.
 fn two_path_router() -> (Router, BTreeSet<String>) {
     let mut router = Router::new();
-    router.register(edge("nurbs->mesh/remesh-v1", "nurbs", "mesh", 0.5)).expect("r");
-    router.register(edge("mesh->sdf/rasterize-v1", "mesh", "sdf", 0.5)).expect("r");
-    router.register(edge("nurbs->sdf/bezier-clip-v1", "nurbs", "sdf", 5.0)).expect("r");
+    router
+        .register(edge("nurbs->mesh/remesh-v1", "nurbs", "mesh", 0.5))
+        .expect("r");
+    router
+        .register(edge("mesh->sdf/rasterize-v1", "mesh", "sdf", 0.5))
+        .expect("r");
+    router
+        .register(edge("nurbs->sdf/bezier-clip-v1", "nurbs", "sdf", 5.0))
+        .expect("r");
     let mut nd = BTreeSet::new();
     nd.insert("nurbs->mesh/remesh-v1".to_string());
     (router, nd)
@@ -91,8 +97,12 @@ fn mg_001_gradient_queries_prefer_the_smooth_path() {
 fn mg_002_unavoidable_remesh_downgrades_never_fakes() {
     // A router where EVERY path crosses the remesh edge.
     let mut router = Router::new();
-    router.register(edge("nurbs->mesh/remesh-v1", "nurbs", "mesh", 0.5)).expect("r");
-    router.register(edge("mesh->sdf/rasterize-v1", "mesh", "sdf", 0.5)).expect("r");
+    router
+        .register(edge("nurbs->mesh/remesh-v1", "nurbs", "mesh", 0.5))
+        .expect("r");
+    router
+        .register(edge("mesh->sdf/rasterize-v1", "mesh", "sdf", 0.5))
+        .expect("r");
     let mut nd = BTreeSet::new();
     nd.insert("nurbs->mesh/remesh-v1".to_string());
     let oracle = MemoryCostOracle::new();
@@ -105,9 +115,15 @@ fn mg_002_unavoidable_remesh_downgrades_never_fakes() {
         } => {
             assert_eq!(crossing, &vec!["nurbs->mesh/remesh-v1".to_string()]);
             match color {
-                Color::Estimated { estimator, dispersion } => {
+                Color::Estimated {
+                    estimator,
+                    dispersion,
+                } => {
                     assert!(estimator.contains("remesh"), "{estimator}");
-                    assert!(dispersion.is_infinite(), "no spread claim across a topology event");
+                    assert!(
+                        dispersion.is_infinite(),
+                        "no spread claim across a topology event"
+                    );
                 }
                 other => panic!("must be Estimated: {other:?}"),
             }
@@ -136,14 +152,8 @@ fn mg_003_hadamard_matches_perturbation_resolve() {
     let (complex, positions) = kuhn_cube(3);
     let velocity = |p: [f64; 3]| -> [f64; 3] {
         // A smooth outward-ish field.
-        [
-            0.3 + 0.1 * p[1],
-            -0.2 + 0.05 * p[0],
-            0.15 * p[2] + 0.05,
-        ]
+        [0.3 + 0.1 * p[1], -0.2 + 0.05 * p[0], 0.15 * p[2] + 0.05]
     };
-    let dj = fs_adjoint::compliance_shape_gradient; // (unused here; volume is the fixture)
-    let _ = dj;
     let hadamard = fs_adjoint::volume_shape_gradient(&complex, &positions, &velocity);
     // Perturbation-resolve: move EVERY vertex by t·V, re-measure volume.
     let volume_at = |t: f64| -> f64 {
@@ -226,8 +236,12 @@ fn mg_005_deterministic_tie_break() {
     // Two EQUAL-fitness smooth paths: the router's choice must be
     // deterministic across repeated plans (the review-round-3 boundary).
     let mut router = Router::new();
-    router.register(edge("nurbs->sdf/path-a", "nurbs", "sdf", 2.0)).expect("r");
-    router.register(edge("nurbs->sdf/path-b", "nurbs", "sdf", 2.0)).expect("r");
+    router
+        .register(edge("nurbs->sdf/path-a", "nurbs", "sdf", 2.0))
+        .expect("r");
+    router
+        .register(edge("nurbs->sdf/path-b", "nurbs", "sdf", 2.0))
+        .expect("r");
     let oracle = MemoryCostOracle::new();
     let nd = BTreeSet::new();
     let first = plan_gradient_route(&router, &request(), &oracle, &nd)
