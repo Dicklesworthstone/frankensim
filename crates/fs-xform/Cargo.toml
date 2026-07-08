@@ -20,6 +20,7 @@ fs-ad = { path = "../fs-ad" }
 [features]
 # [F]-gated per the Ambition-Tag rule.
 manifold-harmonics = ["dep:fs-la"]
+elastic-shapes = ["manifold-harmonics"]
 
 [lints]
 workspace = true

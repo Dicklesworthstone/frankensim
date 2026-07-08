@@ -91,6 +91,9 @@ impl fmt::Display for XformError {
 
 impl std::error::Error for XformError {}
 
+#[cfg(feature = "elastic-shapes")]
+pub mod elastic;
+
 #[cfg(feature = "manifold-harmonics")]
 pub mod harmonics;
 
