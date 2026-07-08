@@ -140,13 +140,7 @@ impl Gp {
         let mean: f64 = kstar.iter().zip(&self.alpha).map(|(a, b)| a * b).sum();
         // v = L⁻¹k*: forward substitution.
         let mut v = kstar;
-        for i in 0..n {
-            let mut acc = v[i];
-            for j in 0..i {
-                acc = (-self.chol.l(i, j)).mul_add(v[j], acc);
-            }
-            v[i] = acc / self.chol.l(i, i);
-        }
+        forward_sub(&self.chol, &mut v, n);
         let kss = self.kernel.eval(xs, xs);
         let var = (kss - v.iter().map(|t| t * t).sum::<f64>()).max(0.0);
         (mean, var)
@@ -167,13 +161,7 @@ impl Gp {
             mu[b] = kstar.iter().zip(&self.alpha).map(|(a, c)| a * c).sum();
             let v = &mut vcols[b];
             v.copy_from_slice(&kstar);
-            for i in 0..n {
-                let mut acc = v[i];
-                for j in 0..i {
-                    acc = (-self.chol.l(i, j)).mul_add(v[j], acc);
-                }
-                v[i] = acc / self.chol.l(i, i);
-            }
+            forward_sub(&self.chol, v, n);
         }
         let mut sigma = vec![0.0f64; q * q];
         for a in 0..q {
@@ -195,6 +183,17 @@ impl Gp {
             }
         }
         (mu, lflat)
+    }
+}
+
+/// Forward substitution v ← L⁻¹v (shared by the predictive paths).
+fn forward_sub(chol: &Cholesky, v: &mut [f64], n: usize) {
+    for i in 0..n {
+        let mut acc = v[i];
+        for (j, vj) in v.iter().enumerate().take(i) {
+            acc = (-chol.l(i, j)).mul_add(*vj, acc);
+        }
+        v[i] = acc / chol.l(i, i);
     }
 }
 
