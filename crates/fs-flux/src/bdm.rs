@@ -36,6 +36,7 @@ fn eval_mono(c: &[f64; 6], x: [f64; 2]) -> [f64; 2] {
 }
 
 /// Two-point Gauss on an edge (exact for the P1 moments).
+#[must_use]
 pub fn edge_gauss_pub(a: [f64; 2], b: [f64; 2]) -> [([f64; 2], f64); 2] {
     edge_gauss(a, b)
 }
@@ -98,9 +99,7 @@ pub fn cell_basis(mesh: &TriMesh, t: usize) -> CellBasis {
         rhs[i] = 1.0;
         let mut x = rhs.to_vec();
         f.solve(&mut x);
-        for m in 0..6 {
-            coef[i][m] = x[m];
-        }
+        coef[i].copy_from_slice(&x[..6]);
     }
     let mut grad = [[[0.0f64; 2]; 2]; 6];
     let mut div = [0.0f64; 6];

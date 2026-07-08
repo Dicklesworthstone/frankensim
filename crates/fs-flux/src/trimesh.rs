@@ -93,10 +93,7 @@ impl TriMesh {
                         tris: (t, usize::MAX),
                         len,
                         normal: outward,
-                        mid: [
-                            f64::midpoint(pa[0], pb[0]),
-                            f64::midpoint(pa[1], pb[1]),
-                        ],
+                        mid: [f64::midpoint(pa[0], pb[0]), f64::midpoint(pa[1], pb[1])],
                     });
                     edges.len() - 1
                 });

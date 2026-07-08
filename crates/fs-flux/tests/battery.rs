@@ -7,6 +7,7 @@
 use fs_flux::bdm::{cell_basis, edge_gauss_pub, eval_basis, tri_quad};
 use fs_flux::{FluxParams, FluxSystem, TriMesh};
 use fs_solid::Mesh2;
+use std::fmt::Write as _;
 
 fn verdict(name: &str, pass: bool, details: &str) {
     println!("{{\"test\":\"{name}\",\"pass\":{pass},\"details\":\"{details}\"}}");
@@ -192,18 +193,17 @@ fn flux_002_stokes_mms_convergence() {
         }
         mean_ex /= total;
         let mut e2 = 0.0;
-        for t in 0..mesh.tris.len() {
+        for (t, &pht) in ph.iter().enumerate() {
             let p: [[f64; 2]; 3] = core::array::from_fn(|k| mesh.verts[mesh.tris[t][k]]);
             for (q, w) in tri_quad(p, mesh.areas[t]) {
-                e2 += w * (ph[t] - (mms_p(q) - mean_ex)).powi(2);
+                e2 += w * (pht - (mms_p(q) - mean_ex)).powi(2);
             }
         }
         eu.push(e_u);
         ep.push(e2.sqrt());
     }
-    let slope = |e: &[f64], i: usize, n0: f64, n1: f64| -> f64 {
-        (e[i] / e[i + 1]).ln() / (n1 / n0).ln()
-    };
+    let slope =
+        |e: &[f64], i: usize, n0: f64, n1: f64| -> f64 { (e[i] / e[i + 1]).ln() / (n1 / n0).ln() };
     // Slope on the finest pair: still preasymptotic toward the
     // theoretical 2 (measured march 1.14/1.40/1.61 over 4..12); the
     // asymptotic-regime confirmation is perf-lane scope, ledgered.
@@ -212,12 +212,18 @@ fn flux_002_stokes_mms_convergence() {
     verdict(
         "flux-002-velocity-order",
         su > 1.5 && eu[1] < eu[0] && eu[2] < eu[1],
-        &format!("u L2 errs {:.3e}/{:.3e}/{:.3e} slope {su:.2}", eu[0], eu[1], eu[2]),
+        &format!(
+            "u L2 errs {:.3e}/{:.3e}/{:.3e} slope {su:.2}",
+            eu[0], eu[1], eu[2]
+        ),
     );
     verdict(
         "flux-002-pressure-order",
         sp > 0.7 && ep[2] < ep[0],
-        &format!("p L2 errs {:.3e}/{:.3e}/{:.3e} slope {sp:.2}", ep[0], ep[1], ep[2]),
+        &format!(
+            "p L2 errs {:.3e}/{:.3e}/{:.3e} slope {sp:.2}",
+            ep[0], ep[1], ep[2]
+        ),
     );
     verdict(
         "flux-002-exact-divergence",
@@ -335,7 +341,7 @@ fn flux_004_cavity_picard() {
     for (y, want) in ghia {
         let got = sys.velocity_at(&sol.x, [0.5, y])[0];
         worst_dev = worst_dev.max((got - want).abs());
-        profile.push_str(&format!("y={y}: {got:.3} vs {want:.3}; "));
+        let _ = write!(profile, "y={y}: {got:.3} vs {want:.3}; ");
     }
     verdict(
         "flux-004-picard-converged",
@@ -398,7 +404,10 @@ fn flux_005_taylor_green_bdf1() {
     let u8 = run(8);
     let u16 = run(16);
     let diff = |a: &[f64], b: &[f64]| -> f64 {
-        (0..sys.n_u).map(|i| (a[i] - b[i]).powi(2)).sum::<f64>().sqrt()
+        (0..sys.n_u)
+            .map(|i| (a[i] - b[i]).powi(2))
+            .sum::<f64>()
+            .sqrt()
     };
     let d1 = diff(&u4, &u8);
     let d2 = diff(&u8, &u16);

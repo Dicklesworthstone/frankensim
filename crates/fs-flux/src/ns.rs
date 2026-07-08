@@ -141,8 +141,7 @@ impl<'m> FluxSystem<'m> {
             for (gx, w) in crate::bdm::edge_gauss_pub(va, vb) {
                 let gv = g(gx);
                 let gn = gv[0] * nrm[0] + gv[1] * nrm[1];
-                let sl = ((gx[0] - va[0]) * (vb[0] - va[0])
-                    + (gx[1] - va[1]) * (vb[1] - va[1]))
+                let sl = ((gx[0] - va[0]) * (vb[0] - va[0]) + (gx[1] - va[1]) * (vb[1] - va[1]))
                     / (edge.len * edge.len)
                     - 0.5;
                 m0 += w * gn / edge.len;
@@ -212,52 +211,7 @@ impl<'m> FluxSystem<'m> {
             let n = edge.normal;
             let (va, vb) = (mesh.verts[edge.verts.0], mesh.verts[edge.verts.1]);
             let gauss = crate::bdm::edge_gauss_pub(va, vb);
-            if t1 != usize::MAX {
-                // Interior SIP with full jumps (normal jump ≡ 0 by
-                // conformity): sides (t0, +), (t1, −).
-                let cells = [t0, t1];
-                let side_sign = [1.0f64, -1.0f64];
-                for (gx, w) in gauss {
-                    // {∇u}n per basis function of each side.
-                    for (sa, &ta) in cells.iter().enumerate() {
-                        for i in 0..6 {
-                            let gi = self.dof(ta, i);
-                            let va_ = eval_basis(&self.bases[ta], i, gx);
-                            let ga_: [f64; 2] = [
-                                self.bases[ta].grad[i][0][0] * n[0]
-                                    + self.bases[ta].grad[i][0][1] * n[1],
-                                self.bases[ta].grad[i][1][0] * n[0]
-                                    + self.bases[ta].grad[i][1][1] * n[1],
-                            ];
-                            for (sb, &tb) in cells.iter().enumerate() {
-                                for j in 0..6 {
-                                    let gj = self.dof(tb, j);
-                                    let vb_ = eval_basis(&self.bases[tb], j, gx);
-                                    let gb_: [f64; 2] = [
-                                        self.bases[tb].grad[j][0][0] * n[0]
-                                            + self.bases[tb].grad[j][0][1] * n[1],
-                                        self.bases[tb].grad[j][1][0] * n[0]
-                                            + self.bases[tb].grad[j][1][1] * n[1],
-                                    ];
-                                    // −ν{∇u·n}·[[v]] − ν{∇v·n}·[[u]] + σν/h [[u]]·[[v]]
-                                    let jump_v = side_sign[sa];
-                                    let jump_u = side_sign[sb];
-                                    let val = -nu * 0.5 * (gb_[0] * va_[0] + gb_[1] * va_[1])
-                                        * jump_v
-                                        - nu * 0.5 * (ga_[0] * vb_[0] + ga_[1] * vb_[1]) * jump_u
-                                        + params.sigma * nu / h
-                                            * (va_[0] * vb_[0] + va_[1] * vb_[1])
-                                            * jump_v
-                                            * jump_u;
-                                    if con[gi].is_none() {
-                                        coo.push(gi, gj, w * val);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            } else {
+            if t1 == usize::MAX {
                 // Boundary: weak Dirichlet (exterior value = g).
                 for (gx, w) in gauss {
                     let gval = g(gx);
@@ -290,6 +244,53 @@ impl<'m> FluxSystem<'m> {
                         let val = -nu * (gni[0] * gval[0] + gni[1] * gval[1])
                             + params.sigma * nu / h * (vi[0] * gval[0] + vi[1] * gval[1]);
                         rhs[gi] += w * val;
+                    }
+                }
+            } else {
+                // Interior SIP with full jumps (normal jump ≡ 0 by
+                // conformity): sides (t0, +), (t1, −).
+                let cells = [t0, t1];
+                let side_sign = [1.0f64, -1.0f64];
+                for (gx, w) in gauss {
+                    // {∇u}n per basis function of each side.
+                    for (sa, &ta) in cells.iter().enumerate() {
+                        for i in 0..6 {
+                            let gi = self.dof(ta, i);
+                            let va_ = eval_basis(&self.bases[ta], i, gx);
+                            let ga_: [f64; 2] = [
+                                self.bases[ta].grad[i][0][0] * n[0]
+                                    + self.bases[ta].grad[i][0][1] * n[1],
+                                self.bases[ta].grad[i][1][0] * n[0]
+                                    + self.bases[ta].grad[i][1][1] * n[1],
+                            ];
+                            for (sb, &tb) in cells.iter().enumerate() {
+                                for j in 0..6 {
+                                    let gj = self.dof(tb, j);
+                                    let vb_ = eval_basis(&self.bases[tb], j, gx);
+                                    let gb_: [f64; 2] = [
+                                        self.bases[tb].grad[j][0][0] * n[0]
+                                            + self.bases[tb].grad[j][0][1] * n[1],
+                                        self.bases[tb].grad[j][1][0] * n[0]
+                                            + self.bases[tb].grad[j][1][1] * n[1],
+                                    ];
+                                    // −ν{∇u·n}·[[v]] − ν{∇v·n}·[[u]] + σν/h [[u]]·[[v]]
+                                    let jump_v = side_sign[sa];
+                                    let jump_u = side_sign[sb];
+                                    let val = -nu
+                                        * 0.5
+                                        * (gb_[0] * va_[0] + gb_[1] * va_[1])
+                                        * jump_v
+                                        - nu * 0.5 * (ga_[0] * vb_[0] + ga_[1] * vb_[1]) * jump_u
+                                        + params.sigma * nu / h
+                                            * (va_[0] * vb_[0] + va_[1] * vb_[1])
+                                            * jump_v
+                                            * jump_u;
+                                    if con[gi].is_none() {
+                                        coo.push(gi, gj, w * val);
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -512,8 +513,14 @@ impl<'m> FluxSystem<'m> {
         uprev: &[f64],
         dt: f64,
     ) -> FluxSolution {
-        let (a, rhs) =
-            self.assemble_transient(params, f, g, Some(&uprev[..self.n_u]), 1.0 / dt, Some(uprev));
+        let (a, rhs) = self.assemble_transient(
+            params,
+            f,
+            g,
+            Some(&uprev[..self.n_u]),
+            1.0 / dt,
+            Some(uprev),
+        );
         self.solve_linear(&a, &rhs, params)
     }
 
@@ -575,11 +582,7 @@ impl<'m> FluxSystem<'m> {
 
     /// L2 velocity error and worst per-cell divergence.
     #[must_use]
-    pub fn velocity_error(
-        &self,
-        x: &[f64],
-        exact: &dyn Fn([f64; 2]) -> [f64; 2],
-    ) -> (f64, f64) {
+    pub fn velocity_error(&self, x: &[f64], exact: &dyn Fn([f64; 2]) -> [f64; 2]) -> (f64, f64) {
         let mesh = self.mesh;
         let mut l2 = 0.0;
         let mut worst_div = 0.0f64;
