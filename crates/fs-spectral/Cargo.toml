@@ -1,0 +1,19 @@
+[package]
+name = "fs-spectral"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Spectral health monitoring (addendum Proposal 5): track the sheaf-Laplacian lambda-gap as a runtime health metric with hysteresis, propagate low-confidence into merge/triage outputs when the gap collapses, and give the representation router an end-to-end conditioning term. Owns risk R5."
+
+[package.metadata.frankensim]
+layer = "L1"
+
+[dependencies]
+fs-evidence = { path = "../fs-evidence" }
+
+[dev-dependencies]
+
+[lints]
+workspace = true
