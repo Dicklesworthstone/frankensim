@@ -38,6 +38,17 @@ pub struct CutElasticity<'a> {
     pub ghost_gamma: f64,
     /// Cut-quadrature depth.
     pub quad_depth: u32,
+    /// Strong zero-Dirichlet clamp on design-box boundary nodes
+    /// satisfying the predicate (topology-optimization frontends clamp
+    /// on the box edge, where Nitsche-on-Γ cannot reach).
+    pub clamp: Option<&'a dyn Fn(f64, f64) -> bool>,
+    /// Dead traction on design-box boundary edges of active cells.
+    pub boundary_traction: Option<&'a dyn Fn(f64, f64) -> [f64; 2]>,
+    /// Treat Γ as TRACTION-FREE (natural) instead of Nitsche
+    /// Dirichlet — the topology-optimization void boundary. Ghost
+    /// penalty still stabilizes the cut cells; support must come from
+    /// clamps.
+    pub traction_free_interface: bool,
 }
 
 /// The CutFEM solution: nodal displacements plus error measurement.
@@ -47,6 +58,21 @@ pub struct CutSolution {
     rules: BTreeMap<(u32, u32, u32), CutRules>,
     /// CG iterations.
     pub iters: usize,
+}
+
+impl CutSolution {
+    /// Nodal displacements (topology-optimization consumers sample
+    /// energy densities and load work from these).
+    #[must_use]
+    pub fn nodal(&self) -> &BTreeMap<(u32, u32), [f64; 2]> {
+        &self.nodal
+    }
+
+    /// The active cells of the solve.
+    #[must_use]
+    pub fn active_cells(&self) -> &[(u32, u32, u32)] {
+        &self.active
+    }
 }
 
 impl CutElasticity<'_> {
@@ -89,6 +115,19 @@ impl CutElasticity<'_> {
             }
         }
         let ndof = 2 * node_ids.len();
+        let ext = self.grid.node_extent();
+        let mut clamped = vec![false; ndof];
+        if let Some(pred) = self.clamp {
+            for (&n, &id) in &node_ids {
+                if (n.0 == 0 || n.0 == ext || n.1 == 0 || n.1 == ext) && {
+                    let p = self.grid.node_pos(n);
+                    pred(p[0], p[1])
+                } {
+                    clamped[2 * id] = true;
+                    clamped[2 * id + 1] = true;
+                }
+            }
+        }
         let mut coo = Coo::new(ndof, ndof);
         let mut rhs = vec![0.0f64; ndof];
         for &c in &active {
@@ -127,7 +166,7 @@ impl CutElasticity<'_> {
                     }
                 }
             }
-            if cut.contains(&c) {
+            if cut.contains(&c) && !self.traction_free_interface {
                 let pen = self.nitsche_beta * (lambda + 2.0 * mu) / h;
                 for &(p, w, nrm) in &rules[&c].iface {
                     let (nv, gr) = q1(lo, hi, p);
@@ -164,12 +203,62 @@ impl CutElasticity<'_> {
             }
             for a in 0..8 {
                 let ia = 2 * ids[a / 2] + a % 2;
+                if clamped[ia] {
+                    continue;
+                }
                 rhs[ia] += fl[a];
                 for b in 0..8 {
-                    if k[a][b] != 0.0 {
-                        coo.push(ia, 2 * ids[b / 2] + b % 2, k[a][b]);
+                    let ib = 2 * ids[b / 2] + b % 2;
+                    if k[a][b] != 0.0 && !clamped[ib] {
+                        coo.push(ia, ib, k[a][b]);
                     }
                 }
+            }
+        }
+        // Design-box boundary tractions: integrate over box-edge faces
+        // of ACTIVE cells (2-pt Gauss per edge), loading material only.
+        if let Some(tr) = self.boundary_traction {
+            for &c in &active {
+                let (lv, i, j) = c;
+                let nmax = 1u32 << lv;
+                let corners = self.grid.corner_nodes(c);
+                let edges: [(bool, [usize; 2]); 4] = [
+                    (j == 0, [0, 1]),
+                    (i + 1 == nmax, [1, 2]),
+                    (j + 1 == nmax, [2, 3]),
+                    (i == 0, [3, 0]),
+                ];
+                for (on_boundary, corner_ids) in edges {
+                    if !on_boundary {
+                        continue;
+                    }
+                    let pa = self.grid.node_pos(corners[corner_ids[0]]);
+                    let pb = self.grid.node_pos(corners[corner_ids[1]]);
+                    let len = (pb[0] - pa[0]).hypot(pb[1] - pa[1]);
+                    let gpt = 0.5 / 3.0f64.sqrt();
+                    for t in [0.5 - gpt, 0.5 + gpt] {
+                        let p = [pa[0] + t * (pb[0] - pa[0]), pa[1] + t * (pb[1] - pa[1])];
+                        if self.sdf.value(p) > 0.0 {
+                            continue;
+                        }
+                        let tv = tr(p[0], p[1]);
+                        let w = 0.5 * len;
+                        for (ci, shape) in [(corner_ids[0], 1.0 - t), (corner_ids[1], t)] {
+                            let id = node_ids[&corners[ci]];
+                            for (comp, tc) in tv.iter().enumerate() {
+                                let dof = 2 * id + comp;
+                                if !clamped[dof] {
+                                    rhs[dof] += w * shape * tc;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for (dof, is_clamped) in clamped.iter().enumerate() {
+            if *is_clamped {
+                coo.push(dof, dof, 1.0);
             }
         }
         // Componentwise ghost penalty on equal-level faces of cut cells.
@@ -192,7 +281,14 @@ impl CutElasticity<'_> {
                     if !seen.insert(key) {
                         continue;
                     }
-                    self.ghost_face(key.0, key.1, lambda + 2.0 * mu, &node_ids, &mut coo);
+                    self.ghost_face(
+                        key.0,
+                        key.1,
+                        lambda + 2.0 * mu,
+                        &node_ids,
+                        &clamped,
+                        &mut coo,
+                    );
                 }
             }
         }
@@ -220,12 +316,14 @@ impl CutElasticity<'_> {
         })
     }
 
+    #[allow(clippy::too_many_arguments)] // one face, one scatter
     fn ghost_face(
         &self,
         ca: (u32, u32, u32),
         cb: (u32, u32, u32),
         stiff: f64,
         node_ids: &BTreeMap<(u32, u32), usize>,
+        clamped: &[bool],
         coo: &mut Coo,
     ) {
         let (lo_a, hi_a) = self.grid.rect(ca);
@@ -265,7 +363,10 @@ impl CutElasticity<'_> {
                     continue;
                 }
                 for c in 0..2 {
-                    coo.push(2 * node_ids[na] + c, 2 * node_ids[nb] + c, v);
+                    let (ia, ib) = (2 * node_ids[na] + c, 2 * node_ids[nb] + c);
+                    if !clamped[ia] && !clamped[ib] {
+                        coo.push(ia, ib, v);
+                    }
                 }
             }
         }

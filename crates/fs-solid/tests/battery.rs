@@ -141,6 +141,9 @@ fn sol_001_patch_tests_exact() {
         nitsche_beta: 20.0,
         ghost_gamma: 0.5,
         quad_depth: 3,
+        clamp: None,
+        boundary_traction: None,
+        traction_free_interface: false,
     };
     let sol = cut
         .solve(&|_, _| [0.0, 0.0], &|x, y| lin(x, y))
@@ -218,6 +221,9 @@ fn sol_002_mms_orders_families_and_frontends() {
             nitsche_beta: 20.0,
             ghost_gamma: 0.5,
             quad_depth: 3,
+            clamp: None,
+            boundary_traction: None,
+            traction_free_interface: false,
         };
         let sol = cut
             .solve(&|x, y| mms_f(x, y), &|x, y| mms_u(x, y))
