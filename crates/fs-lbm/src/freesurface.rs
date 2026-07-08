@@ -288,7 +288,7 @@ impl FreeSurface {
                         if let Some(nb) = neighbor(&self.grid, x, y, q) {
                             let w = match self.grid.flags[nb] {
                                 Cell::Fluid => 1.0,
-                                Cell::Interface => 0.5 * (fills[i] + fills[nb]),
+                                Cell::Interface => f64::midpoint(fills[i], fills[nb]),
                                 _ => 0.0,
                             };
                             if w > 0.0 {

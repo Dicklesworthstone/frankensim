@@ -2,7 +2,8 @@
 
 Lattice Boltzmann core (D2Q9 BGK) with the lattice-scaling assistant plus
 frontier-facing dense-grid extension scaffolding for vector forcing, local
-rheology, and thermal double-population fixtures.
+rheology, thermal double-population fixtures, and a dense-grid free-surface
+mass-ledger prototype.
 
 ## Purpose and layer
 
@@ -29,6 +30,10 @@ Evidence-typed scaling plan). Pure, deterministic (fixed cell order).
 - `thermal::ThermalLbm` and `thermal::gbeta_for_rayleigh` — D2Q9 flow plus
   D2Q5 temperature populations for Rayleigh-Bénard-style onset fixtures with
   fixed-temperature wall rows.
+- `freesurface::FreeSurface`, `ContactModel`, `dam_break`, and `surge_front`
+  — dense-grid VOF-style mass tracking with interface/gas/fluid conversion
+  bookkeeping, conservative carry redistribution, contact-model bracketing,
+  and qualitative dam-break / jet-fragment fixtures.
 - `plan_scaling(reynolds, char_length_lu, u_lattice) -> ScalingPlan { tau,
   viscosity, u_lattice, mach, tau_margin, stable }` — the lattice-scaling
   assistant. `ScalingPlan::color()` (verified when comfortably stable, else
@@ -54,6 +59,9 @@ Evidence-typed scaling plan). Pure, deterministic (fixed cell order).
   τ window.
 - Thermal wall populations encode the declared wall temperatures, so the
   public `temperature` query is consistent on wall and fluid rows.
+- Free-surface steps conserve the tracked ledger mass (fluid `Σf` plus
+  interface mass plus carry) to the test tolerance, and gas/interface/fluid
+  conversions are counted rather than hidden.
 
 ## Error model
 
@@ -89,7 +97,9 @@ high-Mach plan and nonsense inputs; determinism.
 `tests/extensions.rs` covers the current extension scaffolding: power-law and
 Newtonian-limit channel profiles, Carreau plateaus, Rayleigh-Bénard onset
 bracketing and Nusselt heat transport, gas-neighbor streaming behavior, thermal
-wall-temperature queries, and invalid-parameter rejection.
+wall-temperature queries, invalid-parameter rejection, free-surface mass-ledger
+conservation, qualitative dam-break front advance, rotation equivariance,
+contact-model bracketing, and qualitative jet fragmentation.
 
 ## No-claim boundaries
 
@@ -104,6 +114,10 @@ wall-temperature queries, and invalid-parameter rejection.
   missing free-surface populations.
 - Thermal and rheology fixtures are dense-grid correctness scaffolding, not
   validated LES, cumulant, sparse-tile, or production multiphase solvers.
+- The free-surface implementation is a dense prototype with ledger and
+  metamorphic gates. It does not yet claim quantitative dam-break agreement,
+  contact-angle calibration, production wetting physics, or validated
+  surface-tension breakup rates.
 - The scaling assistant covers the `τ`/`ν`/`Mach` core; consuming fs-regime's
   dimensionless groups and emitting a full `dx`/`dt` unit conversion with
   Evidence provenance is the fuller deliverable.
