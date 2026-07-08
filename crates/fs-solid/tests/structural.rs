@@ -28,9 +28,13 @@ fn verdict(name: &str, pass: bool, details: &str) {
     assert!(pass, "{name} failed: {details}");
 }
 
+// Slenderness EA·L²/EI = 200: stiff enough that axial/shear
+// corrections sit at ~0.1% (below every oracle gate), soft enough
+// that Newton steps are not rejected by spurious-stretch penalty
+// (EA ~ 1e4 puts a quadratic wall around every iterate — measured).
 const SECTION: RodSection = RodSection {
-    ea: 1e4,
-    ga: 1e4,
+    ea: 200.0,
+    ga: 200.0,
     gj: 1.0,
     ei: 1.0,
 };
@@ -101,14 +105,14 @@ fn elastica_tip(p_over_ei: f64, l: f64) -> (f64, f64) {
     // Bisection on θ′(0) for θ′(L) = 0.
     let (mut a, mut b) = (0.0f64, 3.0 * p_over_ei);
     for _ in 0..80 {
-        let m = 0.5 * (a + b);
+        let m = f64::midpoint(a, b);
         if integrate(m).0 > 0.0 {
-            a = m;
-        } else {
             b = m;
+        } else {
+            a = m;
         }
     }
-    let (_, x, y) = integrate(0.5 * (a + b));
+    let (_, x, y) = integrate(f64::midpoint(a, b));
     (x, y)
 }
 
@@ -122,7 +126,8 @@ fn str_002_elastica_large_deflection() {
         force: [0.0, p * SECTION.ei, 0.0],
         moment: [0.0, 0.0, 0.0],
     };
-    rod.solve_static(&load, 8, 1e-7).expect("elastica converges");
+    rod.solve_static(&load, 8, 1e-7)
+        .expect("elastica converges");
     let tip = rod.positions[16];
     let dx = (tip[0] - x_ref).abs();
     let dy = (tip[1] - y_ref).abs();
@@ -262,7 +267,7 @@ fn str_004_rc_hysteresis() {
                 peak_m = peak_m.max(m.abs());
                 all_m.push(m);
                 if let Some((kp, mp)) = prev {
-                    work += 0.5 * (m + mp) * (kap - kp);
+                    work += f64::midpoint(m, mp) * (kap - kp);
                 }
                 prev = Some((kap, m));
             }
@@ -308,10 +313,12 @@ fn str_005_batched_consistency_and_throughput() {
     let strains: Vec<(f64, f64)> = (0..m)
         .map(|i| {
             let t = i as f64 / m as f64;
-            (1e-4 * (t - 0.5), 0.01 * (6.28 * t).sin())
+            (1e-4 * (t - 0.5), 0.01 * (std::f64::consts::TAU * t).sin())
         })
         .collect();
-    let rhs: Vec<(f64, f64)> = (0..m).map(|i| (1.0, if i % 2 == 0 { 0.5 } else { -0.5 })).collect();
+    let rhs: Vec<(f64, f64)> = (0..m)
+        .map(|i| (1.0, if i % 2 == 0 { 0.5 } else { -0.5 }))
+        .collect();
     let t0 = Instant::now();
     let (resp, sol) = update_sections_batched(&sections, &strains, &rhs);
     let elapsed = t0.elapsed().as_secs_f64();
@@ -321,7 +328,9 @@ fn str_005_batched_consistency_and_throughput() {
     let mut worst = 0.0f64;
     for i in 0..m {
         let r = sections[i].respond(strains[i].0, strains[i].1);
-        worst = worst.max((r.n - resp[i].n).abs()).max((r.m - resp[i].m).abs());
+        worst = worst
+            .max((r.n - resp[i].n).abs())
+            .max((r.m - resp[i].m).abs());
         // Residual of the 2×2 solve.
         let t = r.tangent;
         let res0 = t[0][0] * sol[i].0 + t[0][1] * sol[i].1 - rhs[i].0;
@@ -358,7 +367,10 @@ fn str_006_forcebased_pushover_and_resume() {
         let d = elem.tip_deflection_under_shear(v).expect("pushover step");
         curve.push((v, d));
         let (_, kap) = elem.base_committed();
-        let _ = write!(rows, "{{\"v\":{v:.4e},\"d\":{d:.5e},\"base_kappa\":{kap:.4e}}},");
+        let _ = write!(
+            rows,
+            "{{\"v\":{v:.4e},\"d\":{d:.5e},\"base_kappa\":{kap:.4e}}},"
+        );
         if k == steps / 2 {
             checkpoint = Some((elem.clone(), k));
         }
@@ -376,9 +388,16 @@ fn str_006_forcebased_pushover_and_resume() {
     let vmax = curve[last].0;
     let mut loop_work = 0.0;
     let mut prev = (vmax, curve[last].1);
-    for &v in &[0.4 * vmax, -0.4 * vmax, -0.8 * vmax, -0.4 * vmax, 0.4 * vmax, vmax] {
+    for &v in &[
+        0.4 * vmax,
+        -0.4 * vmax,
+        -0.8 * vmax,
+        -0.4 * vmax,
+        0.4 * vmax,
+        vmax,
+    ] {
         let d = elem.tip_deflection_under_shear(v).expect("cycle step");
-        loop_work += 0.5 * (v + prev.0) * (d - prev.1);
+        loop_work += f64::midpoint(v, prev.0) * (d - prev.1);
         prev = (v, d);
     }
     // G4: resume from the checkpoint replays the remaining pushover

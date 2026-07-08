@@ -273,3 +273,31 @@ impl Rod {
         Ok(finals)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn linear_tip_deflection_matches_beam_theory() {
+        let section = RodSection {
+            ea: 1e4,
+            ga: 1e4,
+            gj: 1.0,
+            ei: 1.0,
+        };
+        let mut rod = Rod::straight(1.0, 8, section);
+        let p = 0.01; // PL²/EI = 0.01: linear regime
+        let load = TipLoad {
+            force: [0.0, p, 0.0],
+            moment: [0.0; 3],
+        };
+        let hist = rod.solve_static(&load, 1, 1e-9).expect("linear solve");
+        let want = p / (3.0 * section.ei); // PL³/3EI
+        let got = rod.positions[8][1];
+        assert!(
+            (got - want).abs() < 0.02 * want,
+            "tip {got} vs beam theory {want}; residual history {hist:?}"
+        );
+    }
+}

@@ -31,7 +31,13 @@ impl ForceBasedElement {
     #[must_use]
     pub fn new(length: f64, make_section: &dyn Fn() -> Section) -> ForceBasedElement {
         let xi = vec![0.0, 0.172_673_164_646_011, 0.5, 0.827_326_835_353_989, 1.0];
-        let wi = vec![0.05, 0.272_222_222_222_222, 0.355_555_555_555_556, 0.272_222_222_222_222, 0.05];
+        let wi = vec![
+            0.05,
+            0.272_222_222_222_222,
+            0.355_555_555_555_556,
+            0.272_222_222_222_222,
+            0.05,
+        ];
         ForceBasedElement {
             length,
             sections: (0..xi.len()).map(|_| make_section()).collect(),
@@ -75,9 +81,18 @@ impl ForceBasedElement {
                 }
                 let de = (t[1][1] * rn[0] - t[0][1] * rn[1]) / det;
                 let dk = (-t[1][0] * rn[0] + t[0][0] * rn[1]) / det;
-                // Damped update (fiber laws kink at reversals).
-                e0 -= 0.8 * de;
-                k0 -= 0.8 * dk;
+                // Backtracking on the residual norm (fiber laws kink
+                // at reversals; fixed damping oscillates there).
+                let mut alpha = 1.0f64;
+                for _ in 0..25 {
+                    let r2 = self.sections[p].respond(e0 - alpha * de, k0 - alpha * dk);
+                    if (r2.n).hypot(r2.m - m_target) < norm {
+                        break;
+                    }
+                    alpha *= 0.5;
+                }
+                e0 -= alpha * de;
+                k0 -= alpha * dk;
             }
             if !converged {
                 return Err(SolidError::NewtonStalled { history });

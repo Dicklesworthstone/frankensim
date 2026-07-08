@@ -90,9 +90,7 @@ impl Section {
             // is compression-positive (tension returns zero) — flip in
             // and out for concrete.
             let (sig, tan) = match (&f.law, st) {
-                (FiberLaw::Steel(l), FiberState::Steel(s)) => {
-                    (l.stress(eps, s), l.tangent(eps, s))
-                }
+                (FiberLaw::Steel(l), FiberState::Steel(s)) => (l.stress(eps, s), l.tangent(eps, s)),
                 (FiberLaw::Concrete(l), FiberState::Concrete(s)) => {
                     (-l.stress(-eps, s), l.tangent(-eps, s))
                 }
@@ -143,8 +141,8 @@ pub fn update_sections_batched(
         .zip(strains)
         .map(|(s, &(e, k))| s.respond(e, k))
         .collect();
-    let mut a = BatchMat::zeros(m, 2);
-    let mut b = BatchVec::zeros(m, 2);
+    let mut a = BatchMat::zeros(2, m);
+    let mut b = BatchVec::zeros(2, m);
     for (i, r) in responses.iter().enumerate() {
         // SPD guard: fiber tangents can momentarily lose definiteness
         // on crushing branches; a tiny diagonal floor keeps the batch
@@ -199,7 +197,11 @@ pub fn rc_section(d: f64, b: f64, layers: usize, steel_area: f64) -> Section {
         fibers.push(Fiber {
             y,
             area: b * t,
-            law: FiberLaw::Concrete(if is_cover { cover.clone() } else { core.clone() }),
+            law: FiberLaw::Concrete(if is_cover {
+                cover.clone()
+            } else {
+                core.clone()
+            }),
         });
     }
     for y in [-(0.5 * d - cover_t), 0.5 * d - cover_t] {
