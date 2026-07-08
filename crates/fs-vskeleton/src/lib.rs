@@ -105,7 +105,15 @@ pub fn replay(db_path: &str) -> Result<(), String> {
         recomputed.push(ledger::content_hash(&bytes));
     }
     recomputed.push(ledger::content_hash(outcome.report.as_bytes()));
-    let recorded = led.artifact_hashes_excluding_study()?;
+    let mut recorded = led.artifact_hashes_excluding_study()?;
+    // Compare as MULTISETS. Artifacts are content-addressed (identified by
+    // their hash, not by row position), and the ledger's `SELECT` carries no
+    // `ORDER BY`, so a positional `!=` could false-report divergence on a
+    // faithful replay purely from an fsqlite query-plan reordering. Sorting
+    // both sides removes that dependence while still catching any missing,
+    // extra, or changed artifact.
+    recomputed.sort();
+    recorded.sort();
     if recorded != recomputed {
         return Err(format!(
             "replay divergence: recorded {} artifact hashes {:?} but recomputed {:?} — \

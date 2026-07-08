@@ -148,8 +148,9 @@ impl MiniLedger {
         Ok(())
     }
 
-    /// Artifact hashes in insertion order, excluding the study-ir itself
-    /// (replay compares recomputed outputs against these).
+    /// Every non-study artifact hash (row order is UNSPECIFIED — the query
+    /// carries no `ORDER BY`; callers comparing against a recomputed list must
+    /// treat the result as a multiset and sort, as `replay` does).
     ///
     /// # Errors
     /// Returns a message on read failure.
