@@ -70,6 +70,7 @@ members = [
     "crates/fs-spectral",
     "crates/fs-symmetry",
     "crates/fs-conform",
+    "crates/fs-wedge",
     "crates/fs-cutfem",
     "crates/fs-solid",
     "xtask",
