@@ -20,12 +20,12 @@
 
 use core::f64::consts::PI;
 
-/// The van der Corput / Halton radical inverse of `i` in the given `base`
-/// (a deterministic low-discrepancy coordinate in `[0, 1)`).
-#[must_use]
 #[cfg(feature = "chart-backends")]
 pub mod charts;
 
+/// The van der Corput / Halton radical inverse of `i` in the given `base`
+/// (a deterministic low-discrepancy coordinate in `[0, 1)`).
+#[must_use]
 pub fn radical_inverse(base: u32, mut i: u64) -> f64 {
     debug_assert!(base >= 2);
     let b = u64::from(base);
