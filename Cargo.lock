@@ -1407,6 +1407,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-wedge"
+version = "0.0.1"
+
+[[package]]
 name = "fs-xform"
 version = "0.0.1"
 dependencies = [
