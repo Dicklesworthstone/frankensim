@@ -1,0 +1,18 @@
+[package]
+name = "fs-iga"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Isogeometric analysis (fs-iga): Galerkin directly on B-spline spaces — geometry basis = analysis basis, so the CAD→mesh information massacre never happens. A 1D B-spline Poisson solver with clamped k-refinement (smooth high-order bases, few DOFs), verified exactly on polynomial solutions and showing high-order convergence on smooth ones."
+
+[package.metadata.frankensim]
+layer = "L3"
+
+[dependencies]
+
+[dev-dependencies]
+
+[lints]
+workspace = true

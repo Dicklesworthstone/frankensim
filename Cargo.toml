@@ -87,12 +87,14 @@ members = [
     "crates/fs-shapeprog",
     "crates/fs-couple",
     "crates/fs-lbm",
+    "crates/fs-iga",
     "crates/fs-cutfem",
     "crates/fs-solid",
     "crates/fs-dwr",
     "crates/fs-topols",
     "crates/fs-fmm",
     "crates/fs-bem",
+    "crates/fs-truss",
     "xtask",
 ]
 
