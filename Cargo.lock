@@ -1027,6 +1027,7 @@ dependencies = [
  "fs-qty",
  "fs-recompute",
  "fs-spececo",
+ "fs-verify",
 ]
 
 [[package]]

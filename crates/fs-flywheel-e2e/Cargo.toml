@@ -16,8 +16,9 @@ fs-evidence = { path = "../fs-evidence" }
 fs-geom = { path = "../fs-geom", features = ["sheaf-merge"] }
 fs-ledger = { path = "../fs-ledger" }
 fs-qty = { path = "../fs-qty" }
-fs-recompute = { path = "../fs-recompute" }
+fs-recompute = { path = "../fs-recompute", features = ["tolerance-invalidation"] }
 fs-spececo = { path = "../fs-spececo" }
+fs-verify = { path = "../fs-verify", features = ["certified-speculation"] }
 
 [dev-dependencies]
 fs-ledger = { path = "../fs-ledger" }
