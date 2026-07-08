@@ -21,6 +21,17 @@ Layer L5 (LUMEN). No dependencies — pure Rust.
 - `hero_wavelengths(hero, count, min, max)` / `spectral_integral(spectrum, min,
   max, samples)` — hero-wavelength spectral integration.
 
+- `charts` module (plan §10.2, bead qfx.2; [F], behind
+  `chart-backends`): render whatever chart exists, WITHOUT conversion.
+  `sphere_trace` steps `|f(p)|/L` with the chart's CERTIFIED Lipschitz
+  bound — the sign cannot flip within that radius, so the marcher
+  provably never tunnels (audited: `TraceAudit.worst_step_ratio`);
+  over-relaxation uses the standard certified fallback (retreat when
+  spheres fail to overlap). `ray_intersect_nurbs` is grid-seeded 3×3
+  Newton on `S(u,v) − o − t·d` with the `[S_u, S_v, −d]` Jacobian.
+  `TriMesh` is Möller–Trumbore over a deterministic median-split BVH.
+  `trace_scene` mixes all three backend kinds by closest hit.
+
 ## Invariants
 
 - FURNACE: `furnace_radiance` returns exactly `albedo·incident` (energy
@@ -74,3 +85,16 @@ determinism.
   staged.
 - `mis_integrate_unit` is a 1-D demonstrator of the balance heuristic; the
   production MIS lives in the path integrator across BSDF/light strategies.
+
+## No-claim boundaries (charts)
+
+- The tunneling guarantee holds for charts whose `lipschitz` claim is
+  certified (Frep/exact SDFs); charts reporting no bound default to
+  L = 1, which is only safe for true distance fields.
+- The mesh BVH is the interim scalar backend; the 8-wide SIMD BVH and
+  ray streams are qfx.1's ledgered follow-up scope.
+- Ray-rate NUMBERS are measured and ledgered per build/machine; the
+  Mray/s TARGETS (80/120) are release-build perf-CI gates (fz2.4), not
+  claims this module makes.
+- Trimmed-NURBS awareness rides fs-rep-nurbs trim classification; the
+  intersection here treats the full patch (no-claim on trimmed holes).

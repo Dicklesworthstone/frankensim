@@ -1629,6 +1629,10 @@ name = "fs-voi"
 version = "0.0.1"
 
 [[package]]
+name = "fs-vpm"
+version = "0.0.1"
+
+[[package]]
 name = "fs-vskeleton"
 version = "0.0.1"
 dependencies = [
