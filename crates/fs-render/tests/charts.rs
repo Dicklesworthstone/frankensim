@@ -161,7 +161,12 @@ fn rb_002_over_relaxation_stays_certified() {
                 "relaxation never changes hits (ray {k})"
             );
             if let (Some(a), Some(b)) = (h1, h2) {
-                assert!((a.t - b.t).abs() < 1e-4, "same intersection: {} vs {}", a.t, b.t);
+                assert!(
+                    (a.t - b.t).abs() < 1e-4,
+                    "same intersection: {} vs {}",
+                    a.t,
+                    b.t
+                );
             }
             plain_steps += u64::from(a1.steps);
             relaxed_steps += u64::from(a2.steps);
@@ -217,7 +222,9 @@ fn sphere_nurbs() -> fs_rep_nurbs::NurbsSurface<f64> {
         weights.push(wrow);
     }
     let ku = fs_rep_nurbs::KnotVector::new(
-        vec![0.0, 0.0, 0.0, 0.25, 0.25, 0.5, 0.5, 0.75, 0.75, 1.0, 1.0, 1.0],
+        vec![
+            0.0, 0.0, 0.0, 0.25, 0.25, 0.5, 0.5, 0.75, 0.75, 1.0, 1.0, 1.0,
+        ],
         2,
     )
     .expect("ku");
@@ -305,12 +312,7 @@ fn sphere_mesh(subdiv: usize) -> TriMesh {
             let ab = mid(t[0], t[1], &mut verts);
             let bc = mid(t[1], t[2], &mut verts);
             let ca = mid(t[2], t[0], &mut verts);
-            next.extend_from_slice(&[
-                [t[0], ab, ca],
-                [ab, t[1], bc],
-                [ca, bc, t[2]],
-                [ab, bc, ca],
-            ]);
+            next.extend_from_slice(&[[t[0], ab, ca], [ab, t[1], bc], [ca, bc, t[2]], [ab, bc, ca]]);
         }
         tris = next;
     }
@@ -384,7 +386,10 @@ fn rb_004_mixed_scene_consistency_and_frame_invariance() {
             .0
             .map(|h| (h.t, h.steps))
             .expect("hit");
-        assert!((t1 - t2).abs() < 1e-9, "translation invariance: {t1} vs {t2}");
+        assert!(
+            (t1 - t2).abs() < 1e-9,
+            "translation invariance: {t1} vs {t2}"
+        );
         verdict(
             "rb-004",
             "one sphere, three backends, <5e-3 spread; mixed scene picks the closest \
