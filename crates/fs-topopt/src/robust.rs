@@ -145,12 +145,18 @@ pub fn robust_optimality_criteria(
     let mut trace = Vec::with_capacity(iters);
     let mut dilated_target = vol_frac;
     for _ in 0..iters {
-        // Adapt the dilated target so the NOMINAL field hits vol_frac.
+        // Adapt the dilated target so the NOMINAL field hits vol_frac —
+        // DAMPED (0.3 blend toward the instantaneous estimate). The
+        // undamped update measured a period-2 limit cycle on the
+        // uniform cold start (0.4 ↔ 0.6 bouncing, targets 1.0 ↔ 0.5
+        // exactly out of phase with the move-limit-saturated steps);
+        // damping contracts the cycle to the fixed point vn = vol_frac.
         let tf_now = pipeline.three_fields(&rho);
         let vn_now = volume_fraction(&tf_now.nominal, cell_vol);
         let vd_now = volume_fraction(&tf_now.dilated, cell_vol);
         if vn_now > 1e-12 {
-            dilated_target = (vol_frac * vd_now / vn_now).clamp(vol_frac, 1.0);
+            let instant = (vol_frac * vd_now / vn_now).clamp(vol_frac, 1.0);
+            dilated_target = 0.3f64.mul_add(instant - dilated_target, dilated_target);
         }
         let (c, grad) = pipeline.eroded_compliance_and_gradient(elasticity, &rho, force);
         trace.push(c);
