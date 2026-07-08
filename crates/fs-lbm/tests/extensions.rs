@@ -5,7 +5,6 @@
 use fs_lbm::freesurface::{ContactModel, FreeSurface, dam_break, surge_front};
 use fs_lbm::rheology::{Rheology, channel_flow, powerlaw_poiseuille_analytic};
 use fs_lbm::thermal::{ThermalLbm, gbeta_for_rayleigh};
-use fs_lbm::{Cell, Grid};
 use fs_lbm::{Cell, Grid, Q};
 
 fn verdict(name: &str, pass: bool, details: &str) {
