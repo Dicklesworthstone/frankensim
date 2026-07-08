@@ -1,0 +1,18 @@
+[package]
+name = "fs-race"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "e-racing (plan 9.6, Bet 8): anytime-valid sequential tests drive structured candidate cancellation - deterministic round schedules, pairwise e-process races with e-BH family-wise control, successive-halving brackets, and kill-registry wiring. Elimination order is a pure function of seed and stream identities."
+
+[package.metadata.frankensim]
+layer = "L4"
+
+[dependencies]
+fs-eproc = { path = "../fs-eproc" }
+fs-exec = { path = "../fs-exec" }
+
+[lints]
+workspace = true
