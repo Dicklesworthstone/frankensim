@@ -75,6 +75,21 @@ solver without a passing gradient check cannot merge.
   the tape-level twin. Deterministic tie-breaks inherited from the
   router.
 
+- `certs` module (addendum Proposal 1, bead bk0o.3; [S], behind
+  `gradient-certs` → `diff-mitigations`): GRADIENTS ARE CLAIMS and get
+  colors. `adjoint_residual_bound` computes a VERIFIED enclosure of the
+  transpose-consistency residual in outward-rounded fs-ivl arithmetic;
+  `fd_spot_checks` runs the mandatory falsifier pairing
+  (`adjoint-gradient` → `finite-difference-spot-check`, declared in
+  fs-evidence's standard registry) along seeded directions with
+  conditioning-aware tolerances; `certify` assigns colors —
+  smooth+bounded = Verified(residual), flagged remesh = Estimated
+  (inherited, never upgraded: that would be laundering), anchored =
+  Validated(regime, dataset), evidence-free = Estimated (a gradient
+  without a certificate is folklore); `merge_gate` is the CI
+  gradient-gate discipline extended across seams: missing or failing FD
+  checks refuse with teaching text.
+
 ## Invariants
 
 - No differentiation through Krylov iterations anywhere: adjoints are
@@ -181,3 +196,14 @@ gradient and REJECTING a corrupted one; cross-ISA golden hash.
 - Hadamard applicability (volume, boundary compliance) follows the base
   module's fixtures; general goal functionals need their own boundary
   forms.
+
+## No-claim boundaries (certs)
+
+- The interval residual certifies the TRANSPOSE PAIR's consistency,
+  not the objective's differentiability — path smoothness is the
+  routing grade's claim (mitigate module).
+- Anchoring evidence (Proposal 11 assimilation) is caller-supplied;
+  this module records it, it does not validate the dataset.
+- The CI wiring of merge_gate into the Gauntlet runner is the
+  ci-gauntlet bead's contract; this module ships the gate function and
+  its refusals.
