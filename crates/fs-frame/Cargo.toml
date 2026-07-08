@@ -1,0 +1,24 @@
+[package]
+name = "fs-frame"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Flagship 2 (plan 15.2): the seismic-minimal building frame - ground-structure layout LP with duality certificates, code-checked sizing, fiber-hinge nonlinear time history under Kanai-Tajimi ensembles, anytime-valid e-stopped fragility, and CVaR-constrained mass minimization. Smoke tier."
+
+[package.metadata.frankensim]
+layer = "L6"
+
+[dependencies]
+fs-eproc = { path = "../fs-eproc" }
+fs-scenario = { path = "../fs-scenario" }
+fs-solid = { path = "../fs-solid" }
+fs-truss = { path = "../fs-truss" }
+fs-uq = { path = "../fs-uq" }
+
+[dev-dependencies]
+fs-qty = { path = "../fs-qty" }
+
+[lints]
+workspace = true

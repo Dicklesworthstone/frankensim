@@ -1061,6 +1061,18 @@ name = "fs-fmm"
 version = "0.0.1"
 
 [[package]]
+name = "fs-frame"
+version = "0.0.1"
+dependencies = [
+ "fs-eproc",
+ "fs-qty",
+ "fs-scenario",
+ "fs-solid",
+ "fs-truss",
+ "fs-uq",
+]
+
+[[package]]
 name = "fs-ga"
 version = "0.0.1"
 dependencies = [
