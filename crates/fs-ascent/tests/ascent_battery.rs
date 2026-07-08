@@ -422,47 +422,67 @@ fn tr_newton_exact_hv_vs_fd_hv() {
     // Second-order adjoints (frankensim-6jtb): TR-Newton on the PDE
     // density misfit with the EXACT IFT Hessian-vector product vs the
     // O(√ε) FD-of-gradients interim — outer iterations measured.
+    // Parameterization is LOG-density θ (ρ = e^θ): positive by
+    // construction — the raw-density fixture measurably wandered into
+    // negative (unphysical, indefinite-K) territory and stalled. The
+    // exact chain rules: g_θ = ρ⊙g_ρ; H_θ·v = ρ⊙(H_ρ·(ρ⊙v)) + ρ⊙g_ρ⊙v.
     let (complex, positions) = fs_feec::kuhn_cube(3);
     let nt = complex.tets.len();
-    let rho0: Vec<f64> = rand_vec(nt, 90).iter().map(|v| 1.2f64 + 0.3 * v).collect();
-    let problem = fs_adjoint::DensityPoisson::new(&complex, &positions, rho0.clone());
-    let n = problem.n();
+    let rho_true: Vec<f64> = rand_vec(nt, 90).iter().map(|v| 1.2f64 + 0.3 * v).collect();
+    let pr_true = fs_adjoint::DensityPoisson::new(&complex, &positions, rho_true.clone());
+    let n = pr_true.n();
     let b = rand_vec(n, 91);
-    let u_star = rand_vec(n, 92);
-    let fg_factory = || {
-        let complex = &complex;
-        let positions = &positions;
-        let b = b.clone();
-        let u_star = u_star.clone();
-        move |rho: &[f64]| -> (f64, Vec<f64>) {
-            let pr = fs_adjoint::DensityPoisson::new(complex, positions, rho.to_vec());
-            let op = fs_adjoint::DensityOp::new(&pr);
-            let u = solve_cg(&op, &b);
-            let djdu: Vec<f64> = u.iter().zip(&u_star).map(|(a, c)| a - c).collect();
-            let f = 0.5 * djdu.iter().map(|x| x * x).sum::<f64>();
-            let lambda = solve_cg(&op, &djdu);
-            let mut g = pr.density_pullback(&lambda, &u);
-            for x in &mut g {
-                *x = -*x;
-            }
-            (f, g)
-        }
+    let u_star = {
+        let op = fs_adjoint::DensityOp::new(&pr_true);
+        solve_cg(&op, &b)
     };
-    let mut fg_exact = fg_factory();
-    let mut hv_exact = |rho: &[f64], dir: &[f64]| -> Vec<f64> {
+    let grad_rho = |rho: &[f64]| -> (f64, Vec<f64>) {
         let pr = fs_adjoint::DensityPoisson::new(&complex, &positions, rho.to_vec());
-        fs_adjoint::density_misfit_hvp(&pr, &b, &u_star, dir, 1e-13)
+        let op = fs_adjoint::DensityOp::new(&pr);
+        let u = solve_cg(&op, &b);
+        let djdu: Vec<f64> = u.iter().zip(&u_star).map(|(a, c)| a - c).collect();
+        let f = 0.5 * djdu.iter().map(|x| x * x).sum::<f64>();
+        let lambda = solve_cg(&op, &djdu);
+        let mut g = pr.density_pullback(&lambda, &u);
+        for x in &mut g {
+            *x = -*x;
+        }
+        (f, g)
     };
-    let rep_exact = trust_region_newton(&rho0, &mut fg_exact, &mut hv_exact, 1e-9, 60);
-    let mut fg_fd = fg_factory();
-    let mut fg_fd2 = fg_factory();
-    let mut hv_fd = |rho: &[f64], dir: &[f64]| -> Vec<f64> {
-        hv_fd_of_gradients(&mut fg_fd2, rho, dir, 1e-6)
+    let fg_theta = |theta: &[f64]| -> (f64, Vec<f64>) {
+        let rho: Vec<f64> = theta.iter().map(|t| fs_math::det::exp(*t)).collect();
+        let (f, g_rho) = grad_rho(&rho);
+        let g: Vec<f64> = g_rho.iter().zip(&rho).map(|(g, r)| g * r).collect();
+        (f, g)
     };
-    let rep_fd = trust_region_newton(&rho0, &mut fg_fd, &mut hv_fd, 1e-9, 60);
+    let hv_theta_exact = |theta: &[f64], dir: &[f64]| -> Vec<f64> {
+        let rho: Vec<f64> = theta.iter().map(|t| fs_math::det::exp(*t)).collect();
+        let (_, g_rho) = grad_rho(&rho);
+        let rho_dir: Vec<f64> = rho.iter().zip(dir).map(|(r, d)| r * d).collect();
+        let pr = fs_adjoint::DensityPoisson::new(&complex, &positions, rho.clone());
+        let h_rho_v = fs_adjoint::density_misfit_hvp(&pr, &b, &u_star, &rho_dir, 1e-13);
+        h_rho_v
+            .iter()
+            .zip(&rho)
+            .zip(g_rho.iter().zip(dir))
+            .map(|((h, r), (g, d))| r.mul_add(*h, r * g * d))
+            .collect()
+    };
+    let theta0 = vec![fs_math::det::ln(1.2f64); nt];
+    let mut fg1 = fg_theta;
+    let mut hv1 = hv_theta_exact;
+    let rep_exact = trust_region_newton(&theta0, &mut fg1, &mut hv1, 1e-9, 80);
+    let mut fg2 = fg_theta;
+    let mut fg2b = fg_theta;
+    let mut hv2 = |theta: &[f64], dir: &[f64]| -> Vec<f64> {
+        hv_fd_of_gradients(&mut fg2b, theta, dir, 1e-6)
+    };
+    let rep_fd = trust_region_newton(&theta0, &mut fg2, &mut hv2, 1e-9, 80);
     assert!(
         rep_exact.grad_norm < 1e-9,
-        "exact-Hv TR failed to certify: {rep_exact:?}"
+        "exact-Hv TR failed to certify: gnorm {:.3e}, iters {}",
+        rep_exact.grad_norm,
+        rep_exact.iters
     );
     assert!(
         rep_exact.iters <= rep_fd.iters,
@@ -474,12 +494,13 @@ fn tr_newton_exact_hv_vs_fd_hv() {
         "tr-exact-hv",
         "pass",
         &format!(
-            "iters exact {} vs FD {} (FD certified: {}), hv counts {} vs {}",
+            "iters exact {} vs FD {} (FD certified: {}), hv counts {} vs {}, f {:.1e}",
             rep_exact.iters,
             rep_fd.iters,
             rep_fd.grad_norm < 1e-9,
             rep_exact.hv_evals,
-            rep_fd.hv_evals
+            rep_fd.hv_evals,
+            rep_exact.f
         ),
     );
 }
