@@ -61,9 +61,11 @@ pub fn cvar(samples: &[f64], alpha: f64) -> Result<f64, RobustError> {
     }
     let mut sorted: Vec<f64> = samples.to_vec();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    // number of worst-tail samples: ceil((1 - alpha) * n), at least 1.
+    // number of worst-tail samples: at least the (1 - alpha) fraction, >= 1.
+    // Subtract a tiny epsilon before ceil so float error (e.g. 5.0000000004)
+    // does not over-count the tail by one.
     let n = sorted.len();
-    let tail = (((1.0 - alpha) * n as f64).ceil() as usize).clamp(1, n);
+    let tail = ((((1.0 - alpha) * n as f64) - 1e-9).ceil().max(1.0) as usize).clamp(1, n);
     let worst = &sorted[n - tail..];
     Ok(worst.iter().sum::<f64>() / tail as f64)
 }
@@ -190,7 +192,10 @@ pub fn robust_optimum(
 /// achieved safety)? If robust designs are consistently dominated, the
 /// ambiguity sets are miscalibrated.
 #[must_use]
-pub fn dominated_by_nominal(robust_realized_cost: f64, nominal_plus_safety_realized_cost: f64) -> bool {
+pub fn dominated_by_nominal(
+    robust_realized_cost: f64,
+    nominal_plus_safety_realized_cost: f64,
+) -> bool {
     nominal_plus_safety_realized_cost < robust_realized_cost
 }
 

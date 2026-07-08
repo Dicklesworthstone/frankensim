@@ -71,6 +71,7 @@ members = [
     "crates/fs-symmetry",
     "crates/fs-conform",
     "crates/fs-wedge",
+    "crates/fs-robust",
     "crates/fs-cutfem",
     "crates/fs-solid",
     "xtask",
