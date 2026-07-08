@@ -9,7 +9,7 @@ use fs_marquee::{MarqueeStatus, VERSION, scope_summary, status};
 
 fn expected_status() -> MarqueeStatus {
     if cfg!(feature = "marquee") {
-        MarqueeStatus::FeatureEnabledNoRunner
+        MarqueeStatus::SmokeRunnerAvailable
     } else {
         MarqueeStatus::Disabled
     }
@@ -26,5 +26,7 @@ fn marquee_scope_keeps_no_runner_boundary_explicit() {
     let summary = scope_summary();
     assert!(summary.contains("raw SDF"));
     assert!(summary.contains("CutFEM"));
-    assert!(summary.contains("runner not shipped"));
+    // The smoke runner shipped; the nightly golden lane is the
+    // remaining no-claim boundary.
+    assert!(summary.contains("nightly golden pending"));
 }
