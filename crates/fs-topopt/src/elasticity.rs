@@ -16,6 +16,10 @@ use fs_solver::LinearOp;
 pub struct DensityElasticity {
     /// Per-cell 12×12 unit-modulus element stiffness (row-major).
     ke: Vec<[f64; 144]>,
+    /// Per-cell 12×12 unit-density consistent mass (row-major):
+    /// the P1 tet pattern (|V|/20)·(1 + δ_ab) per displacement
+    /// component — kept separate like `ke` for exact chain rules.
+    me: Vec<[f64; 144]>,
     /// Cell → 4 vertex ids.
     tets: Vec<[u32; 4]>,
     /// Vector-dof count (3 per vertex).
@@ -75,6 +79,21 @@ impl DensityElasticity {
             }
             ke.push(k);
         }
+        // Consistent unit-density mass blocks.
+        let mut me = Vec::with_capacity(complex.tets.len());
+        for (t, _tet) in complex.tets.iter().enumerate() {
+            let vol = geo.vol_signed[t].abs();
+            let mut m = [0.0f64; 144];
+            for a in 0..4 {
+                for bb in 0..4 {
+                    let w = vol / 20.0 * if a == bb { 2.0 } else { 1.0 };
+                    for comp in 0..3 {
+                        m[(3 * a + comp) * 12 + (3 * bb + comp)] = w;
+                    }
+                }
+            }
+            me.push(m);
+        }
         let n = 3 * complex.vertex_count;
         let mut free = vec![true; n];
         for (v, &p) in positions.iter().enumerate() {
@@ -86,6 +105,7 @@ impl DensityElasticity {
         }
         DensityElasticity {
             ke,
+            me,
             tets: complex.tets.clone(),
             n,
             free,
@@ -111,12 +131,61 @@ impl DensityElasticity {
         &self.free
     }
 
+    /// Assemble DENSE reduced (K(moduli), M(densities)) on the free
+    /// dofs (fixture-scale eigenproblems; row-major f×f each).
+    #[must_use]
+    pub fn assemble_dense(&self, densities: &[f64]) -> (Vec<f64>, Vec<f64>, Vec<usize>) {
+        let free_idx: Vec<usize> = (0..self.n).filter(|&d| self.free[d]).collect();
+        let mut slot = vec![usize::MAX; self.n];
+        for (i, &d) in free_idx.iter().enumerate() {
+            slot[d] = i;
+        }
+        let f = free_idx.len();
+        let mut kd = vec![0.0f64; f * f];
+        let mut md = vec![0.0f64; f * f];
+        for (c, tet) in self.tets.iter().enumerate() {
+            let (e, rho) = (self.moduli[c], densities[c]);
+            for a in 0..4 {
+                for comp_a in 0..3 {
+                    let da = 3 * tet[a] as usize + comp_a;
+                    if slot[da] == usize::MAX {
+                        continue;
+                    }
+                    for bb in 0..4 {
+                        for comp_b in 0..3 {
+                            let db = 3 * tet[bb] as usize + comp_b;
+                            if slot[db] == usize::MAX {
+                                continue;
+                            }
+                            let row = 3 * a + comp_a;
+                            let col = 3 * bb + comp_b;
+                            kd[slot[da] * f + slot[db]] += e * self.ke[c][row * 12 + col];
+                            md[slot[da] * f + slot[db]] += rho * self.me[c][row * 12 + col];
+                        }
+                    }
+                }
+            }
+        }
+        (kd, md, free_idx)
+    }
+
+    /// Per-cell KINETIC quadratic form m_c = uᵀ·M_c·u (unit density —
+    /// multiply by the mass-interpolation slope outside).
+    #[must_use]
+    pub fn cell_kinetic(&self, u: &[f64]) -> Vec<f64> {
+        self.cell_quadratic(&self.me, u)
+    }
+
     /// Per-cell strain energy density contribution: e_c = uᵀ·K_c·u
     /// (UNIT modulus — multiply by E′ outside for the chain rule).
     #[must_use]
     pub fn cell_energies(&self, u: &[f64]) -> Vec<f64> {
-        let mut out = vec![0.0f64; self.ke.len()];
-        for (c, (k, tet)) in self.ke.iter().zip(&self.tets).enumerate() {
+        self.cell_quadratic(&self.ke, u)
+    }
+
+    fn cell_quadratic(&self, blocks: &[[f64; 144]], u: &[f64]) -> Vec<f64> {
+        let mut out = vec![0.0f64; blocks.len()];
+        for (c, (k, tet)) in blocks.iter().zip(&self.tets).enumerate() {
             let mut ul = [0.0f64; 12];
             for (a, &v) in tet.iter().enumerate() {
                 for comp in 0..3 {

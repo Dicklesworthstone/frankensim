@@ -488,3 +488,196 @@ fn robust_golden_hash() {
          justification (golden-evidence policy)"
     );
 }
+
+#[test]
+fn eigenfrequency_gradient_fd_gates() {
+    use fs_topopt::{eigenfrequency_objective, lowest_eigenpairs, mass_interp};
+    let (complex, positions, _force, _vol) = cantilever(2);
+    let nt = complex.tets.len();
+    let pipeline = DesignPipeline {
+        filter: DensityFilter::new(&complex, &positions, 0.12),
+        params: SimpParams {
+            e_min: 1e-6,
+            penal: 3.0,
+            beta: 2.0,
+            eta: 0.5,
+        },
+    };
+    let mut el = DensityElasticity::new(&complex, &positions, 1.0, 0.3, &|p: [f64; 3]| {
+        p[0].to_bits() == 0.0f64.to_bits()
+    });
+    let rho0: Vec<f64> = rand_vec(nt, 100).iter().map(|v| 0.4 + 0.4 * v).collect();
+    // Smooth-min aggregate gradient vs FD through the WHOLE chain
+    // (filter, projection, SIMP stiffness, interpolated mass, eigen).
+    let (agg0, grad) = eigenfrequency_objective(&pipeline, &mut el, &rho0, 4, 40.0);
+    assert!(agg0 > 0.0, "base eigenvalue must be positive: {agg0}");
+    let j = |rho: &[f64]| -> f64 {
+        let mut el2 = DensityElasticity::new(&complex, &positions, 1.0, 0.3, &|p: [f64; 3]| {
+            p[0].to_bits() == 0.0f64.to_bits()
+        });
+        eigenfrequency_objective(&pipeline, &mut el2, rho, 4, 40.0).0
+    };
+    let dirs: Vec<Vec<f64>> = (0..2).map(|k| rand_vec(nt, 110 + k)).collect();
+    let verdict = fs_adjoint::verify_gradient(&j, &rho0, &grad, &dirs, 1e-5, 5e-4);
+    assert!(
+        verdict.pass,
+        "eigenfrequency gradient failed FD: {:.3e}",
+        verdict.max_rel_err
+    );
+    // The mass-interpolation trap gate: a design with VOID cells must
+    // not host spurious low modes — λ_min of a mostly-void design with
+    // one solid load path stays well above zero.
+    let mut rho_void = vec![0.03f64; nt];
+    for (c, r) in rho_void.iter_mut().enumerate() {
+        if c % 3 == 0 {
+            *r = 1.0;
+        }
+    }
+    let (_, rho_bar_v, moduli_v) = pipeline.forward(&rho_void);
+    el.moduli = moduli_v;
+    let mass_v: Vec<f64> = rho_bar_v.iter().map(|&r| mass_interp(r)).collect();
+    let (lv, _, _) = lowest_eigenpairs(&el, &mass_v, 2);
+    assert!(
+        lv[0] > 1e-4,
+        "spurious void mode: lambda_min {:.3e} (the rho^6 mass floor must prevent this)",
+        lv[0]
+    );
+    log(
+        "eigenfreq-grad",
+        "pass",
+        &format!(
+            "agg {agg0:.4}, FD rel {:.2e}, void lambda_min {:.2e}",
+            verdict.max_rel_err, lv[0]
+        ),
+    );
+}
+
+#[test]
+fn eigenfrequency_clustered_and_improvement() {
+    use fs_topopt::eigenfrequency_objective;
+    let (complex, positions, _force, vol) = cantilever(2);
+    let nt = complex.tets.len();
+    let pipeline = DesignPipeline {
+        filter: DensityFilter::new(&complex, &positions, 0.12),
+        params: SimpParams {
+            e_min: 1e-6,
+            penal: 3.0,
+            beta: 2.0,
+            eta: 0.5,
+        },
+    };
+    // The cantilever cube has two symmetric bending modes (y/z) that
+    // sit CLOSE for symmetric designs — exactly the clustered case the
+    // smooth-min handles. Verify the aggregate gradient near that
+    // near-crossing via FD (the single-eigenvalue objective would be
+    // nonsmooth here; the aggregate is smooth).
+    let rho_sym = vec![0.55f64; nt];
+    let mut el = DensityElasticity::new(&complex, &positions, 1.0, 0.3, &|p: [f64; 3]| {
+        p[0].to_bits() == 0.0f64.to_bits()
+    });
+    let (_, grad) = eigenfrequency_objective(&pipeline, &mut el, &rho_sym, 4, 60.0);
+    let j = |rho: &[f64]| -> f64 {
+        let mut el2 = DensityElasticity::new(&complex, &positions, 1.0, 0.3, &|p: [f64; 3]| {
+            p[0].to_bits() == 0.0f64.to_bits()
+        });
+        eigenfrequency_objective(&pipeline, &mut el2, rho, 4, 60.0).0
+    };
+    let dirs: Vec<Vec<f64>> = (0..2).map(|k| rand_vec(nt, 120 + k)).collect();
+    let verdict = fs_adjoint::verify_gradient(&j, &rho_sym, &grad, &dirs, 1e-5, 5e-4);
+    assert!(
+        verdict.pass,
+        "clustered aggregate gradient failed FD near the crossing: {:.3e}",
+        verdict.max_rel_err
+    );
+    // Improvement demo: a few projected-gradient ascent steps at fixed
+    // volume must RAISE the aggregate eigenvalue (measured).
+    let vol_frac = 0.5f64;
+    let total: f64 = vol.iter().sum();
+    let project = |rho: &mut Vec<f64>| {
+        // Scale toward the volume budget then clamp (simple exact-ish
+        // projection for the demo; OC/AL are the production drivers).
+        for _ in 0..40 {
+            let v: f64 = rho.iter().zip(&vol).map(|(r, w)| r * w).sum::<f64>() / total;
+            let s = vol_frac / v.max(1e-12);
+            for r in rho.iter_mut() {
+                *r = (*r * s).clamp(1e-3, 1.0);
+            }
+            if (v - vol_frac).abs() < 1e-6 {
+                break;
+            }
+        }
+    };
+    let mut rho = vec![vol_frac; nt];
+    project(&mut rho);
+    let mut el3 = DensityElasticity::new(&complex, &positions, 1.0, 0.3, &|p: [f64; 3]| {
+        p[0].to_bits() == 0.0f64.to_bits()
+    });
+    let (l0, _) = eigenfrequency_objective(&pipeline, &mut el3, &rho, 4, 60.0);
+    for _ in 0..8 {
+        let (_, g) = eigenfrequency_objective(&pipeline, &mut el3, &rho, 4, 60.0);
+        let gnorm = g.iter().map(|x| x.abs()).fold(0.0f64, f64::max).max(1e-30);
+        for (r, gi) in rho.iter_mut().zip(&g) {
+            *r = (*r + 0.05 * gi / gnorm).clamp(1e-3, 1.0);
+        }
+        project(&mut rho);
+    }
+    let (l_final, _) = eigenfrequency_objective(&pipeline, &mut el3, &rho, 4, 60.0);
+    assert!(
+        l_final > 1.05 * l0,
+        "ascent must raise the aggregate eigenvalue: {l0:.5} -> {l_final:.5}"
+    );
+    log(
+        "eigenfreq-opt",
+        "pass",
+        &format!(
+            "clustered FD rel {:.2e}, lambda_agg {l0:.5} -> {l_final:.5} (+{:.0}%)",
+            verdict.max_rel_err,
+            100.0 * (l_final / l0 - 1.0)
+        ),
+    );
+}
+
+const EIGEN_GOLDEN_HASH: u64 = 0xbb7e_5ad3_851a_2bf1; // recorded at mdx2 slice A, frozen
+
+#[test]
+fn eigenfreq_golden_hash() {
+    use fs_topopt::{eigenfrequency_objective, lowest_eigenpairs, mass_interp};
+    let mut acc: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut feed = |v: f64| {
+        for byte in v.to_bits().to_le_bytes() {
+            acc ^= u64::from(byte);
+            acc = acc.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    };
+    let (complex, positions, _force, _vol) = cantilever(2);
+    let nt = complex.tets.len();
+    let pipeline = DesignPipeline {
+        filter: DensityFilter::new(&complex, &positions, 0.15),
+        params: SimpParams::default(),
+    };
+    let mut el = DensityElasticity::new(&complex, &positions, 1.0, 0.3, &|p: [f64; 3]| {
+        p[0].to_bits() == 0.0f64.to_bits()
+    });
+    let rho = rand_vec(nt, 130)
+        .iter()
+        .map(|v| 0.4 + 0.4 * v)
+        .collect::<Vec<_>>();
+    let (_, rho_bar, moduli) = pipeline.forward(&rho);
+    el.moduli = moduli;
+    let mass: Vec<f64> = rho_bar.iter().map(|&r| mass_interp(r)).collect();
+    let (lambdas, _, _) = lowest_eigenpairs(&el, &mass, 4);
+    for l in &lambdas {
+        feed(*l);
+    }
+    let (agg, grad) = eigenfrequency_objective(&pipeline, &mut el, &rho, 3, 50.0);
+    feed(agg);
+    for v in grad.iter().step_by(9) {
+        feed(*v);
+    }
+    log("eigenfreq-golden", "info", &format!("{acc:#018x}"));
+    assert_eq!(
+        acc, EIGEN_GOLDEN_HASH,
+        "eigenfreq bits changed: {acc:#018x} vs {EIGEN_GOLDEN_HASH:#018x} — bump only with \
+         semantic justification (golden-evidence policy)"
+    );
+}

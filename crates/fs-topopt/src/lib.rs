@@ -20,12 +20,16 @@
 //! ZERO remeshing) is the marquee follow-up lane recorded on the
 //! bead.
 
+pub mod eigenfreq;
 pub mod elasticity;
 pub mod filter;
 pub mod oc;
 pub mod pipeline;
 pub mod robust;
 
+pub use eigenfreq::{
+    eigenfrequency_objective, eigenvalue_gradient, lowest_eigenpairs, mass_interp, smooth_min,
+};
 pub use elasticity::DensityElasticity;
 pub use filter::{DensityFilter, heaviside, heaviside_derivative};
 pub use oc::{OcReport, optimality_criteria};
