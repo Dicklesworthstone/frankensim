@@ -96,6 +96,14 @@ globalized Newton loop.
   a/b coefficients and `Bifurcation` classification, with the
   SAMPLED-CONTINUATION fallback oracle (the imperfect-geometry path)
   cross-checking imperfection tolerance.
+- `contact` [F], feature `contact` (off by default): SDF-native
+  log-barrier contact around `HyperProblem`, with `Barrier`,
+  optional lagged smoothed-Coulomb `Friction`, `ContactProblem`,
+  `ContactSolution`, and the frictionless `translation_gradient`
+  adjoint probe. The solver requires a finite, intersection-free
+  initial state; bad parameters, non-finite SDF values/gradients,
+  invalid pins, and unsupported contact-adjoint inputs return
+  `SolidError::InvalidInput`.
 - `accept_scenario_bc`: fs-scenario integration — `Dirichlet` and
   `Traction` under `Physics::Elasticity` accepted; dimensioned-value
   resolution stays with the scenario consumer.
@@ -150,7 +158,9 @@ globalized Newton loop.
 `NewtonStalled` (carries the residual history; repair = more load
 steps), `MaterialRefused` (det F ≤ 0 escaped globalization; repair =
 smaller steps), `UnknownPatch`, `UnsupportedBc` (fs-scenario mapping
-outside Dirichlet/Traction × Elasticity).
+outside Dirichlet/Traction × Elasticity), and `InvalidInput`
+(non-finite/inconsistent caller data such as invalid contact
+parameters, infeasible starts, or malformed adjoint seeds).
 
 ## Determinism class
 
@@ -172,7 +182,10 @@ fs-exec driver (the L3 discipline; fs-feec/fs-cutfem precedent).
 
 `koiter-asymptotics` (off by default): the plan-flagged [F] Koiter
 post-buckling module and its battery, per the Ambition-Tag gating
-rule. No other flags.
+rule.
+
+`contact` (off by default): the plan-flagged [F] SDF-native barrier
+contact prototype and its battery, per the Ambition-Tag gating rule.
 
 ### Structural invariants (tfz.14)
 
@@ -192,6 +205,14 @@ rule. No other flags.
 17. Force-based pushover softens past yield (secant < 0.5× initial),
     dissipates under reversal, and resumes from a checkpoint
     BITWISE (G4) — str-006.
+18. Contact barrier calculus and solve hygiene (feature `contact`):
+    barrier derivatives match finite differences, invalid/penetrating
+    contact inputs return structured `InvalidInput` instead of
+    panicking, accepted iterates keep positive gap, reactions balance
+    the applied normal load, tight-clearance and curved-obstacle
+    fixtures retain positive gap, lagged friction separates stick/slip
+    cases, and the frictionless translation adjoint matches FD on a
+    plane — cnt-001..007.
 
 ## Conformance tests
 
@@ -216,6 +237,13 @@ smooth with derivative matching FD to 1e-6, conservative).
 `tests/koiter.rs` (feature-gated): stab-006 symmetric-stable
 classification + imperfect-geometry sampled oracle.
 
+`tests/contact.rs` (feature-gated): cnt-001 barrier calculus and
+force divergence; cnt-002/003 intersection-free hard press and
+reaction balance; cnt-004 tight-clearance and curved-obstacle gap
+audits; cnt-005 lagged friction cone separation; cnt-006
+frictionless contact translation adjoint versus FD; cnt-007
+structured invalid-input returns.
+
 `tests/structural.rs` (bead tfz.14): str-001 objectivity; str-002
 elastica vs shooting oracle; str-003 circle/twist/helix; str-004 RC
 moment-curvature hysteresis + determinism; str-005 batched
@@ -235,8 +263,11 @@ reversal dissipation, G4 bitwise resume.
 - fs-opdsl-generated residual/adjoint paths (the DSL coverage bead);
   the hand path here passes the same consistency gates the DSL output
   must pass.
-- Contact, plasticity flow (fs-material's plastic module wires in a
-  successor), dynamics/time integration.
+- Contact no-claims: mesh-mesh point-triangle fallback, rigorous
+  interval CCD over curved SDFs, adaptive barrier-stiffness policy,
+  frictional adjoints/VJPs, dynamics/time stepping, and fs-scenario
+  contact-law coefficient wiring. Plasticity flow remains successor
+  scope (fs-material's plastic module wires in later).
 - Ogden energies (fs-material's recorded no-claim propagates).
 - Rod SE(3) DYNAMICS (fs-time symplectic wiring) and analytic rod
   tangents; 3D frames/lattices assembled from rods (topo-truss's
