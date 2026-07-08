@@ -369,7 +369,7 @@ fn robust_oc_improves_erosion_retention() {
     let mut el = DensityElasticity::new(&complex, &positions, 1.0, 0.3, &|p: [f64; 3]| {
         p[0].to_bits() == 0.0f64.to_bits()
     });
-    let base = optimality_criteria(&nominal_pipeline, &mut el, &force, &rho0, &vol, vol_frac, 0.2, 10);
+    let base = optimality_criteria(&nominal_pipeline, &mut el, &force, &rho0, &vol, vol_frac, 0.2, 25);
     let probe = RobustPipeline {
         filter: DensityFilter::new(&complex, &positions, 0.15),
         params,
@@ -385,7 +385,7 @@ fn robust_oc_improves_erosion_retention() {
     let mut el2 = DensityElasticity::new(&complex, &positions, 1.0, 0.3, &|p: [f64; 3]| {
         p[0].to_bits() == 0.0f64.to_bits()
     });
-    let rep = robust_optimality_criteria(&probe, &mut el2, &force, &rho0, &vol, vol_frac, 0.2, 10);
+    let rep = robust_optimality_criteria(&probe, &mut el2, &force, &rho0, &vol, vol_frac, 0.2, 25);
     // Eroded compliance descends.
     let c0 = rep.compliance_eroded[0];
     let c_final = *rep.compliance_eroded.last().expect("trace");
