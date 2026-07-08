@@ -24,6 +24,8 @@ pub mod hadamard;
 pub mod ift;
 pub mod sobolev;
 pub mod timedep;
+#[cfg(feature = "ledger-transpose")]
+pub mod transpose;
 pub mod verify;
 
 pub use hadamard::{compliance_shape_gradient, volume_shape_gradient};

@@ -19,7 +19,13 @@ fs-rep-mesh = { path = "../fs-rep-mesh" }
 fs-solver = { path = "../fs-solver" }
 fs-sparse = { path = "../fs-sparse" }
 
+[features]
+# [F]-gated per the Ambition-Tag rule: the ledger-DAG transposition
+# layer ships disabled until its Gauntlet tier + kill metric are green.
+ledger-transpose = []
+
 [dev-dependencies]
+fs-ledger = { path = "../fs-ledger" }
 fs-rand = { path = "../fs-rand" }
 
 [lints]
