@@ -16,5 +16,9 @@ fs-math = { path = "../fs-math" }
 [dev-dependencies]
 fs-rand = { path = "../fs-rand" }
 
+[features]
+# [F]-gated per the Ambition-Tag rule (bead 7tv.9).
+conformal-hardening = []
+
 [lints]
 workspace = true

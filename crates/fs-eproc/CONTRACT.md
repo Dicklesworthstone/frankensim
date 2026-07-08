@@ -23,6 +23,21 @@ makes optional stopping VALID. Layer: L4.
   where e_(k) ≥ m/(αk); FDR ≤ α under arbitrary dependence; deterministic
   tie-breaking (descending e, ascending index).
 
+- `hardening` module (patch Rev M, bead 7tv.9; [F], behind
+  `conformal-hardening`): the anytime-valid layer's assumptions as
+  operational contracts. `MondrianConformal` (per-bucket split
+  conformal at the ⌈(n+1)(1−α)⌉ rule; buckets below the calibration
+  floor REFUSE with a teaching count instead of extrapolating;
+  `marginal_band` kept for the comparison), `DriftMonitor` (sequential
+  two-sample PIT betting pair against the COMPOSITE null
+  mean ∈ 1/2 ± δ, δ = max(1/√n_train, 0.02) — the finite-calibration
+  tolerance, added after an unslacked monitor false-fired on the
+  training sample's own noise; detection shrinks `validity_scale`),
+  `CoverageClaim`/`fcr_flag` (per-claim miscoverage e-processes,
+  e-BH over them spends the explicit false-coverage budget),
+  `admission_alpha` (the Bonferroni reservation for study admission),
+  `ExchangeabilityCard` (assumptions declared, ledger-ready).
+
 ## Invariants
 - Validity is STRUCTURAL: any predictable bet in the admissible range yields
   a supermartingale under H₀ — strategy affects power only.
@@ -63,3 +78,16 @@ race decided + bit-replayable; arithmetic laws; bounded-input refusal.
 - Conformal e-prediction (fs-surrogate + conformal-hardening beads).
 - Nightly adversarial-rotation trials (certify-certifiers bead).
 - Two-sided betting tests; asymptotic variants; sub-exponential extensions.
+
+## No-claim boundaries (hardening)
+
+- The drift monitor tests the CANDIDATE SCORE distribution (1-D PIT);
+  multivariate covariate drift needs a score projection chosen by the
+  caller — the projection's blind spots are the caller's declaration.
+- The composite-null slack δ trades sensitivity below δ for
+  no-false-alarm robustness: shifts smaller than the calibration
+  noise floor are undetectable BY DESIGN.
+- FCR flagging inherits e-BH's guarantee under arbitrary dependence;
+  the admission bound is Bonferroni (conservative on purpose).
+- Weighted-conformal handling of optimization-induced shift (beyond
+  detect-and-refuse/recalibrate) is the growth path the bead names.

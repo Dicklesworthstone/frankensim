@@ -21,6 +21,9 @@
 //! logical-identity streams, every tournament is bit-replayable from its
 //! seed (Bet 8's reproducible-racing requirement).
 
+#[cfg(feature = "conformal-hardening")]
+pub mod hardening;
+
 use fs_math::det;
 
 /// Crate version, re-exported for provenance stamping.
