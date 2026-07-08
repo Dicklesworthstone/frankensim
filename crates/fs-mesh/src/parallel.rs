@@ -2,19 +2,19 @@
 //! READ-PARALLEL, APPLY-CANONICAL prefix batches. Each window of BRIO
 //! order gets every point's conflict region (cavity + growth repair +
 //! one-ring, mirroring the kernel's insert transaction exactly)
-//! computed READ-ONLY across scoped threads; the batch is then the
-//! MAXIMAL PREFIX whose regions are pairwise disjoint — the scan
-//! STOPS at the first clash rather than skipping past it, so the
-//! applied insertion order is EXACTLY the kernel's BRIO order and the
-//! finished mesh is bitwise identical to the sequential kernel's on
-//! EVERY input, including massively cospherical degeneracies where
-//! weak-Delaunay tie-breaking is order-dependent (a first-fit
-//! multi-color scheduler was tried and measurably diverged on the
-//! 6×6×6 grid — reordering is NOT free under ties). Thread count can
-//! only change the wall clock, never a bit of the result; the
-//! batches' mathematical content — same-batch insertions COMMUTE — is
-//! gated adversarially by the battery (reversed application,
-//! canonical equality).
+//! computed READ-ONLY across scoped threads; points are then colored
+//! FLIP-SAFELY (k = 1 + the largest overlapping color): same-color
+//! members are pairwise disjoint AND any pair whose application order
+//! flips relative to BRIO is disjoint — so cospherical TIE groups
+//! (whose weak-Delaunay resolution is order-dependent) keep their
+//! original order and the finished mesh merges canonically with the
+//! sequential kernel on EVERY input. (Two rejected designs, both
+//! measured: first-fit coloring flipped tied pairs and diverged on
+//! the 6×6×6 grid; stop-at-first-clash prefix batching preserved raw
+//! bitwise order but BRIO locality collapsed its batch width to ~3.)
+//! Thread count can only change the wall clock, never a bit of the
+//! result; within-color commutativity is gated adversarially by the
+//! battery (reversed application, canonical equality).
 
 use crate::delaunay::{GHOST, Mesh, MeshError, Tetrahedralization, bootstrap_mesh};
 use fs_exec::Cx;
@@ -158,29 +158,44 @@ fn conflict_region(mesh: &Mesh, p_idx: u32) -> Option<BTreeSet<u32>> {
     Some(region)
 }
 
-/// The maximal PREFIX of the window whose regions are pairwise
-/// disjoint: the scan stops at the first clash (never skips past it),
-/// so batch concatenation reproduces the exact BRIO insertion order.
-/// Known duplicates (None regions) have an empty footprint and pass
-/// through freely — the kernel's duplicate guard is the last line of
-/// defense either way.
-fn prefix_batch(regions: &[(u32, Option<BTreeSet<u32>>)]) -> usize {
-    let mut occupied: BTreeSet<u32> = BTreeSet::new();
-    let mut len = 0usize;
-    for (_, reg) in regions {
-        match reg {
-            None => len += 1,
-            Some(r) => {
-                if occupied.is_disjoint(r) {
-                    occupied.extend(r.iter().copied());
-                    len += 1;
-                } else {
-                    break;
+/// Flip-safe color assignment: point p joins color
+/// k = 1 + max{ j : region(p) ∩ occupied[j] ≠ ∅ } (0 when disjoint
+/// from everything). Two properties BY CONSTRUCTION: (i) same-color
+/// members are pairwise region-disjoint (the parallel-apply batch
+/// structure, gated by reversed application); (ii) every cross-color
+/// pair whose application order flips relative to BRIO is
+/// region-disjoint — overlapping points (including cospherical TIE
+/// groups, whose regions coincide) cascade through strictly
+/// increasing colors and keep their original order, which is why the
+/// degenerate-grid gate passes canonically (a first-fit scheduler
+/// flipped tied pairs and measurably diverged there). Duplicates
+/// (None regions) have an empty footprint and land in color 0.
+fn assign_colors(regions: &[(u32, Option<BTreeSet<u32>>)]) -> Vec<Vec<u32>> {
+    let mut colors: Vec<(Vec<u32>, BTreeSet<u32>)> = Vec::new();
+    for (p_idx, reg) in regions {
+        let footprint: &BTreeSet<u32> = match reg {
+            Some(r) => r,
+            None => {
+                if colors.is_empty() {
+                    colors.push((Vec::new(), BTreeSet::new()));
                 }
+                colors[0].0.push(*p_idx);
+                continue;
             }
+        };
+        let k = colors
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, (_, occ))| !occ.is_disjoint(footprint))
+            .map_or(0, |(j, _)| j + 1);
+        if k == colors.len() {
+            colors.push((Vec::new(), BTreeSet::new()));
         }
+        colors[k].0.push(*p_idx);
+        colors[k].1.extend(footprint.iter().copied());
     }
-    len.max(1)
+    colors.into_iter().map(|(pts, _)| pts).collect()
 }
 
 /// Build the Delaunay tetrahedralization by deterministic prefix
@@ -211,10 +226,7 @@ pub fn delaunay_colored(
         points: work.len() as u64,
         ..ColoredStats::default()
     };
-    let mut i = 0usize;
-    let mut since_checkpoint = 0usize;
-    while i < work.len() {
-        let win = &work[i..(i + window).min(work.len())];
+    for win in work.chunks(window) {
         // Phase A: read-only conflict regions, deterministic thread
         // partition (contiguous chunks reassembled by position — the
         // schedule cannot change the result, only the wall clock).
@@ -236,23 +248,23 @@ pub fn delaunay_colored(
                 regions.extend(h.join().expect("region thread panicked"));
             }
         });
-        // Phase B: the maximal disjoint prefix.
-        let take = prefix_batch(&regions);
-        stats.batches += 1;
-        stats.largest_batch = stats.largest_batch.max(take as u64);
-        if take == 1 {
-            stats.singleton_batches += 1;
+        // Phase B: flip-safe coloring.
+        let colors = assign_colors(&regions);
+        for c in &colors {
+            stats.batches += 1;
+            stats.largest_batch = stats.largest_batch.max(c.len() as u64);
+            if c.len() == 1 {
+                stats.singleton_batches += 1;
+            }
         }
-        // Phase C: canonical application (exact BRIO order).
-        for &p in &win[..take] {
-            mesh.insert(p);
+        // Phase C: color-by-color application, each color in BRIO
+        // order (flips only across disjoint pairs).
+        for color in &colors {
+            for &p in color {
+                mesh.insert(p);
+            }
         }
-        i += take;
-        since_checkpoint += take;
-        if since_checkpoint >= 256 {
-            since_checkpoint = 0;
-            cx.checkpoint()?;
-        }
+        cx.checkpoint()?;
     }
     mesh.stats.tets_final = (0..mesh.tets.len() as u32)
         .filter(|&t| mesh.alive[t as usize] && !mesh.is_ghost(t))
@@ -282,25 +294,19 @@ pub fn delaunay_colored_reversed(
     let (mut mesh, quad, order) = bootstrap_mesh(points)?;
     let work: Vec<u32> = order.iter().copied().filter(|i| !quad.contains(i)).collect();
     let window = window.max(1);
-    let mut i = 0usize;
-    let mut since_checkpoint = 0usize;
-    while i < work.len() {
-        let win = &work[i..(i + window).min(work.len())];
+    for win in work.chunks(window.max(1)) {
         let mesh_ref = &mesh;
         let regions: Vec<(u32, Option<BTreeSet<u32>>)> = win
             .iter()
             .map(|&p| (p, conflict_region(mesh_ref, p)))
             .collect();
-        let take = prefix_batch(&regions);
-        for &p in win[..take].iter().rev() {
-            mesh.insert(p);
+        let colors = assign_colors(&regions);
+        for color in &colors {
+            for &p in color.iter().rev() {
+                mesh.insert(p);
+            }
         }
-        i += take;
-        since_checkpoint += take;
-        if since_checkpoint >= 256 {
-            since_checkpoint = 0;
-            cx.checkpoint()?;
-        }
+        cx.checkpoint()?;
     }
     mesh.stats.tets_final = (0..mesh.tets.len() as u32)
         .filter(|&t| mesh.alive[t as usize] && !mesh.is_ghost(t))

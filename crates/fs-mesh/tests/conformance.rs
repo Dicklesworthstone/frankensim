@@ -970,20 +970,27 @@ fn tmesh_013_parallel_coloring() {
     with_cx(|cx| {
         let pts = cloud(0x1001_2026_0708_0013, 900);
         let seq = delaunay(&pts, cx).expect("sequential kernel");
-        // Prefix batching preserves the EXACT insertion order, so the
-        // gate is RAW bitwise equality of the live-tet sequence, not
-        // just canonical-set equality.
-        let seq_raw = seq.tets();
+        // Colors reorder only across provably disjoint pairs, so the
+        // kernel merge is CANONICAL (allocation order legitimately
+        // differs); thread-count invariance among colored runs is RAW
+        // bitwise.
+        let seq_canon = canonical_tets(&seq);
         let mut stats1 = None;
+        let mut raw1: Option<Vec<[u32; 4]>> = None;
         for threads in [1usize, 2, 4, 8] {
             let (colored, stats) =
                 delaunay_colored(&pts, threads, 64, cx).expect("colored build");
+            let raw = colored.tets();
+            match &raw1 {
+                None => raw1 = Some(raw.clone()),
+                Some(r) => assert_eq!(&raw, r, "RAW thread-count invariance at T={threads}"),
+            }
             verdict(
                 &format!("tmesh-013-threads-{threads}"),
-                colored.tets() == seq_raw,
+                canonical_tets(&colored) == seq_canon,
                 &format!(
-                    "RAW bitwise merge vs sequential kernel: {} tets ({})",
-                    seq_raw.len(),
+                    "canonical merge vs sequential kernel: {} tets ({})",
+                    seq_canon.len(),
                     stats.to_json()
                 ),
             );
@@ -1010,7 +1017,7 @@ fn tmesh_013_parallel_coloring() {
         let rev = delaunay_colored_reversed(&pts, 64, cx).expect("reversed build");
         verdict(
             "tmesh-013-commutativity",
-            canonical_tets(&rev) == canonical_tets(&seq),
+            canonical_tets(&rev) == seq_canon,
             "reversed within-batch insertion order yields the identical canonical mesh",
         );
         // Degenerate adversary: a structured grid (massively cospherical)
@@ -1031,9 +1038,10 @@ fn tmesh_013_parallel_coloring() {
         let (gcol, gstats) = delaunay_colored(&grid_pts, 4, 32, cx).expect("grid colored");
         verdict(
             "tmesh-013-degenerate-grid",
-            gcol.tets() == gseq.tets() && gcol.audit(true).clean(),
+            canonical_tets(&gcol) == canonical_tets(&gseq) && gcol.audit(true).clean(),
             &format!(
-                "6x6x6 cospherical grid: RAW bitwise == kernel ({} tets), audit clean ({})",
+                "6x6x6 cospherical grid (order-dependent ties): canonical == kernel \
+                 ({} tets), audit clean ({})",
                 gcol.tets().len(),
                 gstats.to_json()
             ),
