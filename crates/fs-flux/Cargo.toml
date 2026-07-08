@@ -1,0 +1,20 @@
+[package]
+name = "fs-flux"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Incompressible Navier-Stokes, FEEC-native: H(div)-conforming RT0 velocities (exactly divergence-free, pressure-robust), interior-penalty viscous DG, upwind convection, coupled steady and IMEX transient solves, discrete adjoints."
+
+[package.metadata.frankensim]
+layer = "L3"
+
+[dependencies]
+fs-la = { path = "../fs-la" }
+fs-solid = { path = "../fs-solid" }
+fs-solver = { path = "../fs-solver" }
+fs-sparse = { path = "../fs-sparse" }
+
+[lints]
+workspace = true
