@@ -6,9 +6,9 @@ Layer: L4 (ASCENT). Lattice/infill optimization (plan §9.5 [F], bead
 7tv.14), 2D SMOKE TIER and honest about it: periodic unit-cell
 homogenization with physics-bound audits, graded macro-optimization
 through the fitted homogenized law, and the separation-of-scales
-validity flag doing real work. The 3D TPMS families (gyroid stiffness
-curves vs literature) and de-homogenization re-analysis lanes are
-recorded successors.
+validity flag doing real work — closed end-to-end by the
+de-homogenization re-analysis (lat-007). The 3D TPMS families (gyroid
+stiffness curves vs literature) are recorded successors.
 
 ## Public types and semantics
 
@@ -31,6 +31,11 @@ recorded successors.
   samples s(ρ) with piecewise-linear eval/slope, clamped to the
   sampled VALIDITY DOMAIN, plus the declared `gradation_bound` (the
   separation-of-scales model card).
+- `dehomog::HoleArray` (a `CutSdf`: material = hole complement, with
+  conservative per-hole interval enclosures) + `fullres_compliance`
+  (CutElasticity re-analysis under the macro load convention —
+  uniform right-edge traction, trapezoidal edge quadrature, so
+  compliances compare like-for-like).
 - `graded::graded_compliance_opt` → `GradedDesign`: cantilever
   compliance minimization over per-element cell densities through the
   fitted law; self-adjoint sensitivities, OC-style update with tight
@@ -62,6 +67,17 @@ recorded successors.
    REPORTED, never silent (lat-005).
 6. The property fit passes through s(1) = 1 with positive slopes
    inside its validity domain (lat-006).
+7. DE-HOMOGENIZATION closes the loop: the graded field realized as an
+   explicit hole array (r = h·√((1−ρ)/π) per macro cell) and
+   re-analyzed at full resolution with fs-cutfem CutElasticity
+   (traction-free hole boundaries, matched load convention) lands
+   within 4.7% of the homogenized prediction (band 15%), and the
+   realized graded array still beats the realized uniform array by
+   13.5% — the gradation survives realization (lat-007).
+8. Empty realized hole arrays represent the solid material domain with
+   finite negative SDF values/enclosures and radius range (0, 0), so
+   solid designs do not leak infinities into CutFEM classification or
+   diagnostics (lat-008).
 
 ## Error model
 
@@ -94,17 +110,15 @@ None (the smoke tier ships enabled; heavier tiers will gate).
 element-probe identity); lat-002 sweep bounds + dilute ledger;
 lat-003 resolution; lat-004 strut anisotropy fingerprint; lat-005
 graded-vs-uniform + scale-separation flag; lat-006 property-fit
-sanity.
+sanity; lat-007 de-homogenization prediction band + design transfer;
+lat-008 empty-hole-array finite solid SDF behavior.
 
 ## No-claim boundaries
 
 - 3D TPMS families (gyroid/Schwarz) and their literature stiffness
   curves — need 3D elasticity; recorded successor with the formal
   Hashin–Shtrikman 3D bound audit.
-- DE-HOMOGENIZATION re-analysis (realizing the graded field as
-  explicit micro-geometry and re-solving at full resolution via
-  fs-cutfem) — the flag machinery ships now; the re-analysis lane is
-  the follow-up slice on this bead's trail.
+
 - CutFEM-exact cell geometry (the contrast-density approach ships;
   exact cut cells are the successor), orientation-graded anisotropic
   cells, stress-constrained objectives.

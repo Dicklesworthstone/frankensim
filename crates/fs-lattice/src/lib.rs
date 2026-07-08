@@ -13,9 +13,11 @@
 //! literature), fs-fab manufacturability audits, and FrankenNetworkx
 //! conforming lattice generation are recorded successors.
 
+pub mod dehomog;
 pub mod graded;
 pub mod homogenize;
 
+pub use dehomog::{HoleArray, fullres_compliance};
 pub use graded::{GradedDesign, PropertyFit, graded_compliance_opt};
 pub use homogenize::{EffectiveTensor, Homogenizer, UnitCell, voigt_bound};
 

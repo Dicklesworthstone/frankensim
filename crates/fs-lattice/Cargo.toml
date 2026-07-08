@@ -12,6 +12,7 @@ layer = "L4"
 
 [dependencies]
 fs-cutfem = { path = "../fs-cutfem" }
+fs-ivl = { path = "../fs-ivl" }
 fs-la = { path = "../fs-la" }
 fs-material = { path = "../fs-material" }
 fs-solid = { path = "../fs-solid" }

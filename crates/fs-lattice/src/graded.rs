@@ -144,11 +144,23 @@ fn analyze(
             }
         }
     }
-    // Cantilever: clamp the left edge, unit downward tip load at the
-    // right-bottom node.
+    // Cantilever: clamp the left edge, uniform downward traction on
+    // the right edge with trapezoidal lumping (interior nodes h,
+    // corner nodes h/2) — the SAME load convention the CutFEM
+    // de-homogenization re-analysis applies, so compliances compare.
     let mut load = vec![0.0f64; ndof];
-    let tip = nx; // node (nx, 0)
-    load[2 * tip + 1] = -1.0;
+    let hy = 1.0 / ny as f64;
+    for node in 0..mesh.node_count() {
+        if (mesh.nodes[node][0] - 1.0).abs() < 1e-9 {
+            let y = mesh.nodes[node][1];
+            let w = if y < 1e-9 || (y - 1.0).abs() < 1e-9 {
+                0.5 * hy
+            } else {
+                hy
+            };
+            load[2 * node + 1] = -w;
+        }
+    }
     for node in 0..mesh.node_count() {
         if mesh.nodes[node][0] <= 1e-12 {
             for comp in 0..2 {
@@ -179,9 +191,9 @@ pub fn graded_compliance_opt(
     volfrac: f64,
     iters: u32,
 ) -> GradedDesign {
-    let mesh = Mesh2::quads(2.0, 1.0, nx, ny);
+    let mesh = Mesh2::quads(1.0, 1.0, nx, ny);
     // Reference element stiffness (congruent structured cells).
-    let elem_mesh = Mesh2::quads(2.0 / nx as f64, 1.0 / ny as f64, 1, 1);
+    let elem_mesh = Mesh2::quads(1.0 / nx as f64, 1.0 / ny as f64, 1, 1);
     let hom = Homogenizer::new(cell_res);
     let elem_problem = HyperProblem {
         mesh: &elem_mesh,
