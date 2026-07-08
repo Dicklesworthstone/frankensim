@@ -1,0 +1,22 @@
+[package]
+name = "fs-diffreal-e2e"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Differentiation & reality end-to-end suite (addendum Proposal 11 / Layer-3 conformance): a runnable battery exercising adjoint-vs-finite-difference agreement + missing-VJP blocking, the as-built loop (registration + validated delta + point-sensor 4D-Var), and adjoint-driven tolerance allocation together, with structured per-stage logging."
+
+[package.metadata.frankensim]
+layer = "L6"
+
+[dependencies]
+fs-evidence = { path = "../fs-evidence" }
+fs-asbuilt = { path = "../fs-asbuilt" }
+fs-assimilate = { path = "../fs-assimilate" }
+fs-toleralloc = { path = "../fs-toleralloc" }
+
+[dev-dependencies]
+
+[lints]
+workspace = true
