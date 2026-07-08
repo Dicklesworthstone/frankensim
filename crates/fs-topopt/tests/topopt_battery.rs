@@ -862,7 +862,7 @@ fn stress_descent_reduces_max_stress() {
     );
 }
 
-const STRESS_GOLDEN_HASH: u64 = 0; // recorded on first run, then frozen
+const STRESS_GOLDEN_HASH: u64 = 0xc539_ad97_34d8_1b66; // recorded at mdx2 slice B, frozen
 
 #[test]
 fn stress_golden_hash() {

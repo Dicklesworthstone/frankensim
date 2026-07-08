@@ -76,9 +76,7 @@ pub fn stress_aggregate(
         let rc = rb.clamp(0.0, 1.0);
         p.e_min + (1.0 - p.e_min) * fs_math::det::pow(rc.max(1e-12), p.penal)
     };
-    let relax = |rb: f64| -> f64 {
-        fs_math::det::pow(rb.clamp(0.0, 1.0).max(1e-12), q_relax)
-    };
+    let relax = |rb: f64| -> f64 { fs_math::det::pow(rb.clamp(0.0, 1.0).max(1e-12), q_relax) };
     let tilde: Vec<f64> = rho_bar
         .iter()
         .zip(&vm)
@@ -97,8 +95,7 @@ pub fn stress_aggregate(
     let dpn_dtilde: Vec<f64> = tilde
         .iter()
         .map(|t| {
-            fs_math::det::pow(t.max(1e-30), p_agg - 1.0)
-                * fs_math::det::pow(pnorm, 1.0 - p_agg)
+            fs_math::det::pow(t.max(1e-30), p_agg - 1.0) * fs_math::det::pow(pnorm, 1.0 - p_agg)
                 / nfin
         })
         .collect();
