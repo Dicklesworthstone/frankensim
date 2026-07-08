@@ -5,9 +5,11 @@
 //! upwinded DG convection on the normal-continuous advecting field
 //! (w·n is single-valued on faces — H(div)'s gift to upwinding),
 //! Picard iteration for steady NS, IMEX BDF1 for transients, and the
-//! discrete adjoint of the linearized system. No pressure pin: weak velocity
-//! BCs put boundary fluxes in the test space, so the pressure level
-//! is determined by the formulation itself.
+//! discrete adjoint of the linearized system. Dirichlet velocity BCs
+//! split by component: u·n STRONG (boundary-edge BDM dofs are exactly
+//! the normal moments — identity rows), tangential weak via SIP;
+//! pressure pinned by replacing cell 0's continuity row (implied by
+//! the others plus the prescribed net flux).
 
 use crate::bdm::{CellBasis, cell_basis, eval_basis, tri_quad};
 use crate::trimesh::TriMesh;
@@ -118,6 +120,38 @@ impl<'m> FluxSystem<'m> {
         let nu = params.nu;
         let mut coo = Coo::new(self.n, self.n);
         let mut rhs = vec![0.0f64; self.n];
+        // Constrained rows: boundary-edge normal moments are EXACTLY
+        // the BDM dofs, so u·n = g·n is enforced strongly as identity
+        // rows (every remaining basis function then has v·n ≡ 0 on the
+        // whole boundary by dof duality — the ∮p(v·n) consistency term
+        // vanishes identically). The pressure constant is back in the
+        // null space, so cell 0's continuity row is REPLACED by the
+        // pin p_0 = 0: its div-freeness is implied by the other cells
+        // plus the prescribed net flux, not corrupted by an additive
+        // penalty.
+        let mut con: Vec<Option<f64>> = vec![None; self.n];
+        for (e, edge) in mesh.edges.iter().enumerate() {
+            if edge.tris.1 != usize::MAX {
+                continue;
+            }
+            let (va, vb) = (mesh.verts[edge.verts.0], mesh.verts[edge.verts.1]);
+            let nrm = edge.normal;
+            let mut m0 = 0.0;
+            let mut m1 = 0.0;
+            for (gx, w) in crate::bdm::edge_gauss_pub(va, vb) {
+                let gv = g(gx);
+                let gn = gv[0] * nrm[0] + gv[1] * nrm[1];
+                let sl = ((gx[0] - va[0]) * (vb[0] - va[0])
+                    + (gx[1] - va[1]) * (vb[1] - va[1]))
+                    / (edge.len * edge.len)
+                    - 0.5;
+                m0 += w * gn / edge.len;
+                m1 += w * gn * sl / edge.len;
+            }
+            con[2 * e] = Some(m0);
+            con[2 * e + 1] = Some(m1);
+        }
+        con[self.n_u] = Some(0.0);
         // --- Cell terms: viscous grad:grad, div coupling, load.
         for t in 0..mesh.tris.len() {
             let basis = &self.bases[t];
@@ -133,22 +167,28 @@ impl<'m> FluxSystem<'m> {
                     fi += w * (fv[0] * v[0] + fv[1] * v[1]);
                 }
                 rhs[gi] += fi;
-                for j in 0..6 {
-                    let gj = self.dof(t, j);
-                    let mut visc = 0.0;
-                    for r in 0..2 {
-                        for c in 0..2 {
-                            visc += basis.grad[i][r][c] * basis.grad[j][r][c];
+                if con[gi].is_none() {
+                    for j in 0..6 {
+                        let gj = self.dof(t, j);
+                        let mut visc = 0.0;
+                        for r in 0..2 {
+                            for c in 0..2 {
+                                visc += basis.grad[i][r][c] * basis.grad[j][r][c];
+                            }
                         }
+                        coo.push(gi, gj, nu * area * visc);
                     }
-                    coo.push(gi, gj, nu * area * visc);
                 }
                 // Div coupling: b(u, q) = −∫ q div u; symmetric block.
                 let pdof = self.n_u + t;
-                coo.push(pdof, gi, -basis.div[i] * area);
-                coo.push(gi, pdof, -basis.div[i] * area);
+                if con[pdof].is_none() {
+                    coo.push(pdof, gi, -basis.div[i] * area);
+                }
+                if con[gi].is_none() {
+                    coo.push(gi, pdof, -basis.div[i] * area);
+                }
                 // BDF1 mass: (1/dt)(u, v) and (1/dt)(u_prev, v).
-                if inv_dt > 0.0 {
+                if inv_dt > 0.0 && con[gi].is_none() {
                     for j in 0..6 {
                         let gj = self.dof(t, j);
                         let mut mij = 0.0;
@@ -209,7 +249,9 @@ impl<'m> FluxSystem<'m> {
                                             * (va_[0] * vb_[0] + va_[1] * vb_[1])
                                             * jump_v
                                             * jump_u;
-                                    coo.push(gi, gj, w * val);
+                                    if con[gi].is_none() {
+                                        coo.push(gi, gj, w * val);
+                                    }
                                 }
                             }
                         }
@@ -240,7 +282,9 @@ impl<'m> FluxSystem<'m> {
                             let val = -nu * (gnj[0] * vi[0] + gnj[1] * vi[1])
                                 - nu * (gni[0] * vj[0] + gni[1] * vj[1])
                                 + params.sigma * nu / h * (vi[0] * vj[0] + vi[1] * vj[1]);
-                            coo.push(gi, gj, w * val);
+                            if con[gi].is_none() {
+                                coo.push(gi, gj, w * val);
+                            }
                         }
                         // rhs consistency + penalty with g.
                         let val = -nu * (gni[0] * gval[0] + gni[1] * gval[1])
@@ -252,13 +296,15 @@ impl<'m> FluxSystem<'m> {
         }
         // --- Convection (Picard): −∫(u⊗w):∇v + face upwinding.
         if let Some(wfield) = advect {
-            self.add_convection(&mut coo, &mut rhs, wfield, g);
+            self.add_convection(&mut coo, &mut rhs, wfield, g, &con);
         }
-        // No pressure pin: with fully weak Dirichlet BCs the constant
-        // is NOT in null(B^T) — boundary-edge dofs carry net flux, so
-        // b(v, 1) = -boundary flux of v is nonzero and the saddle is
-        // nonsingular as assembled. (A pin ADDED to the cell-0
-        // continuity row would break exact div-freeness there.)
+        // Constrained rows last: identity diagonal, prescribed value.
+        for (d, c) in con.iter().enumerate() {
+            if let Some(v) = c {
+                coo.push(d, d, 1.0);
+                rhs[d] = *v;
+            }
+        }
         (coo.assemble(), rhs)
     }
 
@@ -269,6 +315,7 @@ impl<'m> FluxSystem<'m> {
         rhs: &mut [f64],
         wfield: &[f64],
         g: &dyn Fn([f64; 2]) -> [f64; 2],
+        con: &[Option<f64>],
     ) {
         let mesh = self.mesh;
         let w_at = |t: usize, x: [f64; 2]| -> [f64; 2] {
@@ -295,7 +342,9 @@ impl<'m> FluxSystem<'m> {
                         // (u ⊗ w) : ∇v = Σ_rc u_r w_c ∂v_r/∂x_c
                         let val = uj[0] * (wv[0] * gv[0][0] + wv[1] * gv[0][1])
                             + uj[1] * (wv[0] * gv[1][0] + wv[1] * gv[1][1]);
-                        coo.push(gi, gj, -wq * val);
+                        if con[gi].is_none() {
+                            coo.push(gi, gj, -wq * val);
+                        }
                     }
                 }
             }
@@ -314,6 +363,9 @@ impl<'m> FluxSystem<'m> {
                     for i in 0..6 {
                         let gi = self.dof(t0, i);
                         let vi = eval_basis(&self.bases[t0], i, gx);
+                        if con[gi].is_some() {
+                            continue;
+                        }
                         if wn >= 0.0 {
                             for j in 0..6 {
                                 let gj = self.dof(t0, j);
@@ -339,11 +391,13 @@ impl<'m> FluxSystem<'m> {
                         for j in 0..6 {
                             let gj = self.dof(up, j);
                             let uj = eval_basis(&self.bases[up], j, gx);
-                            coo.push(
-                                gi,
-                                gj,
-                                wq * wn * (uj[0] * vi[0] + uj[1] * vi[1]) * side_sign[sa],
-                            );
+                            if con[gi].is_none() {
+                                coo.push(
+                                    gi,
+                                    gj,
+                                    wq * wn * (uj[0] * vi[0] + uj[1] * vi[1]) * side_sign[sa],
+                                );
+                            }
                         }
                     }
                 }
