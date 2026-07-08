@@ -46,7 +46,10 @@ impl RobustPipeline {
         let p = &self.params;
         let rho_tilde = self.filter.apply(rho);
         let project = |eta: f64| -> Vec<f64> {
-            rho_tilde.iter().map(|&r| heaviside(r, p.beta, eta)).collect()
+            rho_tilde
+                .iter()
+                .map(|&r| heaviside(r, p.beta, eta))
+                .collect()
         };
         ThreeField {
             eroded: project(p.eta + self.eta_offset),
@@ -90,9 +93,8 @@ impl RobustPipeline {
             .zip(&energies)
             .map(|(&rt, &e)| {
                 let rb = heaviside(rt, p.beta, eta_e).clamp(0.0, 1.0);
-                let dsimp = (1.0 - p.e_min)
-                    * p.penal
-                    * fs_math::det::pow(rb.max(1e-12), p.penal - 1.0);
+                let dsimp =
+                    (1.0 - p.e_min) * p.penal * fs_math::det::pow(rb.max(1e-12), p.penal - 1.0);
                 let dproj = heaviside_derivative(rt, p.beta, eta_e);
                 -e * dsimp * dproj
             })

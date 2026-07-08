@@ -40,6 +40,15 @@ cubical homology), so the optimization stack lives here.
   general path): multiplicative update with move limits, volume
   multiplier by fixed 80-step bisection on the PROJECTED volume —
   fully deterministic, whole runs replay bitwise.
+- `robust::{RobustPipeline, robust_optimality_criteria}` — the
+  erode/dilate three-field formulation: one filter, three projections
+  (η ± δ), POINTWISE-ORDERED realizations (tested); minimize ERODED
+  compliance s.t. volume on the DILATED field whose target is adapted
+  (DAMPED, 0.3 blend) so the NOMINAL design carries the budget — the
+  undamped adaptation measured a period-2 limit cycle on cold starts
+  (kept as a regression probe); reports carry the erosion-retention
+  ratio vol(eroded)/vol(nominal), the measured minimum-length-scale
+  signal.
 
 ## Invariants
 
@@ -62,7 +71,8 @@ Structured panics on solver failures and invalid materials
 Bit-deterministic: fixed bisection schedules, deterministic solves
 throughout; a WHOLE topology-optimization run replays bitwise
 (G5-tested). Golden FNV-64 over pipeline stages, compliance
-gradient, and a short OC run: `0x772a_2f8c_a720_dd64`, recorded on
+gradient, and a short OC run: `0x772a_2f8c_a720_dd64`; robust
+three-field golden `0x519a_41e3_466e_4b7d`. Recorded on
 Apple M4 Pro, verified on Threadripper (x86_64).
 
 ## Cancellation behavior
@@ -81,24 +91,32 @@ None.
 
 ## Conformance tests
 
-`tests/topopt_battery.rs` (5 cases): filter G0 laws (linearity ≤
+`tests/topopt_battery.rs` (8 cases): filter G0 laws (linearity ≤
 1e−9, transpose adjointness ≤ 1e−9, constants preserved); projection
 G0 (exact endpoints, monotone on a 100-point sweep, slope vs FD ≤
 1e−8); FULL-CHAIN sensitivity vs FD at three continuation stages
 (rel ≤ 2e−4 through solve+SIMP+projection+filter); OC cantilever
 (kuhn(3), fixed face + edge load): compliance reduced ≥ 20%, volume
 within 0.03 of the 0.4 target, design range > 0.5 (not gray), and
-the ENTIRE run replaying bitwise; cross-ISA golden hash.
+the ENTIRE run replaying bitwise; three-field pointwise ordering on
+random designs + eroded-compliance sensitivity FD gate (rel ≤ 2e−4);
+robust OC vs the non-robust baseline AUDITED WITH THE SAME
+three-field probe — eroded compliance descends, volumes ordered,
+nominal volume on budget, and erosion retention at least matching
+the baseline (the min-length-scale claim, measured); two cross-ISA
+golden hashes (slice-1 pipeline + robust). Plus
+`tests/probe_robust.rs`: the limit-cycle regression.
 
 ## No-claim boundaries
 
-- Slice 1 scope: compliance + volume on FIXED kuhn meshes. Robust
-  erode/dilate three-field (guaranteed min length scale + medial
-  thickness audit), eigenfrequency objectives (clustered-eigenvalue
+- Slices 1–2 scope: compliance + volume (+ robust three-field) on
+  FIXED kuhn meshes. Eigenfrequency objectives (clustered-eigenvalue
   handling), stress p-norm aggregation (singularity-trap treatment),
-  and the CutFEM-octree marquee (zero remeshing + DWR adaptivity +
-  literature-benchmark envelopes on MBB/L-bracket class fixtures)
-  are the bead's later slices / recorded splits.
+  the medial-axis thickness oracle (the geometry-layer audit beyond
+  the erosion-retention signal), and the CutFEM-octree marquee (zero
+  remeshing + DWR adaptivity + literature-benchmark envelopes on
+  MBB/L-bracket class fixtures) are the bead's later slices /
+  recorded splits.
 - OC is the compliance/volume driver; MMA is not implemented
   (fs-ascent AL is the general constrained path — documented
   choice).

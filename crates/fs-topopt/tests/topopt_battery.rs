@@ -327,7 +327,9 @@ fn robust_three_field_ordering_and_sensitivity() {
         let mut el2 = DensityElasticity::new(&complex, &positions, 1.0, 0.3, &|p: [f64; 3]| {
             p[0].to_bits() == 0.0f64.to_bits()
         });
-        pipeline.eroded_compliance_and_gradient(&mut el2, rho, &force).0
+        pipeline
+            .eroded_compliance_and_gradient(&mut el2, rho, &force)
+            .0
     };
     let dirs: Vec<Vec<f64>> = (0..2).map(|k| rand_vec(nc, 70 + k)).collect();
     let verdict = verify_gradient(&j, &rho0, &grad, &dirs, 1e-6, 2e-4);
@@ -369,7 +371,16 @@ fn robust_oc_improves_erosion_retention() {
     let mut el = DensityElasticity::new(&complex, &positions, 1.0, 0.3, &|p: [f64; 3]| {
         p[0].to_bits() == 0.0f64.to_bits()
     });
-    let base = optimality_criteria(&nominal_pipeline, &mut el, &force, &rho0, &vol, vol_frac, 0.2, 25);
+    let base = optimality_criteria(
+        &nominal_pipeline,
+        &mut el,
+        &force,
+        &rho0,
+        &vol,
+        vol_frac,
+        0.2,
+        25,
+    );
     let probe = RobustPipeline {
         filter: DensityFilter::new(&complex, &positions, 0.15),
         params,
@@ -420,7 +431,7 @@ fn robust_oc_improves_erosion_retention() {
     );
 }
 
-const ROBUST_GOLDEN_HASH: u64 = 0; // recorded on first run, then frozen
+const ROBUST_GOLDEN_HASH: u64 = 0x519a_41e3_466e_4b7d; // recorded at 7tv.11 slice 2, frozen
 
 #[test]
 fn robust_golden_hash() {
