@@ -49,7 +49,12 @@ fn trace_kill_run() {
     );
     if let PlanOutcome::Discharged { ops, cost, .. } = out {
         for o in &ops {
-            println!("op={} cost={} bound={:.3e}", o.op.name(), o.cost, o.bound_after);
+            println!(
+                "op={} cost={} bound={:.3e}",
+                o.op.name(),
+                o.cost,
+                o.bound_after
+            );
         }
         println!("total={cost}");
     }

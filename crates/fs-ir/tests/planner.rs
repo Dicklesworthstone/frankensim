@@ -48,7 +48,9 @@ fn pl_001_discharges_within_budget_contract_held() {
     let tol = 0.05;
     let out = plan(&family, 1.0, tol, 2000.0, &RUNGS, &mut cache, &mut costs);
     match &out {
-        PlanOutcome::Discharged { bound, ops, cost, .. } => {
+        PlanOutcome::Discharged {
+            bound, ops, cost, ..
+        } => {
             // THE CONTRACT: a discharged answer never violates the
             // certified accuracy (property, not sample).
             assert!(*bound <= tol, "certified: {bound} <= {tol}");
@@ -156,13 +158,22 @@ fn pl_004_refusal_boundary_and_g5_determinism() {
             ops,
             ..
         } => {
-            assert!(*best_bound > tol, "honest: the best bound did not reach tol");
-            assert!(best_bound.is_finite(), "a certified interval travels with the refusal");
+            assert!(
+                *best_bound > tol,
+                "honest: the best bound did not reach tol"
+            );
+            assert!(
+                best_bound.is_finite(),
+                "a certified interval travels with the refusal"
+            );
             assert!(
                 *cost <= budget + 100.0,
                 "never loops past the budget: {cost} vs {budget}"
             );
-            assert!(reason.contains("refusal"), "hands off to refusal semantics: {reason}");
+            assert!(
+                reason.contains("refusal"),
+                "hands off to refusal semantics: {reason}"
+            );
             assert!(!ops.is_empty());
         }
         PlanOutcome::Discharged { .. } => panic!("80 cells cannot certify 1e-4"),

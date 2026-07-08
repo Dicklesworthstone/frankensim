@@ -25,7 +25,7 @@ fn mass_is_conserved() {
     let m0 = lbm.total_mass();
     lbm.run(200);
     assert!((lbm.total_mass() - m0).abs() < 1e-9, "mass drifted");
-    assert!((m0 - (6 * 12) as f64).abs() < 1e-9); // unit density
+    assert!((m0 - f64::from(6 * 12)).abs() < 1e-9); // unit density
 }
 
 #[test]
