@@ -67,6 +67,30 @@ globalized Newton loop.
   the buckling mode so the corrector lands on the bifurcated branch
   (a state-only perturbation relaxes back to the fundamental branch;
   a basin-scale jump inverts elements — both measured failure modes).
+- `rod` (bead tfz.14): geometrically exact Cosserat rods — nodal
+  positions + unit quaternions updated MULTIPLICATIVELY through
+  fs-time's exponential map; strains Γ = Rᵀr′ − e₁ and
+  κ = 2log(qᵢ⁻¹qᵢ₊₁)/L₀ from RELATIVE quantities (rigid motions give
+  exactly zero strain — energy-invariance battery). Statics: FD
+  residual/tangent Newton with residual backtracking and load
+  stepping, fixture-gated; fixture slenderness matters — a
+  penalty-stiff EA puts a quadratic spurious-stretch wall around
+  every Newton iterate (measured, documented in the battery).
+  Analytic tangents and SE(3) DYNAMICS under fs-time symplectic
+  integrators are recorded successor scope.
+- `fiber` (bead tfz.14): fiber sections over fs-material `Uniaxial`
+  cards (Menegotto–Pinto steel; Mander concrete with the
+  compression-positive convention flipped at the section boundary);
+  `respond`/`commit` split (pure response vs state commitment);
+  `update_sections_batched` — the §15.2 hot loop through fs-la's
+  batched Cholesky with a per-outlier direct fallback, throughput
+  measured and ledgered; `rc_section` fixture (confined core +
+  unconfined cover + steel layers).
+- `beamcol` (bead tfz.14): force-based (Spacone) cantilever element —
+  EXACT equilibrium interpolation, five-point Gauss–Lobatto section
+  integration (a point AT the hinge), per-section Newton with
+  residual backtracking, virtual-work tip deflection; pushover and
+  cyclic histories with committed, cloneable state (G4).
 - `koiter` [F], feature `koiter-asymptotics` (off by default): FD
   energy expansion along the buckling mode at the critical state →
   a/b coefficients and `Bifurcation` classification, with the
@@ -150,6 +174,25 @@ fs-exec driver (the L3 discipline; fs-feec/fs-cutfem precedent).
 post-buckling module and its battery, per the Ambition-Tag gating
 rule. No other flags.
 
+### Structural invariants (tfz.14)
+
+12. Rod objectivity: superposed rigid motion leaves strain energy
+    invariant to 1e-12 (str-001).
+13. Elastica: large-deflection tip matches an in-test SHOOTING oracle
+    (RK4 + bisection on the elastica BVP) within 0.015·L at
+    PL²/EI = 2 (str-002).
+14. Helical family: pure bending gives the EI/M circle (2%), pure
+    torsion stays straight (1e-6) at rate M/GJ (2%), combined moments
+    give the constant helix strain state (3%) — str-003.
+15. RC hysteresis: per-cycle dissipation positive and growing with
+    amplitude, peak moment inside the hand capacity band, section
+    states bitwise-deterministic across runs (str-004).
+16. Batched section updates are scalar-consistent to 1e-8 with
+    ledgered throughput (str-005).
+17. Force-based pushover softens past yield (secant < 0.5× initial),
+    dissipates under reversal, and resumes from a checkpoint
+    BITWISE (G4) — str-006.
+
 ## Conformance tests
 
 `tests/battery.rs`: sol-001 patch tests (body-fitted max nodal error
@@ -173,6 +216,12 @@ smooth with derivative matching FD to 1e-6, conservative).
 `tests/koiter.rs` (feature-gated): stab-006 symmetric-stable
 classification + imperfect-geometry sampled oracle.
 
+`tests/structural.rs` (bead tfz.14): str-001 objectivity; str-002
+elastica vs shooting oracle; str-003 circle/twist/helix; str-004 RC
+moment-curvature hysteresis + determinism; str-005 batched
+consistency + throughput ledger; str-006 force-based pushover,
+reversal dissipation, G4 bitwise resume.
+
 ## No-claim boundaries
 
 - TDNNS-proper / weakly-imposed-symmetry FEEC stress elements: awaits
@@ -189,6 +238,12 @@ classification + imperfect-geometry sampled oracle.
 - Contact, plasticity flow (fs-material's plastic module wires in a
   successor), dynamics/time integration.
 - Ogden energies (fs-material's recorded no-claim propagates).
+- Rod SE(3) DYNAMICS (fs-time symplectic wiring) and analytic rod
+  tangents; 3D frames/lattices assembled from rods (topo-truss's
+  consumer pass); J2 continuum element wiring (the fs-material card
+  ships with algorithmic moduli; the element battery is successor
+  scope); published El Centro fiber-model plot digitization (the
+  shipped envelope is the capacity band + self-consistency).
 - fs-scenario dimensioned-value resolution (units plumbing stays with
   the scenario consumer; kind/physics validation ships here).
 - Production-scale pencil solves (shift-invert/sparse factorizations
