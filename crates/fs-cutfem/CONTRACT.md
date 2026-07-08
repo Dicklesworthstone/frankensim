@@ -21,7 +21,9 @@ and estimate-driven h-refinement with hanging-node constraints.
   at `max_level` (dyadic, exactly representable). `refine_where` is
   the adaptivity hook (dwr-adaptivity drives it); the specialized
   `refine_toward_interface` establishes the uniform interface band by
-  refining every cell whose SELF-INFLATED box encloses zero.
+  refining every cell whose SELF-INFLATED box encloses zero;
+  `refined_once` is the every-leaf-split copy fs-dwr's enriched
+  adjoint solves on (bead tfz.23 addendum).
 - `cut_cell_rules` → `CutRules`: bulk points (weights sum to inside
   area) and interface points (weights sum to interface length, with
   outward unit normals) for one cut cell; `depth` is the error-control
