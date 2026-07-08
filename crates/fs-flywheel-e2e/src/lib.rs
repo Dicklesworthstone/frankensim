@@ -33,8 +33,10 @@ use fs_qty::{Dims, QtyAny};
 use fs_recompute::{NodeRecord, ParamValue, SkipDecision, Store};
 use fs_spececo::{Decision, ProposerTelemetry, SolveRecord, decide};
 
-/// Which proposals are switched ON for a run.
+/// Which proposals are switched ON for a run (a feature-toggle matrix
+/// by design: the harness measures every on/off combination).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct LoopConfig {
     /// Proposal 9: certified speculation (warm starts).
     pub speculation: bool,
@@ -303,8 +305,7 @@ pub fn run_loop(config: &LoopConfig, iterations: usize, seed: u64) -> LoopReport
                 let _ = store.put(record, b"artifact");
             }
             events.push(format!(
-                "iter={iter} stage=solve agent={agent} cost={:.2}",
-                cost
+                "iter={iter} stage=solve agent={agent} cost={cost:.2}"
             ));
         }
 
