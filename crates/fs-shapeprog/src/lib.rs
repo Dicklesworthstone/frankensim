@@ -303,7 +303,11 @@ fn rewrite_pass(g: &Geom, tol: f64, log: &mut Vec<Rewrite>) -> Geom {
         },
         leaf => leaf.clone(),
     };
-    // apply a root rule.
+    apply_root_rule(g, tol, log)
+}
+
+/// Apply a single root-level rewrite rule (children already simplified).
+fn apply_root_rule(g: Geom, tol: f64, log: &mut Vec<Rewrite>) -> Geom {
     match g {
         // offset composition (EXACT for signed distance fields).
         Geom::Offset { child, radius: r2 } => {

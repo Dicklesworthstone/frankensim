@@ -84,6 +84,7 @@ members = [
     "crates/fs-voi",
     "crates/fs-fab",
     "crates/fs-tropical",
+    "crates/fs-shapeprog",
     "crates/fs-cutfem",
     "crates/fs-solid",
     "crates/fs-dwr",
