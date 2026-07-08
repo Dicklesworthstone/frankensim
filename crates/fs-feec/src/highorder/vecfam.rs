@@ -4,12 +4,13 @@
 //! simplicial P_rΛᵏ tree whose H¹ member lives in `simplex.rs`.
 //!
 //! NO hand-derived shape functions (the classic FEEC bug farm): per
-//! element the space is spanned by Koszul spanning sets in centered/
-//! scaled Cartesian monomials — RT_r = (P_{r−1})³ ⊕ x·H̃_{r−1} (an
-//! EXACT direct sum: square dof-Vandermonde, LU) and
-//! N_r = (P_{r−1})³ + {x × x^α eᵢ} (overspans by r(r−1)/2: the basis
-//! is the least-norm solution c = Aᵀ(AAᵀ)⁻¹e via Cholesky) — and the
-//! basis is whatever makes the classical moment dofs Kronecker.
+//! element the space is spanned by Koszul bases in centered/scaled
+//! Cartesian monomials — RT_r = (P_{r−1})³ ⊕ ξ·H̃_{r−1} and
+//! N_r = (P_{r−1})³ ⊕ {ξ × ξ^α eᵢ over the independent subset α₀ = 0
+//! when i = 0} — both EXACT direct sums, so every element solves one
+//! SQUARE dof-Vandermonde by pivoted LU (normal equations were tried
+//! and cost √ε in the traces), and the basis is whatever makes the
+//! classical moment dofs Kronecker.
 //!
 //! Orientation is the sorted-GLOBAL convention extended to FRAMES:
 //! edge dofs integrate against Legendre P_k(s) with s signed toward
@@ -75,8 +76,8 @@ impl VecPoly {
             let p = xi[0].powi(i32::try_from(a).expect("small"))
                 * xi[1].powi(i32::try_from(b).expect("small"))
                 * xi[2].powi(i32::try_from(c).expect("small"));
-            for k in 0..3 {
-                v[k] = self.comp[k][m].mul_add(p, v[k]);
+            for (k, vk) in v.iter_mut().enumerate() {
+                *vk = self.comp[k][m].mul_add(p, *vk);
             }
         }
         v
@@ -519,7 +520,7 @@ fn spanning_set(r: usize, family: Family) -> (Vec<VecPoly>, Vec<[usize; 3]>) {
     let mut span = Vec::new();
     // (P_{r−1})³.
     for (m, &[a, b, c]) in monos.iter().enumerate() {
-        if a + b + c <= r - 1 {
+        if a + b + c < r {
             for k in 0..3 {
                 let mut vp = VecPoly::zero(r);
                 vp.comp[k][m] = 1.0;
@@ -598,7 +599,7 @@ pub fn build_element(
     r: usize,
     family: Family,
 ) -> ElementBasis {
-    assert!(r >= 1 && r <= MAX_R, "vecfam supports r = 1..={MAX_R}");
+    assert!((1..=MAX_R).contains(&r), "vecfam supports r = 1..={MAX_R}");
     let tet = complex.tets[t];
     let corners: [[f64; 3]; 4] = core::array::from_fn(|k| positions[tet[k] as usize]);
     let chart = Chart::of(&corners);
@@ -1011,8 +1012,8 @@ pub fn grad_matrix(h1: &SimplexSpace<'_>, ned: &VecSpace<'_>, positions: &[[f64;
                     let dl = lf.d_lambda(lam, h1.r);
                     let mut gvec = [0.0f64; 3];
                     for (a, da) in dl.iter().enumerate() {
-                        for c in 0..3 {
-                            gvec[c] = da.mul_add(geo.grads[t][a][c], gvec[c]);
+                        for (c, gc) in gvec.iter_mut().enumerate() {
+                            *gc = da.mul_add(geo.grads[t][a][c], *gc);
                         }
                     }
                     gvec
