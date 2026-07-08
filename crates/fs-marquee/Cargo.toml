@@ -1,0 +1,35 @@
+[package]
+name = "fs-marquee"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "The P2 marquee demo: shape/topology optimization on a raw SDF with no mesh in the loop — CutFEM physics, self-adjoint shape gradients, a composed per-iteration error certificate, sphere-traced renders, and a replayable golden ledger."
+
+[package.metadata.frankensim]
+layer = "L6"
+
+[dependencies]
+fs-cutfem = { path = "../fs-cutfem" }
+fs-dwr = { path = "../fs-dwr" }
+fs-evidence = { path = "../fs-evidence" }
+fs-ivl = { path = "../fs-ivl" }
+fs-ledger = { path = "../fs-ledger" }
+
+[dev-dependencies]
+asupersync = { path = "../../../asupersync" }
+fs-adjoint = { path = "../fs-adjoint", features = ["ledger-transpose"] }
+fs-alloc = { path = "../fs-alloc" }
+fs-exec = { path = "../fs-exec" }
+fs-geom = { path = "../fs-geom" }
+fs-render = { path = "../fs-render", features = ["chart-backends"] }
+fs-rep-frep = { path = "../fs-rep-frep" }
+
+[features]
+# [F]-gated per the Ambition-Tag rule: the marquee study ships disabled
+# until its golden ledger joins nightly CI.
+marquee = []
+
+[lints]
+workspace = true

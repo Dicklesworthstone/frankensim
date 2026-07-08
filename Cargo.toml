@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/fs-dd",
     "crates/fs-flywheel-e2e",
+    "crates/fs-marquee",
     "crates/fs-qty",
     "crates/fs-obs",
     "crates/fs-opt",
