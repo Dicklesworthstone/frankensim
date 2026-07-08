@@ -1,0 +1,18 @@
+[package]
+name = "fs-symmetry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Symmetry harvesting (addendum Proposal 13): detect cyclic symmetry with a certified asymmetry residual, block-diagonalize circulant solves by isotypic (DFT) projection for a k-fold speedup, and turn approximate symmetry into a symmetrized solve plus a certified perturbation bound."
+
+[package.metadata.frankensim]
+layer = "L1"
+
+[dependencies]
+
+[dev-dependencies]
+
+[lints]
+workspace = true
