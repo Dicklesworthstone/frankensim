@@ -1343,6 +1343,8 @@ dependencies = [
  "fs-alloc",
  "fs-exec",
  "fs-geom",
+ "fs-lbm",
+ "fs-rand",
  "fs-rep-frep",
  "fs-rep-nurbs",
 ]

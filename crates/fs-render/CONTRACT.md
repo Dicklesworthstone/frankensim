@@ -32,6 +32,16 @@ Layer L5 (LUMEN). No dependencies — pure Rust.
   `TriMesh` is Möller–Trumbore over a deterministic median-split BVH.
   `trace_scene` mixes all three backend kinds by closest hit.
 
+- `volumes` module (bead qfx.3, feature `volumes`): [`VolumeGrid`]
+  BORROWS its density buffer (zero-copy: live simulation fields render
+  in place), [`MajorantGrid`] per-block maxima, Woodcock delta
+  tracking (`woodcock_transmittance`, unbiased for ANY bound ≥ max σ;
+  the tile stage thins field lookups), the collision emission
+  estimator with Planck spectral weights, HG/Rayleigh phase sampling
+  (Rayleigh via exact Cardano inversion), Beer–Lambert fast path, and
+  a deterministic per-pixel-stream orthographic transmittance
+  renderer.
+
 ## Invariants
 
 - FURNACE: `furnace_radiance` returns exactly `albedo·incident` (energy
@@ -42,6 +52,18 @@ Layer L5 (LUMEN). No dependencies — pure Rust.
 - Hero-wavelength integration is exact on a constant spectrum and accurate on a
   ramp; `cosine_sample_hemisphere` returns unit vectors in the upper hemisphere.
 - Everything is deterministic (low-discrepancy sequences, no RNG here).
+
+- Volumes (vol-001..006): homogeneous slabs match exp(−σL) within
+  3σ_stat; heterogeneous means are invariant under a 3× LOOSE
+  majorant (48.8k vs 229.3k null collisions ledgered — looseness
+  costs work, never bias) and match a deterministic fine-quadrature
+  reference; HG E[cosθ] = g (a sign error in the inversion was CAUGHT
+  by this gate: −0.5995 measured before the fix) and Rayleigh
+  E[cos²θ] = 2/5; spectral emission matches B_λ(T)(1 − e^(−σL)) to
+  0.5% at three hero wavelengths; the live LBM dam-break binding
+  renders bitwise-replayably through a borrowed buffer with the free
+  surface visible (0.917 vs 0.167 transmittance); per-pixel streams
+  make any pixel recomputable standalone to bitwise equality.
 
 ## Error model
 
@@ -63,6 +85,9 @@ None. `#![deny(unsafe_code)]` via the workspace lint.
 ## Feature flags
 
 None (the `frontier-polarization` Mueller-calculus path is staged).
+
+`volumes` gates the volumetric media stack (fs-rand dependency) per
+the same Ambition-Tag rule as `chart-backends`.
 
 ## Conformance tests
 
@@ -98,3 +123,20 @@ determinism.
   claims this module makes.
 - Trimmed-NURBS awareness rides fs-rep-nurbs trim classification; the
   intersection here treats the full patch (no-claim on trimmed holes).
+
+## No-claim boundaries (volumes)
+
+- FrankenVDB tile-maxima majorants: no fvdb crate exists in-workspace;
+  [`MajorantGrid`] builds per-block maxima from dense grids, and the
+  per-tile-rate DDA traversal (rather than lookup thinning under a
+  global bound) is the recorded successor alongside the FVDB wiring.
+- Progressive live tiles with ledger artifact pinning (frame-consistent
+  snapshots of evolving fields) — staged with the vessel flagship's
+  render lane; the smoke tier renders a paused simulation's buffer.
+- Refractive free-surface rendering (fill-fraction interface
+  reconstruction) and MIS integration of phase functions into the full
+  tracer — successors; the phase samplers and their moment gates ship
+  now.
+- The zero-copy claim at smoke tier is BORROW SEMANTICS (the API takes
+  `&[f64]`; the battery binds a live `FreeSurface` mass buffer); the
+  FrankenNumpy membrane view protocol is the fuller deliverable.

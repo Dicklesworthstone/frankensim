@@ -23,6 +23,9 @@ use core::f64::consts::PI;
 #[cfg(feature = "chart-backends")]
 pub mod charts;
 
+#[cfg(feature = "volumes")]
+pub mod volumes;
+
 /// The van der Corput / Halton radical inverse of `i` in the given `base`
 /// (a deterministic low-discrepancy coordinate in `[0, 1)`).
 #[must_use]

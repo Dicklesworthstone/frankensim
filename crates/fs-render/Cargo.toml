@@ -13,17 +13,26 @@ layer = "L5"
 [dependencies]
 fs-exec = { path = "../fs-exec", optional = true }
 fs-geom = { path = "../fs-geom", optional = true }
+fs-rand = { path = "../fs-rand", optional = true }
 fs-rep-nurbs = { path = "../fs-rep-nurbs", optional = true }
 
 [dev-dependencies]
 asupersync = { path = "../../../asupersync" }
 fs-alloc = { path = "../fs-alloc" }
+fs-lbm = { path = "../fs-lbm" }
 fs-rep-frep = { path = "../fs-rep-frep" }
 
 [features]
 # [F]-gated per the Ambition-Tag rule: chart backends ship disabled
 # until the tunneling audit + ray-rate gates are green in perf-CI.
 chart-backends = ["dep:fs-exec", "dep:fs-geom", "dep:fs-rep-nurbs"]
+# [F]-gated per the Ambition-Tag rule: volumetric media ship disabled
+# until the live-field progressive lane lands in perf-CI.
+volumes = ["dep:fs-rand"]
+
+[[test]]
+name = "volumes_battery"
+required-features = ["volumes"]
 
 [lints]
 workspace = true
