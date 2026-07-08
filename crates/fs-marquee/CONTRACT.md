@@ -4,45 +4,56 @@
 
 Layer: L6 (HELM/integration). `fs-marquee` names the P2 marquee study lane:
 raw SDF geometry through CutFEM physics, DWR evidence, ledger records, and
-renderable artifacts. The crate is an admission/status shell only; it keeps the
-workspace member valid and the frontier feature gate explicit while the actual
-runner remains outside the shipped default path.
+renderable artifacts. The default build remains an admission/status shell. With
+the `marquee` feature enabled, the crate exposes a smoke-tier study runner for
+the raw-SDF/CutFEM/DWR slice; the full-resolution nightly golden lane remains a
+no-claim boundary.
 
 ## Public types and semantics
 
 - `MarqueeStatus`: status of the lane. `Disabled` means the `marquee` feature
-  is off. `FeatureEnabledNoRunner` means the feature flag is enabled but the
-  crate still exposes only the status surface.
+  is off. `SmokeRunnerAvailable` means the feature flag is enabled and the
+  smoke-tier runner API is available.
 - `status()`: deterministic status query derived only from Cargo feature
   configuration.
 - `scope_summary()`: static diagnostic text for agents, ledgers, and reports.
 - `VERSION`: crate version for provenance stamping.
+- With `marquee`: `study::{PlateWithHoles, StudyConfig, StudyReport,
+  IterRecord, run_study}`. The runner performs a deterministic projected
+  radius optimization over circular cooling holes, records per-iteration
+  compliance/certificate fields, and returns a replay hash for the smoke trace.
 
-No function in this crate launches simulation, optimization, rendering, ledger
-mutation, or filesystem I/O.
+The default build exposes no simulation entrypoint. The feature-gated smoke
+runner performs in-process CutFEM solves and does not mutate ledgers or the
+filesystem.
 
 ## Invariants
 
 1. The default build cannot accidentally execute a marquee study.
-2. Enabling the `marquee` feature changes the status value only; it does not
-   promote frontier functionality into the default path.
-3. The crate is deterministic and side-effect free.
+2. Enabling the `marquee` feature is required before the smoke runner is
+   available.
+3. Runner inputs are admitted before CutFEM work starts: at least one hole,
+   matching center/radius lengths, finite unit-plate centers, positive finite
+   radii, finite area target in `(0, 1)`, nonnegative finite step size, and
+   finite positive radius bounds.
+4. The exposed runner is deterministic for a fixed source tree and machine.
 
 ## Error model
 
-No fallible operations are exposed. Invalid or unavailable runner behavior is
-represented by `MarqueeStatus`, not by panics or silent work.
+Default status queries are infallible. With `marquee`, invalid study inputs
+panic during admission before solver work starts. Valid study runs return
+`fs_cutfem::CutFemError` for CutFEM build/solve failures.
 
 ## Determinism class
 
-D0 for the exposed API: all outputs are compile-time constants or Cargo-feature
-derived constants.
+D0 for the default status API. The smoke runner is deterministic for fixed
+inputs and code, but it is not yet a cross-ISA golden-proofed lane.
 
 ## Cancellation behavior
 
-No long-running work exists in this crate. Future runners must execute under the
-project cancellation discipline and document their bounded polling points before
-this no-claim boundary can be lifted.
+No long-running work exists in the default build. The feature-gated smoke
+runner is synchronous and currently has no explicit `Cx` cancellation polling;
+production runner cancellation remains a no-claim boundary.
 
 ## Unsafe boundary
 
@@ -50,19 +61,21 @@ No unsafe code.
 
 ## Feature flags
 
-- `marquee`: frontier gate for the future end-to-end study. In the current
-  crate it only changes `status()` from `Disabled` to `FeatureEnabledNoRunner`.
+- `marquee`: frontier gate for the smoke-tier raw-SDF/CutFEM/DWR study runner.
+  The default build remains status-only.
 
 ## Conformance tests
 
 Unit tests check version stamping, feature-derived status, and the explicit
-no-runner scope text.
+nightly-golden no-claim boundary. With `marquee`, tests also check that invalid
+runner inputs are rejected before solver work starts.
 
 ## No-claim boundaries
 
-- No raw-SDF-to-CutFEM optimization runner is shipped here.
-- No DWR certificate composition is shipped here.
 - No sphere-traced render output is shipped here.
 - No replayable golden ledger is shipped here.
-- No performance, convergence, physical-validity, or rendering-quality claims
-  attach to this crate until the runner and its Gauntlet evidence land.
+- No full-resolution/nightly golden study lane is shipped here.
+- No filesystem/ledger mutation is performed by the smoke runner.
+- No performance, convergence beyond the smoke tests, physical-validity beyond
+  the estimated DWR/algebraic fields, or rendering-quality claims attach to
+  this crate until the full runner and its Gauntlet evidence land.
