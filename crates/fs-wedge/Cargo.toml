@@ -1,0 +1,18 @@
+[package]
+name = "fs-wedge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Go-to-market wedge selection as data (addendum Proposal 7): the conjugate-heat-transfer beachhead scored on four criteria, the named second/third verticals with their proposal-exercise mapping, and the cycle-time baseline that makes the >=3x kill criterion measurable."
+
+[package.metadata.frankensim]
+layer = "UTIL"
+
+[dependencies]
+
+[dev-dependencies]
+
+[lints]
+workspace = true
