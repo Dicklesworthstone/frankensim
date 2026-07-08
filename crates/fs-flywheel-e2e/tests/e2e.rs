@@ -154,7 +154,11 @@ fn fw_004_g4_cancellation_storm_mid_loop() {
     // And a fresh full run after the storms is untouched (no leaked
     // state between runs — every run owns its stores).
     let again = run_loop(&LoopConfig::composed(), 12, 55);
-    assert_eq!(full.trace_hash(), again.trace_hash(), "no cross-run residue");
+    assert_eq!(
+        full.trace_hash(),
+        again.trace_hash(),
+        "no cross-run residue"
+    );
     verdict(
         "fw-004",
         "5 cancel points: every partial trace is a clean prefix; re-runs reproduce the \
@@ -166,7 +170,11 @@ fn fw_004_g4_cancellation_storm_mid_loop() {
 fn fw_005_telemetry_completeness() {
     let report = run_loop(&LoopConfig::composed(), 12, 7);
     // The whole flywheel's telemetry in one trace: every dial moved.
-    assert!(report.accept_rate > 0.3, "accept rate: {}", report.accept_rate);
+    assert!(
+        report.accept_rate > 0.3,
+        "accept rate: {}",
+        report.accept_rate
+    );
     assert!(report.skips > 0, "recompute skips: {}", report.skips);
     assert!(report.merges.0 > 0, "resolved merges: {:?}", report.merges);
     assert!(

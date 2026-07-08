@@ -212,19 +212,22 @@ pub fn run_loop(config: &LoopConfig, iterations: usize, seed: u64) -> LoopReport
             )
         };
         if config.tombstones {
-            if let ExplorationVerdict::Blocked { .. } =
-                tombstones.pre_exploration_check(&candidate)
+            if let ExplorationVerdict::Blocked { .. } = tombstones.pre_exploration_check(&candidate)
             {
                 blocks += 1;
                 events.push(format!("iter={iter} stage=tombstone verdict=blocked"));
                 continue; // the whole candidate's cost is saved
             }
-            events.push(format!("iter={iter} stage=tombstone verdict=clear v={velocity:.3}"));
+            events.push(format!(
+                "iter={iter} stage=tombstone verdict=clear v={velocity:.3}"
+            ));
         } else if revisit {
             // Without the gate the dead candidate is fully re-solved by
             // BOTH agents (and then re-discovered dead).
             total_cost += 2.0 * ops_per_iter as f64;
-            events.push(format!("iter={iter} stage=dead-resolve cost={ops_per_iter}"));
+            events.push(format!(
+                "iter={iter} stage=dead-resolve cost={ops_per_iter}"
+            ));
             continue;
         }
 
@@ -342,9 +345,8 @@ pub fn run_loop(config: &LoopConfig, iterations: usize, seed: u64) -> LoopReport
                 _ => {
                     merges_conflict += 1;
                     // Conflict: serialize + redo the cheaper branch.
-                    total_cost += branch_costs[0]
-                        + branch_costs[1]
-                        + branch_costs[0].min(branch_costs[1]);
+                    total_cost +=
+                        branch_costs[0] + branch_costs[1] + branch_costs[0].min(branch_costs[1]);
                     events.push(format!("iter={iter} stage=merge verdict=conflict"));
                 }
             }
