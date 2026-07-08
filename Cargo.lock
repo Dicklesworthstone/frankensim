@@ -918,6 +918,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-diffreal-e2e"
+version = "0.0.1"
+dependencies = [
+ "fs-asbuilt",
+ "fs-assimilate",
+ "fs-evidence",
+ "fs-toleralloc",
+]
+
+[[package]]
 name = "fs-dimine"
 version = "0.0.1"
 dependencies = [
@@ -1480,6 +1490,16 @@ dependencies = [
  "fs-rep-mesh",
  "fs-solver",
  "fs-sparse",
+]
+
+[[package]]
+name = "fs-uq"
+version = "0.0.1"
+dependencies = [
+ "fs-bo",
+ "fs-la",
+ "fs-math",
+ "fs-rand",
 ]
 
 [[package]]

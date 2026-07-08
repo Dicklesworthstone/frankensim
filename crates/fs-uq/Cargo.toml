@@ -1,0 +1,20 @@
+[package]
+name = "fs-uq"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Uncertainty quantification: Karhunen-Loeve random fields with captured-variance evidence, polynomial chaos by regression, QMC propagation, and multilevel Monte Carlo with audited telescoping."
+
+[package.metadata.frankensim]
+layer = "L4"
+
+[dependencies]
+fs-bo = { path = "../fs-bo" }
+fs-la = { path = "../fs-la" }
+fs-math = { path = "../fs-math" }
+fs-rand = { path = "../fs-rand" }
+
+[lints]
+workspace = true
