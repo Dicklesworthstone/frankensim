@@ -261,12 +261,12 @@ fn cvar_matches_gaussian_closed_form() {
 fn cvar_handles_ties_in_linear_tail_pass() {
     let losses = [0.0, 0.0, 10.0, 10.0];
     let (cvar, alpha) = cvar_rockafellar_uryasev(&losses, 0.5);
-    assert_eq!(alpha, 0.0);
+    assert_eq!(alpha.to_bits(), 0.0f64.to_bits());
     assert!((cvar - 10.0).abs() < 1e-12, "{cvar}");
     log("cvar-ties", "pass", "duplicate order statistics handled");
 }
 
-const GOLDEN_HASH: u64 = 0xaf70_6167_593f_51cc; // recorded at 7tv.16 slice 1, frozen
+const GOLDEN_HASH: u64 = 0x606f_35d4_bfb8_822a; // recorded after linear CVaR tail pass
 
 #[test]
 fn moo_golden_hash() {
