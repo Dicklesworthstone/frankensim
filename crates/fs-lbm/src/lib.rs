@@ -17,11 +17,13 @@ pub use fs_evidence::Color;
 
 pub mod core2;
 pub mod freesurface;
+pub mod refine;
 pub mod rheology;
 pub mod thermal;
 
 pub use core2::{Cell, Grid};
 pub use freesurface::{ContactModel, FreeSurface};
+pub use refine::RefinedChannel;
 pub use rheology::Rheology;
 pub use thermal::ThermalLbm;
 

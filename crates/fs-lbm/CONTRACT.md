@@ -101,6 +101,16 @@ wall-temperature queries, invalid-parameter rejection, free-surface mass-ledger
 conservation, qualitative dam-break front advance, rotation equivariance,
 contact-model bracketing, and qualitative jet fragmentation.
 
+`tests/extensions.rs` (tfz.19): lbm-101 power-law/Carreau profiles vs
+analytic (0.12% with τ floor+cap ledger); lbm-102 Rayleigh–Bénard onset
+bracket (decay Ra=1200 / growth Ra=2500, Nu>1); lbm-104 STRICT free-
+surface mass ledger (5e-14 over 600 dam-break steps, conversions
+counted); lbm-105 dam-break front envelope (coarse honesty band);
+lbm-106 G3 rotation equivariance (3e-14); lbm-107 contact-model
+bracket band + Plateau–Rayleigh jet fragmentation with strict ledger;
+lbm-108 level-jump refinement (Poiseuille through the interface +
+shear-wave decay-rate transmission, first-order labels).
+
 ## No-claim boundaries
 
 - v0 is D2Q9 BGK on a DENSE grid with a body force + bounce-back walls. The
@@ -121,3 +131,20 @@ contact-model bracketing, and qualitative jet fragmentation.
 - The scaling assistant covers the `τ`/`ν`/`Mach` core; consuming fs-regime's
   dimensionless groups and emitting a full `dx`/`dt` unit conversion with
   Evidence provenance is the fuller deliverable.
+- Grid refinement is the TWO-LEVEL 1:2 channel coupling with Dupuis–Chopard
+  non-equilibrium rescaling and a FIRST-ORDER interface handoff: measured
+  2.5% steady Poiseuille deviation at the level jump and 5.6% extra shear-
+  wave decay rate — honesty-labeled in lbm-108; the post-collision
+  (Filippova–Hänel-style) second-order transfer, general octree topologies,
+  and dwr-adaptivity-driven refinement signals are recorded successors.
+- Contact-line physics is MODEL-BRACKETED (neutral vs wetting fill ghosts,
+  lbm-107 reports the sensitivity band), never pretended-certain — the
+  §15.3 caveat is a design decision here, not an omission.
+- ADJOINT HONESTY (plan §8.7 [M]): free-surface LBM adjoints are NOT
+  promised — cell-conversion events make the map non-differentiable;
+  gradients for free-surface objectives go through surrogate or
+  gradient-free lanes. The model card is this paragraph.
+- Pouring scenarios: tilt schedules enter as the rotating gravity vector
+  (lbm-106 pins 90-degree equivariance at 3e-14); full fs-scenario moving-
+  frame integration and Plateau–Rayleigh breakup SCORING (beyond the
+  qualitative fragment gate) are staged with the vessel flagship.
