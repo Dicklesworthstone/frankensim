@@ -215,8 +215,9 @@ fn mg_004_the_flag_is_real_and_smooth_paths_check_out() {
     );
     verdict(
         "mg-004",
-        "the FD falsifier passes on the smooth side and genuinely fails across the \
-         topology step — the declared discontinuity is real, not decorative",
+        "smooth side: tiny self-error, falsifier agrees; at the step the self-error \
+         explodes (the real discontinuity) while the conditioning-aware falsifier \
+         correctly declines to false-fire",
     );
 }
 
