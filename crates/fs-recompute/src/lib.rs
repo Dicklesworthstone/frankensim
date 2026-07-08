@@ -428,6 +428,7 @@ impl Store {
     }
 
     /// Remove a node by raw key (the eviction path).
+    #[allow(dead_code)] // wired by the eviction path as it lands; keeping the seam
     pub(crate) fn remove_by_key(&mut self, k: [u8; 32]) {
         self.nodes.remove(&k);
     }
