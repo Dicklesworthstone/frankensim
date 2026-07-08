@@ -1,0 +1,21 @@
+[package]
+name = "fs-solid"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Elasticity core: small-strain and finite-strain hyperelasticity (via fs-material), locking-free B-bar, body-fitted and CutFEM frontends, Newton with globalization."
+
+[package.metadata.frankensim]
+layer = "L3"
+
+[dependencies]
+fs-cutfem = { path = "../fs-cutfem" }
+fs-material = { path = "../fs-material" }
+fs-scenario = { path = "../fs-scenario" }
+fs-solver = { path = "../fs-solver" }
+fs-sparse = { path = "../fs-sparse" }
+
+[lints]
+workspace = true

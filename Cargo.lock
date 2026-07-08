@@ -1239,6 +1239,17 @@ name = "fs-soa-derive"
 version = "0.0.1"
 
 [[package]]
+name = "fs-solid"
+version = "0.0.1"
+dependencies = [
+ "fs-cutfem",
+ "fs-material",
+ "fs-scenario",
+ "fs-solver",
+ "fs-sparse",
+]
+
+[[package]]
 name = "fs-solver"
 version = "0.0.1"
 dependencies = [

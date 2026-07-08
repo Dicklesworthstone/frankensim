@@ -62,6 +62,7 @@ members = [
     "crates/fs-contract",
     "crates/fs-bisect",
     "crates/fs-cutfem",
+    "crates/fs-solid",
     "xtask",
 ]
 
