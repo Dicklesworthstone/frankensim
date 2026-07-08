@@ -72,8 +72,10 @@ members = [
     "crates/fs-conform",
     "crates/fs-wedge",
     "crates/fs-robust",
+    "crates/fs-benchmark",
     "crates/fs-cutfem",
     "crates/fs-solid",
+    "crates/fs-dwr",
     "xtask",
 ]
 

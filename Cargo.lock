@@ -814,6 +814,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-benchmark"
+version = "0.0.1"
+dependencies = [
+ "fs-evidence",
+]
+
+[[package]]
 name = "fs-bisect"
 version = "0.0.1"
 
@@ -887,6 +894,17 @@ name = "fs-dimine"
 version = "0.0.1"
 dependencies = [
  "fs-evidence",
+]
+
+[[package]]
+name = "fs-dwr"
+version = "0.0.1"
+dependencies = [
+ "fs-alloc",
+ "fs-cutfem",
+ "fs-exec",
+ "fs-mesh",
+ "fs-rep-mesh",
 ]
 
 [[package]]

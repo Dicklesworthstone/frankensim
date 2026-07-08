@@ -217,6 +217,29 @@ impl Quadtree {
         });
     }
 
+    /// A copy with every leaf split once — the enriched-space grid the
+    /// DWR estimator solves its adjoint on (the "higher-resolution"
+    /// enrichment option). Headroom grows by one level.
+    ///
+    /// # Panics
+    /// If the tree is already at the level-16 lattice cap.
+    #[must_use]
+    pub fn refined_once(&self) -> Quadtree {
+        assert!(self.max_level < 16, "refined_once at the lattice cap");
+        let mut out = Quadtree {
+            max_level: self.max_level + 1,
+            leaves: BTreeSet::new(),
+        };
+        for &(lv, i, j) in &self.leaves {
+            for di in 0..2u32 {
+                for dj in 0..2u32 {
+                    out.leaves.insert((lv + 1, 2 * i + di, 2 * j + dj));
+                }
+            }
+        }
+        out
+    }
+
     /// Restore the 2:1 edge balance by splitting too-coarse neighbors.
     pub fn balance(&mut self) {
         loop {
