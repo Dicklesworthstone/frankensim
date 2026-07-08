@@ -13,7 +13,9 @@ Layer L2 (restriction maps / Rep Router edges). No dependencies — pure Rust.
   `apply` (source→target), `adjoint` (declared transpose), `declared_error`.
 - `ManufacturedCase { input, exact_output }`; `Composition { after, direct,
   probes }` (a functoriality witness); `ConformanceSuite { adjoint_pairs,
-  manufactured, composition, tolerance }`.
+  manufactured, composition, identity, tolerance }` (`identity` is an optional
+  witness — probes on which a converter claiming to be the identity must act as
+  one; `None` for non-identity converters).
 - Axiom checks: `check_functoriality` (`after∘self == direct`), `check_identity`
   (`id(x) == x`), `check_adjoint` (`⟨Ax,y⟩ == ⟨x,Aᵀy⟩`),
   `check_tolerance_honesty` (measured ≤ declared) → `(honest, measured)`.

@@ -66,6 +66,10 @@ pub struct ConformanceSuite<'a> {
     pub manufactured: Vec<ManufacturedCase>,
     /// An optional functoriality witness (composition).
     pub composition: Option<Composition<'a>>,
+    /// An optional identity witness: probes on which a converter CLAIMED to be
+    /// the identity map must act as one (`source_dim == target_dim`,
+    /// `apply(x) == x`). `None` for converters that are not identities.
+    pub identity: Option<Vec<Vec<f64>>>,
     /// Numerical tolerance for the axiom checks.
     pub tolerance: f64,
 }
@@ -78,6 +82,7 @@ impl ConformanceSuite<'_> {
             adjoint_pairs: Vec::new(),
             manufactured: Vec::new(),
             composition: None,
+            identity: None,
             tolerance,
         }
     }
@@ -182,7 +187,9 @@ pub fn check_identity(c: &dyn Converter, probes: &[Vec<f64>], tol: f64) -> bool 
 pub fn certify(c: &dyn Converter, suite: &ConformanceSuite) -> ConformanceReport {
     let mut findings = Vec::new();
 
-    let functoriality = match &suite.composition {
+    // Functoriality: composition agrees AND (if the converter claims to be an
+    // identity) it acts as the identity.
+    let composition_ok = match &suite.composition {
         Some(comp) => {
             let ok = check_functoriality(c, comp, suite.tolerance);
             if !ok {
@@ -196,6 +203,20 @@ pub fn certify(c: &dyn Converter, suite: &ConformanceSuite) -> ConformanceReport
         }
         None => true,
     };
+    let identity_ok = match &suite.identity {
+        Some(probes) => {
+            let ok = check_identity(c, probes, suite.tolerance);
+            if !ok {
+                findings.push(format!(
+                    "identity: {} claims to be an identity but apply(x) != x",
+                    c.id()
+                ));
+            }
+            ok
+        }
+        None => true,
+    };
+    let functoriality = composition_ok && identity_ok;
 
     let adjoint_consistent = check_adjoint(c, &suite.adjoint_pairs, suite.tolerance);
     if !adjoint_consistent {

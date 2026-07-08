@@ -161,8 +161,33 @@ fn full_suite<'a>() -> ConformanceSuite<'a> {
         adjoint_pairs: vec![(vec![1.0, -2.0], vec![0.5, 4.0])],
         manufactured: manufactured(),
         composition: None,
+        identity: None, // `good` is a scaling converter, not an identity
         tolerance: 1e-9,
     }
+}
+
+#[test]
+fn a_false_identity_claim_is_rejected_by_certify() {
+    // a converter carrying an identity witness must actually be the identity.
+    // A real identity passes the axiom; a scaling map that claims identity fails.
+    let probes = vec![vec![3.0, 7.0], vec![-1.0, 2.0]];
+    let real_id = Mtx::honest("id", vec![vec![1.0, 0.0], vec![0.0, 1.0]], 1e-9);
+    let mut suite = full_suite();
+    suite.adjoint_pairs = vec![(vec![1.0, -2.0], vec![1.0, -2.0])]; // idᵀ = id
+    suite.manufactured = vec![ManufacturedCase {
+        input: vec![2.0, 5.0],
+        exact_output: vec![2.0, 5.0],
+    }];
+    suite.identity = Some(probes.clone());
+    let ok = certify(&real_id, &suite);
+    assert!(ok.functoriality && ok.certified());
+
+    // the SAME suite applied to a non-identity converter fails the identity axiom.
+    let fake = Mtx::honest("fake-id", vec![vec![2.0, 0.0], vec![0.0, 1.0]], 1e-9);
+    let bad = certify(&fake, &suite);
+    assert!(!bad.functoriality);
+    assert_eq!(bad.tier, Tier::Rejected);
+    assert!(bad.findings.iter().any(|f| f.contains("identity")));
 }
 
 #[test]
