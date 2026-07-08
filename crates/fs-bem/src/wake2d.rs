@@ -39,7 +39,6 @@ pub struct WakeStep {
 
 /// The unsteady simulation state.
 pub struct WakeSim {
-    foil: Airfoil2d,
     alpha: f64,
     dt: f64,
     core2: f64,
@@ -55,11 +54,10 @@ impl WakeSim {
     /// Impulsive start at `alpha`, time step `dt`, regularization core
     /// radius `core`.
     #[must_use]
-    pub fn new(foil: Airfoil2d, alpha: f64, dt: f64, core: f64) -> WakeSim {
-        let steady = solve(&foil, alpha);
+    pub fn new(foil: &Airfoil2d, alpha: f64, dt: f64, core: f64) -> WakeSim {
+        let steady = solve(foil, alpha);
         let te = foil.nodes[0];
         WakeSim {
-            foil,
             alpha,
             dt,
             core2: core * core,
@@ -123,10 +121,7 @@ impl WakeSim {
         let shed = bound_prev - bound;
         if shed.abs() > 0.0 {
             self.wake.push(WakeVortex {
-                pos: [
-                    self.te[0] + 0.3 * self.dt,
-                    self.te[1],
-                ],
+                pos: [self.te[0] + 0.3 * self.dt, self.te[1]],
                 gamma: shed,
             });
         }

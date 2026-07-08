@@ -66,10 +66,10 @@ fn lagrange_at(nodes: &[f64], x: f64) -> Vec<f64> {
         }
     }
     let mut w = vec![0.0f64; p];
-    for k in 0..p {
+    for (k, wk) in w.iter_mut().enumerate() {
         #[allow(clippy::cast_precision_loss)]
         let t = (2.0 * k as f64 + 1.0) / (2.0 * p as f64) * std::f64::consts::PI;
-        w[k] = if k % 2 == 0 { 1.0 } else { -1.0 } * t.sin();
+        *wk = if k % 2 == 0 { 1.0 } else { -1.0 } * t.sin();
     }
     let mut num = vec![0.0f64; p];
     let mut den = 0.0;
@@ -136,9 +136,8 @@ impl<'k> Fmm<'k> {
             * (1.0 + 1e-9);
         // Uniform depth: ~leaf_cap points per leaf for a uniform cloud.
         #[allow(clippy::cast_precision_loss)]
-        let mut max_level = ((points.len() as f64 / leaf_cap as f64).max(1.0).ln()
-            / (8.0f64).ln())
-        .ceil() as u32;
+        let mut max_level =
+            ((points.len() as f64 / leaf_cap as f64).max(1.0).ln() / (8.0f64).ln()).ceil() as u32;
         max_level = max_level.clamp(1, 6);
         let n_side = 1u32 << max_level;
         let child_side = side / f64::from(n_side);
@@ -234,10 +233,7 @@ impl<'k> Fmm<'k> {
 
     /// Are two same-level cells adjacent (or identical)?
     fn adjacent(a: CellKey, b: CellKey) -> bool {
-        a.0 == b.0
-            && a.1.abs_diff(b.1) <= 1
-            && a.2.abs_diff(b.2) <= 1
-            && a.3.abs_diff(b.3) <= 1
+        a.0 == b.0 && a.1.abs_diff(b.1) <= 1 && a.2.abs_diff(b.2) <= 1 && a.3.abs_diff(b.3) <= 1
     }
 
     /// Evaluate potentials at every point: FMM (upward, M2L, downward,
@@ -263,8 +259,7 @@ impl<'k> Fmm<'k> {
                 for di in 0..2u32 {
                     for dj in 0..2u32 {
                         for dk in 0..2u32 {
-                            let child =
-                                (key.0 + 1, 2 * key.1 + di, 2 * key.2 + dj, 2 * key.3 + dk);
+                            let child = (key.0 + 1, 2 * key.1 + di, 2 * key.2 + dj, 2 * key.3 + dk);
                             let Some(cm) = multipole.get(&child) else {
                                 continue;
                             };
@@ -391,9 +386,7 @@ impl<'k> Fmm<'k> {
                             let mut s = 0.0;
                             for &sidx in &ocell.points {
                                 if sidx != t {
-                                    s += self
-                                        .kernel
-                                        .eval(self.points[t], self.points[sidx])
+                                    s += self.kernel.eval(self.points[t], self.points[sidx])
                                         * charges[sidx];
                                 }
                             }
@@ -411,14 +404,14 @@ impl<'k> Fmm<'k> {
     pub fn direct(&self, charges: &[f64]) -> Vec<f64> {
         let n = self.points.len();
         let mut out = vec![0.0f64; n];
-        for t in 0..n {
+        for (t, slot) in out.iter_mut().enumerate() {
             let mut s = 0.0;
             for (sidx, &q) in charges.iter().enumerate() {
                 if sidx != t {
                     s += self.kernel.eval(self.points[t], self.points[sidx]) * q;
                 }
             }
-            out[t] = s;
+            *slot = s;
         }
         out
     }

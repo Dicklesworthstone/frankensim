@@ -93,7 +93,11 @@ impl SpherePanels {
     #[must_use]
     pub fn dense_matrix(&self) -> Vec<f64> {
         let n = self.centroids.len();
-        let gk = [GradKernel { c: 0 }, GradKernel { c: 1 }, GradKernel { c: 2 }];
+        let gk = [
+            GradKernel { c: 0 },
+            GradKernel { c: 1 },
+            GradKernel { c: 2 },
+        ];
         let mut a = vec![0.0f64; n * n];
         for i in 0..n {
             for j in 0..n {
@@ -117,11 +121,7 @@ impl SpherePanels {
     #[must_use]
     pub fn fmm_matvec(&self, sigma: &[f64], order: usize) -> Vec<f64> {
         let n = self.centroids.len();
-        let weighted: Vec<f64> = sigma
-            .iter()
-            .zip(&self.areas)
-            .map(|(s, a)| s * a)
-            .collect();
+        let weighted: Vec<f64> = sigma.iter().zip(&self.areas).map(|(s, a)| s * a).collect();
         let mut out = vec![0.0f64; n];
         for c in 0..3 {
             let k = GradKernel { c };
@@ -202,17 +202,15 @@ pub fn surface_velocity(
         let k = GradKernel { c };
         let fmm = Fmm::new(&k, panels.centroids.clone(), order, 40);
         let comp = fmm.potentials(&weighted);
-        for i in 0..n {
-            out[i][c] += comp[i];
+        for (o, ci) in out.iter_mut().zip(&comp) {
+            o[c] += ci;
         }
     }
     // Project out the (small residual) normal component.
-    for i in 0..n {
-        let vn = out[i][0] * panels.normals[i][0]
-            + out[i][1] * panels.normals[i][1]
-            + out[i][2] * panels.normals[i][2];
-        for c in 0..3 {
-            out[i][c] -= vn * panels.normals[i][c];
+    for (o, nrm) in out.iter_mut().zip(&panels.normals) {
+        let vn = o[0] * nrm[0] + o[1] * nrm[1] + o[2] * nrm[2];
+        for (oc, nc) in o.iter_mut().zip(nrm) {
+            *oc -= vn * nc;
         }
     }
     out

@@ -75,7 +75,8 @@ fn geometry(foil: &Airfoil2d) -> Geometry {
         let dx = b[0] - a[0];
         let dy = b[1] - a[1];
         let l = dx.hypot(dy);
-        g.mid.push([f64::midpoint(a[0], b[0]), f64::midpoint(a[1], b[1])]);
+        g.mid
+            .push([f64::midpoint(a[0], b[0]), f64::midpoint(a[1], b[1])]);
         g.tangent.push([dx / l, dy / l]);
         g.normal.push([-dy / l, dx / l]);
         g.len.push(l);
@@ -203,8 +204,8 @@ pub fn solve(foil: &Airfoil2d, alpha: f64) -> PanelSolution2d {
     // what the collocation system actually enforces.
     let mut fx = 0.0;
     let mut fy = 0.0;
-    for i in 0..n {
-        let cp = 1.0 - vt[i] * vt[i];
+    for (i, &vti) in vt.iter().enumerate() {
+        let cp = 1.0 - vti * vti;
         fx += -cp * g.normal[i][0] * g.len[i];
         fy += -cp * g.normal[i][1] * g.len[i];
     }
@@ -255,9 +256,9 @@ pub fn dcl_dalpha_adjoint(foil: &Airfoil2d, alpha: f64) -> f64 {
     // dB/dα.
     let u_inf_d = [-alpha.sin(), alpha.cos()];
     let mut db = vec![0.0f64; dim];
-    for i in 0..n {
+    for (i, slot) in db.iter_mut().take(n).enumerate() {
         let nrm = g.normal[i];
-        db[i] = -(u_inf_d[0] * nrm[0] + u_inf_d[1] * nrm[1]);
+        *slot = -(u_inf_d[0] * nrm[0] + u_inf_d[1] * nrm[1]);
     }
     for &i in &[0usize, n - 1] {
         let tan = g.tangent[i];
@@ -324,7 +325,7 @@ fn output_cl(foil: &Airfoil2d, g: &Geometry, x: &[f64], alpha: f64) -> f64 {
     for i in 0..n {
         let (mid, tan) = (g.mid[i], g.tangent[i]);
         let mut v = [u_inf[0], u_inf[1]];
-        for j in 0..n {
+        for (j, &xj) in x.iter().take(n).enumerate() {
             if i == j {
                 v[0] += 0.5 * gamma * tan[0];
                 v[1] += 0.5 * gamma * tan[1];
@@ -332,8 +333,8 @@ fn output_cl(foil: &Airfoil2d, g: &Geometry, x: &[f64], alpha: f64) -> f64 {
             }
             let sv = source_velocity(foil, g, j, mid);
             let vv = vortex_velocity(foil, g, j, mid);
-            v[0] += sv[0] * x[j] + vv[0] * gamma;
-            v[1] += sv[1] * x[j] + vv[1] * gamma;
+            v[0] += sv[0] * xj + vv[0] * gamma;
+            v[1] += sv[1] * xj + vv[1] * gamma;
         }
         let vt = v[0] * tan[0] + v[1] * tan[1];
         let cp = 1.0 - vt * vt;
@@ -342,4 +343,3 @@ fn output_cl(foil: &Airfoil2d, g: &Geometry, x: &[f64], alpha: f64) -> f64 {
     }
     fy * alpha.cos() - fx * alpha.sin()
 }
-
