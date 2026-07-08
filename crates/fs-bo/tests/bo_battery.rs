@@ -13,6 +13,7 @@ use fs_bo::{
     q_expected_improvement,
 };
 use fs_rand::StreamKey;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 fn log(case: &str, verdict: &str, detail: &str) {
     println!(
@@ -155,6 +156,38 @@ fn known_answer_posteriors() {
 }
 
 #[test]
+fn kernel_dimension_mismatches_fail_fast() {
+    let kernel = Kernel {
+        family: Matern::FiveHalves,
+        signal: 1.0,
+        lengthscales: vec![0.5, 0.5],
+    };
+    let eval_mismatch = catch_unwind(AssertUnwindSafe(|| kernel.eval(&[0.1, 0.2], &[0.1])));
+    assert!(
+        eval_mismatch.is_err(),
+        "kernel eval must reject mismatched point dimensions"
+    );
+    let scale_mismatch = Kernel {
+        lengthscales: vec![0.5],
+        ..kernel.clone()
+    };
+    let ard_mismatch = catch_unwind(AssertUnwindSafe(|| {
+        scale_mismatch.eval(&[0.1, 0.2], &[0.3, 0.4])
+    }));
+    assert!(
+        ard_mismatch.is_err(),
+        "kernel eval must reject ARD lengthscale dimension mismatches"
+    );
+    let gp = Gp::fit(&[vec![0.2, 0.3]], &[1.0], kernel, 1e-6);
+    let predict_mismatch = catch_unwind(AssertUnwindSafe(|| gp.predict(&[0.4])));
+    assert!(
+        predict_mismatch.is_err(),
+        "GP prediction must reject probe dimension mismatches"
+    );
+    log("kernel-dimensions", "pass", "mismatches fail fast");
+}
+
+#[test]
 fn normal_functions_accuracy() {
     // Φ at table values; Φ⁻¹ round trip at the documented accuracy.
     assert!((phi_cdf(0.0) - 0.5).abs() < 1e-9);
@@ -286,7 +319,13 @@ fn bo_beats_random_on_branin_and_replays() {
     );
 }
 
-const GOLDEN_HASH: u64 = 0x4f5a_0601_3cd1_6f46; // recorded at 7tv.5 landing, frozen
+// BUMPED once at tzeh lane-a landing (was 0x4f5a_0601_3cd1_6f46):
+// predict_joint's flat 1e-10 jitter became adaptive escalation
+// (rel*max_diag from 1e-10 up, diagonal fallback for numerically void
+// joints) — REQUIRED for TuRBO's collapsed trust regions, where the
+// flat jitter measurably failed on near-duplicate candidate sets.
+// Semantic justification per the golden-evidence policy.
+const GOLDEN_HASH: u64 = 0x5db8_f433_fd71_f738;
 
 #[test]
 fn bo_golden_hash() {

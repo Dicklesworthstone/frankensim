@@ -37,6 +37,13 @@ pub struct TurboConfig {
     pub fail_tol: usize,
     /// Master seed.
     pub seed: u64,
+    /// Local-data cap: the GP trains on at most this many points
+    /// nearest the region center (O(n³) inference — unbounded local
+    /// sets measurably stalled the 30-d battery).
+    pub max_local: usize,
+    /// Refit hyperparameters every this many iterations (reusing the
+    /// last kernel in between — the standard TuRBO economy).
+    pub refit_every: u64,
 }
 
 /// Outcome of a TuRBO run.
@@ -55,12 +62,34 @@ pub struct TurboReport {
 }
 
 /// Run TuRBO for MINIMIZATION.
+#[allow(clippy::too_many_lines)] // one coherent restart/TR loop
 pub fn turbo_minimize(
     f: &mut dyn FnMut(&[f64]) -> f64,
     dim: usize,
     config: &TurboConfig,
 ) -> TurboReport {
     let (lo, hi) = config.bounds;
+    assert!(dim > 0, "TuRBO requires dim > 0");
+    assert!(
+        lo.is_finite() && hi.is_finite() && hi > lo,
+        "TuRBO bounds must be finite and ordered"
+    );
+    assert!(config.hyper_starts > 0, "TuRBO requires hyper_starts > 0");
+    assert!(config.n_init > 0, "TuRBO requires n_init > 0");
+    assert!(config.candidates > 0, "TuRBO requires candidates > 0");
+    assert!(config.max_local > 0, "TuRBO requires max_local > 0");
+    assert!(config.refit_every > 0, "TuRBO requires refit_every > 0");
+    assert!(config.succ_tol > 0, "TuRBO requires succ_tol > 0");
+    assert!(config.fail_tol > 0, "TuRBO requires fail_tol > 0");
+    assert!(
+        config.l_min.is_finite()
+            && config.l_init.is_finite()
+            && config.l_max.is_finite()
+            && config.l_min > 0.0
+            && config.l_init > 0.0
+            && config.l_max >= config.l_init,
+        "TuRBO trust-region lengths must be positive finite values with l_max >= l_init"
+    );
     let span = hi - lo;
     let mut evals = 0usize;
     let mut restarts = 0usize;
@@ -97,7 +126,7 @@ pub fn turbo_minimize(
             evals += 1;
             if y < global_best {
                 global_best = y;
-                global_x = x.clone();
+                global_x.clone_from(&x);
             }
             trace.push(global_best);
             xs.push(x);
@@ -107,6 +136,8 @@ pub fn turbo_minimize(
         let mut succ = 0usize;
         let mut fail = 0usize;
         let mut iter_in_round = 0u64;
+        let mut kernel_cache: Option<crate::gp::Kernel> = None;
+        let mut noise_cache = 1e-6f64;
         while evals < config.max_evals {
             iter_in_round += 1;
             // Local best anchors the region.
@@ -128,12 +159,24 @@ pub fn turbo_minimize(
                         .all(|(a, c)| (a - c).abs() <= half + 1e-12)
                 })
                 .collect();
-            let use_idx: &[usize] = if in_region.len() >= config.n_init.min(2 * dim) {
-                &in_region
+            let mut use_idx: Vec<usize> = if in_region.len() >= config.n_init.min(2 * dim) {
+                in_region
             } else {
                 // Data-poor region: use everything.
-                &(0..xs.len()).collect::<Vec<_>>()
+                (0..xs.len()).collect()
             };
+            // Cap by distance to the center (deterministic tie-break).
+            if use_idx.len() > config.max_local {
+                let d2 = |i: usize| -> f64 {
+                    xs[i]
+                        .iter()
+                        .zip(&center)
+                        .map(|(a, c)| (a - c) * (a - c))
+                        .sum()
+                };
+                use_idx.sort_by(|&a, &b| d2(a).total_cmp(&d2(b)).then(a.cmp(&b)));
+                use_idx.truncate(config.max_local);
+            }
             let xl: Vec<Vec<f64>> = use_idx.iter().map(|&i| xs[i].clone()).collect();
             let yl_raw: Vec<f64> = use_idx.iter().map(|&i| ys[i]).collect();
             let n = yl_raw.len() as f64;
@@ -141,14 +184,36 @@ pub fn turbo_minimize(
             let var = yl_raw.iter().map(|v| (v - mean) * (v - mean)).sum::<f64>() / n;
             let scale = fs_math::det::sqrt(var.max(1e-30));
             let yl: Vec<f64> = yl_raw.iter().map(|v| (v - mean) / scale).collect();
-            let gp = fit_hyperparams(
-                &xl,
-                &yl,
-                config.family,
-                config.log_box,
-                config.hyper_starts,
-                config.seed ^ round.wrapping_mul(0x9e37_79b9) ^ iter_in_round,
-            );
+            let refit =
+                kernel_cache.is_none() || (iter_in_round - 1).is_multiple_of(config.refit_every);
+            let gp = if refit {
+                let g = fit_hyperparams(
+                    &xl,
+                    &yl,
+                    config.family,
+                    config.log_box,
+                    config.hyper_starts,
+                    config.seed ^ round.wrapping_mul(0x9e37_79b9) ^ iter_in_round,
+                );
+                kernel_cache = Some(g.kernel.clone());
+                noise_cache = g.noise;
+                g
+            } else {
+                let kernel = kernel_cache.clone().expect("cache primed");
+                Gp::try_fit(&xl, &yl, kernel, noise_cache).unwrap_or_else(|| {
+                    let g = fit_hyperparams(
+                        &xl,
+                        &yl,
+                        config.family,
+                        config.log_box,
+                        config.hyper_starts,
+                        config.seed ^ round.wrapping_mul(0x9e37_79b9) ^ iter_in_round,
+                    );
+                    kernel_cache = Some(g.kernel.clone());
+                    noise_cache = g.noise;
+                    g
+                })
+            };
             // ARD-weighted TR sides: side_d ∝ ℓ_d, normalized to the
             // geometric mean (long lengthscales get wide sides).
             let ell = &gp.kernel.lengthscales;
@@ -205,7 +270,7 @@ pub fn turbo_minimize(
             evals += 1;
             if y_new < global_best {
                 global_best = y_new;
-                global_x = x_new.clone();
+                global_x.clone_from(&x_new);
             }
             trace.push(global_best);
             // Counters: success = improved the LOCAL best.

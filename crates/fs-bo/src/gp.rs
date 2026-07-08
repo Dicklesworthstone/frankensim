@@ -30,8 +30,22 @@ pub struct Kernel {
 }
 
 impl Kernel {
+    fn assert_dims(&self, x: &[f64], y: &[f64]) {
+        assert_eq!(
+            x.len(),
+            y.len(),
+            "kernel inputs must have the same dimension"
+        );
+        assert_eq!(
+            x.len(),
+            self.lengthscales.len(),
+            "kernel input dimension must match ARD lengthscales"
+        );
+    }
+
     /// Scaled distance r = √Σ((xᵢ−yᵢ)/ℓᵢ)².
     fn scaled_dist(&self, x: &[f64], y: &[f64]) -> f64 {
+        self.assert_dims(x, y);
         let mut acc = 0.0f64;
         for ((xi, yi), l) in x.iter().zip(y).zip(&self.lengthscales) {
             let d = (xi - yi) / l;
@@ -207,8 +221,7 @@ impl Gp {
             // factor. Marginals stay right; cross-correlations are
             // dropped only where the joint is numerically void.
             for i in 0..q {
-                lflat[i * q + i] =
-                    fs_math::det::sqrt(sigma[i * q + i].max(0.0) + 1e-14);
+                lflat[i * q + i] = fs_math::det::sqrt(sigma[i * q + i].max(0.0) + 1e-14);
             }
         }
         (mu, lflat)

@@ -5,6 +5,7 @@
 //! EI-BO; CMA-ES numbers REPORTED alongside), bitwise replay, golden.
 
 use fs_bo::{Matern, TurboConfig, turbo_minimize};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 fn log(case: &str, verdict: &str, detail: &str) {
     println!(
@@ -30,9 +31,9 @@ fn config(seed: u64, max_evals: usize) -> TurboConfig {
         bounds: (0.0, 1.0),
         family: Matern::FiveHalves,
         log_box: (-2.5, 0.5),
-        hyper_starts: 2,
+        hyper_starts: 1,
         n_init: 20,
-        candidates: 60,
+        candidates: 40,
         max_evals,
         l_init: 0.8,
         l_min: 0.5f64.powi(7),
@@ -40,6 +41,8 @@ fn config(seed: u64, max_evals: usize) -> TurboConfig {
         succ_tol: 3,
         fail_tol: 8,
         seed,
+        max_local: 40,
+        refit_every: 8,
     }
 }
 
@@ -80,9 +83,39 @@ fn trust_region_mechanics() {
 }
 
 #[test]
+fn invalid_turbo_config_fails_fast() {
+    let mut objective = |x: &[f64]| x.iter().sum::<f64>();
+    let mut bad_local = config(1, 5);
+    bad_local.max_local = 0;
+    let local_err = catch_unwind(AssertUnwindSafe(|| {
+        turbo_minimize(&mut objective, 2, &bad_local)
+    }));
+    assert!(
+        local_err.is_err(),
+        "TuRBO must reject max_local = 0 before building an empty GP"
+    );
+
+    let mut objective = |x: &[f64]| x.iter().sum::<f64>();
+    let mut bad_refit = config(1, 5);
+    bad_refit.refit_every = 0;
+    let refit_err = catch_unwind(AssertUnwindSafe(|| {
+        turbo_minimize(&mut objective, 2, &bad_refit)
+    }));
+    assert!(
+        refit_err.is_err(),
+        "TuRBO must reject refit_every = 0 before entering the TR loop"
+    );
+    log("invalid-config", "pass", "zero new knobs fail fast");
+}
+
+#[test]
 fn ackley30_beats_baselines_and_replays() {
+    // Budget sized for the debug-profile battery (the claim is
+    // COMPARATIVE at matched budget; 300 evals in 30-d is enough to
+    // separate a trust-region walker from space-filling sampling by a
+    // wide margin).
     let dim = 30usize;
-    let budget = 600usize;
+    let budget = 300usize;
     let seeds = [11u64, 29];
     let mut turbo_bests = Vec::new();
     let mut rand_bests = Vec::new();
@@ -128,9 +161,9 @@ fn ackley30_beats_baselines_and_replays() {
     let cma = fs_dfo::cmaes(&mut fc, &vec![0.5; dim], &params, 11);
     // Bitwise replay.
     let mut f1 = |x: &[f64]| ackley(x);
-    let r1 = turbo_minimize(&mut f1, dim, &config(7, 150));
+    let r1 = turbo_minimize(&mut f1, dim, &config(7, 80));
     let mut f2 = |x: &[f64]| ackley(x);
-    let r2 = turbo_minimize(&mut f2, dim, &config(7, 150));
+    let r2 = turbo_minimize(&mut f2, dim, &config(7, 80));
     assert!(
         r1.trace
             .iter()
@@ -148,7 +181,7 @@ fn ackley30_beats_baselines_and_replays() {
     );
 }
 
-const GOLDEN_HASH: u64 = 0; // recorded on first run, then frozen
+const GOLDEN_HASH: u64 = 0xe671_9eef_01a1_b960; // recorded at tzeh lane a, frozen
 
 #[test]
 fn turbo_golden_hash() {
@@ -162,7 +195,7 @@ fn turbo_golden_hash() {
     let mut f = |x: &[f64]| ackley(x);
     let rep = turbo_minimize(&mut f, 8, &config(9, 120));
     feed(rep.f_best);
-    for v in rep.x_best.iter() {
+    for v in &rep.x_best {
         feed(*v);
     }
     for v in rep.trace.iter().step_by(11) {

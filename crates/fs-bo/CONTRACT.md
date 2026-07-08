@@ -35,6 +35,22 @@ acquisition surfaces.
   `normal_bank` (scrambled Sobol through Φ⁻¹ — fixed common random
   numbers); `q_expected_improvement` through the Cholesky
   reparameterization f = μ + L·z over the fixed bank.
+- `turbo::turbo_minimize` — TuRBO-class trust-region BO (the honest
+  answer to BO's dimensionality ceiling): local GP inside an adaptive
+  hyperrectangle with ARD-weighted sides, Thompson sampling over
+  Sobol candidates through the joint-posterior Cholesky (fixed Philox
+  noise — common random numbers, bitwise-replayable), success/failure
+  counters (double/halve), restarts on collapse keeping the global
+  best; local data capped at `max_local` nearest points and
+  hyperparameters refit every `refit_every` iterations (unbounded
+  local sets measurably stalled the 30-d battery).
+- `mf` — two-fidelity joint GP via the ICM kernel
+  K((x,m),(x',m')) = B[m][m']·k_x(x,x'), B = LLᵀ Cholesky-
+  parameterized (PSD by construction; the between-fidelity
+  correlation is LEARNED and reported); `mf_minimize` = EI on the
+  HIGH-fidelity posterior with the MFEI-class fidelity rule
+  (evaluate cheap when corr²·cost-ratio > 1, corr from the joint
+  posterior at [(x,lo),(x,hi)]); cost-indexed traces ledgered.
 - `bo::minimize` — Sobol initialization, per-iteration y
   STANDARDIZATION (EI is affine-invariant when applied consistently;
   without it the signal box cannot span arbitrary objective scales —
@@ -54,15 +70,20 @@ acquisition surfaces.
 
 ## Error model
 
-Structured panics on dimension mismatches and direct `fit` of
-non-SPD systems; the hyperparameter search path uses `try_fit`
-(rejection, not crash). `phi_inv` asserts p ∈ (0,1).
+Structured panics on dimension mismatches, invalid fidelity indices,
+invalid TuRBO configuration knobs, and direct `fit` of non-SPD
+systems; the hyperparameter search path uses `try_fit` (rejection,
+not crash). `phi_inv` asserts p ∈ (0,1).
 
 ## Determinism class
 
 Bit-deterministic per seed; golden FNV-64 over GP posteriors,
-acquisitions, and a short BO run: `0x4f5a_0601_3cd1_6f46`, recorded
-on Apple M4 Pro, verified on Threadripper (x86_64).
+acquisitions, and a short BO run: `0x5db8_f433_fd71_f738` (bumped
+once from `0x4f5a_0601_3cd1_6f46` when predict_joint's flat jitter
+became adaptive escalation — required for TuRBO's collapsed trust
+regions; semantic justification recorded in the battery); TuRBO
+golden `0xe671_9eef_01a1_b960`. Recorded on Apple M4 Pro, verified
+on Threadripper (x86_64).
 
 ## Cancellation behavior
 
@@ -80,22 +101,46 @@ None.
 
 ## Conformance tests
 
-`tests/bo_battery.rs` (7 cases): kernel PSD across the family × 40
+`tests/bo_battery.rs` (8 cases): kernel PSD across the family × 40
 random points; posterior union-order consistency ≤ 1e−8; known-answer
 posteriors (noiseless interpolation mean == y and var → 0 at data;
-one-point closed form to 1e−12); Φ table values + Φ⁻¹ round-trip ≤
-1e−6; EI ≥ 0, EI ≈ 0 at data, q-EI batch dominance + q-EI(1) vs
-closed-form EI within 5% MC tolerance; EI-BO beats scrambled-Sobol
-random search on Branin at matched budget over a fixed seed set
-(median 0.80 vs 1.44, optimum 0.398 — the ledgered comparison) with
-whole-run bitwise replay; cross-ISA golden hash.
+one-point closed form to 1e−12); kernel/GP dimension mismatches fail
+fast; Φ table values + Φ⁻¹ round-trip ≤ 1e−6; EI ≥ 0, EI ≈ 0 at
+data, q-EI batch dominance + q-EI(1) vs closed-form EI within 5% MC
+tolerance; EI-BO beats scrambled-Sobol random search on Branin at
+matched budget over a fixed seed set (median 0.80 vs 1.44, optimum
+0.398 — the ledgered comparison) with whole-run bitwise replay;
+cross-ISA golden hash.
+`tests/turbo_battery.rs` (4 cases): trust-region mechanics G0 (a
+smooth bowl tracked to 1e−6; a needle objective collapses the TR
+into ≥ 1 restart); invalid new TuRBO knobs fail fast; Ackley-30 at
+matched 300-eval budget — TuRBO (11.09 median) beats QMC-random
+(12.22) with CMA-ES REPORTED alongside (10.22; both are legitimate
+high-d optimizers — the ledger records the numbers rather than
+cherry-picking the comparison) plus bitwise replay; TuRBO golden.
+`tests/mf_battery.rs` (3 cases + dims guard): correlation recovery
+(learned ρ ≈ 1.0 on the linear-bias Branin pair) with high-fidelity
+variance reduced at 10/10 held-out probes when cheap data is added;
+allocation + cost-to-target at 10:1 costs — low-fidelity evaluations
+dominate (78% share) and MF-BO reaches 0.3995 median vs
+single-fidelity EI-BO's 1.7179 at MATCHED total cost (optimum
+0.3979 — the documented win) with bitwise replay; MF golden
+`0x6411_f077_1d5e_9f88`.
+`tests/mf_battery.rs`: multi-fidelity correlation recovery and
+variance reduction, dimension/fidelity mismatch fail-fast behavior,
+cost-aware allocation and replay, and MF golden.
 
 ## No-claim boundaries
 
-- TuRBO trust-region BO (30–300d), multi-fidelity cost-aware
-  acquisition with discrepancy models, inducing-point sparse GPs
-  beyond ~10⁴ points, heteroscedastic likelihoods, and e-process
-  stopping are the bead's recorded follow-up lanes.
+- Inducing-point sparse GPs beyond ~10⁴ points, heteroscedastic
+  likelihoods, and e-process stopping are the bead's remaining lanes
+  (TuRBO and two-fidelity ICM landed). The MF module is
+  TWO-fidelity; deeper ladders and per-evidence-model-ledger
+  discrepancy models join with their consumers.
+- TuRBO's joint fallback drops cross-correlations only where the
+  posterior is numerically void (degenerate candidate sets); the
+  30-d battery budget is sized for the debug profile — the claim is
+  comparative at matched budget, not budget-specific.
 - Acquisition gradients are derivative-free (CMA-ES); the
   FrankenTorch reparameterized-gradient tape through q-EI is the
   named follow-up (the fixed-bank surfaces are already

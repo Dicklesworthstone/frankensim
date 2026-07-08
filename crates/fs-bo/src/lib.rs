@@ -8,18 +8,20 @@
 //! optimizers come from the landed stack: fs-ascent L-BFGS for
 //! hyperparameters, fs-dfo CMA-ES for acquisition surfaces.
 //!
-//! TuRBO trust-region BO, multi-fidelity cost-aware acquisition,
-//! inducing-point sparse GPs, and tape-differentiated acquisition
-//! gradients are recorded follow-up lanes on the bead.
+//! TuRBO trust-region BO and multi-fidelity cost-aware acquisition
+//! are included; inducing-point sparse GPs and tape-differentiated
+//! acquisition gradients remain recorded follow-up lanes.
 
 pub mod acq;
 pub mod bo;
 pub mod gp;
+pub mod mf;
 pub mod turbo;
 
 pub use acq::{expected_improvement, normal_bank, phi_cdf, phi_inv, q_expected_improvement};
 pub use bo::{BoConfig, BoReport, minimize};
 pub use gp::{Gp, Kernel, Matern, fit_hyperparams};
+pub use mf::{MfConfig, MfGp, MfKernel, MfReport, fit_mf, mf_minimize};
 pub use turbo::{TurboConfig, TurboReport, turbo_minimize};
 
 /// Crate version, re-exported for provenance stamping.
