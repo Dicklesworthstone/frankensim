@@ -15,12 +15,21 @@ use fs_bo::{
 use fs_rand::StreamKey;
 
 fn log(case: &str, verdict: &str, detail: &str) {
-    println!("{{\"suite\":\"fs-bo\",\"case\":\"{case}\",\"verdict\":\"{verdict}\",\"detail\":\"{detail}\"}}");
+    println!(
+        "{{\"suite\":\"fs-bo\",\"case\":\"{case}\",\"verdict\":\"{verdict}\",\"detail\":\"{detail}\"}}"
+    );
 }
 
 fn rand_points(n: usize, d: usize, tile: u32) -> Vec<Vec<f64>> {
-    let mut s = StreamKey { seed: 61, kernel: 0xB0B0, tile }.stream();
-    (0..n).map(|_| (0..d).map(|_| s.next_f64()).collect()).collect()
+    let mut s = StreamKey {
+        seed: 61,
+        kernel: 0xB0B0,
+        tile,
+    }
+    .stream();
+    (0..n)
+        .map(|_| (0..d).map(|_| s.next_f64()).collect())
+        .collect()
 }
 
 fn branin(x: &[f64]) -> f64 {
@@ -93,8 +102,15 @@ fn posterior_consistency_union_law() {
         let (m2, v2) = g2.predict(p);
         worst = worst.max((m1 - m2).abs()).max((v1 - v2).abs());
     }
-    assert!(worst < 1e-8, "union-order consistency violated: {worst:.3e}");
-    log("posterior-consistency", "pass", &format!("worst dev {worst:.1e}"));
+    assert!(
+        worst < 1e-8,
+        "union-order consistency violated: {worst:.3e}"
+    );
+    log(
+        "posterior-consistency",
+        "pass",
+        &format!("worst dev {worst:.1e}"),
+    );
 }
 
 #[test]
@@ -131,7 +147,11 @@ fn known_answer_posteriors() {
     let v_hand = kernel1.eval(&xs, &xs) - ks * ks / (k11 + noise);
     assert!((m - m_hand).abs() < 1e-12, "{m} vs hand {m_hand}");
     assert!((v - v_hand).abs() < 1e-12, "{v} vs hand {v_hand}");
-    log("known-answer", "pass", "interpolation + 1-point closed form");
+    log(
+        "known-answer",
+        "pass",
+        "interpolation + 1-point closed form",
+    );
 }
 
 #[test]
@@ -167,7 +187,10 @@ fn ei_laws_and_qei_dominance() {
         assert!(expected_improvement(&gp, p, f_best, 0.0) >= 0.0);
     }
     let at_datum = expected_improvement(&gp, &x[3], f_best, 0.0);
-    assert!(at_datum < 1e-3, "EI at noiseless datum should be ~0: {at_datum:.3e}");
+    assert!(
+        at_datum < 1e-3,
+        "EI at noiseless datum should be ~0: {at_datum:.3e}"
+    );
     // q-EI(X ∪ {x}) ≥ q-EI(X) (monotone in the batch, fixed bank) and
     // q-EI({x}) ≈ EI(x) at matching sample banks (MC tolerance).
     let bank2 = normal_bank(4096, 2, 99);
@@ -251,7 +274,9 @@ fn bo_beats_random_on_branin_and_replays() {
     let mut f2 = |x: &[f64]| branin(x);
     let r2 = minimize(&mut f2, 2, budget_init, 3, &config_for(7));
     assert!(
-        r1.y.iter().zip(&r2.y).all(|(a, b)| a.to_bits() == b.to_bits()),
+        r1.y.iter()
+            .zip(&r2.y)
+            .all(|(a, b)| a.to_bits() == b.to_bits()),
         "BO run not bitwise replayable"
     );
     log(

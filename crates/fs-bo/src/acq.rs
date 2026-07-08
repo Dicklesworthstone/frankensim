@@ -36,9 +36,12 @@ pub fn phi_cdf(z: f64) -> f64 {
 
 /// Standard normal quantile Φ⁻¹ (Acklam's algorithm, relative error
 /// ≈ 1e−9): turns Sobol uniforms into deterministic normal samples.
+/// Constants are Acklam's verbatim (the lint about excess digits is
+/// suppressed: truncating published constants invites transcription
+/// bugs; the compiler rounds to the nearest f64 deterministically).
 #[must_use]
+#[allow(clippy::excessive_precision)]
 pub fn phi_inv(p: f64) -> f64 {
-    assert!(p > 0.0 && p < 1.0, "quantile needs p in (0,1), got {p}");
     const A: [f64; 6] = [
         -3.969_683_028_665_376e1,
         2.209_460_984_245_205e2,
@@ -68,6 +71,7 @@ pub fn phi_inv(p: f64) -> f64 {
         2.445_134_137_142_996,
         3.754_408_661_907_416,
     ];
+    assert!(p > 0.0 && p < 1.0, "quantile needs p in (0,1), got {p}");
     let p_low = 0.02425;
     if p < p_low {
         let q = fs_math::det::sqrt(-2.0 * fs_math::det::ln(p));

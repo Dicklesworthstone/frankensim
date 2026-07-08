@@ -117,9 +117,8 @@ pub fn minimize(
                         let samples = config.mc_samples;
                         let mut sub = vec![0.0f64; samples * sub_bank_cols];
                         for s in 0..samples {
-                            sub[s * sub_bank_cols..(s + 1) * sub_bank_cols].copy_from_slice(
-                                &bank[s * config.q..s * config.q + sub_bank_cols],
-                            );
+                            sub[s * sub_bank_cols..(s + 1) * sub_bank_cols]
+                                .copy_from_slice(&bank[s * config.q..s * config.q + sub_bank_cols]);
                         }
                         q_expected_improvement(&gp, &trial, f_best, &sub)
                     },
@@ -153,10 +152,7 @@ fn argmax_acq(
     iteration: usize,
 ) -> Vec<f64> {
     let (lo, hi) = config.bounds;
-    let sobol = fs_rand::qmc::Sobol::scrambled(
-        dim,
-        config.seed ^ 0x5EED ^ (iteration as u64) << 8,
-    );
+    let sobol = fs_rand::qmc::Sobol::scrambled(dim, config.seed ^ 0x5EED ^ (iteration as u64) << 8);
     let mut best_x: Option<Vec<f64>> = None;
     let mut best_v = f64::NEG_INFINITY;
     let mut pt = vec![0.0f64; dim];
@@ -168,12 +164,8 @@ fn argmax_acq(
             clamp_box(&mut xc, lo, hi);
             -acq(&xc)
         };
-        let params = fs_dfo::CmaParams::standard(
-            dim,
-            0.2 * (hi - lo),
-            config.acq_evals,
-            f64::NEG_INFINITY,
-        );
+        let params =
+            fs_dfo::CmaParams::standard(dim, 0.2 * (hi - lo), config.acq_evals, f64::NEG_INFINITY);
         let rep = fs_dfo::cmaes(&mut obj, &x0, &params, config.seed ^ (s as u64) << 4);
         let v = -rep.f_best;
         if v > best_v {
