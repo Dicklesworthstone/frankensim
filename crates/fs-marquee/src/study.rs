@@ -97,7 +97,7 @@ impl CutSdf for PlateWithHoles {
 
     fn gradient(&self, p: [f64; 2]) -> [f64; 2] {
         // Gradient of the active hole's term: −(p − c)/|p − c|.
-        let (c, _) = self
+        let Some((c, _)) = self
             .centers
             .iter()
             .zip(&self.radii)
@@ -106,7 +106,9 @@ impl CutSdf for PlateWithHoles {
                 let db = *rb - ((p[0] - cb[0]).powi(2) + (p[1] - cb[1]).powi(2)).sqrt();
                 da.total_cmp(&db)
             })
-            .expect("at least one hole");
+        else {
+            return [0.0, 0.0];
+        };
         let d = ((p[0] - c[0]).powi(2) + (p[1] - c[1]).powi(2))
             .sqrt()
             .max(1e-12);
@@ -355,7 +357,7 @@ pub fn run_study(
             rec.iter, rec.compliance, rec.area
         );
         for r in &rec.radii {
-            let _ = write!(canon, "{:.12e},", r);
+            let _ = write!(canon, "{r:.12e},");
         }
     }
     Ok(StudyReport {

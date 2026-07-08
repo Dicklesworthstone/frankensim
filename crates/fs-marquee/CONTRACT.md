@@ -27,6 +27,15 @@ The default build exposes no simulation entrypoint. The feature-gated smoke
 runner performs in-process CutFEM solves and does not mutate ledgers or the
 filesystem.
 
+- `study` module (the smoke-tier runner, bead mye.1): `PlateWithHoles`
+  (an EXACT parametric SDF with a certified box enclosure — the CutSdf
+  containment law), `run_study` (CutFEM state solves, the self-adjoint
+  compliance shape gradient `dJ/dr = −∮(∂u/∂n)²` — sign CAUGHT by the
+  FD falsifier during development, the drill earning its keep — with an
+  area-budget rescale projection), `IterRecord` (compliance, area,
+  gradient, the three certificate components, composed color, solver
+  iterations), `StudyReport.trace_hash` (the G5 replay witness).
+
 ## Invariants
 
 1. The default build cannot accidentally execute a marquee study.
@@ -79,3 +88,19 @@ runner inputs are rejected before solver work starts.
 - No performance, convergence beyond the smoke tests, physical-validity beyond
   the estimated DWR/algebraic fields, or rendering-quality claims attach to
   this crate until the full runner and its Gauntlet evidence land.
+
+## No-claim boundaries (study)
+
+- SMOKE tier only: level-4/5 quadtrees, 8-step budgets — the
+  full-resolution nightly golden lane and both-ISA runs are the
+  remaining P2 exit work, not claims here.
+- The composed certificate's headline color is ESTIMATED (DWR constants
+  and the CG-residual proxy are estimates; the refined-reference check
+  passes within a documented 4x effectivity band). Equilibrated 2-D
+  brackets would upgrade it to Verified — future work.
+- The FrankenScript-IR front end and the fs-report notebook are the
+  gp3.10/fs-ir integration seams; the study exposes the runner they
+  will drive.
+- Thermal (Poisson) compliance, not elasticity: the canonical heat-sink
+  layout study — the elasticity marquee follows the same seam once
+  CutFEM elasticity lands.

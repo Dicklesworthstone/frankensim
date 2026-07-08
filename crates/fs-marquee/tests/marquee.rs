@@ -1,9 +1,8 @@
 //! fs-marquee contract conformance.
 //!
-//! The current crate is intentionally an L6 admission/status shell. The
-//! `marquee` feature may name the future frontier lane, but it must not
-//! expose an unproven runner or make simulation, rendering, ledger, or
-//! filesystem side effects part of this crate's contract.
+//! The default crate is intentionally an L6 admission/status shell. The
+//! `marquee` feature exposes a smoke-tier in-process runner, but it must not
+//! claim the full nightly golden lane or ledger/filesystem side effects.
 
 use fs_marquee::{MarqueeStatus, VERSION, scope_summary, status};
 
@@ -22,7 +21,7 @@ fn marquee_status_matches_feature_gate() {
 }
 
 #[test]
-fn marquee_scope_keeps_no_runner_boundary_explicit() {
+fn marquee_scope_keeps_nightly_golden_boundary_explicit() {
     let summary = scope_summary();
     assert!(summary.contains("raw SDF"));
     assert!(summary.contains("CutFEM"));
@@ -50,4 +49,26 @@ fn marquee_runner_rejects_invalid_inputs_before_solver() {
     };
 
     assert!(std::panic::catch_unwind(|| run_study(design, &config)).is_err());
+}
+
+#[cfg(feature = "marquee")]
+#[test]
+fn marquee_empty_design_sdf_is_total_even_when_runner_rejects_it() {
+    use fs_cutfem::sdf::CutSdf;
+    use fs_marquee::study::PlateWithHoles;
+
+    let design = PlateWithHoles {
+        centers: Vec::new(),
+        radii: Vec::new(),
+    };
+
+    let value = design.value([0.5, 0.5]);
+    let gradient = design.gradient([0.5, 0.5]);
+
+    assert!(value.is_infinite() && value.is_sign_negative());
+    assert!(
+        gradient
+            .iter()
+            .all(|component| component.abs() <= f64::EPSILON)
+    );
 }
