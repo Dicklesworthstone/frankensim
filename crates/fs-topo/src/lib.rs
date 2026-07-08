@@ -22,6 +22,9 @@
 pub mod cubical;
 mod intersect;
 
+#[cfg(feature = "moonshot-topo-persistence")]
+pub mod penalty;
+
 pub use intersect::{
     IntersectKind, SelfIntersectReport, self_intersection_certificate, tri_tri_intersect,
 };

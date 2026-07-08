@@ -22,5 +22,9 @@ asupersync = { path = "../../../asupersync" }
 fs-alloc = { path = "../fs-alloc" }
 fs-rep-frep = { path = "../fs-rep-frep" }
 
+[features]
+# [M]-gated per the Ambition-Tag rule (bead 7tv.15).
+moonshot-topo-persistence = []
+
 [lints]
 workspace = true
