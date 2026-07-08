@@ -526,7 +526,10 @@ fn exact_hvp_symmetry_fd_gap_and_tr_win() {
     let vthw: f64 = v.iter().zip(&hw).map(|(a, c)| a * c).sum();
     let wthv: f64 = w.iter().zip(&hv).map(|(a, c)| a * c).sum();
     let sym_rel = (vthw - wthv).abs() / vthw.abs().max(1e-30);
-    assert!(sym_rel < 1e-8, "Hessian not symmetric: {vthw:.10e} vs {wthv:.10e}");
+    assert!(
+        sym_rel < 1e-8,
+        "Hessian not symmetric: {vthw:.10e} vs {wthv:.10e}"
+    );
     // (2) FD-of-gradients agreement + the FD accuracy gap QUANTIFIED.
     let grad_at = |rho: &[f64]| -> Vec<f64> {
         let pr = DensityPoisson::new(&complex, &positions, rho.to_vec());
@@ -543,11 +546,23 @@ fn exact_hvp_symmetry_fd_gap_and_tr_win() {
     let mut fd_err_best = f64::INFINITY;
     let mut fd_err_worst = 0.0f64;
     for eps in [1e-4f64, 1e-6, 1e-8] {
-        let rp: Vec<f64> = rho0.iter().zip(&v).map(|(r, vi)| eps.mul_add(*vi, *r)).collect();
-        let rm: Vec<f64> = rho0.iter().zip(&v).map(|(r, vi)| eps.mul_add(-vi, *r)).collect();
+        let rp: Vec<f64> = rho0
+            .iter()
+            .zip(&v)
+            .map(|(r, vi)| eps.mul_add(*vi, *r))
+            .collect();
+        let rm: Vec<f64> = rho0
+            .iter()
+            .zip(&v)
+            .map(|(r, vi)| eps.mul_add(-vi, *r))
+            .collect();
         let gp = grad_at(&rp);
         let gm = grad_at(&rm);
-        let fd: Vec<f64> = gp.iter().zip(&gm).map(|(a, c)| (a - c) / (2.0 * eps)).collect();
+        let fd: Vec<f64> = gp
+            .iter()
+            .zip(&gm)
+            .map(|(a, c)| (a - c) / (2.0 * eps))
+            .collect();
         let num: f64 = fd
             .iter()
             .zip(&hv)
