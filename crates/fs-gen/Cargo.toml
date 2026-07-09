@@ -1,0 +1,20 @@
+[package]
+name = "fs-gen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Proposal-only generative models (fs-gen): corpus-fitted shape priors, covariance-shaped mutation kernels, graph candidate generators, and archive-aware acquisition — every output a Proposal<T> that the type system keeps out of certified paths until it passes validation. ML proposes; certified numerics disposes."
+
+[package.metadata.frankensim]
+layer = "L4"
+
+[dependencies]
+
+[features]
+# [M]-gated per the Ambition-Tag rule (bead 7tv.19).
+proposal-gen = []
+
+[lints]
+workspace = true
