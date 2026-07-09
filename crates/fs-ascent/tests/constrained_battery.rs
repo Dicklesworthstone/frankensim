@@ -1,0 +1,149 @@
+//! Bead ijil battery (a, b): interior-point and SQP parity with the
+//! landed augmented-Lagrangian on the KKT fixtures, plus the SQP
+//! warm-start polish gate.
+
+use fs_ascent::auglag::ConstrainedProblem;
+use fs_ascent::{augmented_lagrangian, interior_point, sqp};
+
+fn verdict(name: &str, pass: bool, details: &str) {
+    println!("{{\"test\":\"{name}\",\"pass\":{pass},\"details\":\"{details}\"}}");
+    assert!(pass, "{name}: {details}");
+}
+
+/// The landed fixture: minimize (x−2)² + (y−1)² s.t. x + y = 2,
+/// x ≤ 1.2. Optimum (1.2, 0.8), both constraints active.
+fn fixture_a<'a>(
+    fg: &'a mut dyn FnMut(&[f64]) -> (f64, Vec<f64>),
+    ce: &'a dyn Fn(&[f64]) -> Vec<f64>,
+    ce_jt: &'a dyn Fn(&[f64], &[f64]) -> Vec<f64>,
+    ci: &'a dyn Fn(&[f64]) -> Vec<f64>,
+    ci_jt: &'a dyn Fn(&[f64], &[f64]) -> Vec<f64>,
+) -> ConstrainedProblem<'a> {
+    ConstrainedProblem {
+        fg,
+        ce,
+        ce_jt,
+        ci,
+        ci_jt,
+    }
+}
+
+fn fg_a(x: &[f64]) -> (f64, Vec<f64>) {
+    (
+        (x[0] - 2.0).powi(2) + (x[1] - 1.0).powi(2),
+        vec![2.0 * (x[0] - 2.0), 2.0 * (x[1] - 1.0)],
+    )
+}
+
+#[test]
+fn ip_parity_on_landed_kkt_fixture() {
+    let mut fg = fg_a;
+    let ce = |x: &[f64]| vec![x[0] + x[1] - 2.0];
+    let ce_jt = |_: &[f64], w: &[f64]| vec![w[0], w[0]];
+    let ci = |x: &[f64]| vec![x[0] - 1.2];
+    let ci_jt = |_: &[f64], w: &[f64]| vec![w[0], 0.0];
+    let mut p = fixture_a(&mut fg, &ce, &ce_jt, &ci, &ci_jt);
+    let rep = interior_point(&mut p, &[0.0, 0.0], 1e-6, 60);
+    verdict(
+        "ijil-ip-parity",
+        rep.converged
+            && (rep.x[0] - 1.2).abs() < 1e-4
+            && (rep.x[1] - 0.8).abs() < 1e-4
+            && rep.nu[0] > 0.0,
+        &format!(
+            "IP x=({:.5},{:.5}) kkt=({:.1e},{:.1e},{:.1e}) nu={:.4} outer={} — matches the AL fixture optimum (1.2, 0.8)",
+            rep.x[0],
+            rep.x[1],
+            rep.kkt.stationarity,
+            rep.kkt.feasibility,
+            rep.kkt.complementarity,
+            rep.nu[0],
+            rep.outer_iters
+        ),
+    );
+}
+
+#[test]
+fn sqp_parity_and_multiplier_agreement() {
+    let mut fg1 = fg_a;
+    let ce = |x: &[f64]| vec![x[0] + x[1] - 2.0];
+    let ce_jt = |_: &[f64], w: &[f64]| vec![w[0], w[0]];
+    let ci = |x: &[f64]| vec![x[0] - 1.2];
+    let ci_jt = |_: &[f64], w: &[f64]| vec![w[0], 0.0];
+    let mut p1 = fixture_a(&mut fg1, &ce, &ce_jt, &ci, &ci_jt);
+    let al = augmented_lagrangian(&mut p1, &[0.0, 0.0], 1e-7, 40);
+    let mut fg2 = fg_a;
+    let mut p2 = fixture_a(&mut fg2, &ce, &ce_jt, &ci, &ci_jt);
+    let sq = sqp(&mut p2, &[0.0, 0.0], 1e-7, 60);
+    let xdev = sq
+        .x
+        .iter()
+        .zip(&al.x)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f64, f64::max);
+    let mult_dev = (sq.lambda[0] - al.lambda[0])
+        .abs()
+        .max((sq.nu[0] - al.nu[0]).abs());
+    verdict(
+        "ijil-sqp-parity",
+        sq.converged && xdev < 1e-5 && mult_dev < 1e-3,
+        &format!(
+            "SQP x=({:.5},{:.5}) vs AL x=({:.5},{:.5}): |dx| {xdev:.1e}; multipliers (lambda, nu) = ({:.4},{:.4}) vs AL ({:.4},{:.4}), dev {mult_dev:.1e}",
+            sq.x[0], sq.x[1], al.x[0], al.x[1], sq.lambda[0], sq.nu[0], al.lambda[0], al.nu[0]
+        ),
+    );
+}
+
+#[test]
+fn sqp_warm_start_polish_is_fast() {
+    // The polish regime the bead names: from a near-optimal start the
+    // active set is right immediately and SQP lands in a handful of
+    // iterations.
+    let mut fg = fg_a;
+    let ce = |x: &[f64]| vec![x[0] + x[1] - 2.0];
+    let ce_jt = |_: &[f64], w: &[f64]| vec![w[0], w[0]];
+    let ci = |x: &[f64]| vec![x[0] - 1.2];
+    let ci_jt = |_: &[f64], w: &[f64]| vec![w[0], 0.0];
+    let mut p = fixture_a(&mut fg, &ce, &ce_jt, &ci, &ci_jt);
+    let rep = sqp(&mut p, &[1.19, 0.81], 1e-9, 20);
+    // Measured: 10 iterations to 5e-11 KKT (identity-seeded BFGS needs
+    // a few curvature pairs + working-set settling); the gate is the
+    // measured envelope, not a wish.
+    verdict(
+        "ijil-sqp-polish",
+        rep.converged && rep.iters <= 12 && (rep.x[0] - 1.2).abs() < 1e-8,
+        &format!(
+            "warm-start polish: {} iters to kkt=({:.1e},{:.1e},{:.1e})",
+            rep.iters, rep.kkt.stationarity, rep.kkt.feasibility, rep.kkt.complementarity
+        ),
+    );
+}
+
+#[test]
+fn ip_and_sqp_on_inequality_only_circle() {
+    // minimize x + y s.t. x² + y² ≤ 2: optimum (−1, −1), ν = 0.5.
+    let mk_fg = || {
+        |x: &[f64]| -> (f64, Vec<f64>) { (x[0] + x[1], vec![1.0, 1.0]) }
+    };
+    let ce = |_: &[f64]| Vec::new();
+    let ce_jt = |_: &[f64], _: &[f64]| vec![0.0, 0.0];
+    let ci = |x: &[f64]| vec![x[0] * x[0] + x[1] * x[1] - 2.0];
+    let ci_jt = |x: &[f64], w: &[f64]| vec![2.0 * x[0] * w[0], 2.0 * x[1] * w[0]];
+    let mut fg1 = mk_fg();
+    let mut p1 = fixture_a(&mut fg1, &ce, &ce_jt, &ci, &ci_jt);
+    let ip = interior_point(&mut p1, &[0.0, 0.0], 1e-6, 60);
+    let mut fg2 = mk_fg();
+    let mut p2 = fixture_a(&mut fg2, &ce, &ce_jt, &ci, &ci_jt);
+    let sq = sqp(&mut p2, &[0.0, 0.0], 1e-7, 80);
+    let ok = |x: &[f64], nu: f64| {
+        (x[0] + 1.0).abs() < 1e-3 && (x[1] + 1.0).abs() < 1e-3 && (nu - 0.5).abs() < 1e-2
+    };
+    verdict(
+        "ijil-circle-both-engines",
+        ip.converged && sq.converged && ok(&ip.x, ip.nu[0]) && ok(&sq.x, sq.nu[0]),
+        &format!(
+            "circle fixture: IP x=({:.4},{:.4}) nu={:.4}; SQP x=({:.4},{:.4}) nu={:.4} (analytic (-1,-1), nu=0.5)",
+            ip.x[0], ip.x[1], ip.nu[0], sq.x[0], sq.x[1], sq.nu[0]
+        ),
+    );
+}

@@ -18,6 +18,10 @@ fs-opt = { path = "../fs-opt" }
 fs-solver = { path = "../fs-solver" }
 
 [dev-dependencies]
+# Constellation (FrankenScipy 0.1.0 per constellation.lock): the
+# section-12 cross-validation oracle — TEST-ONLY.
+fsci-opt = { path = "../../../frankenscipy/crates/fsci-opt" }
+fs-qty = { path = "../fs-qty" }
 fs-ad = { path = "../fs-ad" }
 fs-feec = { path = "../fs-feec" }
 fs-rand = { path = "../fs-rand" }
