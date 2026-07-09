@@ -55,13 +55,13 @@ impl Claim {
         match &self.color {
             Color::Verified { lo, hi } => {
                 out.push_str("verified|");
-                write!(out, "{}|{}|", lo.to_bits(), hi.to_bits()).expect("write to String");
+                let _ = write!(out, "{}|{}|", lo.to_bits(), hi.to_bits());
             }
             Color::Validated { regime, dataset } => {
                 out.push_str("validated|");
                 for (k, (lo, hi)) in regime.bounds() {
                     push_atom(&mut out, k);
-                    write!(out, "{}|{}|", lo.to_bits(), hi.to_bits()).expect("write to String");
+                    let _ = write!(out, "{}|{}|", lo.to_bits(), hi.to_bits());
                 }
                 push_atom(&mut out, dataset);
             }
@@ -71,7 +71,7 @@ impl Claim {
             } => {
                 out.push_str("estimated|");
                 push_atom(&mut out, estimator);
-                write!(out, "{}|", dispersion.to_bits()).expect("write to String");
+                let _ = write!(out, "{}|", dispersion.to_bits());
             }
         }
         out
@@ -197,30 +197,31 @@ impl EvidencePackage {
         level.extend(self.claims.iter().map(|c| fnv1a(c.canonical().as_bytes())));
         while level.len() > 1 {
             let mut next = Vec::with_capacity(level.len().div_ceil(2));
-            let mut i = 0;
-            while i < level.len() {
-                if i + 1 < level.len() {
-                    next.push(combine(level[i], level[i + 1]));
-                } else {
-                    next.push(level[i]); // odd node carries up
+            for pair in level.chunks(2) {
+                match pair {
+                    [a, b] => next.push(combine(*a, *b)),
+                    [a] => next.push(*a), // odd node carries up
+                    _ => {}
                 }
-                i += 2;
             }
             level = next;
         }
-        level[0]
+        match level.as_slice() {
+            [root] => *root,
+            [] => fnv1a(b"fs-package:empty-internal-level"),
+            _ => fnv1a(b"fs-package:invalid-internal-level"),
+        }
     }
 
     fn package_header(&self) -> String {
         use core::fmt::Write as _;
         let mut out = String::from("package|");
-        write!(
+        let _ = write!(
             out,
             "format:{}|claims:{}|",
             self.format_version,
             self.claims.len()
-        )
-        .expect("write to String");
+        );
         push_atom(&mut out, &self.provenance.code_version);
         push_atom(&mut out, &self.provenance.constellation_lock);
         out
@@ -290,17 +291,18 @@ impl EvidencePackage {
     pub fn to_json(&self) -> String {
         use core::fmt::Write as _;
         let mut out = String::new();
-        write!(
+        let _ = write!(
             out,
             "{{\"format_version\":{},\"merkle_root\":\"{:016x}\",\"provenance\":{{\"code_version\":\"{}\",\"constellation_lock\":\"{}\"}},\"signature\":",
             self.format_version,
             self.merkle_root(),
             json_escape(&self.provenance.code_version),
             json_escape(&self.provenance.constellation_lock),
-        )
-        .expect("write to String");
+        );
         match &self.signature {
-            Some(s) => write!(out, "\"{}\"", json_escape(s)).expect("write"),
+            Some(s) => {
+                let _ = write!(out, "\"{}\"", json_escape(s));
+            }
             None => out.push_str("null"),
         }
         out.push_str(",\"claims\":[");
@@ -308,14 +310,13 @@ impl EvidencePackage {
             if i > 0 {
                 out.push(',');
             }
-            write!(
+            let _ = write!(
                 out,
                 "{{\"id\":\"{}\",\"statement\":\"{}\",\"color\":\"{}\"}}",
                 json_escape(&c.id),
                 json_escape(&c.statement),
                 c.color.rank_str(),
-            )
-            .expect("write");
+            );
         }
         out.push_str("]}");
         out
@@ -334,15 +335,17 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 
 /// Combine two child hashes into a parent hash.
 fn combine(a: u64, b: u64) -> u64 {
+    let bytes = a.to_le_bytes().into_iter().chain(b.to_le_bytes());
     let mut buf = [0u8; 16];
-    buf[..8].copy_from_slice(&a.to_le_bytes());
-    buf[8..].copy_from_slice(&b.to_le_bytes());
+    for (slot, byte) in buf.iter_mut().zip(bytes) {
+        *slot = byte;
+    }
     fnv1a(&buf)
 }
 
 fn push_atom(out: &mut String, value: &str) {
     use core::fmt::Write as _;
-    write!(out, "{}:", value.len()).expect("write to String");
+    let _ = write!(out, "{}:", value.len());
     out.push_str(value);
     out.push('|');
 }
@@ -358,7 +361,9 @@ fn json_escape(s: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => write!(out, "\\u{:04x}", c as u32).expect("write to String"),
+            c if u32::from(c) < 0x20 => {
+                let _ = write!(out, "\\u{:04x}", u32::from(c));
+            }
             c => out.push(c),
         }
     }
