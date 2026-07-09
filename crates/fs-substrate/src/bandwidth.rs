@@ -62,9 +62,34 @@ pub fn measure(logical_cpus: usize) -> Measured {
     // SpMV attainment gate reading 8%).
     let threads = logical_cpus.max(1);
     let mut a = vec![0.0f64; LEN];
-    let b = vec![1.0f64; LEN];
-    let c = vec![2.0f64; LEN];
+    let mut b = vec![0.0f64; LEN];
+    let mut c = vec![0.0f64; LEN];
     let chunk = LEN.div_ceil(threads);
+    // FIRST-TOUCH: each timing thread initializes ITS chunk, so pages
+    // land on the toucher's NUMA node. MEASURED rejection of serial
+    // init: on a 64-core Threadripper (8-channel DDR4) all-core triad
+    // read 30 GB/s — every page faulted on one node and 64 threads
+    // queued on one memory controller.
+    std::thread::scope(|s| {
+        let mut ra = a.as_mut_slice();
+        let mut rb = b.as_mut_slice();
+        let mut rc = c.as_mut_slice();
+        while !ra.is_empty() {
+            let take = chunk.min(ra.len());
+            let (ma, ta) = ra.split_at_mut(take);
+            let (mb, tb) = rb.split_at_mut(take);
+            let (mc, tc) = rc.split_at_mut(take);
+            s.spawn(move || {
+                ma.fill(0.0);
+                mb.fill(1.0);
+                mc.fill(2.0);
+            });
+            ra = ta;
+            rb = tb;
+            rc = tc;
+        }
+    });
+    let (b, c) = (b, c);
     let mut best = 0.0f64;
     for rep in 0..REPS {
         let scale = 1.0 + rep as f64;

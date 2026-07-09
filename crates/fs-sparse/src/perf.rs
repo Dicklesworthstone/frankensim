@@ -25,6 +25,13 @@
 
 use crate::{Coo, Csr};
 
+struct TileOut {
+    row_counts: Vec<usize>,
+    col_idx: Vec<usize>,
+    vals: Vec<f64>,
+    row_lo: usize,
+}
+
 /// CSR with compact u32 column indices (the SpMV bandwidth diet).
 #[derive(Debug, Clone, PartialEq)]
 pub struct CsrCompact {
@@ -42,7 +49,7 @@ impl CsrCompact {
     #[must_use]
     pub fn from_csr(a: &Csr) -> CsrCompact {
         assert!(
-            a.ncols() <= u32::MAX as usize,
+            u32::try_from(a.ncols()).is_ok(),
             "compact CSR needs ncols <= u32::MAX, got {}",
             a.ncols()
         );
@@ -124,6 +131,47 @@ impl CsrCompact {
         bounds
     }
 
+    /// Rebuild the compact arrays with PER-SHARD FIRST-TOUCH: each
+    /// shard's slice of `col_idx`/`vals` is copied by the thread that
+    /// will stream it in [`Self::spmv_sharded`], so pages land on the
+    /// owning NUMA node (the bead's "first-touch on TR" item —
+    /// serially-built arrays throttled a 64-core Threadripper to one
+    /// node's controllers, MEASURED). Contents are bitwise identical;
+    /// only page placement changes.
+    #[must_use]
+    pub fn numa_localized(&self, threads: usize) -> CsrCompact {
+        let bounds = self.shard_bounds(threads);
+        let mut col_idx = vec![0u32; self.col_idx.len()];
+        let mut vals = vec![0.0f64; self.vals.len()];
+        std::thread::scope(|scope| {
+            let mut rest_c = col_idx.as_mut_slice();
+            let mut rest_v = vals.as_mut_slice();
+            let mut off = 0usize;
+            for w in bounds.windows(2) {
+                let (lo, hi) = (self.row_ptr[w[0]], self.row_ptr[w[1]]);
+                let take = hi - off;
+                let (mc, tc) = rest_c.split_at_mut(take);
+                let (mv, tv) = rest_v.split_at_mut(take);
+                rest_c = tc;
+                rest_v = tv;
+                let src_c = &self.col_idx[lo..hi];
+                let src_v = &self.vals[lo..hi];
+                off = hi;
+                scope.spawn(move || {
+                    mc.copy_from_slice(src_c);
+                    mv.copy_from_slice(src_v);
+                });
+            }
+        });
+        CsrCompact {
+            nrows: self.nrows,
+            ncols: self.ncols,
+            row_ptr: self.row_ptr.clone(),
+            col_idx,
+            vals,
+        }
+    }
+
     /// Sharded parallel SpMV: bitwise equal to [`Self::spmv`] at every
     /// thread count (disjoint row ranges; per-row order untouched).
     pub fn spmv_sharded(&self, x: &[f64], y: &mut [f64], threads: usize) {
@@ -189,13 +237,6 @@ impl Coo {
         for (i, &r) in self.rows.iter().enumerate() {
             buckets[tile_of_row[r]].push(i);
         }
-        // Per-tile canonical accumulation on scoped threads.
-        struct TileOut {
-            row_counts: Vec<usize>,
-            col_idx: Vec<usize>,
-            vals: Vec<f64>,
-            row_lo: usize,
-        }
         let mut outs: Vec<Option<TileOut>> = Vec::new();
         for _ in 0..t {
             outs.push(None);
@@ -222,35 +263,7 @@ impl Coo {
                 let (row_lo, row_hi) = ranges[tile];
                 handles.push((
                     tile,
-                    scope.spawn(move || {
-                        let mut order: Vec<usize> = idxs.clone();
-                        order.sort_by_key(|&i| (self.rows[i], self.cols[i]));
-                        let mut row_counts = vec![0usize; row_hi.saturating_sub(row_lo)];
-                        let mut col_idx = Vec::new();
-                        let mut vals = Vec::new();
-                        let mut i = 0usize;
-                        while i < order.len() {
-                            let (r, c) = (self.rows[order[i]], self.cols[order[i]]);
-                            let mut acc = self.vals[order[i]];
-                            i += 1;
-                            while i < order.len()
-                                && self.rows[order[i]] == r
-                                && self.cols[order[i]] == c
-                            {
-                                acc += self.vals[order[i]];
-                                i += 1;
-                            }
-                            row_counts[r - row_lo] += 1;
-                            col_idx.push(c);
-                            vals.push(acc);
-                        }
-                        TileOut {
-                            row_counts,
-                            col_idx,
-                            vals,
-                            row_lo,
-                        }
-                    }),
+                    scope.spawn(move || assemble_tile(self, idxs, row_lo, row_hi)),
                 ));
             }
             for (tile, h) in handles {
@@ -272,5 +285,32 @@ impl Coo {
             row_ptr[r + 1] += row_ptr[r];
         }
         Csr::from_parts(nrows, self.ncols, row_ptr, col_idx, vals)
+    }
+}
+
+fn assemble_tile(coo: &Coo, idxs: &[usize], row_lo: usize, row_hi: usize) -> TileOut {
+    let mut order: Vec<usize> = idxs.to_vec();
+    order.sort_by_key(|&i| (coo.rows[i], coo.cols[i]));
+    let mut row_counts = vec![0usize; row_hi.saturating_sub(row_lo)];
+    let mut col_idx = Vec::new();
+    let mut vals = Vec::new();
+    let mut i = 0usize;
+    while i < order.len() {
+        let (r, c) = (coo.rows[order[i]], coo.cols[order[i]]);
+        let mut acc = coo.vals[order[i]];
+        i += 1;
+        while i < order.len() && coo.rows[order[i]] == r && coo.cols[order[i]] == c {
+            acc += coo.vals[order[i]];
+            i += 1;
+        }
+        row_counts[r - row_lo] += 1;
+        col_idx.push(c);
+        vals.push(acc);
+    }
+    TileOut {
+        row_counts,
+        col_idx,
+        vals,
+        row_lo,
     }
 }

@@ -44,7 +44,7 @@ fn wsbf_roofline() {
     let nrows = 4_000_000usize;
     let band = 8usize;
     let a = banded_matrix(nrows, band);
-    let compact = CsrCompact::from_csr(&a);
+    let compact = CsrCompact::from_csr(&a).numa_localized(threads);
     let nnz = compact.nnz();
     let x: Vec<f64> = (0..nrows).map(|i| 0.5 + (i % 13) as f64 * 0.01).collect();
     let mut y = vec![0.0f64; nrows];
