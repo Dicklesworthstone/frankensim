@@ -532,3 +532,222 @@ impl HvArchive {
         true
     }
 }
+
+/// Das–Dennis systematic reference directions on the (m−1)-simplex
+/// with `p` divisions: all non-negative integer m-tuples summing to
+/// p, scaled by 1/p. Deterministic lexicographic enumeration;
+/// C(p+m−1, m−1) directions.
+#[must_use]
+pub fn das_dennis(m: usize, p: usize) -> Vec<Vec<f64>> {
+    let mut out = Vec::new();
+    let mut stack = vec![(Vec::<usize>::new(), p)];
+    while let Some((prefix, rest)) = stack.pop() {
+        if prefix.len() == m - 1 {
+            let mut dir: Vec<f64> = prefix.iter().map(|&k| k as f64 / p as f64).collect();
+            dir.push(rest as f64 / p as f64);
+            out.push(dir);
+            continue;
+        }
+        // Push in reverse so the popped order is lexicographic.
+        for k in (0..=rest).rev() {
+            let mut next = prefix.clone();
+            next.push(k);
+            stack.push((next, rest - k));
+        }
+    }
+    out
+}
+
+/// Perpendicular distance from a (normalized) objective vector to the
+/// ray through a reference direction.
+fn perp_distance(f: &[f64], dir: &[f64]) -> f64 {
+    let dd: f64 = dir.iter().map(|d| d * d).sum();
+    if dd < 1e-30 {
+        return f.iter().map(|v| v * v).sum::<f64>().sqrt();
+    }
+    let t: f64 = f.iter().zip(dir).map(|(a, b)| a * b).sum::<f64>() / dd;
+    f.iter()
+        .zip(dir)
+        .map(|(a, b)| {
+            let r = t.mul_add(-b, *a);
+            r * r
+        })
+        .sum::<f64>()
+        .sqrt()
+}
+
+/// NSGA-III for many-objective minimization: reference-direction
+/// niching replaces crowding distance. Normalization uses the ideal
+/// point and the FIRST-front per-objective maxima as the nadir
+/// estimate (the full ASF extreme-point construction is the recorded
+/// refinement). Deterministic throughout (index tie-breaks).
+pub fn nsga3(
+    objectives: &mut dyn FnMut(&[f64]) -> Vec<f64>,
+    dim: usize,
+    bounds: (f64, f64),
+    directions: &[Vec<f64>],
+    params: &NsgaParams,
+) -> Vec<Individual> {
+    let (lo, hi) = bounds;
+    let mut stream = StreamKey {
+        seed: params.seed,
+        kernel: 0x05A3,
+        tile: 0,
+    }
+    .stream();
+    let mut pop: Vec<Individual> = (0..params.pop)
+        .map(|_| {
+            let x: Vec<f64> = (0..dim)
+                .map(|_| (hi - lo).mul_add(stream.next_f64(), lo))
+                .collect();
+            let f = objectives(&x);
+            Individual { x, f }
+        })
+        .collect();
+    for _ in 0..params.generations {
+        let fronts = non_dominated_sort(&pop);
+        // Rank-only binary tournament (NSGA-III drops crowding).
+        let mut offspring = Vec::with_capacity(params.pop);
+        while offspring.len() < params.pop {
+            let pick = |s: &mut fs_rand::Stream| -> usize {
+                let a = s.next_below(pop.len() as u64) as usize;
+                let b = s.next_below(pop.len() as u64) as usize;
+                if fronts[a] < fronts[b] || (fronts[a] == fronts[b] && a <= b) {
+                    a
+                } else {
+                    b
+                }
+            };
+            let p1 = pick(&mut stream);
+            let p2 = pick(&mut stream);
+            let (mut c1, mut c2) =
+                sbx(&pop[p1].x, &pop[p2].x, params.eta_c, lo, hi, &mut stream);
+            mutate(&mut c1, params.eta_m, params.p_mut, lo, hi, &mut stream);
+            mutate(&mut c2, params.eta_m, params.p_mut, lo, hi, &mut stream);
+            let f1 = objectives(&c1);
+            offspring.push(Individual { x: c1, f: f1 });
+            if offspring.len() < params.pop {
+                let f2 = objectives(&c2);
+                offspring.push(Individual { x: c2, f: f2 });
+            }
+        }
+        pop.extend(offspring);
+        pop = nsga3_select(pop, directions, params.pop);
+    }
+    let fronts = non_dominated_sort(&pop);
+    pop.into_iter()
+        .zip(fronts)
+        .filter(|(_, r)| *r == 0)
+        .map(|(ind, _)| ind)
+        .collect()
+}
+
+/// NSGA-III environmental selection to `target` members.
+fn nsga3_select(pop: Vec<Individual>, directions: &[Vec<f64>], target: usize) -> Vec<Individual> {
+    let m = pop[0].f.len();
+    let fronts = non_dominated_sort(&pop);
+    let max_front = fronts.iter().copied().max().unwrap_or(0);
+    let mut accepted: Vec<usize> = Vec::with_capacity(target);
+    let mut partial: Vec<usize> = Vec::new();
+    for level in 0..=max_front {
+        let members: Vec<usize> = (0..pop.len()).filter(|&i| fronts[i] == level).collect();
+        if accepted.len() + members.len() <= target {
+            accepted.extend(members);
+        } else {
+            partial = members;
+            break;
+        }
+        if accepted.len() == target {
+            break;
+        }
+    }
+    if accepted.len() == target || partial.is_empty() {
+        return accepted.into_iter().map(|i| pop[i].clone()).collect();
+    }
+    // Normalize over accepted ∪ partial: ideal point + first-front max.
+    let considered: Vec<usize> = accepted.iter().chain(&partial).copied().collect();
+    let mut ideal = vec![f64::INFINITY; m];
+    for &i in &considered {
+        for (d, v) in ideal.iter_mut().zip(&pop[i].f) {
+            *d = d.min(*v);
+        }
+    }
+    let mut span = vec![1e-30f64; m];
+    for &i in &considered {
+        if fronts[i] == 0 {
+            for (d, (v, id)) in span.iter_mut().zip(pop[i].f.iter().zip(&ideal)) {
+                *d = d.max(v - id);
+            }
+        }
+    }
+    let normalize = |i: usize| -> Vec<f64> {
+        pop[i]
+            .f
+            .iter()
+            .zip(ideal.iter().zip(&span))
+            .map(|(v, (id, sp))| (v - id) / sp.max(1e-30))
+            .collect()
+    };
+    // Associate everyone to the nearest direction.
+    let associate = |i: usize| -> (usize, f64) {
+        let fnorm = normalize(i);
+        let mut best = (0usize, f64::INFINITY);
+        for (k, dir) in directions.iter().enumerate() {
+            let d = perp_distance(&fnorm, dir);
+            if d < best.1 {
+                best = (k, d);
+            }
+        }
+        best
+    };
+    let mut niche = vec![0usize; directions.len()];
+    for &i in &accepted {
+        niche[associate(i).0] += 1;
+    }
+    let mut pool: Vec<(usize, usize, f64)> = partial
+        .iter()
+        .map(|&i| {
+            let (k, d) = associate(i);
+            (i, k, d)
+        })
+        .collect();
+    while accepted.len() < target {
+        // Direction with members in the pool and MINIMUM niche count
+        // (index tie-break).
+        let mut best_dir = usize::MAX;
+        let mut best_count = usize::MAX;
+        for &(_, k, _) in &pool {
+            if niche[k] < best_count {
+                best_count = niche[k];
+                best_dir = k;
+            }
+        }
+        // Among pool members of that direction: min perpendicular
+        // distance if the niche is empty, else first by index.
+        let mut chosen = usize::MAX;
+        let mut chosen_pos = usize::MAX;
+        let mut chosen_d = f64::INFINITY;
+        for (pos, &(i, k, d)) in pool.iter().enumerate() {
+            if k != best_dir {
+                continue;
+            }
+            let better = if best_count == 0 {
+                d < chosen_d || (d == chosen_d && i < chosen)
+            } else {
+                i < chosen
+            };
+            if better {
+                chosen = i;
+                chosen_pos = pos;
+                chosen_d = d;
+            }
+        }
+        accepted.push(chosen);
+        pool.swap_remove(chosen_pos);
+        niche[best_dir] += 1;
+        if pool.is_empty() {
+            break;
+        }
+    }
+    accepted.into_iter().map(|i| pop[i].clone()).collect()
+}

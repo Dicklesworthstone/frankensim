@@ -23,8 +23,8 @@ pub mod ot;
 pub use cma::{BipopReport, CmaParams, CmaReport, bipop_cmaes, cmaes};
 pub use dro::{DroReport, wasserstein_worst_case};
 pub use moo::{
-    HvArchive, Individual, NsgaParams, crowding_distance, cvar_rockafellar_uryasev, dominates,
-    hypervolume, knee_point, mc_hypervolume, non_dominated_sort, nsga2,
+    HvArchive, Individual, NsgaParams, crowding_distance, cvar_rockafellar_uryasev, das_dennis,
+    dominates, hypervolume, knee_point, mc_hypervolume, non_dominated_sort, nsga2, nsga3,
 };
 pub use neldermead::nelder_mead;
 pub use ot::{OtReport, cost_sq_1d, monotone_cost_1d, sinkhorn};
