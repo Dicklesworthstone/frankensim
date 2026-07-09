@@ -64,7 +64,10 @@ None.
 Random123 KATs (3 vectors), avalanche battery, random-access≡sequential,
 16-tile×3-order shuffle invariance, adjacent-identity decorrelation,
 chi-square/moment gates (uniform/normal/exponential), Lemire bias +
-rejection-replay, checkpoint-resume equality.
+rejection-replay, checkpoint-resume equality. Bead 1za9: `tests/ziggurat.rs`
+(ziggurat moments + bit-determinism + two-sample KS vs Box–Muller) and
+`tests/stream_battery.rs` (DEV-ONLY: uniform χ², lag-1 serial correlation,
+monobit balance, inter-stream correlation matrix).
 
 ## QMC (qmc module)
 - `Sobol::new(dim)` / `Sobol::scrambled(dim, seed)` — base-2 Sobol,
@@ -89,5 +92,8 @@ rejection-replay, checkpoint-resume equality.
   accuracy-gated (moments + two-sample KS vs Box–Muller), but not admitted to
   strict mode until a cross-ISA bitwise-equal run on both reference machines
   lands (the `trj` pipeline); Box–Muller stays the strict default.
-- SIMD bulk generation lanes; PractRand/TestU01-class nightly battery (bead 1za9
-  remaining items).
+- SIMD bulk generation lanes (bead 1za9, remaining item — 4×/8× Philox via
+  fs-simd Ops, bitwise-equivalent to the scalar stream).
+- A FULL PractRand/TestU01 port: `tests/stream_battery.rs` ships a
+  representative dev-only subset (χ²/serial/monobit/inter-stream); the complete
+  suite + CI wiring remain a follow-up.
