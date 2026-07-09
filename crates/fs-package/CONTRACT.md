@@ -16,8 +16,9 @@ Layer L6. Depends only on `fs-evidence` (UTIL — `Color`, `ColorRank`,
 - `Provenance { code_version, constellation_lock }`.
 - `EvidencePackage { format_version, claims, provenance, signature }` —
   builder: `new(prov).with_claim(..).signed(..)`.
-  - `merkle_root() -> u64` — an FNV-1a Merkle root over the claims (order
-    sensitive); the content address. Any claim change changes it.
+  - `merkle_root() -> u64` — an FNV-1a Merkle root over the package identity:
+    format version, provenance, and ordered claims. Detached signatures are
+    excluded. Any reproducibility provenance or claim change changes it.
   - `verify() -> Result<PackageReport, PackageError>` — re-verify WITHOUT a
     solver: the format must be `FORMAT_VERSION`, and every claim must be
     complete for its color.
@@ -33,8 +34,8 @@ Layer L6. Depends only on `fs-evidence` (UTIL — `Color`, `ColorRank`,
   bounds()` non-empty) AND a non-blank anchoring `dataset`; a `Verified` claim
   must carry a finite `[lo <= hi]` interval. An `Estimated` claim needs no
   certificate — an all-estimated package is valid and round-trips.
-- CONTENT-ADDRESSING: `merkle_root` is deterministic and tamper-evident;
-  a detached signature does not change it.
+- CONTENT-ADDRESSING: `merkle_root` is deterministic and tamper-evident across
+  format version, provenance, and claims; a detached signature does not change it.
 - `verify` runs no solver — pure structural re-verification (the checker's
   core).
 
@@ -61,11 +62,12 @@ None.
 
 ## Conformance tests
 
-`tests/package.rs` (Proposal 12, 9 cases): complete mixed-color package;
+`tests/package.rs` (Proposal 12, 10 cases): complete mixed-color package;
 all-estimated boundary (valid + round-trips); validated-missing-regime and
 validated-missing-dataset completeness failures; verified bad-interval
-failure; Merkle determinism + tamper detection; unsupported-format rejection;
-optional detached signature; deterministic JSON carrying the root.
+failure; Merkle determinism + claim/provenance tamper detection;
+unsupported-format rejection; optional detached signature; deterministic JSON
+carrying the root.
 
 ## No-claim boundaries
 

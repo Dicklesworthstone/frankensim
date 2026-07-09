@@ -5,9 +5,9 @@
 //! self-contained, CONTENT-ADDRESSED bundle: the color-typed claims, the raw
 //! certificate data behind each (carried in the [`fs_evidence::Color`]),
 //! provenance (code version + the constellation lockfile), and a Merkle root
-//! over the claims so any tamper is detectable. A standalone, open-source
-//! CHECKER re-verifies the package WITHOUT re-running any solver — that
-//! structural re-verification is exactly [`EvidencePackage::verify`].
+//! over the package identity so any tamper is detectable. A standalone,
+//! open-source CHECKER re-verifies the package WITHOUT re-running any solver —
+//! that structural re-verification is exactly [`EvidencePackage::verify`].
 //!
 //! Completeness is enforced, not assumed: a validated-color claim that is
 //! missing its regime tag OR its anchoring dataset FAILS verification (an
@@ -49,23 +49,32 @@ impl Claim {
     /// A canonical string used for content hashing (bit-exact on floats).
     fn canonical(&self) -> String {
         use core::fmt::Write as _;
-        let c = match &self.color {
+        let mut out = String::from("claim|");
+        push_atom(&mut out, &self.id);
+        push_atom(&mut out, &self.statement);
+        match &self.color {
             Color::Verified { lo, hi } => {
-                format!("verified:{}:{}", lo.to_bits(), hi.to_bits())
+                out.push_str("verified|");
+                write!(out, "{}|{}|", lo.to_bits(), hi.to_bits()).expect("write to String");
             }
             Color::Validated { regime, dataset } => {
-                let mut r = String::new();
+                out.push_str("validated|");
                 for (k, (lo, hi)) in regime.bounds() {
-                    write!(r, "{k}={}..{};", lo.to_bits(), hi.to_bits()).expect("write to String");
+                    push_atom(&mut out, k);
+                    write!(out, "{}|{}|", lo.to_bits(), hi.to_bits()).expect("write to String");
                 }
-                format!("validated:[{r}]:{dataset}")
+                push_atom(&mut out, dataset);
             }
             Color::Estimated {
                 estimator,
                 dispersion,
-            } => format!("estimated:{estimator}:{}", dispersion.to_bits()),
-        };
-        format!("{}\u{1f}{}\u{1f}{c}", self.id, self.statement)
+            } => {
+                out.push_str("estimated|");
+                push_atom(&mut out, estimator);
+                write!(out, "{}|", dispersion.to_bits()).expect("write to String");
+            }
+        }
+        out
     }
 }
 
@@ -178,18 +187,14 @@ impl EvidencePackage {
         self
     }
 
-    /// The content address: an FNV-1a Merkle root over the claims (order
-    /// sensitive). Any change to any claim changes the root.
+    /// The content address: an FNV-1a Merkle root over the package identity
+    /// (format version, provenance, and ordered claims). Detached signatures are
+    /// excluded so signing does not change the address.
     #[must_use]
     pub fn merkle_root(&self) -> u64 {
-        if self.claims.is_empty() {
-            return fnv1a(b"fs-package:empty");
-        }
-        let mut level: Vec<u64> = self
-            .claims
-            .iter()
-            .map(|c| fnv1a(c.canonical().as_bytes()))
-            .collect();
+        let mut level: Vec<u64> = Vec::with_capacity(self.claims.len() + 1);
+        level.push(fnv1a(self.package_header().as_bytes()));
+        level.extend(self.claims.iter().map(|c| fnv1a(c.canonical().as_bytes())));
         while level.len() > 1 {
             let mut next = Vec::with_capacity(level.len().div_ceil(2));
             let mut i = 0;
@@ -204,6 +209,21 @@ impl EvidencePackage {
             level = next;
         }
         level[0]
+    }
+
+    fn package_header(&self) -> String {
+        use core::fmt::Write as _;
+        let mut out = String::from("package|");
+        write!(
+            out,
+            "format:{}|claims:{}|",
+            self.format_version,
+            self.claims.len()
+        )
+        .expect("write to String");
+        push_atom(&mut out, &self.provenance.code_version);
+        push_atom(&mut out, &self.provenance.constellation_lock);
+        out
     }
 
     /// The by-color budget pie over the claims.
@@ -318,6 +338,13 @@ fn combine(a: u64, b: u64) -> u64 {
     buf[..8].copy_from_slice(&a.to_le_bytes());
     buf[8..].copy_from_slice(&b.to_le_bytes());
     fnv1a(&buf)
+}
+
+fn push_atom(out: &mut String, value: &str) {
+    use core::fmt::Write as _;
+    write!(out, "{}:", value.len()).expect("write to String");
+    out.push_str(value);
+    out.push('|');
 }
 
 /// Minimal JSON string escaping.

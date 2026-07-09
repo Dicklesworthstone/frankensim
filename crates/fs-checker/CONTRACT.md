@@ -63,10 +63,10 @@ None.
 
 ## Conformance tests
 
-`tests/checker.rs` (Proposal 12, 8 cases): clean pass with no findings;
+`tests/checker.rs` (Proposal 12, 9 cases): clean pass with no findings;
 incomplete-validated-claim failure; content-address (Merkle) tamper detection;
-signature-presence reporting; deterministic budget-pie rendering; empty-package
-pie; protocol version; determinism.
+including provenance tamper; signature-presence reporting; deterministic
+budget-pie rendering; empty-package pie; protocol version; determinism.
 
 ## No-claim boundaries
 

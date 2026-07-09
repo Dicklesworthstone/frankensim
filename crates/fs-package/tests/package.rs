@@ -133,6 +133,18 @@ fn the_merkle_root_is_deterministic_and_tamper_evident() {
 }
 
 #[test]
+fn the_merkle_root_covers_reproducibility_provenance() {
+    let pkg = EvidencePackage::new(prov()).with_claim(verified("c1"));
+    let changed_code = EvidencePackage::new(Provenance::new("commit-other", "lock-deadbeef"))
+        .with_claim(verified("c1"));
+    let changed_lock = EvidencePackage::new(Provenance::new("commit-abc123", "lock-other"))
+        .with_claim(verified("c1"));
+
+    assert_ne!(pkg.merkle_root(), changed_code.merkle_root());
+    assert_ne!(pkg.merkle_root(), changed_lock.merkle_root());
+}
+
+#[test]
 fn an_unsupported_format_version_is_rejected() {
     let mut pkg = EvidencePackage::new(prov()).with_claim(estimated("e1"));
     pkg.format_version = 999;

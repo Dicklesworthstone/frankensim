@@ -84,6 +84,23 @@ fn content_address_mismatch_is_caught() {
 }
 
 #[test]
+fn content_address_mismatch_catches_provenance_tamper() {
+    let pkg = EvidencePackage::new(prov()).with_claim(verified("c1"));
+    let root = pkg.merkle_root();
+    let tampered =
+        EvidencePackage::new(Provenance::new("commit-evil", "lock-def")).with_claim(verified("c1"));
+
+    let report = check_against_root(&tampered, root);
+    assert!(!report.passed());
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|f| f.kind == "content-address-mismatch")
+    );
+}
+
+#[test]
 fn signature_presence_is_reported() {
     let unsigned = EvidencePackage::new(prov()).with_claim(estimated("e1"));
     assert_eq!(check(&unsigned).signature, SignatureStatus::Unsigned);
