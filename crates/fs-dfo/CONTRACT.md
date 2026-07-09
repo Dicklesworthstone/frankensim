@@ -1,8 +1,10 @@
 # CONTRACT: fs-dfo
 
-> Status: PARTIAL — CMA-ES (IGO form), BIPOP restarts, and Nelder–Mead
-> are in force; sep/low-rank CMA, NES parameterizations, DE, DIRECT,
-> TR-DFO, and fs-exec population waves are recorded follow-up scope.
+> Status: PARTIAL — CMA-ES (IGO form), BIPOP restarts, Nelder–Mead,
+> balanced entropic OT, MOO helpers, and discrete-support
+> Wasserstein-DRO inner sup are in force; sep/low-rank CMA, NES
+> parameterizations, DE, DIRECT, TR-DFO, and fs-exec population waves
+> are recorded follow-up scope.
 
 ## Purpose and layer
 Derivative-free optimization engines (plan §9.3). Layer: **L4 ASCENT**.
@@ -26,6 +28,12 @@ the fs-opt problem IR is a wiring bead once that crate stabilizes
   deterministic Philox-perturbed starts. The report carries the
   schedule (evidence).
 - `nelder_mead(...)` — deterministic simplex polish (no randomness).
+- `wasserstein_worst_case(losses, costs, n, rho) -> DroReport` —
+  exact dual evaluation for a discrete-support Wasserstein-DRO inner
+  supremum, with deterministic dual minimization and a recovered
+  support distribution. Kink cases split mass fractionally across
+  active supports instead of pretending a single argmax distribution
+  realizes the dual value.
 
 ## Invariants
 1. DETERMINISM: the full evolution is a pure function of the seed
@@ -81,20 +89,31 @@ detection hitting a synthetic elbow exactly; CVaR Rockafellar–Uryasev
 on 2·10⁵ Gaussian samples vs the closed form μ + σφ(z_β)/(1−β) within
 0.02 (and the RU minimizer matching the VaR); MOO golden hash
 `0xaf70_6167_593f_51cc`.
+tests/dro_battery.rs (4 cases): the one-sample kink LP recovers the
+fractional q = [0.5, 0.5] and worst-case value 0.5; tiny-scale kinks
+use scale-relative recovery rather than an absolute lambda cutoff;
+large radius saturates at max loss; public guards reject
+empty/non-finite losses, zero sample counts, invalid radii/costs, and
+rows without a zero-cost stay-put support. tests/dro_oracle_battery.rs
+(4 cases): closed-form endpoints and monotonicity in rho, exact
+tiny-LP strong-duality oracle, robust-decision shift demo, and frozen
+DRO golden hash `0xd21c_d092_b4a5_ba98`.
 
 ## No-claim boundaries
 - No published-ERT-table parity claims yet (in-repo BBOB-class fixtures
   only; the external COCO battery is follow-up).
 - Module `ot`: BALANCED entropic OT only (equal masses asserted);
-  unbalanced/partial transport, Sinkhorn divergences (debiasing), and
-  the Wasserstein-DRO inner sup are the bead's remaining lanes.
+  unbalanced/partial transport and Sinkhorn divergences (debiasing)
+  are follow-up lanes.
+- Module `dro`: discrete candidate support only; continuous ambiguity
+  sets, adaptive support generation, and coupled decision-dependent
+  losses are follow-up scope.
 - MOO slice-1 scope (module `moo`): NSGA-II, exact hypervolume m ≤ 4,
   knee, sample-CVaR. NSGA-III reference directions / MOEA/D
   (many-objective), MC hypervolume beyond m = 4,
   hypervolume-contribution archiving, gradient-based Pareto tracing
-  (fs-ascent continuation), ledger world-forking steering, Wasserstein
-  DRO + Sinkhorn OT, and chance constraints are the bead's recorded
-  split lanes.
+  (fs-ascent continuation), ledger world-forking steering, and chance
+  constraints are the bead's recorded split lanes.
 - Sep-CMA/low-rank (dim > ~200), NES, DE, DIRECT, TR-DFO: not built.
 - No constraint handling (fs-constraint owns kinds; integration later).
 - No parallel evaluation waves yet (fs-exec bead).

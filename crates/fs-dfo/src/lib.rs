@@ -15,11 +15,13 @@
 //! golden-hashed).
 
 pub mod cma;
+pub mod dro;
 pub mod moo;
 pub mod neldermead;
 pub mod ot;
 
 pub use cma::{BipopReport, CmaParams, CmaReport, bipop_cmaes, cmaes};
+pub use dro::{DroReport, wasserstein_worst_case};
 pub use moo::{
     Individual, NsgaParams, crowding_distance, cvar_rockafellar_uryasev, dominates, hypervolume,
     knee_point, non_dominated_sort, nsga2,
