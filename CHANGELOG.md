@@ -2,9 +2,9 @@
 
 This is a synthesized, agent-facing changelog for FrankenSim.
 
-Scope window: project inception on 2026-07-05 through `main` at
-[`43d52f2`](https://github.com/Dicklesworthstone/frankensim/commit/43d52f2ed960ede2067eec353359063c86d9dbb3)
-on 2026-07-07.
+Scope window: project inception on 2026-07-05 through
+[`main@319cb64`](https://github.com/Dicklesworthstone/frankensim/commit/319cb64f052d76e15882ee53ace41092881c7fa8)
+on 2026-07-08.
 
 This document was rebuilt from git history, tag/release metadata, the checked-in
 Beads tracker, and the current README/contract surface. It is organized by
@@ -13,11 +13,14 @@ landed capabilities rather than raw diff order.
 ## Version Timeline
 
 There are no git tags and no GitHub Releases as of
-[`43d52f2`](https://github.com/Dicklesworthstone/frankensim/commit/43d52f2ed960ede2067eec353359063c86d9dbb3).
+[`main@319cb64`](https://github.com/Dicklesworthstone/frankensim/commit/319cb64f052d76e15882ee53ace41092881c7fa8).
 
 | Version | Kind | Date | Summary |
 |---------|------|------|---------|
-| [`main@43d52f2`](https://github.com/Dicklesworthstone/frankensim/commit/43d52f2ed960ede2067eec353359063c86d9dbb3) | Mainline snapshot | 2026-07-07 | Working Rust workspace with 333 committed changes, no formal release tag, and the Phase 0 spine closed. |
+| [`main@319cb64`](https://github.com/Dicklesworthstone/frankensim/commit/319cb64f052d76e15882ee53ace41092881c7fa8) | Public mainline snapshot | 2026-07-08 | 633 commits, extending the campaign suite, inverse-trig/AD surface, and p-MG smoother evidence. |
+| [`main@fb08842`](https://github.com/Dicklesworthstone/frankensim/commit/fb088428ae810ee3ddd893712588c1e64f6cc0c4) | Prior changelog checkpoint | 2026-07-08 | 622 commits, including the proof-robust, schedule, and flutter end-to-end campaign capstones. |
+| [`origin/main@941a67e`](https://github.com/Dicklesworthstone/frankensim/commit/941a67e3cfd3a2bbc1fc3209bf0a044bc073188f) | Earlier public checkpoint | 2026-07-08 | 621 commits, covering the large 2026-07-08 implementation wave through value-of-information query planning. |
+| [`main@43d52f2`](https://github.com/Dicklesworthstone/frankensim/commit/43d52f2ed960ede2067eec353359063c86d9dbb3) | Prior changelog baseline | 2026-07-07 | Working Rust workspace with 333 commits, no formal release tag, and the Phase 0 spine closed. |
 | [`8e4c0a5`](https://github.com/Dicklesworthstone/frankensim/commit/8e4c0a5c4f18aa7d0bd0add47e407b835c7a3b86) | Inception commit | 2026-07-05 | Initial FrankenSim plan. |
 
 ## 1. Project Foundation And Policy Spine
@@ -329,10 +332,292 @@ gate.
 - [`544eaee`](https://github.com/Dicklesworthstone/frankensim/commit/544eaee3c0fd27ab672c9f6cf36fbcbd7a99204a) - close the Phase 0 spine milestone.
 - [`b33496e`](https://github.com/Dicklesworthstone/frankensim/commit/b33496e291b928f5113bd65c651b2d5b3b97b044) - add assume-guarantee component contracts.
 
+## 9. Certified Geometry Conversion, CutFEM, Solids, And Topology Optimization
+
+The post-baseline wave turned geometry and structural mechanics into a more
+direct design loop: exact and certified representation conversion, CutFEM on
+SDFs, elasticity and contact on cut geometry, structural stability, and both
+density and level-set topology optimization landed as working crate surfaces.
+
+### Delivered capability
+
+- `fs-rep-nurbs` gained a certified NURBS-to-SDF converter and an SDF-to-NURBS
+  refit path, giving the workspace a round-trip bridge between spline CAD,
+  fields, F-reps, and sheaf watertightness checks.
+- `fs-cutfem` added certified cut classification, depth-controlled cut
+  quadrature, ghost penalties, Nitsche embedded boundary handling, quadtree
+  adaptivity, and zero-meshing FEM on SDFs.
+- `fs-solid` landed linear elasticity, finite-strain hyperelasticity through
+  material cards, B-bar near-incompressibility mitigation, CutFEM frontends,
+  stability continuation, buckling pencils, Koiter scaffolding, Cosserat rods,
+  fiber sections, force-based beams, and SDF-native contact.
+- `fs-topopt` added density topology optimization with robust three-field
+  filtering, stress aggregation, eigenfrequency objectives, and golden
+  batteries.
+- `fs-topols` added level-set topology optimization over the CutFEM stack with
+  WENO advection, fast-marching redistancing, velocity extension, topological
+  derivatives, and deterministic snapshots.
+
+### Closed workstreams
+
+- [`frankensim-epic-morph-wqd.11`](https://github.com/Dicklesworthstone/frankensim/blob/941a67e3cfd3a2bbc1fc3209bf0a044bc073188f/.beads/issues.jsonl) - certified NURBS-to-SDF conversion.
+- [`frankensim-epic-morph-wqd.12`](https://github.com/Dicklesworthstone/frankensim/blob/941a67e3cfd3a2bbc1fc3209bf0a044bc073188f/.beads/issues.jsonl) - SDF-to-NURBS refit.
+- [`frankensim-epic-flux-tfz.13`](https://github.com/Dicklesworthstone/frankensim/blob/941a67e3cfd3a2bbc1fc3209bf0a044bc073188f/.beads/issues.jsonl) - `fs-solid` elasticity core.
+- [`frankensim-epic-flux-tfz.14`](https://github.com/Dicklesworthstone/frankensim/blob/941a67e3cfd3a2bbc1fc3209bf0a044bc073188f/.beads/issues.jsonl) - advanced structural element kernels.
+- [`frankensim-epic-flux-tfz.15`](https://github.com/Dicklesworthstone/frankensim/blob/941a67e3cfd3a2bbc1fc3209bf0a044bc073188f/.beads/issues.jsonl) - stability, continuation, and Koiter path.
+- [`frankensim-epic-flux-tfz.16`](https://github.com/Dicklesworthstone/frankensim/blob/941a67e3cfd3a2bbc1fc3209bf0a044bc073188f/.beads/issues.jsonl) - SDF-native IPC contact.
+
+### Representative commits
+
+- [`279d611`](https://github.com/Dicklesworthstone/frankensim/commit/279d611817f854930a8dc20cd7605702a0f14c2f) - add the certified NURBS-to-SDF converter.
+- [`c9e1a4b`](https://github.com/Dicklesworthstone/frankensim/commit/c9e1a4b984773dfed3fcd953fd251394567867ec) - close the certified SDF-to-NURBS round trip.
+- [`f781085`](https://github.com/Dicklesworthstone/frankensim/commit/f781085a538063c1d6711777030efa3ca5817d19) - ship CutFEM on SDFs.
+- [`15eb757`](https://github.com/Dicklesworthstone/frankensim/commit/15eb75700d69ca73d6fec1cc72b18f3f65666a01) - add the `fs-solid` elasticity core.
+- [`e396160`](https://github.com/Dicklesworthstone/frankensim/commit/e3961608169ab16ea19beb69b368857ba5636221) - add stability, continuation, and Koiter scaffolding.
+- [`bcc71d4`](https://github.com/Dicklesworthstone/frankensim/commit/bcc71d484b001d7188b920308971b7800c4cf543) - add structural rods, fiber sections, and force-based beams.
+- [`4b4c24e`](https://github.com/Dicklesworthstone/frankensim/commit/4b4c24ef48d93be96cb95c4b9b362bb414d6c8d7) - add the `fs-topols` level-set topology optimization crate.
+- [`5015e57`](https://github.com/Dicklesworthstone/frankensim/commit/5015e5795a805e37fda6f58b3f46e736c0428557) - add stress aggregate objective plumbing.
+- [`0c66ce7`](https://github.com/Dicklesworthstone/frankensim/commit/0c66ce7741e3e48f9289f4a8e975d2ad12e74084) - add eigenfrequency objective support.
+- [`7616efe`](https://github.com/Dicklesworthstone/frankensim/commit/7616efedd5e76fb5394a284dd7dab4bc867462b1) - close the SDF-native contact lane.
+
+## 10. Differentiation, Adaptivity, Planning, And Self-Knowledge
+
+The second addendum wave made derivatives, goal-oriented accuracy, and economic
+planning first-class rather than incidental: gradients now carry evidence,
+planners refuse when budgets are inadequate, and value-of-information work
+turns ignorance into a priced queue.
+
+### Delivered capability
+
+- `fs-adjoint` gained a ledger-DAG VJP registry, fail-loud missing-gradient
+  behavior, differentiability mitigations, interval residual gradient
+  certificates, explanation objects, DWR accept gates, and exact Hessian-vector
+  products for density misfit.
+- `fs-dwr` added goal-oriented error estimation, anisotropic metric synthesis,
+  marking, tile-level adaptivity scaffolding, and contract-level accuracy
+  boundaries.
+- `fs-ir` added a greedy fidelity-ladder planner, anytime query semantics,
+  colored intervals, priced tightening hints, and explicit refusal reports.
+- `fs-plan` added value-of-information query planning that ranks surrogate rung
+  climbs and physical validation probes by decision impact per dollar.
+- `fs-flywheel-e2e` added whole-loop, phase-1, and phase-2 gates that measure
+  the compound effect of speculation, recompute, sheaf merges, tombstones,
+  adjoint gradients, and planner ladders.
+
+### Closed workstreams
+
+- [`frankensim-epic-coupling-bk0o.1`](https://github.com/Dicklesworthstone/frankensim/blob/941a67e3cfd3a2bbc1fc3209bf0a044bc073188f/.beads/issues.jsonl) - ledger-DAG transposition.
+- [`frankensim-epic-coupling-bk0o.3`](https://github.com/Dicklesworthstone/frankensim/blob/941a67e3cfd3a2bbc1fc3209bf0a044bc073188f/.beads/issues.jsonl) - gradient certificates and merge gates.
+- [`frankensim-epic-flywheel-lmp4.16`](https://github.com/Dicklesworthstone/frankensim/blob/941a67e3cfd3a2bbc1fc3209bf0a044bc073188f/.beads/issues.jsonl) - fidelity-ladder planner.
+- [`frankensim-epic-flywheel-lmp4.17`](https://github.com/Dicklesworthstone/frankensim/blob/941a67e3cfd3a2bbc1fc3209bf0a044bc073188f/.beads/issues.jsonl) - anytime and refusal semantics.
+- [`frankensim-epic-flywheel-lmp4.18`](https://github.com/Dicklesworthstone/frankensim/blob/941a67e3cfd3a2bbc1fc3209bf0a044bc073188f/.beads/issues.jsonl) - whole-loop flywheel proof harness.
+- [`frankensim-epic-addendum-xpck.4`](https://github.com/Dicklesworthstone/frankensim/blob/941a67e3cfd3a2bbc1fc3209bf0a044bc073188f/.beads/issues.jsonl) - Phase 2 leverage gate.
+
+### Representative commits
+
+- [`41cadcc`](https://github.com/Dicklesworthstone/frankensim/commit/41cadccb11349a1ab5b48374b5e5f875906cdfd7) - add ledger-DAG transposition.
+- [`3fab970`](https://github.com/Dicklesworthstone/frankensim/commit/3fab970ad002fb16223020cd8dfde362c117e004) - add gradient certificates.
+- [`e907bc6`](https://github.com/Dicklesworthstone/frankensim/commit/e907bc6796b5e8b840b52bc618eae1657a969bf2) - add the DWR goal-oriented accept test.
+- [`9ee7227`](https://github.com/Dicklesworthstone/frankensim/commit/9ee7227858c7f09c86bd694b600a1bb263a013b1) - add the greedy fidelity-ladder planner.
+- [`1ade44a`](https://github.com/Dicklesworthstone/frankensim/commit/1ade44a99cf9a67a6be8f6fa10b914209f9622c6) - add anytime and refusal semantics.
+- [`9ab427e`](https://github.com/Dicklesworthstone/frankensim/commit/9ab427e3ca95b3e0e0556547c84234ce4ae37321) - land the whole-loop flywheel harness.
+- [`3f9a714`](https://github.com/Dicklesworthstone/frankensim/commit/3f9a714868c2de4a8ab62359f903a7990c272b4c) - add the Phase 2 leverage gate.
+- [`941a67e`](https://github.com/Dicklesworthstone/frankensim/commit/941a67e3cfd3a2bbc1fc3209bf0a044bc073188f) - add value-of-information queries to `fs-plan`.
+
+## 11. Extended Physics, Numerics, And Solver Kernels
+
+The FLUX and BEDROCK layers broadened from core abstractions into usable
+simulation kernels: harmonic FEEC analysis, domain decomposition, pressure-
+robust flow, FMM/BEM, LBM, vortex particles, time slabs, and large-domain
+deterministic trigonometry.
+
+### Delivered capability
+
+- `fs-feec` added cohomology, harmonic cochains, Hodge splitting, circulation
+  extraction, and high-order vector-family spaces.
+- `fs-dd` added BDDC domain decomposition with sheaf-framed edge coarse spaces
+  and measured conditioning tables.
+- `fs-flux` added a BDM1-P0 pressure-robust Navier-Stokes scaffold with
+  boundary moments, conformance batteries, Picard stepping, and discrete
+  adjoint hooks.
+- `fs-fmm` and `fs-bem` added black-box Chebyshev FMM, Laplace panel methods,
+  Hess-Smith airfoil screening, wake roll-up, and transpose/FMM validation.
+- `fs-lbm` added D2Q9 core dynamics, rheology, thermal coupling, free-surface
+  VOF, contact-line bracketing, and refinement.
+- `fs-vpm`, `fs-iga`, and `fs-couple` added vortex-particle, isogeometric, and
+  passive port-Hamiltonian coupling surfaces.
+- `fs-time` gained time slabs as ledger cells, while `fs-math` extended
+  deterministic trig with Payne-Hanek reduction across all finite `f64`.
+
+### Closed workstreams
+
+- [`frankensim-epic-flux-tfz.7`](https://github.com/Dicklesworthstone/frankensim/blob/941a67e3cfd3a2bbc1fc3209bf0a044bc073188f/.beads/issues.jsonl) - FEEC cohomology and harmonic decomposition.
+- [`frankensim-epic-flux-tfz.11`](https://github.com/Dicklesworthstone/frankensim/blob/941a67e3cfd3a2bbc1fc3209bf0a044bc073188f/.beads/issues.jsonl) - domain decomposition.
+- [`frankensim-epic-flux-tfz.17`](https://github.com/Dicklesworthstone/frankensim/blob/941a67e3cfd3a2bbc1fc3209bf0a044bc073188f/.beads/issues.jsonl) - pressure-robust Navier-Stokes.
+- [`frankensim-epic-flux-tfz.19`](https://github.com/Dicklesworthstone/frankensim/blob/941a67e3cfd3a2bbc1fc3209bf0a044bc073188f/.beads/issues.jsonl) - LBM extensions.
+- [`frankensim-r6r5`](https://github.com/Dicklesworthstone/frankensim/blob/941a67e3cfd3a2bbc1fc3209bf0a044bc073188f/.beads/issues.jsonl) - Payne-Hanek trig reduction.
+
+### Representative commits
+
+- [`7d95552`](https://github.com/Dicklesworthstone/frankensim/commit/7d95552cf6bbb1055296991fb43f119b27916635) - add FEEC cohomology.
+- [`57d775e`](https://github.com/Dicklesworthstone/frankensim/commit/57d775e47f3d38f94b7c1d017c3c74888e551ec0) - add BDDC domain decomposition.
+- [`8f031ad`](https://github.com/Dicklesworthstone/frankensim/commit/8f031ad48a56a3ac5e91023cd99782138918bcd4) - complete pressure-robust Navier-Stokes.
+- [`8c5b0e5`](https://github.com/Dicklesworthstone/frankensim/commit/8c5b0e555e9d3d0f1a7840e941fed43890519008) - add `fs-fmm` and `fs-bem`.
+- [`eeb919a`](https://github.com/Dicklesworthstone/frankensim/commit/eeb919a98ddb7dc8acb8aff87fb6fa85138eeb3b) - implement the FMM transpose panel operator.
+- [`714e9e6`](https://github.com/Dicklesworthstone/frankensim/commit/714e9e6ef39d590ddfd4fa42254fec89a136cc4b) - add the D2Q9 LBM core.
+- [`ded5b78`](https://github.com/Dicklesworthstone/frankensim/commit/ded5b78909a40b81b493289bea2cd6742aa99eb1) - complete LBM rheology, thermal, free-surface, and refinement extensions.
+- [`43ea2dd`](https://github.com/Dicklesworthstone/frankensim/commit/43ea2dd57b29c33e221250cec35b5d8db814a6d5) - add the vortex-particle method core.
+- [`8a90167`](https://github.com/Dicklesworthstone/frankensim/commit/8a9016744727cdeb0b9788df6999e86e9bdc38ab) - add time slabs as cells.
+- [`7049ca3`](https://github.com/Dicklesworthstone/frankensim/commit/7049ca38995f62664d0715580ae7b8fe987f22ae) - ship Payne-Hanek trig reduction for all finite `f64`.
+
+## 12. Optimization, UQ, Robust Design, And Archives
+
+The ASCENT layer became much broader than the initial DFO core. It now includes
+gradient optimization, Bayesian optimization, uncertainty quantification,
+surrogates, proof-carrying optimization, value-of-information, fabrication
+constraints, quality-diversity archives, robust design, and multiple explicit
+design-space representations.
+
+### Delivered capability
+
+- `fs-ascent` added L-BFGS, trust-region Newton, Riemannian routing, augmented
+  Lagrangians, Wolfe search, stopping policy, and gradient Pareto tracing.
+- `fs-bo` added Gaussian-process Bayesian optimization, TuRBO trust regions,
+  and multi-fidelity BO.
+- `fs-dfo` expanded with log-domain Sinkhorn optimal transport, deterministic
+  multi-objective utilities, and a finite-support Wasserstein DRO oracle.
+- `fs-uq`, `fs-surrogate`, `fs-voi`, `fs-race`, and `fs-sos` added UQ,
+  certify-or-escalate ROMs, active validation, anytime-valid e-racing, and SOS
+  certificates.
+- `fs-archive` added MAP-Elites/CVT quality-diversity archives, while
+  `fs-lattice`, `fs-truss`, and `fs-fab` added homogenized lattice design,
+  ground-structure sizing, and manufacturing/code-compliance constraints.
+- `fs-shapeprog`, `fs-rep-neural`, `fs-toleralloc`, `fs-assimilate`, and
+  `fs-robust` added program synthesis, Lipschitz-certified neural implicits,
+  tolerance allocation, as-built/data assimilation, and objective epistemics.
+
+### Closed workstreams
+
+- [`frankensim-epic-ascent-7tv.18`](https://github.com/Dicklesworthstone/frankensim/blob/941a67e3cfd3a2bbc1fc3209bf0a044bc073188f/.beads/issues.jsonl) - value-of-information and active validation.
+- [`frankensim-epic-ascent-7tv.20`](https://github.com/Dicklesworthstone/frankensim/blob/941a67e3cfd3a2bbc1fc3209bf0a044bc073188f/.beads/issues.jsonl) - fabrication and code-compliance constraints.
+- [`frankensim-epic-ascent-7tv.7`](https://github.com/Dicklesworthstone/frankensim/blob/941a67e3cfd3a2bbc1fc3209bf0a044bc073188f/.beads/issues.jsonl) - e-racing with anytime-valid cancellation.
+- [`frankensim-epic-ascent-7tv.10`](https://github.com/Dicklesworthstone/frankensim/blob/941a67e3cfd3a2bbc1fc3209bf0a044bc073188f/.beads/issues.jsonl) - proof-carrying SOS optimization.
+- [`frankensim-epic-ascent-7tv.14`](https://github.com/Dicklesworthstone/frankensim/blob/941a67e3cfd3a2bbc1fc3209bf0a044bc073188f/.beads/issues.jsonl) - lattice homogenization and graded optimization.
+- [`frankensim-vcia`](https://github.com/Dicklesworthstone/frankensim/blob/941a67e3cfd3a2bbc1fc3209bf0a044bc073188f/.beads/issues.jsonl) - Sinkhorn OT and DRO evidence lane.
+
+### Representative commits
+
+- [`f1d2028`](https://github.com/Dicklesworthstone/frankensim/commit/f1d202841d6cb4c29fb60a1fdbfd8624df1c8c69) - add the gradient optimizer stack.
+- [`b93bd21`](https://github.com/Dicklesworthstone/frankensim/commit/b93bd21afce726eb3fddbd3b8c20db3d428a796d) - add gradient Pareto tracing.
+- [`a76cbea`](https://github.com/Dicklesworthstone/frankensim/commit/a76cbea571cb0cb9b324a4734a200e40a63a8ca2) - add the value-of-information crate.
+- [`dcfc2ac`](https://github.com/Dicklesworthstone/frankensim/commit/dcfc2ac3503004c5cf227e05282d47fdbb659ac2) - add TuRBO trust-region BO.
+- [`2d3a3c4`](https://github.com/Dicklesworthstone/frankensim/commit/2d3a3c41de507156d9a22eac5385f649dc217f2c) - add multi-fidelity BO.
+- [`961e2d6`](https://github.com/Dicklesworthstone/frankensim/commit/961e2d60cad948a0b48ac52256dbc89ee154bf8c) - add log-domain Sinkhorn optimal transport.
+- [`382e616`](https://github.com/Dicklesworthstone/frankensim/commit/382e6169cfcfb951006ba53dfe9cd6b175454ee1) - add deterministic multi-objective utilities.
+- [`d947001`](https://github.com/Dicklesworthstone/frankensim/commit/d9470015316f0e587cc797ff53b4a0dbf359d7fc) - add the discrete Wasserstein DRO oracle.
+- [`c0f1a5c`](https://github.com/Dicklesworthstone/frankensim/commit/c0f1a5c2ef63582e173efc87be255e3af1242e6c) - add SOS proof-carrying optimization.
+- [`3c56418`](https://github.com/Dicklesworthstone/frankensim/commit/3c56418c549420e1f62886af9cd1c31a78c38a38) - add MAP-Elites/CVT quality-diversity archives.
+- [`4c3ec84`](https://github.com/Dicklesworthstone/frankensim/commit/4c3ec84cb5cdf5dcbf53e301accb3fc9e908be70) - ship lattice homogenization and graded optimization.
+- [`f9fad53`](https://github.com/Dicklesworthstone/frankensim/commit/f9fad5309f23a18de2d9356cecb01d21938e8aa7) - add certified ground-structure truss sizing.
+
+## 13. Rendering, Reporting, Browser Surface, And End-To-End Campaigns
+
+The project now has several capstone paths where many crates compose into a
+visible workflow: scientific rendering, browser demos, lab notebooks, flagship
+optimization studies, and cross-layer end-to-end certification harnesses.
+
+### Delivered capability
+
+- `fs-render` added unbiased spectral path tracing, certified chart tracing,
+  mixed-scene backends, and Woodcock volume rendering over live LBM fields.
+- `fs-img`, `fs-viz`, and `fs-report` hardened PNG validation, added analytic
+  scientific visualization primitives, and generated automatic lab notebooks
+  with semantic diffs.
+- `fs-wasm` added browser-oriented numerical kernel surfaces and tiered demo
+  modules.
+- `fs-marquee` added the raw-SDF, zero-meshing marquee study runner.
+- `fs-frame` added the seismic-minimal frame flagship with truss layout,
+  fiber-hinge time history, anytime-valid fragility, and CVaR sizing.
+- `fs-thrust-e2e` added a certified quality-diversity vortex-thruster campaign
+  composing VPM, evidence, surrogates, archives, and reports.
+- [`fb08842`](https://github.com/Dicklesworthstone/frankensim/commit/fb088428ae810ee3ddd893712588c1e64f6cc0c4)
+  added three additional certified end-to-end campaigns:
+  proof-robust optimization, campaign scheduling, and flutter certification.
+
+### Closed workstreams
+
+- [`frankensim-epic-lumen-qfx.1`](https://github.com/Dicklesworthstone/frankensim/blob/941a67e3cfd3a2bbc1fc3209bf0a044bc073188f/.beads/issues.jsonl) - spectral path tracing.
+- [`frankensim-epic-lumen-qfx.2`](https://github.com/Dicklesworthstone/frankensim/blob/941a67e3cfd3a2bbc1fc3209bf0a044bc073188f/.beads/issues.jsonl) - chart render backends.
+- [`frankensim-epic-lumen-qfx.3`](https://github.com/Dicklesworthstone/frankensim/blob/941a67e3cfd3a2bbc1fc3209bf0a044bc073188f/.beads/issues.jsonl) - volume rendering.
+- [`frankensim-epic-flagships-mye.1`](https://github.com/Dicklesworthstone/frankensim/blob/941a67e3cfd3a2bbc1fc3209bf0a044bc073188f/.beads/issues.jsonl) - marquee raw-SDF optimization study.
+- [`frankensim-epic-flagships-mye.3`](https://github.com/Dicklesworthstone/frankensim/blob/941a67e3cfd3a2bbc1fc3209bf0a044bc073188f/.beads/issues.jsonl) - seismic-minimal frame flagship.
+
+### Representative commits
+
+- [`b089421`](https://github.com/Dicklesworthstone/frankensim/commit/b089421c5494e231d3623973251e91a30169efb0) - add the spectral path-tracing core.
+- [`f8a927e`](https://github.com/Dicklesworthstone/frankensim/commit/f8a927e601372affc84484e041f8f99d513fe88a) - add certified chart render backends.
+- [`0ccee78`](https://github.com/Dicklesworthstone/frankensim/commit/0ccee78a87ec4e81ca38554142e7506aea356bf5) - ship Woodcock volume rendering over live LBM fields.
+- [`8aaecbc`](https://github.com/Dicklesworthstone/frankensim/commit/8aaecbcd1881349484bdabd3f71a5f38d250ee28) - add analytically verified scientific visualization primitives.
+- [`6e5ae66`](https://github.com/Dicklesworthstone/frankensim/commit/6e5ae66563ec1267711c591ef23bbf47a4568596) - add automatic lab notebooks and semantic diffs.
+- [`68768ba`](https://github.com/Dicklesworthstone/frankensim/commit/68768ba496da9ab6698041429f3b9c23a5d291f6) - add the standalone browser numerical-kernel surface.
+- [`6df2c03`](https://github.com/Dicklesworthstone/frankensim/commit/6df2c03eb3a2ea5c8c731faad7cabda19475aabb) - ship the raw-SDF marquee study runner.
+- [`8d27622`](https://github.com/Dicklesworthstone/frankensim/commit/8d27622657d0f4ace6bdc40991f295e9b958e34c) - ship the seismic-minimal frame flagship.
+- [`dc1bf7f`](https://github.com/Dicklesworthstone/frankensim/commit/dc1bf7faf7ed6feafcda0f7c3c3eb78fe6d1d0e0) - add the certified quality-diversity vortex-thruster campaign.
+- [`fb08842`](https://github.com/Dicklesworthstone/frankensim/commit/fb088428ae810ee3ddd893712588c1e64f6cc0c4) - adds proof-robust, schedule, and flutter certified end-to-end campaigns.
+
+## 14. Latest Campaigns, AD Bridges, And p-Multigrid Smoothing
+
+The latest 2026-07-08 wave adds more proof-carrying end-to-end examples and
+tightens two core numerical surfaces: inverse-trig AD support and p-independent
+multigrid smoothing.
+
+### Delivered capability
+
+- `fs-neuroshape-e2e` and `fs-grammar-e2e` add certified neural-shape topology
+  and geometric-grammar campaigns, composing neural implicit charts,
+  visualization/evidence, shape programs, archives, and fabrication checks.
+- `fs-oed-e2e` adds SensorForge, a value-of-information sensor-placement
+  campaign that stops when the posterior design choice is robust.
+- `fs-vessel` adds the laminar-pour vessel flagship, combining Chebyshev
+  stability objectives, free-surface LBM, CVaR robustification, e-racing, and
+  spectral volume rendering.
+- `fs-metamat-e2e`, `fs-truss-e2e`, `fs-adaptbo-e2e`, and `fs-flowcert-e2e`
+  add certified metamaterial frontiers, optimal truss load paths, anytime BO,
+  and CFD credibility maps.
+- `fs-math` adds deterministic `asin`/`acos`, and `fs-ad` extends the `Real`
+  surface with inverse-trig operations and chain-rule tests.
+- `fs-ad` also gains the FrankenTorch tape bridge, binomial Revolve schedule,
+  snapshot-store seam, and matrix-free IFT tangent route.
+- `fs-solver` replaces p-MG Jacobi scaling with PU-symmetrized
+  vertex-centered additive Schwarz smoothing and an exact r=1 Pavarino coarse
+  term.
+
+### Closed workstreams
+
+- [`frankensim-epic-flagships-mye.4`](https://github.com/Dicklesworthstone/frankensim/blob/319cb64f052d76e15882ee53ace41092881c7fa8/.beads/issues.jsonl) - laminar-pour vessel flagship.
+- [`frankensim-t88x`](https://github.com/Dicklesworthstone/frankensim/blob/319cb64f052d76e15882ee53ace41092881c7fa8/.beads/issues.jsonl) - inverse-trig `Real` operations for AD consumers.
+- [`frankensim-o3ui`](https://github.com/Dicklesworthstone/frankensim/blob/319cb64f052d76e15882ee53ace41092881c7fa8/.beads/issues.jsonl) - `fs-ad` bridge, Revolve, spill, and IFT integrations.
+- [`frankensim-x08j`](https://github.com/Dicklesworthstone/frankensim/blob/319cb64f052d76e15882ee53ace41092881c7fa8/.beads/issues.jsonl) - p-independent p-MG smoothing.
+
+### Representative commits
+
+- [`5cbdd90`](https://github.com/Dicklesworthstone/frankensim/commit/5cbdd903e8caf389e98eafe5ebc2436ac7a0093c) - add neural-shape topology and geometric grammar e2e campaigns.
+- [`94404c4`](https://github.com/Dicklesworthstone/frankensim/commit/94404c4d8ef5f4fb7a33d9e46fddb32f51cb0aaa) - add SensorForge OED e2e.
+- [`b95e00f`](https://github.com/Dicklesworthstone/frankensim/commit/b95e00ff7ee8140d0c1427824a23953af1353963) - ship the laminar-pour vessel flagship.
+- [`8028bbc`](https://github.com/Dicklesworthstone/frankensim/commit/8028bbc29de12aff9fcb46849e688d0cd28bbab5) - add the metamaterial stiffness-density frontier campaign.
+- [`4c573d6`](https://github.com/Dicklesworthstone/frankensim/commit/4c573d648bafd6d779def16e4ca7303fdb99f870) - add the optimal truss critical-load-path campaign.
+- [`76e9c89`](https://github.com/Dicklesworthstone/frankensim/commit/76e9c89f62e91612b8886115c06ba8260c76cc94) - add AnytimeBO.
+- [`922c835`](https://github.com/Dicklesworthstone/frankensim/commit/922c83597d2a79c1a862d9b8e37f5240b8ec9c8e) - add deterministic inverse trig and AD `Real` operations.
+- [`3eb480c`](https://github.com/Dicklesworthstone/frankensim/commit/3eb480c8f4c1faa0d2b92a3b31e0d9db46256f0e) - add the FlowCert CFD credibility map.
+- [`7575cdd`](https://github.com/Dicklesworthstone/frankensim/commit/7575cdd6bb0728794ef0fce4eae3512f9667b93d) - ship `fs-ad` adjoint integrations.
+- [`319cb64`](https://github.com/Dicklesworthstone/frankensim/commit/319cb64f052d76e15882ee53ace41092881c7fa8) - add vertex-patch Schwarz smoothing to p-MG.
+
 ## Current Non-Release Status
 
 - No package or crate release has been tagged yet.
-- The canonical project state is `main`, not a versioned artifact.
+- The canonical project state is `main`, not a versioned artifact; at research
+  time `HEAD` and `origin/main` both resolved to
+  [`319cb64`](https://github.com/Dicklesworthstone/frankensim/commit/319cb64f052d76e15882ee53ace41092881c7fa8).
 - The repository is actively changing; use crate `CONTRACT.md` files and Beads
   close reasons for detailed no-claim boundaries.
 - The README describes the implemented workspace; the long-form plan remains

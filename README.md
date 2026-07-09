@@ -465,6 +465,180 @@ The README-level principles are backed by concrete implementation patterns:
 | Treat performance as a measured claim | `fs-roofline`, substrate machine fingerprints, tune rows, and DSR validation lanes |
 | Avoid hidden global state | Explicit contexts, stream keys, scenarios, manifests, packages, and ledger records |
 
+## Why The Pieces Live Together
+
+Most simulation systems split their real work across several unrelated layers: a
+CAD kernel owns geometry, a mesher owns discretization, a solver owns residuals,
+an optimizer owns design changes, a notebook owns provenance, and a separate CI
+system tries to prove the run still works. FrankenSim keeps those concerns in one
+typed Rust workspace because the hard bugs usually happen at the boundaries.
+
+| Boundary that usually leaks | Why it matters | FrankenSim's approach |
+|-----------------------------|----------------|-----------------------|
+| Geometry to mesh | A conversion can change topology, watertightness, or feature size before physics sees it | Chart and representation crates expose conversion records, validity checks, topology summaries, and no-claim boundaries |
+| Mesh/operator to solver | A residual can be small for the wrong norm, wrong operator, or wrong boundary condition | Operator crates, solver reports, and contracts name the algebraic object being solved and the residual semantics |
+| Solver to adjoint | A gradient can silently differentiate the wrong fixed point or ignore a transpose seam | `fs-adjoint` uses IFT/transposed-solve machinery and feature-gated ledger transposition that refuses missing VJPs |
+| Optimizer to evidence | An optimizer can return a design without explaining feasibility, stopping reason, or uncertainty | `fs-ascent`, `fs-dfo`, `fs-constraint`, and `fs-robust` report KKT residuals, stop reasons, CVaR/DRO quantities, unsat cores, and evidence colors |
+| Experiment to artifact | A report can preserve plots but lose code version, machine, budgets, or assumptions | `fs-ledger`, `fs-report`, `fs-package`, and `fs-checker` keep content hashes, provenance, budget pies, package roots, and standalone checks |
+
+The result is not just "many crates." The result is a set of small interfaces
+that make the expensive parts of simulation inspectable: what representation was
+used, what numerical contract was in force, what was measured, what was
+estimated, and which claim boundary still needs proof.
+
+## What "Certified" Means Here
+
+FrankenSim uses certification language carefully. A value is not "certified"
+because a test passed somewhere; it is certified only when the code path returns
+an explicit claim with the right evidence color, provenance, and budget context.
+
+| Term | Meaning in this repo | Typical source |
+|------|----------------------|----------------|
+| `Verified` | A property was checked by a deterministic proof, exact computation, residual certificate, invariant, or bounded numerical argument inside the modeled assumptions | Exact predicates, solver residual certificates, KKT residuals, package integrity checks, impulse-conservation bands |
+| `Validated` | A model or result is supported against an external or empirical reference over a stated validity domain | Model cards, benchmark fixtures, calibration data, crosswalk records |
+| `Estimated` | The claim is useful but relies on statistical, model-form, discretization, or approximation evidence that is not upgraded to a hard bound | DWR estimates, stochastic confidence sequences, surrogate bands, model-form evidence |
+
+The important design rule is **no laundering**: composing a `Verified` value with
+an `Estimated` value cannot produce a stronger result. That shows up in the
+evidence wrappers, the robust/fragility tooling, and the end-to-end smoke
+campaigns. For example, `fs-thrust-e2e` can place verified bands around
+full-fidelity point-vortex runs that conserve impulse, while surrogate-served
+elites remain estimated. The campaign-level rank is the weakest elite color, not
+the most flattering one.
+
+## Representative Vertical Slices
+
+Several crates are intentionally small capstones. They are not full products,
+but they prove that lower-level pieces compose into end-to-end workflows.
+
+| Slice | What it demonstrates | Why it matters |
+|-------|----------------------|----------------|
+| `fs-marquee` | A feature-gated raw-SDF/CutFEM/DWR smoke runner for a topology-style layout study | Geometry, embedded-boundary physics, gradient checks, and certificate fields can live on the same path without meshing as the first operation |
+| `fs-frame` | A seismic-minimal frame smoke tier: truss layout, sizing, fiber hysteresis, e-stopped fragility, and CVaR sizing | Structural optimization can carry layout certificates, nonlinear response evidence, anytime-valid probability intervals, and robust tail metrics together |
+| `fs-thrust-e2e` | CertQD-Thrust: point-vortex thruster simulation, certify-or-escalate surrogate use, MAP-Elites illumination, evidence colors, and a content-addressed notebook | Quality-diversity search can produce an atlas with per-elite trust labels instead of a single unqualified best design |
+| `fs-vskeleton` | A photovoltaic vertical skeleton connecting SDF/PDE/objective/adjoint/optimization/ledger ideas | A narrow domain slice is useful for testing orchestration seams before every physics model is mature |
+
+These slices are deliberately honest about scope. They are smoke tiers and
+integration fixtures, not claims that every flagship has reached its full
+production resolution. Their value is that they exercise the architecture under
+real composition pressure: dependencies point downward, evidence has to survive
+multiple layers, and tests can catch mismatches between the story and the code.
+
+## Algorithm Families In Practice
+
+FrankenSim combines conservative numerical machinery with explicit
+engineering-grade fallbacks. The algorithms are implemented where they give the
+workspace a contract it can enforce, not just because they are impressive names.
+
+| Family | Implemented examples | Design principle |
+|--------|----------------------|------------------|
+| Strict elementary math | `fs-math` deterministic `exp`, `ln`, `sin`, `cos`, `tan`, `atan2`, `erf`, `pow`, double-double helpers, and Payne-Hanek large-argument trig reduction | Low-level math must not delegate determinism to platform libm when higher layers depend on bit-stable replay |
+| Exact and bounded predicates | `fs-ivl` intervals, affine/Taylor arithmetic, expansions, `orient`, `incircle`, and `insphere` | Geometry and topology decisions should be made with explicit uncertainty instead of hoping floating-point signs are stable |
+| Spectral numerics | `fs-cheb` adaptive Chebyshev functions, collocation, differentiation matrices, and Orr-Sommerfeld probes | Smooth 1D and stability problems get compact, high-order representations with conformance batteries |
+| Sparse and structured linear algebra | CSR/BSR/SELL sparse formats, deterministic assembly, randomized NLA, eigensolver scaffolding, Krylov solvers, and p-multigrid | Large solves need reproducible assembly order, inspectable residuals, and operator structure that adjoints can reuse |
+| Optimization | L-BFGS, trust-region Newton-Krylov, augmented Lagrangian, Riemannian L-BFGS, CMA-ES, BIPOP, Nelder-Mead, NSGA-II, Pareto tracing, CVaR, and discrete-support Wasserstein DRO | Different design regimes need different optimizers, but all of them should report why they stopped and what assumptions their answer uses |
+| Anytime and robust inference | Betting e-processes, pairwise races, e-BH, Gaussian mixture confidence sequences, conformal bands, CVaR, and DRO inner suprema | A study should stop when the decision is good enough, not when a preselected sample count happens to be exhausted |
+| Evidence packaging | Claim colors, validity domains, Merkle roots, package checks, crosswalk mappings, and budget pies | Solver output should be reviewable as a standalone artifact after the expensive run is over |
+
+Two recent examples show the pattern. `fs-math::payne` extends trig reduction
+beyond the old Cody-Waite domain with self-verifying `2/pi` constants generated
+from an all-integer Machin bignum in tests. `fs-dfo::dro` implements the exact
+dual for a discrete-support Wasserstein ambiguity set and tests it against
+closed-form endpoints, kink cases, and tiny LP oracles. In both cases, the code
+does not merely add an algorithm; it adds the tests and contract language that
+make the algorithm usable elsewhere in the workspace.
+
+## Core Abstractions That Repeat Across Crates
+
+FrankenSim is easier to understand if you look for the same few shapes
+reappearing in different layers. The crate names are numerous, but the design is
+not arbitrary: values, fields, operators, budgets, and evidence all have
+standard carriers.
+
+| Abstraction | Where it appears | What it buys |
+|-------------|------------------|--------------|
+| `Qty` and dimensional records | `fs-qty`, `fs-scenario`, `fs-opt`, material and constraint crates | A boundary condition, objective, or material parameter can reject the wrong unit before it contaminates a solve |
+| `Cx`, cancellation gates, and stream keys | `fs-exec`, solver drivers, stochastic crates, e2e campaigns | Work can be interrupted, replayed, and attributed without depending on thread arrival order |
+| Chart and region traits | `fs-geom`, `fs-rep-*`, `fs-query`, `fs-topo` | Geometry keeps representation-specific meaning instead of becoming an untyped point cloud too early |
+| Linear operators and transpose actions | `fs-solver`, `fs-adjoint`, `fs-bem`, `fs-opdsl` | Primal solves, adjoint solves, and gradient checks can share the same operator contract |
+| Evidence colors | `fs-evidence`, `fs-package`, campaign crates, robust/validation crates | A result says whether it is verified, validated, or estimated, and composition cannot upgrade the weakest ingredient |
+| Contract files | Every `fs-*` crate | Each crate states public semantics, invariants, determinism, feature flags, tests, and no-claim boundaries in one place |
+| Content roots and package checks | `fs-ledger`, `fs-report`, `fs-package`, `fs-checker` | A later reader can inspect what was claimed without reconstructing the whole run from a notebook |
+
+This repetition is intentional. A new physics module, optimizer, or campaign
+does not need to invent its own story for cancellation, uncertainty, provenance,
+or validation. It plugs into the same carriers and either satisfies their
+contracts or refuses loudly.
+
+## Certified Campaign Catalog
+
+The e2e crates are small, but they are the best way to see the workspace acting
+as one system. Each campaign composes several lower-level crates and forces a
+real answer to carry evidence instead of just a number.
+
+| Campaign crate | Composition | Decision or artifact produced |
+|----------------|-------------|-------------------------------|
+| `fs-thrust-e2e` | Vortex particle dynamics, conformal surrogate gating, MAP-Elites, evidence colors, report generation | A quality-diversity atlas of self-propelling vortex-thruster designs with per-elite trust labels |
+| `fs-robustopt-e2e` | SOS proof machinery, robust objective epistemics, evidence wrappers | A design choice that is both globally certified in the nominal model and robust under perturbation |
+| `fs-schedule-e2e` | Tropical critical paths, value-of-information, evidence colors | A campaign schedule with named bottlenecks and an act/stop recommendation |
+| `fs-flutter-e2e` | Coupling, spectral health, SOS Lyapunov checks, evidence | A flutter boundary and stability certificate for a partitioned added-mass model |
+| `fs-neuroshape-e2e` | Neural implicit charts, Lipschitz bounds, interval topology checks, visualization evidence | A certified neural-SDF shape with no-tunnel tracing and bounded-component evidence |
+| `fs-grammar-e2e` | Shape-program synthesis, archive illumination, fabrication checks, evidence | A diverse family of simplified CSG programs that match a target while retaining certificates |
+| `fs-oed-e2e` | Kalman assimilation, value-of-information, tolerance allocation, evidence | A sensor placement plan that stops when the design decision is robust |
+| `fs-metamat-e2e` | Lattice homogenization, SOS PSD checks, evidence | A stiffness-density frontier whose points are stable and Voigt-admissible |
+| `fs-truss-e2e` | Ground-structure truss optimization, tropical load paths, evidence | A near-optimal truss plus a named critical load path and bottleneck member |
+| `fs-adaptbo-e2e` | Bayesian optimization, e-process stopping, confidence sequences, evidence | An anytime BO run that can stop early under optional-stopping-valid evidence |
+| `fs-flowcert-e2e` | LBM, analytic Poiseuille checks, MAP-Elites, evidence | A CFD credibility map over Reynolds number and resolution |
+| `fs-vessel` | Chebyshev stability objective, free-surface LBM, e-racing, robust CVaR, volume rendering | A laminar-pour vessel study with stability, mass-ledger, robust-family, and render evidence |
+
+The common pattern is: generate candidates, evaluate them with a physics or
+numerical kernel, attach evidence to the result, and stop only when the decision
+or artifact is good enough under the declared budget. This is why the campaigns
+are useful even when they are smoke-tier: they stress the boundaries between
+representations, solvers, optimizers, reports, and evidence.
+
+## Failure Modes The Architecture Is Built To Catch
+
+Many simulation bugs do not look like panics. They look like plausible numbers
+that lost their assumptions. FrankenSim tries to turn those cases into typed
+refusals, weaker evidence colors, or failing conformance tests.
+
+| Failure mode | How it can happen | Mechanism in FrankenSim |
+|--------------|-------------------|-------------------------|
+| Unit drift | A pressure, length, time step, or material constant enters as an unlabelled `f64` | `fs-qty`, scenario contracts, and objective/constraint records keep dimensions explicit |
+| Topology drift | A representation conversion closes a hole, flips orientation, or hides a thin feature | Chart contracts, topology checks, conversion records, and no-claim rows make representation changes auditable |
+| False solver confidence | A residual is small in the wrong norm or under the wrong boundary rows | Solver reports, operator contracts, conformance batteries, and explicit stall diagnoses name what was solved |
+| Silent gradient loss | A non-differentiable operation returns zero cotangent or a missing transpose is ignored | VJP registries, IFT adjoints, gradient certificates, and merge gates refuse missing derivative paths |
+| Stochastic overconfidence | A campaign keeps sampling after seeing lucky early results and treats the final mean as fixed-sample evidence | E-processes, confidence sequences, e-racing, and value-of-information logic keep stopping rules visible |
+| Platform-dependent replay | Libm, thread order, or unordered assembly changes a golden value | Deterministic math, Philox stream keys, sorted assembly, fixed reductions, and content roots pin the replay path |
+| Evidence laundering | A validated model, estimated surrogate, and verified invariant are collapsed into one flattering status | Evidence colors compose conservatively; the weakest required ingredient limits the claim |
+| Performance folklore | A kernel is called fast because the algorithm sounds fast | Roofline records, machine fingerprints, tune rows, DSR lanes, and no-claim boundaries separate measured facts from ambitions |
+
+This is the practical design principle behind the project: failures should be
+local, named, and inspectable. A user should be able to tell whether a result is
+blocked by geometry validity, algebraic convergence, model-form uncertainty,
+budget exhaustion, missing derivative support, or simply an unmeasured
+performance claim.
+
+## How A Claim Becomes Auditable
+
+The audit path is designed to be mechanical:
+
+1. A crate declares what it can and cannot claim in `CONTRACT.md`.
+2. A computation returns values with residuals, stop reasons, evidence colors,
+   validity domains, or budget records instead of a naked scalar.
+3. The ledger records artifacts, events, metrics, tune rows, machine fingerprints,
+   and lineage.
+4. A report or package bundles the result with its provenance and budget pie.
+5. A checker can later validate package structure, content roots, signatures, and
+   claim completeness without needing to rerun the full solver.
+
+That path is useful for research code, but it is also useful for day-to-day
+engineering. If a golden hash changes, if a solver starts returning a weaker
+certificate, if a new representation loses topology, or if a stochastic estimate
+stops being decision-grade, the failure has a place to surface. The project tries
+to make those failures boring and local instead of late and forensic.
+
 ## Evidence Package Lifecycle
 
 The evidence-package crates are small, but they define an important workflow:
