@@ -21,6 +21,14 @@ and 2 of `[f64; 4]` rows whose extent the type system proves. Padded panel
 tails are the CALLER's packing invariant (fs-la zero-pads); soundness here
 never depends on it — only the asserted lengths matter.
 
+`btile4x4_f64` (the batched-GEMM tile kernel, bead 9ekv) walks eight
+stream pointers of the form base + l·stride + 2·p (a) / base + l·k·stride
++ 2·p (b): the leading assert bounds the maximal dereferenced offset
+(ti ≤ 3, l ≤ k−1, 2p ≤ mb−2) inside both plane buffers, every access is
+2 lanes, and the per-pair rewind (−k·stride +2 / −k²·stride +2) never
+leaves the borrowed allocations, so pointer provenance is preserved. The
+odd batch-lane tail routes through the scalar twin in safe code.
+
 ## Aliasing assumptions
 Input slices are `&[f64]`, outputs `&mut [f64]`; Rust's borrow rules already
 guarantee no mutable aliasing at the façade. No function both reads and
