@@ -25,7 +25,7 @@
 //! Determinism: no clocks, no entropy RNG. All stochastic paths are
 //! counter-based Philox keyed by seed / logical identity.
 
-use fs_bem::panel2d::{Airfoil2d, dcl_dalpha_adjoint, naca4_symmetric, solve};
+use fs_bem::panel2d::{Airfoil2d, dcl_dalpha_adjoint, solve};
 use fs_bem::wake2d::WakeSim;
 use fs_dfo::moo::{Individual, NsgaParams, hypervolume, knee_point, nsga2};
 use fs_eproc::GaussianMixtureCs;
@@ -549,7 +549,6 @@ fn ornithoid_lbm(
 
     let mut scratch: Vec<[f64; 9]> = Vec::new();
     let mut prev = velfield(&grid);
-    let mut steadiness = f64::NAN;
     for s in 0..steps {
         grid.step(&mut scratch);
         if s + 5 == steps {
@@ -558,7 +557,7 @@ fn ornithoid_lbm(
     }
     let field = velfield(&grid);
     // steadiness: relative change of the speed field over the last 5 steps.
-    {
+    let steadiness = {
         let mut num = 0.0f64;
         let mut den = 0.0f64;
         for (a, b) in field.iter().zip(&prev) {
@@ -567,8 +566,8 @@ fn ornithoid_lbm(
                 den += a.abs();
             }
         }
-        steadiness = if den > 1e-30 { num / den } else { f64::NAN };
-    }
+        if den > 1e-30 { num / den } else { f64::NAN }
+    };
 
     // momentum-exchange body force (Ladd): sum over fluid→wall links.
     let (mut fx, mut fy) = (0.0f64, 0.0f64);
@@ -850,7 +849,10 @@ fn pour_inline(
         let w = grid.idx(lip_x, y);
         grid.flags[w] = Cell::Wall;
     }
-    for y in 1..lip_h.min(ny - 2) {
+    // Fill the left chamber ABOVE the weir crest so the (nearly) full carafe
+    // pours over the lip under the tilt schedule (a live dribble test).
+    let fill_h = (lip_h + 6).min(ny - 2);
+    for y in 1..fill_h {
         for x in 1..lip_x {
             let i = grid.idx(x, y);
             grid.flags[i] = Cell::Fluid;
@@ -1005,7 +1007,6 @@ struct FrameLp {
     b: Vec<f64>,
     dof_map: Vec<Option<usize>>,
     norm_est: f64,
-    m: usize,
 }
 
 struct FrameReport {
@@ -1079,6 +1080,7 @@ impl FrameLp {
                 *vi = ai / nrm;
             }
         }
+        let _ = m;
         FrameLp {
             a: a_mat,
             at,
@@ -1086,7 +1088,6 @@ impl FrameLp {
             b: b_vec,
             dof_map,
             norm_est,
-            m,
         }
     }
 
@@ -1470,8 +1471,10 @@ pub fn run_frame(seed: u32) -> Vec<f64> {
     let peak = fs_frame::peak_drift(&xs, base.h);
     let vy = vs.iter().fold(0.0f64, |m, &v| m.max(v.abs()));
 
-    // choose a drift_limit at the median member peak drift so p_hat ∈ (0,1).
+    // choose a drift_limit at the median member peak drift so p_hat ∈ (0,1)
+    // (a thinned pre-pass — every third member — keeps this cheap).
     let mut peaks: Vec<f64> = (0..members)
+        .step_by(3)
         .filter_map(|mm| ensemble.realize(mm).ok())
         .map(|r| {
             let mut fr = fs_frame::StoryFrame::new(base);
@@ -1503,11 +1506,16 @@ pub fn run_frame(seed: u32) -> Vec<f64> {
     }
 
     // ---- STAGE 5: CVaR-vs-scale curve + mass-min design -----------------
+    // The CVaR bisection re-evaluates the whole ensemble at every scale, so
+    // this sub-study runs on a reduced ensemble (the first 16 members at 6 s)
+    // for interactivity — the certified fragility/history above keep the full
+    // 48-member / 8 s ensemble.
+    let ens_cvar = frame_ensemble(seed, 16, 6.0, dt);
     let cvar_catalog = [0.5f64, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0];
     let beta = 0.9f64;
     let cvar_curve: Vec<(f64, f64)> = cvar_catalog
         .iter()
-        .map(|&s| (s, fs_frame::ensemble_cvar(&ensemble, base, s, beta)))
+        .map(|&s| (s, fs_frame::ensemble_cvar(&ens_cvar, base, s, beta)))
         .collect();
     // feasible limit: the CVaR at scale 1.0 (guarantees cvar_at(4.0) ≤ limit).
     let cvar_at_1 = cvar_curve
@@ -1521,7 +1529,7 @@ pub fn run_frame(seed: u32) -> Vec<f64> {
     let limit = cvar_at_1 * 1.0001;
     let design = if limit.is_finite() && cvar_at_4.is_finite() && cvar_at_4 <= limit {
         Some(fs_frame::cvar_mass_min(
-            &ensemble,
+            &ens_cvar,
             base,
             beta,
             limit,
@@ -1742,6 +1750,46 @@ mod tests {
         );
         assert!(tmin >= 0.0 && tmax <= 1.0, "transmittance out of [0,1]: [{tmin},{tmax}]");
         assert!(tmax - tmin > 0.05, "transmittance range too small: [{tmin},{tmax}]");
+    }
+
+    #[test]
+    fn flagship_determinism() {
+        // No clocks, no entropy RNG: identical inputs → bit-identical output.
+        let a = run_ornithoid(7);
+        let b = run_ornithoid(7);
+        assert_eq!(a.len(), b.len());
+        assert!(a.iter().zip(&b).all(|(x, y)| x.to_bits() == y.to_bits()));
+        let a = run_vessel(1500);
+        let b = run_vessel(1500);
+        assert!(a.iter().zip(&b).all(|(x, y)| x.to_bits() == y.to_bits()));
+        let a = run_frame(1234);
+        let b = run_frame(1234);
+        assert!(a.iter().zip(&b).all(|(x, y)| x.to_bits() == y.to_bits()));
+    }
+
+    #[test]
+    fn flagship_timings() {
+        use std::time::Instant;
+        for &seed in &[1u32, 42, 90210] {
+            let t = Instant::now();
+            let o = run_ornithoid(seed);
+            let d_o = t.elapsed();
+            let t = Instant::now();
+            let ve = run_vessel(1000);
+            let d_v = t.elapsed();
+            let t = Instant::now();
+            let f = run_frame(seed);
+            let d_f = t.elapsed();
+            eprintln!(
+                "TIMING seed={seed}: ornithoid {:.1}ms (len {}), vessel {:.1}ms (len {}), frame {:.1}ms (len {})",
+                d_o.as_secs_f64() * 1e3,
+                o.len(),
+                d_v.as_secs_f64() * 1e3,
+                ve.len(),
+                d_f.as_secs_f64() * 1e3,
+                f.len()
+            );
+        }
     }
 
     #[test]
