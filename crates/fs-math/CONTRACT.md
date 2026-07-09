@@ -27,8 +27,19 @@ floating-point POLICY: FMA contraction, subnormals, NaN, ULP budgets
   band x ∈ (1.5, 3.5) the external test oracle is weaker than the
   implementation; budget-grade evidence there is DISJOINT-PATH
   cross-validation (Taylor-dd vs CF-dd agree ≤ 3 ULP, tested).
-- `det::TRIG_DOMAIN` = 2²⁰: trig budgets valid within |x| ≤ 2²⁰ (4-part
-  Cody–Waite reduction); beyond → deterministic but budget-void (no-claim).
+- `det::TRIG_DOMAIN` = 2²⁰: the Cody–Waite/Payne–Hanek dispatch boundary
+  (4-part Cody–Waite at and below; the `payne` module's 1280-bit reduction
+  above). Trig budgets now hold for ALL finite arguments: declared
+  `SIN_LARGE_ULP_BUDGET` = 4 beyond the boundary, measured max 1 ULP over a
+  4000-sample exponent sweep 2²¹..2¹⁰⁰⁰ against the platform-libm oracle,
+  0 ULP on the published worst-case double 6381956970095103·2⁷⁹⁷ (reduced
+  |r| = 4.7e-19). Odd/even symmetry BITWISE at every landmark.
+- `payne`: SELF-VERIFYING constants — the 2/π limbs are hardcoded AND
+  regenerated at test time by an all-integer Machin bignum (π = 16·atan(1/5)
+  − 4·atan(1/239) in u64-limb fixed point, binary long division for 2/π);
+  the regeneration test compares every limb and the π hex expansion against
+  published digits (G5: integer arithmetic, bit-identical on every ISA).
+  The `Fx` bignum doubles as reference machinery for hard-case tests.
 - Policy vocabulary: `canonical_nan`, `next_up/next_down`, `nudge_out`
   (fs-ivl's directed-rounding primitive), `ulp_distance`.
 - `c64::C64` — complex f64 (bead urvw): operator traits with strict
@@ -82,6 +93,13 @@ core-only + worst-case-point + constant-integrity regressions
 
 ## No-claim boundaries
 - tan/atan2/pow/cbrt/log1p/erf: not yet implemented (follow-up bead).
-- Trig beyond |x| > 2²⁰ (Payne–Hanek is recorded follow-up scope).
+- Trig beyond |x| > 2²⁰: RESOLVED (bead r6r5, `payne` module — see above).
+- Fast mode (lower-accuracy feature-flagged variants): BLOCKED on consumers
+  declaring tolerable budgets (fs-material/LUMEN) — deliberately not built
+  speculatively, per the bead's own instruction.
+- The nightly ULP-ledger re-measurement lane: the budget-vs-measured tests
+  ship here and run in every suite; wiring them into a dedicated nightly
+  regression lane belongs to the CI/CD bead family (huq.4 closed; the perf-CI
+  bead fz2.4 owns nightly gates).
 - Correctly-rounded (0.5 ULP) results: NOT claimed — budgets above.
 - dd-oracle billions-scale nightly battery arrives with fs-ivl.

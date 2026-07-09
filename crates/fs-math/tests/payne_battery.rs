@@ -15,13 +15,15 @@ fn verdict(name: &str, pass: bool, details: &str) {
     assert!(pass, "{name}: {details}");
 }
 
+#[allow(clippy::float_cmp)] // the equality fast path is DELIBERATELY bitwise
 fn ulp_diff(a: f64, b: f64) -> u64 {
     if a == b {
         return 0;
     }
-    let (ia, ib) = (a.to_bits() as i64, b.to_bits() as i64);
     // Monotone bit-pattern distance (same-sign assumption at the
     // scales gated here; sign flips register as huge — correctly).
+    let ia = i64::from_ne_bytes(a.to_bits().to_ne_bytes());
+    let ib = i64::from_ne_bytes(b.to_bits().to_ne_bytes());
     ia.abs_diff(ib)
 }
 

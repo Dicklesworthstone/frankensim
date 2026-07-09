@@ -196,7 +196,7 @@ pub fn generate_two_over_pi(out_limbs: usize) -> Vec<u64> {
     let mut rem = Fx::zero(guard);
     rem.int = 2;
     let mut out = vec![0u64; out_limbs];
-    for limb_out in out.iter_mut() {
+    for limb_out in &mut out {
         let mut word: u64 = 0;
         for _ in 0..64 {
             rem.mul_small(2);
@@ -226,7 +226,7 @@ pub fn reduce_pio2_large(x: f64) -> (f64, u8) {
     assert!(x.is_finite(), "Payne-Hanek requires finite input");
     let neg = x < 0.0;
     let bits = x.abs().to_bits();
-    let e = ((bits >> 52) & 0x7FF) as i64 - 1023; // unbiased exponent
+    let e = i64::try_from((bits >> 52) & 0x7FF).expect("11-bit field") - 1023;
     let m = (bits & ((1u64 << 52) - 1)) | (1u64 << 52); // 53-bit mantissa
     let s = e - 52; // x = m · 2^s
     // 256-bit accumulator, little-endian limbs; bit index i (0..256)
@@ -236,7 +236,7 @@ pub fn reduce_pio2_large(x: f64) -> (f64, u8) {
     for (i, &limb) in TWO_OVER_PI_LIMBS.iter().enumerate() {
         // Term m·L_i with LSB weight 2^(s − 64(i+1)) → LSB accumulator
         // bit index:
-        let idx = s - 64 * (i as i64 + 1) + 254;
+        let idx = s - 64 * (i64::try_from(i).expect("small index") + 1) + 254;
         if idx >= 256 {
             continue; // whole multiple of 4 quadrants — drops out mod 4
         }
