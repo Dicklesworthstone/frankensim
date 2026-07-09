@@ -67,14 +67,14 @@ pub fn cvar(samples: &[f64], alpha: f64) -> Result<f64, RobustError> {
     }
     reject_non_finite(samples)?;
     let mut sorted: Vec<f64> = samples.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    sorted.sort_by(f64::total_cmp);
     // number of worst-tail samples: at least the (1 - alpha) fraction, >= 1.
     // Subtract a tiny epsilon before ceil so float error (e.g. 5.0000000004)
     // does not over-count the tail by one.
     let n = sorted.len();
     let tail = ((((1.0 - alpha) * n as f64) - 1e-9).ceil().max(1.0) as usize).clamp(1, n);
-    let worst = &sorted[n - tail..];
-    Ok(worst.iter().sum::<f64>() / tail as f64)
+    let tail_sum = sorted.iter().rev().take(tail).sum::<f64>();
+    Ok(tail_sum / tail as f64)
 }
 
 /// The weakest (lowest-rank) color among the inputs — the reporting rule.
@@ -179,15 +179,16 @@ pub fn robust_optimum(
             });
         }
     }
-    let mut best: Option<(&ColoredObjective, f64)> = None;
+    let mut candidates = candidates.iter();
+    let first = candidates.next().ok_or(RobustError::NoCandidates)?;
+    let mut best = (first, first.robust_value(alpha)?);
     for c in candidates {
         let rv = c.robust_value(alpha)?;
-        match best {
-            Some((_, best_rv)) if rv >= best_rv => {}
-            _ => best = Some((c, rv)),
+        if rv < best.1 {
+            best = (c, rv);
         }
     }
-    let (winner, robust_value) = best.expect("non-empty candidates");
+    let (winner, robust_value) = best;
     Ok(RobustReport {
         design: winner.design.clone(),
         robust_value,
