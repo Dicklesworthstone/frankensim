@@ -64,6 +64,23 @@ cubical homology), so the optimization stack lives here.
   ratio vol(eroded)/vol(nominal), the measured minimum-length-scale
   signal.
 
+- `marquee` module (bead b7d0; [F], behind `cutfem-marquee`): the
+  CutFEM-octree topology marquee. `DensityDesign` (nodal densities;
+  the SOLID region {ρ > ½} IS the CutFEM domain via the bilinear
+  CutSdf with an exact-containment enclosure), `run_marquee` (the
+  volume-to-point heat fixture: interface-flux redistribution with a
+  BAND-LOCAL volume projection, DWR-gated band refinement, zero
+  rebuilds structurally), `void_components` (topology witness),
+  `min_feature_cells` (the medial-axis-class thickness oracle).
+  HARD-WON INVARIANTS from development, all conformance-guarded:
+  fs-cutfem's ghost penalty demands the cut band AND ITS ONE-CELL HALO
+  at a uniform level (`halo_cut`), re-conformed EVERY iteration
+  because the interface moves; interface membership is a NEIGHBOR SIGN
+  CHANGE, not a |φ| threshold (φ is a density gap, not a distance);
+  flux probes project THROUGH the interface so void-side nodes read
+  real flux; and the volume projection lives ON THE BAND — a global
+  shift silently fills voids from the inside.
+
 ## Invariants
 
 - Every stage of the density chain has an exact derivative; the
@@ -150,3 +167,17 @@ golden hashes (pipeline, robust, eigenfrequency
   choice).
 - No multi-load/worst-case formulations, no continuation SCHEDULER
   (drivers own β/p ramps; the primitives take fixed parameters).
+
+## No-claim boundaries (marquee)
+
+- Heat-conduction (volume-to-point) benchmark class: the recorded
+  compliance envelope is THIS fixture's golden band; MBB/cantilever
+  ELASTICITY envelopes ride CutFEM elasticity when it lands.
+- Per-iteration wall times are DEBUG-build measurements, labeled; the
+  interactive-cadence targets are perf-CI's gates.
+- The flux redistribution is a smeared shape-derivative heuristic with
+  measured descent, not a certified gradient (the certified route is
+  the marquee-demo crate's exact bilinear identity).
+- Split concentration is bounded by the halo contract at ~2/3, not the
+  0.8 a halo-free marker could reach — the ceiling is the solver's
+  ghost-penalty stencil, documented in the test.
