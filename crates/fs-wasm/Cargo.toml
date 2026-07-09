@@ -37,6 +37,11 @@ fs-bo = { path = "../fs-bo" }
 fs-xform = { path = "../fs-xform" }
 fs-dfo = { path = "../fs-dfo" }
 fs-symmetry = { path = "../fs-symmetry" }
+# Support crates reached by the upper-stack demos (already in the transitive
+# wasm build via fs-flux / fs-feec): the NS triangle-mesh generator and the
+# tet-complex type the exterior-calculus demos construct.
+fs-solid = { path = "../fs-solid" }
+fs-rep-mesh = { path = "../fs-rep-mesh" }
 
 # wasm-bindgen only enters the wasm32 build — native builds stay dependency-clean.
 [target.'cfg(target_arch = "wasm32")'.dependencies]

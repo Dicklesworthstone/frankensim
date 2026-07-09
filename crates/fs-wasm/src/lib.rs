@@ -34,11 +34,16 @@ use fs_sparse::{Coo, Csr};
 // the `#[wasm_bindgen]` layer at the bottom of this file.
 // ---------------------------------------------------------------------------
 pub mod certified;
+pub mod deep;
 pub mod dynamics;
 pub mod geom;
 pub mod pde;
 
 pub use certified::mandelbrot_certified;
+pub use deep::{
+    betti_shapes, cmaes_trace, cutfem_quadtree, cyclic_symmetry, ffd_deform, gp_regression,
+    hodge_decomposition, krylov_convergence, navier_stokes_cavity, optimal_transport,
+};
 pub use dynamics::{ga_motor_orbit, lorenz_points, symplectic_vs_euler};
 pub use geom::{marching_cubes, sdf_volume};
 pub use pde::{fluid_frames, gray_scott_frames, topopt_frames, wave2d_frames};

@@ -846,6 +846,8 @@ dependencies = [
  "fs-la",
  "fs-math",
  "fs-rand",
+ "fs-rep-mesh",
+ "fs-solid",
  "fs-solver",
  "fs-sparse",
  "fs-symmetry",
