@@ -1,0 +1,22 @@
+[package]
+name = "fs-flutter-e2e"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "FlutterCert: locate the flutter / added-mass instability boundary of a coupled fluid-structure system and hand back a MACHINE-CHECKED Lyapunov stability certificate on the stable side, cross-checked by an independent spectral test, while showing a partitioned solver that only Aitken relaxation can drive up to that boundary. Composes fs-sos (Lyapunov certificate) x fs-spectral (independent eigenvalue cross-check) x fs-couple (partitioned FSI solver) x fs-evidence (Verified certificate). Groundbreaking: a stability boundary that is proven, not plotted."
+
+[package.metadata.frankensim]
+layer = "L4"
+
+[dependencies]
+fs-sos = { path = "../fs-sos" }
+fs-spectral = { path = "../fs-spectral" }
+fs-couple = { path = "../fs-couple" }
+fs-evidence = { path = "../fs-evidence" }
+
+[dev-dependencies]
+
+[lints]
+workspace = true

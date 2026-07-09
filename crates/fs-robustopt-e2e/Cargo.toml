@@ -1,0 +1,21 @@
+[package]
+name = "fs-robustopt-e2e"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "ProofRobust: pick a design that is BOTH certified globally optimal (an executable sum-of-squares proof that no better design exists — no local-optimum ambiguity) AND robust to worst-case manufacturing perturbation (CVaR). Composes fs-sos (SOS global-optimality certificates) x fs-robust (CVaR + colored objectives) x fs-evidence (Verified nominal vs Estimated robust). Groundbreaking: traditional optimizers return a local optimum with no global guarantee and no worst-case account; this returns a proof and a robust ranking together."
+
+[package.metadata.frankensim]
+layer = "L4"
+
+[dependencies]
+fs-sos = { path = "../fs-sos" }
+fs-robust = { path = "../fs-robust" }
+fs-evidence = { path = "../fs-evidence" }
+
+[dev-dependencies]
+
+[lints]
+workspace = true
