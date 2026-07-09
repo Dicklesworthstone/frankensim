@@ -7,9 +7,11 @@
 //! This illuminates the operating space of a lattice-Boltzmann channel and
 //! certifies credibility at every point, composing crates never designed to meet:
 //!
-//! - **The simulation + its exact solution** ([`fs_lbm`]): a body-force-driven
-//!   channel is run to steady state; its velocity profile is compared to the
-//!   ANALYTIC Poiseuille solution — a manufactured-solution accuracy certificate.
+//! - **The simulation + its exact solution** ([`fs_lbm`]): each channel is
+//!   marched to STEADY STATE (not a fixed step budget — otherwise a slow
+//!   high-Reynolds transient would masquerade as inaccuracy), then compared to
+//!   the ANALYTIC Poiseuille solution: a manufactured-solution accuracy check
+//!   that reflects the inherent `O(1/ny²)` discretization error.
 //! - **The scaling certificate** ([`fs_lbm::plan_scaling`]): the lattice scaling
 //!   planner derives `ν`, `τ`, and the Mach number for the target Reynolds and
 //!   flags the regime `Verified` only when comfortably stable (positive viscosity,
@@ -17,8 +19,10 @@
 //! - **Illumination** ([`fs_archive`]): MAP-Elites over (Reynolds × resolution)
 //!   keeps the most-accurate operating point in every niche — the credibility
 //!   atlas, not a single run.
-//! - **Honest colors** ([`fs_evidence`]): a point accurate within tolerance AND in
-//!   a stable regime is `Verified`; the rest are `Estimated`.
+//! - **Honest colors** ([`fs_evidence`]): once converged, EVERY point matches the
+//!   analytic solution, so the credibility differentiation is the REGIME — a
+//!   point accurate AND comfortably stable is `Verified`; a near-`τ=½` point is
+//!   flagged `Estimated` as risky even where it is (currently) accurate.
 //!
 //! Deterministic; no dependencies beyond the composed crates.
 
@@ -37,9 +41,15 @@ pub struct OperatingPoint {
     pub tau: f64,
     /// Lattice viscosity.
     pub viscosity: f64,
-    /// Relative max-profile error vs the analytic Poiseuille solution.
+    /// Relative max-profile error vs the analytic Poiseuille solution, at
+    /// STEADY STATE (so this reflects inherent discretization error, not the
+    /// step budget).
     pub profile_error: f64,
-    /// Is the profile accurate within tolerance?
+    /// Did the flow reach steady state within the step cap?
+    pub converged: bool,
+    /// Steps actually run to reach steady state.
+    pub steps_run: usize,
+    /// Is the (converged) profile accurate within tolerance?
     pub accurate: bool,
     /// Is the lattice scaling in a `Verified` (stable) regime?
     pub regime_stable: bool,
@@ -66,13 +76,16 @@ pub struct FlowReport {
     pub credibility_color: Color,
 }
 
-/// Simulate one channel operating point and certify it.
+/// Simulate one channel operating point (to steady state) and certify it.
+/// `max_steps` caps the transient; the run stops early once the profile stops
+/// changing, so `profile_error` measures the INHERENT accuracy rather than how
+/// far the transient happened to decay in a fixed budget.
 #[must_use]
 pub fn certify_point(
     reynolds: f64,
     ny: usize,
     u_lattice: f64,
-    steps: usize,
+    max_steps: usize,
     tol: f64,
 ) -> OperatingPoint {
     let plan = plan_scaling(reynolds, ny as f64, u_lattice);
@@ -81,9 +94,29 @@ pub fn certify_point(
     // Body force sized so the centerline velocity ≈ u_lattice.
     let gx = 8.0 * nu * u_lattice / (ny as f64).powi(2);
 
+    // March to steady state in fixed chunks; stop when the profile stabilizes.
     let mut lbm = Lbm::channel(4, ny, tau, gx);
-    lbm.run(steps);
-    let profile = lbm.x_velocity_profile();
+    let chunk = 2000usize;
+    let mut profile = lbm.x_velocity_profile();
+    let mut steps_run = 0usize;
+    let mut converged = false;
+    while steps_run < max_steps {
+        lbm.run(chunk);
+        steps_run += chunk;
+        let next = lbm.x_velocity_profile();
+        let (mut delta, mut scale) = (0.0_f64, 1e-12_f64);
+        for (a, b) in next.iter().zip(&profile) {
+            delta = delta.max((a - b).abs());
+            scale = scale.max(a.abs());
+        }
+        profile = next;
+        // Steady once the per-chunk change is far below the O(1/ny²)
+        // discretization floor — tighter would only burn steps.
+        if delta / scale < 1e-4 {
+            converged = true;
+            break;
+        }
+    }
 
     let mut peak = 0.0_f64;
     let mut max_err = 0.0_f64;
@@ -104,7 +137,10 @@ pub fn certify_point(
         tau,
         viscosity: nu,
         profile_error,
-        accurate: profile_error <= tol,
+        converged,
+        steps_run,
+        // Accuracy is only claimed for a converged, tolerance-matching profile.
+        accurate: converged && profile_error <= tol,
         regime_stable: plan.color().rank() == ColorRank::Verified,
     }
 }
@@ -176,5 +212,7 @@ pub fn run_campaign(reynolds: &[f64], resolutions: &[usize], steps: usize, tol: 
 /// The default sweep.
 #[must_use]
 pub fn default_sweep() -> (Vec<f64>, Vec<usize>) {
-    (vec![20.0, 60.0, 120.0], vec![16, 24, 32])
+    // Reynolds spans a comfortable regime (τ well above ½) to a near-boundary
+    // one (τ→½); resolutions kept modest so every point reaches steady state fast.
+    (vec![20.0, 50.0, 90.0], vec![12, 16, 24])
 }
