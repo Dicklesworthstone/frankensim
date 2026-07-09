@@ -11,19 +11,25 @@
 //! finished mesh anyway. Depth/budget caps are counted honestly
 //! (`unrecovered`), never silently dropped.
 //!
-//! INTERIOR FACET recovery ([`recover_facets`], the uee3 successor
-//! slice): every CONVEX planar PLC facet becomes a union of mesh
-//! FACES by longest-edge midpoint bisection of its fan triangulation
-//! — the 2D analogue of the segment argument (sub-triangles below
-//! the local feature size have empty min-enclosing balls and are
-//! Delaunay faces). Non-convex facets and general-position planes are
-//! recorded successors: fan triangulation needs convexity, and f64
-//! midpoints stay EXACTLY coplanar only when the plane is
-//! axis-aligned (bitwise-equal coordinate) — the correspondence
-//! verification measures the residual rather than assuming it.
+//! INTERIOR FACET recovery ([`recover_facets`], the uee3/iw3l successor
+//! slice): every SIMPLE planar PLC facet becomes a union of mesh FACES
+//! by longest-edge midpoint bisection of a valid triangulation — the
+//! 2D analogue of the segment argument (sub-triangles below the local
+//! feature size have empty min-enclosing balls and are Delaunay faces).
+//! The triangulation is EXACT-PREDICATE ROBUST: convex facets keep the
+//! cheap fan (unchanged); NON-CONVEX facets are ear-clipped in the
+//! facet plane using `orient2d` for the ear and containment tests
+//! (bead iw3l item (a): interior/non-convex PLC facets) — a loop that
+//! is not a simple non-degenerate polygon is counted `unrecovered`,
+//! never faked. General-position (non-axis-aligned) planes remain the
+//! recorded successor: f64 midpoints stay EXACTLY coplanar only when
+//! the plane is axis-aligned (bitwise-equal coordinate), so the
+//! correspondence verification measures the residual rather than
+//! assuming it.
 
 use crate::delaunay::{GHOST, MeshError, Tetrahedralization};
 use fs_exec::Cx;
+use fs_ivl::{Sign, orient2d};
 use std::collections::BTreeSet;
 
 /// Recovery policy.
@@ -289,7 +295,160 @@ fn face_set(tetra: &Tetrahedralization) -> BTreeSet<[u32; 3]> {
     faces
 }
 
-/// Recover every CONVEX planar PLC facet (vertex loop into the
+/// Project a facet loop to 2D by dropping the DOMINANT-normal axis and keeping
+/// the two remaining coordinates VERBATIM (exact sub-coordinates, so `orient2d`
+/// on them stays exact). Newell's method gives a robust normal for any
+/// near-planar simple loop.
+fn project_facet(points: &[[f64; 3]], loop_verts: &[u32]) -> Vec<[f64; 2]> {
+    let m = loop_verts.len();
+    let mut nrm = [0.0f64; 3];
+    for i in 0..m {
+        let a = points[loop_verts[i] as usize];
+        let b = points[loop_verts[(i + 1) % m] as usize];
+        nrm[0] += (a[1] - b[1]) * (a[2] + b[2]);
+        nrm[1] += (a[2] - b[2]) * (a[0] + b[0]);
+        nrm[2] += (a[0] - b[0]) * (a[1] + b[1]);
+    }
+    // Dominant axis = largest |component|; keep the other two in ascending
+    // axis order (a fixed, deterministic choice).
+    let mut ax = 0usize;
+    let mut best = nrm[0].abs();
+    for (a, &c) in nrm.iter().enumerate().skip(1) {
+        if c.abs() > best {
+            best = c.abs();
+            ax = a;
+        }
+    }
+    let (u, v) = match ax {
+        0 => (1usize, 2usize),
+        1 => (0usize, 2usize),
+        _ => (0usize, 1usize),
+    };
+    loop_verts
+        .iter()
+        .map(|&idx| {
+            let p = points[idx as usize];
+            [p[u], p[v]]
+        })
+        .collect()
+}
+
+/// True iff the projected simple polygon is convex (every turn one way;
+/// collinear vertices allowed). Convex facets keep the exact fan triangulation.
+fn is_convex(proj: &[[f64; 2]]) -> bool {
+    let n = proj.len();
+    let mut sign = 0i8;
+    for i in 0..n {
+        let a = proj[(i + n - 1) % n];
+        let b = proj[i];
+        let c = proj[(i + 1) % n];
+        match orient2d(a, b, c) {
+            Sign::Positive => {
+                if sign < 0 {
+                    return false;
+                }
+                sign = 1;
+            }
+            Sign::Negative => {
+                if sign > 0 {
+                    return false;
+                }
+                sign = -1;
+            }
+            Sign::Zero => {}
+        }
+    }
+    true
+}
+
+/// Closed-region containment via exact `orient2d`: is `p` inside triangle
+/// `(a, b, c)` (oriented `ccw`), boundary included?
+fn in_triangle(p: [f64; 2], a: [f64; 2], b: [f64; 2], c: [f64; 2], ccw: bool) -> bool {
+    for (x, y) in [(a, b), (b, c), (c, a)] {
+        match orient2d(x, y, p) {
+            Sign::Zero => {}
+            Sign::Positive => {
+                if !ccw {
+                    return false;
+                }
+            }
+            Sign::Negative => {
+                if ccw {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
+/// Ear-clipping triangulation of a SIMPLE (convex or non-convex) planar facet
+/// loop, exact-predicate robust: `orient2d` decides both the convex-corner test
+/// and the ear-emptiness test, and the scan clips the FIRST valid ear in index
+/// order (deterministic). Returns the triangle vertex triples (original point
+/// indices), or `None` if the loop is not a simple non-degenerate polygon (an
+/// HONEST failure — the caller counts it `unrecovered`).
+fn ear_clip(proj: &[[f64; 2]], loop_verts: &[u32]) -> Option<Vec<[u32; 3]>> {
+    let m = loop_verts.len();
+    if m < 3 {
+        return None;
+    }
+    // Signed area (shoelace) → orientation; zero area is degenerate.
+    let mut area2 = 0.0f64;
+    for i in 0..m {
+        let a = proj[i];
+        let b = proj[(i + 1) % m];
+        area2 += a[0].mul_add(b[1], -(b[0] * a[1]));
+    }
+    if area2 == 0.0 {
+        return None;
+    }
+    let ccw = area2 > 0.0;
+    let mut poly: Vec<usize> = (0..m).collect();
+    let mut tris: Vec<[u32; 3]> = Vec::with_capacity(m - 2);
+    // Each successful pass removes one vertex; `m` passes is the hard ceiling.
+    for _ in 0..m {
+        if poly.len() == 3 {
+            break;
+        }
+        let n = poly.len();
+        let mut clipped = false;
+        for i in 0..n {
+            let ip = poly[(i + n - 1) % n];
+            let ic = poly[i];
+            let inx = poly[(i + 1) % n];
+            let convex = matches!(
+                (orient2d(proj[ip], proj[ic], proj[inx]), ccw),
+                (Sign::Positive, true) | (Sign::Negative, false)
+            );
+            if !convex {
+                continue; // reflex or collinear corner is never an ear
+            }
+            let empty = poly.iter().all(|&k| {
+                k == ip
+                    || k == ic
+                    || k == inx
+                    || !in_triangle(proj[k], proj[ip], proj[ic], proj[inx], ccw)
+            });
+            if empty {
+                tris.push([loop_verts[ip], loop_verts[ic], loop_verts[inx]]);
+                poly.remove(i);
+                clipped = true;
+                break;
+            }
+        }
+        if !clipped {
+            return None; // no ear found → not a simple polygon
+        }
+    }
+    if poly.len() != 3 {
+        return None;
+    }
+    tris.push([loop_verts[poly[0]], loop_verts[poly[1]], loop_verts[poly[2]]]);
+    Some(tris)
+}
+
+/// Recover every SIMPLE planar PLC facet (vertex loop into the
 /// ORIGINAL points) as a union of mesh faces.
 ///
 /// # Errors
@@ -324,10 +483,22 @@ pub fn recover_facets(
     for (fid, loop_verts) in facets.iter().enumerate() {
         cx.checkpoint()?;
         assert!(loop_verts.len() >= 3, "facet needs at least 3 vertices");
-        // Fan triangulation of the (convex) polygon.
-        let mut tris: Vec<[u32; 3]> = (1..loop_verts.len() - 1)
-            .map(|i| [loop_verts[0], loop_verts[i], loop_verts[i + 1]])
-            .collect();
+        // Triangulate the facet: CONVEX → the exact fan (unchanged — cheapest,
+        // and keeps the axis-aligned convex path bit-for-bit); NON-CONVEX →
+        // exact-predicate ear-clipping in the facet plane (bead iw3l item (a)).
+        // A loop that is not a simple non-degenerate polygon is counted
+        // `unrecovered`, never faked.
+        let proj = project_facet(&tetra.mesh.points, loop_verts);
+        let mut tris: Vec<[u32; 3]> = if is_convex(&proj) {
+            (1..loop_verts.len() - 1)
+                .map(|i| [loop_verts[0], loop_verts[i], loop_verts[i + 1]])
+                .collect()
+        } else if let Some(t) = ear_clip(&proj, loop_verts) {
+            t
+        } else {
+            stats.unrecovered += 1;
+            continue;
+        };
         let mut failed = false;
         let mut round = 0u32;
         loop {
