@@ -9,8 +9,10 @@
 #![cfg(feature = "time-slabs")]
 
 use fs_time::slabs::{
-    Activation, CoupledFixture, activation_report, march_adaptive, march_instrumented,
+    Activation, CoupledFixture, SlabEntry, SlabLedger, activation_report, march_adaptive,
+    march_instrumented,
 };
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 fn verdict(case: &str, detail: &str) {
     println!(
@@ -219,5 +221,85 @@ fn ts_005_activation_gate_is_honest() {
         "the activation gate recommends instrument-only when splitting error is <20% of \
          budget and flips to control-justified when it dominates — the Proposal-4 \
          sequencing discipline as code",
+    );
+}
+
+#[test]
+fn ts_006_invalid_step_contracts_fail_fast() {
+    let fixture = CoupledFixture {
+        coupling: constant_coupling,
+    };
+    assert!(
+        catch_unwind(AssertUnwindSafe(|| {
+            let _ = fixture.monolithic([1.0, 0.5], 0.0, 1.0, 0);
+        }))
+        .is_err(),
+        "zero fine substeps must fail fast"
+    );
+    assert!(
+        catch_unwind(AssertUnwindSafe(|| {
+            let _ = fixture.split_step([1.0, 0.5], 0.0, 1.0, 0);
+        }))
+        .is_err(),
+        "zero split subcycles must fail fast"
+    );
+    assert!(
+        catch_unwind(AssertUnwindSafe(|| {
+            let _ = march_instrumented(&fixture, [1.0, 0.5], 1.0, 0, 1);
+        }))
+        .is_err(),
+        "zero slabs must fail fast"
+    );
+    assert!(
+        catch_unwind(AssertUnwindSafe(|| {
+            let _ = march_adaptive(&fixture, [1.0, 0.5], 1.0, 4, f64::NAN);
+        }))
+        .is_err(),
+        "non-finite tolerances must fail fast"
+    );
+    let (_, ledger) = march_instrumented(&fixture, [1.0, 0.5], 1.0, 4, 1);
+    assert!(
+        catch_unwind(AssertUnwindSafe(|| {
+            let _ = activation_report(&ledger, 0.0);
+        }))
+        .is_err(),
+        "zero total error budget must fail fast"
+    );
+    let malformed_ledger = SlabLedger {
+        entries: vec![SlabEntry {
+            t0: 1.0,
+            t1: 0.0,
+            subcycles: 0,
+            defect: f64::NAN,
+        }],
+    };
+    assert!(
+        catch_unwind(AssertUnwindSafe(|| {
+            let _ = malformed_ledger.attribute();
+        }))
+        .is_err(),
+        "malformed hand-built ledgers must fail fast before attribution"
+    );
+    assert!(
+        catch_unwind(AssertUnwindSafe(|| {
+            let _ = malformed_ledger.to_json();
+        }))
+        .is_err(),
+        "malformed hand-built ledgers must fail fast before JSON reporting"
+    );
+    let bad = CoupledFixture {
+        coupling: |_| f64::NAN,
+    };
+    assert!(
+        catch_unwind(AssertUnwindSafe(|| {
+            let _ = bad.split_step([1.0, 0.5], 0.0, 1.0, 1);
+        }))
+        .is_err(),
+        "non-finite coupling functions must fail fast"
+    );
+    verdict(
+        "ts-006",
+        "zero substeps/slabs, invalid tolerances/budgets, malformed ledgers, and non-finite \
+         coupling values fail fast",
     );
 }

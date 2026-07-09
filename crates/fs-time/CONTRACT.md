@@ -55,7 +55,11 @@ stepper — are discharged where claimed below.
   t ∈ [2.0, 2.5]"). `march_adaptive` doubles subcycles where the
   cocycle exceeds tolerance (cap 64). `activation_report` encodes the
   Proposal-4 SEQUENCING gate: splitting error under 20% of budget →
-  INSTRUMENT-ONLY (measure it, don't control it).
+  INSTRUMENT-ONLY (measure it, don't control it). Slab constructors
+  and marchers fail fast on zero substeps/slabs, invalid time spans,
+  non-finite states/couplings, and non-positive total error budgets;
+  ledger reporting rejects hand-built malformed entries before
+  attribution or JSON emission.
 
 ## Invariants
 
@@ -106,7 +110,8 @@ None. `unsafe_code = "deny"` via workspace lints; no capsules.
 
 ## Feature flags
 
-None. No optional dependencies.
+- `time-slabs` — [F] time slabs as temporal cells and splitting-error
+  ledger/controller instrumentation. No optional dependencies.
 
 ## Conformance tests
 
@@ -129,6 +134,11 @@ at two horizons — kept from the probe that diagnosed the period-point
 metric blindness (at t = 2π, cos′ = 0: a q-only error measures phase
 error quadratically and fakes order ≈ 4; the honest metric is
 max(q, v) error).
+`tests/slabs.rs` under `time-slabs`: temporal cocycle consistency,
+budget-pie localization, adaptive-vs-uniform cost, G3 repartition
+envelope, activation gate, and fail-fast validation for invalid slab
+counts/substeps/tolerances/budgets, malformed public ledger entries,
+and non-finite couplings.
 
 ## No-claim boundaries
 
