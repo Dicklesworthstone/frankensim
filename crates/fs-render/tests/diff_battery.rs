@@ -4,6 +4,8 @@
 //! rendering, the combined appearance+physics fixture, and bitwise
 //! replay.
 
+use std::fmt::Write as _;
+
 use fs_render::diff::{NPARAMS, RenderCfg, loss_and_grad, render, render_grad};
 
 fn verdict(name: &str, pass: bool, details: &str) {
@@ -53,7 +55,6 @@ fn dr_001_gradient_matches_fd() {
         let scale = grad[k].abs().max(fd.abs()).max(1e-8);
         let rel = (grad[k] - fd).abs() / scale;
         worst = worst.max(rel);
-        use std::fmt::Write as _;
         let _ = write!(details, "p{k}:{rel:.1e} ");
     }
     verdict(
