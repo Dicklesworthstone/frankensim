@@ -84,7 +84,17 @@ pub fn run_campaign(n: usize, radii: &[f64]) -> MetamatReport {
         let eff = homog.effective(&cell);
         let c11 = eff.c[0][0];
         let density = eff.density;
-        let cm: Vec<Vec<f64>> = eff.c.iter().map(|row| row.to_vec()).collect();
+        // `is_psd` uses Jacobi rotations (symmetric-matrix precondition); the
+        // energy tensor is symmetric up to roundoff, so symmetrize exactly before
+        // trusting the certificate — a no-op for a correct tensor, and it keeps
+        // the PSD certificate sound rather than resting on Jacobi's tolerance.
+        let cm: Vec<Vec<f64>> = (0..3)
+            .map(|i| {
+                (0..3)
+                    .map(|j| f64::midpoint(eff.c[i][j], eff.c[j][i]))
+                    .collect()
+            })
+            .collect();
         let stable = is_psd(&cm, 1e-9);
         // Voigt upper bound with a tiny void stiffness floor.
         let bound = voigt_bound(c_solid, density, 1e-3);
