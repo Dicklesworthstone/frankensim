@@ -11,6 +11,7 @@ description = "Per-operator cost/error models, Error Ledger and Time Ledger attr
 layer = "L6"
 
 [dependencies]
+fs-dfo = { path = "../fs-dfo", optional = true }
 fs-geom = { path = "../fs-geom" }
 fs-ledger = { path = "../fs-ledger" }
 
@@ -19,6 +20,18 @@ fs-ledger = { path = "../fs-ledger" }
 [features]
 # [F]-gated per the Ambition-Tag rule (bead knh1.6, Proposal C).
 voi-queries = []
+# [M]-gated (bead gp3.9): the co-optimizing allocator. Ships OFF; the
+# promotion gate (beats hand allocation on all three flagships) is the
+# huq.15 milestone's Gauntlet call — the fixture-matrix scoreboard here
+# is necessary, not sufficient.
+moonshot-planner = ["dep:fs-dfo"]
+
+[[test]]
+name = "alloc_battery"
+
+[[test]]
+name = "moonshot_battery"
+required-features = ["moonshot-planner"]
 
 [lints]
 workspace = true

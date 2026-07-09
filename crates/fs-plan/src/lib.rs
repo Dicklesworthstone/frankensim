@@ -16,12 +16,18 @@
 //!
 //! Layer: L6 (HELM). Runtime deps: `std`, fs-geom, fs-ledger.
 
+pub mod alloc;
 pub mod cost;
 pub mod ledgers;
+#[cfg(feature = "moonshot-planner")]
+pub mod moonshot;
 pub mod oracle;
 #[cfg(feature = "voi-queries")]
 pub mod voi;
 
+pub use alloc::{
+    AllocProblem, Allocator, BudgetInfeasible, Knob, KnobSetting, Plan, allocate, oracle_min_error,
+};
 pub use cost::{CostModel, CostObservation, CostPrediction, CostRefusal, MIN_OBS};
 pub use ledgers::{
     Contribution, ErrorLedger, ErrorSource, LedgerDefect, Rigor, TimeLedger, TimeStage,

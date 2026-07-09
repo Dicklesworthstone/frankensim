@@ -51,6 +51,32 @@ Runtime deps: `std`, fs-geom, fs-ledger.
   scheduling authority only while recommended purchases measurably
   outperform agent-chosen alternatives; no evidence → no authority).
 
+- `alloc::{Knob, KnobSetting, AllocProblem, Plan, allocate, Allocator,
+  BudgetInfeasible, oracle_min_error}` (bead gp3.9 V1): the
+  GREEDY-PLUS-LOOKUP budget allocator — Pareto-ladder upgrades by
+  marginal utility Δerror/Δwall under a TROPICAL wall-clock (max over
+  parallel tracks of within-track sums, §14.3: slack upgrades are free
+  and taken first); online re-planning via `Allocator::observe_error`
+  (a-posteriori estimates override model values); always a plan or a
+  STRUCTURED `BudgetInfeasible` with ranked, VERIFIED relaxations
+  (re-planning at the suggested budget succeeds — gated). Measured on
+  the fixture matrix: worst greedy/oracle error ratio 1.134 over 60
+  random problems; the §11.4 "drag to 2% in 2h" scenario plans to
+  1.68% at 3600 s with an 8-line rationale, deterministically.
+- `moonshot::{optimize_exact, waterfill, cma_continuous, RateKnob,
+  ScoreRow}` (bead gp3.9 V2, feature `moonshot-planner`, [M], ships
+  OFF): the co-optimizer — exact per-track multiple-choice-knapsack DP
+  (the tropical budget DECOMPOSES per track; within 2% of the brute
+  oracle from bucket rounding only, never loses to V1 — 80 fixtures);
+  convex water-filling (KKT bisection) for rate-based models,
+  cross-checked by CMA-ES to 1e-16; BIPOP-CMA-ES for non-convex models
+  (MEASURED rejection: single-run CMA-ES converges AWAY from
+  activation cliffs — surrogate-threshold fixture stuck at spend 0
+  with 3.6× the error until BIPOP restarts crossed it). Scoreboard:
+  V2 beats-or-ties V1 AND hand allocation on 25/25 fixtures —
+  NECESSARY promotion evidence; the flagship-set gate is huq.15's
+  Gauntlet call and this feature stays off until it passes.
+
 ## Invariants
 
 1. Fits are pure functions of the observation multiset — identical ledger
@@ -87,6 +113,9 @@ None. Safe Rust only.
 
 None. The [F]-grade allocator/co-optimizer machinery is deliberately NOT
 here (gp3.9, flag-gated there per plan §11.4).
+`moonshot-planner` ([M], bead gp3.9): the co-optimizing allocator +
+fs-dfo dependency. OFF by default; promotion gated on the huq.15
+flagship Gauntlet.
 
 ## Conformance tests
 

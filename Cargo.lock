@@ -1390,6 +1390,7 @@ dependencies = [
 name = "fs-plan"
 version = "0.0.1"
 dependencies = [
+ "fs-dfo",
  "fs-geom",
  "fs-ledger",
 ]
