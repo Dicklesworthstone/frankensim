@@ -101,6 +101,52 @@ fn neck_samples(r: f64) -> Vec<Point3> {
         .collect()
 }
 
+const ENVELOPE_SPHERE_RADIUS: f64 = 0.4;
+
+fn envelope_sphere_samples(c: Point3) -> Vec<Point3> {
+    let mut v = Vec::new();
+    for k in 0..32 {
+        let th = core::f64::consts::TAU * f64::from(k) / 32.0;
+        for &z in &[-0.25, 0.0, 0.25] {
+            let r = (ENVELOPE_SPHERE_RADIUS * ENVELOPE_SPHERE_RADIUS - z * z)
+                .max(0.0)
+                .sqrt();
+            v.push(Point3::new(c.x + r * th.cos(), c.y + r * th.sin(), c.z + z));
+        }
+        v.push(Point3::new(c.x, c.y, c.z + ENVELOPE_SPHERE_RADIUS));
+        v.push(Point3::new(c.x, c.y, c.z - ENVELOPE_SPHERE_RADIUS));
+    }
+    v
+}
+
+fn envelope_report_at(
+    allowed: &dyn Chart,
+    center_x: f64,
+    cx: &Cx<'_>,
+) -> fs_geocon::EnvelopeReport {
+    envelope_violation(
+        allowed,
+        &envelope_sphere_samples(Point3::new(center_x, 0.0, 0.0)),
+        40.0,
+        false,
+        cx,
+    )
+}
+
+fn envelope_soft_worst_at(allowed: &dyn Chart, center_x: f64, cx: &Cx<'_>) -> f64 {
+    envelope_report_at(allowed, center_x, cx).soft_worst
+}
+
+fn keepout_report_at(keepout: &dyn Chart, center_x: f64, cx: &Cx<'_>) -> fs_geocon::EnvelopeReport {
+    envelope_violation(
+        keepout,
+        &envelope_sphere_samples(Point3::new(center_x, 0.0, 0.0)),
+        40.0,
+        true,
+        cx,
+    )
+}
+
 /// gcp-001 — min-thickness: the soft aggregate under-approximates the
 /// hard minimum and converges to it as p grows; violations LOCALIZE to
 /// the thin samples; the FD lever derivative is right; and a toy
@@ -417,37 +463,11 @@ fn gcp_004_envelopes() {
         let allowed = BoxChart {
             aabb: Aabb::new(Point3::new(-1.0, -1.0, -1.0), Point3::new(1.0, 1.0, 1.0)),
         };
-        // Design: sphere of radius 0.4 at center c; boundary samples.
-        let sphere_samples = |c: Point3| -> Vec<Point3> {
-            let mut v = Vec::new();
-            for k in 0..32 {
-                let th = core::f64::consts::TAU * f64::from(k) / 32.0;
-                for &z in &[-0.25, 0.0, 0.25] {
-                    let r = (0.4f64 * 0.4 - z * z).max(0.0).sqrt();
-                    v.push(Point3::new(c.x + r * th.cos(), c.y + r * th.sin(), c.z + z));
-                }
-                v.push(Point3::new(c.x, c.y, c.z + 0.4));
-                v.push(Point3::new(c.x, c.y, c.z - 0.4));
-            }
-            v
-        };
-        let inside = envelope_violation(
-            &allowed,
-            &sphere_samples(Point3::new(0.3, 0.0, 0.0)),
-            40.0,
-            false,
-            cx,
-        );
+        let inside = envelope_report_at(&allowed, 0.3, cx);
         let contained = inside.worst <= 0.0 && inside.violating.is_empty();
         // Pushed out by 0.2: worst ≈ +0.2 penetration.
-        let out = envelope_violation(
-            &allowed,
-            &sphere_samples(Point3::new(0.8, 0.0, 0.0)),
-            40.0,
-            false,
-            cx,
-        );
-        let n_samples = sphere_samples(Point3::new(0.0, 0.0, 0.0)).len() as f64;
+        let out = envelope_report_at(&allowed, 0.8, cx);
+        let n_samples = envelope_sphere_samples(Point3::new(0.0, 0.0, 0.0)).len() as f64;
         let penetration_ok = (out.worst - 0.2).abs() < 1e-9
             && !out.violating.is_empty()
             && out.soft_worst >= out.worst
@@ -457,46 +477,18 @@ fn gcp_004_envelopes() {
             center: Point3::new(0.0, 0.0, 0.0),
             radius: 0.5,
         };
-        let clear = envelope_violation(
-            &keepout,
-            &sphere_samples(Point3::new(1.2, 0.0, 0.0)),
-            40.0,
-            true,
-            cx,
-        );
-        let hit = envelope_violation(
-            &keepout,
-            &sphere_samples(Point3::new(0.6, 0.0, 0.0)),
-            40.0,
-            true,
-            cx,
-        );
+        let clear = keepout_report_at(&keepout, 1.2, cx);
+        let hit = keepout_report_at(&keepout, 0.6, cx);
         let keepout_ok = clear.worst <= 0.0 && hit.worst > 0.0;
         // FD derivative of soft_worst through the center position.
-        let f = |x: f64| {
-            envelope_violation(
-                &allowed,
-                &sphere_samples(Point3::new(x, 0.0, 0.0)),
-                40.0,
-                false,
-                cx,
-            )
-            .soft_worst
-        };
         let h = 1e-5;
-        let fd = (f(0.8 + h) - f(0.8 - h)) / (2.0 * h);
+        let fd = (envelope_soft_worst_at(&allowed, 0.8 + h, cx)
+            - envelope_soft_worst_at(&allowed, 0.8 - h, cx))
+            / (2.0 * h);
         let deriv_ok = (fd - 1.0).abs() < 0.05; // moving out 1:1
         // Drive to feasibility: descend soft_worst hinge over center x.
         let objective = |x: &[f64]| -> f64 {
-            let s = envelope_violation(
-                &allowed,
-                &sphere_samples(Point3::new(x[0], 0.0, 0.0)),
-                40.0,
-                false,
-                cx,
-            )
-            .soft_worst
-            .max(0.0);
+            let s = envelope_soft_worst_at(&allowed, x[0], cx).max(0.0);
             s * s
         };
         let rep = descend_fn(
@@ -512,15 +504,7 @@ fn gcp_004_envelopes() {
             cx,
         )
         .expect("descent");
-        let back_inside = envelope_violation(
-            &allowed,
-            &sphere_samples(Point3::new(rep.x[0], 0.0, 0.0)),
-            40.0,
-            false,
-            cx,
-        )
-        .worst
-            <= 1e-3;
+        let back_inside = envelope_report_at(&allowed, rep.x[0], cx).worst <= 1e-3;
         verdict(
             "gcp-004",
             contained && penetration_ok && keepout_ok && deriv_ok && back_inside,
