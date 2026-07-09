@@ -102,8 +102,11 @@ pub fn run_campaign(lo: f64, hi: f64, steps: usize) -> FlutterReport {
         );
         let lyapunov_stable = lyapunov_certifies_stability(operator(mu), [[1.0, 0.0], [0.0, 1.0]]);
         let abscissa = spectral_abscissa(mu);
-        // Partitioned interface solves (fixed-point of H(x) = −μx + c).
-        let naive = iterate_fixed_relaxation(mu, 1.0, 0.0, 1.0, 300, 1e-9);
+        // Partitioned interface solves (fixed-point of H(x) = −μx + c). The
+        // naive iteration gets a GENEROUS cap so its non-convergence reflects the
+        // FUNDAMENTAL divergence for μ ≥ 1 (contraction factor μ), not a
+        // budget-limited slow decay near μ = 1.
+        let naive = iterate_fixed_relaxation(mu, 1.0, 0.0, 1.0, 20_000, 1e-9);
         let aitken = iterate_aitken(mu, 1.0, 0.0, 0.5, 2.0, 300, 1e-9);
         samples.push(Sample {
             mu,
