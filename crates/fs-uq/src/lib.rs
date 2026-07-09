@@ -11,13 +11,21 @@
 //! (Kanai–Tajimi, CQC, IDA fragility) and e-process anytime-valid
 //! stopping are the bead's split lanes.
 
+pub mod adaptive;
+pub mod anytime;
 pub mod kl;
 pub mod mlmc;
 pub mod pce;
+pub mod seismic;
 
+pub use adaptive::{AdaptiveReport, adaptive_mlmc};
+pub use anytime::{AnytimeEstimate, cvar, estimate_probability_anytime};
 pub use kl::{CovarianceKind, KlExpansion};
 pub use mlmc::{MlmcReport, mlmc_estimate};
 pub use pce::{PceModel, fit_pce};
+pub use seismic::{
+    FragilityPoint, KanaiTajimi, bilinear_peak_ductility, cqc, ida_fragility, sdof_peak, srss,
+};
 
 /// Crate version, re-exported for provenance stamping.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

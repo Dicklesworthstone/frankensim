@@ -1823,6 +1823,7 @@ name = "fs-uq"
 version = "0.0.1"
 dependencies = [
  "fs-bo",
+ "fs-eproc",
  "fs-la",
  "fs-math",
  "fs-rand",

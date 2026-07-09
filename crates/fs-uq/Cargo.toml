@@ -14,6 +14,7 @@ layer = "L4"
 fs-bo = { path = "../fs-bo" }
 fs-la = { path = "../fs-la" }
 fs-math = { path = "../fs-math" }
+fs-eproc = { path = "../fs-eproc" }
 fs-rand = { path = "../fs-rand" }
 
 [lints]

@@ -32,6 +32,23 @@ for QMC Gaussian germs instead of duplicating the polynomial.
   Y_ℓ driven by one germ — that coupling is what makes variance
   decay); per-level statistics ledgered in the report.
 
+- Slice 2 (bead o5kc): `seismic` — `KanaiTajimi` PSD + spectral-
+  representation synthesis with counter-based phases (bit-replayable
+  per seed), `sdof_peak` (Newmark average-acceleration response
+  ordinates), `cqc` (Der Kiureghian coefficients; collapses to `srss`
+  for separated modes, exceeds it for close modes),
+  `bilinear_peak_ductility` + `ida_fragility` (the nonlinear IDA
+  workhorse; monotone exceedance curves). `anytime` —
+  `estimate_probability_anytime`: a sub-Gaussian (σ = 1/2) mixture
+  confidence sequence stops the moment its RADIUS meets the decision's
+  half-width — valid AT the stopping time by construction (fs-eproc's
+  `interval()` returns (center, radius); mis-reading it as (lo, hi)
+  produced 58% miss rates in development — the semantics are
+  load-bearing). `cvar` (the UQ-side risk functional; fs-robust hosts
+  the ASCENT twin). `adaptive` — `adaptive_mlmc`: levels added while
+  the extrapolated bias `|mean_L|/(2^α − 1)` exceeds tol/2, with weak/
+  strong rates FITTED from level statistics.
+
 ## Invariants
 
 - The KL truncation reports its captured-variance fraction; the
@@ -100,3 +117,16 @@ at MATCHED estimator variance; cross-ISA golden hash.
   sparse-grid construction joins with its consumer.
 - Sobol' sensitivity indices are derivable from the PCE coefficients
   but not yet exposed as API.
+
+## No-claim boundaries (slice 2)
+
+- The IDA workhorse is a bilinear SDOF: the fiber-frame nonlinear
+  time-history path arrives with fs-solid-advanced (tfz.14, in
+  flight) — the fragility MACHINERY is what this slice ships.
+- Ground motions are Kanai–Tajimi synthetic; recorded-suite ingestion
+  rides fs-scenario.
+- The CS applies to BOUNDED [0,1] outcomes via Hoeffding
+  sub-Gaussianity; unbounded losses need a declared sigma.
+- Adaptive-MLMC rate fits assume geometric level decay; oscillatory
+  correction means defeat the extrapolation (documented, as in the
+  classical literature).
