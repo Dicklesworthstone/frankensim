@@ -444,7 +444,11 @@ fn ear_clip(proj: &[[f64; 2]], loop_verts: &[u32]) -> Option<Vec<[u32; 3]>> {
     if poly.len() != 3 {
         return None;
     }
-    tris.push([loop_verts[poly[0]], loop_verts[poly[1]], loop_verts[poly[2]]]);
+    tris.push([
+        loop_verts[poly[0]],
+        loop_verts[poly[1]],
+        loop_verts[poly[2]],
+    ]);
     Some(tris)
 }
 
@@ -667,13 +671,7 @@ mod tests {
             [1.0, 2.0],
             [0.0, 2.0],
         ];
-        let convex = vec![
-            [0.0, 0.0],
-            [2.0, 0.0],
-            [3.0, 1.0],
-            [1.5, 2.5],
-            [0.0, 1.5],
-        ];
+        let convex = vec![[0.0, 0.0], [2.0, 0.0], [3.0, 1.0], [1.5, 2.5], [0.0, 1.5]];
         assert!(!is_convex(&u_shape), "U-shape is non-convex");
         assert!(!is_convex(&l_shape), "L-shape is non-convex");
         assert!(is_convex(&convex), "pentagon is convex");
@@ -703,7 +701,10 @@ mod tests {
         // A degenerate all-collinear loop is refused, not faked.
         let line = vec![[0.0, 0.0], [1.0, 0.0], [2.0, 0.0], [3.0, 0.0]];
         let lv: Vec<u32> = (0..4).collect();
-        assert!(ear_clip(&line, &lv).is_none(), "collinear loop is not a polygon");
+        assert!(
+            ear_clip(&line, &lv).is_none(),
+            "collinear loop is not a polygon"
+        );
     }
 
     /// The 3D projection keeps the dominant-normal axis dropped so the loop
