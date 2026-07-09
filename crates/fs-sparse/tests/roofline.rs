@@ -2,9 +2,9 @@
 //! STREAM triad (fs-substrate), release profile, `--ignored` (perf
 //! lanes run on demand / perf-CI cadence). Conventional accounting:
 //! bytes = nnz·(8 val + idx bytes) + nrows·8 (y) + nrows·8 (row_ptr)
-//! + ncols·8 (x once). Attainment is LEDGERED; the >=85% acceptance
-//! gate is asserted for the SHARDED all-core kernel only (the bead's
-//! criterion; serial single-thread numbers are reported as evidence).
+//!   + ncols·8 (x once). Attainment is LEDGERED; the >=85% acceptance
+//!     gate is asserted for the SHARDED all-core kernel only (the bead's
+//!     criterion; serial single-thread numbers are reported as evidence).
 
 use std::time::Instant;
 
@@ -19,12 +19,19 @@ fn banded_matrix(nrows: usize, band: usize) -> fs_sparse::Csr {
             .wrapping_add(1442695040888963407);
         seed
     };
+    let nrows_i64 = i64::try_from(nrows).unwrap_or(i64::MAX);
+    let band_i64 = i64::try_from(band).unwrap_or(i64::MAX / 8);
+    let band_u64 = u64::try_from(band).unwrap_or(u64::MAX / 8);
+    let window = 8_u64.saturating_mul(band_u64).max(1);
+    let radius = band_i64.saturating_mul(4);
     for r in 0..nrows {
-        for k in 0..band {
+        let r_i64 = i64::try_from(r).unwrap_or(i64::MAX);
+        for _ in 0..band {
             // Spread within a +-4*band window (index locality similar
             // to FEM stencils; defeats pure streaming but is honest).
-            let off = (lcg() % (8 * band as u64)) as i64 - 4 * band as i64;
-            let c = (r as i64 + off).clamp(0, nrows as i64 - 1) as usize;
+            let draw = i64::try_from(lcg() % window).unwrap_or(i64::MAX);
+            let off = draw - radius;
+            let c = usize::try_from((r_i64 + off).clamp(0, nrows_i64 - 1)).unwrap_or(0);
             let v = ((lcg() >> 11) as f64) / (1u64 << 53) as f64 + 0.5;
             coo.push(r, c, v);
         }
