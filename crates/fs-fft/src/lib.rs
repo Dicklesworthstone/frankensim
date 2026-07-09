@@ -11,9 +11,12 @@
 //! bit-deterministic by construction (golden-hash tested, verified on both
 //! reference ISAs like the rest of the numerics spine).
 //!
-//! Deferred to the recorded perf follow-up bead (fs-fft-perf-multidim):
-//! radix-4/8 kernels, SIMD lanes, cache-blocked transposes, 2D/3D pencil
-//! decomposition on the executor, and the ≥40%-of-memory-bound roofline gate.
+//! Bead fs-fft-perf-multidim extends the correctness core with the r2c INVERSE
+//! (c2r, [`RealFft::inverse`]) and N-DIMENSIONAL (2D/3D) transforms via
+//! separable pencil decomposition ([`FftNd`]) — both oracle-tested. Still
+//! deferred to that bead's perf scope: radix-4/8 kernels, SIMD lanes,
+//! cache-blocked transposes, executor-tiled pencils, and the
+//! ≥40%-of-memory-bound roofline gate.
 //!
 //! Conventions: forward is unnormalized; `inverse` scales by 1/n so
 //! inverse(forward(x)) = x. Sizes must be powers of two (structured
@@ -260,6 +263,55 @@ impl RealFft {
         }
         out
     }
+
+    /// Inverse c2r: takes the `n/2 + 1` non-redundant spectrum bins of a real
+    /// signal and reconstructs the `n` real samples — the exact algebraic
+    /// inverse of [`RealFft::forward`]. Hermitian symmetry is ASSUMED (standard
+    /// c2r contract: only the returned real part is meaningful when the input
+    /// spectrum is not conjugate-symmetric). Verified by r2c→c2r round-trip and
+    /// against the full-size complex IFFT of the Hermitian-completed spectrum.
+    #[must_use]
+    pub fn inverse(&self, spectrum: &[C64]) -> Vec<f64> {
+        let n = self.n;
+        let h = n / 2;
+        assert_eq!(
+            spectrum.len(),
+            h + 1,
+            "c2r spectrum length must be n/2+1 = {}",
+            h + 1
+        );
+        // Undo the untangle by solving the 2×2 system relating (Z[k], Z[h−k])
+        // to (X[k], conj(X[h−k])). With w = w_k = exp(−iπk/h),
+        // p = (1 − i·w)/2, q = (1 + i·w)/2, the system is
+        //   X[k]         = p·Z[k] + q·conj(Z[h−k])
+        //   conj(X[h−k]) = q·Z[k] + p·conj(Z[h−k])
+        // whose determinant is D = p² − q² = −i·w, giving
+        //   Z[k] = (p·X[k] − q·conj(X[h−k])) / D.
+        // (X[h−k] uses X[h], the Nyquist bin, when k = 0.)
+        let mut z = vec![C64::default(); h];
+        for (k, zk) in z.iter_mut().enumerate() {
+            let xk = spectrum[k];
+            let xhk = if k == 0 { spectrum[h] } else { spectrum[h - k] };
+            let theta = -std::f64::consts::PI * (k as f64) / (h as f64);
+            let w = C64::new(det::cos(theta), det::sin(theta));
+            // i·w = (−w.im, w.re), so (1 ∓ i·w)/2 are:
+            let p = C64::new(f64::midpoint(1.0, w.im), -0.5 * w.re);
+            let q = C64::new(f64::midpoint(1.0, -w.im), 0.5 * w.re);
+            let d = C64::new(w.im, -w.re); // −i·w
+            let num = p.mul(xk).sub(q.mul(xhk.conj()));
+            // Complex divide by d: num·conj(d)/|d|² (robust to |w| ≠ 1 exactly).
+            *zk = num.mul(d.conj()).scale(1.0 / d.norm_sq());
+        }
+        let mut scratch = vec![C64::default(); h];
+        self.half.inverse(&mut z, &mut scratch);
+        // Unpack the packed half-size sequence: even samples in re, odd in im.
+        let mut out = vec![0.0; n];
+        for (j, zj) in z.iter().enumerate() {
+            out[2 * j] = zj.re;
+            out[2 * j + 1] = zj.im;
+        }
+        out
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -332,6 +384,107 @@ pub fn dct3(input: &[f64]) -> Vec<f64> {
         }
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// Multi-dimensional (2D/3D/N-D) transforms via SEPARABLE pencil decomposition:
+// a Fourier transform is separable, so an N-D transform is exactly the 1D
+// transform applied along each axis in turn (the row–column algorithm). Each
+// axis reuses the planned radix-2 `Fft`. This is the correctness-first
+// dimensionality layer; cache-blocked transposes, executor tiling, and the
+// roofline gate remain the recorded perf follow-up (bead fs-fft-perf-multidim).
+// ---------------------------------------------------------------------------
+
+/// A planned N-dimensional complex FFT over a ROW-MAJOR buffer (last axis
+/// contiguous). Every axis length must be a power of two ≥ 1. Holds one `Fft`
+/// plan per axis; deterministic by construction (fixed axis order, fixed
+/// gather/scatter order — the 1D determinism lifts to N-D).
+#[derive(Debug, Clone)]
+pub struct FftNd {
+    dims: Vec<usize>,
+    plans: Vec<Fft>,
+}
+
+impl FftNd {
+    /// Plan an N-D transform over `dims` (row-major; each a power of two ≥ 1).
+    ///
+    /// # Panics
+    /// If `dims` is empty, or any axis is not a power of two (via [`Fft::new`]).
+    #[must_use]
+    pub fn new(dims: &[usize]) -> FftNd {
+        assert!(!dims.is_empty(), "FftNd needs at least one axis");
+        let plans = dims.iter().map(|&d| Fft::new(d)).collect();
+        FftNd {
+            dims: dims.to_vec(),
+            plans,
+        }
+    }
+
+    /// The axis lengths, row-major (last axis contiguous).
+    #[must_use]
+    pub fn shape(&self) -> &[usize] {
+        &self.dims
+    }
+
+    /// Total element count (the product of the axis lengths) — the required
+    /// length of every `data` buffer.
+    #[must_use]
+    pub fn total(&self) -> usize {
+        self.dims.iter().product()
+    }
+
+    /// Forward N-D DFT, unnormalized: the separable product of per-axis
+    /// unnormalized 1D DFTs.
+    pub fn forward(&self, data: &mut [C64]) {
+        self.run(data, false);
+    }
+
+    /// Inverse N-D DFT with `1/total` normalization: applying the 1/n-scaled 1D
+    /// inverse along each axis composes to exactly `1/∏ n_ax`, so
+    /// `inverse(forward(x)) = x`.
+    pub fn inverse(&self, data: &mut [C64]) {
+        self.run(data, true);
+    }
+
+    fn run(&self, data: &mut [C64], inverse: bool) {
+        let total = self.total();
+        assert_eq!(
+            data.len(),
+            total,
+            "buffer length {} must equal the product of dims {total}",
+            data.len()
+        );
+        for (ax, plan) in self.plans.iter().enumerate() {
+            let n = self.dims[ax];
+            if n == 1 {
+                continue; // a length-1 axis is the identity; skip the gather.
+            }
+            // Row-major stride of this axis = product of the trailing dims;
+            // `outer` counts the leading-index combinations.
+            let stride: usize = self.dims[ax + 1..].iter().product();
+            let outer: usize = self.dims[..ax].iter().product();
+            let mut line = vec![C64::default(); n];
+            let mut scratch = vec![C64::default(); n];
+            for o in 0..outer {
+                for i in 0..stride {
+                    let base = o * n * stride + i;
+                    // Gather the pencil (n samples at `stride`), transform,
+                    // scatter back — the pencil is contiguous in index space.
+                    for (t, slot) in line.iter_mut().enumerate() {
+                        *slot = data[base + t * stride];
+                    }
+                    if inverse {
+                        plan.inverse(&mut line, &mut scratch);
+                    } else {
+                        plan.forward(&mut line, &mut scratch);
+                    }
+                    for (t, &v) in line.iter().enumerate() {
+                        data[base + t * stride] = v;
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -619,6 +772,236 @@ mod tests {
             let r = std::panic::catch_unwind(|| Fft::new(bad));
             assert!(r.is_err(), "size {bad} must be refused");
         }
+    }
+
+    #[test]
+    fn real_fft_c2r_round_trips_and_matches_full_ifft() {
+        let mut seed = 0x5C2_u64;
+        for n in [2usize, 4, 8, 64, 256] {
+            let rfft = RealFft::new(n);
+            let x: Vec<f64> = (0..n).map(|_| lcg(&mut seed)).collect();
+            let spectrum = rfft.forward(&x);
+            assert_eq!(spectrum.len(), n / 2 + 1);
+            // r2c → c2r is the identity to fp precision.
+            let back = rfft.inverse(&spectrum);
+            for (j, (&b, &xj)) in back.iter().zip(&x).enumerate() {
+                assert!(
+                    (b - xj).abs() < 1e-11,
+                    "c2r round-trip n={n} idx {j}: {b} vs {xj}"
+                );
+            }
+            // Independent oracle: Hermitian-complete the half spectrum to full
+            // length, run the ordinary complex inverse, take the real part.
+            let h = n / 2;
+            let mut full = vec![C64::default(); n];
+            for (k, &xk) in spectrum.iter().enumerate() {
+                full[k] = xk;
+            }
+            for k in 1..h {
+                full[n - k] = spectrum[k].conj();
+            }
+            let plan = Fft::new(n);
+            let mut scratch = vec![C64::default(); n];
+            plan.inverse(&mut full, &mut scratch);
+            for (j, (&b, f)) in back.iter().zip(&full).enumerate() {
+                assert!(
+                    (b - f.re).abs() < 1e-11 && f.im.abs() < 1e-9,
+                    "c2r vs full IFFT n={n} idx {j}: {b} vs {f:?}"
+                );
+            }
+        }
+        println!(
+            "{{\"suite\":\"fs-fft\",\"case\":\"c2r\",\"verdict\":\"pass\",\"detail\":\"r2c->c2r round-trip + full-IFFT oracle, n in 2..256\"}}"
+        );
+    }
+
+    /// Fully independent N-D DFT oracle: sums over every source index with the
+    /// exact separable phase — shares NO gather/scatter structure with the
+    /// Stockham pencil path in [`FftNd`].
+    fn naive_dft_nd(x: &[C64], dims: &[usize]) -> Vec<C64> {
+        let d = dims.len();
+        let total: usize = dims.iter().product();
+        let mut strides = vec![1usize; d];
+        let mut acc_stride = 1usize;
+        for ax in (0..d).rev() {
+            strides[ax] = acc_stride;
+            acc_stride *= dims[ax];
+        }
+        let decode = |mut idx: usize| -> Vec<usize> {
+            let mut c = vec![0usize; d];
+            for ax in 0..d {
+                c[ax] = idx / strides[ax];
+                idx %= strides[ax];
+            }
+            c
+        };
+        let mut out = vec![C64::default(); total];
+        for (ko, slot) in out.iter_mut().enumerate() {
+            let k = decode(ko);
+            let mut acc = C64::default();
+            for (jo, &xj) in x.iter().enumerate() {
+                let j = decode(jo);
+                let mut frac = 0.0;
+                for ax in 0..d {
+                    frac += ((k[ax] * j[ax]) % dims[ax]) as f64 / dims[ax] as f64;
+                }
+                let phase = -2.0 * std::f64::consts::PI * frac;
+                acc = acc.add(xj.mul(C64::new(det::cos(phase), det::sin(phase))));
+            }
+            *slot = acc;
+        }
+        out
+    }
+
+    #[test]
+    fn fft_nd_matches_naive_oracle_2d_and_3d() {
+        let mut seed = 0x3D_u64;
+        for dims in [
+            vec![4usize, 4],
+            vec![8, 4],
+            vec![2, 8],
+            vec![4, 4, 4],
+            vec![2, 4, 8],
+        ] {
+            let total: usize = dims.iter().product();
+            let plan = FftNd::new(&dims);
+            assert_eq!(plan.total(), total);
+            assert_eq!(plan.shape(), &dims[..]);
+            let x: Vec<C64> = (0..total)
+                .map(|_| C64::new(lcg(&mut seed), lcg(&mut seed)))
+                .collect();
+            let mut data = x.clone();
+            plan.forward(&mut data);
+            let want = naive_dft_nd(&x, &dims);
+            let err = max_rel_err(&data, &want);
+            assert!(
+                err < 1e-12,
+                "N-D forward dims={dims:?} deviates by {err:.2e}"
+            );
+            // Round trip.
+            plan.inverse(&mut data);
+            let err_rt = max_rel_err(&data, &x);
+            assert!(
+                err_rt < 1e-12,
+                "N-D round-trip dims={dims:?} err {err_rt:.2e}"
+            );
+        }
+        println!(
+            "{{\"suite\":\"fs-fft\",\"case\":\"nd-oracle\",\"verdict\":\"pass\",\"detail\":\"2D/3D pencil == naive N-D DFT + round-trip\"}}"
+        );
+    }
+
+    #[test]
+    fn fft_nd_separability_and_parseval() {
+        // Separability: a 2D transform equals a 1D FFT along every row followed
+        // by a 1D FFT along every column (built from the raw `Fft`, independent
+        // of FftNd's internal axis loop).
+        let (n0, n1) = (8usize, 4usize);
+        let mut seed = 0x5E_u64;
+        let x: Vec<C64> = (0..n0 * n1)
+            .map(|_| C64::new(lcg(&mut seed), lcg(&mut seed)))
+            .collect();
+        let mut nd = x.clone();
+        FftNd::new(&[n0, n1]).forward(&mut nd);
+
+        // Manual row-then-column.
+        let row = Fft::new(n1);
+        let col = Fft::new(n0);
+        let mut man = x.clone();
+        let mut sc1 = vec![C64::default(); n1];
+        for r in 0..n0 {
+            let mut line: Vec<C64> = (0..n1).map(|c| man[r * n1 + c]).collect();
+            row.forward(&mut line, &mut sc1);
+            for (c, &v) in line.iter().enumerate() {
+                man[r * n1 + c] = v;
+            }
+        }
+        let mut sc0 = vec![C64::default(); n0];
+        for c in 0..n1 {
+            let mut line: Vec<C64> = (0..n0).map(|r| man[r * n1 + c]).collect();
+            col.forward(&mut line, &mut sc0);
+            for (r, &v) in line.iter().enumerate() {
+                man[r * n1 + c] = v;
+            }
+        }
+        assert!(
+            max_rel_err(&nd, &man) < 1e-13,
+            "N-D separability (row-then-column) violated"
+        );
+
+        // Parseval in N-D: Σ|x|² = (1/total)·Σ|X|².
+        let time: f64 = x.iter().map(|v| v.norm_sq()).sum();
+        let freq: f64 = nd.iter().map(|v| v.norm_sq()).sum::<f64>() / (n0 * n1) as f64;
+        assert!(
+            (time - freq).abs() / time < 1e-13,
+            "N-D Parseval: {time} vs {freq}"
+        );
+    }
+
+    #[test]
+    fn fft_nd_convolution_theorem_2d() {
+        // ifft(fft(a) ⊙ fft(b)) == circular 2D convolution of a and b — the
+        // capability's headline use (spectral convolution / PDE stencils).
+        let (n0, n1) = (4usize, 8usize);
+        let total = n0 * n1;
+        let mut seed = 0xC0_u64;
+        let a: Vec<C64> = (0..total)
+            .map(|_| C64::new(lcg(&mut seed), lcg(&mut seed)))
+            .collect();
+        let b: Vec<C64> = (0..total)
+            .map(|_| C64::new(lcg(&mut seed), lcg(&mut seed)))
+            .collect();
+        let plan = FftNd::new(&[n0, n1]);
+        let mut fa = a.clone();
+        let mut fb = b.clone();
+        plan.forward(&mut fa);
+        plan.forward(&mut fb);
+        let mut prod: Vec<C64> = fa.iter().zip(&fb).map(|(x, y)| x.mul(*y)).collect();
+        plan.inverse(&mut prod);
+        // Direct circular convolution.
+        let mut want = vec![C64::default(); total];
+        for k0 in 0..n0 {
+            for k1 in 0..n1 {
+                let mut acc = C64::default();
+                for m0 in 0..n0 {
+                    for m1 in 0..n1 {
+                        let s0 = (k0 + n0 - m0) % n0;
+                        let s1 = (k1 + n1 - m1) % n1;
+                        acc = acc.add(a[m0 * n1 + m1].mul(b[s0 * n1 + s1]));
+                    }
+                }
+                want[k0 * n1 + k1] = acc;
+            }
+        }
+        assert!(
+            max_rel_err(&prod, &want) < 1e-12,
+            "2D circular convolution theorem violated"
+        );
+        println!(
+            "{{\"suite\":\"fs-fft\",\"case\":\"nd-conv\",\"verdict\":\"pass\",\"detail\":\"2D convolution theorem holds\"}}"
+        );
+    }
+
+    #[test]
+    fn fft_nd_is_deterministic() {
+        let dims = [4usize, 8, 2];
+        let total: usize = dims.iter().product();
+        let run = || {
+            let mut seed = 0xDE7_u64;
+            let mut data: Vec<C64> = (0..total)
+                .map(|_| C64::new(lcg(&mut seed), lcg(&mut seed)))
+                .collect();
+            FftNd::new(&dims).forward(&mut data);
+            data
+        };
+        let a = run();
+        let b = run();
+        assert!(
+            a.iter()
+                .zip(&b)
+                .all(|(x, y)| x.re.to_bits() == y.re.to_bits() && x.im.to_bits() == y.im.to_bits()),
+            "N-D transform must be bitwise deterministic"
+        );
     }
 
     #[test]
