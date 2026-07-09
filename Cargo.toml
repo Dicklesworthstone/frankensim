@@ -117,6 +117,7 @@ members = [
     "crates/fs-neuroshape-e2e",
     "crates/fs-grammar-e2e",
     "crates/fs-oed-e2e",
+    "crates/fs-metamat-e2e",
     "xtask",
 ]
 

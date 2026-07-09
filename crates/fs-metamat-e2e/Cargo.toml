@@ -1,0 +1,21 @@
+[package]
+name = "fs-metamat-e2e"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "MetamatCert: discover the stiffness-density frontier of a porous metamaterial by numerical homogenization, and machine-certify EVERY point on it — the effective stiffness tensor is provably stable (positive-definite, an SOS/eigenvalue certificate) and provably admissible (respects the Voigt upper bound no microstructure can beat). Composes fs-lattice (homogenization + Voigt bound) x fs-sos (PSD certificate) x fs-evidence (Verified). Groundbreaking: traditional homogenization returns numbers; this returns a frontier with a stability proof and a physical-admissibility proof at every point."
+
+[package.metadata.frankensim]
+layer = "L4"
+
+[dependencies]
+fs-lattice = { path = "../fs-lattice" }
+fs-sos = { path = "../fs-sos" }
+fs-evidence = { path = "../fs-evidence" }
+
+[dev-dependencies]
+
+[lints]
+workspace = true
