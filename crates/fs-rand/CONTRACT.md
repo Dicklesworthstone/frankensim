@@ -104,3 +104,17 @@ monobit balance, inter-stream correlation matrix).
 - A FULL PractRand/TestU01 port: `tests/stream_battery.rs` ships a
   representative dev-only subset (χ²/serial/monobit/inter-stream); the complete
   suite + CI wiring remain a follow-up.
+
+## Perf-lane evidence (bead 1za9, measured)
+
+- Release, macos-aarch64 (Mac16,11): ziggurat 84.2M normals/s vs
+  Box–Muller 29.4M/s — 2.86× — the perf path justified by measurement.
+- Bulk SoA fill measured ~0.9× the scalar loop: bitwise-equivalent but
+  NOT yet faster — the speedup claim awaits the hand-written NEON/AVX
+  Philox capsule (the recorded resource-gated no-claim); the perf-lane
+  gate trips only on pathological regression.
+- The cross-ISA GOLDEN HASH (995960fe709f00bc over 100k draws) is the
+  ready-to-run strict-mode admission instrument: it reproduces across
+  independent aarch64 environments; the x86-64 run completes the trj
+  proof the moment an x86 reference machine is available (the rch
+  fleet is currently ARM-only, verified by census).
