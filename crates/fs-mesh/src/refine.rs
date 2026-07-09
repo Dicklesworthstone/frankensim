@@ -15,7 +15,7 @@
 //! worst-first with a canonical tie-break, sequential inserts through
 //! the exact-predicate kernel; the exact audit is the trip-wire.
 
-use crate::delaunay::{GHOST, MeshError, Tetrahedralization};
+use crate::delaunay::{GHOST, Mesh, MeshError, Tetrahedralization};
 use fs_exec::Cx;
 
 /// Refinement policy.
@@ -194,6 +194,72 @@ fn facet_split_point(a: [f64; 3], b: [f64; 3], c: [f64; 3]) -> Option<[f64; 3]> 
     ])
 }
 
+/// Minimum enclosing sphere of a triangle facet — `(center, radius²)`. Acute
+/// facet → its circumsphere; obtuse → the diametral sphere of the longest edge.
+/// This is Shewchuk's subfacet encroachment ball: a vertex inside it would make
+/// a boundary sliver (f64 — a Steiner heuristic; the exact audit is the trip-wire).
+fn facet_diametral_ball(a: [f64; 3], b: [f64; 3], c: [f64; 3]) -> Option<([f64; 3], f64)> {
+    let (u, v) = (sub(b, a), sub(c, a));
+    let uu = dot(u, u);
+    let vv = dot(v, v);
+    let uv = dot(u, v);
+    let den = 2.0 * (uu * vv - uv * uv);
+    if den.abs() < 1e-300 {
+        return None;
+    }
+    let s = (vv * (uu - uv)) / den;
+    let t = (uu * (vv - uv)) / den;
+    if s >= 0.0 && t >= 0.0 && s + t <= 1.0 {
+        // Acute: the in-plane circumcenter lies inside → its circumsphere.
+        let center = [
+            a[0] + s * u[0] + t * v[0],
+            a[1] + s * u[1] + t * v[1],
+            a[2] + s * u[2] + t * v[2],
+        ];
+        Some((center, dot(sub(center, a), sub(center, a))))
+    } else {
+        // Obtuse: the longest edge's diametral sphere encloses the facet.
+        let w = sub(c, b);
+        let (lu, lv, lw) = (uu, vv, dot(w, w));
+        let (p, q) = if lu >= lv && lu >= lw {
+            (a, b)
+        } else if lv >= lw {
+            (a, c)
+        } else {
+            (b, c)
+        };
+        let center = [
+            f64::midpoint(p[0], q[0]),
+            f64::midpoint(p[1], q[1]),
+            f64::midpoint(p[2], q[2]),
+        ];
+        Some((center, dot(sub(center, p), sub(center, p))))
+    }
+}
+
+/// The first hull (ghost) facet whose diametral ball STRICTLY contains `p` — the
+/// boundary facet `p` encroaches. Scans all ghost tets (O(hull) — the 1e7 perf
+/// lane owns a spatial index); deterministic in tet-slot order.
+fn encroached_hull_facet(mesh: &Mesh, p: [f64; 3]) -> Option<[u32; 3]> {
+    for t in 0..mesh.tets.len() {
+        if !mesh.alive[t] || !mesh.is_ghost(t as u32) {
+            continue;
+        }
+        let tv = mesh.tets[t];
+        let f = [tv[0], tv[1], tv[2]];
+        let pts = &mesh.points;
+        if let Some((c, r2)) =
+            facet_diametral_ball(pts[f[0] as usize], pts[f[1] as usize], pts[f[2] as usize])
+        {
+            let d = sub(p, c);
+            if dot(d, d) < r2 {
+                return Some(f);
+            }
+        }
+    }
+    None
+}
+
 /// The input's closest-pair spacing (deterministic O(n²) at fixture
 /// scale — the perf lane owns bigger inputs).
 fn closest_pair(points: &[[f64; 3]], upto: usize) -> f64 {
@@ -277,10 +343,28 @@ pub fn refine(
             let new_idx = tetra.mesh.points.len() as u32;
             let seed = tetra.mesh.locate(cc, new_idx);
             let escaped = tetra.mesh.tets[seed as usize][3] == GHOST;
+            let mut split_facet = false;
             let candidate = if !escaped {
-                Some(cc)
+                // Full-Ruppert protection: an interior circumcenter that lies
+                // inside a hull facet's diametral ball would manufacture a
+                // boundary sliver — split the encroached facet instead (the
+                // split point relieves the encroachment, and the offending tet
+                // is reconsidered next round). Legacy path inserts the
+                // circumcenter directly.
+                let encroached = opts
+                    .split_hull_facets
+                    .then(|| encroached_hull_facet(&tetra.mesh, cc))
+                    .flatten();
+                if let Some(f) = encroached {
+                    split_facet = true;
+                    let pts = &tetra.mesh.points;
+                    facet_split_point(pts[f[0] as usize], pts[f[1] as usize], pts[f[2] as usize])
+                } else {
+                    Some(cc)
+                }
             } else if opts.split_hull_facets {
                 stats.skipped_outside_hull += 1;
+                split_facet = true;
                 let g = tetra.mesh.tets[seed as usize];
                 let pts = &tetra.mesh.points;
                 facet_split_point(pts[g[0] as usize], pts[g[1] as usize], pts[g[2] as usize])
@@ -311,7 +395,7 @@ pub fn refine(
             tetra.mesh.points.push(point);
             if tetra.mesh.insert(new_idx) {
                 stats.steiner_inserted += 1;
-                if escaped {
+                if split_facet {
                     stats.hull_facets_split += 1;
                 }
                 progressed = true;
