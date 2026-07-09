@@ -184,11 +184,20 @@ reimplementation must pass the suite unchanged.
 
 - Weighted exact insphere predicate (the Edelsbrunner weight-pump
   exudation variant; the perturbation flavor ships).
-- CONSTRAINED-Delaunay facet recovery (interior/non-convex facets), and
-  full-Ruppert QUALITY: the diametral encroachment machinery now ships and cut
-  the hull-split regression ~8× (tmesh-011), but the residual is coupled to
-  boundary-layer / constrained recovery — not yet eliminated. Plus the 1e7-point
-  perf lane (bead uee3's remaining items — tracked there).
+- INTERIOR FACET recovery now ships in CONFORMING form for CONVEX
+  planar facets (`recover_facets`, tmesh-015): batched longest-edge
+  midpoint bisection of the fan triangulation (one-split-per-round was
+  MEASURED to starve at the rounds cap; batching finished the fixture
+  in 7 rounds), twin adoption via the shared coordinate-bits index,
+  a facet correspondence table re-verified against the finished mesh,
+  and honest starved-budget counters. Remaining no-claims:
+  NON-CONVEX facets (fan triangulation needs convexity) and
+  general-position planes (f64 midpoints stay exactly coplanar only
+  when the plane is axis-aligned — the battery gates the bitwise case
+  and the residual is measured, not assumed). Full-Ruppert QUALITY:
+  the diametral encroachment machinery cut the hull-split regression
+  ~8× (tmesh-011); the residual is coupled to boundary-layer
+  refinement — still successor scope.
 
 - SEGMENT recovery now ships in CONFORMING form (`recover_segments`,
   tmesh-014): recursive midpoint Steiner bisection with twin-vertex
@@ -205,8 +214,14 @@ reimplementation must pass the suite unchanged.
   (sliver exudation ships in `exude`).
 - Parallel domain coloring SHIPS (`delaunay_colored`, tmesh-013) —
   see Determinism; v1 is sequential.
-- The 10⁷-point perf lane belongs to the perf harness; tmesh-006
-  pins 10⁴-scale behavior in CI.
+- The 10⁷-point perf lane RAN (2026-07-09, ts1: Threadripper PRO
+  5975WX, Linux x86_64, release): 10⁷ points in 100.0 s = 100,034
+  points/s, 67.6M tets, throughput near-FLAT across the ladder
+  (10⁴: 116k, 10⁵: 115k, 10⁶: 105k, 10⁷: 100k pts/s — BRIO locality
+  holding over three decades), exact structural audit clean at every
+  rung (full insphere certification at 10⁴). Ledger rows in
+  `tests/perf_lane.rs` output and bead uee3. tmesh-006 pins 10⁴-scale
+  behavior in CI; the nightly perf-CI cadence belongs to fz2.4.
 - Remeshing no-claims: curved creases round under midpoint projection
   (straight creases are exact); boundary loops are locked, not
   remeshed; metric gradation control, log-Euclidean metric
