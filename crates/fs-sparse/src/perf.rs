@@ -94,8 +94,10 @@ impl CsrCompact {
             let lo = self.row_ptr[r];
             let hi = self.row_ptr[r + 1];
             let mut acc = 0.0f64;
-            for k in lo..hi {
-                acc = self.vals[k].mul_add(x[self.col_idx[k] as usize], acc);
+            // Slice windows: checked-free iteration (indexed loops were
+            // MEASURED slower than the wide kernel from bounds checks).
+            for (&c, &v) in self.col_idx[lo..hi].iter().zip(&self.vals[lo..hi]) {
+                acc = v.mul_add(x[c as usize], acc);
             }
             *out = acc;
         }
@@ -144,8 +146,8 @@ impl CsrCompact {
                         let a = self.row_ptr[r];
                         let b = self.row_ptr[r + 1];
                         let mut acc = 0.0f64;
-                        for k in a..b {
-                            acc = self.vals[k].mul_add(x[self.col_idx[k] as usize], acc);
+                        for (&c, &v) in self.col_idx[a..b].iter().zip(&self.vals[a..b]) {
+                            acc = v.mul_add(x[c as usize], acc);
                         }
                         mine[r - lo] = acc;
                     }

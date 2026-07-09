@@ -53,19 +53,41 @@ fn triad_gbs_once(len: usize) -> f64 {
 #[must_use]
 pub fn measure(logical_cpus: usize) -> Measured {
     let single = triad_gbs_once(LEN);
-    // All-core: each thread owns private buffers (no false sharing; the
-    // aggregate stresses the memory controllers, which is the point).
+    // All-core: threads stream DISJOINT SLICES of one shared triple of
+    // full-size arrays (classic parallel STREAM). MEASURED rejection of
+    // the previous design (private per-thread buffers of LEN/threads):
+    // at 14 threads each buffer fit in cache and the "bandwidth" read
+    // 922 GB/s on an M4 Pro whose DRAM peak is ~273 — the roofline
+    // denominator was measuring SLC, not memory (found by the wsbf
+    // SpMV attainment gate reading 8%).
     let threads = logical_cpus.max(1);
-    let per_len = (LEN / threads).max(1 << 16);
-    let sum: f64 = std::thread::scope(|s| {
-        let handles: Vec<_> = (0..threads)
-            .map(|_| s.spawn(move || triad_gbs_once(per_len)))
-            .collect();
-        handles.into_iter().map(|h| h.join().unwrap_or(0.0)).sum()
-    });
+    let mut a = vec![0.0f64; LEN];
+    let b = vec![1.0f64; LEN];
+    let c = vec![2.0f64; LEN];
+    let chunk = LEN.div_ceil(threads);
+    let mut best = 0.0f64;
+    for rep in 0..REPS {
+        let scale = 1.0 + rep as f64;
+        let start = std::time::Instant::now();
+        std::thread::scope(|s| {
+            let mut rest = a.as_mut_slice();
+            let mut off = 0usize;
+            while !rest.is_empty() {
+                let take = chunk.min(rest.len());
+                let (mine, tail) = rest.split_at_mut(take);
+                let (bs, cs) = (&b[off..off + take], &c[off..off + take]);
+                s.spawn(move || triad(mine, bs, cs, scale));
+                rest = tail;
+                off += take;
+            }
+        });
+        let dt = start.elapsed().as_secs_f64();
+        best = best.max((LEN as f64 * BYTES_PER_ELEM) / dt / 1e9);
+    }
+    std::hint::black_box(a[LEN / 2]);
     Measured {
         single_thread_gbs: single,
-        all_core_gbs: sum,
+        all_core_gbs: best,
     }
 }
 
