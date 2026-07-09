@@ -260,3 +260,20 @@ reimplementation must pass the suite unchanged.
   warped-element quality arrives with the parameterization.
 - IGA and CutFEM cover most hex use-cases at higher accuracy — this
   module's own refusal says so, by design.
+
+## Boundary-layer quality: the measured decision (bead iw3l)
+
+- tmesh-017 runs the refine(split_hull_facets) → exude pipeline on the
+  ledgered convex-cloud fixture: exudation cuts the sliver census 27%
+  (183 → 134) and lifts the worst dihedral off exact zero, and the
+  longest/2·shortest EDGE-aspect of the final mesh is ~19 — the
+  ledgered 3.5e17 "radius-edge" is CONFINED to near-coplanar hull
+  slivers whose circumradius explodes while their edges stay tame.
+- A hull-EDGE diametral protection tier was implemented and MEASURED
+  COUNTERPRODUCTIVE (worst 3.5e17 → 4.3e18, reverted): convex-hull
+  edges of a point cloud are not PLC features; the classical segment
+  rule protects INPUT segments only.
+- `split_hull_facets` therefore stays default-OFF: removing the
+  residual near-coplanar hull sliver class needs WEIGHTED exudation on
+  an exact weighted insphere predicate (the recorded fs-ivl no-claim)
+  — the honest continuation, demanded-driven.

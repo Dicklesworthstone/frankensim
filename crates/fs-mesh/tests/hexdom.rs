@@ -7,6 +7,8 @@
 //! documented decisions; failure routes to IGA/CutFEM with the honest
 //! diagnostic; the accuracy-per-DOF harness reports honestly.
 
+#![cfg(feature = "frontier-hexmesh")]
+
 use fs_mesh::hexdom::{
     FrameField, Quat, Route, accuracy_per_dof, cube_group, dirichlet_energy, extract_hex_dominant,
     mbo_step, singular_edges,
