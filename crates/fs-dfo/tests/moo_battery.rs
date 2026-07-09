@@ -366,6 +366,35 @@ fn mc_hypervolume_vs_exact_and_high_dim_closed_forms() {
 }
 
 #[test]
+fn mc_hypervolume_public_edges_are_explicit() {
+    use fs_dfo::mc_hypervolume;
+
+    // Match exact hypervolume's public helper policy: malformed-dimensional
+    // points are ignored, not partially zipped into the reference box.
+    let malformed = vec![vec![0.2], vec![0.3, 0.4]];
+    let (mc, hits) = mc_hypervolume(&malformed, &[1.0, 1.0], 2_048, 11);
+    assert_eq!(hits, 2_048);
+    assert!((mc - 0.42).abs() < 1e-12, "{mc}");
+
+    // Empty objective dimension has zero dominated measure.
+    assert_eq!(mc_hypervolume(&[vec![]], &[], 0, 12), (0.0, 0));
+
+    log(
+        "mc-hv-edges",
+        "pass",
+        "malformed points ignored; empty dimension zero",
+    );
+}
+
+#[test]
+#[should_panic(expected = "MC hypervolume needs at least one sample")]
+fn mc_hypervolume_rejects_zero_samples() {
+    use fs_dfo::mc_hypervolume;
+
+    let _ = mc_hypervolume(&[vec![0.2, 0.2]], &[1.0, 1.0], 0, 13);
+}
+
+#[test]
 fn hv_archive_eviction_is_least_contributor() {
     use fs_dfo::HvArchive;
     let mk = |f: Vec<f64>| Individual { x: vec![], f };

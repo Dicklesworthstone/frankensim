@@ -1,9 +1,10 @@
 //! Multi-objective machinery (plan §9.9): NSGA-II with DETERMINISTIC
 //! tie-breaking everywhere (index order — bitwise-replayable runs),
-//! exact hypervolume for m ≤ 4 (2D sweep + recursive exclusive
-//! contributions above), knee-point detection, and CVaR through the
-//! Rockafellar–Uryasev reformulation. All randomness flows through
-//! fs-rand streams.
+//! exact hypervolume for m <= 4 (2D sweep + recursive exclusive
+//! contributions above), Monte Carlo hypervolume beyond that,
+//! least-contributor archives, NSGA-III/MOEA/D many-objective lanes,
+//! knee-point detection, and CVaR through the Rockafellar-Uryasev
+//! reformulation. All randomness flows through fs-rand streams.
 
 use fs_rand::StreamKey;
 
@@ -16,9 +17,69 @@ pub struct Individual {
     pub f: Vec<f64>,
 }
 
+fn check_variation_inputs(dim: usize, bounds: (f64, f64), eta_c: f64, eta_m: f64, p_mut: f64) {
+    assert!(
+        dim > 0,
+        "box-search optimizers need at least one decision variable"
+    );
+    assert!(
+        bounds.0.is_finite() && bounds.1.is_finite() && bounds.0 <= bounds.1,
+        "box bounds must be finite and ordered"
+    );
+    assert!(
+        eta_c.is_finite() && eta_c >= 0.0 && eta_m.is_finite() && eta_m >= 0.0,
+        "SBX and mutation distribution indices must be finite and non-negative"
+    );
+    assert!(
+        p_mut.is_finite() && (0.0..=1.0).contains(&p_mut),
+        "mutation probability must be in [0, 1]"
+    );
+}
+
+fn objective_dimension(pop: &[Individual]) -> Option<usize> {
+    let first = pop.first()?;
+    let m = first.f.len();
+    assert!(m > 0, "objective vectors must not be empty");
+    for ind in pop {
+        assert_eq!(
+            ind.f.len(),
+            m,
+            "all objective vectors in a population must have the same dimension"
+        );
+    }
+    Some(m)
+}
+
+fn direction_dimension(directions: &[Vec<f64>], label: &str) -> usize {
+    assert!(!directions.is_empty(), "{label} must not be empty");
+    let m = directions[0].len();
+    assert!(m > 0, "{label} vectors must not be empty");
+    for dir in directions {
+        assert_eq!(
+            dir.len(),
+            m,
+            "{label} vectors must all have the same dimension"
+        );
+        assert!(
+            dir.iter().all(|v| v.is_finite() && *v >= 0.0) && dir.iter().any(|v| *v > 0.0),
+            "{label} vectors must be finite, non-negative, and not all zero"
+        );
+    }
+    m
+}
+
 /// `a` Pareto-dominates `b` (minimization).
 #[must_use]
 pub fn dominates(a: &[f64], b: &[f64]) -> bool {
+    assert_eq!(
+        a.len(),
+        b.len(),
+        "dominance comparison requires matching objective dimensions"
+    );
+    assert!(
+        !a.is_empty(),
+        "dominance comparison needs at least one objective"
+    );
     let mut strictly = false;
     for (ai, bi) in a.iter().zip(b) {
         if ai > bi {
@@ -36,6 +97,7 @@ pub fn dominates(a: &[f64], b: &[f64]) -> bool {
 #[must_use]
 pub fn non_dominated_sort(pop: &[Individual]) -> Vec<usize> {
     let n = pop.len();
+    let _ = objective_dimension(pop);
     let mut dominated_by = vec![0usize; n]; // count of dominators
     let mut dominates_list: Vec<Vec<usize>> = vec![Vec::new(); n];
     for i in 0..n {
@@ -123,6 +185,8 @@ pub fn nsga2(
     bounds: (f64, f64),
     params: &NsgaParams,
 ) -> Vec<Individual> {
+    assert!(params.pop > 0, "NSGA-II population must be non-empty");
+    check_variation_inputs(dim, bounds, params.eta_c, params.eta_m, params.p_mut);
     let (lo, hi) = bounds;
     let mut stream = StreamKey {
         seed: params.seed,
@@ -416,9 +480,13 @@ pub fn mc_hypervolume(
     seed: u64,
 ) -> (f64, usize) {
     let m = reference.len();
+    if m == 0 {
+        return (0.0, 0);
+    }
+    assert!(samples > 0, "MC hypervolume needs at least one sample");
     let pts: Vec<&Vec<f64>> = front
         .iter()
-        .filter(|p| p.iter().zip(reference).all(|(a, r)| a < r))
+        .filter(|p| p.len() == m && p.iter().zip(reference).all(|(a, r)| a < r))
         .collect();
     if pts.is_empty() {
         return (0.0, 0);
@@ -539,6 +607,8 @@ impl HvArchive {
 /// C(p+m−1, m−1) directions.
 #[must_use]
 pub fn das_dennis(m: usize, p: usize) -> Vec<Vec<f64>> {
+    assert!(m > 0, "Das-Dennis directions need at least one objective");
+    assert!(p > 0, "Das-Dennis directions need at least one division");
     let mut out = Vec::new();
     let mut stack = vec![(Vec::<usize>::new(), p)];
     while let Some((prefix, rest)) = stack.pop() {
@@ -588,6 +658,9 @@ pub fn nsga3(
     directions: &[Vec<f64>],
     params: &NsgaParams,
 ) -> Vec<Individual> {
+    assert!(params.pop > 0, "NSGA-III population must be non-empty");
+    let direction_m = direction_dimension(directions, "NSGA-III reference directions");
+    check_variation_inputs(dim, bounds, params.eta_c, params.eta_m, params.p_mut);
     let (lo, hi) = bounds;
     let mut stream = StreamKey {
         seed: params.seed,
@@ -604,6 +677,11 @@ pub fn nsga3(
             Individual { x, f }
         })
         .collect();
+    let objective_m = objective_dimension(&pop).expect("NSGA-III population is non-empty");
+    assert_eq!(
+        direction_m, objective_m,
+        "NSGA-III reference-direction dimension must match objective dimension"
+    );
     for _ in 0..params.generations {
         let fronts = non_dominated_sort(&pop);
         // Rank-only binary tournament (NSGA-III drops crowding).
@@ -642,8 +720,14 @@ pub fn nsga3(
 }
 
 /// NSGA-III environmental selection to `target` members.
+#[allow(clippy::too_many_lines)] // one coherent selection pass
 fn nsga3_select(pop: &[Individual], directions: &[Vec<f64>], target: usize) -> Vec<Individual> {
-    let m = pop[0].f.len();
+    let m = objective_dimension(pop).expect("NSGA-III selection needs a non-empty population");
+    assert_eq!(
+        direction_dimension(directions, "NSGA-III reference directions"),
+        m,
+        "NSGA-III reference-direction dimension must match objective dimension"
+    );
     let fronts = non_dominated_sort(pop);
     let max_front = fronts.iter().copied().max().unwrap_or(0);
     let mut accepted: Vec<usize> = Vec::with_capacity(target);
@@ -665,40 +749,8 @@ fn nsga3_select(pop: &[Individual], directions: &[Vec<f64>], target: usize) -> V
     }
     // Normalize over accepted ∪ partial: ideal point + first-front max.
     let considered: Vec<usize> = accepted.iter().chain(&partial).copied().collect();
-    let mut ideal = vec![f64::INFINITY; m];
-    for &i in &considered {
-        for (d, v) in ideal.iter_mut().zip(&pop[i].f) {
-            *d = d.min(*v);
-        }
-    }
-    let mut span = vec![1e-30f64; m];
-    for &i in &considered {
-        if fronts[i] == 0 {
-            for (d, (v, id)) in span.iter_mut().zip(pop[i].f.iter().zip(&ideal)) {
-                *d = d.max(v - id);
-            }
-        }
-    }
-    let normalize = |i: usize| -> Vec<f64> {
-        pop[i]
-            .f
-            .iter()
-            .zip(ideal.iter().zip(&span))
-            .map(|(v, (id, sp))| (v - id) / sp.max(1e-30))
-            .collect()
-    };
-    // Associate everyone to the nearest direction.
-    let associate = |i: usize| -> (usize, f64) {
-        let fnorm = normalize(i);
-        let mut best = (0usize, f64::INFINITY);
-        for (k, dir) in directions.iter().enumerate() {
-            let d = perp_distance(&fnorm, dir);
-            if d < best.1 {
-                best = (k, d);
-            }
-        }
-        best
-    };
+    let (ideal, span) = nsga3_normalization(pop, &fronts, &considered, m);
+    let associate = |i: usize| nsga3_association(pop, directions, &ideal, &span, i);
     let mut niche = vec![0usize; directions.len()];
     for &i in &accepted {
         niche[associate(i).0] += 1;
@@ -751,6 +803,52 @@ fn nsga3_select(pop: &[Individual], directions: &[Vec<f64>], target: usize) -> V
     accepted.into_iter().map(|i| pop[i].clone()).collect()
 }
 
+fn nsga3_normalization(
+    pop: &[Individual],
+    fronts: &[usize],
+    considered: &[usize],
+    m: usize,
+) -> (Vec<f64>, Vec<f64>) {
+    let mut ideal = vec![f64::INFINITY; m];
+    for &i in considered {
+        for (d, v) in ideal.iter_mut().zip(&pop[i].f) {
+            *d = d.min(*v);
+        }
+    }
+    let mut span = vec![1e-30f64; m];
+    for &i in considered {
+        if fronts[i] == 0 {
+            for (d, (v, id)) in span.iter_mut().zip(pop[i].f.iter().zip(&ideal)) {
+                *d = d.max(v - id);
+            }
+        }
+    }
+    (ideal, span)
+}
+
+fn nsga3_association(
+    pop: &[Individual],
+    directions: &[Vec<f64>],
+    ideal: &[f64],
+    span: &[f64],
+    i: usize,
+) -> (usize, f64) {
+    let fnorm: Vec<f64> = pop[i]
+        .f
+        .iter()
+        .zip(ideal.iter().zip(span))
+        .map(|(v, (id, sp))| (v - id) / sp.max(1e-30))
+        .collect();
+    let mut best = (0usize, f64::INFINITY);
+    for (k, dir) in directions.iter().enumerate() {
+        let d = perp_distance(&fnorm, dir);
+        if d < best.1 {
+            best = (k, d);
+        }
+    }
+    best
+}
+
 /// MOEA/D configuration.
 #[derive(Debug, Clone, Copy)]
 pub struct MoeadParams {
@@ -793,6 +891,12 @@ pub fn moead(
     params: &MoeadParams,
 ) -> Vec<Individual> {
     let n = weights.len();
+    let weight_m = direction_dimension(weights, "MOEA/D weight vectors");
+    assert!(
+        params.neighbors > 0,
+        "MOEA/D neighborhood size must be positive"
+    );
+    check_variation_inputs(dim, bounds, params.eta_c, params.eta_m, params.p_mut);
     let t = params.neighbors.min(n);
     let (lo, hi) = bounds;
     // T nearest weights per subproblem (Euclidean, index tie-break).
@@ -830,7 +934,11 @@ pub fn moead(
             Individual { x, f }
         })
         .collect();
-    let m = pop[0].f.len();
+    let m = objective_dimension(&pop).expect("MOEA/D population is non-empty");
+    assert_eq!(
+        weight_m, m,
+        "MOEA/D weight-vector dimension must match objective dimension"
+    );
     let mut ideal = vec![f64::INFINITY; m];
     for ind in &pop {
         for (z, v) in ideal.iter_mut().zip(&ind.f) {
@@ -838,10 +946,10 @@ pub fn moead(
         }
     }
     for _ in 0..params.generations {
-        for i in 0..n {
+        for neighbors in &hood {
             // Neighborhood mating.
-            let a = hood[i][stream.next_below(t as u64) as usize];
-            let b = hood[i][stream.next_below(t as u64) as usize];
+            let a = neighbors[stream.next_below(t as u64) as usize];
+            let b = neighbors[stream.next_below(t as u64) as usize];
             let (mut c1, _) = sbx(&pop[a].x, &pop[b].x, params.eta_c, lo, hi, &mut stream);
             mutate(&mut c1, params.eta_m, params.p_mut, lo, hi, &mut stream);
             let fc = objectives(&c1);
@@ -850,7 +958,7 @@ pub fn moead(
             }
             // Bounded neighborhood replacement.
             let mut replaced = 0usize;
-            for &j in &hood[i] {
+            for &j in neighbors {
                 if replaced >= params.max_replace {
                     break;
                 }

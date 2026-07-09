@@ -1,8 +1,9 @@
 # CONTRACT: fs-dfo
 
 > Status: PARTIAL — CMA-ES (IGO form), BIPOP restarts, Nelder–Mead,
-> balanced entropic OT, MOO helpers, and discrete-support
-> Wasserstein-DRO inner sup are in force; sep/low-rank CMA, NES
+> balanced entropic OT, NSGA-II/III, MOEA/D, hypervolume helpers and
+> archives, sample-CVaR, and discrete-support Wasserstein-DRO inner sup
+> are in force; sep/low-rank CMA, NES
 > parameterizations, DE, DIRECT, TR-DFO, and fs-exec population waves
 > are recorded follow-up scope.
 
@@ -77,32 +78,42 @@ marginal feasibility ≤ 1e−8 and cost symmetry ≤ 1e−8; the ε-ladder
 approaching the 1D monotone-coupling CLOSED FORM monotonically
 (0.11 → 0.005 at ε = 0.05 → 0.002); translation covariance
 (W₂² of equal translates = t² within 0.2%); OT golden
-`0x58eb_8443_224c_a689`; tests/moo_battery.rs (7 cases): hypervolume vs
+`0x58eb_8443_224c_a689`; tests/moo_battery.rs (12 cases): hypervolume vs
 hand-computed 2D/3D values including dominated/out-of-reference
 degenerate cases; non-dominated-sort front assignment exact;
 NSGA-II on ZDT1/ZDT2 at standard budgets (pop 80 × 200 generations —
 short runs measurably leave the f2-minimal arm unexplored, documented
 in the test) with mean front gap ≤ 0.05 (measured ≤ 0.0008), full f1
 spread, hypervolume beating scrambled-Sobol random at MATCHED
-evaluations (0.87 vs 0.19 / 0.54 vs 0.00), and bitwise replay; knee
-detection hitting a synthetic elbow exactly; CVaR Rockafellar–Uryasev
+evaluations (0.87 vs 0.19 / 0.54 vs 0.00), and bitwise replay; helper
+edges for crowding; knee detection hitting a synthetic elbow exactly;
+CVaR Rockafellar–Uryasev
 on 2·10⁵ Gaussian samples vs the closed form μ + σφ(z_β)/(1−β) within
-0.02 (and the RU minimizer matching the VaR); MOO golden hash
-`0xaf70_6167_593f_51cc`; MC hypervolume vs exact at m = 2/3 within
+0.02 (and the RU minimizer matching the VaR); duplicate order
+statistics handled in the linear tail pass; MOO golden hash
+`0x606f_35d4_bfb8_822a`; MC hypervolume vs exact at m = 2/3 within
 0.01 absolute and m = 6 CLOSED FORMS beyond exact reach (single point
 ∏(ref − p) and two-point inclusion-exclusion, within 8% at 1.2·10⁵
 Sobol samples, deterministic per seed with the hit count returned as
-the honesty knob); bounded archive — dominated inserts are no-ops,
-dominating inserts evict, over-capacity eviction removes the TRUE
-least contributor (verified against brute-force keep-(k−1) subset
-enumeration); tests/nsga3_battery.rs (4 cases): Das–Dennis counts
+the honesty knob); public MC-hypervolume edges match exact
+hypervolume's malformed-point ignore policy, empty dimension returns
+zero, and zero samples are rejected; bounded archive — dominated
+inserts are no-ops, dominating inserts evict, over-capacity eviction
+removes the TRUE least contributor (verified against brute-force
+keep-(k−1) subset enumeration); tests/nsga3_battery.rs (11 cases):
+Das–Dennis counts
 (C(p+m−1, m−1) exact: 91 at (3,12), 70 at (5,4)) and on-simplex
-membership; DTLZ2(m=3) at standard budgets — worst | ‖f‖−1 | =
-0.0238 against the unit-sphere-octant front with 98%
-reference-direction coverage; the MANY-OBJECTIVE claim at m = 5:
+membership; public guards reject zero-division directions, invalid
+NSGA-III reference directions, empty MOEA/D weights, and zero
+neighborhoods at the API boundary; DTLZ2(m=3) at standard budgets —
+worst | ‖f‖−1 | = 0.0238 against the unit-sphere-octant front with
+98% reference-direction coverage; the MANY-OBJECTIVE claim at m = 5:
 NSGA-III beats NSGA-II 6.51 vs 4.39 on MC-estimated hypervolume at
 matched budget (the classic motivation, measured by composition with
-mc_hypervolume) plus bitwise replay; NSGA-III golden
+mc_hypervolume) plus bitwise replay; MOEA/D converges on ZDT1 and is
+competitive with NSGA-III on DTLZ2(m=3) at matched budget (2.7457 vs
+2.7775 hypervolume in the current deterministic battery) plus bitwise
+replay; NSGA-III golden
 `0xd912_6c49_f1b1_6897`.
 tests/dro_battery.rs (4 cases): the one-sample kink LP recovers the
 fractional q = [0.5, 0.5] and worst-case value 0.5; tiny-scale kinks
@@ -119,8 +130,7 @@ DRO golden hash `0xd21c_d092_b4a5_ba98`.
   only; the external COCO battery is follow-up).
 - NSGA-III normalization uses the ideal point with FIRST-front
   per-objective maxima as the nadir estimate; the full ASF
-  extreme-point construction is the recorded refinement. MOEA/D is
-  the bead's remaining decomposition-based sibling.
+  extreme-point construction is the recorded refinement.
 - `mc_hypervolume` is the m > 4 path; its accuracy knob is the
   sample count (standard error √(p(1−p)/n)) — no silent precision
   claim. `HvArchive` eviction uses EXACT contributions (m ≤ 4);
@@ -131,12 +141,11 @@ DRO golden hash `0xd21c_d092_b4a5_ba98`.
 - Module `dro`: discrete candidate support only; continuous ambiguity
   sets, adaptive support generation, and coupled decision-dependent
   losses are follow-up scope.
-- MOO slice-1 scope (module `moo`): NSGA-II, exact hypervolume m ≤ 4,
-  knee, sample-CVaR. NSGA-III reference directions / MOEA/D
-  (many-objective), MC hypervolume beyond m = 4,
-  hypervolume-contribution archiving, gradient-based Pareto tracing
-  (fs-ascent continuation), ledger world-forking steering, and chance
-  constraints are the bead's recorded split lanes.
+- MOO scope (module `moo`): NSGA-II/III, MOEA/D, exact hypervolume
+  m ≤ 4, MC hypervolume beyond m = 4, bounded hypervolume archive,
+  knee, and sample-CVaR. Gradient-based Pareto tracing (fs-ascent
+  continuation), ledger world-forking steering, and chance constraints
+  are still split lanes.
 - Sep-CMA/low-rank (dim > ~200), NES, DE, DIRECT, TR-DFO: not built.
 - No constraint handling (fs-constraint owns kinds; integration later).
 - No parallel evaluation waves yet (fs-exec bead).

@@ -54,6 +54,92 @@ fn das_dennis_counts_and_simplex() {
     log("das-dennis", "pass", "91 @ (3,12), 70 @ (5,4), on-simplex");
 }
 
+fn guard_nsga_params() -> NsgaParams {
+    NsgaParams {
+        pop: 4,
+        generations: 0,
+        eta_c: 30.0,
+        eta_m: 20.0,
+        p_mut: 0.25,
+        seed: 101,
+    }
+}
+
+#[test]
+#[should_panic(expected = "Das-Dennis directions need at least one objective")]
+fn das_dennis_rejects_zero_objectives() {
+    let _ = das_dennis(0, 1);
+}
+
+#[test]
+#[should_panic(expected = "Das-Dennis directions need at least one division")]
+fn das_dennis_rejects_zero_divisions() {
+    let _ = das_dennis(3, 0);
+}
+
+#[test]
+#[should_panic(expected = "NSGA-III reference-direction dimension must match objective dimension")]
+fn nsga3_rejects_reference_direction_dimension_mismatch() {
+    let nsga_params = guard_nsga_params();
+    let bad_dirs = vec![vec![1.0]];
+    let mut f_bad_dir = |_: &[f64]| vec![0.0, 1.0];
+    let _ = nsga3(&mut f_bad_dir, 2, (0.0, 1.0), &bad_dirs, &nsga_params);
+}
+
+#[test]
+#[should_panic(expected = "NSGA-III reference directions vectors must be finite")]
+fn nsga3_rejects_all_zero_reference_direction() {
+    let zero_dir = vec![vec![0.0, 0.0]];
+    let mut f_zero_dir = |_: &[f64]| vec![0.0, 1.0];
+    let _ = nsga3(
+        &mut f_zero_dir,
+        2,
+        (0.0, 1.0),
+        &zero_dir,
+        &guard_nsga_params(),
+    );
+}
+
+fn guard_moead_params(neighbors: usize) -> fs_dfo::MoeadParams {
+    fs_dfo::MoeadParams {
+        neighbors,
+        max_replace: 1,
+        generations: 0,
+        eta_c: 20.0,
+        eta_m: 20.0,
+        p_mut: 0.25,
+        seed: 102,
+    }
+}
+
+#[test]
+#[should_panic(expected = "MOEA/D neighborhood size must be positive")]
+fn moead_rejects_zero_neighborhood() {
+    let weights = das_dennis(2, 1);
+    let mut f_zero_neighbors = |_: &[f64]| vec![0.0, 1.0];
+    let _ = fs_dfo::moead(
+        &mut f_zero_neighbors,
+        2,
+        (0.0, 1.0),
+        &weights,
+        &guard_moead_params(0),
+    );
+}
+
+#[test]
+#[should_panic(expected = "MOEA/D weight vectors must not be empty")]
+fn moead_rejects_empty_weights() {
+    let empty_weights: Vec<Vec<f64>> = Vec::new();
+    let mut f_empty_weights = |_: &[f64]| vec![0.0, 1.0];
+    let _ = fs_dfo::moead(
+        &mut f_empty_weights,
+        2,
+        (0.0, 1.0),
+        &empty_weights,
+        &guard_moead_params(1),
+    );
+}
+
 #[test]
 fn dtlz2_m3_convergence_and_coverage() {
     let m = 3usize;
@@ -236,7 +322,10 @@ fn moead_zdt1_and_dtlz2_competitive() {
         lo = lo.min(ind.f[0]);
         hi = hi.max(ind.f[0]);
     }
-    assert!(hi - lo > 0.7, "MOEA/D diversity collapsed: [{lo:.3},{hi:.3}]");
+    assert!(
+        hi - lo > 0.7,
+        "MOEA/D diversity collapsed: [{lo:.3},{hi:.3}]"
+    );
     // DTLZ2(m=3): competitive with NSGA-III on hypervolume at matched
     // budget (within 10% — both are legitimate; numbers ledgered).
     let m = 3usize;
@@ -278,7 +367,11 @@ fn moead_zdt1_and_dtlz2_competitive() {
     let rb = moead(&mut fr2, 8, (0.0, 1.0), &weights2, &params);
     assert_eq!(ra.len(), rb.len());
     for (p, q) in ra.iter().zip(&rb) {
-        assert!(p.f.iter().zip(&q.f).all(|(u, v)| u.to_bits() == v.to_bits()));
+        assert!(
+            p.f.iter()
+                .zip(&q.f)
+                .all(|(u, v)| u.to_bits() == v.to_bits())
+        );
     }
     log(
         "moead",
