@@ -40,6 +40,22 @@ fn seeded_design() -> DensityDesign {
 }
 
 #[test]
+#[should_panic(expected = "density lattice needs at least 2 nodes per side")]
+fn tm_000_rejects_degenerate_lattice() {
+    let _ = DensityDesign::uniform(1, 0.5);
+}
+
+#[test]
+#[should_panic(expected = "density lattice length must equal n*n")]
+fn tm_000_rejects_manual_shape_mismatch() {
+    let design = DensityDesign {
+        n: 3,
+        rho: vec![0.5; 8],
+    };
+    let _ = design.volume();
+}
+
+#[test]
 fn tm_001_improves_with_zero_rebuilds() {
     // The marquee property is zero mesh rebuilds: the background
     // quadtree is built once, then the configured adaptation path may

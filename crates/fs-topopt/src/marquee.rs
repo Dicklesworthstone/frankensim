@@ -27,23 +27,45 @@ pub struct DensityDesign {
     pub rho: Vec<f64>,
 }
 
+fn lattice_len(n: usize) -> usize {
+    assert!(n >= 2, "density lattice needs at least 2 nodes per side");
+    n.checked_mul(n)
+        .expect("density lattice size overflows usize")
+}
+
 impl DensityDesign {
     /// A uniform-density start at `frac` solid fraction.
+    ///
+    /// # Panics
+    /// If `n < 2`, `n * n` overflows, or `frac` is not finite and in
+    /// `[0, 1]`.
     #[must_use]
     pub fn uniform(n: usize, frac: f64) -> DensityDesign {
+        assert!(
+            (0.0..=1.0).contains(&frac),
+            "uniform density fraction must be finite and in [0, 1]"
+        );
+        let len = lattice_len(n);
         DensityDesign {
             n,
-            rho: vec![frac; n * n],
+            rho: vec![frac; len],
         }
+    }
+
+    fn assert_shape(&self) {
+        let expected = lattice_len(self.n);
+        assert_eq!(
+            self.rho.len(),
+            expected,
+            "density lattice length must equal n*n"
+        );
     }
 
     fn node(&self, i: usize, j: usize) -> f64 {
         self.rho[j * self.n + i]
     }
 
-    /// Bilinear density at a point.
-    #[must_use]
-    pub fn density_at(&self, x: f64, y: f64) -> f64 {
+    fn density_at_valid_shape(&self, x: f64, y: f64) -> f64 {
         #[allow(clippy::cast_precision_loss)]
         let scale = (self.n - 1) as f64;
         let (fx, fy) = (x.clamp(0.0, 1.0) * scale, y.clamp(0.0, 1.0) * scale);
@@ -60,9 +82,17 @@ impl DensityDesign {
             + (1.0 - tx) * ty * self.node(i, j + 1)
     }
 
+    /// Bilinear density at a point.
+    #[must_use]
+    pub fn density_at(&self, x: f64, y: f64) -> f64 {
+        self.assert_shape();
+        self.density_at_valid_shape(x, y)
+    }
+
     /// Solid fraction (mean density).
     #[must_use]
     pub fn volume(&self) -> f64 {
+        self.assert_shape();
         #[allow(clippy::cast_precision_loss)]
         {
             self.rho.iter().sum::<f64>() / self.rho.len() as f64
@@ -73,6 +103,7 @@ impl DensityDesign {
     /// topology-evolution witness.
     #[must_use]
     pub fn void_components(&self) -> usize {
+        self.assert_shape();
         let n = self.n;
         let mut seen = vec![false; n * n];
         let mut comps = 0usize;
@@ -115,6 +146,7 @@ impl DensityDesign {
     /// length-scale audit of the optimized geometry.
     #[must_use]
     pub fn min_feature_cells(&self) -> usize {
+        self.assert_shape();
         let n = self.n;
         // Distance transform (chessboard) from the void/boundary.
         let mut dist = vec![usize::MAX; n * n];
@@ -199,7 +231,7 @@ impl DensityDesign {
 
 impl CutSdf for DensityDesign {
     fn value(&self, p: [f64; 2]) -> f64 {
-        0.5 - self.density_at(p[0], p[1])
+        0.5 - self.density_at_valid_shape(p[0], p[1])
     }
 
     fn gradient(&self, p: [f64; 2]) -> [f64; 2] {
@@ -241,7 +273,7 @@ impl CutSdf for DensityDesign {
             (lo[0], hi[1]),
             (hi[0], hi[1]),
         ] {
-            let v = self.density_at(x, y);
+            let v = self.density_at_valid_shape(x, y);
             rho_lo = rho_lo.min(v);
             rho_hi = rho_hi.max(v);
         }
@@ -326,6 +358,7 @@ pub fn run_marquee(
     iters: usize,
     splits_per_iter: usize,
 ) -> Result<MarqueeReport, fs_cutfem::CutFemError> {
+    design.assert_shape();
     // THE GRID IS BUILT ONCE. Refinement = splits only; there is no
     // other construction site in this function (the zero-remeshing
     // property is structural, and the log proves it).
