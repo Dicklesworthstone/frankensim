@@ -16,12 +16,14 @@ pub mod acq;
 pub mod bo;
 pub mod gp;
 pub mod mf;
+pub mod sparse;
 pub mod turbo;
 
 pub use acq::{expected_improvement, normal_bank, phi_cdf, phi_inv, q_expected_improvement};
 pub use bo::{BoConfig, BoReport, minimize};
 pub use gp::{Gp, Kernel, Matern, fit_hyperparams};
 pub use mf::{MfConfig, MfGp, MfKernel, MfReport, fit_mf, mf_minimize};
+pub use sparse::{SparseGp, farthest_point_inducing};
 pub use turbo::{TurboConfig, TurboReport, turbo_minimize};
 
 /// Crate version, re-exported for provenance stamping.
