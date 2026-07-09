@@ -28,6 +28,8 @@
 
 mod delaunay;
 mod exude;
+#[cfg(feature = "frontier-hexmesh")]
+pub mod hexdom;
 mod parallel;
 mod recovery;
 mod refine;

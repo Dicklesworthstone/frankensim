@@ -21,5 +21,9 @@ fs-rep-mesh = { path = "../fs-rep-mesh" }
 asupersync = { path = "../../../asupersync" }
 fs-alloc = { path = "../fs-alloc" }
 
+[features]
+# [F]-gated per the Ambition-Tag rule (bead wqd.18).
+frontier-hexmesh = []
+
 [lints]
 workspace = true

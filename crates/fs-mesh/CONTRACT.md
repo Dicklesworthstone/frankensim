@@ -59,6 +59,21 @@ half-edge round-trips, closed-manifold audits).
   remeshing IS `UniformMetric`; anisotropic fields (ultimately FLUX's
   DWR error metric) reuse the identical op set.
 
+- `hexdom` module (plan §7.5, bead wqd.18; [F], behind
+  `frontier-hexmesh`, OFF the critical path): hex-dominant meshing via
+  octahedral frame fields. SH9 realized as a FIXED SPHERICAL SAMPLING
+  of the degree-4 octahedral polynomial (a linear image of the SH9
+  coefficients — exact Wigner-D machinery is the growth path); MBO =
+  graph diffusion + deterministic seeded projection to the variety
+  (energy decreases monotonically, boundary frames pinned); the
+  24-element cube group drives matchings; SINGULARITIES are loop
+  holonomies of matchings around lattice edges (winding, not local
+  twist — a 45° isolated cell is NOT singular, measured);
+  `extract_hex_dominant` routes frame-field / polycube-fallback /
+  refusal by DOCUMENTED criteria, and refusals name IGA/CutFEM (the
+  honest-alternatives doctrine); `accuracy_per_dof` reports both
+  element classes whichever way it falls.
+
 ## Invariants
 
 1. On general-position clouds the FULL exact audit is clean: global
@@ -232,3 +247,16 @@ reimplementation must pass the suite unchanged.
 - `orient3d_sos` is a projection cascade, not the full 3D
   Edelsbrunner–Mücke ladder (fs-ivl's documented no-claim); it is used
   only for walk routing here, never for conflict decisions.
+
+## No-claim boundaries (hexdom)
+
+- v1 lattice tier: frame fields, singularity graphs, and extraction
+  live on box-lattice domains; general tet-domain frame fields, true
+  CubeCover parameterization, and curved hex extraction are the
+  research core this tier deliberately does not claim.
+- The SH9 sampling is a faithful linear image, not the coefficient
+  basis; exact band-4 Wigner-D rotation is the named growth path.
+- Scaled Jacobians are exact (1.0) only for the axis-aligned tier;
+  warped-element quality arrives with the parameterization.
+- IGA and CutFEM cover most hex use-cases at higher accuracy — this
+  module's own refusal says so, by design.
