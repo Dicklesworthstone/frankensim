@@ -1,5 +1,5 @@
 //! End-to-end battery: a learned neural implicit whose Lipschitz bound, safe
-//! rendering, and single-bounded-component topology are all PROVEN.
+//! rendering, and bounded-non-empty-region topology are all PROVEN.
 
 use fs_evidence::Color;
 use fs_neuroshape_e2e::{blob_sdf_net, run_campaign};
@@ -27,14 +27,15 @@ fn the_neural_shape_topology_is_certified() {
         report.nearest_surface_radius
     );
     assert!(report.nearest_surface_radius <= report.max_crossing_radius);
-    // TOPOLOGY, PROVEN: a certified-inside interior trapped by a certified
-    // positive ring ⇒ a single bounded component.
+    // TOPOLOGY, PROVEN: a certified-inside interior enclosed by a CLOSED,
+    // fully-certified boundary frame ⇒ a non-empty, bounded region.
     assert!(
         report.certified_inside,
         "inside interval {:?}",
         report.inside_interval
     );
-    assert_eq!(report.certified_outside_boxes, report.ring_boxes);
+    assert_eq!(report.boundary_segments, 4);
+    assert_eq!(report.boundary_certified, report.boundary_segments);
     assert!(report.bounded);
     assert!(matches!(report.topology_color, Color::Verified { .. }));
     // Morse cross-check: one interior minimum.
@@ -48,15 +49,15 @@ fn the_neural_shape_topology_is_certified() {
     );
     println!(
         "{{\"campaign\":\"neuroshapecert\",\"L\":{:.3},\"origin\":{:.3},\"safe_radius\":{:.3},\
-         \"inside\":[{:.3},{:.3}],\"outside_boxes\":{}/{},\"single_min\":{},\"crossings\":{},\
+         \"inside\":[{:.3},{:.3}],\"boundary\":{}/{},\"single_min\":{},\"crossings\":{},\
          \"max_r\":{:.3}}}",
         report.lipschitz,
         report.origin_value,
         report.safe_radius,
         report.inside_interval.0,
         report.inside_interval.1,
-        report.certified_outside_boxes,
-        report.ring_boxes,
+        report.boundary_certified,
+        report.boundary_segments,
         report.single_minimum,
         report.surface_crossings,
         report.max_crossing_radius,
@@ -65,7 +66,7 @@ fn the_neural_shape_topology_is_certified() {
 
 #[test]
 fn an_open_ring_yields_no_topology_certificate() {
-    // too small a ring sits inside the surface → boxes are not certified outside.
+    // too small a box: its boundary frame overlaps the surface → not certified.
     let net = blob_sdf_net();
     let report = run_campaign(&net, 0.3, 0.3);
     assert!(!report.bounded || !report.certified_inside);

@@ -16,12 +16,15 @@
 //!   CANNOT tunnel through the surface.
 //! - **A topology certificate by interval arithmetic** — the network's sound
 //!   Interval Bound Propagation (`eval_interval`) proves a central box is
-//!   strictly inside (`hi < 0`) and every box on a radius-ring is strictly
-//!   outside (`lo > 0`). A non-empty interior trapped inside a certified-positive
-//!   ring is a single BOUNDED component — a proof, not a mesh.
+//!   strictly inside (`hi < 0`) and that the FOUR edge strips of a bounding box
+//!   are strictly outside (`lo > 0`). Those strips tile the box boundary into a
+//!   CLOSED frame (corners overlap), so `{f<0}` provably cannot cross it: the
+//!   interior is proven NON-EMPTY and BOUNDED — a proof, not a mesh. (Discrete
+//!   ring boxes would leave angular gaps and prove nothing about boundedness.)
 //! - **A Morse cross-check** ([`fs_viz`]): the field has a single interior
-//!   minimum (`classify_hessian → Minimum`), and `isocontour_crossings` localizes
-//!   the zero set — all crossings fall inside the certified ring.
+//!   minimum (`classify_hessian → Minimum`) — evidence (not proof) that the
+//!   bounded region is a single component; `isocontour_crossings` localizes the
+//!   zero set, all inside the certified frame.
 //! - **Honest colors** ([`fs_evidence`]): every certificate is `Verified`.
 //!
 //! Deterministic; no dependencies beyond the composed crates.
@@ -66,11 +69,12 @@ pub struct NeuroShapeReport {
     pub inside_interval: (f64, f64),
     /// Is the central box certified strictly inside (`hi < 0`)?
     pub certified_inside: bool,
-    /// How many ring boxes are certified strictly outside (`lo > 0`).
-    pub certified_outside_boxes: usize,
-    /// Total ring boxes probed.
-    pub ring_boxes: usize,
-    /// Is the surface bounded (every ring box certified outside)?
+    /// How many of the box-boundary strips are certified strictly outside.
+    pub boundary_certified: usize,
+    /// Total boundary strips (4 — a CLOSED frame around the box).
+    pub boundary_segments: usize,
+    /// Is the surface bounded — the whole boundary frame certified outside, so
+    /// `{f<0}` provably cannot cross it (a closed barrier, not spot checks)?
     pub bounded: bool,
     /// Morse: does the field have a single interior minimum?
     pub single_minimum: bool,
@@ -89,8 +93,9 @@ fn radius(p: Vec2) -> f64 {
     p[0].hypot(p[1])
 }
 
-/// Run the NeuroShapeCert campaign on `net` with a ring at `ring_r` and a
-/// central box of half-width `inner`.
+/// Run the NeuroShapeCert campaign on `net` with a bounding box of half-width
+/// `ring_r` (its four edge strips form the closed barrier) and a central
+/// certified-inside box of half-width `inner`.
 #[must_use]
 pub fn run_campaign(net: &MlpSdf, ring_r: f64, inner: f64) -> NeuroShapeReport {
     let lipschitz = net.lipschitz();
@@ -101,29 +106,27 @@ pub fn run_campaign(net: &MlpSdf, ring_r: f64, inner: f64) -> NeuroShapeReport {
     let inside_interval = net.eval_interval(&[-inner, -inner], &[inner, inner]);
     let certified_inside = inside_interval.1 < 0.0;
 
-    // Eight boxes around the ring — each must be certified strictly outside.
-    let half = 0.3;
-    let dirs = [
-        (1.0, 0.0),
-        (-1.0, 0.0),
-        (0.0, 1.0),
-        (0.0, -1.0),
-        (0.7, 0.7),
-        (-0.7, 0.7),
-        (0.7, -0.7),
-        (-0.7, -0.7),
+    // A CLOSED barrier: the four edge strips of the box [−R, R]² tile the whole
+    // boundary frame (corners overlap), so certifying every strip strictly
+    // outside (lo > 0) RIGOROUSLY traps {f<0} inside the box. Eight discrete
+    // boxes would leave angular gaps the surface could escape through.
+    let r = ring_r;
+    let w = 0.4;
+    let strips = [
+        ([-r, r - w], [r, r]),   // top
+        ([-r, -r], [r, -r + w]), // bottom
+        ([-r, -r], [-r + w, r]), // left
+        ([r - w, -r], [r, r]),   // right
     ];
-    let ring_boxes = dirs.len();
-    let mut certified_outside_boxes = 0usize;
-    for (dx, dy) in dirs {
-        let cx = dx * ring_r;
-        let cy = dy * ring_r;
-        let (lo, _hi) = net.eval_interval(&[cx - half, cy - half], &[cx + half, cy + half]);
+    let boundary_segments = strips.len();
+    let mut boundary_certified = 0usize;
+    for (lo_pt, hi_pt) in strips {
+        let (lo, _hi) = net.eval_interval(&lo_pt, &hi_pt);
         if lo > 0.0 {
-            certified_outside_boxes += 1;
+            boundary_certified += 1;
         }
     }
-    let bounded = certified_outside_boxes == ring_boxes;
+    let bounded = boundary_certified == boundary_segments;
 
     // Morse cross-check: a single interior minimum (Hessian by finite diff).
     let h = 1e-3;
@@ -171,8 +174,8 @@ pub fn run_campaign(net: &MlpSdf, ring_r: f64, inner: f64) -> NeuroShapeReport {
         safe_radius,
         inside_interval,
         certified_inside,
-        certified_outside_boxes,
-        ring_boxes,
+        boundary_certified,
+        boundary_segments,
         bounded,
         single_minimum,
         surface_crossings: crossings.len(),
