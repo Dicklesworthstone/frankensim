@@ -41,14 +41,14 @@ fn perf_normal_and_bulk() {
         st.fill_f64(&mut buf);
         acc += buf[0];
     }
-    let bulk = (10 * (1 << 20)) as f64 / t0.elapsed().as_secs_f64();
+    let bulk = f64::from(10 * (1 << 20)) / t0.elapsed().as_secs_f64();
     // Scalar uniform baseline for the bulk ratio.
     let mut st = stream(2);
     let t0 = std::time::Instant::now();
     for _ in 0..(10 * (1 << 20)) {
         acc += st.next_f64();
     }
-    let scalar = (10 * (1 << 20)) as f64 / t0.elapsed().as_secs_f64();
+    let scalar = f64::from(10 * (1 << 20)) / t0.elapsed().as_secs_f64();
     println!(
         "{{\"metric\":\"rand-perf\",\"box_muller_per_s\":{bm:.0},\"ziggurat_per_s\":{zig:.0},\
          \"zig_speedup\":{:.2},\"bulk_fill_per_s\":{bulk:.0},\"scalar_per_s\":{scalar:.0},\

@@ -103,6 +103,7 @@ fn ziggurat_agrees_with_box_muller_ks() {
 /// machine before gating it.
 #[test]
 fn ziggurat_cross_isa_golden_hash() {
+    const GOLDEN: u64 = 0x9959_60fe_709f_00bc; // recorded on aarch64 (Mac16,11)
     let mut st = stream(0x17A9, 7);
     let mut h = 0xcbf2_9ce4_8422_2325u64;
     for _ in 0..100_000 {
@@ -116,8 +117,5 @@ fn ziggurat_cross_isa_golden_hash() {
         "{{\"metric\":\"ziggurat-golden\",\"hash\":\"{h:016x}\",\"arch\":\"{}\"}}",
         std::env::consts::ARCH
     );
-    const GOLDEN: u64 = 0x9959_60fe_709f_00bc; // recorded on aarch64 (Mac16,11)
-    if GOLDEN != 0 {
-        assert_eq!(h, GOLDEN, "cross-ISA bitwise equality");
-    }
+    assert_eq!(h, GOLDEN, "cross-ISA bitwise equality");
 }
