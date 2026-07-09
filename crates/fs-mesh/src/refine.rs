@@ -3,17 +3,21 @@
 //! POLICY is a minimum-edge floor from the input's closest-pair
 //! spacing — any insertion that would land closer than the floor to an
 //! existing vertex YIELDS (counted as protected) instead of cascading;
-//! escapes are skipped and counted. `split_hull_facets` additionally
-//! splits the hull facet a circumcenter escapes through (in-plane
-//! split point blended strictly into the facet) — the infrastructure
-//! is exact-audit-clean and deterministic, but MEASURED to degrade
-//! radius-edge quality on convex-hull boundaries WITHOUT the PLC
-//! protection machinery (diametral encroachment balls, segment
-//! protection): the flag defaults OFF and true full-Ruppert quality is
-//! coupled to the constrained-boundary-recovery successor, exactly as
-//! the classical termination theory says it must be. Deterministic:
-//! worst-first with a canonical tie-break, sequential inserts through
-//! the exact-predicate kernel; the exact audit is the trip-wire.
+//! escapes are skipped and counted. `split_hull_facets` adds the classical
+//! Ruppert rule via DIAMETRAL ENCROACHMENT BALLS (`facet_diametral_ball`): a
+//! circumcenter that lands inside a hull facet's minimum-enclosing sphere splits
+//! that facet instead of being inserted (the sliver-making insertion is
+//! replaced by a lower-dimensional split); an escaping circumcenter that
+//! encroaches nothing is an unfixable boundary sliver and is skipped, not split.
+//! This encroachment protection is exact-audit-clean and deterministic and
+//! MEASURABLY shrinks the convex-hull regression (~8×: the ledgered worst-case
+//! radius-edge fell from ~2.8e18 to ~3.5e17 on the tmesh-011 fixture), but does
+//! NOT eliminate it: the residual slivers come from near-boundary INTERIOR
+//! vertices making thin tets with facet-split points, so true full-Ruppert
+//! quality stays coupled to boundary-layer / constrained-recovery refinement,
+//! exactly as the classical termination theory says. The flag defaults OFF.
+//! Deterministic: worst-first with a canonical tie-break, sequential inserts
+//! through the exact-predicate kernel; the exact audit is the trip-wire.
 
 use crate::delaunay::{GHOST, Mesh, MeshError, Tetrahedralization};
 use fs_exec::Cx;
@@ -343,31 +347,23 @@ pub fn refine(
             let new_idx = tetra.mesh.points.len() as u32;
             let seed = tetra.mesh.locate(cc, new_idx);
             let escaped = tetra.mesh.tets[seed as usize][3] == GHOST;
+            // Full-Ruppert rule: split a hull facet IFF the circumcenter
+            // encroaches its diametral ball; otherwise insert the circumcenter
+            // (interior) or skip it (an escaping circumcenter that encroaches
+            // nothing is an unfixable boundary sliver — domain extension is out
+            // of scope). Splitting a facet a far circumcenter merely escaped
+            // through was what manufactured the boundary slivers.
+            let encroached = opts
+                .split_hull_facets
+                .then(|| encroached_hull_facet(&tetra.mesh, cc))
+                .flatten();
             let mut split_facet = false;
-            let candidate = if !escaped {
-                // Full-Ruppert protection: an interior circumcenter that lies
-                // inside a hull facet's diametral ball would manufacture a
-                // boundary sliver — split the encroached facet instead (the
-                // split point relieves the encroachment, and the offending tet
-                // is reconsidered next round). Legacy path inserts the
-                // circumcenter directly.
-                let encroached = opts
-                    .split_hull_facets
-                    .then(|| encroached_hull_facet(&tetra.mesh, cc))
-                    .flatten();
-                if let Some(f) = encroached {
-                    split_facet = true;
-                    let pts = &tetra.mesh.points;
-                    facet_split_point(pts[f[0] as usize], pts[f[1] as usize], pts[f[2] as usize])
-                } else {
-                    Some(cc)
-                }
-            } else if opts.split_hull_facets {
-                stats.skipped_outside_hull += 1;
+            let candidate = if let Some(f) = encroached {
                 split_facet = true;
-                let g = tetra.mesh.tets[seed as usize];
                 let pts = &tetra.mesh.points;
-                facet_split_point(pts[g[0] as usize], pts[g[1] as usize], pts[g[2] as usize])
+                facet_split_point(pts[f[0] as usize], pts[f[1] as usize], pts[f[2] as usize])
+            } else if !escaped {
+                Some(cc)
             } else {
                 stats.skipped_outside_hull += 1;
                 skipped.insert(key);

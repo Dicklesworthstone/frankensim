@@ -133,17 +133,23 @@ impl DensityDesign {
             let mut next = Vec::new();
             for &k in &frontier {
                 let (i, j) = (k % n, k / n);
-                for (di, dj) in [(1i64, 0i64), (-1, 0), (0, 1), (0, -1)] {
-                    let (ni, nj) = (i as i64 + di, j as i64 + dj);
-                    if ni < 0 || nj < 0 || ni >= n as i64 || nj >= n as i64 {
-                        continue;
-                    }
-                    #[allow(clippy::cast_sign_loss)]
-                    let q = nj as usize * n + ni as usize;
+                let mut visit = |q: usize| {
                     if dist[q] == usize::MAX {
                         dist[q] = d;
                         next.push(q);
                     }
+                };
+                if i > 0 {
+                    visit(k - 1);
+                }
+                if i + 1 < n {
+                    visit(k + 1);
+                }
+                if j > 0 {
+                    visit(k - n);
+                }
+                if j + 1 < n {
+                    visit(k + n);
                 }
             }
             frontier = next;
