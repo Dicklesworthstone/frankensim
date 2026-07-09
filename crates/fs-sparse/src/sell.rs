@@ -166,91 +166,6 @@ impl Sell {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::tests::{laplacian_2d, random_coo};
-
-    #[test]
-    fn round_trip_is_bitwise_lossless() {
-        for (n, c, sigma) in [(50usize, 4usize, 16usize), (64, 8, 8), (7, 4, 32)] {
-            let a = random_coo(n, n, 5, 0x5E11 + n as u64).assemble();
-            let s = Sell::from_csr(&a, c, sigma);
-            let back = s.to_csr();
-            assert_eq!(a.nnz(), back.nnz());
-            for r in 0..n {
-                let (c1, v1) = a.row(r);
-                let (c2, v2) = back.row(r);
-                assert_eq!(c1, c2, "row {r} pattern changed (C={c}, sigma={sigma})");
-                assert!(v1.iter().zip(v2).all(|(x, y)| x.to_bits() == y.to_bits()));
-            }
-        }
-    }
-
-    #[test]
-    fn spmv_bitwise_equals_csr() {
-        let mut seed = 31u64;
-        let mut lcg = move || {
-            seed = seed
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            ((seed >> 11) as f64) / (1u64 << 53) as f64 - 0.5
-        };
-        // Mixed shapes including a ragged final chunk and heavy row-length
-        // skew (dense row + empty rows) to stress the permutation.
-        for (n, c, sigma) in [(81usize, 4usize, 16usize), (64, 8, 64), (33, 16, 16)] {
-            let mut coo = random_coo(n, n, 4, 0xACE + n as u64);
-            for col in 0..n {
-                coo.push(n / 2, col, 0.25); // dense row
-            }
-            let a = coo.assemble();
-            let s = Sell::from_csr(&a, c, sigma);
-            let x: Vec<f64> = (0..n).map(|_| lcg()).collect();
-            let (mut y1, mut y2) = (vec![0.0; n], vec![0.0; n]);
-            a.spmv(&x, &mut y1);
-            s.spmv(&x, &mut y2);
-            for r in 0..n {
-                assert_eq!(
-                    y1[r].to_bits(),
-                    y2[r].to_bits(),
-                    "SELL(C={c},sigma={sigma}) diverged from CSR at row {r}"
-                );
-            }
-        }
-        println!(
-            "{{\"suite\":\"fs-sparse\",\"case\":\"sell-bitwise\",\"verdict\":\"pass\",\"detail\":\"SELL spmv == CSR spmv bitwise, 3 configs incl ragged+skewed\"}}"
-        );
-    }
-
-    #[test]
-    fn sorting_reduces_padding_on_skewed_rows() {
-        // The reason sigma exists: with one dense row per window, sorting
-        // within the window bounds the wide chunk count.
-        let n = 64;
-        let mut coo = random_coo(n, n, 2, 7);
-        for col in 0..n {
-            coo.push(0, col, 1.0);
-        }
-        let a = coo.assemble();
-        let unsorted = Sell::from_csr(&a, 8, 8); // sigma == C → no sorting effect
-        let sorted = Sell::from_csr(&a, 8, 64);
-        assert!(
-            sorted.physical_slots() <= unsorted.physical_slots(),
-            "sorting must not increase padding: {} vs {}",
-            sorted.physical_slots(),
-            unsorted.physical_slots()
-        );
-        // Laplacian is near-uniform: padding overhead should be tiny.
-        let lap = laplacian_2d(16);
-        let s = Sell::from_csr(&lap, 8, 64);
-        let overhead = s.physical_slots() as f64 / lap.nnz() as f64;
-        assert!(
-            overhead < 1.35,
-            "Laplacian SELL overhead {overhead} unexpectedly high"
-        );
-    }
-}
-
 impl Sell {
     /// CHUNK-MAJOR SpMV (bead wsbf segment 2): processes each chunk's
     /// C lanes together — per k, the C (col, val) entries are
@@ -351,5 +266,90 @@ impl Sell {
                 y[r] = v;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tests::{laplacian_2d, random_coo};
+
+    #[test]
+    fn round_trip_is_bitwise_lossless() {
+        for (n, c, sigma) in [(50usize, 4usize, 16usize), (64, 8, 8), (7, 4, 32)] {
+            let a = random_coo(n, n, 5, 0x5E11 + n as u64).assemble();
+            let s = Sell::from_csr(&a, c, sigma);
+            let back = s.to_csr();
+            assert_eq!(a.nnz(), back.nnz());
+            for r in 0..n {
+                let (c1, v1) = a.row(r);
+                let (c2, v2) = back.row(r);
+                assert_eq!(c1, c2, "row {r} pattern changed (C={c}, sigma={sigma})");
+                assert!(v1.iter().zip(v2).all(|(x, y)| x.to_bits() == y.to_bits()));
+            }
+        }
+    }
+
+    #[test]
+    fn spmv_bitwise_equals_csr() {
+        let mut seed = 31u64;
+        let mut lcg = move || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((seed >> 11) as f64) / (1u64 << 53) as f64 - 0.5
+        };
+        // Mixed shapes including a ragged final chunk and heavy row-length
+        // skew (dense row + empty rows) to stress the permutation.
+        for (n, c, sigma) in [(81usize, 4usize, 16usize), (64, 8, 64), (33, 16, 16)] {
+            let mut coo = random_coo(n, n, 4, 0xACE + n as u64);
+            for col in 0..n {
+                coo.push(n / 2, col, 0.25); // dense row
+            }
+            let a = coo.assemble();
+            let s = Sell::from_csr(&a, c, sigma);
+            let x: Vec<f64> = (0..n).map(|_| lcg()).collect();
+            let (mut y1, mut y2) = (vec![0.0; n], vec![0.0; n]);
+            a.spmv(&x, &mut y1);
+            s.spmv(&x, &mut y2);
+            for r in 0..n {
+                assert_eq!(
+                    y1[r].to_bits(),
+                    y2[r].to_bits(),
+                    "SELL(C={c},sigma={sigma}) diverged from CSR at row {r}"
+                );
+            }
+        }
+        println!(
+            "{{\"suite\":\"fs-sparse\",\"case\":\"sell-bitwise\",\"verdict\":\"pass\",\"detail\":\"SELL spmv == CSR spmv bitwise, 3 configs incl ragged+skewed\"}}"
+        );
+    }
+
+    #[test]
+    fn sorting_reduces_padding_on_skewed_rows() {
+        // The reason sigma exists: with one dense row per window, sorting
+        // within the window bounds the wide chunk count.
+        let n = 64;
+        let mut coo = random_coo(n, n, 2, 7);
+        for col in 0..n {
+            coo.push(0, col, 1.0);
+        }
+        let a = coo.assemble();
+        let unsorted = Sell::from_csr(&a, 8, 8); // sigma == C → no sorting effect
+        let sorted = Sell::from_csr(&a, 8, 64);
+        assert!(
+            sorted.physical_slots() <= unsorted.physical_slots(),
+            "sorting must not increase padding: {} vs {}",
+            sorted.physical_slots(),
+            unsorted.physical_slots()
+        );
+        // Laplacian is near-uniform: padding overhead should be tiny.
+        let lap = laplacian_2d(16);
+        let s = Sell::from_csr(&lap, 8, 64);
+        let overhead = s.physical_slots() as f64 / lap.nnz() as f64;
+        assert!(
+            overhead < 1.35,
+            "Laplacian SELL overhead {overhead} unexpectedly high"
+        );
     }
 }
