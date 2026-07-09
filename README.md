@@ -8,16 +8,16 @@
 
 [![Status](https://img.shields.io/badge/status-active%20Rust%20workspace-2ea44f)](#implemented-workspace)
 [![Rust](https://img.shields.io/badge/rust-nightly%202024-b7410e)](rust-toolchain.toml)
-[![Crates](https://img.shields.io/badge/workspace-73%20fs--%2A%20crates-0969da)](#implemented-workspace)
-[![Contracts](https://img.shields.io/badge/contracts-73%20of%2073%20crates-8250df)](#contracts-and-verification)
-[![Tests](https://img.shields.io/badge/tests-119%20crate%20test%20files-1f883d)](#contracts-and-verification)
+[![Crates](https://img.shields.io/badge/workspace-125%20fs--%2A%20crates-0969da)](#implemented-workspace)
+[![Contracts](https://img.shields.io/badge/contracts-125%20of%20125%20crates-8250df)](#contracts-and-verification)
+[![Tests](https://img.shields.io/badge/tests-222%20crate%20test%20files-1f883d)](#contracts-and-verification)
 [![License](https://img.shields.io/badge/license-MIT%20%2B%20AI%20rider-yellow)](LICENSE)
 
 </div>
 
 FrankenSim is a working Rust workspace for deterministic geometry, certified numerics, meshing, execution, evidence, and design-ledger infrastructure for simulation and design optimization.
 
-The tree contains a real Cargo workspace with 73 `fs-*` crates, repository policy tooling, conformance contracts, integration tests, and working implementations across substrate/runtime, numerical kernels, geometry representations, meshing, physics, solvers, adjoints, optimization, imaging, evidence, packaging, and ledger layers.
+The tree contains a real Cargo workspace with 125 `fs-*` crates, repository policy tooling, conformance contracts, integration tests, and working implementations across substrate/runtime, numerical kernels, geometry representations, meshing, physics, solvers, adjoints, optimization, imaging, evidence, packaging, and ledger layers.
 
 There is not yet a packaged end-user simulation application or crates.io release. Today, FrankenSim is usable as a source workspace and library substrate.
 
@@ -31,14 +31,14 @@ There is not yet a packaged end-user simulation application or crates.io release
 
 | Area | Current implementation |
 |------|------------------------|
-| Workspace | Rust 2024 nightly Cargo workspace with 73 `fs-*` crates plus `xtask` |
-| Contracts | 73 of 73 `fs-*` crates have `CONTRACT.md` files |
+| Workspace | Rust 2024 nightly Cargo workspace with 125 `fs-*` crates plus `xtask` |
+| Contracts | 125 of 125 `fs-*` crates have `CONTRACT.md` files |
 | Runtime substrate | Capability probing, SIMD facades, aligned arenas, two-lane execution, cancellation contexts, tile pools, tuner and race scaffolding |
 | Numerics | Deterministic elementary math, dense/sparse linear algebra, FFT/DCT, interval/affine/Taylor arithmetic, Chebyshev collocation, random/QMC streams, AD/adjoint infrastructure, e-process inference |
 | Geometry | Region/chart abstraction, SDF, mesh and F-rep charts, representation conversion hooks, transformations, tet meshing, remeshing, quality audits |
 | Evidence and ledger | Composable `Evidence<T>`/`Certified<T>`, model cards, bracketing, FrankenSQLite-backed design ledger, artifact hashes, event streams, tune cache, roofline recording |
 | Policy tooling | `xtask` checks for layer direction, Franken-only runtime dependencies, contracts, unsafe capsules, and constellation lock verification |
-| Tests | 119 crate-level conformance and integration test files exercising the implemented contracts |
+| Tests | 222 crate-level conformance and integration test files exercising the implemented contracts |
 
 ### What You Can Use Today
 
@@ -590,12 +590,123 @@ real answer to carry evidence instead of just a number.
 | `fs-adaptbo-e2e` | Bayesian optimization, e-process stopping, confidence sequences, evidence | An anytime BO run that can stop early under optional-stopping-valid evidence |
 | `fs-flowcert-e2e` | LBM, analytic Poiseuille checks, MAP-Elites, evidence | A CFD credibility map over Reynolds number and resolution |
 | `fs-vessel` | Chebyshev stability objective, free-surface LBM, e-racing, robust CVaR, volume rendering | A laminar-pour vessel study with stability, mass-ledger, robust-family, and render evidence |
+| `fs-ornith` | BEM/VPM screening, e-racing, LBM refinement, SOS stability certificates, conformal surrogate bands, NSGA-II atlas construction | A smoke-tier ornithoid aircraft study that carries lineage, certificates, model-form honesty, and replay evidence through a full design campaign |
+| `fs-topopt` `cutfem-marquee` | Density fields as CutFEM SDFs, DWR-guided octree refinement, zero-remesh logs, topology/thickness witnesses | A feature-gated topology-optimization lane that keeps the background grid stable while recording exactly where the proof work still lives |
+| `fs-flagship-e2e` | Smoke/mid/full stage wiring, metric-only golden hashes, cross-flagship audits, failure drills, forensic JSON rows, notebook replay | An in-progress suite scaffold that makes flagship replay and shared-core drift visible while keeping unfrozen goldens explicit |
 
 The common pattern is: generate candidates, evaluate them with a physics or
 numerical kernel, attach evidence to the result, and stop only when the decision
 or artifact is good enough under the declared budget. This is why the campaigns
 are useful even when they are smoke-tier: they stress the boundaries between
 representations, solvers, optimizers, reports, and evidence.
+
+## Recent Working Surfaces Worth Reading
+
+The fastest way to understand the codebase is to read a few recently landed
+surfaces that each compress a larger design rule into a small amount of code.
+They show how FrankenSim tries to turn "a solver produced a number" into "a
+claim survived a particular chain of assumptions."
+
+| Surface | What was built | Why it is useful |
+|---------|----------------|------------------|
+| `fs-bo::sparse` | Inducing-point sparse Gaussian processes with deterministic farthest-point inducing locations, DTC/SoR prediction, Titsias ELBO accounting, and sparse/exact conformance tests | Bayesian optimization can use large-data approximations without hiding what the approximation discarded |
+| `fs-uq::adaptive_mlmc` | Adaptive MLMC admission checks, rate recovery, CVaR and anytime probability tests | Uncertainty estimates reject invalid budgets and tolerances before they produce misleading evidence |
+| `fs-flutter-e2e` | A partitioned added-mass flutter campaign whose Lyapunov certificate is checked against the actual eigenvalue boundary and a separate numerical-abscissa implementation | Stability certificates are not accepted merely because two equivalent code paths agree; the README now distinguishes a true independent boundary check from an implementation cross-check |
+| `fs-neuroshape-e2e` | A neural-SDF campaign with a closed interval boundary frame, no-tunnel Lipschitz tracing, Morse evidence, and visualization checks | Neural geometry gets a bounded-region proof instead of relying on sampled ring points that could leave escape gaps |
+| `fs-ornith` | A smoke-tier ornithoid aircraft campaign: parameter decoding, BEM/VPM screening, e-raced candidate elimination, LBM refinement, SOS trim certificates, conformal L/D bands, and Pareto atlas rows | A flagship-style study can carry certificates, surrogate uncertainty, model-form honesty, replay, and graceful degradation through one pipeline |
+| `fs-topopt::marquee` | A feature-gated CutFEM-octree topology lane with density-as-SDF geometry, DWR-guided refinement, zero-remesh iteration logs, and thickness/topology witnesses | Topology optimization can be exercised without making remeshing the first operation, while the feature gate keeps the proof state explicit |
+
+The details matter. The sparse GP surface does not just say "approximate GP";
+it records the ELBO slack that measures how much covariance mass was thrown
+away. The flutter surface does not just say "stable"; it separates the
+sufficient Lyapunov condition, the actual eigenvalue criterion, and the
+implementation cross-check. The ornith surface does not claim high-fidelity
+aerodynamics; it labels panel-vs-LBM agreement as model-form evidence and keeps
+surrogate fallbacks inside conformal bands.
+
+## How The Algorithms Compose
+
+FrankenSim is useful because its algorithms are not isolated demos. A typical
+workflow crosses several crates, and each crossing has a contract.
+
+```text
+geometry or design variables
+        |
+        v
+representation-specific chart / SDF / mesh / field
+        |
+        v
+operator assembly or matrix-free operator
+        |
+        v
+solver, verifier, or simulator
+        |
+        v
+adjoint / sensitivity / uncertainty wrapper
+        |
+        v
+optimizer, race, or value-of-information planner
+        |
+        v
+evidence color + ledger/package/report artifact
+```
+
+| Crossing | Implementation shape | Failure it prevents |
+|----------|----------------------|---------------------|
+| Design to geometry | `fs-xform`, representation crates, interval enclosures, topology checks | A parameter update silently leaves the geometry validity domain |
+| Geometry to physics | CutFEM, FEEC, BEM, LBM, material/scenario records | A solver receives an untyped shape with unknown boundary meaning |
+| Physics to solver | Linear-operator traits, Krylov reports, p-multigrid, block preconditioners, deterministic sparse formats | A residual or matrix format looks fine locally but cannot be replayed or checked elsewhere |
+| Solver to sensitivity | AD, IFT adjoints, VJP registries, transposed solves, gradient verification | An optimizer follows a gradient that differentiated the wrong computation |
+| Sensitivity to decision | L-BFGS/TR-Newton, CMA-ES, NSGA-II, races, MLMC, CVaR, DRO | A campaign optimizes a noisy proxy without recording stop reasons or uncertainty |
+| Decision to artifact | Evidence colors, content roots, package checks, crosswalk records, reports | A reviewer sees only a final plot and cannot inspect the chain of assumptions |
+
+This is why the workspace has many small crates instead of one monolith. The
+crate boundary is where the system can ask a useful question: did this layer
+preserve dimensions, topology, determinism, residual meaning, evidence color,
+or provenance?
+
+## Design Principles For Agentic Simulation Work
+
+FrankenSim is written with automated agents as a real workload. Agents are good
+at running many narrow checks, but they are also prone to losing context,
+over-trusting a local success, or optimizing for the easiest measurable target.
+The architecture tries to make the correct behavior the path of least
+resistance.
+
+| Principle | What it means in practice |
+|-----------|---------------------------|
+| Make claims local | A crate should state exactly what it can prove, what it estimates, and what it refuses to claim in `CONTRACT.md` |
+| Prefer typed refusal to heroic guessing | Invalid tolerances, missing VJPs, unsupported representation conversions, and incomplete evidence should fail loudly or weaken the evidence color |
+| Keep replay independent of scheduling | Stream keys, deterministic reductions, sorted assembly, and cancellation contracts make parallel or stochastic work auditable |
+| Separate model-form honesty from numerical accuracy | A low-Re LBM channel, inviscid panel method, surrogate, and SOS proof can coexist only when each says what kind of evidence it provides |
+| Use smoke tiers as integration pressure | Small e2e campaigns are valuable because they force geometry, solvers, uncertainty, optimization, and reports to share one evidence language |
+| Treat performance as an evidence object | Roofline numbers, tune rows, machine fingerprints, and DSR logs are the claim; architectural intent is not enough |
+
+The result is a codebase where an agent can make progress without inventing a
+new project philosophy for every task. The same rules keep appearing: check the
+contract, run the conformance test, preserve the proof state, and do not upgrade
+a claim just because one path passed.
+
+## How To Evaluate A FrankenSim Result
+
+When a result looks interesting, inspect it in this order:
+
+1. Find the crate contract and read the no-claim boundaries.
+2. Identify the evidence color or certificate type attached to the output.
+3. Check whether the computation is deterministic, stochastic with a valid
+   stopping rule, or model-form estimated.
+4. Look for an independent oracle: dense reference, closed-form endpoint,
+   symmetry law, LP enumeration, interval enclosure, conservation law, or
+   cross-ISA golden.
+5. Check the stop reason, residual norm, budget, and validity domain.
+6. Confirm that any generated report or package contains enough provenance to
+   rerun or independently check the claim.
+7. If performance is part of the claim, require a roofline/tune/DSR artifact
+   rather than accepting timing prose.
+
+This checklist is intentionally mundane. The project is trying to make advanced
+simulation work feel less like a notebook archaeology exercise and more like a
+chain of inspectable, typed claims.
 
 ## Failure Modes The Architecture Is Built To Catch
 
@@ -667,7 +778,8 @@ Different readers should start in different places.
 
 ## Contracts and Verification
 
-The workspace currently has 73 `CONTRACT.md` files for 73 `fs-*` crates.
+The workspace currently has 125 `CONTRACT.md` files for 125 `fs-*` crates. The
+contract count is meant to be checkable, not aspirational.
 
 Existing contracts use these required sections:
 
@@ -708,7 +820,7 @@ The current DSR setup is preferred over GitHub Actions for this repository. If a
 |-- Cargo.toml                         # Workspace manifest
 |-- Cargo.lock                         # Committed lockfile
 |-- rust-toolchain.toml                # Nightly toolchain and components
-|-- crates/                            # 73 fs-* crates; selected entries shown below
+|-- crates/                            # 125 fs-* crates; selected entries shown below
 |   |-- fs-qty/                        # Dimensional quantities
 |   |-- fs-obs/                        # Structured observability
 |   |-- fs-evidence/                   # Evidence and certification wrappers

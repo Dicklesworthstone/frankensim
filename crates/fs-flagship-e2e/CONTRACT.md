@@ -116,5 +116,5 @@ until their perf/CI cadence lands.
   source of truth.
 - No evidence package or FrankenScript study driver is emitted yet;
   the lab notebook is an in-crate deterministic artifact body.
-- No closed-bead proof is claimed while `mye.5` is still in progress
-  and the smoke goldens remain placeholders.
+- No closed-bead proof is claimed for the ignored mid/full fidelity
+  lanes until their perf/CI cadence and envelopes land.

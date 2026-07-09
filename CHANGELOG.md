@@ -3,8 +3,8 @@
 This is a synthesized, agent-facing changelog for FrankenSim.
 
 Scope window: project inception on 2026-07-05 through
-[`main@319cb64`](https://github.com/Dicklesworthstone/frankensim/commit/319cb64f052d76e15882ee53ace41092881c7fa8)
-on 2026-07-08.
+[`main@438128d`](https://github.com/Dicklesworthstone/frankensim/commit/438128d988082f2183f406d75883b766fd6b7324)
+on 2026-07-09.
 
 This document was rebuilt from git history, tag/release metadata, the checked-in
 Beads tracker, and the current README/contract surface. It is organized by
@@ -13,10 +13,14 @@ landed capabilities rather than raw diff order.
 ## Version Timeline
 
 There are no git tags and no GitHub Releases as of
-[`main@319cb64`](https://github.com/Dicklesworthstone/frankensim/commit/319cb64f052d76e15882ee53ace41092881c7fa8).
+[`main@438128d`](https://github.com/Dicklesworthstone/frankensim/commit/438128d988082f2183f406d75883b766fd6b7324).
 
 | Version | Kind | Date | Summary |
 |---------|------|------|---------|
+| [`main@438128d`](https://github.com/Dicklesworthstone/frankensim/commit/438128d988082f2183f406d75883b766fd6b7324) | Public mainline snapshot | 2026-07-09 | 688 commits, adding hull-facet encroachment protection to mesh refinement and tightening the topology-optimization marquee evidence fixtures. |
+| [`main@1fe4ef5`](https://github.com/Dicklesworthstone/frankensim/commit/1fe4ef5c21737a92aa58dd02f901052de5b0a88b) | Public mainline snapshot | 2026-07-09 | 686 commits, adding the flagship replay-suite scaffold, topopt marquee evidence hardening, exact certificate payload refinements, and tracker state for the fs-mesh v2 follow-up. |
+| [`main@9dc7417`](https://github.com/Dicklesworthstone/frankensim/commit/9dc7417090e62e7ab2756719034e2ab0d3b32875) | Mainline checkpoint | 2026-07-09 | 684 commits, registering the staged flagship replay suite and its contract. |
+| [`main@d5873bf`](https://github.com/Dicklesworthstone/frankensim/commit/d5873bfd82a3c2dbe359c11aef4947a5def8cdba) | Public mainline snapshot | 2026-07-09 | 681 commits, adding the ornithoid flagship contract, CutFEM-octree topology lane, sparse-GP and MLMC decision loops, browser campaign tiers, and proof-hardening fixes. |
 | [`main@319cb64`](https://github.com/Dicklesworthstone/frankensim/commit/319cb64f052d76e15882ee53ace41092881c7fa8) | Public mainline snapshot | 2026-07-08 | 633 commits, extending the campaign suite, inverse-trig/AD surface, and p-MG smoother evidence. |
 | [`main@fb08842`](https://github.com/Dicklesworthstone/frankensim/commit/fb088428ae810ee3ddd893712588c1e64f6cc0c4) | Prior changelog checkpoint | 2026-07-08 | 622 commits, including the proof-robust, schedule, and flutter end-to-end campaign capstones. |
 | [`origin/main@941a67e`](https://github.com/Dicklesworthstone/frankensim/commit/941a67e3cfd3a2bbc1fc3209bf0a044bc073188f) | Earlier public checkpoint | 2026-07-08 | 621 commits, covering the large 2026-07-08 implementation wave through value-of-information query planning. |
@@ -612,12 +616,103 @@ multigrid smoothing.
 - [`7575cdd`](https://github.com/Dicklesworthstone/frankensim/commit/7575cdd6bb0728794ef0fce4eae3512f9667b93d) - ship `fs-ad` adjoint integrations.
 - [`319cb64`](https://github.com/Dicklesworthstone/frankensim/commit/319cb64f052d76e15882ee53ace41092881c7fa8) - add vertex-patch Schwarz smoothing to p-MG.
 
+## 15. 2026-07-09 Mainline Expansion: Flagships, Decision Loops, And Proof Hygiene
+
+The window from
+[`319cb64`](https://github.com/Dicklesworthstone/frankensim/commit/319cb64f052d76e15882ee53ace41092881c7fa8)
+through
+[`438128d`](https://github.com/Dicklesworthstone/frankensim/commit/438128d988082f2183f406d75883b766fd6b7324)
+is another implementation-heavy mainline slice, not a formal release. It adds
+55 commits across 108 files, with 15,482 insertions and 323 deletions. The work
+broadens flagship coverage, strengthens decision-making loops for optimization
+and uncertainty, and fixes campaign checks that had been too correlated or too
+underspecified to support the claims around them.
+
+### Delivered capability
+
+- `fs-ornith` lands as a smoke-tier ornithoid aircraft flagship with parameter
+  decoding, BEM/VPM screening, e-raced candidate elimination, LBM refinement,
+  SOS-style trim certificates, conformal lift/drag bands, Pareto-atlas rows,
+  replay evidence, and a checked-in contract.
+- `fs-topopt` gains a feature-gated `cutfem-marquee` lane for topology
+  optimization over density-as-SDF fields, DWR-guided octree refinement,
+  zero-remesh iteration logs, and topology/thickness witnesses.
+- `fs-solver` adds Stokes-class saddle-point machinery: Schur approximations,
+  block preconditioners, and PMINRES coverage over the FEEC mixed-space surface.
+- `fs-dfo` expands from many-objective hypervolume accounting into NSGA-III,
+  MOEA/D, contribution archiving, and world-fork steering. `fs-uq` adds chance
+  constraints, seismic uncertainty helpers, anytime stopping, and adaptive MLMC
+  admission checks.
+- `fs-bo` adds inducing-point sparse Gaussian-process support and then hardens
+  the sparse/exact comparison so approximate covariance loss is visible instead
+  of smoothed over.
+- `fs-ascent` adds interior-point and SQP constrained polish engines, a
+  FrankenScipy oracle lane, Rosenbrock basin checks, and a Problem-IR study
+  runner.
+- `fs-render` adds edge-aware differentiable rendering and an inverse-rendering
+  objective surface, while `fs-wasm` exposes deeper upper-stack kernels and a
+  certified campaign browser tier.
+- `fs-gen` lands as a proposal-only generation crate with compiler-enforced
+  epistemic boundaries, making generated candidates explicit about what they
+  are not allowed to certify.
+- `fs-flagship-e2e` lands as an in-progress L6 replay-suite scaffold for the
+  flagship family: smoke/mid/full stage wiring, metric-only content hashes,
+  cross-flagship LBM and e-race audits, structured failure drills, forensic
+  JSON rows, and a contract that keeps unfrozen smoke goldens explicit.
+- `fs-mesh` hardens full-Ruppert refinement by checking candidate Steiner
+  points against hull-facet diametral balls before insertion, while `fs-topopt`
+  tightens the marquee tests around faster deterministic topology, benchmark,
+  and thickness witnesses.
+- End-to-end proof hygiene improves across `fs-flutter-e2e`,
+  `fs-neuroshape-e2e`, `fs-flowcert-e2e`, `fs-truss-e2e`, and
+  `fs-metamat-e2e`, including independent flutter stability checks, closed
+  neural-shape boundary frames, steady-state credibility maps, corrected
+  duality-gap enclosure direction, and PSD certificate symmetrization.
+- HELM and flywheel surfaces gain a budget allocator, moonshot allocation
+  tests, self-knowledge e2e battery, epistemic-engine acceptance gate, and
+  Phase 3 horizon gate.
+
+### Closed and active workstreams
+
+- [`frankensim-epic-flagships-mye.2`](https://github.com/Dicklesworthstone/frankensim/blob/d5873bfd82a3c2dbe359c11aef4947a5def8cdba/.beads/issues.jsonl) - ornithoid multi-inlet aircraft flagship.
+- [`frankensim-b7d0`](https://github.com/Dicklesworthstone/frankensim/blob/d5873bfd82a3c2dbe359c11aef4947a5def8cdba/.beads/issues.jsonl) - active CutFEM-octree topology-optimization marquee lane.
+- [`frankensim-avuw`](https://github.com/Dicklesworthstone/frankensim/blob/d5873bfd82a3c2dbe359c11aef4947a5def8cdba/.beads/issues.jsonl) - Stokes-class saddle-point block preconditioners.
+- [`frankensim-vcia`](https://github.com/Dicklesworthstone/frankensim/blob/d5873bfd82a3c2dbe359c11aef4947a5def8cdba/.beads/issues.jsonl) - many-objective, steering, and Wasserstein/DRO decision surfaces.
+- [`frankensim-ijil`](https://github.com/Dicklesworthstone/frankensim/blob/d5873bfd82a3c2dbe359c11aef4947a5def8cdba/.beads/issues.jsonl) - constrained polish engines, FrankenScipy oracle, and Problem-IR runner.
+- [`frankensim-epic-helm-gp3.9`](https://github.com/Dicklesworthstone/frankensim/blob/d5873bfd82a3c2dbe359c11aef4947a5def8cdba/.beads/issues.jsonl) - `fs-plan` allocation and replanning machinery.
+- [`frankensim-epic-lumen-qfx.5`](https://github.com/Dicklesworthstone/frankensim/blob/d5873bfd82a3c2dbe359c11aef4947a5def8cdba/.beads/issues.jsonl) - differentiable rendering objective lane.
+- [`frankensim-epic-flagships-mye.5`](https://github.com/Dicklesworthstone/frankensim/blob/9dc7417090e62e7ab2756719034e2ab0d3b32875/.beads/issues.jsonl) - active flagship e2e suite scaffold.
+- [`frankensim-uee3`](https://github.com/Dicklesworthstone/frankensim/blob/1fe4ef5c21737a92aa58dd02f901052de5b0a88b/.beads/issues.jsonl) - active fs-mesh v2 follow-up.
+
+### Representative commits
+
+- [`7624964`](https://github.com/Dicklesworthstone/frankensim/commit/7624964781185c5d82879ba0e63aba9da304021d) - add the self-knowledge e2e battery.
+- [`3dcbfaa`](https://github.com/Dicklesworthstone/frankensim/commit/3dcbfaaf3d3e90496719bb6a879500ca825e61b7) - add Stokes saddle-point block preconditioners and PMINRES.
+- [`8c20bab`](https://github.com/Dicklesworthstone/frankensim/commit/8c20bab6da5ef694d4243ded896ac540d87502c8) - add the NSGA-III reference-direction lane.
+- [`61e9348`](https://github.com/Dicklesworthstone/frankensim/commit/61e93489985b6cdbcea768535e6a12d12885f471) - add edge-aware differentiable rendering.
+- [`fe8a2c2`](https://github.com/Dicklesworthstone/frankensim/commit/fe8a2c2061377e47293a3c638eb152337a97adcd) - add the `fs-plan` budget allocator.
+- [`6d074b8`](https://github.com/Dicklesworthstone/frankensim/commit/6d074b8c92c396ac320815074640c63410f6df95) - add seismic uncertainty, anytime stopping, and adaptive MLMC.
+- [`e2b3dff`](https://github.com/Dicklesworthstone/frankensim/commit/e2b3dffb1b4b58b7378e337e3134f4e4d95fb7ac) - add the sparse Gaussian-process lane in `fs-bo`.
+- [`73c1c6b`](https://github.com/Dicklesworthstone/frankensim/commit/73c1c6b46f0f36673cc2bbda70164c0b11eee23c) - add `fs-gen` with proposal-only epistemics.
+- [`51adc98`](https://github.com/Dicklesworthstone/frankensim/commit/51adc987414491b75ad4543fae7925e83804471a) - add steering and chance-constraint integration.
+- [`2f29772`](https://github.com/Dicklesworthstone/frankensim/commit/2f29772b8536171929f2b4bae4ece8aa849caa3c) - add interior-point, SQP, oracle, and IR runner machinery.
+- [`2199248`](https://github.com/Dicklesworthstone/frankensim/commit/219924842e0e0ebc71ec975b7d17bddf193db403) - expose the certified campaign tier in `fs-wasm`.
+- [`ffcb4a9`](https://github.com/Dicklesworthstone/frankensim/commit/ffcb4a91e047b5f660d28083194da6daeb47b190) - add the smoke-tier `fs-ornith` crate.
+- [`8c06c93`](https://github.com/Dicklesworthstone/frankensim/commit/8c06c93e7404b7bbd528eebc14d4af43914a8906) - add the feature-gated CutFEM-octree topology lane.
+- [`d5873bf`](https://github.com/Dicklesworthstone/frankensim/commit/d5873bfd82a3c2dbe359c11aef4947a5def8cdba) - add the `fs-ornith` contract and close the ornithoid flagship bead.
+- [`fbba704`](https://github.com/Dicklesworthstone/frankensim/commit/fbba7049d3f92714185f26ed1473503b78903281) - refine flutter and neuroshape certificate payloads.
+- [`1092e94`](https://github.com/Dicklesworthstone/frankensim/commit/1092e946be32b211bf20f4748be2f44683feaeaf) - harden CutFEM-octree marquee boundary evidence.
+- [`9dc7417`](https://github.com/Dicklesworthstone/frankensim/commit/9dc7417090e62e7ab2756719034e2ab0d3b32875) - add the staged flagship e2e replay-suite scaffold.
+- [`1337058`](https://github.com/Dicklesworthstone/frankensim/commit/1337058ac6bc4b8f1dd9b7cdeb85db2fd0713bfd) - tighten the flagship replay-suite battery lint posture.
+- [`1fe4ef5`](https://github.com/Dicklesworthstone/frankensim/commit/1fe4ef5c21737a92aa58dd02f901052de5b0a88b) - mark the fs-mesh v2 follow-up in progress.
+- [`438128d`](https://github.com/Dicklesworthstone/frankensim/commit/438128d988082f2183f406d75883b766fd6b7324) - protect hull refinement and tighten marquee witnesses.
+
 ## Current Non-Release Status
 
 - No package or crate release has been tagged yet.
-- The canonical project state is `main`, not a versioned artifact; at research
-  time `HEAD` and `origin/main` both resolved to
-  [`319cb64`](https://github.com/Dicklesworthstone/frankensim/commit/319cb64f052d76e15882ee53ace41092881c7fa8).
+- The canonical project state is `main`, not a versioned artifact; the latest
+  implementation and tracker snapshot covered here is
+  [`438128d`](https://github.com/Dicklesworthstone/frankensim/commit/438128d988082f2183f406d75883b766fd6b7324).
 - The repository is actively changing; use crate `CONTRACT.md` files and Beads
   close reasons for detailed no-claim boundaries.
 - The README describes the implemented workspace; the long-form plan remains
