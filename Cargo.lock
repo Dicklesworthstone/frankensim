@@ -1104,6 +1104,7 @@ name = "fs-flywheel-e2e"
 version = "0.0.1"
 dependencies = [
  "fs-adjoint",
+ "fs-asbuilt",
  "fs-benchmark",
  "fs-checker",
  "fs-evidence",
@@ -1116,6 +1117,9 @@ dependencies = [
  "fs-recompute",
  "fs-robust",
  "fs-spececo",
+ "fs-surrogate",
+ "fs-symmetry",
+ "fs-time",
  "fs-verify",
 ]
 
@@ -1461,10 +1465,12 @@ name = "fs-render"
 version = "0.0.1"
 dependencies = [
  "asupersync 0.3.5",
+ "fs-ad",
  "fs-alloc",
  "fs-exec",
  "fs-geom",
  "fs-lbm",
+ "fs-math",
  "fs-rand",
  "fs-rep-frep",
  "fs-rep-nurbs",

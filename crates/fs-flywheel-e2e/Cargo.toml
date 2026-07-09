@@ -22,7 +22,11 @@ fs-verify = { path = "../fs-verify", features = ["certified-speculation"] }
 
 [dev-dependencies]
 fs-adjoint = { path = "../fs-adjoint", features = ["explanation-objects"] }
+fs-asbuilt = { path = "../fs-asbuilt" }
 fs-checker = { path = "../fs-checker" }
+fs-surrogate = { path = "../fs-surrogate", features = ["abstraction-ladder"] }
+fs-symmetry = { path = "../fs-symmetry" }
+fs-time = { path = "../fs-time", features = ["time-slabs"] }
 fs-ir = { path = "../fs-ir", features = ["ladder-planner"] }
 fs-plan = { path = "../fs-plan", features = ["voi-queries"] }
 fs-package = { path = "../fs-package" }
