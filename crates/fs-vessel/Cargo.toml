@@ -1,0 +1,21 @@
+[package]
+name = "fs-vessel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Flagship 3 (plan 15.3): the laminar-pour vessel - Chebyshev vessel-of-revolution profiles, Orr-Sommerfeld thin-film stability objectives along the pour path, free-surface LBM validation under tilt schedules with contact-line bracketing, CVaR robustification over the fluid band with e-raced candidates, and the pour rendered from the simulation's own bytes. Smoke tier."
+
+[package.metadata.frankensim]
+layer = "L6"
+
+[dependencies]
+fs-cheb = { path = "../fs-cheb" }
+fs-exec = { path = "../fs-exec" }
+fs-lbm = { path = "../fs-lbm" }
+fs-race = { path = "../fs-race" }
+fs-render = { path = "../fs-render", features = ["volumes"] }
+
+[lints]
+workspace = true

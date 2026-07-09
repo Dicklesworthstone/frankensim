@@ -1127,6 +1127,16 @@ name = "fs-govern"
 version = "0.0.1"
 
 [[package]]
+name = "fs-grammar-e2e"
+version = "0.0.1"
+dependencies = [
+ "fs-archive",
+ "fs-evidence",
+ "fs-fab",
+ "fs-shapeprog",
+]
+
+[[package]]
 name = "fs-iface"
 version = "0.0.1"
 
@@ -1259,8 +1269,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-neuroshape-e2e"
+version = "0.0.1"
+dependencies = [
+ "fs-evidence",
+ "fs-rep-neural",
+ "fs-viz",
+]
+
+[[package]]
 name = "fs-obs"
 version = "0.0.1"
+
+[[package]]
+name = "fs-oed-e2e"
+version = "0.0.1"
+dependencies = [
+ "fs-assimilate",
+ "fs-evidence",
+ "fs-toleralloc",
+ "fs-voi",
+]
 
 [[package]]
 name = "fs-opdsl"
