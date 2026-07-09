@@ -1203,6 +1203,41 @@ fn tmesh_014_segment_recovery() {
     });
 }
 
+#[test]
+fn tmesh_015_facet_recovery_accepts_existing_face_at_zero_depth() {
+    with_cx(|cx| {
+        let pts = vec![
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+            Point3::new(0.0, 0.0, 1.0),
+        ];
+        let mut t = delaunay(&pts, cx).expect("delaunay");
+        let facets = vec![vec![0, 1, 2]];
+        let (stats, table) = fs_mesh::recover_facets(
+            &mut t,
+            &facets,
+            RecoveryOptions {
+                max_depth: 0,
+                max_steiner: 0,
+            },
+            cx,
+        )
+        .expect("facet recovery");
+        verdict(
+            "tmesh-015-zero-depth-existing-face",
+            stats.recovered == 1
+                && stats.unrecovered == 0
+                && stats.steiner_inserted == 0
+                && table.rows.len() == 1,
+            &format!(
+                "already-present face recovers without bisection: {}",
+                stats.to_json()
+            ),
+        );
+    });
+}
+
 /// tmesh-015: conforming-Delaunay INTERIOR FACET recovery (uee3
 /// successor slice). A box with an axis-aligned interior diaphragm
 /// plane and clouds on BOTH sides: the diaphragm is not a union of

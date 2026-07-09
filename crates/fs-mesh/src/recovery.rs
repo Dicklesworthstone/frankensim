@@ -331,11 +331,6 @@ pub fn recover_facets(
         let mut failed = false;
         let mut round = 0u32;
         loop {
-            round += 1;
-            if round > opts.max_depth {
-                failed = true;
-                break;
-            }
             let faces = face_set(tetra);
             let missing: Vec<usize> = tris
                 .iter()
@@ -350,10 +345,15 @@ pub fn recover_facets(
             if missing.is_empty() {
                 break;
             }
+            if round >= opts.max_depth {
+                failed = true;
+                break;
+            }
             if stats.steiner_inserted >= u64::from(opts.max_steiner) {
                 failed = true;
                 break;
             }
+            round += 1;
             // Batch: the LONGEST edge of EVERY missing triangle
             // (deterministic: BTreeSet of sorted pairs), split at
             // midpoints this round. One-split-per-round was MEASURED
