@@ -19,8 +19,10 @@ pub mod bsr;
 pub mod ops;
 pub mod precond;
 pub mod sell;
+pub mod perf;
 
 pub use bsr::Bsr;
+pub use perf::CsrCompact;
 pub use sell::Sell;
 
 /// Crate version, re-exported for provenance stamping (the Five Explicits'
@@ -35,11 +37,11 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// allowed and ACCUMULATE (the FEM element-assembly contract).
 #[derive(Debug, Clone, Default)]
 pub struct Coo {
-    nrows: usize,
-    ncols: usize,
-    rows: Vec<usize>,
-    cols: Vec<usize>,
-    vals: Vec<f64>,
+    pub(crate) nrows: usize,
+    pub(crate) ncols: usize,
+    pub(crate) rows: Vec<usize>,
+    pub(crate) cols: Vec<usize>,
+    pub(crate) vals: Vec<f64>,
 }
 
 impl Coo {

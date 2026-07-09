@@ -1720,6 +1720,9 @@ version = "0.0.1"
 [[package]]
 name = "fs-sparse"
 version = "0.0.1"
+dependencies = [
+ "fs-substrate",
+]
 
 [[package]]
 name = "fs-spececo"

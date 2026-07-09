@@ -13,6 +13,8 @@ layer = "L1"
 [dependencies]
 
 [dev-dependencies]
+# Roofline lane only (dev-deps are layer-exempt): STREAM triad reference.
+fs-substrate = { path = "../fs-substrate" }
 
 [lints]
 workspace = true

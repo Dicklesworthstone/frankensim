@@ -141,3 +141,61 @@ fn cross_format_battery_and_golden_hash() {
          with semantic justification (golden-evidence policy)"
     );
 }
+
+/// wsbf segment 1: the compact/sharded/parallel-assembly kernels are
+/// BITWISE equal to their serial wide twins at every thread count —
+/// the perf program never trades the determinism contract.
+#[test]
+fn wsbf_bitwise_twins() {
+    // Adversarial-ish fixture: ragged rows, duplicates, empty rows.
+    let (nrows, ncols) = (257usize, 199usize);
+    let mut coo = fs_sparse::Coo::new(nrows, ncols);
+    let mut seed = 0x5EED_2026_u64;
+    let mut lcg = move || {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        seed
+    };
+    for _ in 0..6000 {
+        let r = (lcg() % nrows as u64) as usize;
+        let c = (lcg() % ncols as u64) as usize;
+        let v = ((lcg() >> 11) as f64) / (1u64 << 53) as f64 - 0.5;
+        coo.push(r, c, v);
+    }
+    let serial = coo.assemble();
+    // (3) parallel assembly bitwise across thread counts.
+    for t in [1usize, 2, 4, 8] {
+        let par = coo.assemble_parallel(t);
+        assert_eq!(serial, par, "assemble_parallel({t}) != serial");
+    }
+    // (1a) compact CSR spmv bitwise vs wide.
+    let x: Vec<f64> = (0..ncols).map(|i| 0.25 + (i % 17) as f64).collect();
+    let mut y_wide = vec![0.0f64; nrows];
+    serial.spmv(&x, &mut y_wide);
+    let compact = fs_sparse::CsrCompact::from_csr(&serial);
+    let mut y_cmp = vec![0.0f64; nrows];
+    compact.spmv(&x, &mut y_cmp);
+    assert!(
+        y_wide
+            .iter()
+            .zip(&y_cmp)
+            .all(|(a, b)| a.to_bits() == b.to_bits()),
+        "compact spmv != wide spmv bitwise"
+    );
+    // (1b + 2) sharded spmv bitwise at every thread count.
+    for t in [1usize, 2, 3, 4, 8, 16] {
+        let mut y_sh = vec![0.0f64; nrows];
+        compact.spmv_sharded(&x, &mut y_sh, t);
+        assert!(
+            y_wide
+                .iter()
+                .zip(&y_sh)
+                .all(|(a, b)| a.to_bits() == b.to_bits()),
+            "sharded spmv (t={t}) != serial bitwise"
+        );
+    }
+    println!(
+        "{{\"suite\":\"fs-sparse\",\"case\":\"wsbf-bitwise-twins\",\"verdict\":\"pass\",\"detail\":\"parallel assembly (t in 1..8) and compact+sharded spmv (t in 1..16) all bitwise == serial wide kernels\"}}"
+    );
+}
