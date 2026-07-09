@@ -11,7 +11,8 @@
 #![allow(unsafe_code)] // registered capsule — see SAFETY.md beside this file
 
 use core::arch::aarch64::{
-    vaddq_f64, vaddvq_f64, vdupq_n_f64, vfmaq_f64, vld1q_f64, vmulq_f64, vst1q_f64,
+    float64x2_t, vaddq_f64, vaddvq_f64, vdupq_n_f64, vfmaq_f64, vfmaq_laneq_f64, vld1q_f64,
+    vmulq_f64, vst1q_f64,
 };
 
 const LANES: usize = 2; // float64x2_t
@@ -114,6 +115,60 @@ pub fn dot(x: &[f64], y: &[f64]) -> f64 {
         vaddvq_f64(vaddq_f64(acc0, acc1))
     };
     vec_part + crate::scalar::dot(xt, yt)
+}
+
+/// The 8×4 f64 GEMM register microkernel: 16 `float64x2` accumulators
+/// (8 rows × 2 column pairs) resident across the whole k loop, k
+/// ascending, `vfmaq_laneq` broadcasting each packed A lane. Per
+/// element this is exactly `acc[r][s] = fma(a[r], b[s], acc[r][s])` in
+/// the scalar twin's order — BITWISE-identical, so fs-la's GEMM golden
+/// is tier-invariant.
+pub fn mk8x4_f64(a_panel: &[f64], b_panel: &[f64], kc: usize, acc: &mut [[f64; 4]; 8]) {
+    assert!(
+        a_panel.len() >= kc * 8 && b_panel.len() >= kc * 4,
+        "mk8x4 panel length mismatch (programmer error)"
+    );
+    // SAFETY: every vld1q/vst1q reads or writes exactly 2 f64 at offsets
+    // kept in bounds by the assert above (a: kk·8+6+2 ≤ kc·8; b: kk·4+2+2
+    // ≤ kc·4) and by `acc`'s [[f64; 4]; 8] type. f64 has no invalid bit
+    // patterns; vld1q/vst1q tolerate unaligned addresses.
+    unsafe {
+        let ap = a_panel.as_ptr();
+        let bp = b_panel.as_ptr();
+        let mut va: [[float64x2_t; 2]; 8] = [[vdupq_n_f64(0.0); 2]; 8];
+        for (r, v) in va.iter_mut().enumerate() {
+            v[0] = vld1q_f64(acc[r].as_ptr());
+            v[1] = vld1q_f64(acc[r].as_ptr().add(2));
+        }
+        for kk in 0..kc {
+            let b0 = vld1q_f64(bp.add(kk * 4));
+            let b1 = vld1q_f64(bp.add(kk * 4 + 2));
+            let a01 = vld1q_f64(ap.add(kk * 8));
+            let a23 = vld1q_f64(ap.add(kk * 8 + 2));
+            let a45 = vld1q_f64(ap.add(kk * 8 + 4));
+            let a67 = vld1q_f64(ap.add(kk * 8 + 6));
+            va[0][0] = vfmaq_laneq_f64::<0>(va[0][0], b0, a01);
+            va[0][1] = vfmaq_laneq_f64::<0>(va[0][1], b1, a01);
+            va[1][0] = vfmaq_laneq_f64::<1>(va[1][0], b0, a01);
+            va[1][1] = vfmaq_laneq_f64::<1>(va[1][1], b1, a01);
+            va[2][0] = vfmaq_laneq_f64::<0>(va[2][0], b0, a23);
+            va[2][1] = vfmaq_laneq_f64::<0>(va[2][1], b1, a23);
+            va[3][0] = vfmaq_laneq_f64::<1>(va[3][0], b0, a23);
+            va[3][1] = vfmaq_laneq_f64::<1>(va[3][1], b1, a23);
+            va[4][0] = vfmaq_laneq_f64::<0>(va[4][0], b0, a45);
+            va[4][1] = vfmaq_laneq_f64::<0>(va[4][1], b1, a45);
+            va[5][0] = vfmaq_laneq_f64::<1>(va[5][0], b0, a45);
+            va[5][1] = vfmaq_laneq_f64::<1>(va[5][1], b1, a45);
+            va[6][0] = vfmaq_laneq_f64::<0>(va[6][0], b0, a67);
+            va[6][1] = vfmaq_laneq_f64::<0>(va[6][1], b1, a67);
+            va[7][0] = vfmaq_laneq_f64::<1>(va[7][0], b0, a67);
+            va[7][1] = vfmaq_laneq_f64::<1>(va[7][1], b1, a67);
+        }
+        for (r, v) in va.iter().enumerate() {
+            vst1q_f64(acc[r].as_mut_ptr(), v[0]);
+            vst1q_f64(acc[r].as_mut_ptr().add(2), v[1]);
+        }
+    }
 }
 
 /// Σ x[i]; same fixed two-accumulator shape as [`dot`].

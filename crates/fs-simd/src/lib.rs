@@ -35,6 +35,10 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Ternary elementwise kernel signature (a, b, c, out).
 pub type TernaryOp = fn(&[f64], &[f64], &[f64], &mut [f64]);
 
+/// GEMM 8×4 register-microkernel signature
+/// (a_panel, b_panel, kc, accumulators).
+pub type Mk8x4 = fn(&[f64], &[f64], usize, &mut [[f64; 4]; 8]);
+
 /// The resolved-once function table (plan §5.1 consequence 5).
 pub struct Ops {
     /// Tier the table was built for (ledger/tune-table key material).
@@ -51,6 +55,11 @@ pub struct Ops {
     pub dot: fn(&[f64], &[f64]) -> f64,
     /// Σ x[i] (fixed per-tier shape).
     pub sum: fn(&[f64]) -> f64,
+    /// The 8×4 f64 GEMM register microkernel over packed panels
+    /// (k-fastest layout): acc[r][s] += Σ_k a[k·8+r]·b[k·4+s], k
+    /// ascending, fused — BITWISE across tiers (fs-la's GEMM bit
+    /// contract).
+    pub mk8x4_f64: Mk8x4,
 }
 
 static OPS: OnceLock<Ops> = OnceLock::new();
@@ -68,6 +77,7 @@ const SCALAR_OPS: Ops = Ops {
     fma3: scalar::fma3,
     dot: scalar::dot,
     sum: scalar::sum,
+    mk8x4_f64: scalar::mk8x4_f64,
 };
 
 fn build_table() -> Ops {
@@ -87,6 +97,7 @@ fn build_table() -> Ops {
                 fma3: neon::fma3,
                 dot: neon::dot,
                 sum: neon::sum,
+                mk8x4_f64: neon::mk8x4_f64,
             },
             // x86 capsule v1 covers axpy/dot/sum (the <300-line capsule cap
             // is a feature: scale/mul_elem/fma3 arrive with their consumer,
@@ -100,6 +111,9 @@ fn build_table() -> Ops {
                 fma3: scalar::fma3,
                 dot: x86::dot,
                 sum: x86::sum,
+                // The AVX GEMM microkernel arrives with x86 perf-lane
+                // hardware (xdgf successor scope); the twin is correct.
+                mk8x4_f64: scalar::mk8x4_f64,
             },
             _ => SCALAR_OPS,
         }
@@ -211,6 +225,37 @@ mod tests {
                 let s_refv = scalar::sum(&x);
                 let mag: f64 = x.iter().map(|v| v.abs()).sum::<f64>().max(1e-300);
                 assert!((s1 - s_refv).abs() <= 1e-12 * mag);
+            }
+        }
+        // mk8x4: bitwise vs twin over packed panels (special values
+        // included via gen_vals), every kc in 0..17 plus a KC-scale one,
+        // with NONZERO starting accumulators (the KC-chunk fold path).
+        for kc in (0..17).chain([256]) {
+            for seed in [3u64, 0xBEEF] {
+                let a = gen_vals(kc * 8, seed);
+                let b = gen_vals(kc * 4, seed ^ 0x11);
+                let start = gen_vals(32, seed ^ 0x2F);
+                let mut acc_tier = [[0.0f64; 4]; 8];
+                let mut acc_ref = [[0.0f64; 4]; 8];
+                for r in 0..8 {
+                    for s in 0..4 {
+                        acc_tier[r][s] = start[r * 4 + s];
+                        acc_ref[r][s] = start[r * 4 + s];
+                    }
+                }
+                (t.mk8x4_f64)(&a, &b, kc, &mut acc_tier);
+                scalar::mk8x4_f64(&a, &b, kc, &mut acc_ref);
+                for r in 0..8 {
+                    for s in 0..4 {
+                        assert_eq!(
+                            acc_tier[r][s].to_bits(),
+                            acc_ref[r][s].to_bits(),
+                            "mk8x4 diverged from twin at kc {kc} seed {seed} r {r} s {s} \
+                             (tier {:?})",
+                            t.tier
+                        );
+                    }
+                }
             }
         }
         println!(

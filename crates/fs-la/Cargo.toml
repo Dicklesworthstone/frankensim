@@ -12,10 +12,12 @@ layer = "L1"
 
 [dependencies]
 fs-math = { path = "../fs-math" }
+fs-simd = { path = "../fs-simd" }
 fs-rand = { path = "../fs-rand" }
 fs-soa = { path = "../fs-soa" }
 
 [dev-dependencies]
+fs-roofline = { path = "../fs-roofline" }
 
 [lints]
 workspace = true

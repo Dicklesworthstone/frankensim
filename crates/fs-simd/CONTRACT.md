@@ -8,7 +8,11 @@ Layer: L0.
 ## Public types and semantics
 - `ops() -> &'static Ops` — function table resolved EXACTLY once from
   fs-substrate's tier; fields: axpy, scale, mul_elem, fma3 (all fused),
-  dot, sum (fixed per-tier reduction shapes); `tier` for ledger keys.
+  dot, sum (fixed per-tier reduction shapes), mk8x4_f64 (the 8×4 f64
+  GEMM register microkernel over packed k-fastest panels — BITWISE
+  across tiers by the k-ascending fused-order contract; NEON capsule
+  on aarch64, scalar twin elsewhere until the AVX capsule lands —
+  bead xdgf); `tier` for ledger keys.
 - `scalar::*` — the semantic definition of every primitive (Tier 0).
 - `neon::*` / `x86::*` — registered unsafe capsules (SAFETY.md beside each);
   all public capsule functions are SAFE (NEON is architecturally guaranteed;
@@ -29,7 +33,7 @@ Layer: L0.
   autotuner sweep. NO cross-ISA determinism-mode claim (the bead's
   explicit non-goal) until the G5 report characterizes streaming-mode
   accumulation across SVL classes.
-- `is_cache_line_aligned`, `TernaryOp`.
+- `is_cache_line_aligned`, `TernaryOp`, `Mk8x4`.
 
 ## Invariants
 - Elementwise ops match the scalar twin BITWISE on every tier (FMA policy:

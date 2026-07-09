@@ -55,7 +55,12 @@ fs-ledger). Runtime deps: `std` + those three workspace crates.
 1. Axes are measured on the machine that runs the kernels, in the same
    process; the compute axis is compiler-achievable FMA throughput
    (conservative where autovectorization misses — the honest direction for
-   a denominator).
+   a denominator). Probe calibration (bead xdgf): timed samples span
+   ≥ 5 ms (single microsecond-scale passes sat inside the frequency-
+   ramp/scheduler noise floor and wandered tens of percent), and the
+   accumulator lane count is REGISTER-FILE-sized per arch (48 on
+   aarch64, 64 on x86) — the former 64-lane constant spilled on NEON
+   and read the axis ~25% low, which inflated attainments past 1.0.
 2. `attainment = measured_rate / min(bandwidth_limit, compute_limit)` with
    limits derived from the spec's intensity model (meta-tested against
    hand calculations).

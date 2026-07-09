@@ -66,8 +66,16 @@ impl MachineAxes {
     }
 }
 
-/// Independent FMA accumulator lanes per chain step (wide enough to fill
-/// 512-bit units with room for dual issue).
+/// Independent FMA accumulator lanes per chain step — sized to the
+/// architecture's REGISTER FILE, not just its issue width: 64 f64 fill
+/// 8 zmm (AVX-512) or 16 ymm (AVX2) exactly, but need 32 NEON vregs —
+/// all of them — so on aarch64 the accumulators spilled every step and
+/// the "peak" axis read ~25% low (and unstably). 48 lanes (24 vregs)
+/// sit on the measured M4 plateau (32/48 lanes within 0.2%; 64 lanes
+/// 26% lower — ledgered in bead xdgf).
+#[cfg(target_arch = "aarch64")]
+const LANES: usize = 48;
+#[cfg(not(target_arch = "aarch64"))]
 const LANES: usize = 64;
 /// Chain steps per timed pass.
 const STEPS: usize = 4096;
@@ -84,19 +92,39 @@ fn fma_pass(acc: &mut [f64; LANES], m: f64, a: f64) {
 }
 
 /// Best-of-passes single-thread FMA throughput in GFLOP/s.
+///
+/// Each timed sample REPEATS the chain until it spans ≥ 5 ms of wall
+/// clock: a single 4096-step pass is only a few microseconds, which is
+/// inside the frequency-ramp/scheduler-noise floor on modern cores and
+/// made the axis wander tens of percent between probes — an unstable
+/// denominator that can push honest kernels past attainment 1.0.
 #[must_use]
 pub fn fma_gflops_single() -> f64 {
     let mut acc = [1.0f64; LANES];
     // Multiplier chosen so accumulators orbit without overflow/denormal.
     let (m, a) = (0.999_999_9, 1.0e-9);
-    let flops = (2 * LANES * STEPS) as f64;
+    let flops_per_pass = (2 * LANES * STEPS) as f64;
+    // Calibrate the repeat count to reach the 5 ms sample floor.
+    let mut reps = 1usize;
+    loop {
+        let start = std::time::Instant::now();
+        for _ in 0..reps {
+            fma_pass(&mut acc, m, a);
+        }
+        if start.elapsed().as_secs_f64() >= 5e-3 || reps >= 1 << 20 {
+            break;
+        }
+        reps *= 2;
+    }
     let mut best = 0.0f64;
     for _ in 0..PASSES {
         let start = std::time::Instant::now();
-        fma_pass(&mut acc, m, a);
+        for _ in 0..reps {
+            fma_pass(&mut acc, m, a);
+        }
         let dt = start.elapsed().as_secs_f64();
         if dt > 0.0 {
-            best = best.max(flops / dt / 1e9);
+            best = best.max(flops_per_pass * reps as f64 / dt / 1e9);
         }
     }
     std::hint::black_box(acc[LANES / 2]);

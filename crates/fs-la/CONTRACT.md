@@ -196,12 +196,31 @@ inv·A = I; eigh3 closed form vs per-matrix Jacobi as sorted sets plus
 trace identity and eigenvector residuals, degenerate (isotropic and
 diagonal) fixtures; 128-byte plane alignment; cross-ISA golden hash.
 
+## Perf-lane evidence (bead xdgf, measured)
+- Release, macos-aarch64 (Apple M4 Pro, Mac16,11), single thread,
+  fs-roofline `MachineAxes::probe()` peak 51.7 GFLOP/s (register-file-
+  sized probe): gemm_f64 through the fs-simd NEON 8×4 capsule
+  microkernel reaches 43.9–45.1 GFLOP/s at n ∈ {256, 512, 1024}
+  square = 85–87% of measured peak — the ≥75% roofline gate PASSES
+  (`tests/perf_lane.rs`, best-of-3, 2mnk flop model). n = 128: 38.4
+  (0.74 — blocking overheads at small n, reported not gated).
+- The capsule (`fs_simd::ops().mk8x4_f64`, NEON `vfmaq_laneq`) is
+  BITWISE-identical to the scalar twin per element (same k-ascending
+  fused order), so the GEMM golden 0x1d7a_a3c6_b631_7ef0 is
+  tier-invariant — verified by the in-crate golden test on both the
+  capsule and scalar paths (aarch64 + the twin), and by fs-simd's
+  equivalence battery (kc ∈ 0..17 ∪ {256}, special values, nonzero
+  starting accumulators).
+- The second-ISA (x86-64/AVX) capsule + attainment row are ARMED
+  PENDING x86 hardware (fleet ARM-only by census; scalar twin
+  dispatches there meanwhile, correct but ungated).
+
 ## No-claim boundaries
-- **No performance claims yet**: v1 microkernel is safe auto-vectorized
-  Rust with fixed pre-autotuner blocking. The ≥75%-of-peak roofline
-  target, arch-specific fs-simd capsule microkernels, autotuned blocking,
-  CCD-aware fs-exec parallel tiling, and f32/mixed packing belong to the
-  recorded perf follow-up bead (gated on the autotuner).
+- Perf scope still open after xdgf slice 1 (recorded successors):
+  autotuned MC/NC/microkernel-shape sweep (KC retune = golden bump),
+  CCD-aware fs-exec parallel tiling (fz2.2 lane), f32/mixed packed
+  paths + capsules, AVX-512 microkernel, nightly perf-regression
+  history through fs-roofline::regress.
 - No transposed-operand or strided (non-contiguous) input forms yet.
 - Factorization v1 is single-threaded; fs-exec tile-parallel
   panel/update drivers and arena packing are recorded follow-up scope.

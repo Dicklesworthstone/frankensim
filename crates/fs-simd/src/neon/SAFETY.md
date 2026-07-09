@@ -12,6 +12,15 @@ slices. Every access is inside the borrow-checked allocation, correctly
 typed, and exactly 2 lanes wide. Tails are handled by the scalar twin in
 safe code; no partial-lane intrinsic access exists.
 
+`mk8x4_f64` (the GEMM register microkernel, bead xdgf) additionally derives
+raw pointers from the panel slices with computed offsets; the leading
+`assert!(a.len() >= kc*8 && b.len() >= kc*4)` bounds every offset used
+(max a: kk·8+6 with a 2-lane read ⇒ kc·8; max b: kk·4+2 with a 2-lane read
+⇒ kc·4), and the accumulator loads/stores are 2-lane accesses at offsets 0
+and 2 of `[f64; 4]` rows whose extent the type system proves. Padded panel
+tails are the CALLER's packing invariant (fs-la zero-pads); soundness here
+never depends on it — only the asserted lengths matter.
+
 ## Aliasing assumptions
 Input slices are `&[f64]`, outputs `&mut [f64]`; Rust's borrow rules already
 guarantee no mutable aliasing at the façade. No function both reads and
@@ -56,7 +65,10 @@ N/A (no concurrency — see Concurrency behavior).
 `tier_equivalence_battery` in fs-simd's tests: seeded LCG inputs across
 special values and every tail length; elementwise ops bitwise-equal to the
 scalar twin (both fused per the FMA policy); reductions within the
-documented cross-shape envelope and bit-stable per tier.
+documented cross-shape envelope and bit-stable per tier. `mk8x4_f64` is
+battery-covered bitwise vs its twin for kc ∈ 0..17 ∪ {256} with special
+values and nonzero starting accumulators (the KC-chunk fold path), and
+transitively by fs-la's GEMM golden hash, which is tier-invariant.
 
 ## Proof obligations discharged by callers
 None. The façade functions are safe and total for all slice inputs

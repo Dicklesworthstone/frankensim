@@ -64,3 +64,25 @@ pub fn sum(x: &[f64]) -> f64 {
     }
     s
 }
+
+/// The 8×4 f64 GEMM register microkernel (scalar twin): accumulate
+/// `acc[r][s] += Σ_kk a_panel[kk·8 + r] · b_panel[kk·4 + s]` with k
+/// ascending and fused `mul_add` per element — the bit-contract shape
+/// fs-la's packed GEMM is built on. Panels are packed k-fastest
+/// (fs-la `pack_a`/`pack_b` layout); `acc` is NOT zeroed here so KC
+/// chunks can fold in caller-chosen order.
+pub fn mk8x4_f64(a_panel: &[f64], b_panel: &[f64], kc: usize, acc: &mut [[f64; 4]; 8]) {
+    assert!(
+        a_panel.len() >= kc * 8 && b_panel.len() >= kc * 4,
+        "mk8x4 panel length mismatch (programmer error)"
+    );
+    for kk in 0..kc {
+        let av = &a_panel[kk * 8..kk * 8 + 8];
+        let bv = &b_panel[kk * 4..kk * 4 + 4];
+        for (accr, &ar) in acc.iter_mut().zip(av) {
+            for (slot, &bs) in accr.iter_mut().zip(bv) {
+                *slot = ar.mul_add(bs, *slot);
+            }
+        }
+    }
+}

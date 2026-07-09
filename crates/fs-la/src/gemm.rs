@@ -155,17 +155,13 @@ fn macro_kernel(
         while q < nc {
             let cols = NR.min(nc - q);
             let b_panel = &b_pack[(q / NR) * NR * kc..][..NR * kc];
-            // Register-tiled microkernel: MR×NR accumulators, k ascending.
+            // Register-tiled microkernel: MR×NR accumulators, k
+            // ascending — through the fs-simd dispatch table (bead
+            // xdgf). The NEON capsule is per-element bitwise-identical
+            // to the scalar twin (which IS the former inline loop), so
+            // the golden hash is tier-invariant.
             let mut acc = [[0.0f64; NR]; MR];
-            for kk in 0..kc {
-                let av = &a_panel[kk * MR..kk * MR + MR];
-                let bv = &b_panel[kk * NR..kk * NR + NR];
-                for (accr, &ar) in acc.iter_mut().zip(av) {
-                    for (slot, &bs) in accr.iter_mut().zip(bv) {
-                        *slot = ar.mul_add(bs, *slot);
-                    }
-                }
-            }
+            (fs_simd::ops().mk8x4_f64)(a_panel, b_panel, kc, &mut acc);
             // Write-back with α, masking padded tail lanes.
             for (r, accr) in acc.iter().enumerate().take(rows) {
                 let crow = (ic + p + r) * n + jc + q;
