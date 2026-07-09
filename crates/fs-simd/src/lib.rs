@@ -20,6 +20,9 @@ pub mod scalar;
 #[cfg(all(target_arch = "aarch64", not(miri)))]
 pub mod neon;
 
+#[cfg(all(target_arch = "aarch64", feature = "frontier-sme2", not(miri)))]
+pub mod sme2;
+
 #[cfg(all(target_arch = "x86_64", not(miri)))]
 pub mod x86;
 

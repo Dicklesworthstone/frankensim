@@ -13,7 +13,16 @@ layer = "L0"
 [dependencies]
 fs-substrate = { path = "../fs-substrate" }
 
+[features]
+# [F]-gated (bead wf9.3): SME2 streaming-mode GEMM prototype.
+# Runtime-capability-gated on top of the flag; inert without hardware.
+frontier-sme2 = []
+
 [dev-dependencies]
+
+[[test]]
+name = "sme2_battery"
+required-features = ["frontier-sme2"]
 
 [lints]
 workspace = true

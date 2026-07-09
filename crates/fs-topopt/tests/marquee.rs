@@ -30,7 +30,7 @@ fn seeded_design() -> DensityDesign {
         for i in 0..n {
             let (x, y) = (i as f64 / scale, j as f64 / scale);
             for &(cx, cy) in &[(0.3, 0.5), (0.7, 0.5)] {
-                if ((x - cx) as f64).powi(2) + ((y - cy) as f64).powi(2) < 0.012 {
+                if (x - cx).powi(2) + (y - cy).powi(2) < 0.012 {
                     d.rho[j * n + i] = 0.1;
                 }
             }

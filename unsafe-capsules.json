@@ -5,6 +5,7 @@
 {"crate": "fs-alloc", "module": "crates/fs-alloc/src/raw/mod.rs", "safety_md": "crates/fs-alloc/src/raw/SAFETY.md"},
 {"crate": "fs-simd", "module": "crates/fs-simd/src/neon/mod.rs", "safety_md": "crates/fs-simd/src/neon/SAFETY.md"},
 {"crate": "fs-substrate", "module": "crates/fs-substrate/src/morton/bmi2/mod.rs", "safety_md": "crates/fs-substrate/src/morton/bmi2/SAFETY.md"},
-{"crate": "fs-simd", "module": "crates/fs-simd/src/x86/mod.rs", "safety_md": "crates/fs-simd/src/x86/SAFETY.md"}
+{"crate": "fs-simd", "module": "crates/fs-simd/src/x86/mod.rs", "safety_md": "crates/fs-simd/src/x86/SAFETY.md"},
+{"crate": "fs-simd", "module": "crates/fs-simd/src/sme2/mod.rs", "safety_md": "crates/fs-simd/src/sme2/SAFETY.md"}
 ]
 }
