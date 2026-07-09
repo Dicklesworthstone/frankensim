@@ -620,8 +620,7 @@ pub fn nsga3(
             };
             let p1 = pick(&mut stream);
             let p2 = pick(&mut stream);
-            let (mut c1, mut c2) =
-                sbx(&pop[p1].x, &pop[p2].x, params.eta_c, lo, hi, &mut stream);
+            let (mut c1, mut c2) = sbx(&pop[p1].x, &pop[p2].x, params.eta_c, lo, hi, &mut stream);
             mutate(&mut c1, params.eta_m, params.p_mut, lo, hi, &mut stream);
             mutate(&mut c2, params.eta_m, params.p_mut, lo, hi, &mut stream);
             let f1 = objectives(&c1);
@@ -632,7 +631,7 @@ pub fn nsga3(
             }
         }
         pop.extend(offspring);
-        pop = nsga3_select(pop, directions, params.pop);
+        pop = nsga3_select(&pop, directions, params.pop);
     }
     let fronts = non_dominated_sort(&pop);
     pop.into_iter()
@@ -643,9 +642,9 @@ pub fn nsga3(
 }
 
 /// NSGA-III environmental selection to `target` members.
-fn nsga3_select(pop: Vec<Individual>, directions: &[Vec<f64>], target: usize) -> Vec<Individual> {
+fn nsga3_select(pop: &[Individual], directions: &[Vec<f64>], target: usize) -> Vec<Individual> {
     let m = pop[0].f.len();
-    let fronts = non_dominated_sort(&pop);
+    let fronts = non_dominated_sort(pop);
     let max_front = fronts.iter().copied().max().unwrap_or(0);
     let mut accepted: Vec<usize> = Vec::with_capacity(target);
     let mut partial: Vec<usize> = Vec::new();
@@ -732,7 +731,7 @@ fn nsga3_select(pop: Vec<Individual>, directions: &[Vec<f64>], target: usize) ->
                 continue;
             }
             let better = if best_count == 0 {
-                d < chosen_d || (d == chosen_d && i < chosen)
+                d < chosen_d || (d.to_bits() == chosen_d.to_bits() && i < chosen)
             } else {
                 i < chosen
             };
@@ -750,4 +749,127 @@ fn nsga3_select(pop: Vec<Individual>, directions: &[Vec<f64>], target: usize) ->
         }
     }
     accepted.into_iter().map(|i| pop[i].clone()).collect()
+}
+
+/// MOEA/D configuration.
+#[derive(Debug, Clone, Copy)]
+pub struct MoeadParams {
+    /// Neighborhood size T.
+    pub neighbors: usize,
+    /// Max replacements per child (bounded-replacement variant —
+    /// preserves diversity).
+    pub max_replace: usize,
+    /// Generations (each visits every subproblem once).
+    pub generations: usize,
+    /// SBX distribution index.
+    pub eta_c: f64,
+    /// Polynomial-mutation distribution index.
+    pub eta_m: f64,
+    /// Per-variable mutation probability.
+    pub p_mut: f64,
+    /// Master seed.
+    pub seed: u64,
+}
+
+/// Tchebycheff scalarization g(f | w, z*) = max_i w_i·|f_i − z*_i|
+/// (weights floored at 1e−6 so no objective is invisible).
+fn tchebycheff(f: &[f64], w: &[f64], ideal: &[f64]) -> f64 {
+    f.iter()
+        .zip(w.iter().zip(ideal))
+        .map(|(fi, (wi, zi))| wi.max(1e-6) * (fi - zi).abs())
+        .fold(f64::NEG_INFINITY, f64::max)
+}
+
+/// MOEA/D with Tchebycheff decomposition: one subproblem per weight
+/// vector (use [`das_dennis`]), T-nearest-weight neighborhoods,
+/// neighborhood mating, ideal-point tracking, and bounded
+/// neighborhood replacement. Deterministic per seed. Returns the
+/// final population's non-dominated front.
+pub fn moead(
+    objectives: &mut dyn FnMut(&[f64]) -> Vec<f64>,
+    dim: usize,
+    bounds: (f64, f64),
+    weights: &[Vec<f64>],
+    params: &MoeadParams,
+) -> Vec<Individual> {
+    let n = weights.len();
+    let t = params.neighbors.min(n);
+    let (lo, hi) = bounds;
+    // T nearest weights per subproblem (Euclidean, index tie-break).
+    let mut hood: Vec<Vec<usize>> = Vec::with_capacity(n);
+    for i in 0..n {
+        let mut order: Vec<usize> = (0..n).collect();
+        order.sort_by(|&a, &b| {
+            let da: f64 = weights[i]
+                .iter()
+                .zip(&weights[a])
+                .map(|(p, q)| (p - q) * (p - q))
+                .sum();
+            let db: f64 = weights[i]
+                .iter()
+                .zip(&weights[b])
+                .map(|(p, q)| (p - q) * (p - q))
+                .sum();
+            da.total_cmp(&db).then(a.cmp(&b))
+        });
+        order.truncate(t);
+        hood.push(order);
+    }
+    let mut stream = StreamKey {
+        seed: params.seed,
+        kernel: 0x0D0E,
+        tile: 0,
+    }
+    .stream();
+    let mut pop: Vec<Individual> = (0..n)
+        .map(|_| {
+            let x: Vec<f64> = (0..dim)
+                .map(|_| (hi - lo).mul_add(stream.next_f64(), lo))
+                .collect();
+            let f = objectives(&x);
+            Individual { x, f }
+        })
+        .collect();
+    let m = pop[0].f.len();
+    let mut ideal = vec![f64::INFINITY; m];
+    for ind in &pop {
+        for (z, v) in ideal.iter_mut().zip(&ind.f) {
+            *z = z.min(*v);
+        }
+    }
+    for _ in 0..params.generations {
+        for i in 0..n {
+            // Neighborhood mating.
+            let a = hood[i][stream.next_below(t as u64) as usize];
+            let b = hood[i][stream.next_below(t as u64) as usize];
+            let (mut c1, _) = sbx(&pop[a].x, &pop[b].x, params.eta_c, lo, hi, &mut stream);
+            mutate(&mut c1, params.eta_m, params.p_mut, lo, hi, &mut stream);
+            let fc = objectives(&c1);
+            for (z, v) in ideal.iter_mut().zip(&fc) {
+                *z = z.min(*v);
+            }
+            // Bounded neighborhood replacement.
+            let mut replaced = 0usize;
+            for &j in &hood[i] {
+                if replaced >= params.max_replace {
+                    break;
+                }
+                if tchebycheff(&fc, &weights[j], &ideal)
+                    < tchebycheff(&pop[j].f, &weights[j], &ideal)
+                {
+                    pop[j] = Individual {
+                        x: c1.clone(),
+                        f: fc.clone(),
+                    };
+                    replaced += 1;
+                }
+            }
+        }
+    }
+    let fronts = non_dominated_sort(&pop);
+    pop.into_iter()
+        .zip(fronts)
+        .filter(|(_, r)| *r == 0)
+        .map(|(ind, _)| ind)
+        .collect()
 }

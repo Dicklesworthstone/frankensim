@@ -95,7 +95,15 @@ Sobol samples, deterministic per seed with the hit count returned as
 the honesty knob); bounded archive — dominated inserts are no-ops,
 dominating inserts evict, over-capacity eviction removes the TRUE
 least contributor (verified against brute-force keep-(k−1) subset
-enumeration).
+enumeration); tests/nsga3_battery.rs (4 cases): Das–Dennis counts
+(C(p+m−1, m−1) exact: 91 at (3,12), 70 at (5,4)) and on-simplex
+membership; DTLZ2(m=3) at standard budgets — worst | ‖f‖−1 | =
+0.0238 against the unit-sphere-octant front with 98%
+reference-direction coverage; the MANY-OBJECTIVE claim at m = 5:
+NSGA-III beats NSGA-II 6.51 vs 4.39 on MC-estimated hypervolume at
+matched budget (the classic motivation, measured by composition with
+mc_hypervolume) plus bitwise replay; NSGA-III golden
+`0xd912_6c49_f1b1_6897`.
 tests/dro_battery.rs (4 cases): the one-sample kink LP recovers the
 fractional q = [0.5, 0.5] and worst-case value 0.5; tiny-scale kinks
 use scale-relative recovery rather than an absolute lambda cutoff;
@@ -109,6 +117,10 @@ DRO golden hash `0xd21c_d092_b4a5_ba98`.
 ## No-claim boundaries
 - No published-ERT-table parity claims yet (in-repo BBOB-class fixtures
   only; the external COCO battery is follow-up).
+- NSGA-III normalization uses the ideal point with FIRST-front
+  per-objective maxima as the nadir estimate; the full ASF
+  extreme-point construction is the recorded refinement. MOEA/D is
+  the bead's remaining decomposition-based sibling.
 - `mc_hypervolume` is the m > 4 path; its accuracy knob is the
   sample count (standard error √(p(1−p)/n)) — no silent precision
   claim. `HvArchive` eviction uses EXACT contributions (m ≤ 4);

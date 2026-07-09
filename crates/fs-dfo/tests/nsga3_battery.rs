@@ -5,10 +5,12 @@
 //! m = 5 — NSGA-III beats NSGA-II on MC-estimated hypervolume at
 //! matched budget; bitwise replay; golden.
 
-use fs_dfo::{NsgaParams, das_dennis, mc_hypervolume, nsga2, nsga3};
+use fs_dfo::{NsgaParams, das_dennis, hypervolume, mc_hypervolume, nsga2, nsga3};
 
 fn log(case: &str, verdict: &str, detail: &str) {
-    println!("{{\"suite\":\"fs-dfo-nsga3\",\"case\":\"{case}\",\"verdict\":\"{verdict}\",\"detail\":\"{detail}\"}}");
+    println!(
+        "{{\"suite\":\"fs-dfo-nsga3\",\"case\":\"{case}\",\"verdict\":\"{verdict}\",\"detail\":\"{detail}\"}}"
+    );
 }
 
 /// DTLZ2 with m objectives, n = m − 1 + k variables in [0,1].
@@ -43,7 +45,10 @@ fn das_dennis_counts_and_simplex() {
     assert_eq!(d5.len(), 70);
     for dir in d3.iter().chain(&d5) {
         let s: f64 = dir.iter().sum();
-        assert!((s - 1.0).abs() < 1e-12, "direction off the simplex: {dir:?}");
+        assert!(
+            (s - 1.0).abs() < 1e-12,
+            "direction off the simplex: {dir:?}"
+        );
         assert!(dir.iter().all(|&v| v >= 0.0));
     }
     log("das-dennis", "pass", "91 @ (3,12), 70 @ (5,4), on-simplex");
@@ -82,8 +87,7 @@ fn dtlz2_m3_convergence_and_coverage() {
             let mut best = (0usize, f64::INFINITY);
             for (k, dir) in dirs.iter().enumerate() {
                 let dd: f64 = dir.iter().map(|d| d * d).sum();
-                let t: f64 =
-                    ind.f.iter().zip(dir).map(|(a, b)| a * b).sum::<f64>() / dd;
+                let t: f64 = ind.f.iter().zip(dir).map(|(a, b)| a * b).sum::<f64>() / dd;
                 let d2: f64 = ind
                     .f
                     .iter()
@@ -108,7 +112,10 @@ fn dtlz2_m3_convergence_and_coverage() {
     log(
         "dtlz2-m3",
         "pass",
-        &format!("worst norm dev {worst_norm:.4}, coverage {covered:.2}, front {}", front.len()),
+        &format!(
+            "worst norm dev {worst_norm:.4}, coverage {covered:.2}, front {}",
+            front.len()
+        ),
     );
 }
 
@@ -144,7 +151,11 @@ fn many_objective_m5_beats_nsga2_on_hv() {
     let rb = nsga3(&mut fr2, 9, (0.0, 1.0), &dirs, &params);
     assert_eq!(ra.len(), rb.len());
     for (p, q) in ra.iter().zip(&rb) {
-        assert!(p.f.iter().zip(&q.f).all(|(u, v)| u.to_bits() == v.to_bits()));
+        assert!(
+            p.f.iter()
+                .zip(&q.f)
+                .all(|(u, v)| u.to_bits() == v.to_bits())
+        );
     }
     log(
         "m5-vs-nsga2",
@@ -153,7 +164,7 @@ fn many_objective_m5_beats_nsga2_on_hv() {
     );
 }
 
-const GOLDEN_HASH: u64 = 0; // recorded on first run, then frozen
+const GOLDEN_HASH: u64 = 0xd912_6c49_f1b1_6897; // recorded at vcia NSGA-III lane, frozen
 
 #[test]
 fn nsga3_golden_hash() {
@@ -190,5 +201,91 @@ fn nsga3_golden_hash() {
         acc, GOLDEN_HASH,
         "nsga3 bits changed: {acc:#018x} vs {GOLDEN_HASH:#018x} — bump only with semantic \
          justification (golden-evidence policy)"
+    );
+}
+
+#[test]
+fn moead_zdt1_and_dtlz2_competitive() {
+    use fs_dfo::{MoeadParams, moead};
+    // ZDT1 convergence + spread (the NSGA-II gates, decomposition path).
+    fn zdt1(x: &[f64]) -> Vec<f64> {
+        let f1 = x[0];
+        let g = 1.0 + 9.0 * x[1..].iter().sum::<f64>() / (x.len() - 1) as f64;
+        vec![f1, g * (1.0 - fs_math::det::sqrt(f1 / g))]
+    }
+    let weights2 = das_dennis(2, 79); // 80 subproblems
+    let params = MoeadParams {
+        neighbors: 12,
+        max_replace: 2,
+        generations: 220,
+        eta_c: 20.0,
+        eta_m: 20.0,
+        p_mut: 1.0 / 8.0,
+        seed: 29,
+    };
+    let mut f = |x: &[f64]| zdt1(x);
+    let front = moead(&mut f, 8, (0.0, 1.0), &weights2, &params);
+    let mean_gap: f64 = front
+        .iter()
+        .map(|ind| (ind.f[1] - (1.0 - fs_math::det::sqrt(ind.f[0]))).abs())
+        .sum::<f64>()
+        / front.len() as f64;
+    assert!(mean_gap < 0.05, "MOEA/D ZDT1 not converged: {mean_gap:.4}");
+    let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+    for ind in &front {
+        lo = lo.min(ind.f[0]);
+        hi = hi.max(ind.f[0]);
+    }
+    assert!(hi - lo > 0.7, "MOEA/D diversity collapsed: [{lo:.3},{hi:.3}]");
+    // DTLZ2(m=3): competitive with NSGA-III on hypervolume at matched
+    // budget (within 10% — both are legitimate; numbers ledgered).
+    let m = 3usize;
+    let dirs = das_dennis(m, 12);
+    let params3 = MoeadParams {
+        neighbors: 15,
+        max_replace: 2,
+        generations: 260,
+        eta_c: 30.0,
+        eta_m: 20.0,
+        p_mut: 1.0 / 7.0,
+        seed: 31,
+    };
+    let mut fd = |x: &[f64]| dtlz2(x, m);
+    let front_md = moead(&mut fd, 7, (0.0, 1.0), &dirs, &params3);
+    let nsga_params = NsgaParams {
+        pop: 92,
+        generations: 260,
+        eta_c: 30.0,
+        eta_m: 20.0,
+        p_mut: 1.0 / 7.0,
+        seed: 31,
+    };
+    let mut fn3 = |x: &[f64]| dtlz2(x, m);
+    let front_n3 = nsga3(&mut fn3, 7, (0.0, 1.0), &dirs, &nsga_params);
+    let reference = vec![1.5f64; m];
+    let pts_md: Vec<Vec<f64>> = front_md.iter().map(|i| i.f.clone()).collect();
+    let pts_n3: Vec<Vec<f64>> = front_n3.iter().map(|i| i.f.clone()).collect();
+    let hv_md = hypervolume(&pts_md, &reference);
+    let hv_n3 = hypervolume(&pts_n3, &reference);
+    assert!(
+        hv_md > 0.9 * hv_n3,
+        "MOEA/D should be competitive with NSGA-III: {hv_md:.4} vs {hv_n3:.4}"
+    );
+    // Bitwise replay.
+    let mut fr = |x: &[f64]| zdt1(x);
+    let ra = moead(&mut fr, 8, (0.0, 1.0), &weights2, &params);
+    let mut fr2 = |x: &[f64]| zdt1(x);
+    let rb = moead(&mut fr2, 8, (0.0, 1.0), &weights2, &params);
+    assert_eq!(ra.len(), rb.len());
+    for (p, q) in ra.iter().zip(&rb) {
+        assert!(p.f.iter().zip(&q.f).all(|(u, v)| u.to_bits() == v.to_bits()));
+    }
+    log(
+        "moead",
+        "pass",
+        &format!(
+            "ZDT1 gap {mean_gap:.4} spread {:.2}; DTLZ2 HV {hv_md:.4} vs NSGA-III {hv_n3:.4}",
+            hi - lo
+        ),
     );
 }
