@@ -318,6 +318,7 @@ fn fem_params() -> FemParams {
 ///
 /// # Errors
 /// CutFEM build/solve errors propagate.
+#[allow(clippy::too_many_lines)] // one linear study loop: solve, grade, update, project, refine
 pub fn run_marquee(
     mut design: DensityDesign,
     base_level: u32,
@@ -405,7 +406,7 @@ pub fn run_marquee(
         let mut flux_cnt = 0usize;
         #[allow(clippy::cast_precision_loss)]
         let lattice_scale = (n - 1) as f64;
-        for k in 0..n * n {
+        for (k, slot) in moves.iter_mut().enumerate() {
             let (i, jj) = (k % n, k / n);
             // Interface-adjacent = a 4-neighbor on the other side of
             // the 0.5 level (phi is a density gap, NOT a distance —
@@ -429,7 +430,7 @@ pub fn run_marquee(
                 #[allow(clippy::cast_precision_loss)]
                 let (x, y) = (i as f64 / lattice_scale, jj as f64 / lattice_scale);
                 let fl = flux_at(x, y);
-                moves[k] = fl.max(1e-12);
+                *slot = fl.max(1e-12);
                 flux_sum += fl;
                 flux_cnt += 1;
             }
@@ -437,11 +438,11 @@ pub fn run_marquee(
         #[allow(clippy::cast_precision_loss)]
         let flux_mean = flux_sum / flux_cnt.max(1) as f64;
         let step = 0.25;
-        for k in 0..n * n {
-            if moves[k] > 0.0 {
+        for (rho, &m_k) in design.rho.iter_mut().zip(&moves) {
+            if m_k > 0.0 {
                 // carve where flux is above the mean, fill below.
-                let rel = (moves[k] - flux_mean) / flux_mean.max(1e-12);
-                design.rho[k] = (design.rho[k] - step * rel.clamp(-1.0, 1.0)).clamp(0.02, 0.98);
+                let rel = (m_k - flux_mean) / flux_mean.max(1e-12);
+                *rho = (*rho - step * rel.clamp(-1.0, 1.0)).clamp(0.02, 0.98);
             }
         }
         // Volume projection ON THE BAND ONLY: a uniform shift over all
