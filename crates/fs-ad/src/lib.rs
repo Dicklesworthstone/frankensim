@@ -13,10 +13,13 @@
 //! cross-ISA bit-determinism compose instead of fighting.
 //!
 //! Adjoint infrastructure lives here too: [`ift`] (differentiate through
-//! solutions), [`revolve`] (checkpointed reverse sweeps), [`gradcheck`]
-//! (the CI gradient-gate primitive). The FrankenTorch tape bridge is the
-//! recorded follow-up.
+//! solutions, dense or matrix-free), [`revolve`] (checkpointed reverse
+//! sweeps: treeverse, binomially-optimal, ledger-spill), [`gradcheck`]
+//! (the CI gradient-gate primitive), and the OPT-IN FrankenTorch
+//! reverse-mode tape bridge (feature `torch-bridge`).
 
+#[cfg(feature = "torch-bridge")]
+pub mod bridge;
 pub mod dual;
 pub mod gradcheck;
 pub mod ift;

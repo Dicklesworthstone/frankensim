@@ -13,9 +13,17 @@
 //!
 //! v1 builds the Jacobians DENSELY, column by column, with single-lane
 //! forward duals: deterministic (fixed seeding order, fused arithmetic),
-//! exact to floating point, O((N+M)·cost(F)). Matrix-free adjoints for
-//! large N join the solver-stack work; the FrankenTorch reverse bridge is
-//! the recorded follow-up.
+//! exact to floating point, O((N+M)·cost(F)).
+//!
+//! Bead o3ui adds the MATRIX-FREE tangent route
+//! ([`ift_gradient_matrix_free`]): ∂F/∂u is only ever APPLIED (one
+//! directional-dual pass per application — seed every uᵢ with εᵢ = vᵢ),
+//! and the caller supplies the linear solver (fs-solver's Krylov stack
+//! at L3, or anything else — fs-ad stays L1 and solver-agnostic). This
+//! is the FORWARD/tangent form: one solve per parameter, the right
+//! shape for few parameters and large N. The matrix-free ADJOINT form
+//! (one solve total) needs Jᵀ·v products, i.e. reverse mode over
+//! vectors — recorded with the FrankenTorch bridge follow-ups.
 
 use crate::dual::Dual64;
 use fs_la::factor::{FactorError, lu};
@@ -123,6 +131,96 @@ where
             adjoint_residual,
         },
     ))
+}
+
+/// Evidence attached to a matrix-free IFT gradient.
+#[derive(Debug, Clone)]
+pub struct MatrixFreeIftReport {
+    /// ‖F(u*, p)‖∞ — the caller's honesty check, as in [`IftReport`].
+    pub primal_residual: f64,
+    /// Worst ‖(∂F/∂u)·wₖ + (∂F/∂p)·eₖ‖∞ over parameters — how well the
+    /// caller's solver actually solved each tangent system (measured
+    /// HERE with a fresh operator application, not trusted from the
+    /// solver).
+    pub tangent_residual: f64,
+}
+
+/// dJ/dp at u* via the TANGENT route with a caller-supplied solver:
+/// for each parameter k, solve (∂F/∂u)·wₖ = −(∂F/∂p)·eₖ matrix-free,
+/// then dJ/dpₖ = ∂J/∂pₖ + (∂J/∂u)·wₖ. `solve(apply, b)` must return an
+/// approximate solution of A·w = b given only `apply: v ↦ A·v`.
+///
+/// Every Jacobian access is ONE directional dual pass — nothing N×N is
+/// ever formed. Cost: M solves + M+2 objective/residual passes.
+pub fn ift_gradient_matrix_free<F, J, L>(
+    f: &F,
+    j: &J,
+    u_star: &[f64],
+    p: &[f64],
+    solve: &mut L,
+) -> (Vec<f64>, MatrixFreeIftReport)
+where
+    F: Fn(&[Dual64<1>], &[Dual64<1>]) -> Vec<Dual64<1>>,
+    J: Fn(&[Dual64<1>], &[Dual64<1>]) -> Dual64<1>,
+    L: FnMut(&mut dyn FnMut(&[f64]) -> Vec<f64>, &[f64]) -> Vec<f64>,
+{
+    let n = u_star.len();
+    let m = p.len();
+    let lift =
+        |xs: &[f64]| -> Vec<Dual64<1>> { xs.iter().map(|&v| Dual64::<1>::constant(v)).collect() };
+    let u0 = lift(u_star);
+    let p0 = lift(p);
+    let r0 = f(&u0, &p0);
+    assert_eq!(r0.len(), n, "F must return u.len() = {n} residuals");
+    let primal_residual = r0.iter().fold(0.0f64, |a, d| a.max(d.re.abs()));
+
+    // (∂F/∂u)·v in one dual pass: seed every u component along v.
+    let dfdu_apply = |v: &[f64]| -> Vec<f64> {
+        let u: Vec<Dual64<1>> = u_star
+            .iter()
+            .zip(v)
+            .map(|(&ui, &vi)| Dual64 { re: ui, eps: [vi] })
+            .collect();
+        f(&u, &p0).iter().map(|d| d.eps[0]).collect()
+    };
+    // ∂J/∂u as a vector is not needed: (∂J/∂u)·wₖ is one dual pass too.
+    let djdu_dot = |w: &[f64]| -> f64 {
+        let u: Vec<Dual64<1>> = u_star
+            .iter()
+            .zip(w)
+            .map(|(&ui, &wi)| Dual64 { re: ui, eps: [wi] })
+            .collect();
+        j(&u, &p0).eps[0]
+    };
+
+    let mut grad = vec![0.0f64; m];
+    let mut tangent_residual = 0.0f64;
+    for k in 0..m {
+        // −(∂F/∂p)·eₖ and ∂J/∂pₖ, one seeded pass each.
+        let mut pp = lift(p);
+        pp[k] = Dual64::<1>::variable(p[k], 0);
+        let rhs: Vec<f64> = f(&u0, &pp).iter().map(|d| -d.eps[0]).collect();
+        let djdpk = j(&u0, &pp).eps[0];
+        // Caller's matrix-free solve of (∂F/∂u)·w = rhs.
+        let mut apply = |v: &[f64]| dfdu_apply(v);
+        let w = solve(&mut apply, &rhs);
+        assert_eq!(w.len(), n, "solver must return a length-{n} solution");
+        // Measured solve quality (fresh application; never trusted).
+        let aw = dfdu_apply(&w);
+        let res = aw
+            .iter()
+            .zip(&rhs)
+            .fold(0.0f64, |a, (&x, &b)| a.max((x - b).abs()));
+        tangent_residual = tangent_residual.max(res);
+        grad[k] = djdu_dot(&w) + djdpk;
+    }
+    (
+        grad,
+        MatrixFreeIftReport {
+            primal_residual,
+            tangent_residual,
+        },
+    )
 }
 
 #[cfg(test)]
@@ -254,6 +352,130 @@ mod tests {
                 jd.eps[0]
             );
         }
+    }
+
+    /// Unpreconditioned dense-storage GMRES (test scaffolding ONLY —
+    /// production callers pass fs-solver's Krylov stack; fs-ad stays
+    /// solver-agnostic).
+    fn gmres(apply: &mut dyn FnMut(&[f64]) -> Vec<f64>, b: &[f64]) -> Vec<f64> {
+        let n = b.len();
+        let m = n.min(60);
+        let beta = b.iter().map(|x| x * x).sum::<f64>().sqrt();
+        if beta == 0.0 {
+            return vec![0.0; n];
+        }
+        let mut v: Vec<Vec<f64>> = vec![b.iter().map(|x| x / beta).collect()];
+        let mut h = vec![vec![0.0f64; m]; m + 1];
+        let mut k_used = 0;
+        for k in 0..m {
+            let mut w = apply(&v[k]);
+            for (i, vi) in v.iter().enumerate() {
+                let hik = w.iter().zip(vi).map(|(a, c)| a * c).sum::<f64>();
+                h[i][k] = hik;
+                for (wj, vj) in w.iter_mut().zip(vi) {
+                    *wj -= hik * vj;
+                }
+            }
+            let hk1 = w.iter().map(|x| x * x).sum::<f64>().sqrt();
+            h[k + 1][k] = hk1;
+            k_used = k + 1;
+            if hk1 < 1e-14 {
+                break;
+            }
+            v.push(w.iter().map(|x| x / hk1).collect());
+        }
+        // Solve the small least-squares min ‖βe₁ − H y‖ by normal
+        // equations (fixture-scale Krylov dimension).
+        let kk = k_used;
+        let mut ata = vec![0.0f64; kk * kk];
+        let mut atb = vec![0.0f64; kk];
+        for c1 in 0..kk {
+            for c2 in 0..kk {
+                let mut acc = 0.0;
+                for row in h.iter().take(kk + 1) {
+                    acc += row[c1] * row[c2];
+                }
+                ata[c1 * kk + c2] = acc;
+            }
+            atb[c1] = h[0][c1] * beta;
+        }
+        let fact = lu(&ata, kk).expect("GMRES normal equations nonsingular");
+        let mut y = atb;
+        fact.solve(&mut y);
+        let mut x = vec![0.0f64; n];
+        for (k, yk) in y.iter().enumerate() {
+            for (xi, vi) in x.iter_mut().zip(&v[k]) {
+                *xi += yk * vi;
+            }
+        }
+        x
+    }
+
+    #[test]
+    fn matrix_free_matches_dense_ift() {
+        const N: usize = 50;
+        // Same 2-system: the tangent route with a caller-supplied
+        // Krylov solve must reproduce the dense adjoint gradient.
+        let p = [3.0, 2.0];
+        let u = newton_solve(&f_sys, &[1.0, 1.0], &p, 60);
+        let (dense, _) = ift_gradient(&f_sys, &j_obj, &u, &p).unwrap();
+        let mut solver = |apply: &mut dyn FnMut(&[f64]) -> Vec<f64>, b: &[f64]| gmres(apply, b);
+        let (mf, rep) = ift_gradient_matrix_free(&f_sys, &j_obj, &u, &p, &mut solver);
+        assert!(rep.primal_residual < 1e-12, "converged primal: {rep:?}");
+        assert!(rep.tangent_residual < 1e-10, "tight solves: {rep:?}");
+        for k in 0..2 {
+            assert!(
+                (mf[k] - dense[k]).abs() < 1e-9 * dense[k].abs().max(1.0),
+                "matrix-free grad[{k}] = {} vs dense {}",
+                mf[k],
+                dense[k]
+            );
+        }
+        // Large-N shape check: nonlinear tridiagonal system, N = 50,
+        // M = 2 — the regime the tangent route exists for. Nothing N×N
+        // is formed inside (by construction of the API).
+        let f_big = |u: &[Dual64<1>], p: &[Dual64<1>]| -> Vec<Dual64<1>> {
+            let mut r = Vec::with_capacity(N);
+            for i in 0..N {
+                let left = if i > 0 {
+                    u[i - 1]
+                } else {
+                    Dual64::constant(0.0)
+                };
+                let right = if i + 1 < N {
+                    u[i + 1]
+                } else {
+                    Dual64::constant(0.0)
+                };
+                let three = Dual64::constant(3.0);
+                r.push(three * u[i] - left - right + u[i].powi(3) - p[0] - p[1] * left);
+            }
+            r
+        };
+        let j_big = |u: &[Dual64<1>], _p: &[Dual64<1>]| -> Dual64<1> {
+            let mut acc = Dual64::constant(0.0);
+            for &ui in u {
+                acc = acc + ui * ui;
+            }
+            acc
+        };
+        let pb = [1.0, 0.3];
+        let ub = newton_solve(&f_big, &vec![0.5; N], &pb, 40);
+        let (dense_b, _) = ift_gradient(&f_big, &j_big, &ub, &pb).unwrap();
+        let (mf_b, rep_b) = ift_gradient_matrix_free(&f_big, &j_big, &ub, &pb, &mut solver);
+        assert!(rep_b.primal_residual < 1e-11, "big primal: {rep_b:?}");
+        for k in 0..2 {
+            assert!(
+                (mf_b[k] - dense_b[k]).abs() < 1e-7 * dense_b[k].abs().max(1.0),
+                "N=50 matrix-free grad[{k}] = {} vs dense {}",
+                mf_b[k],
+                dense_b[k]
+            );
+        }
+        println!(
+            "{{\"suite\":\"fs-ad\",\"case\":\"ift-matrix-free\",\"verdict\":\"pass\",\"detail\":\"tangent route == dense adjoint (2-system to 1e-9, N=50 tridiag to 1e-7); worst tangent residual {:.2e}\"}}",
+            rep_b.tangent_residual.max(rep.tangent_residual)
+        );
     }
 
     #[test]
