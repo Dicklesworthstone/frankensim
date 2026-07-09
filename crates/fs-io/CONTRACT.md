@@ -97,9 +97,10 @@ deterministic bytes + ASCII STL fixture; io-002 the defect zoo
 (duplicate/degenerate/hole/unreferenced) censused, repaired, promoted
 with receipts — and an over-budget hole REFUSED with actionable fixes
 and a refused receipt; io-003 13.5k mutants + truncations + junk with
-zero panics; io-004 AISC-flavored CSV + JSON catalogs, quoting, and the
-teaching-error battery; io-005 3MF ZIP structure (EOCD, entry count,
-model XML), GLB chunk accounting, VTK section counts.
+zero panics; io-004 PLY face-list integer validation; io-005 AISC-flavored
+CSV + JSON catalogs, quoting, and the teaching-error battery; io-006 3MF ZIP
+structure (EOCD, entry count, model XML), GLB chunk accounting, VTK section
+counts.
 
 ## No-claim boundaries
 

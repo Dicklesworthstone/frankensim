@@ -250,23 +250,13 @@ fn read_ascii_body(
                 }
             })?;
             let mut tokens = text.split_whitespace();
-            let mut next_f64 = |what: &str| -> Result<f64, IoError> {
-                let tok = tokens.next().ok_or(IoError::Malformed {
-                    at: 0,
-                    what: format!("body ended early ({what})"),
-                })?;
-                tok.parse().map_err(|_| IoError::Malformed {
-                    at: 0,
-                    what: format!("bad number {tok:?} ({what})"),
-                })
-            };
             for el in &header.elements {
                 for _ in 0..el.count {
                     let mut xyz = [f64::NAN; 3];
                     for prop in &el.props {
                         match prop {
                             Prop::Scalar(_, name) => {
-                                let v = next_f64(name)?;
+                                let v = next_f64_token(next_token(&mut tokens, name)?, name)?;
                                 match name.as_str() {
                                     "x" => xyz[0] = v,
                                     "y" => xyz[1] = v,
@@ -275,8 +265,8 @@ fn read_ascii_body(
                                 }
                             }
                             Prop::List(_, _, name) => {
-                                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                                let n = next_f64("list count")? as usize;
+                                let count_tok = next_token(&mut tokens, "list count")?;
+                                let n = parse_usize_token(count_tok, "list count")?;
                                 if n > 1024 {
                                     return Err(IoError::ResourceBound {
                                         what: "list longer than 1024".to_string(),
@@ -284,11 +274,8 @@ fn read_ascii_body(
                                 }
                                 let mut idx = Vec::with_capacity(n);
                                 for _ in 0..n {
-                                    #[allow(
-                                        clippy::cast_possible_truncation,
-                                        clippy::cast_sign_loss
-                                    )]
-                                    idx.push(next_f64("list item")? as u32);
+                                    let item_tok = next_token(&mut tokens, "list item")?;
+                                    idx.push(parse_u32_token(item_tok, "list item")?);
                                 }
                                 if el.name == "face"
                                     && (name == "vertex_indices" || name == "vertex_index")
@@ -334,8 +321,7 @@ fn read_binary_body(
                             }
                             Prop::List(count_ty, item_ty, name) => {
                                 let cb = take(bytes, &mut pos, count_ty.size())?;
-                                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                                let n = count_ty.read_f64(cb) as usize;
+                                let n = parse_usize_value(count_ty.read_f64(cb), "list count")?;
                                 if n > 1024 {
                                     return Err(IoError::ResourceBound {
                                         what: "list longer than 1024".to_string(),
@@ -344,11 +330,7 @@ fn read_binary_body(
                                 let mut idx = Vec::with_capacity(n);
                                 for _ in 0..n {
                                     let ib = take(bytes, &mut pos, item_ty.size())?;
-                                    #[allow(
-                                        clippy::cast_possible_truncation,
-                                        clippy::cast_sign_loss
-                                    )]
-                                    idx.push(item_ty.read_f64(ib) as u32);
+                                    idx.push(parse_u32_value(item_ty.read_f64(ib), "list item")?);
                                 }
                                 if el.name == "face"
                                     && (name == "vertex_indices" || name == "vertex_index")
@@ -366,6 +348,56 @@ fn read_binary_body(
         }
     }
     Ok(())
+}
+
+fn next_token<'a>(
+    tokens: &mut core::str::SplitWhitespace<'a>,
+    what: &str,
+) -> Result<&'a str, IoError> {
+    tokens.next().ok_or(IoError::Malformed {
+        at: 0,
+        what: format!("body ended early ({what})"),
+    })
+}
+
+fn next_f64_token(tok: &str, what: &str) -> Result<f64, IoError> {
+    tok.parse().map_err(|_| IoError::Malformed {
+        at: 0,
+        what: format!("bad number {tok:?} ({what})"),
+    })
+}
+
+fn parse_usize_token(tok: &str, what: &str) -> Result<usize, IoError> {
+    let v = next_f64_token(tok, what)?;
+    parse_usize_value(v, what)
+}
+
+fn parse_u32_token(tok: &str, what: &str) -> Result<u32, IoError> {
+    let v = next_f64_token(tok, what)?;
+    parse_u32_value(v, what)
+}
+
+fn parse_usize_value(v: f64, what: &str) -> Result<usize, IoError> {
+    if !(v.is_finite() && v.fract() == 0.0 && v >= 0.0) {
+        return Err(IoError::Malformed {
+            at: 0,
+            what: format!("{what} must be a non-negative integer, got {v}"),
+        });
+    }
+    if v > 1024.0 {
+        return Ok(1025);
+    }
+    Ok(v as usize)
+}
+
+fn parse_u32_value(v: f64, what: &str) -> Result<u32, IoError> {
+    if !(v.is_finite() && v.fract() == 0.0 && v >= 0.0 && v <= f64::from(u32::MAX)) {
+        return Err(IoError::Malformed {
+            at: 0,
+            what: format!("{what} must be a non-negative u32, got {v}"),
+        });
+    }
+    Ok(v as u32)
 }
 
 fn push_vertex(positions: &mut Vec<Point3>, xyz: [f64; 3]) -> Result<(), IoError> {
@@ -387,7 +419,11 @@ fn push_face(triangles: &mut Vec<[u32; 3]>, idx: &[u32], n_vertices: usize) -> R
         });
     }
     for &i in idx {
-        if usize::try_from(i).expect("u32") >= n_vertices {
+        let vertex_index = usize::try_from(i).map_err(|_| IoError::Malformed {
+            at: triangles.len(),
+            what: format!("face index {i} cannot be represented on this host"),
+        })?;
+        if vertex_index >= n_vertices {
             return Err(IoError::Malformed {
                 at: triangles.len(),
                 what: format!("face index {i} out of range"),

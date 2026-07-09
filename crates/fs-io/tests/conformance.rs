@@ -227,7 +227,31 @@ fn io_003_fuzz_never_panics() {
 }
 
 #[test]
-fn io_004_catalog_schema_validation_teaches() {
+fn io_004_ply_face_lists_reject_non_integer_values() {
+    let base = "ply\nformat ascii 1.0\nelement vertex 3\nproperty double x\nproperty double y\n\
+                property double z\nelement face 1\nproperty list uchar uint vertex_indices\n\
+                end_header\n0 0 0\n1 0 0\n0 1 0\n";
+    for (tail, needle) in [
+        ("-3 0 1 2\n", "list count"),
+        ("3.5 0 1 2\n", "list count"),
+        ("3 0 -1 2\n", "list item"),
+        ("3 0 1.25 2\n", "list item"),
+    ] {
+        match fs_io::ply::read_ply(format!("{base}{tail}").as_bytes()) {
+            Err(fs_io::IoError::Malformed { what, .. }) => {
+                assert!(what.contains(needle), "{tail:?} error was {what:?}");
+            }
+            other => panic!("expected malformed PLY list value for {tail:?}, got {other:?}"),
+        }
+    }
+    verdict(
+        "io-004",
+        "PLY face list counts and indices reject negative/fractional values",
+    );
+}
+
+#[test]
+fn io_005_catalog_schema_validation_teaches() {
     let schema = Schema {
         columns: vec![
             ColumnSpec {
@@ -286,13 +310,13 @@ fn io_004_catalog_schema_validation_teaches() {
         "nested JSON refused"
     );
     verdict(
-        "io-004",
+        "io-005",
         "CSV+JSON catalogs validate; errors name row/column/offender",
     );
 }
 
 #[test]
-fn io_005_container_exports_are_structurally_valid() {
+fn io_006_container_exports_are_structurally_valid() {
     let mesh = tetra();
     // 3MF: ZIP magic, EOCD present, model XML findable, entry count 3.
     let pkg = export_3mf(&mesh);
@@ -335,7 +359,7 @@ fn io_005_container_exports_are_structurally_valid() {
         "newline-terminated records"
     );
     verdict(
-        "io-005",
+        "io-006",
         "3MF zip structure, GLB chunk accounting, VTK sections all check out",
     );
 }
