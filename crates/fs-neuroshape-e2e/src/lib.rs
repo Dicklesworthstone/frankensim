@@ -154,12 +154,13 @@ pub fn run_campaign(net: &MlpSdf, ring_r: f64, inner: f64) -> NeuroShapeReport {
         .map(radius)
         .fold(f64::INFINITY, f64::min);
 
-    // The topology claim is Verified iff the interval certificate closed:
-    // non-empty interior trapped by a certified-positive ring.
+    // The topology claim is Verified iff the interval certificate closed: a
+    // non-empty interior enclosed by the certified-positive boundary frame. The
+    // certified containment is the frame's INNER edge `ring_r − w` (max-norm).
     let topology_color = if certified_inside && bounded {
         Color::Verified {
             lo: 0.0,
-            hi: ring_r,
+            hi: ring_r - w,
         }
     } else {
         Color::Estimated {

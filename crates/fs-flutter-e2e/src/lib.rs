@@ -157,12 +157,17 @@ pub fn run_campaign(lo: f64, hi: f64, steps: usize) -> FlutterReport {
     let naive_boundary = last_true(&|s| s.naive_converged);
     let aitken_boundary = last_true(&|s| s.aitken_converged);
 
-    // A witness: certified stable, naive fails, Aitken succeeds.
-    let witness = samples
+    // A witness: certified stable, naive fails, Aitken succeeds. Its Verified
+    // band is the spectral abscissa — a certified negative upper bound on the
+    // eigenvalues' real parts (the exponential decay rate).
+    let witness_sample = samples
         .iter()
-        .find(|s| s.lyapunov_stable && !s.naive_converged && s.aitken_converged)
-        .map(|s| s.mu);
-    let witness_color = witness.map(|_| Color::Verified { lo: 0.0, hi: 0.0 });
+        .find(|s| s.lyapunov_stable && !s.naive_converged && s.aitken_converged);
+    let witness = witness_sample.map(|s| s.mu);
+    let witness_color = witness_sample.map(|s| Color::Verified {
+        lo: s.spectral_abscissa,
+        hi: 0.0,
+    });
 
     FlutterReport {
         boundaries_agree: (lyapunov_boundary - eigen_boundary).abs() < 1e-9,
