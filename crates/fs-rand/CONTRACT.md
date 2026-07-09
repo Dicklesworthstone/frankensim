@@ -12,8 +12,10 @@ distributions (plan §6.7; P2's seed pillar). Layer: L1.
   checkpoint/resume by index, `Copy` (forks diverge by IDENTITY, not state).
 - Draws: `next_u64`, `next_f64` (53-bit, [0,1)), `next_below` (Lemire,
   deterministic rejection consumption), `next_normal` (Box–Muller on
-  fs-math strict fns — cross-ISA deterministic SAMPLES), `next_exponential`
-  (inversion), `fill_f64`.
+  fs-math strict fns — cross-ISA deterministic SAMPLES), `next_normal_ziggurat`
+  (bead 1za9: the ZIGGURAT perf path — deterministic `det`-generated table +
+  deterministic rejection consumption; FAST-MODE-ONLY until a cross-ISA bitwise
+  proof admits it to strict mode), `next_exponential` (inversion), `fill_f64`.
 
 ### Extended distributions (bead 6ys.19, module `dist`)
 - `Stream::{next_gamma, next_beta, next_dirichlet, next_truncated_normal,
@@ -82,5 +84,10 @@ rejection-replay, checkpoint-resume equality.
   point-dim; hash-based fast path = recorded follow-up).
 - Gamma/beta/Dirichlet/categorical-alias/von-Mises–Fisher/truncated
   distributions: follow-up bead (consumer-driven: UQ/BO/rendering).
-- Ziggurat normal (perf) — Box–Muller chosen v1 FOR strict-mode determinism.
-- SIMD bulk generation lanes; PractRand/TestU01-class nightly battery.
+- Ziggurat normal STRICT-MODE admission (bead 1za9): `next_normal_ziggurat`
+  ships FAST-MODE-ONLY — deterministic table + rejection consumption and
+  accuracy-gated (moments + two-sample KS vs Box–Muller), but not admitted to
+  strict mode until a cross-ISA bitwise-equal run on both reference machines
+  lands (the `trj` pipeline); Box–Muller stays the strict default.
+- SIMD bulk generation lanes; PractRand/TestU01-class nightly battery (bead 1za9
+  remaining items).

@@ -20,6 +20,7 @@
 pub mod dist;
 pub mod philox;
 pub mod qmc;
+pub mod ziggurat;
 
 use fs_math::det;
 
@@ -122,6 +123,15 @@ impl Stream {
         let u = 1.0 - self.next_f64();
         let v = self.next_f64();
         det::sqrt(-2.0 * det::ln(u)) * det::cos(2.0 * std::f64::consts::PI * v)
+    }
+
+    /// Standard normal via the ZIGGURAT (bead 1za9) — the FAST-MODE-ONLY perf
+    /// path. Deterministic table + deterministic rejection consumption, but not
+    /// admitted to strict mode until a cross-ISA bitwise proof lands; strict
+    /// callers use [`Stream::next_normal`] (Box–Muller). See [`ziggurat`].
+    #[must_use]
+    pub fn next_normal_ziggurat(&mut self) -> f64 {
+        ziggurat::normal(self)
     }
 
     /// Exponential(1) via inversion (consumes exactly 1 draw).
