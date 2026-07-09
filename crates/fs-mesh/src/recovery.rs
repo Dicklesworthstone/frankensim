@@ -9,9 +9,18 @@
 //! (the recursion knows which points it created for which segment) —
 //! and the battery re-verifies each recorded sub-edge against the
 //! finished mesh anyway. Depth/budget caps are counted honestly
-//! (`unrecovered`), never silently dropped. CONSTRAINED-Delaunay
-//! facet recovery (interior/non-convex facets) is the recorded
-//! successor; convex hull-facet conformity is gated test-side.
+//! (`unrecovered`), never silently dropped.
+//!
+//! INTERIOR FACET recovery ([`recover_facets`], the uee3 successor
+//! slice): every CONVEX planar PLC facet becomes a union of mesh
+//! FACES by longest-edge midpoint bisection of its fan triangulation
+//! — the 2D analogue of the segment argument (sub-triangles below
+//! the local feature size have empty min-enclosing balls and are
+//! Delaunay faces). Non-convex facets and general-position planes are
+//! recorded successors: fan triangulation needs convexity, and f64
+//! midpoints stay EXACTLY coplanar only when the plane is
+//! axis-aligned (bitwise-equal coordinate) — the correspondence
+//! verification measures the residual rather than assuming it.
 
 use crate::delaunay::{GHOST, MeshError, Tetrahedralization};
 use fs_exec::Cx;
@@ -214,6 +223,227 @@ pub fn recover_segments(
             }
         }
         if all_edges && !failed {
+            stats.recovered += 1;
+        } else {
+            stats.unrecovered += 1;
+        }
+    }
+    Ok((stats, table))
+}
+
+/// Facet-recovery evidence.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FacetRecoveryStats {
+    /// Facets requested.
+    pub facets_in: u64,
+    /// Facets fully recovered as face unions.
+    pub recovered: u64,
+    /// Facets abandoned at a cap (HONESTY counter).
+    pub unrecovered: u64,
+    /// Steiner points inserted on facets.
+    pub steiner_inserted: u64,
+    /// Bisection rounds used (worst facet).
+    pub rounds_used: u32,
+    /// Sub-faces in the correspondence table.
+    pub sub_faces: u64,
+}
+
+impl FacetRecoveryStats {
+    /// Canonical JSON ledger row.
+    #[must_use]
+    pub fn to_json(&self) -> String {
+        format!(
+            "{{\"facets_in\":{},\"recovered\":{},\"unrecovered\":{},\
+             \"steiner_inserted\":{},\"rounds_used\":{},\"sub_faces\":{}}}",
+            self.facets_in,
+            self.recovered,
+            self.unrecovered,
+            self.steiner_inserted,
+            self.rounds_used,
+            self.sub_faces
+        )
+    }
+}
+
+/// The facet correspondence: every recovered sub-face (sorted vertex
+/// triple) with its parent facet index.
+#[derive(Debug, Clone, Default)]
+pub struct FacetCorrespondence {
+    /// (sub-face, parent facet) rows, deterministic order.
+    pub rows: Vec<([u32; 3], u32)>,
+}
+
+/// Live mesh face set (sorted vertex triples of live real tets).
+fn face_set(tetra: &Tetrahedralization) -> BTreeSet<[u32; 3]> {
+    let mut faces = BTreeSet::new();
+    for tet in tetra.tets() {
+        for skip in 0..4 {
+            let mut f: Vec<u32> = (0..4).filter(|&i| i != skip).map(|i| tet[i]).collect();
+            if f.contains(&GHOST) {
+                continue;
+            }
+            f.sort_unstable();
+            faces.insert([f[0], f[1], f[2]]);
+        }
+    }
+    faces
+}
+
+/// Recover every CONVEX planar PLC facet (vertex loop into the
+/// ORIGINAL points) as a union of mesh faces.
+///
+/// # Errors
+/// [`MeshError::Cancelled`] between insertions.
+///
+/// # Panics
+/// Only on kernel programmer contracts (and facets with < 3 vertices).
+#[allow(clippy::too_many_lines)] // one facet-recovery narrative: rounds loop + verification
+pub fn recover_facets(
+    tetra: &mut Tetrahedralization,
+    facets: &[Vec<u32>],
+    opts: RecoveryOptions,
+    cx: &Cx<'_>,
+) -> Result<(FacetRecoveryStats, FacetCorrespondence), MeshError> {
+    let mut stats = FacetRecoveryStats {
+        facets_in: facets.len() as u64,
+        ..FacetRecoveryStats::default()
+    };
+    let mut table = FacetCorrespondence::default();
+    let mut by_bits: std::collections::BTreeMap<[u64; 3], u32> = tetra
+        .mesh
+        .points
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            (
+                [p[0].to_bits(), p[1].to_bits(), p[2].to_bits()],
+                u32::try_from(i).expect("point count fits u32"),
+            )
+        })
+        .collect();
+    for (fid, loop_verts) in facets.iter().enumerate() {
+        cx.checkpoint()?;
+        assert!(loop_verts.len() >= 3, "facet needs at least 3 vertices");
+        // Fan triangulation of the (convex) polygon.
+        let mut tris: Vec<[u32; 3]> = (1..loop_verts.len() - 1)
+            .map(|i| [loop_verts[0], loop_verts[i], loop_verts[i + 1]])
+            .collect();
+        let mut failed = false;
+        let mut round = 0u32;
+        loop {
+            round += 1;
+            if round > opts.max_depth {
+                failed = true;
+                break;
+            }
+            let faces = face_set(tetra);
+            let missing: Vec<usize> = tris
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| {
+                    let mut k = **t;
+                    k.sort_unstable();
+                    !faces.contains(&k)
+                })
+                .map(|(i, _)| i)
+                .collect();
+            if missing.is_empty() {
+                break;
+            }
+            if stats.steiner_inserted >= u64::from(opts.max_steiner) {
+                failed = true;
+                break;
+            }
+            // Batch: the LONGEST edge of EVERY missing triangle
+            // (deterministic: BTreeSet of sorted pairs), split at
+            // midpoints this round. One-split-per-round was MEASURED
+            // to starve at the rounds cap (12 rounds, facet still
+            // open); batching converges in a handful of rounds.
+            let mut split_edges: BTreeSet<[u32; 2]> = BTreeSet::new();
+            for &mi in &missing {
+                let t = tris[mi];
+                let pts = &tetra.mesh.points;
+                let mut best: Option<([u32; 2], f64)> = None;
+                for (u, v) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+                    let (pu, pv) = (pts[u as usize], pts[v as usize]);
+                    let d2 =
+                        (pu[0] - pv[0]).powi(2) + (pu[1] - pv[1]).powi(2) + (pu[2] - pv[2]).powi(2);
+                    let key = if u < v { [u, v] } else { [v, u] };
+                    let better = match &best {
+                        None => true,
+                        Some((bk, bd)) => d2 > *bd || (d2.to_bits() == bd.to_bits() && key < *bk),
+                    };
+                    if better {
+                        best = Some((key, d2));
+                    }
+                }
+                split_edges.insert(best.expect("triangle has edges").0);
+            }
+            for [u, v] in split_edges {
+                if stats.steiner_inserted >= u64::from(opts.max_steiner) {
+                    failed = true;
+                    break;
+                }
+                let (pu, pv) = (tetra.mesh.points[u as usize], tetra.mesh.points[v as usize]);
+                let mid = [
+                    f64::midpoint(pu[0], pv[0]),
+                    f64::midpoint(pu[1], pv[1]),
+                    f64::midpoint(pu[2], pv[2]),
+                ];
+                let bits = [mid[0].to_bits(), mid[1].to_bits(), mid[2].to_bits()];
+                let m = if let Some(&twin) = by_bits.get(&bits) {
+                    twin
+                } else {
+                    let new_idx =
+                        u32::try_from(tetra.mesh.points.len()).expect("point count fits u32");
+                    tetra.mesh.points.push(mid);
+                    if tetra.mesh.insert(new_idx) {
+                        stats.steiner_inserted += 1;
+                        by_bits.insert(bits, new_idx);
+                        new_idx
+                    } else {
+                        failed = true;
+                        break;
+                    }
+                };
+                // Split EVERY facet triangle sharing edge (u, v) so
+                // the facet triangulation stays edge-conforming.
+                let mut next: Vec<[u32; 3]> = Vec::with_capacity(tris.len() + 2);
+                for tt in &tris {
+                    if tt.contains(&u) && tt.contains(&v) {
+                        let w = *tt
+                            .iter()
+                            .find(|&&x| x != u && x != v)
+                            .expect("third vertex");
+                        next.push([u, m, w]);
+                        next.push([m, v, w]);
+                    } else {
+                        next.push(*tt);
+                    }
+                }
+                tris = next;
+            }
+            if failed {
+                break;
+            }
+            stats.rounds_used = stats.rounds_used.max(round);
+            cx.checkpoint()?;
+        }
+        // Verify against the finished mesh and record correspondence.
+        let faces = face_set(tetra);
+        let fid32 = u32::try_from(fid).expect("facet count fits u32");
+        let mut all_faces = true;
+        for t in &tris {
+            let mut k = *t;
+            k.sort_unstable();
+            if faces.contains(&k) {
+                table.rows.push((k, fid32));
+                stats.sub_faces += 1;
+            } else {
+                all_faces = false;
+            }
+        }
+        if all_faces && !failed {
             stats.recovered += 1;
         } else {
             stats.unrecovered += 1;

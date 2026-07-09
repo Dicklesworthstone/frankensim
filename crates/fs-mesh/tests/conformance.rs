@@ -1202,3 +1202,109 @@ fn tmesh_014_segment_recovery() {
         );
     });
 }
+
+/// tmesh-015: conforming-Delaunay INTERIOR FACET recovery (uee3
+/// successor slice). A box with an axis-aligned interior diaphragm
+/// plane and clouds on BOTH sides: the diaphragm is not a union of
+/// mesh faces until recovery; afterwards every fan sub-triangle is a
+/// verified mesh face, correspondence rows are exactly coplanar (the
+/// axis-aligned bitwise argument), the exact audit stays clean, the
+/// build replays bitwise, and the honesty counters fire on a starved
+/// budget instead of lying. Non-convex facets and general-position
+/// planes remain the recorded successors.
+#[test]
+#[allow(clippy::too_many_lines)] // one recovery narrative, five gates
+#[allow(clippy::float_cmp)] // coplanarity on an axis-aligned plane is bitwise
+fn tmesh_015_facet_recovery() {
+    with_cx(|cx| {
+        // Box corners 0..8 (unit cube), diaphragm rectangle at z = 0.5
+        // (vertices 8..12), then clouds strictly ABOVE and BELOW the
+        // plane (never on it — faces must not come free).
+        let mut pts: Vec<Point3> = Vec::new();
+        for i in 0..2i32 {
+            for j in 0..2i32 {
+                for k in 0..2i32 {
+                    pts.push(Point3::new(f64::from(i), f64::from(j), f64::from(k)));
+                }
+            }
+        }
+        let z = 0.5f64;
+        pts.push(Point3::new(0.0, 0.0, z)); // 8
+        pts.push(Point3::new(1.0, 0.0, z)); // 9
+        pts.push(Point3::new(1.0, 1.0, z)); // 10
+        pts.push(Point3::new(0.0, 1.0, z)); // 11
+        let mut rng = Lcg(0x1001_2026_0709_0015);
+        for s in 0..40 {
+            let d = |r: &mut Lcg| 0.8f64.mul_add(r.dyadic(), 0.1); // (0.1, 0.9)
+            let zz = if s % 2 == 0 {
+                0.3f64.mul_add(rng.dyadic(), 0.55) // (0.55, 0.85)
+            } else {
+                0.3f64.mul_add(rng.dyadic(), 0.15) // (0.15, 0.45)
+            };
+            pts.push(Point3::new(d(&mut rng), d(&mut rng), zz));
+        }
+        let facets: Vec<Vec<u32>> = vec![vec![8, 9, 10, 11]];
+        let run = |cx: &Cx<'_>| -> (
+            Tetrahedralization,
+            fs_mesh::FacetRecoveryStats,
+            Vec<([u32; 3], u32)>,
+        ) {
+            let mut t = delaunay(&pts, cx).expect("delaunay");
+            let (stats, table) =
+                fs_mesh::recover_facets(&mut t, &facets, RecoveryOptions::default(), cx)
+                    .expect("facet recovery");
+            (t, stats, table.rows)
+        };
+        let (t1, stats, rows) = run(cx);
+        verdict(
+            "tmesh-015-recovered",
+            stats.recovered == 1 && stats.unrecovered == 0 && stats.steiner_inserted > 0,
+            &format!("facet recovery ledger: {}", stats.to_json()),
+        );
+        // Correspondence: every recorded sub-face vertex sits EXACTLY
+        // on the diaphragm plane (bitwise z), and rows are nonempty.
+        let ptsv = t1.points();
+        let coplanar = rows
+            .iter()
+            .flat_map(|(f, _)| f.iter())
+            .all(|&v| ptsv[v as usize].z == z);
+        verdict(
+            "tmesh-015-coplanar",
+            !rows.is_empty() && coplanar,
+            &format!("{} sub-faces, all vertices bitwise on z = 0.5", rows.len()),
+        );
+        // Exact audit stays clean after facet Steiner insertion.
+        let audit = t1.audit(true);
+        verdict(
+            "tmesh-015-audit",
+            audit.clean(),
+            &format!("exact audit after recovery: {audit:?}"),
+        );
+        // Bitwise replay.
+        let (t2, stats2, rows2) = run(cx);
+        let bitwise =
+            t1.tets() == t2.tets() && rows == rows2 && stats.to_json() == stats2.to_json();
+        verdict(
+            "tmesh-015-replay",
+            bitwise,
+            "mesh, correspondence, and ledger replay bitwise",
+        );
+        // Honesty drill: a starved Steiner budget must REPORT, not lie.
+        let mut t3 = delaunay(&pts, cx).expect("delaunay");
+        let (starved, _) = fs_mesh::recover_facets(
+            &mut t3,
+            &facets,
+            RecoveryOptions {
+                max_depth: 2,
+                max_steiner: 1,
+            },
+            cx,
+        )
+        .expect("starved recovery runs");
+        verdict(
+            "tmesh-015-honest-caps",
+            starved.unrecovered == 1 && starved.recovered == 0,
+            &format!("starved ledger: {}", starved.to_json()),
+        );
+    });
+}
