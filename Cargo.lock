@@ -1105,11 +1105,13 @@ version = "0.0.1"
 dependencies = [
  "fs-adjoint",
  "fs-benchmark",
+ "fs-checker",
  "fs-evidence",
  "fs-geom",
  "fs-ir",
  "fs-ledger",
  "fs-package",
+ "fs-plan",
  "fs-qty",
  "fs-recompute",
  "fs-robust",
