@@ -11,8 +11,10 @@ description = "Unbiased spectral path-tracing core (fs-render): the verifiable M
 layer = "L5"
 
 [dependencies]
+fs-ad = { path = "../fs-ad", optional = true }
 fs-exec = { path = "../fs-exec", optional = true }
 fs-geom = { path = "../fs-geom", optional = true }
+fs-math = { path = "../fs-math", optional = true }
 fs-rand = { path = "../fs-rand", optional = true }
 fs-rep-nurbs = { path = "../fs-rep-nurbs", optional = true }
 
@@ -29,10 +31,18 @@ chart-backends = ["dep:fs-exec", "dep:fs-geom", "dep:fs-rep-nurbs"]
 # [F]-gated per the Ambition-Tag rule: volumetric media ship disabled
 # until the live-field progressive lane lands in perf-CI.
 volumes = ["dep:fs-rand"]
+# [F]-gated per the Ambition-Tag rule (bead qfx.5): edge-aware
+# differentiable rendering, smoke tier (deterministic quadrature;
+# MC/reparameterized estimators are recorded successors).
+differentiable = ["dep:fs-ad", "dep:fs-math"]
 
 [[test]]
 name = "volumes_battery"
 required-features = ["volumes"]
+
+[[test]]
+name = "diff_battery"
+required-features = ["differentiable"]
 
 [lints]
 workspace = true

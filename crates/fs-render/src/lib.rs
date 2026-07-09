@@ -23,6 +23,8 @@ use core::f64::consts::PI;
 #[cfg(feature = "chart-backends")]
 pub mod charts;
 
+#[cfg(feature = "differentiable")]
+pub mod diff;
 #[cfg(feature = "volumes")]
 pub mod volumes;
 
