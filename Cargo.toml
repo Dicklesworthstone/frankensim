@@ -11,6 +11,7 @@ members = [
     "crates/fs-race",
     "crates/fs-obs",
     "crates/fs-opt",
+    "crates/fs-ornith",
     "crates/fs-constraint",
     "crates/fs-query",
     "crates/fs-geocon",

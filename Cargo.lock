@@ -1386,6 +1386,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-ornith"
+version = "0.0.1"
+dependencies = [
+ "fs-bem",
+ "fs-dfo",
+ "fs-exec",
+ "fs-lbm",
+ "fs-math",
+ "fs-race",
+ "fs-sos",
+ "fs-surrogate",
+ "fs-vpm",
+]
+
+[[package]]
 name = "fs-package"
 version = "0.0.1"
 dependencies = [

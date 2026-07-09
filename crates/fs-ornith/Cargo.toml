@@ -1,0 +1,27 @@
+[package]
+name = "fs-ornith"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Flagship 1 (plan sec-15.1): the ornithoid multi-inlet aircraft at smoke tier — BEM/VPM screening under e-raced generations, LBM refinement with control-volume forces, SOS-certified stability, and the certified Pareto atlas."
+
+[package.metadata.frankensim]
+layer = "L6"
+
+[dependencies]
+fs-bem = { path = "../fs-bem" }
+fs-dfo = { path = "../fs-dfo" }
+fs-exec = { path = "../fs-exec" }
+fs-lbm = { path = "../fs-lbm" }
+fs-math = { path = "../fs-math" }
+fs-race = { path = "../fs-race" }
+fs-sos = { path = "../fs-sos" }
+fs-surrogate = { path = "../fs-surrogate" }
+fs-vpm = { path = "../fs-vpm" }
+
+[dev-dependencies]
+
+[lints]
+workspace = true
