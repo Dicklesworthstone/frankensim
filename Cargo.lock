@@ -1805,7 +1805,10 @@ version = "0.0.1"
 dependencies = [
  "fs-adjoint",
  "fs-ascent",
+ "fs-cutfem",
+ "fs-dwr",
  "fs-feec",
+ "fs-ivl",
  "fs-la",
  "fs-material",
  "fs-math",

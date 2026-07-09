@@ -23,6 +23,8 @@
 pub mod eigenfreq;
 pub mod elasticity;
 pub mod filter;
+#[cfg(feature = "cutfem-marquee")]
+pub mod marquee;
 pub mod oc;
 pub mod pipeline;
 pub mod robust;

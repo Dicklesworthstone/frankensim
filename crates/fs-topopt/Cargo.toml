@@ -11,6 +11,9 @@ description = "Density-based topology optimization: SIMP with Helmholtz filterin
 layer = "L4"
 
 [dependencies]
+fs-cutfem = { path = "../fs-cutfem", optional = true }
+fs-dwr = { path = "../fs-dwr", optional = true }
+fs-ivl = { path = "../fs-ivl", optional = true }
 fs-adjoint = { path = "../fs-adjoint" }
 fs-ascent = { path = "../fs-ascent" }
 fs-feec = { path = "../fs-feec" }
@@ -23,6 +26,10 @@ fs-sparse = { path = "../fs-sparse" }
 
 [dev-dependencies]
 fs-rand = { path = "../fs-rand" }
+
+[features]
+# [F]-gated per the Ambition-Tag rule (bead b7d0).
+cutfem-marquee = ["dep:fs-cutfem", "dep:fs-dwr", "dep:fs-ivl"]
 
 [lints]
 workspace = true
