@@ -1149,6 +1149,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-gen"
+version = "0.0.1"
+
+[[package]]
 name = "fs-geocon"
 version = "0.0.1"
 dependencies = [
