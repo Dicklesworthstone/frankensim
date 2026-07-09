@@ -88,8 +88,101 @@ impl TensorSpace {
     #[must_use]
     pub fn apply_stiffness(&self, u: &[f64]) -> Vec<f64> {
         assert_eq!(u.len(), self.ndof(), "apply_stiffness length mismatch");
-        let p = self.r + 1;
         let mut y = vec![0.0f64; self.ndof()];
+        // Dispatch ONCE per apply to a const-P element loop for the
+        // practical degrees: compile-time trip counts let the whole
+        // gather → 3-term contraction → scatter pipeline inline,
+        // unroll, and NEON/SSE-vectorize. Every monomorphized kernel
+        // preserves the generic path's per-output operation ORDER
+        // exactly (ascending-l accumulation, same `mul_add` operands;
+        // the dropped zero-skip is semantics-free — see the kernel
+        // comment), so the output is BIT-IDENTICAL and the sf-kron
+        // golden does not move.
+        match self.r + 1 {
+            2 => self.apply_mono::<2>(u, &mut y),
+            3 => self.apply_mono::<3>(u, &mut y),
+            4 => self.apply_mono::<4>(u, &mut y),
+            5 => self.apply_mono::<5>(u, &mut y),
+            6 => self.apply_mono::<6>(u, &mut y),
+            7 => self.apply_mono::<7>(u, &mut y),
+            8 => self.apply_mono::<8>(u, &mut y),
+            _ => self.apply_gen(u, &mut y),
+        }
+        y
+    }
+
+    /// The const-P element loop (P = r+1 ≤ 8): scratch on the stack,
+    /// contraction kernels inlined, gather/scatter as hoisted address
+    /// arithmetic. Same element visitation and accumulation order as
+    /// [`Self::apply_gen`] — bit-identical output.
+    fn apply_mono<const P: usize>(&self, u: &[f64], y: &mut [f64]) {
+        const { assert!(P <= 8) }
+        let n1 = self.n1;
+        let (mut local, mut t1, mut t2, mut acc) =
+            ([0.0f64; 512], [0.0f64; 512], [0.0f64; 512], [0.0f64; 512]);
+        let (local, t1, t2) = (
+            &mut local[..P * P * P],
+            &mut t1[..P * P * P],
+            &mut t2[..P * P * P],
+        );
+        let acc = &mut acc[..P * P * P];
+        let (mut gx, mut gy, mut gz) = ([0usize; 8], [0usize; 8], [0usize; 8]);
+        for cx in 0..self.m {
+            for (l, g) in gx[..P].iter_mut().enumerate() {
+                *g = self.lat1(cx, l);
+            }
+            for cy in 0..self.m {
+                for (l, g) in gy[..P].iter_mut().enumerate() {
+                    *g = self.lat1(cy, l);
+                }
+                for cz in 0..self.m {
+                    for (l, g) in gz[..P].iter_mut().enumerate() {
+                        *g = self.lat1(cz, l);
+                    }
+                    // Gather.
+                    for lx in 0..P {
+                        for ly in 0..P {
+                            let base = (gx[lx] * n1 + gy[ly]) * n1;
+                            let row = &mut local[(lx * P + ly) * P..(lx * P + ly + 1) * P];
+                            for (lz, v) in row.iter_mut().enumerate() {
+                                *v = u[base + gz[lz]];
+                            }
+                        }
+                    }
+                    // Three Kronecker terms; contract_*_p applies a
+                    // dense (P×P) 1D matrix along one axis.
+                    acc.fill(0.0);
+                    for term in 0..3 {
+                        let (ax, ay, az) = match term {
+                            0 => (&self.stiff_e, &self.mass_e, &self.mass_e),
+                            1 => (&self.mass_e, &self.stiff_e, &self.mass_e),
+                            _ => (&self.mass_e, &self.mass_e, &self.stiff_e),
+                        };
+                        contract_x_p::<P>(ax, local, t1);
+                        contract_y_p::<P>(ay, t1, t2);
+                        contract_z_p::<P>(az, t2, t1);
+                        for (a, t) in acc.iter_mut().zip(&*t1) {
+                            *a += *t;
+                        }
+                    }
+                    // Scatter-add (fixed element order).
+                    for lx in 0..P {
+                        for ly in 0..P {
+                            let base = (gx[lx] * n1 + gy[ly]) * n1;
+                            let row = &acc[(lx * P + ly) * P..(lx * P + ly + 1) * P];
+                            for (lz, &v) in row.iter().enumerate() {
+                                y[base + gz[lz]] += v;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The runtime-p fallback (r ≥ 8) — the original loop structure.
+    fn apply_gen(&self, u: &[f64], y: &mut [f64]) {
+        let p = self.r + 1;
         let mut local = vec![0.0f64; p * p * p];
         let mut t1 = vec![0.0f64; p * p * p];
         let mut t2 = vec![0.0f64; p * p * p];
@@ -108,8 +201,6 @@ impl TensorSpace {
                             }
                         }
                     }
-                    // Three Kronecker terms; contract_axis applies a
-                    // dense (p×p) 1D matrix along one axis.
                     acc.fill(0.0);
                     for term in 0..3 {
                         let (ax, ay, az) = match term {
@@ -117,9 +208,9 @@ impl TensorSpace {
                             1 => (&self.mass_e, &self.stiff_e, &self.mass_e),
                             _ => (&self.mass_e, &self.mass_e, &self.stiff_e),
                         };
-                        contract_x(ax, &local, &mut t1, p);
-                        contract_y(ay, &t1, &mut t2, p);
-                        contract_z(az, &t2, &mut t1, p);
+                        contract_x_gen(ax, &local, &mut t1, p);
+                        contract_y_gen(ay, &t1, &mut t2, p);
+                        contract_z_gen(az, &t2, &mut t1, p);
                         for (a, t) in acc.iter_mut().zip(&t1) {
                             *a += t;
                         }
@@ -138,7 +229,6 @@ impl TensorSpace {
                 }
             }
         }
-        y
     }
 
     /// Assembled 1D global matrices (mass, stiffness) — dense n₁×n₁,
@@ -294,7 +384,87 @@ impl TensorSpace {
     }
 }
 
-fn contract_x(a: &[f64], src: &[f64], dst: &mut [f64], p: usize) {
+// CONST-P monomorphized contraction kernels for the practical degrees
+// (p = r+1 in 2..=8): compile-time trip counts let LLVM fully unroll
+// and NEON/SSE-vectorize the stride-1 inner loops, which the runtime-p
+// `_gen` fallbacks never achieve. Every kernel preserves the
+// fallback's per-output accumulation ORDER exactly: ascending l,
+// row-major positions, same `mul_add` operands. The fallbacks' ail/ajl
+// zero-skip is DROPPED here (branches block straight-line register
+// allocation of the unrolled GEMMs); that is still bit-identical:
+// executing the skipped op computes fma(±0·s, acc) = acc, because acc
+// is never -0.0 (it starts +0.0, and round-to-nearest addition onto
+// ±0/nonzero never yields -0.0 from a +0.0 start).
+//
+// `inline(always)`: these are the innermost hot kernels of the whole
+// apply and MUST fuse into the monomorphized element loop — measured
+// on the perf lane, not assumed.
+#[allow(clippy::inline_always)]
+#[inline(always)]
+fn contract_x_p<const P: usize>(a: &[f64], src: &[f64], dst: &mut [f64]) {
+    dst.fill(0.0);
+    for i in 0..P {
+        let (dro, a_row) = (i * P * P, &a[i * P..(i + 1) * P]);
+        for (l, &ail) in a_row.iter().enumerate() {
+            let srow = &src[l * P * P..(l + 1) * P * P];
+            let drow = &mut dst[dro..dro + P * P];
+            for (d, &s) in drow.iter_mut().zip(srow) {
+                *d = ail.mul_add(s, *d);
+            }
+        }
+    }
+}
+
+#[allow(clippy::inline_always)]
+#[inline(always)]
+fn contract_y_p<const P: usize>(a: &[f64], src: &[f64], dst: &mut [f64]) {
+    dst.fill(0.0);
+    for i in 0..P {
+        for j in 0..P {
+            let dro = (i * P + j) * P;
+            let a_row = &a[j * P..(j + 1) * P];
+            for (l, &ajl) in a_row.iter().enumerate() {
+                let sro = (i * P + l) * P;
+                let srow = &src[sro..sro + P];
+                let drow = &mut dst[dro..dro + P];
+                for (d, &s) in drow.iter_mut().zip(srow) {
+                    *d = ajl.mul_add(s, *d);
+                }
+            }
+        }
+    }
+}
+
+#[allow(clippy::inline_always)]
+#[inline(always)]
+fn contract_z_p<const P: usize>(a: &[f64], src: &[f64], dst: &mut [f64]) {
+    // Transpose the 1D matrix (values unchanged) so the k loop is
+    // stride-1 in both the matrix and dst; each output still starts at
+    // 0.0 and accumulates over ascending l — the same op sequence per
+    // element as the k-inner fallback, hence bit-identical.
+    let mut at = [0.0f64; 64]; // P <= 8, so P*P <= 64
+    for k in 0..P {
+        for l in 0..P {
+            at[l * P + k] = a[k * P + l];
+        }
+    }
+    for (drow, srow) in dst
+        .as_chunks_mut::<P>()
+        .0
+        .iter_mut()
+        .zip(src.as_chunks::<P>().0)
+    {
+        drow.fill(0.0);
+        for (l, &sl) in srow.iter().enumerate() {
+            let arow = &at[l * P..(l + 1) * P];
+            for (d, &av) in drow.iter_mut().zip(arow) {
+                *d = av.mul_add(sl, *d);
+            }
+        }
+    }
+}
+
+fn contract_x_gen(a: &[f64], src: &[f64], dst: &mut [f64], p: usize) {
     dst.fill(0.0);
     for i in 0..p {
         for l in 0..p {
@@ -311,7 +481,7 @@ fn contract_x(a: &[f64], src: &[f64], dst: &mut [f64], p: usize) {
     }
 }
 
-fn contract_y(a: &[f64], src: &[f64], dst: &mut [f64], p: usize) {
+fn contract_y_gen(a: &[f64], src: &[f64], dst: &mut [f64], p: usize) {
     dst.fill(0.0);
     for i in 0..p {
         for j in 0..p {
@@ -328,7 +498,7 @@ fn contract_y(a: &[f64], src: &[f64], dst: &mut [f64], p: usize) {
     }
 }
 
-fn contract_z(a: &[f64], src: &[f64], dst: &mut [f64], p: usize) {
+fn contract_z_gen(a: &[f64], src: &[f64], dst: &mut [f64], p: usize) {
     dst.fill(0.0);
     for i in 0..p {
         for j in 0..p {

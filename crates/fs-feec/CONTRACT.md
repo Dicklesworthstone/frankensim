@@ -206,6 +206,10 @@ matrix-free Jacobi-PCG path with slope gates ≥ r + 0.6 for r = 1..6
 `tests/ho_probe.rs`: per-mode convergence regression — the diagnosis
 that single-cell symmetric fixtures superconverge at even r (a metric
 trap, so MMS ladders start at m ≥ 2).
+`tests/perf_lane.rs` (bead cwjn, release + `--ignored` only):
+sum-factorized apply throughput vs the fs-roofline MEASURED machine
+peak — the ≥30%-of-peak gate at p = 4 plus the throughput-vs-p sweep
+(r = 1..6), JSON-ledgered.
 `tests/vecfam_battery.rs` (bead dcng): vec-001 dims + Euler
 alternating sum; vec-002 dof-Kronecker + mass SPD; vec-003
 tangential/normal conformity; vec-004 dd = 0 through grad/curl/div;
@@ -234,6 +238,29 @@ gate, measured ≈ r + 1; D: ≥ r − 0.4 gate, measured ≈ r) — these
 drive all four 3D tensor space types' rates; Legendre mass closed
 form; its own golden hash.
 
+## Perf-lane evidence (bead cwjn, measured)
+
+- Release, macos-aarch64 (Apple M4 Pro, Mac16,11), single thread,
+  fs-roofline `MachineAxes::probe()` peak 48–49 GFLOP/s: the
+  sum-factorized apply reaches 21.3 GFLOP/s at p = 4 (r = 3, m = 12)
+  = 43–44% of measured peak — the ≥30% roofline gate PASSES. Sweep
+  (best-of-3, 18p⁴+3p³ flop model): r = 1: 37.0, r = 2: 29.9,
+  r = 3: 21.5, r = 4: 21.6, r = 5: 25.0, r = 6: 17.5 GFLOP/s.
+- How: `apply_stiffness` dispatches once per apply to a const-P
+  monomorphized element loop (P = r+1 in 2..=8; runtime-p fallback
+  above) — stack scratch, inlined contraction kernels, hoisted
+  gather/scatter address arithmetic, and the ail/ajl zero-skip
+  branches dropped from the mono kernels (fma with a ±0 product onto
+  a never−0.0 accumulator is the identity, so the skip was semantics-
+  free). Baseline before the restructure: 2.27 GFLOP/s (5.6%) — a
+  measured 9.4× single-thread improvement with NO golden movement
+  (the sf-kron golden aaf1076a196c6902 is byte-stable across the
+  change; the mono path preserves per-output accumulation order
+  exactly). No fs-simd capsule needed.
+- The second-ISA (x86-64) attainment row is ARMED PENDING: the same
+  lane runs unmodified the moment an x86 reference machine is
+  available (rch fleet is ARM-only by census — the 1za9 precedent).
+
 ## No-claim boundaries
 
 - CIRCUMCENTRIC diagonal star deliberately absent: on
@@ -248,8 +275,9 @@ form; its own golden hash.
   monomial Vandermondes (recorded successor). Full 3D VECTOR MMS
   (curl-curl / mixed Darcy solves) need tfz.10 — canonical
   interpolation ladders stand in, labeled. The tensor-product side
-  covers all four space types (slices 1–2). Unstructured-hex orientation and the ≥30%-peak perf gate
-  are later-slice scope. `HexComplex` incidence is still not
+  covers all four space types (slices 1–2). Unstructured-hex
+  orientation is later-slice scope; the ≥30%-peak perf gate LANDED
+  (bead cwjn, see Perf-lane evidence). `HexComplex` incidence is still not
   consumed.
 - MMS covers the PRIMAL Poisson form; the mixed-form MMS (flux
   variable through M₂/d₂) joins the solver-stack lane (tfz.10) where

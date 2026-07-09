@@ -20,6 +20,7 @@ fs-sparse = { path = "../fs-sparse" }
 
 [dev-dependencies]
 fs-rand = { path = "../fs-rand" }
+fs-roofline = { path = "../fs-roofline" }
 
 [lints]
 workspace = true
