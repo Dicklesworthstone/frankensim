@@ -116,6 +116,7 @@ members = [
     "crates/fs-flutter-e2e",
     "crates/fs-neuroshape-e2e",
     "crates/fs-grammar-e2e",
+    "crates/fs-oed-e2e",
     "xtask",
 ]
 

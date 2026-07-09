@@ -1,0 +1,22 @@
+[package]
+name = "fs-oed-e2e"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "SensorForge: optimal experimental design — greedily place Kalman-fused sensors, choosing WHICH design to measure next by decision-theoretic value of information, and STOP the instant the design decision is provably robust (EVPI below threshold), then allocate the measurement-precision budget cost-optimally. Composes fs-assimilate (Kalman fusion) x fs-voi (EVPI + certify-or-stop) x fs-toleralloc (cost-optimal budget) x fs-evidence (Verified posterior variance vs Estimated EVPI). Groundbreaking: sensor placement that knows when to stop, with an exact posterior and a decision certificate."
+
+[package.metadata.frankensim]
+layer = "L4"
+
+[dependencies]
+fs-assimilate = { path = "../fs-assimilate" }
+fs-voi = { path = "../fs-voi" }
+fs-toleralloc = { path = "../fs-toleralloc" }
+fs-evidence = { path = "../fs-evidence" }
+
+[dev-dependencies]
+
+[lints]
+workspace = true
