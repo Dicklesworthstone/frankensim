@@ -288,12 +288,23 @@ pub struct ProbeBudget {
 
 impl ProbeBudget {
     /// A probe budget capping spend at `cap_fraction` of `fleet_budget`.
-    /// `cap_fraction` is clamped to `[0, 1]`.
+    /// `cap_fraction` is clamped to `[0, 1]`; non-finite inputs fail closed
+    /// to a zero cap.
     #[must_use]
     pub fn new(fleet_budget: f64, cap_fraction: f64) -> ProbeBudget {
+        let fleet_budget = if fleet_budget.is_finite() {
+            fleet_budget.max(0.0)
+        } else {
+            0.0
+        };
+        let cap_fraction = if cap_fraction.is_finite() {
+            cap_fraction.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
         ProbeBudget {
-            fleet_budget: fleet_budget.max(0.0),
-            cap_fraction: cap_fraction.clamp(0.0, 1.0),
+            fleet_budget,
+            cap_fraction,
             spent: 0.0,
         }
     }

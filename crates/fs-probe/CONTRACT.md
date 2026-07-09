@@ -28,9 +28,10 @@ compare.
   closure ("refining the mesh will NOT help") and a numerical-dominated case
   to the mesh/order.
 - `ProbeBudget::new(fleet_budget, cap_fraction)` (`cap_fraction` clamped to
-  `[0,1]`) with `cap`, `spent`, `remaining`, and `try_spend(cost)` — a HARD
-  ceiling: spending up to EXACTLY the cap is allowed, beyond is refused; bad
-  costs (negative / non-finite) are refused.
+  `[0,1]`, non-finite budget inputs fail closed to a zero cap) with `cap`,
+  `spent`, `remaining`, and `try_spend(cost)` — a HARD ceiling: spending up to
+  EXACTLY the cap is allowed, beyond is refused; bad costs (negative /
+  non-finite) are refused.
 - `ProbeError` — `Ladder` / `DimMismatch` / `BudgetExceeded` / `BadCost`, each
   with a teaching `Display`.
 

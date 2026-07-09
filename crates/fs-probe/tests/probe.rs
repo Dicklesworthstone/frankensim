@@ -201,3 +201,21 @@ fn probe_budget_rejects_bad_costs() {
     let over = ProbeBudget::new(100.0, 2.0);
     assert_eq!(over.cap().to_bits(), 100.0f64.to_bits());
 }
+
+#[test]
+fn probe_budget_nonfinite_inputs_fail_closed() {
+    for mut budget in [
+        ProbeBudget::new(f64::NAN, 0.5),
+        ProbeBudget::new(f64::INFINITY, 0.5),
+        ProbeBudget::new(100.0, f64::NAN),
+        ProbeBudget::new(100.0, f64::INFINITY),
+    ] {
+        assert_eq!(budget.cap().to_bits(), 0.0f64.to_bits());
+        assert_eq!(budget.remaining().to_bits(), 0.0f64.to_bits());
+        assert!(matches!(
+            budget.try_spend(1.0),
+            Err(ProbeError::BudgetExceeded { .. })
+        ));
+        assert_eq!(budget.spent().to_bits(), 0.0f64.to_bits());
+    }
+}
