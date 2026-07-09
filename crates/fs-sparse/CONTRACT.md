@@ -31,6 +31,17 @@ gated on fs-tilelang and the autotuner — see No-claim boundaries.
   `spgemm_sparse_spa` uses a per-row BTree accumulator for very wide products
   without O(ncols) scratch, while preserving the reference accumulation order
   and ascending-column output.
+- `interop::{csr_to_graph_snapshot, graph_snapshot_to_csr, WEIGHT_KEY,
+  InteropError}` (feature `fnx-interop`, bead gtql) — FrankenNetworkx bridge.
+  `Csr → GraphSnapshot`: square adjacency only (else `NotSquare`); node `i` ⇄
+  key `"i"`, stored `(r, c, v)` ⇄ directed `EdgeSnapshot` `r→c` with weight `v`
+  under `WEIGHT_KEY`, emitted in canonical row-major/ascending-column order.
+  `GraphSnapshot → Csr`: nodes map to indices BY ORDER (keys may be arbitrary
+  strings), weights read from `WEIGHT_KEY` (`Float`/`Int` coerced, else `1.0`),
+  parallel `(r, c)` edges SUM (multigraph → simple). Necessarily COPIES (fnx's
+  `Graph` is string-keyed and owned — no zero-copy path; the honest deviation
+  from "wrap, do not copy"). Round-trip `Csr → snapshot → Csr` is the identity,
+  bitwise on values.
 - `precond::{Precond, IdentityPrecond, Chebyshev, Ilu0/ilu0/IluBreakdown,
   SaAmg, pcg/PcgReport, lambda_max_estimate}` — the solver-stack toolkit.
   `Precond::apply(r, z)` is the operator interface. Chebyshev: degree-k
@@ -103,7 +114,10 @@ lanes (follow-up bead) will poll at row-range boundaries per Decalogue P7.
 None. `unsafe_code` denied; no capsules.
 
 ## Feature flags
-None.
+- `fnx-interop` (default OFF) — pulls the optional `fnx-classes` + `fnx-runtime`
+  path deps and enables the `interop` module (Csr ⇄ FrankenNetworkx
+  `GraphSnapshot`). Off by default so the L1 crate stays dependency-lean; the
+  numeric core never pulls a constellation crate.
 
 ## Conformance tests
 `tests/conformance.rs`: cross-format bitwise battery + golden hash. In-crate
@@ -131,5 +145,11 @@ reimplementation must pass the conformance battery bit-for-bit.
   Cholesky deferred per its own scope cap. AMG coarsest solve is
   ILU-PCG (dense direct coarse solve joins solver-stack integration).
   No 1e8-DOF scaling claims yet (release-mode scaling lane).
+- **Interop scope (bead gtql)**: the `fnx-interop` feature ships the
+  FrankenNetworkx `GraphSnapshot` bridge (round-trip tested). FrankenNumpy
+  array views (item c) are a scoped follow-up — the owned f64 array lives in
+  `fnp-ufunc::UFuncArray`, which transitively pulls `rayon` + `fnp-linalg`, a
+  heavy dependency for an L1 numeric core; the borrow-vs-convert decision and a
+  separate `fnp-interop` feature are deferred until a consumer needs it.
 - No FrankenNumpy/FrankenNetworkx interop views yet (follow-up).
 - Indices are `usize` (compact u32 indices are a recorded perf-bead item).

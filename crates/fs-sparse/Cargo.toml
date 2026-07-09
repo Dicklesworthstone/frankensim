@@ -11,6 +11,16 @@ description = "Sparse formats (CSR/BSR/SELL-C-sigma), deterministic assembly, Sp
 layer = "L1"
 
 [dependencies]
+# Constellation interop (bead gtql) — OPTIONAL, off by default so L1 stays
+# dependency-lean. fnx-classes' GraphSnapshot is string-keyed and owned, so the
+# converters copy (no zero-copy path in that direction); fnx-runtime carries
+# CompatibilityMode/CgseValue. Precedent: fs-truss, fs-rep-voxel.
+fnx-classes = { path = "../../../franken_networkx/crates/fnx-classes", optional = true }
+fnx-runtime = { path = "../../../franken_networkx/crates/fnx-runtime", optional = true }
+
+[features]
+# FrankenNetworkx GraphSnapshot <-> Csr converters (crate::interop).
+fnx-interop = ["dep:fnx-classes", "dep:fnx-runtime"]
 
 [dev-dependencies]
 # Roofline lane only (dev-deps are layer-exempt): STREAM triad reference.

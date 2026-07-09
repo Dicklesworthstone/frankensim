@@ -16,12 +16,16 @@
 //! recorded follow-up bead, gated on fs-tilelang + the autotuner.
 
 pub mod bsr;
+#[cfg(feature = "fnx-interop")]
+pub mod interop;
 pub mod ops;
 pub mod perf;
 pub mod precond;
 pub mod sell;
 
 pub use bsr::Bsr;
+#[cfg(feature = "fnx-interop")]
+pub use interop::{InteropError, WEIGHT_KEY, csr_to_graph_snapshot, graph_snapshot_to_csr};
 pub use perf::CsrCompact;
 pub use sell::Sell;
 

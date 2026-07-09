@@ -1721,6 +1721,8 @@ version = "0.0.1"
 name = "fs-sparse"
 version = "0.0.1"
 dependencies = [
+ "fnx-classes",
+ "fnx-runtime",
  "fs-substrate",
 ]
 
