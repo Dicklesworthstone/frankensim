@@ -12,6 +12,7 @@
 //! stopping are the bead's split lanes.
 
 pub mod adaptive;
+pub mod chance;
 pub mod anytime;
 pub mod kl;
 pub mod mlmc;
@@ -20,6 +21,7 @@ pub mod seismic;
 
 pub use adaptive::{AdaptiveReport, adaptive_mlmc};
 pub use anytime::{AnytimeEstimate, cvar, estimate_probability_anytime};
+pub use chance::chance_constrained_min;
 pub use kl::{CovarianceKind, KlExpansion};
 pub use mlmc::{MlmcReport, mlmc_estimate};
 pub use pce::{PceModel, fit_pce};
