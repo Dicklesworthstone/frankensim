@@ -281,3 +281,54 @@ fn wsbf_segment2_bitwise_twins() {
         "{{\"suite\":\"fs-sparse\",\"case\":\"wsbf-segment2-twins\",\"verdict\":\"pass\",\"detail\":\"chunked SELL (C in 2/4/8, t in 1/3/8) and blocked SpMM (nrhs in 1/3/8/11) bitwise == references\"}}"
     );
 }
+
+/// wsbf item 6: the sparse-accumulator SpGEMM is bitwise-equal to the
+/// dense-SPA reference, including on a VERY WIDE product where the
+/// dense scratch is the thing being avoided.
+#[test]
+fn wsbf_sparse_spa_spgemm() {
+    let mut seed = 0x59A_2026_u64;
+    let mut lcg = move || {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        seed
+    };
+    // Square-ish random product.
+    let mut ca = fs_sparse::Coo::new(80, 60);
+    let mut cb = fs_sparse::Coo::new(60, 90);
+    for _ in 0..900 {
+        ca.push(
+            (lcg() % 80) as usize,
+            (lcg() % 60) as usize,
+            ((lcg() >> 11) as f64) / (1u64 << 53) as f64 - 0.5,
+        );
+        cb.push(
+            (lcg() % 60) as usize,
+            (lcg() % 90) as usize,
+            ((lcg() >> 11) as f64) / (1u64 << 53) as f64 - 0.5,
+        );
+    }
+    let (a, b) = (ca.assemble(), cb.assemble());
+    let dense = fs_sparse::ops::spgemm(&a, &b);
+    let sparse = fs_sparse::ops::spgemm_sparse_spa(&a, &b);
+    assert_eq!(dense, sparse, "sparse-SPA SpGEMM != dense-SPA bitwise");
+    // Very wide B: 2_000_000 columns, a handful of entries — the dense
+    // SPA would burn a 16 MB+ scratch per call; the sparse one doesn't.
+    let wide_cols = 2_000_000usize;
+    let mut cw = fs_sparse::Coo::new(60, wide_cols);
+    for k in 0..300 {
+        cw.push(
+            (lcg() % 60) as usize,
+            (lcg() % wide_cols as u64) as usize,
+            0.25 + f64::from(k) * 0.001,
+        );
+    }
+    let w = cw.assemble();
+    let dense_w = fs_sparse::ops::spgemm(&a, &w);
+    let sparse_w = fs_sparse::ops::spgemm_sparse_spa(&a, &w);
+    assert_eq!(dense_w, sparse_w, "wide sparse-SPA != dense-SPA bitwise");
+    println!(
+        "{{\"suite\":\"fs-sparse\",\"case\":\"wsbf-sparse-spa\",\"verdict\":\"pass\",\"detail\":\"BTree-SPA SpGEMM bitwise == dense-SPA on random and 2e6-column-wide products\"}}"
+    );
+}

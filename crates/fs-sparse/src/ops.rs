@@ -125,6 +125,49 @@ pub fn spgemm(a: &Csr, b: &Csr) -> Csr {
     Csr::from_parts(m, n, row_ptr, col_idx, vals)
 }
 
+/// C = A·B with a SPARSE accumulator (bead wsbf item 6): a per-row
+/// BTreeMap replaces the dense O(ncols) SPA scratch — the win for VERY
+/// WIDE B (a 10⁶-column product allocates nothing proportional to
+/// ncols). DETERMINISM: per (row, col) the mul_add chain accumulates
+/// in exactly the dense SPA's traversal order, and BTreeMap iteration
+/// is ascending-column — bitwise equality with [`spgemm`] is GATED.
+/// (BTree, not hash: deterministic order needs no post-sort and no
+/// seeded hasher — the "hash-SPA" of the bead, honestly named.)
+#[must_use]
+pub fn spgemm_sparse_spa(a: &Csr, b: &Csr) -> Csr {
+    assert_eq!(
+        a.ncols(),
+        b.nrows(),
+        "spgemm dimension mismatch: {}x{} times {}x{}",
+        a.nrows(),
+        a.ncols(),
+        b.nrows(),
+        b.ncols()
+    );
+    let (m, n) = (a.nrows(), b.ncols());
+    let mut row_ptr = vec![0usize; m + 1];
+    let mut col_idx = Vec::new();
+    let mut vals = Vec::new();
+    let mut spa: std::collections::BTreeMap<usize, f64> = std::collections::BTreeMap::new();
+    for i in 0..m {
+        let (acols, avals) = a.row(i);
+        for (&k, &aik) in acols.iter().zip(avals) {
+            let (bcols, bvals) = b.row(k);
+            for (&j, &bkj) in bcols.iter().zip(bvals) {
+                let slot = spa.entry(j).or_insert(0.0);
+                *slot = aik.mul_add(bkj, *slot);
+            }
+        }
+        for (&j, &v) in &spa {
+            col_idx.push(j);
+            vals.push(v);
+        }
+        row_ptr[i + 1] = col_idx.len();
+        spa.clear();
+    }
+    Csr::from_parts(m, n, row_ptr, col_idx, vals)
+}
+
 impl crate::Csr {
     /// Blocked SpMM (bead wsbf segment 2): Y = A · B for row-major
     /// dense B (ncols × nrhs) into row-major Y (nrows × nrhs). The
