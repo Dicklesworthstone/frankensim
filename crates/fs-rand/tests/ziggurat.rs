@@ -93,3 +93,31 @@ fn ziggurat_agrees_with_box_muller_ks() {
     );
     println!("{{\"test\":\"zig-vs-boxmuller-ks\",\"ks\":{ks:.5},\"m\":{m}}}");
 }
+
+/// The CROSS-ISA GOLDEN HASH (the trj-class bitwise proof, bead 1za9):
+/// an FNV-1a over the raw bits of 100_000 ziggurat draws from a fixed
+/// key. The constant below was recorded on the aarch64 reference and
+/// MUST reproduce exactly on x86-64 — matching hashes on both
+/// reference ISAs are the strict-mode admission evidence the bead
+/// names. Print-first: run with --nocapture to read the hash on a new
+/// machine before gating it.
+#[test]
+fn ziggurat_cross_isa_golden_hash() {
+    let mut st = stream(0x17A9, 7);
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    for _ in 0..100_000 {
+        let v = st.next_normal_ziggurat();
+        for b in v.to_bits().to_le_bytes() {
+            h ^= u64::from(b);
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    println!(
+        "{{\"metric\":\"ziggurat-golden\",\"hash\":\"{h:016x}\",\"arch\":\"{}\"}}",
+        std::env::consts::ARCH
+    );
+    const GOLDEN: u64 = 0x9959_60fe_709f_00bc; // recorded on aarch64 (Mac16,11)
+    if GOLDEN != 0 {
+        assert_eq!(h, GOLDEN, "cross-ISA bitwise equality");
+    }
+}
