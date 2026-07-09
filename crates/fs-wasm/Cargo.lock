@@ -547,6 +547,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-adaptbo-e2e"
+version = "0.0.1"
+dependencies = [
+ "fs-bo",
+ "fs-eproc",
+ "fs-evidence",
+]
+
+[[package]]
 name = "fs-adjoint"
 version = "0.0.1"
 dependencies = [
@@ -697,6 +706,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-flowcert-e2e"
+version = "0.0.1"
+dependencies = [
+ "fs-archive",
+ "fs-evidence",
+ "fs-lbm",
+]
+
+[[package]]
+name = "fs-flutter-e2e"
+version = "0.0.1"
+dependencies = [
+ "fs-couple",
+ "fs-evidence",
+ "fs-sos",
+ "fs-spectral",
+]
+
+[[package]]
 name = "fs-flux"
 version = "0.0.1"
 dependencies = [
@@ -723,6 +751,16 @@ dependencies = [
  "fs-ivl",
  "fs-obs",
  "fs-sparse",
+]
+
+[[package]]
+name = "fs-grammar-e2e"
+version = "0.0.1"
+dependencies = [
+ "fs-archive",
+ "fs-evidence",
+ "fs-fab",
+ "fs-shapeprog",
 ]
 
 [[package]]
@@ -775,8 +813,36 @@ name = "fs-math"
 version = "0.0.1"
 
 [[package]]
+name = "fs-metamat-e2e"
+version = "0.0.1"
+dependencies = [
+ "fs-evidence",
+ "fs-lattice",
+ "fs-sos",
+]
+
+[[package]]
+name = "fs-neuroshape-e2e"
+version = "0.0.1"
+dependencies = [
+ "fs-evidence",
+ "fs-rep-neural",
+ "fs-viz",
+]
+
+[[package]]
 name = "fs-obs"
 version = "0.0.1"
+
+[[package]]
+name = "fs-oed-e2e"
+version = "0.0.1"
+dependencies = [
+ "fs-assimilate",
+ "fs-evidence",
+ "fs-toleralloc",
+ "fs-voi",
+]
 
 [[package]]
 name = "fs-opt"
@@ -834,6 +900,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-robustopt-e2e"
+version = "0.0.1"
+dependencies = [
+ "fs-evidence",
+ "fs-robust",
+ "fs-sos",
+]
+
+[[package]]
 name = "fs-scenario"
 version = "0.0.1"
 dependencies = [
@@ -842,6 +917,15 @@ dependencies = [
  "fs-math",
  "fs-qty",
  "fs-rand",
+]
+
+[[package]]
+name = "fs-schedule-e2e"
+version = "0.0.1"
+dependencies = [
+ "fs-evidence",
+ "fs-tropical",
+ "fs-voi",
 ]
 
 [[package]]
@@ -953,6 +1037,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-truss-e2e"
+version = "0.0.1"
+dependencies = [
+ "fs-evidence",
+ "fs-tropical",
+ "fs-truss",
+]
+
+[[package]]
 name = "fs-viz"
 version = "0.0.1"
 
@@ -966,6 +1059,7 @@ version = "0.0.1"
 dependencies = [
  "asupersync",
  "fs-ad",
+ "fs-adaptbo-e2e",
  "fs-archive",
  "fs-assimilate",
  "fs-bo",
@@ -978,18 +1072,26 @@ dependencies = [
  "fs-fab",
  "fs-feec",
  "fs-fft",
+ "fs-flowcert-e2e",
+ "fs-flutter-e2e",
  "fs-flux",
  "fs-ga",
  "fs-geom",
+ "fs-grammar-e2e",
  "fs-ivl",
  "fs-la",
  "fs-lattice",
  "fs-lbm",
  "fs-math",
+ "fs-metamat-e2e",
+ "fs-neuroshape-e2e",
+ "fs-oed-e2e",
  "fs-rand",
  "fs-rep-mesh",
  "fs-rep-neural",
  "fs-robust",
+ "fs-robustopt-e2e",
+ "fs-schedule-e2e",
  "fs-shapeprog",
  "fs-solid",
  "fs-solver",
@@ -1000,6 +1102,7 @@ dependencies = [
  "fs-toleralloc",
  "fs-tropical",
  "fs-truss",
+ "fs-truss-e2e",
  "fs-viz",
  "fs-voi",
  "fs-xform",

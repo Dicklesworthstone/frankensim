@@ -33,12 +33,17 @@ use fs_sparse::{Coo, Csr};
 // public entry point is re-exported at the crate root and re-surfaced through
 // the `#[wasm_bindgen]` layer at the bottom of this file.
 // ---------------------------------------------------------------------------
+pub mod campaigns;
 pub mod certified;
 pub mod deep;
 pub mod dynamics;
 pub mod geom;
 pub mod pde;
 
+pub use campaigns::{
+    anytimebo, flowcert, fluttercert, grammarforge, metamatcert, neuroshape, proofrobust,
+    schedule_campaign, sensorforge, trusspath,
+};
 pub use certified::mandelbrot_certified;
 pub use deep::{
     betti_shapes, cmaes_trace, cutfem_quadtree, cyclic_symmetry, ffd_deform, gp_regression,
@@ -851,6 +856,64 @@ mod wasm {
     #[wasm_bindgen]
     pub fn fluid_frames(n: usize, frames: usize) -> Vec<f64> {
         super::fluid_frames(n, frames)
+    }
+
+    /* ------------------------------------------------------------------- */
+    /*  Tier-4 CAMPAIGN demos: certified end-to-end pipelines               */
+    /* ------------------------------------------------------------------- */
+
+    #[wasm_bindgen]
+    pub fn proofrobust(alpha: f64, sigma: f64, n: usize) -> Vec<f64> {
+        super::proofrobust(alpha, sigma, n)
+    }
+
+    #[wasm_bindgen]
+    pub fn metamatcert(n: usize, points: usize, rmax: f64) -> Vec<f64> {
+        super::metamatcert(n, points, rmax)
+    }
+
+    #[wasm_bindgen]
+    pub fn fluttercert(lo: f64, hi: f64, steps: usize) -> Vec<f64> {
+        super::fluttercert(lo, hi, steps)
+    }
+
+    #[wasm_bindgen]
+    pub fn schedule_campaign(
+        windtunnel_latency: f64,
+        design_b_mean: f64,
+        stop_threshold: f64,
+    ) -> Vec<f64> {
+        super::schedule_campaign(windtunnel_latency, design_b_mean, stop_threshold)
+    }
+
+    #[wasm_bindgen]
+    pub fn trusspath(nx: usize, ny: usize, gap_tol: f64) -> Vec<f64> {
+        super::trusspath(nx, ny, gap_tol)
+    }
+
+    #[wasm_bindgen]
+    pub fn sensorforge(threshold: f64, max_sensors: usize, b_prior_mean: f64) -> Vec<f64> {
+        super::sensorforge(threshold, max_sensors, b_prior_mean)
+    }
+
+    #[wasm_bindgen]
+    pub fn neuroshape(lift: f64, ring_r: f64, inner: f64) -> Vec<f64> {
+        super::neuroshape(lift, ring_r, inner)
+    }
+
+    #[wasm_bindgen]
+    pub fn grammarforge(match_tol: f64, simplify_tol: f64) -> Vec<f64> {
+        super::grammarforge(match_tol, simplify_tol)
+    }
+
+    #[wasm_bindgen]
+    pub fn anytimebo(max_iters: usize, delta: f64, alpha: f64) -> Vec<f64> {
+        super::anytimebo(max_iters, delta, alpha)
+    }
+
+    #[wasm_bindgen]
+    pub fn flowcert(steps: usize, tol: f64) -> Vec<f64> {
+        super::flowcert(steps, tol)
     }
 
     /// A build stamp so the page can prove it's running the real engine.

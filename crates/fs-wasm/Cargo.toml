@@ -62,6 +62,18 @@ fs-lattice = { path = "../fs-lattice" }
 fs-truss = { path = "../fs-truss" }
 fs-eproc = { path = "../fs-eproc" }
 fs-lbm = { path = "../fs-lbm" }
+# ── The end-to-end CAMPAIGN crates themselves (Tier IV): each composes the
+# leaf crates above into a certified pipeline, and each compiles to wasm32. ──
+fs-robustopt-e2e = { path = "../fs-robustopt-e2e" }
+fs-metamat-e2e = { path = "../fs-metamat-e2e" }
+fs-flutter-e2e = { path = "../fs-flutter-e2e" }
+fs-schedule-e2e = { path = "../fs-schedule-e2e" }
+fs-truss-e2e = { path = "../fs-truss-e2e" }
+fs-oed-e2e = { path = "../fs-oed-e2e" }
+fs-neuroshape-e2e = { path = "../fs-neuroshape-e2e" }
+fs-grammar-e2e = { path = "../fs-grammar-e2e" }
+fs-adaptbo-e2e = { path = "../fs-adaptbo-e2e" }
+fs-flowcert-e2e = { path = "../fs-flowcert-e2e" }
 
 # wasm-bindgen only enters the wasm32 build — native builds stay dependency-clean.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
