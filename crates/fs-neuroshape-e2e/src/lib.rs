@@ -78,6 +78,9 @@ pub struct NeuroShapeReport {
     pub surface_crossings: usize,
     /// The largest radius at which a crossing was found (must be inside the ring).
     pub max_crossing_radius: f64,
+    /// The smallest radius at which a crossing was found — the NEAREST surface
+    /// point; the safe step radius must under-estimate it (no-tunnel soundness).
+    pub nearest_surface_radius: f64,
     /// The topology certificate color (`Verified` — IBP is sound).
     pub topology_color: Color,
 }
@@ -142,6 +145,11 @@ pub fn run_campaign(net: &MlpSdf, ring_r: f64, inner: f64) -> NeuroShapeReport {
     );
     let crossings = grid.isocontour_crossings(0.0);
     let max_crossing_radius = crossings.iter().copied().map(radius).fold(0.0, f64::max);
+    let nearest_surface_radius = crossings
+        .iter()
+        .copied()
+        .map(radius)
+        .fold(f64::INFINITY, f64::min);
 
     // The topology claim is Verified iff the interval certificate closed:
     // non-empty interior trapped by a certified-positive ring.
@@ -169,6 +177,7 @@ pub fn run_campaign(net: &MlpSdf, ring_r: f64, inner: f64) -> NeuroShapeReport {
         single_minimum,
         surface_crossings: crossings.len(),
         max_crossing_radius,
+        nearest_surface_radius,
         topology_color,
     }
 }

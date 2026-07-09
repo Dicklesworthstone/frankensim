@@ -34,8 +34,15 @@ fn a_fabricable_program_family_is_illuminated_and_simplified_soundly() {
         "certified error {}",
         report.max_certified_error
     );
-    // FABRICABILITY: some elites satisfy the minimum feature size.
+    // FABRICABILITY: the constraint genuinely discriminates — some elites pass
+    // the minimum feature size and some (the thin-sphere ones) do not.
     assert!(report.fab_satisfied > 0);
+    assert!(
+        report.fab_satisfied < report.num_elites,
+        "fab did not discriminate: {}/{}",
+        report.fab_satisfied,
+        report.num_elites
+    );
     // the headline claim is Verified (matches + fabricable + sound).
     assert!(matches!(report.headline_color, Color::Verified { .. }));
     println!(

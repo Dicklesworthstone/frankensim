@@ -100,7 +100,9 @@ pub struct GrammarReport {
 pub fn run_campaign(match_tol: f64, simplify_tol: f64) -> GrammarReport {
     let target = target();
     let samples = sample_points();
-    let fab = min_feature_size(0.5);
+    // A minimum-feature-size rule that actually discriminates: the thinnest
+    // (r=0.7) spheres fail it, so not every program is fabricable.
+    let fab = min_feature_size(0.8);
 
     let r_vals = [0.7, 0.9, 1.0, 1.1];
     let d_vals = [0.6, 0.8, 1.0];

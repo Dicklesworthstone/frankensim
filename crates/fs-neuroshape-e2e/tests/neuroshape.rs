@@ -18,14 +18,15 @@ fn the_neural_shape_topology_is_certified() {
     // positive, finite, non-tunneling distance.
     assert!(report.origin_value < 0.0, "origin {}", report.origin_value);
     assert!(report.safe_radius > 0.0 && report.safe_radius.is_finite());
-    // the safe radius must UNDER-estimate the true distance to the surface
-    // (every zero crossing is farther than one safe step).
+    // the safe radius must UNDER-estimate the distance to the NEAREST surface
+    // point — the actual no-tunnel soundness guarantee (a Lipschitz theorem).
     assert!(
-        report.safe_radius < report.max_crossing_radius,
-        "safe {} !< nearest surface ~{}",
+        report.safe_radius < report.nearest_surface_radius,
+        "safe {} !< nearest surface {}",
         report.safe_radius,
-        report.max_crossing_radius
+        report.nearest_surface_radius
     );
+    assert!(report.nearest_surface_radius <= report.max_crossing_radius);
     // TOPOLOGY, PROVEN: a certified-inside interior trapped by a certified
     // positive ring ⇒ a single bounded component.
     assert!(

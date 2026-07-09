@@ -179,16 +179,33 @@ pub fn run_campaign(families: &[Family], alpha: f64, sigma: f64, n: usize) -> Ro
         });
     }
 
-    let nominal_winner = verdicts
+    // Winners are chosen among CERTIFIED optima (finite, SOS-proven); an
+    // unbounded-below family has no real optimum and must not win. Fall back to
+    // all only if nothing was certified.
+    let pool: Vec<usize> = {
+        let certified: Vec<usize> = (0..verdicts.len())
+            .filter(|&i| matches!(verdicts[i].nominal_color, Color::Verified { .. }))
+            .collect();
+        if certified.is_empty() {
+            (0..verdicts.len()).collect()
+        } else {
+            certified
+        }
+    };
+    let nominal_winner = pool
         .iter()
-        .min_by(|a, b| a.nominal_cost.total_cmp(&b.nominal_cost))
-        .map(|v| v.name.clone())
-        .unwrap_or_default();
-    let robust_idx = verdicts
+        .copied()
+        .min_by(|&a, &b| {
+            verdicts[a]
+                .nominal_cost
+                .total_cmp(&verdicts[b].nominal_cost)
+        })
+        .map_or_else(String::new, |i| verdicts[i].name.clone());
+    let robust_idx = pool
         .iter()
-        .enumerate()
-        .min_by(|(_, a), (_, b)| a.robust_cost.total_cmp(&b.robust_cost))
-        .map_or(0, |(i, _)| i);
+        .copied()
+        .min_by(|&a, &b| verdicts[a].robust_cost.total_cmp(&verdicts[b].robust_cost))
+        .unwrap_or(0);
     let robust_winner = verdicts[robust_idx].name.clone();
     // Headline rank = weakest input color of the robust winner (CVaR is a sample
     // statistic, so the robust claim is Estimated — no laundering).

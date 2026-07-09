@@ -76,6 +76,10 @@ fn a_downward_family_is_not_certified() {
     assert_eq!(report.certified_count, 1);
     let bad = report.families.iter().find(|v| v.name == "bad").unwrap();
     assert!(matches!(bad.nominal_color, Color::Estimated { .. }));
+    // the unbounded family (infimum −∞) must NOT be declared the winner — only
+    // certified optima can win.
+    assert_eq!(report.nominal_winner, "ok");
+    assert_eq!(report.robust_winner, "ok");
 }
 
 #[test]

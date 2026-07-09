@@ -6,11 +6,13 @@ use fs_evidence::Color;
 use fs_schedule_e2e::{Study, run_campaign};
 use fs_voi::{Action, ActionKind, DesignEstimate, Uncertainty};
 
+// Candidate COSTS (fs-voi minimizes, so lower is better). A is cheapest but B
+// is close and more uncertain — a live ranking ambiguity; C is clearly costlier.
 fn designs() -> Vec<DesignEstimate> {
     vec![
         DesignEstimate::new(
             "A",
-            1.00,
+            0.60,
             Uncertainty {
                 numerical: 0.05,
                 statistical: 0.05,
@@ -19,7 +21,7 @@ fn designs() -> Vec<DesignEstimate> {
         ),
         DesignEstimate::new(
             "B",
-            0.95,
+            0.65,
             Uncertainty {
                 numerical: 0.08,
                 statistical: 0.06,
@@ -28,7 +30,7 @@ fn designs() -> Vec<DesignEstimate> {
         ),
         DesignEstimate::new(
             "C",
-            0.70,
+            0.90,
             Uncertainty {
                 numerical: 0.05,
                 statistical: 0.05,
@@ -87,11 +89,12 @@ fn the_schedule_and_the_decision_are_both_certified() {
     assert_eq!(report.critical_path, vec![3, 4]);
     assert_eq!(report.bottleneck.as_deref(), Some("windtunnel-A"));
     assert!(report.slack_studies.contains(&"hifi-B".to_string()));
-    // WHETHER: A leads, but B is a live contender — a real ranking ambiguity
-    // (B carries more uncertainty, so the flip probability is substantial).
+    // WHETHER: A is the cheapest (leader), but B is a live contender — a real
+    // ranking ambiguity, so the flip probability is substantial yet below 0.5
+    // (the leader is still more likely to hold).
     assert_eq!(report.leading_design, "A");
     assert!(
-        report.flip_risk > 0.05 && report.flip_risk < 1.0,
+        report.flip_risk > 0.05 && report.flip_risk < 0.5,
         "flip {}",
         report.flip_risk
     );
@@ -116,11 +119,12 @@ fn the_schedule_and_the_decision_are_both_certified() {
 
 #[test]
 fn a_robust_decision_recommends_stop() {
-    // C is dominant and the others are far behind: no study is worth its cost.
+    // A is far cheaper than B and both are near-certain: no study is worth its
+    // cost, so the campaign recommends STOP.
     let clear = vec![
         DesignEstimate::new(
             "A",
-            1.0,
+            0.30,
             Uncertainty {
                 numerical: 0.01,
                 statistical: 0.01,
@@ -129,7 +133,7 @@ fn a_robust_decision_recommends_stop() {
         ),
         DesignEstimate::new(
             "B",
-            0.3,
+            1.00,
             Uncertainty {
                 numerical: 0.01,
                 statistical: 0.01,
@@ -140,6 +144,7 @@ fn a_robust_decision_recommends_stop() {
     let report = run_campaign(&studies(), &clear, &actions(), 0.5);
     assert!(report.should_stop, "rec {}", report.recommendation);
     assert!(report.recommendation.starts_with("Stop:"));
+    assert_eq!(report.leading_design, "A");
 }
 
 #[test]

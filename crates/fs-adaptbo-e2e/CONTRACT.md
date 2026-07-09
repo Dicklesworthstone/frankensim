@@ -14,7 +14,8 @@ point downward.
 - `objective(x) -> f64` — a tilted double-well polynomial on `[0, 4]`.
 - `run_campaign(max_iters, delta, alpha) -> AdaptBoReport` — runs GP/EI BO,
   stops when a betting e-process on the per-step stall indicator rejects at
-  `alpha`, and reports the anytime-valid confidence sequence on the optimum.
+  `alpha`, and reports an anytime-valid confidence sequence on the best-value
+  trace.
 
 ## Invariants
 
@@ -24,7 +25,7 @@ point downward.
   `ln(1/α)` (Ville's threshold), so peeking after every iteration keeps the
   false-stop rate `≤ α`. `stopped_early` ⇒ `Verified` stop color; the GP
   surrogate is `Estimated`.
-- A shrinking anytime-valid interval on the optimum is always reported.
+- A shrinking anytime-valid interval on the best-value trace is always reported.
 - With an impossibly small `delta`, no step stalls and the search runs to the cap.
 - Deterministic (fixed grid + polynomial objective; no RNG, no libm).
 

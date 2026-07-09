@@ -12,7 +12,8 @@
 //!   exact by construction. It also names the bottleneck study (tuning anything
 //!   with positive slack cannot move the finish).
 //! - **WHETHER to keep going?** ([`fs_voi`]) — the candidate designs have
-//!   uncertain performance from numerical / statistical / model sources. The
+//!   uncertain COST (lower is better) from numerical / statistical / model
+//!   sources. The
 //!   Expected Value of Perfect Information (EVPI) measures how much the current
 //!   ranking ambiguity is worth resolving; `recommend` picks the highest
 //!   value-per-cost study, OR says STOP when the decision is already robust
@@ -65,7 +66,7 @@ pub struct ScheduleReport {
     pub slack_studies: Vec<String>,
     /// The current Expected Value of Perfect Information (decision ambiguity).
     pub evpi: f64,
-    /// The leading design by mean performance.
+    /// The leading (lowest-cost) design — `fs-voi` minimizes.
     pub leading_design: String,
     /// Probability the ranking flips between the top two designs.
     pub flip_risk: f64,
@@ -114,8 +115,9 @@ pub fn run_campaign(
     // --- WHETHER: value of information over the candidate designs. ---
     let current_evpi = evpi(designs);
     // Leading design + the top-two flip risk (the decision's fragility).
+    // fs-voi MINIMIZES, so the leader is the lowest-cost design.
     let mut ranked: Vec<&DesignEstimate> = designs.iter().collect();
-    ranked.sort_by(|a, b| b.mean.total_cmp(&a.mean));
+    ranked.sort_by(|a, b| a.mean.total_cmp(&b.mean));
     let leading_design = ranked.first().map(|d| d.name.clone()).unwrap_or_default();
     let flip_risk = if ranked.len() >= 2 {
         ranking_flip_probability(ranked[0], ranked[1])

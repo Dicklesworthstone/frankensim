@@ -16,8 +16,8 @@
 //!   null is "we are still improving often enough"; when the e-value crosses
 //!   `1/α` the search stops — an ANYTIME-VALID decision (Ville's inequality), so
 //!   testing after every iteration never inflates the false-stop rate beyond `α`.
-//! - **The optimum's interval** ([`fs_eproc::GaussianMixtureCs`]): an
-//!   anytime-valid confidence sequence on the best value seen.
+//! - **A trace interval** ([`fs_eproc::GaussianMixtureCs`]): an anytime-valid
+//!   confidence sequence on the best-value trace (a running-mean diagnostic).
 //! - **Honest colors** ([`fs_evidence`]): the anytime stop is `Verified`; the GP
 //!   surrogate is `Estimated`.
 //!
@@ -50,7 +50,8 @@ pub struct AdaptBoReport {
     pub stopped_early: bool,
     /// The final e-process log e-value (evidence the search has stalled).
     pub log_e_value: f64,
-    /// The anytime-valid confidence-sequence center on the optimum value.
+    /// Center of the anytime-valid confidence sequence on the best-value TRACE
+    /// (a running-mean diagnostic, not a bound on the true optimum).
     pub ci_center: f64,
     /// Its (shrinking) radius.
     pub ci_radius: f64,
