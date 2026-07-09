@@ -28,6 +28,7 @@ pub mod c64;
 pub mod dd;
 pub mod det;
 pub mod eft;
+pub mod payne;
 
 /// Crate version, re-exported for provenance stamping.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

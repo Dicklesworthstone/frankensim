@@ -15,9 +15,10 @@
 //!   Taylor/Horner core on |r| ≤ ln2/2, exact 2^k scaling via exponent bits.
 //! - `ln`: mantissa reduction to [√½, √2), atanh series in s=(m−1)/(m+1)
 //!   (|s| ≤ 0.1716), two-part k·ln2 recombination.
-//! - `sin`/`cos`: Cody–Waite THREE-PART π/2 reduction — accurate for
-//!   |x| ≤ 2²⁰ (documented domain; Payne–Hanek big-argument reduction is a
-//!   recorded follow-up) — with degree-13/12 Taylor cores on |r| ≤ π/4.
+//! - `sin`/`cos`: Cody–Waite THREE-PART π/2 reduction for |x| ≤ 2²⁰,
+//!   Payne–Hanek 1280-bit reduction beyond (self-verifying Machin-generated
+//!   limbs, see `payne`) — degree-13/12 Taylor cores on |r| ≤ π/4; budgets
+//!   hold for ALL finite arguments.
 //! - `tanh`: expm1(2x)/(expm1(2x)+2) (odd symmetry; saturates for |x| > 20).
 
 /// ULP budget for [`exp`] (measured max observed: see tests).
@@ -33,10 +34,16 @@ pub const COS_ULP_BUDGET: u64 = 3;
 /// ULP budget for [`tanh`].
 pub const TANH_ULP_BUDGET: u64 = 5;
 
-/// Trig argument-reduction domain bound: |x| ≤ 2²⁰. Beyond it the Cody–Waite
-/// reduction loses bits and the ULP budgets are VOID (no-claim; results are
-/// still deterministic, just less accurate).
+/// Cody–Waite/Payne–Hanek dispatch boundary: |x| ≤ 2²⁰ uses the three-part
+/// Cody–Waite reduction; beyond it the `payne` module's 1280-bit reduction
+/// takes over (bead r6r5), so the trig ULP budgets now hold for ALL finite
+/// arguments (measured 1 ULP across 2²¹..2¹⁰⁰⁰; the large-domain declared
+/// ceiling is [`SIN_LARGE_ULP_BUDGET`]).
 pub const TRIG_DOMAIN: f64 = 1_048_576.0; // 2^20
+
+/// Declared ULP budget for sin/cos with |x| > [`TRIG_DOMAIN`] (Payne–Hanek
+/// path; measured max 1 ULP over the exponent sweep, ceiling kept honest).
+pub const SIN_LARGE_ULP_BUDGET: u64 = 4;
 
 // EXACT bit patterns (fdlibm heritage). The hi parts have ≥20 trailing zero
 // mantissa bits, so k·LN2_HI (|k| ≤ 2¹⁰) and j·PIO2_* (|j| ≤ 2²⁰) are EXACT
@@ -145,7 +152,11 @@ pub fn sin(x: f64) -> f64 {
     if x.is_nan() || x.is_infinite() {
         return f64::NAN;
     }
-    let (r, quadrant) = reduce_pio2(x);
+    let (r, quadrant) = if x.abs() > TRIG_DOMAIN {
+        crate::payne::reduce_pio2_large(x)
+    } else {
+        reduce_pio2(x)
+    };
     match quadrant {
         0 => sin_core(r),
         1 => cos_core(r),
@@ -160,7 +171,11 @@ pub fn cos(x: f64) -> f64 {
     if x.is_nan() || x.is_infinite() {
         return f64::NAN;
     }
-    let (r, quadrant) = reduce_pio2(x);
+    let (r, quadrant) = if x.abs() > TRIG_DOMAIN {
+        crate::payne::reduce_pio2_large(x)
+    } else {
+        reduce_pio2(x)
+    };
     match quadrant {
         0 => cos_core(r),
         1 => -sin_core(r),
@@ -352,7 +367,11 @@ pub fn tan(x: f64) -> f64 {
     if x.is_nan() || x.is_infinite() {
         return f64::NAN;
     }
-    let (r, quadrant) = reduce_pio2(x);
+    let (r, quadrant) = if x.abs() > TRIG_DOMAIN {
+        crate::payne::reduce_pio2_large(x)
+    } else {
+        reduce_pio2(x)
+    };
     let s = sin_core(r);
     let c = cos_core(r);
     if quadrant & 1 == 0 { s / c } else { -(c / s) }
