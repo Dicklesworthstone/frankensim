@@ -26,7 +26,11 @@ gated on fs-tilelang and the autotuner — see No-claim boundaries.
 - `Sell` — SELL-C-σ, stable-sorted by descending row length within σ-row
   windows, lane-fastest layout. Stores TRUE per-row lengths; pad slots exist
   physically but are never read. `to_csr` is bitwise lossless.
-- `ops::{transpose, symmetrize, spgemm}` — pattern algebra on canonical CSR.
+- `ops::{transpose, symmetrize, spgemm, spgemm_sparse_spa}` — pattern
+  algebra on canonical CSR. `spgemm` is the dense-SPA reference path;
+  `spgemm_sparse_spa` uses a per-row BTree accumulator for very wide products
+  without O(ncols) scratch, while preserving the reference accumulation order
+  and ascending-column output.
 - `precond::{Precond, IdentityPrecond, Chebyshev, Ilu0/ilu0/IluBreakdown,
   SaAmg, pcg/PcgReport, lambda_max_estimate}` — the solver-stack toolkit.
   `Precond::apply(r, z)` is the operator interface. Chebyshev: degree-k
@@ -61,11 +65,14 @@ gated on fs-tilelang and the autotuner — see No-claim boundaries.
    `midpoint` commutes) and fixes symmetric inputs.
 6. `spgemm(A, I) = A` and `spgemm(I, A) = A` bitwise; contributions to each
    C[i][j] accumulate in ascending-k order (deterministic).
-7. Preconditioner setup and solves are rerun-deterministic BITWISE
+7. `spgemm_sparse_spa(A, B) = spgemm(A, B)` bitwise on tested random and
+   very-wide products; it changes accumulator storage only, not numerical
+   order or output canonicalization.
+8. Preconditioner setup and solves are rerun-deterministic BITWISE
    (hierarchy shapes, iteration counts, and solutions — tested), and the
    spectral-bound estimate ENCLOSES the true λmax on tested fixtures
    (over-estimation safe by construction, safety factor 1.1).
-8. AMG on 2D Poisson: near-grid-independent PCG iterations (32² vs 64²
+9. AMG on 2D Poisson: near-grid-independent PCG iterations (32² vs 64²
    within a tested band), operator complexity < 2, and the anisotropic
    ε = 1e-3 fixture converges (tested).
 
@@ -104,8 +111,9 @@ suites: assembly canonicalization + stream-order invariance, SpMV vs dense
 oracle, linearity, adversarial patterns (empty rows, dense row, single
 column, empty matrix), BSR/SELL round-trips, SELL padding economics,
 transpose involution, symmetrize bitwise symmetry, SpGEMM vs dense oracle +
-Laplacian-square pattern sanity, structured rejections. Any reimplementation
-must pass the conformance battery bit-for-bit.
+Laplacian-square pattern sanity, sparse-SPA SpGEMM vs dense-SPA reference on
+random and 2e6-column-wide products, structured rejections. Any
+reimplementation must pass the conformance battery bit-for-bit.
 
 ## No-claim boundaries
 - **No performance claims yet**: scalar reference kernels; the ≥85% STREAM
@@ -115,8 +123,9 @@ must pass the conformance battery bit-for-bit.
 - BSR `to_csr` is only structurally lossless for matrices without stored
   exact-zero values (fill is dropped by value test); the dense expansion is
   always bitwise faithful.
-- SpGEMM uses a dense SPA per row (O(ncols) scratch); hash-SPA for very wide
-  matrices is unclaimed.
+- `spgemm_sparse_spa` is a deterministic scalar BTree-accumulator path, not a
+  tuned hash-SPA throughput path; wide-matrix memory shape is improved, but no
+  speedup claim is made.
 - ILU(0) is sequential (level scheduling recorded); IC(0)-specific
   symmetric storage is unclaimed (ILU covers SPD use). Supernodal
   Cholesky deferred per its own scope cap. AMG coarsest solve is
