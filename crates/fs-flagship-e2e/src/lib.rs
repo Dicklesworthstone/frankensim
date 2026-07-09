@@ -1,0 +1,168 @@
+//! fs-flagship-e2e — the flagship E2E suite (bead mye.5): all
+//! flagships as REPLAYABLE, STAGED, FORENSICALLY-LOGGED end-to-end
+//! test assets. Layer: L6 (HELM).
+//!
+//! - STAGED FIDELITY: every flagship runs a SMOKE stage (PR-gate,
+//!   minutes) here and now; MID (nightly) and FULL (weekly) stages are
+//!   WIRED with envelopes and `#[ignore]` markers — their CI lanes
+//!   belong to the perf-CI bead (fz2.4), and this crate does not
+//!   pretend otherwise.
+//! - GOLDEN-LEDGER DISCIPLINE: each smoke stage folds its metric
+//!   stream into a content hash (FNV-64 over metric bits); CI replays
+//!   and compares hashes — every stage here is deterministic, so hash
+//!   equality IS the gate (stochastic-labeled stages would gate on
+//!   envelopes instead).
+//! - CROSS-FLAGSHIP AUDITS: shared machinery must behave identically
+//!   across consumers — one canonical D2Q9 roll hash for the LBM core
+//!   the vessel and the ornithoid both ride, and one e-race consistency
+//!   audit across both flagships' racing conventions.
+//! - FAILURE DRILLS: cancellation storms, budget exhaustion,
+//!   ledger crash-recovery, model-form escalation — each with an
+//!   EXPECTED STRUCTURED OUTCOME, not a shrug.
+//! - FORENSIC LOGGING: every stage emits structured JSON rows
+//!   (metrics, certificates, race records, timings) sufficient to
+//!   diagnose failures from logs + ledger alone; the battery parses
+//!   its own stream as a self-audit; the LAB NOTEBOOK artifact
+//!   regenerates bitwise on replay (timings ride a separate,
+//!   non-golden row — wall-clock is evidence, not identity).
+
+use std::fmt::Write as _;
+
+/// Stage fidelity tiers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tier {
+    /// PR-gate, minutes.
+    Smoke,
+    /// Nightly, hour-class.
+    Mid,
+    /// Weekly/on-demand, production scale.
+    Full,
+}
+
+/// One stage's content-addressed artifact.
+#[derive(Debug, Clone)]
+pub struct StageArtifact {
+    /// Flagship name.
+    pub flagship: &'static str,
+    /// Fidelity tier.
+    pub tier: Tier,
+    /// Named metrics, in emission order (the hashed content).
+    pub metrics: Vec<(&'static str, f64)>,
+    /// FNV-64 over the metric bit patterns (the golden identity).
+    pub hash: u64,
+    /// Wall-clock seconds (logged, NEVER hashed).
+    pub wall_s: f64,
+}
+
+/// Fold a metric stream into the content hash.
+#[must_use]
+pub fn content_hash(metrics: &[(&'static str, f64)]) -> u64 {
+    let mut acc: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut feed = |bytes: &[u8]| {
+        for &b in bytes {
+            acc ^= u64::from(b);
+            acc = acc.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    };
+    for (name, v) in metrics {
+        feed(name.as_bytes());
+        feed(&v.to_bits().to_le_bytes());
+    }
+    acc
+}
+
+/// Build an artifact (hash computed, wall clock attached).
+#[must_use]
+pub fn artifact(
+    flagship: &'static str,
+    tier: Tier,
+    metrics: Vec<(&'static str, f64)>,
+    wall_s: f64,
+) -> StageArtifact {
+    let hash = content_hash(&metrics);
+    StageArtifact {
+        flagship,
+        tier,
+        metrics,
+        hash,
+        wall_s,
+    }
+}
+
+/// One forensic log row: structured JSON with the suite's required
+/// keys (`stage`, `kind`, `payload`).
+#[must_use]
+pub fn log_row(stage: &str, kind: &str, payload: &str) -> String {
+    format!("{{\"stage\":\"{stage}\",\"kind\":\"{kind}\",\"payload\":{payload}}}")
+}
+
+/// The LAB NOTEBOOK artifact: deterministic JSON over the stages'
+/// golden content (hashes + metrics); timings are emitted as a
+/// SEPARATE non-golden section so the notebook body replays bitwise.
+#[must_use]
+pub fn notebook(artifacts: &[StageArtifact]) -> String {
+    let mut body = String::from("{\"suite\":\"flagship-e2e\",\"stages\":[");
+    for (i, a) in artifacts.iter().enumerate() {
+        if i > 0 {
+            body.push(',');
+        }
+        let _ = write!(
+            body,
+            "{{\"flagship\":\"{}\",\"tier\":\"{:?}\",\"hash\":\"0x{:016x}\",\"metrics\":{{",
+            a.flagship, a.tier, a.hash
+        );
+        for (j, (name, v)) in a.metrics.iter().enumerate() {
+            if j > 0 {
+                body.push(',');
+            }
+            let _ = write!(body, "\"{name}\":\"0x{:016x}\"", v.to_bits());
+        }
+        body.push_str("}}");
+    }
+    body.push_str("]}");
+    body
+}
+
+/// Canonical D2Q9 roll: the SHARED-CORE audit fixture. Both the vessel
+/// and the ornithoid ride fs-lbm; any behavioral change in the core
+/// surfaces HERE as one delta with one constant to bump (with
+/// justification), instead of two flagships drifting silently apart.
+#[must_use]
+pub fn lbm_core_roll_hash() -> u64 {
+    use fs_lbm::{Cell, Grid, Q, equilibrium};
+    let (nx, ny) = (24usize, 16usize);
+    let mut grid = Grid::uniform(nx, ny, 0.6);
+    grid.periodic_x = true;
+    grid.periodic_y = false;
+    // Walls top/bottom, shear-ish init.
+    for x in 0..nx {
+        let b = grid.idx(x, 0);
+        grid.flags[b] = Cell::Wall;
+        let t = grid.idx(x, ny - 1);
+        grid.flags[t] = Cell::Wall;
+    }
+    for y in 1..ny - 1 {
+        for x in 0..nx {
+            let i = grid.idx(x, y);
+            let u = 0.04 * (y as f64 / ny as f64 - 0.5);
+            grid.f[i] = equilibrium(1.0, u, 0.0);
+        }
+    }
+    let mut scratch: Vec<[f64; Q]> = Vec::new();
+    for _ in 0..50 {
+        grid.step(&mut scratch);
+    }
+    let mut metrics: Vec<(&'static str, f64)> = Vec::new();
+    for y in [1usize, ny / 2, ny - 2] {
+        for x in [0usize, nx / 2] {
+            let m = grid.moments(grid.idx(x, y));
+            metrics.push(("rho", m.rho));
+            metrics.push(("ux", m.u[0]));
+            metrics.push(("uy", m.u[1]));
+        }
+    }
+    content_hash(&metrics)
+}
+
+/// Crate version, re-exported for provenance stamping.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");

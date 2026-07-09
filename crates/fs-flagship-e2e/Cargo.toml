@@ -1,0 +1,28 @@
+[package]
+name = "fs-flagship-e2e"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Flagship e2e suite (bead mye.5): staged smoke/mid/full golden ledgers, cross-flagship audits, failure drills, forensic logging — the system-level Gauntlet tier."
+
+[package.metadata.frankensim]
+layer = "L6"
+
+[dependencies]
+fs-exec = { path = "../fs-exec" }
+fs-frame = { path = "../fs-frame" }
+fs-lbm = { path = "../fs-lbm" }
+fs-ledger = { path = "../fs-ledger" }
+fs-marquee = { path = "../fs-marquee" }
+fs-ornith = { path = "../fs-ornith" }
+fs-qty = { path = "../fs-qty" }
+fs-race = { path = "../fs-race" }
+fs-scenario = { path = "../fs-scenario" }
+fs-vessel = { path = "../fs-vessel" }
+
+[dev-dependencies]
+
+[lints]
+workspace = true

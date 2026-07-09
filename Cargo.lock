@@ -1073,6 +1073,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-flagship-e2e"
+version = "0.0.1"
+dependencies = [
+ "fs-exec",
+ "fs-frame",
+ "fs-lbm",
+ "fs-ledger",
+ "fs-marquee",
+ "fs-ornith",
+ "fs-qty",
+ "fs-race",
+ "fs-scenario",
+ "fs-vessel",
+]
+
+[[package]]
 name = "fs-flowcert-e2e"
 version = "0.0.1"
 dependencies = [
