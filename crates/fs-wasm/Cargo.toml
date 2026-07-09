@@ -27,10 +27,23 @@ fs-ad = { path = "../fs-ad" }
 fs-fft = { path = "../fs-fft" }
 fs-la = { path = "../fs-la" }
 fs-ga = { path = "../fs-ga" }
+# ── UNLOCKED upper-stack kernels (via asupersync wasm-browser-prod) ──
+fs-geom = { path = "../fs-geom" }
+fs-feec = { path = "../fs-feec" }
+fs-flux = { path = "../fs-flux" }
+fs-cutfem = { path = "../fs-cutfem" }
+fs-solver = { path = "../fs-solver" }
+fs-bo = { path = "../fs-bo" }
+fs-xform = { path = "../fs-xform" }
+fs-dfo = { path = "../fs-dfo" }
+fs-symmetry = { path = "../fs-symmetry" }
 
 # wasm-bindgen only enters the wasm32 build — native builds stay dependency-clean.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "0.2"
+# asupersync in browser mode + JS-backed entropy for wasm32
+asupersync = { path = "../../../asupersync", default-features = false, features = ["wasm-browser-prod"] }
+getrandom = { version = "0.4", features = ["wasm_js"] }
 
 [lints.rust]
 unsafe_code = "forbid"
