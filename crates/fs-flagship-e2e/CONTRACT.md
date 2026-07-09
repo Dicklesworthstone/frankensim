@@ -3,9 +3,11 @@
 Flagship e2e suite (bead `frankensim-epic-flagships-mye.5`): staged
 smoke/mid/full replay lanes for the flagship crates, cross-flagship
 audits, failure drills, forensic logs, and a deterministic lab
-notebook artifact. This crate is the suite scaffold while the bead is
-in progress; golden constants still need to be frozen before the
-smoke battery is a closing proof.
+notebook artifact. Golden constants are FROZEN (bead mye.5): vessel
+0xe621_48d4_490c_a887, ornith 0xa6fa_6460_e7c7_972f, frame
+0x05e1_d182_48d2_949f, shared LBM core 0x6841_e3c0_508e_eba5 —
+replay-equality verified before freezing; bump only with a semantic
+justification in the owning flagship or shared core.
 
 ## Purpose and layer
 
@@ -100,10 +102,9 @@ than Cargo features.
 - `fe2e_mid_stages` and `fe2e_full_stages` are intentionally ignored
   lane placeholders until the perf/CI cadence lands.
 
-Current caveat: smoke golden constants are still placeholders in the
-initial scaffold. The crate compiles, but the non-ignored smoke
-battery is not yet the closing proof until those constants are
-measured, reviewed, and frozen with rationale.
+Current caveat: the smoke battery is the fast replay gate for the
+frozen constants above. Mid/full fidelity envelopes remain ignored
+until their perf/CI cadence lands.
 
 ## No-claim boundaries
 
