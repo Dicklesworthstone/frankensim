@@ -23,11 +23,13 @@ pub mod krylov;
 pub mod mixed;
 pub mod op;
 pub mod pmg;
+pub mod stokes;
 
-pub use krylov::{CgState, GmresState, MinresState, SolveReport, StallDiagnosis};
+pub use krylov::{CgState, GmresState, MinresState, PminresState, SolveReport, StallDiagnosis};
 pub use mixed::{CsrF32, MixedReport, mixed_cg_refine};
 pub use op::{CsrOp, LinearOp};
 pub use pmg::{MaskedTensorOp, PMultigrid};
+pub use stokes::{StokesBlockDiag, StokesOp, StokesSystem};
 
 /// Deterministic inner product: elementwise products folded through
 /// the fixed-shape chunked combiner (shape = f(length) only).

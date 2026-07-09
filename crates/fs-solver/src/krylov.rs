@@ -269,6 +269,144 @@ impl MinresState {
     }
 }
 
+// -------------------------------------------------------------------- PMINRES
+
+/// Resumable PRECONDITIONED MINRES for symmetric (possibly indefinite)
+/// operators with an SPD preconditioner M ≈ |A|⁻¹: Lanczos in the
+/// M-inner product (Choi/Paige–Saunders shape). The saddle-point
+/// driver (Stokes block preconditioners, bead avuw) is the consumer.
+/// `rel_residual` is the residual estimate in the M-norm — exact in
+/// exact arithmetic; the battery cross-checks the TRUE residual.
+#[derive(Debug, Clone)]
+pub struct PminresState {
+    /// Current iterate.
+    pub x: Vec<f64>,
+    v_prev: Vec<f64>,
+    v: Vec<f64>,
+    z: Vec<f64>,
+    w_prev2: Vec<f64>,
+    w_prev1: Vec<f64>,
+    beta: f64,
+    c_km1: f64,
+    c_km2: f64,
+    s_km1: f64,
+    s_km2: f64,
+    eta: f64,
+    bnorm: f64,
+    /// Iterations performed so far.
+    pub iters: usize,
+    /// Relative (M-norm) residual estimate after each iteration.
+    pub history: Vec<f64>,
+}
+
+impl PminresState {
+    /// Start a solve of A·x = b from x₀ = 0 with SPD preconditioner `m`.
+    ///
+    /// # Panics
+    /// If `m` is not positive on b (⟨b, M·b⟩ ≤ 0 — an SPD violation).
+    #[must_use]
+    pub fn new<A: LinearOp, P: Precond>(a: &A, m: &P, b: &[f64]) -> PminresState {
+        let n = a.n();
+        assert_eq!(b.len(), n, "rhs length mismatch");
+        let mut z = vec![0.0f64; n];
+        m.apply(b, &mut z);
+        let bz = dot(b, &z);
+        assert!(bz >= 0.0, "preconditioner must be SPD (b'Mb = {bz} < 0)");
+        let beta = fs_math::det::sqrt(bz).max(f64::MIN_POSITIVE);
+        let v: Vec<f64> = b.iter().map(|&bi| bi / beta).collect();
+        for zi in &mut z {
+            *zi /= beta;
+        }
+        PminresState {
+            x: vec![0.0f64; n],
+            v_prev: vec![0.0f64; n],
+            v,
+            z,
+            w_prev2: vec![0.0f64; n],
+            w_prev1: vec![0.0f64; n],
+            beta,
+            c_km1: 1.0,
+            c_km2: 1.0,
+            s_km1: 0.0,
+            s_km2: 0.0,
+            eta: beta,
+            bnorm: beta,
+            iters: 0,
+            history: Vec::new(),
+        }
+    }
+
+    /// Current relative residual estimate (M-norm).
+    #[must_use]
+    pub fn rel_residual(&self) -> f64 {
+        self.eta.abs() / self.bnorm
+    }
+
+    /// Run until `tol` or `max_iters` additional iterations.
+    ///
+    /// # Panics
+    /// If the preconditioner loses positivity mid-flight.
+    pub fn run<A: LinearOp, P: Precond>(
+        &mut self,
+        a: &A,
+        m: &P,
+        tol: f64,
+        max_iters: usize,
+    ) -> SolveReport {
+        let n = a.n();
+        let mut p = vec![0.0f64; n];
+        let mut z_next = vec![0.0f64; n];
+        for _ in 0..max_iters {
+            if self.rel_residual() < tol {
+                break;
+            }
+            // Lanczos step in the M-inner product: operate on z = M·v.
+            a.apply(&self.z, &mut p);
+            let alpha = dot(&self.z, &p);
+            for (i, pi) in p.iter_mut().enumerate().take(n) {
+                *pi = alpha.mul_add(-self.v[i], self.beta.mul_add(-self.v_prev[i], *pi));
+            }
+            m.apply(&p, &mut z_next);
+            let vz = dot(&p, &z_next);
+            assert!(vz >= -1e-30, "preconditioner lost positivity: {vz}");
+            let beta_next = fs_math::det::sqrt(vz.max(0.0)).max(f64::MIN_POSITIVE);
+            // Givens: identical bookkeeping to plain MINRES.
+            let delta = self
+                .c_km1
+                .mul_add(alpha, -(self.c_km2 * self.s_km1 * self.beta));
+            let rho1 = fs_math::det::sqrt(delta.mul_add(delta, beta_next * beta_next));
+            let rho2 = self
+                .s_km1
+                .mul_add(alpha, self.c_km2 * self.c_km1 * self.beta);
+            let rho3 = self.s_km2 * self.beta;
+            let c_k = delta / rho1;
+            let s_k = beta_next / rho1;
+            // Direction update uses the PRECONDITIONED vector z.
+            for i in 0..n {
+                let w_k = (self.z[i] - rho3 * self.w_prev2[i] - rho2 * self.w_prev1[i]) / rho1;
+                self.x[i] = (c_k * self.eta).mul_add(w_k, self.x[i]);
+                self.w_prev2[i] = self.w_prev1[i];
+                self.w_prev1[i] = w_k;
+            }
+            self.eta *= -s_k;
+            // Roll the Lanczos pair.
+            for i in 0..n {
+                self.v_prev[i] = self.v[i];
+                self.v[i] = p[i] / beta_next;
+                self.z[i] = z_next[i] / beta_next;
+            }
+            self.beta = beta_next;
+            self.c_km2 = self.c_km1;
+            self.c_km1 = c_k;
+            self.s_km2 = self.s_km1;
+            self.s_km1 = s_k;
+            self.iters += 1;
+            self.history.push(self.rel_residual());
+        }
+        report(self.iters, &self.history, self.rel_residual(), tol)
+    }
+}
+
 // --------------------------------------------------------------------- GMRES
 
 /// Resumable restarted GMRES(m) for general operators. Resume
@@ -354,8 +492,8 @@ impl GmresState {
             g[0] = beta;
             let mut cols = 0usize;
             for j in 0..m {
-                apply(&basis[j], &mut scratch);
-                let mut w = scratch.clone();
+                let mut w = vec![0.0f64; n];
+                apply(&basis[j], &mut w);
                 for (i, vi) in basis.iter().enumerate() {
                     let hij = dot(vi, &w);
                     h[i * m + j] = hij;

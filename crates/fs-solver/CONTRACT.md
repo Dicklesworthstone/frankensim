@@ -19,12 +19,16 @@ structured stall diagnoses, never timeout mysteries).
 - `CgState` — resumable preconditioned CG (SPD; fs-sparse `Precond`
   slot). `MinresState` — resumable MINRES (symmetric indefinite;
   Paige–Saunders with explicit two-level Givens memory in the state).
-  `GmresState` — resumable restarted GMRES(m) (general operators;
+  `PminresState` — resumable preconditioned MINRES for symmetric
+  indefinite systems with an SPD split preconditioner; the Stokes
+  block-preconditioner battery is its first consumer. `GmresState` —
+  resumable restarted GMRES(m) (general operators;
   `transposed = true` runs Aᵀ through the SAME machinery and
   preconditioner slot). Resume granularity: CG/MINRES per ITERATION,
-  GMRES per RESTART CYCLE (the Arnoldi basis is deliberately not
-  checkpointed mid-cycle) — split runs at those boundaries are
-  BITWISE-equal to straight runs, `clone()` is the checkpoint.
+  P-MINRES per ITERATION, GMRES per RESTART CYCLE (the Arnoldi basis
+  is deliberately not checkpointed mid-cycle) — split runs at those
+  boundaries are BITWISE-equal to straight runs, `clone()` is the
+  checkpoint.
 - `SolveReport { iters, rel_residual, converged, history, diagnosis }`
   with `StallDiagnosis::{Plateau, BudgetExhausted, Breakdown}`:
   Plateau = < 5% relative progress over the last 50-iteration window
@@ -55,6 +59,24 @@ structured stall diagnoses, never timeout mysteries).
   spot-checks, fixed, gated).
 - `MaskedTensorOp` — the homogeneous-Dirichlet high-order Poisson
   apply as a `LinearOp`.
+- `PminresState` (bead avuw) — resumable PRECONDITIONED MINRES with an
+  SPD preconditioner (Lanczos in the M-inner product); `rel_residual`
+  estimates the M-norm residual (cross-checked against TRUE residuals
+  in the battery); resume is bitwise like the other Krylov states.
+- `stokes::{StokesSystem, StokesOp, StokesBlockDiag}` (bead avuw) —
+  the tensor Stokes saddle fixture Q_r³/P_{r−1}^disc with the
+  Silvester–Wathen block-diagonal preconditioner (p-MG per velocity
+  component + DIAGONAL pressure-mass inverse); constant-pressure null
+  handled by projection. MEASURED rejection on record: the full-tensor
+  Q_{r−1}^disc pressure (the bead's literal reading) is not uniformly
+  inf-sup stable — counts grew 44 → 101 → 137 across m = 2..4 at
+  r = 2 (the Q1/Q0 checkerboard family); the total-degree subset
+  flattens them to 26..61.
+- `StokesSystem`, `StokesOp`, `StokesBlockDiag` — unit-cube FEEC
+  tensor Stokes fixture over Q_r^3/P_{r-1}^disc with projected
+  constant-pressure null mode, block operator [[A, B^T], [B, 0]], and
+  SPD block-diagonal inverse preconditioner (p-MG per velocity
+  component plus diagonal pressure-mass inverse).
 - `mixed::{CsrF32, mixed_cg_refine, MixedReport}` — f32 INNER CG
   (storage AND arithmetic: half the memory traffic per iteration)
   under f64 iterative refinement with TRUE f64 residuals and scaled
@@ -124,6 +146,16 @@ a fixed envelope (≤ 80) while identity-preconditioned counts blow up
 (hard corner m = 4, r = 4: 9 vs 1192 — a 132× advantage), solutions
 matching identity-CG to 1e−7; deterministic dot; golden hash (bumped
 at x08j with justification: the smoother change is semantic).
+`tests/stokes_battery.rs` (5 cases): FEEC tensor Stokes fixture with
+P-MINRES + blockdiag(p-MG, pressure mass) agrees with a dense
+constant-pressure-pinned LU reference on m = 2, r = 2; velocity is
+divergence-free to solver tolerance; mesh/order ladder iteration
+envelope maxes at 61 iterations in the current battery; P-MINRES
+resume is bitwise at cuts 1/7/23; Stokes golden hash
+`0x5754_3908_cb41_7281`. The dense reference pins an actual
+cell-constant pressure coefficient; pinning an arbitrary high-order
+pressure mode leaves the nullspace intact and was rejected by the
+fresh-eyes audit.
 `tests/ladder_probe.rs` (bead x08j acceptance): FIXED smoothing degree
 3 across both ladders — order ladder m = 3, r = 2..6 iters
 [8, 8, 8, 9, 11] (max/min ≤ 1.5), mesh ladder r = 3, m = 2..5 iters
@@ -145,17 +177,19 @@ regression (singular-system CG diverges — must never read Plateau).
   Anisotropic/stretched meshes and non-tensor patches remain
   out-of-scope (the fast-diagonalization patch inverse requires the
   Kronecker structure).
-- Preconditioned MINRES (needs an SPD split preconditioner) and
-  flexible-GMRES (varying preconditioners) are follow-up scope; plain
+- Flexible-GMRES (varying preconditioners) is follow-up scope; plain
   CG with a varying preconditioner is known-broken (observed) — use
   GMRES or fix the preconditioner.
-- Saddle-point block preconditioners (Stokes-class, Schur
-  approximations over the fs-feec mixed spaces) are split scope (the
-  vector-MMS machinery they need is itself gated on the simplicial
-  vector families). The mixed-precision path measures its bandwidth
-  SPEEDUP on the perf lane (fz2.4 release-profile), not here; no
-  ladder policy engine yet (fs-la's `Ladder` decides for
-  factorizations; a Krylov-side policy joins when consumers exist).
+- Saddle-point block preconditioners are implemented only for the
+  unit-cube tensor Stokes fixture over Q_r^3/P_{r-1}^disc with
+  pressure-mass Schur approximation. General fs-feec simplicial
+  vector families, non-tensor mixed spaces, Navier-Stokes convection,
+  pressure-robust production discretizations, and broader Schur
+  approximations remain follow-up scope. The mixed-precision path
+  measures its bandwidth SPEEDUP on the perf lane (fz2.4
+  release-profile), not here; no ladder policy engine yet (fs-la's
+  `Ladder` decides for factorizations; a Krylov-side policy joins when
+  consumers exist).
 - No dense output of Krylov bases, no eigenvalue estimation service,
   no threading (fs-exec drivers own parallelism), no G4 cancellation
   storms yet (needs the Cx wiring).
