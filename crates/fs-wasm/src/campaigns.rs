@@ -247,7 +247,7 @@ pub fn fluttercert(lo: f64, hi: f64, steps: usize) -> Vec<f64> {
     let mut out = Vec::with_capacity(9 + 5 * s);
     out.push(s as f64);
     out.push(fon(report.lyapunov_boundary));
-    out.push(fon(report.spectral_boundary));
+    out.push(fon(report.eigen_boundary));
     out.push(if report.boundaries_agree { 1.0 } else { 0.0 });
     out.push(fon(report.naive_boundary));
     out.push(fon(report.aitken_boundary));
@@ -263,7 +263,7 @@ pub fn fluttercert(lo: f64, hi: f64, steps: usize) -> Vec<f64> {
     for sm in &report.samples {
         out.push(sm.mu);
         out.push(if sm.lyapunov_stable { 1.0 } else { 0.0 });
-        out.push(fon(sm.abscissa));
+        out.push(fon(sm.spectral_abscissa));
         out.push(if sm.naive_converged { 1.0 } else { 0.0 });
         out.push(if sm.aitken_converged { 1.0 } else { 0.0 });
     }
@@ -1098,8 +1098,8 @@ pub fn neuroshape(lift: f64, ring_r: f64, inner: f64) -> Vec<f64> {
     out.push(fon(report.inside_interval.0));
     out.push(fon(report.inside_interval.1));
     out.push(if report.certified_inside { 1.0 } else { 0.0 });
-    out.push(report.certified_outside_boxes as f64);
-    out.push(report.ring_boxes as f64);
+    out.push(report.boundary_certified as f64);
+    out.push(report.boundary_segments as f64);
     out.push(if report.bounded { 1.0 } else { 0.0 });
     out.push(if report.single_minimum { 1.0 } else { 0.0 });
     out.push(report.surface_crossings as f64);
