@@ -572,6 +572,9 @@ fn exec_011_solver_checkpoint_resume_fork_is_bit_exact() {
         iter: u64,
     }
     impl SolverState for ChaoticState {
+        const TYPE_ID: u64 = 0x4348_414f_5449_0001;
+        const SCHEMA_VERSION: u32 = 1;
+
         fn encode(&self, enc: &mut codec::Enc) {
             enc.put_f64(self.x);
             enc.put_u64(self.iter);

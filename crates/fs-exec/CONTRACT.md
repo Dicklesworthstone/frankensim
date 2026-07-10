@@ -119,6 +119,23 @@ fs-substrate, fs-obs.
     pinned decisions reproduce identically on ANY machine, calibrated or
     not (exec-013).
 
+## Snapshot envelope (bead wf9.8.2, v1)
+
+Solver snapshots travel inside a canonical envelope — magic
+`FSEXSNAP`, envelope version, stable state TYPE id, payload SCHEMA
+version, caller-ledgered provenance, payload length, and payload
+checksum — validated in full BEFORE the payload decoder runs. Every
+`SolverState` declares `TYPE_ID` (never reused, never changed) and
+`SCHEMA_VERSION` (bumped on any layout change); cross-type bytes,
+unknown envelope versions, stale schemas, bit flips, truncations, and
+appended bytes are each a distinct structured `EnvelopeError`, never a
+plausible-but-wrong decode. Schema incompatibility is an explicit
+refusal (write a migration when an old version must stay readable).
+`seal(provenance)`/`unseal` carry the run/ledger identity;
+`to_bytes`/`from_bytes` are the unattributed convenience over the same
+envelope, and `fork` round-trips enveloped bytes. Pause → seal →
+unseal → resume remains bit-exact (conformance-tested).
+
 ## Stream identity is declared, never scheduled (bead wf9.7.1)
 
 `TilePool` holds NO stream-identity state: the former pool-global

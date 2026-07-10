@@ -174,47 +174,283 @@ pub mod codec {
     }
 }
 
+/// The snapshot ENVELOPE (bead wf9.8.2): magic, versions, type
+/// identity, length, checksum, and provenance — all validated BEFORE
+/// the payload decoder runs, so same-length bytes from another solver,
+/// another schema version, a bit flip, a truncation, or an append can
+/// never decode into plausible-but-wrong state.
+pub mod envelope {
+    use core::fmt;
+
+    /// Envelope magic (8 bytes).
+    pub const MAGIC: [u8; 8] = *b"FSEXSNAP";
+    /// Envelope layout version. Bump only with a recorded migration.
+    pub const ENVELOPE_VERSION: u32 = 1;
+    /// Header size: magic + env version + type id + schema version +
+    /// provenance + payload len + payload hash.
+    pub const HEADER_LEN: usize = 8 + 4 + 8 + 4 + 8 + 8 + 8;
+
+    /// Structured envelope refusal — never a wrong-state decode.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum EnvelopeError {
+        /// Not a snapshot envelope at all.
+        BadMagic,
+        /// Shorter than a header (or than the declared payload).
+        Truncated {
+            /// Bytes needed.
+            needed: usize,
+            /// Bytes present.
+            have: usize,
+        },
+        /// Envelope layout from a different (unsupported) version.
+        UnknownEnvelopeVersion {
+            /// The version found.
+            found: u32,
+        },
+        /// The snapshot belongs to a DIFFERENT state type.
+        WrongTypeId {
+            /// The expected stable type id.
+            expected: u64,
+            /// The id in the envelope.
+            found: u64,
+        },
+        /// Same type, incompatible schema version: explicit refusal
+        /// (the structured alternative to a silent wrong decode; write
+        /// a migration when a version must remain readable).
+        IncompatibleSchema {
+            /// The reader's schema version.
+            expected: u32,
+            /// The snapshot's schema version.
+            found: u32,
+        },
+        /// Declared payload length disagrees with the actual bytes
+        /// (truncation past the header, or appended bytes).
+        LengthMismatch {
+            /// Length declared in the header.
+            declared: u64,
+            /// Bytes actually present after the header.
+            actual: u64,
+        },
+        /// Payload bytes do not hash to the declared checksum.
+        ChecksumMismatch {
+            /// The declared hash.
+            declared: u64,
+            /// The computed hash.
+            computed: u64,
+        },
+    }
+
+    impl fmt::Display for EnvelopeError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match self {
+                EnvelopeError::BadMagic => write!(f, "not a solver snapshot (bad magic)"),
+                EnvelopeError::Truncated { needed, have } => write!(
+                    f,
+                    "snapshot truncated: needs {needed} bytes, {have} present"
+                ),
+                EnvelopeError::UnknownEnvelopeVersion { found } => write!(
+                    f,
+                    "unknown snapshot envelope version {found} (this reader supports {ENVELOPE_VERSION})"
+                ),
+                EnvelopeError::WrongTypeId { expected, found } => write!(
+                    f,
+                    "snapshot is for state type {found:#018x}, not {expected:#018x} — refusing a cross-type decode"
+                ),
+                EnvelopeError::IncompatibleSchema { expected, found } => write!(
+                    f,
+                    "snapshot schema v{found} is incompatible with this reader (v{expected}); \
+                     write an explicit migration or regenerate the snapshot"
+                ),
+                EnvelopeError::LengthMismatch { declared, actual } => write!(
+                    f,
+                    "snapshot payload length mismatch: header declares {declared}, {actual} bytes present"
+                ),
+                EnvelopeError::ChecksumMismatch { declared, computed } => write!(
+                    f,
+                    "snapshot payload checksum mismatch (declared {declared:#018x}, computed {computed:#018x}): corrupted bytes"
+                ),
+            }
+        }
+    }
+
+    impl core::error::Error for EnvelopeError {}
+
+    /// Seal a payload: canonical header + payload bytes.
+    #[must_use]
+    pub fn seal(type_id: u64, schema_version: u32, provenance: u64, payload: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(HEADER_LEN + payload.len());
+        out.extend_from_slice(&MAGIC);
+        out.extend_from_slice(&ENVELOPE_VERSION.to_le_bytes());
+        out.extend_from_slice(&type_id.to_le_bytes());
+        out.extend_from_slice(&schema_version.to_le_bytes());
+        out.extend_from_slice(&provenance.to_le_bytes());
+        out.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+        out.extend_from_slice(&fs_obs::fnv1a64(payload).to_le_bytes());
+        out.extend_from_slice(payload);
+        out
+    }
+
+    /// Validate an envelope for (`type_id`, `schema_version`) and return
+    /// `(payload, provenance)`. Every header field is checked before a
+    /// single payload byte is interpreted.
+    ///
+    /// # Errors
+    /// [`EnvelopeError`], each naming the exact refusal.
+    pub fn open(
+        bytes: &[u8],
+        type_id: u64,
+        schema_version: u32,
+    ) -> Result<(&[u8], u64), EnvelopeError> {
+        if bytes.len() < HEADER_LEN {
+            if bytes.len() >= 8 && bytes[..8] != MAGIC {
+                return Err(EnvelopeError::BadMagic);
+            }
+            return Err(EnvelopeError::Truncated {
+                needed: HEADER_LEN,
+                have: bytes.len(),
+            });
+        }
+        if bytes[..8] != MAGIC {
+            return Err(EnvelopeError::BadMagic);
+        }
+        let u32_at = |o: usize| u32::from_le_bytes(bytes[o..o + 4].try_into().expect("len"));
+        let u64_at = |o: usize| u64::from_le_bytes(bytes[o..o + 8].try_into().expect("len"));
+        let env_version = u32_at(8);
+        if env_version != ENVELOPE_VERSION {
+            return Err(EnvelopeError::UnknownEnvelopeVersion { found: env_version });
+        }
+        let found_type = u64_at(12);
+        if found_type != type_id {
+            return Err(EnvelopeError::WrongTypeId {
+                expected: type_id,
+                found: found_type,
+            });
+        }
+        let found_schema = u32_at(20);
+        if found_schema != schema_version {
+            return Err(EnvelopeError::IncompatibleSchema {
+                expected: schema_version,
+                found: found_schema,
+            });
+        }
+        let provenance = u64_at(24);
+        let declared_len = u64_at(32);
+        let payload = &bytes[HEADER_LEN..];
+        if declared_len != payload.len() as u64 {
+            return Err(EnvelopeError::LengthMismatch {
+                declared: declared_len,
+                actual: payload.len() as u64,
+            });
+        }
+        let declared_hash = u64_at(40);
+        let computed = fs_obs::fnv1a64(payload);
+        if computed != declared_hash {
+            return Err(EnvelopeError::ChecksumMismatch {
+                declared: declared_hash,
+                computed,
+            });
+        }
+        Ok((payload, provenance))
+    }
+}
+
+/// A snapshot failure: envelope refusal or payload decode error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SnapshotError {
+    /// The envelope refused (wrong type/version/corruption) — the
+    /// payload decoder never ran.
+    Envelope(envelope::EnvelopeError),
+    /// The envelope validated but the payload decoder failed (an
+    /// encode/decode bug within one schema version).
+    Payload(codec::CodecError),
+}
+
+impl core::fmt::Display for SnapshotError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            SnapshotError::Envelope(e) => write!(f, "{e}"),
+            SnapshotError::Payload(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl core::error::Error for SnapshotError {}
+
 /// A serializable solver snapshot. Implementations must be self-contained
 /// (no pointers; artifact references by content hash) — see module docs.
+/// Every state declares a STABLE type id and a schema version (bead
+/// wf9.8.2): snapshots travel inside the [`envelope`], which is validated
+/// before the payload decoder ever runs.
 pub trait SolverState: Sized {
-    /// Write the snapshot.
+    /// Stable type identity. Never reuse across state types; never
+    /// change for a type (that is what [`Self::SCHEMA_VERSION`] is for).
+    const TYPE_ID: u64;
+    /// Payload schema version. Bump on ANY layout change; readers
+    /// refuse other versions structurally.
+    const SCHEMA_VERSION: u32;
+
+    /// Write the snapshot payload.
     fn encode(&self, enc: &mut codec::Enc);
 
-    /// Read a snapshot.
+    /// Read a snapshot payload.
     ///
     /// # Errors
     /// [`codec::CodecError`] on truncated/incompatible bytes.
     fn decode(dec: &mut codec::Dec<'_>) -> Result<Self, codec::CodecError>;
 
-    /// The snapshot bytes (ledger checkpoint payload).
-    fn to_bytes(&self) -> Vec<u8> {
+    /// Seal the snapshot with an explicit caller-ledgered provenance
+    /// (run/ledger identity — e.g. a `RunId` value or ledger row id).
+    fn seal(&self, provenance: u64) -> Vec<u8> {
         let mut enc = codec::Enc::new();
         self.encode(&mut enc);
-        enc.into_bytes()
+        envelope::seal(
+            Self::TYPE_ID,
+            Self::SCHEMA_VERSION,
+            provenance,
+            &enc.into_bytes(),
+        )
     }
 
-    /// Rebuild from snapshot bytes, rejecting trailing garbage.
+    /// Validate the envelope, decode the payload, and return the state
+    /// with its provenance. Rejects trailing payload garbage.
     ///
     /// # Errors
-    /// [`codec::CodecError`] on truncation or trailing bytes.
-    fn from_bytes(bytes: &[u8]) -> Result<Self, codec::CodecError> {
-        let mut dec = codec::Dec::new(bytes);
-        let state = Self::decode(&mut dec)?;
+    /// [`SnapshotError`] — envelope refusals never reach the decoder.
+    fn unseal(bytes: &[u8]) -> Result<(Self, u64), SnapshotError> {
+        let (payload, provenance) = envelope::open(bytes, Self::TYPE_ID, Self::SCHEMA_VERSION)
+            .map_err(SnapshotError::Envelope)?;
+        let mut dec = codec::Dec::new(payload);
+        let state = Self::decode(&mut dec).map_err(SnapshotError::Payload)?;
         if dec.is_empty() {
-            Ok(state)
+            Ok((state, provenance))
         } else {
-            Err(codec::CodecError {
-                at: bytes.len(),
-                what: "end of snapshot",
+            Err(SnapshotError::Payload(codec::CodecError {
+                at: payload.len(),
+                what: "end of snapshot payload",
                 needed: 0,
                 remaining: 1,
-            })
+            }))
         }
     }
 
-    /// Deterministic content hash of the snapshot (FNV-1a until the
-    /// BLAKE3-class ledger hash supersedes it — same upgrade path as
-    /// fs-obs).
+    /// The ENVELOPED snapshot bytes (ledger checkpoint payload) with
+    /// unattributed provenance; ledger paths should prefer
+    /// [`SolverState::seal`] with a real run identity.
+    fn to_bytes(&self) -> Vec<u8> {
+        self.seal(0)
+    }
+
+    /// Rebuild from enveloped snapshot bytes.
+    ///
+    /// # Errors
+    /// [`SnapshotError`] on any envelope refusal or payload error.
+    fn from_bytes(bytes: &[u8]) -> Result<Self, SnapshotError> {
+        Self::unseal(bytes).map(|(state, _)| state)
+    }
+
+    /// Deterministic content hash of the ENVELOPED snapshot (FNV-1a
+    /// until the BLAKE3-class ledger hash supersedes it — same upgrade
+    /// path as fs-obs).
     fn content_hash(&self) -> u64 {
         fs_obs::fnv1a64(&self.to_bytes())
     }
@@ -278,9 +514,9 @@ pub fn drive<R: ResumableSolver>(
 /// that only works in-memory is a distribution bug waiting to happen).
 ///
 /// # Errors
-/// [`codec::CodecError`] when the state's encode/decode disagree — a
+/// [`SnapshotError`] when the state's encode/decode disagree — a
 /// serialization bug surfaced early.
-pub fn fork<S: SolverState>(state: &S) -> Result<S, codec::CodecError> {
+pub fn fork<S: SolverState>(state: &S) -> Result<S, SnapshotError> {
     S::from_bytes(&state.to_bytes())
 }
 
@@ -289,6 +525,109 @@ mod tests {
     use super::*;
     use crate::cx::{CancelGate, ExecMode, StreamKey};
     use asupersync::types::Budget;
+
+    /// wf9.8.2 acceptance: the envelope refuses every corruption and
+    /// misbinding class BEFORE the payload decoder runs.
+    #[test]
+    fn envelope_refuses_every_misbinding_class() {
+        // A twin state with the IDENTICAL payload layout but its own
+        // type id: same-length bytes must not cross-decode.
+        #[derive(Debug, PartialEq)]
+        struct TwinState {
+            x: Vec<f64>,
+            iter: u64,
+        }
+        impl SolverState for TwinState {
+            const TYPE_ID: u64 = 0x5457_494e_0000_0001;
+            const SCHEMA_VERSION: u32 = 1;
+            fn encode(&self, enc: &mut codec::Enc) {
+                enc.put_u64(self.iter);
+                enc.put_f64_slice(&self.x);
+            }
+            fn decode(dec: &mut codec::Dec<'_>) -> Result<Self, codec::CodecError> {
+                Ok(TwinState {
+                    iter: dec.get_u64()?,
+                    x: dec.get_f64_vec()?,
+                })
+            }
+        }
+        let state = JacobiState {
+            x: vec![1.5, -2.25, 0.0],
+            iter: 42,
+        };
+        let sealed = state.seal(0xABCD);
+        // The happy path round-trips bit-exactly WITH provenance.
+        let (back, prov) = JacobiState::unseal(&sealed).expect("valid seal");
+        assert_eq!(back, state);
+        assert_eq!(prov, 0xABCD);
+        // Cross-type: identical payload layout, refused by TYPE ID.
+        assert!(matches!(
+            TwinState::unseal(&sealed),
+            Err(SnapshotError::Envelope(
+                envelope::EnvelopeError::WrongTypeId { .. }
+            ))
+        ));
+        // Bit flip in the payload: checksum refuses.
+        let mut flipped = sealed.clone();
+        let last = flipped.len() - 1;
+        flipped[last] ^= 0x40;
+        assert!(matches!(
+            JacobiState::unseal(&flipped),
+            Err(SnapshotError::Envelope(
+                envelope::EnvelopeError::ChecksumMismatch { .. }
+            ))
+        ));
+        // Bit flip in the magic: not a snapshot.
+        let mut bad_magic = sealed.clone();
+        bad_magic[0] ^= 0x01;
+        assert!(matches!(
+            JacobiState::unseal(&bad_magic),
+            Err(SnapshotError::Envelope(envelope::EnvelopeError::BadMagic))
+        ));
+        // Truncation: header-level and payload-level both refuse.
+        assert!(matches!(
+            JacobiState::unseal(&sealed[..10]),
+            Err(SnapshotError::Envelope(
+                envelope::EnvelopeError::Truncated { .. }
+            ))
+        ));
+        assert!(matches!(
+            JacobiState::unseal(&sealed[..sealed.len() - 3]),
+            Err(SnapshotError::Envelope(
+                envelope::EnvelopeError::LengthMismatch { .. }
+            ))
+        ));
+        // Appended bytes: refused by the declared length.
+        let mut appended = sealed.clone();
+        appended.extend_from_slice(&[0u8; 5]);
+        assert!(matches!(
+            JacobiState::unseal(&appended),
+            Err(SnapshotError::Envelope(
+                envelope::EnvelopeError::LengthMismatch { .. }
+            ))
+        ));
+        // Unknown envelope version.
+        let mut future = sealed.clone();
+        future[8..12].copy_from_slice(&9u32.to_le_bytes());
+        assert!(matches!(
+            JacobiState::unseal(&future),
+            Err(SnapshotError::Envelope(
+                envelope::EnvelopeError::UnknownEnvelopeVersion { found: 9 }
+            ))
+        ));
+        // Stale schema version: structured refusal, not a wrong decode.
+        let mut stale = sealed;
+        stale[20..24].copy_from_slice(&7u32.to_le_bytes());
+        assert!(matches!(
+            JacobiState::unseal(&stale),
+            Err(SnapshotError::Envelope(
+                envelope::EnvelopeError::IncompatibleSchema {
+                    expected: 1,
+                    found: 7
+                }
+            ))
+        ));
+    }
 
     /// Reference solver: damped Jacobi on a fixed diagonally-dominant
     /// system (deterministic, non-trivial float trajectory).
@@ -304,6 +643,9 @@ mod tests {
     }
 
     impl SolverState for JacobiState {
+        const TYPE_ID: u64 = 0x4a41_434f_4249_0001;
+        const SCHEMA_VERSION: u32 = 1;
+
         fn encode(&self, enc: &mut codec::Enc) {
             enc.put_u64(self.iter);
             enc.put_f64_slice(&self.x);

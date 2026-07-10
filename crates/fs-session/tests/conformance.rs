@@ -274,6 +274,9 @@ fn ss_005_degradation_ladder_declared_order_and_pause_resume() {
         field: Vec<f64>,
     }
     impl SolverState for ToySolver {
+        const TYPE_ID: u64 = 0x544f_5953_4f4c_0001;
+        const SCHEMA_VERSION: u32 = 1;
+
         fn encode(&self, enc: &mut codec::Enc) {
             enc.put_u64(self.step);
             enc.put_u64(self.field.len() as u64);
