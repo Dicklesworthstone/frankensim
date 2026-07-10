@@ -96,16 +96,32 @@ impl UnionFind {
 }
 
 /// Exact Betti numbers of the voxel SOLID `{value < level}` (union of
-/// closed unit cubes): `b0` by 6-connected union-find, `b2` as bounded
-/// complement components (6-connected empty cells against a virtual
-/// outside), and `b1 = b0 + b2 − χ` with χ counted EXACTLY on the
-/// cubical complex.
+/// closed unit cubes): `b0` by 26-CONNECTED union-find (closed cubes touch
+/// through faces, edges, and corners), `b2` as bounded complement components
+/// (6-connected empty cells against a virtual outside — the (26, 6)
+/// digital-topology pair), and `b1 = b0 + b2 − χ` with χ counted EXACTLY on
+/// the cubical complex, so the three are mutually consistent (bead rcvl).
 #[must_use]
 #[allow(clippy::too_many_lines)] // b0, b2, and the exact Euler count are one derivation
 pub fn betti(field: &VoxelField, level: f64) -> (u32, u32, u32) {
     let [nx, ny, nz] = field.dims;
     let total = (nx * ny * nz) as usize;
-    // b0: components of filled cells.
+    // b0: components of filled cells under 26-CONNECTIVITY. The solid is a
+    // union of CLOSED unit cubes, so cubes sharing a face, EDGE, or corner are
+    // topologically connected — the digital-topology partner of the 6-connected
+    // VOID model used for b2 and the closed-cube χ counted below (the (26, 6)
+    // pair). A 6-connected b0 was internally inconsistent with χ, inflating
+    // b1 = b0 + b2 − χ into PHANTOM TUNNELS on any diagonal contact (bead rcvl).
+    // The 13 already-visited neighbours in the 3×3×3 stencil (z→y→x order).
+    #[rustfmt::skip]
+    #[allow(clippy::items_after_statements)] // the stencil belongs with the b0 loop
+    const BACKWARD_26: [(isize, isize, isize); 13] = [
+        (-1, -1, -1), (-1, -1, 0), (-1, -1, 1),
+        (-1,  0, -1), (-1,  0, 0), (-1,  0, 1),
+        (-1,  1, -1), (-1,  1, 0), (-1,  1, 1),
+        ( 0, -1, -1), ( 0, -1, 0), ( 0, -1, 1),
+        ( 0,  0, -1),
+    ];
     let mut uf = UnionFind::new(total);
     let mut filled_count = 0u64;
     for z in 0..nz {
@@ -116,14 +132,22 @@ pub fn betti(field: &VoxelField, level: f64) -> (u32, u32, u32) {
                 }
                 filled_count += 1;
                 let i = field.idx(x, y, z) as u32;
-                if x > 0 && field.filled(x - 1, y, z, level) {
-                    uf.union(i, field.idx(x - 1, y, z) as u32);
-                }
-                if y > 0 && field.filled(x, y - 1, z, level) {
-                    uf.union(i, field.idx(x, y - 1, z) as u32);
-                }
-                if z > 0 && field.filled(x, y, z - 1, level) {
-                    uf.union(i, field.idx(x, y, z - 1) as u32);
+                for &(dz, dy, dx) in &BACKWARD_26 {
+                    let (nxp, nyp, nzp) = (
+                        i64::from(x) + dx as i64,
+                        i64::from(y) + dy as i64,
+                        i64::from(z) + dz as i64,
+                    );
+                    if nxp < 0 || nyp < 0 || nzp < 0 {
+                        continue;
+                    }
+                    let (nxp, nyp, nzp) = (nxp as u32, nyp as u32, nzp as u32);
+                    if nxp >= nx || nyp >= ny || nzp >= nz {
+                        continue;
+                    }
+                    if field.filled(nxp, nyp, nzp, level) {
+                        uf.union(i, field.idx(nxp, nyp, nzp) as u32);
+                    }
                 }
             }
         }

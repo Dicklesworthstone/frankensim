@@ -230,6 +230,38 @@ fn topo_003_cubical_betti() {
     });
 }
 
+#[test]
+fn topo_007_diagonal_contact_is_not_a_phantom_tunnel() {
+    // Two closed unit cubes touching only along an EDGE (2×2×1 grid, the
+    // anti-diagonal filled). A union of CLOSED cubes is 26-connected, so this
+    // is ONE contractible piece: true Betti (1,0,0). A 6-connected b0 made
+    // b1 = b0 + b2 − χ manufacture a phantom tunnel (2,1,0) (bead rcvl).
+    let edge = VoxelField {
+        dims: [2, 2, 1],
+        values: vec![-1.0, 1.0, 1.0, -1.0],
+        h: 1.0,
+    };
+    let be = betti(&edge, 0.0);
+    // Corner contact (2×2×2, opposite corners filled) — also one piece.
+    let mut vals = vec![1.0; 8];
+    vals[0] = -1.0; // (0,0,0)
+    vals[7] = -1.0; // (1,1,1)
+    let corner = VoxelField {
+        dims: [2, 2, 2],
+        values: vals,
+        h: 1.0,
+    };
+    let bc = betti(&corner, 0.0);
+    verdict(
+        "topo-007",
+        be == (1, 0, 0) && bc == (1, 0, 0),
+        &format!(
+            "diagonal voxel contacts are ONE 26-connected contractible component — \
+             edge {be:?} and corner {bc:?} both = (1,0,0), no phantom tunnel"
+        ),
+    );
+}
+
 /// Two-well synthetic field with deterministic noise.
 fn two_well_field(noise: f64, seed: u64) -> VoxelField {
     let n = 36u32;
