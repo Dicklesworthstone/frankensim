@@ -321,16 +321,13 @@ impl TuneEvidence {
     /// # Errors
     /// Returns [`TuneError`] unless at least two valid observations are
     /// present and every observation is wall time.
-    pub fn ranked_wall_times(
-        observations: Vec<TuneObservation>,
-    ) -> Result<Self, TuneError> {
+    pub fn ranked_wall_times(observations: Vec<TuneObservation>) -> Result<Self, TuneError> {
         validate_observations(&observations)?;
-        let candidate_separation_ppm = candidate_separation_ppm(&observations).ok_or_else(|| {
-            TuneError {
+        let candidate_separation_ppm =
+            candidate_separation_ppm(&observations).ok_or_else(|| TuneError {
                 detail: "ranked timing evidence requires at least two wall-time candidates"
                     .to_string(),
-            }
-        })?;
+            })?;
         Ok(Self {
             observations,
             candidate_separation_ppm: Some(candidate_separation_ppm),
@@ -345,8 +342,8 @@ impl TuneEvidence {
 
     /// Descriptive fastest-to-runner-up wall-time gap in parts per million.
     ///
-    /// `None` means the row does not contain at least two comparable timing
-    /// candidates. The value is never a statistical confidence claim.
+    /// `None` means the row makes no ranked-candidate claim. The value is
+    /// never a statistical confidence claim.
     #[must_use]
     pub const fn candidate_separation_ppm(&self) -> Option<u32> {
         self.candidate_separation_ppm
@@ -355,10 +352,11 @@ impl TuneEvidence {
     fn validate(&self) -> Result<(), TuneError> {
         validate_observations(&self.observations)?;
         if let Some(stored) = self.candidate_separation_ppm {
-            let expected = candidate_separation_ppm(&self.observations).ok_or_else(|| TuneError {
-                detail: "candidate separation requires comparable wall-time observations"
-                    .to_string(),
-            })?;
+            let expected =
+                candidate_separation_ppm(&self.observations).ok_or_else(|| TuneError {
+                    detail: "candidate separation requires comparable wall-time observations"
+                        .to_string(),
+                })?;
             if expected != stored {
                 return Err(TuneError {
                     detail: "candidate separation does not match wall-time observations"
@@ -1662,6 +1660,24 @@ mod tests {
         .expect("evidence");
         assert_eq!(near_tie.candidate_separation_ppm(), Some(9_900));
         assert_eq!(clear.candidate_separation_ppm(), Some(750_000));
+        let ranked_row = TuneRow {
+            kernel: "ranked".to_string(),
+            shape_class: "shape".to_string(),
+            machine: 1,
+            params: "winner=a".to_string(),
+            evidence: clear.clone(),
+            refresh: 1,
+        }
+        .to_json();
+        assert!(parse_row(&ranked_row).is_some());
+        assert!(
+            parse_row(&ranked_row.replace(
+                "\"candidate_separation_ppm\":750000",
+                "\"candidate_separation_ppm\":749999",
+            ))
+            .is_none(),
+            "stored candidate separation must be re-derived"
+        );
 
         let unranked = TuneEvidence::new(vec![
             TuneObservation::wall_time("phase-a", vec![100]).expect("timing"),
@@ -1823,6 +1839,19 @@ mod tests {
             tuner.needs_calibration(),
             "invalid numeric evidence must fail before any row mutation"
         );
+
+        let mut unattributed = fs_substrate::CapabilityProbe::topology_only();
+        unattributed.logical_cpus = 0;
+        unattributed.measured.all_core_gbs = 1.0;
+        let mut tuner = Tuner::cold(unattributed.fingerprint());
+        assert!(tuner.calibrate(&unattributed).is_err());
+        assert!(tuner.needs_calibration());
+
+        let mut oversized = fs_substrate::CapabilityProbe::topology_only();
+        oversized.logical_cpus = (MAX_TUNE_OBSERVATIONS + 1) as u32;
+        let mut tuner = Tuner::cold(oversized.fingerprint());
+        assert!(tuner.calibrate(&oversized).is_err());
+        assert!(tuner.needs_calibration());
     }
 
     #[test]
