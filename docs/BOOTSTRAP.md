@@ -18,9 +18,12 @@ fixed relative sibling paths, so an arbitrary source cache cannot satisfy the
 workspace. Bead `frankensim-1t8i` tracks extraction of a zero-dependency
 pre-Cargo entry point and strict lock parsing.
 
-Behavior, per library:
+Behavior of an already-built `xtask` binary, per library (the `cargo run`
+commands above can exercise only the verification path while every required
+sibling resolves):
 
-- **Missing from the workspace parent**: clone the declared remote (transform-free,
+- **Missing from the workspace parent**: a previously built binary can clone
+  the declared remote (transform-free,
   `core.autocrlf=false`), check out the locked revision DETACHED, and
   verify the resulting head equals the lock. An unavailable revision or
   unreachable remote is a structured failure.

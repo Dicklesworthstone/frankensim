@@ -991,12 +991,13 @@ fn check_goldens(root: &Path) -> Vec<Violation> {
 }
 
 // ---------------------------------------------------------------------------
-// Constellation bootstrap (bead huq.17): a clean host obtains the pinned
-// sources FROM THE LOCK — clone each declared remote at the locked head
-// into the sibling source cache, verify content identity (the commit
-// hash), and never silently substitute a nearby working tree that does
-// not match. Offline re-runs verify the cache; drift, dirt, missing
-// revisions, and identity mismatches fail with structured diagnostics.
+// Constellation verification/fetch (beads huq.17, 1t8i): once this binary can
+// run, obtain pinned sources FROM THE LOCK, verify content identity (the commit
+// hash), and never silently substitute a nearby working tree that does not
+// match. Cargo cannot build this in-workspace binary while a required sibling
+// path is absent; the pre-Cargo clean-host entry point remains tracked by 1t8i.
+// Drift, dirt, missing revisions, and identity mismatches fail with structured
+// diagnostics.
 // ---------------------------------------------------------------------------
 
 struct LockRow {
