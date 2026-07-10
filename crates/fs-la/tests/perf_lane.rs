@@ -110,8 +110,9 @@ fn gemm_attainment_all_core() {
         // On a bandwidth-starved box the MEMORY roof binds and the
         // compute axis is the wrong denominator (measured on ts1:
         // 219 GFLOP/s read 0.14 vs compute but the memory roof binds).
-        let (ncb, kcb) = (512.0f64, 256.0f64); // NC, KC (bit-contract docs)
         let nf = n as f64;
+        // NC_PAR_CAP=2048 (measured s5 defaults), KC=256 (bit contract).
+        let (ncb, kcb) = (nf.min(2048.0), 256.0f64);
         let bytes_per_elem = 8.0 * (nf * (nf / ncb).ceil() / nf + 1.0 + 2.0 * (nf / kcb).ceil());
         let spec = KernelSpec {
             name: "gemm-f64-parallel",
@@ -138,8 +139,8 @@ fn gemm_attainment_all_core() {
 }
 
 /// The MC/NC AUTOTUNE SWEEP (xlvx segment 5): report-only rows over the
-/// bit-neutral blocking grid at n = 2048, all cores. "adaptive" is what
-/// gemm_f64_parallel actually ships (mc_for); fixed rows bracket it.
+/// bit-neutral blocking grid at n = 2048, all cores. "shipping" is what
+/// gemm_f64_parallel actually ships (MC_PAR/NC_PAR_CAP); the grid brackets it.
 /// Feeds the tuned-defaults decision — KC is NOT swept here (bit
 /// contract; retuning it is a golden bump with justification).
 #[test]
@@ -171,7 +172,7 @@ fn gemm_tune_sweep() {
             );
         }
     }
-    // The shipping adaptive row, for comparison against the grid.
+    // The shipping-defaults row, for comparison against the grid.
     let g = {
         gemm_f64_parallel(n, n, n, 1.0, &a, &b, 0.0, &mut c, threads);
         let mut best = f64::INFINITY;
@@ -183,6 +184,6 @@ fn gemm_tune_sweep() {
         2.0 * (n * n * n) as f64 / best / 1e9
     };
     println!(
-        "{{\"metric\":\"gemm-tune\",\"threads\":{threads},\"mc\":\"adaptive\",\"nc\":512,\"gflops\":{g:.2}}}"
+        "{{\"metric\":\"gemm-tune\",\"threads\":{threads},\"mc\":\"shipping\",\"nc\":\"shipping\",\"gflops\":{g:.2}}}"
     );
 }

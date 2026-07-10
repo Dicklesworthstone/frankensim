@@ -100,24 +100,34 @@ pub fn gemm_f64_parallel(
     threads: usize,
 ) {
     let t = threads.max(1);
-    gemm_f64_parallel_with(m, n, k, alpha, a, b, beta, c, t, mc_for(m, t), NC);
+    gemm_f64_parallel_with(
+        m,
+        n,
+        k,
+        alpha,
+        a,
+        b,
+        beta,
+        c,
+        t,
+        MC_PAR,
+        n.clamp(NR, NC_PAR_CAP),
+    );
 }
 
-/// Adaptive M-blocking for the parallel path (bit-neutral, see module
-/// docs). A fixed MC = 128 caps parallelism at m/128 bands — measured
-/// on an idle 128-thread 5995WX at n = 2048: 16 bands left 7/8 of the
-/// machine idle (FS_LA_THREADS=16 matched 128 threads, 192 vs 177
-/// GFLOP/s). Target ~3 bands per worker so the dispenser has slack to
-/// steal, keep MR alignment, and never exceed the serial L2-sized A
-/// tile. Extra B-panel re-reads from smaller bands stay L3-resident
-/// (the KC×NC panel is ~1 MB), so DRAM traffic is unchanged.
-fn mc_for(m: usize, threads: usize) -> usize {
-    if threads <= 1 {
-        return MC;
-    }
-    let target = m.div_ceil(3 * threads);
-    (target.div_ceil(MR) * MR).clamp(MR, MC)
-}
+/// Parallel-path M blocking, MEASURED (xlvx s5 sweep at n = 2048 on a
+/// 14t M4 Pro and an idle 128t 5995WX): thin mc = 32 bands won BOTH
+/// machines (213 / 386 GFLOP/s vs 159 / 201 at the serial 128/512
+/// defaults). The serial MC = 128 caps parallelism at m/128 bands
+/// (16 threads matched 128 on the 5995WX before this); the opposite
+/// extreme — bands ~= 3 per worker, mc = 8 on 128t — measured 94:
+/// per-band pack/dispatch overhead swamps the extra workers.
+const MC_PAR: usize = 32;
+/// Parallel-path N blocking: nc = n (one A pass, one scope barrier per
+/// KC chunk) dominated every mc row on both machines — the sweep was
+/// monotone in nc. Capped so b_pack stays L3-resident (KC×2048×8 =
+/// 4 MB) for huge n.
+const NC_PAR_CAP: usize = 2048;
 
 /// The tunable parallel engine behind [`gemm_f64_parallel`]: explicit
 /// `mc_q` (band height) and `nc_q` (B-panel width) blocking. Both are
