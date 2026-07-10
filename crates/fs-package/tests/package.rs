@@ -126,7 +126,7 @@ fn a_verified_claim_with_a_bad_interval_fails() {
 }
 
 #[test]
-fn in_memory_and_serialized_semantic_gates_are_identical() {
+fn in_memory_and_serialized_provenance_and_identity_gates_are_identical() {
     let bad_code = EvidencePackage::new(Provenance::new(" ", "lock")).with_claim(verified("c"));
     assert!(matches!(
         bad_code.verify(),
@@ -168,7 +168,10 @@ fn in_memory_and_serialized_semantic_gates_are_identical() {
         })
     ));
     assert_serialized_refuses(&duplicate_id);
+}
 
+#[test]
+fn in_memory_and_serialized_estimate_gates_are_identical() {
     let blank_estimator = EvidencePackage::new(prov()).with_claim(Claim::new(
         "e",
         "missing estimator identity",
@@ -221,7 +224,10 @@ fn in_memory_and_serialized_semantic_gates_are_identical() {
         EvidencePackage::from_json(&explicitly_unbounded.to_json()).unwrap(),
         explicitly_unbounded
     );
+}
 
+#[test]
+fn in_memory_and_serialized_magnitude_gates_are_identical() {
     let width_overflow = EvidencePackage::new(prov()).with_claim(Claim::new(
         "wide",
         "finite endpoints whose width overflows",
@@ -288,7 +294,10 @@ fn in_memory_and_serialized_semantic_gates_are_identical() {
         })
     ));
     assert_serialized_refuses(&cross_component_overflow);
+}
 
+#[test]
+fn in_memory_and_serialized_regime_gates_are_identical() {
     for regime in [
         ValidityDomain::unconstrained().with(" ", 1.0, 2.0),
         ValidityDomain::unconstrained().with("Re", 1.0, f64::INFINITY),

@@ -5,7 +5,8 @@
 //! determinism. The checker uses only the package format — no solver.
 
 use fs_checker::{
-    CHECKER_PROTOCOL_VERSION, ContentHash, SignatureStatus, Verdict, check, check_against_root,
+    CHECKER_PROTOCOL_VERSION, ColorBreakdown, ContentHash, SignatureStatus, Verdict, check,
+    check_against_root,
 };
 use fs_evidence::{Color, ValidityDomain};
 use fs_package::{Claim, EvidencePackage, FalsifierRecord, Provenance};
@@ -88,7 +89,7 @@ fn a_semantically_empty_falsifier_record_fails_the_check() {
     let report = check(&pkg);
     assert!(!report.passed());
     assert_eq!(report.findings[0].kind, "invalid-falsifier-record");
-    assert_eq!(report.breakdown, Default::default());
+    assert_eq!(report.breakdown, ColorBreakdown::default());
     assert_eq!(report.render_pie(), "budget pie: no claims");
 }
 

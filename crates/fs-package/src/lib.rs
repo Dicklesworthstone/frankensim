@@ -643,59 +643,21 @@ impl EvidencePackage {
     }
 
     fn verify_transport_limits(&self) -> Result<(), PackageError> {
-        fn check_count(what: &str, count: usize) -> Result<(), PackageError> {
-            if count > MAX_JSON_CONTAINER_ITEMS {
-                return Err(PackageError::TransportLimit {
-                    what: what.to_string(),
-                    limit: MAX_JSON_CONTAINER_ITEMS,
-                });
-            }
-            Ok(())
-        }
-
-        fn escaped_len(value: &str) -> usize {
-            value
-                .chars()
-                .map(|ch| match ch {
-                    '"' | '\\' | '\n' | '\r' | '\t' => 2,
-                    c if c.is_control() => 6,
-                    c => c.len_utf8(),
-                })
-                .sum()
-        }
-
-        fn add_text(total: &mut usize, what: &str, value: &str) -> Result<(), PackageError> {
-            if value.len() > MAX_JSON_STRING_BYTES {
-                return Err(PackageError::TransportLimit {
-                    what: what.to_string(),
-                    limit: MAX_JSON_STRING_BYTES,
-                });
-            }
-            *total = total
-                .checked_add(escaped_len(value))
-                .and_then(|sum| sum.checked_add(2))
-                .ok_or_else(|| PackageError::TransportLimit {
-                    what: "serialized package size".to_string(),
-                    limit: MAX_PACKAGE_BYTES,
-                })?;
-            Ok(())
-        }
-
-        check_count("claims", self.claims.len())?;
+        check_transport_count("claims", self.claims.len())?;
         let mut bytes = 512usize;
         let mut nodes = 12usize;
-        add_text(
+        add_transport_text(
             &mut bytes,
             "provenance.code_version",
             &self.provenance.code_version,
         )?;
-        add_text(
+        add_transport_text(
             &mut bytes,
             "provenance.constellation_lock",
             &self.provenance.constellation_lock,
         )?;
         if let Some(signature) = &self.signature {
-            add_text(&mut bytes, "signature", signature)?;
+            add_transport_text(&mut bytes, "signature", signature)?;
         }
         for (index, claim) in self.claims.iter().enumerate() {
             bytes = bytes
@@ -705,8 +667,8 @@ impl EvidencePackage {
                     limit: MAX_PACKAGE_BYTES,
                 })?;
             nodes = nodes.saturating_add(10);
-            add_text(&mut bytes, &format!("claims[{index}].id"), &claim.id)?;
-            add_text(
+            add_transport_text(&mut bytes, &format!("claims[{index}].id"), &claim.id)?;
+            add_transport_text(
                 &mut bytes,
                 &format!("claims[{index}].statement"),
                 &claim.statement,
@@ -714,34 +676,42 @@ impl EvidencePackage {
             match &claim.color {
                 Color::Verified { .. } => {}
                 Color::Validated { regime, dataset } => {
-                    check_count("validated regime axes", regime.bounds().len())?;
+                    check_transport_count("validated regime axes", regime.bounds().len())?;
                     nodes = nodes.saturating_add(regime.bounds().len() * 3);
-                    add_text(&mut bytes, &format!("claims[{index}].dataset"), dataset)?;
+                    add_transport_text(&mut bytes, &format!("claims[{index}].dataset"), dataset)?;
                     for axis in regime.bounds().keys() {
-                        add_text(&mut bytes, &format!("claims[{index}].regime axis"), axis)?;
+                        add_transport_text(
+                            &mut bytes,
+                            &format!("claims[{index}].regime axis"),
+                            axis,
+                        )?;
                         bytes = bytes.saturating_add(64);
                     }
                 }
                 Color::Estimated { estimator, .. } => {
-                    add_text(&mut bytes, &format!("claims[{index}].estimator"), estimator)?
+                    add_transport_text(
+                        &mut bytes,
+                        &format!("claims[{index}].estimator"),
+                        estimator,
+                    )?;
                 }
             }
             if let Some(receipt) = &claim.receipt {
-                check_count("receipt parents", receipt.parents.len())?;
+                check_transport_count("receipt parents", receipt.parents.len())?;
                 nodes = nodes.saturating_add(receipt.parents.len() + 3);
                 bytes = bytes.saturating_add(32 * receipt.parents.len() + 64);
             }
-            check_count("falsifiers", claim.falsifiers.len())?;
-            check_count("anchors", claim.anchors.len())?;
+            check_transport_count("falsifiers", claim.falsifiers.len())?;
+            check_transport_count("anchors", claim.anchors.len())?;
             nodes = nodes.saturating_add(claim.falsifiers.len() * 6 + claim.anchors.len() * 4);
             bytes = bytes.saturating_add(claim.falsifiers.len() * 160 + claim.anchors.len() * 128);
             for falsifier in &claim.falsifiers {
-                add_text(&mut bytes, "falsifier.name", &falsifier.name)?;
-                add_text(&mut bytes, "falsifier.detail", &falsifier.detail)?;
+                add_transport_text(&mut bytes, "falsifier.name", &falsifier.name)?;
+                add_transport_text(&mut bytes, "falsifier.detail", &falsifier.detail)?;
             }
             for anchor in &claim.anchors {
-                add_text(&mut bytes, "anchor.dataset_id", &anchor.dataset_id)?;
-                add_text(&mut bytes, "anchor.content_hash", &anchor.content_hash)?;
+                add_transport_text(&mut bytes, "anchor.dataset_id", &anchor.dataset_id)?;
+                add_transport_text(&mut bytes, "anchor.content_hash", &anchor.content_hash)?;
             }
             if bytes > MAX_PACKAGE_BYTES {
                 return Err(PackageError::TransportLimit {
@@ -858,6 +828,44 @@ impl EvidencePackage {
         out.push_str("]}");
         out
     }
+}
+
+fn check_transport_count(what: &str, count: usize) -> Result<(), PackageError> {
+    if count > MAX_JSON_CONTAINER_ITEMS {
+        return Err(PackageError::TransportLimit {
+            what: what.to_string(),
+            limit: MAX_JSON_CONTAINER_ITEMS,
+        });
+    }
+    Ok(())
+}
+
+fn escaped_json_len(value: &str) -> usize {
+    value
+        .chars()
+        .map(|ch| match ch {
+            '"' | '\\' | '\n' | '\r' | '\t' => 2,
+            c if c.is_control() => 6,
+            c => c.len_utf8(),
+        })
+        .sum()
+}
+
+fn add_transport_text(total: &mut usize, what: &str, value: &str) -> Result<(), PackageError> {
+    if value.len() > MAX_JSON_STRING_BYTES {
+        return Err(PackageError::TransportLimit {
+            what: what.to_string(),
+            limit: MAX_JSON_STRING_BYTES,
+        });
+    }
+    *total = total
+        .checked_add(escaped_json_len(value))
+        .and_then(|sum| sum.checked_add(2))
+        .ok_or_else(|| PackageError::TransportLimit {
+            what: "serialized package size".to_string(),
+            limit: MAX_PACKAGE_BYTES,
+        })?;
+    Ok(())
 }
 
 pub(crate) fn is_canonical_content_hash(hash: &str) -> bool {
@@ -1106,6 +1114,72 @@ impl Jp<'_> {
         self.value_at(0)
     }
 
+    fn object_at(&mut self, depth: usize) -> Result<Jv, ParseError> {
+        self.at += 1;
+        let mut fields = Vec::new();
+        let mut keys = std::collections::BTreeSet::new();
+        self.ws();
+        if self.b.get(self.at) == Some(&b'}') {
+            self.at += 1;
+            return Ok(Jv::Obj(fields));
+        }
+        loop {
+            let key = self.string()?;
+            self.eat(b':', "object")?;
+            let value = self.value_at(depth + 1)?;
+            if !keys.insert(key.clone()) {
+                return Err(self.err("object", format!("duplicate key {key:?}")));
+            }
+            fields.push((key, value));
+            if fields.len() > MAX_JSON_CONTAINER_ITEMS {
+                return Err(self.err(
+                    "object",
+                    format!("object member count exceeds limit {MAX_JSON_CONTAINER_ITEMS}"),
+                ));
+            }
+            self.ws();
+            match self.b.get(self.at) {
+                Some(b',') => {
+                    self.at += 1;
+                    self.ws();
+                }
+                Some(b'}') => {
+                    self.at += 1;
+                    return Ok(Jv::Obj(fields));
+                }
+                _ => return Err(self.err("object", "expected ',' or '}'")),
+            }
+        }
+    }
+
+    fn array_at(&mut self, depth: usize) -> Result<Jv, ParseError> {
+        self.at += 1;
+        let mut items = Vec::new();
+        self.ws();
+        if self.b.get(self.at) == Some(&b']') {
+            self.at += 1;
+            return Ok(Jv::Arr(items));
+        }
+        loop {
+            items.push(self.value_at(depth + 1)?);
+            if items.len() > MAX_JSON_CONTAINER_ITEMS {
+                return Err(self.err(
+                    "array",
+                    format!("array element count exceeds limit {MAX_JSON_CONTAINER_ITEMS}"),
+                ));
+            }
+            self.ws();
+            match self.b.get(self.at) {
+                Some(b',') => self.at += 1,
+                Some(b']') => {
+                    self.at += 1;
+                    return Ok(Jv::Arr(items));
+                }
+                _ => return Err(self.err("array", "expected ',' or ']'")),
+            }
+        }
+    }
+
     fn value_at(&mut self, depth: usize) -> Result<Jv, ParseError> {
         if depth > MAX_JSON_DEPTH {
             return Err(self.err(
@@ -1128,72 +1202,8 @@ impl Jp<'_> {
         self.ws();
         match self.b.get(self.at) {
             Some(b'"') => Ok(Jv::Str(self.string()?)),
-            Some(b'{') => {
-                self.at += 1;
-                let mut fields = Vec::new();
-                let mut keys = std::collections::BTreeSet::new();
-                self.ws();
-                if self.b.get(self.at) == Some(&b'}') {
-                    self.at += 1;
-                    return Ok(Jv::Obj(fields));
-                }
-                loop {
-                    let key = self.string()?;
-                    self.eat(b':', "object")?;
-                    let v = self.value_at(depth + 1)?;
-                    if !keys.insert(key.clone()) {
-                        return Err(self.err("object", format!("duplicate key {key:?}")));
-                    }
-                    fields.push((key, v));
-                    if fields.len() > MAX_JSON_CONTAINER_ITEMS {
-                        return Err(self.err(
-                            "object",
-                            format!("object member count exceeds limit {MAX_JSON_CONTAINER_ITEMS}"),
-                        ));
-                    }
-                    self.ws();
-                    match self.b.get(self.at) {
-                        Some(b',') => {
-                            self.at += 1;
-                            self.ws();
-                        }
-                        Some(b'}') => {
-                            self.at += 1;
-                            return Ok(Jv::Obj(fields));
-                        }
-                        _ => return Err(self.err("object", "expected ',' or '}'")),
-                    }
-                }
-            }
-            Some(b'[') => {
-                self.at += 1;
-                let mut items = Vec::new();
-                self.ws();
-                if self.b.get(self.at) == Some(&b']') {
-                    self.at += 1;
-                    return Ok(Jv::Arr(items));
-                }
-                loop {
-                    items.push(self.value_at(depth + 1)?);
-                    if items.len() > MAX_JSON_CONTAINER_ITEMS {
-                        return Err(self.err(
-                            "array",
-                            format!("array element count exceeds limit {MAX_JSON_CONTAINER_ITEMS}"),
-                        ));
-                    }
-                    self.ws();
-                    match self.b.get(self.at) {
-                        Some(b',') => {
-                            self.at += 1;
-                        }
-                        Some(b']') => {
-                            self.at += 1;
-                            return Ok(Jv::Arr(items));
-                        }
-                        _ => return Err(self.err("array", "expected ',' or ']'")),
-                    }
-                }
-            }
+            Some(b'{') => self.object_at(depth),
+            Some(b'[') => self.array_at(depth),
             Some(b'n') => {
                 if self.b[self.at..].starts_with(b"null") {
                     self.at += 4;
