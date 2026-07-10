@@ -18,6 +18,12 @@
 //! Serialization is in-house (Decalogue P1: std + constellation only — serde
 //! is not on that list). The wire format is JSON-lines with CANONICAL field
 //! order; the strict validator treats deviation as corruption, not dialect.
+//!
+//! The [`ident`] module owns the CANONICAL REPLAY IDENTITY encoding
+//! (bead gp3.14): versioned, typed, length-prefixed — the shared
+//! replacement for ad hoc delimiter-concatenation identities.
+
+pub mod ident;
 
 use core::fmt;
 use std::fmt::Write as _;
