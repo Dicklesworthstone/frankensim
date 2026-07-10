@@ -112,8 +112,21 @@ impl Gp {
     /// Fallible exact fit: `None` when K + σ_n²I is not SPD.
     #[must_use]
     pub fn try_fit(x: &[Vec<f64>], y: &[f64], kernel: Kernel, noise: f64) -> Option<Gp> {
+        let noises = vec![noise; x.len()];
+        Gp::try_fit_diag(x, y, kernel, &noises)
+    }
+
+    /// HETEROSCEDASTIC fallible fit: per-point noise variances
+    /// (K + diag(σᵢ²)); the Cholesky/LML/predict paths are unchanged
+    /// once the matrix is built. The stored scalar `noise` becomes
+    /// the MINIMUM (used only for reporting; predictions are latent-f
+    /// and never re-add noise).
+    #[must_use]
+    pub fn try_fit_diag(x: &[Vec<f64>], y: &[f64], kernel: Kernel, noises: &[f64]) -> Option<Gp> {
         let n = x.len();
         assert_eq!(n, y.len());
+        assert_eq!(n, noises.len());
+        let noise = noises.iter().copied().fold(f64::INFINITY, f64::min);
         let mut k = vec![0.0f64; n * n];
         for i in 0..n {
             for j in 0..=i {
@@ -121,7 +134,7 @@ impl Gp {
                 k[i * n + j] = v;
                 k[j * n + i] = v;
             }
-            k[i * n + i] += noise;
+            k[i * n + i] += noises[i];
         }
         let chol = cholesky(&k, n).ok()?;
         let mut alpha = y.to_vec();

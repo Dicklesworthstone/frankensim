@@ -17,5 +17,9 @@ fs-la = { path = "../fs-la" }
 fs-math = { path = "../fs-math" }
 fs-rand = { path = "../fs-rand" }
 
+[dev-dependencies]
+fs-eproc = { path = "../fs-eproc" }
+fs-uq = { path = "../fs-uq" }
+
 [lints]
 workspace = true

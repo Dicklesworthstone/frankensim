@@ -899,9 +899,11 @@ version = "0.0.1"
 dependencies = [
  "fs-ascent",
  "fs-dfo",
+ "fs-eproc",
  "fs-la",
  "fs-math",
  "fs-rand",
+ "fs-uq",
 ]
 
 [[package]]
