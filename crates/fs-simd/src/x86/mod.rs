@@ -229,10 +229,7 @@ unsafe fn mk8x4_f64_256(a_panel: &[f64], b_panel: &[f64], kc: usize, acc: &mut [
     unsafe {
         let ap = a_panel.as_ptr();
         let bp = b_panel.as_ptr();
-        let mut va: [__m256d; 8] = [_mm256_setzero_pd(); 8];
-        for (r, v) in va.iter_mut().enumerate() {
-            *v = _mm256_loadu_pd(acc[r].as_ptr());
-        }
+        let mut va: [__m256d; 8] = std::array::from_fn(|r| _mm256_loadu_pd(acc[r].as_ptr()));
         for kk in 0..kc {
             let b = _mm256_loadu_pd(bp.add(kk * 4));
             for (r, v) in va.iter_mut().enumerate() {
