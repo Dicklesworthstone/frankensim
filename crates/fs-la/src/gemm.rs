@@ -129,8 +129,12 @@ pub fn gemm_f64_parallel(
             // band, never of which thread computed it or in what
             // order; the lock guards ASSIGNMENT only.
             let dispenser = std::sync::Mutex::new(c.chunks_mut(MC * n).enumerate());
+            // Never spawn more workers than bands: excess threads only
+            // lock, see None, and exit — 64 spawns for 4-16 bands
+            // measured 2-9x slower than v2 on the 64-thread ts1.
+            let workers = t.min(m.div_ceil(MC));
             std::thread::scope(|scope| {
-                for _ in 0..t {
+                for _ in 0..workers {
                     let disp = &dispenser;
                     scope.spawn(move || {
                         let mut a_pack = vec![0.0f64; MC * KC];
