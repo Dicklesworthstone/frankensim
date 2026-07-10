@@ -356,3 +356,47 @@ fn evd_007_disjoint_validated_regimes_demote_not_launder() {
          Estimated instead of laundering a phantom point regime",
     );
 }
+
+#[test]
+#[allow(clippy::float_cmp)] // exact next_down/next_up bit checks
+fn evd_008_verified_compose_stays_a_true_enclosure() {
+    use fs_evidence::{Color, IntervalOp, compose};
+    // Round-to-nearest a+b can EXCLUDE the exact real sum — 0.1+0.2 is the
+    // textbook case (the exact sum lies below the nearest f64). A Verified
+    // composition must OUTWARD-round so the interval still brackets the exact
+    // result: lo < a+b < hi, strictly.
+    let a = Color::Verified { lo: 0.1, hi: 0.1 };
+    let b = Color::Verified { lo: 0.2, hi: 0.2 };
+    let Color::Verified { lo, hi } = compose(&a, &b, IntervalOp::Add) else {
+        panic!("Verified ⊕ Verified must stay Verified");
+    };
+    let mid = 0.1_f64 + 0.2_f64;
+    assert!(
+        lo < mid && mid < hi,
+        "Add not outward-rounded: [{lo}, {hi}] vs {mid}"
+    );
+    assert_eq!(lo, mid.next_down());
+    assert_eq!(hi, mid.next_up());
+
+    // A 0×∞ product corner is indeterminate and the min/max fold would SILENTLY
+    // DROP the NaN, reporting a bogus tight interval — it must degrade to the
+    // whole real line instead.
+    let zero = Color::Verified { lo: 0.0, hi: 0.0 };
+    let whole = Color::Verified {
+        lo: f64::NEG_INFINITY,
+        hi: f64::INFINITY,
+    };
+    let Color::Verified { lo, hi } = compose(&zero, &whole, IntervalOp::Mul) else {
+        panic!("stays Verified");
+    };
+    assert!(
+        lo == f64::NEG_INFINITY && hi == f64::INFINITY,
+        "0×∞ Mul must be the whole real line, got [{lo}, {hi}]"
+    );
+
+    verdict(
+        "evd-008",
+        true,
+        "Verified compose is outward-rounded (true enclosure) and NaN-safe",
+    );
+}
