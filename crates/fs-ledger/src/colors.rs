@@ -16,16 +16,117 @@ use crate::hash::{ContentHash, hash_bytes};
 use fs_evidence::{Color, ColorRank, Demotion, IntervalOp, check_regime, compose};
 use std::collections::BTreeMap;
 
-/// A signed waiver: the only path past a laundering refusal, and it
-/// travels IN the provenance hash.
+/// A human ANNOTATION (ticket, memo, name, rationale). It travels in
+/// provenance but AUTHORIZES NOTHING (bead qmao.1.1): presence of
+/// caller-created strings is not proof. The only path past a
+/// laundering refusal is an authenticated [`WaiverGrant`] through
+/// [`ColorGraph::derive_waived`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Waiver {
     /// Waiver identifier (ticket, memo).
     pub id: String,
-    /// The human who signed it.
+    /// The human who accepts responsibility.
     pub signer: String,
     /// Why.
     pub reason: String,
+}
+
+/// The canonical scope string a color-upgrade grant must carry.
+pub const WAIVER_SCOPE_COLOR_UPGRADE: &str = "color-upgrade";
+
+/// An AUTHENTICATED waiver: a versioned, length-prefixed payload bound
+/// to the exact node identity, evidence lineage, claimed color, scope,
+/// signer key, and expiry — plus signature bytes over that payload.
+/// Verification happens through a caller-supplied [`WaiverVerifier`]
+/// capability; the grant travels whole in the provenance hash.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WaiverGrant {
+    /// The human annotation riding along (never itself authorizing).
+    pub annotation: Waiver,
+    /// Issuer key identity the verifier resolves.
+    pub key_id: String,
+    /// Must equal [`WAIVER_SCOPE_COLOR_UPGRADE`] for color upgrades.
+    pub scope: String,
+    /// The node name this grant is bound to.
+    pub node_name: String,
+    /// The color name (`Color::name`) being authorized.
+    pub claimed_color: String,
+    /// The exact parent provenance hashes, in write order — binds the
+    /// grant to one evidence lineage (replay to another node fails).
+    pub parent_hashes: Vec<ContentHash>,
+    /// Last day the grant is valid (days since 2026-01-01).
+    pub expires_day: u32,
+    /// Signature bytes over [`WaiverGrant::signing_payload`].
+    pub signature: Vec<u8>,
+}
+
+impl WaiverGrant {
+    /// Canonical signing payload, VERSIONED and LENGTH-PREFIXED (no
+    /// delimiters, so adversarial text cannot collide structurally):
+    /// version byte 1, then each field as u32-LE length + bytes, then
+    /// parent count + 32-byte hashes, then expiry as u32 LE. The
+    /// signature is NOT part of its own payload.
+    #[must_use]
+    pub fn signing_payload(&self) -> Vec<u8> {
+        let mut out = vec![1u8];
+        for field in [
+            self.key_id.as_str(),
+            self.scope.as_str(),
+            self.node_name.as_str(),
+            self.claimed_color.as_str(),
+            self.annotation.id.as_str(),
+            self.annotation.signer.as_str(),
+            self.annotation.reason.as_str(),
+        ] {
+            out.extend_from_slice(&(field.len() as u32).to_le_bytes());
+            out.extend_from_slice(field.as_bytes());
+        }
+        out.extend_from_slice(&(self.parent_hashes.len() as u32).to_le_bytes());
+        for h in &self.parent_hashes {
+            out.extend_from_slice(h.to_hex().as_bytes());
+        }
+        out.extend_from_slice(&self.expires_day.to_le_bytes());
+        out
+    }
+}
+
+/// The signature-verification CAPABILITY (injected; this crate ships
+/// no cryptography). Implementations resolve `key_id` and check
+/// `signature` over `payload`.
+pub trait WaiverVerifier {
+    /// True iff `signature` authenticates `payload` under `key_id`.
+    fn verify(&self, key_id: &str, payload: &[u8], signature: &[u8]) -> bool;
+}
+
+/// The in-tree default: NO verifier exists, so NOTHING authenticates
+/// (the no-crypto no-claim — fail closed until a Franken-compliant
+/// signature capability is wired in).
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NoWaiverVerifier;
+
+impl WaiverVerifier for NoWaiverVerifier {
+    fn verify(&self, _key_id: &str, _payload: &[u8], _signature: &[u8]) -> bool {
+        false
+    }
+}
+
+/// Why a grant failed to authorize (structured, teaching).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WaiverRejection {
+    /// Scope is not [`WAIVER_SCOPE_COLOR_UPGRADE`].
+    ScopeMismatch,
+    /// The grant names a different node.
+    NodeMismatch,
+    /// The grant authorizes a different color than claimed.
+    ColorMismatch,
+    /// The grant's parent hashes differ from the actual lineage
+    /// (replay to another node / tampered evidence).
+    LineageMismatch,
+    /// Expired as of the supplied day.
+    Expired,
+    /// The verifier refused the signature (wrong key, tampered
+    /// payload, rotated-out key, or no verifier capability at all).
+    BadSignature,
 }
 
 fn json_f64(value: f64) -> String {
@@ -70,8 +171,10 @@ pub struct ColorNode {
     pub parents: Vec<u64>,
     /// Demotion flag, when the regime check fired.
     pub demotion: Option<Demotion>,
-    /// The waiver, when one authorized an upgrade.
+    /// The human annotation, when one was recorded (never authorizing).
     pub waiver: Option<Waiver>,
+    /// The authenticated grant, when one authorized an upgrade.
+    pub grant: Option<WaiverGrant>,
     /// Provenance hash (name, payload, parent hashes, waiver).
     pub hash: ContentHash,
 }
@@ -95,6 +198,12 @@ pub enum ColorWriteError {
     },
     /// Derivations need at least one parent.
     NoParents,
+    /// A waiver grant failed authentication or binding checks; the
+    /// promotion is refused (fail closed).
+    WaiverRefused {
+        /// The structured reason.
+        rejection: WaiverRejection,
+    },
 }
 
 impl core::fmt::Display for ColorWriteError {
@@ -108,9 +217,9 @@ impl core::fmt::Display for ColorWriteError {
                 f,
                 "laundering refused: the write claims {claimed:?} but the parents \
                  support at most {derived:?} (capped by nodes {offending_parents:?}); \
-                 estimates cannot become certificates by assertion — attach a signed \
-                 waiver if a human accepts responsibility, and it will travel in \
-                 provenance"
+                 estimates cannot become certificates by assertion — an authenticated \
+                 WaiverGrant via derive_waived is the only path past this refusal, and \
+                 it travels whole in provenance"
             ),
             ColorWriteError::UnknownParent { id } => {
                 write!(f, "parent node {id} does not exist in this color graph")
@@ -118,6 +227,12 @@ impl core::fmt::Display for ColorWriteError {
             ColorWriteError::NoParents => {
                 write!(f, "derived nodes need parents; use `source` for leaves")
             }
+            ColorWriteError::WaiverRefused { rejection } => write!(
+                f,
+                "waiver refused ({rejection:?}): promotion requires an authenticated \
+                 grant bound to this node, lineage, color, and scope, unexpired, with \
+                 a signature the verifier capability accepts — fail closed otherwise"
+            ),
         }
     }
 }
@@ -150,31 +265,55 @@ impl ColorGraph {
         &self.rows
     }
 
+    /// Provenance hash over a VERSIONED, LENGTH-PREFIXED encoding
+    /// (bead qmao.1.1): the former newline/colon-delimited encoding let
+    /// adversarial text collide structurally (a name containing a
+    /// newline could impersonate a parent hash line).
     fn node_hash(
         &self,
         name: &str,
         color: &Color,
         parents: &[u64],
         waiver: Option<&Waiver>,
+        grant: Option<&WaiverGrant>,
     ) -> ContentHash {
-        let mut buf = String::new();
-        buf.push_str(name);
-        buf.push('\n');
-        buf.push_str(color.name());
-        buf.push('\n');
-        buf.push_str(&color.payload_json());
-        buf.push('\n');
+        let mut buf = vec![2u8]; // encoding version
+        let mut field = |b: &mut Vec<u8>, s: &str| {
+            b.extend_from_slice(&(s.len() as u32).to_le_bytes());
+            b.extend_from_slice(s.as_bytes());
+        };
+        field(&mut buf, name);
+        field(&mut buf, color.name());
+        field(&mut buf, &color.payload_json());
+        buf.extend_from_slice(&(parents.len() as u32).to_le_bytes());
         for &p in parents {
-            buf.push_str(&self.nodes[p as usize].hash.to_hex());
-            buf.push('\n');
+            let hex = self.nodes[p as usize].hash.to_hex();
+            field(&mut buf, &hex);
         }
-        if let Some(w) = waiver {
-            use core::fmt::Write as _;
-            let _ = writeln!(buf, "waiver:{}:{}:{}", w.id, w.signer, w.reason);
+        match waiver {
+            Some(w) => {
+                buf.push(1);
+                field(&mut buf, &w.id);
+                field(&mut buf, &w.signer);
+                field(&mut buf, &w.reason);
+            }
+            None => buf.push(0),
         }
-        hash_bytes(buf.as_bytes())
+        match grant {
+            Some(g) => {
+                buf.push(1);
+                let payload = g.signing_payload();
+                buf.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+                buf.extend_from_slice(&payload);
+                buf.extend_from_slice(&(g.signature.len() as u32).to_le_bytes());
+                buf.extend_from_slice(&g.signature);
+            }
+            None => buf.push(0),
+        }
+        hash_bytes(&buf)
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     fn push_node(
         &mut self,
         name: &str,
@@ -182,9 +321,10 @@ impl ColorGraph {
         parents: Vec<u64>,
         demotion: Option<Demotion>,
         waiver: Option<Waiver>,
+        grant: Option<WaiverGrant>,
     ) -> u64 {
         let id = self.nodes.len() as u64;
-        let hash = self.node_hash(name, &color, &parents, waiver.as_ref());
+        let hash = self.node_hash(name, &color, &parents, waiver.as_ref(), grant.as_ref());
         if let Some(d) = &demotion {
             self.rows.push(format!(
                 "{{\"event\":\"demotion\",\"node\":{id},\"dataset\":{},\
@@ -202,15 +342,24 @@ impl ColorGraph {
                 json_string(&w.reason)
             )
         });
+        let grant_json = grant.as_ref().map_or("null".to_string(), |g| {
+            format!(
+                "{{\"key_id\":{},\"scope\":{},\"expires_day\":{},\"authorized\":true}}",
+                json_string(&g.key_id),
+                json_string(&g.scope),
+                g.expires_day
+            )
+        });
         self.rows.push(format!(
             "{{\"event\":\"color-write\",\"node\":{id},\"name\":{},\
              \"color\":\"{}\",\"payload\":{},\"parents\":{:?},\"waiver\":{},\
-             \"hash\":\"{}\"}}",
+             \"grant\":{},\"hash\":\"{}\"}}",
             json_string(name),
             color.name(),
             color.payload_json(),
             parents,
             waiver_json,
+            grant_json,
             hash.to_hex()
         ));
         self.nodes.push(ColorNode {
@@ -220,6 +369,7 @@ impl ColorGraph {
             parents,
             demotion,
             waiver,
+            grant,
             hash,
         });
         id
@@ -229,14 +379,69 @@ impl ColorGraph {
     /// estimator output). Leaves state their color; derivations must
     /// EARN theirs.
     pub fn source(&mut self, name: &str, color: Color) -> u64 {
-        self.push_node(name, color, Vec::new(), None, None)
+        self.push_node(name, color, Vec::new(), None, None, None)
+    }
+
+    /// Regime re-checks + composition fold shared by the derive paths.
+    fn fold_parents(
+        &self,
+        parents: &[u64],
+        op: IntervalOp,
+        state: &BTreeMap<String, f64>,
+    ) -> Result<(Color, Option<Demotion>), ColorWriteError> {
+        if parents.is_empty() {
+            return Err(ColorWriteError::NoParents);
+        }
+        for &p in parents {
+            if p as usize >= self.nodes.len() {
+                return Err(ColorWriteError::UnknownParent { id: p });
+            }
+        }
+        let mut demotion = None;
+        let mut effective: Vec<Color> = Vec::with_capacity(parents.len());
+        for &p in parents {
+            let (c, d) = check_regime(&self.nodes[p as usize].color, state);
+            if demotion.is_none() {
+                demotion = d;
+            }
+            effective.push(c);
+        }
+        let mut derived = effective[0].clone();
+        for c in &effective[1..] {
+            derived = compose(&derived, c, op);
+        }
+        Ok((derived, demotion))
+    }
+
+    fn laundering_error(
+        &self,
+        parents: &[u64],
+        state: &BTreeMap<String, f64>,
+        claimed: ColorRank,
+        cap: ColorRank,
+    ) -> ColorWriteError {
+        let offending: Vec<u64> = parents
+            .iter()
+            .copied()
+            .filter(|&p| {
+                let (eff, _) = check_regime(&self.nodes[p as usize].color, state);
+                eff.rank() <= cap
+            })
+            .collect();
+        ColorWriteError::LaunderingRefused {
+            claimed,
+            derived: cap,
+            offending_parents: offending,
+        }
     }
 
     /// Write a DERIVED node: the composition algebra folds the parent
     /// colors (with regime re-checks against `state`, auto-demoting on
-    /// exit), and the claimed color must not outrank the derivation —
-    /// unless a signed waiver authorizes it, in which case the waiver
-    /// travels in the provenance hash.
+    /// exit), and the claimed color must not outrank the derivation.
+    /// The `waiver` argument is a HUMAN ANNOTATION only (bead
+    /// qmao.1.1): it is recorded and hashed but authorizes NOTHING —
+    /// an upgrade claim is refused here regardless. The authorized
+    /// path is [`ColorGraph::derive_waived`].
     ///
     /// # Errors
     /// [`ColorWriteError`] teaching errors; the laundering refusal
@@ -250,54 +455,86 @@ impl ColorGraph {
         state: &BTreeMap<String, f64>,
         waiver: Option<Waiver>,
     ) -> Result<u64, ColorWriteError> {
-        if parents.is_empty() {
-            return Err(ColorWriteError::NoParents);
-        }
-        for &p in parents {
-            if p as usize >= self.nodes.len() {
-                return Err(ColorWriteError::UnknownParent { id: p });
-            }
-        }
-        // Regime re-checks per parent (validated is REGIONAL).
-        let mut demotion = None;
-        let mut effective: Vec<Color> = Vec::with_capacity(parents.len());
-        for &p in parents {
-            let (c, d) = check_regime(&self.nodes[p as usize].color, state);
-            if demotion.is_none() {
-                demotion = d;
-            }
-            effective.push(c);
-        }
-        // Fold the composition algebra.
-        let mut derived = effective[0].clone();
-        for c in &effective[1..] {
-            derived = compose(&derived, c, op);
-        }
-        // The claim gate.
+        let (derived, demotion) = self.fold_parents(parents, op, state)?;
         let written = match claimed {
             None => derived,
             Some(c) if c.rank() <= derived.rank() => c,
             Some(c) => {
-                if waiver.is_none() {
-                    let cap = derived.rank();
-                    let offending: Vec<u64> = parents
-                        .iter()
-                        .copied()
-                        .filter(|&p| {
-                            let (eff, _) = check_regime(&self.nodes[p as usize].color, state);
-                            eff.rank() <= cap
-                        })
-                        .collect();
-                    return Err(ColorWriteError::LaunderingRefused {
-                        claimed: c.rank(),
-                        derived: cap,
-                        offending_parents: offending,
-                    });
-                }
-                c // waived upgrade: recorded WITH the waiver in provenance
+                return Err(self.laundering_error(parents, state, c.rank(), derived.rank()));
             }
         };
-        Ok(self.push_node(name, written, parents.to_vec(), demotion, waiver))
+        Ok(self.push_node(name, written, parents.to_vec(), demotion, waiver, None))
+    }
+
+    /// Write a DERIVED node whose upgrade past the composition cap is
+    /// authorized by an AUTHENTICATED [`WaiverGrant`] (bead qmao.1.1):
+    /// the grant must carry the color-upgrade scope, name THIS node,
+    /// authorize exactly the claimed color, bind the exact parent
+    /// provenance hashes (replay to another node fails), be unexpired
+    /// as of `today_day`, and carry a signature the `verifier`
+    /// capability accepts over the canonical length-prefixed payload.
+    /// Any failure refuses the write (fail closed) — with the in-tree
+    /// [`NoWaiverVerifier`] every promotion is refused (the no-crypto
+    /// no-claim).
+    ///
+    /// # Errors
+    /// [`ColorWriteError::WaiverRefused`] with the structured
+    /// rejection, plus the ordinary derive errors.
+    #[allow(clippy::too_many_arguments)] // the authorization surface is the point
+    pub fn derive_waived(
+        &mut self,
+        name: &str,
+        parents: &[u64],
+        op: IntervalOp,
+        claimed: Color,
+        state: &BTreeMap<String, f64>,
+        grant: WaiverGrant,
+        verifier: &dyn WaiverVerifier,
+        today_day: u32,
+    ) -> Result<u64, ColorWriteError> {
+        let (derived, demotion) = self.fold_parents(parents, op, state)?;
+        if claimed.rank() <= derived.rank() {
+            // No upgrade needed; record the annotation, drop nothing.
+            return Ok(self.push_node(
+                name,
+                claimed,
+                parents.to_vec(),
+                demotion,
+                Some(grant.annotation.clone()),
+                Some(grant),
+            ));
+        }
+        let refuse = |rejection| Err(ColorWriteError::WaiverRefused { rejection });
+        if grant.scope != WAIVER_SCOPE_COLOR_UPGRADE {
+            return refuse(WaiverRejection::ScopeMismatch);
+        }
+        if grant.node_name != name {
+            return refuse(WaiverRejection::NodeMismatch);
+        }
+        if grant.claimed_color != claimed.name() {
+            return refuse(WaiverRejection::ColorMismatch);
+        }
+        let lineage: Vec<ContentHash> = parents
+            .iter()
+            .map(|&p| self.nodes[p as usize].hash)
+            .collect();
+        if grant.parent_hashes != lineage {
+            return refuse(WaiverRejection::LineageMismatch);
+        }
+        if today_day > grant.expires_day {
+            return refuse(WaiverRejection::Expired);
+        }
+        if !verifier.verify(&grant.key_id, &grant.signing_payload(), &grant.signature) {
+            return refuse(WaiverRejection::BadSignature);
+        }
+        Ok(self.push_node(
+            name,
+            claimed,
+            parents.to_vec(),
+            demotion,
+            Some(grant.annotation.clone()),
+            Some(grant),
+        ))
     }
 
     /// The node by id.
