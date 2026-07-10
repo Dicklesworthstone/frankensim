@@ -29,9 +29,11 @@ at every joint.
   cd₀(t) + induced cl²/(π·AR·e); the inviscid panel has no drag of its
   own), the fs-vpm flapping wake metric (BEM-shed vortices advected as
   particles, streamwise vorticity drift), and the E-RACED generation:
-  losses pre-normalized per the fs-eproc contract (the vessel
-  flagship's measured lesson applied), eliminations and the
-  fixed-N-equivalent savings LEDGERED.
+  losses normalized against a fixed analytical `LossSpan` per the fs-eproc
+  contract (the vessel flagship's measured lesson applied), eliminations and
+  the fixed-N-equivalent savings LEDGERED. `screen_generation` returns the
+  structured `fs_race::RaceError` rather than manufacturing a winner when the
+  support or input contract fails.
 - `refine::{refine, RefineReport}` — fs-lbm channel flow around the
   rasterized section; forces by CONTROL-VOLUME momentum balance over
   the PUBLIC cell moments (∮(ρuu + p·I)·n dA, p = ρc_s² — no reliance
@@ -53,8 +55,9 @@ at every joint.
 
 1. Certified means CERTIFIED: `roa_volume > 0 ⇔ certificate verified`
    (gated per atlas row).
-2. Race losses are pre-normalized so pair differences land on [−1, 1]
-   (the PairwiseRace contract).
+2. Race losses have a declared maximum paired difference of 1.52: normalized
+   base range 1.5 plus total jitter width 0.02. A support breach yields no race
+   report (the PairwiseRace contract).
 3. Seed replay is bitwise: same seed → identical atlas genes and
    objectives, identical race trajectories (gated).
 4. Reports never drop their honesty labels (model-form agreement is
@@ -62,9 +65,9 @@ at every joint.
 
 ## Error model
 
-Fixture-scale programmer errors panic (`expect`/`assert`). No
-`Result` surface: the flagship consumes typed results from lower
-crates and converts failure to a loud stop at smoke tier.
+Fixture-scale programmer errors still panic (`expect`/`assert`). The e-raced
+screen is a `Result` surface: guarantee-voiding loss/span failures propagate as
+`fs_race::RaceError`; smoke-tier tests explicitly require success.
 
 ## Determinism class
 

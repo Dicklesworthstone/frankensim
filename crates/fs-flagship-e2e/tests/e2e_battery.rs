@@ -77,7 +77,7 @@ fn ornith_smoke() -> StageArtifact {
             OrnithCandidate::from_genes(&g)
         })
         .collect();
-    let rep = screen_generation(&generation, 0xE2E);
+    let rep = screen_generation(&generation, 0xE2E).expect("normalized screen losses");
     let winner = generation[rep.winner];
     let cert = fs_ornith::certify(&winner);
     let metrics = vec![
@@ -258,9 +258,10 @@ fn fe2e_006_erace_consistency_audit() {
         fs_race::race_field(
             &mut loss,
             base.len(),
-            fs_race::RaceSettings::default(),
+            fs_race::RaceSettings::new(fs_race::LossSpan::new(1.32).expect("positive constant")),
             &kills,
         )
+        .expect("fixture losses stay within the declared span")
     };
     let a = run(0xAB);
     let b = run(0xAB);
@@ -323,9 +324,10 @@ fn fe2e_007_failure_drills() {
     let out = fs_race::race_field(
         &mut loss,
         base.len(),
-        fs_race::RaceSettings::default(),
+        fs_race::RaceSettings::new(fs_race::LossSpan::new(1.52).expect("positive constant")),
         &kills,
-    );
+    )
+    .expect("fixture losses stay within the declared span");
     let storm_ok = out.winner == 0;
     println!(
         "{}",

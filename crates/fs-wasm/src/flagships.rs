@@ -36,7 +36,7 @@ use fs_ornith::certify::LdSurrogate;
 use fs_ornith::param::OrnithCandidate;
 use fs_ornith::screen::{PANELS, lift_to_drag};
 use fs_qty::{Dims, QtyAny};
-use fs_race::{RaceSettings, race_field};
+use fs_race::{LossSpan, RaceSettings, race_field};
 use fs_rand::StreamKey;
 use fs_render::volumes::{MajorantGrid, VolumeGrid, render_transmittance};
 use fs_scenario::ensemble::{SpectrumModel, StochasticEnsemble};
@@ -239,7 +239,19 @@ pub fn run_ornithoid(seed: u32) -> Vec<f64> {
         let jitter = ((h >> 11) as f64 / (1u64 << 53) as f64 - 0.5) * 0.02;
         (base[i] - minb).mul_add(scale, jitter)
     };
-    let race = race_field(&mut loss, ns, RaceSettings::default(), &kills);
+    let race = match race_field(
+        &mut loss,
+        ns,
+        // Normalized base lies in [0, 1.5]; jitter has total width 0.02.
+        RaceSettings::new(LossSpan::new(1.52).expect("positive constant")),
+        &kills,
+    ) {
+        Ok(race) => race,
+        // The flat browser ABI uses an empty payload for a stage that cannot
+        // make its claimed result; never turn an invalid e-process into a
+        // winner or a wasm trap.
+        Err(_) => return Vec::new(),
+    };
 
     // winner flapping wake → vortex particles → advect.
     let winner = candidates[race.winner];

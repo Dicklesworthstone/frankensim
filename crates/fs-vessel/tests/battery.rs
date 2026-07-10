@@ -153,6 +153,8 @@ fn vsl_005_cvar_and_race() {
         .iter()
         .map(|&l| growth_objective(&VesselProfile::carafe(l), 1.0, 1.0, 3, 3))
         .collect();
+    let base_span = base.iter().copied().fold(f64::NEG_INFINITY, f64::max)
+        - base.iter().copied().fold(f64::INFINITY, f64::min);
     let kills = fs_exec::KillRegistry::new();
     let mut loss = |i: usize, t: u64| {
         let mut h = (i as u64) << 32 ^ t ^ 0x7E55;
@@ -176,9 +178,12 @@ fn vsl_005_cvar_and_race() {
     let out = fs_race::race_field(
         &mut loss,
         lips.len(),
-        fs_race::RaceSettings::default(),
+        fs_race::RaceSettings::new(
+            fs_race::LossSpan::new(200.0 * (base_span + 1e-4)).expect("positive analytical span"),
+        ),
         &kills,
-    );
+    )
+    .expect("fixture losses stay within the declared span");
     verdict(
         "vsl-005-e-raced-screen",
         out.winner == expected && !out.eliminated.is_empty(),

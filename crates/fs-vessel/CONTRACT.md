@@ -125,8 +125,9 @@ objective); a monotone unclamped branch pinned both optimizers at the
 lip-grid floor (no robustification story); g0 = 1.2e-4 never overtopped
 the weir in 700 steps (poured mass 0.00); unscaled growth losses
 (~1e-3 gaps) starved the PairwiseRace betting process (0 eliminations
-in 400 rounds) — losses are now pre-normalized ×200 per fs-eproc's
-documented contract.
+in 400 rounds) — losses are now scaled by 200 for power, while the exact
+fixture-wide paired difference plus jitter is declared separately as the
+checked `LossSpan`. A support breach produces no race verdict.
 
 ## No-claim boundaries
 

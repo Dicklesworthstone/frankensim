@@ -91,11 +91,21 @@ pub struct ScreenReport {
 }
 
 /// Race one generation on the (noisy) screening loss. Losses are
-/// pre-normalized per the fs-eproc PairwiseRace contract (the vessel
-/// flagship's measured lesson: unscaled ~1e-3 gaps starve the betting
-/// e-process).
-#[must_use]
-pub fn screen_generation(candidates: &[OrnithCandidate], seed: u64) -> ScreenReport {
+/// normalized onto a declared analytical support per the fs-eproc
+/// PairwiseRace contract (the vessel flagship's measured lesson: unscaled
+/// ~1e-3 gaps starve the betting e-process).
+///
+/// # Errors
+/// Propagates a structured [`fs_race::RaceError`] if the analytically
+/// bounded normalization or an observation violates the e-process input
+/// contract.
+///
+/// # Panics
+/// If fewer than two candidates are supplied.
+pub fn screen_generation(
+    candidates: &[OrnithCandidate],
+    seed: u64,
+) -> Result<ScreenReport, fs_race::RaceError> {
     assert!(candidates.len() >= 2, "a generation needs candidates");
     let base: Vec<f64> = candidates.iter().map(|c| -lift_to_drag(c)).collect();
     let spread = base.iter().fold(f64::NEG_INFINITY, |m, &v| m.max(v))
@@ -114,16 +124,17 @@ pub fn screen_generation(candidates: &[OrnithCandidate], seed: u64) -> ScreenRep
     let out = fs_race::race_field(
         &mut loss,
         candidates.len(),
-        fs_race::RaceSettings::default(),
+        // Normalized base lies in [0, 1.5]; jitter has total width 0.02.
+        fs_race::RaceSettings::new(fs_race::LossSpan::new(1.52).expect("positive constant")),
         &kills,
-    );
-    ScreenReport {
+    )?;
+    Ok(ScreenReport {
         winner: out.winner,
         eliminated: out.eliminated.len(),
         evaluations_used: out.evaluations_used,
         fixed_n_equivalent: out.fixed_n_equivalent,
         losses: base,
-    }
+    })
 }
 
 #[cfg(test)]

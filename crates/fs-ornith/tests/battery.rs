@@ -69,7 +69,7 @@ fn lift_to_drag_cl(c: &OrnithCandidate) -> f64 {
 fn orn_002_screen_eraced() {
     let mut seed = 0x0221_u64;
     let generation = generation(24, &mut seed);
-    let rep = screen_generation(&generation, 0x7E55);
+    let rep = screen_generation(&generation, 0x7E55).expect("normalized screen losses");
     let expected = rep
         .losses
         .iter()
@@ -210,8 +210,8 @@ fn orn_006_seed_replay() {
         });
     let mut s1 = 0x0662_u64;
     let g1 = generation(12, &mut s1);
-    let r1 = screen_generation(&g1, 0xACE);
-    let r2 = screen_generation(&g1, 0xACE);
+    let r1 = screen_generation(&g1, 0xACE).expect("normalized screen losses");
+    let r2 = screen_generation(&g1, 0xACE).expect("normalized screen losses");
     verdict(
         "orn-006-seed-replay",
         atlas_bitwise && r1.winner == r2.winner && r1.evaluations_used == r2.evaluations_used,
