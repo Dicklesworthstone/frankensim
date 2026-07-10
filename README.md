@@ -70,7 +70,14 @@ There is not yet a packaged end-user simulation application or crates.io release
 
 ## Quick Start
 
-FrankenSim currently builds from source. The workspace expects sibling Franken projects for path dependencies, especially `~/projects/asupersync` and `~/projects/frankensqlite`.
+FrankenSim currently builds from source. The workspace expects exact pinned
+sibling Franken projects for path dependencies, especially
+`~/projects/asupersync` and `~/projects/frankensqlite`. A true clean-clone
+bootstrap is not yet available: Cargo cannot build the in-workspace bootstrap
+tool before those paths resolve, and the current FrankenNumpy pin has a
+case-collision on default macOS filesystems. See
+[`docs/BOOTSTRAP.md`](docs/BOOTSTRAP.md) for the explicit blocker and supported
+verification path.
 
 ```bash
 git clone https://github.com/Dicklesworthstone/frankensim.git

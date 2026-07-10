@@ -1060,37 +1060,7 @@ fn dirname_of(lib: &str) -> &str {
         .map_or(lib, |(_, d)| d)
 }
 
-/// True iff EVERY dirty path in `status_porcelain` is one of a pair of
-/// indexed paths differing only by ASCII case — the unavoidable
-/// checkout artifact of a case-insensitive filesystem (only one of the
-/// pair can exist on disk). Anything else stays a hard failure.
-fn only_case_collisions(dir: &Path, status_porcelain: &str) -> bool {
-    let Ok(all) = git_out(dir, &["ls-files"]) else {
-        return false;
-    };
-    let mut lower_counts = std::collections::BTreeMap::new();
-    for f in all.lines() {
-        *lower_counts.entry(f.to_ascii_lowercase()).or_insert(0u32) += 1;
-    }
-    let mut any = false;
-    for line in status_porcelain.lines() {
-        // Porcelain is "XY path" but the surrounding capture is trimmed,
-        // so parse from the right: the path is everything after the
-        // status columns' trailing space. Rename lines ("a -> b") stay
-        // hard failures by never matching a colliding pair.
-        let path = line.rsplit(' ').next().unwrap_or("").trim();
-        if path.is_empty() {
-            return false;
-        }
-        if lower_counts.get(&path.to_ascii_lowercase()).copied() < Some(2) {
-            return false;
-        }
-        any = true;
-    }
-    any
-}
-
-/// `bootstrap-constellation [--dest <dir>] [--offline] [--from <base>]`.
+/// `bootstrap-constellation [--offline] [--from <base>]`.
 /// dest defaults to the workspace parent (where the manifests' relative
 /// paths point). `--from <base>` overrides every remote with
 /// `<base>/<dirname>` — the air-gapped-mirror / local-test transport.
@@ -1118,6 +1088,19 @@ fn cmd_bootstrap(root: &Path) -> ExitCode {
         eprintln!("bootstrap-constellation: no destination directory");
         return ExitCode::FAILURE;
     };
+    let Some(workspace_parent) = root.parent() else {
+        eprintln!("bootstrap-constellation: workspace has no parent directory");
+        return ExitCode::FAILURE;
+    };
+    if dest != workspace_parent {
+        eprintln!(
+            "bootstrap-constellation: --dest {} cannot satisfy this workspace's fixed sibling \
+             path dependencies; use {}",
+            dest.display(),
+            workspace_parent.display()
+        );
+        return ExitCode::FAILURE;
+    }
     let lock_text = match std::fs::read_to_string(root.join("constellation.lock")) {
         Ok(t) => t,
         Err(e) => {
@@ -1143,22 +1126,9 @@ fn cmd_bootstrap(root: &Path) -> ExitCode {
                 Ok(head) if head == row.git_head => {
                     match git_out(&target, &["status", "--porcelain"]) {
                         Ok(st) if st.is_empty() => Ok("verified"),
-                        Ok(st) if only_case_collisions(&target, &st) => {
-                            // Paths differing only by case cannot coexist
-                            // on a case-insensitive filesystem; the COMMIT
-                            // identity is verified, and every dirty path is
-                            // provably one of a case-colliding pair — a
-                            // host-filesystem artifact, not a tamper.
-                            eprintln!(
-                                "note: {} shows case-collision checkout artifacts \
-                                 (case-insensitive filesystem); commit identity verified",
-                                target.display()
-                            );
-                            Ok("verified-case-collision")
-                        }
                         Ok(_) => Err(format!(
                             "{} is DIRTY at the locked head — a modified working tree is not \
-                             the pinned source; commit/stash there or point --dest elsewhere",
+                             the pinned source; restore or replace that sibling deliberately",
                             target.display()
                         )),
                         Err(e) => Err(e),
@@ -1166,7 +1136,7 @@ fn cmd_bootstrap(root: &Path) -> ExitCode {
                 }
                 Ok(head) => Err(format!(
                     "{} is at {head}, lock pins {} — refusing to silently substitute a \
-                     nearby working tree; align it deliberately or use a fresh --dest",
+                     nearby working tree; align or replace that sibling deliberately",
                     target.display(),
                     row.git_head
                 )),
