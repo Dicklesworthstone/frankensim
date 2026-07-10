@@ -51,7 +51,10 @@ pub use kill::{CandidateId, KillRegistry, UnregisteredKill};
 pub use latency::{LaneError, LatencyLane};
 pub use pool::{PoolConfig, RunError, RunReport, TilePool, victim_order, weighted_ranges};
 pub use race::{BranchOutcome, BranchReport, NoWinner, RaceBranch, RaceRun, Racer, RacerConfig};
-pub use tune::{ScheduleKind, TuneError, TuneRow, TuneSource, Tuner, TuningDecision};
+pub use tune::{
+    ScheduleKind, ThroughputUnit, TuneError, TuneEvidence, TuneObservation, TuneRow, TuneSource,
+    Tuner, TuningDecision, WallTimeSummary, WorkUnit,
+};
 
 /// Crate version, re-exported for provenance stamping (the Five Explicits'
 /// "versions" pillar reaches down to individual crates).

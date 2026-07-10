@@ -66,18 +66,34 @@ fs-substrate, fs-obs.
   the cancellation path), `fork` (round-trips through bytes, proving
   serializability at fork time), `StepVerdict`, `SolverProgress`.
 - `Tuner` / `TuneRow` / `TuningDecision` / `TuneSource` / `ScheduleKind` /
-  `TuneError` — the autotuner (plan §5.5). `calibrate(&probe)` first
+  `TuneEvidence` / `TuneObservation` / `WallTimeSummary` / `WorkUnit` /
+  `ThroughputUnit` / `TuneError` — the autotuner (plan §5.5).
+  `calibrate(&probe)` first
   requires the probe's stable fingerprint to match the tuner's machine
   key, then measures a real stencil-edge sweep through the real pool (argmin with
   lowest-index tie law), reduction cost, steal cost, and selects the
   schedule kind from measured per-core bandwidth; rows are keyed kernel ×
-  shape-class × MACHINE FINGERPRINT with repeat-agreement confidence and a
-  refresh counter (recalibration idempotent). Persistence is a JSON-lines
-  file store shaped like the ledger `tune` table (migration = rename);
-  foreign-fingerprint rows are stale and ignored on load. The loader
-  accepts only the canonical writer grammar, finite confidence in `[0,1]`,
-  and positive integral refresh counters; suffixes and alternate numeric
-  spellings are corruption. Decisions (`tile_edge_for`, `schedule`) are
+  shape-class × MACHINE FINGERPRINT with typed evidence and a refresh
+  counter (recalibration idempotent). Evidence schema v1 preserves every
+  wall-time sample plus revalidated min/max summaries, distinguishes
+  completed-tile and steal counters by `WorkUnit`, and records throughput as
+  a checked nearest integral milli-unit with `ThroughputUnit` (the resulting
+  integer is persisted exactly). Its optional
+  `candidate_separation_ppm` is emitted only by the explicit ranked-wall-time
+  constructor and is only the descriptive fastest-to-runner-up gap; unranked,
+  singleton, or mixed-unit rows have `null`, never a fabricated statistical
+  confidence. Persistence is a strict JSON-lines file store;
+  migrating it to fs-ledger requires retaining these typed fields rather than
+  relabeling opaque integers. Foreign-fingerprint rows are stale and ignored
+  on load. The loader accepts only evidence version 1, the canonical writer
+  grammar, summaries and separation re-derived from the exact observations,
+  recognized units, full-width canonical integers, and positive integral
+  refresh counters; suffixes and alternate numeric spellings are corruption.
+  Parsing is bounded before growth (16 MiB store, 1 MiB row, 64 KiB string,
+  4096 observations per row, 4096 samples per timing observation), and
+  duplicate kernel × shape-class rows for the selected fingerprint are
+  corruption rather than last-write-wins.
+  Decisions (`tile_edge_for`, `schedule`) are
   RECORDED; studies pin them through typed helpers or the validating
   canonical replay API and replay uses recorded plans, never re-tuned ones
   (replay fidelity). Cold-start defaults: 8-cube tiles, bandwidth-rich
@@ -120,8 +136,13 @@ fs-substrate, fs-obs.
 10. A registry kill drains the candidate's whole tree at its next poll
     points with arenas quiescent (exec-012, latency ledgered).
 11. Tune rows always carry the machine fingerprint; loads drop foreign
-    rows and reject non-canonical or out-of-domain rows; calibration refuses
+    rows and reject non-canonical, dimensionally ambiguous, or out-of-domain
+    rows; wall-time summaries and candidate separation are derived from exact
+    samples, never trusted as independent claims; calibration refuses
     a probe whose fingerprint differs before any row mutation;
+    duration narrowing is checked, non-finite/negative/unrepresentable
+    throughput is refused before any row mutation, parser allocations are
+    bounded, duplicate selected-machine keys are refused;
     recalibration replaces same-key rows with refresh incremented; pinned
     decisions are typed or canonical-validated and reproduce identically on
     ANY machine, calibrated or not (exec-013).
@@ -265,6 +286,10 @@ survival after panics.
   noise; the improvement is DOCUMENTED via the ledgered calibration
   report, and the perf harness owns throughput verdicts (same doctrine as
   every other latency/perf claim here).
+- NO statistical-confidence claim for tune rows: evidence v1 records exact
+  observations, wall-time extrema, and (when meaningful) a descriptive
+  candidate-separation ratio. It does not estimate repeatability,
+  uncertainty, or a probability that the selected candidate is optimal.
 - GEMM/prefetch-distance calibration rows arrive when fs-la and the
   stencil-prefetch kernels register their microbenches; the table schema
   and TilePlan service are ready for them. Tropical tune-next analytics

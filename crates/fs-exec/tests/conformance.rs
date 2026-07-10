@@ -749,9 +749,14 @@ fn exec_013_autotuner_calibrates_persists_and_pins_reproducibly() {
         .to_jsonl();
     fs_obs::validate_line(&line).expect("calibration report validates");
     println!("{line}");
-    // Rows carry the fingerprint + confidence (acceptance).
+    // Rows carry the fingerprint plus typed, versioned measurement evidence.
     let fp_hex = format!("{fingerprint:016x}");
-    let rows_keyed = report.contains(&fp_hex) && report.contains("\"confidence\":");
+    let rows_keyed = report.contains(&fp_hex)
+        && report.contains("\"evidence_version\":1")
+        && report.contains("\"kind\":\"wall-time\"")
+        && report.contains("\"kind\":\"work-count\"")
+        && report.contains("\"kind\":\"throughput\"")
+        && !report.contains("confidence");
     // Tuned decision now answers (source = tuned), and recalibration is
     // idempotent (same keys, refresh increments — visible in the report).
     let (_edge_first, src) = tuner.tile_edge_for("stencil7-f32");
@@ -786,7 +791,7 @@ fn exec_013_autotuner_calibrates_persists_and_pins_reproducibly() {
         rows_keyed && tuned && idempotent && persisted && stale && replayable,
         &format!(
             "calibrate->persist->consume round trip on machine {fp_hex}: rows fingerprinted \
-             with confidence, recalibration idempotent (refresh=2), foreign fingerprints \
+             with typed evidence v1, recalibration idempotent (refresh=2), foreign fingerprints \
              stale, pinned replay reproduces the recorded plan (edge={})",
             edge_reloaded.cells()
         ),
