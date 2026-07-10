@@ -6,6 +6,7 @@
 //! `cargo run -p xtask -- check-all`.
 
 pub mod batched;
+pub mod batched_f32;
 pub mod eigen;
 pub mod eigen_complex;
 pub mod factor;

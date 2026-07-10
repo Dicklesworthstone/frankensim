@@ -269,9 +269,18 @@ diagonal) fixtures; 128-byte plane alignment; cross-ISA golden hash.
   The >=60%-of-peak roofline acceptance, arch-specific capsule
   microkernels, autotuned interleave width, and a lane-vectorized
   pivoted LU join the recorded batched perf follow-up bead (same split
-  discipline as the GEMM perf lane). Batched QR/SVD, f32/mixed batched
-  precisions, and eigh3 closed-form EIGENVECTORS (currently via
-  per-matrix Jacobi) are recorded follow-up scope.
+  discipline as the GEMM perf lane). Batched QR/SVD and eigh3
+  closed-form EIGENVECTORS (currently via per-matrix Jacobi) are
+  recorded follow-up scope.
+- `batched_f32` (9ekv scope e): `BatchMatF32` + `batch_gemm_f32` (fused
+  f32 chain) + `batch_gemm_mixed` (f32 storage, EXACT widen, fused f64
+  chain, exactly ONE f32 rounding per output — the LBM moment path).
+  Bit-deterministic and membership-invariant by the same construction as
+  the f64 path; own golden `0x5600_7cfe_6a6d_1f9a` (registered against
+  `fs-la:batched-f32-bits=1`), verified identical debug+release on
+  aarch64. NO performance claim: v1 is plain plane sweeps (no MBLK
+  chunking, no packed tiles, no capsules) — the perf treatment joins the
+  9ekv lane; cross-ISA golden row pending the next x86 run.
 - `eigen_complex::eig` runs UNBALANCED explicit shifted QR (O(n²) per
   sweep; implicit bulge-chasing and a balancing pass are recorded perf/
   robustness refinements) and returns eigenvalues only (eigenvectors
