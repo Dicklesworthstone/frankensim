@@ -10,7 +10,8 @@ Performance claims as falsifiable targets: benchmark every registered
 kernel against its arithmetic-intensity-derived limit on the actual
 machine, ledger the result under the machine fingerprint, and alert when
 the fingerprint drifts. Layer: L6 (consumes fs-substrate, fs-simd,
-fs-ledger). Runtime deps: `std` + those three workspace crates.
+fs-exec, fs-session, fs-ledger). Runtime dependencies remain workspace
+crates plus `std`.
 
 ## Public types and semantics
 
@@ -43,9 +44,18 @@ fs-ledger). Runtime deps: `std` + those three workspace crates.
 - `staleness` — `MatchingIdentityAgeUnknown` / `FingerprintDrift` /
   `NeverMeasured` per kernel version and fingerprint. The name deliberately
   does not claim freshness because the tune schema has no timestamp.
-- `kernels::default_registry` — fs-simd axpy/dot/sum (report-only bands in
-  v0) and `SeededSlowKernel` (meta-test kernel claiming a band it cannot
-  meet).
+- `kernels::default_registry` — the stable test/meta registry: fs-simd
+  axpy/dot/sum (report-only bands in v0). `SeededSlowKernel` is the separate
+  meta-test kernel claiming a band it cannot meet.
+- `kernels::production_registry` / `GemmKernel` — the shipped command's
+  registry adds real f64 GEMM through `fs_session::gemm_f64_session`.
+  One kernel instance owns one tuner and cancellation gate: the first
+  warmup closes measure → cache → model → dispatch and later warmups/timed
+  reps reuse its validated row. With `--ledger`, the kernel also owns a
+  dedicated connection during measurement, adopts a valid row from a prior
+  process, or persists the cold sweep before dispatch. Execution is
+  sequential through exclusive `&mut RooflineKernel`; no wrapper lock hides
+  tune state.
 - `roofline` CLI bin — axes line, per-kernel JSONL, §14.1 coverage table,
   optional `--ledger` recording + staleness report.
 
@@ -111,9 +121,12 @@ counts and dispersion make the noise visible instead of hidden.
 
 ## Cancellation behavior
 
-No long-running loops beyond `reps × run_once`; a run is bounded by its
-arguments. Tile-level cancellation integration arrives when kernels run
-under fs-exec scopes (deferred with fs-exec integration).
+The session-backed GEMM carries an `fs_exec::CancelGate` into fs-la's
+bounded-poll, request → drain → finalize path. The current synchronous
+roofline CLI owns but does not externally expose that gate; cancellation
+therefore cannot be requested through the command yet. Other registry
+kernels remain bounded by `reps × run_once` and have no tile cancellation
+surface.
 
 ## Unsafe boundary
 
@@ -132,7 +145,10 @@ identity-match-age-unknown/drift/never-measured plus rejection-without-publicati
 (rf-004/004b); re-run reproducibility
 within stated dispersion allowance (rf-005); CLI smoke incl. §14.1
 coverage table and structured refusals (rf-006). Unit tests cover
-attainment hand-calculations, order statistics, and axes sanity.
+attainment hand-calculations, order statistics, and axes sanity. The GEMM
+registry regression executes the production session call twice and proves
+exactly one cold sweep plus two recorded dispatch decisions (warm-row reuse,
+not a test-only wrapper).
 
 ## No-claim boundaries
 
@@ -143,8 +159,10 @@ attainment hand-calculations, order statistics, and axes sanity.
   1.5 means the shared axis is not credible for gating, whether because it
   was crushed/stale or because a specialized kernel outran the probe by too
   much; the run is retained as invalid evidence and must be re-probed.
-- §14.1 family targets (LBM/GEMM/SpMV/FEEC/batched/FFT/rays) are
-  `landed: false` until their kernels register.
+- §14.1 family targets other than GEMM remain `landed: false` until their
+  kernels register. The GEMM production kernel is registered; the target
+  table's `landed` bit remains false until the owning concurrent edit is
+  reconciled with its focused execution proof.
 - Per-CCD bandwidth axes, P/E-core-class split, frequency-state capture,
   and thermal controls are future scope (v0 measures whole-machine axes).
 - Static floors plus pre/post agreement cannot detect a host that is already

@@ -265,7 +265,7 @@ fn rf_006_cli_smoke_prints_report_and_ledgers() {
             "--n",
             "4096",
             "--warmup",
-            "0",
+            "1",
             "--reps",
             "2",
             "--ledger",

@@ -1675,7 +1675,9 @@ dependencies = [
 name = "fs-roofline"
 version = "0.0.1"
 dependencies = [
+ "fs-exec",
  "fs-ledger",
+ "fs-session",
  "fs-simd",
  "fs-substrate",
 ]

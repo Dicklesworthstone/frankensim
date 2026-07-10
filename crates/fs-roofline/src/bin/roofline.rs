@@ -8,7 +8,7 @@
 //! and — when `--ledger` is given — records the run as ledger provenance
 //! and reports staleness for every registered kernel.
 
-use fs_roofline::kernels::default_registry;
+use fs_roofline::kernels::production_registry_with_ledger;
 use fs_roofline::{MachineAxes, SECTION_14_1_TARGETS, run_is_citable, run_registry, staleness};
 
 fn fail(detail: &str) -> std::process::ExitCode {
@@ -31,8 +31,8 @@ fn main() -> std::process::ExitCode {
     };
     let warmup = match parse_flag(&args, "--warmup").map(|v| v.parse::<usize>()) {
         None => 2,
-        Some(Ok(v)) => v,
-        Some(Err(_)) => return fail("--warmup must be an integer"),
+        Some(Ok(v)) if v > 0 => v,
+        Some(_) => return fail("--warmup must be a positive integer"),
     };
     let reps = match parse_flag(&args, "--reps").map(|v| v.parse::<usize>()) {
         None => 9,
@@ -40,10 +40,19 @@ fn main() -> std::process::ExitCode {
         Some(_) => return fail("--reps must be a positive integer"),
     };
 
+    let ledger_path = parse_flag(&args, "--ledger");
+    let tune_ledger = match ledger_path.as_deref() {
+        Some(path) => match fs_ledger::Ledger::open(path) {
+            Ok(ledger) => Some(ledger),
+            Err(error) => return fail(&error.to_string().replace('"', "'")),
+        },
+        None => None,
+    };
+
     let axes = MachineAxes::probe();
     println!("{}", axes.to_jsonl());
 
-    let mut registry = default_registry(n);
+    let mut registry = production_registry_with_ledger(n, &axes, tune_ledger);
     let results = run_registry(&mut registry, warmup, reps, &axes);
     let post_axes = MachineAxes::probe();
     println!("{}", post_axes.to_jsonl());
@@ -58,14 +67,18 @@ fn main() -> std::process::ExitCode {
         );
     }
 
-    if let Some(db) = parse_flag(&args, "--ledger") {
+    // The registry owns fsqlite's deliberately !Send tune connection. Drop it
+    // before reopening the same database for the atomic evidence transaction;
+    // run_registry is synchronous, so no kernel work survives this point.
+    drop(registry);
+    if let Some(db) = ledger_path {
         let ledger = match fs_ledger::Ledger::open(&db) {
             Ok(l) => l,
             Err(e) => return fail(&e.to_string().replace('"', "'")),
         };
         match fs_roofline::record_run(&ledger, &axes, &post_axes, &results) {
             Ok(op) => {
-                println!("{{\"ledgered\":true,\"citable\":{citable},\"op\":{op},\"db\":\"{db}\"}}")
+                println!("{{\"ledgered\":true,\"citable\":{citable},\"op\":{op},\"db\":\"{db}\"}}");
             }
             Err(e) => return fail(&e.to_string().replace('"', "'")),
         }
