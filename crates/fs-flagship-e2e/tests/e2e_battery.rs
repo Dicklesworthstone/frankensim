@@ -147,8 +147,8 @@ fn frame_smoke() -> StageArtifact {
 fn fe2e_001_vessel_smoke_golden() {
     let (a, poured_a) = vessel_smoke();
     let (b, poured_b) = vessel_smoke();
-    // Envelope gate for the mode-divergent metric (bead xo2k): value
-    // stable to 1e-9 within a mode and inside the physical band.
+    // Physical-band gate on poured_mass (kept after xo2k's fix put the
+    // metric back in the hash: the band catches meaning, the hash bits).
     let poured_ok = (0.25..0.40).contains(&poured_a) && (poured_a - poured_b).abs() < 1e-9;
     let evidence = notebook(std::slice::from_ref(&a));
     println!(
@@ -167,7 +167,10 @@ fn fe2e_001_vessel_smoke_golden() {
         a.hash == b.hash && a.hash == GOLDEN_VESSEL_SMOKE && a.metrics[0].1 < 1e-10 && poured_ok,
         &format!(
             "vessel smoke: hash 0x{:016x} (golden 0x{GOLDEN_VESSEL_SMOKE:016x}), replay equal, mass drift {:.2e}, poured {poured_a:.4} bits 0x{:016x} (envelope 0.25..0.40, bead xo2k), wall {:.1}s; evidence {evidence}",
-            a.hash, a.metrics[0].1, poured_a.to_bits(), a.wall_s,
+            a.hash,
+            a.metrics[0].1,
+            poured_a.to_bits(),
+            a.wall_s,
         ),
     );
 }

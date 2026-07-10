@@ -30,7 +30,13 @@ impl VesselProfile {
     #[must_use]
     pub fn carafe(lip_width: f64) -> VesselProfile {
         let radius = Cheb1::build(
-            &|z: f64| 0.05f64.mul_add((2.5 * std::f64::consts::PI * z).sin(), 1.0 - 0.45 * z * z),
+            &|z: f64| {
+                // det::sin: platform trig is a build-mode hazard (xo2k).
+                0.05f64.mul_add(
+                    fs_math::det::sin(2.5 * std::f64::consts::PI * z),
+                    1.0 - 0.45 * z * z,
+                )
+            },
             0.0,
             1.0,
             64,

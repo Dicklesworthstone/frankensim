@@ -111,8 +111,10 @@ impl ThermalLbm {
         for y in 1..ny - 1 {
             for x in 0..nx {
                 let i = self.grid.idx(x, y);
-                let s = (std::f64::consts::TAU * x as f64 / nx as f64).sin()
-                    * (std::f64::consts::PI * (y as f64 - 0.5) / (ny as f64 - 2.0)).sin();
+                let s = fs_math::det::sin(std::f64::consts::TAU * x as f64 / nx as f64)
+                    * fs_math::det::sin(
+                        std::f64::consts::PI * (y as f64 - 0.5) / (ny as f64 - 2.0),
+                    );
                 let mm = self.grid.moments(i);
                 self.grid.f[i] = crate::equilibrium(mm.rho, mm.u[0], amplitude.mul_add(s, mm.u[1]));
             }

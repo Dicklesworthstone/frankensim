@@ -167,25 +167,42 @@ impl CapabilityProbe {
         }
     }
 
-    /// Stable machine fingerprint: FNV-1a 64 over the STABLE facts only
-    /// (measured bandwidth deliberately excluded — see module docs).
+    /// Stable machine fingerprint over the STABLE facts only (measured
+    /// bandwidth deliberately excluded — see module docs; that
+    /// exclusion is declared on the identity). Canonical replay
+    /// identity encoding (gp3.14): the former '|'-joined format let a
+    /// variable-length cpu_brand or feature list shift field
+    /// boundaries; fingerprints from that encoding predate ident v1
+    /// and re-key on upgrade (per-machine values, never goldened).
     #[must_use]
     pub fn fingerprint(&self) -> u64 {
-        let stable = format!(
-            "{}|{}|{}|{}|{}|{}|{:?}|{:?}|{:?}|{:?}|{}",
-            self.isa.name(),
-            self.cpu_brand,
-            self.cache_line,
-            self.page_size,
-            self.mem_bytes,
-            self.logical_cpus,
-            self.perf_cores,
-            self.eff_cores,
-            self.l2_per_cluster,
-            self.numa_nodes,
-            self.features.join(",")
-        );
-        fs_obs::fnv1a64(stable.as_bytes())
+        let mut b = fs_obs::ident::IdentityBuilder::new("capability-probe")
+            .str("isa", self.isa.name())
+            .str("cpu_brand", &self.cpu_brand)
+            .u64("cache_line", u64::from(self.cache_line))
+            .u64("page_size", u64::from(self.page_size))
+            .u64("mem_bytes", self.mem_bytes)
+            .u64("logical_cpus", u64::from(self.logical_cpus))
+            .u64("perf_cores", u64::from(self.perf_cores.unwrap_or(0)))
+            .flag("perf_cores_known", self.perf_cores.is_some())
+            .u64("eff_cores", u64::from(self.eff_cores.unwrap_or(0)))
+            .flag("eff_cores_known", self.eff_cores.is_some())
+            .u64("l2_per_cluster", self.l2_per_cluster.unwrap_or(0))
+            .flag("l2_known", self.l2_per_cluster.is_some())
+            .u64("numa_nodes", u64::from(self.numa_nodes.unwrap_or(0)))
+            .flag("numa_known", self.numa_nodes.is_some())
+            .exclude(
+                "measured_bandwidth",
+                "measured axes vary run to run; identity is topology",
+            )
+            .exclude(
+                "probe_time",
+                "wall clock is the caller's provenance, not identity",
+            );
+        for f in &self.features {
+            b = b.str("feature", f);
+        }
+        b.finish().root()
     }
 
     /// Serialize to the ledger `capability_probes` row shape (canonical JSON,

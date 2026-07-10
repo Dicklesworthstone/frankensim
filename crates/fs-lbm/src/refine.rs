@@ -246,7 +246,9 @@ impl RefinedChannel {
             for x in 0..nxc {
                 let i = self.coarse.idx(x, j);
                 if self.coarse.flags[i] != Cell::Wall {
-                    let uy = a * (std::f64::consts::TAU * (x as f64 + 0.5) / nxc as f64).sin();
+                    let uy = a * fs_math::det::sin(
+                        std::f64::consts::TAU * (x as f64 + 0.5) / nxc as f64,
+                    );
                     self.coarse.f[i] = equilibrium(1.0, 0.0, uy);
                 }
             }
@@ -258,7 +260,9 @@ impl RefinedChannel {
                 if self.fine.flags[i] != Cell::Wall {
                     // Same physical phase: fine cell x covers phase
                     // (x + 0.5)/nxf of the same period.
-                    let uy = a * (std::f64::consts::TAU * (x as f64 + 0.5) / nxf as f64).sin();
+                    let uy = a * fs_math::det::sin(
+                        std::f64::consts::TAU * (x as f64 + 0.5) / nxf as f64,
+                    );
                     self.fine.f[i] = equilibrium(1.0, 0.0, uy);
                 }
             }
