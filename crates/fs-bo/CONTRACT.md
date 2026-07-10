@@ -56,6 +56,13 @@ acquisition surfaces.
   trace slack (1/2σ²)·tr(K_XX − Q_XX) reports what the approximation
   discards); inversion-lemma identities through fs-la Cholesky,
   O(n·m²); deterministic farthest-point selection.
+- `acq_grad` (feature `tape-acq`): EXACT q-EI gradients by one
+  reverse pass through the taped chain (kernels → posterior →
+  Cholesky → reparameterized hinge) via fs-ad's FrankenTorch scalar
+  bridge — no matrix-level Cholesky backward needed; `qei_ascent` =
+  probe-then-polish L-BFGS argmax. DETERMINISM CLASS inherited from
+  the bridge: tolerance-verified vs FD, never bitwise, EXCLUDED from
+  cross-ISA goldens (the production f64 q-EI stays on det kernels).
 - `Gp::try_fit_diag` — HETEROSCEDASTIC fits: per-point noise
   variances K + diag(σᵢ²); the Cholesky/LML/predict paths are
   unchanged once the matrix is built (predictions are latent-f).
@@ -157,15 +164,30 @@ mean-independent for fixed-σ CSs, making cross-candidate comparisons
 vacuous; Hoeffding σ = ½ was 3× conservative vs the true noise —
 clamping is a contraction so the actual σ is valid); hetero golden
 `0xe9b3_f6b5_69ee_258b`.
+`tests/acq_grad_battery.rs` + `tests/probe_grad.rs` (feature
+`tape-acq`, aarch64 evidence; cross-ISA not claimed per the bridge's
+determinism class): taped q-EI primal parity with the production
+path at 1.3e−7 relative; gradient vs FD worst 2.0e−8 WITH ALIVENESS
+GUARDS (the first gate passed vacuously on a flat region while the
+Σ-diagonal's √0 backward poisoned gradients with NaN — Matérn-5⁄2 is
+C² so the r = 0 kernel value is a CONSTANT with exactly zero
+gradient, and the probe regression pins an active surface forever);
+probe-then-polish ascent improves its seed 0.314 → 0.374 in 47
+reverse passes (FD-equivalent 423) with CMA-ES REPORTED (0.488 — a
+Monte-Carlo needle spike at near-duplicate candidate blocks; gating
+local polish on a needle hunt would be dishonest in both
+directions).
 `tests/mf_battery.rs`: multi-fidelity correlation recovery and
 variance reduction, dimension/fidelity mismatch fail-fast behavior,
 cost-aware allocation and replay, and MF golden.
 
 ## No-claim boundaries
 
-- Tape acquisition gradients (FrankenTorch) are the remaining lane
-  (TuRBO, two-fidelity ICM, DTC/Titsias sparse GPs, heteroscedastic
-  fits, and e-racing stopping landed). Heteroscedastic noise is
+- All bead lanes landed (TuRBO, two-fidelity ICM, DTC/Titsias
+  sparse GPs, heteroscedastic fits, e-racing stopping, tape
+  acquisition gradients). The taped path is feature-gated and
+  fixture-scale (dense training view); production-scale tape argmax
+  joins with a consumer needing it. Heteroscedastic noise is
   CALLER-SUPPLIED (from fs-uq estimates); joint noise-model learning
   is out of scope. Sparse inducing LOCATIONS are fixed
   (farthest-point); variational location optimization joins with a
