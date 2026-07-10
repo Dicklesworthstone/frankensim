@@ -84,7 +84,7 @@ impl Color {
     pub fn payload_json(&self) -> String {
         match self {
             Color::Verified { lo, hi } => {
-                format!("{{\"interval\":[{lo:.6e},{hi:.6e}]}}")
+                format!("{{\"interval\":[{},{}]}}", json_f64(*lo), json_f64(*hi))
             }
             Color::Validated { regime, dataset } => {
                 use core::fmt::Write as _;
@@ -93,16 +93,58 @@ impl Color {
                     if !axes.is_empty() {
                         axes.push(',');
                     }
-                    let _ = write!(axes, "\"{k}\":[{lo:.6e},{hi:.6e}]");
+                    let _ = write!(
+                        axes,
+                        "{}:[{},{}]",
+                        json_string(k),
+                        json_f64(*lo),
+                        json_f64(*hi)
+                    );
                 }
-                format!("{{\"dataset\":\"{dataset}\",\"regime\":{{{axes}}}}}")
+                format!(
+                    "{{\"dataset\":{},\"regime\":{{{axes}}}}}",
+                    json_string(dataset)
+                )
             }
             Color::Estimated {
                 estimator,
                 dispersion,
-            } => format!("{{\"estimator\":\"{estimator}\",\"dispersion\":{dispersion:.6e}}}"),
+            } => format!(
+                "{{\"estimator\":{},\"dispersion\":{}}}",
+                json_string(estimator),
+                json_f64(*dispersion)
+            ),
         }
     }
+}
+
+fn json_f64(value: f64) -> String {
+    if value.is_finite() {
+        format!("{value:.6e}")
+    } else {
+        format!("\"non-finite:{value}\"")
+    }
+}
+
+fn json_string(value: &str) -> String {
+    use core::fmt::Write as _;
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if u32::from(c) < 0x20 => {
+                let _ = write!(out, "\\u{:04x}", u32::from(c));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// How verified intervals combine under the ledger operation.
@@ -219,23 +261,47 @@ fn cert_kind(c: &NumericalCertificate) -> NumericalKind {
     c.kind
 }
 
+/// Outward-round an arithmetic interval endpoint pair (one ulp each way) so a
+/// composed enclosure stays a TRUE enclosure under round-to-nearest — otherwise
+/// the lower bound could round UP (or the upper bound DOWN) and EXCLUDE the
+/// exact result, laundering the very precision a `Verified` color certifies. A
+/// NaN endpoint (∞ + −∞) degrades to the whole real line, the only sound
+/// enclosure. Mirrors `NumericalCertificate::compose` in `lib.rs`.
+fn outward_round(lo: f64, hi: f64) -> (f64, f64) {
+    if lo.is_nan() || hi.is_nan() {
+        (f64::NEG_INFINITY, f64::INFINITY)
+    } else {
+        (lo.next_down(), hi.next_up())
+    }
+}
+
 /// The TOTAL, conservative pairwise composition: the result's rank is
 /// the MINIMUM of the operands' ranks (no laundering), verified bounds
-/// combine per `op`, validated regimes INTERSECT (both anchors must
-/// hold), and estimated dispersions add (conservative).
+/// combine per `op` (outward-rounded to preserve enclosure), validated
+/// regimes INTERSECT (both anchors must hold), and estimated dispersions
+/// add (conservative).
 #[must_use]
 pub fn compose(a: &Color, b: &Color, op: IntervalOp) -> Color {
     match (a, b) {
         (Color::Verified { lo: a0, hi: a1 }, Color::Verified { lo: b0, hi: b1 }) => {
             let (lo, hi) = match op {
-                IntervalOp::Add => (a0 + b0, a1 + b1),
+                IntervalOp::Add => outward_round(a0 + b0, a1 + b1),
                 IntervalOp::Mul => {
                     let c = [a0 * b0, a0 * b1, a1 * b0, a1 * b1];
-                    (
-                        c.iter().copied().fold(f64::INFINITY, f64::min),
-                        c.iter().copied().fold(f64::NEG_INFINITY, f64::max),
-                    )
+                    if c.iter().any(|x| x.is_nan()) {
+                        // A NaN corner (0×∞) is indeterminate AND the min/max
+                        // fold below would SILENTLY DROP it (f64::min/max ignore
+                        // NaN), reporting a bogus tight interval. The whole real
+                        // line is the only sound enclosure.
+                        (f64::NEG_INFINITY, f64::INFINITY)
+                    } else {
+                        outward_round(
+                            c.iter().copied().fold(f64::INFINITY, f64::min),
+                            c.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+                        )
+                    }
                 }
+                // Hull is exact endpoint selection (no arithmetic → no rounding).
                 IntervalOp::Hull => (a0.min(*b0), a1.max(*b1)),
             };
             Color::Verified { lo, hi }
@@ -261,10 +327,11 @@ pub fn compose(a: &Color, b: &Color, op: IntervalOp) -> Color {
             if regime.is_empty() {
                 // Mutually unsatisfiable regimes: there is NO state where both
                 // anchors hold, so the composition cannot honestly stay
-                // Validated — demote to Estimated (min-rank, no laundering).
+                // Validated. There is also no defensible spread claim, so the
+                // demotion carries infinite dispersion just like a regime exit.
                 Color::Estimated {
                     estimator: format!("disjoint-regimes:{d1}&{d2}"),
-                    dispersion: 0.0,
+                    dispersion: f64::INFINITY,
                 }
             } else {
                 Color::Validated {
@@ -334,11 +401,14 @@ pub fn check_regime(color: &Color, state: &BTreeMap<String, f64>) -> (Color, Opt
     let Color::Validated { regime, dataset } = color else {
         return (color.clone(), None);
     };
+    if regime.bounds().is_empty() {
+        return demote(dataset, "<undeclared-regime>", f64::NAN);
+    }
     for (axis, &(lo, hi)) in regime.bounds() {
         let Some(&v) = state.get(axis) else {
             return demote(dataset, axis, f64::NAN);
         };
-        if v < lo || v > hi {
+        if !lo.is_finite() || !hi.is_finite() || lo > hi || !v.is_finite() || v < lo || v > hi {
             return demote(dataset, axis, v);
         }
     }
