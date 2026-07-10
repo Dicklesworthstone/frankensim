@@ -83,9 +83,15 @@ fn tp_001_g0_zero_iff_target_matched() {
     assert_eq!(att.voxels.len(), 64, "the 4x4x4 void is fully attributed");
     assert!(att.direction > 0.0, "fill direction");
     // Seed a SPURIOUS ISLAND (excess component): carve-direction
-    // attribution on the island.
+    // attribution on the island. A SINGLE corner voxel at (0,0,0):
+    // the solid starts at index 2, so a full empty layer separates
+    // them under the crate's 26-connectivity. (The original
+    // [0,2)³ island CORNER-TOUCHED the solid at (1,1,1)-(2,2,2) —
+    // one component under betti's own convention; the old
+    // bar-counting code called it two, which is exactly the 84ib
+    // defect this fixture now guards against.)
     let mut island = bracket(16);
-    carve(&mut island, [0, 0, 0], [2, 2, 2], -0.9);
+    carve(&mut island, [0, 0, 0], [1, 1, 1], -0.9);
     let report = evaluate(&island, &spec());
     assert!(report.total > 0.0);
     assert!(
