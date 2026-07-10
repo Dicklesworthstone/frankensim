@@ -607,6 +607,7 @@ dependencies = [
  "fs-fmm",
  "fs-geom",
  "fs-la",
+ "fs-math",
  "fs-rep-mesh",
  "fs-solver",
 ]
@@ -663,6 +664,7 @@ version = "0.0.1"
 dependencies = [
  "fs-la",
  "fs-math",
+ "fs-obs",
  "fs-rand",
 ]
 
@@ -824,6 +826,7 @@ name = "fs-lbm"
 version = "0.0.1"
 dependencies = [
  "fs-evidence",
+ "fs-math",
 ]
 
 [[package]]
@@ -1139,6 +1142,7 @@ dependencies = [
  "fs-cheb",
  "fs-exec",
  "fs-lbm",
+ "fs-math",
  "fs-race",
  "fs-render",
 ]
