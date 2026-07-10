@@ -24,8 +24,9 @@ unit-expression parsing — the "units" pillar of the Five Explicits (plan
   SATURATING `plus/minus/times` (agent-facing paths must not panic on
   adversarial exponent chains; consumers reject long before saturation).
 - `QtyAny { value, dims }` — checked `try_add/try_sub` (returning
-  `DimensionMismatch`), unchecked-but-correct `Mul/Div/powi`, and
-  `to_typed::<...>()` downcasts.
+  `DimensionMismatch`), checked `powi` (returning `DimensionOverflow`
+  before metadata can saturate), `Mul/Div`, and `to_typed::<...>()`
+  downcasts.
 - `parse::parse_qty(&str) -> Result<QtyAny, ParseError>` — the FrankenScript
   literal grammar (`0.12Pa*s`, `0.5L/s`, `65deg`, `0.03m2/s3`, `9.81m/s^2`,
   `20degC`, `15%`); strict left-to-right `*`/`·`/`/`; prefixes p n u µ m c d
@@ -45,8 +46,8 @@ unit-expression parsing — the "units" pillar of the Five Explicits (plan
 - Accumulated unit exponents beyond ±60 are rejected as unphysical.
 
 ## Error model
-`DimensionMismatch { op, left, right }`, `ParseError { input, at, kind, help }`,
-`JsonError { at, message }` — all structured values with teaching messages
+`DimensionMismatch { op, left, right }`, `DimensionOverflow { op, dims, factor }`,
+`ParseError { input, at, kind, help }`, `JsonError { at, message }` — all structured values with teaching messages
 (P10 errors-as-guidance); no panics across the crate boundary.
 
 ## Determinism class

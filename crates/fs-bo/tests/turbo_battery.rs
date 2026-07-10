@@ -36,7 +36,7 @@ fn config(seed: u64, max_evals: usize) -> TurboConfig {
         candidates: 40,
         max_evals,
         l_init: 0.8,
-        l_min: 0.5f64.powi(7),
+        l_min: 1.0 / 128.0,
         l_max: 1.6,
         succ_tol: 3,
         fail_tol: 8,

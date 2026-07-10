@@ -6,6 +6,7 @@
 
 use fs_feec::highorder::hex::{TensorSpace, pcg_matfree};
 use fs_feec::highorder::quad1d::{gauss_legendre, legendre, lobatto_shapes};
+use fs_math::det;
 use fs_rand::StreamKey;
 
 fn log(case: &str, verdict: &str, detail: &str) {
@@ -42,7 +43,7 @@ fn gauss_legendre_exactness_and_symmetry() {
             let quad: f64 = x
                 .iter()
                 .zip(&w)
-                .map(|(&xi, &wi)| wi * xi.powi(i32::try_from(d).expect("small")))
+                .map(|(&xi, &wi)| wi * det::powi(xi, i32::try_from(d).expect("small")))
                 .sum();
             let exact = if d % 2 == 1 {
                 0.0

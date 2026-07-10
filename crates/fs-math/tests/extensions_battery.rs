@@ -292,6 +292,7 @@ fn pow_budget_and_specials() {
     // n=64) and the comparison stops measuring what it claims (4xnt).
     for n in [-8i32, -3, 2, 5, 17, 64] {
         let x = std::hint::black_box(1.7f64);
+        // det-ok: this is the independent platform-powi comparison oracle.
         let d = ulp_distance(det::pow(x, f64::from(n)), x.powi(n));
         assert!(d <= 6, "pow integer path n={n}: {d} ULP");
     }
@@ -444,6 +445,7 @@ fn powi_budget_vs_platform() {
     for _ in 0..100_000 {
         let x = lcg(&mut seed) * 20.0;
         let n = ((lcg(&mut seed) * 128.0) as i32).clamp(-64, 64);
+        // det-ok: this is the independent platform-powi comparison oracle.
         let d = ulp_distance(det::powi(x, n), x.powi(n));
         worst = worst.max(d);
         assert!(d <= 2, "powi({x}, {n}) is {d} ULP from platform powi");

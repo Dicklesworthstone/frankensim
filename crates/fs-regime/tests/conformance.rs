@@ -5,6 +5,7 @@
 //! recommendations measurably improve conditioning; flagship fixtures
 //! match hand calculations; reports reproducible.
 
+use fs_math::det;
 use fs_qty::{Dims, QtyAny};
 use fs_regime::{
     Input, Role, RoleInput, assess, condition_number, flux_model_cards, pi_groups, standard_groups,
@@ -167,7 +168,7 @@ fn rg_002_unit_rescaling_invariance_is_exact() {
     let rescale = |q: QtyAny| -> QtyAny {
         let mut v = q.value;
         for (&s, d) in scales.iter().zip(q.dims.0) {
-            v *= s.powi(i32::from(d));
+            v *= det::powi(s, i32::from(d));
         }
         QtyAny::new(v, q.dims)
     };

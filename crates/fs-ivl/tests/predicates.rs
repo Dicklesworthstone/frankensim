@@ -69,7 +69,7 @@ fn pd_001_adversarial_degeneracies_are_exact_zero() {
 #[test]
 fn pd_002_one_ulp_class_perturbations_resolve_correctly() {
     // Exact dyadic radial scaling: truth known analytically (outside).
-    let grow = 1.0 + (2.0f64).powi(-40);
+    let grow = 1.0 + fs_math::det::powi(2.0, -40);
     let (a, b, c) = ([5.0, 0.0], [3.0, 4.0], [-3.0, 4.0]);
     assert_eq!(incircle(a, b, c, [0.0, -5.0]), Sign::Zero);
     assert_eq!(incircle(a, b, c, [0.0, -5.0 * grow]), Sign::Negative);

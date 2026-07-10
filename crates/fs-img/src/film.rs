@@ -6,7 +6,7 @@
 /// Exposure scale: `c · 2^ev` (exact powers of two).
 #[must_use]
 pub fn exposure(c: f64, ev: i32) -> f64 {
-    c * (2.0f64).powi(ev) // det-ok: base 2, every chain step exact (4xnt)
+    c * fs_math::det::powi(2.0, ev)
 }
 
 /// Per-channel white-balance gains.
@@ -84,5 +84,8 @@ mod tests {
         assert!((hable_filmic(11.2) - 1.0).abs() < 1e-12);
         // Exposure is exact powers of two.
         assert!((exposure(0.3, 2) - 1.2).abs() < 1e-15);
+        assert_eq!(exposure(1.0, -1024).to_bits(), 1_u64 << 50);
+        assert_eq!(exposure(1.0, -1074).to_bits(), 1);
+        assert!(exposure(1.0, 1024).is_infinite());
     }
 }

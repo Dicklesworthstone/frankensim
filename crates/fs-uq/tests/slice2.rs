@@ -4,6 +4,7 @@
 //! certify-the-certifiers battery), CVaR, and adaptive MLMC with rate
 //! recovery on a known-rate synthetic.
 
+use fs_math::det;
 use fs_uq::seismic::{KanaiTajimi, bilinear_peak_ductility, cqc, ida_fragility, sdof_peak, srss};
 use fs_uq::{adaptive_mlmc, cvar, estimate_probability_anytime};
 
@@ -200,8 +201,8 @@ fn uq_005_cvar_and_adaptive_mlmc_rate_recovery() {
     // the rates, add levels until the bias fits, and land near the
     // telescoped limit (sum of 4^-l -> 4/3).
     let sampler = |level: usize, i: usize| -> f64 {
-        let mean = 4.0f64.powi(-i32::try_from(level).expect("small"));
-        let noise_scale = 8.0f64.powi(-i32::try_from(level).expect("small")).sqrt();
+        let mean = det::powi(4.0, -i32::try_from(level).expect("small"));
+        let noise_scale = det::sqrt(det::powi(8.0, -i32::try_from(level).expect("small")));
         let mut z = 0x5eed_u64 ^ ((level as u64) << 32 | i as u64);
         z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
         z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
@@ -210,7 +211,7 @@ fn uq_005_cvar_and_adaptive_mlmc_rate_recovery() {
     };
     let report = adaptive_mlmc(
         sampler,
-        |l| 4.0f64.powi(i32::try_from(l).expect("small")),
+        |l| det::powi(4.0, i32::try_from(l).expect("small")),
         2e-3,
         400,
         8,

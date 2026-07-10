@@ -8,13 +8,14 @@
 //! 0xaaf1_076a_196c_6902 output golden is untouched by construction.
 
 use fs_feec::highorder::hex::TensorSpace;
+use fs_math::det;
 use fs_roofline::MachineAxes;
 
 /// FLOPs per element per apply for degree r (p = r + 1): 9 axis
 /// contractions of 2·p⁴ each, plus 3·p³ accumulate adds.
 fn flops_per_element(r: usize) -> f64 {
     let p = (r + 1) as f64;
-    18.0 * p.powi(4) + 3.0 * p.powi(3)
+    18.0 * det::powi(p, 4) + 3.0 * det::powi(p, 3)
 }
 
 fn measure_apply(m: usize, r: usize, reps: usize) -> (f64, f64) {

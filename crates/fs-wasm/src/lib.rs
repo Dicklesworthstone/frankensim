@@ -680,7 +680,7 @@ fn convex_hull_exact(points: &[(f64, f64)]) -> Vec<(f64, f64)> {
 pub fn compensated_sum(count_in: usize, log10_big_in: i32) -> Vec<f64> {
     let count = count_in.clamp(1, 4_000_000);
     let log10_big = log10_big_in.clamp(6, 300);
-    let big = 10.0f64.powi(log10_big);
+    let big = det::powi(10.0, log10_big);
     let truth = count as f64;
 
     let mut xs = Vec::with_capacity(count + 2);

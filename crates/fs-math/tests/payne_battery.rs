@@ -5,7 +5,7 @@
 //! against the platform-libm oracle (tests-only oracle, per the
 //! det.rs doctrine), and bitwise odd symmetry.
 
-use fs_math::det::{TRIG_DOMAIN, cos, sin, tan};
+use fs_math::det::{TRIG_DOMAIN, cos, powi, sin, tan};
 use fs_math::payne::{
     PH_LIMBS, TWO_OVER_PI_LIMBS, generate_pi, generate_two_over_pi, reduce_pio2_large,
 };
@@ -100,7 +100,7 @@ fn cos_core_probe(r: f64) -> f64 {
 #[test]
 fn payne_003_worst_case() {
     #[allow(clippy::cast_precision_loss)]
-    let x = 6_381_956_970_095_103.0f64 * 2.0f64.powi(797);
+    let x = 6_381_956_970_095_103.0f64 * powi(2.0, 797);
     let (r, _q) = reduce_pio2_large(x);
     let mine = sin(x);
     let oracle = x.sin();
@@ -134,7 +134,7 @@ fn payne_004_budget_sweep() {
         let e = 21 + (next() % 980) as i32;
         #[allow(clippy::cast_precision_loss)]
         let mant = 1.0 + (next() >> 11) as f64 / (1u64 << 53) as f64;
-        let x = mant * 2.0f64.powi(e);
+        let x = mant * powi(2.0, e);
         if !x.is_finite() {
             continue;
         }
@@ -165,10 +165,10 @@ fn payne_004_budget_sweep() {
 #[test]
 fn payne_005_landmarks_and_symmetry() {
     let landmarks = [
-        2.0f64.powi(60),
-        2.0f64.powi(100),
-        2.0f64.powi(500),
-        2.0f64.powi(1000),
+        powi(2.0, 60),
+        powi(2.0, 100),
+        powi(2.0, 500),
+        powi(2.0, 1000),
         1e300,
         1.797e308,
     ];

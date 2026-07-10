@@ -670,23 +670,16 @@ fn powi_single_arg(after_open: &str) -> Option<&str> {
     Some(after_open)
 }
 
-/// Files awaiting migration to `fs_math::det::powi` that are currently
-/// owned by other in-flight work; each entry must cite the tracking
-/// bead. Remove entries as the migrations land.
-const POWI_PENDING: &[&str] = &[
-    // powi(4) smoothness objective; file owned by active hexdom work (bead 4xnt).
-    "crates/fs-mesh/src/hexdom.rs",
-];
-
 /// No optimization-level-dependent integer powers in deterministic paths
 /// (bead 4xnt): `f64::powi`'s rounding differs between debug and release
 /// from exponent 4 upward (llvm.powi has no pinned operation order), so
-/// any `.powi(arg)` in `crates/*/src` must either use a literal exponent
+/// any `.powi(arg)` in crate sources, tests, examples, or benches must
+/// either use a literal exponent
 /// in -3..=3 (where all lowerings agree), be migrated to
 /// `fs_math::det::powi` (or fs-qty's `powi_pinned`), or carry a
 /// `// det-ok: <reason>` annotation on the same or preceding line.
-/// fs-wasm is skipped (nested demo workspace outside the deterministic
-/// claim surface); fs-math itself hosts the pinned implementation.
+/// Explicit primitive UFCS calls are always flagged because their receiver
+/// and exponent need separate parsing; migrate or annotate them locally.
 fn check_powi(root: &Path) -> Vec<Violation> {
     let mut violations = Vec::new();
     let crates_dir = root.join("crates");
@@ -695,8 +688,7 @@ fn check_powi(root: &Path) -> Vec<Violation> {
     };
     let mut stack: Vec<PathBuf> = entries
         .flatten()
-        .filter(|e| e.file_name() != "fs-wasm")
-        .map(|e| e.path().join("src"))
+        .map(|e| e.path())
         .filter(|p| p.is_dir())
         .collect();
     while let Some(dir) = stack.pop() {
@@ -706,32 +698,34 @@ fn check_powi(root: &Path) -> Vec<Violation> {
         for entry in rd.flatten() {
             let p = entry.path();
             if p.is_dir() {
-                stack.push(p);
+                if p.file_name().is_none_or(|name| name != "target") {
+                    stack.push(p);
+                }
                 continue;
             }
             if p.extension().is_none_or(|e| e != "rs") {
                 continue;
             }
             let rel = p.strip_prefix(root).unwrap_or(&p).display().to_string();
-            if POWI_PENDING.contains(&rel.as_str()) {
-                continue;
-            }
             let Ok(text) = std::fs::read_to_string(&p) else {
                 continue;
             };
             let mut prev_raw = "";
             for (idx, raw) in text.lines().enumerate() {
                 let code = strip_line_comments(raw);
-                let mut rest = code;
+                let annotated = raw.contains("det-ok:") || prev_raw.contains("det-ok:");
                 let mut flagged = false;
-                while let Some(pos) = rest.find(".powi(") {
-                    let after = &rest[pos + ".powi(".len()..];
-                    if let Some(arg) = powi_single_arg(after) {
+
+                let mut rest = code;
+                while let Some(pos) = rest.find(".powi") {
+                    let after_name = &rest[pos + ".powi".len()..];
+                    if let Some(after) = after_name.trim_start().strip_prefix('(')
+                        && let Some(arg) = powi_single_arg(after)
+                    {
                         let literal_ok = arg
                             .trim()
                             .parse::<i64>()
                             .is_ok_and(|v| (-3..=3).contains(&v));
-                        let annotated = raw.contains("det-ok:") || prev_raw.contains("det-ok:");
                         if !literal_ok && !annotated && !flagged {
                             violations.push(Violation {
                                 check: "powi-determinism",
@@ -750,7 +744,23 @@ fn check_powi(root: &Path) -> Vec<Violation> {
                             flagged = true;
                         }
                     }
-                    rest = after;
+                    rest = after_name;
+                }
+
+                if !annotated
+                    && !flagged
+                    && ["f32::powi", "f64::powi", "<f32>::powi", "<f64>::powi"]
+                        .iter()
+                        .any(|needle| code.contains(needle))
+                {
+                    violations.push(Violation {
+                        check: "powi-determinism",
+                        crate_name: rel.clone(),
+                        detail: format!(
+                            "{rel}:{}: explicit primitive `powi` call bypasses the pinned deterministic primitive; use fs_math::det::powi or annotate `// det-ok: <reason>` on this or the preceding line",
+                            idx + 1
+                        ),
+                    });
                 }
                 prev_raw = raw;
             }
@@ -1314,10 +1324,15 @@ mod tests {
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(p, content).unwrap();
         };
-        // Seeded violation: variable exponent, no annotation.
+        // Seeded violations: variable method exponent, whitespace before
+        // the call delimiter, a test-only call, and explicit primitive UFCS.
         mk(
             "crates/fs-bad/src/lib.rs",
-            "pub fn f(x: f64, n: i32) -> f64 { x.powi(n) }\n",
+            "pub fn f(x: f64, n: i32) -> f64 { x.powi(n) + x.powi (n) }\n",
+        );
+        mk(
+            "crates/fs-bad/tests/golden.rs",
+            "pub fn oracle(x: f64, n: i32) -> f64 { f64::powi(x, n) }\n",
         );
         // Clean: small literals, det-ok (same and preceding line), builder
         // two-arg calls, and prose in comments.
@@ -1332,15 +1347,19 @@ mod tests {
                 "pub fn d(p: &mut B, a: u32, n: i8) { p.powi(a, n); }\n",
             ),
         );
-        // fs-wasm is outside the claim surface.
+        // The standalone WASM workspace is part of the deterministic claim.
         mk(
             "crates/fs-wasm/src/lib.rs",
             "pub fn w(x: f64, n: i32) -> f64 { x.powi(n) }\n",
         );
         let v = check_powi(&base);
-        assert_eq!(v.len(), 1, "exactly the seeded violation expected: {v:?}");
-        assert!(v[0].detail.contains("fs-bad"), "{v:?}");
-        assert!(v[0].detail.contains("det-ok"), "fix hint expected: {v:?}");
+        assert_eq!(v.len(), 3, "one violation per seeded file expected: {v:?}");
+        assert!(v.iter().any(|x| x.detail.contains("tests/golden")), "{v:?}");
+        assert!(v.iter().any(|x| x.detail.contains("fs-wasm")), "{v:?}");
+        assert!(
+            v.iter().all(|x| x.detail.contains("det-ok")),
+            "fix hint expected: {v:?}"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
