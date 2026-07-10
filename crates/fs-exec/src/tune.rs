@@ -31,6 +31,7 @@ const MAX_TUNE_ROW_BYTES: usize = 1024 * 1024;
 const MAX_TUNE_STRING_BYTES: usize = 64 * 1024;
 const MAX_TUNE_OBSERVATIONS: usize = 4096;
 const MAX_WALL_TIME_SAMPLES: usize = 4096;
+const MAX_GEMM_IDENTITY_COMPONENT_BYTES: usize = 256;
 
 /// Schedule polymorphism (plan §5.1 consequence 2): the same algorithm
 /// ships a bandwidth-rich schedule (fewer, fatter, streaming-friendly
@@ -90,12 +91,12 @@ impl GemmBlockPlan {
     /// [`TuneError`] outside the lattice (fail closed: an untrusted row
     /// never becomes an unbounded pack allocation).
     pub fn new(mc: usize, nc_cap: usize) -> Result<Self, TuneError> {
-        if mc < 8 || mc > 1024 || !mc.is_multiple_of(8) {
+        if !(8..=1024).contains(&mc) || !mc.is_multiple_of(8) {
             return Err(TuneError {
                 detail: format!("gemm mc {mc} outside the lattice (multiple of 8 in [8, 1024])"),
             });
         }
-        if nc_cap < 128 || nc_cap > 8192 || !nc_cap.is_multiple_of(128) {
+        if !(128..=8192).contains(&nc_cap) || !nc_cap.is_multiple_of(128) {
             return Err(TuneError {
                 detail: format!(
                     "gemm nc_cap {nc_cap} outside the lattice (multiple of 128 in [128, 8192])"
@@ -122,6 +123,262 @@ impl GemmBlockPlan {
         // Round-trip discipline: only canonical spellings are pinnable.
         (plan.canonical() == params).then_some(plan)
     }
+}
+
+/// Execution dimensions that can change which GEMM blocking plan wins.
+///
+/// Every field participates in the persistent tune key. This prevents a row
+/// measured with one thread count, probe, ISA tier, placement policy, or
+/// implementation from silently dispatching under another configuration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GemmExecutionIdentity {
+    requested_threads: u64,
+    thread_budget: u64,
+    probe_dims: [u64; 3],
+    isa_tier: String,
+    placement: String,
+    implementation: String,
+}
+
+impl GemmExecutionIdentity {
+    /// Construct a validated execution identity.
+    ///
+    /// `requested_threads` may be zero when the producer defines zero as an
+    /// automatic/default request, but `thread_budget` (the producer-normalized
+    /// maximum, not a claim about candidate-dependent spawned workers) and
+    /// every probe extent must be non-zero. Text components use a deliberately
+    /// narrow canonical alphabet so the scoped key has one unambiguous
+    /// spelling.
+    ///
+    /// # Errors
+    /// Returns [`TuneError`] for unrepresentable dimensions, zero effective
+    /// dimensions, or non-canonical text components.
+    pub fn new(
+        requested_threads: usize,
+        thread_budget: usize,
+        probe_dims: [usize; 3],
+        isa_tier: impl Into<String>,
+        placement: impl Into<String>,
+        implementation: impl Into<String>,
+    ) -> Result<Self, TuneError> {
+        let requested_threads = u64::try_from(requested_threads).map_err(|_| TuneError {
+            detail: "requested GEMM thread count is not representable as u64".to_string(),
+        })?;
+        let thread_budget = u64::try_from(thread_budget).map_err(|_| TuneError {
+            detail: "normalized GEMM thread budget is not representable as u64".to_string(),
+        })?;
+        if thread_budget == 0 {
+            return Err(TuneError {
+                detail: "normalized GEMM thread budget must be non-zero".to_string(),
+            });
+        }
+        let mut canonical_probe = [0_u64; 3];
+        for (axis, (dst, extent)) in canonical_probe.iter_mut().zip(probe_dims).enumerate() {
+            *dst = u64::try_from(extent).map_err(|_| TuneError {
+                detail: format!("GEMM probe extent {axis} is not representable as u64"),
+            })?;
+            if *dst == 0 {
+                return Err(TuneError {
+                    detail: format!("GEMM probe extent {axis} must be non-zero"),
+                });
+            }
+        }
+        let isa_tier = isa_tier.into();
+        let placement = placement.into();
+        let implementation = implementation.into();
+        require_gemm_identity_component("ISA tier", &isa_tier)?;
+        require_gemm_identity_component("placement", &placement)?;
+        require_gemm_identity_component("implementation", &implementation)?;
+        Ok(Self {
+            requested_threads,
+            thread_budget,
+            probe_dims: canonical_probe,
+            isa_tier,
+            placement,
+            implementation,
+        })
+    }
+
+    /// Requested thread count, before producer normalization.
+    #[must_use]
+    pub const fn requested_threads(&self) -> u64 {
+        self.requested_threads
+    }
+
+    /// Producer-normalized maximum thread budget. Actual spawned workers may
+    /// be lower and candidate-dependent.
+    #[must_use]
+    pub const fn thread_budget(&self) -> u64 {
+        self.thread_budget
+    }
+
+    /// Exact dimensions of the measured probe.
+    #[must_use]
+    pub const fn probe_dims(&self) -> [u64; 3] {
+        self.probe_dims
+    }
+
+    /// Producer-resolved ISA tier.
+    #[must_use]
+    pub fn isa_tier(&self) -> &str {
+        &self.isa_tier
+    }
+
+    /// Producer-resolved placement policy.
+    #[must_use]
+    pub fn placement(&self) -> &str {
+        &self.placement
+    }
+
+    /// Producer implementation identity/version.
+    #[must_use]
+    pub fn implementation(&self) -> &str {
+        &self.implementation
+    }
+}
+
+/// Canonical GEMM tuning key. The storage kernel embeds the shape class and
+/// every execution dimension, so row lookup, pin lookup, ledger lookup, and
+/// recorded decisions all use the same identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GemmTuneKey {
+    base_kernel: String,
+    shape_class: String,
+    execution: GemmExecutionIdentity,
+    scoped_kernel: String,
+}
+
+impl GemmTuneKey {
+    /// Build a fully scoped key from a bit-semantics kernel, shape class, and
+    /// execution identity.
+    ///
+    /// # Errors
+    /// Returns [`TuneError`] unless `base_kernel` is exactly
+    /// `gemm-f64-parallel/bits-vN` with a canonical decimal `N`, and the shape
+    /// class is a canonical identity component.
+    pub fn new(
+        base_kernel: impl Into<String>,
+        shape_class: impl Into<String>,
+        execution: GemmExecutionIdentity,
+    ) -> Result<Self, TuneError> {
+        let base_kernel = base_kernel.into();
+        if parse_gemm_base_version(&base_kernel).is_none() {
+            return Err(TuneError {
+                detail: format!(
+                    "GEMM base kernel must be {GEMM_KERNEL_PREFIX}N with a canonical decimal version, got {base_kernel:?}"
+                ),
+            });
+        }
+        let shape_class = shape_class.into();
+        require_gemm_identity_component("shape class", &shape_class)?;
+        let scoped_kernel = format!(
+            "{base_kernel}/tune-v1/shape={shape_class}/requested={}/thread-budget={}/probe={}x{}x{}/tier={}/placement={}/implementation={}",
+            execution.requested_threads,
+            execution.thread_budget,
+            execution.probe_dims[0],
+            execution.probe_dims[1],
+            execution.probe_dims[2],
+            execution.isa_tier,
+            execution.placement,
+            execution.implementation,
+        );
+        if scoped_kernel.len() > MAX_TUNE_STRING_BYTES {
+            return Err(TuneError {
+                detail: format!(
+                    "scoped GEMM kernel exceeds the {MAX_TUNE_STRING_BYTES}-byte limit"
+                ),
+            });
+        }
+        debug_assert_eq!(
+            gemm_shape_from_scoped_kernel(&scoped_kernel),
+            Some(shape_class.as_str())
+        );
+        Ok(Self {
+            base_kernel,
+            shape_class,
+            execution,
+            scoped_kernel,
+        })
+    }
+
+    /// Fully scoped kernel used by rows, pins, ledger entries, and decisions.
+    #[must_use]
+    pub fn kernel(&self) -> &str {
+        &self.scoped_kernel
+    }
+
+    /// Producer bit-semantics kernel before execution scoping.
+    #[must_use]
+    pub fn base_kernel(&self) -> &str {
+        &self.base_kernel
+    }
+
+    /// Shape class redundantly bound in both the scoped kernel and row field.
+    #[must_use]
+    pub fn shape_class(&self) -> &str {
+        &self.shape_class
+    }
+
+    /// Execution identity carried by this key.
+    #[must_use]
+    pub const fn execution(&self) -> &GemmExecutionIdentity {
+        &self.execution
+    }
+}
+
+fn require_gemm_identity_component(label: &str, value: &str) -> Result<(), TuneError> {
+    if value.is_empty()
+        || value.len() > MAX_GEMM_IDENTITY_COMPONENT_BYTES
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_'))
+    {
+        return Err(TuneError {
+            detail: format!(
+                "GEMM {label} must be 1..={MAX_GEMM_IDENTITY_COMPONENT_BYTES} ASCII [A-Za-z0-9._-] bytes, got {value:?}"
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn parse_canonical_u64(text: &str) -> Option<u64> {
+    let value = text.parse::<u64>().ok()?;
+    (value.to_string() == text).then_some(value)
+}
+
+fn parse_gemm_base_version(kernel: &str) -> Option<u64> {
+    parse_canonical_u64(kernel.strip_prefix(GEMM_KERNEL_PREFIX)?)
+}
+
+fn gemm_shape_from_scoped_kernel(kernel: &str) -> Option<&str> {
+    let (base, scope) = kernel.split_once("/tune-v1/")?;
+    parse_gemm_base_version(base)?;
+    let mut parts = scope.split('/');
+    let shape = parts.next()?.strip_prefix("shape=")?;
+    let requested = parts.next()?.strip_prefix("requested=")?;
+    let thread_budget = parts.next()?.strip_prefix("thread-budget=")?;
+    let probe = parts.next()?.strip_prefix("probe=")?;
+    let tier = parts.next()?.strip_prefix("tier=")?;
+    let placement = parts.next()?.strip_prefix("placement=")?;
+    let implementation = parts.next()?.strip_prefix("implementation=")?;
+    if parts.next().is_some()
+        || parse_canonical_u64(requested).is_none()
+        || parse_canonical_u64(thread_budget)? == 0
+        || require_gemm_identity_component("shape class", shape).is_err()
+        || require_gemm_identity_component("ISA tier", tier).is_err()
+        || require_gemm_identity_component("placement", placement).is_err()
+        || require_gemm_identity_component("implementation", implementation).is_err()
+    {
+        return None;
+    }
+    let mut probe_parts = probe.split('x');
+    for _ in 0..3 {
+        if parse_canonical_u64(probe_parts.next()?)? == 0 {
+            return None;
+        }
+    }
+    probe_parts.next().is_none().then_some(shape)
 }
 
 /// Where a decision came from — part of every recorded decision.
@@ -547,6 +804,78 @@ fn candidate_separation_ppm(observations: &[TuneObservation]) -> Option<u32> {
     Some(u32::try_from(ppm).expect("a relative separation is at most one million ppm"))
 }
 
+fn gemm_evidence_argmin(evidence: &TuneEvidence) -> Result<GemmBlockPlan, TuneError> {
+    if evidence.candidate_separation_ppm().is_none() {
+        return Err(TuneError {
+            detail: "a GEMM selection row requires ranked wall-time candidate evidence".to_string(),
+        });
+    }
+    let mut winner: Option<(u64, usize, GemmBlockPlan)> = None;
+    for (index, observation) in evidence.observations().iter().enumerate() {
+        let plan = GemmBlockPlan::parse(observation.label()).ok_or_else(|| TuneError {
+            detail: format!(
+                "GEMM candidate label {:?} is not a canonical blocking plan",
+                observation.label()
+            ),
+        })?;
+        let minimum_ns = observation.wall_minimum().ok_or_else(|| TuneError {
+            detail: "GEMM ranked evidence must contain only wall-time candidates".to_string(),
+        })?;
+        let candidate = (minimum_ns, index, plan);
+        if winner
+            .as_ref()
+            .is_none_or(|&(best_ns, best_index, _)| (minimum_ns, index) < (best_ns, best_index))
+        {
+            winner = Some(candidate);
+        }
+    }
+    winner.map(|(_, _, plan)| plan).ok_or_else(|| TuneError {
+        detail: "GEMM ranked evidence contains no candidates".to_string(),
+    })
+}
+
+fn validate_gemm_selection(
+    selected: GemmBlockPlan,
+    evidence: &TuneEvidence,
+) -> Result<(), TuneError> {
+    let argmin = gemm_evidence_argmin(evidence)?;
+    if selected != argmin {
+        return Err(TuneError {
+            detail: format!(
+                "selected GEMM plan {} is not evidence argmin {}",
+                selected.canonical(),
+                argmin.canonical()
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn validate_scoped_gemm_row(row: &TuneRow) -> Result<GemmBlockPlan, TuneError> {
+    let embedded_shape = gemm_shape_from_scoped_kernel(&row.kernel).ok_or_else(|| TuneError {
+        detail: format!(
+            "GEMM row kernel {:?} is not a canonical scoped key",
+            row.kernel
+        ),
+    })?;
+    if embedded_shape != row.shape_class {
+        return Err(TuneError {
+            detail: format!(
+                "GEMM row shape {:?} disagrees with scoped kernel shape {embedded_shape:?}",
+                row.shape_class
+            ),
+        });
+    }
+    let selected = GemmBlockPlan::parse(&row.params).ok_or_else(|| TuneError {
+        detail: format!(
+            "GEMM row params {:?} are not a canonical blocking plan",
+            row.params
+        ),
+    })?;
+    validate_gemm_selection(selected, &row.evidence)?;
+    Ok(selected)
+}
+
 /// One tune-table row (strict file-store edition).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TuneRow {
@@ -579,6 +908,70 @@ impl TuneRow {
         self.evidence.push_json(&mut s);
         let _ = write!(s, ",\"refresh\":{}}}", self.refresh);
         s
+    }
+}
+
+/// A validated GEMM row awaiting failure-atomic installation.
+///
+/// The fields are private so callers cannot change the key, machine,
+/// selection, evidence, or refresh witness after validation. A session can
+/// persist [`PreparedGemmRow::row_json`] and [`PreparedGemmRow::params_json`]
+/// before handing the value to [`Tuner::commit_gemm_row`].
+#[derive(Debug)]
+pub struct PreparedGemmRow {
+    key: GemmTuneKey,
+    row: TuneRow,
+    expected_refresh: Option<u32>,
+}
+
+/// A resolved GEMM plan whose decision receipt has not yet been recorded.
+/// Sessions commit it only after the cancellable producer reports success.
+#[derive(Debug, Clone)]
+pub struct PreparedGemmDecision {
+    key: GemmTuneKey,
+    plan: GemmBlockPlan,
+    source: TuneSource,
+}
+
+impl PreparedGemmDecision {
+    /// Resolved blocking plan.
+    #[must_use]
+    pub const fn plan(&self) -> GemmBlockPlan {
+        self.plan
+    }
+
+    /// Provenance of the resolved plan.
+    #[must_use]
+    pub const fn source(&self) -> TuneSource {
+        self.source
+    }
+
+    /// Exact scoped key that was resolved.
+    #[must_use]
+    pub const fn key(&self) -> &GemmTuneKey {
+        &self.key
+    }
+}
+
+impl PreparedGemmRow {
+    /// Canonical selected-plan JSON for the ledger's separate `params` field.
+    #[must_use]
+    pub fn params_json(&self) -> String {
+        let mut out = String::new();
+        push_json_string(&mut out, &self.row.params);
+        out
+    }
+
+    /// Canonical tune-row JSON for the ledger's measured body.
+    #[must_use]
+    pub fn row_json(&self) -> String {
+        self.row.to_json()
+    }
+
+    /// Fully scoped key this row was validated against.
+    #[must_use]
+    pub const fn key(&self) -> &GemmTuneKey {
+        &self.key
     }
 }
 
@@ -670,7 +1063,9 @@ impl PinnedParam {
             };
         }
         if kernel.starts_with(GEMM_KERNEL_PREFIX) {
-            return GemmBlockPlan::parse(params).map(Self::GemmBlocking);
+            return gemm_shape_from_scoped_kernel(kernel)
+                .and_then(|_| GemmBlockPlan::parse(params))
+                .map(Self::GemmBlocking);
         }
         match params {
             "edge=4" => Some(Self::TileEdge(TileEdge::E4)),
@@ -772,9 +1167,13 @@ impl Tuner {
                 detail: "a pinned kernel identity must be non-blank".to_string(),
             });
         }
-        if kernel == SCHEDULE_KERNEL {
+        if kernel == SCHEDULE_KERNEL || kernel.starts_with(GEMM_KERNEL_PREFIX) {
             return Err(TuneError {
-                detail: "the reserved schedule key requires pin_schedule".to_string(),
+                detail: if kernel == SCHEDULE_KERNEL {
+                    "the reserved schedule key requires pin_schedule".to_string()
+                } else {
+                    "a GEMM-scoped key requires pin_gemm_blocking".to_string()
+                },
             });
         }
         self.pins.insert(kernel, PinnedParam::TileEdge(edge));
@@ -806,57 +1205,216 @@ impl Tuner {
             .contains_key(&(kernel.to_string(), shape_class.to_string()))
     }
 
-    /// Pin a typed GEMM blocking plan for a `gemm-f64-parallel/bits-v*`
-    /// kernel key.
+    /// True when a typed GEMM pin exists for this exact shape and execution
+    /// identity.
+    #[must_use]
+    pub fn has_gemm_pin(&self, key: &GemmTuneKey) -> bool {
+        matches!(
+            self.pins.get(key.kernel()),
+            Some(PinnedParam::GemmBlocking(_))
+        )
+    }
+
+    /// True when a validated GEMM row exists for this exact shape and
+    /// execution identity.
+    #[must_use]
+    pub fn has_gemm_row(&self, key: &GemmTuneKey) -> bool {
+        self.rows
+            .contains_key(&(key.kernel().to_string(), key.shape_class().to_string()))
+    }
+
+    /// Pin a typed GEMM blocking plan for one exact scoped key.
     ///
     /// # Errors
-    /// [`TuneError`] when `kernel` does not carry the GEMM prefix (a plan
-    /// pinned under the wrong key could shadow a tile-edge kernel).
+    /// [`TuneError`] if the typed key's internal canonical binding is invalid.
     pub fn pin_gemm_blocking(
         &mut self,
-        kernel: impl Into<String>,
+        key: &GemmTuneKey,
         plan: GemmBlockPlan,
     ) -> Result<(), TuneError> {
-        let kernel = kernel.into();
-        if !kernel.starts_with(GEMM_KERNEL_PREFIX) {
+        if gemm_shape_from_scoped_kernel(key.kernel()) != Some(key.shape_class()) {
             return Err(TuneError {
-                detail: format!(
-                    "gemm blocking pins require a {GEMM_KERNEL_PREFIX}* kernel key, got {kernel:?}"
-                ),
+                detail: "typed GEMM key has an invalid internal shape binding".to_string(),
             });
         }
-        self.pins.insert(kernel, PinnedParam::GemmBlocking(plan));
+        self.pins
+            .insert(key.kernel().to_string(), PinnedParam::GemmBlocking(plan));
         Ok(())
     }
 
-    /// Resolve the MC/NC blocking plan for a GEMM kernel key and shape
-    /// class: pins beat tuned rows beat [`GemmBlockPlan::COLD_START`].
-    /// A row whose params do not parse as a canonical plan resolves to
-    /// the cold-start default (it never dispatches unvalidated blocking)
-    /// and the decision records that provenance. The decision is
-    /// recorded either way for study pinning/replay.
-    pub fn gemm_blocking_for(
+    /// Resolve a GEMM plan without recording that it executed. Pins beat
+    /// tuned rows, which beat [`GemmBlockPlan::COLD_START`]. The caller must
+    /// explicitly commit the returned decision after successful dispatch.
+    #[must_use]
+    pub fn prepare_gemm_decision(&self, key: &GemmTuneKey) -> PreparedGemmDecision {
+        let (plan, source) = self.resolve_gemm(key);
+        PreparedGemmDecision {
+            key: key.clone(),
+            plan,
+            source,
+        }
+    }
+
+    /// Record a prepared GEMM decision after successful dispatch.
+    ///
+    /// # Errors
+    /// [`TuneError`] if the applicable pin/row changed after preparation.
+    pub fn commit_gemm_decision(
         &mut self,
-        kernel: &str,
-        shape_class: &str,
-    ) -> (GemmBlockPlan, TuneSource) {
-        let (plan, source) = if let Some(PinnedParam::GemmBlocking(plan)) = self.pins.get(kernel) {
+        prepared: PreparedGemmDecision,
+    ) -> Result<(), TuneError> {
+        let PreparedGemmDecision { key, plan, source } = prepared;
+        if self.resolve_gemm(&key) != (plan, source) {
+            return Err(TuneError {
+                detail: "prepared GEMM decision is stale because tuner state changed before commit"
+                    .to_string(),
+            });
+        }
+        self.decisions.push(TuningDecision {
+            kernel: key.kernel().to_string(),
+            params: plan.canonical(),
+            source: source.name(),
+        });
+        Ok(())
+    }
+
+    fn resolve_gemm(&self, key: &GemmTuneKey) -> (GemmBlockPlan, TuneSource) {
+        if let Some(PinnedParam::GemmBlocking(plan)) = self.pins.get(key.kernel()) {
             (*plan, TuneSource::Pinned)
         } else if let Some(plan) = self
             .rows
-            .get(&(kernel.to_string(), shape_class.to_string()))
+            .get(&(key.kernel().to_string(), key.shape_class().to_string()))
             .and_then(|row| GemmBlockPlan::parse(&row.params))
         {
             (plan, TuneSource::Tuned)
         } else {
             (GemmBlockPlan::COLD_START, TuneSource::ColdStart)
-        };
-        self.decisions.push(TuningDecision {
-            kernel: format!("{kernel}#{shape_class}"),
-            params: plan.canonical(),
-            source: source.name(),
-        });
-        (plan, source)
+        }
+    }
+
+    /// Validate a measured GEMM selection without mutating this tuner.
+    ///
+    /// The returned value can be persisted first and committed only after the
+    /// external cache write succeeds, so a ledger failure cannot leave a
+    /// process-local row that was never durably recorded.
+    ///
+    /// # Errors
+    /// [`TuneError`] when evidence is invalid, candidate labels are not
+    /// canonical plans, the selected plan is not the deterministic evidence
+    /// argmin, or the refresh counter is exhausted.
+    pub fn prepare_gemm_row(
+        &self,
+        key: &GemmTuneKey,
+        plan: GemmBlockPlan,
+        evidence: TuneEvidence,
+    ) -> Result<PreparedGemmRow, TuneError> {
+        evidence.validate()?;
+        validate_gemm_selection(plan, &evidence)?;
+        let map_key = (key.kernel().to_string(), key.shape_class().to_string());
+        let expected_refresh = self.rows.get(&map_key).map(|row| row.refresh);
+        let refresh = expected_refresh.map_or(Ok(1), |refresh| {
+            refresh.checked_add(1).ok_or_else(|| TuneError {
+                detail: format!(
+                    "refresh counter exhausted for kernel {:?} shape {:?}",
+                    key.kernel(),
+                    key.shape_class()
+                ),
+            })
+        })?;
+        Ok(PreparedGemmRow {
+            key: key.clone(),
+            row: TuneRow {
+                kernel: key.kernel().to_string(),
+                shape_class: key.shape_class().to_string(),
+                machine: self.fingerprint,
+                params: plan.canonical(),
+                evidence,
+                refresh,
+            },
+            expected_refresh,
+        })
+    }
+
+    /// Parse and validate a cached GEMM row against the exact requested key
+    /// without mutating this tuner.
+    ///
+    /// This binds the embedded kernel, shape class, machine fingerprint,
+    /// canonical plan, ranked evidence, and evidence argmin before a session
+    /// compares the ledger's separate `params` field and commits the row.
+    ///
+    /// # Errors
+    /// [`TuneError`] on any mismatch or when the requested key already has a
+    /// local row (cache adoption is a seeding operation, not a rollback path).
+    pub fn prepare_adopt_gemm_row_json(
+        &self,
+        key: &GemmTuneKey,
+        line: &str,
+    ) -> Result<PreparedGemmRow, TuneError> {
+        let row = parse_row(line).ok_or_else(|| TuneError {
+            detail: "external GEMM tune row is not a canonical validated row line".to_string(),
+        })?;
+        if row.machine != self.fingerprint {
+            return Err(TuneError {
+                detail: format!(
+                    "external GEMM tune row is stale: machine {:016x} != this machine {:016x}",
+                    row.machine, self.fingerprint
+                ),
+            });
+        }
+        if row.kernel != key.kernel() || row.shape_class != key.shape_class() {
+            return Err(TuneError {
+                detail: format!(
+                    "external GEMM tune row key mismatch: embedded {:?} × {:?}, requested {:?} × {:?}",
+                    row.kernel,
+                    row.shape_class,
+                    key.kernel(),
+                    key.shape_class()
+                ),
+            });
+        }
+        validate_scoped_gemm_row(&row)?;
+        let map_key = (key.kernel().to_string(), key.shape_class().to_string());
+        if self.rows.contains_key(&map_key) {
+            return Err(TuneError {
+                detail: "external GEMM tune-row adoption cannot replace a local row".to_string(),
+            });
+        }
+        Ok(PreparedGemmRow {
+            key: key.clone(),
+            row,
+            expected_refresh: None,
+        })
+    }
+
+    /// Install a previously validated GEMM row if tuner state still matches
+    /// the state observed during preparation.
+    ///
+    /// # Errors
+    /// [`TuneError`] when the prepared row belongs to another tuner or the row
+    /// changed between preparation and commit.
+    pub fn commit_gemm_row(&mut self, prepared: PreparedGemmRow) -> Result<(), TuneError> {
+        if prepared.row.machine != self.fingerprint
+            || prepared.row.kernel != prepared.key.kernel()
+            || prepared.row.shape_class != prepared.key.shape_class()
+        {
+            return Err(TuneError {
+                detail: "prepared GEMM row does not belong to this tuner/key".to_string(),
+            });
+        }
+        validate_scoped_gemm_row(&prepared.row)?;
+        let map_key = (
+            prepared.key.kernel().to_string(),
+            prepared.key.shape_class().to_string(),
+        );
+        let actual_refresh = self.rows.get(&map_key).map(|row| row.refresh);
+        if actual_refresh != prepared.expected_refresh {
+            return Err(TuneError {
+                detail: "prepared GEMM row is stale because tuner state changed before commit"
+                    .to_string(),
+            });
+        }
+        self.rows.insert(map_key, prepared.row);
+        Ok(())
     }
 
     /// Record a measured GEMM sweep row: the winning plan plus its RANKED
@@ -864,34 +1422,29 @@ impl Tuner {
     /// increments `refresh` (idempotence witness).
     ///
     /// # Errors
-    /// [`TuneError`] when the kernel key lacks the GEMM prefix, or the
-    /// evidence makes no ranked-candidate claim (a single unranked timing
-    /// cannot justify a selection).
+    /// [`TuneError`] when evidence makes no ranked-candidate claim, contains
+    /// non-canonical plan labels, or selects anything other than its argmin.
     pub fn record_gemm_row(
         &mut self,
-        kernel: &str,
-        shape_class: &str,
+        key: &GemmTuneKey,
         plan: GemmBlockPlan,
         evidence: TuneEvidence,
     ) -> Result<(), TuneError> {
-        if !kernel.starts_with(GEMM_KERNEL_PREFIX) {
-            return Err(TuneError {
-                detail: format!(
-                    "gemm rows require a {GEMM_KERNEL_PREFIX}* kernel key, got {kernel:?}"
-                ),
-            });
-        }
-        if evidence.candidate_separation_ppm().is_none() {
-            return Err(TuneError {
-                detail: "a gemm selection row requires ranked wall-time candidate evidence"
-                    .to_string(),
-            });
-        }
-        self.insert_row(kernel, shape_class, plan.canonical(), evidence)
+        let prepared = self.prepare_gemm_row(key, plan, evidence)?;
+        self.commit_gemm_row(prepared)
     }
 
-    /// The canonical JSON line for one row (what an external cache — the
-    /// ledger `tune` table — stores and [`Tuner::adopt_row_json`] reads).
+    /// Canonical JSON for a validated GEMM row under this exact key.
+    #[must_use]
+    pub fn gemm_row_json(&self, key: &GemmTuneKey) -> Option<String> {
+        self.rows
+            .get(&(key.kernel().to_string(), key.shape_class().to_string()))
+            .map(TuneRow::to_json)
+    }
+
+    /// The canonical JSON line for one general row (what an external cache
+    /// stores and [`Tuner::adopt_row_json`] reads). GEMM consumers use
+    /// [`Tuner::gemm_row_json`] and expected-key adoption instead.
     #[must_use]
     pub fn row_json(&self, kernel: &str, shape_class: &str) -> Option<String> {
         self.rows
@@ -912,6 +1465,12 @@ impl Tuner {
         let row = parse_row(line).ok_or_else(|| TuneError {
             detail: "external tune row is not a canonical row line".to_string(),
         })?;
+        if row.kernel.starts_with(GEMM_KERNEL_PREFIX) {
+            return Err(TuneError {
+                detail: "GEMM rows require prepare_adopt_gemm_row_json with an expected scoped key"
+                    .to_string(),
+            });
+        }
         if row.machine != self.fingerprint {
             return Err(TuneError {
                 detail: format!(
@@ -925,12 +1484,26 @@ impl Tuner {
         Ok(())
     }
 
+    /// Validate and install one GEMM cache row against an exact requested key.
+    /// Sessions that also persist a separate params column should instead call
+    /// [`Tuner::prepare_adopt_gemm_row_json`], compare that column with
+    /// [`PreparedGemmRow::params_json`], then call
+    /// [`Tuner::commit_gemm_row`].
+    ///
+    /// # Errors
+    /// [`TuneError`] naming any semantic or identity mismatch.
+    pub fn adopt_gemm_row_json(&mut self, key: &GemmTuneKey, line: &str) -> Result<(), TuneError> {
+        let prepared = self.prepare_adopt_gemm_row_json(key, line)?;
+        self.commit_gemm_row(prepared)
+    }
+
     /// Validate and pin canonical params from a recorded decision.
     ///
     /// The accepted replay forms are exactly `edge={4,8,16}` for tile
-    /// kernels and `schedule={bandwidth-rich,bandwidth-starved}` for the
-    /// schedule key. Invalid spellings fail closed instead of resolving to a
-    /// default that would be falsely recorded as pinned.
+    /// kernels, `schedule={bandwidth-rich,bandwidth-starved}` for the schedule
+    /// key, and a canonical bounded GEMM plan for a canonical scoped GEMM key.
+    /// Invalid spellings fail closed instead of resolving to a default that
+    /// would be falsely recorded as pinned.
     ///
     /// # Errors
     /// Returns [`TuneError`] when `params` is not canonical for `kernel`.
@@ -1524,6 +2097,9 @@ fn parse_row(line: &str) -> Option<TuneRow> {
         evidence,
         refresh,
     };
+    if row.kernel.starts_with(GEMM_KERNEL_PREFIX) && validate_scoped_gemm_row(&row).is_err() {
+        return None;
+    }
     (row.to_json() == line).then_some(row)
 }
 
@@ -1689,6 +2265,360 @@ fn push_bounded_char(out: &mut String, ch: char) -> Option<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn gemm_identity(
+        requested_threads: usize,
+        thread_budget: usize,
+        probe_dims: [usize; 3],
+        tier: &str,
+        placement: &str,
+        implementation: &str,
+    ) -> GemmExecutionIdentity {
+        GemmExecutionIdentity::new(
+            requested_threads,
+            thread_budget,
+            probe_dims,
+            tier,
+            placement,
+            implementation,
+        )
+        .expect("test execution identity")
+    }
+
+    fn gemm_key_with(identity: GemmExecutionIdentity) -> GemmTuneKey {
+        GemmTuneKey::new(format!("{GEMM_KERNEL_PREFIX}1"), "m64-n128-k32", identity)
+            .expect("test GEMM key")
+    }
+
+    fn gemm_key() -> GemmTuneKey {
+        gemm_key_with(gemm_identity(
+            4,
+            4,
+            [64, 128, 32],
+            "avx2-fma",
+            "unpinned",
+            "fs-la-parallel-v1",
+        ))
+    }
+
+    fn ranked_gemm_evidence(
+        first: (GemmBlockPlan, u64),
+        second: (GemmBlockPlan, u64),
+    ) -> TuneEvidence {
+        TuneEvidence::ranked_wall_times(vec![
+            TuneObservation::wall_time(first.0.canonical(), vec![first.1]).expect("first timing"),
+            TuneObservation::wall_time(second.0.canonical(), vec![second.1])
+                .expect("second timing"),
+        ])
+        .expect("ranked GEMM evidence")
+    }
+
+    #[test]
+    fn gemm_scoped_identity_has_one_canonical_spelling() {
+        let key = gemm_key();
+        assert!(key.kernel().contains("/requested=4/thread-budget=4/"));
+        assert_eq!(
+            gemm_shape_from_scoped_kernel(key.kernel()),
+            Some(key.shape_class())
+        );
+        assert!(
+            GemmTuneKey::new(
+                format!("{GEMM_KERNEL_PREFIX}01"),
+                key.shape_class(),
+                key.execution().clone(),
+            )
+            .is_err(),
+            "the bit-semantics version is canonical decimal"
+        );
+        assert!(GemmExecutionIdentity::new(4, 0, [64, 128, 32], "avx2", "unpinned", "v1").is_err());
+        assert!(GemmExecutionIdentity::new(4, 4, [64, 0, 32], "avx2", "unpinned", "v1").is_err());
+        assert!(
+            GemmExecutionIdentity::new(4, 4, [64, 128, 32], "avx/2", "unpinned", "v1").is_err()
+        );
+    }
+
+    #[test]
+    fn selected_plan_must_equal_evidence_argmin() {
+        let key = gemm_key();
+        let fast = GemmBlockPlan::new(32, 2048).expect("fast plan");
+        let slow = GemmBlockPlan::new(64, 1024).expect("slow plan");
+        let evidence = ranked_gemm_evidence((fast, 10), (slow, 20));
+        let tuner = Tuner::cold(0xA1);
+        let error = tuner
+            .prepare_gemm_row(&key, slow, evidence)
+            .expect_err("non-argmin selection must fail");
+        assert!(error.detail.contains("not evidence argmin"), "{error}");
+
+        let tied = ranked_gemm_evidence((fast, 10), (slow, 10));
+        assert!(tuner.prepare_gemm_row(&key, fast, tied.clone()).is_ok());
+        assert!(
+            tuner.prepare_gemm_row(&key, slow, tied).is_err(),
+            "ranked evidence ties resolve to the earliest candidate"
+        );
+    }
+
+    #[test]
+    fn gemm_import_rejects_invalid_params() {
+        let key = gemm_key();
+        let selected = GemmBlockPlan::new(32, 2048).expect("selected");
+        let other = GemmBlockPlan::new(64, 1024).expect("other");
+        let tuner = Tuner::cold(0xA2);
+        let valid = tuner
+            .prepare_gemm_row(
+                &key,
+                selected,
+                ranked_gemm_evidence((selected, 10), (other, 20)),
+            )
+            .expect("valid prepared row")
+            .row_json();
+        let invalid = valid.replace(
+            "\"params\":\"mc=32,nc-cap=2048\"",
+            "\"params\":\"mc=33,nc-cap=2048\"",
+        );
+        assert!(
+            tuner.prepare_adopt_gemm_row_json(&key, &invalid).is_err(),
+            "off-lattice cache params must fail closed"
+        );
+    }
+
+    #[test]
+    fn gemm_import_requires_ranked_evidence() {
+        let key = gemm_key();
+        let selected = GemmBlockPlan::new(32, 2048).expect("selected");
+        let other = GemmBlockPlan::new(64, 1024).expect("other");
+        let row = TuneRow {
+            kernel: key.kernel().to_string(),
+            shape_class: key.shape_class().to_string(),
+            machine: 0xA3,
+            params: selected.canonical(),
+            evidence: TuneEvidence::new(vec![
+                TuneObservation::wall_time(selected.canonical(), vec![10]).expect("timing"),
+                TuneObservation::wall_time(other.canonical(), vec![20]).expect("timing"),
+            ])
+            .expect("unranked evidence"),
+            refresh: 1,
+        };
+        let tuner = Tuner::cold(0xA3);
+        assert!(
+            tuner
+                .prepare_adopt_gemm_row_json(&key, &row.to_json())
+                .is_err(),
+            "multiple timings are not ranked evidence unless explicitly declared"
+        );
+    }
+
+    #[test]
+    fn foreign_embedded_key_is_refused_and_remeasured() {
+        let requested = gemm_key();
+        let foreign = GemmTuneKey::new(
+            requested.base_kernel(),
+            "m128-n128-k32",
+            requested.execution().clone(),
+        )
+        .expect("foreign key");
+        let selected = GemmBlockPlan::new(32, 2048).expect("selected");
+        let other = GemmBlockPlan::new(64, 1024).expect("other");
+        let producer = Tuner::cold(0xA4);
+        let foreign_json = producer
+            .prepare_gemm_row(
+                &foreign,
+                selected,
+                ranked_gemm_evidence((selected, 10), (other, 20)),
+            )
+            .expect("foreign row")
+            .row_json();
+        let mut consumer = Tuner::cold(0xA4);
+        assert!(
+            consumer
+                .adopt_gemm_row_json(&requested, &foreign_json)
+                .is_err(),
+            "cache body must bind the exact requested key and shape"
+        );
+        assert!(!consumer.has_gemm_row(&requested));
+        assert_eq!(
+            consumer.prepare_gemm_decision(&requested).source(),
+            TuneSource::ColdStart,
+            "a caller must remeasure after the refused cache seed"
+        );
+    }
+
+    #[test]
+    fn gemm_execution_identity_dimensions_do_not_cross_reuse() {
+        let baseline = gemm_key();
+        let variants = [
+            gemm_key_with(gemm_identity(
+                8,
+                4,
+                [64, 128, 32],
+                "avx2-fma",
+                "unpinned",
+                "fs-la-parallel-v1",
+            )),
+            gemm_key_with(gemm_identity(
+                4,
+                2,
+                [64, 128, 32],
+                "avx2-fma",
+                "unpinned",
+                "fs-la-parallel-v1",
+            )),
+            gemm_key_with(gemm_identity(
+                4,
+                4,
+                [63, 128, 32],
+                "avx2-fma",
+                "unpinned",
+                "fs-la-parallel-v1",
+            )),
+            gemm_key_with(gemm_identity(
+                4,
+                4,
+                [64, 128, 32],
+                "scalar",
+                "unpinned",
+                "fs-la-parallel-v1",
+            )),
+            gemm_key_with(gemm_identity(
+                4,
+                4,
+                [64, 128, 32],
+                "avx2-fma",
+                "ccd-pinned",
+                "fs-la-parallel-v1",
+            )),
+            gemm_key_with(gemm_identity(
+                4,
+                4,
+                [64, 128, 32],
+                "avx2-fma",
+                "unpinned",
+                "fs-la-parallel-v2",
+            )),
+        ];
+        let selected = GemmBlockPlan::new(64, 1024).expect("selected");
+        let other = GemmBlockPlan::new(32, 2048).expect("other");
+        let mut tuner = Tuner::cold(0xA5);
+        tuner
+            .record_gemm_row(
+                &baseline,
+                selected,
+                ranked_gemm_evidence((selected, 10), (other, 20)),
+            )
+            .expect("baseline row");
+        tuner
+            .pin_gemm_blocking(&baseline, selected)
+            .expect("baseline pin");
+        for variant in variants {
+            assert_ne!(baseline.kernel(), variant.kernel());
+            assert!(!tuner.has_gemm_row(&variant));
+            assert!(!tuner.has_gemm_pin(&variant));
+            assert_eq!(
+                tuner.prepare_gemm_decision(&variant).source(),
+                TuneSource::ColdStart
+            );
+        }
+    }
+
+    #[test]
+    fn recorded_gemm_key_replays_only_the_exact_scope() {
+        let key = gemm_key();
+        let neighbor = GemmTuneKey::new(key.base_kernel(), "m64-n256-k32", key.execution().clone())
+            .expect("neighbor key");
+        let plan = GemmBlockPlan::new(64, 1024).expect("plan");
+        let mut live = Tuner::cold(0xA6);
+        live.pin_gemm_blocking(&key, plan).expect("pin");
+        let live_decision = live.prepare_gemm_decision(&key);
+        assert_eq!(live_decision.plan(), plan);
+        live.commit_gemm_decision(live_decision)
+            .expect("successful live dispatch");
+        let recorded = live.decisions()[0].clone();
+        assert_eq!(recorded.kernel, key.kernel());
+
+        let mut replay = Tuner::cold(0xFFFF);
+        replay
+            .pin(recorded.kernel, recorded.params)
+            .expect("recorded scoped key is canonical");
+        let replay_decision = replay.prepare_gemm_decision(&key);
+        assert_eq!(
+            (replay_decision.plan(), replay_decision.source()),
+            (plan, TuneSource::Pinned)
+        );
+        replay
+            .commit_gemm_decision(replay_decision)
+            .expect("successful replay dispatch");
+        assert_eq!(
+            replay.prepare_gemm_decision(&neighbor).source(),
+            TuneSource::ColdStart,
+            "a scoped replay pin cannot leak into a neighboring shape"
+        );
+    }
+
+    #[test]
+    fn typed_pin_apis_reject_parameter_family_collisions() {
+        let key = gemm_key();
+        let mut tuner = Tuner::cold(0xA7);
+        assert!(tuner.pin_tile_edge(key.kernel(), TileEdge::E4).is_err());
+        assert!(tuner.pin(key.kernel(), "edge=4").is_err());
+        assert!(
+            tuner
+                .pin(format!("{GEMM_KERNEL_PREFIX}1"), "edge=4")
+                .is_err(),
+            "an unscoped GEMM-family key cannot fall through to tile-edge parsing"
+        );
+        assert!(
+            tuner
+                .pin(STENCIL_KERNEL, GemmBlockPlan::COLD_START.canonical())
+                .is_err()
+        );
+        tuner
+            .pin_gemm_blocking(&key, GemmBlockPlan::COLD_START)
+            .expect("typed GEMM pin");
+        assert!(tuner.has_gemm_pin(&key));
+    }
+
+    #[test]
+    fn prepared_gemm_rows_and_decisions_commit_explicitly() {
+        let key = gemm_key();
+        let selected = GemmBlockPlan::new(32, 2048).expect("selected");
+        let other = GemmBlockPlan::new(64, 1024).expect("other");
+        let mut tuner = Tuner::cold(0xA8);
+        let evidence = ranked_gemm_evidence((selected, 10), (other, 20));
+        let prepared = tuner
+            .prepare_gemm_row(&key, selected, evidence.clone())
+            .expect("prepared");
+        let concurrently_stale = tuner
+            .prepare_gemm_row(&key, selected, evidence)
+            .expect("second preparation observes the same state");
+        assert_eq!(prepared.params_json(), "\"mc=32,nc-cap=2048\"");
+        assert!(!tuner.has_gemm_row(&key));
+        tuner.commit_gemm_row(prepared).expect("commit row");
+        assert!(tuner.has_gemm_row(&key));
+        assert!(
+            tuner.commit_gemm_row(concurrently_stale).is_err(),
+            "a prepared row cannot overwrite state changed after preparation"
+        );
+
+        let decision = tuner.prepare_gemm_decision(&key);
+        assert!(tuner.decisions().is_empty());
+        tuner
+            .commit_gemm_decision(decision)
+            .expect("commit successful dispatch decision");
+        assert_eq!(tuner.decisions().len(), 1);
+
+        let neighbor =
+            GemmTuneKey::new(key.base_kernel(), "m128-n128-k32", key.execution().clone())
+                .expect("neighbor");
+        let stale_decision = tuner.prepare_gemm_decision(&neighbor);
+        tuner
+            .pin_gemm_blocking(&neighbor, other)
+            .expect("state changes after resolution");
+        assert!(tuner.commit_gemm_decision(stale_decision).is_err());
+        assert_eq!(
+            tuner.decisions().len(),
+            1,
+            "a stale decision cannot fabricate a dispatch receipt"
+        );
+    }
 
     #[test]
     fn cold_start_defaults_are_documented_values_and_recorded() {

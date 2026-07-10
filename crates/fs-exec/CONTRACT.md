@@ -98,19 +98,30 @@ fs-substrate, fs-obs.
   canonical replay API and replay uses recorded plans, never re-tuned ones
   (replay fidelity). Cold-start defaults: 8-cube tiles, bandwidth-rich
   schedule.
-- `GemmBlockPlan` / `GEMM_KERNEL_PREFIX` — the MC/NC blocking lane for the
-  parallel-GEMM consumer (bead yqug). Plans live on a bounded lattice
+- `GemmBlockPlan` / `GemmExecutionIdentity` / `GemmTuneKey` /
+  `PreparedGemmRow` / `PreparedGemmDecision` / `GEMM_KERNEL_PREFIX` — the
+  MC/NC blocking lane for the parallel-GEMM consumer (bead yqug). Plans live
+  on a bounded lattice
   (`mc` a multiple of 8 in [8, 1024]; `nc_cap` a multiple of 128 in
   [128, 8192]); only the canonical `mc=X,nc-cap=Y` spelling parses (pins
-  fail closed otherwise). Kernel keys carry the producer's bit-semantics
-  version appended to the prefix, so rows measured under a different
-  accumulation contract can never match a lookup. `gemm_blocking_for`
-  resolves pins → tuned rows → the documented cold start (mc=32,
-  nc-cap=2048, the xlvx s5 winner) and records the decision;
-  `record_gemm_row` requires RANKED wall-time candidate evidence;
-  `adopt_row_json` imports one canonical row line from an external cache
-  and refuses non-canonical, invalid-evidence, or foreign-fingerprint
-  (stale) lines; `row_json` exports the canonical line for that cache.
+  fail closed otherwise). A canonical scoped key binds the producer's
+  bit-semantics version, shape class, requested thread count, normalized
+  maximum thread budget (not the candidate-dependent spawned-worker count),
+  exact probe dimensions, resolved ISA tier, placement policy, and
+  implementation identity. Row lookup, pin lookup, ledger lookup, and the
+  recorded decision all use that SAME scoped key, so neither a neighboring
+  shape nor a different execution configuration can reuse the row or pin.
+  GEMM evidence must be explicitly RANKED wall-time candidates whose labels
+  are canonical plans; the selected plan must equal the minimum-time
+  candidate with insertion-order tie-breaking. Cache adoption requires the
+  expected `GemmTuneKey` and binds the embedded key, shape, machine, params,
+  ranked evidence, and evidence argmin. Generic `adopt_row_json` refuses GEMM
+  rows so a caller cannot bypass expected-key binding. `prepare_gemm_row` and
+  `prepare_adopt_gemm_row_json` validate without mutation;
+  `commit_gemm_row` installs only if tuner state is unchanged, permitting a
+  session to persist the canonical params and row first. Likewise,
+  `prepare_gemm_decision` resolves without logging and
+  `commit_gemm_decision` records only after successful dispatch.
 - `KillRegistry` (behavior 3, Bet 8): candidate id -> `Arc<CancelGate>`;
   `kill` (idempotent; unknown id is a non-event), `kill_where` (batch
   elimination, ascending order), `registered_gate` (fetch without silently
@@ -159,6 +170,13 @@ fs-substrate, fs-obs.
     recalibration replaces same-key rows with refresh incremented; pinned
     decisions are typed or canonical-validated and reproduce identically on
     ANY machine, calibrated or not (exec-013).
+12. GEMM rows and pins are scoped to the complete execution identity; imports
+    match the requested scoped key and machine, params are canonical bounded
+    plans, selected plans equal the ranked-evidence argmin, parameter families
+    cannot shadow one another, and decisions record the exact key used by
+    lookup and replay. Row and decision installation are explicit commits so
+    failed persistence or cancelled execution cannot fabricate local state or
+    a successful-dispatch receipt.
 
 ## Snapshot envelope (bead wf9.8.2, v1)
 
@@ -264,7 +282,10 @@ idempotent recalibration; canonical pinned replay).
 tests/constellation_smoke.rs pins the
 asupersync Budget vocabulary. In-module unit suites cover the gate, keys,
 Reduce laws, partitioning, victim orders, self-cancellation, and pool
-survival after panics.
+survival after panics. GEMM tuner unit drills cover hostile embedded cache
+keys, invalid params, unranked evidence, selection/argmin disagreement,
+identity-dimension isolation, exact-key replay, parameter-family collisions,
+and explicit row/decision commit semantics.
 
 ## No-claim boundaries
 - NO 200 µs cancel-latency CLAIM yet: the reference-hardware p99 gate
@@ -303,10 +324,10 @@ survival after panics.
   observations, wall-time extrema, and (when meaningful) a descriptive
   candidate-separation ratio. It does not estimate repeatability,
   uncertainty, or a probability that the selected candidate is optimal.
-- GEMM/prefetch-distance calibration rows arrive when fs-la and the
-  stencil-prefetch kernels register their microbenches; the table schema
-  and TilePlan service are ready for them. Tropical tune-next analytics
-  (Bet 12) is fs-plan's.
+- Stencil prefetch-distance calibration rows arrive when that kernel registers
+  its microbench. GEMM has a typed row and dispatch lane, while reference-ISA
+  performance admission and broader tropical tune-next analytics (Bet 12)
+  remain with the Gauntlet and fs-plan respectively.
 - Per-core-class (P/E) bandwidth calibration inherits fs-substrate's
   pinning no-claim; the schedule decision uses aggregate per-core numbers.
 - Deterministic hash-map wrappers are not shipped: the contract's rule is

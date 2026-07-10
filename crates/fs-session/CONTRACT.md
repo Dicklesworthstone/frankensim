@@ -56,19 +56,23 @@ Consumers: the P2 marquee demo, the HELM e2e suite (gp3.11).
   fsqlite connections are `!Send` by design.
 - `gemm_f64_session(tuner, ledger?, gate, threads, m, n, k, α, a, b, β, c)`
   — the production GEMM autotune loop (bead yqug): measure → cache →
-  model → dispatch. Kernel key = `gemm-f64-parallel/bits-v` +
-  fs-la's `GEMM_BIT_SEMANTICS_VERSION` (semantic staleness filtered by
-  key construction); shape class = power-of-two dim buckets. Pinned
-  plans dispatch with NO measurement (replay fidelity); else a cached
-  tuner/ledger row; else a bounded 4×2 candidate sweep at the caller's
-  dims (capped at 512) with 3 wall-time samples per candidate, recorded
-  as ranked evidence, written through to the ledger `tune` table, and
-  ENFORCED bit-neutral: every candidate's output must be bitwise equal
-  to the first's or the loop fails closed (`BitDrift`) and records
-  nothing. The selection rule is declared (argmin of minimum wall time,
-  ties to the earlier lattice index) — never a confidence claim.
-  Returns a `GemmDispatch` receipt (kernel, class, plan, provenance,
-  swept) for study pinning.
+  model → cancellation-correct dispatch. The scoped key binds fs-la's bit
+  semantics version, power-of-two shape class, requested/normalized thread
+  budget, exact capped probe dims (M/K ≤ 512, N ≤ 2048), resolved SIMD tier,
+  unpinned work-stealing placement policy, and implementation version; the
+  ledger key also binds the machine fingerprint. Shape/overflow and
+  pre-requested-cancel checks happen before any tune mutation; one-thread,
+  small-M, and no-product calls bypass tuning. Pinned plans skip measurement;
+  else an exact tuner/ledger row is used; else an up-to-4×2 lattice is
+  deduplicated by the `(mc,nc)` values fs-la will actually execute and sampled
+  three times. Every output word from every repeat is compared by `f64::to_bits`
+  (signed zero and NaN payloads included); drift fails closed. The declared
+  model is argmin of minimum wall time with lattice-order tie breaking, not a
+  confidence claim. A row is prepared, durably written with a separate params
+  field that must agree with its body, then committed locally. A decision is
+  recorded only after fs-la drains and successfully commits the staged output.
+  `GemmDispatch.kernel` is the exact replay key; replay pins the recorded key
+  and params rather than reconstructing a weaker base key.
 
 ## Invariants
 
@@ -91,12 +95,22 @@ Consumers: the P2 marquee demo, the HELM e2e suite (gp3.11).
 7. **Invalid resources fail closed**: NaN, infinities, negative values, and
    accumulated floating-point overflow are rejected before any token or meter
    mutation. Landing exactly on a grant returns `Throttled`.
+8. **GEMM tuning cannot create phantom success**: malformed shapes and
+   no-op/serial routes cannot create rows or decisions; cancellation or bit
+   drift during measurement cannot create a row; cache failure, foreign
+   execution identity, and params/body disagreement cannot install a row.
+   Ledger persistence precedes local row commit; successful compute precedes
+   decision commit. Cancellation during final dispatch may retain its already
+   validated measured row, but records no successful decision and leaves caller
+   `C` bitwise intact.
 
 ## Error model
 
 `SessionError`: `UnknownSession`, `InvalidResource`, `Submission`,
-`Persistence`. Refusals that teach travel as `Guidance` values with ranked
-fixes. A caller-work panic is data, not an unwind across the governor API:
+`Persistence`. `GemmTuneError`: cancellation with completed/total bounded tile
+counts, typed tuner refusal, ledger refusal, or exact-bit drift with candidate
+and repeat. Refusals that teach travel as `Guidance` values with ranked fixes.
+A caller-work panic is data, not an unwind across the governor API:
 `SubmitOutcome::Failed` records its receipt and diagnosis.
 
 ## Determinism class
@@ -104,12 +118,19 @@ fixes. A caller-work panic is data, not an unwind across the governor API:
 Governor state transitions are deterministic given the call order;
 event ordinals are logical (no wall clocks in ledgered payloads).
 Concurrency outcomes (who wins a race) are scheduling-dependent by
-nature — the INVARIANTS above are what is guaranteed.
+nature — the INVARIANTS above are what is guaranteed. GEMM numerical bits are
+independent of the selected MC/NC plan; the wall-clock winner is inherently
+environment-dependent and therefore travels as scoped evidence plus an exact
+replayable decision.
 
 ## Cancellation behavior
 
 The governor is itself a cancellation SOURCE (pause step → CancelGate).
-Its own operations are short, bounded critical sections.
+Its own operations are short, bounded critical sections. GEMM sweep and final
+dispatch poll the same gate inside bounded packing/microtile work. fs-la stages
+`C`, stops claiming work, drains all scoped workers, and commits only after the
+final poll; cancellation returns progress counts and leaves caller `C`
+bit-for-bit unchanged.
 
 ## Unsafe boundary
 
@@ -141,9 +162,19 @@ refusal.
 matches serial bits; ledger warm start seeds a fresh session without
 re-measuring; stale (foreign-fingerprint) and invalid cache rows are
 refused and re-measured; a requested gate cancels the sweep with no row
-and untouched output; non-canonical/off-lattice/mis-keyed pins are
-structured refusals; pinned replay skips measurement and reproduces the
-live bits; every lattice plan matches serial bits. The oracle lane
+and untouched output; pre-requested warm and pinned paths leave output and
+decision logs untouched; non-canonical/off-lattice/mis-keyed pins are
+structured refusals; replay uses the actual recorded scoped decision and
+reproduces the live bits; execution identity separates thread budgets and
+exact probes even inside one shape bucket; serial/no-op/small and invalid-shape
+paths cannot mutate tuning state; every lattice plan matches serial bits.
+An n=640 producer test executes both the two-panel NC=512 route and the
+single-panel wider route, proving the NC axis reaches fs-la rather than only
+changing evidence labels.
+In-module injected Gauntlet tests force exact signed-zero/NaN-payload drift in
+each repeat, candidate collapse, between-repeat cancellation, cache-write
+failure/retry, params/body disagreement, wrong-probe adoption, and cancelled
+dispatch without a success decision. The oracle lane
 (`--ignored`, release) asserts the live choice is within the declared
 25% tolerance of the exhaustive best-of-3 oracle at the real problem
 size and reports its machine — measured 1.000/1.000/1.062 on
@@ -170,3 +201,6 @@ armed and runs when an x86 host picks it up.
 - A mutex self-deadlock in the calibration renderer was found by the
   conformance run and fixed (single lock scope) — reentrancy is a
   documented non-assumption throughout.
+- GEMM minimum-wall-time ranking is a deterministic selection rule over the
+  recorded samples, not statistical confidence. The x86 oracle lane remains
+  armed rather than claimed as measured until it runs on the reference host.

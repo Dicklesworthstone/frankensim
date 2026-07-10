@@ -4,7 +4,8 @@
 //! pin failure, and pinned replay. The oracle-tolerance lane runs
 //! explicitly (`--ignored`, release) like every wall-clock gate.
 
-use fs_exec::{CancelGate, GemmBlockPlan, TuneSource, Tuner};
+use fs_exec::{CancelGate, GemmBlockPlan, GemmTuneKey, TuneSource, Tuner};
+use fs_session::gemm_tune::gemm_tune_key;
 use fs_session::{GemmTuneError, gemm_f64_session, gemm_kernel_key, gemm_shape_class};
 
 const FP_THIS: u64 = 0x00AA_11BB_22CC_33DD;
@@ -48,6 +49,10 @@ fn temp_ledger(tag: &str) -> (std::path::PathBuf, fs_ledger::Ledger) {
     (dir, ledger)
 }
 
+fn key(threads: usize, m: usize, n: usize, k: usize) -> GemmTuneKey {
+    gemm_tune_key(threads, m, n, k).expect("canonical GEMM key")
+}
+
 /// COLD DRILL: no pins, no rows, no ledger — the loop must sweep once,
 /// record a tuned row, dispatch bitwise-identically to the serial
 /// reference, and NOT re-sweep on the second call.
@@ -64,7 +69,9 @@ fn cold_start_sweeps_once_and_matches_serial_bits() {
     .expect("cold dispatch");
     assert!(first.swept, "cold start measures");
     assert_eq!(first.source, TuneSource::Tuned);
-    assert_eq!(first.kernel, gemm_kernel_key());
+    let exact_key = key(THREADS, M, N, K);
+    assert_eq!(first.kernel, exact_key.kernel());
+    assert!(first.kernel.starts_with(&gemm_kernel_key()));
     assert_eq!(first.shape_class, gemm_shape_class(M, N, K));
     assert_eq!(
         c.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
@@ -85,7 +92,7 @@ fn cold_start_sweeps_once_and_matches_serial_bits() {
         tuner
             .decisions()
             .iter()
-            .any(|d| d.kernel.starts_with(&gemm_kernel_key()) && d.params == first.plan.canonical())
+            .any(|d| d.kernel == first.kernel && d.params == first.plan.canonical())
     );
 }
 
@@ -114,6 +121,15 @@ fn ledger_cache_warm_starts_a_fresh_session() {
     )
     .expect("session 1");
     assert!(first.swept);
+    let persisted = ledger
+        .tune_get(&first.kernel, &first.shape_class, &FP_THIS.to_le_bytes())
+        .expect("cache read")
+        .expect("row persisted");
+    assert_eq!(
+        persisted.params,
+        format!("\"{}\"", first.plan.canonical()),
+        "the ledger params column binds the exact selected plan"
+    );
 
     let mut tuner2 = Tuner::cold(FP_THIS);
     let mut c2 = vec![0.0f64; M * N];
@@ -146,13 +162,12 @@ fn stale_other_machine_row_is_refused_and_remeasured() {
     let (dir, ledger) = temp_ledger("stale");
     let (a, b) = problem();
     let gate = CancelGate::new();
-    let kernel = gemm_kernel_key();
-    let class = gemm_shape_class(M, N, K);
+    let exact_key = key(THREADS, M, N, K);
     // Session on machine A records the row under A's fingerprint...
     let fp_other = 0x0DEA_D0BE_EF00_0001_u64;
     let mut tuner_a = Tuner::cold(fp_other);
     let mut c = vec![0.0f64; M * N];
-    gemm_f64_session(
+    let foreign = gemm_f64_session(
         &mut tuner_a,
         None,
         &gate,
@@ -167,15 +182,15 @@ fn stale_other_machine_row_is_refused_and_remeasured() {
         &mut c,
     )
     .expect("machine A session");
-    let row_a = tuner_a.row_json(&kernel, &class).expect("row recorded");
+    let row_a = tuner_a.gemm_row_json(&exact_key).expect("row recorded");
     // ...but the cache entry lands under THIS machine's key (a corrupt
     // or copied cache — exactly what the fingerprint check exists for).
     ledger
         .tune_put(
-            &kernel,
-            &class,
+            exact_key.kernel(),
+            exact_key.shape_class(),
             &FP_THIS.to_le_bytes(),
-            "\"gemm-block-plan\"",
+            &format!("\"{}\"", foreign.plan.canonical()),
             &row_a,
         )
         .expect("plant stale row");
@@ -209,12 +224,11 @@ fn invalid_cache_row_is_refused_and_remeasured() {
     let (dir, ledger) = temp_ledger("invalid");
     let (a, b) = problem();
     let gate = CancelGate::new();
-    let kernel = gemm_kernel_key();
-    let class = gemm_shape_class(M, N, K);
+    let exact_key = key(THREADS, M, N, K);
     ledger
         .tune_put(
-            &kernel,
-            &class,
+            exact_key.kernel(),
+            exact_key.shape_class(),
             &FP_THIS.to_le_bytes(),
             "\"gemm-block-plan\"",
             "{\"not\":\"a tune row\"}",
@@ -258,13 +272,20 @@ fn cancelled_sweep_records_nothing_and_leaves_c_untouched() {
         &mut tuner, None, &gate, THREADS, M, N, K, 1.0, &a, &b, 0.0, &mut c,
     )
     .expect_err("cancelled");
-    assert!(matches!(err, GemmTuneError::Cancelled));
+    assert!(matches!(
+        err,
+        GemmTuneError::Cancelled {
+            completed_tiles: 0,
+            total_tiles: 0
+        }
+    ));
+    let exact_key = key(THREADS, M, N, K);
     assert!(
-        !tuner.has_row(&gemm_kernel_key(), &gemm_shape_class(M, N, K)),
+        !tuner.has_gemm_row(&exact_key),
         "no partial evidence survives a cancel"
     );
     assert!(
-        c.iter().all(|&x| x == sentinel),
+        c.iter().all(|value| value.to_bits() == sentinel.to_bits()),
         "nothing dispatched under an unselected plan"
     );
 }
@@ -275,7 +296,7 @@ fn cancelled_sweep_records_nothing_and_leaves_c_untouched() {
 #[test]
 fn pin_failures_are_structured_refusals() {
     let mut tuner = Tuner::cold(FP_THIS);
-    let kernel = gemm_kernel_key();
+    let exact_key = key(THREADS, M, N, K);
     for bad in [
         "mc=banana,nc-cap=2048",
         "mc=33,nc-cap=2048",   // off-lattice mc
@@ -283,18 +304,22 @@ fn pin_failures_are_structured_refusals() {
         "mc=32",               // missing member
         "mc=032,nc-cap=2048",  // non-canonical spelling
     ] {
-        assert!(tuner.pin(&kernel, bad).is_err(), "{bad:?} must be refused");
+        assert!(
+            tuner.pin(exact_key.kernel(), bad).is_err(),
+            "{bad:?} must be refused"
+        );
     }
     // A gemm plan pinned under a non-gemm kernel key is refused too.
     assert!(
         tuner
-            .pin_gemm_blocking("stencil7-f32", GemmBlockPlan::COLD_START)
+            .pin("stencil7-f32", GemmBlockPlan::COLD_START.canonical())
             .is_err()
     );
     // And the canonical spelling round-trips through the replay path.
     tuner
-        .pin(&kernel, "mc=64,nc-cap=512")
+        .pin(exact_key.kernel(), "mc=64,nc-cap=512")
         .expect("canonical pin");
+    assert!(tuner.has_gemm_pin(&exact_key));
 }
 
 /// REPLAY DRILL: pinning the recorded decision reproduces the plan with
@@ -320,10 +345,19 @@ fn pinned_replay_skips_measurement_and_reproduces_bits() {
         &mut c1,
     )
     .expect("live session");
-    // Replay: a second session pins the recorded decision's params.
+    let recorded = tuner1
+        .decisions()
+        .last()
+        .expect("successful dispatch records a decision")
+        .clone();
+    assert_eq!(recorded.kernel, live.kernel);
+    assert_eq!(recorded.params, live.plan.canonical());
+    // Replay the ACTUAL receipt, including shape, exact probe, threads,
+    // tier, placement, and implementation. Reconstructing only the old base
+    // key would silently discard the evidence identity.
     let mut tuner2 = Tuner::cold(FP_THIS);
     tuner2
-        .pin(gemm_kernel_key(), live.plan.canonical())
+        .pin(recorded.kernel, recorded.params)
         .expect("replay pin");
     let mut c2 = vec![0.0f64; M * N];
     let replay = gemm_f64_session(
@@ -349,6 +383,203 @@ fn pinned_replay_skips_measurement_and_reproduces_bits() {
         c2.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
         "replay reproduces the live bits exactly"
     );
+}
+
+#[test]
+fn execution_identity_separates_threads_and_exact_probe_dims() {
+    let base = key(4, 320, 288, 300);
+    assert_eq!(base.execution().requested_threads(), 4);
+    assert_eq!(base.execution().thread_budget(), 4);
+    assert_eq!(base.execution().probe_dims(), [320, 288, 300]);
+    assert_eq!(base.execution().isa_tier(), fs_la::gemm_execution_tier());
+    assert_eq!(
+        base.execution().placement(),
+        fs_la::GEMM_PARALLEL_IMPLEMENTATION
+    );
+    assert!(
+        base.execution()
+            .implementation()
+            .contains(&format!("gemm-v{}", fs_la::GEMM_IMPLEMENTATION_VERSION))
+    );
+
+    let other_threads = key(5, 320, 288, 300);
+    let other_probe_same_bucket = key(4, 320, 289, 300);
+    assert_eq!(base.shape_class(), other_probe_same_bucket.shape_class());
+    assert_ne!(base.kernel(), other_threads.kernel());
+    assert_ne!(base.kernel(), other_probe_same_bucket.kernel());
+}
+
+#[test]
+fn pre_requested_warm_and_pinned_paths_leave_output_and_decisions_untouched() {
+    let (a, b) = problem();
+    let mut live_tuner = Tuner::cold(FP_THIS);
+    let live_gate = CancelGate::new();
+    let mut live_c = vec![0.0; M * N];
+    let live = gemm_f64_session(
+        &mut live_tuner,
+        None,
+        &live_gate,
+        THREADS,
+        M,
+        N,
+        K,
+        1.0,
+        &a,
+        &b,
+        0.0,
+        &mut live_c,
+    )
+    .expect("seed warm row");
+    let recorded = live_tuner.decisions().last().expect("decision").clone();
+
+    let cancelled = CancelGate::new();
+    cancelled.request();
+    let sentinel = f64::from_bits(0x7ff8_0000_0000_0042);
+    let mut warm_c = vec![sentinel; M * N];
+    let decision_count = live_tuner.decisions().len();
+    let warm_error = gemm_f64_session(
+        &mut live_tuner,
+        None,
+        &cancelled,
+        THREADS,
+        M,
+        N,
+        K,
+        1.0,
+        &a,
+        &b,
+        0.0,
+        &mut warm_c,
+    )
+    .expect_err("warm dispatch must observe pre-request");
+    assert!(matches!(
+        warm_error,
+        GemmTuneError::Cancelled {
+            completed_tiles: 0,
+            total_tiles: 0
+        }
+    ));
+    assert!(
+        warm_c
+            .iter()
+            .all(|value| value.to_bits() == sentinel.to_bits())
+    );
+    assert_eq!(live_tuner.decisions().len(), decision_count);
+
+    let mut pinned_tuner = Tuner::cold(FP_THIS);
+    pinned_tuner
+        .pin(recorded.kernel, recorded.params)
+        .expect("recorded pin");
+    let mut pinned_c = vec![sentinel; M * N];
+    let pinned_error = gemm_f64_session(
+        &mut pinned_tuner,
+        None,
+        &cancelled,
+        THREADS,
+        M,
+        N,
+        K,
+        1.0,
+        &a,
+        &b,
+        0.0,
+        &mut pinned_c,
+    )
+    .expect_err("pinned dispatch must observe pre-request");
+    assert!(matches!(pinned_error, GemmTuneError::Cancelled { .. }));
+    assert!(
+        pinned_c
+            .iter()
+            .all(|value| value.to_bits() == sentinel.to_bits())
+    );
+    assert!(pinned_tuner.decisions().is_empty());
+    assert_eq!(live.kernel, key(THREADS, M, N, K).kernel());
+}
+
+#[test]
+fn serial_noop_and_small_routes_never_tune_or_record_decisions() {
+    let cases = [
+        ("one-thread", 1, 256, 8, 8, 1.0),
+        ("small-m", 4, 16, 8, 8, 1.0),
+        ("alpha-zero", 4, 256, 8, 8, 0.0),
+        ("k-zero", 4, 256, 8, 0, 1.0),
+        ("m-zero", 4, 0, 8, 8, 1.0),
+        ("n-zero", 4, 256, 0, 8, 1.0),
+    ];
+    for (name, threads, m, n, k, alpha) in cases {
+        let a = vec![0.25; m * k];
+        let b = vec![-0.5; k * n];
+        let mut c = vec![2.0; m * n];
+        let mut tuner = Tuner::cold(FP_THIS);
+        let report = gemm_f64_session(
+            &mut tuner,
+            None,
+            &CancelGate::new(),
+            threads,
+            m,
+            n,
+            k,
+            alpha,
+            &a,
+            &b,
+            0.5,
+            &mut c,
+        )
+        .unwrap_or_else(|error| panic!("{name}: {error}"));
+        assert!(!report.swept, "{name}");
+        assert_eq!(report.source, TuneSource::ColdStart, "{name}");
+        assert!(tuner.decisions().is_empty(), "{name}");
+        assert!(!tuner.has_gemm_row(&key(threads, m, n, k)), "{name}");
+    }
+}
+
+#[test]
+fn invalid_shapes_and_extent_overflow_precede_all_tune_mutation() {
+    let (mut a, b) = problem();
+    a.pop();
+    let sentinel = 17.0;
+    let mut c = vec![sentinel; M * N];
+    let mut tuner = Tuner::cold(FP_THIS);
+    let mismatch = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = gemm_f64_session(
+            &mut tuner,
+            None,
+            &CancelGate::new(),
+            THREADS,
+            M,
+            N,
+            K,
+            1.0,
+            &a,
+            &b,
+            0.0,
+            &mut c,
+        );
+    }));
+    assert!(mismatch.is_err());
+    assert!(tuner.decisions().is_empty());
+    assert!(!tuner.has_gemm_row(&key(THREADS, M, N, K)));
+    assert!(c.iter().all(|value| value.to_bits() == sentinel.to_bits()));
+
+    let overflow = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut empty = [];
+        let _ = gemm_f64_session(
+            &mut tuner,
+            None,
+            &CancelGate::new(),
+            THREADS,
+            usize::MAX,
+            0,
+            2,
+            1.0,
+            &[],
+            &[],
+            0.0,
+            &mut empty,
+        );
+    }));
+    assert!(overflow.is_err());
+    assert!(tuner.decisions().is_empty());
 }
 
 /// Every plan on the sweep lattice dispatches bitwise-identically to the
@@ -380,6 +611,52 @@ fn every_lattice_plan_matches_serial_bits() {
                 "mc={mc} nc_cap={nc_cap}"
             );
         }
+    }
+}
+
+/// The NC axis must reach the real producer, not merely create two labels for
+/// one clamped execution. At n=640, nc=512 executes two B panels while the
+/// wider candidate executes one; both remain bit-neutral.
+#[test]
+fn nc_axis_executes_distinct_real_panel_widths() {
+    const WM: usize = 256;
+    const WN: usize = 640;
+    const WK: usize = 8;
+    let mut a = vec![0.0; WM * WK];
+    let mut b = vec![0.0; WK * WN];
+    fill(&mut a, 0x31);
+    fill(&mut b, 0x32);
+    let mut expected = vec![0.0; WM * WN];
+    fs_la::gemm_f64(WM, WN, WK, 1.0, &a, &b, 0.0, &mut expected);
+    for nc in [512, WN] {
+        let mut actual = vec![0.0; WM * WN];
+        let report = fs_la::gemm_f64_parallel_with_cancel(
+            WM,
+            WN,
+            WK,
+            1.0,
+            &a,
+            &b,
+            0.0,
+            &mut actual,
+            THREADS,
+            32,
+            nc,
+            &CancelGate::new(),
+        )
+        .expect("wide real-panel run");
+        assert_eq!(report.completed_tiles, report.total_tiles);
+        assert_eq!(
+            actual
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            expected
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            "nc={nc}"
+        );
     }
 }
 

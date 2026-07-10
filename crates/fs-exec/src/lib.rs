@@ -52,8 +52,9 @@ pub use latency::{LaneError, LatencyLane};
 pub use pool::{PoolConfig, RunError, RunReport, TilePool, victim_order, weighted_ranges};
 pub use race::{BranchOutcome, BranchReport, NoWinner, RaceBranch, RaceRun, Racer, RacerConfig};
 pub use tune::{
-    GEMM_KERNEL_PREFIX, GemmBlockPlan, ScheduleKind, ThroughputUnit, TuneError, TuneEvidence,
-    TuneObservation, TuneRow, TuneSource, Tuner, TuningDecision, WallTimeSummary, WorkUnit,
+    GEMM_KERNEL_PREFIX, GemmBlockPlan, GemmExecutionIdentity, GemmTuneKey, PreparedGemmDecision,
+    PreparedGemmRow, ScheduleKind, ThroughputUnit, TuneError, TuneEvidence, TuneObservation,
+    TuneRow, TuneSource, Tuner, TuningDecision, WallTimeSummary, WorkUnit,
 };
 
 /// Crate version, re-exported for provenance stamping (the Five Explicits'
