@@ -137,17 +137,122 @@ impl SosCertificate {
         acc.max_abs_coeff()
     }
 
-    /// Is the certificate valid (the identity holds within `tol`)?
+    /// Does the DECOMPOSITION IDENTITY hold within `tol` in coefficient
+    /// ∞-norm? This is a statement about the algebra of the certificate,
+    /// NOT a value bound: a residual with tiny coefficients can be
+    /// arbitrarily negative far from the origin (r(x) = −tol − tol·x is
+    /// −tol·(1+10⁶) at x = 10⁶), so passing `verify` must never be
+    /// converted into a global `p ≥ lower_bound` claim (bead wa8i S2 —
+    /// the old `certified_bound(tol)` did exactly that and forged
+    /// certificates). Use [`SosCertificate::certified_bound_global`] or
+    /// [`SosCertificate::certified_bound_on`] for value claims.
     #[must_use]
     pub fn verify(&self, p: &Poly, tol: f64) -> bool {
         self.residual(p) <= tol
     }
 
-    /// The PROVEN lower bound if the certificate verifies, else `None` — so a
-    /// bound above the true minimum is never returned.
+    /// The EXACT residual coefficients of `p − lower_bound − Σ qᵢ²` as
+    /// fs-ivl expansions: every product and sum of f64 coefficients is
+    /// exactly representable, so these are the true residual
+    /// coefficients with NO rounding (the substrate for rigorous value
+    /// claims).
+    fn residual_expansions(&self, p: &Poly) -> Vec<Vec<f64>> {
+        use fs_ivl::expansion::expansion_diff;
+        use fs_math::eft::two_prod;
+        // Degree bound of the residual.
+        let deg_p = p.coeffs().len();
+        let deg_sq = self
+            .squares
+            .iter()
+            .map(|q| {
+                let d = q.coeffs().len();
+                if d == 0 { 0 } else { 2 * d - 1 }
+            })
+            .max()
+            .unwrap_or(0);
+        let len = deg_p.max(deg_sq).max(1);
+        let mut acc: Vec<Vec<f64>> = (0..len)
+            .map(|j| {
+                let mut c = p.coeffs().get(j).copied().unwrap_or(0.0);
+                if j == 0 {
+                    // p₀ − lower_bound must itself be exact: use a
+                    // two-component difference expansion.
+                    let (hi, lo) = fs_ivl::expansion::two_diff(c, self.lower_bound);
+                    return vec![lo, hi];
+                }
+                if c == 0.0 {
+                    c = 0.0; // normalize −0
+                }
+                vec![c]
+            })
+            .collect();
+        for q in &self.squares {
+            let qc = q.coeffs();
+            for (i, &qi) in qc.iter().enumerate() {
+                for (j, &qj) in qc.iter().enumerate() {
+                    let (hi, lo) = two_prod(qi, qj);
+                    let prod = vec![lo, hi];
+                    let k = i + j;
+                    acc[k] = expansion_diff(&acc[k], &prod);
+                }
+            }
+        }
+        acc
+    }
+
+    /// GLOBAL certified bound: `Some(b)` only when every non-constant
+    /// residual coefficient is EXACTLY zero (expansion sign 0), in which
+    /// case `p − lower_bound = Σ qᵢ² + r₀` identically and
+    /// `p(x) ≥ lower_bound − |r₀|` for ALL real x — a theorem, not a
+    /// tolerance. Returns the bound degraded by the exact |r₀| envelope.
     #[must_use]
-    pub fn certified_bound(&self, p: &Poly, tol: f64) -> Option<f64> {
-        self.verify(p, tol).then_some(self.lower_bound)
+    pub fn certified_bound_global(&self, p: &Poly) -> Option<f64> {
+        use fs_ivl::expansion::{estimate, expansion_sign};
+        let res = self.residual_expansions(p);
+        for e in res.iter().skip(1) {
+            if expansion_sign(e) != 0 {
+                return None;
+            }
+        }
+        // |r₀| upper bound: expansions are exact; Σ|components| rounded
+        // up encloses the magnitude.
+        let r0 = res.first().map_or(0.0, |e| {
+            let approx = estimate(e).abs();
+            // A few-ulp outward nudge covers the summation rounding.
+            f64::from_bits(approx.to_bits() + 4)
+        });
+        Some(self.lower_bound - r0)
+    }
+
+    /// RADIUS-SCOPED certified bound: for any finite `radius > 0`,
+    /// `p(x) ≥ returned` for all |x| ≤ radius — true for EVERY
+    /// certificate by the triangle inequality
+    /// (p = lb + Σq² + r ≥ lb − Σⱼ|rⱼ|·Rʲ), with the envelope computed
+    /// through outward-rounded interval arithmetic. A lying certificate
+    /// does not break soundness here: its large residual simply degrades
+    /// the returned bound into uselessness (the lie becomes visible as
+    /// distance from `lower_bound`, never as a false claim).
+    #[must_use]
+    pub fn certified_bound_on(&self, p: &Poly, radius: f64) -> Option<f64> {
+        use fs_ivl::Interval;
+        use fs_ivl::expansion::estimate;
+        if !(radius.is_finite() && radius > 0.0) {
+            return None;
+        }
+        let res = self.residual_expansions(p);
+        let r_iv = Interval::new(radius, radius);
+        let mut envelope = Interval::new(0.0, 0.0);
+        let mut pow = Interval::new(1.0, 1.0);
+        for (j, e) in res.iter().enumerate() {
+            if j > 0 {
+                pow = pow * r_iv;
+            }
+            let mag = estimate(e).abs();
+            // One-ulp outward nudge on the exact-expansion magnitude.
+            let mag_up = f64::from_bits(mag.to_bits() + 4);
+            envelope = envelope + Interval::new(mag_up, mag_up) * pow;
+        }
+        Some(self.lower_bound - envelope.hi())
     }
 }
 

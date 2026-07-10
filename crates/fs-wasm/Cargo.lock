@@ -1037,6 +1037,10 @@ dependencies = [
 [[package]]
 name = "fs-sos"
 version = "0.0.1"
+dependencies = [
+ "fs-ivl",
+ "fs-math",
+]
 
 [[package]]
 name = "fs-sparse"
