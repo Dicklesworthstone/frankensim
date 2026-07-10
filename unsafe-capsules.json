@@ -1,13 +1,15 @@
 {
-  "schema": "frankensim-unsafe-capsules-v1",
-  "note": "Every module containing `unsafe` code MUST be registered here with a SAFETY.md next to it (docs/SAFETY_TEMPLATE.md). xtask check-unsafe enforces this. Capsules are <300 lines, behind safe facades (Decalogue P1). Mirrored to the ledger unsafe_capsules table once fs-ledger lands. FORMAT: one capsule per line ({\"crate\"... on a single line) \u2014 xtask's registry parser is line-based; multi-line objects deregister EVERYTHING (measured 2026-07-09: 7 violations from a pretty-print).",
-  "capsules": [
+"schema": "frankensim-unsafe-capsules-v1",
+"note": "Every module containing `unsafe` code MUST be registered here with a SAFETY.md next to it (docs/SAFETY_TEMPLATE.md). xtask check-unsafe enforces this. Capsules are <300 lines, behind safe facades (Decalogue P1). Mirrored to the ledger unsafe_capsules table once fs-ledger lands. FORMAT: one capsule per line ({\"crate\"... on a single line) \u2014 xtask's registry parser is line-based; multi-line objects deregister EVERYTHING (measured 2026-07-09: 7 violations from a pretty-print).",
+"capsules": [
 {"crate": "fs-alloc", "module": "crates/fs-alloc/src/raw/mod.rs", "safety_md": "crates/fs-alloc/src/raw/SAFETY.md"},
 {"crate": "fs-simd", "module": "crates/fs-simd/src/neon/mod.rs", "safety_md": "crates/fs-simd/src/neon/SAFETY.md"},
 {"crate": "fs-substrate", "module": "crates/fs-substrate/src/morton/bmi2/mod.rs", "safety_md": "crates/fs-substrate/src/morton/bmi2/SAFETY.md"},
 {"crate": "fs-simd", "module": "crates/fs-simd/src/x86/mod.rs", "safety_md": "crates/fs-simd/src/x86/SAFETY.md"},
 {"crate": "fs-simd", "module": "crates/fs-simd/src/sme2/mod.rs", "safety_md": "crates/fs-simd/src/sme2/SAFETY.md"},
 {"crate": "fs-roofline", "module": "crates/fs-roofline/src/axes.rs", "safety_md": "crates/fs-roofline/src/SAFETY.md"},
-{"crate": "fs-fft", "module": "crates/fs-fft/src/simd_view.rs", "safety_md": "crates/fs-fft/src/SAFETY.md"}
+{"crate": "fs-fft", "module": "crates/fs-fft/src/simd_view.rs", "safety_md": "crates/fs-fft/src/SAFETY.md"},
+{"crate": "fs-simd", "module": "crates/fs-simd/src/neon/gemm/mod.rs", "safety_md": "crates/fs-simd/src/neon/gemm/SAFETY.md"},
+{"crate": "fs-simd", "module": "crates/fs-simd/src/neon/fft/mod.rs", "safety_md": "crates/fs-simd/src/neon/fft/SAFETY.md"}
 ]
 }
