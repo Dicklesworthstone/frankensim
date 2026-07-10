@@ -50,7 +50,11 @@ const RATE: Dims = Dims([0, 0, -1, 0, 0]);
 // modes) is restored to the hashed stream. fs-lbm rheology powf paths
 // migrated to det::pow in the same change (latent, same hazard class).
 const GOLDEN_VESSEL_SMOKE: u64 = 0x4e42_4a53_6a63_ce8b;
-const GOLDEN_ORNITH_SMOKE: u64 = 0xd750_e1bb_a8d7_e76a;
+// 2026-07-10 again (6ure): roa proved cross-ISA bit-divergent (~1e-9,
+// macOS libm vs glibc) and moved to an envelope gate; this hash binds
+// the five ISA-invariant metrics. The 6-metric v2 hash was
+// 0xd750_e1bb_a8d7_e76a (aarch64 bits).
+const GOLDEN_ORNITH_SMOKE: u64 = 0x1b03_ae9f_66cd_b548;
 const GOLDEN_FRAME_SMOKE: u64 = 0x9c09_b06a_7883_57fc;
 const GOLDEN_LBM_CORE: u64 = 0x1539_430c_dae4_7762;
 
