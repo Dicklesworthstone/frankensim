@@ -220,12 +220,7 @@ fn rcs_003_skip_soundness() {
     let still_hits = matches!(store.can_skip(&retolerated, 1e-4), SkipDecision::Hit { .. });
     verdict(
         "rcs-003",
-        hit_ok
-            && boundary_ok
-            && tightened_ok
-            && invalid_tolerances
-            && miss_ok
-            && still_hits,
+        hit_ok && boundary_ok && tightened_ok && invalid_tolerances && miss_ok && still_hits,
         "skips carry slack certificates (9.9e-5 on the fixture), the exact boundary \
          is a zero-slack hit, tightened tolerances name their deficit (9e-7), \
          malformed tolerances fail closed, unknown identities miss, and the skip \
@@ -385,7 +380,8 @@ fn rcs_006_rows_and_fork() {
     let (s1, r1) = build();
     let (s2, r2) = build();
     let rows_deterministic = r1 == r2;
-    let fork_stable = s1.snapshot() == s2.snapshot();
+    let fork_stable =
+        s1.snapshot() == s2.snapshot() && s1.snapshot().starts_with("fsrecompute v2\n");
     let has_fields = r1[0].contains("\"op\":")
         && r1[0].contains("\"node\":")
         && r1[0].contains("\"artifact\":")

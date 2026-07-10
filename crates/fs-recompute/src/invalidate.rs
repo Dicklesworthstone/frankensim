@@ -92,15 +92,38 @@ pub enum Verdict {
 #[derive(Debug, Clone)]
 pub struct InvalidationPlan {
     /// Verdicts in store (topological) order, touched nodes only.
-    pub verdicts: Vec<(ContentHash, Verdict)>,
+    verdicts: Vec<(ContentHash, Verdict)>,
     /// Fraction of TOUCHED nodes certifiably skipped (the R4 health
     /// metric).
-    pub skip_yield: f64,
+    skip_yield: f64,
     /// Canonical JSON rows (verdicts with verified-color skip claims).
-    pub rows: Vec<String>,
+    rows: Vec<String>,
     /// Store mutation revision against which every skip certificate was
     /// computed. Private so callers cannot forge plan freshness.
     pub(crate) store_revision: u64,
+    /// Fingerprint of the certificate-relevant store state.
+    pub(crate) store_state: ContentHash,
+}
+
+impl InvalidationPlan {
+    /// Read-only semantic verdicts. Keeping the backing storage private
+    /// prevents a caller from rewriting recomputes into certified skips.
+    #[must_use]
+    pub fn verdicts(&self) -> &[(ContentHash, Verdict)] {
+        &self.verdicts
+    }
+
+    /// Fraction of touched nodes certifiably skipped.
+    #[must_use]
+    pub fn skip_yield(&self) -> f64 {
+        self.skip_yield
+    }
+
+    /// Read-only canonical evidence rows.
+    #[must_use]
+    pub fn rows(&self) -> &[String] {
+        &self.rows
+    }
 }
 
 /// Planning errors.
@@ -360,6 +383,7 @@ pub fn plan(
         verdicts,
         rows,
         store_revision: store.revision(),
+        store_state: store.state_fingerprint(),
     })
 }
 
@@ -380,5 +404,5 @@ pub fn apply_plan(store: &mut Store, plan: &InvalidationPlan) -> Result<(), Stor
             Verdict::Recompute { .. } => None,
         })
         .collect::<Vec<_>>();
-    store.commit_burns(plan.store_revision, &burns)
+    store.commit_burns(plan.store_revision, plan.store_state, &burns)
 }

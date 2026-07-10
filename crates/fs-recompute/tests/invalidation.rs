@@ -89,7 +89,7 @@ fn inv_001_absorption() {
     ];
     let p = plan(&store, &edges, &[(a, 0.02)]).expect("plan");
     let find = |h: ContentHash| {
-        p.verdicts
+        p.verdicts()
             .iter()
             .find(|(x, _)| *x == h)
             .map(|(_, v)| v.clone())
@@ -138,7 +138,7 @@ fn inv_001_absorption() {
     ];
     let p2 = plan(&store2, &edges2, &[(a2, 0.02)]).expect("plan 2");
     let find2 = |h: ContentHash| {
-        p2.verdicts
+        p2.verdicts()
             .iter()
             .find(|(x, _)| *x == h)
             .map(|(_, v)| v.clone())
@@ -158,7 +158,7 @@ fn inv_001_absorption() {
         })
     );
     let empty = plan(&store, &edges, &[(a, 0.0)]).expect("plan");
-    let empty_ok = empty.verdicts.is_empty() && (empty.skip_yield - 1.0).abs() < 1e-15;
+    let empty_ok = empty.verdicts().is_empty() && (empty.skip_yield() - 1.0).abs() < 1e-15;
     verdict(
         "inv-001",
         a_recomputes
@@ -221,7 +221,7 @@ fn inv_002_fail_closed() {
     ];
     let p = plan(&store, &edges, &[(a, 0.01)]).expect("plan");
     let find = |h: ContentHash| {
-        p.verdicts
+        p.verdicts()
             .iter()
             .find(|(x, _)| *x == h)
             .map(|(_, v)| v.clone())
@@ -255,7 +255,7 @@ fn inv_002_fail_closed() {
         })
     );
     let duplicate_plan = plan(&store, &edges, &[(a, 0.004), (a, 0.004)]).expect("duplicates");
-    let duplicates_sum = duplicate_plan.verdicts.iter().any(|(h, verdict)| {
+    let duplicates_sum = duplicate_plan.verdicts().iter().any(|(h, verdict)| {
         *h == f
             && matches!(
                 verdict,
@@ -403,7 +403,7 @@ fn inv_003_soundness_battery() {
         // Simulate: recomputed nodes take TRUTH values (the closure
         // guarantees their inputs are fresh); skipped keep cached.
         let mut final_vals = baseline;
-        for (h, v) in &p.verdicts {
+        for (h, v) in p.verdicts() {
             let idx = fx.hashes.iter().position(|x| x == h).expect("fixture node");
             if matches!(v, Verdict::Recompute { .. }) {
                 final_vals[idx] = truth[idx];
@@ -417,7 +417,7 @@ fn inv_003_soundness_battery() {
                 violations += 1;
             }
         }
-        for (h, v) in &p.verdicts {
+        for (h, v) in p.verdicts() {
             let idx = fx.hashes.iter().position(|x| x == h).expect("fixture node");
             if let Verdict::Skip { bound, .. } = v {
                 skipped_total += 1;
@@ -458,19 +458,19 @@ fn inv_004_graceful_degradation() {
     let mut loose_edges = fx.edges.clone();
     loose_edges[2].sensitivity = 1e6;
     let degraded = plan(&fx.store, &loose_edges, &[(fx.hashes[0], 1e-4)]).expect("plan");
-    let healthy_skips = healthy.skip_yield;
-    let degraded_skips = degraded.skip_yield;
+    let healthy_skips = healthy.skip_yield();
+    let degraded_skips = degraded.skip_yield();
     // Degraded: everything downstream of the loose edge recomputes,
     // and the closure pulls the stale m in too.
     let all_downstream_recompute = degraded
-        .verdicts
+        .verdicts()
         .iter()
         .filter(|(h, _)| {
             let idx = fx.hashes.iter().position(|x| x == h).expect("node");
             idx >= 3
         })
         .all(|(_, v)| matches!(v, Verdict::Recompute { .. }));
-    let m_pulled = degraded.verdicts.iter().any(|(h, v)| {
+    let m_pulled = degraded.verdicts().iter().any(|(h, v)| {
         *h == fx.hashes[2]
             && matches!(
                 v,
@@ -513,7 +513,7 @@ fn inv_005_claims_and_burning() {
     }];
     let p1 = plan(&store, &edges, &[(a, 0.01)]).expect("plan 1");
     let skip_row = p1
-        .rows
+        .rows()
         .iter()
         .find(|r| r.contains("\"verdict\":\"skip\""))
         .expect("skip row");
@@ -524,7 +524,7 @@ fn inv_005_claims_and_burning() {
     // Slack was 0.012, burned 0.01 → 0.002 left. The same perturbation
     // again cannot be absorbed.
     let p2 = plan(&store, &edges, &[(a, 0.01)]).expect("plan 2");
-    let now_recomputes = p2.verdicts.iter().any(|(h, v)| {
+    let now_recomputes = p2.verdicts().iter().any(|(h, v)| {
         *h == b
             && matches!(
                 v,
@@ -537,7 +537,7 @@ fn inv_005_claims_and_burning() {
     // A smaller perturbation still fits the remainder.
     let p3 = plan(&store, &edges, &[(a, 0.001)]).expect("plan 3");
     let small_still_skips = p3
-        .verdicts
+        .verdicts()
         .iter()
         .any(|(h, v)| *h == b && matches!(v, Verdict::Skip { .. }));
     verdict(

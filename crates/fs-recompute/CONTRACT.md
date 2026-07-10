@@ -117,10 +117,13 @@ order LRU would destroy, pins survive, saturation is structured
 dashboard live via fs-obs (api-004); the kill-criterion replay
 machinery measures certified-vs-memo cost on a 100-variant trace
 (fixture-scale; the production decision runs on recorded agent
-traces) (api-005). Every plan captures the store mutation revision it
-certified; committing another plan or otherwise changing the store makes
-the older plan a structured `StalePlan` refusal, validated before any
-burn or telemetry mutation (api-006).
+traces) (api-005). Every plan keeps its verdicts and evidence rows
+read-only and captures both the store mutation revision and a deterministic
+fingerprint of certificate-relevant state. Committing another plan,
+substituting a plan from different state, or otherwise changing the store
+makes the plan a structured `StalePlan` refusal, validated before any burn
+or telemetry mutation. Duplicate burns are aggregated before the atomic
+fit check (api-006).
 
 ## Error model
 
@@ -168,7 +171,7 @@ reimplementation must pass the suite unchanged.
   cache-policy surface are the recompute-invalidate / recompute-api
   beads; this store supplies their pinning hooks.
 - The SQLite-backed persistent form (fs-ledger schema v3 tables) is
-  deferred; `snapshot()` is the interim durable form.
+  deferred; `snapshot()` v2 is the interim durable form.
 - Slack SPENDING policies (which skips to take under a budget) are
   the recompute-api bead's.
 - Sensitivity bounds are SUPPLIED (interval-derived by callers);

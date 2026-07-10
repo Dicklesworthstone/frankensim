@@ -65,7 +65,7 @@ fn push_string(buf: &mut Vec<u8>, value: &str) {
     push_bytes(buf, value.as_bytes());
 }
 
-fn json_string(value: &str) -> String {
+pub(crate) fn json_string(value: &str) -> String {
     let mut out = String::with_capacity(value.len() + 2);
     out.push('"');
     for ch in value.chars() {
@@ -339,6 +339,10 @@ pub enum StoreError {
         planned_revision: u64,
         /// Store revision at commit time.
         current_revision: u64,
+        /// State fingerprint captured by the plan.
+        planned_state: ContentHash,
+        /// State fingerprint at commit time.
+        current_state: ContentHash,
     },
 }
 
@@ -388,9 +392,13 @@ impl core::fmt::Display for StoreError {
             StoreError::StalePlan {
                 planned_revision,
                 current_revision,
+                planned_state,
+                current_state,
             } => write!(
                 f,
-                "stale recompute plan: certified store revision {planned_revision}, current revision {current_revision}; re-plan before committing"
+                "stale recompute plan: certified store revision {planned_revision} state {}, current revision {current_revision} state {}; re-plan before committing",
+                planned_state.to_hex(),
+                current_state.to_hex()
             ),
         }
     }
@@ -444,7 +452,22 @@ impl Store {
     }
 
     fn bump_revision(&mut self) {
-        self.revision = self.revision.wrapping_add(1);
+        self.revision = self.revision.saturating_add(1);
+    }
+
+    /// Deterministic fingerprint of every field that can affect an
+    /// invalidation certificate. This catches cross-store plans and remains
+    /// authoritative if the diagnostic revision counter saturates.
+    pub(crate) fn state_fingerprint(&self) -> ContentHash {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"fs-recompute-store-state-v1\0");
+        push_u64(&mut buf, self.nodes.len() as u64);
+        for (node_key, node) in &self.nodes {
+            buf.extend_from_slice(node_key);
+            buf.extend_from_slice(node.artifact_hash.as_bytes());
+            push_u64(&mut buf, node.burned.to_bits());
+        }
+        hash_bytes(&buf)
     }
 
     /// Store a computed node. Re-putting the identical record with the
@@ -605,27 +628,51 @@ impl Store {
     /// # Errors
     /// [`StoreError::UnknownNode`].
     pub fn burn_slack(&mut self, node: &ContentHash, amount: f64) -> Result<(), StoreError> {
-        self.commit_burns(self.revision, &[(*node, amount)])
+        self.commit_burns(self.revision, self.state_fingerprint(), &[(*node, amount)])
     }
 
     pub(crate) fn commit_burns(
         &mut self,
         planned_revision: u64,
+        planned_state: ContentHash,
         burns: &[(ContentHash, f64)],
     ) -> Result<(), StoreError> {
-        if self.revision != planned_revision {
+        let current_state = self.state_fingerprint();
+        if self.revision != planned_revision || current_state != planned_state {
             return Err(StoreError::StalePlan {
                 planned_revision,
                 current_revision: self.revision,
+                planned_state,
+                current_state,
             });
         }
+        let mut aggregated = BTreeMap::<[u8; 32], (ContentHash, f64)>::new();
         for (node, amount) in burns {
             let entry = self
                 .nodes
                 .get(&key(node))
                 .ok_or(StoreError::UnknownNode { node: *node })?;
             let available = entry.effective_slack();
-            if !amount.is_finite() || *amount < 0.0 || *amount >= available {
+            if !amount.is_finite() || *amount < 0.0 {
+                return Err(StoreError::InvalidSlackBurn {
+                    node: *node,
+                    amount_bits: amount.to_bits(),
+                    available_bits: available.to_bits(),
+                });
+            }
+            let total = &mut aggregated.entry(key(node)).or_insert((*node, 0.0)).1;
+            *total += *amount;
+            if !total.is_finite() {
+                return Err(StoreError::InvalidSlackBurn {
+                    node: *node,
+                    amount_bits: total.to_bits(),
+                    available_bits: available.to_bits(),
+                });
+            }
+        }
+        for (node_key, (node, amount)) in &aggregated {
+            let available = self.nodes[node_key].effective_slack();
+            if *amount >= available {
                 return Err(StoreError::InvalidSlackBurn {
                     node: *node,
                     amount_bits: amount.to_bits(),
@@ -633,9 +680,11 @@ impl Store {
                 });
             }
         }
-        for (node, amount) in burns {
-            let entry = self.nodes.get_mut(&key(node)).expect("burns prevalidated");
-            entry.burned += amount;
+        for (node_key, (_, amount)) in aggregated {
+            self.nodes
+                .get_mut(&node_key)
+                .expect("burns prevalidated")
+                .burned += amount;
         }
         self.bump_revision();
         Ok(())
@@ -653,10 +702,48 @@ impl Store {
     /// "hash stability under fork").
     #[must_use]
     pub fn snapshot(&self) -> String {
-        let mut out = String::from("fsrecompute v1\n");
+        let mut out = String::from("fsrecompute v2\n");
         for node in self.nodes.values() {
             let _ = writeln!(out, "{}", node.record.to_row(&node.artifact_hash));
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record(required_tolerance: f64) -> NodeRecord {
+        NodeRecord {
+            op_id: "aggregate-burn".to_string(),
+            input_hashes: Vec::new(),
+            params: Vec::new(),
+            code_version_hash: hash_bytes(b"test-code"),
+            rng_seed: 1,
+            achieved_error: 0.0,
+            required_tolerance,
+        }
+    }
+
+    #[test]
+    fn duplicate_burns_are_aggregated_before_mutation() {
+        let mut store = Store::new();
+        let PutOutcome::Inserted(node) = store.put(record(1.0), b"artifact").expect("put") else {
+            unreachable!("fresh store");
+        };
+        let revision = store.revision();
+        let state = store.state_fingerprint();
+        let refused = store.commit_burns(revision, state, &[(node, 0.6), (node, 0.6)]);
+        assert!(matches!(refused, Err(StoreError::InvalidSlackBurn { .. })));
+        assert_eq!(
+            store.get(&node).expect("node").effective_slack().to_bits(),
+            1.0f64.to_bits(),
+            "aggregate overflow must refuse before any partial burn"
+        );
+
+        store.revision = u64::MAX;
+        store.bump_revision();
+        assert_eq!(store.revision(), u64::MAX, "revision must never wrap");
     }
 }

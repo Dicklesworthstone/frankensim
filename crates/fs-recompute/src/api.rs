@@ -18,7 +18,7 @@
 //!   goes.
 
 use crate::invalidate::{Edge, InvalidateError, InvalidationPlan, Verdict, apply_plan, plan};
-use crate::{Store, StoreError};
+use crate::{Store, StoreError, json_string};
 use fs_ledger::ContentHash;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -27,23 +27,47 @@ use std::fmt::Write as _;
 #[derive(Debug, Clone)]
 pub struct PerturbPlan {
     /// The underlying invalidation plan (frontier + verdicts + rows).
-    pub inner: InvalidationPlan,
+    inner: InvalidationPlan,
     /// Estimated cost of executing the recompute frontier (Σ measured
     /// per-node costs; unknown costs count as `default_cost`).
-    pub estimated_cost: f64,
+    estimated_cost: f64,
     /// The baseline a bit-level (hash) invalidator would pay: every
     /// touched node recomputes.
-    pub hash_memo_cost: f64,
+    hash_memo_cost: f64,
     /// The verified-color skip certificates (one row per absorption).
-    pub certificates: Vec<String>,
+    certificates: Vec<String>,
 }
 
 impl PerturbPlan {
+    /// Read-only invalidation plan carrying the certified verdicts.
+    #[must_use]
+    pub fn invalidation(&self) -> &InvalidationPlan {
+        &self.inner
+    }
+
+    /// Estimated recompute-frontier cost.
+    #[must_use]
+    pub fn estimated_cost(&self) -> f64 {
+        self.estimated_cost
+    }
+
+    /// Cost a bit-level hash invalidator would pay.
+    #[must_use]
+    pub fn hash_memo_cost(&self) -> f64 {
+        self.hash_memo_cost
+    }
+
+    /// Read-only verified skip-certificate rows.
+    #[must_use]
+    pub fn certificates(&self) -> &[String] {
+        &self.certificates
+    }
+
     /// Nodes the plan recomputes.
     #[must_use]
     pub fn recompute_count(&self) -> usize {
         self.inner
-            .verdicts
+            .verdicts()
             .iter()
             .filter(|(_, v)| matches!(v, Verdict::Recompute { .. }))
             .count()
@@ -52,7 +76,7 @@ impl PerturbPlan {
     /// Nodes the plan skips with certificates.
     #[must_use]
     pub fn skip_count(&self) -> usize {
-        self.inner.verdicts.len() - self.recompute_count()
+        self.inner.verdicts().len() - self.recompute_count()
     }
 }
 
@@ -82,8 +106,9 @@ impl SkipYield {
             }
             let _ = write!(
                 s,
-                "{{\"op\":\"{op}\",\"skips\":{sk},\"touches\":{t},\
+                "{{\"op\":{},\"skips\":{sk},\"touches\":{t},\
                  \"yield\":{:.4}}}",
+                json_string(op),
                 sk as f64 / t.max(1) as f64
             );
         }
@@ -169,14 +194,14 @@ impl RecomputeApi {
         let mut estimated_cost = 0.0;
         let mut hash_memo_cost = 0.0;
         let mut certificates = Vec::new();
-        for (h, v) in &inner.verdicts {
+        for (h, v) in inner.verdicts() {
             hash_memo_cost += self.cost_of(h);
             match v {
                 Verdict::Recompute { .. } => estimated_cost += self.cost_of(h),
                 Verdict::Skip { .. } => {}
             }
         }
-        for row in &inner.rows {
+        for row in inner.rows() {
             if row.contains("\"verdict\":\"skip\"") {
                 certificates.push(row.clone());
             }
@@ -197,7 +222,7 @@ impl RecomputeApi {
     pub fn commit(&mut self, p: &PerturbPlan) -> Result<(), StoreError> {
         apply_plan(&mut self.store, &p.inner)?;
         self.plans_seen += 1;
-        for (h, v) in &p.inner.verdicts {
+        for (h, v) in p.inner.verdicts() {
             let op = self
                 .store
                 .get(h)

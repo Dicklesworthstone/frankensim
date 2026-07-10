@@ -104,19 +104,19 @@ fn api_001_perturb_plan() {
     // < 1e-1).
     let p = api.perturb(&h[0], 1e-2).expect("plan");
     let frontier_right = p.recompute_count() == 2 && p.skip_count() == 2; // src + right
-    let certs = p.certificates.len() == 2
-        && p.certificates
+    let certs = p.certificates().len() == 2
+        && p.certificates()
             .iter()
             .all(|c| c.contains("perturbation absorbed"));
     // Cost: recompute src (1.0) + right (100.0); hash-memo pays all 4.
     let cost_ok =
-        (p.estimated_cost - 101.0).abs() < 1e-12 && (p.hash_memo_cost - 1111.0).abs() < 1e-12;
+        (p.estimated_cost() - 101.0).abs() < 1e-12 && (p.hash_memo_cost() - 1111.0).abs() < 1e-12;
     // Nothing burned before commit: replan gives identical verdicts.
     let p2 = api.perturb(&h[0], 1e-2).expect("replan");
     let pure = p2.recompute_count() == p.recompute_count();
     // Leaf: perturbing the isolated leaf touches only itself.
     let pl = api.perturb(&h[4], 1e-5).expect("leaf");
-    let leaf_ok = pl.inner.verdicts.len() == 1 && pl.recompute_count() == 1;
+    let leaf_ok = pl.invalidation().verdicts().len() == 1 && pl.recompute_count() == 1;
     // Root: a huge δ swamps every slack → full frontier recomputes.
     let pr = api.perturb(&h[0], 1e3).expect("root");
     let root_ok = pr.recompute_count() == 4 && pr.skip_count() == 0;
@@ -128,7 +128,8 @@ fn api_001_perturb_plan() {
              with absorbed-perturbation claims; costs read {:.0} vs hash-memo \
              {:.0}; plans are pure until commit; a leaf touches only itself; a \
              swamping root perturbation recomputes the full frontier",
-            p.estimated_cost, p.hash_memo_cost
+            p.estimated_cost(),
+            p.hash_memo_cost()
         ),
     );
 }
@@ -141,7 +142,7 @@ fn api_002_commit_burns() {
     let mut api = RecomputeApi::new(store, edges, 1.0);
     let p1 = api.perturb(&h[0], 8e-3).expect("plan 1");
     let left_skipped_first =
-        p1.inner.verdicts.iter().any(|(x, v)| {
+        p1.invalidation().verdicts().iter().any(|(x, v)| {
             *x == h[1] && matches!(v, fs_recompute::invalidate::Verdict::Skip { .. })
         });
     api.commit(&p1).expect("commit");
@@ -150,7 +151,7 @@ fn api_002_commit_burns() {
     let p2 = api.perturb(&h[0], 8e-3).expect("plan 2");
     api.commit(&p2).expect("commit 2");
     let p3 = api.perturb(&h[0], 8e-3).expect("plan 3");
-    let left_recomputes_third = p3.inner.verdicts.iter().any(|(x, v)| {
+    let left_recomputes_third = p3.invalidation().verdicts().iter().any(|(x, v)| {
         *x == h[1] && matches!(v, fs_recompute::invalidate::Verdict::Recompute { .. })
     });
     verdict(
@@ -315,8 +316,8 @@ fn api_005_kill_criterion_replay() {
     for _ in 0..100 {
         let delta = 1e-3 * rng.unit();
         let p = api.perturb(&src, delta).expect("plan");
-        certified_cost += p.estimated_cost;
-        memo_cost += p.hash_memo_cost;
+        certified_cost += p.estimated_cost();
+        memo_cost += p.hash_memo_cost();
         plans += 1;
         // Do NOT commit: model independent variant exploration from
         // the same base design (branch checkouts, Proposal 10).
@@ -358,13 +359,53 @@ fn api_006_stale_plan_refuses_atomically() {
     let sink_after = api.store.get(&h[3]).expect("sink").effective_slack();
     let telemetry_after = api.skip_yield().dashboard_json();
 
+    // A revision number alone is not a store identity. Construct two stores
+    // at the same revision but with different burned-slack state and prove a
+    // plan cannot cross between them.
+    let (store_a, edges_a, a) = diamond();
+    let mut api_a = RecomputeApi::new(store_a, edges_a, 1.0);
+    api_a
+        .store
+        .pin(&a[4], PinReason::Contract("same-revision".to_string()))
+        .expect("pin advances revision without changing slack");
+    let foreign = api_a.perturb(&a[0], 8e-3).expect("foreign plan");
+    let (store_b, edges_b, b) = diamond();
+    let mut api_b = RecomputeApi::new(store_b, edges_b, 1.0);
+    let own = api_b.perturb(&b[0], 8e-3).expect("own plan");
+    api_b.commit(&own).expect("burn advances matching revision");
+    let same_revision = api_a.store.revision() == api_b.store.revision();
+    let foreign_refused = matches!(api_b.commit(&foreign), Err(StoreError::StalePlan { .. }));
+
+    // Telemetry keys originate in caller-controlled operator ids and must be
+    // escaped just like node rows.
+    let mut escaped_store = Store::new();
+    let escaped_src = put(&mut escaped_store, "escaped-src", 0.0, 0.0);
+    let escaped_sink = put(&mut escaped_store, "quoted \"op\"\nnext", 0.0, 1.0);
+    let escaped_edges = vec![Edge {
+        from: escaped_src,
+        to: escaped_sink,
+        sensitivity: 0.5,
+    }];
+    let mut escaped_api = RecomputeApi::new(escaped_store, escaped_edges, 1.0);
+    let escaped_plan = escaped_api
+        .perturb(&escaped_src, 0.25)
+        .expect("escaped plan");
+    escaped_api.commit(&escaped_plan).expect("escaped commit");
+    let dashboard = escaped_api.skip_yield().dashboard_json();
+    let telemetry_escaped = dashboard.contains("quoted \\\"op\\\"\\nnext")
+        && !dashboard.contains("quoted \"op\"\nnext");
+
     verdict(
         "api-006",
         matches!(refused, Err(StoreError::StalePlan { .. }))
             && left_before.to_bits() == left_after.to_bits()
             && sink_before.to_bits() == sink_after.to_bits()
-            && telemetry_before == telemetry_after,
+            && telemetry_before == telemetry_after
+            && same_revision
+            && foreign_refused
+            && telemetry_escaped,
         "a plan certified against pre-burn slack refuses after a sibling plan commits; \
-         the stale commit performs no partial burns and records no false telemetry",
+         a same-revision plan from different state also refuses; failures perform no \
+         partial burns or false telemetry, and dashboard operator ids are JSON-escaped",
     );
 }
