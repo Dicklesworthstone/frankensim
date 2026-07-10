@@ -17,7 +17,7 @@ pub mod token;
 
 pub use estimate::{CalibrationReport, Estimate, estimate};
 pub use governor::{
-    Charge, DegradationEvent, DegradationStep, Enforcement, Governor, SubmitOutcome,
+    Charge, DegradationEvent, DegradationStep, Enforcement, Governor, StepPhase, SubmitOutcome,
 };
 pub use guidance::Guidance;
 pub use token::{CapabilityToken, SessionId};
@@ -55,6 +55,25 @@ pub enum SessionError {
         /// Diagnosis.
         what: String,
     },
+    /// A memory-pressure level outside the declared ladder 1..=3
+    /// (bead gp3.13: out-of-ladder levels are refused, never clamped).
+    InvalidPressureLevel {
+        /// The rejected level.
+        level: u8,
+    },
+    /// Level-3 pressure targeted a session opened without a bound
+    /// cancellation gate — a pause that cannot reach the computation
+    /// is refused, not ledgered (bead gp3.13).
+    UngatedSession {
+        /// The id.
+        id: u64,
+    },
+    /// A pause acknowledgement arrived with no outstanding pause
+    /// request for the session (bead gp3.13).
+    NoPendingPause {
+        /// The id.
+        id: u64,
+    },
 }
 
 impl fmt::Display for SessionError {
@@ -72,6 +91,21 @@ impl fmt::Display for SessionError {
             ),
             SessionError::Submission { what } => write!(f, "submission failed: {what}"),
             SessionError::Persistence { what } => write!(f, "persistence failed: {what}"),
+            SessionError::InvalidPressureLevel { level } => write!(
+                f,
+                "memory-pressure level {level} is outside the declared ladder 1..=3; \
+                 out-of-ladder levels are refused, never clamped"
+            ),
+            SessionError::UngatedSession { id } => write!(
+                f,
+                "session {id} was opened without a cancellation gate; level-3 pressure \
+                 (pause-serialize-resume) is refused — open with open_session_gated to \
+                 bind the session's own gate"
+            ),
+            SessionError::NoPendingPause { id } => write!(
+                f,
+                "session {id} has no outstanding pause request to acknowledge"
+            ),
         }
     }
 }

@@ -11,7 +11,7 @@ use fs_exec::solver::{SolverState, codec};
 use fs_plan::{CostModel, CostObservation};
 use fs_session::{
     CalibrationReport, CapabilityToken, Charge, DegradationStep, Enforcement, Governor, Guidance,
-    SessionError, SessionId, SubmitOutcome, estimate,
+    SessionError, SessionId, StepPhase, SubmitOutcome, estimate,
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -295,19 +295,17 @@ fn ss_005_degradation_ladder_declared_order_and_pause_resume() {
         }
     }
     let gov = Governor::new();
-    gov.open_session(token(5, 1e9, 1e9)).expect("valid token");
-    let gate = CancelGate::new();
+    let gate = Arc::new(CancelGate::new());
+    gov.open_session_gated(token(5, 1e9, 1e9), Arc::clone(&gate))
+        .expect("valid token");
     // Level 1: only the spill step fires.
-    let l1 = gov
-        .apply_memory_pressure(SessionId(5), 1, Some(&gate))
-        .expect("session");
+    let l1 = gov.apply_memory_pressure(SessionId(5), 1).expect("session");
     assert_eq!(l1.len(), 1);
     assert_eq!(l1[0].step, DegradationStep::SpillColdArenas);
     assert!(!gate.is_requested(), "level 1 must not pause");
-    // Level 3: all three fire IN THE DECLARED ORDER; pause requests the gate.
-    let l3 = gov
-        .apply_memory_pressure(SessionId(5), 3, Some(&gate))
-        .expect("session");
+    // Level 3: all three fire IN THE DECLARED ORDER; pause requests the
+    // session's OWN gate (bound at open — no gate crosses the API).
+    let l3 = gov.apply_memory_pressure(SessionId(5), 3).expect("session");
     let steps: Vec<DegradationStep> = l3.iter().map(|e| e.step).collect();
     assert_eq!(
         steps,
@@ -335,6 +333,112 @@ fn ss_005_degradation_ladder_declared_order_and_pause_resume() {
     verdict(
         "ss-005",
         "ladder fires spill->coarsen->pause in declared order; snapshot round-trip exact",
+    );
+}
+
+#[test]
+fn ss_011_pressure_actions_bind_to_owned_session_gates() {
+    // Bead gp3.13 acceptance battery: gates are OWNED (bound at open),
+    // wrong-session pauses unrepresentable, out-of-ladder levels fail,
+    // and a pause is never complete without a checkpoint receipt.
+    let gov = Governor::new();
+    let gate_a = Arc::new(CancelGate::new());
+    let gate_b = Arc::new(CancelGate::new());
+    gov.open_session_gated(token(41, 1e9, 1e9), Arc::clone(&gate_a))
+        .expect("valid token");
+    gov.open_session_gated(token(42, 1e9, 1e9), Arc::clone(&gate_b))
+        .expect("valid token");
+    gov.open_session(token(43, 1e9, 1e9)).expect("valid token"); // ungated
+
+    // (a) Levels 0 and > 3 are REFUSED, never clamped, nothing ledgered.
+    for bad in [0u8, 4, 200] {
+        assert_eq!(
+            gov.apply_memory_pressure(SessionId(41), bad),
+            Err(SessionError::InvalidPressureLevel { level: bad }),
+            "level {bad} must be refused"
+        );
+    }
+    assert!(
+        gov.events().is_empty(),
+        "refused levels must not ledger events"
+    );
+
+    // (b) Level 3 on an UNGATED session is refused ATOMICALLY: no gate
+    // to reach the computation means no pause claim and no partial
+    // ladder application.
+    assert_eq!(
+        gov.apply_memory_pressure(SessionId(43), 3),
+        Err(SessionError::UngatedSession { id: 43 }),
+        "ungated session must refuse level 3"
+    );
+    assert!(
+        gov.events().is_empty(),
+        "a refused pause must not half-apply the ladder"
+    );
+    // Levels 1-2 need no gate: spill/coarsen are synchronous.
+    let l2 = gov
+        .apply_memory_pressure(SessionId(43), 2)
+        .expect("levels 1-2 need no gate");
+    assert_eq!(l2.len(), 2);
+    assert!(l2.iter().all(|e| e.phase == StepPhase::Applied));
+
+    // (c) Level 3 on session A requests ONLY A's gate; B is untouched.
+    let l3 = gov.apply_memory_pressure(SessionId(41), 3).expect("gated");
+    assert!(gate_a.is_requested(), "the target session's gate fires");
+    assert!(
+        !gate_b.is_requested(),
+        "level 3 must request only the target session"
+    );
+    // (d) The request event is phase Requested — NOT complete.
+    let pause = l3.last().expect("three steps fired");
+    assert_eq!(pause.step, DegradationStep::PauseSerializeResume);
+    assert_eq!(pause.phase, StepPhase::Requested);
+    assert!(gov.pause_pending(SessionId(41)).expect("known session"));
+
+    // (e) A blank receipt cannot complete the pause (and the pending
+    // request survives the refusal).
+    assert!(matches!(
+        gov.acknowledge_pause(SessionId(41), "  "),
+        Err(SessionError::Submission { .. })
+    ));
+    assert!(gov.pause_pending(SessionId(41)).expect("known session"));
+    // (f) Acknowledging a session with NO outstanding request is refused.
+    assert_eq!(
+        gov.acknowledge_pause(SessionId(42), "ckpt-b-1"),
+        Err(SessionError::NoPendingPause { id: 42 })
+    );
+    // (g) The checkpoint receipt is the ONLY route to Complete; the
+    // completion event cites the request it acknowledges.
+    let done = gov
+        .acknowledge_pause(SessionId(41), "solver-state-0xf00d")
+        .expect("pending pause");
+    assert_eq!(done.phase, StepPhase::Complete);
+    assert!(done.attribution.contains("solver-state-0xf00d"));
+    assert!(
+        done.attribution
+            .contains(&format!("ordinal {}", pause.ordinal)),
+        "completion must cite the request it acknowledges"
+    );
+    assert!(!gov.pause_pending(SessionId(41)).expect("known session"));
+    // Double-acknowledgement is refused (the claim is consumed).
+    assert_eq!(
+        gov.acknowledge_pause(SessionId(41), "solver-state-0xf00d"),
+        Err(SessionError::NoPendingPause { id: 41 })
+    );
+    // (h) The ledgered stream never contains an unacknowledged Complete:
+    // exactly one Complete, and it follows its Requested ordinal.
+    let events = gov.events();
+    let completes: Vec<_> = events
+        .iter()
+        .filter(|e| e.phase == StepPhase::Complete)
+        .collect();
+    assert_eq!(completes.len(), 1);
+    assert!(completes[0].ordinal > pause.ordinal);
+    assert!(events.windows(2).all(|w| w[0].ordinal < w[1].ordinal));
+    verdict(
+        "ss-011",
+        "pressure binds to owned gates: bad levels refused, ungated level-3 atomic refusal, \
+         target-only request, complete only via checkpoint receipt",
     );
 }
 

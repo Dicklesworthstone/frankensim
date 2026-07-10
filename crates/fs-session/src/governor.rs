@@ -9,7 +9,7 @@ use crate::token::{CapabilityToken, SessionId};
 use crate::{Guidance, SessionError};
 use fs_exec::CancelGate;
 use std::collections::BTreeMap;
-use std::sync::{Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 /// Hard-bound multiplier: past `HARD_FACTOR × grant` the session pauses.
 const HARD_FACTOR: f64 = 1.2;
@@ -70,6 +70,21 @@ pub const LADDER: [DegradationStep; 3] = [
     DegradationStep::PauseSerializeResume,
 ];
 
+/// How far a ladder step has actually gotten (bead gp3.13): the ledger
+/// distinguishes a synchronous action, a REQUEST awaiting the solver's
+/// checkpoint, and the acknowledged completion — a pause that was never
+/// acknowledged can never read as complete.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepPhase {
+    /// The step's action was applied synchronously (spill/coarsen).
+    Applied,
+    /// Cancellation was requested on the session's OWN gate; the solver
+    /// has not yet acknowledged with a checkpoint receipt.
+    Requested,
+    /// The solver acknowledged: checkpoint receipt recorded.
+    Complete,
+}
+
 /// A ledgered degradation event.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DegradationEvent {
@@ -79,6 +94,8 @@ pub struct DegradationEvent {
     pub step: DegradationStep,
     /// Pressure level (1..=3) that triggered it.
     pub pressure_level: u8,
+    /// How far the step actually got (request vs acknowledged completion).
+    pub phase: StepPhase,
     /// Attribution text (what was spilled/coarsened/paused).
     pub attribution: String,
     /// Logical event ordinal (deterministic; ledger `t`).
@@ -158,6 +175,13 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 #[derive(Default)]
 struct Inner {
     tokens: BTreeMap<u64, CapabilityToken>,
+    /// Session-OWNED cancellation gates, bound at open (gp3.13): the
+    /// only route to a pause request, so a foreign gate is
+    /// unrepresentable at the pressure API.
+    gates: BTreeMap<u64, Arc<CancelGate>>,
+    /// Pause requests awaiting a checkpoint acknowledgement, keyed by
+    /// session → ordinal of the Requested event.
+    pending_pause: BTreeMap<u64, i64>,
     meters: BTreeMap<u64, SessionMeters>,
     idempotency: BTreeMap<String, IdemState>,
     events: Vec<DegradationEvent>,
@@ -201,6 +225,26 @@ impl Governor {
         let mut g = self.inner.lock().expect("governor lock");
         g.meters.entry(token.session.0).or_default();
         g.tokens.insert(token.session.0, token);
+        Ok(())
+    }
+
+    /// Register a session's token WITH its cancellation capability
+    /// (bead gp3.13): the gate is owned by the governor from open, and
+    /// level-3 memory pressure resolves it by `SessionId` — passing
+    /// someone else's gate to a pressure action is unrepresentable.
+    /// Sessions opened without a gate refuse level-3 pressure.
+    ///
+    /// # Errors
+    /// [`SessionError::InvalidResource`] as [`Governor::open_session`].
+    pub fn open_session_gated(
+        &self,
+        token: CapabilityToken,
+        gate: Arc<CancelGate>,
+    ) -> Result<(), SessionError> {
+        let session = token.session.0;
+        self.open_session(token)?;
+        let mut g = self.inner.lock().expect("governor lock");
+        g.gates.insert(session, gate);
         Ok(())
     }
 
@@ -370,42 +414,71 @@ impl Governor {
         )
     }
 
-    /// Apply memory pressure at `level` (1..=3): ladder steps `1..=level`
-    /// fire IN THE DECLARED ORDER, each recorded with attribution. The
-    /// `PauseSerializeResume` step requests cancellation on the session's
-    /// gate — the solver checkpoints at its next tile boundary (P7).
+    /// Apply memory pressure at `level` (1..=3 ONLY): ladder steps
+    /// `1..=level` fire IN THE DECLARED ORDER, each recorded with
+    /// attribution. The `PauseSerializeResume` step requests
+    /// cancellation on the session's OWN gate, resolved by `SessionId`
+    /// from the binding made at [`Governor::open_session_gated`] — no
+    /// gate crosses this API, so pausing a different session's work is
+    /// unrepresentable (bead gp3.13). The request event is phase
+    /// `Requested`; it becomes `Complete` only through
+    /// [`Governor::acknowledge_pause`] with a checkpoint receipt.
     ///
     /// # Errors
-    /// [`SessionError::UnknownSession`].
+    /// - [`SessionError::InvalidPressureLevel`] for levels 0 and > 3.
+    /// - [`SessionError::UnknownSession`].
+    /// - [`SessionError::UngatedSession`] when level 3 targets a
+    ///   session opened without a cancellation gate. Validation is
+    ///   ATOMIC: no step fires and nothing is ledgered.
     pub fn apply_memory_pressure(
         &self,
         session: SessionId,
         level: u8,
-        gate: Option<&CancelGate>,
     ) -> Result<Vec<DegradationEvent>, SessionError> {
+        if !(1..=3).contains(&level) {
+            return Err(SessionError::InvalidPressureLevel { level });
+        }
         let mut g = self.inner.lock().expect("governor lock");
         if !g.tokens.contains_key(&session.0) {
             return Err(SessionError::UnknownSession { id: session.0 });
         }
+        // Resolve the session's own gate BEFORE any step fires: a
+        // refused level-3 request must not half-apply the ladder.
+        let gate = if usize::from(level) >= LADDER.len() {
+            Some(
+                g.gates
+                    .get(&session.0)
+                    .cloned()
+                    .ok_or(SessionError::UngatedSession { id: session.0 })?,
+            )
+        } else {
+            None
+        };
         let mut fired = Vec::new();
         for (i, step) in LADDER.iter().enumerate() {
             if i as u8 >= level {
                 break;
             }
-            let attribution = match step {
-                DegradationStep::SpillColdArenas => {
-                    "spilled coldest arenas (least-recently-touched first)".to_string()
-                }
-                DegradationStep::CoarsenAdaptively => {
-                    "coarsened adaptive resolutions outside protected bands".to_string()
-                }
+            let (phase, attribution) = match step {
+                DegradationStep::SpillColdArenas => (
+                    StepPhase::Applied,
+                    "spilled coldest arenas (least-recently-touched first)".to_string(),
+                ),
+                DegradationStep::CoarsenAdaptively => (
+                    StepPhase::Applied,
+                    "coarsened adaptive resolutions outside protected bands".to_string(),
+                ),
                 DegradationStep::PauseSerializeResume => {
-                    if let Some(gate) = gate {
-                        gate.request();
-                    }
-                    "requested pause: solver checkpoints at the next tile boundary \
-                     (SolverState snapshot to the ledger)"
-                        .to_string()
+                    gate.as_ref()
+                        .expect("level-3 gate resolved above")
+                        .request();
+                    (
+                        StepPhase::Requested,
+                        "requested pause on the session-owned gate: solver checkpoints \
+                         at the next tile boundary (SolverState snapshot to the ledger); \
+                         complete only on acknowledge_pause with a checkpoint receipt"
+                            .to_string(),
+                    )
                 }
             };
             g.next_ordinal += 1;
@@ -413,13 +486,75 @@ impl Governor {
                 session,
                 step: *step,
                 pressure_level: level,
+                phase,
                 attribution,
                 ordinal: g.next_ordinal,
             };
+            if event.phase == StepPhase::Requested {
+                g.pending_pause.insert(session.0, event.ordinal);
+            }
             fired.push(event.clone());
             g.events.push(event);
         }
         Ok(fired)
+    }
+
+    /// Acknowledge a pending pause with the solver's checkpoint receipt
+    /// (bead gp3.13): the ONLY route to a `Complete` pause event. A
+    /// pause that was never requested, or a blank receipt, is refused —
+    /// a missing acknowledgement can never be ledgered as complete.
+    ///
+    /// # Errors
+    /// - [`SessionError::UnknownSession`].
+    /// - [`SessionError::Submission`] for a blank checkpoint receipt
+    ///   (refused BEFORE the pending request is consumed).
+    /// - [`SessionError::NoPendingPause`] when no pause request is
+    ///   outstanding for the session.
+    pub fn acknowledge_pause(
+        &self,
+        session: SessionId,
+        checkpoint_receipt: &str,
+    ) -> Result<DegradationEvent, SessionError> {
+        let mut g = self.inner.lock().expect("governor lock");
+        if !g.tokens.contains_key(&session.0) {
+            return Err(SessionError::UnknownSession { id: session.0 });
+        }
+        if checkpoint_receipt.trim().is_empty() {
+            return Err(SessionError::Submission {
+                what: "pause acknowledgement requires a non-empty checkpoint receipt".to_string(),
+            });
+        }
+        let requested_ordinal = g
+            .pending_pause
+            .remove(&session.0)
+            .ok_or(SessionError::NoPendingPause { id: session.0 })?;
+        g.next_ordinal += 1;
+        let event = DegradationEvent {
+            session,
+            step: DegradationStep::PauseSerializeResume,
+            pressure_level: 3,
+            phase: StepPhase::Complete,
+            attribution: format!(
+                "pause complete: checkpoint receipt {checkpoint_receipt:?} acknowledges \
+                 the request at ordinal {requested_ordinal}"
+            ),
+            ordinal: g.next_ordinal,
+        };
+        g.events.push(event.clone());
+        Ok(event)
+    }
+
+    /// Whether a pause request is outstanding (requested, not yet
+    /// acknowledged) for the session.
+    ///
+    /// # Errors
+    /// [`SessionError::UnknownSession`].
+    pub fn pause_pending(&self, session: SessionId) -> Result<bool, SessionError> {
+        let g = self.inner.lock().expect("governor lock");
+        if !g.tokens.contains_key(&session.0) {
+            return Err(SessionError::UnknownSession { id: session.0 });
+        }
+        Ok(g.pending_pause.contains_key(&session.0))
     }
 
     /// Session consumption snapshot `(core_s, mem_peak, wall_s, throttled,
@@ -500,8 +635,8 @@ impl Governor {
         }
         for ev in &g.events {
             let payload = format!(
-                "{{\"step\":\"{:?}\",\"level\":{},\"attribution\":{:?}}}",
-                ev.step, ev.pressure_level, ev.attribution
+                "{{\"step\":\"{:?}\",\"level\":{},\"phase\":\"{:?}\",\"attribution\":{:?}}}",
+                ev.step, ev.pressure_level, ev.phase, ev.attribution
             );
             let session_bytes = ev.session.0.to_be_bytes();
             ledger
