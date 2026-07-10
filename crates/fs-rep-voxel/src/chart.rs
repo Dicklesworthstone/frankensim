@@ -126,9 +126,10 @@ impl Chart for OccupancyChart {
         let mut max = [f64::NEG_INFINITY; 3];
         for (c, _) in self.field.grid.iter_active() {
             let center = self.field.center(c);
+            let half_voxel = 0.5 * self.field.voxel_size();
             for k in 0..3 {
-                min[k] = min[k].min(center[k] - self.field.voxel_size());
-                max[k] = max[k].max(center[k] + self.field.voxel_size());
+                min[k] = min[k].min(center[k] - half_voxel);
+                max[k] = max[k].max(center[k] + half_voxel);
             }
         }
         if min[0] > max[0] {

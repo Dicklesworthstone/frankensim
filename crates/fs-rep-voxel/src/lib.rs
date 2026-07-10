@@ -75,6 +75,15 @@ pub enum VoxelError {
         /// Checked per-axis dimensions before target-size conversion.
         dims: [u64; 3],
     },
+    /// A dense box exceeds the proved exact-integer range of the DT.
+    ExactnessRangeExceeded {
+        /// Operation that requested the distance box.
+        operation: &'static str,
+        /// Maximum squared corner-to-corner distance in voxel units.
+        max_squared_distance: u128,
+        /// Largest squared distance admitted by the exact f64 path.
+        maximum: u128,
+    },
     /// An operation requires at least one active occupancy voxel.
     EmptyOccupancy {
         /// Operation that refused the empty field.
@@ -134,6 +143,15 @@ impl fmt::Display for VoxelError {
             VoxelError::DenseVolumeOverflow { operation, dims } => write!(
                 f,
                 "{operation} dense dimensions {dims:?} cannot be represented on this target"
+            ),
+            VoxelError::ExactnessRangeExceeded {
+                operation,
+                max_squared_distance,
+                maximum,
+            } => write!(
+                f,
+                "{operation} squared coordinate diameter {max_squared_distance} exceeds exact \
+                 f64 limit {maximum}"
             ),
             VoxelError::EmptyOccupancy { operation } => {
                 write!(f, "{operation} requires at least one active voxel")

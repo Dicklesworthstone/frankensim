@@ -6,6 +6,12 @@
 
 use crate::{VoxelError, field::OccupancyField};
 
+// All integer intermediate costs then remain below 2^53. The guard bit
+// also keeps a rounded non-integer envelope intersection from crossing an
+// integer query location: for separation D, the rounding scale is below
+// D/2^53 while the nearest rational breakpoint gap is at least 1/(2D).
+const MAX_EXACT_SQUARED_DISTANCE: u128 = 1 << 52;
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct CheckedBox {
     pub(crate) min: [i32; 3],
@@ -78,6 +84,23 @@ pub(crate) fn checked_dense_box(
             operation,
             required,
             maximum: max_voxels,
+        });
+    }
+    let max_squared_distance = dims_u64.iter().try_fold(0u128, |sum, &dim| {
+        let span = u128::from(dim.saturating_sub(1));
+        sum.checked_add(span.checked_mul(span)?)
+    });
+    let Some(max_squared_distance) = max_squared_distance else {
+        return Err(VoxelError::DenseVolumeOverflow {
+            operation,
+            dims: dims_u64,
+        });
+    };
+    if max_squared_distance > MAX_EXACT_SQUARED_DISTANCE {
+        return Err(VoxelError::ExactnessRangeExceeded {
+            operation,
+            max_squared_distance,
+            maximum: MAX_EXACT_SQUARED_DISTANCE,
         });
     }
     let to_usize = |dim| {

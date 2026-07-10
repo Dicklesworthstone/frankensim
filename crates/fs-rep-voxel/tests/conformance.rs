@@ -580,6 +580,16 @@ fn rv_006_frames_and_dense_work_fail_closed() {
         })
     ));
 
+    // The explicit allocation budget is not permission to leave the
+    // numerical range where integer squared distances are exact in f64.
+    let mut too_wide = OccupancyField::new(1.0, [0.0; 3]).expect("wide frame");
+    too_wide.set([0, 0, 0]);
+    too_wide.set([100_000_000, 0, 0]);
+    assert!(matches!(
+        fs_rep_voxel::euclidean_dt(&too_wide, 100_000_001),
+        Err(VoxelError::ExactnessRangeExceeded { .. })
+    ));
+
     // A single active cell needs a 3^3 complement scan. The constructor
     // must enforce that budget before populating the complement field.
     let mut one = OccupancyField::new(1.0, [0.0; 3]).expect("one-cell frame");
@@ -606,6 +616,24 @@ fn rv_006_frames_and_dense_work_fail_closed() {
             })
         ));
     }
+
+    // Chart support is the union of voxel cubes, not centers padded by a
+    // full edge length. This fixture has exactly representable bounds.
+    use fs_geom::Chart;
+    let mut support_field = OccupancyField::new(2.0, [10.0, 20.0, 30.0]).expect("support frame");
+    support_field.set([-1, 2, 0]);
+    support_field.set([1, -2, 3]);
+    let support = OccupancyChart::try_new(support_field, TEST_DT_BUDGET)
+        .expect("support chart")
+        .support();
+    assert_eq!(
+        [support.min.x, support.min.y, support.min.z],
+        [8.0, 16.0, 30.0]
+    );
+    assert_eq!(
+        [support.max.x, support.max.y, support.max.z],
+        [14.0, 26.0, 38.0]
+    );
 
     verdict(
         "rv-006",
