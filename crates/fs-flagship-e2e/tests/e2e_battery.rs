@@ -50,11 +50,17 @@ const RATE: Dims = Dims([0, 0, -1, 0, 0]);
 // modes) is restored to the hashed stream. fs-lbm rheology powf paths
 // migrated to det::pow in the same change (latent, same hazard class).
 const GOLDEN_VESSEL_SMOKE: u64 = 0x4e42_4a53_6a63_ce8b;
-// 2026-07-10 again (6ure): roa proved cross-ISA bit-divergent (~1e-9,
-// macOS libm vs glibc) and moved to an envelope gate; this hash binds
-// the five ISA-invariant metrics. The 6-metric v2 hash was
-// 0xd750_e1bb_a8d7_e76a (aarch64 bits).
-const GOLDEN_ORNITH_SMOKE: u64 = 0x1b03_ae9f_66cd_b548;
+// JUSTIFIED BUMP (2026-07-10, 6ure CLOSED): the ROA chain's libm
+// divergence (macOS vs glibc in fs-bem panel2d: sin/cos/atan2/ln/
+// sqrt/hypot) is fixed by routing the WHOLE panel kernel through
+// fs_math::det:: — bits legitimately moved on every platform, and roa
+// is RESTORED to the hashed stream (6 metrics again). Reproduced in
+// BOTH debug and release on aarch64 (hash and roa bits
+// 0x3fe4c1ee0bb8f1e8 identical across modes); cross-ISA identity now
+// follows from det::'s own cross-ISA golden gate — ts2 (x86-64)
+// confirmation row noted in bead 6ure. Prior hashes: 5-metric interim
+// 0x1b03_ae9f_66cd_b548; divergent 6-metric v2 0xd750_e1bb_a8d7_e76a.
+const GOLDEN_ORNITH_SMOKE: u64 = 0xae56_945a_312e_0378;
 const GOLDEN_FRAME_SMOKE: u64 = 0x9c09_b06a_7883_57fc;
 const GOLDEN_LBM_CORE: u64 = 0x1539_430c_dae4_7762;
 
@@ -107,17 +113,18 @@ fn ornith_smoke() -> (StageArtifact, f64) {
     let rep = screen_generation(&generation, 0xE2E).expect("normalized screen losses");
     let winner = generation[rep.winner];
     let cert = fs_ornith::certify(&winner);
-    // roa is OUT of the hashed stream: cross-ISA bit-divergent (~1e-9,
-    // macOS libm vs glibc in the ROA proxy chain — bead 6ure) while the
-    // other five metrics are bit-identical across ISAs and build modes.
-    // Envelope-gated in fe2e-002. Restore + re-freeze when 6ure routes
-    // the chain through fs-math det::.
+    // roa is BACK in the hashed stream (6ure closed): the divergence was
+    // platform libm (macOS vs glibc sin/cos/atan2/ln/sqrt/hypot) in the
+    // fs-bem panel kernel feeding the ROA proxy's adjoint lift slope;
+    // the whole panel2d kernel now routes through fs_math::det::, so the
+    // metric is ISA- and mode-invariant by the det:: contract.
     let metrics = vec![
         ("winner", rep.winner as f64),
         ("eliminated", rep.eliminated as f64),
         ("evals", rep.evaluations_used as f64),
         ("winner_ld", lift_to_drag(&winner)),
         ("certified", f64::from(u8::from(cert.certified))),
+        ("roa", cert.roa_volume),
     ];
     (
         artifact("ornith", Tier::Smoke, metrics, t0.elapsed().as_secs_f64()),
@@ -209,8 +216,10 @@ fn fe2e_002_ornith_smoke_golden() {
         "fe2e-002-ornith-smoke",
         a.hash == b.hash && a.hash == GOLDEN_ORNITH_SMOKE && roa_ok,
         &format!(
-            "ornith smoke: hash 0x{:016x} (golden 0x{GOLDEN_ORNITH_SMOKE:016x}), replay equal, roa {roa_a:.4} (envelope 0.1..2.0, bead 6ure), wall {:.1}s; evidence {evidence}",
-            a.hash, a.wall_s,
+            "ornith smoke: hash 0x{:016x} (golden 0x{GOLDEN_ORNITH_SMOKE:016x}), replay equal, roa {roa_a:.4} bits 0x{:016x} (envelope 0.1..2.0, bead 6ure), wall {:.1}s; evidence {evidence}",
+            a.hash,
+            roa_a.to_bits(),
+            a.wall_s,
         ),
     );
 }

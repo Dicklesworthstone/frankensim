@@ -8,6 +8,23 @@
 //! battery. Inviscid screening honesty label applies.
 
 use fs_la::factor::lu;
+use fs_math::det;
+
+/// Cross-ISA determinism (bead 6ure): every transcendental in this
+/// kernel routes through fs-math's strict `det::` implementations —
+/// platform libm (macOS vs glibc) differs by ulps on sin/cos/atan2/ln/
+/// sqrt, which surfaced as a bit-divergent ornith ROA between the M4
+/// Pro and the 5995WX. `hypot` is composed as `det::sqrt(x·x + y·y)`
+/// (panel coordinates are O(1); no overflow regime).
+/// PANEL-KERNEL BIT-SEMANTICS VERSION (bead 6ure, per the y4pt golden
+/// discipline): bump on ANY change that can move this kernel's output
+/// bits — transcendental routing, quadrature, assembly order.
+/// Downstream goldens pin this in golden-couplings.json.
+pub const PANEL_BIT_SEMANTICS_VERSION: u32 = 1;
+
+fn det_hypot(x: f64, y: f64) -> f64 {
+    det::sqrt(x.mul_add(x, y * y))
+}
 
 /// A closed airfoil section: nodes ordered clockwise from the trailing
 /// edge along the lower surface and back over the upper surface.
@@ -37,18 +54,18 @@ pub fn naca4_symmetric(t: f64, n: usize) -> Airfoil2d {
     let half = n / 2;
     let thick = |x: f64| {
         5.0 * t
-            * (0.2969 * x.sqrt() - 0.1260 * x - 0.3516 * x * x + 0.2843 * x * x * x
+            * (0.2969 * det::sqrt(x) - 0.1260 * x - 0.3516 * x * x + 0.2843 * x * x * x
                 - 0.1036 * x * x * x * x)
     };
     let mut nodes = Vec::with_capacity(n);
     // Cosine-clustered x from TE (1) along the LOWER surface to LE (0).
     for k in 0..half {
-        let x = f64::midpoint(1.0, (std::f64::consts::PI * k as f64 / half as f64).cos());
+        let x = f64::midpoint(1.0, det::cos(std::f64::consts::PI * k as f64 / half as f64));
         nodes.push([x, -thick(x)]);
     }
     // LE to TE along the UPPER surface.
     for k in 0..half {
-        let x = 0.5 * (1.0 - (std::f64::consts::PI * k as f64 / half as f64).cos());
+        let x = 0.5 * (1.0 - det::cos(std::f64::consts::PI * k as f64 / half as f64));
         nodes.push([x, thick(x)]);
     }
     Airfoil2d { nodes }
@@ -74,7 +91,7 @@ fn geometry(foil: &Airfoil2d) -> Geometry {
         let b = foil.nodes[(i + 1) % n];
         let dx = b[0] - a[0];
         let dy = b[1] - a[1];
-        let l = dx.hypot(dy);
+        let l = det_hypot(dx, dy);
         g.mid
             .push([f64::midpoint(a[0], b[0]), f64::midpoint(a[1], b[1])]);
         g.tangent.push([dx / l, dy / l]);
@@ -96,14 +113,14 @@ fn source_velocity(foil: &Airfoil2d, g: &Geometry, j: usize, p: [f64; 2]) -> [f6
     let xl = dx * t[0] + dy * t[1];
     let yl = dx * nrm[0] + dy * nrm[1];
     let l = g.len[j];
-    let r1 = xl.hypot(yl).max(1e-12);
-    let r2 = (xl - l).hypot(yl).max(1e-12);
-    let theta1 = yl.atan2(xl);
-    let theta2 = yl.atan2(xl - l);
+    let r1 = det_hypot(xl, yl).max(1e-12);
+    let r2 = det_hypot(xl - l, yl).max(1e-12);
+    let theta1 = det::atan2(yl, xl);
+    let theta2 = det::atan2(yl, xl - l);
     let two_pi = std::f64::consts::TAU;
     // v_n = (θ₂ − θ₁)/2π — the panel-probe battery pinned the
     // reversed order (a source panel must push AWAY on both sides).
-    let ul = (r1 / r2).ln() / two_pi;
+    let ul = det::ln(r1 / r2) / two_pi;
     let vl = (theta2 - theta1) / two_pi;
     [ul * t[0] + vl * nrm[0], ul * t[1] + vl * nrm[1]]
 }
@@ -125,7 +142,7 @@ fn vortex_velocity(foil: &Airfoil2d, g: &Geometry, j: usize, p: [f64; 2]) -> [f6
 pub fn solve(foil: &Airfoil2d, alpha: f64) -> PanelSolution2d {
     let g = geometry(foil);
     let n = foil.nodes.len();
-    let u_inf = [alpha.cos(), alpha.sin()];
+    let u_inf = [det::cos(alpha), det::sin(alpha)];
     // Unknowns: n sources + 1 vortex density. Equations: n
     // no-penetration + 1 Kutta.
     let dim = n + 1;
@@ -209,7 +226,7 @@ pub fn solve(foil: &Airfoil2d, alpha: f64) -> PanelSolution2d {
         fx += -cp * g.normal[i][0] * g.len[i];
         fy += -cp * g.normal[i][1] * g.len[i];
     }
-    let cl = fy * alpha.cos() - fx * alpha.sin();
+    let cl = fy * det::cos(alpha) - fx * det::sin(alpha);
     PanelSolution2d {
         sources: x[..n].to_vec(),
         gamma,
@@ -254,7 +271,7 @@ pub fn dcl_dalpha_adjoint(foil: &Airfoil2d, alpha: f64) -> f64 {
     let mut lambda = gvec;
     ft.solve(&mut lambda);
     // dB/dα.
-    let u_inf_d = [-alpha.sin(), alpha.cos()];
+    let u_inf_d = [-det::sin(alpha), det::cos(alpha)];
     let mut db = vec![0.0f64; dim];
     for (i, slot) in db.iter_mut().take(n).enumerate() {
         let nrm = g.normal[i];
@@ -271,7 +288,7 @@ pub fn dcl_dalpha_adjoint(foil: &Airfoil2d, alpha: f64) -> f64 {
 #[allow(clippy::too_many_lines)]
 fn assemble(foil: &Airfoil2d, g: &Geometry, alpha: f64) -> (Vec<f64>, Vec<f64>) {
     let n = foil.nodes.len();
-    let u_inf = [alpha.cos(), alpha.sin()];
+    let u_inf = [det::cos(alpha), det::sin(alpha)];
     let dim = n + 1;
     let mut a = vec![0.0f64; dim * dim];
     let mut rhs = vec![0.0f64; dim];
@@ -318,7 +335,7 @@ fn assemble(foil: &Airfoil2d, g: &Geometry, alpha: f64) -> (Vec<f64>, Vec<f64>) 
 /// Pressure-integrated Cl as a pure function of (solution, α).
 fn output_cl(foil: &Airfoil2d, g: &Geometry, x: &[f64], alpha: f64) -> f64 {
     let n = foil.nodes.len();
-    let u_inf = [alpha.cos(), alpha.sin()];
+    let u_inf = [det::cos(alpha), det::sin(alpha)];
     let gamma = x[n];
     let mut fx = 0.0;
     let mut fy = 0.0;
@@ -341,5 +358,5 @@ fn output_cl(foil: &Airfoil2d, g: &Geometry, x: &[f64], alpha: f64) -> f64 {
         fx += -cp * g.normal[i][0] * g.len[i];
         fy += -cp * g.normal[i][1] * g.len[i];
     }
-    fy * alpha.cos() - fx * alpha.sin()
+    fy * det::cos(alpha) - fx * det::sin(alpha)
 }

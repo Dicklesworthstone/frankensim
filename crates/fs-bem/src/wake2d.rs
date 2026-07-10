@@ -75,7 +75,8 @@ impl WakeSim {
     }
 
     fn induced(&self, p: [f64; 2], bound: f64, quarter: [f64; 2]) -> [f64; 2] {
-        let mut v = [self.alpha.cos(), self.alpha.sin()];
+        // det::: platform trig is a cross-ISA hazard in solver paths (6ure).
+        let mut v = [fs_math::det::cos(self.alpha), fs_math::det::sin(self.alpha)];
         let two_pi = std::f64::consts::TAU;
         // Bound vortex lumped at the quarter chord (screening model).
         let dx = p[0] - quarter[0];
@@ -117,11 +118,11 @@ impl WakeSim {
         // Guard the degenerate zero-incidence case: sin α = 0 makes the ratio
         // 0/0 = NaN, which would poison the whole screening simulation. At zero
         // incidence this model carries no bound circulation to scale.
-        let sin_alpha = self.alpha.sin();
+        let sin_alpha = fs_math::det::sin(self.alpha);
         let bound_target = if sin_alpha.abs() < 1e-12 {
             0.0
         } else {
-            self.steady_gamma * (self.alpha + wake_wash).sin() / sin_alpha
+            self.steady_gamma * fs_math::det::sin(self.alpha + wake_wash) / sin_alpha
         };
         // First-order relaxation with the shed vortex carrying the
         // difference (Kelvin: dΓ_bound = −Γ_shed).

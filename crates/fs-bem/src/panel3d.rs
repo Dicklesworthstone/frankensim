@@ -313,7 +313,9 @@ mod tests {
             order: 6,
         };
         #[allow(clippy::cast_precision_loss)]
-        let x: Vec<f64> = (0..n).map(|i| ((i as f64) * 0.19).cos()).collect();
+        let x: Vec<f64> = (0..n)
+            .map(|i| fs_math::det::cos((i as f64) * 0.19))
+            .collect();
         let mut got = vec![0.0; n];
         op.apply_transpose(&x, &mut got);
 
