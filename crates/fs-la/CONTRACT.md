@@ -15,6 +15,14 @@ Dense linear algebra: GEMM, batched small dense, factorizations, eigensolvers. L
 - f64 path: BLIS-style NC→KC→MC blocking with A/B panel packing and an
   MR×NR register-tiled microkernel (safe Rust, fused mul_add). f32/mixed
   paths share the loop order and KC chunking, unpacked in v1.
+- `gemm_f64_parallel_with_cancel(..., gate)` is the production
+  cancellation-aware MC/NC engine. It returns `GemmRunReport` on a full
+  transactional commit or `GemmCancelled { report }` after draining all
+  scoped workers; an error leaves caller-visible C bitwise unchanged.
+  `gemm_tuning_is_effective` is the producer-owned routing query used to
+  avoid publishing tune evidence for single-thread, small-M, and no-op
+  calls. `gemm_execution_tier`, `GEMM_IMPLEMENTATION_VERSION`, and
+  `GEMM_PARALLEL_IMPLEMENTATION` are tune/replay identity material.
 - `factor::{cholesky, lu, qr, tsqr_r, svd_jacobi}` + `FactorError` —
   dense factorizations. Failure is DATA: `NotSpd{index}` /
   `Singular{index}` typed diagnostics, never panics for data conditions.
@@ -123,22 +131,26 @@ Dense linear algebra: GEMM, batched small dense, factorizations, eigensolvers. L
    bump with justification). Submatrix consistency tested.
 3. `gemm_mixed` output is bitwise equal to the f64 computation on
    exactly-widened inputs (tested).
-4. (A·B)ᵀ = Bᵀ·Aᵀ within 1e-13 relative (order differs; not bitwise).
-5. Factorization residuals (tested): ‖A−LLᵀ‖/‖A‖ ≤ n·1e-14 on SPD;
+4. Cancellation is transactional: a cancelled parallel GEMM may have
+   completed private microtiles, but C remains bitwise unchanged after the
+   request is observed and every scoped worker drains. A successful call
+   crosses one documented non-cancellable final commit boundary.
+5. (A·B)ᵀ = Bᵀ·Aᵀ within 1e-13 relative (order differs; not bitwise).
+6. Factorization residuals (tested): ‖A−LLᵀ‖/‖A‖ ≤ n·1e-14 on SPD;
    LU solve round-trips at 1e-9 on random; A = QR reconstruction at
    1e-12 with Q orthogonal to 1e-13; TSQR R equals direct QR's
    canonicalized R (1e-10) for ANY tree shape and satisfies the Gram
    identity; SVD reconstructs to 1e-13 with U, V orthogonal to 1e-13
    (Hilbert-8 spectral condition lands in the known ~1.5e10 band).
-6. Factorizations are bit-deterministic given the blocking constants
+7. Factorizations are bit-deterministic given the blocking constants
    (fixed loop orders; GEMM's KC contract inherited; TSQR tree fixed).
-7. The mixed-precision LADDER DECISION is deterministic: fixed thresholds
+8. The mixed-precision LADDER DECISION is deterministic: fixed thresholds
    (κ·eps32·16 < 1 admits the f32 rung; κ·eps64·16 < forward-target
    admits working-precision rungs), fixed stall rule (two consecutive
    steps without halving), deterministic condition estimator — same
    input, same ladder, same trajectory bits (tested). f32 singularity
    escalates automatically (tested with an f32-collapsing matrix).
-8. dd-refinement demonstrably converges to the exact solution of the
+9. dd-refinement demonstrably converges to the exact solution of the
    STORED problem: at κ = 1e10 it beats the direct solve's forward error
    by ≥100× against a past-convergence reference (tested). Note the
    no-claim: it cannot recover accuracy already lost when b was rounded
@@ -152,8 +164,9 @@ offending index: non-SPD pivots, exactly-singular columns. LU `growth`
 exposes the pivot-growth statistic for ledgering.
 
 ## Determinism class
-GEMM: bit-deterministic CROSS-ISA by construction (fixed loop order,
-fused mul_add, no threading in v1). Evidence: FNV-64 golden hash over a
+GEMM: bit-deterministic CROSS-ISA by construction (fixed per-element loop
+order and fused mul_add; MC/NC work assignment is disjoint and bit-neutral
+across thread counts). Evidence: FNV-64 golden hash over a
 48×36×300 α-scaled product = `0x1d7a_a3c6_b631_7ef0`, recorded on
 aarch64-apple, required to match on x86-64 in the test suite.
 Factorizations: same class; golden hash over Cholesky L + LU solve +
@@ -189,11 +202,21 @@ that feeds golden bits (tracked workspace-wide in bead
 frankensim-powi-build-mode-determinism-4xnt).
 
 ## Cancellation behavior
-All future hot paths poll cancellation at tile boundaries (Decalogue P7).
-Batched kernels are bounded synchronous loops; chunking a large batch to
-tile quanta (and Cx poll points between chunks) is the fs-exec driver's
-job — no cancellation hooks inside the kernels, matching the fs-simd
-discipline.
+`gemm_f64_parallel_with_cancel` implements request → drain → finalize under
+an `fs_exec::CancelGate`. It polls while initializing/staging output and
+pack storage (every 4096 elements), before each packed A/B micro-panel (at
+most MR×KC / NR×KC copies), and before every MR×NR×KC compute tile (at most
+8224 fused multiply-adds including alpha/write-back). A request stops tile
+acquisition; the scoped join (or inline single-worker return) is the drain
+barrier. All writes before that barrier target private staging, so
+`GemmCancelled` leaves C unchanged.
+After the final poll, copying the
+complete staged result into exclusively borrowed C is the non-cancellable
+finalize step; a later request applies to the next operation.
+
+Batched kernels remain bounded synchronous loops; chunking a large batch
+to tile quanta (and Cx poll points between chunks) is the fs-exec driver's
+job.
 
 ## Unsafe boundary
 None. `unsafe_code` is denied workspace-wide; any future capsule must be
@@ -206,8 +229,10 @@ None. Frontier features use `frontier-*`, moonshots `moonshot-*`, default off.
 In-crate GEMM suite: bitwise same-order oracle across shape sweep, β/α
 edge semantics (β=0 NaN overwrite, α=0, k=0, empty m/n), transpose
 identity, submatrix consistency, mixed == widened-f64 bitwise, f32
-tolerance battery, determinism + golden hash. tests/conformance.rs
-placeholder remains for the shared-harness migration.
+tolerance battery, determinism + golden hash; G4 deterministic
+mid-dispatch cancellation injection proves bounded polling, worker drain,
+and unchanged C; the success path is bitwise the serial contract.
+tests/conformance.rs placeholder remains for the shared-harness migration.
 Batched battery (tests/batched_battery.rs): GEMM vs scalar oracle
 across size classes + β-accumulate path; batch-membership bitwise
 invariance for Cholesky and pivoted LU; L·Lᵀ reconstruction and solve

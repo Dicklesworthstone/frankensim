@@ -15,7 +15,10 @@ pub mod mixed;
 pub mod rand_nla;
 
 pub use gemm::{
-    Trans, gemm_f32, gemm_f64, gemm_f64_op, gemm_f64_parallel, gemm_f64_parallel_with, gemm_mixed,
+    GEMM_IMPLEMENTATION_VERSION, GEMM_MAX_FMAS_BETWEEN_POLLS, GEMM_PARALLEL_IMPLEMENTATION,
+    GemmCancelled, GemmRunReport, Trans, gemm_execution_tier, gemm_f32, gemm_f64, gemm_f64_op,
+    gemm_f64_parallel, gemm_f64_parallel_with, gemm_f64_parallel_with_cancel, gemm_mixed,
+    gemm_tuning_is_effective,
 };
 
 /// Crate version, re-exported for provenance stamping (the Five Explicits'

@@ -32,6 +32,74 @@ const MC: usize = 128;
 /// N blocking (bit-neutral).
 const NC: usize = 512;
 
+/// Version of the production f64 GEMM implementation and scheduling
+/// surface. This is separate from [`GEMM_BIT_SEMANTICS_VERSION`]: a
+/// bit-neutral scheduling or cancellation change bumps this identity while
+/// leaving the numerical contract alone.
+pub const GEMM_IMPLEMENTATION_VERSION: u32 = 1;
+
+/// Producer-owned identity for the current parallel placement policy. Tune
+/// rows include this string so a later fs-exec pool, pinning policy, or NUMA
+/// placement cannot silently reuse evidence from this std-thread engine.
+pub const GEMM_PARALLEL_IMPLEMENTATION: &str = "std-thread-scope-work-stealing-unpinned-v1";
+
+/// Maximum arithmetic work in one cancellable GEMM compute quantum. Packing
+/// and beta staging use smaller fixed quanta; the largest poll interval is one
+/// `MR x NR x KC` microtile plus its alpha/write-back FMA per output.
+pub const GEMM_MAX_FMAS_BETWEEN_POLLS: usize = MR * NR * (KC + 1);
+
+/// Number of output elements staged between cancellation polls.
+const C_STAGE_TILE_ELEMENTS: usize = 4096;
+
+/// Structured progress for a cancellation-aware GEMM dispatch. A successful
+/// return always has `completed_tiles == total_tiles`; a cancelled return may
+/// contain completed work, but that work exists only in private staging.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GemmRunReport {
+    /// Fully written `MR x NR x KC` compute tiles.
+    pub completed_tiles: usize,
+    /// Total compute tiles required by this dispatch (zero for beta-only work).
+    pub total_tiles: usize,
+}
+
+/// Cancellation observed at a bounded GEMM poll point after all scoped
+/// workers drained. The caller's output remains bitwise unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GemmCancelled {
+    /// Work completed in private staging before the request was observed.
+    pub report: GemmRunReport,
+}
+
+impl core::fmt::Display for GemmCancelled {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "gemm cancelled after {}/{} compute tiles; output not committed",
+            self.report.completed_tiles, self.report.total_tiles
+        )
+    }
+}
+
+impl core::error::Error for GemmCancelled {}
+
+/// The SIMD tier ACTUALLY selected by fs-simd's resolved function table.
+/// This remains truthful under Miri, where the table deliberately routes to
+/// the scalar implementation even when the host advertises SIMD.
+#[must_use]
+pub fn gemm_execution_tier() -> &'static str {
+    fs_simd::ops().tier.name()
+}
+
+/// Whether MC/NC tuning can affect the legacy production parallel route.
+/// Small and single-thread calls deliberately bypass tuning because thread
+/// dispatch overhead dominates and [`gemm_f64_parallel`] routes them through
+/// the serial kernel. No-op products likewise have no blocking decision to
+/// measure.
+#[must_use]
+pub fn gemm_tuning_is_effective(m: usize, n: usize, k: usize, alpha: f64, threads: usize) -> bool {
+    threads > 1 && m >= 2 * MC && n != 0 && k != 0 && alpha != 0.0
+}
+
 #[track_caller]
 fn checked_product(label: &str, lhs: usize, rhs: usize) -> usize {
     lhs.checked_mul(rhs)
@@ -264,6 +332,391 @@ pub fn gemm_f64_parallel_with(
         }
         jc += nc_q;
     }
+}
+
+/// Cancellation-aware tunable parallel GEMM.
+///
+/// This is the request -> drain -> finalize path for session/solver
+/// orchestration. Computation happens in private staging. A cancellation
+/// request stops new work, every scoped worker finishes at most its current
+/// bounded packing panel or `MR x NR x KC` microtile, and the scope is joined
+/// before [`GemmCancelled`] is returned. Therefore `Err` leaves `c` bitwise
+/// unchanged. On success, the final gate poll is the FINALIZATION CUTOFF;
+/// committing the completed staging buffer is non-cancellable and a request
+/// arriving during that copy belongs to the caller's next operation.
+///
+/// Unlike [`gemm_f64_parallel_with`], this entry point does not route small or
+/// single-thread problems through the non-cancellable serial facade. The
+/// supplied MC/NC quanta remain effective so sweep and dispatch execute the
+/// same kernel. Orchestrators should use [`gemm_tuning_is_effective`] to skip
+/// meaningless wall-time sweeps while still dispatching here with the cold
+/// plan.
+///
+/// # Errors
+/// [`GemmCancelled`] after observing `gate` and draining every worker. The
+/// error reports completed private compute tiles; `c` is unchanged.
+///
+/// # Panics
+/// Structured panics on slice-length or extent mismatches, before `c` can be
+/// mutated.
+#[allow(clippy::too_many_arguments)]
+pub fn gemm_f64_parallel_with_cancel(
+    m: usize,
+    n: usize,
+    k: usize,
+    alpha: f64,
+    a: &[f64],
+    b: &[f64],
+    beta: f64,
+    c: &mut [f64],
+    threads: usize,
+    mc_q: usize,
+    nc_q: usize,
+    gate: &fs_exec::CancelGate,
+) -> Result<GemmRunReport, GemmCancelled> {
+    gemm_f64_parallel_with_poll(m, n, k, alpha, a, b, beta, c, threads, mc_q, nc_q, &|| {
+        gate.is_requested()
+    })
+}
+
+#[track_caller]
+fn segmented_micro_tiles(extent: usize, block: usize, micro: usize, label: &str) -> usize {
+    debug_assert!(block > 0 && micro > 0);
+    let full_blocks = extent / block;
+    let tail = extent % block;
+    let per_full = block.div_ceil(micro);
+    full_blocks
+        .checked_mul(per_full)
+        .and_then(|count| count.checked_add(tail.div_ceil(micro)))
+        .unwrap_or_else(|| panic!("{label} tile-count overflow"))
+}
+
+#[track_caller]
+fn cancellable_tile_count(m: usize, n: usize, k: usize, mc_q: usize, nc_q: usize) -> usize {
+    let mt = segmented_micro_tiles(m, mc_q, MR, "parallel M");
+    let nt = segmented_micro_tiles(n, nc_q, NR, "parallel N");
+    let kt = k.div_ceil(KC);
+    checked_product("parallel MN tile count", mt, nt)
+        .checked_mul(kt)
+        .unwrap_or_else(|| panic!("parallel MNK tile-count overflow"))
+}
+
+fn report(completed: &std::sync::atomic::AtomicUsize, total_tiles: usize) -> GemmRunReport {
+    GemmRunReport {
+        completed_tiles: completed.load(std::sync::atomic::Ordering::Acquire),
+        total_tiles,
+    }
+}
+
+fn cancelled(completed: &std::sync::atomic::AtomicUsize, total_tiles: usize) -> GemmCancelled {
+    GemmCancelled {
+        report: report(completed, total_tiles),
+    }
+}
+
+/// Internal generic poll seam. Production passes a monotonic CancelGate poll;
+/// the generic form lets G4 deterministically inject a request after a known
+/// number of boundaries without timing sleeps.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn gemm_f64_parallel_with_poll<P>(
+    m: usize,
+    n: usize,
+    k: usize,
+    alpha: f64,
+    a: &[f64],
+    b: &[f64],
+    beta: f64,
+    c: &mut [f64],
+    threads: usize,
+    mc_q: usize,
+    nc_q: usize,
+    poll: &P,
+) -> Result<GemmRunReport, GemmCancelled>
+where
+    P: Fn() -> bool + Sync,
+{
+    // Shape rejection precedes every allocation and every possible mutation.
+    assert_contiguous_shapes(m, n, k, a, b, c);
+    let t = threads.max(1);
+    let mc_q = mc_q.max(MR).min(m.max(MR));
+    let nc_q = nc_q.max(NR).min(n.max(NR));
+    let has_product = m != 0 && n != 0 && k != 0 && alpha != 0.0;
+    let total_tiles = if has_product {
+        cancellable_tile_count(m, n, k, mc_q, nc_q)
+    } else {
+        0
+    };
+    let completed = std::sync::atomic::AtomicUsize::new(0);
+    if poll() {
+        return Err(cancelled(&completed, total_tiles));
+    }
+
+    // Transactional staging is the no-torn-C boundary. Capacity reservation
+    // itself is not a poll point, but initialization/copying is chunked under
+    // the gate so beta=0 cannot hide an unbounded zero-fill.
+    let Some(mut staged) = stage_beta(c, beta, poll) else {
+        return Err(cancelled(&completed, total_tiles));
+    };
+    if !has_product {
+        if poll() {
+            return Err(cancelled(&completed, total_tiles));
+        }
+        c.copy_from_slice(&staged);
+        return Ok(report(&completed, total_tiles));
+    }
+
+    let a_pack_rows = checked_round_up("parallel A pack rows", mc_q, MR);
+    let b_pack_cols = checked_round_up("parallel B pack columns", nc_q, NR);
+    let a_pack_len = checked_product("parallel A pack", a_pack_rows, KC);
+    let b_pack_len = checked_product("parallel B pack", KC, b_pack_cols);
+    let band_len = checked_product("parallel C band", mc_q, n);
+    let Some(mut b_pack) = zeroed_with_poll(b_pack_len, poll) else {
+        return Err(cancelled(&completed, total_tiles));
+    };
+    let observed_cancel = std::sync::atomic::AtomicBool::new(false);
+    let mut jc = 0;
+    while jc < n {
+        let nc = nc_q.min(n - jc);
+        let mut pc = 0;
+        while pc < k {
+            let kc = KC.min(k - pc);
+            if !pack_b_with_poll(&mut b_pack, b, n, pc, jc, kc, nc, poll) {
+                return Err(cancelled(&completed, total_tiles));
+            }
+            let bp: &[f64] = &b_pack;
+            let dispenser = std::sync::Mutex::new(staged.chunks_mut(band_len).enumerate());
+            let workers = t.min(m.div_ceil(mc_q));
+            if workers == 1 {
+                let Some(mut a_pack) = zeroed_with_poll(a_pack_len, poll) else {
+                    return Err(cancelled(&completed, total_tiles));
+                };
+                loop {
+                    if poll() {
+                        observed_cancel.store(true, std::sync::atomic::Ordering::Release);
+                        break;
+                    }
+                    let next = dispenser.lock().expect("dispenser lock").next();
+                    let Some((bi, band)) = next else { break };
+                    let ic = bi * mc_q;
+                    let mc = mc_q.min(m - ic);
+                    if !pack_a_with_poll(&mut a_pack, a, k, ic, pc, mc, kc, poll)
+                        || !macro_kernel_with_poll(
+                            &a_pack, bp, band, n, jc, mc, nc, kc, alpha, &completed, poll,
+                        )
+                    {
+                        observed_cancel.store(true, std::sync::atomic::Ordering::Release);
+                        break;
+                    }
+                }
+            } else {
+                std::thread::scope(|scope| {
+                    for _ in 0..workers {
+                        let disp = &dispenser;
+                        let observed_cancel = &observed_cancel;
+                        let completed = &completed;
+                        scope.spawn(move || {
+                            let Some(mut a_pack) = zeroed_with_poll(a_pack_len, poll) else {
+                                observed_cancel.store(true, std::sync::atomic::Ordering::Release);
+                                return;
+                            };
+                            loop {
+                                if poll() {
+                                    observed_cancel
+                                        .store(true, std::sync::atomic::Ordering::Release);
+                                    break;
+                                }
+                                let next = disp.lock().expect("dispenser lock").next();
+                                let Some((bi, band)) = next else { break };
+                                let ic = bi * mc_q;
+                                let mc = mc_q.min(m - ic);
+                                if !pack_a_with_poll(&mut a_pack, a, k, ic, pc, mc, kc, poll)
+                                    || !macro_kernel_with_poll(
+                                        &a_pack, bp, band, n, jc, mc, nc, kc, alpha, completed,
+                                        poll,
+                                    )
+                                {
+                                    observed_cancel
+                                        .store(true, std::sync::atomic::Ordering::Release);
+                                    break;
+                                }
+                            }
+                        });
+                    }
+                });
+            }
+            // This join/inline boundary is the DRAIN barrier. No worker or
+            // borrow of private staging survives this point.
+            if observed_cancel.load(std::sync::atomic::Ordering::Acquire) || poll() {
+                return Err(cancelled(&completed, total_tiles));
+            }
+            pc += KC;
+        }
+        jc += nc_q;
+    }
+
+    let final_report = report(&completed, total_tiles);
+    debug_assert_eq!(final_report.completed_tiles, final_report.total_tiles);
+    if poll() {
+        return Err(GemmCancelled {
+            report: final_report,
+        });
+    }
+    // FINALIZE: &mut C excludes safe concurrent observers. Once the final poll
+    // passes, copy is deliberately non-cancellable and the call returns a
+    // complete result even if a later request races this commit.
+    c.copy_from_slice(&staged);
+    Ok(final_report)
+}
+
+fn zeroed_with_poll<P>(len: usize, poll: &P) -> Option<Vec<f64>>
+where
+    P: Fn() -> bool,
+{
+    let mut values = Vec::with_capacity(len);
+    while values.len() < len {
+        if poll() {
+            return None;
+        }
+        let next = (len - values.len()).min(C_STAGE_TILE_ELEMENTS);
+        values.resize(values.len() + next, 0.0);
+    }
+    (!poll()).then_some(values)
+}
+
+fn stage_beta<P>(source: &[f64], beta: f64, poll: &P) -> Option<Vec<f64>>
+where
+    P: Fn() -> bool,
+{
+    let mut staged = Vec::with_capacity(source.len());
+    for src in source.chunks(C_STAGE_TILE_ELEMENTS) {
+        if poll() {
+            return None;
+        }
+        if beta == 0.0 {
+            staged.resize(staged.len() + src.len(), 0.0);
+        } else if beta.to_bits() == 1.0f64.to_bits() {
+            staged.extend_from_slice(src);
+        } else {
+            staged.extend(src.iter().map(|&value| value * beta));
+        }
+    }
+    (!poll()).then_some(staged)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn pack_a_with_poll<P>(
+    dst: &mut [f64],
+    a: &[f64],
+    lda: usize,
+    ic: usize,
+    pc: usize,
+    mc: usize,
+    kc: usize,
+    poll: &P,
+) -> bool
+where
+    P: Fn() -> bool,
+{
+    let mut w = 0;
+    let mut p = 0;
+    while p < mc {
+        if poll() {
+            return false;
+        }
+        let rows = MR.min(mc - p);
+        for kk in 0..kc {
+            for r in 0..MR {
+                dst[w] = if r < rows {
+                    a[(ic + p + r) * lda + pc + kk]
+                } else {
+                    0.0
+                };
+                w += 1;
+            }
+        }
+        p += MR;
+    }
+    !poll()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn pack_b_with_poll<P>(
+    dst: &mut [f64],
+    b: &[f64],
+    ldb: usize,
+    pc: usize,
+    jc: usize,
+    kc: usize,
+    nc: usize,
+    poll: &P,
+) -> bool
+where
+    P: Fn() -> bool,
+{
+    let mut w = 0;
+    let mut q = 0;
+    while q < nc {
+        if poll() {
+            return false;
+        }
+        let cols = NR.min(nc - q);
+        for kk in 0..kc {
+            for s in 0..NR {
+                dst[w] = if s < cols {
+                    b[(pc + kk) * ldb + jc + q + s]
+                } else {
+                    0.0
+                };
+                w += 1;
+            }
+        }
+        q += NR;
+    }
+    !poll()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn macro_kernel_with_poll<P>(
+    a_pack: &[f64],
+    b_pack: &[f64],
+    c: &mut [f64],
+    n: usize,
+    jc: usize,
+    mc: usize,
+    nc: usize,
+    kc: usize,
+    alpha: f64,
+    completed: &std::sync::atomic::AtomicUsize,
+    poll: &P,
+) -> bool
+where
+    P: Fn() -> bool,
+{
+    let mut p = 0;
+    while p < mc {
+        let rows = MR.min(mc - p);
+        let a_panel = &a_pack[(p / MR) * MR * kc..][..MR * kc];
+        let mut q = 0;
+        while q < nc {
+            if poll() {
+                return false;
+            }
+            let cols = NR.min(nc - q);
+            let b_panel = &b_pack[(q / NR) * NR * kc..][..NR * kc];
+            let mut acc = [[0.0f64; NR]; MR];
+            (fs_simd::ops().mk8x4_f64)(a_panel, b_panel, kc, &mut acc);
+            for (r, accr) in acc.iter().enumerate().take(rows) {
+                let crow = (p + r) * n + jc + q;
+                for (s, &value) in accr.iter().enumerate().take(cols) {
+                    c[crow + s] = alpha.mul_add(value, c[crow + s]);
+                }
+            }
+            completed.fetch_add(1, std::sync::atomic::Ordering::Release);
+            q += NR;
+        }
+        p += MR;
+    }
+    !poll()
 }
 
 /// Operand orientation for the op-form GEMM entry points.
@@ -1105,6 +1558,114 @@ mod tests {
             h, GOLDEN_HASH,
             "GEMM output bits changed: {h:#018x} vs {GOLDEN_HASH:#018x} — KC is part of the \
              bit contract; bump only with semantic justification"
+        );
+    }
+
+    /// G4: inject cancellation after a deterministic number of real packing /
+    /// compute boundaries. This avoids a sleep-based race while proving that
+    /// a mid-dispatch request drains with partial PRIVATE progress and never
+    /// exposes a partially scaled or multiplied C.
+    #[test]
+    fn cancellable_gemm_mid_dispatch_drains_transactionally() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let (m, n, k) = (263usize, 37usize, 257usize);
+        let a = rand_mat(m, k, 0xCA11);
+        let b = rand_mat(k, n, 0xCE11);
+        let original = rand_mat(m, n, 0xC0DE);
+        let mut c = original.clone();
+        let polls = AtomicUsize::new(0);
+        const CANCEL_AFTER: usize = 80;
+        let poll = || polls.fetch_add(1, Ordering::SeqCst) >= CANCEL_AFTER;
+
+        let error =
+            gemm_f64_parallel_with_poll(m, n, k, 1.25, &a, &b, 0.5, &mut c, 3, 32, 37, &poll)
+                .expect_err("the injected mid-dispatch request must cancel");
+        assert!(
+            error.report.completed_tiles > 0,
+            "injection must happen after real compute, not during setup: {error:?}"
+        );
+        assert!(
+            error.report.completed_tiles < error.report.total_tiles,
+            "injection must interrupt before finalize: {error:?}"
+        );
+        assert!(
+            c.iter()
+                .zip(&original)
+                .all(|(got, before)| got.to_bits() == before.to_bits()),
+            "cancelled transactional GEMM changed caller-visible C"
+        );
+        // Every worker exits on its first true poll; only the scope-finalizer
+        // may add another observation. This guards accidental unbounded work
+        // after a request as the loop nest evolves.
+        assert!(
+            polls.load(Ordering::SeqCst) <= CANCEL_AFTER + 2 * 3 + 4,
+            "workers kept polling/working after cancellation"
+        );
+        assert_eq!(GEMM_MAX_FMAS_BETWEEN_POLLS, 8 * 4 * 257);
+    }
+
+    /// G0/G5: the cancellation-capable success path commits exactly once and
+    /// remains bitwise the established serial accumulation contract.
+    #[test]
+    fn cancellable_gemm_success_is_bitwise_and_reports_complete() {
+        let (m, n, k) = (263usize, 37usize, 257usize);
+        let a = rand_mat(m, k, 0xA11);
+        let b = rand_mat(k, n, 0xB11);
+        let original = rand_mat(m, n, 0xC11);
+        let mut expected = original.clone();
+        gemm_f64(m, n, k, 1.25, &a, &b, 0.5, &mut expected);
+
+        for threads in [1, 3] {
+            let gate = fs_exec::CancelGate::new();
+            let mut actual = original.clone();
+            let report = gemm_f64_parallel_with_cancel(
+                m,
+                n,
+                k,
+                1.25,
+                &a,
+                &b,
+                0.5,
+                &mut actual,
+                threads,
+                32,
+                37,
+                &gate,
+            )
+            .expect("unrequested dispatch");
+            assert_eq!(report.completed_tiles, report.total_tiles);
+            assert!(report.total_tiles > 0);
+            assert!(
+                actual
+                    .iter()
+                    .zip(&expected)
+                    .all(|(got, want)| got.to_bits() == want.to_bits()),
+                "cancellable GEMM diverged at thread count {threads}"
+            );
+        }
+    }
+
+    /// G4: an already-requested gate is refused after shape validation and
+    /// before staging allocation or mutation.
+    #[test]
+    fn cancellable_gemm_pre_requested_gate_leaves_c_untouched() {
+        let (m, n, k) = (2usize, 3usize, 4usize);
+        let a = rand_mat(m, k, 1);
+        let b = rand_mat(k, n, 2);
+        let original = rand_mat(m, n, 3);
+        let mut c = original.clone();
+        let gate = fs_exec::CancelGate::new();
+        gate.request();
+        let error =
+            gemm_f64_parallel_with_cancel(m, n, k, 1.0, &a, &b, 0.0, &mut c, 2, 32, 128, &gate)
+                .expect_err("pre-requested gate");
+        assert_eq!(error.report.completed_tiles, 0);
+        assert!(error.report.total_tiles > 0);
+        assert!(
+            c.iter()
+                .zip(&original)
+                .all(|(got, before)| got.to_bits() == before.to_bits())
         );
     }
 

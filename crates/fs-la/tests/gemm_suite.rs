@@ -3,7 +3,7 @@
 
 use std::any::Any;
 
-fn panic_text(payload: Box<dyn Any + Send>) -> String {
+fn panic_text(payload: &(dyn Any + Send)) -> String {
     if let Some(text) = payload.downcast_ref::<String>() {
         text.clone()
     } else if let Some(text) = payload.downcast_ref::<&str>() {
@@ -15,7 +15,7 @@ fn panic_text(payload: Box<dyn Any + Send>) -> String {
 
 fn assert_extent_overflow(f: impl FnOnce() + std::panic::UnwindSafe, label: &str) {
     let panic = std::panic::catch_unwind(f).expect_err("overflow must panic");
-    let text = panic_text(panic);
+    let text = panic_text(panic.as_ref());
     assert!(
         text.contains("extent overflow"),
         "{label}: unexpected panic: {text}"
@@ -29,38 +29,38 @@ fn public_facades_reject_extent_overflow_before_mutation() {
     let mut c64 = [7.0f64];
     assert_extent_overflow(
         std::panic::AssertUnwindSafe(|| {
-            fs_la::gemm_f64(usize::MAX, 0, 2, 1.0, &[], &[], 0.0, &mut c64)
+            fs_la::gemm_f64(usize::MAX, 0, 2, 1.0, &[], &[], 0.0, &mut c64);
         }),
         "gemm_f64",
     );
-    assert_eq!(c64, [7.0]);
+    assert_eq!(c64[0].to_bits(), 7.0f64.to_bits());
 
     let mut c32 = [7.0f32];
     assert_extent_overflow(
         std::panic::AssertUnwindSafe(|| {
-            fs_la::gemm_f32(usize::MAX, 0, 2, 1.0, &[], &[], 0.0, &mut c32)
+            fs_la::gemm_f32(usize::MAX, 0, 2, 1.0, &[], &[], 0.0, &mut c32);
         }),
         "gemm_f32",
     );
-    assert_eq!(c32, [7.0]);
+    assert_eq!(c32[0].to_bits(), 7.0f32.to_bits());
 
     let mut mixed = [7.0f64];
     assert_extent_overflow(
         std::panic::AssertUnwindSafe(|| {
-            fs_la::gemm_mixed(usize::MAX, 0, 2, 1.0, &[], &[], 0.0, &mut mixed)
+            fs_la::gemm_mixed(usize::MAX, 0, 2, 1.0, &[], &[], 0.0, &mut mixed);
         }),
         "gemm_mixed",
     );
-    assert_eq!(mixed, [7.0]);
+    assert_eq!(mixed[0].to_bits(), 7.0f64.to_bits());
 
     let mut parallel = [7.0f64];
     assert_extent_overflow(
         std::panic::AssertUnwindSafe(|| {
-            fs_la::gemm_f64_parallel(usize::MAX, 0, 2, 1.0, &[], &[], 0.0, &mut parallel, 4)
+            fs_la::gemm_f64_parallel(usize::MAX, 0, 2, 1.0, &[], &[], 0.0, &mut parallel, 4);
         }),
         "gemm_f64_parallel",
     );
-    assert_eq!(parallel, [7.0]);
+    assert_eq!(parallel[0].to_bits(), 7.0f64.to_bits());
 
     let mut op = [7.0f64];
     assert_extent_overflow(
@@ -79,11 +79,11 @@ fn public_facades_reject_extent_overflow_before_mutation() {
                 0.0,
                 &mut op,
                 1,
-            )
+            );
         }),
         "gemm_f64_op",
     );
-    assert_eq!(op, [7.0]);
+    assert_eq!(op[0].to_bits(), 7.0f64.to_bits());
 }
 
 /// G0: tuner quanta need not align to the microkernel. Packed storage must
@@ -102,6 +102,24 @@ fn parallel_unaligned_tune_quanta_size_padded_packs() {
             .iter()
             .zip(&parallel)
             .all(|(lhs, rhs)| lhs.to_bits() == rhs.to_bits())
+    );
+}
+
+/// G0: the producer-owned routing query is the single source of truth for
+/// whether a session may publish MC/NC timing evidence.
+#[test]
+fn tuning_effectiveness_refuses_noop_serial_and_small_routes() {
+    assert!(!fs_la::gemm_tuning_is_effective(512, 512, 512, 1.0, 1));
+    assert!(!fs_la::gemm_tuning_is_effective(255, 512, 512, 1.0, 8));
+    assert!(!fs_la::gemm_tuning_is_effective(512, 0, 512, 1.0, 8));
+    assert!(!fs_la::gemm_tuning_is_effective(512, 512, 0, 1.0, 8));
+    assert!(!fs_la::gemm_tuning_is_effective(512, 512, 512, -0.0, 8));
+    assert!(fs_la::gemm_tuning_is_effective(256, 1, 1, 1.0, 2));
+    assert!(!fs_la::gemm_execution_tier().is_empty());
+    assert_eq!(fs_la::GEMM_IMPLEMENTATION_VERSION, 1);
+    assert_eq!(
+        fs_la::GEMM_PARALLEL_IMPLEMENTATION,
+        "std-thread-scope-work-stealing-unpinned-v1"
     );
 }
 

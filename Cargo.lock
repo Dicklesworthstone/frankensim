@@ -1312,6 +1312,7 @@ dependencies = [
 name = "fs-la"
 version = "0.0.1"
 dependencies = [
+ "fs-exec",
  "fs-math",
  "fs-rand",
  "fs-roofline",
