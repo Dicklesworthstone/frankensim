@@ -46,6 +46,15 @@ pub struct PoolConfig {
     pub mode: ExecMode,
     /// Arena configuration for per-tile scope arenas.
     pub arena: fs_alloc::ArenaConfig,
+    /// OPT-IN OS pinning (fz2.2): worker `w` is pinned to
+    /// `pin_groups[ccd_of_worker(w) % len]` — pass the measured L3
+    /// groups so each shard's workers stay inside their cache island
+    /// (measured on a 5995WX: unpinned threads migrate across CCDs and
+    /// lose 8.35x on cache-resident sweeps). Empty = no pinning
+    /// (default). ADVISORY and timing-only (P2): pin failures are
+    /// ignored by design — results are bit-identical either way, and
+    /// the ccd_ab harness verifies the mechanism separately.
+    pub pin_groups: Vec<Vec<u32>>,
 }
 
 impl PoolConfig {
@@ -59,7 +68,21 @@ impl PoolConfig {
             seed,
             mode: ExecMode::Deterministic,
             arena: fs_alloc::ArenaConfig::default(),
+            pin_groups: Vec::new(),
         }
+    }
+
+    /// Enable CCD pinning from the MEASURED L3 topology where the
+    /// platform exposes it (Linux sysfs); a no-op elsewhere — callers
+    /// can inspect `pin_groups.is_empty()` to ledger which they got.
+    #[must_use]
+    pub fn with_measured_pinning(mut self) -> Self {
+        let groups = fs_substrate::affinity::measured_l3_groups();
+        if let Some(topo) = CcdTopology::from_l3_groups(&groups) {
+            self.topo = topo;
+            self.pin_groups = groups;
+        }
+        self
     }
 }
 
@@ -358,6 +381,12 @@ impl TilePool {
                 let arenas = &self.arenas;
                 let config = &self.config;
                 s.spawn(move || {
+                    if !config.pin_groups.is_empty() {
+                        let g = ccd_of_worker(w, workers, config.topo) % config.pin_groups.len();
+                        // Advisory (see PoolConfig::pin_groups docs).
+                        let _ =
+                            fs_substrate::os_affinity::pin_current_thread(&config.pin_groups[g]);
+                    }
                     loop {
                         // Tile boundary: the drain point (P7). Record the
                         // observation timestamp once for the histogram.
@@ -562,6 +591,34 @@ mod tests {
                 assert!(p.arena_pool().stats().quiescent(), "arena leak");
             }
         }
+    }
+
+    #[test]
+    fn pinning_is_bit_invariant_and_advisory() {
+        // P2: pinning changes timing, never bits — pinned (measured
+        // topology where available, garbage groups otherwise) must
+        // produce exactly the unpinned result; on targets without
+        // pinning support the advisory path is a no-op that still
+        // completes the run.
+        let tiles = 513u64;
+        let want = pool(4).run(&SumKernel { tiles }).expect("unpinned run");
+        let measured = TilePool::new(
+            PoolConfig::new(4, CcdTopology::APPLE_M_CLASS, 0x5EED).with_measured_pinning(),
+        );
+        assert_eq!(
+            measured.run(&SumKernel { tiles }).expect("pinned run"),
+            want
+        );
+        // Deliberately hostile pin groups (cpu ids that may not exist):
+        // advisory pinning must never fail the run or change the bits.
+        let mut hostile = PoolConfig::new(4, CcdTopology::APPLE_M_CLASS, 0x5EED);
+        hostile.pin_groups = vec![vec![9999], vec![0]];
+        assert_eq!(
+            TilePool::new(hostile)
+                .run(&SumKernel { tiles })
+                .expect("hostile-pin run"),
+            want
+        );
     }
 
     #[test]
