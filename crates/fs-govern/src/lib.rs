@@ -12,9 +12,11 @@
 //! instrumented.
 //!
 //! The register is the canonical record; [`to_json`] emits it for dashboards.
-//! `instrumented` defaults to `false` for every risk (nothing is wired yet —
-//! the honest baseline); a risk flips to instrumented only when its
-//! early-warning metric is live on a dashboard.
+//! Instrumentation is EVIDENCE, not a flag (bead xpck.9): a risk counts as
+//! operationally managed only when it carries a fresh, fingerprint-
+//! authenticated [`InstrumentationReceipt`]; every receipt is `None` today
+//! (the honest baseline), so the register is schema-complete but
+//! operationally RED — and the audits say both things separately.
 //!
 //! Sibling modules encode the rest of the addendum's governance as data: the
 //! design principles + governance rules ([`doctrine`]) and the nineteen
@@ -87,6 +89,106 @@ impl RiskId {
     }
 }
 
+/// A SELF-AUTHENTICATING instrumentation receipt (bead xpck.9): the
+/// claim "this metric is live on a dashboard" carried as evidence, not
+/// as a mutable boolean. A receipt names the dashboard, records the
+/// day the feed was last verified live, and carries an integrity
+/// fingerprint over (subject, dashboard, day) — flipping a flag
+/// without producing a consistent receipt cannot turn an audit green,
+/// and receipts age out (stale dashboards demote coverage).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InstrumentationReceipt {
+    /// Dashboard locator (non-empty).
+    pub dashboard: &'static str,
+    /// Day the feed was last verified live (days since 2026-01-01).
+    pub verified_day: u32,
+    /// Must equal [`receipt_fingerprint`] over (subject, dashboard,
+    /// verified_day).
+    pub fingerprint: u64,
+}
+
+/// Receipts older than this demote to [`InstrumentationStatus::Stale`].
+pub const MAX_RECEIPT_AGE_DAYS: u32 = 45;
+
+/// The integrity fingerprint a valid receipt must carry (FNV-1a over
+/// the subject id, dashboard locator, and verification day).
+#[must_use]
+pub fn receipt_fingerprint(subject: &str, dashboard: &str, verified_day: u32) -> u64 {
+    let mut acc: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in subject
+        .as_bytes()
+        .iter()
+        .chain([0xfeu8].iter())
+        .chain(dashboard.as_bytes())
+        .chain([0xfeu8].iter())
+        .chain(verified_day.to_le_bytes().iter())
+    {
+        acc ^= u64::from(*b);
+        acc = acc.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    acc
+}
+
+/// Operational status of one subject's instrumentation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstrumentationStatus {
+    /// Receipt present, fingerprint-consistent, fresh.
+    Verified {
+        /// Days since the feed was verified live.
+        age_days: u32,
+    },
+    /// Receipt fingerprint-consistent but older than
+    /// [`MAX_RECEIPT_AGE_DAYS`] — the dashboard may be dead.
+    Stale {
+        /// Days since the feed was verified live.
+        age_days: u32,
+    },
+    /// Receipt present but its fingerprint does not authenticate (a
+    /// flipped flag without evidence, or tampering).
+    BadReceipt,
+    /// No receipt at all.
+    Uninstrumented,
+}
+
+impl InstrumentationStatus {
+    /// Stable lowercase name for JSON/ledger rows.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            InstrumentationStatus::Verified { .. } => "verified",
+            InstrumentationStatus::Stale { .. } => "stale",
+            InstrumentationStatus::BadReceipt => "bad-receipt",
+            InstrumentationStatus::Uninstrumented => "uninstrumented",
+        }
+    }
+}
+
+/// Judge one subject's receipt as of `today_day` (days since
+/// 2026-01-01). Fail-closed: only a fingerprint-consistent, non-empty,
+/// fresh receipt is [`InstrumentationStatus::Verified`].
+#[must_use]
+pub fn instrumentation_status(
+    subject: &str,
+    receipt: Option<&InstrumentationReceipt>,
+    today_day: u32,
+) -> InstrumentationStatus {
+    let Some(r) = receipt else {
+        return InstrumentationStatus::Uninstrumented;
+    };
+    if r.dashboard.trim().is_empty()
+        || r.fingerprint != receipt_fingerprint(subject, r.dashboard, r.verified_day)
+        || r.verified_day > today_day
+    {
+        return InstrumentationStatus::BadReceipt;
+    }
+    let age_days = today_day - r.verified_day;
+    if age_days > MAX_RECEIPT_AGE_DAYS {
+        InstrumentationStatus::Stale { age_days }
+    } else {
+        InstrumentationStatus::Verified { age_days }
+    }
+}
+
 /// One risk-register entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Risk {
@@ -104,8 +206,9 @@ pub struct Risk {
     pub threshold: &'static str,
     /// The owning bead (or governance owner).
     pub owner: &'static str,
-    /// Is the early-warning metric actually live on a dashboard yet?
-    pub instrumented: bool,
+    /// Evidence that the early-warning metric is live on a dashboard
+    /// (`None` = uninstrumented; a bare flag cannot claim coverage).
+    pub receipt: Option<InstrumentationReceipt>,
 }
 
 /// The canonical R1–R10 register.
@@ -118,7 +221,7 @@ const REGISTER: [Risk; 10] = [
         early_warning: "accept-rate stratified by problem class",
         threshold: "a problem class stuck at warm-start-only (accept-rate near zero)",
         owner: "frankensim-epic-flywheel-lmp4.1",
-        instrumented: false,
+        receipt: None,
     },
     Risk {
         id: RiskId::R2,
@@ -128,7 +231,7 @@ const REGISTER: [Risk; 10] = [
         early_warning: "reproducibility test failures per release",
         threshold: "determinism tax exceeding ~15% on dominant kernels",
         owner: "frankensim-epic-flywheel-lmp4.6",
-        instrumented: false,
+        receipt: None,
     },
     Risk {
         id: RiskId::R3,
@@ -138,7 +241,7 @@ const REGISTER: [Risk; 10] = [
         early_warning: "fraction of diffs falling back to unattributed geometric comparison",
         threshold: "a material fraction of diffs cannot attribute to a causal edit",
         owner: "frankensim-epic-flywheel-lmp4.10",
-        instrumented: false,
+        receipt: None,
     },
     Risk {
         id: RiskId::R4,
@@ -148,7 +251,7 @@ const REGISTER: [Risk; 10] = [
         early_warning: "skip-yield (fraction of DAG certifiably skipped)",
         threshold: "skip-yield delivers <2x median wall-clock vs hash memoization",
         owner: "frankensim-epic-flywheel-lmp4.7",
-        instrumented: false,
+        receipt: None,
     },
     Risk {
         id: RiskId::R5,
@@ -158,7 +261,7 @@ const REGISTER: [Risk; 10] = [
         early_warning: "gap-collapse incidence per assembly class",
         threshold: "gap collapse observed outside synthetic cases at volume",
         owner: "frankensim-epic-selfknow-knh1.3",
-        instrumented: false,
+        receipt: None,
     },
     Risk {
         id: RiskId::R6,
@@ -168,7 +271,7 @@ const REGISTER: [Risk; 10] = [
         early_warning: "conformance-tier distribution of converters on the hot path",
         threshold: "hot-path converters cluster in low conformance tiers",
         owner: "frankensim-epic-gtm-jwq8.2",
-        instrumented: false,
+        receipt: None,
     },
     Risk {
         id: RiskId::R7,
@@ -178,7 +281,7 @@ const REGISTER: [Risk; 10] = [
         early_warning: "audit rate of estimated-color claims in decision-critical positions",
         threshold: "estimated-color claims silently drive decisions without probe maps",
         owner: "frankensim-epic-epistype-qmao.2",
-        instrumented: false,
+        receipt: None,
     },
     Risk {
         id: RiskId::R8,
@@ -188,7 +291,7 @@ const REGISTER: [Risk; 10] = [
         early_warning: "registration-uncertainty-to-signal ratio per part class",
         threshold: "registration uncertainty exceeds the geometric deviations being certified",
         owner: "frankensim-epic-coupling-bk0o.4",
-        instrumented: false,
+        receipt: None,
     },
     Risk {
         id: RiskId::R9,
@@ -198,7 +301,7 @@ const REGISTER: [Risk; 10] = [
         early_warning: "auditor engagement rate in the first regulated-vertical cycle",
         threshold: "no auditor engages the machine-checkable format even as supplementary evidence",
         owner: "frankensim-epic-epistype-qmao.9",
-        instrumented: false,
+        receipt: None,
     },
     Risk {
         id: RiskId::R10,
@@ -208,7 +311,7 @@ const REGISTER: [Risk; 10] = [
         early_warning: "headcount-weighted work-in-progress outside the current phase",
         threshold: "WIP outside the current phase grows materially",
         owner: "frankensim-epic-addendum-xpck.1",
-        instrumented: false,
+        receipt: None,
     },
 ];
 
@@ -229,64 +332,84 @@ pub fn risk(id: RiskId) -> &'static Risk {
     &REGISTER[idx]
 }
 
-/// The result of auditing the register for governance completeness.
+/// The result of auditing the register: DECLARATION (schema) and LIVE
+/// OPERATION (receipts) are distinct verdicts — collapsing them was
+/// the false-green this bead removed (xpck.9).
 #[derive(Debug, Clone, PartialEq)]
 pub struct RiskAudit {
     /// Total risks.
     pub total: usize,
-    /// Risks that have BOTH a non-empty early-warning metric and an owner.
-    pub complete: usize,
-    /// Risks whose early-warning metric is actually instrumented.
-    pub instrumented: usize,
-    /// `(risk, reason)` for every incomplete entry.
-    pub gaps: Vec<(RiskId, &'static str)>,
+    /// Risks that DECLARE both a non-empty early-warning metric and an owner.
+    pub declared: usize,
+    /// Risks whose early-warning metric is VERIFIED live (fresh,
+    /// authenticated receipt).
+    pub verified_instrumented: usize,
+    /// `(risk, reason)` for every declaration gap.
+    pub schema_gaps: Vec<(RiskId, &'static str)>,
+    /// `(risk, status)` for every risk NOT verified live — the exact
+    /// operational gaps Governance Rule 2 demands be visible.
+    pub operational_gaps: Vec<(RiskId, InstrumentationStatus)>,
 }
 
 impl RiskAudit {
-    /// Is the register complete (every risk has a metric AND an owner)?
+    /// Does every risk DECLARE a metric and an owner? (Schema only —
+    /// says nothing about whether anything is actually measured.)
     #[must_use]
-    pub fn ok(&self) -> bool {
-        self.gaps.is_empty()
+    pub fn declared_schema_ok(&self) -> bool {
+        self.schema_gaps.is_empty()
+    }
+
+    /// Is every risk OPERATIONALLY managed — declared AND its metric
+    /// verified live by a fresh authenticated receipt? Fails closed on
+    /// any uninstrumented, stale, or bad-receipt entry. "Unmeasured
+    /// survival is not survival."
+    #[must_use]
+    pub fn operationally_managed(&self) -> bool {
+        self.declared_schema_ok() && self.operational_gaps.is_empty()
     }
 }
 
-/// Audit the canonical register (see [`audit_slice`]).
+/// Audit the canonical register as of `today_day` (see [`audit_slice`]).
 #[must_use]
-pub fn audit() -> RiskAudit {
-    audit_slice(&REGISTER)
+pub fn audit(today_day: u32) -> RiskAudit {
+    audit_slice(&REGISTER, today_day)
 }
 
 /// Audit an arbitrary risk slice: every risk must carry an early-warning
-/// metric and an owner (Governance Rule 2 — a risk with no measurement is
-/// unmanaged). Also counts how many early-warning metrics are instrumented
-/// (the standing gap between "declared" and "watched").
+/// metric and an owner (declaration), and Governance Rule 2 demands the
+/// metric be VERIFIED LIVE (a risk with no working measurement is
+/// unmanaged) — the two verdicts are reported separately and the
+/// operational one fails closed.
 #[must_use]
-pub fn audit_slice(risks: &[Risk]) -> RiskAudit {
-    let mut gaps = Vec::new();
-    let mut complete = 0usize;
-    let mut instrumented = 0usize;
+pub fn audit_slice(risks: &[Risk], today_day: u32) -> RiskAudit {
+    let mut schema_gaps = Vec::new();
+    let mut operational_gaps = Vec::new();
+    let mut declared = 0usize;
+    let mut verified_instrumented = 0usize;
     for r in risks {
         let mut ok = true;
         if r.early_warning.trim().is_empty() {
-            gaps.push((r.id, "missing early-warning metric"));
+            schema_gaps.push((r.id, "missing early-warning metric"));
             ok = false;
         }
         if r.owner.trim().is_empty() {
-            gaps.push((r.id, "missing owner"));
+            schema_gaps.push((r.id, "missing owner"));
             ok = false;
         }
         if ok {
-            complete += 1;
+            declared += 1;
         }
-        if r.instrumented {
-            instrumented += 1;
+        match instrumentation_status(r.id.code(), r.receipt.as_ref(), today_day) {
+            InstrumentationStatus::Verified { .. } => verified_instrumented += 1,
+            other => operational_gaps.push((r.id, other)),
         }
     }
     RiskAudit {
         total: risks.len(),
-        complete,
-        instrumented,
-        gaps,
+        declared,
+        verified_instrumented,
+        schema_gaps,
+        operational_gaps,
     }
 }
 
@@ -306,25 +429,29 @@ pub(crate) fn json_escape(s: &str) -> String {
     out
 }
 
-/// Emit the register as a machine-readable JSON array (one object per risk),
-/// for dashboards and CI gates. Deterministic (risks in order).
+/// Emit the register as a machine-readable JSON array (one object per
+/// risk) as of `today_day`, for dashboards and CI gates. Deterministic
+/// (risks in order). Each entry carries its instrumentation STATUS
+/// (verified/stale/bad-receipt/uninstrumented) — never an ambiguous
+/// "complete" flag.
 #[must_use]
-pub fn to_json() -> String {
+pub fn to_json(today_day: u32) -> String {
     use core::fmt::Write as _;
     let mut out = String::from("[");
     for (i, r) in REGISTER.iter().enumerate() {
         if i > 0 {
             out.push(',');
         }
+        let status = instrumentation_status(r.id.code(), r.receipt.as_ref(), today_day);
         write!(
             out,
-            "{{\"id\":\"{}\",\"name\":\"{}\",\"early_warning\":\"{}\",\"threshold\":\"{}\",\"owner\":\"{}\",\"instrumented\":{},\"mitigation\":\"{}\"}}",
+            "{{\"id\":\"{}\",\"name\":\"{}\",\"early_warning\":\"{}\",\"threshold\":\"{}\",\"owner\":\"{}\",\"instrumentation\":\"{}\",\"mitigation\":\"{}\"}}",
             r.id.code(),
             json_escape(r.name),
             json_escape(r.early_warning),
             json_escape(r.threshold),
             json_escape(r.owner),
-            r.instrumented,
+            status.name(),
             json_escape(r.mitigation),
         )
         .expect("writing to a String is infallible");

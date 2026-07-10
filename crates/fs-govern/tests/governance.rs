@@ -79,16 +79,21 @@ fn every_proposal_declares_a_kill_metric_and_owner() {
 }
 
 #[test]
-fn governance_audit_is_complete_with_honest_zero_instrumented() {
-    let a = governance_audit();
+fn governance_audit_is_schema_complete_but_operationally_red() {
+    let a = governance_audit(200);
     assert_eq!(a.total, 19);
     assert_eq!(
         a.with_kill_metric_and_owner, 19,
         "every proposal must declare a kill metric + owner"
     );
-    assert!(a.ok(), "no gaps: {:?}", a.gaps);
-    // honest baseline: no kill metric is instrumented yet.
-    assert_eq!(a.instrumented, 0);
+    assert!(a.declared_schema_ok(), "schema gaps: {:?}", a.schema_gaps);
+    // Honest baseline: NO kill metric is verified live, so the
+    // registry is operationally RED with all nineteen gaps listed —
+    // the doctrine's "an uninstrumented kill measurement counts as
+    // killed or unmanaged", no longer renderable as green (xpck.9).
+    assert_eq!(a.verified_instrumented, 0);
+    assert!(!a.operationally_managed());
+    assert_eq!(a.operational_gaps.len(), 19);
 }
 
 #[test]
@@ -103,11 +108,11 @@ fn owners_map_to_the_expected_beads() {
 
 #[test]
 fn proposals_json_is_well_formed_and_deterministic() {
-    let j = proposals_json();
+    let j = proposals_json(200);
     assert!(j.starts_with('[') && j.ends_with(']'));
     assert_eq!(j.matches("\"id\":").count(), 19);
     assert!(j.contains("\"mean\":850"));
     assert!(j.contains("frankensim-epic-epistype-qmao.5")); // Goodhart guard owner
     assert!(!j.contains(",,"));
-    assert_eq!(proposals_json(), proposals_json());
+    assert_eq!(proposals_json(200), proposals_json(200));
 }

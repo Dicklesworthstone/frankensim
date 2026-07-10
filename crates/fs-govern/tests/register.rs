@@ -3,7 +3,10 @@
 //! (complete + instrumented counts + gap detection on a deliberately
 //! incomplete slice), JSON well-formedness, and determinism.
 
-use fs_govern::{Risk, RiskId, audit, audit_slice, register, risk, to_json};
+use fs_govern::{
+    InstrumentationReceipt, InstrumentationStatus, MAX_RECEIPT_AGE_DAYS, Risk, RiskId, audit,
+    audit_slice, receipt_fingerprint, register, risk, to_json,
+};
 
 #[test]
 fn register_has_all_ten_risks_in_order() {
@@ -54,13 +57,75 @@ fn lookup_returns_the_right_risk() {
 }
 
 #[test]
-fn audit_of_the_canonical_register_is_complete() {
-    let a = audit();
+fn audit_separates_declaration_from_live_operation() {
+    let a = audit(200);
     assert_eq!(a.total, 10);
-    assert_eq!(a.complete, 10, "every risk must have a metric and an owner");
-    assert!(a.ok(), "no gaps: {:?}", a.gaps);
-    // honest baseline: nothing is instrumented yet.
-    assert_eq!(a.instrumented, 0);
+    assert_eq!(
+        a.declared, 10,
+        "every risk must declare a metric and an owner"
+    );
+    assert!(a.declared_schema_ok(), "schema gaps: {:?}", a.schema_gaps);
+    // Honest baseline: nothing is verified live, so the register is
+    // OPERATIONALLY RED with all ten exact gaps listed (xpck.9 — the
+    // former single ok() rendered this state as a false green).
+    assert_eq!(a.verified_instrumented, 0);
+    assert!(!a.operationally_managed());
+    assert_eq!(a.operational_gaps.len(), 10);
+    assert!(
+        a.operational_gaps
+            .iter()
+            .all(|(_, s)| *s == InstrumentationStatus::Uninstrumented)
+    );
+}
+
+#[test]
+fn receipts_authenticate_and_age() {
+    let mk = |receipt| Risk {
+        id: RiskId::R2,
+        name: "y",
+        description: "y",
+        mitigation: "y",
+        early_warning: "a metric",
+        threshold: "y",
+        owner: "frankensim-epic-x",
+        receipt,
+    };
+    // A flipped flag without evidence — a receipt whose fingerprint was
+    // never computed — CANNOT turn the audit green.
+    let forged = mk(Some(InstrumentationReceipt {
+        dashboard: "grafana://kills",
+        verified_day: 190,
+        fingerprint: 0xDEAD_BEEF,
+    }));
+    let a = audit_slice(&[forged], 200);
+    assert!(!a.operationally_managed());
+    assert!(matches!(
+        a.operational_gaps[0].1,
+        InstrumentationStatus::BadReceipt
+    ));
+    // A consistent, fresh receipt verifies.
+    let good = mk(Some(InstrumentationReceipt {
+        dashboard: "grafana://kills",
+        verified_day: 190,
+        fingerprint: receipt_fingerprint("R2", "grafana://kills", 190),
+    }));
+    let a = audit_slice(&[good], 200);
+    assert!(a.operationally_managed(), "gaps: {:?}", a.operational_gaps);
+    assert_eq!(a.verified_instrumented, 1);
+    // The same receipt, long unverified, DEMOTES to stale (dead
+    // dashboards cannot keep claiming coverage).
+    let a = audit_slice(&[good], 190 + MAX_RECEIPT_AGE_DAYS + 1);
+    assert!(!a.operationally_managed());
+    assert!(matches!(
+        a.operational_gaps[0].1,
+        InstrumentationStatus::Stale { .. }
+    ));
+    // A receipt "verified" in the future is bad, not fresh.
+    let a = audit_slice(&[good], 100);
+    assert!(matches!(
+        a.operational_gaps[0].1,
+        InstrumentationStatus::BadReceipt
+    ));
 }
 
 #[test]
@@ -75,7 +140,7 @@ fn audit_detects_a_missing_metric_or_owner() {
             early_warning: "", // missing
             threshold: "x",
             owner: "", // missing
-            instrumented: false,
+            receipt: None,
         },
         Risk {
             id: RiskId::R2,
@@ -85,22 +150,22 @@ fn audit_detects_a_missing_metric_or_owner() {
             early_warning: "a metric",
             threshold: "y",
             owner: "frankensim-epic-x",
-            instrumented: true,
+            receipt: None,
         },
     ];
-    let a = audit_slice(&bad);
+    let a = audit_slice(&bad, 200);
     assert_eq!(a.total, 2);
-    assert_eq!(a.complete, 1);
-    assert_eq!(a.instrumented, 1);
-    assert!(!a.ok());
+    assert_eq!(a.declared, 1);
+    assert_eq!(a.verified_instrumented, 0);
+    assert!(!a.declared_schema_ok());
     // both a missing-metric and a missing-owner gap on R1.
     assert!(
-        a.gaps
+        a.schema_gaps
             .iter()
             .any(|(id, why)| *id == RiskId::R1 && why.contains("metric"))
     );
     assert!(
-        a.gaps
+        a.schema_gaps
             .iter()
             .any(|(id, why)| *id == RiskId::R1 && why.contains("owner"))
     );
@@ -108,7 +173,7 @@ fn audit_detects_a_missing_metric_or_owner() {
 
 #[test]
 fn json_is_well_formed_and_complete() {
-    let j = to_json();
+    let j = to_json(200);
     assert!(j.starts_with('[') && j.ends_with(']'));
     // one object per risk.
     assert_eq!(j.matches("\"id\":\"R").count(), 10);
@@ -119,15 +184,17 @@ fn json_is_well_formed_and_complete() {
             id.code()
         );
     }
-    // owner bead ids and the instrumented flag are present.
+    // Owner bead ids and the UNAMBIGUOUS instrumentation status are
+    // present; the former boolean "instrumented" flag is gone (xpck.9).
     assert!(j.contains("frankensim-epic-flywheel-lmp4.1"));
-    assert!(j.contains("\"instrumented\":false"));
+    assert!(j.contains("\"instrumentation\":\"uninstrumented\""));
+    assert!(!j.contains("\"instrumented\""));
     // no accidental double-commas between objects.
     assert!(!j.contains(",,"));
 }
 
 #[test]
 fn register_json_and_audit_are_deterministic() {
-    assert_eq!(to_json(), to_json());
-    assert_eq!(audit(), audit());
+    assert_eq!(to_json(200), to_json(200));
+    assert_eq!(audit(200), audit(200));
 }

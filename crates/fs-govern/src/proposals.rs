@@ -5,7 +5,7 @@
 //! kill measurement counts as killed, so every proposal must at least DECLARE
 //! a kill metric and an owner.
 
-use crate::json_escape;
+use crate::{InstrumentationReceipt, InstrumentationStatus, instrumentation_status, json_escape};
 use core::fmt::Write as _;
 
 /// One addendum proposal.
@@ -24,8 +24,9 @@ pub struct Proposal {
     pub kill_metric: &'static str,
     /// The owning bead.
     pub owning_bead: &'static str,
-    /// Is the kill metric actually instrumented on a dashboard yet?
-    pub instrumented: bool,
+    /// Evidence that the kill metric is live on a dashboard (`None` =
+    /// uninstrumented; a bare flag cannot claim coverage — xpck.9).
+    pub receipt: Option<InstrumentationReceipt>,
 }
 
 /// The nineteen proposals, in composite (Mean) order.
@@ -37,7 +38,7 @@ const PROPOSALS: [Proposal; 19] = [
         mean: 850,
         kill_metric: "accept-rate >30% AND median warm-start >=1.5x at customer tolerances (6-month checkpoint)",
         owning_bead: "frankensim-epic-flywheel-lmp4.1",
-        instrumented: false,
+        receipt: None,
     },
     Proposal {
         id: "2",
@@ -46,7 +47,7 @@ const PROPOSALS: [Proposal; 19] = [
         mean: 840,
         kill_metric: "certified skip-yield >=2x median wall-clock vs plain hash memoization",
         owning_bead: "frankensim-epic-flywheel-lmp4.8",
-        instrumented: false,
+        receipt: None,
     },
     Proposal {
         id: "10",
@@ -55,7 +56,7 @@ const PROPOSALS: [Proposal; 19] = [
         mean: 820,
         kill_metric: "<25% of realistic merges surface harmonic (structural) conflicts",
         owning_bead: "frankensim-epic-flywheel-lmp4.12",
-        instrumented: false,
+        receipt: None,
     },
     Proposal {
         id: "8",
@@ -64,7 +65,7 @@ const PROPOSALS: [Proposal; 19] = [
         mean: 810,
         kill_metric: "greedy planner beats a fixed baseline by >=2x cost at equal certified accuracy (else ship the interface anyway)",
         owning_bead: "frankensim-epic-flywheel-lmp4.16",
-        instrumented: false,
+        receipt: None,
     },
     Proposal {
         id: "E",
@@ -73,7 +74,7 @@ const PROPOSALS: [Proposal; 19] = [
         mean: 810,
         kill_metric: "re-exploration rate falls materially; envelope containment is satisfiable on real assemblies",
         owning_bead: "frankensim-epic-flywheel-lmp4.13",
-        instrumented: false,
+        receipt: None,
     },
     Proposal {
         id: "3",
@@ -82,7 +83,7 @@ const PROPOSALS: [Proposal; 19] = [
         mean: 810,
         kill_metric: "probe-derived model-form maps actually change downstream decisions (probe compute capped)",
         owning_bead: "frankensim-epic-epistype-qmao.1",
-        instrumented: false,
+        receipt: None,
     },
     Proposal {
         id: "6",
@@ -91,7 +92,7 @@ const PROPOSALS: [Proposal; 19] = [
         mean: 790,
         kill_metric: "falsifier yield (true catches per compute) per class stays positive",
         owning_bead: "frankensim-epic-epistype-qmao.4",
-        instrumented: false,
+        receipt: None,
     },
     Proposal {
         id: "F",
@@ -100,7 +101,7 @@ const PROPOSALS: [Proposal; 19] = [
         mean: 790,
         kill_metric: "robust optima not consistently dominated by nominal-optimum-plus-safety-factor on realized cost",
         owning_bead: "frankensim-epic-epistype-qmao.3",
-        instrumented: false,
+        receipt: None,
     },
     Proposal {
         id: "A",
@@ -109,7 +110,7 @@ const PROPOSALS: [Proposal; 19] = [
         mean: 780,
         kill_metric: "RB-certified regions cover >=20% of wedge-vertical query volume",
         owning_bead: "frankensim-epic-selfknow-knh1.4",
-        instrumented: false,
+        receipt: None,
     },
     Proposal {
         id: "C",
@@ -118,7 +119,7 @@ const PROPOSALS: [Proposal; 19] = [
         mean: 780,
         kill_metric: "VoI-recommended purchases outperform agent-chosen at matched cost on realized decision-changes",
         owning_bead: "frankensim-epic-selfknow-knh1.6",
-        instrumented: false,
+        receipt: None,
     },
     Proposal {
         id: "1",
@@ -127,7 +128,7 @@ const PROPOSALS: [Proposal; 19] = [
         mean: 770,
         kill_metric: "adjoint-driven optimization beats the best derivative-free baseline on >=70% of benchmark design tasks",
         owning_bead: "frankensim-epic-coupling-bk0o.1",
-        instrumented: false,
+        receipt: None,
     },
     Proposal {
         id: "B",
@@ -136,7 +137,7 @@ const PROPOSALS: [Proposal; 19] = [
         mean: 770,
         kill_metric: "attributed channels + residual reconcile to the observed change within bounds on >=90% of cases",
         owning_bead: "frankensim-epic-selfknow-knh1.5",
-        instrumented: false,
+        receipt: None,
     },
     Proposal {
         id: "D",
@@ -145,7 +146,7 @@ const PROPOSALS: [Proposal; 19] = [
         mean: 770,
         kill_metric: "guard endpoint catch-rate exceeds its catch-rate on random non-endpoint designs",
         owning_bead: "frankensim-epic-epistype-qmao.5",
-        instrumented: false,
+        receipt: None,
     },
     Proposal {
         id: "11",
@@ -154,7 +155,7 @@ const PROPOSALS: [Proposal; 19] = [
         mean: 760,
         kill_metric: "registration uncertainty stays below the geometric deviations being certified",
         owning_bead: "frankensim-epic-coupling-bk0o.4",
-        instrumented: false,
+        receipt: None,
     },
     Proposal {
         id: "13",
@@ -163,7 +164,7 @@ const PROPOSALS: [Proposal; 19] = [
         mean: 720,
         kill_metric: "type checker ships (no kill); symmetry: >=15% of workloads present exploitable symmetry",
         owning_bead: "frankensim-epic-selfknow-knh1.1",
-        instrumented: false,
+        receipt: None,
     },
     Proposal {
         id: "12",
@@ -172,7 +173,7 @@ const PROPOSALS: [Proposal; 19] = [
         mean: 720,
         kill_metric: "an auditor/certification body engages the machine-checkable format as at least supplementary evidence",
         owning_bead: "frankensim-epic-epistype-qmao.6",
-        instrumented: false,
+        receipt: None,
     },
     Proposal {
         id: "5",
@@ -181,7 +182,7 @@ const PROPOSALS: [Proposal; 19] = [
         mean: 660,
         kill_metric: "gap collapse observed outside synthetic cases at volume (else demote to sampled spot checks)",
         owning_bead: "frankensim-epic-selfknow-knh1.3",
-        instrumented: false,
+        receipt: None,
     },
     Proposal {
         id: "7",
@@ -190,7 +191,7 @@ const PROPOSALS: [Proposal; 19] = [
         mean: 640,
         kill_metric: "referenceable customer with measured cycle-time reduction >=3x within two quarters of GA",
         owning_bead: "frankensim-epic-gtm-jwq8.1",
-        instrumented: false,
+        receipt: None,
     },
     Proposal {
         id: "4",
@@ -199,7 +200,7 @@ const PROPOSALS: [Proposal; 19] = [
         mean: 590,
         kill_metric: "a paying workload's error budget is dominated by splitting error (>=20% of budget)",
         owning_bead: "frankensim-epic-coupling-bk0o.7",
-        instrumented: false,
+        receipt: None,
     },
 ];
 
@@ -209,80 +210,102 @@ pub fn proposals() -> &'static [Proposal] {
     &PROPOSALS
 }
 
-/// The result of auditing the proposals for governance completeness.
+/// The result of auditing the proposals: DECLARATION (schema) and LIVE
+/// OPERATION (receipts) are distinct verdicts — collapsing them was
+/// the false-green this bead removed (xpck.9).
 #[derive(Debug, Clone, PartialEq)]
 pub struct GovernanceAudit {
     /// Total proposals.
     pub total: usize,
     /// Proposals that DECLARE both a kill metric and an owning bead.
     pub with_kill_metric_and_owner: usize,
-    /// Proposals whose kill metric is actually instrumented.
-    pub instrumented: usize,
-    /// `(proposal id, reason)` for every incomplete entry.
-    pub gaps: Vec<(&'static str, &'static str)>,
+    /// Proposals whose kill metric is VERIFIED live (fresh,
+    /// authenticated receipt).
+    pub verified_instrumented: usize,
+    /// `(proposal id, reason)` for every declaration gap.
+    pub schema_gaps: Vec<(&'static str, &'static str)>,
+    /// `(proposal id, status)` for every proposal NOT verified live —
+    /// the exact operational gaps.
+    pub operational_gaps: Vec<(&'static str, InstrumentationStatus)>,
 }
 
 impl GovernanceAudit {
-    /// Does every proposal declare a kill metric and an owner?
+    /// Does every proposal DECLARE a kill metric and an owner? (Schema
+    /// only — says nothing about whether the kill switch would fire.)
     #[must_use]
-    pub fn ok(&self) -> bool {
-        self.gaps.is_empty()
+    pub fn declared_schema_ok(&self) -> bool {
+        self.schema_gaps.is_empty()
+    }
+
+    /// Is every proposal OPERATIONALLY managed — declared AND its kill
+    /// metric verified live by a fresh authenticated receipt? Fails
+    /// closed on any uninstrumented, stale, or bad-receipt entry: an
+    /// uninstrumented kill measurement counts as killed or unmanaged,
+    /// never as green.
+    #[must_use]
+    pub fn operationally_managed(&self) -> bool {
+        self.declared_schema_ok() && self.operational_gaps.is_empty()
     }
 }
 
-/// Audit the proposals: every one must declare a non-empty kill metric AND an
-/// owning bead (Governance Rule 2 — a proposal whose kill measurement was
-/// never instrumented counts as killed). Also counts how many kill metrics are
-/// actually instrumented.
+/// Audit the proposals as of `today_day` (days since 2026-01-01):
+/// declaration (non-empty kill metric AND owning bead) and live
+/// operation (fresh authenticated receipts) reported SEPARATELY; the
+/// operational verdict fails closed and lists exact gaps.
 #[must_use]
-pub fn governance_audit() -> GovernanceAudit {
-    let mut gaps = Vec::new();
+pub fn governance_audit(today_day: u32) -> GovernanceAudit {
+    let mut schema_gaps = Vec::new();
+    let mut operational_gaps = Vec::new();
     let mut complete = 0usize;
-    let mut instrumented = 0usize;
+    let mut verified_instrumented = 0usize;
     for p in &PROPOSALS {
         let mut ok = true;
         if p.kill_metric.trim().is_empty() {
-            gaps.push((p.id, "missing kill metric"));
+            schema_gaps.push((p.id, "missing kill metric"));
             ok = false;
         }
         if p.owning_bead.trim().is_empty() {
-            gaps.push((p.id, "missing owning bead"));
+            schema_gaps.push((p.id, "missing owning bead"));
             ok = false;
         }
         if ok {
             complete += 1;
         }
-        if p.instrumented {
-            instrumented += 1;
+        match instrumentation_status(p.id, p.receipt.as_ref(), today_day) {
+            InstrumentationStatus::Verified { .. } => verified_instrumented += 1,
+            other => operational_gaps.push((p.id, other)),
         }
     }
     GovernanceAudit {
         total: PROPOSALS.len(),
         with_kill_metric_and_owner: complete,
-        instrumented,
-        gaps,
+        verified_instrumented,
+        schema_gaps,
+        operational_gaps,
     }
 }
 
-/// Emit the proposals as a machine-readable JSON array (id, name, phase, mean,
-/// kill_metric, owning_bead, instrumented). Deterministic.
+/// Emit the proposals as a machine-readable JSON array (id, name,
+/// phase, mean, kill_metric, owning_bead, instrumentation STATUS) as
+/// of `today_day`. Deterministic; never an ambiguous "complete" flag.
 #[must_use]
-pub fn proposals_json() -> String {
+pub fn proposals_json(today_day: u32) -> String {
     let mut out = String::from("[");
     for (i, p) in PROPOSALS.iter().enumerate() {
         if i > 0 {
             out.push(',');
         }
+        let status = instrumentation_status(p.id, p.receipt.as_ref(), today_day);
         write!(
             out,
-            "{{\"id\":\"{}\",\"name\":\"{}\",\"phase\":\"{}\",\"mean\":{},\"kill_metric\":\"{}\",\"owning_bead\":\"{}\",\"instrumented\":{}}}",
+            "{{\"id\":\"{}\",\"name\":\"{}\",\"phase\":\"{}\",\"mean\":{},\"kill_metric\":\"{}\",\"owning_bead\":\"{}\",\"instrumentation\":\"{}\"}}",
             json_escape(p.id),
             json_escape(p.name),
             json_escape(p.phase),
             p.mean,
             json_escape(p.kill_metric),
             json_escape(p.owning_bead),
-            p.instrumented,
+            status.name(),
         )
         .expect("writing to a String is infallible");
     }

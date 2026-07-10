@@ -50,6 +50,27 @@ unmeasured (design principle P8 / Governance Rule 2).
   object per risk: id, name, early_warning, threshold, owner, instrumented,
   mitigation) with JSON-escaped strings, for dashboards / CI gates.
 
+## Trust boundary: declaration vs live operation (bead xpck.9)
+
+The audits report TWO verdicts, never one: `declared_schema_ok()`
+(every entry names a metric and an owner — pure schema) and
+`operationally_managed()` (every metric VERIFIED live). The former
+single `ok()` collapsed these and rendered the zero-instrumented
+registry as green — the false-green this bead removed. Instrumentation
+is EVIDENCE, not a flag: an entry counts as verified only through an
+`InstrumentationReceipt` whose FNV fingerprint authenticates over
+(subject id, dashboard, verified day), that is not dated in the
+future, and that is younger than `MAX_RECEIPT_AGE_DAYS` (45) — stale
+or fingerprint-inconsistent receipts DEMOTE coverage
+(`Stale`/`BadReceipt` in the exact-gap lists) and can never be
+outweighed by flipping a boolean. Audits and JSON take `today_day`
+(days since 2026-01-01) explicitly, so verdicts are deterministic and
+replayable. Migration: `Risk::instrumented`/`Proposal::instrumented`
+(bool) became `receipt: Option<InstrumentationReceipt>`; JSON emits
+`"instrumentation":"verified|stale|bad-receipt|uninstrumented"` in
+place of the boolean; no other crate consumed the old fields
+(verified at migration).
+
 ## Invariants
 
 - The register is complete: `audit().ok()` is true and `audit().complete == 10`.
