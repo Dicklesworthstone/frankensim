@@ -87,15 +87,26 @@ pub fn cvar(samples: &[f64], beta: f64) -> f64 {
     );
     let mut sorted = samples.to_vec();
     sorted.sort_by(f64::total_cmp);
+    // Standard finite-sample empirical CVaR (Acerbi–Tasche): the mean over the
+    // worst n·(1−β) fraction of losses, applying a FRACTIONAL weight to the
+    // boundary order statistic when n·β is not an integer. Averaging the
+    // ⌈n(1−β)⌉ top samples at EQUAL weight (dividing by the rounded-up count)
+    // systematically UNDER-reports the shortfall — the anti-conservative
+    // direction for a risk functional feeding ASCENT robust formulations
+    // (bead zsvk). For integer n·β the two coincide.
+    #[allow(clippy::cast_precision_loss)]
+    let n = samples.len() as f64;
+    // 1-based rank of the boundary order statistic, m = ⌈nβ⌉ ∈ [1, n].
     #[allow(
         clippy::cast_precision_loss,
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss
     )]
-    let cut = ((samples.len() as f64) * beta).floor() as usize;
-    let tail = &sorted[cut.min(samples.len().saturating_sub(1))..];
+    let m = (n * beta).ceil() as usize;
+    let n_alpha = n * (1.0 - beta); // effective tail count (> 0 since β < 1)
     #[allow(clippy::cast_precision_loss)]
-    {
-        tail.iter().sum::<f64>() / tail.len().max(1) as f64
-    }
+    let boundary_weight = (m as f64) - n * beta; // ⌈nβ⌉ − nβ ∈ [0, 1)
+    let boundary = sorted[m - 1];
+    let above: f64 = sorted[m..].iter().sum();
+    (boundary_weight * boundary + above) / n_alpha
 }
