@@ -363,7 +363,7 @@ The important point is not just that the crate names exist. The workspace alread
 | Area | Implemented mechanics |
 |------|-----------------------|
 | Sparse assembly | `fs_sparse::Coo` stages triplets, canonicalizes them with deterministic duplicate accumulation, and emits CSR. CSR, BSR, and SELL kernels accumulate rows in a fixed column order so cross-format SpMV behavior is testable. |
-| Randomized NLA | `fs-la::rand_nla` provides seeded range finding, randomized SVD, Nyström PSD approximation, sketch-and-precondition least squares, Hutchinson trace estimation, and Hutch++ trace estimation. Its golden-hash sentinel is still proof-pending. |
+| Randomized NLA | `fs-la::rand_nla` provides seeded range finding, randomized SVD, Nyström PSD approximation, sketch-and-precondition least squares, Hutchinson trace estimation, and Hutch++ trace estimation. Its golden-hash sentinel is deliberately recorded and build-mode-stable; x86-64 re-confirmation is pending. |
 | Certified arithmetic | `fs-ivl` provides outward-rounded intervals, affine arithmetic, Taylor models, Newton/Krawczyk helpers, expansions, and exact predicates for orientation and in-sphere/incircle decisions. |
 | Spectral numerics | `fs-cheb` implements adaptive 1D Chebyshev expansions, Lobatto grids, differentiation matrices, Dirichlet Laplacian checks, and an Orr-Sommerfeld stability battery. |
 | Randomness and sampling | `fs-rand` uses counter-based Philox streams keyed by logical identity, with Sobol/QMC and lattice helpers so replay does not depend on thread arrival order. |
@@ -1095,7 +1095,7 @@ FrankenSim has substantial working code, but it is still early infrastructure.
 | GitHub Actions | Not authoritative for this repo; use DSR |
 | Full multiphysics solver suite | Not complete in the current workspace |
 | Neural representations | Not implemented as a first-class representation crate in the current workspace |
-| Randomized NLA golden sentinel | `fs-la::rand_nla` is implemented and mostly covered, but `rand_nla_golden_hash` still carries a placeholder hash until the observed value is deliberately recorded and cross-ISA proof is completed |
+| Randomized NLA golden sentinel | `rand_nla_golden_hash` is deliberately recorded (`0xeef1_0550_7daf_c0d5`, identical in debug and release on arm64) after a build-mode-dependent `powi` fixture was fixed; x86-64 re-confirmation on trj is pending |
 | Ascent golden sentinel | `fs-ascent` implements the optimizer stack, but its trajectory golden hash lane still needs the recorded hash to be frozen in the test source |
 | Long-running stability fixtures | Some structural stability and snap-through tests are active proof lanes and may need targeted runtime/threshold work rather than being treated as cheap smoke tests |
 | Production validation corpus | In progress through contracts, tests, ledger records, and roofline harnesses |

@@ -165,6 +165,20 @@ batch of N is bitwise-equal to the same matrix alone in a batch of 1
 mul_add; tested per op family). Golden hash over GEMM + Cholesky solve
 + LU + det/inv + eigh3 = `0x0377_a8c9_5992_aee9`, verified identical on
 both reference ISAs.
+Randomized NLA: keyed-Philox replayable (every estimate is a pure
+function of its seed); FNV-64 golden over RSVD σ + posterior estimate +
+Hutchinson trace = `0xeef1_0550_7daf_c0d5`, identical in debug and
+release by construction (recorded on aarch64-apple; x86-64 confirmation
+on trj pending re-run). Bumped once with cause: the original fixture
+built its spectrum with `f64::powi`, whose rounding is
+optimization-level-dependent (1-ulp debug/release divergence from
+exponent 4 up), so the sentinel bits depended on build mode
+(0x3e92_8bac_8cf9_fd48 debug vs 0xf3dc_b63b_e63f_8ab9 release — the
+latter was briefly and incorrectly pinned). The fixture now uses a
+fixed-order product chain. Contract rule, sibling of the platform-libm
+rule above: NO `f64::powi` with a variable or >3 exponent in any path
+that feeds golden bits (tracked workspace-wide in bead
+frankensim-powi-build-mode-determinism-4xnt).
 
 ## Cancellation behavior
 All future hot paths poll cancellation at tile boundaries (Decalogue P7).
