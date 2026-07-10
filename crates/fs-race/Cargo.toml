@@ -14,5 +14,8 @@ layer = "L4"
 fs-eproc = { path = "../fs-eproc" }
 fs-exec = { path = "../fs-exec" }
 
+[dev-dependencies]
+fs-eproc = { path = "../fs-eproc" }
+
 [lints]
 workspace = true

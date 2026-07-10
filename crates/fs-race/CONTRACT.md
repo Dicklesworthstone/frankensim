@@ -48,6 +48,43 @@ payoff claim is measured, never assumed.
 6. Successive halving follows its declared bracket schedule and beats
    fixed-N while the true best survives (race-006).
 
+## Elimination-evidence validity (bead 7tv.7.1, the derivation)
+
+Candidate i's elimination evidence is the MIXTURE (arithmetic mean,
+computed in log space via `fs_eproc::combine_average`) of the pairwise
+e-processes e_ji("j beats i") over the FIXED, predeclared family of all
+n−1 ORIGINAL opponents. Validity: (1) each e_ji is a test
+supermartingale for the pairwise null "i is not worse than j" (betting
+process, predictable λ, bounded outcomes); (2) under candidate i's
+composite null "i is not worse than ANY opponent" every family member's
+null holds, so each e_ji has expectation ≤ 1 at every stopping time;
+(3) a dead opponent's process is frozen at its elimination round — a
+stopped supermartingale is a supermartingale (optional stopping), so
+freezing preserves validity; (4) a convex combination of
+supermartingales is a supermartingale, hence the mixture is itself an
+anytime-valid e-process for i's null; (5) e-BH (Wang–Ramdas) controls
+the elimination FDR at α under ARBITRARY dependence among the input
+e-values, which round-by-round re-testing and adaptive elimination do
+not violate because each input is anytime-valid. The REJECTED former
+construction — the maximum over currently-surviving opponents — fails
+(4) (a max of e-values is not an e-value) and additionally selected its
+family from the same data (survivor-dependence); the battery's
+certifier test (race-008) demonstrates the max exceeding the E[e] ≤ 1
+Markov budget (measured 1.51 ± 0.27 vs the mixture's 0.79 ± 0.15 under
+the exchangeable null) and race-007 pins the shipped construction's
+any-elimination rate under the global null within α plus binomial
+slack, with optional stopping and adaptive elimination active. The
+certifier's first catch was the battery's own former noise fixture,
+whose per-candidate persistent offsets made it a non-null (recorded in
+the battery header).
+
+Non-finite losses are rejected STRUCTURALLY (fail closed): the
+offending candidate is condemned in the round the value appears
+(`invalid` + `eliminated`, kill fired), the poisoned value never
+reaches e-processes or running means, and winner selection uses
+`total_cmp` over means that are finite by construction — the former
+panic at winner selection is gone.
+
 ## Error model
 
 Structured panics on programmer contracts (field size, eta); loss
