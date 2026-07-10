@@ -164,11 +164,37 @@ impl LabNotebook {
         s
     }
 
-    /// A content hash of the rendered report — a report is as content-addressed
-    /// as any other ledger artifact (FNV-1a of the Markdown).
+    /// A content hash of the report STRUCTURE — a report is as
+    /// content-addressed as any other ledger artifact. Canonical
+    /// replay identity encoding (gp3.14): the former hash of the
+    /// RENDERED Markdown was non-injective — a Prose block containing
+    /// `- **name**: value unit` rendered byte-identically to a Metric
+    /// block, so structurally different notebooks could share a
+    /// content address (gated in the battery). The Markdown render
+    /// remains the human artifact; the hash binds the typed fields.
     #[must_use]
     pub fn content_hash(&self) -> u64 {
-        fnv1a(self.render_markdown().as_bytes())
+        let mut b = fs_obs::ident::IdentityBuilder::new("lab-notebook")
+            .str("title", &self.title)
+            .u64("seed", self.seed)
+            .str("version", &self.version);
+        for block in &self.blocks {
+            b = match block {
+                Block::Prose(t) => b.str("prose", t),
+                Block::Metric { name, quantity } => b
+                    .str("metric", name)
+                    .f64_bits("value", quantity.value)
+                    .str("unit", &quantity.unit),
+                Block::Step(step) => {
+                    let mut sb = b.str("step_op", &step.op);
+                    for arg in &step.args {
+                        sb = sb.str("step_arg", arg);
+                    }
+                    sb
+                }
+            };
+        }
+        b.finish().root()
     }
 }
 
@@ -247,13 +273,4 @@ pub fn semantic_diff(
             .then_with(|| x.name.cmp(&y.name))
     });
     deltas
-}
-
-fn fnv1a(bytes: &[u8]) -> u64 {
-    let mut h = 0xcbf2_9ce4_8422_2325_u64;
-    for &b in bytes {
-        h ^= u64::from(b);
-        h = h.wrapping_mul(0x100_0000_01b3);
-    }
-    h
 }

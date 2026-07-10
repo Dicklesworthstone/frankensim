@@ -269,6 +269,15 @@ fn v2_round_trip_and_fail_closed_walls() {
     assert!(EvidencePackage::from_json("{\"format_version\":2").is_err());
     assert!(EvidencePackage::from_json(&json[..json.len() / 2]).is_err());
     assert!(EvidencePackage::from_json("").is_err());
+    // Canonical fixed-width roots and JSON's control-character rule are
+    // enforced at the parser boundary, before semantic verification.
+    let root = format!("{:016x}", pkg.merkle_root());
+    let short_root = json.replacen(&format!("\"{root}\""), &format!("\"{}\"", &root[1..]), 1);
+    let err = EvidencePackage::from_json(&short_root).expect_err("short root refused");
+    assert!(err.why.contains("16 hex digits"), "{err}");
+    let raw_control = json.replacen("surrogate prediction", "surrogate\nprediction", 1);
+    let err = EvidencePackage::from_json(&raw_control).expect_err("raw control refused");
+    assert!(err.why.contains("control character"), "{err}");
 }
 
 /// qmao.6.1 — the magnitude budget attributes ERROR MAGNITUDES, not

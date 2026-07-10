@@ -63,6 +63,23 @@ impl EscalationStep for MockStep {
     }
 }
 
+struct MacVerifier;
+
+fn mac(payload: &[u8]) -> Vec<u8> {
+    let mut acc = 0xcbf2_9ce4_8422_2325u64 ^ 0xE2E;
+    for &byte in payload {
+        acc ^= u64::from(byte);
+        acc = acc.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    acc.to_le_bytes().to_vec()
+}
+
+impl fs_ledger::WaiverVerifier for MacVerifier {
+    fn verify(&self, key_id: &str, payload: &[u8], signature: &[u8]) -> bool {
+        key_id == "epi-key" && mac(payload) == signature
+    }
+}
+
 #[test]
 #[allow(clippy::too_many_lines)]
 fn epi_e2e_battery() {
@@ -132,20 +149,6 @@ fn epi_e2e_battery() {
     // The waiver path (qmao.1.1): an AUTHENTICATED grant — bound to
     // node, lineage, color, and scope, unexpired, verifier-accepted —
     // authorizes the upgrade; a bare annotation would be refused.
-    struct MacVerifier;
-    fn mac(payload: &[u8]) -> Vec<u8> {
-        let mut acc = 0xcbf2_9ce4_8422_2325u64 ^ 0xE2E;
-        for &b in payload {
-            acc ^= u64::from(b);
-            acc = acc.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-        acc.to_le_bytes().to_vec()
-    }
-    impl fs_ledger::WaiverVerifier for MacVerifier {
-        fn verify(&self, key_id: &str, payload: &[u8], signature: &[u8]) -> bool {
-            key_id == "epi-key" && mac(payload) == signature
-        }
-    }
     let claimed_color = Color::Validated {
         regime: ValidityDomain::unconstrained(),
         dataset: "engineer-judgment".to_string(),

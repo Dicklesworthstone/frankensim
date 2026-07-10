@@ -70,6 +70,24 @@ fn the_reproducibility_loop_closes_by_content_hash() {
         .prose("Optimized the bracket for mass under a stiffness floor.")
         .metric("mass", 1.5, "kg"); // 1.4 -> 1.5
     assert_ne!(altered.content_hash(), h1);
+    // gp3.14 regression: a Prose block whose body embeds a rendered
+    // step line is not the same notebook as an actual Step + Prose —
+    // but both RENDER byte-identically. The former markdown-render
+    // hash collided here; the structural hash refuses.
+    let mut real = LabNotebook::new("x", 1, "0.1.0");
+    real.step("x", Vec::new()).prose("q");
+    let mut forged = LabNotebook::new("x", 1, "0.1.0");
+    forged.prose("- repro: `x()`\nq");
+    assert_eq!(
+        forged.render_markdown(),
+        real.render_markdown(),
+        "the adversarial pair must render identically for the gate to mean anything"
+    );
+    assert_ne!(
+        forged.content_hash(),
+        real.content_hash(),
+        "prose imitating a step must not share the content address"
+    );
 }
 
 #[test]

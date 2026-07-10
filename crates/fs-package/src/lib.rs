@@ -460,20 +460,6 @@ fn json_escape(s: &str) -> String {
     out
 }
 
-/// Rank-string helper on [`Color`] for JSON.
-trait RankStr {
-    fn rank_str(&self) -> &'static str;
-}
-impl RankStr for Color {
-    fn rank_str(&self) -> &'static str {
-        match self.rank() {
-            ColorRank::Verified => "verified",
-            ColorRank::Validated => "validated",
-            ColorRank::Estimated => "estimated",
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Strict schema-v2 parser (bead qmao.6.1): the package is a PROOF
 // ARTIFACT, so parsing fails closed — unknown fields, missing fields,
@@ -514,7 +500,7 @@ struct Jp<'a> {
     at: usize,
 }
 
-impl<'a> Jp<'a> {
+impl Jp<'_> {
     fn err(&self, what: &str, why: impl Into<String>) -> ParseError {
         ParseError {
             what: format!("{what} (byte {})", self.at),
@@ -660,6 +646,9 @@ impl<'a> Jp<'a> {
                     }
                     self.at += 1;
                 }
+                Some(&c) if c < 0x20 => {
+                    return Err(self.err("string", "unescaped control character"));
+                }
                 Some(&c) => {
                     // Multi-byte UTF-8 passes through byte-wise.
                     let len = if c < 0x80 {
@@ -727,16 +716,19 @@ fn as_str(v: Jv, what: &str) -> Result<String, ParseError> {
     }
 }
 
-fn bits_f64(v: Jv, what: &str, must_be_finite: bool) -> Result<f64, ParseError> {
+fn hex_u64(v: Jv, what: &str) -> Result<u64, ParseError> {
     let hex = as_str(v, what)?;
     if hex.len() != 16 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(ParseError {
             what: what.to_string(),
-            why: format!("expected 16 hex digits of f64 bits, got {hex:?}"),
+            why: format!("expected 16 hex digits, got {hex:?}"),
         });
     }
-    let bits = u64::from_str_radix(&hex, 16).expect("validated hex");
-    let value = f64::from_bits(bits);
+    Ok(u64::from_str_radix(&hex, 16).expect("validated hexadecimal u64"))
+}
+
+fn bits_f64(v: Jv, what: &str, must_be_finite: bool) -> Result<f64, ParseError> {
+    let value = f64::from_bits(hex_u64(v, what)?);
     if must_be_finite && !value.is_finite() {
         return Err(ParseError {
             what: what.to_string(),
@@ -744,6 +736,148 @@ fn bits_f64(v: Jv, what: &str, must_be_finite: bool) -> Result<f64, ParseError> 
         });
     }
     Ok(value)
+}
+
+fn parse_package_fields(text: &str) -> Result<Vec<(String, Jv)>, ParseError> {
+    let mut parser = Jp {
+        b: text.as_bytes(),
+        at: 0,
+    };
+    let root = parser.value()?;
+    parser.ws();
+    if parser.at != parser.b.len() {
+        return Err(ParseError {
+            what: "package".to_string(),
+            why: "trailing bytes after the package object".to_string(),
+        });
+    }
+    obj_fields(root, "package")
+}
+
+fn parse_format_version(fields: &mut Vec<(String, Jv)>) -> Result<u32, ParseError> {
+    let version = match take_field(fields, "format_version", "package")? {
+        Jv::Num(n) if n.fract() == 0.0 && (0.0..=f64::from(u32::MAX)).contains(&n) => n as u32,
+        other => {
+            return Err(ParseError {
+                what: "format_version".to_string(),
+                why: format!("expected a u32, got {other:?}"),
+            });
+        }
+    };
+    if version != FORMAT_VERSION {
+        return Err(ParseError {
+            what: "format_version".to_string(),
+            why: format!("unsupported version {version} (this build reads {FORMAT_VERSION})"),
+        });
+    }
+    Ok(version)
+}
+
+fn parse_provenance(fields: &mut Vec<(String, Jv)>) -> Result<Provenance, ParseError> {
+    let mut provenance = obj_fields(take_field(fields, "provenance", "package")?, "provenance")?;
+    let parsed = Provenance {
+        code_version: as_str(
+            take_field(&mut provenance, "code_version", "provenance")?,
+            "code_version",
+        )?,
+        constellation_lock: as_str(
+            take_field(&mut provenance, "constellation_lock", "provenance")?,
+            "constellation_lock",
+        )?,
+    };
+    no_leftovers(&provenance, "provenance")?;
+    Ok(parsed)
+}
+
+fn parse_signature(fields: &mut Vec<(String, Jv)>) -> Result<Option<String>, ParseError> {
+    match take_field(fields, "signature", "package")? {
+        Jv::Null => Ok(None),
+        Jv::Str(signature) => Ok(Some(signature)),
+        other => Err(ParseError {
+            what: "signature".to_string(),
+            why: format!("expected a string or null, got {other:?}"),
+        }),
+    }
+}
+
+fn parse_magnitude_budget(fields: &mut Vec<(String, Jv)>) -> Result<MagnitudeBudget, ParseError> {
+    let mut budget = obj_fields(
+        take_field(fields, "magnitude_budget", "package")?,
+        "magnitude_budget",
+    )?;
+    let verified_width = bits_f64(
+        take_field(&mut budget, "verified_width_bits", "magnitude_budget")?,
+        "verified_width_bits",
+        false,
+    )?;
+    let estimated_dispersion = bits_f64(
+        take_field(&mut budget, "estimated_dispersion_bits", "magnitude_budget")?,
+        "estimated_dispersion_bits",
+        false,
+    )?;
+    let validated_unquantified =
+        match take_field(&mut budget, "validated_unquantified", "magnitude_budget")? {
+            Jv::Num(n) if n.fract() == 0.0 && n >= 0.0 => n as usize,
+            other => {
+                return Err(ParseError {
+                    what: "validated_unquantified".to_string(),
+                    why: format!("expected a count, got {other:?}"),
+                });
+            }
+        };
+    no_leftovers(&budget, "magnitude_budget")?;
+    Ok(MagnitudeBudget {
+        verified_width,
+        estimated_dispersion,
+        validated_unquantified,
+        quantified_total: verified_width + estimated_dispersion,
+    })
+}
+
+fn parse_claims(fields: &mut Vec<(String, Jv)>) -> Result<Vec<Claim>, ParseError> {
+    let values = match take_field(fields, "claims", "package")? {
+        Jv::Arr(items) => items,
+        other => {
+            return Err(ParseError {
+                what: "claims".to_string(),
+                why: format!("expected an array, got {other:?}"),
+            });
+        }
+    };
+    values
+        .into_iter()
+        .enumerate()
+        .map(|(index, value)| parse_claim(value, index))
+        .collect()
+}
+
+fn verify_declarations(
+    package: &EvidencePackage,
+    declared_root: u64,
+    declared_budget: MagnitudeBudget,
+) -> Result<(), ParseError> {
+    let recomputed_budget = package.magnitude_budget();
+    if recomputed_budget.verified_width.to_bits() != declared_budget.verified_width.to_bits()
+        || recomputed_budget.estimated_dispersion.to_bits()
+            != declared_budget.estimated_dispersion.to_bits()
+        || recomputed_budget.validated_unquantified != declared_budget.validated_unquantified
+    {
+        return Err(ParseError {
+            what: "magnitude_budget".to_string(),
+            why: "declared budget does not re-derive from the claims (tamper or drift)".to_string(),
+        });
+    }
+    let recomputed_root = package.merkle_root();
+    if recomputed_root != declared_root {
+        return Err(ParseError {
+            what: "merkle_root".to_string(),
+            why: format!(
+                "embedded root {declared_root:016x} does not recompute from the parsed fields \
+                 (got {recomputed_root:016x}) — tampered or forged content"
+            ),
+        });
+    }
+    Ok(())
 }
 
 impl EvidencePackage {
@@ -756,139 +890,24 @@ impl EvidencePackage {
     /// # Errors
     /// [`ParseError`] naming the field and the refusal.
     pub fn from_json(text: &str) -> Result<EvidencePackage, ParseError> {
-        let mut jp = Jp {
-            b: text.as_bytes(),
-            at: 0,
-        };
-        let root_value = jp.value()?;
-        jp.ws();
-        if jp.at != jp.b.len() {
-            return Err(ParseError {
-                what: "package".to_string(),
-                why: "trailing bytes after the package object".to_string(),
-            });
-        }
-        let mut fields = obj_fields(root_value, "package")?;
-        let format_version = match take_field(&mut fields, "format_version", "package")? {
-            Jv::Num(n) if n.fract() == 0.0 && (0.0..=f64::from(u32::MAX)).contains(&n) => n as u32,
-            other => {
-                return Err(ParseError {
-                    what: "format_version".to_string(),
-                    why: format!("expected a u32, got {other:?}"),
-                });
-            }
-        };
-        if format_version != FORMAT_VERSION {
-            return Err(ParseError {
-                what: "format_version".to_string(),
-                why: format!(
-                    "unsupported version {format_version} (this build reads {FORMAT_VERSION})"
-                ),
-            });
-        }
-        let declared_root = {
-            let hex = as_str(
-                take_field(&mut fields, "merkle_root", "package")?,
-                "merkle_root",
-            )?;
-            u64::from_str_radix(&hex, 16).map_err(|_| ParseError {
-                what: "merkle_root".to_string(),
-                why: format!("expected 16 hex digits, got {hex:?}"),
-            })?
-        };
-        let mut prov = obj_fields(
-            take_field(&mut fields, "provenance", "package")?,
-            "provenance",
+        let mut fields = parse_package_fields(text)?;
+        let format_version = parse_format_version(&mut fields)?;
+        let declared_root = hex_u64(
+            take_field(&mut fields, "merkle_root", "package")?,
+            "merkle_root",
         )?;
-        let provenance = Provenance {
-            code_version: as_str(
-                take_field(&mut prov, "code_version", "provenance")?,
-                "code_version",
-            )?,
-            constellation_lock: as_str(
-                take_field(&mut prov, "constellation_lock", "provenance")?,
-                "constellation_lock",
-            )?,
-        };
-        no_leftovers(&prov, "provenance")?;
-        let signature = match take_field(&mut fields, "signature", "package")? {
-            Jv::Null => None,
-            Jv::Str(s) => Some(s),
-            other => {
-                return Err(ParseError {
-                    what: "signature".to_string(),
-                    why: format!("expected a string or null, got {other:?}"),
-                });
-            }
-        };
-        let mut mb = obj_fields(
-            take_field(&mut fields, "magnitude_budget", "package")?,
-            "magnitude_budget",
-        )?;
-        let declared_width = bits_f64(
-            take_field(&mut mb, "verified_width_bits", "magnitude_budget")?,
-            "verified_width_bits",
-            false,
-        )?;
-        let declared_disp = bits_f64(
-            take_field(&mut mb, "estimated_dispersion_bits", "magnitude_budget")?,
-            "estimated_dispersion_bits",
-            false,
-        )?;
-        let declared_unq = match take_field(&mut mb, "validated_unquantified", "magnitude_budget")?
-        {
-            Jv::Num(n) if n.fract() == 0.0 && n >= 0.0 => n as usize,
-            other => {
-                return Err(ParseError {
-                    what: "validated_unquantified".to_string(),
-                    why: format!("expected a count, got {other:?}"),
-                });
-            }
-        };
-        no_leftovers(&mb, "magnitude_budget")?;
-        let claims_v = match take_field(&mut fields, "claims", "package")? {
-            Jv::Arr(items) => items,
-            other => {
-                return Err(ParseError {
-                    what: "claims".to_string(),
-                    why: format!("expected an array, got {other:?}"),
-                });
-            }
-        };
+        let provenance = parse_provenance(&mut fields)?;
+        let signature = parse_signature(&mut fields)?;
+        let declared_budget = parse_magnitude_budget(&mut fields)?;
+        let claims = parse_claims(&mut fields)?;
         no_leftovers(&fields, "package")?;
-        let mut claims = Vec::with_capacity(claims_v.len());
-        for (i, cv) in claims_v.into_iter().enumerate() {
-            claims.push(parse_claim(cv, i)?);
-        }
         let pkg = EvidencePackage {
             format_version,
             claims,
             provenance,
             signature,
         };
-        // SEMANTIC re-derivation: the magnitude budget and the content
-        // root must recompute from the parsed fields, bit for bit.
-        let mb2 = pkg.magnitude_budget();
-        if mb2.verified_width.to_bits() != declared_width.to_bits()
-            || mb2.estimated_dispersion.to_bits() != declared_disp.to_bits()
-            || mb2.validated_unquantified != declared_unq
-        {
-            return Err(ParseError {
-                what: "magnitude_budget".to_string(),
-                why: "declared budget does not re-derive from the claims (tamper or drift)"
-                    .to_string(),
-            });
-        }
-        let recomputed = pkg.merkle_root();
-        if recomputed != declared_root {
-            return Err(ParseError {
-                what: "merkle_root".to_string(),
-                why: format!(
-                    "embedded root {declared_root:016x} does not recompute from the parsed \
-                     fields (got {recomputed:016x}) — tampered or forged content"
-                ),
-            });
-        }
+        verify_declarations(&pkg, declared_root, declared_budget)?;
         Ok(pkg)
     }
 }
