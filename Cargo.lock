@@ -1719,6 +1719,7 @@ version = "0.0.1"
 dependencies = [
  "fs-exec",
  "fs-ir",
+ "fs-la",
  "fs-ledger",
  "fs-obs",
  "fs-plan",

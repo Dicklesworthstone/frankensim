@@ -11,11 +11,15 @@
 //! `!Send` by design.
 
 pub mod estimate;
+pub mod gemm_tune;
 pub mod governor;
 pub mod guidance;
 pub mod token;
 
 pub use estimate::{CalibrationReport, Estimate, estimate};
+pub use gemm_tune::{
+    GemmDispatch, GemmTuneError, gemm_f64_session, gemm_kernel_key, gemm_shape_class,
+};
 pub use governor::{
     Charge, DegradationEvent, DegradationStep, Enforcement, Governor, StepPhase, SubmitOutcome,
 };

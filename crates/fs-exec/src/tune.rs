@@ -55,6 +55,72 @@ impl ScheduleKind {
     }
 }
 
+/// Kernel-key prefix for the parallel-GEMM blocking lane. Consumers
+/// append the PRODUCER's bit-semantics version (fs-la's
+/// `GEMM_BIT_SEMANTICS_VERSION`) so rows measured under a different
+/// accumulation contract can never match a lookup — semantic staleness
+/// is filtered by key construction, not by trust.
+pub const GEMM_KERNEL_PREFIX: &str = "gemm-f64-parallel/bits-v";
+
+/// An MC/NC blocking plan for the parallel GEMM lane. Both members are
+/// BIT-NEUTRAL by the producer's determinism contract (pure m/n tiling);
+/// KC and the SIMD tier are part of the bit contract and stay OUTSIDE
+/// this tuning loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GemmBlockPlan {
+    /// Band height for the parallel M loop (rows per work-stealing band).
+    pub mc: usize,
+    /// Cap on the packed-B panel width (the engine takes `min(n, nc_cap)`).
+    pub nc_cap: usize,
+}
+
+impl GemmBlockPlan {
+    /// The documented cold-start default: the xlvx s5 sweep winner on
+    /// both reference machines (thin mc = 32 bands, nc = n capped so the
+    /// B pack stays L3-resident).
+    pub const COLD_START: GemmBlockPlan = GemmBlockPlan { mc: 32, nc_cap: 2048 };
+
+    /// A validated plan: `mc` a multiple of 8 in `[8, 1024]`, `nc_cap` a
+    /// multiple of 128 in `[128, 8192]` — the bounded candidate lattice.
+    ///
+    /// # Errors
+    /// [`TuneError`] outside the lattice (fail closed: an untrusted row
+    /// never becomes an unbounded pack allocation).
+    pub fn new(mc: usize, nc_cap: usize) -> Result<Self, TuneError> {
+        if mc < 8 || mc > 1024 || !mc.is_multiple_of(8) {
+            return Err(TuneError {
+                detail: format!("gemm mc {mc} outside the lattice (multiple of 8 in [8, 1024])"),
+            });
+        }
+        if nc_cap < 128 || nc_cap > 8192 || !nc_cap.is_multiple_of(128) {
+            return Err(TuneError {
+                detail: format!(
+                    "gemm nc_cap {nc_cap} outside the lattice (multiple of 128 in [128, 8192])"
+                ),
+            });
+        }
+        Ok(GemmBlockPlan { mc, nc_cap })
+    }
+
+    /// Canonical params form (`mc=32,nc-cap=2048`).
+    #[must_use]
+    pub fn canonical(&self) -> String {
+        format!("mc={},nc-cap={}", self.mc, self.nc_cap)
+    }
+
+    /// Parse the canonical form; `None` for anything else (fail closed).
+    #[must_use]
+    pub fn parse(params: &str) -> Option<Self> {
+        let rest = params.strip_prefix("mc=")?;
+        let (mc, nc) = rest.split_once(",nc-cap=")?;
+        let mc: usize = mc.parse().ok()?;
+        let nc_cap: usize = nc.parse().ok()?;
+        let plan = GemmBlockPlan::new(mc, nc_cap).ok()?;
+        // Round-trip discipline: only canonical spellings are pinnable.
+        (plan.canonical() == params).then_some(plan)
+    }
+}
+
 /// Where a decision came from — part of every recorded decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TuneSource {
@@ -586,6 +652,7 @@ pub struct Tuner {
 enum PinnedParam {
     TileEdge(TileEdge),
     Schedule(ScheduleKind),
+    GemmBlocking(GemmBlockPlan),
 }
 
 impl PinnedParam {
@@ -599,6 +666,9 @@ impl PinnedParam {
                 _ => None,
             };
         }
+        if kernel.starts_with(GEMM_KERNEL_PREFIX) {
+            return GemmBlockPlan::parse(params).map(Self::GemmBlocking);
+        }
         match params {
             "edge=4" => Some(Self::TileEdge(TileEdge::E4)),
             "edge=8" => Some(Self::TileEdge(TileEdge::E8)),
@@ -611,6 +681,7 @@ impl PinnedParam {
         match self {
             Self::TileEdge(edge) => format!("edge={}", edge.cells()),
             Self::Schedule(kind) => format!("schedule={}", kind.name()),
+            Self::GemmBlocking(plan) => plan.canonical(),
         }
     }
 }
@@ -711,6 +782,144 @@ impl Tuner {
     pub fn pin_schedule(&mut self, kind: ScheduleKind) {
         self.pins
             .insert(SCHEDULE_KERNEL.to_string(), PinnedParam::Schedule(kind));
+    }
+
+    /// The machine fingerprint this tuner's rows belong to.
+    #[must_use]
+    pub fn machine(&self) -> u64 {
+        self.fingerprint
+    }
+
+    /// True when a pin exists for `kernel` (any param kind).
+    #[must_use]
+    pub fn has_pin(&self, kernel: &str) -> bool {
+        self.pins.contains_key(kernel)
+    }
+
+    /// True when a tuned row exists for `kernel` × `shape_class`.
+    #[must_use]
+    pub fn has_row(&self, kernel: &str, shape_class: &str) -> bool {
+        self.rows
+            .contains_key(&(kernel.to_string(), shape_class.to_string()))
+    }
+
+    /// Pin a typed GEMM blocking plan for a `gemm-f64-parallel/bits-v*`
+    /// kernel key.
+    ///
+    /// # Errors
+    /// [`TuneError`] when `kernel` does not carry the GEMM prefix (a plan
+    /// pinned under the wrong key could shadow a tile-edge kernel).
+    pub fn pin_gemm_blocking(
+        &mut self,
+        kernel: impl Into<String>,
+        plan: GemmBlockPlan,
+    ) -> Result<(), TuneError> {
+        let kernel = kernel.into();
+        if !kernel.starts_with(GEMM_KERNEL_PREFIX) {
+            return Err(TuneError {
+                detail: format!(
+                    "gemm blocking pins require a {GEMM_KERNEL_PREFIX}* kernel key, got {kernel:?}"
+                ),
+            });
+        }
+        self.pins.insert(kernel, PinnedParam::GemmBlocking(plan));
+        Ok(())
+    }
+
+    /// Resolve the MC/NC blocking plan for a GEMM kernel key and shape
+    /// class: pins beat tuned rows beat [`GemmBlockPlan::COLD_START`].
+    /// A row whose params do not parse as a canonical plan resolves to
+    /// the cold-start default (it never dispatches unvalidated blocking)
+    /// and the decision records that provenance. The decision is
+    /// recorded either way for study pinning/replay.
+    pub fn gemm_blocking_for(
+        &mut self,
+        kernel: &str,
+        shape_class: &str,
+    ) -> (GemmBlockPlan, TuneSource) {
+        let (plan, source) = if let Some(PinnedParam::GemmBlocking(plan)) = self.pins.get(kernel) {
+            (*plan, TuneSource::Pinned)
+        } else if let Some(plan) = self
+            .rows
+            .get(&(kernel.to_string(), shape_class.to_string()))
+            .and_then(|row| GemmBlockPlan::parse(&row.params))
+        {
+            (plan, TuneSource::Tuned)
+        } else {
+            (GemmBlockPlan::COLD_START, TuneSource::ColdStart)
+        };
+        self.decisions.push(TuningDecision {
+            kernel: format!("{kernel}#{shape_class}"),
+            params: plan.canonical(),
+            source: source.name(),
+        });
+        (plan, source)
+    }
+
+    /// Record a measured GEMM sweep row: the winning plan plus its RANKED
+    /// wall-time candidate evidence. Same key replaces the row and
+    /// increments `refresh` (idempotence witness).
+    ///
+    /// # Errors
+    /// [`TuneError`] when the kernel key lacks the GEMM prefix, or the
+    /// evidence makes no ranked-candidate claim (a single unranked timing
+    /// cannot justify a selection).
+    pub fn record_gemm_row(
+        &mut self,
+        kernel: &str,
+        shape_class: &str,
+        plan: GemmBlockPlan,
+        evidence: TuneEvidence,
+    ) -> Result<(), TuneError> {
+        if !kernel.starts_with(GEMM_KERNEL_PREFIX) {
+            return Err(TuneError {
+                detail: format!(
+                    "gemm rows require a {GEMM_KERNEL_PREFIX}* kernel key, got {kernel:?}"
+                ),
+            });
+        }
+        if evidence.candidate_separation_ppm().is_none() {
+            return Err(TuneError {
+                detail: "a gemm selection row requires ranked wall-time candidate evidence"
+                    .to_string(),
+            });
+        }
+        self.insert_row(kernel, shape_class, plan.canonical(), evidence)
+    }
+
+    /// The canonical JSON line for one row (what an external cache — the
+    /// ledger `tune` table — stores and [`Tuner::adopt_row_json`] reads).
+    #[must_use]
+    pub fn row_json(&self, kernel: &str, shape_class: &str) -> Option<String> {
+        self.rows
+            .get(&(kernel.to_string(), shape_class.to_string()))
+            .map(TuneRow::to_json)
+    }
+
+    /// Adopt one canonical JSON tune-row line from an external cache (the
+    /// ledger `tune` table). Fail-closed filters: the line must parse as
+    /// a canonical row, its evidence must re-validate, and its machine
+    /// fingerprint must equal THIS tuner's — a stale (other-machine) or
+    /// tampered row is refused, never silently adopted. The stored
+    /// `refresh` counter is preserved.
+    ///
+    /// # Errors
+    /// [`TuneError`] naming the refusal.
+    pub fn adopt_row_json(&mut self, line: &str) -> Result<(), TuneError> {
+        let row = parse_row(line).ok_or_else(|| TuneError {
+            detail: "external tune row is not a canonical row line".to_string(),
+        })?;
+        if row.machine != self.fingerprint {
+            return Err(TuneError {
+                detail: format!(
+                    "external tune row is stale: machine {:016x} != this machine {:016x}",
+                    row.machine, self.fingerprint
+                ),
+            });
+        }
+        self.rows
+            .insert((row.kernel.clone(), row.shape_class.clone()), row);
+        Ok(())
     }
 
     /// Validate and pin canonical params from a recorded decision.
