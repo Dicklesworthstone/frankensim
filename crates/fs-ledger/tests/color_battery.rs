@@ -386,6 +386,7 @@ fn col_003_laundering_gauntlet() {
 /// travels in the provenance hash; annotations alone authorize
 /// nothing; tamper/replay/expiry/rotation/no-crypto all fail closed.
 #[test]
+#[allow(clippy::too_many_lines)] // tamper, replay, expiry, rotation, and no-crypto form one auth story
 fn col_004_waiver_in_provenance() {
     let state = BTreeMap::new();
     let verifier = TestVerifier {
