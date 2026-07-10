@@ -430,7 +430,7 @@ fn race_010_checked_span_catches_the_clipping_counterexample() {
         let mut loss = |i: usize, t: u64| {
             if i == 0 {
                 3.0
-            } else if mix64(seed ^ mix64(t)) & 3 == 0 {
+            } else if mix64(seed ^ mix64(t)).trailing_zeros() >= 2 {
                 0.0
             } else {
                 4.0
