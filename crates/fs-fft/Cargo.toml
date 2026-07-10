@@ -14,6 +14,7 @@ layer = "L1"
 fs-math = { path = "../fs-math" }
 
 [dev-dependencies]
+fs-roofline = { path = "../fs-roofline" }
 
 [lints]
 workspace = true

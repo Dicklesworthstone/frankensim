@@ -149,9 +149,28 @@ impl Fft {
         }
     }
 
-    /// Radix-2 Stockham autosort: ping-pongs between `data` and `scratch`
-    /// with no bit-reversal pass; butterfly order is a pure function of the
-    /// stage structure (deterministic by construction).
+    /// Twiddle w^k = exp(−2πik/n) for k < 3n/4: the table stores the
+    /// first half-turn; the half-turn symmetry w^(k+n/2) = −w^k extends
+    /// it EXACTLY (negation is exact) for the radix-4 stages' 3·p·s
+    /// indices.
+    fn tw(&self, k: usize) -> C64 {
+        if k < self.table.len() {
+            self.table[k]
+        } else {
+            let t = self.table[k - self.table.len()];
+            C64::new(-t.re, -t.im)
+        }
+    }
+
+    /// Mixed radix-4/2 Stockham autosort (bead 27d3): ping-pongs between
+    /// `data` and `scratch` with no bit-reversal pass; butterfly order is
+    /// a pure function of the stage structure (deterministic by
+    /// construction). Radix-4 stages do HALF the full-array passes of the
+    /// former radix-2 formulation — the memory-bound roofline lever — and
+    /// one radix-2 stage absorbs an odd log₂ residue. The radix change
+    /// legitimately changed twiddle-application order and hence output
+    /// bits: the golden hash was bumped ONCE with that justification
+    /// (see the golden test).
     fn transform(&self, data: &mut [C64], scratch: &mut [C64], inverse: bool) {
         let n = self.n;
         assert_eq!(data.len(), n, "data length must equal the planned size {n}");
@@ -163,15 +182,11 @@ impl Fft {
         if n == 1 {
             return;
         }
-        // DIF Stockham (OTFFT formulation): at each stage the current
-        // transform length n_cur halves while the stride s doubles; the
-        // butterfly is (a+b, (a−b)·w_p) with w_p = exp(−2πi·p/n_cur)
-        // = table[p·s] (since s = n/n_cur). Autosorting: no reversal pass.
         let mut n_cur = n;
         let mut s = 1usize;
         let mut src_is_data = true;
-        while n_cur > 1 {
-            let m = n_cur / 2;
+        while n_cur >= 4 {
+            let m = n_cur / 4;
             {
                 let (src, dst): (&[C64], &mut [C64]) = if src_is_data {
                     (&*data, &mut *scratch)
@@ -179,20 +194,53 @@ impl Fft {
                     (&*scratch, &mut *data)
                 };
                 for p in 0..m {
-                    let mut w = self.table[p * s];
+                    let (mut w1, mut w2, mut w3) =
+                        (self.tw(p * s), self.tw(2 * p * s), self.tw(3 * p * s));
                     if inverse {
-                        w = w.conj();
+                        (w1, w2, w3) = (w1.conj(), w2.conj(), w3.conj());
                     }
                     for q in 0..s {
                         let a = src[q + s * p];
                         let b = src[q + s * (p + m)];
-                        dst[q + s * 2 * p] = a.add(b);
-                        dst[q + s * (2 * p + 1)] = a.sub(b).mul(w);
+                        let c = src[q + s * (p + 2 * m)];
+                        let d = src[q + s * (p + 3 * m)];
+                        let t0 = a.add(c);
+                        let t1 = a.sub(c);
+                        let t2 = b.add(d);
+                        let t3 = b.sub(d);
+                        // ∓i·t3: forward −i (DIF kernel), inverse +i.
+                        let t3i = if inverse {
+                            C64::new(-t3.im, t3.re)
+                        } else {
+                            C64::new(t3.im, -t3.re)
+                        };
+                        dst[q + s * 4 * p] = t0.add(t2);
+                        dst[q + s * (4 * p + 1)] = t1.add(t3i).mul(w1);
+                        dst[q + s * (4 * p + 2)] = t0.sub(t2).mul(w2);
+                        dst[q + s * (4 * p + 3)] = t1.sub(t3i).mul(w3);
                     }
                 }
             }
             n_cur = m;
-            s *= 2;
+            s *= 4;
+            src_is_data = !src_is_data;
+        }
+        if n_cur == 2 {
+            let (src, dst): (&[C64], &mut [C64]) = if src_is_data {
+                (&*data, &mut *scratch)
+            } else {
+                (&*scratch, &mut *data)
+            };
+            let mut w = self.table[0];
+            if inverse {
+                w = w.conj();
+            }
+            for q in 0..s {
+                let a = src[q];
+                let b = src[q + s];
+                dst[q] = a.add(b);
+                dst[q + s] = a.sub(b).mul(w);
+            }
             src_is_data = !src_is_data;
         }
         if !src_is_data {
@@ -762,9 +810,16 @@ mod tests {
         );
     }
 
-    /// Recorded on aarch64-apple (M4 Pro); verified identical on x86-64
-    /// (Threadripper, trj) — the cross-ISA bit-determinism evidence.
-    const GOLDEN_HASH: u64 = 0xbd55_68d2_33f4_b4bc;
+    /// JUSTIFIED BUMP (bead 27d3, 2026-07-09): the transform moved from
+    /// pure radix-2 to mixed radix-4/2 Stockham — twiddle-application
+    /// ORDER changes with the radix, which legitimately changes output
+    /// bits (the bump the bead pre-authorized). Correctness is pinned by
+    /// the unchanged naive-DFT oracle, Parseval, shift, and round-trip
+    /// tests, all green across the change. Previous radix-2 golden:
+    /// 0xbd55_68d2_33f4_b4bc (recorded M4 Pro, verified on trj).
+    /// This value re-recorded on aarch64-apple (M4 Pro); the x86-64
+    /// cross-ISA row is ARMED PENDING the next trj run.
+    const GOLDEN_HASH: u64 = 0x0506_a4a0_955d_cf8e;
 
     #[test]
     fn non_power_of_two_is_refused_loudly() {

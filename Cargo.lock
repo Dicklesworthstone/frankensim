@@ -1070,6 +1070,7 @@ name = "fs-fft"
 version = "0.0.1"
 dependencies = [
  "fs-math",
+ "fs-roofline",
 ]
 
 [[package]]
