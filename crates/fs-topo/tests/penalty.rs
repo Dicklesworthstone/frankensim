@@ -278,3 +278,57 @@ fn tp_005_duality_route_and_tunnel_counting() {
          satisfies a 1-tunnel routing spec and is penalized under a 0-tunnel spec",
     );
 }
+
+#[test]
+fn internal_basins_are_not_phantom_components() {
+    // Bead 84ib regression: a CONNECTED solid with two internal density
+    // basins separated by a still-solid saddle produced two long-lived
+    // sublevel bars — and a false excess-component penalty that
+    // contradicted the report's own betti = (1, 0, 0). The count
+    // authority is b₀ at the spec level (bars alive at the level), so
+    // this design is compliant on the component channel.
+    let field = VoxelField {
+        dims: [5, 1, 1],
+        values: vec![-1.0, -0.4, -0.3, -0.4, -1.0],
+        h: 1.0,
+    };
+    let spec = TopoSpec {
+        components: 1,
+        tunnels: 0,
+        enclosed_voids: 0,
+        tau: 0.3,
+        level: 0.0,
+    };
+    let report = evaluate(&field, &spec);
+    assert_eq!(report.betti, (1, 0, 0), "one connected solid");
+    assert!(
+        !report
+            .attributions
+            .iter()
+            .any(|a| a.channel == "excess-component"),
+        "internal basins must not be penalized as components: {:?}",
+        report
+            .attributions
+            .iter()
+            .map(|a| a.channel)
+            .collect::<Vec<_>>()
+    );
+    // And a genuinely disconnected solid still fires the channel.
+    let split = VoxelField {
+        dims: [5, 1, 1],
+        values: vec![-1.0, -0.4, 0.5, -0.4, -1.0],
+        h: 1.0,
+    };
+    let report2 = evaluate(&split, &spec);
+    assert_eq!(
+        report2.betti.0, 2,
+        "the saddle above level splits the solid"
+    );
+    assert!(
+        report2
+            .attributions
+            .iter()
+            .any(|a| a.channel == "excess-component"),
+        "a real second component must still be penalized"
+    );
+}

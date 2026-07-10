@@ -191,21 +191,33 @@ pub fn evaluate(field: &VoxelField, spec: &TopoSpec) -> TopoPenalty {
     let b = betti(field, spec.level);
     let mut attributions = Vec::new();
     let mut total = 0.0f64;
-    // H0: rank bars by persistence descending (deterministic: then by
-    // birth). Essential bars (infinite death) rank first.
-    let mut ranked: Vec<&Bar> = bars0.iter().collect();
-    ranked.sort_by(|x, y| {
+    // H0 (bead 84ib): the component count of THE SOLID is the number of
+    // sublevel components ALIVE AT the spec level — bars with
+    // birth ≤ level < death — which coincides with b₀(level). Counting
+    // long-lived bars ANYWHERE in the filtration (the old form) turned
+    // internal density basins separated by still-solid saddles into
+    // phantom components: a connected solid with two basins carried a
+    // false excess-component penalty while the SAME report said
+    // betti = (1, ·, ·). b₀ is the count authority; alive bars supply
+    // the voxel attribution, ranked so the LEAST persistent (most
+    // weakly attached) components are carved first.
+    let mut alive: Vec<&Bar> = bars0
+        .iter()
+        .filter(|bar| bar.birth <= spec.level && bar.death > spec.level)
+        .collect();
+    alive.sort_by(|x, y| {
         y.persistence()
             .total_cmp(&x.persistence())
             .then(x.birth.total_cmp(&y.birth))
     });
-    let persistent = ranked.iter().filter(|b| b.persistence() > spec.tau).count();
-    if persistent > spec.components as usize {
-        for bar in ranked
-            .iter()
-            .filter(|b| b.persistence() > spec.tau)
-            .skip(spec.components as usize)
-        {
+    debug_assert_eq!(
+        alive.len(),
+        b.0 as usize,
+        "alive sublevel bars must agree with b0 (matching connectivity)"
+    );
+    let solid_components = b.0 as usize;
+    if solid_components > spec.components as usize {
+        for bar in alive.iter().skip(spec.components as usize) {
             let amount = bar.persistence().min(1e12); // essential guard
             total += amount;
             attributions.push(Attribution {
@@ -215,8 +227,8 @@ pub fn evaluate(field: &VoxelField, spec: &TopoSpec) -> TopoPenalty {
                 direction: -1.0,
             });
         }
-    } else if (persistent as u32) < spec.components {
-        let amount = f64::from(spec.components - persistent as u32) * spec.tau;
+    } else if (solid_components as u32) < spec.components {
+        let amount = f64::from(spec.components - solid_components as u32) * spec.tau;
         total += amount;
         attributions.push(Attribution {
             channel: "component-deficit",
