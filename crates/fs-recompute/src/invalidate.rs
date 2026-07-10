@@ -26,7 +26,7 @@
 //! correct, just less clever — and the SKIP YIELD metric says which
 //! ops need tighter bounds (risk R4, owned here).
 
-use crate::{Store, StoreError};
+use crate::{Store, StoreError, json_f64};
 use fs_evidence::Color;
 use fs_ledger::ContentHash;
 use std::collections::BTreeMap;
@@ -56,6 +56,9 @@ pub enum RecomputeReason {
     TieOnBoundary,
     /// An incoming sensitivity was non-finite: FAIL CLOSED.
     NonFiniteSensitivity,
+    /// A sensitivity bound was negative and therefore not a bound:
+    /// FAIL CLOSED.
+    NegativeSensitivity,
     /// The node's recorded slack is negative (over budget): never
     /// skippable.
     NegativeSlack,
@@ -95,6 +98,9 @@ pub struct InvalidationPlan {
     pub skip_yield: f64,
     /// Canonical JSON rows (verdicts with verified-color skip claims).
     pub rows: Vec<String>,
+    /// Store mutation revision against which every skip certificate was
+    /// computed. Private so callers cannot forge plan freshness.
+    pub(crate) store_revision: u64,
 }
 
 /// Planning errors.
@@ -142,6 +148,7 @@ struct Touch {
     slack: f64,
     source: bool,
     nonfinite: bool,
+    negative_sensitivity: bool,
 }
 
 /// Plan the recompute frontier for `perturbations` (node, |δ| bound).
@@ -179,7 +186,16 @@ pub fn plan(
     for &(h, d) in perturbations {
         seq_of(&h)?;
         if d != 0.0 {
-            sources.insert(*h.as_bytes(), d.abs());
+            let magnitude = if d.is_finite() {
+                d.abs()
+            } else {
+                f64::INFINITY
+            };
+            let accumulated = sources.entry(*h.as_bytes()).or_insert(0.0);
+            *accumulated += magnitude;
+            if !accumulated.is_finite() {
+                *accumulated = f64::INFINITY;
+            }
         }
     }
     let mut order: Vec<(u64, [u8; 32], ContentHash)> = Vec::new();
@@ -195,22 +211,26 @@ pub fn plan(
         let source_delta = sources.get(&key).copied();
         let mut bound = source_delta.unwrap_or(0.0);
         let mut nonfinite = false;
+        let mut negative_sensitivity = false;
         if let Some(es) = incoming.get(&key) {
             for e in es {
                 if let Some(&d) = delta.get(e.from.as_bytes()) {
                     if !e.sensitivity.is_finite() {
                         nonfinite = true;
+                    } else if e.sensitivity < 0.0 {
+                        negative_sensitivity = true;
+                    } else {
+                        bound += e.sensitivity * d;
                     }
-                    bound += e.sensitivity * d;
                 }
             }
         }
-        if bound == 0.0 && !nonfinite {
+        if bound == 0.0 && !nonfinite && !negative_sensitivity {
             continue; // untouched: not on the frontier at all
         }
         delta.insert(
             key,
-            if bound.is_finite() {
+            if bound.is_finite() && !nonfinite && !negative_sensitivity {
                 bound
             } else {
                 f64::INFINITY
@@ -224,6 +244,7 @@ pub fn plan(
             slack: node.effective_slack(),
             source: source_delta.is_some(),
             nonfinite,
+            negative_sensitivity,
         });
     }
     // Pass 2: initial verdict per node (fail-closed hardening).
@@ -234,6 +255,8 @@ pub fn plan(
                 Some(RecomputeReason::SourcePerturbed)
             } else if t.nonfinite || !t.bound.is_finite() {
                 Some(RecomputeReason::NonFiniteSensitivity)
+            } else if t.negative_sensitivity {
+                Some(RecomputeReason::NegativeSensitivity)
             } else if t.slack < 0.0 {
                 Some(RecomputeReason::NegativeSlack)
             } else if t.bound == t.slack {
@@ -282,7 +305,10 @@ pub fn plan(
                 }
             }
             Some(r) => Verdict::Recompute {
-                bound: if matches!(r, RecomputeReason::NonFiniteSensitivity) {
+                bound: if matches!(
+                    r,
+                    RecomputeReason::NonFiniteSensitivity | RecomputeReason::NegativeSensitivity
+                ) {
                     f64::INFINITY
                 } else {
                     t.bound
@@ -315,9 +341,10 @@ pub fn plan(
             Verdict::Recompute { bound, reason } => {
                 rows.push(format!(
                     "{{\"event\":\"invalidation\",\"node\":\"{}\",\
-                     \"verdict\":\"recompute\",\"bound\":{bound:.3e},\
+                     \"verdict\":\"recompute\",\"bound\":{},\
                      \"reason\":\"{reason:?}\"}}",
-                    t.hash.to_hex()
+                    t.hash.to_hex(),
+                    json_f64(*bound)
                 ));
             }
         }
@@ -332,20 +359,26 @@ pub fn plan(
         },
         verdicts,
         rows,
+        store_revision: store.revision(),
     })
 }
 
 /// Apply a plan to the store: skipped nodes BURN their absorbed bound
-/// into `achieved_error` (repeat perturbations see the reduced slack —
-/// slack is a real, spendable resource).
+/// into runtime state (repeat perturbations see the reduced slack —
+/// slack is a real, spendable resource). The plan revision is validated
+/// before any burn, so a stale plan cannot partially mutate the store.
 ///
 /// # Errors
-/// [`StoreError::UnknownNode`] if the store changed under the plan.
+/// [`StoreError::StalePlan`] or another fail-closed store error if the
+/// state no longer matches the plan's certificate.
 pub fn apply_plan(store: &mut Store, plan: &InvalidationPlan) -> Result<(), StoreError> {
-    for (hash, verdict) in &plan.verdicts {
-        if let Verdict::Skip { bound, .. } = verdict {
-            store.burn_slack(hash, *bound)?;
-        }
-    }
-    Ok(())
+    let burns = plan
+        .verdicts
+        .iter()
+        .filter_map(|(hash, verdict)| match verdict {
+            Verdict::Skip { bound, .. } => Some((*hash, *bound)),
+            Verdict::Recompute { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    store.commit_burns(plan.store_revision, &burns)
 }

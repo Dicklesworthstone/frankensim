@@ -338,3 +338,33 @@ fn api_005_kill_criterion_replay() {
         ),
     );
 }
+
+/// api-006 — plans are bound to the exact slack snapshot they certify.
+/// Committing one of two concurrent plans makes the other stale; the
+/// refusal is atomic and leaves slack/telemetry unchanged.
+#[test]
+fn api_006_stale_plan_refuses_atomically() {
+    let (store, edges, h) = diamond();
+    let mut api = RecomputeApi::new(store, edges, 1.0);
+    let first = api.perturb(&h[0], 8e-3).expect("first plan");
+    let stale = api.perturb(&h[0], 8e-3).expect("concurrent plan");
+    api.commit(&first).expect("first commit");
+
+    let left_before = api.store.get(&h[1]).expect("left").effective_slack();
+    let sink_before = api.store.get(&h[3]).expect("sink").effective_slack();
+    let telemetry_before = api.skip_yield().dashboard_json();
+    let refused = api.commit(&stale);
+    let left_after = api.store.get(&h[1]).expect("left").effective_slack();
+    let sink_after = api.store.get(&h[3]).expect("sink").effective_slack();
+    let telemetry_after = api.skip_yield().dashboard_json();
+
+    verdict(
+        "api-006",
+        matches!(refused, Err(StoreError::StalePlan { .. }))
+            && left_before.to_bits() == left_after.to_bits()
+            && sink_before.to_bits() == sink_after.to_bits()
+            && telemetry_before == telemetry_after,
+        "a plan certified against pre-burn slack refuses after a sibling plan commits; \
+         the stale commit performs no partial burns and records no false telemetry",
+    );
+}

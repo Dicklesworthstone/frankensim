@@ -98,12 +98,23 @@ fn rcs_001_hashing_stability() {
     m.required_tolerance = 2e-4;
     probes.push(m.content_hash());
     let all_differ = probes.iter().all(|p| *p != base.content_hash());
+    // Delimiter injection must not alias a real input edge. The v1
+    // line-oriented encoding serialized these two distinct records to
+    // identical bytes.
+    let injected_input = hash_bytes(b"injected-input");
+    let mut injected = base.clone();
+    injected.op_id = format!("assemble\nin:{}", injected_input.to_hex());
+    injected.input_hashes.clear();
+    let mut structured = base.clone();
+    structured.op_id = "assemble".to_string();
+    structured.input_hashes = vec![injected_input];
+    let injection_safe = injected.content_hash() != structured.content_hash();
     // Negative slack is representable and first-class.
     let over_budget = record("expensive-op", 7, 1e-3, 1e-4);
+    let over_budget_row = over_budget.to_row(&hash_bytes(b"x"));
     let negative = over_budget.slack() < 0.0
-        && over_budget
-            .to_row(&hash_bytes(b"x"))
-            .contains("\"slack\":-9.0");
+        && over_budget_row.contains("\"slack\":-")
+        && over_budget_row.contains("\"slack_bits\":");
     // Deep DAG: a 1000-node chain where each node's input is the
     // previous node's hash — stable across two builds.
     let deep = |n: u32| -> fs_ledger::ContentHash {
@@ -135,14 +146,19 @@ fn rcs_001_hashing_stability() {
             && canonical
             && same_bits
             && all_differ
+            && injection_safe
             && negative
             && deep_stable
             && empty_ok
             && single_ok,
-        "node hashes are repeat-stable and param-order canonical, EVERY one of the \
-         seven fields perturbs the hash (floats by bits), negative slack is \
-         first-class in the row, a 1000-deep chain is hash-stable, and \
-         empty/single-node stores behave",
+        &format!(
+            "node hashes are repeat-stable, param-order canonical, and injective \
+             across delimiter-looking caller strings; every field differs and \
+             boundary stores behave [stable={stable} canonical={canonical} \
+             same_bits={same_bits} all_differ={all_differ} injection_safe={injection_safe} \
+             negative={negative} deep_stable={deep_stable} empty={empty_ok} \
+             single={single_ok}]"
+        ),
     );
 }
 
@@ -184,6 +200,15 @@ fn rcs_003_skip_soundness() {
     let tightened = store.can_skip(&r, 1e-7);
     let tightened_ok = matches!(tightened, SkipDecision::ToleranceTightened { deficit }
         if (deficit - 9e-7).abs() < 1e-12);
+    let invalid_tolerances = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0]
+        .into_iter()
+        .all(|tolerance| {
+            matches!(
+                store.can_skip(&r, tolerance),
+                SkipDecision::InvalidTolerance { tolerance_bits }
+                    if tolerance_bits == tolerance.to_bits()
+            )
+        });
     let mut other = r.clone();
     other.rng_seed = 999;
     let miss = store.can_skip(&other, 1e-4);
@@ -195,11 +220,16 @@ fn rcs_003_skip_soundness() {
     let still_hits = matches!(store.can_skip(&retolerated, 1e-4), SkipDecision::Hit { .. });
     verdict(
         "rcs-003",
-        hit_ok && boundary_ok && tightened_ok && miss_ok && still_hits,
+        hit_ok
+            && boundary_ok
+            && tightened_ok
+            && invalid_tolerances
+            && miss_ok
+            && still_hits,
         "skips carry slack certificates (9.9e-5 on the fixture), the exact boundary \
          is a zero-slack hit, tightened tolerances name their deficit (9e-7), \
-         unknown identities miss, and the skip identity correctly ignores recorded \
-         tolerances",
+         malformed tolerances fail closed, unknown identities miss, and the skip \
+         identity correctly ignores recorded tolerances",
     );
 }
 
@@ -363,6 +393,18 @@ fn rcs_006_rows_and_fork() {
         && r1[0].contains("\"achieved\":")
         && r1[0].contains("\"required\":")
         && r1[0].contains("\"slack\":");
+    let mut escaped_record = record("quoted \"op\"\nnext", 9, 1e-6, 1e-4);
+    escaped_record.params.push((
+        "quoted\"key".to_string(),
+        ParamValue::Str("line1\nline2".to_string()),
+    ));
+    let escaped = escaped_record.to_row(&hash_bytes(b"escaped"));
+    let row_is_structured = escaped.contains("quoted \\\"op\\\"\\nnext")
+        && escaped.contains("line1\\nline2")
+        && !escaped.contains("line1\nline2")
+        && escaped.contains("\"input_hashes\":[")
+        && escaped.contains("\"params\":[")
+        && escaped.contains("\"code_version\":");
     let mut em = fs_obs::Emitter::new("fs-recompute/conformance", "rcs-006/slack");
     let line = em
         .emit(
@@ -378,8 +420,34 @@ fn rcs_006_rows_and_fork() {
     println!("{line}");
     verdict(
         "rcs-006",
-        rows_deterministic && fork_stable && has_fields,
+        rows_deterministic && fork_stable && has_fields && row_is_structured,
         "ledger rows carry all seven fields plus slack, identical builds give \
-         bitwise-identical rows, and snapshots are fork-stable",
+         bitwise-identical rows, caller strings are JSON-escaped, and snapshots are \
+         fork-stable",
+    );
+}
+
+/// rcs-007 — malformed error magnitudes and slack burns fail closed.
+#[test]
+fn rcs_007_invalid_magnitudes_refuse() {
+    let mut store = Store::new();
+    let invalid_nan = store.put(record("nan", 1, f64::NAN, 1.0), b"nan");
+    let invalid_negative = store.put(record("negative", 1, 0.0, -1.0), b"negative");
+    let valid = record("valid", 1, 0.0, 1.0);
+    let PutOutcome::Inserted(node) = store.put(valid, b"valid").expect("valid insert") else {
+        unreachable!("fresh record");
+    };
+    let before = store.get(&node).expect("node").effective_slack();
+    let burn = store.burn_slack(&node, -0.5);
+    let after = store.get(&node).expect("node").effective_slack();
+    let pass = matches!(invalid_nan, Err(StoreError::InvalidErrorBudget { .. }))
+        && matches!(invalid_negative, Err(StoreError::InvalidErrorBudget { .. }))
+        && matches!(burn, Err(StoreError::InvalidSlackBurn { .. }))
+        && before.to_bits() == after.to_bits();
+    verdict(
+        "rcs-007",
+        pass,
+        "NaN/negative error budgets and negative slack burns refuse without mutating \
+         the store; error magnitudes cannot manufacture reusable slack",
     );
 }

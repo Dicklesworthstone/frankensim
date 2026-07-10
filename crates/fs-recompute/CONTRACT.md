@@ -15,9 +15,11 @@ CONTRACT (risk R2 owned here).
 
 - `NodeRecord` (the seven-field schema) with `slack()` (negative
   representable — over-budget nodes are first-class and never satisfy
-  skips), `content_hash()` (canonical serialization: params sorted by
-  key, floats by BITS, inputs in order, fs-ledger's Blake3-class tree
-  hash), and `to_row()` (all seven fields + slack).
+  skips), `content_hash()` (versioned length-prefixed binary canonical
+  serialization: params sorted by key, floats by BITS, inputs in order,
+  fs-ledger's Blake3-class tree hash), and `to_row()` (valid JSON carrying
+  all seven fields + slack, including bit forms). Caller strings cannot
+  inject field delimiters or collide with structured fields.
 - `Store::put(record, artifact_bytes)`: content-addressed insert;
   identical record + identical artifact is a write-time memo hit
   (`Deduped`); identical record + DIFFERENT artifact bytes is
@@ -28,7 +30,8 @@ CONTRACT (risk R2 owned here).
   Identity for skips excludes the recorded tolerances (a node cached
   under a looser requirement still hits if it ACHIEVED enough);
   `Hit{slack}` is the certificate, `ToleranceTightened{deficit}` names
-  the recompute reason, `Miss` is honest absence.
+  the recompute reason, malformed tolerances return `InvalidTolerance`,
+  and `Miss` is honest absence.
 - `Store::pin(node, PinReason::{EvidencePackage, Contract})`: pinned
   nodes are NEVER evicted; `evict_unpinned(keep)` removes oldest
   unpinned first (deterministic) and cannot touch pins by
@@ -45,8 +48,8 @@ CONTRACT (risk R2 owned here).
    identical record with different bytes errors with both artifact
    hashes named (rcs-002).
 3. Skip decisions carry slack certificates, the exact boundary is a
-   zero-slack hit, deficits are named, and skip identity ignores
-   recorded tolerances (rcs-003).
+   zero-slack hit, deficits are named, malformed requested tolerances
+   fail closed, and skip identity ignores recorded tolerances (rcs-003).
 4. THE CERTIFICATION (G5-at-scale primitive): a fixture study —
    deterministic tile reduction (fs-exec `det_sum` per tile +
    order-fixed `pairwise_fold`) — produces BIT-IDENTICAL artifacts
@@ -57,6 +60,8 @@ CONTRACT (risk R2 owned here).
    first; pinning unknown nodes teaches (rcs-005).
 6. Ledger rows carry all seven fields + slack; rows and snapshots are
    bitwise-deterministic across builds (rcs-006).
+7. Error budgets and slack burns are finite, non-negative magnitudes;
+   malformed values refuse without mutation (rcs-007).
 
 ## Tolerance-aware invalidation (bead lmp4.7, feature-gated)
 
@@ -72,7 +77,10 @@ SEPARATE from the immutable record identity — the suite caught an
 early design where burning mutated the hashed record and broke
 identity), so repeat perturbations see the spent slack. Fail-closed
 hardening: exact ties recompute; non-finite sensitivities force
-recompute; negative slack never skips; δ = 0 is an empty frontier.
+recompute; finite negative sensitivities also force recompute because
+they are not magnitude bounds; duplicate perturbations at one source
+sum by the triangle inequality; negative slack never skips; δ = 0 is an
+empty frontier.
 Skip YIELD is the R4 health metric; loose bounds degrade gracefully
 to hash-memoization behavior, still correct.
 
@@ -109,13 +117,17 @@ order LRU would destroy, pins survive, saturation is structured
 dashboard live via fs-obs (api-004); the kill-criterion replay
 machinery measures certified-vs-memo cost on a 100-variant trace
 (fixture-scale; the production decision runs on recorded agent
-traces) (api-005).
+traces) (api-005). Every plan captures the store mutation revision it
+certified; committing another plan or otherwise changing the store makes
+the older plan a structured `StalePlan` refusal, validated before any
+burn or telemetry mutation (api-006).
 
 ## Error model
 
 `StoreError::DeterminismViolation` (stop-the-line, with likely-cause
 teaching text: unordered reduction, unstable sort, uninitialized
-padding) and `UnknownNode`. Nothing panics across the boundary.
+padding), `UnknownNode`, malformed error/burn refusals, and `StalePlan`.
+Nothing panics across the boundary.
 
 ## Determinism class
 
@@ -143,7 +155,7 @@ stay green. Adds fs-evidence (the verified-color skip claims).
 
 ## Conformance tests
 
-`tests/conformance.rs`, cases rcs-001..rcs-006 — JSON-line verdicts,
+`tests/conformance.rs`, cases rcs-001..rcs-007 — JSON-line verdicts,
 seeded LCG randomness, the fs-obs slack-table event. Any
 reimplementation must pass the suite unchanged.
 

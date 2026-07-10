@@ -175,8 +175,9 @@ fn inv_001_absorption() {
 }
 
 /// inv-002 — fail-closed hardening: exact ties recompute; negative
-/// slack never skips; non-finite sensitivities force recompute;
-/// non-topological edges refuse.
+/// slack never skips; non-finite or negative sensitivities force
+/// recompute; duplicate perturbations combine; non-topological edges
+/// refuse.
 #[test]
 fn inv_002_fail_closed() {
     let mut store = Store::new();
@@ -187,6 +188,10 @@ fn inv_002_fail_closed() {
     let c = put(&mut store, "c2", 0.01, 0.001, b"c2");
     // Downstream of a non-finite edge.
     let d = put(&mut store, "d2", 0.0, 1e9, b"d2");
+    // A finite negative value is not a valid magnitude bound.
+    let e = put(&mut store, "e2", 0.0, 1e9, b"e2");
+    // Duplicate source perturbations sum to 0.008, exceeding this slack.
+    let f = put(&mut store, "f2", 0.0, 0.007, b"f2");
     let edges = vec![
         Edge {
             from: a,
@@ -202,6 +207,16 @@ fn inv_002_fail_closed() {
             from: a,
             to: d,
             sensitivity: f64::INFINITY,
+        },
+        Edge {
+            from: a,
+            to: e,
+            sensitivity: -0.5,
+        },
+        Edge {
+            from: a,
+            to: f,
+            sensitivity: 1.0,
         },
     ];
     let p = plan(&store, &edges, &[(a, 0.01)]).expect("plan");
@@ -232,6 +247,24 @@ fn inv_002_fail_closed() {
             ..
         })
     );
+    let negative_sensitivity = matches!(
+        find(e),
+        Some(Verdict::Recompute {
+            reason: RecomputeReason::NegativeSensitivity,
+            ..
+        })
+    );
+    let duplicate_plan = plan(&store, &edges, &[(a, 0.004), (a, 0.004)]).expect("duplicates");
+    let duplicates_sum = duplicate_plan.verdicts.iter().any(|(h, verdict)| {
+        *h == f
+            && matches!(
+                verdict,
+                Verdict::Recompute {
+                    reason: RecomputeReason::BoundExceedsSlack,
+                    bound,
+                } if (*bound - 0.008).abs() < 1e-15
+            )
+    });
     // Non-topological edge refuses.
     let bad = plan(
         &store,
@@ -245,10 +278,10 @@ fn inv_002_fail_closed() {
     let refuses = bad.is_err();
     verdict(
         "inv-002",
-        tie && negative && nonfinite && refuses,
+        tie && negative && nonfinite && negative_sensitivity && duplicates_sum && refuses,
         "the exact tie recomputes (never skip on the boundary), negative slack never \
-         skips, non-finite sensitivities FAIL CLOSED, and non-topological edges \
-         refuse with teaching text",
+         skips, invalid sensitivity bounds FAIL CLOSED, duplicate perturbations sum \
+         conservatively, and non-topological edges refuse with teaching text",
     );
 }
 

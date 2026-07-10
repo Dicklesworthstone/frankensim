@@ -52,6 +52,49 @@ impl ParamValue {
     }
 }
 
+fn push_u64(buf: &mut Vec<u8>, value: u64) {
+    buf.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_bytes(buf: &mut Vec<u8>, value: &[u8]) {
+    push_u64(buf, value.len() as u64);
+    buf.extend_from_slice(value);
+}
+
+fn push_string(buf: &mut Vec<u8>, value: &str) {
+    push_bytes(buf, value.as_bytes());
+}
+
+fn json_string(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\u{08}' => out.push_str("\\b"),
+            '\u{0c}' => out.push_str("\\f"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{00}'..='\u{1f}' => {
+                let _ = write!(out, "\\u{:04x}", u32::from(ch));
+            }
+            _ => out.push(ch),
+        }
+    }
+    out.push('"');
+    out
+}
+
+pub(crate) fn json_f64(value: f64) -> String {
+    if value.is_finite() {
+        format!("{value:.17e}")
+    } else {
+        "null".to_string()
+    }
+}
+
 /// The seven-field node record (the Merkle DAG schema).
 #[derive(Debug, Clone, PartialEq)]
 pub struct NodeRecord {
@@ -84,47 +127,92 @@ impl NodeRecord {
     /// floats as bits, params sorted by key).
     #[must_use]
     pub fn content_hash(&self) -> ContentHash {
-        let mut buf = String::new();
-        let _ = writeln!(buf, "op:{}", self.op_id);
+        // Versioned, length-prefixed binary encoding. Delimiter-based text
+        // encoding is not injective when caller-controlled strings can contain
+        // newlines or field-looking prefixes.
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"fs-recompute-node-v2\0");
+        push_string(&mut buf, &self.op_id);
+        push_u64(&mut buf, self.input_hashes.len() as u64);
         for h in &self.input_hashes {
-            let _ = writeln!(buf, "in:{}", h.to_hex());
+            buf.extend_from_slice(h.as_bytes());
         }
         let mut params = self.params.clone();
         params.sort();
+        push_u64(&mut buf, params.len() as u64);
         for (k, v) in &params {
+            push_string(&mut buf, k);
             match v {
                 ParamValue::F64(bits) => {
-                    let _ = writeln!(buf, "pf:{k}={bits:016X}");
+                    buf.push(0);
+                    push_u64(&mut buf, *bits);
                 }
                 ParamValue::Int(i) => {
-                    let _ = writeln!(buf, "pi:{k}={i}");
+                    buf.push(1);
+                    buf.extend_from_slice(&i.to_le_bytes());
                 }
                 ParamValue::Str(s) => {
-                    let _ = writeln!(buf, "ps:{k}={s}");
+                    buf.push(2);
+                    push_string(&mut buf, s);
                 }
             }
         }
-        let _ = writeln!(buf, "code:{}", self.code_version_hash.to_hex());
-        let _ = writeln!(buf, "seed:{}", self.rng_seed);
-        let _ = writeln!(buf, "ach:{:016X}", self.achieved_error.to_bits());
-        let _ = writeln!(buf, "req:{:016X}", self.required_tolerance.to_bits());
-        hash_bytes(buf.as_bytes())
+        buf.extend_from_slice(self.code_version_hash.as_bytes());
+        push_u64(&mut buf, self.rng_seed);
+        push_u64(&mut buf, self.achieved_error.to_bits());
+        push_u64(&mut buf, self.required_tolerance.to_bits());
+        hash_bytes(&buf)
     }
 
     /// Canonical ledger row (node fields + slack).
     #[must_use]
     pub fn to_row(&self, artifact: &ContentHash) -> String {
+        let input_hashes = self
+            .input_hashes
+            .iter()
+            .map(|h| format!("\"{}\"", h.to_hex()))
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut params = self.params.clone();
+        params.sort();
+        let params = params
+            .iter()
+            .map(|(key, value)| match value {
+                ParamValue::F64(bits) => format!(
+                    "{{\"key\":{},\"kind\":\"f64\",\"bits\":\"{bits:016X}\"}}",
+                    json_string(key)
+                ),
+                ParamValue::Int(value) => format!(
+                    "{{\"key\":{},\"kind\":\"int\",\"value\":{value}}}",
+                    json_string(key)
+                ),
+                ParamValue::Str(value) => format!(
+                    "{{\"key\":{},\"kind\":\"string\",\"value\":{}}}",
+                    json_string(key),
+                    json_string(value)
+                ),
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let slack = self.slack();
         format!(
-            "{{\"op\":\"{}\",\"node\":\"{}\",\"artifact\":\"{}\",\"inputs\":{},\
-             \"seed\":{},\"achieved\":{:.6e},\"required\":{:.6e},\"slack\":{:.6e}}}",
-            self.op_id,
+            "{{\"op\":{},\"node\":\"{}\",\"artifact\":\"{}\",\
+             \"input_hashes\":[{input_hashes}],\"params\":[{params}],\
+             \"code_version\":\"{}\",\"seed\":{},\"achieved\":{},\
+             \"achieved_bits\":\"{:016X}\",\"required\":{},\
+             \"required_bits\":\"{:016X}\",\"slack\":{},\
+             \"slack_bits\":\"{:016X}\"}}",
+            json_string(&self.op_id),
             self.content_hash().to_hex(),
             artifact.to_hex(),
-            self.input_hashes.len(),
+            self.code_version_hash.to_hex(),
             self.rng_seed,
-            self.achieved_error,
-            self.required_tolerance,
-            self.slack()
+            json_f64(self.achieved_error),
+            self.achieved_error.to_bits(),
+            json_f64(self.required_tolerance),
+            self.required_tolerance.to_bits(),
+            json_f64(slack),
+            slack.to_bits()
         )
     }
 }
@@ -190,6 +278,12 @@ pub enum SkipDecision {
         /// `achieved_error − new_tolerance` (> 0).
         deficit: f64,
     },
+    /// The requested tolerance was not a finite, non-negative error
+    /// magnitude, so no skip certificate can be issued.
+    InvalidTolerance {
+        /// Exact bits supplied by the caller.
+        tolerance_bits: u64,
+    },
     /// No node with this identity exists.
     Miss,
 }
@@ -221,6 +315,31 @@ pub enum StoreError {
         /// The capacity requested.
         capacity: usize,
     },
+    /// Error bounds are magnitudes and must be finite and non-negative.
+    InvalidErrorBudget {
+        /// Supplied achieved-error bits.
+        achieved_bits: u64,
+        /// Supplied required-tolerance bits.
+        required_bits: u64,
+    },
+    /// A slack burn was malformed or did not fit strictly inside the
+    /// currently available slack.
+    InvalidSlackBurn {
+        /// The node whose slack would be changed.
+        node: ContentHash,
+        /// Requested burn bits.
+        amount_bits: u64,
+        /// Available slack bits.
+        available_bits: u64,
+    },
+    /// A pure plan was committed after the store state it certified had
+    /// changed.
+    StalePlan {
+        /// Store revision captured by the plan.
+        planned_revision: u64,
+        /// Store revision at commit time.
+        current_revision: u64,
+    },
 }
 
 impl core::fmt::Display for StoreError {
@@ -246,6 +365,33 @@ impl core::fmt::Display for StoreError {
                 f,
                 "{pinned} pinned nodes exceed the requested capacity {capacity};                  pins are re-verifiability PROMISES (evidence packages, contracts)                  and cannot be evicted — raise the capacity or retire the promises"
             ),
+            StoreError::InvalidErrorBudget {
+                achieved_bits,
+                required_bits,
+            } => write!(
+                f,
+                "invalid error budget: achieved={} required={}; both must be finite, non-negative magnitudes",
+                f64::from_bits(*achieved_bits),
+                f64::from_bits(*required_bits)
+            ),
+            StoreError::InvalidSlackBurn {
+                node,
+                amount_bits,
+                available_bits,
+            } => write!(
+                f,
+                "invalid slack burn at node {}: amount={} must be finite, non-negative, and strictly below available slack {}",
+                node.to_hex(),
+                f64::from_bits(*amount_bits),
+                f64::from_bits(*available_bits)
+            ),
+            StoreError::StalePlan {
+                planned_revision,
+                current_revision,
+            } => write!(
+                f,
+                "stale recompute plan: certified store revision {planned_revision}, current revision {current_revision}; re-plan before committing"
+            ),
         }
     }
 }
@@ -257,6 +403,7 @@ impl std::error::Error for StoreError {}
 pub struct Store {
     nodes: BTreeMap<[u8; 32], StoredNode>,
     seq: u64,
+    revision: u64,
     rows: Vec<String>,
 }
 
@@ -289,6 +436,17 @@ impl Store {
         &self.rows
     }
 
+    /// Monotonic mutation revision used to bind pure plans to the state
+    /// against which their certificates were computed.
+    #[must_use]
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    fn bump_revision(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
+    }
+
     /// Store a computed node. Re-putting the identical record with the
     /// identical artifact dedupes; the identical record with DIFFERENT
     /// artifact bytes trips the determinism contract.
@@ -300,6 +458,16 @@ impl Store {
         record: NodeRecord,
         artifact_bytes: &[u8],
     ) -> Result<PutOutcome, StoreError> {
+        if !record.achieved_error.is_finite()
+            || record.achieved_error < 0.0
+            || !record.required_tolerance.is_finite()
+            || record.required_tolerance < 0.0
+        {
+            return Err(StoreError::InvalidErrorBudget {
+                achieved_bits: record.achieved_error.to_bits(),
+                required_bits: record.required_tolerance.to_bits(),
+            });
+        }
         let node_hash = record.content_hash();
         let artifact_hash = hash_bytes(artifact_bytes);
         if let Some(existing) = self.nodes.get(&key(&node_hash)) {
@@ -324,6 +492,7 @@ impl Store {
             },
         );
         self.seq += 1;
+        self.bump_revision();
         Ok(PutOutcome::Inserted(node_hash))
     }
 
@@ -345,6 +514,11 @@ impl Store {
     /// the returned slack.
     #[must_use]
     pub fn can_skip(&self, record: &NodeRecord, new_tolerance: f64) -> SkipDecision {
+        if !new_tolerance.is_finite() || new_tolerance < 0.0 {
+            return SkipDecision::InvalidTolerance {
+                tolerance_bits: new_tolerance.to_bits(),
+            };
+        }
         // Identity for skip purposes: the record with its tolerance
         // fields normalized out.
         let mut probe = record.clone();
@@ -352,22 +526,30 @@ impl Store {
         probe.required_tolerance = 0.0;
         let probe_hash = probe.content_hash();
         // Scan for a node with the same normalized identity.
+        let mut best: Option<(&StoredNode, f64)> = None;
         for stored in self.nodes.values() {
             let mut norm = stored.record.clone();
             norm.achieved_error = 0.0;
             norm.required_tolerance = 0.0;
             if norm.content_hash() == probe_hash {
-                let slack = new_tolerance - (stored.record.achieved_error + stored.burned);
-                if slack >= 0.0 {
-                    return SkipDecision::Hit {
-                        node: stored.record.content_hash(),
-                        slack,
-                    };
+                let effective_error = stored.record.achieved_error + stored.burned;
+                if best.is_none_or(|(_, current)| effective_error < current) {
+                    best = Some((stored, effective_error));
                 }
-                return SkipDecision::ToleranceTightened { deficit: -slack };
             }
         }
-        SkipDecision::Miss
+        let Some((stored, effective_error)) = best else {
+            return SkipDecision::Miss;
+        };
+        let slack = new_tolerance - effective_error;
+        if slack >= 0.0 {
+            SkipDecision::Hit {
+                node: stored.record.content_hash(),
+                slack,
+            }
+        } else {
+            SkipDecision::ToleranceTightened { deficit: -slack }
+        }
     }
 
     /// Pin a node (evidence package / contract reference): pinned
@@ -383,6 +565,7 @@ impl Store {
         if !entry.pins.contains(&reason) {
             entry.pins.push(reason);
             entry.pins.sort();
+            self.bump_revision();
         }
         Ok(())
     }
@@ -404,6 +587,9 @@ impl Store {
             self.nodes.remove(&k);
             evicted += 1;
         }
+        if evicted > 0 {
+            self.bump_revision();
+        }
         evicted
     }
 
@@ -419,18 +605,48 @@ impl Store {
     /// # Errors
     /// [`StoreError::UnknownNode`].
     pub fn burn_slack(&mut self, node: &ContentHash, amount: f64) -> Result<(), StoreError> {
-        let entry = self
-            .nodes
-            .get_mut(&key(node))
-            .ok_or(StoreError::UnknownNode { node: *node })?;
-        entry.burned += amount;
+        self.commit_burns(self.revision, &[(*node, amount)])
+    }
+
+    pub(crate) fn commit_burns(
+        &mut self,
+        planned_revision: u64,
+        burns: &[(ContentHash, f64)],
+    ) -> Result<(), StoreError> {
+        if self.revision != planned_revision {
+            return Err(StoreError::StalePlan {
+                planned_revision,
+                current_revision: self.revision,
+            });
+        }
+        for (node, amount) in burns {
+            let entry = self
+                .nodes
+                .get(&key(node))
+                .ok_or(StoreError::UnknownNode { node: *node })?;
+            let available = entry.effective_slack();
+            if !amount.is_finite() || *amount < 0.0 || *amount >= available {
+                return Err(StoreError::InvalidSlackBurn {
+                    node: *node,
+                    amount_bits: amount.to_bits(),
+                    available_bits: available.to_bits(),
+                });
+            }
+        }
+        for (node, amount) in burns {
+            let entry = self.nodes.get_mut(&key(node)).expect("burns prevalidated");
+            entry.burned += amount;
+        }
+        self.bump_revision();
         Ok(())
     }
 
     /// Remove a node by raw key (the eviction path).
     #[allow(dead_code)] // wired by the eviction path as it lands; keeping the seam
     pub(crate) fn remove_by_key(&mut self, k: [u8; 32]) {
-        self.nodes.remove(&k);
+        if self.nodes.remove(&k).is_some() {
+            self.bump_revision();
+        }
     }
 
     /// Serialize the store to its canonical text form (round-trips;
