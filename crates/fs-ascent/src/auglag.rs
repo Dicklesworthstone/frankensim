@@ -3,22 +3,45 @@
 //! L-BFGS inner solves of
 //! L_μ(x) = f + λᵀc_e + (μ/2)‖c_e‖² + (μ/2)‖max(0, c_i + s/μ)‖²-style
 //! terms (the standard PHR form for inequalities). Every returned
-//! optimum carries a KKT-RESIDUAL CERTIFICATE — stationarity,
-//! feasibility, complementarity — so "converged" and "stalled" are
-//! distinguishable outcomes, not vibes.
+//! optimum carries a KKT-RESIDUAL CERTIFICATE — stationarity, primal
+//! feasibility, dual feasibility, and complementarity — so
+//! "converged" and "stalled" are distinguishable outcomes, not vibes.
 
 use crate::lbfgs::LbfgsState;
 use crate::stop::StopRule;
 
 /// The KKT residuals of a returned point (the certificate).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct KktResidual {
     /// ‖∇f + Σλ∇c_e + Σν∇c_i‖∞ (stationarity of the Lagrangian).
     pub stationarity: f64,
     /// max(‖c_e‖∞, ‖max(0, c_i)‖∞) (feasibility).
     pub feasibility: f64,
+    /// max max(0, -ν_j) (inequality dual feasibility).
+    pub dual_feasibility: f64,
     /// max |ν_j · c_i_j| (complementary slackness).
     pub complementarity: f64,
+}
+
+impl KktResidual {
+    /// Whether every KKT residual is strictly below `tol`.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `tol` is not finite and positive. Non-finite residuals
+    /// never satisfy the predicate.
+    #[must_use]
+    pub fn within_tolerance(&self, tol: f64) -> bool {
+        validate_tolerance(tol);
+        [
+            self.stationarity,
+            self.feasibility,
+            self.dual_feasibility,
+            self.complementarity,
+        ]
+        .into_iter()
+        .all(|residual| residual.is_finite() && residual < tol)
+    }
 }
 
 /// Outcome of an augmented-Lagrangian solve.
@@ -38,7 +61,7 @@ pub struct AugLagReport {
     pub outer_iters: usize,
     /// Total inner evaluations.
     pub evals: usize,
-    /// All three KKT residuals below the tolerance.
+    /// All four KKT residuals below the tolerance.
     pub converged: bool,
 }
 
@@ -59,7 +82,96 @@ pub struct ConstrainedProblem<'a> {
 }
 
 fn inf_norm(v: &[f64]) -> f64 {
+    assert_finite("norm input", v);
     v.iter().map(|x| x.abs()).fold(0.0f64, f64::max)
+}
+
+pub(crate) fn validate_tolerance(tol: f64) {
+    assert!(
+        tol.is_finite() && tol > 0.0,
+        "KKT tolerance must be finite and positive"
+    );
+}
+
+pub(crate) fn validate_point(x: &[f64]) {
+    assert!(
+        !x.is_empty(),
+        "constrained decision vector must be non-empty"
+    );
+    assert_finite("constrained decision vector", x);
+}
+
+pub(crate) fn assert_finite(label: &str, values: &[f64]) {
+    assert!(
+        values.iter().all(|value| value.is_finite()),
+        "{label} entries must be finite"
+    );
+}
+
+pub(crate) fn checked_fg(
+    fg: &mut dyn FnMut(&[f64]) -> (f64, Vec<f64>),
+    x: &[f64],
+) -> (f64, Vec<f64>) {
+    validate_point(x);
+    let (f, gradient) = fg(x);
+    assert!(f.is_finite(), "objective value must be finite");
+    assert_eq!(
+        gradient.len(),
+        x.len(),
+        "objective gradient length must match the decision dimension"
+    );
+    assert_finite("objective gradient", &gradient);
+    (f, gradient)
+}
+
+pub(crate) fn checked_constraints(
+    label: &str,
+    callback: &dyn Fn(&[f64]) -> Vec<f64>,
+    x: &[f64],
+    expected: Option<usize>,
+) -> Vec<f64> {
+    validate_point(x);
+    let values = callback(x);
+    if let Some(expected) = expected {
+        assert_eq!(
+            values.len(),
+            expected,
+            "{label} constraint count changed across evaluations"
+        );
+    }
+    assert_finite(&format!("{label} constraint"), &values);
+    values
+}
+
+pub(crate) fn checked_jt(
+    label: &str,
+    callback: &dyn Fn(&[f64], &[f64]) -> Vec<f64>,
+    x: &[f64],
+    weights: &[f64],
+) -> Vec<f64> {
+    validate_point(x);
+    assert_finite(&format!("{label} multiplier"), weights);
+    let pullback = callback(x, weights);
+    assert_eq!(
+        pullback.len(),
+        x.len(),
+        "{label} Jacobian-transpose output length must match the decision dimension"
+    );
+    assert_finite(&format!("{label} Jacobian-transpose output"), &pullback);
+    pullback
+}
+
+pub(crate) fn validate_problem_at_start(
+    problem: &mut ConstrainedProblem<'_>,
+    x: &[f64],
+) -> (usize, usize) {
+    validate_point(x);
+    let _ = checked_fg(&mut *problem.fg, x);
+    let ce = checked_constraints("equality", problem.ce, x, None);
+    let ci = checked_constraints("inequality", problem.ci, x, None);
+    let _ = checked_jt("equality", problem.ce_jt, x, &vec![0.0; ce.len()]);
+    let _ = checked_jt("inequality", problem.ci_jt, x, &vec![0.0; ci.len()]);
+    (ce.len(), ci.len())
 }
 
 /// Run the PHR augmented-Lagrangian loop from `x0`.
@@ -69,8 +181,8 @@ pub fn augmented_lagrangian(
     tol: f64,
     max_outer: usize,
 ) -> AugLagReport {
-    let ne = (problem.ce)(x0).len();
-    let ni = (problem.ci)(x0).len();
+    validate_tolerance(tol);
+    let (ne, ni) = validate_problem_at_start(problem, x0);
     let mut lambda = vec![0.0f64; ne];
     let mut nu = vec![0.0f64; ni];
     let mut mu = 10.0f64;
@@ -83,9 +195,9 @@ pub fn augmented_lagrangian(
         // Inner minimization of the augmented Lagrangian.
         let (lam, nuv, m) = (lambda.clone(), nu.clone(), mu);
         let mut inner = |xv: &[f64]| -> (f64, Vec<f64>) {
-            let (f, mut g) = (problem.fg)(xv);
-            let cev = (problem.ce)(xv);
-            let civ = (problem.ci)(xv);
+            let (f, mut g) = checked_fg(&mut *problem.fg, xv);
+            let cev = checked_constraints("equality", problem.ce, xv, Some(ne));
+            let civ = checked_constraints("inequality", problem.ci, xv, Some(ni));
             let mut val = f;
             // Equalities: λᵀc + (μ/2)‖c‖²; gradient (λ + μc)ᵀ∇c.
             if !cev.is_empty() {
@@ -97,9 +209,9 @@ pub fn augmented_lagrangian(
                 for (c, l) in cev.iter().zip(&lam) {
                     val += l * c + 0.5 * m * c * c;
                 }
-                let pull = (problem.ce_jt)(xv, &w);
-                for (gi, pi) in g.iter_mut().zip(&pull) {
-                    *gi += pi;
+                let pull = checked_jt("equality", problem.ce_jt, xv, &w);
+                for i in 0..g.len() {
+                    g[i] += pull[i];
                 }
             }
             // Inequalities (PHR): (1/2μ)·Σ [max(0, ν + μc)² − ν²].
@@ -112,11 +224,16 @@ pub fn augmented_lagrangian(
                 for (wi, v) in w.iter().zip(&nuv) {
                     val += (wi * wi - v * v) / (2.0 * m);
                 }
-                let pull = (problem.ci_jt)(xv, &w);
-                for (gi, pi) in g.iter_mut().zip(&pull) {
-                    *gi += pi;
+                let pull = checked_jt("inequality", problem.ci_jt, xv, &w);
+                for i in 0..g.len() {
+                    g[i] += pull[i];
                 }
             }
+            assert!(
+                val.is_finite(),
+                "augmented-Lagrangian objective must remain finite"
+            );
+            assert_finite("augmented-Lagrangian gradient", &g);
             (val, g)
         };
         let mut st = LbfgsState::new(&x, 10, &mut inner);
@@ -124,14 +241,16 @@ pub fn augmented_lagrangian(
         evals += rep.evals;
         x.clone_from(&st.x);
         // Multiplier updates.
-        let cev = (problem.ce)(&x);
-        let civ = (problem.ci)(&x);
-        for (l, c) in lambda.iter_mut().zip(&cev) {
-            *l = mu.mul_add(*c, *l);
+        let cev = checked_constraints("equality", problem.ce, &x, Some(ne));
+        let civ = checked_constraints("inequality", problem.ci, &x, Some(ni));
+        for i in 0..lambda.len() {
+            lambda[i] = mu.mul_add(cev[i], lambda[i]);
         }
-        for (v, c) in nu.iter_mut().zip(&civ) {
-            *v = mu.mul_add(*c, *v).max(0.0);
+        for i in 0..nu.len() {
+            nu[i] = mu.mul_add(civ[i], nu[i]).max(0.0);
         }
+        assert_finite("equality multiplier", &lambda);
+        assert_finite("inequality multiplier", &nu);
         let feas = inf_norm(&cev).max(civ.iter().map(|c| c.max(0.0)).fold(0.0f64, f64::max));
         // Penalty growth when feasibility stalls (classical schedule).
         if feas > 0.25 * prev_feas {
@@ -140,8 +259,8 @@ pub fn augmented_lagrangian(
         prev_feas = feas;
         let kkt = kkt_residual(problem, &x, &lambda, &nu);
         evals += 1;
-        if kkt.stationarity < tol && kkt.feasibility < tol && kkt.complementarity < tol {
-            let (f, _) = (problem.fg)(&x);
+        if kkt.within_tolerance(tol) {
+            let (f, _) = checked_fg(&mut *problem.fg, &x);
             return AugLagReport {
                 x,
                 f,
@@ -155,7 +274,7 @@ pub fn augmented_lagrangian(
         }
     }
     let kkt = kkt_residual(problem, &x, &lambda, &nu);
-    let (f, _) = (problem.fg)(&x);
+    let (f, _) = checked_fg(&mut *problem.fg, &x);
     AugLagReport {
         x,
         f,
@@ -175,30 +294,48 @@ pub fn kkt_residual(
     lambda: &[f64],
     nu: &[f64],
 ) -> KktResidual {
-    let (_, mut g) = (problem.fg)(x);
-    let cev = (problem.ce)(x);
-    let civ = (problem.ci)(x);
+    validate_point(x);
+    let (_, mut g) = checked_fg(&mut *problem.fg, x);
+    let cev = checked_constraints("equality", problem.ce, x, None);
+    let civ = checked_constraints("inequality", problem.ci, x, None);
+    assert_eq!(
+        lambda.len(),
+        cev.len(),
+        "equality multiplier length must match the equality constraint count"
+    );
+    assert_eq!(
+        nu.len(),
+        civ.len(),
+        "inequality multiplier length must match the inequality constraint count"
+    );
+    assert_finite("equality multiplier", lambda);
+    assert_finite("inequality multiplier", nu);
+    let equality_pull = checked_jt("equality", problem.ce_jt, x, lambda);
     if !cev.is_empty() {
-        let pull = (problem.ce_jt)(x, lambda);
-        for (gi, pi) in g.iter_mut().zip(&pull) {
-            *gi += pi;
+        for i in 0..g.len() {
+            g[i] += equality_pull[i];
         }
     }
+    let inequality_pull = checked_jt("inequality", problem.ci_jt, x, nu);
     if !civ.is_empty() {
-        let pull = (problem.ci_jt)(x, nu);
-        for (gi, pi) in g.iter_mut().zip(&pull) {
-            *gi += pi;
+        for i in 0..g.len() {
+            g[i] += inequality_pull[i];
         }
     }
     let feasibility = inf_norm(&cev).max(civ.iter().map(|c| c.max(0.0)).fold(0.0f64, f64::max));
+    let dual_feasibility = nu
+        .iter()
+        .map(|multiplier| (-multiplier).max(0.0))
+        .fold(0.0f64, f64::max);
     let complementarity = civ
         .iter()
-        .zip(nu)
-        .map(|(c, v)| (c * v).abs())
+        .enumerate()
+        .map(|(i, c)| (c * nu[i]).abs())
         .fold(0.0f64, f64::max);
     KktResidual {
         stationarity: inf_norm(&g),
         feasibility,
+        dual_feasibility,
         complementarity,
     }
 }

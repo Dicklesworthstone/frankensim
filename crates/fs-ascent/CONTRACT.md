@@ -28,8 +28,8 @@ so converged and stalled are distinguishable outcomes.
 - `auglag::augmented_lagrangian` — PHR augmented Lagrangian
   (equalities + inequalities) over L-BFGS inner solves, classical
   penalty schedule, multipliers returned, and a `KktResidual`
-  certificate (stationarity, feasibility, complementarity) on every
-  outcome.
+  certificate (stationarity, primal feasibility, inequality dual
+  feasibility, complementarity) on every outcome.
 - `riemann::{tangent_project, retract, RiemannianLbfgs}` — the
   manifold OPERATIONS for fs-opt's metadata (Rn/Sphere/So3;
   Stiefel is metadata-only and panics loudly), plus Riemannian L-BFGS
@@ -83,16 +83,22 @@ so converged and stalled are distinguishable outcomes.
   tracked and reported).
 - KKT certificates are computed from the PROBLEM's callbacks, not
   the inner solver's internal state.
+- KKT certification is fail-closed: decision vectors, objective and
+  constraint values, gradients, multiplier vectors, and Jacobian-
+  transpose actions must have exact dimensions and finite entries.
+  Inequality dual feasibility is an explicit residual, so a negative
+  multiplier cannot cancel stationarity into a false certificate.
 
 ## Error model
 
-Structured panics on dimension mismatches, non-descent directions
-handed to the line search, and metadata-only manifolds used in
-descent (modeling errors surfaced loudly). Pareto sweeps reject
-non-finite decisions/objective values/gradients, invalid weights or
-epsilons, non-positive tolerances, and gradient dimension mismatches at
-the API boundary. Optimizer non-convergence is a REPORTED outcome
-(reason + certificate), never a panic.
+Structured panics on dimension mismatches, non-finite callback data,
+non-positive or non-finite tolerances, non-descent directions handed
+to the line search, and metadata-only manifolds used in descent
+(modeling errors surfaced loudly). Pareto sweeps reject non-finite
+decisions/objective values/gradients, invalid weights or epsilons,
+non-positive tolerances, and gradient dimension mismatches at the API
+boundary. Optimizer non-convergence with a well-formed problem is a
+REPORTED outcome (reason + certificate), never a panic.
 
 ## Determinism class
 
@@ -125,7 +131,7 @@ optimizer sees it, driven to ≤ 1e−12 misfit by L-BFGS; trust-region
 Newton–Krylov solving Rosenbrock with negative-curvature steps
 counted and gradient certification; augmented Lagrangian on an
 equality+active-inequality fixture recovering the analytic optimum
-with all three KKT residuals ≤ 1e−6 and a positive active multiplier;
+with all four KKT residuals ≤ 1e−6 and a positive active multiplier;
 Riemannian L-BFGS minimizing a Rayleigh quotient on S¹¹ to the
 Jacobi-verified smallest eigenvalue with manifold violation ≤ 1e−14
 along the whole path; stop-rule attribution (Budget and Stall

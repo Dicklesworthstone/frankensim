@@ -12,7 +12,10 @@
 //! gated). Large-scale SQP (sparse KKT, trust-region globalization)
 //! is recorded follow-up, not claimed.
 
-use crate::auglag::{ConstrainedProblem, KktResidual, kkt_residual};
+use crate::auglag::{
+    ConstrainedProblem, KktResidual, assert_finite, checked_constraints, checked_fg, checked_jt,
+    kkt_residual, validate_problem_at_start, validate_tolerance,
+};
 use fs_la::factor::lu;
 
 type JtAction<'a> = dyn Fn(&[f64], &[f64]) -> Vec<f64> + 'a;
@@ -40,13 +43,13 @@ pub struct SqpReport {
 
 /// Reconstruct a constraint Jacobian (rows = constraints) by probing
 /// the Jᵀ·w action with unit vectors — fixture-scale by design.
-fn jacobian(jt: &JtAction<'_>, x: &[f64], m: usize, n: usize) -> Vec<f64> {
+fn jacobian(label: &str, jt: &JtAction<'_>, x: &[f64], m: usize, n: usize) -> Vec<f64> {
     let mut j = vec![0.0f64; m * n];
     for k in 0..m {
         let mut w = vec![0.0f64; m];
         w[k] = 1.0;
-        let row = jt(x, &w);
-        j[k * n..(k + 1) * n].copy_from_slice(&row[..n]);
+        let row = checked_jt(label, jt, x, &w);
+        j[k * n..(k + 1) * n].copy_from_slice(&row);
     }
     j
 }
@@ -120,24 +123,36 @@ fn solve_qp(
         rhs[n + r] = -c[r];
     }
     fact.solve(&mut rhs);
+    if rhs.iter().any(|value| !value.is_finite()) {
+        return None;
+    }
     let d = rhs[..n].to_vec();
     let mult = rhs[n..].to_vec();
     Some((d, mult))
 }
 
 /// ℓ1 merit: f + w·(‖c_e‖₁ + ‖max(0, c_i)‖₁).
-fn merit_of(problem: &mut ConstrainedProblem<'_>, xx: &[f64], w: f64, ev: &mut usize) -> f64 {
-    let (fv, _) = (problem.fg)(xx);
+fn merit_of(
+    problem: &mut ConstrainedProblem<'_>,
+    xx: &[f64],
+    w: f64,
+    ev: &mut usize,
+    ne: usize,
+    ni: usize,
+) -> f64 {
+    let (fv, _) = checked_fg(&mut *problem.fg, xx);
     *ev += 1;
-    let ce_v = (problem.ce)(xx);
-    let ci_v = (problem.ci)(xx);
+    let ce_v = checked_constraints("equality", problem.ce, xx, Some(ne));
+    let ci_v = checked_constraints("inequality", problem.ci, xx, Some(ni));
     let viol: f64 =
         ce_v.iter().map(|c| c.abs()).sum::<f64>() + ci_v.iter().map(|c| c.max(0.0)).sum::<f64>();
-    w.mul_add(viol, fv)
+    let merit = w.mul_add(viol, fv);
+    assert!(merit.is_finite(), "SQP merit value must remain finite");
+    merit
 }
 
 fn active_constraints(problem: &ConstrainedProblem<'_>, x: &[f64], ni: usize) -> Vec<usize> {
-    let civ = (problem.ci)(x);
+    let civ = checked_constraints("inequality", problem.ci, x, Some(ni));
     (0..ni).filter(|&j| civ[j] > -1e-8).collect()
 }
 
@@ -150,8 +165,8 @@ fn working_set_block(
     dims: (usize, usize, usize),
 ) -> (Vec<f64>, Vec<f64>) {
     let (ne, ni, n) = dims;
-    let je = jacobian(problem.ce_jt, x, ne, n);
-    let ji = jacobian(problem.ci_jt, x, ni, n);
+    let je = jacobian("equality", problem.ce_jt, x, ne, n);
+    let ji = jacobian("inequality", problem.ci_jt, x, ni, n);
     let m = ne + active.len();
     let mut a = vec![0.0f64; m * n];
     let mut c = vec![0.0f64; m];
@@ -171,10 +186,16 @@ fn update_multipliers(
     mult: &[f64],
     ne: usize,
 ) -> bool {
+    assert_eq!(
+        mult.len(),
+        ne + active.len(),
+        "SQP multiplier dimension must match the working set"
+    );
+    assert_finite("SQP multiplier", mult);
     lambda.copy_from_slice(&mult[..ne]);
     nu.fill(0.0);
     for (r, &j) in active.iter().enumerate() {
-        nu[j] = mult[ne + r];
+        nu[j] = mult[ne + r].max(0.0);
     }
     let mut drop_idx = None;
     let mut worst = -1e-10f64;
@@ -206,9 +227,11 @@ fn accept_merit_step(
     step: &MeritStep<'_>,
     b: &mut [f64],
     evals: &mut usize,
+    ne: usize,
+    ni: usize,
 ) -> Option<Vec<f64>> {
     let n = step.x.len();
-    let m0 = merit_of(problem, step.x, 10.0, evals);
+    let m0 = merit_of(problem, step.x, 10.0, evals, ne, ni);
     let mut alpha = 1.0f64;
     for _ in 0..40 {
         let xt: Vec<f64> = step
@@ -217,18 +240,20 @@ fn accept_merit_step(
             .zip(step.d)
             .map(|(xi, di)| alpha.mul_add(*di, *xi))
             .collect();
-        if merit_of(problem, &xt, 10.0, evals) < m0 - 1e-12 {
-            let (_, gt) = (problem.fg)(&xt);
+        if merit_of(problem, &xt, 10.0, evals, ne, ni) < m0 - 1e-12 {
+            let (_, gt) = checked_fg(&mut *problem.fg, &xt);
             *evals += 1;
-            let pull_e = (problem.ce_jt)(&xt, step.lambda);
-            let pull_i = (problem.ci_jt)(&xt, step.nu);
-            let pull_e0 = (problem.ce_jt)(step.x, step.lambda);
-            let pull_i0 = (problem.ci_jt)(step.x, step.nu);
+            let pull_e = checked_jt("equality", problem.ce_jt, &xt, step.lambda);
+            let pull_i = checked_jt("inequality", problem.ci_jt, &xt, step.nu);
+            let pull_e0 = checked_jt("equality", problem.ce_jt, step.x, step.lambda);
+            let pull_i0 = checked_jt("inequality", problem.ci_jt, step.x, step.nu);
             let s: Vec<f64> = xt.iter().zip(step.x).map(|(a2, b2)| a2 - b2).collect();
             let y: Vec<f64> = (0..n)
                 .map(|i| (gt[i] + pull_e[i] + pull_i[i]) - (step.g[i] + pull_e0[i] + pull_i0[i]))
                 .collect();
+            assert_finite("SQP curvature vector", &y);
             bfgs_update(b, n, &s, &y);
+            assert_finite("SQP Hessian approximation", b);
             return Some(xt);
         }
         alpha *= 0.5;
@@ -252,9 +277,9 @@ pub fn sqp(
     tol: f64,
     max_iters: usize,
 ) -> SqpReport {
+    validate_tolerance(tol);
     let n = x0.len();
-    let ne = (problem.ce)(x0).len();
-    let ni = (problem.ci)(x0).len();
+    let (ne, ni) = validate_problem_at_start(problem, x0);
     let mut x = x0.to_vec();
     let mut b = vec![0.0f64; n * n];
     for i in 0..n {
@@ -268,9 +293,9 @@ pub fn sqp(
     let mut nu = vec![0.0f64; ni];
     for _ in 0..max_iters {
         iters += 1;
-        let (f, g) = (problem.fg)(&x);
-        let cev = (problem.ce)(&x);
-        let civ = (problem.ci)(&x);
+        let (f, g) = checked_fg(&mut *problem.fg, &x);
+        let cev = checked_constraints("equality", problem.ce, &x, Some(ne));
+        let civ = checked_constraints("inequality", problem.ci, &x, Some(ni));
         evals += 1;
         let m = ne + active.len();
         let (a, c) = working_set_block(problem, &x, &active, &cev, &civ, (ne, ni, n));
@@ -282,12 +307,7 @@ pub fn sqp(
         let dnorm = d.iter().map(|v| v.abs()).fold(0.0f64, f64::max);
         let kkt = kkt_residual(problem, &x, &lambda, &nu);
         evals += 1;
-        if !dropped
-            && dnorm < tol
-            && kkt.stationarity < tol
-            && kkt.feasibility < tol
-            && kkt.complementarity < tol
-        {
+        if !dropped && dnorm < tol && kkt.within_tolerance(tol) {
             return SqpReport {
                 x,
                 f,
@@ -309,17 +329,17 @@ pub fn sqp(
             lambda: &lambda,
             nu: &nu,
         };
-        let Some(accepted_x) = accept_merit_step(problem, &step, &mut b, &mut evals) else {
+        let Some(accepted_x) = accept_merit_step(problem, &step, &mut b, &mut evals, ne, ni) else {
             break; // merit stall — certificate below tells the truth
         };
         x = accepted_x;
         // Activate violated inequalities at the new point.
-        let civ_new = (problem.ci)(&x);
+        let civ_new = checked_constraints("inequality", problem.ci, &x, Some(ni));
         activate_violated(&mut active, &civ_new);
     }
-    let (f, _) = (problem.fg)(&x);
+    let (f, _) = checked_fg(&mut *problem.fg, &x);
     let kkt = kkt_residual(problem, &x, &lambda, &nu);
-    let converged = kkt.stationarity < tol && kkt.feasibility < tol && kkt.complementarity < tol;
+    let converged = kkt.within_tolerance(tol);
     SqpReport {
         x,
         f,

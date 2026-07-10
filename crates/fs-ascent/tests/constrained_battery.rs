@@ -2,7 +2,7 @@
 //! landed augmented-Lagrangian on the KKT fixtures, plus the SQP
 //! warm-start polish gate.
 
-use fs_ascent::auglag::ConstrainedProblem;
+use fs_ascent::auglag::{ConstrainedProblem, kkt_residual};
 use fs_ascent::{augmented_lagrangian, interior_point, sqp};
 
 type ConstraintEval<'a> = &'a dyn Fn(&[f64]) -> Vec<f64>;
@@ -146,4 +146,133 @@ fn ip_and_sqp_on_inequality_only_circle() {
             ip.x[0], ip.x[1], ip.nu[0], sq.x[0], sq.x[1], sq.nu[0]
         ),
     );
+}
+
+#[test]
+fn kkt_dual_feasibility_blocks_negative_multiplier_false_certificate() {
+    // Old behavior returned three exact zeros here: the negative dual
+    // cancels the objective gradient, while primal feasibility and
+    // complementarity both vanish at the active boundary.
+    let mut fg = |x: &[f64]| (x[0], vec![1.0]);
+    let ce = |_: &[f64]| Vec::new();
+    let ce_jt = |x: &[f64], _: &[f64]| vec![0.0; x.len()];
+    let ci = |x: &[f64]| vec![x[0]];
+    let ci_jt = |_: &[f64], w: &[f64]| vec![w[0]];
+    let mut problem = ConstrainedProblem {
+        fg: &mut fg,
+        ce: &ce,
+        ce_jt: &ce_jt,
+        ci: &ci,
+        ci_jt: &ci_jt,
+    };
+
+    let residual = kkt_residual(&mut problem, &[0.0], &[], &[-1.0]);
+    assert_eq!(residual.stationarity, 0.0);
+    assert_eq!(residual.feasibility, 0.0);
+    assert_eq!(residual.complementarity, 0.0);
+    assert_eq!(residual.dual_feasibility, 1.0);
+    assert!(!residual.within_tolerance(1e-8));
+}
+
+#[test]
+#[should_panic(expected = "objective gradient entries must be finite")]
+fn kkt_rejects_nan_instead_of_dropping_it_from_the_norm() {
+    let mut fg = |_: &[f64]| (0.0, vec![f64::NAN]);
+    let none = |_: &[f64]| Vec::new();
+    let zero_jt = |x: &[f64], _: &[f64]| vec![0.0; x.len()];
+    let mut problem = ConstrainedProblem {
+        fg: &mut fg,
+        ce: &none,
+        ce_jt: &zero_jt,
+        ci: &none,
+        ci_jt: &zero_jt,
+    };
+
+    let _ = kkt_residual(&mut problem, &[0.0], &[], &[]);
+}
+
+#[test]
+#[should_panic(expected = "objective gradient length must match")]
+fn kkt_rejects_objective_gradient_dimension_mismatch() {
+    let mut fg = |_: &[f64]| (0.0, vec![0.0]);
+    let none = |_: &[f64]| Vec::new();
+    let zero_jt = |x: &[f64], _: &[f64]| vec![0.0; x.len()];
+    let mut problem = ConstrainedProblem {
+        fg: &mut fg,
+        ce: &none,
+        ce_jt: &zero_jt,
+        ci: &none,
+        ci_jt: &zero_jt,
+    };
+
+    let _ = kkt_residual(&mut problem, &[0.0, 0.0], &[], &[]);
+}
+
+#[test]
+#[should_panic(expected = "inequality multiplier length must match")]
+fn kkt_rejects_multiplier_constraint_dimension_mismatch() {
+    let mut fg = |_: &[f64]| (0.0, vec![0.0]);
+    let ce = |_: &[f64]| Vec::new();
+    let ce_jt = |x: &[f64], _: &[f64]| vec![0.0; x.len()];
+    let ci = |_: &[f64]| vec![0.0];
+    let ci_jt = |_: &[f64], w: &[f64]| vec![w[0]];
+    let mut problem = ConstrainedProblem {
+        fg: &mut fg,
+        ce: &ce,
+        ce_jt: &ce_jt,
+        ci: &ci,
+        ci_jt: &ci_jt,
+    };
+
+    let _ = kkt_residual(&mut problem, &[0.0], &[], &[]);
+}
+
+#[test]
+#[should_panic(expected = "Jacobian-transpose output length must match")]
+fn kkt_rejects_jacobian_transpose_dimension_mismatch() {
+    let mut fg = |_: &[f64]| (0.0, vec![0.0, 0.0]);
+    let ce = |_: &[f64]| Vec::new();
+    let ce_jt = |x: &[f64], _: &[f64]| vec![0.0; x.len()];
+    let ci = |_: &[f64]| vec![0.0];
+    let ci_jt = |_: &[f64], _: &[f64]| vec![0.0];
+    let mut problem = ConstrainedProblem {
+        fg: &mut fg,
+        ce: &ce,
+        ce_jt: &ce_jt,
+        ci: &ci,
+        ci_jt: &ci_jt,
+    };
+
+    let _ = kkt_residual(&mut problem, &[0.0, 0.0], &[], &[0.0]);
+}
+
+#[test]
+fn all_constrained_engines_require_positive_finite_tolerances() {
+    for (engine, tolerance) in [("AL", 0.0), ("IP", f64::NAN), ("SQP", f64::INFINITY)] {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut fg = |x: &[f64]| (x[0] * x[0], vec![2.0 * x[0]]);
+            let none = |_: &[f64]| Vec::new();
+            let zero_jt = |x: &[f64], _: &[f64]| vec![0.0; x.len()];
+            let mut problem = ConstrainedProblem {
+                fg: &mut fg,
+                ce: &none,
+                ce_jt: &zero_jt,
+                ci: &none,
+                ci_jt: &zero_jt,
+            };
+            match engine {
+                "AL" => {
+                    let _ = augmented_lagrangian(&mut problem, &[1.0], tolerance, 1);
+                }
+                "IP" => {
+                    let _ = interior_point(&mut problem, &[1.0], tolerance, 1);
+                }
+                "SQP" => {
+                    let _ = sqp(&mut problem, &[1.0], tolerance, 1);
+                }
+                _ => unreachable!(),
+            }
+        }));
+        assert!(result.is_err(), "{engine} accepted tolerance {tolerance}");
+    }
 }

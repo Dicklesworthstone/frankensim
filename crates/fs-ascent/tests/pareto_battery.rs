@@ -108,6 +108,7 @@ fn concave_front_epsilon_covers_weighted_collapses() {
         worst_kkt = worst_kkt
             .max(k.stationarity)
             .max(k.feasibility)
+            .max(k.dual_feasibility)
             .max(k.complementarity);
     }
     assert!(
