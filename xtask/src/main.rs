@@ -6,6 +6,8 @@
 //! - `check-contracts`— every workspace `fs-*` crate ships a CONTRACT.md with required sections.
 //! - `check-unsafe`   — unsafe code only in registered capsules (<300 lines, SAFETY.md).
 //! - `check-powi`     — no build-mode-dependent `f64::powi` in deterministic paths (bead 4xnt).
+//! - `check-goldens`  — golden hashes declare upstream couplings; drift re-freezes deliberately (bead y4pt).
+//! - `check-claims`   — README hashes/crates/sentinels must exist in code (bead 06yc).
 //! - `check-all`      — all of the above; non-zero exit on any violation.
 //! - `lock-constellation` / `check-constellation` — pin/verify the Franken library states.
 //!
@@ -17,6 +19,8 @@
 //! conventions": one dependency per line, `[section]` headers on their own line).
 //! It fails loudly on shapes it does not understand rather than guessing — these are
 //! our files, and the conventions are enforced, not inferred.
+
+mod claims;
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -996,6 +1000,7 @@ fn main() -> ExitCode {
         "check-unsafe" => (check_unsafe(&root), vec!["unsafe-capsules"]),
         "check-powi" => (check_powi(&root), vec!["powi-determinism"]),
         "check-goldens" => (check_goldens(&root), vec!["golden-couplings"]),
+        "check-claims" => (claims::check_claims(&root), vec!["claim-state"]),
         "check-all" => {
             let mut v = check_layers(&manifests);
             v.extend(check_deps(&manifests));
@@ -1003,6 +1008,7 @@ fn main() -> ExitCode {
             v.extend(check_unsafe(&root));
             v.extend(check_powi(&root));
             v.extend(check_goldens(&root));
+            v.extend(claims::check_claims(&root));
             (
                 v,
                 vec![
@@ -1012,13 +1018,15 @@ fn main() -> ExitCode {
                     "unsafe-capsules",
                     "powi-determinism",
                     "golden-couplings",
+                    "claim-state",
                 ],
             )
         }
         other => {
             eprintln!(
                 "unknown command {other:?}; use check-layers|check-deps|check-contracts|\
-                 check-unsafe|check-powi|check-goldens|check-all|lock-constellation|check-constellation"
+                 check-unsafe|check-powi|check-goldens|check-claims|check-all|\
+                 lock-constellation|check-constellation"
             );
             return ExitCode::FAILURE;
         }
