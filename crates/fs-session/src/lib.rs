@@ -35,6 +35,16 @@ pub enum SessionError {
         /// The id.
         id: u64,
     },
+    /// A resource grant, charge, or accumulated meter is outside its valid
+    /// finite, non-negative domain.
+    InvalidResource {
+        /// The resource field.
+        resource: &'static str,
+        /// The rejected value.
+        value: f64,
+        /// The required domain.
+        requirement: &'static str,
+    },
     /// A submission failed structurally (parse/admission).
     Submission {
         /// Diagnosis.
@@ -51,6 +61,15 @@ impl fmt::Display for SessionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             SessionError::UnknownSession { id } => write!(f, "unknown session {id}"),
+            SessionError::InvalidResource {
+                resource,
+                value,
+                requirement,
+            } => write!(
+                f,
+                "invalid {resource} value {value}: {requirement}; the governor did not mutate \
+                 session state"
+            ),
             SessionError::Submission { what } => write!(f, "submission failed: {what}"),
             SessionError::Persistence { what } => write!(f, "persistence failed: {what}"),
         }

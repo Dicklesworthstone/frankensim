@@ -101,6 +101,15 @@ pub enum SubmitOutcome {
         /// The original execution's receipt.
         receipt: u64,
     },
+    /// The one attempted execution failed before a charge could be committed.
+    /// The key remains terminal: all duplicates receive this same receipt and
+    /// diagnosis, and an explicit retry requires a new key.
+    Failed {
+        /// The failed execution's receipt.
+        receipt: u64,
+        /// Panic payload or structured validation diagnosis.
+        what: String,
+    },
     /// Rejected with guidance before execution.
     Refused(Box<Guidance>),
 }
@@ -118,6 +127,32 @@ struct SessionMeters {
 enum IdemState {
     Pending,
     Done { receipt: u64, charge: Charge },
+    Failed { receipt: u64, what: String },
+}
+
+enum SubmissionCompletion {
+    Done(Charge),
+    Failed(String),
+}
+
+fn validate_resource(resource: &'static str, value: f64) -> Result<(), SessionError> {
+    if value.is_finite() && value >= 0.0 {
+        Ok(())
+    } else {
+        Err(SessionError::InvalidResource {
+            resource,
+            value,
+            requirement: "must be finite and non-negative",
+        })
+    }
+}
+
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(ToString::to_string)
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "submission work panicked with a non-string payload".to_string())
 }
 
 #[derive(Default)]
@@ -154,10 +189,19 @@ impl Governor {
     }
 
     /// Register a session's token (issuance).
-    pub fn open_session(&self, token: CapabilityToken) {
+    ///
+    /// # Errors
+    /// [`SessionError::InvalidResource`] when a floating-point grant is not
+    /// finite and non-negative. Rejection happens before any session state is
+    /// mutated.
+    pub fn open_session(&self, token: CapabilityToken) -> Result<(), SessionError> {
+        validate_resource("core-seconds grant", token.core_s)?;
+        validate_resource("wall-seconds grant", token.wall_s)?;
+        validate_resource("concurrent-cores grant", token.cores)?;
         let mut g = self.inner.lock().expect("governor lock");
         g.meters.entry(token.session.0).or_default();
         g.tokens.insert(token.session.0, token);
+        Ok(())
     }
 
     /// The token for a session.
@@ -181,6 +225,8 @@ impl Governor {
     /// # Errors
     /// [`SessionError::UnknownSession`].
     pub fn charge(&self, session: SessionId, delta: Charge) -> Result<Enforcement, SessionError> {
+        validate_resource("core-seconds charge", delta.core_s)?;
+        validate_resource("wall-seconds charge", delta.wall_s)?;
         let mut g = self.inner.lock().expect("governor lock");
         let token = g
             .tokens
@@ -188,9 +234,13 @@ impl Governor {
             .cloned()
             .ok_or(SessionError::UnknownSession { id: session.0 })?;
         let meters = g.meters.entry(session.0).or_default();
-        meters.core_s += delta.core_s;
+        let next_core_s = meters.core_s + delta.core_s;
+        let next_wall_s = meters.wall_s + delta.wall_s;
+        validate_resource("accumulated core-seconds", next_core_s)?;
+        validate_resource("accumulated wall-seconds", next_wall_s)?;
+        meters.core_s = next_core_s;
         meters.mem_peak_bytes = meters.mem_peak_bytes.max(delta.mem_peak_bytes);
-        meters.wall_s += delta.wall_s;
+        meters.wall_s = next_wall_s;
         #[allow(clippy::cast_precision_loss)]
         let checks: [(&'static str, f64, f64); 3] = [
             ("core-seconds", meters.core_s, token.core_s),
@@ -216,7 +266,7 @@ impl Governor {
             }
         }
         for (resource, used, granted) in checks {
-            if used > granted {
+            if used >= granted {
                 meters.throttled += 1;
                 return Ok(Enforcement::Throttled {
                     resource,
@@ -235,8 +285,10 @@ impl Governor {
     /// # Errors
     /// [`SessionError::UnknownSession`].
     ///
-    /// # Panics
-    /// If the governor mutex is poisoned (a prior panic in `work`).
+    /// A panic in `work` is contained and committed as a terminal
+    /// [`SubmitOutcome::Failed`] receipt. The same key never reruns implicitly:
+    /// duplicates receive that same failure receipt and callers must choose a
+    /// new idempotency key for an explicit retry.
     pub fn submit_once(
         &self,
         session: SessionId,
@@ -258,26 +310,54 @@ impl Governor {
                     Some(IdemState::Done { receipt, .. }) => {
                         return Ok(SubmitOutcome::Duplicate { receipt: *receipt });
                     }
+                    Some(IdemState::Failed { receipt, what }) => {
+                        return Ok(SubmitOutcome::Failed {
+                            receipt: *receipt,
+                            what: what.clone(),
+                        });
+                    }
                     Some(IdemState::Pending) => {
                         g = self.idle.wait(g).expect("governor wait");
                     }
                 }
             }
         }
-        // Execute OUTSIDE the lock (work may be long).
-        let charge = work();
+        // Execute OUTSIDE the lock (work may be long). Catching here is
+        // load-bearing: every Pending key must reach a terminal state and wake
+        // its waiters even when caller-authored work unwinds.
+        let completion = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)) {
+            Ok(charge) => match self.charge(session, charge) {
+                Ok(_) => SubmissionCompletion::Done(charge),
+                Err(error) => SubmissionCompletion::Failed(error.to_string()),
+            },
+            Err(payload) => SubmissionCompletion::Failed(panic_message(payload.as_ref())),
+        };
         let receipt;
+        let outcome;
         {
             let mut g = self.inner.lock().expect("governor lock");
             g.next_receipt += 1;
             receipt = g.next_receipt;
-            g.idempotency
-                .insert(idem_key.to_string(), IdemState::Done { receipt, charge });
+            match completion {
+                SubmissionCompletion::Done(charge) => {
+                    g.idempotency
+                        .insert(idem_key.to_string(), IdemState::Done { receipt, charge });
+                    outcome = SubmitOutcome::Executed { charge, receipt };
+                }
+                SubmissionCompletion::Failed(what) => {
+                    g.idempotency.insert(
+                        idem_key.to_string(),
+                        IdemState::Failed {
+                            receipt,
+                            what: what.clone(),
+                        },
+                    );
+                    outcome = SubmitOutcome::Failed { receipt, what };
+                }
+            }
         }
         self.idle.notify_all();
-        // One charge, exactly once.
-        let _ = self.charge(session, charge)?;
-        Ok(SubmitOutcome::Executed { charge, receipt })
+        Ok(outcome)
     }
 
     /// The canonical idempotency key: agent-supplied key + content hash of
@@ -391,22 +471,32 @@ impl Governor {
                 })?;
         }
         for (key, state) in &g.idempotency {
-            if let IdemState::Done { receipt, charge } = state {
-                let payload = format!(
-                    "{{\"receipt\":{},\"core_s\":{},\"wall_s\":{}}}",
-                    receipt, charge.core_s, charge.wall_s
-                );
-                ledger
-                    .append_event(&fs_ledger::EventRow {
-                        session: None,
-                        t: i64::try_from(*receipt).unwrap_or(i64::MAX),
-                        kind: "session.idempotent-execution",
-                        payload: Some(&payload),
-                    })
-                    .map_err(|e| SessionError::Persistence {
-                        what: format!("idempotency event for {key}: {e}"),
-                    })?;
-            }
+            let (receipt, kind, payload) = match state {
+                IdemState::Pending => continue,
+                IdemState::Done { receipt, charge } => (
+                    *receipt,
+                    "session.idempotent-execution",
+                    format!(
+                        "{{\"receipt\":{},\"core_s\":{},\"wall_s\":{}}}",
+                        receipt, charge.core_s, charge.wall_s
+                    ),
+                ),
+                IdemState::Failed { receipt, what } => (
+                    *receipt,
+                    "session.idempotent-failure",
+                    format!("{{\"receipt\":{},\"error\":{what:?}}}", receipt),
+                ),
+            };
+            ledger
+                .append_event(&fs_ledger::EventRow {
+                    session: None,
+                    t: i64::try_from(receipt).unwrap_or(i64::MAX),
+                    kind,
+                    payload: Some(&payload),
+                })
+                .map_err(|e| SessionError::Persistence {
+                    what: format!("idempotency event for {key}: {e}"),
+                })?;
         }
         for ev in &g.events {
             let payload = format!(
