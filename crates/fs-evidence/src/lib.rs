@@ -596,13 +596,51 @@ pub struct Evidence<T> {
     pub adjoint_ref: Option<ProvenanceHash>,
 }
 
-/// `Certified<T>`: evidence whose numerical slice is rigorous (Exact or
-/// Enclosure) AND whose model evidence is explicit. The constructor
-/// discipline lives in [`Evidence::certified`].
-pub type Certified<T> = Evidence<T>;
+/// `Certified<T>`: evidence whose certificate slate PASSED the full
+/// validation boundary in [`Evidence::certified`] — rigorous numerics
+/// (Exact/Enclosure), finite ordered bounds, QoI containment, and
+/// in-domain model evidence.
+///
+/// UNFORGEABLE BY CONSTRUCTION (bead gp3.2.1): the inner evidence is
+/// private, the ONLY constructor is [`Evidence::certified`], and no
+/// mutable access exists — so a certificate cannot be forged by literal
+/// construction or weakened by post-certification mutation. Reads go
+/// through `Deref<Target = Evidence<T>>` (immutable). To modify, call
+/// [`Certified::into_evidence`]: the downgrade is explicit, the
+/// certification mark is LOST, and re-certifying re-validates. The
+/// escape hatches are plain `Evidence<T>` or
+/// [`NumericalCertificate::no_claim`] — never a `Certified<T>`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Certified<T>(Evidence<T>);
+
+impl<T> Certified<T> {
+    /// Read-only view of the certified evidence.
+    #[must_use]
+    pub fn evidence(&self) -> &Evidence<T> {
+        &self.0
+    }
+
+    /// EXPLICIT downgrade: surrender the certification mark to get a
+    /// mutable `Evidence<T>` back. Any change must pass
+    /// [`Evidence::certified`] again to regain `Certified<T>` — this is
+    /// the reconstruction/round-trip path, and it re-validates.
+    #[must_use]
+    pub fn into_evidence(self) -> Evidence<T> {
+        self.0
+    }
+}
+
+impl<T> core::ops::Deref for Certified<T> {
+    type Target = Evidence<T>;
+    fn deref(&self) -> &Evidence<T> {
+        &self.0
+    }
+}
 
 /// Why a value could not be certified (Decalogue P10: teaching refusals).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Carries the offending numbers; `Eq` is deliberately absent (f64
+/// payloads), `Copy + PartialEq` retained.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CertifyError {
     /// The numerical certificate is not rigorous.
     NotRigorous {
@@ -611,6 +649,43 @@ pub enum CertifyError {
     },
     /// A constituent model was used outside its validity domain.
     OutOfDomain,
+    /// An Exact certificate over a non-finite value.
+    ExactNotFinite {
+        /// The rejected QoI.
+        qoi: f64,
+    },
+    /// An Exact certificate whose bounds do not both equal the QoI.
+    ExactInconsistent {
+        /// The QoI the certificates describe.
+        qoi: f64,
+        /// The certificate's lower bound.
+        lo: f64,
+        /// The certificate's upper bound.
+        hi: f64,
+    },
+    /// An enclosure with a NaN or infinite bound.
+    NonFiniteBounds {
+        /// The certificate's lower bound.
+        lo: f64,
+        /// The certificate's upper bound.
+        hi: f64,
+    },
+    /// An enclosure with `lo > hi` (encloses nothing).
+    InvertedBounds {
+        /// The certificate's lower bound.
+        lo: f64,
+        /// The certificate's upper bound.
+        hi: f64,
+    },
+    /// The QoI lies outside its own claimed enclosure.
+    QoiOutsideEnclosure {
+        /// The QoI the certificates describe.
+        qoi: f64,
+        /// The certificate's lower bound.
+        lo: f64,
+        /// The certificate's upper bound.
+        hi: f64,
+    },
 }
 
 impl fmt::Display for CertifyError {
@@ -626,6 +701,31 @@ impl fmt::Display for CertifyError {
                 f,
                 "Certified<T> refused: a constituent model was used OUTSIDE its validity \
                  domain; bracket the model or escalate fidelity"
+            ),
+            CertifyError::ExactNotFinite { qoi } => write!(
+                f,
+                "Certified<T> refused: an Exact certificate over the non-finite value {qoi} \
+                 certifies nothing — use NumericalCertificate::no_claim for missing values"
+            ),
+            CertifyError::ExactInconsistent { qoi, lo, hi } => write!(
+                f,
+                "Certified<T> refused: Exact demands lo == qoi == hi, got qoi {qoi} with \
+                 bounds [{lo}, {hi}] — the certificate does not describe its own QoI"
+            ),
+            CertifyError::NonFiniteBounds { lo, hi } => write!(
+                f,
+                "Certified<T> refused: enclosure [{lo}, {hi}] has a NaN or infinite bound; \
+                 a certified enclosure must be finite — keep it as Evidence or no-claim"
+            ),
+            CertifyError::InvertedBounds { lo, hi } => write!(
+                f,
+                "Certified<T> refused: enclosure [{lo}, {hi}] is inverted (lo > hi) and \
+                 encloses NOTHING — a forged or corrupted certificate fails closed"
+            ),
+            CertifyError::QoiOutsideEnclosure { qoi, lo, hi } => write!(
+                f,
+                "Certified<T> refused: qoi {qoi} lies outside its own claimed enclosure \
+                 [{lo}, {hi}] — the certificate contradicts the value it travels with"
             ),
         }
     }
@@ -660,26 +760,56 @@ impl Evidence<f64> {
 }
 
 impl<T> Evidence<T> {
-    /// The `Certified<T>` constructor discipline: rigorous numerics
-    /// (Exact/Enclosure) plus EXPLICIT, in-domain model evidence.
-    /// Pure-math values certify with `ModelEvidence::none()` — that IS the
-    /// explicit "no model involved" statement.
+    /// The `Certified<T>` constructor discipline — the ONLY door into
+    /// [`Certified<T>`], and the FULL validation boundary (bead
+    /// gp3.2.1): rigorous numerics (Exact/Enclosure), finite ordered
+    /// bounds, the QoI contained in its own enclosure, and EXPLICIT,
+    /// in-domain model evidence. Pure-math values certify with
+    /// `ModelEvidence::none()` — that IS the explicit "no model
+    /// involved" statement.
+    ///
+    /// Because `NumericalCertificate` fields are public (composition
+    /// ergonomics), a hand-built certificate can hold NaN, infinite,
+    /// or inverted bounds — everything here validates the ACTUAL
+    /// numbers, not the constructor that claimed them.
     ///
     /// # Errors
     /// [`CertifyError`] naming what is missing and how to fix it.
     pub fn certified(self) -> Result<Certified<T>, CertifyError> {
-        if matches!(
-            self.numerical.kind,
-            NumericalKind::Estimate | NumericalKind::NoClaim
-        ) {
-            return Err(CertifyError::NotRigorous {
-                kind: self.numerical.kind,
-            });
+        let (qoi, lo, hi) = (self.qoi, self.numerical.lo, self.numerical.hi);
+        match self.numerical.kind {
+            NumericalKind::Estimate | NumericalKind::NoClaim => {
+                return Err(CertifyError::NotRigorous {
+                    kind: self.numerical.kind,
+                });
+            }
+            NumericalKind::Exact => {
+                if !qoi.is_finite() {
+                    return Err(CertifyError::ExactNotFinite { qoi });
+                }
+                // Bit identity, not approximate equality: Exact CLAIMS
+                // the bounds are the value (and fails closed on the
+                // -0.0 vs 0.0 edge rather than minting a certificate).
+                if lo.to_bits() != qoi.to_bits() || hi.to_bits() != qoi.to_bits() {
+                    return Err(CertifyError::ExactInconsistent { qoi, lo, hi });
+                }
+            }
+            NumericalKind::Enclosure => {
+                if !(lo.is_finite() && hi.is_finite()) {
+                    return Err(CertifyError::NonFiniteBounds { lo, hi });
+                }
+                if lo > hi {
+                    return Err(CertifyError::InvertedBounds { lo, hi });
+                }
+                if !(qoi >= lo && qoi <= hi) {
+                    return Err(CertifyError::QoiOutsideEnclosure { qoi, lo, hi });
+                }
+            }
         }
         if !self.model.in_domain {
             return Err(CertifyError::OutOfDomain);
         }
-        Ok(self)
+        Ok(Certified(self))
     }
 
     /// Attach a statistical certificate.

@@ -322,6 +322,122 @@ fn evd_006_certified_discipline_composes() {
     );
 }
 
+/// gp3.2.1 — the Certified<T> trust boundary: every public forge route
+/// is refused with the structured reason; the opaque newtype has no
+/// mutable access, so weakening means an EXPLICIT downgrade whose
+/// re-certification re-validates (the reconstruction round trip).
+#[test]
+fn evd_012_certified_is_unforgeable_and_validated() {
+    use fs_evidence::{CertifyError, NumericalKind};
+    let p = ProvenanceHash::of_bytes(b"adversarial");
+    let forge = |numerical: NumericalCertificate, qoi: f64| {
+        let mut e = Evidence::exact(0.0, p);
+        e.qoi = qoi;
+        e.value = qoi;
+        e.numerical = numerical;
+        e.certified()
+    };
+    // (a) NaN/infinite "exact" values refuse (Evidence::exact accepts
+    // them as EVIDENCE; the certification boundary is where they stop).
+    let nan_exact = matches!(
+        Evidence::exact(f64::NAN, p).certified(),
+        Err(CertifyError::ExactNotFinite { .. })
+    );
+    let inf_exact = matches!(
+        Evidence::exact(f64::INFINITY, p).certified(),
+        Err(CertifyError::ExactNotFinite { .. })
+    );
+    // (b) A hand-built Exact whose bounds contradict its QoI refuses.
+    let inconsistent = matches!(
+        forge(
+            NumericalCertificate {
+                kind: NumericalKind::Exact,
+                lo: 1.0,
+                hi: 2.0,
+            },
+            1.0,
+        ),
+        Err(CertifyError::ExactInconsistent { .. })
+    );
+    // (c) Hand-built inverted / NaN / infinite enclosures refuse: the
+    // validator checks the NUMBERS, not the constructor that claimed them.
+    let inverted = matches!(
+        forge(
+            NumericalCertificate {
+                kind: NumericalKind::Enclosure,
+                lo: 2.0,
+                hi: 1.0,
+            },
+            1.5,
+        ),
+        Err(CertifyError::InvertedBounds { .. })
+    );
+    let nan_bound = matches!(
+        forge(
+            NumericalCertificate {
+                kind: NumericalKind::Enclosure,
+                lo: f64::NAN,
+                hi: 1.0,
+            },
+            0.5,
+        ),
+        Err(CertifyError::NonFiniteBounds { .. })
+    );
+    let inf_bound = matches!(
+        forge(
+            NumericalCertificate {
+                kind: NumericalKind::Enclosure,
+                lo: 0.0,
+                hi: f64::INFINITY,
+            },
+            0.5,
+        ),
+        Err(CertifyError::NonFiniteBounds { .. })
+    );
+    // (d) A QoI outside its own claimed enclosure refuses.
+    let escaped = matches!(
+        forge(NumericalCertificate::enclosure(0.0, 1.0), 2.0),
+        Err(CertifyError::QoiOutsideEnclosure { .. })
+    );
+    // (e) Legitimate exact/enclosure composition remains usable, and
+    // reads flow through the immutable Deref view.
+    let a = Evidence::exact(2.0, p);
+    let b = Evidence::enclosed(3.0, 2.9, 3.1, p);
+    let cert = Evidence::combine(Op::Mul, &a, &b, ())
+        .certified()
+        .expect("rigorous chain certifies");
+    let readable = cert.qoi.to_bits() == 6.0f64.to_bits() && cert.evidence().numerical.lo <= 6.0;
+    // (f) Downgrade-mutate-recertify: the ONLY mutation path loses the
+    // mark, and reconstruction re-validates (round-trip invariance).
+    let mut reopened = cert.into_evidence();
+    reopened.numerical = NumericalCertificate::estimate(5.9, 6.1);
+    let weakened_refused = matches!(
+        reopened.clone().certified(),
+        Err(CertifyError::NotRigorous { .. })
+    );
+    reopened.numerical = NumericalCertificate::enclosure(5.9, 6.1);
+    reopened.qoi = 7.0; // outside the reclaimed enclosure
+    let drifted_refused = matches!(
+        reopened.certified(),
+        Err(CertifyError::QoiOutsideEnclosure { .. })
+    );
+    verdict(
+        "evd-012",
+        nan_exact
+            && inf_exact
+            && inconsistent
+            && inverted
+            && nan_bound
+            && inf_bound
+            && escaped
+            && readable
+            && weakened_refused
+            && drifted_refused,
+        "Certified<T> is opaque: every forge route refused with its structured reason; \
+         rigorous composition still certifies; downgrade-mutate-recertify re-validates",
+    );
+}
+
 #[test]
 fn evd_007_disjoint_validated_regimes_demote_not_launder() {
     use fs_evidence::{Color, IntervalOp, compose};

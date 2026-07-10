@@ -177,9 +177,12 @@ fn geo_002_multi_chart_region_agrees_within_composed_bounds() {
     };
     let gate = CancelGate::new();
     let (agreed, json_stable) = with_cx(&gate, |cx| {
+        // Certified<T> is opaque (gp3.2.1): taking the value OUT is an
+        // explicit downgrade to plain Evidence.
         let sampled = sphere
             .convert(ErrBudget { abs_sd_error: 0.08 }, cx)
-            .expect("feasible budget");
+            .expect("feasible budget")
+            .into_evidence();
         let region = Region::from_chart(Arc::new(sphere), ProvenanceHash::of_bytes(b"exact"))
             .with_chart(Arc::new(sampled.value), sampled.provenance);
         let cfg = AgreementConfig::default();

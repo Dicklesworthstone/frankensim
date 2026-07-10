@@ -106,6 +106,24 @@ on fs-obs only.
 7. Color regime checks fail closed: no empty, inverted, or non-finite regime
    and no non-finite current state can retain `Validated`; disjoint validated
    composition and regime exit both carry infinite/no-claim dispersion.
+8. Certified trust boundary (gp3.2.1, evd-012): `Certified<T>` is an
+   OPAQUE newtype over `Evidence<T>` — private inner, no `DerefMut`, no
+   field access for writing. The ONLY constructor is
+   `Evidence::certified()`, which validates the ACTUAL numbers, not the
+   constructor that claimed them: Exact requires a finite QoI with
+   bit-identical bounds; Enclosure requires finite ordered bounds that
+   CONTAIN the QoI; Estimate/NoClaim and out-of-domain models refuse.
+   Reads flow through `Deref<Target = Evidence<T>>`;
+   `Certified::into_evidence()` is the explicit downgrade — the mark is
+   lost and any reconstruction must re-enter `certified()`
+   (re-validated round trip). Escape hatches are plain `Evidence<T>` or
+   `NumericalCertificate::no_claim()`, never a `Certified<T>`.
+   MIGRATION: `Certified<T>` was a type alias for `Evidence<T>`;
+   callers that mutated or moved fields of a certified value now call
+   `.into_evidence()` first (one workspace site: fs-geom conformance),
+   and callers that only read fields are unchanged via Deref. This
+   crate has no serializer; persisted evidence re-enters through
+   `certified()` on ingest by construction.
 
 ## Error model
 Structured teaching errors throughout: `CertifyError`, `RegistryError`,
