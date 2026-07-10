@@ -265,7 +265,7 @@ fn ac_003_package_recheck_solver_free_and_voi_hint() {
 #[test]
 fn ac_004_g5_whole_path_replay() {
     use fs_ir::anytime::run_anytime;
-    let run = || -> (Vec<u64>, u64) {
+    let run = || -> (Vec<u64>, fs_package::ContentHash) {
         let family = steep_family();
         let mut cache = MemCache::default();
         let mut costs = CostTable::new(200.0);
