@@ -14,9 +14,12 @@
 //! Bead fs-fft-perf-multidim extends the correctness core with the r2c INVERSE
 //! (c2r, [`RealFft::inverse`]) and N-DIMENSIONAL (2D/3D) transforms via
 //! separable pencil decomposition ([`FftNd`]) — both oracle-tested. Still
-//! deferred to that bead's perf scope: radix-4/8 kernels, SIMD lanes,
-//! cache-blocked transposes, executor-tiled pencils, and the
-//! ≥40%-of-memory-bound roofline gate.
+//! that bead also landed the mixed RADIX-4/2 Stockham core (half the
+//! full-array passes) and fs-simd NEON stage kernels (bitwise vs the
+//! scalar twin), with the roofline lane in tests/perf_lane.rs. Still
+//! open there: radix-8, cache-blocked transposes, executor-tiled
+//! pencils, and quiet-machine certification of the 40% target (the
+//! lane asserts an anti-collapse floor and reports the target).
 //!
 //! Conventions: forward is unnormalized; `inverse` scales by 1/n so
 //! inverse(forward(x)) = x. Sizes must be powers of two (structured
