@@ -190,8 +190,13 @@ fn dirichlet_eigenvalues_match_analytic() {
     );
 }
 
-/// Recorded on aarch64-apple (M4 Pro); must match on x86-64 (trj).
-const GOLDEN_HASH: u64 = 0xaee4_8002_1eea_9097;
+/// JUSTIFIED BUMP (bead 27d3, 2026-07-09): fs-fft moved its DCT substrate
+/// from radix-2 to mixed radix-4/2 Stockham. The resulting butterfly and
+/// twiddle order changes bits while the unchanged DCT oracle, recovery,
+/// calculus, root, and eigenvalue tests remain green. Previous radix-2
+/// golden: 0xaee4_8002_1eea_9097 (M4 Pro + trj). This radix-4 value is
+/// recorded on M4 Pro; the x86-64 row remains armed pending RCH admission.
+const GOLDEN_HASH: u64 = 0x22e7_ea21_58c9_e587;
 
 #[test]
 fn cheb_golden_hash() {

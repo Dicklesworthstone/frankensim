@@ -47,8 +47,10 @@ fs-ivl (interval root certification).
    deterministic ~1e-18 jitter fixture).
 4. `diff_matrix` rows sum to exact zero (differentiation annihilates
    constants bitwise).
-5. Deterministic cross-ISA: all state built on strict fs-math cos/sin
-   and fixed-order arithmetic (golden hash, trj-verified).
+5. Deterministic per ISA: all state is built on strict fs-math cos/sin
+   and fixed-order arithmetic. The radix-4 downstream golden is recorded
+   on M4 Pro; x86-64 equality is armed pending RCH admission (the previous
+   radix-2 golden was trj-verified).
 6. Colleague roots agree with the subdivision scanner on simple roots,
    recover even-multiplicity roots the scanner cannot see, and
    certification boxes are reported in physical-domain coordinates.
@@ -66,9 +68,10 @@ policies, non-positive certification widths, malformed public `Cheb2`
 or `FourierSeries` fields, and non-power-of-two Fourier sample counts.
 
 ## Determinism class
-Bit-deterministic cross-ISA by construction. Golden hash over
-coefficients + integral + derivative sample + roots + collocation
-eigenvalues, recorded on aarch64-apple and required to match on x86-64.
+Bit-deterministic per ISA by construction. The golden hashes coefficients
++ integral + derivative sample + roots + collocation eigenvalues. The
+current radix-4 value is recorded on aarch64-apple and must match on
+x86-64 before the cross-ISA row is restored to verified.
 
 ## Cancellation behavior
 Construction is bounded (max_degree cap); no poll points needed at v1

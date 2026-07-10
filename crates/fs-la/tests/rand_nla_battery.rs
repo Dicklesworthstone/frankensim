@@ -14,6 +14,23 @@ fn lcg(seed: &mut u64) -> f64 {
     ((*seed >> 11) as f64) / (1u64 << 53) as f64 - 0.5
 }
 
+/// scale·ratioᵏ for k in 0..n via a fixed left-to-right product chain.
+///
+/// Deliberately NOT `f64::powi`: its rounding sequence is
+/// optimization-level-dependent (observed 1-ulp debug/release divergence
+/// from exponent 4 upward on this exact fixture), which makes golden bits
+/// build-mode-dependent. A sequential product has one rounding order.
+fn geo(scale: f64, ratio: f64, n: usize) -> Vec<f64> {
+    let mut p = scale;
+    (0..n)
+        .map(|_| {
+            let cur = p;
+            p *= ratio;
+            cur
+        })
+        .collect()
+}
+
 /// A = Q1·diag(σ)·Q2ᵀ with a chosen spectrum (m×n, m ≥ n).
 fn spectrum_matrix(m: usize, n: usize, sigma: &[f64], seed: u64) -> Vec<f64> {
     let mut s = seed;
@@ -79,9 +96,7 @@ fn spectral_residual(a: &[f64], m: usize, n: usize, q: &[f64], k: usize) -> f64 
 fn rangefinder_meets_bounds_on_three_spectra() {
     let (m, n) = (120usize, 60usize);
     // Fast exponential decay, slow algebraic decay, and a spectral gap.
-    let fast: Vec<f64> = (0..n)
-        .map(|k| 0.5f64.powi(i32::try_from(k).unwrap()))
-        .collect();
+    let fast: Vec<f64> = geo(1.0, 0.5, n);
     let slow: Vec<f64> = (0..n)
         .map(|k| 1.0 / f64::from(u32::try_from(k + 1).unwrap()))
         .collect();
@@ -118,9 +133,7 @@ fn rangefinder_meets_bounds_on_three_spectra() {
 #[test]
 fn rsvd_recovers_singular_values() {
     let (m, n) = (100usize, 50usize);
-    let sigma: Vec<f64> = (0..n)
-        .map(|k| 2.0 * 0.6f64.powi(i32::try_from(k).unwrap()))
-        .collect();
+    let sigma: Vec<f64> = geo(2.0, 0.6, n);
     let a = spectrum_matrix(m, n, &sigma, 0xB0B);
     let (_, sv, _, _) = rsvd(&a, m, n, 10, 8, 1, 7);
     for k in 0..8 {
@@ -140,15 +153,8 @@ fn rsvd_recovers_singular_values() {
 fn nystrom_reconstructs_low_rank_psd() {
     let n = 60usize;
     // PSD with rank ~8 + tiny tail.
-    let sigma: Vec<f64> = (0..n)
-        .map(|k| {
-            if k < 8 {
-                4.0 * 0.7f64.powi(i32::try_from(k).unwrap())
-            } else {
-                1e-9
-            }
-        })
-        .collect();
+    let head = geo(4.0, 0.7, n);
+    let sigma: Vec<f64> = (0..n).map(|k| if k < 8 { head[k] } else { 1e-9 }).collect();
     // Build PSD as Q·diag(σ)·Qᵀ.
     let mut s = 0xC0DE_u64;
     let g: Vec<f64> = (0..n * n).map(|_| lcg(&mut s)).collect();
@@ -223,9 +229,7 @@ fn sketch_ls_matches_direct_qr() {
 fn hutch_pp_beats_hutchinson_variance() {
     let n = 80usize;
     // Decaying-spectrum SPD (where Hutch++ shines).
-    let sigma: Vec<f64> = (0..n)
-        .map(|k| 8.0 * 0.8f64.powi(i32::try_from(k).unwrap()))
-        .collect();
+    let sigma: Vec<f64> = geo(8.0, 0.8, n);
     let true_trace: f64 = sigma.iter().sum();
     let mut s = 0x7ACE_u64;
     let g: Vec<f64> = (0..n * n).map(|_| lcg(&mut s)).collect();
@@ -272,13 +276,18 @@ fn hutch_pp_beats_hutchinson_variance() {
     );
 }
 
-/// Recorded on aarch64-apple (M4 Pro); must match on x86-64 (trj).
-// JUSTIFIED BUMP (2026-07-09): commit d9ba0b6 made fs-rand stream
-// counter advancement wrap deterministically (the old bits depended on
-// build-mode-dependent overflow), which moves every StreamKey consumer.
-// Re-pinned on arm64 (stable across runs); the x86_64 cross-check row
-// re-arms with that fix.
-const GOLDEN_HASH: u64 = 0xf3dc_b63b_e63f_8ab9;
+/// Recorded on aarch64-apple (M4 Pro), identical in debug and release;
+/// must match on x86-64 (trj).
+// JUSTIFIED BUMP (2026-07-09, second): the previous bump to
+// 0xf3dc_b63b_e63f_8ab9 attributed the break to fs-rand d9ba0b6, but that
+// commit only changed counter wrapping at the u64::MAX boundary (never
+// reached here). The real cause was `f64::powi` in the sigma fixture:
+// its rounding is optimization-level-dependent, so debug observed
+// 0x3e92_8bac_8cf9_fd48 (the original recording) while release observed
+// 0xf3dc_b63b_e63f_8ab9 — the golden was build-mode-dependent. The
+// fixture now uses a sequential product chain (`geo`), which changes the
+// sigma bits once and makes the sentinel profile-stable by construction.
+const GOLDEN_HASH: u64 = 0xeef1_0550_7daf_c0d5;
 
 #[test]
 fn rand_nla_golden_hash() {
@@ -290,9 +299,7 @@ fn rand_nla_golden_hash() {
         }
     };
     let (m, n) = (60usize, 30usize);
-    let sigma: Vec<f64> = (0..n)
-        .map(|k| 0.7f64.powi(i32::try_from(k).unwrap()))
-        .collect();
+    let sigma: Vec<f64> = geo(1.0, 0.7, n);
     let a = spectrum_matrix(m, n, &sigma, 0xFEED);
     let (_, sv, _, rep) = rsvd(&a, m, n, 6, 4, 1, 11);
     for &v in &sv {
