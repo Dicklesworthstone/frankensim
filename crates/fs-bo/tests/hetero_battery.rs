@@ -119,7 +119,12 @@ fn anytime_stopped_noisy_bo() {
     // comparison was vacuous; racing is the real e-process pattern.)
     // Plus the Bet-5 validity claim: every stopped interval covers the
     // true mean AT the stopping time.
-    let truth = |x: f64| 0.5f64.mul_add(-fs_math::det::exp(-30.0 * (x - 0.7) * (x - 0.7)), 0.6);
+    // V-shaped objective: candidate means separate linearly with
+    // distance from the optimum (the first draft's narrow Gaussian dip
+    // left 9 of 12 candidates as statistical TIES at the plateau mean,
+    // so they all raced to the half-width floor — a fixture bug, not a
+    // racing bug).
+    let truth = |x: f64| 0.55f64.mul_add((x - 0.7f64).abs(), 0.15);
     let candidates: Vec<f64> = (0..12).map(|k| f64::from(k) / 11.0).collect();
     let noise = 0.15f64;
     let cap = 4000u64;
@@ -150,7 +155,7 @@ fn anytime_stopped_noisy_bo() {
                     break;
                 }
                 // Challenger provably better: dethrone.
-                if hi < lo.max(0.0).mul_add(0.0, incumbent.expect("set").1) {
+                if hi < incumbent.expect("set").1 {
                     break;
                 }
             }
