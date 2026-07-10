@@ -8,7 +8,7 @@
 //!   belong to the perf-CI bead (fz2.4), and this crate does not
 //!   pretend otherwise.
 //! - GOLDEN-LEDGER DISCIPLINE: each smoke stage folds its metric
-//!   stream into a content hash (FNV-64 over metric bits); CI replays
+//!   stream into a content hash (canonical replay identity over metric bits); CI replays
 //!   and compares hashes — every stage here is deterministic, so hash
 //!   equality IS the gate (stochastic-labeled stages would gate on
 //!   envelopes instead).
@@ -74,21 +74,23 @@ pub struct StageArtifact {
     pub wall_s: f64,
 }
 
-/// Fold a metric stream into the content hash.
+/// Metric-stream encoding version — a SEMANTIC SURFACE registered in
+/// golden-couplings.json: every flagship golden depends on it, so
+/// changing the encoding must deliberately re-freeze them all.
+/// v1 = bare name/bits concatenation (unprefixed — "ab"+bits vs
+/// "a"+... could collide); v2 = canonical replay identity (gp3.14):
+/// typed, length-prefixed fs_obs::ident fields.
+pub const METRIC_STREAM_ENCODING_VERSION: u32 = 2;
+
+/// Fold a metric stream into the content hash (canonical replay
+/// identity over `(name, bits)` fields, order-semantic).
 #[must_use]
 pub fn content_hash(metrics: &[(&'static str, f64)]) -> u64 {
-    let mut acc: u64 = 0xcbf2_9ce4_8422_2325;
-    let mut feed = |bytes: &[u8]| {
-        for &b in bytes {
-            acc ^= u64::from(b);
-            acc = acc.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-    };
+    let mut b = fs_obs::ident::IdentityBuilder::new("flagship-metric-stream");
     for (name, v) in metrics {
-        feed(name.as_bytes());
-        feed(&v.to_bits().to_le_bytes());
+        b = b.f64_bits(name, *v);
     }
-    acc
+    b.finish().root()
 }
 
 /// Build an artifact (hash computed, wall clock attached).

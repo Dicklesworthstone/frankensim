@@ -1091,6 +1091,7 @@ dependencies = [
  "fs-lbm",
  "fs-ledger",
  "fs-marquee",
+ "fs-obs",
  "fs-ornith",
  "fs-qty",
  "fs-race",

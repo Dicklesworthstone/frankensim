@@ -15,6 +15,7 @@ fs-exec = { path = "../fs-exec" }
 fs-frame = { path = "../fs-frame" }
 fs-lbm = { path = "../fs-lbm" }
 fs-ledger = { path = "../fs-ledger" }
+fs-obs = { path = "../fs-obs" }
 fs-marquee = { path = "../fs-marquee" }
 fs-ornith = { path = "../fs-ornith" }
 fs-qty = { path = "../fs-qty" }
