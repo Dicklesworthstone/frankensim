@@ -187,6 +187,22 @@ pub fn certify(
             }
         }
     };
+    // The transpose-residual bound certifies apply_t IS the structural
+    // transpose of apply — it says NOTHING about whether the gradient FORMULA
+    // is correct. If the gradient's OWN finite-difference falsifier flagged an
+    // inconsistency, the gradient is demonstrably wrong and cannot wear a color
+    // stronger than Estimated, whatever the residual/anchor evidence claims.
+    // Never launder a refuted gradient into a Verified/Validated ledger color
+    // (bead 9sf6). Empty fd_checks are unchanged — merge_gate separately makes
+    // the falsifier pairing mandatory before a merge.
+    let color = if fd_checks.iter().any(|v| !v.consistent) {
+        Color::Estimated {
+            estimator: "gradient contradicted by its own FD falsifier".to_string(),
+            dispersion: f64::INFINITY,
+        }
+    } else {
+        color
+    };
     GradientCertificate {
         color,
         residual_bound,

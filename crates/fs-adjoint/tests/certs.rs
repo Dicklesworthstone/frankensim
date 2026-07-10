@@ -112,6 +112,20 @@ fn gc_002_seeded_transpose_bug_is_caught_and_blocks_merge() {
     );
     let refusal2 = merge_gate(&cert_none).expect_err("no checks, no merge");
     assert!(format!("{refusal2}").contains("mandatory"), "{refusal2}");
+    // The COLOR must honor the falsifier, not just the merge gate (bead 9sf6):
+    // the refuted gradient cannot be laundered into a Verified ledger color even
+    // though its structural transpose-residual bound is tiny; the correct
+    // gradient stays Verified.
+    assert!(
+        matches!(cert_ok.color, Color::Verified { .. }),
+        "correct gradient stays Verified, got {:?}",
+        cert_ok.color
+    );
+    assert!(
+        matches!(cert_bad.color, Color::Estimated { .. }),
+        "a gradient refuted by its own FD falsifier must NOT wear Verified, got {:?}",
+        cert_bad.color
+    );
     verdict(
         "gc-002",
         "seeded sign flip caught by 4 FD spot checks and blocked at the merge gate; \
