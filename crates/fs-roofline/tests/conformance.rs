@@ -282,8 +282,14 @@ fn rf_006_cli_smoke_prints_report_and_ledgers() {
     assert!(stdout.contains("\"fingerprint\""), "axes line present");
     assert!(stdout.contains("simd-axpy-f64"), "kernel lines present");
     assert!(
+        stdout.contains(
+            "\"target\":\"gemm-f64\",\"statement\":\"≥75% of measured peak FLOPs for the selected SIMD tier\",\"landed\":true"
+        ),
+        "registered GEMM target is marked landed"
+    );
+    assert!(
         stdout.contains("\"landed\":false"),
-        "§14.1 coverage table present"
+        "unregistered §14.1 targets remain explicitly uncovered"
     );
     assert!(
         stdout.contains("\"ledgered\":true"),

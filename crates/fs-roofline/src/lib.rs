@@ -718,7 +718,7 @@ pub const SECTION_14_1_TARGETS: &[TargetRow] = &[
     TargetRow {
         kernel: "gemm-f64",
         statement: "≥75% of measured peak FLOPs for the selected SIMD tier",
-        landed: false,
+        landed: true,
     },
     TargetRow {
         kernel: "spmv-sell-c-sigma",
@@ -1164,12 +1164,15 @@ mod tests {
     #[test]
     fn section_14_1_table_is_complete_and_honest() {
         assert_eq!(SECTION_14_1_TARGETS.len(), 7, "all §14.1 families present");
-        // Nothing may claim to be landed until its kernel registers here.
+        let registry = kernels::production_registry(1, &synthetic_axes());
+        let registered: std::collections::BTreeSet<_> =
+            registry.iter().map(|kernel| kernel.spec().name).collect();
         for row in SECTION_14_1_TARGETS {
-            assert!(
-                !row.landed,
-                "{} claims landed without a registered kernel",
-                row.kernel
+            assert_eq!(
+                row.landed,
+                registered.contains(row.kernel),
+                "{} target registration and landed status drifted",
+                row.kernel,
             );
         }
     }

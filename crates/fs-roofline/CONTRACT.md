@@ -160,9 +160,10 @@ not a test-only wrapper).
   was crushed/stale or because a specialized kernel outran the probe by too
   much; the run is retained as invalid evidence and must be re-probed.
 - §14.1 family targets other than GEMM remain `landed: false` until their
-  kernels register. The GEMM production kernel is registered; the target
-  table's `landed` bit remains false until the owning concurrent edit is
-  reconciled with its focused execution proof.
+  kernels register. GEMM is `landed: true` because the shipped production
+  registry now executes the persistent session tune path; this is an
+  implementation-coverage claim, not a claim that any machine met the 75%
+  target.
 - Per-CCD bandwidth axes, P/E-core-class split, frequency-state capture,
   and thermal controls are future scope (v0 measures whole-machine axes).
 - Static floors plus pre/post agreement cannot detect a host that is already
