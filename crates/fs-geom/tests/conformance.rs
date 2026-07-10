@@ -279,6 +279,50 @@ fn geo_004_conversion_receipts_are_rigorous_and_refusals_teach() {
     );
 }
 
+/// An HONEST chart whose LOCAL Lipschitz varies: 1 near the origin, 50 in a
+/// fast-oscillating shell beyond `x = 1`. It never lies about any local bound.
+struct VaryingLipschitz;
+
+impl Chart for VaryingLipschitz {
+    fn eval(&self, x: Point3, _cx: &Cx<'_>) -> fs_geom::ChartSample {
+        let (sd, lip) = if x.x <= 1.0 {
+            (x.x, 1.0)
+        } else {
+            (1.0 + (50.0 * (x.x - 1.0)).sin(), 50.0)
+        };
+        fs_geom::ChartSample {
+            signed_distance: sd,
+            gradient: None,
+            lipschitz: Some(lip),
+            error: fs_evidence::NumericalCertificate::exact(sd),
+        }
+    }
+    fn support(&self) -> Aabb {
+        Aabb::new(Point3::new(-2.0, -2.0, -2.0), Point3::new(2.0, 2.0, 2.0))
+    }
+    fn name(&self) -> &'static str {
+        "varying-lipschitz-probe"
+    }
+}
+
+#[test]
+fn geo_004b_convert_bounds_global_lipschitz_not_the_center() {
+    // The box-center probe sees local Lipschitz 1, but the sampling grid lands
+    // in the 50-Lipschitz shell (|x.x| up to 2). Sampling only the center would
+    // ship a sampled-SDF receipt understating the trilinear error ~18x; the
+    // grid-max bound must instead REFUSE this budget rather than certify a false
+    // enclosure (bead obnw F2). (Resolution stays well under the cap, so the
+    // grid-Lipschitz check — not the resolution cap — is what refuses.)
+    let gate = CancelGate::new();
+    let refusal = with_cx(&gate, |cx| {
+        VaryingLipschitz.convert(ErrBudget { abs_sd_error: 0.5 }, cx)
+    });
+    assert!(
+        matches!(refusal, Err(ConvertDiag::BudgetInfeasible { .. })),
+        "convert must refuse (grid Lipschitz 50 >> center 1), got {refusal:?}"
+    );
+}
+
 #[test]
 fn geo_005_geometry_is_cancellable() {
     let sphere = SphereChart {

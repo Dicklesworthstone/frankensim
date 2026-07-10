@@ -231,7 +231,14 @@ impl<C: Chart> Convert<SampledSdf> for C {
         }
         let n = need_resolution.max(2);
         let h = edge / f64::from(n - 1);
-        let achieved = lipschitz * h;
+        // Sample the field AND the source's local Lipschitz at EVERY grid point.
+        // The center probe alone is NOT a global bound: a source whose local
+        // Lipschitz varies (exactly the F-rep charts the Rep Router routes to
+        // SDF) can be far steeper away from the center, so `center·h` would
+        // UNDERSTATE the trilinear error (bead obnw). The max over the grid is
+        // conservative at the sampled resolution; sub-grid Lipschitz spikes
+        // remain a documented sampling assumption (CONTRACT no-claim).
+        let mut l_max = lipschitz;
         let mut values = Vec::with_capacity((n as usize).pow(3));
         for k in 0..n {
             for j in 0..n {
@@ -241,16 +248,36 @@ impl<C: Chart> Convert<SampledSdf> for C {
                         box_.min.y + f64::from(j) * (box_.max.y - box_.min.y) / f64::from(n - 1),
                         box_.min.z + f64::from(k) * (box_.max.z - box_.min.z) / f64::from(n - 1),
                     );
-                    values.push(self.eval(p, cx).signed_distance);
+                    let sample = self.eval(p, cx);
+                    values.push(sample.signed_distance);
+                    match sample.lipschitz {
+                        Some(l) if l.is_finite() => l_max = l_max.max(l),
+                        // No local bound at a sample ⇒ the error there is
+                        // unbounded; refuse rather than certify a hole.
+                        _ => return Err(ConvertDiag::NoLipschitzBound),
+                    }
                 }
             }
+        }
+        let achieved = l_max * h;
+        // If the grid revealed a steeper slope than the center probe assumed,
+        // the honest bound may exceed the budget — REFUSE with the true
+        // achievable rather than ship a receipt that understates the error.
+        if achieved > budget.abs_sd_error {
+            let refined_h = budget.abs_sd_error / l_max.max(f64::MIN_POSITIVE);
+            return Err(ConvertDiag::BudgetInfeasible {
+                requested: budget.abs_sd_error,
+                achievable: achieved,
+                need_resolution: (edge / refined_h).ceil() as u32 + 1,
+                cap: SAMPLED_SDF_MAX_RESOLUTION,
+            });
         }
         let chart = SampledSdf {
             box_,
             n,
             values,
             bound: achieved,
-            source_lipschitz: lipschitz,
+            source_lipschitz: l_max,
         };
         // The receipt: QoI = achieved bound, enclosed rigorously; the
         // provenance chains source-name → conversion.
