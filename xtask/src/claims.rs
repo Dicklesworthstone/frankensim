@@ -104,31 +104,113 @@ fn count_before(line: &str, pat: &str) -> Option<usize> {
     digits.parse::<usize>().ok()
 }
 
+fn workspace_fs_member_count(manifest: &str) -> Option<usize> {
+    let mut lines = manifest.lines();
+    lines.find(|line| line.trim() == "members = [")?;
+    let mut count = 0usize;
+    for line in lines {
+        let entry = line.trim();
+        if entry == "]" {
+            return Some(count);
+        }
+        let entry = entry.strip_suffix(',').unwrap_or(entry).trim();
+        let entry = entry.strip_prefix('"')?.strip_suffix('"')?;
+        if entry.starts_with("crates/fs-") {
+            count = count.checked_add(1)?;
+        }
+    }
+    None
+}
+
+fn tracked_file_count(root: &Path, pathspec: &str) -> Option<usize> {
+    let output = std::process::Command::new("git")
+        .args(["-C"])
+        .arg(root)
+        .args(["ls-files", "--", pathspec])
+        .output()
+        .ok()?;
+    output.status.success().then(|| {
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .count()
+    })
+}
+
 /// huq.18: README inventory counts (crate/contract/test-file numbers in
 /// the badges and the What-Exists table) must equal the tree's actual
 /// counts — counts are DERIVED, never hand-promoted, so drift turns the
 /// gate red instead of aging silently.
 fn check_inventory_counts(root: &Path, readme: &str) -> Vec<Violation> {
     let mut violations = Vec::new();
-    let crate_dirs: Vec<PathBuf> = std::fs::read_dir(root.join("crates"))
-        .map_or_else(|_| Vec::new(), |rd| rd.flatten().map(|e| e.path()).collect());
-    let crate_count = crate_dirs
+    let crate_dirs: Vec<PathBuf> = std::fs::read_dir(root.join("crates")).map_or_else(
+        |_| Vec::new(),
+        |rd| rd.flatten().map(|e| e.path()).collect(),
+    );
+    let filesystem_crate_count = crate_dirs
         .iter()
         .filter(|p| p.join("Cargo.toml").is_file())
         .count();
-    let contract_count = crate_dirs
+    let filesystem_contract_count = crate_dirs
         .iter()
         .filter(|p| p.join("CONTRACT.md").is_file())
         .count();
-    let test_file_count: usize = crate_dirs
+    let filesystem_test_file_count: usize = crate_dirs
         .iter()
         .filter_map(|p| std::fs::read_dir(p.join("tests")).ok())
         .flat_map(std::iter::Iterator::flatten)
         .filter(|f| f.path().extension().is_some_and(|x| x == "rs"))
         .count();
+    // Public inventory describes a clean clone. Untracked scratch probes must
+    // neither inflate README claims nor make the gate nondeterministic. The
+    // filesystem fallback keeps isolated non-git unit fixtures useful.
+    let crate_count =
+        tracked_file_count(root, "crates/*/Cargo.toml").unwrap_or(filesystem_crate_count);
+    let contract_count =
+        tracked_file_count(root, "crates/*/CONTRACT.md").unwrap_or(filesystem_contract_count);
+    let test_file_count =
+        tracked_file_count(root, "crates/*/tests/*.rs").unwrap_or(filesystem_test_file_count);
+    let workspace_crate_count = std::fs::read_to_string(root.join("Cargo.toml"))
+        .ok()
+        .and_then(|manifest| workspace_fs_member_count(&manifest));
+    if workspace_crate_count.is_none() {
+        violations.push(Violation {
+            check: "claim-state",
+            crate_name: "Cargo.toml".to_string(),
+            detail: "cannot derive native fs-* workspace-member count from [workspace].members"
+                .to_string(),
+        });
+    }
+    let workspace_crate_count = workspace_crate_count.unwrap_or(usize::MAX);
     let checks = [
+        (
+            "%20fs--%2A%20crates",
+            workspace_crate_count,
+            "fs-* crates (badge)",
+        ),
+        (
+            " native `fs-*` workspace crates",
+            workspace_crate_count,
+            "native fs-* workspace crates",
+        ),
+        (
+            " `fs-*` crate directories",
+            crate_count,
+            "fs-* crate directories",
+        ),
+        (" fs-* crates", crate_count, "fs-* crates (layout)"),
+        (" `CONTRACT.md` files", contract_count, "CONTRACT.md files"),
         (" crate test files", test_file_count, "crate test files"),
-        ("%20crate%20test%20files", test_file_count, "crate test files (badge)"),
+        (
+            " crate-level conformance",
+            test_file_count,
+            "crate test files (What Exists table)",
+        ),
+        (
+            "%20crate%20test%20files",
+            test_file_count,
+            "crate test files (badge)",
+        ),
     ];
     for line in readme.lines() {
         for (pat, actual, what) in checks {
@@ -152,7 +234,11 @@ fn check_inventory_counts(root: &Path, readme: &str) -> Vec<Violation> {
             let m = tail
                 .find("%20of%20")
                 .map(|p| &tail[p + "%20of%20".len()..])
-                .map(|t| t.chars().take_while(char::is_ascii_digit).collect::<String>());
+                .map(|t| {
+                    t.chars()
+                        .take_while(char::is_ascii_digit)
+                        .collect::<String>()
+                });
             if let (Ok(n), Some(Ok(m))) = (n.parse::<usize>(), m.map(|s| s.parse::<usize>()))
                 && (n != contract_count || m != crate_count)
             {
@@ -163,6 +249,26 @@ fn check_inventory_counts(root: &Path, readme: &str) -> Vec<Violation> {
                         "README contracts badge says {n} of {m} but the tree has \
                          {contract_count} CONTRACT.md files across {crate_count} crates \
                          (bead huq.18)"
+                    ),
+                });
+            }
+        }
+        if line.contains("| Contracts |") || line.contains("`CONTRACT.md` files for") {
+            let numbers: Vec<usize> = line
+                .split(|ch: char| !ch.is_ascii_digit())
+                .filter(|token| !token.is_empty())
+                .filter_map(|token| token.parse().ok())
+                .collect();
+            if numbers.len() >= 2 && numbers[numbers.len() - 2..] != [contract_count, crate_count] {
+                violations.push(Violation {
+                    check: "claim-state",
+                    crate_name: "README.md".to_string(),
+                    detail: format!(
+                        "README contract inventory says {} of {} but the tree has \
+                         {contract_count} CONTRACT.md files across {crate_count} crates \
+                         (bead huq.18)",
+                        numbers[numbers.len() - 2],
+                        numbers[numbers.len() - 1]
                     ),
                 });
             }
@@ -264,6 +370,20 @@ mod tests {
     }
 
     #[test]
+    fn workspace_member_count_excludes_tools_and_nested_workspaces() {
+        let manifest = r#"
+[workspace]
+members = [
+    "crates/fs-a",
+    "crates/fs-b",
+    "xtask",
+]
+"#;
+        assert_eq!(workspace_fs_member_count(manifest), Some(2));
+        assert_eq!(workspace_fs_member_count("[workspace]\n"), None);
+    }
+
+    #[test]
     fn claims_check_end_to_end_on_fixture_tree() {
         let base = std::env::temp_dir().join(format!("fsim-claims-test-{}", std::process::id()));
         let mk = |rel: &str, content: &str| {
@@ -271,6 +391,10 @@ mod tests {
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(p, content).unwrap();
         };
+        mk(
+            "Cargo.toml",
+            "[workspace]\nmembers = [\n    \"crates/fs-real\",\n]\n",
+        );
         mk(
             "crates/fs-real/src/lib.rs",
             "pub const G: u64 = 0x1111_2222_3333_4444;\n",
