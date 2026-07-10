@@ -6,7 +6,9 @@
 
 use std::collections::BTreeMap;
 
-use fs_roofline::regress::{Cusum, GateSpec, GateVerdict, Night, gate, slower_this_month, standardize};
+use fs_roofline::regress::{
+    Cusum, GateSpec, GateVerdict, Night, gate, slower_this_month, standardize,
+};
 
 fn verdict(case: &str, detail: &str) {
     println!(

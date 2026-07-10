@@ -9,6 +9,7 @@
 //! tier-invariant, verified by the gemm test suite, not here.
 
 use fs_la::{gemm_f64, gemm_f64_parallel};
+use fs_roofline::regress::{Cusum, GateSpec, GateVerdict, Night, gate, standardize};
 use fs_roofline::{KernelSpec, MachineAxes, Threading, attainment_for};
 
 /// Best-of-3 measured GFLOP/s (2·m·n·k flops per GEMM).
@@ -136,6 +137,124 @@ fn gemm_attainment_all_core() {
             );
         }
     }
+}
+
+/// Compute tonight's min-roof attainment at one n (the ledgered
+/// scalar), returning (attainment, wall seconds).
+fn nightly_attainment(n: usize, threads: usize, axes: &MachineAxes) -> (f64, f64) {
+    let t0 = std::time::Instant::now();
+    let g = measure_parallel(n, 1, threads);
+    let wall = t0.elapsed().as_secs_f64();
+    let nf = n as f64;
+    let (ncb, kcb) = (nf.min(2048.0), 256.0f64);
+    let bytes_per_elem = 8.0 * (nf * (nf / ncb).ceil() / nf + 1.0 + 2.0 * (nf / kcb).ceil());
+    let spec = KernelSpec {
+        name: "gemm-f64-parallel",
+        version: "v3-worksteal",
+        bytes_per_elem,
+        flops_per_elem: 2.0 * nf,
+        threading: Threading::AllCore,
+        target_fraction: None,
+    };
+    (
+        attainment_for(&spec, g * 1e9 / (2.0 * nf), axes).attainment,
+        wall,
+    )
+}
+
+/// Pull `"key":<f64>` out of one ledger line (own fixed format).
+fn ledger_f64(line: &str, key: &str) -> f64 {
+    let pat = format!("\"{key}\":");
+    let start = line
+        .find(&pat)
+        .unwrap_or_else(|| panic!("ledger line missing {key}: {line}"))
+        + pat.len();
+    let rest = &line[start..];
+    let end = rest
+        .find([',', '}'])
+        .unwrap_or_else(|| panic!("unterminated {key} in ledger line: {line}"));
+    rest[..end]
+        .parse::<f64>()
+        .unwrap_or_else(|e| panic!("bad {key} in ledger line ({e}): {line}"))
+}
+
+/// NIGHTLY PERF-REGRESSION wiring (xlvx item 6 / fz2.4 machinery):
+/// each run measures the n=2048 all-core min-roof attainment, appends
+/// it to the JSONL ledger at FS_LA_REGRESS_LEDGER (with per-n wall
+/// times as the phase stream for attribution), then runs the
+/// dispersion-aware GateSpec band over the ledgered nights and the
+/// CUSUM drift detector over the expanding-baseline z-scores. A Red
+/// verdict or a CUSUM alarm IS a test failure (perf regressions are
+/// test failures — plan §14.4); Invalid evidence fails loudest.
+/// Without the env var the lane reports and skips: the ledger's HOME
+/// (per-machine persistent path) is the nightly CI's to choose.
+#[test]
+#[ignore = "perf lane: run explicitly in release with --ignored"]
+fn gemm_regress_nightly() {
+    let Ok(ledger) = std::env::var("FS_LA_REGRESS_LEDGER") else {
+        println!(
+            "{{\"metric\":\"gemm-regress\",\"verdict\":\"skip\",\"detail\":\"FS_LA_REGRESS_LEDGER unset; nightly CI owns the ledger path\"}}"
+        );
+        return;
+    };
+    let threads = std::env::var("FS_LA_THREADS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(8, std::num::NonZero::get));
+    let axes = MachineAxes::probe();
+    // Phases: per-n wall shares. Coarse but honest attribution — a Red
+    // whose n512 share grew is per-chunk overhead; n2048 is the kernel.
+    let (_, w512) = nightly_attainment(512, threads, &axes);
+    let (_, w1024) = nightly_attainment(1024, threads, &axes);
+    let (att, w2048) = nightly_attainment(2048, threads, &axes);
+    let prior = std::fs::read_to_string(&ledger).unwrap_or_default();
+    let night = prior.lines().filter(|l| !l.trim().is_empty()).count() as u64;
+    let row = format!(
+        "{{\"night\":{night},\"attainment\":{att},\"phases\":{{\"n512\":{w512},\"n1024\":{w1024},\"n2048\":{w2048}}}}}\n"
+    );
+    std::fs::write(&ledger, prior.clone() + &row).expect("append to FS_LA_REGRESS_LEDGER");
+    // Reload the full history into regress::Night rows.
+    let history: Vec<Night> = (prior + &row)
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|line| Night {
+            night: ledger_f64(line, "night") as u64,
+            attainment: ledger_f64(line, "attainment"),
+            phases: [
+                ("n512".to_string(), ledger_f64(line, "n512")),
+                ("n1024".to_string(), ledger_f64(line, "n1024")),
+                ("n2048".to_string(), ledger_f64(line, "n2048")),
+            ]
+            .into(),
+        })
+        .collect();
+    let verdict = gate(&history, GateSpec::default());
+    let attainments: Vec<f64> = history.iter().map(|n| n.attainment).collect();
+    let alarm =
+        Cusum::default().first_alarm(&standardize(&attainments, GateSpec::default().min_baseline));
+    println!(
+        "{{\"metric\":\"gemm-regress\",\"nights\":{},\"tonight\":{att:.3},\"gate\":\"{}\",\"cusum_alarm\":{}}}",
+        history.len(),
+        match &verdict {
+            GateVerdict::Green { z } => format!("green z={z:.2}"),
+            GateVerdict::Red { z, .. } => format!("RED z={z:.2}"),
+            GateVerdict::Invalid { reason } => format!("INVALID {reason}"),
+        },
+        alarm.map_or_else(|| "null".to_string(), |i| i.to_string()),
+    );
+    match verdict {
+        GateVerdict::Green { .. } => {}
+        GateVerdict::Red { z, attribution } => panic!(
+            "nightly GEMM attainment regressed: z={z:.2}, top offender phase: {:?}",
+            attribution.first()
+        ),
+        GateVerdict::Invalid { reason } => panic!("malformed regress evidence: {reason}"),
+    }
+    assert!(
+        alarm.is_none(),
+        "CUSUM drift alarm at night index {} — slow regression the per-night gate missed",
+        alarm.unwrap_or_default()
+    );
 }
 
 /// The MC/NC AUTOTUNE SWEEP (xlvx segment 5): report-only rows over the
