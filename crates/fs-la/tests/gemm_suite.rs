@@ -6,7 +6,10 @@
 /// of m — xdgf's recorded fact (b), now gated).
 #[test]
 fn parallel_gemm_bitwise_across_thread_counts() {
-    let (m, n, k) = (67usize, 45, 83); // deliberately unaligned to MR/NR/KC
+    // m >= 2*MC so the THREADED path runs (below that the facade
+    // falls back to serial and the gate would test nothing); all three
+    // dims deliberately unaligned to MR/NR/KC/MC.
+    let (m, n, k) = (391usize, 173, 83);
     let a: Vec<f64> = (0..m * k).map(|i| ((i as f64) * 0.7).sin()).collect();
     let b: Vec<f64> = (0..k * n).map(|i| ((i as f64) * 1.3).cos()).collect();
     let mut c_ref: Vec<f64> = (0..m * n).map(|i| (i as f64) * 0.01 - 3.0).collect();
@@ -24,6 +27,6 @@ fn parallel_gemm_bitwise_across_thread_counts() {
         );
     }
     println!(
-        "{{\"suite\":\"fs-la\",\"case\":\"xlvx-parallel-bitwise\",\"verdict\":\"pass\",\"detail\":\"row-band parallel GEMM bitwise == serial for t in 1/2/3/5/8/16 on unaligned 67x45x83\"}}"
+        "{{\"suite\":\"fs-la\",\"case\":\"xlvx-parallel-bitwise\",\"verdict\":\"pass\",\"detail\":\"row-band parallel GEMM bitwise == serial for t in 1/2/3/5/8/16 on unaligned 391x173x83 (threaded path)\"}}"
     );
 }

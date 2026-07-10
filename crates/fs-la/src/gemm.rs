@@ -76,16 +76,17 @@ pub fn gemm_f64(
     let _ = m; // (m used above; silences pedantic when MC >= m)
 }
 
-/// PARALLEL GEMM over row bands (bead xlvx item 3): thread w owns the
-/// contiguous C row band [lo, hi) and runs the FULL serial loop nest
-/// on it with its own packing buffers (thread-local = CCD-local when
-/// the OS places pages with the toucher). BITWISE-FREE parallelism:
-/// each C element's accumulation sequence (jc/pc chunk order, k order
-/// within a chunk) is independent of m, so a band run is identical to
-/// the same rows of a full serial run — gated across thread counts,
-/// no golden bump, exactly as xdgf's recorded fact (b) promised.
-/// Bands align to MR so micro-panel padding patterns match the serial
-/// walk (not required for bits — required for zero waste).
+/// PARALLEL GEMM, shared-B design (bead xlvx item 3, v2): the packed
+/// B panel for each (jc, pc) chunk is built ONCE and SHARED read-only
+/// across threads, which then split the MC loop — each thread packs
+/// its own A block and owns a disjoint contiguous C row band. The v1
+/// row-band design (each thread running the whole loop nest) was
+/// MEASURED to repack the entire B per thread and topped out at 0.107
+/// of the all-core axis on a 64-thread Threadripper; sharing the pack
+/// is the standard BLIS parallelization. BITWISE-FREE: the per-element
+/// accumulation order (jc/pc chunk order, k order within) is exactly
+/// the serial kernel's — gated across thread counts, no golden bump
+/// (xdgf recorded fact (b)).
 #[allow(clippy::too_many_arguments)]
 pub fn gemm_f64_parallel(
     m: usize,
@@ -102,31 +103,55 @@ pub fn gemm_f64_parallel(
     assert_eq!(b.len(), k * n, "b must be k*n = {}", k * n);
     assert_eq!(c.len(), m * n, "c must be m*n = {}", m * n);
     let t = threads.max(1);
-    if t == 1 || m < 2 * MR {
+    if t == 1 || m < 2 * MC {
         gemm_f64(m, n, k, alpha, a, b, beta, c);
         return;
     }
-    // MR-aligned row bands, balanced within one MR quantum.
-    let panels = m.div_ceil(MR);
-    let per = panels.div_ceil(t);
-    std::thread::scope(|scope| {
-        let mut rest = c;
-        let mut row = 0usize;
-        for w in 0..t {
-            let lo = (w * per * MR).min(m);
-            let hi = ((w + 1) * per * MR).min(m);
-            if lo >= hi {
-                break;
-            }
-            let (band, tail) = rest.split_at_mut((hi - row) * n);
-            rest = tail;
-            row = hi;
-            let a_band = &a[lo * k..hi * k];
-            scope.spawn(move || {
-                gemm_f64(hi - lo, n, k, alpha, a_band, b, beta, band);
+    scale_c(c, beta);
+    if m == 0 || n == 0 || alpha == 0.0 || k == 0 {
+        return;
+    }
+    let mut b_pack = vec![0.0f64; KC * NC];
+    // MC-quantum row ranges per worker (disjoint contiguous C bands).
+    let blocks = m.div_ceil(MC);
+    let per = blocks.div_ceil(t);
+    let mut jc = 0;
+    while jc < n {
+        let nc = NC.min(n - jc);
+        let mut pc = 0;
+        while pc < k {
+            let kc = KC.min(k - pc);
+            pack_b(&mut b_pack, b, n, pc, jc, kc, nc);
+            let bp: &[f64] = &b_pack;
+            std::thread::scope(|scope| {
+                let mut rest = &mut *c;
+                let mut row = 0usize;
+                for w in 0..t {
+                    let lo = (w * per * MC).min(m);
+                    let hi = ((w + 1) * per * MC).min(m);
+                    if lo >= hi {
+                        break;
+                    }
+                    let (band, tail) = rest.split_at_mut((hi - row) * n);
+                    rest = tail;
+                    row = hi;
+                    scope.spawn(move || {
+                        let mut a_pack = vec![0.0f64; MC * KC];
+                        let mut ic = lo;
+                        while ic < hi {
+                            let mc = MC.min(hi - ic);
+                            pack_a(&mut a_pack, a, k, ic, pc, mc, kc);
+                            // Band-local row offset; ld stays n.
+                            macro_kernel(&a_pack, bp, band, m, n, ic - lo, jc, mc, nc, kc, alpha);
+                            ic += MC;
+                        }
+                    });
+                }
             });
+            pc += KC;
         }
-    });
+        jc += NC;
+    }
 }
 
 /// β application with BLAS overwrite semantics for β = 0.
