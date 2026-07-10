@@ -227,10 +227,7 @@ fn non_finite_residual_bound_cannot_mint_verified() {
     ));
     // A finite bound still verifies.
     let cert_ok = certify(&grade, Some(1e-12), vec![], None);
-    assert!(matches!(
-        cert_ok.color,
-        fs_evidence::Color::Verified { .. }
-    ));
+    assert!(matches!(cert_ok.color, fs_evidence::Color::Verified { .. }));
 }
 
 #[test]

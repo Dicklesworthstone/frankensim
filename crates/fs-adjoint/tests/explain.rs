@@ -316,3 +316,47 @@ fn xp_006_edge_contracts_fail_fast_and_one_node_solves() {
         "edge contracts fail fast; the one-node elliptic fixture reconciles; fingerprints include color",
     );
 }
+
+#[test]
+fn reconciles_fires_on_uncovered_residual() {
+    // Bead 9sf6 F3 regression: the OLD invariant checked an identity
+    // finalize() makes true by construction — it could never fire.
+    // The coverage form must REJECT a hand-built tree whose certified
+    // bounds cannot absorb the unattributed residual.
+    let node = ExplanationNode::new(
+        "only-channel",
+        1.0,
+        1e-6,
+        Color::Estimated {
+            estimator: "test".to_string(),
+            dispersion: 1e-6,
+        },
+        vec!["test-evidence".to_string()],
+    );
+    let bad = Explanation::Explained {
+        nodes: vec![node],
+        observed: 2.0,
+        residual: 1.0, // identity holds (1.0 + 1.0 = 2.0)…
+    };
+    assert!(
+        !bad.reconciles(),
+        "an uncovered residual (1.0 vs bounds 1e-6) must fail the kill criterion"
+    );
+    // And a covered one still reconciles.
+    let node2 = ExplanationNode::new(
+        "only-channel",
+        1.0,
+        1e-6,
+        Color::Estimated {
+            estimator: "test".to_string(),
+            dispersion: 1e-6,
+        },
+        vec!["test-evidence".to_string()],
+    );
+    let good = Explanation::Explained {
+        nodes: vec![node2],
+        observed: 1.0,
+        residual: 0.0,
+    };
+    assert!(good.reconciles());
+}

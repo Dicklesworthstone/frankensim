@@ -179,8 +179,7 @@ impl Explanation {
                 let attributed: f64 = nodes.iter().map(|n| n.contribution).sum();
                 let bounds: f64 = nodes.iter().map(|n| n.bound).sum();
                 // Construction sanity (cheap, and guards hand-built trees).
-                let identity_ok =
-                    (attributed + residual - observed).abs() <= bounds.max(1e-14);
+                let identity_ok = (attributed + residual - observed).abs() <= bounds.max(1e-14);
                 let covered = residual.abs() <= bounds.max(1e-14);
                 identity_ok && covered
             }
