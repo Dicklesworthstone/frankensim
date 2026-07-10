@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Pure safe-Rust BLAKE3 (plain hash mode): the 32-byte content-hash owner for the whole workspace."
+description = "Pure safe-Rust BLAKE3 plain and derive-domain modes: the workspace's 32-byte content-hash owner."
 
 [package.metadata.frankensim]
 layer = "UTIL"

@@ -4,9 +4,15 @@
 //! per-concept / per-standard slices, specific lookups, and deterministic JSON.
 
 use fs_crosswalk::{
-    CROSSWALK_VERSION, Counterpart, PackageConcept, Standard, audit, crosswalk, for_concept,
-    for_standard, lookup, to_json,
+    CROSSWALK_VERSION, Counterpart, PackageConcept, SUPPORTED_PACKAGE_FORMAT, Standard, audit,
+    crosswalk, for_concept, for_standard, lookup, to_json,
 };
+
+#[test]
+fn compatibility_versions_are_explicit() {
+    assert_eq!(CROSSWALK_VERSION, 2);
+    assert_eq!(SUPPORTED_PACKAGE_FORMAT, 4);
+}
 
 #[test]
 fn the_table_covers_every_concept_by_every_standard() {
@@ -83,6 +89,9 @@ fn json_is_well_formed_and_deterministic() {
     assert_eq!(j, to_json());
     assert!(j.starts_with('{') && j.ends_with('}'));
     assert!(j.contains(&format!("\"version\":{CROSSWALK_VERSION}")));
+    assert!(j.contains(&format!(
+        "\"supported_package_format\":{SUPPORTED_PACKAGE_FORMAT}"
+    )));
     assert_eq!(j.matches("\"concept\":").count(), 40);
     assert!(j.contains("verified-color") && j.contains("asme-vv-40"));
     assert!(j.contains("no_counterpart"));

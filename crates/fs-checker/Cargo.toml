@@ -11,8 +11,9 @@ description = "The standalone evidence-package checker (addendum Proposal 12): a
 layer = "L6"
 
 # HARD CONSTRAINT (Proposal 12): the checker's dependency graph must contain NO
-# solver stack and NO license gate. Its only dependency is the package format
-# (which depends only on fs-evidence). "Don't trust us; here is the checker."
+# solver stack and NO license gate. Its only direct dependency is the package
+# format; that cone is fs-blake3 + fs-crosswalk + fs-evidence -> fs-obs.
+# "Don't trust us; here is the checker."
 [dependencies]
 fs-package = { path = "../fs-package" }
 

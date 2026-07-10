@@ -8,8 +8,9 @@ evidence-package fields onto the regulator's existing standards language.
 Layer UTIL (pure data + audit; no dependencies). It owns risk R9
 (standards-body latency): every field is mapped or explicitly flagged, so the
 package doubles as internal-QA / B2B diligence collateral regardless of
-standards-body pace. Versioned by `CROSSWALK_VERSION` alongside the package
-format.
+standards-body pace. `CROSSWALK_VERSION = 2` identifies this vocabulary and
+`SUPPORTED_PACKAGE_FORMAT = 4` makes package compatibility explicit without a
+dependency cycle.
 
 ## Public types and semantics
 
@@ -23,7 +24,8 @@ format.
   `lookup(concept, standard)` — the single row.
 - `audit() -> CrosswalkAudit` — every `(concept, standard)` pair must have
   exactly one row (mapped or an explicit no-counterpart); `ok()` iff no gaps.
-- `to_json()` — deterministic machine-readable record.
+- `to_json()` — deterministic machine-readable record carrying both the
+  vocabulary version and supported package format.
 
 ## Invariants
 
@@ -56,8 +58,9 @@ None.
 
 ## Conformance tests
 
-`tests/crosswalk.rs` (Proposal 12, 7 cases): full coverage + no silent gaps;
-honesty (explicit no-counterpart rows exist, verified-color does map);
+`tests/crosswalk.rs` (Proposal 12, 8 cases): explicit package/vocabulary
+compatibility versions; full coverage + no silent gaps; honesty (explicit
+no-counterpart rows exist, verified-color does map);
 per-concept (×4) and per-standard (×10) slices; a representative
 validated→validation-metric lookup; unique labels; deterministic JSON.
 

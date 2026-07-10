@@ -14,6 +14,14 @@ use fs_evidence::{Color, IntervalOp, compose};
 use fs_ir::planner::{CostTable, MemCache, ProblemFamily};
 use fs_ir::{admission, sexpr};
 use fs_package::{Claim, EvidencePackage, Provenance};
+
+/// A deliberately corrupted content root (one byte flipped): the v4
+/// 32-byte replacement for the old `root ^ 0xdead` tamper idiom.
+fn flip(root: fs_package::ContentHash) -> fs_package::ContentHash {
+    let mut bytes = *root.as_bytes();
+    bytes[0] ^= 0xde;
+    fs_package::ContentHash(bytes)
+}
 use fs_verify::fem1d::Poly;
 use std::collections::BTreeMap;
 
@@ -237,12 +245,12 @@ fn ac_003_package_recheck_solver_free_and_voi_hint() {
         "the content address matches"
     );
     assert!(
-        !fs_checker::check_against_root(&pkg, root ^ 0xdead).passed(),
+        !fs_checker::check_against_root(&pkg, flip(root)).passed(),
         "a tampered root FAILS the third-party check"
     );
     let pie = check.render_pie();
     println!(
-        "{{\"metric\":\"package\",\"root\":\"{root:x}\",\"hint\":\"{hint}\",\
+        "{{\"metric\":\"package\",\"root\":\"{root}\",\"hint\":\"{hint}\",\
          \"pie\":\"{}\"}}",
         pie.replace('"', "'").replace('\n', " | ")
     );

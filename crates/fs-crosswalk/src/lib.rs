@@ -21,8 +21,14 @@
 //! format. NOTE: the mappings below are a first-party reading of the standards
 //! for engineering use; they are not an official ASME/FAA/EASA determination.
 
-/// The crosswalk version (moves with the evidence-package format).
-pub const CROSSWALK_VERSION: u32 = 1;
+/// The crosswalk vocabulary version.
+pub const CROSSWALK_VERSION: u32 = 2;
+
+/// Evidence-package schema whose concepts this crosswalk describes.
+///
+/// Kept independent of `fs-package` to preserve the dependency direction;
+/// the package crate asserts this value against its own format constant.
+pub const SUPPORTED_PACKAGE_FORMAT: u32 = 4;
 
 /// An evidence-package field/concept (the FrankenSim side of the map).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -522,7 +528,10 @@ pub fn audit() -> CrosswalkAudit {
 #[must_use]
 pub fn to_json() -> String {
     use core::fmt::Write as _;
-    let mut out = format!("{{\"version\":{CROSSWALK_VERSION},\"entries\":[");
+    let mut out = format!(
+        "{{\"version\":{CROSSWALK_VERSION},\"supported_package_format\":\
+         {SUPPORTED_PACKAGE_FORMAT},\"entries\":["
+    );
     for (i, e) in CROSSWALK.iter().enumerate() {
         if i > 0 {
             out.push(',');

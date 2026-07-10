@@ -338,7 +338,7 @@ fn p2_003_evidence_package_and_colored_objective_contract() {
     assert_eq!(root_a, root_b, "the package root is replayable");
     let breakdown = package.color_breakdown();
     println!(
-        "{{\"metric\":\"evidence-package\",\"merkle_root\":\"{root_a:x}\",\
+        "{{\"metric\":\"evidence-package\",\"merkle_root\":\"{root_a}\",\
          \"breakdown\":{breakdown:?}}}"
     );
     // Proposal F's AMENDED OPTIMIZATION CONTRACT: no optimization runs

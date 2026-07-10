@@ -225,7 +225,7 @@ fn p3_005_proposal_11_r8_gate_and_the_holding_pen() {
         "exactly one trigger has fired; four wait honestly: {breakdown:?}"
     );
     println!(
-        "{{\"metric\":\"horizon-ledger\",\"root\":\"{:x}\",\"fired\":1,\"waiting\":4}}",
+        "{{\"metric\":\"horizon-ledger\",\"root\":\"{}\",\"fired\":1,\"waiting\":4}}",
         pkg.merkle_root()
     );
     verdict(

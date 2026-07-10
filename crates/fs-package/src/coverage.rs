@@ -155,7 +155,7 @@ pub fn package_presence(pkg: &EvidencePackage) -> Vec<ConceptPresence> {
                     )
                 }
                 PackageConcept::MerkleRoot => {
-                    (true, format!("content root {:016x} recomputable", pkg.merkle_root()))
+                    (true, format!("content root {} recomputable", pkg.merkle_root()))
                 }
                 PackageConcept::Signature => signature_presence(pkg),
             };

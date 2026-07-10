@@ -3,7 +3,7 @@
 ## Purpose and layer
 
 Layer: **UTIL**. The single in-tree owner of the BLAKE3 hash function
-(plain hash mode, fixed 32-byte output) and the `ContentHash` identity
+(plain and derive-key domain modes, fixed 32-byte output) and the `ContentHash` identity
 type. Extracted verbatim from `fs-ledger` (bead 7uq9) so exactly one
 BLAKE3 implementation exists in the workspace; `fs-ledger` re-exports
 these types unchanged. Zero dependencies by design: solver-free
@@ -18,9 +18,11 @@ solver, geometry, or license surface.
   repeatedly and interleaved with further `update`s.
 - `hash_bytes(&[u8]) -> ContentHash` — one-shot convenience.
 - `hash_domain(domain: &str, payload: &[u8]) -> ContentHash` — the
-  canonical domain-separation scheme for every 32-byte root in the
-  workspace: absorbs `len(domain) as u64 LE || domain || payload`. The
-  length prefix makes the domain/payload boundary unambiguous.
+  canonical domain-separation scheme for every typed 32-byte root in the
+  workspace. It uses BLAKE3's standard derive-key construction:
+  `DERIVE_KEY_CONTEXT` for the domain and `DERIVE_KEY_MATERIAL` for the
+  payload. Mode flags separate typed roots from plain `hash_bytes`
+  artifacts as well as from other domains.
 - `ContentHash(pub [u8; 32])` — Copy identity value. `as_bytes`,
   `to_hex` (64 lowercase hex chars), `from_hex` (either case, exactly
   64 chars, else `None`), `from_slice` (exactly 32 bytes, else
@@ -33,9 +35,10 @@ solver, geometry, or license surface.
   fs-ledger's `ledger_001` conformance suite).
 - Streaming and one-shot hashing of the same byte sequence produce the
   same digest for every split pattern.
-- `hash_domain(d1, p1) == hash_domain(d2, p2)` implies (up to hash
-  collision) `d1 == d2 && p1 == p2` — the length prefix removes
-  boundary ambiguity.
+- `hash_domain(d1, p1) == hash_domain(d2, p2)` implies (up to a BLAKE3
+  collision) `d1 == d2 && p1 == p2`; equality between a tagged hash and a
+  plain `hash_bytes` artifact likewise requires a cross-mode BLAKE3 collision
+  because the compression flags differ.
 - `from_hex(to_hex(h)) == Some(h)` for all `h`.
 
 ## Error model
@@ -67,12 +70,18 @@ None.
 
 Unit tests in `src/lib.rs`: official empty-input spec vector, oracle
 `abc` vector, hex round-trip and rejection, streaming-vs-one-shot
-across block/chunk edges, domain-separation binding. The historical
+across block/chunk edges, single- and multi-chunk derive-key oracle
+vectors, and raw/tagged namespace separation. The historical
 multi-chunk / multi-level tree vectors continue to run in fs-ledger's
 `ledger_001` conformance suite through the re-exported paths.
 
 ## No-claim boundaries
 
-Keyed hashing, key derivation (KDF), and extended (XOF) output are NOT
-implemented. No constant-time claim is made (content addressing, not
-secret handling). No SIMD/multithreaded throughput claim is made.
+General-purpose keyed hashing, a public KDF API, and extended (XOF) output
+are NOT implemented. `hash_domain` uses the standard derive-key modes only
+for public, non-secret identity namespaces. No constant-time claim is made
+(content addressing, not secret handling). No SIMD/multithreaded throughput
+claim is made.
+- Domain strings are caller-owned protocol identifiers. Callers must use
+  hardcoded, globally unique, versioned contexts; this crate does not register
+  or deduplicate names dynamically.

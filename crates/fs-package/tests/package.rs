@@ -67,7 +67,7 @@ fn a_complete_mixed_color_package_verifies() {
     assert_eq!(report.breakdown.validated, 1);
     assert_eq!(report.breakdown.estimated, 1);
     assert_eq!(report.merkle_root, pkg.merkle_root());
-    assert_ne!(report.merkle_root, 0);
+    assert_ne!(report.merkle_root.as_bytes(), &[0u8; 32]);
 }
 
 #[test]
@@ -488,6 +488,11 @@ fn the_merkle_root_is_deterministic_and_tamper_evident() {
     };
     // identical packages -> identical content address.
     assert_eq!(build().merkle_root(), build().merkle_root());
+    assert_eq!(
+        build().merkle_root().to_hex(),
+        "61a09cc114970a8400b77c52192e4909cb85c98e245cd8b8aa056f6d8f1e134a",
+        "schema-v4 package-root ABI; changes require a format-version migration"
+    );
     // tampering with a claim changes the root.
     let tampered = EvidencePackage::new(prov())
         .with_claim(Claim::new(
@@ -543,8 +548,8 @@ fn json_is_deterministic_and_carries_the_root() {
     let j = pkg.to_json();
     assert_eq!(j, pkg.to_json());
     assert!(j.starts_with('{') && j.ends_with('}'));
-    assert!(j.contains(&format!("{:016x}", pkg.merkle_root())));
-    assert!(j.contains("\"format_version\":3"), "schema v3 (xfxq)");
+    assert!(j.contains(&pkg.merkle_root().to_hex()));
+    assert!(j.contains("\"format_version\":4"), "schema v4 (7uq9)");
     // v3 carries COMPLETE payloads, not just rank labels.
     assert!(j.contains("\"lo_bits\":") && j.contains("\"dataset\":"));
 }
@@ -587,7 +592,7 @@ fn v3_round_trip_and_fail_closed_walls() {
     let back = EvidencePackage::from_json(&json).expect("canonical JSON parses");
     assert_eq!(back, pkg, "semantic round trip");
     assert_eq!(back.to_json(), json, "textual round trip");
-    let leading_zero = json.replacen("\"format_version\":3", "\"format_version\":03", 1);
+    let leading_zero = json.replacen("\"format_version\":4", "\"format_version\":04", 1);
     assert!(
         EvidencePackage::from_json(&leading_zero).is_err(),
         "non-JSON leading-zero integer refuses"
@@ -643,10 +648,10 @@ fn v3_round_trip_and_fail_closed_walls() {
     assert!(EvidencePackage::from_json("").is_err());
     // Canonical fixed-width roots and JSON's control-character rule are
     // enforced at the parser boundary, before semantic verification.
-    let root = format!("{:016x}", pkg.merkle_root());
+    let root = pkg.merkle_root().to_hex();
     let short_root = json.replacen(&format!("\"{root}\""), &format!("\"{}\"", &root[1..]), 1);
     let err = EvidencePackage::from_json(&short_root).expect_err("short root refused");
-    assert!(err.why.contains("16 hex digits"), "{err}");
+    assert!(err.why.contains("64 hex chars"), "{err}");
     let raw_control = json.replacen("surrogate prediction", "surrogate\nprediction", 1);
     let err = EvidencePackage::from_json(&raw_control).expect_err("raw control refused");
     assert!(err.why.contains("control character"), "{err}");
@@ -898,4 +903,75 @@ fn v3_receipts_falsifiers_anchors() {
         EvidencePackage::from_json(&tampered).is_err(),
         "root binds v3 fields"
     );
+}
+
+/// 7uq9 (schema v4) — the content address is a domain-separated 32-byte
+/// BLAKE3 root; legacy v3 transports and legacy 16-hex FNV roots are
+/// refused with messages that NAME the incompatibility.
+#[test]
+fn v4_blake3_root_refuses_legacy_transports() {
+    let pkg = EvidencePackage::new(prov()).with_claim(verified("c1"));
+    let json = pkg.to_json();
+    let root = pkg.merkle_root().to_hex();
+    assert_eq!(root.len(), 64, "32-byte BLAKE3 root renders as 64 hex");
+    assert!(json.contains(&format!("\"merkle_root\":\"{root}\"")));
+
+    // A v3 transport is refused BY VERSION before any field is read.
+    let v3 = json.replacen("\"format_version\":4", "\"format_version\":3", 1);
+    let err = EvidencePackage::from_json(&v3).expect_err("v3 refused");
+    assert!(err.why.contains("unsupported version 3"), "{err}");
+
+    // A legacy 16-hex FNV root inside a v4 envelope is named as such.
+    let legacy = json.replacen(&format!("\"{root}\""), "\"deadbeefcafe0123\"", 1);
+    let err = EvidencePackage::from_json(&legacy).expect_err("legacy root refused");
+    assert!(err.why.contains("legacy v3 FNV"), "{err}");
+
+    // Right length, non-hex content: refused at the boundary.
+    let garbled = json.replacen(
+        &format!("\"{root}\""),
+        &format!("\"{}\"", "z".repeat(64)),
+        1,
+    );
+    let err = EvidencePackage::from_json(&garbled).expect_err("non-hex root refused");
+    assert!(err.why.contains("non-hex"), "{err}");
+
+    // A validly-formatted but WRONG root: recomputation refuses it.
+    let mut flipped = root.clone().into_bytes();
+    flipped[0] = if flipped[0] == b'0' { b'1' } else { b'0' };
+    let wrong = json.replacen(&root, core::str::from_utf8(&flipped).unwrap(), 1);
+    let err = EvidencePackage::from_json(&wrong).expect_err("wrong root refused");
+    assert!(err.why.contains("does not recompute"), "{err}");
+}
+
+/// 7uq9 — domain separation: the root is not the bare BLAKE3 of any
+/// undomained serialization. The package header binds claim count, so
+/// zero/one and duplicate-tail shapes have distinct roots; the BLAKE3
+/// owner separately locks cross-mode and cross-domain behavior.
+#[test]
+fn v4_root_is_domain_separated() {
+    let pkg = EvidencePackage::new(prov()).with_claim(verified("c1"));
+    let root = pkg.merkle_root();
+    // Not the undomained hash of the canonical JSON or of the claim.
+    assert_ne!(root, fs_blake3::hash_bytes(pkg.to_json().as_bytes()));
+    assert_ne!(
+        root,
+        EvidencePackage::new(prov()).merkle_root(),
+        "header claim count distinguishes zero and one claim"
+    );
+    assert_ne!(
+        root,
+        EvidencePackage::new(prov())
+            .with_claim(verified("c1"))
+            .with_claim(verified("c1"))
+            .merkle_root(),
+        "duplicating the final claim changes the tree identity"
+    );
+    // Stable across recomputation and bound to claim ORDER.
+    let swapped = EvidencePackage::new(prov())
+        .with_claim(verified("c2"))
+        .with_claim(verified("c1"));
+    let ordered = EvidencePackage::new(prov())
+        .with_claim(verified("c1"))
+        .with_claim(verified("c2"));
+    assert_ne!(swapped.merkle_root(), ordered.merkle_root());
 }

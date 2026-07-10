@@ -15,12 +15,18 @@
 //! package is still valid and round-trips — honesty about low confidence is
 //! not a defect.
 //!
-//! The Merkle tree uses an in-house FNV-1a content hash (pure Rust, std only —
-//! Franken-compliant); a cryptographic signature is DETACHED and OPTIONAL (the
-//! bundle is verifiable by content address regardless). Everything is
-//! deterministic: the same package yields the same root and JSON.
+//! The Merkle tree uses the in-house BLAKE3 content hash from [`fs_blake3`]
+//! (pure safe Rust, zero deps — Franken-compliant), with every leaf and node
+//! DOMAIN-SEPARATED under `fs-package:v4:…` tags (bead 7uq9), yielding a
+//! 32-byte [`ContentHash`] root; a cryptographic signature is DETACHED and
+//! OPTIONAL (the bundle is verifiable by content address regardless).
+//! Everything is deterministic: the same package yields the same root and
+//! JSON.
 
+use fs_blake3::hash_domain;
 use fs_evidence::{Color, ColorRank, IntervalOp, compose};
+
+pub use fs_blake3::ContentHash;
 
 pub mod coverage;
 pub use coverage::{ConceptPresence, CoverageStatus, package_coverage, package_presence};
@@ -247,8 +253,8 @@ pub struct ColorBreakdown {
 /// The result of verifying a package.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackageReport {
-    /// The recomputed content address (Merkle root).
-    pub merkle_root: u64,
+    /// The recomputed content address (domain-separated BLAKE3 Merkle root).
+    pub merkle_root: ContentHash,
     /// The by-color budget pie.
     pub breakdown: ColorBreakdown,
     /// The number of claims.
@@ -371,10 +377,13 @@ pub enum PackageError {
 
 /// The one format version this build understands. v2 (bead qmao.6.1)
 /// added complete color payloads + the strict parser + root
-/// recomputation; v3 (bead xfxq) adds composition receipts (checker
+/// recomputation; v3 (bead xfxq) added composition receipts (checker
 /// re-runs the derivation), falsifier records (refuted claims fail),
-/// and dataset anchors — all bound into the content address.
-pub const FORMAT_VERSION: u32 = 3;
+/// and dataset anchors; v4 (bead 7uq9) replaces the 64-bit FNV-1a
+/// content address with a domain-separated 32-byte BLAKE3 root
+/// ([`ContentHash`]) — v3 transports are refused by version.
+pub const FORMAT_VERSION: u32 = 4;
+const _: () = assert!(FORMAT_VERSION == fs_crosswalk::SUPPORTED_PACKAGE_FORMAT);
 
 fn verify_attached_records(claim: &Claim) -> Result<(), PackageError> {
     for (falsifier, record) in claim.falsifiers.iter().enumerate() {
@@ -440,19 +449,28 @@ impl EvidencePackage {
         self
     }
 
-    /// The content address: an FNV-1a Merkle root over the package identity
-    /// (format version, provenance, and ordered claims). Detached signatures are
-    /// excluded so signing does not change the address.
+    /// The content address: a BLAKE3 Merkle root over the package identity
+    /// (format version, provenance, and ordered claims), with every leaf and
+    /// internal node domain-separated under `fs-package:v4:…` tags so no
+    /// leaf can masquerade as a node (or vice versa). Detached signatures
+    /// are excluded so signing does not change the address.
     #[must_use]
-    pub fn merkle_root(&self) -> u64 {
-        let mut level: Vec<u64> = Vec::with_capacity(self.claims.len() + 1);
-        level.push(fnv1a(self.package_header().as_bytes()));
-        level.extend(self.claims.iter().map(|c| fnv1a(c.canonical().as_bytes())));
+    pub fn merkle_root(&self) -> ContentHash {
+        let mut level: Vec<ContentHash> = Vec::with_capacity(self.claims.len() + 1);
+        level.push(hash_domain(
+            "fs-package:v4:header",
+            self.package_header().as_bytes(),
+        ));
+        level.extend(
+            self.claims
+                .iter()
+                .map(|c| hash_domain("fs-package:v4:claim", c.canonical().as_bytes())),
+        );
         while level.len() > 1 {
             let mut next = Vec::with_capacity(level.len().div_ceil(2));
             for pair in level.chunks(2) {
                 match pair {
-                    [a, b] => next.push(combine(*a, *b)),
+                    [a, b] => next.push(combine(a, b)),
                     [a] => next.push(*a), // odd node carries up
                     _ => {}
                 }
@@ -461,8 +479,8 @@ impl EvidencePackage {
         }
         match level.as_slice() {
             [root] => *root,
-            [] => fnv1a(b"fs-package:empty-internal-level"),
-            _ => fnv1a(b"fs-package:invalid-internal-level"),
+            [] => hash_domain("fs-package:v4:empty-internal-level", b""),
+            _ => hash_domain("fs-package:v4:invalid-internal-level", b""),
         }
     }
 
@@ -800,17 +818,17 @@ impl EvidencePackage {
     }
 
     /// Emit the package as deterministic, self-describing JSON —
-    /// schema v3: COMPLETE color payloads (floats as bit-exact hex),
-    /// provenance, signature, the content root, and the magnitude
-    /// budget. [`EvidencePackage::from_json`] round-trips this
-    /// semantically and refuses anything else.
+    /// schema v4: COMPLETE color payloads (floats as bit-exact hex),
+    /// provenance, signature, the 64-hex BLAKE3 content root, and the
+    /// magnitude budget. [`EvidencePackage::from_json`] round-trips
+    /// this semantically and refuses anything else.
     #[must_use]
     pub fn to_json(&self) -> String {
         use core::fmt::Write as _;
         let mut out = String::new();
         let _ = write!(
             out,
-            "{{\"format_version\":{},\"merkle_root\":\"{:016x}\",\"provenance\":{{\"code_version\":\"{}\",\"constellation_lock\":\"{}\"}},\"signature\":",
+            "{{\"format_version\":{},\"merkle_root\":\"{}\",\"provenance\":{{\"code_version\":\"{}\",\"constellation_lock\":\"{}\"}},\"signature\":",
             self.format_version,
             self.merkle_root(),
             json_escape(&self.provenance.code_version),
@@ -950,24 +968,12 @@ pub struct MagnitudeBudget {
     pub quantified_total: f64,
 }
 
-/// FNV-1a 64-bit hash (pure Rust, std only).
-fn fnv1a(bytes: &[u8]) -> u64 {
-    let mut h = 0xcbf2_9ce4_8422_2325_u64;
-    for &b in bytes {
-        h ^= u64::from(b);
-        h = h.wrapping_mul(0x100_0000_01b3);
-    }
-    h
-}
-
-/// Combine two child hashes into a parent hash.
-fn combine(a: u64, b: u64) -> u64 {
-    let bytes = a.to_le_bytes().into_iter().chain(b.to_le_bytes());
-    let mut buf = [0u8; 16];
-    for (slot, byte) in buf.iter_mut().zip(bytes) {
-        *slot = byte;
-    }
-    fnv1a(&buf)
+/// Combine two child hashes into a domain-separated parent node hash.
+fn combine(a: &ContentHash, b: &ContentHash) -> ContentHash {
+    let mut buf = [0u8; 64];
+    buf[..32].copy_from_slice(a.as_bytes());
+    buf[32..].copy_from_slice(b.as_bytes());
+    hash_domain("fs-package:v4:node", &buf)
 }
 
 fn push_atom(out: &mut String, value: &str) {
@@ -998,7 +1004,7 @@ fn json_escape(s: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Strict schema-v3 parser (bead qmao.6.1): the package is a PROOF
+// Strict schema-v4 parser (beads qmao.6.1, xfxq, 7uq9): the package is a PROOF
 // ARTIFACT, so parsing fails closed — unknown fields, missing fields,
 // wrong types, bad hex, non-finite certificates, a magnitude budget
 // that does not re-derive, or an embedded root that does not recompute
@@ -1337,7 +1343,7 @@ fn no_leftovers(fields: &[(String, Jv)], what: &str) -> Result<(), ParseError> {
     if let Some((k, _)) = fields.first() {
         return Err(ParseError {
             what: what.to_string(),
-            why: format!("unknown field {k:?} (schema v3 is closed — fail closed)"),
+            why: format!("unknown field {k:?} (schema v4 is closed — fail closed)"),
         });
     }
     Ok(())
@@ -1517,7 +1523,7 @@ fn parse_claims(fields: &mut Vec<(String, Jv)>) -> Result<Vec<Claim>, ParseError
 
 fn verify_declarations(
     package: &EvidencePackage,
-    declared_root: u64,
+    declared_root: ContentHash,
     declared_budget: MagnitudeBudget,
 ) -> Result<(), ParseError> {
     let recomputed_budget = package.magnitude_budget();
@@ -1536,30 +1542,53 @@ fn verify_declarations(
         return Err(ParseError {
             what: "merkle_root".to_string(),
             why: format!(
-                "embedded root {declared_root:016x} does not recompute from the parsed fields \
-                 (got {recomputed_root:016x}) — tampered or forged content"
+                "embedded root {declared_root} does not recompute from the parsed fields \
+                 (got {recomputed_root}) — tampered or forged content"
             ),
         });
     }
     Ok(())
 }
 
+/// Parse the embedded content root: exactly 64 hex chars (schema v4).
+/// A 16-hex value is the legacy v3 FNV root and is named in the refusal.
+fn parse_declared_root(fields: &mut Vec<(String, Jv)>) -> Result<ContentHash, ParseError> {
+    let raw = match take_field(fields, "merkle_root", "package")? {
+        Jv::Str(s) => s,
+        other => {
+            return Err(ParseError {
+                what: "merkle_root".to_string(),
+                why: format!("expected a hex string, got {}", other.kind()),
+            });
+        }
+    };
+    ContentHash::from_hex(&raw).ok_or_else(|| ParseError {
+        what: "merkle_root".to_string(),
+        why: match raw.len() {
+            16 => "a 16-hex root is the legacy v3 FNV content address; schema v4 requires \
+                   the 64-hex BLAKE3 root"
+                .to_string(),
+            64 => "the 64-char root contains non-hex characters".to_string(),
+            n => format!("expected exactly 64 hex chars (BLAKE3 content root), got {n} chars"),
+        },
+    })
+}
+
 impl EvidencePackage {
-    /// Parse schema-v3 JSON STRICTLY and semantically: every field
+    /// Parse schema-v4 JSON STRICTLY and semantically: every field
     /// mapped, unknown fields refused, floats reconstructed bit-exactly,
     /// the magnitude budget re-derived and compared, and the embedded
     /// content root recomputed from the parsed fields — a package whose
     /// root does not recompute is tampered or forged, and never loads.
+    /// Earlier schema versions (v3's 16-hex FNV root) are refused by
+    /// version before any field is interpreted.
     ///
     /// # Errors
     /// [`ParseError`] naming the field and the refusal.
     pub fn from_json(text: &str) -> Result<EvidencePackage, ParseError> {
         let mut fields = parse_package_fields(text)?;
         let format_version = parse_format_version(&mut fields)?;
-        let declared_root = hex_u64(
-            take_field(&mut fields, "merkle_root", "package")?,
-            "merkle_root",
-        )?;
+        let declared_root = parse_declared_root(&mut fields)?;
         let provenance = parse_provenance(&mut fields)?;
         let signature = parse_signature(&mut fields)?;
         let declared_budget = parse_magnitude_budget(&mut fields)?;

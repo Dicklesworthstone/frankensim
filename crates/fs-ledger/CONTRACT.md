@@ -19,7 +19,9 @@ fine-grained event stream. Layer: L6 (HELM). Runtime deps: `std` + `fsqlite`.
   `busy_timeout`, enforced foreign keys) + versioned migrations
   (`PRAGMA user_version`; idempotent DDL batches in `schema::MIGRATIONS`).
 - `ContentHash`, `Blake3`, `hash_bytes` — in-house BLAKE3 (plain hash mode,
-  32-byte output), pure safe Rust; artifact identity everywhere.
+  32-byte output), pure safe Rust; artifact identity everywhere. The
+  implementation is OWNED by the UTIL crate `fs-blake3` (bead 7uq9) and
+  re-exported here unchanged — same paths, same bits.
 - Artifacts: `put_artifact` (≤ `STORAGE_CHUNK_LEN` inline; larger stored as
   `artifact_chunks` rows because fsqlite has no incremental-blob API),
   `ArtifactWriter` (streaming; hashes incrementally, stages chunks under a

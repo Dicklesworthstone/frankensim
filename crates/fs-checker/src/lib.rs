@@ -9,9 +9,10 @@
 //!
 //! # Hard distribution constraint
 //! This crate depends only on `fs-package`; that package's production cone is
-//! `fs-evidence` plus the static `fs-crosswalk` vocabulary. There is NO solver,
-//! geometry kernel, or license gate anywhere in the cone, so by construction
-//! the checker CANNOT run a solve. It carries its own protocol version
+//! dependency-free `fs-blake3`, the static `fs-crosswalk` vocabulary, and
+//! `fs-evidence` plus its observability utility. There is NO solver, geometry
+//! kernel, or license gate anywhere in the cone, so by construction the checker
+//! CANNOT run a solve. It carries its own protocol version
 //! ([`CHECKER_PROTOCOL_VERSION`]) because it is distributed independently.
 //!
 //! What it re-verifies: format support + per-claim completeness (delegated to
@@ -20,10 +21,20 @@
 //! an external capability is supplied. It renders a by-color budget pie only
 //! after package verification succeeds. Everything is deterministic.
 
-pub use fs_package::{ColorBreakdown, EvidencePackage, MagnitudeBudget, PackageError, ParseError};
+pub use fs_package::{
+    ColorBreakdown, ContentHash, EvidencePackage, MagnitudeBudget, PackageError, ParseError,
+};
 
 /// The checker's own protocol version (it is distributed independently).
-pub const CHECKER_PROTOCOL_VERSION: u32 = 1;
+pub const CHECKER_PROTOCOL_VERSION: u32 = 2;
+
+/// The one evidence-package format understood by this checker protocol.
+///
+/// Keep this as an explicit protocol literal rather than deriving it from
+/// `fs-package`: a package-format change must make this crate fail to compile
+/// until the independently distributed checker ABI is reviewed and versioned.
+pub const CHECKER_SUPPORTED_PACKAGE_FORMAT: u32 = 4;
+const _: () = assert!(CHECKER_SUPPORTED_PACKAGE_FORMAT == fs_package::FORMAT_VERSION);
 
 /// Whether the package carried a detached signature and how far it was
 /// verified (bead qmao.6.1): a present signature is only ASSERTED valid
@@ -46,8 +57,8 @@ pub enum SignatureStatus {
 /// cryptography — the same fail-closed pattern as fs-ledger waivers).
 pub trait SignatureVerifier {
     /// True iff `signature` authenticates the package's recomputed
-    /// content root.
-    fn verify(&self, merkle_root: u64, signature: &str) -> bool;
+    /// 32-byte BLAKE3 content root.
+    fn verify(&self, merkle_root: &ContentHash, signature: &str) -> bool;
 }
 
 /// The in-tree default: nothing authenticates (no-crypto no-claim).
@@ -55,7 +66,7 @@ pub trait SignatureVerifier {
 pub struct NoSignatureVerifier;
 
 impl SignatureVerifier for NoSignatureVerifier {
-    fn verify(&self, _merkle_root: u64, _signature: &str) -> bool {
+    fn verify(&self, _merkle_root: &ContentHash, _signature: &str) -> bool {
         false
     }
 }
@@ -83,8 +94,8 @@ pub struct Finding {
 pub struct CheckReport {
     /// Pass/Fail.
     pub verdict: Verdict,
-    /// The recomputed content address.
-    pub merkle_root: u64,
+    /// The recomputed content address (domain-separated BLAKE3 root).
+    pub merkle_root: ContentHash,
     /// The by-color budget pie.
     pub breakdown: ColorBreakdown,
     /// Signature presence.
@@ -137,12 +148,12 @@ pub fn check(pkg: &EvidencePackage) -> CheckReport {
 /// Re-verify a package AND confirm its content address matches `expected_root`
 /// — a mismatch (tamper, or the wrong package) fails the check.
 #[must_use]
-pub fn check_against_root(pkg: &EvidencePackage, expected_root: u64) -> CheckReport {
+pub fn check_against_root(pkg: &EvidencePackage, expected_root: ContentHash) -> CheckReport {
     build_report(pkg, Some(expected_root), None)
 }
 
 /// The full third-party entry point (bead qmao.6.1): parse the
-/// serialized package STRICTLY (schema v3 — the parser itself
+/// serialized package STRICTLY (schema v4 — the parser itself
 /// recomputes the content root and re-derives the magnitude budget
 /// from the parsed claims), then re-verify semantics, optionally
 /// against an expected root and a signature capability. A package that
@@ -150,14 +161,17 @@ pub fn check_against_root(pkg: &EvidencePackage, expected_root: u64) -> CheckRep
 #[must_use]
 pub fn check_json(
     text: &str,
-    expected_root: Option<u64>,
+    expected_root: Option<ContentHash>,
     verifier: Option<&dyn SignatureVerifier>,
 ) -> CheckReport {
     match EvidencePackage::from_json(text) {
         Ok(pkg) => build_report(&pkg, expected_root, verifier),
         Err(e) => CheckReport {
             verdict: Verdict::Fail,
-            merkle_root: 0,
+            // Fail-closed sentinel: parsing refused, so there is no
+            // recomputed root. The Fail verdict is authoritative; the
+            // zero bytes are only a deterministic placeholder.
+            merkle_root: ContentHash([0u8; 32]),
             breakdown: ColorBreakdown::default(),
             signature: SignatureStatus::Unsigned,
             findings: vec![Finding {
@@ -172,7 +186,7 @@ pub fn check_json(
 #[must_use]
 pub fn check_with(
     pkg: &EvidencePackage,
-    expected_root: Option<u64>,
+    expected_root: Option<ContentHash>,
     verifier: &dyn SignatureVerifier,
 ) -> CheckReport {
     build_report(pkg, expected_root, Some(verifier))
@@ -180,7 +194,7 @@ pub fn check_with(
 
 fn build_report(
     pkg: &EvidencePackage,
-    expected_root: Option<u64>,
+    expected_root: Option<ContentHash>,
     verifier: Option<&dyn SignatureVerifier>,
 ) -> CheckReport {
     let mut findings = Vec::new();
@@ -204,7 +218,7 @@ fn build_report(
     {
         findings.push(Finding {
             kind: "content-address-mismatch",
-            detail: format!("recomputed root {merkle_root:016x} != expected {expected:016x}"),
+            detail: format!("recomputed root {merkle_root} != expected {expected}"),
         });
     }
 
@@ -225,7 +239,7 @@ fn build_report(
         (None, _) => SignatureStatus::Unsigned,
         (Some(s), None) => SignatureStatus::Unverified(s.clone()),
         (Some(s), Some(v)) => {
-            if v.verify(merkle_root, s) {
+            if v.verify(&merkle_root, s) {
                 SignatureStatus::Valid(s.clone())
             } else {
                 findings.push(Finding {

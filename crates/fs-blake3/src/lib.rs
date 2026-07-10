@@ -15,9 +15,11 @@
 //!
 //! Verified against oracle-generated official-pattern test vectors
 //! (fs-ledger's conformance suite `ledger_001` plus the unit tests here),
-//! including multi-chunk and multi-level tree inputs. Only the plain hash
-//! mode is implemented; keyed hashing, key derivation, and extended (XOF)
-//! output are no-claim (CONTRACT.md).
+//! including multi-chunk and multi-level tree inputs. Plain hashing and
+//! the standard derive-key construction (used by [`hash_domain`] for
+//! public identity namespaces) are implemented; general-purpose keyed
+//! hashing, a public KDF API, and extended (XOF) output are no-claim
+//! (CONTRACT.md).
 //!
 //! Determinism class: pure function of the input bytes — bit-stable across
 //! runs, thread counts, and ISAs.
@@ -46,6 +48,8 @@ const CHUNK_START: u32 = 1 << 0;
 const CHUNK_END: u32 = 1 << 1;
 const PARENT: u32 = 1 << 2;
 const ROOT: u32 = 1 << 3;
+const DERIVE_KEY_CONTEXT: u32 = 1 << 5;
+const DERIVE_KEY_MATERIAL: u32 = 1 << 6;
 
 /// The quarter-round mixing function.
 fn g(state: &mut [u32; 16], a: usize, b: usize, c: usize, d: usize, mx: u32, my: u32) {
@@ -181,16 +185,21 @@ impl Output {
     }
 }
 
-fn parent_output(left_child_cv: [u32; 8], right_child_cv: [u32; 8]) -> Output {
+fn parent_output(
+    key_words: [u32; 8],
+    flags: u32,
+    left_child_cv: [u32; 8],
+    right_child_cv: [u32; 8],
+) -> Output {
     let mut block_words = [0u32; 16];
     block_words[..8].copy_from_slice(&left_child_cv);
     block_words[8..].copy_from_slice(&right_child_cv);
     Output {
-        input_chaining_value: IV,
+        input_chaining_value: key_words,
         block_words,
         counter: 0, // parent nodes always use counter 0
         block_len: BLOCK_LEN as u32,
-        flags: PARENT,
+        flags: flags | PARENT,
     }
 }
 
@@ -201,16 +210,18 @@ struct ChunkState {
     block: [u8; BLOCK_LEN],
     block_len: u8,
     blocks_compressed: u8,
+    flags: u32,
 }
 
 impl ChunkState {
-    fn new(chunk_counter: u64) -> Self {
+    fn new(key_words: [u32; 8], chunk_counter: u64, flags: u32) -> Self {
         ChunkState {
-            chaining_value: IV,
+            chaining_value: key_words,
             chunk_counter,
             block: [0; BLOCK_LEN],
             block_len: 0,
             blocks_compressed: 0,
+            flags,
         }
     }
 
@@ -220,9 +231,9 @@ impl ChunkState {
 
     fn start_flag(&self) -> u32 {
         if self.blocks_compressed == 0 {
-            CHUNK_START
+            self.flags | CHUNK_START
         } else {
-            0
+            self.flags
         }
     }
 
@@ -272,6 +283,8 @@ const MAX_DEPTH: usize = 54;
 /// Feed bytes with [`Blake3::update`] in any split pattern; the digest is
 /// identical to hashing the concatenation in one call (property-tested).
 pub struct Blake3 {
+    key_words: [u32; 8],
+    flags: u32,
     chunk_state: ChunkState,
     cv_stack: [[u32; 8]; MAX_DEPTH],
     cv_stack_len: u8,
@@ -287,8 +300,14 @@ impl Blake3 {
     /// A fresh hasher.
     #[must_use]
     pub fn new() -> Self {
+        Self::new_internal(IV, 0)
+    }
+
+    fn new_internal(key_words: [u32; 8], flags: u32) -> Self {
         Blake3 {
-            chunk_state: ChunkState::new(0),
+            key_words,
+            flags,
+            chunk_state: ChunkState::new(key_words, 0, flags),
             cv_stack: [[0u32; 8]; MAX_DEPTH],
             cv_stack_len: 0,
         }
@@ -308,7 +327,8 @@ impl Blake3 {
     /// k completed subtrees to merge before its chaining value is pushed.
     fn add_chunk_chaining_value(&mut self, mut new_cv: [u32; 8], mut total_chunks: u64) {
         while total_chunks & 1 == 0 {
-            new_cv = parent_output(self.pop_stack(), new_cv).chaining_value();
+            new_cv = parent_output(self.key_words, self.flags, self.pop_stack(), new_cv)
+                .chaining_value();
             total_chunks >>= 1;
         }
         self.push_stack(new_cv);
@@ -323,7 +343,7 @@ impl Blake3 {
                 let chunk_cv = self.chunk_state.output().chaining_value();
                 let total_chunks = self.chunk_state.chunk_counter + 1;
                 self.add_chunk_chaining_value(chunk_cv, total_chunks);
-                self.chunk_state = ChunkState::new(total_chunks);
+                self.chunk_state = ChunkState::new(self.key_words, total_chunks, self.flags);
             }
             let want = CHUNK_LEN - self.chunk_state.len();
             let take = want.min(input.len());
@@ -339,7 +359,12 @@ impl Blake3 {
         let mut remaining = self.cv_stack_len as usize;
         while remaining > 0 {
             remaining -= 1;
-            output = parent_output(self.cv_stack[remaining], output.chaining_value());
+            output = parent_output(
+                self.key_words,
+                self.flags,
+                self.cv_stack[remaining],
+                output.chaining_value(),
+            );
         }
         ContentHash(output.root_hash())
     }
@@ -353,19 +378,26 @@ pub fn hash_bytes(bytes: &[u8]) -> ContentHash {
     hasher.finalize()
 }
 
-/// Hash `payload` under a length-prefixed domain tag: the canonical
-/// domain-separation scheme for every 32-byte root in the workspace.
+/// Hash `payload` under a BLAKE3 derive-key context: the canonical
+/// domain-separation scheme for every typed 32-byte root in the workspace.
 ///
-/// The absorbed stream is `len(domain) as u64 LE || domain || payload`, so
-/// distinct domains can never collide by boundary ambiguity, and the same
-/// payload hashed under two domains yields unrelated digests.
+/// This is the standard BLAKE3 derive-key construction: `domain` is hashed
+/// with `DERIVE_KEY_CONTEXT`, then that result keys the payload hash under
+/// `DERIVE_KEY_MATERIAL`. The mode flags separate typed roots from plain
+/// [`hash_bytes`] artifacts as well as from other domains.
 #[must_use]
 pub fn hash_domain(domain: &str, payload: &[u8]) -> ContentHash {
-    let mut hasher = Blake3::new();
-    hasher.update(&(domain.len() as u64).to_le_bytes());
-    hasher.update(domain.as_bytes());
-    hasher.update(payload);
-    hasher.finalize()
+    let mut context_hasher = Blake3::new_internal(IV, DERIVE_KEY_CONTEXT);
+    context_hasher.update(domain.as_bytes());
+    let context_key = context_hasher.finalize();
+    let mut key_words = [0u32; 8];
+    let (words, _) = context_key.as_bytes().as_chunks::<4>();
+    for (word, bytes) in key_words.iter_mut().zip(words) {
+        *word = u32::from_le_bytes(*bytes);
+    }
+    let mut material_hasher = Blake3::new_internal(key_words, DERIVE_KEY_MATERIAL);
+    material_hasher.update(payload);
+    material_hasher.finalize()
 }
 
 /// A 32-byte BLAKE3 content hash: the identity of every content-addressed
@@ -479,14 +511,55 @@ mod tests {
     fn domain_separation_binds_the_tag_unambiguously() {
         // Different domains, same payload: unrelated digests.
         assert_ne!(hash_domain("a", b"payload"), hash_domain("b", b"payload"));
-        // The length prefix prevents boundary reshuffling between the
-        // domain and the payload.
+        // Context and material are distinct BLAKE3 modes, so boundary
+        // reshuffling cannot imitate another domain.
         assert_ne!(hash_domain("ab", b"c"), hash_domain("a", b"bc"));
-        // Deterministic and equal to the hand-assembled stream.
-        let mut h = Blake3::new();
-        h.update(&6u64.to_le_bytes());
-        h.update(b"domain");
-        h.update(b"payload");
-        assert_eq!(hash_domain("domain", b"payload"), h.finalize());
+        assert_eq!(
+            hash_domain("domain", b"payload").to_hex(),
+            "4d50c6393be1879a9767b80ee406c4008d60abd2e76b4241dc97b2b41e2f6cd2"
+        );
+
+        // Regression: the old length-prefixed construction was also a valid
+        // raw artifact preimage, so it collided across shared namespaces by
+        // construction. Mode separation makes that require a hash break.
+        let mut former_encoding = 6u64.to_le_bytes().to_vec();
+        former_encoding.extend_from_slice(b"domainpayload");
+        assert_ne!(
+            hash_domain("domain", b"payload"),
+            hash_bytes(&former_encoding)
+        );
+    }
+
+    #[test]
+    fn derive_key_domain_matches_official_vectors() {
+        for (len, expected) in [
+            (
+                0usize,
+                "2cc39783c223154fea8dfb7c1b1660f2ac2dcbd1c1de8277b0b0dd39b7e50d7d",
+            ),
+            (
+                64,
+                "a5c4a7053fa86b64746d4bb688d06ad1f02a18fce9afd3e818fefaa7126bf73e",
+            ),
+            (
+                1024,
+                "7356cd7720d5b66b6d0697eb3177d9f8d73a4a5c5e968896eb6a689684302706",
+            ),
+            (
+                1025,
+                "effaa245f065fbf82ac186839a249707c3bddf6d3fdda22d1b95a3c970379bcb",
+            ),
+            (
+                4097,
+                "aca51029626b55fda7117b42a7c211f8c6e9ba4fe5b7a8ca922f34299500ead8",
+            ),
+        ] {
+            let data: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+            assert_eq!(
+                hash_domain("BLAKE3 2019-12-27 16:29:52 test vectors context", &data,).to_hex(),
+                expected,
+                "derive-key oracle length {len}"
+            );
+        }
     }
 }

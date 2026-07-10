@@ -9,15 +9,15 @@
 [![Status](https://img.shields.io/badge/status-active%20Rust%20workspace-2ea44f)](#implemented-workspace)
 [![Rust](https://img.shields.io/badge/rust-nightly%202024-b7410e)](rust-toolchain.toml)
 [![Crates](https://img.shields.io/badge/workspace-125%20fs--%2A%20crates-0969da)](#implemented-workspace)
-[![Contracts](https://img.shields.io/badge/contracts-125%20of%20125%20crates-8250df)](#contracts-and-verification)
-[![Tests](https://img.shields.io/badge/tests-251%20crate%20test%20files-1f883d)](#contracts-and-verification)
+[![Contracts](https://img.shields.io/badge/contracts-126%20of%20126%20crates-8250df)](#contracts-and-verification)
+[![Tests](https://img.shields.io/badge/tests-250%20crate%20test%20files-1f883d)](#contracts-and-verification)
 [![License](https://img.shields.io/badge/license-MIT%20%2B%20AI%20rider-yellow)](LICENSE)
 
 </div>
 
 FrankenSim is a working Rust workspace for deterministic geometry, certified numerics, meshing, execution, evidence, and design-ledger infrastructure for simulation and design optimization.
 
-The tree contains a real Cargo workspace with 125 `fs-*` crates, repository policy tooling, conformance contracts, integration tests, and working implementations across substrate/runtime, numerical kernels, geometry representations, meshing, physics, solvers, adjoints, optimization, imaging, evidence, packaging, and ledger layers.
+The tree contains 126 `fs-*` crate directories: 125 in the native Cargo workspace plus the standalone nested `fs-wasm` workspace. They include repository policy tooling, conformance contracts, integration tests, and working implementations across substrate/runtime, numerical kernels, geometry representations, meshing, physics, solvers, adjoints, optimization, imaging, evidence, packaging, and ledger layers.
 
 There is not yet a packaged end-user simulation application or crates.io release. Today, FrankenSim is usable as a source workspace and library substrate.
 
@@ -31,14 +31,14 @@ There is not yet a packaged end-user simulation application or crates.io release
 
 | Area | Current implementation |
 |------|------------------------|
-| Workspace | Rust 2024 nightly Cargo workspace with 125 `fs-*` crates plus `xtask` |
-| Contracts | 125 of 125 `fs-*` crates have `CONTRACT.md` files |
+| Workspace | Rust 2024 nightly Cargo workspace with 125 native `fs-*` workspace crates plus `xtask`; `fs-wasm` is a standalone nested workspace |
+| Contracts | 126 of 126 `fs-*` crate directories have `CONTRACT.md` files |
 | Runtime substrate | Capability probing, SIMD facades, aligned arenas, two-lane execution, cancellation contexts, tile pools, tuner and race scaffolding |
 | Numerics | Deterministic elementary math, dense/sparse linear algebra, FFT/DCT, interval/affine/Taylor arithmetic, Chebyshev collocation, random/QMC streams, AD/adjoint infrastructure, e-process inference |
 | Geometry | Region/chart abstraction, SDF, mesh and F-rep charts, representation conversion hooks, transformations, tet meshing, remeshing, quality audits |
 | Evidence and ledger | Composable `Evidence<T>`/`Certified<T>`, model cards, bracketing, FrankenSQLite-backed design ledger, artifact hashes, event streams, tune cache, roofline recording |
 | Policy tooling | `xtask` checks for layer direction, Franken-only runtime dependencies, contracts, unsafe capsules, and constellation lock verification |
-| Tests | 251 crate-level conformance and integration test files exercising the implemented contracts |
+| Tests | 250 crate-level conformance and integration test files tracked in git and exercising the implemented contracts |
 
 ### What You Can Use Today
 
@@ -979,8 +979,8 @@ Different readers should start in different places.
 
 ## Contracts and Verification
 
-The workspace currently has 125 `CONTRACT.md` files for 125 `fs-*` crates. The
-contract count is meant to be checkable, not aspirational.
+The tree currently has 126 `CONTRACT.md` files for 126 `fs-*` crate directories.
+The contract count is meant to be checkable, not aspirational.
 
 Existing contracts use these required sections:
 
@@ -1021,7 +1021,7 @@ The current DSR setup is preferred over GitHub Actions for this repository. If a
 |-- Cargo.toml                         # Workspace manifest
 |-- Cargo.lock                         # Committed lockfile
 |-- rust-toolchain.toml                # Nightly toolchain and components
-|-- crates/                            # 125 fs-* crates; selected entries shown below
+|-- crates/                            # 126 fs-* crates; selected entries shown below
 |   |-- fs-qty/                        # Dimensional quantities
 |   |-- fs-obs/                        # Structured observability
 |   |-- fs-evidence/                   # Evidence and certification wrappers

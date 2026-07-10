@@ -4,9 +4,19 @@
 //! rendering (including the empty case), the protocol version, and
 //! determinism. The checker uses only the package format — no solver.
 
-use fs_checker::{CHECKER_PROTOCOL_VERSION, SignatureStatus, Verdict, check, check_against_root};
+use fs_checker::{
+    CHECKER_PROTOCOL_VERSION, ContentHash, SignatureStatus, Verdict, check, check_against_root,
+};
 use fs_evidence::{Color, ValidityDomain};
 use fs_package::{Claim, EvidencePackage, FalsifierRecord, Provenance};
+
+/// A deliberately corrupted content root (one byte flipped): the v4
+/// 32-byte replacement for the old `root ^ 0xdead` tamper idiom.
+fn flip(root: ContentHash) -> ContentHash {
+    let mut bytes = *root.as_bytes();
+    bytes[0] ^= 0xde;
+    ContentHash(bytes)
+}
 
 fn prov() -> Provenance {
     Provenance::new("commit-abc", "lock-def")
@@ -89,7 +99,7 @@ fn content_address_mismatch_is_caught() {
     // the right root passes.
     assert!(check_against_root(&pkg, real_root).passed());
     // a wrong expected root (a tampered/substituted package) fails.
-    let report = check_against_root(&pkg, real_root ^ 0xdead_beef);
+    let report = check_against_root(&pkg, flip(real_root));
     assert!(!report.passed());
     assert!(
         report
@@ -151,7 +161,12 @@ fn the_budget_pie_handles_an_empty_package() {
 
 #[test]
 fn the_checker_advertises_its_protocol_version() {
-    assert_eq!(CHECKER_PROTOCOL_VERSION, 1);
+    assert_eq!(CHECKER_PROTOCOL_VERSION, 2);
+    assert_eq!(fs_checker::CHECKER_SUPPORTED_PACKAGE_FORMAT, 4);
+    assert_eq!(
+        fs_checker::CHECKER_SUPPORTED_PACKAGE_FORMAT,
+        fs_package::FORMAT_VERSION
+    );
 }
 
 #[test]
@@ -170,11 +185,11 @@ fn checker_json_path_and_signature_capability() {
     use fs_checker::{NoSignatureVerifier, SignatureVerifier, check_json, check_with};
     use fs_evidence::Color;
     struct MacVerifier;
-    fn mac(root: u64) -> String {
-        format!("test-key/{:016x}", root ^ 0xA5A5_A5A5_A5A5_A5A5)
+    fn mac(root: &ContentHash) -> String {
+        format!("test-key/{root}")
     }
     impl SignatureVerifier for MacVerifier {
-        fn verify(&self, merkle_root: u64, signature: &str) -> bool {
+        fn verify(&self, merkle_root: &ContentHash, signature: &str) -> bool {
             signature == mac(merkle_root)
         }
     }
@@ -184,7 +199,7 @@ fn checker_json_path_and_signature_capability() {
         Color::Verified { lo: 0.0, hi: 1.0 },
     ));
     let root = base.merkle_root();
-    let pkg = base.signed(mac(root));
+    let pkg = base.signed(mac(&root));
     // Valid signature via the capability.
     let report = check_with(&pkg, Some(root), &MacVerifier);
     assert!(report.passed(), "{:?}", report.findings);

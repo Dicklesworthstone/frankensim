@@ -7,8 +7,9 @@ re-verify without solvers.
 ## Purpose and layer
 
 Layer L6. Depends on `fs-evidence` (UTIL — `Color`, `ColorRank`,
-`ValidityDomain`) and `fs-crosswalk` (the static standards vocabulary used by
-coverage reports). Pure, deterministic; no I/O and no solver dependency.
+`ValidityDomain`), `fs-crosswalk` (the static standards vocabulary used by
+coverage reports), and dependency-free `fs-blake3` (the shared content-hash
+owner). Pure, deterministic; no I/O and no solver dependency.
 
 ## Public types and semantics
 
@@ -18,9 +19,11 @@ coverage reports). Pure, deterministic; no I/O and no solver dependency.
 - `Provenance { code_version, constellation_lock }`.
 - `EvidencePackage { format_version, claims, provenance, signature }` —
   builder: `new(prov).with_claim(..).signed(..)`.
-  - `merkle_root() -> u64` — an FNV-1a Merkle root over the package identity:
-    format version, provenance, and ordered claims. Detached signatures are
-    excluded. Any reproducibility provenance or claim change changes it.
+  - `merkle_root() -> ContentHash` — a 32-byte BLAKE3 Merkle root over the
+    package identity: format version, claim count, provenance, and ordered
+    claims. Header, claim, and internal-node hashes use standard BLAKE3
+    derive-key domains. Detached signatures are excluded. Any reproducibility
+    provenance or claim change changes the root.
   - `verify() -> Result<PackageReport, PackageError>` — re-verify WITHOUT a
     solver: the format must be `FORMAT_VERSION`, and every claim must be
     complete for its color.
@@ -51,7 +54,9 @@ coverage reports). Pure, deterministic; no I/O and no solver dependency.
   anchoring coverage requires a valid anchor whose dataset id exactly matches
   the `Validated` claim's named dataset; unrelated anchors do not count.
 - CONTENT-ADDRESSING: `merkle_root` is deterministic and tamper-evident across
-  format version, provenance, and claims; a detached signature does not change it.
+  format version, claim count, provenance, and ordered claims. Derive-key modes
+  separate package leaves/nodes from plain artifact hashes and each other; a
+  detached signature does not change the root.
 - `verify` runs no solver — pure structural re-verification (the checker's
   core).
 
@@ -93,6 +98,17 @@ unsupported-format rejection; optional detached signature; deterministic JSON
 carrying the root; in-memory/serialized semantic parity; and exact full-width
 falsifier attempt-count round trips with overflow refusal.
 
+## Schema v4: mode-separated BLAKE3 roots (beads 7uq9, t7x3)
+
+The content address is a 32-byte `ContentHash`. A header leaf binds the format,
+ordered claim count, and reproducibility provenance; each claim is a separate
+canonical leaf; internal nodes combine exact child bytes. Header, claim, and
+node hashing use distinct standard BLAKE3 derive-key contexts, which also
+separate package identities from plain ledger artifact hashes. Odd tree nodes
+carry upward unchanged, while the header's claim count prevents tree-shape or
+duplicate-tail ambiguity. Readers refuse v3's 16-hex FNV root by version and
+root width; checker protocol v2 is the matching standalone ABI.
+
 ## Schema v3: receipts, falsifiers, anchors (bead xfxq)
 
 Claims optionally carry a COMPOSITION RECEIPT (parent claim indices +
@@ -126,7 +142,7 @@ with a structured `ParseError`. The parser re-derives the magnitude
 budget from the parsed claims and RECOMPUTES the content root from the
 parsed fields: a package whose embedded root does not recompute is
 tampered in transit and never loads. This is an integrity check, not the
-schema-v4 source-origin proof named below. Decode-encode is both
+schema-v5 source-origin proof named below. Decode-encode is both
 semantically and textually stable (tested). The magnitude budget
 attributes ERROR MAGNITUDES (verified interval widths, estimated
 dispersions) and counts validated claims as unquantified regional
@@ -137,18 +153,19 @@ rounding through `f64`.
 
 ## No-claim boundaries
 
-- The Merkle hash is an in-house FNV-1a (Franken-compliant, pure Rust); a
-  production build swaps in fs-ledger's BLAKE3-class hash. A cryptographic
-  SIGNATURE is detached and OPTIONAL — the bundle is verifiable by content
-  address regardless; wiring a Franken signature primitive is later work.
+- The Merkle hash is the shared in-house BLAKE3 implementation, with standard
+  derive-key mode separation for typed package roots. This establishes content
+  integrity, not authorship or scientific truth. A cryptographic SIGNATURE is
+  detached and OPTIONAL; wiring a default Franken signature primitive is later
+  work.
 - `verify` checks STRUCTURAL completeness + the content address; it does not
   re-run solvers to re-derive the certificates (that is the point — the
   certificates are carried). The standalone distributable checker (a separate
   bead) wraps this crate.
 - The certificate payloads live in `fs-evidence::Color`; this crate bundles
   and content-addresses them, it does not produce them.
-- Schema v3's public `Claim` and `Color` fields do not prove how a source claim
+- Schema v4's public `Claim` and `Color` fields do not prove how a source claim
   was obtained. A party can construct a fresh package around a structurally
   valid raw `Verified` interval and recompute its root. The root establishes
   integrity, not epistemic origin; sealed ClaimOrigin transport is tracked for
-  schema v4.
+  schema v5.

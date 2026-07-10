@@ -6,10 +6,15 @@ independently distributable verifier — "don't trust us; here is the checker."
 ## Purpose and layer
 
 Layer L6. Its sole direct dependency is `fs-package`; that package's production
-cone contains `fs-evidence` and the static `fs-crosswalk` vocabulary. A HARD
+cone contains `fs-evidence`, dependency-free `fs-blake3`, and the static
+`fs-crosswalk` vocabulary. A HARD
 distribution constraint (Proposal 12): NO solver stack, geometry kernel, or
 license gate anywhere in the graph. By construction the checker cannot run a
-solve. It carries its own `CHECKER_PROTOCOL_VERSION` (distributed independently).
+solve. It carries `CHECKER_PROTOCOL_VERSION = 2` for the schema-v4 32-byte-root
+ABI (distributed independently). `CHECKER_SUPPORTED_PACKAGE_FORMAT = 4` is an
+explicit protocol literal with a compile-time assertion against
+`fs_package::FORMAT_VERSION`, so a package schema bump cannot silently retain
+an incompatible checker ABI.
 
 ## Public types and semantics
 
@@ -22,7 +27,8 @@ solve. It carries its own `CHECKER_PROTOCOL_VERSION` (distributed independently)
   `Finding { kind, detail }`.
 - Invalid packages carry a zeroed breakdown, so a refused claim cannot retain a
   normal-looking positive evidence pie alongside the failure finding.
-- Re-exports `EvidencePackage`, `ColorBreakdown`, `PackageError`.
+- Re-exports `EvidencePackage`, `ContentHash`, `ColorBreakdown`,
+  `MagnitudeBudget`, `PackageError`, and `ParseError`.
 
 ## What it re-verifies
 
@@ -81,9 +87,9 @@ when a supplied capability accepts the signature over the RECOMPUTED
 root; the in-tree `NoSignatureVerifier` accepts nothing (the no-crypto
 no-claim — presence is recorded as `Unverified`, and supplying a
 capability that rejects raises a `signature-invalid` finding). The
-magnitude budget must reconcile with its parts. The dependency graph
-remains fs-package → fs-evidence only: the checker cannot run a solve
-by construction.
+magnitude budget must reconcile with its parts. The normal dependency graph is
+`fs-package -> {fs-blake3, fs-crosswalk, fs-evidence -> fs-obs}`: it contains no
+solver and the checker cannot run a solve by construction.
 
 ## No-claim boundaries
 
@@ -93,6 +99,6 @@ by construction.
 - Composition receipts are re-run, but source-certificate production is not.
   The certificates are CARRIED in the package; the checker validates their
   structure and derivation receipts without running a solver.
-- Schema v3 does not yet encode a non-forgeable source origin for a raw
+- Schema v4 does not yet encode a non-forgeable source origin for a raw
   `Verified` claim. Content addressing proves package integrity, not scientific
-  truth; schema-v4 ClaimOrigin work is tracked separately.
+  truth; schema-v5 ClaimOrigin work is tracked separately.

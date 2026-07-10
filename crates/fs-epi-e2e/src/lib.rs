@@ -28,7 +28,15 @@
 
 use std::collections::BTreeMap;
 
-use fs_checker::{check, check_against_root};
+use fs_checker::{ContentHash, check, check_against_root};
+
+/// A deliberately corrupted content root (one byte flipped): the v4
+/// 32-byte replacement for the old `root ^ 0xdead` tamper idiom.
+fn flip(root: ContentHash) -> ContentHash {
+    let mut bytes = *root.as_bytes();
+    bytes[0] ^= 0xde;
+    ContentHash(bytes)
+}
 use fs_evidence::{
     ClaimContext, Color, ColorRank, FalsifierHistory, FalsifierRegistry, IntervalOp,
     ValidityDomain, allocate_budget, check_regime, compose,
@@ -353,7 +361,7 @@ pub fn stage_evidence_roundtrip() -> StageLog {
     passed &= good.passed();
 
     // a tampered package fails with a LOCALIZED finding.
-    let tampered = check_against_root(&pkg, root ^ 0xdead_beef);
+    let tampered = check_against_root(&pkg, flip(root));
     let tamper_caught = !tampered.passed()
         && tampered
             .findings
