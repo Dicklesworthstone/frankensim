@@ -177,7 +177,7 @@ fn json_is_deterministic_and_carries_the_root() {
     assert_eq!(j, pkg.to_json());
     assert!(j.starts_with('{') && j.ends_with('}'));
     assert!(j.contains(&format!("{:016x}", pkg.merkle_root())));
-    assert!(j.contains("\"format_version\":2"), "schema v2 (qmao.6.1)");
+    assert!(j.contains("\"format_version\":3"), "schema v3 (xfxq)");
     // v2 carries COMPLETE payloads, not just rank labels.
     assert!(j.contains("\"lo_bits\":") && j.contains("\"dataset\":"));
 }
@@ -343,7 +343,7 @@ fn coverage_cannot_claim_absent_evidence() {
     assert!(!get(PackageConcept::Signature).present);
     assert!(
         !get(PackageConcept::FalsifierLog).present,
-        "unrepresentable evidence can never read as present"
+        "absent falsifier records can never read as present"
     );
     for standard in Standard::ALL {
         for (concept, status, _why) in package_coverage(&pkg, standard) {
@@ -357,9 +357,100 @@ fn coverage_cannot_claim_absent_evidence() {
             if concept == PackageConcept::FalsifierLog {
                 assert!(
                     !matches!(status, CoverageStatus::Covered),
-                    "falsifier logs cannot be covered in v2 ({standard:?})"
+                    "falsifier logs without records cannot be covered ({standard:?})"
                 );
             }
         }
     }
+}
+
+/// xfxq (schema v3) — composition receipts re-run solver-free, refuted
+/// falsifiers fail, anchors and falsifier logs travel and flip the
+/// crosswalk, and every new field round-trips through the strict
+/// parser bound into the content address.
+#[test]
+fn v3_receipts_falsifiers_anchors() {
+    use fs_evidence::IntervalOp;
+    use fs_package::{CompositionReceipt, FalsifierRecord, PackageError};
+    let ve = |lo: f64, hi: f64| Color::Verified { lo, hi };
+    // A well-formed derived package: c = a + b with a valid receipt.
+    let good = EvidencePackage::new(Provenance::new("v", "l"))
+        .with_claim(Claim::new("a", "left", ve(1.0, 2.0)))
+        .with_claim(Claim::new("b", "right", ve(10.0, 20.0)))
+        .with_claim(
+            Claim::new(
+                "c",
+                "sum",
+                fs_evidence::compose(&ve(1.0, 2.0), &ve(10.0, 20.0), IntervalOp::Add),
+            )
+            .with_receipt(vec![0, 1], IntervalOp::Add)
+            .with_falsifier(FalsifierRecord {
+                name: "interval-probe".to_string(),
+                attempts: 512,
+                refuted: false,
+                detail: "no violation found".to_string(),
+            })
+            .with_anchor("wt-2026-run9", "deadbeefcafef00d"),
+        );
+    good.verify().expect("receipt re-derives");
+    // Round trip: the v3 fields survive the strict parser bit-for-bit.
+    let back = EvidencePackage::from_json(&good.to_json()).expect("v3 parses");
+    assert_eq!(back, good);
+    assert_eq!(back.claims[2].falsifiers[0].attempts, 512);
+    assert_eq!(back.claims[2].anchors[0].dataset_id, "wt-2026-run9");
+    // FORGED receipt: claiming Verified while a parent is Estimated —
+    // the re-run composition cannot reproduce it (semantic catch, not
+    // just the content-address catch).
+    let forged = EvidencePackage::new(Provenance::new("v", "l"))
+        .with_claim(Claim::new(
+            "a",
+            "shaky",
+            Color::Estimated {
+                estimator: "guess".to_string(),
+                dispersion: 0.5,
+            },
+        ))
+        .with_claim(Claim::new("b", "solid", ve(1.0, 2.0)))
+        .with_claim(
+            Claim::new("c", "laundered", ve(2.0, 4.0)).with_receipt(vec![0, 1], IntervalOp::Add),
+        );
+    assert!(matches!(
+        forged.verify(),
+        Err(PackageError::ReceiptMismatch { claim }) if claim == "c"
+    ));
+    // Forward/self parent references refuse.
+    let cyclic = EvidencePackage::new(Provenance::new("v", "l"))
+        .with_claim(Claim::new("a", "s", ve(0.0, 1.0)).with_receipt(vec![0], IntervalOp::Hull));
+    assert!(matches!(
+        cyclic.verify(),
+        Err(PackageError::BadReceiptParent { parent: 0, .. })
+    ));
+    // A refuted falsifier fails the whole claim.
+    let refuted = EvidencePackage::new(Provenance::new("v", "l")).with_claim(
+        Claim::new("a", "wrong", ve(0.0, 1.0)).with_falsifier(FalsifierRecord {
+            name: "adversary".to_string(),
+            attempts: 3,
+            refuted: true,
+            detail: "counterexample at x=0.7".to_string(),
+        }),
+    );
+    assert!(matches!(
+        refuted.verify(),
+        Err(PackageError::RefutedClaim { falsifier, .. }) if falsifier == "adversary"
+    ));
+    // Crosswalk: falsifier logs are now REPRESENTABLE — records present
+    // flips the concept to present.
+    let presence = fs_package::package_presence(&good);
+    let fal = presence
+        .iter()
+        .find(|p| p.concept == fs_crosswalk::PackageConcept::FalsifierLog)
+        .unwrap();
+    assert!(fal.present, "{}", fal.why);
+    // Tampering with a falsifier flag flips the content address (bound).
+    let json = good.to_json();
+    let tampered = json.replace("\"refuted\":false", "\"refuted\":true");
+    assert!(
+        EvidencePackage::from_json(&tampered).is_err(),
+        "root binds v3 fields"
+    );
 }

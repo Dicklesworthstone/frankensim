@@ -69,6 +69,27 @@ failure; Merkle determinism + claim/provenance tamper detection;
 unsupported-format rejection; optional detached signature; deterministic JSON
 carrying the root.
 
+## Schema v3: receipts, falsifiers, anchors (bead xfxq)
+
+Claims optionally carry a COMPOSITION RECEIPT (parent claim indices +
+the ledger op): `verify` re-runs `fs_evidence::compose` over the
+parents in order and requires EXACT color equality — a claim whose
+color cannot be re-derived is `ReceiptMismatch`, so laundering a
+Verified from Estimated parents is caught SEMANTICALLY, not just by
+the content address; parents must point strictly backwards
+(`BadReceiptParent` otherwise — a DAG by construction). FALSIFIER
+RECORDS (name, attempts, refuted, detail) travel with the claim; any
+`refuted: true` fails verification outright (`RefutedClaim`). ANCHOR
+RECORDS give validated claims content-hashed dataset identities. All
+three field families bind into the content address and round-trip
+through the strict parser (booleans added to the closed grammar);
+crosswalk coverage now reads falsifier logs and anchors from the
+actual fields (present only when records exist). The checker stays
+solver-free: `compose` lives in fs-evidence, already in its dependency
+cone. Migration: v2 readers refuse v3 by version (the one-version
+contract); in-tree constructors gained fields with builders, no
+call-site changes.
+
 ## Schema v2: round trip and fail-closed parsing (bead qmao.6.1)
 
 `to_json` emits the COMPLETE color payloads (floats as bit-exact hex

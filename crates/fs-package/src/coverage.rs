@@ -65,12 +65,19 @@ pub fn package_presence(pkg: &EvidencePackage) -> Vec<ConceptPresence> {
                         },
                     )
                 }
-                PackageConcept::FalsifierLog => (
-                    false,
-                    "falsifier logs are not representable in package schema v2 — coverage \
-                     cannot be claimed for absent evidence (recorded no-claim)"
-                        .to_string(),
-                ),
+                PackageConcept::FalsifierLog => {
+                    let n: usize = pkg.claims.iter().map(|c| c.falsifiers.len()).sum();
+                    (
+                        n > 0,
+                        if n > 0 {
+                            format!("{n} falsifier record(s) attached to claims (schema v3)")
+                        } else {
+                            "no falsifier records attached — coverage cannot be claimed for \
+                             absent evidence"
+                                .to_string()
+                        },
+                    )
+                }
                 PackageConcept::RegimeTag => {
                     let n = validated_with(&|c| {
                         matches!(c, Color::Validated { regime, .. } if !regime.bounds().is_empty())
@@ -78,10 +85,17 @@ pub fn package_presence(pkg: &EvidencePackage) -> Vec<ConceptPresence> {
                     (n > 0, format!("{n} validated claim(s) with regime bounds"))
                 }
                 PackageConcept::AnchoringDataset => {
-                    let n = validated_with(&|c| {
+                    let named = validated_with(&|c| {
                         matches!(c, Color::Validated { dataset, .. } if !dataset.trim().is_empty())
                     });
-                    (n > 0, format!("{n} validated claim(s) with anchoring datasets"))
+                    let anchored: usize = pkg.claims.iter().map(|c| c.anchors.len()).sum();
+                    (
+                        named > 0 || anchored > 0,
+                        format!(
+                            "{named} validated claim(s) with named datasets; {anchored} \
+                             content-hashed anchor record(s) (schema v3)"
+                        ),
+                    )
                 }
                 PackageConcept::Provenance => {
                     let ok = !pkg.provenance.code_version.trim().is_empty()

@@ -264,5 +264,23 @@ fn describe(e: &PackageError) -> Finding {
             kind: "unsupported-format",
             detail: format!("package format version {found} is not supported"),
         },
+        PackageError::ReceiptMismatch { claim } => Finding {
+            kind: "receipt-mismatch",
+            detail: format!(
+                "claim '{claim}': re-running its composition receipt does not reproduce the \
+                 claimed color — forged or stale derivation"
+            ),
+        },
+        PackageError::BadReceiptParent { claim, parent } => Finding {
+            kind: "bad-receipt-parent",
+            detail: format!(
+                "claim '{claim}': receipt parent {parent} is out of range or not strictly \
+                 earlier in the package"
+            ),
+        },
+        PackageError::RefutedClaim { claim, falsifier } => Finding {
+            kind: "refuted-claim",
+            detail: format!("claim '{claim}' was REFUTED by falsifier '{falsifier}'"),
+        },
     }
 }

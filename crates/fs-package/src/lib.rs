@@ -20,14 +20,54 @@
 //! bundle is verifiable by content address regardless). Everything is
 //! deterministic: the same package yields the same root and JSON.
 
-use fs_evidence::{Color, ColorRank};
+use fs_evidence::{Color, ColorRank, IntervalOp, compose};
 
 pub mod coverage;
 pub use coverage::{ConceptPresence, CoverageStatus, package_coverage, package_presence};
 
+/// A COMPOSITION RECEIPT (schema v3, bead xfxq): this claim's color was
+/// derived from earlier claims in the package, and the standalone
+/// checker re-runs the derivation — `compose` folded over the parents'
+/// colors in order must EQUAL the claimed color exactly. Parents are
+/// indices into the package's claim list and must precede this claim
+/// (a DAG by construction).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompositionReceipt {
+    /// Parent claim indices, in fold order (each < this claim's index).
+    pub parents: Vec<usize>,
+    /// The ledger operation the derivation used.
+    pub op: IntervalOp,
+}
+
+/// One falsifier's adversarial record against a claim (schema v3):
+/// negative results travel WITH the claim; a refuted claim fails
+/// verification outright.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FalsifierRecord {
+    /// Which falsifier ran.
+    pub name: String,
+    /// Adversarial attempts executed.
+    pub attempts: u64,
+    /// Did it refute the claim?
+    pub refuted: bool,
+    /// Outcome summary.
+    pub detail: String,
+}
+
+/// An anchoring-dataset identity (schema v3): the reference data behind
+/// a validated claim, by stable id and content hash — not just a name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnchorRecord {
+    /// Stable dataset identity.
+    pub dataset_id: String,
+    /// Content hash (hex) of the dataset artifact.
+    pub content_hash: String,
+}
+
 /// One claim in an evidence package: a statement plus its epistemic color
 /// (which carries the certificate data — an interval, a regime+dataset, or an
-/// estimator+dispersion).
+/// estimator+dispersion), and optionally its composition receipt,
+/// falsifier records, and dataset anchors (schema v3).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Claim {
     /// A stable claim id.
@@ -36,6 +76,12 @@ pub struct Claim {
     pub statement: String,
     /// The epistemic color + its certificate payload.
     pub color: Color,
+    /// The composition receipt, when this claim is derived.
+    pub receipt: Option<CompositionReceipt>,
+    /// Falsifier records (adversarial attempts + outcomes).
+    pub falsifiers: Vec<FalsifierRecord>,
+    /// Anchoring datasets.
+    pub anchors: Vec<AnchorRecord>,
 }
 
 impl Claim {
@@ -46,7 +92,38 @@ impl Claim {
             id: id.into(),
             statement: statement.into(),
             color,
+            receipt: None,
+            falsifiers: Vec::new(),
+            anchors: Vec::new(),
         }
+    }
+
+    /// Attach a composition receipt (builder style).
+    #[must_use]
+    pub fn with_receipt(mut self, parents: Vec<usize>, op: IntervalOp) -> Claim {
+        self.receipt = Some(CompositionReceipt { parents, op });
+        self
+    }
+
+    /// Attach a falsifier record (builder style).
+    #[must_use]
+    pub fn with_falsifier(mut self, rec: FalsifierRecord) -> Claim {
+        self.falsifiers.push(rec);
+        self
+    }
+
+    /// Attach a dataset anchor (builder style).
+    #[must_use]
+    pub fn with_anchor(
+        mut self,
+        dataset_id: impl Into<String>,
+        content_hash: impl Into<String>,
+    ) -> Claim {
+        self.anchors.push(AnchorRecord {
+            dataset_id: dataset_id.into(),
+            content_hash: content_hash.into(),
+        });
+        self
     }
 
     /// A canonical string used for content hashing (bit-exact on floats).
@@ -77,7 +154,46 @@ impl Claim {
                 let _ = write!(out, "{}|", dispersion.to_bits());
             }
         }
+        // Schema-v3 fields bind into the content address too.
+        match &self.receipt {
+            Some(r) => {
+                let _ = write!(out, "receipt:{}|", op_name(r.op));
+                for &p in &r.parents {
+                    let _ = write!(out, "{p}|");
+                }
+            }
+            None => out.push_str("no-receipt|"),
+        }
+        for fr in &self.falsifiers {
+            out.push_str("falsifier|");
+            push_atom(&mut out, &fr.name);
+            let _ = write!(out, "{}|{}|", fr.attempts, fr.refuted);
+            push_atom(&mut out, &fr.detail);
+        }
+        for a in &self.anchors {
+            out.push_str("anchor|");
+            push_atom(&mut out, &a.dataset_id);
+            push_atom(&mut out, &a.content_hash);
+        }
         out
+    }
+}
+
+/// Stable op name for hashing/JSON.
+fn op_name(op: IntervalOp) -> &'static str {
+    match op {
+        IntervalOp::Add => "add",
+        IntervalOp::Mul => "mul",
+        IntervalOp::Hull => "hull",
+    }
+}
+
+fn op_parse(name: &str) -> Option<IntervalOp> {
+    match name {
+        "add" => Some(IntervalOp::Add),
+        "mul" => Some(IntervalOp::Mul),
+        "hull" => Some(IntervalOp::Hull),
+        _ => None,
     }
 }
 
@@ -159,13 +275,36 @@ pub enum PackageError {
         /// The version found.
         found: u32,
     },
+    /// A composition receipt does not re-derive the claimed color: the
+    /// checker re-ran `compose` over the parents and got a different
+    /// result — a forged or stale derivation (schema v3).
+    ReceiptMismatch {
+        /// The claim id.
+        claim: String,
+    },
+    /// A receipt references a parent at or after the claim itself (the
+    /// derivation DAG must point strictly backwards), or out of range.
+    BadReceiptParent {
+        /// The claim id.
+        claim: String,
+        /// The offending parent index.
+        parent: usize,
+    },
+    /// A falsifier REFUTED this claim; a refuted claim cannot verify.
+    RefutedClaim {
+        /// The claim id.
+        claim: String,
+        /// The refuting falsifier.
+        falsifier: String,
+    },
 }
 
-/// The one format version this build understands. v2 (bead qmao.6.1):
-/// claims carry their COMPLETE color payloads bit-exactly, the JSON
-/// round-trips through a strict parser, and the embedded content root
-/// must recompute from the parsed fields.
-pub const FORMAT_VERSION: u32 = 2;
+/// The one format version this build understands. v2 (bead qmao.6.1)
+/// added complete color payloads + the strict parser + root
+/// recomputation; v3 (bead xfxq) adds composition receipts (checker
+/// re-runs the derivation), falsifier records (refuted claims fail),
+/// and dataset anchors — all bound into the content address.
+pub const FORMAT_VERSION: u32 = 3;
 
 impl EvidencePackage {
     /// An empty package at the current format version.
@@ -259,7 +398,39 @@ impl EvidencePackage {
                 found: self.format_version,
             });
         }
-        for c in &self.claims {
+        for (index, c) in self.claims.iter().enumerate() {
+            // Schema-v3 semantic re-verification (solver-free):
+            // refuted falsifiers fail; composition receipts re-run.
+            if let Some(fr) = c.falsifiers.iter().find(|f| f.refuted) {
+                return Err(PackageError::RefutedClaim {
+                    claim: c.id.clone(),
+                    falsifier: fr.name.clone(),
+                });
+            }
+            if let Some(r) = &c.receipt {
+                let mut derived: Option<Color> = None;
+                for &pi in &r.parents {
+                    if pi >= index {
+                        return Err(PackageError::BadReceiptParent {
+                            claim: c.id.clone(),
+                            parent: pi,
+                        });
+                    }
+                    let pc = &self.claims[pi].color;
+                    derived = Some(match derived {
+                        None => pc.clone(),
+                        Some(d) => compose(&d, pc, r.op),
+                    });
+                }
+                match derived {
+                    Some(d) if d == c.color => {}
+                    _ => {
+                        return Err(PackageError::ReceiptMismatch {
+                            claim: c.id.clone(),
+                        });
+                    }
+                }
+            }
             match &c.color {
                 Color::Verified { lo, hi } => {
                     if !(lo.is_finite() && hi.is_finite() && lo <= hi) {
@@ -391,6 +562,44 @@ impl EvidencePackage {
                     );
                 }
             }
+            match &c.receipt {
+                Some(r) => {
+                    let _ = write!(
+                        out,
+                        ",\"receipt\":{{\"op\":\"{}\",\"parents\":{:?}}}",
+                        op_name(r.op),
+                        r.parents
+                    );
+                }
+                None => out.push_str(",\"receipt\":null"),
+            }
+            out.push_str(",\"falsifiers\":[");
+            for (j, fr) in c.falsifiers.iter().enumerate() {
+                if j > 0 {
+                    out.push(',');
+                }
+                let _ = write!(
+                    out,
+                    "{{\"name\":\"{}\",\"attempts\":{},\"refuted\":{},\"detail\":\"{}\"}}",
+                    json_escape(&fr.name),
+                    fr.attempts,
+                    fr.refuted,
+                    json_escape(&fr.detail)
+                );
+            }
+            out.push_str("],\"anchors\":[");
+            for (j, a) in c.anchors.iter().enumerate() {
+                if j > 0 {
+                    out.push(',');
+                }
+                let _ = write!(
+                    out,
+                    "{{\"dataset_id\":\"{}\",\"content_hash\":\"{}\"}}",
+                    json_escape(&a.dataset_id),
+                    json_escape(&a.content_hash)
+                );
+            }
+            out.push(']');
             out.push('}');
         }
         out.push_str("]}");
@@ -489,6 +698,7 @@ impl core::error::Error for ParseError {}
 #[derive(Debug, Clone, PartialEq)]
 enum Jv {
     Null,
+    Bool(bool),
     Str(String),
     Num(f64),
     Arr(Vec<Jv>),
@@ -589,6 +799,22 @@ impl Jp<'_> {
                 if self.b[self.at..].starts_with(b"null") {
                     self.at += 4;
                     Ok(Jv::Null)
+                } else {
+                    Err(self.err("literal", "unknown literal"))
+                }
+            }
+            Some(b't') => {
+                if self.b[self.at..].starts_with(b"true") {
+                    self.at += 4;
+                    Ok(Jv::Bool(true))
+                } else {
+                    Err(self.err("literal", "unknown literal"))
+                }
+            }
+            Some(b'f') => {
+                if self.b[self.at..].starts_with(b"false") {
+                    self.at += 5;
+                    Ok(Jv::Bool(false))
                 } else {
                     Err(self.err("literal", "unknown literal"))
                 }
@@ -918,6 +1144,9 @@ fn parse_claim(v: Jv, index: usize) -> Result<Claim, ParseError> {
     let id = as_str(take_field(&mut f, "id", &what)?, &what)?;
     let statement = as_str(take_field(&mut f, "statement", &what)?, &what)?;
     let mut cf = obj_fields(take_field(&mut f, "color", &what)?, &what)?;
+    let receipt_v = take_field(&mut f, "receipt", &what)?;
+    let falsifiers_v = take_field(&mut f, "falsifiers", &what)?;
+    let anchors_v = take_field(&mut f, "anchors", &what)?;
     no_leftovers(&f, &what)?;
     let kind = as_str(take_field(&mut cf, "kind", &what)?, &what)?;
     let color = match kind.as_str() {
@@ -978,9 +1207,100 @@ fn parse_claim(v: Jv, index: usize) -> Result<Claim, ParseError> {
         }
     };
     no_leftovers(&cf, "claim color")?;
+    let receipt = match receipt_v {
+        Jv::Null => None,
+        v => {
+            let mut rf = obj_fields(v, &what)?;
+            let op_s = as_str(take_field(&mut rf, "op", &what)?, &what)?;
+            let op = op_parse(&op_s).ok_or_else(|| ParseError {
+                what: what.clone(),
+                why: format!("unknown receipt op {op_s:?} — fail closed"),
+            })?;
+            let parents = match take_field(&mut rf, "parents", &what)? {
+                Jv::Arr(items) => items
+                    .into_iter()
+                    .map(|v| match v {
+                        Jv::Num(n) if n.fract() == 0.0 && n >= 0.0 => Ok(n as usize),
+                        other => Err(ParseError {
+                            what: what.clone(),
+                            why: format!("receipt parent must be an index, got {other:?}"),
+                        }),
+                    })
+                    .collect::<Result<Vec<usize>, ParseError>>()?,
+                other => {
+                    return Err(ParseError {
+                        what,
+                        why: format!("receipt parents must be an array, got {other:?}"),
+                    });
+                }
+            };
+            no_leftovers(&rf, "claim receipt")?;
+            Some(CompositionReceipt { parents, op })
+        }
+    };
+    let Jv::Arr(falsifier_items) = falsifiers_v else {
+        return Err(ParseError {
+            what,
+            why: "falsifiers must be an array".to_string(),
+        });
+    };
+    let falsifiers = falsifier_items
+        .into_iter()
+        .map(|v| {
+            let mut ff = obj_fields(v, &what)?;
+            let name = as_str(take_field(&mut ff, "name", &what)?, &what)?;
+            let attempts = match take_field(&mut ff, "attempts", &what)? {
+                Jv::Num(n) if n.fract() == 0.0 && n >= 0.0 => n as u64,
+                other => {
+                    return Err(ParseError {
+                        what: what.clone(),
+                        why: format!("falsifier attempts must be a count, got {other:?}"),
+                    });
+                }
+            };
+            let refuted = match take_field(&mut ff, "refuted", &what)? {
+                Jv::Bool(b) => b,
+                other => {
+                    return Err(ParseError {
+                        what: what.clone(),
+                        why: format!("falsifier refuted must be a bool, got {other:?}"),
+                    });
+                }
+            };
+            let detail = as_str(take_field(&mut ff, "detail", &what)?, &what)?;
+            no_leftovers(&ff, "falsifier record")?;
+            Ok(FalsifierRecord {
+                name,
+                attempts,
+                refuted,
+                detail,
+            })
+        })
+        .collect::<Result<Vec<FalsifierRecord>, ParseError>>()?;
+    let Jv::Arr(anchor_items) = anchors_v else {
+        return Err(ParseError {
+            what,
+            why: "anchors must be an array".to_string(),
+        });
+    };
+    let anchors = anchor_items
+        .into_iter()
+        .map(|v| {
+            let mut af = obj_fields(v, &what)?;
+            let rec = AnchorRecord {
+                dataset_id: as_str(take_field(&mut af, "dataset_id", &what)?, &what)?,
+                content_hash: as_str(take_field(&mut af, "content_hash", &what)?, &what)?,
+            };
+            no_leftovers(&af, "anchor record")?;
+            Ok(rec)
+        })
+        .collect::<Result<Vec<AnchorRecord>, ParseError>>()?;
     Ok(Claim {
         id,
         statement,
         color,
+        receipt,
+        falsifiers,
+        anchors,
     })
 }
