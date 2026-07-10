@@ -12,6 +12,7 @@ layer = "L1"
 
 [dependencies]
 fs-math = { path = "../fs-math" }
+fs-simd = { path = "../fs-simd" }
 
 [dev-dependencies]
 fs-roofline = { path = "../fs-roofline" }

@@ -24,11 +24,15 @@
 
 use fs_math::det;
 
+mod simd_view;
+
 /// Crate version, re-exported for provenance stamping.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// A complex number (f64 re/im). Local, minimal: fs-la's future complex
-/// types can absorb this when a shared home exists.
+/// types can absorb this when a shared home exists. `repr(C)` pins the
+/// (re, im) interleaved layout the fs-simd stage kernels view as f64.
+#[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct C64 {
     /// Real part.
@@ -185,6 +189,13 @@ impl Fft {
         let mut n_cur = n;
         let mut s = 1usize;
         let mut src_is_data = true;
+        // The stage q-runs go through the fs-simd dispatch table once
+        // s ≥ 4 (bead 27d3 scope 2): the NEON kernel deinterleaves two
+        // complex elements per iteration and is BITWISE-identical to
+        // the scalar twin, which is itself the inline loop below — one
+        // semantic definition, tier-tested in fs-simd's battery, and
+        // this golden did NOT move when the capsule path landed.
+        let r4 = fs_simd::ops().r4qrun_f64;
         while n_cur >= 4 {
             let m = n_cur / 4;
             {
@@ -198,6 +209,19 @@ impl Fft {
                         (self.tw(p * s), self.tw(2 * p * s), self.tw(3 * p * s));
                     if inverse {
                         (w1, w2, w3) = (w1.conj(), w2.conj(), w3.conj());
+                    }
+                    if s >= 4 {
+                        let wv = [w1.re, w1.im, w2.re, w2.im, w3.re, w3.im];
+                        r4(
+                            simd_view::as_f64(&src[s * p..s * p + s]),
+                            simd_view::as_f64(&src[s * (p + m)..s * (p + m) + s]),
+                            simd_view::as_f64(&src[s * (p + 2 * m)..s * (p + 2 * m) + s]),
+                            simd_view::as_f64(&src[s * (p + 3 * m)..s * (p + 3 * m) + s]),
+                            simd_view::as_f64_mut(&mut dst[s * 4 * p..s * 4 * (p + 1)]),
+                            &wv,
+                            inverse,
+                        );
+                        continue;
                     }
                     for q in 0..s {
                         let a = src[q + s * p];
