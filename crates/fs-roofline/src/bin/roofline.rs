@@ -11,8 +11,31 @@
 use fs_roofline::kernels::production_registry_with_ledger;
 use fs_roofline::{MachineAxes, SECTION_14_1_TARGETS, run_is_citable, run_registry, staleness};
 
+fn json_escape(value: &str) -> String {
+    use core::fmt::Write as _;
+
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            c if c.is_control() => {
+                let _ = write!(escaped, "\\u{:04x}", u32::from(c));
+            }
+            c => escaped.push(c),
+        }
+    }
+    escaped
+}
+
 fn fail(detail: &str) -> std::process::ExitCode {
-    eprintln!("{{\"error\":\"Roofline\",\"detail\":\"{detail}\"}}");
+    eprintln!(
+        "{{\"error\":\"Roofline\",\"detail\":\"{}\"}}",
+        json_escape(detail)
+    );
     std::process::ExitCode::FAILURE
 }
 
@@ -44,7 +67,7 @@ fn main() -> std::process::ExitCode {
     let tune_ledger = match ledger_path.as_deref() {
         Some(path) => match fs_ledger::Ledger::open(path) {
             Ok(ledger) => Some(ledger),
-            Err(error) => return fail(&error.to_string().replace('"', "'")),
+            Err(error) => return fail(&error.to_string()),
         },
         None => None,
     };
@@ -63,7 +86,9 @@ fn main() -> std::process::ExitCode {
     for row in SECTION_14_1_TARGETS {
         println!(
             "{{\"target\":\"{}\",\"statement\":\"{}\",\"landed\":{}}}",
-            row.kernel, row.statement, row.landed
+            json_escape(row.kernel),
+            json_escape(row.statement),
+            row.landed
         );
     }
 
@@ -74,20 +99,39 @@ fn main() -> std::process::ExitCode {
     if let Some(db) = ledger_path {
         let ledger = match fs_ledger::Ledger::open(&db) {
             Ok(l) => l,
-            Err(e) => return fail(&e.to_string().replace('"', "'")),
+            Err(e) => return fail(&e.to_string()),
         };
         match fs_roofline::record_run(&ledger, &axes, &post_axes, &results) {
             Ok(op) => {
-                println!("{{\"ledgered\":true,\"citable\":{citable},\"op\":{op},\"db\":\"{db}\"}}");
+                println!(
+                    "{{\"ledgered\":true,\"citable\":{citable},\"op\":{op},\"db\":\"{}\"}}",
+                    json_escape(&db)
+                );
             }
-            Err(e) => return fail(&e.to_string().replace('"', "'")),
+            Err(e) => return fail(&e.to_string()),
         }
         for r in &results {
             match staleness(&ledger, &r.kernel, &r.version, axes.fingerprint) {
-                Ok(s) => println!("{{\"kernel\":\"{}\",\"staleness\":\"{s:?}\"}}", r.kernel),
-                Err(e) => return fail(&e.to_string().replace('"', "'")),
+                Ok(s) => println!(
+                    "{{\"kernel\":\"{}\",\"staleness\":\"{s:?}\"}}",
+                    json_escape(&r.kernel)
+                ),
+                Err(e) => return fail(&e.to_string()),
             }
         }
     }
     std::process::ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::json_escape;
+
+    #[test]
+    fn manual_json_fields_escape_hostile_paths_and_diagnostics() {
+        assert_eq!(
+            json_escape("ledger\\\"row\n\t\u{0001}.db"),
+            "ledger\\\\\\\"row\\n\\t\\u0001.db"
+        );
+    }
 }
