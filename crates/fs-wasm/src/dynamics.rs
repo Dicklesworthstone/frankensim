@@ -123,9 +123,17 @@ pub fn lorenz_points(steps_in: usize, dt_in: f64, rho_in: f64) -> Vec<f64> {
         out.push(s[1]);
         out.push(s[2]);
         let k1 = f(s);
-        let s2 = [s[0] + 0.5 * dt * k1[0], s[1] + 0.5 * dt * k1[1], s[2] + 0.5 * dt * k1[2]];
+        let s2 = [
+            s[0] + 0.5 * dt * k1[0],
+            s[1] + 0.5 * dt * k1[1],
+            s[2] + 0.5 * dt * k1[2],
+        ];
         let k2 = f(s2);
-        let s3 = [s[0] + 0.5 * dt * k2[0], s[1] + 0.5 * dt * k2[1], s[2] + 0.5 * dt * k2[2]];
+        let s3 = [
+            s[0] + 0.5 * dt * k2[0],
+            s[1] + 0.5 * dt * k2[1],
+            s[2] + 0.5 * dt * k2[2],
+        ];
         let k3 = f(s3);
         let s4 = [s[0] + dt * k3[0], s[1] + dt * k3[1], s[2] + dt * k3[2]];
         let k4 = f(s4);
@@ -165,13 +173,18 @@ pub fn ga_motor_orbit(npoints_in: usize, steps_in: usize) -> Vec<f64> {
     let mut seed: Vec<Point> = Vec::with_capacity(npoints);
     for i in 0..npoints {
         let a = two_pi * i as f64 / npoints as f64;
-        seed.push(Point::new(offset + seed_r * det::cos(a), 0.0, seed_r * det::sin(a)));
+        seed.push(Point::new(
+            offset + seed_r * det::cos(a),
+            0.0,
+            seed_r * det::sin(a),
+        ));
     }
 
     // Screw motor: rotate about z by dθ AND translate along z by dz per step.
     let dtheta = two_pi / 60.0; // one full turn every 60 steps
     let dz = 0.06f64;
-    let step_motor = Motor::translator(0.0, 0.0, dz).compose(&Motor::rotor([0.0, 0.0, 1.0], dtheta));
+    let step_motor =
+        Motor::translator(0.0, 0.0, dz).compose(&Motor::rotor([0.0, 0.0, 1.0], dtheta));
 
     let mut out = Vec::with_capacity(2 + steps * npoints * 3);
     out.push(npoints as f64);

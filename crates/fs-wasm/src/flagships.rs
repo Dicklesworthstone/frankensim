@@ -338,34 +338,34 @@ pub fn run_ornithoid(seed: u32) -> Vec<f64> {
     /* ---- assemble the flat output --------------------------------------- */
     let hero_p = hero_foil.nodes.len();
     let w = particles.len();
-    let mut out: Vec<f64> = Vec::new();
-    // HEADER
-    out.push(1.0); // schema
-    out.push(ns as f64);
-    out.push(hero_p as f64);
-    out.push(race.eliminated.len() as f64);
-    out.push(nx as f64);
-    out.push(ny as f64);
-    out.push(nrows as f64);
-    out.push(atlas_pop as f64);
-    out.push(atlas_gen as f64);
-    out.push(fon(adj_rel_err));
-    out.push(fon(dcl_adjoint));
-    out.push(race.winner as f64);
-    out.push(race.evaluations_used as f64);
-    out.push(race.fixed_n_equivalent as f64);
-    out.push(race.eliminated.len() as f64);
-    out.push(fon(lbm_lift));
-    out.push(fon(lbm_drag));
-    out.push(fon(panel_cl));
-    out.push(fon(lbm_steadiness));
-    out.push(fon(roa));
-    out.push(fon(coverage));
-    out.push(fon(band_hw));
-    out.push(fon(hv));
-    out.push(knee as f64);
-    out.push(fon(polish_before));
-    out.push(fon(polish_after));
+    let mut out: Vec<f64> = vec![
+        1.0, // schema
+        ns as f64,
+        hero_p as f64,
+        race.eliminated.len() as f64,
+        nx as f64,
+        ny as f64,
+        nrows as f64,
+        atlas_pop as f64,
+        atlas_gen as f64,
+        fon(adj_rel_err),
+        fon(dcl_adjoint),
+        race.winner as f64,
+        race.evaluations_used as f64,
+        race.fixed_n_equivalent as f64,
+        race.eliminated.len() as f64,
+        fon(lbm_lift),
+        fon(lbm_drag),
+        fon(panel_cl),
+        fon(lbm_steadiness),
+        fon(roa),
+        fon(coverage),
+        fon(band_hw),
+        fon(hv),
+        knee as f64,
+        fon(polish_before),
+        fon(polish_after),
+    ];
     // BLOCK A: hero section + jacobian actions
     for nd in &hero_foil.nodes {
         out.push(nd[0]);
@@ -494,11 +494,7 @@ fn knee_polish(start: &[f64]) -> (f64, f64, [f64; 5]) {
 /// winner airfoil rasterized as bounce-back walls, run with the real `fs_lbm`
 /// D2Q9 kernel. Returns `(field, lift, drag, steadiness, cv_box)` where `field`
 /// is the `ny·nx` row-major `|u|` map (`-1` at walls).
-fn ornithoid_lbm(
-    c: &OrnithCandidate,
-    nx: usize,
-    ny: usize,
-) -> (Vec<f64>, f64, f64, f64, [f64; 4]) {
+fn ornithoid_lbm(c: &OrnithCandidate, nx: usize, ny: usize) -> (Vec<f64>, f64, f64, f64, [f64; 4]) {
     let tau = 0.56;
     let u0 = 0.06;
     let nu = (tau - 0.5) / 3.0;
@@ -538,10 +534,10 @@ fn ornithoid_lbm(
 
     let velfield = |g: &Grid| -> Vec<f64> {
         let mut v = vec![-1.0f64; nx * ny];
-        for i in 0..nx * ny {
+        for (i, vi) in v.iter_mut().enumerate() {
             if matches!(g.flags[i], Cell::Fluid) {
                 let m = g.moments(i);
-                v[i] = m.u[0].hypot(m.u[1]);
+                *vi = m.u[0].hypot(m.u[1]);
             }
         }
         v
@@ -748,27 +744,28 @@ pub fn run_vessel(lip_x1000: u32) -> Vec<f64> {
     let transmittance = render_thin_slab(&neutral.mass_field, nx, ny, render_res);
 
     /* ---- assemble the flat output --------------------------------------- */
-    let mut out: Vec<f64> = Vec::new();
-    out.push(1.0); // version
-    out.push(p as f64);
-    out.push(s as f64);
-    out.push(m as f64);
-    out.push(nx as f64);
-    out.push(ny as f64);
-    out.push(frames as f64);
-    out.push(render_res as f64);
-    out.push(l as f64);
-    out.push(bcount as f64);
-    out.push(fon(growth_minmax));
-    out.push(fon(spectral_offnom));
-    out.push(fon(neutral.drift));
-    out.push(fon(neutral.poured));
-    out.push(fon(contact_poured_band));
-    out.push(fon(contact_dribble_band));
-    out.push(neutral.fragments as f64);
-    out.push(fon(cvar_robust_offband));
-    out.push(fon(cvar_nominal_offband));
-    out.push(0.0); // reserved
+    let mut out: Vec<f64> = vec![
+        1.0, // version
+        p as f64,
+        s as f64,
+        m as f64,
+        nx as f64,
+        ny as f64,
+        frames as f64,
+        render_res as f64,
+        l as f64,
+        bcount as f64,
+        fon(growth_minmax),
+        fon(spectral_offnom),
+        fon(neutral.drift),
+        fon(neutral.poured),
+        fon(contact_poured_band),
+        fon(contact_dribble_band),
+        neutral.fragments as f64,
+        fon(cvar_robust_offband),
+        fon(cvar_nominal_offband),
+        0.0, // reserved
+    ];
     // BLOCK 1 PROFILE
     for &(z, r) in &profile {
         out.push(z);
@@ -864,8 +861,8 @@ fn pour_inline(
     let cell_mass = |s: &FreeSurface| -> Vec<f64> {
         let n = s.grid.nx * s.grid.ny;
         let mut v = vec![0.0f64; n];
-        for i in 0..n {
-            v[i] = match s.grid.flags[i] {
+        for (i, vi) in v.iter_mut().enumerate() {
+            *vi = match s.grid.flags[i] {
                 Cell::Fluid => s.grid.f[i].iter().sum(),
                 Cell::Interface => s.mass[i],
                 _ => 0.0,
@@ -1294,11 +1291,13 @@ fn frame_size_and_snap(
             .copied()
             .find(|&a| a >= need)
             .unwrap_or(f64::NAN);
-        let stress_ok = area_catalog.is_finite() && q.abs() / area_catalog <= sigma_y * (1.0 + 1e-9);
+        let stress_ok =
+            area_catalog.is_finite() && q.abs() / area_catalog <= sigma_y * (1.0 + 1e-9);
         let buckling_ok = q >= 0.0
             || (area_catalog.is_finite()
                 && q.abs()
-                    <= std::f64::consts::PI.powi(2) * youngs * area_catalog * area_catalog / 12.0
+                    <= std::f64::consts::PI.powi(2) * youngs * area_catalog * area_catalog
+                        / 12.0
                         / (l * l)
                         * (1.0 + 1e-9));
         all_pass &= stress_ok && buckling_ok;
@@ -1459,12 +1458,11 @@ pub fn run_frame(seed: u32) -> Vec<f64> {
     let base = fs_frame::StoryParams::default();
     // guard: a realization error would panic the real stage APIs (trap on
     // wasm) — probe once and bail to a NaN body if the ensemble is malformed.
-    if ensemble.realize(0).is_err() {
+    let Ok(rep0) = ensemble.realize(0) else {
         return frame_nan_body(seed);
-    }
+    };
 
     // ---- STAGE 3: TIME HISTORY (member 0, faithful hysteresis) ----------
-    let rep0 = ensemble.realize(0).expect("probed above");
     let ag = rep0.values.clone();
     let (xs, vs, k0) = story_history(&base, &ag, dt);
     let ns_hist = ag.len();
@@ -1558,7 +1556,11 @@ pub fn run_frame(seed: u32) -> Vec<f64> {
         layout.push(a as f64);
         layout.push(b as f64);
         layout.push(fon(force(k)));
-        layout.push(if force(k).abs() > active_tol { 1.0 } else { 0.0 });
+        layout.push(if force(k).abs() > active_tol {
+            1.0
+        } else {
+            0.0
+        });
     }
 
     let mut sizing: Vec<f64> = Vec::new();
@@ -1576,12 +1578,7 @@ pub fn run_frame(seed: u32) -> Vec<f64> {
         sizing.push(fon(r.area_catalog));
     }
 
-    let mut history: Vec<f64> = Vec::new();
-    history.push(fon(peak));
-    history.push(dt);
-    history.push(ns_hist as f64);
-    history.push(fon(k0));
-    history.push(fon(vy));
+    let mut history: Vec<f64> = vec![fon(peak), dt, ns_hist as f64, fon(k0), fon(vy)];
     history.extend(ag.iter().map(|&v| fon(v)));
     history.extend(xs.iter().map(|&v| fon(v)));
     history.extend(vs.iter().map(|&v| fon(v)));
@@ -1716,7 +1713,10 @@ mod tests {
         );
         assert!(adj_rel_err < 1e-5, "adj_rel_err {adj_rel_err:e}");
         assert!(nrows >= 12, "atlas rows {nrows}");
-        assert!(polish_after > polish_before, "polish {polish_before} !> {polish_after}");
+        assert!(
+            polish_after > polish_before,
+            "polish {polish_before} !> {polish_after}"
+        );
     }
 
     #[test]
@@ -1748,8 +1748,14 @@ mod tests {
             robust_offband < nominal_offband,
             "robust_offband {robust_offband} !< nominal_offband {nominal_offband}"
         );
-        assert!(tmin >= 0.0 && tmax <= 1.0, "transmittance out of [0,1]: [{tmin},{tmax}]");
-        assert!(tmax - tmin > 0.05, "transmittance range too small: [{tmin},{tmax}]");
+        assert!(
+            tmin >= 0.0 && tmax <= 1.0,
+            "transmittance out of [0,1]: [{tmin},{tmax}]"
+        );
+        assert!(
+            tmax - tmin > 0.05,
+            "transmittance range too small: [{tmin},{tmax}]"
+        );
     }
 
     #[test]

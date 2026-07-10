@@ -61,10 +61,11 @@ None. WASM-only dependencies are target-gated under `cfg(target_arch =
 
 ## Conformance tests
 
-No dedicated `fs-wasm` tests yet. Current verification is native cargo
-check/build of the nested workspace and any wasm32 build lane provided by
-DSR or site automation. This contract exists so the repository-wide
-contract checker can track the no-test boundary explicitly.
+Native unit tests in the nested workspace exercise root demos, campaign
+defaults, geometry/PDE/deep modules, and flagship headline/determinism cases.
+Current verification is native cargo test/clippy of the nested workspace plus
+any wasm32 build lane provided by DSR or site automation. The wasm32 browser
+surface itself remains a build/smoke lane rather than a browser-E2E test suite.
 
 ## No-claim boundaries
 

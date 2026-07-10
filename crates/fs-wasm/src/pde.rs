@@ -12,7 +12,7 @@
 //! Every input is clamped and every loop is capped: nothing here can trap.
 
 use crate::{cg, dot, laplacian_5pt};
-use fs_fft::{Fft, C64};
+use fs_fft::{C64, Fft};
 use fs_math::det;
 use fs_rand::StreamKey;
 use fs_sparse::{Coo, Csr};
@@ -254,9 +254,9 @@ pub fn topopt_frames(nx_in: usize, ny_in: usize, iters_in: usize, volfrac_in: f6
         }
         let a = coo.assemble();
         let mut inv_diag = vec![1.0f64; nf];
-        for i in 0..nf {
+        for (i, inv) in inv_diag.iter_mut().enumerate() {
             let d = a.get(i, i);
-            inv_diag[i] = if d.abs() > 1e-30 { 1.0 / d } else { 1.0 };
+            *inv = if d.abs() > 1e-30 { 1.0 / d } else { 1.0 };
         }
         let u_red = pcg(&a, &f_red, &inv_diag, 2000, 1e-7);
         for slot in u.iter_mut() {
@@ -366,7 +366,14 @@ fn fft2d(data: &mut [C64], n: usize, plan: &Fft, inverse: bool) {
 
 /// `Δu` on the `n×n` periodic grid, evaluated spectrally: FFT → multiply by
 /// `−(kx²+ky²)` → inverse FFT, taking the real part.
-fn spectral_laplacian(u: &[f64], n: usize, plan: &Fft, kv: &[f64], cbuf: &mut [C64], out: &mut [f64]) {
+fn spectral_laplacian(
+    u: &[f64],
+    n: usize,
+    plan: &Fft,
+    kv: &[f64],
+    cbuf: &mut [C64],
+    out: &mut [f64],
+) {
     let m = n * n;
     for i in 0..m {
         cbuf[i] = C64::new(u[i], 0.0);
@@ -374,8 +381,8 @@ fn spectral_laplacian(u: &[f64], n: usize, plan: &Fft, kv: &[f64], cbuf: &mut [C
     fft2d(cbuf, n, plan, false);
     for row in 0..n {
         let ky2 = kv[row] * kv[row];
-        for col in 0..n {
-            let mult = -(kv[col] * kv[col] + ky2);
+        for (col, &kx) in kv.iter().enumerate().take(n) {
+            let mult = -(kx * kx + ky2);
             let idx = row * n + col;
             cbuf[idx] = C64::new(cbuf[idx].re * mult, cbuf[idx].im * mult);
         }
@@ -408,7 +415,13 @@ pub fn wave2d_frames(n_in: usize, frames_in: usize, steps_per_frame_in: usize) -
 
     // Integer wavenumbers on the 2π-periodic domain.
     let kv: Vec<f64> = (0..n)
-        .map(|j| if j <= n / 2 { j as f64 } else { j as f64 - n as f64 })
+        .map(|j| {
+            if j <= n / 2 {
+                j as f64
+            } else {
+                j as f64 - n as f64
+            }
+        })
         .collect();
     let c = 1.0f64;
     let kmax = (n as f64) / 2.0;
@@ -609,7 +622,8 @@ pub fn fluid_frames(n_in: usize, frames_in: usize) -> Vec<f64> {
                 let im = i.saturating_sub(1);
                 let jp = (j + 1).min(n - 1);
                 let jm = j.saturating_sub(1);
-                div[j * n + i] = 0.5 * ((vx[j * n + ip] - vx[j * n + im]) + (vy[jp * n + i] - vy[jm * n + i]));
+                div[j * n + i] =
+                    0.5 * ((vx[j * n + ip] - vx[j * n + im]) + (vy[jp * n + i] - vy[jm * n + i]));
             }
         }
         // Pressure: solve A p = −div (real fs-sparse CG).

@@ -79,7 +79,11 @@ fn field_normal(kind: u32, g: [f64; 3]) -> [f64; 3] {
 /// Linear crossing point on the segment `pa→pb` where `φ` reaches `lev`.
 fn interp_edge(pa: [f64; 3], pb: [f64; 3], va: f64, vb: f64, lev: f64) -> [f64; 3] {
     let denom = vb - va;
-    let mut t = if denom.abs() > 1e-12 { (lev - va) / denom } else { 0.5 };
+    let mut t = if denom.abs() > 1e-12 {
+        (lev - va) / denom
+    } else {
+        0.5
+    };
     t = t.clamp(0.0, 1.0);
     [
         pa[0] + t * (pb[0] - pa[0]),
@@ -106,13 +110,19 @@ fn emit_tri(out: &mut Vec<f64>, kind: u32, a: [f64; 3], b: [f64; 3], c: [f64; 3]
 
 /// Polygonize one tetrahedron generically from its four corner signs relative
 /// to `lev`. Returns the number of triangles emitted (0, 1, or 2).
-fn polygonise_tet(p: &[[f64; 3]; 4], val: &[f64; 4], lev: f64, kind: u32, out: &mut Vec<f64>) -> usize {
+fn polygonise_tet(
+    p: &[[f64; 3]; 4],
+    val: &[f64; 4],
+    lev: f64,
+    kind: u32,
+    out: &mut Vec<f64>,
+) -> usize {
     let mut inside = [0usize; 4];
     let mut n_in = 0usize;
     let mut outside = [0usize; 4];
     let mut n_out = 0usize;
-    for i in 0..4 {
-        if val[i] < lev {
+    for (i, &v) in val.iter().enumerate() {
+        if v < lev {
             inside[n_in] = i;
             n_in += 1;
         } else {
@@ -285,7 +295,10 @@ fn sdf_scene(kind: u32, x: f64, y: f64, z: f64, t: f64) -> f64 {
             let cx = 0.4 * det::cos(ang);
             let cy = 0.4 * det::sin(ang);
             let s = sd_sphere([x - cx, y - cy, z], 0.45);
-            let b = sd_box([x + 0.5 * cx, y, z - 0.2 * det::sin(ang)], [0.35, 0.35, 0.35]);
+            let b = sd_box(
+                [x + 0.5 * cx, y, z - 0.2 * det::sin(ang)],
+                [0.35, 0.35, 0.35],
+            );
             smin(s, b, 0.25)
         }
         1 => {

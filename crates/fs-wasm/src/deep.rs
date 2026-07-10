@@ -266,10 +266,10 @@ pub fn navier_stokes_cavity(
                 let ixm = ix.saturating_sub(1);
                 let iyp = (iy + 1).min(grid - 1);
                 let iym = iy.saturating_sub(1);
-                let dvdx = (vv[iy * grid + ixp] - vv[iy * grid + ixm])
-                    / (((ixp - ixm).max(1)) as f64 * h);
-                let dudy = (uu[iyp * grid + ix] - uu[iym * grid + ix])
-                    / (((iyp - iym).max(1)) as f64 * h);
+                let dvdx =
+                    (vv[iy * grid + ixp] - vv[iy * grid + ixm]) / (((ixp - ixm).max(1)) as f64 * h);
+                let dudy =
+                    (uu[iyp * grid + ix] - uu[iym * grid + ix]) / (((iyp - iym).max(1)) as f64 * h);
                 out.push(dvdx - dudy);
             }
         }
@@ -720,8 +720,8 @@ pub fn ffd_deform(grid_in: usize, controls_in: usize, amp: f64, mode: u32) -> Ve
     // Control-point offsets per mode (in-plane only).
     let offset = |u: f64, v: f64| -> (f64, f64) {
         match mode {
-            0 => (a * v, 0.0),                              // shear: top slides in x
-            1 => (a * (u - 0.5), a * (v - 0.5)),            // bulge: push out from center
+            0 => (a * v, 0.0),                   // shear: top slides in x
+            1 => (a * (u - 0.5), a * (v - 0.5)), // bulge: push out from center
             2 => {
                 // twist: rotate control node about the center by angle ∝ v
                 let ang = a * (v - 0.5) * 2.0;
@@ -793,7 +793,11 @@ pub fn ffd_deform(grid_in: usize, controls_in: usize, amp: f64, mode: u32) -> Ve
         }
     }
     out.push(if foldover { 1.0 } else { 0.0 });
-    out.push(if min_det.is_finite() { min_det } else { f64::NAN });
+    out.push(if min_det.is_finite() {
+        min_det
+    } else {
+        f64::NAN
+    });
     out
 }
 

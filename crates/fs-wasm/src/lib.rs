@@ -18,13 +18,13 @@
 //! input is clamped to a safe range and every fallible kernel result is
 //! folded to `NaN` / an empty vector — nothing here can trap at runtime.
 
-use fs_ad::{second_directional, Real};
-use fs_cheb::{orr_sommerfeld, Cheb1};
+use fs_ad::{Real, second_directional};
+use fs_cheb::{Cheb1, orr_sommerfeld};
 use fs_fft::RealFft;
-use fs_ivl::{orient2d, Interval, Sign, TaylorModel1};
+use fs_ivl::{Interval, Sign, TaylorModel1, orient2d};
 use fs_la::{eigen::jacobi_eigh, rand_nla::rsvd};
 use fs_math::{det, eft::two_sum};
-use fs_rand::{qmc::Sobol, StreamKey};
+use fs_rand::{StreamKey, qmc::Sobol};
 use fs_sparse::{Coo, Csr};
 
 // ---------------------------------------------------------------------------
@@ -426,7 +426,11 @@ pub fn randomized_svd(n_in: usize, rank_in: usize, seed_in: u32) -> Vec<f64> {
             den += a[i * n + j] * a[i * n + j];
         }
     }
-    let relerr = if den > 0.0 { (num / den).sqrt() } else { f64::NAN };
+    let relerr = if den > 0.0 {
+        (num / den).sqrt()
+    } else {
+        f64::NAN
+    };
     let mut out = Vec::with_capacity(2 * k + 1);
     for i in 0..k {
         out.push(sv.get(i).copied().unwrap_or(0.0));
@@ -681,9 +685,7 @@ pub fn compensated_sum(count_in: usize, log10_big_in: i32) -> Vec<f64> {
 
     let mut xs = Vec::with_capacity(count + 2);
     xs.push(big);
-    for _ in 0..count {
-        xs.push(1.0);
-    }
+    xs.extend(std::iter::repeat_n(1.0, count));
     xs.push(-big);
 
     // Naive left-to-right accumulation.

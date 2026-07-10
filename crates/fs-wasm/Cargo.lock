@@ -714,6 +714,7 @@ name = "fs-fft"
 version = "0.0.1"
 dependencies = [
  "fs-math",
+ "fs-simd",
 ]
 
 [[package]]
@@ -802,6 +803,7 @@ version = "0.0.1"
 dependencies = [
  "fs-math",
  "fs-rand",
+ "fs-simd",
  "fs-soa",
 ]
 
@@ -987,6 +989,13 @@ dependencies = [
 [[package]]
 name = "fs-shapeprog"
 version = "0.0.1"
+
+[[package]]
+name = "fs-simd"
+version = "0.0.1"
+dependencies = [
+ "fs-substrate",
+]
 
 [[package]]
 name = "fs-soa"

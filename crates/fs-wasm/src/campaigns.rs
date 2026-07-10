@@ -41,8 +41,8 @@ use fs_toleralloc::{Feature, allocate};
 use fs_tropical::TaskDag;
 use fs_viz::Grid2;
 use fs_voi::{
-    Action, ActionKind, DesignEstimate, Recommendation, Uncertainty, evpi, ranking_flip_probability,
-    recommend,
+    Action, ActionKind, DesignEstimate, Recommendation, Uncertainty, evpi,
+    ranking_flip_probability, recommend,
 };
 
 /* ======================================================================= */
@@ -192,11 +192,13 @@ pub fn metamatcert(n: usize, points: usize, rmax: f64) -> Vec<f64> {
     } else {
         0.0
     });
-    out.push(if matches!(report.stability_color, Color::Verified { .. }) {
-        1.0
-    } else {
-        0.0
-    });
+    out.push(
+        if matches!(report.stability_color, Color::Verified { .. }) {
+            1.0
+        } else {
+            0.0
+        },
+    );
     for c in &report.frontier {
         out.push(c.r);
         out.push(fon(c.density));
@@ -972,7 +974,12 @@ pub fn sensorforge(threshold: f64, max_sensors: usize, b_prior_mean: f64) -> Vec
         })
         .collect();
     let alloc: std::collections::BTreeMap<String, f64> = allocate(&features, 0.02, 3.0)
-        .map(|a| a.items.into_iter().map(|it| (it.name, it.tolerance)).collect())
+        .map(|a| {
+            a.items
+                .into_iter()
+                .map(|it| (it.name, it.tolerance))
+                .collect()
+        })
         .unwrap_or_default();
 
     let s = placements.len();
@@ -1078,13 +1085,9 @@ pub fn neuroshape(lift: f64, ring_r: f64, inner: f64) -> Vec<f64> {
 
     let win_lo = -(ring_r + 0.5);
     let win_hi = ring_r + 0.5;
-    let field = Grid2::from_fn(
-        grid_n,
-        grid_n,
-        [win_lo, win_lo],
-        [win_hi, win_hi],
-        |p| net.eval(&[p[0], p[1]]),
-    );
+    let field = Grid2::from_fn(grid_n, grid_n, [win_lo, win_lo], [win_hi, win_hi], |p| {
+        net.eval(&[p[0], p[1]])
+    });
 
     let mut out = Vec::with_capacity(24 + grid_n * grid_n);
     out.push(grid_n as f64);
@@ -1216,8 +1219,12 @@ pub fn grammarforge(match_tol: f64, simplify_tol: f64) -> Vec<f64> {
     let mut max_certified_error = 0.0_f64;
     let mut simplification_sound = true;
     for e in archive.elites() {
-        let prog =
-            fs_grammar_e2e::build_program(e.solution[0], e.solution[1], e.solution[2], e.solution[3]);
+        let prog = fs_grammar_e2e::build_program(
+            e.solution[0],
+            e.solution[1],
+            e.solution[2],
+            e.solution[3],
+        );
         let before = prog.size();
         let simp = simplify(&prog, simplify_tol);
         let after = simp.program.size();
@@ -1245,12 +1252,15 @@ pub fn grammarforge(match_tol: f64, simplify_tol: f64) -> Vec<f64> {
                 best.solution[2],
                 best.solution[3],
             ];
-            (bd, bp, fab.satisfied(best.solution[0].min(best.solution[1])))
+            (
+                bd,
+                bp,
+                fab.satisfied(best.solution[0].min(best.solution[1])),
+            )
         }
         None => (f64::NAN, [f64::NAN; 4], false),
     };
-    let headline_verified =
-        best_disc <= match_tol && best_fab_ok && simplification_sound;
+    let headline_verified = best_disc <= match_tol && best_fab_ok && simplification_sound;
 
     // Representative shape: best program z=0 slice, 64×64 over [-2,2]².
     let repr_n = 64usize;
@@ -1458,7 +1468,11 @@ fn flow_certify(reynolds: f64, ny: usize, u_lattice: f64, steps: usize, tol: f64
         max_err = max_err.max((u - exact).abs());
         analytic.push(exact);
     }
-    let profile_error = if peak > 1e-12 { max_err / peak } else { max_err };
+    let profile_error = if peak > 1e-12 {
+        max_err / peak
+    } else {
+        max_err
+    };
 
     FlowPoint {
         reynolds,
@@ -1619,10 +1633,7 @@ mod tests {
         // c11 first (r=0) ~3.5, last (r=0.40) ~0.8; decreasing.
         let first_c11 = v[7 + 2];
         let last_c11 = v[7 + 6 * (p - 1) + 2];
-        assert!(
-            first_c11 > 3.0 && first_c11 < 4.0,
-            "first c11 {first_c11}"
-        );
+        assert!(first_c11 > 3.0 && first_c11 < 4.0, "first c11 {first_c11}");
         assert!(last_c11 > 0.5 && last_c11 < 1.2, "last c11 {last_c11}");
         assert!(first_c11 > last_c11, "c11 decreasing");
     }
@@ -1712,7 +1723,7 @@ mod tests {
         assert!((v[1] - 2.9957).abs() < 0.001, "ville {}", v[1]);
         assert!((v[3] - 3.0).abs() < 0.1, "best_x {}", v[3]);
         assert!((v[4] + 0.45).abs() < 0.1, "best_value {}", v[4]);
-        assert!(iters >= 8 && iters <= 16, "iters {iters}");
+        assert!((8..=16).contains(&iters), "iters {iters}");
     }
 
     #[test]
