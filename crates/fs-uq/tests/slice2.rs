@@ -185,6 +185,16 @@ fn uq_005_cvar_and_adaptive_mlmc_rate_recovery() {
         (c - 95.5).abs() < 0.6,
         "CVaR_0.9 of 1..100 is the top-decile mean: {c}"
     );
+    // Anti-conservative-bias regression (bead zsvk): for NON-integer n·β the
+    // proper empirical CVaR applies a fractional weight to the boundary order
+    // statistic. A plain top-k mean returns 2.0 here (UNDER-reporting the risk);
+    // the correct CVaR_0.85 is (0.5·1 + 3)/1.5 = 7/3.
+    let tail = vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 3.0];
+    let cv = cvar(&tail, 0.85);
+    assert!(
+        (cv - 7.0 / 3.0).abs() < 1e-12,
+        "CVaR_0.85 must use the fractional boundary weight (2.333…), got {cv}"
+    );
     // Adaptive MLMC on a synthetic with KNOWN rates: mean_l = 4^-l,
     // var_l = 8^-l (alpha = 2, beta = 3). The estimator must recover
     // the rates, add levels until the bias fits, and land near the
