@@ -203,11 +203,11 @@ where
             let m = cur.midpoint();
             // Adjacent floats and any future midpoint policy must not be able
             // to reproduce the parent box indefinitely.
-            if !(m.is_finite() && cur.lo() < m && m < cur.hi()) {
-                out.push(RootBox::Possible(cur));
-            } else {
+            if m.is_finite() && cur.lo() < m && m < cur.hi() {
                 stack.push(Interval::new(cur.lo(), m));
                 stack.push(Interval::new(m, cur.hi()));
+            } else {
+                out.push(RootBox::Possible(cur));
             }
         }
     }

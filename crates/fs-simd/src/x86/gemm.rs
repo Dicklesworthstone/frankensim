@@ -18,9 +18,7 @@
 #![allow(unsafe_code)] // registered capsule — see SAFETY.md beside this file
 
 #[cfg(target_arch = "x86_64")]
-use core::arch::x86_64::{
-    _mm256_fmadd_pd, _mm256_loadu_pd, _mm256_setzero_pd, _mm256_storeu_pd,
-};
+use core::arch::x86_64::{_mm256_fmadd_pd, _mm256_loadu_pd, _mm256_setzero_pd, _mm256_storeu_pd};
 
 /// Safe façade: AVX2+FMA packed 4×4 batched-GEMM tile, else the scalar twin.
 /// Unconditionally safe — the feature is re-checked here at runtime.

@@ -31,7 +31,7 @@ pub fn btile4x4pf32(
             && dst.len() >= 16 * mb,
         "btile4x4pf32 packed bounds (programmer error)"
     );
-    if mb % 4 != 0 {
+    if !mb.is_multiple_of(4) {
         crate::scalar::btile4x4pf32(a, b, i0, j0, k, mb, dst);
         return;
     }
