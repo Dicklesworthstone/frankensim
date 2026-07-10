@@ -43,6 +43,10 @@ pub type Mk8x4 = fn(&[f64], &[f64], usize, &mut [[f64; 4]; 8]);
 /// (a, b, i0, j0, stride, k, m0, mb, dst) — plane-SoA layout.
 pub type Btile4x4 = fn(&[f64], &[f64], usize, usize, usize, usize, usize, usize, &mut [f64]);
 
+/// Packed batched-GEMM 4×4 tile signature
+/// (a_pack, b_pack, i0, j0, k, mb, dst) — l-contiguous packed layout.
+pub type Btile4x4P = fn(&[f64], &[f64], usize, usize, usize, usize, &mut [f64]);
+
 /// Radix-4 Stockham q-run butterfly signature
 /// (a, b, c, d, out, twiddles [w1re,w1im,w2re,w2im,w3re,w3im], inverse)
 /// over interleaved complex rows.
@@ -73,6 +77,10 @@ pub struct Ops {
     /// (lanes = independent matrices): BITWISE across tiers (zero
     /// start, l-ascending fused accumulate per element).
     pub btile4x4_f64: Btile4x4,
+    /// PACKED batched-GEMM 4×4 tile over l-contiguous operands (A
+    /// i-major, B j-major): both walks stride `mb` — BITWISE across
+    /// tiers (zero start, l-ascending fused accumulate).
+    pub btile4x4p_f64: Btile4x4P,
     /// Radix-4 Stockham q-run butterfly over interleaved complex rows
     /// (fs-fft's stage kernel): BITWISE across tiers — every lane op is
     /// the scalar twin's exact per-element composition.
@@ -96,6 +104,7 @@ const SCALAR_OPS: Ops = Ops {
     sum: scalar::sum,
     mk8x4_f64: scalar::mk8x4_f64,
     btile4x4_f64: scalar::btile4x4_f64,
+    btile4x4p_f64: scalar::btile4x4p_f64,
     r4qrun_f64: scalar::r4qrun_f64,
 };
 
@@ -118,6 +127,7 @@ fn build_table() -> Ops {
                 sum: neon::sum,
                 mk8x4_f64: neon::mk8x4_f64,
                 btile4x4_f64: neon::btile4x4_f64,
+                btile4x4p_f64: neon::gemm::btile4x4p_f64,
                 r4qrun_f64: neon::r4qrun_f64,
             },
             // x86 capsule v1 covers axpy/dot/sum (the <300-line capsule cap
@@ -136,6 +146,7 @@ fn build_table() -> Ops {
                 // hardware; btile stays the twin until 9ekv's consumer.
                 mk8x4_f64: x86::mk8x4_f64,
                 btile4x4_f64: scalar::btile4x4_f64,
+                btile4x4p_f64: scalar::btile4x4p_f64,
                 r4qrun_f64: scalar::r4qrun_f64,
             },
             _ => SCALAR_OPS,
@@ -304,6 +315,28 @@ mod tests {
                     t.tier
                 );
             }
+        }
+        // btile4x4p: bitwise vs twin over l-contiguous packed operands,
+        // even and odd lane counts, offset tiles.
+        for &(k, i0, j0, mb) in &[
+            (4usize, 0usize, 0usize, 8usize),
+            (6, 1, 0, 5),
+            (12, 2, 4, 16),
+        ] {
+            let a = gen_vals((i0 + 4) * k * mb, 0xC0 ^ k as u64);
+            let b = gen_vals((j0 + 4) * k * mb, 0xC1 ^ mb as u64);
+            let mut d_tier = vec![0.0f64; 16 * mb];
+            let mut d_ref = vec![0.0f64; 16 * mb];
+            (t.btile4x4p_f64)(&a, &b, i0, j0, k, mb, &mut d_tier);
+            scalar::btile4x4p_f64(&a, &b, i0, j0, k, mb, &mut d_ref);
+            assert!(
+                d_tier
+                    .iter()
+                    .zip(&d_ref)
+                    .all(|(x, y)| x.to_bits() == y.to_bits()),
+                "btile4x4p diverged from twin at k {k} mb {mb} (tier {:?})",
+                t.tier
+            );
         }
         // r4qrun: bitwise vs twin over interleaved complex runs — run
         // lengths cover the twin-delegation path (s2 % 4 != 0), both

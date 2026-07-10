@@ -187,3 +187,46 @@ pub fn r4qrun_f64(
         o3[i1] = u3re.mul_add(w[5], u3im * w[4]);
     }
 }
+
+/// PACKED batched-GEMM 4×4 tile microkernel (scalar twin, bead 9ekv
+/// slice 2) over l-CONTIGUOUS packed operands: A packed i-major
+/// (`a[(i·k + l)·mb + lane]`), B packed j-major (`b[(j·k + l)·mb +
+/// lane]`), so BOTH walks advance by `mb` per l — contiguous streams,
+/// no strided-plane TLB pressure. Per element identical to
+/// [`btile4x4_f64`]: zero start, l-ascending fused accumulate —
+/// capsules must match bitwise. `dst` is 16 rows of `mb` (row t =
+/// tile (t/4, t%4)).
+///
+/// # Panics
+/// If the packed buffers or `dst` are too short for the tile.
+#[allow(clippy::too_many_arguments)] // packed-layout bundle (see fs-la::batched)
+pub fn btile4x4p_f64(
+    a: &[f64],
+    b: &[f64],
+    i0: usize,
+    j0: usize,
+    k: usize,
+    mb: usize,
+    dst: &mut [f64],
+) {
+    assert!(
+        k >= 1
+            && (i0 + 3) * k * mb + k * mb <= a.len()
+            && (j0 + 3) * k * mb + k * mb <= b.len()
+            && dst.len() >= 16 * mb,
+        "btile4x4p packed bounds (programmer error)"
+    );
+    for ti in 0..4 {
+        for tj in 0..4 {
+            let drow = &mut dst[(ti * 4 + tj) * mb..(ti * 4 + tj + 1) * mb];
+            drow.fill(0.0);
+            for l in 0..k {
+                let ap = &a[((i0 + ti) * k + l) * mb..][..mb];
+                let bp = &b[((j0 + tj) * k + l) * mb..][..mb];
+                for ((s, &am), &bm) in drow.iter_mut().zip(ap).zip(bp) {
+                    *s = am.mul_add(bm, *s);
+                }
+            }
+        }
+    }
+}

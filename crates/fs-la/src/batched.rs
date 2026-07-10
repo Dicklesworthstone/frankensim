@@ -299,37 +299,50 @@ fn gemm_sized<const K: usize>(alpha: f64, a: &BatchMat, b: &BatchMat, beta: f64,
 /// streaming the whole batch from memory k² times. PURE lane
 /// partitioning — per-element operation order is untouched, so this is
 /// bit-neutral (the membership-invariance contract, tested).
-const MBLK: usize = 256;
+///
+/// TUNED EMPIRICALLY on M4 Pro (release, median-of-9, batched_perf):
+/// 256 → 7–18% of peak (the 16·256·8 B = 32 KB accumulator tile plus
+/// streamed planes overran L1 residency); 128 worse; 64 → 9–23%;
+/// 32 → 9–26% (best all-rounder); 16 ≈ 32 but weaker at k = 24/48.
+/// The remaining gap to the 60% band lives in the btile kernel's
+/// inner loop (the fs-simd capsule lane), not in this partitioning.
+const MBLK: usize = 32;
 
 fn gemm_generic(alpha: f64, a: &BatchMat, b: &BatchMat, beta: f64, c: &mut BatchMat, k: usize) {
     let n = a.n;
-    let stride = a.stride;
-    debug_assert_eq!(stride, b.stride, "equal batch => equal stride");
-    let btile = fs_simd::ops().btile4x4_f64;
+    let btile = fs_simd::ops().btile4x4p_f64;
     let mut tile = vec![0.0f64; 16 * MBLK];
     let mut acc = [0.0f64; MBLK];
+    // PACKED operands (bead 9ekv slice 2): per chunk, copy the lane
+    // block of every plane into l-CONTIGUOUS scratch — A i-major
+    // (a_pack[(i·k + l)·mb]), B j-major (b_pack[(j·k + l)·mb]) — so the
+    // tile kernel's walks stream sequentially instead of jumping
+    // k·stride pages (measured TLB/latency bound). Packing is 2k²·mb
+    // copies against 2k³·mb flops (1/k overhead) and is PURE DATA
+    // MOVEMENT: per-element operation order is unchanged, so outputs
+    // stay bitwise-identical (membership invariance + golden, tested).
+    let mut a_pack = vec![0.0f64; k * k * MBLK];
+    let mut b_pack = vec![0.0f64; k * k * MBLK];
     let kt = k - k % 4; // tile-covered leading square
     let mut m0 = 0;
     while m0 < n {
         let mb = MBLK.min(n - m0);
-        // 4×4 entry tiles through the fs-simd microkernel: 16 register-
-        // resident accumulator lanes per tile, FMA-bound instead of
-        // accumulator-round-trip-bound. Bitwise path (capsule == twin
-        // == the tail loop below, per element).
+        for i in 0..k {
+            for l in 0..k {
+                a_pack[(i * k + l) * mb..(i * k + l) * mb + mb]
+                    .copy_from_slice(&a.plane(i, l)[m0..m0 + mb]);
+            }
+        }
+        for j in 0..k {
+            for l in 0..k {
+                b_pack[(j * k + l) * mb..(j * k + l) * mb + mb]
+                    .copy_from_slice(&b.plane(l, j)[m0..m0 + mb]);
+            }
+        }
         for i0 in (0..kt).step_by(4) {
             for j0 in (0..kt).step_by(4) {
                 let td = &mut tile[..16 * mb];
-                btile(
-                    a.data.as_slice(),
-                    b.data.as_slice(),
-                    i0,
-                    j0,
-                    stride,
-                    k,
-                    m0,
-                    mb,
-                    td,
-                );
+                btile(&a_pack, &b_pack, i0, j0, k, mb, td);
                 for ti in 0..4 {
                     for tj in 0..4 {
                         let trow = &td[(ti * 4 + tj) * mb..(ti * 4 + tj + 1) * mb];
@@ -339,7 +352,8 @@ fn gemm_generic(alpha: f64, a: &BatchMat, b: &BatchMat, beta: f64, c: &mut Batch
                 }
             }
         }
-        // Tails (k % 4 rows and columns): the plane-at-a-time loop.
+        // Tails (k % 4 rows and columns): the plane-at-a-time loop on
+        // the ORIGINAL planes (identical ops — bitwise-consistent).
         for i in 0..k {
             let j_start = if i < kt { kt } else { 0 };
             for j in j_start..k {

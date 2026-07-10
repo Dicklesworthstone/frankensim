@@ -194,3 +194,104 @@ pub fn btile4x4_f64(
         }
     }
 }
+
+/// PACKED batched-GEMM 4×4 tile microkernel (bead 9ekv slice 2): both
+/// operand walks are l-CONTIGUOUS (stride `mb` per l — A packed
+/// i-major, B packed j-major), so the 16 resident accumulators stream
+/// eight sequential runs instead of jumping k·stride pages. Per
+/// element identical to the scalar twin — BITWISE.
+#[allow(clippy::too_many_arguments)] // packed-layout bundle (see fs-la::batched)
+pub fn btile4x4p_f64(
+    a: &[f64],
+    b: &[f64],
+    i0: usize,
+    j0: usize,
+    k: usize,
+    mb: usize,
+    dst: &mut [f64],
+) {
+    assert!(
+        k >= 1
+            && (i0 + 3) * k * mb + k * mb <= a.len()
+            && (j0 + 3) * k * mb + k * mb <= b.len()
+            && dst.len() >= 16 * mb,
+        "btile4x4p packed bounds (programmer error)"
+    );
+    let pairs = mb / 2;
+    if mb % 2 == 1 {
+        // Odd lane counts take the twin whole (packed runs stay aligned).
+        crate::scalar::btile4x4p_f64(a, b, i0, j0, k, mb, dst);
+        return;
+    }
+    // SAFETY: every pointer is base(t) + l·mb + 2·p with base(t) =
+    // ((i0+t)·k)·mb (a) or ((j0+t)·k)·mb (b); the maximal dereferenced
+    // offset over t ≤ 3, l ≤ k−1, 2p ≤ mb−2 is inside the extents
+    // asserted above. Every access is 2 lanes; f64 has no invalid bit
+    // patterns; unaligned access is permitted. The per-pair rewind
+    // (−k·mb + 2) never leaves the borrowed allocations.
+    unsafe {
+        let (mut a0p, mut a1p, mut a2p, mut a3p) = (
+            a.as_ptr().add(i0 * k * mb),
+            a.as_ptr().add((i0 + 1) * k * mb),
+            a.as_ptr().add((i0 + 2) * k * mb),
+            a.as_ptr().add((i0 + 3) * k * mb),
+        );
+        let (mut b0p, mut b1p, mut b2p, mut b3p) = (
+            b.as_ptr().add(j0 * k * mb),
+            b.as_ptr().add((j0 + 1) * k * mb),
+            b.as_ptr().add((j0 + 2) * k * mb),
+            b.as_ptr().add((j0 + 3) * k * mb),
+        );
+        let op = dst.as_mut_ptr();
+        for p in 0..pairs {
+            let mut acc = [vdupq_n_f64(0.0); 16];
+            for _l in 0..k {
+                let a0 = vld1q_f64(a0p);
+                let a1 = vld1q_f64(a1p);
+                let a2 = vld1q_f64(a2p);
+                let a3 = vld1q_f64(a3p);
+                let b0 = vld1q_f64(b0p);
+                let b1 = vld1q_f64(b1p);
+                let b2 = vld1q_f64(b2p);
+                let b3 = vld1q_f64(b3p);
+                acc[0] = vfmaq_f64(acc[0], a0, b0);
+                acc[1] = vfmaq_f64(acc[1], a0, b1);
+                acc[2] = vfmaq_f64(acc[2], a0, b2);
+                acc[3] = vfmaq_f64(acc[3], a0, b3);
+                acc[4] = vfmaq_f64(acc[4], a1, b0);
+                acc[5] = vfmaq_f64(acc[5], a1, b1);
+                acc[6] = vfmaq_f64(acc[6], a1, b2);
+                acc[7] = vfmaq_f64(acc[7], a1, b3);
+                acc[8] = vfmaq_f64(acc[8], a2, b0);
+                acc[9] = vfmaq_f64(acc[9], a2, b1);
+                acc[10] = vfmaq_f64(acc[10], a2, b2);
+                acc[11] = vfmaq_f64(acc[11], a2, b3);
+                acc[12] = vfmaq_f64(acc[12], a3, b0);
+                acc[13] = vfmaq_f64(acc[13], a3, b1);
+                acc[14] = vfmaq_f64(acc[14], a3, b2);
+                acc[15] = vfmaq_f64(acc[15], a3, b3);
+                a0p = a0p.add(mb);
+                a1p = a1p.add(mb);
+                a2p = a2p.add(mb);
+                a3p = a3p.add(mb);
+                b0p = b0p.add(mb);
+                b1p = b1p.add(mb);
+                b2p = b2p.add(mb);
+                b3p = b3p.add(mb);
+            }
+            let dp = op.add(2 * p);
+            for (t, &v) in acc.iter().enumerate() {
+                vst1q_f64(dp.add(t * mb), v);
+            }
+            let rewind = k * mb - 2;
+            a0p = a0p.sub(rewind);
+            a1p = a1p.sub(rewind);
+            a2p = a2p.sub(rewind);
+            a3p = a3p.sub(rewind);
+            b0p = b0p.sub(rewind);
+            b1p = b1p.sub(rewind);
+            b2p = b2p.sub(rewind);
+            b3p = b3p.sub(rewind);
+        }
+    }
+}
