@@ -335,7 +335,11 @@ pub fn r4qrun_f64(
 ) {
     let s2 = a.len();
     assert!(
-        s2.is_multiple_of(2) && b.len() == s2 && c.len() == s2 && d.len() == s2 && out.len() == 4 * s2,
+        s2.is_multiple_of(2)
+            && b.len() == s2
+            && c.len() == s2
+            && d.len() == s2
+            && out.len() == 4 * s2,
         "r4qrun run-length mismatch (programmer error)"
     );
     if !s2.is_multiple_of(4) {

@@ -313,7 +313,7 @@ mod tests {
                 let a = gen_vals(s2, 0xF0 ^ s2 as u64);
                 let b = gen_vals(s2, 0xF1);
                 let c = gen_vals(s2, 0xF2);
-                let d = gen_vals(s2, 0xF3 ^ (inverse as u64));
+                let d = gen_vals(s2, 0xF3 ^ u64::from(inverse));
                 let w = [0.912, -0.409, 0.664, -0.747, 0.298, -0.954];
                 let mut o_tier = vec![0.0f64; 4 * s2];
                 let mut o_ref = vec![0.0f64; 4 * s2];
