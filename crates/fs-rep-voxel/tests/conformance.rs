@@ -5,6 +5,7 @@
 //! attributes preserved, degenerates refuse structurally, and realization
 //! behaves like a watertight solid's level set.
 
+use fs_geom::Chart;
 use fs_rep_voxel::{
     LatticeGraph, LatticeNode, OccupancyChart, OccupancyField, PointCloud, Strut, VoxelError,
 };
@@ -436,7 +437,7 @@ fn rv_004_lattice_round_trip_degenerates_and_realization() {
 fn rv_005_occupancy_chart_contract() {
     use asupersync::types::Budget;
     use fs_exec::{CancelGate, Cx, ExecMode, StreamKey};
-    use fs_geom::{Chart, Point3};
+    use fs_geom::Point3;
     let field = ball(6); // voxel_size 0.1, centered at origin voxel
     let chart = OccupancyChart::try_new(field, TEST_DT_BUDGET).expect("admissible chart");
     let gate = CancelGate::new();
@@ -496,13 +497,53 @@ fn rv_005_occupancy_chart_contract() {
     );
 }
 
+fn assert_frame_ops_refuse_without_mutation(
+    base: &OccupancyField,
+    other: &OccupancyField,
+    mismatch: &str,
+) {
+    let before = active_set(base);
+    let mut candidate = base.clone();
+    assert!(matches!(
+        candidate.union(other),
+        Err(VoxelError::FrameMismatch { .. })
+    ));
+    assert_eq!(
+        active_set(&candidate),
+        before,
+        "union mutated on {mismatch} mismatch"
+    );
+
+    let mut candidate = base.clone();
+    assert!(matches!(
+        candidate.intersect(other),
+        Err(VoxelError::FrameMismatch { .. })
+    ));
+    assert_eq!(
+        active_set(&candidate),
+        before,
+        "intersection mutated on {mismatch} mismatch"
+    );
+
+    let mut candidate = base.clone();
+    assert!(matches!(
+        candidate.subtract(other),
+        Err(VoxelError::FrameMismatch { .. })
+    ));
+    assert_eq!(
+        active_set(&candidate),
+        before,
+        "subtraction mutated on {mismatch} mismatch"
+    );
+}
+
 #[test]
-fn rv_006_frames_and_dense_work_fail_closed() {
+fn rv_006_frames_and_world_coordinates_fail_closed() {
     let mut base = OccupancyField::new(1.0, [0.0; 3]).expect("base frame");
     base.set([1, 2, 3]);
     base.set([4, 5, 6]);
-    assert_eq!(base.voxel_size(), 1.0);
-    assert_eq!(base.origin(), [0.0; 3]);
+    assert_eq!(base.voxel_size().to_bits(), 1.0f64.to_bits());
+    assert_eq!(base.origin().map(f64::to_bits), [0.0f64.to_bits(); 3]);
     let conversion = OccupancyField::new(2.0, [10.0, 20.0, 30.0]).expect("conversion frame");
     assert_eq!(
         conversion.voxel_of([9.999, 20.0, 34.0]),
@@ -520,7 +561,7 @@ fn rv_006_frames_and_dense_work_fail_closed() {
         ));
     }
 
-    for (name, other) in [
+    for (mismatch, other) in [
         (
             "voxel size",
             OccupancyField::new(0.5, [0.0; 3]).expect("different size"),
@@ -530,39 +571,7 @@ fn rv_006_frames_and_dense_work_fail_closed() {
             OccupancyField::new(1.0, [1.0, 0.0, 0.0]).expect("different origin"),
         ),
     ] {
-        let before = active_set(&base);
-        let mut candidate = base.clone();
-        assert!(matches!(
-            candidate.union(&other),
-            Err(VoxelError::FrameMismatch { .. })
-        ));
-        assert_eq!(
-            active_set(&candidate),
-            before,
-            "union mutated on {name} mismatch"
-        );
-
-        let mut candidate = base.clone();
-        assert!(matches!(
-            candidate.intersect(&other),
-            Err(VoxelError::FrameMismatch { .. })
-        ));
-        assert_eq!(
-            active_set(&candidate),
-            before,
-            "intersection mutated on {name} mismatch"
-        );
-
-        let mut candidate = base.clone();
-        assert!(matches!(
-            candidate.subtract(&other),
-            Err(VoxelError::FrameMismatch { .. })
-        ));
-        assert_eq!(
-            active_set(&candidate),
-            before,
-            "subtraction mutated on {name} mismatch"
-        );
+        assert_frame_ops_refuse_without_mutation(&base, &other, mismatch);
     }
 
     assert!(matches!(
@@ -581,6 +590,15 @@ fn rv_006_frames_and_dense_work_fail_closed() {
         })
     ));
 
+    verdict(
+        "rv-006",
+        "frames are immutable; booleans preserve receivers on mismatch; world coordinate \
+         conversion and empty charts fail closed",
+    );
+}
+
+#[test]
+fn rv_007_dense_work_fails_closed() {
     // The full i32 span must be computed in i64/u128, then rejected by
     // the explicit budget rather than overflowing signed subtraction.
     let mut extrema = OccupancyField::new(1.0, [0.0; 3]).expect("extrema frame");
@@ -648,9 +666,17 @@ fn rv_006_frames_and_dense_work_fail_closed() {
         ));
     }
 
+    verdict(
+        "rv-007",
+        "DT and complement halo refuse coordinate overflow, excess volume, and numeric \
+         inexactness before dense work",
+    );
+}
+
+#[test]
+fn rv_008_chart_support_is_exact_voxel_union() {
     // Chart support is the union of voxel cubes, not centers padded by a
     // full edge length. This fixture has exactly representable bounds.
-    use fs_geom::Chart;
     let mut support_field = OccupancyField::new(2.0, [10.0, 20.0, 30.0]).expect("support frame");
     support_field.set([-1, 2, 0]);
     support_field.set([1, -2, 3]);
@@ -658,17 +684,16 @@ fn rv_006_frames_and_dense_work_fail_closed() {
         .expect("support chart")
         .support();
     assert_eq!(
-        [support.min.x, support.min.y, support.min.z],
-        [8.0, 16.0, 30.0]
+        [support.min.x, support.min.y, support.min.z].map(f64::to_bits),
+        [8.0, 16.0, 30.0].map(f64::to_bits)
     );
     assert_eq!(
-        [support.max.x, support.max.y, support.max.z],
-        [14.0, 26.0, 38.0]
+        [support.max.x, support.max.y, support.max.z].map(f64::to_bits),
+        [14.0, 26.0, 38.0].map(f64::to_bits)
     );
 
     verdict(
-        "rv-006",
-        "frames are validated and immutable; mismatches preserve receivers; DT and halo \
-         refuse overflow and over-budget boxes before dense work",
+        "rv-008",
+        "chart support is the exact union of occupied voxel cubes",
     );
 }

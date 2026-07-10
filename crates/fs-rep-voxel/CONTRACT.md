@@ -39,8 +39,9 @@ validity/topology certificates (wqd.23), lattice/infill homogenization
   in checked `u128`, and no allocation occurs unless the caller's
   explicit voxel budget admits it. The maximum squared coordinate
   diameter is limited to `< 2^52` voxel units so integer costs and
-  envelope decisions remain exact in `f64`. `DistanceField` layout is private and
-  read-only so inconsistent dimensions/storage cannot be forged.
+  envelope decisions remain exact in `f64`. `DistanceField` layout is
+  private and read-only so inconsistent dimensions/storage cannot be
+  forged.
 - `cloud`: `PointCloud` with grid-hash radius/kNN queries (brute-force
   verified, deterministic tie order), PCA normal estimation (smallest
   covariance eigenvector via cyclic Jacobi), and orientation propagation
@@ -131,12 +132,13 @@ sphere normals (the ring fixture DELIBERATELY breaks kNN connectivity —
 it caught the propagation gap during development); rv-004 fnx
 round-trip + degenerate refusals + level-set probe parity + realization
 receipts; rv-005 the chart contract (inside/outside, DT-backed distance
-near analytic, declared resolution error, out-of-box fallback); rv-006
-non-finite-origin refusal, frame-mismatch/no-mutation, empty-chart
-refusal, full-`i32` span and dense-volume budget refusal, and complement
-halo refusal at both coordinate extrema, numeric-exactness refusal, and
-exact voxel-cube support bounds, plus no-claim chart samples for NaN,
-infinite, and huge finite world coordinates.
+near analytic, declared resolution error, out-of-box fallback, and
+no-claim samples for invalid world coordinates); rv-006 non-finite-origin
+refusal, frame-mismatch/no-mutation, floor-preserving fallible coordinate
+conversion, and empty-chart refusal; rv-007 full-`i32` span and
+dense-volume budget refusal, complement halo refusal at both coordinate
+extrema, and numeric-exactness refusal; rv-008 exact voxel-cube support
+bounds.
 
 ## No-claim boundaries
 
