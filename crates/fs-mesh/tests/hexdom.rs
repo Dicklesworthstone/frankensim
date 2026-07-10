@@ -89,7 +89,7 @@ fn hd_001_cube_group_and_mbo_monotone() {
     let n = 5;
     for j in 0..n {
         for i in 0..n {
-            let a = (0 * n + j) * n + i;
+            let a = j * n + i;
             assert_eq!(field.frames[a], Quat::identity(), "boundary stays aligned");
         }
     }

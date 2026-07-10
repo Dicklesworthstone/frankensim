@@ -78,7 +78,6 @@ impl Quat {
                 a[0] * b[1] - a[1] * b[0],
             ]
         };
-        let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
         let uv = cross(u, v);
         let uuv = cross(u, uv);
         [

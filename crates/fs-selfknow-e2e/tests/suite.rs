@@ -33,14 +33,14 @@ impl Harness {
         }
     }
 
-    fn log(&self, kind: &str, payload: String) {
+    fn log(&self, kind: &str, payload: &str) {
         self.t.set(self.t.get() + 1);
         self.ledger
             .append_event(&EventRow {
                 session: None,
                 t: self.t.get(),
                 kind,
-                payload: Some(&payload),
+                payload: Some(payload),
             })
             .expect("event");
     }
@@ -59,7 +59,7 @@ fn stage_1_interface_types() {
     let report = check(&legal, &registry);
     h.log(
         "iface.legal",
-        format!("{{\"admitted\":{}}}", report.admitted),
+        &format!("{{\"admitted\":{}}}", report.admitted),
     );
     assert!(report.admitted, "the certified pairing is admitted");
     // ILLEGAL: an unstable pairing is rejected PRE-RUN with a located
@@ -71,7 +71,7 @@ fn stage_1_interface_types() {
     let report = check(&illegal, &registry);
     h.log(
         "iface.illegal",
-        format!(
+        &format!(
             "{{\"admitted\":{},\"findings\":{}}}",
             report.admitted,
             report.findings.len()
@@ -91,7 +91,7 @@ fn stage_1_interface_types() {
     let report = check(&unknown, &registry);
     h.log(
         "iface.unknown",
-        format!("{{\"admitted\":{}}}", report.admitted),
+        &format!("{{\"admitted\":{}}}", report.admitted),
     );
     assert!(
         !report.admitted,
@@ -121,7 +121,7 @@ fn stage_2_symmetry_harvest() {
         .fold(0.0, f64::max);
     h.log(
         "symmetry.exact",
-        format!(
+        &format!(
             "{{\"gap\":{gap:.3e},\"residual\":{:.3e}}}",
             harvested.asymmetry_residual
         ),
@@ -143,7 +143,7 @@ fn stage_2_symmetry_harvest() {
         .fold(0.0, f64::max);
     h.log(
         "symmetry.approx",
-        format!(
+        &format!(
             "{{\"true_gap\":{true_gap:.3e},\"bound\":{:.3e}}}",
             bound.correction_bound
         ),
@@ -159,7 +159,7 @@ fn stage_2_symmetry_harvest() {
     let res = cyclic_residual(&[3.0, -1.0, 0.2, 5.0], 2).expect("residual");
     h.log(
         "symmetry.asym",
-        format!("{{\"fraction\":{:.3}}}", res.relative),
+        &format!("{{\"fraction\":{:.3}}}", res.relative),
     );
     assert!(
         res.relative > 0.3,
@@ -185,7 +185,7 @@ fn stage_3_spectral_health() {
     let health = monitor.update(gap.ratio);
     h.log(
         "spectral.degraded",
-        format!("{{\"ratio\":{:.4},\"health\":\"{health:?}\"}}", gap.ratio),
+        &format!("{{\"ratio\":{:.4},\"health\":\"{health:?}\"}}", gap.ratio),
     );
     assert_eq!(health, Health::Degraded, "degraded gap refuses confidence");
     let merged = propagate(Color::Verified { lo: 0.0, hi: 1.0 }, health);
@@ -199,7 +199,7 @@ fn stage_3_spectral_health() {
     let health = monitor.update(gap.ratio);
     h.log(
         "spectral.healthy",
-        format!("{{\"ratio\":{:.4},\"health\":\"{health:?}\"}}", gap.ratio),
+        &format!("{{\"ratio\":{:.4},\"health\":\"{health:?}\"}}", gap.ratio),
     );
     assert_eq!(health, Health::Healthy, "a clean gap is not flagged");
     let kept = propagate(Color::Verified { lo: 0.0, hi: 1.0 }, health);
@@ -224,7 +224,7 @@ fn stage_4_abstraction_ladder() {
     let ans = ladder.at_level(ladder.top()).query(1.7, 1e-32);
     h.log(
         "ladder.drill",
-        format!(
+        &format!(
             "{{\"level_used\":{},\"leaks\":{:?}}}",
             ans.level_used, ans.leaks
         ),
@@ -242,7 +242,7 @@ fn stage_4_abstraction_ladder() {
     let concept = ladder.at_level(ladder.top()).query(1.7, 0.5);
     h.log(
         "ladder.concept",
-        format!(
+        &format!(
             "{{\"color_estimated\":{}}}",
             matches!(concept.color, Color::Estimated { .. })
         ),
@@ -281,7 +281,7 @@ fn stage_5_explanation_objects() {
     );
     h.log(
         "explain.reconcile",
-        format!("{{\"ok\":{}}}", ok.reconciles()),
+        &format!("{{\"ok\":{}}}", ok.reconciles()),
     );
     assert!(matches!(ok, Explanation::Explained { .. }) && ok.reconciles());
     // Hidden channel: the honesty gate refuses AND the rendering layer
@@ -295,7 +295,7 @@ fn stage_5_explanation_objects() {
     let narrative = refused.render_narrative();
     h.log(
         "explain.refuse",
-        format!(
+        &format!(
             "{{\"refused\":{}}}",
             matches!(refused, Explanation::Refused { .. })
         ),
@@ -340,7 +340,7 @@ fn stage_6_value_of_information() {
     let ranked = rank_purchases(&decision, &live, &menu, 64);
     h.log(
         "voi.live",
-        format!("{{\"top_score\":{:.5}}}", ranked[0].score),
+        &format!("{{\"top_score\":{:.5}}}", ranked[0].score),
     );
     assert!(
         ranked[0].score > 0.0,
@@ -358,7 +358,7 @@ fn stage_6_value_of_information() {
     let ranked = rank_purchases(&decision, &settled, &menu, 64);
     h.log(
         "voi.settled",
-        format!("{{\"top_score\":{:.5}}}", ranked[0].score),
+        &format!("{{\"top_score\":{:.5}}}", ranked[0].score),
     );
     assert!(
         ranked[0].score == 0.0,
