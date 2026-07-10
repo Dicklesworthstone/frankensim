@@ -210,20 +210,34 @@ pub fn evaluate(field: &VoxelField, spec: &TopoSpec) -> TopoPenalty {
             .total_cmp(&x.persistence())
             .then(x.birth.total_cmp(&y.birth))
     });
-    debug_assert_eq!(
-        alive.len(),
-        b.0 as usize,
-        "alive sublevel bars must agree with b0 (matching connectivity)"
-    );
+    // The bars and b₀ can DISAGREE legitimately: persistence0's union-
+    // find connectivity is not guaranteed to match betti's 26-connected
+    // solid (measured on tp_001: 2 alive bars, b₀ = 1). b₀ is the count
+    // AUTHORITY (the report can never contradict itself again); bars
+    // supply voxel localization only when the two agree.
     let solid_components = b.0 as usize;
+    let localizable = alive.len() == solid_components;
     if solid_components > spec.components as usize {
-        for bar in alive.iter().skip(spec.components as usize) {
-            let amount = bar.persistence().min(1e12); // essential guard
+        if localizable {
+            for bar in alive.iter().skip(spec.components as usize) {
+                let amount = bar.persistence().min(1e12); // essential guard
+                total += amount;
+                attributions.push(Attribution {
+                    channel: "excess-component",
+                    amount,
+                    voxels: component_voxels(field, spec.level, bar),
+                    direction: -1.0,
+                });
+            }
+        } else {
+            // Counted, not localized (the honest degradation when the
+            // filtration proxy disagrees with the solid's connectivity).
+            let amount = f64::from(b.0 - spec.components) * spec.tau;
             total += amount;
             attributions.push(Attribution {
                 channel: "excess-component",
                 amount,
-                voxels: component_voxels(field, spec.level, bar),
+                voxels: Vec::new(),
                 direction: -1.0,
             });
         }
