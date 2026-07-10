@@ -35,7 +35,7 @@ fn stages(n: usize) -> usize {
 /// and measures the stage walk; enabling `frontier-sixstep` flips both
 /// the kernel and this model together.
 fn takes_sixstep(n: usize) -> bool {
-    cfg!(feature = "frontier-sixstep") && n >= (1 << 16) && n.trailing_zeros() % 2 == 0
+    cfg!(feature = "frontier-sixstep") && n >= (1 << 16) && n.trailing_zeros().is_multiple_of(2)
 }
 
 /// Full-array DRAM passes per single transform: the six-step does six

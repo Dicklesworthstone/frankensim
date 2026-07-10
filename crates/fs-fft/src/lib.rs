@@ -137,7 +137,9 @@ impl Fft {
     #[doc(hidden)]
     #[must_use]
     pub fn takes_sixstep(n: usize) -> bool {
-        cfg!(feature = "frontier-sixstep") && n >= SIXSTEP_MIN && n.trailing_zeros() % 2 == 0
+        cfg!(feature = "frontier-sixstep")
+            && n >= SIXSTEP_MIN
+            && n.trailing_zeros().is_multiple_of(2)
     }
 
     /// Stage-walk entry for the gated conformance battery's cross-path
