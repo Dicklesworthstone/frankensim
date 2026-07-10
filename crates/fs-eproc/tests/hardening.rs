@@ -277,3 +277,36 @@ fn ch_005_g5_determinism() {
         "drift monitors replay bit-equal from the same stream (G5)",
     );
 }
+
+#[test]
+fn ch_006_undercalibrated_conformal_band_is_infinite_not_undercovering() {
+    // n=10 residuals, alpha=0.05: k = ceil(11*0.95) = 11 > 10, so NO finite
+    // residual achieves 95% coverage — the honest split-conformal band is
+    // INFINITE. Capping at the max residual would cover only 10/11 = 0.909
+    // < 0.95, a false coverage certificate (bead q2tf).
+    let mut cal = MondrianConformal::new(1);
+    for i in 0..10 {
+        cal.add("b", f64::from(i));
+    }
+    let band = cal.band("b", 0.05);
+    let BucketBand::Calibrated { half_width, n } = band else {
+        panic!("expected an infinite Calibrated band, got {band:?}");
+    };
+    assert_eq!(n, 10);
+    assert!(
+        half_width.is_infinite(),
+        "under-calibrated band must be infinite, got {half_width}"
+    );
+    // Enough data (n=25, k = ceil(26*0.95) = 25 <= 25): a finite band.
+    let mut big = MondrianConformal::new(1);
+    for i in 0..25 {
+        big.add("b", f64::from(i));
+    }
+    assert!(matches!(
+        big.band("b", 0.05),
+        BucketBand::Calibrated { half_width, .. } if half_width.is_finite()
+    ));
+    // The degenerate default (min_calibration = 0, empty bucket) must NOT panic
+    // (the old k.min(n) - 1 underflowed usize for n = 0).
+    let _ = MondrianConformal::default().band("empty", 0.1);
+}
