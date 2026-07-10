@@ -21,15 +21,20 @@ Consumers: the P2 marquee demo, the HELM e2e suite (gp3.11).
   under; `to_admission()` bridges into fs-ir static admission (one token,
   checked statically at admission AND continuously by the governor).
 - `Governor` — `Send + Sync`; hot paths are mutex-guarded in-memory
-  state. `charge(session, Charge)` meters core-seconds / peak memory /
-  wall and returns `Enforcement`: `Ok` → `Throttled` (at the grant) →
-  `Paused` (past 1.2× the grant, with a teaching resume hint). The
-  governor NEVER silently kills.
+  state. `open_session` rejects non-finite or negative floating grants
+  before registration. `charge(session, Charge)` rejects non-finite,
+  negative, or overflowing deltas before mutating meters, then meters
+  core-seconds / peak memory / wall and returns `Enforcement`: `Ok` →
+  `Throttled` (at the grant) → `Paused` (past 1.2× the grant, with a
+  teaching resume hint). The governor NEVER silently kills.
 - `submit_once(session, idem_key, work)` — exactly-once execution:
   the first caller runs and is charged; concurrent/repeat callers block
   on a condvar and receive `Duplicate` with the SAME receipt and NO
-  charge. `idempotency_key(agent_key, program)` = agent key + FNV
-  content hash.
+  charge. Caller panics and invalid returned charges are contained as a
+  terminal `Failed { receipt, what }`; all waiters receive that same
+  failure, no charge is committed, and retry requires an explicit new
+  key. `idempotency_key(agent_key, program)` = agent key + FNV content
+  hash.
 - `apply_memory_pressure(session, level, gate)` — the DECLARED
   degradation ladder (`LADDER`: spill coldest arenas → coarsen
   adaptively → pause-serialize-resume) fires steps `1..=level` in order;
@@ -65,11 +70,19 @@ Consumers: the P2 marquee demo, the HELM e2e suite (gp3.11).
    wall is excluded, nothing is silently assumed.
 5. **Meters are exact under storm**: concurrent charges accumulate
    without loss (32-way storm test asserts exact totals).
+6. **Every idempotency key terminates**: success or caller panic transitions
+   `Pending` exactly once, wakes every waiter, and carries one shared receipt;
+   failed work never charges and same-key retry never executes implicitly.
+7. **Invalid resources fail closed**: NaN, infinities, negative values, and
+   accumulated floating-point overflow are rejected before any token or meter
+   mutation. Landing exactly on a grant returns `Throttled`.
 
 ## Error model
 
-`SessionError`: `UnknownSession`, `Submission`, `Persistence`. Refusals
-that teach travel as `Guidance` values with ranked fixes.
+`SessionError`: `UnknownSession`, `InvalidResource`, `Submission`,
+`Persistence`. Refusals that teach travel as `Guidance` values with ranked
+fixes. A caller-work panic is data, not an unwind across the governor API:
+`SubmitOutcome::Failed` records its receipt and diagnosis.
 
 ## Determinism class
 
@@ -103,7 +116,11 @@ round-trip; ss-005 ladder order + gate request + toy-SolverState
 snapshot equality + attributed ordinal-ordered events; ss-006 the
 canonical BudgetInfeasible finding surfacing as ranked `Guidance`;
 ss-007 32-way adversarial-grant storm with exact meters and structured
-outcomes only.
+outcomes only; ss-008 seeded caller panic with eight concurrent duplicates,
+bounded completion, one shared terminal failure receipt, and zero charge;
+ss-009 NaN/infinite/negative grant and charge refusal with no-mutation checks;
+ss-010 the exact-grant throttle boundary and atomic accumulated-overflow
+refusal.
 
 ## No-claim boundaries
 
@@ -117,8 +134,8 @@ outcomes only.
 - **Energy is a declared-constant model** (45 W/core), not measured
   power telemetry; the calibration channel is where reality lands.
 - **Idempotency persistence is flush-based**: in-process registry +
-  ledgered receipts; cross-process replay reconstruction belongs to the
-  HELM e2e/crash-recovery bead (gp3.11).
+  ledgered success/failure receipts; cross-process replay reconstruction
+  belongs to the HELM e2e/crash-recovery bead (gp3.11).
 - **Two-lane executor integration** (interactive vs batch lanes with
   core quotas) is deferred to gp3.11's study-scale batteries; the
   enforcement/idempotency/estimate surfaces here are what it composes.

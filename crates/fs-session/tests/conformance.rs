@@ -11,7 +11,7 @@ use fs_exec::solver::{SolverState, codec};
 use fs_plan::{CostModel, CostObservation};
 use fs_session::{
     CalibrationReport, CapabilityToken, Charge, DegradationStep, Enforcement, Governor, Guidance,
-    SessionId, SubmitOutcome, estimate,
+    SessionError, SessionId, SubmitOutcome, estimate,
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -84,7 +84,7 @@ fn ss_001_token_bridges_into_static_admission() {
 #[test]
 fn ss_002_enforcement_throttles_then_pauses_never_kills() {
     let gov = Governor::new();
-    gov.open_session(token(7, 100.0, 1e9));
+    gov.open_session(token(7, 100.0, 1e9)).expect("valid token");
     // Under the grant: Ok.
     let e1 = gov
         .charge(
@@ -155,7 +155,7 @@ fn ss_002_enforcement_throttles_then_pauses_never_kills() {
 #[test]
 fn ss_003_idempotency_races_execute_exactly_once() {
     let gov = Arc::new(Governor::new());
-    gov.open_session(token(3, 1e9, 1e9));
+    gov.open_session(token(3, 1e9, 1e9)).expect("valid token");
     let executions = Arc::new(AtomicU32::new(0));
     let key = Governor::idempotency_key("agent-a", SPOUT);
     let mut handles = Vec::new();
@@ -292,7 +292,7 @@ fn ss_005_degradation_ladder_declared_order_and_pause_resume() {
         }
     }
     let gov = Governor::new();
-    gov.open_session(token(5, 1e9, 1e9));
+    gov.open_session(token(5, 1e9, 1e9)).expect("valid token");
     let gate = CancelGate::new();
     // Level 1: only the spill step fires.
     let l1 = gov
@@ -379,7 +379,8 @@ fn ss_007_governor_storm_structured_outcomes_only() {
     for id in 0..8u64 {
         // Adversarial: tiny grants on odd sessions.
         let grant = if id % 2 == 0 { 1e6 } else { 20.0 };
-        gov.open_session(token(id, grant, 1e9));
+        gov.open_session(token(id, grant, 1e9))
+            .expect("valid token");
     }
     let mut handles = Vec::new();
     for id in 0..8u64 {
@@ -432,5 +433,244 @@ fn ss_007_governor_storm_structured_outcomes_only() {
     verdict(
         "ss-007",
         "32-way storm over adversarial grants: exact meters, structured outcomes only",
+    );
+}
+
+#[test]
+fn ss_008_panicking_submission_releases_every_idempotency_waiter() {
+    const WAITERS: usize = 8;
+    let gov = Arc::new(Governor::new());
+    gov.open_session(token(80, 1e9, 1e9)).expect("valid token");
+    let executions = Arc::new(AtomicU32::new(0));
+    let rendezvous = Arc::new(std::sync::Barrier::new(WAITERS + 1));
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let key = "panic-terminal".to_string();
+
+    let owner = {
+        let gov = Arc::clone(&gov);
+        let executions = Arc::clone(&executions);
+        let rendezvous = Arc::clone(&rendezvous);
+        let done_tx = done_tx.clone();
+        let key = key.clone();
+        std::thread::spawn(move || {
+            let outcome = gov.submit_once(SessionId(80), &key, || {
+                executions.fetch_add(1, Ordering::SeqCst);
+                started_tx.send(()).expect("test receiver alive");
+                rendezvous.wait();
+                panic!("seeded submission panic");
+            });
+            done_tx.send(outcome).expect("test receiver alive");
+        })
+    };
+
+    started_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("owner reached caller work after installing Pending");
+    let mut waiters = Vec::new();
+    for _ in 0..WAITERS {
+        let gov = Arc::clone(&gov);
+        let rendezvous = Arc::clone(&rendezvous);
+        let done_tx = done_tx.clone();
+        let key = key.clone();
+        waiters.push(std::thread::spawn(move || {
+            rendezvous.wait();
+            let outcome = gov.submit_once(SessionId(80), &key, || {
+                panic!("a duplicate must never execute");
+            });
+            done_tx.send(outcome).expect("test receiver alive");
+        }));
+    }
+    drop(done_tx);
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut failures = Vec::with_capacity(WAITERS + 1);
+    for _ in 0..=WAITERS {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        let outcome = done_rx
+            .recv_timeout(remaining)
+            .expect("a panicking owner must not strand idempotency waiters")
+            .expect("session remains valid");
+        match outcome {
+            SubmitOutcome::Failed { receipt, what } => failures.push((receipt, what)),
+            other => panic!("every caller must observe the terminal failure, got {other:?}"),
+        }
+    }
+    owner.join().expect("panic was contained by submit_once");
+    for waiter in waiters {
+        waiter.join().expect("waiter returned");
+    }
+
+    assert_eq!(executions.load(Ordering::SeqCst), 1, "work ran once");
+    let (receipt, diagnosis) = &failures[0];
+    assert!(
+        failures.iter().all(|(r, d)| r == receipt && d == diagnosis),
+        "owner and duplicates must share one failure receipt"
+    );
+    assert!(diagnosis.contains("seeded submission panic"), "{diagnosis}");
+    assert_eq!(
+        gov.consumption(SessionId(80)).expect("meters").0.to_bits(),
+        0.0f64.to_bits(),
+        "failed work is never charged"
+    );
+
+    let retry = gov
+        .submit_once(SessionId(80), &key, || {
+            executions.fetch_add(1, Ordering::SeqCst);
+            Charge::default()
+        })
+        .expect("terminal failure is readable");
+    assert!(
+        matches!(retry, SubmitOutcome::Failed { receipt: r, .. } if r == *receipt),
+        "same-key retry receives the terminal failure; a new key is explicit retry"
+    );
+    assert_eq!(executions.load(Ordering::SeqCst), 1);
+    assert!(matches!(
+        gov.submit_once(SessionId(80), "panic-terminal:retry-1", Charge::default)
+            .expect("new key executes"),
+        SubmitOutcome::Executed { .. }
+    ));
+    verdict(
+        "ss-008",
+        "seeded panic: one execution, one terminal failure receipt, all waiters released within 5s, no charge",
+    );
+}
+
+#[test]
+fn ss_009_invalid_resources_fail_closed_without_poisoning_meters() {
+    let gov = Governor::new();
+    let invalid = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0];
+    let mut next_id = 90u64;
+    for value in invalid {
+        for field in ["core_s", "wall_s", "cores"] {
+            let id = next_id;
+            next_id += 1;
+            let mut bad = token(id, 100.0, 100.0);
+            match field {
+                "core_s" => bad.core_s = value,
+                "wall_s" => bad.wall_s = value,
+                "cores" => bad.cores = value,
+                _ => unreachable!(),
+            }
+            assert!(matches!(
+                gov.open_session(bad),
+                Err(SessionError::InvalidResource { .. })
+            ));
+            assert!(
+                matches!(
+                    gov.token(SessionId(id)),
+                    Err(SessionError::UnknownSession { .. })
+                ),
+                "invalid {field} grant must not partially open session {id}"
+            );
+        }
+    }
+
+    gov.open_session(token(102, 100.0, 1_000.0))
+        .expect("valid token");
+    let before = gov.consumption(SessionId(102)).expect("meters");
+    for value in invalid {
+        for delta in [
+            Charge {
+                core_s: value,
+                ..Charge::default()
+            },
+            Charge {
+                wall_s: value,
+                ..Charge::default()
+            },
+        ] {
+            assert!(matches!(
+                gov.charge(SessionId(102), delta),
+                Err(SessionError::InvalidResource { .. })
+            ));
+            assert_eq!(
+                gov.consumption(SessionId(102)).expect("meters"),
+                before,
+                "invalid charge must not mutate any meter"
+            );
+        }
+    }
+
+    verdict(
+        "ss-009",
+        "NaN/infinite/negative grants and deltas rejected before mutation",
+    );
+}
+
+#[test]
+fn ss_010_exact_grant_throttles_and_accumulated_overflow_is_atomic() {
+    let gov = Governor::new();
+    gov.open_session(token(102, 100.0, 1_000.0))
+        .expect("valid token");
+    let at_grant = gov
+        .charge(
+            SessionId(102),
+            Charge {
+                core_s: 100.0,
+                ..Charge::default()
+            },
+        )
+        .expect("valid charge");
+    assert!(
+        matches!(
+            at_grant,
+            Enforcement::Throttled { used, granted, .. }
+                if used.to_bits() == granted.to_bits()
+        ),
+        "the documented exact-grant boundary throttles"
+    );
+    assert!(matches!(
+        gov.charge(
+            SessionId(102),
+            Charge {
+                core_s: 20.0,
+                ..Charge::default()
+            }
+        )
+        .expect("valid charge"),
+        Enforcement::Throttled { .. }
+    ));
+    assert!(matches!(
+        gov.charge(
+            SessionId(102),
+            Charge {
+                core_s: 1.0,
+                ..Charge::default()
+            }
+        )
+        .expect("valid charge"),
+        Enforcement::Paused { .. }
+    ));
+
+    gov.open_session(token(103, f64::MAX, f64::MAX))
+        .expect("finite maximum grants are valid");
+    let _ = gov
+        .charge(
+            SessionId(103),
+            Charge {
+                core_s: f64::MAX,
+                ..Charge::default()
+            },
+        )
+        .expect("first finite charge");
+    assert!(matches!(
+        gov.charge(
+            SessionId(103),
+            Charge {
+                core_s: f64::MAX,
+                ..Charge::default()
+            }
+        ),
+        Err(SessionError::InvalidResource { .. })
+    ));
+    assert_eq!(
+        gov.consumption(SessionId(103)).expect("meters").0.to_bits(),
+        f64::MAX.to_bits(),
+        "overflow rejection leaves the prior finite meter intact"
+    );
+    verdict(
+        "ss-010",
+        "exact grant throttles; accumulated overflow is refused without mutating the finite meter",
     );
 }

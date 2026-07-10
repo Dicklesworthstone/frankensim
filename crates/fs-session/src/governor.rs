@@ -484,7 +484,7 @@ impl Governor {
                 IdemState::Failed { receipt, what } => (
                     *receipt,
                     "session.idempotent-failure",
-                    format!("{{\"receipt\":{},\"error\":{what:?}}}", receipt),
+                    format!("{{\"receipt\":{receipt},\"error\":{what:?}}}"),
                 ),
             };
             ledger
