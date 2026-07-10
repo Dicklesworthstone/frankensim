@@ -178,8 +178,18 @@ impl Interval {
     /// lower bound 0 is preserved (exp > 0: never nudged below zero).
     #[must_use]
     pub fn exp(self) -> Interval {
+        let elo = det::exp(self.lo);
+        // Overflow: `exp` of a FINITE argument that rounds to +∞ is a finite
+        // real above `f64::MAX`, so the largest finite value is a valid lower
+        // bound — leaving `lo = +∞` would make [∞, ∞] EXCLUDE every true value
+        // (bead wa8i V2). The upper bound may legitimately be +∞.
+        let lo = if elo.is_infinite() && self.lo.is_finite() {
+            f64::MAX
+        } else {
+            down_k(elo, ULP_EXP).max(0.0)
+        };
         Interval {
-            lo: down_k(det::exp(self.lo), ULP_EXP).max(0.0),
+            lo,
             hi: up_k(det::exp(self.hi), ULP_EXP),
         }
     }
@@ -244,9 +254,16 @@ impl core::ops::Add for Interval {
     type Output = Interval;
     /// Addition, outward-rounded.
     fn add(self, o: Interval) -> Interval {
+        let (lo, hi) = (self.lo + o.lo, self.hi + o.hi);
+        // ∞ + (−∞) = NaN; a NaN endpoint would bypass `new`'s guard and give a
+        // non-enclosing interval — fall back to WHOLE (bead wa8i V3, mirroring
+        // the Mul/Div guard).
+        if lo.is_nan() || hi.is_nan() {
+            return Interval::WHOLE;
+        }
         Interval {
-            lo: down_k(self.lo + o.lo, 1),
-            hi: up_k(self.hi + o.hi, 1),
+            lo: down_k(lo, 1),
+            hi: up_k(hi, 1),
         }
     }
 }
@@ -255,9 +272,14 @@ impl core::ops::Sub for Interval {
     type Output = Interval;
     /// Subtraction, outward-rounded.
     fn sub(self, o: Interval) -> Interval {
+        let (lo, hi) = (self.lo - o.hi, self.hi - o.lo);
+        // ∞ − ∞ = NaN → WHOLE (bead wa8i V3), as in Add/Mul/Div.
+        if lo.is_nan() || hi.is_nan() {
+            return Interval::WHOLE;
+        }
         Interval {
-            lo: down_k(self.lo - o.hi, 1),
-            hi: up_k(self.hi - o.lo, 1),
+            lo: down_k(lo, 1),
+            hi: up_k(hi, 1),
         }
     }
 }
@@ -509,6 +531,38 @@ mod tests {
         let z = Interval::new(0.25, 0.5);
         let q = x / z;
         assert!(q.contains(4.0) && q.contains(8.0) && q.lo() >= 1.9);
+    }
+
+    #[test]
+    fn exp_overflow_lower_bound_stays_finite_and_encloses() {
+        // exp of a huge-but-FINITE argument overflows f64 to +∞; the LOWER
+        // bound must stay finite (f64::MAX ≤ every true value, which are all
+        // above f64::MAX) so the interval still encloses them — bead wa8i V2.
+        let r = Interval::new(710.0, 720.0).exp();
+        assert!(
+            r.lo().is_finite() && r.lo() > 1e308,
+            "exp overflow lower bound must be finite (f64::MAX), got {}",
+            r.lo()
+        );
+        assert!(r.hi().is_infinite() && r.hi() > 0.0);
+        // A non-overflowing exp still tightly encloses the truth.
+        let e = Interval::new(0.0, 1.0).exp();
+        assert!(e.lo() <= 1.0 && e.hi() >= std::f64::consts::E && e.lo() >= 0.0);
+    }
+
+    #[test]
+    fn add_sub_opposing_infinities_are_whole_not_nan() {
+        // ∞ + (−∞) and ∞ − ∞ yield NaN endpoints; the ops must fall back to
+        // WHOLE rather than emit a NaN interval that encloses nothing (and
+        // would bypass `new`'s NaN guard) — bead wa8i V3.
+        let pinf = Interval::new(f64::INFINITY, f64::INFINITY);
+        let neg = Interval::new(f64::NEG_INFINITY, 0.0);
+        assert_eq!(pinf + neg, Interval::WHOLE);
+        let wide = Interval::new(0.0, f64::INFINITY);
+        assert_eq!(pinf - wide, Interval::WHOLE);
+        // Finite arithmetic is unaffected (outward-rounded enclosure).
+        let s = Interval::new(1.0, 2.0) + Interval::new(3.0, 4.0);
+        assert!(s.contains(4.0) && s.contains(6.0) && s.lo() <= 4.0 && s.hi() >= 6.0);
     }
 
     #[test]
