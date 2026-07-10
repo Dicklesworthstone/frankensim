@@ -53,18 +53,12 @@ const NOISE_PAIR_SPAN: f64 = 12.0;
 
 fn span_for(means: &[f64]) -> LossSpan {
     let lo = means.iter().copied().fold(f64::INFINITY, f64::min);
-    let hi = means
-        .iter()
-        .copied()
-        .fold(f64::NEG_INFINITY, f64::max);
+    let hi = means.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     LossSpan::new(NOISE_PAIR_SPAN + hi - lo).expect("finite fixture span")
 }
 
 fn settings_for(means: &[f64]) -> RaceSettings {
-    RaceSettings {
-        loss_span: span_for(means),
-        ..RaceSettings::default()
-    }
+    RaceSettings::new(span_for(means))
 }
 
 /// race-001: bitwise replay — identical seeds give identical
@@ -180,10 +174,7 @@ fn race_004_savings() {
     let out2 = race_field(
         &mut loss2,
         6,
-        RaceSettings {
-            loss_span: LossSpan::new(NOISE_PAIR_SPAN).expect("positive"),
-            ..RaceSettings::default()
-        },
+        RaceSettings::new(LossSpan::new(NOISE_PAIR_SPAN).expect("positive")),
         &kills2,
     )
     .expect("fixture respects its analytical span");
@@ -305,9 +296,8 @@ fn race_008_certifier_catches_max() {
     // seeds give the margins.
     let (mut mix_means, mut max_means) = (Vec::new(), Vec::new());
     for seed in 0..replays {
-        let prototype = PairwiseRace::with_loss_span(
-            fs_eproc::LossSpan::new(NOISE_PAIR_SPAN).expect("positive"),
-        );
+        let prototype =
+            PairwiseRace::new(fs_eproc::LossSpan::new(NOISE_PAIR_SPAN).expect("positive"));
         let mut races = vec![prototype; n * n];
         for t in 0..rounds {
             let obs: Vec<f64> = (0..n)
@@ -361,18 +351,14 @@ fn race_008_certifier_catches_max() {
     );
 }
 
-/// race-009: non-finite losses are rejected STRUCTURALLY — the NaN
-/// candidate is condemned that round (invalid + eliminated + kill
-/// fired), its poison never reaches means or e-processes, no panic
-/// anywhere, and the race's winner comes from the valid field. Same
-/// contract in successive halving.
+/// race-009: non-finite e-race losses abort with NO VERDICT. Selectively
+/// freezing one component at tau-1 after observing tau is not optional
+/// stopping. Rank-based successive halving can still reject the bad row.
 #[test]
 fn race_009_nonfinite_structural() {
     let mus = [0.0f64, 0.6, 0.9, 1.2];
     let kills = KillRegistry::new();
-    for i in 0..4u64 {
-        let _ = kills.register(i);
-    }
+    let gates: Vec<_> = (0..4u64).map(|i| kills.register(i)).collect();
     let mut loss = |i: usize, t: u64| {
         if i == 2 && t == 3 {
             f64::NAN
@@ -380,8 +366,8 @@ fn race_009_nonfinite_structural() {
             mus[i] + noise(0xF1A5, i, t)
         }
     };
-    let out = race_field(&mut loss, 4, settings_for(&mus), &kills)
-        .expect("finite observations respect span");
+    let error = race_field(&mut loss, 4, settings_for(&mus), &kills)
+        .expect_err("non-finite e-race input carries no verdict");
     let sh_kills = KillRegistry::new();
     let mut loss2 = |i: usize, t: u64| {
         if i == 1 && t == 2 {
@@ -393,15 +379,175 @@ fn race_009_nonfinite_structural() {
     let ledger = successive_halving(&mut loss2, 4, 8, 2, &sh_kills);
     verdict(
         "race-009-nonfinite",
-        out.invalid == vec![(4, 2)]
-            && out.eliminated.contains(&(4, 2))
-            && out.winner != 2
+        matches!(
+            error,
+            RaceError::NonFiniteLoss {
+                round: 4,
+                candidate: 2,
+                ..
+            }
+        ) && gates.iter().all(|gate| !gate.is_requested())
             && ledger.invalid == vec![(3, 1)]
             && ledger.winner != 1,
         &format!(
-            "race condemned candidate 2 at round 4 structurally (invalid {:?}, winner {}); \
-             halving condemned candidate 1 at round 3 (invalid {:?}, winner {})",
-            out.invalid, out.winner, ledger.invalid, ledger.winner
+            "e-race refused candidate 2's non-finite round-4 observation with no verdict or kill; \
+             rank-only halving condemned candidate 1 at round 3 (invalid {:?}, winner {})",
+            ledger.invalid, ledger.winner
         ),
+    );
+}
+
+/// race-010: the scale is part of the theorem. The old silent clamp
+/// converted this equal-mean skew family into positive betting drift.
+#[test]
+fn race_010_checked_span_catches_the_clipping_counterexample() {
+    let kills = KillRegistry::new();
+    let mut invalid = |i: usize, t: u64| {
+        if i == 0 {
+            3.0
+        } else if t % 4 == 3 {
+            0.0
+        } else {
+            4.0
+        }
+    };
+    let error = race_field(&mut invalid, 2, RaceSettings::new(LossSpan::ONE), &kills)
+        .expect_err("the -3 excursion exceeds a unit span");
+    assert!(matches!(
+        error,
+        RaceError::PairwiseInput {
+            round: 4,
+            candidate_a: 0,
+            candidate_b: 1,
+            ..
+        }
+    ));
+
+    let alpha = 0.05;
+    let replays = 200u64;
+    let mut any_elims = 0u32;
+    for seed in 0..replays {
+        let mut loss = |i: usize, t: u64| {
+            if i == 0 {
+                3.0
+            } else if mix64(seed ^ mix64(t)) & 3 == 0 {
+                0.0
+            } else {
+                4.0
+            }
+        };
+        let out = race_field(
+            &mut loss,
+            2,
+            RaceSettings {
+                alpha,
+                max_rounds: 300,
+                min_rounds: 8,
+                loss_span: LossSpan::new(3.0).expect("positive"),
+            },
+            &KillRegistry::new(),
+        )
+        .expect("the exact raw support is declared");
+        any_elims += u32::from(!out.eliminated.is_empty());
+    }
+    let expect = alpha * replays as f64;
+    let slack = 3.0 * (replays as f64 * alpha * (1.0 - alpha)).sqrt();
+    verdict(
+        "race-010-checked-span",
+        f64::from(any_elims) <= expect + slack,
+        &format!(
+            "equal-mean skew family: {any_elims}/{replays} eliminations with raw span 3 \
+             (budget {expect:.1} + 3sigma {slack:.1}); unit-span misuse refused"
+        ),
+    );
+}
+
+/// race-011: changing loss units and the declared span together cannot
+/// change decisions, and malformed settings never enter the race.
+#[test]
+fn race_011_scale_covariance_and_settings_refusal() {
+    let run = |scale: f64| {
+        let base = [0.0f64, 0.25, 0.5];
+        let mut loss = |i: usize, t: u64| {
+            let jitter = if mix64((i as u64) << 32 ^ t) & 1 == 0 {
+                -0.01
+            } else {
+                0.01
+            };
+            scale * (base[i] + jitter)
+        };
+        race_field(
+            &mut loss,
+            base.len(),
+            RaceSettings::new(LossSpan::new(scale * 0.52).expect("positive")),
+            &KillRegistry::new(),
+        )
+        .expect("analytical span covers the fixture")
+    };
+    let a = run(1.0);
+    let b = run(8.0);
+    let same = a.winner == b.winner
+        && a.survivors == b.survivors
+        && a.eliminated == b.eliminated
+        && a.evaluations_used == b.evaluations_used;
+
+    let mut loss = |_: usize, _: u64| 0.0;
+    for alpha in [0.0, -0.0, 1.0, f64::NAN, f64::INFINITY] {
+        assert!(matches!(
+            race_field(
+                &mut loss,
+                2,
+                RaceSettings {
+                    alpha,
+                    ..RaceSettings::new(LossSpan::ONE)
+                },
+                &KillRegistry::new()
+            ),
+            Err(RaceError::InvalidAlpha { .. })
+        ));
+    }
+    assert!(matches!(
+        race_field(
+            &mut loss,
+            2,
+            RaceSettings {
+                min_rounds: 9,
+                max_rounds: 8,
+                ..RaceSettings::new(LossSpan::ONE)
+            },
+            &KillRegistry::new()
+        ),
+        Err(RaceError::InvalidRoundBudget { .. })
+    ));
+    verdict(
+        "race-011-scale-covariance",
+        same,
+        "binary rescaling of losses and span leaves the complete race decision unchanged; malformed settings refuse",
+    );
+}
+
+/// race-012: finite losses near f64::MAX cannot overflow the winner's
+/// running mean and collapse comparison into an infinity tie.
+#[test]
+fn race_012_running_means_do_not_overflow() {
+    let high = f64::MAX / 2.0;
+    let low = f64::MAX * 0.4;
+    let mut loss = |i: usize, _: u64| if i == 0 { high } else { low };
+    let out = race_field(
+        &mut loss,
+        2,
+        RaceSettings {
+            alpha: 1e-12,
+            max_rounds: 3,
+            min_rounds: 3,
+            loss_span: LossSpan::new(f64::MAX / 4.0).expect("finite"),
+        },
+        &KillRegistry::new(),
+    )
+    .expect("finite extreme fixture has a declared span");
+    verdict(
+        "race-012-overflow-safe-mean",
+        out.winner == 1,
+        "three extreme finite observations retain the lower mathematical mean instead of tying at infinity",
     );
 }

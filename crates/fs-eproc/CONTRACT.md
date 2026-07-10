@@ -11,8 +11,16 @@ makes optional stopping VALID. Layer: L4.
   PREDICTABLE plug-in bet (regularized empirical mean/var, clipped one-sided
   to `aggressiveness / max(m, 1−m)`); `observe`, `e_value`, `log_e_value`,
   `rejects_at(alpha)` (Ville threshold 1/α).
-- `PairwiseRace` — the e-racing primitive: paired losses → d = midpoint of
-  clipped difference and 1 → betting process at null ½; `a_beats_b(alpha)`.
+- `LossSpan::new(span)` — checked finite-positive, fixed-before-observation
+  support for `abs(loss_b - loss_a)`. The span is part of the statistical
+  claim and replay identity; it must not be estimated from the race data.
+- `PairwiseRace::new(loss_span)` — the e-racing primitive for
+  lower-is-better losses. Construction requires the scale explicitly; there
+  is no default unit span. It maps
+  `d = ((loss_b - loss_a) / span + 1) / 2` without clipping and feeds a
+  betting process at null 1/2; `a_beats_b(alpha)` reports evidence that A has
+  lower conditional mean loss than B. The required null is
+  `E[loss_b,t - loss_a,t | F_(t-1)] <= 0`, not marginal-mean equality alone.
 - `GaussianMixtureCs::new(sigma, rho, alpha)` — Robbins normal-mixture CS
   for sub-Gaussian means: time-uniform interval with closed-form radius
   √((tσ²+ρ)(ln((tσ²+ρ)/ρ) + 2ln(1/α)))/t; also `e_value_for(m)` (the
@@ -43,14 +51,20 @@ makes optional stopping VALID. Layer: L4.
   a supermartingale under H₀ — strategy affects power only.
 - Boundedness contract enforced: observations outside [0,1] are REFUSED
   (feeding unbounded data would silently void the guarantee).
+- Pairwise support is enforced before wealth changes: non-finite losses,
+  subtraction overflow, and differences outside the declared `LossSpan`
+  return `PairwiseInputError`. Clipping is forbidden because it changes the
+  estimand and can create betting drift under an equal-raw-mean null.
 - Trajectories are bit-replayable: strict fs-math functions + caller-supplied
   fs-rand streams (tested: identical tournament decision, time, and bits).
 - log-space wealth: no overflow at extreme evidence.
 
 ## Error model
-Contract violations (null mean outside (0,1), out-of-range outcomes,
-non-positive σ/ρ, α∉(0,1)) panic with teaching messages — these are
-guarantee-voiding programmer errors, not data errors.
+Malformed scalar process parameters (null mean outside (0,1), out-of-range
+bounded-process outcomes, non-positive sigma/rho, alpha outside (0,1)) panic
+with teaching messages. Pairwise loss data and span violations are fallible
+`PairwiseInputError` values and leave pairwise wealth unchanged, because a
+production race must be able to surface a no-claim result rather than panic.
 
 ## Determinism class
 Deterministic CROSS-ISA (strict fs-math + pure arithmetic).
@@ -63,14 +77,16 @@ supplies the decision signal e-racing acts on.
 None.
 
 ## Feature flags
-None.
+`conformal-hardening` enables the [F] Mondrian conformal, drift-monitor, and
+false-coverage-budget machinery. It is default-off.
 
 ## Conformance tests (empirical, seeded, release-mode)
 Ville validity under ADVERSARIAL stopping (4000 sims × 2000 horizon:
 type-I 0.0305 ≤ 0.05); power scaling (median stop 241 @ δ=.05, 32 @ δ=.15);
 time-uniform CS coverage (miss 0.0487 ≤ 0.05; radius 0.573→0.086);
 e-BH FDR 0.001 ≤ 0.1 at power 1.00 (10 signals / 30 nulls × 300 sims);
-race decided + bit-replayable; arithmetic laws; bounded-input refusal.
+race decided + bit-replayable; arithmetic laws; bounded-input refusal;
+declared-span boundaries and one-ULP refusal; equal-mean skew counterexample.
 
 ## No-claim boundaries
 - Empirical-Bernstein/hedged closed-form CS for bounded means (mixture CS
@@ -78,6 +94,9 @@ race decided + bit-replayable; arithmetic laws; bounded-input refusal.
 - Conformal e-prediction (fs-surrogate + conformal-hardening beads).
 - Nightly adversarial-rotation trials (certify-certifiers bead).
 - Two-sided betting tests; asymptotic variants; sub-exponential extensions.
+- A caller-supplied finite span is a checked assumption, not a certificate that
+  the underlying stochastic process has that support. Runtime breach refuses
+  the observation; justifying the bound remains the caller's obligation.
 
 ## No-claim boundaries (hardening)
 

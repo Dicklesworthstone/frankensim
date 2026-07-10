@@ -28,7 +28,7 @@ use fs_exec::KillRegistry;
 /// Racing controls.
 #[derive(Debug, Clone, Copy)]
 pub struct RaceSettings {
-    /// Family-wise elimination level α (e-BH across the population).
+    /// False-discovery-rate elimination level α (e-BH across the population).
     pub alpha: f64,
     /// Round budget (the fixed-N design would spend this per
     /// candidate).
@@ -43,13 +43,15 @@ pub struct RaceSettings {
     pub loss_span: LossSpan,
 }
 
-impl Default for RaceSettings {
-    fn default() -> Self {
+impl RaceSettings {
+    /// Standard alpha and round budgets with an explicit statistical scale.
+    #[must_use]
+    pub const fn new(loss_span: LossSpan) -> Self {
         RaceSettings {
             alpha: 0.05,
             max_rounds: 400,
             min_rounds: 8,
-            loss_span: LossSpan::ONE,
+            loss_span,
         }
     }
 }
@@ -58,16 +60,31 @@ impl Default for RaceSettings {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RaceError {
     /// A race needs at least two candidates.
-    TooFewCandidates { count: usize },
+    TooFewCandidates {
+        /// Number of supplied candidates.
+        count: usize,
+    },
     /// Alpha must be finite and strictly between zero and one.
-    InvalidAlpha { alpha_bits: u64 },
+    InvalidAlpha {
+        /// IEEE-754 bits of the rejected alpha.
+        alpha_bits: u64,
+    },
     /// The round budget must be nonzero and include `min_rounds`.
-    InvalidRoundBudget { min_rounds: u32, max_rounds: u32 },
+    InvalidRoundBudget {
+        /// Requested first round at which elimination may occur.
+        min_rounds: u32,
+        /// Requested total round budget.
+        max_rounds: u32,
+    },
     /// One pair violated the declared support, so no race evidence is valid.
     PairwiseInput {
+        /// One-based round where the invalid pair appeared.
         round: u32,
+        /// First candidate in the oriented pair.
         candidate_a: usize,
+        /// Second candidate in the oriented pair.
         candidate_b: usize,
+        /// Exact paired-input contract violation.
         source: PairwiseInputError,
     },
     /// A non-finite loss invalidated the optional-stopping construction.
@@ -179,7 +196,7 @@ fn update_mean(mean: &mut f64, count: &mut u64, value: f64) {
     *count = next;
 }
 
-/// Race a field of candidates with e-BH family-wise elimination.
+/// Race a field of candidates with e-BH false-discovery-rate control.
 /// `loss(candidate, observation)` must be a PURE function of its
 /// arguments (deterministic streams — the caller keys them by seed and
 /// candidate id). Every paired difference must lie inside
@@ -232,7 +249,7 @@ pub fn race_field(
             max_rounds: settings.max_rounds,
         });
     }
-    let prototype = PairwiseRace::with_loss_span(settings.loss_span);
+    let prototype = PairwiseRace::new(settings.loss_span);
     let n = n_candidates;
     // Pairwise race matrix (i, j), i < j: PairwiseRace observing
     // (loss_i, loss_j); a_beats_b == "i dominates j".
@@ -270,22 +287,22 @@ pub fn race_field(
         for i in 0..n {
             for j in (i + 1)..n {
                 if let (Some(a), Some(b)) = (obs[i], obs[j]) {
-                    races[i * n + j].observe(a, b).map_err(|source| {
-                        RaceError::PairwiseInput {
+                    races[i * n + j]
+                        .observe(a, b)
+                        .map_err(|source| RaceError::PairwiseInput {
                             round: round + 1,
                             candidate_a: i,
                             candidate_b: j,
                             source,
-                        }
-                    })?;
-                    races[j * n + i].observe(b, a).map_err(|source| {
-                        RaceError::PairwiseInput {
+                        })?;
+                    races[j * n + i]
+                        .observe(b, a)
+                        .map_err(|source| RaceError::PairwiseInput {
                             round: round + 1,
                             candidate_a: j,
                             candidate_b: i,
                             source,
-                        }
-                    })?;
+                        })?;
                 }
             }
         }
@@ -325,9 +342,7 @@ pub fn race_field(
     let winner = survivors
         .iter()
         .copied()
-        .min_by(|&a, &b| {
-            means[a].total_cmp(&means[b]).then(a.cmp(&b))
-        })
+        .min_by(|&a, &b| means[a].total_cmp(&means[b]).then(a.cmp(&b)))
         .expect("finite race inputs leave at least one survivor");
     Ok(RaceOutcome {
         survivors,
@@ -349,7 +364,7 @@ pub struct BracketLedger {
     /// (milestone round, survivors before, survivors after).
     pub brackets: Vec<(u32, usize, usize)>,
     /// Candidates structurally rejected for non-finite losses
-    /// (`(round, candidate)` — fail-closed, as in [`RaceOutcome`]).
+    /// (`(round, candidate)` — rank-based bracket semantics only).
     pub invalid: Vec<(u32, usize)>,
     /// The outcome fields shared with [`RaceOutcome`].
     pub winner: usize,
@@ -406,9 +421,7 @@ pub fn successive_halving(
         let mut live: Vec<usize> = (0..n).filter(|&i| alive[i]).collect();
         let before = live.len();
         // Overflow-safe online means make this a finite total order.
-        live.sort_by(|&a, &b| {
-            means[a].total_cmp(&means[b]).then(a.cmp(&b))
-        });
+        live.sort_by(|&a, &b| means[a].total_cmp(&means[b]).then(a.cmp(&b)));
         let keep = (before as u32).div_ceil(eta).max(1) as usize;
         for &i in &live[keep.min(live.len())..] {
             alive[i] = false;
@@ -420,9 +433,7 @@ pub fn successive_halving(
     }
     let winner = (0..n)
         .filter(|&i| alive[i])
-        .min_by(|&a, &b| {
-            means[a].total_cmp(&means[b]).then(a.cmp(&b))
-        })
+        .min_by(|&a, &b| means[a].total_cmp(&means[b]).then(a.cmp(&b)))
         .expect("no valid candidate survived: every loss stream produced non-finite values");
     BracketLedger {
         brackets,

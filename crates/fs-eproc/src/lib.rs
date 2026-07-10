@@ -37,7 +37,8 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// One-sided betting e-process testing H₀: mean(X) ≤ `null_mean` against
 /// "mean is LARGER", for outcomes in [0, 1]. (Race two candidates by feeding
-/// d = (x − y + 1)/2 with null mean 1/2 — see [`PairwiseRace`].)
+/// their declared-span-normalized difference with null mean 1/2 — see
+/// [`PairwiseRace`].)
 #[derive(Debug, Clone)]
 pub struct BettingEProcess {
     null_mean: f64,
@@ -259,19 +260,9 @@ impl fmt::Display for PairwiseInputError {
 impl std::error::Error for PairwiseInputError {}
 
 impl PairwiseRace {
-    /// Fresh race.
+    /// Fresh race with a fixed, checked paired-loss support.
     #[must_use]
-    pub fn new() -> Self {
-        PairwiseRace {
-            proc: BettingEProcess::new(0.5),
-            loss_span: LossSpan::ONE,
-        }
-    }
-
-    /// Create a race whose paired losses satisfy
-    /// `abs(loss_b - loss_a) <= loss_span` almost surely.
-    #[must_use]
-    pub fn with_loss_span(loss_span: LossSpan) -> Self {
+    pub fn new(loss_span: LossSpan) -> Self {
         PairwiseRace {
             proc: BettingEProcess::new(0.5),
             loss_span,
@@ -286,11 +277,7 @@ impl PairwiseRace {
     /// # Errors
     /// Non-finite losses, subtraction overflow, or a paired difference
     /// outside the declared span. On error, wealth is unchanged.
-    pub fn observe(
-        &mut self,
-        loss_a: f64,
-        loss_b: f64,
-    ) -> Result<(), PairwiseInputError> {
+    pub fn observe(&mut self, loss_a: f64, loss_b: f64) -> Result<(), PairwiseInputError> {
         if !loss_a.is_finite() || !loss_b.is_finite() {
             return Err(PairwiseInputError::NonFiniteLoss {
                 loss_a_bits: loss_a.to_bits(),
@@ -331,12 +318,6 @@ impl PairwiseRace {
     #[must_use]
     pub fn log_e_value(&self) -> f64 {
         self.proc.log_e_value()
-    }
-}
-
-impl Default for PairwiseRace {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -649,7 +630,7 @@ mod tests {
         // replay bit-identically from the same stream key (Bet 8).
         let run = || -> (bool, u64, u64) {
             let mut s = key(777).stream();
-            let mut race = PairwiseRace::new();
+            let mut race = PairwiseRace::new(LossSpan::ONE);
             let mut t = 0u64;
             while !race.a_beats_b(0.05) && t < 50_000 {
                 let a = 0.4 + 0.1 * s.next_f64(); // better (lower loss)
@@ -674,7 +655,7 @@ mod tests {
 
     #[test]
     fn pairwise_scale_is_checked_before_wealth_changes() {
-        let mut race = PairwiseRace::with_loss_span(LossSpan::ONE);
+        let mut race = PairwiseRace::new(LossSpan::ONE);
         let initial = race.log_e_value().to_bits();
         let outside = f64::from_bits(1.0f64.to_bits() + 1);
         assert!(matches!(
@@ -693,7 +674,7 @@ mod tests {
         // 1/4; candidate A is always 3. Both means are exactly 3. The
         // old silent clamp changed B-A from {+1,-3} to {+1,-1}, whose
         // positive mean manufactured evidence that A beats equal-mean B.
-        let mut race = PairwiseRace::new();
+        let mut race = PairwiseRace::new(LossSpan::ONE);
         for loss_b in [4.0, 4.0, 4.0] {
             race.observe(3.0, loss_b).expect("upper boundary");
         }
