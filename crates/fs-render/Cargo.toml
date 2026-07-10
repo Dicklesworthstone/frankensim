@@ -14,7 +14,7 @@ layer = "L5"
 fs-ad = { path = "../fs-ad", optional = true }
 fs-exec = { path = "../fs-exec", optional = true }
 fs-geom = { path = "../fs-geom", optional = true }
-fs-math = { path = "../fs-math", optional = true }
+fs-math = { path = "../fs-math" }
 fs-rand = { path = "../fs-rand", optional = true }
 fs-rep-nurbs = { path = "../fs-rep-nurbs", optional = true }
 
@@ -34,7 +34,7 @@ volumes = ["dep:fs-rand"]
 # [F]-gated per the Ambition-Tag rule (bead qfx.5): edge-aware
 # differentiable rendering, smoke tier (deterministic quadrature;
 # MC/reparameterized estimators are recorded successors).
-differentiable = ["dep:fs-ad", "dep:fs-math"]
+differentiable = ["dep:fs-ad"]
 
 [[test]]
 name = "volumes_battery"

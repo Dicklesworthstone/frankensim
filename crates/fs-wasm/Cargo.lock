@@ -877,6 +877,7 @@ name = "fs-opt"
 version = "0.0.1"
 dependencies = [
  "fs-exec",
+ "fs-math",
  "fs-obs",
  "fs-qty",
 ]
@@ -919,6 +920,7 @@ dependencies = [
 name = "fs-render"
 version = "0.0.1"
 dependencies = [
+ "fs-math",
  "fs-rand",
 ]
 
