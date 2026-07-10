@@ -46,6 +46,19 @@ fn xp_001_permanent_invariant_kill_battery() {
             ("right-half", (60..=120).collect::<Vec<_>>()),
         ];
         let nodes = adjoint_attribution(&fixture, &a0, &a1, &channels);
+        // F2 (bead 9sf6): the Verified interval MUST equal the node's declared
+        // (relative) bound. A fixed absolute ±1e-12 half-width is not a rigorous
+        // enclosure once |value| is large (it would exclude the exact value).
+        for node in &nodes {
+            if let Color::Verified { lo, hi } = node.color {
+                let half = 0.5 * (hi - lo);
+                assert!(
+                    (half - node.bound).abs() <= 1e-9 * node.bound.max(1e-30),
+                    "Verified half-width {half:.3e} != declared bound {:.3e}",
+                    node.bound
+                );
+            }
+        }
         let explanation = finalize(nodes, observed, 1e-10);
         assert!(
             matches!(explanation, Explanation::Explained { .. }),
