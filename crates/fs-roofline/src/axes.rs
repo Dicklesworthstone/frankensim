@@ -8,8 +8,6 @@
 //! misses, which is the honest direction for a limit that divides other
 //! kernels' attainment.
 
-#![allow(unsafe_code)]
-
 use fs_substrate::CapabilityProbe;
 
 /// Lowest credible single-thread STREAM bandwidth on FrankenSim's
@@ -20,6 +18,9 @@ pub const MIN_REFERENCE_SINGLE_BANDWIDTH_GBS: f64 = 5.0;
 /// Lowest credible single-thread fused throughput on FrankenSim's
 /// post-2015 reference-machine families.
 pub const MIN_REFERENCE_SINGLE_PEAK_GFLOPS: f64 = 5.0;
+
+/// Maximum relative change allowed between the pre-run and post-run probes.
+pub const MAX_AXIS_REPROBE_DRIFT: f64 = 0.25;
 
 /// The roofline's axes for one machine, all measured.
 #[derive(Debug, Clone)]
@@ -101,6 +102,29 @@ impl MachineAxes {
         self.plausibility_error().is_none()
     }
 
+    /// Explain why a post-run probe does not corroborate this pre-run probe.
+    #[must_use]
+    pub fn reprobe_error(&self, after: &Self) -> Option<&'static str> {
+        if self.plausibility_error().is_some() || after.plausibility_error().is_some() {
+            return Some("pre-run or post-run axes are implausible");
+        }
+        if self.fingerprint != after.fingerprint || self.logical_cpus != after.logical_cpus {
+            return Some("machine identity changed between axis probes");
+        }
+        let pairs = [
+            (self.bandwidth_single_gbs, after.bandwidth_single_gbs),
+            (self.bandwidth_all_core_gbs, after.bandwidth_all_core_gbs),
+            (self.peak_single_gflops, after.peak_single_gflops),
+            (self.peak_all_core_gflops, after.peak_all_core_gflops),
+        ];
+        if pairs.iter().any(|&(before, after)| {
+            (before - after).abs() / before.abs().max(after.abs()) > MAX_AXIS_REPROBE_DRIFT
+        }) {
+            return Some("pre-run and post-run axes disagree beyond the drift band");
+        }
+        None
+    }
+
     /// One JSON line describing the axes (report/ledger context).
     #[must_use]
     pub fn to_jsonl(&self) -> String {
@@ -163,41 +187,12 @@ const STEPS: usize = 4096;
 /// deflating the axis (an axis too low would inflate everyone's attainment).
 const PASSES: usize = 5;
 
-fn fma_pass_portable(acc: &mut [f64; LANES], m: f64, a: f64) {
-    for _ in 0..STEPS {
-        for lane in acc.iter_mut() {
-            *lane = lane.mul_add(m, a);
-        }
-    }
-}
+use fma_kernel::fma_pass;
 
-/// x86 body with REAL fused-multiply-add codegen: the baseline x86-64
-/// target has no compile-time FMA, so `f64::mul_add` lowers to a libm
-/// CALL and the "peak" axis measured call overhead — 1.0 GFLOP/s on a
-/// Threadripper whose GEMM then read attainment 40× (found by the
-/// xlvx x86 attainment row). Runtime-detected, capsule-registered.
-///
-/// # Safety
-/// Requires avx+fma, verified by the dispatcher immediately before the
-/// call. The body is pure safe arithmetic on a caller-owned array.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx,fma")]
-unsafe fn fma_pass_x86(acc: &mut [f64; LANES], m: f64, a: f64) {
-    for _ in 0..STEPS {
-        for lane in acc.iter_mut() {
-            *lane = lane.mul_add(m, a);
-        }
-    }
-}
-
-fn fma_pass(acc: &mut [f64; LANES], m: f64, a: f64) {
-    #[cfg(target_arch = "x86_64")]
-    if std::arch::is_x86_feature_detected!("avx") && std::arch::is_x86_feature_detected!("fma") {
-        // SAFETY: features verified on this CPU immediately above.
-        return unsafe { fma_pass_x86(acc, m, a) };
-    }
-    fma_pass_portable(acc, m, a);
-}
+/// The FMA chain kernel (own registered capsule — the x86 body needs
+/// `target_feature`; everything else in this file is safe).
+#[path = "fma_kernel.rs"]
+mod fma_kernel;
 
 /// Best-of-passes single-thread FMA throughput in GFLOP/s.
 ///
@@ -307,5 +302,25 @@ mod tests {
         let mut no_cpus = healthy;
         no_cpus.logical_cpus = 0;
         assert!(!no_cpus.plausible());
+    }
+
+    #[test]
+    fn post_run_probe_must_match_machine_and_axis_band() {
+        let before = MachineAxes {
+            fingerprint: 1,
+            cpu_brand: "synthetic".to_string(),
+            logical_cpus: 8,
+            bandwidth_single_gbs: 50.0,
+            bandwidth_all_core_gbs: 200.0,
+            peak_single_gflops: 40.0,
+            peak_all_core_gflops: 240.0,
+        };
+        assert!(before.reprobe_error(&before).is_none());
+        let mut drifted = before.clone();
+        drifted.bandwidth_single_gbs = 20.0;
+        assert!(before.reprobe_error(&drifted).is_some());
+        let mut other = before.clone();
+        other.fingerprint = 2;
+        assert!(before.reprobe_error(&other).is_some());
     }
 }

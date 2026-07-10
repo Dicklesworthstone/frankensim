@@ -149,5 +149,8 @@ pub mod gemm;
 /// FFT stage kernels (own registered capsule — bead 8nfp).
 pub mod fft;
 
+/// f32 GEMM microkernels (own registered capsule — bead 9ekv scope e).
+pub mod gemmf32;
+
 pub use fft::r4qrun_f64;
 pub use gemm::{btile4x4_f64, mk8x4_f64};

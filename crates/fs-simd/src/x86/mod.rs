@@ -12,8 +12,10 @@
 // 300-line cap like NEON's fft submodule; re-exported below.
 pub mod elem;
 pub mod fft;
+pub mod gemm;
 pub use elem::fma3;
 pub use fft::r4qrun_f64;
+pub use gemm::btile4x4p_f64;
 
 // Only the intrinsics the WIRED ops (axpy/dot/sum) use; mul intrinsics
 // return here when scale/mul_elem get vector paths (caught by the CI

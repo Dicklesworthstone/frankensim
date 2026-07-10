@@ -94,6 +94,10 @@ pub(crate) fn checked_btile4x4p_lengths(
     Some((a_len, b_len, dst_len))
 }
 
+/// Packed f32 batched-GEMM 4×4 tile signature
+/// (a_pack, b_pack, i0, j0, k, mb, dst) — l-contiguous packed layout.
+pub type Btile4x4Pf32 = fn(&[f32], &[f32], usize, usize, usize, usize, &mut [f32]);
+
 /// Radix-4 Stockham q-run butterfly signature
 /// (a, b, c, d, out, twiddles [w1re,w1im,w2re,w2im,w3re,w3im], inverse)
 /// over interleaved complex rows.
@@ -128,6 +132,9 @@ pub struct Ops {
     /// i-major, B j-major): both walks stride `mb` — BITWISE across
     /// tiers (zero start, l-ascending fused accumulate).
     pub btile4x4p_f64: Btile4x4P,
+    /// PACKED f32 batched-GEMM 4×4 tile (four lanes per register —
+    /// bead 9ekv scope e): BITWISE across tiers.
+    pub btile4x4pf32: Btile4x4Pf32,
     /// Radix-4 Stockham q-run butterfly over interleaved complex rows
     /// (fs-fft's stage kernel): BITWISE across tiers — every lane op is
     /// the scalar twin's exact per-element composition.
@@ -152,6 +159,7 @@ const SCALAR_OPS: Ops = Ops {
     mk8x4_f64: scalar::mk8x4_f64,
     btile4x4_f64: scalar::btile4x4_f64,
     btile4x4p_f64: scalar::btile4x4p_f64,
+    btile4x4pf32: scalar::btile4x4pf32,
     r4qrun_f64: scalar::r4qrun_f64,
 };
 
@@ -175,6 +183,7 @@ fn build_table() -> Ops {
                 mk8x4_f64: neon::mk8x4_f64,
                 btile4x4_f64: neon::btile4x4_f64,
                 btile4x4p_f64: neon::gemm::btile4x4p_f64,
+                btile4x4pf32: neon::gemmf32::btile4x4pf32,
                 r4qrun_f64: neon::r4qrun_f64,
             },
             // x86 capsule v1 covers axpy/dot/sum (the <300-line capsule cap
@@ -398,6 +407,34 @@ mod tests {
                     .zip(&d_ref)
                     .all(|(x, y)| x.to_bits() == y.to_bits()),
                 "btile4x4p diverged from twin at k {k} mb {mb} (tier {:?})",
+                t.tier
+            );
+        }
+        // btile4x4pf32: bitwise vs twin, quad path + twin-delegation
+        // tail (mb % 4 != 0), offset tiles, f32 special values.
+        for &(k, i0, j0, mb) in &[
+            (4usize, 0usize, 0usize, 8usize),
+            (6, 1, 0, 5),
+            (12, 2, 4, 16),
+        ] {
+            let a: Vec<f32> = gen_vals((i0 + 4) * k * mb, 0xD0 ^ k as u64)
+                .into_iter()
+                .map(|v| v as f32)
+                .collect();
+            let b: Vec<f32> = gen_vals((j0 + 4) * k * mb, 0xD1 ^ mb as u64)
+                .into_iter()
+                .map(|v| v as f32)
+                .collect();
+            let mut d_tier = vec![0.0f32; 16 * mb];
+            let mut d_ref = vec![0.0f32; 16 * mb];
+            (t.btile4x4pf32)(&a, &b, i0, j0, k, mb, &mut d_tier);
+            scalar::btile4x4pf32(&a, &b, i0, j0, k, mb, &mut d_ref);
+            assert!(
+                d_tier
+                    .iter()
+                    .zip(&d_ref)
+                    .all(|(x, y)| x.to_bits() == y.to_bits()),
+                "btile4x4pf32 diverged from twin at k {k} mb {mb} (tier {:?})",
                 t.tier
             );
         }

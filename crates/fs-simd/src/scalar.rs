@@ -235,3 +235,43 @@ pub fn btile4x4p_f64(
         }
     }
 }
+
+/// PACKED f32 batched-GEMM 4×4 tile microkernel (scalar twin, bead
+/// 9ekv scope e): identical layout contract to [`btile4x4p_f64`] at
+/// f32 — A packed i-major, B packed j-major, both walks stride `mb`
+/// per l; zero start, l-ascending fused accumulate per element.
+/// Capsules must match bitwise.
+///
+/// # Panics
+/// If the packed buffers or `dst` are too short for the tile.
+#[allow(clippy::too_many_arguments)] // packed-layout bundle (see fs-la::batched)
+pub fn btile4x4pf32(
+    a: &[f32],
+    b: &[f32],
+    i0: usize,
+    j0: usize,
+    k: usize,
+    mb: usize,
+    dst: &mut [f32],
+) {
+    assert!(
+        k >= 1
+            && (i0 + 3) * k * mb + k * mb <= a.len()
+            && (j0 + 3) * k * mb + k * mb <= b.len()
+            && dst.len() >= 16 * mb,
+        "btile4x4pf32 packed bounds (programmer error)"
+    );
+    for ti in 0..4 {
+        for tj in 0..4 {
+            let drow = &mut dst[(ti * 4 + tj) * mb..(ti * 4 + tj + 1) * mb];
+            drow.fill(0.0);
+            for l in 0..k {
+                let ap = &a[((i0 + ti) * k + l) * mb..][..mb];
+                let bp = &b[((j0 + tj) * k + l) * mb..][..mb];
+                for ((s, &am), &bm) in drow.iter_mut().zip(ap).zip(bp) {
+                    *s = am.mul_add(bm, *s);
+                }
+            }
+        }
+    }
+}

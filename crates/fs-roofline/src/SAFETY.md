@@ -1,4 +1,4 @@
-# SAFETY: fs-roofline/axes.rs FMA probe capsule (bead xlvx)
+# SAFETY: fs-roofline/fma_kernel.rs FMA probe capsule (bead xlvx)
 
 ## What the unsafe does
 One `#[target_feature(enable = "avx,fma")]` function whose body is the

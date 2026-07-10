@@ -83,3 +83,24 @@ battery` gates bitwise equality with the scalar twin over run lengths
 {2,6,8,32,34} (covering both the vector path and the whole-delegation
 tail), both directions, special values — verified GREEN natively on
 x86-64 (Threadripper 5995WX). fs-fft's golden hash is tier-invariant.
+
+## btile4x4p_f64 (bead 9ekv, file x86/gemm.rs)
+
+Packed 4×4 batched-GEMM tile microkernel, AVX2+FMA twin of
+`scalar::btile4x4p_f64`. The façade re-verifies avx2+fma before the
+`#[target_feature]` body and delegates to the scalar twin otherwise, so
+it is unconditionally safe to call. Bounds are asserted up front by the
+shared `checked_btile4x4p_lengths` (the same helper the scalar/NEON
+twins use): `a_len ≤ a.len()`, `b_len ≤ b.len()`, `dst_len ≤ dst.len()`.
+The vector body derives four A row-bases `((i0+t)·k)·mb` and four B
+col-bases `((j0+t)·k)·mb`; per lane-block `m` (step 4, `m < (mb/4)·4`)
+and per `l ∈ 0..k` it reads exactly 4 f64 at `base(t) + l·mb + m`
+(maximal offset `≤ base + (k−1)·mb + mb − 4`, inside the extents) and
+writes exactly 4 f64 per output row at `(ti·4+tj)·mb + m` (16 disjoint
+rows within `dst`). The `mb % 4` tail lanes run the scalar per-lane
+loop over the same bounded pointers. Only unaligned `loadu`/`storeu`
+are used. Bitwise contract: 16 `__m256d` accumulators start at
+`_mm256_setzero_pd()` (+0.0) and fuse via `_mm256_fmadd_pd` in
+l-ascending order — exactly the twin's per-lane `mul_add` from +0.0.
+Compensating check: `tier_equivalence_battery` gates bitwise equality
+with the scalar twin over the tested (k, mb) grid.
