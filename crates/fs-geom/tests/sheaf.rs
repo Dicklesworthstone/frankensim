@@ -327,13 +327,17 @@ fn sh_004_adversarial_seams_and_soundness() {
         };
         let kiss: Vec<&dyn Chart> = vec![&s1, &s2];
         let kiss_complex = SheafComplex::from_charts(&kiss, cx);
-        if !kiss_complex.interfaces.is_empty() {
-            let kv = kiss_complex.watertightness(1e-9);
-            assert!(
-                !matches!(kv.value, SheafVerdict::Pass { .. }),
-                "near-tangent distinct surfaces must not certify"
-            );
-        }
+        // The 0.05 gap means NO overlap interface is discovered, so the
+        // interface-agreement check has gathered zero evidence. It must NOT
+        // report a positive PASS from an empty bound set (bead obnw: `all()`
+        // on the empty set was vacuously true) — the honest verdict is Unknown.
+        let kv = kiss_complex.watertightness(1e-9);
+        assert!(
+            matches!(kv.value, SheafVerdict::Unknown { .. }),
+            "near-tangent distinct surfaces (no interface) must be Unknown, not a \
+             false PASS, got {:?}",
+            kv.value
+        );
         // SOUNDNESS cross-examination (the falsifier pairing): a PASSing
         // watertight model survives ray parity; the falsifier runs a
         // DIFFERENT algorithm (sign-crossing counts) on the same charts.

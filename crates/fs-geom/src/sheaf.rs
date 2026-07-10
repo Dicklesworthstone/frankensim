@@ -398,7 +398,14 @@ impl SheafComplex {
         let bounds = self.mismatch_bounds(tol);
         let worst_hi = bounds.iter().map(|b| b.hi_report).fold(0.0f64, f64::max);
         let worst_lo = bounds.iter().map(|b| b.lo_report).fold(0.0f64, f64::max);
-        let all_pass = bounds.iter().all(|b| b.all_within);
+        // PASS requires at least one DISCOVERED interface whose samples all lie
+        // inside [0, tol]. An empty `bounds` means NO interface was found (charts
+        // are disjoint/gapped/near-tangent, or the geometry is empty) — the
+        // interface-agreement check gathered NO evidence, so the honest verdict
+        // is `Unknown`, not a positive `worst_mismatch = 0` PASS. `all()` on an
+        // empty set is vacuously true; guarding on non-emptiness closes the
+        // vacuous-truth false certificate (bead obnw).
+        let all_pass = !bounds.is_empty() && bounds.iter().all(|b| b.all_within);
         let obstruction: Vec<((usize, usize), f64)> = bounds
             .iter()
             .filter(|b| b.proven_leak)
