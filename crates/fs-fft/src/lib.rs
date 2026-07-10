@@ -210,7 +210,12 @@ impl Fft {
                     if inverse {
                         (w1, w2, w3) = (w1.conj(), w2.conj(), w3.conj());
                     }
-                    if s >= 4 {
+                    // Threshold measured, not vibed: below s = 64 the
+                    // per-p call overhead (slicing + dispatch) costs
+                    // more than the NEON win on 8–256-f64 runs; the
+                    // inline loop below autovectorizes to ~the same
+                    // GB/s there. Bits identical on both paths.
+                    if s >= 64 {
                         let wv = [w1.re, w1.im, w2.re, w2.im, w3.re, w3.im];
                         r4(
                             simd_view::as_f64(&src[s * p..s * p + s]),
