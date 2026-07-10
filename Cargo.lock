@@ -1346,6 +1346,7 @@ dependencies = [
  "fs-exec",
  "fs-geom",
  "fs-ivl",
+ "fs-math",
  "fs-obs",
  "fs-rep-mesh",
 ]
@@ -1725,6 +1726,10 @@ dependencies = [
 [[package]]
 name = "fs-sos"
 version = "0.0.1"
+dependencies = [
+ "fs-ivl",
+ "fs-math",
+]
 
 [[package]]
 name = "fs-sparse"

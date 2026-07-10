@@ -524,6 +524,32 @@ impl fmt::Display for DimensionMismatch {
 
 impl core::error::Error for DimensionMismatch {}
 
+/// Runtime dimension arithmetic exceeded the representable exponent domain.
+/// Refusing is safer than attaching saturated metadata to an unsaturated value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DimensionOverflow {
+    /// Operation that failed.
+    pub op: &'static str,
+    /// Dimensions before the attempted scaling.
+    pub dims: Dims,
+    /// Requested scale factor.
+    pub factor: i32,
+}
+
+impl fmt::Display for DimensionOverflow {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "dimension overflow in {}: [{}] scaled by {} leaves the supported i8 exponent domain",
+            self.op,
+            self.dims.unit_string(),
+            self.factor
+        )
+    }
+}
+
+impl core::error::Error for DimensionOverflow {}
+
 /// A runtime-dimensioned value: the dimension vector travels as data. Used
 /// for IR values, data files, and anywhere compile-time `Qty` cannot reach
 /// (G3 demands unit-rescaling invariance through RUNTIME paths too).
@@ -589,13 +615,23 @@ impl QtyAny {
         }
     }
 
-    /// Integer power: dimensions scale.
-    #[must_use]
-    pub fn powi(self, n: i8) -> QtyAny {
-        QtyAny {
-            value: powi_pinned(self.value, i32::from(n)),
-            dims: self.dims.times(n),
+    /// Integer power with checked dimension scaling.
+    ///
+    /// # Errors
+    /// [`DimensionOverflow`] when any scaled exponent would leave `i8`.
+    pub fn powi(self, n: i8) -> Result<QtyAny, DimensionOverflow> {
+        let mut scaled = [0i8; 5];
+        for (out, &e) in scaled.iter_mut().zip(&self.dims.0) {
+            *out = e.checked_mul(n).ok_or(DimensionOverflow {
+                op: "powi",
+                dims: self.dims,
+                factor: i32::from(n),
+            })?;
         }
+        Ok(QtyAny {
+            value: powi_pinned(self.value, i32::from(n)),
+            dims: Dims(scaled),
+        })
     }
 
     /// Downcast to a compile-time `Qty`, checking the dimension.
@@ -654,7 +690,9 @@ impl fmt::Display for QtyAny {
 }
 
 /// Pinned-order integer power (LSB-first square-and-multiply, one final
-/// reciprocal for negative n) — the `__powidf2` operation sequence.
+/// reciprocal for ordinary negative results). A reciprocal-base recovery
+/// preserves representable subnormals when the positive intermediate
+/// overflows.
 ///
 /// `f64::powi` is FORBIDDEN in value-producing paths: its rounding is
 /// optimization-level-dependent (bead 4xnt), which would make parsed
@@ -664,21 +702,31 @@ impl fmt::Display for QtyAny {
 /// loop is duplicated rather than the layer boundary broken. Keep the
 /// two implementations textually in sync.
 pub(crate) fn powi_pinned(x: f64, n: i32) -> f64 {
-    let recip = n < 0;
-    let mut b = i64::from(n).unsigned_abs();
-    let mut a = x;
-    let mut r = 1.0f64;
-    loop {
-        if b & 1 == 1 {
-            r *= a;
+    fn unsigned(mut a: f64, mut b: u64) -> f64 {
+        let mut r = 1.0f64;
+        loop {
+            if b & 1 == 1 {
+                r *= a;
+            }
+            b /= 2;
+            if b == 0 {
+                break;
+            }
+            a *= a;
         }
-        b /= 2;
-        if b == 0 {
-            break;
-        }
-        a *= a;
+        r
     }
-    if recip { 1.0 / r } else { r }
+
+    let b = i64::from(n).unsigned_abs();
+    let positive = unsigned(x, b);
+    if n >= 0 {
+        return positive;
+    }
+    let reciprocal = 1.0 / positive;
+    if reciprocal == 0.0 && x.is_finite() && x != 0.0 {
+        return unsigned(1.0 / x, b);
+    }
+    reciprocal
 }
 
 #[cfg(test)]
@@ -721,6 +769,21 @@ mod tests {
             msg.contains("dimension mismatch"),
             "teaching message expected, got: {msg}"
         );
+    }
+
+    #[test]
+    fn qty_any_power_refuses_dimension_saturation() {
+        let q = QtyAny::new(2.0, Dims([2, 0, 0, 0, 0]));
+        // det-ok: QtyAny::powi — routes to powi_pinned (4xnt)
+        let err = q.powi(64).expect_err("m^128 cannot fit runtime dims");
+        assert_eq!(err.factor, 64);
+
+        let admitted = QtyAny::new(2.0, Dims([1, 0, 0, 0, 0]))
+            // det-ok: QtyAny::powi — routes to powi_pinned (4xnt)
+            .powi(101)
+            .expect("m^101 is representable");
+        assert_eq!(admitted.dims, Dims([101, 0, 0, 0, 0]));
+        assert_eq!(powi_pinned(2.0, -1024).to_bits(), 1_u64 << 50);
     }
 
     #[test]

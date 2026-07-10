@@ -117,7 +117,11 @@ pub fn frame_samples(q: Quat, dirs: &[[f64; 3]]) -> Vec<f64> {
     dirs.iter()
         .map(|d| {
             let dot = |a: [f64; 3]| a[0] * d[0] + a[1] * d[1] + a[2] * d[2];
-            dot(ax).powi(4) + dot(ay).powi(4) + dot(az).powi(4)
+            // det::powi: pinned (x²)² order in every build mode (4xnt);
+            // bit-neutral here — literal-4 lowerings already squared.
+            fs_math::det::powi(dot(ax), 4)
+                + fs_math::det::powi(dot(ay), 4)
+                + fs_math::det::powi(dot(az), 4)
         })
         .collect()
 }
