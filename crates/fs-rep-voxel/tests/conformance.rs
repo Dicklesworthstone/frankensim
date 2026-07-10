@@ -5,7 +5,11 @@
 //! attributes preserved, degenerates refuse structurally, and realization
 //! behaves like a watertight solid's level set.
 
-use fs_rep_voxel::{LatticeGraph, LatticeNode, OccupancyChart, OccupancyField, PointCloud, Strut};
+use fs_rep_voxel::{
+    LatticeGraph, LatticeNode, OccupancyChart, OccupancyField, PointCloud, Strut, VoxelError,
+};
+
+const TEST_DT_BUDGET: usize = 1_000_000;
 
 fn verdict(case: &str, detail: &str) {
     println!(
@@ -100,11 +104,11 @@ fn rv_001_morphology_matches_brute_force_and_algebra() {
     // Boolean algebra: (A ∪ B) \ B ⊆ A, A ∩ B ⊆ A.
     let b = ball(3);
     let mut u = f.clone();
-    u.union(&b);
-    u.subtract(&b);
+    u.union(&b).expect("matching frames");
+    u.subtract(&b).expect("matching frames");
     assert!(active_set(&u).is_subset(&before));
     let mut i = f.clone();
-    i.intersect(&b);
+    i.intersect(&b).expect("matching frames");
     assert!(active_set(&i).is_subset(&active_set(&b)));
     println!("{}", f.stats_json());
     verdict(
@@ -136,12 +140,16 @@ fn rv_002_euclidean_dt_is_exact_vs_reference() {
     }
     seeds.sort_unstable();
     seeds.dedup();
-    let dt = fs_rep_voxel::euclidean_dt(&f).expect("nonempty");
+    let dt = fs_rep_voxel::euclidean_dt(&f, TEST_DT_BUDGET)
+        .expect("admissible box")
+        .expect("nonempty");
+    let dt_min = dt.min();
+    let dt_dims = dt.dims();
     // O(n²) reference over the whole box: EXACT equality of squared
     // distances (both sides are integer-valued in voxel units).
-    for x in dt.min[0]..dt.min[0] + i32::try_from(dt.dims[0]).expect("fits") {
-        for y in dt.min[1]..dt.min[1] + i32::try_from(dt.dims[1]).expect("fits") {
-            for z in dt.min[2]..dt.min[2] + i32::try_from(dt.dims[2]).expect("fits") {
+    for x in dt_min[0]..dt_min[0] + i32::try_from(dt_dims[0]).expect("fits") {
+        for y in dt_min[1]..dt_min[1] + i32::try_from(dt_dims[1]).expect("fits") {
+            for z in dt_min[2]..dt_min[2] + i32::try_from(dt_dims[2]).expect("fits") {
                 let brute = seeds
                     .iter()
                     .map(|s| {
@@ -162,9 +170,9 @@ fn rv_002_euclidean_dt_is_exact_vs_reference() {
     let mut s2 = 0xD7_0002u64;
     for _ in 0..200 {
         let p = [
-            dt.min[0] + (lcg(&mut s2) * dt.dims[0] as f64) as i32,
-            dt.min[1] + (lcg(&mut s2) * dt.dims[1] as f64) as i32,
-            dt.min[2] + (lcg(&mut s2) * dt.dims[2] as f64) as i32,
+            dt_min[0] + (lcg(&mut s2) * dt_dims[0] as f64) as i32,
+            dt_min[1] + (lcg(&mut s2) * dt_dims[1] as f64) as i32,
+            dt_min[2] + (lcg(&mut s2) * dt_dims[2] as f64) as i32,
         ];
         let q = [p[0] + 1, p[1], p[2]];
         if let (Some(dp), Some(dq)) = (dt.distance(p), dt.distance(q)) {
@@ -430,7 +438,7 @@ fn rv_005_occupancy_chart_contract() {
     use fs_exec::{CancelGate, Cx, ExecMode, StreamKey};
     use fs_geom::{Chart, Point3};
     let field = ball(6); // voxel_size 0.1, centered at origin voxel
-    let chart = OccupancyChart::new(field);
+    let chart = OccupancyChart::try_new(field, TEST_DT_BUDGET).expect("admissible chart");
     let gate = CancelGate::new();
     let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
     pool.scope(|arena| {
@@ -474,5 +482,134 @@ fn rv_005_occupancy_chart_contract() {
         "rv-005",
         "occupancy chart: inside/outside, DT-backed distance near analytic, resolution \
          error declared",
+    );
+}
+
+#[test]
+fn rv_006_frames_and_dense_work_fail_closed() {
+    let mut base = OccupancyField::new(1.0, [0.0; 3]).expect("base frame");
+    base.set([1, 2, 3]);
+    base.set([4, 5, 6]);
+    assert_eq!(base.voxel_size(), 1.0);
+    assert_eq!(base.origin(), [0.0; 3]);
+
+    for (name, other) in [
+        (
+            "voxel size",
+            OccupancyField::new(0.5, [0.0; 3]).expect("different size"),
+        ),
+        (
+            "origin",
+            OccupancyField::new(1.0, [1.0, 0.0, 0.0]).expect("different origin"),
+        ),
+    ] {
+        let before = active_set(&base);
+        let mut candidate = base.clone();
+        assert!(matches!(
+            candidate.union(&other),
+            Err(VoxelError::FrameMismatch { .. })
+        ));
+        assert_eq!(
+            active_set(&candidate),
+            before,
+            "union mutated on {name} mismatch"
+        );
+
+        let mut candidate = base.clone();
+        assert!(matches!(
+            candidate.intersect(&other),
+            Err(VoxelError::FrameMismatch { .. })
+        ));
+        assert_eq!(
+            active_set(&candidate),
+            before,
+            "intersection mutated on {name} mismatch"
+        );
+
+        let mut candidate = base.clone();
+        assert!(matches!(
+            candidate.subtract(&other),
+            Err(VoxelError::FrameMismatch { .. })
+        ));
+        assert_eq!(
+            active_set(&candidate),
+            before,
+            "subtraction mutated on {name} mismatch"
+        );
+    }
+
+    assert!(matches!(
+        OccupancyField::new(1.0, [f64::NAN, 0.0, 0.0]),
+        Err(VoxelError::Parameters { .. })
+    ));
+    assert!(matches!(
+        OccupancyField::new(1.0, [0.0, f64::INFINITY, 0.0]),
+        Err(VoxelError::Parameters { .. })
+    ));
+    let empty = OccupancyField::new(1.0, [0.0; 3]).expect("empty frame");
+    assert!(matches!(
+        OccupancyChart::try_new(empty, TEST_DT_BUDGET),
+        Err(VoxelError::EmptyOccupancy {
+            operation: "occupancy chart construction"
+        })
+    ));
+
+    // The full i32 span must be computed in i64/u128, then rejected by
+    // the explicit budget rather than overflowing signed subtraction.
+    let mut extrema = OccupancyField::new(1.0, [0.0; 3]).expect("extrema frame");
+    extrema.set([i32::MIN, 0, 0]);
+    extrema.set([i32::MAX, 0, 0]);
+    assert!(matches!(
+        fs_rep_voxel::euclidean_dt(&extrema, 1_024),
+        Err(VoxelError::VoxelBudgetExceeded {
+            required: 4_294_967_296,
+            maximum: 1_024,
+            ..
+        })
+    ));
+
+    let mut volume = OccupancyField::new(1.0, [0.0; 3]).expect("volume frame");
+    volume.set([0, 0, 0]);
+    volume.set([10, 10, 10]);
+    assert!(matches!(
+        fs_rep_voxel::euclidean_dt(&volume, 1_000),
+        Err(VoxelError::VoxelBudgetExceeded {
+            required: 1_331,
+            maximum: 1_000,
+            ..
+        })
+    ));
+
+    // A single active cell needs a 3^3 complement scan. The constructor
+    // must enforce that budget before populating the complement field.
+    let mut one = OccupancyField::new(1.0, [0.0; 3]).expect("one-cell frame");
+    one.set([0, 0, 0]);
+    assert!(matches!(
+        OccupancyChart::try_new(one, 26),
+        Err(VoxelError::VoxelBudgetExceeded {
+            required: 27,
+            maximum: 26,
+            ..
+        })
+    ));
+
+    for boundary in [i32::MIN, i32::MAX] {
+        let mut edge = OccupancyField::new(1.0, [0.0; 3]).expect("edge frame");
+        edge.set([boundary, 0, 0]);
+        assert!(matches!(
+            OccupancyChart::try_new(edge, 1_000),
+            Err(VoxelError::CoordinateRange {
+                operation: "occupancy complement halo",
+                axis: 0,
+                halo: 1,
+                ..
+            })
+        ));
+    }
+
+    verdict(
+        "rv-006",
+        "frames are validated and immutable; mismatches preserve receivers; DT and halo \
+         refuse overflow and over-budget boxes before dense work",
     );
 }

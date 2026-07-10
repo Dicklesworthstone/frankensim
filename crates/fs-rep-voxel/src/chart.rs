@@ -4,7 +4,8 @@
 //! an Enclosure of half a voxel diagonal (resolution error), never
 //! "exact".
 
-use crate::dt::{DistanceField, euclidean_dt};
+use crate::VoxelError;
+use crate::dt::{CheckedBox, DistanceField, active_bounds, checked_dense_box, euclidean_dt};
 use crate::field::OccupancyField;
 use fs_evidence::NumericalCertificate;
 use fs_exec::Cx;
@@ -22,18 +23,35 @@ pub struct OccupancyChart {
 }
 
 impl OccupancyChart {
-    /// Build from a field (precomputes both distance transforms).
-    #[must_use]
-    pub fn new(field: OccupancyField) -> Self {
-        let to_solid = euclidean_dt(&field);
-        let to_void = complement_dt(&field);
-        let half_diagonal = 0.5 * fs_math::det::sqrt(3.0) * field.voxel_size;
-        OccupancyChart {
+    /// Build from a field and precompute both distance transforms.
+    ///
+    /// `max_voxels` bounds each dense transform and also bounds the
+    /// padded complement scan performed during construction.
+    ///
+    /// # Errors
+    /// Returns a structured coordinate, volume, or budget error before
+    /// the inadmissible scan or allocation begins. Empty fields are
+    /// refused because they cannot produce a finite chart sample.
+    pub fn try_new(field: OccupancyField, max_voxels: usize) -> Result<Self, VoxelError> {
+        if field.active() == 0 {
+            return Err(VoxelError::EmptyOccupancy {
+                operation: "occupancy chart construction",
+            });
+        }
+        let (min, max) = active_bounds(&field).ok_or(VoxelError::EmptyOccupancy {
+            operation: "occupancy chart construction",
+        })?;
+        let complement_box =
+            checked_dense_box(min, max, 1, max_voxels, "occupancy complement halo")?;
+        let to_solid = euclidean_dt(&field, max_voxels)?;
+        let to_void = complement_dt(&field, max_voxels, complement_box)?;
+        let half_diagonal = 0.5 * fs_math::det::sqrt(3.0) * field.voxel_size();
+        Ok(OccupancyChart {
             field,
             to_solid,
             to_void,
             half_diagonal,
-        }
+        })
     }
 
     /// The underlying field.
@@ -45,29 +63,22 @@ impl OccupancyChart {
 
 /// DT of the field's complement over a one-voxel-padded active box
 /// (distance to the nearest EMPTY voxel; used inside the solid).
-fn complement_dt(field: &OccupancyField) -> Option<DistanceField> {
-    let mut min = [i32::MAX; 3];
-    let mut max = [i32::MIN; 3];
-    for (c, _) in field.grid.iter_active() {
-        for k in 0..3 {
-            min[k] = min[k].min(c[k]);
-            max[k] = max[k].max(c[k]);
-        }
-    }
-    if min[0] == i32::MAX {
-        return None;
-    }
-    let mut complement = OccupancyField::new(field.voxel_size, field.origin).ok()?;
-    for x in (min[0] - 1)..=(max[0] + 1) {
-        for y in (min[1] - 1)..=(max[1] + 1) {
-            for z in (min[2] - 1)..=(max[2] + 1) {
+fn complement_dt(
+    field: &OccupancyField,
+    max_voxels: usize,
+    padded: CheckedBox,
+) -> Result<Option<DistanceField>, VoxelError> {
+    let mut complement = OccupancyField::new(field.voxel_size(), field.origin())?;
+    for x in padded.min[0]..=padded.max[0] {
+        for y in padded.min[1]..=padded.max[1] {
+            for z in padded.min[2]..=padded.max[2] {
                 if !field.is_solid([x, y, z]) {
                     complement.set([x, y, z]);
                 }
             }
         }
     }
-    euclidean_dt(&complement)
+    euclidean_dt(&complement, max_voxels)
 }
 
 impl Chart for OccupancyChart {
@@ -78,7 +89,7 @@ impl Chart for OccupancyChart {
             self.to_void
                 .as_ref()
                 .and_then(|dt| dt.distance(coord))
-                .unwrap_or(self.field.voxel_size)
+                .unwrap_or(self.field.voxel_size())
         } else {
             // Outside the DT's bounding box, fall back to an exact scan
             // over active-voxel centers (same center-to-center metric).
@@ -116,8 +127,8 @@ impl Chart for OccupancyChart {
         for (c, _) in self.field.grid.iter_active() {
             let center = self.field.center(c);
             for k in 0..3 {
-                min[k] = min[k].min(center[k] - self.field.voxel_size);
-                max[k] = max[k].max(center[k] + self.field.voxel_size);
+                min[k] = min[k].min(center[k] - self.field.voxel_size());
+                max[k] = max[k].max(center[k] + self.field.voxel_size());
             }
         }
         if min[0] > max[0] {

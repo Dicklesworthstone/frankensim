@@ -22,10 +22,12 @@ fn clone_grid<T: Copy>(grid: &VdbGrid<T>, background: T) -> VdbGrid<T> {
 pub struct OccupancyField {
     /// The sparse active set (active = solid).
     pub grid: VdbGrid<bool>,
-    /// Voxel edge length (m).
-    pub voxel_size: f64,
-    /// World position of voxel (0,0,0)'s min corner.
-    pub origin: [f64; 3],
+    /// Voxel edge length (m). Private so the validated frame cannot be
+    /// changed independently of its active coordinates.
+    voxel_size: f64,
+    /// World position of voxel (0,0,0)'s min corner. Private so all
+    /// externally constructible frames pass [`OccupancyField::new`].
+    origin: [f64; 3],
 }
 
 impl Clone for OccupancyField {
@@ -53,18 +55,44 @@ impl OccupancyField {
     /// An empty field.
     ///
     /// # Errors
-    /// [`VoxelError::Parameters`] on a non-positive voxel size.
+    /// [`VoxelError::Parameters`] on a non-positive voxel size or a
+    /// non-finite origin component.
     pub fn new(voxel_size: f64, origin: [f64; 3]) -> Result<Self, VoxelError> {
         if !(voxel_size.is_finite() && voxel_size > 0.0) {
             return Err(VoxelError::Parameters {
                 what: format!("voxel size {voxel_size} must be positive"),
             });
         }
+        if let Some((axis, value)) = origin
+            .iter()
+            .copied()
+            .enumerate()
+            .find(|(_, value)| !value.is_finite())
+        {
+            return Err(VoxelError::Parameters {
+                what: format!("origin axis {axis} value {value} must be finite"),
+            });
+        }
+        // Canonicalize signed zero so spatially identical frames have one
+        // deterministic identity for exact preflight comparisons.
+        let origin = origin.map(|value| if value == 0.0 { 0.0 } else { value });
         Ok(OccupancyField {
             grid: VdbGrid::new(false),
             voxel_size,
             origin,
         })
+    }
+
+    /// Voxel edge length in world units.
+    #[must_use]
+    pub fn voxel_size(&self) -> f64 {
+        self.voxel_size
+    }
+
+    /// World position of voxel `(0, 0, 0)`'s minimum corner.
+    #[must_use]
+    pub fn origin(&self) -> [f64; 3] {
+        self.origin
     }
 
     /// Activate one voxel.
@@ -95,15 +123,49 @@ impl OccupancyField {
         })
     }
 
+    fn require_same_frame(
+        &self,
+        other: &OccupancyField,
+        operation: &'static str,
+    ) -> Result<(), VoxelError> {
+        let same_size = self.voxel_size.to_bits() == other.voxel_size.to_bits();
+        let same_origin = self
+            .origin
+            .iter()
+            .zip(other.origin)
+            .all(|(left, right)| left.to_bits() == right.to_bits());
+        if same_size && same_origin {
+            return Ok(());
+        }
+        Err(VoxelError::FrameMismatch {
+            operation,
+            left_voxel_size: self.voxel_size,
+            right_voxel_size: other.voxel_size,
+            left_origin: self.origin,
+            right_origin: other.origin,
+        })
+    }
+
     /// Active-set union (in place).
-    pub fn union(&mut self, other: &OccupancyField) {
+    ///
+    /// # Errors
+    /// [`VoxelError::FrameMismatch`] when the two integer lattices do
+    /// not denote the same world-space frame. The receiver is unchanged.
+    pub fn union(&mut self, other: &OccupancyField) -> Result<(), VoxelError> {
+        self.require_same_frame(other, "occupancy union")?;
         for (c, _) in other.grid.iter_active() {
             self.grid.set(c, true);
         }
+        Ok(())
     }
 
     /// Active-set intersection (in place).
-    pub fn intersect(&mut self, other: &OccupancyField) {
+    ///
+    /// # Errors
+    /// [`VoxelError::FrameMismatch`] when the two integer lattices do
+    /// not denote the same world-space frame. The receiver is unchanged.
+    pub fn intersect(&mut self, other: &OccupancyField) -> Result<(), VoxelError> {
+        self.require_same_frame(other, "occupancy intersection")?;
         let doomed: Vec<[i32; 3]> = self
             .grid
             .iter_active()
@@ -113,10 +175,16 @@ impl OccupancyField {
         for c in doomed {
             self.grid.deactivate(c);
         }
+        Ok(())
     }
 
     /// Active-set subtraction (in place).
-    pub fn subtract(&mut self, other: &OccupancyField) {
+    ///
+    /// # Errors
+    /// [`VoxelError::FrameMismatch`] when the two integer lattices do
+    /// not denote the same world-space frame. The receiver is unchanged.
+    pub fn subtract(&mut self, other: &OccupancyField) -> Result<(), VoxelError> {
+        self.require_same_frame(other, "occupancy subtraction")?;
         let doomed: Vec<[i32; 3]> = self
             .grid
             .iter_active()
@@ -126,6 +194,7 @@ impl OccupancyField {
         for c in doomed {
             self.grid.deactivate(c);
         }
+        Ok(())
     }
 
     /// Morphological dilation by `n` voxels (6-connected).

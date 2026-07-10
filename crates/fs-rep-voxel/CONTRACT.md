@@ -16,19 +16,27 @@ validity/topology certificates (wqd.23), lattice/infill homogenization
 
 ## Public types and semantics
 
-- `field`: `OccupancyField` (bool active set + voxel size + origin) with
-  active-set booleans (union/intersect/subtract) and morphology
+- `field`: `OccupancyField` (bool active set + immutable validated voxel
+  size/origin frame) with fallible active-set booleans
+  (union/intersect/subtract) and morphology
   (dilate/erode/open/close, 6-connected — the manufacturing-constraint
   primitives); `MaterialField` (u16 ids, 0 reserved for empty, per-id
   occupancy extraction); `DensityField` (SIMP fractions, out-of-range
-  REFUSED not clamped). Manual `Clone` rebuilds through the active set
-  (the substrate carries no derives).
-- `dt`: `euclidean_dt` — EXACT Euclidean distance transform
+  REFUSED not clamped). `OccupancyField::new` rejects non-finite frame
+  origins; frame metadata is private and exposed read-only. Boolean
+  operations reject frame mismatches before touching the receiver.
+  Manual `Clone` rebuilds through the active set (the substrate carries
+  no derives).
+- `dt`: `euclidean_dt(field, max_voxels)` — fallible EXACT Euclidean
+  distance transform
   (Felzenszwalb–Huttenlocher separable lower envelopes) over the active
   bounding box; squared distances are integer-valued in voxel units and
   conformance checks EQUALITY against the O(n²) reference. Infinite
   (seedless) lines are handled by envelope construction over finite
-  parabolas only.
+  parabolas only. Coordinate spans are computed in `i64`, dense volume
+  in checked `u128`, and no allocation occurs unless the caller's
+  explicit voxel budget admits it. `DistanceField` layout is private and
+  read-only so inconsistent dimensions/storage cannot be forged.
 - `cloud`: `PointCloud` with grid-hash radius/kNN queries (brute-force
   verified, deterministic tie order), PCA normal estimation (smallest
   covariance eigenvector via cyclic Jacobi), and orientation propagation
@@ -41,7 +49,9 @@ validity/topology certificates (wqd.23), lattice/infill homogenization
   preserved exactly. `sdf(p)` realizes the solid as a smooth-min of
   capsule SDFs — a continuous level set, watertight by construction;
   per-strut realization receipts are JSON log lines.
-- `chart`: `OccupancyChart` implements fs-geom `Chart`: inside/outside
+- `chart`: `OccupancyChart::try_new(field, max_voxels)` preflights the
+  one-cell complement halo, rejects empty fields and inadmissible dense
+  work, then implements fs-geom `Chart`: inside/outside
   from occupancy, distance magnitude from the exact DT on both
   polarities (complement DT inside), an exact active-center scan
   fallback outside the DT box, and an HONEST error certificate — an
@@ -64,11 +74,19 @@ validity/topology certificates (wqd.23), lattice/infill homogenization
    of times.
 6. **Resolution error is declared**: every chart sample carries the
    ±half-diagonal enclosure.
+7. **Frames cannot be mixed silently**: occupancy booleans require equal
+   voxel size and origin, and any mismatch leaves the receiver unchanged.
+8. **Dense work is admitted before execution**: DT and complement boxes
+   use checked spans/volumes, respect an explicit maximum voxel count,
+   and reject an unrepresentable `i32` halo before iteration or allocation.
 
 ## Error model
 
-`VoxelError`: `Parameters`, `Lattice` (offending element named),
-`Cloud`, `Graph`. Nothing silently clamps or skips.
+`VoxelError`: `Parameters`, `FrameMismatch` (both frames and operation),
+`CoordinateRange` (axis/range/halo), `VoxelBudgetExceeded` (required and
+authorized voxels), `DenseVolumeOverflow` (dimensions), `EmptyOccupancy`,
+`Lattice` (offending element named), `Cloud`, `Graph`. Nothing silently
+clamps, wraps, mutates after failed admission, or skips.
 
 ## Determinism class
 
@@ -79,8 +97,9 @@ BFS restarts at the lowest unvisited index.
 ## Cancellation behavior
 
 Operations are bounded by active-set/box size; the chart polls nothing
-itself (single-voxel lookups) — P7 by boundedness. Long DT boxes are the
-caller's budget decision (see no-claims).
+itself (single-voxel lookups) — P7 by boundedness. DT and complement
+construction require an explicit maximum dense voxel count. This is an
+allocation/work admission bound, not an asynchronous cancellation point.
 
 ## Unsafe boundary
 
@@ -99,13 +118,19 @@ sphere normals (the ring fixture DELIBERATELY breaks kNN connectivity —
 it caught the propagation gap during development); rv-004 fnx
 round-trip + degenerate refusals + level-set probe parity + realization
 receipts; rv-005 the chart contract (inside/outside, DT-backed distance
-near analytic, declared resolution error, out-of-box fallback).
+near analytic, declared resolution error, out-of-box fallback); rv-006
+non-finite-origin refusal, frame-mismatch/no-mutation, empty-chart
+refusal, full-`i32` span and dense-volume budget refusal, and complement
+halo refusal at both coordinate extrema.
 
 ## No-claim boundaries
 
 - **The DT densifies the ACTIVE BOUNDING BOX**: memory is box volume,
-  not active count — far-flung sparse sets pay for their box (tiled
-  narrow-band DT is follow-up work with fs-rep-sdf's band machinery).
+  not active count — far-flung sparse sets are refused unless the caller
+  explicitly authorizes their checked box volume. The voxel budget does
+  not promise that the host allocator can satisfy an imprudently large
+  authorization. Tiled narrow-band DT is follow-up work with
+  fs-rep-sdf's band machinery.
 - **Out-of-box chart queries scan active centers**: exact but O(active);
   bulk far-field queries should go through the SDF representations.
 - **Morphology is 6-connected**: 26-connected structuring elements and
