@@ -22,6 +22,9 @@
 
 use fs_evidence::{Color, ColorRank};
 
+pub mod coverage;
+pub use coverage::{ConceptPresence, CoverageStatus, package_coverage, package_presence};
+
 /// One claim in an evidence package: a statement plus its epistemic color
 /// (which carries the certificate data — an interval, a regime+dataset, or an
 /// estimator+dispersion).

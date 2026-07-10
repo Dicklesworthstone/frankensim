@@ -360,6 +360,7 @@ struct ConstellationEntry {
     dir: PathBuf,
     version: String,
     git_head: String,
+    remote: String,
 }
 
 /// FNV-1a 64 (mirrors fs-obs::fnv1a64; duplicated here because TOOL crates
@@ -408,11 +409,23 @@ fn constellation_entries(workspace_root: &Path) -> Result<Vec<ConstellationEntry
                 || "no-git".to_string(),
                 |o| String::from_utf8_lossy(&o.stdout).trim().to_string(),
             );
+        let remote = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&dir)
+            .args(["remote", "get-url", "origin"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map_or_else(
+                || "no-remote".to_string(),
+                |o| String::from_utf8_lossy(&o.stdout).trim().to_string(),
+            );
         out.push(ConstellationEntry {
             lib: (*lib).to_string(),
             dir,
             version,
             git_head: head,
+            remote,
         });
     }
     out.sort_by(|a, b| a.lib.cmp(&b.lib));
@@ -430,20 +443,22 @@ fn lock_identity(entries: &[ConstellationEntry]) -> String {
 
 fn render_lockfile(entries: &[ConstellationEntry], hash: u64) -> String {
     let mut s = String::new();
-    s.push_str("{\n  \"schema\": \"frankensim-constellation-lock-v1\",\n");
+    s.push_str("{\n  \"schema\": \"frankensim-constellation-lock-v2\",\n");
     let _ = writeln!(s, "  \"lock_hash\": \"{hash:016x}\",");
     s.push_str(
-        "  \"note\": \"lock_hash covers (lib, version, git_head) only — paths are per-machine\",\n",
+        "  \"note\": \"lock_hash covers (lib, version, git_head) only — paths are per-machine; \
+         remote is transport for bootstrap-constellation (content identity is the git head)\",\n",
     );
     s.push_str("  \"libraries\": [\n");
     for (i, e) in entries.iter().enumerate() {
         let comma = if i + 1 == entries.len() { "" } else { "," };
         let _ = writeln!(
             s,
-            "    {{\"lib\": \"{}\", \"version\": \"{}\", \"git_head\": \"{}\", \"path\": \"{}\"}}{comma}",
+            "    {{\"lib\": \"{}\", \"version\": \"{}\", \"git_head\": \"{}\", \"remote\": \"{}\", \"path\": \"{}\"}}{comma}",
             e.lib,
             e.version,
             e.git_head,
+            e.remote,
             e.dir.display()
         );
     }
@@ -975,6 +990,284 @@ fn check_goldens(root: &Path) -> Vec<Violation> {
     violations
 }
 
+// ---------------------------------------------------------------------------
+// Constellation bootstrap (bead huq.17): a clean host obtains the pinned
+// sources FROM THE LOCK — clone each declared remote at the locked head
+// into the sibling source cache, verify content identity (the commit
+// hash), and never silently substitute a nearby working tree that does
+// not match. Offline re-runs verify the cache; drift, dirt, missing
+// revisions, and identity mismatches fail with structured diagnostics.
+// ---------------------------------------------------------------------------
+
+struct LockRow {
+    lib: String,
+    git_head: String,
+    remote: String,
+}
+
+fn parse_lock_rows(text: &str) -> Result<(String, Vec<LockRow>), String> {
+    let mut rows = Vec::new();
+    let mut lock_hash = String::new();
+    for line in text.lines() {
+        let t = line.trim();
+        if let Some(rest) = t.strip_prefix("\"lock_hash\": \"") {
+            lock_hash = rest.split('"').next().unwrap_or("").to_string();
+        }
+        if t.starts_with("{\"lib\"") {
+            let field = |key: &str| -> Option<String> {
+                let tag = format!("\"{key}\": \"");
+                let start = t.find(&tag)? + tag.len();
+                t[start..].split('"').next().map(str::to_string)
+            };
+            let (Some(lib), Some(git_head)) = (field("lib"), field("git_head")) else {
+                return Err(format!("malformed lock row: {t}"));
+            };
+            rows.push(LockRow {
+                lib,
+                git_head,
+                remote: field("remote").unwrap_or_else(|| "no-remote".to_string()),
+            });
+        }
+    }
+    if lock_hash.is_empty() || rows.is_empty() {
+        return Err("constellation.lock has no hash or no libraries".to_string());
+    }
+    Ok((lock_hash, rows))
+}
+
+fn git_out(dir: &Path, args: &[&str]) -> Result<String, String> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .map_err(|e| format!("git {args:?} failed to spawn: {e}"))?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    } else {
+        Err(format!(
+            "git {args:?} in {} failed: {}",
+            dir.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))
+    }
+}
+
+fn dirname_of(lib: &str) -> &str {
+    CONSTELLATION_REPOS
+        .iter()
+        .find(|(l, _)| *l == lib)
+        .map_or(lib, |(_, d)| d)
+}
+
+/// True iff EVERY dirty path in `status_porcelain` is one of a pair of
+/// indexed paths differing only by ASCII case — the unavoidable
+/// checkout artifact of a case-insensitive filesystem (only one of the
+/// pair can exist on disk). Anything else stays a hard failure.
+fn only_case_collisions(dir: &Path, status_porcelain: &str) -> bool {
+    let Ok(all) = git_out(dir, &["ls-files"]) else {
+        return false;
+    };
+    let mut lower_counts = std::collections::BTreeMap::new();
+    for f in all.lines() {
+        *lower_counts.entry(f.to_ascii_lowercase()).or_insert(0u32) += 1;
+    }
+    let mut any = false;
+    for line in status_porcelain.lines() {
+        // Porcelain is "XY path" but the surrounding capture is trimmed,
+        // so parse from the right: the path is everything after the
+        // status columns' trailing space. Rename lines ("a -> b") stay
+        // hard failures by never matching a colliding pair.
+        let path = line.rsplit(' ').next().unwrap_or("").trim();
+        if path.is_empty() {
+            return false;
+        }
+        if lower_counts.get(&path.to_ascii_lowercase()).copied() < Some(2) {
+            return false;
+        }
+        any = true;
+    }
+    any
+}
+
+/// `bootstrap-constellation [--dest <dir>] [--offline] [--from <base>]`.
+/// dest defaults to the workspace parent (where the manifests' relative
+/// paths point). `--from <base>` overrides every remote with
+/// `<base>/<dirname>` — the air-gapped-mirror / local-test transport.
+// One protocol: fetch/verify/refuse per library + provenance; splitting
+// would scatter the fail-closed invariants the acceptance audits as one.
+#[allow(clippy::too_many_lines)]
+fn cmd_bootstrap(root: &Path) -> ExitCode {
+    let args: Vec<String> = std::env::args().skip(2).collect();
+    let mut dest = root.parent().map(Path::to_path_buf);
+    let mut offline = false;
+    let mut from: Option<String> = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--dest" => dest = it.next().map(PathBuf::from),
+            "--offline" => offline = true,
+            "--from" => from = it.next().cloned(),
+            other => {
+                eprintln!("bootstrap-constellation: unknown flag {other:?}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+    let Some(dest) = dest else {
+        eprintln!("bootstrap-constellation: no destination directory");
+        return ExitCode::FAILURE;
+    };
+    let lock_text = match std::fs::read_to_string(root.join("constellation.lock")) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("error: constellation.lock unreadable: {e} — the lock IS the input");
+            return ExitCode::FAILURE;
+        }
+    };
+    let (lock_hash, rows) = match parse_lock_rows(&lock_text) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let mut provenance = Vec::new();
+    let mut failures = 0usize;
+    for row in &rows {
+        let dirname = dirname_of(&row.lib);
+        let target = dest.join(dirname);
+        let state: Result<&'static str, String> = if target.is_dir() {
+            // EXISTING tree: verify identity; never silently substitute.
+            match git_out(&target, &["rev-parse", "HEAD"]) {
+                Ok(head) if head == row.git_head => {
+                    match git_out(&target, &["status", "--porcelain"]) {
+                        Ok(st) if st.is_empty() => Ok("verified"),
+                        Ok(st) if only_case_collisions(&target, &st) => {
+                            // Paths differing only by case cannot coexist
+                            // on a case-insensitive filesystem; the COMMIT
+                            // identity is verified, and every dirty path is
+                            // provably one of a case-colliding pair — a
+                            // host-filesystem artifact, not a tamper.
+                            eprintln!(
+                                "note: {} shows case-collision checkout artifacts \
+                                 (case-insensitive filesystem); commit identity verified",
+                                target.display()
+                            );
+                            Ok("verified-case-collision")
+                        }
+                        Ok(_) => Err(format!(
+                            "{} is DIRTY at the locked head — a modified working tree is not \
+                             the pinned source; commit/stash there or point --dest elsewhere",
+                            target.display()
+                        )),
+                        Err(e) => Err(e),
+                    }
+                }
+                Ok(head) => Err(format!(
+                    "{} is at {head}, lock pins {} — refusing to silently substitute a \
+                     nearby working tree; align it deliberately or use a fresh --dest",
+                    target.display(),
+                    row.git_head
+                )),
+                Err(e) => Err(format!("{}: {e}", target.display())),
+            }
+        } else if offline {
+            Err(format!(
+                "{} missing from the source cache in --offline mode",
+                target.display()
+            ))
+        } else {
+            // FETCH: clone the declared transport, check out the pinned
+            // revision detached, verify the resulting identity.
+            let url = from
+                .as_ref()
+                .map_or_else(|| row.remote.clone(), |b| format!("{b}/{dirname}"));
+            if url == "no-remote" {
+                Err(format!(
+                    "lock declares no remote for {} — re-lock on a host that has one",
+                    row.lib
+                ))
+            } else {
+                let clone = std::process::Command::new("git")
+                    .args(["clone", "--no-checkout", "-c", "core.autocrlf=false", &url])
+                    .arg(&target)
+                    .output();
+                match clone {
+                    Ok(o) if o.status.success() => {
+                        match git_out(&target, &["checkout", "--detach", &row.git_head]) {
+                            Ok(_) => match git_out(&target, &["rev-parse", "HEAD"]) {
+                                Ok(head) if head == row.git_head => Ok("cloned"),
+                                Ok(head) => Err(format!(
+                                    "post-checkout identity mismatch: {head} != {}",
+                                    row.git_head
+                                )),
+                                Err(e) => Err(e),
+                            },
+                            Err(e) => Err(format!(
+                                "locked revision {} unavailable from {url}: {e}",
+                                row.git_head
+                            )),
+                        }
+                    }
+                    Ok(o) => Err(format!(
+                        "clone of {url} failed: {}",
+                        String::from_utf8_lossy(&o.stderr).trim()
+                    )),
+                    Err(e) => Err(format!("git clone failed to spawn: {e}")),
+                }
+            }
+        };
+        match state {
+            Ok(st) => {
+                println!(
+                    "{{\"check\":\"constellation-bootstrap\",\"lib\":\"{}\",\"state\":\"{st}\",\"head\":\"{}\"}}",
+                    row.lib, row.git_head
+                );
+                provenance.push(format!(
+                    "{{\"lib\": \"{}\", \"git_head\": \"{}\", \"remote\": \"{}\", \"state\": \"{st}\"}}",
+                    row.lib, row.git_head, row.remote
+                ));
+            }
+            Err(why) => {
+                println!(
+                    "{{\"check\":\"constellation-bootstrap\",\"lib\":\"{}\",\"state\":\"failed\",\"why\":\"{}\"}}",
+                    row.lib,
+                    why.replace('"', "'")
+                );
+                eprintln!("bootstrap FAILED for {}: {why}", row.lib);
+                failures += 1;
+            }
+        }
+    }
+    if failures > 0 {
+        eprintln!(
+            "constellation bootstrap failed for {failures}/{} libraries (fail closed)",
+            rows.len()
+        );
+        return ExitCode::FAILURE;
+    }
+    // Build provenance: the lock hash + every fetched/verified identity.
+    let prov = format!(
+        "{{\n\"schema\": \"frankensim-constellation-bootstrap-v1\",\n\"lock_hash\": \"{lock_hash}\",\n\"dest\": \"{}\",\n\"libraries\": [\n{}\n]\n}}\n",
+        dest.display(),
+        provenance.join(",\n")
+    );
+    let prov_path = dest.join("constellation-bootstrap.json");
+    if let Err(e) = std::fs::write(&prov_path, prov) {
+        eprintln!("error writing bootstrap provenance: {e}");
+        return ExitCode::FAILURE;
+    }
+    eprintln!(
+        "constellation bootstrap OK: {} libraries at their locked heads under {} \
+         (provenance: {})",
+        rows.len(),
+        dest.display(),
+        prov_path.display()
+    );
+    ExitCode::SUCCESS
+}
+
 fn main() -> ExitCode {
     let cmd = std::env::args()
         .nth(1)
@@ -995,6 +1288,7 @@ fn main() -> ExitCode {
     match cmd.as_str() {
         "lock-constellation" => return cmd_constellation(&root, false),
         "check-constellation" => return cmd_constellation(&root, true),
+        "bootstrap-constellation" => return cmd_bootstrap(&root),
         _ => {}
     }
     let manifests = match load_workspace(&root) {
@@ -1367,12 +1661,14 @@ mod tests {
     fn lock_identity_is_canonical_and_version_extraction_works() {
         let entries = vec![
             ConstellationEntry {
+                remote: "https://example.invalid/x.git".to_string(),
                 lib: "a".into(),
                 dir: PathBuf::from("/x/a"),
                 version: "1.0.0".into(),
                 git_head: "abc".into(),
             },
             ConstellationEntry {
+                remote: "https://example.invalid/x.git".to_string(),
                 lib: "b".into(),
                 dir: PathBuf::from("/elsewhere/b"),
                 version: "2.0.0".into(),

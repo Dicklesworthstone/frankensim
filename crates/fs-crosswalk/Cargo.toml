@@ -11,8 +11,6 @@ description = "Regulatory vocabulary crosswalk (addendum Proposal 12): a machine
 layer = "UTIL"
 
 [dependencies]
-fs-package = { path = "../fs-package" }
-fs-evidence = { path = "../fs-evidence" }
 
 [dev-dependencies]
 

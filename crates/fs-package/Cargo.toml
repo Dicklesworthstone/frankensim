@@ -11,6 +11,7 @@ description = "Machine-checkable evidence packages (addendum Proposal 12): a con
 layer = "L6"
 
 [dependencies]
+fs-crosswalk = { path = "../fs-crosswalk" }
 fs-evidence = { path = "../fs-evidence" }
 
 [dev-dependencies]
