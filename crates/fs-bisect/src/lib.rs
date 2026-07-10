@@ -1,4 +1,5 @@
-//! fs-bisect — git-bisect for a wrong number (plan addendum, Proposal 10).
+//! fs-bisect — git-bisect for a wrong number (plan addendum, Proposal 10),
+//! plus the Gauntlet failure-compounding workflow ([`compound`], bead 6nb.9).
 //! Layer: L6 (a version-control/orchestration concern; no numerical deps).
 //!
 //! Given a linear COMMIT SEQUENCE and a monotone predicate ("QoI within spec",
@@ -21,6 +22,8 @@
 //! this crate's; here the [`CommitOracle`] IS that replay-plus-predicate.
 //! Everything here is deterministic and side-effect-free; the oracle's own
 //! (possibly expensive) evaluation runs under the caller's cancellation scope.
+
+pub mod compound;
 
 /// A commit's verdict under the predicate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
