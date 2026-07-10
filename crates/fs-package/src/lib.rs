@@ -605,7 +605,7 @@ impl EvidencePackage {
 
         check_count("claims", self.claims.len())?;
         let mut bytes = 512usize;
-        let mut nodes = 8usize;
+        let mut nodes = 12usize;
         add_text(
             &mut bytes,
             "provenance.code_version",
