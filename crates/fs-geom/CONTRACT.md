@@ -206,6 +206,9 @@ and support, and exact disagreement with zero diagnostic retention.
   checking is SAMPLED evidence, not a proof (`Agreed` means "no
   counterexample found at these seeded points under the reported certificate
   strength + declared intervals + configured slack").
+- Two registered presentations are sufficient to run the pairwise check; this
+  module does not certify implementation or provenance independence between
+  them. Independence must be established by the campaign that cites the result.
 - `SampledSdf` claims no Lipschitz bound for its interpolant and no
   gradients (rep-sdf's job); its outside-box enclosure relies on the
   SOURCE's certified Lipschitz constant being truthful.

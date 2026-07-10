@@ -388,7 +388,8 @@ impl AgreementStatus {
 /// Why an agreement proposition could not be evaluated.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgreementUnknownReason {
-    /// Agreement requires at least two independent presentations.
+    /// Agreement requires at least two presentations. This check does not
+    /// establish that their implementations or provenance are independent.
     InsufficientCharts {
         /// Number of presentations available.
         found: usize,
