@@ -152,7 +152,10 @@ fn powi_model_minimizes_to_the_exact_boundary() {
             "frankensim-epic-gauntlet-6nb.9".to_string(),
             "frankensim-powi-build-mode-determinism-4xnt".to_string(),
         ],
-        Some("forbid variable-exponent integer powers in deterministic paths (4xnt lint)".to_string()),
+        Some(
+            "forbid variable-exponent integer powers in deterministic paths (4xnt lint)"
+                .to_string(),
+        ),
         1000,
     )
     .expect("the seeded golden break must minimize");
