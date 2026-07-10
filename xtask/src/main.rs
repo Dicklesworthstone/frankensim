@@ -8,6 +8,7 @@
 //! - `check-powi`     — no build-mode-dependent `f64::powi` in deterministic paths (bead 4xnt).
 //! - `check-goldens`  — golden hashes declare upstream couplings; drift re-freezes deliberately (bead y4pt).
 //! - `check-claims`   — README hashes/crates/sentinels must exist in code (bead 06yc).
+//! - `check-closures` — closed bug beads must cite regression evidence or a disposition (bead hx4p).
 //! - `check-all`      — all of the above; non-zero exit on any violation.
 //! - `lock-constellation` / `check-constellation` — pin/verify the Franken library states.
 //!
@@ -21,6 +22,7 @@
 //! our files, and the conventions are enforced, not inferred.
 
 mod claims;
+mod closures;
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -1277,6 +1279,7 @@ fn main() -> ExitCode {
         "check-powi" => (check_powi(&root), vec!["powi-determinism"]),
         "check-goldens" => (check_goldens(&root), vec!["golden-couplings"]),
         "check-claims" => (claims::check_claims(&root), vec!["claim-state"]),
+        "check-closures" => (closures::check_closures(&root), vec!["closure-evidence"]),
         "check-all" => {
             let mut v = check_layers(&manifests);
             v.extend(check_deps(&manifests));
@@ -1285,6 +1288,7 @@ fn main() -> ExitCode {
             v.extend(check_powi(&root));
             v.extend(check_goldens(&root));
             v.extend(claims::check_claims(&root));
+            v.extend(closures::check_closures(&root));
             (
                 v,
                 vec![
@@ -1295,14 +1299,15 @@ fn main() -> ExitCode {
                     "powi-determinism",
                     "golden-couplings",
                     "claim-state",
+                    "closure-evidence",
                 ],
             )
         }
         other => {
             eprintln!(
                 "unknown command {other:?}; use check-layers|check-deps|check-contracts|\
-                 check-unsafe|check-powi|check-goldens|check-claims|check-all|\
-                 lock-constellation|check-constellation"
+                 check-unsafe|check-powi|check-goldens|check-claims|check-closures|\
+                 check-all|lock-constellation|check-constellation"
             );
             return ExitCode::FAILURE;
         }
