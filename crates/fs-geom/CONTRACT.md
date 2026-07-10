@@ -26,10 +26,15 @@ Depends on fs-exec (Cx), fs-evidence, fs-alloc, fs-obs.
 - `Region` — charts + per-chart `ProvenanceHash`; deterministic
   `primary()` (first); `check_agreement(&AgreementConfig, &Cx) ->
   Result<AgreementReport, Cancelled>` — seeded sampling over the inflated
-  union support; two charts agree at x iff their signed distances differ
-  by at most the SUM of their declared error half-widths plus the
-  configured slack; failures localize (point, chart names, gap vs
-  allowed, first-K cap) and reports render canonical JSON.
+  union support with an explicit `Agreed | Disagreed | Unknown` verdict.
+  Two valid chart samples agree at x iff their declared signed-distance
+  intervals overlap after configured slack. Zero samples, fewer than two
+  charts, invalid configuration/support, non-finite outputs, malformed
+  certificates, and `NoClaim` all produce `Unknown`, never vacuous agreement.
+  Reports retain the weakest certificate class used, the strongest class
+  supporting a counterexample, exact total counts, signed worst excess (so a
+  negative agreement margin is not rounded away), and first-K localized
+  disagreement/unknown diagnostics in canonical JSON.
 - `Convert<Dst>: Chart` — `convert(ErrBudget, &Cx) ->
   Result<Certified<Dst>, ConvertDiag>`: the receipt's QoI is the achieved
   absolute sd-error bound (enclosed `[0, achieved]`), provenance chained.
@@ -139,10 +144,12 @@ Depends on fs-exec (Cx), fs-evidence, fs-alloc, fs-obs.
    tolerance); certified Lipschitz bounds hold along random steps;
    claimed gradients are unit-norm and match central differences on
    smooth fixtures.
-2. Agreement soundness: identical presentations always agree; a
-   disagreement implies at least one chart's geometry or error
-   declaration is wrong — proven by detecting an undeclared 0.03 bias
-   with gap-localized diagnostics naming the lying chart (geo-003).
+2. Agreement soundness: identical valid presentations always agree; a
+   disagreement implies at least one chart's geometry or error declaration is
+   wrong — proven by detecting an undeclared 0.03 bias with exact-strength,
+   gap-localized diagnostics naming the lying chart (geo-003). Missing or
+   malformed evidence is structurally `Unknown`, including when diagnostic
+   retention is disabled.
 3. Conversion receipts are conservative: empirical |sampled − exact| over
    10k seeded points never exceeds the receipt's QoI bound (geo-004);
    receipts satisfy the `Certified` discipline (enclosure-grade, chained
@@ -154,9 +161,10 @@ Depends on fs-exec (Cx), fs-evidence, fs-alloc, fs-obs.
 
 ## Error model
 Structured teaching values throughout: `ConvertDiag` (ranked fixes),
-`fs_exec::Cancelled` for interrupted checks, `fs_evidence::CertifyError`
-through receipts. Constructors are total (`Aabb::new` normalizes); no
-panics cross the boundary.
+`fs_exec::Cancelled` for interrupted checks, `AgreementStatus::Unknown` plus
+structured `AgreementUnknownReason` for non-evaluable checks, and
+`fs_evidence::CertifyError` through receipts. Constructors are total
+(`Aabb::new` normalizes); no panics cross the boundary.
 
 ## Determinism class
 Deterministic: seeded sampling, insertion-ordered charts, canonical JSON
@@ -187,14 +195,17 @@ tests/conformance.rs, cases geo-001..geo-005 (JSON-line verdicts; seeded
 cases carry seeds): the fixture trait-law battery, multi-chart agreement
 within composed bounds + G5 replay, lying-chart detection with localized
 diagnostics, rigorous conversion receipts + teaching refusals, and
-cancellation. In-module suites cover Aabb/vector laws, fixture known
-values, agreement determinism, and cancellation.
+cancellation. In-module suites cover Aabb/vector laws, fixture known values,
+agreement determinism, cancellation, zero-evidence/one-chart refusal,
+non-finite configuration and chart output, `NoClaim`, malformed certificates
+and support, and exact disagreement with zero diagnostic retention.
 
 ## No-claim boundaries
 - NO watertightness/manifoldness/self-intersection certificates here —
   those are wqd.7 (validity certificates) and the sheaf bead; agreement
-  checking is SAMPLED evidence, not a proof (its verdict is "no
-  counterexample found at these seeded points + declared errors").
+  checking is SAMPLED evidence, not a proof (`Agreed` means "no
+  counterexample found at these seeded points under the reported certificate
+  strength + declared intervals + configured slack").
 - `SampledSdf` claims no Lipschitz bound for its interpolant and no
   gradients (rep-sdf's job); its outside-box enclosure relies on the
   SOURCE's certified Lipschitz constant being truthful.

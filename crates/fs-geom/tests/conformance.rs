@@ -9,7 +9,8 @@ use fs_evidence::ProvenanceHash;
 use fs_exec::{CancelGate, Cancelled, Cx, ExecMode, StreamKey};
 use fs_geom::fixtures::{BoxChart, LyingSphereChart, SphereChart, TorusChart};
 use fs_geom::{
-    Aabb, AgreementConfig, Chart, Convert, ConvertDiag, ErrBudget, Point3, Region, Vec3,
+    Aabb, AgreementConfig, AgreementStatus, Chart, Convert, ConvertDiag, ErrBudget, Point3, Region,
+    Vec3,
 };
 use std::sync::Arc;
 
@@ -188,7 +189,10 @@ fn geo_002_multi_chart_region_agrees_within_composed_bounds() {
         let cfg = AgreementConfig::default();
         let r1 = region.check_agreement(&cfg, cx).expect("not cancelled");
         let r2 = region.check_agreement(&cfg, cx).expect("not cancelled");
-        (r1.agreed, r1.to_json() == r2.to_json())
+        (
+            r1.status == AgreementStatus::Agreed,
+            r1.to_json() == r2.to_json(),
+        )
     });
     verdict(
         "geo-002",
@@ -215,7 +219,7 @@ fn geo_003_disagreement_is_detected_with_localized_diagnostics() {
             .check_agreement(&AgreementConfig::default(), cx)
             .expect("not cancelled")
     });
-    let localized = !report.agreed
+    let localized = report.status == AgreementStatus::Disagreed
         && !report.disagreements.is_empty()
         && report.disagreements.iter().all(|d| {
             (d.gap - 0.03).abs() < 1e-9
@@ -228,7 +232,7 @@ fn geo_003_disagreement_is_detected_with_localized_diagnostics() {
             "a 0.03 undeclared bias is caught and localized ({} diagnostics, worst excess \
              {:.4}); report: {}",
             report.disagreements.len(),
-            report.worst_gap,
+            report.worst_excess.expect("valid comparisons"),
             report.to_json()
         ),
     );

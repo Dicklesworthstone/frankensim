@@ -46,7 +46,10 @@ pub mod sheaf_repair;
 
 pub use convert::{Convert, ConvertDiag, ErrBudget, SampledSdf};
 pub use ident::{EntityId, IdTransform, IdentityMap};
-pub use region::{AgreementConfig, AgreementReport, Disagreement, Region, RegionChart};
+pub use region::{
+    AgreementConfig, AgreementReport, AgreementStatus, AgreementUnknown, AgreementUnknownReason,
+    Disagreement, Region, RegionChart,
+};
 pub use sheaf::{
     Interface, InterfaceBound, InterfaceSample, SheafComplex, SheafVerdict, TripleCell,
     ray_parity_falsifier,
