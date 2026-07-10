@@ -17,6 +17,11 @@ fs-la = { path = "../fs-la" }
 fs-math = { path = "../fs-math" }
 fs-rand = { path = "../fs-rand" }
 
+fs-ad = { path = "../fs-ad", optional = true }
+
+[features]
+tape-acq = ["dep:fs-ad", "fs-ad/torch-bridge"]
+
 [dev-dependencies]
 fs-eproc = { path = "../fs-eproc" }
 fs-uq = { path = "../fs-uq" }

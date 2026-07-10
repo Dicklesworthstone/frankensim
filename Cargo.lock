@@ -897,6 +897,7 @@ version = "0.0.1"
 name = "fs-bo"
 version = "0.0.1"
 dependencies = [
+ "fs-ad",
  "fs-ascent",
  "fs-dfo",
  "fs-eproc",

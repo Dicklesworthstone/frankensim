@@ -13,6 +13,8 @@
 //! acquisition gradients remain a recorded follow-up lane.
 
 pub mod acq;
+#[cfg(feature = "tape-acq")]
+pub mod acq_grad;
 pub mod bo;
 pub mod gp;
 pub mod mf;

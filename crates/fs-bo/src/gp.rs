@@ -159,6 +159,22 @@ impl Gp {
         })
     }
 
+    /// Read-only training view for the taped acquisition path:
+    /// (training inputs, DENSE row-major training Cholesky factor,
+    /// α weights). The factor is materialized on demand (fixture-scale
+    /// n; the taped path is feature-gated).
+    #[must_use]
+    pub fn training_view(&self) -> (&[Vec<f64>], Vec<f64>, &[f64]) {
+        let n = self.x.len();
+        let mut l = vec![0.0f64; n * n];
+        for i in 0..n {
+            for j in 0..=i {
+                l[i * n + j] = self.chol.l(i, j);
+            }
+        }
+        (&self.x, l, &self.alpha)
+    }
+
     /// Posterior mean and variance at a point (latent f, no noise).
     #[must_use]
     pub fn predict(&self, xs: &[f64]) -> (f64, f64) {
