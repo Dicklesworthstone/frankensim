@@ -8,7 +8,7 @@
 //! identical to the scalar twin — the golden 0x1d7a_a3c6_b631_7ef0 is
 //! tier-invariant, verified by the gemm test suite, not here.
 
-use fs_la::gemm_f64;
+use fs_la::{gemm_f64, gemm_f64_parallel};
 use fs_roofline::MachineAxes;
 
 /// Best-of-3 measured GFLOP/s (2·m·n·k flops per GEMM).
@@ -64,4 +64,54 @@ fn gemm_attainment() {
         large_best >= 0.75,
         "large-square gemm_f64 clears 75% of measured peak: {large_best:.3}"
     );
+}
+
+/// Best-of-3 all-core GFLOP/s via row-band parallel GEMM.
+fn measure_parallel(n: usize, reps: usize, threads: usize) -> f64 {
+    let a: Vec<f64> = (0..n * n).map(|i| ((i as f64) * 0.13).sin()).collect();
+    let b: Vec<f64> = (0..n * n).map(|i| ((i as f64) * 0.31).cos()).collect();
+    let mut c = vec![0.0f64; n * n];
+    gemm_f64_parallel(n, n, n, 1.0, &a, &b, 0.0, &mut c, threads); // warm
+    let mut best = f64::INFINITY;
+    for _ in 0..3 {
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps {
+            gemm_f64_parallel(n, n, n, 1.0, &a, &b, 0.0, &mut c, threads);
+        }
+        best = best.min(t0.elapsed().as_secs_f64() / reps as f64);
+    }
+    2.0 * (n * n * n) as f64 / best / 1e9
+}
+
+/// The ALL-CORE attainment row (bead xlvx item 3): row-band parallel
+/// GEMM against the measured all-core FMA axis. REPORT row by default;
+/// FS_LA_ROOFLINE_GATE=1 asserts >= 0.5 (parallel GEMM leaves more on
+/// the table than single-thread — memory bandwidth and band tails —
+/// so the all-core floor is honest, not aspirational).
+#[test]
+#[ignore = "perf lane: run explicitly in release with --ignored"]
+fn gemm_attainment_all_core() {
+    let threads = std::env::var("FS_LA_THREADS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(8, std::num::NonZero::get));
+    let axes = MachineAxes::probe();
+    println!(
+        "{{\"metric\":\"axes-all-core\",\"cpu\":\"{}\",\"threads\":{threads},\"peak_all_core_gflops\":{:.1}}}",
+        axes.cpu_brand, axes.peak_all_core_gflops
+    );
+    for n in [512usize, 1024, 2048] {
+        let reps = if n >= 2048 { 1 } else { 3 };
+        let g = measure_parallel(n, reps, threads);
+        let att = g / axes.peak_all_core_gflops;
+        println!(
+            "{{\"metric\":\"gemm-f64-parallel\",\"n\":{n},\"gflops\":{g:.2},\"attainment_all_core\":{att:.3}}}"
+        );
+        if n == 2048 && std::env::var("FS_LA_ROOFLINE_GATE").as_deref() == Ok("1") {
+            assert!(
+                att >= 0.5,
+                "all-core GEMM attainment {att:.3} below the 50% floor"
+            );
+        }
+    }
 }
