@@ -70,8 +70,15 @@ pub enum RaceError {
         candidate_b: usize,
         source: PairwiseInputError,
     },
-    /// Every candidate produced a non-finite loss before a winner existed.
-    NoValidCandidate { invalid: Vec<(u32, usize)> },
+    /// A non-finite loss invalidated the optional-stopping construction.
+    NonFiniteLoss {
+        /// One-based round where the invalid value appeared.
+        round: u32,
+        /// Candidate that emitted the invalid value.
+        candidate: usize,
+        /// IEEE-754 bits of the invalid value.
+        value_bits: u64,
+    },
 }
 
 impl fmt::Display for RaceError {
@@ -101,9 +108,15 @@ impl fmt::Display for RaceError {
                 f,
                 "race lost its validity claim at round {round}, pair ({candidate_a}, {candidate_b}): {source}"
             ),
-            RaceError::NoValidCandidate { invalid } => {
-                write!(f, "every race candidate was structurally invalid: {invalid:?}")
-            }
+            RaceError::NonFiniteLoss {
+                round,
+                candidate,
+                value_bits,
+            } => write!(
+                f,
+                "race lost its validity claim when candidate {candidate} emitted non-finite loss {} at round {round}",
+                f64::from_bits(*value_bits)
+            ),
         }
     }
 }
@@ -128,11 +141,6 @@ pub struct RaceOutcome {
     /// Winner: the surviving candidate with the lowest running mean
     /// loss (ties break by index).
     pub winner: usize,
-    /// Candidates STRUCTURALLY rejected for producing a non-finite
-    /// loss, as `(round, candidate)` — fail-closed, never fed to the
-    /// e-processes, never eligible to win (also present in
-    /// `eliminated`).
-    pub invalid: Vec<(u32, usize)>,
     /// Loss evaluations actually consumed.
     pub evaluations_used: u64,
     /// What a fixed-N design (every candidate to the full budget)
@@ -153,6 +161,22 @@ impl RaceOutcome {
             self.fixed_n_equivalent as f64 / (self.evaluations_used as f64).max(1.0)
         }
     }
+}
+
+fn update_mean(mean: &mut f64, count: &mut u64, value: f64) {
+    if *count == 0 {
+        *mean = value;
+        *count = 1;
+        return;
+    }
+    let next = *count + 1;
+    let n = next as f64;
+    if mean.is_sign_positive() == value.is_sign_positive() {
+        *mean += (value - *mean) / n;
+    } else {
+        *mean = (*mean).mul_add(1.0 - 1.0 / n, value / n);
+    }
+    *count = next;
 }
 
 /// Race a field of candidates with e-BH family-wise elimination.
@@ -176,10 +200,9 @@ impl RaceOutcome {
 /// and inflates false elimination; the battery's certifier test
 /// demonstrates the inflation and pins this one below it.
 ///
-/// Non-finite losses are rejected STRUCTURALLY: the offending candidate
-/// is condemned that round (recorded in [`RaceOutcome::invalid`] and
-/// `eliminated`, kill-handle fired), its poisoned observation never
-/// reaches the e-processes or the running means.
+/// Non-finite losses abort the race with no verdict. Condemning only the
+/// offending stream would select a freeze time using the next observation,
+/// which is not a valid stopped-supermartingale construction.
 ///
 /// # Errors
 /// Invalid settings, paired-loss support violations, or a field with no
@@ -215,16 +238,15 @@ pub fn race_field(
     // (loss_i, loss_j); a_beats_b == "i dominates j".
     let mut races = vec![prototype; n * n];
     let mut alive: Vec<bool> = vec![true; n];
-    let mut sums = vec![0.0f64; n];
+    let mut means = vec![0.0f64; n];
     let mut counts = vec![0u64; n];
     let mut eliminated: Vec<(u32, usize)> = Vec::new();
-    let mut invalid: Vec<(u32, usize)> = Vec::new();
     let mut evaluations_used = 0u64;
     let mut round = 0u32;
     while round < settings.max_rounds && alive.iter().filter(|&&a| a).count() > 1 {
-        // One observation per survivor, canonical order. Non-finite
-        // losses condemn their candidate structurally (fail closed):
-        // nothing poisoned reaches the e-processes or the means.
+        // One observation per survivor, canonical order. A non-finite
+        // loss aborts the entire evidence path: selectively freezing a
+        // component at tau-1 after observing tau is not optional stopping.
         let mut obs: Vec<Option<f64>> = vec![None; n];
         for i in 0..n {
             if !alive[i] {
@@ -233,14 +255,14 @@ pub fn race_field(
             evaluations_used += 1;
             let v = loss(i, u64::from(round));
             if v.is_finite() {
-                sums[i] += v;
-                counts[i] += 1;
+                update_mean(&mut means[i], &mut counts[i], v);
                 obs[i] = Some(v);
             } else {
-                alive[i] = false;
-                invalid.push((round + 1, i));
-                eliminated.push((round + 1, i));
-                let _ = kills.kill(i as u64);
+                return Err(RaceError::NonFiniteLoss {
+                    round: round + 1,
+                    candidate: i,
+                    value_bits: v.to_bits(),
+                });
             }
         }
         // Feed every live pair in BOTH directions: slot (i, j) tracks
@@ -298,24 +320,19 @@ pub fn race_field(
         }
     }
     let survivors: Vec<usize> = (0..n).filter(|&i| alive[i]).collect();
-    // Means are finite by construction (only finite losses accumulate),
-    // so total_cmp is a total order with no panic path.
+    // The overflow-safe online means stay finite even when long streams
+    // contain values near the ends of the finite f64 range.
     let winner = survivors
         .iter()
         .copied()
         .min_by(|&a, &b| {
-            let ma = sums[a] / counts[a].max(1) as f64;
-            let mb = sums[b] / counts[b].max(1) as f64;
-            ma.total_cmp(&mb).then(a.cmp(&b))
+            means[a].total_cmp(&means[b]).then(a.cmp(&b))
         })
-        .ok_or_else(|| RaceError::NoValidCandidate {
-            invalid: invalid.clone(),
-        })?;
+        .expect("finite race inputs leave at least one survivor");
     Ok(RaceOutcome {
         survivors,
         eliminated,
         winner,
-        invalid,
         evaluations_used,
         fixed_n_equivalent: n as u64 * u64::from(settings.max_rounds),
         rounds: round,
@@ -361,7 +378,7 @@ pub fn successive_halving(
     assert!(eta >= 2, "eta must halve at least");
     let n = n_candidates;
     let mut alive: Vec<bool> = vec![true; n];
-    let mut sums = vec![0.0f64; n];
+    let mut means = vec![0.0f64; n];
     let mut counts = vec![0u64; n];
     let mut invalid: Vec<(u32, usize)> = Vec::new();
     let mut evaluations_used = 0u64;
@@ -376,8 +393,7 @@ pub fn successive_halving(
                     evaluations_used += 1;
                     let v = loss(i, u64::from(round));
                     if v.is_finite() {
-                        sums[i] += v;
-                        counts[i] += 1;
+                        update_mean(&mut means[i], &mut counts[i], v);
                     } else {
                         alive[i] = false;
                         invalid.push((round + 1, i));
@@ -389,11 +405,9 @@ pub fn successive_halving(
         }
         let mut live: Vec<usize> = (0..n).filter(|&i| alive[i]).collect();
         let before = live.len();
-        // Means are finite by construction: total order, no panic path.
+        // Overflow-safe online means make this a finite total order.
         live.sort_by(|&a, &b| {
-            let ma = sums[a] / counts[a].max(1) as f64;
-            let mb = sums[b] / counts[b].max(1) as f64;
-            ma.total_cmp(&mb).then(a.cmp(&b))
+            means[a].total_cmp(&means[b]).then(a.cmp(&b))
         });
         let keep = (before as u32).div_ceil(eta).max(1) as usize;
         for &i in &live[keep.min(live.len())..] {
@@ -407,9 +421,7 @@ pub fn successive_halving(
     let winner = (0..n)
         .filter(|&i| alive[i])
         .min_by(|&a, &b| {
-            let ma = sums[a] / counts[a].max(1) as f64;
-            let mb = sums[b] / counts[b].max(1) as f64;
-            ma.total_cmp(&mb).then(a.cmp(&b))
+            means[a].total_cmp(&means[b]).then(a.cmp(&b))
         })
         .expect("no valid candidate survived: every loss stream produced non-finite values");
     BracketLedger {
