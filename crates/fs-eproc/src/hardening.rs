@@ -90,11 +90,14 @@ impl MondrianConformal {
         let n = sorted.len();
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let k = (((n + 1) as f64) * (1.0 - alpha)).ceil() as usize;
-        let idx = k.min(n) - 1;
-        BucketBand::Calibrated {
-            half_width: sorted[idx],
-            n,
-        }
+        // Split conformal: half-width = the k-th smallest residual, k =
+        // ⌈(n+1)(1−α)⌉. When k > n there are too few calibration points for this
+        // α — the (n+1)(1−α) quantile of {residuals} ∪ {+∞} lands on +∞, so the
+        // honest band is INFINITE (still ≥1−α coverage, trivially). Capping at
+        // sorted[n−1] (the max) UNDER-COVERS at exactly n/(n+1) < 1−α (bead
+        // q2tf); `k.min(n) − 1` also underflowed usize for n = 0.
+        let half_width = if k > n { f64::INFINITY } else { sorted[k - 1] };
+        BucketBand::Calibrated { half_width, n }
     }
 
     /// The MARGINAL band over all buckets pooled (what a non-Mondrian
@@ -113,10 +116,9 @@ impl MondrianConformal {
         let n = all.len();
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let k = (((n + 1) as f64) * (1.0 - alpha)).ceil() as usize;
-        BucketBand::Calibrated {
-            half_width: all[k.min(n) - 1],
-            n,
-        }
+        // Infinite band when k > n — see `band` (bead q2tf).
+        let half_width = if k > n { f64::INFINITY } else { all[k - 1] };
+        BucketBand::Calibrated { half_width, n }
     }
 
     /// Bucket names (deterministic order).
