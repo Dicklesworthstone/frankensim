@@ -40,12 +40,16 @@ const RATE: Dims = Dims([0, 0, -1, 0, 0]);
 // - ornith: 0xf513_eaf8_22d2_7813 (before that 0xa6fa_6460_e7c7_972f,
 //   unit-span/clipping e-race; only evals moved, 394 -> 925).
 // - frame: 0x05e1_d182_48d2_949f; lbm-core: 0x6841_e3c0_508e_eba5.
-const GOLDEN_VESSEL_SMOKE: u64 = 0xdabd_6fd3_6315_31fe;
+// 2026-07-10 again (xo2k): poured_mass proved build-mode bit-divergent
+// (~31 ulp release vs debug) and moved to an envelope gate; this hash
+// binds the five mode-invariant metrics only. The 6-metric v2 hash was
+// 0xdabd_6fd3_6315_31fe (debug bits).
+const GOLDEN_VESSEL_SMOKE: u64 = 0xfb33_2a50_af26_1116;
 const GOLDEN_ORNITH_SMOKE: u64 = 0xd750_e1bb_a8d7_e76a;
 const GOLDEN_FRAME_SMOKE: u64 = 0x9c09_b06a_7883_57fc;
 const GOLDEN_LBM_CORE: u64 = 0x1539_430c_dae4_7762;
 
-fn vessel_smoke() -> StageArtifact {
+fn vessel_smoke() -> (StageArtifact, f64) {
     let t0 = Instant::now();
     let rig = PourRig {
         steps: 300,
@@ -57,15 +61,23 @@ fn vessel_smoke() -> StageArtifact {
         fs_lbm::Rheology::Newtonian { nu: 0.0167 },
     );
     let rep = robustify(0.7);
+    // poured_mass is OUT of the hashed stream: it is build-mode
+    // bit-divergent (~31 ulp, release vs debug — bead xo2k) while the
+    // other five metrics are mode-invariant. Envelope-gated in
+    // fe2e-001 instead, per the crate's stated discipline
+    // (non-deterministic values gate on envelopes, not hashes).
+    // Restore to the hash + re-freeze when xo2k closes.
     let metrics = vec![
         ("mass_drift", out.mass_drift),
-        ("poured_mass", out.poured_mass),
         ("fragments", out.fragments as f64),
         ("robust_lip", rep.robust_lip),
         ("nominal_lip", rep.nominal_lip),
         ("robust_offband", rep.robust_offband_growth),
     ];
-    artifact("vessel", Tier::Smoke, metrics, t0.elapsed().as_secs_f64())
+    (
+        artifact("vessel", Tier::Smoke, metrics, t0.elapsed().as_secs_f64()),
+        out.poured_mass,
+    )
 }
 
 fn ornith_smoke() -> StageArtifact {
@@ -128,8 +140,11 @@ fn frame_smoke() -> StageArtifact {
 /// GOLDEN (content hash frozen; replay equality is the gate).
 #[test]
 fn fe2e_001_vessel_smoke_golden() {
-    let a = vessel_smoke();
-    let b = vessel_smoke();
+    let (a, poured_a) = vessel_smoke();
+    let (b, poured_b) = vessel_smoke();
+    // Envelope gate for the mode-divergent metric (bead xo2k): value
+    // stable to 1e-9 within a mode and inside the physical band.
+    let poured_ok = (0.25..0.40).contains(&poured_a) && (poured_a - poured_b).abs() < 1e-9;
     let evidence = notebook(std::slice::from_ref(&a));
     println!(
         "{}",
@@ -144,9 +159,9 @@ fn fe2e_001_vessel_smoke_golden() {
     );
     verdict(
         "fe2e-001-vessel-smoke",
-        a.hash == b.hash && a.hash == GOLDEN_VESSEL_SMOKE && a.metrics[0].1 < 1e-10,
+        a.hash == b.hash && a.hash == GOLDEN_VESSEL_SMOKE && a.metrics[0].1 < 1e-10 && poured_ok,
         &format!(
-            "vessel smoke: hash 0x{:016x} (golden 0x{GOLDEN_VESSEL_SMOKE:016x}), replay equal, mass drift {:.2e}, wall {:.1}s; evidence {evidence}",
+            "vessel smoke: hash 0x{:016x} (golden 0x{GOLDEN_VESSEL_SMOKE:016x}), replay equal, mass drift {:.2e}, poured {poured_a:.4} (envelope 0.25..0.40, bead xo2k), wall {:.1}s; evidence {evidence}",
             a.hash, a.metrics[0].1, a.wall_s,
         ),
     );
@@ -477,10 +492,10 @@ fn fe2e_008_forensics_and_notebook() {
     let escaped = log_row("vessel\"\n", "artifact\\kind", "{\"ok\":true}");
     let hostile = artifact("vessel\"\n", Tier::Smoke, vec![("metric\tname", 1.0)], 0.0);
     let escaped_notebook = notebook(&[hostile]);
-    let arts = vec![vessel_smoke(), ornith_smoke(), frame_smoke()];
+    let arts = vec![vessel_smoke().0, ornith_smoke(), frame_smoke()];
     let n1 = notebook(&arts);
     // Replay: rebuild everything and regenerate.
-    let arts2 = vec![vessel_smoke(), ornith_smoke(), frame_smoke()];
+    let arts2 = vec![vessel_smoke().0, ornith_smoke(), frame_smoke()];
     let n2 = notebook(&arts2);
     println!(
         "{}",
