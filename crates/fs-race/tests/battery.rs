@@ -5,7 +5,7 @@
 //! [M] claim), kill-registry wiring, and successive-halving brackets.
 
 use fs_exec::KillRegistry;
-use fs_race::{RaceSettings, race_field, successive_halving};
+use fs_race::{LossSpan, RaceError, RaceSettings, race_field, successive_halving};
 
 fn verdict(name: &str, pass: bool, details: &str) {
     println!("{{\"test\":\"{name}\",\"pass\":{pass},\"details\":\"{details}\"}}");
@@ -49,6 +49,24 @@ fn noise(seed: u64, candidate: usize, obs: u64) -> f64 {
     acc - 6.0
 }
 
+const NOISE_PAIR_SPAN: f64 = 12.0;
+
+fn span_for(means: &[f64]) -> LossSpan {
+    let lo = means.iter().copied().fold(f64::INFINITY, f64::min);
+    let hi = means
+        .iter()
+        .copied()
+        .fold(f64::NEG_INFINITY, f64::max);
+    LossSpan::new(NOISE_PAIR_SPAN + hi - lo).expect("finite fixture span")
+}
+
+fn settings_for(means: &[f64]) -> RaceSettings {
+    RaceSettings {
+        loss_span: span_for(means),
+        ..RaceSettings::default()
+    }
+}
+
 /// race-001: bitwise replay — identical seeds give identical
 /// elimination sequences, winners, and counters.
 #[test]
@@ -57,7 +75,8 @@ fn race_001_replay() {
     let run = || {
         let kills = KillRegistry::new();
         let mut loss = |i: usize, t: u64| mus[i] + noise(0xACE, i, t);
-        race_field(&mut loss, mus.len(), RaceSettings::default(), &kills)
+        race_field(&mut loss, mus.len(), settings_for(&mus), &kills)
+            .expect("fixture respects its analytical span")
     };
     let a = run();
     let b = run();
@@ -85,7 +104,8 @@ fn race_002_domination() {
     let mus = [0.0f64, 1.0, 1.5, 2.0, 1.2, 0.9, 1.7, 1.3];
     let kills = KillRegistry::new();
     let mut loss = |i: usize, t: u64| mus[i] + noise(0xD0D0, i, t);
-    let out = race_field(&mut loss, mus.len(), RaceSettings::default(), &kills);
+    let out = race_field(&mut loss, mus.len(), settings_for(&mus), &kills)
+        .expect("fixture respects its analytical span");
     verdict(
         "race-002-domination",
         out.winner == 0 && out.survivors == vec![0] && out.eliminated.len() == 7,
@@ -113,8 +133,10 @@ fn race_003_calibration() {
             alpha,
             max_rounds: 300,
             min_rounds: 8,
+            loss_span: span_for(&mus),
         };
-        let out = race_field(&mut loss, mus.len(), settings, &kills);
+        let out = race_field(&mut loss, mus.len(), settings, &kills)
+            .expect("fixture respects its analytical span");
         if out.eliminated.iter().any(|&(_, c)| c == 0) {
             false_elims += 1;
         }
@@ -140,7 +162,8 @@ fn race_004_savings() {
     let mus = [0.0f64, 1.0, 1.5, 2.0, 1.2, 0.9, 1.7, 1.3];
     let kills = KillRegistry::new();
     let mut loss = |i: usize, t: u64| mus[i] + noise(0x5A7E, i, t);
-    let out = race_field(&mut loss, mus.len(), RaceSettings::default(), &kills);
+    let out = race_field(&mut loss, mus.len(), settings_for(&mus), &kills)
+        .expect("fixture respects its analytical span");
     verdict(
         "race-004-separated-savings",
         out.savings() >= 2.0,
@@ -154,7 +177,16 @@ fn race_004_savings() {
     // Inseparable field: all equal means.
     let kills2 = KillRegistry::new();
     let mut loss2 = |i: usize, t: u64| noise(0xE0_01, i, t);
-    let out2 = race_field(&mut loss2, 6, RaceSettings::default(), &kills2);
+    let out2 = race_field(
+        &mut loss2,
+        6,
+        RaceSettings {
+            loss_span: LossSpan::new(NOISE_PAIR_SPAN).expect("positive"),
+            ..RaceSettings::default()
+        },
+        &kills2,
+    )
+    .expect("fixture respects its analytical span");
     verdict(
         "race-004-inseparable-honest",
         out2.savings() < 1.5 && out2.eliminated.len() <= 1,
@@ -174,7 +206,8 @@ fn race_005_kill_wiring() {
     let kills = KillRegistry::new();
     let gates: Vec<_> = (0..mus.len()).map(|i| kills.register(i as u64)).collect();
     let mut loss = |i: usize, t: u64| mus[i] + noise(0x1 << 20, i, t);
-    let out = race_field(&mut loss, mus.len(), RaceSettings::default(), &kills);
+    let out = race_field(&mut loss, mus.len(), settings_for(&mus), &kills)
+        .expect("fixture respects its analytical span");
     let mut wiring_ok = true;
     for (i, gate) in gates.iter().enumerate() {
         let should_fire = out.eliminated.iter().any(|&(_, c)| c == i);
@@ -233,8 +266,10 @@ fn race_007_global_null() {
             alpha,
             max_rounds: 300,
             min_rounds: 8,
+            loss_span: LossSpan::new(NOISE_PAIR_SPAN).expect("positive"),
         };
-        let out = race_field(&mut loss, 6, settings, &kills);
+        let out = race_field(&mut loss, 6, settings, &kills)
+            .expect("fixture respects its analytical span");
         if !out.eliminated.is_empty() {
             any_elims += 1;
         }
@@ -270,15 +305,22 @@ fn race_008_certifier_catches_max() {
     // seeds give the margins.
     let (mut mix_means, mut max_means) = (Vec::new(), Vec::new());
     for seed in 0..replays {
-        let mut races: Vec<PairwiseRace> = (0..n * n).map(|_| PairwiseRace::new()).collect();
+        let prototype = PairwiseRace::with_loss_span(
+            fs_eproc::LossSpan::new(NOISE_PAIR_SPAN).expect("positive"),
+        );
+        let mut races = vec![prototype; n * n];
         for t in 0..rounds {
             let obs: Vec<f64> = (0..n)
                 .map(|i| noise(seed.wrapping_mul(0x00BE_EF77), i, t))
                 .collect();
             for i in 0..n {
                 for j in (i + 1)..n {
-                    races[i * n + j].observe(obs[i], obs[j]);
-                    races[j * n + i].observe(obs[j], obs[i]);
+                    races[i * n + j]
+                        .observe(obs[i], obs[j])
+                        .expect("fixture respects its analytical span");
+                    races[j * n + i]
+                        .observe(obs[j], obs[i])
+                        .expect("fixture respects its analytical span");
                 }
             }
         }
@@ -338,7 +380,8 @@ fn race_009_nonfinite_structural() {
             mus[i] + noise(0xF1A5, i, t)
         }
     };
-    let out = race_field(&mut loss, 4, RaceSettings::default(), &kills);
+    let out = race_field(&mut loss, 4, settings_for(&mus), &kills)
+        .expect("finite observations respect span");
     let sh_kills = KillRegistry::new();
     let mut loss2 = |i: usize, t: u64| {
         if i == 1 && t == 2 {
