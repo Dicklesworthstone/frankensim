@@ -175,6 +175,10 @@ pub struct RunReport {
     /// Per-worker cancel-observation latencies in ns (empty when the run
     /// was not cancelled).
     pub cancel_latencies_ns: Vec<u64>,
+    /// Tiles completed per worker (fz2.2): the measured per-class
+    /// throughput signal — on heterogeneous cores, slow-class workers
+    /// complete measurably fewer tiles under work-stealing.
+    pub tiles_by_worker: Vec<u64>,
 }
 
 impl RunReport {
@@ -368,6 +372,9 @@ impl TilePool {
         let observed: Vec<CachePadded<AtomicU64>> = (0..workers)
             .map(|_| CachePadded::new(AtomicU64::new(0)))
             .collect();
+        let done_by: Vec<CachePadded<AtomicU64>> = (0..workers)
+            .map(|_| CachePadded::new(AtomicU64::new(0)))
+            .collect();
 
         std::thread::scope(|s| {
             for w in 0..workers {
@@ -378,6 +385,7 @@ impl TilePool {
                 let cross_steals = &cross_steals;
                 let panic_box = &panic_box;
                 let observed = &observed[w];
+                let done_by = &done_by[w];
                 let arenas = &self.arenas;
                 let config = &self.config;
                 s.spawn(move || {
@@ -449,6 +457,7 @@ impl TilePool {
                         match outcome {
                             Ok(ControlFlow::Continue(out)) => {
                                 *slots[tile as usize].lock().expect("slot") = Some(out);
+                                done_by.get().fetch_add(1, Ordering::Relaxed);
                             }
                             Ok(ControlFlow::Break(_cancelled)) => {
                                 // Kernel observed the gate (or self-cancelled):
@@ -495,6 +504,10 @@ impl TilePool {
                     })
                     .collect()
             }),
+            tiles_by_worker: done_by
+                .iter()
+                .map(|c| c.get().load(Ordering::Relaxed))
+                .collect(),
         };
 
         if let Some((tile, message)) = panic_box.into_inner().expect("panic box") {

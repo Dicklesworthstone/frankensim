@@ -369,6 +369,9 @@ impl Tuner {
             vec![("wall".to_string(), steal_ns)],
         );
 
+        // Per-class throughput (fz2.2): the measured class signal.
+        self.class_throughput_row(probe, topo);
+
         // Schedule: measured bandwidth per logical core decides (the §5.1
         // consequence-2 doctrine); zero measurement -> rich default,
         // recorded as such.
@@ -403,6 +406,35 @@ impl Tuner {
         }
         s.push_str("]}");
         s
+    }
+
+    /// Per-class throughput row (fz2.2): FULL parallelism, uniform
+    /// tiles; per-worker completed counts are the measured class
+    /// signal. Records the sorted distribution and the fast:slow
+    /// ratio — the quantum_weights VERIFICATION (weighted initial
+    /// shares vs pure stealing) lives in the machine A/B lane.
+    fn class_throughput_row(&mut self, probe: &fs_substrate::CapabilityProbe, topo: CcdTopology) {
+        let full = (probe.logical_cpus as usize).max(1);
+        let pool = TilePool::new(PoolConfig::new(full, topo, 0x7C4E));
+        let gate = CancelGate::new();
+        let (r, report) = pool.run_with_gate(&ClassProbe, &gate);
+        r.expect("class probe runs");
+        let mut counts = report.tiles_by_worker.clone();
+        counts.sort_unstable_by(|a, b| b.cmp(a));
+        let fast = counts.first().copied().unwrap_or(0).max(1);
+        let slow = counts.last().copied().unwrap_or(0).max(1);
+        #[allow(clippy::cast_precision_loss)]
+        let ratio_x1000 = (slow as f64 / fast as f64 * 1000.0) as u64;
+        self.insert_row(
+            "class-throughput",
+            SHAPE_DEFAULT,
+            format!("workers={full};slow_over_fast_x1000={ratio_x1000}"),
+            counts
+                .iter()
+                .enumerate()
+                .map(|(i, &c)| (format!("w{i}"), c))
+                .collect(),
+        );
     }
 
     fn insert_row(
@@ -473,6 +505,31 @@ impl Tuner {
             }
         }
         Ok(tuner)
+    }
+}
+
+/// Uniform CPU-bound tiles for the per-class throughput probe (fz2.2):
+/// every tile costs the same FLOP budget, so per-worker completed-tile
+/// counts under work-stealing ARE the measured per-class throughput
+/// (heterogeneous slow-class workers complete measurably fewer).
+struct ClassProbe;
+
+impl TileKernel for ClassProbe {
+    type Out = u64;
+
+    fn tiles(&self) -> TilePlan {
+        TilePlan::new("tune/class-probe", 512)
+    }
+
+    fn run(&self, tile: u64, cx: &Cx<'_>) -> ControlFlow<crate::Cancelled, u64> {
+        if cx.checkpoint().is_err() {
+            return ControlFlow::Break(crate::Cancelled);
+        }
+        let mut acc = (tile as f64).mul_add(1e-9, 1.0);
+        for _ in 0..1_000_000 {
+            acc = acc.mul_add(0.999_999_9, 1.0e-9);
+        }
+        ControlFlow::Continue(acc.to_bits() & 1)
     }
 }
 
@@ -570,6 +627,34 @@ mod tests {
         );
         assert_eq!(t.decisions().len(), 2);
         assert!(t.decisions()[0].to_json().contains("cold-start"));
+    }
+
+    #[test]
+    fn schedule_selection_follows_the_measured_axis_both_ways() {
+        // §5.1 consequence 2, end to end: the SAME calibration pass
+        // picks a DIFFERENT schedule per machine class, driven by the
+        // measured bandwidth axis — synthetic probes make the doctrine
+        // testable deterministically on any host.
+        let mut rich = fs_substrate::CapabilityProbe::topology_only();
+        rich.logical_cpus = 14;
+        rich.measured.all_core_gbs = 273.0; // M4 Pro class: ~19.5 GB/s/core
+        let mut t_rich = Tuner::cold(0xA);
+        t_rich.calibrate(&rich);
+        assert_eq!(t_rich.schedule().0, ScheduleKind::BandwidthRich);
+
+        let mut starved = fs_substrate::CapabilityProbe::topology_only();
+        starved.logical_cpus = 128;
+        starved.measured.all_core_gbs = 120.0; // 5995WX class: ~0.94 GB/s/core
+        let mut t_starved = Tuner::cold(0xB);
+        t_starved.calibrate(&starved);
+        assert_eq!(t_starved.schedule().0, ScheduleKind::BandwidthStarved);
+
+        // The class-throughput row landed with the sorted distribution.
+        let row = t_starved
+            .rows
+            .get(&("class-throughput".to_string(), SHAPE_DEFAULT.to_string()))
+            .expect("class row recorded");
+        assert!(row.params.contains("slow_over_fast_x1000="));
     }
 
     #[test]
