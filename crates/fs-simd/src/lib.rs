@@ -205,6 +205,7 @@ fn build_table() -> Ops {
                 mk8x4_f64: x86::mk8x4_f64,
                 btile4x4_f64: scalar::btile4x4_f64,
                 btile4x4p_f64: scalar::btile4x4p_f64,
+                btile4x4pf32: scalar::btile4x4pf32,
                 r4qrun_f64: x86::r4qrun_f64,
             },
             _ => SCALAR_OPS,
