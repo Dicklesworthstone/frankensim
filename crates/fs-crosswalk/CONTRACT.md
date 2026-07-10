@@ -61,6 +61,16 @@ honesty (explicit no-counterpart rows exist, verified-color does map);
 per-concept (×4) and per-standard (×10) slices; a representative
 validated→validation-metric lookup; unique labels; deterministic JSON.
 
+## Package-grounded coverage (bead qmao.6.1)
+
+The static concept↔standard table is a MAPPING, never coverage.
+`package_presence` judges each concept against fields actually present
+in a parsed package, and `package_coverage` reports Covered only for
+the intersection of (mapped, evidenced); a mapped concept with absent
+evidence is `MappedButAbsent`, and concepts unrepresentable in schema
+v2 (falsifier logs) can never read Covered (tested across all four
+standards).
+
 ## No-claim boundaries
 
 - The mappings are a FIRST-PARTY engineering reading of the standards to frame

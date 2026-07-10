@@ -68,6 +68,20 @@ incomplete-validated-claim failure; content-address (Merkle) tamper detection;
 including provenance tamper; signature-presence reporting; deterministic
 budget-pie rendering; empty-package pie; protocol version; determinism.
 
+## Independent re-verification (bead qmao.6.1)
+
+`check_json` is the third-party entry point: strict parse (root
+recomputation and budget re-derivation happen in the parser), then
+semantic re-verification, optionally against an expected root and a
+`SignatureVerifier` capability. Signature VALIDITY is asserted only
+when a supplied capability accepts the signature over the RECOMPUTED
+root; the in-tree `NoSignatureVerifier` accepts nothing (the no-crypto
+no-claim — presence is recorded as `Unverified`, and supplying a
+capability that rejects raises a `signature-invalid` finding). The
+magnitude budget must reconcile with its parts. The dependency graph
+remains fs-package → fs-evidence only: the checker cannot run a solve
+by construction.
+
 ## No-claim boundaries
 
 - Cryptographic SIGNATURE verification is not performed (no Franken-compliant

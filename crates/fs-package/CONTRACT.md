@@ -69,6 +69,23 @@ failure; Merkle determinism + claim/provenance tamper detection;
 unsupported-format rejection; optional detached signature; deterministic JSON
 carrying the root.
 
+## Schema v2: round trip and fail-closed parsing (bead qmao.6.1)
+
+`to_json` emits the COMPLETE color payloads (floats as bit-exact hex
+bits), provenance, signature, magnitude budget, and the content root;
+`from_json` is a STRICT parser — unknown fields, missing fields, wrong
+types, duplicate keys, bad hex, non-finite certificates, inverted
+intervals, negative dispersions, and unknown color kinds each refuse
+with a structured `ParseError`. The parser re-derives the magnitude
+budget from the parsed claims and RECOMPUTES the content root from the
+parsed fields: a package whose embedded root does not recompute is
+tampered or forged and never loads — which is what makes a
+structurally-shaped forged Verified claim fail. Decode-encode is both
+semantically and textually stable (tested). The magnitude budget
+attributes ERROR MAGNITUDES (verified interval widths, estimated
+dispersions) and counts validated claims as unquantified regional
+trust — never numerified.
+
 ## No-claim boundaries
 
 - The Merkle hash is an in-house FNV-1a (Franken-compliant, pure Rust); a
