@@ -56,6 +56,9 @@ acquisition surfaces.
   trace slack (1/2σ²)·tr(K_XX − Q_XX) reports what the approximation
   discards); inversion-lemma identities through fs-la Cholesky,
   O(n·m²); deterministic farthest-point selection.
+- `Gp::try_fit_diag` — HETEROSCEDASTIC fits: per-point noise
+  variances K + diag(σᵢ²); the Cholesky/LML/predict paths are
+  unchanged once the matrix is built (predictions are latent-f).
 - `bo::minimize` — Sobol initialization, per-iteration y
   STANDARDIZATION (EI is affine-invariant when applied consistently;
   without it the signal box cannot span arbitrary objective scales —
@@ -141,15 +144,30 @@ under nested farthest-point selection); the accuracy ladder —
 RMSE-vs-exact 0.114 → 0.019 → 0.003 at m = 10/30/80 on n = 300;
 duplicate-row farthest-point ties never reselect an already chosen
 row; sparse golden `0x0138_e24a_db84_4bec`.
+`tests/hetero_battery.rs` (4 cases): the COINCIDENT-POINT closed
+form (2×2 posterior algebra by hand; the precision-weighted mean
+sits at the low-noise observation); declared-noisy clusters do not
+drag predictions (hetero err 0.011 vs homoscedastic 1.14 on the same
+data — measured); E-RACING candidate elimination via fs-eproc
+confidence sequences — the optimum found with 49% fewer samples than
+uniform max replication AND every stopped CS covering its true mean
+at the stopping time (the Bet-5 validity claim, instance-checked);
+two fixture bugs documented in-test (half-width stopping is
+mean-independent for fixed-σ CSs, making cross-candidate comparisons
+vacuous; Hoeffding σ = ½ was 3× conservative vs the true noise —
+clamping is a contraction so the actual σ is valid); hetero golden
+`0xe9b3_f6b5_69ee_258b`.
 `tests/mf_battery.rs`: multi-fidelity correlation recovery and
 variance reduction, dimension/fidelity mismatch fail-fast behavior,
 cost-aware allocation and replay, and MF golden.
 
 ## No-claim boundaries
 
-- Heteroscedastic likelihoods and e-process stopping are the bead's
-  remaining lanes (TuRBO, two-fidelity ICM, and DTC/Titsias sparse
-  GPs landed). Sparse inducing LOCATIONS are fixed
+- Tape acquisition gradients (FrankenTorch) are the remaining lane
+  (TuRBO, two-fidelity ICM, DTC/Titsias sparse GPs, heteroscedastic
+  fits, and e-racing stopping landed). Heteroscedastic noise is
+  CALLER-SUPPLIED (from fs-uq estimates); joint noise-model learning
+  is out of scope. Sparse inducing LOCATIONS are fixed
   (farthest-point); variational location optimization joins with a
   consumer at genuine 10⁴-point scale. The MF module is
   TWO-fidelity; deeper ladders and per-evidence-model-ledger
