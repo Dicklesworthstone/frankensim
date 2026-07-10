@@ -85,13 +85,25 @@ fn rf_002_seeded_slow_kernel_is_below_band() {
     let axes = MachineAxes::probe();
     let mut slow = SeededSlowKernel::new(1 << 14);
     let result = measure(&mut slow, 1, 3, &axes);
-    assert_eq!(
-        result.verdict,
-        Verdict::BelowBand,
-        "seeded-slow kernel must be caught below its band (attainment {:.4})",
-        result.attainment
-    );
-    assert!(result.attainment < 0.9);
+    // On a CONTENDED host the probe itself is implausible and the
+    // 1n61 guard refuses to gate at all — the honest outcome (this
+    // fired on a live agent-build storm during development). Either
+    // way the seeded-slow kernel must never wear within_band.
+    if axes.plausible() {
+        assert_eq!(
+            result.verdict,
+            Verdict::BelowBand,
+            "seeded-slow kernel must be caught below its band (attainment {:.4})",
+            result.attainment
+        );
+        assert!(result.attainment < 0.9);
+    } else {
+        assert_eq!(
+            result.verdict,
+            Verdict::EnvironmentInvalid,
+            "implausible axes must refuse to gate"
+        );
+    }
     verdict(
         "rf-002",
         &format!(
@@ -170,6 +182,46 @@ fn rf_004_staleness_alerts_on_fingerprint_drift() {
 }
 
 #[test]
+fn rf_004b_invalid_environment_never_becomes_fresh_evidence() {
+    let db = temp_db("invalid-environment");
+    let ledger = fs_ledger::Ledger::open(&db).expect("open ledger");
+    let crushed = MachineAxes {
+        fingerprint: 0xBAD,
+        cpu_brand: "synthetic-crushed".to_string(),
+        logical_cpus: 8,
+        bandwidth_single_gbs: 0.2,
+        bandwidth_all_core_gbs: 0.4,
+        peak_single_gflops: 0.1,
+        peak_all_core_gflops: 0.4,
+    };
+    let mut registry = default_registry(1 << 10);
+    let results = run_registry(&mut registry, 0, 1, &crushed);
+    assert!(
+        results
+            .iter()
+            .all(|row| row.verdict == Verdict::EnvironmentInvalid)
+    );
+    let op = record_run(&ledger, &crushed, &results).expect("record invalid run");
+    let row = ledger.op(op).unwrap().expect("op row");
+    assert_eq!(row.outcome.as_deref(), Some("error"));
+    assert_eq!(ledger.table_count("tune").unwrap(), 0);
+    assert_eq!(
+        staleness(&ledger, &results[0].kernel, crushed.fingerprint).unwrap(),
+        fs_roofline::Staleness::NeverMeasured
+    );
+    assert_eq!(
+        ledger.table_count("events").unwrap(),
+        results.len() as u64 + 1
+    );
+    drop(ledger);
+    cleanup_db(&db);
+    verdict(
+        "rf-004b",
+        "invalid axes recorded as failed evidence without publishing fresh tune rows",
+    );
+}
+
+#[test]
 fn rf_005_reproducibility_within_dispersion() {
     // Two back-to-back measurements of the same kernel must agree within a
     // generous multiple of their reported dispersion (harness smoke, not a
@@ -229,7 +281,19 @@ fn rf_006_cli_smoke_prints_report_and_ledgers() {
         stdout.contains("\"ledgered\":true"),
         "ledger receipt present"
     );
-    assert!(stdout.contains("Fresh"), "staleness lines present");
+    if stdout.contains("\"verdict\":\"environment_invalid\"") {
+        assert!(
+            stdout.contains("\"citable\":false"),
+            "invalid run must be marked non-citable"
+        );
+        assert!(
+            stdout.contains("NeverMeasured"),
+            "invalid run must not publish fresh evidence"
+        );
+    } else {
+        assert!(stdout.contains("\"citable\":true"));
+        assert!(stdout.contains("Fresh"), "valid run is fresh");
+    }
     // Bad args refuse structurally.
     let bad = std::process::Command::new(exe)
         .args(["--n", "zero"])

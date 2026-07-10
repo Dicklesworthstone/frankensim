@@ -9,7 +9,7 @@
 //! and reports staleness for every registered kernel.
 
 use fs_roofline::kernels::default_registry;
-use fs_roofline::{MachineAxes, SECTION_14_1_TARGETS, run_registry, staleness};
+use fs_roofline::{MachineAxes, SECTION_14_1_TARGETS, Verdict, run_registry, staleness};
 
 fn fail(detail: &str) -> std::process::ExitCode {
     eprintln!("{{\"error\":\"Roofline\",\"detail\":\"{detail}\"}}");
@@ -45,6 +45,9 @@ fn main() -> std::process::ExitCode {
 
     let mut registry = default_registry(n);
     let results = run_registry(&mut registry, warmup, reps, &axes);
+    let citable = results
+        .iter()
+        .all(|result| result.verdict != Verdict::EnvironmentInvalid);
     for r in &results {
         println!("{}", r.to_jsonl());
     }
@@ -61,7 +64,9 @@ fn main() -> std::process::ExitCode {
             Err(e) => return fail(&e.to_string().replace('"', "'")),
         };
         match fs_roofline::record_run(&ledger, &axes, &results) {
-            Ok(op) => println!("{{\"ledgered\":true,\"op\":{op},\"db\":\"{db}\"}}"),
+            Ok(op) => {
+                println!("{{\"ledgered\":true,\"citable\":{citable},\"op\":{op},\"db\":\"{db}\"}}")
+            }
             Err(e) => return fail(&e.to_string().replace('"', "'")),
         }
         for r in &results {

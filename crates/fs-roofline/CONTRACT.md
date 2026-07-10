@@ -24,13 +24,16 @@ fs-ledger). Runtime deps: `std` + those three workspace crates.
 - `measure` / `run_registry` — warmup + repetitions →
   [`Attainment`]: median rate, achieved GB/s and GFLOP/s, binding
   `RoofSide`, attainment fraction, relative IQR `dispersion`, and a
-  `Verdict` (`WithinBand`/`BelowBand`/`NoTarget`).
+  `Verdict` (`WithinBand`/`BelowBand`/`NoTarget`/`EnvironmentInvalid`).
+  The invalid verdict carries a reason and is never a performance pass or
+  failure.
 - `SECTION_14_1_TARGETS` — the plan's target table as data; `landed`
   flips only when the owning kernel registers here (no silent coverage
   gaps).
 - `record_run` — one ledger op (frozen Five Explicits) + per-kernel
-  metrics, `benchmark_result` events, and `tune` rows keyed
-  (kernel × `roofline-v1` × fingerprint LE bytes).
+  metrics and `benchmark_result` events. Valid runs publish `tune` rows
+  keyed (kernel × `roofline-v1` × fingerprint LE bytes); invalid runs
+  finish with an error diagnostic and publish no fresh tuning evidence.
 - `staleness` — `Fresh` / `FingerprintDrift` / `NeverMeasured` per kernel
   against the current fingerprint.
 - `kernels::default_registry` — fs-simd axpy/dot/sum (report-only bands in
@@ -68,11 +71,21 @@ fs-ledger). Runtime deps: `std` + those three workspace crates.
    are reporting-only in v0 — no CI gate consumes them on shared runners.
 4. Ledger rows are keyed by fingerprint; a drifted fingerprint makes every
    prior number stale, and `staleness` says so.
+5. Axes must be finite and positive, have a nonzero logical-CPU count, meet
+   the 5 GB/s and 5 GFLOP/s single-thread reference-family floors, and have
+   aggregate axes at least half their single-thread counterparts. These
+   absolute guards prevent a crushed axis and crushed kernel from
+   self-normalizing to a vacuous pass (bead 1n61).
+6. Specs, rates, targets, and dispersion are screened before verdict
+   arithmetic. Any non-finite/negative input or attainment above 1.5 makes
+   the run invalid. One invalid row poisons every verdict in that registry
+   run because the shared axes can no longer certify any sibling result.
 
 ## Error model
 
 Measurement APIs are infallible (they report what they saw, including
-zero rates). Ledger interaction returns `fs_ledger::LedgerError`
+zero rates, with invalid evidence normalized to finite JSON plus an
+explicit reason). Ledger interaction returns `fs_ledger::LedgerError`
 (structured, machine-actionable). The CLI refuses malformed arguments with
 a structured JSON error on stderr and a nonzero exit.
 
@@ -112,8 +125,10 @@ attainment hand-calculations, order statistics, and axes sanity.
 - No machine performance claims live in this crate: numbers become
   citable only as ledgered rows with fingerprints (plan §14.1 discipline).
 - The compute axis is compiler-achievable FMA throughput, not theoretical
-  ISA peak; kernels beating it (via intrinsics fs-simd tiers) can exceed
-  attainment 1.0 — reported as-is, never clamped.
+  ISA peak; modest attainment above 1.0 is reported as-is. Attainment above
+  1.5 means the shared axis is not credible for gating, whether because it
+  was crushed/stale or because a specialized kernel outran the probe by too
+  much; the run is retained as invalid evidence and must be re-probed.
 - §14.1 family targets (LBM/GEMM/SpMV/FEEC/batched/FFT/rays) are
   `landed: false` until their kernels register.
 - Per-CCD bandwidth axes, P/E-core-class split, frequency-state capture,

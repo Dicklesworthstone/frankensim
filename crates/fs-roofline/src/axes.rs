@@ -12,6 +12,15 @@
 
 use fs_substrate::CapabilityProbe;
 
+/// Lowest credible single-thread STREAM bandwidth on FrankenSim's
+/// post-2015 reference-machine families. Values below this are evidence
+/// that the probe ran in a crushed or otherwise unusable environment.
+pub const MIN_REFERENCE_SINGLE_BANDWIDTH_GBS: f64 = 5.0;
+
+/// Lowest credible single-thread fused throughput on FrankenSim's
+/// post-2015 reference-machine families.
+pub const MIN_REFERENCE_SINGLE_PEAK_GFLOPS: f64 = 5.0;
+
 /// The roofline's axes for one machine, all measured.
 #[derive(Debug, Clone)]
 pub struct MachineAxes {
@@ -50,22 +59,91 @@ impl MachineAxes {
         }
     }
 
+    /// Explain why these axes cannot support an attainment verdict.
+    ///
+    /// Absolute floors catch the bead-1n61 counterexample where both the
+    /// axis and kernel collapsed together. Finite/positive checks keep
+    /// malformed or overflowed measurements out of JSON and the ledger.
+    /// All-core measurements may be noisy, but falling below half the
+    /// single-thread value means the aggregate probe was not usable.
+    #[must_use]
+    pub fn plausibility_error(&self) -> Option<&'static str> {
+        if self.logical_cpus == 0 {
+            return Some("logical CPU count is zero");
+        }
+        let axes = [
+            self.bandwidth_single_gbs,
+            self.bandwidth_all_core_gbs,
+            self.peak_single_gflops,
+            self.peak_all_core_gflops,
+        ];
+        if axes.iter().any(|value| !value.is_finite() || *value <= 0.0) {
+            return Some("one or more measured axes are non-finite or non-positive");
+        }
+        if self.bandwidth_single_gbs < MIN_REFERENCE_SINGLE_BANDWIDTH_GBS {
+            return Some("single-thread bandwidth is below the reference-family floor");
+        }
+        if self.peak_single_gflops < MIN_REFERENCE_SINGLE_PEAK_GFLOPS {
+            return Some("single-thread FMA throughput is below the reference-family floor");
+        }
+        if self.bandwidth_all_core_gbs < self.bandwidth_single_gbs * 0.5 {
+            return Some("all-core bandwidth is less than half the single-thread axis");
+        }
+        if self.peak_all_core_gflops < self.peak_single_gflops * 0.5 {
+            return Some("all-core FMA throughput is less than half the single-thread axis");
+        }
+        None
+    }
+
+    /// Whether these axes can support an attainment verdict.
+    #[must_use]
+    pub fn plausible(&self) -> bool {
+        self.plausibility_error().is_none()
+    }
+
     /// One JSON line describing the axes (report/ledger context).
     #[must_use]
     pub fn to_jsonl(&self) -> String {
         format!(
             "{{\"fingerprint\":\"{:016x}\",\"cpu\":\"{}\",\"logical_cpus\":{},\
-             \"bandwidth_single_gbs\":{:.2},\"bandwidth_all_core_gbs\":{:.2},\
-             \"peak_single_gflops\":{:.2},\"peak_all_core_gflops\":{:.2}}}",
+             \"bandwidth_single_gbs\":{},\"bandwidth_all_core_gbs\":{},\
+             \"peak_single_gflops\":{},\"peak_all_core_gflops\":{}}}",
             self.fingerprint,
-            self.cpu_brand,
+            json_escape(&self.cpu_brand),
             self.logical_cpus,
-            self.bandwidth_single_gbs,
-            self.bandwidth_all_core_gbs,
-            self.peak_single_gflops,
-            self.peak_all_core_gflops,
+            json_axis(self.bandwidth_single_gbs),
+            json_axis(self.bandwidth_all_core_gbs),
+            json_axis(self.peak_single_gflops),
+            json_axis(self.peak_all_core_gflops),
         )
     }
+}
+
+fn json_axis(value: f64) -> String {
+    if value.is_finite() {
+        format!("{value:.2}")
+    } else {
+        "null".to_string()
+    }
+}
+
+fn json_escape(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => {
+                use std::fmt::Write as _;
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// Independent FMA accumulator lanes per chain step — sized to the
@@ -197,5 +275,37 @@ mod tests {
         let b = MachineAxes::probe();
         assert_eq!(a.fingerprint, b.fingerprint);
         assert!(a.to_jsonl().contains("fingerprint"));
+    }
+
+    #[test]
+    fn plausibility_checks_every_axis_and_topology_field() {
+        let healthy = MachineAxes {
+            fingerprint: 1,
+            cpu_brand: "synthetic".to_string(),
+            logical_cpus: 8,
+            bandwidth_single_gbs: 50.0,
+            bandwidth_all_core_gbs: 200.0,
+            peak_single_gflops: 40.0,
+            peak_all_core_gflops: 240.0,
+        };
+        assert!(healthy.plausible());
+        for field in 0..4 {
+            let mut poisoned = healthy.clone();
+            match field {
+                0 => poisoned.bandwidth_single_gbs = f64::NAN,
+                1 => poisoned.bandwidth_all_core_gbs = f64::INFINITY,
+                2 => poisoned.peak_single_gflops = -1.0,
+                _ => poisoned.peak_all_core_gflops = 0.0,
+            }
+            assert!(
+                !poisoned.plausible(),
+                "axis field {field} escaped validation"
+            );
+            let json = poisoned.to_jsonl();
+            assert!(!json.contains("NaN") && !json.contains("inf"));
+        }
+        let mut no_cpus = healthy;
+        no_cpus.logical_cpus = 0;
+        assert!(!no_cpus.plausible());
     }
 }
