@@ -51,8 +51,8 @@ façades (module privacy enforces it).
 
 ## mk8x4_f64 (bead xlvx)
 
-The 8×4 GEMM microkernel façade asserts panel bounds BEFORE the unsafe
-body (`a_panel ≥ kc·8`, `b_panel ≥ kc·4`); the AVX2+FMA body reads
+The 8×4 GEMM microkernel façade checks `kc·8` and `kc·4` for `usize`
+overflow and asserts panel bounds BEFORE the unsafe body; the AVX2+FMA body reads
 exactly 4 f64 per `loadu` at offsets `kk·4 ≤ kc·4 − 4` (B) and
 broadcasts single elements at `kk·8 + r ≤ kc·8 − 1` (A); every
 `storeu` writes 4 f64 into a row of the caller's `[[f64; 4]; 8]`.

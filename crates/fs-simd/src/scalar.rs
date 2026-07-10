@@ -86,11 +86,13 @@ pub fn btile4x4_f64(
     mb: usize,
     dst: &mut [f64],
 ) {
+    let bounds = crate::checked_btile4x4_lengths(i0, j0, stride, k, m0, mb);
     assert!(
-        k >= 1
-            && ((i0 + 3) * k + (k - 1)) * stride + m0 + mb <= a.len()
-            && ((k - 1) * k + j0 + 3) * stride + m0 + mb <= b.len()
-            && dst.len() >= 16 * mb,
+        matches!(
+            bounds,
+            Some((a_len, b_len, dst_len))
+                if a_len <= a.len() && b_len <= b.len() && dst_len <= dst.len()
+        ),
         "btile4x4 plane bounds (programmer error)"
     );
     for ti in 0..4 {
@@ -115,8 +117,9 @@ pub fn btile4x4_f64(
 /// (fs-la `pack_a`/`pack_b` layout); `acc` is NOT zeroed here so KC
 /// chunks can fold in caller-chosen order.
 pub fn mk8x4_f64(a_panel: &[f64], b_panel: &[f64], kc: usize, acc: &mut [[f64; 4]; 8]) {
+    let lengths = crate::checked_mk8x4_lengths(kc);
     assert!(
-        a_panel.len() >= kc * 8 && b_panel.len() >= kc * 4,
+        matches!(lengths, Some((a_len, b_len)) if a_len <= a_panel.len() && b_len <= b_panel.len()),
         "mk8x4 panel length mismatch (programmer error)"
     );
     for kk in 0..kc {
@@ -209,11 +212,13 @@ pub fn btile4x4p_f64(
     mb: usize,
     dst: &mut [f64],
 ) {
+    let bounds = crate::checked_btile4x4p_lengths(i0, j0, k, mb);
     assert!(
-        k >= 1
-            && (i0 + 3) * k * mb + k * mb <= a.len()
-            && (j0 + 3) * k * mb + k * mb <= b.len()
-            && dst.len() >= 16 * mb,
+        matches!(
+            bounds,
+            Some((a_len, b_len, dst_len))
+                if a_len <= a.len() && b_len <= b.len() && dst_len <= dst.len()
+        ),
         "btile4x4p packed bounds (programmer error)"
     );
     for ti in 0..4 {

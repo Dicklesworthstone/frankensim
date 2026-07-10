@@ -19,6 +19,20 @@ fn log(case: &str, verdict: &str, detail: &str) {
     );
 }
 
+fn assert_panics_with(expected: &str, f: impl FnOnce()) {
+    let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
+        .expect_err("overflowing shape unexpectedly succeeded");
+    let message = payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("non-string panic payload");
+    assert!(
+        message.contains(expected),
+        "panic {message:?} did not contain {expected:?}"
+    );
+}
+
 fn stream(tile: u32) -> fs_rand::Stream {
     StreamKey {
         seed: 64,
@@ -95,6 +109,45 @@ fn gemm_matches_scalar_reference_across_size_classes() {
         "pass",
         "size classes 3,4,6,8,12,16 vs scalar oracle",
     );
+}
+
+#[test]
+fn gemm_alpha_zero_does_not_read_operands() {
+    let (k, n) = (4usize, 3usize);
+    let a = BatchMat::from_fn(k, n, |_, _, _| f64::NAN);
+    let b = BatchMat::from_fn(k, n, |_, _, _| f64::INFINITY);
+    let c0 = BatchMat::from_fn(k, n, |m, i, j| (m * 17 + i * 5 + j) as f64 + 0.25);
+    for alpha in [0.0, -0.0] {
+        for beta in [0.0, 1.0, -0.75] {
+            let mut c = c0.clone();
+            batch_gemm(alpha, &a, &b, beta, &mut c);
+            for m in 0..n {
+                for i in 0..k {
+                    for j in 0..k {
+                        let want = if beta == 0.0 {
+                            0.0
+                        } else {
+                            beta * c0.get(m, i, j)
+                        };
+                        assert_eq!(c.get(m, i, j).to_bits(), want.to_bits());
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn batch_shape_overflow_is_refused() {
+    assert_panics_with("batch stride overflow", || {
+        BatchMat::zeros(1, usize::MAX);
+    });
+    assert_panics_with("batch matrix shape overflow", || {
+        BatchMat::zeros(usize::MAX, 1);
+    });
+    assert_panics_with("batch stride overflow", || {
+        BatchVec::zeros(1, usize::MAX);
+    });
 }
 
 #[test]

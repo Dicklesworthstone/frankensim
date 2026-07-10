@@ -214,6 +214,20 @@ pub fn is_cache_line_aligned<T>(ptr: *const T) -> bool {
 mod tests {
     use super::*;
 
+    fn assert_panics_with(expected: &str, f: impl FnOnce()) {
+        let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
+            .expect_err("operation unexpectedly succeeded");
+        let message = payload
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+            .unwrap_or("non-string panic payload");
+        assert!(
+            message.contains(expected),
+            "panic {message:?} did not contain {expected:?}"
+        );
+    }
+
     /// Deterministic input generator (LCG; fs-rand lands later in the graph).
     fn gen_vals(len: usize, seed: u64) -> Vec<f64> {
         let mut s = seed | 1;
@@ -465,35 +479,23 @@ mod tests {
     #[test]
     fn gemm_geometry_overflow_is_refused_before_dispatch() {
         let mut acc = [[0.0; 4]; 8];
-        assert!(
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                (ops().mk8x4_f64)(&[], &[], usize::MAX, &mut acc);
-            }))
-            .is_err()
+        assert_panics_with("mk8x4 panel length mismatch", || {
+            (ops().mk8x4_f64)(&[], &[], usize::MAX, &mut acc);
+        });
+        assert_panics_with("btile4x4 plane bounds", || {
+            let mut dst = [];
+            (ops().btile4x4_f64)(&[], &[], usize::MAX, 0, 4, 4, 0, 1, &mut dst);
+        });
+        assert_panics_with("btile4x4p packed bounds", || {
+            let mut dst = [];
+            (ops().btile4x4p_f64)(&[], &[], usize::MAX, 0, 4, 1, &mut dst);
+        });
+
+        assert_eq!(checked_mk8x4_lengths(usize::MAX), None);
+        assert_eq!(
+            checked_btile4x4_lengths(0, 0, usize::MAX, 4, usize::MAX, 1),
+            None
         );
-        assert!(
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let mut dst = [];
-                (ops().btile4x4_f64)(
-                    &[],
-                    &[],
-                    usize::MAX,
-                    0,
-                    usize::MAX,
-                    usize::MAX,
-                    usize::MAX,
-                    usize::MAX,
-                    &mut dst,
-                );
-            }))
-            .is_err()
-        );
-        assert!(
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let mut dst = [];
-                (ops().btile4x4p_f64)(&[], &[], usize::MAX, 0, usize::MAX, usize::MAX, &mut dst);
-            }))
-            .is_err()
-        );
+        assert_eq!(checked_btile4x4p_lengths(0, 0, 4, usize::MAX), None);
     }
 }

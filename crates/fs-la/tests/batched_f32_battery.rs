@@ -7,6 +7,20 @@
 
 use fs_la::batched_f32::{BatchMatF32, batch_gemm_f32, batch_gemm_mixed};
 
+fn assert_panics_with(expected: &str, f: impl FnOnce()) {
+    let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
+        .expect_err("overflowing shape unexpectedly succeeded");
+    let message = payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("non-string panic payload");
+    assert!(
+        message.contains(expected),
+        "panic {message:?} did not contain {expected:?}"
+    );
+}
+
 fn lcg(seed: &mut u64) -> f64 {
     *seed = seed
         .wrapping_mul(6364136223846793005)
@@ -46,6 +60,24 @@ fn mixed_oracle(
     }
 }
 
+fn f32_oracle(
+    (alpha, beta): (f32, f32),
+    a: &BatchMatF32,
+    b: &BatchMatF32,
+    c_old: &BatchMatF32,
+    (m, i, j): (usize, usize, usize),
+) -> f32 {
+    let mut s = 0.0f32;
+    for l in 0..a.k() {
+        s = a.get(m, i, l).mul_add(b.get(m, l, j), s);
+    }
+    if beta == 0.0 {
+        alpha * s
+    } else {
+        alpha.mul_add(s, beta * c_old.get(m, i, j))
+    }
+}
+
 #[test]
 fn mixed_matches_scalar_oracle_bitwise() {
     for &(k, n) in &[(4usize, 33usize), (8, 64), (12, 7), (24, 40)] {
@@ -70,7 +102,30 @@ fn mixed_matches_scalar_oracle_bitwise() {
 }
 
 #[test]
-fn f32_matches_scalar_oracle_bitwise_and_membership_invariance() {
+fn f32_matches_scalar_oracle_bitwise() {
+    for &(k, n) in &[(4usize, 33usize), (8, 17), (12, 7)] {
+        let (a, b, c0) = fixture(k, n, 0xF320_u64 + k as u64);
+        for &(alpha, beta) in &[(1.0f32, 0.0f32), (0.5, 1.25), (-0.75, -0.25)] {
+            let mut c = c0.clone();
+            batch_gemm_f32(alpha, &a, &b, beta, &mut c);
+            for m in 0..n {
+                for i in 0..k {
+                    for j in 0..k {
+                        let want = f32_oracle((alpha, beta), &a, &b, &c0, (m, i, j));
+                        assert_eq!(
+                            c.get(m, i, j).to_bits(),
+                            want.to_bits(),
+                            "f32 k={k} m={m} ({i},{j}) alpha={alpha} beta={beta}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn f32_and_mixed_are_batch_membership_invariant() {
     let (k, n) = (8usize, 48usize);
     let (a, b, c0) = fixture(k, n, 0xACE);
     let mut c = c0.clone();
@@ -158,6 +213,47 @@ fn beta_zero_overwrites_nan() {
             }
         }
     }
+}
+
+#[test]
+fn alpha_zero_does_not_read_f32_operands() {
+    let (k, n) = (4usize, 3usize);
+    let a = BatchMatF32::from_fn(k, n, |_, _, _| f32::NAN);
+    let b = BatchMatF32::from_fn(k, n, |_, _, _| f32::INFINITY);
+    let c0 = BatchMatF32::from_fn(k, n, |m, i, j| (m * 17 + i * 5 + j) as f32 + 0.25);
+    for alpha in [0.0f32, -0.0] {
+        for beta in [0.0f32, 1.0, -0.75] {
+            let mut c = c0.clone();
+            batch_gemm_f32(alpha, &a, &b, beta, &mut c);
+            let mut mixed = c0.clone();
+            batch_gemm_mixed(f64::from(alpha), &a, &b, f64::from(beta), &mut mixed);
+            for m in 0..n {
+                for i in 0..k {
+                    for j in 0..k {
+                        let old = c0.get(m, i, j);
+                        let want_f32 = if beta == 0.0 { 0.0 } else { beta * old };
+                        let want_mixed = if beta == 0.0 {
+                            0.0
+                        } else {
+                            (f64::from(beta) * f64::from(old)) as f32
+                        };
+                        assert_eq!(c.get(m, i, j).to_bits(), want_f32.to_bits());
+                        assert_eq!(mixed.get(m, i, j).to_bits(), want_mixed.to_bits());
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn f32_batch_shape_overflow_is_refused() {
+    assert_panics_with("batch stride overflow", || {
+        BatchMatF32::zeros(1, usize::MAX);
+    });
+    assert_panics_with("batch matrix shape overflow", || {
+        BatchMatF32::zeros(usize::MAX, 1);
+    });
 }
 
 /// Recorded on aarch64-apple (M4 Pro); f32/f64 fused arithmetic only, so

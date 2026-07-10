@@ -89,11 +89,13 @@ pub fn streaming_vl_bytes() -> Option<u64> {
 /// If SME2 is unavailable (callers gate on [`sme2_available`]) or the
 /// panel lengths disagree with `k`.
 pub fn gemm_tile_f32(a_panel: &[f32], b_panel: &[f32], c: &mut [f32], k: usize) {
-    assert!(sme2_available(), "SME2 tile kernel needs the capability");
-    assert!(k >= 1, "empty accumulation");
-    assert_eq!(a_panel.len(), k * TILE, "a panel is k x 16");
-    assert_eq!(b_panel.len(), k * TILE, "b panel is k x 16");
+    let panel_len = k.checked_mul(TILE);
+    assert!(
+        k >= 1 && panel_len == Some(a_panel.len()) && panel_len == Some(b_panel.len()),
+        "SME2 panel length overflow or mismatch"
+    );
     assert_eq!(c.len(), TILE * TILE, "c is 16 x 16");
+    assert!(sme2_available(), "SME2 tile kernel needs the capability");
     // SAFETY: one self-contained streaming-mode region. `smstart`
     // enters streaming SVE + ZA and `smstop` leaves before the block
     // ends, so no Rust FP/SIMD code interleaves with streaming state.
@@ -150,8 +152,8 @@ pub fn gemm_tile_f32(a_panel: &[f32], b_panel: &[f32], c: &mut [f32], k: usize) 
 /// k-order, fused multiply-add, and overwrite semantics — the G0
 /// equivalence reference.
 pub fn gemm_tile_f32_scalar(a_panel: &[f32], b_panel: &[f32], c: &mut [f32], k: usize) {
-    assert_eq!(a_panel.len(), k * TILE);
-    assert_eq!(b_panel.len(), k * TILE);
+    let panel_len = k.checked_mul(TILE);
+    assert!(k >= 1 && panel_len == Some(a_panel.len()) && panel_len == Some(b_panel.len()));
     assert_eq!(c.len(), TILE * TILE);
     c.fill(0.0);
     for kk in 0..k {

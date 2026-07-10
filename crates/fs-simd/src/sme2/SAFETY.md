@@ -18,7 +18,8 @@ Two `asm!` blocks:
   under any enabled codegen feature, and the block touches only p0/p1
   and za0.s beyond declared operands. w12 is bound because ZA slice
   indices architecturally require w12–w15.
-- BOUNDS: the safe facade asserts panel/tile lengths before the block;
+- BOUNDS: the safe facade computes `k * TILE` with checked arithmetic
+  and asserts panel/tile lengths before capability dispatch or the block;
   the loop performs exactly k 64-byte loads per panel and 16 64-byte
   stores to c — all within the asserted allocations. The kernel
   overwrites the output tile; it does not read or accumulate the prior

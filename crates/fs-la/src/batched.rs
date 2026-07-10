@@ -21,12 +21,20 @@ use crate::factor::FactorError;
 use fs_math::det;
 use fs_soa::FieldBuf;
 
+/// Semantic version of the batched-f64 bit contract registered in
+/// `golden-couplings.json`: fixed per-element reduction order, beta-zero
+/// overwrite, alpha-zero no-read behavior, and batch-membership invariance.
+pub const BATCHED_F64_BIT_SEMANTICS_VERSION: u32 = 1;
+
 /// Plane stride granularity: 16 f64 = 128 bytes, so every plane start
 /// stays 128-byte aligned given the buffer base is.
 const STRIDE_QUANTUM: usize = 16;
 
-const fn stride_for(n: usize) -> usize {
-    let s = n.div_ceil(STRIDE_QUANTUM) * STRIDE_QUANTUM;
+fn stride_for(n: usize) -> usize {
+    let blocks = n / STRIDE_QUANTUM + usize::from(!n.is_multiple_of(STRIDE_QUANTUM));
+    let s = blocks
+        .checked_mul(STRIDE_QUANTUM)
+        .expect("batch stride overflow");
     // Break power-of-two plane spacing (bead 9ekv): 2ᵖ strides put
     // every plane in the same L1/L2 cache sets and the multi-stream
     // tile kernels thrash — measured 2× slower at k ∈ {8, 16, 32}
@@ -35,14 +43,17 @@ const fn stride_for(n: usize) -> usize {
     // order are untouched (bit-neutral, covered by the membership-
     // invariance and golden tests).
     if s >= 4096 && s.is_power_of_two() {
-        s + STRIDE_QUANTUM
+        s.checked_add(STRIDE_QUANTUM)
+            .expect("batch stride padding overflow")
     } else {
         s
     }
 }
 
 fn make_buf(planes: usize, stride: usize) -> FieldBuf<f64> {
-    let total = planes * stride;
+    let total = planes
+        .checked_mul(stride)
+        .expect("batch allocation size overflow");
     let mut data = FieldBuf::with_capacity(total);
     for _ in 0..total {
         data.push(0.0);
@@ -64,13 +75,14 @@ impl BatchMat {
     /// Batch of `n` zero k×k matrices.
     ///
     /// # Panics
-    /// If `k == 0` or `n == 0`.
+    /// If either dimension is zero or the padded allocation shape overflows.
     #[must_use]
     pub fn zeros(k: usize, n: usize) -> BatchMat {
         assert!(k > 0 && n > 0, "empty batch shapes are programmer errors");
         let stride = stride_for(n);
+        let planes = k.checked_mul(k).expect("batch matrix shape overflow");
         BatchMat {
-            data: make_buf(k * k, stride),
+            data: make_buf(planes, stride),
             k,
             n,
             stride,
@@ -192,7 +204,7 @@ impl BatchVec {
     /// Batch of `n` zero k-vectors.
     ///
     /// # Panics
-    /// If `k == 0` or `n == 0`.
+    /// If either dimension is zero or the padded allocation shape overflows.
     #[must_use]
     pub fn zeros(k: usize, n: usize) -> BatchVec {
         assert!(k > 0 && n > 0, "empty batch shapes are programmer errors");
@@ -277,6 +289,10 @@ pub fn batch_gemm(alpha: f64, a: &BatchMat, b: &BatchMat, beta: f64, c: &mut Bat
     let k = a.k;
     assert!(b.k == k && c.k == k, "batch_gemm dimension mismatch");
     assert!(a.n == b.n && a.n == c.n, "batch_gemm batch-length mismatch");
+    if alpha == 0.0 {
+        scale_batch(beta, c);
+        return;
+    }
     match k {
         4 => gemm_sized::<4>(alpha, a, b, beta, c),
         6 => gemm_sized::<6>(alpha, a, b, beta, c),
@@ -287,6 +303,21 @@ pub fn batch_gemm(alpha: f64, a: &BatchMat, b: &BatchMat, beta: f64, c: &mut Bat
         32 => gemm_sized::<32>(alpha, a, b, beta, c),
         48 => gemm_sized::<48>(alpha, a, b, beta, c),
         _ => gemm_generic(alpha, a, b, beta, c, k),
+    }
+}
+
+fn scale_batch(beta: f64, c: &mut BatchMat) {
+    for i in 0..c.k {
+        for j in 0..c.k {
+            let cp = c.plane_mut(i, j);
+            if beta == 0.0 {
+                cp.fill(0.0);
+            } else if beta != 1.0 {
+                for value in cp {
+                    *value *= beta;
+                }
+            }
+        }
     }
 }
 

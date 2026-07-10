@@ -2,8 +2,7 @@
 //! 300-line capsule cap, bead 8nfp): the packed-panel 8x4 kernel
 //! (bead xdgf) and the batched plane-SoA 4x4 entry-tile kernel (bead
 //! 9ekv). Registered in unsafe-capsules.json; SAFETY.md beside this
-//! file. Bitwise contracts and the tier battery are unchanged — this
-//! is a pure file move.
+//! file. Bitwise contracts are shared with the scalar twin.
 #![allow(unsafe_code)] // registered capsule — see SAFETY.md beside this file
 
 use core::arch::aarch64::{
@@ -17,8 +16,9 @@ use core::arch::aarch64::{
 /// the scalar twin's order — BITWISE-identical, so fs-la's GEMM golden
 /// is tier-invariant.
 pub fn mk8x4_f64(a_panel: &[f64], b_panel: &[f64], kc: usize, acc: &mut [[f64; 4]; 8]) {
+    let lengths = crate::checked_mk8x4_lengths(kc);
     assert!(
-        a_panel.len() >= kc * 8 && b_panel.len() >= kc * 4,
+        matches!(lengths, Some((a_len, b_len)) if a_len <= a_panel.len() && b_len <= b_panel.len()),
         "mk8x4 panel length mismatch (programmer error)"
     );
     // SAFETY: every vld1q/vst1q reads or writes exactly 2 f64 at offsets
@@ -83,11 +83,13 @@ pub fn btile4x4_f64(
     mb: usize,
     dst: &mut [f64],
 ) {
+    let bounds = crate::checked_btile4x4_lengths(i0, j0, stride, k, m0, mb);
     assert!(
-        k >= 1
-            && ((i0 + 3) * k + (k - 1)) * stride + m0 + mb <= a.len()
-            && ((k - 1) * k + j0 + 3) * stride + m0 + mb <= b.len()
-            && dst.len() >= 16 * mb,
+        matches!(
+            bounds,
+            Some((a_len, b_len, dst_len))
+                if a_len <= a.len() && b_len <= b.len() && dst_len <= dst.len()
+        ),
         "btile4x4 plane bounds (programmer error)"
     );
     let pairs = mb / 2;
@@ -96,23 +98,24 @@ pub fn btile4x4_f64(
     // extents asserted above; each vld1q/vst1q touches exactly 2 f64;
     // f64 has no invalid bit patterns; unaligned access is permitted.
     unsafe {
-        // Tile bases hoisted out of the pair loop; per pair the eight
-        // stream pointers are one add each and REWIND by k·stride (a)
-        // / k²·stride (b) after the l walk.
-        let mut ab = [core::ptr::null::<f64>(); 4];
-        let mut bb = [core::ptr::null::<f64>(); 4];
+        // Tile bases are hoisted, then each lane pair derives fresh
+        // cursors so no rewind or transient out-of-allocation pointer
+        // is ever formed.
+        let mut a_base = [core::ptr::null::<f64>(); 4];
+        let mut b_base = [core::ptr::null::<f64>(); 4];
         for t in 0..4 {
-            ab[t] = a.as_ptr().add(((i0 + t) * k) * stride + m0);
-            bb[t] = b.as_ptr().add((j0 + t) * stride + m0);
+            a_base[t] = a.as_ptr().add(((i0 + t) * k) * stride + m0);
+            b_base[t] = b.as_ptr().add((j0 + t) * stride + m0);
         }
         for p in 0..pairs {
             let mut acc = [vdupq_n_f64(0.0); 16];
+            let mut ab = a_base.map(|ptr| ptr.add(2 * p));
+            let mut bb = b_base.map(|ptr| ptr.add(2 * p));
             let mut l = 0;
             // l-unroll ×2: same per-element order (l ascending), half
             // the loop control.
             while l + 2 <= k {
-                for step in 0..2 {
-                    let _ = step;
+                for _step in 0..2 {
                     let a0 = vld1q_f64(ab[0]);
                     let a1 = vld1q_f64(ab[1]);
                     let a2 = vld1q_f64(ab[2]);
@@ -137,12 +140,14 @@ pub fn btile4x4_f64(
                     acc[13] = vfmaq_f64(acc[13], a3, b1);
                     acc[14] = vfmaq_f64(acc[14], a3, b2);
                     acc[15] = vfmaq_f64(acc[15], a3, b3);
-                    for t in 0..4 {
-                        ab[t] = ab[t].add(stride);
-                        bb[t] = bb[t].add(k * stride);
+                    l += 1;
+                    if l < k {
+                        for t in 0..4 {
+                            ab[t] = ab[t].add(stride);
+                            bb[t] = bb[t].add(k * stride);
+                        }
                     }
                 }
-                l += 2;
             }
             if l < k {
                 let a0 = vld1q_f64(ab[0]);
@@ -169,25 +174,16 @@ pub fn btile4x4_f64(
                 acc[13] = vfmaq_f64(acc[13], a3, b1);
                 acc[14] = vfmaq_f64(acc[14], a3, b2);
                 acc[15] = vfmaq_f64(acc[15], a3, b3);
-                for t in 0..4 {
-                    ab[t] = ab[t].add(stride);
-                    bb[t] = bb[t].add(k * stride);
-                }
             }
             let dp = dst.as_mut_ptr().add(2 * p);
             for (t, &v) in acc.iter().enumerate() {
                 vst1q_f64(dp.add(t * mb), v);
             }
-            // Rewind to l = 0 and advance two batch lanes.
-            for t in 0..4 {
-                ab[t] = ab[t].sub(k * stride).add(2);
-                bb[t] = bb[t].sub(k * k * stride).add(2);
-            }
         }
     }
     // Odd batch-lane tail: the scalar twin on the last lane.
     if mb % 2 == 1 {
-        let mut tail = vec![0.0f64; 16];
+        let mut tail = [0.0f64; 16];
         crate::scalar::btile4x4_f64(a, b, i0, j0, stride, k, m0 + mb - 1, 1, &mut tail);
         for t in 0..16 {
             dst[t * mb + mb - 1] = tail[t];
@@ -210,11 +206,13 @@ pub fn btile4x4p_f64(
     mb: usize,
     dst: &mut [f64],
 ) {
+    let bounds = crate::checked_btile4x4p_lengths(i0, j0, k, mb);
     assert!(
-        k >= 1
-            && (i0 + 3) * k * mb + k * mb <= a.len()
-            && (j0 + 3) * k * mb + k * mb <= b.len()
-            && dst.len() >= 16 * mb,
+        matches!(
+            bounds,
+            Some((a_len, b_len, dst_len))
+                if a_len <= a.len() && b_len <= b.len() && dst_len <= dst.len()
+        ),
         "btile4x4p packed bounds (programmer error)"
     );
     let pairs = mb / 2;
@@ -227,33 +225,35 @@ pub fn btile4x4p_f64(
     // ((i0+t)·k)·mb (a) or ((j0+t)·k)·mb (b); the maximal dereferenced
     // offset over t ≤ 3, l ≤ k−1, 2p ≤ mb−2 is inside the extents
     // asserted above. Every access is 2 lanes; f64 has no invalid bit
-    // patterns; unaligned access is permitted. The per-pair rewind
-    // (−k·mb + 2) never leaves the borrowed allocations.
+    // patterns; unaligned access is permitted. Each lane pair derives
+    // fresh pointers and advances only when another k step remains.
     unsafe {
-        let (mut a0p, mut a1p, mut a2p, mut a3p) = (
+        let a_base = [
             a.as_ptr().add(i0 * k * mb),
             a.as_ptr().add((i0 + 1) * k * mb),
             a.as_ptr().add((i0 + 2) * k * mb),
             a.as_ptr().add((i0 + 3) * k * mb),
-        );
-        let (mut b0p, mut b1p, mut b2p, mut b3p) = (
+        ];
+        let b_base = [
             b.as_ptr().add(j0 * k * mb),
             b.as_ptr().add((j0 + 1) * k * mb),
             b.as_ptr().add((j0 + 2) * k * mb),
             b.as_ptr().add((j0 + 3) * k * mb),
-        );
+        ];
         let op = dst.as_mut_ptr();
         for p in 0..pairs {
             let mut acc = [vdupq_n_f64(0.0); 16];
-            for _l in 0..k {
-                let a0 = vld1q_f64(a0p);
-                let a1 = vld1q_f64(a1p);
-                let a2 = vld1q_f64(a2p);
-                let a3 = vld1q_f64(a3p);
-                let b0 = vld1q_f64(b0p);
-                let b1 = vld1q_f64(b1p);
-                let b2 = vld1q_f64(b2p);
-                let b3 = vld1q_f64(b3p);
+            let mut ap = a_base.map(|ptr| ptr.add(2 * p));
+            let mut bp = b_base.map(|ptr| ptr.add(2 * p));
+            for l in 0..k {
+                let a0 = vld1q_f64(ap[0]);
+                let a1 = vld1q_f64(ap[1]);
+                let a2 = vld1q_f64(ap[2]);
+                let a3 = vld1q_f64(ap[3]);
+                let b0 = vld1q_f64(bp[0]);
+                let b1 = vld1q_f64(bp[1]);
+                let b2 = vld1q_f64(bp[2]);
+                let b3 = vld1q_f64(bp[3]);
                 acc[0] = vfmaq_f64(acc[0], a0, b0);
                 acc[1] = vfmaq_f64(acc[1], a0, b1);
                 acc[2] = vfmaq_f64(acc[2], a0, b2);
@@ -270,28 +270,17 @@ pub fn btile4x4p_f64(
                 acc[13] = vfmaq_f64(acc[13], a3, b1);
                 acc[14] = vfmaq_f64(acc[14], a3, b2);
                 acc[15] = vfmaq_f64(acc[15], a3, b3);
-                a0p = a0p.add(mb);
-                a1p = a1p.add(mb);
-                a2p = a2p.add(mb);
-                a3p = a3p.add(mb);
-                b0p = b0p.add(mb);
-                b1p = b1p.add(mb);
-                b2p = b2p.add(mb);
-                b3p = b3p.add(mb);
+                if l + 1 < k {
+                    for t in 0..4 {
+                        ap[t] = ap[t].add(mb);
+                        bp[t] = bp[t].add(mb);
+                    }
+                }
             }
             let dp = op.add(2 * p);
             for (t, &v) in acc.iter().enumerate() {
                 vst1q_f64(dp.add(t * mb), v);
             }
-            let rewind = k * mb - 2;
-            a0p = a0p.sub(rewind);
-            a1p = a1p.sub(rewind);
-            a2p = a2p.sub(rewind);
-            a3p = a3p.sub(rewind);
-            b0p = b0p.sub(rewind);
-            b1p = b1p.sub(rewind);
-            b2p = b2p.sub(rewind);
-            b3p = b3p.sub(rewind);
         }
     }
 }

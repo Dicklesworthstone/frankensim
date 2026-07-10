@@ -1,8 +1,9 @@
 //! Batched small-dense f32 and MIXED-precision GEMM (bead 9ekv, scope e)
-//! — the LBM moment path: distributions stored f32 (half the plane
-//! traffic of f64), moments accumulated in f64 (widening is EXACT for
-//! every f32), narrowed ONCE at the store. Same entry-plane SoA layout
-//! and per-element determinism doctrine as [`crate::batched`]:
+//! — the intended substrate for a future LBM moment path: distributions
+//! stored f32 (half the plane traffic of f64), moments accumulated in
+//! f64 (widening is EXACT for every f32), narrowed ONCE at the store.
+//! There is no production `fs-lbm` consumer yet. Same entry-plane SoA
+//! layout and per-element determinism doctrine as [`crate::batched`]:
 //!
 //! - one fused operation order per element (l-ascending `mul_add`),
 //!   identical for every lane — batch membership can never change bits;
@@ -20,29 +21,35 @@ use fs_soa::FieldBuf;
 
 /// Semantic version of the batched-f32/mixed bit contract
 /// (golden-couplings surface `fs-la:batched-f32-bits`): the fused
-/// per-element chain order, the widen-exact/narrow-once mixed rule, and
-/// the β = 0 overwrite convention. Changing any of them bumps this and
+/// per-element chain order, the widen-exact/narrow-once mixed rule,
+/// β = 0 overwrite, and α = 0 no-read convention. Changing any of them bumps this and
 /// deliberately re-freezes the dependents in golden-couplings.json.
-pub const BATCHED_F32_BIT_SEMANTICS_VERSION: u32 = 1;
+pub const BATCHED_F32_BIT_SEMANTICS_VERSION: u32 = 2;
 
 /// Plane stride granularity: 32 f32 = 128 bytes, so every plane start
 /// stays 128-byte aligned given the buffer base is.
 const STRIDE_QUANTUM: usize = 32;
 
-const fn stride_for(n: usize) -> usize {
-    let s = n.div_ceil(STRIDE_QUANTUM) * STRIDE_QUANTUM;
+fn stride_for(n: usize) -> usize {
+    let blocks = n / STRIDE_QUANTUM + usize::from(!n.is_multiple_of(STRIDE_QUANTUM));
+    let s = blocks
+        .checked_mul(STRIDE_QUANTUM)
+        .expect("batch stride overflow");
     // Break power-of-two plane BYTE spacing (the f64 path measured 2×
     // set-aliasing slowdowns; 8192 f32 = the same 32 KB byte spacing
     // where its rule engages). Pure layout — bit-neutral.
     if s >= 8192 && s.is_power_of_two() {
-        s + STRIDE_QUANTUM
+        s.checked_add(STRIDE_QUANTUM)
+            .expect("batch stride padding overflow")
     } else {
         s
     }
 }
 
 fn make_buf(planes: usize, stride: usize) -> FieldBuf<f32> {
-    let total = planes * stride;
+    let total = planes
+        .checked_mul(stride)
+        .expect("batch allocation size overflow");
     let mut data = FieldBuf::with_capacity(total);
     for _ in 0..total {
         data.push(0.0f32);
@@ -65,13 +72,14 @@ impl BatchMatF32 {
     /// Batch of `n` zero k×k matrices.
     ///
     /// # Panics
-    /// If `k == 0` or `n == 0`.
+    /// If either dimension is zero or the padded allocation shape overflows.
     #[must_use]
     pub fn zeros(k: usize, n: usize) -> BatchMatF32 {
         assert!(k > 0 && n > 0, "empty batch shapes are programmer errors");
         let stride = stride_for(n);
+        let planes = k.checked_mul(k).expect("batch matrix shape overflow");
         BatchMatF32 {
-            data: make_buf(k * k, stride),
+            data: make_buf(planes, stride),
             k,
             n,
             stride,
@@ -156,6 +164,10 @@ pub fn batch_gemm_f32(
         a.n == b.n && a.n == c.n,
         "batch_gemm_f32 batch-length mismatch"
     );
+    if alpha == 0.0 {
+        scale_batch_f32(beta, c);
+        return;
+    }
     let n = a.n;
     let mut acc = vec![0.0f32; n];
     for i in 0..k {
@@ -205,6 +217,10 @@ pub fn batch_gemm_mixed(
         a.n == b.n && a.n == c.n,
         "batch_gemm_mixed batch-length mismatch"
     );
+    if alpha == 0.0 {
+        scale_batch_mixed(beta, c);
+        return;
+    }
     let n = a.n;
     let mut acc = vec![0.0f64; n];
     for i in 0..k {
@@ -225,6 +241,37 @@ pub fn batch_gemm_mixed(
             } else {
                 for (cm, &s) in cp.iter_mut().zip(&acc) {
                     *cm = alpha.mul_add(s, beta * f64::from(*cm)) as f32;
+                }
+            }
+        }
+    }
+}
+
+fn scale_batch_f32(beta: f32, c: &mut BatchMatF32) {
+    for i in 0..c.k {
+        for j in 0..c.k {
+            let cp = c.plane_mut(i, j);
+            if beta == 0.0 {
+                cp.fill(0.0);
+            } else if beta != 1.0 {
+                for value in cp {
+                    *value *= beta;
+                }
+            }
+        }
+    }
+}
+
+#[allow(clippy::cast_possible_truncation)] // one narrowing is the mixed contract
+fn scale_batch_mixed(beta: f64, c: &mut BatchMatF32) {
+    for i in 0..c.k {
+        for j in 0..c.k {
+            let cp = c.plane_mut(i, j);
+            if beta == 0.0 {
+                cp.fill(0.0);
+            } else if beta != 1.0 {
+                for value in cp {
+                    *value = (beta * f64::from(*value)) as f32;
                 }
             }
         }

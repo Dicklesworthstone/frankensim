@@ -83,9 +83,16 @@ Dense linear algebra: GEMM, batched small dense, factorizations, eigensolvers. L
   are the SIMD surface (lanes run across ELEMENTS, never within one
   small matrix).
 - `batched::batch_gemm` — per matrix C = α·A·B + β·C (β = 0 overwrites,
-  the house convention); size classes {4, 6, 8, 12, 16, 24, 32, 48}
+  the house convention); α = 0 scales/overwrites C without reading A or B,
+  matching the core GEMM contract; size classes {4, 6, 8, 12, 16, 24, 32, 48}
   dispatch to monomorphized kernels, other k run the same code
   generically.
+- The batched-f64 bit surface is `fs-la:batched-f64-bits=1`; its
+  `0x0377_a8c9_5992_aee9` golden is registered in
+  `golden-couplings.json` and covers reduction order and batch-membership
+  invariance. Alpha-zero no-read behavior is locked by a poisoned-operand
+  regression because the frozen nonzero-alpha fixture intentionally does
+  not move.
 - `batched::{batch_det, batch_inv}` — closed forms for k ≤ 4 (Jacobian
   hot path); exactly-zero determinants flagged `Singular`, batch
   continues (flagged outputs unspecified).
@@ -274,10 +281,12 @@ diagonal) fixtures; 128-byte plane alignment; cross-ISA golden hash.
   recorded follow-up scope.
 - `batched_f32` (9ekv scope e): `BatchMatF32` + `batch_gemm_f32` (fused
   f32 chain) + `batch_gemm_mixed` (f32 storage, EXACT widen, fused f64
-  chain, exactly ONE f32 rounding per output — the LBM moment path).
+  chain, exactly ONE f32 rounding per output — the intended substrate
+  for a future LBM moment path; no production `fs-lbm` consumer yet).
   Bit-deterministic and membership-invariant by the same construction as
   the f64 path; own golden `0x5600_7cfe_6a6d_1f9a` (registered against
-  `fs-la:batched-f32-bits=1`), verified identical debug+release on
+  `fs-la:batched-f32-bits=2`; v2 fixes the promised α = 0 no-read path),
+  verified identical debug+release on
   aarch64. NO performance claim: v1 is plain plane sweeps (no MBLK
   chunking, no packed tiles, no capsules) — the perf treatment joins the
   9ekv lane; cross-ISA golden row pending the next x86 run.

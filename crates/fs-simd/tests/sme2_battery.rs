@@ -17,6 +17,14 @@ fn verdict(name: &str, pass: bool, details: &str) {
     assert!(pass, "{name}: {details}");
 }
 
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
+    payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("non-string panic payload")
+}
+
 fn lcg_f32(seed: &mut u64) -> f32 {
     *seed = seed
         .wrapping_mul(6364136223846793005)
@@ -66,6 +74,23 @@ fn sme2_002_capability_fallback() {
             "no SME2: kernel refuses loudly; the flag is inert and NEON remains committed",
         );
     }
+}
+
+/// sme2-002b: checked panel geometry refuses release-mode `usize`
+/// wrapping before capability dispatch or unsafe assembly.
+#[test]
+fn sme2_002b_panel_extent_overflow_refused() {
+    let payload = std::panic::catch_unwind(|| {
+        let mut c = vec![0.0f32; TILE * TILE];
+        gemm_tile_f32(&[], &[], &mut c, usize::MAX);
+    })
+    .expect_err("overflowed geometry unexpectedly reached dispatch");
+    let message = panic_message(payload.as_ref());
+    verdict(
+        "sme2-002b-overflow",
+        message.contains("SME2 panel length overflow or mismatch"),
+        "overflowed k x TILE extent is rejected before unsafe dispatch",
+    );
 }
 
 /// sme2-003: G0 equivalence — the streaming kernel vs the scalar
