@@ -1262,6 +1262,9 @@ version = "0.0.1"
 [[package]]
 name = "fs-iga"
 version = "0.0.1"
+dependencies = [
+ "fs-math",
+]
 
 [[package]]
 name = "fs-img"

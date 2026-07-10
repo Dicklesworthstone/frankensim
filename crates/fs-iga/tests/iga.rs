@@ -80,3 +80,22 @@ fn solving_is_deterministic() {
     let b = solve_poisson(&space, |x: f64| (PI * x).sin()).unwrap();
     assert_eq!(a.coeffs(), b.coeffs());
 }
+
+#[test]
+fn one_element_high_degree_spaces_are_not_underintegrated() {
+    let exact = |x: f64| x * (1.0 - x);
+    for degree in 2..=8 {
+        let space = BsplineSpace::clamped_uniform(degree, 1);
+        let solution = solve_poisson(&space, |_| 2.0)
+            .unwrap_or_else(|error| panic!("degree {degree} solve failed: {error:?}"));
+        assert!(
+            solution.coeffs().iter().all(|value| value.is_finite()),
+            "degree {degree} produced non-finite coefficients"
+        );
+        let error = solution.l2_error(exact);
+        assert!(
+            error < 1e-9,
+            "degree {degree} polynomial reproduction error {error}"
+        );
+    }
+}

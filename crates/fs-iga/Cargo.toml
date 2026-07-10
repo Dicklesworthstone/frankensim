@@ -11,6 +11,7 @@ description = "Isogeometric analysis (fs-iga): Galerkin directly on B-spline spa
 layer = "L3"
 
 [dependencies]
+fs-math = { path = "../fs-math" }
 
 [dev-dependencies]
 

@@ -12,7 +12,8 @@
 //! polynomial solution is reproduced EXACTLY (to roundoff); on a smooth
 //! non-polynomial solution the error falls sharply with degree.
 //!
-//! Deterministic; no dependencies.
+//! Deterministic; Gauss nodes use fs-math's strict cosine so raising the
+//! spline degree does not introduce a platform-libm dependency.
 
 /// A clamped, uniform B-spline space on `[0, 1]`.
 #[derive(Debug, Clone, PartialEq)]
@@ -123,7 +124,7 @@ impl Solution {
     #[must_use]
     pub fn l2_error(&self, exact: impl Fn(f64) -> f64) -> f64 {
         let mut sq = 0.0;
-        for_each_quadrature(&self.space.knots, |x, w| {
+        for_each_quadrature(&self.space.knots, self.space.degree + 1, |x, w| {
             let e = self.eval(x) - exact(x);
             sq += w * e * e;
         });
@@ -140,30 +141,62 @@ pub enum IgaError {
     Singular,
 }
 
-// 4-point Gauss–Legendre on [-1, 1] (exact to degree 7).
-const GL_X: [f64; 4] = [
-    -0.861_136_311_594_052_6,
-    -0.339_981_043_584_856_3,
-    0.339_981_043_584_856_3,
-    0.861_136_311_594_052_6,
-];
-const GL_W: [f64; 4] = [
-    0.347_854_845_137_453_8,
-    0.652_145_154_862_546_1,
-    0.652_145_154_862_546_1,
-    0.347_854_845_137_453_8,
-];
+/// Deterministic Gauss-Legendre nodes and weights on [-1, 1]. The Newton
+/// iteration is symmetric by construction and uses a fixed iteration ceiling.
+fn gauss_legendre_rule(order: usize) -> Vec<(f64, f64)> {
+    assert!(order > 0, "quadrature order must be positive");
+    let mut rule = vec![(0.0, 0.0); order];
+    let half = order.div_ceil(2);
+    for i in 0..half {
+        let angle = core::f64::consts::PI * (i as f64 + 0.75) / (order as f64 + 0.5);
+        let mut root = fs_math::det::cos(angle);
+        for _ in 0..64 {
+            let (value, derivative) = legendre_value_derivative(order, root);
+            let next = root - value / derivative;
+            if (next - root).abs() <= 4.0 * f64::EPSILON * next.abs().max(1.0) {
+                root = next;
+                break;
+            }
+            root = next;
+        }
+        let (_, derivative) = legendre_value_derivative(order, root);
+        let weight = 2.0 / ((1.0 - root * root) * derivative * derivative);
+        let opposite = order - 1 - i;
+        if i == opposite {
+            rule[i] = (0.0, weight);
+        } else {
+            rule[i] = (-root, weight);
+            rule[opposite] = (root, weight);
+        }
+    }
+    rule
+}
 
-fn for_each_quadrature(knots: &[f64], mut f: impl FnMut(f64, f64)) {
+fn legendre_value_derivative(order: usize, x: f64) -> (f64, f64) {
+    let mut previous = 0.0;
+    let mut current = 1.0;
+    for degree in 1..=order {
+        let next = ((2.0 * degree as f64 - 1.0) * x * current
+            - (degree - 1) as f64 * previous)
+            / degree as f64;
+        previous = current;
+        current = next;
+    }
+    let derivative = order as f64 * (x * current - previous) / (x * x - 1.0);
+    (current, derivative)
+}
+
+fn for_each_quadrature(knots: &[f64], order: usize, mut f: impl FnMut(f64, f64)) {
+    let rule = gauss_legendre_rule(order);
     for w in knots.windows(2) {
         let (a, b) = (w[0], w[1]);
         if b <= a {
             continue;
         }
         let (mid, half) = (f64::midpoint(a, b), (b - a) / 2.0);
-        for k in 0..4 {
-            let x = mid + half * GL_X[k];
-            f(x, GL_W[k] * half);
+        for &(node, weight) in &rule {
+            let x = mid + half * node;
+            f(x, weight * half);
         }
     }
 }
@@ -181,7 +214,9 @@ pub fn solve_poisson(space: &BsplineSpace, g: impl Fn(f64) -> f64) -> Result<Sol
     // full stiffness + load.
     let mut k = vec![vec![0.0; n]; n];
     let mut load = vec![0.0; n];
-    for_each_quadrature(&space.knots, |x, w| {
+    // p+1 Gauss points integrate stiffness products (degree 2p-2) exactly
+    // and avoid the rank ceiling caused by a fixed quadrature rule.
+    for_each_quadrature(&space.knots, space.degree + 1, |x, w| {
         let dphi: Vec<f64> = (0..n).map(|i| space.basis_deriv(i, x)).collect();
         let phi: Vec<f64> = (0..n).map(|i| space.basis(i, x)).collect();
         let gx = g(x);
