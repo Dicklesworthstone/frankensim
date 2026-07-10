@@ -83,7 +83,9 @@ fn echelon(mut m: Vec<Vec<i128>>, n: usize) -> (Vec<Vec<i128>>, Vec<(usize, usiz
 /// [`RegimeError::Degenerate`] on empty input or non-positive values
 /// (groups are products of powers — signs/zeros have no regime meaning);
 /// [`RegimeError::NotDimensionless`] if the construction self-check fails
-/// (impossible unless the elimination is wrong — it is the G0 guard).
+/// (impossible unless the elimination is wrong — it is the G0 guard); or
+/// [`RegimeError::ExponentOutOfRange`] when an exact exponent cannot be
+/// evaluated by the current deterministic i32 power primitive.
 pub fn pi_groups(inputs: &[Input]) -> Result<PiBasis, RegimeError> {
     let n = inputs.len();
     if n == 0 {
@@ -145,36 +147,37 @@ pub fn pi_groups(inputs: &[Input]) -> Result<PiBasis, RegimeError> {
             }
         }
         // Dimensionless-by-construction self-check (G0).
-        let mut residual = [0i32; 5];
+        let mut residual = [0i128; 5];
         for (input, &e) in inputs.iter().zip(&exps) {
             for (slot, &d) in residual.iter_mut().zip(&input.qty.dims.0) {
-                #[allow(clippy::cast_possible_truncation)] // exponents are tiny
-                {
-                    *slot += i32::from(d) * e as i32;
-                }
+                *slot += i128::from(d) * e;
             }
         }
         if residual != [0; 5] {
             return Err(RegimeError::NotDimensionless {
                 context: format!("pi group over free column {f}"),
-                residual: residual.map(|v| {
-                    #[allow(clippy::cast_possible_truncation)]
-                    {
-                        v as i8
-                    }
-                }),
+                residual,
             });
         }
+        let eval_exps: Vec<i32> = exps
+            .iter()
+            .enumerate()
+            .map(|(index, &e)| {
+                i32::try_from(e).map_err(|_| RegimeError::ExponentOutOfRange {
+                    context: format!(
+                        "pi group over free column {f}, input {:?}",
+                        inputs[index].name
+                    ),
+                    exponent: e,
+                })
+            })
+            .collect::<Result<_, _>>()?;
         let mut value = 1.0f64;
-        for (input, &e) in inputs.iter().zip(&exps) {
-            #[allow(clippy::cast_possible_truncation)]
-            {
-                value *= fs_math::det::powi(input.qty.value, e as i32);
-            }
+        for (input, &e) in inputs.iter().zip(&eval_exps) {
+            value *= fs_math::det::powi(input.qty.value, e);
         }
-        #[allow(clippy::cast_possible_truncation)]
         groups.push(PiGroup {
-            exponents: exps.iter().map(|&e| e as i64).collect(),
+            exponents: eval_exps.iter().map(|&e| i64::from(e)).collect(),
             value,
         });
     }
@@ -191,6 +194,26 @@ mod tests {
             name: name.to_string(),
             qty: QtyAny::new(value, Dims(dims)),
         }
+    }
+
+    #[test]
+    fn oversized_exact_exponents_refuse_instead_of_wrapping() {
+        // Valid 5x6 i8 dimension matrix with primitive null exponents
+        // [246398765, 1209471509, 174635022, -831044588,
+        //  -4691840893, -4000421645]. The final two exceed i32.
+        let inputs = [
+            input("x0", 1.0, [-67, -88, 107, -71, -83]),
+            input("x1", 1.0, [-50, -104, -53, 6, 84]),
+            input("x2", 1.0, [-101, -110, 77, 10, -100]),
+            input("x3", 1.0, [57, -122, 126, -35, -60]),
+            input("x4", 1.0, [-26, -25, 68, -57, -73]),
+            input("x5", 1.0, [-5, 13, -112, 72, 114]),
+        ];
+        assert!(matches!(
+            pi_groups(&inputs),
+            Err(RegimeError::ExponentOutOfRange { exponent, .. })
+                if exponent == -4_691_840_893
+        ));
     }
 
     #[test]

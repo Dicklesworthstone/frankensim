@@ -20,8 +20,10 @@ lattice-scaling assistant, FLUX conformance, conformal hardening buckets.
 - `pi`: `pi_groups(&[Input]) -> PiBasis` — the integer nullspace of the
   5×n SI dimension matrix by exact fraction-free elimination over i128.
   `PiGroup` exponents are reduced (gcd 1, leading positive); values are
-  products of SI input values (hence unit-free). `rank + groups.len() ==
-  n` (Buckingham's theorem, by construction).
+  products of SI input values (hence unit-free). Exact exponents outside
+  the current deterministic i32 power domain are refused before numerical
+  evaluation; they are never truncated. `rank + groups.len() == n`
+  (Buckingham's theorem, by construction for admitted bases).
 - `groups`: `standard_groups(&[RoleInput])` — named groups from
   role-tagged inputs: Re, We, Ca, Oh, Bo, Fr, Ma, St, De, slenderness,
   damping ratio ζ, P-Delta index. Every formula runs through QtyAny
@@ -60,8 +62,9 @@ lattice-scaling assistant, FLUX conformance, conformal hardening buckets.
 
 ## Error model
 
-`RegimeError`: `NotDimensionless { context, residual }`, `Degenerate`,
-`MissingRole`, `UnknownModel`, `BadValue`. Group formation refuses
+`RegimeError`: `NotDimensionless { context, residual }`,
+`ExponentOutOfRange { context, exponent }`, `Degenerate`, `MissingRole`,
+`UnknownModel`, `BadValue`. Group formation refuses
 non-positive inputs (powers of signed values have no regime meaning).
 
 ## Determinism class

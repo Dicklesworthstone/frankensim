@@ -292,6 +292,15 @@ pub enum OptError {
         /// Right dims.
         right: [i8; 5],
     },
+    /// Dimension exponents would leave the representable runtime domain.
+    DimOverflow {
+        /// Operation that attempted the dimension arithmetic.
+        op: &'static str,
+        /// Base dimensions before scaling.
+        dims: [i8; 5],
+        /// Requested integer exponent.
+        exponent: i32,
+    },
     /// A transcendental was fed a dimensioned quantity.
     NonDimensionless {
         /// Operation name.
@@ -381,6 +390,10 @@ impl core::fmt::Display for OptError {
                 f,
                 "`{op}` got incompatible dimensions {left:?} vs {right:?}; only \
                  same-dimension quantities add or compare"
+            ),
+            OptError::DimOverflow { op, dims, exponent } => write!(
+                f,
+                "`{op}` would scale dimensions {dims:?} by {exponent} outside the supported i8 exponent domain; rescale the formulation or use a dimensionless base"
             ),
             OptError::NonDimensionless { op, dims } => write!(
                 f,
@@ -881,13 +894,25 @@ impl ProblemBuilder {
     /// Integer power (scalar).
     ///
     /// # Errors
-    /// Shape teaching errors.
+    /// Shape or dimension-overflow teaching errors.
     pub fn powi(&mut self, base: NodeId, exp: i32) -> Result<NodeId, OptError> {
         self.check_node(base)?;
         self.scalar("powi", base)?;
         let d = self.dims[base.0 as usize].0;
-        let k = i8::try_from(exp.clamp(-100, 100)).unwrap_or(100);
-        let dims = Dims(d.map(|e| e.saturating_mul(k)));
+        let mut scaled = [0i8; 5];
+        for (out, &e) in scaled.iter_mut().zip(&d) {
+            let product = i32::from(e).checked_mul(exp).ok_or(OptError::DimOverflow {
+                op: "powi",
+                dims: d,
+                exponent: exp,
+            })?;
+            *out = i8::try_from(product).map_err(|_| OptError::DimOverflow {
+                op: "powi",
+                dims: d,
+                exponent: exp,
+            })?;
+        }
+        let dims = Dims(scaled);
         Ok(self.push(Expr::Powi { base, exp }, Shape::Scalar, dims))
     }
 

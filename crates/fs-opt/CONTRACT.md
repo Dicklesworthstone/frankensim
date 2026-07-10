@@ -15,7 +15,7 @@ structure; FLUX/UQ execute it.
   subexpressions return the SAME `NodeId` — CSE by construction).
   Every constructor validates: shapes (`Scalar`/`Vector(n)`), fs-qty
   DIMENSIONS (add/compare need equal dims; mul/dot add exponents; div
-  subtracts; powi scales; sqrt halves even exponents; transcendentals
+  subtracts; powi scales with checked refusal rather than clamping; sqrt halves even exponents; transcendentals
   demand dimensionless), node/variable existence, parameter ranges,
   and scalar-only objective/constraint roots.
 - Node kinds: arithmetic (`add/sub/mul/div/neg/powi/sqrt/exp/ln/
@@ -90,7 +90,7 @@ structure; FLUX/UQ execute it.
 ## Error model
 
 `OptError` teaching errors throughout: unknown ids, shape/dimension
-mismatches (with exponent vectors shown), non-dimensionless
+mismatches and dimension overflow (with exponent vectors shown), non-dimensionless
 transcendentals, odd-sqrt dims, bad parameters/indices, non-scalar
 roots, `NonsmoothForFamily` (node + kind + class),
 `NoAdjoint` (node + study), `Unevaluable` (node + executor), `Parse`

@@ -106,7 +106,7 @@ fn dimensionless(name: &'static str, q: QtyAny) -> Result<NamedGroup, RegimeErro
     } else {
         Err(RegimeError::NotDimensionless {
             context: format!("group {name}"),
-            residual: q.dims.0,
+            residual: q.dims.0.map(i128::from),
         })
     }
 }

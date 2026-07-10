@@ -33,7 +33,14 @@ pub enum RegimeError {
         /// Which group/product.
         context: String,
         /// The residual SI exponents.
-        residual: [i8; 5],
+        residual: [i128; 5],
+    },
+    /// An exact Pi exponent exceeds the deterministic numerical evaluator.
+    ExponentOutOfRange {
+        /// Which free-column group and input produced the exponent.
+        context: String,
+        /// Exact exponent that was refused rather than truncated.
+        exponent: i128,
     },
     /// The Pi machinery was given a degenerate input set.
     Degenerate {
@@ -65,6 +72,10 @@ impl fmt::Display for RegimeError {
             RegimeError::NotDimensionless { context, residual } => {
                 write!(f, "{context}: not dimensionless (residual {residual:?})")
             }
+            RegimeError::ExponentOutOfRange { context, exponent } => write!(
+                f,
+                "{context}: exact exponent {exponent} exceeds the supported i32 numerical power domain"
+            ),
             RegimeError::Degenerate { what } => write!(f, "degenerate input set: {what}"),
             RegimeError::MissingRole { role, context } => {
                 write!(f, "{context}: missing required role {role}")

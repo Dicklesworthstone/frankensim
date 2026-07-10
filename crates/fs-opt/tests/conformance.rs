@@ -92,6 +92,16 @@ fn opt_001_validation_teaches() {
     // sqrt of m³ → OddDims.
     let m3 = b.konst(1.0, Dims([3, 0, 0, 0, 0]));
     let odd_err = b.sqrt(m3).expect_err("odd dims").to_string();
+    let pow_dims_checked = {
+        let mut powers = ProblemBuilder::new();
+        let m = powers.konst(2.0, METER);
+        let m2 = powers.konst(2.0, Dims([2, 0, 0, 0, 0]));
+        let m101 = powers.powi(m, 101).expect("m^101 is representable");
+        let overflow = powers.powi(m2, 100).expect_err("m^200 cannot fit i8 dims");
+        let problem = powers.finish();
+        problem.node_dims(m101) == Dims([101, 0, 0, 0, 0])
+            && matches!(overflow, OptError::DimOverflow { exponent: 100, .. })
+    };
     // component out of range.
     let idx_err = b.component(xr, 7).expect_err("bad index").to_string();
     // vector objective root refused.
@@ -239,13 +249,14 @@ fn opt_001_validation_teaches() {
             && shape_teaches
             && dimensionless_err
             && odd_err.contains("odd dimension")
+            && pow_dims_checked
             && idx_err.contains("does not exist")
             && root_err.contains("SCALAR")
             && disagreed == 0
             && agreed > 500,
         &format!(
             "seeded ill-typed constructions refuse with teaching text (dims, shapes, \
-             dimensionless, odd-sqrt, index, non-scalar root) and a 600-op fuzz storm \
+             dimensionless, odd-sqrt, checked power dims, index, non-scalar root) and a 600-op fuzz storm \
              matches the independent validity model exactly ({agreed} agreements, \
              {disagreed} disagreements); seed 0x1001_2026_0706_0031"
         ),
