@@ -1504,11 +1504,14 @@ pub fn run_frame(seed: u32) -> Vec<f64> {
     }
 
     // ---- STAGE 5: CVaR-vs-scale curve + mass-min design -----------------
-    // The CVaR bisection re-evaluates the whole ensemble at every scale, so
-    // this sub-study runs on a reduced ensemble (the first 16 members at 6 s)
-    // for interactivity — the certified fragility/history above keep the full
-    // 48-member / 8 s ensemble.
-    let ens_cvar = frame_ensemble(seed, 16, 6.0, dt);
+    // The CVaR bisection re-evaluates the whole ensemble at every scale (the
+    // 7-point curve plus ~12 losses() calls inside cvar_mass_min dominate the
+    // whole campaign's cost), so this sub-study runs on a reduced ensemble
+    // (the first 12 members at 4 s) for interactivity — enough samples for a
+    // non-degenerate CVaR_0.9 while cutting the stage's work ~2×. It is fully
+    // isolated from the headline: the certified fragility/history above keep
+    // the full 48-member / 8 s ensemble and its p̂ / e-stop are unaffected.
+    let ens_cvar = frame_ensemble(seed, 12, 4.0, dt);
     let cvar_catalog = [0.5f64, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0];
     let beta = 0.9f64;
     let cvar_curve: Vec<(f64, f64)> = cvar_catalog

@@ -1036,15 +1036,18 @@ fn neuro_net(lift: f64) -> MlpSdf {
 /// normalized `tanh`-MLP SDF ([`fs_rep_neural`]) with certified Lipschitz
 /// constant `L = 18` gives a no-tunnel sphere-trace step `|f|/L`; sound
 /// Interval Bound Propagation proves a central box strictly inside (`hi < 0`)
-/// and 8 ring boxes strictly outside (`lo > 0`) — a single bounded component,
-/// a proof not a mesh. A Morse cross-check ([`fs_viz`]) confirms a single
-/// interior minimum. Runs the real `fs_neuroshape_e2e::run_campaign` for the
-/// certificate, then renders a 64×64 SDF field for the viz.
+/// and the four boundary strips of a bounding box each strictly outside
+/// (`lo > 0`); tiled together (corners overlap) they wall off the interior into
+/// a CLOSED frame `{f<0}` provably cannot cross — a single bounded component,
+/// a proof not a mesh, strictly stronger than spot-checking discrete ring
+/// boxes. A Morse cross-check ([`fs_viz`]) confirms a single interior minimum.
+/// Runs the real `fs_neuroshape_e2e::run_campaign` for the certificate, then
+/// renders a 64×64 SDF field for the viz.
 ///
 /// `lift` — output bias (clamped `2.0..=12.0`, default 6.5; past ≈8.23 the
 /// interior empties and the certificate flips `Verified → Estimated`); `ring_r`
-/// — ring radius (clamped `1.0..=4.0`, default 2.5); `inner` — central box
-/// half-width (clamped `0.05..=1.0`, default 0.3).
+/// — boundary-frame half-width (clamped `1.0..=4.0`, default 2.5); `inner` —
+/// central box half-width (clamped `0.05..=1.0`, default 0.3).
 ///
 /// Output layout (length `24 + 4096`):
 /// - `[0]` — `grid_n` (64).
@@ -1058,9 +1061,10 @@ fn neuro_net(lift: f64) -> MlpSdf {
 /// - `[8]`,`[9]` — `inside_lo`, `inside_hi` (IBP enclosure over the central
 ///   box).
 /// - `[10]` — `certified_inside` (0/1 — `hi < 0`).
-/// - `[11]` — `certified_outside_boxes`.
-/// - `[12]` — `ring_boxes` (8).
-/// - `[13]` — `bounded` (0/1 — every ring box certified outside).
+/// - `[11]` — `boundary_certified` (boundary strips proven strictly outside).
+/// - `[12]` — `boundary_segments` (total strips forming the closed frame, 4).
+/// - `[13]` — `bounded` (0/1 — closed barrier: every boundary strip certified
+///   strictly outside, so the interior cannot escape).
 /// - `[14]` — `single_minimum` (0/1 — Morse).
 /// - `[15]` — `surface_crossings`.
 /// - `[16]` — `topology_verified` (0/1).
