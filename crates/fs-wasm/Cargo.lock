@@ -964,6 +964,7 @@ name = "fs-robustopt-e2e"
 version = "0.0.1"
 dependencies = [
  "fs-evidence",
+ "fs-ivl",
  "fs-robust",
  "fs-sos",
 ]

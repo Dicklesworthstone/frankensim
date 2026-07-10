@@ -107,7 +107,7 @@ fn signature_presence_is_reported() {
     let signed = unsigned.signed("ed25519:cafe");
     assert_eq!(
         check(&signed).signature,
-        SignatureStatus::Present("ed25519:cafe".to_string())
+        SignatureStatus::Unverified("ed25519:cafe".to_string())
     );
 }
 
@@ -144,4 +144,49 @@ fn checking_is_deterministic() {
         .with_claim(verified("c1"))
         .with_claim(estimated("c2"));
     assert_eq!(check(&pkg), check(&pkg));
+}
+
+/// qmao.6.1 — the third-party JSON path: parse-refused inputs never
+/// pass; signature validity is asserted only through a capability over
+/// the recomputed root; tamper anywhere fails.
+#[test]
+fn checker_json_path_and_signature_capability() {
+    use fs_checker::{NoSignatureVerifier, SignatureVerifier, check_json, check_with};
+    use fs_evidence::Color;
+    struct MacVerifier;
+    fn mac(root: u64) -> String {
+        format!("test-key/{:016x}", root ^ 0xA5A5_A5A5_A5A5_A5A5)
+    }
+    impl SignatureVerifier for MacVerifier {
+        fn verify(&self, merkle_root: u64, signature: &str) -> bool {
+            signature == mac(merkle_root)
+        }
+    }
+    let base = EvidencePackage::new(Provenance::new("v1.0", "lock:abc")).with_claim(Claim::new(
+        "c1",
+        "bounded",
+        Color::Verified { lo: 0.0, hi: 1.0 },
+    ));
+    let root = base.merkle_root();
+    let pkg = base.signed(mac(root));
+    // Valid signature via the capability.
+    let report = check_with(&pkg, Some(root), &MacVerifier);
+    assert!(report.passed(), "{:?}", report.findings);
+    assert!(matches!(
+        report.signature,
+        fs_checker::SignatureStatus::Valid(_)
+    ));
+    // The no-crypto default cannot assert validity (fail closed: the
+    // signature stays Unverified and a finding is raised).
+    let report = check_with(&pkg, Some(root), &NoSignatureVerifier);
+    assert!(!report.passed());
+    assert!(report.findings.iter().any(|f| f.kind == "signature-invalid"));
+    // Full JSON path: round trip passes; tampered JSON is parse-refused
+    // (never a Pass with quietly wrong content).
+    let json = pkg.to_json();
+    assert!(check_json(&json, Some(root), Some(&MacVerifier)).passed());
+    let tampered = json.replace("bounded", "PROVEN");
+    let report = check_json(&tampered, Some(root), Some(&MacVerifier));
+    assert!(!report.passed());
+    assert_eq!(report.findings[0].kind, "parse-refused");
 }

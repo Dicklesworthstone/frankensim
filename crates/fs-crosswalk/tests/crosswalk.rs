@@ -88,3 +88,46 @@ fn json_is_well_formed_and_deterministic() {
     assert!(j.contains("no_counterpart"));
     assert!(!j.contains(",,"));
 }
+
+/// qmao.6.1 — crosswalk coverage derives from fields ACTUALLY PRESENT
+/// in a parsed package: a mapped concept with absent evidence is
+/// "mapped but absent", never covered; unrepresentable concepts
+/// (falsifier logs in schema v2) can never report covered.
+#[test]
+fn coverage_cannot_claim_absent_evidence() {
+    use fs_crosswalk::{CoverageStatus, PackageConcept, Standard, package_coverage, package_presence};
+    use fs_evidence::Color;
+    use fs_package::{Claim, EvidencePackage, Provenance};
+    // Unsigned, verified-only package: no validated claims, no regime
+    // tags, no datasets, no signature.
+    let pkg = EvidencePackage::new(Provenance::new("v", "lock")).with_claim(Claim::new(
+        "c",
+        "bounded",
+        Color::Verified { lo: 0.0, hi: 1.0 },
+    ));
+    let presence = package_presence(&pkg);
+    let get = |c: PackageConcept| presence.iter().find(|p| p.concept == c).unwrap();
+    assert!(get(PackageConcept::VerifiedColor).present);
+    assert!(!get(PackageConcept::ValidatedColor).present);
+    assert!(!get(PackageConcept::RegimeTag).present);
+    assert!(!get(PackageConcept::AnchoringDataset).present);
+    assert!(!get(PackageConcept::Signature).present);
+    assert!(
+        !get(PackageConcept::FalsifierLog).present,
+        "unrepresentable evidence can never read as present"
+    );
+    for standard in Standard::ALL {
+        for (concept, status, _why) in package_coverage(&pkg, standard) {
+            if matches!(status, CoverageStatus::Covered) {
+                let p = presence.iter().find(|p| p.concept == concept).unwrap();
+                assert!(p.present, "{concept:?} covered without evidence for {standard:?}");
+            }
+            if concept == PackageConcept::FalsifierLog {
+                assert!(
+                    !matches!(status, CoverageStatus::Covered),
+                    "falsifier logs cannot be covered in v2 ({standard:?})"
+                );
+            }
+        }
+    }
+}

@@ -27,8 +27,24 @@
 //! Deterministic; no dependencies beyond the composed crates.
 
 use fs_evidence::{Color, ColorRank};
+use fs_ivl::Interval;
 use fs_robust::{ColoredObjective, cvar};
 use fs_sos::{Poly, certify_quadratic};
+
+fn attained_upper_bound(poly: &Poly, x: f64) -> Option<f64> {
+    if !x.is_finite() {
+        return None;
+    }
+    let x = Interval::new(x, x);
+    let value = poly
+        .coeffs()
+        .iter()
+        .rev()
+        .fold(Interval::new(0.0, 0.0), |acc, &coefficient| {
+            acc * x + Interval::new(coefficient, coefficient)
+        });
+    value.hi().is_finite().then_some(value.hi())
+}
 
 /// A design family with nominal cost `p(x) = a·x² + b·x + c` (`a > 0`, convex).
 #[derive(Debug, Clone)]
@@ -130,25 +146,33 @@ pub fn run_campaign(families: &[Family], alpha: f64, sigma: f64, n: usize) -> Ro
 
     for fam in families {
         let poly = fam.poly();
-        // Prove the global optimum with a sum-of-squares certificate.
+        // The radius contains the quadratic vertex. The SOS bound is rigorous
+        // on [-radius, radius]; because a > 0, the quadratic is monotone away
+        // from its vertex outside that interval, so the same bound is global.
+        // Evaluating the vertex with intervals supplies a rigorous attained
+        // upper bound, enclosing the true minimum from both sides.
+        let x_star = fam.x_star();
+        let radius = x_star.abs().max(1.0);
         let (nominal_cost, nominal_color) = match certify_quadratic(fam.a, fam.b, fam.c) {
-            Some(cert) => match cert.certified_bound(&poly, 1e-9) {
-                Some(bound) => {
+            Some(cert) => match (
+                cert.certified_bound_on(&poly, radius),
+                attained_upper_bound(&poly, x_star),
+            ) {
+                (Some(lower), Some(upper)) if lower <= upper => {
                     certified_count += 1;
-                    let slack = cert.residual(&poly).max(1e-12);
                     (
-                        bound,
+                        upper,
                         Color::Verified {
-                            lo: bound - slack,
-                            hi: bound + slack,
+                            lo: lower,
+                            hi: upper,
                         },
                     )
                 }
-                None => (
-                    poly.eval(fam.x_star()),
+                _ => (
+                    poly.eval(x_star),
                     Color::Estimated {
                         estimator: "sos-unverified".to_string(),
-                        dispersion: 0.0,
+                        dispersion: f64::INFINITY,
                     },
                 ),
             },
@@ -173,7 +197,7 @@ pub fn run_campaign(families: &[Family], alpha: f64, sigma: f64, n: usize) -> Ro
         verdicts.push(FamilyVerdict {
             name: fam.name.clone(),
             nominal_cost,
-            x_star: fam.x_star(),
+            x_star,
             nominal_color,
             robust_cost,
         });

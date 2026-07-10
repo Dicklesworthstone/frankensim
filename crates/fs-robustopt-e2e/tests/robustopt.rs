@@ -10,10 +10,15 @@ fn global_optima_are_sos_proven_and_robustness_reorders() {
     // every convex family's global optimum carries an SOS proof.
     assert_eq!(report.certified_count, 3);
     for v in &report.families {
+        // The theorem is over the exact real values represented by the f64
+        // coefficients. `5.2_f64 - 4.0` is therefore the champion's exact
+        // coefficient-derived target, not the distinct f64 literal `1.2`.
+        let expected = if v.name == "champion" { 5.2 - 4.0 } else { 2.0 };
         assert!(
-            matches!(v.nominal_color, Color::Verified { .. }),
-            "{} unproven",
-            v.name
+            matches!(v.nominal_color, Color::Verified { lo, hi } if lo <= expected && expected <= hi),
+            "{} does not enclose its global minimum: {:?}",
+            v.name,
+            v.nominal_color
         );
         assert!((v.x_star - 2.0).abs() < 1e-9, "{} x*={}", v.name, v.x_star);
     }

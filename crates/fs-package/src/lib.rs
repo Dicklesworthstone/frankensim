@@ -158,8 +158,11 @@ pub enum PackageError {
     },
 }
 
-/// The one format version this build understands.
-pub const FORMAT_VERSION: u32 = 1;
+/// The one format version this build understands. v2 (bead qmao.6.1):
+/// claims carry their COMPLETE color payloads bit-exactly, the JSON
+/// round-trips through a strict parser, and the embedded content root
+/// must recompute from the parsed fields.
+pub const FORMAT_VERSION: u32 = 2;
 
 impl EvidencePackage {
     /// An empty package at the current format version.
@@ -286,7 +289,31 @@ impl EvidencePackage {
         })
     }
 
-    /// Emit the package as deterministic, self-describing JSON.
+    /// The per-claim uncertainty MAGNITUDE attribution (bead qmao.6.1):
+    /// the budget pie over error magnitudes, not claim counts. Verified
+    /// claims contribute their interval width, estimated claims their
+    /// dispersion; validated claims carry regional trust with no
+    /// numeric bound and are reported as an unquantified COUNT rather
+    /// than laundered into a number.
+    #[must_use]
+    pub fn magnitude_budget(&self) -> MagnitudeBudget {
+        let mut b = MagnitudeBudget::default();
+        for c in &self.claims {
+            match &c.color {
+                Color::Verified { lo, hi } => b.verified_width += hi - lo,
+                Color::Validated { .. } => b.validated_unquantified += 1,
+                Color::Estimated { dispersion, .. } => b.estimated_dispersion += dispersion,
+            }
+        }
+        b.quantified_total = b.verified_width + b.estimated_dispersion;
+        b
+    }
+
+    /// Emit the package as deterministic, self-describing JSON —
+    /// schema v2: COMPLETE color payloads (floats as bit-exact hex),
+    /// provenance, signature, the content root, and the magnitude
+    /// budget. [`EvidencePackage::from_json`] round-trips this
+    /// semantically and refuses anything else.
     #[must_use]
     pub fn to_json(&self) -> String {
         use core::fmt::Write as _;
@@ -305,6 +332,14 @@ impl EvidencePackage {
             }
             None => out.push_str("null"),
         }
+        let mb = self.magnitude_budget();
+        let _ = write!(
+            out,
+            ",\"magnitude_budget\":{{\"verified_width_bits\":\"{:016x}\",\"estimated_dispersion_bits\":\"{:016x}\",\"validated_unquantified\":{}}}",
+            mb.verified_width.to_bits(),
+            mb.estimated_dispersion.to_bits(),
+            mb.validated_unquantified
+        );
         out.push_str(",\"claims\":[");
         for (i, c) in self.claims.iter().enumerate() {
             if i > 0 {
@@ -312,15 +347,67 @@ impl EvidencePackage {
             }
             let _ = write!(
                 out,
-                "{{\"id\":\"{}\",\"statement\":\"{}\",\"color\":\"{}\"}}",
+                "{{\"id\":\"{}\",\"statement\":\"{}\",\"color\":",
                 json_escape(&c.id),
                 json_escape(&c.statement),
-                c.color.rank_str(),
             );
+            match &c.color {
+                Color::Verified { lo, hi } => {
+                    let _ = write!(
+                        out,
+                        "{{\"kind\":\"verified\",\"lo_bits\":\"{:016x}\",\"hi_bits\":\"{:016x}\"}}",
+                        lo.to_bits(),
+                        hi.to_bits()
+                    );
+                }
+                Color::Validated { regime, dataset } => {
+                    let _ = write!(out, "{{\"kind\":\"validated\",\"regime\":{{");
+                    for (j, (k, (lo, hi))) in regime.bounds().iter().enumerate() {
+                        if j > 0 {
+                            out.push(',');
+                        }
+                        let _ = write!(
+                            out,
+                            "\"{}\":[\"{:016x}\",\"{:016x}\"]",
+                            json_escape(k),
+                            lo.to_bits(),
+                            hi.to_bits()
+                        );
+                    }
+                    let _ = write!(out, "}},\"dataset\":\"{}\"}}", json_escape(dataset));
+                }
+                Color::Estimated {
+                    estimator,
+                    dispersion,
+                } => {
+                    let _ = write!(
+                        out,
+                        "{{\"kind\":\"estimated\",\"estimator\":\"{}\",\"dispersion_bits\":\"{:016x}\"}}",
+                        json_escape(estimator),
+                        dispersion.to_bits()
+                    );
+                }
+            }
+            out.push('}');
         }
         out.push_str("]}");
         out
     }
+}
+
+/// The magnitude budget (see [`EvidencePackage::magnitude_budget`]).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct MagnitudeBudget {
+    /// Σ (hi − lo) over verified claims.
+    pub verified_width: f64,
+    /// Σ dispersion over estimated claims.
+    pub estimated_dispersion: f64,
+    /// Validated claims (regional trust, no numeric bound — counted,
+    /// never converted into a fake magnitude).
+    pub validated_unquantified: usize,
+    /// verified_width + estimated_dispersion (reconciles with the
+    /// parts by construction; the parser re-derives and refuses drift).
+    pub quantified_total: f64,
 }
 
 /// FNV-1a 64-bit hash (pure Rust, std only).
@@ -382,4 +469,483 @@ impl RankStr for Color {
             ColorRank::Estimated => "estimated",
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Strict schema-v2 parser (bead qmao.6.1): the package is a PROOF
+// ARTIFACT, so parsing fails closed — unknown fields, missing fields,
+// wrong types, bad hex, non-finite certificates, a magnitude budget
+// that does not re-derive, or an embedded root that does not recompute
+// from the parsed fields are each a structured refusal.
+// ---------------------------------------------------------------------------
+
+/// A structured parse failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParseError {
+    /// What was being parsed.
+    pub what: String,
+    /// Why it refused.
+    pub why: String,
+}
+
+impl core::fmt::Display for ParseError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "package parse refused at {}: {}", self.what, self.why)
+    }
+}
+
+impl core::error::Error for ParseError {}
+
+/// Minimal JSON value for the strict mapper.
+#[derive(Debug, Clone, PartialEq)]
+enum Jv {
+    Null,
+    Str(String),
+    Num(f64),
+    Arr(Vec<Jv>),
+    Obj(Vec<(String, Jv)>),
+}
+
+struct Jp<'a> {
+    b: &'a [u8],
+    at: usize,
+}
+
+impl<'a> Jp<'a> {
+    fn err(&self, what: &str, why: impl Into<String>) -> ParseError {
+        ParseError {
+            what: format!("{what} (byte {})", self.at),
+            why: why.into(),
+        }
+    }
+
+    fn ws(&mut self) {
+        while self
+            .b
+            .get(self.at)
+            .is_some_and(|c| matches!(c, b' ' | b'\t' | b'\n' | b'\r'))
+        {
+            self.at += 1;
+        }
+    }
+
+    fn eat(&mut self, c: u8, what: &str) -> Result<(), ParseError> {
+        self.ws();
+        if self.b.get(self.at) == Some(&c) {
+            self.at += 1;
+            Ok(())
+        } else {
+            Err(self.err(what, format!("expected {:?}", char::from(c))))
+        }
+    }
+
+    fn value(&mut self) -> Result<Jv, ParseError> {
+        self.ws();
+        match self.b.get(self.at) {
+            Some(b'"') => Ok(Jv::Str(self.string()?)),
+            Some(b'{') => {
+                self.at += 1;
+                let mut fields = Vec::new();
+                self.ws();
+                if self.b.get(self.at) == Some(&b'}') {
+                    self.at += 1;
+                    return Ok(Jv::Obj(fields));
+                }
+                loop {
+                    let key = self.string()?;
+                    self.eat(b':', "object")?;
+                    let v = self.value()?;
+                    if fields.iter().any(|(k, _)| *k == key) {
+                        return Err(self.err("object", format!("duplicate key {key:?}")));
+                    }
+                    fields.push((key, v));
+                    self.ws();
+                    match self.b.get(self.at) {
+                        Some(b',') => {
+                            self.at += 1;
+                            self.ws();
+                        }
+                        Some(b'}') => {
+                            self.at += 1;
+                            return Ok(Jv::Obj(fields));
+                        }
+                        _ => return Err(self.err("object", "expected ',' or '}'")),
+                    }
+                }
+            }
+            Some(b'[') => {
+                self.at += 1;
+                let mut items = Vec::new();
+                self.ws();
+                if self.b.get(self.at) == Some(&b']') {
+                    self.at += 1;
+                    return Ok(Jv::Arr(items));
+                }
+                loop {
+                    items.push(self.value()?);
+                    self.ws();
+                    match self.b.get(self.at) {
+                        Some(b',') => {
+                            self.at += 1;
+                        }
+                        Some(b']') => {
+                            self.at += 1;
+                            return Ok(Jv::Arr(items));
+                        }
+                        _ => return Err(self.err("array", "expected ',' or ']'")),
+                    }
+                }
+            }
+            Some(b'n') => {
+                if self.b[self.at..].starts_with(b"null") {
+                    self.at += 4;
+                    Ok(Jv::Null)
+                } else {
+                    Err(self.err("literal", "unknown literal"))
+                }
+            }
+            Some(c) if c.is_ascii_digit() || *c == b'-' => {
+                let start = self.at;
+                while self
+                    .b
+                    .get(self.at)
+                    .is_some_and(|c| c.is_ascii_digit() || matches!(c, b'-' | b'+' | b'.' | b'e' | b'E'))
+                {
+                    self.at += 1;
+                }
+                let text = core::str::from_utf8(&self.b[start..self.at]).unwrap_or("");
+                text.parse()
+                    .map(Jv::Num)
+                    .map_err(|_| self.err("number", format!("bad number {text:?}")))
+            }
+            _ => Err(self.err("value", "unexpected byte or end of input")),
+        }
+    }
+
+    fn string(&mut self) -> Result<String, ParseError> {
+        self.ws();
+        if self.b.get(self.at) != Some(&b'"') {
+            return Err(self.err("string", "expected '\"'"));
+        }
+        self.at += 1;
+        let mut out = String::new();
+        loop {
+            match self.b.get(self.at) {
+                None => return Err(self.err("string", "unterminated")),
+                Some(b'"') => {
+                    self.at += 1;
+                    return Ok(out);
+                }
+                Some(b'\\') => {
+                    self.at += 1;
+                    match self.b.get(self.at) {
+                        Some(b'"') => out.push('"'),
+                        Some(b'\\') => out.push('\\'),
+                        Some(b'n') => out.push('\n'),
+                        Some(b'r') => out.push('\r'),
+                        Some(b't') => out.push('\t'),
+                        Some(b'u') => {
+                            let hex = self
+                                .b
+                                .get(self.at + 1..self.at + 5)
+                                .and_then(|h| core::str::from_utf8(h).ok())
+                                .and_then(|h| u32::from_str_radix(h, 16).ok())
+                                .and_then(char::from_u32)
+                                .ok_or_else(|| self.err("string", "bad \\u escape"))?;
+                            out.push(hex);
+                            self.at += 4;
+                        }
+                        _ => return Err(self.err("string", "bad escape")),
+                    }
+                    self.at += 1;
+                }
+                Some(&c) => {
+                    // Multi-byte UTF-8 passes through byte-wise.
+                    let len = if c < 0x80 {
+                        1
+                    } else if c >> 5 == 0b110 {
+                        2
+                    } else if c >> 4 == 0b1110 {
+                        3
+                    } else {
+                        4
+                    };
+                    let chunk = self
+                        .b
+                        .get(self.at..self.at + len)
+                        .and_then(|ch| core::str::from_utf8(ch).ok())
+                        .ok_or_else(|| self.err("string", "invalid UTF-8"))?;
+                    out.push_str(chunk);
+                    self.at += len;
+                }
+            }
+        }
+    }
+}
+
+fn obj_fields(v: Jv, what: &str) -> Result<Vec<(String, Jv)>, ParseError> {
+    match v {
+        Jv::Obj(f) => Ok(f),
+        other => Err(ParseError {
+            what: what.to_string(),
+            why: format!("expected an object, got {other:?}"),
+        }),
+    }
+}
+
+/// Take field `key` from `fields`; strict mappers call this for every
+/// expected key and then refuse leftovers.
+fn take_field(fields: &mut Vec<(String, Jv)>, key: &str, what: &str) -> Result<Jv, ParseError> {
+    let idx = fields.iter().position(|(k, _)| k == key).ok_or(ParseError {
+        what: what.to_string(),
+        why: format!("missing required field {key:?}"),
+    })?;
+    Ok(fields.remove(idx).1)
+}
+
+fn no_leftovers(fields: &[(String, Jv)], what: &str) -> Result<(), ParseError> {
+    if let Some((k, _)) = fields.first() {
+        return Err(ParseError {
+            what: what.to_string(),
+            why: format!("unknown field {k:?} (schema v2 is closed — fail closed)"),
+        });
+    }
+    Ok(())
+}
+
+fn as_str(v: Jv, what: &str) -> Result<String, ParseError> {
+    match v {
+        Jv::Str(s) => Ok(s),
+        other => Err(ParseError {
+            what: what.to_string(),
+            why: format!("expected a string, got {other:?}"),
+        }),
+    }
+}
+
+fn bits_f64(v: Jv, what: &str, must_be_finite: bool) -> Result<f64, ParseError> {
+    let hex = as_str(v, what)?;
+    if hex.len() != 16 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(ParseError {
+            what: what.to_string(),
+            why: format!("expected 16 hex digits of f64 bits, got {hex:?}"),
+        });
+    }
+    let bits = u64::from_str_radix(&hex, 16).expect("validated hex");
+    let value = f64::from_bits(bits);
+    if must_be_finite && !value.is_finite() {
+        return Err(ParseError {
+            what: what.to_string(),
+            why: format!("non-finite value {value} where a finite certificate is required"),
+        });
+    }
+    Ok(value)
+}
+
+impl EvidencePackage {
+    /// Parse schema-v2 JSON STRICTLY and semantically: every field
+    /// mapped, unknown fields refused, floats reconstructed bit-exactly,
+    /// the magnitude budget re-derived and compared, and the embedded
+    /// content root recomputed from the parsed fields — a package whose
+    /// root does not recompute is tampered or forged, and never loads.
+    ///
+    /// # Errors
+    /// [`ParseError`] naming the field and the refusal.
+    pub fn from_json(text: &str) -> Result<EvidencePackage, ParseError> {
+        let mut jp = Jp {
+            b: text.as_bytes(),
+            at: 0,
+        };
+        let root_value = jp.value()?;
+        jp.ws();
+        if jp.at != jp.b.len() {
+            return Err(ParseError {
+                what: "package".to_string(),
+                why: "trailing bytes after the package object".to_string(),
+            });
+        }
+        let mut fields = obj_fields(root_value, "package")?;
+        let format_version = match take_field(&mut fields, "format_version", "package")? {
+            Jv::Num(n) if n.fract() == 0.0 && (0.0..=f64::from(u32::MAX)).contains(&n) => n as u32,
+            other => {
+                return Err(ParseError {
+                    what: "format_version".to_string(),
+                    why: format!("expected a u32, got {other:?}"),
+                });
+            }
+        };
+        if format_version != FORMAT_VERSION {
+            return Err(ParseError {
+                what: "format_version".to_string(),
+                why: format!("unsupported version {format_version} (this build reads {FORMAT_VERSION})"),
+            });
+        }
+        let declared_root = {
+            let hex = as_str(take_field(&mut fields, "merkle_root", "package")?, "merkle_root")?;
+            u64::from_str_radix(&hex, 16).map_err(|_| ParseError {
+                what: "merkle_root".to_string(),
+                why: format!("expected 16 hex digits, got {hex:?}"),
+            })?
+        };
+        let mut prov = obj_fields(take_field(&mut fields, "provenance", "package")?, "provenance")?;
+        let provenance = Provenance {
+            code_version: as_str(take_field(&mut prov, "code_version", "provenance")?, "code_version")?,
+            constellation_lock: as_str(
+                take_field(&mut prov, "constellation_lock", "provenance")?,
+                "constellation_lock",
+            )?,
+        };
+        no_leftovers(&prov, "provenance")?;
+        let signature = match take_field(&mut fields, "signature", "package")? {
+            Jv::Null => None,
+            Jv::Str(s) => Some(s),
+            other => {
+                return Err(ParseError {
+                    what: "signature".to_string(),
+                    why: format!("expected a string or null, got {other:?}"),
+                });
+            }
+        };
+        let mut mb = obj_fields(
+            take_field(&mut fields, "magnitude_budget", "package")?,
+            "magnitude_budget",
+        )?;
+        let declared_width = bits_f64(
+            take_field(&mut mb, "verified_width_bits", "magnitude_budget")?,
+            "verified_width_bits",
+            false,
+        )?;
+        let declared_disp = bits_f64(
+            take_field(&mut mb, "estimated_dispersion_bits", "magnitude_budget")?,
+            "estimated_dispersion_bits",
+            false,
+        )?;
+        let declared_unq = match take_field(&mut mb, "validated_unquantified", "magnitude_budget")? {
+            Jv::Num(n) if n.fract() == 0.0 && n >= 0.0 => n as usize,
+            other => {
+                return Err(ParseError {
+                    what: "validated_unquantified".to_string(),
+                    why: format!("expected a count, got {other:?}"),
+                });
+            }
+        };
+        no_leftovers(&mb, "magnitude_budget")?;
+        let claims_v = match take_field(&mut fields, "claims", "package")? {
+            Jv::Arr(items) => items,
+            other => {
+                return Err(ParseError {
+                    what: "claims".to_string(),
+                    why: format!("expected an array, got {other:?}"),
+                });
+            }
+        };
+        no_leftovers(&fields, "package")?;
+        let mut claims = Vec::with_capacity(claims_v.len());
+        for (i, cv) in claims_v.into_iter().enumerate() {
+            claims.push(parse_claim(cv, i)?);
+        }
+        let pkg = EvidencePackage {
+            format_version,
+            claims,
+            provenance,
+            signature,
+        };
+        // SEMANTIC re-derivation: the magnitude budget and the content
+        // root must recompute from the parsed fields, bit for bit.
+        let mb2 = pkg.magnitude_budget();
+        if mb2.verified_width.to_bits() != declared_width.to_bits()
+            || mb2.estimated_dispersion.to_bits() != declared_disp.to_bits()
+            || mb2.validated_unquantified != declared_unq
+        {
+            return Err(ParseError {
+                what: "magnitude_budget".to_string(),
+                why: "declared budget does not re-derive from the claims (tamper or drift)"
+                    .to_string(),
+            });
+        }
+        let recomputed = pkg.merkle_root();
+        if recomputed != declared_root {
+            return Err(ParseError {
+                what: "merkle_root".to_string(),
+                why: format!(
+                    "embedded root {declared_root:016x} does not recompute from the parsed \
+                     fields (got {recomputed:016x}) — tampered or forged content"
+                ),
+            });
+        }
+        Ok(pkg)
+    }
+}
+
+fn parse_claim(v: Jv, index: usize) -> Result<Claim, ParseError> {
+    let what = format!("claims[{index}]");
+    let mut f = obj_fields(v, &what)?;
+    let id = as_str(take_field(&mut f, "id", &what)?, &what)?;
+    let statement = as_str(take_field(&mut f, "statement", &what)?, &what)?;
+    let mut cf = obj_fields(take_field(&mut f, "color", &what)?, &what)?;
+    no_leftovers(&f, &what)?;
+    let kind = as_str(take_field(&mut cf, "kind", &what)?, &what)?;
+    let color = match kind.as_str() {
+        "verified" => {
+            let lo = bits_f64(take_field(&mut cf, "lo_bits", &what)?, &what, true)?;
+            let hi = bits_f64(take_field(&mut cf, "hi_bits", &what)?, &what, true)?;
+            if lo > hi {
+                return Err(ParseError {
+                    what,
+                    why: format!("verified interval inverted: {lo} > {hi}"),
+                });
+            }
+            Color::Verified { lo, hi }
+        }
+        "validated" => {
+            let regime_fields = obj_fields(take_field(&mut cf, "regime", &what)?, &what)?;
+            let mut domain = fs_evidence::ValidityDomain::unconstrained();
+            for (param, bounds) in regime_fields {
+                let Jv::Arr(pair) = bounds else {
+                    return Err(ParseError {
+                        what,
+                        why: format!("regime {param:?} must be a [lo_bits, hi_bits] pair"),
+                    });
+                };
+                let [lo_v, hi_v]: [Jv; 2] = pair.try_into().map_err(|_| ParseError {
+                    what: what.clone(),
+                    why: format!("regime {param:?} must have exactly two bounds"),
+                })?;
+                let lo = bits_f64(lo_v, &what, true)?;
+                let hi = bits_f64(hi_v, &what, true)?;
+                domain = domain.with(param, lo, hi);
+            }
+            let dataset = as_str(take_field(&mut cf, "dataset", &what)?, &what)?;
+            Color::Validated {
+                regime: domain,
+                dataset,
+            }
+        }
+        "estimated" => {
+            let estimator = as_str(take_field(&mut cf, "estimator", &what)?, &what)?;
+            let dispersion = bits_f64(take_field(&mut cf, "dispersion_bits", &what)?, &what, true)?;
+            if dispersion < 0.0 {
+                return Err(ParseError {
+                    what,
+                    why: format!("negative dispersion {dispersion}"),
+                });
+            }
+            Color::Estimated {
+                estimator,
+                dispersion,
+            }
+        }
+        other => {
+            return Err(ParseError {
+                what,
+                why: format!("unknown color kind {other:?} — fail closed"),
+            });
+        }
+    };
+    no_leftovers(&cf, "claim color")?;
+    Ok(Claim {
+        id,
+        statement,
+        color,
+    })
 }

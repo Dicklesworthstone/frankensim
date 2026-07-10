@@ -177,5 +177,117 @@ fn json_is_deterministic_and_carries_the_root() {
     assert_eq!(j, pkg.to_json());
     assert!(j.starts_with('{') && j.ends_with('}'));
     assert!(j.contains(&format!("{:016x}", pkg.merkle_root())));
-    assert!(j.contains("\"format_version\":1"));
+    assert!(j.contains("\"format_version\":2"), "schema v2 (qmao.6.1)");
+    // v2 carries COMPLETE payloads, not just rank labels.
+    assert!(j.contains("\"lo_bits\":") && j.contains("\"dataset\":"));
+}
+
+/// qmao.6.1 — the schema-v2 round trip and its fail-closed walls: a
+/// package decode-encodes stably (golden), floats travel bit-exactly,
+/// and hostile/missing/unknown/non-finite/forged/tampered inputs each
+/// refuse with a structured parse error.
+#[test]
+fn v2_round_trip_and_fail_closed_walls() {
+    let pkg = EvidencePackage::new(Provenance::new("frankensim@abc123", "lock:deadbeef"))
+        .with_claim(Claim::new(
+            "c-verified",
+            "tip deflection within bound",
+            Color::Verified {
+                lo: 0.1875,
+                hi: 0.25,
+            },
+        ))
+        .with_claim(Claim::new(
+            "c-validated",
+            "k-epsilon matched within regime",
+            Color::Validated {
+                regime: fs_evidence::ValidityDomain::unconstrained().with("reynolds", 1e3, 1e5),
+                dataset: "tunnel-run-9".to_string(),
+            },
+        ))
+        .with_claim(Claim::new(
+            "c-estimated",
+            "surrogate prediction",
+            Color::Estimated {
+                estimator: "pod-deim".to_string(),
+                dispersion: 0.02,
+            },
+        ))
+        .signed("test-key/1234abcd");
+    // Golden decode-encode stability: parse(to_json) == pkg, and the
+    // re-emission is byte-identical (semantic AND textual round trip).
+    let json = pkg.to_json();
+    let back = EvidencePackage::from_json(&json).expect("canonical JSON parses");
+    assert_eq!(back, pkg, "semantic round trip");
+    assert_eq!(back.to_json(), json, "textual round trip");
+    // Forged Verified claim: structurally shaped, but the embedded root
+    // no longer recomputes from the tampered content — refused at parse.
+    let forged = json.replace("tip deflection within bound", "tip deflection PROVEN SAFE");
+    let err = EvidencePackage::from_json(&forged).expect_err("forgery refused");
+    assert!(err.why.contains("does not recompute"), "{err}");
+    // Widening the certified interval (payload tamper) also refused.
+    let widened = json.replace(&format!("{:016x}", 0.25f64.to_bits()), &format!("{:016x}", 2.5f64.to_bits()));
+    assert!(EvidencePackage::from_json(&widened).is_err(), "payload tamper refused");
+    // Non-finite certificate bits: fail closed.
+    let nan = json.replace(
+        &format!("{:016x}", 0.1875f64.to_bits()),
+        &format!("{:016x}", f64::NAN.to_bits()),
+    );
+    let err = EvidencePackage::from_json(&nan).expect_err("NaN certificate refused");
+    assert!(err.why.contains("non-finite"), "{err}");
+    // Unknown fields: closed schema.
+    let unknown = json.replacen("{\"format_version\"", "{\"vendor_extra\":1,\"format_version\"", 1);
+    let err = EvidencePackage::from_json(&unknown).expect_err("unknown field refused");
+    assert!(err.why.contains("unknown field"), "{err}");
+    // Missing fields: fail closed.
+    let missing = json.replacen("\"signature\":\"test-key/1234abcd\",", "", 1);
+    assert!(EvidencePackage::from_json(&missing).is_err(), "missing field refused");
+    // Unknown color kind: fail closed.
+    let bad_kind = json.replacen("\"kind\":\"verified\"", "\"kind\":\"blessed\"", 1);
+    let err = EvidencePackage::from_json(&bad_kind).expect_err("unknown kind refused");
+    assert!(err.why.contains("unknown color kind"), "{err}");
+    // Drifted magnitude budget: refused (it must re-derive).
+    let mb_tag = "\"validated_unquantified\":1";
+    assert!(json.contains(mb_tag), "fixture sanity");
+    let drifted = json.replacen(mb_tag, "\"validated_unquantified\":7", 1);
+    let err = EvidencePackage::from_json(&drifted).expect_err("budget drift refused");
+    assert!(err.why.contains("re-derive"), "{err}");
+    // Hostile garbage and truncation: structured refusals, no panic.
+    assert!(EvidencePackage::from_json("{\"format_version\":2").is_err());
+    assert!(EvidencePackage::from_json(&json[..json.len() / 2]).is_err());
+    assert!(EvidencePackage::from_json("").is_err());
+}
+
+/// qmao.6.1 — the magnitude budget attributes ERROR MAGNITUDES, not
+/// claim counts, and reconciles with an independent recomputation.
+#[test]
+fn magnitude_budget_reconciles() {
+    let pkg = EvidencePackage::new(Provenance::new("v", "l"))
+        .with_claim(Claim::new("a", "s", Color::Verified { lo: 0.0, hi: 0.5 }))
+        .with_claim(Claim::new("b", "s", Color::Verified { lo: 1.0, hi: 1.25 }))
+        .with_claim(Claim::new(
+            "c",
+            "s",
+            Color::Estimated {
+                estimator: "e".to_string(),
+                dispersion: 0.125,
+            },
+        ))
+        .with_claim(Claim::new(
+            "d",
+            "s",
+            Color::Validated {
+                regime: fs_evidence::ValidityDomain::unconstrained().with("re", 1.0, 2.0),
+                dataset: "ds".to_string(),
+            },
+        ));
+    let mb = pkg.magnitude_budget();
+    assert_eq!(mb.verified_width.to_bits(), 0.75f64.to_bits());
+    assert_eq!(mb.estimated_dispersion.to_bits(), 0.125f64.to_bits());
+    assert_eq!(mb.validated_unquantified, 1, "regional trust counted, never numerified");
+    assert_eq!(
+        mb.quantified_total.to_bits(),
+        (mb.verified_width + mb.estimated_dispersion).to_bits(),
+        "total reconciles with its parts"
+    );
 }

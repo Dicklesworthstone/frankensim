@@ -14,14 +14,16 @@ colored objectives), `fs-evidence` (Verified/Estimated). Deps point downward.
   `perturbed_costs(sigma, n)`.
 - `FamilyVerdict { name, nominal_cost, x_star, nominal_color, robust_cost }`.
 - `run_campaign(&[Family], alpha, sigma, n) -> RobustOptReport` — proves each
-  global optimum, ranks by CVaR robustness.
+  global optimum by composing a radius-scoped SOS lower bound (on a radius
+  containing the vertex), convex-quadratic monotonicity outside that radius,
+  and an interval-evaluated attained upper bound; ranks by CVaR robustness.
 - `demo_families()` — three families with `x*=2` but different curvature.
 
 ## Invariants
 
-- Every convex family's nominal optimum is SOS-`Verified` (proof residual ~0),
-  equal to `c − b²/4a`; a non-convex (`a≤0`) family is `Estimated`
-  (unbounded below).
+- Every finite convex family's nominal optimum is SOS-`Verified` by a true
+  enclosure containing `c − b²/4a`; a non-convex, non-finite, or numerically
+  unrepresentable family is `Estimated` (no global certificate).
 - ROBUSTNESS REORDERS: the lowest-nominal family ("champion") is not the CVaR
   winner ("flat") — a flatter family wins under worst-case perturbation.
 - NO LAUNDERING: the robust (CVaR) headline is `Estimated` (a sample statistic).

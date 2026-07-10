@@ -14,6 +14,7 @@ layer = "L4"
 fs-sos = { path = "../fs-sos" }
 fs-robust = { path = "../fs-robust" }
 fs-evidence = { path = "../fs-evidence" }
+fs-ivl = { path = "../fs-ivl" }
 
 [dev-dependencies]
 

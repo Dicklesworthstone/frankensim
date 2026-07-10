@@ -960,6 +960,10 @@ version = "0.0.1"
 [[package]]
 name = "fs-crosswalk"
 version = "0.0.1"
+dependencies = [
+ "fs-evidence",
+ "fs-package",
+]
 
 [[package]]
 name = "fs-cutfem"
@@ -1611,6 +1615,7 @@ name = "fs-robustopt-e2e"
 version = "0.0.1"
 dependencies = [
  "fs-evidence",
+ "fs-ivl",
  "fs-robust",
  "fs-sos",
 ]

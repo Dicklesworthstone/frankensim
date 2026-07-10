@@ -94,6 +94,9 @@ fn there_are_zero_false_certificates() {
 fn certify_quadratic_rejects_unbounded_forms() {
     assert!(certify_quadratic(-1.0, 0.0, 0.0).is_none()); // opens downward
     assert!(certify_quadratic(0.0, 1.0, 0.0).is_none()); // linear
+    assert!(certify_quadratic(f64::NAN, 0.0, 0.0).is_none());
+    assert!(certify_quadratic(1.0, f64::INFINITY, 0.0).is_none());
+    assert!(certify_quadratic(f64::MIN_POSITIVE, f64::MAX, 0.0).is_none());
 }
 
 #[test]

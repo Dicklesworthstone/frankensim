@@ -259,16 +259,21 @@ impl SosCertificate {
 /// The exact global minimum of `a·x² + b·x + c` (`a > 0`) with its SOS
 /// certificate: `p(x) − (c − b²/4a) = (√a·x + b/2√a)²`.
 ///
-/// Returns `None` when `a <= 0` (not bounded below by a square).
+/// Returns `None` when the coefficients or derived certificate values are
+/// non-finite, or when `a <= 0` (not bounded below by a square).
 #[must_use]
 pub fn certify_quadratic(a: f64, b: f64, c: f64) -> Option<SosCertificate> {
-    if a <= 0.0 {
+    if !(a.is_finite() && a > 0.0 && b.is_finite() && c.is_finite()) {
         return None;
     }
     let lower_bound = c - b * b / (4.0 * a);
     let root_a = a.sqrt();
     // q(x) = √a·x + b/(2√a).
-    let q = Poly::new(vec![b / (2.0 * root_a), root_a]);
+    let q0 = b / (2.0 * root_a);
+    if !(lower_bound.is_finite() && root_a.is_finite() && q0.is_finite()) {
+        return None;
+    }
+    let q = Poly::new(vec![q0, root_a]);
     Some(SosCertificate {
         squares: vec![q],
         lower_bound,

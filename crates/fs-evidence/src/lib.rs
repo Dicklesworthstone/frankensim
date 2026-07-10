@@ -70,14 +70,18 @@ impl ProvenanceHash {
 
     /// Chain an operation over operand provenances (deterministic,
     /// order-sensitive — `combine("sub", [a, b])` differs from `[b, a]`).
+    ///
+    /// Encoded with the canonical replay-identity schema (gp3.14):
+    /// typed length-prefixed fields, NOT `op|hash|hash` concatenation —
+    /// an op name containing `|` or a hex-looking suffix can no longer
+    /// imitate a different chain.
     #[must_use]
     pub fn chain(op: &str, operands: &[ProvenanceHash]) -> Self {
-        let mut s = String::with_capacity(16 + operands.len() * 17);
-        s.push_str(op);
+        let mut b = fs_obs::ident::IdentityBuilder::new("provenance-chain").str("op", op);
         for p in operands {
-            let _ = write!(s, "|{:016x}", p.0);
+            b = b.child_root64("operand", p.0);
         }
-        Self::of_bytes(s.as_bytes())
+        ProvenanceHash(b.finish().root())
     }
 }
 
