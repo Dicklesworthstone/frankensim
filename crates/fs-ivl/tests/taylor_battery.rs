@@ -3,7 +3,10 @@
 //! Newton/Krawczyk certification incl. the double-root honesty case,
 //! Lipschitz extraction, and the cross-ISA golden hash.
 
-use fs_ivl::{Interval, TaylorModel1, krawczyk_step, lipschitz_bound, newton_roots};
+use fs_ivl::{
+    Interval, RootBox, RootSearchConfig, RootSearchError, TaylorModel1, krawczyk_step,
+    lipschitz_bound, newton_roots, newton_roots_bounded,
+};
 
 /// f(x) = x·sin(x) + exp(x·0.3) as a Taylor model (order 5).
 fn model_f(domain: Interval) -> TaylorModel1 {
@@ -175,6 +178,85 @@ fn krawczyk_agrees_with_newton() {
     assert!(strict, "Krawczyk must certify on this box");
     assert!(k1.contains(std::f64::consts::SQRT_2));
     assert!(k1.width() < x0.width(), "must contract");
+}
+
+#[test]
+fn root_search_rejects_non_finite_or_unbounded_requests() {
+    let zero = |_x: Interval| Interval::point(0.0);
+    let config = RootSearchConfig {
+        min_width: 1.0,
+        max_boxes: 8,
+    };
+    assert_eq!(
+        newton_roots_bounded(&zero, &zero, Interval::WHOLE, config),
+        Err(RootSearchError::NonFiniteDomain)
+    );
+    assert_eq!(
+        newton_roots_bounded(
+            &zero,
+            &zero,
+            Interval::new(-1.0, 1.0),
+            RootSearchConfig {
+                min_width: f64::NAN,
+                max_boxes: 8,
+            },
+        ),
+        Err(RootSearchError::InvalidMinWidth)
+    );
+    assert_eq!(
+        newton_roots_bounded(
+            &zero,
+            &zero,
+            Interval::new(-1.0, 1.0),
+            RootSearchConfig {
+                min_width: 1.0,
+                max_boxes: 0,
+            },
+        ),
+        Err(RootSearchError::EmptyBudget)
+    );
+}
+
+#[test]
+fn root_search_budget_exhaustion_is_reported_as_possible() {
+    let zero = |_x: Interval| Interval::point(0.0);
+    let domain = Interval::new(-1.0, 1.0);
+    let report = newton_roots_bounded(
+        &zero,
+        &zero,
+        domain,
+        RootSearchConfig {
+            min_width: f64::MIN_POSITIVE,
+            max_boxes: 8,
+        },
+    )
+    .expect("valid bounded search");
+    assert_eq!(report.boxes_examined, 8);
+    assert!(!report.complete);
+    assert!(report.roots.iter().all(|root| !root.is_certified()));
+    assert!(report.roots.iter().any(
+        |root| matches!(root, RootBox::Possible(iv) if iv.lo() <= domain.lo() && iv.hi() >= domain.hi())
+    ));
+}
+
+#[test]
+fn root_search_stops_when_midpoint_cannot_split_adjacent_floats() {
+    let zero = |_x: Interval| Interval::point(0.0);
+    let lo = 1.0;
+    let hi = fs_math::next_up(lo);
+    let report = newton_roots_bounded(
+        &zero,
+        &zero,
+        Interval::new(lo, hi),
+        RootSearchConfig {
+            min_width: f64::MIN_POSITIVE,
+            max_boxes: 8,
+        },
+    )
+    .expect("valid bounded search");
+    assert!(report.complete);
+    assert_eq!(report.boxes_examined, 1);
+    assert_eq!(report.roots, vec![RootBox::Possible(Interval::new(lo, hi))]);
 }
 
 #[test]

@@ -97,6 +97,14 @@ ln with hi ≤ 0. Partial-domain overlaps degrade gracefully (sqrt clips at
 0; ln returns lower bound −∞). Division by zero-containing intervals
 returns `WHOLE`, never panics.
 
+Interval root isolation accepts only finite domains, finite positive target
+widths, and nonzero box budgets. `newton_roots_bounded` returns structured
+`RootSearchError` values for invalid requests and a `RootSearchReport` whose
+`complete` bit is true only when the subdivision stack was exhausted. On work
+exhaustion, unevaluated regions remain `Possible`; they are never silently
+dropped or promoted to certified. The compatibility `newton_roots` entry point
+uses a fixed 65,536-box ceiling and panics only for invalid parameters.
+
 ## Determinism class
 Bit-deterministic CROSS-ISA by construction (straight-line IEEE arithmetic
 + fs-math strict functions). Evidence: FNV-64 golden hash over 500 random
@@ -105,8 +113,9 @@ recorded on aarch64-apple (M4 Pro), required to match on x86-64
 (Threadripper) in tests/conformance.rs. Golden-evidence policy applies.
 
 ## Cancellation behavior
-Straight-line arithmetic; no poll points needed (certified BULK kernels
-belong to future consumers, which poll at their own tile boundaries).
+Straight-line arithmetic needs no poll points. Root isolation is a bulk search
+and therefore requires an explicit box budget; the report makes exhaustion
+observable and a caller may resume at the returned `Possible` boxes.
 
 ## Unsafe boundary
 None. `unsafe_code` denied; no capsules.

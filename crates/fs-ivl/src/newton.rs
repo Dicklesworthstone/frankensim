@@ -10,6 +10,58 @@
 
 use crate::Interval;
 
+/// Default work bound for the compatibility [`newton_roots`] entry point.
+/// Callers that need a completeness receipt should use
+/// [`newton_roots_bounded`] with an explicit [`RootSearchConfig`].
+pub const DEFAULT_MAX_ROOT_BOXES: usize = 65_536;
+
+/// Explicit subdivision controls for interval root isolation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RootSearchConfig {
+    /// Boxes no wider than this may be returned as ambiguous.
+    pub min_width: f64,
+    /// Maximum number of boxes that may be evaluated.
+    pub max_boxes: usize,
+}
+
+/// Invalid root-search parameters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootSearchError {
+    /// The search domain must have finite endpoints.
+    NonFiniteDomain,
+    /// The target width must be finite and strictly positive.
+    InvalidMinWidth,
+    /// A zero work budget cannot evaluate even the initial box.
+    EmptyBudget,
+}
+
+impl core::fmt::Display for RootSearchError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            RootSearchError::NonFiniteDomain => {
+                write!(f, "root-search domain endpoints must be finite")
+            }
+            RootSearchError::InvalidMinWidth => {
+                write!(f, "root-search min_width must be finite and positive")
+            }
+            RootSearchError::EmptyBudget => write!(f, "root-search max_boxes must be positive"),
+        }
+    }
+}
+
+impl std::error::Error for RootSearchError {}
+
+/// Root boxes plus a receipt for whether the requested domain was exhausted.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RootSearchReport {
+    /// Certified and possible root boxes in deterministic order.
+    pub roots: Vec<RootBox>,
+    /// Number of boxes whose interval extension was evaluated.
+    pub boxes_examined: usize,
+    /// `true` only when no unevaluated subdivision boxes remain.
+    pub complete: bool,
+}
+
 /// A root-search result box with its certification status.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum RootBox {
@@ -58,20 +110,54 @@ where
     Some((contracted, strict_interior))
 }
 
-/// Find all roots of `f` in `domain` by recursive bisection with interval
-/// Newton contraction. `f` and `fp` are interval extensions of the
-/// function and its derivative (fs-ivl arithmetic keeps them rigorous).
-/// `min_width` bounds subdivision; boxes still ambiguous at that width
-/// come back [`RootBox::Possible`].
-#[must_use]
-pub fn newton_roots<F, D>(f: &F, fp: &D, domain: Interval, min_width: f64) -> Vec<RootBox>
+fn merge_root_boxes(mut out: Vec<RootBox>) -> Vec<RootBox> {
+    out.sort_by(|a, b| a.interval().lo().total_cmp(&b.interval().lo()));
+    let mut merged: Vec<RootBox> = Vec::new();
+    for root in out {
+        if let (Some(RootBox::Possible(previous)), RootBox::Possible(current)) =
+            (merged.last().copied(), root)
+            && previous.hi() >= current.lo()
+        {
+            *merged.last_mut().expect("last element exists") =
+                RootBox::Possible(previous.hull(current));
+            continue;
+        }
+        merged.push(root);
+    }
+    merged
+}
+
+/// Find roots by recursive bisection with an explicit work budget.
+///
+/// On budget exhaustion, every unevaluated subdivision box is returned as
+/// [`RootBox::Possible`] and `complete` is false. This is conservative: no
+/// root is silently dropped merely because the caller ran out of work.
+pub fn newton_roots_bounded<F, D>(
+    f: &F,
+    fp: &D,
+    domain: Interval,
+    config: RootSearchConfig,
+) -> Result<RootSearchReport, RootSearchError>
 where
     F: Fn(Interval) -> Interval,
     D: Fn(Interval) -> Interval,
 {
+    if !(domain.lo().is_finite() && domain.hi().is_finite()) {
+        return Err(RootSearchError::NonFiniteDomain);
+    }
+    if !(config.min_width.is_finite() && config.min_width > 0.0) {
+        return Err(RootSearchError::InvalidMinWidth);
+    }
+    if config.max_boxes == 0 {
+        return Err(RootSearchError::EmptyBudget);
+    }
+
     let mut out = Vec::new();
     let mut stack = vec![domain];
-    while let Some(x) = stack.pop() {
+    let mut boxes_examined = 0usize;
+    while boxes_examined < config.max_boxes {
+        let Some(x) = stack.pop() else { break };
+        boxes_examined += 1;
         // Exclusion test first: 0 ∉ F(X) means no root here.
         if !f(x).contains_zero() {
             continue;
@@ -111,29 +197,52 @@ where
                 }
             }
             out.push(RootBox::Certified(cur));
-        } else if cur.width() <= min_width {
+        } else if cur.width() <= config.min_width {
             out.push(RootBox::Possible(cur));
         } else {
             let m = cur.midpoint();
-            stack.push(Interval::new(cur.lo(), m));
-            stack.push(Interval::new(m, cur.hi()));
+            // Adjacent floats and any future midpoint policy must not be able
+            // to reproduce the parent box indefinitely.
+            if !(m.is_finite() && cur.lo() < m && m < cur.hi()) {
+                out.push(RootBox::Possible(cur));
+            } else {
+                stack.push(Interval::new(cur.lo(), m));
+                stack.push(Interval::new(m, cur.hi()));
+            }
         }
     }
-    // Deterministic presentation: sort by lower bound; merge adjacent
-    // Possible boxes that share an endpoint (bisection artifacts).
-    out.sort_by(|a, b| a.interval().lo().partial_cmp(&b.interval().lo()).unwrap());
-    let mut merged: Vec<RootBox> = Vec::new();
-    for r in out {
-        if let (Some(RootBox::Possible(prev)), RootBox::Possible(cur)) = (merged.last().copied(), r)
-            && prev.hi() >= cur.lo()
-        {
-            let joined = prev.hull(cur);
-            *merged.last_mut().unwrap() = RootBox::Possible(joined);
-            continue;
-        }
-        merged.push(r);
-    }
-    merged
+    let complete = stack.is_empty();
+    out.extend(stack.into_iter().map(RootBox::Possible));
+    Ok(RootSearchReport {
+        roots: merge_root_boxes(out),
+        boxes_examined,
+        complete,
+    })
+}
+
+/// Find roots with the default bounded-work policy.
+///
+/// Invalid parameters panic with a structured message, matching the existing
+/// interval-domain API. The search itself is capped at
+/// [`DEFAULT_MAX_ROOT_BOXES`]; ambiguous unevaluated regions are returned as
+/// [`RootBox::Possible`] rather than allowing an unbounded search.
+#[must_use]
+pub fn newton_roots<F, D>(f: &F, fp: &D, domain: Interval, min_width: f64) -> Vec<RootBox>
+where
+    F: Fn(Interval) -> Interval,
+    D: Fn(Interval) -> Interval,
+{
+    newton_roots_bounded(
+        f,
+        fp,
+        domain,
+        RootSearchConfig {
+            min_width,
+            max_boxes: DEFAULT_MAX_ROOT_BOXES,
+        },
+    )
+    .unwrap_or_else(|error| panic!("invalid interval root search: {error}"))
+    .roots
 }
 
 /// One Krawczyk step: K(X) = m − y·f(m) + (1 − y·F′(X))·(X − m) with

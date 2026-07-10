@@ -28,7 +28,10 @@ pub mod taylor;
 
 pub use affine::{Affine, AffineCtx};
 pub use interval::Interval;
-pub use newton::{RootBox, krawczyk_step, lipschitz_bound, newton_roots};
+pub use newton::{
+    DEFAULT_MAX_ROOT_BOXES, RootBox, RootSearchConfig, RootSearchError, RootSearchReport,
+    krawczyk_step, lipschitz_bound, newton_roots, newton_roots_bounded,
+};
 pub use predicates::{
     Sign, Stage, incircle, incircle_with_stage, insphere, insphere_with_stage, orient2d,
     orient2d_sos, orient2d_with_stage, orient3d, orient3d_sos, orient3d_with_stage,
