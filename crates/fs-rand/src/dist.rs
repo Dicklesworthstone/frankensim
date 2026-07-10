@@ -33,6 +33,12 @@ impl Stream {
             // U^(1/α) via strict pow; U ∈ [0,1) → guard the 0 corner.
             return g * det::pow(u.max(f64::MIN_POSITIVE), 1.0 / alpha);
         }
+        let (d, v3) = self.next_gamma_base(alpha);
+        d * v3
+    }
+
+    // Retain the positive α ≥ 1 factors separately for log-domain replay.
+    fn next_gamma_base(&mut self, alpha: f64) -> (f64, f64) {
         let d = alpha - 1.0 / 3.0;
         let c = 1.0 / det::sqrt(9.0 * d);
         loop {
@@ -46,35 +52,59 @@ impl Stream {
             let x2 = x * x;
             // Squeeze acceptance (cheap path).
             if u < 1.0 - 0.0331 * x2 * x2 {
-                return d * v3;
+                return (d, v3);
             }
             // Log acceptance (exact path).
             if det::ln(u) < 0.5f64.mul_add(x2, d * (1.0 - v3 + det::ln(v3))) {
-                return d * v3;
+                return (d, v3);
             }
         }
+    }
+
+    // `scale <= min(1, alpha)` keeps this log score finite.
+    fn next_scaled_log_gamma(&mut self, alpha: f64, scale: f64) -> f64 {
+        if alpha < 1.0 {
+            let u = self.next_f64();
+            let base = self.next_scaled_log_gamma(alpha + 1.0, scale);
+            return det::ln(u.max(f64::MIN_POSITIVE)).mul_add(scale / alpha, base);
+        }
+        let (d, v3) = self.next_gamma_base(alpha);
+        scale * (det::ln(d) + det::ln(v3))
     }
 
     /// Beta(α, β) as Gα/(Gα + Gβ) (inherits the rejection contract).
     #[must_use]
     pub fn next_beta(&mut self, alpha: f64, beta: f64) -> f64 {
+        let checkpoint = *self;
         let ga = self.next_gamma(alpha);
         let gb = self.next_gamma(beta);
-        ga / (ga + gb)
+        let total = ga + gb;
+        if total > 0.0 && total.is_finite() {
+            ga / total
+        } else {
+            let mut normalized = [0.0; 2];
+            normalize_gamma_replay(checkpoint, &[alpha, beta], &mut normalized);
+            normalized[0]
+        }
     }
 
     /// Dirichlet(α₁..α_k): k gammas normalized, written into `out`.
     pub fn next_dirichlet(&mut self, alphas: &[f64], out: &mut [f64]) {
         assert_eq!(alphas.len(), out.len(), "dirichlet output length mismatch");
         assert!(!alphas.is_empty(), "dirichlet needs at least one component");
+        let checkpoint = *self;
         let mut total = 0.0f64;
         for (slot, &a) in out.iter_mut().zip(alphas) {
             let g = self.next_gamma(a);
             *slot = g;
             total += g;
         }
-        for slot in out.iter_mut() {
-            *slot /= total;
+        if total > 0.0 && total.is_finite() {
+            for slot in out.iter_mut() {
+                *slot /= total;
+            }
+        } else {
+            normalize_gamma_replay(checkpoint, alphas, out);
         }
     }
 
@@ -139,6 +169,28 @@ impl Stream {
         let phi = 2.0 * std::f64::consts::PI * phi_u;
         let local = [r * det::cos(phi), r * det::sin(phi), w];
         rotate_z_to(mu, local)
+    }
+}
+
+// The checkpoint replay consumes no additional caller-visible draws.
+fn normalize_gamma_replay(mut replay: Stream, alphas: &[f64], out: &mut [f64]) {
+    let scale = alphas.iter().fold(1.0f64, |acc, &alpha| acc.min(alpha));
+    let mut max_score = f64::NEG_INFINITY;
+    for (slot, &alpha) in out.iter_mut().zip(alphas) {
+        let score = replay.next_scaled_log_gamma(alpha, scale);
+        *slot = score;
+        max_score = max_score.max(score);
+    }
+
+    let total: f64 = out
+        .iter_mut()
+        .map(|slot| {
+            *slot = det::exp((*slot - max_score) / scale);
+            *slot
+        })
+        .sum();
+    for slot in out.iter_mut() {
+        *slot /= total;
     }
 }
 

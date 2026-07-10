@@ -98,6 +98,75 @@ fn beta_and_dirichlet_moments() {
 }
 
 #[test]
+fn extreme_beta_and_dirichlet_shapes_are_total_and_replay_safe() {
+    const TINY: f64 = f64::MIN_POSITIVE;
+    const SMALLEST: f64 = f64::from_bits(1);
+    const HUGE: f64 = f64::MAX;
+
+    for (case, &(alpha, beta)) in [
+        (SMALLEST, SMALLEST),
+        (TINY, TINY),
+        (TINY, 2.0 * TINY),
+        (1.0e-300, TINY),
+        (HUGE, HUGE),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let start = 120_000 + 100 * case as u64;
+        let mut a = Stream::resume(KEY, start);
+        let value = a.next_beta(alpha, beta);
+        let end = a.index();
+
+        assert!(value.is_finite(), "extreme-shape beta returned {value}");
+        assert!((0.0..=1.0).contains(&value), "beta out of range: {value}");
+
+        let mut replay = Stream::resume(KEY, start);
+        let replayed = replay.next_beta(alpha, beta);
+        assert_eq!(value.to_bits(), replayed.to_bits(), "beta replay bits");
+        assert_eq!(end, replay.index(), "beta fallback consumed hidden draws");
+    }
+
+    for (case, alphas) in [
+        [SMALLEST, SMALLEST, SMALLEST],
+        [TINY, TINY, TINY],
+        [TINY, 2.0 * TINY, 1.0e-300],
+        [HUGE, HUGE, HUGE],
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let start = 140_000 + 100 * case as u64;
+        let mut a = Stream::resume(KEY, start);
+        let mut values = [0.0; 3];
+        a.next_dirichlet(&alphas, &mut values);
+        let end = a.index();
+
+        assert!(
+            values.iter().all(|v| v.is_finite() && *v >= 0.0),
+            "extreme-shape Dirichlet returned {values:?}"
+        );
+        let sum: f64 = values.iter().sum();
+        assert!(sum > 0.0, "Dirichlet normalization was all zero");
+        assert!((sum - 1.0).abs() <= f64::EPSILON, "simplex sum {sum}");
+
+        let mut replay = Stream::resume(KEY, start);
+        let mut replayed = [0.0; 3];
+        replay.next_dirichlet(&alphas, &mut replayed);
+        assert_eq!(
+            values.map(f64::to_bits),
+            replayed.map(f64::to_bits),
+            "Dirichlet replay bits"
+        );
+        assert_eq!(
+            end,
+            replay.index(),
+            "Dirichlet fallback consumed hidden draws"
+        );
+    }
+}
+
+#[test]
 fn alias_table_bitwise_construction_and_chi_square() {
     const N: usize = 200_000;
     let weights = [1.0f64, 2.0, 3.0, 10.0, 0.5];

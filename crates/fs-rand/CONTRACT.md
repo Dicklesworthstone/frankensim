@@ -35,6 +35,12 @@ distributions (plan §6.7; P2's seed pillar). Layer: L1.
   pow for the α < 1 gamma boost) — sampled VALUES are cross-ISA
   bit-deterministic, golden-hashed (`0x4224_6e28_56de_673c`, verified on
   both reference ISAs).
+- Beta and Dirichlet use direct gamma normalization when its total is finite
+  and positive. If valid extreme shapes underflow every gamma to zero (or make
+  the direct total overflow), they replay the same checkpointed samples as
+  scaled log weights. The replay advances no caller-visible stream state, uses
+  only strict arithmetic, and guarantees finite normalized outputs without
+  changing ordinary-shape bits.
 - vMF mean-resultant lengths match the analytic coth(κ) − 1/κ at
   κ ∈ {1, 10, 100} (tested); truncated-normal mean matches the analytic
   hazard ratio via erfc (tested).
@@ -53,7 +59,12 @@ distributions (plan §6.7; P2's seed pillar). Layer: L1.
   proven cross-ISA determinism.
 
 ## Error model
-`next_below(0)` panics (programmer error). Everything else total.
+Invalid distribution parameters panic as programmer errors (`next_below(0)`,
+non-positive/non-finite gamma-family shapes, empty or length-mismatched
+Dirichlet outputs, and invalid truncation/vMF parameters). Within those
+documented domains, operations are total; in particular, every valid beta is
+finite in `[0,1]` and every valid Dirichlet result is a finite non-negative
+simplex point even at `f64::MIN_POSITIVE` shapes.
 
 ## Determinism class
 Deterministic CROSS-ISA (integer core + fs-math-strict distributions).
