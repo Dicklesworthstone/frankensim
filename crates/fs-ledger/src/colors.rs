@@ -28,6 +28,35 @@ pub struct Waiver {
     pub reason: String,
 }
 
+fn json_f64(value: f64) -> String {
+    if value.is_finite() {
+        value.to_string()
+    } else {
+        format!("\"non-finite:{value}\"")
+    }
+}
+
+fn json_string(value: &str) -> String {
+    use core::fmt::Write as _;
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if u32::from(c) < 0x20 => {
+                let _ = write!(out, "\\u{:04x}", u32::from(c));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 /// One colored ledger node.
 #[derive(Debug, Clone)]
 pub struct ColorNode {
@@ -158,21 +187,26 @@ impl ColorGraph {
         let hash = self.node_hash(name, &color, &parents, waiver.as_ref());
         if let Some(d) = &demotion {
             self.rows.push(format!(
-                "{{\"event\":\"demotion\",\"node\":{id},\"dataset\":\"{}\",\
-                 \"axis\":\"{}\",\"value\":{}}}",
-                d.dataset, d.axis, d.value
+                "{{\"event\":\"demotion\",\"node\":{id},\"dataset\":{},\
+                 \"axis\":{},\"value\":{}}}",
+                json_string(&d.dataset),
+                json_string(&d.axis),
+                json_f64(d.value)
             ));
         }
         let waiver_json = waiver.as_ref().map_or("null".to_string(), |w| {
             format!(
-                "{{\"id\":\"{}\",\"signer\":\"{}\",\"reason\":\"{}\"}}",
-                w.id, w.signer, w.reason
+                "{{\"id\":{},\"signer\":{},\"reason\":{}}}",
+                json_string(&w.id),
+                json_string(&w.signer),
+                json_string(&w.reason)
             )
         });
         self.rows.push(format!(
-            "{{\"event\":\"color-write\",\"node\":{id},\"name\":\"{name}\",\
+            "{{\"event\":\"color-write\",\"node\":{id},\"name\":{},\
              \"color\":\"{}\",\"payload\":{},\"parents\":{:?},\"waiver\":{},\
              \"hash\":\"{}\"}}",
+            json_string(name),
             color.name(),
             color.payload_json(),
             parents,

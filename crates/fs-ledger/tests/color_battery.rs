@@ -449,6 +449,93 @@ fn col_006_determinism() {
     );
 }
 
+/// col-007 — color rows remain strict JSON when fail-closed demotion emits
+/// non-finite sentinels and caller-controlled metadata contains JSON syntax or
+/// control characters. Validation goes through the ledger's SQLite `json_valid`
+/// path, the same parser that enforces persisted payloads.
+#[test]
+fn col_007_color_rows_are_strict_json_under_hostile_metadata() {
+    let build = || -> Vec<String> {
+        let hostile = "meta\"\\\n\r\t\u{0007}";
+        let axis = format!("Re-{hostile}");
+        let dataset = format!("anchors-{hostile}");
+        let mut graph = ColorGraph::new();
+        let validated = graph.source(
+            &format!("validated-{hostile}"),
+            Color::Validated {
+                regime: ValidityDomain::unconstrained().with(&axis, 1.0, 10.0),
+                dataset,
+            },
+        );
+        let state: BTreeMap<String, f64> = [(axis, f64::NAN)].into();
+        graph
+            .derive(
+                &format!("demoted-{hostile}"),
+                &[validated],
+                IntervalOp::Hull,
+                None,
+                &state,
+                None,
+            )
+            .expect("non-finite state demotes instead of refusing the write");
+
+        let estimated = graph.source(
+            &format!("estimated-{hostile}"),
+            Color::Estimated {
+                estimator: format!("surrogate-{hostile}"),
+                dispersion: f64::INFINITY,
+            },
+        );
+        graph
+            .derive(
+                &format!("waived-{hostile}"),
+                &[estimated],
+                IntervalOp::Hull,
+                Some(Color::Verified { lo: 0.0, hi: 1.0 }),
+                &BTreeMap::new(),
+                Some(Waiver {
+                    id: format!("id-{hostile}"),
+                    signer: format!("signer-{hostile}"),
+                    reason: format!("reason-{hostile}"),
+                }),
+            )
+            .expect("waived write");
+        graph.rows().to_vec()
+    };
+
+    let rows = build();
+    let deterministic = rows == build();
+    let ledger = fs_ledger::Ledger::open(":memory:").expect("open validation ledger");
+    let mut parser_accepts_every_row = true;
+    for (index, row) in rows.iter().enumerate() {
+        parser_accepts_every_row &= ledger
+            .append_event(&fs_ledger::EventRow {
+                session: None,
+                t: i64::try_from(index).expect("small row index"),
+                kind: "color-json-validation",
+                payload: Some(row),
+            })
+            .is_ok();
+    }
+    let no_raw_controls = rows.iter().all(|row| !row.chars().any(char::is_control));
+    let sentinels_and_escapes_present = rows.iter().any(|row| row.contains("non-finite:NaN"))
+        && rows.iter().any(|row| row.contains("non-finite:inf"))
+        && rows.iter().any(|row| row.contains(r#"\""#))
+        && rows.iter().any(|row| row.contains(r#"\\"#))
+        && rows.iter().any(|row| row.contains(r#"\n"#))
+        && rows.iter().any(|row| row.contains(r#"\u0007"#));
+
+    verdict(
+        "col-007",
+        deterministic
+            && parser_accepts_every_row
+            && no_raw_controls
+            && sentinels_and_escapes_present,
+        "SQLite json_valid accepts every deterministic color/demotion/waiver row; \
+         NaN and infinity are tagged strings and hostile metadata is escaped",
+    );
+}
+
 /// v3 migration regression (bead lmp4.3): the speculation extension
 /// table exists, round-trips the four solve-node fields, and every
 /// pre-existing table still answers queries (nothing broke).

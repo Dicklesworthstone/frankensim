@@ -324,7 +324,7 @@ fn evd_006_certified_discipline_composes() {
 
 #[test]
 fn evd_007_disjoint_validated_regimes_demote_not_launder() {
-    use fs_evidence::{Color, ColorRank, IntervalOp, compose};
+    use fs_evidence::{Color, IntervalOp, compose};
     let a = Color::Validated {
         regime: ValidityDomain::unconstrained().with("Re", 1e5, 2e5),
         dataset: "A".into(),
@@ -348,12 +348,16 @@ fn evd_007_disjoint_validated_regimes_demote_not_launder() {
         dataset: "B".into(),
     };
     let disjoint = compose(&a, &b_disjoint, IntervalOp::Add);
-    let demoted = disjoint.rank() == ColorRank::Estimated;
+    let demoted = matches!(
+        disjoint,
+        Color::Estimated { dispersion, .. } if dispersion.is_infinite()
+    );
     verdict(
         "evd-007",
         overlap_ok && demoted,
         "validated⊕validated intersects when overlapping; disjoint regimes demote to \
-         Estimated instead of laundering a phantom point regime",
+         Estimated with infinite/no-claim dispersion instead of laundering a phantom point \
+         regime or asserting a zero spread",
     );
 }
 
@@ -398,5 +402,64 @@ fn evd_008_verified_compose_stays_a_true_enclosure() {
         "evd-008",
         true,
         "Verified compose is outward-rounded (true enclosure) and NaN-safe",
+    );
+}
+
+#[test]
+fn evd_009_non_finite_regimes_fail_closed_and_payloads_escape() {
+    use fs_evidence::{Color, check_regime};
+
+    let validated = Color::Validated {
+        regime: ValidityDomain::unconstrained().with("Re", 1.0, 10.0),
+        dataset: "anchors".to_string(),
+    };
+    let mut non_finite_states_demote = true;
+    for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let (checked, flag) = check_regime(&validated, &pt(&[("Re", value)]));
+        non_finite_states_demote &= matches!(
+            checked,
+            Color::Estimated { dispersion, .. } if dispersion.is_infinite()
+        ) && flag
+            .is_some_and(|d| d.axis == "Re" && !d.value.is_finite());
+    }
+
+    let inverted = ValidityDomain::unconstrained()
+        .with("Re", 1.0, 2.0)
+        .intersect(&ValidityDomain::unconstrained().with("Re", 3.0, 4.0));
+    let invalid_regimes = [
+        ValidityDomain::unconstrained(),
+        ValidityDomain::unconstrained().with("Re", f64::NEG_INFINITY, 10.0),
+        ValidityDomain::unconstrained().with("Re", f64::NAN, f64::NAN),
+        inverted,
+    ];
+    let mut invalid_regimes_demote = true;
+    for regime in invalid_regimes {
+        let invalid = Color::Validated {
+            regime,
+            dataset: "anchors".to_string(),
+        };
+        let (checked, flag) = check_regime(&invalid, &pt(&[("Re", 5.0)]));
+        invalid_regimes_demote &= matches!(
+            checked,
+            Color::Estimated { dispersion, .. } if dispersion.is_infinite()
+        ) && flag.is_some();
+    }
+
+    let hostile = Color::Estimated {
+        estimator: "est\"\\\n\r\t\u{0007}".to_string(),
+        dispersion: f64::INFINITY,
+    };
+    let payload = hostile.payload_json();
+    let payload_is_escaped = !payload.chars().any(char::is_control)
+        && payload.contains(r#"est\"\\\n\r\t\u0007"#)
+        && payload.contains(r#""dispersion":"non-finite:inf""#)
+        && payload == hostile.payload_json();
+
+    verdict(
+        "evd-009",
+        non_finite_states_demote && invalid_regimes_demote && payload_is_escaped,
+        "NaN and infinite state values, empty/non-finite/inverted regimes all demote \
+         with infinite dispersion; hostile payload metadata is escaped deterministically \
+         and non-finite floats are tagged strings",
     );
 }

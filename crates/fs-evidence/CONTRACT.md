@@ -57,13 +57,18 @@ on fs-obs only.
   Estimated{estimator, dispersion}}` with the `ColorRank` lattice
   (verified > validated > estimated), the TOTAL conservative pairwise
   `compose` (result rank = min of operands; verified intervals combine
-  per `IntervalOp`; validated regimes INTERSECT; estimated absorbs
-  everything with additive dispersion), `check_regime` (validated is a
-  REGIONAL property: exiting or failing to report a regime axis
-  AUTO-DEMOTES to estimated with a `Demotion` flag), `verified_from`
+  per `IntervalOp` with outward-rounded arithmetic; validated regimes
+  INTERSECT, and a disjoint intersection demotes with infinite/no-claim
+  dispersion; estimated absorbs everything with additive dispersion),
+  `check_regime` (validated is a REGIONAL property: exiting, failing to
+  report a regime axis, supplying a non-finite state, or declaring an
+  empty/non-finite/inverted regime AUTO-DEMOTES to estimated with a
+  `Demotion` flag), `verified_from`
   (the only door to a verified color — non-enclosure certificates
   refuse with the laundering teaching error), and `color_of` (the
-  honest bridge from existing Evidence receipts). Write-time
+  honest bridge from existing Evidence receipts). `Color::payload_json`
+  escapes caller-controlled strings and represents non-finite floats as
+  tagged JSON strings, never invalid bare numeric tokens. Write-time
   enforcement lives HELM-side in fs-ledger over these types.
 
 - `falsify` module (bead qmao.4): FALSIFIER PAIRING — `FalsifierRegistry`
@@ -98,6 +103,9 @@ on fs-obs only.
    Numerical) — deterministic verdicts.
 6. Ledger rows and provenance chains are deterministic (repeat-identical);
    provenance chaining is order-sensitive.
+7. Color regime checks fail closed: no empty, inverted, or non-finite regime
+   and no non-finite current state can retain `Validated`; disjoint validated
+   composition and regime exit both carry infinite/no-claim dispersion.
 
 ## Error model
 Structured teaching errors throughout: `CertifyError`, `RegistryError`,
@@ -123,15 +131,18 @@ None. The mechanisms are `[S]`-grade bookkeeping; the models they DESCRIBE
 carry their own ambition tags in their cards.
 
 ## Conformance tests
-tests/conformance.rs, cases evd-001..evd-006 (JSON-line verdicts; seeded
+tests/conformance.rs, cases evd-001..evd-009 (JSON-line verdicts; seeded
 cases carry seeds): the G0 conservativeness battery, the registration
 lint, the worked model-discrepancy-dominates example (10% closure vs 0.7%
 mesh at a 5% threshold → NotDecisionGrade{ModelForm} + escalation advice,
 flipping to DecisionGrade with a 2% calibrated closure), the
 out-of-distribution refusal on a synthetic two-fidelity corpus, bracketing
 spread reporting with deterministic schema-valid rows, and certification
-poisoning. In-module suites cover the certificate algebra, validity laws,
-tie-breaking, provenance chaining, and card rendering.
+poisoning. The color cases cover disjoint-regime demotion with infinite
+dispersion, outward-rounded verified arithmetic, non-finite state/regime
+demotion, and deterministic escaping/tagging of hostile JSON payloads.
+In-module suites cover the certificate algebra, validity laws, tie-breaking,
+provenance chaining, and card rendering.
 
 - Falsifier registration is total: empty falsifier lists refuse at the
   source; the ship gate names every unpaired class.
@@ -143,9 +154,9 @@ tie-breaking, provenance chaining, and card rendering.
 
 ## No-claim boundaries (colors)
 
-- Verified-interval composition here covers Add/Mul/Hull; the full
-  ledger operation algebra (and outward rounding) composes through
-  fs-ivl when wired.
+- Verified-interval composition here covers outward-rounded Add/Mul and exact
+  endpoint Hull; the full ledger operation algebra composes through fs-ivl
+  when wired.
 - Estimated dispersion combines additively (conservative); calibrated
   dispersion algebra joins the color-probes bead.
 
