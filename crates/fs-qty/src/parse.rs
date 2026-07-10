@@ -386,7 +386,7 @@ pub fn parse_qty(input: &str) -> Result<QtyAny, ParseError> {
         pos += consumed;
 
         // apply factor
-        let factor_scale = scale.powi(i32::from(exp));
+        let factor_scale = crate::powi_pinned(scale, i32::from(exp));
         let factor_dims = tok_dims.times(exp);
         if divide {
             value /= factor_scale;

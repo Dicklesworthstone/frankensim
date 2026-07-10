@@ -155,7 +155,7 @@ impl TaylorModel1 {
         let sup = fs_math::det::exp(range.hi());
         let lag = Interval::new(-1.0, 1.0)
             * Interval::point(sup * 1.000_000_000_000_1)
-            * gmag.powi(order + 1)
+            * gmag.powi(order + 1) // det-ok: Interval::powi, pinned sequential product (4xnt)
             * Interval::point(1.0 / factorial(order + 1));
         rem = rem + lag;
         out.poly = poly;
@@ -210,7 +210,7 @@ impl TaylorModel1 {
         }
         let gmag = g.bound().abs();
         let lag = Interval::new(-1.0, 1.0)
-            * gmag.powi(order + 1)
+            * gmag.powi(order + 1) // det-ok: Interval::powi, pinned sequential product (4xnt)
             * Interval::point(1.0 / factorial(order + 1));
         sum.rem = sum.rem + lag;
         sum
@@ -300,6 +300,7 @@ impl core::ops::Mul<&TaylorModel1> for &TaylorModel1 {
                     acc[i + j] = acc[i + j] + prod;
                 } else {
                     // Bound the dropped term a·b·h^(i+j) over the domain.
+                    // det-ok: Interval::powi, pinned sequential product (4xnt)
                     rem = rem + prod * h.powi(i + j);
                 }
             }

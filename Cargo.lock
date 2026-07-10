@@ -1405,6 +1405,7 @@ dependencies = [
  "asupersync 0.3.5",
  "fs-alloc",
  "fs-exec",
+ "fs-math",
  "fs-obs",
  "fs-qty",
 ]
@@ -1887,6 +1888,7 @@ name = "fs-verify"
 version = "0.0.1"
 dependencies = [
  "fs-evidence",
+ "fs-math",
  "fs-obs",
 ]
 

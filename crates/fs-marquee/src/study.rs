@@ -253,6 +253,7 @@ fn solve_and_grade(
             let py = c[1] + r * th.sin();
             // ∂u/∂n via a one-sided probe into the material along the
             // outward-from-hole (into-material) normal.
+            // det-ok: base 2, exact (4xnt)
             let h = 2.0f64.powi(-(i32::try_from(level).unwrap_or(6)) - 2);
             let q = [px + h * th.cos(), py + h * th.sin()];
             let u_q = sample_nodal(&grid, &nodal, q);

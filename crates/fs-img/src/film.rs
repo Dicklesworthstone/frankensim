@@ -6,7 +6,7 @@
 /// Exposure scale: `c · 2^ev` (exact powers of two).
 #[must_use]
 pub fn exposure(c: f64, ev: i32) -> f64 {
-    c * (2.0f64).powi(ev)
+    c * (2.0f64).powi(ev) // det-ok: base 2, every chain step exact (4xnt)
 }
 
 /// Per-channel white-balance gains.

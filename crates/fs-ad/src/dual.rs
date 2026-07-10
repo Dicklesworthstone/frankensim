@@ -259,8 +259,11 @@ impl<T: Real, const N: usize> Real for Dual<T, N> {
             return Self::one();
         }
         // d(xⁿ) = n·xⁿ⁻¹; computed via T's powi so the primal matches the
-        // scalar path bitwise.
+        // scalar path bitwise. Real::powi trait dispatch: the f64 impl
+        // routes to fs_math::det::powi (4xnt), never std powi.
+        // det-ok: Real::powi trait dispatch (4xnt)
         let f = self.re.powi(n);
+        // det-ok: Real::powi trait dispatch (4xnt)
         let df = T::from_f64(f64::from(n)) * self.re.powi(n - 1);
         self.chain(f, df)
     }

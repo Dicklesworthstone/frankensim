@@ -715,3 +715,45 @@ pub fn pow(x: f64, y: f64) -> f64 {
     // so the first-order correction is exact to ~2⁻¹⁰⁶.
     exp(p_hi) * (1.0 + p_lo)
 }
+
+/// xⁿ for integer n, deterministic strict mode.
+///
+/// `f64::powi` must never feed golden bits: the `llvm.powi` intrinsic
+/// has no pinned operation order, so its rounding sequence is
+/// optimization-level-dependent (observed 1-ULP debug/release
+/// divergence from n = 4 upward — bead 4xnt). This function pins the
+/// order in source: LSB-first binary exponentiation with EXACTLY the
+/// operation sequence of compiler-rt's `__powidf2` (`r *= a` on each
+/// set bit, `a *= a` per halving, ONE final `1.0 / r` for negative n).
+/// Unoptimized builds lower `f64::powi` to `__powidf2` itself, so
+/// goldens recorded under plain `cargo test` keep their bits when call
+/// sites migrate here.
+///
+/// Semantics: n = 0 returns 1.0 for every x (including NaN and ∞,
+/// matching `__powidf2`); `powi(x, -n) == 1.0 / powi(x, n)` bitwise;
+/// n = i32::MIN is handled (|n| carried in i64). For positive n ≤ 512
+/// this agrees bitwise with [`pow`]'s integer fast path (same order);
+/// for negative n it differs from [`pow`] by design (reciprocal-last
+/// here vs reciprocal-first there — the `__powidf2` contract wins).
+///
+/// Accuracy: one rounding per executed multiply (popcount(n) +
+/// ⌊log₂ n⌋ − 1 of them), NOT correctly rounded; measured ≤ 2 ULP vs
+/// platform `powi` for |n| ≤ 64 in the extension battery.
+#[must_use]
+pub fn powi(x: f64, n: i32) -> f64 {
+    let recip = n < 0;
+    let mut b = i64::from(n).unsigned_abs();
+    let mut a = x;
+    let mut r = 1.0f64;
+    loop {
+        if b & 1 == 1 {
+            r *= a;
+        }
+        b /= 2;
+        if b == 0 {
+            break;
+        }
+        a *= a;
+    }
+    if recip { 1.0 / r } else { r }
+}

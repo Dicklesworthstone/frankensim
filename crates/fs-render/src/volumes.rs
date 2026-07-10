@@ -259,7 +259,7 @@ pub fn woodcock_emission(
 pub fn planck(lambda_nm: f64, t_kelvin: f64) -> f64 {
     const C2_NM_K: f64 = 1.438_776_877e7;
     let x = C2_NM_K / (lambda_nm * t_kelvin);
-    let l5 = lambda_nm.powi(5);
+    let l5 = fs_math::det::powi(lambda_nm, 5);
     1.0 / (l5 * x.exp_m1())
 }
 

@@ -98,7 +98,7 @@ fn eval_at(
             Value::S(x) => Value::S(-x),
             Value::V(v) => Value::V(v.iter().map(|p| -p).collect()),
         },
-        Expr::Powi { base, exp } => Value::S(scalar(ev(*base, memo)?).powi(*exp)),
+        Expr::Powi { base, exp } => Value::S(fs_math::det::powi(scalar(ev(*base, memo)?), *exp)),
         Expr::Sqrt(a) => Value::S(scalar(ev(*a, memo)?).sqrt()),
         Expr::Exp(a) => Value::S(scalar(ev(*a, memo)?).exp()),
         Expr::Ln(a) => Value::S(scalar(ev(*a, memo)?).ln()),

@@ -593,7 +593,7 @@ impl QtyAny {
     #[must_use]
     pub fn powi(self, n: i8) -> QtyAny {
         QtyAny {
-            value: self.value.powi(i32::from(n)),
+            value: powi_pinned(self.value, i32::from(n)),
             dims: self.dims.times(n),
         }
     }
@@ -651,6 +651,34 @@ impl fmt::Display for QtyAny {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Debug::fmt(self, f)
     }
+}
+
+/// Pinned-order integer power (LSB-first square-and-multiply, one final
+/// reciprocal for negative n) — the `__powidf2` operation sequence.
+///
+/// `f64::powi` is FORBIDDEN in value-producing paths: its rounding is
+/// optimization-level-dependent (bead 4xnt), which would make parsed
+/// unit scales and `QtyAny::powi` build-mode-dependent. This is a
+/// deliberate private copy of `fs_math::det::powi`: fs-qty is UTIL and
+/// may not depend on L0 fs-math (xtask layer rule), so the three-line
+/// loop is duplicated rather than the layer boundary broken. Keep the
+/// two implementations textually in sync.
+pub(crate) fn powi_pinned(x: f64, n: i32) -> f64 {
+    let recip = n < 0;
+    let mut b = i64::from(n).unsigned_abs();
+    let mut a = x;
+    let mut r = 1.0f64;
+    loop {
+        if b & 1 == 1 {
+            r *= a;
+        }
+        b /= 2;
+        if b == 0 {
+            break;
+        }
+        a *= a;
+    }
+    if recip { 1.0 / r } else { r }
 }
 
 #[cfg(test)]

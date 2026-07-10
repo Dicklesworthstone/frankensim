@@ -181,7 +181,10 @@ impl Real for f64 {
     }
 
     fn powi(self, n: i32) -> Self {
-        f64::powi(self, n)
+        // Pinned-order integer power: f64::powi's rounding is
+        // optimization-level-dependent (bead 4xnt), which would make
+        // Real-generic primals and their duals build-mode-dependent.
+        fs_math::det::powi(self, n)
     }
 }
 

@@ -272,8 +272,8 @@ pub fn reduce_pio2_large(x: f64) -> (f64, u8) {
     let b = ((frac_hi & 0x7FF) << 42) | (frac_lo >> 22);
     #[allow(clippy::cast_precision_loss)] // both fit in 53 bits — exact
     let fd = Dd::from_pair(
-        (a as f64) * 2.0f64.powi(-53),
-        (b as f64) * 2.0f64.powi(-106),
+        (a as f64) * 2.0f64.powi(-53),  // det-ok: base 2, exact (4xnt)
+        (b as f64) * 2.0f64.powi(-106), // det-ok: base 2, exact (4xnt)
     );
     let r = fd * PIO2_DD;
     let r_signed = if negate { -r.to_f64() } else { r.to_f64() };

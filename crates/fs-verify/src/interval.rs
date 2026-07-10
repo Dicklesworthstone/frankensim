@@ -152,7 +152,9 @@ mod tests {
         for _ in 0..40 {
             p = p.mul(Iv::point(1.1));
         }
-        let truth = 1.1f64.powi(40);
+        // det::powi: const-base f64::powi(40) is exactly the release
+        // const-fold divergence case (bead 4xnt).
+        let truth = fs_math::det::powi(1.1f64, 40);
         assert!(p.lo <= truth && truth <= p.hi);
     }
 

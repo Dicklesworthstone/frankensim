@@ -72,7 +72,7 @@ impl ScalingMap {
         ];
         base.iter()
             .zip(dims)
-            .map(|(&b, d)| b.powi(i32::from(d)))
+            .map(|(&b, d)| fs_math::det::powi(b, i32::from(d)))
             .product()
     }
 

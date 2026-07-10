@@ -402,7 +402,7 @@ mod tests {
                 .map(|&v| 1.0 / (1.0 + (v - 0.5) * (v - 0.5)))
                 .product()
         };
-        let exact = (2.0 * 0.5f64.atan()).powi(i32::try_from(DIM).expect("small"));
+        let exact = fs_math::det::powi(2.0 * 0.5f64.atan(), i32::try_from(DIM).expect("small"));
         let n = 4096u32;
         // Scrambled-Sobol RMSE over independent randomizations.
         let mut qmc_se = 0.0;

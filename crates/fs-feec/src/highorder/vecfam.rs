@@ -29,6 +29,15 @@ use fs_sparse::{Coo, Csr};
 /// Highest supported order (dense per-element solves stay small).
 pub const MAX_R: usize = 4;
 
+/// Monomial power via the pinned-order `det::powi` (bead 4xnt):
+/// exponents reach MAX_R = 4 — exactly where `f64::powi`'s
+/// optimization-level-dependent rounding starts diverging, which would
+/// make basis evaluation (and every golden fed by it) build-mode-
+/// dependent.
+fn mpow(x: f64, e: usize) -> f64 {
+    fs_math::det::powi(x, i32::try_from(e).expect("small"))
+}
+
 // ------------------------------------------------------------------
 // Monomial vector polynomials in centered/scaled local coordinates.
 // ------------------------------------------------------------------
@@ -73,9 +82,7 @@ impl VecPoly {
     pub fn eval_local(&self, monos: &[[usize; 3]], xi: [f64; 3]) -> [f64; 3] {
         let mut v = [0.0f64; 3];
         for (m, &[a, b, c]) in monos.iter().enumerate() {
-            let p = xi[0].powi(i32::try_from(a).expect("small"))
-                * xi[1].powi(i32::try_from(b).expect("small"))
-                * xi[2].powi(i32::try_from(c).expect("small"));
+            let p = mpow(xi[0], a) * mpow(xi[1], b) * mpow(xi[2], c);
             for (k, vk) in v.iter_mut().enumerate() {
                 *vk = self.comp[k][m].mul_add(p, *vk);
             }
@@ -275,8 +282,7 @@ impl Dof {
                     // Face barycentrics via the sorted frame: solve for
                     // (s, t) in p = p0 + s(p1−p0) + t(p2−p0).
                     let (s, t) = face_params(*tri, p);
-                    let q = (s - 0.5).powi(i32::try_from(*qi).expect("small"))
-                        * (t - 0.5).powi(i32::try_from(*qj).expect("small"));
+                    let q = mpow(s - 0.5, *qi) * mpow(t - 0.5, *qj);
                     acc = (w * q).mul_add(dot3(u(p), *dir), acc);
                 }
                 acc / area
@@ -316,9 +322,7 @@ impl Dof {
                         }
                     }
                     let xi = chart.local(p);
-                    let q = xi[0].powi(i32::try_from(qm[0]).expect("small"))
-                        * xi[1].powi(i32::try_from(qm[1]).expect("small"))
-                        * xi[2].powi(i32::try_from(qm[2]).expect("small"));
+                    let q = mpow(xi[0], qm[0]) * mpow(xi[1], qm[1]) * mpow(xi[2], qm[2]);
                     acc = (w * vol6 * q).mul_add(dot3(u(p), *dir), acc);
                     wsum += w * vol6;
                 }
@@ -1118,16 +1122,12 @@ pub fn div_matrix(rt: &VecSpace<'_>, dg: &DgSpace<'_>, positions: &[[f64; 3]]) -
                         }
                     }
                     let xi = el.chart.local(p);
-                    let q = xi[0].powi(i32::try_from(qa).expect("small"))
-                        * xi[1].powi(i32::try_from(qb).expect("small"))
-                        * xi[2].powi(i32::try_from(qc).expect("small"));
+                    let q = mpow(xi[0], qa) * mpow(xi[1], qb) * mpow(xi[2], qc);
                     // div in physical coordinates = local / h.
                     let mut dv = 0.0f64;
                     for (mm, &[a2, b2, c2]) in el.monos.iter().enumerate() {
                         if divs[j][mm] != 0.0 {
-                            let pm = xi[0].powi(i32::try_from(a2).expect("small"))
-                                * xi[1].powi(i32::try_from(b2).expect("small"))
-                                * xi[2].powi(i32::try_from(c2).expect("small"));
+                            let pm = mpow(xi[0], a2) * mpow(xi[1], b2) * mpow(xi[2], c2);
                             dv = divs[j][mm].mul_add(pm, dv);
                         }
                     }

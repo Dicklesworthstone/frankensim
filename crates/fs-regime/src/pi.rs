@@ -169,7 +169,7 @@ pub fn pi_groups(inputs: &[Input]) -> Result<PiBasis, RegimeError> {
         for (input, &e) in inputs.iter().zip(&exps) {
             #[allow(clippy::cast_possible_truncation)]
             {
-                value *= input.qty.value.powi(e as i32);
+                value *= fs_math::det::powi(input.qty.value, e as i32);
             }
         }
         #[allow(clippy::cast_possible_truncation)]

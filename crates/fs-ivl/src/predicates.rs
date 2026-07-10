@@ -797,7 +797,7 @@ mod tests {
         // Exactly representable dyadic scaling: coords ≤ 2¹⁰, factor
         // 1 + 2⁻⁴⁰ ⇒ products have ≤ 51 mantissa bits (EXACT), so the
         // scaled point is exactly OUTSIDE its sphere/circle.
-        let grow = 1.0 + (2.0f64).powi(-40);
+        let grow = 1.0 + (2.0f64).powi(-40); // det-ok: base 2, exact (4xnt)
         let (a, b, c) = ([5.0, 0.0], [3.0, 4.0], [-3.0, 4.0]);
         let d_on = [0.0, -5.0];
         let d_out = [0.0, -5.0 * grow];
@@ -850,6 +850,7 @@ mod tests {
                 let exact = orient2d(p, q, r);
                 // Ground truth via exact integer reformulation: scale by
                 // 2⁵⁴ (all values integral: 0.5·2⁵⁴ + i·2, 12·2⁵⁴, 24·2⁵⁴).
+                // det-ok: base 2, exact (4xnt)
                 let s = |x: f64| (x * (2.0f64).powi(54)) as i128;
                 let truth = ((s(p[0]) - s(r[0])) * (s(q[1]) - s(r[1]))
                     - (s(p[1]) - s(r[1])) * (s(q[0]) - s(r[0])))

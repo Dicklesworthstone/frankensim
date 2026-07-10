@@ -241,8 +241,10 @@ pub fn cmaes<F: FnMut(&[f64]) -> f64>(
         // Rank-1 path with stall indicator h_σ.
         let h_sig = ps_norm
             / fs_math::det::sqrt(
-                1.0 - (1.0 - cs)
-                    .powi(2 * i32::try_from(generations.min(100_000)).expect("generation count")),
+                1.0 - fs_math::det::powi(
+                    1.0 - cs,
+                    2 * i32::try_from(generations.min(100_000)).expect("generation count"),
+                ),
             )
             < (1.4 + 2.0 / (nf + 1.0)) * chi_n;
         let ccn = fs_math::det::sqrt(cc * (2.0 - cc) * mu_eff);

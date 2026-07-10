@@ -27,6 +27,19 @@ floating-point POLICY: FMA contraction, subnormals, NaN, ULP budgets
   band x ∈ (1.5, 3.5) the external test oracle is weaker than the
   implementation; budget-grade evidence there is DISJOINT-PATH
   cross-validation (Taylor-dd vs CF-dd agree ≤ 3 ULP, tested).
+- PINNED-ORDER INTEGER POWERS (bead 4xnt, additive): `det::powi(x, n)` —
+  LSB-first binary exponentiation with EXACTLY compiler-rt `__powidf2`'s
+  operation sequence (one final reciprocal for negative n; n = 0 → 1.0
+  for every x; i32::MIN handled). Exists because `f64::powi`'s rounding
+  is optimization-level-dependent (llvm.powi has no pinned order;
+  observed 1-ULP debug/release divergence from n = 4 up), which is a
+  build-mode determinism hazard in any golden-feeding path. Debug-mode
+  `f64::powi` lowers to `__powidf2`, so debug-recorded goldens keep
+  their bits when call sites migrate. Positive n ≤ 512 agrees BITWISE
+  with `pow`'s integer fast path (same order, tested). NOT correctly
+  rounded: one rounding per executed multiply; measured ≤ 2 ULP vs
+  platform powi for |n| ≤ 64. Own golden hash, identical in both build
+  modes by construction.
 - INVERSE-TRIG COMPLETION (bead t88x, additive): `det::{asin, acos}` via
   atan2 on the FACTORED complement √((1−x)(1+x)) (endpoint-conditioned;
   1 − x² cancels catastrophically at |x| → 1). Declared budget 6
@@ -101,7 +114,12 @@ core-only + worst-case-point + constant-integrity regressions
 (tests/core_regression.rs). All verified on BOTH reference ISAs.
 
 ## No-claim boundaries
-- tan/atan2/pow/cbrt/log1p/erf: not yet implemented (follow-up bead).
+- cbrt/log1p: not yet implemented (follow-up bead). (tan/atan/atan2/pow/
+  erf/erfc/asin/acos/powi landed via wf9.14, t88x, and 4xnt — see above;
+  this line previously understated the implemented surface.)
+- `det::powi`: f32 variant not provided; no claim that its bits match
+  release-mode `f64::powi` (they intentionally match the debug-mode
+  `__powidf2` lowering instead).
 - Trig beyond |x| > 2²⁰: RESOLVED (bead r6r5, `payne` module — see above).
 - Fast mode (lower-accuracy feature-flagged variants): BLOCKED on consumers
   declaring tolerable budgets (fs-material/LUMEN) — deliberately not built

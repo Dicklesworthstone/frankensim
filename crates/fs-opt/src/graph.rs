@@ -479,7 +479,7 @@ impl Problem {
             Node::Mul(a, b) => v(*a) * v(*b),
             Node::Div(a, b) => v(*a) / v(*b),
             Node::Neg(a) => -v(*a),
-            Node::Powi(a, n) => v(*a).powi(i32::from(*n)),
+            Node::Powi(a, n) => det::powi(v(*a), i32::from(*n)),
             Node::Min(a, b) => v(*a).min(v(*b)),
             Node::Max(a, b) => v(*a).max(v(*b)),
             Node::Abs(a) => v(*a).abs(),
@@ -575,7 +575,7 @@ impl Problem {
                 Node::Powi(a, k) => {
                     let va = v(*a);
                     bar[a.0 as usize] = (b * f64::from(*k))
-                        .mul_add(va.powi(i32::from(*k) - 1), bar[a.0 as usize]);
+                        .mul_add(det::powi(va, i32::from(*k) - 1), bar[a.0 as usize]);
                 }
                 Node::Min(a, c) => {
                     // Subgradient convention: the SMALLER branch gets the

@@ -5,6 +5,7 @@
 //! - `check-deps`     — enforce the Franken-only runtime dependency policy (Decalogue P1).
 //! - `check-contracts`— every workspace `fs-*` crate ships a CONTRACT.md with required sections.
 //! - `check-unsafe`   — unsafe code only in registered capsules (<300 lines, SAFETY.md).
+//! - `check-powi`     — no build-mode-dependent `f64::powi` in deterministic paths (bead 4xnt).
 //! - `check-all`      — all of the above; non-zero exit on any violation.
 //! - `lock-constellation` / `check-constellation` — pin/verify the Franken library states.
 //!
@@ -637,6 +638,120 @@ fn check_unsafe(root: &Path) -> Vec<Violation> {
     violations
 }
 
+/// `f64::powi`/`f32::powi` take exactly ONE argument, so a `.powi(` call
+/// whose argument list contains a top-level comma is some other method
+/// (e.g. the fs-opt expression builders) and is skipped. Returns the
+/// single argument text when the call could be the float intrinsic; on
+/// an unbalanced (multi-line) call it conservatively returns the rest of
+/// the line so hidden float powi cannot slip through.
+fn powi_single_arg(after_open: &str) -> Option<&str> {
+    let mut depth = 0usize;
+    for (i, c) in after_open.char_indices() {
+        match c {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => {
+                if depth == 0 {
+                    return if c == ')' { Some(&after_open[..i]) } else { None };
+                }
+                depth -= 1;
+            }
+            ',' if depth == 0 => return None,
+            _ => {}
+        }
+    }
+    Some(after_open)
+}
+
+/// Files awaiting migration to `fs_math::det::powi` that are currently
+/// owned by other in-flight work; each entry must cite the tracking
+/// bead. Remove entries as the migrations land.
+const POWI_PENDING: &[&str] = &[
+    // powi(4) smoothness objective; file owned by active hexdom work (bead 4xnt).
+    "crates/fs-mesh/src/hexdom.rs",
+];
+
+/// No optimization-level-dependent integer powers in deterministic paths
+/// (bead 4xnt): `f64::powi`'s rounding differs between debug and release
+/// from exponent 4 upward (llvm.powi has no pinned operation order), so
+/// any `.powi(arg)` in `crates/*/src` must either use a literal exponent
+/// in -3..=3 (where all lowerings agree), be migrated to
+/// `fs_math::det::powi` (or fs-qty's `powi_pinned`), or carry a
+/// `// det-ok: <reason>` annotation on the same or preceding line.
+/// fs-wasm is skipped (nested demo workspace outside the deterministic
+/// claim surface); fs-math itself hosts the pinned implementation.
+fn check_powi(root: &Path) -> Vec<Violation> {
+    let mut violations = Vec::new();
+    let crates_dir = root.join("crates");
+    let Ok(entries) = std::fs::read_dir(&crates_dir) else {
+        return violations;
+    };
+    let mut stack: Vec<PathBuf> = entries
+        .flatten()
+        .filter(|e| e.file_name() != "fs-wasm")
+        .map(|e| e.path().join("src"))
+        .filter(|p| p.is_dir())
+        .collect();
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in rd.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                stack.push(p);
+                continue;
+            }
+            if p.extension().is_none_or(|e| e != "rs") {
+                continue;
+            }
+            let rel = p.strip_prefix(root).unwrap_or(&p).display().to_string();
+            if POWI_PENDING.contains(&rel.as_str()) {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&p) else {
+                continue;
+            };
+            let mut prev_raw = "";
+            for (idx, raw) in text.lines().enumerate() {
+                let code = strip_line_comments(raw);
+                let mut rest = code;
+                let mut flagged = false;
+                while let Some(pos) = rest.find(".powi(") {
+                    let after = &rest[pos + ".powi(".len()..];
+                    if let Some(arg) = powi_single_arg(after) {
+                        let literal_ok = arg
+                            .trim()
+                            .parse::<i64>()
+                            .is_ok_and(|v| (-3..=3).contains(&v));
+                        let annotated =
+                            raw.contains("det-ok:") || prev_raw.contains("det-ok:");
+                        if !literal_ok && !annotated && !flagged {
+                            violations.push(Violation {
+                                check: "powi-determinism",
+                                crate_name: rel.clone(),
+                                detail: format!(
+                                    "{rel}:{}: `.powi({})` — f64::powi rounding is \
+                                     optimization-level-dependent (1-ULP debug/release \
+                                     divergence from exponent 4; bead 4xnt); use \
+                                     fs_math::det::powi, or a literal exponent in -3..=3, \
+                                     or annotate `// det-ok: <reason>` on this or the \
+                                     preceding line",
+                                    idx + 1,
+                                    arg.trim()
+                                ),
+                            });
+                            flagged = true;
+                        }
+                    }
+                    rest = after;
+                }
+                prev_raw = raw;
+            }
+        }
+    }
+    violations
+}
+
 fn json_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 8);
     for c in s.chars() {
@@ -733,11 +848,13 @@ fn main() -> ExitCode {
         "check-deps" => (check_deps(&manifests), vec!["dependency-policy"]),
         "check-contracts" => (check_contracts(&manifests), vec!["contracts"]),
         "check-unsafe" => (check_unsafe(&root), vec!["unsafe-capsules"]),
+        "check-powi" => (check_powi(&root), vec!["powi-determinism"]),
         "check-all" => {
             let mut v = check_layers(&manifests);
             v.extend(check_deps(&manifests));
             v.extend(check_contracts(&manifests));
             v.extend(check_unsafe(&root));
+            v.extend(check_powi(&root));
             (
                 v,
                 vec![
@@ -745,13 +862,14 @@ fn main() -> ExitCode {
                     "dependency-policy",
                     "contracts",
                     "unsafe-capsules",
+                    "powi-determinism",
                 ],
             )
         }
         other => {
             eprintln!(
                 "unknown command {other:?}; use check-layers|check-deps|check-contracts|\
-                 check-all|lock-constellation|check-constellation"
+                 check-unsafe|check-powi|check-all|lock-constellation|check-constellation"
             );
             return ExitCode::FAILURE;
         }
@@ -951,6 +1069,62 @@ mod tests {
             v.iter().any(|x| x.detail.contains("lines")),
             "LOC cap must trip: {v:?}"
         );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn powi_single_arg_distinguishes_float_from_builder_calls() {
+        // Single-argument calls (candidate float powi) return the arg.
+        assert_eq!(powi_single_arg("n)"), Some("n"));
+        assert_eq!(powi_single_arg("i32::from(*k) - 1)"), Some("i32::from(*k) - 1"));
+        assert_eq!(powi_single_arg("-3)"), Some("-3"));
+        // Two-argument calls (typed builders) are skipped.
+        assert_eq!(powi_single_arg("a, n)"), None);
+        assert_eq!(powi_single_arg("base, exp)"), None);
+        // Nested commas inside the single argument do not split it.
+        assert_eq!(
+            powi_single_arg("i32::try_from(k).unwrap_or(0))"),
+            Some("i32::try_from(k).unwrap_or(0)")
+        );
+        // Unbalanced (multi-line) stays suspect — conservative Some.
+        assert_eq!(powi_single_arg("2 * i32::try_from("), Some("2 * i32::try_from("));
+    }
+
+    #[test]
+    fn powi_check_end_to_end_on_fixture_tree() {
+        let base = std::env::temp_dir().join(format!("fsim-powi-test-{}", std::process::id()));
+        let mk = |rel: &str, content: &str| {
+            let p = base.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, content).unwrap();
+        };
+        // Seeded violation: variable exponent, no annotation.
+        mk(
+            "crates/fs-bad/src/lib.rs",
+            "pub fn f(x: f64, n: i32) -> f64 { x.powi(n) }\n",
+        );
+        // Clean: small literals, det-ok (same and preceding line), builder
+        // two-arg calls, and prose in comments.
+        mk(
+            "crates/fs-good/src/lib.rs",
+            concat!(
+                "pub fn a(x: f64) -> f64 { x.powi(2) + x.powi(-3) }\n",
+                "pub fn b(x: f64, n: i32) -> f64 { x.powi(n) } // det-ok: test fixture\n",
+                "// det-ok: annotated on preceding line\n",
+                "pub fn c(x: f64, n: i32) -> f64 { x.powi(n) }\n",
+                "// prose mentioning .powi( in a comment is not a call\n",
+                "pub fn d(p: &mut B, a: u32, n: i8) { p.powi(a, n); }\n",
+            ),
+        );
+        // fs-wasm is outside the claim surface.
+        mk(
+            "crates/fs-wasm/src/lib.rs",
+            "pub fn w(x: f64, n: i32) -> f64 { x.powi(n) }\n",
+        );
+        let v = check_powi(&base);
+        assert_eq!(v.len(), 1, "exactly the seeded violation expected: {v:?}");
+        assert!(v[0].detail.contains("fs-bad"), "{v:?}");
+        assert!(v[0].detail.contains("det-ok"), "fix hint expected: {v:?}");
         let _ = std::fs::remove_dir_all(&base);
     }
 

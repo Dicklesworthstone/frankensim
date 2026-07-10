@@ -47,7 +47,7 @@ fn kahan(n: usize, theta: f64) -> Vec<f64> {
     let (s, c) = (theta.sin(), theta.cos());
     let mut k = vec![0.0; n * n];
     for i in 0..n {
-        let ci = c.powi(i32::try_from(i).unwrap());
+        let ci = fs_math::det::powi(c, i32::try_from(i).unwrap());
         for j in 0..n {
             if j == i {
                 k[i * n + j] = ci;
