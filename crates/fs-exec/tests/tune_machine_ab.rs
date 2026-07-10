@@ -40,7 +40,9 @@ fn machine_calibration_and_weight_verification() {
     // --- The real calibration report for THIS machine (ledger row). ---
     let probe = CapabilityProbe::run();
     let mut tuner = Tuner::cold(probe.fingerprint());
-    let report = tuner.calibrate(&probe);
+    let report = tuner
+        .calibrate(&probe)
+        .expect("probe matches tuner fingerprint");
     println!("{report}");
     let (kind, _) = tuner.schedule();
     println!(

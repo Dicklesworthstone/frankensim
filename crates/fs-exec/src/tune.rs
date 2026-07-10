@@ -93,17 +93,20 @@ impl TuneRow {
     #[must_use]
     pub fn to_json(&self) -> String {
         let mut s = String::with_capacity(160);
-        let _ = write!(
-            s,
-            "{{\"kernel\":\"{}\",\"shape_class\":\"{}\",\"machine\":\"{:016x}\",\
-             \"params\":\"{}\",\"measured_ns\":[",
-            self.kernel, self.shape_class, self.machine, self.params
-        );
+        s.push_str("{\"kernel\":");
+        push_json_string(&mut s, &self.kernel);
+        s.push_str(",\"shape_class\":");
+        push_json_string(&mut s, &self.shape_class);
+        let _ = write!(s, ",\"machine\":\"{:016x}\",\"params\":", self.machine);
+        push_json_string(&mut s, &self.params);
+        s.push_str(",\"measured_ns\":[");
         for (i, (name, ns)) in self.measured_ns.iter().enumerate() {
             if i > 0 {
                 s.push(',');
             }
-            let _ = write!(s, "{{\"candidate\":\"{name}\",\"ns\":{ns}}}");
+            s.push_str("{\"candidate\":");
+            push_json_string(&mut s, name);
+            let _ = write!(s, ",\"ns\":{ns}}}");
         }
         let _ = write!(
             s,
@@ -112,6 +115,25 @@ impl TuneRow {
         );
         s
     }
+}
+
+fn push_json_string(out: &mut String, value: &str) {
+    use core::fmt::Write as _;
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => {
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
 }
 
 /// Structured tune-store failure (Decalogue P10).
@@ -123,12 +145,7 @@ pub struct TuneError {
 
 impl fmt::Display for TuneError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "tune store error: {}; calibration data is reproducible — delete the store and \
-             recalibrate if it is corrupt",
-            self.detail
-        )
+        write!(f, "tuner error: {}", self.detail)
     }
 }
 
@@ -149,10 +166,14 @@ impl TuningDecision {
     /// Canonical JSON object.
     #[must_use]
     pub fn to_json(&self) -> String {
-        format!(
-            "{{\"kernel\":\"{}\",\"params\":\"{}\",\"source\":\"{}\"}}",
-            self.kernel, self.params, self.source
-        )
+        let mut out = String::from("{\"kernel\":");
+        push_json_string(&mut out, &self.kernel);
+        out.push_str(",\"params\":");
+        push_json_string(&mut out, &self.params);
+        out.push_str(",\"source\":");
+        push_json_string(&mut out, self.source);
+        out.push('}');
+        out
     }
 }
 
@@ -161,8 +182,41 @@ impl TuningDecision {
 pub struct Tuner {
     fingerprint: u64,
     rows: BTreeMap<(String, String), TuneRow>,
-    pins: BTreeMap<String, String>,
+    pins: BTreeMap<String, PinnedParam>,
     decisions: Vec<TuningDecision>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PinnedParam {
+    TileEdge(TileEdge),
+    Schedule(ScheduleKind),
+}
+
+impl PinnedParam {
+    fn parse(kernel: &str, params: &str) -> Option<Self> {
+        if kernel == SCHEDULE_KERNEL {
+            return match params {
+                "schedule=bandwidth-rich" => Some(Self::Schedule(ScheduleKind::BandwidthRich)),
+                "schedule=bandwidth-starved" => {
+                    Some(Self::Schedule(ScheduleKind::BandwidthStarved))
+                }
+                _ => None,
+            };
+        }
+        match params {
+            "edge=4" => Some(Self::TileEdge(TileEdge::E4)),
+            "edge=8" => Some(Self::TileEdge(TileEdge::E8)),
+            "edge=16" => Some(Self::TileEdge(TileEdge::E16)),
+            _ => None,
+        }
+    }
+
+    fn canonical(self) -> String {
+        match self {
+            Self::TileEdge(edge) => format!("edge={}", edge.cells()),
+            Self::Schedule(kind) => format!("schedule={}", kind.name()),
+        }
+    }
 }
 
 /// The reference stencil kernel used for tile-edge calibration (a real
@@ -232,9 +286,62 @@ impl Tuner {
         self.rows.is_empty()
     }
 
-    /// Pin a kernel's params (replay path: recorded plans, never re-tuned).
-    pub fn pin(&mut self, kernel: impl Into<String>, params: impl Into<String>) {
-        self.pins.insert(kernel.into(), params.into());
+    /// Pin a typed tile edge for a kernel.
+    ///
+    /// # Errors
+    /// Returns [`TuneError`] when `kernel` is the reserved schedule key.
+    pub fn pin_tile_edge(
+        &mut self,
+        kernel: impl Into<String>,
+        edge: TileEdge,
+    ) -> Result<(), TuneError> {
+        let kernel = kernel.into();
+        if kernel.trim().is_empty() {
+            return Err(TuneError {
+                detail: "a pinned kernel identity must be non-blank".to_string(),
+            });
+        }
+        if kernel == SCHEDULE_KERNEL {
+            return Err(TuneError {
+                detail: "the reserved schedule key requires pin_schedule".to_string(),
+            });
+        }
+        self.pins.insert(kernel, PinnedParam::TileEdge(edge));
+        Ok(())
+    }
+
+    /// Pin the typed schedule decision.
+    pub fn pin_schedule(&mut self, kind: ScheduleKind) {
+        self.pins
+            .insert(SCHEDULE_KERNEL.to_string(), PinnedParam::Schedule(kind));
+    }
+
+    /// Validate and pin canonical params from a recorded decision.
+    ///
+    /// The accepted replay forms are exactly `edge={4,8,16}` for tile
+    /// kernels and `schedule={bandwidth-rich,bandwidth-starved}` for the
+    /// schedule key. Invalid spellings fail closed instead of resolving to a
+    /// default that would be falsely recorded as pinned.
+    ///
+    /// # Errors
+    /// Returns [`TuneError`] when `params` is not canonical for `kernel`.
+    pub fn pin(
+        &mut self,
+        kernel: impl Into<String>,
+        params: impl Into<String>,
+    ) -> Result<(), TuneError> {
+        let kernel = kernel.into();
+        let params = params.into();
+        if kernel.trim().is_empty() {
+            return Err(TuneError {
+                detail: "a pinned kernel identity must be non-blank".to_string(),
+            });
+        }
+        let parsed = PinnedParam::parse(&kernel, &params).ok_or_else(|| TuneError {
+            detail: format!("invalid pinned params {params:?} for kernel {kernel:?}"),
+        })?;
+        self.pins.insert(kernel, parsed);
+        Ok(())
     }
 
     /// The decisions handed out so far (a study records these; replaying
@@ -271,7 +378,7 @@ impl Tuner {
 
     fn resolve(&mut self, kernel: &str) -> (String, TuneSource) {
         let (params, source) = if let Some(p) = self.pins.get(kernel) {
-            (p.clone(), TuneSource::Pinned)
+            (p.canonical(), TuneSource::Pinned)
         } else if let Some(row) = self
             .rows
             .get(&(kernel.to_string(), SHAPE_DEFAULT.to_string()))
@@ -298,7 +405,16 @@ impl Tuner {
     /// schedule selection from the probe's measured bandwidth. Idempotent:
     /// same fingerprint keys are replaced, `refresh` increments. Returns
     /// the machine calibration report (canonical JSON, ledger-bound).
-    pub fn calibrate(&mut self, probe: &fs_substrate::CapabilityProbe) -> String {
+    ///
+    /// # Errors
+    /// Returns [`TuneError`] without measuring or mutating rows when the
+    /// probe's stable fingerprint differs from this tuner's machine key.
+    pub fn calibrate(
+        &mut self,
+        probe: &fs_substrate::CapabilityProbe,
+    ) -> Result<String, TuneError> {
+        self.require_matching_probe(probe)?;
+        self.require_refresh_capacity()?;
         let workers = (probe.logical_cpus as usize).clamp(1, 8);
         let topo = CcdTopology::from_probe(probe);
         // Tile-edge sweep: best-of-2 per edge, argmin wins; ties break to
@@ -336,7 +452,7 @@ impl Tuner {
             .map(|(_, (name, _))| name.clone())
             .expect("three candidates");
         let confidence = confidence_from(&measured);
-        self.insert_row(STENCIL_KERNEL, SHAPE_DEFAULT, winner, measured);
+        self.insert_row(STENCIL_KERNEL, SHAPE_DEFAULT, winner, measured)?;
 
         // Reduction cost: deterministic compensated sum over 100k terms.
         let xs: Vec<f64> = (0..100_000).map(|i| 1.0 / f64::from(i + 1)).collect();
@@ -349,7 +465,7 @@ impl Tuner {
             "100k",
             "block=256".to_string(),
             vec![("block=256".to_string(), red_ns)],
-        );
+        )?;
 
         // Steal cost: an imbalanced 2-worker run forces steals; record the
         // per-steal wall cost estimate.
@@ -367,10 +483,10 @@ impl Tuner {
             "2w-imbalanced",
             format!("steals={}", report.steals),
             vec![("wall".to_string(), steal_ns)],
-        );
+        )?;
 
         // Per-class throughput (fz2.2): the measured class signal.
-        self.class_throughput_row(probe, topo);
+        self.class_throughput_row(probe, topo)?;
 
         // Schedule: measured bandwidth per logical core decides (the §5.1
         // consequence-2 doctrine); zero measurement -> rich default,
@@ -390,7 +506,7 @@ impl Tuner {
             SHAPE_DEFAULT,
             format!("schedule={}", kind.name()),
             vec![("per-core-gbs-x1000".to_string(), (per_core * 1000.0) as u64)],
-        );
+        )?;
 
         let mut s = String::with_capacity(512);
         let _ = write!(
@@ -405,7 +521,47 @@ impl Tuner {
             s.push_str(&row.to_json());
         }
         s.push_str("]}");
-        s
+        Ok(s)
+    }
+
+    fn require_matching_probe(
+        &self,
+        probe: &fs_substrate::CapabilityProbe,
+    ) -> Result<(), TuneError> {
+        let probe_fingerprint = probe.fingerprint();
+        if probe_fingerprint == self.fingerprint {
+            return Ok(());
+        }
+        Err(TuneError {
+            detail: format!(
+                "calibration probe fingerprint {probe_fingerprint:016x} does not match tuner \
+                 fingerprint {:016x}",
+                self.fingerprint
+            ),
+        })
+    }
+
+    fn require_refresh_capacity(&self) -> Result<(), TuneError> {
+        for (kernel, shape) in [
+            (STENCIL_KERNEL, SHAPE_DEFAULT),
+            ("det-sum-f64", "100k"),
+            ("steal-probe", "2w-imbalanced"),
+            ("class-throughput", SHAPE_DEFAULT),
+            (SCHEDULE_KERNEL, SHAPE_DEFAULT),
+        ] {
+            if self
+                .rows
+                .get(&(kernel.to_string(), shape.to_string()))
+                .is_some_and(|row| row.refresh == u32::MAX)
+            {
+                return Err(TuneError {
+                    detail: format!(
+                        "refresh counter exhausted for kernel {kernel:?} shape {shape:?}"
+                    ),
+                });
+            }
+        }
+        Ok(())
     }
 
     /// Per-class throughput row (fz2.2): FULL parallelism, uniform
@@ -413,7 +569,11 @@ impl Tuner {
     /// signal. Records the sorted distribution and the fast:slow
     /// ratio — the quantum_weights VERIFICATION (weighted initial
     /// shares vs pure stealing) lives in the machine A/B lane.
-    fn class_throughput_row(&mut self, probe: &fs_substrate::CapabilityProbe, topo: CcdTopology) {
+    fn class_throughput_row(
+        &mut self,
+        probe: &fs_substrate::CapabilityProbe,
+        topo: CcdTopology,
+    ) -> Result<(), TuneError> {
         let full = (probe.logical_cpus as usize).max(1);
         let pool = TilePool::new(PoolConfig::new(full, topo, 0x7C4E));
         let gate = CancelGate::new();
@@ -434,7 +594,7 @@ impl Tuner {
                 .enumerate()
                 .map(|(i, &c)| (format!("w{i}"), c))
                 .collect(),
-        );
+        )
     }
 
     fn insert_row(
@@ -443,9 +603,15 @@ impl Tuner {
         shape_class: &str,
         params: String,
         measured_ns: Vec<(String, u64)>,
-    ) {
+    ) -> Result<(), TuneError> {
         let key = (kernel.to_string(), shape_class.to_string());
-        let refresh = self.rows.get(&key).map_or(1, |r| r.refresh + 1);
+        let refresh = self.rows.get(&key).map_or(Ok(1), |row| {
+            row.refresh.checked_add(1).ok_or_else(|| TuneError {
+                detail: format!(
+                    "refresh counter exhausted for kernel {kernel:?} shape {shape_class:?}"
+                ),
+            })
+        })?;
         let confidence = confidence_from(&measured_ns);
         self.rows.insert(
             key,
@@ -459,6 +625,7 @@ impl Tuner {
                 refresh,
             },
         );
+        Ok(())
     }
 
     /// Persist the table (JSON-lines, one row per line — the ledger `tune`
@@ -496,7 +663,11 @@ impl Tuner {
         };
         for (lineno, line) in text.lines().enumerate() {
             let row = parse_row(line).ok_or_else(|| TuneError {
-                detail: format!("corrupt row at {}:{}", path.display(), lineno + 1),
+                detail: format!(
+                    "corrupt row at {}:{}; remove the store and recalibrate",
+                    path.display(),
+                    lineno + 1
+                ),
             })?;
             if row.machine == fingerprint {
                 tuner
@@ -569,45 +740,151 @@ fn confidence_from(measured: &[(String, u64)]) -> f64 {
     }
 }
 
-/// Minimal strict parser for our own row writer (deviation = corruption,
-/// same doctrine as fs-obs).
+/// Exact parser for the canonical row writer above. Field reordering,
+/// duplicate fields, non-canonical numbers, and trailing content are
+/// corruption rather than dialects of the tune-store schema.
 fn parse_row(line: &str) -> Option<TuneRow> {
-    let field = |key: &str| -> Option<String> {
-        let pat = format!("\"{key}\":\"");
-        let start = line.find(&pat)? + pat.len();
-        let end = line[start..].find('"')? + start;
-        Some(line[start..end].to_string())
-    };
-    let num_field = |key: &str| -> Option<f64> {
-        let pat = format!("\"{key}\":");
-        let start = line.find(&pat)? + pat.len();
-        let end = line[start..]
-            .find([',', '}'])
-            .map_or(line.len(), |e| e + start);
-        line[start..end].trim().parse().ok()
-    };
-    let mut measured_ns = Vec::new();
-    let mut rest = line;
-    while let Some(p) = rest.find("{\"candidate\":\"") {
-        let after = &rest[p + 14..];
-        let name_end = after.find('"')?;
-        let name = after[..name_end].to_string();
-        let ns_pat = "\"ns\":";
-        let ns_start = after.find(ns_pat)? + ns_pat.len();
-        let ns_end = after[ns_start..].find('}')? + ns_start;
-        let ns: u64 = after[ns_start..ns_end].trim().parse().ok()?;
-        measured_ns.push((name, ns));
-        rest = &after[ns_end..];
+    let mut parser = RowParser { rest: line };
+    parser.take("{\"kernel\":")?;
+    let kernel = parser.string()?;
+    parser.take(",\"shape_class\":")?;
+    let shape_class = parser.string()?;
+    parser.take(",\"machine\":")?;
+    let machine_hex = parser.string()?;
+    if machine_hex.len() != 16
+        || !machine_hex
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return None;
     }
-    Some(TuneRow {
-        kernel: field("kernel")?,
-        shape_class: field("shape_class")?,
-        machine: u64::from_str_radix(&field("machine")?, 16).ok()?,
-        params: field("params")?,
+    let machine = u64::from_str_radix(&machine_hex, 16).ok()?;
+    parser.take(",\"params\":")?;
+    let params = parser.string()?;
+    parser.take(",\"measured_ns\":[")?;
+
+    let mut measured_ns = Vec::new();
+    loop {
+        parser.take("{\"candidate\":")?;
+        let candidate = parser.string()?;
+        parser.take(",\"ns\":")?;
+        let ns = parser.canonical_u64()?;
+        parser.take("}")?;
+        if measured_ns.iter().any(|(name, _)| name == &candidate) {
+            return None;
+        }
+        measured_ns.push((candidate, ns));
+        if parser.rest.starts_with(',') {
+            parser.take(",")?;
+        } else {
+            break;
+        }
+    }
+
+    parser.take("],\"confidence\":")?;
+    let confidence = parser.canonical_confidence()?;
+    parser.take(",\"refresh\":")?;
+    let refresh = u32::try_from(parser.canonical_u64()?).ok()?;
+    parser.take("}")?;
+
+    if !parser.rest.is_empty()
+        || kernel.is_empty()
+        || shape_class.is_empty()
+        || params.is_empty()
+        || measured_ns.is_empty()
+        || measured_ns.iter().any(|(name, _)| name.is_empty())
+        || refresh == 0
+        || !(0.0..=1.0).contains(&confidence)
+        || (kernel == STENCIL_KERNEL && PinnedParam::parse(&kernel, &params).is_none())
+        || (kernel == SCHEDULE_KERNEL && PinnedParam::parse(&kernel, &params).is_none())
+    {
+        return None;
+    }
+
+    let row = TuneRow {
+        kernel,
+        shape_class,
+        machine,
+        params,
         measured_ns,
-        confidence: num_field("confidence")?,
-        refresh: num_field("refresh")? as u32,
-    })
+        confidence,
+        refresh,
+    };
+    (row.to_json() == line).then_some(row)
+}
+
+struct RowParser<'a> {
+    rest: &'a str,
+}
+
+impl RowParser<'_> {
+    fn take(&mut self, expected: &str) -> Option<()> {
+        self.rest = self.rest.strip_prefix(expected)?;
+        Some(())
+    }
+
+    fn string(&mut self) -> Option<String> {
+        self.take("\"")?;
+        let mut out = String::new();
+        loop {
+            let ch = self.rest.chars().next()?;
+            self.rest = &self.rest[ch.len_utf8()..];
+            match ch {
+                '"' => return Some(out),
+                '\\' => {
+                    let escaped = self.rest.chars().next()?;
+                    self.rest = &self.rest[escaped.len_utf8()..];
+                    match escaped {
+                        '"' => out.push('"'),
+                        '\\' => out.push('\\'),
+                        'n' => out.push('\n'),
+                        'r' => out.push('\r'),
+                        't' => out.push('\t'),
+                        'u' => {
+                            let hex = self.rest.get(..4)?;
+                            if !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                                return None;
+                            }
+                            let code = u32::from_str_radix(hex, 16).ok()?;
+                            out.push(char::from_u32(code)?);
+                            self.rest = &self.rest[4..];
+                        }
+                        _ => return None,
+                    }
+                }
+                c if c.is_control() => return None,
+                c => out.push(c),
+            }
+        }
+    }
+
+    fn canonical_u64(&mut self) -> Option<u64> {
+        let len = self.rest.bytes().take_while(u8::is_ascii_digit).count();
+        if len == 0 {
+            return None;
+        }
+        let token = &self.rest[..len];
+        if token.len() > 1 && token.starts_with('0') {
+            return None;
+        }
+        self.rest = &self.rest[len..];
+        token.parse().ok()
+    }
+
+    fn canonical_confidence(&mut self) -> Option<f64> {
+        let bytes = self.rest.as_bytes();
+        if bytes.len() < 5
+            || !bytes[0].is_ascii_digit()
+            || bytes[1] != b'.'
+            || !bytes[2..5].iter().all(u8::is_ascii_digit)
+        {
+            return None;
+        }
+        let token = &self.rest[..5];
+        self.rest = &self.rest[5..];
+        let value: f64 = token.parse().ok()?;
+        value.is_finite().then_some(value)
+    }
 }
 
 #[cfg(test)]
@@ -638,15 +915,17 @@ mod tests {
         let mut rich = fs_substrate::CapabilityProbe::topology_only();
         rich.logical_cpus = 14;
         rich.measured.all_core_gbs = 273.0; // M4 Pro class: ~19.5 GB/s/core
-        let mut t_rich = Tuner::cold(0xA);
-        t_rich.calibrate(&rich);
+        let mut t_rich = Tuner::cold(rich.fingerprint());
+        t_rich.calibrate(&rich).expect("matching rich probe");
         assert_eq!(t_rich.schedule().0, ScheduleKind::BandwidthRich);
 
         let mut starved = fs_substrate::CapabilityProbe::topology_only();
         starved.logical_cpus = 128;
         starved.measured.all_core_gbs = 120.0; // 5995WX class: ~0.94 GB/s/core
-        let mut t_starved = Tuner::cold(0xB);
-        t_starved.calibrate(&starved);
+        let mut t_starved = Tuner::cold(starved.fingerprint());
+        t_starved
+            .calibrate(&starved)
+            .expect("matching starved probe");
         assert_eq!(t_starved.schedule().0, ScheduleKind::BandwidthStarved);
 
         // The class-throughput row landed with the sorted distribution.
@@ -660,15 +939,51 @@ mod tests {
     #[test]
     fn pins_beat_everything_and_replay_reproducibly() {
         let mut t = Tuner::cold(0xF1);
-        t.pin(STENCIL_KERNEL, "edge=16");
+        t.pin(STENCIL_KERNEL, "edge=16").expect("canonical pin");
         let (edge, src) = t.tile_edge_for(STENCIL_KERNEL);
         assert_eq!((edge, src), (TileEdge::E16, TuneSource::Pinned));
         // Replay: a second tuner pinned from the recorded decision agrees.
         let recorded = t.decisions()[0].clone();
         let mut replay = Tuner::cold(0xDEAD_BEEF); // different machine!
-        replay.pin(recorded.kernel.clone(), recorded.params.clone());
+        replay
+            .pin(recorded.kernel.clone(), recorded.params.clone())
+            .expect("recorded pin is canonical");
         let (edge2, src2) = replay.tile_edge_for(STENCIL_KERNEL);
         assert_eq!((edge2, src2), (TileEdge::E16, TuneSource::Pinned));
+    }
+
+    #[test]
+    fn invalid_pins_fail_closed_instead_of_becoming_pinned_defaults() {
+        let mut t = Tuner::cold(0xF1);
+        assert!(t.pin(" ", "edge=4").is_err());
+        assert!(t.pin_tile_edge("", TileEdge::E4).is_err());
+        assert!(t.pin(STENCIL_KERNEL, "edge=32").is_err());
+        assert!(t.pin(SCHEDULE_KERNEL, "schedule=rich").is_err());
+        assert!(t.pin_tile_edge(SCHEDULE_KERNEL, TileEdge::E4).is_err());
+
+        let (edge, source) = t.tile_edge_for(STENCIL_KERNEL);
+        assert_eq!((edge, source), (TileEdge::E8, TuneSource::ColdStart));
+        t.pin_tile_edge(STENCIL_KERNEL, TileEdge::E4)
+            .expect("typed tile pin");
+        assert_eq!(
+            t.tile_edge_for(STENCIL_KERNEL),
+            (TileEdge::E4, TuneSource::Pinned)
+        );
+        t.pin_schedule(ScheduleKind::BandwidthStarved);
+        assert_eq!(
+            t.schedule(),
+            (ScheduleKind::BandwidthStarved, TuneSource::Pinned)
+        );
+    }
+
+    #[test]
+    fn calibration_rejects_a_foreign_probe_before_mutating_rows() {
+        let probe = fs_substrate::CapabilityProbe::topology_only();
+        let mut t = Tuner::cold(probe.fingerprint() ^ 1);
+        let err = t.calibrate(&probe).expect_err("foreign probe must fail");
+        assert!(err.detail.contains("does not match"), "{err}");
+        assert!(t.needs_calibration(), "failed calibration added no rows");
+        assert!(t.decisions().is_empty());
     }
 
     #[test]
@@ -682,7 +997,8 @@ mod tests {
             "s1",
             "edge=4".to_string(),
             vec![("edge=4".to_string(), 100), ("edge=8".to_string(), 200)],
-        );
+        )
+        .expect("first row insert");
         t.save(&path).expect("save");
         let same = Tuner::load(&path, 0xAB).expect("load");
         assert_eq!(
@@ -711,5 +1027,73 @@ mod tests {
         let clear = confidence_from(&[("a".into(), 100), ("b".into(), 400)]);
         assert!(near_tie < 0.05, "near ties are low confidence: {near_tie}");
         assert!(clear > 0.7, "clear rankings are high confidence: {clear}");
+    }
+
+    #[test]
+    fn row_parser_rejects_noncanonical_or_out_of_domain_fields() {
+        let row = TuneRow {
+            kernel: STENCIL_KERNEL.to_string(),
+            shape_class: SHAPE_DEFAULT.to_string(),
+            machine: 0xAB,
+            params: "edge=4".to_string(),
+            measured_ns: vec![("edge=4".to_string(), 100)],
+            confidence: 0.5,
+            refresh: 1,
+        }
+        .to_json();
+        assert!(parse_row(&row).is_some(), "writer output must parse");
+
+        for corrupt in [
+            format!("{row} trailing"),
+            row.replace("\"confidence\":0.500", "\"confidence\":NaN"),
+            row.replace("\"confidence\":0.500", "\"confidence\":1.001"),
+            row.replace("\"confidence\":0.500", "\"confidence\":-0.100"),
+            row.replace("\"refresh\":1", "\"refresh\":1.5"),
+            row.replace("\"refresh\":1", "\"refresh\":-1"),
+            row.replace("\"refresh\":1", "\"refresh\":0"),
+            row.replace("\"refresh\":1", "\"refresh\":4294967296"),
+            row.replace("\"params\":\"edge=4\"", "\"params\":\"edge=32\""),
+        ] {
+            assert!(
+                parse_row(&corrupt).is_none(),
+                "accepted corrupt row: {corrupt}"
+            );
+        }
+
+        let escaped = TuneRow {
+            kernel: "custom\"kernel".to_string(),
+            shape_class: "line\nbreak".to_string(),
+            machine: 0xCD,
+            params: "edge=4".to_string(),
+            measured_ns: vec![("candidate\\path".to_string(), 7)],
+            confidence: 1.0,
+            refresh: 1,
+        }
+        .to_json();
+        let parsed = parse_row(&escaped).expect("canonical escaped strings round trip");
+        assert_eq!(parsed.kernel, "custom\"kernel");
+        assert_eq!(parsed.shape_class, "line\nbreak");
+        assert_eq!(parsed.measured_ns[0].0, "candidate\\path");
+    }
+
+    #[test]
+    fn exhausted_refresh_counter_refuses_before_calibration() {
+        let mut tuner = Tuner::cold(0xAB);
+        tuner.rows.insert(
+            (STENCIL_KERNEL.to_string(), SHAPE_DEFAULT.to_string()),
+            TuneRow {
+                kernel: STENCIL_KERNEL.to_string(),
+                shape_class: SHAPE_DEFAULT.to_string(),
+                machine: 0xAB,
+                params: "edge=4".to_string(),
+                measured_ns: vec![("edge=4".to_string(), 1)],
+                confidence: 1.0,
+                refresh: u32::MAX,
+            },
+        );
+        let err = tuner
+            .require_refresh_capacity()
+            .expect_err("counter exhaustion must fail closed");
+        assert!(err.detail.contains("counter exhausted"), "{err}");
     }
 }

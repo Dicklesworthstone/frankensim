@@ -66,17 +66,22 @@ fs-substrate, fs-obs.
   the cancellation path), `fork` (round-trips through bytes, proving
   serializability at fork time), `StepVerdict`, `SolverProgress`.
 - `Tuner` / `TuneRow` / `TuningDecision` / `TuneSource` / `ScheduleKind` /
-  `TuneError` — the autotuner (plan §5.5). `calibrate(&probe)` measures a
-  real stencil-edge sweep through the real pool (argmin with
+  `TuneError` — the autotuner (plan §5.5). `calibrate(&probe)` first
+  requires the probe's stable fingerprint to match the tuner's machine
+  key, then measures a real stencil-edge sweep through the real pool (argmin with
   lowest-index tie law), reduction cost, steal cost, and selects the
   schedule kind from measured per-core bandwidth; rows are keyed kernel ×
   shape-class × MACHINE FINGERPRINT with repeat-agreement confidence and a
   refresh counter (recalibration idempotent). Persistence is a JSON-lines
   file store shaped like the ledger `tune` table (migration = rename);
-  foreign-fingerprint rows are stale and ignored on load. Decisions
-  (`tile_edge_for`, `schedule`) are RECORDED; studies pin them and replay
-  uses recorded plans, never re-tuned ones (replay fidelity). Cold-start
-  defaults: 8-cube tiles, bandwidth-rich schedule.
+  foreign-fingerprint rows are stale and ignored on load. The loader
+  accepts only the canonical writer grammar, finite confidence in `[0,1]`,
+  and positive integral refresh counters; suffixes and alternate numeric
+  spellings are corruption. Decisions (`tile_edge_for`, `schedule`) are
+  RECORDED; studies pin them through typed helpers or the validating
+  canonical replay API and replay uses recorded plans, never re-tuned ones
+  (replay fidelity). Cold-start defaults: 8-cube tiles, bandwidth-rich
+  schedule.
 - `KillRegistry` (behavior 3, Bet 8): candidate id -> `Arc<CancelGate>`;
   `kill` (idempotent; unknown id is a non-event), `kill_where` (batch
   elimination, ascending order), `registered_gate` (fetch without silently
@@ -115,9 +120,11 @@ fs-substrate, fs-obs.
 10. A registry kill drains the candidate's whole tree at its next poll
     points with arenas quiescent (exec-012, latency ledgered).
 11. Tune rows always carry the machine fingerprint; loads drop foreign
-    rows; recalibration replaces same-key rows with refresh incremented;
-    pinned decisions reproduce identically on ANY machine, calibrated or
-    not (exec-013).
+    rows and reject non-canonical or out-of-domain rows; calibration refuses
+    a probe whose fingerprint differs before any row mutation;
+    recalibration replaces same-key rows with refresh incremented; pinned
+    decisions are typed or canonical-validated and reproduce identically on
+    ANY machine, calibrated or not (exec-013).
 
 ## Snapshot envelope (bead wf9.8.2, v1)
 
@@ -218,7 +225,8 @@ bug caught with prefix localization), exec-010 (deterministic race victory
 under jitter + loser drain), exec-011 (bit-exact checkpoint/resume/fork on
 a chaotic trajectory), exec-012 (kill-handle drains a deep tree,
 latency ledgered), and exec-013 (calibrate -> persist -> consume round
-trip; fingerprint keying; idempotent recalibration; pinned replay).
+trip; fingerprint keying and mismatch refusal; strict row domains;
+idempotent recalibration; canonical pinned replay).
 tests/constellation_smoke.rs pins the
 asupersync Budget vocabulary. In-module unit suites cover the gate, keys,
 Reduce laws, partitioning, victim orders, self-cancellation, and pool
