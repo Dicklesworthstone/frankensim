@@ -97,7 +97,12 @@ None. Safe Rust only.
 
 ## Feature flags
 
-None. All v1 levers are `[S]` default-path.
+All OFF by default per the Ambition-Tag rule (the v1 FFD/RBF/velocity/
+density levers remain unflagged `[S]`):
+- `manifold-harmonics` [F] — manifold-harmonic deformation basis
+  (`dep:fs-la`); gates the `harmonics` integration target.
+- `elastic-shapes` [F] — elastic shape parameterization (implies
+  `manifold-harmonics`); gates the `elastic` integration target.
 
 ## Conformance tests
 

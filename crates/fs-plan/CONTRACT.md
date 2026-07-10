@@ -111,11 +111,12 @@ None. Safe Rust only.
 
 ## Feature flags
 
-None. The [F]-grade allocator/co-optimizer machinery is deliberately NOT
-here (gp3.9, flag-gated there per plan §11.4).
-`moonshot-planner` ([M], bead gp3.9): the co-optimizing allocator +
-fs-dfo dependency. OFF by default; promotion gated on the huq.15
-flagship Gauntlet.
+- `voi-queries` [F] (default OFF) — value-of-information query planning
+  (knh1.6, Proposal C); gates the `voi` integration target.
+- `moonshot-planner` [M] (default OFF, bead gp3.9) — the co-optimizing
+  allocator + fs-dfo dependency; promotion gated on the huq.15 flagship
+  Gauntlet (the fixture-matrix scoreboard here is necessary, not
+  sufficient).
 
 ## Conformance tests
 

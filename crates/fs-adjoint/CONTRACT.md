@@ -160,7 +160,19 @@ None. `unsafe_code = "deny"`.
 
 ## Feature flags
 
-None.
+All OFF by default per the Ambition-Tag rule (huq.18 reconciliation —
+this section previously said "None" while the manifest declared five):
+- `ledger-transpose` [F] — the ledger-DAG transposition layer (VJP
+  registry); disabled until its Gauntlet tier + kill metric are green.
+- `explanation-objects` [F] — explanation objects (knh1.5, Proposal B).
+- `diff-mitigations` [F] — non-differentiable meshing mitigations
+  (routing term, Hadamard path, estimated+flag downgrade); implies
+  `ledger-transpose`.
+- `gradient-certs` [S] — gradient certificates (colors + interval
+  residual bounds + the FD-falsifier merge gate); implies
+  `diff-mitigations`.
+- `dwr-accept` [F] — the DWR goal-oriented accept test.
+Each gates its own integration target (required-features declared).
 
 ## Conformance tests
 

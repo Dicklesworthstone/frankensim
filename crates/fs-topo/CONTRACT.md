@@ -99,7 +99,9 @@ None. `#![forbid(unsafe_code)]` via workspace lints; no capsules.
 
 ## Feature flags
 
-None.
+- `moonshot-topo-persistence` [M] (default OFF, bead 7tv.15) —
+  persistence-based topology penalties; gates the `penalty` integration
+  target.
 
 ## Conformance tests
 

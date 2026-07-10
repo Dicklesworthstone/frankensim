@@ -70,7 +70,9 @@ None. `#![deny(unsafe_code)]` via the workspace lint.
 
 ## Feature flags
 
-None.
+- `abstraction-ladder` [F] (default OFF) — the certified abstraction
+  ladder (knh1.4, Proposal A; `dep:fs-evidence`); gates the `ladder`
+  integration target.
 
 ## Conformance tests
 

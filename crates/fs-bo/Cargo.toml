@@ -28,3 +28,15 @@ fs-uq = { path = "../fs-uq" }
 
 [lints]
 workspace = true
+
+# Feature-gated integration target (huq.18): skipped-with-reason when the
+# feature is off, never a zero-test pass.
+[[test]]
+name = "acq_grad_battery"
+required-features = ["tape-acq"]
+
+# Feature-gated integration target (huq.18): skipped-with-reason when the
+# feature is off, never a zero-test pass.
+[[test]]
+name = "probe_grad"
+required-features = ["tape-acq"]

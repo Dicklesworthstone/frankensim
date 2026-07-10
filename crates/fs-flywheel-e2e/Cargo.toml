@@ -41,3 +41,45 @@ flywheel-e2e = []
 
 [lints]
 workspace = true
+
+# Feature-gated integration target (huq.18): skipped-with-reason when the
+# feature is off, never a zero-test pass.
+[[test]]
+name = "acceptance"
+required-features = ["flywheel-e2e"]
+
+# Feature-gated integration target (huq.18): skipped-with-reason when the
+# feature is off, never a zero-test pass.
+[[test]]
+name = "cal"
+required-features = ["flywheel-e2e"]
+
+# Feature-gated integration target (huq.18): skipped-with-reason when the
+# feature is off, never a zero-test pass.
+[[test]]
+name = "dbg"
+required-features = ["flywheel-e2e"]
+
+# Feature-gated integration target (huq.18): skipped-with-reason when the
+# feature is off, never a zero-test pass.
+[[test]]
+name = "e2e"
+required-features = ["flywheel-e2e"]
+
+# Feature-gated integration target (huq.18): skipped-with-reason when the
+# feature is off, never a zero-test pass.
+[[test]]
+name = "phase1_gate"
+required-features = ["flywheel-e2e"]
+
+# Feature-gated integration target (huq.18): skipped-with-reason when the
+# feature is off, never a zero-test pass.
+[[test]]
+name = "phase2_gate"
+required-features = ["flywheel-e2e"]
+
+# Feature-gated integration target (huq.18): skipped-with-reason when the
+# feature is off, never a zero-test pass.
+[[test]]
+name = "phase3_gate"
+required-features = ["flywheel-e2e"]

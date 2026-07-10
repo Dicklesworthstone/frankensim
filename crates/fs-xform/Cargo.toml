@@ -24,3 +24,15 @@ elastic-shapes = ["manifold-harmonics"]
 
 [lints]
 workspace = true
+
+# Feature-gated integration target (huq.18): skipped-with-reason when the
+# feature is off, never a zero-test pass.
+[[test]]
+name = "elastic"
+required-features = ["elastic-shapes"]
+
+# Feature-gated integration target (huq.18): skipped-with-reason when the
+# feature is off, never a zero-test pass.
+[[test]]
+name = "harmonics"
+required-features = ["manifold-harmonics"]

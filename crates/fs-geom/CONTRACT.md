@@ -172,10 +172,15 @@ interruptible like any kernel (P7); fixtures are O(1) per query.
 None. `unsafe_code` denied workspace-wide.
 
 ## Feature flags
-None yet. `[F]`-tagged bead: the abstractions are frontier by AMBITION
-(category-of-charts doctrine), but everything shipped here is exercised
-by the conformance suite — no flag needed until moonshot certificates
-(sheaf gluing) arrive.
+All OFF by default per the Ambition-Tag rule (the default-path chart
+abstractions remain unflagged `[S]`):
+- `semantic-diff` [F] — semantic design diff; disabled until its
+  Gauntlet tier + kill metric (R3 fallback fraction) are green.
+- `sheaf-repair` [M] — sheaf-adjudicated repair; disabled until
+  certifier trials pass (milestone P6).
+- `sheaf-merge` [M] — the sheaf-adjudicated merge (crown jewel);
+  implies `sheaf-repair`.
+Each gates its own integration target (required-features declared).
 
 ## Conformance tests
 tests/conformance.rs, cases geo-001..geo-005 (JSON-line verdicts; seeded

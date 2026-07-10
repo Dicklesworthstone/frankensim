@@ -126,7 +126,12 @@ Zero `unsafe`.
 
 ## Feature flags
 
-None.
+All OFF by default per the Ambition-Tag rule:
+- `nurbs-sdf` [F] — the NURBS→SDF converter; disabled until its
+  Gauntlet tier is green. Gates the `sdf` integration target.
+- `nurbs-refit` [F] — the SDF→NURBS refit (implies `nurbs-sdf`; the CSG
+  acceptance closes the loop through the forward converter + sheaf
+  certificates). Gates the `refit` integration target.
 
 ## Conformance tests
 

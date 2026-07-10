@@ -35,3 +35,21 @@ sheaf-merge = ["sheaf-repair"]
 
 [lints]
 workspace = true
+
+# Feature-gated integration target (huq.18): skipped-with-reason when the
+# feature is off, never a zero-test pass.
+[[test]]
+name = "diff"
+required-features = ["semantic-diff"]
+
+# Feature-gated integration target (huq.18): skipped-with-reason when the
+# feature is off, never a zero-test pass.
+[[test]]
+name = "sheaf_merge"
+required-features = ["sheaf-merge"]
+
+# Feature-gated integration target (huq.18): skipped-with-reason when the
+# feature is off, never a zero-test pass.
+[[test]]
+name = "sheaf_repair"
+required-features = ["sheaf-repair"]

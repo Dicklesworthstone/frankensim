@@ -45,3 +45,33 @@ fs-rand = { path = "../fs-rand" }
 
 [lints]
 workspace = true
+
+# Feature-gated integration target (huq.18): skipped-with-reason when the
+# feature is off, never a zero-test pass.
+[[test]]
+name = "certs"
+required-features = ["gradient-certs"]
+
+# Feature-gated integration target (huq.18): skipped-with-reason when the
+# feature is off, never a zero-test pass.
+[[test]]
+name = "dwr_accept"
+required-features = ["dwr-accept"]
+
+# Feature-gated integration target (huq.18): skipped-with-reason when the
+# feature is off, never a zero-test pass.
+[[test]]
+name = "explain"
+required-features = ["explanation-objects"]
+
+# Feature-gated integration target (huq.18): skipped-with-reason when the
+# feature is off, never a zero-test pass.
+[[test]]
+name = "mitigate"
+required-features = ["diff-mitigations"]
+
+# Feature-gated integration target (huq.18): skipped-with-reason when the
+# feature is off, never a zero-test pass.
+[[test]]
+name = "transpose"
+required-features = ["ledger-transpose"]

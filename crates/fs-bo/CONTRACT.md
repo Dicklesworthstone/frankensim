@@ -112,7 +112,9 @@ None. `unsafe_code = "deny"`.
 
 ## Feature flags
 
-None.
+- `tape-acq` (default OFF) — acquisition gradients through the
+  FrankenTorch tape bridge (`dep:fs-ad` + `fs-ad/torch-bridge`); gates
+  the `acq_grad_battery` and `probe_grad` integration targets.
 
 ## Conformance tests
 

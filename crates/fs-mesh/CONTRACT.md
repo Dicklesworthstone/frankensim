@@ -161,7 +161,8 @@ None. `#![forbid(unsafe_code)]` via workspace lints; no capsules.
 
 ## Feature flags
 
-None.
+- `frontier-hexmesh` [F] (default OFF) — hex-dominant meshing (bead
+  wqd.18); gates the `hexdom` integration target.
 
 ## Conformance tests
 

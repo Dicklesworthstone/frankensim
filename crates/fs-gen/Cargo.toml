@@ -18,3 +18,9 @@ proposal-gen = []
 
 [lints]
 workspace = true
+
+# Feature-gated integration target (huq.18): skipped-with-reason when the
+# feature is off, never a zero-test pass.
+[[test]]
+name = "gen"
+required-features = ["proposal-gen"]

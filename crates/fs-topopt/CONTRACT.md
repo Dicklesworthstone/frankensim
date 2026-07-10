@@ -118,7 +118,9 @@ None. `unsafe_code = "deny"`.
 
 ## Feature flags
 
-None.
+- `cutfem-marquee` [F] (default OFF, bead b7d0) — the CutFEM-octree
+  marquee topology lane (`dep:fs-cutfem`, `dep:fs-dwr`, `dep:fs-ivl`);
+  gates the `marquee` integration target.
 
 ## Conformance tests
 

@@ -118,6 +118,9 @@ None. `unsafe_code` denied; no capsules.
   path deps and enables the `interop` module (Csr ⇄ FrankenNetworkx
   `GraphSnapshot`). Off by default so the L1 crate stays dependency-lean; the
   numeric core never pulls a constellation crate.
+- `fnp-interop` (default OFF) — pulls the optional `fnp-ufunc` + `fnp-dtype`
+  path deps and enables the `interop_fnp` module (Csr ⇄ FrankenNumpy
+  `UFuncArray`). Same dependency-lean rationale.
 
 ## Conformance tests
 `tests/conformance.rs`: cross-format bitwise battery + golden hash. In-crate

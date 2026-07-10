@@ -33,3 +33,9 @@ cutfem-marquee = ["dep:fs-cutfem", "dep:fs-dwr", "dep:fs-ivl"]
 
 [lints]
 workspace = true
+
+# Feature-gated integration target (huq.18): skipped-with-reason when the
+# feature is off, never a zero-test pass.
+[[test]]
+name = "marquee"
+required-features = ["cutfem-marquee"]

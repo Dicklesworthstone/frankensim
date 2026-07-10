@@ -89,6 +89,88 @@ fn rust_files(root: &Path) -> Vec<PathBuf> {
     files
 }
 
+/// The number immediately preceding `pat` on `line` (digits touching the
+/// pattern), if any.
+fn count_before(line: &str, pat: &str) -> Option<usize> {
+    let pos = line.find(pat)?;
+    let digits: String = line[..pos]
+        .chars()
+        .rev()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    digits.parse::<usize>().ok()
+}
+
+/// huq.18: README inventory counts (crate/contract/test-file numbers in
+/// the badges and the What-Exists table) must equal the tree's actual
+/// counts — counts are DERIVED, never hand-promoted, so drift turns the
+/// gate red instead of aging silently.
+fn check_inventory_counts(root: &Path, readme: &str) -> Vec<Violation> {
+    let mut violations = Vec::new();
+    let crate_dirs: Vec<PathBuf> = std::fs::read_dir(root.join("crates"))
+        .map_or_else(|_| Vec::new(), |rd| rd.flatten().map(|e| e.path()).collect());
+    let crate_count = crate_dirs
+        .iter()
+        .filter(|p| p.join("Cargo.toml").is_file())
+        .count();
+    let contract_count = crate_dirs
+        .iter()
+        .filter(|p| p.join("CONTRACT.md").is_file())
+        .count();
+    let test_file_count: usize = crate_dirs
+        .iter()
+        .filter_map(|p| std::fs::read_dir(p.join("tests")).ok())
+        .flat_map(std::iter::Iterator::flatten)
+        .filter(|f| f.path().extension().is_some_and(|x| x == "rs"))
+        .count();
+    let checks = [
+        (" crate test files", test_file_count, "crate test files"),
+        ("%20crate%20test%20files", test_file_count, "crate test files (badge)"),
+    ];
+    for line in readme.lines() {
+        for (pat, actual, what) in checks {
+            if let Some(claimed) = count_before(line, pat)
+                && claimed != actual
+            {
+                violations.push(Violation {
+                    check: "claim-state",
+                    crate_name: "README.md".to_string(),
+                    detail: format!(
+                        "README claims {claimed} {what} but the tree has {actual} — counts \
+                         are derived, never hand-promoted (bead huq.18)"
+                    ),
+                });
+            }
+        }
+        // Contracts badge: `contracts-<n>%20of%20<m>%20crates`.
+        if let Some(at) = line.find("badge/contracts-") {
+            let tail = &line[at + "badge/contracts-".len()..];
+            let n: String = tail.chars().take_while(char::is_ascii_digit).collect();
+            let m = tail
+                .find("%20of%20")
+                .map(|p| &tail[p + "%20of%20".len()..])
+                .map(|t| t.chars().take_while(char::is_ascii_digit).collect::<String>());
+            if let (Ok(n), Some(Ok(m))) = (n.parse::<usize>(), m.map(|s| s.parse::<usize>()))
+                && (n != contract_count || m != crate_count)
+            {
+                violations.push(Violation {
+                    check: "claim-state",
+                    crate_name: "README.md".to_string(),
+                    detail: format!(
+                        "README contracts badge says {n} of {m} but the tree has \
+                         {contract_count} CONTRACT.md files across {crate_count} crates \
+                         (bead huq.18)"
+                    ),
+                });
+            }
+        }
+    }
+    violations
+}
+
 /// README claim-state lint: see module docs for the three rules.
 pub fn check_claims(root: &Path) -> Vec<Violation> {
     let mut violations = Vec::new();
@@ -111,6 +193,10 @@ pub fn check_claims(root: &Path) -> Vec<Violation> {
             code_text.push('\n');
         }
     }
+
+    // Rule 4 (huq.18): README inventory counts are derived, never
+    // hand-promoted.
+    violations.extend(check_inventory_counts(root, &readme));
 
     // Rule 1: cited hashes exist in code.
     for h in hashes_in(&readme) {

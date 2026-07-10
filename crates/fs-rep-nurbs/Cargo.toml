@@ -33,3 +33,15 @@ nurbs-refit = ["nurbs-sdf"]
 
 [lints]
 workspace = true
+
+# Feature-gated integration target (huq.18): skipped-with-reason when the
+# feature is off, never a zero-test pass.
+[[test]]
+name = "refit"
+required-features = ["nurbs-refit"]
+
+# Feature-gated integration target (huq.18): skipped-with-reason when the
+# feature is off, never a zero-test pass.
+[[test]]
+name = "sdf"
+required-features = ["nurbs-sdf"]

@@ -147,7 +147,10 @@ None. Safe Rust only.
 
 ## Feature flags
 
-None. All v1 behavior is `[S]` default-path.
+- `ladder-planner` [F] (default OFF) — the greedy ladder-walk planner
+  (`dep:fs-verify`); disabled until its Gauntlet tier + kill metric are
+  green. Gates the `planner`, `plancal`, and `anytime` targets. All
+  other v1 behavior is `[S]` default-path.
 
 ## Conformance tests
 
