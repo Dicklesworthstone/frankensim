@@ -18,6 +18,8 @@
 pub mod bsr;
 #[cfg(feature = "fnx-interop")]
 pub mod interop;
+#[cfg(feature = "fnp-interop")]
+pub mod interop_fnp;
 pub mod ops;
 pub mod perf;
 pub mod precond;
@@ -26,6 +28,8 @@ pub mod sell;
 pub use bsr::Bsr;
 #[cfg(feature = "fnx-interop")]
 pub use interop::{InteropError, WEIGHT_KEY, csr_to_graph_snapshot, graph_snapshot_to_csr};
+#[cfg(feature = "fnp-interop")]
+pub use interop_fnp::{FnpInteropError, csr_to_dense_array, dense_array_to_csr};
 pub use perf::CsrCompact;
 pub use sell::Sell;
 

@@ -17,10 +17,14 @@ layer = "L1"
 # CompatibilityMode/CgseValue. Precedent: fs-truss, fs-rep-voxel.
 fnx-classes = { path = "../../../franken_networkx/crates/fnx-classes", optional = true }
 fnx-runtime = { path = "../../../franken_networkx/crates/fnx-runtime", optional = true }
+fnp-ufunc = { path = "../../../franken_numpy/crates/fnp-ufunc", optional = true }
+fnp-dtype = { path = "../../../franken_numpy/crates/fnp-dtype", optional = true }
 
 [features]
 # FrankenNetworkx GraphSnapshot <-> Csr converters (crate::interop).
 fnx-interop = ["dep:fnx-classes", "dep:fnx-runtime"]
+# FrankenNumpy UFuncArray <-> Csr converters (crate::interop_fnp).
+fnp-interop = ["dep:fnp-ufunc", "dep:fnp-dtype"]
 
 [dev-dependencies]
 # Roofline lane only (dev-deps are layer-exempt): STREAM triad reference.

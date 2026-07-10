@@ -129,6 +129,20 @@ Laplacian-square pattern sanity, sparse-SPA SpGEMM vs dense-SPA reference on
 random and 2e6-column-wide products, structured rejections. Any
 reimplementation must pass the conformance battery bit-for-bit.
 
+## FrankenNumpy interop (bead gtql item c, feature `fnp-interop`)
+
+Scout verdict recorded: fnp-ndarray holds only layout metadata; the
+owned array type is `fnp_ufunc::UFuncArray` (owned `Vec<f64>` +
+shape), so these are CONVERSIONS by necessity — no zero-copy view
+exists into another crate's owned storage; the borrowed views remain
+`Csr::row`/`Csr::to_dense` on this side. `csr_to_dense_array`
+densifies (O(nrows·ncols), overflow-refused) with unstored entries as
++0.0 — explicit stored zeros are documented lossiness (round trip is
+the identity exactly for CSRs without them). `dense_array_to_csr`
+accepts rank-2 only, reads the f64 value plane, drops ±0.0, and
+REFUSES non-finite entries with their position (fail closed). Off by
+default; the L1 core pulls no constellation crate unless opted in.
+
 ## No-claim boundaries
 - **No performance claims yet**: scalar reference kernels; the ≥85% STREAM
   target, CCD sharding, prefetch, and SIMD belong to the perf follow-up.
