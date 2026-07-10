@@ -243,3 +243,43 @@ fn dw_005_falsifier_spot_check_and_pairing() {
          ships only once paired",
     );
 }
+
+#[test]
+fn guaranteed_over_tolerance_bracket_refuses_acceptance() {
+    // Bead 9sf6 F4 regression: a GUARANTEED bracket whose bound
+    // exceeds tolerance is rigorous evidence the tolerance cannot be
+    // confirmed — the old path silently dropped it and accepted on
+    // the bare estimate. Fail closed.
+    let query = DwrQuery {
+        qoi: "test-qoi".to_string(),
+        tolerance: 1e-3,
+    };
+    let bracket = Bracket {
+        bound: 5e-2,
+        guaranteed: true,
+        source: "test-enclosure".to_string(),
+    };
+    // The estimate LOOKS fine (below tolerance) — that is exactly the
+    // trap: an uncertified estimate must not override certified
+    // inconclusiveness.
+    let outcome = accept(&query, 5e-4, Some(&bracket));
+    assert!(
+        !outcome.accepted,
+        "must refuse when rigorous evidence cannot confirm tolerance: {}",
+        outcome.audit
+    );
+    assert!(
+        outcome.audit.contains("REFUSED"),
+        "audit must state the refusal: {}",
+        outcome.audit
+    );
+    // A NON-guaranteed over-tolerance bracket still falls through to
+    // the estimate path (nothing rigorous was dropped).
+    let soft = Bracket {
+        bound: 5e-2,
+        guaranteed: false,
+        source: "heuristic".to_string(),
+    };
+    let outcome2 = accept(&query, 5e-4, Some(&soft));
+    assert!(outcome2.accepted, "heuristic brackets do not veto");
+}

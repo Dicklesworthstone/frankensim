@@ -206,3 +206,40 @@ fn gc_004_no_falsifier_no_ship_covers_gradients() {
          pairing, an unpaired class is blocked by name",
     );
 }
+
+#[test]
+fn non_finite_residual_bound_cannot_mint_verified() {
+    // Bead 9sf6 F5 regression: certify(Some(INFINITY)) used to wear
+    // Verified{0, inf} — a vacuous certificate in the strongest color.
+    use fs_adjoint::certs::certify;
+    use fs_adjoint::mitigate::GradientGrade;
+    let grade = GradientGrade::Smooth { route: vec![] };
+    let cert = certify(&grade, Some(f64::INFINITY), vec![], None);
+    assert!(
+        !matches!(cert.color, fs_evidence::Color::Verified { .. }),
+        "a non-finite bound must not certify: {:?}",
+        cert.color
+    );
+    let cert_nan = certify(&grade, Some(f64::NAN), vec![], None);
+    assert!(!matches!(
+        cert_nan.color,
+        fs_evidence::Color::Verified { .. }
+    ));
+    // A finite bound still verifies.
+    let cert_ok = certify(&grade, Some(1e-12), vec![], None);
+    assert!(matches!(
+        cert_ok.color,
+        fs_evidence::Color::Verified { .. }
+    ));
+}
+
+#[test]
+#[should_panic(expected = "ZERO probes")]
+fn zero_probe_residual_bound_panics() {
+    use fs_adjoint::certs::{SparseLinear, adjoint_residual_bound};
+    let op = SparseLinear {
+        rows: vec![vec![(0usize, 1.0f64)]],
+        ncols: 1,
+    };
+    let _ = adjoint_residual_bound(&op, 0);
+}
