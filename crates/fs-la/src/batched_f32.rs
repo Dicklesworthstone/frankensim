@@ -168,31 +168,83 @@ pub fn batch_gemm_f32(
         scale_batch_f32(beta, c);
         return;
     }
+    // PACKED tile path (bead 9ekv scope e): same doctrine as the f64
+    // batch_gemm — per lane chunk, repack operands l-CONTIGUOUS (A
+    // i-major, B j-major; pure data movement) and stream the fs-simd
+    // f32 tile kernel at FOUR lanes per register. Per-element order is
+    // the same fixed l-ascending fused `mul_add` as the plane loop, so
+    // outputs are bitwise-unchanged by this restructure (membership
+    // invariance + the naive-fold checks pin it).
     let n = a.n;
-    let mut acc = vec![0.0f32; n];
-    for i in 0..k {
-        for j in 0..k {
-            acc.fill(0.0);
-            for l in 0..k {
-                let ap = a.plane(i, l);
-                let bp = b.plane(l, j);
-                for ((s, &am), &bm) in acc.iter_mut().zip(ap).zip(bp) {
-                    *s = am.mul_add(bm, *s);
-                }
+    let btile = fs_simd::ops().btile4x4pf32;
+    let mut tile = vec![0.0f32; 16 * MBLK_F32];
+    let mut acc = [0.0f32; MBLK_F32];
+    let mut a_pack = vec![0.0f32; k * k * MBLK_F32];
+    let mut b_pack = vec![0.0f32; k * k * MBLK_F32];
+    let kt = k - k % 4;
+    let write_back = |alpha: f32, beta: f32, acc: &[f32], cp: &mut [f32]| {
+        if beta == 0.0 {
+            for (cm, &s) in cp.iter_mut().zip(acc) {
+                *cm = alpha * s;
             }
-            let cp = c.plane_mut(i, j);
-            if beta == 0.0 {
-                for (cm, &s) in cp.iter_mut().zip(&acc) {
-                    *cm = alpha * s;
-                }
-            } else {
-                for (cm, &s) in cp.iter_mut().zip(&acc) {
-                    *cm = alpha.mul_add(s, beta * *cm);
+        } else {
+            for (cm, &s) in cp.iter_mut().zip(acc) {
+                *cm = alpha.mul_add(s, beta * *cm);
+            }
+        }
+    };
+    let mut m0 = 0;
+    while m0 < n {
+        let mb = MBLK_F32.min(n - m0);
+        for i in 0..k {
+            for l in 0..k {
+                a_pack[(i * k + l) * mb..(i * k + l) * mb + mb]
+                    .copy_from_slice(&a.plane(i, l)[m0..m0 + mb]);
+            }
+        }
+        for j in 0..k {
+            for l in 0..k {
+                b_pack[(j * k + l) * mb..(j * k + l) * mb + mb]
+                    .copy_from_slice(&b.plane(l, j)[m0..m0 + mb]);
+            }
+        }
+        for i0 in (0..kt).step_by(4) {
+            for j0 in (0..kt).step_by(4) {
+                let td = &mut tile[..16 * mb];
+                btile(&a_pack, &b_pack, i0, j0, k, mb, td);
+                for ti in 0..4 {
+                    for tj in 0..4 {
+                        let trow = &td[(ti * 4 + tj) * mb..(ti * 4 + tj + 1) * mb];
+                        let cp = &mut c.plane_mut(i0 + ti, j0 + tj)[m0..m0 + mb];
+                        write_back(alpha, beta, trow, cp);
+                    }
                 }
             }
         }
+        // Tails (k % 4): the plane loop on the original planes.
+        for i in 0..k {
+            let j_start = if i < kt { kt } else { 0 };
+            for j in j_start..k {
+                let acc = &mut acc[..mb];
+                acc.fill(0.0);
+                for l in 0..k {
+                    let ap = &a.plane(i, l)[m0..m0 + mb];
+                    let bp = &b.plane(l, j)[m0..m0 + mb];
+                    for ((s, &am), &bm) in acc.iter_mut().zip(ap).zip(bp) {
+                        *s = am.mul_add(bm, *s);
+                    }
+                }
+                let cp = &mut c.plane_mut(i, j)[m0..m0 + mb];
+                write_back(alpha, beta, acc, cp);
+            }
+        }
+        m0 += MBLK_F32;
     }
 }
+
+/// Lanes per chunk for the f32 packed path (mirrors the f64 MBLK
+/// doctrine; multiples of 4 keep the quad kernel off its tail path).
+const MBLK_F32: usize = 256;
 
 /// MIXED batched GEMM for the LBM moment path: operands and result
 /// stored f32, the whole per-element computation carried in f64 —
