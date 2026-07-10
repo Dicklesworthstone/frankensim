@@ -10,7 +10,9 @@
 
 // Radix-4 Stockham FFT butterfly capsule (bead 27d3), split out under the
 // 300-line cap like NEON's fft submodule; re-exported below.
+pub mod elem;
 pub mod fft;
+pub use elem::fma3;
 pub use fft::r4qrun_f64;
 
 // Only the intrinsics the WIRED ops (axpy/dot/sum) use; mul intrinsics
@@ -253,8 +255,9 @@ unsafe fn mk8x4_f64_256(a_panel: &[f64], b_panel: &[f64], kc: usize, acc: &mut [
 /// the golden — that is autotuner-sweep scope with a justified bump,
 /// not capsule scope; ymm ops run fine on AVX-512 parts).
 pub fn mk8x4_f64(a_panel: &[f64], b_panel: &[f64], kc: usize, acc: &mut [[f64; 4]; 8]) {
+    let lengths = crate::checked_mk8x4_lengths(kc);
     assert!(
-        a_panel.len() >= kc * 8 && b_panel.len() >= kc * 4,
+        matches!(lengths, Some((a_len, b_len)) if a_len <= a_panel.len() && b_len <= b_panel.len()),
         "mk8x4 panel length mismatch (programmer error)"
     );
     #[cfg(target_arch = "x86_64")]

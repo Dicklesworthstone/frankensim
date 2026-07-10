@@ -47,6 +47,53 @@ pub type Btile4x4 = fn(&[f64], &[f64], usize, usize, usize, usize, usize, usize,
 /// (a_pack, b_pack, i0, j0, k, mb, dst) — l-contiguous packed layout.
 pub type Btile4x4P = fn(&[f64], &[f64], usize, usize, usize, usize, &mut [f64]);
 
+#[inline]
+pub(crate) fn checked_mk8x4_lengths(kc: usize) -> Option<(usize, usize)> {
+    Some((kc.checked_mul(8)?, kc.checked_mul(4)?))
+}
+
+#[inline]
+pub(crate) fn checked_btile4x4_lengths(
+    i0: usize,
+    j0: usize,
+    stride: usize,
+    k: usize,
+    m0: usize,
+    mb: usize,
+) -> Option<(usize, usize, usize)> {
+    let i_end = i0.checked_add(4)?;
+    let j_end = j0.checked_add(4)?;
+    let lane_end = m0.checked_add(mb)?;
+    if k == 0 || i_end > k || j_end > k || lane_end > stride {
+        return None;
+    }
+    let last_k = k - 1;
+    let a_plane = (i_end - 1).checked_mul(k)?.checked_add(last_k)?;
+    let b_plane = last_k.checked_mul(k)?.checked_add(j_end - 1)?;
+    let a_len = a_plane.checked_mul(stride)?.checked_add(lane_end)?;
+    let b_len = b_plane.checked_mul(stride)?.checked_add(lane_end)?;
+    let dst_len = 16usize.checked_mul(mb)?;
+    Some((a_len, b_len, dst_len))
+}
+
+#[inline]
+pub(crate) fn checked_btile4x4p_lengths(
+    i0: usize,
+    j0: usize,
+    k: usize,
+    mb: usize,
+) -> Option<(usize, usize, usize)> {
+    let i_end = i0.checked_add(4)?;
+    let j_end = j0.checked_add(4)?;
+    if k == 0 || i_end > k || j_end > k {
+        return None;
+    }
+    let a_len = i_end.checked_mul(k)?.checked_mul(mb)?;
+    let b_len = j_end.checked_mul(k)?.checked_mul(mb)?;
+    let dst_len = 16usize.checked_mul(mb)?;
+    Some((a_len, b_len, dst_len))
+}
+
 /// Radix-4 Stockham q-run butterfly signature
 /// (a, b, c, d, out, twiddles [w1re,w1im,w2re,w2im,w3re,w3im], inverse)
 /// over interleaved complex rows.
@@ -139,7 +186,9 @@ fn build_table() -> Ops {
                 axpy: x86::axpy,
                 scale: scalar::scale,
                 mul_elem: scalar::mul_elem,
-                fma3: scalar::fma3,
+                // fma3 vector path (fz2.2 tier audit): baseline-x86
+                // scalar mul_add is a per-element libm CALL.
+                fma3: x86::fma3,
                 dot: x86::dot,
                 sum: x86::sum,
                 // AVX2 mk8x4 landed (bead xlvx) on user-granted x86
@@ -411,5 +460,40 @@ mod tests {
         let x = [1.0, 2.0];
         let mut y = [1.0];
         (ops().axpy)(1.0, &x, &mut y);
+    }
+
+    #[test]
+    fn gemm_geometry_overflow_is_refused_before_dispatch() {
+        let mut acc = [[0.0; 4]; 8];
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                (ops().mk8x4_f64)(&[], &[], usize::MAX, &mut acc);
+            }))
+            .is_err()
+        );
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let mut dst = [];
+                (ops().btile4x4_f64)(
+                    &[],
+                    &[],
+                    usize::MAX,
+                    0,
+                    usize::MAX,
+                    usize::MAX,
+                    usize::MAX,
+                    usize::MAX,
+                    &mut dst,
+                );
+            }))
+            .is_err()
+        );
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let mut dst = [];
+                (ops().btile4x4p_f64)(&[], &[], usize::MAX, 0, usize::MAX, usize::MAX, &mut dst);
+            }))
+            .is_err()
+        );
     }
 }
