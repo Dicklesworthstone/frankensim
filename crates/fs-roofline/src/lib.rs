@@ -457,6 +457,7 @@ pub fn attainment_with_dispersion(
     )
 }
 
+#[allow(clippy::too_many_lines)] // one roof decision per branch; splitting obscures the min-roof flow
 fn attainment_with_origin(
     spec: &KernelSpec,
     elems_per_sec: f64,
