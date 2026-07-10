@@ -25,6 +25,7 @@ pub mod bandwidth;
 pub mod field;
 pub mod morton;
 pub mod os_affinity;
+pub mod prefetch;
 pub mod tile;
 
 /// Crate version, re-exported for provenance stamping.

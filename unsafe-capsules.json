@@ -6,6 +6,7 @@
 {"crate": "fs-simd", "module": "crates/fs-simd/src/neon/mod.rs", "safety_md": "crates/fs-simd/src/neon/SAFETY.md"},
 {"crate": "fs-substrate", "module": "crates/fs-substrate/src/morton/bmi2/mod.rs", "safety_md": "crates/fs-substrate/src/morton/bmi2/SAFETY.md"},
 {"crate": "fs-substrate", "module": "crates/fs-substrate/src/os_affinity/mod.rs", "safety_md": "crates/fs-substrate/src/os_affinity/SAFETY.md"},
+{"crate": "fs-substrate", "module": "crates/fs-substrate/src/prefetch/mod.rs", "safety_md": "crates/fs-substrate/src/prefetch/SAFETY.md"},
 {"crate": "fs-simd", "module": "crates/fs-simd/src/x86/mod.rs", "safety_md": "crates/fs-simd/src/x86/SAFETY.md"},
 {"crate": "fs-simd", "module": "crates/fs-simd/src/sme2/mod.rs", "safety_md": "crates/fs-simd/src/sme2/SAFETY.md"},
 {"crate": "fs-roofline", "module": "crates/fs-roofline/src/axes.rs", "safety_md": "crates/fs-roofline/src/SAFETY.md"},
@@ -13,6 +14,7 @@
 {"crate": "fs-simd", "module": "crates/fs-simd/src/neon/gemm/mod.rs", "safety_md": "crates/fs-simd/src/neon/gemm/SAFETY.md"},
 {"crate": "fs-simd", "module": "crates/fs-simd/src/neon/fft/mod.rs", "safety_md": "crates/fs-simd/src/neon/fft/SAFETY.md"},
 {"crate": "fs-simd", "module": "crates/fs-simd/src/x86/fft.rs", "safety_md": "crates/fs-simd/src/x86/SAFETY.md"},
-{"crate": "fs-simd", "module": "crates/fs-simd/src/x86/elem.rs", "safety_md": "crates/fs-simd/src/x86/SAFETY.md"}
+{"crate": "fs-simd", "module": "crates/fs-simd/src/x86/elem.rs", "safety_md": "crates/fs-simd/src/x86/SAFETY.md"},
+{"crate": "fs-simd", "module": "crates/fs-simd/src/neon/gemmf32/mod.rs", "safety_md": "crates/fs-simd/src/neon/gemmf32/SAFETY.md"}
 ]
 }
