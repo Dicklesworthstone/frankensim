@@ -54,6 +54,21 @@ Consumers: the P2 marquee demo, the HELM e2e suite (gp3.11).
 - `flush_to_ledger(&Ledger)` — consumption, degradation, and idempotency
   receipts persisted as `session.*` events. Explicitly single-threaded:
   fsqlite connections are `!Send` by design.
+- `gemm_f64_session(tuner, ledger?, gate, threads, m, n, k, α, a, b, β, c)`
+  — the production GEMM autotune loop (bead yqug): measure → cache →
+  model → dispatch. Kernel key = `gemm-f64-parallel/bits-v` +
+  fs-la's `GEMM_BIT_SEMANTICS_VERSION` (semantic staleness filtered by
+  key construction); shape class = power-of-two dim buckets. Pinned
+  plans dispatch with NO measurement (replay fidelity); else a cached
+  tuner/ledger row; else a bounded 4×2 candidate sweep at the caller's
+  dims (capped at 512) with 3 wall-time samples per candidate, recorded
+  as ranked evidence, written through to the ledger `tune` table, and
+  ENFORCED bit-neutral: every candidate's output must be bitwise equal
+  to the first's or the loop fails closed (`BitDrift`) and records
+  nothing. The selection rule is declared (argmin of minimum wall time,
+  ties to the earlier lattice index) — never a confidence claim.
+  Returns a `GemmDispatch` receipt (kernel, class, plan, provenance,
+  swept) for study pinning.
 
 ## Invariants
 
@@ -121,6 +136,19 @@ bounded completion, one shared terminal failure receipt, and zero charge;
 ss-009 NaN/infinite/negative grant and charge refusal with no-mutation checks;
 ss-010 the exact-grant throttle boundary and atomic accumulated-overflow
 refusal.
+
+`tests/gemm_tune.rs` (bead yqug drills): cold start sweeps once and
+matches serial bits; ledger warm start seeds a fresh session without
+re-measuring; stale (foreign-fingerprint) and invalid cache rows are
+refused and re-measured; a requested gate cancels the sweep with no row
+and untouched output; non-canonical/off-lattice/mis-keyed pins are
+structured refusals; pinned replay skips measurement and reproduces the
+live bits; every lattice plan matches serial bits. The oracle lane
+(`--ignored`, release) asserts the live choice is within the declared
+25% tolerance of the exhaustive best-of-3 oracle at the real problem
+size and reports its machine — measured 1.000/1.000/1.062 on
+macos-aarch64 under ambient load; the second-ISA (x86) counterpart is
+armed and runs when an x86 host picks it up.
 
 ## No-claim boundaries
 

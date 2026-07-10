@@ -98,6 +98,19 @@ fs-substrate, fs-obs.
   canonical replay API and replay uses recorded plans, never re-tuned ones
   (replay fidelity). Cold-start defaults: 8-cube tiles, bandwidth-rich
   schedule.
+- `GemmBlockPlan` / `GEMM_KERNEL_PREFIX` — the MC/NC blocking lane for the
+  parallel-GEMM consumer (bead yqug). Plans live on a bounded lattice
+  (`mc` a multiple of 8 in [8, 1024]; `nc_cap` a multiple of 128 in
+  [128, 8192]); only the canonical `mc=X,nc-cap=Y` spelling parses (pins
+  fail closed otherwise). Kernel keys carry the producer's bit-semantics
+  version appended to the prefix, so rows measured under a different
+  accumulation contract can never match a lookup. `gemm_blocking_for`
+  resolves pins → tuned rows → the documented cold start (mc=32,
+  nc-cap=2048, the xlvx s5 winner) and records the decision;
+  `record_gemm_row` requires RANKED wall-time candidate evidence;
+  `adopt_row_json` imports one canonical row line from an external cache
+  and refuses non-canonical, invalid-evidence, or foreign-fingerprint
+  (stale) lines; `row_json` exports the canonical line for that cache.
 - `KillRegistry` (behavior 3, Bet 8): candidate id -> `Arc<CancelGate>`;
   `kill` (idempotent; unknown id is a non-event), `kill_where` (batch
   elimination, ascending order), `registered_gate` (fetch without silently
