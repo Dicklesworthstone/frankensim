@@ -17,7 +17,9 @@ const K: usize = 300;
 
 fn fill(buf: &mut [f64], salt: u64) {
     for (i, slot) in buf.iter_mut().enumerate() {
-        let mut z = (i as u64).wrapping_add(salt).wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = (i as u64)
+            .wrapping_add(salt)
+            .wrapping_add(0x9E37_79B9_7F4A_7C15);
         z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
         z ^= z >> 31;
         *slot = (z >> 11) as f64 / 9_007_199_254_740_992.0 - 0.5;
@@ -193,7 +195,10 @@ fn stale_other_machine_row_is_refused_and_remeasured() {
         &mut c,
     )
     .expect("stale-cache session");
-    assert!(report.swept, "the stale row is refused; the loop re-measures");
+    assert!(
+        report.swept,
+        "the stale row is refused; the loop re-measures"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -232,7 +237,10 @@ fn invalid_cache_row_is_refused_and_remeasured() {
         &mut c,
     )
     .expect("invalid-cache session");
-    assert!(report.swept, "garbage never dispatches; the loop re-measures");
+    assert!(
+        report.swept,
+        "garbage never dispatches; the loop re-measures"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -275,10 +283,7 @@ fn pin_failures_are_structured_refusals() {
         "mc=32",               // missing member
         "mc=032,nc-cap=2048",  // non-canonical spelling
     ] {
-        assert!(
-            tuner.pin(&kernel, bad).is_err(),
-            "{bad:?} must be refused"
-        );
+        assert!(tuner.pin(&kernel, bad).is_err(), "{bad:?} must be refused");
     }
     // A gemm plan pinned under a non-gemm kernel key is refused too.
     assert!(
@@ -287,7 +292,9 @@ fn pin_failures_are_structured_refusals() {
             .is_err()
     );
     // And the canonical spelling round-trips through the replay path.
-    tuner.pin(&kernel, "mc=64,nc-cap=512").expect("canonical pin");
+    tuner
+        .pin(&kernel, "mc=64,nc-cap=512")
+        .expect("canonical pin");
 }
 
 /// REPLAY DRILL: pinning the recorded decision reproduces the plan with
@@ -299,7 +306,18 @@ fn pinned_replay_skips_measurement_and_reproduces_bits() {
     let mut tuner1 = Tuner::cold(FP_THIS);
     let mut c1 = vec![0.0f64; M * N];
     let live = gemm_f64_session(
-        &mut tuner1, None, &gate, THREADS, M, N, K, 1.0, &a, &b, 0.0, &mut c1,
+        &mut tuner1,
+        None,
+        &gate,
+        THREADS,
+        M,
+        N,
+        K,
+        1.0,
+        &a,
+        &b,
+        0.0,
+        &mut c1,
     )
     .expect("live session");
     // Replay: a second session pins the recorded decision's params.
@@ -309,7 +327,18 @@ fn pinned_replay_skips_measurement_and_reproduces_bits() {
         .expect("replay pin");
     let mut c2 = vec![0.0f64; M * N];
     let replay = gemm_f64_session(
-        &mut tuner2, None, &gate, THREADS, M, N, K, 1.0, &a, &b, 0.0, &mut c2,
+        &mut tuner2,
+        None,
+        &gate,
+        THREADS,
+        M,
+        N,
+        K,
+        1.0,
+        &a,
+        &b,
+        0.0,
+        &mut c2,
     )
     .expect("replay session");
     assert!(!replay.swept, "a pinned path never re-measures");

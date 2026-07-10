@@ -134,7 +134,9 @@ pub fn gemm_shape_class(m: usize, n: usize, k: usize) -> String {
 /// integer-only, so probe inputs are bit-identical on every ISA.
 fn probe_fill(buf: &mut [f64], salt: u64) {
     for (i, slot) in buf.iter_mut().enumerate() {
-        let mut z = (i as u64).wrapping_add(salt).wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = (i as u64)
+            .wrapping_add(salt)
+            .wrapping_add(0x9E37_79B9_7F4A_7C15);
         z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
         z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
         z ^= z >> 31;

@@ -78,7 +78,10 @@ impl GemmBlockPlan {
     /// The documented cold-start default: the xlvx s5 sweep winner on
     /// both reference machines (thin mc = 32 bands, nc = n capped so the
     /// B pack stays L3-resident).
-    pub const COLD_START: GemmBlockPlan = GemmBlockPlan { mc: 32, nc_cap: 2048 };
+    pub const COLD_START: GemmBlockPlan = GemmBlockPlan {
+        mc: 32,
+        nc_cap: 2048,
+    };
 
     /// A validated plan: `mc` a multiple of 8 in `[8, 1024]`, `nc_cap` a
     /// multiple of 128 in `[128, 8192]` — the bounded candidate lattice.
