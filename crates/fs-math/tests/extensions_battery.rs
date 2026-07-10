@@ -371,7 +371,7 @@ fn extensions_golden_hash() {
 // ---- det::powi (bead 4xnt): pinned-order integer powers ----
 
 #[test]
-fn powi_matches_powidf2_order() {
+fn powi_matches_pinned_positive_order() {
     // The doc contract is a specific operation sequence; these chains are
     // that sequence written out by hand for n = 2..6.
     let mut seed = 0x90_1D_u64;
@@ -389,8 +389,17 @@ fn powi_matches_powidf2_order() {
 
 #[test]
 fn powi_identity_and_edge_semantics() {
-    // n = 0 → 1.0 for EVERY x, per the __powidf2 contract.
-    for x in [0.0, -0.0, 1.0, -1.0, 0.5, f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+    // n = 0 → 1.0 for EVERY x, matching f64::powi.
+    for x in [
+        0.0,
+        -0.0,
+        1.0,
+        -1.0,
+        0.5,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::NAN,
+    ] {
         assert_eq!(det::powi(x, 0), 1.0, "powi({x}, 0)");
     }
     let mut seed = 0xED6E_u64;
@@ -398,13 +407,16 @@ fn powi_identity_and_edge_semantics() {
         let x = lcg(&mut seed) * 1e6;
         // n = 1 is the exact product 1.0 · x.
         assert_eq!(det::powi(x, 1).to_bits(), x.to_bits());
-        // Negative n: ONE reciprocal at the end, bitwise.
+        // Negative n: one final reciprocal while that path retains range.
         for n in [1, 2, 3, 7, 30, 511] {
-            assert_eq!(
-                det::powi(x, -n).to_bits(),
-                (1.0 / det::powi(x, n)).to_bits(),
-                "powi({x}, -{n}) must be 1/powi bitwise"
-            );
+            let reciprocal_last = 1.0 / det::powi(x, n);
+            if reciprocal_last != 0.0 {
+                assert_eq!(
+                    det::powi(x, -n).to_bits(),
+                    reciprocal_last.to_bits(),
+                    "powi({x}, -{n}) must retain the ordinary reciprocal-last tree"
+                );
+            }
         }
     }
     // IEEE edges.
@@ -416,6 +428,10 @@ fn powi_identity_and_edge_semantics() {
     assert_eq!(det::powi(1.0, i32::MIN), 1.0);
     assert_eq!(det::powi(2.0, i32::MIN), 0.0); // 1/2^(2³¹) underflows
     assert_eq!(det::powi(0.5, i32::MIN), f64::INFINITY);
+    // Reciprocal-last exponentiation overflows these positive powers and
+    // spuriously returns zero. The exact binary results remain representable.
+    assert_eq!(det::powi(2.0, -1024).to_bits(), (1_u64 << 50));
+    assert_eq!(det::powi(2.0, -1074).to_bits(), 1);
 }
 
 #[test]
@@ -439,21 +455,23 @@ fn powi_budget_vs_platform() {
 
 #[test]
 fn powi_agrees_with_pow_integer_fast_path() {
-    // Same LSB-first order as pow's |y| ≤ 512 integer fast path: bitwise.
-    let mut seed = 0xFA57_u64;
-    for _ in 0..20_000 {
-        let x = lcg(&mut seed).abs() * 4.0 + 0.25;
-        let n = 1 + ((lcg(&mut seed).abs() * 511.0) as i32);
-        assert_eq!(
-            det::powi(x, n).to_bits(),
-            det::pow(x, f64::from(n)).to_bits(),
-            "powi({x}, {n}) must match pow's integer fast path bitwise"
-        );
+    // Same LSB-first order as pow's positive integer fast path: bitwise.
+    // Iterate the claimed boundary explicitly; the old randomized expression
+    // only reached 256 because lcg() is in [-0.5, 0.5).
+    for x in [0.25, 0.7, 0.999, 1.001, 1.5, 2.25] {
+        for n in 1..=512 {
+            assert_eq!(
+                det::powi(x, n).to_bits(),
+                det::pow(x, f64::from(n)).to_bits(),
+                "powi({x}, {n}) must match pow's integer fast path bitwise"
+            );
+        }
     }
 }
 
-/// Recorded on aarch64-apple (M4 Pro), identical in debug and release by
-/// construction (pinned source-level order); must match on x86-64 (trj).
+/// Recorded on aarch64-apple (M4 Pro); verified identical on x86-64
+/// (trj) in BOTH debug and release on both ISAs (four quadrants,
+/// 2026-07-10, trj:/data/tmp/powi_verify).
 const POWI_GOLDEN_HASH: u64 = 0xe971_352e_4c0a_5f29;
 
 #[test]
@@ -467,8 +485,8 @@ fn powi_golden_hash() {
     };
     let mut seed = 0x4A17_u64;
     let exponents = [
-        0, 1, 2, 3, 4, 5, 6, 7, 8, 16, 31, 64, 127, 512, 1000, 65_535, 200_000, -1, -2, -3, -4,
-        -5, -17, -100_000,
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 16, 31, 64, 127, 512, 1000, 65_535, 200_000, -1, -2, -3, -4, -5,
+        -17, -100_000,
     ];
     for _ in 0..2000 {
         let x = lcg(&mut seed) * 3.0;

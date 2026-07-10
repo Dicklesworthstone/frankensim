@@ -263,8 +263,14 @@ impl<T: Real, const N: usize> Real for Dual<T, N> {
         // routes to fs_math::det::powi (4xnt), never std powi.
         // det-ok: Real::powi trait dispatch (4xnt)
         let f = self.re.powi(n);
-        // det-ok: Real::powi trait dispatch (4xnt)
-        let df = T::from_f64(f64::from(n)) * self.re.powi(n - 1);
+        let df = if n == i32::MIN {
+            // n - 1 is not representable. The equivalent n*x^n/x rule
+            // preserves the full i32 exponent domain without wrapping.
+            T::from_f64(f64::from(n)) * f * self.re.recip()
+        } else {
+            // det-ok: Real::powi trait dispatch (4xnt)
+            T::from_f64(f64::from(n)) * self.re.powi(n - 1)
+        };
         self.chain(f, df)
     }
 }
@@ -330,4 +336,18 @@ pub fn second_directional<const M: usize>(
     let out = f(vars);
     // out.re.re = f; out.re.eps[0] = ∇f·v; out.eps[0].eps[0] = vᵀHv.
     (out.re.re, out.re.eps[0], out.eps[0].eps[0])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Real;
+
+    #[test]
+    fn powi_accepts_the_full_i32_exponent_domain() {
+        let x = Dual64::<1>::variable(1.0, 0).powi(i32::MIN);
+        // Exact semantics — bitwise compares (clippy::float_cmp lane).
+        assert_eq!(x.re.to_bits(), 1.0f64.to_bits());
+        assert_eq!(x.eps[0].to_bits(), f64::from(i32::MIN).to_bits());
+    }
 }

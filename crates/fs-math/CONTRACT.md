@@ -28,15 +28,16 @@ floating-point POLICY: FMA contraction, subnormals, NaN, ULP budgets
   implementation; budget-grade evidence there is DISJOINT-PATH
   cross-validation (Taylor-dd vs CF-dd agree ≤ 3 ULP, tested).
 - PINNED-ORDER INTEGER POWERS (bead 4xnt, additive): `det::powi(x, n)` —
-  LSB-first binary exponentiation with EXACTLY compiler-rt `__powidf2`'s
-  operation sequence (one final reciprocal for negative n; n = 0 → 1.0
-  for every x; i32::MIN handled). Exists because `f64::powi`'s rounding
+  LSB-first binary exponentiation with a fixed source-level operation tree
+  (negative powers use one final reciprocal, with a reciprocal-base
+  range-recovery pass only when an overflowed intermediate would erase a
+  representable subnormal; n = 0 → 1.0 for every x; i32::MIN handled).
+  Exists because `f64::powi`'s rounding
   is optimization-level-dependent (llvm.powi has no pinned order;
   observed 1-ULP debug/release divergence from n = 4 up), which is a
-  build-mode determinism hazard in any golden-feeding path. Debug-mode
-  `f64::powi` lowers to `__powidf2`, so debug-recorded goldens keep
-  their bits when call sites migrate. Positive n ≤ 512 agrees BITWISE
-  with `pow`'s integer fast path (same order, tested). NOT correctly
+  build-mode determinism hazard in any golden-feeding path. Positive
+  n ≤ 512 agrees BITWISE with `pow`'s integer fast path (same order,
+  every exponent tested). NOT correctly
   rounded: one rounding per executed multiply; measured ≤ 2 ULP vs
   platform powi for |n| ≤ 64. Own golden hash, identical in both build
   modes by construction.
@@ -118,8 +119,7 @@ core-only + worst-case-point + constant-integrity regressions
   erf/erfc/asin/acos/powi landed via wf9.14, t88x, and 4xnt — see above;
   this line previously understated the implemented surface.)
 - `det::powi`: f32 variant not provided; no claim that its bits match
-  release-mode `f64::powi` (they intentionally match the debug-mode
-  `__powidf2` lowering instead).
+  platform `f64::powi` (the source-level tree is intentionally pinned).
 - Trig beyond |x| > 2²⁰: RESOLVED (bead r6r5, `payne` module — see above).
 - Fast mode (lower-accuracy feature-flagged variants): BLOCKED on consumers
   declaring tolerable budgets (fs-material/LUMEN) — deliberately not built
