@@ -180,6 +180,29 @@ impl RaceOutcome {
     }
 }
 
+fn validate_race_settings(n_candidates: usize, settings: RaceSettings) -> Result<(), RaceError> {
+    if n_candidates < 2 {
+        return Err(RaceError::TooFewCandidates {
+            count: n_candidates,
+        });
+    }
+    if !settings.alpha.is_finite() || settings.alpha <= 0.0 || settings.alpha >= 1.0 {
+        return Err(RaceError::InvalidAlpha {
+            alpha_bits: settings.alpha.to_bits(),
+        });
+    }
+    if settings.min_rounds == 0
+        || settings.max_rounds == 0
+        || settings.min_rounds > settings.max_rounds
+    {
+        return Err(RaceError::InvalidRoundBudget {
+            min_rounds: settings.min_rounds,
+            max_rounds: settings.max_rounds,
+        });
+    }
+    Ok(())
+}
+
 fn update_mean(mean: &mut f64, count: &mut u64, value: f64) {
     if *count == 0 {
         *mean = value;
@@ -230,25 +253,7 @@ pub fn race_field(
     settings: RaceSettings,
     kills: &KillRegistry,
 ) -> Result<RaceOutcome, RaceError> {
-    if n_candidates < 2 {
-        return Err(RaceError::TooFewCandidates {
-            count: n_candidates,
-        });
-    }
-    if !settings.alpha.is_finite() || settings.alpha <= 0.0 || settings.alpha >= 1.0 {
-        return Err(RaceError::InvalidAlpha {
-            alpha_bits: settings.alpha.to_bits(),
-        });
-    }
-    if settings.min_rounds == 0
-        || settings.max_rounds == 0
-        || settings.min_rounds > settings.max_rounds
-    {
-        return Err(RaceError::InvalidRoundBudget {
-            min_rounds: settings.min_rounds,
-            max_rounds: settings.max_rounds,
-        });
-    }
+    validate_race_settings(n_candidates, settings)?;
     let prototype = PairwiseRace::new(settings.loss_span);
     let n = n_candidates;
     // Pairwise race matrix (i, j), i < j: PairwiseRace observing
