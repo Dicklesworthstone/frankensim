@@ -2147,6 +2147,7 @@ mod tests {
             37,
             &gate,
             fs_exec::RunId(41),
+            GemmMemoryEnvelope::UNBOUNDED,
             &poll,
         ) {
             Err(GemmRunError::Cancelled(error)) => error,
