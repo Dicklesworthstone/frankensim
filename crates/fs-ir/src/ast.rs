@@ -148,17 +148,44 @@ impl DecimalCount {
         if self.negative {
             return None;
         }
-        let shifted = self
-            .significand
-            .checked_shl(shift)
-            .filter(|scaled| *scaled >> shift == self.significand)?;
         let integral = if self.exponent10 >= 0 {
             let exponent = u32::try_from(self.exponent10).ok()?;
-            shifted.checked_mul(10_u128.checked_pow(exponent)?)?
+            let scaled = self
+                .significand
+                .checked_mul(10_u128.checked_pow(exponent)?)?;
+            scaled
+                .checked_shl(shift)
+                .filter(|value| *value >> shift == scaled)?
         } else {
-            let exponent = self.exponent10.unsigned_abs();
-            let denominator = 10_u128.checked_pow(exponent)?;
-            (shifted % denominator == 0).then_some(shifted / denominator)?
+            // Divide the exact decimal denominator 2^n*5^n before any
+            // multiplication. This both proves integrality and avoids a
+            // transient u128 overflow for values whose reduced byte count is
+            // small.
+            let denominator_power = self.exponent10.unsigned_abs();
+            // A nonzero u128 cannot contain more than 55 factors of five;
+            // cap before the loop so hostile exponents remain O(1).
+            if denominator_power > 55 {
+                return None;
+            }
+            let mut reduced = self.significand;
+            for _ in 0..denominator_power {
+                if reduced % 5 != 0 {
+                    return None;
+                }
+                reduced /= 5;
+            }
+            if denominator_power > shift {
+                let remaining_twos = denominator_power - shift;
+                if reduced.trailing_zeros() < remaining_twos {
+                    return None;
+                }
+                reduced >> remaining_twos
+            } else {
+                let extra_twos = shift - denominator_power;
+                reduced
+                    .checked_shl(extra_twos)
+                    .filter(|value| *value >> extra_twos == reduced)?
+            }
         };
         u64::try_from(integral).ok()
     }
@@ -173,6 +200,10 @@ impl DecimalCount {
     }
 
     fn approx_f64(self) -> f64 {
+        // det-ok: this is the documented APPROXIMATE view of an exact
+        // decimal (identity and enforcement use the significand/exponent
+        // form); a 1-ULP profile divergence here cannot reach any
+        // canonical hash or replay identity.
         #[allow(clippy::cast_precision_loss)]
         let magnitude = (self.significand as f64) * 10_f64.powi(self.exponent10);
         if self.negative { -magnitude } else { magnitude }

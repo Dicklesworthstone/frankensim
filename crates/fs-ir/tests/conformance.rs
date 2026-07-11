@@ -299,6 +299,10 @@ fn ir_0xx_exact_count_literals_survive_admission_and_identity() {
     let err = sexpr::parse("340282366920938463463374607431768211456B")
         .expect_err("2^128 cannot be an exact count");
     assert!(err.to_string().contains("exact count range"));
+    let hostile = format!("{}B", "9".repeat(100_000));
+    let err = sexpr::parse(&hostile).expect_err("oversized exact count must refuse");
+    assert!(err.to_string().contains("exact count range"));
+    assert!(err.span.end <= hostile.len());
     // Decimal/exponent semantics are exact too: useful fractional-unit
     // spellings work without binary-float authority decisions.
     let frac = sexpr::parse("1.5GiB").expect("parses");
@@ -322,6 +326,21 @@ fn ir_0xx_exact_count_literals_survive_admission_and_identity() {
         json::parse(&json::print(&exponent))
             .expect("exponent JSON reparse")
             .same_shape(&exponent)
+    );
+    let half_kib = sexpr::parse("0.5KiB").expect("fractional unit parses");
+    let NodeKind::Count { value, unit } = &half_kib.kind else {
+        panic!("count expected");
+    };
+    assert_eq!(value.integral_bytes(*unit), Some(512));
+    let reduced = sexpr::parse("316912650130689144134521484375e-30GiB")
+        .expect("large exact decimal parses");
+    let NodeKind::Count { value, unit } = &reduced.kind else {
+        panic!("count expected");
+    };
+    assert_eq!(
+        value.integral_bytes(*unit),
+        Some(340_282_367),
+        "denominator factors must cancel before checked scaling"
     );
 
     // Exact decimal storage distinguishes an integer-valued decimal above
@@ -407,7 +426,11 @@ fn gen_node(seed: &mut u64, depth: usize) -> Node {
                 }
             }
             3 => {
-                let c = ["384GiB", "96cores", "512MiB", "7KiB", "42B"][next(5) as usize];
+                let counts = [
+                    "384GiB", "96cores", "512MiB", "7KiB", "42B", "1.5GiB", "0.5KiB", "1e3B",
+                    "1e-21B",
+                ];
+                let c = counts[next(counts.len() as u64) as usize];
                 match sexpr::parse(c).map(|n| n.kind) {
                     Ok(k @ NodeKind::Count { .. }) => k,
                     _ => unreachable!("count pool entries always parse"),
