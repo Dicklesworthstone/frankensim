@@ -5,11 +5,35 @@
 //! priors, deterministic decisions, and the kernel × regime dashboard.
 //! JSON-line verdicts; seeded cases carry seeds.
 
-use fs_verify::economics::{DriftGuard, EconDecision, run_speculative, solve_node_record};
-use fs_verify::fem1d::{MmsProblem, Poly, solve_p1};
+use fs_math::eft::two_sum;
+use fs_verify::economics::{
+    DriftGuard, EconDecision, run_speculative as try_run_speculative, solve_node_record,
+};
+use fs_verify::fem1d::{
+    Fem1dError, MAX_FEM1D_NEWTON_ITERATIONS, MmsProblem, Poly, solve_p1 as try_solve_p1,
+};
 use fs_verify::zoo::{
     NeighborExtrapolation, Proposal, Proposer, Registry, SpeculationQuery, ZooTelemetry,
 };
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
+
+fn solve_p1(problem: &MmsProblem) -> Vec<f64> {
+    try_solve_p1(problem).expect("economics problem must solve")
+}
+
+fn run_speculative(
+    query: &SpeculationQuery,
+    registry: &Registry,
+    zoo_telemetry: &mut ZooTelemetry,
+    guard: &mut DriftGuard,
+    max_iter: u32,
+) -> EconDecision {
+    try_run_speculative(query, registry, zoo_telemetry, guard, max_iter)
+        .expect("economics solve must converge")
+}
 
 fn verdict(case: &str, pass: bool, detail: &str) {
     println!(
@@ -21,7 +45,8 @@ fn verdict(case: &str, pass: bool, detail: &str) {
 }
 
 fn family(theta: f64) -> Poly {
-    Poly(vec![0.0, -theta, 1.0 + theta, -1.0])
+    let (middle, correction) = two_sum(1.0, theta);
+    Poly(vec![0.0, -theta, middle, -1.0, correction])
 }
 
 /// The amplified family (×40): the u³ term dominates, so Newton
@@ -29,7 +54,9 @@ fn family(theta: f64) -> Poly {
 /// monotone cubic keeps Newton globally convergent, just slower from
 /// far away).
 fn family_big(theta: f64) -> Poly {
-    Poly(vec![0.0, -40.0 * theta, 40.0 * (1.0 + theta), -40.0])
+    let scaled_theta = 40.0 * theta;
+    let (middle, correction) = two_sum(40.0, scaled_theta);
+    Poly(vec![0.0, -scaled_theta, middle, -40.0, correction])
 }
 
 fn uniform(n: usize) -> Vec<f64> {
@@ -57,18 +84,18 @@ impl Proposer for RegimeBound {
         "regime-bound"
     }
 
-    fn propose(&self, q: &SpeculationQuery) -> Option<Proposal> {
+    fn propose(&self, q: &SpeculationQuery) -> Result<Option<Proposal>, Fem1dError> {
         if (q.theta - self.cache_theta).abs() < 0.15 {
-            Some(Proposal {
+            Ok(Some(Proposal {
                 candidate: self.solution.clone(),
                 confidence: 0.9,
-            })
+            }))
         } else {
             // Out of its depth: confidently wrong.
-            Some(Proposal {
+            Ok(Some(Proposal {
                 candidate: self.solution.iter().map(|v| v * 25.0).collect(),
                 confidence: 0.9,
-            })
+            }))
         }
     }
 }
@@ -82,11 +109,64 @@ impl Proposer for Antithetical {
         "antithetical"
     }
 
-    fn propose(&self, q: &SpeculationQuery) -> Option<Proposal> {
-        Some(Proposal {
-            candidate: q.problem.mesh.iter().map(|_| 50.0).collect(),
+    fn propose(&self, q: &SpeculationQuery) -> Result<Option<Proposal>, Fem1dError> {
+        let mut candidate = q.problem.mesh.iter().map(|_| 50.0).collect::<Vec<_>>();
+        candidate[0] = 0.0;
+        let last = candidate.len() - 1;
+        candidate[last] = 0.0;
+        Ok(Some(Proposal {
+            candidate,
             confidence: 0.5,
-        })
+        }))
+    }
+}
+
+struct SinglePass {
+    calls: Arc<AtomicUsize>,
+}
+
+struct ConfidentReject;
+
+impl Proposer for ConfidentReject {
+    fn name(&self) -> &'static str {
+        "confident-reject"
+    }
+
+    fn propose(&self, q: &SpeculationQuery) -> Result<Option<Proposal>, Fem1dError> {
+        Ok(Some(Proposal {
+            candidate: vec![0.0; q.problem.mesh.len()],
+            confidence: 1.0,
+        }))
+    }
+}
+
+struct VerifiedWinner;
+
+impl Proposer for VerifiedWinner {
+    fn name(&self) -> &'static str {
+        "verified-winner"
+    }
+
+    fn propose(&self, q: &SpeculationQuery) -> Result<Option<Proposal>, Fem1dError> {
+        Ok(Some(Proposal {
+            candidate: try_solve_p1(&q.problem)?,
+            confidence: 0.0,
+        }))
+    }
+}
+
+impl Proposer for SinglePass {
+    fn name(&self) -> &'static str {
+        "single-pass"
+    }
+
+    fn propose(&self, q: &SpeculationQuery) -> Result<Option<Proposal>, Fem1dError> {
+        let prior = self.calls.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(prior, 0, "economics reran a stateful proposer");
+        Ok(Some(Proposal {
+            candidate: vec![0.0; q.problem.mesh.len()],
+            confidence: 0.5,
+        }))
     }
 }
 
@@ -100,7 +180,8 @@ fn econ_001_outright_and_warm() {
     let mut reg = Registry::new();
     reg.register(Box::new(NeighborExtrapolation {
         cache: vec![(0.4, solved, None)],
-    }));
+    }))
+    .expect("register neighbor");
     let mut zt = ZooTelemetry::default();
     let mut guard = DriftGuard::default();
     // Near the cache at loose tolerance: outright accept.
@@ -147,7 +228,8 @@ fn econ_001_outright_and_warm() {
 #[test]
 fn econ_002_worse_than_cold_clamps() {
     let mut reg = Registry::new();
-    reg.register(Box::new(Antithetical));
+    reg.register(Box::new(Antithetical))
+        .expect("register antithetical");
     let mut zt = ZooTelemetry::default();
     let mut guard = DriftGuard::default();
     let q = query(0.4, 24, 1e-9, "wedge");
@@ -176,7 +258,8 @@ fn econ_003_drift_localized() {
     reg.register(Box::new(RegimeBound {
         cache_theta: 0.3,
         solution: solved,
-    }));
+    }))
+    .expect("register regime fixture");
     let mut zt = ZooTelemetry::default();
     let mut guard = DriftGuard::default();
     // Regime A (near): accepts. Regime B (far): garbage → rejects.
@@ -188,7 +271,7 @@ fn econ_003_drift_localized() {
         let qb = query(tb, n, 1e-1, "regime-b");
         let _ = run_speculative(&qb, &reg, &mut zt, &mut guard, 50);
     }
-    let demotions = guard.check_drift(0.2, 10);
+    let demotions = guard.check_drift(0.2, 10).expect("valid drift policy");
     let localized = demotions.len() == 1
         && demotions[0] == ("regime-bound".to_string(), "regime-b".to_string())
         && guard.is_demoted("regime-bound", "regime-b")
@@ -213,24 +296,41 @@ fn econ_003_drift_localized() {
 fn econ_004_hysteresis_no_flap() {
     let mut guard = DriftGuard::default();
     // One unlucky reject: no demotion (min_tries = 10).
-    guard.record("p", "r", false);
-    let none = guard.check_drift(0.2, 10).is_empty();
+    guard.record("p", "r", false).expect("record rejection");
+    let none = guard
+        .check_drift(0.2, 10)
+        .expect("valid drift policy")
+        .is_empty();
     // Collapse with enough samples: demoted.
     for _ in 0..11 {
-        guard.record("p", "r", false);
+        guard.record("p", "r", false).expect("record rejection");
     }
-    let demoted = !guard.check_drift(0.2, 10).is_empty() && guard.is_demoted("p", "r");
+    let demoted = !guard
+        .check_drift(0.2, 10)
+        .expect("valid drift policy")
+        .is_empty()
+        && guard.is_demoted("p", "r");
     // Failed probation (insufficient probe rate): STAYS demoted and
     // the next probation needs double the evidence.
-    let fail1 = !guard.probation("p", "r", 1, 5, 0.5);
+    let fail1 = !guard
+        .probation("p", "r", 1, 5, 0.5)
+        .expect("valid probation evidence");
     let still = guard.is_demoted("p", "r");
     // A 5-try probe is no longer enough after one failure (needs 10).
-    let fail2 = !guard.probation("p", "r", 5, 5, 0.5);
+    let fail2 = !guard
+        .probation("p", "r", 5, 5, 0.5)
+        .expect("valid probation evidence");
     // Two failures → the bar doubles twice (needs 20); a genuine
     // recovery with that evidence re-promotes.
-    let promoted = guard.probation("p", "r", 18, 20, 0.5) && !guard.is_demoted("p", "r");
+    let promoted = guard
+        .probation("p", "r", 18, 20, 0.5)
+        .expect("valid probation evidence")
+        && !guard.is_demoted("p", "r");
     // And the reset window means it is not instantly re-demoted.
-    let stable = guard.check_drift(0.2, 10).is_empty();
+    let stable = guard
+        .check_drift(0.2, 10)
+        .expect("valid drift policy")
+        .is_empty();
     verdict(
         "econ-004",
         none && demoted && fail1 && still && fail2 && promoted && stable,
@@ -254,7 +354,8 @@ fn econ_005_priors_determinism_dashboard() {
         let mut reg = Registry::new();
         reg.register(Box::new(NeighborExtrapolation {
             cache: vec![(0.4, solved, None)],
-        }));
+        }))
+        .expect("register deterministic neighbor");
         let mut zt = ZooTelemetry::default();
         let mut guard = DriftGuard::default();
         let mut decisions = Vec::new();
@@ -295,5 +396,172 @@ fn econ_005_priors_determinism_dashboard() {
         "zero-telemetry regimes report the conservative 0.0 prior, identical runs \
          give identical decisions and dashboard rows, and the kernel x regime x \
          proposer dashboard ships via fs-obs",
+    );
+}
+
+/// econ-006 — finite nonconvergence and malformed problems are refusals, not
+/// zero-iteration solves or savings observations.
+#[test]
+fn econ_006_nonconvergence_never_counts_as_savings() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = Registry::new();
+    registry
+        .register(Box::new(SinglePass {
+            calls: Arc::clone(&calls),
+        }))
+        .expect("register failed-solve proposer");
+    let mut telemetry = ZooTelemetry::default();
+    let mut guard = DriftGuard::default();
+    let q = query(0.4, 24, 1e-9, "bounded-failure");
+    let nonconverged = try_run_speculative(&q, &registry, &mut telemetry, &mut guard, 0);
+    assert!(matches!(
+        nonconverged,
+        Err(Fem1dError::NonConverged {
+            stage: "economic cold solve",
+            iterations: 0,
+            ..
+        })
+    ));
+    assert!(guard.dashboard("poisson-1d").is_empty());
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    let cap_calls = Arc::new(AtomicUsize::new(0));
+    let mut cap_registry = Registry::new();
+    cap_registry
+        .register(Box::new(SinglePass {
+            calls: Arc::clone(&cap_calls),
+        }))
+        .expect("register budget fixture");
+    let mut cap_telemetry = ZooTelemetry::default();
+    assert!(matches!(
+        try_run_speculative(
+            &q,
+            &cap_registry,
+            &mut cap_telemetry,
+            &mut guard,
+            MAX_FEM1D_NEWTON_ITERATIONS + 1,
+        ),
+        Err(Fem1dError::ResourceLimit {
+            resource: "Newton iterations",
+            ..
+        })
+    ));
+    assert_eq!(cap_calls.load(Ordering::SeqCst), 0);
+    assert!(cap_telemetry.rows().is_empty());
+
+    let malformed = SpeculationQuery {
+        problem: MmsProblem::new("malformed", family(0.4), Vec::new()),
+        theta: 0.4,
+        tolerance: 1e-3,
+        regime: "bounded-failure".to_string(),
+    };
+    let refused = try_run_speculative(&malformed, &registry, &mut telemetry, &mut guard, 10);
+    assert!(matches!(
+        refused,
+        Err(Fem1dError::ResourceLimit {
+            resource: "mesh nodes",
+            ..
+        })
+    ));
+    verdict(
+        "econ-006",
+        true,
+        "zero-budget nonconvergence and malformed problems return structured errors without drift observations; an oversized iteration budget refuses before proposal work or zoo telemetry",
+    );
+}
+
+/// econ-007 — rejected candidates retained by the first verified pass are
+/// consumed directly; stateful proposers are never invoked a second time.
+#[test]
+fn econ_007_all_rejected_does_not_rerun_proposers() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = Registry::new();
+    registry
+        .register(Box::new(SinglePass {
+            calls: Arc::clone(&calls),
+        }))
+        .expect("register single-pass proposer");
+    let mut telemetry = ZooTelemetry::default();
+    let mut guard = DriftGuard::default();
+    let q = query(0.4, 24, 1e-12, "single-pass");
+    let decision = try_run_speculative(&q, &registry, &mut telemetry, &mut guard, 50)
+        .expect("retained rejected candidate must warm-start");
+    assert!(matches!(decision, EconDecision::WarmStarted { .. }));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    verdict(
+        "econ-007",
+        true,
+        "the all-rejected outcome retained its verified best candidate and proposer identity; economics warm-started it with exactly one proposer invocation",
+    );
+}
+
+/// econ-008 — public telemetry identities are escaped and non-finite bound
+/// diagnostics become JSON null rather than invalid numeric tokens.
+#[test]
+fn econ_008_telemetry_json_is_injection_safe() {
+    let record = solve_node_record("quoted\"}\n{\"forged\":true", false, f64::NAN, 0);
+    assert!(record.contains("quoted\\\"}\\n{\\\"forged\\\":true"));
+    assert!(record.contains("\"bound\":null"));
+    assert!(!record.contains('\n'));
+
+    let mut guard = DriftGuard::default();
+    guard
+        .record("quoted\"\\proposer", "quoted\"\\regime", false)
+        .expect("record escaped identities");
+    let rows = guard.dashboard("kernel\"\\identity");
+    assert_eq!(rows.len(), 1);
+    let mut emitter = fs_obs::Emitter::new("fs-verify/economics", "econ-008/identity-json");
+    for (name, json) in [("solve-node", record), ("dashboard", rows[0].clone())] {
+        let line = emitter
+            .emit(
+                fs_obs::Severity::Info,
+                fs_obs::EventKind::Custom {
+                    name: name.to_string(),
+                    json,
+                },
+                None,
+            )
+            .to_jsonl();
+        fs_obs::validate_line(&line).expect("escaped economics row is valid JSON");
+    }
+    verdict(
+        "econ-008",
+        true,
+        "solve-node and dashboard rows escape hostile identities and serialize non-finite diagnostic bounds as null",
+    );
+}
+
+/// econ-009 — an outright winner does not erase higher-confidence proposals
+/// rejected earlier in the same first pass; drift telemetry sees both outcomes.
+#[test]
+fn econ_009_accepted_run_retains_prior_rejections() {
+    let mut registry = Registry::new();
+    registry
+        .register(Box::new(ConfidentReject))
+        .expect("register confident reject");
+    registry
+        .register(Box::new(VerifiedWinner))
+        .expect("register verified winner");
+    let mut telemetry = ZooTelemetry::default();
+    let mut guard = DriftGuard::default();
+    let q = query(0.4, 24, 5e-2, "accepted-history");
+    let decision = try_run_speculative(&q, &registry, &mut telemetry, &mut guard, 50)
+        .expect("later verified proposal must accept outright");
+    assert!(matches!(decision, EconDecision::AcceptedOutright { .. }));
+    let rows = guard.dashboard("poisson-1d");
+    assert!(rows.iter().any(|row| {
+        row.contains("\"proposer\":\"confident-reject\"")
+            && row.contains("\"accepts\":0")
+            && row.contains("\"tries\":1")
+    }));
+    assert!(rows.iter().any(|row| {
+        row.contains("\"proposer\":\"verified-winner\"")
+            && row.contains("\"accepts\":1")
+            && row.contains("\"tries\":1")
+    }));
+    verdict(
+        "econ-009",
+        true,
+        "the certified winner shipped without a solve while the earlier verifier rejection remained visible to the regime-local drift detector",
     );
 }

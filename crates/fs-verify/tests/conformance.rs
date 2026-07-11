@@ -7,9 +7,42 @@
 //! verdicts; seeded cases carry seeds.
 
 use fs_verify::estimator::{
-    EstimatorFamily, effectivity, hierarchical_estimate, verify, warm_start,
+    EstimatorFamily, MAX_VERIFIER_MESH_NODES, MAX_VERIFIER_POLY_COEFFICIENTS, VerifierPolynomial,
+    VerifierRefusal, effectivity as try_effectivity,
+    hierarchical_estimate as try_hierarchical_estimate, verify, warm_start as try_warm_start,
 };
-use fs_verify::fem1d::{MmsProblem, Poly, solve_p1, true_energy_error};
+use fs_verify::fem1d::{
+    Fem1dError, MmsProblem, Poly, solve_p1 as try_solve_p1,
+    true_energy_error as try_true_energy_error,
+};
+
+fn solve_p1(problem: &MmsProblem) -> Vec<f64> {
+    try_solve_p1(problem).expect("conformance problem must solve")
+}
+
+fn true_energy_error(problem: &MmsProblem, candidate: &[f64]) -> f64 {
+    try_true_energy_error(problem, candidate).expect("conformance oracle must evaluate")
+}
+
+fn effectivity(
+    problem: &MmsProblem,
+    candidate: &[f64],
+    report: &fs_verify::estimator::VerifierReport,
+) -> f64 {
+    try_effectivity(problem, candidate, report).expect("conformance effectivity must evaluate")
+}
+
+fn hierarchical_estimate(problem: &MmsProblem, candidate: &[f64]) -> f64 {
+    try_hierarchical_estimate(problem, candidate).expect("conformance hierarchy must evaluate")
+}
+
+fn warm_start(
+    problem: &MmsProblem,
+    candidate: &[f64],
+    max_iter: u32,
+) -> fs_verify::estimator::WarmStartReport {
+    try_warm_start(problem, candidate, max_iter).expect("conformance warm start must converge")
+}
 
 fn verdict(case: &str, pass: bool, detail: &str) {
     println!(
@@ -41,18 +74,14 @@ impl Lcg {
 fn mms_zoo() -> Vec<(&'static str, Poly)> {
     // x(1−x) = x − x²
     let u1 = Poly(vec![0.0, 1.0, -1.0]);
-    // x(1−x)(x−0.3) = 0.3·(−x) + ... expand: (x − x²)(x − 0.3)
-    // = x² − 0.3x − x³ + 0.3x² = −0.3x + 1.3x² − x³
-    let u2 = Poly(vec![0.0, -0.3, 1.3, -1.0]);
+    // x(1−x)(x−0.25) = −0.25x + 1.25x² − x³ (dyadic-exact).
+    let u2 = Poly(vec![0.0, -0.25, 1.25, -1.0]);
     // x²(1−x)² = x² − 2x³ + x⁴
     let u3 = Poly(vec![0.0, 0.0, 1.0, -2.0, 1.0]);
-    // x(1−x)(x−0.2)(x−0.8): (x−x²)(x²−x+0.16)
-    // = x³ − x² + 0.16x − x⁴ + x³ − 0.16x² = 0.16x − 1.16x² + 2x³ − x⁴
-    let u4 = Poly(vec![0.0, 0.16, -1.16, 2.0, -1.0]);
-    // Degree 5: x(1−x)(x−0.5)(x²+0.3):
-    // (x−x²)(x−0.5) = x² −0.5x −x³ +0.5x² = −0.5x +1.5x² −x³
-    // ×(x²+0.3): −0.5x³ +1.5x⁴ −x⁵ −0.15x +0.45x² −0.3x³
-    let u5 = Poly(vec![0.0, -0.15, 0.45, -0.8, 1.5, -1.0]);
+    // x(1−x)(x−0.25)(x−0.75), expanded in dyadic-exact coefficients.
+    let u4 = Poly(vec![0.0, 0.1875, -1.1875, 2.0, -1.0]);
+    // Degree 5: x(1−x)(x−0.5)(x²+0.25), also dyadic-exact.
+    let u5 = Poly(vec![0.0, -0.125, 0.375, -0.75, 1.5, -1.0]);
     vec![("u1", u1), ("u2", u2), ("u3", u3), ("u4", u4), ("u5", u5)]
 }
 
@@ -355,5 +384,226 @@ fn ver_006_warm_start_and_ledger() {
              boundary); the ledger row carries every review-round-3 field: {row}",
             saves, ws.cold_iterations, ws.warm_iterations
         ),
+    );
+}
+
+fn assert_refused(
+    problem: &MmsProblem,
+    candidate: &[f64],
+    tolerance: f64,
+    expected: VerifierRefusal,
+) {
+    let report = verify(problem, candidate, tolerance);
+    assert_eq!(report.refusal, Some(expected));
+    assert!(!report.accept);
+    assert!(report.color.is_none());
+    assert!(report.bound.is_unbounded());
+    assert_eq!(report.flux_hash, 0);
+}
+
+/// ver-007 — public-input admission is complete and precedes all verifier
+/// indexing/compute. Every malformed input is a structured refusal with an
+/// unbounded sentinel and no evidence color, never a panic or partial badge.
+#[test]
+#[allow(clippy::too_many_lines)] // one adversarial admission matrix
+fn ver_007_hostile_public_inputs_fail_closed() {
+    let exact = Poly(vec![0.0, 1.0, -1.0]);
+    let base = MmsProblem::new("hostile", exact.clone(), vec![0.0, 0.5, 1.0]);
+    let candidate = vec![0.0, 0.25, 0.0];
+
+    for mesh in [Vec::new(), vec![0.0]] {
+        let problem = MmsProblem::new("short-mesh", exact.clone(), mesh);
+        assert_refused(&problem, &[], 1.0, VerifierRefusal::MeshNodeCount);
+    }
+    assert_refused(&base, &[0.0, 0.0], 1.0, VerifierRefusal::CandidateLength);
+
+    for tolerance in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert_refused(
+            &base,
+            &candidate,
+            tolerance,
+            VerifierRefusal::InvalidTolerance,
+        );
+    }
+
+    for mesh in [
+        vec![-0.0, 0.5, 1.0],
+        vec![0.0, 0.5, 2.0],
+        vec![0.0, 0.5, f64::NAN],
+    ] {
+        let problem = MmsProblem::new("wrong-domain", exact.clone(), mesh);
+        assert_refused(&problem, &candidate, 1.0, VerifierRefusal::MeshDomain);
+    }
+    for mesh in [
+        vec![0.0, 0.5, 0.5, 1.0],
+        vec![0.0, f64::NAN, 1.0],
+        vec![0.0, f64::INFINITY, 1.0],
+    ] {
+        let problem = MmsProblem::new("bad-coordinates", exact.clone(), mesh);
+        let values = vec![0.0; problem.mesh.len()];
+        assert_refused(&problem, &values, 1.0, VerifierRefusal::MeshCoordinates);
+    }
+
+    for values in [
+        vec![1.0, 0.25, 0.0],
+        vec![0.0, 0.25, 1.0],
+        vec![-0.0, 0.25, 0.0],
+    ] {
+        assert_refused(&base, &values, 1.0, VerifierRefusal::CandidateBoundary);
+    }
+    for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let mut values = candidate.clone();
+        values[1] = value;
+        assert_refused(&base, &values, 1.0, VerifierRefusal::CandidateNonFinite);
+    }
+
+    let oversized_mesh = MmsProblem::new(
+        "oversized-mesh",
+        exact.clone(),
+        vec![0.0; MAX_VERIFIER_MESH_NODES + 1],
+    );
+    assert_refused(&oversized_mesh, &[], 1.0, VerifierRefusal::MeshNodeCount);
+    for polynomial in [
+        VerifierPolynomial::ExactSolution,
+        VerifierPolynomial::Forcing,
+        VerifierPolynomial::ForcingAntiderivative,
+    ] {
+        let mut problem = base.clone();
+        match polynomial {
+            VerifierPolynomial::ExactSolution => {
+                problem.u.0 = vec![0.0; MAX_VERIFIER_POLY_COEFFICIENTS + 1];
+            }
+            VerifierPolynomial::Forcing => {
+                problem.f.0 = vec![0.0; MAX_VERIFIER_POLY_COEFFICIENTS + 1];
+            }
+            VerifierPolynomial::ForcingAntiderivative => {
+                problem.big_f.0 = vec![0.0; MAX_VERIFIER_POLY_COEFFICIENTS + 1];
+            }
+        }
+        assert_refused(
+            &problem,
+            &candidate,
+            1.0,
+            VerifierRefusal::PolynomialCoefficientCount { polynomial },
+        );
+    }
+
+    for polynomial in [
+        VerifierPolynomial::ExactSolution,
+        VerifierPolynomial::Forcing,
+        VerifierPolynomial::ForcingAntiderivative,
+    ] {
+        let mut problem = base.clone();
+        match polynomial {
+            VerifierPolynomial::ExactSolution => problem.u.0[1] = f64::NAN,
+            VerifierPolynomial::Forcing => problem.f.0[0] = f64::INFINITY,
+            VerifierPolynomial::ForcingAntiderivative => {
+                problem.big_f.0[0] = f64::NEG_INFINITY;
+            }
+        }
+        assert_refused(
+            &problem,
+            &candidate,
+            1.0,
+            VerifierRefusal::PolynomialNonFinite { polynomial },
+        );
+    }
+
+    // The stored binary64 coefficients cancel exactly at x=1, even though
+    // ordinary Horner evaluation rounds to a nonzero value.
+    let cancellation_boundary = MmsProblem::new(
+        "cancellation-boundary",
+        Poly(vec![0.0, 1.0, 1.0e16, -1.0e16, -1.0]),
+        base.mesh.clone(),
+    );
+    let cancellation_report = verify(&cancellation_boundary, &[0.0, 0.0, 0.0], 10.0);
+    assert_eq!(cancellation_report.refusal, None);
+    assert!(!cancellation_report.bound.is_unbounded());
+
+    // Point Horner loses the final exact residue and returns zero, but the
+    // binary-rational polynomial is nonzero at x=1 and must be refused.
+    let hidden_residue = MmsProblem::new(
+        "hidden-boundary-residue",
+        Poly(vec![0.0, 1.0e16, -1.0e16, 1.0]),
+        base.mesh.clone(),
+    );
+    assert_eq!(hidden_residue.u.eval(1.0).to_bits(), 0.0_f64.to_bits());
+    assert_refused(
+        &hidden_residue,
+        &candidate,
+        1.0,
+        VerifierRefusal::ExactSolutionBoundary,
+    );
+
+    let nonvanishing = MmsProblem::new("nonvanishing", Poly(vec![1.0]), base.mesh.clone());
+    assert_refused(
+        &nonvanishing,
+        &candidate,
+        1.0,
+        VerifierRefusal::ExactSolutionBoundary,
+    );
+    let mut wrong_f = base.clone();
+    wrong_f.f.0[0] = 1.0;
+    assert_refused(
+        &wrong_f,
+        &candidate,
+        1.0,
+        VerifierRefusal::DerivedPolynomialMismatch {
+            polynomial: VerifierPolynomial::Forcing,
+        },
+    );
+    let mut wrong_big_f = base.clone();
+    wrong_big_f.big_f.0[0] = 1.0;
+    assert_refused(
+        &wrong_big_f,
+        &candidate,
+        1.0,
+        VerifierRefusal::DerivedPolynomialMismatch {
+            polynomial: VerifierPolynomial::ForcingAntiderivative,
+        },
+    );
+
+    let mut refused = verify(&base, &candidate, f64::NAN);
+    assert!(matches!(
+        try_effectivity(&base, &candidate, &refused),
+        Err(Fem1dError::InvalidScalar {
+            field: "verifier report",
+            ..
+        })
+    ));
+    let zero_problem = MmsProblem::new("zero", Poly(vec![0.0]), base.mesh.clone());
+    let zero_candidate = vec![0.0; zero_problem.mesh.len()];
+    let zero_report = verify(&zero_problem, &zero_candidate, 1.0);
+    assert!(matches!(
+        try_effectivity(&zero_problem, &zero_candidate, &zero_report),
+        Err(Fem1dError::InvalidScalar {
+            field: "oracle true error",
+            ..
+        })
+    ));
+    refused.family = "family\"}\n{\"forged-family\":true";
+    let row = refused.to_row("hostile\"}\n{\"forged\":true", f64::NAN);
+    assert!(row.contains("\"verdict\":\"refused\""));
+    assert!(row.contains("\"bound_hi\":null"));
+    assert!(row.contains("\"tolerance\":null"));
+    assert!(row.contains("hostile\\\"}\\n{\\\"forged\\\":true"));
+    assert!(row.contains("family\\\"}\\n{\\\"forged-family\\\":true"));
+    assert!(!row.contains('\n'));
+    let mut emitter = fs_obs::Emitter::new("fs-verify/conformance", "ver-007/refusal-row");
+    let line = emitter
+        .emit(
+            fs_obs::Severity::Info,
+            fs_obs::EventKind::Custom {
+                name: "verify-refusal".to_string(),
+                json: row,
+            },
+            None,
+        )
+        .to_jsonl();
+    fs_obs::validate_line(&line).expect("structured refusal row is valid JSON");
+    verdict(
+        "ver-007",
+        true,
+        "empty/short/oversized meshes, malformed coordinates/domain, candidate shape/value/BC errors, invalid tolerances, degree overflow, non-finite/tampered polynomials, and nonvanishing exact data all refused without color",
     );
 }

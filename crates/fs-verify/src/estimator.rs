@@ -6,13 +6,21 @@
 //! `σ = c − F` is optimized in plain f64 for TIGHTNESS while the bound
 //! itself is evaluated with outward-rounded intervals over exact Gauss
 //! quadrature (polynomial data ⇒ the quadrature identity is exact;
-//! only rounding needs enclosing). An unbounded/NaN enclosure FAILS
-//! CLOSED: reject, no color, ever.
+//! only rounding needs enclosing). Malformed inputs and unusable
+//! enclosures FAIL CLOSED as structured refusals: no color, ever.
 
-use crate::fem1d::{MmsProblem, gauss5, true_energy_error};
+use crate::fem1d::{
+    Fem1dError, MAX_FEM1D_MESH_NODES, MAX_FEM1D_POLY_COEFFICIENTS, MmsProblem, gauss5,
+    require_converged, true_energy_error, try_zeroed, validate_candidate, validate_problem,
+};
 use crate::interval::Iv;
 use fs_evidence::Color;
 use std::fmt::Write as _;
+
+/// Largest mesh admitted by the synchronous v0 verifier.
+pub const MAX_VERIFIER_MESH_NODES: usize = MAX_FEM1D_MESH_NODES;
+/// Exactness envelope for the manufactured solution: degree at most five.
+pub const MAX_VERIFIER_POLY_COEFFICIENTS: usize = MAX_FEM1D_POLY_COEFFICIENTS;
 
 /// Estimator families (Proposal D's independence escalation needs at
 /// least two registered per class).
@@ -23,6 +31,103 @@ pub enum EstimatorFamily {
     /// Hierarchical (refined-mesh comparison — independent, NOT
     /// guaranteed; the falsifier's cross-check).
     Hierarchical,
+}
+
+/// Polynomial role carried by a structured verifier refusal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerifierPolynomial {
+    /// Manufactured exact-solution metadata (`u`).
+    ExactSolution,
+    /// Canonical forcing (`f = -u''`).
+    Forcing,
+    /// Canonical zero-constant antiderivative of the forcing (`big_f`).
+    ForcingAntiderivative,
+}
+
+/// Stable, structured reason why no verifier authority was issued.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerifierRefusal {
+    /// Mesh length is outside the bounded `2..=MAX_VERIFIER_MESH_NODES` class.
+    MeshNodeCount,
+    /// One polynomial is empty or exceeds the degree-five exactness class.
+    PolynomialCoefficientCount {
+        /// Polynomial whose resource envelope was violated.
+        polynomial: VerifierPolynomial,
+    },
+    /// Candidate and mesh lengths differ.
+    CandidateLength,
+    /// Tolerance is non-finite or non-positive.
+    InvalidTolerance,
+    /// Mesh endpoints are not canonical `+0.0` and `1.0`.
+    MeshDomain,
+    /// A mesh coordinate is non-finite or the mesh is not strictly increasing.
+    MeshCoordinates,
+    /// A candidate value is non-finite.
+    CandidateNonFinite,
+    /// Candidate endpoints are not canonical homogeneous `+0.0` values.
+    CandidateBoundary,
+    /// One polynomial contains a non-finite coefficient.
+    PolynomialNonFinite {
+        /// Polynomial containing the non-finite coefficient.
+        polynomial: VerifierPolynomial,
+    },
+    /// The exact-solution polynomial does not vanish canonically at both ends.
+    ExactSolutionBoundary,
+    /// A public derived polynomial differs from the canonical value recomputed from `u`.
+    DerivedPolynomialMismatch {
+        /// Public derived polynomial that did not match its canonical value.
+        polynomial: VerifierPolynomial,
+    },
+    /// The optional tightness constant could not be computed finitely.
+    NonFiniteTightness,
+    /// Interval construction produced a non-finite, reversed, or unusable enclosure.
+    InvalidEnclosure,
+}
+
+impl VerifierRefusal {
+    /// Stable identifier for diagnostics and ledger rows.
+    #[must_use]
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::MeshNodeCount => "mesh-node-count",
+            Self::PolynomialCoefficientCount {
+                polynomial: VerifierPolynomial::ExactSolution,
+            } => "u-coefficient-count",
+            Self::PolynomialCoefficientCount {
+                polynomial: VerifierPolynomial::Forcing,
+            } => "f-coefficient-count",
+            Self::PolynomialCoefficientCount {
+                polynomial: VerifierPolynomial::ForcingAntiderivative,
+            } => "big-f-coefficient-count",
+            Self::CandidateLength => "candidate-length",
+            Self::InvalidTolerance => "invalid-tolerance",
+            Self::MeshDomain => "mesh-domain",
+            Self::MeshCoordinates => "mesh-coordinates",
+            Self::CandidateNonFinite => "candidate-non-finite",
+            Self::CandidateBoundary => "candidate-boundary",
+            Self::PolynomialNonFinite {
+                polynomial: VerifierPolynomial::ExactSolution,
+            } => "u-non-finite",
+            Self::PolynomialNonFinite {
+                polynomial: VerifierPolynomial::Forcing,
+            } => "f-non-finite",
+            Self::PolynomialNonFinite {
+                polynomial: VerifierPolynomial::ForcingAntiderivative,
+            } => "big-f-non-finite",
+            Self::ExactSolutionBoundary => "exact-solution-boundary",
+            Self::DerivedPolynomialMismatch {
+                polynomial: VerifierPolynomial::Forcing,
+            } => "derived-f-mismatch",
+            Self::DerivedPolynomialMismatch {
+                polynomial: VerifierPolynomial::ForcingAntiderivative,
+            } => "derived-big-f-mismatch",
+            Self::DerivedPolynomialMismatch {
+                polynomial: VerifierPolynomial::ExactSolution,
+            } => "derived-u-mismatch",
+            Self::NonFiniteTightness => "non-finite-tightness",
+            Self::InvalidEnclosure => "invalid-enclosure",
+        }
+    }
 }
 
 impl EstimatorFamily {
@@ -41,10 +146,9 @@ impl EstimatorFamily {
 pub struct VerifierReport {
     /// The certified error-bound enclosure (energy norm).
     pub bound: Iv,
-    /// Accept ⟺ `bound.hi ≤ tolerance` (fail closed on unbounded).
+    /// Accept ⟺ `bound.hi ≤ tolerance` for an admitted finite report.
     pub accept: bool,
-    /// The verified color carried by an ACCEPT (`None` on reject —
-    /// never a badge without the bound).
+    /// The verified color carried by an ACCEPT (`None` on reject or refusal).
     pub color: Option<Color>,
     /// The tolerance tested against (feeds the planner).
     pub tolerance: f64,
@@ -52,42 +156,331 @@ pub struct VerifierReport {
     pub family: &'static str,
     /// FNV hash of the reconstructed flux (ledger identity).
     pub flux_hash: u64,
+    /// Structured refusal (`None` only when a finite bound was produced).
+    pub refusal: Option<VerifierRefusal>,
 }
 
 impl VerifierReport {
     /// The review-round-3 ledger row (structured, never stdout).
     #[must_use]
     pub fn to_row(&self, problem: &str, oracle_error: f64) -> String {
-        let eff = if oracle_error > 0.0 {
-            self.bound.hi / oracle_error
+        let problem = json_escape(problem);
+        let family = json_escape(self.family);
+        let bound_lo = finite_scientific(self.bound.lo);
+        let bound_hi = finite_scientific(self.bound.hi);
+        let oracle = finite_scientific(oracle_error);
+        let tolerance = finite_scientific(self.tolerance);
+        let effectivity = if self.refusal.is_none()
+            && oracle_error.is_finite()
+            && oracle_error > 0.0
+            && self.bound.hi.is_finite()
+        {
+            finite_fixed(self.bound.hi / oracle_error)
+        } else if self.refusal.is_none() && oracle_error == 0.0 {
+            "1.0000".to_string()
         } else {
-            1.0
+            "null".to_string()
+        };
+        let refusal = self.refusal.map_or_else(
+            || "null".to_string(),
+            |reason| format!("\"{}\"", reason.id()),
+        );
+        let verdict = if self.refusal.is_some() {
+            "refused"
+        } else if self.accept {
+            "accept"
+        } else {
+            "reject"
         };
         let mut s = String::new();
         let _ = write!(
             s,
             "{{\"problem\":\"{problem}\",\"estimator_family_id\":\"{}\",\
-             \"flux_hash\":\"{:016X}\",\"bound_lo\":{:.6e},\"bound_hi\":{:.6e},\
-             \"oracle_true_error\":{oracle_error:.6e},\"effectivity\":{eff:.4},\
-             \"verdict\":\"{}\",\"tolerance\":{:.6e}}}",
-            self.family,
-            self.flux_hash,
-            self.bound.lo,
-            self.bound.hi,
-            if self.accept { "accept" } else { "reject" },
-            self.tolerance
+             \"flux_hash\":\"{:016X}\",\"bound_lo\":{bound_lo},\"bound_hi\":{bound_hi},\
+             \"oracle_true_error\":{oracle},\"effectivity\":{effectivity},\
+             \"verdict\":\"{verdict}\",\"tolerance\":{tolerance},\"refusal\":{refusal}}}",
+            family, self.flux_hash,
         );
         s
     }
 }
 
-fn fnv(bytes: &[u8]) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+fn json_escape(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            '\u{08}' => escaped.push_str("\\b"),
+            '\u{0c}' => escaped.push_str("\\f"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            control if control <= '\u{1f}' => {
+                let _ = write!(escaped, "\\u{:04x}", u32::from(control));
+            }
+            other => escaped.push(other),
+        }
+    }
+    escaped
+}
+
+fn finite_scientific(value: f64) -> String {
+    if value.is_finite() {
+        format!("{value:.6e}")
+    } else {
+        "null".to_string()
+    }
+}
+
+fn finite_fixed(value: f64) -> String {
+    if value.is_finite() {
+        format!("{value:.4}")
+    } else {
+        "null".to_string()
+    }
+}
+
+fn fnv_extend(mut h: u64, bytes: &[u8]) -> u64 {
     for &b in bytes {
         h ^= u64::from(b);
         h = h.wrapping_mul(0x0000_0100_0000_01b3);
     }
     h
+}
+
+fn hash_polynomial(mut hash: u64, polynomial: &crate::fem1d::Poly) -> u64 {
+    hash = fnv_extend(hash, &(polynomial.0.len() as u64).to_le_bytes());
+    for coefficient in &polynomial.0 {
+        hash = fnv_extend(hash, &coefficient.to_bits().to_le_bytes());
+    }
+    hash
+}
+
+fn flux_hash(c_star: f64, f: &crate::fem1d::Poly, big_f: &crate::fem1d::Poly) -> u64 {
+    let mut hash = fnv_extend(0xcbf2_9ce4_8422_2325, &c_star.to_bits().to_le_bytes());
+    hash = hash_polynomial(hash, f);
+    hash_polynomial(hash, big_f)
+}
+
+fn poly_bits_equal(left: &crate::fem1d::Poly, right: &crate::fem1d::Poly) -> bool {
+    left.0.len() == right.0.len()
+        && left
+            .0
+            .iter()
+            .zip(&right.0)
+            .all(|(left, right)| left.to_bits() == right.to_bits())
+}
+
+fn validate_inputs(
+    problem: &MmsProblem,
+    candidate: &[f64],
+    tolerance: f64,
+) -> Result<(crate::fem1d::Poly, crate::fem1d::Poly), VerifierRefusal> {
+    if !(2..=MAX_VERIFIER_MESH_NODES).contains(&problem.mesh.len()) {
+        return Err(VerifierRefusal::MeshNodeCount);
+    }
+    if candidate.len() != problem.mesh.len() {
+        return Err(VerifierRefusal::CandidateLength);
+    }
+    for (role, polynomial) in [
+        (VerifierPolynomial::ExactSolution, &problem.u),
+        (VerifierPolynomial::Forcing, &problem.f),
+        (VerifierPolynomial::ForcingAntiderivative, &problem.big_f),
+    ] {
+        if !(1..=MAX_VERIFIER_POLY_COEFFICIENTS).contains(&polynomial.0.len()) {
+            return Err(VerifierRefusal::PolynomialCoefficientCount { polynomial: role });
+        }
+    }
+    if !tolerance.is_finite() || tolerance <= 0.0 {
+        return Err(VerifierRefusal::InvalidTolerance);
+    }
+    if problem.mesh.first().map(|value| value.to_bits()) != Some(0.0_f64.to_bits())
+        || problem.mesh.last().map(|value| value.to_bits()) != Some(1.0_f64.to_bits())
+    {
+        return Err(VerifierRefusal::MeshDomain);
+    }
+    if !problem.mesh.iter().all(|value| value.is_finite())
+        || !problem.mesh.windows(2).all(|pair| pair[0] < pair[1])
+    {
+        return Err(VerifierRefusal::MeshCoordinates);
+    }
+    if !candidate.iter().all(|value| value.is_finite()) {
+        return Err(VerifierRefusal::CandidateNonFinite);
+    }
+    if candidate.first().map(|value| value.to_bits()) != Some(0.0_f64.to_bits())
+        || candidate.last().map(|value| value.to_bits()) != Some(0.0_f64.to_bits())
+    {
+        return Err(VerifierRefusal::CandidateBoundary);
+    }
+    for (role, polynomial) in [
+        (VerifierPolynomial::ExactSolution, &problem.u),
+        (VerifierPolynomial::Forcing, &problem.f),
+        (VerifierPolynomial::ForcingAntiderivative, &problem.big_f),
+    ] {
+        if !polynomial.0.iter().all(|value| value.is_finite()) {
+            return Err(VerifierRefusal::PolynomialNonFinite { polynomial: role });
+        }
+    }
+    if problem.u.0.first().map(|value| value.to_bits()) != Some(0.0_f64.to_bits())
+        || !problem.u.is_exactly_zero_at_one()
+    {
+        return Err(VerifierRefusal::ExactSolutionBoundary);
+    }
+
+    let expected_f = problem.u.derive().derive().neg();
+    if !poly_bits_equal(&problem.f, &expected_f) {
+        return Err(VerifierRefusal::DerivedPolynomialMismatch {
+            polynomial: VerifierPolynomial::Forcing,
+        });
+    }
+    let expected_big_f = expected_f.antiderive();
+    if !poly_bits_equal(&problem.big_f, &expected_big_f) {
+        return Err(VerifierRefusal::DerivedPolynomialMismatch {
+            polynomial: VerifierPolynomial::ForcingAntiderivative,
+        });
+    }
+    Ok((expected_f, expected_big_f))
+}
+
+fn tightness_constant(
+    problem: &MmsProblem,
+    candidate: &[f64],
+    big_f: &crate::fem1d::Poly,
+) -> Result<f64, VerifierRefusal> {
+    let mut mean = 0.0;
+    for element in 0..problem.mesh.len() - 1 {
+        let (x0, x1) = (problem.mesh[element], problem.mesh[element + 1]);
+        let h = x1 - x0;
+        let slope = (candidate[element + 1] - candidate[element]) / h;
+        if !h.is_finite() || h <= 0.0 || !slope.is_finite() {
+            return Err(VerifierRefusal::NonFiniteTightness);
+        }
+        for (point, weight) in gauss5(x0, x1) {
+            let value = big_f.eval(point) + slope;
+            let contribution = weight * value;
+            if !point.is_finite()
+                || !weight.is_finite()
+                || !value.is_finite()
+                || !contribution.is_finite()
+            {
+                return Err(VerifierRefusal::NonFiniteTightness);
+            }
+            mean += contribution;
+            if !mean.is_finite() {
+                return Err(VerifierRefusal::NonFiniteTightness);
+            }
+        }
+    }
+    Ok(mean)
+}
+
+fn finite_interval(interval: Iv) -> Result<Iv, VerifierRefusal> {
+    if interval.lo.is_finite() && interval.hi.is_finite() && interval.lo <= interval.hi {
+        Ok(interval)
+    } else {
+        Err(VerifierRefusal::InvalidEnclosure)
+    }
+}
+
+fn interval_element_geometry(x0: f64, x1: f64) -> Result<(Iv, Iv, Iv), VerifierRefusal> {
+    let x0 = Iv::point(x0);
+    let x1 = Iv::point(x1);
+    let h = finite_interval(x1.sub(x0))?;
+    if h.lo <= 0.0 {
+        return Err(VerifierRefusal::InvalidEnclosure);
+    }
+    let midpoint = finite_interval(x0.add(x1).scale_pos(0.5))?;
+    let half = finite_interval(h.scale_pos(0.5))?;
+    if half.lo <= 0.0 {
+        return Err(VerifierRefusal::InvalidEnclosure);
+    }
+    Ok((h, midpoint, half))
+}
+
+fn interval_candidate_slope(first: f64, second: f64, h: Iv) -> Result<Iv, VerifierRefusal> {
+    let difference = finite_interval(Iv::point(second).sub(Iv::point(first)))?;
+    finite_interval(difference.div_pos(h))
+}
+
+fn interval_quadrature_geometry(
+    midpoint: Iv,
+    half: Iv,
+    node_constant: f64,
+    weight_constant: f64,
+) -> Result<(Iv, Iv), VerifierRefusal> {
+    let node = finite_interval(midpoint.add(half.mul(iv_c(node_constant))))?;
+    let weight = finite_interval(half.mul(iv_c(weight_constant)))?;
+    if weight.lo <= 0.0 {
+        return Err(VerifierRefusal::InvalidEnclosure);
+    }
+    Ok((node, weight))
+}
+
+fn interval_antiderivative_coefficient(
+    coefficient: f64,
+    exponent: usize,
+) -> Result<Iv, VerifierRefusal> {
+    finite_interval(Iv::point(coefficient).div_pos(Iv::point(exponent as f64)))
+}
+
+fn interval_forcing_antiderivative(
+    forcing: &crate::fem1d::Poly,
+    x: Iv,
+) -> Result<Iv, VerifierRefusal> {
+    // F(x) = x * Horner(f_k / (k + 1)). Coefficient division is itself
+    // intervalized: the rounded coefficients in `big_f` are replay metadata,
+    // not point enclosures of the exact antiderivative of the authoritative f.
+    let mut accumulated = Iv::zero();
+    for (degree, coefficient) in forcing.0.iter().copied().enumerate().rev() {
+        let antiderivative_coefficient =
+            interval_antiderivative_coefficient(coefficient, degree + 1)?;
+        accumulated = finite_interval(accumulated.mul(x).add(antiderivative_coefficient))?;
+    }
+    finite_interval(x.mul(accumulated))
+}
+
+fn equilibrated_bound(
+    problem: &MmsProblem,
+    candidate: &[f64],
+    forcing: &crate::fem1d::Poly,
+    c_star: f64,
+) -> Result<Iv, VerifierRefusal> {
+    let mut eta_sq = Iv::zero();
+    for element in 0..problem.mesh.len() - 1 {
+        let (h, midpoint, half) =
+            interval_element_geometry(problem.mesh[element], problem.mesh[element + 1])?;
+        let slope = interval_candidate_slope(candidate[element], candidate[element + 1], h)?;
+        for (node_constant, weight_constant) in GAUSS5_REF {
+            let (node, weight) =
+                interval_quadrature_geometry(midpoint, half, node_constant, weight_constant)?;
+            let antiderivative = interval_forcing_antiderivative(forcing, node)?;
+            let residual = finite_interval(Iv::point(c_star).sub(antiderivative).sub(slope))?;
+            let contribution = finite_interval(weight.mul(residual.sq()))?;
+            eta_sq = finite_interval(eta_sq.add(contribution))?;
+        }
+    }
+    let bound = finite_interval(eta_sq.sqrt())?;
+    if bound.lo < 0.0 {
+        Err(VerifierRefusal::InvalidEnclosure)
+    } else {
+        Ok(bound)
+    }
+}
+
+fn refused(tolerance: f64, reason: VerifierRefusal) -> VerifierReport {
+    VerifierReport {
+        bound: Iv {
+            lo: f64::NEG_INFINITY,
+            hi: f64::INFINITY,
+        },
+        accept: false,
+        color: None,
+        tolerance,
+        family: EstimatorFamily::EquilibratedFlux.id(),
+        flux_hash: 0,
+        refusal: Some(reason),
+    }
 }
 
 /// The equilibrated-flux VERIFIER: certify (or reject) a candidate's
@@ -96,41 +489,20 @@ fn fnv(bytes: &[u8]) -> u64 {
 /// boundary conditions; the enclosure is rigorous by outward rounding.
 #[must_use]
 pub fn verify(problem: &MmsProblem, candidate: &[f64], tolerance: f64) -> VerifierReport {
-    let m = &problem.mesh;
-    let n = m.len();
-    // Optimal free constant (f64 — tightness only; ANY c is sound):
-    // c* = mean over (0,1) of (F + u_h′).
-    let mut mean = 0.0;
-    for e in 0..n - 1 {
-        let (x0, x1) = (m[e], m[e + 1]);
-        let h = x1 - x0;
-        let slope = (candidate[e + 1] - candidate[e]) / h;
-        for (gx, gw) in gauss5(x0, x1) {
-            mean += gw * (problem.big_f.eval(gx) + slope);
-        }
-    }
-    let c_star = mean; // domain length is 1
-    // η² = ∫ (c − F − u_h′)², interval-evaluated, exact quadrature.
-    let mut eta_sq = Iv::zero();
-    for e in 0..n - 1 {
-        let (x0, x1) = (m[e], m[e + 1]);
-        let h = x1 - x0;
-        let slope = (candidate[e + 1] - candidate[e]) / h;
-        let mid = f64::midpoint(x0, x1);
-        let half = 0.5 * (x1 - x0);
-        for (gn, gw) in GAUSS5_REF {
-            // Interval node/weight enclosures (nudged constants).
-            let node = Iv::point(mid).add(Iv::point(half).mul(iv_c(gn)));
-            let weight = iv_c(gw).scale_pos(half.max(1e-300));
-            let big_f = problem.big_f.eval_iv(node);
-            let r = Iv::point(c_star).sub(big_f).sub(Iv::point(slope));
-            eta_sq = eta_sq.add(weight.mul(r.sq()));
-        }
-    }
-    let bound = eta_sq.sqrt();
-    // FAIL CLOSED: unbounded/NaN enclosures never accept, never color.
-    let sound = !bound.is_unbounded() && !bound.lo.is_nan() && !bound.hi.is_nan();
-    let accept = sound && bound.hi <= tolerance;
+    let (canonical_f, canonical_big_f) = match validate_inputs(problem, candidate, tolerance) {
+        Ok(polynomials) => polynomials,
+        Err(reason) => return refused(tolerance, reason),
+    };
+    // Any finite c is sound. This rounded optimizer affects tightness only.
+    let c_star = match tightness_constant(problem, candidate, &canonical_big_f) {
+        Ok(value) => value,
+        Err(reason) => return refused(tolerance, reason),
+    };
+    let bound = match equilibrated_bound(problem, candidate, &canonical_f, c_star) {
+        Ok(bound) => bound,
+        Err(reason) => return refused(tolerance, reason),
+    };
+    let accept = bound.hi <= tolerance;
     let color = if accept {
         Some(Color::Verified {
             lo: 0.0,
@@ -139,27 +511,23 @@ pub fn verify(problem: &MmsProblem, candidate: &[f64], tolerance: f64) -> Verifi
     } else {
         None
     };
-    let mut flux_bytes = Vec::new();
-    flux_bytes.extend_from_slice(&c_star.to_bits().to_le_bytes());
-    for c in &problem.big_f.0 {
-        flux_bytes.extend_from_slice(&c.to_bits().to_le_bytes());
-    }
     VerifierReport {
         bound,
         accept,
         color,
         tolerance,
         family: EstimatorFamily::EquilibratedFlux.id(),
-        flux_hash: fnv(&flux_bytes),
+        flux_hash: flux_hash(c_star, &canonical_f, &canonical_big_f),
+        refusal: None,
     }
 }
 
 const GAUSS5_REF: [(f64, f64); 5] = [
-    (-0.906_179_845_938_664, 0.236_926_885_056_189),
-    (-0.538_469_310_105_683, 0.478_628_670_499_366),
-    (0.0, 0.568_888_888_888_889),
-    (0.538_469_310_105_683, 0.478_628_670_499_366),
-    (0.906_179_845_938_664, 0.236_926_885_056_189),
+    (-0.906_179_845_938_664, 0.236_926_885_056_189_08),
+    (-0.538_469_310_105_683_1, 0.478_628_670_499_366_47),
+    (0.0, 0.568_888_888_888_888_9),
+    (0.538_469_310_105_683_1, 0.478_628_670_499_366_47),
+    (0.906_179_845_938_664, 0.236_926_885_056_189_08),
 ];
 
 /// One-ulp-widened constant (the tabulated Gauss data carries ~1 ulp
@@ -174,16 +542,44 @@ fn iv_c(v: f64) -> Iv {
 /// The INDEPENDENT second family: hierarchical estimate from a
 /// uniformly refined solve (`h/2`). Not guaranteed — the falsifier's
 /// cross-check, never a color source.
-#[must_use]
-pub fn hierarchical_estimate(problem: &MmsProblem, candidate: &[f64]) -> f64 {
-    let mut fine_mesh = Vec::with_capacity(problem.mesh.len() * 2 - 1);
+///
+/// # Errors
+/// Returns [`Fem1dError`] for malformed inputs, refinement overflow/resource
+/// excess, allocation failure, or a non-finite estimate.
+pub fn hierarchical_estimate(problem: &MmsProblem, candidate: &[f64]) -> Result<f64, Fem1dError> {
+    validate_problem(problem)?;
+    validate_candidate(problem, candidate, "candidate")?;
+    let fine_nodes = problem
+        .mesh
+        .len()
+        .checked_mul(2)
+        .and_then(|nodes| nodes.checked_sub(1))
+        .ok_or(Fem1dError::ResourceLimit {
+            resource: "hierarchical mesh nodes",
+            requested: usize::MAX,
+            limit: MAX_FEM1D_MESH_NODES,
+        })?;
+    if fine_nodes > MAX_FEM1D_MESH_NODES {
+        return Err(Fem1dError::ResourceLimit {
+            resource: "hierarchical mesh nodes",
+            requested: fine_nodes,
+            limit: MAX_FEM1D_MESH_NODES,
+        });
+    }
+    let mut fine_mesh = Vec::new();
+    fine_mesh
+        .try_reserve_exact(fine_nodes)
+        .map_err(|_| Fem1dError::AllocationFailed {
+            stage: "hierarchical mesh",
+            requested: fine_nodes,
+        })?;
     for w in problem.mesh.windows(2) {
         fine_mesh.push(w[0]);
         fine_mesh.push(f64::midpoint(w[0], w[1]));
     }
-    fine_mesh.push(*problem.mesh.last().expect("nonempty mesh"));
+    fine_mesh.push(problem.mesh[problem.mesh.len() - 1]);
     let fine = MmsProblem::new(&problem.name, problem.u.clone(), fine_mesh);
-    let fine_u = crate::fem1d::solve_p1(&fine);
+    let fine_u = crate::fem1d::solve_p1(&fine)?;
     // ‖u_{h/2}′ − u_h′‖ over the fine mesh.
     let mut acc = 0.0;
     for e in 0..fine.mesh.len() - 1 {
@@ -195,9 +591,28 @@ pub fn hierarchical_estimate(problem: &MmsProblem, candidate: &[f64]) -> f64 {
         let ch = problem.mesh[coarse_e + 1] - problem.mesh[coarse_e];
         let coarse_slope = (candidate[coarse_e + 1] - candidate[coarse_e]) / ch;
         let d = fine_slope - coarse_slope;
-        acc += h * d * d;
+        let updated = (h * d).mul_add(d, acc);
+        if !fine_slope.is_finite()
+            || !coarse_slope.is_finite()
+            || !d.is_finite()
+            || !updated.is_finite()
+        {
+            return Err(Fem1dError::NonFiniteIntermediate {
+                stage: "hierarchical estimate",
+                index: Some(e),
+            });
+        }
+        acc = updated;
     }
-    acc.sqrt()
+    let estimate = acc.sqrt();
+    if estimate.is_finite() {
+        Ok(estimate)
+    } else {
+        Err(Fem1dError::NonFiniteIntermediate {
+            stage: "hierarchical estimate",
+            index: None,
+        })
+    }
 }
 
 /// The nonlinear WARM-START fallback: the candidate is accepted only
@@ -214,29 +629,192 @@ pub struct WarmStartReport {
 }
 
 /// Measure warm-start savings on the toy nonlinear class.
-#[must_use]
-pub fn warm_start(problem: &MmsProblem, candidate: &[f64], max_iter: u32) -> WarmStartReport {
-    let zero = vec![0.0; problem.mesh.len()];
-    let (_, cold) = crate::fem1d::solve_nonlinear(problem, &zero, max_iter);
-    let (_, warm) = crate::fem1d::solve_nonlinear(problem, candidate, max_iter);
-    WarmStartReport {
-        cold_iterations: cold,
-        warm_iterations: warm,
+///
+/// # Errors
+/// Returns [`Fem1dError`] when either run is malformed, unusable, or does not
+/// converge within the admitted budget. Nonconvergence never becomes savings.
+pub fn warm_start(
+    problem: &MmsProblem,
+    candidate: &[f64],
+    max_iter: u32,
+) -> Result<WarmStartReport, Fem1dError> {
+    validate_problem(problem)?;
+    validate_candidate(problem, candidate, "candidate")?;
+    let zero = try_zeroed("cold nonlinear start", problem.mesh.len())?;
+    let cold = crate::fem1d::solve_nonlinear(problem, &zero, max_iter)?;
+    require_converged(&cold, "cold nonlinear solve")?;
+    let warm = crate::fem1d::solve_nonlinear(problem, candidate, max_iter)?;
+    require_converged(&warm, "warm nonlinear solve")?;
+    Ok(WarmStartReport {
+        cold_iterations: cold.iterations,
+        warm_iterations: warm.iterations,
         color: Color::Estimated {
             estimator: "warm-start-iteration-savings".to_string(),
             dispersion: f64::INFINITY,
         },
-    }
+    })
 }
 
 /// Convenience for the batteries: effectivity of a report against the
 /// oracle.
-#[must_use]
-pub fn effectivity(problem: &MmsProblem, candidate: &[f64], report: &VerifierReport) -> f64 {
-    let truth = true_energy_error(problem, candidate);
-    if truth > 0.0 {
-        report.bound.hi / truth
+///
+/// # Errors
+/// Returns [`Fem1dError`] when the independent oracle or report bound is not a
+/// usable finite value. Oracle failure is never mapped to effectivity `1.0`.
+pub fn effectivity(
+    problem: &MmsProblem,
+    candidate: &[f64],
+    report: &VerifierReport,
+) -> Result<f64, Fem1dError> {
+    if report.refusal.is_some() {
+        return Err(Fem1dError::InvalidScalar {
+            field: "verifier report",
+            reason: "refused reports have no defined effectivity",
+        });
+    }
+    let truth = true_energy_error(problem, candidate)?;
+    if !report.bound.hi.is_finite() || report.bound.hi < 0.0 {
+        return Err(Fem1dError::NonFiniteIntermediate {
+            stage: "effectivity report bound",
+            index: None,
+        });
+    }
+    if truth == 0.0 {
+        return Err(Fem1dError::InvalidScalar {
+            field: "oracle true error",
+            reason: "effectivity is undefined for a zero denominator",
+        });
+    }
+    let value = report.bound.hi / truth;
+    if value.is_finite() {
+        Ok(value)
     } else {
-        1.0
+        Err(Fem1dError::NonFiniteIntermediate {
+            stage: "effectivity ratio",
+            index: None,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fs_math::dd::Dd;
+
+    fn contains_dd(interval: Iv, exact: Dd) -> bool {
+        !exact.lt(Dd::from_f64(interval.lo)) && !Dd::from_f64(interval.hi).lt(exact)
+    }
+
+    #[test]
+    fn intervalized_element_inputs_cover_independent_dd_oracle() {
+        // These decimal-looking f64 inputs make every legacy point computation
+        // below round away a nonzero residual. The double-double oracle therefore
+        // detects removal of intervalized mesh, slope, node, or weight arithmetic.
+        let (x0, x1) = (0.1, 0.4);
+        let (candidate0, candidate1) = (0.1, 0.2);
+        let (node_constant, weight_constant) = GAUSS5_REF[0];
+        let (dx0, dx1) = (Dd::from_f64(x0), Dd::from_f64(x1));
+        let half_constant = Dd::from_f64(0.5);
+
+        let (h, midpoint, half) = interval_element_geometry(x0, x1).unwrap();
+        let exact_h = dx1 - dx0;
+        let exact_midpoint = (dx0 + dx1) * half_constant;
+        let exact_half = exact_h * half_constant;
+        assert_ne!(exact_h, Dd::from_f64(x1 - x0));
+        assert_ne!(exact_midpoint, Dd::from_f64(f64::midpoint(x0, x1)));
+        assert_ne!(exact_half, Dd::from_f64((x1 - x0) * 0.5));
+        assert!(contains_dd(h, exact_h));
+        assert!(contains_dd(midpoint, exact_midpoint));
+        assert!(contains_dd(half, exact_half));
+
+        let slope = interval_candidate_slope(candidate0, candidate1, h).unwrap();
+        let exact_difference = Dd::from_f64(candidate1) - Dd::from_f64(candidate0);
+        let rounded_slope = (candidate1 - candidate0) / (x1 - x0);
+        assert_ne!(Dd::from_f64(rounded_slope) * exact_h, exact_difference);
+        assert!(!(exact_difference).lt(Dd::from_f64(slope.lo) * exact_h));
+        assert!(!(Dd::from_f64(slope.hi) * exact_h).lt(exact_difference));
+
+        let (node, weight) =
+            interval_quadrature_geometry(midpoint, half, node_constant, weight_constant).unwrap();
+        let exact_node = exact_midpoint + exact_half * Dd::from_f64(node_constant);
+        let exact_weight = exact_half * Dd::from_f64(weight_constant);
+        let rounded_node = f64::midpoint(x0, x1) + (x1 - x0) * 0.5 * node_constant;
+        let rounded_weight = (x1 - x0) * 0.5 * weight_constant;
+        assert_ne!(exact_node, Dd::from_f64(rounded_node));
+        assert_ne!(exact_weight, Dd::from_f64(rounded_weight));
+        assert!(contains_dd(node, exact_node));
+        assert!(contains_dd(weight, exact_weight));
+
+        // `1/3` is not representable. The coefficient interval must reach the
+        // side of the rounded quotient selected by the exact FMA residual;
+        // treating the rounded antiderivative coefficient as a point fails it.
+        let coefficient = interval_antiderivative_coefficient(1.0, 3).unwrap();
+        let rounded = 1.0_f64 / 3.0;
+        let residual = rounded.mul_add(3.0, -1.0);
+        if residual > 0.0 {
+            assert!(coefficient.lo <= crate::interval::down(rounded));
+        } else if residual < 0.0 {
+            assert!(coefficient.hi >= crate::interval::up(rounded));
+        } else {
+            assert!(coefficient.lo <= rounded && rounded <= coefficient.hi);
+        }
+    }
+
+    #[test]
+    fn gauss_constants_enclose_independent_truth_brackets() {
+        // Each bit pair is the adjacent-f64 bracket around the corresponding
+        // high-precision Gauss-Legendre constant, derived independently from
+        // the decimal reference values. Fifteen-digit literals miss some
+        // weights by up to eight ulps, so this locks the certified quadrature
+        // inputs rather than merely checking that `iv_c` widens its input.
+        let positive_constants = [
+            (
+                GAUSS5_REF[4].0,
+                0x3fec_ff6c_e053_3a69,
+                0x3fec_ff6c_e053_3a6a,
+            ),
+            (
+                GAUSS5_REF[3].0,
+                0x3fe1_3b23_fd99_b704,
+                0x3fe1_3b23_fd99_b705,
+            ),
+            (
+                GAUSS5_REF[0].1,
+                0x3fce_539e_c36e_038c,
+                0x3fce_539e_c36e_038d,
+            ),
+            (
+                GAUSS5_REF[1].1,
+                0x3fde_a1da_25ae_415a,
+                0x3fde_a1da_25ae_415b,
+            ),
+            (
+                GAUSS5_REF[2].1,
+                0x3fe2_3456_789a_bcdf,
+                0x3fe2_3456_789a_bce0,
+            ),
+        ];
+        for (constant, lower_bits, upper_bits) in positive_constants {
+            let interval = iv_c(constant);
+            assert!(interval.lo <= f64::from_bits(lower_bits));
+            assert!(interval.hi >= f64::from_bits(upper_bits));
+        }
+
+        for (constant, positive_lower_bits, positive_upper_bits) in [
+            (
+                GAUSS5_REF[0].0,
+                0x3fec_ff6c_e053_3a69,
+                0x3fec_ff6c_e053_3a6a,
+            ),
+            (
+                GAUSS5_REF[1].0,
+                0x3fe1_3b23_fd99_b704,
+                0x3fe1_3b23_fd99_b705,
+            ),
+        ] {
+            let interval = iv_c(constant);
+            assert!(interval.lo <= -f64::from_bits(positive_upper_bits));
+            assert!(interval.hi >= -f64::from_bits(positive_lower_bits));
+        }
     }
 }

@@ -7,12 +7,32 @@
 //! auto-demotion, and the end-to-end economics loop with ledger rows.
 //! JSON-line verdicts; seeded cases carry seeds.
 
+use fs_math::eft::two_sum;
 use fs_verify::estimator::verify;
-use fs_verify::fem1d::{MmsProblem, Poly, solve_p1, true_energy_error};
+use fs_verify::fem1d::{
+    Fem1dError, MmsProblem, Poly, solve_p1 as try_solve_p1,
+    true_energy_error as try_true_energy_error,
+};
 use fs_verify::zoo::{
     CoarseRungProlongation, NeighborExtrapolation, Outcome, Proposal, Proposer, Registry,
-    SpeculationQuery, ZooTelemetry, quantize_f16, speculate,
+    SpeculationQuery, ZooTelemetry, quantize_f16, speculate as try_speculate,
 };
+
+fn solve_p1(problem: &MmsProblem) -> Vec<f64> {
+    try_solve_p1(problem).expect("zoo problem must solve")
+}
+
+fn true_energy_error(problem: &MmsProblem, candidate: &[f64]) -> f64 {
+    try_true_energy_error(problem, candidate).expect("zoo oracle must evaluate")
+}
+
+fn speculate(
+    query: &SpeculationQuery,
+    registry: &Registry,
+    telemetry: &mut ZooTelemetry,
+) -> Outcome {
+    try_speculate(query, registry, telemetry).expect("zoo speculation must execute")
+}
 
 fn verdict(case: &str, pass: bool, detail: &str) {
     println!(
@@ -41,8 +61,10 @@ impl Lcg {
 
 /// The parameterized design family: u(x; θ) = x(1−x)(x−θ).
 fn family(theta: f64) -> Poly {
-    // (x − x²)(x − θ) = −θx + (1+θ)x² − x³
-    Poly(vec![0.0, -theta, 1.0 + theta, -1.0])
+    // `(1 + theta)` may round. Preserve its error term on x^4 so the stored
+    // binary64 polynomial, not only the ideal formula, vanishes exactly at 1.
+    let (middle, correction) = two_sum(1.0, theta);
+    Poly(vec![0.0, -theta, middle, -1.0, correction])
 }
 
 fn uniform(n: usize) -> Vec<f64> {
@@ -66,11 +88,15 @@ impl Proposer for AdversarialSurrogate {
         "adversarial-surrogate"
     }
 
-    fn propose(&self, q: &SpeculationQuery) -> Option<Proposal> {
-        Some(Proposal {
-            candidate: q.problem.mesh.iter().map(|x| (x * 941.0).sin()).collect(),
+    fn propose(&self, q: &SpeculationQuery) -> Result<Option<Proposal>, Fem1dError> {
+        let mut candidate: Vec<f64> = q.problem.mesh.iter().map(|x| (x * 941.0).sin()).collect();
+        candidate[0] = 0.0;
+        let last = candidate.len() - 1;
+        candidate[last] = 0.0;
+        Ok(Some(Proposal {
+            candidate,
             confidence: 1.0,
-        })
+        }))
     }
 }
 
@@ -83,11 +109,26 @@ impl Proposer for HumbleGood {
         "humble-good"
     }
 
-    fn propose(&self, q: &SpeculationQuery) -> Option<Proposal> {
-        Some(Proposal {
-            candidate: solve_p1(&q.problem),
+    fn propose(&self, q: &SpeculationQuery) -> Result<Option<Proposal>, Fem1dError> {
+        Ok(Some(Proposal {
+            candidate: try_solve_p1(&q.problem)?,
             confidence: f64::NAN,
-        })
+        }))
+    }
+}
+
+struct QuotedIdentity;
+
+impl Proposer for QuotedIdentity {
+    fn name(&self) -> &'static str {
+        "quoted\"\\proposer"
+    }
+
+    fn propose(&self, q: &SpeculationQuery) -> Result<Option<Proposal>, Fem1dError> {
+        Ok(Some(Proposal {
+            candidate: vec![0.0; q.problem.mesh.len()],
+            confidence: 0.5,
+        }))
     }
 }
 
@@ -103,8 +144,10 @@ fn zoo_001_interface_and_safety() {
     let none = matches!(speculate(&q, &empty, &mut telemetry), Outcome::NoCandidates);
     // Register/deregister round-trip.
     let mut reg = Registry::new();
-    reg.register(Box::new(CoarseRungProlongation));
-    reg.register(Box::new(AdversarialSurrogate));
+    reg.register(Box::new(CoarseRungProlongation))
+        .expect("register coarse proposer");
+    reg.register(Box::new(AdversarialSurrogate))
+        .expect("register adversarial proposer");
     let has_two = reg.names().len() == 2;
     reg.deregister("adversarial-surrogate");
     let has_one = reg.names() == vec!["coarse-rung-prolongation"];
@@ -125,8 +168,10 @@ fn zoo_001_interface_and_safety() {
     // Advisory-NaN: the humble-good proposer (NaN confidence) is tried
     // LAST but still accepted when the noisy one fails.
     let mut reg2 = Registry::new();
-    reg2.register(Box::new(HumbleGood));
-    reg2.register(Box::new(AdversarialSurrogate));
+    reg2.register(Box::new(HumbleGood))
+        .expect("register humble proposer");
+    reg2.register(Box::new(AdversarialSurrogate))
+        .expect("register adversarial proposer");
     let tight = query(0.45, 16, 5e-2);
     let out2 = speculate(&tight, &reg2, &mut telemetry);
     let nan_still_wins = matches!(&out2, Outcome::Accepted(ans) if ans.proposer() == "humble-good");
@@ -167,9 +212,11 @@ fn zoo_002_neighbor_extrapolation() {
     let q = query(0.45, n, 1e-1);
     let warm = NeighborExtrapolation { cache: cache_warm }
         .propose(&q)
+        .expect("warm executes")
         .expect("warm");
     let cold = NeighborExtrapolation { cache: cache_cold }
         .propose(&q)
+        .expect("cold executes")
         .expect("cold");
     let warm_err = true_energy_error(&q.problem, &warm.candidate);
     let cold_err = true_energy_error(&q.problem, &cold.candidate);
@@ -187,9 +234,11 @@ fn zoo_002_neighbor_extrapolation() {
         cache: cache2.clone(),
     }
     .propose(&qt)
+    .expect("tie 1 executes")
     .expect("tie 1");
     let pick2 = NeighborExtrapolation { cache: cache2 }
         .propose(&qt)
+        .expect("tie 2 executes")
         .expect("tie 2");
     let tie_deterministic = pick1.candidate == pick2.candidate && pick1.candidate == solved(0.2); // zeroth-order from θ=0.2
     verdict(
@@ -211,7 +260,10 @@ fn zoo_002_neighbor_extrapolation() {
 #[test]
 fn zoo_003_coarse_rung_and_precision() {
     let q_loose = query(0.3, 32, 1e-1);
-    let prop = CoarseRungProlongation.propose(&q_loose).expect("coarse");
+    let prop = CoarseRungProlongation
+        .propose(&q_loose)
+        .expect("coarse executes")
+        .expect("coarse");
     let loose = verify(&q_loose.problem, &prop.candidate, 1e-1);
     let tight = verify(&q_loose.problem, &prop.candidate, 1e-6);
     // fp16 quantization: the proposer's precision is nobody's business.
@@ -219,7 +271,10 @@ fn zoo_003_coarse_rung_and_precision() {
     let q_accept = verify(&q_loose.problem, &quantized, 1e-1);
     // Tiny meshes have no coarser rung: honest decline.
     let q_small = query(0.3, 3, 1e-1);
-    let declines = CoarseRungProlongation.propose(&q_small).is_none();
+    let declines = CoarseRungProlongation
+        .propose(&q_small)
+        .expect("small coarse proposal executes")
+        .is_none();
     verdict(
         "zoo-003",
         loose.accept && !tight.accept && q_accept.accept && declines,
@@ -241,8 +296,10 @@ fn zoo_003_coarse_rung_and_precision() {
 fn zoo_004_adversarial_falsifier() {
     let mut telemetry = ZooTelemetry::default();
     let mut reg = Registry::new();
-    reg.register(Box::new(AdversarialSurrogate));
-    reg.register(Box::new(CoarseRungProlongation));
+    reg.register(Box::new(AdversarialSurrogate))
+        .expect("register adversarial proposer");
+    reg.register(Box::new(CoarseRungProlongation))
+        .expect("register coarse proposer");
     let mut rng = Lcg(0x1001_2026_0707_00A4);
     let mut incorrect_accepts = 0u32;
     for _ in 0..25 {
@@ -260,13 +317,15 @@ fn zoo_004_adversarial_falsifier() {
                     incorrect_accepts += 1; // garbage must never verify
                 }
             }
-            Outcome::AllRejected { .. } | Outcome::NoCandidates => {}
+            Outcome::AllRejected(_) | Outcome::NoCandidates => {}
         }
     }
     let adv_rate = telemetry
         .accept_rate("adversarial-surrogate", "wedge-v0")
         .expect("tried");
-    let demotions = telemetry.demote_collapsed(0.05, 10);
+    let demotions = telemetry
+        .demote_collapsed(0.05, 10)
+        .expect("valid demotion policy");
     let demoted = telemetry.is_demoted("adversarial-surrogate", "wedge-v0");
     // After demotion the adversary is not consulted (tries frozen).
     let tries_before = 25;
@@ -302,9 +361,12 @@ fn zoo_005_economics_loop() {
         .map(|&t| (t, solved(t), None))
         .collect();
     let mut reg = Registry::new();
-    reg.register(Box::new(NeighborExtrapolation { cache }));
-    reg.register(Box::new(CoarseRungProlongation));
-    reg.register(Box::new(AdversarialSurrogate));
+    reg.register(Box::new(NeighborExtrapolation { cache }))
+        .expect("register neighbor proposer");
+    reg.register(Box::new(CoarseRungProlongation))
+        .expect("register coarse proposer");
+    reg.register(Box::new(AdversarialSurrogate))
+        .expect("register adversarial proposer");
     let mut telemetry = ZooTelemetry::default();
     let mut rng = Lcg(0x1001_2026_0707_00A5);
     let mut accepted = 0u32;
@@ -316,7 +378,7 @@ fn zoo_005_economics_loop() {
                 accepted += 1;
                 assert!(ans.report().accept, "type invariant");
             }
-            Outcome::AllRejected { .. } | Outcome::NoCandidates => {}
+            Outcome::AllRejected(_) | Outcome::NoCandidates => {}
         }
     }
     let rows = telemetry.rows();
@@ -350,5 +412,143 @@ fn zoo_005_economics_loop() {
              per-proposer-per-regime rows ship to the ledger; \
              seed 0x1001_2026_0707_00A5"
         ),
+    );
+}
+
+/// zoo-006 — invalid queries and built-in proposer state propagate structured
+/// errors before proposal work; no panic or ordinary miss hides the failure.
+#[test]
+fn zoo_006_invalid_queries_refuse_before_proposal_work() {
+    let mut telemetry = ZooTelemetry::default();
+    let mut registry = Registry::new();
+    registry
+        .register(Box::new(AdversarialSurrogate))
+        .expect("register adversarial proposer");
+
+    let mut nonfinite_theta = query(0.4, 8, 1e-2);
+    nonfinite_theta.theta = f64::NAN;
+    assert!(matches!(
+        try_speculate(&nonfinite_theta, &registry, &mut telemetry),
+        Err(Fem1dError::InvalidScalar { field: "theta", .. })
+    ));
+
+    let malformed = SpeculationQuery {
+        problem: MmsProblem::new("malformed", family(0.4), Vec::new()),
+        theta: 0.4,
+        tolerance: 1e-2,
+        regime: "wedge-v0".to_string(),
+    };
+    assert!(matches!(
+        try_speculate(&malformed, &registry, &mut telemetry),
+        Err(Fem1dError::ResourceLimit {
+            resource: "mesh nodes",
+            ..
+        })
+    ));
+
+    let q = query(0.4, 8, 1e-2);
+    let poisoned_neighbor = NeighborExtrapolation {
+        cache: vec![(f64::NAN, vec![0.0; q.problem.mesh.len()], None)],
+    };
+    assert!(matches!(
+        poisoned_neighbor.propose(&q),
+        Err(Fem1dError::InvalidScalar {
+            field: "neighbor cache theta",
+            ..
+        })
+    ));
+
+    let mut control_regime = query(0.4, 8, 1e-2);
+    control_regime.regime = "bad\nregime".to_string();
+    assert!(matches!(
+        try_speculate(&control_regime, &registry, &mut telemetry),
+        Err(Fem1dError::InvalidScalar {
+            field: "regime",
+            ..
+        })
+    ));
+    verdict(
+        "zoo-006",
+        true,
+        "non-finite query coordinates, malformed meshes, and poisoned neighbor identities return structured errors before ordering, solving, or verification",
+    );
+}
+
+/// zoo-007 — valid identity punctuation is deterministically JSON-escaped in
+/// telemetry rows; it cannot inject a sibling field or line.
+#[test]
+fn zoo_007_telemetry_rows_escape_identities() {
+    let mut registry = Registry::new();
+    registry
+        .register(Box::new(QuotedIdentity))
+        .expect("register quoted identity");
+    let mut telemetry = ZooTelemetry::default();
+    let mut q = query(0.4, 8, 1e-12);
+    q.regime = "quoted\"\\regime".to_string();
+    let outcome = try_speculate(&q, &registry, &mut telemetry)
+        .expect("quoted identities must remain valid data");
+    assert!(matches!(outcome, Outcome::AllRejected(_)));
+    let rows = telemetry.rows();
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].contains("quoted\\\"\\\\proposer"));
+    assert!(rows[0].contains("quoted\\\"\\\\regime"));
+    let mut emitter = fs_obs::Emitter::new("fs-verify/zoo", "zoo-007/identity-json");
+    let line = emitter
+        .emit(
+            fs_obs::Severity::Info,
+            fs_obs::EventKind::Custom {
+                name: "quoted-identity-row".to_string(),
+                json: rows[0].clone(),
+            },
+            None,
+        )
+        .to_jsonl();
+    fs_obs::validate_line(&line).expect("escaped identity row is valid JSON");
+    verdict(
+        "zoo-007",
+        true,
+        "quoted and backslashed proposer/regime identities remain one valid JSON object with no field or line injection",
+    );
+}
+
+/// zoo-008 — coarse-rung routing remains linear and correct on a large,
+/// strongly nonuniform mesh; every injected coarse node is reproduced exactly.
+#[test]
+fn zoo_008_coarse_rung_routes_large_nonuniform_mesh() {
+    let cells = 4_096usize;
+    let mesh: Vec<f64> = (0..=cells)
+        .map(|index| {
+            let coordinate = index as f64 / cells as f64;
+            coordinate * coordinate
+        })
+        .collect();
+    let problem = MmsProblem::new("nonuniform-coarse-rung", family(0.3), mesh.clone());
+    let query = SpeculationQuery {
+        problem,
+        theta: 0.3,
+        tolerance: 1.0,
+        regime: "nonuniform-routing".to_string(),
+    };
+    let proposal = CoarseRungProlongation
+        .propose(&query)
+        .expect("large nonuniform proposal must execute")
+        .expect("large nonuniform mesh has a coarse rung");
+
+    let coarse_mesh: Vec<f64> = mesh.iter().step_by(2).copied().collect();
+    let coarse_problem = MmsProblem::new("nonuniform-coarse-rung", family(0.3), coarse_mesh);
+    let coarse_solution = solve_p1(&coarse_problem);
+    assert_eq!(proposal.candidate.len(), mesh.len());
+    assert!(proposal.candidate.iter().all(|value| value.is_finite()));
+    for (coarse_index, value) in coarse_solution.iter().enumerate() {
+        assert_eq!(
+            proposal.candidate[coarse_index * 2].to_bits(),
+            value.to_bits(),
+            "coarse node {coarse_index} changed during prolongation"
+        );
+    }
+    verdict(
+        "zoo-008",
+        true,
+        "the monotone segment cursor prolongated 4,097 strongly nonuniform nodes and preserved every injected coarse-node value bitwise",
     );
 }

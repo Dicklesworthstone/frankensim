@@ -1,17 +1,331 @@
 //! The 1D elliptic testbed: P1 finite elements for `−u″ = f` on (0,1)
 //! with homogeneous Dirichlet data, polynomial manufactured solutions
-//! (so flux antiderivatives are exact and Gauss quadrature is
-//! MATHEMATICALLY exact — the rigor of the verifier's bound then rests
-//! only on outward-rounded interval evaluation), and a Newton solver
-//! for the nonlinear warm-start class.
+//! (so the mathematical Gauss rule is exact for the admitted integrands),
+//! fallible bounded solves/oracles, and a Newton solver for the nonlinear
+//! warm-start class. Stored antiderivative coefficients are rounded replay
+//! metadata; the verifier intervalizes their exact construction separately.
 
 use crate::interval::Iv;
+use core::fmt;
+
+/// Largest mesh admitted by one synchronous v0 fem1d operation.
+pub const MAX_FEM1D_MESH_NODES: usize = 1_000_000;
+/// Polynomial exactness envelope: degree at most five.
+pub const MAX_FEM1D_POLY_COEFFICIENTS: usize = 6;
+/// Largest Newton update budget accepted by the synchronous toy solver.
+pub const MAX_FEM1D_NEWTON_ITERATIONS: u32 = 10_000;
+/// Conservative scalar-work ceiling for one synchronous fem1d call.
+pub const MAX_FEM1D_WORK_UNITS: usize = 50_000_000;
+/// Largest provenance/diagnostic identity admitted at this boundary.
+pub const MAX_FEM1D_IDENTITY_BYTES: usize = 4_096;
+
+const NEWTON_RESIDUAL_TOLERANCE: f64 = 1.0e-10;
+
+/// Structured failure at the bounded fem1d execution boundary.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Fem1dError {
+    /// A resource-driving count exceeds the synchronous v0 envelope.
+    ResourceLimit {
+        /// Stable resource name.
+        resource: &'static str,
+        /// Requested count.
+        requested: usize,
+        /// Maximum admitted count.
+        limit: usize,
+    },
+    /// A bounded allocation failed before numerical work began.
+    AllocationFailed {
+        /// Stable allocation stage.
+        stage: &'static str,
+        /// Requested elements.
+        requested: usize,
+    },
+    /// Conservative work accounting overflowed or exceeded its ceiling.
+    WorkBudgetExceeded {
+        /// Operation whose work was estimated.
+        stage: &'static str,
+        /// Estimated work, or `None` when checked multiplication overflowed.
+        estimated: Option<usize>,
+        /// Maximum admitted work.
+        limit: usize,
+    },
+    /// A retained telemetry counter exhausted its fixed-width representation.
+    CounterOverflow {
+        /// Stable counter identity.
+        counter: &'static str,
+    },
+    /// A scalar public input is not finite or outside its required range.
+    InvalidScalar {
+        /// Stable field name.
+        field: &'static str,
+        /// Stable refusal reason.
+        reason: &'static str,
+    },
+    /// A polynomial is empty or outside the degree-five class.
+    PolynomialCoefficientCount {
+        /// `u`, `f`, or `big_f`.
+        field: &'static str,
+        /// Observed coefficient count.
+        count: usize,
+    },
+    /// A polynomial coefficient is non-finite.
+    NonFinitePolynomialCoefficient {
+        /// `u`, `f`, or `big_f`.
+        field: &'static str,
+        /// Offending coefficient.
+        index: usize,
+    },
+    /// The MMS exact-solution metadata is inconsistent with homogeneous BCs.
+    ExactSolutionBoundary,
+    /// Public derived polynomial data differs from the canonical value from `u`.
+    DerivedPolynomialMismatch {
+        /// `f` or `big_f`.
+        field: &'static str,
+    },
+    /// Mesh endpoints are not bit-canonical `+0.0` and `1.0`.
+    MeshDomain,
+    /// A mesh node is non-finite.
+    NonFiniteMeshNode {
+        /// Offending node.
+        index: usize,
+    },
+    /// A mesh cell is not strictly increasing.
+    NonIncreasingMeshCell {
+        /// Offending cell.
+        cell: usize,
+    },
+    /// A positive mesh width has a non-finite reciprocal.
+    NonFiniteReciprocal {
+        /// Offending cell.
+        cell: usize,
+    },
+    /// Nodal input length does not equal mesh length.
+    CandidateLength {
+        /// `candidate` or `start`.
+        field: &'static str,
+        /// Required length.
+        expected: usize,
+        /// Observed length.
+        actual: usize,
+    },
+    /// A nodal public input is non-finite.
+    NonFiniteCandidate {
+        /// `candidate` or `start`.
+        field: &'static str,
+        /// Offending value.
+        index: usize,
+    },
+    /// Nodal endpoints are not bit-canonical homogeneous `+0.0` values.
+    CandidateBoundary {
+        /// `candidate` or `start`.
+        field: &'static str,
+    },
+    /// An internal tridiagonal system has inconsistent shapes.
+    LinearSystemShape {
+        /// Solver stage.
+        stage: &'static str,
+    },
+    /// Thomas elimination encountered a zero or non-finite pivot.
+    SingularPivot {
+        /// Solver stage.
+        stage: &'static str,
+        /// Pivot row.
+        row: usize,
+    },
+    /// A derived numerical value was non-finite.
+    NonFiniteIntermediate {
+        /// Stable computation stage.
+        stage: &'static str,
+        /// Element or row, when applicable.
+        index: Option<usize>,
+    },
+    /// A caller required convergence but the bounded Newton run did not converge.
+    NonConverged {
+        /// `cold`, `warm`, or another stable caller role.
+        stage: &'static str,
+        /// Updates performed.
+        iterations: u32,
+        /// Final finite residual norm.
+        residual_norm: f64,
+    },
+}
+
+impl fmt::Display for Fem1dError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ResourceLimit {
+                resource,
+                requested,
+                limit,
+            } => write!(
+                f,
+                "fem1d resource `{resource}` requested {requested}, limit is {limit}"
+            ),
+            Self::AllocationFailed { stage, requested } => {
+                write!(
+                    f,
+                    "fem1d allocation failed during {stage} for {requested} elements"
+                )
+            }
+            Self::WorkBudgetExceeded {
+                stage,
+                estimated,
+                limit,
+            } => write!(
+                f,
+                "fem1d work for {stage} was {estimated:?}, limit is {limit}"
+            ),
+            Self::CounterOverflow { counter } => {
+                write!(f, "fem1d telemetry counter `{counter}` overflowed")
+            }
+            Self::InvalidScalar { field, reason } => {
+                write!(f, "invalid fem1d scalar `{field}`: {reason}")
+            }
+            Self::PolynomialCoefficientCount { field, count } => write!(
+                f,
+                "fem1d polynomial `{field}` has {count} coefficients; expected 1..={MAX_FEM1D_POLY_COEFFICIENTS}"
+            ),
+            Self::NonFinitePolynomialCoefficient { field, index } => {
+                write!(
+                    f,
+                    "fem1d polynomial `{field}` coefficient {index} is non-finite"
+                )
+            }
+            Self::ExactSolutionBoundary => {
+                f.write_str("fem1d exact-solution metadata is not homogeneous at both endpoints")
+            }
+            Self::DerivedPolynomialMismatch { field } => {
+                write!(f, "fem1d derived polynomial `{field}` is not canonical")
+            }
+            Self::MeshDomain => f.write_str("fem1d mesh endpoints must be canonical +0.0 and 1.0"),
+            Self::NonFiniteMeshNode { index } => {
+                write!(f, "fem1d mesh node {index} is non-finite")
+            }
+            Self::NonIncreasingMeshCell { cell } => {
+                write!(f, "fem1d mesh cell {cell} is not strictly increasing")
+            }
+            Self::NonFiniteReciprocal { cell } => {
+                write!(
+                    f,
+                    "fem1d mesh cell {cell} has a non-finite reciprocal width"
+                )
+            }
+            Self::CandidateLength {
+                field,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "fem1d `{field}` length {actual} differs from mesh length {expected}"
+            ),
+            Self::NonFiniteCandidate { field, index } => {
+                write!(f, "fem1d `{field}` value {index} is non-finite")
+            }
+            Self::CandidateBoundary { field } => {
+                write!(
+                    f,
+                    "fem1d `{field}` endpoints must be canonical homogeneous +0.0"
+                )
+            }
+            Self::LinearSystemShape { stage } => {
+                write!(
+                    f,
+                    "fem1d {stage} tridiagonal system has inconsistent shapes"
+                )
+            }
+            Self::SingularPivot { stage, row } => {
+                write!(f, "fem1d {stage} pivot {row} is zero or non-finite")
+            }
+            Self::NonFiniteIntermediate { stage, index } => match index {
+                Some(index) => write!(f, "fem1d {stage} is non-finite at index {index}"),
+                None => write!(f, "fem1d {stage} is non-finite"),
+            },
+            Self::NonConverged {
+                stage,
+                iterations,
+                residual_norm,
+            } => write!(
+                f,
+                "fem1d {stage} did not converge after {iterations} updates (residual {residual_norm:.6e})"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for Fem1dError {}
 
 /// A polynomial in monomial coefficients (`c[0] + c[1]x + …`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Poly(pub Vec<f64>);
 
 impl Poly {
+    /// Whether the finite binary64 coefficients sum to exactly zero.
+    ///
+    /// At `x = 1`, every monomial equals one, so this is the exact
+    /// homogeneous-boundary predicate for the stored polynomial. A fixed-size
+    /// binary superaccumulator compares positive and negative magnitudes in
+    /// units of `2^-1074`; ordinary or interval Horner evaluation is not enough
+    /// because rounding can respectively hide a residue or merely enclose zero.
+    #[must_use]
+    pub fn is_exactly_zero_at_one(&self) -> bool {
+        const LIMBS: usize = 34;
+        const FRACTION_MASK: u64 = (1_u64 << 52) - 1;
+        const EXPONENT_MASK: u64 = 0x7ff;
+
+        fn add_word(accumulator: &mut [u64; LIMBS], mut index: usize, word: u64) {
+            let (sum, mut carry) = accumulator[index].overflowing_add(word);
+            accumulator[index] = sum;
+            index += 1;
+            while carry && index < accumulator.len() {
+                let (sum, next_carry) = accumulator[index].overflowing_add(1);
+                accumulator[index] = sum;
+                carry = next_carry;
+                index += 1;
+            }
+        }
+
+        fn add_significand(accumulator: &mut [u64; LIMBS], significand: u64, shift: usize) {
+            let limb = shift / 64;
+            let offset = shift % 64;
+            add_word(accumulator, limb, significand << offset);
+            if offset != 0 {
+                add_word(accumulator, limb + 1, significand >> (64 - offset));
+            }
+        }
+
+        if self.0.is_empty() || self.0.len() > MAX_FEM1D_POLY_COEFFICIENTS {
+            return false;
+        }
+        let mut positive = [0_u64; LIMBS];
+        let mut negative = [0_u64; LIMBS];
+        for coefficient in &self.0 {
+            let bits = coefficient.to_bits();
+            let exponent = ((bits >> 52) & EXPONENT_MASK) as usize;
+            if exponent == EXPONENT_MASK as usize {
+                return false;
+            }
+            let fraction = bits & FRACTION_MASK;
+            let significand = if exponent == 0 {
+                fraction
+            } else {
+                fraction | (1_u64 << 52)
+            };
+            if significand == 0 {
+                continue;
+            }
+            // In units of 2^-1074, subnormal significands start at bit zero
+            // and a normal value with biased exponent e starts at bit e - 1.
+            let shift = exponent.saturating_sub(1);
+            let accumulator = if bits >> 63 == 0 {
+                &mut positive
+            } else {
+                &mut negative
+            };
+            add_significand(accumulator, significand, shift);
+        }
+        positive == negative
+    }
+
     /// Derivative.
     #[must_use]
     pub fn derive(&self) -> Poly {
@@ -72,8 +386,8 @@ pub struct MmsProblem {
     pub u: Poly,
     /// The load `f = −u″`.
     pub f: Poly,
-    /// `F(x) = ∫₀ˣ f` (exact antiderivative; the equilibrated flux is
-    /// `σ = c − F` for a free constant c).
+    /// Rounded coefficients for `F(x) = ∫₀ˣ f`, used for replay and
+    /// tightness only. The verifier intervalizes exact coefficient division.
     pub big_f: Poly,
     /// Mesh nodes (ascending, first 0, last 1).
     pub mesh: Vec<f64>,
@@ -95,85 +409,363 @@ impl MmsProblem {
     }
 }
 
+fn poly_bits_equal(left: &Poly, right: &Poly) -> bool {
+    left.0.len() == right.0.len()
+        && left
+            .0
+            .iter()
+            .zip(&right.0)
+            .all(|(left, right)| left.to_bits() == right.to_bits())
+}
+
+/// Validate the complete v0 MMS problem before allocation or numerical work.
+pub(crate) fn validate_problem(problem: &MmsProblem) -> Result<(), Fem1dError> {
+    validate_identity(&problem.name, "problem.name")?;
+    if !(2..=MAX_FEM1D_MESH_NODES).contains(&problem.mesh.len()) {
+        return Err(Fem1dError::ResourceLimit {
+            resource: "mesh nodes",
+            requested: problem.mesh.len(),
+            limit: MAX_FEM1D_MESH_NODES,
+        });
+    }
+    for (field, polynomial) in [
+        ("u", &problem.u),
+        ("f", &problem.f),
+        ("big_f", &problem.big_f),
+    ] {
+        if !(1..=MAX_FEM1D_POLY_COEFFICIENTS).contains(&polynomial.0.len()) {
+            return Err(Fem1dError::PolynomialCoefficientCount {
+                field,
+                count: polynomial.0.len(),
+            });
+        }
+        if let Some(index) = polynomial.0.iter().position(|value| !value.is_finite()) {
+            return Err(Fem1dError::NonFinitePolynomialCoefficient { field, index });
+        }
+    }
+    if problem.mesh[0].to_bits() != 0.0_f64.to_bits()
+        || problem.mesh[problem.mesh.len() - 1].to_bits() != 1.0_f64.to_bits()
+    {
+        return Err(Fem1dError::MeshDomain);
+    }
+    if let Some(index) = problem.mesh.iter().position(|value| !value.is_finite()) {
+        return Err(Fem1dError::NonFiniteMeshNode { index });
+    }
+    for (cell, nodes) in problem.mesh.windows(2).enumerate() {
+        if nodes[0] >= nodes[1] {
+            return Err(Fem1dError::NonIncreasingMeshCell { cell });
+        }
+        let reciprocal = 1.0 / (nodes[1] - nodes[0]);
+        if !reciprocal.is_finite() {
+            return Err(Fem1dError::NonFiniteReciprocal { cell });
+        }
+    }
+    if problem.u.0[0].to_bits() != 0.0_f64.to_bits() || !problem.u.is_exactly_zero_at_one() {
+        return Err(Fem1dError::ExactSolutionBoundary);
+    }
+    let expected_f = problem.u.derive().derive().neg();
+    if expected_f.0.iter().any(|value| !value.is_finite()) {
+        return Err(Fem1dError::NonFiniteIntermediate {
+            stage: "canonical forcing",
+            index: None,
+        });
+    }
+    if !poly_bits_equal(&problem.f, &expected_f) {
+        return Err(Fem1dError::DerivedPolynomialMismatch { field: "f" });
+    }
+    let expected_big_f = expected_f.antiderive();
+    if expected_big_f.0.iter().any(|value| !value.is_finite()) {
+        return Err(Fem1dError::NonFiniteIntermediate {
+            stage: "canonical forcing antiderivative",
+            index: None,
+        });
+    }
+    if !poly_bits_equal(&problem.big_f, &expected_big_f) {
+        return Err(Fem1dError::DerivedPolynomialMismatch { field: "big_f" });
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_identity(value: &str, field: &'static str) -> Result<(), Fem1dError> {
+    if value.is_empty() {
+        return Err(Fem1dError::InvalidScalar {
+            field,
+            reason: "must not be empty",
+        });
+    }
+    if value.len() > MAX_FEM1D_IDENTITY_BYTES {
+        return Err(Fem1dError::ResourceLimit {
+            resource: field,
+            requested: value.len(),
+            limit: MAX_FEM1D_IDENTITY_BYTES,
+        });
+    }
+    if value.chars().any(char::is_control) {
+        return Err(Fem1dError::InvalidScalar {
+            field,
+            reason: "must not contain control characters",
+        });
+    }
+    Ok(())
+}
+
+/// Validate one conforming nodal vector against an already validated problem.
+pub(crate) fn validate_candidate(
+    problem: &MmsProblem,
+    candidate: &[f64],
+    field: &'static str,
+) -> Result<(), Fem1dError> {
+    if candidate.len() != problem.mesh.len() {
+        return Err(Fem1dError::CandidateLength {
+            field,
+            expected: problem.mesh.len(),
+            actual: candidate.len(),
+        });
+    }
+    if let Some(index) = candidate.iter().position(|value| !value.is_finite()) {
+        return Err(Fem1dError::NonFiniteCandidate { field, index });
+    }
+    if candidate[0].to_bits() != 0.0_f64.to_bits()
+        || candidate[candidate.len() - 1].to_bits() != 0.0_f64.to_bits()
+    {
+        return Err(Fem1dError::CandidateBoundary { field });
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_tolerance(tolerance: f64) -> Result<(), Fem1dError> {
+    if !tolerance.is_finite() {
+        Err(Fem1dError::InvalidScalar {
+            field: "tolerance",
+            reason: "must be finite",
+        })
+    } else if tolerance <= 0.0 {
+        Err(Fem1dError::InvalidScalar {
+            field: "tolerance",
+            reason: "must be strictly positive",
+        })
+    } else {
+        Ok(())
+    }
+}
+
+pub(crate) fn validate_finite_scalar(value: f64, field: &'static str) -> Result<(), Fem1dError> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(Fem1dError::InvalidScalar {
+            field,
+            reason: "must be finite",
+        })
+    }
+}
+
+fn validate_work(stage: &'static str, factors: &[usize]) -> Result<(), Fem1dError> {
+    let estimated = factors
+        .iter()
+        .try_fold(1usize, |work, factor| work.checked_mul(*factor));
+    if estimated.is_none_or(|work| work > MAX_FEM1D_WORK_UNITS) {
+        Err(Fem1dError::WorkBudgetExceeded {
+            stage,
+            estimated,
+            limit: MAX_FEM1D_WORK_UNITS,
+        })
+    } else {
+        Ok(())
+    }
+}
+
+pub(crate) fn try_zeroed(stage: &'static str, length: usize) -> Result<Vec<f64>, Fem1dError> {
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(length)
+        .map_err(|_| Fem1dError::AllocationFailed {
+            stage,
+            requested: length,
+        })?;
+    values.resize(length, 0.0);
+    Ok(values)
+}
+
+fn try_copy_slice(stage: &'static str, values: &[f64]) -> Result<Vec<f64>, Fem1dError> {
+    let mut copy = Vec::new();
+    copy.try_reserve_exact(values.len())
+        .map_err(|_| Fem1dError::AllocationFailed {
+            stage,
+            requested: values.len(),
+        })?;
+    copy.extend_from_slice(values);
+    Ok(copy)
+}
+
+fn non_finite(stage: &'static str, index: Option<usize>) -> Fem1dError {
+    Fem1dError::NonFiniteIntermediate { stage, index }
+}
+
+fn add_finite(
+    slot: &mut f64,
+    delta: f64,
+    stage: &'static str,
+    index: usize,
+) -> Result<(), Fem1dError> {
+    let updated = *slot + delta;
+    if !delta.is_finite() || !updated.is_finite() {
+        return Err(non_finite(stage, Some(index)));
+    }
+    *slot = updated;
+    Ok(())
+}
+
+fn solve_tridiagonal_into(
+    off: &[f64],
+    diag: &[f64],
+    rhs: &[f64],
+    c: &mut [f64],
+    d: &mut [f64],
+    solution: &mut [f64],
+    stage: &'static str,
+) -> Result<(), Fem1dError> {
+    let n = diag.len();
+    if rhs.len() != n
+        || c.len() != n
+        || d.len() != n
+        || solution.len() != n
+        || off.len() != n.saturating_sub(1)
+    {
+        return Err(Fem1dError::LinearSystemShape { stage });
+    }
+    if n == 0 {
+        return Ok(());
+    }
+    let first_pivot = diag[0];
+    if !first_pivot.is_finite() || first_pivot == 0.0 {
+        return Err(Fem1dError::SingularPivot { stage, row: 0 });
+    }
+    c[0] = if n > 1 { off[0] / first_pivot } else { 0.0 };
+    d[0] = rhs[0] / first_pivot;
+    if !c[0].is_finite() || !d[0].is_finite() {
+        return Err(non_finite("Thomas first row", Some(0)));
+    }
+    for row in 1..n {
+        let pivot = diag[row] - off[row - 1] * c[row - 1];
+        if !pivot.is_finite() || pivot == 0.0 {
+            return Err(Fem1dError::SingularPivot { stage, row });
+        }
+        if row < n - 1 {
+            c[row] = off[row] / pivot;
+            if !c[row].is_finite() {
+                return Err(non_finite("Thomas upper factor", Some(row)));
+            }
+        }
+        d[row] = (rhs[row] - off[row - 1] * d[row - 1]) / pivot;
+        if !d[row].is_finite() {
+            return Err(non_finite("Thomas forward substitution", Some(row)));
+        }
+    }
+    solution[n - 1] = d[n - 1];
+    for row in (0..n - 1).rev() {
+        solution[row] = d[row] - c[row] * solution[row + 1];
+        if !solution[row].is_finite() {
+            return Err(non_finite("Thomas back substitution", Some(row)));
+        }
+    }
+    Ok(())
+}
+
 /// Solve `−u″ = f` with P1 elements on the problem's mesh (Thomas
 /// algorithm; deterministic). Returns interior+boundary nodal values.
-#[must_use]
-pub fn solve_p1(problem: &MmsProblem) -> Vec<f64> {
+///
+/// # Errors
+/// Returns [`Fem1dError`] before issuing a solution when the public problem,
+/// bounded work envelope, allocation, assembly, or elimination is unusable.
+pub fn solve_p1(problem: &MmsProblem) -> Result<Vec<f64>, Fem1dError> {
+    validate_problem(problem)?;
     let m = &problem.mesh;
     let n = m.len();
-    if n < 3 {
-        return vec![0.0; n];
-    }
     let interior = n - 2;
+    validate_work(
+        "P1 solve",
+        &[
+            n - 1,
+            problem.f.0.len().saturating_mul(5).saturating_add(16),
+        ],
+    )?;
+    if interior == 0 {
+        return try_zeroed("P1 boundary-only solution", n);
+    }
     // Tridiagonal stiffness + exact load via 5-pt Gauss per element.
-    let mut diag = vec![0.0; interior];
-    let mut off = vec![0.0; interior.saturating_sub(1)];
-    let mut rhs = vec![0.0; interior];
+    let mut diag = try_zeroed("P1 diagonal", interior)?;
+    let mut off = try_zeroed("P1 off-diagonal", interior.saturating_sub(1))?;
+    let mut rhs = try_zeroed("P1 right-hand side", interior)?;
     for e in 0..n - 1 {
         let (x0, x1) = (m[e], m[e + 1]);
         let h = x1 - x0;
         let k = 1.0 / h;
         // Assemble stiffness.
-        for (a, b) in [(e, e), (e + 1, e + 1)] {
-            if (1..=interior).contains(&a) && (1..=interior).contains(&b) {
-                diag[a - 1] += k;
-            }
+        if e >= 1 {
+            add_finite(&mut diag[e - 1], k, "P1 diagonal assembly", e - 1)?;
+        }
+        if e < interior {
+            add_finite(&mut diag[e], k, "P1 diagonal assembly", e)?;
         }
         if e >= 1 && e < interior {
-            off[e - 1] -= k;
+            add_finite(&mut off[e - 1], -k, "P1 off-diagonal assembly", e - 1)?;
         }
         // Load: ∫ f φ_a over the element, exact Gauss.
         for (gx, gw) in gauss5(x0, x1) {
             let fv = problem.f.eval(gx);
             let phi_left = (x1 - gx) / h;
             let phi_right = (gx - x0) / h;
+            if !gx.is_finite()
+                || !gw.is_finite()
+                || !fv.is_finite()
+                || !phi_left.is_finite()
+                || !phi_right.is_finite()
+            {
+                return Err(non_finite("P1 quadrature", Some(e)));
+            }
             if e >= 1 {
-                rhs[e - 1] += gw * fv * phi_left;
+                add_finite(
+                    &mut rhs[e - 1],
+                    gw * fv * phi_left,
+                    "P1 load assembly",
+                    e - 1,
+                )?;
             }
             if e < interior {
-                rhs[e] += gw * fv * phi_right;
+                add_finite(&mut rhs[e], gw * fv * phi_right, "P1 load assembly", e)?;
             }
         }
     }
     // Thomas solve.
-    let mut c = vec![0.0; interior];
-    let mut d = vec![0.0; interior];
-    c[0] = if interior > 1 { off[0] / diag[0] } else { 0.0 };
-    d[0] = rhs[0] / diag[0];
-    for i in 1..interior {
-        let m_ = diag[i] - off[i - 1] * c[i - 1];
-        if i < interior - 1 {
-            c[i] = off[i] / m_;
-        }
-        d[i] = (rhs[i] - off[i - 1] * d[i - 1]) / m_;
-    }
-    let mut x = vec![0.0; interior];
-    x[interior - 1] = d[interior - 1];
-    for i in (0..interior - 1).rev() {
-        x[i] = d[i] - c[i] * x[i + 1];
-    }
-    let mut full = vec![0.0; n];
+    let mut c = try_zeroed("P1 Thomas upper factors", interior)?;
+    let mut d = try_zeroed("P1 Thomas right-hand side", interior)?;
+    let mut x = try_zeroed("P1 interior solution", interior)?;
+    solve_tridiagonal_into(&off, &diag, &rhs, &mut c, &mut d, &mut x, "P1 solve")?;
+    let mut full = try_zeroed("P1 full solution", n)?;
     full[1..=interior].copy_from_slice(&x);
-    full
+    Ok(full)
 }
 
-/// 5-point Gauss–Legendre nodes/weights mapped to `[x0, x1]` (exact
-/// for polynomial degree ≤ 9).
+/// Correctly-rounded 5-point Gauss–Legendre nodes/weights mapped to `[x0, x1]`.
+/// The mathematical rule is exact for polynomial degree at most nine; this
+/// ordinary-f64 helper is for solves, oracles, and Estimated diagnostics. The
+/// verifier separately intervalizes the same constants and mapping.
 #[must_use]
 pub fn gauss5(x0: f64, x1: f64) -> [(f64, f64); 5] {
     const N: [f64; 5] = [
         -0.906_179_845_938_664,
-        -0.538_469_310_105_683,
+        -0.538_469_310_105_683_1,
         0.0,
-        0.538_469_310_105_683,
+        0.538_469_310_105_683_1,
         0.906_179_845_938_664,
     ];
     const W: [f64; 5] = [
-        0.236_926_885_056_189,
-        0.478_628_670_499_366,
-        0.568_888_888_888_889,
-        0.478_628_670_499_366,
-        0.236_926_885_056_189,
+        0.236_926_885_056_189_08,
+        0.478_628_670_499_366_47,
+        0.568_888_888_888_888_9,
+        0.478_628_670_499_366_47,
+        0.236_926_885_056_189_08,
     ];
     let mid = f64::midpoint(x0, x1);
     let half = 0.5 * (x1 - x0);
@@ -182,15 +774,28 @@ pub fn gauss5(x0: f64, x1: f64) -> [(f64, f64); 5] {
 
 /// True energy-norm error `‖u′ − u_h′‖` (the ORACLE; high-resolution
 /// f64 quadrature — the oracle needs accuracy, not rigor).
-#[must_use]
-pub fn true_energy_error(problem: &MmsProblem, candidate: &[f64]) -> f64 {
+///
+/// # Errors
+/// Returns [`Fem1dError`] for malformed/nonconforming inputs, excessive work,
+/// or any non-finite derived value. Oracle failure is never encoded as a
+/// plausible scalar.
+pub fn true_energy_error(problem: &MmsProblem, candidate: &[f64]) -> Result<f64, Fem1dError> {
+    validate_problem(problem)?;
+    validate_candidate(problem, candidate, "candidate")?;
     let m = &problem.mesh;
     let du = problem.u.derive();
+    validate_work(
+        "energy-error oracle",
+        &[m.len() - 1, 32, 5, du.0.len().saturating_add(8)],
+    )?;
     let mut acc = 0.0;
     for e in 0..m.len() - 1 {
         let (x0, x1) = (m[e], m[e + 1]);
         let h = x1 - x0;
         let slope = (candidate[e + 1] - candidate[e]) / h;
+        if !slope.is_finite() {
+            return Err(non_finite("energy-error candidate slope", Some(e)));
+        }
         // Subdivide each element for oracle accuracy.
         let sub = 32;
         for s in 0..sub {
@@ -198,96 +803,470 @@ pub fn true_energy_error(problem: &MmsProblem, candidate: &[f64]) -> f64 {
             let b = x0 + h * f64::from(s + 1) / f64::from(sub);
             for (gx, gw) in gauss5(a, b) {
                 let d = du.eval(gx) - slope;
-                acc += gw * d * d;
+                let contribution = gw * d * d;
+                let updated = acc + contribution;
+                if !a.is_finite()
+                    || !b.is_finite()
+                    || !gx.is_finite()
+                    || !gw.is_finite()
+                    || !d.is_finite()
+                    || !contribution.is_finite()
+                    || !updated.is_finite()
+                {
+                    return Err(non_finite("energy-error quadrature", Some(e)));
+                }
+                acc = updated;
             }
         }
     }
-    acc.sqrt()
+    let error = acc.sqrt();
+    if error.is_finite() {
+        Ok(error)
+    } else {
+        Err(non_finite("energy-error result", None))
+    }
 }
 
-/// Newton solve of the toy NONLINEAR class `−u″ + u³ = f` starting
-/// from `start`; returns (solution, iterations to ‖R‖ < 1e-10).
-#[must_use]
-#[allow(clippy::too_many_lines)] // assembly + Newton loop are one method
-pub fn solve_nonlinear(problem: &MmsProblem, start: &[f64], max_iter: u32) -> (Vec<f64>, u32) {
+/// One bounded Newton run, including an explicit convergence identity.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NonlinearSolveReport {
+    /// Final conforming nodal vector (also present on finite nonconvergence).
+    pub solution: Vec<f64>,
+    /// Newton updates performed.
+    pub iterations: u32,
+    /// Residual norm recomputed after the final update.
+    pub residual_norm: f64,
+    /// Whether `residual_norm < 1e-10`.
+    pub converged: bool,
+}
+
+/// Convert finite nonconvergence into a structured caller refusal.
+pub(crate) fn require_converged(
+    report: &NonlinearSolveReport,
+    stage: &'static str,
+) -> Result<(), Fem1dError> {
+    if report.converged {
+        Ok(())
+    } else {
+        Err(Fem1dError::NonConverged {
+            stage,
+            iterations: report.iterations,
+            residual_norm: report.residual_norm,
+        })
+    }
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn assemble_nonlinear(
+    problem: &MmsProblem,
+    u: &[f64],
+    resid: &mut [f64],
+    jac_diag: &mut [f64],
+    jac_off: &mut [f64],
+) -> Result<f64, Fem1dError> {
     let m = &problem.mesh;
-    let n = m.len();
-    let interior = n - 2;
-    let mut u = start.to_vec();
-    let mut iters = 0;
-    for _ in 0..max_iter {
-        // Residual R_i = (A u)_i + (M u³)_i − b_i with lumped mass.
-        let mut resid = vec![0.0; interior];
-        let mut jac_diag = vec![0.0; interior];
-        let mut jac_off = vec![0.0; interior.saturating_sub(1)];
-        for e in 0..n - 1 {
-            let (x0, x1) = (m[e], m[e + 1]);
-            let h = x1 - x0;
-            let k = 1.0 / h;
-            let slope_term = (u[e + 1] - u[e]) * k;
+    let interior = m.len() - 2;
+    if resid.len() != interior
+        || jac_diag.len() != interior
+        || jac_off.len() != interior.saturating_sub(1)
+    {
+        return Err(Fem1dError::LinearSystemShape {
+            stage: "nonlinear assembly",
+        });
+    }
+    resid.fill(0.0);
+    jac_diag.fill(0.0);
+    jac_off.fill(0.0);
+    for e in 0..m.len() - 1 {
+        let (x0, x1) = (m[e], m[e + 1]);
+        let h = x1 - x0;
+        let k = 1.0 / h;
+        let slope_term = (u[e + 1] - u[e]) * k;
+        if !slope_term.is_finite() {
+            return Err(non_finite("nonlinear stiffness slope", Some(e)));
+        }
+        if e >= 1 {
+            add_finite(
+                &mut resid[e - 1],
+                -slope_term,
+                "nonlinear stiffness residual",
+                e - 1,
+            )?;
+            add_finite(
+                &mut jac_diag[e - 1],
+                k,
+                "nonlinear Jacobian diagonal",
+                e - 1,
+            )?;
+        }
+        if e < interior {
+            add_finite(&mut resid[e], slope_term, "nonlinear stiffness residual", e)?;
+            add_finite(&mut jac_diag[e], k, "nonlinear Jacobian diagonal", e)?;
+        }
+        if e >= 1 && e < interior {
+            add_finite(
+                &mut jac_off[e - 1],
+                -k,
+                "nonlinear Jacobian off-diagonal",
+                e - 1,
+            )?;
+        }
+        // Lumped nonlinear + load terms.
+        let half_width = 0.5 * h;
+        if e >= 1 {
+            add_finite(
+                &mut resid[e - 1],
+                half_width * u[e].powi(3),
+                "nonlinear cubic residual",
+                e - 1,
+            )?;
+            add_finite(
+                &mut jac_diag[e - 1],
+                half_width * 3.0 * u[e] * u[e],
+                "nonlinear cubic Jacobian",
+                e - 1,
+            )?;
+        }
+        if e < interior {
+            add_finite(
+                &mut resid[e],
+                half_width * u[e + 1].powi(3),
+                "nonlinear cubic residual",
+                e,
+            )?;
+            add_finite(
+                &mut jac_diag[e],
+                half_width * 3.0 * u[e + 1] * u[e + 1],
+                "nonlinear cubic Jacobian",
+                e,
+            )?;
+        }
+        for (gx, gw) in gauss5(x0, x1) {
+            let forcing = problem.f.eval(gx) + problem.u.eval(gx).powi(3);
+            let phi_left = (x1 - gx) / h;
+            let phi_right = (gx - x0) / h;
+            if !gx.is_finite()
+                || !gw.is_finite()
+                || !forcing.is_finite()
+                || !phi_left.is_finite()
+                || !phi_right.is_finite()
+            {
+                return Err(non_finite("nonlinear load quadrature", Some(e)));
+            }
             if e >= 1 {
-                resid[e - 1] -= slope_term;
-                jac_diag[e - 1] += k;
+                add_finite(
+                    &mut resid[e - 1],
+                    -gw * forcing * phi_left,
+                    "nonlinear load residual",
+                    e - 1,
+                )?;
             }
             if e < interior {
-                resid[e] += slope_term;
-                jac_diag[e] += k;
+                add_finite(
+                    &mut resid[e],
+                    -gw * forcing * phi_right,
+                    "nonlinear load residual",
+                    e,
+                )?;
             }
-            if e >= 1 && e < interior {
-                jac_off[e - 1] -= k;
-            }
-            // Lumped nonlinear + load terms.
-            let hl = 0.5 * h;
-            if e >= 1 {
-                resid[e - 1] += hl * u[e].powi(3);
-                jac_diag[e - 1] += hl * 3.0 * u[e] * u[e];
-            }
-            if e < interior {
-                resid[e] += hl * u[e + 1].powi(3);
-                jac_diag[e] += hl * 3.0 * u[e + 1] * u[e + 1];
-            }
-            for (gx, gw) in gauss5(x0, x1) {
-                let fv = problem.f.eval(gx) + problem.u.eval(gx).powi(3);
-                let phi_l = (x1 - gx) / h;
-                let phi_r = (gx - x0) / h;
-                if e >= 1 {
-                    resid[e - 1] -= gw * fv * phi_l;
-                }
-                if e < interior {
-                    resid[e] -= gw * fv * phi_r;
-                }
-            }
-        }
-        let norm: f64 = resid.iter().map(|r| r * r).sum::<f64>().sqrt();
-        if norm < 1e-10 {
-            break;
-        }
-        iters += 1;
-        // Thomas solve J δ = −R.
-        let rhs: Vec<f64> = resid.iter().map(|r| -r).collect();
-        let mut c = vec![0.0; interior];
-        let mut d = vec![0.0; interior];
-        c[0] = if interior > 1 {
-            jac_off[0] / jac_diag[0]
-        } else {
-            0.0
-        };
-        d[0] = rhs[0] / jac_diag[0];
-        for i in 1..interior {
-            let mm = jac_diag[i] - jac_off[i - 1] * c[i - 1];
-            if i < interior - 1 {
-                c[i] = jac_off[i] / mm;
-            }
-            d[i] = (rhs[i] - jac_off[i - 1] * d[i - 1]) / mm;
-        }
-        let mut delta = vec![0.0; interior];
-        delta[interior - 1] = d[interior - 1];
-        for i in (0..interior - 1).rev() {
-            delta[i] = d[i] - c[i] * delta[i + 1];
-        }
-        for i in 0..interior {
-            u[i + 1] += delta[i];
         }
     }
-    (u, iters)
+    let mut squared_norm = 0.0;
+    for (index, value) in resid.iter().enumerate() {
+        let updated = value.mul_add(*value, squared_norm);
+        if !updated.is_finite() {
+            return Err(non_finite("nonlinear residual norm", Some(index)));
+        }
+        squared_norm = updated;
+    }
+    let norm = squared_norm.sqrt();
+    if norm.is_finite() {
+        Ok(norm)
+    } else {
+        Err(non_finite("nonlinear residual norm", None))
+    }
+}
+
+/// Newton solve of the toy nonlinear class `−u″ + u³ = f` from a conforming
+/// `start`. Finite nonconvergence is explicit in the returned report.
+///
+/// # Errors
+/// Returns [`Fem1dError`] for malformed inputs, excessive work, allocation
+/// failure, non-finite arithmetic, or an unusable Thomas pivot.
+#[allow(clippy::too_many_lines)]
+pub fn solve_nonlinear(
+    problem: &MmsProblem,
+    start: &[f64],
+    max_iter: u32,
+) -> Result<NonlinearSolveReport, Fem1dError> {
+    validate_problem(problem)?;
+    validate_candidate(problem, start, "start")?;
+    if max_iter > MAX_FEM1D_NEWTON_ITERATIONS {
+        return Err(Fem1dError::ResourceLimit {
+            resource: "Newton iterations",
+            requested: max_iter as usize,
+            limit: MAX_FEM1D_NEWTON_ITERATIONS as usize,
+        });
+    }
+    let passes = (max_iter as usize)
+        .checked_add(1)
+        .ok_or(Fem1dError::WorkBudgetExceeded {
+            stage: "nonlinear solve",
+            estimated: None,
+            limit: MAX_FEM1D_WORK_UNITS,
+        })?;
+    let per_cell = problem
+        .u
+        .0
+        .len()
+        .checked_add(problem.f.0.len())
+        .and_then(|polynomial_work| polynomial_work.checked_mul(5))
+        .and_then(|polynomial_work| polynomial_work.checked_add(32))
+        .ok_or(Fem1dError::WorkBudgetExceeded {
+            stage: "nonlinear solve",
+            estimated: None,
+            limit: MAX_FEM1D_WORK_UNITS,
+        })?;
+    validate_work(
+        "nonlinear solve",
+        &[problem.mesh.len() - 1, passes, per_cell],
+    )?;
+
+    let interior = problem.mesh.len() - 2;
+    let mut u = try_copy_slice("nonlinear start", start)?;
+    let mut resid = try_zeroed("nonlinear residual", interior)?;
+    let mut jac_diag = try_zeroed("nonlinear Jacobian diagonal", interior)?;
+    let mut jac_off = try_zeroed(
+        "nonlinear Jacobian off-diagonal",
+        interior.saturating_sub(1),
+    )?;
+    let mut rhs = try_zeroed("nonlinear right-hand side", interior)?;
+    let mut c = try_zeroed("nonlinear Thomas upper factors", interior)?;
+    let mut d = try_zeroed("nonlinear Thomas right-hand side", interior)?;
+    let mut delta = try_zeroed("nonlinear Newton update", interior)?;
+
+    let mut residual_norm =
+        assemble_nonlinear(problem, &u, &mut resid, &mut jac_diag, &mut jac_off)?;
+    if residual_norm < NEWTON_RESIDUAL_TOLERANCE {
+        return Ok(NonlinearSolveReport {
+            solution: u,
+            iterations: 0,
+            residual_norm,
+            converged: true,
+        });
+    }
+    for iteration in 1..=max_iter {
+        for (right, residual) in rhs.iter_mut().zip(&resid) {
+            *right = -*residual;
+        }
+        solve_tridiagonal_into(
+            &jac_off,
+            &jac_diag,
+            &rhs,
+            &mut c,
+            &mut d,
+            &mut delta,
+            "nonlinear Newton solve",
+        )?;
+        for (index, update) in delta.iter().copied().enumerate() {
+            let updated = u[index + 1] + update;
+            if !updated.is_finite() {
+                return Err(non_finite("nonlinear solution update", Some(index + 1)));
+            }
+            u[index + 1] = updated;
+        }
+        residual_norm = assemble_nonlinear(problem, &u, &mut resid, &mut jac_diag, &mut jac_off)?;
+        if residual_norm < NEWTON_RESIDUAL_TOLERANCE {
+            return Ok(NonlinearSolveReport {
+                solution: u,
+                iterations: iteration,
+                residual_norm,
+                converged: true,
+            });
+        }
+    }
+    Ok(NonlinearSolveReport {
+        solution: u,
+        iterations: max_iter,
+        residual_norm,
+        converged: false,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_problem(mesh: Vec<f64>) -> MmsProblem {
+        MmsProblem::new("fem1d-test", Poly(vec![0.0, 1.0, -1.0]), mesh)
+    }
+
+    #[test]
+    fn malformed_public_inputs_refuse_before_indexing() {
+        for mesh in [Vec::new(), vec![0.0]] {
+            let problem = test_problem(mesh);
+            assert!(matches!(
+                solve_p1(&problem),
+                Err(Fem1dError::ResourceLimit {
+                    resource: "mesh nodes",
+                    ..
+                })
+            ));
+            assert!(matches!(
+                solve_nonlinear(&problem, &[], 1),
+                Err(Fem1dError::ResourceLimit {
+                    resource: "mesh nodes",
+                    ..
+                })
+            ));
+            assert!(matches!(
+                true_energy_error(&problem, &[]),
+                Err(Fem1dError::ResourceLimit {
+                    resource: "mesh nodes",
+                    ..
+                })
+            ));
+        }
+
+        let problem = test_problem(vec![0.0, 0.5, 1.0]);
+        for values in [&[0.0, 0.0][..], &[0.0, 0.0, 0.0, 0.0][..]] {
+            assert!(matches!(
+                solve_nonlinear(&problem, values, 1),
+                Err(Fem1dError::CandidateLength { field: "start", .. })
+            ));
+            assert!(matches!(
+                true_energy_error(&problem, values),
+                Err(Fem1dError::CandidateLength {
+                    field: "candidate",
+                    ..
+                })
+            ));
+        }
+        assert!(matches!(
+            solve_nonlinear(&problem, &[1.0, 0.0, 0.0], 1),
+            Err(Fem1dError::CandidateBoundary { field: "start" })
+        ));
+        assert!(matches!(
+            solve_nonlinear(&problem, &[0.0, f64::NAN, 0.0], 1),
+            Err(Fem1dError::NonFiniteCandidate { field: "start", .. })
+        ));
+
+        let duplicate = test_problem(vec![0.0, 0.5, 0.5, 1.0]);
+        assert!(matches!(
+            solve_p1(&duplicate),
+            Err(Fem1dError::NonIncreasingMeshCell { .. })
+        ));
+        let mut tampered = problem.clone();
+        tampered.f.0[0] = 123.0;
+        assert!(matches!(
+            solve_p1(&tampered),
+            Err(Fem1dError::DerivedPolynomialMismatch { field: "f" })
+        ));
+    }
+
+    #[test]
+    fn nonlinear_convergence_identity_is_explicit() {
+        let problem = test_problem(vec![0.0, 0.5, 1.0]);
+        let zero = [0.0, 0.0, 0.0];
+        let zero_budget = solve_nonlinear(&problem, &zero, 0).expect("finite initial residual");
+        assert!(!zero_budget.converged);
+        assert_eq!(zero_budget.iterations, 0);
+        assert!(zero_budget.residual_norm >= NEWTON_RESIDUAL_TOLERANCE);
+        assert!(matches!(
+            require_converged(&zero_budget, "test solve"),
+            Err(Fem1dError::NonConverged {
+                stage: "test solve",
+                iterations: 0,
+                ..
+            })
+        ));
+
+        let solved = solve_nonlinear(&problem, &zero, 50).expect("bounded Newton solve");
+        assert!(solved.converged);
+        assert!(solved.residual_norm < NEWTON_RESIDUAL_TOLERANCE);
+        assert_eq!(solved.solution.len(), problem.mesh.len());
+        assert_eq!(solved.solution[0].to_bits(), 0.0_f64.to_bits());
+        assert_eq!(
+            solved.solution[solved.solution.len() - 1].to_bits(),
+            0.0_f64.to_bits()
+        );
+
+        assert!(matches!(
+            solve_nonlinear(&problem, &zero, MAX_FEM1D_NEWTON_ITERATIONS + 1),
+            Err(Fem1dError::ResourceLimit {
+                resource: "Newton iterations",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn gauss_constants_cover_independent_truth_brackets() {
+        let rule = gauss5(-1.0, 1.0);
+        let positive_constants = [
+            (
+                rule[4].0,
+                0x3fec_ff6c_e053_3a69,
+                0x3fec_ff6c_e053_3a69,
+                0x3fec_ff6c_e053_3a6a,
+            ),
+            (
+                rule[3].0,
+                0x3fe1_3b23_fd99_b705,
+                0x3fe1_3b23_fd99_b704,
+                0x3fe1_3b23_fd99_b705,
+            ),
+            (
+                rule[0].1,
+                0x3fce_539e_c36e_038c,
+                0x3fce_539e_c36e_038c,
+                0x3fce_539e_c36e_038d,
+            ),
+            (
+                rule[1].1,
+                0x3fde_a1da_25ae_415b,
+                0x3fde_a1da_25ae_415a,
+                0x3fde_a1da_25ae_415b,
+            ),
+            (
+                rule[2].1,
+                0x3fe2_3456_789a_bcdf,
+                0x3fe2_3456_789a_bcdf,
+                0x3fe2_3456_789a_bce0,
+            ),
+        ];
+        for (rounded, expected_bits, lower_bits, upper_bits) in positive_constants {
+            let lower = f64::from_bits(lower_bits);
+            let upper = f64::from_bits(upper_bits);
+            assert_eq!(rounded.to_bits(), expected_bits);
+            assert!(lower <= rounded && rounded <= upper);
+        }
+    }
+
+    #[test]
+    fn exact_boundary_sum_distinguishes_hidden_residue_from_true_cancellation() {
+        let hidden_residue = Poly(vec![0.0, 1.0e16, -1.0e16, 1.0]);
+        assert_eq!(hidden_residue.eval(1.0).to_bits(), 0.0_f64.to_bits());
+        assert!(
+            !hidden_residue.is_exactly_zero_at_one(),
+            "an absorbed exact residue is not a homogeneous trace"
+        );
+
+        let rounded_point = Poly(vec![0.0, 1.0, 1.0e16, -1.0e16, -1.0]);
+        assert_ne!(rounded_point.eval(1.0).to_bits(), 0.0_f64.to_bits());
+        assert!(
+            rounded_point.is_exactly_zero_at_one(),
+            "the exact binary-rational coefficient sum is authoritative"
+        );
+
+        let extremes = Poly(vec![
+            0.0,
+            f64::MAX,
+            -f64::MAX,
+            f64::MIN_POSITIVE,
+            -f64::MIN_POSITIVE,
+        ]);
+        assert!(extremes.is_exactly_zero_at_one());
+        assert!(!Poly(vec![0.0, f64::INFINITY, f64::NEG_INFINITY]).is_exactly_zero_at_one());
+    }
 }

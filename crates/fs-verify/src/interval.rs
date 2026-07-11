@@ -51,6 +51,17 @@ pub struct Iv {
 }
 
 impl Iv {
+    fn entire() -> Iv {
+        Iv {
+            lo: f64::NEG_INFINITY,
+            hi: f64::INFINITY,
+        }
+    }
+
+    fn is_valid_finite(self) -> bool {
+        self.lo.is_finite() && self.hi.is_finite() && self.lo <= self.hi
+    }
+
     /// The point interval.
     #[must_use]
     pub fn point(v: f64) -> Iv {
@@ -63,16 +74,20 @@ impl Iv {
         Iv { lo: 0.0, hi: 0.0 }
     }
 
-    /// True when either end is non-finite (the FAIL-CLOSED trigger).
+    /// True when the interval is non-finite or reversed (the FAIL-CLOSED
+    /// trigger).
     #[must_use]
     pub fn is_unbounded(&self) -> bool {
-        !self.lo.is_finite() || !self.hi.is_finite()
+        !self.is_valid_finite()
     }
 
     /// Outward-rounded sum.
     #[must_use]
     #[allow(clippy::should_implement_trait)] // deliberate: no operator sugar for rigor-bearing ops
     pub fn add(self, o: Iv) -> Iv {
+        if !self.is_valid_finite() || !o.is_valid_finite() {
+            return Iv::entire();
+        }
         Iv {
             lo: down(self.lo + o.lo),
             hi: up(self.hi + o.hi),
@@ -83,6 +98,9 @@ impl Iv {
     #[must_use]
     #[allow(clippy::should_implement_trait)]
     pub fn sub(self, o: Iv) -> Iv {
+        if !self.is_valid_finite() || !o.is_valid_finite() {
+            return Iv::entire();
+        }
         Iv {
             lo: down(self.lo - o.hi),
             hi: up(self.hi - o.lo),
@@ -93,6 +111,9 @@ impl Iv {
     #[must_use]
     #[allow(clippy::should_implement_trait)]
     pub fn mul(self, o: Iv) -> Iv {
+        if !self.is_valid_finite() || !o.is_valid_finite() {
+            return Iv::entire();
+        }
         let c = [
             self.lo * o.lo,
             self.lo * o.hi,
@@ -105,6 +126,28 @@ impl Iv {
         }
     }
 
+    /// Outward-rounded division by a strictly positive interval.
+    ///
+    /// An invalid, non-finite, or zero-containing divisor returns the entire
+    /// real line. Callers must fail closed on that unbounded result.
+    #[must_use]
+    pub fn div_pos(self, divisor: Iv) -> Iv {
+        if !self.lo.is_finite()
+            || !self.hi.is_finite()
+            || self.lo > self.hi
+            || !divisor.lo.is_finite()
+            || !divisor.hi.is_finite()
+            || divisor.lo <= 0.0
+            || divisor.lo > divisor.hi
+        {
+            return Iv::entire();
+        }
+        self.mul(Iv {
+            lo: down(1.0 / divisor.hi),
+            hi: up(1.0 / divisor.lo),
+        })
+    }
+
     /// Outward-rounded square (dependency-aware: never negative).
     #[must_use]
     pub fn sq(self) -> Iv {
@@ -115,10 +158,14 @@ impl Iv {
         }
     }
 
-    /// Outward-rounded square root (requires `lo ≥ 0`; clamps tiny
-    /// negative rounding residue at zero).
+    /// Outward-rounded square root. A wholly negative, reversed, or
+    /// non-finite input fails closed; a valid interval crossing zero clamps
+    /// its lower endpoint to zero.
     #[must_use]
     pub fn sqrt(self) -> Iv {
+        if !self.is_valid_finite() || self.hi < 0.0 {
+            return Iv::entire();
+        }
         Iv {
             lo: down(self.lo.max(0.0).sqrt()).max(0.0),
             hi: up(self.hi.max(0.0).sqrt()),
@@ -128,7 +175,9 @@ impl Iv {
     /// Outward-rounded scale by a positive point constant.
     #[must_use]
     pub fn scale_pos(self, s: f64) -> Iv {
-        debug_assert!(s > 0.0);
+        if !self.is_valid_finite() || !s.is_finite() || s <= 0.0 {
+            return Iv::entire();
+        }
         Iv {
             lo: down(self.lo * s),
             hi: up(self.hi * s),
@@ -163,5 +212,142 @@ mod tests {
         assert!(down(1.0) < 1.0 && up(1.0) > 1.0);
         assert!(down(0.0) < 0.0 && up(0.0) > 0.0);
         assert!(down(-2.5) < -2.5 && up(-2.5) > -2.5);
+    }
+
+    /// Direction-aware containment of the EXACT real truth `T = hi + resid`:
+    /// `resid > 0` ⇒ `T` exceeds `hi`, so a rigorous enclosure must reach
+    /// `up(hi)`; `resid < 0` ⇒ it must reach `down(hi)`. This is what actually
+    /// GATES the outward nudge — a plain `lo <= hi <= up_end` passes an
+    /// enclosure one ulp too narrow, i.e. an op that DROPPED its widen, which
+    /// is the verifier's entire rigor.
+    fn contains_truth(iv: Iv, hi: f64, resid: f64) -> bool {
+        let hi_ok = if resid > 0.0 {
+            iv.hi >= up(hi)
+        } else {
+            iv.hi >= hi
+        };
+        let lo_ok = if resid < 0.0 {
+            iv.lo <= down(hi)
+        } else {
+            iv.lo <= hi
+        };
+        lo_ok && hi_ok
+    }
+
+    fn lcg(seed: &mut u64) -> f64 {
+        *seed = seed
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        ((*seed >> 11) as f64) / (1u64 << 53) as f64 - 0.5
+    }
+
+    #[test]
+    fn every_op_rounds_strictly_outward_past_the_true_result() {
+        // The two tests above gate only `add`'s down-nudge and the `up`/`down`
+        // primitives; dropping the widen from sub/mul/sq/sqrt/scale_pos would
+        // keep them green while making the verifier's bounds UNSOUND by a ulp.
+        // This battery gates EVERY op in BOTH directions against an exact
+        // oracle: add/sub/mul/sq/scale_pos truths are two-sum / two-prod exact,
+        // so the residual's sign pins which neighbour the enclosure must reach;
+        // sqrt is checked by the exact sign of `root*root - p` (real sqrt(p) is
+        // irrational in general and must be strictly straddled).
+        use fs_math::dd::Dd;
+        let mut seed = 0x0051_A9EF_u64;
+        let mut checked = 0u64;
+        for _ in 0..20_000 {
+            let a = lcg(&mut seed) * 40.0;
+            let b = lcg(&mut seed) * 40.0;
+            let (da, db) = (Dd::from_f64(a), Dd::from_f64(b));
+            for (iv, dd) in [
+                (Iv::point(a).add(Iv::point(b)), da + db),
+                (Iv::point(a).sub(Iv::point(b)), da - db),
+                (Iv::point(a).mul(Iv::point(b)), da * db),
+                (Iv::point(a).sq(), da * da),
+            ] {
+                assert!(
+                    contains_truth(iv, dd.hi, dd.lo),
+                    "outward rounding lost the truth: {iv:?} vs {dd:?}"
+                );
+                checked += 1;
+            }
+            let divisor = b.abs() + 1e-3;
+            let quotient = a / divisor;
+            // For moderate finite inputs, FMA gives the sign of q*d-a without
+            // a second product rounding. That sign places the exact quotient
+            // strictly below or above q; unlike Dd division, this is not an
+            // approximate oracle being treated as exact.
+            let residual = quotient.mul_add(divisor, -a);
+            let quotient_iv = Iv::point(a).div_pos(Iv::point(divisor));
+            let division_ok = if residual > 0.0 {
+                quotient_iv.lo <= down(quotient)
+            } else if residual < 0.0 {
+                quotient_iv.hi >= up(quotient)
+            } else {
+                quotient_iv.lo <= quotient && quotient <= quotient_iv.hi
+            };
+            assert!(division_ok, "positive division lost the truth");
+            checked += 1;
+            let s = lcg(&mut seed).abs() + 1e-3;
+            let sc = da * Dd::from_f64(s);
+            assert!(
+                contains_truth(Iv::point(a).scale_pos(s), sc.hi, sc.lo),
+                "scale_pos lost the truth"
+            );
+            checked += 1;
+            // sqrt: `root = p.sqrt()` is correctly rounded, so real sqrt(p) sits
+            // within half a ulp of it and must be strictly straddled. `root² - p`
+            // fused (single rounding ⇒ exact sign) is OPPOSITE in sign to
+            // `real_sqrt(p) - root`.
+            let p = a.abs();
+            let root = p.sqrt();
+            let d = root.mul_add(root, -p);
+            let root_iv = Iv::point(p).sqrt();
+            let sqrt_ok = if d > 0.0 {
+                root_iv.lo <= down(root) // root overshoots ⇒ truth below root
+            } else if d < 0.0 {
+                root_iv.hi >= up(root) // root undershoots ⇒ truth above root
+            } else {
+                root_iv.lo <= root && root <= root_iv.hi // p is an exact square
+            };
+            assert!(
+                sqrt_ok,
+                "sqrt did not straddle sqrt({p}): {root_iv:?} root {root}"
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 140_000);
+    }
+
+    #[test]
+    fn positive_division_refuses_invalid_divisors() {
+        for divisor in [
+            Iv::point(0.0),
+            Iv { lo: -1.0, hi: 1.0 },
+            Iv::point(f64::INFINITY),
+            Iv {
+                lo: f64::NAN,
+                hi: 1.0,
+            },
+        ] {
+            assert!(Iv::point(1.0).div_pos(divisor).is_unbounded());
+        }
+    }
+
+    #[test]
+    fn invalid_public_domains_fail_closed_without_panicking() {
+        let reversed = Iv { lo: 2.0, hi: 1.0 };
+        assert!(reversed.is_unbounded());
+        assert!(reversed.add(Iv::point(1.0)).is_unbounded());
+        assert!(Iv::point(1.0).sub(reversed).is_unbounded());
+        assert!(reversed.mul(Iv::point(2.0)).is_unbounded());
+        assert!(reversed.sq().is_unbounded());
+        assert!(reversed.sqrt().is_unbounded());
+        assert!(Iv { lo: -2.0, hi: -1.0 }.sqrt().is_unbounded());
+        assert!(!Iv { lo: -1.0, hi: 4.0 }.sqrt().is_unbounded());
+
+        for scale in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(Iv::point(1.0).scale_pos(scale).is_unbounded());
+        }
+        assert!(reversed.scale_pos(2.0).is_unbounded());
     }
 }

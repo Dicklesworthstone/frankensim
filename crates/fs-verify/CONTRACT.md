@@ -17,29 +17,83 @@ quadrature.
 - `interval::Iv` — outward-rounded interval arithmetic: every op
   widens one ulp each direction (bit-nudge directed rounding), so
   enclosures are RIGOROUS, not to-nearest-plus-slack. Small on
-  purpose (`add/sub/mul/sq/sqrt/scale_pos`).
+  purpose (`add/sub/mul/div_pos/sq/sqrt/scale_pos`). Invalid or
+  zero-containing positive divisors, wholly negative square-root domains,
+  reversed intervals, and nonpositive/non-finite positive scales produce the
+  entire real line and therefore force verifier refusal.
 - `fem1d` — the v0 class testbed: P1 elements for `−u″ = f` on (0,1),
   polynomial manufactured solutions of degree ≤ 5 (so 5-point Gauss
   quadrature is MATHEMATICALLY exact for every integrand the verifier
-  meets — rigor rests on rounding alone), Thomas solves, a
-  high-resolution oracle, and the toy nonlinear class
-  (`−u″ + u³ = f`, Newton).
+  meets — rigor rests on rounding alone), fallible Thomas solves, a
+  fallible high-resolution oracle, and the toy nonlinear class
+  (`−u″ + u³ = f`, Newton). `Fem1dError` is the shared structured
+  validity boundary. Every operation revalidates the public problem
+  before indexing or allocation: canonical domain/BCs and derived
+  polynomials, finite strictly increasing mesh, exact nodal shape,
+  finite values, and bounded resources. v0 caps are 1,000,000 mesh
+  nodes, six polynomial coefficients (exact-solution degree at most
+  five), 10,000 Newton updates, 4,096
+  identity bytes, and 50,000,000 conservative scalar-work units per
+  synchronous call. Solver, refinement, ordering, and candidate work
+  vectors use fallible reserve. The degree-five envelope is
+  load-bearing: the equilibrated integrand squares an antiderivative
+  of degree `deg(u)-1`, so five-point Gauss exactness requires
+  `deg(u) <= 5` even though P1 load assembly alone admits higher degree.
+- `fem1d::solve_p1` and `fem1d::true_energy_error` return `Result`;
+  numerical failure cannot hide in a NaN/empty ordinary value. The
+  correctly rounded ordinary-f64 Gauss constants are independently
+  locked between adjacent-f64 truth brackets. `solve_nonlinear`
+  returns `NonlinearSolveReport { solution, iterations,
+  residual_norm, converged }`, checks finite assembly/update/pivots,
+  re-evaluates the residual after the last admitted update, and keeps
+  finite nonconvergence distinct from success. `max_iter=0` is an
+  initial-residual probe, not a zero-cost success.
 - `estimator::verify(problem, candidate, tolerance)` — THE VERIFIER:
   the equilibrated flux is `σ = c − F` (any `c` is sound because
   `σ′ = −f` exactly; the FREE CONSTANT is optimized in plain f64 for
-  TIGHTNESS — rigor from structure, tightness from optimization), and
-  the bound `‖σ − u_h′‖` is interval-evaluated. Accept ⟺
-  `bound.hi ≤ tolerance`; an accept carries `Color::Verified`; a
-  reject — or ANY unbounded/NaN enclosure — carries NOTHING (fail
-  closed, never a badge without a bound). Reports carry the
-  review-round-3 ledger fields (family id, flux hash, bound
-  endpoints, oracle error, effectivity, verdict, tolerance).
+  TIGHTNESS — rigor from structure, tightness from optimization). The
+  certified path intervalizes the candidate difference and division,
+  mesh subtraction and affine quadrature map, quadrature weights, and
+  every coefficient division in the exact antiderivative of the
+  authoritative forcing. Gauss nodes and weights use correctly rounded
+  full-precision literals, then widen one ulp; independent adjacent-f64
+  truth brackets lock that the irrational constants are enclosed. The
+  rounded public `big_f` is replay metadata
+  and a tightness aid, never silently treated as a point enclosure of
+  exact antiderivative coefficients. The bound `‖σ − u_h′‖` is then
+  interval-evaluated. Accept ⟺ `bound.hi ≤ tolerance`; an accept
+  carries `Color::Verified`; a reject carries no color.
+- Public admission precedes indexing or arithmetic. Meshes contain
+  `2..=1_000_000` finite, strictly increasing nodes with bit-canonical
+  `+0.0` and `1.0` endpoints. Candidates have exactly the mesh length,
+  finite values, and bit-canonical homogeneous `+0.0` endpoints.
+  Tolerances are finite and positive. Each polynomial is nonempty,
+  finite, and has at most six coefficients (degree at most five).
+  Manufactured `u(0)` is canonical `+0.0`; `u(1)` is checked by a bounded
+  exact binary superaccumulator over the stored finite f64 coefficients.
+  Point Horner can hide a nonzero residue, while interval containment only
+  proves that zero is possible, so neither is boundary authority. Exact
+  binary-rational cancellations remain admissible even when ordinary Horner
+  rounds to a nonzero value. Canonical `f = -u''` and its
+  zero-constant `big_f` are recomputed from `u` and must match the
+  public fields bit for bit.
+- `VerifierReport::refusal` carries a closed structured reason. A
+  refusal preserves the requested tolerance and estimator family but
+  returns `[-∞,+∞]`, `accept=false`, no color, and flux hash zero. A
+  valid finite reject instead has `refusal=None`. The flux hash binds
+  the selected constant and both recomputed polynomials. Ledger rows
+  JSON-escape problem names, encode non-finite numbers as `null`, and
+  distinguish `refused` from a valid `reject`.
 - `estimator::hierarchical_estimate` — the INDEPENDENT second family
   (refined-mesh comparison; not guaranteed; the falsifier's
-  cross-check, never a color source).
+  cross-check, never a color source). It is fallible and bounds the
+  doubled-mesh allocation before refinement.
 - `estimator::warm_start` — the honest nonlinear fallback: candidates
   are WARM STARTS with measured iteration savings and an ESTIMATED
-  color, never certificates (the R1 boundary).
+  color, never certificates (the R1 boundary). Both cold and warm
+  runs must explicitly converge; otherwise the call returns an error
+  and no savings record exists. `effectivity` likewise propagates
+  oracle/report failure instead of mapping NaN to the ideal value 1.
 
 - `zoo` (bead lmp4.2) — the PROPOSER ZOO behind one `propose()`
   trait: hot-swap `Registry` (register/deregister without touching
@@ -54,9 +108,17 @@ quadrature.
   (halved-mesh solve, linear prolongation, honest decline on tiny
   meshes). `quantize_f16` demonstrates the precision discipline:
   speculate LOW, verify HIGH — the certificate inherits the
-  VERIFIER's precision. `ZooTelemetry` tracks per-proposer per-regime
-  accept rates with the AUTO-DEMOTION hook (collapse ⇒ disabled in
-  that regime) and ledger rows.
+  VERIFIER's precision. Proposal construction and `speculate()` are
+  fallible: malformed queries, poisoned built-in cache coordinates or
+  vectors, allocation failure, and coarse-solve failure propagate
+  before an ordinary miss can be reported. The registry, neighbor
+  cache, and telemetry each admit at most 4,096 entries/keys; counter
+  overflow is atomic and structured. `ZooTelemetry` tracks
+  per-proposer per-regime accept rates with the AUTO-DEMOTION hook
+  (collapse ⇒ disabled in that regime) and ledger rows. First-pass
+  rejected candidates are retained behind a sealed outcome: neither
+  all-rejected warm starts nor accepted-run drift accounting invokes a
+  stateful proposer twice or forgets an earlier rejection.
 
 - `economics` (bead lmp4.3; COMPLEMENTARY to the standalone
   fs-spececo policy crate, which owns the abstract decide/telemetry/
@@ -77,7 +139,13 @@ quadrature.
   four-field schema amendment `(proposer_id, accepted, bound,
   iterations_saved)` stored in fs-ledger's v3 `speculation` extension
   table. Dashboards are kernel × regime × proposer with median
-  savings.
+  savings. Drift state admits at most 4,096 proposer/regime keys and
+  retains only the most recent 1,024 savings samples per key; recovery
+  clears stale savings. Policy scalars and evidence counts are
+  validated. The control loop itself returns `Result`; iteration caps
+  are checked before proposal work, and solver nonconvergence or
+  numerical refusal produces no cold/warm decision, savings telemetry,
+  or drift observation for the failed solve.
 
 ## Invariants
 
@@ -110,8 +178,9 @@ quadrature.
 9. Coarse-rung candidates accept at honest tolerances, reject at
    tight ones, and fp16-quantized candidates still verify (zoo-003).
 10. THE FALSIFIER: an adversarial surrogate lands ZERO incorrect
-    accepts, its rate collapse auto-demotes it, and demoted proposers
-    stop being consulted (zoo-004).
+    accepts despite satisfying the nodal boundary conditions, its rate
+    collapse auto-demotes it, and demoted proposers stop being consulted
+    (zoo-004).
 11. The economics loop stays sound end-to-end with per-proposer
     per-regime rows shipped to the ledger (zoo-005).
 12. Outright accepts ship without a solve; warm starts measure real
@@ -122,12 +191,48 @@ quadrature.
     hysteresis prevents flapping and genuine recovery re-promotes
     (econ-004); priors are conservative, decisions deterministic, and
     the dashboard ships via fs-obs (econ-005).
+14. Hostile public inputs — short and oversized meshes, invalid
+    domains/order, length mismatches, non-finite values, noncanonical
+    boundary data, invalid tolerances, excessive polynomial degree,
+    tampered derived polynomials, and invalid MMS endpoints — refuse
+    before compute with no evidence authority. Cancelling valid MMS
+    endpoints remain admissible, and hostile problem names cannot
+    inject ledger JSON (ver-007).
+15. The interval arithmetic battery independently gates positive
+    division using the sign of an FMA residual. A double-double oracle
+    separately proves that element width, midpoint, half-width,
+    candidate slope, mapped nodes, and mapped weights enclose the
+    exact values represented by their f64 inputs; removing input
+    widening fails the regression.
+16. fem1d public entry points reject empty/short/oversized meshes,
+    nodal shape/BC/non-finite errors, invalid canonical polynomial
+    state, reciprocal-width failure, work overflow, allocation
+    failure, and unusable pivots before returning an ordinary value.
+    A zero-update nonlinear run reports finite nonconvergence unless
+    its initial residual already satisfies the tolerance.
+17. Zoo and economics propagate malformed queries and finite
+    nonconvergence as errors. No failed cold/warm run can become a
+    solve count, iteration saving, drift observation, or dashboard row
+    (zoo-006, econ-006).
+18. Coarse-rung prolongation uses one monotone segment cursor, not a
+    full mesh search per fine node; a 4,097-node strongly nonuniform
+    regression preserves every injected coarse value bitwise
+    (zoo-008).
+19. Stateful proposers run once per speculation. All-rejected
+    economics consumes the retained first-pass candidate (econ-007),
+    while an outright winner preserves every earlier rejection in
+    drift telemetry (econ-009). Drift/zoo key counts, counters, rolling
+    savings windows, and policy inputs fail closed at fixed bounds.
 
 ## Error model
 
-Fail closed is the error model: no exceptions cross the boundary; an
-unevaluable bound is a REJECT with no color, never a panic and never
-an accept.
+Fail closed is the error model: no exceptions cross the boundary; a
+malformed input or unevaluable intermediate is a structured REFUSAL
+with an unbounded sentinel, zero hash, and no color, never a panic and
+never an accept. A well-formed finite bound above tolerance is a
+distinct, ordinary REJECT. Non-authority numerical APIs return
+`Fem1dError`; finite Newton nonconvergence remains explicit in the
+low-level report and is promoted to an error by every savings caller.
 
 ## Determinism class
 
@@ -139,8 +244,9 @@ deterministic-reduction contract when the tile-kernel form lands
 
 ## Cancellation behavior
 
-v0 solves are milliseconds-scale direct solves (no polling loops);
-the tiled/parallel form inherits fs-exec's checkpoint discipline.
+v0 calls are synchronous and bounded by mesh, iteration, and work
+caps, but they do not yet poll cancellation inside their loops. The
+tiled/parallel form inherits fs-exec's checkpoint discipline.
 
 ## Unsafe boundary
 
@@ -155,7 +261,9 @@ savings ≥ 1.5×) stay green.
 
 ## Conformance tests
 
-`tests/conformance.rs`, cases ver-001..ver-006 — JSON-line verdicts,
+`tests/conformance.rs`, cases ver-001..ver-007; `tests/zoo.rs`, cases
+zoo-001..zoo-008; `tests/economics.rs`, cases econ-001..econ-009; and
+the fem1d unit refusal/convergence/Gauss batteries. JSON-line verdicts,
 seeded LCG randomness, fs-obs events for the effectivity table and
 ledger rows. Any reimplementation must pass the suite unchanged.
 
@@ -167,6 +275,17 @@ ledger rows. Any reimplementation must pass the suite unchanged.
   Whitney machinery as the successor — the architecture (accept test,
   colors, falsifier, fail-closed) is class-independent and lands here
   unchanged.
+- The `u` endpoint check is manufactured-solution metadata
+  consistency, not a premise used to issue the PDE certificate. The
+  certificate is for the homogeneous-boundary problem defined by the
+  recomputed canonical forcing and the conforming candidate; it does
+  not claim that rounded Horner evaluation is symbolic algebra.
+- Phase 1 validates every operation but leaves `Poly` and
+  `MmsProblem::new` as open data containers for hostile-input testing.
+  Canonical construction, trailing-zero normalization, private
+  derived fields, and one shared cross-crate admission type are the
+  phase-2 identity migration tracked by `frankensim-oaxj`; callers
+  must not treat construction alone as admission.
 - Variable diffusion coefficients, non-polynomial data (with data-
   oscillation terms and explicit Poincaré constants), and quadrature
   ERROR bounds for transcendental integrands are the same successor.
