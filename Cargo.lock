@@ -1249,6 +1249,9 @@ dependencies = [
 [[package]]
 name = "fs-govern"
 version = "0.0.1"
+dependencies = [
+ "fs-blake3",
+]
 
 [[package]]
 name = "fs-grammar-e2e"

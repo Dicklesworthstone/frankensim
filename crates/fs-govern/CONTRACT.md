@@ -7,9 +7,10 @@ CI-gateable completeness audit.
 
 ## Purpose and layer
 
-Layer UTIL. Pure data + audit — no dependencies. Encodes the doctrine, the
-proposals, and the ten named risks, and audits that nothing survives
-unmeasured (design principle P8 / Governance Rule 2).
+Layer UTIL. Pure data + audit, with `fs-blake3` as its only dependency for
+canonical content identities. Encodes the doctrine, the proposals, and the ten
+named risks, and audits that nothing survives unmeasured (design principle P8 /
+Governance Rule 2).
 
 ## Crate registry (`crates` module)
 
@@ -26,8 +27,8 @@ unmeasured (design principle P8 / Governance Rule 2).
   statement); `rules() -> &[GovernanceRule]` — the four governance rules
   (number, name, statement).
 - `proposals() -> &[Proposal]` — the nineteen proposals in composite (Mean)
-  order, each `{ id, name, phase, mean, kill_metric, owning_bead, instrumented
-  }`. `governance_audit() -> GovernanceAudit` enforces that every proposal
+  order, each `{ id, name, phase, mean, kill_metric, owning_bead, receipt }`.
+  `governance_audit() -> GovernanceAudit` enforces that every proposal
   DECLARES a kill metric AND an owning bead (Governance Rule 2), counting how
   many are instrumented; `proposals_json()` emits the deterministic
   machine-readable record.
@@ -35,20 +36,29 @@ unmeasured (design principle P8 / Governance Rule 2).
 ## Public types and semantics
 
 - `RiskId` (`R1`..`R10`) with `RiskId::ALL` and `code()`.
+- `InstrumentationReceipt::new(subject, dashboard, verifier,
+  evidence_artifact, verified_day)` validates mandatory provenance and returns
+  an opaque receipt. Its private fields prevent accidental identity drift;
+  accessors expose the dashboard, verifier, evidence-artifact content hash,
+  verification day, and receipt identity. `receipt_identity()` is the replay
+  oracle.
 - `Risk { id, name, description, mitigation, early_warning, threshold, owner,
-  instrumented }` — `early_warning` is the metric that makes the risk visible
-  before it is fatal; `owner` is the bead that owns the mitigation;
-  `instrumented` is whether that metric is live on a dashboard (default
-  `false` — the honest baseline).
+  receipt }` — `early_warning` is the metric that makes the risk visible before
+  it is fatal; `owner` is the bead that owns the mitigation; `receipt` is the
+  optional evidence-bearing instrumentation assertion (`None` is the honest
+  baseline).
 - `register() -> &'static [Risk]` — the canonical R1–R10 in order;
   `risk(id) -> &'static Risk` for lookup.
-- `audit() -> RiskAudit` / `audit_slice(&[Risk]) -> RiskAudit` — checks every
+- `audit(today_day) -> RiskAudit` / `audit_slice(&[Risk], today_day) ->
+  RiskAudit` — checks every
   risk has a non-empty early-warning metric AND an owner, counts how many are
-  instrumented, and lists `(RiskId, reason)` gaps. `RiskAudit::ok()` is true
-  iff there are no gaps.
-- `to_json() -> String` — a deterministic machine-readable JSON array (one
-  object per risk: id, name, early_warning, threshold, owner, instrumented,
-  mitigation) with JSON-escaped strings, for dashboards / CI gates.
+  instrumented, and separately lists schema gaps and operational receipt gaps.
+  `declared_schema_ok()` and `operationally_managed()` deliberately expose the
+  two different verdicts.
+- `to_json(today_day) -> String` — a deterministic machine-readable JSON array
+  with JSON-escaped strings for dashboards / CI gates. Every row carries the
+  unambiguous instrumentation status and either `receipt:null` or the complete
+  receipt provenance (dashboard, day, verifier, evidence artifact, identity).
 
 ## Trust boundary: declaration vs live operation (bead xpck.9)
 
@@ -58,29 +68,39 @@ The audits report TWO verdicts, never one: `declared_schema_ok()`
 single `ok()` collapsed these and rendered the zero-instrumented
 registry as green — the false-green this bead removed. Instrumentation
 is EVIDENCE, not a flag: an entry counts as verified only through an
-`InstrumentationReceipt` whose FNV fingerprint authenticates over
-(subject id, dashboard, verified day), that is not dated in the
-future, and that is younger than `MAX_RECEIPT_AGE_DAYS` (45) — stale
-or fingerprint-inconsistent receipts DEMOTE coverage
-(`Stale`/`BadReceipt` in the exact-gap lists) and can never be
-outweighed by flipping a boolean. Audits and JSON take `today_day`
-(days since 2026-01-01) explicitly, so verdicts are deterministic and
-replayable. Migration: `Risk::instrumented`/`Proposal::instrumented`
-(bool) became `receipt: Option<InstrumentationReceipt>`; JSON emits
-`"instrumentation":"verified|stale|bad-receipt|uninstrumented"` in
-place of the boolean; no other crate consumed the old fields
-(verified at migration).
+`InstrumentationReceipt` that binds the subject id, dashboard locator,
+verifier identity, supporting evidence-artifact content hash, and verification
+day. The canonical encoding uses tagged, `u64`-length-prefixed fields under
+BLAKE3 derive-key domain
+`frankensim.fs-govern.instrumentation-receipt.v1`; all receipt fields are
+private. Subject replay, a future verification date, missing provenance, stale
+evidence, or an inconsistent identity fails closed (`BadReceipt`/`Stale`).
+Audits and JSON take `today_day` (days since 2026-01-01) explicitly, so verdicts
+are deterministic and replayable.
+
+The BLAKE3 root is an **unkeyed content identity, not an authentication tag or
+signature**. It provides collision-resistant identity and accidental-tamper
+detection; it does not prove that the dashboard was live, that `verifier` was
+authorized, or that the evidence artifact is scientifically adequate. The
+canonical registry remains code-reviewed governance data, and issuer trust /
+artifact checking are deployment policy. Calling a public hash an
+"authentication fingerprint" would overstate this crate's security contract.
 
 ## Invariants
 
-- The register is complete: `audit().ok()` is true and `audit().complete == 10`.
+- The register declares all ten risks while honestly remaining operationally
+  red until receipts are installed.
 - `register()` and `RiskId::ALL` share the same order.
 - `to_json()` and `audit()` are deterministic.
+- Receipt identities change when any semantic field changes, are bound to one
+  governed subject, and cannot be mutated through the safe public API.
 
 ## Error model
 
-None (pure data + total functions); the audit reports gaps as data, it does
-not error.
+`InstrumentationReceipt::new` returns `ReceiptError` for an empty subject,
+dashboard, or verifier. Audits report missing, stale, future-dated,
+subject-mismatched, and otherwise inconsistent receipts as data and fail
+closed; they do not panic or silently promote coverage.
 
 ## Determinism class
 
@@ -100,11 +120,14 @@ None.
 
 ## Conformance tests
 
-`tests/register.rs` (Part V, 8 cases): all ten risks present + ordered;
+`tests/register.rs` (Part V, 10 cases): all ten risks present + ordered;
 every risk has a metric/owner/mitigation; owners are real bead ids; lookup;
 the canonical audit is complete with an honest zero-instrumented baseline;
 `audit_slice` detects missing metric AND owner on an incomplete entry (the
-audit is not vacuous); JSON is well-formed + complete; determinism.
+audit is not vacuous); subject-replay/future/stale receipts fail closed;
+missing provenance is rejected; changing subject, dashboard, verifier,
+evidence artifact, or day changes the identity; JSON includes explicit receipt
+provenance; determinism.
 
 `tests/governance.rs` (8 cases): eight principles P1–P8; four rules numbered
 1–4 (Rule 2 = kill-criteria enforcement); all nineteen proposals present with
@@ -116,9 +139,11 @@ well-formed + deterministic.
 ## No-claim boundaries
 
 - This crate encodes the risk register as governance DATA; it does not itself
-  measure the early-warning metrics — a dashboard/CI wires them and flips
-  `instrumented`. The audit enforces that each risk DECLARES a metric + owner,
-  not that the metric is currently green.
+  measure an early-warning metric, fetch an evidence artifact, authenticate a
+  verifier, or prove dashboard liveness. A dashboard/CI supplies that evidence
+  and deployment policy establishes issuer authority. The audit enforces that
+  each risk declares a metric + owner and fails closed when receipt evidence is
+  absent or malformed; it cannot establish the truth of an issuer's assertion.
 - The addendum's design principles (P1–P8), the four governance rules, and the
   per-proposal kill criteria are the sibling doctrine bead's scope; this crate
   is the risk register (R1–R10) only.

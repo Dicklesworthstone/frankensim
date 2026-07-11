@@ -1,5 +1,5 @@
 //! fs-govern — the addendum's machine-readable RISK REGISTER (plan addendum,
-//! Part V). Layer: UTIL (pure data + audit; no dependencies).
+//! Part V). Layer: UTIL (pure data + audit; `fs-blake3` identity dependency).
 //!
 //! Design principle P8 says the plan itself must be falsifiable, and
 //! Governance Rule 2 says a risk (or kill criterion) whose measurement was
@@ -13,8 +13,8 @@
 //!
 //! The register is the canonical record; [`to_json`] emits it for dashboards.
 //! Instrumentation is EVIDENCE, not a flag (bead xpck.9): a risk counts as
-//! operationally managed only when it carries a fresh, fingerprint-
-//! authenticated [`InstrumentationReceipt`]; every receipt is `None` today
+//! operationally managed only when it carries a fresh, content-identified
+//! [`InstrumentationReceipt`]; every receipt is `None` today
 //! (the honest baseline), so the register is schema-complete but
 //! operationally RED — and the audits say both things separately.
 //!
@@ -29,6 +29,7 @@ pub mod proposals;
 
 pub use crates::{AddendumCrate, CrateAudit, addendum_crates, crate_audit, crates_json};
 pub use doctrine::{GovernanceRule, PRINCIPLES, Principle, RULES, principles, rules};
+pub use fs_blake3::ContentHash;
 pub use proposals::{GovernanceAudit, Proposal, governance_audit, proposals, proposals_json};
 
 /// The ten addendum risks (Part V).
@@ -89,62 +90,196 @@ impl RiskId {
     }
 }
 
-/// A SELF-AUTHENTICATING instrumentation receipt (bead xpck.9): the
-/// claim "this metric is live on a dashboard" carried as evidence, not
-/// as a mutable boolean. A receipt names the dashboard, records the
-/// day the feed was last verified live, and carries an integrity
-/// fingerprint over (subject, dashboard, day) — flipping a flag
-/// without producing a consistent receipt cannot turn an audit green,
-/// and receipts age out (stale dashboards demote coverage).
+/// A content-identified instrumentation receipt (bead xpck.9): the claim
+/// "this metric is live on a dashboard" carried with its supporting evidence,
+/// not as a mutable boolean.
+///
+/// The fields are private so a caller cannot accidentally mutate a receipt
+/// without invalidating its identity. The identity binds the subject,
+/// dashboard, verifier, evidence artifact, and verification day. It is an
+/// unkeyed content identity, not a signature: issuer authorization and the
+/// scientific adequacy of the referenced evidence remain external policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InstrumentationReceipt {
     /// Dashboard locator (non-empty).
-    pub dashboard: &'static str,
+    dashboard: &'static str,
     /// Day the feed was last verified live (days since 2026-01-01).
-    pub verified_day: u32,
-    /// Must equal [`receipt_fingerprint`] over (subject, dashboard,
-    /// verified_day).
-    pub fingerprint: u64,
+    verified_day: u32,
+    /// Identity of the person, service, or policy that performed the check.
+    verifier: &'static str,
+    /// Content address of the evidence supporting the live-feed check.
+    evidence_artifact: ContentHash,
+    /// Domain-separated identity of every preceding field plus the subject.
+    identity: ContentHash,
 }
 
 /// Receipts older than this demote to [`InstrumentationStatus::Stale`].
 pub const MAX_RECEIPT_AGE_DAYS: u32 = 45;
 
-/// The integrity fingerprint a valid receipt must carry (FNV-1a over
-/// the subject id, dashboard locator, and verification day).
-#[must_use]
-pub fn receipt_fingerprint(subject: &str, dashboard: &str, verified_day: u32) -> u64 {
-    let mut acc: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in subject
-        .as_bytes()
-        .iter()
-        .chain([0xfeu8].iter())
-        .chain(dashboard.as_bytes())
-        .chain([0xfeu8].iter())
-        .chain(verified_day.to_le_bytes().iter())
-    {
-        acc ^= u64::from(*b);
-        acc = acc.wrapping_mul(0x0000_0100_0000_01b3);
+/// Domain for canonical instrumentation-receipt identities.
+pub const INSTRUMENTATION_RECEIPT_IDENTITY_DOMAIN: &str =
+    "frankensim.fs-govern.instrumentation-receipt.v1";
+
+/// Why an instrumentation receipt could not be constructed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReceiptError {
+    /// The governed risk or proposal id was empty.
+    EmptySubject,
+    /// The dashboard locator was empty.
+    EmptyDashboard,
+    /// The verifier identity was empty.
+    EmptyVerifier,
+}
+
+impl core::fmt::Display for ReceiptError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            ReceiptError::EmptySubject => "instrumentation receipt subject is empty",
+            ReceiptError::EmptyDashboard => "instrumentation receipt dashboard is empty",
+            ReceiptError::EmptyVerifier => "instrumentation receipt verifier is empty",
+        })
     }
-    acc
+}
+
+fn push_identity_field(out: &mut Vec<u8>, tag: u8, bytes: &[u8]) {
+    out.push(tag);
+    let len = u64::try_from(bytes.len()).expect("field length fits in u64");
+    out.extend_from_slice(&len.to_le_bytes());
+    out.extend_from_slice(bytes);
+}
+
+/// Derive the canonical content identity for an instrumentation receipt.
+///
+/// Every variable-length field is tagged and length-prefixed, and BLAKE3's
+/// derive-key mode separates this identity from all other artifact types.
+#[must_use]
+pub fn receipt_identity(
+    subject: &str,
+    dashboard: &str,
+    verifier: &str,
+    evidence_artifact: ContentHash,
+    verified_day: u32,
+) -> ContentHash {
+    let mut canonical = Vec::new();
+    push_identity_field(&mut canonical, 1, subject.as_bytes());
+    push_identity_field(&mut canonical, 2, dashboard.as_bytes());
+    push_identity_field(&mut canonical, 3, verifier.as_bytes());
+    push_identity_field(&mut canonical, 4, evidence_artifact.as_bytes());
+    push_identity_field(&mut canonical, 5, &verified_day.to_le_bytes());
+    fs_blake3::hash_domain(INSTRUMENTATION_RECEIPT_IDENTITY_DOMAIN, &canonical)
+}
+
+impl InstrumentationReceipt {
+    /// Construct a sealed receipt whose identity binds all semantic fields.
+    pub fn new(
+        subject: &str,
+        dashboard: &'static str,
+        verifier: &'static str,
+        evidence_artifact: ContentHash,
+        verified_day: u32,
+    ) -> Result<Self, ReceiptError> {
+        if subject.trim().is_empty() {
+            return Err(ReceiptError::EmptySubject);
+        }
+        if dashboard.trim().is_empty() {
+            return Err(ReceiptError::EmptyDashboard);
+        }
+        if verifier.trim().is_empty() {
+            return Err(ReceiptError::EmptyVerifier);
+        }
+        Ok(Self {
+            dashboard,
+            verified_day,
+            verifier,
+            evidence_artifact,
+            identity: receipt_identity(
+                subject,
+                dashboard,
+                verifier,
+                evidence_artifact,
+                verified_day,
+            ),
+        })
+    }
+
+    /// Dashboard locator asserted by this receipt.
+    #[must_use]
+    pub fn dashboard(self) -> &'static str {
+        self.dashboard
+    }
+
+    /// Day on which the dashboard feed was checked.
+    #[must_use]
+    pub fn verified_day(self) -> u32 {
+        self.verified_day
+    }
+
+    /// Identity of the verifier that asserted the live-feed check.
+    #[must_use]
+    pub fn verifier(self) -> &'static str {
+        self.verifier
+    }
+
+    /// Content address of the supporting evidence artifact.
+    #[must_use]
+    pub fn evidence_artifact(self) -> ContentHash {
+        self.evidence_artifact
+    }
+
+    /// Canonical content identity of this receipt.
+    #[must_use]
+    pub fn identity(self) -> ContentHash {
+        self.identity
+    }
+
+    /// Whether this receipt's sealed identity is valid for `subject`.
+    #[must_use]
+    pub fn is_consistent_for(self, subject: &str) -> bool {
+        self.identity
+            == receipt_identity(
+                subject,
+                self.dashboard,
+                self.verifier,
+                self.evidence_artifact,
+                self.verified_day,
+            )
+    }
+
+    /// Deterministic receipt provenance for dashboards and ledger records.
+    #[must_use]
+    pub fn to_json(self) -> String {
+        use core::fmt::Write as _;
+        let mut out = String::new();
+        write!(
+            out,
+            "{{\"dashboard\":\"{}\",\"verified_day\":{},\"verifier\":\"{}\",\"evidence_artifact\":\"{}\",\"identity\":\"{}\"}}",
+            json_escape(self.dashboard),
+            self.verified_day,
+            json_escape(self.verifier),
+            self.evidence_artifact,
+            self.identity,
+        )
+        .expect("writing to a String is infallible");
+        out
+    }
 }
 
 /// Operational status of one subject's instrumentation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstrumentationStatus {
-    /// Receipt present, fingerprint-consistent, fresh.
+    /// Receipt present, content-identity-consistent, and fresh.
     Verified {
         /// Days since the feed was verified live.
         age_days: u32,
     },
-    /// Receipt fingerprint-consistent but older than
+    /// Receipt content-identity-consistent but older than
     /// [`MAX_RECEIPT_AGE_DAYS`] — the dashboard may be dead.
     Stale {
         /// Days since the feed was verified live.
         age_days: u32,
     },
-    /// Receipt present but its fingerprint does not authenticate (a
-    /// flipped flag without evidence, or tampering).
+    /// Receipt present but its content identity is inconsistent with the
+    /// governed subject, or its verification date is in the future.
     BadReceipt,
     /// No receipt at all.
     Uninstrumented,
@@ -164,7 +299,7 @@ impl InstrumentationStatus {
 }
 
 /// Judge one subject's receipt as of `today_day` (days since
-/// 2026-01-01). Fail-closed: only a fingerprint-consistent, non-empty,
+/// 2026-01-01). Fail-closed: only a content-identity-consistent, non-empty,
 /// fresh receipt is [`InstrumentationStatus::Verified`].
 #[must_use]
 pub fn instrumentation_status(
@@ -176,7 +311,8 @@ pub fn instrumentation_status(
         return InstrumentationStatus::Uninstrumented;
     };
     if r.dashboard.trim().is_empty()
-        || r.fingerprint != receipt_fingerprint(subject, r.dashboard, r.verified_day)
+        || r.verifier.trim().is_empty()
+        || !r.is_consistent_for(subject)
         || r.verified_day > today_day
     {
         return InstrumentationStatus::BadReceipt;
@@ -341,8 +477,8 @@ pub struct RiskAudit {
     pub total: usize,
     /// Risks that DECLARE both a non-empty early-warning metric and an owner.
     pub declared: usize,
-    /// Risks whose early-warning metric is VERIFIED live (fresh,
-    /// authenticated receipt).
+    /// Risks whose early-warning metric carries a fresh, identity-consistent
+    /// receipt with verifier and evidence provenance.
     pub verified_instrumented: usize,
     /// `(risk, reason)` for every declaration gap.
     pub schema_gaps: Vec<(RiskId, &'static str)>,
@@ -359,8 +495,8 @@ impl RiskAudit {
         self.schema_gaps.is_empty()
     }
 
-    /// Is every risk OPERATIONALLY managed — declared AND its metric
-    /// verified live by a fresh authenticated receipt? Fails closed on
+    /// Is every risk OPERATIONALLY managed — declared AND its metric carries
+    /// a fresh, identity-consistent receipt? Fails closed on
     /// any uninstrumented, stale, or bad-receipt entry. "Unmeasured
     /// survival is not survival."
     #[must_use]
@@ -415,6 +551,8 @@ pub fn audit_slice(risks: &[Risk], today_day: u32) -> RiskAudit {
 
 /// Escape a string for embedding in JSON.
 pub(crate) fn json_escape(s: &str) -> String {
+    use core::fmt::Write as _;
+
     let mut out = String::with_capacity(s.len() + 2);
     for c in s.chars() {
         match c {
@@ -423,6 +561,9 @@ pub(crate) fn json_escape(s: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\t' => out.push_str("\\t"),
             '\r' => out.push_str("\\r"),
+            '\u{0000}'..='\u{001f}' => {
+                write!(out, "\\u{:04x}", u32::from(c)).expect("writing to a String is infallible");
+            }
             _ => out.push(c),
         }
     }
@@ -445,13 +586,15 @@ pub fn to_json(today_day: u32) -> String {
         let status = instrumentation_status(r.id.code(), r.receipt.as_ref(), today_day);
         write!(
             out,
-            "{{\"id\":\"{}\",\"name\":\"{}\",\"early_warning\":\"{}\",\"threshold\":\"{}\",\"owner\":\"{}\",\"instrumentation\":\"{}\",\"mitigation\":\"{}\"}}",
+            "{{\"id\":\"{}\",\"name\":\"{}\",\"early_warning\":\"{}\",\"threshold\":\"{}\",\"owner\":\"{}\",\"instrumentation\":\"{}\",\"receipt\":{},\"mitigation\":\"{}\"}}",
             r.id.code(),
             json_escape(r.name),
             json_escape(r.early_warning),
             json_escape(r.threshold),
             json_escape(r.owner),
             status.name(),
+            r.receipt
+                .map_or_else(|| "null".to_owned(), InstrumentationReceipt::to_json),
             json_escape(r.mitigation),
         )
         .expect("writing to a String is infallible");

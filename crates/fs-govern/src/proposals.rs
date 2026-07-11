@@ -219,8 +219,8 @@ pub struct GovernanceAudit {
     pub total: usize,
     /// Proposals that DECLARE both a kill metric and an owning bead.
     pub with_kill_metric_and_owner: usize,
-    /// Proposals whose kill metric is VERIFIED live (fresh,
-    /// authenticated receipt).
+    /// Proposals whose kill metric carries a fresh, identity-consistent
+    /// receipt with verifier and evidence provenance.
     pub verified_instrumented: usize,
     /// `(proposal id, reason)` for every declaration gap.
     pub schema_gaps: Vec<(&'static str, &'static str)>,
@@ -238,7 +238,7 @@ impl GovernanceAudit {
     }
 
     /// Is every proposal OPERATIONALLY managed — declared AND its kill
-    /// metric verified live by a fresh authenticated receipt? Fails
+    /// metric carries a fresh, identity-consistent receipt? Fails
     /// closed on any uninstrumented, stale, or bad-receipt entry: an
     /// uninstrumented kill measurement counts as killed or unmanaged,
     /// never as green.
@@ -250,7 +250,7 @@ impl GovernanceAudit {
 
 /// Audit the proposals as of `today_day` (days since 2026-01-01):
 /// declaration (non-empty kill metric AND owning bead) and live
-/// operation (fresh authenticated receipts) reported SEPARATELY; the
+/// operation (fresh, identity-consistent receipts) reported SEPARATELY; the
 /// operational verdict fails closed and lists exact gaps.
 #[must_use]
 pub fn governance_audit(today_day: u32) -> GovernanceAudit {
@@ -298,7 +298,7 @@ pub fn proposals_json(today_day: u32) -> String {
         let status = instrumentation_status(p.id, p.receipt.as_ref(), today_day);
         write!(
             out,
-            "{{\"id\":\"{}\",\"name\":\"{}\",\"phase\":\"{}\",\"mean\":{},\"kill_metric\":\"{}\",\"owning_bead\":\"{}\",\"instrumentation\":\"{}\"}}",
+            "{{\"id\":\"{}\",\"name\":\"{}\",\"phase\":\"{}\",\"mean\":{},\"kill_metric\":\"{}\",\"owning_bead\":\"{}\",\"instrumentation\":\"{}\",\"receipt\":{}}}",
             json_escape(p.id),
             json_escape(p.name),
             json_escape(p.phase),
@@ -306,6 +306,8 @@ pub fn proposals_json(today_day: u32) -> String {
             json_escape(p.kill_metric),
             json_escape(p.owning_bead),
             status.name(),
+            p.receipt
+                .map_or_else(|| "null".to_owned(), InstrumentationReceipt::to_json),
         )
         .expect("writing to a String is infallible");
     }

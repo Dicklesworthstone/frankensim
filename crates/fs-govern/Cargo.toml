@@ -11,6 +11,7 @@ description = "Addendum governance as machine-readable data: the design principl
 layer = "UTIL"
 
 [dependencies]
+fs-blake3 = { path = "../fs-blake3" }
 
 [dev-dependencies]
 

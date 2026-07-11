@@ -4,9 +4,13 @@
 //! incomplete slice), JSON well-formedness, and determinism.
 
 use fs_govern::{
-    InstrumentationReceipt, InstrumentationStatus, MAX_RECEIPT_AGE_DAYS, Risk, RiskId, audit,
-    audit_slice, receipt_fingerprint, register, risk, to_json,
+    InstrumentationReceipt, InstrumentationStatus, MAX_RECEIPT_AGE_DAYS, ReceiptError, Risk,
+    RiskId, audit, audit_slice, receipt_identity, register, risk, to_json,
 };
+
+fn evidence(label: &[u8]) -> fs_govern::ContentHash {
+    fs_blake3::hash_domain("frankensim.fs-govern.test-evidence.v1", label)
+}
 
 #[test]
 fn register_has_all_ten_risks_in_order() {
@@ -79,7 +83,7 @@ fn audit_separates_declaration_from_live_operation() {
 }
 
 #[test]
-fn receipts_authenticate_and_age() {
+fn receipts_bind_subject_provenance_and_age() {
     let mk = |receipt| Risk {
         id: RiskId::R2,
         name: "y",
@@ -90,28 +94,62 @@ fn receipts_authenticate_and_age() {
         owner: "frankensim-epic-x",
         receipt,
     };
-    // A flipped flag without evidence — a receipt whose fingerprint was
-    // never computed — CANNOT turn the audit green.
-    let forged = mk(Some(InstrumentationReceipt {
-        dashboard: "grafana://kills",
-        verified_day: 190,
-        fingerprint: 0xDEAD_BEEF,
-    }));
-    let a = audit_slice(&[forged], 200);
+    // A valid receipt for a different subject cannot be replayed to turn R2
+    // green. Sealed fields make direct identity tampering unrepresentable.
+    let replayed = mk(Some(
+        InstrumentationReceipt::new(
+            "R1",
+            "grafana://kills",
+            "ci/governance-audit",
+            evidence(b"R1-live-feed"),
+            190,
+        )
+        .unwrap(),
+    ));
+    let a = audit_slice(&[replayed], 200);
     assert!(!a.operationally_managed());
     assert!(matches!(
         a.operational_gaps[0].1,
         InstrumentationStatus::BadReceipt
     ));
     // A consistent, fresh receipt verifies.
-    let good = mk(Some(InstrumentationReceipt {
-        dashboard: "grafana://kills",
-        verified_day: 190,
-        fingerprint: receipt_fingerprint("R2", "grafana://kills", 190),
-    }));
+    let good_receipt = InstrumentationReceipt::new(
+        "R2",
+        "grafana://kills",
+        "ci/governance-audit",
+        evidence(b"R2-live-feed"),
+        190,
+    )
+    .unwrap();
+    let good = mk(Some(good_receipt));
     let a = audit_slice(&[good], 200);
     assert!(a.operationally_managed(), "gaps: {:?}", a.operational_gaps);
     assert_eq!(a.verified_instrumented, 1);
+    assert_eq!(good_receipt.dashboard(), "grafana://kills");
+    assert_eq!(good_receipt.verifier(), "ci/governance-audit");
+    assert_eq!(good_receipt.verified_day(), 190);
+    assert_eq!(good_receipt.evidence_artifact(), evidence(b"R2-live-feed"));
+    assert!(good_receipt.is_consistent_for("R2"));
+    assert!(!good_receipt.is_consistent_for("R1"));
+    let json = good_receipt.to_json();
+    assert!(json.contains(&good_receipt.identity().to_hex()));
+    assert!(json.contains(&good_receipt.evidence_artifact().to_hex()));
+    assert!(json.contains("ci/governance-audit"));
+    let escaped = InstrumentationReceipt::new(
+        "R2",
+        "grafana://kills\u{0001}\\\"",
+        "ci/governance-audit\nsecondary",
+        evidence(b"escaped-provenance"),
+        190,
+    )
+    .unwrap()
+    .to_json();
+    assert!(escaped.contains("grafana://kills\\u0001\\\\\\\""));
+    assert!(escaped.contains("ci/governance-audit\\nsecondary"));
+    assert!(
+        !escaped.contains('\u{0001}'),
+        "JSON may not contain raw controls"
+    );
     // The same receipt, long unverified, DEMOTES to stale (dead
     // dashboards cannot keep claiming coverage).
     let a = audit_slice(&[good], 190 + MAX_RECEIPT_AGE_DAYS + 1);
@@ -126,6 +164,54 @@ fn receipts_authenticate_and_age() {
         a.operational_gaps[0].1,
         InstrumentationStatus::BadReceipt
     ));
+}
+
+#[test]
+fn receipt_identity_binds_every_semantic_field() {
+    let artifact = evidence(b"feed-snapshot-a");
+    let base = receipt_identity("R2", "grafana://kills", "ci/a", artifact, 190);
+    assert_eq!(
+        base,
+        receipt_identity("R2", "grafana://kills", "ci/a", artifact, 190),
+        "canonical identity must replay exactly"
+    );
+    assert_ne!(
+        receipt_identity("ab", "c", "ci/a", artifact, 190),
+        receipt_identity("a", "bc", "ci/a", artifact, 190),
+        "length framing must separate adjacent string fields"
+    );
+    for changed in [
+        receipt_identity("R3", "grafana://kills", "ci/a", artifact, 190),
+        receipt_identity("R2", "grafana://other", "ci/a", artifact, 190),
+        receipt_identity("R2", "grafana://kills", "ci/b", artifact, 190),
+        receipt_identity(
+            "R2",
+            "grafana://kills",
+            "ci/a",
+            evidence(b"feed-snapshot-b"),
+            190,
+        ),
+        receipt_identity("R2", "grafana://kills", "ci/a", artifact, 191),
+    ] {
+        assert_ne!(base, changed, "a semantic edit must change the identity");
+    }
+}
+
+#[test]
+fn receipt_constructor_rejects_missing_provenance() {
+    let artifact = evidence(b"feed-snapshot");
+    assert_eq!(
+        InstrumentationReceipt::new(" ", "grafana://kills", "ci/a", artifact, 190,),
+        Err(ReceiptError::EmptySubject)
+    );
+    assert_eq!(
+        InstrumentationReceipt::new("R2", "\t", "ci/a", artifact, 190),
+        Err(ReceiptError::EmptyDashboard)
+    );
+    assert_eq!(
+        InstrumentationReceipt::new("R2", "grafana://kills", "", artifact, 190),
+        Err(ReceiptError::EmptyVerifier)
+    );
 }
 
 #[test]
@@ -188,6 +274,7 @@ fn json_is_well_formed_and_complete() {
     // present; the former boolean "instrumented" flag is gone (xpck.9).
     assert!(j.contains("frankensim-epic-flywheel-lmp4.1"));
     assert!(j.contains("\"instrumentation\":\"uninstrumented\""));
+    assert_eq!(j.matches("\"receipt\":null").count(), 10);
     assert!(!j.contains("\"instrumented\""));
     // no accidental double-commas between objects.
     assert!(!j.contains(",,"));

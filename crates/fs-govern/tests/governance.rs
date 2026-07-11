@@ -113,6 +113,7 @@ fn proposals_json_is_well_formed_and_deterministic() {
     assert_eq!(j.matches("\"id\":").count(), 19);
     assert!(j.contains("\"mean\":850"));
     assert!(j.contains("frankensim-epic-epistype-qmao.5")); // Goodhart guard owner
+    assert_eq!(j.matches("\"receipt\":null").count(), 19);
     assert!(!j.contains(",,"));
     assert_eq!(proposals_json(200), proposals_json(200));
 }
