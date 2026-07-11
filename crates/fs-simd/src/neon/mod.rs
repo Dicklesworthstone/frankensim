@@ -152,5 +152,8 @@ pub mod fft;
 /// f32 GEMM microkernels (own registered capsule — bead 9ekv scope e).
 pub mod gemmf32;
 
+/// Complex-transpose capsule (bead 27d3): the fs-fft six-step tile pass.
+pub mod transpose;
+
 pub use fft::r4qrun_f64;
 pub use gemm::{btile4x4_f64, mk8x4_f64};

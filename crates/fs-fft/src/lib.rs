@@ -505,25 +505,14 @@ impl Fft {
 /// SEQUENTIAL writes per destination row chunk (the strided side is the
 /// read, which prefetches better than strided read-modify-write swaps).
 fn transpose_into(src: &[C64], dst: &mut [C64], n1: usize) {
-    const TILE: usize = 8;
     debug_assert_eq!(src.len(), n1 * n1, "transpose needs a square matrix");
     debug_assert_eq!(dst.len(), n1 * n1, "transpose needs a square dst");
-    let mut bi = 0;
-    while bi < n1 {
-        let i_end = (bi + TILE).min(n1);
-        let mut bj = 0;
-        while bj < n1 {
-            let j_end = (bj + TILE).min(n1);
-            for i in bi..i_end {
-                let drow = &mut dst[i * n1 + bj..i * n1 + j_end];
-                for (dj, slot) in drow.iter_mut().enumerate() {
-                    *slot = src[(bj + dj) * n1 + i];
-                }
-            }
-            bj += TILE;
-        }
-        bi += TILE;
-    }
+    // The tiled move loop is the fs-simd trn1c64 capsule (bead 27d3):
+    // one interleaved complex is one 128-bit vector, so the NEON tier
+    // moves 16 bytes per instruction with no per-element bounds checks.
+    // Pure exact moves — bit-neutral by construction, gated bitwise
+    // against the scalar twin in fs-simd's tier battery.
+    (fs_simd::ops().trn1c64)(simd_view::as_f64(src), simd_view::as_f64_mut(dst), n1);
 }
 
 // ---------------------------------------------------------------------------

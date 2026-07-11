@@ -275,3 +275,35 @@ pub fn btile4x4pf32(
         }
     }
 }
+
+/// Scalar twin for the NEON complex-transpose capsule (bead 27d3):
+/// `dst[i·n1 + j] = src[j·n1 + i]` over n₁×n₁ interleaved-complex
+/// elements (slice length `2·n1²`), 8×8 tiles, identical iteration
+/// order. Pure exact moves — bitwise by construction.
+///
+/// # Panics
+/// Structured panics when either slice length is not `2·n1²`.
+pub fn trn1c64(src: &[f64], dst: &mut [f64], n1: usize) {
+    const TILE: usize = 8;
+    let need = 2 * n1 * n1;
+    assert_eq!(src.len(), need, "trn1c64 src length (programmer error)");
+    assert_eq!(dst.len(), need, "trn1c64 dst length (programmer error)");
+    let mut bi = 0;
+    while bi < n1 {
+        let i_end = (bi + TILE).min(n1);
+        let mut bj = 0;
+        while bj < n1 {
+            let j_end = (bj + TILE).min(n1);
+            for i in bi..i_end {
+                for j in bj..j_end {
+                    let s = 2 * (j * n1 + i);
+                    let d = 2 * (i * n1 + j);
+                    dst[d] = src[s];
+                    dst[d + 1] = src[s + 1];
+                }
+            }
+            bj += TILE;
+        }
+        bi += TILE;
+    }
+}

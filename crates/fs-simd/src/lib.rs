@@ -103,10 +103,18 @@ pub type Btile4x4Pf32 = fn(&[f32], &[f32], usize, usize, usize, usize, &mut [f32
 /// over interleaved complex rows.
 pub type R4Qrun = fn(&[f64], &[f64], &[f64], &[f64], &mut [f64], &[f64; 6], bool);
 
+/// Out-of-place transpose of an n₁×n₁ interleaved-complex matrix
+/// (`dst[i·n1+j] = src[j·n1+i]`, slice length 2·n1²): (src, dst, n1).
+pub type Trn1C64 = fn(&[f64], &mut [f64], usize);
+
 /// The resolved-once function table (plan §5.1 consequence 5).
 pub struct Ops {
     /// Tier the table was built for (ledger/tune-table key material).
     pub tier: SimdTier,
+    /// Effective tier of `mk8x4_f64`. This is operation-specific: an
+    /// AVX-512-capable host currently selects the audited AVX2/FMA GEMM
+    /// microkernel rather than claiming an AVX-512 implementation.
+    pub mk8x4_f64_tier: SimdTier,
     /// y[i] = a·x[i] + y[i] (fused).
     pub axpy: fn(f64, &[f64], &mut [f64]),
     /// x[i] *= a.
@@ -139,6 +147,9 @@ pub struct Ops {
     /// (fs-fft's stage kernel): BITWISE across tiers — every lane op is
     /// the scalar twin's exact per-element composition.
     pub r4qrun_f64: R4Qrun,
+    /// 8×8-tiled complex transpose (fs-fft's six-step tile pass): pure
+    /// exact moves, BITWISE across tiers by construction.
+    pub trn1c64: Trn1C64,
 }
 
 static OPS: OnceLock<Ops> = OnceLock::new();
@@ -150,6 +161,7 @@ pub fn ops() -> &'static Ops {
 
 const SCALAR_OPS: Ops = Ops {
     tier: SimdTier::Scalar,
+    mk8x4_f64_tier: SimdTier::Scalar,
     axpy: scalar::axpy,
     scale: scalar::scale,
     mul_elem: scalar::mul_elem,
@@ -161,6 +173,7 @@ const SCALAR_OPS: Ops = Ops {
     btile4x4p_f64: scalar::btile4x4p_f64,
     btile4x4pf32: scalar::btile4x4pf32,
     r4qrun_f64: scalar::r4qrun_f64,
+    trn1c64: scalar::trn1c64,
 };
 
 fn build_table() -> Ops {
@@ -174,6 +187,7 @@ fn build_table() -> Ops {
             #[cfg(target_arch = "aarch64")]
             SimdTier::Neon => Ops {
                 tier: SimdTier::Neon,
+                mk8x4_f64_tier: SimdTier::Neon,
                 axpy: neon::axpy,
                 scale: neon::scale,
                 mul_elem: neon::mul_elem,
@@ -185,32 +199,67 @@ fn build_table() -> Ops {
                 btile4x4p_f64: neon::gemm::btile4x4p_f64,
                 btile4x4pf32: neon::gemmf32::btile4x4pf32,
                 r4qrun_f64: neon::r4qrun_f64,
+                trn1c64: neon::transpose::trn1c64,
             },
             // x86 capsule v1 covers axpy/dot/sum (the <300-line capsule cap
             // is a feature: scale/mul_elem/fma3 arrive with their consumer,
             // fs-la's packing kernels). Fallbacks are the scalar twin.
             #[cfg(target_arch = "x86_64")]
-            SimdTier::Avx2 | SimdTier::Avx512 => Ops {
-                tier: fs_substrate::dispatch_tier(),
-                axpy: x86::axpy,
-                scale: scalar::scale,
-                mul_elem: scalar::mul_elem,
-                // fma3 vector path (fz2.2 tier audit): baseline-x86
-                // scalar mul_add is a per-element libm CALL.
-                fma3: x86::fma3,
-                dot: x86::dot,
-                sum: x86::sum,
-                // AVX2 mk8x4 landed (bead xlvx) on user-granted x86
-                // hardware; btile stays the twin until 9ekv's consumer.
-                mk8x4_f64: x86::mk8x4_f64,
-                btile4x4_f64: scalar::btile4x4_f64,
-                btile4x4p_f64: scalar::btile4x4p_f64,
-                btile4x4pf32: scalar::btile4x4pf32,
-                r4qrun_f64: x86::r4qrun_f64,
-            },
+            SimdTier::Avx2 | SimdTier::Avx512 => {
+                let global_tier = fs_substrate::dispatch_tier();
+                let (mk8x4_f64, mk8x4_f64_tier) = x86::gemm::select_mk8x4_f64(global_tier);
+                Ops {
+                    tier: global_tier,
+                    mk8x4_f64_tier,
+                    axpy: x86::axpy,
+                    scale: scalar::scale,
+                    mul_elem: scalar::mul_elem,
+                    // fma3 vector path (fz2.2 tier audit): baseline-x86
+                    // scalar mul_add is a per-element libm CALL.
+                    fma3: x86::fma3,
+                    dot: x86::dot,
+                    sum: x86::sum,
+                    // Resolve the microkernel once: hot tiles call a direct
+                    // pointer and never repeat feature detection.
+                    mk8x4_f64,
+                    btile4x4_f64: scalar::btile4x4_f64,
+                    btile4x4p_f64: scalar::btile4x4p_f64,
+                    btile4x4pf32: scalar::btile4x4pf32,
+                    r4qrun_f64: x86::r4qrun_f64,
+                    trn1c64: scalar::trn1c64,
+                }
+            }
             _ => SCALAR_OPS,
         }
     }
+}
+
+/// Effective GEMM microkernel tier for a resolved global SIMD tier and the
+/// exact x86 feature predicate used by the safe microkernel facade.
+///
+/// This pure selector is the operation-specific admission rule used by the
+/// function table. In particular, global AVX-512 capability does not upgrade
+/// the current AVX2/FMA-only GEMM capsule, and AVX2 without FMA executes and is
+/// reported as scalar.
+#[must_use]
+pub const fn mk8x4_f64_tier_for(
+    global: SimdTier,
+    x86_avx2_available: bool,
+    x86_fma_available: bool,
+) -> SimdTier {
+    match global {
+        SimdTier::Avx2 | SimdTier::Avx512 if x86_avx2_available && x86_fma_available => {
+            SimdTier::Avx2
+        }
+        SimdTier::Avx2 | SimdTier::Avx512 => SimdTier::Scalar,
+        other => other,
+    }
+}
+
+/// Tier actually selected for the f64 GEMM 8x4 microkernel.
+#[must_use]
+pub fn mk8x4_f64_tier() -> SimdTier {
+    ops().mk8x4_f64_tier
 }
 
 /// True if `ptr` is aligned to the target's cache line (fs-substrate's
@@ -463,6 +512,23 @@ mod tests {
                 );
             }
         }
+        // trn1c64: bitwise vs twin — square shapes covering the exact
+        // 8-multiple, the ragged tail, and the degenerate n1 = 1 edge.
+        for n1 in [1usize, 5, 8, 12, 16, 23] {
+            let src = gen_vals(2 * n1 * n1, 0x7A ^ n1 as u64);
+            let mut d_tier = vec![0.0f64; 2 * n1 * n1];
+            let mut d_ref = vec![0.0f64; 2 * n1 * n1];
+            (t.trn1c64)(&src, &mut d_tier, n1);
+            scalar::trn1c64(&src, &mut d_ref, n1);
+            assert!(
+                d_tier
+                    .iter()
+                    .zip(&d_ref)
+                    .all(|(x, y)| x.to_bits() == y.to_bits()),
+                "trn1c64 diverged from twin at n1 {n1} (tier {:?})",
+                t.tier
+            );
+        }
         println!(
             "{{\"suite\":\"fs-simd/equivalence\",\"case\":\"battery\",\"verdict\":\"pass\",\"detail\":\"tier={} lens=0..67\"}}",
             t.tier.name()
@@ -478,6 +544,52 @@ mod tests {
         assert_eq!(ops().tier, SimdTier::Neon);
         #[cfg(miri)]
         assert_eq!(ops().tier, SimdTier::Scalar);
+    }
+
+    #[test]
+    fn gemm_tier_selection_is_operation_specific() {
+        assert_eq!(
+            mk8x4_f64_tier_for(SimdTier::Scalar, true, true),
+            SimdTier::Scalar
+        );
+        assert_eq!(
+            mk8x4_f64_tier_for(SimdTier::Neon, false, false),
+            SimdTier::Neon
+        );
+        assert_eq!(
+            mk8x4_f64_tier_for(SimdTier::Avx2, true, true),
+            SimdTier::Avx2
+        );
+        assert_eq!(
+            mk8x4_f64_tier_for(SimdTier::Avx512, true, true),
+            SimdTier::Avx2
+        );
+        assert_eq!(
+            mk8x4_f64_tier_for(SimdTier::Avx2, true, false),
+            SimdTier::Scalar,
+            "AVX2 with FMA masked executes the scalar facade"
+        );
+        assert_eq!(
+            mk8x4_f64_tier_for(SimdTier::Avx512, false, true),
+            SimdTier::Scalar,
+            "a hostile AVX-512/AVX2 feature mask must follow the facade"
+        );
+        assert_eq!(mk8x4_f64_tier(), ops().mk8x4_f64_tier);
+        #[cfg(target_arch = "x86_64")]
+        {
+            let (_, hostile_tier) = x86::gemm::select_mk8x4_f64(SimdTier::Neon);
+            assert_eq!(
+                hostile_tier,
+                SimdTier::Scalar,
+                "an impossible x86 global tier must fail closed with its scalar pointer"
+            );
+            let (_, selected_tier) = x86::gemm::select_mk8x4_f64(ops().tier);
+            assert_eq!(
+                ops().mk8x4_f64_tier,
+                selected_tier,
+                "the installed operation receipt must match the owned selector"
+            );
+        }
     }
 
     #[test]

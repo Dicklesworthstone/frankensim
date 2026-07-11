@@ -3,6 +3,14 @@
 ## Purpose and layer
 SIMD tiers behind safe façades (plan §5.1, patch Rev Q): scalar reference,
 NEON capsule (aarch64), AVX2/AVX-512 capsule (x86-64), one-shot dispatch.
+The table also carries operation-specific tier receipts: f64 GEMM reports
+AVX2 on an AVX-512-capable host because its current audited microkernel is
+AVX2/FMA, and reports scalar when either AVX2 or FMA is unavailable, preventing
+tune evidence from claiming a tier that did not execute. This exact predicate
+is resolved once while constructing the process-wide table; hot GEMM tiles call
+the selected microkernel pointer without repeated feature detection. The x86
+GEMM submodule owns selection and keeps its unchecked target-feature thunk
+private, so safe sibling modules cannot bypass that one-shot proof.
 Layer: L0.
 
 ## Public types and semantics
@@ -11,10 +19,14 @@ Layer: L0.
   dot, sum (fixed per-tier reduction shapes), mk8x4_f64 (the 8×4 f64
   GEMM register microkernel over packed k-fastest panels — BITWISE
   across tiers by the k-ascending fused-order contract; NEON capsule
-  on aarch64, scalar twin elsewhere until the AVX capsule lands —
+  on aarch64, AVX2+FMA capsule on x86 with an exact-feature scalar fallback —
   bead xdgf), btile4x4_f64 (the batched-GEMM 4×4 entry-tile
   microkernel over plane-SoA batches, bead 9ekv — same BITWISE
-  contract, lanes are independent matrices); `tier` for ledger keys.
+  contract, lanes are independent matrices), trn1c64 (8×8-tiled
+  out-of-place transpose of an n₁×n₁ interleaved-complex matrix —
+  fs-fft's six-step tile pass, bead 27d3: pure exact 16-byte moves,
+  one complex per q-register on NEON, BITWISE trivially; scalar on
+  x86 until a measured need); `tier` for ledger keys.
 - `scalar::*` — the semantic definition of every primitive (Tier 0).
 - `neon::*` / `x86::*` — registered unsafe capsules (SAFETY.md beside each);
   all public capsule functions are SAFE (NEON is architecturally guaranteed;

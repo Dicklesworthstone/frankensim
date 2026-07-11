@@ -38,7 +38,7 @@ There is not yet a packaged end-user simulation application or crates.io release
 | Geometry | Region/chart abstraction, SDF, mesh and F-rep charts, representation conversion hooks, transformations, tet meshing, remeshing, quality audits |
 | Evidence and ledger | Composable `Evidence<T>`/`Certified<T>`, model cards, bracketing, FrankenSQLite-backed design ledger, artifact hashes, event streams, tune cache, roofline recording |
 | Policy tooling | `xtask` checks for layer direction, Franken-only runtime dependencies, contracts, unsafe capsules, and constellation lock verification |
-| Tests | 251 crate-level conformance and integration test files tracked in git and exercising the implemented contracts |
+| Tests | 251 crate-level conformance and integration test files in the intended snapshot, exercising the implemented contracts |
 
 ### What You Can Use Today
 

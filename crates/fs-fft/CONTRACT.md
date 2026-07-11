@@ -89,12 +89,15 @@ None. `unsafe_code` denied; no capsules.
   full-array passes). CORRECT (cross-path agreement, transform laws, own
   golden 0x79aa_108f_a517_012f — new bit territory, the small-n stage
   golden is untouched by the pure-function-of-n dispatch, asserted both
-  ways) but MEASURED SLOWER than the radix-8/4/2 stage walk on M4
-  (2026-07-10: ~2.4e7 vs ~4.8e7 elems/s round-trip at n = 2²⁰ — scalar
-  transposes lose to the stage walk's prefetch-friendly streams; the
-  out-of-place rewrite recovered only part of it). Ships OFF until the
-  SIMD-tiled transpose capsule makes it win; gates the `sixstep`
-  integration target. Enabling changes large-n output bits by design.
+  ways) but still MEASURED SLOWER than the radix-8/4/2 stage walk on M4.
+  The fs-simd `trn1c64` NEON transpose capsule (one interleaved complex
+  = one q-register; bounds checks hoisted) roughly HALVED the deficit
+  (2026-07-11 interleaved relative lane at n = 2²⁰: forward ratio
+  0.73 vs the pre-capsule ~0.44) without moving any bits (pure exact
+  moves, twin-gated bitwise). Ships OFF until a quiet-host run shows a
+  WIN (`tests/sixstep.rs` `--ignored` relative lane is the instrument);
+  the remaining lever is fusing the ping-pong copy-back. Enabling
+  changes large-n output bits by design.
 
 ## Conformance tests
 In-crate suite (`cargo test -p fs-fft`): naive-DFT oracle sweep (n = 1..512),

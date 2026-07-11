@@ -157,3 +157,51 @@ fn sixstep_golden_hash() {
          semantic justification (golden-evidence policy)"
     );
 }
+
+/// RELATIVE perf instrument (wall-clock; run explicitly in release):
+/// `cargo test -p fs-fft --release --features frontier-sixstep --test sixstep -- --ignored --nocapture`
+///
+/// Measures the six-step path against the stage walk back-to-back and
+/// INTERLEAVED (ambient load hits both sides ~equally, so the RATIO is
+/// meaningful on a shared host even when absolute numbers are not).
+/// Reports only — the frontier-sixstep default flip additionally
+/// requires a quiet-host win per the 27d3 registry note.
+#[test]
+#[ignore = "wall-clock comparison lane: run explicitly in release with --ignored"]
+fn sixstep_vs_stage_walk_relative_throughput() {
+    let n = 1usize << 20;
+    let plan = Fft::new(n);
+    let mut seed = 0x27d3;
+    let signal: Vec<C64> = (0..n)
+        .map(|_| C64::new(lcg(&mut seed), lcg(&mut seed)))
+        .collect();
+    let mut buf = signal.clone();
+    let mut scratch = vec![C64::default(); n];
+    // Warm both paths once.
+    buf.copy_from_slice(&signal);
+    plan.forward_via_stages(&mut buf, &mut scratch);
+    buf.copy_from_slice(&signal);
+    plan.forward(&mut buf, &mut scratch); // dispatched = six-step here
+    // Interleaved best-of-5 per side.
+    let mut best_stage = f64::INFINITY;
+    let mut best_six = f64::INFINITY;
+    for _ in 0..5 {
+        buf.copy_from_slice(&signal);
+        let t0 = std::time::Instant::now();
+        plan.forward_via_stages(&mut buf, &mut scratch);
+        best_stage = best_stage.min(t0.elapsed().as_secs_f64());
+        buf.copy_from_slice(&signal);
+        let t1 = std::time::Instant::now();
+        plan.forward(&mut buf, &mut scratch);
+        best_six = best_six.min(t1.elapsed().as_secs_f64());
+    }
+    let ratio = best_stage / best_six; // > 1 means six-step is FASTER
+    println!(
+        "{{\"metric\":\"sixstep-vs-stage\",\"n\":{n},\"stage_s\":{best_stage:.6},\
+         \"sixstep_s\":{best_six:.6},\"ratio\":{ratio:.3},\"machine\":\"{}-{}\"}}",
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    );
+    // No assertion on the ratio: this is a reporting instrument. The
+    // paths must still agree (the correctness batteries above gate it).
+}
