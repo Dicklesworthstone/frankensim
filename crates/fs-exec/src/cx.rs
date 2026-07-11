@@ -43,6 +43,22 @@ impl ExecMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct RunId(pub u64);
 
+impl RunId {
+    /// Derive a deterministic child run for one phase/ordinal of this logical
+    /// operation. The domain must name the producer and schema; derivation is
+    /// independent of scheduling and pool history.
+    #[must_use]
+    pub fn derive(self, domain: &str, ordinal: u64) -> Self {
+        let mut preimage = [0_u8; 16];
+        preimage[..8].copy_from_slice(&self.0.to_le_bytes());
+        preimage[8..].copy_from_slice(&ordinal.to_le_bytes());
+        let hash = fs_blake3::hash_domain(domain, &preimage);
+        let mut id = [0_u8; 8];
+        id.copy_from_slice(&hash.as_bytes()[..8]);
+        Self(u64::from_le_bytes(id))
+    }
+}
+
 /// Logical RNG stream identity (plan §5.2): results must be independent of
 /// which worker ran which tile, so streams are keyed by WHAT the work is,
 /// not WHERE it ran. fs-rand's Philox generator consumes [`StreamKey::key128`].
@@ -232,6 +248,16 @@ impl<'s> Cx<'s> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn child_run_ids_bind_parent_domain_and_ordinal() {
+        let parent = RunId(17);
+        let first = parent.derive("org.frankensim.test.phase-a.v1", 0);
+        assert_eq!(first, parent.derive("org.frankensim.test.phase-a.v1", 0));
+        assert_ne!(first, parent.derive("org.frankensim.test.phase-a.v1", 1));
+        assert_ne!(first, parent.derive("org.frankensim.test.phase-b.v1", 0));
+        assert_ne!(first, RunId(18).derive("org.frankensim.test.phase-a.v1", 0));
+    }
 
     #[test]
     fn stream_keys_depend_on_every_logical_field_and_nothing_else() {

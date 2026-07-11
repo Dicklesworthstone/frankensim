@@ -36,12 +36,27 @@ const NC: usize = 512;
 /// surface. This is separate from [`GEMM_BIT_SEMANTICS_VERSION`]: a
 /// bit-neutral scheduling or cancellation change bumps this identity while
 /// leaving the numerical contract alone.
-pub const GEMM_IMPLEMENTATION_VERSION: u32 = 1;
+pub const GEMM_IMPLEMENTATION_VERSION: u32 = 3;
 
-/// Producer-owned identity for the current parallel placement policy. Tune
-/// rows include this string so a later fs-exec pool, pinning policy, or NUMA
-/// placement cannot silently reuse evidence from this std-thread engine.
-pub const GEMM_PARALLEL_IMPLEMENTATION: &str = "std-thread-scope-work-stealing-unpinned-v1";
+/// Domain used to derive each NC/KC panel's child run identity from the
+/// caller-ledgered GEMM operation run.
+pub const GEMM_PANEL_RUN_DOMAIN: &str = "org.frankensim.fs-la.gemm-panel-run.v1";
+
+/// Deterministic child run for one NC/KC panel of a declared GEMM operation.
+#[must_use]
+pub fn gemm_panel_run_id(operation: fs_exec::RunId, panel_ordinal: u64) -> fs_exec::RunId {
+    operation.derive(GEMM_PANEL_RUN_DOMAIN, panel_ordinal)
+}
+
+/// BLAKE3 fingerprint of the compiler, Cargo profile/codegen inputs, target,
+/// explicit Rust flags, workspace manifests, the bounded GEMM execution source
+/// closure, and optional operator-supplied `FRANKENSIM_GEMM_CODEGEN_ID` salt
+/// for this build.
+///
+/// This is performance identity rather than numerical identity: two binaries
+/// can preserve [`GEMM_BIT_SEMANTICS_VERSION`] while requiring independent
+/// tune rows because their generated code differs.
+pub const GEMM_BUILD_FINGERPRINT: &str = env!("FS_LA_GEMM_BUILD_FINGERPRINT");
 
 /// Maximum arithmetic work in one cancellable GEMM compute quantum. Packing
 /// and beta staging use smaller fixed quanta; the largest poll interval is one
@@ -54,17 +69,23 @@ const C_STAGE_TILE_ELEMENTS: usize = 4096;
 /// Structured progress for a cancellation-aware GEMM dispatch. A successful
 /// return always has `completed_tiles == total_tiles`; a cancelled return may
 /// contain completed work, but that work exists only in private staging.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GemmRunReport {
+    /// Caller-ledgered identity of the complete GEMM operation.
+    pub declared_run: fs_exec::RunId,
     /// Fully written `MR x NR x KC` compute tiles.
     pub completed_tiles: usize,
     /// Total compute tiles required by this dispatch (zero for beta-only work).
     pub total_tiles: usize,
+    /// One real fs-exec traversal receipt per dispatched NC/KC panel.
+    /// Empty only when the operation has no arithmetic product or cancellation
+    /// happened before the first M-band dispatch.
+    pub pool_runs: Vec<fs_exec::RunReport>,
 }
 
 /// Cancellation observed at a bounded GEMM poll point after all scoped
 /// workers drained. The caller's output remains bitwise unchanged.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GemmCancelled {
     /// Work completed in private staging before the request was observed.
     pub report: GemmRunReport,
@@ -82,12 +103,55 @@ impl core::fmt::Display for GemmCancelled {
 
 impl core::error::Error for GemmCancelled {}
 
-/// The SIMD tier ACTUALLY selected by fs-simd's resolved function table.
-/// This remains truthful under Miri, where the table deliberately routes to
-/// the scalar implementation even when the host advertises SIMD.
+/// Failure from the caller-owned TilePool GEMM path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GemmRunError {
+    /// The gate was observed at a bounded poll point after every worker and
+    /// arena scope drained. Caller-visible C is unchanged.
+    Cancelled(GemmCancelled),
+    /// Tile panic or executor invariant refusal, with tile provenance from
+    /// fs-exec. Caller-visible C is unchanged.
+    Executor {
+        /// Structured fs-exec failure with logical tile provenance.
+        error: fs_exec::RunError,
+        /// Compute and traversal progress accumulated before refusal.
+        report: GemmRunReport,
+    },
+}
+
+impl core::fmt::Display for GemmRunError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Cancelled(error) => error.fmt(f),
+            Self::Executor { error, .. } => write!(f, "gemm executor: {error}"),
+        }
+    }
+}
+
+impl core::error::Error for GemmRunError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::Cancelled(error) => Some(error),
+            Self::Executor { error, .. } => Some(error),
+        }
+    }
+}
+
+/// The SIMD tier ACTUALLY selected for GEMM's 8x4 microkernel.
+///
+/// This is operation-specific rather than the process-wide maximum: an
+/// AVX-512-capable host currently reports `avx2` because GEMM's audited x86
+/// capsule uses AVX2/FMA. It remains truthful under Miri, where the table
+/// deliberately routes to the scalar implementation.
 #[must_use]
 pub fn gemm_execution_tier() -> &'static str {
-    fs_simd::ops().tier.name()
+    fs_simd::mk8x4_f64_tier().name()
+}
+
+/// Exact codegen/build fingerprint carried by production GEMM tune keys.
+#[must_use]
+pub const fn gemm_build_identity() -> &'static str {
+    GEMM_BUILD_FINGERPRINT
 }
 
 /// Whether MC/NC tuning can affect the legacy production parallel route.
@@ -353,8 +417,8 @@ pub fn gemm_f64_parallel_with(
 /// plan.
 ///
 /// # Errors
-/// [`GemmCancelled`] after observing `gate` and draining every worker. The
-/// error reports completed private compute tiles; `c` is unchanged.
+/// [`GemmRunError`] after observing `gate` or a contained executor failure and
+/// draining every worker. The error reports private progress; `c` is unchanged.
 ///
 /// # Panics
 /// Structured panics on slice-length or extent mismatches, before `c` can be
@@ -373,10 +437,102 @@ pub fn gemm_f64_parallel_with_cancel(
     mc_q: usize,
     nc_q: usize,
     gate: &fs_exec::CancelGate,
-) -> Result<GemmRunReport, GemmCancelled> {
-    gemm_f64_parallel_with_poll(m, n, k, alpha, a, b, beta, c, threads, mc_q, nc_q, &|| {
-        gate.is_requested()
-    })
+) -> Result<GemmRunReport, GemmRunError> {
+    let pool = fs_exec::TilePool::for_host(threads, 0x4653_2D4C_412D_474D);
+    gemm_f64_parallel_with_pool(m, n, k, alpha, a, b, beta, c, &pool, mc_q, nc_q, gate)
+}
+
+/// Cancellation-aware GEMM on a caller-owned, reusable fs-exec pool.
+///
+/// Each NC/KC panel packs B once. Its disjoint MC row bands are then logical
+/// [`fs_exec::TileKernel`] tiles scheduled by `pool`, so the pool's worker
+/// budget, topology, quantum weights, pinning policy, `Cx` budget, stream
+/// identity, and tile-scoped arenas are the execution path rather than tune
+/// metadata detached from the kernel. The caller can reuse one pool across a
+/// session; current fs-exec workers are still joined `std::thread` scopes per
+/// run (see its contract no-claim).
+///
+/// # Errors
+/// [`GemmRunError::Cancelled`] after a request -> drain -> finalize refusal, or
+/// [`GemmRunError::Executor`] for a contained tile/executor failure. Both leave
+/// `c` bitwise unchanged.
+///
+/// # Panics
+/// Structured panics on slice-length or extent mismatches before `c` mutation.
+#[allow(clippy::too_many_arguments)]
+pub fn gemm_f64_parallel_with_pool(
+    m: usize,
+    n: usize,
+    k: usize,
+    alpha: f64,
+    a: &[f64],
+    b: &[f64],
+    beta: f64,
+    c: &mut [f64],
+    pool: &fs_exec::TilePool,
+    mc_q: usize,
+    nc_q: usize,
+    gate: &fs_exec::CancelGate,
+) -> Result<GemmRunReport, GemmRunError> {
+    gemm_f64_parallel_with_pool_declared(
+        m,
+        n,
+        k,
+        alpha,
+        a,
+        b,
+        beta,
+        c,
+        pool,
+        mc_q,
+        nc_q,
+        gate,
+        fs_exec::RunId::default(),
+    )
+}
+
+/// As [`gemm_f64_parallel_with_pool`], with an explicit caller-ledgered
+/// operation identity. Every NC/KC panel receives a domain-separated child
+/// [`fs_exec::RunId`], so distinct operations cannot reuse corresponding tile
+/// stream identities accidentally.
+///
+/// # Errors
+/// As [`gemm_f64_parallel_with_pool`].
+///
+/// # Panics
+/// As [`gemm_f64_parallel_with_pool`].
+#[allow(clippy::too_many_arguments)]
+pub fn gemm_f64_parallel_with_pool_declared(
+    m: usize,
+    n: usize,
+    k: usize,
+    alpha: f64,
+    a: &[f64],
+    b: &[f64],
+    beta: f64,
+    c: &mut [f64],
+    pool: &fs_exec::TilePool,
+    mc_q: usize,
+    nc_q: usize,
+    gate: &fs_exec::CancelGate,
+    declared_run: fs_exec::RunId,
+) -> Result<GemmRunReport, GemmRunError> {
+    gemm_f64_parallel_with_pool_and_poll(
+        m,
+        n,
+        k,
+        alpha,
+        a,
+        b,
+        beta,
+        c,
+        pool,
+        mc_q,
+        nc_q,
+        gate,
+        declared_run,
+        &|| gate.is_requested(),
+    )
 }
 
 #[track_caller]
@@ -401,16 +557,118 @@ fn cancellable_tile_count(m: usize, n: usize, k: usize, mc_q: usize, nc_q: usize
         .unwrap_or_else(|| panic!("parallel MNK tile-count overflow"))
 }
 
-fn report(completed: &std::sync::atomic::AtomicUsize, total_tiles: usize) -> GemmRunReport {
+fn report(
+    completed: &std::sync::atomic::AtomicUsize,
+    total_tiles: usize,
+    pool_runs: Vec<fs_exec::RunReport>,
+    declared_run: fs_exec::RunId,
+) -> GemmRunReport {
     GemmRunReport {
+        declared_run,
         completed_tiles: completed.load(std::sync::atomic::Ordering::Acquire),
         total_tiles,
+        pool_runs,
     }
 }
 
-fn cancelled(completed: &std::sync::atomic::AtomicUsize, total_tiles: usize) -> GemmCancelled {
+fn cancelled(
+    completed: &std::sync::atomic::AtomicUsize,
+    total_tiles: usize,
+    pool_runs: Vec<fs_exec::RunReport>,
+    declared_run: fs_exec::RunId,
+) -> GemmCancelled {
     GemmCancelled {
-        report: report(completed, total_tiles),
+        report: report(completed, total_tiles, pool_runs, declared_run),
+    }
+}
+
+struct GemmBandKernel<'a, P> {
+    bands: &'a [std::sync::Mutex<&'a mut [f64]>],
+    m: usize,
+    n: usize,
+    k: usize,
+    ic_quantum: usize,
+    pc: usize,
+    jc: usize,
+    kc: usize,
+    nc: usize,
+    alpha: f64,
+    a: &'a [f64],
+    b_pack: &'a [f64],
+    completed: &'a std::sync::atomic::AtomicUsize,
+    poll: &'a P,
+}
+
+impl<P> fs_exec::TileKernel for GemmBandKernel<'_, P>
+where
+    P: Fn() -> bool + Sync,
+{
+    type Out = ();
+
+    fn tiles(&self) -> fs_exec::TilePlan {
+        fs_exec::TilePlan::new(
+            "fs-la/gemm-f64-m-band-v1",
+            u64::try_from(self.bands.len()).expect("GEMM M-band count exceeds u64"),
+        )
+    }
+
+    fn run(
+        &self,
+        tile: u64,
+        cx: &fs_exec::Cx<'_>,
+    ) -> core::ops::ControlFlow<fs_exec::Cancelled, ()> {
+        if cx.checkpoint().is_err() || (self.poll)() {
+            return core::ops::ControlFlow::Break(fs_exec::Cancelled);
+        }
+        let tile = usize::try_from(tile).expect("GEMM tile index exceeds usize");
+        let ic = tile
+            .checked_mul(self.ic_quantum)
+            .expect("GEMM M-band offset overflow");
+        let mc = self.ic_quantum.min(self.m - ic);
+        let mut band = self.bands[tile].lock().expect("GEMM C-band lock poisoned");
+
+        // One bounded A micro-panel lives in the Cx arena. It is reclaimed
+        // when this tile completes, cancels, or panics; no packing allocation
+        // can escape the executor scope.
+        let a_pack = cx
+            .arena()
+            .alloc_slice_fill(
+                fs_alloc::Site::named("fs-la/gemm-a-micro-panel"),
+                MR * KC,
+                0.0,
+            )
+            .unwrap_or_else(|error| panic!("GEMM A-pack arena allocation failed: {error}"));
+        let poll = || cx.checkpoint().is_err() || (self.poll)();
+        let mut p = 0;
+        while p < mc {
+            let rows = MR.min(mc - p);
+            if !pack_a_with_poll(
+                a_pack,
+                self.a,
+                self.k,
+                ic + p,
+                self.pc,
+                rows,
+                self.kc,
+                &poll,
+            ) || !macro_kernel_with_poll(
+                a_pack,
+                self.b_pack,
+                &mut band[p * self.n..],
+                self.n,
+                self.jc,
+                rows,
+                self.nc,
+                self.kc,
+                self.alpha,
+                self.completed,
+                &poll,
+            ) {
+                return core::ops::ControlFlow::Break(fs_exec::Cancelled);
+            }
+            p += MR;
+        }
+        core::ops::ControlFlow::Continue(())
     }
 }
 
@@ -418,7 +676,7 @@ fn cancelled(completed: &std::sync::atomic::AtomicUsize, total_tiles: usize) -> 
 /// the generic form lets G4 deterministically inject a request after a known
 /// number of boundaries without timing sleeps.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-fn gemm_f64_parallel_with_poll<P>(
+fn gemm_f64_parallel_with_pool_and_poll<P>(
     m: usize,
     n: usize,
     k: usize,
@@ -427,17 +685,18 @@ fn gemm_f64_parallel_with_poll<P>(
     b: &[f64],
     beta: f64,
     c: &mut [f64],
-    threads: usize,
+    pool: &fs_exec::TilePool,
     mc_q: usize,
     nc_q: usize,
+    gate: &fs_exec::CancelGate,
+    declared_run: fs_exec::RunId,
     poll: &P,
-) -> Result<GemmRunReport, GemmCancelled>
+) -> Result<GemmRunReport, GemmRunError>
 where
     P: Fn() -> bool + Sync,
 {
     // Shape rejection precedes every allocation and every possible mutation.
     assert_contiguous_shapes(m, n, k, a, b, c);
-    let t = threads.max(1);
     let mc_q = mc_q.max(MR).min(m.max(MR));
     let nc_q = nc_q.max(NR).min(n.max(NR));
     let has_product = m != 0 && n != 0 && k != 0 && alpha != 0.0;
@@ -447,33 +706,51 @@ where
         0
     };
     let completed = std::sync::atomic::AtomicUsize::new(0);
+    let mut pool_runs = Vec::new();
     if poll() {
-        return Err(cancelled(&completed, total_tiles));
+        return Err(GemmRunError::Cancelled(cancelled(
+            &completed,
+            total_tiles,
+            pool_runs,
+            declared_run,
+        )));
     }
 
     // Transactional staging is the no-torn-C boundary. Capacity reservation
     // itself is not a poll point, but initialization/copying is chunked under
     // the gate so beta=0 cannot hide an unbounded zero-fill.
     let Some(mut staged) = stage_beta(c, beta, poll) else {
-        return Err(cancelled(&completed, total_tiles));
+        return Err(GemmRunError::Cancelled(cancelled(
+            &completed,
+            total_tiles,
+            pool_runs,
+            declared_run,
+        )));
     };
     if !has_product {
         if poll() {
-            return Err(cancelled(&completed, total_tiles));
+            return Err(GemmRunError::Cancelled(cancelled(
+                &completed,
+                total_tiles,
+                pool_runs,
+                declared_run,
+            )));
         }
         c.copy_from_slice(&staged);
-        return Ok(report(&completed, total_tiles));
+        return Ok(report(&completed, total_tiles, pool_runs, declared_run));
     }
 
-    let a_pack_rows = checked_round_up("parallel A pack rows", mc_q, MR);
     let b_pack_cols = checked_round_up("parallel B pack columns", nc_q, NR);
-    let a_pack_len = checked_product("parallel A pack", a_pack_rows, KC);
     let b_pack_len = checked_product("parallel B pack", KC, b_pack_cols);
     let band_len = checked_product("parallel C band", mc_q, n);
     let Some(mut b_pack) = zeroed_with_poll(b_pack_len, poll) else {
-        return Err(cancelled(&completed, total_tiles));
+        return Err(GemmRunError::Cancelled(cancelled(
+            &completed,
+            total_tiles,
+            pool_runs,
+            declared_run,
+        )));
     };
-    let observed_cancel = std::sync::atomic::AtomicBool::new(false);
     let mut jc = 0;
     while jc < n {
         let nc = nc_q.min(n - jc);
@@ -481,85 +758,74 @@ where
         while pc < k {
             let kc = KC.min(k - pc);
             if !pack_b_with_poll(&mut b_pack, b, n, pc, jc, kc, nc, poll) {
-                return Err(cancelled(&completed, total_tiles));
+                return Err(GemmRunError::Cancelled(cancelled(
+                    &completed,
+                    total_tiles,
+                    pool_runs,
+                    declared_run,
+                )));
             }
-            let bp: &[f64] = &b_pack;
-            let dispenser = std::sync::Mutex::new(staged.chunks_mut(band_len).enumerate());
-            let workers = t.min(m.div_ceil(mc_q));
-            if workers == 1 {
-                let Some(mut a_pack) = zeroed_with_poll(a_pack_len, poll) else {
-                    return Err(cancelled(&completed, total_tiles));
-                };
-                loop {
-                    if poll() {
-                        observed_cancel.store(true, std::sync::atomic::Ordering::Release);
-                        break;
-                    }
-                    let next = dispenser.lock().expect("dispenser lock").next();
-                    let Some((bi, band)) = next else { break };
-                    let ic = bi * mc_q;
-                    let mc = mc_q.min(m - ic);
-                    if !pack_a_with_poll(&mut a_pack, a, k, ic, pc, mc, kc, poll)
-                        || !macro_kernel_with_poll(
-                            &a_pack, bp, band, n, jc, mc, nc, kc, alpha, &completed, poll,
-                        )
-                    {
-                        observed_cancel.store(true, std::sync::atomic::Ordering::Release);
-                        break;
-                    }
+            let bands: Vec<std::sync::Mutex<&mut [f64]>> = staged
+                .chunks_mut(band_len)
+                .map(std::sync::Mutex::new)
+                .collect();
+            let kernel = GemmBandKernel {
+                bands: &bands,
+                m,
+                n,
+                k,
+                ic_quantum: mc_q,
+                pc,
+                jc,
+                kc,
+                nc,
+                alpha,
+                a,
+                b_pack: &b_pack,
+                completed: &completed,
+                poll,
+            };
+            let panel_ordinal = u64::try_from(pool_runs.len())
+                .expect("supported Rust targets have at most 64-bit usize");
+            let panel_run = gemm_panel_run_id(declared_run, panel_ordinal);
+            let (outcome, pool_report) = pool.run_declared(&kernel, gate, panel_run);
+            pool_runs.push(pool_report);
+            match outcome {
+                Ok(()) => {}
+                Err(fs_exec::RunError::Cancelled { .. }) => {
+                    return Err(GemmRunError::Cancelled(cancelled(
+                        &completed,
+                        total_tiles,
+                        pool_runs,
+                        declared_run,
+                    )));
                 }
-            } else {
-                std::thread::scope(|scope| {
-                    for _ in 0..workers {
-                        let disp = &dispenser;
-                        let observed_cancel = &observed_cancel;
-                        let completed = &completed;
-                        scope.spawn(move || {
-                            let Some(mut a_pack) = zeroed_with_poll(a_pack_len, poll) else {
-                                observed_cancel.store(true, std::sync::atomic::Ordering::Release);
-                                return;
-                            };
-                            loop {
-                                if poll() {
-                                    observed_cancel
-                                        .store(true, std::sync::atomic::Ordering::Release);
-                                    break;
-                                }
-                                let next = disp.lock().expect("dispenser lock").next();
-                                let Some((bi, band)) = next else { break };
-                                let ic = bi * mc_q;
-                                let mc = mc_q.min(m - ic);
-                                if !pack_a_with_poll(&mut a_pack, a, k, ic, pc, mc, kc, poll)
-                                    || !macro_kernel_with_poll(
-                                        &a_pack, bp, band, n, jc, mc, nc, kc, alpha, completed,
-                                        poll,
-                                    )
-                                {
-                                    observed_cancel
-                                        .store(true, std::sync::atomic::Ordering::Release);
-                                    break;
-                                }
-                            }
-                        });
-                    }
-                });
+                Err(error) => {
+                    return Err(GemmRunError::Executor {
+                        error,
+                        report: report(&completed, total_tiles, pool_runs, declared_run),
+                    });
+                }
             }
-            // This join/inline boundary is the DRAIN barrier. No worker or
-            // borrow of private staging survives this point.
-            if observed_cancel.load(std::sync::atomic::Ordering::Acquire) || poll() {
-                return Err(cancelled(&completed, total_tiles));
+            if poll() {
+                return Err(GemmRunError::Cancelled(cancelled(
+                    &completed,
+                    total_tiles,
+                    pool_runs,
+                    declared_run,
+                )));
             }
             pc += KC;
         }
         jc += nc_q;
     }
 
-    let final_report = report(&completed, total_tiles);
+    let final_report = report(&completed, total_tiles, pool_runs, declared_run);
     debug_assert_eq!(final_report.completed_tiles, final_report.total_tiles);
     if poll() {
-        return Err(GemmCancelled {
+        return Err(GemmRunError::Cancelled(GemmCancelled {
             report: final_report,
-        });
+        }));
     }
     // FINALIZE: &mut C excludes safe concurrent observers. Once the final poll
     // passes, copy is deliberately non-cancellable and the call returns a
@@ -1201,6 +1467,20 @@ fn macro_kernel_mixed(
 mod tests {
     use super::*;
 
+    #[test]
+    fn build_fingerprint_is_stable_and_canonical_for_this_binary() {
+        let first = gemm_build_identity();
+        let second = gemm_build_identity();
+        assert_eq!(first, second, "one build has one stable codegen identity");
+        assert_eq!(first.len(), 64, "BLAKE3 identity is full width");
+        assert!(
+            first
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+            "build identity must be canonical lowercase hex"
+        );
+    }
+
     fn lcg(seed: &mut u64) -> f64 {
         *seed = seed
             .wrapping_mul(6364136223846793005)
@@ -1569,18 +1849,37 @@ mod tests {
     fn cancellable_gemm_mid_dispatch_drains_transactionally() {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
+        const CANCEL_AFTER: usize = 80;
+
         let (m, n, k) = (263usize, 37usize, 257usize);
         let a = rand_mat(m, k, 0xCA11);
         let b = rand_mat(k, n, 0xCE11);
         let original = rand_mat(m, n, 0xC0DE);
         let mut c = original.clone();
         let polls = AtomicUsize::new(0);
-        const CANCEL_AFTER: usize = 80;
         let poll = || polls.fetch_add(1, Ordering::SeqCst) >= CANCEL_AFTER;
+        let pool = fs_exec::TilePool::for_host(3, 0xCA11);
+        let gate = fs_exec::CancelGate::new();
 
-        let error =
-            gemm_f64_parallel_with_poll(m, n, k, 1.25, &a, &b, 0.5, &mut c, 3, 32, 37, &poll)
-                .expect_err("the injected mid-dispatch request must cancel");
+        let error = match gemm_f64_parallel_with_pool_and_poll(
+            m,
+            n,
+            k,
+            1.25,
+            &a,
+            &b,
+            0.5,
+            &mut c,
+            &pool,
+            32,
+            37,
+            &gate,
+            fs_exec::RunId(41),
+            &poll,
+        ) {
+            Err(GemmRunError::Cancelled(error)) => error,
+            other => panic!("expected structured cancellation, got {other:?}"),
+        };
         assert!(
             error.report.completed_tiles > 0,
             "injection must happen after real compute, not during setup: {error:?}"
@@ -1595,6 +1894,18 @@ mod tests {
                 .all(|(got, before)| got.to_bits() == before.to_bits()),
             "cancelled transactional GEMM changed caller-visible C"
         );
+        assert!(
+            error
+                .report
+                .pool_runs
+                .iter()
+                .any(|run| run.kernel == "fs-la/gemm-f64-m-band-v1" && run.total > 0),
+            "cancellation receipt must prove traversal through the real TilePool"
+        );
+        assert!(
+            pool.arena_pool().stats().quiescent(),
+            "cancelled GEMM must fully drain every Cx arena"
+        );
         // Every worker exits on its first true poll; only the scope-finalizer
         // may add another observation. This guards accidental unbounded work
         // after a request as the loop nest evolves.
@@ -1608,7 +1919,7 @@ mod tests {
     /// G0/G5: the cancellation-capable success path commits exactly once and
     /// remains bitwise the established serial accumulation contract.
     #[test]
-    fn cancellable_gemm_success_is_bitwise_and_reports_complete() {
+    fn cancellable_gemm_success_is_bitwise_across_pool_placement() {
         let (m, n, k) = (263usize, 37usize, 257usize);
         let a = rand_mat(m, k, 0xA11);
         let b = rand_mat(k, n, 0xB11);
@@ -1616,10 +1927,25 @@ mod tests {
         let mut expected = original.clone();
         gemm_f64(m, n, k, 1.25, &a, &b, 0.5, &mut expected);
 
-        for threads in [1, 3] {
+        let parallelism =
+            std::thread::available_parallelism().map_or(2, core::num::NonZeroUsize::get);
+        let mut configs = vec![
+            ("one", fs_exec::PoolConfig::for_host(1, 0xA11)),
+            ("two", fs_exec::PoolConfig::for_host(2, 0xA11)),
+            (
+                "available-parallelism",
+                fs_exec::PoolConfig::for_host(parallelism, 0xA11),
+            ),
+        ];
+        let mut pinned = fs_exec::PoolConfig::for_host(parallelism, 0xA11);
+        pinned.pin_groups = vec![vec![9999], vec![0]];
+        configs.push(("advisory-pinned", pinned));
+
+        for (placement, config) in configs {
+            let pool = fs_exec::TilePool::new(config);
             let gate = fs_exec::CancelGate::new();
             let mut actual = original.clone();
-            let report = gemm_f64_parallel_with_cancel(
+            let report = gemm_f64_parallel_with_pool(
                 m,
                 n,
                 k,
@@ -1628,7 +1954,7 @@ mod tests {
                 &b,
                 0.5,
                 &mut actual,
-                threads,
+                &pool,
                 32,
                 37,
                 &gate,
@@ -1636,13 +1962,30 @@ mod tests {
             .expect("unrequested dispatch");
             assert_eq!(report.completed_tiles, report.total_tiles);
             assert!(report.total_tiles > 0);
+            assert!(!report.pool_runs.is_empty());
+            assert!(report.pool_runs.iter().all(|run| {
+                run.kernel == "fs-la/gemm-f64-m-band-v1"
+                    && run.completed == run.total
+                    && run.total > 0
+            }));
+            assert_eq!(
+                report
+                    .pool_runs
+                    .iter()
+                    .map(|run| run.declared_run.0)
+                    .collect::<Vec<_>>(),
+                (0..u64::try_from(report.pool_runs.len()).expect("panel count fits u64"))
+                    .collect::<Vec<_>>(),
+                "NC/KC panel stream identities must be distinct and deterministic"
+            );
             assert!(
                 actual
                     .iter()
                     .zip(&expected)
                     .all(|(got, want)| got.to_bits() == want.to_bits()),
-                "cancellable GEMM diverged at thread count {threads}"
+                "cancellable GEMM diverged under {placement}"
             );
+            assert!(pool.arena_pool().stats().quiescent(), "{placement}");
         }
     }
 
@@ -1660,6 +2003,9 @@ mod tests {
         let error =
             gemm_f64_parallel_with_cancel(m, n, k, 1.0, &a, &b, 0.0, &mut c, 2, 32, 128, &gate)
                 .expect_err("pre-requested gate");
+        let GemmRunError::Cancelled(error) = error else {
+            panic!("pre-requested gate returned an executor failure");
+        };
         assert_eq!(error.report.completed_tiles, 0);
         assert!(error.report.total_tiles > 0);
         assert!(
@@ -1667,6 +2013,45 @@ mod tests {
                 .zip(&original)
                 .all(|(got, before)| got.to_bits() == before.to_bits())
         );
+    }
+
+    #[test]
+    fn caller_pool_arena_refusal_is_structured_and_transactional() {
+        let (m, n, k) = (16usize, 7usize, 9usize);
+        let a = rand_mat(m, k, 0xA110);
+        let b = rand_mat(k, n, 0xB110);
+        let original = rand_mat(m, n, 0xC110);
+        let mut c = original.clone();
+        let mut config = fs_exec::PoolConfig::for_host(2, 0xA110);
+        config.arena.limit_bytes = Some(0);
+        let pool = fs_exec::TilePool::new(config);
+        let gate = fs_exec::CancelGate::new();
+
+        let error =
+            gemm_f64_parallel_with_pool(m, n, k, 1.0, &a, &b, 0.5, &mut c, &pool, 8, 7, &gate)
+                .expect_err("the zero-byte arena budget must refuse A packing");
+        match error {
+            GemmRunError::Executor {
+                error: fs_exec::RunError::TilePanicked { message, .. },
+                report,
+            } => {
+                assert!(message.contains("arena allocation failed"), "{message}");
+                assert_eq!(report.completed_tiles, 0);
+                assert_eq!(report.pool_runs.len(), 1);
+            }
+            other => panic!("expected contained arena refusal, got {other:?}"),
+        }
+        assert!(
+            gate.is_requested(),
+            "tile containment drains through the gate"
+        );
+        assert!(
+            c.iter()
+                .zip(&original)
+                .all(|(got, before)| got.to_bits() == before.to_bits()),
+            "executor refusal must not expose staged output"
+        );
+        assert!(pool.arena_pool().stats().quiescent());
     }
 
     /// Recorded on aarch64-apple (M4 Pro); must match on x86-64 (trj).

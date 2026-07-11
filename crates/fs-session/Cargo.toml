@@ -11,11 +11,11 @@ description = "Sessions, capability tokens, and the enforcing resource governor:
 layer = "L6"
 
 [dependencies]
+fs-blake3 = { path = "../fs-blake3" }
 fs-exec = { path = "../fs-exec" }
 fs-ir = { path = "../fs-ir" }
 fs-la = { path = "../fs-la" }
 fs-ledger = { path = "../fs-ledger" }
-fs-obs = { path = "../fs-obs" }
 fs-plan = { path = "../fs-plan" }
 fs-qty = { path = "../fs-qty" }
 

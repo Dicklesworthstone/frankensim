@@ -175,25 +175,45 @@ fn relock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 fn race_json(mode: &str, winner: Option<usize>, reports: &[BranchReport]) -> String {
     use std::fmt::Write as _;
     let mut s = String::with_capacity(96);
+    s.push_str("{\"mode\":");
+    push_json_string(&mut s, mode);
     let _ = write!(
         s,
-        "{{\"mode\":\"{mode}\",\"winner\":{},\"branches\":[",
+        ",\"winner\":{},\"branches\":[",
         winner.map_or_else(|| "null".to_string(), |w| w.to_string())
     );
     for (i, r) in reports.iter().enumerate() {
         if i > 0 {
             s.push(',');
         }
-        let _ = write!(
-            s,
-            "{{\"index\":{},\"name\":\"{}\",\"outcome\":\"{}\"}}",
-            r.index,
-            r.name,
-            r.outcome.name()
-        );
+        let _ = write!(s, "{{\"index\":{},\"name\":", r.index);
+        push_json_string(&mut s, r.name);
+        let _ = write!(s, ",\"outcome\":\"{}\"}}", r.outcome.name());
     }
     s.push_str("]}");
     s
+}
+
+fn push_json_string(out: &mut String, value: &str) {
+    use std::fmt::Write as _;
+
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\u{08}' => out.push_str("\\b"),
+            '\u{0c}' => out.push_str("\\f"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            control if control <= '\u{1f}' => {
+                let _ = write!(out, "\\u{:04x}", u32::from(control));
+            }
+            other => out.push(other),
+        }
+    }
+    out.push('"');
 }
 
 /// Speculative-race executor. Owns the arena pool whose quiescence after a
@@ -479,6 +499,19 @@ mod tests {
         assert_eq!(run.reports[2].outcome, BranchOutcome::Outraced);
         assert!(racer.arena_pool().stats().quiescent(), "losers drained");
         assert!(run.to_json().contains("\"winner\":0"), "{}", run.to_json());
+    }
+
+    #[test]
+    fn race_json_escapes_hostile_branch_names() {
+        let reports = [BranchReport {
+            name: "quote\" slash\\ line\n tab\t control\u{0001}",
+            index: 0,
+            outcome: BranchOutcome::Won,
+        }];
+        assert_eq!(
+            race_json("deterministic", Some(0), &reports),
+            "{\"mode\":\"deterministic\",\"winner\":0,\"branches\":[{\"index\":0,\"name\":\"quote\\\" slash\\\\ line\\n tab\\t control\\u0001\",\"outcome\":\"won\"}]}"
+        );
     }
 
     #[test]

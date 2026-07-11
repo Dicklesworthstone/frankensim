@@ -1086,6 +1086,7 @@ version = "0.0.1"
 dependencies = [
  "asupersync 0.3.5",
  "fs-alloc",
+ "fs-blake3",
  "fs-obs",
  "fs-substrate",
 ]
@@ -1315,6 +1316,8 @@ dependencies = [
 name = "fs-la"
 version = "0.0.1"
 dependencies = [
+ "fs-alloc",
+ "fs-blake3",
  "fs-exec",
  "fs-math",
  "fs-rand",
@@ -1724,11 +1727,11 @@ dependencies = [
 name = "fs-session"
 version = "0.0.1"
 dependencies = [
+ "fs-blake3",
  "fs-exec",
  "fs-ir",
  "fs-la",
  "fs-ledger",
- "fs-obs",
  "fs-plan",
  "fs-qty",
  "fs-regime",

@@ -72,6 +72,15 @@ impl PoolConfig {
         }
     }
 
+    /// Construct an unpinned deterministic configuration from the host's
+    /// topology probe. The probe is a scheduling hint, not a hardware claim;
+    /// callers that already hold measured topology should use [`Self::new`].
+    #[must_use]
+    pub fn for_host(workers: usize, seed: u64) -> Self {
+        let probe = fs_substrate::CapabilityProbe::topology_only();
+        Self::new(workers, CcdTopology::from_probe(&probe), seed)
+    }
+
     /// Enable CCD pinning from the MEASURED L3 topology where the
     /// platform exposes it (Linux sysfs); a no-op elsewhere — callers
     /// can inspect `pin_groups.is_empty()` to ledger which they got.
@@ -111,6 +120,24 @@ pub enum RunError {
         /// Tiles that completed despite the failure.
         completed: u64,
     },
+    /// The operating system refused to create a scoped worker. Already-started
+    /// workers were cancelled and drained before this outcome was returned.
+    WorkerSpawn {
+        /// Kernel name.
+        kernel: &'static str,
+        /// Lowest worker index whose creation failed.
+        worker: usize,
+        /// Operating-system diagnostic.
+        message: String,
+    },
+    /// A user-defined deterministic reduction merge panicked after every tile
+    /// had completed. The unwind was contained at the pool boundary.
+    ReductionPanicked {
+        /// Kernel name.
+        kernel: &'static str,
+        /// Panic payload's message, when it carried one.
+        message: String,
+    },
     /// Defensive: a slot was missing at fold time (executor bug, reported
     /// structurally rather than panicking across the boundary).
     Incomplete {
@@ -143,6 +170,18 @@ impl fmt::Display for RunError {
                 "kernel `{kernel}` tile {tile} panicked: {message} ({completed} sibling tiles \
                  completed; siblings were cancelled, the pool remains usable)"
             ),
+            RunError::WorkerSpawn {
+                kernel,
+                worker,
+                message,
+            } => write!(
+                f,
+                "kernel `{kernel}` worker {worker} could not be created: {message}; started workers were cancelled and drained"
+            ),
+            RunError::ReductionPanicked { kernel, message } => write!(
+                f,
+                "kernel `{kernel}` deterministic reduction panicked: {message}; the unwind was contained and the pool remains usable"
+            ),
             RunError::Incomplete { kernel, tile } => write!(
                 f,
                 "kernel `{kernel}` finished without output for tile {tile}: executor invariant \
@@ -154,15 +193,38 @@ impl fmt::Display for RunError {
 
 impl core::error::Error for RunError {}
 
+fn push_json_string(out: &mut String, value: &str) {
+    use core::fmt::Write as _;
+
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => {
+                let _ = write!(out, "\\u{:04x}", u32::from(c));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+}
+
 /// Measured facts about one run: steal statistics and the cancel-latency
 /// samples (ns between the first cancel request and each worker OBSERVING
 /// it at a tile boundary). Measurements only — results never depend on them.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RunReport {
     /// Kernel name.
     pub kernel: &'static str,
     /// Execution mode of the run.
     pub mode: &'static str,
+    /// Caller-declared logical run identity used as every tile stream's
+    /// iteration component.
+    pub declared_run: RunId,
     /// Tiles completed.
     pub completed: u64,
     /// Tiles planned.
@@ -201,17 +263,28 @@ impl RunReport {
     pub fn to_json(&self) -> String {
         use std::fmt::Write as _;
         let mut s = String::with_capacity(160);
+        s.push_str("{\"kernel\":");
+        push_json_string(&mut s, self.kernel);
+        s.push_str(",\"mode\":");
+        push_json_string(&mut s, self.mode);
         let _ = write!(
             s,
-            "{{\"kernel\":\"{}\",\"mode\":\"{}\",\"completed\":{},\"total\":{},\"steals\":{},\
+            ",\"declared_run\":{},\"completed\":{},\"total\":{},\"steals\":{},\
              \"cross_ccd_steals\":{},\"cancel_latencies_ns\":[",
-            self.kernel, self.mode, self.completed, self.total, self.steals, self.cross_ccd_steals
+            self.declared_run.0, self.completed, self.total, self.steals, self.cross_ccd_steals
         );
         for (i, l) in self.cancel_latencies_ns.iter().enumerate() {
             if i > 0 {
                 s.push(',');
             }
             let _ = write!(s, "{l}");
+        }
+        s.push_str("],\"tiles_by_worker\":[");
+        for (i, completed) in self.tiles_by_worker.iter().enumerate() {
+            if i > 0 {
+                s.push(',');
+            }
+            let _ = write!(s, "{completed}");
         }
         s.push_str("]}");
         s
@@ -247,24 +320,50 @@ pub fn victim_order(w: usize, workers: usize, topo: &CcdTopology) -> Vec<usize> 
 }
 
 /// Split `0..tiles` into contiguous per-worker ranges proportional to
-/// `weights` (largest-remainder rounding; deterministic).
+/// cumulative weights. Each interior boundary is
+/// `floor(tiles * prefix_weight / total_weight)`; the implementation evaluates
+/// that ratio exactly without a fixed-width intermediate product.
 #[must_use]
 pub fn weighted_ranges(tiles: u64, weights: &[u32]) -> Vec<core::ops::Range<u64>> {
-    let total_w: u64 = weights.iter().map(|&w| u64::from(w.max(1))).sum();
+    let total_w: u128 = weights.iter().map(|&w| u128::from(w.max(1))).sum();
+    let tiles = u128::from(tiles);
     let mut ranges = Vec::with_capacity(weights.len());
     let mut start = 0u64;
-    let mut acc = 0u64;
+    let mut acc = 0u128;
     for (i, &w) in weights.iter().enumerate() {
-        acc += u64::from(w.max(1));
+        acc += u128::from(w.max(1));
         let end = if i + 1 == weights.len() {
-            tiles
+            u64::try_from(tiles).expect("u64 tile count widened losslessly")
         } else {
-            (tiles * acc) / total_w
+            mul_ratio_floor(
+                u64::try_from(tiles).expect("u64 tile count widened losslessly"),
+                acc,
+                total_w,
+            )
         };
         ranges.push(start..end);
         start = end;
     }
     ranges
+}
+
+fn mul_ratio_floor(value: u64, numerator: u128, denominator: u128) -> u64 {
+    debug_assert!(denominator > 0 && numerator <= denominator);
+    // A realizable &[u32] has total weight below 2^96 on 64-bit targets.
+    // Maintaining the division remainder keeps every step below 3*denominator
+    // instead of forming the potentially 160-bit `value * numerator` product.
+    let mut quotient = 0u128;
+    let mut remainder = 0u128;
+    for bit in (0..u64::BITS).rev() {
+        quotient *= 2;
+        remainder *= 2;
+        if (value >> bit) & 1 == 1 {
+            remainder += numerator;
+        }
+        quotient += remainder / denominator;
+        remainder %= denominator;
+    }
+    u64::try_from(quotient).expect("a ratio no greater than one cannot exceed its u64 multiplicand")
 }
 
 /// The throughput-lane pool. Workers are scoped per run (spawned at `run`,
@@ -288,6 +387,43 @@ impl TilePool {
         }
         let arenas = fs_alloc::ArenaPool::new(config.arena.clone());
         TilePool { config, arenas }
+    }
+
+    /// Construct a deterministic, unpinned pool from the host topology probe.
+    #[must_use]
+    pub fn for_host(workers: usize, seed: u64) -> Self {
+        Self::new(PoolConfig::for_host(workers, seed))
+    }
+
+    /// Normalized maximum worker budget used by this pool.
+    #[must_use]
+    pub const fn workers(&self) -> usize {
+        self.config.workers
+    }
+
+    /// Canonical placement/configuration identity for tune rows and replay
+    /// keys. The readable prefix records topology, mode, and pinning intent;
+    /// the derive-key BLAKE3 suffix binds normalized weights, arena policy,
+    /// the pool's recorded hugepage decision, and exact pin groups without an
+    /// unbounded key.
+    ///
+    /// Pinning is advisory at execution time, but requesting it changes the
+    /// timing population and therefore must select a distinct tune key even
+    /// on a host where the OS rejects the affinity request.
+    #[must_use]
+    pub fn placement_identity(&self) -> String {
+        let digest = placement_digest(&self.config, self.arenas.hugepage_decision());
+        let pinning_intent = if self.config.pin_groups.is_empty() {
+            "pin-unrequested"
+        } else {
+            "ccd-pin-requested"
+        };
+        format!(
+            "fs-exec-tilepool-v2-{pinning_intent}-ccd{}x{}-mode-{}-cfg-{digest}",
+            self.config.topo.ccds,
+            self.config.topo.cores_per_ccd,
+            self.config.mode.name(),
+        )
     }
 
     /// The arena pool backing per-tile scopes (leak oracle for G4 tests).
@@ -376,6 +512,7 @@ impl TilePool {
             .map(|_| CachePadded::new(AtomicU64::new(0)))
             .collect();
 
+        let mut spawn_failure = None;
         std::thread::scope(|s| {
             for w in 0..workers {
                 let deques = &deques;
@@ -388,7 +525,7 @@ impl TilePool {
                 let done_by = &done_by[w];
                 let arenas = &self.arenas;
                 let config = &self.config;
-                s.spawn(move || {
+                let spawned = std::thread::Builder::new().spawn_scoped(s, move || {
                     if !config.pin_groups.is_empty() {
                         let g = ccd_of_worker(w, workers, config.topo) % config.pin_groups.len();
                         // Advisory (see PoolConfig::pin_groups docs).
@@ -471,7 +608,10 @@ impl TilePool {
                                     .or_else(|| payload.downcast_ref::<String>().cloned())
                                     .unwrap_or_else(|| "non-string panic payload".to_string());
                                 let mut pb = panic_box.lock().expect("panic box");
-                                if pb.is_none() {
+                                if pb
+                                    .as_ref()
+                                    .is_none_or(|(recorded_tile, _)| tile < *recorded_tile)
+                                {
                                     *pb = Some((tile, message));
                                 }
                                 drop(pb);
@@ -480,6 +620,11 @@ impl TilePool {
                         }
                     }
                 });
+                if let Err(error) = spawned {
+                    spawn_failure = Some((w, error.to_string()));
+                    gate.request();
+                    break;
+                }
             }
         });
 
@@ -491,6 +636,7 @@ impl TilePool {
         let report = RunReport {
             kernel: plan.kernel,
             mode: self.config.mode.name(),
+            declared_run: run,
             completed,
             total: n,
             steals: steals.load(Ordering::Relaxed),
@@ -510,6 +656,16 @@ impl TilePool {
                 .collect(),
         };
 
+        if let Some((worker, message)) = spawn_failure {
+            return (
+                Err(RunError::WorkerSpawn {
+                    kernel: plan.kernel,
+                    worker,
+                    message,
+                }),
+                report,
+            );
+        }
         if let Some((tile, message)) = panic_box.into_inner().expect("panic box") {
             return (
                 Err(RunError::TilePanicked {
@@ -548,8 +704,78 @@ impl TilePool {
                 }
             }
         }
-        (Ok(crate::reduce::pairwise_fold(outs)), report)
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            crate::reduce::pairwise_fold(outs)
+        })) {
+            Ok(out) => (Ok(out), report),
+            Err(payload) => {
+                let message = payload
+                    .downcast_ref::<&str>()
+                    .map(ToString::to_string)
+                    .or_else(|| payload.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "non-string panic payload".to_string());
+                (
+                    Err(RunError::ReductionPanicked {
+                        kernel: plan.kernel,
+                        message,
+                    }),
+                    report,
+                )
+            }
+        }
     }
+}
+
+fn placement_digest(config: &PoolConfig, hugepage: &fs_alloc::HugepageDecision) -> String {
+    const DOMAIN: &str = "org.frankensim.fs-exec.tilepool-placement.v2";
+    let mut payload = Vec::new();
+    append_placement_usize(&mut payload, config.workers);
+    payload.extend_from_slice(&config.topo.ccds.to_le_bytes());
+    payload.extend_from_slice(&config.topo.cores_per_ccd.to_le_bytes());
+    payload.push(match config.mode {
+        ExecMode::Deterministic => 0,
+        ExecMode::Fast => 1,
+    });
+    append_placement_usize(&mut payload, config.quantum_weights.len());
+    for weight in &config.quantum_weights {
+        payload.extend_from_slice(&weight.to_le_bytes());
+    }
+    append_placement_usize(&mut payload, config.arena.chunk_bytes);
+    append_placement_usize(&mut payload, config.arena.max_chunk_bytes);
+    match config.arena.limit_bytes {
+        Some(limit) => {
+            payload.push(1);
+            append_placement_usize(&mut payload, limit);
+        }
+        None => payload.push(0),
+    }
+    append_placement_usize(&mut payload, config.arena.free_list_max_bytes);
+    payload.push(match config.arena.hugepage {
+        fs_alloc::HugepagePolicy::Auto => 0,
+        fs_alloc::HugepagePolicy::Never => 1,
+    });
+    append_placement_bytes(&mut payload, hugepage.to_json().as_bytes());
+    append_placement_usize(&mut payload, config.pin_groups.len());
+    for group in &config.pin_groups {
+        append_placement_usize(&mut payload, group.len());
+        for cpu in group {
+            payload.extend_from_slice(&cpu.to_le_bytes());
+        }
+    }
+    fs_blake3::hash_domain(DOMAIN, &payload).to_hex()
+}
+
+fn append_placement_usize(payload: &mut Vec<u8>, value: usize) {
+    payload.extend_from_slice(
+        &u64::try_from(value)
+            .expect("TilePool placement dimension exceeds u64")
+            .to_le_bytes(),
+    );
+}
+
+fn append_placement_bytes(payload: &mut Vec<u8>, bytes: &[u8]) {
+    append_placement_usize(payload, bytes.len());
+    payload.extend_from_slice(bytes);
 }
 
 impl fmt::Debug for TilePool {
@@ -564,7 +790,7 @@ impl fmt::Debug for TilePool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kernel::TilePlan;
+    use crate::kernel::{Reduce, TilePlan};
 
     struct SumKernel {
         tiles: u64,
@@ -589,8 +815,174 @@ mod tests {
         }
     }
 
+    struct MultiPanicKernel {
+        tiles: u64,
+        barrier: std::sync::Barrier,
+    }
+
+    impl TileKernel for MultiPanicKernel {
+        type Out = u64;
+
+        fn tiles(&self) -> TilePlan {
+            TilePlan::new("test/multi-panic", self.tiles)
+        }
+
+        fn run(&self, tile: u64, _cx: &Cx<'_>) -> ControlFlow<crate::Cancelled, u64> {
+            self.barrier.wait();
+            panic!("simultaneous panic from tile {tile}");
+        }
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct MergeBomb(u64);
+
+    impl Reduce for MergeBomb {
+        fn identity() -> Self {
+            Self(0)
+        }
+
+        fn merge(self, _other: Self) -> Self {
+            panic!("reduction merge exploded")
+        }
+    }
+
+    struct ReductionPanicKernel;
+
+    impl TileKernel for ReductionPanicKernel {
+        type Out = MergeBomb;
+
+        fn tiles(&self) -> TilePlan {
+            TilePlan::new("test/reduction-panic", 2)
+        }
+
+        fn run(&self, _tile: u64, _cx: &Cx<'_>) -> ControlFlow<crate::Cancelled, MergeBomb> {
+            ControlFlow::Continue(MergeBomb(1))
+        }
+    }
+
     fn pool(workers: usize) -> TilePool {
         TilePool::new(PoolConfig::new(workers, CcdTopology::APPLE_M_CLASS, 0x5EED))
+    }
+
+    #[test]
+    fn run_report_json_escapes_identity_and_retains_worker_counts() {
+        let report = RunReport {
+            kernel: "test/\"kernel\\line\n",
+            mode: "deterministic",
+            declared_run: RunId(7),
+            completed: 3,
+            total: 4,
+            steals: 2,
+            cross_ccd_steals: 1,
+            cancel_latencies_ns: vec![11, 13],
+            tiles_by_worker: vec![2, 1],
+        };
+
+        assert_eq!(
+            report.to_json(),
+            "{\"kernel\":\"test/\\\"kernel\\\\line\\n\",\"mode\":\"deterministic\",\"declared_run\":7,\"completed\":3,\"total\":4,\"steals\":2,\"cross_ccd_steals\":1,\"cancel_latencies_ns\":[11,13],\"tiles_by_worker\":[2,1]}"
+        );
+    }
+
+    #[test]
+    fn simultaneous_panics_report_the_lowest_logical_tile() {
+        for workers in [2usize, 4] {
+            for _ in 0..16 {
+                let kernel = MultiPanicKernel {
+                    tiles: workers as u64,
+                    barrier: std::sync::Barrier::new(workers),
+                };
+                let error = pool(workers)
+                    .run(&kernel)
+                    .expect_err("every in-flight tile panics");
+                match error {
+                    RunError::TilePanicked { tile, message, .. } => {
+                        assert_eq!(tile, 0, "panic provenance must not depend on arrival order");
+                        assert_eq!(message, "simultaneous panic from tile 0");
+                    }
+                    other => panic!("expected TilePanicked, got {other:?}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn reduction_panics_are_structured_and_the_pool_survives() {
+        let pool = pool(2);
+        let error = pool
+            .run(&ReductionPanicKernel)
+            .expect_err("the merge deliberately panics");
+        assert_eq!(
+            error,
+            RunError::ReductionPanicked {
+                kernel: "test/reduction-panic",
+                message: "reduction merge exploded".to_string(),
+            }
+        );
+        assert_eq!(
+            pool.run(&SumKernel { tiles: 17 })
+                .expect("reuse after panic"),
+            (1_u64..=17).sum::<u64>(),
+            "a contained reduction panic must not poison the pool"
+        );
+        assert!(pool.arena_pool().stats().quiescent());
+    }
+
+    #[test]
+    fn placement_identity_tracks_the_requested_pinning_intent() {
+        let unpinned = pool(0);
+        assert_eq!(unpinned.workers(), 1, "worker budgets are normalized");
+        let unpinned_identity = unpinned.placement_identity();
+        assert!(
+            unpinned_identity.starts_with("fs-exec-tilepool-v2-pin-unrequested-ccd"),
+            "{unpinned_identity}"
+        );
+
+        let mut config = PoolConfig::new(3, CcdTopology::APPLE_M_CLASS, 0x5EED);
+        config.pin_groups = vec![vec![9999]];
+        let pinned = TilePool::new(config);
+        assert_eq!(pinned.workers(), 3);
+        let pinned_identity = pinned.placement_identity();
+        assert!(
+            pinned_identity.starts_with("fs-exec-tilepool-v2-ccd-pin-requested-ccd"),
+            "{pinned_identity}"
+        );
+        assert_ne!(pinned_identity, unpinned_identity);
+
+        let mut weighted = PoolConfig::new(1, CcdTopology::APPLE_M_CLASS, 0x5EED);
+        weighted.quantum_weights = vec![2];
+        let weighted_identity = TilePool::new(weighted).placement_identity();
+        assert_ne!(weighted_identity, unpinned_identity);
+        assert!(weighted_identity.len() <= 256);
+        assert!(
+            weighted_identity
+                .bytes()
+                .all(|byte| { byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_') })
+        );
+    }
+
+    #[test]
+    fn placement_identity_binds_the_recorded_hugepage_outcome() {
+        let pool = pool(1);
+        let decision = |outcome| fs_alloc::HugepageDecision {
+            policy: fs_alloc::HugepagePolicy::Auto,
+            outcome,
+            detail: "deterministic fixture detail".to_string(),
+        };
+        let aligned = decision(fs_alloc::HugepageOutcome::AlignedForThp);
+        let unsupported = decision(fs_alloc::HugepageOutcome::UnsupportedPlatform);
+
+        let aligned_digest = placement_digest(&pool.config, &aligned);
+        assert_eq!(
+            aligned_digest,
+            placement_digest(&pool.config, &aligned),
+            "the same recorded decision must produce the same placement digest"
+        );
+        assert_ne!(
+            aligned_digest,
+            placement_digest(&pool.config, &unsupported),
+            "different realized hugepage outcomes must not share tune rows"
+        );
     }
 
     #[test]
@@ -642,6 +1034,28 @@ mod tests {
         assert_eq!(r, vec![0..3, 3..7]);
         let r = weighted_ranges(0, &[1, 1]);
         assert_eq!(r, vec![0..0, 0..0]);
+
+        let maximal = weighted_ranges(u64::MAX, &[1, 1, u32::MAX, 7]);
+        assert_eq!(maximal.first().map(|range| range.start), Some(0));
+        assert_eq!(maximal.last().map(|range| range.end), Some(u64::MAX));
+        assert!(
+            maximal.windows(2).all(|pair| pair[0].end == pair[1].start),
+            "maximum-domain partition must have neither gaps nor overlap: {maximal:?}"
+        );
+        assert!(
+            maximal.iter().all(|range| range.start <= range.end),
+            "maximum-domain boundaries must be monotonic: {maximal:?}"
+        );
+        assert_eq!(mul_ratio_floor(u64::MAX, 1, 2), u64::MAX / 2);
+        for value in [0, 1, 7, 1024, u64::from(u32::MAX)] {
+            for (numerator, denominator) in [(0, 1), (1, 3), (2, 3), (17, 19), (1, 1)] {
+                assert_eq!(
+                    mul_ratio_floor(value, numerator, denominator),
+                    u64::try_from(u128::from(value) * numerator / denominator)
+                        .expect("small oracle fits")
+                );
+            }
+        }
     }
 
     #[test]

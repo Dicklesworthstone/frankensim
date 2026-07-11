@@ -13,6 +13,9 @@ use std::sync::{Arc, Condvar, Mutex};
 
 /// Hard-bound multiplier: past `HARD_FACTOR × grant` the session pauses.
 const HARD_FACTOR: f64 = 1.2;
+const IDEMPOTENCY_KEY_DOMAIN: &str = "org.frankensim.fs-session.idempotency-key.v2";
+const SUBMISSION_RECEIPT_DOMAIN: &str = "org.frankensim.fs-session.submission-receipt.v1";
+const MAX_IDEMPOTENCY_KEY_BYTES: usize = 4096;
 
 /// One metering delta reported by the executor.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -102,6 +105,54 @@ pub struct DegradationEvent {
     pub ordinal: i64,
 }
 
+/// Opaque content identity for one terminal idempotent submission.
+///
+/// The private field prevents callers from minting receipts from arbitrary
+/// integers. Identity binds the owning session, exact idempotency key, terminal
+/// outcome, and charge or failure diagnosis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SubmissionReceipt(fs_blake3::ContentHash);
+
+impl SubmissionReceipt {
+    /// Domain-separated content hash carried by this receipt.
+    #[must_use]
+    pub const fn content_hash(self) -> fs_blake3::ContentHash {
+        self.0
+    }
+
+    /// Recompute and verify a successful terminal receipt.
+    #[must_use]
+    pub fn matches_success(
+        self,
+        session: SessionId,
+        idem_key: &str,
+        charge: Charge,
+        enforcement: &Enforcement,
+    ) -> bool {
+        self == submission_receipt(
+            session,
+            idem_key,
+            &SubmissionCompletion::Done(charge, enforcement.clone()),
+        )
+    }
+
+    /// Recompute and verify a failed terminal receipt.
+    #[must_use]
+    pub fn matches_failure(self, session: SessionId, idem_key: &str, what: &str) -> bool {
+        self == submission_receipt(
+            session,
+            idem_key,
+            &SubmissionCompletion::Failed(what.to_string()),
+        )
+    }
+}
+
+impl core::fmt::Display for SubmissionReceipt {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        core::fmt::Display::fmt(&self.0, f)
+    }
+}
+
 /// Outcome of an idempotent submission.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SubmitOutcome {
@@ -109,21 +160,25 @@ pub enum SubmitOutcome {
     Executed {
         /// The charge recorded.
         charge: Charge,
-        /// Execution ordinal (1 = first ever for this key).
-        receipt: u64,
+        /// Enforcement decision produced by committing that charge.
+        enforcement: Enforcement,
+        /// Content-derived terminal receipt.
+        receipt: SubmissionReceipt,
     },
     /// The key had already executed (or raced and lost): same receipt,
     /// NO additional charge.
     Duplicate {
         /// The original execution's receipt.
-        receipt: u64,
+        receipt: SubmissionReceipt,
+        /// The original execution's enforcement decision.
+        enforcement: Enforcement,
     },
     /// The one attempted execution failed before a charge could be committed.
     /// The key remains terminal: all duplicates receive this same receipt and
     /// diagnosis, and an explicit retry requires a new key.
     Failed {
         /// The failed execution's receipt.
-        receipt: u64,
+        receipt: SubmissionReceipt,
         /// Panic payload or structured validation diagnosis.
         what: String,
     },
@@ -131,7 +186,7 @@ pub enum SubmitOutcome {
     Refused(Box<Guidance>),
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 struct SessionMeters {
     core_s: f64,
     mem_peak_bytes: u64,
@@ -140,16 +195,59 @@ struct SessionMeters {
     paused: u32,
 }
 
+fn same_meter_snapshot(left: &SessionMeters, right: &SessionMeters) -> bool {
+    left.core_s.to_bits() == right.core_s.to_bits()
+        && left.mem_peak_bytes == right.mem_peak_bytes
+        && left.wall_s.to_bits() == right.wall_s.to_bits()
+        && left.throttled == right.throttled
+        && left.paused == right.paused
+}
+
+fn ledger_sink_identity(ledger: &fs_ledger::Ledger) -> String {
+    if ledger.path() == ":memory:" {
+        format!(":memory:@{ledger:p}")
+    } else {
+        ledger.path().to_string()
+    }
+}
+
 #[derive(Debug)]
 enum IdemState {
     Pending,
-    Done { receipt: u64, charge: Charge },
-    Failed { receipt: u64, what: String },
+    Done {
+        ordinal: u64,
+        receipt: SubmissionReceipt,
+        charge: Charge,
+        enforcement: Enforcement,
+    },
+    Failed {
+        ordinal: u64,
+        receipt: SubmissionReceipt,
+        what: String,
+    },
 }
 
 enum SubmissionCompletion {
-    Done(Charge),
+    Done(Charge, Enforcement),
     Failed(String),
+}
+
+struct BufferedLedgerEvent {
+    session: [u8; 8],
+    t: i64,
+    kind: &'static str,
+    payload: String,
+}
+
+impl BufferedLedgerEvent {
+    fn as_row(&self) -> fs_ledger::EventRow<'_> {
+        fs_ledger::EventRow {
+            session: Some(self.session.as_slice()),
+            t: self.t,
+            kind: self.kind,
+            payload: Some(&self.payload),
+        }
+    }
 }
 
 fn validate_resource(resource: &'static str, value: f64) -> Result<(), SessionError> {
@@ -172,6 +270,115 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
         .unwrap_or_else(|| "submission work panicked with a non-string payload".to_string())
 }
 
+fn push_framed(payload: &mut Vec<u8>, bytes: &[u8]) {
+    payload.extend_from_slice(
+        &u64::try_from(bytes.len())
+            .expect("submission receipt field length fits u64")
+            .to_le_bytes(),
+    );
+    payload.extend_from_slice(bytes);
+}
+
+fn push_enforcement_identity(payload: &mut Vec<u8>, enforcement: &Enforcement) {
+    match enforcement {
+        Enforcement::Ok => payload.push(0),
+        Enforcement::Throttled {
+            resource,
+            used,
+            granted,
+        } => {
+            payload.push(1);
+            push_framed(payload, resource.as_bytes());
+            payload.extend_from_slice(&used.to_bits().to_le_bytes());
+            payload.extend_from_slice(&granted.to_bits().to_le_bytes());
+        }
+        Enforcement::Paused {
+            resource,
+            used,
+            granted,
+            resume_hint,
+        } => {
+            payload.push(2);
+            push_framed(payload, resource.as_bytes());
+            payload.extend_from_slice(&used.to_bits().to_le_bytes());
+            payload.extend_from_slice(&granted.to_bits().to_le_bytes());
+            push_framed(payload, resume_hint.as_bytes());
+        }
+    }
+}
+
+fn submission_receipt(
+    session: SessionId,
+    idem_key: &str,
+    completion: &SubmissionCompletion,
+) -> SubmissionReceipt {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&session.0.to_le_bytes());
+    push_framed(&mut payload, idem_key.as_bytes());
+    match completion {
+        SubmissionCompletion::Done(charge, enforcement) => {
+            payload.push(0);
+            payload.extend_from_slice(&charge.core_s.to_bits().to_le_bytes());
+            payload.extend_from_slice(&charge.mem_peak_bytes.to_le_bytes());
+            payload.extend_from_slice(&charge.wall_s.to_bits().to_le_bytes());
+            push_enforcement_identity(&mut payload, enforcement);
+        }
+        SubmissionCompletion::Failed(what) => {
+            payload.push(1);
+            push_framed(&mut payload, what.as_bytes());
+        }
+    }
+    SubmissionReceipt(fs_blake3::hash_domain(SUBMISSION_RECEIPT_DOMAIN, &payload))
+}
+
+fn json_escape(value: &str) -> String {
+    use core::fmt::Write as _;
+
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => {
+                let _ = write!(out, "\\u{:04x}", u32::from(c));
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+fn enforcement_json(enforcement: &Enforcement) -> String {
+    match enforcement {
+        Enforcement::Ok => "{\"kind\":\"ok\"}".to_string(),
+        Enforcement::Throttled {
+            resource,
+            used,
+            granted,
+        } => format!(
+            "{{\"kind\":\"throttled\",\"resource\":\"{}\",\"used_bits\":\"{:016x}\",\"granted_bits\":\"{:016x}\"}}",
+            json_escape(resource),
+            used.to_bits(),
+            granted.to_bits(),
+        ),
+        Enforcement::Paused {
+            resource,
+            used,
+            granted,
+            resume_hint,
+        } => format!(
+            "{{\"kind\":\"paused\",\"resource\":\"{}\",\"used_bits\":\"{:016x}\",\"granted_bits\":\"{:016x}\",\"resume_hint\":\"{}\"}}",
+            json_escape(resource),
+            used.to_bits(),
+            granted.to_bits(),
+            json_escape(resume_hint),
+        ),
+    }
+}
+
 #[derive(Default)]
 struct Inner {
     tokens: BTreeMap<u64, CapabilityToken>,
@@ -183,10 +390,22 @@ struct Inner {
     /// session → ordinal of the Requested event.
     pending_pause: BTreeMap<u64, i64>,
     meters: BTreeMap<u64, SessionMeters>,
-    idempotency: BTreeMap<String, IdemState>,
+    idempotency: BTreeMap<(u64, String), IdemState>,
     events: Vec<DegradationEvent>,
-    next_receipt: u64,
+    /// Last meter snapshot durably appended to the owning ledger.
+    flushed_meters: BTreeMap<u64, SessionMeters>,
+    /// Terminal submission generation and receipt durably appended for each
+    /// session/key. Binding both fields prevents a future replacement from
+    /// being mistaken for an already-flushed generation.
+    flushed_idempotency: BTreeMap<(u64, String), (u64, SubmissionReceipt)>,
+    /// Prefix length of `events` durably appended to the owning ledger.
+    flushed_events: usize,
+    /// Exact owning ledger sink. File ledgers bind by their opened path;
+    /// independent `:memory:` handles additionally bind by handle identity.
+    flushed_ledger: Option<String>,
+    next_submission_ordinal: u64,
     next_ordinal: i64,
+    next_flush_generation: i64,
 }
 
 /// The governor. `Send + Sync`: hot paths are mutex-guarded in-memory
@@ -212,20 +431,37 @@ impl Governor {
         }
     }
 
-    /// Register a session's token (issuance).
-    ///
-    /// # Errors
-    /// [`SessionError::InvalidResource`] when a floating-point grant is not
-    /// finite and non-negative. Rejection happens before any session state is
-    /// mutated.
-    pub fn open_session(&self, token: CapabilityToken) -> Result<(), SessionError> {
+    fn register_session(
+        &self,
+        token: CapabilityToken,
+        gate: Option<Arc<CancelGate>>,
+    ) -> Result<(), SessionError> {
         validate_resource("core-seconds grant", token.core_s)?;
         validate_resource("wall-seconds grant", token.wall_s)?;
         validate_resource("concurrent-cores grant", token.cores)?;
+        let session = token.session.0;
         let mut g = self.inner.lock().expect("governor lock");
-        g.meters.entry(token.session.0).or_default();
-        g.tokens.insert(token.session.0, token);
+        if g.tokens.contains_key(&session) {
+            return Err(SessionError::SessionAlreadyOpen { id: session });
+        }
+        g.meters.insert(session, SessionMeters::default());
+        g.tokens.insert(session, token);
+        if let Some(gate) = gate {
+            g.gates.insert(session, gate);
+        }
         Ok(())
+    }
+
+    /// Register a session's token (issuance). Session ids are single-use for
+    /// the lifetime of this governor; duplicate registration fails closed.
+    ///
+    /// # Errors
+    /// [`SessionError::InvalidResource`] when a floating-point grant is not
+    /// finite and non-negative, or [`SessionError::SessionAlreadyOpen`] when
+    /// the id is already registered. Rejection happens before any session
+    /// state is mutated.
+    pub fn open_session(&self, token: CapabilityToken) -> Result<(), SessionError> {
+        self.register_session(token, None)
     }
 
     /// Register a session's token WITH its cancellation capability
@@ -235,17 +471,14 @@ impl Governor {
     /// Sessions opened without a gate refuse level-3 pressure.
     ///
     /// # Errors
-    /// [`SessionError::InvalidResource`] as [`Governor::open_session`].
+    /// [`SessionError::InvalidResource`] or
+    /// [`SessionError::SessionAlreadyOpen`] as [`Governor::open_session`].
     pub fn open_session_gated(
         &self,
         token: CapabilityToken,
         gate: Arc<CancelGate>,
     ) -> Result<(), SessionError> {
-        let session = token.session.0;
-        self.open_session(token)?;
-        let mut g = self.inner.lock().expect("governor lock");
-        g.gates.insert(session, gate);
-        Ok(())
+        self.register_session(token, Some(gate))
     }
 
     /// The token for a session.
@@ -267,7 +500,7 @@ impl Governor {
     /// Structured outcomes only — the governor NEVER silently kills.
     ///
     /// # Errors
-    /// [`SessionError::UnknownSession`].
+    /// [`SessionError::UnknownSession`] or [`SessionError::InvalidResource`].
     pub fn charge(&self, session: SessionId, delta: Charge) -> Result<Enforcement, SessionError> {
         validate_resource("core-seconds charge", delta.core_s)?;
         validate_resource("wall-seconds charge", delta.wall_s)?;
@@ -327,7 +560,9 @@ impl Governor {
     /// wait and receive `Duplicate` with the SAME receipt and NO charge.
     ///
     /// # Errors
-    /// [`SessionError::UnknownSession`].
+    /// [`SessionError::UnknownSession`] for an unknown owner, or
+    /// [`SessionError::Submission`] for a blank/oversized key or exhausted
+    /// logical ordinal space.
     ///
     /// A panic in `work` is contained and committed as a terminal
     /// [`SubmitOutcome::Failed`] receipt. The same key never reruns implicitly:
@@ -339,22 +574,43 @@ impl Governor {
         idem_key: &str,
         work: impl FnOnce() -> Charge,
     ) -> Result<SubmitOutcome, SessionError> {
-        {
+        if idem_key.trim().is_empty() || idem_key.len() > MAX_IDEMPOTENCY_KEY_BYTES {
+            return Err(SessionError::Submission {
+                what: format!(
+                    "idempotency key must be non-blank and at most {MAX_IDEMPOTENCY_KEY_BYTES} bytes"
+                ),
+            });
+        }
+        let scope = (session.0, idem_key.to_string());
+        let ordinal = {
             let mut g = self.inner.lock().expect("governor lock");
             if !g.tokens.contains_key(&session.0) {
                 return Err(SessionError::UnknownSession { id: session.0 });
             }
             loop {
-                match g.idempotency.get(idem_key) {
+                match g.idempotency.get(&scope) {
                     None => {
-                        g.idempotency
-                            .insert(idem_key.to_string(), IdemState::Pending);
-                        break; // we own execution
+                        g.next_submission_ordinal = g
+                            .next_submission_ordinal
+                            .checked_add(1)
+                            .ok_or_else(|| SessionError::Submission {
+                                what: "submission ordinal space exhausted".to_string(),
+                            })?;
+                        let ordinal = g.next_submission_ordinal;
+                        g.idempotency.insert(scope.clone(), IdemState::Pending);
+                        break ordinal; // we own execution
                     }
-                    Some(IdemState::Done { receipt, .. }) => {
-                        return Ok(SubmitOutcome::Duplicate { receipt: *receipt });
+                    Some(IdemState::Done {
+                        receipt,
+                        enforcement,
+                        ..
+                    }) => {
+                        return Ok(SubmitOutcome::Duplicate {
+                            receipt: *receipt,
+                            enforcement: enforcement.clone(),
+                        });
                     }
-                    Some(IdemState::Failed { receipt, what }) => {
+                    Some(IdemState::Failed { receipt, what, .. }) => {
                         return Ok(SubmitOutcome::Failed {
                             receipt: *receipt,
                             what: what.clone(),
@@ -365,33 +621,43 @@ impl Governor {
                     }
                 }
             }
-        }
+        };
         // Execute OUTSIDE the lock (work may be long). Catching here is
         // load-bearing: every Pending key must reach a terminal state and wake
         // its waiters even when caller-authored work unwinds.
         let completion = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)) {
             Ok(charge) => match self.charge(session, charge) {
-                Ok(_) => SubmissionCompletion::Done(charge),
+                Ok(enforcement) => SubmissionCompletion::Done(charge, enforcement),
                 Err(error) => SubmissionCompletion::Failed(error.to_string()),
             },
             Err(payload) => SubmissionCompletion::Failed(panic_message(payload.as_ref())),
         };
-        let receipt;
+        let receipt = submission_receipt(session, idem_key, &completion);
         let outcome;
         {
             let mut g = self.inner.lock().expect("governor lock");
-            g.next_receipt += 1;
-            receipt = g.next_receipt;
             match completion {
-                SubmissionCompletion::Done(charge) => {
-                    g.idempotency
-                        .insert(idem_key.to_string(), IdemState::Done { receipt, charge });
-                    outcome = SubmitOutcome::Executed { charge, receipt };
+                SubmissionCompletion::Done(charge, enforcement) => {
+                    g.idempotency.insert(
+                        scope,
+                        IdemState::Done {
+                            ordinal,
+                            receipt,
+                            charge,
+                            enforcement: enforcement.clone(),
+                        },
+                    );
+                    outcome = SubmitOutcome::Executed {
+                        charge,
+                        enforcement,
+                        receipt,
+                    };
                 }
                 SubmissionCompletion::Failed(what) => {
                     g.idempotency.insert(
-                        idem_key.to_string(),
+                        scope,
                         IdemState::Failed {
+                            ordinal,
                             receipt,
                             what: what.clone(),
                         },
@@ -404,13 +670,16 @@ impl Governor {
         Ok(outcome)
     }
 
-    /// The canonical idempotency key: agent-supplied key + content hash of
-    /// the submitted program text.
+    /// The canonical idempotency key: length-framed agent key and program text
+    /// under a domain-separated BLAKE3 identity.
     #[must_use]
     pub fn idempotency_key(agent_key: &str, program_text: &str) -> String {
+        let mut payload = Vec::new();
+        push_framed(&mut payload, agent_key.as_bytes());
+        push_framed(&mut payload, program_text.as_bytes());
         format!(
-            "{agent_key}:{:016x}",
-            fs_obs::fnv1a64(program_text.as_bytes())
+            "fs-session-idem-v2:{}",
+            fs_blake3::hash_domain(IDEMPOTENCY_KEY_DOMAIN, &payload)
         )
     }
 
@@ -580,78 +849,163 @@ impl Governor {
         self.inner.lock().expect("governor lock").events.clone()
     }
 
-    /// Persist consumption + degradation events to the Design Ledger
-    /// (single-threaded by design: fsqlite connections are `!Send`).
+    /// Incrementally persist changed consumption snapshots plus new terminal
+    /// idempotency and degradation events to the Design Ledger. A successful
+    /// flush advances in-memory cursors, so repeating it without new governor
+    /// state is a no-op. The batch is atomic and this governor has one owning
+    /// ledger sink; cross-ledger replication belongs above this API.
+    ///
+    /// The method refuses to join an already-open ledger transaction: it could
+    /// not know whether the caller later committed or rolled back, and marking
+    /// the in-memory cursors in either case would lose data or duplicate it.
+    /// (Single-threaded by design: fsqlite connections are `!Send`.)
     ///
     /// # Errors
     /// [`SessionError::Persistence`] wrapping the ledger error.
     pub fn flush_to_ledger(&self, ledger: &fs_ledger::Ledger) -> Result<(), SessionError> {
-        let g = self.inner.lock().expect("governor lock");
-        let persist = |e: &SessionError| e.to_string();
-        for (id, m) in &g.meters {
-            let payload = format!(
-                "{{\"core_s\":{},\"mem_peak\":{},\"wall_s\":{},\"throttled\":{},\"paused\":{}}}",
-                m.core_s, m.mem_peak_bytes, m.wall_s, m.throttled, m.paused
-            );
-            let session_bytes = id.to_be_bytes();
-            ledger
-                .append_event(&fs_ledger::EventRow {
-                    session: Some(&session_bytes),
-                    t: 0,
-                    kind: "session.consumption",
-                    payload: Some(&payload),
-                })
-                .map_err(|e| SessionError::Persistence {
-                    what: format!("consumption event: {e}"),
-                })?;
+        let mut g = self.inner.lock().expect("governor lock");
+        let sink_identity = ledger_sink_identity(ledger);
+        if let Some(bound) = &g.flushed_ledger
+            && bound != &sink_identity
+        {
+            return Err(SessionError::Persistence {
+                what: format!(
+                    "this governor is already bound to ledger sink {bound:?}; refusing split \
+                     history into {sink_identity:?} and leaving every flush cursor unchanged"
+                ),
+            });
         }
-        for (key, state) in &g.idempotency {
-            let (receipt, kind, payload) = match state {
+        let flush_generation =
+            g.next_flush_generation
+                .checked_add(1)
+                .ok_or_else(|| SessionError::Persistence {
+                    what: "session flush generation space exhausted".to_string(),
+                })?;
+        let mut buffered = Vec::new();
+        let mut meter_marks = Vec::new();
+        for (id, m) in &g.meters {
+            if g.flushed_meters
+                .get(id)
+                .is_some_and(|flushed| same_meter_snapshot(flushed, m))
+            {
+                continue;
+            }
+            let payload = format!(
+                "{{\"schema\":\"fs-session-consumption-v2\",\"flush_generation\":{flush_generation},\"core_s\":{},\"mem_peak\":{},\"wall_s\":{},\"throttled\":{},\"paused\":{}}}",
+                m.core_s, m.mem_peak_bytes, m.wall_s, m.throttled, m.paused,
+            );
+            buffered.push(BufferedLedgerEvent {
+                session: id.to_be_bytes(),
+                t: flush_generation,
+                kind: "session.consumption",
+                payload,
+            });
+            meter_marks.push((*id, m.clone()));
+        }
+        let mut idempotency_marks = Vec::new();
+        for ((session, key), state) in &g.idempotency {
+            let (ordinal, receipt, kind, payload) = match state {
                 IdemState::Pending => continue,
-                IdemState::Done { receipt, charge } => (
+                IdemState::Done {
+                    ordinal,
+                    receipt,
+                    charge,
+                    enforcement,
+                } => (
+                    *ordinal,
                     *receipt,
                     "session.idempotent-execution",
                     format!(
-                        "{{\"receipt\":{},\"core_s\":{},\"wall_s\":{}}}",
-                        receipt, charge.core_s, charge.wall_s
+                        "{{\"schema\":\"fs-session-idempotency-v2\",\"session\":{session},\"key\":\"{}\",\"receipt\":\"{receipt}\",\"core_s_bits\":\"{:016x}\",\"mem_peak_bytes\":{},\"wall_s_bits\":\"{:016x}\",\"enforcement\":{}}}",
+                        json_escape(key),
+                        charge.core_s.to_bits(),
+                        charge.mem_peak_bytes,
+                        charge.wall_s.to_bits(),
+                        enforcement_json(enforcement),
                     ),
                 ),
-                IdemState::Failed { receipt, what } => (
+                IdemState::Failed {
+                    ordinal,
+                    receipt,
+                    what,
+                } => (
+                    *ordinal,
                     *receipt,
                     "session.idempotent-failure",
-                    format!("{{\"receipt\":{receipt},\"error\":{what:?}}}"),
+                    format!(
+                        "{{\"schema\":\"fs-session-idempotency-v2\",\"session\":{session},\"key\":\"{}\",\"receipt\":\"{receipt}\",\"error\":\"{}\"}}",
+                        json_escape(key),
+                        json_escape(what),
+                    ),
                 ),
             };
-            ledger
-                .append_event(&fs_ledger::EventRow {
-                    session: None,
-                    t: i64::try_from(receipt).unwrap_or(i64::MAX),
-                    kind,
-                    payload: Some(&payload),
-                })
-                .map_err(|e| SessionError::Persistence {
-                    what: format!("idempotency event for {key}: {e}"),
-                })?;
+            let generation = (ordinal, receipt);
+            let scope = (*session, key.clone());
+            if g.flushed_idempotency.get(&scope) == Some(&generation) {
+                continue;
+            }
+            buffered.push(BufferedLedgerEvent {
+                session: session.to_be_bytes(),
+                t: i64::try_from(ordinal).map_err(|_| SessionError::Persistence {
+                    what: format!("idempotency ordinal {ordinal} exceeds ledger i64"),
+                })?,
+                kind,
+                payload,
+            });
+            idempotency_marks.push((scope, generation));
         }
-        for ev in &g.events {
+        let flushed_events = g.flushed_events;
+        let event_target = g.events.len();
+        let new_events = g.events.get(flushed_events..).ok_or_else(|| {
+            SessionError::Persistence {
+                what: format!(
+                    "session flush cursor {flushed_events} exceeds degradation event count {event_target}"
+                ),
+            }
+        })?;
+        for ev in new_events {
             let payload = format!(
-                "{{\"step\":\"{:?}\",\"level\":{},\"phase\":\"{:?}\",\"attribution\":{:?}}}",
-                ev.step, ev.pressure_level, ev.phase, ev.attribution
+                "{{\"step\":\"{:?}\",\"level\":{},\"phase\":\"{:?}\",\"attribution\":\"{}\"}}",
+                ev.step,
+                ev.pressure_level,
+                ev.phase,
+                json_escape(&ev.attribution),
             );
-            let session_bytes = ev.session.0.to_be_bytes();
-            ledger
-                .append_event(&fs_ledger::EventRow {
-                    session: Some(&session_bytes),
-                    t: ev.ordinal,
-                    kind: "session.degradation",
-                    payload: Some(&payload),
-                })
-                .map_err(|e| SessionError::Persistence {
-                    what: persist(&SessionError::Persistence {
-                        what: e.to_string(),
-                    }),
-                })?;
+            buffered.push(BufferedLedgerEvent {
+                session: ev.session.0.to_be_bytes(),
+                t: ev.ordinal,
+                kind: "session.degradation",
+                payload,
+            });
         }
+        if buffered.is_empty() {
+            return Ok(());
+        }
+        if ledger.in_transaction() {
+            return Err(SessionError::Persistence {
+                what: "session flush requires ownership of its atomic ledger transaction; an \
+                       explicit transaction is already open and every flush cursor remains dirty"
+                    .to_string(),
+            });
+        }
+        let rows: Vec<_> = buffered.iter().map(BufferedLedgerEvent::as_row).collect();
+        ledger
+            .append_events(&rows)
+            .map_err(|e| SessionError::Persistence {
+                what: format!(
+                    "atomic session event batch failed; every flush cursor remains dirty: {e}"
+                ),
+            })?;
+
+        g.next_flush_generation = flush_generation;
+        g.flushed_ledger = Some(sink_identity);
+        for (id, meters) in meter_marks {
+            g.flushed_meters.insert(id, meters);
+        }
+        for (scope, generation) in idempotency_marks {
+            g.flushed_idempotency.insert(scope, generation);
+        }
+        g.flushed_events = event_target;
         Ok(())
     }
 }

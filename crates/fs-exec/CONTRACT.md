@@ -6,7 +6,7 @@ scheduling for orchestration; the throughput lane is a work-stealing
 fork-join tile pool with weighted quanta, CCD-local-first stealing, and
 fixed-shape reductions. Owns the `Cx`/`TileKernel` contract every hot
 kernel programs against. Layer: L0. Depends on asupersync, fs-alloc,
-fs-substrate, fs-obs.
+fs-blake3, fs-substrate, fs-obs.
 
 ## Public types and semantics
 - `Cx<'s>` — the per-tile context (plan Appendix B): `checkpoint()` /
@@ -42,10 +42,20 @@ fs-substrate, fs-obs.
   RunError>, RunReport)`. Workers are scoped per run; per-worker deques are
   seeded with contiguous, weight-proportional tile runs (`weighted_ranges`)
   and steal HALF a victim's deque in `victim_order` (same-CCD ring first).
-- `RunError { Cancelled, TilePanicked, Incomplete }` — structured, teaching
-  outcomes with tile provenance. `RunReport` — steal counts, cross-CCD
-  steal counts, cancel-latency samples, `cancel_latency_p99_ns()`,
-  canonical `to_json()`.
+  `PoolConfig::for_host` / `TilePool::for_host` select the recorded host-probe
+  topology; `workers()` and `placement_identity()` expose the normalized
+  execution identity that tune producers must bind. The latter has a readable
+  topology/mode/pinning-intent prefix plus a derive-key BLAKE3 suffix over
+  normalized workers, weights, arena policy, the `ArenaPool`'s recorded
+  hugepage decision/outcome, and exact requested pin groups. Pin success is not
+  claimed by this identity.
+- `RunError { Cancelled, TilePanicked, WorkerSpawn, ReductionPanicked,
+  Incomplete }` — structured, teaching
+  outcomes with tile provenance. `RunReport` — the caller-declared `RunId`
+  that keyed every tile stream, steal counts, cross-CCD steal counts,
+  cancel-latency samples, `cancel_latency_p99_ns()`, canonical `to_json()`.
+  If several in-flight tiles panic, deterministic mode reports the lowest
+  logical tile (and its message), never mutex-arrival order.
 - `LatencyLane` — thin configured handle on the asupersync runtime
   (`block_on`, `runtime()`); no fs-exec scheduling policy of its own.
 - `victim_order(worker, workers, topo)` / `weighted_ranges(tiles, weights)`
@@ -55,7 +65,8 @@ fs-substrate, fs-obs.
   `NoWinner` — speculative races (plan §5.2 behavior 1). Victory rule:
   Deterministic = lowest-index accepted result, recomputed from OUTCOMES
   (timing moves when kills land, never who wins); Fast = first accepted
-  arrival, recorded. Early kills: branch j dies once any i<j is accepted;
+  arrival, recorded. Canonical JSON reports escape every dynamic branch name.
+  Early kills: branch j dies once any i<j is accepted;
   a parent gate (kill-handle) cancels the whole tree via a bounded-stride
   watcher. Liveness caveat documented: below-leader branches must
   terminate on their own budgets before the decision seals.
@@ -87,17 +98,28 @@ fs-substrate, fs-obs.
   relabeling opaque integers. Foreign-fingerprint rows are stale and ignored
   on load. The loader accepts only evidence version 1, the canonical writer
   grammar, summaries and separation re-derived from the exact observations,
-  recognized units, full-width canonical integers, and positive integral
-  refresh counters; suffixes and alternate numeric spellings are corruption.
-  Parsing is bounded before growth (16 MiB store, 1 MiB row, 64 KiB string,
-  4096 observations per row, 4096 samples per timing observation), and
-  duplicate kernel × shape-class rows for the selected fingerprint are
-  corruption rather than last-write-wins.
-  Decisions (`tile_edge_for`, `schedule`) are
-  RECORDED; studies pin them through typed helpers or the validating
-  canonical replay API and replay uses recorded plans, never re-tuned ones
-  (replay fidelity). Cold-start defaults: 8-cube tiles, bandwidth-rich
-  schedule.
+  recognized units, full-width canonical integers, strictly positive wall-time
+  samples (internally measured sub-nanosecond elapsed values are represented by
+  the 1 ns floor), and positive integral refresh counters; suffixes and
+  alternate numeric spellings are corruption.
+  Parsing and generated-row emission are bounded before growth (16 MiB store,
+  1 MiB canonical row, 64 KiB string, 4096 observations per row, 4096 samples
+  per timing observation, and 4096 wall-time samples in aggregate per row).
+  Every locally generated row must be a canonical writer-to-parser fixed point
+  before preparation, commit, insertion, or persistence. Duplicate kernel ×
+  shape-class rows for the selected fingerprint are corruption rather than
+  last-write-wins.
+  Decisions (`tile_edge_for`, `schedule`) are RECORDED; studies pin them
+  through typed helpers or the validating canonical replay API and replay uses
+  recorded plans, never re-tuned ones (replay fidelity). The process-local
+  diagnostic history is a deterministic bounded window: at most 4096 entries
+  and 1 MiB of owned kernel/parameter payload, with oldest-prefix batch
+  eviction. `decision_history()` exposes the evicted count and
+  `is_complete()`; a window with an evicted prefix MUST NOT be presented as a
+  complete replay record. Production dispatch receipts belong in the Design
+  Ledger. General decision kernel identities are nonblank and bounded to the
+  canonical 64 KiB tune-string domain before cloning. Cold-start defaults:
+  8-cube tiles, bandwidth-rich schedule.
 - `GemmBlockPlan` / `GemmExecutionIdentity` / `GemmTuneKey` /
   `PreparedGemmRow` / `PreparedGemmDecision` / `GEMM_KERNEL_PREFIX` — the
   MC/NC blocking lane for the parallel-GEMM consumer (bead yqug). Plans live
@@ -108,9 +130,12 @@ fs-substrate, fs-obs.
   bit-semantics version, shape class, requested thread count, normalized
   maximum thread budget (not the candidate-dependent spawned-worker count),
   exact probe dimensions, resolved ISA tier, placement policy, and
-  implementation identity. Row lookup, pin lookup, ledger lookup, and the
-  recorded decision all use that SAME scoped key, so neither a neighboring
-  shape nor a different execution configuration can reuse the row or pin.
+  implementation identity, plus a required producer-supplied build/codegen
+  identity. The scoped-key schema is `tune-v2`; older keys lack the build seam
+  and are not accepted as current GEMM keys. Row lookup, pin lookup, ledger
+  lookup, and the recorded decision all use that SAME scoped key, so neither a
+  neighboring shape nor a different execution or build configuration can
+  reuse the row or pin.
   GEMM evidence must be explicitly RANKED wall-time candidates whose labels
   are canonical plans; the selected plan must equal the minimum-time
   candidate with insertion-order tie-breaking. Cache adoption requires the
@@ -145,7 +170,10 @@ fs-substrate, fs-obs.
    returns `RunError::Cancelled` with completed/total counts (exec-004/005).
 5. Panic containment: a panicking tile is caught with tile provenance,
    siblings drain via the gate, the pool remains usable, and the process
-   NEVER aborts (exec-005 and unit battery).
+   NEVER aborts. User-defined `Reduce::merge` panics are caught separately as
+   `ReductionPanicked`; OS worker-creation failures cancel and drain every
+   already-started worker before returning `WorkerSpawn` (exec-005 and unit
+   battery).
 6. Steal order is CCD-local-first under the fixture topologies; initial
    quanta are weight-proportional within one tile (exec-006).
 7. Per-tile arenas come from one `ArenaPool` (chunk-recycled); the pool's
@@ -161,15 +189,20 @@ fs-substrate, fs-obs.
     points with arenas quiescent (exec-012, latency ledgered).
 11. Tune rows always carry the machine fingerprint; loads drop foreign
     rows and reject non-canonical, dimensionally ambiguous, or out-of-domain
-    rows; wall-time summaries and candidate separation are derived from exact
-    samples, never trusted as independent claims; calibration refuses
-    a probe whose fingerprint differs before any row mutation;
+    rows; wall-time summaries and candidate separation are derived from exact,
+    strictly positive samples, never trusted as independent claims;
+    calibration refuses a probe whose fingerprint differs before any row
+    mutation;
     duration narrowing is checked, non-finite/negative/unrepresentable
-    throughput is refused before any row mutation, parser allocations are
-    bounded, duplicate selected-machine keys are refused;
+    throughput is refused before any row mutation, parser and generated-writer
+    allocations are bounded, generated rows reparse identically before they
+    can enter or leave tuner state, duplicate selected-machine keys are refused;
     recalibration replaces same-key rows with refresh incremented; pinned
     decisions are typed or canonical-validated and reproduce identically on
-    ANY machine, calibrated or not (exec-013).
+    ANY machine, calibrated or not; their in-memory diagnostic window is
+    count- and byte-bounded, evicts a deterministic oldest prefix, and exposes
+    incompleteness instead of silently claiming replay coverage (exec-013 and
+    tuner unit battery).
 12. GEMM rows and pins are scoped to the complete execution identity; imports
     match the requested scoped key and machine, params are canonical bounded
     plans, selected plans equal the ranked-evidence argmin, parameter families
@@ -232,6 +265,8 @@ returns, arenas end quiescent.
 ## Error model
 All fallible APIs return structured values (`RunError`, `LaneError`) with
 teaching `Display` text. Kernel panics become `RunError::TilePanicked`;
+reduction panics become `RunError::ReductionPanicked`; fallible scoped thread
+creation becomes `RunError::WorkerSpawn` rather than an unwind;
 executor-internal invariant violations become `RunError::Incomplete`
 (reported, not panicked). The only intentional panics are lock-poisoning
 `expect`s (reachable only after a panic already contained elsewhere) and
@@ -298,13 +333,24 @@ and explicit row/decision commit semantics.
 - Workers are scoped per run (spawn cost ~tens of µs amortized over a
   kernel run); the persistent parked-worker pool is deferred with the same
   evidence bar.
-- NO thread-pinning/NUMA-binding claim: `victim_order` steers locality;
-  actual affinity syscalls are outside safe std (fs-substrate no-claim
-  applies). P/E quantum WEIGHTS are plumbed but their values await the
-  autotuner.
-- Budget enforcement beyond cancellation (poll quotas, deadlines) is
-  carried in the `Cx` but enforced by the session governor when HELM
-  lands; `Budget` here is vocabulary and provenance.
+- The throughput lane currently implements those scopes with joined
+  `std::thread::scope` workers. Tile cancellation, drain, arena reclamation,
+  and structured containment are live, but the plan's stronger claim that
+  every throughput lifetime is an asupersync child scope is NOT made yet.
+  Replacing the worker-lifetime substrate without changing `TileKernel`/`Cx`
+  semantics remains L0 follow-up work.
+- NO achieved thread-pinning/NUMA-binding claim: `victim_order` steers
+  locality and supported hosts may attempt the requested affinity through the
+  audited fs-substrate capsule, but v1 workers ignore the syscall result. The
+  placement key therefore identifies pinning intent, not observed CPU/CCD
+  placement; typed requested-versus-observed receipts remain
+  `frankensim-3iq7`. P/E quantum WEIGHTS are plumbed but their values await
+  the autotuner.
+- Budget enforcement beyond cancellation (poll quotas, deadlines, and root
+  orchestration memory) is not claimed. TilePool currently supplies
+  `Budget::INFINITE`; the session governor and the explicit GEMM memory
+  envelope tracked by `frankensim-epic-substrate-wf9.15` must close this
+  before budget provenance becomes enforcement.
 - The latency lane's ≤100 ms conversational guarantee is HELM's gate;
   exec-007 measures and ledgers turnaround without claiming it.
 - `ExecMode::Fast`'s 5–15% relaxed-reduction throughput claim is NOT made:

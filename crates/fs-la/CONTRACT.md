@@ -15,14 +15,39 @@ Dense linear algebra: GEMM, batched small dense, factorizations, eigensolvers. L
 - f64 path: BLIS-style NC→KC→MC blocking with A/B panel packing and an
   MR×NR register-tiled microkernel (safe Rust, fused mul_add). f32/mixed
   paths share the loop order and KC chunking, unpacked in v1.
-- `gemm_f64_parallel_with_cancel(..., gate)` is the production
-  cancellation-aware MC/NC engine. It returns `GemmRunReport` on a full
-  transactional commit or `GemmCancelled { report }` after draining all
-  scoped workers; an error leaves caller-visible C bitwise unchanged.
+- `gemm_f64_parallel_with_pool(..., pool, gate)` is the production
+  cancellation-aware MC/NC engine. It retains shared-B NC/KC orchestration and
+  dispatches disjoint M bands as `TileKernel` work through the caller-owned,
+  reusable `TilePool`; every band receives the pool's real `Cx` (gate, budget,
+  stream identity, scoped arena, and mode). It returns `GemmRunReport` with one
+  fs-exec `RunReport` per NC/KC panel on a full transactional commit, or
+  `GemmRunError` after draining all scoped workers; an error leaves
+  caller-visible C bitwise unchanged. `gemm_f64_parallel_with_cancel` is the
+  convenience wrapper that constructs an unpinned host pool and preserves the
+  same structured cancellation/executor error surface.
   `gemm_tuning_is_effective` is the producer-owned routing query used to
   avoid publishing tune evidence for single-thread, small-M, and no-op
-  calls. `gemm_execution_tier`, `GEMM_IMPLEMENTATION_VERSION`, and
-  `GEMM_PARALLEL_IMPLEMENTATION` are tune/replay identity material.
+  calls. `gemm_execution_tier`, `GEMM_IMPLEMENTATION_VERSION`, the executing
+  `TilePool::placement_identity()`, and `GEMM_BUILD_FINGERPRINT` are tune/replay
+  identity material. The execution tier is operation-specific: AVX-512 host
+  capability maps to the current AVX2/FMA GEMM capsule only when both AVX2 and
+  FMA are available; otherwise the scalar fallback is reported. The build fingerprint
+  is BLAKE3 over compiler version plus the watched/resolved compiler and active
+  wrapper executable bytes, Cargo profile/codegen inputs, target, explicit Rust
+  flags, workspace manifests, and a sorted content snapshot of
+  the fs-la/fs-simd/fs-exec/fs-alloc/fs-substrate/fs-blake3/fs-obs Rust source
+  closure, the constellation lock, and the actual asupersync, proc-macro, and
+  Franken evidence/decision/kernel source closure, its unconditional
+  non-source compiler inputs, and its Git identity,
+  plus an optional explicit `FRANKENSIM_GEMM_CODEGEN_ID` salt; rows from another
+  generated-code identity cannot be adopted. Build systems that inject codegen
+  settings or code generators outside that bounded closure must supply the
+  salt; a missing required environment, source, or workspace identity input is
+  a build error rather than a generic fallback. Relevant dirty asupersync
+  source is content-addressed directly, so its identity remains exact instead
+  of pretending that Git HEAD describes the working tree. This is not a claim
+  to hash arbitrary external tools or other path-dependency sources outside
+  the named closure.
 - `factor::{cholesky, lu, qr, tsqr_r, svd_jacobi}` + `FactorError` —
   dense factorizations. Failure is DATA: `NotSpd{index}` /
   `Singular{index}` typed diagnostics, never panics for data conditions.
@@ -202,14 +227,18 @@ that feeds golden bits (tracked workspace-wide in bead
 frankensim-powi-build-mode-determinism-4xnt).
 
 ## Cancellation behavior
-`gemm_f64_parallel_with_cancel` implements request → drain → finalize under
-an `fs_exec::CancelGate`. It polls while initializing/staging output and
+`gemm_f64_parallel_with_pool` implements request → drain → finalize under an
+`fs_exec::CancelGate`. It polls while initializing/staging output and
 pack storage (every 4096 elements), before each packed A/B micro-panel (at
 most MR×KC / NR×KC copies), and before every MR×NR×KC compute tile (at most
-8224 fused multiply-adds including alpha/write-back). A request stops tile
-acquisition; the scoped join (or inline single-worker return) is the drain
-barrier. All writes before that barrier target private staging, so
-`GemmCancelled` leaves C unchanged.
+8224 fused multiply-adds including alpha/write-back). A request stops
+TilePool acquisition; each NC/KC panel uses its deterministic ordinal as the
+`run_declared` identity, and that call joins every worker and drops every
+tile-scoped arena before returning, which is the drain barrier. All writes
+before that barrier target private staging, so cancellation leaves C
+unchanged. The current TilePool worker lifetime uses joined
+`std::thread::scope`, not yet an asupersync child scope; fs-exec documents that
+precise L0 no-claim.
 After the final poll, copying the
 complete staged result into exclusively borrowed C is the non-cancellable
 finalize step; a later request applies to the next operation.
@@ -230,8 +259,10 @@ In-crate GEMM suite: bitwise same-order oracle across shape sweep, β/α
 edge semantics (β=0 NaN overwrite, α=0, k=0, empty m/n), transpose
 identity, submatrix consistency, mixed == widened-f64 bitwise, f32
 tolerance battery, determinism + golden hash; G4 deterministic
-mid-dispatch cancellation injection proves bounded polling, worker drain,
-and unchanged C; the success path is bitwise the serial contract.
+mid-dispatch cancellation injection proves bounded polling, real TilePool
+traversal receipts, worker drain, arena quiescence, and unchanged C; G5 proves
+the success path is bitwise the serial contract across 1, 2, host-parallelism,
+and advisory-pinned pool configurations.
 tests/conformance.rs placeholder remains for the shared-harness migration.
 Batched battery (tests/batched_battery.rs): GEMM vs scalar oracle
 across size classes + β-accumulate path; batch-membership bitwise
@@ -276,6 +307,22 @@ diagonal) fixtures; 128-byte plane alignment; cross-ISA golden hash.
   floor (0.08), not the target. Successor design notes in bead 9ekv.
 
 ## No-claim boundaries
+- Cargo does not expose the resolved feature set of transitive dependencies to
+  `fs-la`'s build script. The canonical FrankenSim graph fixes fs-exec's
+  asupersync features through its manifest, but a build that feature-unifies an
+  additional asupersync capability must set `FRANKENSIM_GEMM_CODEGEN_ID`; tune
+  reuse across such an unsalted non-canonical graph is not claimed. A future
+  resolved-unit-graph receipt should replace this operator obligation.
+- Compiler and wrapper executable bytes are watched and content-addressed, but
+  a wrapper that changes generated code through mutable configuration outside
+  the declared Cargo/Rust environment must set `FRANKENSIM_GEMM_CODEGEN_ID`.
+  Tune reuse across an unsalted non-transparent wrapper configuration is not
+  claimed.
+- Parallel GEMM's transactional C staging, shared B pack, and per-panel band
+  metadata are ordinary root `Vec` allocations today. They preserve
+  cancellation atomicity, but are not fallible structured refusals and are not
+  charged to a caller memory envelope; this remains
+  `frankensim-epic-substrate-wf9.15`.
 - Batched small-dense throughput is NOT claimed roofline-competitive
   yet (see 9ekv evidence above): in-kernel AoS repacking or per-matrix
   packed-GEMM routing for large k, the autotuned interleave, and the

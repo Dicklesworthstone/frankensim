@@ -759,7 +759,7 @@ fn exec_013_autotuner_calibrates_persists_and_pins_reproducibly() {
         && !report.contains("confidence");
     // Tuned decision now answers (source = tuned), and recalibration is
     // idempotent (same keys, refresh increments — visible in the report).
-    let (_edge_first, src) = tuner.tile_edge_for("stencil7-f32");
+    let (_edge_first, src) = tuner.tile_edge_for("stencil7-f32").expect("bounded kernel");
     let tuned = src == TuneSource::Tuned;
     let report2 = tuner
         .calibrate(&probe)
@@ -771,8 +771,10 @@ fn exec_013_autotuner_calibrates_persists_and_pins_reproducibly() {
     let path = dir.join("tune.jsonl");
     tuner.save(&path).expect("save");
     let mut reloaded = Tuner::load(&path, fingerprint).expect("load");
-    let (edge_reloaded, src_reloaded) = reloaded.tile_edge_for("stencil7-f32");
-    let (edge_tuner, _) = tuner.tile_edge_for("stencil7-f32");
+    let (edge_reloaded, src_reloaded) = reloaded
+        .tile_edge_for("stencil7-f32")
+        .expect("bounded kernel");
+    let (edge_tuner, _) = tuner.tile_edge_for("stencil7-f32").expect("bounded kernel");
     let persisted = src_reloaded == TuneSource::Tuned && edge_reloaded == edge_tuner;
     let stale = Tuner::load(&path, fingerprint ^ 1)
         .expect("foreign load")
@@ -784,7 +786,9 @@ fn exec_013_autotuner_calibrates_persists_and_pins_reproducibly() {
     replay
         .pin(recorded.kernel.clone(), recorded.params.clone())
         .expect("recorded params are canonical");
-    let (edge_replayed, src_replayed) = replay.tile_edge_for("stencil7-f32");
+    let (edge_replayed, src_replayed) = replay
+        .tile_edge_for("stencil7-f32")
+        .expect("bounded kernel");
     let replayable = src_replayed == TuneSource::Pinned && edge_replayed == edge_reloaded;
     verdict(
         "exec-013",
@@ -830,18 +834,15 @@ fn stream_keys_are_immune_to_pool_history_and_concurrency() {
     assert_eq!(wide, baseline, "worker count must not perturb streams");
     // Distinct DECLARED runs diverge; the same declared run replays.
     let g = CancelGate::new();
-    let r1 = pool
-        .run_declared(&KeyKernel { tiles: 64 }, &g, RunId(1))
-        .0
-        .expect("run 1");
-    let r1b = pool
-        .run_declared(&KeyKernel { tiles: 64 }, &g, RunId(1))
-        .0
-        .expect("run 1 replay");
-    let r2 = pool
-        .run_declared(&KeyKernel { tiles: 64 }, &g, RunId(2))
-        .0
-        .expect("run 2");
+    let (r1, report1) = pool.run_declared(&KeyKernel { tiles: 64 }, &g, RunId(1));
+    let r1 = r1.expect("run 1");
+    let (r1b, report1b) = pool.run_declared(&KeyKernel { tiles: 64 }, &g, RunId(1));
+    let r1b = r1b.expect("run 1 replay");
+    let (r2, report2) = pool.run_declared(&KeyKernel { tiles: 64 }, &g, RunId(2));
+    let r2 = r2.expect("run 2");
+    assert_eq!(report1.declared_run, RunId(1));
+    assert_eq!(report1b.declared_run, RunId(1));
+    assert_eq!(report2.declared_run, RunId(2));
     assert_eq!(r1, r1b, "same declared run is bit-identical");
     assert_ne!(r1, r2, "distinct declared runs diverge");
     assert_ne!(r1, baseline, "RunId(1) diverges from the implicit RunId(0)");

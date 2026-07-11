@@ -140,13 +140,13 @@ fn gemm_alpha_zero_does_not_read_operands() {
 #[test]
 fn batch_shape_overflow_is_refused() {
     assert_panics_with("batch stride overflow", || {
-        BatchMat::zeros(1, usize::MAX);
+        let _ = BatchMat::zeros(1, usize::MAX);
     });
     assert_panics_with("batch matrix shape overflow", || {
-        BatchMat::zeros(usize::MAX, 1);
+        let _ = BatchMat::zeros(usize::MAX, 1);
     });
     assert_panics_with("batch stride overflow", || {
-        BatchVec::zeros(1, usize::MAX);
+        let _ = BatchVec::zeros(1, usize::MAX);
     });
 }
 

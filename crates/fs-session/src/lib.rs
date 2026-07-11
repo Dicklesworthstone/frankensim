@@ -18,10 +18,14 @@ pub mod token;
 
 pub use estimate::{CalibrationReport, Estimate, estimate};
 pub use gemm_tune::{
-    GemmDispatch, GemmTuneError, gemm_f64_session, gemm_kernel_key, gemm_shape_class,
+    GEMM_TUNE_ROW_RECEIPT_DOMAIN, GEMM_TUNER_SCHEMA_VERSION, GemmDispatch, GemmExecutionReceipt,
+    GemmPanelReceipt, GemmTuneCache, GemmTuneError, ValidatedGemmTuneRow, gemm_f64_session,
+    gemm_f64_session_with_pool, gemm_f64_session_with_pool_declared, gemm_kernel_key,
+    gemm_shape_class, gemm_tune_key_with_pool,
 };
 pub use governor::{
-    Charge, DegradationEvent, DegradationStep, Enforcement, Governor, StepPhase, SubmitOutcome,
+    Charge, DegradationEvent, DegradationStep, Enforcement, Governor, StepPhase, SubmissionReceipt,
+    SubmitOutcome,
 };
 pub use guidance::Guidance;
 pub use token::{CapabilityToken, SessionId};
@@ -37,6 +41,13 @@ pub enum SessionError {
     /// The session id is unknown to the governor.
     UnknownSession {
         /// The id.
+        id: u64,
+    },
+    /// A session id was registered more than once. Session identity is
+    /// immutable: replacing a token would let new authority inherit old
+    /// meters, pause state, and idempotency receipts.
+    SessionAlreadyOpen {
+        /// The duplicate id.
         id: u64,
     },
     /// A resource grant, charge, or accumulated meter is outside its valid
@@ -84,6 +95,11 @@ impl fmt::Display for SessionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             SessionError::UnknownSession { id } => write!(f, "unknown session {id}"),
+            SessionError::SessionAlreadyOpen { id } => write!(
+                f,
+                "session {id} is already open; capability tokens are immutable and the existing \
+                 session state was left unchanged"
+            ),
             SessionError::InvalidResource {
                 resource,
                 value,

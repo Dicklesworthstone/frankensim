@@ -54,7 +54,7 @@ pub use race::{BranchOutcome, BranchReport, NoWinner, RaceBranch, RaceRun, Racer
 pub use tune::{
     GEMM_KERNEL_PREFIX, GemmBlockPlan, GemmExecutionIdentity, GemmTuneKey, PreparedGemmDecision,
     PreparedGemmRow, ScheduleKind, ThroughputUnit, TuneError, TuneEvidence, TuneObservation,
-    TuneRow, TuneSource, Tuner, TuningDecision, WallTimeSummary, WorkUnit,
+    TuneRow, TuneSource, Tuner, TuningDecision, TuningDecisionHistory, WallTimeSummary, WorkUnit,
 };
 
 /// Crate version, re-exported for provenance stamping (the Five Explicits'

@@ -153,6 +153,77 @@ fn ss_002_enforcement_throttles_then_pauses_never_kills() {
 }
 
 #[test]
+fn ss_002b_duplicate_session_open_preserves_original_authority_and_state() {
+    let gov = Governor::new();
+    let original_gate = Arc::new(CancelGate::new());
+    let replacement_gate = Arc::new(CancelGate::new());
+    let original = token(71, 100.0, 1_000.0);
+    gov.open_session_gated(original.clone(), Arc::clone(&original_gate))
+        .expect("original session");
+    let charge = Charge {
+        core_s: 7.0,
+        mem_peak_bytes: 11,
+        wall_s: 3.0,
+    };
+    let executed = gov
+        .submit_once(SessionId(71), "immutable-session", || charge)
+        .expect("original submission");
+    let (receipt, enforcement) = match executed {
+        SubmitOutcome::Executed {
+            receipt,
+            enforcement,
+            ..
+        } => (receipt, enforcement),
+        other => panic!("original key must execute, got {other:?}"),
+    };
+    let meters = gov.consumption(SessionId(71)).expect("original meters");
+
+    let mut replacement = token(71, 1.0, 2.0);
+    replacement.ops = vec!["unrelated.*".to_string()];
+    replacement.mem_bytes = 1;
+    replacement.cores = 1.0;
+    replacement.ledger_scope = "replacement-scope".to_string();
+    assert_eq!(
+        gov.open_session(replacement.clone()),
+        Err(SessionError::SessionAlreadyOpen { id: 71 })
+    );
+    assert_eq!(
+        gov.open_session_gated(replacement, Arc::clone(&replacement_gate)),
+        Err(SessionError::SessionAlreadyOpen { id: 71 })
+    );
+
+    assert_eq!(
+        gov.token(SessionId(71)).expect("original token retained"),
+        original,
+        "duplicate registration must not mutate authority"
+    );
+    assert_eq!(
+        gov.consumption(SessionId(71))
+            .expect("original meters retained"),
+        meters,
+        "duplicate registration must not reset or alter meters"
+    );
+    assert!(matches!(
+        gov.submit_once(SessionId(71), "immutable-session", || {
+            panic!("duplicate registration must not erase the original idempotency state")
+        })
+        .expect("original terminal key retained"),
+        SubmitOutcome::Duplicate {
+            receipt: duplicate_receipt,
+            enforcement: duplicate_enforcement,
+        } if duplicate_receipt == receipt && duplicate_enforcement == enforcement
+    ));
+
+    gov.apply_memory_pressure(SessionId(71), 3)
+        .expect("the original gate remains bound");
+    assert!(original_gate.is_requested());
+    assert!(
+        !replacement_gate.is_requested(),
+        "a rejected replacement gate must never acquire session authority"
+    );
+}
+
+#[test]
 fn ss_003_idempotency_races_execute_exactly_once() {
     let gov = Arc::new(Governor::new());
     gov.open_session(token(3, 1e9, 1e9)).expect("valid token");
@@ -194,7 +265,7 @@ fn ss_003_idempotency_races_execute_exactly_once() {
         _ => unreachable!(),
     };
     for o in &outcomes {
-        if let SubmitOutcome::Duplicate { receipt: r } = o {
+        if let SubmitOutcome::Duplicate { receipt: r, .. } = o {
             assert_eq!(*r, receipt, "duplicates share the original receipt");
         }
     }
@@ -216,6 +287,239 @@ fn ss_003_idempotency_races_execute_exactly_once() {
         "ss-003",
         "16-thread race: one execution, one charge, shared receipt",
     );
+}
+
+#[test]
+fn ss_003b_idempotency_is_session_scoped_and_content_addressed() {
+    let gov = Governor::new();
+    gov.open_session(token(31, 1e9, 1e9)).expect("session 31");
+    gov.open_session(token(32, 1e9, 1e9)).expect("session 32");
+    let key = Governor::idempotency_key("agent:alpha", "program:beta");
+    assert!(key.starts_with("fs-session-idem-v2:"));
+    assert_eq!(key.len(), "fs-session-idem-v2:".len() + 64);
+    assert_eq!(
+        key,
+        Governor::idempotency_key("agent:alpha", "program:beta")
+    );
+    assert_ne!(
+        key,
+        Governor::idempotency_key("agent", "alpha:program:beta"),
+        "length framing must distinguish delimiter-equivalent inputs"
+    );
+
+    let first = gov
+        .submit_once(SessionId(31), &key, || Charge {
+            core_s: 3.0,
+            ..Charge::default()
+        })
+        .expect("first session executes");
+    let second = gov
+        .submit_once(SessionId(32), &key, || Charge {
+            core_s: 5.0,
+            ..Charge::default()
+        })
+        .expect("second session executes independently");
+    let first_receipt = match first {
+        SubmitOutcome::Executed { receipt, .. } => receipt,
+        other => panic!("first session must execute, got {other:?}"),
+    };
+    let second_receipt = match second {
+        SubmitOutcome::Executed { receipt, .. } => receipt,
+        other => panic!("second session must execute, got {other:?}"),
+    };
+    assert_ne!(
+        first_receipt, second_receipt,
+        "the owning session is part of receipt identity"
+    );
+    assert_eq!(gov.consumption(SessionId(31)).unwrap().0, 3.0);
+    assert_eq!(gov.consumption(SessionId(32)).unwrap().0, 5.0);
+    assert!(matches!(
+        gov.submit_once(SessionId(31), &key, || panic!("duplicate ran"))
+            .expect("duplicate returns"),
+        SubmitOutcome::Duplicate { receipt, .. } if receipt == first_receipt
+    ));
+    assert!(
+        gov.submit_once(SessionId(31), "   ", Charge::default)
+            .is_err(),
+        "blank idempotency keys must fail before execution"
+    );
+}
+
+#[test]
+fn ss_003c_receipts_bind_charge_failure_and_enforcement() {
+    fn opened(core_s: f64) -> Governor {
+        let governor = Governor::new();
+        governor
+            .open_session(token(33, core_s, 1e9))
+            .expect("valid receipt-test token");
+        governor
+    }
+
+    let key = "receipt-binding";
+    let positive_zero_charge = Charge {
+        core_s: 0.0,
+        mem_peak_bytes: 7,
+        wall_s: 1.0,
+    };
+    let positive = opened(10.0)
+        .submit_once(SessionId(33), key, || positive_zero_charge)
+        .expect("positive-zero submit");
+    let (positive_receipt, positive_enforcement) = match positive {
+        SubmitOutcome::Executed {
+            receipt,
+            enforcement,
+            ..
+        } => (receipt, enforcement),
+        other => panic!("expected execution, got {other:?}"),
+    };
+    assert_eq!(positive_enforcement, Enforcement::Ok);
+    assert!(positive_receipt.matches_success(
+        SessionId(33),
+        key,
+        positive_zero_charge,
+        &positive_enforcement,
+    ));
+
+    let negative_zero_charge = Charge {
+        core_s: -0.0,
+        ..positive_zero_charge
+    };
+    let negative = opened(10.0)
+        .submit_once(SessionId(33), key, || negative_zero_charge)
+        .expect("negative-zero submit");
+    let negative_receipt = match negative {
+        SubmitOutcome::Executed { receipt, .. } => receipt,
+        other => panic!("expected execution, got {other:?}"),
+    };
+    assert_ne!(
+        positive_receipt, negative_receipt,
+        "bit-exact charge fields are receipt semantics"
+    );
+
+    let failed = opened(10.0)
+        .submit_once(SessionId(33), key, || panic!("receipt-bound failure"))
+        .expect("panic is a terminal outcome");
+    let failed_receipt = match failed {
+        SubmitOutcome::Failed { receipt, what } => {
+            assert!(receipt.matches_failure(SessionId(33), key, &what));
+            receipt
+        }
+        other => panic!("expected failed receipt, got {other:?}"),
+    };
+    assert_ne!(positive_receipt, failed_receipt);
+
+    let throttled = opened(1.0);
+    let charge = Charge {
+        core_s: 1.0,
+        ..Charge::default()
+    };
+    let executed = throttled
+        .submit_once(SessionId(33), key, || charge)
+        .expect("throttled work still completes");
+    let (receipt, enforcement) = match executed {
+        SubmitOutcome::Executed {
+            receipt,
+            enforcement,
+            ..
+        } => (receipt, enforcement),
+        other => panic!("expected execution, got {other:?}"),
+    };
+    assert!(matches!(enforcement, Enforcement::Throttled { .. }));
+    assert!(receipt.matches_success(SessionId(33), key, charge, &enforcement));
+    assert!(matches!(
+        throttled
+            .submit_once(SessionId(33), key, || panic!("duplicate ran"))
+            .expect("duplicate"),
+        SubmitOutcome::Duplicate {
+            receipt: duplicate_receipt,
+            enforcement: Enforcement::Throttled { .. },
+        } if duplicate_receipt == receipt
+    ));
+
+    let ledger = fs_ledger::Ledger::open(":memory:").expect("receipt ledger");
+    throttled
+        .flush_to_ledger(&ledger)
+        .expect("strict JSON receipt event");
+    assert_eq!(ledger.table_count("events").unwrap(), 2);
+    assert!(ledger.lint().unwrap().is_clean());
+}
+
+#[test]
+fn ss_003d_ledger_flush_is_atomic_incremental_and_retryable() {
+    let gov = Governor::new();
+    gov.open_session(token(34, 1e9, 1e9))
+        .expect("flush-test session");
+    let key = "flush-once";
+    assert!(matches!(
+        gov.submit_once(SessionId(34), key, || Charge {
+            core_s: 2.0,
+            mem_peak_bytes: 5,
+            wall_s: 1.0,
+        })
+        .expect("submission"),
+        SubmitOutcome::Executed { .. }
+    ));
+    let ledger = fs_ledger::Ledger::open(":memory:").expect("flush ledger");
+
+    ledger.begin().expect("caller transaction");
+    let refused = gov
+        .flush_to_ledger(&ledger)
+        .expect_err("flush cannot promise durability inside a caller transaction");
+    assert!(matches!(refused, SessionError::Persistence { .. }));
+    assert_eq!(ledger.table_count("events").unwrap(), 0);
+    ledger.rollback().expect("caller rollback");
+
+    gov.flush_to_ledger(&ledger)
+        .expect("the refused batch remains fully dirty for retry");
+    assert_eq!(
+        ledger.table_count("events").unwrap(),
+        2,
+        "one consumption snapshot and one terminal idempotency event"
+    );
+    gov.flush_to_ledger(&ledger).expect("unchanged no-op flush");
+    assert_eq!(
+        ledger.table_count("events").unwrap(),
+        2,
+        "repeated flush must not duplicate semantic events"
+    );
+    assert!(matches!(
+        gov.submit_once(SessionId(34), key, || panic!("duplicate ran"))
+            .expect("terminal duplicate"),
+        SubmitOutcome::Duplicate { .. }
+    ));
+    gov.flush_to_ledger(&ledger)
+        .expect("duplicate observation is not a new event");
+    assert_eq!(ledger.table_count("events").unwrap(), 2);
+
+    gov.charge(
+        SessionId(34),
+        Charge {
+            core_s: 3.0,
+            ..Charge::default()
+        },
+    )
+    .expect("new consumption");
+    let foreign_ledger = fs_ledger::Ledger::open(":memory:").expect("foreign ledger");
+    assert!(matches!(
+        gov.flush_to_ledger(&foreign_ledger),
+        Err(SessionError::Persistence { .. })
+    ));
+    assert_eq!(
+        foreign_ledger.table_count("events").unwrap(),
+        0,
+        "a governor must not split its event history across ledger sinks"
+    );
+    gov.flush_to_ledger(&ledger)
+        .expect("sink refusal leaves the changed meter dirty for its owning ledger");
+    assert_eq!(ledger.table_count("events").unwrap(), 3);
+    gov.apply_memory_pressure(SessionId(34), 1)
+        .expect("one degradation event");
+    gov.flush_to_ledger(&ledger)
+        .expect("new degradation event appends once");
+    assert_eq!(ledger.table_count("events").unwrap(), 4);
+    gov.flush_to_ledger(&ledger).expect("second no-op flush");
+    assert_eq!(ledger.table_count("events").unwrap(), 4);
+    assert!(ledger.lint().unwrap().is_clean());
 }
 
 #[test]

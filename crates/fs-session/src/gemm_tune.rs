@@ -5,9 +5,9 @@
 //! for: it resolves an MC/NC [`GemmBlockPlan`] for the caller's shape
 //! class (pins beat cached rows beat the documented cold-start default),
 //! runs a BOUNDED candidate sweep when the machine is cold, records the
-//! ranked wall-time evidence as a tune row, writes it through to the
-//! ledger `tune` table, and dispatches
-//! `fs_la::gemm_f64_parallel_with_cancel` with the selected plan.
+//! ranked wall-time evidence as a tune row, applies the caller's explicit
+//! cache policy, and dispatches
+//! `fs_la::gemm_f64_parallel_with_pool` with the selected plan.
 //!
 //! Honesty boundaries, in the fs-exec tuner's division:
 //! - The KERNEL KEY embeds fs-la's `GEMM_BIT_SEMANTICS_VERSION`, so rows
@@ -15,7 +15,8 @@
 //!   lookup (semantic filtering by construction). Rows are additionally
 //!   bound to the exact probe dims, requested/normalized thread budget,
 //!   resolved ISA tier, placement policy, and implementation version, then
-//!   machine-fingerprint-keyed. The ledger read path refuses stale,
+//!   the exact compiler/profile/codegen build fingerprint, then machine-
+//!   fingerprint-keyed. The ledger read path refuses stale,
 //!   differently scoped, non-canonical, and params/body-disagreeing rows.
 //! - MC/NC are BIT-NEUTRAL by fs-la's determinism contract, and the
 //!   sweep ENFORCES that: every repeat of every effective candidate is
@@ -36,8 +37,8 @@
 
 use fs_exec::{
     CancelGate, GEMM_KERNEL_PREFIX, GemmBlockPlan, GemmExecutionIdentity, GemmTuneKey,
-    PreparedGemmDecision, PreparedGemmRow, TuneError, TuneEvidence, TuneObservation, TuneSource,
-    Tuner,
+    PreparedGemmDecision, PreparedGemmRow, TilePool, TuneError, TuneEvidence, TuneObservation,
+    TuneSource, Tuner,
 };
 use fs_ledger::Ledger;
 
@@ -59,6 +60,42 @@ const PROBE_N_DIM_CAP: usize = 2048;
 /// Wall-time samples per candidate (min-of ranking, all survive in the
 /// evidence row).
 const SWEEP_SAMPLES: usize = 3;
+
+/// Durable identity of the autotune producer algorithm: candidate lattice,
+/// probe dimensions/sample policy, ranking, and plan-to-dispatch mapping. Any
+/// semantic change to those choices must bump this value before old rows may be
+/// considered compatible.
+pub const GEMM_TUNER_SCHEMA_VERSION: u32 = 1;
+
+/// Logical stream seed for the compatibility session pool. GEMM itself is
+/// non-stochastic; caller-owned pools retain their study seed for Cx identity.
+const SESSION_GEMM_POOL_SEED: u64 = 0x4653_2D53_4553_534E;
+
+const GEMM_SWEEP_RUN_DOMAIN: &str = "org.frankensim.fs-session.gemm-sweep-run.v1";
+
+/// Globally unique BLAKE3 derive-key context for canonical GEMM tune-row
+/// receipts.
+pub const GEMM_TUNE_ROW_RECEIPT_DOMAIN: &str = "org.frankensim.fs-session.gemm-tune-row-receipt.v1";
+
+fn push_json_string(out: &mut String, value: &str) {
+    use core::fmt::Write as _;
+
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => {
+                let _ = write!(out, "\\u{:04x}", u32::from(c));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+}
 
 /// A structured autotune-loop failure. Every variant fails closed: sweep
 /// failures record no row and nothing dispatches under unvalidated blocking.
@@ -86,6 +123,15 @@ pub enum GemmTuneError {
         /// One-based repeat whose exact output bits diverged.
         repeat: usize,
     },
+    /// The TilePool contained a tile panic or executor invariant refusal.
+    Executor {
+        /// Structured fs-exec outcome with logical tile provenance.
+        error: fs_exec::RunError,
+        /// Completed GEMM microtiles before the refusal.
+        completed_tiles: usize,
+        /// Total GEMM microtiles in the attempted dispatch.
+        total_tiles: usize,
+    },
 }
 
 impl core::fmt::Display for GemmTuneError {
@@ -104,6 +150,14 @@ impl core::fmt::Display for GemmTuneError {
                 f,
                 "gemm autotune: candidate {candidate} repeat {repeat} broke the MC/NC bit-neutrality contract"
             ),
+            Self::Executor {
+                error,
+                completed_tiles,
+                total_tiles,
+            } => write!(
+                f,
+                "gemm executor failed after {completed_tiles}/{total_tiles} compute tiles: {error}"
+            ),
         }
     }
 }
@@ -121,6 +175,19 @@ impl From<fs_la::GemmCancelled> for GemmTuneError {
         Self::Cancelled {
             completed_tiles: cancelled.report.completed_tiles,
             total_tiles: cancelled.report.total_tiles,
+        }
+    }
+}
+
+impl From<fs_la::GemmRunError> for GemmTuneError {
+    fn from(error: fs_la::GemmRunError) -> Self {
+        match error {
+            fs_la::GemmRunError::Cancelled(cancelled) => Self::from(cancelled),
+            fs_la::GemmRunError::Executor { error, report } => Self::Executor {
+                error,
+                completed_tiles: report.completed_tiles,
+                total_tiles: report.total_tiles,
+            },
         }
     }
 }
@@ -147,6 +214,299 @@ pub struct GemmDispatch {
     pub source: TuneSource,
     /// True when this call ran the measurement sweep (cold cache).
     pub swept: bool,
+    /// Sealed newly measured row. Read-only cache users can retain this
+    /// process-locally and publish it only after their enclosing run passes
+    /// admission. `None` when no sweep ran.
+    pub new_tune_row: Option<ValidatedGemmTuneRow>,
+    /// Sealed row adopted or measured during this call. Callers that need a
+    /// citable execution receipt retain this identity across later warm-cache
+    /// dispatches. `None` when this call reused an already local row or bypassed
+    /// tuning.
+    pub validated_tune_row: Option<ValidatedGemmTuneRow>,
+    /// Final production execution receipt. Its `pool_runs` prove the selected
+    /// plan traversed the caller's TilePool rather than a detached thread path.
+    pub run: fs_la::GemmRunReport,
+}
+
+impl GemmDispatch {
+    /// Deterministic execution facts suitable for replay and evidence binding.
+    /// Scheduling measurements (steals, worker distribution, and cancellation
+    /// latency) deliberately remain outside this identity.
+    #[must_use]
+    pub fn execution_receipt(&self) -> GemmExecutionReceipt {
+        GemmExecutionReceipt::from_report(&self.run)
+    }
+}
+
+/// Stable facts for one TilePool traversal of an NC/KC panel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GemmPanelReceipt {
+    /// Stable TileKernel name.
+    pub kernel: String,
+    /// Deterministic/fast execution mode recorded by the pool.
+    pub mode: String,
+    /// Deterministic NC/KC panel ordinal used as the fs-exec declared run.
+    pub declared_run: u64,
+    /// Logical M-band tiles completed.
+    pub completed: u64,
+    /// Logical M-band tiles planned.
+    pub total: u64,
+}
+
+/// Deterministic production-path receipt for a GEMM dispatch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GemmExecutionReceipt {
+    /// Caller-ledgered identity of the final production dispatch.
+    pub declared_run: u64,
+    /// Completed bounded GEMM microtiles.
+    pub completed_tiles: usize,
+    /// Total bounded GEMM microtiles.
+    pub total_tiles: usize,
+    /// Ordered NC/KC panel traversals through the caller's TilePool.
+    pub panels: Vec<GemmPanelReceipt>,
+}
+
+impl GemmExecutionReceipt {
+    /// Project a full numerical run report onto identity-stable fields.
+    #[must_use]
+    pub fn from_report(report: &fs_la::GemmRunReport) -> Self {
+        Self {
+            declared_run: report.declared_run.0,
+            completed_tiles: report.completed_tiles,
+            total_tiles: report.total_tiles,
+            panels: report
+                .pool_runs
+                .iter()
+                .map(|panel| GemmPanelReceipt {
+                    kernel: panel.kernel.to_string(),
+                    mode: panel.mode.to_string(),
+                    declared_run: panel.declared_run.0,
+                    completed: panel.completed,
+                    total: panel.total,
+                })
+                .collect(),
+        }
+    }
+
+    /// Whether every panel completed and carries the exact child RunId derived
+    /// from this receipt's declared operation identity and panel ordinal.
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        self.total_tiles > 0
+            && self.completed_tiles == self.total_tiles
+            && !self.panels.is_empty()
+            && self.panels.iter().enumerate().all(|(ordinal, panel)| {
+                let Ok(ordinal) = u64::try_from(ordinal) else {
+                    return false;
+                };
+                panel.declared_run
+                    == fs_la::gemm_panel_run_id(fs_exec::RunId(self.declared_run), ordinal).0
+                    && !panel.kernel.is_empty()
+                    && !panel.mode.is_empty()
+                    && panel.total > 0
+                    && panel.completed == panel.total
+            })
+    }
+}
+
+/// Explicit access policy for the durable GEMM tune cache.
+///
+/// A read-only caller may adopt a previously admitted row but cannot publish a
+/// new measurement during speculative or not-yet-admitted work. Newly measured
+/// rows remain available through [`GemmDispatch::new_tune_row`].
+#[derive(Clone, Copy)]
+pub enum GemmTuneCache<'a> {
+    /// Do not read or write durable tuning state.
+    Disabled,
+    /// Adopt validated rows, but never write the ledger.
+    ReadOnly(&'a Ledger),
+    /// Adopt validated rows and persist a newly measured row before local
+    /// installation.
+    ReadWrite(&'a Ledger),
+}
+
+impl<'a> GemmTuneCache<'a> {
+    fn reader(self) -> Option<&'a Ledger> {
+        match self {
+            Self::Disabled => None,
+            Self::ReadOnly(ledger) | Self::ReadWrite(ledger) => Some(ledger),
+        }
+    }
+}
+
+/// A validated tune row that can be published after a wider admission gate.
+///
+/// Fields are private: callers can neither forge nor alter the scoped kernel,
+/// shape, machine fingerprint, selected parameters, or measured evidence.
+/// Instances are created only after fs-exec validates the complete row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidatedGemmTuneRow {
+    kernel: String,
+    shape_class: String,
+    machine: [u8; 8],
+    params: String,
+    measured: String,
+}
+
+impl ValidatedGemmTuneRow {
+    fn from_prepared(prepared: &PreparedGemmRow, machine: u64) -> Self {
+        Self {
+            kernel: prepared.key().kernel().to_string(),
+            shape_class: prepared.key().shape_class().to_string(),
+            machine: machine.to_le_bytes(),
+            params: prepared.params_json(),
+            measured: prepared.row_json(),
+        }
+    }
+
+    /// Canonical JSON preimage for this exact tune-table tuple.
+    #[must_use]
+    pub fn receipt_json(&self) -> String {
+        use core::fmt::Write as _;
+
+        let mut out = String::new();
+        out.push_str("{\"kernel\":");
+        push_json_string(&mut out, &self.kernel);
+        out.push_str(",\"shape_class\":");
+        push_json_string(&mut out, &self.shape_class);
+        let _ = write!(
+            out,
+            ",\"machine\":\"{:016x}\",\"params\":",
+            u64::from_le_bytes(self.machine)
+        );
+        out.push_str(&self.params);
+        out.push_str(",\"measured\":");
+        out.push_str(&self.measured);
+        out.push('}');
+        out
+    }
+
+    /// Domain-separated identity of [`Self::receipt_json`]. It is stable for a
+    /// freshly measured row and the same row adopted later.
+    #[must_use]
+    pub fn receipt_identity(&self) -> fs_ledger::ContentHash {
+        fs_blake3::hash_domain(GEMM_TUNE_ROW_RECEIPT_DOMAIN, self.receipt_json().as_bytes())
+    }
+
+    /// Whether this sealed row is the exact evidence behind one dispatched
+    /// decision.
+    #[must_use]
+    pub fn matches_decision(
+        &self,
+        scoped_kernel: &str,
+        shape_class: &str,
+        machine: u64,
+        canonical_plan: &str,
+    ) -> bool {
+        self.kernel == scoped_kernel
+            && self.shape_class == shape_class
+            && self.machine == machine.to_le_bytes()
+            && self.params == format!("\"{canonical_plan}\"")
+    }
+
+    /// Whether a ledger query returned this exact sealed tuple.
+    #[must_use]
+    pub fn matches_ledger_row(&self, row: &fs_ledger::TuneRow) -> bool {
+        self.kernel == row.kernel
+            && self.shape_class == row.shape_class
+            && self.machine.as_slice() == row.machine
+            && self.params == row.params
+            && self.measured == row.measured
+    }
+
+    /// Publish this already validated row without replacing a different row,
+    /// preserving the caller's ledger transaction when one is active.
+    ///
+    /// # Errors
+    /// Propagates the original ledger diagnostic.
+    pub fn publish_to_ledger(&self, ledger: &Ledger) -> Result<(), fs_ledger::LedgerError> {
+        self.publish_if_absent_or_identical(ledger)
+    }
+
+    /// Insert this row into an evidence ledger without replacing a different
+    /// tune decision already stored under the same key. An identical row is an
+    /// idempotent success; a conflict fails closed.
+    ///
+    /// # Errors
+    /// Propagates ledger failures or returns [`fs_ledger::LedgerError::Invalid`]
+    /// when the destination key contains a different tuple.
+    pub fn publish_if_absent_or_identical(
+        &self,
+        ledger: &Ledger,
+    ) -> Result<(), fs_ledger::LedgerError> {
+        ledger.tune_put_if_absent(
+            &self.kernel,
+            &self.shape_class,
+            &self.machine,
+            &self.params,
+            &self.measured,
+        )?;
+        let stored = ledger
+            .tune_get(&self.kernel, &self.shape_class, &self.machine)?
+            .ok_or_else(|| fs_ledger::LedgerError::Invalid {
+                field: "tune".to_string(),
+                problem: "insert-if-absent returned without a stored tune row".to_string(),
+            })?;
+        if self.matches_ledger_row(&stored) {
+            Ok(())
+        } else {
+            Err(fs_ledger::LedgerError::Invalid {
+                field: "tune".to_string(),
+                problem: format!(
+                    "refusing to replace a conflicting tune row for kernel {:?}, shape {:?}",
+                    self.kernel, self.shape_class
+                ),
+            })
+        }
+    }
+
+    /// Persist this already validated row to a durable tune ledger.
+    ///
+    /// # Errors
+    /// Returns [`GemmTuneError::Ledger`] when the ledger refuses the write.
+    pub fn persist(&self, ledger: &Ledger) -> Result<(), GemmTuneError> {
+        self.publish_to_ledger(ledger)
+            .map_err(|error| GemmTuneError::Ledger(error.to_string()))
+    }
+
+    /// Install this sealed row as the current mutable cache decision.
+    ///
+    /// Unlike [`ValidatedGemmTuneRow::publish_if_absent_or_identical`], this
+    /// method deliberately replaces a stale or malformed row under the same
+    /// cache key. The `tune` table is a dispatch cache, not an append-only
+    /// evidence history; citable benchmark publication uses the insert-only
+    /// method and content-addressed ledger artifacts instead.
+    ///
+    /// # Errors
+    /// Returns [`GemmTuneError::Ledger`] when the upsert or exact read-back
+    /// verification fails.
+    pub fn replace_cache_row(&self, ledger: &Ledger) -> Result<(), GemmTuneError> {
+        ledger
+            .tune_put(
+                &self.kernel,
+                &self.shape_class,
+                &self.machine,
+                &self.params,
+                &self.measured,
+            )
+            .map_err(|error| GemmTuneError::Ledger(error.to_string()))?;
+        let stored = ledger
+            .tune_get(&self.kernel, &self.shape_class, &self.machine)
+            .map_err(|error| GemmTuneError::Ledger(error.to_string()))?
+            .ok_or_else(|| {
+                GemmTuneError::Ledger(
+                    "cache upsert returned without a stored GEMM tune row".to_string(),
+                )
+            })?;
+        if self.matches_ledger_row(&stored) {
+            Ok(())
+        } else {
+            Err(GemmTuneError::Ledger(format!(
+                "cache read-back disagrees with the sealed GEMM row for kernel {:?}, shape {:?}",
+                self.kernel, self.shape_class
+            )))
+        }
+    }
 }
 
 /// The kernel key for this build's GEMM accumulation contract.
@@ -194,18 +554,75 @@ pub fn gemm_tune_key(
     n: usize,
     k: usize,
 ) -> Result<GemmTuneKey, GemmTuneError> {
+    let pool = TilePool::for_host(threads, SESSION_GEMM_POOL_SEED);
+    gemm_tune_key_with_pool(&pool, m, n, k)
+}
+
+/// Construct the persistent tuning identity from the TilePool that will
+/// actually execute the measured and selected plans.
+///
+/// # Errors
+/// [`GemmTuneError::Tune`] if a pool dimension or identity component cannot
+/// be represented canonically.
+pub fn gemm_tune_key_with_pool(
+    pool: &TilePool,
+    m: usize,
+    n: usize,
+    k: usize,
+) -> Result<GemmTuneKey, GemmTuneError> {
+    gemm_tune_key_for_execution(
+        pool.workers(),
+        pool.workers(),
+        &pool.placement_identity(),
+        m,
+        n,
+        k,
+    )
+}
+
+fn gemm_tune_key_for_execution(
+    requested_threads: usize,
+    thread_budget: usize,
+    placement: &str,
+    m: usize,
+    n: usize,
+    k: usize,
+) -> Result<GemmTuneKey, GemmTuneError> {
+    gemm_tune_key_for_execution_schema(
+        requested_threads,
+        thread_budget,
+        placement,
+        m,
+        n,
+        k,
+        GEMM_TUNER_SCHEMA_VERSION,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn gemm_tune_key_for_execution_schema(
+    requested_threads: usize,
+    thread_budget: usize,
+    placement: &str,
+    m: usize,
+    n: usize,
+    k: usize,
+    tuner_schema: u32,
+) -> Result<GemmTuneKey, GemmTuneError> {
+    debug_assert!(tuner_schema > 0);
     let implementation = format!(
-        "fs-la-{}-gemm-v{}",
+        "fs-la-{}-gemm-v{}-fs-session-tuner-v{tuner_schema}",
         fs_la::VERSION,
         fs_la::GEMM_IMPLEMENTATION_VERSION
     );
     let execution = GemmExecutionIdentity::new(
-        threads,
-        threads.max(1),
+        requested_threads,
+        thread_budget,
         probe_dims(m, n, k),
         fs_la::gemm_execution_tier(),
-        fs_la::GEMM_PARALLEL_IMPLEMENTATION,
+        placement,
         implementation,
+        fs_la::gemm_build_identity(),
     )?;
     Ok(GemmTuneKey::new(
         gemm_kernel_key(),
@@ -358,7 +775,8 @@ where
 /// row second so a cache failure cannot leave a phantom in-memory success.
 fn run_sweep(
     gate: &CancelGate,
-    threads: usize,
+    pool: &TilePool,
+    declared_run: fs_exec::RunId,
     m: usize,
     n: usize,
     k: usize,
@@ -375,8 +793,13 @@ fn run_sweep(
     probe_fill(&mut a, 0xA);
     probe_fill(&mut b, 0xB);
     let candidates = effective_sweep_candidates(pm, pn)?;
+    let mut sweep_ordinal = 0_u64;
     measure_candidates(gate, &candidates, pm * pn, |candidate, c| {
-        fs_la::gemm_f64_parallel_with_cancel(
+        let sweep_run = declared_run.derive(GEMM_SWEEP_RUN_DOMAIN, sweep_ordinal);
+        sweep_ordinal = sweep_ordinal.checked_add(1).ok_or_else(|| TuneError {
+            detail: "GEMM sweep run ordinal exhausted".to_string(),
+        })?;
+        fs_la::gemm_f64_parallel_with_pool_declared(
             pm,
             pn,
             pk,
@@ -385,10 +808,11 @@ fn run_sweep(
             &b,
             0.0,
             c,
-            threads,
+            pool,
             candidate.effective_mc,
             candidate.effective_nc,
             gate,
+            sweep_run,
         )
         .map(|_| ())
         .map_err(GemmTuneError::from)
@@ -403,15 +827,16 @@ fn install_sweep_row<P>(
     key: &GemmTuneKey,
     sweep: SweepResult,
     persist: P,
-) -> Result<GemmBlockPlan, GemmTuneError>
+) -> Result<(GemmBlockPlan, ValidatedGemmTuneRow), GemmTuneError>
 where
-    P: FnOnce(&PreparedGemmRow) -> Result<(), GemmTuneError>,
+    P: FnOnce(&ValidatedGemmTuneRow) -> Result<(), GemmTuneError>,
 {
     let prepared = tuner.prepare_gemm_row(key, sweep.winner, sweep.evidence)?;
-    persist(&prepared)?;
+    let validated = ValidatedGemmTuneRow::from_prepared(&prepared, tuner.machine());
+    persist(&validated)?;
     let winner = sweep.winner;
     tuner.commit_gemm_row(prepared)?;
-    Ok(winner)
+    Ok((winner, validated))
 }
 
 fn adopt_cached_row(
@@ -419,34 +844,35 @@ fn adopt_cached_row(
     key: &GemmTuneKey,
     params: &str,
     measured: &str,
-) -> Result<bool, GemmTuneError> {
+) -> Result<Option<ValidatedGemmTuneRow>, GemmTuneError> {
     let Ok(prepared) = tuner.prepare_adopt_gemm_row_json(key, measured) else {
-        return Ok(false);
+        return Ok(None);
     };
     if params != prepared.params_json() {
-        return Ok(false);
+        return Ok(None);
     }
+    let validated = ValidatedGemmTuneRow::from_prepared(&prepared, tuner.machine());
     tuner.commit_gemm_row(prepared)?;
-    Ok(true)
+    Ok(Some(validated))
 }
 
-fn execute_prepared_decision<R>(
+fn execute_prepared_decision<R, F>(
     tuner: &mut Tuner,
     decision: PreparedGemmDecision,
-    run: R,
-) -> Result<(GemmBlockPlan, TuneSource), GemmTuneError>
+    run: F,
+) -> Result<(GemmBlockPlan, TuneSource, R), GemmTuneError>
 where
-    R: FnOnce(GemmBlockPlan) -> Result<(), GemmTuneError>,
+    F: FnOnce(GemmBlockPlan) -> Result<R, GemmTuneError>,
 {
     let plan = decision.plan();
     let source = decision.source();
-    run(plan)?;
+    let output = run(plan)?;
     // Exclusive access to `tuner` spans prepare -> run -> commit, so no
     // applicable pin/row can change and make this prepared decision stale.
     tuner
         .commit_gemm_decision(decision)
         .expect("exclusive tuner borrow preserves a prepared GEMM decision");
-    Ok((plan, source))
+    Ok((plan, source, output))
 }
 
 /// The production autotuned f64 GEMM: `c = alpha·a·b + beta·c` through
@@ -454,9 +880,9 @@ where
 ///
 /// Resolution order after shape and cancellation preflight: a pinned plan
 /// dispatches without measurement; else an exact cached row (in the tuner,
-/// seeded from `ledger` when supplied); else the bounded sweep measures,
-/// persists a prepared row, commits it locally, and dispatches. Serial,
-/// small-M, and no-product calls bypass tuning entirely.
+/// seeded from the cache when permitted); else the bounded sweep measures,
+/// applies the explicit write policy, commits it locally, and dispatches.
+/// Serial, small-M, and no-product calls bypass tuning entirely.
 ///
 /// # Errors
 /// [`GemmTuneError`] — cancellation, tuner refusals, ledger I/O, or a
@@ -470,9 +896,81 @@ where
 #[allow(clippy::too_many_arguments)] // BLAS-shape signature + orchestration handles
 pub fn gemm_f64_session(
     tuner: &mut Tuner,
-    ledger: Option<&Ledger>,
+    cache: GemmTuneCache<'_>,
     gate: &CancelGate,
     threads: usize,
+    m: usize,
+    n: usize,
+    k: usize,
+    alpha: f64,
+    a: &[f64],
+    b: &[f64],
+    beta: f64,
+    c: &mut [f64],
+) -> Result<GemmDispatch, GemmTuneError> {
+    let pool = TilePool::for_host(threads, SESSION_GEMM_POOL_SEED);
+    gemm_f64_session_with_pool(tuner, cache, &pool, gate, m, n, k, alpha, a, b, beta, c)
+}
+
+/// The production autotuned f64 GEMM on a caller-owned, reusable TilePool.
+/// The same pool executes every sweep candidate and the selected plan; its
+/// normalized worker budget and placement policy are bound into the tune key.
+///
+/// # Errors
+/// As [`gemm_f64_session`], plus a structured executor failure if TilePool
+/// contains a tile panic or detects an incomplete traversal.
+///
+/// # Panics
+/// Inherits fs-la's structured shape panics for mismatched slice lengths.
+#[allow(clippy::too_many_arguments)]
+pub fn gemm_f64_session_with_pool(
+    tuner: &mut Tuner,
+    cache: GemmTuneCache<'_>,
+    pool: &TilePool,
+    gate: &CancelGate,
+    m: usize,
+    n: usize,
+    k: usize,
+    alpha: f64,
+    a: &[f64],
+    b: &[f64],
+    beta: f64,
+    c: &mut [f64],
+) -> Result<GemmDispatch, GemmTuneError> {
+    gemm_f64_session_with_pool_declared(
+        tuner,
+        cache,
+        pool,
+        gate,
+        fs_exec::RunId::default(),
+        m,
+        n,
+        k,
+        alpha,
+        a,
+        b,
+        beta,
+        c,
+    )
+}
+
+/// As [`gemm_f64_session_with_pool`], with the caller-ledgered identity of the
+/// final production dispatch. Sweep repetitions receive separate
+/// domain-derived children and cannot collide with the final run's tile
+/// streams.
+///
+/// # Errors
+/// As [`gemm_f64_session_with_pool`].
+///
+/// # Panics
+/// As [`gemm_f64_session_with_pool`].
+#[allow(clippy::too_many_arguments)]
+pub fn gemm_f64_session_with_pool_declared(
+    tuner: &mut Tuner,
+    cache: GemmTuneCache<'_>,
+    pool: &TilePool,
+    gate: &CancelGate,
+    declared_run: fs_exec::RunId,
     m: usize,
     n: usize,
     k: usize,
@@ -490,17 +988,19 @@ pub fn gemm_f64_session(
         return Err(cancelled_before_compute());
     }
 
-    let key = gemm_tune_key(threads, m, n, k)?;
+    let key = gemm_tune_key_with_pool(pool, m, n, k)?;
     let kernel = key.kernel().to_string();
     let shape_class = gemm_shape_class(m, n, k);
     let mut swept = false;
+    let mut new_tune_row = None;
+    let mut validated_tune_row = None;
 
     // No product, one-thread, and small-M routes do not have a meaningful
     // production MC/NC choice. Dispatch them cancellation-correctly under the
     // documented cold plan without reading or mutating tune state.
-    if !fs_la::gemm_tuning_is_effective(m, n, k, alpha, threads) {
+    if !fs_la::gemm_tuning_is_effective(m, n, k, alpha, pool.workers()) {
         let plan = GemmBlockPlan::COLD_START;
-        fs_la::gemm_f64_parallel_with_cancel(
+        let run = fs_la::gemm_f64_parallel_with_pool_declared(
             m,
             n,
             k,
@@ -509,10 +1009,11 @@ pub fn gemm_f64_session(
             b,
             beta,
             c,
-            threads,
+            pool,
             plan.mc,
             n.min(plan.nc_cap).max(1),
             gate,
+            declared_run,
         )
         .map_err(GemmTuneError::from)?;
         return Ok(GemmDispatch {
@@ -521,6 +1022,9 @@ pub fn gemm_f64_session(
             plan,
             source: TuneSource::ColdStart,
             swept,
+            new_tune_row,
+            validated_tune_row,
+            run,
         });
     }
 
@@ -530,8 +1034,7 @@ pub fn gemm_f64_session(
         // prepare_adopt_gemm_row_json and we fall through to a fresh sweep.
         // The ledger's separate params column must agree byte-for-byte with
         // the validated row body before either is allowed into the tuner.
-        let mut seeded = false;
-        if let Some(ledger) = ledger {
+        if let Some(ledger) = cache.reader() {
             let cached = ledger
                 .tune_get(
                     key.kernel(),
@@ -540,27 +1043,18 @@ pub fn gemm_f64_session(
                 )
                 .map_err(|e| GemmTuneError::Ledger(e.to_string()))?;
             if let Some(row) = cached {
-                seeded = adopt_cached_row(tuner, &key, &row.params, &row.measured)?;
+                validated_tune_row = adopt_cached_row(tuner, &key, &row.params, &row.measured)?;
             }
         }
-        if !seeded {
-            let sweep = run_sweep(gate, threads, m, n, k)?;
+        if validated_tune_row.is_none() {
+            let sweep = run_sweep(gate, pool, declared_run, m, n, k)?;
             swept = true;
-            let machine = tuner.machine().to_le_bytes();
-            install_sweep_row(tuner, &key, sweep, |prepared| {
-                let Some(ledger) = ledger else {
-                    return Ok(());
-                };
-                ledger
-                    .tune_put(
-                        key.kernel(),
-                        key.shape_class(),
-                        &machine,
-                        &prepared.params_json(),
-                        &prepared.row_json(),
-                    )
-                    .map_err(|e| GemmTuneError::Ledger(e.to_string()))
+            let (_, validated) = install_sweep_row(tuner, &key, sweep, |row| match cache {
+                GemmTuneCache::ReadWrite(ledger) => row.replace_cache_row(ledger),
+                GemmTuneCache::Disabled | GemmTuneCache::ReadOnly(_) => Ok(()),
             })?;
+            new_tune_row = Some(validated.clone());
+            validated_tune_row = Some(validated);
         }
     }
 
@@ -568,8 +1062,8 @@ pub fn gemm_f64_session(
         return Err(cancelled_before_compute());
     }
     let decision = tuner.prepare_gemm_decision(&key);
-    let (plan, source) = execute_prepared_decision(tuner, decision, |plan| {
-        fs_la::gemm_f64_parallel_with_cancel(
+    let (plan, source, run) = execute_prepared_decision(tuner, decision, |plan| {
+        fs_la::gemm_f64_parallel_with_pool_declared(
             m,
             n,
             k,
@@ -578,12 +1072,12 @@ pub fn gemm_f64_session(
             b,
             beta,
             c,
-            threads,
+            pool,
             plan.mc,
             n.min(plan.nc_cap).max(1),
             gate,
+            declared_run,
         )
-        .map(|_| ())
         .map_err(GemmTuneError::from)
     })?;
     Ok(GemmDispatch {
@@ -592,12 +1086,74 @@ pub fn gemm_f64_session(
         plan,
         source,
         swept,
+        new_tune_row,
+        validated_tune_row,
+        run,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tuner_schema_bump_separates_durable_keys() {
+        let v1 = gemm_tune_key_for_execution_schema(4, 4, "test-placement", 512, 640, 512, 1)
+            .expect("schema-v1 key");
+        let v2 = gemm_tune_key_for_execution_schema(4, 4, "test-placement", 512, 640, 512, 2)
+            .expect("schema-v2 key");
+
+        assert_ne!(v1.kernel(), v2.kernel());
+        assert_eq!(v1.shape_class(), v2.shape_class());
+        assert!(v1.kernel().contains("fs-session-tuner-v1"));
+        assert!(v2.kernel().contains("fs-session-tuner-v2"));
+    }
+
+    #[test]
+    fn execution_receipt_excludes_schedule_measurements() {
+        let operation_run = fs_exec::RunId(7);
+        let base_panel = fs_exec::RunReport {
+            kernel: "fs-la/gemm-f64-m-band-v1",
+            mode: "deterministic",
+            declared_run: fs_la::gemm_panel_run_id(operation_run, 0),
+            completed: 4,
+            total: 4,
+            steals: 0,
+            cross_ccd_steals: 0,
+            cancel_latencies_ns: Vec::new(),
+            tiles_by_worker: vec![2, 2],
+        };
+        let first = fs_la::GemmRunReport {
+            declared_run: operation_run,
+            completed_tiles: 32,
+            total_tiles: 32,
+            pool_runs: vec![base_panel.clone()],
+        };
+        let mut noisy_panel = base_panel;
+        noisy_panel.steals = 99;
+        noisy_panel.cross_ccd_steals = 17;
+        noisy_panel.cancel_latencies_ns = vec![3, 5, 8];
+        noisy_panel.tiles_by_worker = vec![4, 0];
+        let second = fs_la::GemmRunReport {
+            declared_run: operation_run,
+            completed_tiles: 32,
+            total_tiles: 32,
+            pool_runs: vec![noisy_panel],
+        };
+        assert_eq!(
+            GemmExecutionReceipt::from_report(&first),
+            GemmExecutionReceipt::from_report(&second),
+            "steal, latency, and worker-distribution envelopes are not replay identity"
+        );
+        assert!(GemmExecutionReceipt::from_report(&first).is_complete());
+        let mut different_run = first;
+        different_run.pool_runs[0].declared_run = fs_exec::RunId(1);
+        assert_ne!(
+            GemmExecutionReceipt::from_report(&different_run),
+            GemmExecutionReceipt::from_report(&second),
+            "declared logical run is part of replay identity"
+        );
+    }
 
     fn synthetic_sweep() -> SweepResult {
         let winner = GemmBlockPlan::new(16, 512).expect("winner plan");
@@ -721,7 +1277,7 @@ mod tests {
         assert!(!tuner.has_gemm_row(&key));
         assert!(tuner.decisions().is_empty());
 
-        let winner = install_sweep_row(&mut tuner, &key, synthetic_sweep(), |_| Ok(()))
+        let (winner, _) = install_sweep_row(&mut tuner, &key, synthetic_sweep(), |_| Ok(()))
             .expect("retry installs the row");
         assert_eq!(winner, GemmBlockPlan::new(16, 512).expect("plan"));
         assert!(tuner.has_gemm_row(&key));
@@ -733,27 +1289,65 @@ mod tests {
         let mut producer = Tuner::cold(0xAA55);
         let mut params = String::new();
         let mut measured = String::new();
-        install_sweep_row(&mut producer, &key, synthetic_sweep(), |prepared| {
-            params = prepared.params_json();
-            measured = prepared.row_json();
+        let mut sealed = None;
+        install_sweep_row(&mut producer, &key, synthetic_sweep(), |validated| {
+            params.clone_from(&validated.params);
+            measured.clone_from(&validated.measured);
+            sealed = Some(validated.clone());
             Ok(())
         })
         .expect("produce cached row");
+        let sealed = sealed.expect("sealed row");
 
         let mut consumer = Tuner::cold(0xAA55);
         assert!(
-            !adopt_cached_row(&mut consumer, &key, "\"mc=32,nc-cap=512\"", &measured)
+            adopt_cached_row(&mut consumer, &key, "\"mc=32,nc-cap=512\"", &measured)
                 .expect("mismatch is a cache miss")
+                .is_none()
         );
         assert!(!consumer.has_gemm_row(&key));
-        assert!(adopt_cached_row(&mut consumer, &key, &params, &measured).expect("adopt"));
+        let adopted = adopt_cached_row(&mut consumer, &key, &params, &measured)
+            .expect("adopt")
+            .expect("validated adopted row");
+        assert_eq!(adopted.receipt_identity(), sealed.receipt_identity());
+        assert!(adopted.matches_decision(
+            key.kernel(),
+            key.shape_class(),
+            0xAA55,
+            "mc=16,nc-cap=512"
+        ));
         assert!(consumer.has_gemm_row(&key));
+
+        let original_identity = sealed.receipt_identity();
+        let mut field_tampers = Vec::new();
+        let mut tampered = sealed.clone();
+        tampered.kernel.push('x');
+        field_tampers.push(tampered);
+        let mut tampered = sealed.clone();
+        tampered.shape_class.push('x');
+        field_tampers.push(tampered);
+        let mut tampered = sealed.clone();
+        tampered.machine[0] ^= 1;
+        field_tampers.push(tampered);
+        let mut tampered = sealed.clone();
+        tampered.params.push(' ');
+        field_tampers.push(tampered);
+        let mut tampered = sealed.clone();
+        tampered.measured.push(' ');
+        field_tampers.push(tampered);
+        assert!(
+            field_tampers
+                .iter()
+                .all(|tampered| tampered.receipt_identity() != original_identity),
+            "every ledger tuple field must participate in the derive-key identity"
+        );
 
         let other_probe = gemm_tune_key(4, 320, 289, 300).expect("other key");
         let mut wrong_context = Tuner::cold(0xAA55);
         assert!(
-            !adopt_cached_row(&mut wrong_context, &other_probe, &params, &measured)
+            adopt_cached_row(&mut wrong_context, &other_probe, &params, &measured)
                 .expect("wrong context is a cache miss")
+                .is_none()
         );
         assert!(!wrong_context.has_gemm_row(&other_probe));
     }
@@ -767,10 +1361,12 @@ mod tests {
             .expect("pin");
         let decision = tuner.prepare_gemm_decision(&key);
         let error = execute_prepared_decision(&mut tuner, decision, |_| {
-            Err(GemmTuneError::from(fs_la::GemmCancelled {
+            Err::<(), _>(GemmTuneError::from(fs_la::GemmCancelled {
                 report: fs_la::GemmRunReport {
+                    declared_run: fs_exec::RunId(9),
                     completed_tiles: 7,
                     total_tiles: 19,
+                    pool_runs: Vec::new(),
                 },
             }))
         })

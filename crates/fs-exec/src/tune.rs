@@ -31,7 +31,10 @@ const MAX_TUNE_ROW_BYTES: usize = 1024 * 1024;
 const MAX_TUNE_STRING_BYTES: usize = 64 * 1024;
 const MAX_TUNE_OBSERVATIONS: usize = 4096;
 const MAX_WALL_TIME_SAMPLES: usize = 4096;
+const MAX_TUNE_ROW_WALL_TIME_SAMPLES: usize = 4096;
 const MAX_GEMM_IDENTITY_COMPONENT_BYTES: usize = 256;
+const MAX_RETAINED_TUNING_DECISIONS: usize = 4096;
+const MAX_RETAINED_TUNING_DECISION_BYTES: usize = 1024 * 1024;
 
 /// Schedule polymorphism (plan §5.1 consequence 2): the same algorithm
 /// ships a bandwidth-rich schedule (fewer, fatter, streaming-friendly
@@ -129,7 +132,8 @@ impl GemmBlockPlan {
 ///
 /// Every field participates in the persistent tune key. This prevents a row
 /// measured with one thread count, probe, ISA tier, placement policy, or
-/// implementation from silently dispatching under another configuration.
+/// implementation/build from silently dispatching under another
+/// configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GemmExecutionIdentity {
     requested_threads: u64,
@@ -138,6 +142,7 @@ pub struct GemmExecutionIdentity {
     isa_tier: String,
     placement: String,
     implementation: String,
+    build: String,
 }
 
 impl GemmExecutionIdentity {
@@ -160,6 +165,7 @@ impl GemmExecutionIdentity {
         isa_tier: impl Into<String>,
         placement: impl Into<String>,
         implementation: impl Into<String>,
+        build: impl Into<String>,
     ) -> Result<Self, TuneError> {
         let requested_threads = u64::try_from(requested_threads).map_err(|_| TuneError {
             detail: "requested GEMM thread count is not representable as u64".to_string(),
@@ -186,9 +192,11 @@ impl GemmExecutionIdentity {
         let isa_tier = isa_tier.into();
         let placement = placement.into();
         let implementation = implementation.into();
+        let build = build.into();
         require_gemm_identity_component("ISA tier", &isa_tier)?;
         require_gemm_identity_component("placement", &placement)?;
         require_gemm_identity_component("implementation", &implementation)?;
+        require_gemm_identity_component("build", &build)?;
         Ok(Self {
             requested_threads,
             thread_budget,
@@ -196,6 +204,7 @@ impl GemmExecutionIdentity {
             isa_tier,
             placement,
             implementation,
+            build,
         })
     }
 
@@ -235,6 +244,12 @@ impl GemmExecutionIdentity {
     pub fn implementation(&self) -> &str {
         &self.implementation
     }
+
+    /// Producer codegen/build identity. Durable rows never cross this seam.
+    #[must_use]
+    pub fn build(&self) -> &str {
+        &self.build
+    }
 }
 
 /// Canonical GEMM tuning key. The storage kernel embeds the shape class and
@@ -272,7 +287,7 @@ impl GemmTuneKey {
         let shape_class = shape_class.into();
         require_gemm_identity_component("shape class", &shape_class)?;
         let scoped_kernel = format!(
-            "{base_kernel}/tune-v1/shape={shape_class}/requested={}/thread-budget={}/probe={}x{}x{}/tier={}/placement={}/implementation={}",
+            "{base_kernel}/tune-v2/shape={shape_class}/requested={}/thread-budget={}/probe={}x{}x{}/tier={}/placement={}/implementation={}/build={}",
             execution.requested_threads,
             execution.thread_budget,
             execution.probe_dims[0],
@@ -281,6 +296,7 @@ impl GemmTuneKey {
             execution.isa_tier,
             execution.placement,
             execution.implementation,
+            execution.build,
         );
         if scoped_kernel.len() > MAX_TUNE_STRING_BYTES {
             return Err(TuneError {
@@ -342,6 +358,22 @@ fn require_gemm_identity_component(label: &str, value: &str) -> Result<(), TuneE
     Ok(())
 }
 
+fn require_decision_kernel(kernel: &str) -> Result<(), TuneError> {
+    if kernel.trim().is_empty() {
+        return Err(TuneError {
+            detail: "a tuning-decision kernel identity must be non-blank".to_string(),
+        });
+    }
+    if kernel.len() > MAX_TUNE_STRING_BYTES {
+        return Err(TuneError {
+            detail: format!(
+                "tuning-decision kernel identity exceeds the {MAX_TUNE_STRING_BYTES}-byte limit"
+            ),
+        });
+    }
+    Ok(())
+}
+
 fn parse_canonical_u64(text: &str) -> Option<u64> {
     let value = text.parse::<u64>().ok()?;
     (value.to_string() == text).then_some(value)
@@ -352,7 +384,7 @@ fn parse_gemm_base_version(kernel: &str) -> Option<u64> {
 }
 
 fn gemm_shape_from_scoped_kernel(kernel: &str) -> Option<&str> {
-    let (base, scope) = kernel.split_once("/tune-v1/")?;
+    let (base, scope) = kernel.split_once("/tune-v2/")?;
     parse_gemm_base_version(base)?;
     let mut parts = scope.split('/');
     let shape = parts.next()?.strip_prefix("shape=")?;
@@ -362,6 +394,7 @@ fn gemm_shape_from_scoped_kernel(kernel: &str) -> Option<&str> {
     let tier = parts.next()?.strip_prefix("tier=")?;
     let placement = parts.next()?.strip_prefix("placement=")?;
     let implementation = parts.next()?.strip_prefix("implementation=")?;
+    let build = parts.next()?.strip_prefix("build=")?;
     if parts.next().is_some()
         || parse_canonical_u64(requested).is_none()
         || parse_canonical_u64(thread_budget)? == 0
@@ -369,6 +402,7 @@ fn gemm_shape_from_scoped_kernel(kernel: &str) -> Option<&str> {
         || require_gemm_identity_component("ISA tier", tier).is_err()
         || require_gemm_identity_component("placement", placement).is_err()
         || require_gemm_identity_component("implementation", implementation).is_err()
+        || require_gemm_identity_component("build", build).is_err()
     {
         return None;
     }
@@ -495,7 +529,8 @@ impl TuneObservation {
     /// Construct a wall-time observation and derive its summary.
     ///
     /// # Errors
-    /// Returns [`TuneError`] for a blank label or an empty sample set.
+    /// Returns [`TuneError`] for a blank label, an empty sample set, or any
+    /// zero-duration sample.
     pub fn wall_time(label: impl Into<String>, samples_ns: Vec<u64>) -> Result<Self, TuneError> {
         let label = label.into();
         require_observation_label(&label)?;
@@ -509,6 +544,11 @@ impl TuneObservation {
         let minimum_ns = samples_ns.iter().copied().min().ok_or_else(|| TuneError {
             detail: format!("wall-time observation {label:?} has no samples"),
         })?;
+        if minimum_ns == 0 {
+            return Err(TuneError {
+                detail: format!("wall-time observation {label:?} contains a zero-duration sample"),
+            });
+        }
         let maximum_ns = samples_ns
             .iter()
             .copied()
@@ -628,7 +668,8 @@ impl TuneEvidence {
     ///
     /// # Errors
     /// Returns [`TuneError`] for no observations, invalid observation
-    /// summaries, blank labels, or duplicate labels.
+    /// summaries, blank or duplicate labels, or an aggregate wall-time sample
+    /// count beyond the per-row resource budget.
     pub fn new(observations: Vec<TuneObservation>) -> Result<Self, TuneError> {
         validate_observations(&observations)?;
         Ok(Self {
@@ -646,7 +687,8 @@ impl TuneEvidence {
     ///
     /// # Errors
     /// Returns [`TuneError`] unless at least two valid observations are
-    /// present and every observation is wall time.
+    /// present, every observation is wall time, and their aggregate sample
+    /// count is within the per-row resource budget.
     pub fn ranked_wall_times(observations: Vec<TuneObservation>) -> Result<Self, TuneError> {
         validate_observations(&observations)?;
         let candidate_separation_ppm =
@@ -693,11 +735,11 @@ impl TuneEvidence {
         Ok(())
     }
 
-    fn push_json(&self, out: &mut String) {
-        let _ = write!(out, "{{\"version\":{},\"observations\":[", Self::VERSION);
+    fn write_json<W: fmt::Write>(&self, out: &mut W) -> fmt::Result {
+        write!(out, "{{\"version\":{},\"observations\":[", Self::VERSION)?;
         for (index, observation) in self.observations.iter().enumerate() {
             if index > 0 {
-                out.push(',');
+                out.write_char(',')?;
             }
             match observation {
                 TuneObservation::WallTime {
@@ -705,48 +747,48 @@ impl TuneEvidence {
                     samples_ns,
                     summary,
                 } => {
-                    out.push_str("{\"kind\":\"wall-time\",\"label\":");
-                    push_json_string(out, label);
-                    out.push_str(",\"samples_ns\":[");
+                    out.write_str("{\"kind\":\"wall-time\",\"label\":")?;
+                    write_json_string(out, label)?;
+                    out.write_str(",\"samples_ns\":[")?;
                     for (sample_index, sample) in samples_ns.iter().enumerate() {
                         if sample_index > 0 {
-                            out.push(',');
+                            out.write_char(',')?;
                         }
-                        let _ = write!(out, "{sample}");
+                        write!(out, "{sample}")?;
                     }
-                    let _ = write!(
+                    write!(
                         out,
                         "],\"summary\":{{\"minimum_ns\":{},\"maximum_ns\":{}}}}}",
                         summary.minimum_ns, summary.maximum_ns
-                    );
+                    )?;
                 }
                 TuneObservation::WorkCount { label, unit, count } => {
-                    out.push_str("{\"kind\":\"work-count\",\"label\":");
-                    push_json_string(out, label);
-                    out.push_str(",\"unit\":");
-                    push_json_string(out, unit.name());
-                    let _ = write!(out, ",\"count\":{count}}}");
+                    out.write_str("{\"kind\":\"work-count\",\"label\":")?;
+                    write_json_string(out, label)?;
+                    out.write_str(",\"unit\":")?;
+                    write_json_string(out, unit.name())?;
+                    write!(out, ",\"count\":{count}}}")?;
                 }
                 TuneObservation::Throughput {
                     label,
                     unit,
                     milli_units,
                 } => {
-                    out.push_str("{\"kind\":\"throughput\",\"label\":");
-                    push_json_string(out, label);
-                    out.push_str(",\"unit\":");
-                    push_json_string(out, unit.name());
-                    let _ = write!(out, ",\"milli_units\":{milli_units}}}");
+                    out.write_str("{\"kind\":\"throughput\",\"label\":")?;
+                    write_json_string(out, label)?;
+                    out.write_str(",\"unit\":")?;
+                    write_json_string(out, unit.name())?;
+                    write!(out, ",\"milli_units\":{milli_units}}}")?;
                 }
             }
         }
-        out.push_str("],\"candidate_separation_ppm\":");
+        out.write_str("],\"candidate_separation_ppm\":")?;
         if let Some(separation) = self.candidate_separation_ppm {
-            let _ = write!(out, "{separation}");
+            write!(out, "{separation}")?;
         } else {
-            out.push_str("null");
+            out.write_str("null")?;
         }
-        out.push('}');
+        out.write_char('}')
     }
 }
 
@@ -762,8 +804,19 @@ fn validate_observations(observations: &[TuneObservation]) -> Result<(), TuneErr
         });
     }
     let mut labels = BTreeSet::new();
+    let mut total_wall_time_samples = 0_usize;
     for observation in observations {
         observation.validate()?;
+        if let TuneObservation::WallTime { samples_ns, .. } = observation {
+            total_wall_time_samples = total_wall_time_samples
+                .checked_add(samples_ns.len())
+                .filter(|&total| total <= MAX_TUNE_ROW_WALL_TIME_SAMPLES)
+                .ok_or_else(|| TuneError {
+                    detail: format!(
+                        "tune evidence exceeds the {MAX_TUNE_ROW_WALL_TIME_SAMPLES}-sample aggregate wall-time limit"
+                    ),
+                })?;
+        }
         if !labels.insert(observation.label()) {
             return Err(TuneError {
                 detail: format!("duplicate tune observation label {:?}", observation.label()),
@@ -894,20 +947,45 @@ pub struct TuneRow {
 }
 
 impl TuneRow {
+    fn write_json<W: fmt::Write>(&self, out: &mut W) -> fmt::Result {
+        out.write_str("{\"kernel\":")?;
+        write_json_string(out, &self.kernel)?;
+        out.write_str(",\"shape_class\":")?;
+        write_json_string(out, &self.shape_class)?;
+        write!(out, ",\"machine\":\"{:016x}\",\"params\":", self.machine)?;
+        write_json_string(out, &self.params)?;
+        out.write_str(",\"evidence\":")?;
+        self.evidence.write_json(out)?;
+        write!(out, ",\"refresh\":{}}}", self.refresh)
+    }
+
     /// Canonical JSON-line (deterministic field order).
     #[must_use]
     pub fn to_json(&self) -> String {
         let mut s = String::with_capacity(160);
-        s.push_str("{\"kernel\":");
-        push_json_string(&mut s, &self.kernel);
-        s.push_str(",\"shape_class\":");
-        push_json_string(&mut s, &self.shape_class);
-        let _ = write!(s, ",\"machine\":\"{:016x}\",\"params\":", self.machine);
-        push_json_string(&mut s, &self.params);
-        s.push_str(",\"evidence\":");
-        self.evidence.push_json(&mut s);
-        let _ = write!(s, ",\"refresh\":{}}}", self.refresh);
+        self.write_json(&mut s).expect("String writes cannot fail");
         s
+    }
+
+    fn validated_generated_json(&self) -> Result<String, TuneError> {
+        self.evidence.validate()?;
+        let mut bounded = BoundedJsonWriter::new(MAX_TUNE_ROW_BYTES);
+        self.write_json(&mut bounded).map_err(|_| TuneError {
+            detail: format!(
+                "generated tune row exceeds the {MAX_TUNE_ROW_BYTES}-byte canonical row limit"
+            ),
+        })?;
+        let json = bounded.finish();
+        let reparsed = parse_row(&json).ok_or_else(|| TuneError {
+            detail: "generated tune row is outside the canonical parser domain".to_string(),
+        })?;
+        if reparsed != *self {
+            return Err(TuneError {
+                detail: "generated tune row does not preserve its fields through canonical parsing"
+                    .to_string(),
+            });
+        }
+        Ok(json)
     }
 }
 
@@ -958,7 +1036,7 @@ impl PreparedGemmRow {
     #[must_use]
     pub fn params_json(&self) -> String {
         let mut out = String::new();
-        push_json_string(&mut out, &self.row.params);
+        write_json_string(&mut out, &self.row.params).expect("String writes cannot fail");
         out
     }
 
@@ -975,23 +1053,53 @@ impl PreparedGemmRow {
     }
 }
 
-fn push_json_string(out: &mut String, value: &str) {
-    use core::fmt::Write as _;
-    out.push('"');
-    for ch in value.chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if c.is_control() => {
-                let _ = write!(out, "\\u{:04x}", c as u32);
-            }
-            c => out.push(c),
+struct BoundedJsonWriter {
+    out: String,
+    limit: usize,
+}
+
+impl BoundedJsonWriter {
+    fn new(limit: usize) -> Self {
+        Self {
+            out: String::with_capacity(limit.min(1024)),
+            limit,
         }
     }
-    out.push('"');
+
+    fn finish(self) -> String {
+        self.out
+    }
+}
+
+impl fmt::Write for BoundedJsonWriter {
+    fn write_str(&mut self, value: &str) -> fmt::Result {
+        let Some(new_len) = self.out.len().checked_add(value.len()) else {
+            return Err(fmt::Error);
+        };
+        if new_len > self.limit {
+            return Err(fmt::Error);
+        }
+        self.out.push_str(value);
+        Ok(())
+    }
+}
+
+fn write_json_string<W: fmt::Write>(out: &mut W, value: &str) -> fmt::Result {
+    out.write_char('"')?;
+    for ch in value.chars() {
+        match ch {
+            '"' => out.write_str("\\\"")?,
+            '\\' => out.write_str("\\\\")?,
+            '\n' => out.write_str("\\n")?,
+            '\r' => out.write_str("\\r")?,
+            '\t' => out.write_str("\\t")?,
+            c if c.is_control() => {
+                write!(out, "\\u{:04x}", c as u32)?;
+            }
+            c => out.write_char(c)?,
+        }
+    }
+    out.write_char('"')
 }
 
 /// Structured tune-store failure (Decalogue P10).
@@ -1025,13 +1133,63 @@ impl TuningDecision {
     #[must_use]
     pub fn to_json(&self) -> String {
         let mut out = String::from("{\"kernel\":");
-        push_json_string(&mut out, &self.kernel);
+        write_json_string(&mut out, &self.kernel).expect("String writes cannot fail");
         out.push_str(",\"params\":");
-        push_json_string(&mut out, &self.params);
+        write_json_string(&mut out, &self.params).expect("String writes cannot fail");
         out.push_str(",\"source\":");
-        push_json_string(&mut out, self.source);
+        write_json_string(&mut out, self.source).expect("String writes cannot fail");
         out.push('}');
         out
+    }
+
+    fn retained_bytes(&self) -> Option<usize> {
+        self.kernel.len().checked_add(self.params.len())
+    }
+}
+
+/// Borrowed metadata for the tuner's bounded in-memory decision window.
+///
+/// [`TuningDecisionHistory::is_complete`] is false after any oldest-prefix
+/// eviction. Callers must not treat an incomplete window as the full replay
+/// record; production dispatch receipts belong in the Design Ledger.
+#[derive(Debug, Clone, Copy)]
+pub struct TuningDecisionHistory<'a> {
+    decisions: &'a [TuningDecision],
+    evicted: usize,
+    retained_bytes: usize,
+}
+
+impl<'a> TuningDecisionHistory<'a> {
+    /// Decisions still retained, in original dispatch order.
+    #[must_use]
+    pub const fn decisions(self) -> &'a [TuningDecision] {
+        self.decisions
+    }
+
+    /// Number of older decisions evicted from this tuner.
+    #[must_use]
+    pub const fn evicted(self) -> usize {
+        self.evicted
+    }
+
+    /// Owned string payload retained by the current window.
+    #[must_use]
+    pub const fn retained_bytes(self) -> usize {
+        self.retained_bytes
+    }
+
+    /// True only when the retained slice still starts at the tuner's first
+    /// recorded decision.
+    #[must_use]
+    pub const fn is_complete(self) -> bool {
+        self.evicted == 0
+    }
+
+    /// Total decisions recorded by this tuner, saturating only after an
+    /// unrepresentable process-lifetime count.
+    #[must_use]
+    pub fn total_recorded(self) -> usize {
+        self.evicted.saturating_add(self.decisions.len())
     }
 }
 
@@ -1042,6 +1200,8 @@ pub struct Tuner {
     rows: BTreeMap<(String, String), TuneRow>,
     pins: BTreeMap<String, PinnedParam>,
     decisions: Vec<TuningDecision>,
+    decision_bytes: usize,
+    evicted_decisions: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1143,6 +1303,8 @@ impl Tuner {
             rows: BTreeMap::new(),
             pins: BTreeMap::new(),
             decisions: Vec::new(),
+            decision_bytes: 0,
+            evicted_decisions: 0,
         }
     }
 
@@ -1162,11 +1324,7 @@ impl Tuner {
         edge: TileEdge,
     ) -> Result<(), TuneError> {
         let kernel = kernel.into();
-        if kernel.trim().is_empty() {
-            return Err(TuneError {
-                detail: "a pinned kernel identity must be non-blank".to_string(),
-            });
-        }
+        require_decision_kernel(&kernel)?;
         if kernel == SCHEDULE_KERNEL || kernel.starts_with(GEMM_KERNEL_PREFIX) {
             return Err(TuneError {
                 detail: if kernel == SCHEDULE_KERNEL {
@@ -1270,12 +1428,11 @@ impl Tuner {
                     .to_string(),
             });
         }
-        self.decisions.push(TuningDecision {
+        self.record_decision(TuningDecision {
             kernel: key.kernel().to_string(),
             params: plan.canonical(),
             source: source.name(),
-        });
-        Ok(())
+        })
     }
 
     fn resolve_gemm(&self, key: &GemmTuneKey) -> (GemmBlockPlan, TuneSource) {
@@ -1301,7 +1458,8 @@ impl Tuner {
     /// # Errors
     /// [`TuneError`] when evidence is invalid, candidate labels are not
     /// canonical plans, the selected plan is not the deterministic evidence
-    /// argmin, or the refresh counter is exhausted.
+    /// argmin, the generated row exceeds persistence bounds or cannot be
+    /// reparsed canonically, or the refresh counter is exhausted.
     pub fn prepare_gemm_row(
         &self,
         key: &GemmTuneKey,
@@ -1321,16 +1479,18 @@ impl Tuner {
                 ),
             })
         })?;
+        let row = TuneRow {
+            kernel: key.kernel().to_string(),
+            shape_class: key.shape_class().to_string(),
+            machine: self.fingerprint,
+            params: plan.canonical(),
+            evidence,
+            refresh,
+        };
+        row.validated_generated_json()?;
         Ok(PreparedGemmRow {
             key: key.clone(),
-            row: TuneRow {
-                kernel: key.kernel().to_string(),
-                shape_class: key.shape_class().to_string(),
-                machine: self.fingerprint,
-                params: plan.canonical(),
-                evidence,
-                refresh,
-            },
+            row,
             expected_refresh,
         })
     }
@@ -1390,8 +1550,9 @@ impl Tuner {
     /// the state observed during preparation.
     ///
     /// # Errors
-    /// [`TuneError`] when the prepared row belongs to another tuner or the row
-    /// changed between preparation and commit.
+    /// [`TuneError`] when the prepared row belongs to another tuner, is no
+    /// longer canonically bounded, or the row changed between preparation and
+    /// commit.
     pub fn commit_gemm_row(&mut self, prepared: PreparedGemmRow) -> Result<(), TuneError> {
         if prepared.row.machine != self.fingerprint
             || prepared.row.kernel != prepared.key.kernel()
@@ -1401,6 +1562,7 @@ impl Tuner {
                 detail: "prepared GEMM row does not belong to this tuner/key".to_string(),
             });
         }
+        prepared.row.validated_generated_json()?;
         validate_scoped_gemm_row(&prepared.row)?;
         let map_key = (
             prepared.key.kernel().to_string(),
@@ -1514,11 +1676,7 @@ impl Tuner {
     ) -> Result<(), TuneError> {
         let kernel = kernel.into();
         let params = params.into();
-        if kernel.trim().is_empty() {
-            return Err(TuneError {
-                detail: "a pinned kernel identity must be non-blank".to_string(),
-            });
-        }
+        require_decision_kernel(&kernel)?;
         let parsed = PinnedParam::parse(&kernel, &params).ok_or_else(|| TuneError {
             detail: format!("invalid pinned params {params:?} for kernel {kernel:?}"),
         })?;
@@ -1526,30 +1684,51 @@ impl Tuner {
         Ok(())
     }
 
-    /// The decisions handed out so far (a study records these; replaying
-    /// the study pins them).
+    /// The currently retained decision window in dispatch order.
+    ///
+    /// This compatibility view is not, by itself, proof that the prefix is
+    /// complete. Long-running callers must check [`Tuner::decision_history`]
+    /// before using it as replay input and persist production dispatch receipts
+    /// to the Design Ledger.
     #[must_use]
     pub fn decisions(&self) -> &[TuningDecision] {
         &self.decisions
     }
 
+    /// Metadata for the bounded decision window.
+    #[must_use]
+    pub fn decision_history(&self) -> TuningDecisionHistory<'_> {
+        TuningDecisionHistory {
+            decisions: &self.decisions,
+            evicted: self.evicted_decisions,
+            retained_bytes: self.decision_bytes,
+        }
+    }
+
     /// Resolve a tile edge for `kernel`: pins beat tuned rows beat the
     /// cold-start default (8³ — plan §5.3). The decision is recorded.
-    pub fn tile_edge_for(&mut self, kernel: &str) -> (TileEdge, TuneSource) {
-        let (params, source) = self.resolve(kernel);
+    ///
+    /// # Errors
+    /// [`TuneError`] when the kernel identity is blank or exceeds the bounded
+    /// tune-string domain.
+    pub fn tile_edge_for(&mut self, kernel: &str) -> Result<(TileEdge, TuneSource), TuneError> {
+        require_decision_kernel(kernel)?;
+        let (params, source) = self.resolve(kernel)?;
         let edge = match params.as_str() {
             "edge=4" => TileEdge::E4,
             "edge=16" => TileEdge::E16,
             _ => TileEdge::E8,
         };
-        (edge, source)
+        Ok((edge, source))
     }
 
     /// Resolve the schedule kind: pins beat tuned beat the cold-start
     /// default (bandwidth-rich — harmless on starved machines, just less
     /// blocked). The decision is recorded.
     pub fn schedule(&mut self) -> (ScheduleKind, TuneSource) {
-        let (params, source) = self.resolve(SCHEDULE_KERNEL);
+        let (params, source) = self
+            .resolve(SCHEDULE_KERNEL)
+            .expect("the reserved schedule decision is statically bounded");
         let kind = if params == "schedule=bandwidth-starved" {
             ScheduleKind::BandwidthStarved
         } else {
@@ -1558,7 +1737,7 @@ impl Tuner {
         (kind, source)
     }
 
-    fn resolve(&mut self, kernel: &str) -> (String, TuneSource) {
+    fn resolve(&mut self, kernel: &str) -> Result<(String, TuneSource), TuneError> {
         let (params, source) = if let Some(p) = self.pins.get(kernel) {
             (p.canonical(), TuneSource::Pinned)
         } else if let Some(row) = self
@@ -1574,12 +1753,72 @@ impl Tuner {
             };
             (default.to_string(), TuneSource::ColdStart)
         };
-        self.decisions.push(TuningDecision {
+        self.record_decision(TuningDecision {
             kernel: kernel.to_string(),
             params: params.clone(),
             source: source.name(),
-        });
-        (params, source)
+        })?;
+        Ok((params, source))
+    }
+
+    fn record_decision(&mut self, decision: TuningDecision) -> Result<(), TuneError> {
+        let bytes = decision.retained_bytes().ok_or_else(|| TuneError {
+            detail: "tuning decision payload length overflowed usize".to_string(),
+        })?;
+        if bytes > MAX_RETAINED_TUNING_DECISION_BYTES {
+            return Err(TuneError {
+                detail: format!(
+                    "tuning decision exceeds the {MAX_RETAINED_TUNING_DECISION_BYTES}-byte retained-payload limit"
+                ),
+            });
+        }
+
+        let exceeds_count = self.decisions.len() >= MAX_RETAINED_TUNING_DECISIONS;
+        let exceeds_bytes = self
+            .decision_bytes
+            .checked_add(bytes)
+            .is_none_or(|total| total > MAX_RETAINED_TUNING_DECISION_BYTES);
+        if exceeds_count || exceeds_bytes {
+            // Evict to half capacity in one deterministic oldest-prefix batch.
+            // This keeps append cost amortized rather than shifting a full Vec
+            // on every dispatch once the window reaches capacity.
+            let target_count = MAX_RETAINED_TUNING_DECISIONS / 2;
+            let target_bytes = MAX_RETAINED_TUNING_DECISION_BYTES / 2;
+            let mut remove = 0_usize;
+            let mut remaining_bytes = self.decision_bytes;
+            while remove < self.decisions.len()
+                && (self.decisions.len() - remove > target_count
+                    || remaining_bytes
+                        .checked_add(bytes)
+                        .is_none_or(|total| total > target_bytes))
+            {
+                let old_bytes = self.decisions[remove]
+                    .retained_bytes()
+                    .expect("retained decision lengths were checked on insertion");
+                remaining_bytes = remaining_bytes
+                    .checked_sub(old_bytes)
+                    .expect("retained decision byte accounting is exact");
+                remove += 1;
+            }
+            self.decisions.drain(..remove);
+            self.decision_bytes = remaining_bytes;
+            self.evicted_decisions = self.evicted_decisions.saturating_add(remove);
+        }
+
+        self.decision_bytes = self
+            .decision_bytes
+            .checked_add(bytes)
+            .filter(|&total| total <= MAX_RETAINED_TUNING_DECISION_BYTES)
+            .ok_or_else(|| TuneError {
+                detail: "tuning decision window failed its byte bound after eviction".to_string(),
+            })?;
+        if self.decisions.len() >= MAX_RETAINED_TUNING_DECISIONS {
+            return Err(TuneError {
+                detail: "tuning decision window failed its count bound after eviction".to_string(),
+            });
+        }
+        self.decisions.push(decision);
+        Ok(())
     }
 
     /// Run the calibration pass: stencil-edge sweep through the REAL tile
@@ -1833,17 +2072,16 @@ impl Tuner {
                 ),
             })
         })?;
-        self.rows.insert(
-            key,
-            TuneRow {
-                kernel: kernel.to_string(),
-                shape_class: shape_class.to_string(),
-                machine: self.fingerprint,
-                params,
-                evidence,
-                refresh,
-            },
-        );
+        let row = TuneRow {
+            kernel: kernel.to_string(),
+            shape_class: shape_class.to_string(),
+            machine: self.fingerprint,
+            params,
+            evidence,
+            refresh,
+        };
+        row.validated_generated_json()?;
+        self.rows.insert(key, row);
         Ok(())
     }
 
@@ -1851,11 +2089,12 @@ impl Tuner {
     /// schema's file edition).
     ///
     /// # Errors
-    /// [`TuneError`] on I/O failure.
+    /// [`TuneError`] when any row is no longer canonically bounded, the total
+    /// store exceeds its persistence budget, or the final write fails.
     pub fn save(&self, path: &std::path::Path) -> Result<(), TuneError> {
         let mut out = String::new();
         for row in self.rows.values() {
-            out.push_str(&row.to_json());
+            out.push_str(&row.validated_generated_json()?);
             out.push('\n');
             if out.len() > MAX_TUNE_STORE_BYTES {
                 return Err(TuneError {
@@ -1991,9 +2230,10 @@ impl TileKernel for StealProbe {
 }
 
 fn duration_ns(duration: std::time::Duration, context: &str) -> Result<u64, TuneError> {
-    u64::try_from(duration.as_nanos()).map_err(|_| TuneError {
+    let nanoseconds = u64::try_from(duration.as_nanos()).map_err(|_| TuneError {
         detail: format!("{context} duration exceeds the tune evidence u64 nanosecond range"),
-    })
+    })?;
+    Ok(nanoseconds.max(1))
 }
 
 fn schedule_measurement(
@@ -2273,6 +2513,7 @@ mod tests {
         tier: &str,
         placement: &str,
         implementation: &str,
+        build: &str,
     ) -> GemmExecutionIdentity {
         GemmExecutionIdentity::new(
             requested_threads,
@@ -2281,6 +2522,7 @@ mod tests {
             tier,
             placement,
             implementation,
+            build,
         )
         .expect("test execution identity")
     }
@@ -2298,6 +2540,7 @@ mod tests {
             "avx2-fma",
             "unpinned",
             "fs-la-parallel-v1",
+            "release-opt3-cgu1-build-a",
         ))
     }
 
@@ -2313,13 +2556,58 @@ mod tests {
         .expect("ranked GEMM evidence")
     }
 
+    fn work_count_evidence_with_label_lengths(label_lengths: &[usize]) -> TuneEvidence {
+        TuneEvidence::new(
+            label_lengths
+                .iter()
+                .enumerate()
+                .map(|(index, &length)| {
+                    let prefix = format!("work-{index}:");
+                    assert!(length >= prefix.len(), "test label length is too short");
+                    TuneObservation::work_count(
+                        format!("{prefix}{}", "x".repeat(length - prefix.len())),
+                        WorkUnit::Steals,
+                        index as u64,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .expect("bounded work-count observations"),
+        )
+        .expect("bounded work-count evidence")
+    }
+
+    fn work_count_row(evidence: TuneEvidence) -> TuneRow {
+        TuneRow {
+            kernel: "aggregate-row".to_string(),
+            shape_class: "shape".to_string(),
+            machine: 0xAC,
+            params: "mode=bounded".to_string(),
+            evidence,
+            refresh: 1,
+        }
+    }
+
     #[test]
     fn gemm_scoped_identity_has_one_canonical_spelling() {
         let key = gemm_key();
+        assert!(key.kernel().contains("/tune-v2/"));
         assert!(key.kernel().contains("/requested=4/thread-budget=4/"));
+        assert!(key.kernel().contains("/build=release-opt3-cgu1-build-a"));
         assert_eq!(
             gemm_shape_from_scoped_kernel(key.kernel()),
             Some(key.shape_class())
+        );
+        let legacy = key.kernel().replacen("/tune-v2/", "/tune-v1/", 1);
+        assert_eq!(
+            gemm_shape_from_scoped_kernel(&legacy),
+            None,
+            "legacy keys without a build seam fail closed"
+        );
+        assert!(
+            Tuner::cold(1)
+                .pin(legacy, GemmBlockPlan::COLD_START.canonical())
+                .is_err(),
+            "legacy durable pins cannot bypass the current schema"
         );
         assert!(
             GemmTuneKey::new(
@@ -2330,10 +2618,21 @@ mod tests {
             .is_err(),
             "the bit-semantics version is canonical decimal"
         );
-        assert!(GemmExecutionIdentity::new(4, 0, [64, 128, 32], "avx2", "unpinned", "v1").is_err());
-        assert!(GemmExecutionIdentity::new(4, 4, [64, 0, 32], "avx2", "unpinned", "v1").is_err());
         assert!(
-            GemmExecutionIdentity::new(4, 4, [64, 128, 32], "avx/2", "unpinned", "v1").is_err()
+            GemmExecutionIdentity::new(4, 0, [64, 128, 32], "avx2", "unpinned", "v1", "release-a")
+                .is_err()
+        );
+        assert!(
+            GemmExecutionIdentity::new(4, 4, [64, 0, 32], "avx2", "unpinned", "v1", "release-a")
+                .is_err()
+        );
+        assert!(
+            GemmExecutionIdentity::new(4, 4, [64, 128, 32], "avx/2", "unpinned", "v1", "release-a")
+                .is_err()
+        );
+        assert!(
+            GemmExecutionIdentity::new(4, 4, [64, 128, 32], "avx2", "unpinned", "v1", "release/a")
+                .is_err()
         );
     }
 
@@ -2453,6 +2752,7 @@ mod tests {
                 "avx2-fma",
                 "unpinned",
                 "fs-la-parallel-v1",
+                "release-opt3-cgu1-build-a",
             )),
             gemm_key_with(gemm_identity(
                 4,
@@ -2461,6 +2761,7 @@ mod tests {
                 "avx2-fma",
                 "unpinned",
                 "fs-la-parallel-v1",
+                "release-opt3-cgu1-build-a",
             )),
             gemm_key_with(gemm_identity(
                 4,
@@ -2469,6 +2770,7 @@ mod tests {
                 "avx2-fma",
                 "unpinned",
                 "fs-la-parallel-v1",
+                "release-opt3-cgu1-build-a",
             )),
             gemm_key_with(gemm_identity(
                 4,
@@ -2477,6 +2779,7 @@ mod tests {
                 "scalar",
                 "unpinned",
                 "fs-la-parallel-v1",
+                "release-opt3-cgu1-build-a",
             )),
             gemm_key_with(gemm_identity(
                 4,
@@ -2485,6 +2788,7 @@ mod tests {
                 "avx2-fma",
                 "ccd-pinned",
                 "fs-la-parallel-v1",
+                "release-opt3-cgu1-build-a",
             )),
             gemm_key_with(gemm_identity(
                 4,
@@ -2493,6 +2797,16 @@ mod tests {
                 "avx2-fma",
                 "unpinned",
                 "fs-la-parallel-v2",
+                "release-opt3-cgu1-build-a",
+            )),
+            gemm_key_with(gemm_identity(
+                4,
+                4,
+                [64, 128, 32],
+                "avx2-fma",
+                "unpinned",
+                "fs-la-parallel-v1",
+                "debug-opt0-cgu256-build-a",
             )),
         ];
         let selected = GemmBlockPlan::new(64, 1024).expect("selected");
@@ -2514,6 +2828,54 @@ mod tests {
             assert!(!tuner.has_gemm_pin(&variant));
             assert_eq!(
                 tuner.prepare_gemm_decision(&variant).source(),
+                TuneSource::ColdStart
+            );
+        }
+    }
+
+    #[test]
+    fn gemm_build_identity_is_stable_and_cache_rows_cannot_cross() {
+        let baseline = gemm_key();
+        let same_build = gemm_key();
+        assert_eq!(
+            baseline, same_build,
+            "the same explicit build identity produces one stable key"
+        );
+
+        assert_eq!(baseline.execution().build(), "release-opt3-cgu1-build-a");
+
+        let selected = GemmBlockPlan::new(64, 1024).expect("selected");
+        let other = GemmBlockPlan::new(32, 2048).expect("other");
+        let producer = Tuner::cold(0x0B01_7D1D);
+        let row = producer
+            .prepare_gemm_row(
+                &baseline,
+                selected,
+                ranked_gemm_evidence((selected, 10), (other, 20)),
+            )
+            .expect("baseline row")
+            .row_json();
+
+        for foreign_identity in ["release-opt2-cgu1-build-a", "release-opt3-cgu1-build-b"] {
+            let foreign_build = gemm_key_with(gemm_identity(
+                4,
+                4,
+                [64, 128, 32],
+                "avx2-fma",
+                "unpinned",
+                "fs-la-parallel-v1",
+                foreign_identity,
+            ));
+            assert_ne!(baseline.kernel(), foreign_build.kernel());
+
+            let mut consumer = Tuner::cold(0x0B01_7D1D);
+            assert!(
+                consumer.adopt_gemm_row_json(&foreign_build, &row).is_err(),
+                "a durable row must not cross codegen/build identity {foreign_identity}"
+            );
+            assert!(!consumer.has_gemm_row(&foreign_build));
+            assert_eq!(
+                consumer.prepare_gemm_decision(&foreign_build).source(),
                 TuneSource::ColdStart
             );
         }
@@ -2621,10 +2983,38 @@ mod tests {
     }
 
     #[test]
+    fn prepared_gemm_rows_are_bounded_writer_parser_adoption_fixed_points() {
+        let key = gemm_key();
+        let selected = GemmBlockPlan::new(32, 2048).expect("selected");
+        let other = GemmBlockPlan::new(64, 1024).expect("other");
+        let producer = Tuner::cold(0xAD);
+        let prepared = producer
+            .prepare_gemm_row(
+                &key,
+                selected,
+                ranked_gemm_evidence((selected, 10), (other, 20)),
+            )
+            .expect("generated row");
+        let json = prepared.row_json();
+        assert!(json.len() <= MAX_TUNE_ROW_BYTES);
+        assert_eq!(parse_row(&json).as_ref(), Some(&prepared.row));
+
+        let mut consumer = Tuner::cold(0xAD);
+        let adopted = consumer
+            .prepare_adopt_gemm_row_json(&key, &json)
+            .expect("writer output must be adoptable under the same key");
+        assert_eq!(adopted.row_json(), json);
+        consumer
+            .commit_gemm_row(adopted)
+            .expect("canonical adoption commit");
+        assert_eq!(consumer.gemm_row_json(&key).as_deref(), Some(json.as_str()));
+    }
+
+    #[test]
     fn cold_start_defaults_are_documented_values_and_recorded() {
         let mut t = Tuner::cold(0xF1);
         assert!(t.needs_calibration());
-        let (edge, src) = t.tile_edge_for("anything");
+        let (edge, src) = t.tile_edge_for("anything").expect("bounded kernel");
         assert_eq!((edge, src), (TileEdge::E8, TuneSource::ColdStart));
         let (kind, src) = t.schedule();
         assert_eq!(
@@ -2633,6 +3023,37 @@ mod tests {
         );
         assert_eq!(t.decisions().len(), 2);
         assert!(t.decisions()[0].to_json().contains("cold-start"));
+    }
+
+    #[test]
+    fn decision_history_is_bounded_and_eviction_is_explicit() {
+        let mut tuner = Tuner::cold(0xF2);
+        let calls = MAX_RETAINED_TUNING_DECISIONS + 1;
+        for _ in 0..calls {
+            assert_eq!(
+                tuner.schedule(),
+                (ScheduleKind::BandwidthRich, TuneSource::ColdStart)
+            );
+        }
+
+        let history = tuner.decision_history();
+        assert!(!history.is_complete());
+        assert!(history.evicted() > 0);
+        assert_eq!(history.total_recorded(), calls);
+        assert!(history.decisions().len() <= MAX_RETAINED_TUNING_DECISIONS);
+        assert!(history.retained_bytes() <= MAX_RETAINED_TUNING_DECISION_BYTES);
+    }
+
+    #[test]
+    fn oversized_decision_kernel_is_refused_without_mutating_history() {
+        let mut tuner = Tuner::cold(0xF3);
+        let oversized = "k".repeat(MAX_TUNE_STRING_BYTES + 1);
+        let error = tuner
+            .tile_edge_for(&oversized)
+            .expect_err("oversized decision identity must fail closed");
+        assert!(error.detail.contains("kernel identity exceeds"), "{error}");
+        assert!(tuner.decision_history().is_complete());
+        assert!(tuner.decisions().is_empty());
     }
 
     #[test]
@@ -2669,7 +3090,7 @@ mod tests {
     fn pins_beat_everything_and_replay_reproducibly() {
         let mut t = Tuner::cold(0xF1);
         t.pin(STENCIL_KERNEL, "edge=16").expect("canonical pin");
-        let (edge, src) = t.tile_edge_for(STENCIL_KERNEL);
+        let (edge, src) = t.tile_edge_for(STENCIL_KERNEL).expect("bounded kernel");
         assert_eq!((edge, src), (TileEdge::E16, TuneSource::Pinned));
         // Replay: a second tuner pinned from the recorded decision agrees.
         let recorded = t.decisions()[0].clone();
@@ -2677,7 +3098,9 @@ mod tests {
         replay
             .pin(recorded.kernel.clone(), recorded.params.clone())
             .expect("recorded pin is canonical");
-        let (edge2, src2) = replay.tile_edge_for(STENCIL_KERNEL);
+        let (edge2, src2) = replay
+            .tile_edge_for(STENCIL_KERNEL)
+            .expect("bounded kernel");
         assert_eq!((edge2, src2), (TileEdge::E16, TuneSource::Pinned));
     }
 
@@ -2690,12 +3113,12 @@ mod tests {
         assert!(t.pin(SCHEDULE_KERNEL, "schedule=rich").is_err());
         assert!(t.pin_tile_edge(SCHEDULE_KERNEL, TileEdge::E4).is_err());
 
-        let (edge, source) = t.tile_edge_for(STENCIL_KERNEL);
+        let (edge, source) = t.tile_edge_for(STENCIL_KERNEL).expect("bounded kernel");
         assert_eq!((edge, source), (TileEdge::E8, TuneSource::ColdStart));
         t.pin_tile_edge(STENCIL_KERNEL, TileEdge::E4)
             .expect("typed tile pin");
         assert_eq!(
-            t.tile_edge_for(STENCIL_KERNEL),
+            t.tile_edge_for(STENCIL_KERNEL).expect("bounded kernel"),
             (TileEdge::E4, TuneSource::Pinned)
         );
         t.pin_schedule(ScheduleKind::BandwidthStarved);
@@ -2944,6 +3367,8 @@ mod tests {
     fn evidence_rejects_blank_duplicate_and_inconsistent_observations() {
         assert!(TuneObservation::wall_time(" ", vec![1]).is_err());
         assert!(TuneObservation::wall_time("empty", Vec::new()).is_err());
+        assert!(TuneObservation::wall_time("zero", vec![0]).is_err());
+        assert!(TuneObservation::wall_time("mixed-zero", vec![10, 0, 20]).is_err());
         let duplicate = TuneEvidence::new(vec![
             TuneObservation::wall_time("same", vec![1]).expect("timing"),
             TuneObservation::work_count("same", WorkUnit::Steals, 2).expect("work"),
@@ -2962,8 +3387,56 @@ mod tests {
     }
 
     #[test]
+    fn canonical_ranked_row_adoption_rejects_zero_wall_time() {
+        let row = TuneRow {
+            kernel: "hostile-ranked-kernel".to_string(),
+            shape_class: "shape".to_string(),
+            machine: 0xAB,
+            params: "candidate-a".to_string(),
+            evidence: TuneEvidence::ranked_wall_times(vec![
+                TuneObservation::wall_time("candidate-a", vec![1]).expect("first timing"),
+                TuneObservation::wall_time("candidate-b", vec![2]).expect("second timing"),
+            ])
+            .expect("ranked evidence"),
+            refresh: 1,
+        }
+        .to_json();
+        let hostile = row.replace(
+            "\"samples_ns\":[1],\"summary\":{\"minimum_ns\":1,\"maximum_ns\":1}",
+            "\"samples_ns\":[0],\"summary\":{\"minimum_ns\":0,\"maximum_ns\":0}",
+        );
+        assert_ne!(
+            hostile, row,
+            "hostile fixture must replace the fastest sample"
+        );
+        let hostile = hostile.replace(
+            "\"candidate_separation_ppm\":500000",
+            "\"candidate_separation_ppm\":1000000",
+        );
+        assert!(
+            hostile.contains("\"candidate_separation_ppm\":1000000"),
+            "hostile fixture must carry the separation derived from zero and two"
+        );
+        assert!(
+            parse_row(&hostile).is_none(),
+            "a structurally canonical zero-duration row must fail closed"
+        );
+
+        let mut tuner = Tuner::cold(0xAB);
+        assert!(tuner.adopt_row_json(&hostile).is_err());
+        assert!(
+            tuner.row_json("hostile-ranked-kernel", "shape").is_none(),
+            "failed adoption must not mutate tuner state"
+        );
+    }
+
+    #[test]
     fn numeric_conversions_fail_closed_without_partial_calibration() {
         assert_eq!(throughput_milli_units(1.234).expect("scaled"), 1234);
+        assert_eq!(
+            duration_ns(std::time::Duration::ZERO, "test").expect("measurement floor"),
+            1
+        );
         for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.001, f64::MAX] {
             assert!(
                 throughput_milli_units(invalid).is_err(),
@@ -3045,6 +3518,109 @@ mod tests {
             ),
         );
         assert!(parse_row(&too_many_samples).is_none());
+    }
+
+    #[test]
+    fn evidence_enforces_the_aggregate_wall_time_sample_budget() {
+        let first = MAX_TUNE_ROW_WALL_TIME_SAMPLES / 2;
+        let second = MAX_TUNE_ROW_WALL_TIME_SAMPLES - first;
+        let boundary = TuneEvidence::new(vec![
+            TuneObservation::wall_time("first", vec![1; first]).expect("first samples"),
+            TuneObservation::wall_time("second", vec![2; second]).expect("second samples"),
+        ])
+        .expect("the exact aggregate boundary is accepted");
+        assert_eq!(
+            boundary
+                .observations()
+                .iter()
+                .map(|observation| match observation {
+                    TuneObservation::WallTime { samples_ns, .. } => samples_ns.len(),
+                    TuneObservation::WorkCount { .. } | TuneObservation::Throughput { .. } => 0,
+                })
+                .sum::<usize>(),
+            MAX_TUNE_ROW_WALL_TIME_SAMPLES
+        );
+
+        let error = TuneEvidence::new(vec![
+            TuneObservation::wall_time("first", vec![1; first]).expect("first samples"),
+            TuneObservation::wall_time("second", vec![2; second + 1]).expect("second samples"),
+        ])
+        .expect_err("one sample beyond the aggregate budget must fail");
+        assert!(
+            error.detail.contains("aggregate wall-time limit"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn generated_rows_accept_the_exact_byte_boundary_and_refuse_one_more_byte() {
+        let mut label_lengths = vec![MAX_TUNE_STRING_BYTES; 15];
+        let shortest_last = "work-15:".len();
+        label_lengths.push(shortest_last);
+        let shortest_row = work_count_row(work_count_evidence_with_label_lengths(&label_lengths));
+        let remaining = MAX_TUNE_ROW_BYTES
+            .checked_sub(shortest_row.to_json().len())
+            .expect("fifteen maximum labels leave room for the final observation");
+        let exact_last = shortest_last + remaining;
+        assert!(
+            exact_last < MAX_TUNE_STRING_BYTES,
+            "the one-byte overflow fixture must remain inside the per-string limit"
+        );
+        *label_lengths.last_mut().expect("last label") = exact_last;
+
+        let boundary_evidence = work_count_evidence_with_label_lengths(&label_lengths);
+        let boundary_row = work_count_row(boundary_evidence.clone());
+        let boundary_json = boundary_row
+            .validated_generated_json()
+            .expect("the exact canonical row boundary is accepted");
+        assert_eq!(boundary_json.len(), MAX_TUNE_ROW_BYTES);
+        assert_eq!(parse_row(&boundary_json), Some(boundary_row));
+
+        let mut tuner = Tuner::cold(0xAC);
+        tuner
+            .insert_row(
+                "aggregate-row",
+                "shape",
+                "mode=bounded".to_string(),
+                boundary_evidence,
+            )
+            .expect("the generated-row insertion boundary is accepted");
+        assert_eq!(
+            tuner
+                .row_json("aggregate-row", "shape")
+                .expect("inserted boundary row")
+                .len(),
+            MAX_TUNE_ROW_BYTES
+        );
+
+        *label_lengths.last_mut().expect("last label") += 1;
+        let oversized_evidence = work_count_evidence_with_label_lengths(&label_lengths);
+        let mut rejected = Tuner::cold(0xAC);
+        let error = rejected
+            .insert_row(
+                "aggregate-row",
+                "shape",
+                "mode=bounded".to_string(),
+                oversized_evidence.clone(),
+            )
+            .expect_err("one byte beyond the canonical row limit must fail");
+        assert!(error.detail.contains("canonical row limit"), "{error}");
+        assert!(rejected.row_json("aggregate-row", "shape").is_none());
+
+        let mut poisoned = Tuner::cold(0xAC);
+        let oversized_row = work_count_row(oversized_evidence);
+        poisoned.rows.insert(
+            ("aggregate-row".to_string(), "shape".to_string()),
+            oversized_row,
+        );
+        let path = std::env::temp_dir().join(format!(
+            "fs-exec-oversized-generated-row-{}.jsonl",
+            std::process::id()
+        ));
+        let error = poisoned
+            .save(&path)
+            .expect_err("persistence revalidates even internally injected rows");
+        assert!(error.detail.contains("canonical row limit"), "{error}");
     }
 
     #[test]

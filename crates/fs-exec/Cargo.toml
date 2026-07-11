@@ -13,6 +13,7 @@ layer = "L0"
 [dependencies]
 asupersync = { path = "../../../asupersync" }
 fs-alloc = { path = "../fs-alloc" }
+fs-blake3 = { path = "../fs-blake3" }
 fs-obs = { path = "../fs-obs" }
 fs-substrate = { path = "../fs-substrate" }
 

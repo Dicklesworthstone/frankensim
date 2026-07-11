@@ -4,9 +4,15 @@
 //! pin failure, and pinned replay. The oracle-tolerance lane runs
 //! explicitly (`--ignored`, release) like every wall-clock gate.
 
-use fs_exec::{CancelGate, GemmBlockPlan, GemmTuneKey, TuneSource, Tuner};
+use fs_exec::{
+    CancelGate, GemmBlockPlan, GemmExecutionIdentity, GemmTuneKey, PoolConfig, RunId, TilePool,
+    TuneSource, Tuner,
+};
 use fs_session::gemm_tune::gemm_tune_key;
-use fs_session::{GemmTuneError, gemm_f64_session, gemm_kernel_key, gemm_shape_class};
+use fs_session::{
+    GemmTuneCache, GemmTuneError, gemm_f64_session, gemm_f64_session_with_pool_declared,
+    gemm_kernel_key, gemm_shape_class, gemm_tune_key_with_pool,
+};
 
 const FP_THIS: u64 = 0x00AA_11BB_22CC_33DD;
 const THREADS: usize = 4;
@@ -64,7 +70,18 @@ fn cold_start_sweeps_once_and_matches_serial_bits() {
     let gate = CancelGate::new();
     let mut c = vec![f64::NAN; M * N]; // beta = 0 must overwrite garbage
     let first = gemm_f64_session(
-        &mut tuner, None, &gate, THREADS, M, N, K, 1.0, &a, &b, 0.0, &mut c,
+        &mut tuner,
+        GemmTuneCache::Disabled,
+        &gate,
+        THREADS,
+        M,
+        N,
+        K,
+        1.0,
+        &a,
+        &b,
+        0.0,
+        &mut c,
     )
     .expect("cold dispatch");
     assert!(first.swept, "cold start measures");
@@ -81,7 +98,18 @@ fn cold_start_sweeps_once_and_matches_serial_bits() {
     // Second call: row cached, no sweep, same plan.
     let mut c2 = vec![0.0f64; M * N];
     let second = gemm_f64_session(
-        &mut tuner, None, &gate, THREADS, M, N, K, 1.0, &a, &b, 0.0, &mut c2,
+        &mut tuner,
+        GemmTuneCache::Disabled,
+        &gate,
+        THREADS,
+        M,
+        N,
+        K,
+        1.0,
+        &a,
+        &b,
+        0.0,
+        &mut c2,
     )
     .expect("warm dispatch");
     assert!(!second.swept, "cached row answers the second call");
@@ -107,7 +135,7 @@ fn ledger_cache_warm_starts_a_fresh_session() {
     let mut tuner1 = Tuner::cold(FP_THIS);
     let first = gemm_f64_session(
         &mut tuner1,
-        Some(&ledger),
+        GemmTuneCache::ReadWrite(&ledger),
         &gate,
         THREADS,
         M,
@@ -135,7 +163,7 @@ fn ledger_cache_warm_starts_a_fresh_session() {
     let mut c2 = vec![0.0f64; M * N];
     let second = gemm_f64_session(
         &mut tuner2,
-        Some(&ledger),
+        GemmTuneCache::ReadWrite(&ledger),
         &gate,
         THREADS,
         M,
@@ -169,7 +197,7 @@ fn stale_other_machine_row_is_refused_and_remeasured() {
     let mut c = vec![0.0f64; M * N];
     let foreign = gemm_f64_session(
         &mut tuner_a,
-        None,
+        GemmTuneCache::Disabled,
         &gate,
         THREADS,
         M,
@@ -197,7 +225,7 @@ fn stale_other_machine_row_is_refused_and_remeasured() {
     let mut tuner = Tuner::cold(FP_THIS);
     let report = gemm_f64_session(
         &mut tuner,
-        Some(&ledger),
+        GemmTuneCache::ReadWrite(&ledger),
         &gate,
         THREADS,
         M,
@@ -238,7 +266,7 @@ fn invalid_cache_row_is_refused_and_remeasured() {
     let mut c = vec![0.0f64; M * N];
     let report = gemm_f64_session(
         &mut tuner,
-        Some(&ledger),
+        GemmTuneCache::ReadWrite(&ledger),
         &gate,
         THREADS,
         M,
@@ -269,7 +297,18 @@ fn cancelled_sweep_records_nothing_and_leaves_c_untouched() {
     let sentinel = 42.5f64;
     let mut c = vec![sentinel; M * N];
     let err = gemm_f64_session(
-        &mut tuner, None, &gate, THREADS, M, N, K, 1.0, &a, &b, 0.0, &mut c,
+        &mut tuner,
+        GemmTuneCache::Disabled,
+        &gate,
+        THREADS,
+        M,
+        N,
+        K,
+        1.0,
+        &a,
+        &b,
+        0.0,
+        &mut c,
     )
     .expect_err("cancelled");
     assert!(matches!(
@@ -332,7 +371,7 @@ fn pinned_replay_skips_measurement_and_reproduces_bits() {
     let mut c1 = vec![0.0f64; M * N];
     let live = gemm_f64_session(
         &mut tuner1,
-        None,
+        GemmTuneCache::Disabled,
         &gate,
         THREADS,
         M,
@@ -362,7 +401,7 @@ fn pinned_replay_skips_measurement_and_reproduces_bits() {
     let mut c2 = vec![0.0f64; M * N];
     let replay = gemm_f64_session(
         &mut tuner2,
-        None,
+        GemmTuneCache::Disabled,
         &gate,
         THREADS,
         M,
@@ -392,14 +431,26 @@ fn execution_identity_separates_threads_and_exact_probe_dims() {
     assert_eq!(base.execution().thread_budget(), 4);
     assert_eq!(base.execution().probe_dims(), [320, 288, 300]);
     assert_eq!(base.execution().isa_tier(), fs_la::gemm_execution_tier());
-    assert_eq!(
-        base.execution().placement(),
-        fs_la::GEMM_PARALLEL_IMPLEMENTATION
+    assert!(
+        base.execution()
+            .placement()
+            .starts_with("fs-exec-tilepool-v2-pin-unrequested-ccd"),
+        "{}",
+        base.execution().placement()
     );
     assert!(
         base.execution()
             .implementation()
             .contains(&format!("gemm-v{}", fs_la::GEMM_IMPLEMENTATION_VERSION))
+    );
+    assert_eq!(
+        base.execution().build(),
+        fs_la::gemm_build_identity(),
+        "production keys bind the generated compiler/profile/codegen identity"
+    );
+    assert!(
+        base.kernel()
+            .contains(&format!("/build={}", fs_la::gemm_build_identity()))
     );
 
     let other_threads = key(5, 320, 288, 300);
@@ -410,6 +461,124 @@ fn execution_identity_separates_threads_and_exact_probe_dims() {
 }
 
 #[test]
+fn caller_pool_is_the_dispatch_path_and_placement_key() {
+    let (a, b) = problem();
+    let reference = serial_reference(&a, &b);
+    let pool = TilePool::new(PoolConfig::for_host(3, 0x51A));
+    let key = gemm_tune_key_with_pool(&pool, M, N, K).expect("pool-scoped key");
+    assert_eq!(key.execution().thread_budget(), 3);
+    assert_eq!(key.execution().placement(), pool.placement_identity());
+
+    let mut tuner = Tuner::cold(FP_THIS);
+    tuner
+        .pin_gemm_blocking(&key, GemmBlockPlan::COLD_START)
+        .expect("pin exact pool key");
+    let mut c = vec![0.0; M * N];
+    let declared_run = RunId(91);
+    let dispatch = gemm_f64_session_with_pool_declared(
+        &mut tuner,
+        GemmTuneCache::Disabled,
+        &pool,
+        &CancelGate::new(),
+        declared_run,
+        M,
+        N,
+        K,
+        1.0,
+        &a,
+        &b,
+        0.0,
+        &mut c,
+    )
+    .expect("caller-pool dispatch");
+    assert_eq!(dispatch.source, TuneSource::Pinned);
+    assert_eq!(dispatch.kernel, key.kernel());
+    assert!(!dispatch.run.pool_runs.is_empty());
+    assert!(dispatch.run.pool_runs.iter().all(|run| {
+        run.kernel == "fs-la/gemm-f64-m-band-v1" && run.completed == run.total && run.total > 0
+    }));
+    let receipt = dispatch.execution_receipt();
+    assert_eq!(receipt.declared_run, declared_run.0);
+    assert!(receipt.is_complete());
+    assert_eq!(receipt.completed_tiles, receipt.total_tiles);
+    assert_eq!(receipt.panels.len(), dispatch.run.pool_runs.len());
+    assert!(receipt.panels.iter().all(|panel| {
+        panel.kernel == "fs-la/gemm-f64-m-band-v1"
+            && panel.mode == "deterministic"
+            && panel.completed == panel.total
+            && panel.total > 0
+    }));
+    assert_eq!(
+        receipt
+            .panels
+            .iter()
+            .map(|panel| panel.declared_run)
+            .collect::<Vec<_>>(),
+        (0..u64::try_from(receipt.panels.len()).expect("panel count fits u64"))
+            .map(|ordinal| fs_la::gemm_panel_run_id(declared_run, ordinal).0)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        c.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+        reference
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>()
+    );
+    assert!(pool.arena_pool().stats().quiescent());
+}
+
+#[test]
+fn old_std_thread_placement_key_is_refused() {
+    let current_pool = TilePool::new(PoolConfig::for_host(THREADS, 0x51A));
+    let current = gemm_tune_key_with_pool(&current_pool, M, N, K).expect("current key");
+    let implementation = format!(
+        "fs-la-{}-gemm-v{}",
+        fs_la::VERSION,
+        fs_la::GEMM_IMPLEMENTATION_VERSION
+    );
+    let old_execution = GemmExecutionIdentity::new(
+        THREADS,
+        THREADS,
+        [M, N, K],
+        fs_la::gemm_execution_tier(),
+        "std-thread-scope-work-stealing-unpinned-v1",
+        implementation,
+        fs_la::gemm_build_identity(),
+    )
+    .expect("legacy identity is syntactically canonical");
+    let old = GemmTuneKey::new(gemm_kernel_key(), gemm_shape_class(M, N, K), old_execution)
+        .expect("legacy key");
+    assert_ne!(old.kernel(), current.kernel());
+
+    let mut tuner = Tuner::cold(FP_THIS);
+    tuner
+        .pin_gemm_blocking(&old, GemmBlockPlan::COLD_START)
+        .expect("install legacy pin");
+    assert!(tuner.has_gemm_pin(&old));
+    assert!(!tuner.has_gemm_pin(&current));
+    assert_eq!(
+        tuner.prepare_gemm_decision(&current).source(),
+        TuneSource::ColdStart,
+        "the obsolete std-thread placement must not dispatch as a current TilePool pin"
+    );
+
+    let mut pinned = PoolConfig::for_host(THREADS, 0x51A);
+    pinned.pin_groups = vec![vec![9999]];
+    let pinned = TilePool::new(pinned);
+    let pinned_key = gemm_tune_key_with_pool(&pinned, M, N, K).expect("pinned key");
+    assert_ne!(pinned_key.kernel(), current.kernel());
+    assert!(
+        pinned_key
+            .execution()
+            .placement()
+            .starts_with("fs-exec-tilepool-v2-ccd-pin-requested-ccd"),
+        "{}",
+        pinned_key.execution().placement()
+    );
+}
+
+#[test]
 fn pre_requested_warm_and_pinned_paths_leave_output_and_decisions_untouched() {
     let (a, b) = problem();
     let mut live_tuner = Tuner::cold(FP_THIS);
@@ -417,7 +586,7 @@ fn pre_requested_warm_and_pinned_paths_leave_output_and_decisions_untouched() {
     let mut live_c = vec![0.0; M * N];
     let live = gemm_f64_session(
         &mut live_tuner,
-        None,
+        GemmTuneCache::Disabled,
         &live_gate,
         THREADS,
         M,
@@ -439,7 +608,7 @@ fn pre_requested_warm_and_pinned_paths_leave_output_and_decisions_untouched() {
     let decision_count = live_tuner.decisions().len();
     let warm_error = gemm_f64_session(
         &mut live_tuner,
-        None,
+        GemmTuneCache::Disabled,
         &cancelled,
         THREADS,
         M,
@@ -473,7 +642,7 @@ fn pre_requested_warm_and_pinned_paths_leave_output_and_decisions_untouched() {
     let mut pinned_c = vec![sentinel; M * N];
     let pinned_error = gemm_f64_session(
         &mut pinned_tuner,
-        None,
+        GemmTuneCache::Disabled,
         &cancelled,
         THREADS,
         M,
@@ -513,7 +682,7 @@ fn serial_noop_and_small_routes_never_tune_or_record_decisions() {
         let mut tuner = Tuner::cold(FP_THIS);
         let report = gemm_f64_session(
             &mut tuner,
-            None,
+            GemmTuneCache::Disabled,
             &CancelGate::new(),
             threads,
             m,
@@ -543,7 +712,7 @@ fn invalid_shapes_and_extent_overflow_precede_all_tune_mutation() {
     let mismatch = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let _ = gemm_f64_session(
             &mut tuner,
-            None,
+            GemmTuneCache::Disabled,
             &CancelGate::new(),
             THREADS,
             M,
@@ -565,7 +734,7 @@ fn invalid_shapes_and_extent_overflow_precede_all_tune_mutation() {
         let mut empty = [];
         let _ = gemm_f64_session(
             &mut tuner,
-            None,
+            GemmTuneCache::Disabled,
             &CancelGate::new(),
             THREADS,
             usize::MAX,
@@ -681,7 +850,18 @@ fn live_choice_is_within_declared_tolerance_of_exhaustive_oracle() {
     let mut tuner = Tuner::cold(FP_THIS);
     let mut c = vec![0.0f64; M * N];
     let live = gemm_f64_session(
-        &mut tuner, None, &gate, THREADS, M, N, K, 1.0, &a, &b, 0.0, &mut c,
+        &mut tuner,
+        GemmTuneCache::Disabled,
+        &gate,
+        THREADS,
+        M,
+        N,
+        K,
+        1.0,
+        &a,
+        &b,
+        0.0,
+        &mut c,
     )
     .expect("live session");
     // Exhaustive oracle at the REAL size, best-of-3 per candidate.

@@ -249,10 +249,10 @@ fn alpha_zero_does_not_read_f32_operands() {
 #[test]
 fn f32_batch_shape_overflow_is_refused() {
     assert_panics_with("batch stride overflow", || {
-        BatchMatF32::zeros(1, usize::MAX);
+        let _ = BatchMatF32::zeros(1, usize::MAX);
     });
     assert_panics_with("batch matrix shape overflow", || {
-        BatchMatF32::zeros(usize::MAX, 1);
+        let _ = BatchMatF32::zeros(usize::MAX, 1);
     });
 }
 
