@@ -376,6 +376,13 @@ pub struct TilePool {
 }
 
 impl TilePool {
+    /// Normalized worker count — preflight sizing for callers that
+    /// budget per-worker scratch (bead wf9.15).
+    #[must_use]
+    pub const fn workers(&self) -> usize {
+        self.config.workers
+    }
+
     /// Build a pool (normalizes the config — see [`PoolConfig`]).
     #[must_use]
     pub fn new(config: PoolConfig) -> Self {
@@ -393,12 +400,6 @@ impl TilePool {
     #[must_use]
     pub fn for_host(workers: usize, seed: u64) -> Self {
         Self::new(PoolConfig::for_host(workers, seed))
-    }
-
-    /// Normalized maximum worker budget used by this pool.
-    #[must_use]
-    pub const fn workers(&self) -> usize {
-        self.config.workers
     }
 
     /// Canonical placement/configuration identity for tune rows and replay
