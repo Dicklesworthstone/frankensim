@@ -3,6 +3,9 @@
 //! Usage:
 //!   roofline [--n <elements>] [--warmup <k>] [--reps <k>] [--ledger <db>]
 //!            [--baseline <jsonl>] [--firmware <identity>]
+//!   roofline promote --store <jsonl> --firmware <identity>
+//!            --operator <name> --justification <text>
+//!            [--probes <k≥3>] [--age-days <d>]
 //!
 //! Probes the machine axes, runs the default kernel registry, prints one
 //! JSON line per kernel (plus the axes line and the §14.1 coverage table),
@@ -73,6 +76,121 @@ fn positive_usize(flag: &str, value: &str) -> Result<usize, String> {
         .ok()
         .filter(|value| *value > 0)
         .ok_or_else(|| format!("{flag} must be a positive integer"))
+}
+
+/// `roofline promote` — the operator bootstrap for governed baselines
+/// (bead c40j): probe the machine axes N ≥ 3 times, build candidates,
+/// run [`fs_roofline::promote_baseline`] (which REFUSES on a loaded
+/// host — the drift bands are the point), and create-or-update the
+/// JSONL store. Until fz2.7 lands signatures, the store is
+/// operator-trusted/tamper-evident, not independently verified.
+struct PromoteArgs {
+    store: String,
+    firmware: String,
+    operator: String,
+    justification: String,
+    probes: usize,
+    age_days: u32,
+}
+
+fn parse_promote_args(args: &[String]) -> Result<PromoteArgs, String> {
+    let (mut store, mut firmware, mut operator, mut justification) = (None, None, None, None);
+    let mut probes = 3usize;
+    let mut age_days = 90u32;
+    let mut seen = std::collections::BTreeSet::new();
+    let mut args = args.iter().skip(2);
+    while let Some(flag) = args.next() {
+        if !matches!(
+            flag.as_str(),
+            "--store" | "--firmware" | "--operator" | "--justification" | "--probes" | "--age-days"
+        ) {
+            return Err(format!("unknown promote argument {flag:?}"));
+        }
+        if !seen.insert(flag.as_str()) {
+            return Err(format!("duplicate promote argument {flag:?}"));
+        }
+        let value = args
+            .next()
+            .filter(|value| !value.starts_with("--"))
+            .ok_or_else(|| format!("{flag} requires a value"))?;
+        if value.is_empty() {
+            return Err(format!("{flag} requires a non-empty value"));
+        }
+        match flag.as_str() {
+            "--store" => store = Some(value.clone()),
+            "--firmware" => firmware = Some(value.clone()),
+            "--operator" => operator = Some(value.clone()),
+            "--justification" => justification = Some(value.clone()),
+            "--probes" => probes = positive_usize(flag, value)?,
+            "--age-days" => {
+                age_days = value
+                    .parse::<u32>()
+                    .ok()
+                    .filter(|v| *v > 0)
+                    .ok_or_else(|| format!("{flag} must be a positive integer"))?;
+            }
+            _ => unreachable!("flag list checked above"),
+        }
+    }
+    if probes < 3 {
+        return Err("--probes must be at least 3 (governed promotion needs mutual agreement)"
+            .to_string());
+    }
+    Ok(PromoteArgs {
+        store: store.ok_or("promote requires --store <jsonl>")?,
+        firmware: firmware.ok_or("promote requires --firmware <identity>")?,
+        operator: operator.ok_or("promote requires --operator <name>")?,
+        justification: justification.ok_or("promote requires --justification <text>")?,
+        probes,
+        age_days,
+    })
+}
+
+fn run_promote(args: &PromoteArgs) -> Result<(), String> {
+    use fs_roofline::{BaselineCandidate, promote_baseline};
+    let mut candidates = Vec::with_capacity(args.probes);
+    for ordinal in 0..args.probes {
+        let axes = MachineAxes::probe();
+        println!("{}", axes.to_jsonl());
+        let identity = BaselineIdentity::current(&axes, args.firmware.clone())
+            .map_err(|error| format!("probe {ordinal}: {error}"))?;
+        // A content-derived source receipt: the probe's own canonical
+        // bytes under a CLI-specific domain (structural traceability;
+        // authentication is fz2.7's layer, stated in the store README).
+        let receipt = fs_blake3::hash_domain(
+            "fs-roofline.cli-baseline-source.v1",
+            axes.to_jsonl().as_bytes(),
+        );
+        let candidate = BaselineCandidate::from_receipt(axes, identity, receipt)
+            .map_err(|error| format!("probe {ordinal}: {error}"))?;
+        candidates.push(candidate);
+    }
+    let now_day = days_since_epoch_now().map_err(|error| error.to_string())?;
+    let baseline = promote_baseline(
+        &candidates,
+        args.operator.clone(),
+        args.justification.clone(),
+        now_day,
+        args.age_days,
+    )
+    .map_err(|error| format!("promotion refused: {error}"))?;
+    let mut store = match std::fs::read_to_string(&args.store) {
+        Ok(text) => BaselineStore::from_jsonl(&text).map_err(|error| error.to_string())?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => BaselineStore::new(),
+        Err(error) => return Err(format!("cannot read store {:?}: {error}", args.store)),
+    };
+    store.admit(baseline.clone()).map_err(|error| error.to_string())?;
+    std::fs::write(&args.store, store.to_jsonl())
+        .map_err(|error| format!("cannot write store {:?}: {error}", args.store))?;
+    println!("{}", baseline.to_jsonl());
+    println!(
+        "{{\"promote\":\"ok\",\"fingerprint\":\"{:016x}\",\"store\":\"{}\",\"probes\":{},\"operator\":\"{}\"}}",
+        baseline.identity.fingerprint,
+        json_escape(&args.store),
+        args.probes,
+        json_escape(&args.operator)
+    );
+    Ok(())
 }
 
 fn parse_args(args: &[String]) -> Result<CliArgs, String> {
@@ -176,6 +294,12 @@ fn load_baseline_inputs(args: &CliArgs, axes: &MachineAxes) -> Result<BaselineIn
 
 fn main() -> std::process::ExitCode {
     let raw_args: Vec<String> = std::env::args().collect();
+    if raw_args.get(1).is_some_and(|arg| arg == "promote") {
+        return match parse_promote_args(&raw_args).and_then(|args| run_promote(&args)) {
+            Ok(()) => std::process::ExitCode::SUCCESS,
+            Err(error) => fail(&error),
+        };
+    }
     let args = match parse_args(&raw_args) {
         Ok(args) => args,
         Err(error) => return fail(&error),
