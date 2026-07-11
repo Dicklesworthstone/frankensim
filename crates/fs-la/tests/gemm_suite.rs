@@ -228,7 +228,7 @@ fn tuning_effectiveness_refuses_noop_serial_and_small_routes() {
     assert!(!fs_la::gemm_tuning_is_effective(512, 512, 512, -0.0, 8));
     assert!(fs_la::gemm_tuning_is_effective(256, 1, 1, 1.0, 2));
     assert!(!fs_la::gemm_execution_tier().is_empty());
-    assert_eq!(fs_la::GEMM_IMPLEMENTATION_VERSION, 3);
+    assert_eq!(fs_la::GEMM_IMPLEMENTATION_VERSION, 4);
 }
 
 /// xlvx item 3: row-band parallel GEMM is BITWISE equal to serial at
