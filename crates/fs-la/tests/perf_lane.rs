@@ -10,7 +10,7 @@
 
 use fs_la::{gemm_f64, gemm_f64_parallel};
 use fs_roofline::regress::{Cusum, GateSpec, GateVerdict, Night, gate, standardize};
-use fs_roofline::{KernelSpec, MachineAxes, Threading, attainment_for};
+use fs_roofline::{KernelSpec, MachineAxes, TargetAxis, Threading, attainment_for};
 
 /// Best-of-3 measured GFLOP/s (2·m·n·k flops per GEMM).
 fn measure(n: usize, reps: usize) -> f64 {
@@ -121,6 +121,7 @@ fn gemm_attainment_all_core() {
             bytes_per_elem,
             flops_per_elem: 2.0 * nf,
             threading: Threading::AllCore,
+            target_axis: TargetAxis::BindingRoof,
             target_fraction: None,
         };
         let elems_per_sec = g * 1e9 / (2.0 * nf);
@@ -154,6 +155,7 @@ fn nightly_attainment(n: usize, threads: usize, axes: &MachineAxes) -> (f64, f64
         bytes_per_elem,
         flops_per_elem: 2.0 * nf,
         threading: Threading::AllCore,
+        target_axis: TargetAxis::BindingRoof,
         target_fraction: None,
     };
     (

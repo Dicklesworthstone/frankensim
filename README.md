@@ -181,10 +181,10 @@ FrankenSim is organized as layered Rust crates. The names below are crates prese
 
 | Crate | What is implemented |
 |-------|---------------------|
-| `fs-ledger` | Design Ledger schema v2 on FrankenSQLite, content-addressed artifacts, operations, event streams, lineage, metrics, tune cache, extension rows, integrity/lint checks, and time-travel queries |
+| `fs-ledger` | Versioned Design Ledger schema (currently v3) on FrankenSQLite, content-addressed artifacts, operations, event streams, lineage, metrics, tune cache, extension rows, integrity/lint checks, and time-travel queries |
 | `fs-ir` | FrankenScript typed AST with spans, isomorphic s-expression and JSON syntaxes, shape comparison, study recognition, lowering, and structured IR errors |
 | `fs-plan` | Cost model types, error and time ledgers, plan-cost oracle, and cost-model construction from tune records |
-| `fs-roofline` | Machine-axis probing, kernel specs, roofline kernel registry, measurement harness, section-target constants, ledger recording, and staleness checks |
+| `fs-roofline` | Machine-axis probing, protected historical baselines, kernel registry, measurement receipts, baseline-bound ledger recording, and staleness checks |
 | `fs-img` | LUMEN image pipeline crate with deterministic PNG/OpenEXR subset plumbing, film/display transforms, bias-labeled denoising, and conformance tests |
 | `fs-vskeleton` | Photovoltaic vertical skeleton tying SDF/PDE/objective/adjoint/optimization/ledger concepts into a narrow demonstrator path |
 | `fs-opt` | ASCENT optimization problem IR crate with typed objective/constraint graphs, dimensional validation, differentiability-class routing, canonical serialization, manifold metadata, and a conformance contract |
@@ -275,8 +275,7 @@ let claim = Claim::new(
 );
 
 let pkg = EvidencePackage::new(Provenance::new("commit-abc", "lock-def"))
-    .with_claim(claim)
-    .signed("ed25519:detached-signature-placeholder");
+    .with_claim(claim);
 
 let root = pkg.merkle_root();
 let report = check_against_root(&pkg, root);
@@ -285,6 +284,11 @@ assert!(report.passed());
 assert_eq!(report.merkle_root, root);
 assert!(report.render_pie().contains("validated"));
 ```
+
+This example checks structural completeness and the expected content root. It
+does not authenticate authorship or admit the package for release; use
+`check_for_release` with a real injected `SignatureVerifier`, attached
+falsifiers, and matching validation anchors for that stronger boundary.
 
 ### Repository Policy Checks
 
@@ -388,7 +392,7 @@ The important point is not just that the crate names exist. The workspace alread
 | Imaging | `fs-img` contains deterministic image artifact plumbing for the LUMEN layer: PNG/OpenEXR subset handling, film/display transforms, and explicitly bias-labeled denoising. |
 | Execution | `fs-exec` provides cancellation contexts, stream keys, tile kernels, tile pools, deterministic reductions, racing/tuning scaffolding, solver state, and kill registries over `asupersync`. |
 | Ledger | `fs-ledger` records content-addressed artifacts, operations, events, metrics, tune rows, extension rows, integrity checks, lineage, and time-travel queries on FrankenSQLite. |
-| Roofline | `fs-roofline` probes machine axes, registers measurable kernels, records runs to the ledger, and checks staleness against machine fingerprints. |
+| Roofline | `fs-roofline` probes machine axes, checks pre/post probes against a protected historical baseline, records citable runs under the machine-plus-baseline identity, and reports either kind of drift. |
 
 ## Why This Is Useful
 
@@ -460,7 +464,7 @@ On top of that, `fs-ascent` provides L-BFGS with strong-Wolfe search, trust-regi
 
 ### Evidence, Packages, and Standards
 
-`fs-evidence` gives values a claim type. `fs-package` groups color-typed claims and provenance into a content-addressed Merkle bundle. `fs-checker` re-verifies package completeness, content address, signature presence, and budget breakdown without depending on solvers, geometry, or license gates. `fs-crosswalk` maps the same package concepts onto ASME V&V 10/20/40 and FAA/EASA certification-by-analysis vocabulary.
+`fs-evidence` gives values a claim type. `fs-package` groups color-typed claims and provenance into a content-addressed Merkle bundle. `fs-checker` re-verifies package completeness, content address, signature status, and budget breakdown without depending on solvers, geometry, or license gates. Its distinct release gate additionally requires an injected signature verifier, falsifier pairing, and matching anchors; ordinary integrity checking does not authenticate a signature merely because text is present. `fs-crosswalk` maps the same package concepts onto ASME V&V 10/20/40 and FAA/EASA certification-by-analysis vocabulary.
 
 That division matters: the expensive solver can produce evidence once, while a reviewer can later check the package structure and provenance without re-running the solver stack.
 
@@ -948,8 +952,9 @@ The audit path is designed to be mechanical:
 3. The ledger records artifacts, events, metrics, tune rows, machine fingerprints,
    and lineage.
 4. A report or package bundles the result with its provenance and budget pie.
-5. A checker can later validate package structure, content roots, signatures, and
-   claim completeness without needing to rerun the full solver.
+5. A checker can later validate package structure, content roots, signature
+   status, and claim completeness without needing to rerun the full solver;
+   authenticated release admission requires a caller-supplied verifier.
 
 That path is useful for research code, but it is also useful for day-to-day
 engineering. If a golden hash changes, if a solver starts returning a weaker
@@ -963,7 +968,7 @@ The evidence-package crates are small, but they define an important workflow:
 
 1. A solver, verifier, optimizer, or study runner creates claims with evidence colors: verified, validated, or estimated.
 2. `fs-package` bundles those claims with provenance and a deterministic content address.
-3. `fs-checker` re-verifies the bundle's structural completeness, expected root, signature presence, and budget pie without pulling in the solver stack.
+3. `fs-checker` re-verifies the bundle's structural completeness, expected root, signature status, and budget pie without pulling in the solver stack. Its explicit release API additionally requires a caller-supplied authenticator, certificate-class falsifiers, and matching validation anchors.
 4. `fs-crosswalk` gives the package a standards-facing vocabulary so the same artifact can be discussed as validation metrics, domain of validation, provenance, certified bounds, and content integrity.
 5. `fs-ledger` can retain artifacts, operations, events, tune rows, roofline measurements, and lineage so a later report can connect package claims back to the actual run history.
 

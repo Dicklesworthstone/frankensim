@@ -1108,7 +1108,6 @@ dependencies = [
  "fs-rand",
  "fs-rep-mesh",
  "fs-roofline",
- "fs-simd",
  "fs-soa",
  "fs-sparse",
 ]
@@ -1681,6 +1680,7 @@ dependencies = [
 name = "fs-roofline"
 version = "0.0.1"
 dependencies = [
+ "fs-blake3",
  "fs-exec",
  "fs-ledger",
  "fs-session",

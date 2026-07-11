@@ -11,6 +11,7 @@ description = "Roofline harness: measured machine axes, kernel attainment vs fal
 layer = "L6"
 
 [dependencies]
+fs-blake3 = { path = "../fs-blake3" }
 fs-exec = { path = "../fs-exec" }
 fs-session = { path = "../fs-session" }
 fs-substrate = { path = "../fs-substrate" }

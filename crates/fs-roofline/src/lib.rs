@@ -17,25 +17,161 @@ pub mod stats;
 
 pub use axes::MachineAxes;
 pub use baseline::{
-    BaselineAxes, BaselineIdentity, BaselineProvenance, BaselineStore, BaselineVerdict,
-    PromotionError, citable_axis_admission, promote_baseline,
+    BASELINE_SCHEMA_VERSION, BaselineAxes, BaselineCandidate, BaselineClockError, BaselineIdentity,
+    BaselineProvenance, BaselineStore, BaselineVerdict, PromotionError, citable_axis_admission,
+    days_since_epoch_now, promote_baseline,
 };
 
-use fs_ledger::{EventRow, FiveExplicits, Ledger, LedgerError, OpOutcome, now_wall_ns};
+use fs_ledger::{EdgeRole, EventRow, FiveExplicits, Ledger, LedgerError, OpOutcome, now_wall_ns};
 
 pub mod regress;
 
 /// Crate version (compile-time stamp).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+const FINALIZED_RUN_DOMAIN: &str = "org.frankensim.fs-roofline.finalized-run.v1";
+
+/// One-shot capability proving that every registry kernel observed the exact
+/// run's aggregate admission decision and completed its tuning lifecycle.
+/// Fields are private and the value is deliberately neither `Clone` nor `Copy`.
+#[derive(Debug)]
+pub struct FinalizedRegistryRun {
+    receipt: fs_blake3::ContentHash,
+    admitted: bool,
+    consumed: bool,
+}
+
+impl FinalizedRegistryRun {
+    /// Whether the finalized run passed citable admission.
+    #[must_use]
+    pub fn admitted(&self) -> bool {
+        self.admitted
+    }
+
+    /// Content identity of the exact axes, baseline decision, and result set
+    /// seen during finalization.
+    #[must_use]
+    pub fn receipt_identity(&self) -> fs_blake3::ContentHash {
+        self.receipt
+    }
+}
+
+/// Explicit historical-baseline policy for one roofline run.
+///
+/// `None` is not a permissive default: it represents a first/unbaselined run,
+/// which may be reported as candidate evidence but cannot publish citable
+/// metrics or tune rows. The referenced store is a protected-operator trust
+/// root until promotion signatures are implemented.
+#[derive(Debug, Clone, Copy)]
+pub struct AxisBaselinePolicy<'a> {
+    baseline: Option<&'a BaselineAxes>,
+    identity: &'a BaselineIdentity,
+    now_day: u64,
+}
+
+impl<'a> AxisBaselinePolicy<'a> {
+    /// Bind the selected baseline (if any), declared current environment, and
+    /// observed epoch day used for age admission.
+    #[must_use]
+    pub const fn new(
+        baseline: Option<&'a BaselineAxes>,
+        identity: &'a BaselineIdentity,
+        now_day: u64,
+    ) -> Self {
+        Self {
+            baseline,
+            identity,
+            now_day,
+        }
+    }
+
+    /// Evaluate the complete pre/probe/post baseline policy.
+    #[must_use]
+    pub fn verdict(&self, pre: &MachineAxes, post: &MachineAxes) -> BaselineVerdict {
+        citable_axis_admission(pre, post, self.baseline, self.identity, self.now_day)
+    }
+
+    /// Domain-separated identity of the selected baseline, if one exists.
+    #[must_use]
+    pub fn baseline_hash(&self) -> Option<fs_blake3::ContentHash> {
+        self.baseline.map(BaselineAxes::content_hash)
+    }
+
+    /// Canonical, self-contained receipt for the baseline admission decision.
+    #[must_use]
+    pub fn receipt_json(&self, pre: &MachineAxes, post: &MachineAxes) -> String {
+        let baseline = self
+            .baseline
+            .map_or_else(|| "null".to_string(), BaselineAxes::canonical_json);
+        let baseline_hash = self.baseline_hash().map_or_else(
+            || "null".to_string(),
+            |hash| format!("\"{}\"", hash.to_hex()),
+        );
+        format!(
+            "{{\"schema\":\"fs-roofline-axis-admission-v1\",\"now_day\":{},\"identity\":{},\"pre\":{},\"post\":{},\"baseline_hash\":{},\"baseline\":{},\"verdict\":{}}}",
+            self.now_day,
+            baseline_identity_json(self.identity),
+            machine_axes_receipt_json(pre),
+            machine_axes_receipt_json(post),
+            baseline_hash,
+            baseline,
+            self.verdict(pre, post).to_jsonl(),
+        )
+    }
+}
+
+fn baseline_identity_json(identity: &BaselineIdentity) -> String {
+    format!(
+        "{{\"fingerprint\":\"{:016x}\",\"cpu_brand\":\"{}\",\"logical_cpus\":{},\"os\":\"{}\",\"arch\":\"{}\",\"firmware\":\"{}\"}}",
+        identity.fingerprint(),
+        json_escape(identity.cpu_brand()),
+        identity.logical_cpus(),
+        json_escape(identity.os()),
+        json_escape(identity.arch()),
+        json_escape(identity.firmware()),
+    )
+}
+
+fn machine_axes_receipt_json(axes: &MachineAxes) -> String {
+    format!(
+        "{{\"fingerprint\":\"{:016x}\",\"cpu_brand\":\"{}\",\"logical_cpus\":{},\"bandwidth_single_bits\":\"{:016x}\",\"bandwidth_all_core_bits\":\"{:016x}\",\"peak_single_bits\":\"{:016x}\",\"peak_all_core_bits\":\"{:016x}\"}}",
+        axes.fingerprint,
+        json_escape(&axes.cpu_brand),
+        axes.logical_cpus,
+        axes.bandwidth_single_gbs.to_bits(),
+        axes.bandwidth_all_core_gbs.to_bits(),
+        axes.peak_single_gflops.to_bits(),
+        axes.peak_all_core_gflops.to_bits(),
+    )
+}
+
 /// Shape-class prefix under which versioned roofline rows land in the ledger
 /// `tune` table.
-pub const TUNE_SHAPE_CLASS: &str = "roofline-v2";
+pub const TUNE_SHAPE_CLASS: &str = "roofline-v6";
 
 /// Versioned ledger shape-class key for a kernel implementation.
 #[must_use]
 pub fn tune_shape_class(version: &str) -> String {
     format!("{TUNE_SHAPE_CLASS}:{version}")
+}
+
+/// Append-only shape key for one finalized measurement operation.
+#[must_use]
+pub fn tune_measurement_shape_class(
+    version: &str,
+    run_receipt: fs_blake3::ContentHash,
+    op: i64,
+) -> String {
+    format!("{}:run={run_receipt}:op={op}", tune_shape_class(version))
+}
+
+/// Composite machine key for baseline-bound roofline rows.
+#[must_use]
+pub fn roofline_machine_key(fingerprint: u64, baseline: fs_blake3::ContentHash) -> [u8; 40] {
+    let mut key = [0_u8; 40];
+    key[..8].copy_from_slice(&fingerprint.to_le_bytes());
+    key[8..].copy_from_slice(baseline.as_bytes());
+    key
 }
 
 /// Which machine axis a kernel is measured against.
@@ -155,20 +291,11 @@ struct GemmDecisionBinding {
     execution_path_identity: fs_ledger::ContentHash,
 }
 
-const GEMM_EXECUTION_PATH_DOMAIN: &str = "org.frankensim.fs-roofline.gemm-execution-path.v2";
-const EXECUTION_BINDING_DOMAIN: &str = "org.frankensim.fs-roofline.execution-binding.v2";
+const GEMM_EXECUTION_PATH_DOMAIN: &str = "org.frankensim.fs-roofline.gemm-execution-path.v3";
+const EXECUTION_BINDING_DOMAIN: &str = "org.frankensim.fs-roofline.execution-binding.v3";
 
 fn execution_path_is_complete(path: &fs_session::GemmExecutionReceipt) -> bool {
-    path.total_tiles > 0
-        && path.completed_tiles == path.total_tiles
-        && !path.panels.is_empty()
-        && path.panels.iter().enumerate().all(|(ordinal, panel)| {
-            u64::try_from(ordinal) == Ok(panel.declared_run)
-                && !panel.kernel.is_empty()
-                && !panel.mode.is_empty()
-                && panel.total > 0
-                && panel.completed == panel.total
-        })
+    path.is_complete()
 }
 
 fn execution_path_json(path: &fs_session::GemmExecutionReceipt) -> String {
@@ -188,7 +315,8 @@ fn execution_path_json(path: &fs_session::GemmExecutionReceipt) -> String {
         .collect::<Vec<_>>()
         .join(",");
     format!(
-        "{{\"completed_tiles\":{},\"total_tiles\":{},\"panel_count\":{},\"panels\":[{}]}}",
+        "{{\"declared_run\":{},\"completed_tiles\":{},\"total_tiles\":{},\"panel_count\":{},\"panels\":[{}]}}",
+        path.declared_run,
         path.completed_tiles,
         path.total_tiles,
         path.panels.len(),
@@ -272,10 +400,28 @@ impl KernelExecutionBinding {
             )
     }
 
+    fn declared_run(&self) -> u64 {
+        self.gemm.execution_path.declared_run
+    }
+
+    fn stable_equivalent(&self, other: &Self) -> bool {
+        let left = &self.gemm;
+        let right = &other.gemm;
+        left.scoped_tune_key == right.scoped_tune_key
+            && left.shape_class == right.shape_class
+            && left.canonical_plan == right.canonical_plan
+            && left.source == right.source
+            && left.operation_tier == right.operation_tier
+            && left.build_identity == right.build_identity
+            && left.tune_row_identity == right.tune_row_identity
+            && left.validated_row == right.validated_row
+            && execution_path_shape_eq(&left.execution_path, &right.execution_path)
+    }
+
     fn canonical_json(&self) -> String {
         let gemm = &self.gemm;
         format!(
-            "{{\"kind\":\"gemm-v2\",\"scoped_tune_key\":\"{}\",\"shape_class\":\"{}\",\"plan\":\"{}\",\"source\":\"{}\",\"operation_tier\":\"{}\",\"build_identity\":\"{}\",\"tune_row_identity\":\"{}\",\"tune_row\":{},\"execution_path_identity\":\"{}\",\"execution_path\":{}}}",
+            "{{\"kind\":\"gemm-v3\",\"scoped_tune_key\":\"{}\",\"shape_class\":\"{}\",\"plan\":\"{}\",\"source\":\"{}\",\"operation_tier\":\"{}\",\"build_identity\":\"{}\",\"tune_row_identity\":\"{}\",\"tune_row\":{},\"execution_path_identity\":\"{}\",\"execution_path\":{}}}",
             json_escape(&gemm.scoped_tune_key),
             json_escape(&gemm.shape_class),
             json_escape(&gemm.canonical_plan),
@@ -296,6 +442,23 @@ impl KernelExecutionBinding {
     fn validated_row(&self) -> &fs_session::ValidatedGemmTuneRow {
         &self.gemm.validated_row
     }
+}
+
+fn execution_path_shape_eq(
+    left: &fs_session::GemmExecutionReceipt,
+    right: &fs_session::GemmExecutionReceipt,
+) -> bool {
+    left.is_complete()
+        && right.is_complete()
+        && left.completed_tiles == right.completed_tiles
+        && left.total_tiles == right.total_tiles
+        && left.panels.len() == right.panels.len()
+        && left.panels.iter().zip(&right.panels).all(|(left, right)| {
+            left.kernel == right.kernel
+                && left.mode == right.mode
+                && left.completed == right.completed
+                && left.total == right.total
+        })
 }
 
 /// Which side of the roofline binds the limit.
@@ -448,7 +611,19 @@ fn stable_decision_binding(
     let first = bindings.first()?.as_ref()?;
     bindings
         .iter()
-        .all(|candidate| candidate.as_ref() == Some(first))
+        .enumerate()
+        .all(|(ordinal, candidate)| {
+            let Some(candidate) = candidate.as_ref() else {
+                return false;
+            };
+            let Ok(ordinal) = u64::try_from(ordinal) else {
+                return false;
+            };
+            let Some(expected_run) = first.declared_run().checked_add(ordinal) else {
+                return false;
+            };
+            candidate.declared_run() == expected_run && candidate.stable_equivalent(first)
+        })
         .then_some(first)
 }
 
@@ -514,7 +689,7 @@ impl Attainment {
             MeasurementOrigin::Analytic => "null".to_string(),
         };
         format!(
-            "{{\"receipt_version\":2,\"kernel\":\"{}\",\"version\":\"{}\",\"machine\":\"{:016x}\",\
+            "{{\"receipt_version\":3,\"kernel\":\"{}\",\"version\":\"{}\",\"machine\":\"{:016x}\",\
              \"axes\":{{\"logical_cpus\":{},\"bandwidth_single_bits\":\"{:016x}\",\"bandwidth_all_core_bits\":\"{:016x}\",\"peak_single_bits\":\"{:016x}\",\"peak_all_core_bits\":\"{:016x}\"}},\
              \"spec\":{{\"bytes_per_elem_bits\":\"{:016x}\",\"flops_per_elem_bits\":\"{:016x}\",\"threading\":\"{}\",\"target_axis\":\"{}\",\"target_fraction_bits\":{}}},\"measurement\":{},\"execution\":{},\"elems_per_sec_bits\":\"{:016x}\",\"gbs_bits\":\"{:016x}\",\"gflops_bits\":\"{:016x}\",\"limit_elems_per_sec_bits\":\"{:016x}\",\"attainment_bits\":\"{:016x}\",\"target_attainment_bits\":\"{:016x}\",\"dispersion_bits\":\"{:016x}\",\"elems_per_sec_display\":{:.3e},\
              \"gbs\":{:.3},\"gflops\":{:.3},\"limit_elems_per_sec\":{:.3e},\
@@ -971,8 +1146,37 @@ pub fn run_registry(
 /// Whether a registry result set is admissible as citable performance
 /// evidence for these exact measured axes.
 #[must_use]
-pub fn run_is_citable(axes: &MachineAxes, post_axes: &MachineAxes, results: &[Attainment]) -> bool {
-    run_admission_error(axes, post_axes, results).is_none()
+pub fn run_is_citable(
+    axes: &MachineAxes,
+    post_axes: &MachineAxes,
+    baseline: AxisBaselinePolicy<'_>,
+    results: &[Attainment],
+) -> bool {
+    run_admission_error(axes, post_axes, baseline, results).is_none()
+}
+
+fn finalized_run_receipt(
+    axes: &MachineAxes,
+    post_axes: &MachineAxes,
+    baseline: AxisBaselinePolicy<'_>,
+    results: &[Attainment],
+) -> fs_blake3::ContentHash {
+    fn push_field(payload: &mut Vec<u8>, bytes: &[u8]) {
+        let len = u64::try_from(bytes.len()).expect("receipt field length fits u64");
+        payload.extend_from_slice(&len.to_le_bytes());
+        payload.extend_from_slice(bytes);
+    }
+
+    let mut payload = Vec::new();
+    let baseline_receipt = baseline.receipt_json(axes, post_axes);
+    push_field(&mut payload, baseline_receipt.as_bytes());
+    let result_count = u64::try_from(results.len()).expect("result count fits u64");
+    payload.extend_from_slice(&result_count.to_le_bytes());
+    for result in results {
+        let receipt = result.to_jsonl();
+        push_field(&mut payload, receipt.as_bytes());
+    }
+    fs_blake3::hash_domain(FINALIZED_RUN_DOMAIN, &payload)
 }
 
 /// Complete the registry's tuning lifecycle at the same admission boundary
@@ -989,10 +1193,30 @@ pub fn finalize_registry_tuning(
     registry: &mut [Box<dyn RooflineKernel>],
     axes: &MachineAxes,
     post_axes: &MachineAxes,
+    baseline: AxisBaselinePolicy<'_>,
     results: &[Attainment],
-) -> Result<bool, String> {
-    let admitted = run_admission_error(axes, post_axes, results).is_none();
+) -> Result<FinalizedRegistryRun, String> {
     let mut diagnostics = Vec::new();
+    let mut registry_matches = registry.len() == results.len();
+    if !registry_matches {
+        diagnostics.push(format!(
+            "registry/result length mismatch: {} kernels for {} result rows",
+            registry.len(),
+            results.len()
+        ));
+    }
+    for (index, (kernel, result)) in registry.iter().zip(results).enumerate() {
+        let spec = kernel.spec();
+        if spec.name != result.kernel || spec.version != result.version {
+            registry_matches = false;
+            diagnostics.push(format!(
+                "kernel[{index}] identity mismatch: registry {}/{} vs result {}/{}",
+                spec.name, spec.version, result.kernel, result.version
+            ));
+        }
+    }
+    let admitted =
+        registry_matches && run_admission_error(axes, post_axes, baseline, results).is_none();
     for (index, kernel) in registry.iter_mut().enumerate() {
         if let Err(error) = kernel.finalize_tuning(admitted) {
             diagnostics.push(format!("kernel[{index}]: {error}"));
@@ -1005,7 +1229,11 @@ pub fn finalize_registry_tuning(
             diagnostics.join("; ")
         ));
     }
-    Ok(admitted)
+    Ok(FinalizedRegistryRun {
+        receipt: finalized_run_receipt(axes, post_axes, baseline, results),
+        admitted,
+        consumed: false,
+    })
 }
 
 /// Explain why a result set cannot be admitted as citable performance
@@ -1014,17 +1242,17 @@ pub fn finalize_registry_tuning(
 pub fn run_admission_error(
     axes: &MachineAxes,
     post_axes: &MachineAxes,
+    baseline: AxisBaselinePolicy<'_>,
     results: &[Attainment],
 ) -> Option<String> {
     if results.is_empty() {
         return Some("registry produced no measured kernels".to_string());
     }
-    if let Some(reason) = axes.plausibility_error() {
-        return Some(format!("machine axes are not admissible: {reason}"));
-    }
-    if let Some(reason) = axes.reprobe_error(post_axes) {
+    let baseline_verdict = baseline.verdict(axes, post_axes);
+    if !baseline_verdict.trusted() {
         return Some(format!(
-            "post-run axis probe did not corroborate the run: {reason}"
+            "historical baseline admission refused: {}",
+            baseline_verdict.to_jsonl()
         ));
     }
     let mut identities = std::collections::BTreeSet::new();
@@ -1123,11 +1351,180 @@ pub const SECTION_14_1_TARGETS: &[TargetRow] = &[
     },
 ];
 
-fn versions_json(code_version: &str) -> String {
-    format!(
-        "{{\"frankensim\":\"{}\",\"fs-roofline\":\"{VERSION}\"}}",
-        json_escape(code_version)
-    )
+const ROOFLINE_ROW_SCHEMA: &str = "fs-roofline-ledger-row-v2";
+const ROOFLINE_PAYLOAD_ARTIFACT_KIND: &str = "roofline-benchmark-result";
+const ROOFLINE_EXECUTABLE_DOMAIN: &str = "org.frankensim.fs-roofline.executable.v1";
+
+/// Maximum age of a roofline measurement that can be reported as fresh.
+pub const STALENESS_MAX_AGE_NS: i64 = 30 * 24 * 60 * 60 * 1_000_000_000;
+
+fn versions_json(build_identity: fs_blake3::ContentHash) -> String {
+    format!("{{\"frankensim_executable\":\"{build_identity}\",\"fs-roofline\":\"{VERSION}\"}}")
+}
+
+fn executable_build_identity() -> Result<fs_blake3::ContentHash, LedgerError> {
+    static IDENTITY: std::sync::OnceLock<Result<fs_blake3::ContentHash, LedgerError>> =
+        std::sync::OnceLock::new();
+    IDENTITY.get_or_init(read_executable_build_identity).clone()
+}
+
+fn read_executable_build_identity() -> Result<fs_blake3::ContentHash, LedgerError> {
+    use std::io::Read as _;
+
+    let path = std::env::current_exe().map_err(|error| LedgerError::Invalid {
+        field: "executable_identity".to_string(),
+        problem: format!("cannot resolve current executable: {error}"),
+    })?;
+    let mut file = std::fs::File::open(&path).map_err(|error| LedgerError::Invalid {
+        field: "executable_identity".to_string(),
+        problem: format!("cannot open current executable {}: {error}", path.display()),
+    })?;
+    let mut hasher = fs_blake3::Blake3::new();
+    let mut total = 0_u64;
+    let mut chunk = [0_u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut chunk)
+            .map_err(|error| LedgerError::Invalid {
+                field: "executable_identity".to_string(),
+                problem: format!("cannot read current executable {}: {error}", path.display()),
+            })?;
+        if read == 0 {
+            break;
+        }
+        total = total
+            .checked_add(u64::try_from(read).expect("read chunk length fits u64"))
+            .ok_or_else(|| LedgerError::Invalid {
+                field: "executable_identity".to_string(),
+                problem: "current executable length exceeds u64".to_string(),
+            })?;
+        hasher.update(&chunk[..read]);
+    }
+    let raw = hasher.finalize();
+    let mut preimage = [0_u8; 40];
+    preimage[..8].copy_from_slice(&total.to_le_bytes());
+    preimage[8..].copy_from_slice(raw.as_bytes());
+    Ok(fs_blake3::hash_domain(
+        ROOFLINE_EXECUTABLE_DOMAIN,
+        &preimage,
+    ))
+}
+
+#[derive(Debug)]
+struct RooflineRowParams {
+    op: i64,
+    run_receipt: fs_blake3::ContentHash,
+    payload_artifact: fs_blake3::ContentHash,
+    baseline_hash: fs_blake3::ContentHash,
+    build_identity: fs_blake3::ContentHash,
+    reps: u64,
+    post_axis_bits: [u64; 4],
+}
+
+impl RooflineRowParams {
+    fn to_json(&self) -> String {
+        format!(
+            "{{\"schema\":\"{ROOFLINE_ROW_SCHEMA}\",\"op\":{},\"run_receipt\":\"{}\",\"payload_artifact\":\"{}\",\"baseline_hash\":\"{}\",\"build_identity\":\"{}\",\"reps\":{},\"post_bandwidth_single_bits\":\"{:016x}\",\"post_bandwidth_all_core_bits\":\"{:016x}\",\"post_peak_single_bits\":\"{:016x}\",\"post_peak_all_core_bits\":\"{:016x}\"}}",
+            self.op,
+            self.run_receipt,
+            self.payload_artifact,
+            self.baseline_hash,
+            self.build_identity,
+            self.reps,
+            self.post_axis_bits[0],
+            self.post_axis_bits[1],
+            self.post_axis_bits[2],
+            self.post_axis_bits[3],
+        )
+    }
+}
+
+fn parse_roofline_row_params(text: &str) -> Option<RooflineRowParams> {
+    fn take<'a>(rest: &mut &'a str, prefix: &str) -> Option<()> {
+        *rest = rest.strip_prefix(prefix)?;
+        Some(())
+    }
+    fn decimal(rest: &mut &str) -> Option<u64> {
+        let end = rest
+            .find(|ch: char| !ch.is_ascii_digit())
+            .unwrap_or(rest.len());
+        if end == 0 || (end > 1 && rest.starts_with('0')) {
+            return None;
+        }
+        let (digits, tail) = rest.split_at(end);
+        *rest = tail;
+        digits.parse().ok()
+    }
+    fn hash(rest: &mut &str) -> Option<fs_blake3::ContentHash> {
+        let (raw, tail) = rest.split_once('"')?;
+        if raw.len() != 64 {
+            return None;
+        }
+        *rest = tail;
+        fs_blake3::ContentHash::from_hex(raw)
+    }
+    fn bits(rest: &mut &str) -> Option<u64> {
+        let (raw, tail) = rest.split_once('"')?;
+        if raw.len() != 16
+            || !raw
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return None;
+        }
+        *rest = tail;
+        u64::from_str_radix(raw, 16).ok()
+    }
+
+    let mut rest = text;
+    take(
+        &mut rest,
+        &format!("{{\"schema\":\"{ROOFLINE_ROW_SCHEMA}\",\"op\":"),
+    )?;
+    let op = i64::try_from(decimal(&mut rest)?).ok()?;
+    if op <= 0 {
+        return None;
+    }
+    take(&mut rest, ",\"run_receipt\":\"")?;
+    let run_receipt = hash(&mut rest)?;
+    take(&mut rest, ",\"payload_artifact\":\"")?;
+    let payload_artifact = hash(&mut rest)?;
+    take(&mut rest, ",\"baseline_hash\":\"")?;
+    let baseline_hash = hash(&mut rest)?;
+    take(&mut rest, ",\"build_identity\":\"")?;
+    let build_identity = hash(&mut rest)?;
+    take(&mut rest, ",\"reps\":")?;
+    let reps = decimal(&mut rest)?;
+    if reps == 0 {
+        return None;
+    }
+    take(&mut rest, ",\"post_bandwidth_single_bits\":\"")?;
+    let bandwidth_single = bits(&mut rest)?;
+    take(&mut rest, ",\"post_bandwidth_all_core_bits\":\"")?;
+    let bandwidth_all_core = bits(&mut rest)?;
+    take(&mut rest, ",\"post_peak_single_bits\":\"")?;
+    let peak_single = bits(&mut rest)?;
+    take(&mut rest, ",\"post_peak_all_core_bits\":\"")?;
+    let peak_all_core = bits(&mut rest)?;
+    take(&mut rest, "}")?;
+    if !rest.is_empty() {
+        return None;
+    }
+    let params = RooflineRowParams {
+        op,
+        run_receipt,
+        payload_artifact,
+        baseline_hash,
+        build_identity,
+        reps,
+        post_axis_bits: [
+            bandwidth_single,
+            bandwidth_all_core,
+            peak_single,
+            peak_all_core,
+        ],
+    };
+    (params.to_json() == text).then_some(params)
 }
 
 // ---------------------------------------------------------------------------
@@ -1135,8 +1532,10 @@ fn versions_json(code_version: &str) -> String {
 // ---------------------------------------------------------------------------
 
 /// Record a harness run atomically in the ledger. Admitted timed rows receive
-/// metrics, `benchmark_result` events, and versioned tune rows. Rejected input
-/// receives one explicit rejection event and no normal-looking measurements.
+/// metrics, `benchmark_result` events, content-addressed output artifacts, and
+/// versioned tune rows. Rejected input receives an exact baseline-admission
+/// receipt plus one explicit rejection event and no normal-looking
+/// measurements.
 /// A successful commit consumes each result's one-shot fresh-row marker;
 /// rollback retains it so the same transaction can be retried.
 ///
@@ -1147,12 +1546,30 @@ pub fn record_run(
     ledger: &Ledger,
     axes: &MachineAxes,
     post_axes: &MachineAxes,
+    baseline: AxisBaselinePolicy<'_>,
+    finalized: &mut FinalizedRegistryRun,
     results: &mut [Attainment],
 ) -> Result<i64, LedgerError> {
-    let admission_error = run_admission_error(axes, post_axes, results);
+    let admission_error = run_admission_error(axes, post_axes, baseline, results);
     let run_valid = admission_error.is_none();
-    let code_version = std::env::var("GITHUB_SHA").unwrap_or_else(|_| "local".to_string());
-    let versions = versions_json(&code_version);
+    if finalized.consumed {
+        return Err(LedgerError::Invalid {
+            field: "finalized_run".to_string(),
+            problem: "the finalized roofline run was already recorded".to_string(),
+        });
+    }
+    let expected_receipt = finalized_run_receipt(axes, post_axes, baseline, results);
+    if finalized.receipt != expected_receipt || finalized.admitted != run_valid {
+        return Err(LedgerError::Invalid {
+            field: "finalized_run".to_string(),
+            problem:
+                "axes, baseline decision, results, or admission changed after registry finalization"
+                    .to_string(),
+        });
+    }
+    let baseline_receipt = baseline.receipt_json(axes, post_axes);
+    let build_identity = executable_build_identity()?;
+    let versions = versions_json(build_identity);
     let explicits = FiveExplicits {
         seed: b"roofline",
         versions: &versions,
@@ -1160,16 +1577,29 @@ pub fn record_run(
         capability: "{\"ops\":[\"perf.roofline\"]}",
     };
     let ir = format!(
-        "{{\"op\":\"perf.roofline\",\"kernels\":{},\"fingerprint\":\"{:016x}\",\"post_fingerprint\":\"{:016x}\",\"admitted\":{run_valid}}}",
+        "{{\"op\":\"perf.roofline\",\"kernels\":{},\"fingerprint\":\"{:016x}\",\"post_fingerprint\":\"{:016x}\",\"admitted\":{run_valid},\"finalized_run_receipt\":\"{}\",\"baseline_admission\":{baseline_receipt}}}",
         results.len(),
         axes.fingerprint,
         post_axes.fingerprint,
+        finalized.receipt,
     );
     ledger.begin()?;
     let write_result: Result<i64, LedgerError> = (|| {
         let op = ledger.begin_op(Some(b"roofline"), &ir, &explicits, now_wall_ns())?;
+        ledger.append_event(&EventRow {
+            session: Some(b"roofline"),
+            t: 0,
+            kind: "axis_baseline_admission",
+            payload: Some(&baseline_receipt),
+        })?;
         if run_valid {
-            let fp_bytes = axes.fingerprint.to_le_bytes();
+            let baseline_hash = baseline
+                .baseline_hash()
+                .ok_or_else(|| LedgerError::Invalid {
+                    field: "baseline".to_string(),
+                    problem: "trusted roofline admission has no selected baseline".to_string(),
+                })?;
+            let machine_key = roofline_machine_key(axes.fingerprint, baseline_hash);
             for r in results.iter() {
                 if let MeasurementOrigin::Timed {
                     decision_bindings, ..
@@ -1201,21 +1631,54 @@ pub fn record_run(
                     kind: "benchmark_result",
                     payload: Some(&payload),
                 })?;
-                ledger.tune_put(
-                    &r.kernel,
-                    &tune_shape_class(&r.version),
-                    &fp_bytes,
-                    &format!(
-                        "{{\"version\":\"{}\",\"reps\":{},\"post_bandwidth_single_bits\":\"{:016x}\",\"post_bandwidth_all_core_bits\":\"{:016x}\",\"post_peak_single_bits\":\"{:016x}\",\"post_peak_all_core_bits\":\"{:016x}\"}}",
-                        json_escape(&r.version),
-                        r.reps,
+                let payload_artifact = ledger.put_artifact(
+                    ROOFLINE_PAYLOAD_ARTIFACT_KIND,
+                    payload.as_bytes(),
+                    Some("{\"schema\":\"fs-roofline-benchmark-result-v1\"}"),
+                )?;
+                ledger.link(op, &payload_artifact.hash, EdgeRole::Out)?;
+                let params = RooflineRowParams {
+                    op,
+                    run_receipt: finalized.receipt,
+                    payload_artifact: payload_artifact.hash,
+                    baseline_hash,
+                    build_identity,
+                    reps: u64::try_from(r.reps).map_err(|_| LedgerError::Invalid {
+                        field: "reps".to_string(),
+                        problem: "roofline repetition count exceeds u64".to_string(),
+                    })?,
+                    post_axis_bits: [
                         post_axes.bandwidth_single_gbs.to_bits(),
                         post_axes.bandwidth_all_core_gbs.to_bits(),
                         post_axes.peak_single_gflops.to_bits(),
                         post_axes.peak_all_core_gflops.to_bits(),
-                    ),
+                    ],
+                }
+                .to_json();
+                let shape_class = tune_measurement_shape_class(&r.version, finalized.receipt, op);
+                ledger.tune_put_if_absent(
+                    &r.kernel,
+                    &shape_class,
+                    &machine_key,
+                    &params,
                     &payload,
                 )?;
+                let stored = ledger
+                    .tune_get(&r.kernel, &shape_class, &machine_key)?
+                    .ok_or_else(|| LedgerError::Invalid {
+                        field: "tune".to_string(),
+                        problem: "roofline insert-if-absent returned without a stored row"
+                            .to_string(),
+                    })?;
+                if stored.params != params || stored.measured != payload {
+                    return Err(LedgerError::Invalid {
+                        field: "tune".to_string(),
+                        problem: format!(
+                            "refusing conflicting roofline evidence for kernel {:?}, shape {:?}",
+                            r.kernel, shape_class
+                        ),
+                    });
+                }
             }
             ledger.finish_op(op, OpOutcome::Ok, None, now_wall_ns())?;
         } else {
@@ -1243,6 +1706,7 @@ pub fn record_run(
     match write_result {
         Ok(op) => match ledger.commit() {
             Ok(()) => {
+                finalized.consumed = true;
                 for result in results.iter_mut() {
                     result.pending_tune_publication = None;
                 }
@@ -1263,17 +1727,36 @@ pub fn record_run(
 /// Staleness state of one kernel's ledgered attainment on this machine.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Staleness {
-    /// A row matches kernel version and machine identity, but the tune schema
-    /// carries no timestamp yet, so freshness cannot honestly be asserted.
-    MatchingIdentityAgeUnknown,
+    /// At least one semantically valid row from this exact executable is no
+    /// more than [`STALENESS_MAX_AGE_NS`] old.
+    Fresh,
+    /// Matching current-build evidence exists, but its newest successful
+    /// operation is older than [`STALENESS_MAX_AGE_NS`].
+    Expired,
+    /// The observation clock predates the newest matching operation receipt.
+    ClockRollback,
     /// Rows exist, but none for the current fingerprint — the machine
     /// drifted and every cited number is stale until re-measured.
     FingerprintDrift,
+    /// The current machine fingerprint matches historical rows, but no trusted
+    /// baseline was selected for comparison.
+    BaselineUnavailable,
+    /// The machine matches but the selected historical baseline changed.
+    BaselineDrift,
+    /// Semantically valid rows exist for this machine and baseline, but only
+    /// for a different executable-content identity.
+    BuildDrift,
+    /// A row exists under the exact current version, machine, and baseline key,
+    /// but its canonical parameters, payload artifact/edge, operation receipt,
+    /// or executable identity no longer agree. Corrupt evidence is never
+    /// treated as fresh.
+    CorruptEvidence,
     /// No roofline rows at all: never measured.
     NeverMeasured,
 }
 
-/// Check one kernel's staleness against the current fingerprint.
+/// Check one kernel's staleness against the current fingerprint and admitted
+/// historical baseline identity.
 ///
 /// # Errors
 /// Ledger errors propagate.
@@ -1282,22 +1765,212 @@ pub fn staleness(
     kernel: &str,
     version: &str,
     current_fingerprint: u64,
+    current_baseline: Option<fs_blake3::ContentHash>,
+) -> Result<Staleness, LedgerError> {
+    staleness_at(
+        ledger,
+        kernel,
+        version,
+        current_fingerprint,
+        current_baseline,
+        now_wall_ns(),
+    )
+}
+
+/// Deterministic form of [`staleness`] evaluated at an explicit wall-clock
+/// nanosecond. Supplying time makes expiry and rollback tests replayable.
+///
+/// # Errors
+/// Ledger and executable-identity errors propagate.
+pub fn staleness_at(
+    ledger: &Ledger,
+    kernel: &str,
+    version: &str,
+    current_fingerprint: u64,
+    current_baseline: Option<fs_blake3::ContentHash>,
+    observed_wall_ns: i64,
+) -> Result<Staleness, LedgerError> {
+    let current_build = executable_build_identity()?;
+    staleness_at_with_build(
+        ledger,
+        kernel,
+        version,
+        current_fingerprint,
+        current_baseline,
+        observed_wall_ns,
+        current_build,
+    )
+}
+
+fn staleness_at_with_build(
+    ledger: &Ledger,
+    kernel: &str,
+    version: &str,
+    current_fingerprint: u64,
+    current_baseline: Option<fs_blake3::ContentHash>,
+    observed_wall_ns: i64,
+    current_build: fs_blake3::ContentHash,
 ) -> Result<Staleness, LedgerError> {
     let rows = ledger.tune_rows(kernel)?;
-    let shape_class = tune_shape_class(version);
+    let shape_prefix = format!("{}:run=", tune_shape_class(version));
     let roofline_rows: Vec<_> = rows
         .iter()
-        .filter(|r| r.shape_class == shape_class)
+        .filter(|r| r.shape_class.starts_with(&shape_prefix))
         .collect();
     if roofline_rows.is_empty() {
         return Ok(Staleness::NeverMeasured);
     }
     let fp = current_fingerprint.to_le_bytes();
-    if roofline_rows.iter().any(|r| r.machine == fp) {
-        Ok(Staleness::MatchingIdentityAgeUnknown)
-    } else {
-        Ok(Staleness::FingerprintDrift)
+    let same_machine = roofline_rows
+        .iter()
+        .filter(|row| row.machine.get(..8) == Some(fp.as_slice()))
+        .collect::<Vec<_>>();
+    if same_machine.is_empty() {
+        return Ok(Staleness::FingerprintDrift);
     }
+    let Some(current_baseline) = current_baseline else {
+        return Ok(Staleness::BaselineUnavailable);
+    };
+    let key = roofline_machine_key(current_fingerprint, current_baseline);
+    let matching_rows = same_machine
+        .into_iter()
+        .filter(|row| row.machine == key)
+        .collect::<Vec<_>>();
+    if matching_rows.is_empty() {
+        return Ok(Staleness::BaselineDrift);
+    }
+    let mut newest_current_build = None;
+    let mut saw_foreign_build = false;
+    for row in matching_rows {
+        let Some(validated) = validate_roofline_row(
+            ledger,
+            row,
+            kernel,
+            version,
+            current_fingerprint,
+            current_baseline,
+        )?
+        else {
+            return Ok(Staleness::CorruptEvidence);
+        };
+        if validated.build_identity == current_build {
+            newest_current_build = Some(
+                newest_current_build.map_or(validated.recorded_at_ns, |newest: i64| {
+                    newest.max(validated.recorded_at_ns)
+                }),
+            );
+        } else {
+            saw_foreign_build = true;
+        }
+    }
+    let Some(recorded_at_ns) = newest_current_build else {
+        return Ok(if saw_foreign_build {
+            Staleness::BuildDrift
+        } else {
+            Staleness::CorruptEvidence
+        });
+    };
+    if observed_wall_ns < recorded_at_ns {
+        return Ok(Staleness::ClockRollback);
+    }
+    if observed_wall_ns.saturating_sub(recorded_at_ns) > STALENESS_MAX_AGE_NS {
+        return Ok(Staleness::Expired);
+    }
+    Ok(Staleness::Fresh)
+}
+
+struct ValidatedRooflineRow {
+    build_identity: fs_blake3::ContentHash,
+    recorded_at_ns: i64,
+}
+
+fn validate_roofline_row(
+    ledger: &Ledger,
+    row: &fs_ledger::TuneRow,
+    kernel: &str,
+    version: &str,
+    current_fingerprint: u64,
+    current_baseline: fs_blake3::ContentHash,
+) -> Result<Option<ValidatedRooflineRow>, LedgerError> {
+    let Some(params) = parse_roofline_row_params(&row.params) else {
+        return Ok(None);
+    };
+    if params.baseline_hash != current_baseline
+        || row.machine != roofline_machine_key(current_fingerprint, current_baseline)
+        || row.shape_class != tune_measurement_shape_class(version, params.run_receipt, params.op)
+        || params.payload_artifact != fs_ledger::hash_bytes(row.measured.as_bytes())
+    {
+        return Ok(None);
+    }
+    let Some(artifact_bytes) = ledger.get_artifact(&params.payload_artifact)? else {
+        return Ok(None);
+    };
+    if artifact_bytes.as_slice() != row.measured.as_bytes()
+        || !ledger.edge_exists(params.op, &params.payload_artifact, EdgeRole::Out)?
+    {
+        return Ok(None);
+    }
+
+    let measured_prefix = format!(
+        "{{\"receipt_version\":3,\"kernel\":\"{}\",\"version\":\"{}\",\"machine\":\"{current_fingerprint:016x}\",",
+        json_escape(kernel),
+        json_escape(version),
+    );
+    if !row.measured.starts_with(&measured_prefix)
+        || !row
+            .measured
+            .contains(&format!("\"reps\":{},\"verdict\":", params.reps))
+    {
+        return Ok(None);
+    }
+
+    let Some(op) = ledger.op(params.op)? else {
+        return Ok(None);
+    };
+    let Some(recorded_at_ns) = op.t_end else {
+        return Ok(None);
+    };
+    if op.id != params.op
+        || op.session.as_deref() != Some(b"roofline".as_slice())
+        || op.outcome.as_deref() != Some("ok")
+        || recorded_at_ns < op.t_start
+        || op.versions != versions_json(params.build_identity)
+        || !op.ir.contains("\"op\":\"perf.roofline\"")
+        || !op.ir.contains("\"admitted\":true")
+        || !op
+            .ir
+            .contains(&format!("\"fingerprint\":\"{current_fingerprint:016x}\""))
+        || !op.ir.contains(&format!(
+            "\"finalized_run_receipt\":\"{}\"",
+            params.run_receipt
+        ))
+        || !op
+            .ir
+            .contains(&format!("\"baseline_hash\":\"{}\"", params.baseline_hash))
+    {
+        return Ok(None);
+    }
+
+    let Some((_, post_and_later)) = op.ir.split_once("\"post\":") else {
+        return Ok(None);
+    };
+    let Some((post, _)) = post_and_later.split_once(",\"baseline_hash\"") else {
+        return Ok(None);
+    };
+    let post_names = [
+        "bandwidth_single_bits",
+        "bandwidth_all_core_bits",
+        "peak_single_bits",
+        "peak_all_core_bits",
+    ];
+    let post_matches = post_names
+        .iter()
+        .zip(params.post_axis_bits)
+        .all(|(name, bits)| post.contains(&format!("\"{name}\":\"{bits:016x}\"")));
+    Ok(post_matches.then_some(ValidatedRooflineRow {
+        build_identity: params.build_identity,
+        recorded_at_ns,
+    }))
 }
 
 #[cfg(test)]
@@ -1370,18 +2043,33 @@ mod tests {
 
     impl RooflineKernel for FallibleAdmissionProbeKernel {
         fn spec(&self) -> KernelSpec {
-            ReceiptKernel {
+            let mut spec = ReceiptKernel {
                 elements: 1,
                 value: 0,
             }
-            .spec()
+            .spec();
+            spec.name = ["receipt-kernel-0", "receipt-kernel-1", "receipt-kernel-2"]
+                .get(self.id)
+                .copied()
+                .unwrap_or("receipt-kernel-out-of-range");
+            spec
         }
 
         fn elements(&self) -> usize {
             1
         }
 
-        fn run_once(&mut self) {}
+        fn run_once(&mut self) {
+            let mut value = self.id as u64;
+            for _ in 0..1024 {
+                value = std::hint::black_box(
+                    value
+                        .wrapping_mul(6_364_136_223_846_793_005)
+                        .wrapping_add(1),
+                );
+            }
+            std::hint::black_box(value);
+        }
 
         fn finalize_tuning(&mut self, admitted: bool) -> Result<(), String> {
             self.observed.borrow_mut().push((self.id, admitted));
@@ -1399,6 +2087,33 @@ mod tests {
             peak_single_gflops: 50.0,
             peak_all_core_gflops: 300.0,
         }
+    }
+
+    fn trusted_baseline(axes: &MachineAxes) -> (BaselineAxes, BaselineIdentity) {
+        let identity =
+            BaselineIdentity::current(axes, "test-firmware").expect("valid synthetic identity");
+        let candidates: Vec<_> = (0_u64..3)
+            .map(|ordinal| {
+                BaselineCandidate::from_receipt(
+                    axes.clone(),
+                    identity.clone(),
+                    fs_blake3::hash_domain(
+                        "fs-roofline.lib-test-baseline-source.v1",
+                        &ordinal.to_le_bytes(),
+                    ),
+                )
+                .expect("valid synthetic candidate")
+            })
+            .collect();
+        let baseline = promote_baseline(
+            &candidates,
+            "test-operator",
+            "deterministic lib receipt fixture",
+            20_000,
+            90,
+        )
+        .expect("valid synthetic baseline");
+        (baseline, identity)
     }
 
     #[test]
@@ -1523,6 +2238,8 @@ mod tests {
     #[test]
     fn only_bound_timed_receipts_are_citable() {
         let axes = synthetic_axes();
+        let (baseline, identity) = trusted_baseline(&axes);
+        let baseline_policy = AxisBaselinePolicy::new(Some(&baseline), &identity, 20_010);
         let spec = ReceiptKernel {
             elements: 1,
             value: 0,
@@ -1530,7 +2247,7 @@ mod tests {
         .spec();
         let analytic = attainment_with_dispersion(&spec, 1.0, 0.0, 1, &axes);
         assert!(
-            !run_is_citable(&axes, &axes, &[analytic]),
+            !run_is_citable(&axes, &axes, baseline_policy, &[analytic]),
             "an analytic helper result is not measurement evidence"
         );
 
@@ -1539,38 +2256,100 @@ mod tests {
             value: 0,
         };
         let timed = measure(&mut kernel, 0, 3, &axes);
-        assert!(run_is_citable(&axes, &axes, std::slice::from_ref(&timed)));
+        assert!(run_is_citable(
+            &axes,
+            &axes,
+            baseline_policy,
+            std::slice::from_ref(&timed)
+        ));
         assert!(timed.to_jsonl().contains("\"sample_seconds_bits\""));
         let mut drifted_post = axes.clone();
         drifted_post.bandwidth_single_gbs = 60.0;
         assert!(!run_is_citable(
             &axes,
             &drifted_post,
+            baseline_policy,
             std::slice::from_ref(&timed)
         ));
 
         let mut tampered = timed.clone();
         tampered.dispersion += 0.01;
-        assert!(!run_is_citable(&axes, &axes, &[tampered]));
+        assert!(!run_is_citable(&axes, &axes, baseline_policy, &[tampered]));
         let mut tampered_target = timed.clone();
         tampered_target.target_attainment += 0.01;
-        assert!(!run_is_citable(&axes, &axes, &[tampered_target]));
+        assert!(!run_is_citable(
+            &axes,
+            &axes,
+            baseline_policy,
+            &[tampered_target]
+        ));
         let mut tampered_axis = timed.clone();
         tampered_axis.spec_binding.target_axis = TargetAxis::ComputePeak;
-        assert!(!run_is_citable(&axes, &axes, &[tampered_axis]));
-        assert!(run_admission_error(&axes, &axes, &[timed.clone(), timed]).is_some());
+        assert!(!run_is_citable(
+            &axes,
+            &axes,
+            baseline_policy,
+            &[tampered_axis]
+        ));
+        assert!(
+            run_admission_error(
+                &axes,
+                &axes,
+                baseline_policy,
+                &[timed.clone(), timed.clone()],
+            )
+            .is_some()
+        );
 
         let mut empty = ReceiptKernel {
             elements: 0,
             value: 0,
         };
         let empty_row = measure(&mut empty, 0, 1, &axes);
-        assert!(!run_is_citable(&axes, &axes, &[empty_row]));
+        assert!(!run_is_citable(&axes, &axes, baseline_policy, &[empty_row]));
+
+        let unbaselined = AxisBaselinePolicy::new(None, &identity, 20_010);
+        assert!(
+            !run_is_citable(&axes, &axes, unbaselined, std::slice::from_ref(&timed)),
+            "first-run candidate evidence must never authorize itself"
+        );
+    }
+
+    #[test]
+    fn stable_sustained_contention_cannot_cross_the_production_admission_boundary() {
+        let quiet = synthetic_axes();
+        let (baseline, identity) = trusted_baseline(&quiet);
+        let baseline_policy = AxisBaselinePolicy::new(Some(&baseline), &identity, 20_010);
+        let mut crushed = quiet.clone();
+        crushed.bandwidth_single_gbs = 10.0;
+        crushed.bandwidth_all_core_gbs = 40.0;
+        crushed.peak_single_gflops = 10.0;
+        crushed.peak_all_core_gflops = 60.0;
+        assert!(crushed.plausible());
+        assert!(crushed.reprobe_error(&crushed).is_none());
+
+        let mut kernel = ReceiptKernel {
+            elements: 1,
+            value: 0,
+        };
+        let timed = measure(&mut kernel, 1, 3, &crushed);
+        assert!(!run_is_citable(
+            &crushed,
+            &crushed,
+            baseline_policy,
+            std::slice::from_ref(&timed)
+        ));
+        let receipt = baseline_policy.receipt_json(&crushed, &crushed);
+        assert!(receipt.contains("\"baseline\":\"degraded\""));
+        assert!(receipt.contains(&baseline.content_hash().to_hex()));
+        assert!(!receipt.contains("NaN"));
     }
 
     #[test]
     fn registry_tuning_hook_uses_the_complete_admission_decision() {
         let axes = synthetic_axes();
+        let (baseline, identity) = trusted_baseline(&axes);
+        let baseline_policy = AxisBaselinePolicy::new(Some(&baseline), &identity, 20_010);
         let mut measured = ReceiptKernel {
             elements: 1,
             value: 0,
@@ -1582,8 +2361,15 @@ mod tests {
         })];
 
         assert!(
-            finalize_registry_tuning(&mut registry, &axes, &axes, std::slice::from_ref(&result),)
-                .expect("admitted hook")
+            finalize_registry_tuning(
+                &mut registry,
+                &axes,
+                &axes,
+                baseline_policy,
+                std::slice::from_ref(&result),
+            )
+            .expect("admitted hook")
+            .admitted()
         );
         assert_eq!(observed.get(), Some(true));
 
@@ -1591,8 +2377,15 @@ mod tests {
         let mut drifted_post = axes.clone();
         drifted_post.bandwidth_single_gbs *= 0.5;
         assert!(
-            !finalize_registry_tuning(&mut registry, &axes, &drifted_post, &[result])
-                .expect("rejected hook")
+            !finalize_registry_tuning(
+                &mut registry,
+                &axes,
+                &drifted_post,
+                baseline_policy,
+                &[result],
+            )
+            .expect("rejected hook")
+            .admitted()
         );
         assert_eq!(observed.get(), Some(false));
     }
@@ -1600,11 +2393,8 @@ mod tests {
     #[test]
     fn registry_tuning_hook_drains_every_kernel_after_a_middle_failure() {
         let axes = synthetic_axes();
-        let mut measured = ReceiptKernel {
-            elements: 1,
-            value: 0,
-        };
-        let result = measure(&mut measured, 0, 3, &axes);
+        let (baseline, identity) = trusted_baseline(&axes);
+        let baseline_policy = AxisBaselinePolicy::new(Some(&baseline), &identity, 20_010);
         let observed = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let mut registry: Vec<Box<dyn RooflineKernel>> = (0..3)
             .map(|id| {
@@ -1615,9 +2405,10 @@ mod tests {
                 }) as Box<dyn RooflineKernel>
             })
             .collect();
+        let results = run_registry(&mut registry, 0, 3, &axes);
 
         let error =
-            finalize_registry_tuning(&mut registry, &axes, &axes, std::slice::from_ref(&result))
+            finalize_registry_tuning(&mut registry, &axes, &axes, baseline_policy, &results)
                 .expect_err("middle failure must be reported after every hook drains");
         assert_eq!(
             observed.borrow().as_slice(),
@@ -1627,6 +2418,49 @@ mod tests {
         assert_eq!(
             error,
             "tuning lifecycle finalization failed for 1 kernel(s): kernel[1]: middle cleanup failed"
+        );
+    }
+
+    #[test]
+    fn registry_finalization_refuses_missing_or_mismatched_kernels() {
+        let axes = synthetic_axes();
+        let (baseline, identity) = trusted_baseline(&axes);
+        let baseline_policy = AxisBaselinePolicy::new(Some(&baseline), &identity, 20_010);
+        let mut measured = ReceiptKernel {
+            elements: 1,
+            value: 0,
+        };
+        let result = measure(&mut measured, 0, 1, &axes);
+
+        let missing = finalize_registry_tuning(
+            &mut [],
+            &axes,
+            &axes,
+            baseline_policy,
+            std::slice::from_ref(&result),
+        )
+        .expect_err("an empty registry cannot finalize a nonempty result set");
+        assert!(missing.contains("length mismatch"));
+
+        let observed = std::rc::Rc::new(std::cell::Cell::new(None));
+        let mut mismatched: Vec<Box<dyn RooflineKernel>> = vec![Box::new(AdmissionProbeKernel {
+            observed: std::rc::Rc::clone(&observed),
+        })];
+        let mut mismatched_result = result;
+        mismatched_result.version = "different-version".to_string();
+        let mismatch = finalize_registry_tuning(
+            &mut mismatched,
+            &axes,
+            &axes,
+            baseline_policy,
+            &[mismatched_result],
+        )
+        .expect_err("a different kernel cannot finalize the measured row");
+        assert!(mismatch.contains("identity mismatch"));
+        assert_eq!(
+            observed.get(),
+            Some(false),
+            "identity mismatch must be part of the aggregate admission decision"
         );
     }
 
@@ -1755,12 +2589,131 @@ mod tests {
     }
 
     #[test]
-    fn versions_json_escapes_hostile_build_identifiers() {
+    fn versions_json_binds_the_exact_executable_identity() {
+        let identity = fs_blake3::hash_domain("fs-roofline.test-executable.v1", b"binary");
         assert_eq!(
-            versions_json("sha\\\"row\n\t\u{0001}"),
-            format!(
-                "{{\"frankensim\":\"sha\\\\\\\"row\\n\\t\\u0001\",\"fs-roofline\":\"{VERSION}\"}}"
-            )
+            versions_json(identity),
+            format!("{{\"frankensim_executable\":\"{identity}\",\"fs-roofline\":\"{VERSION}\"}}")
         );
+    }
+
+    #[test]
+    fn staleness_refuses_a_different_current_executable() {
+        let axes = synthetic_axes();
+        let (baseline, identity) = trusted_baseline(&axes);
+        let baseline_policy = AxisBaselinePolicy::new(Some(&baseline), &identity, 20_010);
+        let mut registry: Vec<Box<dyn RooflineKernel>> = vec![Box::new(ReceiptKernel {
+            elements: 1,
+            value: 0,
+        })];
+        let mut results = run_registry(&mut registry, 0, 1, &axes);
+        let mut finalized =
+            finalize_registry_tuning(&mut registry, &axes, &axes, baseline_policy, &results)
+                .expect("finalize fixture");
+        let ledger = Ledger::open(":memory:").expect("in-memory ledger");
+        let op = record_run(
+            &ledger,
+            &axes,
+            &axes,
+            baseline_policy,
+            &mut finalized,
+            &mut results,
+        )
+        .expect("record fixture");
+        let recorded_at = ledger
+            .op(op)
+            .expect("query op")
+            .expect("stored op")
+            .t_end
+            .expect("finished op");
+        let foreign_build = fs_blake3::hash_domain(
+            "org.frankensim.fs-roofline.foreign-executable.test.v1",
+            b"rebuilt binary",
+        );
+        assert_eq!(
+            staleness_at_with_build(
+                &ledger,
+                &results[0].kernel,
+                &results[0].version,
+                axes.fingerprint,
+                Some(baseline.content_hash()),
+                recorded_at,
+                foreign_build,
+            )
+            .expect("classify"),
+            Staleness::BuildDrift
+        );
+    }
+
+    #[test]
+    fn bit_identical_reruns_keep_distinct_operation_bound_rows() {
+        let axes = synthetic_axes();
+        let (baseline, identity) = trusted_baseline(&axes);
+        let baseline_policy = AxisBaselinePolicy::new(Some(&baseline), &identity, 20_010);
+        let mut first_registry: Vec<Box<dyn RooflineKernel>> = vec![Box::new(ReceiptKernel {
+            elements: 1,
+            value: 0,
+        })];
+        let mut first_results = run_registry(&mut first_registry, 0, 1, &axes);
+        let mut second_results = first_results.clone();
+        let mut first_finalized = finalize_registry_tuning(
+            &mut first_registry,
+            &axes,
+            &axes,
+            baseline_policy,
+            &first_results,
+        )
+        .expect("finalize first identical run");
+        let mut second_registry: Vec<Box<dyn RooflineKernel>> = vec![Box::new(ReceiptKernel {
+            elements: 1,
+            value: 0,
+        })];
+        let mut second_finalized = finalize_registry_tuning(
+            &mut second_registry,
+            &axes,
+            &axes,
+            baseline_policy,
+            &second_results,
+        )
+        .expect("finalize second identical run");
+        assert_eq!(
+            first_finalized.receipt_identity(),
+            second_finalized.receipt_identity(),
+            "fixture must exercise an exact receipt collision"
+        );
+
+        let ledger = Ledger::open(":memory:").expect("in-memory ledger");
+        let first_op = record_run(
+            &ledger,
+            &axes,
+            &axes,
+            baseline_policy,
+            &mut first_finalized,
+            &mut first_results,
+        )
+        .expect("record first identical run");
+        let second_op = record_run(
+            &ledger,
+            &axes,
+            &axes,
+            baseline_policy,
+            &mut second_finalized,
+            &mut second_results,
+        )
+        .expect("record second identical run");
+        assert_ne!(first_op, second_op);
+
+        let rows = ledger
+            .tune_rows("receipt-kernel")
+            .expect("query retained run history");
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().any(|row| {
+            row.shape_class
+                == tune_measurement_shape_class("1", first_finalized.receipt_identity(), first_op)
+        }));
+        assert!(rows.iter().any(|row| {
+            row.shape_class
+                == tune_measurement_shape_class("1", second_finalized.receipt_identity(), second_op)
+        }));
     }
 }

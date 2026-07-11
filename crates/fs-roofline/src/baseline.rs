@@ -11,7 +11,8 @@
 //!
 //! The fix is a separately ADMITTED baseline: a fingerprint-specific
 //! record of what this machine's axes measure when quiet, carrying
-//! provenance (who promoted it, from which runs, why), an age policy,
+//! provenance (who promoted it, retained source-receipt identities, why),
+//! an age policy,
 //! and the environment identity (OS/arch/firmware declaration) it is
 //! valid for. Citable gates then require the CURRENT axes to sit inside
 //! declared bands around the trusted baseline.
@@ -21,7 +22,9 @@
 //!    measures about itself can authorize itself.
 //! 2. Promotion is explicit and governed: at least
 //!    [`MIN_PROMOTION_RUNS`] mutually-agreeing candidate runs plus a
-//!    named operator and a non-blank justification.
+//!    named operator annotation and a non-blank justification. The annotation
+//!    is not an authenticated signature; protected-store/operator authority is
+//!    an explicit trust boundary until a verifier capability is wired.
 //! 3. Admission against the baseline refuses degraded, suspiciously
 //!    fast, stale, and identity-drifted axes — each with a distinct,
 //!    teaching verdict.
@@ -29,6 +32,8 @@
 //!    in-place mutation API.
 
 use crate::axes::{MAX_AXIS_REPROBE_DRIFT, MachineAxes};
+use fs_blake3::{ContentHash, hash_domain};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 /// Lower trust band: each current axis must be at least this fraction of
@@ -49,12 +54,21 @@ pub const DEFAULT_BASELINE_AGE_DAYS: u32 = 90;
 pub const MAX_BASELINE_AGE_DAYS: u32 = 365;
 
 /// Minimum mutually-agreeing candidate runs behind one promotion.
+/// This is a governance floor, not a statistical confidence claim: repeated
+/// agreement cannot independently prove that the host was quiet.
 pub const MIN_PROMOTION_RUNS: usize = 3;
 
-/// Bounded store parsing (mirrors the tune-store discipline).
-const MAX_BASELINE_STORE_BYTES: usize = 1024 * 1024;
+/// Maximum encoded baseline-store size accepted by parsers and CLI readers.
+pub const MAX_BASELINE_STORE_BYTES: usize = 1024 * 1024;
 const MAX_BASELINE_LINE_BYTES: usize = 16 * 1024;
 const MAX_BASELINE_STRING_BYTES: usize = 4096;
+
+/// Canonical baseline-record schema. A policy or probe-semantics change must
+/// use a new schema rather than silently reinterpreting old evidence.
+pub const BASELINE_SCHEMA_VERSION: u32 = 1;
+
+/// Domain for the content identity of one admitted baseline record.
+pub const BASELINE_HASH_DOMAIN: &str = "frankensim.fs-roofline.baseline.v1";
 
 /// The environment identity a baseline is valid for. `firmware` is a
 /// DECLARED string (OS build / kernel release / SMC version — whatever
@@ -64,66 +78,200 @@ const MAX_BASELINE_STRING_BYTES: usize = 4096;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BaselineIdentity {
     /// fs-substrate topology fingerprint.
-    pub fingerprint: u64,
+    fingerprint: u64,
     /// CPU brand string.
-    pub cpu_brand: String,
+    cpu_brand: String,
     /// Logical CPU count.
-    pub logical_cpus: u32,
+    logical_cpus: u32,
     /// Operating system (`std::env::consts::OS` at promotion).
-    pub os: String,
+    os: String,
     /// ISA (`std::env::consts::ARCH` at promotion).
-    pub arch: String,
+    arch: String,
     /// Declared firmware/OS-build identity.
-    pub firmware: String,
+    firmware: String,
 }
 
 impl BaselineIdentity {
     /// The identity of the current process's environment for `axes`,
     /// with the operator's declared firmware string.
-    #[must_use]
-    pub fn current(axes: &MachineAxes, firmware: impl Into<String>) -> BaselineIdentity {
-        BaselineIdentity {
+    ///
+    /// # Errors
+    /// Refuses blank, control-bearing, or oversized identity fields and an
+    /// axis record with no logical CPUs.
+    pub fn current(
+        axes: &MachineAxes,
+        firmware: impl Into<String>,
+    ) -> Result<BaselineIdentity, PromotionError> {
+        let identity = BaselineIdentity {
             fingerprint: axes.fingerprint,
             cpu_brand: axes.cpu_brand.clone(),
             logical_cpus: axes.logical_cpus,
             os: std::env::consts::OS.to_string(),
             arch: std::env::consts::ARCH.to_string(),
             firmware: firmware.into(),
+        };
+        validate_identity(&identity)?;
+        Ok(identity)
+    }
+
+    /// Topology fingerprint.
+    #[must_use]
+    pub fn fingerprint(&self) -> u64 {
+        self.fingerprint
+    }
+
+    /// CPU brand string.
+    #[must_use]
+    pub fn cpu_brand(&self) -> &str {
+        &self.cpu_brand
+    }
+
+    /// Logical CPU count.
+    #[must_use]
+    pub fn logical_cpus(&self) -> u32 {
+        self.logical_cpus
+    }
+
+    /// Operating-system identity.
+    #[must_use]
+    pub fn os(&self) -> &str {
+        &self.os
+    }
+
+    /// Architecture identity.
+    #[must_use]
+    pub fn arch(&self) -> &str {
+        &self.arch
+    }
+
+    /// Declared firmware/OS-build identity.
+    #[must_use]
+    pub fn firmware(&self) -> &str {
+        &self.firmware
+    }
+}
+
+/// One candidate axis probe plus the content identity of its retained source
+/// receipt. The hash makes promotions traceable and duplicate-resistant; it
+/// does not by itself authenticate who produced the receipt. Production
+/// promotion therefore remains a trusted-operator boundary until a signature
+/// verifier capability is wired.
+#[derive(Debug, Clone)]
+pub struct BaselineCandidate {
+    axes: MachineAxes,
+    identity: BaselineIdentity,
+    source_receipt: ContentHash,
+}
+
+impl BaselineCandidate {
+    /// Bind a plausible axis probe and its environment to a retained receipt.
+    ///
+    /// # Errors
+    /// Refuses implausible axes or an identity that does not describe them.
+    pub fn from_receipt(
+        axes: MachineAxes,
+        identity: BaselineIdentity,
+        source_receipt: ContentHash,
+    ) -> Result<Self, PromotionError> {
+        validate_identity(&identity)?;
+        if let Some(reason) = axes.plausibility_error() {
+            return Err(PromotionError {
+                detail: format!("candidate axes fail plausibility floors: {reason}"),
+            });
         }
+        validate_identity_matches_axes(&identity, &axes)?;
+        Ok(Self {
+            axes,
+            identity,
+            source_receipt,
+        })
+    }
+
+    /// Candidate axes.
+    #[must_use]
+    pub fn axes(&self) -> &MachineAxes {
+        &self.axes
+    }
+
+    /// Candidate environment identity.
+    #[must_use]
+    pub fn identity(&self) -> &BaselineIdentity {
+        &self.identity
+    }
+
+    /// Retained source-receipt identity.
+    #[must_use]
+    pub fn source_receipt(&self) -> ContentHash {
+        self.source_receipt
     }
 }
 
 /// Who promoted a baseline, from what, and why.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BaselineProvenance {
-    /// Named operator (non-blank; "governed" means someone signs).
-    pub promoted_by: String,
+    /// Named operator annotation (non-blank, but not authenticated).
+    promoted_by: String,
     /// Non-blank justification recorded with the promotion.
-    pub justification: String,
+    justification: String,
     /// Promotion day (days since the Unix epoch — see
     /// [`days_since_epoch_now`]).
-    pub promoted_day: u64,
-    /// How many mutually-agreeing candidate runs backed the promotion.
-    pub source_runs: u32,
+    promoted_day: u64,
+    /// Sorted, unique identities of the retained candidate receipts.
+    source_receipts: Vec<ContentHash>,
+}
+
+impl BaselineProvenance {
+    /// Named promoting operator. This is an annotation, not an authenticated
+    /// signature.
+    #[must_use]
+    pub fn promoted_by(&self) -> &str {
+        &self.promoted_by
+    }
+
+    /// Promotion justification.
+    #[must_use]
+    pub fn justification(&self) -> &str {
+        &self.justification
+    }
+
+    /// Promotion day, as a Unix-epoch day.
+    #[must_use]
+    pub fn promoted_day(&self) -> u64 {
+        self.promoted_day
+    }
+
+    /// Sorted, unique source-receipt identities.
+    #[must_use]
+    pub fn source_receipts(&self) -> &[ContentHash] {
+        &self.source_receipts
+    }
+
+    /// Number of retained source receipts.
+    #[must_use]
+    pub fn source_runs(&self) -> usize {
+        self.source_receipts.len()
+    }
 }
 
 /// A trusted, admitted baseline for one machine fingerprint.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BaselineAxes {
+    /// Canonical record schema.
+    schema_version: u32,
     /// The environment this baseline describes.
-    pub identity: BaselineIdentity,
+    identity: BaselineIdentity,
     /// Trusted single-thread STREAM bandwidth, GB/s.
-    pub bandwidth_single_gbs: f64,
+    bandwidth_single_gbs: f64,
     /// Trusted all-core STREAM bandwidth, GB/s.
-    pub bandwidth_all_core_gbs: f64,
+    bandwidth_all_core_gbs: f64,
     /// Trusted single-thread FMA throughput, GFLOP/s.
-    pub peak_single_gflops: f64,
+    peak_single_gflops: f64,
     /// Trusted all-core FMA throughput, GFLOP/s.
-    pub peak_all_core_gflops: f64,
+    peak_all_core_gflops: f64,
     /// Promotion provenance.
-    pub provenance: BaselineProvenance,
+    provenance: BaselineProvenance,
     /// This baseline's age policy in days (≤ [`MAX_BASELINE_AGE_DAYS`]).
-    pub age_policy_days: u32,
+    age_policy_days: u32,
 }
 
 /// Why a promotion was refused.
@@ -140,6 +288,29 @@ impl core::fmt::Display for PromotionError {
 }
 
 impl core::error::Error for PromotionError {}
+
+/// Wall-clock failure while establishing an epoch day for promotion or
+/// admission. A citable path must fail closed rather than substitute day zero.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaselineClockError {
+    detail: &'static str,
+}
+
+impl BaselineClockError {
+    /// Stable diagnostic text.
+    #[must_use]
+    pub fn detail(&self) -> &'static str {
+        self.detail
+    }
+}
+
+impl core::fmt::Display for BaselineClockError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "baseline clock refused: {}", self.detail)
+    }
+}
+
+impl core::error::Error for BaselineClockError {}
 
 /// The verdict of checking current axes against a trusted baseline.
 /// Only [`BaselineVerdict::Trusted`] supports citable gates.
@@ -181,6 +352,31 @@ pub enum BaselineVerdict {
         /// The first field that differed.
         field: &'static str,
     },
+    /// The supplied axes were not credible enough to evaluate.
+    InvalidAxes {
+        /// Which probe failed.
+        probe: &'static str,
+        /// Stable plausibility diagnostic.
+        reason: &'static str,
+    },
+    /// The pre/post probes did not corroborate one another.
+    ReprobeFailed {
+        /// Stable reprobe diagnostic.
+        reason: &'static str,
+    },
+    /// The observed clock precedes the promotion timestamp. Saturating age
+    /// arithmetic would make this baseline appear permanently young.
+    ClockRollback {
+        /// Observed Unix-epoch day.
+        now_day: u64,
+        /// Baseline promotion Unix-epoch day.
+        promoted_day: u64,
+    },
+    /// An in-memory record violated the sealed baseline invariants.
+    InvalidBaseline {
+        /// Structural validation diagnostic.
+        reason: String,
+    },
 }
 
 impl BaselineVerdict {
@@ -197,10 +393,16 @@ impl BaselineVerdict {
             BaselineVerdict::Trusted => "{\"baseline\":\"trusted\"}".to_string(),
             BaselineVerdict::Unbaselined => "{\"baseline\":\"unbaselined\"}".to_string(),
             BaselineVerdict::Degraded { axis, ratio } => {
-                format!("{{\"baseline\":\"degraded\",\"axis\":\"{axis}\",\"ratio\":{ratio:.3}}}")
+                format!(
+                    "{{\"baseline\":\"degraded\",\"axis\":\"{axis}\",\"ratio\":{}}}",
+                    json_f64(*ratio)
+                )
             }
             BaselineVerdict::Suspect { axis, ratio } => {
-                format!("{{\"baseline\":\"suspect\",\"axis\":\"{axis}\",\"ratio\":{ratio:.3}}}")
+                format!(
+                    "{{\"baseline\":\"suspect\",\"axis\":\"{axis}\",\"ratio\":{}}}",
+                    json_f64(*ratio)
+                )
             }
             BaselineVerdict::Stale {
                 age_days,
@@ -211,17 +413,55 @@ impl BaselineVerdict {
             BaselineVerdict::IdentityDrift { field } => {
                 format!("{{\"baseline\":\"identity-drift\",\"field\":\"{field}\"}}")
             }
+            BaselineVerdict::InvalidAxes { probe, reason } => format!(
+                "{{\"baseline\":\"invalid-axes\",\"probe\":\"{probe}\",\"reason\":\"{}\"}}",
+                json_escaped(reason)
+            ),
+            BaselineVerdict::ReprobeFailed { reason } => format!(
+                "{{\"baseline\":\"reprobe-failed\",\"reason\":\"{}\"}}",
+                json_escaped(reason)
+            ),
+            BaselineVerdict::ClockRollback {
+                now_day,
+                promoted_day,
+            } => format!(
+                "{{\"baseline\":\"clock-rollback\",\"now_day\":{now_day},\"promoted_day\":{promoted_day}}}"
+            ),
+            BaselineVerdict::InvalidBaseline { reason } => format!(
+                "{{\"baseline\":\"invalid-record\",\"reason\":\"{}\"}}",
+                json_escaped(reason)
+            ),
         }
     }
 }
 
 /// Days since the Unix epoch, from the system clock. Tests inject their
 /// own day; production callers use this.
-#[must_use]
-pub fn days_since_epoch_now() -> u64 {
+///
+/// # Errors
+/// Refuses a wall clock before the Unix epoch. Returning zero here would make
+/// future-dated records appear fresh through saturating subtraction.
+pub fn days_since_epoch_now() -> Result<u64, BaselineClockError> {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs() / 86_400)
+        .map(|d| d.as_secs() / 86_400)
+        .map_err(|_| BaselineClockError {
+            detail: "system wall clock precedes the Unix epoch",
+        })
+}
+
+fn json_f64(value: f64) -> String {
+    if value.is_finite() {
+        format!("{value:.3}")
+    } else {
+        "null".to_string()
+    }
+}
+
+fn json_escaped(value: &str) -> String {
+    let mut out = String::new();
+    push_json_string_body(&mut out, value);
+    out
 }
 
 fn axes_quad(axes: &MachineAxes) -> [(&'static str, f64); 4] {
@@ -231,6 +471,121 @@ fn axes_quad(axes: &MachineAxes) -> [(&'static str, f64); 4] {
         ("peak_single_gflops", axes.peak_single_gflops),
         ("peak_all_core_gflops", axes.peak_all_core_gflops),
     ]
+}
+
+fn validate_text(field: &str, value: &str) -> Result<(), PromotionError> {
+    if value.trim().is_empty() {
+        return Err(PromotionError {
+            detail: format!("{field} must be non-blank"),
+        });
+    }
+    if value.len() > MAX_BASELINE_STRING_BYTES {
+        return Err(PromotionError {
+            detail: format!("{field} exceeds the {MAX_BASELINE_STRING_BYTES}-byte string bound"),
+        });
+    }
+    if value.chars().any(char::is_control) {
+        return Err(PromotionError {
+            detail: format!("{field} must not contain control characters"),
+        });
+    }
+    Ok(())
+}
+
+fn validate_identity(identity: &BaselineIdentity) -> Result<(), PromotionError> {
+    if identity.logical_cpus == 0 {
+        return Err(PromotionError {
+            detail: "identity logical CPU count is zero".to_string(),
+        });
+    }
+    for (field, value) in [
+        ("cpu_brand", identity.cpu_brand.as_str()),
+        ("os", identity.os.as_str()),
+        ("arch", identity.arch.as_str()),
+        ("firmware", identity.firmware.as_str()),
+    ] {
+        validate_text(field, value)?;
+    }
+    Ok(())
+}
+
+fn validate_identity_matches_axes(
+    identity: &BaselineIdentity,
+    axes: &MachineAxes,
+) -> Result<(), PromotionError> {
+    if identity.fingerprint != axes.fingerprint {
+        return Err(PromotionError {
+            detail: "candidate identity has a different machine fingerprint".to_string(),
+        });
+    }
+    if identity.logical_cpus != axes.logical_cpus || identity.cpu_brand != axes.cpu_brand {
+        return Err(PromotionError {
+            detail: "candidate identity has a different topology identity".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_baseline(baseline: &BaselineAxes) -> Result<(), PromotionError> {
+    if baseline.schema_version != BASELINE_SCHEMA_VERSION {
+        return Err(PromotionError {
+            detail: format!(
+                "unsupported baseline schema {} (expected {BASELINE_SCHEMA_VERSION})",
+                baseline.schema_version
+            ),
+        });
+    }
+    validate_identity(&baseline.identity)?;
+    validate_text("promoted_by", &baseline.provenance.promoted_by)?;
+    validate_text("justification", &baseline.provenance.justification)?;
+    if baseline.provenance.source_receipts.len() < MIN_PROMOTION_RUNS {
+        return Err(PromotionError {
+            detail: format!(
+                "baseline requires at least {MIN_PROMOTION_RUNS} source receipts, got {}",
+                baseline.provenance.source_receipts.len()
+            ),
+        });
+    }
+    if baseline
+        .provenance
+        .source_receipts
+        .windows(2)
+        .any(|pair| matches!(pair, [left, right] if left >= right))
+    {
+        return Err(PromotionError {
+            detail: "source receipt identities must be sorted and unique".to_string(),
+        });
+    }
+    if baseline.age_policy_days == 0 || baseline.age_policy_days > MAX_BASELINE_AGE_DAYS {
+        return Err(PromotionError {
+            detail: format!(
+                "age policy {} days is outside 1..={MAX_BASELINE_AGE_DAYS}",
+                baseline.age_policy_days
+            ),
+        });
+    }
+    let axes = MachineAxes {
+        fingerprint: baseline.identity.fingerprint,
+        cpu_brand: baseline.identity.cpu_brand.clone(),
+        logical_cpus: baseline.identity.logical_cpus,
+        bandwidth_single_gbs: baseline.bandwidth_single_gbs,
+        bandwidth_all_core_gbs: baseline.bandwidth_all_core_gbs,
+        peak_single_gflops: baseline.peak_single_gflops,
+        peak_all_core_gflops: baseline.peak_all_core_gflops,
+    };
+    if let Some(reason) = axes.plausibility_error() {
+        return Err(PromotionError {
+            detail: format!("baseline axes fail plausibility: {reason}"),
+        });
+    }
+    if baseline.canonical_json_unchecked().len() > MAX_BASELINE_LINE_BYTES {
+        return Err(PromotionError {
+            detail: format!(
+                "canonical baseline exceeds the {MAX_BASELINE_LINE_BYTES}-byte line bound"
+            ),
+        });
+    }
+    Ok(())
 }
 
 impl BaselineAxes {
@@ -243,6 +598,54 @@ impl BaselineAxes {
         ]
     }
 
+    /// Canonical record schema.
+    #[must_use]
+    pub fn schema_version(&self) -> u32 {
+        self.schema_version
+    }
+
+    /// Environment identity described by this baseline.
+    #[must_use]
+    pub fn identity(&self) -> &BaselineIdentity {
+        &self.identity
+    }
+
+    /// Trusted single-thread memory bandwidth, GB/s.
+    #[must_use]
+    pub fn bandwidth_single_gbs(&self) -> f64 {
+        self.bandwidth_single_gbs
+    }
+
+    /// Trusted all-core memory bandwidth, GB/s.
+    #[must_use]
+    pub fn bandwidth_all_core_gbs(&self) -> f64 {
+        self.bandwidth_all_core_gbs
+    }
+
+    /// Trusted single-thread compute peak, GFLOP/s.
+    #[must_use]
+    pub fn peak_single_gflops(&self) -> f64 {
+        self.peak_single_gflops
+    }
+
+    /// Trusted all-core compute peak, GFLOP/s.
+    #[must_use]
+    pub fn peak_all_core_gflops(&self) -> f64 {
+        self.peak_all_core_gflops
+    }
+
+    /// Promotion provenance, including every source-receipt identity.
+    #[must_use]
+    pub fn provenance(&self) -> &BaselineProvenance {
+        &self.provenance
+    }
+
+    /// Maximum trusted age in days.
+    #[must_use]
+    pub fn age_policy_days(&self) -> u32 {
+        self.age_policy_days
+    }
+
     /// Check `current` axes (already floor-plausible) against this
     /// baseline on day `now_day`.
     #[must_use]
@@ -252,29 +655,51 @@ impl BaselineAxes {
         identity: &BaselineIdentity,
         now_day: u64,
     ) -> BaselineVerdict {
-        if self.identity.fingerprint != current.fingerprint {
+        if let Err(error) = validate_baseline(self) {
+            return BaselineVerdict::InvalidBaseline {
+                reason: error.detail,
+            };
+        }
+        if let Some(reason) = current.plausibility_error() {
+            return BaselineVerdict::InvalidAxes {
+                probe: "current",
+                reason,
+            };
+        }
+        if identity.fingerprint != current.fingerprint
+            || self.identity.fingerprint != identity.fingerprint
+        {
             return BaselineVerdict::IdentityDrift {
                 field: "fingerprint",
             };
         }
-        if self.identity.logical_cpus != current.logical_cpus {
+        if identity.logical_cpus != current.logical_cpus
+            || self.identity.logical_cpus != identity.logical_cpus
+        {
             return BaselineVerdict::IdentityDrift {
                 field: "logical_cpus",
             };
         }
-        if self.identity.cpu_brand != current.cpu_brand {
+        if identity.cpu_brand != current.cpu_brand || self.identity.cpu_brand != identity.cpu_brand
+        {
             return BaselineVerdict::IdentityDrift { field: "cpu_brand" };
         }
-        if self.identity.os != identity.os {
+        if identity.os != std::env::consts::OS || self.identity.os != identity.os {
             return BaselineVerdict::IdentityDrift { field: "os" };
         }
-        if self.identity.arch != identity.arch {
+        if identity.arch != std::env::consts::ARCH || self.identity.arch != identity.arch {
             return BaselineVerdict::IdentityDrift { field: "arch" };
         }
         if self.identity.firmware != identity.firmware {
             return BaselineVerdict::IdentityDrift { field: "firmware" };
         }
-        let age_days = now_day.saturating_sub(self.provenance.promoted_day);
+        if now_day < self.provenance.promoted_day {
+            return BaselineVerdict::ClockRollback {
+                now_day,
+                promoted_day: self.provenance.promoted_day,
+            };
+        }
+        let age_days = now_day - self.provenance.promoted_day;
         if age_days > u64::from(self.age_policy_days) {
             return BaselineVerdict::Stale {
                 age_days,
@@ -295,13 +720,15 @@ impl BaselineAxes {
         BaselineVerdict::Trusted
     }
 
-    /// One canonical JSON line (bit-exact axes for lossless round-trip).
-    #[must_use]
-    pub fn to_jsonl(&self) -> String {
-        let mut s = String::with_capacity(512);
+    fn canonical_json_unchecked(&self) -> String {
+        let mut s = String::with_capacity(768);
         let _ = write!(
             s,
-            "{{\"fingerprint\":\"{:016x}\",\"cpu_brand\":",
+            "{{\"schema_version\":{},\"low_band_bits\":\"{:016x}\",\"high_band_bits\":\"{:016x}\",\"promotion_drift_bits\":\"{:016x}\",\"fingerprint\":\"{:016x}\",\"cpu_brand\":",
+            self.schema_version,
+            BASELINE_LOW_BAND.to_bits(),
+            BASELINE_HIGH_BAND.to_bits(),
+            MAX_AXIS_REPROBE_DRIFT.to_bits(),
             self.identity.fingerprint
         );
         push_json_string(&mut s, &self.identity.cpu_brand);
@@ -318,34 +745,101 @@ impl BaselineAxes {
         let _ = write!(
             s,
             ",\"bandwidth_single_bits\":\"{:016x}\",\"bandwidth_all_core_bits\":\"{:016x}\",\
-             \"peak_single_bits\":\"{:016x}\",\"peak_all_core_bits\":\"{:016x}\",\"promoted_by\":",
+             \"peak_single_bits\":\"{:016x}\",\"peak_all_core_bits\":\"{:016x}\",\"source_receipts\":[",
             self.bandwidth_single_gbs.to_bits(),
             self.bandwidth_all_core_gbs.to_bits(),
             self.peak_single_gflops.to_bits(),
             self.peak_all_core_gflops.to_bits(),
         );
+        for (index, receipt) in self.provenance.source_receipts.iter().enumerate() {
+            if index > 0 {
+                s.push(',');
+            }
+            push_json_string(&mut s, &receipt.to_hex());
+        }
+        s.push_str("],\"promoted_by\":");
         push_json_string(&mut s, &self.provenance.promoted_by);
         s.push_str(",\"justification\":");
         push_json_string(&mut s, &self.provenance.justification);
         let _ = write!(
             s,
             ",\"promoted_day\":{},\"source_runs\":{},\"age_policy_days\":{}}}",
-            self.provenance.promoted_day, self.provenance.source_runs, self.age_policy_days
+            self.provenance.promoted_day,
+            self.provenance.source_receipts.len(),
+            self.age_policy_days
         );
         s
     }
+
+    /// Canonical, self-contained JSON preimage. All floats are represented by
+    /// their exact bits and source receipts are sorted.
+    #[must_use]
+    pub fn canonical_json(&self) -> String {
+        self.canonical_json_unchecked()
+    }
+
+    /// Domain-separated identity of [`Self::canonical_json`].
+    #[must_use]
+    pub fn content_hash(&self) -> ContentHash {
+        hash_domain(BASELINE_HASH_DOMAIN, self.canonical_json().as_bytes())
+    }
+
+    /// Backwards-compatible JSON-lines spelling (without the trailing newline).
+    #[must_use]
+    pub fn to_jsonl(&self) -> String {
+        self.canonical_json()
+    }
+}
+
+// Compute the conservative per-axis maximum after enforcing mutual agreement.
+fn mutually_agreeing_maxima(
+    candidates: &[BaselineCandidate],
+    first: &BaselineCandidate,
+) -> Result<[f64; 4], PromotionError> {
+    let mut minima = [f64::INFINITY; 4];
+    let mut maxima = [0.0f64; 4];
+    for candidate in candidates {
+        for ((minimum, maximum), (_, value)) in minima
+            .iter_mut()
+            .zip(maxima.iter_mut())
+            .zip(axes_quad(&candidate.axes))
+        {
+            *minimum = minimum.min(value);
+            *maximum = maximum.max(value);
+        }
+    }
+    let mut promoted = [0.0f64; 4];
+    for (((axis, minimum), maximum), promoted_axis) in axes_quad(&first.axes)
+        .map(|(axis, _)| axis)
+        .into_iter()
+        .zip(minima)
+        .zip(maxima)
+        .zip(promoted.iter_mut())
+    {
+        if (maximum - minimum) / maximum > MAX_AXIS_REPROBE_DRIFT {
+            return Err(PromotionError {
+                detail: format!(
+                    "candidate runs disagree on {axis} beyond the {MAX_AXIS_REPROBE_DRIFT} drift \
+                     band ({minimum:.2} .. {maximum:.2}) — measure on a quiet host"
+                ),
+            });
+        }
+        *promoted_axis = maximum;
+    }
+    Ok(promoted)
 }
 
 /// Promote a trusted baseline from candidate runs — THE only way a
 /// baseline comes to exist.
 ///
 /// Requirements (each refused with a teaching detail):
-/// - at least [`MIN_PROMOTION_RUNS`] candidate runs;
-/// - every run floor-plausible, same fingerprint/topology, and every
+/// - at least [`MIN_PROMOTION_RUNS`] candidates with unique retained receipt
+///   identities;
+/// - every run floor-plausible, same complete environment identity, and every
 ///   axis pair within [`MAX_AXIS_REPROBE_DRIFT`] of the run minimum
 ///   (mutual agreement — one quiet run among crushed ones cannot
 ///   launder the set);
-/// - a named operator and non-blank justification;
+/// - a named operator annotation and non-blank justification;
 /// - an age policy within [`MAX_BASELINE_AGE_DAYS`].
 ///
 /// The promoted axes are the per-axis MAXIMUM over the runs: the best
@@ -353,11 +847,14 @@ impl BaselineAxes {
 /// true quiet capability, and a too-low baseline would inflate every
 /// later attainment claim.
 ///
+/// This function makes the record structurally traceable; it cannot prove that
+/// a caller-supplied source hash came from an authentic probe. Signature-backed
+/// source receipt verification remains a no-claim boundary.
+///
 /// # Errors
 /// [`PromotionError`] naming the failed requirement.
 pub fn promote_baseline(
-    runs: &[MachineAxes],
-    identity: BaselineIdentity,
+    candidates: &[BaselineCandidate],
     promoted_by: impl Into<String>,
     justification: impl Into<String>,
     promoted_day: u64,
@@ -370,11 +867,13 @@ pub fn promote_baseline(
             detail: "promotion requires a named operator".to_string(),
         });
     }
+    validate_text("promoted_by", &promoted_by)?;
     if justification.trim().is_empty() {
         return Err(PromotionError {
             detail: "promotion requires a non-blank justification".to_string(),
         });
     }
+    validate_text("justification", &justification)?;
     if age_policy_days == 0 || age_policy_days > MAX_BASELINE_AGE_DAYS {
         return Err(PromotionError {
             detail: format!(
@@ -382,67 +881,63 @@ pub fn promote_baseline(
             ),
         });
     }
-    if runs.len() < MIN_PROMOTION_RUNS {
+    if candidates.len() < MIN_PROMOTION_RUNS {
         return Err(PromotionError {
             detail: format!(
                 "promotion requires at least {MIN_PROMOTION_RUNS} candidate runs, got {}",
-                runs.len()
+                candidates.len()
             ),
         });
     }
-    for (index, run) in runs.iter().enumerate() {
-        if let Some(reason) = run.plausibility_error() {
+    let first = candidates.first().ok_or_else(|| PromotionError {
+        detail: "promotion has no first candidate".to_string(),
+    })?;
+    let identity = first.identity.clone();
+    validate_identity(&identity)?;
+    let mut source_receipts = BTreeSet::new();
+    for (index, candidate) in candidates.iter().enumerate() {
+        if let Some(reason) = candidate.axes.plausibility_error() {
             return Err(PromotionError {
                 detail: format!("candidate run {index} fails plausibility floors: {reason}"),
             });
         }
-        if run.fingerprint != identity.fingerprint {
+        validate_identity_matches_axes(&candidate.identity, &candidate.axes)?;
+        if candidate.identity != identity {
             return Err(PromotionError {
-                detail: format!("candidate run {index} has a different machine fingerprint"),
+                detail: format!("candidate run {index} has a different environment identity"),
             });
         }
-        if run.logical_cpus != identity.logical_cpus || run.cpu_brand != identity.cpu_brand {
+        if !source_receipts.insert(candidate.source_receipt) {
             return Err(PromotionError {
-                detail: format!("candidate run {index} has a different topology identity"),
+                detail: format!("candidate run {index} reuses a source receipt identity"),
             });
         }
     }
-    // Mutual agreement: for each axis, max/min across runs must sit
-    // within the reprobe drift band.
-    let mut promoted = [0.0f64; 4];
-    for (axis_index, promoted_axis) in promoted.iter_mut().enumerate() {
-        let values: Vec<f64> = runs
-            .iter()
-            .map(|run| axes_quad(run)[axis_index].1)
-            .collect();
-        let minimum = values.iter().copied().fold(f64::INFINITY, f64::min);
-        let maximum = values.iter().copied().fold(0.0f64, f64::max);
-        if (maximum - minimum) / maximum > MAX_AXIS_REPROBE_DRIFT {
-            return Err(PromotionError {
-                detail: format!(
-                    "candidate runs disagree on {} beyond the {MAX_AXIS_REPROBE_DRIFT} drift \
-                     band ({minimum:.2} .. {maximum:.2}) — measure on a quiet host",
-                    axes_quad(&runs[0])[axis_index].0
-                ),
-            });
-        }
-        *promoted_axis = maximum;
-    }
-    let source_runs = u32::try_from(runs.len()).expect("a plausible promotion run count fits u32");
-    Ok(BaselineAxes {
+    // Mutual agreement: for each axis, max/min across runs must sit within the
+    // reprobe drift band. The maximum is conservative against inflated claims.
+    let [
+        bandwidth_single_gbs,
+        bandwidth_all_core_gbs,
+        peak_single_gflops,
+        peak_all_core_gflops,
+    ] = mutually_agreeing_maxima(candidates, first)?;
+    let baseline = BaselineAxes {
+        schema_version: BASELINE_SCHEMA_VERSION,
         identity,
-        bandwidth_single_gbs: promoted[0],
-        bandwidth_all_core_gbs: promoted[1],
-        peak_single_gflops: promoted[2],
-        peak_all_core_gflops: promoted[3],
+        bandwidth_single_gbs,
+        bandwidth_all_core_gbs,
+        peak_single_gflops,
+        peak_all_core_gflops,
         provenance: BaselineProvenance {
             promoted_by,
             justification,
             promoted_day,
-            source_runs,
+            source_receipts: source_receipts.into_iter().collect(),
         },
         age_policy_days,
-    })
+    };
+    validate_baseline(&baseline)?;
+    Ok(baseline)
 }
 
 /// The combined citable-axis admission: absolute floors (last-resort
@@ -457,18 +952,20 @@ pub fn citable_axis_admission(
     identity: &BaselineIdentity,
     now_day: u64,
 ) -> BaselineVerdict {
-    if pre.plausibility_error().is_some()
-        || post.plausibility_error().is_some()
-        || pre.reprobe_error(post).is_some()
-    {
-        // The coarse checks already refuse; report through the nearest
-        // verdict (a degraded pair that also fails floors is degraded
-        // with an unknown ratio — the floors' own error strings travel
-        // in the existing environment-refusal path).
-        return BaselineVerdict::Degraded {
-            axis: "floors-or-reprobe",
-            ratio: f64::NAN,
+    if let Some(reason) = pre.plausibility_error() {
+        return BaselineVerdict::InvalidAxes {
+            probe: "pre",
+            reason,
         };
+    }
+    if let Some(reason) = post.plausibility_error() {
+        return BaselineVerdict::InvalidAxes {
+            probe: "post",
+            reason,
+        };
+    }
+    if let Some(reason) = pre.reprobe_error(post) {
+        return BaselineVerdict::ReprobeFailed { reason };
     }
     match baseline {
         None => BaselineVerdict::Unbaselined,
@@ -487,7 +984,7 @@ pub fn citable_axis_admission(
 /// stores are corruption (fail closed), mirroring the tune store.
 #[derive(Debug, Default)]
 pub struct BaselineStore {
-    baselines: Vec<BaselineAxes>,
+    baselines: BTreeMap<u64, BaselineAxes>,
 }
 
 impl BaselineStore {
@@ -500,25 +997,52 @@ impl BaselineStore {
     /// The admitted baseline for a fingerprint, if any.
     #[must_use]
     pub fn for_fingerprint(&self, fingerprint: u64) -> Option<&BaselineAxes> {
-        self.baselines
-            .iter()
-            .find(|b| b.identity.fingerprint == fingerprint)
+        self.baselines.get(&fingerprint)
     }
 
     /// Admit a promoted baseline, REPLACING any previous baseline for
     /// the same fingerprint (updates go through promotion, so the new
     /// record carries its own provenance).
-    pub fn admit(&mut self, baseline: BaselineAxes) {
-        self.baselines
-            .retain(|b| b.identity.fingerprint != baseline.identity.fingerprint);
-        self.baselines.push(baseline);
+    ///
+    /// # Errors
+    /// Refuses structurally invalid records, rollback/non-monotone updates,
+    /// and updates that would exceed the bounded store representation.
+    pub fn admit(&mut self, baseline: BaselineAxes) -> Result<(), PromotionError> {
+        validate_baseline(&baseline)?;
+        let fingerprint = baseline.identity.fingerprint;
+        if let Some(previous) = self.baselines.get(&fingerprint) {
+            if previous.content_hash() == baseline.content_hash() {
+                return Ok(());
+            }
+            if baseline.provenance.promoted_day <= previous.provenance.promoted_day {
+                return Err(PromotionError {
+                    detail: format!(
+                        "baseline update for {fingerprint:016x} is not newer than day {}",
+                        previous.provenance.promoted_day
+                    ),
+                });
+            }
+        }
+        let replaced_bytes = self
+            .baselines
+            .get(&fingerprint)
+            .map_or(0, |old| old.canonical_json().len() + 1);
+        let projected =
+            self.to_jsonl().len() - replaced_bytes + baseline.canonical_json().len() + 1;
+        if projected > MAX_BASELINE_STORE_BYTES {
+            return Err(PromotionError {
+                detail: format!("baseline store exceeds the {MAX_BASELINE_STORE_BYTES}-byte bound"),
+            });
+        }
+        self.baselines.insert(fingerprint, baseline);
+        Ok(())
     }
 
     /// Serialize as JSON lines.
     #[must_use]
     pub fn to_jsonl(&self) -> String {
         let mut out = String::new();
-        for baseline in &self.baselines {
+        for baseline in self.baselines.values() {
             out.push_str(&baseline.to_jsonl());
             out.push('\n');
         }
@@ -527,6 +1051,9 @@ impl BaselineStore {
 
     /// Parse a JSON-lines store STRICTLY: every line must be a canonical
     /// baseline record; duplicate fingerprints are corruption.
+    /// Structural validity and content identity detect substitution only when
+    /// a caller also binds an expected hash. This parser does not authenticate
+    /// operator authority; the store path remains a protected trust root.
     ///
     /// # Errors
     /// [`PromotionError`] (the store shares the promotion trust domain)
@@ -539,8 +1066,13 @@ impl BaselineStore {
         }
         let mut store = BaselineStore::new();
         for (line_number, line) in text.lines().enumerate() {
-            if line.trim().is_empty() {
-                continue;
+            if line.is_empty() {
+                return Err(PromotionError {
+                    detail: format!(
+                        "baseline store line {} is blank, not canonical",
+                        line_number + 1
+                    ),
+                });
             }
             let baseline = parse_baseline_line(line).ok_or_else(|| PromotionError {
                 detail: format!("baseline store line {} is not canonical", line_number + 1),
@@ -557,7 +1089,16 @@ impl BaselineStore {
                     ),
                 });
             }
-            store.baselines.push(baseline);
+            validate_baseline(&baseline).map_err(|error| PromotionError {
+                detail: format!(
+                    "baseline store line {} is invalid: {}",
+                    line_number + 1,
+                    error.detail
+                ),
+            })?;
+            store
+                .baselines
+                .insert(baseline.identity.fingerprint, baseline);
         }
         Ok(store)
     }
@@ -565,6 +1106,11 @@ impl BaselineStore {
 
 fn push_json_string(out: &mut String, value: &str) {
     out.push('"');
+    push_json_string_body(out, value);
+    out.push('"');
+}
+
+fn push_json_string_body(out: &mut String, value: &str) {
     for ch in value.chars() {
         match ch {
             '"' => out.push_str("\\\""),
@@ -578,7 +1124,6 @@ fn push_json_string(out: &mut String, value: &str) {
             c => out.push(c),
         }
     }
-    out.push('"');
 }
 
 /// Minimal strict line parser for the canonical writer grammar above.
@@ -600,7 +1145,7 @@ impl LineParser<'_> {
             let (index, ch) = chars.next()?;
             match ch {
                 '"' => {
-                    self.rest = &self.rest[index + 1..];
+                    self.rest = self.rest.get(index + 1..)?;
                     if out.len() > MAX_BASELINE_STRING_BYTES {
                         return None;
                     }
@@ -643,6 +1188,18 @@ impl LineParser<'_> {
         u64::from_str_radix(&raw, 16).ok()
     }
 
+    fn content_hash(&mut self) -> Option<ContentHash> {
+        let raw = self.string()?;
+        if raw.len() != 64
+            || !raw
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return None;
+        }
+        ContentHash::from_hex(&raw)
+    }
+
     fn decimal_u64(&mut self) -> Option<u64> {
         let end = self
             .rest
@@ -665,7 +1222,21 @@ fn parse_baseline_line(line: &str) -> Option<BaselineAxes> {
         return None;
     }
     let mut p = LineParser { rest: line };
-    p.take("{\"fingerprint\":")?;
+    p.take("{\"schema_version\":")?;
+    let schema_version = u32::try_from(p.decimal_u64()?).ok()?;
+    p.take(",\"low_band_bits\":")?;
+    if p.hex_u64()? != BASELINE_LOW_BAND.to_bits() {
+        return None;
+    }
+    p.take(",\"high_band_bits\":")?;
+    if p.hex_u64()? != BASELINE_HIGH_BAND.to_bits() {
+        return None;
+    }
+    p.take(",\"promotion_drift_bits\":")?;
+    if p.hex_u64()? != MAX_AXIS_REPROBE_DRIFT.to_bits() {
+        return None;
+    }
+    p.take(",\"fingerprint\":")?;
     let fingerprint = p.hex_u64()?;
     p.take(",\"cpu_brand\":")?;
     let cpu_brand = p.string()?;
@@ -685,6 +1256,20 @@ fn parse_baseline_line(line: &str) -> Option<BaselineAxes> {
     let peak_single_gflops = f64::from_bits(p.hex_u64()?);
     p.take(",\"peak_all_core_bits\":")?;
     let peak_all_core_gflops = f64::from_bits(p.hex_u64()?);
+    p.take(",\"source_receipts\":[")?;
+    let mut source_receipts = Vec::new();
+    if p.rest.starts_with(']') {
+        p.take("]")?;
+    } else {
+        loop {
+            source_receipts.push(p.content_hash()?);
+            if p.rest.starts_with(']') {
+                p.take("]")?;
+                break;
+            }
+            p.take(",")?;
+        }
+    }
     p.take(",\"promoted_by\":")?;
     let promoted_by = p.string()?;
     p.take(",\"justification\":")?;
@@ -692,34 +1277,18 @@ fn parse_baseline_line(line: &str) -> Option<BaselineAxes> {
     p.take(",\"promoted_day\":")?;
     let promoted_day = p.decimal_u64()?;
     p.take(",\"source_runs\":")?;
-    let source_runs = u32::try_from(p.decimal_u64()?).ok()?;
+    let source_runs = usize::try_from(p.decimal_u64()?).ok()?;
     p.take(",\"age_policy_days\":")?;
     let age_policy_days = u32::try_from(p.decimal_u64()?).ok()?;
     p.take("}")?;
     if !p.rest.is_empty() {
         return None;
     }
-    // Semantic refusals: the store only carries records promotion could
-    // have produced.
-    if promoted_by.trim().is_empty()
-        || justification.trim().is_empty()
-        || source_runs < MIN_PROMOTION_RUNS as u32
-        || age_policy_days == 0
-        || age_policy_days > MAX_BASELINE_AGE_DAYS
-        || logical_cpus == 0
-    {
+    if source_runs != source_receipts.len() {
         return None;
     }
-    let axes = [
-        bandwidth_single_gbs,
-        bandwidth_all_core_gbs,
-        peak_single_gflops,
-        peak_all_core_gflops,
-    ];
-    if axes.iter().any(|v| !v.is_finite() || *v <= 0.0) {
-        return None;
-    }
-    Some(BaselineAxes {
+    let baseline = BaselineAxes {
+        schema_version,
         identity: BaselineIdentity {
             fingerprint,
             cpu_brand,
@@ -736,10 +1305,12 @@ fn parse_baseline_line(line: &str) -> Option<BaselineAxes> {
             promoted_by,
             justification,
             promoted_day,
-            source_runs,
+            source_receipts,
         },
         age_policy_days,
-    })
+    };
+    validate_baseline(&baseline).ok()?;
+    (baseline.canonical_json() == line).then_some(baseline)
 }
 
 #[cfg(test)]
@@ -759,19 +1330,48 @@ mod tests {
     }
 
     fn identity() -> BaselineIdentity {
-        BaselineIdentity::current(&quiet_axes(), "build-24F74")
+        BaselineIdentity::current(&quiet_axes(), "build-24F74").expect("valid identity")
     }
 
-    fn promoted() -> BaselineAxes {
+    fn receipt(label: &str) -> ContentHash {
+        hash_domain(
+            "frankensim.fs-roofline.baseline.test-source",
+            label.as_bytes(),
+        )
+    }
+
+    fn candidate(axes: MachineAxes, firmware: &str, label: &str) -> BaselineCandidate {
+        let identity = BaselineIdentity::current(&axes, firmware).expect("candidate identity");
+        BaselineCandidate::from_receipt(axes, identity, receipt(label)).expect("candidate")
+    }
+
+    fn candidates_for(axes: &MachineAxes, prefix: &str) -> Vec<BaselineCandidate> {
+        (0..3)
+            .map(|index| candidate(axes.clone(), "build-24F74", &format!("{prefix}-{index}")))
+            .collect()
+    }
+
+    fn quiet_candidates(prefix: &str) -> Vec<BaselineCandidate> {
+        candidates_for(&quiet_axes(), prefix)
+    }
+
+    fn promoted_axes_at(axes: &MachineAxes, day: u64, prefix: &str) -> BaselineAxes {
         promote_baseline(
-            &[quiet_axes(), quiet_axes(), quiet_axes()],
-            identity(),
+            &candidates_for(axes, prefix),
             "operator-a",
             "three quiet-window runs on the reference host",
-            20_000,
+            day,
             90,
         )
         .expect("canonical promotion")
+    }
+
+    fn promoted_at(day: u64, prefix: &str) -> BaselineAxes {
+        promoted_axes_at(&quiet_axes(), day, prefix)
+    }
+
+    fn promoted() -> BaselineAxes {
+        promoted_at(20_000, "quiet")
     }
 
     /// QUIET DRILL: axes at the baseline are trusted end-to-end.
@@ -856,6 +1456,15 @@ mod tests {
                 .verdict(&quiet_axes(), &identity(), 20_000 + 90)
                 .trusted()
         );
+        let rollback = baseline.verdict(&quiet_axes(), &identity(), 19_999);
+        assert_eq!(
+            rollback,
+            BaselineVerdict::ClockRollback {
+                now_day: 19_999,
+                promoted_day: 20_000,
+            }
+        );
+        assert!(!rollback.trusted());
     }
 
     /// FIRMWARE-DRIFT DRILL: a changed firmware declaration is identity
@@ -863,8 +1472,8 @@ mod tests {
     #[test]
     fn firmware_drift_is_identity_refusal() {
         let baseline = promoted();
-        let mut moved = identity();
-        moved.firmware = "build-25A01".to_string();
+        let moved =
+            BaselineIdentity::current(&quiet_axes(), "build-25A01").expect("moved identity");
         assert_eq!(
             baseline.verdict(&quiet_axes(), &moved, 20_010),
             BaselineVerdict::IdentityDrift { field: "firmware" }
@@ -889,64 +1498,161 @@ mod tests {
         assert!(!verdict.trusted());
     }
 
+    #[test]
+    fn coarse_refusals_are_structured_and_always_valid_json() {
+        let baseline = promoted();
+        let mut invalid = quiet_axes();
+        invalid.bandwidth_single_gbs = f64::NAN;
+        let invalid_verdict = citable_axis_admission(
+            &invalid,
+            &quiet_axes(),
+            Some(&baseline),
+            &identity(),
+            20_010,
+        );
+        assert!(matches!(
+            invalid_verdict,
+            BaselineVerdict::InvalidAxes { probe: "pre", .. }
+        ));
+        let invalid_json = invalid_verdict.to_jsonl();
+        assert!(!invalid_json.contains("NaN") && !invalid_json.contains("inf"));
+
+        let mut drifted = quiet_axes();
+        drifted.bandwidth_single_gbs *= 0.5;
+        let reprobe = citable_axis_admission(
+            &quiet_axes(),
+            &drifted,
+            Some(&baseline),
+            &identity(),
+            20_010,
+        );
+        assert!(matches!(reprobe, BaselineVerdict::ReprobeFailed { .. }));
+        assert!(reprobe.to_jsonl().starts_with('{'));
+
+        let defensive = BaselineVerdict::Degraded {
+            axis: "synthetic",
+            ratio: f64::NAN,
+        }
+        .to_jsonl();
+        assert!(defensive.contains("\"ratio\":null"));
+    }
+
     /// GOVERNED PROMOTION: blank operator/justification, too few runs,
     /// disagreeing runs, foreign-fingerprint runs, and out-of-policy age
     /// are each refused with a teaching detail.
     #[test]
     fn promotion_is_governed_and_fails_closed() {
-        let runs = [quiet_axes(), quiet_axes(), quiet_axes()];
+        let runs = quiet_candidates("governed");
         let refuse = |result: Result<BaselineAxes, PromotionError>, needle: &str| {
             let err = result.expect_err(needle);
             assert!(err.detail.contains(needle), "{}", err.detail);
         };
         refuse(
-            promote_baseline(&runs, identity(), "  ", "why", 1, 90),
+            promote_baseline(&runs, "  ", "why", 1, 90),
             "named operator",
         );
+        refuse(promote_baseline(&runs, "op", " ", 1, 90), "justification");
         refuse(
-            promote_baseline(&runs, identity(), "op", " ", 1, 90),
-            "justification",
-        );
-        refuse(
-            promote_baseline(&runs[..2], identity(), "op", "why", 1, 90),
+            promote_baseline(&runs[..2], "op", "why", 1, 90),
             "at least 3",
         );
-        refuse(
-            promote_baseline(&runs, identity(), "op", "why", 1, 0),
-            "age policy",
-        );
-        refuse(
-            promote_baseline(&runs, identity(), "op", "why", 1, 9999),
-            "age policy",
-        );
+        refuse(promote_baseline(&runs, "op", "why", 1, 0), "age policy");
+        refuse(promote_baseline(&runs, "op", "why", 1, 9999), "age policy");
         // One crushed run among quiet ones: mutual agreement refuses.
-        let mut mixed = vec![quiet_axes(), quiet_axes(), quiet_axes()];
-        mixed[2].bandwidth_single_gbs = 6.0;
+        let mut crushed = quiet_axes();
+        crushed.bandwidth_single_gbs = 6.0;
+        crushed.bandwidth_all_core_gbs = 13.0;
+        let mixed = vec![
+            candidate(quiet_axes(), "build-24F74", "mixed-0"),
+            candidate(quiet_axes(), "build-24F74", "mixed-1"),
+            candidate(crushed, "build-24F74", "mixed-2"),
+        ];
+        refuse(promote_baseline(&mixed, "op", "why", 1, 90), "disagree");
+        // A foreign full environment identity cannot join a promotion.
+        let mut foreign_axes = quiet_axes();
+        foreign_axes.fingerprint = 0xF2;
+        let foreign = vec![
+            candidate(quiet_axes(), "build-24F74", "foreign-0"),
+            candidate(foreign_axes, "build-24F74", "foreign-1"),
+            candidate(quiet_axes(), "build-24F74", "foreign-2"),
+        ];
         refuse(
-            promote_baseline(&mixed, identity(), "op", "why", 1, 90),
-            "disagree",
+            promote_baseline(&foreign, "op", "why", 1, 90),
+            "environment identity",
         );
-        // A foreign-fingerprint run cannot join a promotion.
-        let mut foreign = vec![quiet_axes(), quiet_axes(), quiet_axes()];
-        foreign[1].fingerprint = 0xF2;
+        // An implausible run cannot become a candidate.
+        let mut implausible = quiet_axes();
+        implausible.peak_single_gflops = f64::NAN;
+        let implausible_identity =
+            BaselineIdentity::current(&implausible, "build-24F74").expect("identity fields valid");
         refuse(
-            promote_baseline(&foreign, identity(), "op", "why", 1, 90),
-            "fingerprint",
+            BaselineCandidate::from_receipt(
+                implausible,
+                implausible_identity,
+                receipt("implausible"),
+            )
+            .map(|_| promoted()),
+            "plausibility floors",
         );
-        // An implausible run cannot join a promotion.
-        let mut implausible = vec![quiet_axes(), quiet_axes(), quiet_axes()];
-        implausible[0].peak_single_gflops = f64::NAN;
+        // Three array entries must name three retained receipts.
+        let duplicate_receipt = receipt("duplicate");
+        let duplicate = (0..3)
+            .map(|_| {
+                BaselineCandidate::from_receipt(quiet_axes(), identity(), duplicate_receipt)
+                    .expect("candidate")
+            })
+            .collect::<Vec<_>>();
         refuse(
-            promote_baseline(&implausible, identity(), "op", "why", 1, 90),
-            "plausibility",
+            promote_baseline(&duplicate, "op", "why", 1, 90),
+            "reuses a source receipt",
         );
+    }
+
+    #[test]
+    fn canonical_hash_binds_schema_axes_policy_and_source_receipts() {
+        let baseline = promoted();
+        assert_eq!(baseline.schema_version(), BASELINE_SCHEMA_VERSION);
+        assert_eq!(baseline.identity().fingerprint(), 0xF1);
+        assert_eq!(baseline.provenance().source_runs(), 3);
+        assert!(
+            baseline
+                .provenance()
+                .source_receipts()
+                .windows(2)
+                .all(|pair| pair[0] < pair[1])
+        );
+        assert_eq!(
+            baseline.content_hash(),
+            hash_domain(BASELINE_HASH_DOMAIN, baseline.canonical_json().as_bytes())
+        );
+
+        let mut reversed = quiet_candidates("order");
+        reversed.reverse();
+        let reversed = promote_baseline(
+            &reversed,
+            "operator-a",
+            "three quiet-window runs on the reference host",
+            20_000,
+            90,
+        )
+        .expect("order-independent promotion");
+        let ordered = promote_baseline(
+            &quiet_candidates("order"),
+            "operator-a",
+            "three quiet-window runs on the reference host",
+            20_000,
+            90,
+        )
+        .expect("ordered promotion");
+        assert_eq!(ordered.content_hash(), reversed.content_hash());
+        assert_ne!(baseline.content_hash(), ordered.content_hash());
     }
 
     /// Store round-trip is lossless; corruption and duplicates refuse.
     #[test]
     fn store_round_trips_and_fails_closed() {
         let mut store = BaselineStore::new();
-        store.admit(promoted());
+        store.admit(promoted()).expect("admit");
         let text = store.to_jsonl();
         let back = BaselineStore::from_jsonl(&text).expect("canonical store parses");
         assert_eq!(back.for_fingerprint(0xF1), Some(&promoted()));
@@ -957,11 +1663,81 @@ mod tests {
         // Duplicate fingerprint: corruption.
         let duplicated = format!("{text}{text}");
         assert!(BaselineStore::from_jsonl(&duplicated).is_err());
-        // Admitting a re-promotion REPLACES (single record per machine).
-        let mut refreshed = promoted();
-        refreshed.provenance.promoted_day = 21_000;
-        store.admit(refreshed.clone());
+        assert!(BaselineStore::from_jsonl(&format!("\n{text}")).is_err());
+
+        // Semantics that promotion could not produce are refused on load.
+        let implausible = text.replace(
+            &format!("{:016x}", 100.0f64.to_bits()),
+            &format!("{:016x}", 1.0f64.to_bits()),
+        );
+        assert!(BaselineStore::from_jsonl(&implausible).is_err());
+        assert!(
+            BaselineStore::from_jsonl(&text.replace("\"source_runs\":3", "\"source_runs\":4"))
+                .is_err()
+        );
+        assert!(
+            BaselineStore::from_jsonl(&text.replace(
+                &format!("{:016x}", BASELINE_LOW_BAND.to_bits()),
+                &format!("{:016x}", 0.5f64.to_bits()),
+            ))
+            .is_err(),
+            "serialized admission policy is part of the baseline identity"
+        );
+        assert!(
+            BaselineStore::from_jsonl(&text.replace("operator-a", "oper\\u0061tor-a")).is_err(),
+            "alternate JSON encodings are not canonical"
+        );
+
+        // Updates are idempotent by hash and otherwise strictly monotone.
+        store.admit(promoted()).expect("idempotent admit");
+        let older = promoted_at(19_999, "older");
+        assert!(store.admit(older).is_err());
+        let refreshed = promoted_at(21_000, "refreshed");
+        store.admit(refreshed.clone()).expect("newer promotion");
         assert_eq!(store.for_fingerprint(0xF1), Some(&refreshed));
         assert_eq!(store.to_jsonl().lines().count(), 1);
+
+        // The store cannot be bypassed with an invalid in-memory record.
+        let mut invalid = promoted_at(22_000, "invalid");
+        invalid.bandwidth_single_gbs = 1.0;
+        assert!(store.admit(invalid).is_err());
+
+        // Canonical store order is a function of content, not admission order.
+        let mut second_axes = quiet_axes();
+        second_axes.fingerprint = 0xF2;
+        let first = promoted_at(20_000, "deterministic-first");
+        let second = promoted_axes_at(&second_axes, 20_000, "deterministic-second");
+        let mut forward = BaselineStore::new();
+        forward.admit(first.clone()).expect("first");
+        forward.admit(second.clone()).expect("second");
+        let mut reverse = BaselineStore::new();
+        reverse.admit(second).expect("second");
+        reverse.admit(first).expect("first");
+        assert_eq!(forward.to_jsonl(), reverse.to_jsonl());
+    }
+
+    #[test]
+    fn identity_and_serialization_bounds_fail_closed() {
+        assert!(BaselineIdentity::current(&quiet_axes(), " ").is_err());
+        assert!(BaselineIdentity::current(&quiet_axes(), "firmware\0").is_err());
+        assert!(BaselineIdentity::current(&quiet_axes(), "x".repeat(4097)).is_err());
+
+        let candidates = quiet_candidates("bounds");
+        assert!(promote_baseline(&candidates, "operator-a", "x".repeat(4097), 20_000, 90).is_err());
+
+        let mut huge_brand = quiet_axes();
+        huge_brand.cpu_brand = "x".repeat(MAX_BASELINE_STRING_BYTES);
+        let candidates = (0..3)
+            .map(|index| {
+                candidate(
+                    huge_brand.clone(),
+                    "y".repeat(4096).as_str(),
+                    &format!("huge-{index}"),
+                )
+            })
+            .collect::<Vec<_>>();
+        let error = promote_baseline(&candidates, "z".repeat(4096), "q".repeat(4096), 20_000, 90)
+            .expect_err("aggregate line bound");
+        assert!(error.detail.contains("line bound"), "{}", error.detail);
     }
 }

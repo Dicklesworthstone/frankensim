@@ -1,8 +1,9 @@
-//! The fs-fft PERF LANE (bead 27d3): mixed radix-4/2 Stockham
+//! The fs-fft PERF LANE (bead 27d3): mixed radix-8/4/2 Stockham
 //! throughput against the MEMORY-BOUND roofline (fs-substrate STREAM
 //! triad via fs-roofline axes — the plan's denominator for this
-//! kernel), ≥40% attainment gate at memory-resident sizes. Run
-//! explicitly in release:
+//! kernel). The ≥40% plan target is reported honestly; until it lands,
+//! the executable regression gate is a 15% anti-collapse floor at
+//! memory-resident sizes. Run explicitly in release:
 //! `cargo test -p fs-fft --release --test perf_lane -- --ignored --nocapture`
 //!
 //! One `run_once` is a forward+inverse ROUND TRIP (keeps values
@@ -12,7 +13,7 @@
 //! not a compulsory-miss fantasy.
 
 use fs_fft::{C64, Fft};
-use fs_roofline::{KernelSpec, MachineAxes, RooflineKernel, Threading, measure};
+use fs_roofline::{KernelSpec, MachineAxes, RooflineKernel, TargetAxis, Threading, measure};
 
 /// Stockham stage count for the mixed radix-8/4/2 formulation — MUST
 /// mirror the transform's decomposition exactly or the traffic model
@@ -60,6 +61,22 @@ fn butterfly_stages(n: usize) -> f64 {
     } else {
         stages(n) as f64
     }
+}
+
+fn measurement_json(n: usize, gated: bool, receipt: &str) -> String {
+    let receipt_fields = receipt
+        .strip_prefix('{')
+        .and_then(|fields| fields.strip_suffix('}'))
+        .expect("roofline attainment receipt must be a JSON object");
+    format!("{{\"metric\":\"fft-roundtrip\",\"n\":{n},\"gated\":{gated},{receipt_fields}}}")
+}
+
+#[test]
+fn measurement_receipt_is_one_json_object() {
+    assert_eq!(
+        measurement_json(16, true, "{\"schema\":\"attainment-v1\",\"value\":1}"),
+        "{\"metric\":\"fft-roundtrip\",\"n\":16,\"gated\":true,\"schema\":\"attainment-v1\",\"value\":1}"
+    );
 }
 
 struct FftRoundTrip {
@@ -110,6 +127,7 @@ impl RooflineKernel for FftRoundTrip {
             // is bandwidth at this intensity either way.
             flops_per_elem: 2.0 * (12.5 * bf + twiddle) + 2.0,
             threading: Threading::SingleThread,
+            target_axis: TargetAxis::BindingRoof,
             target_fraction: Some(0.40),
         }
     }
@@ -136,10 +154,9 @@ fn fft_attainment() {
     for &(n, gated) in &[(1usize << 16, false), (1 << 20, true), (1 << 22, true)] {
         let mut kern = FftRoundTrip::new(n);
         let att = measure(&mut kern, 1, 5, &axes);
-        println!(
-            "{{\"metric\":\"fft-roundtrip\",\"n\":{n},\"gated\":{gated},{}}}",
-            att.to_jsonl().trim_start_matches('{')
-        );
+        let receipt = att.to_jsonl();
+        let measurement = measurement_json(n, gated, &receipt);
+        println!("{measurement}");
         // An environment_invalid row gates NOTHING — neither pass nor
         // fail (bead 1n61: the first guarded storm-window run refused
         // every row, yet this harness still printed target_met:true
@@ -159,7 +176,7 @@ fn fft_attainment() {
             std::env::consts::OS,
             std::env::consts::ARCH
         );
-        return; // no claim either way from a contaminated environment
+        panic!("FFT roofline evidence rejected: contaminated environment");
     }
     // The 0.40 target is REPORTED per row; measured 0.26–0.43 across
     // runs on this machine, dominated by axis and load noise from

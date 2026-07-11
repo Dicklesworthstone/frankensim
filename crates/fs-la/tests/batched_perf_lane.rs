@@ -14,7 +14,7 @@
 //! (flop model documented), gated only against pathological collapse.
 
 use fs_la::batched::{BatchMat, batch_gemm, batch_lu};
-use fs_roofline::{KernelSpec, MachineAxes, RooflineKernel, Threading, measure};
+use fs_roofline::{KernelSpec, MachineAxes, RooflineKernel, TargetAxis, Threading, measure};
 
 struct BatchGemmKernel {
     k: usize,
@@ -47,6 +47,7 @@ impl RooflineKernel for BatchGemmKernel {
             bytes_per_elem: 3.0 * kf * kf * 8.0,
             flops_per_elem: 2.0 * kf * kf * kf,
             threading: Threading::SingleThread,
+            target_axis: TargetAxis::ComputePeak,
             target_fraction: Some(0.60),
         }
     }
@@ -74,6 +75,7 @@ impl RooflineKernel for BatchLuKernel {
             // ~(2/3)k³ multiply-adds = (4/3)k³ flops + k² divides.
             flops_per_elem: 4.0 / 3.0 * kf * kf * kf,
             threading: Threading::SingleThread,
+            target_axis: TargetAxis::BindingRoof,
             target_fraction: None, // reported; collapse-gated below
         }
     }

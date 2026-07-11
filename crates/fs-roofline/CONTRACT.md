@@ -1,15 +1,15 @@
 # CONTRACT: fs-roofline
 
-> Status: ACTIVE (harness receipt v2). Owns the roofline measurement discipline of
+> Status: ACTIVE (harness receipt v3). Owns the roofline measurement discipline of
 > plan §14: measured axes, intensity-derived limits, dispersion-reported
-> attainment, fingerprint-keyed ledger rows, staleness detection.
+> attainment, fingerprint-and-baseline-keyed ledger rows, staleness detection.
 
 ## Purpose and layer
 
 Performance claims as falsifiable targets: benchmark every registered
 kernel against its arithmetic-intensity-derived limit on the actual
-machine, ledger the result under the machine fingerprint, and alert when
-the fingerprint drifts. Layer: L6 (consumes fs-substrate, fs-simd,
+machine, ledger the result under the machine fingerprint plus historical
+baseline identity, and alert when either drifts. Layer: L6 (consumes fs-substrate, fs-simd,
 fs-blake3, fs-exec, fs-session, fs-ledger). Runtime dependencies remain workspace
 crates plus `std`.
 
@@ -31,7 +31,8 @@ crates plus `std`.
   The invalid verdict carries a reason and is never a performance pass or
   failure.
 - `run_admission_error` / `run_is_citable` — the publication boundary:
-  require exact pre/post axis agreement, private timed provenance, positive
+  require an explicit `AxisBaselinePolicy` whose selected baseline trusts both
+  exact pre/post probes, private timed provenance, positive
   work count and sample durations, raw-sample re-derivation, unmodified
   spec/derived fields, and unique kernel identities. GEMM additionally requires
   at least one warmup and an identical sealed decision/path binding after every
@@ -41,7 +42,10 @@ crates plus `std`.
   consume the kernel's pending marker; rejection also invalidates its local
   tuner decision. Every registry hook runs even if an earlier hook fails;
   failures are returned together in deterministic registry order after cleanup
-  drains. Publication does not happen here.
+  drains. The registry length and ordered kernel/version identities must match
+  the result set. Success returns a non-cloneable, one-shot
+  `FinalizedRegistryRun` bound to the exact axes, baseline receipt, and result
+  receipts. Publication does not happen here.
 - `SECTION_14_1_TARGETS` — the plan's target table as data; `landed`
   flips only when the owning kernel registers here (no silent coverage
   gaps).
@@ -49,12 +53,24 @@ crates plus `std`.
   exact sealed session row from their stable binding (fresh or adopted), plus
   metrics, `benchmark_result` events, and
   roofline `tune` rows keyed (kernel ×
-  `roofline-v2:<kernel-version>` × fingerprint LE bytes). Rejected input
-  publishes one rejection event and an Error op, never normal-looking metrics
+  `roofline-v6:<kernel-version>:run=<finalized-receipt>:op=<operation-id>` × fingerprint LE bytes
+  × 32-byte baseline hash). Rows are append-only per finalized receipt and bind
+  the exact executable-content identity, operation, baseline, repetition count,
+  and post-probe axes. Every measured payload is also stored as a
+  content-addressed `roofline-benchmark-result` artifact and linked as an `Out`
+  edge of that exact operation; the row binds the artifact hash. `record_run`
+  requires and consumes the matching one-shot token. Rejected input publishes the exact baseline-admission
+  event plus one rejection event and an Error op, never normal-looking metrics
   or tuning evidence; storage failures roll back the entire write set.
-- `staleness` — `MatchingIdentityAgeUnknown` / `FingerprintDrift` /
-  `NeverMeasured` per kernel version and fingerprint. The name deliberately
-  does not claim freshness because the tune schema has no timestamp.
+- `staleness` / `staleness_at` — `Fresh` / `Expired` / `ClockRollback` /
+  `FingerprintDrift` / `BaselineUnavailable` / `BaselineDrift` / `BuildDrift` /
+  `CorruptEvidence` / `NeverMeasured` per kernel version, fingerprint, selected
+  baseline, and exact current executable. Exact current-key rows are
+  semantically revalidated against canonical params, artifact bytes and output
+  edge, successful operation receipt, admitted baseline, and executable
+  identity. `Fresh` requires the newest current-build op to be no more than 30
+  days old. `staleness_at` takes explicit wall nanoseconds for deterministic
+  replay; `staleness` supplies the current clock.
 - `kernels::default_registry` — the stable test/meta registry: fs-simd
   axpy/dot/sum (report-only bands in v0). `SeededSlowKernel` is the separate
   meta-test kernel claiming a band it cannot meet.
@@ -72,7 +88,9 @@ crates plus `std`.
   evidence. Execution is sequential through exclusive `&mut RooflineKernel`;
   no wrapper lock hides tune state.
 - `roofline` CLI bin — axes line, per-kernel JSONL, §14.1 coverage table,
-  optional `--ledger` recording + staleness report.
+  optional `--baseline <jsonl>` plus required `--firmware <identity>`, and
+  optional `--ledger` recording + composite staleness report. Omitting the
+  baseline is an explicit report-only candidate run (`citable:false`).
 
 - `regress` module (plan §14.4, bead fz2.4): the regression layer.
   `gate` — DISPERSION-AWARE bands (k·σ against the rolling baseline,
@@ -101,13 +119,18 @@ crates plus `std`.
    hand calculations). This remains the binding-roof report. Verdicts compare
    `target_attainment` to the declared target: GEMM's 75% row is always divided
    by measured compute peak, even when memory bandwidth is the binding roof.
-3. Receipt schema v2 carries bit-exact pre-run axes, intensity spec, target
+3. Receipt schema v3 carries bit-exact pre-run axes, intensity spec, target
    axis, warmup count, every raw timed sample, median/p25/p75/dispersion, and
    exact derived-result bits. Rounded decimal fields are display-only. A
    standalone reader can rederive the reported rate, roof, target ratio, and
    variance bar.
-4. Ledger rows are keyed by kernel version and fingerprint. A drifted
-   fingerprint or version refuses reuse; matching identity has unknown age.
+4. Ledger rows are append-only per finalized run and keyed by kernel version,
+   finalized receipt, fingerprint, and admitted baseline. A drifted fingerprint,
+   version, baseline, or executable refuses reuse; a malformed exact-key row is
+   corrupt rather than fresh. Payload bytes must hash to a retained artifact
+   linked as an output of the row's exact successful op. Current-build evidence
+   is fresh through 30 days inclusive, expired afterward, and a clock earlier
+   than its newest op fails closed as rollback.
 5. Axes must be finite and positive, have a nonzero logical-CPU count, meet
    the 5 GB/s and 5 GFLOP/s single-thread reference-family floors, and have
    aggregate axes at least half their single-thread counterparts. These
@@ -146,6 +169,18 @@ crates plus `std`.
    traversals with sequential declared run ordinals, so NC/KC panels have
    distinct deterministic stream identities, while excluding nondeterministic
    steal, worker-distribution, and latency samples.
+10. Citable admission additionally requires an explicit `AxisBaselinePolicy`
+    whose selected baseline returns `Trusted` for both exact pre/post axis
+    receipts. `record_run` binds the bit-exact axis records, declared
+    environment/day, canonical baseline preimage, domain hash, and verdict in
+    the same transaction. `None` is an explicit unbaselined candidate policy,
+    never a permissive default; it publishes no metrics or tune rows.
+11. The ledger op's versions field contains a domain-separated hash of the
+    actual current executable bytes, not a checkout label or ambient CI
+    variable. Each roofline row binds that identity and staleness revalidates it
+    against both the successful op and the executable currently asking, so two
+    rebuilt binaries cannot share provenance merely because their source
+    revision string matches.
 
 ## Error model
 
@@ -184,8 +219,9 @@ None. All v0 behavior is `[S]` default-path.
 `tests/conformance.rs`: registry run + reporting shape (rf-001);
 seeded-slow kernel demonstrably below band on real axes (rf-002);
 ledgered run with versioned fingerprint-keyed tune rows, lint-clean (rf-003);
-identity-match-age-unknown/drift/never-measured plus rejection-without-publication
-(rf-004/004b); re-run reproducibility
+fresh/expiry/clock-rollback plus fingerprint/baseline drift, corrupt evidence,
+and never-measured states (rf-004), plus rejection-without-publication (rf-004b);
+re-run reproducibility
 within stated dispersion allowance (rf-005); CLI smoke incl. §14.1
 coverage table and structured refusals (rf-006). Unit tests cover
 attainment hand-calculations, order statistics, and axes sanity. The GEMM
@@ -197,7 +233,10 @@ persists the session row plus its roofline row, and a new process adopts the
 exact row identity without re-sweeping. Receipt regressions tamper every bound
 decision/path field, alter only one repetition, and remove warmup; all refuse
 admission. A registry-hook unit test proves the hook receives the complete
-pre/post admission decision.
+pre/post admission decision and drains every hook after a middle failure.
+Baseline integration tests prove an unbaselined first run and stable sustained
+contention cannot cross `run_is_citable`, while admitted ledger rows carry one
+canonical `axis_baseline_admission` event.
 
 ## No-claim boundaries
 
@@ -217,33 +256,43 @@ pre/post admission decision.
   and thermal controls are future scope (v0 measures whole-machine axes).
 - Static floors plus pre/post agreement cannot detect a host that is already
   degraded before the first probe and remains equally degraded through the
-  second. The `baseline` module (bead dfh3) closes this: binding nightly
-  gates MUST additionally pass `citable_axis_admission` against a
-  separately admitted `BaselineAxes` record (see the baseline section);
-  reporting-only lanes may run unbaselined but their measurements are
-  candidate evidence, never citable.
+  second. Every citable API and the CLI now require a separately admitted
+  `BaselineAxes` through `AxisBaselinePolicy`; reporting-only lanes may run
+  unbaselined but their measurements are candidate evidence, never citable.
 - `RooflineKernel::elements()` and intensity are asserted by the registered
-  implementation. Receipt v2 proves what was timed and how the arithmetic was
+  implementation. Receipt v3 proves what was timed and how the arithmetic was
   derived; it does not prove a custom trait implementation performed the work
   it claimed. Default-registry review is the v1 trust root; implementation
-  hashes remain follow-up scope.
+  hashes remain follow-up scope. Likewise, public callers currently supply the
+  pre/post `MachineAxes`; receipt admission proves agreement between the values
+  supplied, not that a caller actually performed the post-run probe. An opaque
+  production-run protocol that owns registry selection and both probes remains
+  `frankensim-epic-perf-fz2.5`; custom/public registry runs are candidate
+  evidence, not independently citable proof.
 - Verdict gating in CI is deliberately absent on shared runners; bands
   bind only on ledgered reference machines (nightly lane, later).
+- Baseline content hashes and source receipt IDs are tamper-evident
+  traceability, not authentication. `promoted_by` is free-text annotation and
+  the baseline store is a protected-operator trust root until verifier-backed
+  signatures and source authorization close
+  `frankensim-epic-perf-fz2.7`.
 
 ## Trusted historical axis baselines (bead dfh3)
 
 Sustained-contention detection that pre/post agreement cannot provide.
-`BaselineAxes` is a fingerprint-specific trusted record of the machine's
-quiet axes with provenance (named operator, justification, promotion
-day, source-run count), an age policy (≤ 365 days), and a declared
+`BaselineAxes` is an opaque schema-v1 record of the machine's quiet axes with
+provenance (named operator, justification, promotion day, and sorted unique
+source receipt identities), an age policy (≤ 365 days), and a declared
 environment identity (topology + OS + arch + firmware string, compared
-verbatim). Trust laws:
+verbatim). Its bit-exact canonical JSON has a domain-separated BLAKE3 identity.
+Trust laws:
 
 1. First-run measurements are CANDIDATE evidence (`Unbaselined`) — a
    probe can never authorize itself as its own baseline.
-2. `promote_baseline` is the only constructor: ≥ 3 floor-plausible,
-   same-identity candidate runs that mutually agree within the reprobe
-   drift band, plus a named operator and non-blank justification. The
+2. `promote_baseline` is the only public constructor: ≥ 3 floor-plausible,
+   same-identity `BaselineCandidate` values with distinct retained source
+   receipt hashes that mutually agree within the reprobe drift band, plus a
+   named operator and non-blank justification. The
    promoted value is the per-axis maximum over the runs (a too-low
    baseline would inflate later attainment). Updates are re-promotions;
    no in-place mutation API exists.
@@ -254,17 +303,21 @@ verbatim). Trust laws:
    baseline — the 6-GB/s-on-a-100-GB/s-host counterexample), `Suspect`
    (above 1.15× — not the machine the baseline describes), `Stale`
    (past the age policy), `IdentityDrift` (fingerprint/topology/OS/
-   arch/firmware mismatch, checked before any band math).
+   arch/firmware mismatch), `ClockRollback`, `InvalidAxes`, `ReprobeFailed`,
+   and `InvalidBaseline`. Every verdict serializes as valid JSON; non-finite
+   diagnostic ratios become `null`.
 4. `BaselineStore` is a strict bounded JSON-lines store, one baseline
-   per fingerprint; malformed lines, semantic impossibilities (blank
-   provenance, < 3 source runs, out-of-policy ages, non-finite axes),
-   and duplicate fingerprints are corruption, not last-write-wins.
+   per fingerprint in deterministic order. Admission revalidates every sealed
+   invariant; malformed lines, sub-floor/impossible axes, duplicate source
+   receipts/fingerprints, oversized records, and non-monotone replacement are
+   refusals, not last-write-wins.
 
 Drills (unit tests in `baseline.rs`): quiet-trusted, sustained
 contention refused despite pre/post self-agreement, suspiciously-fast
 refused, stale-by-age refused (boundary day still trusts), firmware and
 fingerprint drift refused, first-run-not-self-authorizing, all six
-promotion refusals, store round-trip + tamper/duplicate refusal.
+promotion refusals, future/rollback clocks, valid-JSON refusal receipts, source
+receipt uniqueness, and store round-trip + tamper/duplicate refusal.
 
 ## Fail-closed evidence screening (bead fz2.4.1)
 

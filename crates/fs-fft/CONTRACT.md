@@ -120,6 +120,9 @@ suite bit-for-bit on the golden-hash case.
   pass, executor-tiled pencils with cancellation polls. Higher-radix golden bumps are pre-authorized with justification —
   bumped twice so far (radix-2→4/2→8/4/2), each recorded at the golden and
   the current value four-quadrant verified (M4 + ts2 × debug + release).
+  The explicit perf lane reports that target and currently enforces only a 15%
+  anti-collapse floor; an environment-invalid measurement fails closed rather
+  than returning a green test with no admissible evidence.
 - The N-D transform is CORRECT and separable but not yet cache/execution
   optimized: it gathers each pencil into a temporary line (allocated per axis,
   reused across pencils) rather than blocking transposes or tiling on fs-exec.
