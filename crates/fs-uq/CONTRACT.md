@@ -134,7 +134,9 @@ at MATCHED estimator variance; cross-ISA golden hash.
 - Ground motions are Kanai–Tajimi synthetic; recorded-suite ingestion
   rides fs-scenario.
 - The CS applies to BOUNDED [0,1] outcomes via Hoeffding
-  sub-Gaussianity; unbounded losses need a declared sigma.
+  sub-Gaussianity; release and debug builds both refuse non-finite or
+  out-of-range samples before updating the process. The target half-width must
+  be finite and non-negative. Unbounded losses need a declared sigma.
 - `cvar` is the standard finite-sample empirical CVaR (Acerbi–Tasche): the mean
   over the worst `n·(1−β)` fraction of losses, with a FRACTIONAL weight on the
   boundary order statistic when `n·β` is not an integer. A plain top-`⌈n(1−β)⌉`

@@ -33,6 +33,10 @@ pub fn estimate_probability_anytime(
     half_width: f64,
     max_n: u64,
 ) -> AnytimeEstimate {
+    assert!(
+        half_width.is_finite() && half_width >= 0.0,
+        "target half-width must be finite and non-negative"
+    );
     // Bounded [0,1] variables are sub-Gaussian with sigma = 1/2
     // (Hoeffding), so the Gaussian-mixture CS applies.
     let mut cs = GaussianMixtureCs::new(0.5, 1.0, alpha);
@@ -40,7 +44,10 @@ pub fn estimate_probability_anytime(
     let mut n = 0u64;
     while n < max_n {
         let x = sample(n);
-        debug_assert!((0.0..=1.0).contains(&x), "bounded outcomes only");
+        assert!(
+            (0.0..=1.0).contains(&x),
+            "probability observations must lie in [0,1]; got {x}"
+        );
         cs.observe(x);
         sum += x;
         n += 1;

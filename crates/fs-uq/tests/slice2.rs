@@ -178,6 +178,28 @@ fn uq_004_anytime_stopping_is_valid_and_adaptive() {
 }
 
 #[test]
+fn anytime_probability_refuses_inputs_that_void_the_cs() {
+    for sample in [-0.1, 1.1, f64::NAN, f64::INFINITY] {
+        assert!(
+            std::panic::catch_unwind(|| {
+                let _ = estimate_probability_anytime(|_| sample, 0.05, 0.1, 1);
+            })
+            .is_err(),
+            "invalid bounded sample must fail before evidence: {sample}"
+        );
+    }
+    for half_width in [-0.1, f64::NAN, f64::INFINITY] {
+        assert!(
+            std::panic::catch_unwind(|| {
+                let _ = estimate_probability_anytime(|_| 0.0, 0.05, half_width, 1);
+            })
+            .is_err(),
+            "invalid stopping half-width must fail: {half_width}"
+        );
+    }
+}
+
+#[test]
 fn uq_005_cvar_and_adaptive_mlmc_rate_recovery() {
     // CVaR sanity: the tail mean of a known sample set.
     let samples: Vec<f64> = (1..=100).map(f64::from).collect();
