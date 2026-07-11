@@ -22,22 +22,29 @@ use crate::highorder::quad1d::{element_matrices, gauss_legendre, lobatto_shapes}
 /// A Q_r tensor-product H¹ space on an m×m×m grid of the unit cube.
 pub struct TensorSpace {
     /// Cells per axis.
-    pub m: usize,
+    m: usize,
     /// Polynomial order r ≥ 1.
-    pub r: usize,
+    r: usize,
     /// 1D lattice size m·r + 1.
-    pub n1: usize,
+    n1: usize,
+    /// Local basis width r + 1.
+    p: usize,
+    /// Checked local scratch extent (r + 1)^3.
+    local_dofs: usize,
+    /// Checked global extent (m·r + 1)^3.
+    ndof: usize,
     /// 1D element mass matrix ((r+1)²) for h = 1/m.
-    pub mass_e: Vec<f64>,
+    mass_e: Vec<f64>,
     /// 1D element stiffness matrix for h = 1/m.
-    pub stiff_e: Vec<f64>,
+    stiff_e: Vec<f64>,
 }
 
 impl TensorSpace {
     /// Build the space (uniform grid, h = 1/m per axis).
     ///
     /// # Panics
-    /// If `m == 0`, `r == 0`, or a lattice/element-matrix extent overflows.
+    /// If `m == 0`, `r == 0`, or a lattice, local scratch, global DOF, or
+    /// element-matrix extent overflows.
     #[must_use]
     pub fn new(m: usize, r: usize) -> TensorSpace {
         assert!(m >= 1 && r >= 1, "TensorSpace needs m >= 1, r >= 1");
@@ -45,33 +52,71 @@ impl TensorSpace {
             .checked_mul(r)
             .and_then(|extent| extent.checked_add(1))
             .expect("TensorSpace lattice-size overflow");
+        let p = r.checked_add(1).expect("TensorSpace basis-width overflow");
+        let local_dofs = p
+            .checked_mul(p)
+            .and_then(|square| square.checked_mul(p))
+            .expect("TensorSpace local-cube extent overflow");
+        let ndof = n1
+            .checked_mul(n1)
+            .and_then(|square| square.checked_mul(n1))
+            .expect("TensorSpace dof-count overflow");
         let h = 1.0 / m as f64;
         let (mass_e, stiff_e) = element_matrices(r, h);
         TensorSpace {
             m,
             r,
             n1,
+            p,
+            local_dofs,
+            ndof,
             mass_e,
             stiff_e,
         }
     }
 
-    /// Total dof count (m·r + 1)³.
-    ///
-    /// # Panics
-    /// If the cubic extent cannot be represented by `usize`.
+    /// Cells per coordinate axis.
     #[must_use]
-    pub fn ndof(&self) -> usize {
+    pub const fn m(&self) -> usize {
+        self.m
+    }
+
+    /// Polynomial order.
+    #[must_use]
+    pub const fn r(&self) -> usize {
+        self.r
+    }
+
+    /// One-dimensional global lattice size.
+    #[must_use]
+    pub const fn n1(&self) -> usize {
         self.n1
-            .checked_mul(self.n1)
-            .and_then(|square| square.checked_mul(self.n1))
-            .expect("TensorSpace dof-count overflow")
+    }
+
+    /// Canonical row-major one-dimensional element mass matrix.
+    #[must_use]
+    pub fn element_mass_matrix(&self) -> &[f64] {
+        &self.mass_e
+    }
+
+    /// Canonical row-major one-dimensional element stiffness matrix.
+    #[must_use]
+    pub fn element_stiffness_matrix(&self) -> &[f64] {
+        &self.stiff_e
+    }
+
+    /// Total dof count (m·r + 1)³.
+    #[must_use]
+    pub const fn ndof(&self) -> usize {
+        self.ndof
     }
 
     /// Global 1D lattice index of local dof `l` (Lobatto order:
     /// 0 = left vertex, 1 = right vertex, k ≥ 2 = bubbles) in cell c.
     #[must_use]
     pub fn lat1(&self, c: usize, l: usize) -> usize {
+        assert!(c < self.m, "cell index outside TensorSpace");
+        assert!(l <= self.r, "local basis index outside TensorSpace");
         match l {
             0 => c * self.r,
             1 => (c + 1) * self.r,
@@ -82,6 +127,10 @@ impl TensorSpace {
     /// Global dof id of lattice point (i, j, k).
     #[must_use]
     pub fn gid(&self, i: usize, j: usize, k: usize) -> usize {
+        assert!(
+            i < self.n1 && j < self.n1 && k < self.n1,
+            "lattice index outside TensorSpace"
+        );
         (i * self.n1 + j) * self.n1 + k
     }
 
@@ -89,7 +138,8 @@ impl TensorSpace {
     /// face along its axis (only the two endpoint vertex-chain dofs).
     #[must_use]
     pub fn on_axis_boundary(&self, i: usize) -> bool {
-        i == 0 || i == self.m * self.r
+        assert!(i < self.n1, "lattice index outside TensorSpace");
+        i == 0 || i == self.n1 - 1
     }
 
     /// SUM-FACTORIZED Poisson apply y = K·u (full space, no BC).
@@ -114,7 +164,7 @@ impl TensorSpace {
         // (baseline x86 lowers mul_add to a per-element libm CALL —
         // measured 0.026 attainment); elsewhere identical codegen to
         // calling the body directly. Bit-identical either way.
-        match self.r + 1 {
+        match self.p {
             2 => apply_mono_dispatch::<2>(self, u, &mut y),
             3 => apply_mono_dispatch::<3>(self, u, &mut y),
             4 => apply_mono_dispatch::<4>(self, u, &mut y),
@@ -135,6 +185,7 @@ impl TensorSpace {
     #[inline(always)]
     pub(crate) fn apply_mono_body<const P: usize>(&self, u: &[f64], y: &mut [f64]) {
         const { assert!(P <= 8) }
+        assert_eq!(P, self.p, "monomorphized basis width mismatch");
         let n1 = self.n1;
         let (mut local, mut t1, mut t2, mut acc) =
             ([0.0f64; 512], [0.0f64; 512], [0.0f64; 512], [0.0f64; 512]);
@@ -200,11 +251,11 @@ impl TensorSpace {
 
     /// The runtime-p fallback (r ≥ 8) — the original loop structure.
     fn apply_gen(&self, u: &[f64], y: &mut [f64]) {
-        let p = self.r + 1;
-        let mut local = vec![0.0f64; p * p * p];
-        let mut t1 = vec![0.0f64; p * p * p];
-        let mut t2 = vec![0.0f64; p * p * p];
-        let mut acc = vec![0.0f64; p * p * p];
+        let p = self.p;
+        let mut local = vec![0.0f64; self.local_dofs];
+        let mut t1 = vec![0.0f64; self.local_dofs];
+        let mut t2 = vec![0.0f64; self.local_dofs];
+        let mut acc = vec![0.0f64; self.local_dofs];
         for cx in 0..self.m {
             for cy in 0..self.m {
                 for cz in 0..self.m {
@@ -629,26 +680,37 @@ mod tests {
             .unwrap_or("non-string panic");
         assert!(lattice.contains("lattice-size overflow"), "{lattice}");
 
-        let wide = TensorSpace::new(usize::MAX / 2, 1);
-        let assembled = std::panic::catch_unwind(|| wide.assembled_1d())
-            .expect_err("assembled 1D extent must not wrap");
-        let assembled = assembled
+        let local_p = 1usize << (usize::BITS + 2) / 3;
+        let local = match std::panic::catch_unwind(|| TensorSpace::new(1, local_p - 1)) {
+            Ok(_) => panic!("local cube extent must not wrap"),
+            Err(payload) => payload,
+        };
+        let local = local
             .downcast_ref::<&str>()
             .copied()
-            .or_else(|| assembled.downcast_ref::<String>().map(String::as_str))
+            .or_else(|| local.downcast_ref::<String>().map(String::as_str))
             .unwrap_or("non-string panic");
-        assert!(
-            assembled.contains("assembled-1D extent overflow"),
-            "{assembled}"
-        );
+        assert!(local.contains("local-cube extent overflow"), "{local}");
 
-        let dofs = std::panic::catch_unwind(|| wide.ndof()).expect_err("dof extent must not wrap");
+        let dofs = match std::panic::catch_unwind(|| TensorSpace::new(usize::MAX / 2, 1)) {
+            Ok(_) => panic!("global dof extent must not wrap"),
+            Err(payload) => payload,
+        };
         let dofs = dofs
             .downcast_ref::<&str>()
             .copied()
             .or_else(|| dofs.downcast_ref::<String>().map(String::as_str))
             .unwrap_or("non-string panic");
         assert!(dofs.contains("dof-count overflow"), "{dofs}");
+    }
+
+    #[test]
+    fn tensor_index_helpers_reject_out_of_space_indices() {
+        let space = TensorSpace::new(1, 2);
+        assert!(std::panic::catch_unwind(|| space.lat1(1, 0)).is_err());
+        assert!(std::panic::catch_unwind(|| space.lat1(0, 3)).is_err());
+        assert!(std::panic::catch_unwind(|| space.gid(space.n1(), 0, 0)).is_err());
+        assert!(std::panic::catch_unwind(|| space.on_axis_boundary(space.n1())).is_err());
     }
 
     #[test]

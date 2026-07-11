@@ -97,7 +97,7 @@ fn sum_factorized_matches_assembled_kronecker() {
     // a tensor grid).
     for &(m, r) in &[(2usize, 1usize), (2, 3), (1, 5), (3, 2)] {
         let sp = TensorSpace::new(m, r);
-        let n1 = sp.n1;
+        let n1 = sp.n1();
         let (m1, k1) = sp.assembled_1d();
         let u = rand_vec(sp.ndof(), 30 + u32::try_from(10 * m + r).expect("small"));
         let y_fast = sp.apply_stiffness(&u);
@@ -247,7 +247,11 @@ fn highorder_golden_hash() {
     }
     // 1D element matrices at r = 4.
     let sp = TensorSpace::new(2, 4);
-    for v in sp.mass_e.iter().chain(&sp.stiff_e) {
+    for v in sp
+        .element_mass_matrix()
+        .iter()
+        .chain(sp.element_stiffness_matrix())
+    {
         feed(*v);
     }
     // Sum-factorized apply output sample.

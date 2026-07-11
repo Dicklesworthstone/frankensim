@@ -149,9 +149,11 @@ checkerboarding structurally instead of by stabilization folklore.
 ## Error model
 
 Structured panics on shape mismatches, out-of-range degrees, and
-degenerate tets (programmer/mesh errors). Tensor-product lattice, local
-element-matrix, and DOF extents are checked before allocation and panic rather
-than wrapping.
+degenerate tets (programmer/mesh errors). `TensorSpace` seals its extent-bearing
+fields; tensor-product lattice, local scratch cube, element-matrix, and global
+DOF extents are checked by its constructor before allocation and panic rather
+than wrapping. Public lattice-index helpers reject indices outside that sealed
+space.
 `betti` panics on i128
 overflow rather than degrade exactness. No Result-based paths in v1 —
 the inputs are meshes that upstream certificates (fs-rep-mesh,

@@ -161,7 +161,7 @@ struct VertexSchwarz {
 
 impl VertexSchwarz {
     fn new(space: &TensorSpace) -> VertexSchwarz {
-        let (m, r, n1) = (space.m, space.r, space.n1);
+        let (m, r, n1) = (space.m(), space.r(), space.n1());
         assert!(m >= 2, "vertex-patch Schwarz needs m >= 2");
         let (mass, stiff) = space.assembled_1d();
         let mut types = Vec::new();
@@ -207,7 +207,7 @@ impl VertexSchwarz {
         out.fill(0.0);
         let rhs: Vec<f64> = rhs.iter().zip(&self.dw).map(|(v, w)| v * w).collect();
         let rhs = rhs.as_slice();
-        let m = space.m;
+        let m = space.m();
         for vx in 1..m {
             let (lox, tx) = self.windows[vx - 1];
             let ax = &self.types[tx];
@@ -411,7 +411,7 @@ impl PMultigrid {
         // assembled 1D matrices restricted to interior dofs.
         let coarse_space = &levels.last().expect("nonempty").space;
         let (m1, k1) = coarse_space.assembled_1d();
-        let n1 = coarse_space.n1;
+        let n1 = coarse_space.n1();
         let mask = &levels.last().expect("nonempty").mask;
         let n_full = coarse_space.ndof();
         let mut slot = vec![usize::MAX; n_full];
@@ -474,8 +474,8 @@ impl PMultigrid {
     fn precond_apply(&self, li: usize, r: &[f64], s: &mut [f64]) {
         let lv = &self.levels[li];
         lv.schwarz.apply(&lv.space, r, s);
-        let ord = lv.space.r;
-        let n1c = self.levels.last().expect("nonempty").space.n1;
+        let ord = lv.space.r();
+        let n1c = self.levels.last().expect("nonempty").space.n1();
         let nred = self.coarse_interior.len();
         let mut rc = vec![0.0f64; nred];
         for (sl, &dof) in self.coarse_interior.iter().enumerate() {
@@ -581,7 +581,7 @@ impl PMultigrid {
         let fine = &self.levels[li];
         let coarse = &self.levels[li + 1];
         let map = coarse.inject1.as_ref().expect("coarse levels carry maps");
-        let ncc = coarse.space.n1;
+        let ncc = coarse.space.n1();
         let mut out = vec![0.0f64; coarse.space.ndof()];
         for i in 0..ncc {
             for j in 0..ncc {
@@ -598,7 +598,7 @@ impl PMultigrid {
         let fine = &self.levels[li];
         let coarse = &self.levels[li + 1];
         let map = coarse.inject1.as_ref().expect("coarse levels carry maps");
-        let ncc = coarse.space.n1;
+        let ncc = coarse.space.n1();
         for i in 0..ncc {
             for j in 0..ncc {
                 for k in 0..ncc {
