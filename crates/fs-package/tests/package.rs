@@ -171,6 +171,29 @@ fn in_memory_and_serialized_provenance_and_identity_gates_are_identical() {
 }
 
 #[test]
+fn in_memory_and_serialized_claim_statements_must_be_meaningful() {
+    for (statement, reason) in [
+        (" \t", "blank"),
+        ("TODO", "placeholder"),
+        (" n/A ", "placeholder"),
+    ] {
+        let pkg = EvidencePackage::new(prov()).with_claim(Claim::new(
+            "claim",
+            statement,
+            Color::Verified { lo: 0.0, hi: 1.0 },
+        ));
+        assert!(matches!(
+            pkg.verify(),
+            Err(PackageError::InvalidClaimStatement {
+                claim,
+                reason: found,
+            }) if claim == "claim" && found == reason
+        ));
+        assert_serialized_refuses(&pkg);
+    }
+}
+
+#[test]
 fn in_memory_and_serialized_estimate_gates_are_identical() {
     let blank_estimator = EvidencePackage::new(prov()).with_claim(Claim::new(
         "e",
@@ -406,6 +429,26 @@ fn falsifier_records_require_identity_work_and_outcome() {
         },
         "detail",
     );
+    for placeholder in ["TODO", " placeholder ", "N/A", "not run", "unknown"] {
+        assert_invalid(
+            FalsifierRecord {
+                name: placeholder.to_string(),
+                attempts: 1,
+                refuted: false,
+                detail: "no violation observed".to_string(),
+            },
+            "name",
+        );
+        assert_invalid(
+            FalsifierRecord {
+                name: "interval-probe".to_string(),
+                attempts: 1,
+                refuted: false,
+                detail: placeholder.to_string(),
+            },
+            "detail",
+        );
+    }
 }
 
 #[test]

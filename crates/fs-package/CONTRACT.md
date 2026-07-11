@@ -15,7 +15,12 @@ owner). Pure, deterministic; no I/O and no solver dependency.
 
 - `Claim { id, statement, color }` — a claim plus its epistemic color (which
   carries the certificate payload). Claim ids are non-blank and unique within
-  a package.
+  a package; statements are non-blank and cannot be reserved placeholder text.
+  `has_matching_validated_anchor()` exposes the exact dataset-anchor predicate
+  used by release admission, while `requires_release_falsifier()` identifies
+  Verified/Validated certificate-class claims and
+  `requires_validated_anchor()` identifies the stricter validated-only
+  obligation without exposing a second color algebra.
 - `Provenance { code_version, constellation_lock }`.
 - `EvidencePackage { format_version, claims, provenance, signature }` —
   builder: `new(prov).with_claim(..).signed(..)`.
@@ -31,13 +36,17 @@ owner). Pure, deterministic; no I/O and no solver dependency.
   - `to_json()` — deterministic self-describing JSON (carries the root hex).
 - `PackageReport { merkle_root, breakdown, claims }`.
 - `PackageError` — structured refusals for incomplete provenance, invalid or
-  duplicate claim ids, malformed color payloads, unsupported formats, receipt
-  mismatches/parents, malformed falsifier/anchor records, and refuted claims.
+  duplicate claim ids, blank/placeholder claim statements, malformed color
+  payloads, unsupported formats, receipt mismatches/parents, malformed
+  falsifier/anchor records, and refuted claims.
 
 ## Invariants
 
 - COMPLETENESS: reproducibility provenance fields and claim ids are non-blank;
-  claim ids are unique. A `Validated` claim must have a non-empty regime
+  claim ids are unique, and claim statements are meaningful rather than blank
+  or one of the reserved placeholders (`TODO`, `TBD`, `placeholder`, `N/A`/`NA`,
+  `none`, `not run`, `pending`, `unknown`, `-`, or `?`, case-insensitive). A
+  `Validated` claim must have a non-empty regime
   (`regime.bounds()` non-empty) whose axis names are non-blank and whose bounds
   are finite and ordered, plus a non-blank anchoring `dataset`. A `Verified`
   claim must carry a finite `[lo <= hi]` interval. An `Estimated` claim needs a
@@ -46,9 +55,11 @@ owner). Pure, deterministic; no I/O and no solver dependency.
   no-quantitative-spread-claim sentinel; it is distinct from finite subtotal
   overflow, which verification rejects. An honest all-estimated package
   remains valid.
-- FALSIFIER EVIDENCE: a record has a non-blank stable falsifier identity, at
-  least one executed attempt, and a non-blank outcome detail. A refuted record
-  still rejects its claim and package.
+- FALSIFIER EVIDENCE: a record has a non-blank, non-placeholder stable
+  falsifier identity, at least one executed attempt, and a non-blank,
+  non-placeholder outcome detail. A refuted record still rejects its claim and
+  package. This structural rule does not assert that the recorded work ran;
+  source authentication remains a no-claim below.
 - DATASET ANCHORS: every attached anchor has a non-blank stable dataset id and
   an exactly 64-character, lowercase hexadecimal content hash. Crosswalk
   anchoring coverage requires a valid anchor whose dataset id exactly matches
@@ -93,7 +104,8 @@ None.
 `tests/package.rs` (Proposal 12): complete mixed-color package;
 all-estimated boundary (valid + round-trips); validated-missing-regime and
 validated-missing-dataset completeness failures; verified bad-interval
-failure; Merkle determinism + claim/provenance tamper detection;
+failure; blank/placeholder statement and falsifier refusal; Merkle determinism
+and claim/provenance tamper detection;
 unsupported-format rejection; optional detached signature; deterministic JSON
 carrying the root; in-memory/serialized semantic parity; and exact full-width
 falsifier attempt-count round trips with overflow refusal.

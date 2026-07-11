@@ -50,13 +50,14 @@ pub struct CompositionReceipt {
 /// verification outright.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FalsifierRecord {
-    /// Stable registered identity of the falsifier that ran (non-blank).
+    /// Stable registered identity of the falsifier that ran (meaningful,
+    /// non-placeholder text).
     pub name: String,
     /// Adversarial attempts executed (strictly positive).
     pub attempts: u64,
     /// Did it refute the claim?
     pub refuted: bool,
-    /// Non-blank outcome summary.
+    /// Meaningful, non-placeholder outcome summary.
     pub detail: String,
 }
 
@@ -78,7 +79,7 @@ pub struct AnchorRecord {
 pub struct Claim {
     /// A stable claim id.
     pub id: String,
-    /// The human-readable claim.
+    /// The meaningful human-readable claim (not blank/placeholder text).
     pub statement: String,
     /// The epistemic color + its certificate payload.
     pub color: Color,
@@ -130,6 +131,37 @@ impl Claim {
             content_hash: content_hash.into(),
         });
         self
+    }
+
+    /// Whether this validated claim carries a canonical content-hash anchor
+    /// for the exact dataset named by its color. Other color classes return
+    /// `false` because they have no validated dataset to anchor.
+    #[must_use]
+    pub fn has_matching_validated_anchor(&self) -> bool {
+        let Color::Validated { dataset, .. } = &self.color else {
+            return false;
+        };
+        self.anchors.iter().any(|anchor| {
+            anchor.dataset_id == *dataset && is_canonical_content_hash(&anchor.content_hash)
+        })
+    }
+
+    /// Whether this claim is a certificate-class result subject to the
+    /// no-falsifier-no-ship release rule. Estimated claims remain explicitly
+    /// low-assurance rather than being promoted into this class.
+    #[must_use]
+    pub fn requires_release_falsifier(&self) -> bool {
+        matches!(
+            &self.color,
+            Color::Verified { .. } | Color::Validated { .. }
+        )
+    }
+
+    /// Whether release admission must find a matching content-hash dataset
+    /// anchor for this claim.
+    #[must_use]
+    pub fn requires_validated_anchor(&self) -> bool {
+        matches!(&self.color, Color::Validated { .. })
     }
 
     /// A canonical string used for content hashing (bit-exact on floats).
@@ -278,6 +310,13 @@ pub enum PackageError {
         /// Why it is invalid (`"blank"` or `"duplicate"`).
         reason: &'static str,
     },
+    /// A claim has no meaningful human-readable assertion.
+    InvalidClaimStatement {
+        /// The claim id.
+        claim: String,
+        /// Why it is invalid (`"blank"` or `"placeholder"`).
+        reason: &'static str,
+    },
     /// A validated claim is missing part of its evidence.
     IncompleteValidatedClaim {
         /// The claim id.
@@ -353,8 +392,8 @@ pub enum PackageError {
         falsifier: String,
     },
     /// A falsifier record is not meaningful evidence: identities and outcome
-    /// details must be non-blank, and at least one adversarial attempt must
-    /// have run.
+    /// details must be non-blank and non-placeholder, and at least one
+    /// adversarial attempt must have run.
     InvalidFalsifierRecord {
         /// The claim id.
         claim: String,
@@ -387,11 +426,11 @@ const _: () = assert!(FORMAT_VERSION == fs_crosswalk::SUPPORTED_PACKAGE_FORMAT);
 
 fn verify_attached_records(claim: &Claim) -> Result<(), PackageError> {
     for (falsifier, record) in claim.falsifiers.iter().enumerate() {
-        let field = if record.name.trim().is_empty() {
+        let field = if is_blank_or_placeholder(&record.name) {
             Some("name")
         } else if record.attempts == 0 {
             Some("attempts")
-        } else if record.detail.trim().is_empty() {
+        } else if is_blank_or_placeholder(&record.detail) {
             Some("detail")
         } else {
             None
@@ -632,6 +671,19 @@ impl EvidencePackage {
                     reason: "duplicate",
                 });
             }
+            let statement = c.statement.trim();
+            if statement.is_empty() {
+                return Err(PackageError::InvalidClaimStatement {
+                    claim: c.id.clone(),
+                    reason: "blank",
+                });
+            }
+            if is_placeholder(statement) {
+                return Err(PackageError::InvalidClaimStatement {
+                    claim: c.id.clone(),
+                    reason: "placeholder",
+                });
+            }
             self.verify_claim(index, c)?;
         }
         self.verify_finite_magnitude_sums()?;
@@ -828,6 +880,29 @@ impl EvidencePackage {
         out.push_str("]}");
         out
     }
+}
+
+fn is_blank_or_placeholder(text: &str) -> bool {
+    let text = text.trim();
+    text.is_empty() || is_placeholder(text)
+}
+
+fn is_placeholder(text: &str) -> bool {
+    [
+        "-",
+        "?",
+        "n/a",
+        "na",
+        "none",
+        "not run",
+        "pending",
+        "placeholder",
+        "tbd",
+        "todo",
+        "unknown",
+    ]
+    .iter()
+    .any(|placeholder| text.eq_ignore_ascii_case(placeholder))
 }
 
 fn check_transport_count(what: &str, count: usize) -> Result<(), PackageError> {

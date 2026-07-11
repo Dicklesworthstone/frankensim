@@ -11,7 +11,7 @@
 // concept with no evidence in hand is "mapped but absent", not covered.
 // ---------------------------------------------------------------------------
 
-use crate::{EvidencePackage, is_canonical_content_hash};
+use crate::EvidencePackage;
 use fs_crosswalk::{PackageConcept, Standard, crosswalk};
 use fs_evidence::{Color, ColorRank};
 
@@ -39,14 +39,7 @@ fn anchoring_dataset_presence(pkg: &EvidencePackage) -> (bool, String) {
     let matched = pkg
         .claims
         .iter()
-        .filter(|claim| {
-            let Color::Validated { dataset, .. } = &claim.color else {
-                return false;
-            };
-            claim.anchors.iter().any(|anchor| {
-                anchor.dataset_id == *dataset && is_canonical_content_hash(&anchor.content_hash)
-            })
-        })
+        .filter(|claim| claim.has_matching_validated_anchor())
         .count();
     (
         matched > 0,
