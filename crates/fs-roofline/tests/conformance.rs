@@ -12,9 +12,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use fs_roofline::kernels::{SeededSlowKernel, default_registry};
 use fs_roofline::{
-    AxisBaselinePolicy, BaselineAxes, BaselineCandidate, BaselineIdentity, MachineAxes,
-    STALENESS_MAX_AGE_NS, Verdict, finalize_registry_tuning, measure, promote_baseline, record_run,
-    roofline_machine_key, run_registry, staleness, staleness_at, tune_measurement_shape_class,
+    AxisBaselinePolicy, BaselineAxes, BaselineCandidate, BaselineIdentity, MachineAxes, Verdict,
+    candidate_measurement_shape_class, finalize_registry_tuning, measure, promote_baseline,
+    record_run, roofline_machine_key, run_registry, staleness, staleness_at,
 };
 
 static NEXT_DB: AtomicU32 = AtomicU32::new(0);
@@ -90,8 +90,8 @@ fn trusted_baseline(axes: &MachineAxes) -> (BaselineAxes, BaselineIdentity) {
 #[test]
 fn rf_001_registry_runs_and_reports() {
     let axes = synthetic_axes(0x1);
-    let mut registry = default_registry(1 << 12);
-    let results = run_registry(&mut registry, 1, 3, &axes);
+    let mut registry = default_registry(1 << 12).expect("bounded registry fixture");
+    let results = run_registry(&mut registry, 1, 3, &axes).expect("bounded registry run");
     assert_eq!(results.len(), 3);
     for r in &results {
         assert!(r.elems_per_sec > 0.0, "{}: zero rate", r.kernel);
@@ -117,8 +117,8 @@ fn rf_002_seeded_slow_kernel_is_below_band() {
     // Real machine axes so the limit is genuine; the kernel claims 90% of
     // the bandwidth roof and cannot come close by construction.
     let axes = MachineAxes::probe();
-    let mut slow = SeededSlowKernel::new(1 << 14);
-    let result = measure(&mut slow, 1, 3, &axes);
+    let mut slow = SeededSlowKernel::new(1 << 14).expect("bounded slow-kernel fixture");
+    let result = measure(&mut slow, 1, 3, &axes).expect("bounded slow-kernel measurement");
     // On a CONTENDED host the probe itself is implausible and the
     // 1n61 guard refuses to gate at all — the honest outcome (this
     // fired on a live agent-build storm during development). Either
@@ -154,8 +154,9 @@ fn rf_003_ledgered_run_with_fingerprint_keying() {
     let axes = synthetic_axes(0xFEED_FACE);
     let (baseline, identity) = trusted_baseline(&axes);
     let baseline_policy = AxisBaselinePolicy::new(Some(&baseline), &identity, 20_010);
-    let mut registry = default_registry(1 << 10);
-    let mut results = run_registry(&mut registry, 0, 2, &axes);
+    let mut registry = default_registry(1 << 10).expect("bounded registry fixture");
+    let mut results =
+        run_registry(&mut registry, 0, 2, &axes).expect("bounded ledger registry run");
     let mut finalized =
         finalize_registry_tuning(&mut registry, &axes, &axes, baseline_policy, &results)
             .expect("finalize run");
@@ -187,7 +188,7 @@ fn rf_003_ledgered_run_with_fingerprint_keying() {
         let tune = ledger
             .tune_get(
                 &r.kernel,
-                &tune_measurement_shape_class(&r.version, run_receipt, op),
+                &candidate_measurement_shape_class(&r.version, run_receipt, op),
                 &machine_key,
             )
             .unwrap()
@@ -235,8 +236,9 @@ fn rf_003b_finalized_receipt_refuses_post_finalize_mutation() {
     let axes = synthetic_axes(0xF1A1_1EED);
     let (baseline, identity) = trusted_baseline(&axes);
     let baseline_policy = AxisBaselinePolicy::new(Some(&baseline), &identity, 20_010);
-    let mut registry = default_registry(1 << 10);
-    let mut results = run_registry(&mut registry, 0, 1, &axes);
+    let mut registry = default_registry(1 << 10).expect("bounded registry fixture");
+    let mut results =
+        run_registry(&mut registry, 0, 1, &axes).expect("bounded mutation registry run");
     let mut finalized =
         finalize_registry_tuning(&mut registry, &axes, &axes, baseline_policy, &results)
             .expect("finalize run");
@@ -263,14 +265,16 @@ fn rf_003b_finalized_receipt_refuses_post_finalize_mutation() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // One complete staleness/provenance drift matrix.
 fn rf_004_staleness_alerts_on_fingerprint_drift() {
     let db = temp_db("stale");
     let ledger = fs_ledger::Ledger::open(&db).expect("open ledger");
     let old_axes = synthetic_axes(0xAAAA);
     let (baseline, identity) = trusted_baseline(&old_axes);
     let baseline_policy = AxisBaselinePolicy::new(Some(&baseline), &identity, 20_010);
-    let mut registry = default_registry(1 << 10);
-    let mut results = run_registry(&mut registry, 0, 1, &old_axes);
+    let mut registry = default_registry(1 << 10).expect("bounded registry fixture");
+    let mut results =
+        run_registry(&mut registry, 0, 1, &old_axes).expect("bounded staleness registry run");
     let mut finalized = finalize_registry_tuning(
         &mut registry,
         &old_axes,
@@ -296,7 +300,8 @@ fn rf_004_staleness_alerts_on_fingerprint_drift() {
         .expect("finished op");
 
     let kernel = &results[0].kernel;
-    // Same machine → fresh.
+    // The intentionally public custom-registry path is outside every
+    // production staleness dimension, so it cannot satisfy or poison them.
     assert_eq!(
         staleness_at(
             &ledger,
@@ -304,38 +309,14 @@ fn rf_004_staleness_alerts_on_fingerprint_drift() {
             &results[0].version,
             0xAAAA,
             Some(baseline.content_hash()),
-            recorded_at + STALENESS_MAX_AGE_NS,
+            recorded_at + 1,
         )
         .unwrap(),
-        fs_roofline::Staleness::Fresh
-    );
-    assert_eq!(
-        staleness_at(
-            &ledger,
-            kernel,
-            &results[0].version,
-            0xAAAA,
-            Some(baseline.content_hash()),
-            recorded_at + STALENESS_MAX_AGE_NS + 1,
-        )
-        .unwrap(),
-        fs_roofline::Staleness::Expired
-    );
-    assert_eq!(
-        staleness_at(
-            &ledger,
-            kernel,
-            &results[0].version,
-            0xAAAA,
-            Some(baseline.content_hash()),
-            recorded_at - 1,
-        )
-        .unwrap(),
-        fs_roofline::Staleness::ClockRollback
+        fs_roofline::Staleness::NeverMeasured
     );
     assert_eq!(
         staleness(&ledger, kernel, &results[0].version, 0xAAAA, None).unwrap(),
-        fs_roofline::Staleness::BaselineUnavailable
+        fs_roofline::Staleness::NeverMeasured
     );
     let foreign_baseline = fs_blake3::hash_domain("fs-roofline.foreign-baseline.v1", b"other");
     assert_eq!(
@@ -347,7 +328,7 @@ fn rf_004_staleness_alerts_on_fingerprint_drift() {
             Some(foreign_baseline),
         )
         .unwrap(),
-        fs_roofline::Staleness::BaselineDrift
+        fs_roofline::Staleness::NeverMeasured
     );
     assert_eq!(
         staleness(
@@ -361,32 +342,6 @@ fn rf_004_staleness_alerts_on_fingerprint_drift() {
         fs_roofline::Staleness::NeverMeasured
     );
 
-    let current_row = ledger
-        .tune_rows(kernel)
-        .unwrap()
-        .into_iter()
-        .find(|row| row.machine == roofline_machine_key(0xAAAA, baseline.content_hash()))
-        .expect("current baseline row");
-    ledger
-        .tune_put(
-            &current_row.kernel,
-            &current_row.shape_class,
-            &current_row.machine,
-            &current_row.params,
-            "{}",
-        )
-        .expect("inject valid-JSON payload corruption");
-    assert_eq!(
-        staleness(
-            &ledger,
-            kernel,
-            &results[0].version,
-            0xAAAA,
-            Some(baseline.content_hash()),
-        )
-        .unwrap(),
-        fs_roofline::Staleness::CorruptEvidence
-    );
     // Drifted machine → alert.
     assert_eq!(
         staleness(
@@ -397,7 +352,7 @@ fn rf_004_staleness_alerts_on_fingerprint_drift() {
             Some(baseline.content_hash()),
         )
         .unwrap(),
-        fs_roofline::Staleness::FingerprintDrift
+        fs_roofline::Staleness::NeverMeasured
     );
     // Unknown kernel → never measured.
     assert_eq!(
@@ -415,7 +370,7 @@ fn rf_004_staleness_alerts_on_fingerprint_drift() {
     cleanup_db(&db);
     verdict(
         "rf-004",
-        "staleness: fresh/expired/clock-rollback plus identity drift, corruption, and never-measured",
+        "custom evidence stays non-citable; fingerprint/baseline/version drift remains explicit",
     );
 }
 
@@ -432,8 +387,9 @@ fn rf_004b_invalid_environment_never_becomes_fresh_evidence() {
         peak_single_gflops: 0.1,
         peak_all_core_gflops: 0.4,
     };
-    let mut registry = default_registry(1 << 10);
-    let mut results = run_registry(&mut registry, 0, 1, &crushed);
+    let mut registry = default_registry(1 << 10).expect("bounded registry fixture");
+    let mut results = run_registry(&mut registry, 0, 1, &crushed)
+        .expect("bounded invalid-environment registry run");
     let identity = BaselineIdentity::current(&crushed, "test-firmware")
         .expect("synthetic identity remains representable");
     let baseline_policy = AxisBaselinePolicy::new(None, &identity, 20_010);
@@ -484,10 +440,14 @@ fn rf_005_reproducibility_within_dispersion() {
     // generous multiple of their reported dispersion (harness smoke, not a
     // machine claim — shared CI boxes are noisy).
     let axes = MachineAxes::probe();
-    let mut registry_a = default_registry(1 << 14);
-    let mut registry_b = default_registry(1 << 14);
-    let a = &run_registry(&mut registry_a, 2, 7, &axes)[0];
-    let b = &run_registry(&mut registry_b, 2, 7, &axes)[0];
+    let mut registry_a = default_registry(1 << 14).expect("bounded registry fixture");
+    let mut registry_b = default_registry(1 << 14).expect("bounded registry fixture");
+    let results_a =
+        run_registry(&mut registry_a, 2, 7, &axes).expect("bounded first reproducibility run");
+    let results_b =
+        run_registry(&mut registry_b, 2, 7, &axes).expect("bounded second reproducibility run");
+    let a = &results_a[0];
+    let b = &results_b[0];
     let rel_delta = (a.elems_per_sec - b.elems_per_sec).abs() / a.elems_per_sec.max(1.0);
     let allowance = 0.5 + 3.0 * a.dispersion.max(b.dispersion);
     assert!(

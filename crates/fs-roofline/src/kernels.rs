@@ -22,6 +22,19 @@ use crate::{KernelExecutionBinding, KernelSpec, RooflineKernel, TargetAxis, Thre
 /// identities are independently bound inside fs-session's tune key.
 pub const GEMM_ROOFLINE_VERSION: &str = "2";
 
+/// Largest element count accepted by any one built-in vector-kernel buffer.
+///
+/// Constructors enforce this before reserving memory so public exploratory
+/// registry APIs have the same finite allocation envelope as the sealed
+/// production runner.
+pub const MAX_VECTOR_KERNEL_ELEMENTS: usize = 1 << 24;
+
+/// Largest element count accepted by any one GEMM matrix.
+pub const MAX_GEMM_MATRIX_ELEMENTS: usize = 1 << 24;
+
+/// Largest executor worker budget accepted by a GEMM kernel.
+pub const MAX_GEMM_THREADS: usize = 4_096;
+
 const GEMM_ROOFLINE_POOL_SEED: u64 = 0x524F_4F46_4C49_4E45;
 
 /// Production f64 GEMM benchmark routed through the session autotuner.
@@ -29,10 +42,9 @@ const GEMM_ROOFLINE_POOL_SEED: u64 = 0x524F_4F46_4C49_4E45;
 /// The kernel owns its [`fs_exec::Tuner`], reusable [`fs_exec::TilePool`], and
 /// [`fs_exec::CancelGate`]. The
 /// roofline registry invokes kernels sequentially through exclusive `&mut`
-/// borrows, so tune/cache/dispatch state needs no wrapper lock. A failure is
-/// fail-closed: [`RooflineKernel::run_once`] cannot return `Result`, therefore
-/// an unexpected session diagnostic panics instead of emitting a normal-
-/// looking timing row.
+/// borrows, so tune/cache/dispatch state needs no wrapper lock. Session, key,
+/// and receipt failures propagate through [`RooflineKernel::run_once`] and
+/// fail closed before an attainment row can be constructed.
 pub struct GemmKernel {
     m: usize,
     n: usize,
@@ -55,14 +67,14 @@ pub struct GemmKernel {
 impl GemmKernel {
     /// A square production GEMM sized by one matrix edge.
     ///
-    /// # Panics
-    /// If the requested matrix extents overflow `usize`.
-    #[must_use]
-    pub fn square(side: usize, threads: usize, machine_fingerprint: u64) -> Self {
+    /// # Errors
+    /// Returns a diagnostic before allocation if the edge, matrix element
+    /// count, or worker budget is outside the built-in kernel envelope, or if
+    /// a bounded buffer reservation fails.
+    pub fn square(side: usize, threads: usize, machine_fingerprint: u64) -> Result<Self, String> {
         Self::new(side, side, side, threads, machine_fingerprint, None)
     }
 
-    #[track_caller]
     fn new(
         m: usize,
         n: usize,
@@ -70,29 +82,20 @@ impl GemmKernel {
         threads: usize,
         machine_fingerprint: u64,
         tune_ledger: Option<fs_ledger::Ledger>,
-    ) -> Self {
-        assert!(
-            m > 0 && n > 0 && k > 0,
-            "roofline GEMM extents must be positive"
-        );
-        let a_len = m.checked_mul(k).expect("GEMM A extent overflow");
-        let b_len = k.checked_mul(n).expect("GEMM B extent overflow");
-        let c_len = m.checked_mul(n).expect("GEMM C extent overflow");
-        let a = (0..a_len)
-            .map(|i| ((i % 31) as f64 - 15.0) / 31.0)
-            .collect();
-        let b = (0..b_len)
-            .map(|i| ((i % 29) as f64 - 14.0) / 29.0)
-            .collect();
-        Self {
+    ) -> Result<Self, String> {
+        let (a_len, b_len, c_len) = validate_gemm_request(m, n, k, threads)?;
+        let a = generated_buffer("GEMM A", a_len, |i| ((i % 31) as f64 - 15.0) / 31.0)?;
+        let b = generated_buffer("GEMM B", b_len, |i| ((i % 29) as f64 - 14.0) / 29.0)?;
+        let c = filled_buffer("GEMM C", c_len, 0.0)?;
+        Ok(Self {
             m,
             n,
             k,
             a,
             b,
-            c: vec![0.0; c_len],
+            c,
             tuner: fs_exec::Tuner::cold(machine_fingerprint),
-            pool: fs_exec::TilePool::for_host(threads.max(1), GEMM_ROOFLINE_POOL_SEED),
+            pool: fs_exec::TilePool::for_host(threads, GEMM_ROOFLINE_POOL_SEED),
             tune_ledger,
             pending_tune_row: None,
             active_tune_row: None,
@@ -101,7 +104,7 @@ impl GemmKernel {
             dispatches: 0,
             sweeps: 0,
             lifecycle_pending: false,
-        }
+        })
     }
 
     /// Number of completed session dispatches (warmups included).
@@ -115,6 +118,15 @@ impl GemmKernel {
     #[must_use]
     pub fn sweeps(&self) -> usize {
         self.sweeps
+    }
+
+    fn invalidate_tuning_state(&mut self) {
+        let machine = self.tuner.machine();
+        self.lifecycle_pending = false;
+        self.pending_tune_row = None;
+        self.active_tune_row = None;
+        self.last_binding = None;
+        self.tuner = fs_exec::Tuner::cold(machine);
     }
 }
 
@@ -138,16 +150,16 @@ impl RooflineKernel for GemmKernel {
         self.m * self.n
     }
 
-    fn run_once(&mut self) {
+    fn run_once(&mut self) -> Result<(), String> {
         let cache = self
             .tune_ledger
             .as_ref()
             .map_or(fs_session::GemmTuneCache::Disabled, |ledger| {
                 fs_session::GemmTuneCache::ReadOnly(ledger)
             });
-        let declared_run = fs_exec::RunId(
-            u64::try_from(self.dispatches).expect("roofline GEMM dispatch count exceeds u64"),
-        );
+        let declared_run = fs_exec::RunId(u64::try_from(self.dispatches).map_err(|_| {
+            "roofline GEMM dispatch count exceeds the u64 run-identity envelope".to_string()
+        })?);
         let dispatch = fs_session::gemm_f64_session_with_pool_declared(
             &mut self.tuner,
             cache,
@@ -162,45 +174,60 @@ impl RooflineKernel for GemmKernel {
             &self.b,
             0.0,
             &mut self.c,
-        )
-        .unwrap_or_else(|error| panic!("production roofline GEMM dispatch failed: {error}"));
-        self.lifecycle_pending = true;
-        self.dispatches += 1;
-        self.sweeps += usize::from(dispatch.swept);
-        if let Some(row) = dispatch.validated_tune_row.as_ref() {
-            self.active_tune_row = Some(row.clone());
-        }
-        if let Some(row) = dispatch.new_tune_row.as_ref() {
-            self.pending_tune_row = Some(row.clone());
-        }
-        let Some(active_row) = self.active_tune_row.as_ref() else {
-            // Serial/small/no-product dispatches have no meaningful MC/NC row.
-            // They may still be reported, but GEMM admission requires a sealed
-            // decision binding and therefore refuses them as citable evidence.
-            self.last_binding = None;
-            std::hint::black_box(self.c[self.c.len() / 2]);
-            return;
-        };
-        let expected_key =
-            fs_session::gemm_tune::gemm_tune_key_with_pool(&self.pool, self.m, self.n, self.k)
-                .unwrap_or_else(|error| panic!("roofline GEMM key construction failed: {error}"));
-        assert_eq!(
-            dispatch.kernel,
-            expected_key.kernel(),
-            "session dispatch returned a different scoped key"
         );
-        assert_eq!(
-            dispatch.shape_class,
-            expected_key.shape_class(),
-            "session dispatch returned a different shape class"
-        );
-        let source = match dispatch.source {
-            fs_exec::TuneSource::Tuned => "tuned",
-            fs_exec::TuneSource::Pinned => "pinned",
-            fs_exec::TuneSource::ColdStart => "cold-start",
+        let dispatch = match dispatch {
+            Ok(dispatch) => dispatch,
+            Err(error) => {
+                self.invalidate_tuning_state();
+                return Err(format!("production roofline GEMM dispatch failed: {error}"));
+            }
         };
-        self.last_binding = Some(
-            KernelExecutionBinding::gemm(
+        let next_dispatches = match self.dispatches.checked_add(1) {
+            Some(next) => next,
+            None => {
+                self.invalidate_tuning_state();
+                return Err("roofline GEMM dispatch counter overflowed usize".to_string());
+            }
+        };
+        let next_sweeps = match self.sweeps.checked_add(usize::from(dispatch.swept)) {
+            Some(next) => next,
+            None => {
+                self.invalidate_tuning_state();
+                return Err("roofline GEMM sweep counter overflowed usize".to_string());
+            }
+        };
+        let next_active_row = dispatch
+            .validated_tune_row
+            .clone()
+            .or_else(|| self.active_tune_row.clone());
+        let next_pending_row = dispatch
+            .new_tune_row
+            .clone()
+            .or_else(|| self.pending_tune_row.clone());
+        let binding = if let Some(active_row) = next_active_row.as_ref() {
+            let expected_key = match fs_session::gemm_tune::gemm_tune_key_with_pool(
+                &self.pool, self.m, self.n, self.k,
+            ) {
+                Ok(key) => key,
+                Err(error) => {
+                    self.invalidate_tuning_state();
+                    return Err(format!("roofline GEMM key construction failed: {error}"));
+                }
+            };
+            if dispatch.kernel != expected_key.kernel() {
+                self.invalidate_tuning_state();
+                return Err("session dispatch returned a different scoped key".to_string());
+            }
+            if dispatch.shape_class != expected_key.shape_class() {
+                self.invalidate_tuning_state();
+                return Err("session dispatch returned a different shape class".to_string());
+            }
+            let source = match dispatch.source {
+                fs_exec::TuneSource::Tuned => "tuned",
+                fs_exec::TuneSource::Pinned => "pinned",
+                fs_exec::TuneSource::ColdStart => "cold-start",
+            };
+            match KernelExecutionBinding::gemm(
                 dispatch.kernel.clone(),
                 dispatch.shape_class.clone(),
                 dispatch.plan.canonical(),
@@ -210,10 +237,27 @@ impl RooflineKernel for GemmKernel {
                 active_row.clone(),
                 self.tuner.machine(),
                 dispatch.execution_receipt(),
-            )
-            .unwrap_or_else(|error| panic!("roofline GEMM receipt refused: {error}")),
-        );
+            ) {
+                Ok(binding) => Some(binding),
+                Err(error) => {
+                    self.invalidate_tuning_state();
+                    return Err(format!("roofline GEMM receipt refused: {error}"));
+                }
+            }
+        } else {
+            // Serial/small/no-product dispatches have no meaningful MC/NC row.
+            // They may still be reported, but GEMM admission requires a sealed
+            // decision binding and therefore refuses them as citable evidence.
+            None
+        };
+        self.lifecycle_pending = true;
+        self.dispatches = next_dispatches;
+        self.sweeps = next_sweeps;
+        self.active_tune_row = next_active_row;
+        self.pending_tune_row = next_pending_row;
+        self.last_binding = binding;
         std::hint::black_box(self.c[self.c.len() / 2]);
+        Ok(())
     }
 
     fn execution_binding(&self) -> Option<KernelExecutionBinding> {
@@ -231,10 +275,13 @@ impl RooflineKernel for GemmKernel {
         self.lifecycle_pending = false;
         self.pending_tune_row = None;
         if !admitted {
-            self.active_tune_row = None;
-            self.last_binding = None;
-            self.tuner = fs_exec::Tuner::cold(self.tuner.machine());
+            self.invalidate_tuning_state();
         }
+        Ok(())
+    }
+
+    fn abort_tuning(&mut self) -> Result<(), String> {
+        self.invalidate_tuning_state();
         Ok(())
     }
 }
@@ -248,12 +295,16 @@ pub struct AxpyKernel {
 impl AxpyKernel {
     /// Buffers of `n` elements each (pick `n` large enough to stream past
     /// the last-level cache when measuring the bandwidth roof).
-    #[must_use]
-    pub fn new(n: usize) -> AxpyKernel {
-        AxpyKernel {
-            x: vec![1.5; n],
-            y: vec![0.5; n],
-        }
+    ///
+    /// # Errors
+    /// Returns a diagnostic before allocation for a zero or out-of-envelope
+    /// length, or if a bounded buffer reservation fails.
+    pub fn new(n: usize) -> Result<AxpyKernel, String> {
+        validate_vector_elements("axpy", n)?;
+        Ok(AxpyKernel {
+            x: filled_buffer("axpy x", n, 1.5)?,
+            y: filled_buffer("axpy y", n, 0.5)?,
+        })
     }
 }
 
@@ -274,9 +325,10 @@ impl RooflineKernel for AxpyKernel {
         self.x.len()
     }
 
-    fn run_once(&mut self) {
+    fn run_once(&mut self) -> Result<(), String> {
         (fs_simd::ops().axpy)(1.000_000_1, &self.x, &mut self.y);
         std::hint::black_box(self.y[self.y.len() / 2]);
+        Ok(())
     }
 }
 
@@ -289,13 +341,17 @@ pub struct DotKernel {
 
 impl DotKernel {
     /// Buffers of `n` elements each.
-    #[must_use]
-    pub fn new(n: usize) -> DotKernel {
-        DotKernel {
-            x: vec![1.5; n],
-            y: vec![0.5; n],
+    ///
+    /// # Errors
+    /// Returns a diagnostic before allocation for a zero or out-of-envelope
+    /// length, or if a bounded buffer reservation fails.
+    pub fn new(n: usize) -> Result<DotKernel, String> {
+        validate_vector_elements("dot", n)?;
+        Ok(DotKernel {
+            x: filled_buffer("dot x", n, 1.5)?,
+            y: filled_buffer("dot y", n, 0.5)?,
             out: 0.0,
-        }
+        })
     }
 }
 
@@ -316,9 +372,10 @@ impl RooflineKernel for DotKernel {
         self.x.len()
     }
 
-    fn run_once(&mut self) {
+    fn run_once(&mut self) -> Result<(), String> {
         self.out = (fs_simd::ops().dot)(&self.x, &self.y);
         std::hint::black_box(self.out);
+        Ok(())
     }
 }
 
@@ -330,12 +387,16 @@ pub struct SumKernel {
 
 impl SumKernel {
     /// A buffer of `n` elements.
-    #[must_use]
-    pub fn new(n: usize) -> SumKernel {
-        SumKernel {
-            x: vec![0.25; n],
+    ///
+    /// # Errors
+    /// Returns a diagnostic before allocation for a zero or out-of-envelope
+    /// length, or if a bounded buffer reservation fails.
+    pub fn new(n: usize) -> Result<SumKernel, String> {
+        validate_vector_elements("sum", n)?;
+        Ok(SumKernel {
+            x: filled_buffer("sum x", n, 0.25)?,
             out: 0.0,
-        }
+        })
     }
 }
 
@@ -356,9 +417,10 @@ impl RooflineKernel for SumKernel {
         self.x.len()
     }
 
-    fn run_once(&mut self) {
+    fn run_once(&mut self) -> Result<(), String> {
         self.out = (fs_simd::ops().sum)(&self.x);
         std::hint::black_box(self.out);
+        Ok(())
     }
 }
 
@@ -373,12 +435,16 @@ pub struct SeededSlowKernel {
 
 impl SeededSlowKernel {
     /// A buffer of `n` elements.
-    #[must_use]
-    pub fn new(n: usize) -> SeededSlowKernel {
-        SeededSlowKernel {
-            x: (0..n).map(|i| (i % 7) as f64).collect(),
+    ///
+    /// # Errors
+    /// Returns a diagnostic before allocation for a zero or out-of-envelope
+    /// length, or if a bounded buffer reservation fails.
+    pub fn new(n: usize) -> Result<SeededSlowKernel, String> {
+        validate_vector_elements("seeded-slow", n)?;
+        Ok(SeededSlowKernel {
+            x: generated_buffer("seeded-slow x", n, |i| (i % 7) as f64)?,
             out: 0.0,
-        }
+        })
     }
 }
 
@@ -399,7 +465,7 @@ impl RooflineKernel for SeededSlowKernel {
         self.x.len()
     }
 
-    fn run_once(&mut self) {
+    fn run_once(&mut self) -> Result<(), String> {
         // Serial chain + division: nowhere near any roof, by construction.
         let mut acc = 1.0f64;
         for &v in &self.x {
@@ -407,24 +473,34 @@ impl RooflineKernel for SeededSlowKernel {
         }
         self.out = acc;
         std::hint::black_box(self.out);
+        Ok(())
     }
 }
 
 /// The default registry: everything that exists today.
-#[must_use]
-pub fn default_registry(n: usize) -> Vec<Box<dyn RooflineKernel>> {
-    vec![
-        Box::new(AxpyKernel::new(n)),
-        Box::new(DotKernel::new(n)),
-        Box::new(SumKernel::new(n)),
-    ]
+///
+/// # Errors
+/// Returns a diagnostic before execution when `n` is outside the built-in
+/// vector-kernel allocation envelope or a bounded reservation fails.
+pub fn default_registry(n: usize) -> Result<Vec<Box<dyn RooflineKernel>>, String> {
+    Ok(vec![
+        Box::new(AxpyKernel::new(n)?),
+        Box::new(DotKernel::new(n)?),
+        Box::new(SumKernel::new(n)?),
+    ])
 }
 
 /// The registry used by the shipped `roofline` command. Vector kernels use
 /// `n` elements; GEMM uses approximately the same per-matrix element count,
 /// with a 256 edge floor so its production parallel/tuning route is real.
-#[must_use]
-pub fn production_registry(n: usize, axes: &crate::MachineAxes) -> Vec<Box<dyn RooflineKernel>> {
+///
+/// # Errors
+/// Returns a diagnostic before execution when the vector, derived GEMM, or
+/// worker allocation is outside the built-in kernel envelope.
+pub fn production_registry(
+    n: usize,
+    axes: &crate::MachineAxes,
+) -> Result<Vec<Box<dyn RooflineKernel>>, String> {
     production_registry_with_ledger(n, axes, None)
 }
 
@@ -432,14 +508,19 @@ pub fn production_registry(n: usize, axes: &crate::MachineAxes) -> Vec<Box<dyn R
 /// Supplying one lets a cold process adopt the previous run's validated GEMM
 /// row before timing. Ownership keeps fsqlite's deliberately `!Send`
 /// connection on this synchronous registry thread.
-#[must_use]
+///
+/// # Errors
+/// Returns a diagnostic before execution when the vector, derived GEMM, or
+/// worker allocation is outside the built-in kernel envelope.
 pub fn production_registry_with_ledger(
     n: usize,
     axes: &crate::MachineAxes,
     tune_ledger: Option<fs_ledger::Ledger>,
-) -> Vec<Box<dyn RooflineKernel>> {
-    let mut registry = default_registry(n);
+) -> Result<Vec<Box<dyn RooflineKernel>>, String> {
+    validate_vector_elements("production registry", n)?;
     let side = n.isqrt().max(256);
+    validate_gemm_request(side, side, side, axes.logical_cpus as usize)?;
+    let mut registry = default_registry(n)?;
     registry.push(Box::new(GemmKernel::new(
         side,
         side,
@@ -447,13 +528,92 @@ pub fn production_registry_with_ledger(
         axes.logical_cpus as usize,
         axes.fingerprint,
         tune_ledger,
-    )));
-    registry
+    )?));
+    Ok(registry)
+}
+
+fn validate_vector_elements(kernel: &str, n: usize) -> Result<(), String> {
+    if n == 0 || n > MAX_VECTOR_KERNEL_ELEMENTS {
+        return Err(format!(
+            "roofline {kernel} elements must be in 1..={MAX_VECTOR_KERNEL_ELEMENTS}, got {n}"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_gemm_request(
+    m: usize,
+    n: usize,
+    k: usize,
+    threads: usize,
+) -> Result<(usize, usize, usize), String> {
+    if m == 0 || n == 0 || k == 0 {
+        return Err(format!(
+            "roofline GEMM extents must be positive, got m={m}, n={n}, k={k}"
+        ));
+    }
+    if threads == 0 || threads > MAX_GEMM_THREADS {
+        return Err(format!(
+            "roofline GEMM threads must be in 1..={MAX_GEMM_THREADS}, got {threads}"
+        ));
+    }
+    Ok((
+        checked_matrix_elements("A", m, k)?,
+        checked_matrix_elements("B", k, n)?,
+        checked_matrix_elements("C", m, n)?,
+    ))
+}
+
+fn checked_matrix_elements(matrix: &str, rows: usize, columns: usize) -> Result<usize, String> {
+    let elements = rows.checked_mul(columns).ok_or_else(|| {
+        format!("roofline GEMM {matrix} extent overflowed usize: {rows} * {columns}")
+    })?;
+    if elements > MAX_GEMM_MATRIX_ELEMENTS {
+        return Err(format!(
+            "roofline GEMM {matrix} matrix exceeds {MAX_GEMM_MATRIX_ELEMENTS} elements: {elements}"
+        ));
+    }
+    Ok(elements)
+}
+
+fn filled_buffer(label: &str, n: usize, value: f64) -> Result<Vec<f64>, String> {
+    let mut buffer = Vec::new();
+    buffer
+        .try_reserve_exact(n)
+        .map_err(|_| format!("unable to reserve {n} f64 elements for roofline {label}"))?;
+    buffer.resize(n, value);
+    Ok(buffer)
+}
+
+fn generated_buffer(
+    label: &str,
+    n: usize,
+    mut value: impl FnMut(usize) -> f64,
+) -> Result<Vec<f64>, String> {
+    let mut buffer = Vec::new();
+    buffer
+        .try_reserve_exact(n)
+        .map_err(|_| format!("unable to reserve {n} f64 elements for roofline {label}"))?;
+    for index in 0..n {
+        buffer.push(value(index));
+    }
+    Ok(buffer)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_gemm_kernel(
+        m: usize,
+        n: usize,
+        k: usize,
+        threads: usize,
+        fingerprint: u64,
+        ledger: Option<fs_ledger::Ledger>,
+    ) -> GemmKernel {
+        GemmKernel::new(m, n, k, threads, fingerprint, ledger).expect("bounded GEMM test fixture")
+    }
 
     fn receipt_axes(fingerprint: u64) -> crate::MachineAxes {
         crate::MachineAxes {
@@ -465,6 +625,38 @@ mod tests {
             peak_single_gflops: 1.0e9,
             peak_all_core_gflops: 2.0e9,
         }
+    }
+
+    #[test]
+    fn built_in_constructors_refuse_hostile_resource_inputs_before_execution() {
+        for n in [0, MAX_VECTOR_KERNEL_ELEMENTS + 1, usize::MAX] {
+            assert!(AxpyKernel::new(n).is_err(), "axpy accepted n={n}");
+            assert!(DotKernel::new(n).is_err(), "dot accepted n={n}");
+            assert!(SumKernel::new(n).is_err(), "sum accepted n={n}");
+            assert!(
+                SeededSlowKernel::new(n).is_err(),
+                "seeded-slow accepted n={n}"
+            );
+            assert!(
+                default_registry(n).is_err(),
+                "default registry accepted n={n}"
+            );
+        }
+
+        let oversized_side = MAX_GEMM_MATRIX_ELEMENTS.isqrt() + 1;
+        assert!(GemmKernel::square(0, 1, 0).is_err());
+        assert!(GemmKernel::square(oversized_side, 1, 0).is_err());
+        assert!(GemmKernel::square(usize::MAX, 1, 0).is_err());
+        assert!(GemmKernel::square(1, 0, 0).is_err());
+        assert!(GemmKernel::square(1, MAX_GEMM_THREADS + 1, 0).is_err());
+        assert!(GemmKernel::new(usize::MAX, 2, 1, 1, 0, None).is_err());
+
+        let axes = receipt_axes(0xB0_0D5);
+        assert!(production_registry(0, &axes).is_err());
+        assert!(production_registry(MAX_VECTOR_KERNEL_ELEMENTS + 1, &axes).is_err());
+        let mut hostile_threads = axes;
+        hostile_threads.logical_cpus = (MAX_GEMM_THREADS + 1) as u32;
+        assert!(production_registry(1, &hostile_threads).is_err());
     }
 
     fn trusted_baseline(
@@ -531,9 +723,9 @@ mod tests {
     /// fast while M=256 forces the same tuning route as production.
     #[test]
     fn gemm_kernel_closes_and_reuses_the_tune_loop() {
-        let mut kernel = GemmKernel::new(256, 1, 1, 2, 0xC105_ED10, None);
+        let mut kernel = test_gemm_kernel(256, 1, 1, 2, 0xC105_ED10, None);
         assert_eq!((kernel.dispatches(), kernel.sweeps()), (0, 0));
-        kernel.run_once();
+        kernel.run_once().expect("cold GEMM dispatch");
         assert_eq!((kernel.dispatches(), kernel.sweeps()), (1, 1));
         let first_decisions = kernel.tuner.decisions().len();
         assert_eq!(
@@ -541,7 +733,7 @@ mod tests {
             "first dispatch must record its decision"
         );
 
-        kernel.run_once();
+        kernel.run_once().expect("warm GEMM dispatch");
         assert_eq!((kernel.dispatches(), kernel.sweeps()), (2, 1));
         assert_eq!(
             kernel.tuner.decisions().len(),
@@ -558,9 +750,28 @@ mod tests {
     }
 
     #[test]
+    fn cancelled_gemm_dispatch_returns_an_error_and_invalidates_tune_state() {
+        let mut kernel = test_gemm_kernel(256, 1, 1, 2, 0xCA11_CE11, None);
+        kernel.gate.request();
+
+        let error = kernel
+            .run_once()
+            .expect_err("a pre-cancelled production GEMM must fail closed");
+        assert!(
+            error.contains("production roofline GEMM dispatch failed"),
+            "unexpected diagnostic: {error}"
+        );
+        assert_eq!((kernel.dispatches(), kernel.sweeps()), (0, 0));
+        assert!(!kernel.lifecycle_pending);
+        assert!(kernel.pending_tune_row.is_none());
+        assert!(kernel.active_tune_row.is_none());
+        assert!(kernel.last_binding.is_none());
+    }
+
+    #[test]
     fn rejected_gemm_lifecycle_invalidates_the_local_decision() {
-        let mut kernel = GemmKernel::new(256, 1, 1, 2, 0xBAD0_CAFE, None);
-        kernel.run_once();
+        let mut kernel = test_gemm_kernel(256, 1, 1, 2, 0xBAD0_CAFE, None);
+        kernel.run_once().expect("GEMM dispatch before rejection");
         assert!(kernel.active_tune_row.is_some());
         assert!(kernel.last_binding.is_some());
         let sweeps_before_rejection = kernel.sweeps();
@@ -572,7 +783,7 @@ mod tests {
         assert!(kernel.pending_tune_row.is_none());
         assert!(kernel.last_binding.is_none());
 
-        kernel.run_once();
+        kernel.run_once().expect("GEMM dispatch after rejection");
         assert_eq!(
             kernel.sweeps(),
             sweeps_before_rejection + 1,
@@ -581,11 +792,27 @@ mod tests {
     }
 
     #[test]
+    fn registry_abort_is_idempotent_and_clears_gemm_tune_authority() {
+        let mut kernel = test_gemm_kernel(256, 1, 1, 2, 0xAB07_7001, None);
+        kernel.run_once().expect("GEMM dispatch before abort");
+        assert!(kernel.lifecycle_pending);
+        assert!(kernel.active_tune_row.is_some());
+        assert!(kernel.last_binding.is_some());
+
+        kernel.abort_tuning().expect("first registry abort");
+        kernel.abort_tuning().expect("idempotent registry abort");
+        assert!(!kernel.lifecycle_pending);
+        assert!(kernel.pending_tune_row.is_none());
+        assert!(kernel.active_tune_row.is_none());
+        assert!(kernel.last_binding.is_none());
+    }
+
+    #[test]
     fn stale_results_cannot_finalize_a_newer_gemm_execution_state() {
         let axes = receipt_axes(0x51A1_E001);
         let (baseline, identity) = trusted_baseline(&axes);
         let baseline_policy = crate::AxisBaselinePolicy::new(Some(&baseline), &identity, 20_010);
-        let mut registry: Vec<Box<dyn RooflineKernel>> = vec![Box::new(GemmKernel::new(
+        let mut registry: Vec<Box<dyn RooflineKernel>> = vec![Box::new(test_gemm_kernel(
             256,
             1,
             1,
@@ -593,8 +820,10 @@ mod tests {
             axes.fingerprint,
             None,
         ))];
-        let first = crate::run_registry(&mut registry, 1, 1, &axes);
-        let second = crate::run_registry(&mut registry, 1, 1, &axes);
+        let first =
+            crate::run_registry(&mut registry, 1, 1, &axes).expect("bounded first registry run");
+        let second =
+            crate::run_registry(&mut registry, 1, 1, &axes).expect("bounded second registry run");
         assert_ne!(
             first[0].to_jsonl(),
             second[0].to_jsonl(),
@@ -629,7 +858,7 @@ mod tests {
             peak_single_gflops: 10.0,
             peak_all_core_gflops: 20.0,
         };
-        let registry = production_registry(1, &axes);
+        let registry = production_registry(1, &axes).expect("bounded production registry");
         let specs: Vec<_> = registry.iter().map(|kernel| kernel.spec().name).collect();
         assert_eq!(
             specs,
@@ -650,15 +879,16 @@ mod tests {
         let (baseline, identity) = trusted_baseline(&axes);
         let baseline_policy = crate::AxisBaselinePolicy::new(Some(&baseline), &identity, 20_010);
         let ledger = fs_ledger::Ledger::open(":memory:").expect("in-memory tune ledger");
-        let mut first = GemmKernel::new(256, 1, 1, 2, fingerprint, Some(ledger));
-        let mut measured = crate::measure(&mut first, 1, 2, &axes);
+        let mut first = test_gemm_kernel(256, 1, 1, 2, fingerprint, Some(ledger));
+        let mut measured =
+            crate::measure(&mut first, 1, 2, &axes).expect("bounded first GEMM measurement");
         let mut stale_fresh_clone = measured.clone();
         assert!(
             stale_fresh_clone.pending_tune_publication.is_some(),
             "regression fixture must duplicate the former overwrite marker"
         );
         assert_eq!((first.dispatches(), first.sweeps()), (3, 1));
-        assert!(crate::run_is_citable(
+        assert!(crate::run_passes_measurement_admission(
             &axes,
             &axes,
             baseline_policy,
@@ -715,8 +945,9 @@ mod tests {
         );
         let ledger = first.tune_ledger.take().expect("owned ledger");
 
-        let mut replay = GemmKernel::new(256, 1, 1, 2, fingerprint, Some(ledger));
-        let mut adopted = crate::measure(&mut replay, 1, 2, &axes);
+        let mut replay = test_gemm_kernel(256, 1, 1, 2, fingerprint, Some(ledger));
+        let mut adopted =
+            crate::measure(&mut replay, 1, 2, &axes).expect("bounded replay GEMM measurement");
         assert_eq!(
             (replay.dispatches(), replay.sweeps()),
             (3, 0),
@@ -725,7 +956,7 @@ mod tests {
         assert_eq!(replay.tuner.decisions().len(), 3);
         assert!(replay.active_tune_row.is_some());
         assert!(replay.pending_tune_row.is_none());
-        assert!(crate::run_is_citable(
+        assert!(crate::run_passes_measurement_admission(
             &axes,
             &axes,
             baseline_policy,
@@ -799,8 +1030,8 @@ mod tests {
             "ledger B must contain the exact sealed row, not only its hash"
         );
 
-        let mut newer = GemmKernel::new(256, 1, 1, 2, fingerprint, None);
-        newer.run_once();
+        let mut newer = test_gemm_kernel(256, 1, 1, 2, fingerprint, None);
+        newer.run_once().expect("independent newer GEMM dispatch");
         let newer_row = newer
             .pending_tune_row
             .as_ref()
@@ -869,8 +1100,10 @@ mod tests {
     #[test]
     fn rejected_gemm_run_discards_buffer_without_persistent_row() {
         let ledger = fs_ledger::Ledger::open(":memory:").expect("in-memory tune ledger");
-        let mut kernel = GemmKernel::new(256, 1, 1, 2, 0xBAD_A11E5, Some(ledger));
-        kernel.run_once();
+        let mut kernel = test_gemm_kernel(256, 1, 1, 2, 0xBAD_A11E5, Some(ledger));
+        kernel
+            .run_once()
+            .expect("GEMM dispatch before discarded run");
         assert_eq!((kernel.dispatches(), kernel.sweeps()), (1, 1));
         assert!(kernel.pending_tune_row.is_some());
 
@@ -899,14 +1132,16 @@ mod tests {
     #[test]
     fn admitted_finalize_consumes_pending_marker_before_registry_reuse() {
         let fingerprint = 0xA11D_771D;
-        let mut kernel = GemmKernel::new(256, 1, 1, 2, fingerprint, None);
-        kernel.run_once();
+        let mut kernel = test_gemm_kernel(256, 1, 1, 2, fingerprint, None);
+        kernel
+            .run_once()
+            .expect("GEMM dispatch before finalization");
         assert!(kernel.pending_tune_row.is_some());
         kernel
             .finalize_tuning(true)
             .expect("admitted lifecycle finalizes");
         assert!(kernel.pending_tune_row.is_none());
-        kernel.run_once();
+        kernel.run_once().expect("GEMM dispatch after finalization");
         assert!(kernel.pending_tune_row.is_none());
         assert!(kernel.active_tune_row.is_some());
     }
@@ -916,11 +1151,13 @@ mod tests {
         let axes = receipt_axes(0x51A1);
         let (baseline, identity) = trusted_baseline(&axes);
         let baseline_policy = crate::AxisBaselinePolicy::new(Some(&baseline), &identity, 20_010);
-        let mut kernel = GemmKernel::square(8, 1, axes.fingerprint);
-        let measured = crate::measure(&mut kernel, 1, 1, &axes);
+        let mut kernel =
+            GemmKernel::square(8, 1, axes.fingerprint).expect("bounded square fixture");
+        let measured =
+            crate::measure(&mut kernel, 1, 1, &axes).expect("bounded serial GEMM measurement");
         assert_eq!((kernel.dispatches(), kernel.sweeps()), (2, 0));
         assert!(kernel.last_binding.is_none());
-        assert!(!crate::run_is_citable(
+        assert!(!crate::run_passes_measurement_admission(
             &axes,
             &axes,
             baseline_policy,
@@ -933,9 +1170,10 @@ mod tests {
         let axes = receipt_axes(0x55_00_11);
         let (baseline, identity) = trusted_baseline(&axes);
         let baseline_policy = crate::AxisBaselinePolicy::new(Some(&baseline), &identity, 20_010);
-        let mut kernel = GemmKernel::new(256, 1, 1, 2, axes.fingerprint, None);
-        let measured = crate::measure(&mut kernel, 1, 3, &axes);
-        assert!(crate::run_is_citable(
+        let mut kernel = test_gemm_kernel(256, 1, 1, 2, axes.fingerprint, None);
+        let measured =
+            crate::measure(&mut kernel, 1, 3, &axes).expect("bounded citable GEMM measurement");
+        assert!(crate::run_passes_measurement_admission(
             &axes,
             &axes,
             baseline_policy,
@@ -984,7 +1222,7 @@ mod tests {
         ];
         for (index, result) in rejected.into_iter().enumerate() {
             assert!(
-                !crate::run_is_citable(&axes, &axes, baseline_policy, &[result]),
+                !crate::run_passes_measurement_admission(&axes, &axes, baseline_policy, &[result]),
                 "tamper case {index} was admitted"
             );
         }
@@ -1002,7 +1240,7 @@ mod tests {
             .gemm
             .canonical_plan
             .push('x');
-        assert!(!crate::run_is_citable(
+        assert!(!crate::run_passes_measurement_admission(
             &axes,
             &axes,
             baseline_policy,
@@ -1015,7 +1253,7 @@ mod tests {
             panic!("expected timed receipt");
         };
         *warmup_runs = 0;
-        assert!(!crate::run_is_citable(
+        assert!(!crate::run_passes_measurement_admission(
             &axes,
             &axes,
             baseline_policy,

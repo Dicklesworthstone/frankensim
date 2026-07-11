@@ -140,9 +140,10 @@ impl RooflineKernel for FftRoundTrip {
     fn elements(&self) -> usize {
         self.n
     }
-    fn run_once(&mut self) {
+    fn run_once(&mut self) -> Result<(), String> {
         self.plan.forward(&mut self.data, &mut self.scratch);
         self.plan.inverse(&mut self.data, &mut self.scratch);
+        Ok(())
     }
 }
 
@@ -200,13 +201,14 @@ impl RooflineKernel for FftNdRoundTrip {
     fn elements(&self) -> usize {
         self.plan.total()
     }
-    fn run_once(&mut self) {
+    fn run_once(&mut self) -> Result<(), String> {
         self.plan
             .forward_pooled(&mut self.data, &self.pool, &self.gate)
-            .expect("pooled forward runs");
+            .map_err(|error| format!("pooled forward failed: {error}"))?;
         self.plan
             .inverse_pooled(&mut self.data, &self.pool, &self.gate)
-            .expect("pooled inverse runs");
+            .map_err(|error| format!("pooled inverse failed: {error}"))?;
+        Ok(())
     }
 }
 
@@ -239,7 +241,7 @@ fn fftnd_report_rows(axes: &MachineAxes) -> bool {
     let mut env_ok = true;
     for dims in [vec![256usize, 256], vec![1024, 1024], vec![128, 128, 64]] {
         let mut kern = FftNdRoundTrip::new(&dims, workers);
-        let att = measure(&mut kern, 1, 5, axes);
+        let att = measure(&mut kern, 1, 5, axes).expect("bounded FFT-ND measurement");
         let receipt = att.to_jsonl();
         println!(
             "{{\"metric\":\"fftnd-roundtrip\",\"dims\":{dims:?},\"workers\":{workers},\
@@ -295,7 +297,7 @@ fn fft_attainment() {
     let mut env_ok = true;
     for &(n, gated) in &[(1usize << 16, false), (1 << 20, true), (1 << 22, true)] {
         let mut kern = FftRoundTrip::new(n);
-        let att = measure(&mut kern, 1, 5, &axes);
+        let att = measure(&mut kern, 1, 5, &axes).expect("bounded FFT measurement");
         let receipt = att.to_jsonl();
         let measurement = measurement_json(n, gated, &receipt);
         println!("{measurement}");

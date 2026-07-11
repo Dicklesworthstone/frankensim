@@ -14,6 +14,12 @@ Bootstrap/update a machine (re-promotion is the only update path):
 
 A loaded host REFUSES promotion (drift bands) — measure quiet.
 
+Promotion reads the existing store through the 1 MiB parser bound, serializes
+same-store writers with an OS file lock, durably writes a same-directory staging
+generation, and atomically renames it over the prior store. A crash before the
+rename leaves the prior authority store intact; a later promotion safely
+overwrites the staging generation.
+
 TRUST BOUNDARY: these stores are operator-trusted and tamper-evident
 (content-hashed), NOT independently verified — promotion-authority
 signatures are bead fz2.7's layer. Do not present gate results as

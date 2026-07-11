@@ -2,7 +2,7 @@
 //! size class {4, 6, 8, 12, 16, 24, 32, 48} against the machine
 //! ROOFLINE (fs-roofline conventions: limit = min(bandwidth·intensity,
 //! compute). Each row reports both binding-roof `attainment` and
-//! compute-peak `target_attainment`: the plan's 60% target uses the latter,
+//! compute-peak `target_attainment`: the repinned 25% target uses the latter,
 //! while the executable anti-collapse floor uses the former. See the note at
 //! the bottom and bead 9ekv for the measured achieved-vs-target gap. Run
 //! explicitly in release:
@@ -15,12 +15,29 @@
 use fs_la::batched::{BatchMat, batch_gemm, batch_lu};
 use fs_roofline::{KernelSpec, MachineAxes, RooflineKernel, TargetAxis, Threading, measure};
 
+const BATCH_GEMM_COMPUTE_TARGET: f64 = 0.25;
+
 fn measurement_json(metric: &str, k: usize, n: usize, receipt: &str) -> String {
     let receipt_fields = receipt
         .strip_prefix('{')
         .and_then(|fields| fields.strip_suffix('}'))
         .expect("roofline attainment receipt must be a JSON object");
     format!("{{\"metric\":\"{metric}\",\"k\":{k},\"n\":{n},{receipt_fields}}}")
+}
+
+fn batched_gate_json(target_met: bool, floor_met: bool, environment_valid: bool) -> String {
+    format!(
+        "{{\"metric\":\"batched-gate\",\"target_axis\":\"compute_peak\",\
+         \"target\":{BATCH_GEMM_COMPUTE_TARGET},\"target_met\":{target_met},\
+         \"floor_axis\":\"binding_roof\",\"floor\":0.08,\"floor_met\":{floor_met},\
+         \"environment_valid\":{environment_valid},\"machine\":\"{}-{}\"}}",
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    )
+}
+
+fn batch_gemm_target_met(target_attainment: f64) -> bool {
+    target_attainment >= BATCH_GEMM_COMPUTE_TARGET
 }
 
 #[test]
@@ -34,6 +51,27 @@ fn measurement_receipt_is_one_json_object() {
         ),
         "{\"metric\":\"batch-gemm\",\"k\":4,\"n\":16,\"schema\":\"attainment-v1\",\"attainment\":0.5}"
     );
+}
+
+#[test]
+fn batch_gemm_target_is_identical_in_spec_gate_and_receipt() {
+    let kernel = BatchGemmKernel {
+        k: 4,
+        a: BatchMat::zeros(4, 1),
+        b: BatchMat::zeros(4, 1),
+        c: BatchMat::zeros(4, 1),
+    };
+    assert_eq!(
+        kernel.spec().target_fraction,
+        Some(BATCH_GEMM_COMPUTE_TARGET)
+    );
+    assert!(batch_gemm_target_met(BATCH_GEMM_COMPUTE_TARGET));
+    assert!(!batch_gemm_target_met(
+        BATCH_GEMM_COMPUTE_TARGET - f64::EPSILON
+    ));
+    assert!(batched_gate_json(true, true, true).contains(&format!(
+        "\"target\":{BATCH_GEMM_COMPUTE_TARGET},\"target_met\":true"
+    )));
 }
 
 struct BatchGemmKernel {
@@ -77,18 +115,19 @@ impl RooflineKernel for BatchGemmKernel {
             // 3x3 = 1.5; the 8x8 geometry (64 accumulators) cannot
             // exist in registers on either reference ISA, and measured
             // attainment (x86 0.28-0.33, M4 band alike, admitted rows)
-            // projects to at most ~0.37 at the feasible maxima. 0.30 is
+            // projects to at most ~0.37 at the feasible maxima. 0.25 is
             // the honest, falsifiable compute-peak target for
             // lane-independent batched tiles; operand-sharing
             // formulations are a DIFFERENT algorithm and bit contract.
-            target_fraction: Some(0.30),
+            target_fraction: Some(BATCH_GEMM_COMPUTE_TARGET),
         }
     }
     fn elements(&self) -> usize {
         self.a.batch_len()
     }
-    fn run_once(&mut self) {
+    fn run_once(&mut self) -> Result<(), String> {
         batch_gemm(1.0, &self.a, &self.b, 0.0, &mut self.c);
+        Ok(())
     }
 }
 
@@ -115,10 +154,13 @@ impl RooflineKernel for BatchLuKernel {
     fn elements(&self) -> usize {
         self.a.batch_len()
     }
-    fn run_once(&mut self) {
+    fn run_once(&mut self) -> Result<(), String> {
         let out = batch_lu(&self.a);
-        assert!(out.flags.is_empty(), "perf fixture must be nonsingular");
+        if !out.flags.is_empty() {
+            return Err("batch-LU performance fixture became singular".to_string());
+        }
         std::hint::black_box(out.lu.get(0, 0, 0));
+        Ok(())
     }
 }
 
@@ -132,7 +174,7 @@ fn batched_attainment() {
     let mut environment_valid = true;
     for &k in &[4usize, 6, 8, 12, 16, 24, 32, 48] {
         let mut kern = BatchGemmKernel::new(k);
-        let att = measure(&mut kern, 1, 5, &axes);
+        let att = measure(&mut kern, 1, 5, &axes).expect("bounded batch GEMM measurement");
         let receipt = measurement_json("batch-gemm", k, kern.elements(), &att.to_jsonl());
         println!("{receipt}");
         if att.verdict == fs_roofline::Verdict::EnvironmentInvalid {
@@ -144,7 +186,7 @@ fn batched_attainment() {
         // classes structurally cannot meet ANY compute fraction and
         // answer to the binding-roof floor instead (ny9d re-pin).
         if att.roof == fs_roofline::RoofSide::Compute {
-            all_within &= att.target_attainment >= 0.25;
+            all_within &= batch_gemm_target_met(att.target_attainment);
         }
         floor_ok &= att.attainment >= 0.08;
     }
@@ -156,7 +198,7 @@ fn batched_attainment() {
             if i == j { base + 3.0 * k as f64 } else { base }
         });
         let mut kern = BatchLuKernel { a };
-        let att = measure(&mut kern, 1, 5, &axes);
+        let att = measure(&mut kern, 1, 5, &axes).expect("bounded batch LU measurement");
         let receipt = measurement_json("batch-lu", k, n, &att.to_jsonl());
         println!("{receipt}");
         if att.verdict == fs_roofline::Verdict::EnvironmentInvalid {
@@ -182,12 +224,8 @@ fn batched_attainment() {
     let target_met = environment_valid && all_within;
     let floor_met = environment_valid && floor_ok;
     println!(
-        "{{\"metric\":\"batched-gate\",\"target_axis\":\"compute_peak\",\
-         \"target\":0.25,\"target_met\":{target_met},\
-         \"floor_axis\":\"binding_roof\",\"floor\":0.08,\"floor_met\":{floor_met},\
-         \"environment_valid\":{environment_valid},\"machine\":\"{}-{}\"}}",
-        std::env::consts::OS,
-        std::env::consts::ARCH
+        "{}",
+        batched_gate_json(target_met, floor_met, environment_valid)
     );
     assert!(
         environment_valid,

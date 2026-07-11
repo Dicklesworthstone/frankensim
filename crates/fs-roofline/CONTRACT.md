@@ -1,6 +1,6 @@
 # CONTRACT: fs-roofline
 
-> Status: ACTIVE (harness receipt v3). Owns the roofline measurement discipline of
+> Status: ACTIVE (ledger row v4, production protocol v2). Owns the roofline measurement discipline of
 > plan §14: measured axes, intensity-derived limits, dispersion-reported
 > attainment, fingerprint-and-baseline-keyed ledger rows, staleness detection.
 
@@ -22,19 +22,25 @@ crates plus `std`.
 - `KernelSpec` — identity + intensity model (`bytes_per_elem`,
   `flops_per_elem`), threading axis, explicit `TargetAxis`, and optional
   `target_fraction`.
-- `RooflineKernel` — owns its buffers; `run_once` is the timed unit.
+- `RooflineKernel` — owns its buffers; fallible `run_once` is the timed unit.
 - `measure` / `run_registry` — warmup + repetitions →
   [`Attainment`]: median rate, achieved GB/s and GFLOP/s, binding
   `RoofSide`, binding-roof `attainment`, target-axis `target_attainment`,
   relative IQR `dispersion`, and a
   `Verdict` (`WithinBand`/`BelowBand`/`NoTarget`/`EnvironmentInvalid`).
   The invalid verdict carries a reason and is never a performance pass or
-  failure.
-- `run_admission_error` / `run_is_citable` — the publication boundary:
+  failure. Both entry points are fallible and reject work before invoking a
+  kernel: warmups are bounded to 1000, repetitions to `1..=1000`, registries
+  to 256 kernels, and aggregate kernel invocations to 250,000 with checked
+  arithmetic. Result and sample buffers use fallible reservations.
+- `run_admission_error` / `run_passes_measurement_admission` — the aggregate
+  measurement boundary:
   require an explicit `AxisBaselinePolicy` whose selected baseline trusts both
   exact pre/post probes, private timed provenance, positive
   work count and sample durations, raw-sample re-derivation, unmodified
-  spec/derived fields, and unique kernel identities. GEMM additionally requires
+  spec/derived fields, and unique kernel identities. Passing this predicate is
+  necessary but not sufficient for citation: only the sealed production
+  protocol supplies production-registry provenance. GEMM additionally requires
   at least one warmup and an identical sealed decision/path binding after every
   timed repetition. Analytic helper rows are deliberately non-citable.
 - `finalize_registry_tuning` / `RooflineKernel::finalize_tuning` — apply that
@@ -53,56 +59,115 @@ crates plus `std`.
   exact sealed session row from their stable binding (fresh or adopted), plus
   metrics, `benchmark_result` events, and
   roofline `tune` rows keyed (kernel ×
-  `roofline-v6:<kernel-version>:run=<finalized-receipt>:op=<operation-id>` × fingerprint LE bytes
+  `roofline-v7:<kernel-version>:run=<finalized-receipt>:op=<operation-id>` × fingerprint LE bytes
   × 32-byte baseline hash). Rows are append-only per finalized receipt and bind
   the exact executable-content identity, operation, baseline, repetition count,
   and post-probe axes. Every measured payload is also stored as a
   content-addressed `roofline-benchmark-result` artifact and linked as an `Out`
-  edge of that exact operation; the row binds the artifact hash. `record_run`
+  edge of that exact operation; the row binds the artifact hash. Receipt-backed
+  production runs also retain the exact canonical fs-la normal/build graph as
+  an `fs-la-depgraph-receipt` artifact, link it as an `In` edge, and bind both
+  its content hash and exported-domain digest into the operation IR and every
+  row. A development-salt production run is report-only: it records a
+  structured rejection and publishes no metrics or tune rows. `record_run`
   requires and consumes the matching one-shot token. Rejected input publishes the exact baseline-admission
   event plus one rejection event and an Error op, never normal-looking metrics
   or tuning evidence; storage failures roll back the entire write set.
+  The public custom-registry path uses the disjoint
+  `roofline-candidate-v1:<kernel-version>:run=...` namespace; exploratory rows
+  therefore cannot satisfy or poison the production `roofline-v7` scan.
 - `staleness` / `staleness_at` — `Fresh` / `Expired` / `ClockRollback` /
   `FingerprintDrift` / `BaselineUnavailable` / `BaselineDrift` / `BuildDrift` /
   `CorruptEvidence` / `NeverMeasured` per kernel version, fingerprint, selected
   baseline, and exact current executable. Exact current-key rows are
   semantically revalidated against canonical params, artifact bytes and output
   edge, successful operation receipt, admitted baseline, and executable
-  identity. `Fresh` requires the newest current-build op to be no more than 30
-  days old. `staleness_at` takes explicit wall nanoseconds for deterministic
-  replay; `staleness` supplies the current clock.
+  identity. Validation also requires the canonical `production-v2` stamp,
+  well-formed nonce/pre-probe/post-probe fields, exact dependency artifact
+  kind/metadata/bytes, an `In` lineage edge, and a digest recomputed with
+  `fs_session::GEMM_DEPGRAPH_RECEIPT_DOMAIN`. Historical rows validate against
+  their own retained receipt; equality with the receipt compiled into the
+  current executable is required only for a row claiming that current build.
+  A public `custom-registry` row is outside the production namespace and thus
+  classifies as `NeverMeasured`, never `Fresh` or `CorruptEvidence`. `Fresh`
+  requires the newest current-build op to be no more than 30 days old. The
+  successful operation envelope is exact: session, seed, versions, wall-time
+  budget, roofline capability, `ok` outcome, absent diagnostic, and monotone
+  timestamps all revalidate.
+  `staleness_at` takes explicit wall nanoseconds for deterministic replay;
+  `staleness` supplies the current clock.
 - Sealed production protocol (bead fz2.5): `production::ProductionProbe` /
-  `ProductionRun` is the ONLY path to citable evidence. `observe()` performs
+  `ProductionRun` is the only API path to a production citation candidate. `observe()` performs
   the pre-probe and mints a per-run nonce (callers may read the axes for
   baseline selection but never supply them); `run()` owns production
   registry selection, timed warmup/repetitions, the post-probe (observed
   strictly after the timed loop), aggregate admission, and tune
   finalization; `record()` consumes the run and stamps the operation `ir`
-  with `"protocol":"production-v1"`, the nonce, and content hashes of both
-  observed axis receipts. The public `record_run` path stays available for
+  with `"protocol":"production-v2"`, the nonce, content hashes of both
+  observed axis receipts, and the dependency-receipt artifact/digest. Its
+  `citation_eligible()` pre-commit predicate additionally refuses the default
+  development salt with a structured report-only reason; CLI output cannot set
+  `citable:true` until the atomic record succeeds and every row revalidates as
+  `Fresh`. The public `record_run` path stays available for
   harness tests but is stamped `"protocol":"custom-registry"` and is
   explicitly NON-CITABLE — a custom kernel wearing a production name,
   replaying a cloned execution binding, or passing the pre-probe twice can
-  never wear the production stamp (`tests/production_seal.rs`, in-crate
-  drifted-post/finalizer-failure/probe-ordering battery). Unforgeability is
-  type opacity per the workspace capability pattern, not cryptography: the
-  nonce is a process-unique challenge, and the no-crypto no-claim applies.
-- Ordered result manifest (bead gp3.15, ledger row schema v3): every recorded
+  never wear the production stamp through this API (`tests/production_seal.rs`,
+  in-crate drifted-post/finalizer-failure/probe-ordering battery). Type opacity
+  seals the API constructor, not the database: the nonce is a process-unique
+  challenge, and callers with general `fs-ledger` mutation authority remain a
+  trusted-writer boundary. External package/ledger authentication is required
+  before evidence can claim authority against a malicious writer.
+  `ProductionRunConfig::validate` runs before registry allocation/timing and
+  bounds `n` to `1..=2^24`, warmups to `0..=1000`, and repetitions to
+  `1..=1000`; it additionally bounds the combined
+  `n * (warmup + repetitions)` work proxy to `2^28` with checked arithmetic.
+  The CLI also caps promotion probes at 1000 and baseline age at
+  36,500 days before allocation or loops. Promotion reads the existing store
+  through the same 1 MiB bound as runtime admission, serializes same-store
+  writers with an OS lock, and opens each uniquely named same-directory staging
+  generation with create-new semantics. It syncs the complete generation,
+  verifies open-handle/path identity and single-link ownership, atomically
+  replaces the prior identity-checked regular file, and syncs the parent
+  directory. It never reopens or truncates stale crash generations;
+  symlink/special-file stores and staging paths are refused. This durable
+  promotion transaction currently fails closed on non-Unix hosts, where the
+  required file identities are unavailable. Existing and staged stores must
+  each have exactly one hard link. Atomic replacement assumes a stable, trusted
+  parent directory: the identity checks detect path/object drift at each check
+  point but cannot prevent a privileged writer from swapping the directory
+  entry after the final rename. The executable content identity is
+  captured before timing and rehashed immediately before recording; drift
+  refuses the transaction.
+- Ordered result manifest (bead gp3.15, retained in ledger row schema v4): every recorded
   run binds a versioned `result_manifest` (ordinal × kernel × version ×
   payload content hash, canonical JSON) into the operation `ir` and folds its
   domain-separated hash into the finalized run receipt
-  (`finalized-run.v2`). Staleness revalidation reconstructs the entire receipt
+  (`finalized-run.v2`). Kernel/version identifiers are bounded to 1..=128
+  canonical ASCII bytes and JSON-escaped before any admission decision, so a
+  refused custom registry cannot corrupt the retained operation envelope.
+  Staleness revalidation reconstructs the entire receipt
   from the manifest and the rows stored **today** — baseline receipt bytes,
   every payload in manifest order, manifest hash — and compares it to the
-  op-bound receipt. Replacing one payload plus its matching artifact/params
-  while retaining the old receipt, adding rows beyond the manifest, or
-  removing/altering any sibling row classifies as `CorruptEvidence` for every
-  row of that run (`tests/manifest_tamper.rs`). Pre-manifest v2 rows cannot
-  prove receipt membership and are retired the same way; identical honest
-  reruns stay `Fresh`.
+  op-bound receipt. Replacing one payload plus its matching artifact/params, or
+  removing/altering any sibling row, classifies every manifested row in that
+  run as `CorruptEvidence`. A forged row added beyond the manifest is itself
+  corrupt, while untouched manifested rows remain `Fresh`; an unrelated extra
+  row is not allowed to revoke valid evidence. The crate-private
+  `production::tests` battery executes these receipt-backed attacks. The
+  external battery actively proves public custom-registry rows cannot acquire
+  Freshness and retains the now-vacuous historical attacks as ignored source.
+  Pre-manifest/dependency-receipt rows cannot prove current membership and are
+  retired the same way; identical honest reruns stay `Fresh`.
 - `kernels::default_registry` — the stable test/meta registry: fs-simd
   axpy/dot/sum (report-only bands in v0). `SeededSlowKernel` is the separate
-  meta-test kernel claiming a band it cannot meet.
+  meta-test kernel claiming a band it cannot meet. Every built-in constructor
+  and registry is fallible: vector sizes must be in `1..=2^24`, each GEMM
+  matrix must contain at most `2^24` elements, and GEMM worker budgets must be
+  in `1..=4096`. These checks and checked extent arithmetic run before buffer
+  allocation; buffers use fallible reservations. Empty midpoint indexing and
+  hostile-size capacity panics therefore cannot enter `run_once` through a
+  built-in constructor.
 - `kernels::production_registry` / `GemmKernel` — the shipped command's
   registry adds real f64 GEMM through
   `fs_session::gemm_f64_session_with_pool`.
@@ -219,9 +284,18 @@ crates plus `std`.
 
 ## Error model
 
-Measurement APIs are infallible (they report what they saw, including
-zero rates, with invalid evidence normalized to finite JSON plus an
-explicit reason). Ledger interaction returns `fs_ledger::LedgerError`
+Measurement APIs return `Result`: invalid resource envelopes are refused before
+any kernel execution. Sample reservations happen before the affected kernel's
+warmup, and a registry aborts rather than executing a kernel whose measurement
+buffers cannot be reserved. A `run_once` failure is annotated with the kernel
+identity, warmup/timed phase, and invocation index; it aborts the measurement
+without constructing an attainment row. Any registry execution or lifecycle
+failure invokes every kernel's idempotent, non-publishing `abort_tuning` hook;
+process-local tune rows and decision bindings from a tokenless partial run
+cannot survive into registry reuse. The production GEMM propagates session,
+tune-key, and execution-receipt refusals through this path rather than panicking.
+Observations such as zero rates remain successful measurements with invalid
+evidence normalized to finite JSON plus an explicit reason. Ledger interaction returns `fs_ledger::LedgerError`
 (structured, machine-actionable). The CLI refuses malformed arguments with
 a structured JSON error on stderr and a nonzero exit.
 
@@ -270,7 +344,7 @@ decision/path field, alter only one repetition, and remove warmup; all refuse
 admission. A registry-hook unit test proves the hook receives the complete
 pre/post admission decision and drains every hook after a middle failure.
 Baseline integration tests prove an unbaselined first run and stable sustained
-contention cannot cross `run_is_citable`, while admitted ledger rows carry one
+contention cannot cross `run_passes_measurement_admission`, while admitted ledger rows carry one
 canonical `axis_baseline_admission` event.
 
 ## No-claim boundaries
@@ -295,15 +369,24 @@ canonical `axis_baseline_admission` event.
   `BaselineAxes` through `AxisBaselinePolicy`; reporting-only lanes may run
   unbaselined but their measurements are candidate evidence, never citable.
 - `RooflineKernel::elements()` and intensity are asserted by the registered
-  implementation. Receipt v3 proves what was timed and how the arithmetic was
+  implementation. The measurement receipt proves what was timed and how the arithmetic was
   derived; it does not prove a custom trait implementation performed the work
-  it claimed. Default-registry review is the v1 trust root; implementation
-  hashes remain follow-up scope. Likewise, public callers currently supply the
-  pre/post `MachineAxes`; receipt admission proves agreement between the values
-  supplied, not that a caller actually performed the post-run probe. An opaque
-  production-run protocol that owns registry selection and both probes remains
-  `frankensim-epic-perf-fz2.5`; custom/public registry runs are candidate
-  evidence, not independently citable proof.
+  it claimed. The sealed production registry and executable content identity
+  are the implementation trust root. Public callers still supply custom
+  pre/post `MachineAxes`; those rows are exploratory and never classify Fresh.
+  `ProductionProbe` owns both probes and registry selection for citable rows.
+- Dependency receipts are operator-observed, structurally validated evidence,
+  not Cargo-authenticated invocation proofs or signatures. Protocol v2 proves
+  that the exact bytes compiled into fs-session were retained, rehashed, linked
+  to the operation. The receipt command admits only byte-identical results from
+  two complete Cargo-discovery-plus-package-hashing derivations, so detected
+  movement fails closed instead of producing a mixed snapshot. This is a
+  coherence check over an operator-observed filesystem, not filesystem
+  transactional atomicity; undetectable ABA mutation remains outside the claim.
+  A current-build row is compared with the current
+  executable's exported receipt; a foreign-build row remains valid history
+  when its own retained artifact and digest agree. Correspondence between the operator-selected Cargo tree and
+  the actual rustc invocation remains an explicit no-claim.
 - Verdict gating in CI is deliberately absent on shared runners; bands
   bind only on ledgered reference machines (nightly lane, later).
 - Baseline promotion authority (bead fz2.7): the `authority` module adds

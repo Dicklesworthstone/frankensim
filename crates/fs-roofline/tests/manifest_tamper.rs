@@ -1,3 +1,13 @@
+//! Historical external form of the op-bound manifest battery.
+//!
+//! Receipt-backed tamper coverage lives in `production::tests` because a non-vacuous Fresh
+//! precondition now requires the crate-private receipt-backed production seam.
+//! Keeping that seam inaccessible to integration crates is part of the public
+//! production-protocol seal. The historical attacks remain compiled but
+//! ignored because their former `Fresh` precondition is intentionally
+//! unreachable through the public custom-registry path. One active test below
+//! locks that public boundary; the private battery executes the attacks.
+
 //! Adversarial battery for the op-bound ordered result manifest (bead
 //! gp3.15): a writer holding ordinary Ledger APIs must not be able to alter
 //! recorded roofline evidence while keeping the finalized run receipt.
@@ -96,8 +106,9 @@ fn recorded_run(db: &str) -> RecordedRun {
     let axes = synthetic_axes(FINGERPRINT);
     let (baseline, identity) = trusted_baseline(&axes);
     let policy = AxisBaselinePolicy::new(Some(&baseline), &identity, 20_010);
-    let mut registry = default_registry(1 << 10);
-    let mut results = run_registry(&mut registry, 0, 1, &axes);
+    let mut registry = default_registry(1 << 10).expect("bounded registry fixture");
+    let mut results =
+        run_registry(&mut registry, 0, 1, &axes).expect("bounded manifest registry run");
     let mut finalized = finalize_registry_tuning(&mut registry, &axes, &axes, policy, &results)
         .expect("finalize run");
     let op = record_run(&ledger, &axes, &axes, policy, &mut finalized, &mut results)
@@ -193,6 +204,21 @@ fn altered_measured(measured: &str) -> String {
 }
 
 #[test]
+fn ordinary_ledger_writer_fixture_never_acquires_production_freshness() {
+    let db = temp_db("public-boundary");
+    let run = recorded_run(&db);
+    for (kernel, version) in &run.kernels {
+        assert_eq!(
+            probe(&run, kernel, version),
+            Staleness::NeverMeasured,
+            "public custom-registry evidence must remain outside production history"
+        );
+    }
+    cleanup_db(&db);
+}
+
+#[test]
+#[ignore = "historical attack replay requires the crate-private synthetic receipt seam"]
 fn replacing_one_payload_while_keeping_the_receipt_poisons_the_whole_run() {
     let db = temp_db("splice");
     let run = recorded_run(&db);
@@ -219,6 +245,7 @@ fn replacing_one_payload_while_keeping_the_receipt_poisons_the_whole_run() {
 }
 
 #[test]
+#[ignore = "historical attack replay requires the crate-private synthetic receipt seam"]
 fn rows_added_beyond_the_manifest_are_corrupt_evidence() {
     let db = temp_db("added");
     let run = recorded_run(&db);
@@ -272,6 +299,7 @@ fn rows_added_beyond_the_manifest_are_corrupt_evidence() {
 }
 
 #[test]
+#[ignore = "historical attack replay requires the crate-private synthetic receipt seam"]
 fn identical_rerun_history_stays_fresh() {
     let db = temp_db("rerun");
     let first = recorded_run(&db);
@@ -283,8 +311,8 @@ fn identical_rerun_history_stays_fresh() {
     let axes = synthetic_axes(FINGERPRINT);
     let (baseline2, identity2) = trusted_baseline(&axes);
     let policy = AxisBaselinePolicy::new(Some(&baseline2), &identity2, 20_010);
-    let mut registry = default_registry(1 << 10);
-    let mut results = run_registry(&mut registry, 0, 1, &axes);
+    let mut registry = default_registry(1 << 10).expect("bounded registry fixture");
+    let mut results = run_registry(&mut registry, 0, 1, &axes).expect("bounded rerun registry run");
     let mut finalized = finalize_registry_tuning(&mut registry, &axes, &axes, policy, &results)
         .expect("finalize second run");
     let op2 = record_run(
@@ -322,6 +350,7 @@ fn identical_rerun_history_stays_fresh() {
 }
 
 #[test]
+#[ignore = "historical attack replay requires the crate-private synthetic receipt seam"]
 fn pre_manifest_v2_rows_are_retired_as_corrupt() {
     let db = temp_db("v2row");
     let run = recorded_run(&db);
