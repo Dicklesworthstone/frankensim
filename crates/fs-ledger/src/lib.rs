@@ -129,6 +129,21 @@ pub enum LedgerError {
         /// Every attestation violation found (object-level diffs).
         violations: Vec<String>,
     },
+    /// Identical bytes offered with a DIFFERENT envelope (kind or
+    /// metadata) than the stored artifact carries (bead gp3.19).
+    /// Byte deduplication stays content-addressed, but an envelope
+    /// disagreement refuses instead of silently retaining whichever
+    /// arrived first — provenance must not depend on insertion order.
+    ArtifactEnvelopeConflict {
+        /// Hex content hash of the artifact.
+        hash_hex: String,
+        /// Which envelope field conflicts: `kind` or `meta`.
+        field: &'static str,
+        /// The envelope value already stored (`<none>` for NULL meta).
+        stored: String,
+        /// The envelope value this call offered.
+        offered: String,
+    },
 }
 
 impl LedgerError {
@@ -147,6 +162,7 @@ impl LedgerError {
             LedgerError::DoubleFinish { .. } => "LedgerDoubleFinish",
             LedgerError::WriterInTransaction => "LedgerWriterInTransaction",
             LedgerError::SchemaMismatch { .. } => "LedgerSchemaMismatch",
+            LedgerError::ArtifactEnvelopeConflict { .. } => "LedgerArtifactEnvelopeConflict",
         }
     }
 }
@@ -205,6 +221,19 @@ impl std::fmt::Display for LedgerError {
                  data out manually or delete the file if it is disposable",
                 violations.len(),
                 violations.join("; ")
+            ),
+            LedgerError::ArtifactEnvelopeConflict {
+                hash_hex,
+                field,
+                stored,
+                offered,
+            } => write!(
+                f,
+                "LedgerArtifactEnvelopeConflict: artifact {hash_hex} already stores \
+                 {field}={stored} but this call offered {field}={offered}; identical \
+                 bytes dedupe only under an AGREEING envelope — match the stored \
+                 envelope (or offer no metadata to accept it) instead of relying on \
+                 insertion order",
             ),
         }
     }
@@ -1012,6 +1041,7 @@ impl Ledger {
         self.validate_artifact_inputs(kind, meta)?;
         let h = hash_bytes(bytes);
         if let Some(info) = self.artifact_info(&h)? {
+            self.attest_artifact_envelope(&h, &info, kind, meta)?;
             return Ok(PutReceipt {
                 hash: h,
                 len: info.len,
@@ -1063,6 +1093,60 @@ impl Ledger {
         Ok(())
     }
 
+    /// Envelope agreement gate at every dedupe site (bead gp3.19): a
+    /// byte-identical artifact dedupes only when the offered `kind`
+    /// matches exactly and the offered metadata (when a claim is made)
+    /// canonically equals the stored metadata. Offering `meta: None`
+    /// makes NO claim and accepts the stored envelope (the streaming
+    /// dedupe contract); offering metadata against a row stored without
+    /// any is a conflict — silent claim-dropping is the bug this gate
+    /// removes.
+    fn attest_artifact_envelope(
+        &self,
+        h: &ContentHash,
+        info: &ArtifactInfo,
+        kind: &str,
+        meta: Option<&str>,
+    ) -> Result<(), LedgerError> {
+        if kind != info.kind {
+            return Err(LedgerError::ArtifactEnvelopeConflict {
+                hash_hex: h.to_hex(),
+                field: "kind",
+                stored: info.kind.clone(),
+                offered: kind.to_string(),
+            });
+        }
+        let Some(offered) = meta else {
+            return Ok(());
+        };
+        let conflict = |stored: String| LedgerError::ArtifactEnvelopeConflict {
+            hash_hex: h.to_hex(),
+            field: "meta",
+            stored,
+            offered: offered.to_string(),
+        };
+        let Some(stored) = info.meta.as_deref() else {
+            return Err(conflict("<none>".to_string()));
+        };
+        // Canonical comparison through the engine (whitespace-insensitive;
+        // key order remains significant, as documented in CONTRACT.md).
+        let rows = self
+            .conn
+            .query_with_params(
+                "SELECT json(?1) = json(?2)",
+                &[text_param(stored), text_param(offered)],
+            )
+            .map_err(|e| sql_err("artifact meta compare", &e))?;
+        let equal = rows
+            .first()
+            .map_or(Ok(0), |row| row_i64(row, 0, "artifact meta compare"))?;
+        if equal == 1 {
+            Ok(())
+        } else {
+            Err(conflict(stored.to_string()))
+        }
+    }
+
     fn insert_inline_artifact(
         &self,
         h: &ContentHash,
@@ -1093,13 +1177,19 @@ impl Ledger {
                 chunked: false,
             }),
             // A concurrent writer stored the same content first: that IS the
-            // dedupe contract, not an error.
-            Err(e) if is_duplicate_key(&e) => Ok(PutReceipt {
-                hash: *h,
-                len: bytes.len() as u64,
-                deduped: true,
-                chunked: false,
-            }),
+            // dedupe contract, not an error — but only under an AGREEING
+            // envelope (gp3.19), so re-read theirs and attest.
+            Err(e) if is_duplicate_key(&e) => {
+                if let Some(info) = self.artifact_info(h)? {
+                    self.attest_artifact_envelope(h, &info, kind, meta)?;
+                }
+                Ok(PutReceipt {
+                    hash: *h,
+                    len: bytes.len() as u64,
+                    deduped: true,
+                    chunked: false,
+                })
+            }
             Err(e) => Err(sql_err("artifact insert", &e)),
         }
     }
@@ -1126,7 +1216,11 @@ impl Ledger {
             match insert {
                 Ok(_) => {}
                 Err(e) if is_duplicate_key(&e) => {
-                    // Concurrent identical store; the other writer wins.
+                    // Concurrent identical store; the other writer wins —
+                    // if their committed envelope agrees (gp3.19).
+                    if let Some(info) = self.artifact_info(h)? {
+                        self.attest_artifact_envelope(h, &info, kind, meta)?;
+                    }
                     return Ok(());
                 }
                 Err(e) => return Err(sql_err("chunk insert", &e)),
@@ -2074,7 +2168,10 @@ impl ArtifactWriter<'_> {
         }
         let h = self.hasher.finalize();
         if let Some(info) = self.ledger.artifact_info(&h)? {
-            // Identical content already stored: discard staging, keep theirs.
+            // Identical content already stored: keep theirs — if the
+            // envelope agrees (gp3.19) — and discard staging.
+            self.ledger
+                .attest_artifact_envelope(&h, &info, &self.kind, meta)?;
             self.discard_staging()?;
             self.ledger.commit()?;
             return Ok(PutReceipt {

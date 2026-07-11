@@ -165,8 +165,20 @@ signature) and grants re-verify from the stored ledger node.
 
 ## Invariants
 
-1. Artifact identity = BLAKE3 of content; identical bytes dedupe to one row
-   (concurrent duplicate insert resolves to dedupe, never an error).
+1. Artifact identity = BLAKE3 of content; identical bytes dedupe to one row.
+   ENVELOPE AGREEMENT (bead gp3.19): the dedupe applies only under an
+   AGREEING envelope — the offered `kind` must match exactly, and offered
+   metadata (when a claim is made) must canonically equal the stored
+   metadata (engine `json()` comparison: whitespace-insensitive, key order
+   significant). Offering `meta: None` makes no claim and accepts the
+   stored envelope; offering metadata against a row stored without any is
+   a conflict. Disagreement refuses with structured
+   `LedgerArtifactEnvelopeConflict { hash, field, stored, offered }` at
+   EVERY dedupe site (pre-check, concurrent duplicate-key race, streaming
+   writer finish) — provenance never depends on insertion order, and
+   content identity stays bytes-only (no schema change; byte dedup
+   retained). Concurrent duplicate insert with an agreeing envelope still
+   resolves to dedupe, never an error.
 2. Storage shape: inline XOR chunked; `len` always equals stored byte count;
    chunk `seq` is dense from 0. Enforced by CHECKs and re-checked by `lint`.
 3. Ops are event-sourced facts: `(t_end IS NULL) = (outcome IS NULL)` is a

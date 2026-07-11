@@ -13,7 +13,7 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use fs_ledger::{
-    Blake3, EdgeRole, EventRow, FiveExplicits, Ledger, OpOutcome, SCHEMA_VERSION,
+    Blake3, EdgeRole, EventRow, FiveExplicits, Ledger, LedgerError, OpOutcome, SCHEMA_VERSION,
     STORAGE_CHUNK_LEN, hash_bytes,
 };
 
@@ -675,6 +675,16 @@ fn ledger_011_schema_attestation_gauntlet() {
     assert!(err.to_string().contains("missing table"), "{err}");
     cleanup_db(&db);
 
+    verdict(
+        "ledger-011",
+        "schema attestation: empty-init atomic + conflict/partial refused fail-closed",
+    );
+}
+
+#[test]
+fn ledger_011b_schema_attestation_mangled_definitions() {
+    // gp3.18 continued: same-name objects with divergent definitions.
+
     // (4) wrong-column: a v1 table rebuilt with a different column set
     // (same name) is not the shipped definition.
     let db = temp_db("attest-wrongcol");
@@ -740,8 +750,143 @@ fn ledger_011_schema_attestation_gauntlet() {
     cleanup_db(&db);
 
     verdict(
-        "ledger-011",
-        "schema attestation: empty-init atomic + 6 corruption classes refused fail-closed",
+        "ledger-011b",
+        "schema attestation: wrong-column/wrong-affinity/missing-index refused",
+    );
+}
+
+#[test]
+fn ledger_012_artifact_envelope_conflicts() {
+    // gp3.19: identical bytes dedupe ONLY under an agreeing envelope;
+    // conflicting kind/meta refuses structurally instead of silently
+    // retaining whichever envelope arrived first.
+    let bytes = b"envelope gauntlet payload".as_slice();
+
+    // Recommit: the exact same envelope dedupes idempotently.
+    let db = temp_db("env-recommit");
+    let l = Ledger::open(&db).expect("open");
+    let first = l
+        .put_artifact("field", bytes, Some(r#"{"units":"Pa"}"#))
+        .expect("first put");
+    assert!(!first.deduped);
+    let again = l
+        .put_artifact("field", bytes, Some(r#"{"units":"Pa"}"#))
+        .expect("recommit with the identical envelope");
+    assert!(again.deduped);
+    // Whitespace-variant metadata is canonically equal through the engine.
+    assert!(
+        l.put_artifact("field", bytes, Some(r#"{ "units" : "Pa" }"#))
+            .expect("canonically equal meta dedupes")
+            .deduped
+    );
+    // No-claim metadata accepts the stored envelope (streaming contract).
+    assert!(
+        l.put_artifact("field", bytes, None)
+            .expect("no-claim meta dedupes")
+            .deduped
+    );
+    // Conflicting kind refuses.
+    let Err(err) = l.put_artifact("mesh", bytes, Some(r#"{"units":"Pa"}"#)) else {
+        panic!("conflicting kind must refuse")
+    };
+    assert_eq!(err.code(), "LedgerArtifactEnvelopeConflict");
+    assert!(err.to_string().contains("kind=field"), "{err}");
+    // Conflicting metadata refuses and names both sides.
+    let Err(err) = l.put_artifact("field", bytes, Some(r#"{"units":"kPa"}"#)) else {
+        panic!("conflicting meta must refuse")
+    };
+    assert_eq!(err.code(), "LedgerArtifactEnvelopeConflict");
+    assert!(err.to_string().contains("kPa"), "{err}");
+    // A claim against a row stored WITHOUT metadata also refuses.
+    let bare = l
+        .put_artifact("bare", b"no-meta bytes", None)
+        .expect("bare");
+    assert!(!bare.deduped);
+    assert!(matches!(
+        l.put_artifact("bare", b"no-meta bytes", Some("{}")),
+        Err(LedgerError::ArtifactEnvelopeConflict { field: "meta", .. })
+    ));
+    // The streaming writer's dedupe path enforces the same gate.
+    let mut w = l.artifact_writer("mesh").expect("writer");
+    w.write(bytes).expect("stage");
+    assert!(matches!(
+        w.finish(None),
+        Err(LedgerError::ArtifactEnvelopeConflict { field: "kind", .. })
+    ));
+    drop(l);
+    cleanup_db(&db);
+    verdict(
+        "ledger-012",
+        "artifact envelopes: agree-or-refuse at every dedupe site",
+    );
+}
+
+#[test]
+fn ledger_012b_envelope_order_concurrency_replay() {
+    let bytes = b"envelope gauntlet payload".as_slice();
+    // Reversed-order: either arrival order yields ONE stored envelope and
+    // one structured refusal — never a silent swallow.
+    for (first_kind, second_kind) in [("field", "mesh"), ("mesh", "field")] {
+        let db = temp_db("env-order");
+        let l = Ledger::open(&db).expect("open");
+        l.put_artifact(first_kind, bytes, None).expect("winner");
+        let refused = l.put_artifact(second_kind, bytes, None);
+        assert!(
+            matches!(
+                &refused,
+                Err(LedgerError::ArtifactEnvelopeConflict { field: "kind", stored, .. })
+                    if stored == first_kind
+            ),
+            "order {first_kind}->{second_kind}: {refused:?}"
+        );
+        drop(l);
+        cleanup_db(&db);
+    }
+
+    // Concurrent handles: a second connection deduping through the
+    // duplicate-key race path still attests the envelope.
+    let db = temp_db("env-concurrent");
+    let l1 = Ledger::open(&db).expect("open 1");
+    let l2 = Ledger::open(&db).expect("open 2");
+    l1.put_artifact("field", bytes, None).expect("writer one");
+    assert!(
+        l2.put_artifact("field", bytes, None)
+            .expect("agreeing concurrent put dedupes")
+            .deduped
+    );
+    assert!(matches!(
+        l2.put_artifact("mesh", bytes, None),
+        Err(LedgerError::ArtifactEnvelopeConflict { field: "kind", .. })
+    ));
+    drop((l1, l2));
+    cleanup_db(&db);
+
+    // Replay + migration: a file written before this gate (envelope rows
+    // unchanged by construction — no schema change) replays the accepted
+    // sequence identically after reopen, and the gate binds new puts.
+    let db = temp_db("env-replay");
+    {
+        let l = Ledger::open(&db).expect("open");
+        l.put_artifact("field", bytes, Some(r#"{"units":"Pa"}"#))
+            .expect("seed");
+    }
+    {
+        let l = Ledger::open(&db).expect("reopen (schema attests)");
+        assert!(
+            l.put_artifact("field", bytes, Some(r#"{"units":"Pa"}"#))
+                .expect("replayed put dedupes identically")
+                .deduped
+        );
+        assert!(matches!(
+            l.put_artifact("field", bytes, Some(r#"{"units":"bar"}"#)),
+            Err(LedgerError::ArtifactEnvelopeConflict { .. })
+        ));
+    }
+    cleanup_db(&db);
+
+    verdict(
+        "ledger-012b",
+        "artifact envelopes: order-independent verdicts, concurrent + replay",
     );
 }
 
