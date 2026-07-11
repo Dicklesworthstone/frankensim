@@ -65,8 +65,10 @@ fine-grained event stream. Layer: L6 (HELM). Runtime deps: `std` + `fsqlite`.
   Tune kernel/shape identities are 1..=64 KiB visible ASCII bytes; machine
   identities are exact opaque 1..=256-byte BLOBs; parameter and measurement
   JSON are each at most 1 MiB. Reads metadata-preflight stored values and
-  repeat bounds in guarded payload queries. A kernel scan refuses before
-  payload materialization above 1,024 rows or 16 MiB aggregate output.
+  repeat bounds in guarded payload queries; nested SQL `CASE` gates JSON
+  validation behind type and byte-length checks, so an oversized raw row is
+  refused without reparsing its payload. A kernel scan refuses before payload
+  materialization above 1,024 rows or 16 MiB aggregate output.
 - Rev S extension tables (sparse v0, uniform `(name UNIQUE, body JSON)`
   shape): `put_extension`/`get_extension` over `requirements`, `model_cards`,
   `evidence`, `scenarios`, `constraints`, `capability_probes`, `imports`,
@@ -234,10 +236,12 @@ refusal, or verifier panic).
    most `MAX_TUNE_MACHINE_BYTES`; params/measured are valid JSON within their
    1 MiB bounds. Both write APIs share this admission gate. `tune_get` and
    `tune_rows` inspect type, exact BLOB byte length, and JSON validity before
-   payload selection; guarded queries repeat those predicates. `tune_rows`
-   additionally caps rows and checked aggregate output bytes before selecting
-   variable-size values. Raw-SQL rows outside this contract fail closed as
-   `TuneCorrupt`; valid but excessive histories fail as `TuneReadLimit`.
+   payload selection; guarded queries repeat those predicates, and JSON checks
+   are `CASE`-guarded so evaluation order cannot parse an over-limit value.
+   `tune_rows` additionally caps rows and checked aggregate output bytes before
+   selecting variable-size values. Raw-SQL rows outside this contract fail
+   closed as `TuneCorrupt`; valid but excessive histories fail as
+   `TuneReadLimit`.
 4. Ops are event-sourced facts: `(t_end IS NULL) = (outcome IS NULL)` is a
    table CHECK; an op finishes at most once (`DoubleFinish` otherwise).
 5. Edges only reference existing ops and artifacts (enforced FKs).
@@ -298,7 +302,9 @@ connections through the same atomic tune upsert after forcing tune-table leaf
 splits, then proves a single untorn row, bounded scan, clean lint, and identical
 reopen. Tune unit regressions cover every exact field limit and limit+1,
 empty/NUL/non-ASCII identities, hostile oversized raw-SQL rows, lint detection,
-and deterministic row/aggregate scan caps. `tests/travel.rs`: genuine-v1 →
+and deterministic row/aggregate scan caps (including an exact 16 MiB boundary
+that counts the cloned kernel identity once per returned row).
+`tests/travel.rs`: genuine-v1 →
 v2 migration with history intact, fork storage audit (N forks = 1× artifacts
 + deltas) + branch independence, replay audit battery (clean /
 deterministic-failure / fast-divergence), explain() full-lineage
