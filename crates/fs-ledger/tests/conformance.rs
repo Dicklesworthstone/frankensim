@@ -321,6 +321,14 @@ fn ledger_005_corruption_fails_loudly() {
     assert!(l.verify_artifact_integrity().unwrap().is_clean());
     l.corrupt_artifact_for_test(&small.hash).unwrap();
     l.corrupt_artifact_for_test(&big.hash).unwrap();
+    assert!(matches!(
+        l.get_artifact(&small.hash),
+        Err(fs_ledger::LedgerError::Corrupt { .. })
+    ));
+    assert!(matches!(
+        l.get_artifact(&big.hash),
+        Err(fs_ledger::LedgerError::Corrupt { .. })
+    ));
     let report = l.verify_artifact_integrity().unwrap();
     assert_eq!(report.checked, 2);
     assert!(report.corrupted.contains(&small.hash.to_hex()));
@@ -329,7 +337,7 @@ fn ledger_005_corruption_fails_loudly() {
     cleanup_db(&db);
     verdict(
         "ledger-005",
-        "inline and chunked corruption both detected by re-hash",
+        "ordinary reads and full scan reject inline and chunked corruption",
     );
 }
 

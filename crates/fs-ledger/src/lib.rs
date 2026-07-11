@@ -43,6 +43,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use fsqlite::{Connection, FrankenError, SqliteValue};
 
+/// Maximum UTF-8 byte length of an artifact kind admitted or materialized.
+pub const MAX_ARTIFACT_KIND_BYTES: usize = 256;
+
+/// Maximum UTF-8 byte length of optional artifact metadata JSON.
+pub const MAX_ARTIFACT_META_BYTES: usize = 1024 * 1024;
+
 /// Crate version (compile-time stamp).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -473,9 +479,11 @@ pub struct LintReport {
     pub orphan_edge_artifacts: u64,
     /// Metrics whose op id does not exist.
     pub orphan_metric_ops: u64,
-    /// Artifacts violating the inline-XOR-chunked storage invariant.
+    /// Artifacts violating the inline-XOR-chunked or bounded-row storage
+    /// invariants.
     pub malformed_artifacts: u64,
-    /// Chunked artifacts whose actual chunk-row count differs.
+    /// Chunked artifacts whose row count or dense zero-based sequence differs
+    /// from metadata.
     pub chunk_count_mismatches: u64,
     /// Artifacts whose stored byte length differs from `len`.
     pub len_mismatches: u64,
@@ -664,6 +672,86 @@ fn inline_artifact_bytes(row: &fsqlite::Row, expected_len: u64) -> Result<&[u8],
         ));
     }
     Ok(bytes.as_ref())
+}
+
+fn storage_i64(row: &fsqlite::Row, idx: usize, field: &str) -> Result<i64, String> {
+    match row.get(idx) {
+        Some(SqliteValue::Integer(value)) => Ok(*value),
+        other => Err(format!(
+            "storage preflight {field}: expected INTEGER at column {idx}, got {other:?}"
+        )),
+    }
+}
+
+fn storage_u64(row: &fsqlite::Row, idx: usize, field: &str) -> Result<u64, String> {
+    let value = storage_i64(row, idx, field)?;
+    u64::try_from(value)
+        .map_err(|_| format!("storage preflight {field}: expected non-negative value, got {value}"))
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ArtifactChunkPreflight {
+    count: u64,
+    non_null_count: u64,
+    min_seq: i64,
+    max_seq: i64,
+    total_len: u64,
+    max_len: u64,
+}
+
+enum ChunkedArtifactInsert {
+    Inserted,
+    Deduped(ArtifactInfo),
+}
+
+impl ArtifactChunkPreflight {
+    fn from_row(row: &fsqlite::Row) -> Result<Self, String> {
+        Ok(Self {
+            count: storage_u64(row, 0, "chunk count")?,
+            non_null_count: storage_u64(row, 1, "non-null chunk count")?,
+            min_seq: storage_i64(row, 2, "minimum chunk sequence")?,
+            max_seq: storage_i64(row, 3, "maximum chunk sequence")?,
+            total_len: storage_u64(row, 4, "chunk byte total")?,
+            max_len: storage_u64(row, 5, "maximum chunk length")?,
+        })
+    }
+
+    fn validate(self, info: &ArtifactInfo) -> Result<(), String> {
+        let storage_chunk_len = STORAGE_CHUNK_LEN as u64;
+        if self.non_null_count != self.count {
+            return Err(format!(
+                "chunk BLOB count mismatch: found {} rows but only {} non-NULL byte values",
+                self.count, self.non_null_count
+            ));
+        }
+        if self.max_len > storage_chunk_len {
+            return Err(format!(
+                "chunk exceeds the {STORAGE_CHUNK_LEN}-byte storage bound: maximum stored length is {} bytes",
+                self.max_len
+            ));
+        }
+        if self.count != info.chunk_count {
+            return Err(format!(
+                "chunk count mismatch: recorded {}, found {}",
+                info.chunk_count, self.count
+            ));
+        }
+        let expected_max = i64::try_from(info.chunk_count - 1)
+            .map_err(|_| "recorded chunk count does not fit the sequence domain".to_string())?;
+        if self.min_seq != 0 || self.max_seq != expected_max {
+            return Err(format!(
+                "chunk sequence range is not dense from zero: count {}, min {}, max {}",
+                self.count, self.min_seq, self.max_seq
+            ));
+        }
+        if self.total_len != info.len {
+            return Err(format!(
+                "chunk length mismatch: recorded {}, found {}",
+                info.len, self.total_len
+            ));
+        }
+        Ok(())
+    }
 }
 
 struct ArtifactChunkValidator {
@@ -1156,7 +1244,7 @@ impl Ledger {
         self.validate_artifact_inputs(kind, meta)?;
         let h = hash_bytes(bytes);
         if let Some(info) = self.artifact_info(&h)? {
-            self.attest_artifact_envelope(&h, &info, kind, meta)?;
+            self.verify_dedupe_candidate(&h, &info, kind, meta)?;
             return Ok(PutReceipt {
                 hash: h,
                 len: info.len,
@@ -1175,7 +1263,7 @@ impl Ledger {
         }
         let result = self.insert_chunked_artifact(&h, kind, bytes, meta);
         match (&result, owns_txn) {
-            (Ok(()), true) => {
+            (Ok(_), true) => {
                 if let Err(e) = self.commit() {
                     let _ = self.rollback();
                     return Err(e);
@@ -1186,13 +1274,20 @@ impl Ledger {
             }
             _ => {}
         }
-        result?;
-        Ok(PutReceipt {
-            hash: h,
-            len,
-            deduped: false,
-            chunked: true,
-        })
+        match result? {
+            ChunkedArtifactInsert::Inserted => Ok(PutReceipt {
+                hash: h,
+                len,
+                deduped: false,
+                chunked: true,
+            }),
+            ChunkedArtifactInsert::Deduped(info) => Ok(PutReceipt {
+                hash: h,
+                len: info.len,
+                deduped: true,
+                chunked: info.chunk_count > 0,
+            }),
+        }
     }
 
     fn validate_artifact_inputs(&self, kind: &str, meta: Option<&str>) -> Result<(), LedgerError> {
@@ -1202,7 +1297,23 @@ impl Ledger {
                 problem: "empty; name the artifact kind (e.g. \"field\", \"mesh\")".to_string(),
             });
         }
+        if kind.len() > MAX_ARTIFACT_KIND_BYTES {
+            return Err(LedgerError::Invalid {
+                field: "kind".to_string(),
+                problem: format!(
+                    "UTF-8 encoding exceeds the {MAX_ARTIFACT_KIND_BYTES}-byte artifact-kind limit"
+                ),
+            });
+        }
         if let Some(m) = meta {
+            if m.len() > MAX_ARTIFACT_META_BYTES {
+                return Err(LedgerError::Invalid {
+                    field: "meta".to_string(),
+                    problem: format!(
+                        "UTF-8 encoding exceeds the {MAX_ARTIFACT_META_BYTES}-byte artifact-metadata limit"
+                    ),
+                });
+            }
             self.require_json("meta", m, false)?;
         }
         Ok(())
@@ -1262,6 +1373,37 @@ impl Ledger {
         }
     }
 
+    /// Refuse dedupe unless the existing storage still hashes to its key.
+    /// Envelope agreement alone cannot make corrupted bytes trustworthy.
+    fn verify_dedupe_candidate(
+        &self,
+        h: &ContentHash,
+        info: &ArtifactInfo,
+        kind: &str,
+        meta: Option<&str>,
+    ) -> Result<(), LedgerError> {
+        match self.read_artifact_chunks(h, &mut |_| {})? {
+            Some(streamed) if streamed == info.len => {}
+            Some(streamed) => {
+                return Err(LedgerError::Corrupt {
+                    hash_hex: h.to_hex(),
+                    detail: format!(
+                        "dedupe verification streamed {streamed} bytes but metadata records {}",
+                        info.len
+                    ),
+                });
+            }
+            None => {
+                return Err(LedgerError::Corrupt {
+                    hash_hex: h.to_hex(),
+                    detail: "dedupe candidate disappeared before its bytes could be verified"
+                        .to_string(),
+                });
+            }
+        }
+        self.attest_artifact_envelope(h, info, kind, meta)
+    }
+
     fn insert_inline_artifact(
         &self,
         h: &ContentHash,
@@ -1295,14 +1437,17 @@ impl Ledger {
             // dedupe contract, not an error — but only under an AGREEING
             // envelope (gp3.19), so re-read theirs and attest.
             Err(e) if is_duplicate_key(&e) => {
-                if let Some(info) = self.artifact_info(h)? {
-                    self.attest_artifact_envelope(h, &info, kind, meta)?;
-                }
+                let info = self.artifact_info(h)?.ok_or_else(|| LedgerError::Corrupt {
+                    hash_hex: h.to_hex(),
+                    detail: "duplicate artifact key exists without readable artifact metadata"
+                        .to_string(),
+                })?;
+                self.verify_dedupe_candidate(h, &info, kind, meta)?;
                 Ok(PutReceipt {
                     hash: *h,
-                    len: bytes.len() as u64,
+                    len: info.len,
                     deduped: true,
-                    chunked: false,
+                    chunked: info.chunk_count > 0,
                 })
             }
             Err(e) => Err(sql_err("artifact insert", &e)),
@@ -1315,7 +1460,7 @@ impl Ledger {
         kind: &str,
         bytes: &[u8],
         meta: Option<&str>,
-    ) -> Result<(), LedgerError> {
+    ) -> Result<ChunkedArtifactInsert, LedgerError> {
         let chunks = bytes.chunks(STORAGE_CHUNK_LEN);
         let chunk_count = int_from_usize(chunks.len());
         for (seq, chunk) in chunks.enumerate() {
@@ -1332,11 +1477,25 @@ impl Ledger {
                 Ok(_) => {}
                 Err(e) if is_duplicate_key(&e) => {
                     // Concurrent identical store; the other writer wins —
-                    // if their committed envelope agrees (gp3.19).
-                    if let Some(info) = self.artifact_info(h)? {
-                        self.attest_artifact_envelope(h, &info, kind, meta)?;
+                    // if their committed bytes and envelope agree. Restore
+                    // any holes this attempt filled before evaluating the
+                    // pre-existing candidate.
+                    if seq > 0 {
+                        self.conn
+                            .prepare("DELETE FROM artifact_chunks WHERE hash = ?1 AND seq < ?2")
+                            .map_err(|error| sql_err("chunk prefix cleanup prepare", &error))?
+                            .execute_with_params(&[
+                                blob_param(h.as_bytes()),
+                                SqliteValue::Integer(int_from_usize(seq)),
+                            ])
+                            .map_err(|error| sql_err("chunk prefix cleanup", &error))?;
                     }
-                    return Ok(());
+                    let info = self.artifact_info(h)?.ok_or_else(|| LedgerError::Corrupt {
+                        hash_hex: h.to_hex(),
+                        detail: "duplicate chunk key exists without artifact metadata".to_string(),
+                    })?;
+                    self.verify_dedupe_candidate(h, &info, kind, meta)?;
+                    return Ok(ChunkedArtifactInsert::Deduped(info));
                 }
                 Err(e) => return Err(sql_err("chunk insert", &e)),
             }
@@ -1356,7 +1515,7 @@ impl Ledger {
                 SqliteValue::Integer(now_wall_ns()),
             ])
             .map_err(|e| sql_err("artifact insert", &e))?;
-        Ok(())
+        Ok(ChunkedArtifactInsert::Inserted)
     }
 
     /// Begin a streaming artifact write (for fields too large to hold in
@@ -1387,18 +1546,85 @@ impl Ledger {
     /// Metadata for one artifact, if present.
     ///
     /// # Errors
-    /// Engine errors only; absence is `Ok(None)`.
+    /// Engine errors or [`LedgerError::Corrupt`] when the stored envelope is
+    /// malformed or exceeds its materialization bounds; absence is `Ok(None)`.
     pub fn artifact_info(&self, h: &ContentHash) -> Result<Option<ArtifactInfo>, LedgerError> {
+        let preflight = self
+            .conn
+            .query_with_params(
+                "SELECT typeof(kind), length(CAST(kind AS BLOB)), typeof(meta), \
+                 CASE WHEN meta IS NULL THEN 0 ELSE length(CAST(meta AS BLOB)) END \
+                 FROM artifacts WHERE hash = ?1",
+                &[blob_param(h.as_bytes())],
+            )
+            .map_err(|e| sql_err("artifact_info envelope preflight", &e))?;
+        let Some(preflight) = preflight.first() else {
+            return Ok(None);
+        };
+        let envelope_detail = (|| {
+            let kind_type = match preflight.get(0) {
+                Some(SqliteValue::Text(value)) => value.as_str(),
+                other => {
+                    return Err(format!(
+                        "artifact kind type preflight expected TEXT, got {other:?}"
+                    ));
+                }
+            };
+            let meta_type = match preflight.get(2) {
+                Some(SqliteValue::Text(value)) => value.as_str(),
+                other => {
+                    return Err(format!(
+                        "artifact metadata type preflight expected TEXT, got {other:?}"
+                    ));
+                }
+            };
+            let kind_len = storage_u64(preflight, 1, "artifact kind byte length")?;
+            let meta_len = storage_u64(preflight, 3, "artifact metadata byte length")?;
+            if kind_type != "text" {
+                return Err(format!("artifact kind must be TEXT, found {kind_type}"));
+            }
+            if kind_len == 0 || kind_len > MAX_ARTIFACT_KIND_BYTES as u64 {
+                return Err(format!(
+                    "artifact kind byte length {kind_len} is outside 1..={MAX_ARTIFACT_KIND_BYTES}"
+                ));
+            }
+            if meta_type != "null" && meta_type != "text" {
+                return Err(format!(
+                    "artifact metadata must be TEXT or NULL, found {meta_type}"
+                ));
+            }
+            if meta_len > MAX_ARTIFACT_META_BYTES as u64 {
+                return Err(format!(
+                    "artifact metadata byte length {meta_len} exceeds {MAX_ARTIFACT_META_BYTES}"
+                ));
+            }
+            Ok(())
+        })();
+        envelope_detail.map_err(|detail| LedgerError::Corrupt {
+            hash_hex: h.to_hex(),
+            detail,
+        })?;
+
         let rows = self
             .conn
             .query_with_params(
-                "SELECT kind, len, chunk_count, meta, created_at FROM artifacts WHERE hash = ?1",
-                &[blob_param(h.as_bytes())],
+                "SELECT kind, len, chunk_count, meta, created_at FROM artifacts \
+                 WHERE hash = ?1 AND typeof(kind) = 'text' \
+                 AND length(CAST(kind AS BLOB)) BETWEEN 1 AND ?2 \
+                 AND (meta IS NULL OR (typeof(meta) = 'text' \
+                      AND length(CAST(meta AS BLOB)) <= ?3))",
+                &[
+                    blob_param(h.as_bytes()),
+                    SqliteValue::Integer(int_from_usize(MAX_ARTIFACT_KIND_BYTES)),
+                    SqliteValue::Integer(int_from_usize(MAX_ARTIFACT_META_BYTES)),
+                ],
             )
             .map_err(|e| sql_err("artifact_info", &e))?;
-        let Some(row) = rows.first() else {
-            return Ok(None);
-        };
+        let row = rows.first().ok_or_else(|| LedgerError::Corrupt {
+            hash_hex: h.to_hex(),
+            detail: "artifact envelope disappeared or exceeded its bound after preflight"
+                .to_string(),
+        })?;
         let kind = match row.get(0) {
             Some(SqliteValue::Text(t)) => t.as_str().to_string(),
             other => {
@@ -1418,6 +1644,18 @@ impl Ledger {
                 });
             }
         };
+        if let Some(meta) = meta.as_deref() {
+            match self.require_json("artifact.meta", meta, false) {
+                Ok(()) => {}
+                Err(LedgerError::Invalid { .. }) => {
+                    return Err(LedgerError::Corrupt {
+                        hash_hex: h.to_hex(),
+                        detail: "artifact metadata is not valid JSON".to_string(),
+                    });
+                }
+                Err(error) => return Err(error),
+            }
+        }
         Ok(Some(ArtifactInfo {
             hash: *h,
             kind,
@@ -1426,6 +1664,75 @@ impl Ledger {
             meta,
             created_at: row_i64(row, 4, "artifact_info.created_at")?,
         }))
+    }
+
+    fn preflight_inline_artifact(
+        &self,
+        h: &ContentHash,
+        info: &ArtifactInfo,
+    ) -> Result<(), LedgerError> {
+        let rows = self
+            .conn
+            .query_with_params(
+                "SELECT CASE WHEN bytes IS NULL THEN 0 ELSE 1 END, \
+                 COALESCE(length(bytes), -1) FROM artifacts WHERE hash = ?1",
+                &[blob_param(h.as_bytes())],
+            )
+            .map_err(|e| sql_err("inline artifact preflight", &e))?;
+        let row = rows.first().ok_or_else(|| LedgerError::Corrupt {
+            hash_hex: h.to_hex(),
+            detail: "artifact metadata disappeared before storage preflight".to_string(),
+        })?;
+        let detail = (|| {
+            let present = storage_i64(row, 0, "inline BLOB presence")?;
+            let actual_len = storage_i64(row, 1, "inline BLOB length")?;
+            if present != 1 || actual_len < 0 {
+                return Err("inline artifact has no BLOB value".to_string());
+            }
+            let actual_len = u64::try_from(actual_len)
+                .map_err(|_| "inline BLOB length is outside the ledger domain".to_string())?;
+            let bound = STORAGE_CHUNK_LEN as u64;
+            if info.len > bound || actual_len > bound {
+                return Err(format!(
+                    "inline value exceeds the {STORAGE_CHUNK_LEN}-byte storage bound: recorded {}, found {actual_len}",
+                    info.len
+                ));
+            }
+            if actual_len != info.len {
+                return Err(format!(
+                    "inline length mismatch: recorded {}, found {actual_len}",
+                    info.len
+                ));
+            }
+            Ok(())
+        })();
+        detail.map_err(|detail| LedgerError::Corrupt {
+            hash_hex: h.to_hex(),
+            detail,
+        })
+    }
+
+    fn preflight_chunked_artifact(
+        &self,
+        h: &ContentHash,
+        info: &ArtifactInfo,
+    ) -> Result<(), LedgerError> {
+        let row = self
+            .conn
+            .query_row_with_params(
+                "SELECT COUNT(*), COUNT(bytes), COALESCE(MIN(seq), -1), \
+                 COALESCE(MAX(seq), -1), COALESCE(SUM(length(bytes)), 0), \
+                 COALESCE(MAX(length(bytes)), 0) \
+                 FROM artifact_chunks WHERE hash = ?1",
+                &[blob_param(h.as_bytes())],
+            )
+            .map_err(|e| sql_err("chunked artifact preflight", &e))?;
+        ArtifactChunkPreflight::from_row(&row)
+            .and_then(|preflight| preflight.validate(info))
+            .map_err(|detail| LedgerError::Corrupt {
+                hash_hex: h.to_hex(),
+                detail,
+            })
     }
 
     /// Fetch an artifact's full bytes (assembles chunked storage in memory —
@@ -1472,18 +1779,22 @@ impl Ledger {
     /// whole value. Returns the total length streamed, or `Ok(None)` if the
     /// artifact does not exist.
     ///
-    /// Each callback receives only a prefix whose row sequence, count, and
-    /// cumulative length are valid at that point. A later row or the final
-    /// exact-count/exact-length check can still return `Err`; callback side
-    /// effects for an already-delivered prefix are not rolled back. The first
-    /// row that violates a recorded bound is not delivered. The callback has
-    /// no error channel of its own, so callers that perform fallible work must
-    /// record that failure and make subsequent invocations no-ops.
+    /// Storage shape and row sizes are checked with metadata-only SQL before
+    /// any BLOB is materialized. Each callback then receives only a prefix
+    /// whose row sequence, count, and cumulative length are valid at that
+    /// point. A concurrent mutation, a later row, or the final content-hash
+    /// comparison can still return `Err`; callback side effects for an
+    /// already-delivered prefix are not rolled back. In particular,
+    /// same-length byte tampering is reported only after the full tampered
+    /// prefix has been delivered and hashed. The first row that violates a
+    /// recorded bound is not delivered. The callback has no error channel of
+    /// its own, so callers that perform fallible work must record that failure
+    /// and make subsequent invocations no-ops.
     ///
     /// # Errors
     /// Engine errors; [`LedgerError::Corrupt`] on malformed rows, non-dense
-    /// sequences, oversized chunks, arithmetic overflow, or disagreement
-    /// with the recorded chunk count or byte length.
+    /// sequences, oversized chunks, arithmetic overflow, disagreement with
+    /// the recorded shape, or a content hash mismatch.
     pub fn read_artifact_chunks(
         &self,
         h: &ContentHash,
@@ -1493,16 +1804,21 @@ impl Ledger {
             return Ok(None);
         };
         if info.chunk_count == 0 {
+            self.preflight_inline_artifact(h, &info)?;
             let rows = self
                 .conn
                 .query_with_params(
-                    "SELECT bytes FROM artifacts WHERE hash = ?1",
-                    &[blob_param(h.as_bytes())],
+                    "SELECT bytes FROM artifacts WHERE hash = ?1 AND bytes IS NOT NULL \
+                     AND length(bytes) <= ?2",
+                    &[
+                        blob_param(h.as_bytes()),
+                        SqliteValue::Integer(int_from_usize(STORAGE_CHUNK_LEN)),
+                    ],
                 )
                 .map_err(|e| sql_err("read_artifact_chunks", &e))?;
             let row = rows.first().ok_or_else(|| LedgerError::Corrupt {
                 hash_hex: h.to_hex(),
-                detail: "artifact metadata disappeared before its inline bytes were read"
+                detail: "inline storage disappeared or exceeded its bound after preflight"
                     .to_string(),
             })?;
             let bytes =
@@ -1510,22 +1826,41 @@ impl Ledger {
                     hash_hex: h.to_hex(),
                     detail,
                 })?;
+            let computed = hash_bytes(bytes);
             f(bytes);
+            if computed != *h {
+                return Err(LedgerError::Corrupt {
+                    hash_hex: h.to_hex(),
+                    detail: format!(
+                        "content hash mismatch: computed {} from stored bytes",
+                        computed.to_hex()
+                    ),
+                });
+            }
             return Ok(Some(info.len));
         }
 
+        self.preflight_chunked_artifact(h, &info)?;
         let mut validator = ArtifactChunkValidator::new(&info);
+        let mut hasher = Blake3::new();
         let mut corrupt_detail = None;
         self.conn
             .query_with_params_for_each(
-                "SELECT seq, bytes FROM artifact_chunks WHERE hash = ?1 ORDER BY seq",
-                &[blob_param(h.as_bytes())],
+                "SELECT seq, bytes FROM artifact_chunks WHERE hash = ?1 AND bytes IS NOT NULL \
+                 AND length(bytes) <= ?2 ORDER BY seq",
+                &[
+                    blob_param(h.as_bytes()),
+                    SqliteValue::Integer(int_from_usize(STORAGE_CHUNK_LEN)),
+                ],
                 |row| {
                     if corrupt_detail.is_some() {
                         return Ok(());
                     }
                     match validator.accept(row) {
-                        Ok(bytes) => f(bytes),
+                        Ok(bytes) => {
+                            hasher.update(bytes);
+                            f(bytes);
+                        }
                         Err(detail) => corrupt_detail = Some(detail),
                     }
                     Ok(())
@@ -1538,13 +1873,21 @@ impl Ledger {
                 detail,
             });
         }
-        validator
-            .finish()
-            .map(Some)
-            .map_err(|detail| LedgerError::Corrupt {
+        let streamed = validator.finish().map_err(|detail| LedgerError::Corrupt {
+            hash_hex: h.to_hex(),
+            detail,
+        })?;
+        let computed = hasher.finalize();
+        if computed != *h {
+            return Err(LedgerError::Corrupt {
                 hash_hex: h.to_hex(),
-                detail,
-            })
+                detail: format!(
+                    "content hash mismatch: computed {} from stored bytes",
+                    computed.to_hex()
+                ),
+            });
+        }
+        Ok(Some(streamed))
     }
 
     /// Re-hash every stored artifact against its recorded identity.
@@ -1567,18 +1910,13 @@ impl Ledger {
                 report.corrupted.push("<malformed hash column>".to_string());
                 continue;
             };
-            let mut hasher = Blake3::new();
             report.checked += 1;
-            match self.read_artifact_chunks(&stored, &mut |chunk| hasher.update(chunk)) {
+            match self.read_artifact_chunks(&stored, &mut |_| {}) {
                 Ok(Some(_)) => {}
                 Ok(None) | Err(LedgerError::Corrupt { .. }) => {
                     report.corrupted.push(stored.to_hex());
-                    continue;
                 }
                 Err(error) => return Err(error),
-            }
-            if hasher.finalize() != stored {
-                report.corrupted.push(stored.to_hex());
             }
         }
         Ok(report)
@@ -2179,6 +2517,20 @@ impl Ledger {
             let row = self.conn.query_row(sql).map_err(|e| sql_err(context, &e))?;
             row_u64(&row, 0, context)
         };
+        let malformed_storage_sql = format!(
+            "SELECT COUNT(*) FROM artifacts a WHERE NOT \
+             ((a.bytes IS NOT NULL AND a.chunk_count = 0) OR \
+              (a.bytes IS NULL AND a.chunk_count > 0)) OR \
+             typeof(a.kind) != 'text' OR \
+             length(CAST(a.kind AS BLOB)) NOT BETWEEN 1 AND {MAX_ARTIFACT_KIND_BYTES} OR \
+             (a.meta IS NOT NULL AND (typeof(a.meta) != 'text' OR \
+              length(CAST(a.meta AS BLOB)) > {MAX_ARTIFACT_META_BYTES} OR \
+              json_valid(a.meta) != 1)) OR \
+             (a.bytes IS NOT NULL AND length(a.bytes) > {STORAGE_CHUNK_LEN}) OR \
+             EXISTS (SELECT 1 FROM artifact_chunks c WHERE c.hash = a.hash \
+                     AND (c.bytes IS NULL OR \
+                          length(c.bytes) > {STORAGE_CHUNK_LEN}))"
+        );
         Ok(LintReport {
             orphan_edge_ops: count(
                 "SELECT COUNT(*) FROM edges e LEFT JOIN ops o ON e.op = o.id WHERE o.id IS NULL",
@@ -2194,16 +2546,15 @@ impl Ledger {
                  WHERE o.id IS NULL",
                 "lint orphan_metric_ops",
             )?,
-            malformed_artifacts: count(
-                "SELECT COUNT(*) FROM artifacts WHERE NOT \
-                 ((bytes IS NOT NULL AND chunk_count = 0) OR \
-                  (bytes IS NULL AND chunk_count > 0))",
-                "lint malformed_artifacts",
-            )?,
+            malformed_artifacts: count(&malformed_storage_sql, "lint malformed_artifacts")?,
             chunk_count_mismatches: count(
                 "SELECT COUNT(*) FROM artifacts a WHERE a.chunk_count > 0 AND \
-                 (SELECT COUNT(*) FROM artifact_chunks c WHERE c.hash = a.hash) \
-                 != a.chunk_count",
+                 ((SELECT COUNT(*) FROM artifact_chunks c WHERE c.hash = a.hash) \
+                    != a.chunk_count OR \
+                  COALESCE((SELECT MIN(c.seq) FROM artifact_chunks c WHERE c.hash = a.hash), -1) \
+                    != 0 OR \
+                  COALESCE((SELECT MAX(c.seq) FROM artifact_chunks c WHERE c.hash = a.hash), -1) \
+                    != a.chunk_count - 1)",
                 "lint chunk_count_mismatches",
             )?,
             len_mismatches: count(
@@ -2323,15 +2674,14 @@ impl ArtifactWriter<'_> {
     }
 
     fn finish_inner(&mut self, meta: Option<&str>) -> Result<PutReceipt, LedgerError> {
-        if let Some(m) = meta {
-            self.ledger.require_json("meta", m, false)?;
-        }
+        self.ledger.validate_artifact_inputs(&self.kind, meta)?;
         let h = self.hasher.finalize();
         if let Some(info) = self.ledger.artifact_info(&h)? {
             // Identical content already stored: keep theirs — if the
-            // envelope agrees (gp3.19) — and discard staging.
+            // bytes still match their identity and the envelope agrees
+            // (gp3.19) — then discard staging.
             self.ledger
-                .attest_artifact_envelope(&h, &info, &self.kind, meta)?;
+                .verify_dedupe_candidate(&h, &info, &self.kind, meta)?;
             self.discard_staging()?;
             self.ledger.commit()?;
             return Ok(PutReceipt {
@@ -2524,12 +2874,12 @@ mod tests {
             LedgerError::Corrupt { hash_hex, detail }
                 if hash_hex == hash.to_hex()
                     && detail
-                        == "chunk length mismatch: recorded 9223372036854775807, streamed 1"
+                        == "chunk length mismatch: recorded 9223372036854775807, found 1"
         ));
     }
 
     #[test]
-    fn chunked_count_mismatch_returns_corruption_after_valid_prefix() {
+    fn chunked_count_mismatch_is_rejected_by_metadata_preflight() {
         let ledger = mem();
         let hash = insert_raw_chunked_artifact(&ledger, b"count-mismatch", 1, 2, &[(0, b"x")]);
         let mut prefix = Vec::new();
@@ -2537,7 +2887,7 @@ mod tests {
         let error = ledger
             .read_artifact_chunks(&hash, &mut |chunk| prefix.extend_from_slice(chunk))
             .unwrap_err();
-        assert_eq!(prefix, b"x", "a previously validated prefix is retained");
+        assert!(prefix.is_empty(), "preflight must run before BLOB delivery");
         assert!(matches!(
             error,
             LedgerError::Corrupt { hash_hex, detail }
@@ -2560,15 +2910,15 @@ mod tests {
             error,
             LedgerError::Corrupt { hash_hex, detail }
                 if hash_hex == hash.to_hex()
-                    && detail == "chunk sequence mismatch: expected 0, found 1"
+                    && detail
+                        == "chunk sequence range is not dense from zero: count 1, min 1, max 1"
         ));
     }
 
     #[test]
     fn chunked_dense_rows_stream_and_materialize_exactly() {
         let ledger = mem();
-        let hash =
-            insert_raw_chunked_artifact(&ledger, b"dense-valid", 5, 2, &[(0, b"abc"), (1, b"de")]);
+        let hash = insert_raw_chunked_artifact(&ledger, b"abcde", 5, 2, &[(0, b"abc"), (1, b"de")]);
         let mut chunks = Vec::new();
         let streamed = ledger
             .read_artifact_chunks(&hash, &mut |chunk| chunks.push(chunk.to_vec()))
@@ -2577,6 +2927,163 @@ mod tests {
         assert_eq!(streamed, Some(5));
         assert_eq!(chunks, [b"abc".as_slice(), b"de".as_slice()]);
         assert_eq!(ledger.get_artifact(&hash).unwrap().unwrap(), b"abcde");
+    }
+
+    #[test]
+    fn same_length_inline_tampering_fails_after_streamed_prefix() {
+        let ledger = mem();
+        let receipt = ledger.put_artifact("blob", b"abc", None).unwrap();
+        ledger
+            .conn
+            .prepare("UPDATE artifacts SET bytes = X'78797A' WHERE hash = ?1")
+            .unwrap()
+            .execute_with_params(&[blob_param(receipt.hash.as_bytes())])
+            .unwrap();
+
+        let mut prefix = Vec::new();
+        let error = ledger
+            .read_artifact_chunks(&receipt.hash, &mut |bytes| prefix.extend_from_slice(bytes))
+            .unwrap_err();
+        assert_eq!(
+            prefix, b"xyz",
+            "late hash failure preserves callback effects"
+        );
+        assert!(matches!(
+            error,
+            LedgerError::Corrupt { hash_hex, detail }
+                if hash_hex == receipt.hash.to_hex()
+                    && detail.starts_with("content hash mismatch: computed ")
+        ));
+        assert!(matches!(
+            ledger.get_artifact(&receipt.hash),
+            Err(LedgerError::Corrupt { .. })
+        ));
+    }
+
+    #[test]
+    fn same_length_chunk_tampering_fails_after_streamed_prefix() {
+        let ledger = mem();
+        let hash = insert_raw_chunked_artifact(&ledger, b"abcde", 5, 2, &[(0, b"abc"), (1, b"de")]);
+        ledger
+            .conn
+            .prepare("UPDATE artifact_chunks SET bytes = X'617863' WHERE hash = ?1 AND seq = 0")
+            .unwrap()
+            .execute_with_params(&[blob_param(hash.as_bytes())])
+            .unwrap();
+
+        let mut prefix = Vec::new();
+        let error = ledger
+            .read_artifact_chunks(&hash, &mut |bytes| prefix.extend_from_slice(bytes))
+            .unwrap_err();
+        assert_eq!(
+            prefix, b"axcde",
+            "late hash failure preserves callback effects"
+        );
+        assert!(matches!(
+            error,
+            LedgerError::Corrupt { hash_hex, detail }
+                if hash_hex == hash.to_hex()
+                    && detail.starts_with("content hash mismatch: computed ")
+        ));
+    }
+
+    #[test]
+    fn storage_preflight_rejects_oversized_blobs_before_callback() {
+        let ledger = mem();
+        let oversized = vec![0xA5; STORAGE_CHUNK_LEN + 1];
+        let inline = ledger.put_artifact("blob", b"inline", None).unwrap();
+        ledger
+            .conn
+            .prepare("UPDATE artifacts SET bytes = ?1, len = ?2 WHERE hash = ?3")
+            .unwrap()
+            .execute_with_params(&[
+                blob_param(&oversized),
+                SqliteValue::Integer(int_from_usize(oversized.len())),
+                blob_param(inline.hash.as_bytes()),
+            ])
+            .unwrap();
+        let mut callbacks = 0;
+        let inline_error = ledger
+            .read_artifact_chunks(&inline.hash, &mut |_| callbacks += 1)
+            .unwrap_err();
+        assert_eq!(callbacks, 0);
+        assert!(matches!(
+            inline_error,
+            LedgerError::Corrupt { detail, .. }
+                if detail.starts_with("inline value exceeds the ")
+        ));
+
+        let chunked = insert_raw_chunked_artifact(
+            &ledger,
+            b"oversized-chunk-identity",
+            int_from_usize(oversized.len()),
+            1,
+            &[(0, &oversized)],
+        );
+        let chunk_error = ledger
+            .read_artifact_chunks(&chunked, &mut |_| callbacks += 1)
+            .unwrap_err();
+        assert_eq!(callbacks, 0);
+        assert!(matches!(
+            chunk_error,
+            LedgerError::Corrupt { detail, .. }
+                if detail.starts_with("chunk exceeds the ")
+        ));
+    }
+
+    #[test]
+    fn lint_detects_oversized_and_non_dense_artifact_storage() {
+        let ledger = mem();
+        let oversized = vec![0x3C; STORAGE_CHUNK_LEN + 1];
+        let inline = ledger.put_artifact("blob", b"inline-lint", None).unwrap();
+        ledger
+            .conn
+            .prepare("UPDATE artifacts SET bytes = ?1, len = ?2 WHERE hash = ?3")
+            .unwrap()
+            .execute_with_params(&[
+                blob_param(&oversized),
+                SqliteValue::Integer(int_from_usize(oversized.len())),
+                blob_param(inline.hash.as_bytes()),
+            ])
+            .unwrap();
+        insert_raw_chunked_artifact(
+            &ledger,
+            b"oversized-chunk-lint",
+            int_from_usize(oversized.len()),
+            1,
+            &[(0, &oversized)],
+        );
+        insert_raw_chunked_artifact(&ledger, b"sequence-gap-lint", 1, 1, &[(1, b"x")]);
+
+        let report = ledger.lint().unwrap();
+        assert_eq!(report.malformed_artifacts, 2);
+        assert_eq!(report.chunk_count_mismatches, 1);
+        assert_eq!(report.len_mismatches, 0);
+    }
+
+    #[test]
+    fn dedupe_refuses_existing_same_length_corruption() {
+        let ledger = mem();
+        let receipt = ledger.put_artifact("blob", b"abc", None).unwrap();
+        ledger
+            .conn
+            .prepare("UPDATE artifacts SET bytes = X'78797A' WHERE hash = ?1")
+            .unwrap()
+            .execute_with_params(&[blob_param(receipt.hash.as_bytes())])
+            .unwrap();
+
+        assert!(matches!(
+            ledger.put_artifact("blob", b"abc", None),
+            Err(LedgerError::Corrupt { .. })
+        ));
+        let mut writer = ledger.artifact_writer("blob").unwrap();
+        writer.write(b"abc").unwrap();
+        assert!(matches!(
+            writer.finish(None),
+            Err(LedgerError::Corrupt { .. })
+        ));
+        assert!(!ledger.in_transaction());
+        assert_eq!(ledger.table_count("artifacts").unwrap(), 1);
     }
 
     #[test]
@@ -2592,10 +3099,120 @@ mod tests {
     }
 
     #[test]
+    fn chunked_duplicate_insert_returns_winner_and_restores_corrupt_prefix() {
+        let ledger = mem();
+        let hash = insert_raw_chunked_artifact(&ledger, b"abcde", 5, 2, &[(0, b"abc"), (1, b"de")]);
+        let outcome = ledger
+            .insert_chunked_artifact(&hash, "corrupt-fixture", b"abcde", None)
+            .unwrap();
+        let ChunkedArtifactInsert::Deduped(info) = outcome else {
+            panic!("an existing verified row must be reported as deduped")
+        };
+        assert_eq!(info.len, 5);
+        assert_eq!(info.chunk_count, 2);
+
+        let offered = vec![0x4D; STORAGE_CHUNK_LEN + 1];
+        let partial = insert_raw_chunked_artifact(
+            &ledger,
+            &offered,
+            int_from_usize(offered.len()),
+            2,
+            &[(1, &[0x4D])],
+        );
+        assert!(matches!(
+            ledger.insert_chunked_artifact(&partial, "corrupt-fixture", &offered, None),
+            Err(LedgerError::Corrupt { .. })
+        ));
+        let rows = ledger
+            .conn
+            .query_with_params(
+                "SELECT seq FROM artifact_chunks WHERE hash = ?1 ORDER BY seq",
+                &[blob_param(partial.as_bytes())],
+            )
+            .unwrap();
+        assert_eq!(rows.len(), 1, "the attempted seq-0 fill must be removed");
+        assert_eq!(row_i64(&rows[0], 0, "restored sequence").unwrap(), 1);
+    }
+
+    #[test]
     fn artifact_meta_must_be_json() {
         let l = mem();
         let err = l.put_artifact("blob", b"x", Some("not json")).unwrap_err();
         assert_eq!(err.code(), "LedgerInvalid");
+    }
+
+    #[test]
+    fn artifact_envelope_write_limits_fail_closed() {
+        let ledger = mem();
+        let oversized_kind = "k".repeat(MAX_ARTIFACT_KIND_BYTES + 1);
+        let error = ledger
+            .put_artifact(&oversized_kind, b"kind", None)
+            .expect_err("oversized kind must be refused");
+        assert!(matches!(
+            error,
+            LedgerError::Invalid { field, problem }
+                if field == "kind" && problem.contains("artifact-kind limit")
+        ));
+
+        let oversized_meta = format!("\"{}\"", "m".repeat(MAX_ARTIFACT_META_BYTES));
+        let error = ledger
+            .put_artifact("blob", b"meta", Some(&oversized_meta))
+            .expect_err("oversized metadata must be refused");
+        assert!(matches!(
+            error,
+            LedgerError::Invalid { field, problem }
+                if field == "meta" && problem.contains("artifact-metadata limit")
+        ));
+
+        let mut writer = ledger.artifact_writer("blob").unwrap();
+        writer.write(b"streamed").unwrap();
+        assert!(matches!(
+            writer.finish(Some(&oversized_meta)),
+            Err(LedgerError::Invalid { field, .. }) if field == "meta"
+        ));
+        assert!(!ledger.in_transaction());
+        assert_eq!(ledger.table_count("artifacts").unwrap(), 0);
+    }
+
+    #[test]
+    fn artifact_info_preflights_hostile_envelope_sizes() {
+        let ledger = mem();
+        let kind = ledger.put_artifact("blob", b"kind-row", None).unwrap();
+        let meta = ledger.put_artifact("blob", b"meta-row", None).unwrap();
+        let oversized_kind = "k".repeat(MAX_ARTIFACT_KIND_BYTES + 1);
+        let oversized_meta = format!("\"{}\"", "m".repeat(MAX_ARTIFACT_META_BYTES));
+
+        ledger
+            .conn
+            .prepare("UPDATE artifacts SET kind = ?1 WHERE hash = ?2")
+            .unwrap()
+            .execute_with_params(&[
+                text_param(&oversized_kind),
+                blob_param(kind.hash.as_bytes()),
+            ])
+            .unwrap();
+        ledger
+            .conn
+            .prepare("UPDATE artifacts SET meta = ?1 WHERE hash = ?2")
+            .unwrap()
+            .execute_with_params(&[
+                text_param(&oversized_meta),
+                blob_param(meta.hash.as_bytes()),
+            ])
+            .unwrap();
+
+        assert!(matches!(
+            ledger.artifact_info(&kind.hash),
+            Err(LedgerError::Corrupt { detail, .. })
+                if detail.contains("artifact kind byte length")
+        ));
+        assert!(matches!(
+            ledger.artifact_info(&meta.hash),
+            Err(LedgerError::Corrupt { detail, .. })
+                if detail.contains("artifact metadata byte length")
+        ));
+        let lint = ledger.lint().unwrap();
+        assert_eq!(lint.malformed_artifacts, 2);
     }
 
     #[test]

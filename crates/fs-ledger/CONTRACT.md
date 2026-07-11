@@ -43,10 +43,16 @@ fine-grained event stream. Layer: L6 (HELM). Runtime deps: `std` + `fsqlite`.
   provisional key inside a writer-owned transaction, promotes on `finish`),
   `get_artifact` / `read_artifact_chunks` / `artifact_info`,
   `verify_artifact_integrity` (full re-hash), `corrupt_artifact_for_test`.
+  Every byte-returning retrieval re-hashes stored content against its key.
   Retrieval treats signed database integers as untrusted: it never
-  preallocates from declared `len`, uses fallible materialization, checks dense
-  chunk sequence, count, and checked byte totals against metadata, and reports
-  corruption instead of panicking or attempting an attacker-sized allocation.
+  preallocates from declared `len`, uses fallible materialization, and performs
+  metadata-only SQL preflights for bounded artifact-kind/metadata envelopes,
+  BLOB presence, per-row size bounds, dense chunk sequence, count, and checked
+  byte totals before selecting variable-size values. Guarded envelope and BLOB
+  queries repeat the size predicates so a mutation between preflight and
+  materialization still cannot deliver an oversized row. Same-length byte
+  tampering is necessarily a late hash failure: streaming callbacks retain
+  effects for the delivered prefix, while `get_artifact` returns no bytes.
 - Ops/lineage: `begin_op` (validates the Five Explicits field-by-field;
   units travel inside the typed IR, the other four are mandatory columns),
   `finish_op` (exactly once; `ok|error|cancelled`), `op`, `link` (FK-checked
@@ -188,10 +194,18 @@ or verifier panic) and grants re-verify from the stored ledger node.
    EVERY dedupe site (pre-check, concurrent duplicate-key race, streaming
    writer finish) — provenance never depends on insertion order, and
    content identity stays bytes-only (no schema change; byte dedup
-   retained). Concurrent duplicate insert with an agreeing envelope still
+   retained). An existing row is fully shape-checked and re-hashed before
+   dedupe can succeed, so corruption is never preserved under a successful
+   receipt. Concurrent duplicate insert with an agreeing, intact row still
    resolves to dedupe, never an error.
 2. Storage shape: inline XOR chunked; `len` always equals stored byte count;
-   chunk `seq` is dense from 0. Enforced by CHECKs and re-checked by `lint`.
+   every inline/chunk BLOB is at most `STORAGE_CHUNK_LEN`; artifact kinds are
+   1..=`MAX_ARTIFACT_KIND_BYTES` UTF-8 bytes, metadata JSON is at most
+   `MAX_ARTIFACT_META_BYTES` UTF-8 bytes, and chunk `seq` is dense from 0. The
+   schema CHECK enforces the storage-form XOR, JSON metadata, and non-negative
+   storage counters. Canonical writes enforce the remaining bounds; ordinary
+   reads fail closed through metadata-only preflight plus guarded selection,
+   and `lint` detects envelope, length, row-bound, count, and sequence violations.
 3. Ops are event-sourced facts: `(t_end IS NULL) = (outcome IS NULL)` is a
    table CHECK; an op finishes at most once (`DoubleFinish` otherwise).
 4. Edges only reference existing ops and artifacts (enforced FKs).
@@ -355,6 +369,11 @@ dependency (the colors are its types).
 - Multi-GiB single artifacts: chunk storage bounds row sizes, but the
   streaming path is verified at the tens-of-MiB scale only so far; fsqlite
   transaction memory behavior at multi-GiB scale is unmeasured.
+- The v1 tables do not encode the per-BLOB `STORAGE_CHUNK_LEN` or artifact
+  envelope byte bounds as schema CHECKs. Existing databases are protected by
+  bounded canonical writes, metadata-only read preflights, guarded variable-size
+  queries, and lint; resistance to a hostile client executing arbitrary SQL is
+  not claimed as a DDL property.
 - `ColorGraph::verify_replay()` structurally re-earns colors and hashes but does
   not itself re-run external source-origin or waiver capabilities. It retains
   the complete request/artifact fields, exact policy fingerprints, waiver
