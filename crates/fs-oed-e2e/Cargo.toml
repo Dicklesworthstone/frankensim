@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "SensorForge: optimal experimental design — greedily place Kalman-fused sensors, choosing WHICH design to measure next by decision-theoretic value of information, and STOP the instant the design decision is provably robust (EVPI below threshold), then allocate the measurement-precision budget cost-optimally. Composes fs-assimilate (Kalman fusion) x fs-voi (EVPI + certify-or-stop) x fs-toleralloc (cost-optimal budget) x fs-evidence (Verified posterior variance vs Estimated EVPI). Groundbreaking: sensor placement that knows when to stop, with an exact posterior and a decision certificate."
+description = "SensorForge: checked optimal-experimental-design campaign that greedily places instrument-bound Kalman sensor updates by decision-theoretic value of information, stops when modeled EVPI reaches its threshold, and allocates a first-order measurement-precision budget. Posterior and stop claims remain input-bound Estimated evidence until independently certified."
 
 [package.metadata.frankensim]
 layer = "L4"
@@ -15,6 +15,7 @@ fs-assimilate = { path = "../fs-assimilate" }
 fs-voi = { path = "../fs-voi" }
 fs-toleralloc = { path = "../fs-toleralloc" }
 fs-evidence = { path = "../fs-evidence" }
+fs-blake3 = { path = "../fs-blake3" }
 
 [dev-dependencies]
 

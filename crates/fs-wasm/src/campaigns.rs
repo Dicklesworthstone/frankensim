@@ -24,11 +24,10 @@
 //! needs a per-iteration trajectory / geometry, the campaign's `run_campaign`
 //! body is transcribed FAITHFULLY here using the same public APIs (and the
 //! campaign crate's public helpers) so results stay bit-identical to the
-//! certified tests. Those campaigns are: SensorForge, AnytimeBO, FlowCert,
-//! GrammarForge, TrussPath, and CampaignSchedule (to surface per-study slack).
+//! certified tests. Those campaigns are: AnytimeBO, FlowCert, GrammarForge,
+//! TrussPath, and CampaignSchedule (to surface per-study slack).
 
 use fs_archive::MapElites;
-use fs_assimilate::{Belief, assimilate, point_sensor};
 use fs_bo::{Gp, Kernel, Matern, expected_improvement};
 use fs_eproc::{BettingEProcess, GaussianMixtureCs};
 use fs_evidence::{Color, ColorRank};
@@ -37,7 +36,6 @@ use fs_lbm::{Lbm, plan_scaling, poiseuille_analytic};
 use fs_rep_neural::{Layer, MlpSdf};
 use fs_shapeprog::{max_sdf_discrepancy, simplify};
 use fs_sparse::{Coo, Csr};
-use fs_toleralloc::{Feature, allocate};
 use fs_tropical::TaskDag;
 use fs_viz::Grid2;
 use fs_voi::{
@@ -845,36 +843,17 @@ pub fn trusspath(nx: usize, ny: usize, gap_tol: f64) -> Vec<f64> {
 /*  6 · SensorForge — fs-oed-e2e (fs-assimilate × fs-voi × fs-toleralloc)    */
 /* ======================================================================= */
 
-fn oed_estimates(cands: &[fs_oed_e2e::Candidate], beliefs: &[Belief]) -> Vec<DesignEstimate> {
-    cands
-        .iter()
-        .zip(beliefs)
-        .map(|(c, b)| {
-            DesignEstimate::new(
-                c.name.clone(),
-                b.mean[0],
-                Uncertainty {
-                    numerical: b.variance(0).sqrt(),
-                    statistical: 0.0,
-                    model: 0.0,
-                },
-            )
-        })
-        .collect()
-}
-
 /// **SensorForge**: greedy value-of-information sensor placement. Each
 /// candidate design is a Gaussian belief ([`fs_assimilate`]); at every step the
 /// EVPI-driven `recommend` ([`fs_voi`]) places the next sensor on the candidate
 /// whose measurement most sharpens the DECISION, fuses it with the exact scalar
-/// Kalman update, and STOPS the instant the decision is robust. The greedy loop
-/// is transcribed here to capture the per-step EVPI trace; a cost-optimal
-/// tolerance allocation ([`fs_toleralloc`]) closes the campaign. Uses the fixed
-/// `demo_candidates()` (A/B/C/D), with B's prior mean & truth set to
-/// `b_prior_mean`.
+/// Kalman update, and STOPS the instant the decision is robust. This calls the
+/// checked `fs_oed_e2e::run_campaign` directly and serializes its native EVPI
+/// trace, posterior summaries, and allocation. Uses the fixed `demo_candidates()`
+/// (A/B/C/D), with B's prior mean and truth set to `b_prior_mean`.
 ///
 /// `threshold` — EVPI stop threshold (clamped `1e-6..=1.0`, default 0.01);
-/// `max_sensors` — placement cap (clamped `1..=64`, default 12); `b_prior_mean`
+/// `max_sensors` — placement cap (clamped `0..=64`, default 12); `b_prior_mean`
 /// — B's prior mean & truth (clamped `0.60..=0.90`, default 0.65).
 ///
 /// Output layout (a flat array the viz slices; `C` = candidates = 4,
@@ -892,121 +871,90 @@ fn oed_estimates(cands: &[fs_oed_e2e::Candidate], beliefs: &[Belief]) -> Vec<Des
 /// - then `T` per-step EVPI values (`[0]` = initial, one per placement after).
 /// - then `S` placed candidate indices.
 /// - then `C` blocks of 2: `[posterior_mean, posterior_var]`.
-/// - then `C` allocation tolerances (candidate order; 0 if unallocated).
+/// - then `C` allocation tolerances (candidate order; NaN if unconstrained).
 pub fn sensorforge(threshold: f64, max_sensors: usize, b_prior_mean: f64) -> Vec<f64> {
-    let threshold = threshold.clamp(1e-6, 1.0);
-    let max_sensors = max_sensors.clamp(1, 64);
-    let b_prior_mean = b_prior_mean.clamp(0.60, 0.90);
+    let threshold = if threshold.is_finite() {
+        threshold.clamp(1e-6, 1.0)
+    } else {
+        0.01
+    };
+    let max_sensors = max_sensors.min(64);
+    let b_prior_mean = if b_prior_mean.is_finite() {
+        b_prior_mean.clamp(0.60, 0.90)
+    } else {
+        0.65
+    };
 
-    let mut cands = fs_oed_e2e::demo_candidates();
-    if cands.len() > 1 {
-        cands[1].prior_mean = b_prior_mean;
-        cands[1].truth = b_prior_mean;
-    }
+    let Ok(mut cands) = fs_oed_e2e::demo_candidates() else {
+        return Vec::new();
+    };
+    let Some(default_b) = cands.get(1) else {
+        return Vec::new();
+    };
+    let Ok(b) = fs_oed_e2e::Candidate::new(
+        default_b.name(),
+        b_prior_mean,
+        b_prior_mean,
+        default_b.prior_variance(),
+        default_b.sensor_noise(),
+        default_b.sensor_cost(),
+    ) else {
+        return Vec::new();
+    };
+    cands[1] = b;
     let c = cands.len();
-
-    let mut beliefs: Vec<Belief> = cands
+    let Ok(report) = fs_oed_e2e::run_campaign(&cands, threshold, max_sensors) else {
+        return Vec::new();
+    };
+    let Some(placements): Option<Vec<usize>> = report
+        .placements
         .iter()
-        .map(|c| Belief::scalar(c.prior_mean, c.prior_var))
-        .collect();
-    let prior_total_var: f64 = beliefs.iter().map(|b| b.variance(0)).sum();
-    let initial_evpi = evpi(&oed_estimates(&cands, &beliefs));
-
-    let mut trace = vec![initial_evpi];
-    let mut placements: Vec<usize> = Vec::new();
-    let mut decision_robust = false;
-    for _ in 0..max_sensors {
-        let estimates = oed_estimates(&cands, &beliefs);
-        let actions: Vec<Action> = cands
-            .iter()
-            .map(|c| Action {
-                name: format!("measure-{}", c.name),
-                kind: ActionKind::Simulate,
-                target_design: c.name.clone(),
-                reduction: 0.85,
-                cost: c.sensor_cost,
-            })
-            .collect();
-        match recommend(&estimates, &actions, threshold) {
-            Recommendation::Act { action, .. } => {
-                let Some(idx) = actions.iter().position(|a| a.name == action) else {
-                    break;
-                };
-                let obs = point_sensor(
-                    0,
-                    1,
-                    cands[idx].truth,
-                    cands[idx].sensor_noise,
-                    format!("sensor-{}", cands[idx].name),
-                );
-                match assimilate(&beliefs[idx], &obs) {
-                    Ok(b) => beliefs[idx] = b,
-                    Err(_) => break,
-                }
-                placements.push(idx);
-                trace.push(evpi(&oed_estimates(&cands, &beliefs)));
-            }
-            Recommendation::Stop { .. } => {
-                decision_robust = true;
-                break;
-            }
-        }
+        .map(|name| cands.iter().position(|candidate| candidate.name() == name))
+        .collect()
+    else {
+        return Vec::new();
+    };
+    let chosen_idx = cands
+        .iter()
+        .position(|candidate| candidate.name() == report.chosen_design)
+        .map_or(-1.0, |index| index as f64);
+    if report.posteriors.len() != c {
+        return Vec::new();
     }
-
-    let posterior_total_var: f64 = beliefs.iter().map(|b| b.variance(0)).sum();
-    let final_evpi = *trace.last().unwrap_or(&initial_evpi);
-    let estimates = oed_estimates(&cands, &beliefs);
-    let chosen_idx = estimates
+    let allocation: std::collections::BTreeMap<&str, f64> = report
+        .allocation
         .iter()
-        .enumerate()
-        .min_by(|a, b| a.1.mean.total_cmp(&b.1.mean))
-        .map_or(-1.0, |(i, _)| i as f64);
-
-    // Cost-optimal precision allocation (sensitivity = prior std).
-    let features: Vec<Feature> = cands
-        .iter()
-        .map(|c| Feature {
-            name: c.name.clone(),
-            sensitivity: c.prior_var.sqrt(),
-            sensitivity_color: ColorRank::Verified,
-            cost_coeff: c.sensor_cost,
-            baseline_tolerance: 0.1,
-        })
+        .map(|(name, tolerance)| (name.as_str(), *tolerance))
         .collect();
-    let alloc: std::collections::BTreeMap<String, f64> = allocate(&features, 0.02, 3.0)
-        .map(|a| {
-            a.items
-                .into_iter()
-                .map(|it| (it.name, it.tolerance))
-                .collect()
-        })
-        .unwrap_or_default();
 
     let s = placements.len();
-    let t = trace.len();
+    let t = report.evpi_trace.len();
     let mut out = Vec::with_capacity(10 + t + s + 2 * c + c);
     out.push(c as f64);
     out.push(s as f64);
-    out.push(fon(prior_total_var));
-    out.push(fon(posterior_total_var));
-    out.push(fon(1.0 - posterior_total_var / prior_total_var));
-    out.push(fon(initial_evpi));
-    out.push(fon(final_evpi));
-    out.push(if decision_robust { 1.0 } else { 0.0 });
+    out.push(fon(report.prior_total_variance));
+    out.push(fon(report.posterior_total_variance));
+    out.push(fon(report.variance_reduction));
+    out.push(fon(report.initial_evpi));
+    out.push(fon(report.final_evpi));
+    out.push(if report.decision_robust { 1.0 } else { 0.0 });
     out.push(chosen_idx);
     out.push(t as f64);
-    for &e in &trace {
+    for &e in &report.evpi_trace {
         out.push(fon(e));
     }
     for &i in &placements {
         out.push(i as f64);
     }
-    for b in &beliefs {
-        out.push(fon(b.mean[0]));
-        out.push(fon(b.variance(0)));
+    for posterior in &report.posteriors {
+        out.push(fon(posterior.mean));
+        out.push(fon(posterior.variance));
     }
     for cand in &cands {
-        out.push(fon(alloc.get(&cand.name).copied().unwrap_or(0.0)));
+        out.push(fon(allocation
+            .get(cand.name())
+            .copied()
+            .unwrap_or(f64::NAN)));
     }
     out
 }
