@@ -16,6 +16,7 @@
 //! recorded follow-up bead, gated on fs-tilelang + the autotuner.
 
 pub mod bsr;
+mod fma;
 #[cfg(feature = "fnx-interop")]
 pub mod interop;
 #[cfg(feature = "fnp-interop")]
@@ -257,6 +258,15 @@ impl Csr {
             "spmv: y length must equal nrows {}",
             self.nrows
         );
+        fma::spmv_dispatch(self, x, y);
+    }
+
+    /// The spmv loop body (extracted so the x86 FMA-codegen capsule can
+    /// recompile it under `target_feature` — bead nabk; the a55x
+    /// pattern). MUST stay `inline(always)`: a non-inlined call would
+    /// keep baseline codegen and the per-element libm `fma()` call.
+    #[inline(always)]
+    pub(crate) fn spmv_body(&self, x: &[f64], y: &mut [f64]) {
         for (r, out) in y.iter_mut().enumerate() {
             let (cols, vals) = self.row(r);
             let mut acc = 0.0f64;
@@ -273,6 +283,12 @@ impl Csr {
     pub fn spmm(&self, x: &[f64], k: usize, y: &mut [f64]) {
         assert_eq!(x.len(), self.ncols * k, "spmm: X must be ncols*k");
         assert_eq!(y.len(), self.nrows * k, "spmm: Y must be nrows*k");
+        fma::spmm_dispatch(self, x, k, y);
+    }
+
+    /// The spmm loop body (see [`Csr::spmv_body`]'s capsule note).
+    #[inline(always)]
+    pub(crate) fn spmm_body(&self, x: &[f64], k: usize, y: &mut [f64]) {
         for r in 0..self.nrows {
             let (cols, vals) = self.row(r);
             let out = &mut y[r * k..(r + 1) * k];
