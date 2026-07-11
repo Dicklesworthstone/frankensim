@@ -30,7 +30,7 @@ fn cc_001_gaussian_toy_hits_the_analytic_boundary() {
     // alpha = 0.1 -> z_0.9 = 1.2816.
     let (mu, sigma, alpha) = (2.0, 0.5, 0.10);
     let x_star = mu + sigma * 1.281_551_6;
-    let (x, p_est, spent) = chance_constrained_min(
+    let solution = chance_constrained_min(
         |x| x,                                      // minimize x itself
         |x, i| mu + sigma * gauss(0xc0ffee, i) - x, // g = xi - x
         alpha,
@@ -39,7 +39,9 @@ fn cc_001_gaussian_toy_hits_the_analytic_boundary() {
         0.05,
         0.02,
         50_000,
-    );
+    )
+    .expect("the bounded grid contains a simultaneously admitted design");
+    let (x, p_est, spent) = (solution.x, solution.probability, solution.samples);
     println!(
         "{{\"metric\":\"chance\",\"x\":{x:.4},\"x_star\":{x_star:.4},\"p_at_x\":{p_est:.3},\
          \"samples\":{spent}}}"
@@ -56,13 +58,33 @@ fn cc_001_gaussian_toy_hits_the_analytic_boundary() {
         "and not absurdly conservative: {x:.4} vs {x_star:.4}"
     );
     assert!(
-        p_est >= 1.0 - alpha - 0.05,
-        "the estimate backs feasibility"
+        solution.probability_lo >= 1.0 - alpha,
+        "the simultaneous lower bound backs feasibility"
     );
     verdict(
         "cc-001",
         "the chance-constrained minimum lands at-or-conservatively-above the analytic \
          Gaussian quantile boundary, never below — anytime-stopped estimates with the \
          CS lower bound enforcing feasibility",
+    );
+}
+
+#[test]
+fn cc_002_multiplicity_and_work_admission_fail_closed() {
+    let no_feasible =
+        chance_constrained_min(|x| x, |_x, _i| 1.0, 0.1, (0.0, 1.0), 1, 0.05, 0.1, 100);
+    assert!(no_feasible.is_err());
+    assert!(
+        std::panic::catch_unwind(|| {
+            let _ = chance_constrained_min(|x| x, |_x, _i| -1.0, 0.1, (0.0, 1.0), 65, 0.05, 0.1, 1);
+        })
+        .is_err()
+    );
+    assert!(
+        std::panic::catch_unwind(|| {
+            let _ =
+                chance_constrained_min(|x| x, |_x, _i| f64::NAN, 0.1, (0.0, 1.0), 1, 0.05, 0.1, 1);
+        })
+        .is_err()
     );
 }

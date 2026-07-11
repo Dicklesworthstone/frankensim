@@ -50,12 +50,13 @@ for QMC Gaussian germs instead of duplicating the polynomial.
   strong rates FITTED from level statistics.
 
 - `chance` module (bead qlvf, lane b): `chance_constrained_min` —
-  `P(g(x,ξ) ≤ 0) ≥ 1−α` enforced through an augmented penalty whose
-  probability estimates are ANYTIME-STOPPED (each query ends the
-  moment the CS is decision-grade) and whose feasibility test uses the
-  CS LOWER bound: the solution can sit conservatively above the
-  analytic boundary but never below it — validity feeding feasibility
-  (verified on the Gaussian toy with the closed-form quantile).
+  `P(g(x,ξ) ≤ 0) ≥ 1−α` enforced through probability estimates that are
+  ANYTIME-STOPPED (each query ends the
+  moment the CS is decision-grade). The complete bounded query family is
+  predeclared and receives a Bonferroni allocation of the familywise budget;
+  adaptive selection may return only a candidate whose simultaneous CS lower
+  bound is feasible. If none is admitted, the API returns
+  `NoFeasibleChanceCandidate` rather than a penalized but uncertified design.
 
 ## Invariants
 

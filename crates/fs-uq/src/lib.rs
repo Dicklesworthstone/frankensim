@@ -21,7 +21,7 @@ pub mod seismic;
 
 pub use adaptive::{AdaptiveReport, adaptive_mlmc};
 pub use anytime::{AnytimeEstimate, cvar, estimate_probability_anytime};
-pub use chance::chance_constrained_min;
+pub use chance::{ChanceSolution, NoFeasibleChanceCandidate, chance_constrained_min};
 pub use kl::{CovarianceKind, KlExpansion};
 pub use mlmc::{MlmcReport, mlmc_estimate};
 pub use pce::{PceModel, fit_pce};
