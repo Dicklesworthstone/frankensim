@@ -34,6 +34,16 @@ fn fail_invalid_environment(reason: &str, attainment: Option<f64>) -> ! {
     panic!("FEEC roofline evidence rejected: {reason}");
 }
 
+fn fail_invalid_numerics(reason: &str) -> ! {
+    println!(
+        "{{\"metric\":\"feec-gate\",\"verdict\":\"numerical_invalid\",\
+         \"reason\":\"{reason}\",\"machine\":\"{}-{}\"}}",
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    );
+    panic!("FEEC numerical measurement rejected: {reason}");
+}
+
 /// FLOPs per element per apply for degree r (p = r + 1): 9 axis
 /// contractions of 2·p⁴ each, plus 3·p³ accumulate adds.
 fn flops_per_element(r: usize) -> f64 {
@@ -98,6 +108,9 @@ fn sum_factorized_attainment() {
         if !gflops.is_finite() || gflops < 0.0 {
             fail_invalid_environment("non-finite or negative FEEC throughput", None);
         }
+        if !sink.is_finite() {
+            fail_invalid_numerics("non-finite FEEC apply sink");
+        }
         println!(
             "{{\"metric\":\"feec-apply\",\"r\":{r},\"m\":{m},\"gflops\":{gflops:.2},\
              \"attainment_single\":{:.3},\"sink\":{sink:.3}}}",
@@ -108,10 +121,13 @@ fn sum_factorized_attainment() {
     // tensor basis = 4 points per axis): >= 30% of measured
     // single-thread peak on THIS machine. Bead cwjn requires separately
     // admitted rows on both reference ISAs before the cross-ISA claim lands.
-    let (gflops, _) = measure_apply(12, 3, 6);
+    let (gflops, sink) = measure_apply(12, 3, 6);
     let attainment = gflops / axes.peak_single_gflops;
     if !attainment.is_finite() || attainment < 0.0 {
         fail_invalid_environment("non-finite or negative FEEC attainment", None);
+    }
+    if !sink.is_finite() {
+        fail_invalid_numerics("non-finite FEEC gate sink");
     }
     println!(
         "{{\"metric\":\"feec-gate\",\"r\":3,\"gflops\":{gflops:.2},\

@@ -149,7 +149,10 @@ checkerboarding structurally instead of by stabilization folklore.
 ## Error model
 
 Structured panics on shape mismatches, out-of-range degrees, and
-degenerate tets (programmer/mesh errors). `betti` panics on i128
+degenerate tets (programmer/mesh errors). Tensor-product lattice, local
+element-matrix, and DOF extents are checked before allocation and panic rather
+than wrapping.
+`betti` panics on i128
 overflow rather than degrade exactness. No Result-based paths in v1 —
 the inputs are meshes that upstream certificates (fs-rep-mesh,
 fs-mesh audits) have already validated.
@@ -165,6 +168,9 @@ FNV-64 over all four mass matrices, the Poisson stiffness, Betti
 numbers, and element volumes on kuhn(2): `0xa973_ca6b_07c3_9639`,
 recorded on Apple M4 Pro (aarch64), verified identical on
 Threadripper (x86_64). No libm anywhere in the hashed pipeline.
+Const-P and runtime-P contractions execute the same ascending-order fused
+operations, including zero coefficients. Exceptional field values therefore
+propagate consistently instead of being hidden only by one degree path.
 
 ## Cancellation behavior
 
@@ -174,7 +180,15 @@ job (the fs-la/fs-simd discipline). No internal threading.
 
 ## Unsafe boundary
 
-None. `unsafe_code = "deny"` via workspace lints.
+One registered leaf capsule:
+`src/highorder/fma/mod.rs` uses an x86-64
+`#[target_feature(enable = "avx2,fma")]` function so explicit
+`f64::mul_add` operations in the const-P apply compile to native fused
+instructions instead of baseline-x86 libm calls. Its safe dispatcher checks
+both CPU features immediately before the only unsafe call; the numerical body
+is otherwise safe slice code. The boundary and precondition are documented in
+`src/highorder/fma/SAFETY.md` and registered in `unsafe-capsules.json`. All
+other crate code inherits the workspace `unsafe_code = "deny"` policy.
 
 ## Feature flags
 
@@ -238,28 +252,29 @@ gate, measured ≈ r + 1; D: ≥ r − 0.4 gate, measured ≈ r) — these
 drive all four 3D tensor space types' rates; Legendre mass closed
 form; its own golden hash.
 
-## Perf-lane evidence (bead cwjn, measured)
+## Perf-lane evidence (bead cwjn, partially measured)
 
-- Release, macos-aarch64 (Apple M4 Pro, Mac16,11), single thread,
+- The last admitted macos-aarch64 row (Apple M4 Pro, Mac16,11), single thread,
   fs-roofline `MachineAxes::probe()` peak 48–49 GFLOP/s: the
   sum-factorized apply reaches 21.3 GFLOP/s at p = 4 (r = 3, m = 12)
-  = 43–44% of measured peak — the ≥30% roofline gate PASSES. Sweep
+  = 43–44% of measured peak — the ≥30% aarch64 row PASSED. Sweep
   (best-of-3, 18p⁴+3p³ flop model): r = 1: 37.0, r = 2: 29.9,
   r = 3: 21.5, r = 4: 21.6, r = 5: 25.0, r = 6: 17.5 GFLOP/s.
-- How: `apply_stiffness` dispatches once per apply to a const-P
-  monomorphized element loop (P = r+1 in 2..=8; runtime-p fallback
-  above) — stack scratch, inlined contraction kernels, hoisted
-  gather/scatter address arithmetic, and the ail/ajl zero-skip
-  branches dropped from the mono kernels (fma with a ±0 product onto
-  a never−0.0 accumulator is the identity, so the skip was semantics-
-  free). Baseline before the restructure: 2.27 GFLOP/s (5.6%) — a
-  measured 9.4× single-thread improvement with NO golden movement
-  (the sf-kron golden aaf1076a196c6902 is byte-stable across the
-  change; the mono path preserves per-output accumulation order
-  exactly). No fs-simd capsule needed.
-- The second-ISA (x86-64) attainment row is ARMED PENDING: the same
-  lane runs unmodified the moment an x86 reference machine is
-  available (rch fleet is ARM-only by census — the 1za9 precedent).
+- The x86-64 row has been measured and did not pass: baseline code on a
+  Threadripper PRO 5975WX reached about 0.026 attainment. The local FMA
+  capsule removed the per-element libm call, but inspection still found scalar
+  fused operations rather than packed AVX2. The current register-accumulator
+  contraction rewrite targets that packing gap while preserving each output's
+  ascending-l operation order and the frozen sf-kron golden.
+- No current-tree both-ISA performance claim is made until quiet M4 and
+  Threadripper runs re-admit the rewritten kernel. Bead cwjn remains open; the
+  historical aarch64 row is evidence for the preceding implementation, not a
+  substitute for remeasurement after this performance-sensitive rewrite. The
+  explicitly invoked perf test requires `FRANKENSIM_BASELINE_STORE` and
+  `FRANKENSIM_FIRMWARE_ID`, then admits both probes against that selected
+  historical baseline before applying the 30% gate. The store is the protected
+  operator trust root documented by fs-roofline; signature verification remains
+  `frankensim-epic-perf-fz2.7`.
 
 ## No-claim boundaries
 
@@ -276,8 +291,8 @@ form; its own golden hash.
   (curl-curl / mixed Darcy solves) need tfz.10 — canonical
   interpolation ladders stand in, labeled. The tensor-product side
   covers all four space types (slices 1–2). Unstructured-hex
-  orientation is later-slice scope; the ≥30%-peak perf gate LANDED
-  (bead cwjn, see Perf-lane evidence). `HexComplex` incidence is still not
+  orientation is later-slice scope; the cross-ISA ≥30%-peak perf gate remains
+  open (bead cwjn, see Perf-lane evidence). `HexComplex` incidence is still not
   consumed.
 - MMS covers the PRIMAL Poisson form; the mixed-form MMS (flux
   variable through M₂/d₂) joins the solver-stack lane (tfz.10) where

@@ -37,25 +37,35 @@ impl TensorSpace {
     /// Build the space (uniform grid, h = 1/m per axis).
     ///
     /// # Panics
-    /// If `m == 0` or `r == 0`.
+    /// If `m == 0`, `r == 0`, or a lattice/element-matrix extent overflows.
     #[must_use]
     pub fn new(m: usize, r: usize) -> TensorSpace {
         assert!(m >= 1 && r >= 1, "TensorSpace needs m >= 1, r >= 1");
+        let n1 = m
+            .checked_mul(r)
+            .and_then(|extent| extent.checked_add(1))
+            .expect("TensorSpace lattice-size overflow");
         let h = 1.0 / m as f64;
         let (mass_e, stiff_e) = element_matrices(r, h);
         TensorSpace {
             m,
             r,
-            n1: m * r + 1,
+            n1,
             mass_e,
             stiff_e,
         }
     }
 
     /// Total dof count (m·r + 1)³.
+    ///
+    /// # Panics
+    /// If the cubic extent cannot be represented by `usize`.
     #[must_use]
     pub fn ndof(&self) -> usize {
-        self.n1 * self.n1 * self.n1
+        self.n1
+            .checked_mul(self.n1)
+            .and_then(|square| square.checked_mul(self.n1))
+            .expect("TensorSpace dof-count overflow")
     }
 
     /// Global 1D lattice index of local dof `l` (Lobatto order:
@@ -95,10 +105,10 @@ impl TensorSpace {
         // gather → 3-term contraction → scatter pipeline inline,
         // unroll, and NEON/SSE-vectorize. Every monomorphized kernel
         // preserves the generic path's per-output operation ORDER
-        // exactly (ascending-l accumulation, same `mul_add` operands;
-        // the dropped zero-skip is semantics-free — see the kernel
-        // comment), so the output is BIT-IDENTICAL and the sf-kron
-        // golden does not move.
+        // exactly (ascending-l accumulation and the same `mul_add`
+        // operands, including zero coefficients), so finite output is
+        // BIT-IDENTICAL, exceptional values propagate consistently, and
+        // the sf-kron golden does not move.
         // Routed through the fma capsule (bead a55x): on x86 with
         // avx2+fma the SAME body compiles with native fused ops
         // (baseline x86 lowers mul_add to a per-element libm CALL —
@@ -242,12 +252,18 @@ impl TensorSpace {
     /// Assembled 1D global matrices (mass, stiffness) — dense n₁×n₁,
     /// the reference the Kronecker comparison and the Jacobi diagonal
     /// are built from.
+    ///
+    /// # Panics
+    /// If the dense square extent cannot be represented by `usize`.
     #[must_use]
     pub fn assembled_1d(&self) -> (Vec<f64>, Vec<f64>) {
         let p = self.r + 1;
         let n1 = self.n1;
-        let mut mass = vec![0.0f64; n1 * n1];
-        let mut stiff = vec![0.0f64; n1 * n1];
+        let dense_len = n1
+            .checked_mul(n1)
+            .expect("TensorSpace assembled-1D extent overflow");
+        let mut mass = vec![0.0f64; dense_len];
+        let mut stiff = vec![0.0f64; dense_len];
         for c in 0..self.m {
             for li in 0..p {
                 let gi = self.lat1(c, li);
@@ -396,17 +412,12 @@ impl TensorSpace {
 // (p = r+1 in 2..=8): compile-time trip counts let LLVM fully unroll
 // and NEON/SSE-vectorize the stride-1 inner loops, which the runtime-p
 // `_gen` fallbacks never achieve. Every kernel preserves the
-// fallback's per-output accumulation ORDER exactly: ascending l,
-// row-major positions, same `mul_add` operands. The fallbacks' ail/ajl
-// zero-skip is DROPPED here (branches block straight-line register
-// allocation of the unrolled GEMMs); that is still bit-identical:
-// executing the skipped op computes fma(±0·s, acc) = acc, because acc
-// is never -0.0 (it starts +0.0, and round-to-nearest addition onto
-// ±0/nonzero never yields -0.0 from a +0.0 start).
-//
-// `inline(always)`: these are the innermost hot kernels of the whole
-// apply and MUST fuse into the monomorphized element loop — measured
-// on the perf lane, not assumed.
+// runtime path's per-output accumulation ORDER exactly: ascending l,
+// row-major positions, same `mul_add` operands. Both paths execute zero
+// coefficients rather than using a data-dependent skip. Besides enabling
+// straight-line register allocation, this keeps exceptional-value behavior
+// coherent: `0 * infinity` propagates NaN at every polynomial degree instead
+// of being hidden only by the runtime-p fallback.
 // REGISTER-ARRAY ACCUMULATORS (bead cwjn, the a55x handoff's lead): each
 // output row accumulates in a local `[f64; P]` and stores ONCE, instead
 // of fma-ing through `&mut dst` memory. Bit-identical per element — the
@@ -496,12 +507,10 @@ fn contract_x_gen(a: &[f64], src: &[f64], dst: &mut [f64], p: usize) {
     for i in 0..p {
         for l in 0..p {
             let ail = a[i * p + l];
-            if ail != 0.0 {
-                for j in 0..p {
-                    for k in 0..p {
-                        dst[(i * p + j) * p + k] =
-                            ail.mul_add(src[(l * p + j) * p + k], dst[(i * p + j) * p + k]);
-                    }
+            for j in 0..p {
+                for k in 0..p {
+                    dst[(i * p + j) * p + k] =
+                        ail.mul_add(src[(l * p + j) * p + k], dst[(i * p + j) * p + k]);
                 }
             }
         }
@@ -514,11 +523,9 @@ fn contract_y_gen(a: &[f64], src: &[f64], dst: &mut [f64], p: usize) {
         for j in 0..p {
             for l in 0..p {
                 let ajl = a[j * p + l];
-                if ajl != 0.0 {
-                    for k in 0..p {
-                        dst[(i * p + j) * p + k] =
-                            ajl.mul_add(src[(i * p + l) * p + k], dst[(i * p + j) * p + k]);
-                    }
+                for k in 0..p {
+                    dst[(i * p + j) * p + k] =
+                        ajl.mul_add(src[(i * p + l) * p + k], dst[(i * p + j) * p + k]);
                 }
             }
         }
@@ -603,4 +610,85 @@ pub fn pcg_matfree<A: Fn(&[f64]) -> Vec<f64>>(
         }
     }
     (max_iters, false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tensor_extents_fail_closed_before_wrapping() {
+        let lattice = std::panic::catch_unwind(|| TensorSpace::new(usize::MAX, 1))
+            .expect_err("lattice extent must not wrap");
+        let lattice = lattice
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| lattice.downcast_ref::<String>().map(String::as_str))
+            .unwrap_or("non-string panic");
+        assert!(lattice.contains("lattice-size overflow"), "{lattice}");
+
+        let wide = TensorSpace::new(usize::MAX / 2, 1);
+        let assembled = std::panic::catch_unwind(|| wide.assembled_1d())
+            .expect_err("assembled 1D extent must not wrap");
+        let assembled = assembled
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| assembled.downcast_ref::<String>().map(String::as_str))
+            .unwrap_or("non-string panic");
+        assert!(
+            assembled.contains("assembled-1D extent overflow"),
+            "{assembled}"
+        );
+
+        let dofs = std::panic::catch_unwind(|| wide.ndof()).expect_err("dof extent must not wrap");
+        let dofs = dofs
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| dofs.downcast_ref::<String>().map(String::as_str))
+            .unwrap_or("non-string panic");
+        assert!(dofs.contains("dof-count overflow"), "{dofs}");
+    }
+
+    #[test]
+    fn const_and_runtime_contractions_share_exceptional_value_semantics() {
+        const P: usize = 2;
+        let a = [0.0, 1.0, -0.0, -2.0];
+        let src = [
+            f64::INFINITY,
+            1.0,
+            f64::from_bits(0x7ff8_0000_0000_0042),
+            -3.0,
+            4.0,
+            5.0,
+            6.0,
+            7.0,
+        ];
+
+        let assert_same_values = |mono: &[f64], runtime: &[f64], axis: &str| {
+            assert!(
+                mono.iter().zip(runtime).all(|(left, right)| {
+                    (left.is_nan() && right.is_nan()) || left.to_bits() == right.to_bits()
+                }),
+                "{axis} contraction diverged: mono={mono:?} runtime={runtime:?}"
+            );
+        };
+
+        let mut mono = [0.0; P * P * P];
+        let mut runtime = [0.0; P * P * P];
+        contract_x_p::<P>(&a, &src, &mut mono);
+        contract_x_gen(&a, &src, &mut runtime, P);
+        assert_same_values(&mono, &runtime, "x");
+
+        mono.fill(0.0);
+        runtime.fill(0.0);
+        contract_y_p::<P>(&a, &src, &mut mono);
+        contract_y_gen(&a, &src, &mut runtime, P);
+        assert_same_values(&mono, &runtime, "y");
+
+        mono.fill(0.0);
+        runtime.fill(0.0);
+        contract_z_p::<P>(&a, &src, &mut mono);
+        contract_z_gen(&a, &src, &mut runtime, P);
+        assert_same_values(&mono, &runtime, "z");
+    }
 }
