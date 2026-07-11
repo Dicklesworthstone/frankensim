@@ -61,6 +61,25 @@ Dense linear algebra: GEMM, batched small dense, factorizations, eigensolvers. L
   of pretending that Git HEAD describes the working tree. This is not a claim
   to hash arbitrary external tools or other path-dependency sources outside
   the named closure.
+- Dependency-graph evidence (bead fz2.6, codegen schema v2): source bytes do
+  not pin dependency CODEGEN — Cargo feature unification can compile the
+  normal-dependency closure (asupersync and its registry closure) under a
+  different unified feature set without moving any other fingerprint input.
+  Every build therefore binds exactly one evidence class into the
+  fingerprint, exposed as `GEMM_GRAPH_EVIDENCE`: `receipt:<blake3>` when
+  tooling exported `FRANKENSIM_DEPGRAPH_RECEIPT` (canonical resolved
+  package+feature receipt from `cargo run -p xtask -- depgraph-receipt --
+  <same selection as the build>`, verifiable post-build with `--verify`;
+  ambiguous resolutions refuse a receipt), or `salt:<value>` from the
+  workspace `.cargo/config.toml` `FRANKENSIM_DEPGRAPH_SALT` — an explicit,
+  operator-visible declaration that all such builds form ONE equivalence
+  class. Neither present → the build fails closed. Citable perf lanes must
+  use receipts (see `perf-baselines/README.md`); durable tune rows can only
+  cross binaries inside one evidence class because the class payload is part
+  of the fingerprint. Receipt precision is `cargo tree` resolution
+  (dev-dependencies participate in unification, a conservative
+  over-approximation of plain builds; the invocation-exact `-Z unit-graph`
+  no longer exists in Cargo).
 - `factor::{cholesky, lu, qr, tsqr_r, svd_jacobi}` + `FactorError` —
   dense factorizations. Failure is DATA: `NotSpd{index}` /
   `Singular{index}` typed diagnostics, never panics for data conditions.

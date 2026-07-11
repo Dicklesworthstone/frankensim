@@ -58,6 +58,16 @@ pub fn gemm_panel_run_id(operation: fs_exec::RunId, panel_ordinal: u64) -> fs_ex
 /// tune rows because their generated code differs.
 pub const GEMM_BUILD_FINGERPRINT: &str = env!("FS_LA_GEMM_BUILD_FINGERPRINT");
 
+/// Dependency-graph evidence class bound into [`GEMM_BUILD_FINGERPRINT`]
+/// (bead fz2.6): `receipt:<blake3-hex>` when build tooling supplied the
+/// canonical resolved normal-dependency receipt
+/// (`cargo run -p xtask -- depgraph-receipt`), or `salt:<value>` when the
+/// build carries the explicit workspace equivalence-class salt. A build with
+/// neither fails closed at compile time, so no third state exists. Durable
+/// tune rows only ever cross binaries within one evidence class because the
+/// class payload is part of the fingerprint itself.
+pub const GEMM_GRAPH_EVIDENCE: &str = env!("FS_LA_GEMM_GRAPH_EVIDENCE");
+
 /// Maximum arithmetic work in one cancellable GEMM compute quantum. Packing
 /// and beta staging use smaller fixed quanta; the largest poll interval is one
 /// `MR x NR x KC` microtile plus its alpha/write-back FMA per output.
@@ -2140,6 +2150,30 @@ mod tests {
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
             "build identity must be canonical lowercase hex"
         );
+    }
+
+    #[test]
+    fn graph_evidence_class_is_present_and_well_formed() {
+        // fz2.6: a binary cannot exist without dependency-graph evidence —
+        // build.rs fails closed. Whichever class this test binary carries,
+        // the class marker must be canonical.
+        let evidence = GEMM_GRAPH_EVIDENCE;
+        if let Some(digest) = evidence.strip_prefix("receipt:") {
+            assert_eq!(digest.len(), 64, "receipt digest is full-width BLAKE3");
+            assert!(
+                digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+                "receipt digest must be canonical lowercase hex"
+            );
+        } else if let Some(salt) = evidence.strip_prefix("salt:") {
+            assert!(
+                !salt.is_empty() && salt.len() <= 128,
+                "salt class must be short and non-empty: {salt:?}"
+            );
+        } else {
+            panic!("graph evidence must be receipt:* or salt:*, got {evidence:?}");
+        }
     }
 
     fn lcg(seed: &mut u64) -> f64 {

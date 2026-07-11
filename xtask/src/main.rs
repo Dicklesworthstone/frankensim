@@ -23,6 +23,7 @@
 
 mod claims;
 mod closures;
+mod depgraph;
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -1309,6 +1310,16 @@ fn main() -> ExitCode {
         "lock-constellation" => return cmd_constellation(&root, false),
         "check-constellation" => return cmd_constellation(&root, true),
         "bootstrap-constellation" => return cmd_bootstrap(&root),
+        "depgraph-receipt" => {
+            let rest: Vec<String> = std::env::args().skip(2).collect();
+            return match depgraph::cmd_depgraph_receipt(&root, &rest) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    eprintln!("error: {error}");
+                    ExitCode::FAILURE
+                }
+            };
+        }
         _ => {}
     }
     let manifests = match load_workspace(&root) {

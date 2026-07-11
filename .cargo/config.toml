@@ -20,3 +20,17 @@
 # whose arithmetic semantics are pinned against its scalar twin. See bead cwjn
 # and crates/fs-simd for the capsule precedent. fs-roofline already does this for
 # its FMA probe (bead xlvx).
+
+# Dependency-graph evidence for the GEMM build identity (bead fz2.6).
+#
+# Cargo feature unification can compile fs-la's dependencies (asupersync and
+# its registry closure) under different feature sets without changing any
+# other fingerprint input. Citable perf builds must export
+# FRANKENSIM_DEPGRAPH_RECEIPT from
+# `cargo run -p xtask -- depgraph-receipt -- <selection>`; that receipt wins
+# over this salt. Every other in-workspace build carries this EXPLICIT salt,
+# which declares all such builds one deliberate equivalence class (the
+# pre-fz2.6 status quo, now visible and bound into the fingerprint). Builds
+# with neither fail closed in crates/fs-la/build.rs.
+[env]
+FRANKENSIM_DEPGRAPH_SALT = "frankensim-workspace-dev-v1"

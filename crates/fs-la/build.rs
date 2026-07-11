@@ -310,10 +310,65 @@ fn add_asupersync_identity(
     append_external_identity(payload, constellation_lock, head_text, source_fields);
 }
 
+/// Resolved dependency-graph evidence for feature unification (bead fz2.6).
+///
+/// `CARGO_FEATURE_*` only covers this crate's own features: Cargo can compile
+/// path and registry dependencies (asupersync and its aes-gcm/rand_core
+/// closure) under a different unified feature set without changing any other
+/// fingerprint input, letting a tune row cross binaries whose dependency
+/// codegen differs. Build tooling derives a canonical receipt of the resolved
+/// normal-dependency closure OUTSIDE this build script
+/// (`cargo run -p xtask -- depgraph-receipt -- <selection>`) and exports it as
+/// `FRANKENSIM_DEPGRAPH_RECEIPT`; interactive workspace builds carry the
+/// explicit `FRANKENSIM_DEPGRAPH_SALT` from `.cargo/config.toml`, which marks
+/// all such builds as ONE deliberate equivalence class rather than proven
+/// graphs. Neither present → fail closed. Receipt wins when both are set
+/// (tooling overrides the workspace default).
+fn add_depgraph_evidence(payload: &mut Vec<u8>) -> String {
+    let receipt = optional_env("FRANKENSIM_DEPGRAPH_RECEIPT");
+    let salt = optional_env("FRANKENSIM_DEPGRAPH_SALT");
+    if let Some(receipt) = receipt.as_deref() {
+        assert!(
+            receipt.starts_with("{\"schema\":\"fs-la-depgraph-receipt-v1\"")
+                && receipt.contains("\"packages\":[")
+                && receipt.contains("\"id\":\"fs-la "),
+            "FRANKENSIM_DEPGRAPH_RECEIPT is not a fs-la depgraph receipt \
+             (expected canonical JSON from `cargo run -p xtask -- depgraph-receipt`)"
+        );
+        push_field(payload, "depgraph-receipt", receipt.as_bytes());
+        let digest = fs_blake3::hash_domain(
+            "org.frankensim.fs-la.depgraph-receipt.v1",
+            receipt.as_bytes(),
+        );
+        return format!("receipt:{digest}");
+    }
+    if let Some(salt) = salt.as_deref() {
+        assert!(
+            !salt.is_empty()
+                && salt.len() <= 128
+                && salt
+                    .bytes()
+                    .all(|byte| byte.is_ascii_graphic() || byte == b' '),
+            "FRANKENSIM_DEPGRAPH_SALT must be short printable ASCII, got {salt:?}"
+        );
+        push_field(payload, "depgraph-salt", salt.as_bytes());
+        return format!("salt:{salt}");
+    }
+    panic!(
+        "GEMM build identity requires dependency-graph evidence (bead fz2.6): \
+         export FRANKENSIM_DEPGRAPH_RECEIPT via \
+         `cargo run -p xtask -- depgraph-receipt -- <selection>` for citable builds, \
+         or build inside the workspace whose .cargo/config.toml supplies the \
+         explicit FRANKENSIM_DEPGRAPH_SALT equivalence class"
+    );
+}
+
 #[allow(clippy::too_many_lines)] // one ordered payload defines the complete code-generation identity
 fn main() {
     let mut payload = Vec::new();
-    push_field(&mut payload, "schema", b"fs-la-gemm-codegen-v1");
+    push_field(&mut payload, "schema", b"fs-la-gemm-codegen-v2");
+    let graph_evidence = add_depgraph_evidence(&mut payload);
+    println!("cargo:rustc-env=FS_LA_GEMM_GRAPH_EVIDENCE={graph_evidence}");
 
     for name in [
         "PROFILE",
