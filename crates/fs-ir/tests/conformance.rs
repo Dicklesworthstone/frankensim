@@ -39,7 +39,7 @@ const SPOUT: &str = r#"(study "spout-laminar-v3"
 /// Appendix C, the seismic frame study — verbatim.
 const FRAME: &str = r#"(study "frame-seismic-cvar-v9"
   (seed 0xF00D0002) (versions (constellation :lock "2026-07"))
-  (capability :cores 96 :mem 384GiB :wall 36h :ops (flux.* ascent.* uq.*))
+  (capability :cores 96 :mem 384GiB :wall 36h :ops (flux.* ascent.* topo.* uq.*))
   (budget (qoi "P(drift>2e-2)" :rel-error 0.15 :confidence 0.95))
   (let site   (uq.ground-motion (kanai-tajimi :S0 0.03m2/s3 :wg 15rad/s :zg 0.6)
                                 (records "PEER-set-A") (mlmc :levels 4)))

@@ -37,7 +37,7 @@ const SPOUT: &str = r#"(study "spout-laminar-v3"
 
 const FRAME: &str = r#"(study "frame-seismic-cvar-v9"
   (seed 0xF00D0002) (versions (constellation :lock "2026-07"))
-  (capability :cores 96 :mem 384GiB :wall 36h :ops (flux.* ascent.* uq.*))
+  (capability :cores 96 :mem 384GiB :wall 36h :ops (flux.* ascent.* topo.* uq.*))
   (budget (qoi "P(drift>2e-2)" :rel-error 0.15 :confidence 0.95))
   (let site   (uq.ground-motion (kanai-tajimi :S0 0.03m2/s3 :wg 15rad/s :zg 0.6)
                                 (records "PEER-set-A") (mlmc :levels 4)))
@@ -206,6 +206,158 @@ fn ad_002_violation_zoo_zero_false_admits() {
     verdict(
         "ad-002",
         "5-study violation zoo: all rejected on the right dimension with fixes",
+    );
+}
+
+#[test]
+fn ad_002b_resource_domains_and_explicit_capabilities_fail_closed() {
+    const SELF_CONTAINED: &str = r#"(study "resource-domain"
+  (seed 0x5EED020B) (versions (constellation :lock "2026-07"))
+  (capability :cores 1 :mem 1GiB :wall 1h :ops (flux.*))
+  (budget (wall 10s) (mem 1GiB))
+  (flux.solve))"#;
+
+    let no_token = AdmissionContext {
+        router: None,
+        chart_requirements: Vec::new(),
+        cost_models: BTreeMap::new(),
+        capability: None,
+        regime: None,
+        regime_policy: RegimePolicy::Warn,
+    };
+    let clean = admit_src(SELF_CONTAINED, &no_token);
+    assert!(clean.admitted, "{}", clean.diagnosis());
+
+    let wrong_declared_op = SELF_CONTAINED.replace(":ops (flux.*)", ":ops (ascent.*)");
+    let report = admit_src(&wrong_declared_op, &no_token);
+    assert!(
+        !report.admitted,
+        "an explicit capability must constrain its study"
+    );
+    assert!(report.findings.iter().any(|finding| {
+        finding.check == "capability"
+            && finding
+                .what
+                .contains("outside the study's explicit capability")
+    }));
+
+    let overflowing_memory =
+        SELF_CONTAINED.replace(":mem 1GiB", &format!(":mem 1{}GiB", "0".repeat(300)));
+    for malformed in [
+        SELF_CONTAINED.replace(":cores 1", ":cores -1"),
+        overflowing_memory,
+        SELF_CONTAINED.replace(":mem 1GiB", ":mem 0.5B"),
+        SELF_CONTAINED.replace(":wall 1h", ":wall 1kg"),
+        SELF_CONTAINED.replace(":ops (flux.*)", ":ops ()"),
+        SELF_CONTAINED.replace(
+            "(capability :cores 1 :mem 1GiB :wall 1h :ops (flux.*))",
+            "(capability :cores 1 :wall 1h :ops (flux.*) :mem)",
+        ),
+    ] {
+        let report = admit_src(&malformed, &no_token);
+        assert!(
+            !report.admitted,
+            "malformed capability admitted:\n{}",
+            report.diagnosis()
+        );
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| finding.check == "capability"),
+            "{}",
+            report.diagnosis()
+        );
+    }
+
+    for malformed in [
+        SELF_CONTAINED.replace("(mem 1GiB)", "(mem -1GiB)"),
+        SELF_CONTAINED.replace("(budget (wall 10s) (mem 1GiB))", "(budget)"),
+        SELF_CONTAINED.replace("(wall 10s)", "(wall)"),
+        SELF_CONTAINED.replace("(wall 10s)", "(wall 10s) (wall 20s)"),
+    ] {
+        let report = admit_src(&malformed, &no_token);
+        assert!(
+            !report.admitted,
+            "malformed budget admitted:\n{}",
+            report.diagnosis()
+        );
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| finding.check == "budget"),
+            "{}",
+            report.diagnosis()
+        );
+    }
+
+    let token_only = SELF_CONTAINED.replace(
+        "  (capability :cores 1 :mem 1GiB :wall 1h :ops (flux.*))\n",
+        "",
+    );
+    let invalid_token = AdmissionContext {
+        router: None,
+        chart_requirements: Vec::new(),
+        cost_models: BTreeMap::new(),
+        capability: Some(SessionCapability {
+            ops: vec!["flux.*".to_string()],
+            cores: f64::NAN,
+            mem_bytes: -1.0,
+            wall_s: f64::INFINITY,
+        }),
+        regime: None,
+        regime_policy: RegimePolicy::Warn,
+    };
+    let report = admit_src(&token_only, &invalid_token);
+    assert!(!report.admitted, "invalid token grants must fail closed");
+    assert_eq!(
+        report
+            .findings
+            .iter()
+            .filter(|finding| finding.check == "capability" && finding.what.contains("session "))
+            .count(),
+        3,
+        "{}",
+        report.diagnosis()
+    );
+
+    for ambiguous in [
+        SELF_CONTAINED.replace("(seed 0x5EED020B)", "(seed 0x5EED020B) (seed 0x5EED020C)"),
+        SELF_CONTAINED.replace(
+            "(versions (constellation :lock \"2026-07\"))",
+            "(versions (constellation :lock \"2026-07\")) \
+             (versions (constellation :lock \"2026-08\"))",
+        ),
+        SELF_CONTAINED.replace(
+            "(budget (wall 10s) (mem 1GiB))",
+            "(budget (wall 10s)) (budget (mem 1GiB))",
+        ),
+        SELF_CONTAINED.replace(
+            "(capability :cores 1 :mem 1GiB :wall 1h :ops (flux.*))",
+            "(capability :cores 1 :mem 1GiB :wall 1h :ops (flux.*)) \
+             (capability :cores 2 :mem 2GiB :wall 2h :ops (flux.*))",
+        ),
+        SELF_CONTAINED.replace(
+            "(flux.solve)",
+            "(let duplicate (flux.solve)) (let duplicate (flux.solve))",
+        ),
+    ] {
+        let report = admit_src(&ambiguous, &no_token);
+        assert!(!report.admitted, "duplicate structure admitted");
+        assert!(
+            report.findings.iter().any(|finding| {
+                finding.check == "structure" && finding.what.contains("duplicate")
+            }),
+            "{}",
+            report.diagnosis()
+        );
+    }
+
+    verdict(
+        "ad-002b",
+        "resource domains, self-contained operator grants, invalid tokens, and duplicate \
+         pillars all fail closed",
     );
 }
 

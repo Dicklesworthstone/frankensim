@@ -67,17 +67,41 @@ impl<'a> Study<'a> {
             lets: Vec::new(),
             body: Vec::new(),
         };
+        let mut seen_seed = false;
+        let mut seen_versions = false;
+        let mut seen_budget = false;
+        let mut seen_capability = false;
         for clause in &items[2..] {
             match clause.head() {
-                Some("seed") => study.seed = seed_value(clause),
-                Some("versions") => study.versions = Some(clause),
-                Some("budget") => study.budget = Some(clause),
-                Some("capability") => study.capability = Some(clause),
+                Some("seed") => {
+                    reject_duplicate_pillar("seed", clause, &mut seen_seed)?;
+                    study.seed = seed_value(clause);
+                }
+                Some("versions") => {
+                    reject_duplicate_pillar("versions", clause, &mut seen_versions)?;
+                    study.versions = Some(clause);
+                }
+                Some("budget") => {
+                    reject_duplicate_pillar("budget", clause, &mut seen_budget)?;
+                    study.budget = Some(clause);
+                }
+                Some("capability") => {
+                    reject_duplicate_pillar("capability", clause, &mut seen_capability)?;
+                    study.capability = Some(clause);
+                }
                 Some("let") => {
                     if let Some(list) = clause.items()
                         && let (Some(sym), Some(expr)) = (list.get(1), list.get(2))
                         && let NodeKind::Symbol(s) = &sym.kind
                     {
+                        if study.lets.iter().any(|(name, _)| *name == s.as_str()) {
+                            return Err(IrError {
+                                span: clause.span,
+                                kind: IrErrorKind::MalformedClause,
+                                detail: format!("duplicate let binding {s:?} is ambiguous"),
+                                hint: "give every let binding a unique name".to_string(),
+                            });
+                        }
                         study.lets.push((s, expr));
                     } else {
                         return Err(IrError {
@@ -115,6 +139,19 @@ impl<'a> Study<'a> {
         }
         None
     }
+}
+
+fn reject_duplicate_pillar(name: &str, clause: &Node, seen: &mut bool) -> Result<(), IrError> {
+    if *seen {
+        return Err(IrError {
+            span: clause.span,
+            kind: IrErrorKind::MalformedClause,
+            detail: format!("duplicate {name} pillar is ambiguous"),
+            hint: format!("retain exactly one ({name} ...) clause"),
+        });
+    }
+    *seen = true;
+    Ok(())
 }
 
 fn seed_value(clause: &Node) -> Option<u64> {

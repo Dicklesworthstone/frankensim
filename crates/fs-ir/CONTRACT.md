@@ -35,8 +35,10 @@ typed AST. Layer: L6 (HELM). Runtime deps: `std` + fs-qty.
   spans.
 - `Study::from_node` — recognizes Appendix C study forms: name, seed,
   versions/budget/capability clauses, `(let …)` bindings, body;
-  `constellation_lock()` extracts the versions pin. Extraction only —
-  validity POLICY lives in `admission` (below).
+  `constellation_lock()` extracts the versions pin. Duplicate Five-Explicit
+  pillars and duplicate let names refuse as ambiguous instead of replacing an
+  earlier declaration. Extraction only — validity POLICY lives in `admission`
+  (below).
 - `lower::lower` — high-level verbs (`optimize-shape`, `simulate-pour`)
   expand to explicit IR with an inspectable trace naming every injected
   default (progressive disclosure with nothing hidden); idempotent;
@@ -69,7 +71,8 @@ typed AST. Layer: L6 (HELM). Runtime deps: `std` + fs-qty.
   feasibility (fs-plan cost models over `:dof`/`:size` features, p90
   totals vs the `(budget (wall …))` bound, with RANKED cost-model-derived
   fixes: coarsen / surrogate-screen / relax), capability sufficiency
-  (session token globs vs namespaced verbs + declared asks), chart
+  (finite non-negative session grants, session-token and self-contained
+  explicit globs vs namespaced verbs, and finite declared asks), chart
   routability (fs-geom Router as an admission predicate with the
   RouteRefusal's own fixes attached), and regime gating (explicit
   `(assert (regime.allows …))` plus `flux.*` verbs checked against an
@@ -175,7 +178,9 @@ exceedance+confidence) with a teaching error on a non-query form.
 
 `tests/admission.rs` (suite `fs-ir/admission`): ad-001 Appendix C admits
 cleanly + ms-class latency + determinism; ad-002 five-study violation zoo
-(all rejected on the right dimension, fixes attached); ad-003 dimensional
+(all rejected on the right dimension, fixes attached); ad-002b malformed,
+negative, non-finite, empty, and duplicate resource grants/pillars fail closed,
+and self-contained operator grants constrain the study; ad-003 dimensional
 spans pinpoint the offending operand, products stay legal; ad-004
 BudgetInfeasible with ranked cost-derived fixes + fix-quality harness
 (applying fixes admits); ad-005 Router-backed feasibility; ad-006 regime
