@@ -175,47 +175,15 @@ fn p3_005_proposal_11_r8_gate_and_the_holding_pen() {
     // THE HOLDING PEN, IN WRITING: the five statuses as a signed
     // package — the quarterly-review artifact a third party can check.
     let pkg = EvidencePackage::new(Provenance::new("phase3-horizon", "Cargo.lock"))
-        .with_claim(Claim::new(
-            "A-abstraction-ladder",
-            "trigger FIRED: rb_coverage 1.0 >= 0.2 on the beachhead",
-            Color::Verified { lo: 0.2, hi: 1.0 },
-        ))
-        .with_claim(Claim::new(
-            "C-value-of-information",
-            "instrumented; scheduling authority awaits the prospective audit",
-            Color::Estimated {
-                estimator: "prospective-audit-pending".to_string(),
-                dispersion: 1.0,
-            },
-        ))
-        .with_claim(Claim::new(
-            "4-spacetime-complex",
-            "instrumented-but-uncontrolled; control gated on a splitting-dominated \
-             paying workload",
-            Color::Estimated {
-                estimator: "workload-demand-pending".to_string(),
-                dispersion: 1.0,
-            },
-        ))
-        .with_claim(Claim::new(
-            "13b-symmetry-solver",
-            "prevalence instrument live; dedicated solver waits for >=15% real-workload \
-             symmetry",
-            Color::Estimated {
-                estimator: "prevalence-pending".to_string(),
-                dispersion: 1.0,
-            },
-        ))
-        .with_claim(Claim::new(
-            "11-reality-as-a-chart",
-            "R8 instrument live (registration vs certified deviation); full-field \
+        .with_claim(Claim::from_certificate("A-abstraction-ladder", "trigger FIRED: rb_coverage 1.0 >= 0.2 on the beachhead", 0.2, 1.0, "test-solver/cert", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"))
+        .with_claim(Claim::estimated("C-value-of-information", "instrumented; scheduling authority awaits the prospective audit", "prospective-audit-pending".to_string(), 1.0))
+        .with_claim(Claim::estimated("4-spacetime-complex", "instrumented-but-uncontrolled; control gated on a splitting-dominated \
+             paying workload", "workload-demand-pending".to_string(), 1.0))
+        .with_claim(Claim::estimated("13b-symmetry-solver", "prevalence instrument live; dedicated solver waits for >=15% real-workload \
+             symmetry", "prevalence-pending".to_string(), 1.0))
+        .with_claim(Claim::estimated("11-reality-as-a-chart", "R8 instrument live (registration vs certified deviation); full-field \
              activation awaits metrology partnerships — point-sensor assimilation \
-             ships meanwhile",
-            Color::Estimated {
-                estimator: "metrology-partnership-pending".to_string(),
-                dispersion: 1.0,
-            },
-        ))
+             ships meanwhile", "metrology-partnership-pending".to_string(), 1.0))
         .signed("phase3-horizon-gate");
     let check = fs_checker::check(&pkg);
     assert!(check.passed(), "the holding-pen record re-verifies");

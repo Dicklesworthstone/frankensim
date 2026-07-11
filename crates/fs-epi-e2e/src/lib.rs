@@ -348,8 +348,14 @@ pub fn stage_evidence_roundtrip() -> StageLog {
     let mut passed = true;
 
     let pkg = EvidencePackage::new(Provenance::new("commit-abc", "lock-def"))
-        .with_claim(Claim::new("c1", "stress <= sigma*", verified()))
-        .with_claim(Claim::new("c2", "surrogate says ok", estimated()));
+        .with_claim(Claim::from_certificate(
+            "c1",
+            "stress <= sigma*",
+            -1.0,
+            1.0,
+            "test-solver/cert", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        ))
+        .with_claim(Claim::estimated("c2", "surrogate says ok", "surrogate", 2.0));
     let root = pkg.merkle_root();
 
     // solver-free re-verification passes.

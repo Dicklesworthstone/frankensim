@@ -23,27 +23,13 @@ fn prov() -> Provenance {
     Provenance::new("commit-abc", "lock-def")
 }
 fn verified(id: &str) -> Claim {
-    Claim::new(id, "ok", Color::Verified { lo: -1.0, hi: 1.0 })
+    Claim::from_certificate(id, "ok", -1.0, 1.0, "test-solver/cert", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
 }
 fn estimated(id: &str) -> Claim {
-    Claim::new(
-        id,
-        "maybe",
-        Color::Estimated {
-            estimator: "surrogate".into(),
-            dispersion: 2.0,
-        },
-    )
+    Claim::estimated(id, "maybe", "surrogate", 2.0)
 }
 fn validated(id: &str, regime: ValidityDomain) -> Claim {
-    Claim::new(
-        id,
-        "matches",
-        Color::Validated {
-            regime,
-            dataset: "wt-2026".into(),
-        },
-    )
+    Claim::anchored(id, "matches", regime, "wt-2026", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
 }
 fn good_regime() -> ValidityDomain {
     ValidityDomain::unconstrained().with("Re", 1e5, 3e5)
@@ -95,11 +81,7 @@ fn a_semantically_empty_falsifier_record_fails_the_check() {
 
 #[test]
 fn placeholder_claim_and_falsifier_text_fail_the_check() {
-    let placeholder_statement = EvidencePackage::new(prov()).with_claim(Claim::new(
-        "claim",
-        "TODO",
-        Color::Verified { lo: 0.0, hi: 1.0 },
-    ));
+    let placeholder_statement = EvidencePackage::new(prov()).with_claim(Claim::from_certificate("claim", "TODO", 0.0, 1.0, "test-solver/cert", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"));
     let report = check(&placeholder_statement);
     assert!(!report.passed());
     assert_eq!(report.findings[0].kind, "invalid-claim-statement");
@@ -340,11 +322,7 @@ fn checker_json_path_and_signature_capability() {
             signature == mac(merkle_root)
         }
     }
-    let base = EvidencePackage::new(Provenance::new("v1.0", "lock:abc")).with_claim(Claim::new(
-        "c1",
-        "bounded",
-        Color::Verified { lo: 0.0, hi: 1.0 },
-    ));
+    let base = EvidencePackage::new(Provenance::new("v1.0", "lock:abc")).with_claim(Claim::from_certificate("c1", "bounded", 0.0, 1.0, "test-solver/cert", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"));
     let root = base.merkle_root();
     let pkg = base.signed(mac(&root));
     // Valid signature via the capability.

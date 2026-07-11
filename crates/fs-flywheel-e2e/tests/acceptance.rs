@@ -221,19 +221,20 @@ fn ac_003_package_recheck_solver_free_and_voi_hint() {
     let hint = fs_plan::voi::hint_for_query(&ranked);
     // The package: colored claims, signed, Merkle-rooted.
     let pkg = EvidencePackage::new(Provenance::new("acceptance-e2e", "Cargo.lock"))
-        .with_claim(Claim::new(
-            "wedge-qoi-interval",
-            format!("certified half-width {bound:.3e} at tol 6e-3"),
-            last.color.clone(),
-        ))
-        .with_claim(Claim::new(
-            "voi-hint",
-            hint.clone(),
-            Color::Estimated {
-                estimator: "voi-myopic".to_string(),
-                dispersion: 1.0,
-            },
-        ))
+        .with_claim({
+            let Color::Verified { lo, hi } = last.color else {
+                panic!("the wedge trajectory ends verified");
+            };
+            Claim::from_certificate(
+                "wedge-qoi-interval",
+                format!("certified half-width {bound:.3e} at tol 6e-3"),
+                lo,
+                hi,
+                "fs-wedge/dwr-certifier",
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            )
+        })
+        .with_claim(Claim::estimated("voi-hint", hint.clone(), "voi-myopic", 1.0))
         .signed("acceptance-gate");
     // THIRD-PARTY RE-VERIFICATION: fs-checker has no solver deps —
     // it checks certificates, composition, signature, and the root.
@@ -284,11 +285,21 @@ fn ac_004_g5_whole_path_replay() {
             .map(|s| s.bound.to_bits())
             .collect();
         let pkg = EvidencePackage::new(Provenance::new("acceptance-e2e", "Cargo.lock"))
-            .with_claim(Claim::new(
-                "wedge-qoi-interval",
-                "replay claim",
-                report.trajectory.last().expect("step").color.clone(),
-            ))
+            .with_claim({
+                let Color::Verified { lo, hi } =
+                    report.trajectory.last().expect("step").color.clone()
+                else {
+                    panic!("the replay trajectory ends verified");
+                };
+                Claim::from_certificate(
+                    "wedge-qoi-interval",
+                    "replay claim",
+                    lo,
+                    hi,
+                    "fs-wedge/dwr-certifier",
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                )
+            })
             .signed("acceptance-gate");
         (bits, pkg.merkle_root())
     };
@@ -320,8 +331,14 @@ fn ac_005_laundering_invariant_across_the_path() {
     // At the package layer the breakdown keeps them apart — an audit
     // sees exactly how much of the answer is estimated.
     let pkg = EvidencePackage::new(Provenance::new("acceptance-e2e", "Cargo.lock"))
-        .with_claim(Claim::new("hard", "certified part", verified))
-        .with_claim(Claim::new("soft", "estimated part", estimated))
+        .with_claim(Claim::from_certificate(
+            "hard",
+            "certified part",
+            1.0,
+            1.1,
+            "test-solver/cert", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        ))
+        .with_claim(Claim::estimated("soft", "estimated part", "dwr-guess", 0.1))
         .signed("acceptance-gate");
     let breakdown = pkg.color_breakdown();
     assert!(

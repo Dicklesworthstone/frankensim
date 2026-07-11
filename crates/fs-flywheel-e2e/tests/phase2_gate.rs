@@ -310,25 +310,15 @@ fn p2_003_evidence_package_and_colored_objective_contract() {
     // Proposal 12: the gate's own results ship as a signed,
     // Merkle-rooted, machine-checkable evidence package.
     let package = EvidencePackage::new(Provenance::new("phase2-gate", "Cargo.lock"))
-        .with_claim(Claim::new(
-            "adjoint-vs-dfo",
-            "adjoint-driven optimization beats the DFO baseline on >=70% of the battery",
-            Color::Verified { lo: 0.7, hi: 1.0 },
-        ))
-        .with_claim(Claim::new(
-            "planner-vs-baseline",
-            "the ladder planner beats the uniform baseline by >=2x at equal accuracy",
-            Color::Verified { lo: 2.0, hi: 10.0 },
-        ))
-        .with_claim(Claim::new(
+        .with_claim(Claim::from_certificate("adjoint-vs-dfo", "adjoint-driven optimization beats the DFO baseline on >=70% of the battery", 0.7, 1.0, "test-solver/cert", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"))
+        .with_claim(Claim::from_certificate("planner-vs-baseline", "the ladder planner beats the uniform baseline by >=2x at equal accuracy", 2.0, 10.0, "test-solver/cert", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"))
+        .with_claim(Claim::estimated(
             "external-audit",
             "HONEST STATUS: external auditor engagement is pending — the package format is \
          machine-checkable and signed, but third-party review cannot be synthesized \
          in-repo",
-            Color::Estimated {
-                estimator: "self-report".to_string(),
-                dispersion: 1.0,
-            },
+            "self-report",
+            1.0,
         ))
         .signed("phase2-gate");
     // Machine-checkable: the Merkle root is deterministic and the
