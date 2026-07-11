@@ -526,7 +526,7 @@ fn check_budget_resource_domains(study: &Study<'_>, out: &mut Vec<Finding>) {
             }
             "mem" => {
                 let bytes = value.and_then(count_bytes_exact);
-                if !bytes.is_some_and(|bytes| bytes > 0) {
+                if bytes.is_none_or(|bytes| bytes == 0) {
                     out.push(invalid_resource_value(
                         "budget",
                         clause.span,
@@ -812,7 +812,7 @@ fn check_capability(study: &Study<'_>, cx: &AdmissionContext<'_>, out: &mut Vec<
                 "remove the dangling field or supply its value".to_string(),
             ));
         }
-        for pair in fields.chunks_exact(2) {
+        for pair in fields.as_chunks::<2>().0 {
             let field_node = &pair[0];
             let value_node = &pair[1];
             let NodeKind::Keyword(field) = &field_node.kind else {

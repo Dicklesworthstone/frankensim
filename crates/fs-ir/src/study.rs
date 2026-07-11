@@ -211,7 +211,7 @@ fn validate_versions_clause(clause: &Node) -> Result<(), IrError> {
             ));
         }
         let mut seen_lock = false;
-        for pair in fields.chunks_exact(2) {
+        for pair in fields.as_chunks::<2>().0 {
             let NodeKind::Keyword(field) = &pair[0].kind else {
                 return Err(malformed_clause(
                     &pair[0],
