@@ -111,8 +111,12 @@ in `crates/fs-simd/src/neon/transpose/SAFETY.md` and bitwise twin-gated.
   `0x79aa_108f_a517_012f`) but still MEASURED SLOWER than the stage walk on
   M4 after vectorized gather/scatter. At n = 2²² on 2026-07-11, six-step was
   0.0822–0.0852 s versus 0.053–0.055 s for stages (ratio 0.64–0.67).
-  It remains frontier/default-OFF on this ISA; the current x86 verdict is
-  pending. Enabling it changes large-n output bits by design. Its roofline
+  x86 verdict (2026-07-11, ts2 5975WX, n = 2²², 3 runs): ratio 0.80–0.87 —
+  weaker prefetch narrows the gap but does not invert it; golden verified on
+  x86 debug + release. PERMANENTLY FRONTIER on both reference ISAs — every
+  recorded lever (radix-8, transpose capsule, 6→2 fusion, vectorized strips)
+  is exhausted; the relative lane stays armed as the instrument of record.
+  Enabling it changes large-n output bits by design. Its roofline
   evidence version is `27d3-6s-fused2`, separate from the transform-bit
   version because exact-move optimization changed traffic without moving bits.
 
