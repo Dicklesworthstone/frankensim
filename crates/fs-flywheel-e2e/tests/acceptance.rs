@@ -70,8 +70,8 @@ fn admission_cx() -> admission::AdmissionContext<'static> {
             "frep".to_string(),
             "xform.*".to_string(),
         ],
-        cores: 32.0,
-        mem_bytes: 64.0 * 1024.0 * 1024.0 * 1024.0,
+        cores: 32,
+        mem_bytes: 64 * 1024 * 1024 * 1024,
         wall_s: 7200.0,
     };
     admission::AdmissionContext {
