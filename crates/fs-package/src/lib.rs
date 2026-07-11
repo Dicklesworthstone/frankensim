@@ -19,14 +19,16 @@
 //!
 //! The Merkle tree uses the in-house BLAKE3 content hash from [`fs_blake3`]
 //! (pure safe Rust, zero deps — Franken-compliant), with every leaf and node
-//! DOMAIN-SEPARATED under `fs-package:v6:…` tags, yielding a
+//! DOMAIN-SEPARATED under `fs-package:v7:…` tags, yielding a
 //! 32-byte [`ContentHash`] root; signature bytes are DETACHED and OPTIONAL, and
 //! become authenticated only through an injected purpose-bound policy.
 //! Everything is deterministic: the same package yields the same root and
 //! JSON.
 
 use fs_blake3::hash_domain;
-use fs_evidence::{Color, ColorRank, IntervalOp, compose};
+use fs_evidence::{
+    Color, ColorPayloadError, ColorRank, IntervalOp, compose, validate_color_payload,
+};
 use origin::{identity_reason, is_placeholder_token, validate_origin_shape};
 
 pub use fs_blake3::ContentHash;
@@ -56,6 +58,8 @@ pub use origin::{
 /// (a DAG by construction).
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompositionReceipt {
+    /// Exact fs-evidence color algebra used to derive this claim.
+    pub color_algebra_version: u32,
     /// Parent claim indices, in fold order (each < this claim's index).
     pub parents: Vec<usize>,
     /// The ledger operation the derivation used.
@@ -215,6 +219,7 @@ impl Claim {
     ) -> Claim {
         let mut claim = Claim::sealed(id, statement, color, ClaimOrigin::Derived);
         claim.receipt = Some(CompositionReceipt {
+            color_algebra_version: fs_evidence::COLOR_ALGEBRA_VERSION,
             parents,
             op,
             artifact_hash: artifact_hash.into(),
@@ -258,7 +263,7 @@ impl Claim {
     /// artifact address, not an admission decision.
     #[must_use]
     pub fn declared_content_hash_unverified(&self) -> ContentHash {
-        hash_domain("fs-package:v6:claim", self.canonical().as_bytes())
+        hash_domain("fs-package:v7:claim", self.canonical().as_bytes())
     }
 
     /// Domain-separated subject hash for external falsifier/derivation
@@ -275,7 +280,7 @@ impl Claim {
             falsifier.artifact_hash.clear();
         }
         hash_domain(
-            "fs-package:v6:claim-verification-subject",
+            "fs-package:v7:claim-verification-subject",
             subject.authorization_canonical().as_bytes(),
         )
     }
@@ -358,6 +363,23 @@ impl Claim {
         )
     }
 
+    /// Whether this raw declaration can satisfy the release gate's minimum
+    /// substantive-evidence requirement after its admission receipt classifies
+    /// it as scientific. This predicate does not authenticate the declaration.
+    ///
+    /// A finite `Verified` interval is informative even when wide. An ordered
+    /// interval with an infinite endpoint remains a sound, explicit vacuous
+    /// enclosure, but it cannot by itself justify release. `Validated` evidence
+    /// remains eligible because package verification separately authenticates
+    /// its bounded regime and exact anchoring dataset.
+    #[must_use]
+    pub fn declared_is_release_scientific_evidence_unverified(&self) -> bool {
+        matches!(
+            &self.color,
+            Color::Verified { lo, hi } if lo.is_finite() && hi.is_finite()
+        ) || matches!(&self.color, Color::Validated { .. })
+    }
+
     /// Whether release admission must find a matching content-hash dataset
     /// anchor for this claim.
     #[must_use]
@@ -365,7 +387,7 @@ impl Claim {
         matches!(&self.color, Color::Validated { .. })
     }
 
-    /// The schema-v6 canonical body (id, statement, color, receipt,
+    /// The schema-v7 canonical body (id, statement, color, receipt,
     /// falsifiers, anchors), excluding the claim origin.
     fn canonical_body(&self) -> String {
         use core::fmt::Write as _;
@@ -397,7 +419,12 @@ impl Claim {
         // Schema-v3 fields bind into the content address too.
         match &self.receipt {
             Some(r) => {
-                let _ = write!(out, "receipt:{}|", op_name(r.op));
+                let _ = write!(
+                    out,
+                    "receipt:color-algebra-v{}:{}|",
+                    r.color_algebra_version,
+                    op_name(r.op)
+                );
                 for &p in &r.parents {
                     let _ = write!(out, "{p}|");
                 }
@@ -420,7 +447,7 @@ impl Claim {
         out
     }
 
-    /// Full canonical string (schema v6): the claim body plus the origin.
+    /// Full canonical string (schema v7): the claim body plus the origin.
     fn canonical(&self) -> String {
         let mut out = self.canonical_body();
         out.push_str("origin|");
@@ -1090,6 +1117,15 @@ pub enum PackageError {
         /// The version found.
         found: u32,
     },
+    /// A derived receipt names a different color-algebra semantics.
+    UnsupportedColorAlgebra {
+        /// Derived claim carrying the receipt.
+        claim: String,
+        /// Algebra version found.
+        found: u32,
+        /// Algebra version this checker executes.
+        supported: u32,
+    },
     /// A composition receipt does not re-derive the claimed color: the
     /// checker re-ran `compose` over the parents and got a different
     /// result — a forged or stale derivation (schema v3).
@@ -1271,15 +1307,16 @@ impl core::error::Error for PackageError {}
 /// ([`ContentHash`]); v5 sealed claims with typed origins; v6 adds
 /// capability-gated anchoring datasets and signatures, policy-bound
 /// verification receipts, transitive waiver admission, and waiver-separated
-/// magnitude accounting. Earlier transports are refused by version.
-pub const FORMAT_VERSION: u32 = 6;
+/// magnitude accounting; v7 binds the color-algebra version into every
+/// composition receipt. Earlier transports are refused by version.
+pub const FORMAT_VERSION: u32 = 7;
 const _: () = assert!(FORMAT_VERSION == fs_crosswalk::SUPPORTED_PACKAGE_FORMAT);
 
 /// Domain-separated integrity digest for the independently distributed
 /// checker's gate-context receipt. This is integrity-only, not a signature.
 #[must_use]
 pub fn hash_checker_decision(payload: &[u8]) -> ContentHash {
-    hash_domain("fs-package:v6:checker-decision", payload)
+    hash_domain("fs-package:v7:checker-decision", payload)
 }
 
 fn verify_attached_records(claim: &Claim) -> Result<(), PackageError> {
@@ -1324,13 +1361,7 @@ fn verify_attached_records(claim: &Claim) -> Result<(), PackageError> {
 
 fn verify_color_payload(claim: &Claim) -> Result<(), PackageError> {
     match &claim.color {
-        Color::Verified { lo, hi } => {
-            if !(lo.is_finite() && hi.is_finite() && lo <= hi) {
-                return Err(PackageError::IncompleteVerifiedClaim {
-                    claim: claim.id.clone(),
-                });
-            }
-        }
+        Color::Verified { .. } => {}
         Color::Validated { regime, dataset } => {
             if regime.bounds().is_empty() {
                 return Err(PackageError::IncompleteValidatedClaim {
@@ -1344,47 +1375,43 @@ fn verify_color_payload(claim: &Claim) -> Result<(), PackageError> {
                     missing: "dataset",
                 });
             }
-            if let Some(reason) = identity_reason(dataset) {
-                return Err(PackageError::InvalidIdentity {
-                    claim: Some(claim.id.clone()),
-                    field: "color.dataset",
-                    reason,
-                });
-            }
-            if let Some((axis, _)) = regime.bounds().iter().find(|(axis, (lo, hi))| {
-                identity_reason(axis).is_some() || !lo.is_finite() || !hi.is_finite() || lo > hi
-            }) {
-                return Err(PackageError::InvalidValidatedRegime {
-                    claim: claim.id.clone(),
-                    axis: axis.clone(),
-                });
-            }
         }
-        Color::Estimated {
-            estimator,
-            dispersion,
-        } => {
+        Color::Estimated { estimator, .. } => {
             if estimator.trim().is_empty() {
                 return Err(PackageError::IncompleteEstimatedClaim {
                     claim: claim.id.clone(),
                     missing: "estimator",
                 });
             }
-            if let Some(reason) = identity_reason(estimator) {
-                return Err(PackageError::InvalidIdentity {
-                    claim: Some(claim.id.clone()),
-                    field: "color.estimator",
-                    reason,
-                });
-            }
-            if dispersion.is_nan() || *dispersion < 0.0 {
-                return Err(PackageError::InvalidEstimatedDispersion {
-                    claim: claim.id.clone(),
-                });
-            }
         }
     }
-    Ok(())
+    validate_color_payload(&claim.color).map_err(|error| match error {
+        ColorPayloadError::InvalidIdentity { field, reason, .. } => PackageError::InvalidIdentity {
+            claim: Some(claim.id.clone()),
+            field: match field {
+                "dataset" => "color.dataset",
+                "estimator" => "color.estimator",
+                _ => "color.regime.axis",
+            },
+            reason,
+        },
+        ColorPayloadError::InvalidVerifiedInterval { .. } => {
+            PackageError::IncompleteVerifiedClaim {
+                claim: claim.id.clone(),
+            }
+        }
+        ColorPayloadError::InvalidValidatedRegime { axis, .. } => {
+            PackageError::InvalidValidatedRegime {
+                claim: claim.id.clone(),
+                axis,
+            }
+        }
+        ColorPayloadError::InvalidEstimatedDispersion { .. } => {
+            PackageError::InvalidEstimatedDispersion {
+                claim: claim.id.clone(),
+            }
+        }
+    })
 }
 
 /// Equality for receipt re-derivation is an identity check, not a numerical
@@ -1497,12 +1524,12 @@ fn add_record_transport(
 ) -> Result<(), PackageError> {
     if let Some(receipt) = &claim.receipt {
         check_transport_count("receipt parents", receipt.parents.len())?;
-        add_transport_nodes(nodes, receipt.parents.len().saturating_add(3))?;
+        add_transport_nodes(nodes, receipt.parents.len().saturating_add(4))?;
         add_transport_bytes(
             bytes,
             32usize
                 .saturating_mul(receipt.parents.len())
-                .saturating_add(64),
+                .saturating_add(80),
         )?;
         add_transport_text(bytes, "receipt.artifact_hash", &receipt.artifact_hash)?;
     }
@@ -1640,7 +1667,7 @@ impl EvidencePackage {
 
     /// Compute the BLAKE3 Merkle content address after enforcing the standalone
     /// transport byte, node, string, and container limits. Every leaf and
-    /// internal node is domain-separated under `fs-package:v6:...`; detached
+    /// internal node is domain-separated under `fs-package:v7:...`; detached
     /// signatures are excluded so signing does not change the address.
     ///
     /// # Errors
@@ -1654,13 +1681,13 @@ impl EvidencePackage {
     fn merkle_root_unchecked(&self) -> ContentHash {
         let mut level: Vec<ContentHash> = Vec::with_capacity(self.claims.len() + 1);
         level.push(hash_domain(
-            "fs-package:v6:header",
+            "fs-package:v7:header",
             self.package_header().as_bytes(),
         ));
         level.extend(
             self.claims
                 .iter()
-                .map(|c| hash_domain("fs-package:v6:claim", c.canonical().as_bytes())),
+                .map(|c| hash_domain("fs-package:v7:claim", c.canonical().as_bytes())),
         );
         while level.len() > 1 {
             let mut next = Vec::with_capacity(level.len().div_ceil(2));
@@ -1675,8 +1702,8 @@ impl EvidencePackage {
         }
         match level.as_slice() {
             [root] => *root,
-            [] => hash_domain("fs-package:v6:empty-internal-level", b""),
-            _ => hash_domain("fs-package:v6:invalid-internal-level", b""),
+            [] => hash_domain("fs-package:v7:empty-internal-level", b""),
+            _ => hash_domain("fs-package:v7:invalid-internal-level", b""),
         }
     }
 
@@ -1699,7 +1726,7 @@ impl EvidencePackage {
         for claim in &self.claims {
             push_atom(&mut canonical, &claim.authorization_canonical());
         }
-        hash_domain("fs-package:v6:authorization-context", canonical.as_bytes())
+        hash_domain("fs-package:v7:authorization-context", canonical.as_bytes())
     }
 
     /// Stable, domain-separated bytes authenticated by a waiver MAC at
@@ -1728,7 +1755,7 @@ impl EvidencePackage {
         let ClaimOrigin::AuthenticatedWaiver(grant) = &claim.origin else {
             return None;
         };
-        let mut message = String::from("fs-package:v6:waiver-authorization|");
+        let mut message = String::from("fs-package:v7:waiver-authorization|");
         push_atom(&mut message, &authorization_context.to_hex());
         let _ = write!(message, "claim-index:{claim_index}|");
         push_atom(&mut message, &claim.canonical_body());
@@ -1862,6 +1889,13 @@ impl EvidencePackage {
             });
         }
         if let Some(receipt) = &claim.receipt {
+            if receipt.color_algebra_version != fs_evidence::COLOR_ALGEBRA_VERSION {
+                return Err(PackageError::UnsupportedColorAlgebra {
+                    claim: claim.id.clone(),
+                    found: receipt.color_algebra_version,
+                    supported: fs_evidence::COLOR_ALGEBRA_VERSION,
+                });
+            }
             if !is_canonical_content_hash(&receipt.artifact_hash) {
                 return Err(PackageError::InvalidDerivationArtifact {
                     claim: claim.id.clone(),
@@ -2568,6 +2602,13 @@ impl EvidencePackage {
             }
             match &claim.color {
                 Color::Verified { lo, hi } => {
+                    if lo.is_infinite() || hi.is_infinite() {
+                        // An explicit infinite endpoint is a sound, vacuous
+                        // enclosure and remains visible as +inf in the actual
+                        // magnitude budget. This finite-overflow guard only
+                        // rejects finite inputs whose arithmetic overflows.
+                        continue;
+                    }
                     let width = hi - lo;
                     let next = verified_width + width;
                     if !width.is_finite() || !next.is_finite() {
@@ -2636,7 +2677,13 @@ impl EvidencePackage {
                 continue;
             }
             match &c.color {
-                Color::Verified { lo, hi } => b.verified_width += hi - lo,
+                Color::Verified { lo, hi } => {
+                    if lo.is_infinite() || hi.is_infinite() {
+                        b.verified_width = f64::INFINITY;
+                    } else {
+                        b.verified_width += hi - lo;
+                    }
+                }
                 Color::Validated { .. } => b.validated_unquantified += 1,
                 Color::Estimated { dispersion, .. } => b.estimated_dispersion += dispersion,
             }
@@ -2646,7 +2693,8 @@ impl EvidencePackage {
     }
 
     /// Emit the package as deterministic, self-describing JSON —
-    /// schema v6: complete color payloads and typed origins (floats as bit-exact hex),
+    /// schema v7: complete color payloads, algebra-versioned receipts, and typed origins
+    /// (floats as bit-exact hex),
     /// provenance, signature, the 64-hex BLAKE3 content root, and the
     /// magnitude budget. [`EvidencePackage::from_json`] round-trips this
     /// semantically and refuses anything else. Serialization is fallible so an
@@ -2874,7 +2922,8 @@ fn push_claim_json(out: &mut String, claim: &Claim) {
         Some(receipt) => {
             let _ = write!(
                 out,
-                ",\"receipt\":{{\"op\":\"{}\",\"parents\":{:?},\"artifact_hash\":\"{}\"}}",
+                ",\"receipt\":{{\"color_algebra_version\":{},\"op\":\"{}\",\"parents\":{:?},\"artifact_hash\":\"{}\"}}",
+                receipt.color_algebra_version,
                 op_name(receipt.op),
                 receipt.parents,
                 json_escape(&receipt.artifact_hash)
@@ -2972,7 +3021,7 @@ fn release_admission_context_hash(
         waiver_registry,
     );
     hash_domain(
-        "fs-package:v6:release-admission-context",
+        "fs-package:v7:release-admission-context",
         provisional_receipt.as_bytes(),
     )
 }
@@ -2987,7 +3036,7 @@ fn verification_receipt_hash(
 ) -> ContentHash {
     fn stable_usize(value: usize) -> [u8; 8] {
         u64::try_from(value)
-            .expect("schema-v6 transport bounds fit u64")
+            .expect("schema-v7 transport bounds fit u64")
             .to_le_bytes()
     }
 
@@ -3005,7 +3054,7 @@ fn verification_receipt_hash(
     }
 
     let mut hasher = fs_blake3::Blake3::new();
-    hasher.update(b"fs-package:v6:verification-receipt\0");
+    hasher.update(b"fs-package:v7:verification-receipt\0");
     push_atom_hash(&mut hasher, package_root.as_bytes());
     push_policy(
         &mut hasher,
@@ -3084,7 +3133,7 @@ fn verification_receipt_hash(
         }
     }
     let inner = hasher.finalize();
-    hash_domain("fs-package:v6:verification-receipt", inner.as_bytes())
+    hash_domain("fs-package:v7:verification-receipt", inner.as_bytes())
 }
 
 /// Combine two child hashes into a domain-separated parent node hash.
@@ -3092,7 +3141,7 @@ fn combine(a: &ContentHash, b: &ContentHash) -> ContentHash {
     let mut buf = [0u8; 64];
     buf[..32].copy_from_slice(a.as_bytes());
     buf[32..].copy_from_slice(b.as_bytes());
-    hash_domain("fs-package:v6:node", &buf)
+    hash_domain("fs-package:v7:node", &buf)
 }
 
 fn push_atom(out: &mut String, value: &str) {
@@ -3123,9 +3172,9 @@ fn json_escape(s: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Strict schema-v6 parser: the package is a PROOF
+// Strict schema-v7 parser: the package is a PROOF
 // ARTIFACT, so parsing fails closed — unknown fields, missing fields,
-// wrong types, bad hex, non-finite certificates, a magnitude budget
+// wrong types, bad hex, NaN/inverted certificates, a magnitude budget
 // that does not re-derive, or an embedded root that does not recompute
 // from the parsed fields are each a structured refusal.
 // ---------------------------------------------------------------------------
@@ -3464,7 +3513,7 @@ fn no_leftovers(fields: &[(String, Jv)], what: &str) -> Result<(), ParseError> {
     if let Some((k, _)) = fields.first() {
         return Err(ParseError {
             what: what.to_string(),
-            why: format!("unknown field {k:?} (schema v6 is closed — fail closed)"),
+            why: format!("unknown field {k:?} (schema v7 is closed — fail closed)"),
         });
     }
     Ok(())
@@ -3684,7 +3733,7 @@ fn verify_declarations(
     Ok(())
 }
 
-/// Parse the embedded content root: exactly 64 hex chars (schema v6).
+/// Parse the embedded content root: exactly 64 hex chars (schema v7).
 /// A 16-hex value is the legacy v3 FNV root and is named in the refusal.
 fn parse_declared_root(fields: &mut Vec<(String, Jv)>) -> Result<ContentHash, ParseError> {
     let raw = match take_field(fields, "merkle_root", "package")? {
@@ -3704,7 +3753,7 @@ fn parse_declared_root(fields: &mut Vec<(String, Jv)>) -> Result<ContentHash, Pa
         return Err(ParseError {
             what: "merkle_root".to_string(),
             why: match raw.len() {
-                16 => "a 16-hex root is the legacy v3 FNV content address; schema v6 requires \
+                16 => "a 16-hex root is the legacy v3 FNV content address; schema v7 requires \
                        the 64-hex lowercase BLAKE3 root"
                     .to_string(),
                 64 => "the 64-char root must use lowercase hexadecimal".to_string(),
@@ -3715,7 +3764,7 @@ fn parse_declared_root(fields: &mut Vec<(String, Jv)>) -> Result<ContentHash, Pa
     ContentHash::from_hex(&raw).ok_or_else(|| ParseError {
         what: "merkle_root".to_string(),
         why: match raw.len() {
-            16 => "a 16-hex root is the legacy v3 FNV content address; schema v6 requires \
+            16 => "a 16-hex root is the legacy v3 FNV content address; schema v7 requires \
                    the 64-hex lowercase BLAKE3 root"
                 .to_string(),
             64 => "the 64-char root contains non-lowercase-hex characters".to_string(),
@@ -3725,7 +3774,7 @@ fn parse_declared_root(fields: &mut Vec<(String, Jv)>) -> Result<ContentHash, Pa
 }
 
 impl EvidencePackage {
-    /// Parse the deterministic schema-v6 FrankenSim JSON profile structurally:
+    /// Parse the deterministic schema-v7 FrankenSim JSON profile structurally:
     /// every field
     /// mapped, unknown fields refused, floats reconstructed bit-exactly,
     /// the magnitude budget re-derived and compared, and the embedded
@@ -3843,8 +3892,8 @@ fn parse_color(value: Jv, what: &str) -> Result<Color, ParseError> {
     let kind = as_str(take_field(&mut fields, "kind", what)?, what)?;
     let color = match kind.as_str() {
         "verified" => {
-            let lo = bits_f64(take_field(&mut fields, "lo_bits", what)?, what, true)?;
-            let hi = bits_f64(take_field(&mut fields, "hi_bits", what)?, what, true)?;
+            let lo = bits_f64(take_field(&mut fields, "lo_bits", what)?, what, false)?;
+            let hi = bits_f64(take_field(&mut fields, "hi_bits", what)?, what, false)?;
             if lo > hi {
                 return Err(ParseError {
                     what: what.to_string(),
@@ -3915,6 +3964,10 @@ fn parse_color(value: Jv, what: &str) -> Result<Color, ParseError> {
         }
     };
     no_leftovers(&fields, "claim color")?;
+    validate_color_payload(&color).map_err(|error| ParseError {
+        what: what.to_string(),
+        why: error.to_string(),
+    })?;
     Ok(color)
 }
 
@@ -3928,6 +3981,23 @@ fn parse_receipt(value: Jv, what: &str) -> Result<Option<CompositionReceipt>, Pa
             }),
         };
     };
+    let color_algebra_version = u32::try_from(decimal_u64(
+        take_field(&mut fields, "color_algebra_version", what)?,
+        "color_algebra_version",
+    )?)
+    .map_err(|_| ParseError {
+        what: what.to_string(),
+        why: "color_algebra_version exceeds u32".to_string(),
+    })?;
+    if color_algebra_version != fs_evidence::COLOR_ALGEBRA_VERSION {
+        return Err(ParseError {
+            what: what.to_string(),
+            why: format!(
+                "unsupported color algebra {color_algebra_version} (this build reads {})",
+                fs_evidence::COLOR_ALGEBRA_VERSION
+            ),
+        });
+    }
     let op_name = as_str(take_field(&mut fields, "op", what)?, what)?;
     let op = op_parse(&op_name).ok_or_else(|| ParseError {
         what: what.to_string(),
@@ -3948,6 +4018,7 @@ fn parse_receipt(value: Jv, what: &str) -> Result<Option<CompositionReceipt>, Pa
     let artifact_hash = as_str(take_field(&mut fields, "artifact_hash", what)?, what)?;
     no_leftovers(&fields, "claim receipt")?;
     Ok(Some(CompositionReceipt {
+        color_algebra_version,
         parents,
         op,
         artifact_hash,
@@ -4014,6 +4085,37 @@ fn parse_anchors(value: Jv, what: &str) -> Result<Vec<AnchorRecord>, ParseError>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn magnitude_budget_never_subtracts_same_signed_infinite_endpoints() {
+        for value in [f64::NEG_INFINITY, f64::INFINITY] {
+            let claim = Claim {
+                id: "vacuous".to_string(),
+                statement: "sound but vacuous enclosure".to_string(),
+                color: Color::Verified {
+                    lo: value,
+                    hi: value,
+                },
+                receipt: None,
+                falsifiers: Vec::new(),
+                anchors: Vec::new(),
+                origin: ClaimOrigin::Derived,
+            };
+            let package = EvidencePackage::new(Provenance::new("commit", "lock")).with_claim(claim);
+            let admission = ClaimAdmission {
+                claim_index: 0,
+                claim_id: "vacuous".to_string(),
+                origin_kind: AdmissionOriginKind::Derived,
+                class: AdmissionClass::Scientific,
+                direct_waiver: None,
+                waiver_parents: Vec::new(),
+            };
+            let budget = package.magnitude_budget_from(&[admission]);
+            assert!(budget.verified_width.is_infinite());
+            assert!(!budget.verified_width.is_nan());
+            assert!(budget.quantified_total.is_infinite());
+        }
+    }
 
     #[test]
     fn anchored_origin_requires_the_exact_attached_content_hash() {

@@ -565,18 +565,142 @@ fn in_memory_and_serialized_magnitude_gates_are_identical() {
 }
 
 #[test]
-fn in_memory_and_serialized_regime_gates_are_identical() {
-    for regime in [
-        ValidityDomain::unconstrained().with(" ", 1.0, 2.0),
-        ValidityDomain::unconstrained().with("Re", 1.0, f64::INFINITY),
+fn release_evidence_shape_excludes_vacuous_verified_enclosures() {
+    let finite = Claim::from_certificate(
+        "finite",
+        "finite interval",
+        -1.0,
+        1.0,
+        "solver",
+        CANONICAL_DATASET_HASH,
+    );
+    assert!(finite.declared_is_release_scientific_evidence_unverified());
+
+    for (id, lo, hi) in [
+        ("whole-line", f64::NEG_INFINITY, f64::INFINITY),
+        ("lower-unbounded", f64::NEG_INFINITY, 1.0),
+        ("upper-unbounded", -1.0, f64::INFINITY),
     ] {
-        let pkg = EvidencePackage::new(prov()).with_claim(validated("v", regime, "dataset"));
-        assert!(matches!(
-            pkg.verify(),
-            Err(PackageError::InvalidValidatedRegime { .. })
-        ));
-        assert_serialized_refuses(&pkg);
+        let vacuous = Claim::from_certificate(
+            id,
+            "sound but vacuous enclosure",
+            lo,
+            hi,
+            "solver",
+            CANONICAL_DATASET_HASH,
+        );
+        assert!(vacuous.declared_requires_release_falsifier_unverified());
+        assert!(!vacuous.declared_is_release_scientific_evidence_unverified());
     }
+
+    let anchored = Claim::anchored(
+        "validated",
+        "experimentally anchored",
+        ValidityDomain::unconstrained().with("Re", 1.0, 2.0),
+        "dataset",
+        CANONICAL_DATASET_HASH,
+    );
+    assert!(anchored.declared_is_release_scientific_evidence_unverified());
+    assert!(
+        !Claim::estimated("estimate", "estimate", "model", 1.0)
+            .declared_is_release_scientific_evidence_unverified()
+    );
+}
+
+#[test]
+fn derived_vacuous_verified_enclosure_remains_sound_and_explicitly_unbounded() {
+    use fs_crosswalk::PackageConcept;
+
+    let provenance = prov();
+    let left_color = Color::Verified {
+        lo: f64::MAX,
+        hi: f64::MAX,
+    };
+    let right_color = left_color.clone();
+    let left = source_claim(
+        &provenance,
+        0,
+        "left-max",
+        "finite exact upper extreme",
+        f64::MAX,
+        f64::MAX,
+    );
+    let right = source_claim(
+        &provenance,
+        1,
+        "right-max",
+        "second finite exact upper extreme",
+        f64::MAX,
+        f64::MAX,
+    );
+    let derived_color = fs_evidence::compose(&left_color, &right_color, IntervalOp::Add);
+    assert!(matches!(
+        derived_color,
+        Color::Verified { lo, hi } if lo.is_finite() && hi == f64::INFINITY
+    ));
+    let package = EvidencePackage::new(provenance)
+        .with_claim(left)
+        .with_claim(right)
+        .with_claim(Claim::derived(
+            "overflow-enclosure",
+            "addition is rigorously enclosed but quantitatively vacuous",
+            derived_color,
+            vec![0, 1],
+            IntervalOp::Add,
+            CANONICAL_DATASET_HASH,
+        ));
+    verify_package(&package).expect("ordered infinite derived enclosure is structurally sound");
+    let presence = fs_package::package_presence_with(&package, &source_capabilities());
+    let certificate = presence
+        .iter()
+        .find(|row| row.concept() == PackageConcept::Certificate)
+        .expect("certificate concept is reported");
+    assert!(certificate.present());
+    assert!(
+        certificate.why().contains("2 admitted"),
+        "the two finite source certificates count; the vacuous derived enclosure does not: {}",
+        certificate.why()
+    );
+    assert!(
+        package
+            .magnitude_budget_with(&source_capabilities())
+            .expect("verified package has a magnitude budget")
+            .verified_width
+            .is_infinite(),
+        "vacuous enclosure remains explicit rather than becoming finite certificate coverage"
+    );
+    assert_eq!(
+        EvidencePackage::from_json(&package_json(&package)).expect("package parses"),
+        package
+    );
+}
+
+#[test]
+fn in_memory_and_serialized_regime_gates_are_identical() {
+    let malformed_axis = EvidencePackage::new(prov()).with_claim(validated(
+        "v",
+        ValidityDomain::unconstrained().with(" ", 1.0, 2.0),
+        "dataset",
+    ));
+    assert!(matches!(
+        malformed_axis.verify(),
+        Err(PackageError::InvalidIdentity {
+            field: "color.regime.axis",
+            ..
+        })
+    ));
+    assert_serialized_refuses(&malformed_axis);
+
+    let non_finite_bound = EvidencePackage::new(prov()).with_claim(validated(
+        "v",
+        ValidityDomain::unconstrained().with("Re", 1.0, f64::INFINITY),
+        "dataset",
+    ));
+    assert!(matches!(
+        non_finite_bound.verify(),
+        Err(PackageError::InvalidValidatedRegime { .. })
+    ));
+    assert_serialized_refuses(&non_finite_bound);
 
     let ordered = EvidencePackage::new(prov()).with_claim(validated(
         "ordered",
@@ -809,8 +933,8 @@ fn the_merkle_root_is_deterministic_and_tamper_evident() {
     assert_eq!(package_root(&build()), package_root(&build()));
     assert_eq!(
         package_root(&build()).to_hex(),
-        "1a917f759d541819f863a02787aceb0408cacae9bf55c8a50230d8ca9db89465",
-        "schema-v6 package-root fixture (re-pinned for the v6 domain separation)"
+        "b24099cc18450348797e0b8df231bdb2f6b70d4d780de53eb8324fc62d76cdf7",
+        "schema-v7 package-root fixture (re-pinned for algebra-versioned domains)"
     );
     // tampering with a claim changes the root.
     let tampered = EvidencePackage::new(prov())
@@ -1193,7 +1317,7 @@ fn json_is_deterministic_and_carries_the_root() {
     assert_eq!(j, package_json(&pkg));
     assert!(j.starts_with('{') && j.ends_with('}'));
     assert!(j.contains(&package_root(&pkg).to_hex()));
-    assert!(j.contains("\"format_version\":6"), "schema v6");
+    assert!(j.contains("\"format_version\":7"), "schema v7");
     // v3 carries COMPLETE payloads, not just rank labels.
     assert!(j.contains("\"lo_bits\":") && j.contains("\"dataset\":"));
 }
@@ -1210,9 +1334,9 @@ fn schema_v6_magnitude_shape_is_closed_and_waiver_aware() {
         .expect_err("a v5-shaped magnitude budget must not parse as v6");
     assert!(error.why.contains("waived_unquantified"), "{error}");
 
-    let stale_v5 = missing_v6_field.replacen("\"format_version\":6", "\"format_version\":5", 1);
-    let error = EvidencePackage::from_json(&stale_v5).expect_err("schema v5 is not v6");
-    assert!(error.why.contains("unsupported version 5"), "{error}");
+    let stale_v6 = missing_v6_field.replacen("\"format_version\":7", "\"format_version\":6", 1);
+    let error = EvidencePackage::from_json(&stale_v6).expect_err("schema v6 is not v7");
+    assert!(error.why.contains("unsupported version 6"), "{error}");
 }
 
 /// qmao.6.1 — the schema-v3 round trip and its fail-closed walls: a
@@ -1250,7 +1374,7 @@ fn v3_round_trip_and_fail_closed_walls() {
     let back = EvidencePackage::from_json(&json).expect("canonical JSON parses");
     assert_eq!(back, pkg, "semantic round trip");
     assert_eq!(package_json(&back), json, "textual round trip");
-    let leading_zero = json.replacen("\"format_version\":6", "\"format_version\":06", 1);
+    let leading_zero = json.replacen("\"format_version\":7", "\"format_version\":07", 1);
     assert!(
         EvidencePackage::from_json(&leading_zero).is_err(),
         "non-JSON leading-zero integer refuses"
@@ -1269,13 +1393,14 @@ fn v3_round_trip_and_fail_closed_walls() {
         EvidencePackage::from_json(&widened).is_err(),
         "payload tamper refused"
     );
-    // Non-finite certificate bits: fail closed.
+    // NaN certificate bits: fail closed. Ordered infinities are sound but
+    // vacuous and are covered by the dedicated unbounded-enclosure test.
     let nan = json.replace(
         &format!("{:016x}", 0.1875f64.to_bits()),
         &format!("{:016x}", f64::NAN.to_bits()),
     );
     let err = EvidencePackage::from_json(&nan).expect_err("NaN certificate refused");
-    assert!(err.why.contains("non-finite"), "{err}");
+    assert!(err.why.contains("bounds contain NaN"), "{err}");
     // Unknown fields: closed schema.
     let unknown = json.replacen(
         "{\"format_version\"",
@@ -1518,6 +1643,20 @@ fn v3_receipts_falsifiers_anchors() {
     // Round trip: the v3 fields survive the strict parser bit-for-bit.
     let back = EvidencePackage::from_json(&package_json(&good)).expect("v3 parses");
     assert_eq!(back, good);
+    let stale_algebra = package_json(&good).replacen(
+        &format!(
+            "\"color_algebra_version\":{}",
+            fs_evidence::COLOR_ALGEBRA_VERSION
+        ),
+        "\"color_algebra_version\":1",
+        1,
+    );
+    let stale_error = EvidencePackage::from_json(&stale_algebra)
+        .expect_err("a receipt from an older color algebra must fail closed");
+    assert!(
+        stale_error.why.contains("unsupported color algebra 1"),
+        "{stale_error}"
+    );
     assert_eq!(
         back.declared_claims_unverified()[2].declared_falsifiers_unverified()[0].attempts,
         512
@@ -1861,7 +2000,7 @@ fn v4_blake3_root_refuses_legacy_transports() {
     assert!(json.contains(&format!("\"merkle_root\":\"{root}\"")));
 
     // A v3 transport is refused BY VERSION before any field is read.
-    let v4 = json.replacen("\"format_version\":6", "\"format_version\":4", 1);
+    let v4 = json.replacen("\"format_version\":7", "\"format_version\":4", 1);
     let err = EvidencePackage::from_json(&v4).expect_err("v4 refused");
     assert!(err.why.contains("unsupported version 4"), "{err}");
 
@@ -2725,6 +2864,28 @@ fn origin_transport_and_machine_identity_boundaries_fail_closed() {
     ));
     assert!(matches!(
         placeholder_producer.verify(),
+        Err(PackageError::InvalidOrigin { .. })
+    ));
+
+    let rerooted_derived_estimator = EvidencePackage::new(prov()).with_claim(Claim::estimated(
+        "derived-source",
+        "derived identities require a composition receipt",
+        "derived:composed:deadbeef",
+        f64::INFINITY,
+    ));
+    assert!(matches!(
+        rerooted_derived_estimator.verify(),
+        Err(PackageError::InvalidOrigin { .. })
+    ));
+    let rerooted_derived_anchor = EvidencePackage::new(prov()).with_claim(Claim::anchored(
+        "derived-anchor",
+        "derived anchor identities require lineage",
+        good_regime(),
+        "derived:datasets:deadbeef",
+        CANONICAL_DATASET_HASH,
+    ));
+    assert!(matches!(
+        rerooted_derived_anchor.verify(),
         Err(PackageError::InvalidOrigin { .. })
     ));
 }

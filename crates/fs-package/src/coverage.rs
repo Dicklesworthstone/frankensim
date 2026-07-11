@@ -204,7 +204,11 @@ fn certificate_presence(pkg: &EvidencePackage, report: &PackageReport) -> (bool,
         .iter()
         .enumerate()
         .filter(|(index, claim)| {
-            is_scientific(report, *index) && claim.color.rank() == ColorRank::Verified
+            is_scientific(report, *index)
+                && matches!(
+                    &claim.color,
+                    Color::Verified { lo, hi } if lo.is_finite() && hi.is_finite()
+                )
         })
         .count();
     (
@@ -212,7 +216,7 @@ fn certificate_presence(pkg: &EvidencePackage, report: &PackageReport) -> (bool,
         if count > 0 {
             format!("{count} admitted scientific Verified certificate claim(s)")
         } else {
-            "no admitted scientific Verified certificate claim".to_string()
+            "no admitted scientific informative Verified certificate claim; vacuous infinite enclosures do not establish certificate coverage".to_string()
         },
     )
 }
@@ -422,7 +426,7 @@ fn presence_report_hash(report: &PackagePresenceReport) -> crate::ContentHash {
         atom(&mut canonical, &[u8::from(row.present)]);
         atom(&mut canonical, row.why.as_bytes());
     }
-    fs_blake3::hash_domain("fs-package:v6:presence-decision", &canonical)
+    fs_blake3::hash_domain("fs-package:v7:presence-decision", &canonical)
 }
 
 /// Derive coverage rows from an already verified package without invoking any
@@ -618,7 +622,7 @@ fn coverage_report_hash(report: &PackageCoverageReport) -> crate::ContentHash {
         canonical.push_str(why);
         canonical.push('|');
     }
-    fs_blake3::hash_domain("fs-package:v6:coverage-decision", canonical.as_bytes())
+    fs_blake3::hash_domain("fs-package:v7:coverage-decision", canonical.as_bytes())
 }
 
 /// Derive standards coverage from an already verified package without

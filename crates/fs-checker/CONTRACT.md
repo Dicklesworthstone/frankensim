@@ -10,8 +10,9 @@ cone contains `fs-evidence`, dependency-free `fs-blake3`, and the static
 `fs-crosswalk` vocabulary. A HARD
 distribution constraint (Proposal 12): NO solver stack, geometry kernel, or
 license gate anywhere in the graph. By construction the checker cannot run a
-solve. It carries `CHECKER_PROTOCOL_VERSION = 4` for the schema-v6 admission
-receipt ABI (distributed independently). `CHECKER_SUPPORTED_PACKAGE_FORMAT = 6` is an
+solve. It carries `CHECKER_PROTOCOL_VERSION = 5` for the algebra-versioned
+admission-receipt ABI
+(distributed independently). `CHECKER_SUPPORTED_PACKAGE_FORMAT = 7` is an
 explicit protocol literal with a compile-time assertion against
 `fs_package::FORMAT_VERSION`, so a package schema bump cannot silently retain
 an incompatible checker ABI.
@@ -22,14 +23,15 @@ an incompatible checker ABI.
   external origin capabilities denied.
 - `check_against_root(&EvidencePackage, expected_root) -> CheckReport` — also
   confirm the content address matches (tamper / substitution detection), with
-  external origins still denied.
+  external origins still denied. A bounded-root refusal or mismatch terminates
+  before any injected verifier can observe the package.
 - `check_with_capabilities(package, expected_root, signature_verifier,
   capabilities)` — the in-memory entry point for explicitly authenticated
   source certificates, anchoring datasets, falsifier artifacts, derivation
   artifacts, waivers, and signatures. The separate signature argument selects
   the exact checker-purpose context and overrides a signature capability in the
   set.
-- `check_json(...)` and `check_json_with_capabilities(...)` — strict schema-v6
+- `check_json(...)` and `check_json_with_capabilities(...)` — strict schema-v7
   transport counterparts. Plain `check_json` denies external origins; the
   capability-aware form authenticates them after structural parsing.
 - `check_release_preflight(&EvidencePackage, expected_root, verifier)` — a
@@ -43,7 +45,11 @@ an incompatible checker ABI.
 - `check_for_release_with_capabilities(...)` — release admission with explicit
   source-certificate, anchoring-dataset, falsifier, derivation, and waiver
   capabilities in addition to the mandatory signature verifier. It requires at
-  least one scientifically admitted Verified or Validated claim.
+  least one scientifically admitted finite `Verified` interval or authenticated
+  `Validated` claim. Ordered infinite `Verified` enclosures remain transportable
+  no-claim artifacts but cannot satisfy this minimum. After proving the expected
+  content root, the gate performs bounded structural inspection and refuses
+  conclusive declaration-shape blockers before any external capability runs.
 - `check_json_release_preflight(...)` — the non-admitting transport preflight.
 - `check_json_for_release_with_capabilities(...)` — the strict-parser release
   entry point with explicit origin capabilities.
@@ -76,8 +82,11 @@ an incompatible checker ABI.
    typed `VerificationCapabilities`. Plain integrity entry points use
    `deny_all()`.
 3. The content address through bounded `try_merkle_root`, optionally checked
-   against an expected value. A transport refusal uses a zero refusal sentinel
-   in the sealed report and never hashes or clones rejected oversized bytes.
+   against an expected value before any source, anchor, falsifier, derivation,
+   waiver, or signature capability dispatch. A transport refusal uses a zero
+   refusal sentinel in the sealed report and never hashes or clones rejected
+   oversized bytes. A mismatched bounded package reports its actual and expected
+   roots but carries no receipt or admitted breakdown.
 4. Signature validity only through an injected `SignatureVerifier` over a typed
    purpose. Integrity uses `PackageRootAttestation`; release uses
    `ReleaseApproval { checker_protocol, expected_root, admission_context }`.
@@ -87,9 +96,15 @@ an incompatible checker ABI.
    signer identity or role is inferred.
 5. A policy-bound verification receipt: package root, policy fingerprints,
    waiver day, signature status, and ordered origin/admission/waiver decisions.
-6. For explicit release admission only: non-vacuity, at least one scientific
-   Verified/Validated claim, purpose-bound approval, authenticated
-   per-certificate falsifiers, and exact authenticated per-Validated anchors.
+6. For explicit release admission only: at least one scientific finite
+   `Verified` interval or authenticated `Validated` claim, purpose-bound
+   approval, authenticated per-certificate falsifiers, and exact authenticated
+   per-Validated anchors. Empty, unsigned, all-waiver-dependent, unpaired
+   certificate-class, and unanchored `Validated` declarations are conclusive
+   structural blockers: they return a zeroed breakdown, no receipt, and at most
+   raw `Unverified` signature bytes without invoking a verifier. Structurally
+   complete candidates reuse the already-computed content root for authority
+   verification rather than hashing the bounded package twice.
 
 ## Invariants
 
@@ -116,16 +131,21 @@ an incompatible checker ABI.
   It is optional outside release admission and mandatory at release admission.
 - An empty package verifies vacuously and renders a "no claims" pie.
 - Release preflight never passes, even if every current blocker is absent. An
-  empty package and all-estimated or all-waived packages never pass actual
-  release admission; ordinary integrity, preflight, and admission are distinct
-  hash-bound policies.
+  empty package and all-estimated, all-waived, or solely vacuous-Verified
+  packages never pass actual release admission; ordinary integrity, preflight,
+  and admission are distinct hash-bound policies.
 - Verified and Validated claims never pass release admission without
   authenticated, content-addressed falsifier artifacts. Validated claims
   additionally require an exact matching canonical dataset anchor authenticated
   against the complete typed subject.
-- Oversized in-memory builders are refused before root/signature canonicalization
-  and before per-claim release diagnostics. Rejected raw signature bytes are not
-  retained in a refusal report.
+- Oversized in-memory builders and expected-root mismatches are refused before
+  every external verifier callback and before per-claim release diagnostics.
+  Rejected oversized signature bytes are not retained; a bounded mismatched
+  package may retain its detached bytes only as explicitly `Unverified`.
+- Actual release admission dispatches no source, anchor, falsifier, derivation,
+  waiver, or signature callback when a structurally inspectable declaration has
+  a conclusive release-shape blocker. Malformed declarations still traverse the
+  structural verifier for a precise refusal, which itself precedes callbacks.
 - Release preflight distinguishes capability refusal from structural refusal:
   only `EvidencePackage::is_structurally_inspectable_unverified()` inputs are
   scanned for independent declaration-level blockers when no receipt exists.
@@ -160,7 +180,7 @@ None.
 
 ## Conformance tests
 
-`tests/checker.rs` plus crate unit tests (23 cases, Proposal 12): clean pass with no findings;
+`tests/checker.rs` plus crate unit tests (32 integration cases, Proposal 12): clean pass with no findings;
 incomplete-validated-claim failure; content-address (Merkle) tamper detection;
 including provenance tamper; malformed falsifier refusal with fail-closed pie;
 signature-presence and verifier-capability reporting; deterministic budget-pie
@@ -174,8 +194,12 @@ breakdown, source verifiers bind the exact typed claim, and waiver verifiers
 bind the complete package-owned authorization message. The battery also locks
 all-estimated/all-waived release refusal, purpose-bound release signatures,
 scientific-policy and waiver-clock replay refusal, structurally non-admitting
-preflight policy, checker decision-hash mutation coverage, and oversized-builder
-diagnostic bounds.
+preflight policy, checker decision-hash mutation coverage, oversized-builder
+diagnostic bounds, and zero-callback expected-root refusal across every injected
+capability for both in-memory and strict-JSON integrity/release paths. A
+six-case release-shape battery proves callback-free refusal for empty, unsigned,
+all-waived, unpaired, and unanchored inputs, then proves a complete mixed-origin
+candidate dispatches every capability with identical in-memory and JSON reports.
 
 ## Independent re-verification (bead qmao.6.1)
 
@@ -203,7 +227,9 @@ solver and the checker cannot run a solve by construction.
   fetch source certificates or anchoring datasets. Injected verifiers may
   retrieve and independently validate addressed artifacts; the checker only
   supplies exact typed subjects and fails closed without those capabilities.
-- Schema v6 seals every claim behind a typed origin and emits a policy-bound
+- Schema v7 additionally binds the color-algebra version into derived receipts;
+  the checker refuses any stale algebra before re-running composition. Schema v6
+  sealed every claim behind a typed origin and emitted a policy-bound
   admission receipt. Content addressing proves
   package integrity, not scientific truth. Successful source verification
   means only that the caller's configured verifier accepted the exact artifact

@@ -7,14 +7,16 @@
 use fs_checker::{
     AnchoredSourceRequest, AnchoredSourceVerifier, CHECKER_PROTOCOL_VERSION, ColorBreakdown,
     ContentHash, DerivationRequest, DerivationVerifier, FalsifierRequest, FalsifierVerifier,
-    SignaturePurpose, SignatureRequest, SignatureStatus, SourceCertificateRequest,
-    SourceCertificateVerifier, Verdict, VerificationCapabilities, VerificationDecision,
-    WaiverGrant, WaiverVerifier, check, check_against_root, check_for_release_with_capabilities,
-    check_json, check_json_for_release_with_capabilities, check_json_release_preflight,
-    check_json_with_capabilities, check_release_preflight, check_with_capabilities,
+    SignaturePurpose, SignatureRequest, SignatureStatus, SignatureVerifier,
+    SourceCertificateRequest, SourceCertificateVerifier, Verdict, VerificationCapabilities,
+    VerificationDecision, WaiverGrant, WaiverVerifier, check, check_against_root,
+    check_for_release_with_capabilities, check_json, check_json_for_release_with_capabilities,
+    check_json_release_preflight, check_json_with_capabilities, check_release_preflight,
+    check_with_capabilities,
 };
 use fs_evidence::{Color, IntervalOp, ValidityDomain};
 use fs_package::{Claim, EvidencePackage, FalsifierRecord, Provenance};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 const ARTIFACT_HASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -323,10 +325,11 @@ impl fs_checker::SignatureVerifier for ReleaseVerifier {
             && matches!(
                 request.purpose,
                 SignaturePurpose::ReleaseApproval {
-                    checker_protocol: 4,
+                    checker_protocol,
                     expected_root,
                     admission_context,
                 } if expected_root == request.package_root
+                    && checker_protocol == CHECKER_PROTOCOL_VERSION
                     && admission_context != ContentHash([0; 32])
             );
         let policy = policy_fingerprint("release-verifier");
@@ -427,6 +430,326 @@ fn waived_fixture() -> EvidencePackage {
         .expect("install exact fixture authenticator")
 }
 
+#[derive(Default)]
+struct UnexpectedCallbacks {
+    source: AtomicUsize,
+    anchor: AtomicUsize,
+    falsifier: AtomicUsize,
+    derivation: AtomicUsize,
+    waiver: AtomicUsize,
+    signature: AtomicUsize,
+}
+
+impl UnexpectedCallbacks {
+    fn accept(counter: &AtomicUsize) -> VerificationDecision {
+        counter.fetch_add(1, Ordering::SeqCst);
+        VerificationDecision::accept(ContentHash([0xa5; 32]))
+    }
+
+    fn assert_never_called(&self) {
+        for (name, counter) in [
+            ("source", &self.source),
+            ("anchor", &self.anchor),
+            ("falsifier", &self.falsifier),
+            ("derivation", &self.derivation),
+            ("waiver", &self.waiver),
+            ("signature", &self.signature),
+        ] {
+            assert_eq!(
+                counter.load(Ordering::SeqCst),
+                0,
+                "{name} callback ran before expected-root admission"
+            );
+        }
+    }
+
+    fn counts(&self) -> [usize; 6] {
+        [
+            self.source.load(Ordering::SeqCst),
+            self.anchor.load(Ordering::SeqCst),
+            self.falsifier.load(Ordering::SeqCst),
+            self.derivation.load(Ordering::SeqCst),
+            self.waiver.load(Ordering::SeqCst),
+            self.signature.load(Ordering::SeqCst),
+        ]
+    }
+}
+
+impl SourceCertificateVerifier for UnexpectedCallbacks {
+    fn verify(&self, _request: &SourceCertificateRequest<'_>) -> VerificationDecision {
+        Self::accept(&self.source)
+    }
+}
+
+impl AnchoredSourceVerifier for UnexpectedCallbacks {
+    fn verify(&self, _request: &AnchoredSourceRequest<'_>) -> VerificationDecision {
+        Self::accept(&self.anchor)
+    }
+}
+
+impl FalsifierVerifier for UnexpectedCallbacks {
+    fn verify(&self, _request: &FalsifierRequest<'_>) -> VerificationDecision {
+        Self::accept(&self.falsifier)
+    }
+}
+
+impl DerivationVerifier for UnexpectedCallbacks {
+    fn verify(&self, _request: &DerivationRequest<'_>) -> VerificationDecision {
+        Self::accept(&self.derivation)
+    }
+}
+
+impl WaiverVerifier for UnexpectedCallbacks {
+    fn verify(&self, _mac: &str, _message: &[u8]) -> VerificationDecision {
+        Self::accept(&self.waiver)
+    }
+}
+
+impl SignatureVerifier for UnexpectedCallbacks {
+    fn verify(&self, _request: &SignatureRequest<'_>) -> VerificationDecision {
+        Self::accept(&self.signature)
+    }
+}
+
+fn all_unexpected_capabilities(callbacks: &UnexpectedCallbacks) -> VerificationCapabilities<'_> {
+    VerificationCapabilities::deny_all()
+        .with_source_certificates(callbacks)
+        .with_anchored_sources(callbacks)
+        .with_falsifiers(callbacks)
+        .with_derivations(callbacks)
+        .with_waivers(callbacks, 100)
+        .with_signatures(callbacks)
+}
+
+fn mixed_origin_signed_fixture() -> EvidencePackage {
+    let estimate = estimated("estimate");
+    let derived_color = fs_evidence::compose(
+        estimate.declared_color_unverified(),
+        estimate.declared_color_unverified(),
+        IntervalOp::Hull,
+    );
+    EvidencePackage::new(prov())
+        .with_claim(verified("certificate").with_falsifier(passed_falsifier()))
+        .with_claim(validated("anchor", good_regime()).with_falsifier(passed_falsifier()))
+        .with_claim(estimate)
+        .with_claim(
+            Claim::derived(
+                "derived",
+                "derived estimate",
+                derived_color,
+                vec![2, 2],
+                IntervalOp::Hull,
+                ARTIFACT_HASH,
+            )
+            .with_falsifier(passed_falsifier()),
+        )
+        .with_claim(
+            Claim::waived(
+                "waived",
+                "approved exception",
+                Color::Verified { lo: -1.0, hi: 1.0 },
+                WaiverGrant {
+                    waiver_id: "wrong-root-waiver".to_string(),
+                    expiry_day: 200,
+                    mac: "wrong-root-mac".to_string(),
+                },
+            )
+            .with_falsifier(passed_falsifier()),
+        )
+        .signed("wrong-root-signature")
+}
+
+fn assert_root_mismatch_refusal(
+    report: &fs_checker::CheckReport,
+    actual: ContentHash,
+    expected: ContentHash,
+) {
+    assert_eq!(report.verdict(), Verdict::Fail);
+    assert_eq!(report.merkle_root(), actual);
+    assert_eq!(report.expected_root(), Some(expected));
+    assert_eq!(report.breakdown(), &ColorBreakdown::default());
+    assert!(report.receipt().is_none());
+    assert!(report.validate_decision_hash());
+    assert!(report.findings().iter().any(|finding| {
+        finding.kind == "content-address-mismatch"
+            && finding.detail.contains(&actual.to_string())
+            && finding.detail.contains(&expected.to_string())
+    }));
+}
+
+fn assert_release_shape_refuses_without_callbacks(package: &EvidencePackage, kind: &str) {
+    let root = package_root(package);
+    let callbacks = UnexpectedCallbacks::default();
+    let capabilities = all_unexpected_capabilities(&callbacks);
+
+    let in_memory = check_for_release_with_capabilities(package, root, &callbacks, &capabilities);
+    callbacks.assert_never_called();
+    assert_eq!(in_memory.verdict(), Verdict::Fail);
+    assert_eq!(in_memory.merkle_root(), root);
+    assert_eq!(in_memory.expected_root(), Some(root));
+    assert_eq!(in_memory.breakdown(), &ColorBreakdown::default());
+    assert!(in_memory.receipt().is_none());
+    assert!(in_memory.validate_decision_hash());
+    assert!(!matches!(
+        in_memory.signature(),
+        SignatureStatus::Authenticated(_)
+    ));
+    assert!(
+        in_memory
+            .findings()
+            .iter()
+            .any(|finding| finding.kind == kind),
+        "missing {kind} finding: {:?}",
+        in_memory.findings()
+    );
+
+    let json = check_json_for_release_with_capabilities(
+        &package_json(package),
+        root,
+        &callbacks,
+        &capabilities,
+    );
+    callbacks.assert_never_called();
+    assert_eq!(json, in_memory);
+}
+
+#[test]
+fn expected_root_mismatch_precedes_all_integrity_callbacks_in_memory_and_json() {
+    let package = mixed_origin_signed_fixture();
+    let actual = package_root(&package);
+    let expected = flip(actual);
+    let callbacks = UnexpectedCallbacks::default();
+    let capabilities = all_unexpected_capabilities(&callbacks);
+
+    let in_memory =
+        check_with_capabilities(&package, Some(expected), Some(&callbacks), &capabilities);
+    callbacks.assert_never_called();
+    assert_root_mismatch_refusal(&in_memory, actual, expected);
+    assert!(matches!(
+        in_memory.signature(),
+        SignatureStatus::Unverified(_)
+    ));
+
+    let json = check_json_with_capabilities(
+        &package_json(&package),
+        Some(expected),
+        Some(&callbacks),
+        &capabilities,
+    );
+    callbacks.assert_never_called();
+    assert_eq!(json, in_memory);
+}
+
+#[test]
+fn expected_root_mismatch_precedes_all_release_callbacks_in_memory_and_json() {
+    let package = mixed_origin_signed_fixture();
+    let actual = package_root(&package);
+    let expected = flip(actual);
+    let callbacks = UnexpectedCallbacks::default();
+    let capabilities = all_unexpected_capabilities(&callbacks);
+
+    let in_memory =
+        check_for_release_with_capabilities(&package, expected, &callbacks, &capabilities);
+    callbacks.assert_never_called();
+    assert_root_mismatch_refusal(&in_memory, actual, expected);
+    assert!(!in_memory.release_admitted());
+
+    let json = check_json_for_release_with_capabilities(
+        &package_json(&package),
+        expected,
+        &callbacks,
+        &capabilities,
+    );
+    callbacks.assert_never_called();
+    assert_eq!(json, in_memory);
+}
+
+#[test]
+fn release_empty_package_refuses_before_all_callbacks_in_memory_and_json() {
+    let package = EvidencePackage::new(prov()).signed("shape-test-signature");
+    assert_release_shape_refuses_without_callbacks(&package, "release-empty-package");
+}
+
+#[test]
+fn release_unsigned_package_refuses_before_all_callbacks_in_memory_and_json() {
+    let package = EvidencePackage::new(prov())
+        .with_claim(verified("unsigned").with_falsifier(passed_falsifier()));
+    assert_release_shape_refuses_without_callbacks(&package, "release-signature-required");
+}
+
+#[test]
+fn release_all_waived_package_refuses_before_all_callbacks_in_memory_and_json() {
+    let package = EvidencePackage::new(prov())
+        .with_claim(
+            Claim::waived(
+                "waived-only",
+                "authorized exception",
+                Color::Verified { lo: -1.0, hi: 1.0 },
+                WaiverGrant {
+                    waiver_id: "shape-waiver".to_string(),
+                    expiry_day: 200,
+                    mac: "shape-waiver-mac".to_string(),
+                },
+            )
+            .with_falsifier(passed_falsifier()),
+        )
+        .signed("shape-test-signature");
+    assert_release_shape_refuses_without_callbacks(
+        &package,
+        "release-scientific-evidence-required",
+    );
+}
+
+#[test]
+fn release_missing_falsifier_refuses_before_all_callbacks_in_memory_and_json() {
+    let package = EvidencePackage::new(prov())
+        .with_claim(verified("missing-falsifier"))
+        .signed("shape-test-signature");
+    assert_release_shape_refuses_without_callbacks(&package, "release-falsifier-required");
+}
+
+#[test]
+fn release_missing_anchor_refuses_before_all_callbacks_in_memory_and_json() {
+    let parent = validated("anchored-parent", good_regime()).with_falsifier(passed_falsifier());
+    let derived_color = parent.declared_color_unverified().clone();
+    let package = EvidencePackage::new(prov())
+        .with_claim(parent)
+        .with_claim(
+            Claim::derived(
+                "missing-anchor",
+                "derived validation",
+                derived_color,
+                vec![0],
+                IntervalOp::Hull,
+                ARTIFACT_HASH,
+            )
+            .with_falsifier(passed_falsifier()),
+        )
+        .signed("shape-test-signature");
+    assert_release_shape_refuses_without_callbacks(&package, "release-anchor-required");
+}
+
+#[test]
+fn release_complete_shape_dispatches_every_callback_in_memory_and_json() {
+    let package = mixed_origin_signed_fixture();
+    let root = package_root(&package);
+    let callbacks = UnexpectedCallbacks::default();
+    let capabilities = all_unexpected_capabilities(&callbacks);
+
+    let in_memory = check_for_release_with_capabilities(&package, root, &callbacks, &capabilities);
+    assert!(in_memory.release_admitted(), "{:?}", in_memory.findings());
+    assert_eq!(callbacks.counts(), [1, 1, 4, 1, 1, 1]);
+
+    let json = check_json_for_release_with_capabilities(
+        &package_json(&package),
+        root,
+        &callbacks,
+        &capabilities,
+    );
+    assert_eq!(json, in_memory);
+    assert_eq!(callbacks.counts(), [2, 2, 8, 2, 2, 2]);
+}
+
 #[test]
 fn source_certificates_are_capability_gated_across_every_entry_path() {
     let unsigned = EvidencePackage::new(prov())
@@ -512,15 +835,16 @@ fn waivers_are_capability_gated_across_every_entry_path() {
         assert_eq!(report.breakdown().verified, 0);
         assert_eq!(report.breakdown().waived, 1);
     }
-    for report in [
-        check_for_release_with_capabilities(&signed, root, &ReleaseVerifier, &capabilities),
-        check_json_for_release_with_capabilities(
-            &package_json(&signed),
-            root,
-            &ReleaseVerifier,
-            &capabilities,
-        ),
-    ] {
+    let release =
+        check_for_release_with_capabilities(&signed, root, &ReleaseVerifier, &capabilities);
+    let release_json = check_json_for_release_with_capabilities(
+        &package_json(&signed),
+        root,
+        &ReleaseVerifier,
+        &capabilities,
+    );
+    assert_eq!(release_json, release);
+    for report in [&release, &release_json] {
         assert!(
             !report.passed(),
             "all-waived packages cannot be release evidence"
@@ -533,11 +857,9 @@ fn waivers_are_capability_gated_across_every_entry_path() {
             "missing scientific-evidence refusal: {:?}",
             report.findings()
         );
-        assert!(matches!(
-            report.signature(),
-            SignatureStatus::Authenticated(authenticated)
-                if matches!(authenticated.purpose(), SignaturePurpose::ReleaseApproval { .. })
-        ));
+        assert_eq!(report.breakdown(), &ColorBreakdown::default());
+        assert!(report.receipt().is_none());
+        assert!(matches!(report.signature(), SignatureStatus::Unverified(_)));
     }
 
     let expired = VerificationCapabilities::deny_all()
@@ -608,19 +930,100 @@ fn release_gate_rejects_all_estimated_even_with_valid_signature_and_root() {
         &ReleaseVerifier,
         &VerificationCapabilities::deny_all(),
     );
+    let json = check_json_for_release_with_capabilities(
+        &package_json(&package),
+        root,
+        &ReleaseVerifier,
+        &VerificationCapabilities::deny_all(),
+    );
+    assert_eq!(json, report);
     assert!(!report.passed());
     assert!(report.validate_decision_hash());
-    assert!(matches!(
-        report.signature(),
-        SignatureStatus::Authenticated(authenticated)
-            if matches!(authenticated.purpose(), SignaturePurpose::ReleaseApproval { .. })
-    ));
+    assert_eq!(report.breakdown(), &ColorBreakdown::default());
+    assert!(report.receipt().is_none());
+    assert!(matches!(report.signature(), SignatureStatus::Unverified(_)));
     assert!(
         report
             .findings()
             .iter()
             .any(|finding| finding.kind == "release-scientific-evidence-required")
     );
+}
+
+#[test]
+fn release_gate_rejects_sole_vacuous_verified_enclosure_under_valid_policies() {
+    struct VacuousSourceVerifier;
+
+    impl SourceCertificateVerifier for VacuousSourceVerifier {
+        fn verify(&self, request: &SourceCertificateRequest<'_>) -> VerificationDecision {
+            let accepted = request.package_provenance == &prov()
+                && request.claim_index == 0
+                && request.claim_id == "vacuous"
+                && request.statement == "sound but vacuous enclosure"
+                && request.lo == f64::NEG_INFINITY
+                && request.hi == f64::INFINITY
+                && request.producer == "test-solver/cert"
+                && request.certificate_hash.to_hex() == ARTIFACT_HASH;
+            let policy = ContentHash([0x7a; 32]);
+            if accepted {
+                VerificationDecision::accept(policy)
+            } else {
+                VerificationDecision::reject(policy)
+            }
+        }
+    }
+
+    let source_verifier = VacuousSourceVerifier;
+    let capabilities = VerificationCapabilities::deny_all()
+        .with_source_certificates(&source_verifier)
+        .with_falsifiers(&EXACT_FALSIFIER_VERIFIER);
+    let unsigned = EvidencePackage::new(prov()).with_claim(
+        Claim::from_certificate(
+            "vacuous",
+            "sound but vacuous enclosure",
+            f64::NEG_INFINITY,
+            f64::INFINITY,
+            "test-solver/cert",
+            ARTIFACT_HASH,
+        )
+        .with_falsifier(passed_falsifier()),
+    );
+
+    let integrity = check_with_capabilities(&unsigned, None, None, &capabilities);
+    assert!(
+        integrity.passed(),
+        "vacuous enclosure remains an honest integrity artifact: {:?}",
+        integrity.findings()
+    );
+    assert_eq!(integrity.breakdown().verified, 1);
+
+    let package = signed_for_release(unsigned, &capabilities);
+    let root = package_root(&package);
+    let report =
+        check_for_release_with_capabilities(&package, root, &ReleaseVerifier, &capabilities);
+    let json = check_json_for_release_with_capabilities(
+        &package_json(&package),
+        root,
+        &ReleaseVerifier,
+        &capabilities,
+    );
+    assert_eq!(json, report);
+    for report in [&report, &json] {
+        assert!(!report.passed());
+        assert!(!report.release_admitted());
+        assert!(report.validate_decision_hash());
+        assert_eq!(report.breakdown(), &ColorBreakdown::default());
+        assert!(report.receipt().is_none());
+        assert!(matches!(report.signature(), SignatureStatus::Unverified(_)));
+        assert!(
+            report
+                .findings()
+                .iter()
+                .any(|finding| finding.kind == "release-scientific-evidence-required"),
+            "vacuous evidence must be named as the release blocker: {:?}",
+            report.findings()
+        );
+    }
 }
 
 #[test]
@@ -640,7 +1043,8 @@ fn release_gate_refuses_package_root_attestation_substitution() {
         }
     }
 
-    let unsigned = EvidencePackage::new(prov()).with_claim(estimated("integrity-only"));
+    let unsigned = EvidencePackage::new(prov())
+        .with_claim(verified("integrity-only").with_falsifier(passed_falsifier()));
     let root = package_root(&unsigned);
     let attestation_subject =
         fs_checker::signature_subject_hash(root, SignaturePurpose::PackageRootAttestation);
@@ -649,7 +1053,9 @@ fn release_gate_refuses_package_root_attestation_substitution() {
         &package,
         root,
         &RootAttestationVerifier,
-        &VerificationCapabilities::deny_all(),
+        &source_capabilities(&ExactSourceVerifier {
+            claim_id: "integrity-only",
+        }),
     );
     assert_capability_refusal(&report, "signature-invalid");
 }
@@ -686,12 +1092,33 @@ fn release_approval_refuses_policy_or_waiver_clock_replay() {
     );
     assert_capability_refusal(&replayed_source, "signature-invalid");
 
-    let waiver_package = waived_fixture();
+    let pending_waiver = EvidencePackage::new(prov())
+        .with_claim(verified("source").with_falsifier(passed_falsifier()))
+        .with_claim(
+            Claim::waived(
+                "waived",
+                "authorized interval",
+                Color::Verified { lo: -1.0, hi: 1.0 },
+                WaiverGrant {
+                    waiver_id: "checker-waiver-2026".to_string(),
+                    expiry_day: 300,
+                    mac: "pending-authenticator".to_string(),
+                },
+            )
+            .with_falsifier(passed_falsifier()),
+        );
+    let waiver_message = pending_waiver
+        .waiver_message(1)
+        .expect("combined waiver target");
+    let waiver_package = pending_waiver
+        .with_waiver_mac(1, fixture_waiver_mac(&waiver_message))
+        .expect("install combined fixture authenticator");
     let waiver_verifier = ExactWaiverVerifier;
-    let day_250 = VerificationCapabilities::deny_all()
+    let waiver_source = ExactSourceVerifier { claim_id: "source" };
+    let day_250 = source_capabilities(&waiver_source)
         .with_waivers(&waiver_verifier, 250)
         .with_falsifiers(&EXACT_FALSIFIER_VERIFIER);
-    let day_249 = VerificationCapabilities::deny_all()
+    let day_249 = source_capabilities(&waiver_source)
         .with_waivers(&waiver_verifier, 249)
         .with_falsifiers(&EXACT_FALSIFIER_VERIFIER);
     let signed_waiver = signed_for_release(waiver_package.clone(), &day_250);
@@ -975,8 +1402,8 @@ fn release_gate_rejects_derived_validated_anchor_substitution() {
 
 #[test]
 fn the_checker_advertises_its_protocol_version() {
-    assert_eq!(CHECKER_PROTOCOL_VERSION, 4);
-    assert_eq!(fs_checker::CHECKER_SUPPORTED_PACKAGE_FORMAT, 6);
+    assert_eq!(CHECKER_PROTOCOL_VERSION, 5);
+    assert_eq!(fs_checker::CHECKER_SUPPORTED_PACKAGE_FORMAT, 7);
     assert_eq!(
         fs_checker::CHECKER_SUPPORTED_PACKAGE_FORMAT,
         fs_package::FORMAT_VERSION

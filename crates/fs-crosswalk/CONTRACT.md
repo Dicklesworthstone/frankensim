@@ -9,7 +9,7 @@ Layer UTIL (pure data + audit; no dependencies). It owns risk R9
 (standards-body latency): every field is mapped or explicitly flagged, so the
 package doubles as internal-QA / B2B diligence collateral regardless of
 standards-body pace. `CROSSWALK_VERSION = 4` identifies this vocabulary and
-`SUPPORTED_PACKAGE_FORMAT = 6` makes package compatibility explicit without a
+`SUPPORTED_PACKAGE_FORMAT = 7` makes package compatibility explicit without a
 dependency cycle.
 
 ## Public types and semantics
@@ -66,10 +66,11 @@ no-counterpart rows exist, verified-color does map);
 per-concept (×4) and per-standard (×12) slices; representative validation,
 claim-origin, and waiver decisions; unique labels; deterministic JSON.
 
-## Vocabulary v4: schema-v6 authenticated concepts
+## Vocabulary v4: authenticated concepts on schema v7
 
-Package format 6 makes scientific claim origin and waiver authorization
-independently observable proof states. `ClaimOrigin` maps to
+Package format 6 introduced scientific claim origin and waiver authorization as
+independently observable proof states; current package format 7 retains those
+semantics. `ClaimOrigin` maps to
 credibility-evidence traceability in ASME V&V 40 and analysis-data traceability
 in FAA/EASA CbA; Estimated declarations, administrative waivers, and
 waiver-dependent descendants do not establish this concept. V&V 10/20 have

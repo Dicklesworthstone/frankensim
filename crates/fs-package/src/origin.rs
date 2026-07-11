@@ -39,6 +39,7 @@
 //!   replayed onto a different claim fails.
 
 use core::fmt;
+use fs_evidence::color_leaf_identity_reason;
 
 use crate::{ContentHash, Provenance};
 
@@ -138,7 +139,7 @@ pub struct NoWaiverVerifier;
 impl WaiverVerifier for NoWaiverVerifier {
     fn verify(&self, _mac: &str, _message: &[u8]) -> VerificationDecision {
         VerificationDecision::reject(fs_blake3::hash_domain(
-            "fs-package:v6:policy",
+            "fs-package:v7:policy",
             b"deny-all-waivers",
         ))
     }
@@ -184,7 +185,7 @@ pub struct NoSourceCertificateVerifier;
 impl SourceCertificateVerifier for NoSourceCertificateVerifier {
     fn verify(&self, _request: &SourceCertificateRequest<'_>) -> VerificationDecision {
         VerificationDecision::reject(fs_blake3::hash_domain(
-            "fs-package:v6:policy",
+            "fs-package:v7:policy",
             b"deny-all-source-certificates",
         ))
     }
@@ -226,7 +227,7 @@ pub struct NoAnchoredSourceVerifier;
 impl AnchoredSourceVerifier for NoAnchoredSourceVerifier {
     fn verify(&self, _request: &AnchoredSourceRequest<'_>) -> VerificationDecision {
         VerificationDecision::reject(fs_blake3::hash_domain(
-            "fs-package:v6:policy",
+            "fs-package:v7:policy",
             b"deny-all-anchored-sources",
         ))
     }
@@ -316,7 +317,7 @@ pub struct NoDerivationVerifier;
 impl DerivationVerifier for NoDerivationVerifier {
     fn verify(&self, _request: &DerivationRequest<'_>) -> VerificationDecision {
         VerificationDecision::reject(fs_blake3::hash_domain(
-            "fs-package:v6:policy",
+            "fs-package:v7:policy",
             b"deny-all-derivations",
         ))
     }
@@ -329,7 +330,7 @@ pub struct NoFalsifierVerifier;
 impl FalsifierVerifier for NoFalsifierVerifier {
     fn verify(&self, _request: &FalsifierRequest<'_>) -> VerificationDecision {
         VerificationDecision::reject(fs_blake3::hash_domain(
-            "fs-package:v6:policy",
+            "fs-package:v7:policy",
             b"deny-all-falsifiers",
         ))
     }
@@ -413,7 +414,7 @@ pub fn signature_subject_hash(package_root: ContentHash, purpose: SignaturePurpo
             subject.extend_from_slice(admission_context.as_bytes());
         }
     }
-    fs_blake3::hash_domain("fs-package:v6:signature-subject", &subject)
+    fs_blake3::hash_domain("fs-package:v7:signature-subject", &subject)
 }
 
 /// The signature-verification capability. `fs-package` deliberately ships no
@@ -431,7 +432,7 @@ pub struct NoSignatureVerifier;
 impl SignatureVerifier for NoSignatureVerifier {
     fn verify(&self, _request: &SignatureRequest<'_>) -> VerificationDecision {
         VerificationDecision::reject(fs_blake3::hash_domain(
-            "fs-package:v6:policy",
+            "fs-package:v7:policy",
             b"deny-all-signatures",
         ))
     }
@@ -741,7 +742,7 @@ pub fn validate_origin_shape(
             dataset_id,
             content_hash,
         } => {
-            if let Some(reason) = identity_reason(dataset_id) {
+            if let Some(reason) = color_leaf_identity_reason(dataset_id) {
                 return refuse(format!(
                     "anchored-source origin has an invalid dataset id ({reason})"
                 ));
@@ -754,7 +755,7 @@ pub fn validate_origin_shape(
             Ok(())
         }
         ClaimOrigin::EstimatedSource { estimator } => {
-            if let Some(reason) = identity_reason(estimator) {
+            if let Some(reason) = color_leaf_identity_reason(estimator) {
                 return refuse(format!(
                     "estimated-source origin has an invalid estimator ({reason})"
                 ));

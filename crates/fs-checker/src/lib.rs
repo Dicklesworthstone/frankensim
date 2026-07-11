@@ -36,14 +36,14 @@ pub use fs_package::{
 };
 
 /// The checker's own protocol version (it is distributed independently).
-pub const CHECKER_PROTOCOL_VERSION: u32 = 4;
+pub const CHECKER_PROTOCOL_VERSION: u32 = 5;
 
 /// The one evidence-package format understood by this checker protocol.
 ///
 /// Keep this as an explicit protocol literal rather than deriving it from
 /// `fs-package`: a package-format change must make this crate fail to compile
 /// until the independently distributed checker ABI is reviewed and versioned.
-pub const CHECKER_SUPPORTED_PACKAGE_FORMAT: u32 = 6;
+pub const CHECKER_SUPPORTED_PACKAGE_FORMAT: u32 = 7;
 const _: () = assert!(CHECKER_SUPPORTED_PACKAGE_FORMAT == fs_package::FORMAT_VERSION);
 
 /// The checker's overall verdict.
@@ -62,7 +62,7 @@ pub enum CheckPolicy {
     Integrity,
     /// Non-admitting release readiness inventory.
     ReleasePreflight,
-    /// Strong release admission under protocol v4.
+    /// Strong release admission under protocol v5.
     ReleaseAdmission,
 }
 
@@ -306,7 +306,7 @@ pub fn check_against_root(pkg: &EvidencePackage, expected_root: ContentHash) -> 
 }
 
 /// The full third-party entry point (bead qmao.6.1): parse the
-/// serialized package under the deterministic schema-v6 JSON profile (the parser itself
+/// serialized package under the deterministic schema-v7 JSON profile (the parser itself
 /// recomputes the content root and re-derives the magnitude budget
 /// from the parsed claims), then re-verify semantics, optionally
 /// against an expected root and a signature capability. A package that
@@ -398,14 +398,23 @@ pub fn check_release_preflight(
     expected_root: ContentHash,
     verifier: &dyn SignatureVerifier,
 ) -> CheckReport {
-    let mut report = build_report(
-        pkg,
-        Some(expected_root),
-        Some(verifier),
-        &VerificationCapabilities::deny_all(),
-        CheckPolicy::ReleasePreflight,
-    );
-    append_release_findings(pkg, &mut report);
+    let merkle_root =
+        preflight_content_address(pkg, Some(expected_root), CheckPolicy::ReleasePreflight);
+    let mut report = match merkle_root {
+        Ok(root) => {
+            let mut report = build_report_from_preflight(
+                pkg,
+                Some(expected_root),
+                Some(verifier),
+                &VerificationCapabilities::deny_all(),
+                CheckPolicy::ReleasePreflight,
+                root,
+            );
+            append_release_findings(pkg, &mut report);
+            report
+        }
+        Err(report) => *report,
+    };
     report.findings.push(Finding {
         kind: "release-preflight-only",
         detail: "preflight inventories blockers but never grants release admission; invoke the \
@@ -419,7 +428,8 @@ pub fn check_release_preflight(
 
 /// Actual release-admission gate with explicit source, anchor, falsifier,
 /// derivation, waiver, and signature capabilities. It requires a non-empty
-/// package, at least one scientifically admitted Verified or Validated claim,
+/// package, at least one scientifically admitted finite Verified or
+/// authenticated Validated claim,
 /// purpose-bound release signature, authenticated falsifiers for every
 /// certificate-class claim, and an exact authenticated anchor for every
 /// Validated claim.
@@ -430,12 +440,21 @@ pub fn check_for_release_with_capabilities(
     verifier: &dyn SignatureVerifier,
     capabilities: &VerificationCapabilities<'_>,
 ) -> CheckReport {
-    let mut report = build_report(
+    let merkle_root =
+        match preflight_content_address(pkg, Some(expected_root), CheckPolicy::ReleaseAdmission) {
+            Ok(root) => root,
+            Err(report) => return *report,
+        };
+    if let Some(report) = release_shape_refusal(pkg, expected_root, merkle_root) {
+        return report;
+    }
+    let mut report = build_report_from_preflight(
         pkg,
         Some(expected_root),
         Some(verifier),
         capabilities,
         CheckPolicy::ReleaseAdmission,
+        merkle_root,
     );
     append_release_findings(pkg, &mut report);
     report.decision_hash = checker_report_hash(&report);
@@ -497,20 +516,141 @@ fn parse_refusal(
     report
 }
 
-fn append_release_findings(pkg: &EvidencePackage, report: &mut CheckReport) {
-    // Complete structural inspection is the bounded precondition for every raw
-    // declaration scan. Capability refusals deliberately carry no receipt, but
-    // preflight must still inventory independent release blockers. Oversized or
-    // malformed builders remain single-refusal inputs and are never amplified.
-    if report.receipt.is_none() && !pkg.is_structurally_inspectable_unverified() {
-        report.verdict = Verdict::Fail;
-        return;
+fn scientific_evidence_required_finding() -> Finding {
+    Finding {
+        kind: "release-scientific-evidence-required",
+        detail: "release admission requires at least one scientifically admitted finite \
+                 Verified interval or authenticated Validated claim; vacuous infinite \
+                 enclosures, preflight capability refusals, all-estimated packages, and \
+                 all-waived packages remain publication/no-claim artifacts"
+            .to_string(),
     }
+}
+
+fn release_signature_required_finding() -> Finding {
+    Finding {
+        kind: "release-signature-required",
+        detail: "release admission requires a policy-authenticated detached release-approval \
+                 signature bound to this checker protocol, expected content root, and exact \
+                 scientific admission context"
+            .to_string(),
+    }
+}
+
+fn release_shape_findings(pkg: &EvidencePackage) -> Option<Vec<Finding>> {
+    if !pkg.is_structurally_inspectable_unverified() {
+        return None;
+    }
+    let claims = pkg.declared_claims_unverified();
+    let mut waiver_dependent = Vec::with_capacity(claims.len());
+    for claim in claims {
+        let depends = match claim.declared_origin_unverified() {
+            fs_package::ClaimOrigin::AuthenticatedWaiver(_) => true,
+            fs_package::ClaimOrigin::Derived => {
+                claim.declared_receipt_unverified().is_none_or(|receipt| {
+                    receipt
+                        .parents
+                        .iter()
+                        .any(|parent| waiver_dependent.get(*parent).copied().unwrap_or(true))
+                })
+            }
+            fs_package::ClaimOrigin::SourceCertificate { .. }
+            | fs_package::ClaimOrigin::AnchoredSource { .. }
+            | fs_package::ClaimOrigin::EstimatedSource { .. } => false,
+        };
+        waiver_dependent.push(depends);
+    }
+
+    let mut findings = Vec::new();
     if pkg.declared_claims_unverified().is_empty() {
-        report.findings.push(Finding {
+        findings.push(Finding {
             kind: "release-empty-package",
             detail: "release admission requires at least one claim".to_string(),
         });
+    }
+    if !claims.iter().zip(&waiver_dependent).any(|(claim, waived)| {
+        !waived && claim.declared_is_release_scientific_evidence_unverified()
+    }) {
+        findings.push(scientific_evidence_required_finding());
+    }
+    if pkg.signature.is_none() {
+        findings.push(release_signature_required_finding());
+    }
+    for claim in claims {
+        if claim.declared_requires_release_falsifier_unverified()
+            && claim.declared_falsifiers_unverified().is_empty()
+        {
+            findings.push(Finding {
+                kind: "release-falsifier-required",
+                detail: format!(
+                    "certificate-class claim '{}' cannot ship without an attached falsifier \
+                     record",
+                    claim.id()
+                ),
+            });
+        }
+        if claim.declared_requires_validated_anchor_unverified()
+            && !claim.has_declared_matching_validated_anchor_unverified()
+        {
+            findings.push(Finding {
+                kind: "release-anchor-required",
+                detail: format!(
+                    "validated claim '{}' cannot ship without a canonical content-hash anchor \
+                     for its named dataset",
+                    claim.id()
+                ),
+            });
+        }
+    }
+    Some(findings)
+}
+
+fn push_unique_finding(report: &mut CheckReport, finding: Finding) {
+    if !report
+        .findings
+        .iter()
+        .any(|existing| existing.kind == finding.kind && existing.detail == finding.detail)
+    {
+        report.findings.push(finding);
+    }
+}
+
+fn unverified_signature_status(pkg: &EvidencePackage) -> SignatureStatus {
+    pkg.signature
+        .as_ref()
+        .map_or(SignatureStatus::Unsigned, |signature| {
+            SignatureStatus::Unverified(signature.clone())
+        })
+}
+
+fn release_shape_refusal(
+    pkg: &EvidencePackage,
+    expected_root: ContentHash,
+    merkle_root: ContentHash,
+) -> Option<CheckReport> {
+    let findings = release_shape_findings(pkg)?;
+    if findings.is_empty() {
+        return None;
+    }
+    Some(callback_free_refusal(
+        CheckPolicy::ReleaseAdmission,
+        Some(expected_root),
+        merkle_root,
+        unverified_signature_status(pkg),
+        findings,
+    ))
+}
+
+fn append_release_findings(pkg: &EvidencePackage, report: &mut CheckReport) {
+    // Complete structural inspection is the bounded precondition for every raw
+    // declaration scan. Oversized or malformed builders remain single-refusal
+    // inputs and are never amplified.
+    let Some(shape_findings) = release_shape_findings(pkg) else {
+        report.verdict = Verdict::Fail;
+        return;
+    };
+    for finding in shape_findings {
+        push_unique_finding(report, finding);
     }
     let has_scientific_certificate = report.receipt.as_ref().is_some_and(|receipt| {
         pkg.declared_claims_unverified()
@@ -518,17 +658,11 @@ fn append_release_findings(pkg: &EvidencePackage, report: &mut CheckReport) {
             .zip(receipt.admissions())
             .any(|(claim, admission)| {
                 admission.class() == AdmissionClass::Scientific
-                    && claim.declared_requires_release_falsifier_unverified()
+                    && claim.declared_is_release_scientific_evidence_unverified()
             })
     });
     if !has_scientific_certificate {
-        report.findings.push(Finding {
-            kind: "release-scientific-evidence-required",
-            detail: "release admission requires at least one scientifically admitted Verified or \
-                     Validated claim; a preflight capability refusal admits none, while \
-                     all-estimated and all-waived packages remain publication/no-claim artifacts"
-                .to_string(),
-        });
+        push_unique_finding(report, scientific_evidence_required_finding());
     }
     let receipt_admission_context = report
         .receipt
@@ -546,43 +680,66 @@ fn append_release_findings(pkg: &EvidencePackage, report: &mut CheckReport) {
                 && Some(admission_context) == receipt_admission_context)
     );
     if !release_signature {
-        report.findings.push(Finding {
-            kind: "release-signature-required",
-            detail: "release admission requires a policy-authenticated detached release-approval \
-                     signature bound to this checker protocol, expected content root, and exact \
-                     scientific admission context"
-                .to_string(),
-        });
-    }
-    for claim in pkg.declared_claims_unverified() {
-        if claim.declared_requires_release_falsifier_unverified()
-            && claim.declared_falsifiers_unverified().is_empty()
-        {
-            report.findings.push(Finding {
-                kind: "release-falsifier-required",
-                detail: format!(
-                    "certificate-class claim '{}' cannot ship without an attached falsifier \
-                     record",
-                    claim.id()
-                ),
-            });
-        }
-        if claim.declared_requires_validated_anchor_unverified()
-            && !claim.has_declared_matching_validated_anchor_unverified()
-        {
-            report.findings.push(Finding {
-                kind: "release-anchor-required",
-                detail: format!(
-                    "validated claim '{}' cannot ship without a canonical content-hash anchor \
-                     for its named dataset",
-                    claim.id()
-                ),
-            });
-        }
+        push_unique_finding(report, release_signature_required_finding());
     }
     if !report.findings.is_empty() {
         report.verdict = Verdict::Fail;
     }
+}
+
+fn callback_free_refusal(
+    policy: CheckPolicy,
+    expected_root: Option<ContentHash>,
+    merkle_root: ContentHash,
+    signature: SignatureStatus,
+    findings: Vec<Finding>,
+) -> CheckReport {
+    let mut report = CheckReport {
+        verdict: Verdict::Fail,
+        merkle_root,
+        breakdown: ColorBreakdown::default(),
+        signature,
+        receipt: None,
+        findings,
+        policy,
+        expected_root,
+        decision_hash: ContentHash([0; 32]),
+    };
+    report.decision_hash = checker_report_hash(&report);
+    report
+}
+
+fn preflight_content_address(
+    pkg: &EvidencePackage,
+    expected_root: Option<ContentHash>,
+    policy: CheckPolicy,
+) -> Result<ContentHash, Box<CheckReport>> {
+    let merkle_root = pkg.try_merkle_root().map_err(|error| {
+        Box::new(callback_free_refusal(
+            policy,
+            expected_root,
+            ContentHash([0; 32]),
+            SignatureStatus::Refused {
+                reason: "package transport envelope refused",
+            },
+            vec![describe(&error)],
+        ))
+    })?;
+    if let Some(expected) = expected_root
+        && merkle_root != expected
+    {
+        return Err(Box::new(callback_free_refusal(
+            policy,
+            expected_root,
+            merkle_root,
+            unverified_signature_status(pkg),
+            vec![Finding {
+                kind: "content-address-mismatch",
+                detail: format!("recomputed root {merkle_root} != expected {expected}"),
+            }],
+        )));
+    }
+    Ok(merkle_root)
 }
 
 /// The full report builder. Missing origin capabilities fail closed only for
@@ -594,6 +751,33 @@ fn build_report(
     signature_verifier: Option<&dyn SignatureVerifier>,
     capabilities: &VerificationCapabilities<'_>,
     policy: CheckPolicy,
+) -> CheckReport {
+    // The caller-supplied root is a trust boundary, not merely another
+    // finding. Reject an oversized or substituted package before dispatching
+    // any injected capability: those callbacks may fetch attacker-selected
+    // artifact addresses or perform other trusted side effects.
+    let merkle_root = match preflight_content_address(pkg, expected_root, policy) {
+        Ok(root) => root,
+        Err(report) => return *report,
+    };
+
+    build_report_from_preflight(
+        pkg,
+        expected_root,
+        signature_verifier,
+        capabilities,
+        policy,
+        merkle_root,
+    )
+}
+
+fn build_report_from_preflight(
+    pkg: &EvidencePackage,
+    expected_root: Option<ContentHash>,
+    signature_verifier: Option<&dyn SignatureVerifier>,
+    capabilities: &VerificationCapabilities<'_>,
+    policy: CheckPolicy,
+    merkle_root: ContentHash,
 ) -> CheckReport {
     let mut findings = Vec::new();
 
@@ -637,21 +821,7 @@ fn build_report(
         }
     };
 
-    // 2. content address (recomputed here, independently).
-    let bounded_root = pkg.try_merkle_root();
-    let root_refused = bounded_root.is_err();
-    let merkle_root = bounded_root.unwrap_or(ContentHash([0; 32]));
-    if !root_refused
-        && let Some(expected) = expected_root
-        && merkle_root != expected
-    {
-        findings.push(Finding {
-            kind: "content-address-mismatch",
-            detail: format!("recomputed root {merkle_root} != expected {expected}"),
-        });
-    }
-
-    // 3. the magnitude budget must reconcile with its parts (the pie
+    // 2. the magnitude budget must reconcile with its parts (the pie
     // is over error magnitudes, not claim counts — and it must not be
     // able to drift from the claims it summarizes).
     if let Ok(report) = &verified {
@@ -665,13 +835,10 @@ fn build_report(
         }
     }
 
-    // 4. The package verifier owns signature authentication so coverage and
+    // 3. The package verifier owns signature authentication so coverage and
     // checker reports consume the exact same decision.
     let signature = match &verified {
         Ok(report) => report.receipt().signature().clone(),
-        Err(_) if root_refused => SignatureStatus::Refused {
-            reason: "package transport envelope refused",
-        },
         Err(_) => match &pkg.signature {
             Some(signature) => SignatureStatus::Unverified(signature.clone()),
             None => SignatureStatus::Unsigned,
@@ -770,6 +937,17 @@ fn describe(e: &PackageError) -> Finding {
         PackageError::UnsupportedFormat { found } => Finding {
             kind: "unsupported-format",
             detail: format!("package format version {found} is not supported"),
+        },
+        PackageError::UnsupportedColorAlgebra {
+            claim,
+            found,
+            supported,
+        } => Finding {
+            kind: "unsupported-color-algebra",
+            detail: format!(
+                "claim '{claim}' uses color algebra version {found}; this checker supports \
+                 version {supported}"
+            ),
         },
         PackageError::ReceiptMismatch { claim } => Finding {
             kind: "receipt-mismatch",

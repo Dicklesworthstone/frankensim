@@ -65,6 +65,10 @@ Injected verifier implementations are caller-owned synchronous capabilities.
 - `ColorBreakdown { verified, validated, estimated, waived }` counts admitted
   scientific claims in the first three buckets. A direct waiver and its entire
   derived descendant cone appear only in `waived`.
+- `Claim::declared_is_release_scientific_evidence_unverified()` distinguishes
+  finite informative `Verified` intervals and `Validated` claims from vacuous
+  infinite enclosures. It is a raw shape predicate only; release authority still
+  requires the package receipt and checker gate.
 - `PackageReport` and `VerificationReceipt` have sealed fields and read-only
   accessors. The receipt binds the package root, every invoked policy
   fingerprint, waiver day, signature status, and ordered `ClaimAdmission`
@@ -97,7 +101,8 @@ Injected verifier implementations are caller-owned synchronous capabilities.
   `Validated` claim must have a non-empty regime
   (`regime.bounds()` non-empty) whose axis names are non-blank and whose bounds
   are finite and ordered, plus a non-blank anchoring `dataset`. A `Verified`
-  claim must carry a finite `[lo <= hi]` interval. An `Estimated` claim needs a
+  claim must carry an ordered, non-NaN `[lo <= hi]` interval. Ordered infinite
+  endpoints are a sound but vacuous enclosure, not a decision-grade bound. An `Estimated` claim needs a
   non-blank estimator identity and a non-negative, non-NaN dispersion.
   Positive infinity is preserved as the lower-layer algebra's explicit
   no-quantitative-spread-claim sentinel; it is distinct from finite subtotal
@@ -162,8 +167,9 @@ Injected verifier implementations are caller-owned synchronous capabilities.
   verification and suppress every concept when a gated origin is
   unauthenticated; `_with` variants accept explicit capabilities. Color rank,
   certificate, regime, falsifier, and dataset coverage use only scientifically
-  admitted claims. `Certificate` requires admitted `Verified` evidence (an
-  all-estimated package has none). `ClaimOrigin` excludes Estimated declarations,
+  admitted claims. `Certificate` requires admitted `Verified` evidence with
+  finite endpoints (an all-estimated or solely vacuous-Verified package has
+  none). `ClaimOrigin` excludes Estimated declarations,
   waived claims, and waiver-dependent descendants. `Signature` requires
   release-purpose authentication but does not imply checker release admission.
   `WaiverAuthorization` remains an explicit administrative concept.
@@ -226,7 +232,16 @@ receipt identity; compact waiver-taint DAGs; sealed verified-package binding;
 and origin transport/identity limits. The compile-fail battery proves that an
 authenticated signature payload cannot be constructed downstream.
 
-## Schema v6: admission receipts and non-launderable waivers
+## Schema v7: algebra-versioned derivations
+
+Format 7 rotates current `fs-package:v7:*` domains and adds the exact
+`fs-evidence` color-algebra version to every composition receipt. Both strict
+transport parsing and in-memory verification refuse a stale algebra before
+re-deriving a color. This prevents a receipt created under older identity,
+rounding, or composition rules from being interpreted as current evidence.
+Formats 6 and earlier are refused by the one-version contract.
+
+## Schema v6: admission receipts and non-launderable waivers (historical)
 
 Format 6 uses `fs-package:v6:*` domains and a closed JSON magnitude shape with
 `waived_unquantified`. Source certificates, anchoring datasets, falsifier
@@ -237,7 +252,7 @@ with a topological admission decision for every claim. Direct waiver identities
 are interned once and descendants retain immediate tainted-parent edges. Direct
 waivers and every one-parent, multi-hop, or multi-parent descendant remain
 waiver-dependent and cannot enter scientific color/magnitude/coverage summaries.
-Formats 5 and earlier are refused by the one-version contract.
+Format 6 and earlier are no longer accepted by current readers.
 
 ## Schema v5: sealed origins and explicit capabilities (historical)
 
@@ -265,9 +280,11 @@ root width; checker protocol v2 is the matching standalone ABI.
 ## Schema v3: receipts, falsifiers, anchors (bead xfxq)
 
 Claims optionally carry a COMPOSITION RECEIPT (parent claim indices +
-the ledger op): `verify` re-runs `fs_evidence::compose` over the
-parents in order and requires exact IEEE-754 bit identity (including signed
-zero) — a claim whose
+the ledger op + the exact color-algebra version): `verify` re-runs
+`fs_evidence::compose` over the parents in order and requires exact IEEE-754
+bit identity (including signed zero). Readers and in-memory verification refuse
+receipts from any other algebra version before interpreting their derived
+identity namespace. A claim whose
 color cannot be re-derived is `ReceiptMismatch`, so laundering a
 Verified from Estimated parents is caught SEMANTICALLY, not just by
 the content address; parents must point strictly backwards
@@ -290,14 +307,18 @@ changes.
 Fallible `to_json` emits the COMPLETE color payloads (floats as bit-exact hex
 bits), provenance, signature, magnitude budget, and the content root;
 `from_json` is a STRICT parser — unknown fields, missing fields, wrong
-types, duplicate keys, bad hex, non-finite certificates, inverted
+types, duplicate keys, bad hex, NaN certificates, inverted
 intervals, negative dispersions, and unknown color kinds each refuse
 with a structured `ParseError`. The parser re-derives the magnitude
 budget from the parsed claims and RECOMPUTES the content root from the
 parsed fields: a package whose embedded root does not recompute is
 tampered in transit and never loads. This is an integrity check, not the
-schema-v6 external-origin admission named above. Decode-encode is both
-semantically and textually stable (tested). The magnitude budget
+schema-v7 external-origin admission (inherited from v6) named above.
+Decode-encode is both
+semantically and textually stable (tested). Ordered infinite Verified endpoints
+are accepted as rigorous but vacuous enclosures; coverage and magnitude
+accounting treat them as unbounded, never as a finite decision-grade result.
+The magnitude budget
 attributes ERROR MAGNITUDES (verified interval widths, estimated
 dispersions) and counts validated claims as unquantified regional
 trust — never numerified. JSON number tokens are retained as decimal text until
