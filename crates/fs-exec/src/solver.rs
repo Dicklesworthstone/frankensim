@@ -152,13 +152,25 @@ pub mod codec {
         /// # Errors
         /// [`CodecError`] on truncation (including an implausible length).
         pub fn get_f64_vec(&mut self) -> Result<Vec<f64>, CodecError> {
-            let len = self.get_u64()? as usize;
+            let encoded_len = self.get_u64()?;
             let remaining = self.bytes.len() - self.at;
-            if remaining < len.saturating_mul(8) {
+            let len = usize::try_from(encoded_len).map_err(|_| CodecError {
+                at: self.at,
+                what: "f64 slice length exceeds platform usize",
+                needed: usize::MAX,
+                remaining,
+            })?;
+            let needed = len.checked_mul(8).ok_or(CodecError {
+                at: self.at,
+                what: "f64 slice byte length overflow",
+                needed: usize::MAX,
+                remaining,
+            })?;
+            if remaining < needed {
                 return Err(CodecError {
                     at: self.at,
                     what: "f64 slice body",
-                    needed: len.saturating_mul(8),
+                    needed,
                     remaining,
                 });
             }
@@ -740,6 +752,16 @@ mod tests {
             .get_u64()
             .expect_err("truncated");
         assert!(err.to_string().contains("truncated"), "{err}");
+        let impossible_len = u64::MAX.to_le_bytes();
+        let err = codec::Dec::new(&impossible_len)
+            .get_f64_vec()
+            .expect_err("wire lengths must fit usize and their byte extent");
+        assert!(err.what.starts_with("f64 slice"), "{err}");
+        #[cfg(target_pointer_width = "32")]
+        assert_eq!(
+            err.what, "f64 slice length exceeds platform usize",
+            "32-bit readers must not truncate the u64 wire length"
+        );
         // Trailing garbage is rejected by from_bytes.
         let (_, s0) = jacobi();
         let mut noisy = s0.to_bytes();

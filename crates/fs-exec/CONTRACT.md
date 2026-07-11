@@ -223,6 +223,9 @@ unknown envelope versions, stale schemas, bit flips, truncations, and
 appended bytes are each a distinct structured `EnvelopeError`, never a
 plausible-but-wrong decode. Schema incompatibility is an explicit
 refusal (write a migration when an old version must stay readable).
+Length-prefixed vector decoders also refuse wire lengths that do not fit the
+reader's `usize` or whose byte extent overflows, before allocation; a 64-bit
+length can never truncate into a plausible 32-bit element count.
 `seal(provenance)`/`unseal` carry the run/ledger identity;
 `to_bytes`/`from_bytes` are the unattributed convenience over the same
 envelope, and `fork` round-trips enveloped bytes. Pause → seal →
