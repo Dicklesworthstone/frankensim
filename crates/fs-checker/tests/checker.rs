@@ -6,7 +6,7 @@
 
 use fs_checker::{
     CHECKER_PROTOCOL_VERSION, ColorBreakdown, ContentHash, SignatureStatus, Verdict, check,
-    check_against_root,
+    check_against_root, check_for_release, check_json_for_release,
 };
 use fs_evidence::{Color, ValidityDomain};
 use fs_package::{Claim, EvidencePackage, FalsifierRecord, Provenance};
@@ -94,6 +94,30 @@ fn a_semantically_empty_falsifier_record_fails_the_check() {
 }
 
 #[test]
+fn placeholder_claim_and_falsifier_text_fail_the_check() {
+    let placeholder_statement = EvidencePackage::new(prov()).with_claim(Claim::new(
+        "claim",
+        "TODO",
+        Color::Verified { lo: 0.0, hi: 1.0 },
+    ));
+    let report = check(&placeholder_statement);
+    assert!(!report.passed());
+    assert_eq!(report.findings[0].kind, "invalid-claim-statement");
+
+    let placeholder_falsifier = EvidencePackage::new(prov()).with_claim(
+        verified("claim").with_falsifier(FalsifierRecord {
+            name: "independent-probe".to_string(),
+            attempts: 1,
+            refuted: false,
+            detail: "placeholder".to_string(),
+        }),
+    );
+    let report = check(&placeholder_falsifier);
+    assert!(!report.passed());
+    assert_eq!(report.findings[0].kind, "invalid-falsifier-record");
+}
+
+#[test]
 fn content_address_mismatch_is_caught() {
     let pkg = EvidencePackage::new(prov()).with_claim(verified("c1"));
     let real_root = pkg.merkle_root();
@@ -158,6 +182,128 @@ fn the_budget_pie_handles_an_empty_package() {
     let report = check(&pkg);
     assert!(report.passed());
     assert_eq!(report.render_pie(), "budget pie: no claims");
+}
+
+struct ReleaseVerifier;
+
+impl fs_checker::SignatureVerifier for ReleaseVerifier {
+    fn verify(&self, merkle_root: &ContentHash, signature: &str) -> bool {
+        signature == format!("release-test:{merkle_root}")
+    }
+}
+
+fn signed_for_release(pkg: EvidencePackage) -> EvidencePackage {
+    let root = pkg.merkle_root();
+    pkg.signed(format!("release-test:{root}"))
+}
+
+fn passed_falsifier() -> FalsifierRecord {
+    FalsifierRecord {
+        name: "independent-interval-probe".to_string(),
+        attempts: 64,
+        refuted: false,
+        detail: "64 boundary-biased probes found no violation".to_string(),
+    }
+}
+
+const DATASET_HASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+#[test]
+fn release_gate_requires_certificate_obligations() {
+    let pkg = signed_for_release(
+        EvidencePackage::new(prov())
+            .with_claim(verified("verified").with_falsifier(passed_falsifier()))
+            .with_claim(
+                validated("validated", good_regime())
+                    .with_falsifier(passed_falsifier())
+                    .with_anchor("wt-2026", DATASET_HASH),
+            )
+            .with_claim(estimated("honest-estimate")),
+    );
+    let root = pkg.merkle_root();
+    let report = check_for_release(&pkg, root, &ReleaseVerifier);
+    assert!(report.passed(), "{:?}", report.findings);
+    assert!(matches!(report.signature, SignatureStatus::Valid(_)));
+    assert!(check_json_for_release(&pkg.to_json(), root, &ReleaseVerifier).passed());
+}
+
+#[test]
+fn release_gate_refuses_vacuous_or_unpaired_packages() {
+    let empty = signed_for_release(EvidencePackage::new(prov()));
+    assert!(
+        check(&empty).passed(),
+        "ordinary integrity check stays vacuous"
+    );
+    let report = check_for_release(&empty, empty.merkle_root(), &ReleaseVerifier);
+    assert!(!report.passed());
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|finding| finding.kind == "release-empty-package")
+    );
+
+    let unpaired = signed_for_release(EvidencePackage::new(prov()).with_claim(verified("v")));
+    let report = check_for_release(&unpaired, unpaired.merkle_root(), &ReleaseVerifier);
+    assert!(!report.passed());
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|finding| finding.kind == "release-falsifier-required")
+    );
+    let report = check_json_for_release(
+        &unpaired.to_json(),
+        unpaired.merkle_root(),
+        &ReleaseVerifier,
+    );
+    assert!(!report.passed(), "JSON must not bypass release policy");
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|finding| finding.kind == "release-falsifier-required")
+    );
+}
+
+#[test]
+fn release_gate_requires_matching_anchor_signature_and_root() {
+    let unanchored = signed_for_release(
+        EvidencePackage::new(prov()).with_claim(
+            validated("v", good_regime())
+                .with_falsifier(passed_falsifier())
+                .with_anchor("different-dataset", DATASET_HASH),
+        ),
+    );
+    let report = check_for_release(&unanchored, unanchored.merkle_root(), &ReleaseVerifier);
+    assert!(!report.passed());
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|finding| finding.kind == "release-anchor-required")
+    );
+
+    let unsigned =
+        EvidencePackage::new(prov()).with_claim(verified("v").with_falsifier(passed_falsifier()));
+    let report = check_for_release(&unsigned, unsigned.merkle_root(), &ReleaseVerifier);
+    assert!(!report.passed());
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|finding| finding.kind == "release-signature-required")
+    );
+
+    let signed = signed_for_release(unsigned);
+    let report = check_for_release(&signed, flip(signed.merkle_root()), &ReleaseVerifier);
+    assert!(!report.passed());
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|finding| finding.kind == "content-address-mismatch")
+    );
 }
 
 #[test]

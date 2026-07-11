@@ -166,19 +166,7 @@ pub fn check_json(
 ) -> CheckReport {
     match EvidencePackage::from_json(text) {
         Ok(pkg) => build_report(&pkg, expected_root, verifier),
-        Err(e) => CheckReport {
-            verdict: Verdict::Fail,
-            // Fail-closed sentinel: parsing refused, so there is no
-            // recomputed root. The Fail verdict is authoritative; the
-            // zero bytes are only a deterministic placeholder.
-            merkle_root: ContentHash([0u8; 32]),
-            breakdown: ColorBreakdown::default(),
-            signature: SignatureStatus::Unsigned,
-            findings: vec![Finding {
-                kind: "parse-refused",
-                detail: e.to_string(),
-            }],
-        },
+        Err(e) => parse_refusal(e),
     }
 }
 
@@ -190,6 +178,97 @@ pub fn check_with(
     verifier: &dyn SignatureVerifier,
 ) -> CheckReport {
     build_report(pkg, expected_root, Some(verifier))
+}
+
+/// Re-verify a package under the stronger RELEASE-ADMISSION policy.
+///
+/// Unlike [`check`], which deliberately accepts an empty but well-formed
+/// transport, this gate requires a non-empty package, an authenticated
+/// detached signature over the expected content root, an attached falsifier
+/// record for every Verified or Validated claim, and a matching content-hash
+/// anchor for every Validated claim. This is the explicit
+/// no-falsifier-no-ship boundary; it does not claim to re-run source solvers.
+#[must_use]
+pub fn check_for_release(
+    pkg: &EvidencePackage,
+    expected_root: ContentHash,
+    verifier: &dyn SignatureVerifier,
+) -> CheckReport {
+    let mut report = build_report(pkg, Some(expected_root), Some(verifier));
+    append_release_findings(pkg, &mut report);
+    report
+}
+
+/// Strict JSON counterpart of [`check_for_release`]. Parse refusal can never
+/// become release admission.
+#[must_use]
+pub fn check_json_for_release(
+    text: &str,
+    expected_root: ContentHash,
+    verifier: &dyn SignatureVerifier,
+) -> CheckReport {
+    match EvidencePackage::from_json(text) {
+        Ok(pkg) => check_for_release(&pkg, expected_root, verifier),
+        Err(e) => parse_refusal(e),
+    }
+}
+
+fn parse_refusal(error: ParseError) -> CheckReport {
+    CheckReport {
+        verdict: Verdict::Fail,
+        // Fail-closed sentinel: parsing refused, so there is no recomputed
+        // root. The Fail verdict is authoritative; the zero bytes are only a
+        // deterministic placeholder.
+        merkle_root: ContentHash([0u8; 32]),
+        breakdown: ColorBreakdown::default(),
+        signature: SignatureStatus::Unsigned,
+        findings: vec![Finding {
+            kind: "parse-refused",
+            detail: error.to_string(),
+        }],
+    }
+}
+
+fn append_release_findings(pkg: &EvidencePackage, report: &mut CheckReport) {
+    if pkg.claims.is_empty() {
+        report.findings.push(Finding {
+            kind: "release-empty-package",
+            detail: "release admission requires at least one claim".to_string(),
+        });
+    }
+    if matches!(report.signature, SignatureStatus::Unsigned) {
+        report.findings.push(Finding {
+            kind: "release-signature-required",
+            detail: "release admission requires an authenticated detached signature over the \
+                     expected content root"
+                .to_string(),
+        });
+    }
+    for claim in &pkg.claims {
+        if claim.requires_release_falsifier() && claim.falsifiers.is_empty() {
+            report.findings.push(Finding {
+                kind: "release-falsifier-required",
+                detail: format!(
+                    "certificate-class claim '{}' cannot ship without an attached falsifier \
+                     record",
+                    claim.id
+                ),
+            });
+        }
+        if claim.requires_validated_anchor() && !claim.has_matching_validated_anchor() {
+            report.findings.push(Finding {
+                kind: "release-anchor-required",
+                detail: format!(
+                    "validated claim '{}' cannot ship without a canonical content-hash anchor \
+                     for its named dataset",
+                    claim.id
+                ),
+            });
+        }
+    }
+    if !report.findings.is_empty() {
+        report.verdict = Verdict::Fail;
+    }
 }
 
 fn build_report(
@@ -277,6 +356,10 @@ fn describe(e: &PackageError) -> Finding {
         PackageError::InvalidClaimId { index, id, reason } => Finding {
             kind: "invalid-claim-id",
             detail: format!("claim at index {index} has {reason} id {id:?}"),
+        },
+        PackageError::InvalidClaimStatement { claim, reason } => Finding {
+            kind: "invalid-claim-statement",
+            detail: format!("claim '{claim}' has a {reason} statement"),
         },
         PackageError::IncompleteValidatedClaim { claim, missing } => Finding {
             kind: "incomplete-validated-claim",
