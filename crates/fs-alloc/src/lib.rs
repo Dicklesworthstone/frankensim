@@ -36,6 +36,7 @@
 
 mod arena;
 mod hugepage;
+mod lease;
 mod pool;
 mod raw;
 
@@ -43,6 +44,7 @@ pub use arena::{
     AllocError, Arena, ArenaConfig, ArenaPool, ArenaStats, PoolStats, Site, SiteReport, SiteStats,
 };
 pub use hugepage::{HUGEPAGE_BYTES, HugepageDecision, HugepageOutcome, HugepagePolicy};
+pub use lease::{LeaseCharge, LeaseReceipt, LeaseRefusal, OperationMemoryLease};
 pub use pool::{PoolItem, ShardStats, ShardedPool, ShardedPoolStats};
 
 /// Crate version, re-exported for provenance stamping (the Five Explicits'

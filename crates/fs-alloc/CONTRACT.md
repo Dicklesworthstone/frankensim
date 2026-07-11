@@ -59,10 +59,21 @@ recorded, sharded object pools, and diffable allocation-site accounting
    deallocated, so claimants can observe conservative over-accounting but
    never stale free capacity. Refusal is structured and leaves the pool fully
    usable (alloc-003).
+6. `OperationMemoryLease` (bead wf9.16) is the RUN-SCOPED ledger, distinct
+   from the pool budget's process-wide one: cloneable, atomic
+   reserve/release, deterministic receipts (`requested`/`used`/`refusals`
+   exact for a fixed plan; `peak_bytes` is a conservative logical
+   high-water). A leased arena (`arena_leased`/`scope_leased`) charges every
+   chunk — fresh or recycled — for exactly its hold interval and releases on
+   drop (unwinds included); free-list inventory belongs to no operation, so
+   recycled chunks are never double-charged. Both gates must admit a chunk;
+   the refusal names whichever refused (`Exhausted` = pool,
+   `LeaseExhausted` = operation). Child scopes inherit the parent's lease.
 
 ## Error model
 All fallible APIs return `Result<_, AllocError>`; `AllocError` is a
-structured enum (`Exhausted`, `OutOfMemory`, `LayoutOverflow`,
+structured enum (`Exhausted`, `OutOfMemory`, `LeaseExhausted`,
+`LayoutOverflow`,
 `ReservationOverflow`) carrying the allocation site, sizes, and budget
 context, with teaching `Display` text including ranked fixes (Decalogue P10).
 Out-of-memory is a refusal, never an abort (`handle_alloc_error` is not

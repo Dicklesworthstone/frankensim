@@ -141,6 +141,20 @@ pub enum RunError {
         /// Operating-system diagnostic.
         message: String,
     },
+    /// The operation memory lease refused the pool's root metadata BEFORE
+    /// worker launch (bead wf9.16); nothing ran and nothing was allocated.
+    /// Mid-run per-tile refusals surface as [`RunError::TileFailed`] with an
+    /// allocation failure instead.
+    MemoryRefused {
+        /// Kernel name.
+        kernel: &'static str,
+        /// Component that was refused.
+        what: &'static str,
+        /// Bytes the component requested.
+        requested_bytes: u64,
+        /// The lease limit in force.
+        limit_bytes: u64,
+    },
     /// A user-defined deterministic reduction merge panicked after every tile
     /// had completed. The unwind was contained at the pool boundary.
     ReductionPanicked {
@@ -207,6 +221,17 @@ impl fmt::Display for RunError {
                 f,
                 "kernel `{kernel}` finished without output for tile {tile}: executor invariant \
                  violation — please report this"
+            ),
+            RunError::MemoryRefused {
+                kernel,
+                what,
+                requested_bytes,
+                limit_bytes,
+            } => write!(
+                f,
+                "kernel `{kernel}` refused before launch: `{what}` needs {requested_bytes} B \
+                 but the operation memory lease holds {limit_bytes} B; nothing ran and \
+                 nothing was allocated"
             ),
         }
     }
@@ -324,6 +349,29 @@ impl RunReport {
 fn ccd_of_worker(w: usize, workers: usize, topo: CcdTopology) -> usize {
     let ccds = (topo.ccds as usize).max(1);
     (w * ccds) / workers.max(1)
+}
+
+/// Conservative logical bytes for one run's root metadata (bead wf9.16):
+/// slots, deque headers and tile-id entries, victim tables, per-worker
+/// cache-padded atomics, the fold buffer, and the report vectors.
+/// Saturating arithmetic — an unrepresentable plan charges `u64::MAX` and
+/// fails the lease honestly. Thread stacks and allocator overhead are
+/// explicit no-claims (CONTRACT): this is the logical live set, not a
+/// platform byte census.
+fn root_metadata_bytes<K: TileKernel>(n: u64, workers: usize) -> u64 {
+    let workers = workers as u64;
+    let slot = size_of::<Mutex<Option<K::Out>>>() as u64;
+    let deque_header = size_of::<CachePadded<Mutex<VecDeque<u64>>>>() as u64;
+    let atomic = size_of::<CachePadded<AtomicU64>>() as u64;
+    let out = size_of::<K::Out>() as u64;
+    let victim_entries = workers.saturating_mul(workers.saturating_sub(1));
+    n.saturating_mul(slot)
+        .saturating_add(n.saturating_mul(8))
+        .saturating_add(workers.saturating_mul(deque_header))
+        .saturating_add(victim_entries.saturating_mul(8))
+        .saturating_add(workers.saturating_mul(2).saturating_mul(atomic))
+        .saturating_add(n.saturating_mul(out))
+        .saturating_add(workers.saturating_mul(16))
 }
 
 /// The steal victim order for worker `w`: same-CCD workers first (ring
@@ -483,7 +531,13 @@ impl TilePool {
         gate: &CancelGate,
         run: RunId,
     ) -> (Result<K::Out, RunError>, RunReport) {
-        self.run_inner(kernel, gate, run, Budget::INFINITE)
+        self.run_inner(
+            kernel,
+            gate,
+            run,
+            Budget::INFINITE,
+            &fs_alloc::OperationMemoryLease::unbounded(),
+        )
     }
 
     /// Run a kernel under explicit logical identity and asupersync budget.
@@ -496,7 +550,30 @@ impl TilePool {
         run: RunId,
         budget: Budget,
     ) -> (Result<K::Out, RunError>, RunReport) {
-        self.run_inner(kernel, gate, run, budget)
+        self.run_inner(
+            kernel,
+            gate,
+            run,
+            budget,
+            &fs_alloc::OperationMemoryLease::unbounded(),
+        )
+    }
+
+    /// [`TilePool::run_declared_budgeted`] under a shared operation memory
+    /// lease (bead wf9.16): root metadata is reserved fallibly BEFORE worker
+    /// launch, and every tile arena's chunks charge the lease while held.
+    /// The caller keeps the lease and reads `lease.receipt()` for the
+    /// deterministic requested/peak/refused accounting; thread stacks and
+    /// allocator overhead are explicitly not claimed.
+    pub fn run_declared_leased_budgeted<K: TileKernel>(
+        &self,
+        kernel: &K,
+        gate: &CancelGate,
+        run: RunId,
+        budget: Budget,
+        lease: &fs_alloc::OperationMemoryLease,
+    ) -> (Result<K::Out, RunError>, RunReport) {
+        self.run_inner(kernel, gate, run, budget, lease)
     }
 
     /// Run a kernel under an external cancel gate; returns the outcome and
@@ -510,7 +587,13 @@ impl TilePool {
         kernel: &K,
         gate: &CancelGate,
     ) -> (Result<K::Out, RunError>, RunReport) {
-        self.run_inner(kernel, gate, RunId::default(), Budget::INFINITE)
+        self.run_inner(
+            kernel,
+            gate,
+            RunId::default(),
+            Budget::INFINITE,
+            &fs_alloc::OperationMemoryLease::unbounded(),
+        )
     }
 
     // One coherent protocol (seed deques -> worker loops -> fold + report);
@@ -523,6 +606,7 @@ impl TilePool {
         gate: &CancelGate,
         run: RunId,
         budget: Budget,
+        lease: &fs_alloc::OperationMemoryLease,
     ) -> (Result<K::Out, RunError>, RunReport) {
         let plan = kernel.tiles();
         let kernel_id = plan.kernel_id();
@@ -532,6 +616,40 @@ impl TilePool {
         // prior runs and on concurrent invocation order.
         let iteration = run.0;
         let workers = self.config.workers.min(n.max(1) as usize).max(1);
+
+        // Root metadata is reserved fallibly BEFORE any of it is allocated
+        // and BEFORE worker launch (bead wf9.16). The charge covers slots,
+        // deque headers and entries, victim tables, per-worker atomics, the
+        // fold buffer, and the report vectors; thread stacks and allocator
+        // overhead are explicit no-claims. The guard holds until the run
+        // returns (including unwinds).
+        let _root_charge = match lease.reserve(
+            "tilepool-root-metadata",
+            root_metadata_bytes::<K>(n, workers),
+        ) {
+            Ok(charge) => charge,
+            Err(refusal) => {
+                return (
+                    Err(RunError::MemoryRefused {
+                        kernel: plan.kernel,
+                        what: refusal.what,
+                        requested_bytes: refusal.requested_bytes,
+                        limit_bytes: refusal.limit_bytes,
+                    }),
+                    RunReport {
+                        kernel: plan.kernel,
+                        mode: self.config.mode.name(),
+                        declared_run: run,
+                        completed: 0,
+                        total: n,
+                        steals: 0,
+                        cross_ccd_steals: 0,
+                        cancel_latencies_ns: Vec::new(),
+                        tiles_by_worker: Vec::new(),
+                    },
+                );
+            }
+        };
 
         // Fixed-slot reduction storage: one slot per tile, written once.
         let slots: Vec<Mutex<Option<K::Out>>> = (0..n).map(|_| Mutex::new(None)).collect();
@@ -624,7 +742,9 @@ impl TilePool {
                             tile,
                             iteration,
                         };
-                        let outcome = arenas.scope(|arena| {
+                        // Every tile arena charges the shared operation
+                        // lease while its chunks are held (bead wf9.16).
+                        let outcome = arenas.scope_leased(lease, |arena| {
                             let cx = Cx::new_with_refusal_sink(
                                 gate,
                                 arena,

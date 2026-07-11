@@ -43,7 +43,18 @@ fs-blake3, fs-substrate, fs-obs.
   arena }` — `run(&kernel)` / `run_with_gate(&kernel, &gate) -> (Result<Out,
   RunError>, RunReport)`. `run_declared_budgeted` additionally carries an exact
   caller-supplied asupersync `Budget` into every tile `Cx`; legacy run wrappers
-  deliberately retain `Budget::INFINITE`. Workers are scoped per run; per-worker deques are
+  deliberately retain `Budget::INFINITE`. `run_declared_leased_budgeted`
+  (bead wf9.16) further binds the run to a shared
+  `fs_alloc::OperationMemoryLease`: root metadata (slots, deque headers and
+  entries, victim tables, per-worker atomics, fold buffer, report vectors)
+  is reserved fallibly BEFORE worker launch (`RunError::MemoryRefused`,
+  nothing ran, nothing allocated) and every tile arena charges the lease
+  while its chunks are held (mid-run refusals surface as `TileFailed` with
+  `AllocError::LeaseExhausted` and drain like any typed refusal). Legacy
+  wrappers pass an unbounded lease; the caller reads `lease.receipt()` for
+  deterministic requested/peak/refused accounting. Thread stacks and
+  allocator overhead are explicit no-claims — the lease is the logical live
+  set, not a platform byte census. Workers are scoped per run; per-worker deques are
   seeded with contiguous, weight-proportional tile runs (`weighted_ranges`)
   and steal HALF a victim's deque in `victim_order` (same-CCD ring first).
   `PoolConfig::for_host` / `TilePool::for_host` select the recorded host-probe

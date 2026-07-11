@@ -111,6 +111,18 @@ pub enum AllocError {
         /// Chunk bytes that were requested.
         requested_bytes: usize,
     },
+    /// The operation memory lease refused the chunk (bead wf9.16). The
+    /// pool budget may still have room — this is the per-operation gate.
+    LeaseExhausted {
+        /// Site requesting the allocation.
+        site: &'static str,
+        /// Chunk bytes the lease was asked for.
+        requested_bytes: u64,
+        /// Lease bytes in use at refusal time.
+        used_bytes: u64,
+        /// The lease limit in force.
+        limit_bytes: u64,
+    },
     /// `len * size_of::<T>()` overflows `usize`.
     LayoutOverflow {
         /// Site requesting the allocation.
@@ -156,6 +168,18 @@ impl fmt::Display for AllocError {
                  is near its memory ceiling. Fixes (ranked): (1) set ArenaConfig::limit_bytes \
                  so pressure degrades to a budget error earlier; (2) split the workload into \
                  smaller scopes"
+            ),
+            AllocError::LeaseExhausted {
+                site,
+                requested_bytes,
+                used_bytes,
+                limit_bytes,
+            } => write!(
+                f,
+                "operation memory lease exhausted at site `{site}`: requested {requested_bytes} B \
+                 for a chunk with {used_bytes} B of the {limit_bytes} B operation lease in use. \
+                 Fixes (ranked): (1) raise the operation lease; (2) reduce concurrent tile \
+                 working sets; (3) lower ArenaConfig::chunk_bytes so growth is finer-grained"
             ),
             AllocError::LayoutOverflow {
                 site,
@@ -348,6 +372,18 @@ impl ArenaPool {
     /// executor (fs-exec's use case).
     #[must_use]
     pub fn arena(&self) -> Arena {
+        self.build_arena(None)
+    }
+
+    /// Create a fresh arena whose chunks charge `lease` while held (bead
+    /// wf9.16). The pool's own `limit_bytes` remains an independent gate:
+    /// both must admit a chunk, and a refusal names whichever refused.
+    #[must_use]
+    pub fn arena_leased(&self, lease: &crate::OperationMemoryLease) -> Arena {
+        self.build_arena(Some(lease.clone()))
+    }
+
+    fn build_arena(&self, lease: Option<crate::OperationMemoryLease>) -> Arena {
         self.shared.arenas_live.fetch_add(1, Ordering::AcqRel);
         Arena {
             shared: Arc::clone(&self.shared),
@@ -356,6 +392,8 @@ impl ArenaPool {
             allocated_bytes: Cell::new(0),
             allocation_count: Cell::new(0),
             sites: RefCell::new(Vec::new()),
+            lease,
+            leased_bytes: Cell::new(0),
         }
     }
 
@@ -408,6 +446,17 @@ impl ArenaPool {
     /// ```
     pub fn scope<R>(&self, f: impl for<'a> FnOnce(&'a Arena) -> R) -> R {
         let arena = self.arena();
+        f(&arena)
+    }
+
+    /// [`ArenaPool::scope`] with the scope's chunks charged to `lease`
+    /// while held (bead wf9.16). Same escape discipline.
+    pub fn scope_leased<R>(
+        &self,
+        lease: &crate::OperationMemoryLease,
+        f: impl for<'a> FnOnce(&'a Arena) -> R,
+    ) -> R {
+        let arena = self.arena_leased(lease);
         f(&arena)
     }
 
@@ -475,6 +524,12 @@ pub struct Arena {
     allocated_bytes: Cell<u64>,
     allocation_count: Cell<u64>,
     sites: RefCell<Vec<(&'static str, SiteStats)>>,
+    /// Operation lease this arena's chunks charge while held (bead wf9.16).
+    /// `None` = legacy unleased arena. The charge covers the hold interval
+    /// only: chunks returned to the pool free list on drop stop being the
+    /// operation's live set, so a recycled chunk is never double-charged.
+    lease: Option<crate::OperationMemoryLease>,
+    leased_bytes: Cell<u64>,
 }
 
 impl Arena {
@@ -586,6 +641,9 @@ impl Arena {
     /// allocator.)
     pub fn scope<R>(&self, f: impl for<'c> FnOnce(&'c Arena) -> R) -> R {
         self.shared.arenas_live.fetch_add(1, Ordering::AcqRel);
+        // A child scope inherits the parent's operation lease (bead
+        // wf9.16): sub-scopes of a leased tile stay inside the same
+        // operation live set.
         let child = Arena {
             shared: Arc::clone(&self.shared),
             raw: RawArena::new(),
@@ -593,6 +651,8 @@ impl Arena {
             allocated_bytes: Cell::new(0),
             allocation_count: Cell::new(0),
             sites: RefCell::new(Vec::new()),
+            lease: self.lease.clone(),
+            leased_bytes: Cell::new(0),
         };
         f(&child)
     }
@@ -621,6 +681,24 @@ impl Arena {
         let chunk = self
             .shared
             .acquire_chunk(min_bytes, self.next_chunk_bytes.get(), site)?;
+        // Charge the operation lease for the hold interval (bead wf9.16) —
+        // fresh and recycled chunks alike enter this operation's live set.
+        // On refusal the chunk goes straight back to the pool: it never
+        // entered the arena, so nothing double-counts.
+        if let Some(lease) = &self.lease {
+            let chunk_bytes = chunk.len() as u64;
+            if let Err(refusal) = lease.try_reserve_raw("arena-chunk", chunk_bytes) {
+                self.shared.release_chunks(vec![chunk]);
+                return Err(AllocError::LeaseExhausted {
+                    site: site.name(),
+                    requested_bytes: refusal.requested_bytes,
+                    used_bytes: refusal.used_bytes,
+                    limit_bytes: refusal.limit_bytes,
+                });
+            }
+            self.leased_bytes
+                .set(self.leased_bytes.get() + chunk_bytes);
+        }
         self.next_chunk_bytes.set(
             chunk
                 .len()
@@ -679,6 +757,14 @@ impl Drop for Arena {
     fn drop(&mut self) {
         let chunks = self.raw.take_chunks();
         self.shared.release_chunks(chunks);
+        // Chunks returned to the pool free list leave this operation's live
+        // set; release the lease charge for the whole hold (bead wf9.16).
+        if let Some(lease) = &self.lease {
+            let held = self.leased_bytes.get();
+            if held > 0 {
+                lease.release_raw(held);
+            }
+        }
         let local = core::mem::take(self.sites.get_mut());
         if !local.is_empty() {
             let mut sites = self

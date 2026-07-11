@@ -836,6 +836,9 @@ fn alloc_error_requested_bytes(error: &fs_alloc::AllocError) -> u128 {
             additional_bytes,
             ..
         } => (*base_bytes as u128) + (*additional_bytes as u128),
+        fs_alloc::AllocError::LeaseExhausted {
+            requested_bytes, ..
+        } => u128::from(*requested_bytes),
     }
 }
 
