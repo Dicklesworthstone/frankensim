@@ -42,8 +42,10 @@ pub mod falsify;
 
 pub use cards::{Ambition, ModelCard, ModelRegistry, RegistryError};
 pub use color::{
-    Color, ColorError, ColorRank, Demotion, IntervalOp, check_regime, color_of, compose,
-    intersect_domains, verified_from,
+    COLOR_ALGEBRA_VERSION, Color, ColorError, ColorPayloadError, ColorRank, Demotion, IntervalOp,
+    MAX_COLOR_IDENTITY_BYTES, check_regime, color_identity_reason, color_leaf_identity_reason,
+    color_of, compose, demotion_estimator_identity, intersect_domains, regime_demotion,
+    validate_color_payload, verified_from,
 };
 pub use discrepancy::{
     DiscrepancyBand, DiscrepancyModel, FidelityPair, FitError, ModelBracket, OutOfDomain,

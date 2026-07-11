@@ -241,12 +241,30 @@ fn evd_004_discrepancy_model_flags_out_of_distribution_queries() {
     let ood_blocked = model
         .evidence_at("panel-vs-les", &pt(&[("Re", 1e6)]))
         .is_err();
+    let unexpected_dimension_blocked = model
+        .evidence_at("panel-vs-les", &pt(&[("Re", 5e4), ("Mach", 0.08)]))
+        .is_err();
+    let simulated_model = model
+        .evidence_at("panel-vs-les", &pt(&[("Re", 5e4)]))
+        .expect("in-domain discrepancy evidence");
+    let simulated_color =
+        fs_evidence::color_of(&NumericalCertificate::enclosure(0.9, 1.1), &simulated_model);
+    let simulation_stays_estimated = matches!(
+        simulated_color,
+        fs_evidence::Color::Estimated { dispersion, .. }
+            if dispersion.to_bits() == band.max_rel.to_bits()
+    );
     verdict(
         "evd-004",
-        band_sane && teaching && ood_blocked,
+        band_sane
+            && teaching
+            && ood_blocked
+            && unexpected_dimension_blocked
+            && simulation_stays_estimated,
         &format!(
             "trained on 50 pairs (seed {SEED:#x}): in-domain band mean {:.3}/max {:.3}; \
-             out-of-domain query refused with the violated parameter named",
+             out-of-domain and unexpected-dimension queries refused; paired simulations remain \
+             Estimated rather than impersonating an experimental anchor",
             band.mean_rel, band.max_rel
         ),
     );
@@ -257,9 +275,12 @@ fn evd_005_bracketing_reports_spread_and_rows_are_deterministic() {
     // The vessel flagship's stated mitigation: bracket contact-angle
     // models, report the objective's sensitivity band.
     let bracket = ModelBracket::new()
-        .with_member("contact-angle-60", 0.90)
-        .with_member("contact-angle-90", 1.00)
-        .with_member("contact-angle-120", 1.16);
+        .try_with_member("contact-angle-60", 0.90)
+        .expect("valid first bracket member")
+        .try_with_member("contact-angle-90", 1.00)
+        .expect("valid second bracket member")
+        .try_with_member("contact-angle-120", 1.16)
+        .expect("valid third bracket member");
     let ev = bracket
         .evidence(ProvenanceHash::of_bytes(b"vessel-lip-v1"))
         .expect("bracket evidence");
@@ -659,9 +680,11 @@ fn evd_007_disjoint_validated_regimes_demote_not_launder() {
         dataset: "B".into(),
     };
     let overlap = compose(&a, &b_overlap, IntervalOp::Add);
-    let overlap_ok = if let Color::Validated { regime, .. } = &overlap {
+    let overlap_ok = if let Color::Validated { regime, dataset } = &overlap {
         let (lo, hi) = regime.bound("Re").unwrap_or((0.0, 0.0));
-        (lo - 1.5e5).abs() < 1.0 && (hi - 2e5).abs() < 1.0
+        (lo - 1.5e5).abs() < 1.0
+            && (hi - 2e5).abs() < 1.0
+            && dataset == "derived:v2:datasets:1:A+1:B"
     } else {
         false
     };
@@ -674,7 +697,9 @@ fn evd_007_disjoint_validated_regimes_demote_not_launder() {
     let disjoint = compose(&a, &b_disjoint, IntervalOp::Add);
     let demoted = matches!(
         disjoint,
-        Color::Estimated { dispersion, .. } if dispersion.is_infinite()
+        Color::Estimated { estimator, dispersion }
+            if estimator == "derived:v2:disjoint-regimes:1:A+1:B"
+                && dispersion.is_infinite()
     );
     verdict(
         "evd-007",
@@ -731,7 +756,7 @@ fn evd_008_verified_compose_stays_a_true_enclosure() {
 
 #[test]
 fn evd_009_non_finite_regimes_fail_closed_and_payloads_escape() {
-    use fs_evidence::{Color, check_regime};
+    use fs_evidence::{Color, check_regime, regime_demotion};
 
     let validated = Color::Validated {
         regime: ValidityDomain::unconstrained().with("Re", 1.0, 10.0),
@@ -739,12 +764,22 @@ fn evd_009_non_finite_regimes_fail_closed_and_payloads_escape() {
     };
     let mut non_finite_states_demote = true;
     for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-        let (checked, flag) = check_regime(&validated, &pt(&[("Re", value)]));
+        let state = pt(&[("Re", value)]);
+        let borrowed = regime_demotion(&validated, &state);
+        let (checked, flag) = check_regime(&validated, &state);
         non_finite_states_demote &= matches!(
             checked,
             Color::Estimated { dispersion, .. } if dispersion.is_infinite()
         ) && flag
-            .is_some_and(|d| d.axis == "Re" && !d.value.is_finite());
+            .as_ref()
+            .is_some_and(|d| d.axis == "Re" && !d.value.is_finite())
+            && matches!(
+                (&borrowed, &flag),
+                (Some(left), Some(right))
+                    if left.dataset == right.dataset
+                        && left.axis == right.axis
+                        && left.value.to_bits() == right.value.to_bits()
+            );
     }
 
     let inverted = ValidityDomain::unconstrained()
@@ -764,11 +799,20 @@ fn evd_009_non_finite_regimes_fail_closed_and_payloads_escape() {
             regime,
             dataset: "anchors".to_string(),
         };
-        let (checked, flag) = check_regime(&invalid, &pt(&[("Re", 5.0)]));
+        let state = pt(&[("Re", 5.0)]);
+        let borrowed = regime_demotion(&invalid, &state);
+        let (checked, flag) = check_regime(&invalid, &state);
         invalid_regimes_demote &= matches!(
             checked,
             Color::Estimated { dispersion, .. } if dispersion.is_infinite()
-        ) && flag.is_some();
+        ) && flag.is_some()
+            && matches!(
+                (&borrowed, &flag),
+                (Some(left), Some(right))
+                    if left.dataset == right.dataset
+                        && left.axis == right.axis
+                        && left.value.to_bits() == right.value.to_bits()
+            );
     }
 
     let hostile = Color::Estimated {
@@ -852,8 +896,8 @@ fn evd_011_color_canonical_identity_is_versioned_and_bit_exact() {
         write!(&mut encoded_hex, "{byte:02x}").expect("writing to String cannot fail");
     }
     assert_eq!(
-        encoded_hex, "01000800000000000000000000000000000008000000000000000000000000000080",
-        "this vector freezes Color canonical encoding v1"
+        encoded_hex, "02000800000000000000000000000000000008000000000000000000000000000080",
+        "this vector freezes Color canonical encoding v2"
     );
 
     let first = Color::Verified { lo: 1.0, hi: 2.0 };
@@ -881,7 +925,499 @@ fn evd_011_color_canonical_identity_is_versioned_and_bit_exact() {
     verdict(
         "evd-011",
         true,
-        "Color canonical encoding v1 is frozen, bit-exact for f64 payloads, and \
+        "Color canonical encoding v2 is frozen, bit-exact for f64 payloads, and \
          deterministic across validity-domain insertion order",
+    );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // one bounded-identity adversarial composition matrix
+fn evd_014_color_provenance_composition_is_bounded_without_laundering() {
+    use fs_evidence::{
+        Color, ColorRank, IntervalOp, MAX_COLOR_IDENTITY_BYTES, color_leaf_identity_reason,
+        color_of, compose,
+    };
+
+    let source = Color::Estimated {
+        estimator: "wedge-proposer-v1".to_string(),
+        dispersion: 0.1,
+    };
+    let repeated = compose(&source, &source, IntervalOp::Hull);
+    assert!(matches!(
+        &repeated,
+        Color::Estimated {
+            estimator,
+            dispersion,
+        } if estimator
+            == "derived:v2:composed:17:wedge-proposer-v1+17:wedge-proposer-v1"
+            && dispersion.to_bits() == 0.2f64.to_bits()
+    ));
+    let verified = Color::Verified { lo: 1.0, hi: 1.0 };
+    let validated_pass_through = compose(
+        &Color::Validated {
+            regime: ValidityDomain::unconstrained().with("x", 0.0, 1.0),
+            dataset: "dataset-0".to_string(),
+        },
+        &verified,
+        IntervalOp::Mul,
+    );
+    let Color::Validated { dataset, .. } = validated_pass_through else {
+        panic!("a verified transform cannot strengthen or weaken a validated parent")
+    };
+    assert_eq!(
+        dataset,
+        "derived:v2:datasets-verified:9:dataset-0+8:verified"
+    );
+    assert_eq!(
+        color_leaf_identity_reason(&dataset),
+        Some("derived-identity-requires-lineage")
+    );
+
+    let same_estimator_twice = compose(
+        &Color::Estimated {
+            estimator: "shared".to_string(),
+            dispersion: 0.0,
+        },
+        &Color::Estimated {
+            estimator: "shared".to_string(),
+            dispersion: 0.0,
+        },
+        IntervalOp::Hull,
+    );
+    let estimator_with_verified = compose(
+        &Color::Estimated {
+            estimator: "shared".to_string(),
+            dispersion: 0.0,
+        },
+        &verified,
+        IntervalOp::Hull,
+    );
+    assert_ne!(
+        same_estimator_twice.canonical_bytes(),
+        estimator_with_verified.canonical_bytes(),
+        "two Estimated operands cannot alias an Estimated-plus-Verified derivation"
+    );
+
+    let shared_regime = ValidityDomain::unconstrained().with("x", 0.0, 1.0);
+    let shared_validated = Color::Validated {
+        regime: shared_regime,
+        dataset: "shared".to_string(),
+    };
+    let validated_twice = compose(&shared_validated, &shared_validated, IntervalOp::Hull);
+    let validated_with_verified = compose(&shared_validated, &verified, IntervalOp::Hull);
+    assert_ne!(
+        validated_twice.canonical_bytes(),
+        validated_with_verified.canonical_bytes(),
+        "two Validated operands cannot alias a Validated-plus-Verified derivation"
+    );
+
+    let estimator_named_verified = compose(
+        &Color::Estimated {
+            estimator: "shared".to_string(),
+            dispersion: 0.0,
+        },
+        &Color::Estimated {
+            estimator: "verified".to_string(),
+            dispersion: 0.0,
+        },
+        IntervalOp::Hull,
+    );
+    assert_ne!(
+        estimator_named_verified.canonical_bytes(),
+        estimator_with_verified.canonical_bytes(),
+        "an estimator literally named verified cannot impersonate the Verified operand class"
+    );
+
+    let dataset_named_verified = compose(
+        &shared_validated,
+        &Color::Validated {
+            regime: ValidityDomain::unconstrained().with("x", 0.0, 1.0),
+            dataset: "verified".to_string(),
+        },
+        IntervalOp::Hull,
+    );
+    assert_ne!(
+        dataset_named_verified.canonical_bytes(),
+        validated_with_verified.canonical_bytes(),
+        "a dataset literally named verified cannot impersonate the Verified operand class"
+    );
+
+    let mut folded = source;
+    for index in 0..1_024 {
+        folded = compose(
+            &folded,
+            &Color::Estimated {
+                estimator: format!("independent-estimator-{index}"),
+                dispersion: 0.0,
+            },
+            IntervalOp::Hull,
+        );
+        let Color::Estimated { estimator, .. } = &folded else {
+            panic!("estimated composition must remain estimated")
+        };
+        assert!(estimator.len() <= MAX_COLOR_IDENTITY_BYTES);
+    }
+    assert_eq!(folded.rank(), ColorRank::Estimated);
+    assert_eq!(
+        folded,
+        (0..1_024).fold(
+            Color::Estimated {
+                estimator: "wedge-proposer-v1".to_string(),
+                dispersion: 0.1,
+            },
+            |color, index| compose(
+                &color,
+                &Color::Estimated {
+                    estimator: format!("independent-estimator-{index}"),
+                    dispersion: 0.0,
+                },
+                IntervalOp::Hull,
+            )
+        ),
+        "bounded identities replay deterministically"
+    );
+
+    let overlong = "x".repeat(MAX_COLOR_IDENTITY_BYTES + 1);
+    let overlong_estimate = Color::Estimated {
+        estimator: overlong.clone(),
+        dispersion: 0.0,
+    };
+    let compact_repeated = compose(&overlong_estimate, &overlong_estimate, IntervalOp::Hull);
+    let compact_with_verified = compose(
+        &overlong_estimate,
+        &Color::Verified { lo: 0.0, hi: 1.0 },
+        IntervalOp::Hull,
+    );
+    assert_ne!(
+        compact_repeated.canonical_bytes(),
+        compact_with_verified.canonical_bytes(),
+        "domain labels must also separate operand classes after compact hashing"
+    );
+    for bounded in [compact_repeated, compact_with_verified] {
+        let Color::Estimated { estimator, .. } = bounded else {
+            panic!("an estimated operand must cap the result at Estimated")
+        };
+        assert!(estimator.len() <= MAX_COLOR_IDENTITY_BYTES);
+    }
+
+    let left_grouping = compose(
+        &Color::Estimated {
+            estimator: "A+B".to_string(),
+            dispersion: 0.0,
+        },
+        &Color::Estimated {
+            estimator: "C".to_string(),
+            dispersion: 0.0,
+        },
+        IntervalOp::Hull,
+    );
+    let right_grouping = compose(
+        &Color::Estimated {
+            estimator: "A".to_string(),
+            dispersion: 0.0,
+        },
+        &Color::Estimated {
+            estimator: "B+C".to_string(),
+            dispersion: 0.0,
+        },
+        IntervalOp::Hull,
+    );
+    assert_ne!(
+        left_grouping, right_grouping,
+        "length framing must distinguish identities containing the separator"
+    );
+
+    let regime = ValidityDomain::unconstrained().with("x", 0.0, 1.0);
+    let mut validated = Color::Validated {
+        regime: regime.clone(),
+        dataset: "dataset-0".to_string(),
+    };
+    for index in 1..1_024 {
+        validated = compose(
+            &validated,
+            &Color::Validated {
+                regime: regime.clone(),
+                dataset: format!("dataset-{index}"),
+            },
+            IntervalOp::Hull,
+        );
+        let Color::Validated { dataset, .. } = &validated else {
+            panic!("overlapping validated regimes must remain validated")
+        };
+        assert!(dataset.len() <= MAX_COLOR_IDENTITY_BYTES);
+    }
+
+    let cards = (0..1_024)
+        .map(|index| format!("model-card-{index}"))
+        .collect::<Vec<_>>();
+    let modeled = ModelEvidence {
+        cards,
+        assumptions: Vec::new(),
+        validity: regime,
+        discrepancy_rel: 0.0,
+        in_domain: true,
+    };
+    let Color::Estimated {
+        estimator: dataset,
+        dispersion,
+    } = color_of(&NumericalCertificate::enclosure(0.0, 1.0), &modeled)
+    else {
+        panic!("bounded model cards remain Estimated without an authenticated anchor")
+    };
+    assert!(dataset.len() <= MAX_COLOR_IDENTITY_BYTES);
+    assert_eq!(dispersion.to_bits(), 0.0_f64.to_bits());
+
+    let one_long_card = ModelEvidence {
+        cards: vec![overlong],
+        assumptions: Vec::new(),
+        validity: ValidityDomain::unconstrained(),
+        discrepancy_rel: 0.0,
+        in_domain: true,
+    };
+    let Color::Estimated { estimator, .. } =
+        color_of(&NumericalCertificate::estimate(0.0, 1.0), &one_long_card)
+    else {
+        panic!("one unbounded model-card identity remains Estimated")
+    };
+    assert!(estimator.len() <= MAX_COLOR_IDENTITY_BYTES);
+    verdict(
+        "evd-014",
+        true,
+        "repeated and heterogeneous estimator composition stays bounded, deterministic, and Estimated",
+    );
+}
+
+#[test]
+fn evd_015_malformed_bridge_inputs_fail_closed() {
+    use fs_evidence::{Color, ModelEvidence, NumericalCertificate, ValidityDomain, color_of};
+
+    let no_claim = color_of(&NumericalCertificate::no_claim(), &ModelEvidence::none());
+    assert!(matches!(
+        no_claim,
+        Color::Estimated { dispersion, .. } if dispersion.is_infinite()
+    ));
+    let malformed_exact = color_of(
+        &NumericalCertificate::exact(f64::NAN),
+        &ModelEvidence::none(),
+    );
+    assert!(matches!(
+        malformed_exact,
+        Color::Estimated { dispersion, .. } if dispersion.is_infinite()
+    ));
+    let uncarded_model_spread = ModelEvidence {
+        discrepancy_rel: 0.2,
+        ..ModelEvidence::none()
+    };
+    assert!(matches!(
+        color_of(
+            &NumericalCertificate::enclosure(0.0, 1.0),
+            &uncarded_model_spread,
+        ),
+        Color::Estimated { dispersion, .. } if dispersion.is_infinite()
+    ));
+
+    let regime = ValidityDomain::unconstrained().with("x", 0.0, 1.0);
+    let out_of_domain = ModelEvidence {
+        cards: vec!["card-a".to_string()],
+        assumptions: Vec::new(),
+        validity: regime.clone(),
+        discrepancy_rel: 0.1,
+        in_domain: false,
+    };
+    assert!(matches!(
+        color_of(
+            &NumericalCertificate::enclosure(0.0, 1.0),
+            &out_of_domain,
+        ),
+        Color::Estimated { dispersion, .. } if dispersion.is_infinite()
+    ));
+    let malformed_carded = ModelEvidence {
+        in_domain: true,
+        ..out_of_domain.clone()
+    };
+    assert!(matches!(
+        color_of(
+            &NumericalCertificate::exact(f64::NAN),
+            &malformed_carded,
+        ),
+        Color::Estimated { dispersion, .. } if dispersion.is_infinite()
+    ));
+    let canonical_cards = ModelEvidence {
+        cards: vec!["zeta".to_string(), "alpha".to_string(), "zeta".to_string()],
+        assumptions: Vec::new(),
+        validity: regime.clone(),
+        discrepancy_rel: 0.0,
+        in_domain: true,
+    };
+    let sorted_cards = ModelEvidence {
+        cards: vec!["alpha".to_string(), "zeta".to_string()],
+        ..canonical_cards.clone()
+    };
+    assert_eq!(
+        color_of(&NumericalCertificate::enclosure(0.0, 1.0), &canonical_cards,),
+        color_of(&NumericalCertificate::enclosure(0.0, 1.0), &sorted_cards,),
+        "model-card identity is a canonical sorted set"
+    );
+
+    let model_spread = ModelEvidence {
+        cards: vec!["identified-model".to_string()],
+        discrepancy_rel: 0.2,
+        ..ModelEvidence::none()
+    };
+    let Color::Estimated { dispersion, .. } =
+        color_of(&NumericalCertificate::estimate(0.9, 1.1), &model_spread)
+    else {
+        panic!("an uncarded numerical estimate remains Estimated")
+    };
+    assert!(
+        (dispersion - 0.3).abs() < 1e-12,
+        "numerical and model relative spreads add conservatively: {dispersion}"
+    );
+    verdict(
+        "evd-015",
+        true,
+        "malformed and out-of-domain bridge inputs demote to infinite-dispersion Estimated evidence",
+    );
+}
+
+#[test]
+fn evd_015b_malformed_color_payloads_fail_closed() {
+    use fs_evidence::{
+        Color, ColorRank, IntervalOp, ValidityDomain, compose, validate_color_payload,
+    };
+
+    let valid = Color::Verified { lo: 1.0, hi: 2.0 };
+    let malformed = [
+        Color::Verified {
+            lo: f64::NAN,
+            hi: f64::NAN,
+        },
+        Color::Verified { lo: 2.0, hi: 1.0 },
+        Color::Estimated {
+            estimator: "bad-dispersion".to_string(),
+            dispersion: -1.0,
+        },
+        Color::Estimated {
+            estimator: "bad-dispersion".to_string(),
+            dispersion: f64::NAN,
+        },
+        Color::Validated {
+            regime: ValidityDomain::unconstrained(),
+            dataset: "dataset-a".to_string(),
+        },
+        Color::Validated {
+            regime: ValidityDomain::unconstrained().with("x", 0.0, f64::INFINITY),
+            dataset: "dataset-a".to_string(),
+        },
+    ];
+    for bad in malformed {
+        assert!(validate_color_payload(&bad).is_err());
+        for op in [IntervalOp::Add, IntervalOp::Mul, IntervalOp::Hull] {
+            let result = compose(&bad, &valid, op);
+            assert_eq!(result.rank(), ColorRank::Estimated);
+            assert!(matches!(
+                result,
+                Color::Estimated { dispersion, .. } if dispersion.is_infinite()
+            ));
+        }
+    }
+
+    let whole_line = Color::Verified {
+        lo: f64::NEG_INFINITY,
+        hi: f64::INFINITY,
+    };
+    validate_color_payload(&whole_line).expect("whole-line enclosure is sound but vacuous");
+    verdict(
+        "evd-015b",
+        true,
+        "malformed color payloads fail closed while the sound whole-line enclosure remains valid",
+    );
+}
+
+#[test]
+fn evd_015c_empty_regime_demotion_has_a_valid_bounded_identity() {
+    use fs_evidence::{
+        Color, ValidityDomain, check_regime, color_identity_reason, demotion_estimator_identity,
+        validate_color_payload,
+    };
+    use std::collections::BTreeMap;
+
+    let malformed = Color::Validated {
+        regime: ValidityDomain::unconstrained(),
+        dataset: "fixture-dataset".to_string(),
+    };
+    let (demoted, record) = check_regime(&malformed, &BTreeMap::new());
+    let Color::Estimated {
+        estimator,
+        dispersion,
+    } = &demoted
+    else {
+        panic!("an undeclared regime must demote")
+    };
+    assert!(dispersion.is_infinite());
+    assert!(record.is_some());
+    assert_eq!(
+        estimator,
+        &demotion_estimator_identity("fixture-dataset", "<undeclared-regime>")
+    );
+    assert_eq!(color_identity_reason(estimator), None);
+    validate_color_payload(&demoted).expect("demotion must always emit a valid color payload");
+}
+
+#[test]
+fn evd_015c_malformed_card_diagnostics_remain_derived() {
+    use fs_evidence::{
+        Color, ModelEvidence, NumericalCertificate, color_leaf_identity_reason, color_of,
+    };
+
+    let reserved_card = ModelEvidence {
+        cards: vec!["derived:v2:forged-model-card".to_string()],
+        ..ModelEvidence::none()
+    };
+    let Color::Estimated {
+        estimator,
+        dispersion,
+    } = color_of(&NumericalCertificate::enclosure(0.0, 1.0), &reserved_card)
+    else {
+        panic!("a malformed model-card identity must fail closed as Estimated")
+    };
+    assert!(dispersion.is_infinite());
+    assert!(estimator.starts_with("derived:v2:invalid-card-"));
+    assert_eq!(
+        color_leaf_identity_reason(&estimator),
+        Some("derived-identity-requires-lineage"),
+        "generated malformed-card diagnostics stay in the reserved derived namespace"
+    );
+
+    let diagnostic = |cards: &[&str]| {
+        let modeled = ModelEvidence {
+            cards: cards.iter().map(|card| (*card).to_string()).collect(),
+            ..ModelEvidence::none()
+        };
+        let Color::Estimated {
+            estimator,
+            dispersion,
+        } = color_of(&NumericalCertificate::enclosure(0.0, 1.0), &modeled)
+        else {
+            panic!("a malformed card set must fail closed as Estimated")
+        };
+        assert!(dispersion.is_infinite());
+        estimator
+    };
+    let suffix_a = diagnostic(&["pending", "A"]);
+    let suffix_b = diagnostic(&["pending", "B"]);
+    assert_ne!(
+        suffix_a, suffix_b,
+        "the complete malformed card set must participate in diagnostic identity"
+    );
+    assert_eq!(
+        suffix_a,
+        diagnostic(&["A", "pending", "A"]),
+        "card identities have deterministic set semantics across order and duplicates"
+    );
+    verdict(
+        "evd-015c",
+        true,
+        "malformed card diagnostics bind the complete canonical card set, remain derived, and \n+         cannot be re-rooted as evidence leaves",
     );
 }

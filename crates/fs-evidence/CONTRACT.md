@@ -26,7 +26,7 @@ on fs-obs only.
   is ordered; float composition never claims Exact; NoClaim absorbs.
 - `StatisticalCertificate { None | EValue{e, alpha} | HalfWidth{...} }` —
   finite non-negative e-values and widths with levels/confidences strictly in
-  `(0,1)`; v1 composition is conservative-weakest (see no-claims).
+  `(0,1)`; statistical v1 composition is conservative-weakest (see no-claims).
 - `ModelEvidence { cards, assumptions, validity, discrepancy_rel,
   in_domain }`; `ValidityDomain` — named-parameter boxes with
   intersection/containment; `SensitivitySummary` — d(qoi)/d(param)
@@ -45,8 +45,9 @@ on fs-obs only.
   — `register_solver` REFUSES without a registered card (the lint).
 - `DiscrepancyModel::fit(&[FidelityPair])` — observed parameter box +
   mean/max relative discrepancy; `query`/`evidence_at` refuse
-  out-of-distribution points with the violated parameter named
-  (`OutOfDomain`).
+  out-of-distribution points and any query whose key set differs from the exact
+  training schema, with the first missing, unexpected, non-finite, or
+  out-of-range parameter named (`OutOfDomain`).
 - `ModelBracket` — N plausible models; evidence = midrange value, an
   enclosure spanning every member, spread as the model band, and a
   bracket-spread sensitivity entry (the vessel flagship's contact-line
@@ -65,15 +66,31 @@ on fs-obs only.
   `check_regime` (validated is a REGIONAL property: exiting, failing to
   report a regime axis, supplying a non-finite state, or declaring an
   empty/non-finite/inverted regime AUTO-DEMOTES to estimated with a
-  `Demotion` flag), `verified_from`
+  `Demotion` flag), `regime_demotion` (the borrowed form used for bounded
+  multi-parent admission preflight), `verified_from`
   (the only door to a verified color — non-enclosure certificates
   refuse with the laundering teaching error), and `color_of` (the
-  honest bridge from existing Evidence receipts). `Color::payload_json`
+  honest bridge from existing Evidence receipts: model-free enclosures may be
+  `Verified`, while plain `ModelEvidence` is always `Estimated`). Model cards,
+  simulated fidelity pairs, discrepancy bands, and declared validity boxes do
+  not authenticate experimental membership and cannot mint `Validated`;
+  promotion awaits a typed, independently checkable anchored-source receipt.
+  `Color::payload_json`
   escapes caller-controlled strings and represents non-finite floats as
   tagged JSON strings, never invalid bare numeric tokens. The distinct
-  `Color::canonical_bytes` identity encoding is versioned (v1), structurally
+  `Color::canonical_bytes` identity encoding is versioned (v2), structurally
   length-prefixed, deterministically ordered, and preserves every IEEE-754 bit;
   display rounding therefore never aliases color identity or authorization.
+  Color algebra v2 also reserves every `derived:` leaf identity and emits
+  bounded composition identities below `derived:v2:` so a caller cannot re-root
+  computed evidence as an independently anchored source. Readable derived
+  identities are emitted only when every component already satisfies the shared
+  grammar; invalid/sentinel components use the domain-separated compact form,
+  so even empty-regime demotion returns a structurally valid Estimated payload.
+  `color_of` recognizes model absence only for the exact
+  `ModelEvidence::none()` shape; an empty card list cannot hide discrepancy,
+  assumptions, validity restrictions, or an out-of-domain model behind a
+  `Verified` numerical interval.
   Write-time enforcement lives HELM-side in fs-ledger over these types.
 
 - `falsify` module (bead qmao.4): FALSIFIER PAIRING — `FalsifierRegistry`
@@ -104,9 +121,10 @@ on fs-obs only.
 3. No card, no solver: `ModelRegistry::register_solver` refuses unknown
    cards with teaching text (evd-002).
 4. Out-of-distribution discrepancy queries refuse with the violated
-   parameter named — never silent extrapolation; non-finite training or query
-   coordinates are unusable, not a way to synthesize or enter a trained box
-   (evd-004).
+   parameter named — never silent extrapolation. Query keys must equal the
+   training schema exactly, so an untrained physical dimension cannot be
+   supplied and silently ignored; non-finite training or query coordinates are
+   unusable, not a way to synthesize or enter a trained box (evd-004).
 5. Dominance ties break in declaration order (ModelForm, Statistical,
    Numerical) — deterministic verdicts.
 6. Ledger rows and provenance chains are deterministic (repeat-identical).
@@ -151,6 +169,23 @@ on fs-obs only.
 9. Decision assessment fails closed (evd-013): malformed or negative
    uncertainty becomes an infinite band; infinite totals and malformed
    thresholds cannot become `DecisionGrade`.
+10. Color provenance identities are bounded, byte-length-framed, and
+    domain-separated (evd-014). Every generated identity is in the reserved
+    `derived:v2:` namespace, while all `derived:` identities are forbidden at
+    source admission so computed evidence cannot be re-rooted as a leaf.
+11. The shared public color validator and `color_of` bridge fail closed on
+    NaN/inverted intervals, malformed identities and regimes, negative/NaN
+    dispersion, and malformed evidence/model inputs (evd-015). Plain model
+    evidence never self-promotes to `Validated`, including in-domain
+    two-fidelity discrepancy evidence (evd-004). Ordered infinite Verified
+    endpoints remain sound but vacuous enclosures.
+12. `demotion_estimator_identity` is total over arbitrary strings and always
+    emits a bounded identity accepted by `color_identity_reason`; invalid
+    readable inputs are hash-compacted rather than interpolated. Malformed
+    model-card diagnostics bind the complete sorted/deduplicated card set and
+    each entry's validation reason in a v2 domain-separated streaming hash;
+    distinct residual cards cannot alias merely because the first invalid card
+    is the same.
 
 ## Error model
 Structured teaching errors throughout: `CertifyError`, `RegistryError`,
@@ -176,7 +211,7 @@ None. The mechanisms are `[S]`-grade bookkeeping; the models they DESCRIBE
 carry their own ambition tags in their cards.
 
 ## Conformance tests
-tests/conformance.rs, cases evd-001..evd-013 (JSON-line verdicts; seeded
+tests/conformance.rs, cases evd-001..evd-015 (JSON-line verdicts; seeded
 cases carry seeds): the G0 conservativeness battery, the registration
 lint, the worked model-discrepancy-dominates example (10% closure vs 0.7%
 mesh at a 5% threshold → NotDecisionGrade{ModelForm} + escalation advice,
@@ -190,6 +225,10 @@ In-module suites cover the certificate algebra, validity laws, tie-breaking,
 provenance chaining, and card rendering.
 `evd-013` exercises the public `Evidence` layer against indeterminate interval
 arithmetic and malformed statistical/model uncertainty.
+`evd-014` locks bounded collision-resistant derived identities and source
+namespace separation; `evd-015` locks the shared color structural invariant
+across every public variant and bridge input, including the malformed empty-
+regime demotion sentinel and complete-set malformed-card identity stability.
 
 - Falsifier registration is total: empty falsifier lists refuse at the
   source; the ship gate names every unpaired class.
@@ -206,6 +245,24 @@ arithmetic and malformed statistical/model uncertainty.
   when wired.
 - Estimated dispersion combines additively (conservative); calibrated
   dispersion algebra joins the color-probes bead.
+- `ModelEvidence` carries model-form diagnostics, not experimental authority.
+  Even an in-domain discrepancy model trained on paired simulations remains
+  `Estimated`; this crate has no authenticated anchor type that can admit a new
+  `Validated` leaf.
+- Estimator identity chains are human-readable up to
+  `MAX_COLOR_IDENTITY_BYTES` and then collapse to a domain-separated BLAKE3
+  composition identity. Human-readable pairs are byte-length-framed, so an
+  identity containing `+` or `@` cannot alias a different composition tree.
+  Every binary composition retains both framed operands, including repeated
+  identities, and mixed `Verified`/`Validated`/`Estimated` operand classes use
+  distinct domain labels. A source literally named `verified` therefore cannot
+  impersonate a Verified operand. Pass-through operands receive a bounded
+  `derived:v2:` identity rather than retaining a source-leaf identity. Single
+  model-card identities remain source identities until an operation composes
+  them.
+  This bounds provenance payload growth without changing the Estimated rank or
+  its accumulated dispersion. Compact identities are deterministic provenance
+  labels, not signatures or source authority.
 
 ## No-claim boundaries
 - Statistical composition is CONSERVATIVE-WEAKEST v1 (half-widths add,
