@@ -428,10 +428,11 @@ fn contract_x_p<const P: usize>(a: &[f64], src: &[f64], dst: &mut [f64]) {
         let a_row = &a[i * P..(i + 1) * P];
         for j in 0..P {
             let mut acc = [0.0f64; P];
-            for (l, &ail) in a_row.iter().enumerate() {
+            for l in 0..P {
+                let ail = a_row[l];
                 let srow = &src[(l * P + j) * P..(l * P + j + 1) * P];
-                for (av, &s) in acc.iter_mut().zip(srow) {
-                    *av = ail.mul_add(s, *av);
+                for k in 0..P {
+                    acc[k] = ail.mul_add(srow[k], acc[k]);
                 }
             }
             dst[(i * P + j) * P..(i * P + j + 1) * P].copy_from_slice(&acc);
@@ -447,10 +448,11 @@ fn contract_y_p<const P: usize>(a: &[f64], src: &[f64], dst: &mut [f64]) {
         for j in 0..P {
             let a_row = &a[j * P..(j + 1) * P];
             let mut acc = [0.0f64; P];
-            for (l, &ajl) in a_row.iter().enumerate() {
+            for l in 0..P {
+                let ajl = a_row[l];
                 let srow = &sblock[l * P..(l + 1) * P];
-                for (av, &s) in acc.iter_mut().zip(srow) {
-                    *av = ajl.mul_add(s, *av);
+                for k in 0..P {
+                    acc[k] = ajl.mul_add(srow[k], acc[k]);
                 }
             }
             dst[(i * P + j) * P..(i * P + j + 1) * P].copy_from_slice(&acc);
@@ -478,10 +480,11 @@ fn contract_z_p<const P: usize>(a: &[f64], src: &[f64], dst: &mut [f64]) {
         .zip(src.as_chunks::<P>().0)
     {
         let mut acc = [0.0f64; P];
-        for (l, &sl) in srow.iter().enumerate() {
+        for l in 0..P {
+            let sl = srow[l];
             let arow = &at[l * P..(l + 1) * P];
-            for (av, &av_a) in acc.iter_mut().zip(arow) {
-                *av = av_a.mul_add(sl, *av);
+            for k in 0..P {
+                acc[k] = arow[k].mul_add(sl, acc[k]);
             }
         }
         *drow = acc;
