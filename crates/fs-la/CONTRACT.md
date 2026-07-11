@@ -299,12 +299,14 @@ diagonal) fixtures; 128-byte plane alignment; cross-ISA golden hash.
   after the 9ekv slice-1 optimizations (m-chunking, fs-simd 4×4-tile
   capsule, power-of-two stride padding, plane-vectorized LU updates —
   all bitwise-neutral, golden 0x0377_a8c9_5992_aee9 unchanged),
-  batch_gemm reaches 5.5–15.3 GFLOP/s = 10–29% of the per-class
-  roofline; batch_lu 22–32%. The ≥60% target is NOT met on this
-  machine: the plane-SoA lane walk is TLB/load-latency bound (raw tile
-  walk microbenches at 9.6–26 GFLOP/s). Rows are ledgered with honest
-  below_band verdicts; the asserted lane gate is an anti-collapse
-  floor (0.08), not the target. Successor design notes in bead 9ekv.
+  batch_gemm reaches 5.5–15.3 GFLOP/s = 10–29% of each binding roof;
+  batch_lu reaches 22–32% of its binding roof. The plan's ≥60% target is
+  explicitly compute-peak-relative and is NOT met on this machine: rows report
+  both `attainment` (binding roof) and `target_attainment` (compute peak), and
+  only the latter decides `target_met`. The asserted lane gate is an
+  anti-collapse floor of 0.08 against the binding roof, not the target; an
+  environment-invalid row fails the evidence lane rather than yielding a green
+  no-claim run. Successor design notes remain in bead 9ekv.
 
 ## No-claim boundaries
 - Cargo does not expose the resolved feature set of transitive dependencies to
@@ -343,14 +345,11 @@ diagonal) fixtures; 128-byte plane alignment; cross-ISA golden hash.
   bound in theory) — not a certified bound (fs-ivl owns certified claims).
 - Jacobi SVD targets small/medium n (O(n²·m) per sweep); no blocked
   driver yet.
-- Batched small-dense makes NO performance claims yet: kernels are safe
-  auto-vectorized Rust (plane loops shaped for lanes-across-elements).
-  The >=60%-of-peak roofline acceptance, arch-specific capsule
-  microkernels, autotuned interleave width, and a lane-vectorized
-  pivoted LU join the recorded batched perf follow-up bead (same split
-  discipline as the GEMM perf lane). Batched QR/SVD and eigh3
-  closed-form EIGENVECTORS (currently via per-matrix Jacobi) are
-  recorded follow-up scope.
+- Batched small-dense makes NO roofline-competitive claim yet. The current
+  packed 4×4 f64/f32 capsules are bitwise-equivalent execution paths, but the
+  ≥60%-of-compute-peak acceptance, autotuned interleave width, and a
+  lane-vectorized pivoted LU remain open. Batched QR/SVD and eigh3 closed-form
+  EIGENVECTORS (currently via per-matrix Jacobi) are recorded follow-up scope.
 - `batched_f32` (9ekv scope e): `BatchMatF32` + `batch_gemm_f32` (fused
   f32 chain) + `batch_gemm_mixed` (f32 storage, EXACT widen, fused f64
   chain, exactly ONE f32 rounding per output — the intended substrate

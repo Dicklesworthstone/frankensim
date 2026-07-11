@@ -1,12 +1,11 @@
 //! The fs-la BATCHED PERF LANE (bead 9ekv): batch_gemm attainment per
 //! size class {4, 6, 8, 12, 16, 24, 32, 48} against the machine
 //! ROOFLINE (fs-roofline conventions: limit = min(bandwidth·intensity,
-//! compute) — small classes are bandwidth-bound at memory-resident
-//! batch sizes, where "percent of peak FLOPs" is not achievable by any
-//! implementation and the roofline limit is the honest denominator).
-//! The 60% target is REPORTED per row; the asserted gate is the
-//! anti-collapse floor — see the note at the bottom and bead 9ekv for
-//! the measured achieved-vs-target gap. Run explicitly in release:
+//! compute). Each row reports both binding-roof `attainment` and
+//! compute-peak `target_attainment`: the plan's 60% target uses the latter,
+//! while the executable anti-collapse floor uses the former. See the note at
+//! the bottom and bead 9ekv for the measured achieved-vs-target gap. Run
+//! explicitly in release:
 //! `cargo test -p fs-la --release --test batched_perf_lane -- --ignored --nocapture`
 //!
 //! Batch sizes put the working set at ~50 MB (memory-resident, the
@@ -15,6 +14,27 @@
 
 use fs_la::batched::{BatchMat, batch_gemm, batch_lu};
 use fs_roofline::{KernelSpec, MachineAxes, RooflineKernel, TargetAxis, Threading, measure};
+
+fn measurement_json(metric: &str, k: usize, n: usize, receipt: &str) -> String {
+    let receipt_fields = receipt
+        .strip_prefix('{')
+        .and_then(|fields| fields.strip_suffix('}'))
+        .expect("roofline attainment receipt must be a JSON object");
+    format!("{{\"metric\":\"{metric}\",\"k\":{k},\"n\":{n},{receipt_fields}}}")
+}
+
+#[test]
+fn measurement_receipt_is_one_json_object() {
+    assert_eq!(
+        measurement_json(
+            "batch-gemm",
+            4,
+            16,
+            "{\"schema\":\"attainment-v1\",\"attainment\":0.5}"
+        ),
+        "{\"metric\":\"batch-gemm\",\"k\":4,\"n\":16,\"schema\":\"attainment-v1\",\"attainment\":0.5}"
+    );
+}
 
 struct BatchGemmKernel {
     k: usize,
@@ -96,15 +116,17 @@ fn batched_attainment() {
     println!("{}", axes.to_jsonl());
     let mut all_within = true;
     let mut floor_ok = true;
+    let mut environment_valid = true;
     for &k in &[4usize, 6, 8, 12, 16, 24, 32, 48] {
         let mut kern = BatchGemmKernel::new(k);
         let att = measure(&mut kern, 1, 5, &axes);
-        println!(
-            "{{\"metric\":\"batch-gemm\",\"k\":{k},\"n\":{},{}}}",
-            kern.elements(),
-            att.to_jsonl().trim_start_matches('{')
-        );
-        all_within &= att.attainment >= 0.60;
+        let receipt = measurement_json("batch-gemm", k, kern.elements(), &att.to_jsonl());
+        println!("{receipt}");
+        if att.verdict == fs_roofline::Verdict::EnvironmentInvalid {
+            environment_valid = false;
+            continue;
+        }
+        all_within &= att.target_attainment >= 0.60;
         floor_ok &= att.attainment >= 0.08;
     }
     // LU report rows (diagonally-dominant fixture, flag-free).
@@ -116,10 +138,12 @@ fn batched_attainment() {
         });
         let mut kern = BatchLuKernel { a };
         let att = measure(&mut kern, 1, 5, &axes);
-        println!(
-            "{{\"metric\":\"batch-lu\",\"k\":{k},\"n\":{n},{}}}",
-            att.to_jsonl().trim_start_matches('{')
-        );
+        let receipt = measurement_json("batch-lu", k, n, &att.to_jsonl());
+        println!("{receipt}");
+        if att.verdict == fs_roofline::Verdict::EnvironmentInvalid {
+            environment_valid = false;
+            continue;
+        }
         assert!(
             att.attainment >= 0.05,
             "batch-lu k={k} collapsed: attainment {:.3}",
@@ -133,11 +157,19 @@ fn batched_attainment() {
     // achieved-vs-target gap and the successor design notes live in
     // bead 9ekv. The ASSERTED gate here is the anti-collapse floor —
     // a regression, not an aspiration.
+    let target_met = environment_valid && all_within;
+    let floor_met = environment_valid && floor_ok;
     println!(
-        "{{\"metric\":\"batched-gate\",\"target\":0.60,\"target_met\":{all_within},\
-         \"floor\":0.08,\"machine\":\"{}-{}\"}}",
+        "{{\"metric\":\"batched-gate\",\"target_axis\":\"compute_peak\",\
+         \"target\":0.60,\"target_met\":{target_met},\
+         \"floor_axis\":\"binding_roof\",\"floor\":0.08,\"floor_met\":{floor_met},\
+         \"environment_valid\":{environment_valid},\"machine\":\"{}-{}\"}}",
         std::env::consts::OS,
         std::env::consts::ARCH
+    );
+    assert!(
+        environment_valid,
+        "batched roofline evidence rejected: contaminated environment"
     );
     assert!(
         floor_ok,

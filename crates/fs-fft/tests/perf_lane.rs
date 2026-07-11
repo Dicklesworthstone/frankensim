@@ -157,10 +157,9 @@ fn fft_attainment() {
         let receipt = att.to_jsonl();
         let measurement = measurement_json(n, gated, &receipt);
         println!("{measurement}");
-        // An environment_invalid row gates NOTHING — neither pass nor
-        // fail (bead 1n61: the first guarded storm-window run refused
-        // every row, yet this harness still printed target_met:true
-        // from the raw ratios — the consumer must honor the verdict).
+        // An environment-invalid row contributes neither a target pass nor a
+        // numerical regression failure. It poisons the evidence lane as a
+        // whole below, so cargo cannot report a green citable run.
         if att.verdict == fs_roofline::Verdict::EnvironmentInvalid {
             env_ok = false;
             continue;
