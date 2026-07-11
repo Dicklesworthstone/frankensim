@@ -140,6 +140,14 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/Dicklesworthstone/frankensim"
 authors = ["FrankenSim contributors"]
 
+# FrankenSQLite declares its runtime dependency through crates.io so it remains
+# independently publishable. Inside this constellation, force that dependency
+# to the same pinned sibling used directly by fs-* crates. A missing sibling is
+# therefore a resolution error rather than a silent second runtime identity;
+# `xtask check-constellation` verifies the sibling's exact locked git head.
+[patch.crates-io]
+asupersync = { path = "../asupersync" }
+
 # Decalogue P1 as policy: the default for every crate is `deny(unsafe_code)`.
 # Registered unsafe capsules (see docs/CONVENTIONS.md and the unsafe-capsule
 # registry) opt out at the MODULE level with #[allow(unsafe_code)] plus a

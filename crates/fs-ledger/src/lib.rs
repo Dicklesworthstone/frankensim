@@ -2275,14 +2275,12 @@ impl Ledger {
     /// Upsert one autotuner cache row (`kernel` × `shape_class` × machine
     /// fingerprint).
     ///
-    /// Implemented as UPDATE-then-INSERT rather than
-    /// `INSERT .. ON CONFLICT .. DO UPDATE`: the upsert form corrupts the
-    /// database at fsqlite HEAD when the conflict seek lands after a leaf
-    /// split (bead u8og; Dicklesworthstone/frankensqlite#123, regression in
-    /// upstream d1a543e). Revert to the single-statement upsert once #123 is
-    /// fixed. Equivalent under this connection model: the engine is
-    /// single-writer per connection, so no row can appear between the two
-    /// statements.
+    /// Single-statement `INSERT .. ON CONFLICT .. DO UPDATE` — atomic under
+    /// any connection model. (Between 2026-07-11 and the upstream fix
+    /// 3c388122 this was routed UPDATE-then-INSERT around the fsqlite
+    /// upsert-after-leaf-split corruption, bead u8og /
+    /// Dicklesworthstone/frankensqlite#123; the raw repro from that issue
+    /// was re-verified clean on both ISAs before restoring this form.)
     ///
     /// # Errors
     /// [`LedgerError::Invalid`] for malformed JSON; engine errors.
@@ -2296,13 +2294,14 @@ impl Ledger {
     ) -> Result<(), LedgerError> {
         self.require_json("params", params, false)?;
         self.require_json("measured", measured, false)?;
-        let updated = self
-            .conn
+        self.conn
             .prepare(
-                "UPDATE tune SET params = ?4, measured = ?5 \
-                 WHERE kernel = ?1 AND shape_class = ?2 AND machine = ?3",
+                "INSERT INTO tune(kernel, shape_class, machine, params, measured) \
+                 VALUES (?1, ?2, ?3, ?4, ?5) \
+                 ON CONFLICT(kernel, shape_class, machine) \
+                 DO UPDATE SET params = excluded.params, measured = excluded.measured",
             )
-            .map_err(|e| sql_err("tune update prepare", &e))?
+            .map_err(|e| sql_err("tune upsert prepare", &e))?
             .execute_with_params(&[
                 text_param(kernel),
                 text_param(shape_class),
@@ -2310,23 +2309,7 @@ impl Ledger {
                 text_param(params),
                 text_param(measured),
             ])
-            .map_err(|e| sql_err("tune update", &e))?;
-        if updated == 0 {
-            self.conn
-                .prepare(
-                    "INSERT INTO tune(kernel, shape_class, machine, params, measured) \
-                     VALUES (?1, ?2, ?3, ?4, ?5)",
-                )
-                .map_err(|e| sql_err("tune insert prepare", &e))?
-                .execute_with_params(&[
-                    text_param(kernel),
-                    text_param(shape_class),
-                    blob_param(machine),
-                    text_param(params),
-                    text_param(measured),
-                ])
-                .map_err(|e| sql_err("tune insert", &e))?;
-        }
+            .map_err(|e| sql_err("tune upsert", &e))?;
         Ok(())
     }
 
