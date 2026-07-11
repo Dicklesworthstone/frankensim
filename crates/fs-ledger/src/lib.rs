@@ -1647,6 +1647,15 @@ impl Ledger {
     /// Upsert one autotuner cache row (`kernel` × `shape_class` × machine
     /// fingerprint).
     ///
+    /// Implemented as UPDATE-then-INSERT rather than
+    /// `INSERT .. ON CONFLICT .. DO UPDATE`: the upsert form corrupts the
+    /// database at fsqlite HEAD when the conflict seek lands after a leaf
+    /// split (bead u8og; Dicklesworthstone/frankensqlite#123, regression in
+    /// upstream d1a543e). Revert to the single-statement upsert once #123 is
+    /// fixed. Equivalent under this connection model: the engine is
+    /// single-writer per connection, so no row can appear between the two
+    /// statements.
+    ///
     /// # Errors
     /// [`LedgerError::Invalid`] for malformed JSON; engine errors.
     pub fn tune_put(
@@ -1659,14 +1668,13 @@ impl Ledger {
     ) -> Result<(), LedgerError> {
         self.require_json("params", params, false)?;
         self.require_json("measured", measured, false)?;
-        self.conn
+        let updated = self
+            .conn
             .prepare(
-                "INSERT INTO tune(kernel, shape_class, machine, params, measured) \
-                 VALUES (?1, ?2, ?3, ?4, ?5) \
-                 ON CONFLICT(kernel, shape_class, machine) \
-                 DO UPDATE SET params = excluded.params, measured = excluded.measured",
+                "UPDATE tune SET params = ?4, measured = ?5 \
+                 WHERE kernel = ?1 AND shape_class = ?2 AND machine = ?3",
             )
-            .map_err(|e| sql_err("tune upsert prepare", &e))?
+            .map_err(|e| sql_err("tune update prepare", &e))?
             .execute_with_params(&[
                 text_param(kernel),
                 text_param(shape_class),
@@ -1674,7 +1682,23 @@ impl Ledger {
                 text_param(params),
                 text_param(measured),
             ])
-            .map_err(|e| sql_err("tune upsert", &e))?;
+            .map_err(|e| sql_err("tune update", &e))?;
+        if updated == 0 {
+            self.conn
+                .prepare(
+                    "INSERT INTO tune(kernel, shape_class, machine, params, measured) \
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                )
+                .map_err(|e| sql_err("tune insert prepare", &e))?
+                .execute_with_params(&[
+                    text_param(kernel),
+                    text_param(shape_class),
+                    blob_param(machine),
+                    text_param(params),
+                    text_param(measured),
+                ])
+                .map_err(|e| sql_err("tune insert", &e))?;
+        }
         Ok(())
     }
 
