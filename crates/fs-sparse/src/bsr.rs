@@ -149,6 +149,7 @@ impl Bsr {
     /// recompile it under `target_feature` (bead nabk). MUST stay
     /// `inline(always)`: a non-inlined call keeps baseline codegen and
     /// the per-element libm `fma()` call.
+    #[allow(clippy::inline_always)] // required to inherit the target-feature FMA capsule
     #[inline(always)]
     pub(crate) fn spmv_body(&self, x: &[f64], y: &mut [f64]) {
         for rb in 0..self.brow_ptr.len() - 1 {

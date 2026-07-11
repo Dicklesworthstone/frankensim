@@ -265,6 +265,7 @@ impl Csr {
     /// recompile it under `target_feature` — bead nabk; the a55x
     /// pattern). MUST stay `inline(always)`: a non-inlined call would
     /// keep baseline codegen and the per-element libm `fma()` call.
+    #[allow(clippy::inline_always)] // required to inherit the target-feature FMA capsule
     #[inline(always)]
     pub(crate) fn spmv_body(&self, x: &[f64], y: &mut [f64]) {
         for (r, out) in y.iter_mut().enumerate() {
@@ -287,6 +288,7 @@ impl Csr {
     }
 
     /// The spmm loop body (see [`Csr::spmv_body`]'s capsule note).
+    #[allow(clippy::inline_always)] // required to inherit the target-feature FMA capsule
     #[inline(always)]
     pub(crate) fn spmm_body(&self, x: &[f64], k: usize, y: &mut [f64]) {
         for r in 0..self.nrows {

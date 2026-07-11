@@ -102,6 +102,7 @@ impl CsrCompact {
 
     /// The serial loop body — recompiled by the x86 FMA-codegen capsule
     /// (bead nabk); MUST stay `inline(always)`.
+    #[allow(clippy::inline_always)] // required to inherit the target-feature FMA capsule
     #[inline(always)]
     pub(crate) fn spmv_body(&self, x: &[f64], y: &mut [f64]) {
         for (r, out) in y.iter_mut().enumerate() {
@@ -119,6 +120,7 @@ impl CsrCompact {
 
     /// The per-shard row-range body — recompiled by the x86 FMA-codegen
     /// capsule (bead nabk); MUST stay `inline(always)`.
+    #[allow(clippy::inline_always)] // required to inherit the target-feature FMA capsule
     #[inline(always)]
     pub(crate) fn shard_body(&self, x: &[f64], lo: usize, hi: usize, mine: &mut [f64]) {
         for r in lo..hi {
