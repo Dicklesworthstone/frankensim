@@ -54,7 +54,8 @@ Governance Rule 2).
   risk has a non-empty early-warning metric AND an owner, counts how many are
   instrumented, and separately lists schema gaps and operational receipt gaps.
   `declared_schema_ok()` and `operationally_managed()` deliberately expose the
-  two different verdicts.
+  two different verdicts. Empty audit scopes and duplicate risk ids fail closed;
+  success requires the declared/verified counts to equal the nonzero total.
 - `to_json(today_day) -> String` — a deterministic machine-readable JSON array
   with JSON-escaped strings for dashboards / CI gates. Every row carries the
   unambiguous instrumentation status and either `receipt:null` or the complete
@@ -124,8 +125,9 @@ None.
 `tests/register.rs` (Part V, 10 cases): all ten risks present + ordered;
 every risk has a metric/owner/mitigation; owners are real bead ids; lookup;
 the canonical audit is complete with an honest zero-instrumented baseline;
-`audit_slice` detects missing metric AND owner on an incomplete entry (the
-audit is not vacuous); subject-replay/future/stale receipts fail closed;
+`audit_slice` detects missing metric AND owner on an incomplete entry, rejects
+empty scopes and duplicate ids (the audit is not vacuous), and fails closed on
+subject-replay/future/stale receipts;
 missing provenance is rejected; changing subject, dashboard, verifier,
 evidence artifact, or day changes the identity; JSON includes explicit receipt
 provenance; determinism.

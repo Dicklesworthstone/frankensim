@@ -268,6 +268,37 @@ fn audit_detects_a_missing_metric_or_owner() {
 }
 
 #[test]
+fn audit_scope_cannot_be_empty_or_repeat_one_risk() {
+    let empty = audit_slice(&[], 200);
+    assert_eq!(empty.total, 0);
+    assert!(!empty.declared_schema_ok());
+    assert!(!empty.operationally_managed());
+
+    let base = risk(RiskId::R1);
+    let receipt = InstrumentationReceipt::new(
+        base.id.code(),
+        "ledger://risk/r1",
+        "fs-govern-test",
+        evidence(b"R1-complete"),
+        200,
+    )
+    .expect("complete receipt");
+    let repeated = Risk {
+        receipt: Some(receipt),
+        ..(*base).clone()
+    };
+    let duplicate = audit_slice(&[repeated.clone(), repeated], 200);
+    assert_eq!(duplicate.total, 2);
+    assert!(!duplicate.declared_schema_ok());
+    assert!(!duplicate.operationally_managed());
+    assert!(
+        duplicate
+            .schema_gaps
+            .contains(&(RiskId::R1, "duplicate risk id"))
+    );
+}
+
+#[test]
 fn json_is_well_formed_and_complete() {
     let j = to_json(200);
     assert!(j.starts_with('[') && j.ends_with(']'));

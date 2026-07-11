@@ -501,7 +501,7 @@ impl RiskAudit {
     /// says nothing about whether anything is actually measured.)
     #[must_use]
     pub fn declared_schema_ok(&self) -> bool {
-        self.schema_gaps.is_empty()
+        self.total > 0 && self.declared == self.total && self.schema_gaps.is_empty()
     }
 
     /// Is every risk OPERATIONALLY managed — declared AND its metric carries
@@ -510,7 +510,9 @@ impl RiskAudit {
     /// survival is not survival."
     #[must_use]
     pub fn operationally_managed(&self) -> bool {
-        self.declared_schema_ok() && self.operational_gaps.is_empty()
+        self.declared_schema_ok()
+            && self.verified_instrumented == self.total
+            && self.operational_gaps.is_empty()
     }
 }
 
@@ -531,8 +533,18 @@ pub fn audit_slice(risks: &[Risk], today_day: u32) -> RiskAudit {
     let mut operational_gaps = Vec::new();
     let mut declared = 0usize;
     let mut verified_instrumented = 0usize;
+    let mut seen = [false; RiskId::ALL.len()];
     for r in risks {
         let mut ok = true;
+        let index = RiskId::ALL
+            .iter()
+            .position(|candidate| *candidate == r.id)
+            .expect("every RiskId belongs to RiskId::ALL");
+        if seen[index] {
+            schema_gaps.push((r.id, "duplicate risk id"));
+            ok = false;
+        }
+        seen[index] = true;
         if r.early_warning.trim().is_empty() {
             schema_gaps.push((r.id, "missing early-warning metric"));
             ok = false;
