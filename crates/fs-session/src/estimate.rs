@@ -278,30 +278,103 @@ pub fn estimate(
     })
 }
 
-fn quantiles_of(rows: &[(f64, f64)]) -> Option<(f64, f64, f64)> {
-    let mut ratios: Vec<f64> = rows
-        .iter()
-        .filter(|(p, _)| *p > 0.0)
-        .map(|(p, a)| a / p)
-        .collect();
-    if ratios.is_empty() {
+fn zero_summary_of(rows: &[CalRow]) -> ZeroPredictionSummary {
+    let zero_rows: Vec<&CalRow> = rows.iter().filter(|r| r.predicted == 0.0).collect();
+    ZeroPredictionSummary {
+        true_zero: zero_rows.iter().filter(|r| r.fully_modeled).count(),
+        unmodeled: zero_rows.iter().filter(|r| !r.fully_modeled).count(),
+        actual_quantiles_s: sorted_quantiles(zero_rows.iter().map(|r| r.actual).collect()),
+    }
+}
+
+/// One recorded estimate-vs-actual observation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct CalRow {
+    predicted: f64,
+    actual: f64,
+    /// False when the scored estimate carried unmodeled ops: its
+    /// prediction systematically EXCLUDES wall, so a zero prediction
+    /// from such a row is a coverage gap, not a zero-cost observation.
+    fully_modeled: bool,
+}
+
+fn sorted_quantiles(mut values: Vec<f64>) -> Option<(f64, f64, f64)> {
+    if values.is_empty() {
         return None;
     }
-    ratios.sort_by(f64::total_cmp);
+    values.sort_by(f64::total_cmp);
     #[allow(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
         clippy::cast_precision_loss
     )]
-    let q = |f: f64| ratios[((ratios.len() - 1) as f64 * f).round() as usize];
+    let q = |f: f64| values[((values.len() - 1) as f64 * f).round() as usize];
     Some((q(0.1), q(0.5), q(0.9)))
 }
 
+fn quantiles_of(rows: &[CalRow]) -> Option<(f64, f64, f64)> {
+    sorted_quantiles(
+        rows.iter()
+            .filter(|r| r.predicted > 0.0)
+            .map(|r| r.actual / r.predicted)
+            .collect(),
+    )
+}
+
+/// What the zero-prediction rows look like (bead gp3.21): the rows the
+/// ratio quantiles CANNOT see. Reported instead of silently dropped so
+/// repeated zero predictions can never make calibration look healthier
+/// than it is. No ratio is invented for them — the actual-time
+/// distribution travels raw.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ZeroPredictionSummary {
+    /// Zero-prediction rows from FULLY MODELED estimates: the model
+    /// genuinely asserted zero cost.
+    pub true_zero: usize,
+    /// Zero-prediction rows from estimates with unmodeled ops: the
+    /// prediction excluded wall it could not see (a coverage gap).
+    pub unmodeled: usize,
+    /// (p10, p50, p90) of the ACTUAL wall over all zero-prediction
+    /// rows; `None` when there are none.
+    pub actual_quantiles_s: Option<(f64, f64, f64)>,
+}
+
+/// Governance-configurable calibration thresholds (bead gp3.21).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CalibrationPolicy {
+    /// Largest tolerated fraction of zero-prediction rows before the
+    /// report is DEGRADED (quantiles alone are no longer trustworthy).
+    pub max_zero_prediction_fraction: f64,
+}
+
+impl Default for CalibrationPolicy {
+    fn default() -> Self {
+        CalibrationPolicy {
+            max_zero_prediction_fraction: 0.25,
+        }
+    }
+}
+
+/// The policy verdict over a calibration report.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CalibrationHealth {
+    /// Zero-prediction mass is within the declared threshold.
+    Healthy,
+    /// Too much of the evidence is invisible to the ratio quantiles.
+    Degraded {
+        /// Observed zero-prediction fraction.
+        zero_fraction: f64,
+        /// The policy threshold it exceeded.
+        limit: f64,
+    },
+}
+
 /// Estimate-vs-actual tracking: the calibration curve the acceptance
-/// criteria demand (`actual / predicted-p50` ratio quantiles).
+/// criteria demand (`actual / predicted-p50` ratio quantiles), plus the
+/// zero-prediction telemetry the quantiles cannot carry.
 #[derive(Debug, Default)]
 pub struct CalibrationReport {
-    rows: Mutex<Vec<(f64, f64)>>, // (predicted_p50, actual)
+    rows: Mutex<Vec<CalRow>>,
 }
 
 impl CalibrationReport {
@@ -351,11 +424,54 @@ impl CalibrationReport {
                 requirement: "must be finite for a positive prediction",
             });
         }
-        self.rows
-            .lock()
-            .expect("calibration lock")
-            .push((estimate.wall_p50_s, actual_wall_s));
+        self.rows.lock().expect("calibration lock").push(CalRow {
+            predicted: estimate.wall_p50_s,
+            actual: actual_wall_s,
+            fully_modeled: estimate.unmodeled_ops.is_empty(),
+        });
         Ok(())
+    }
+
+    /// The zero-prediction telemetry: counts split by whether the
+    /// estimate was fully modeled, plus the raw actual-time quantiles.
+    #[must_use]
+    pub fn zero_prediction_summary(&self) -> ZeroPredictionSummary {
+        let rows = self.rows.lock().expect("calibration lock");
+        zero_summary_of(&rows)
+    }
+
+    /// Judge this report against a governance policy.
+    ///
+    /// # Errors
+    /// [`crate::SessionError::InvalidResource`] for a non-finite or
+    /// out-of-[0, 1] threshold — an unusable policy cannot certify.
+    pub fn health(
+        &self,
+        policy: &CalibrationPolicy,
+    ) -> Result<CalibrationHealth, crate::SessionError> {
+        let limit = policy.max_zero_prediction_fraction;
+        if !limit.is_finite() || !(0.0..=1.0).contains(&limit) {
+            return Err(crate::SessionError::InvalidResource {
+                resource: "calibration zero-prediction threshold",
+                value: limit,
+                requirement: "must be finite and within [0, 1]",
+            });
+        }
+        let rows = self.rows.lock().expect("calibration lock");
+        if rows.is_empty() {
+            return Ok(CalibrationHealth::Healthy);
+        }
+        #[allow(clippy::cast_precision_loss)]
+        let zero_fraction =
+            rows.iter().filter(|r| r.predicted == 0.0).count() as f64 / rows.len() as f64;
+        Ok(if zero_fraction <= limit {
+            CalibrationHealth::Healthy
+        } else {
+            CalibrationHealth::Degraded {
+                zero_fraction,
+                limit,
+            }
+        })
     }
 
     /// Ratio quantiles `(p10, p50, p90)` of actual/predicted; None until
@@ -373,11 +489,12 @@ impl CalibrationReport {
         // caught by the hung conformance run).
         let rows = self.rows.lock().expect("calibration lock");
         let mut out = String::from("{\"kind\":\"estimate-calibration\",\"rows\":[");
-        for (i, (p, a)) in rows.iter().enumerate() {
+        for (i, row) in rows.iter().enumerate() {
             if i > 0 {
                 out.push(',');
             }
-            let _ = write!(out, "[{p},{a}]");
+            let modeled = u8::from(row.fully_modeled);
+            let _ = write!(out, "[{},{},{modeled}]", row.predicted, row.actual);
         }
         out.push_str("],\"ratio_quantiles\":");
         match quantiles_of(&rows) {
@@ -386,7 +503,19 @@ impl CalibrationReport {
             }
             None => out.push_str("null"),
         }
-        out.push('}');
+        let zero = zero_summary_of(&rows);
+        let _ = write!(
+            out,
+            ",\"zero_predictions\":{{\"true_zero\":{},\"unmodeled\":{},\"actual_quantiles_s\":",
+            zero.true_zero, zero.unmodeled
+        );
+        match zero.actual_quantiles_s {
+            Some((a, b, c)) => {
+                let _ = write!(out, "[{a},{b},{c}]");
+            }
+            None => out.push_str("null"),
+        }
+        out.push_str("}}");
         out
     }
 

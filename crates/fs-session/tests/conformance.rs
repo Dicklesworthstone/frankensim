@@ -791,7 +791,8 @@ fn ss_004b_estimate_refuses_invalid_resource_domains() {
     assert!(calibration.ratio_quantiles().is_none());
     assert_eq!(
         calibration.to_json(),
-        "{\"kind\":\"estimate-calibration\",\"rows\":[],\"ratio_quantiles\":null}"
+        "{\"kind\":\"estimate-calibration\",\"rows\":[],\"ratio_quantiles\":null,\
+         \"zero_predictions\":{\"true_zero\":0,\"unmodeled\":0,\"actual_quantiles_s\":null}}"
     );
 }
 

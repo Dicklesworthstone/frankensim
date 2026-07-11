@@ -16,12 +16,17 @@ pub mod governor;
 pub mod guidance;
 pub mod token;
 
-pub use estimate::{CalibrationReport, Estimate, estimate};
+pub use estimate::{
+    CalibrationHealth, CalibrationPolicy, CalibrationReport, Estimate, ZeroPredictionSummary,
+    estimate,
+};
 pub use gemm_tune::{
     GEMM_TUNE_ROW_RECEIPT_DOMAIN, GEMM_TUNER_SCHEMA_VERSION, GemmDispatch, GemmExecutionReceipt,
-    GemmPanelReceipt, GemmTuneCache, GemmTuneError, ValidatedGemmTuneRow, gemm_f64_session,
-    gemm_f64_session_with_pool, gemm_f64_session_with_pool_declared, gemm_kernel_key,
-    gemm_shape_class, gemm_tune_key_with_pool,
+    GemmMemoryReceipt, GemmPanelReceipt, GemmTuneCache, GemmTuneError, ValidatedGemmTuneRow,
+    gemm_f64_session, gemm_f64_session_budgeted, gemm_f64_session_with_pool,
+    gemm_f64_session_with_pool_budgeted, gemm_f64_session_with_pool_declared,
+    gemm_f64_session_with_pool_declared_budgeted, gemm_kernel_key, gemm_shape_class, gemm_tune_key,
+    gemm_tune_key_budgeted, gemm_tune_key_with_pool, gemm_tune_key_with_pool_budgeted,
 };
 pub use governor::{
     Charge, DegradationEvent, DegradationStep, Enforcement, Governor, StepPhase, SubmissionReceipt,

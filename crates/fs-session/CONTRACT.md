@@ -75,7 +75,16 @@ Consumers: the P2 marquee demo, the HELM e2e suite (gp3.11).
   refused instead of silently falling back to the unit-size default.
 - `CalibrationReport` — estimate-vs-actual rows, ratio quantiles, and a
   content-addressed ledger artifact (`estimate-calibration`): the cost
-  models' own report card. Row ingestion rejects negative/non-finite values and
+  models' own report card. Zero-prediction rows (bead gp3.21) are
+  EXCLUDED from ratio quantiles (no invented ratios) but never hidden:
+  `zero_prediction_summary()` and the JSON's `zero_predictions` object
+  carry their count — split into true-zero (fully modeled) vs unmodeled
+  (coverage gap) — plus the raw actual-time quantiles; rows serialize as
+  `[predicted, actual, fully_modeled]` triples. `health(&policy)` judges
+  the zero-prediction fraction against the governance-configurable
+  `CalibrationPolicy` threshold (default 0.25; non-finite or out-of-[0,1]
+  thresholds refuse) and returns Healthy or Degraded, never a silent
+  pass. Row ingestion rejects negative/non-finite values and
   non-finite ratios before mutation, so its canonical JSON cannot be poisoned
   by `NaN`/infinity spellings.
 - `Guidance { code, diagnosis, fixes }` — errors as teaching:
@@ -95,9 +104,11 @@ Consumers: the P2 marquee demo, the HELM e2e suite (gp3.11).
   — the production GEMM autotune loop (bead yqug): measure → cache →
   model → cancellation-correct dispatch through one caller-owned, reusable
   `TilePool`. `gemm_f64_session(..., threads, ...)` is the compatibility
-  wrapper that constructs an unpinned host pool. The scoped key binds fs-la's bit
-  semantics version, power-of-two shape class, requested/normalized thread
-  budget, exact capped probe dims (M/K ≤ 512, N ≤ 2048), resolved SIMD tier,
+  wrapper that constructs an unpinned host pool. The `*_budgeted` forms accept
+  an explicit `GemmMemoryEnvelope`; legacy wrappers pass the explicit unbounded
+  sentinel. The scoped key binds fs-la's bit semantics version, power-of-two
+  shape class, requested/normalized thread budget, memory limit, exact capped
+  probe dims (M/K ≤ 512, N ≤ 2048), resolved SIMD tier,
   the executing pool's canonical topology/mode/weights/arena/pin-groups
   identity, implementation version, and generated compiler/profile/codegen
   build fingerprint, plus `GEMM_TUNER_SCHEMA_VERSION`, which must bump whenever
@@ -108,7 +119,10 @@ Consumers: the P2 marquee demo, the HELM e2e suite (gp3.11).
   small-M, and no-product calls bypass tuning. Pinned plans skip measurement;
   else an exact tuner/ledger row is used; else an up-to-4×2 lattice is
   deduplicated by the `(mc,nc)` values fs-la will actually execute and sampled
-  three times. Every output word from every repeat is compared by `f64::to_bits`
+  three times. Probe A, B, candidate C, and the exact-bit reference are
+  fallibly reserved and jointly charged to the session envelope; bounded sweeps
+  pass only the remaining child ceiling to fs-la. Every output word from every
+  repeat is compared by `f64::to_bits`
   (signed zero and NaN payloads included); drift fails closed. The declared
   model is argmin of minimum wall time with lattice-order tie breaking, not a
   confidence claim. `GemmTuneCache` makes durable access explicit:
@@ -116,7 +130,8 @@ Consumers: the P2 marquee demo, the HELM e2e suite (gp3.11).
   existing validated row but cannot publish during speculative work. A newly
   measured row is sealed as `ValidatedGemmTuneRow` inside `GemmDispatch`; its
   private fields cannot be forged or altered. `receipt_json()` is its canonical
-  kernel/shape/machine/params/measured preimage; a public globally unique
+  kernel/shape/machine/params/measured/memory-limit/probe-buffer-plan preimage;
+  a public globally unique
   derive-key domain hashes those exact bytes, and
   `publish_to_ledger` participates in an already-open wider transaction.
   Cache adoption returns the same sealed identity on its first dispatch so
@@ -131,9 +146,9 @@ Consumers: the P2 marquee demo, the HELM e2e suite (gp3.11).
   only after fs-la drains and successfully commits the staged output.
   `GemmDispatch.run` carries the final compute counts and every real per-panel
   fs-exec `RunReport`; `execution_receipt()` projects kernel, mode, deterministic
-  declared panel ordinal, and completed/total counts into
-  `GemmExecutionReceipt`, explicitly excluding steal, latency, and
-  worker-distribution measurements from replay identity.
+  declared panel ordinal, completed/total counts, and the deterministic memory
+  plan into `GemmExecutionReceipt`, explicitly excluding steal, latency,
+  worker-distribution, peak-use, and refusal measurements from replay identity.
   `GemmDispatch.kernel` is the exact replay key; replay pins the recorded key
   and params rather than reconstructing a weaker base key.
 
@@ -296,3 +311,9 @@ armed and runs when an x86 host picks it up.
 - GEMM minimum-wall-time ranking is a deterministic selection rule over the
   recorded samples, not statistical confidence. The x86 oracle lane remains
   armed rather than claimed as measured until it runs on the reference host.
+- The session envelope currently covers the four dominant numeric tune buffers
+  plus every fs-la-owned dispatch reservation. Candidate/BTree/ranking vectors,
+  sample/evidence/JSON strings, sealed-row strings, and ledger/cache transient
+  values are not yet under the same lease; that precise remaining scope is
+  `frankensim-epic-substrate-wf9.15.1`. Generic TilePool metadata remains the
+  separate `frankensim-epic-substrate-wf9.16` boundary.
