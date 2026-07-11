@@ -133,7 +133,7 @@ impl DecimalCount {
                 exponent10: 0,
             });
         }
-        while significand % 10 == 0 {
+        while significand.is_multiple_of(10) {
             significand /= 10;
             exponent10 = exponent10.checked_add(1)?;
         }
@@ -169,7 +169,7 @@ impl DecimalCount {
             }
             let mut reduced = self.significand;
             for _ in 0..denominator_power {
-                if reduced % 5 != 0 {
+                if !reduced.is_multiple_of(5) {
                     return None;
                 }
                 reduced /= 5;
@@ -200,11 +200,8 @@ impl DecimalCount {
     }
 
     fn approx_f64(self) -> f64 {
-        // det-ok: this is the documented APPROXIMATE view of an exact
-        // decimal (identity and enforcement use the significand/exponent
-        // form); a 1-ULP profile divergence here cannot reach any
-        // canonical hash or replay identity.
         #[allow(clippy::cast_precision_loss)]
+        // det-ok: documented APPROXIMATE view; identity/enforcement use the exact significand/exponent form, so a 1-ULP profile divergence cannot reach any canonical hash
         let magnitude = (self.significand as f64) * 10_f64.powi(self.exponent10);
         if self.negative { -magnitude } else { magnitude }
     }

@@ -5,7 +5,7 @@
 //! explicit and inspectable; version pinning round-trips; both parsers are
 //! total (fuzz: structured rejections with in-bounds spans, never panics).
 
-use fs_ir::{IR_VERSION, Node, NodeKind, Study, json, lower, sexpr};
+use fs_ir::{IR_VERSION, Node, NodeKind, Study, VersionedProgram, json, lower, sexpr};
 
 fn count_qty(n: &Node, hits: &mut usize) {
     match &n.kind {
@@ -303,6 +303,10 @@ fn ir_0xx_exact_count_literals_survive_admission_and_identity() {
     let err = sexpr::parse(&hostile).expect_err("oversized exact count must refuse");
     assert!(err.to_string().contains("exact count range"));
     assert!(err.span.end <= hostile.len());
+    assert!(
+        err.detail.len() < 256,
+        "hostile token must not be copied wholesale into diagnostics"
+    );
     // Decimal/exponent semantics are exact too: useful fractional-unit
     // spellings work without binary-float authority decisions.
     let frac = sexpr::parse("1.5GiB").expect("parses");
@@ -332,8 +336,8 @@ fn ir_0xx_exact_count_literals_survive_admission_and_identity() {
         panic!("count expected");
     };
     assert_eq!(value.integral_bytes(*unit), Some(512));
-    let reduced = sexpr::parse("316912650130689144134521484375e-30GiB")
-        .expect("large exact decimal parses");
+    let reduced =
+        sexpr::parse("316912650130689144134521484375e-30GiB").expect("large exact decimal parses");
     let NodeKind::Count { value, unit } = &reduced.kind else {
         panic!("count expected");
     };
@@ -382,9 +386,53 @@ fn ir_006_version_pinning_round_trips() {
     let via_sexpr = sexpr::parse(&sexpr::print(&via_json)).unwrap();
     let study = Study::from_node(&via_sexpr).unwrap();
     assert_eq!(study.constellation_lock(), Some("2026-07"));
+
+    let artifact = VersionedProgram::current(ast);
+    let canonical_sexpr = artifact.print_sexpr();
+    let canonical_json = artifact.print_json();
+    let from_sexpr = VersionedProgram::parse_sexpr(&canonical_sexpr).expect("v2 envelope");
+    let from_json = VersionedProgram::parse_json(&canonical_json).expect("v2 JSON envelope");
+    assert_eq!(from_sexpr.version(), IR_VERSION);
+    assert!(from_sexpr.program().same_shape(from_json.program()));
+    assert_eq!(from_sexpr.print_sexpr(), canonical_sexpr);
+    assert_eq!(from_json.print_json(), canonical_json);
+
+    for unsupported in [1, IR_VERSION + 1] {
+        let source = canonical_sexpr.replacen(
+            &format!(":version {IR_VERSION}"),
+            &format!(":version {unsupported}"),
+            1,
+        );
+        let error = VersionedProgram::parse_sexpr(&source)
+            .expect_err("unsupported language semantics must refuse");
+        assert_eq!(error.kind.code(), "IrUnsupportedVersion");
+        assert_eq!(
+            &source[error.span.start..error.span.end],
+            unsupported.to_string()
+        );
+    }
+    let newer_json = canonical_json.replacen(
+        &format!("{{\"i\":{IR_VERSION}}}"),
+        &format!("{{\"i\":{}}}", IR_VERSION + 1),
+        1,
+    );
+    assert_eq!(
+        VersionedProgram::parse_json(&newer_json)
+            .expect_err("newer JSON envelope must refuse")
+            .kind
+            .code(),
+        "IrUnsupportedVersion"
+    );
+
+    let v1_count = sexpr::parse("384.0GiB").expect("legacy bare syntax parses syntax-only");
+    let migrated = VersionedProgram::current(v1_count);
+    assert!(
+        migrated.print_sexpr().contains("384e0GiB"),
+        "migration is explicit re-emission under the v2 envelope"
+    );
     verdict(
         "ir-006",
-        "constellation lock pin survives sexpr->json->sexpr verbatim",
+        "constellation lock and IR v2 envelope survive both syntaxes; unsupported versions refuse",
     );
 }
 

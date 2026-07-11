@@ -29,6 +29,11 @@ typed AST. Layer: L6 (HELM). Runtime deps: `std` + fs-qty.
   deterministic canonical spelling.
 - `Node::same_shape` — semantic equality ignoring spans and Qty
   presentation; the isomorphism property is stated in terms of it.
+- `VersionedProgram` — the persisted/replayed artifact boundary shared by both
+  syntaxes. It canonically wraps a program as
+  `(frankensim-ir :version 2 :program <node>)`, binds the language version into
+  serialized identity, and refuses older/newer semantics unless a caller first
+  performs an explicit audited migration. Bare parsers remain syntax-only.
 - `sexpr::parse/print` — total reader with spans, comments (`;`),
   string escapes, deterministic atom classification (numeric-leading
   tokens MUST fully parse — a number with a garbage suffix is a structured
@@ -228,6 +233,9 @@ structured refusal).
   integer/decimal atoms. V1 canonical artifacts must be reparsed and re-emitted
   under v2 before their new identity is recorded; no silent v1 hash migration
   is claimed.
+- Bare `sexpr::parse`/`json::parse` intentionally do not infer an artifact
+  version. Persisted or replayed programs must use `VersionedProgram`; callers
+  that ledger a bare AST have no version-binding claim.
 - The query language is v0: a FIXED QoI menu (max/integral/exceedance), not
   a general program surface. `Query::admit` type-checks well-posedness and
   dimensions ONLY — it does NOT plan, cost, or execute a query (the greedy

@@ -219,7 +219,7 @@ pub(crate) fn classify_atom(text: &str, span: Span) -> Result<Node, IrError> {
             Err(_) => Err(IrError {
                 span,
                 kind: IrErrorKind::BadSeed,
-                detail: format!("{text:?} is not a valid 64-bit hex seed"),
+                detail: format!("{} is not a valid 64-bit hex seed", token_preview(text)),
                 hint: "seeds are 0x-prefixed hex fitting u64, e.g. 0x5EED0001".to_string(),
             }),
         };
@@ -240,6 +240,18 @@ pub(crate) fn classify_atom(text: &str, span: Span) -> Result<Node, IrError> {
     })
 }
 
+fn token_preview(text: &str) -> String {
+    const MAX_PREVIEW_BYTES: usize = 160;
+    if text.len() <= MAX_PREVIEW_BYTES {
+        return format!("{text:?}");
+    }
+    let mut end = MAX_PREVIEW_BYTES;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{:?}... ({} bytes)", &text[..end], text.len())
+}
+
 fn classify_numeric(text: &str, span: Span) -> Result<Node, IrError> {
     if let Ok(i) = text.parse::<i64>() {
         return Ok(Node {
@@ -252,7 +264,7 @@ fn classify_numeric(text: &str, span: Span) -> Result<Node, IrError> {
             return Err(IrError {
                 span,
                 kind: IrErrorKind::BadNumber,
-                detail: format!("{text:?} is not finite"),
+                detail: format!("{} is not finite", token_preview(text)),
                 hint: "IR literals must be finite".to_string(),
             });
         }
@@ -288,7 +300,10 @@ fn classify_numeric(text: &str, span: Span) -> Result<Node, IrError> {
                 Err(_) => Err(IrError {
                     span,
                     kind: IrErrorKind::BadNumber,
-                    detail: format!("{text:?} exceeds the exact count range (u128)"),
+                    detail: format!(
+                        "{} exceeds the exact count range (u128)",
+                        token_preview(text)
+                    ),
                     hint: "integer count literals are exact; this one cannot be represented"
                         .to_string(),
                 }),
@@ -316,7 +331,10 @@ fn classify_numeric(text: &str, span: Span) -> Result<Node, IrError> {
         Err(e) => Err(IrError {
             span,
             kind: IrErrorKind::BadQuantity,
-            detail: format!("{text:?} is not an int, float, quantity, or count: {e}"),
+            detail: format!(
+                "{} is not an int, float, quantity, or count: {e}",
+                token_preview(text)
+            ),
             hint: "numeric tokens must fully parse; e.g. 0.12Pa*s, 65deg, 384GiB, 2e-2".to_string(),
         }),
     }
