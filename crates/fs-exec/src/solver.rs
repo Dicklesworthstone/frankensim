@@ -183,6 +183,16 @@ pub mod codec {
         pub fn is_empty(&self) -> bool {
             self.at == self.bytes.len()
         }
+
+        /// Current payload cursor for the enclosing schema validator.
+        pub(super) fn position(&self) -> usize {
+            self.at
+        }
+
+        /// Bytes not consumed by the payload decoder.
+        pub(super) fn remaining(&self) -> usize {
+            self.bytes.len() - self.at
+        }
     }
 }
 
@@ -437,10 +447,10 @@ pub trait SolverState: Sized {
             Ok((state, provenance))
         } else {
             Err(SnapshotError::Payload(codec::CodecError {
-                at: payload.len(),
+                at: dec.position(),
                 what: "end of snapshot payload",
                 needed: 0,
-                remaining: 1,
+                remaining: dec.remaining(),
             }))
         }
     }
@@ -767,6 +777,24 @@ mod tests {
         let mut noisy = s0.to_bytes();
         noisy.push(0xFF);
         assert!(JacobiState::from_bytes(&noisy).is_err());
+
+        let mut encoder = codec::Enc::new();
+        s0.encode(&mut encoder);
+        let mut payload = encoder.into_bytes();
+        let decoded_len = payload.len();
+        payload.extend_from_slice(&[0xAA, 0xBB, 0xCC]);
+        let sealed_with_schema_tail = envelope::seal(
+            JacobiState::TYPE_ID,
+            JacobiState::SCHEMA_VERSION,
+            0,
+            &payload,
+        );
+        let Err(SnapshotError::Payload(tail)) = JacobiState::from_bytes(&sealed_with_schema_tail)
+        else {
+            panic!("checksummed trailing schema bytes must reach the payload refusal");
+        };
+        assert_eq!(tail.at, decoded_len);
+        assert_eq!(tail.remaining, 3);
     }
 
     #[test]
