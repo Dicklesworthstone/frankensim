@@ -67,7 +67,9 @@ Consumers: the P2 marquee demo, the HELM e2e suite (gp3.11).
   named `mem` has no authority to grant a budget.
   `unmodeled_ops` means no model exists; a present model that refuses its input,
   emits invalid numbers, or reverses its quantiles is an error, not silently
-  relabeled as a coverage gap.
+  relabeled as a coverage gap. An explicitly declared `:dof`, `:size`, or
+  `:modes` feature must have one numeric value, and duplicate size features are
+  refused instead of silently falling back to the unit-size default.
 - `CalibrationReport` — estimate-vs-actual rows, ratio quantiles, and a
   content-addressed ledger artifact (`estimate-calibration`): the cost
   models' own report card. Row ingestion rejects negative/non-finite values and

@@ -31,35 +31,57 @@ pub struct Estimate {
     pub unmodeled_ops: Vec<String>,
 }
 
-fn size_of_call(items: &[Node]) -> f64 {
-    for pair in items.windows(2) {
-        if let NodeKind::Keyword(k) = &pair[0].kind
-            && (k == "dof" || k == "size" || k == "modes")
-        {
-            match &pair[1].kind {
-                NodeKind::Int(i) => {
-                    #[allow(clippy::cast_precision_loss)]
-                    return *i as f64;
-                }
-                NodeKind::Float(f) => return *f,
-                _ => {}
-            }
-        }
-    }
-    1.0
+#[allow(clippy::cast_precision_loss)]
+fn integer_size(value: i64) -> f64 {
+    value as f64
 }
 
-fn walk_calls(node: &Node, out: &mut Vec<(String, f64)>) {
+fn size_of_call(items: &[Node], verb: &str) -> Result<f64, crate::SessionError> {
+    let mut size = None;
+    for (index, item) in items.iter().enumerate() {
+        let NodeKind::Keyword(keyword) = &item.kind else {
+            continue;
+        };
+        if keyword != "dof" && keyword != "size" && keyword != "modes" {
+            continue;
+        }
+        if size.is_some() {
+            return Err(crate::SessionError::Submission {
+                what: format!(
+                    "operation {verb:?} declares more than one :dof/:size/:modes feature"
+                ),
+            });
+        }
+        let value = items
+            .get(index + 1)
+            .ok_or_else(|| crate::SessionError::Submission {
+                what: format!("operation {verb:?} has no value after :{keyword}"),
+            })?;
+        size = Some(match &value.kind {
+            NodeKind::Int(value) => integer_size(*value),
+            NodeKind::Float(value) => *value,
+            _ => {
+                return Err(crate::SessionError::Submission {
+                    what: format!("operation {verb:?} requires a numeric value after :{keyword}"),
+                });
+            }
+        });
+    }
+    Ok(size.unwrap_or(1.0))
+}
+
+fn walk_calls(node: &Node, out: &mut Vec<(String, f64)>) -> Result<(), crate::SessionError> {
     if let NodeKind::List(items) = &node.kind {
         if let Some(h) = node.head()
             && h.contains('.')
         {
-            out.push((h.to_string(), size_of_call(items)));
+            out.push((h.to_string(), size_of_call(items, h)?));
         }
         for child in items {
-            walk_calls(child, out);
+            walk_calls(child, out)?;
         }
     }
+    Ok(())
 }
 
 fn mem_ask(budget: Option<&Node>) -> Result<Option<u64>, crate::SessionError> {
@@ -140,7 +162,9 @@ fn mem_ask(budget: Option<&Node>) -> Result<Option<u64>, crate::SessionError> {
 ///
 /// # Errors
 /// [`crate::SessionError::InvalidResource`] when cores, a declared memory ask,
-/// or a derived wall/energy estimate is outside its finite non-negative domain.
+/// or a derived wall/energy estimate is outside its finite non-negative domain;
+/// [`crate::SessionError::Submission`] for malformed studies or explicit size
+/// features and for cost-model refusals.
 pub fn estimate(
     study: &Node,
     models: &BTreeMap<String, CostModel>,
@@ -160,10 +184,10 @@ pub fn estimate(
     let mem_ask_bytes = mem_ask(recognized.budget)?;
     let mut calls = Vec::new();
     for (_, expression) in &recognized.lets {
-        walk_calls(expression, &mut calls);
+        walk_calls(expression, &mut calls)?;
     }
     for clause in &recognized.body {
-        walk_calls(clause, &mut calls);
+        walk_calls(clause, &mut calls)?;
     }
     let (mut p10, mut p50, mut p90) = (0.0f64, 0.0f64, 0.0f64);
     let mut unmodeled = Vec::new();

@@ -674,7 +674,8 @@ fn ss_004_estimate_dry_run_and_ledgered_calibration() {
 #[test]
 fn ss_004b_estimate_refuses_invalid_resource_domains() {
     let valid = fs_ir::sexpr::parse(SPOUT).expect("valid fixture");
-    let models = BTreeMap::new();
+    let mut models = BTreeMap::new();
+    models.insert("xform.level-set-velocity".to_string(), lbm_cost_model());
     for cores in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0] {
         assert!(matches!(
             estimate(&valid, &models, cores),
@@ -738,6 +739,24 @@ fn ss_004b_estimate_refuses_invalid_resource_domains() {
             ..
         })
     ));
+    for malformed_size in [
+        "(study \"missing-size\" (xform.level-set-velocity field :dof))",
+        "(study \"nonnumeric-size\" (xform.level-set-velocity field :size \"many\"))",
+        "(study \"duplicate-size\" (xform.level-set-velocity field :dof 4 :size 8))",
+    ] {
+        let study = fs_ir::sexpr::parse(malformed_size).expect("malformed size remains an AST");
+        assert!(matches!(
+            estimate(&study, &models, 1.0),
+            Err(SessionError::Submission { .. })
+        ));
+    }
+    let implicit_unit_size =
+        fs_ir::sexpr::parse("(study \"implicit-unit-size\" (xform.level-set-velocity field))")
+            .expect("size-free operation remains a valid AST");
+    assert!(
+        estimate(&implicit_unit_size, &models, 1.0).is_ok(),
+        "the unit-size default remains available only when no size feature is declared"
+    );
 
     let calibration = CalibrationReport::new();
     let finite = Estimate {
