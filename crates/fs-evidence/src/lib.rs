@@ -449,13 +449,13 @@ impl ValidityDomain {
         self.bounds.keys().cloned().collect()
     }
 
-    fn to_json(&self) -> String {
+    pub(crate) fn to_json(&self) -> String {
         let mut s = String::from("{");
         for (i, (k, (lo, hi))) in self.bounds.iter().enumerate() {
             if i > 0 {
                 s.push(',');
             }
-            let _ = write!(s, "\"{k}\":[{lo},{hi}]");
+            let _ = write!(s, "{}:[{},{}]", json_string(k), fmt_f64(*lo), fmt_f64(*hi));
         }
         s.push('}');
         s
@@ -1140,17 +1140,24 @@ impl<T> Evidence<T> {
         }
         let _ = write!(
             s,
-            ",\"model\":{{\"cards\":[{}],\"discrepancy_rel\":{},\"in_domain\":{},\
-             \"validity\":{}}},\"adjoint\":{}}}",
+            ",\"model\":{{\"cards\":[{}],\"assumptions\":[{}],\"discrepancy_rel\":{},\
+             \"in_domain\":{},\"validity\":{}}},\"sensitivity\":{},\"adjoint\":{}}}",
             self.model
                 .cards
                 .iter()
-                .map(|c| format!("\"{c}\""))
+                .map(|c| json_string(c))
+                .collect::<Vec<_>>()
+                .join(","),
+            self.model
+                .assumptions
+                .iter()
+                .map(|assumption| json_string(assumption))
                 .collect::<Vec<_>>()
                 .join(","),
             fmt_f64(self.model.discrepancy_rel),
             self.model.in_domain,
             self.model.validity.to_json(),
+            sensitivity_json(&self.sensitivity),
             self.adjoint_ref
                 .map_or_else(|| "null".to_string(), |a| format!("\"{:016x}\"", a.0)),
         );
@@ -1160,12 +1167,44 @@ impl<T> Evidence<T> {
 
 /// Finite floats print shortest-round-trip; non-finite prints as a tagged
 /// string (fs-obs doctrine: JSON has no Inf/NaN).
-fn fmt_f64(v: f64) -> String {
+pub(crate) fn fmt_f64(v: f64) -> String {
     if v.is_finite() {
         format!("{v}")
     } else {
         format!("\"non-finite:{v}\"")
     }
+}
+
+pub(crate) fn json_string(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if u32::from(c) < 0x20 => {
+                let _ = write!(out, "\\u{:04x}", u32::from(c));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+fn sensitivity_json(summary: &SensitivitySummary) -> String {
+    let mut out = String::from("{");
+    for (index, (parameter, derivative)) in summary.d_qoi.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        let _ = write!(out, "{}:{}", json_string(parameter), fmt_f64(*derivative));
+    }
+    out.push('}');
+    out
 }
 
 impl fmt::Display for DecisionStatus {
@@ -1304,9 +1343,41 @@ mod tests {
             "\"numerical\":",
             "\"statistical\":",
             "\"model\":",
+            "\"sensitivity\":",
             "\"adjoint\":",
         ] {
             assert!(row.contains(key), "missing {key} in {row}");
         }
+    }
+
+    #[test]
+    fn ledger_row_escapes_all_evidence_metadata_and_keeps_missing_slices() {
+        let mut sensitivity = SensitivitySummary::default();
+        sensitivity
+            .d_qoi
+            .insert("gain\"\n\u{0001}".to_string(), f64::NAN);
+        let evidence = Evidence::exact(1.0, ProvenanceHash::of_bytes(b"hostile-row"))
+            .with_model(ModelEvidence {
+                cards: vec!["card\"\n\u{0002}".to_string()],
+                assumptions: vec!["assume\\\r\u{0003}".to_string()],
+                validity: ValidityDomain::unconstrained().with(
+                    "axis\"\n\u{0004}",
+                    f64::NEG_INFINITY,
+                    f64::INFINITY,
+                ),
+                discrepancy_rel: f64::INFINITY,
+                in_domain: false,
+            })
+            .with_sensitivity(sensitivity);
+
+        let row = evidence.to_ledger_row_json();
+        assert!(row.contains("\"assumptions\":["), "{row}");
+        assert!(row.contains("\"sensitivity\":{"), "{row}");
+        assert!(row.contains("card\\\"\\n\\u0002"), "{row}");
+        assert!(row.contains("axis\\\"\\n\\u0004"), "{row}");
+        assert!(row.contains("gain\\\"\\n\\u0001"), "{row}");
+        assert!(row.contains("\"non-finite:inf\""), "{row}");
+        assert!(row.contains("\"non-finite:NaN\""), "{row}");
+        assert!(!row.chars().any(|ch| u32::from(ch) < 0x20), "{row:?}");
     }
 }

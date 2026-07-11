@@ -7,7 +7,7 @@
 //! construction (frame flagship), surrogate out-of-distribution failure,
 //! ground-motion model assumptions.
 
-use crate::{ProvenanceHash, ValidityDomain};
+use crate::{ProvenanceHash, ValidityDomain, fmt_f64, json_string};
 use core::fmt;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -98,43 +98,25 @@ impl ModelCard {
     pub fn to_ledger_row_json(&self) -> String {
         let list = |xs: &[String]| {
             xs.iter()
-                .map(|x| format!("\"{x}\""))
+                .map(|x| json_string(x))
                 .collect::<Vec<_>>()
                 .join(",")
         };
         let mut s = String::with_capacity(256);
         let _ = write!(
             s,
-            "{{\"name\":\"{}\",\"version\":\"{}\",\"ambition\":\"{}\",\"assumptions\":[{}],\
+            "{{\"name\":{},\"version\":{},\"ambition\":\"{}\",\"assumptions\":[{}],\
              \"known_failures\":[{}],\"discrepancy_rel\":{},\"calibration\":{},\"validity\":",
-            self.name,
-            self.version,
+            json_string(&self.name),
+            json_string(&self.version),
             self.ambition.tag(),
             list(&self.assumptions),
             list(&self.known_failures),
-            self.discrepancy_rel,
+            fmt_f64(self.discrepancy_rel),
             self.calibration
                 .map_or_else(|| "null".to_string(), |c| format!("\"{:016x}\"", c.0)),
         );
-        s.push_str(&self.validity_json());
-        s.push('}');
-        s
-    }
-
-    fn validity_json(&self) -> String {
-        // Reuse the domain's canonical rendering through a tiny shim (the
-        // field is private to keep the invariants in one place).
-        let mut s = String::from("{");
-        let mut first = true;
-        for name in self.validity_params() {
-            if let Some((lo, hi)) = self.validity.bound(&name) {
-                if !first {
-                    s.push(',');
-                }
-                first = false;
-                let _ = write!(s, "\"{name}\":[{lo},{hi}]");
-            }
-        }
+        s.push_str(&self.validity.to_json());
         s.push('}');
         s
     }
@@ -286,5 +268,27 @@ mod tests {
         let a = row.find("resolved-eddy").expect("assumption present");
         let b = row.find("wall model").expect("assumption present");
         assert!(a < b);
+    }
+
+    #[test]
+    fn card_rows_escape_metadata_and_tag_non_finite_numbers() {
+        let card = ModelCard::new(
+            "model\"\n\u{0001}",
+            "v\\\r\u{0002}",
+            Ambition::Frontier,
+            vec!["assumption\"\n\u{0003}".to_string()],
+            ValidityDomain::unconstrained().with(
+                "axis\"\n\u{0004}",
+                f64::NEG_INFINITY,
+                f64::INFINITY,
+            ),
+            vec!["failure\\\t\u{0005}".to_string()],
+            f64::NAN,
+        );
+        let row = card.to_ledger_row_json();
+        assert!(row.contains("model\\\"\\n\\u0001"), "{row}");
+        assert!(row.contains("axis\\\"\\n\\u0004"), "{row}");
+        assert!(row.contains("\"non-finite:NaN\""), "{row}");
+        assert!(!row.chars().any(|ch| u32::from(ch) < 0x20), "{row:?}");
     }
 }

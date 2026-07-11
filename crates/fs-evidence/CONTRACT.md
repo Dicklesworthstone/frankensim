@@ -109,7 +109,10 @@ on fs-obs only.
    (evd-004).
 5. Dominance ties break in declaration order (ModelForm, Statistical,
    Numerical) — deterministic verdicts.
-6. Ledger rows and provenance chains are deterministic (repeat-identical);
+6. Ledger rows and provenance chains are deterministic (repeat-identical).
+   Evidence and model-card rows stay valid JSON under hostile metadata and
+   tagged non-finite no-claim values; evidence rows retain model assumptions
+   and sensitivity headlines rather than dropping those semantic slices.
    provenance chaining is order-sensitive.
 7. Color regime checks fail closed: no empty, inverted, or non-finite regime
    and no non-finite current state can retain `Validated`; disjoint validated
