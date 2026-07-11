@@ -399,7 +399,34 @@ fn evd_012_certified_is_unforgeable_and_validated() {
         forge(NumericalCertificate::enclosure(0.0, 1.0), 2.0),
         Err(CertifyError::QoiOutsideEnclosure { .. })
     );
-    // (e) Legitimate exact/enclosure composition remains usable, and
+    // (e) A public ModelEvidence literal cannot override an impossible
+    // validity box by merely asserting `in_domain: true`.
+    let invalid_model_validity = [
+        ValidityDomain::unconstrained()
+            .with("Re", 1.0, 2.0)
+            .intersect(&ValidityDomain::unconstrained().with("Re", 3.0, 4.0)),
+        ValidityDomain::unconstrained().with("Re", f64::NAN, 2.0),
+        ValidityDomain::unconstrained().with("Re", 1.0, f64::INFINITY),
+    ]
+    .into_iter()
+    .all(|validity| {
+        let forged_model = Evidence::exact(1.0, p).with_model(ModelEvidence {
+            cards: vec!["forged-regime".to_string()],
+            assumptions: Vec::new(),
+            validity,
+            discrepancy_rel: 0.01,
+            in_domain: true,
+        });
+        matches!(
+            forged_model.clone().certified(),
+            Err(CertifyError::InvalidModelValidity)
+        ) && forged_model.breakdown().model_rel.is_infinite()
+            && matches!(
+                forged_model.assess(0.05),
+                DecisionStatus::NotDecisionGrade { .. }
+            )
+    });
+    // (f) Legitimate exact/enclosure composition remains usable, and
     // reads flow through the immutable Deref view.
     let a = Evidence::exact(2.0, p);
     let b = Evidence::enclosed(3.0, 2.9, 3.1, p);
@@ -407,7 +434,7 @@ fn evd_012_certified_is_unforgeable_and_validated() {
         .certified()
         .expect("rigorous chain certifies");
     let readable = cert.qoi.to_bits() == 6.0f64.to_bits() && cert.evidence().numerical.lo <= 6.0;
-    // (f) Downgrade-mutate-recertify: the ONLY mutation path loses the
+    // (g) Downgrade-mutate-recertify: the ONLY mutation path loses the
     // mark, and reconstruction re-validates (round-trip invariance).
     let mut reopened = cert.into_evidence();
     reopened.numerical = NumericalCertificate::estimate(5.9, 6.1);
@@ -430,11 +457,13 @@ fn evd_012_certified_is_unforgeable_and_validated() {
             && nan_bound
             && inf_bound
             && escaped
+            && invalid_model_validity
             && readable
             && weakened_refused
             && drifted_refused,
-        "Certified<T> is opaque: every forge route refused with its structured reason; \
-         rigorous composition still certifies; downgrade-mutate-recertify re-validates",
+        "Certified<T> is opaque: every numerical and model-validity forge route refused with \
+         its structured reason; rigorous composition still certifies; \
+         downgrade-mutate-recertify re-validates",
     );
 }
 

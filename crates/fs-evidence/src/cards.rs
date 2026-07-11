@@ -7,7 +7,7 @@
 //! construction (frame flagship), surrogate out-of-distribution failure,
 //! ground-motion model assumptions.
 
-use crate::{ProvenanceHash, ValidityDomain, fmt_f64, json_string};
+use crate::{ProvenanceHash, ValidityDomain, canonical_json_string_list, fmt_f64, json_string};
 use core::fmt;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -96,12 +96,6 @@ impl ModelCard {
     /// The ledger `model_cards` row (canonical, deterministic).
     #[must_use]
     pub fn to_ledger_row_json(&self) -> String {
-        let list = |xs: &[String]| {
-            xs.iter()
-                .map(|x| json_string(x))
-                .collect::<Vec<_>>()
-                .join(",")
-        };
         let mut s = String::with_capacity(256);
         let _ = write!(
             s,
@@ -110,8 +104,8 @@ impl ModelCard {
             json_string(&self.name),
             json_string(&self.version),
             self.ambition.tag(),
-            list(&self.assumptions),
-            list(&self.known_failures),
+            canonical_json_string_list(&self.assumptions),
+            canonical_json_string_list(&self.known_failures),
             fmt_f64(self.discrepancy_rel),
             self.calibration
                 .map_or_else(|| "null".to_string(), |c| format!("\"{:016x}\"", c.0)),
@@ -290,5 +284,37 @@ mod tests {
         assert!(row.contains("axis\\\"\\n\\u0004"), "{row}");
         assert!(row.contains("\"non-finite:NaN\""), "{row}");
         assert!(!row.chars().any(|ch| u32::from(ch) < 0x20), "{row:?}");
+    }
+
+    #[test]
+    fn card_rows_canonicalize_public_set_fields() {
+        let mut first = les_card();
+        first.assumptions = vec!["zeta".to_string(), "alpha".to_string(), "zeta".to_string()];
+        first.known_failures = vec![
+            "separation".to_string(),
+            "transition".to_string(),
+            "separation".to_string(),
+        ];
+        let mut second = first.clone();
+        second.assumptions = vec!["alpha".to_string(), "zeta".to_string()];
+        second.known_failures = vec!["transition".to_string(), "separation".to_string()];
+
+        let first_row = first.to_ledger_row_json();
+        assert_eq!(
+            first_row,
+            second.to_ledger_row_json(),
+            "caller ordering and duplicates cannot change a set-like durable row"
+        );
+        assert_eq!(
+            first_row.matches("separation").count(),
+            1,
+            "duplicates survive"
+        );
+        let alpha = first_row.find("alpha").expect("alpha assumption retained");
+        let zeta = first_row.find("zeta").expect("zeta assumption retained");
+        assert!(
+            alpha < zeta,
+            "sets are not lexically canonical: {first_row}"
+        );
     }
 }

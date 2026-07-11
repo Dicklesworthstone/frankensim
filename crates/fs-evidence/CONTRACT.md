@@ -113,7 +113,10 @@ on fs-obs only.
    Evidence and model-card rows stay valid JSON under hostile metadata and
    tagged non-finite no-claim values; evidence rows retain model assumptions
    and sensitivity headlines rather than dropping those semantic slices.
-   provenance chaining is order-sensitive.
+   Public set-like card, assumption, and known-failure vectors are sorted and
+   deduplicated again at the durable rendering boundary, so caller mutation or
+   insertion order cannot change row identity.
+   Provenance chaining is order-sensitive.
 7. Color regime checks fail closed: no empty, inverted, or non-finite regime
    and no non-finite current state can retain `Validated`; disjoint validated
    composition and regime exit both carry infinite/no-claim dispersion.
@@ -125,8 +128,11 @@ on fs-obs only.
    bit-identical bounds; Enclosure requires finite ordered bounds that
    CONTAIN the QoI; statistical e-values, levels, widths, and confidence
    parameters must satisfy their finite domains; model discrepancy must be
-   non-negative (positive infinity is the explicit unbounded claim);
-   Estimate/NoClaim and out-of-domain models refuse.
+   non-negative (positive infinity is the explicit unbounded claim); empty,
+   inverted, or non-finite model-validity domains refuse even when a public
+   literal asserts `in_domain: true`; Estimate/NoClaim and out-of-domain models
+   refuse. Decision breakdown applies the same validity check and assigns an
+   infinite model band to an impossible domain.
    Reads flow through `Deref<Target = Evidence<T>>`;
    `Certified::into_evidence()` is the explicit downgrade — the mark is
    lost and any reconstruction must re-enter `certified()`
