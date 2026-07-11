@@ -22,13 +22,13 @@
 //! for engineering use; they are not an official ASME/FAA/EASA determination.
 
 /// The crosswalk vocabulary version.
-pub const CROSSWALK_VERSION: u32 = 3;
+pub const CROSSWALK_VERSION: u32 = 4;
 
 /// Evidence-package schema whose concepts this crosswalk describes.
 ///
 /// Kept independent of `fs-package` to preserve the dependency direction;
 /// the package crate asserts this value against its own format constant.
-pub const SUPPORTED_PACKAGE_FORMAT: u32 = 5;
+pub const SUPPORTED_PACKAGE_FORMAT: u32 = 6;
 
 /// An evidence-package field/concept (the FrankenSim side of the map).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -436,25 +436,25 @@ const CROSSWALK: [CrosswalkEntry; 48] = [
         Signature,
         AsmeVvV10,
         "Responsible-party review & approval",
-        "a detached signature is the modern form of the responsible-engineer sign-off",
+        "a policy-authenticated release approval is a digital approval record bound to the exact gate; signer identity and role are not claimed",
     ),
     m(
         Signature,
         AsmeVvV20,
         "Documented review/approval of results",
-        "signature = authorized approval",
+        "policy-authenticated release approval records the gate decision; it does not by itself identify an authorized person",
     ),
     m(
         Signature,
         AsmeVvV40,
         "Approval within the credibility assessment plan",
-        "signature = plan sign-off",
+        "release-purpose authentication binds approval to protocol and package root without asserting signer role",
     ),
     m(
         Signature,
         FaaEasaCbA,
         "Authorized sign-off / statement of compliance",
-        "signature attests the means-of-compliance record",
+        "release-purpose authentication attests the exact means-of-compliance package under the configured policy; signer identity is outside the package",
     ),
     // Claim origin — typed, re-verified traceability to an evidence source.
     nc(
@@ -499,7 +499,7 @@ const CROSSWALK: [CrosswalkEntry; 48] = [
         WaiverAuthorization,
         FaaEasaCbA,
         "Approved deviations, limitations, and conditions of use",
-        "an authenticated, unexpired waiver records the responsible authority's bounded exception; it does not prove the waived claim",
+        "an authenticated, unexpired waiver records the configured policy's bounded exception; it does not identify a responsible person or prove the waived claim",
     ),
 ];
 

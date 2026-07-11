@@ -28,7 +28,11 @@
 
 use std::collections::BTreeMap;
 
-use fs_checker::{ContentHash, check, check_against_root};
+use fs_checker::{
+    ContentHash, SignaturePurpose, SignatureRequest, SignatureStatus, SignatureVerifier,
+    SourceCertificateRequest, SourceCertificateVerifier, VerificationCapabilities,
+    VerificationDecision, check_with_capabilities,
+};
 
 /// A deliberately corrupted content root (one byte flipped): the v4
 /// 32-byte replacement for the old `root ^ 0xdead` tamper idiom.
@@ -47,6 +51,52 @@ use fs_opt::{
 };
 use fs_package::{Claim, EvidencePackage, Provenance};
 use fs_robust::{ColoredObjective, RobustError, fragility_curve, robust_optimum, weakest_color};
+
+const ROUNDTRIP_CERTIFICATE_HASH: &str =
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+const ROUNDTRIP_POLICY_FINGERPRINT: &str =
+    "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1";
+const ROUNDTRIP_SIGNATURE_POLICY_FINGERPRINT: &str =
+    "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2";
+
+struct RoundtripCertificateVerifier;
+
+impl SourceCertificateVerifier for RoundtripCertificateVerifier {
+    fn verify(&self, request: &SourceCertificateRequest<'_>) -> VerificationDecision {
+        let fingerprint = ContentHash::from_hex(ROUNDTRIP_POLICY_FINGERPRINT)
+            .expect("the fixture policy fingerprint is canonical");
+        let accepted = request.package_provenance.code_version == "commit-abc"
+            && request.package_provenance.constellation_lock == "lock-def"
+            && request.claim_index == 0
+            && request.claim_id == "c1"
+            && request.statement == "stress <= sigma*"
+            && request.lo.to_bits() == (-1.0f64).to_bits()
+            && request.hi.to_bits() == 1.0f64.to_bits()
+            && request.producer == "test-solver/cert"
+            && request.certificate_hash.to_hex() == ROUNDTRIP_CERTIFICATE_HASH;
+        if accepted {
+            VerificationDecision::accept(fingerprint)
+        } else {
+            VerificationDecision::reject(fingerprint)
+        }
+    }
+}
+
+struct RoundtripSignatureVerifier;
+
+impl SignatureVerifier for RoundtripSignatureVerifier {
+    fn verify(&self, request: &SignatureRequest<'_>) -> VerificationDecision {
+        let fingerprint = ContentHash::from_hex(ROUNDTRIP_SIGNATURE_POLICY_FINGERPRINT)
+            .expect("the fixture signature-policy fingerprint is canonical");
+        if request.signature == format!("fs-epi-e2e:roundtrip:{}", request.subject_hash().to_hex())
+            && request.purpose == SignaturePurpose::PackageRootAttestation
+        {
+            VerificationDecision::accept(fingerprint)
+        } else {
+            VerificationDecision::reject(fingerprint)
+        }
+    }
+}
 
 /// One stage's structured result.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -347,30 +397,58 @@ pub fn stage_evidence_roundtrip() -> StageLog {
     let mut events = Vec::new();
     let mut passed = true;
 
-    let pkg = EvidencePackage::new(Provenance::new("commit-abc", "lock-def"))
+    let unsigned = EvidencePackage::new(Provenance::new("commit-abc", "lock-def"))
         .with_claim(Claim::from_certificate(
             "c1",
             "stress <= sigma*",
             -1.0,
             1.0,
-            "test-solver/cert", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "test-solver/cert",
+            ROUNDTRIP_CERTIFICATE_HASH,
         ))
-        .with_claim(Claim::estimated("c2", "surrogate says ok", "surrogate", 2.0));
-    let root = pkg.merkle_root();
+        .with_claim(Claim::estimated(
+            "c2",
+            "surrogate says ok",
+            "surrogate",
+            2.0,
+        ));
+    let root = unsigned.try_merkle_root().expect("bounded fixture root");
+    let signature_subject =
+        fs_checker::signature_subject_hash(root, SignaturePurpose::PackageRootAttestation);
+    let pkg = unsigned.signed(format!(
+        "fs-epi-e2e:roundtrip:{}",
+        signature_subject.to_hex()
+    ));
+    let source_verifier = RoundtripCertificateVerifier;
+    let signature_verifier = RoundtripSignatureVerifier;
+    let capabilities =
+        VerificationCapabilities::deny_all().with_source_certificates(&source_verifier);
 
-    // solver-free re-verification passes.
-    let good = check(&pkg);
+    // Solver-free re-verification exercises an exact-subject capability
+    // fixture without rerunning the producer. Artifact retrieval is outside
+    // this reduced E2E fixture's claim.
+    let good = check_with_capabilities(&pkg, None, Some(&signature_verifier), &capabilities);
     events.push(format!(
         "checker re-verify (no solver) passed = {}",
         good.passed()
     ));
     passed &= good.passed();
+    let signature_authenticated = matches!(good.signature(), SignatureStatus::Authenticated(_));
+    events.push(format!(
+        "root-bound fixture signature authenticated = {signature_authenticated}"
+    ));
+    passed &= signature_authenticated;
 
     // a tampered package fails with a LOCALIZED finding.
-    let tampered = check_against_root(&pkg, flip(root));
+    let tampered = check_with_capabilities(
+        &pkg,
+        Some(flip(root)),
+        Some(&signature_verifier),
+        &capabilities,
+    );
     let tamper_caught = !tampered.passed()
         && tampered
-            .findings
+            .findings()
             .iter()
             .any(|f| f.kind == "content-address-mismatch");
     events.push(format!(

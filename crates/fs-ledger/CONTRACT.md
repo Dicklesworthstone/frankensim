@@ -43,6 +43,10 @@ fine-grained event stream. Layer: L6 (HELM). Runtime deps: `std` + `fsqlite`.
   provisional key inside a writer-owned transaction, promotes on `finish`),
   `get_artifact` / `read_artifact_chunks` / `artifact_info`,
   `verify_artifact_integrity` (full re-hash), `corrupt_artifact_for_test`.
+  Retrieval treats signed database integers as untrusted: it never
+  preallocates from declared `len`, uses fallible materialization, checks dense
+  chunk sequence, count, and checked byte totals against metadata, and reports
+  corruption instead of panicking or attempting an attacker-sized allocation.
 - Ops/lineage: `begin_op` (validates the Five Explicits field-by-field;
   units travel inside the typed IR, the other four are mandatory columns),
   `finish_op` (exactly once; `ok|error|cancelled`), `op`, `link` (FK-checked
@@ -152,16 +156,23 @@ capability ships in this crate, so promotion is impossible until a
 Franken-compliant signature verifier is wired in (the no-crypto
 no-claim). Authentication runs for EVERY `derive_waived` call, including a
 claim that does not upgrade rank; choosing the waived path can never turn an
-invalid signature into a provenance-bearing grant. Node provenance hashes use
-a domain-separated, versioned length-prefixed encoding (v4), including source
-versus derived status, the exact operation, and bit-exact canonical color bytes.
-The former v3 omitted the operation, and v2 used display-rounded color JSON.
-Color-write row schema v2 serializes the canonical v3 signing payload,
-signature, key id, node name, parent hashes, exact claimed-color bytes,
-operation, scope, and expiry so persisted authorization can be independently
+invalid signature into a provenance-bearing grant. Verifiers return a sealed,
+atomic `PolicyDecision`; the accepting policy fingerprint and historical
+admission day travel with the direct grant and every transitive
+`WaiverDependency`. Callback panic is a structured fail-closed refusal. Node
+provenance hashes use a domain-separated, versioned length-prefixed encoding
+(v8): v8 adds certificate artifact identity, source and waiver policy
+fingerprints, admission days, and those fields in every transitive dependency;
+v7 added canonical transitive waiver dependencies, v6 added all demotions and operation-correct
+grant payloads, v5 added typed source origins, v4 added source/derived status
+and the exact operation, v3 added bit-exact canonical color bytes, and v2 used
+display-rounded color JSON. Color-write row schema v5 serializes typed origins,
+the transitive waiver closure, the canonical v3 derived or v4 source signing
+payload, signature, key id, node name, parent hashes, exact claimed-color bytes,
+operation, scope, expiry, admission day, and policy fingerprint so persisted authorization can be independently
 reverified rather than trusting an `authorized:true` assertion. Refusals are structured
-(`WaiverRejection`: scope/node/color/lineage mismatch, expiry, bad
-signature) and grants re-verify from the stored ledger node.
+(`WaiverRejection`: scope/node/color/lineage mismatch, expiry, policy refusal,
+or verifier panic) and grants re-verify from the stored ledger node.
 
 ## Invariants
 
@@ -196,7 +207,9 @@ file refused, never clobbered), `Sql`, `Busy` (retryable contention —
 busy/locked/write-conflict; retry with backoff), `MissingExplicit` (names the
 offending Five Explicits field), `Invalid` (names the field),
 `Corrupt`, `NotFound`, `DoubleFinish`, `WriterInTransaction`. Never panics
-across the crate boundary.
+across the crate boundary. Signed database metadata that represents a length or
+count is converted with an explicit non-negative check; physical corruption
+cannot reinterpret `-1` as `u64::MAX`.
 
 ## Determinism class
 
@@ -258,22 +271,42 @@ answers queries. The economics control loop lives in fs-verify
 ## Three-color write gate (bead qmao.1)
 
 `colors::ColorGraph` is the WRITE-TIME gatekeeper over fs-evidence's
-color schema. `source()` accepts Estimated leaves only. A Verified leaf must
-carry a `SourceOrigin::Certificate`; the gate reruns `verified_from` and writes
-the rederived interval. A Validated leaf must carry an
+color schema. `source()` accepts Estimated leaves only, rejecting blank or
+placeholder estimator identities, surrounding identity whitespace, and
+NaN/negative dispersion (positive infinity remains the explicit
+no-spread-claim sentinel). A Verified leaf must carry a
+`SourceOrigin::Certificate` with the retained certificate artifact's content
+hash; the gate reruns `verified_from` and writes the rederived interval. A
+Validated leaf must carry an
 `SourceOrigin::Anchoring` with dataset content hash and exact regime; the gate
-reconstructs the complete color and refuses blank datasets, empty or malformed
-regimes, and any claimed dataset/regime drift.
+reconstructs the complete color and refuses blank, placeholder, or padded
+producer/dataset/axis identities, empty or malformed regimes, and any claimed
+dataset/regime drift. Shape-valid public fields are
+not authority: `source_with_origin` also requires an injected
+`SourceOriginVerifier`. Its read-only request and canonical payload cover the
+node name, exact claimed color, certificate artifact hash, and every other
+certificate/anchor field. Its sealed `PolicyDecision` returns acceptance and
+the exact policy fingerprint atomically; that fingerprint is hash-bound into
+the node and row. Verifier panic fails closed before append;
+`NoSourceOriginVerifier` is the fail-closed default.
 The exceptional source path is an authenticated `WaiverGrant` under the
 distinct `source-color` scope and v4 source signing payload. A derive grant
-cannot be replayed as source authority.
+cannot be replayed as source authority. Authentication does not bypass payload
+structure: the shared color validator rejects non-finite or inverted Verified
+intervals, invalid Validated identities/regimes, and invalid Estimated
+identities/dispersion before either `source_waived` or `derive_waived` can
+append a node. Ordinary composition is checked by the same validator before
+append, so arithmetic overflow cannot create a node that immediately fails its
+own replay. A waiver authorizes claim policy, never malformed epistemic data.
 
 Derived nodes' colors are COMPUTED from their parents with regime re-checks
 against the current execution state. Every parent that exits its regime emits
 a retained `ColorDemotion`, keyed by parent position and id in canonical
 parent-list order. This remains unambiguous when a parent id occurs twice.
-Demotions and typed source origins participate in the domain-separated v6 node
-hash. An ordinary explicit claim must equal the exact canonical derived color:
+Demotions, typed source origins and their admitting policies, and canonical
+transitive waiver dependencies with their policies/admission days participate
+in the domain-separated v8 node hash. An ordinary explicit claim
+must equal the exact canonical derived color:
 equal rank alone is insufficient because it could narrow an interval, widen a
 validity regime, or shrink dispersion; unsupported rank weakening is likewise
 refused until a formal weakening relation exists. Claims that outrank the
@@ -284,12 +317,24 @@ the `color-upgrade` scope and operation-bound v3 signing payload.
 `ColorNode` fields are private and exposed read-only. `ColorGraph::node` is a
 checked `Option` lookup, never an indexing panic. `verify_replay()` checks
 append ids, backward parent references, canonical demotions, source-origin
-rederivation, grant-to-node/lineage binding, ordinary derived colors, and every
-node hash. Canonical schema-v3 JSON rows include the typed origin and the exact
+rederivation, structural color validity (including waived nodes),
+grant-to-node/lineage binding, ordinary derived colors, and every node hash.
+Ordinary and waived derivations retain the sorted, duplicate-free union of
+their parents' historical waiver dependencies plus each parent's own grant;
+scientific consumers can distinguish a transitively waived node without
+walking the graph through `waiver_dependencies()` or the convenience predicate
+`depends_on_waiver()` (own grant OR inherited dependency). Replay resolves each
+dependency to its earlier authorizing node and recomputes the exact
+parent-derived closure, including the original policy fingerprint and
+admission day. Canonical schema-v5 color rows include the typed origin and
+certificate artifact identity, direct policy/admission context, transitive
+dependencies, and the exact
 v3/v4 signed payload needed for an independent verifier. G3/G5 tests cover
 forged positive sources, source/derive grant separation, invalid ids,
 multi-parent demotion preservation, deterministic replay, origin substitution,
-and signed-payload tampering. Note: this module adds fs-evidence as a runtime
+policy and certificate-artifact substitution, callback panic, composed-bound
+overflow, signed-payload tampering, padded source identities, and authenticated
+attempts to admit malformed colors. Note: this module adds fs-evidence as a runtime
 dependency (the colors are its types).
 
 ## No-claim boundaries
@@ -311,11 +356,15 @@ dependency (the colors are its types).
   streaming path is verified at the tens-of-MiB scale only so far; fsqlite
   transaction memory behavior at multi-GiB scale is unmeasured.
 - `ColorGraph::verify_replay()` structurally re-earns colors and hashes but does
-  not re-authenticate stored waiver signatures: the graph does not retain the
-  verifier capability or admission day. The schema-v3 row retains the exact
-  signing payload, key id, signature, and expiry for an independent verifier.
+  not itself re-run external source-origin or waiver capabilities. It retains
+  the complete request/artifact fields, exact policy fingerprints, waiver
+  admission day, signing payload, key id, signature, and expiry so an
+  independent verifier can resolve the named policy and re-authenticate.
   Regime demotion records retain the offending value and are hash-bound, but
   the complete execution-state map is not persisted by this in-memory gate.
+- Transitive waiver visibility currently stores the complete unique grant
+  closure on each descendant. This is deliberately inspectable and replayable;
+  compact/sublinear waiver-lineage storage is not claimed.
 
 ## No-claim boundaries (tombstones)
 

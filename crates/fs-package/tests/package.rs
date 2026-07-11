@@ -7,16 +7,36 @@
 
 use fs_evidence::{Color, IntervalOp, ValidityDomain};
 use fs_package::{
-    Claim, EvidencePackage, FalsifierRecord, MAX_JSON_CONTAINER_ITEMS, MAX_JSON_DEPTH,
-    MAX_JSON_NUMBER_BYTES, MAX_JSON_STRING_BYTES, PackageError, PackageReport, Provenance,
-    SourceCertificateRequest, SourceCertificateVerifier, VerificationCapabilities, WaiverGrant,
-    WaiverVerifier,
+    AdmissionClass, AnchoredSourceRequest, AnchoredSourceVerifier, Claim, ContentHash,
+    DerivationRequest, DerivationVerifier, EvidencePackage, FalsifierRecord, FalsifierRequest,
+    FalsifierVerifier, MAX_JSON_CONTAINER_ITEMS, MAX_JSON_DEPTH, MAX_JSON_NUMBER_BYTES,
+    MAX_JSON_STRING_BYTES, PackageError, PackageReport, Provenance, SignaturePurpose,
+    SignatureRequest, SignatureStatus, SignatureVerifier, SourceCertificateRequest,
+    SourceCertificateVerifier, VerificationCapabilities, VerificationDecision, WaiverGrant,
+    WaiverVerifier, signature_subject_hash,
 };
 
 const CANONICAL_DATASET_HASH: &str =
     "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
+fn package_root(package: &EvidencePackage) -> ContentHash {
+    package
+        .try_merkle_root()
+        .expect("bounded test package has a content root")
+}
+
+fn package_json(package: &EvidencePackage) -> String {
+    package.to_json().expect("bounded test package serializes")
+}
+
 struct FixtureSourceVerifier;
+struct FixtureAnchorVerifier;
+struct FixtureFalsifierVerifier;
+struct FixtureDerivationVerifier;
+
+fn fixture_policy(label: &str) -> ContentHash {
+    fs_blake3::hash_domain("fs-package:test:v6:policy", label.as_bytes())
+}
 
 fn fixture_source_hash(
     provenance: &Provenance,
@@ -46,8 +66,8 @@ fn fixture_source_hash(
 }
 
 impl SourceCertificateVerifier for FixtureSourceVerifier {
-    fn verify(&self, request: &SourceCertificateRequest<'_>) -> bool {
-        request.certificate_hash.to_hex()
+    fn verify(&self, request: &SourceCertificateRequest<'_>) -> VerificationDecision {
+        let accepted = request.certificate_hash.to_hex()
             == fixture_source_hash(
                 request.package_provenance,
                 request.claim_index,
@@ -56,14 +76,55 @@ impl SourceCertificateVerifier for FixtureSourceVerifier {
                 request.lo,
                 request.hi,
                 request.producer,
-            )
+            );
+        VerificationDecision {
+            accepted,
+            policy_fingerprint: fixture_policy("fixture-source-verifier"),
+        }
+    }
+}
+
+impl AnchoredSourceVerifier for FixtureAnchorVerifier {
+    fn verify(&self, request: &AnchoredSourceRequest<'_>) -> VerificationDecision {
+        let accepted = request.content_hash.to_hex() == CANONICAL_DATASET_HASH
+            && !request.dataset_id.is_empty()
+            && !request.regime.bounds().is_empty();
+        VerificationDecision {
+            accepted,
+            policy_fingerprint: fixture_policy("fixture-anchor-verifier"),
+        }
+    }
+}
+
+impl FalsifierVerifier for FixtureFalsifierVerifier {
+    fn verify(&self, request: &FalsifierRequest<'_>) -> VerificationDecision {
+        VerificationDecision {
+            accepted: request.artifact_hash.to_hex() == CANONICAL_DATASET_HASH,
+            policy_fingerprint: fixture_policy("fixture-falsifier-verifier"),
+        }
+    }
+}
+
+impl DerivationVerifier for FixtureDerivationVerifier {
+    fn verify(&self, request: &DerivationRequest<'_>) -> VerificationDecision {
+        VerificationDecision {
+            accepted: request.artifact_hash.to_hex() == CANONICAL_DATASET_HASH,
+            policy_fingerprint: fixture_policy("fixture-derivation-verifier"),
+        }
     }
 }
 
 static FIXTURE_SOURCE_VERIFIER: FixtureSourceVerifier = FixtureSourceVerifier;
+static FIXTURE_ANCHOR_VERIFIER: FixtureAnchorVerifier = FixtureAnchorVerifier;
+static FIXTURE_FALSIFIER_VERIFIER: FixtureFalsifierVerifier = FixtureFalsifierVerifier;
+static FIXTURE_DERIVATION_VERIFIER: FixtureDerivationVerifier = FixtureDerivationVerifier;
 
 fn source_capabilities() -> VerificationCapabilities<'static> {
-    VerificationCapabilities::deny_all().with_source_certificates(&FIXTURE_SOURCE_VERIFIER)
+    VerificationCapabilities::deny_all()
+        .with_source_certificates(&FIXTURE_SOURCE_VERIFIER)
+        .with_anchored_sources(&FIXTURE_ANCHOR_VERIFIER)
+        .with_falsifiers(&FIXTURE_FALSIFIER_VERIFIER)
+        .with_derivations(&FIXTURE_DERIVATION_VERIFIER)
 }
 
 fn verify_package(pkg: &EvidencePackage) -> Result<PackageReport, PackageError> {
@@ -136,22 +197,26 @@ fn derived_package() -> EvidencePackage {
                 ),
                 vec![0, 1],
                 IntervalOp::Add,
+                CANONICAL_DATASET_HASH,
             )
             .with_falsifier(FalsifierRecord {
                 name: "interval-probe".to_string(),
                 attempts: 512,
                 refuted: false,
                 detail: "no violation found".to_string(),
+                artifact_hash: CANONICAL_DATASET_HASH.to_string(),
             })
             .with_anchor("wt-2026-run9", CANONICAL_DATASET_HASH),
         )
 }
 
 fn assert_serialized_refuses(pkg: &EvidencePackage) {
-    assert!(
-        EvidencePackage::from_json(&pkg.to_json()).is_err(),
-        "serialized package must refuse the same semantics as verify(): {pkg:?}"
-    );
+    if let Ok(json) = pkg.to_json() {
+        assert!(
+            EvidencePackage::from_json(&json).is_err(),
+            "serialized package must refuse the same semantics as verify(): {pkg:?}"
+        );
+    }
 }
 
 #[test]
@@ -177,7 +242,7 @@ fn fixture_source_authority_binds_every_typed_request_field() {
         producer: "test-solver/cert",
         certificate_hash: fs_package::ContentHash::from_hex(&hash).expect("fixture hash"),
     };
-    assert!(FIXTURE_SOURCE_VERIFIER.verify(&request));
+    assert!(FIXTURE_SOURCE_VERIFIER.verify(&request).accepted);
     for altered in [
         SourceCertificateRequest {
             package_provenance: &other_provenance,
@@ -203,7 +268,7 @@ fn fixture_source_authority_binds_every_typed_request_field() {
         },
     ] {
         assert!(
-            !FIXTURE_SOURCE_VERIFIER.verify(&altered),
+            !FIXTURE_SOURCE_VERIFIER.verify(&altered).accepted,
             "fixture authority accepted a modified typed request: {altered:?}"
         );
     }
@@ -216,12 +281,29 @@ fn a_complete_mixed_color_package_verifies() {
         .with_claim(validated("c2", good_regime(), "wind-tunnel-2026"))
         .with_claim(estimated("c3"));
     let report = verify_package(&pkg).expect("complete package verifies");
-    assert_eq!(report.claims, 3);
-    assert_eq!(report.breakdown.verified, 1);
-    assert_eq!(report.breakdown.validated, 1);
-    assert_eq!(report.breakdown.estimated, 1);
-    assert_eq!(report.merkle_root, pkg.merkle_root());
-    assert_ne!(report.merkle_root.as_bytes(), &[0u8; 32]);
+    assert_eq!(report.claims(), 3);
+    assert_eq!(report.breakdown().verified, 1);
+    assert_eq!(report.breakdown().validated, 1);
+    assert_eq!(report.breakdown().estimated, 1);
+    assert_eq!(report.merkle_root(), package_root(&pkg));
+    assert_ne!(report.merkle_root().as_bytes(), &[0u8; 32]);
+}
+
+#[test]
+fn verified_package_binding_recomputes_admissions_and_summaries() {
+    let package = EvidencePackage::new(prov())
+        .with_claim(estimated("estimate-a"))
+        .with_claim(estimated("estimate-b"));
+    let verified = package
+        .into_verified()
+        .expect("deny-all estimated package verifies");
+    assert!(verified.validate_binding());
+    assert_eq!(verified.admitted_claims().len(), 2);
+    assert!(
+        verified
+            .admitted_claims()
+            .all(|claim| claim.scientific_color().is_some())
+    );
 }
 
 #[test]
@@ -230,9 +312,9 @@ fn an_all_estimated_package_is_still_valid_and_round_trips() {
         .with_claim(estimated("e1"))
         .with_claim(estimated("e2"));
     let report = pkg.verify().expect("all-estimated is honest, not invalid");
-    assert_eq!(report.breakdown.estimated, 2);
-    assert_eq!(report.breakdown.verified, 0);
-    let json = pkg.to_json();
+    assert_eq!(report.breakdown().estimated, 2);
+    assert_eq!(report.breakdown().verified, 0);
+    let json = package_json(&pkg);
     assert!(json.contains("\"estimated\""));
     assert!(json.contains("e1") && json.contains("e2"));
 }
@@ -397,11 +479,12 @@ fn in_memory_and_serialized_estimate_gates_are_identical() {
     assert!(
         explicitly_unbounded
             .magnitude_budget()
+            .expect("estimated-only package verifies")
             .estimated_dispersion
             .is_infinite()
     );
     assert_eq!(
-        EvidencePackage::from_json(&explicitly_unbounded.to_json()).unwrap(),
+        EvidencePackage::from_json(&package_json(&explicitly_unbounded)).unwrap(),
         explicitly_unbounded
     );
 }
@@ -502,7 +585,7 @@ fn in_memory_and_serialized_regime_gates_are_identical() {
         2.0_f64.to_bits(),
         1.0_f64.to_bits()
     );
-    let inverted_json = ordered.to_json().replace(&ordered_pair, &inverted_pair);
+    let inverted_json = package_json(&ordered).replace(&ordered_pair, &inverted_pair);
     let err = EvidencePackage::from_json(&inverted_json).expect_err("inverted regime refuses");
     assert!(err.why.contains("inverted bounds"), "{err}");
 }
@@ -517,24 +600,29 @@ fn falsifier_attempt_counts_round_trip_without_f64_precision_loss() {
                 attempts: first_unrepresentable_integer,
                 refuted: false,
                 detail: "one above f64's exact-integer range".to_string(),
+                artifact_hash: CANONICAL_DATASET_HASH.to_string(),
             })
             .with_falsifier(FalsifierRecord {
                 name: "exhaustive-probe".to_string(),
                 attempts: u64::MAX,
                 refuted: false,
                 detail: "full-width counter".to_string(),
+                artifact_hash: CANONICAL_DATASET_HASH.to_string(),
             }),
     );
-    let json = pkg.to_json();
+    let json = package_json(&pkg);
     assert!(json.contains("\"attempts\":9007199254740993"));
     assert!(json.contains("\"attempts\":18446744073709551615"));
     let back = EvidencePackage::from_json(&json).expect("full-width u64 values parse exactly");
     assert_eq!(back, pkg);
     assert_eq!(
-        back.claims[0].falsifiers()[0].attempts,
+        back.declared_claims_unverified()[0].declared_falsifiers_unverified()[0].attempts,
         first_unrepresentable_integer
     );
-    assert_eq!(back.claims[0].falsifiers()[1].attempts, u64::MAX);
+    assert_eq!(
+        back.declared_claims_unverified()[0].declared_falsifiers_unverified()[1].attempts,
+        u64::MAX
+    );
 
     let overflow = json.replace("18446744073709551615", "18446744073709551616");
     let err = EvidencePackage::from_json(&overflow).expect_err("u64 overflow must refuse");
@@ -562,6 +650,7 @@ fn falsifier_records_require_identity_work_and_outcome() {
             attempts: 1,
             refuted: false,
             detail: "no violation".to_string(),
+            artifact_hash: CANONICAL_DATASET_HASH.to_string(),
         },
         "name",
     );
@@ -571,6 +660,7 @@ fn falsifier_records_require_identity_work_and_outcome() {
             attempts: 0,
             refuted: false,
             detail: "no work ran".to_string(),
+            artifact_hash: CANONICAL_DATASET_HASH.to_string(),
         },
         "attempts",
     );
@@ -580,8 +670,19 @@ fn falsifier_records_require_identity_work_and_outcome() {
             attempts: 1,
             refuted: false,
             detail: "  ".to_string(),
+            artifact_hash: CANONICAL_DATASET_HASH.to_string(),
         },
         "detail",
+    );
+    assert_invalid(
+        FalsifierRecord {
+            name: "interval-probe".to_string(),
+            attempts: 1,
+            refuted: false,
+            detail: "no violation".to_string(),
+            artifact_hash: "deadbeef".to_string(),
+        },
+        "artifact_hash",
     );
     for placeholder in ["TODO", " placeholder ", "N/A", "not run", "unknown"] {
         assert_invalid(
@@ -590,6 +691,7 @@ fn falsifier_records_require_identity_work_and_outcome() {
                 attempts: 1,
                 refuted: false,
                 detail: "no violation observed".to_string(),
+                artifact_hash: CANONICAL_DATASET_HASH.to_string(),
             },
             "name",
         );
@@ -599,6 +701,7 @@ fn falsifier_records_require_identity_work_and_outcome() {
                 attempts: 1,
                 refuted: false,
                 detail: placeholder.to_string(),
+                artifact_hash: CANONICAL_DATASET_HASH.to_string(),
             },
             "detail",
         );
@@ -676,6 +779,14 @@ fn untrusted_json_resource_limits_fail_before_schema_mapping() {
         oversized_in_memory.verify(),
         Err(PackageError::TransportLimit { .. })
     ));
+    assert!(matches!(
+        oversized_in_memory.try_merkle_root(),
+        Err(PackageError::TransportLimit { .. })
+    ));
+    assert!(matches!(
+        oversized_in_memory.to_json(),
+        Err(PackageError::TransportLimit { .. })
+    ));
     assert_serialized_refuses(&oversized_in_memory);
 }
 
@@ -687,13 +798,11 @@ fn the_merkle_root_is_deterministic_and_tamper_evident() {
             .with_claim(estimated("c2"))
     };
     // identical packages -> identical content address.
-    assert_eq!(build().merkle_root(), build().merkle_root());
+    assert_eq!(package_root(&build()), package_root(&build()));
     assert_eq!(
-        build().merkle_root().to_hex(),
-        "6b8d0c29e8b270d8ad523ec0aff139b03898f022330e3b972b6e3abd1048a1b7",
-        "schema-v5 package-root fixture (re-pinned because the TEST certificate artifact address \
-         now binds the full typed source request, including provenance and index); production \
-         canonicalization did not change"
+        package_root(&build()).to_hex(),
+        "1a917f759d541819f863a02787aceb0408cacae9bf55c8a50230d8ca9db89465",
+        "schema-v6 package-root fixture (re-pinned for the v6 domain separation)"
     );
     // tampering with a claim changes the root.
     let tampered = EvidencePackage::new(prov())
@@ -706,7 +815,7 @@ fn the_merkle_root_is_deterministic_and_tamper_evident() {
             CANONICAL_DATASET_HASH,
         ))
         .with_claim(estimated("c2"));
-    assert_ne!(build().merkle_root(), tampered.merkle_root());
+    assert_ne!(package_root(&build()), package_root(&tampered));
 }
 
 #[test]
@@ -717,8 +826,8 @@ fn the_merkle_root_covers_reproducibility_provenance() {
     let changed_lock = EvidencePackage::new(Provenance::new("commit-abc123", "lock-other"))
         .with_claim(verified("c1"));
 
-    assert_ne!(pkg.merkle_root(), changed_code.merkle_root());
-    assert_ne!(pkg.merkle_root(), changed_lock.merkle_root());
+    assert_ne!(package_root(&pkg), package_root(&changed_code));
+    assert_ne!(package_root(&pkg), package_root(&changed_lock));
 }
 
 #[test]
@@ -738,11 +847,319 @@ fn a_signature_is_optional_and_detached() {
         unsigned.verify().is_ok(),
         "no signature is fine (content-addressed)"
     );
-    assert!(unsigned.to_json().contains("\"signature\":null"));
+    assert!(package_json(&unsigned).contains("\"signature\":null"));
     let signed = unsigned.clone().signed("ed25519:deadbeef");
     // signing does not change the content address (detached).
-    assert_eq!(unsigned.merkle_root(), signed.merkle_root());
-    assert!(signed.to_json().contains("ed25519:deadbeef"));
+    assert_eq!(package_root(&unsigned), package_root(&signed));
+    assert!(package_json(&signed).contains("ed25519:deadbeef"));
+}
+
+struct ExactSignatureVerifier;
+struct PermissiveSignatureVerifier;
+
+impl SignatureVerifier for ExactSignatureVerifier {
+    fn verify(&self, request: &SignatureRequest<'_>) -> VerificationDecision {
+        VerificationDecision {
+            accepted: request.signature == format!("test-signature:{}", request.subject_hash())
+                && match request.purpose {
+                    SignaturePurpose::PackageRootAttestation => true,
+                    SignaturePurpose::ReleaseApproval {
+                        checker_protocol: 4,
+                        expected_root,
+                        admission_context,
+                    } => {
+                        expected_root == request.package_root
+                            && admission_context != ContentHash([0; 32])
+                    }
+                    SignaturePurpose::ReleaseApproval { .. } => false,
+                },
+            policy_fingerprint: fixture_policy("exact-signature-verifier"),
+        }
+    }
+}
+
+impl SignatureVerifier for PermissiveSignatureVerifier {
+    fn verify(&self, _request: &SignatureRequest<'_>) -> VerificationDecision {
+        VerificationDecision::accept(fixture_policy("permissive-signature-verifier"))
+    }
+}
+
+#[test]
+fn signature_subject_hash_separates_every_purpose_axis() {
+    let root = ContentHash([0x11; 32]);
+    let other_root = ContentHash([0x22; 32]);
+    let context = ContentHash([0x33; 32]);
+    let other_context = ContentHash([0x44; 32]);
+    let release =
+        |checker_protocol, expected_root, admission_context| SignaturePurpose::ReleaseApproval {
+            checker_protocol,
+            expected_root,
+            admission_context,
+        };
+
+    let subjects = [
+        signature_subject_hash(root, SignaturePurpose::PackageRootAttestation),
+        signature_subject_hash(other_root, SignaturePurpose::PackageRootAttestation),
+        signature_subject_hash(root, release(4, root, context)),
+        signature_subject_hash(root, release(3, root, context)),
+        signature_subject_hash(root, release(4, other_root, context)),
+        signature_subject_hash(root, release(4, root, other_context)),
+    ];
+    for (left_index, left) in subjects.iter().enumerate() {
+        for right in &subjects[left_index + 1..] {
+            assert_ne!(left, right, "distinct signature axes must not alias");
+        }
+    }
+    assert_eq!(
+        subjects[2],
+        signature_subject_hash(root, release(4, root, context)),
+        "the exact typed subject must replay deterministically"
+    );
+}
+
+#[test]
+fn signature_coverage_requires_authentication_and_rejection_fails_closed() {
+    use fs_crosswalk::PackageConcept;
+
+    let unsigned = EvidencePackage::new(prov()).with_claim(estimated("signed-evidence"));
+    let root = package_root(&unsigned);
+    let integrity_purpose = SignaturePurpose::PackageRootAttestation;
+    let signed = unsigned.clone().signed(format!(
+        "test-signature:{}",
+        signature_subject_hash(root, integrity_purpose)
+    ));
+    let raw_presence = fs_package::package_presence(&signed);
+    assert!(
+        !raw_presence
+            .iter()
+            .find(|row| row.concept() == PackageConcept::Signature)
+            .expect("signature concept")
+            .present()
+    );
+
+    let capabilities =
+        VerificationCapabilities::deny_all().with_signatures(&ExactSignatureVerifier);
+    let report = signed
+        .verify_with(&capabilities)
+        .expect("exact signature authenticates");
+    assert!(matches!(
+        report.receipt().signature(),
+        SignatureStatus::Authenticated(authenticated)
+            if authenticated.purpose() == SignaturePurpose::PackageRootAttestation
+    ));
+    assert_eq!(
+        report.receipt().policy_fingerprints().signatures(),
+        Some(fixture_policy("exact-signature-verifier"))
+    );
+    let integrity_presence = fs_package::package_presence_with(&signed, &capabilities);
+    assert!(integrity_presence.validate_decision_hash());
+    assert!(
+        !integrity_presence
+            .iter()
+            .find(|row| row.concept() == PackageConcept::Signature)
+            .expect("signature concept")
+            .present(),
+        "a generic integrity attestation is not regulatory release approval"
+    );
+
+    let release_capabilities = VerificationCapabilities::deny_all().with_release_signatures(
+        &ExactSignatureVerifier,
+        4,
+        root,
+    );
+    let unsigned_report = unsigned
+        .verify()
+        .expect("unsigned release subject verifies");
+    let release_purpose = SignaturePurpose::ReleaseApproval {
+        checker_protocol: 4,
+        expected_root: root,
+        admission_context: unsigned_report.receipt().release_admission_context(),
+    };
+    let release_signed = unsigned.signed(format!(
+        "test-signature:{}",
+        signature_subject_hash(root, release_purpose)
+    ));
+    assert!(
+        fs_package::package_presence_with(&release_signed, &release_capabilities)
+            .iter()
+            .find(|row| row.concept() == PackageConcept::Signature)
+            .expect("signature concept")
+            .present(),
+        "an authenticated, purpose-bound release approval establishes signature coverage"
+    );
+
+    let forged = EvidencePackage::new(prov())
+        .with_claim(estimated("signed-evidence"))
+        .signed("test-signature:wrong-root");
+    assert!(matches!(
+        forged.verify_with(&capabilities),
+        Err(PackageError::SignatureRefused {
+            why: "rejected by the injected verifier",
+            ..
+        })
+    ));
+    assert!(
+        fs_package::package_presence_with(&forged, &capabilities)
+            .iter()
+            .all(|row| !row.present()),
+        "an invalid supplied signature suppresses all coverage"
+    );
+}
+
+#[test]
+fn release_signature_purpose_must_name_the_recomputed_package_root() {
+    let unsigned = EvidencePackage::new(prov()).with_claim(estimated("release-subject"));
+    let root = package_root(&unsigned);
+    let signed = unsigned.signed(format!("test-signature:{root}"));
+    let mut wrong_root_bytes = *root.as_bytes();
+    wrong_root_bytes[0] ^= 1;
+    let capabilities = VerificationCapabilities::deny_all().with_release_signatures(
+        &PermissiveSignatureVerifier,
+        4,
+        ContentHash(wrong_root_bytes),
+    );
+    assert!(matches!(
+        signed.verify_with(&capabilities),
+        Err(PackageError::SignatureRefused {
+            why: "release-approval purpose names a different package root",
+            policy_fingerprint: None,
+        })
+    ));
+    assert!(
+        fs_package::package_presence_with(&signed, &capabilities)
+            .iter()
+            .all(|row| !row.present()),
+        "a permissive verifier cannot authenticate release approval for another root"
+    );
+}
+
+#[test]
+fn all_estimated_packages_do_not_claim_certificate_coverage() {
+    use fs_crosswalk::PackageConcept;
+
+    let pkg = EvidencePackage::new(prov()).with_claim(estimated("estimate-only"));
+    let presence = fs_package::package_presence(&pkg);
+    assert!(
+        presence
+            .iter()
+            .find(|row| row.concept() == PackageConcept::EstimatedColor)
+            .expect("estimated concept")
+            .present()
+    );
+    assert!(
+        !presence
+            .iter()
+            .find(|row| row.concept() == PackageConcept::Certificate)
+            .expect("certificate concept")
+            .present()
+    );
+    for concept in [PackageConcept::ClaimOrigin, PackageConcept::Provenance] {
+        let row = presence
+            .iter()
+            .find(|row| row.concept() == concept)
+            .expect("concept is always judged");
+        assert!(!row.present(), "{}", row.why());
+    }
+}
+
+struct ExactFalsifierArtifactVerifier {
+    package_root: ContentHash,
+    claim_subject_hash: ContentHash,
+}
+
+impl FalsifierVerifier for ExactFalsifierArtifactVerifier {
+    fn verify(&self, request: &FalsifierRequest<'_>) -> VerificationDecision {
+        let accepted = request.package_provenance == &prov()
+            && request.package_root == self.package_root
+            && request.claim_index == 0
+            && request.claim_id == "falsified"
+            && request.statement == "bounded estimate"
+            && matches!(
+                request.color,
+                Color::Estimated {
+                    estimator,
+                    dispersion,
+                } if estimator == "probe" && dispersion.to_bits() == 1.0f64.to_bits()
+            )
+            && matches!(request.origin, fs_package::ClaimOrigin::EstimatedSource { estimator } if estimator == "probe")
+            && request.claim_subject_hash == self.claim_subject_hash
+            && request.falsifier_index == 0
+            && request.name == "boundary-probe"
+            && request.attempts == 32
+            && !request.refuted
+            && request.detail == "no counterexample"
+            && request.artifact_hash.to_hex() == CANONICAL_DATASET_HASH;
+        VerificationDecision {
+            accepted,
+            policy_fingerprint: fixture_policy("exact-falsifier-artifact-verifier"),
+        }
+    }
+}
+
+fn falsifier_subject(detail: &str, artifact_hash: &str) -> EvidencePackage {
+    EvidencePackage::new(prov()).with_claim(
+        Claim::estimated("falsified", "bounded estimate", "probe", 1.0).with_falsifier(
+            FalsifierRecord {
+                name: "boundary-probe".to_string(),
+                attempts: 32,
+                refuted: false,
+                detail: detail.to_string(),
+                artifact_hash: artifact_hash.to_string(),
+            },
+        ),
+    )
+}
+
+#[test]
+fn falsifier_artifacts_bind_the_exact_claim_and_record() {
+    use fs_crosswalk::PackageConcept;
+
+    let pkg = falsifier_subject("no counterexample", CANONICAL_DATASET_HASH);
+    assert!(matches!(
+        pkg.verify(),
+        Err(PackageError::FalsifierRefused {
+            why: "falsifier capability missing",
+            ..
+        })
+    ));
+    let verifier = ExactFalsifierArtifactVerifier {
+        package_root: package_root(&pkg),
+        claim_subject_hash: pkg.declared_claims_unverified()[0]
+            .declared_verification_subject_hash_unverified(),
+    };
+    let capabilities = VerificationCapabilities::deny_all().with_falsifiers(&verifier);
+    let report = pkg
+        .verify_with(&capabilities)
+        .expect("exact falsifier subject authenticates");
+    assert_eq!(
+        report.receipt().policy_fingerprints().falsifiers(),
+        Some(fixture_policy("exact-falsifier-artifact-verifier"))
+    );
+    let coverage = fs_package::package_presence_with(&pkg, &capabilities);
+    assert!(coverage.receipt().is_some());
+    assert!(
+        coverage
+            .iter()
+            .find(|row| row.concept() == PackageConcept::FalsifierLog)
+            .expect("falsifier concept")
+            .present()
+    );
+
+    for forged in [
+        falsifier_subject("different outcome", CANONICAL_DATASET_HASH),
+        falsifier_subject(
+            "no counterexample",
+            "1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        ),
+    ] {
+        assert!(matches!(
+            forged.verify_with(&capabilities),
+            Err(PackageError::FalsifierRefused {
+                why: "rejected by the injected verifier",
+                ..
+            })
+        ));
+    }
 }
 
 #[test]
@@ -750,13 +1167,30 @@ fn json_is_deterministic_and_carries_the_root() {
     let pkg = EvidencePackage::new(prov())
         .with_claim(verified("c1"))
         .with_claim(validated("c2", good_regime(), "wt-2026"));
-    let j = pkg.to_json();
-    assert_eq!(j, pkg.to_json());
+    let j = package_json(&pkg);
+    assert_eq!(j, package_json(&pkg));
     assert!(j.starts_with('{') && j.ends_with('}'));
-    assert!(j.contains(&pkg.merkle_root().to_hex()));
-    assert!(j.contains("\"format_version\":5"), "schema v5 (krym)");
+    assert!(j.contains(&package_root(&pkg).to_hex()));
+    assert!(j.contains("\"format_version\":6"), "schema v6");
     // v3 carries COMPLETE payloads, not just rank labels.
     assert!(j.contains("\"lo_bits\":") && j.contains("\"dataset\":"));
+}
+
+#[test]
+fn schema_v6_magnitude_shape_is_closed_and_waiver_aware() {
+    let pkg = EvidencePackage::new(prov()).with_claim(estimated("shape"));
+    let json = package_json(&pkg);
+    assert!(json.contains("\"waived_unquantified\":0"));
+    assert_eq!(EvidencePackage::from_json(&json).unwrap(), pkg);
+
+    let missing_v6_field = json.replace(",\"waived_unquantified\":0", "");
+    let error = EvidencePackage::from_json(&missing_v6_field)
+        .expect_err("a v5-shaped magnitude budget must not parse as v6");
+    assert!(error.why.contains("waived_unquantified"), "{error}");
+
+    let stale_v5 = missing_v6_field.replacen("\"format_version\":6", "\"format_version\":5", 1);
+    let error = EvidencePackage::from_json(&stale_v5).expect_err("schema v5 is not v6");
+    assert!(error.why.contains("unsupported version 5"), "{error}");
 }
 
 /// qmao.6.1 — the schema-v3 round trip and its fail-closed walls: a
@@ -790,11 +1224,11 @@ fn v3_round_trip_and_fail_closed_walls() {
         .signed("test-key/1234abcd");
     // Golden decode-encode stability: parse(to_json) == pkg, and the
     // re-emission is byte-identical (semantic AND textual round trip).
-    let json = pkg.to_json();
+    let json = package_json(&pkg);
     let back = EvidencePackage::from_json(&json).expect("canonical JSON parses");
     assert_eq!(back, pkg, "semantic round trip");
-    assert_eq!(back.to_json(), json, "textual round trip");
-    let leading_zero = json.replacen("\"format_version\":5", "\"format_version\":05", 1);
+    assert_eq!(package_json(&back), json, "textual round trip");
+    let leading_zero = json.replacen("\"format_version\":6", "\"format_version\":06", 1);
     assert!(
         EvidencePackage::from_json(&leading_zero).is_err(),
         "non-JSON leading-zero integer refuses"
@@ -850,10 +1284,10 @@ fn v3_round_trip_and_fail_closed_walls() {
     assert!(EvidencePackage::from_json("").is_err());
     // Canonical fixed-width roots and JSON's control-character rule are
     // enforced at the parser boundary, before semantic verification.
-    let root = pkg.merkle_root().to_hex();
+    let root = package_root(&pkg).to_hex();
     let short_root = json.replacen(&format!("\"{root}\""), &format!("\"{}\"", &root[1..]), 1);
     let err = EvidencePackage::from_json(&short_root).expect_err("short root refused");
-    assert!(err.why.contains("64 hex chars"), "{err}");
+    assert!(err.why.contains("64 lowercase hex chars"), "{err}");
     let raw_control = json.replacen("surrogate prediction", "surrogate\nprediction", 1);
     let err = EvidencePackage::from_json(&raw_control).expect_err("raw control refused");
     assert!(err.why.contains("control character"), "{err}");
@@ -863,23 +1297,10 @@ fn v3_round_trip_and_fail_closed_walls() {
 /// claim counts, and reconciles with an independent recomputation.
 #[test]
 fn magnitude_budget_reconciles() {
-    let pkg = EvidencePackage::new(Provenance::new("v", "l"))
-        .with_claim(Claim::from_certificate(
-            "a",
-            "s",
-            0.0,
-            0.5,
-            "test-solver/cert",
-            CANONICAL_DATASET_HASH,
-        ))
-        .with_claim(Claim::from_certificate(
-            "b",
-            "s",
-            1.0,
-            1.25,
-            "test-solver/cert",
-            CANONICAL_DATASET_HASH,
-        ))
+    let provenance = Provenance::new("v", "l");
+    let pkg = EvidencePackage::new(provenance.clone())
+        .with_claim(source_claim(&provenance, 0, "a", "s", 0.0, 0.5))
+        .with_claim(source_claim(&provenance, 1, "b", "s", 1.0, 1.25))
         .with_claim(Claim::estimated("c", "s", "e", 0.125))
         .with_claim(Claim::anchored(
             "d",
@@ -888,7 +1309,9 @@ fn magnitude_budget_reconciles() {
             "ds",
             CANONICAL_DATASET_HASH,
         ));
-    let mb = pkg.magnitude_budget();
+    let mb = pkg
+        .magnitude_budget_with(&source_capabilities())
+        .expect("scientific magnitude requires admitted origins");
     assert_eq!(mb.verified_width.to_bits(), 0.75f64.to_bits());
     assert_eq!(mb.estimated_dispersion.to_bits(), 0.125f64.to_bits());
     assert_eq!(
@@ -923,26 +1346,49 @@ fn coverage_cannot_claim_absent_evidence() {
     ));
     let capabilities = source_capabilities();
     let presence = package_presence_with(&pkg, &capabilities);
-    let get = |c: PackageConcept| presence.iter().find(|p| p.concept == c).unwrap();
-    assert!(get(PackageConcept::VerifiedColor).present);
-    assert!(!get(PackageConcept::ValidatedColor).present);
-    assert!(!get(PackageConcept::RegimeTag).present);
-    assert!(!get(PackageConcept::AnchoringDataset).present);
-    assert!(!get(PackageConcept::Signature).present);
+    assert!(presence.validate_decision_hash());
+    assert!(presence.receipt().is_some());
+    let get = |c: PackageConcept| presence.iter().find(|p| p.concept() == c).unwrap();
+    assert!(get(PackageConcept::VerifiedColor).present());
+    assert!(!get(PackageConcept::ValidatedColor).present());
+    assert!(!get(PackageConcept::RegimeTag).present());
+    assert!(!get(PackageConcept::AnchoringDataset).present());
+    assert!(!get(PackageConcept::Signature).present());
     assert!(
-        !get(PackageConcept::FalsifierLog).present,
+        !get(PackageConcept::FalsifierLog).present(),
         "absent falsifier records can never read as present"
     );
     for standard in Standard::ALL {
-        for (concept, status, _why) in package_coverage_with(&pkg, standard, &capabilities) {
+        let coverage = package_coverage_with(&pkg, standard, &capabilities);
+        assert!(coverage.validate_decision_hash());
+        assert_eq!(coverage.standard(), standard);
+        assert_eq!(
+            coverage.crosswalk_version(),
+            fs_crosswalk::CROSSWALK_VERSION
+        );
+        assert_eq!(coverage.package_format(), fs_package::FORMAT_VERSION);
+        assert_eq!(
+            coverage
+                .receipt()
+                .map(fs_package::VerificationReceipt::receipt_hash),
+            presence
+                .receipt()
+                .map(fs_package::VerificationReceipt::receipt_hash)
+        );
+        assert!(
+            coverage
+                .iter()
+                .all(|(_, _, why)| why.contains("package evidence:"))
+        );
+        for (concept, status, _why) in &coverage {
             if matches!(status, CoverageStatus::Covered) {
-                let p = presence.iter().find(|p| p.concept == concept).unwrap();
+                let p = presence.iter().find(|p| p.concept() == *concept).unwrap();
                 assert!(
-                    p.present,
+                    p.present(),
                     "{concept:?} covered without evidence for {standard:?}"
                 );
             }
-            if concept == PackageConcept::FalsifierLog {
+            if *concept == PackageConcept::FalsifierLog {
                 assert!(
                     !matches!(status, CoverageStatus::Covered),
                     "falsifier logs without records cannot be covered ({standard:?})"
@@ -963,9 +1409,10 @@ fn coverage_requires_a_valid_package_and_authenticated_evidence() {
             attempts: 1,
             refuted: true,
             detail: "counterexample found".to_string(),
+            artifact_hash: CANONICAL_DATASET_HASH.to_string(),
         }))
         .signed("raw-detached-signature");
-    assert!(package_presence(&refuted).iter().all(|row| !row.present));
+    assert!(package_presence(&refuted).iter().all(|row| !row.present()));
     for standard in Standard::ALL {
         assert!(
             package_coverage(&refuted, standard)
@@ -978,17 +1425,20 @@ fn coverage_requires_a_valid_package_and_authenticated_evidence() {
     let merely_signed = EvidencePackage::new(prov())
         .with_claim(verified("signed"))
         .signed("unauthenticated-bytes");
-    let signature = package_presence(&merely_signed)
-        .into_iter()
-        .find(|row| row.concept == PackageConcept::Signature)
+    let presence = package_presence(&merely_signed);
+    let signature = presence
+        .iter()
+        .find(|row| row.concept() == PackageConcept::Signature)
         .expect("signature concept judged");
-    assert!(!signature.present, "{}", signature.why);
+    assert!(!signature.present(), "{}", signature.why());
     for standard in Standard::ALL {
-        let status = package_coverage(&merely_signed, standard)
-            .into_iter()
+        let coverage = package_coverage(&merely_signed, standard);
+        let status = coverage
+            .iter()
             .find(|(concept, _, _)| *concept == PackageConcept::Signature)
             .expect("signature is mapped for every standard")
-            .1;
+            .1
+            .clone();
         assert!(!matches!(status, CoverageStatus::Covered));
     }
 }
@@ -996,9 +1446,9 @@ fn coverage_requires_a_valid_package_and_authenticated_evidence() {
 #[test]
 fn dataset_coverage_requires_a_matching_valid_anchor() {
     use fs_crosswalk::PackageConcept;
-    use fs_package::package_presence;
+    use fs_package::package_presence_with;
 
-    // Schema v5: a validated claim can only be CONSTRUCTED anchored to
+    // Schema v6: a validated claim can only be CONSTRUCTED anchored to
     // its own dataset (the AnchoredSource origin attaches the matching
     // record), so "validated but unanchored" is unrepresentable in
     // memory; an EXTRA unrelated anchor neither helps nor hides it.
@@ -1006,27 +1456,30 @@ fn dataset_coverage_requires_a_matching_valid_anchor() {
         validated("v", good_regime(), "wind-tunnel-2026")
             .with_anchor("different-dataset", CANONICAL_DATASET_HASH),
     );
+    let capabilities = source_capabilities();
     unrelated
-        .verify()
+        .verify_with(&capabilities)
         .expect("an extra unrelated anchor is structurally valid");
-    let unrelated_presence = package_presence(&unrelated);
+    let unrelated_presence = package_presence_with(&unrelated, &capabilities);
     let anchor = unrelated_presence
         .iter()
-        .find(|row| row.concept == PackageConcept::AnchoringDataset)
+        .find(|row| row.concept() == PackageConcept::AnchoringDataset)
         .expect("anchor concept judged");
-    assert!(anchor.present, "{}", anchor.why);
+    assert!(anchor.present(), "{}", anchor.why());
 
     let matching = EvidencePackage::new(prov()).with_claim(
         validated("v", good_regime(), "wind-tunnel-2026")
             .with_anchor("wind-tunnel-2026", CANONICAL_DATASET_HASH),
     );
-    matching.verify().expect("matching anchor verifies");
-    let matching_presence = package_presence(&matching);
+    matching
+        .verify_with(&capabilities)
+        .expect("matching anchor verifies");
+    let matching_presence = package_presence_with(&matching, &capabilities);
     let anchor = matching_presence
         .iter()
-        .find(|row| row.concept == PackageConcept::AnchoringDataset)
+        .find(|row| row.concept() == PackageConcept::AnchoringDataset)
         .expect("anchor concept judged");
-    assert!(anchor.present, "{}", anchor.why);
+    assert!(anchor.present(), "{}", anchor.why());
 }
 
 /// xfxq (schema v3) — composition receipts re-run solver-free, refuted
@@ -1041,10 +1494,16 @@ fn v3_receipts_falsifiers_anchors() {
     let good = derived_package();
     verify_package(&good).expect("receipt re-derives");
     // Round trip: the v3 fields survive the strict parser bit-for-bit.
-    let back = EvidencePackage::from_json(&good.to_json()).expect("v3 parses");
+    let back = EvidencePackage::from_json(&package_json(&good)).expect("v3 parses");
     assert_eq!(back, good);
-    assert_eq!(back.claims[2].falsifiers()[0].attempts, 512);
-    assert_eq!(back.claims[2].anchors()[0].dataset_id, "wt-2026-run9");
+    assert_eq!(
+        back.declared_claims_unverified()[2].declared_falsifiers_unverified()[0].attempts,
+        512
+    );
+    assert_eq!(
+        back.declared_claims_unverified()[2].declared_anchors_unverified()[0].dataset_id,
+        "wt-2026-run9"
+    );
     // FORGED receipt: claiming Verified while a parent is Estimated —
     // the re-run composition cannot reproduce it (semantic catch, not
     // just the content-address catch).
@@ -1064,6 +1523,7 @@ fn v3_receipts_falsifiers_anchors() {
             ve(2.0, 4.0),
             vec![0, 1],
             IntervalOp::Add,
+            CANONICAL_DATASET_HASH,
         ));
     assert!(matches!(
         forged.verify(),
@@ -1076,6 +1536,7 @@ fn v3_receipts_falsifiers_anchors() {
         ve(0.0, 1.0),
         vec![0],
         IntervalOp::Hull,
+        CANONICAL_DATASET_HASH,
     ));
     assert!(matches!(
         cyclic.verify(),
@@ -1096,12 +1557,195 @@ fn v3_receipts_falsifiers_anchors() {
             attempts: 3,
             refuted: true,
             detail: "counterexample at x=0.7".to_string(),
+            artifact_hash: CANONICAL_DATASET_HASH.to_string(),
         }),
     );
     assert!(matches!(
         refuted.verify(),
         Err(PackageError::RefutedClaim { falsifier, .. }) if falsifier == "adversary"
     ));
+}
+
+struct ExactDerivationArtifactVerifier {
+    package_root: ContentHash,
+    child_subject_hash: ContentHash,
+    parent_claim_hash: ContentHash,
+}
+
+impl DerivationVerifier for ExactDerivationArtifactVerifier {
+    fn verify(&self, request: &DerivationRequest<'_>) -> VerificationDecision {
+        let accepted = request.package_provenance == &prov()
+            && request.package_root == self.package_root
+            && request.claim_index == 1
+            && request.claim_id == "derived"
+            && request.statement == "same bounded estimate"
+            && matches!(
+                request.color,
+                Color::Estimated {
+                    estimator,
+                    dispersion,
+                } if estimator == "probe" && dispersion.to_bits() == 1.0f64.to_bits()
+            )
+            && request.child_subject_hash == self.child_subject_hash
+            && request.anchors.is_empty()
+            && request.op == IntervalOp::Hull
+            && request.parent_indices == [0]
+            && request.parent_claim_hashes == [self.parent_claim_hash]
+            && request.artifact_hash.to_hex() == CANONICAL_DATASET_HASH;
+        VerificationDecision {
+            accepted,
+            policy_fingerprint: fixture_policy("exact-derivation-artifact-verifier"),
+        }
+    }
+}
+
+fn derivation_subject(statement: &str, artifact_hash: &str) -> EvidencePackage {
+    let color = Color::Estimated {
+        estimator: "probe".to_string(),
+        dispersion: 1.0,
+    };
+    EvidencePackage::new(prov())
+        .with_claim(Claim::estimated("parent", "bounded estimate", "probe", 1.0))
+        .with_claim(Claim::derived(
+            "derived",
+            statement,
+            color,
+            vec![0],
+            IntervalOp::Hull,
+            artifact_hash,
+        ))
+}
+
+#[test]
+fn derivation_artifacts_bind_child_statement_color_and_ordered_parents() {
+    let pkg = derivation_subject("same bounded estimate", CANONICAL_DATASET_HASH);
+    assert!(matches!(
+        pkg.verify(),
+        Err(PackageError::DerivationRefused {
+            why: "derivation capability missing",
+            ..
+        })
+    ));
+    let claims = pkg.declared_claims_unverified();
+    let verifier = ExactDerivationArtifactVerifier {
+        package_root: package_root(&pkg),
+        child_subject_hash: claims[1].declared_verification_subject_hash_unverified(),
+        parent_claim_hash: claims[0].declared_content_hash_unverified(),
+    };
+    let capabilities = VerificationCapabilities::deny_all().with_derivations(&verifier);
+    let report = pkg
+        .verify_with(&capabilities)
+        .expect("exact derivation subject authenticates");
+    assert_eq!(
+        report.receipt().policy_fingerprints().derivations(),
+        Some(fixture_policy("exact-derivation-artifact-verifier"))
+    );
+    assert!(report.receipt().validate_hash());
+
+    for forged in [
+        derivation_subject("unrelated safety assertion", CANONICAL_DATASET_HASH),
+        derivation_subject(
+            "same bounded estimate",
+            "1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        ),
+    ] {
+        assert!(matches!(
+            forged.verify_with(&capabilities),
+            Err(PackageError::DerivationRefused {
+                why: "rejected by the injected verifier",
+                ..
+            })
+        ));
+    }
+}
+
+#[test]
+fn derived_receipts_compare_signed_zero_by_exact_bits() {
+    let estimated_parent = Color::Estimated {
+        estimator: "signed-zero-probe".to_string(),
+        dispersion: -0.0,
+    };
+    let verified_parent = Color::Verified { lo: 0.0, hi: 0.0 };
+    let recomputed = fs_evidence::compose(&estimated_parent, &verified_parent, IntervalOp::Add);
+    assert!(matches!(
+        recomputed,
+        Color::Estimated { dispersion, .. } if dispersion.to_bits() == 0.0f64.to_bits()
+    ));
+
+    let package = EvidencePackage::new(prov())
+        .with_claim(Claim::estimated(
+            "estimated-parent",
+            "signed zero estimate",
+            "signed-zero-probe",
+            -0.0,
+        ))
+        .with_claim(verified("verified-parent"))
+        .with_claim(Claim::derived(
+            "derived",
+            "bit-exact derived identity",
+            Color::Estimated {
+                estimator: "signed-zero-probe".to_string(),
+                dispersion: -0.0,
+            },
+            vec![0, 1],
+            IntervalOp::Add,
+            CANONICAL_DATASET_HASH,
+        ));
+    assert!(matches!(
+        package.verify(),
+        Err(PackageError::ReceiptMismatch { claim }) if claim == "derived"
+    ));
+}
+
+struct DivergentDerivationPolicy;
+
+impl DerivationVerifier for DivergentDerivationPolicy {
+    fn verify(&self, request: &DerivationRequest<'_>) -> VerificationDecision {
+        VerificationDecision::accept(ContentHash([request.claim_index as u8; 32]))
+    }
+}
+
+#[test]
+fn one_capability_cannot_rotate_policy_fingerprints_mid_package() {
+    let color = Color::Estimated {
+        estimator: "probe".to_string(),
+        dispersion: 1.0,
+    };
+    let pkg = EvidencePackage::new(prov())
+        .with_claim(Claim::estimated("parent", "bounded", "probe", 1.0))
+        .with_claim(Claim::derived(
+            "d1",
+            "first derivation",
+            color.clone(),
+            vec![0],
+            IntervalOp::Hull,
+            CANONICAL_DATASET_HASH,
+        ))
+        .with_claim(Claim::derived(
+            "d2",
+            "second derivation",
+            color,
+            vec![1],
+            IntervalOp::Hull,
+            CANONICAL_DATASET_HASH,
+        ));
+    let capabilities =
+        VerificationCapabilities::deny_all().with_derivations(&DivergentDerivationPolicy);
+    assert!(matches!(
+        pkg.verify_with(&capabilities),
+        Err(PackageError::PolicyFingerprintRefused {
+            capability: "derivations",
+            why: "policy fingerprint changed during package verification",
+            previous,
+            observed,
+        }) if previous == ContentHash([1; 32]) && observed == ContentHash([2; 32])
+    ));
+
+    let unused = EvidencePackage::new(prov()).with_claim(estimated("unused-policy"));
+    let report = unused
+        .verify_with(&capabilities)
+        .expect("unused capability changes no proof state");
+    assert_eq!(report.receipt().policy_fingerprints().derivations(), None);
 }
 
 #[test]
@@ -1111,13 +1755,11 @@ fn v3_falsifier_coverage_and_content_binding() {
     let presence = fs_package::package_presence_with(&good, &capabilities);
     let falsifier = presence
         .iter()
-        .find(|row| row.concept == fs_crosswalk::PackageConcept::FalsifierLog)
+        .find(|row| row.concept() == fs_crosswalk::PackageConcept::FalsifierLog)
         .expect("falsifier concept judged");
-    assert!(falsifier.present, "{}", falsifier.why);
+    assert!(falsifier.present(), "{}", falsifier.why());
 
-    let tampered = good
-        .to_json()
-        .replace("\"refuted\":false", "\"refuted\":true");
+    let tampered = package_json(&good).replace("\"refuted\":false", "\"refuted\":true");
     assert!(
         EvidencePackage::from_json(&tampered).is_err(),
         "content root binds falsifier fields"
@@ -1130,13 +1772,13 @@ fn v3_falsifier_coverage_and_content_binding() {
 #[test]
 fn v4_blake3_root_refuses_legacy_transports() {
     let pkg = EvidencePackage::new(prov()).with_claim(verified("c1"));
-    let json = pkg.to_json();
-    let root = pkg.merkle_root().to_hex();
+    let json = package_json(&pkg);
+    let root = package_root(&pkg).to_hex();
     assert_eq!(root.len(), 64, "32-byte BLAKE3 root renders as 64 hex");
     assert!(json.contains(&format!("\"merkle_root\":\"{root}\"")));
 
     // A v3 transport is refused BY VERSION before any field is read.
-    let v4 = json.replacen("\"format_version\":5", "\"format_version\":4", 1);
+    let v4 = json.replacen("\"format_version\":6", "\"format_version\":4", 1);
     let err = EvidencePackage::from_json(&v4).expect_err("v4 refused");
     assert!(err.why.contains("unsupported version 4"), "{err}");
 
@@ -1152,7 +1794,7 @@ fn v4_blake3_root_refuses_legacy_transports() {
         1,
     );
     let err = EvidencePackage::from_json(&garbled).expect_err("non-hex root refused");
-    assert!(err.why.contains("non-hex"), "{err}");
+    assert!(err.why.contains("lowercase hexadecimal"), "{err}");
 
     // A validly-formatted but WRONG root: recomputation refuses it.
     let mut flipped = root.clone().into_bytes();
@@ -1169,20 +1811,21 @@ fn v4_blake3_root_refuses_legacy_transports() {
 #[test]
 fn v4_root_is_domain_separated() {
     let pkg = EvidencePackage::new(prov()).with_claim(verified("c1"));
-    let root = pkg.merkle_root();
+    let root = package_root(&pkg);
     // Not the undomained hash of the canonical JSON or of the claim.
-    assert_ne!(root, fs_blake3::hash_bytes(pkg.to_json().as_bytes()));
+    assert_ne!(root, fs_blake3::hash_bytes(package_json(&pkg).as_bytes()));
     assert_ne!(
         root,
-        EvidencePackage::new(prov()).merkle_root(),
+        package_root(&EvidencePackage::new(prov())),
         "header claim count distinguishes zero and one claim"
     );
     assert_ne!(
         root,
-        EvidencePackage::new(prov())
-            .with_claim(verified("c1"))
-            .with_claim(verified("c1"))
-            .merkle_root(),
+        package_root(
+            &EvidencePackage::new(prov())
+                .with_claim(verified("c1"))
+                .with_claim(verified("c1"))
+        ),
         "duplicating the final claim changes the tree identity"
     );
     // Stable across recomputation and bound to claim ORDER.
@@ -1192,25 +1835,125 @@ fn v4_root_is_domain_separated() {
     let ordered = EvidencePackage::new(prov())
         .with_claim(verified("c1"))
         .with_claim(verified("c2"));
-    assert_ne!(swapped.merkle_root(), ordered.merkle_root());
+    assert_ne!(package_root(&swapped), package_root(&ordered));
 }
 
 struct ExactSourceVerifier;
 
 impl SourceCertificateVerifier for ExactSourceVerifier {
-    fn verify(&self, request: &SourceCertificateRequest<'_>) -> bool {
-        request.package_provenance == &prov()
+    fn verify(&self, request: &SourceCertificateRequest<'_>) -> VerificationDecision {
+        let accepted = request.package_provenance == &prov()
             && request.claim_index == 0
             && request.claim_id == "source"
             && request.statement == "certified interval"
             && request.lo.to_bits() == 1.0f64.to_bits()
             && request.hi.to_bits() == 2.0f64.to_bits()
             && request.producer == "test-solver/cert"
-            && request.certificate_hash.to_hex() == CANONICAL_DATASET_HASH
+            && request.certificate_hash.to_hex() == CANONICAL_DATASET_HASH;
+        VerificationDecision {
+            accepted,
+            policy_fingerprint: fixture_policy("exact-source-verifier"),
+        }
     }
 }
 
 static EXACT_SOURCE_VERIFIER: ExactSourceVerifier = ExactSourceVerifier;
+
+struct ExactAnchorSubjectVerifier;
+
+impl AnchoredSourceVerifier for ExactAnchorSubjectVerifier {
+    fn verify(&self, request: &AnchoredSourceRequest<'_>) -> VerificationDecision {
+        let accepted = request.package_provenance == &prov()
+            && request.claim_index == 0
+            && request.claim_id == "anchor"
+            && request.statement == "matches exact reference data"
+            && request.regime == &good_regime()
+            && request.dataset_id == "wind-tunnel-2026"
+            && request.content_hash.to_hex() == CANONICAL_DATASET_HASH;
+        VerificationDecision {
+            accepted,
+            policy_fingerprint: fixture_policy("exact-anchor-subject-verifier"),
+        }
+    }
+}
+
+static EXACT_ANCHOR_SUBJECT_VERIFIER: ExactAnchorSubjectVerifier = ExactAnchorSubjectVerifier;
+
+fn exact_anchor_claim(statement: &str, regime: ValidityDomain, dataset: &str, hash: &str) -> Claim {
+    Claim::anchored("anchor", statement, regime, dataset, hash)
+}
+
+#[test]
+fn anchoring_hashes_require_exact_typed_external_verification() {
+    let pkg = EvidencePackage::new(prov()).with_claim(exact_anchor_claim(
+        "matches exact reference data",
+        good_regime(),
+        "wind-tunnel-2026",
+        CANONICAL_DATASET_HASH,
+    ));
+    assert!(matches!(
+        pkg.verify(),
+        Err(PackageError::AnchoredSourceRefused {
+            why: "anchored-source capability missing",
+            ..
+        })
+    ));
+    let capabilities =
+        VerificationCapabilities::deny_all().with_anchored_sources(&EXACT_ANCHOR_SUBJECT_VERIFIER);
+    let report = pkg
+        .verify_with(&capabilities)
+        .expect("exact anchor subject verifies");
+    assert_eq!(report.breakdown().validated, 1);
+    assert_eq!(
+        report.receipt().policy_fingerprints().anchored_sources(),
+        Some(fixture_policy("exact-anchor-subject-verifier"))
+    );
+
+    let different_hash = "1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let forgeries = [
+        EvidencePackage::new(Provenance::new("other-commit", "lock-deadbeef")).with_claim(
+            exact_anchor_claim(
+                "matches exact reference data",
+                good_regime(),
+                "wind-tunnel-2026",
+                CANONICAL_DATASET_HASH,
+            ),
+        ),
+        EvidencePackage::new(prov()).with_claim(exact_anchor_claim(
+            "different assertion",
+            good_regime(),
+            "wind-tunnel-2026",
+            CANONICAL_DATASET_HASH,
+        )),
+        EvidencePackage::new(prov()).with_claim(exact_anchor_claim(
+            "matches exact reference data",
+            ValidityDomain::unconstrained().with("Re", 1e5, 4e5),
+            "wind-tunnel-2026",
+            CANONICAL_DATASET_HASH,
+        )),
+        EvidencePackage::new(prov()).with_claim(exact_anchor_claim(
+            "matches exact reference data",
+            good_regime(),
+            "other-dataset",
+            CANONICAL_DATASET_HASH,
+        )),
+        EvidencePackage::new(prov()).with_claim(exact_anchor_claim(
+            "matches exact reference data",
+            good_regime(),
+            "wind-tunnel-2026",
+            different_hash,
+        )),
+    ];
+    for forged in forgeries {
+        assert!(matches!(
+            forged.verify_with(&capabilities),
+            Err(PackageError::AnchoredSourceRefused {
+                why: "rejected by the injected verifier",
+                ..
+            })
+        ));
+    }
+}
 
 #[test]
 fn source_certificate_hashes_require_typed_external_verification() {
@@ -1234,9 +1977,13 @@ fn source_certificate_hashes_require_typed_external_verification() {
     ));
     assert!(pkg.color_breakdown().is_err());
     assert!(
+        pkg.magnitude_budget().is_err(),
+        "an unverified source cannot expose a scientific magnitude"
+    );
+    assert!(
         fs_package::package_presence(&pkg)
             .iter()
-            .all(|row| !row.present),
+            .all(|row| !row.present()),
         "unverified source bytes must not produce positive coverage"
     );
 
@@ -1245,7 +1992,7 @@ fn source_certificate_hashes_require_typed_external_verification() {
     let report = pkg
         .verify_with(&capabilities)
         .expect("typed verifier recognizes the exact certificate subject");
-    assert_eq!(report.breakdown.verified, 1);
+    assert_eq!(report.breakdown().verified, 1);
     assert_eq!(
         pkg.color_breakdown_with(&capabilities)
             .expect("authenticated breakdown")
@@ -1256,34 +2003,41 @@ fn source_certificate_hashes_require_typed_external_verification() {
     assert!(
         presence
             .iter()
-            .find(|row| row.concept == PackageConcept::VerifiedColor)
+            .find(|row| row.concept() == PackageConcept::VerifiedColor)
             .expect("verified concept")
-            .present
+            .present()
     );
     assert!(
         presence
             .iter()
-            .find(|row| row.concept == PackageConcept::ClaimOrigin)
+            .find(|row| row.concept() == PackageConcept::ClaimOrigin)
             .expect("origin concept")
-            .present,
+            .present(),
         "claim-origin presence requires the successful typed verifier above"
     );
     assert!(
         !presence
             .iter()
-            .find(|row| row.concept == PackageConcept::WaiverAuthorization)
+            .find(|row| row.concept() == PackageConcept::WaiverAuthorization)
             .expect("waiver concept")
-            .present
+            .present()
     );
-    let origin_status = fs_package::package_coverage_with(&pkg, Standard::AsmeVvV40, &capabilities)
-        .into_iter()
+    let origin_coverage =
+        fs_package::package_coverage_with(&pkg, Standard::AsmeVvV40, &capabilities);
+    let origin_status = origin_coverage
+        .iter()
         .find(|(concept, _, _)| *concept == PackageConcept::ClaimOrigin)
         .expect("claim-origin crosswalk row")
-        .1;
+        .1
+        .clone();
     assert_eq!(origin_status, CoverageStatus::Covered);
-    let decoded = EvidencePackage::from_json_with(&pkg.to_json(), &capabilities)
+    let decoded = EvidencePackage::from_json_with(&package_json(&pkg), &capabilities)
         .expect("strict transport plus capability authentication");
-    assert_eq!(decoded, pkg);
+    assert_eq!(decoded.package(), &pkg);
+    assert_eq!(
+        decoded.report().receipt().package_root(),
+        package_root(&pkg)
+    );
 
     let widened = EvidencePackage::new(prov()).with_claim(Claim::from_certificate(
         "source",
@@ -1302,6 +2056,35 @@ fn source_certificate_hashes_require_typed_external_verification() {
     ));
 }
 
+struct PanickingSourceVerifier;
+
+impl SourceCertificateVerifier for PanickingSourceVerifier {
+    fn verify(&self, _request: &SourceCertificateRequest<'_>) -> VerificationDecision {
+        panic!("hostile external verifier")
+    }
+}
+
+#[test]
+fn verifier_panics_become_structured_refusals() {
+    let pkg = EvidencePackage::new(prov()).with_claim(Claim::from_certificate(
+        "source",
+        "certified interval",
+        1.0,
+        2.0,
+        "test-solver/cert",
+        CANONICAL_DATASET_HASH,
+    ));
+    let capabilities =
+        VerificationCapabilities::deny_all().with_source_certificates(&PanickingSourceVerifier);
+    assert!(matches!(
+        pkg.verify_with(&capabilities),
+        Err(PackageError::SourceCertificateRefused {
+            why: "verifier callback panicked",
+            ..
+        })
+    ));
+}
+
 struct HashWaiverVerifier;
 
 fn waiver_mac(message: &[u8]) -> String {
@@ -1309,8 +2092,11 @@ fn waiver_mac(message: &[u8]) -> String {
 }
 
 impl WaiverVerifier for HashWaiverVerifier {
-    fn verify(&self, mac: &str, message: &[u8]) -> bool {
-        mac == waiver_mac(message)
+    fn verify(&self, mac: &str, message: &[u8]) -> VerificationDecision {
+        VerificationDecision {
+            accepted: mac == waiver_mac(message),
+            policy_fingerprint: fixture_policy("hash-waiver-verifier"),
+        }
     }
 }
 
@@ -1327,14 +2113,18 @@ fn waived_package(provenance: Provenance, waiver_id: &str, expiry_day: u64) -> E
             mac: "pending-authenticator".to_string(),
         },
     ));
-    let message = pending.waiver_message(0).expect("waiver target");
+    authorize_waiver(pending, 0)
+}
+
+fn authorize_waiver(pending: EvidencePackage, claim_index: usize) -> EvidencePackage {
+    let message = pending.waiver_message(claim_index).expect("waiver target");
     let mac = waiver_mac(&message);
     let authorized = pending
-        .with_waiver_mac(0, mac)
+        .with_waiver_mac(claim_index, mac)
         .expect("install waiver authenticator");
     assert_eq!(
-        authorized.waiver_message(0).as_deref(),
-        Some(message.as_slice())
+        authorized.waiver_message(claim_index).as_deref(),
+        Ok(message.as_slice())
     );
     authorized
 }
@@ -1356,43 +2146,261 @@ fn waiver_authentication_enables_capability_aware_coverage() {
     assert!(
         fs_package::package_presence(&pkg)
             .iter()
-            .all(|row| !row.present)
+            .all(|row| !row.present())
     );
 
     let capabilities =
         VerificationCapabilities::deny_all().with_waivers(&HASH_WAIVER_VERIFIER, 199);
-    pkg.verify_with(&capabilities)
+    let report = pkg
+        .verify_with(&capabilities)
         .expect("unexpired, context-bound waiver verifies");
+    assert_eq!(report.breakdown().verified, 0);
+    assert_eq!(report.breakdown().waived, 1);
+    assert_eq!(report.magnitude_budget().verified_width.to_bits(), 0);
+    assert_eq!(report.magnitude_budget().waived_unquantified, 1);
+    assert_eq!(report.receipt().package_root(), report.merkle_root());
+    assert_eq!(report.receipt().waiver_day(), Some(199));
+    assert_eq!(
+        report.receipt().policy_fingerprints().waivers(),
+        Some(fixture_policy("hash-waiver-verifier"))
+    );
+    assert_eq!(
+        report.receipt().admissions()[0].class(),
+        AdmissionClass::WaiverDependent
+    );
+    assert_eq!(
+        report.receipt().admissions()[0].origin_kind(),
+        fs_package::AdmissionOriginKind::AuthenticatedWaiver
+    );
+    assert_eq!(report.receipt().admissions()[0].direct_waiver(), Some(0));
+    assert!(report.receipt().admissions()[0].waiver_parents().is_empty());
+    assert_eq!(report.receipt().waiver_registry().len(), 1);
+    assert_eq!(
+        report.receipt().waiver_registry()[0].waiver_id(),
+        "waiver-2026-01"
+    );
+    let different_day =
+        VerificationCapabilities::deny_all().with_waivers(&HASH_WAIVER_VERIFIER, 198);
+    let different_day_report = pkg
+        .verify_with(&different_day)
+        .expect("earlier day is also inside the grant");
+    assert_ne!(
+        report.receipt().receipt_hash(),
+        different_day_report.receipt().receipt_hash(),
+        "the decision receipt binds the explicit waiver clock"
+    );
     let presence = fs_package::package_presence_with(&pkg, &capabilities);
-    for concept in [
-        PackageConcept::ClaimOrigin,
-        PackageConcept::WaiverAuthorization,
-    ] {
-        assert!(
-            presence
-                .iter()
-                .find(|row| row.concept == concept)
-                .expect("schema-v5 authorization concept")
-                .present,
-            "{concept:?} must require and reflect successful waiver authentication"
-        );
-    }
-    let waiver_status =
-        fs_package::package_coverage_with(&pkg, Standard::FaaEasaCbA, &capabilities)
-            .into_iter()
-            .find(|(concept, _, _)| *concept == PackageConcept::WaiverAuthorization)
-            .expect("waiver crosswalk row")
-            .1;
+    assert!(
+        !presence
+            .iter()
+            .find(|row| row.concept() == PackageConcept::ClaimOrigin)
+            .expect("claim-origin concept")
+            .present(),
+        "administrative waiver authority must not become scientific source traceability"
+    );
+    assert!(
+        presence
+            .iter()
+            .find(|row| row.concept() == PackageConcept::WaiverAuthorization)
+            .expect("waiver-authorization concept")
+            .present(),
+        "successful waiver authentication belongs only in waiver coverage"
+    );
+    let waiver_coverage =
+        fs_package::package_coverage_with(&pkg, Standard::FaaEasaCbA, &capabilities);
+    let waiver_status = waiver_coverage
+        .iter()
+        .find(|(concept, _, _)| *concept == PackageConcept::WaiverAuthorization)
+        .expect("waiver crosswalk row")
+        .1
+        .clone();
     assert_eq!(waiver_status, CoverageStatus::Covered);
-    let asme_status = fs_package::package_coverage_with(&pkg, Standard::AsmeVvV40, &capabilities)
-        .into_iter()
+    let asme_coverage = fs_package::package_coverage_with(&pkg, Standard::AsmeVvV40, &capabilities);
+    let asme_status = asme_coverage
+        .iter()
         .find(|(concept, _, _)| *concept == PackageConcept::WaiverAuthorization)
         .expect("waiver no-counterpart row")
-        .1;
+        .1
+        .clone();
     assert_eq!(asme_status, CoverageStatus::NoClaim);
-    let decoded = EvidencePackage::from_json_with(&pkg.to_json(), &capabilities)
+    let decoded = EvidencePackage::from_json_with(&package_json(&pkg), &capabilities)
         .expect("waiver capability is available at the JSON boundary");
-    assert_eq!(decoded, pkg);
+    assert_eq!(decoded.package(), &pkg);
+    assert_eq!(
+        decoded.report().receipt().package_root(),
+        package_root(&pkg)
+    );
+}
+
+fn pending_waiver_claim(id: &str, color: Color) -> Claim {
+    Claim::waived(
+        id,
+        format!("{id} administrative exception"),
+        color,
+        WaiverGrant {
+            waiver_id: "waiver-taint-root".to_string(),
+            expiry_day: 400,
+            mac: "pending-authenticator".to_string(),
+        },
+    )
+}
+
+#[test]
+fn one_parent_derivation_cannot_launder_a_waiver() {
+    let color = Color::Verified { lo: 0.0, hi: 1.0 };
+    let pending = EvidencePackage::new(prov())
+        .with_claim(pending_waiver_claim("waived-root", color.clone()))
+        .with_claim(Claim::derived(
+            "child",
+            "identity derivation",
+            color,
+            vec![0],
+            IntervalOp::Hull,
+            CANONICAL_DATASET_HASH,
+        ));
+    let pkg = authorize_waiver(pending, 0);
+    let capabilities = VerificationCapabilities::deny_all()
+        .with_waivers(&HASH_WAIVER_VERIFIER, 300)
+        .with_derivations(&FIXTURE_DERIVATION_VERIFIER);
+    let report = pkg
+        .verify_with(&capabilities)
+        .expect("waiver authenticates");
+    assert_eq!(report.breakdown().verified, 0);
+    assert_eq!(report.breakdown().waived, 2);
+    assert_eq!(report.magnitude_budget().verified_width.to_bits(), 0);
+    assert_eq!(report.magnitude_budget().waived_unquantified, 2);
+    assert_eq!(report.receipt().admissions()[1].waiver_parents(), [0]);
+    assert_eq!(report.receipt().waiver_registry().len(), 1);
+}
+
+#[test]
+fn multihop_derivation_preserves_the_original_waiver_identity() {
+    let color = Color::Verified { lo: 0.0, hi: 1.0 };
+    let pending = EvidencePackage::new(prov())
+        .with_claim(pending_waiver_claim("waived-root", color.clone()))
+        .with_claim(Claim::derived(
+            "child",
+            "first hop",
+            color.clone(),
+            vec![0],
+            IntervalOp::Hull,
+            CANONICAL_DATASET_HASH,
+        ))
+        .with_claim(Claim::derived(
+            "grandchild",
+            "second hop",
+            color,
+            vec![1],
+            IntervalOp::Hull,
+            CANONICAL_DATASET_HASH,
+        ));
+    let pkg = authorize_waiver(pending, 0);
+    let capabilities = VerificationCapabilities::deny_all()
+        .with_waivers(&HASH_WAIVER_VERIFIER, 300)
+        .with_derivations(&FIXTURE_DERIVATION_VERIFIER);
+    let report = pkg
+        .verify_with(&capabilities)
+        .expect("waiver authenticates");
+    assert_eq!(report.breakdown().waived, 3);
+    assert!(
+        report
+            .receipt()
+            .admissions()
+            .iter()
+            .all(|decision| decision.class() == AdmissionClass::WaiverDependent)
+    );
+    assert_eq!(report.receipt().admissions()[1].waiver_parents(), [0]);
+    assert_eq!(report.receipt().admissions()[2].waiver_parents(), [1]);
+    assert_eq!(report.receipt().waiver_registry().len(), 1);
+}
+
+#[test]
+fn long_waiver_ids_are_interned_once_across_deep_taint_chains() {
+    let color = Color::Verified { lo: 0.0, hi: 1.0 };
+    let waiver_id = format!("waiver-{}", "w".repeat(8 * 1024));
+    let mut pending = EvidencePackage::new(prov()).with_claim(Claim::waived(
+        "waived-root",
+        "long waiver identity",
+        color.clone(),
+        WaiverGrant {
+            waiver_id: waiver_id.clone(),
+            expiry_day: 400,
+            mac: "pending-authenticator".to_string(),
+        },
+    ));
+    for index in 1..32 {
+        pending = pending.with_claim(Claim::derived(
+            format!("derived-{index}"),
+            format!("taint hop {index}"),
+            color.clone(),
+            vec![index - 1],
+            IntervalOp::Hull,
+            CANONICAL_DATASET_HASH,
+        ));
+    }
+    let package = authorize_waiver(pending, 0);
+    let capabilities = VerificationCapabilities::deny_all()
+        .with_waivers(&HASH_WAIVER_VERIFIER, 300)
+        .with_derivations(&FIXTURE_DERIVATION_VERIFIER);
+    let report = package
+        .verify_with(&capabilities)
+        .expect("deep waiver chain verifies");
+    assert_eq!(report.receipt().waiver_registry().len(), 1);
+    assert_eq!(report.receipt().waiver_registry()[0].waiver_id(), waiver_id);
+    for (index, admission) in report.receipt().admissions().iter().enumerate().skip(1) {
+        assert_eq!(admission.waiver_parents(), [index - 1]);
+        assert_eq!(admission.direct_waiver(), None);
+    }
+    assert!(report.receipt().validate_hash());
+}
+
+#[test]
+fn multiparent_derivation_is_tainted_if_any_parent_depends_on_a_waiver() {
+    let waived_color = Color::Verified { lo: 0.0, hi: 1.0 };
+    let clean_color = Color::Estimated {
+        estimator: "clean-estimator".to_string(),
+        dispersion: 2.0,
+    };
+    let derived_color = fs_evidence::compose(&waived_color, &clean_color, IntervalOp::Add);
+    let pending = EvidencePackage::new(prov())
+        .with_claim(pending_waiver_claim("waived-root", waived_color))
+        .with_claim(Claim::estimated(
+            "clean",
+            "independent estimate",
+            "clean-estimator",
+            2.0,
+        ))
+        .with_claim(Claim::derived(
+            "mixed",
+            "waived plus clean",
+            derived_color,
+            vec![0, 1],
+            IntervalOp::Add,
+            CANONICAL_DATASET_HASH,
+        ));
+    let pkg = authorize_waiver(pending, 0);
+    let capabilities = VerificationCapabilities::deny_all()
+        .with_waivers(&HASH_WAIVER_VERIFIER, 300)
+        .with_derivations(&FIXTURE_DERIVATION_VERIFIER);
+    let report = pkg
+        .verify_with(&capabilities)
+        .expect("waiver authenticates");
+    assert_eq!(report.breakdown().estimated, 1);
+    assert_eq!(report.breakdown().waived, 2);
+    assert_eq!(
+        report.magnitude_budget().estimated_dispersion.to_bits(),
+        2.0f64.to_bits()
+    );
+    assert_eq!(report.magnitude_budget().waived_unquantified, 2);
+    assert_eq!(
+        report.receipt().admissions()[1].class(),
+        AdmissionClass::Scientific
+    );
+    assert_eq!(
+        report.receipt().admissions()[2].class(),
+        AdmissionClass::WaiverDependent
+    );
+    assert_eq!(report.receipt().admissions()[2].waiver_parents(), [0]);
 }
 
 #[test]
@@ -1402,9 +2410,9 @@ fn waiver_authentication_binds_package_context_id_expiry_and_claim() {
         VerificationCapabilities::deny_all().with_waivers(&HASH_WAIVER_VERIFIER, 199);
 
     let old_mac = pkg
-        .claims
+        .declared_claims_unverified()
         .iter()
-        .find_map(|claim| match claim.origin() {
+        .find_map(|claim| match claim.declared_origin_unverified() {
             fs_package::ClaimOrigin::AuthenticatedWaiver(grant) => Some(grant.mac.clone()),
             _ => None,
         })
@@ -1547,11 +2555,11 @@ fn multiple_waivers_share_one_mac_independent_authorization_context() {
         .expect("second authenticator");
     assert_eq!(
         package.waiver_message(0).as_deref(),
-        Some(first_message.as_slice())
+        Ok(first_message.as_slice())
     );
     assert_eq!(
         package.waiver_message(1).as_deref(),
-        Some(second_message.as_slice())
+        Ok(second_message.as_slice())
     );
     let capabilities =
         VerificationCapabilities::deny_all().with_waivers(&HASH_WAIVER_VERIFIER, 199);

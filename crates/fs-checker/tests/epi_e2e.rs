@@ -10,12 +10,72 @@ use std::collections::BTreeMap;
 
 use fs_evidence::falsify::{ClaimContext, FalsifierHistory, FalsifierRegistry};
 use fs_evidence::{Color, IntervalOp, ValidityDomain};
-use fs_ledger::{ColorGraph, EventRow, Ledger, SourceOrigin, Waiver, hash_bytes};
+use fs_ledger::{
+    ColorGraph, EventRow, Ledger, PolicyDecision, SourceOrigin, SourceOriginRequest,
+    SourceOriginVerifier, Waiver, hash_bytes,
+};
 use fs_opt::{
     DeltaPerturbationStep, Endpoint, EscalationKind, EscalationStep, GoodhartGuard, GuardStatus,
     StepOutcome,
 };
 use fs_package::{Claim, EvidencePackage, Provenance};
+
+struct FixtureSourceVerifier(Vec<u8>);
+
+impl SourceOriginVerifier for FixtureSourceVerifier {
+    fn verify(&self, request: &SourceOriginRequest<'_>) -> PolicyDecision {
+        let fingerprint = hash_bytes(b"fs-checker/epi-ledger-source-policy/v1");
+        if self.0 == request.canonical_bytes() {
+            PolicyDecision::accept(fingerprint)
+        } else {
+            PolicyDecision::reject(fingerprint)
+        }
+    }
+}
+
+struct PackageSourceVerifier;
+struct PackageSignatureVerifier;
+
+impl fs_checker::SourceCertificateVerifier for PackageSourceVerifier {
+    fn verify(
+        &self,
+        request: &fs_checker::SourceCertificateRequest<'_>,
+    ) -> fs_checker::VerificationDecision {
+        let accepted = request.package_provenance.code_version == "frankensim@3fab970"
+            && request.package_provenance.constellation_lock == "lock-digest-77"
+            && request.claim_index == 0
+            && request.claim_id == "drag"
+            && request.statement == "Cd in [0.31, 0.33] at Re 2e5"
+            && request.lo.to_bits() == 0.31f64.to_bits()
+            && request.hi.to_bits() == 0.33f64.to_bits()
+            && request.producer == "test-solver/cert"
+            && request.certificate_hash.to_hex()
+                == "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let fingerprint = hash_bytes(b"fs-checker:epi-package-source-policy:v1");
+        if accepted {
+            fs_checker::VerificationDecision::accept(fingerprint)
+        } else {
+            fs_checker::VerificationDecision::reject(fingerprint)
+        }
+    }
+}
+
+impl fs_checker::SignatureVerifier for PackageSignatureVerifier {
+    fn verify(
+        &self,
+        request: &fs_checker::SignatureRequest<'_>,
+    ) -> fs_checker::VerificationDecision {
+        let fingerprint = hash_bytes(b"fs-checker:epi-package-signature-policy:v1");
+        if request.signature
+            == format!("fs-checker:epi-subject:{}", request.subject_hash().to_hex())
+            && request.purpose == fs_checker::SignaturePurpose::PackageRootAttestation
+        {
+            fs_checker::VerificationDecision::accept(fingerprint)
+        } else {
+            fs_checker::VerificationDecision::reject(fingerprint)
+        }
+    }
+}
 use fs_robust::{ColoredObjective, RobustError, fragility_curve};
 
 fn verdict(case: &str, detail: &str) {
@@ -75,8 +135,13 @@ fn mac(payload: &[u8]) -> Vec<u8> {
 }
 
 impl fs_ledger::WaiverVerifier for MacVerifier {
-    fn verify(&self, key_id: &str, payload: &[u8], signature: &[u8]) -> bool {
-        key_id == "epi-key" && mac(payload) == signature
+    fn verify(&self, key_id: &str, payload: &[u8], signature: &[u8]) -> PolicyDecision {
+        let fingerprint = hash_bytes(b"fs-checker/epi-ledger-waiver-policy/v1");
+        if key_id == "epi-key" && mac(payload) == signature {
+            PolicyDecision::accept(fingerprint)
+        } else {
+            PolicyDecision::reject(fingerprint)
+        }
     }
 }
 
@@ -104,18 +169,24 @@ fn epi_e2e_battery() {
         )
         .expect("surrogate is Estimated");
     let anchor_regime = ValidityDomain::unconstrained().with("Re", 1.0e5, 3.0e5);
+    let anchor_color = Color::Validated {
+        regime: anchor_regime.clone(),
+        dataset: "tunnel-2026".to_string(),
+    };
+    let anchor_origin = SourceOrigin::Anchoring {
+        dataset_id: "tunnel-2026".to_string(),
+        content_hash: hash_bytes(b"tunnel-2026 fixture"),
+        regime: anchor_regime,
+    };
+    let anchor_verifier = FixtureSourceVerifier(
+        SourceOriginRequest::new("tunnel-anchor", &anchor_color, &anchor_origin).canonical_bytes(),
+    );
     let anchored = graph
         .source_with_origin(
             "tunnel-anchor",
-            &Color::Validated {
-                regime: anchor_regime.clone(),
-                dataset: "tunnel-2026".to_string(),
-            },
-            SourceOrigin::Anchoring {
-                dataset_id: "tunnel-2026".to_string(),
-                content_hash: hash_bytes(b"tunnel-2026 fixture"),
-                regime: anchor_regime,
-            },
+            &anchor_color,
+            anchor_origin,
+            &anchor_verifier,
         )
         .expect("dataset anchor mints Validated");
     // Adversarial upgrade: REFUSED at write time.
@@ -160,7 +231,7 @@ fn epi_e2e_battery() {
     // node, lineage, color, and scope, unexpired, verifier-accepted —
     // authorizes the upgrade; a bare annotation would be refused.
     let claimed_color = Color::Validated {
-        regime: ValidityDomain::unconstrained(),
+        regime: ValidityDomain::unconstrained().with("Re", 1.0e5, 3.0e5),
         dataset: "engineer-judgment".to_string(),
     };
     let mut grant = fs_ledger::WaiverGrant {
@@ -406,7 +477,7 @@ fn epi_e2e_battery() {
     );
 
     // ---- STAGE 5: the evidence-package round-trip -----------------------
-    let package = EvidencePackage::new(Provenance::new("frankensim@3fab970", "lock-digest-77"))
+    let unsigned = EvidencePackage::new(Provenance::new("frankensim@3fab970", "lock-digest-77"))
         .with_claim(Claim::from_certificate(
             "drag",
             "Cd in [0.31, 0.33] at Re 2e5",
@@ -421,35 +492,86 @@ fn epi_e2e_battery() {
             "hazard-model-v2",
             0.2,
         ));
-    let root = package.merkle_root();
-    let package = package.signed("sig:royalchinchillas");
-    let report = fs_checker::check(&package);
+    let root = unsigned.try_merkle_root().expect("bounded fixture root");
+    let signature_subject = fs_checker::signature_subject_hash(
+        root,
+        fs_checker::SignaturePurpose::PackageRootAttestation,
+    );
+    let package = unsigned.signed(format!(
+        "fs-checker:epi-subject:{}",
+        signature_subject.to_hex()
+    ));
+    let package_source_verifier = PackageSourceVerifier;
+    let package_signature_verifier = PackageSignatureVerifier;
+    let capabilities = fs_checker::VerificationCapabilities::deny_all()
+        .with_source_certificates(&package_source_verifier);
+    let report = fs_checker::check_with_capabilities(
+        &package,
+        None,
+        Some(&package_signature_verifier),
+        &capabilities,
+    );
     assert!(
         report.passed(),
-        "the honest package re-verifies solver-free"
+        "the exact-subject fixture capability accepts without rerunning the solver"
     );
+    assert!(matches!(
+        report.signature(),
+        fs_checker::SignatureStatus::Authenticated(_)
+    ));
     let pie = report.render_pie();
     assert!(
         pie.contains("verified") && pie.contains("estimated"),
         "the pie renders: {pie}"
     );
     // TAMPER: polish the estimated claim after signing.
-    let mut tampered = package.clone();
-    tampered.claims[1] = Claim::from_certificate(
-        "fatigue",
-        "life > 1e7 cycles per hazard-model-v2",
-        0.0,
-        1.0,
-        "tampered/certificate",
-        "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+    let tampered = EvidencePackage::new(Provenance::new("frankensim@3fab970", "lock-digest-77"))
+        .with_claim(Claim::from_certificate(
+            "drag",
+            "Cd in [0.31, 0.33] at Re 2e5",
+            0.31,
+            0.33,
+            "test-solver/cert",
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        ))
+        .with_claim(Claim::from_certificate(
+            "fatigue",
+            "life > 1e7 cycles per hazard-model-v2",
+            0.0,
+            1.0,
+            "tampered/certificate",
+            "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+        ))
+        .signed(format!(
+            "fs-checker:epi-subject:{}",
+            signature_subject.to_hex()
+        ));
+    let bad = fs_checker::check_with_capabilities(
+        &tampered,
+        Some(root),
+        Some(&package_signature_verifier),
+        &capabilities,
     );
-    let bad = fs_checker::check_against_root(&tampered, root);
     assert!(!bad.passed(), "tampering fails closed");
+    assert!(
+        bad.findings()
+            .iter()
+            .any(|finding| finding.kind == "source-certificate-refused"),
+        "substituted source claim must fail exact subject authentication: {:?}",
+        bad.findings()
+    );
+    assert!(
+        bad.findings()
+            .iter()
+            .any(|finding| finding.kind == "content-address-mismatch"),
+        "claim substitution must also break the expected content root: {:?}",
+        bad.findings()
+    );
     let named = bad
-        .findings
+        .findings()
         .iter()
         .any(|f| f.detail.contains("fatigue") || f.detail.contains("root"));
-    assert!(named, "the failure is localized: {:?}", bad.findings);
+    assert!(named, "the failure is localized: {:?}", bad.findings());
     log.log(
         "package",
         "\"event\":\"round-trip\",\"claims\":2,\"reverified\":true,\

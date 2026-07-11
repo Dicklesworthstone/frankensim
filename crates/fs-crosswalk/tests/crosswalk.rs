@@ -10,8 +10,8 @@ use fs_crosswalk::{
 
 #[test]
 fn compatibility_versions_are_explicit() {
-    assert_eq!(CROSSWALK_VERSION, 3);
-    assert_eq!(SUPPORTED_PACKAGE_FORMAT, 5);
+    assert_eq!(CROSSWALK_VERSION, 4);
+    assert_eq!(SUPPORTED_PACKAGE_FORMAT, 6);
 }
 
 #[test]
@@ -42,7 +42,7 @@ fn the_crosswalk_is_honest_about_missing_counterparts() {
             .counterpart,
         Counterpart::Mapped { .. }
     ));
-    // Schema-v5 origin traceability maps only where the vocabulary supports
+    // Schema-v6 origin traceability maps only where the vocabulary supports
     // it; an authenticated waiver is not laundered into scientific evidence.
     assert!(matches!(
         lookup(PackageConcept::ClaimOrigin, Standard::AsmeVvV10)

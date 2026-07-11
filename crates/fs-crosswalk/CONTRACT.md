@@ -8,8 +8,8 @@ evidence-package fields onto the regulator's existing standards language.
 Layer UTIL (pure data + audit; no dependencies). It owns risk R9
 (standards-body latency): every field is mapped or explicitly flagged, so the
 package doubles as internal-QA / B2B diligence collateral regardless of
-standards-body pace. `CROSSWALK_VERSION = 3` identifies this vocabulary and
-`SUPPORTED_PACKAGE_FORMAT = 5` makes package compatibility explicit without a
+standards-body pace. `CROSSWALK_VERSION = 4` identifies this vocabulary and
+`SUPPORTED_PACKAGE_FORMAT = 6` makes package compatibility explicit without a
 dependency cycle.
 
 ## Public types and semantics
@@ -66,26 +66,32 @@ no-counterpart rows exist, verified-color does map);
 per-concept (×4) and per-standard (×12) slices; representative validation,
 claim-origin, and waiver decisions; unique labels; deterministic JSON.
 
-## Vocabulary v3: schema-v5 authorization concepts
+## Vocabulary v4: schema-v6 authenticated concepts
 
-Package format 5 makes claim origin and waiver authorization independently
-observable proof states. `ClaimOrigin` maps to credibility-evidence traceability
-in ASME V&V 40 and analysis-data traceability in FAA/EASA CbA; V&V 10/20 have
-explicit no-counterpart rows rather than a forced mapping. `WaiverAuthorization`
-maps only to FAA/EASA's approved deviations/limitations vocabulary. The ASME
-rows are explicit no-counterpart decisions: risk acceptance, review approval,
-or a signature must not be misreported as a waiver of scientific evidence.
+Package format 6 makes scientific claim origin and waiver authorization
+independently observable proof states. `ClaimOrigin` maps to
+credibility-evidence traceability in ASME V&V 40 and analysis-data traceability
+in FAA/EASA CbA; Estimated declarations, administrative waivers, and
+waiver-dependent descendants do not establish this concept. V&V 10/20 have
+explicit no-counterpart rows. `WaiverAuthorization` maps only to FAA/EASA's
+approved deviations/limitations vocabulary. Signature rows refer specifically
+to policy-authenticated release approval bound to checker protocol and package
+root; the mapping does not claim signer identity, role, or authorship.
 
 ## Package-grounded coverage (bead qmao.6.1)
 
 The static concept↔standard table is a MAPPING, never coverage.
-`package_presence` judges each concept against fields actually present after
-deny-all package verification, and `package_presence_with` accepts explicit
-origin capabilities. `package_coverage` and `_with` report Covered only for the
-intersection of (mapped, authenticated evidence); a mapped concept with absent
-evidence is `MappedButAbsent`. Claim-origin presence requires successful origin
-verification. Waiver-authorization presence additionally requires at least one
-authenticated, unexpired waiver. Raw origin or MAC fields never count.
+`package_presence` judges each concept after deny-all package verification, and
+`package_presence_with` accepts explicit origin/artifact capabilities.
+`PackagePresenceReport` and `PackageCoverageReport` are sealed, retain the exact
+package receipt, and bind rows plus mapping context into decision hashes.
+Coverage is `Covered` only for the intersection of mapped and authenticated
+evidence; a mapped concept with absent evidence is `MappedButAbsent`.
+Claim-origin presence requires scientific admission and a successfully invoked
+source/anchor/derivation policy. Waiver authorization requires an authenticated,
+unexpired waiver. Signature coverage requires release-purpose authentication.
+Provenance strings remain absent coverage until a provenance-artifact verifier
+exists. Raw declarations never count.
 
 ## No-claim boundaries
 
@@ -97,9 +103,10 @@ authenticated, unexpired waiver. Raw origin or MAC fields never count.
 - This crate is DATA + audit; it does not parse a package or drive the checker
   (fs-package / fs-checker do). A tool that renders a package AS a given
   standard's evidence dossier is a downstream consumer.
-- A mapped waiver authorization means only that a responsible authority
-  approved the bounded exception. It is not a certificate, validation result,
-  or proof of the waived claim.
+- A mapped waiver authorization means only that the configured policy accepted
+  the bounded exception through the recorded day. It does not identify a
+  responsible person and is not a certificate, validation result, or proof of
+  the waived claim.
 - Clause references are indicative concept names, not verbatim clause numbers
   (which move between standard editions); the crosswalk is versioned so it can
   track a specific edition.

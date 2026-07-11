@@ -1,11 +1,13 @@
-//! CLAIM ORIGINS (schema v5, bead krym): where a claim's certificate
+//! CLAIM ORIGINS (schema v6): where a claim's certificate
 //! CAME FROM — the missing half of "machine-checkable".
 //!
 //! Schema v4 made the content address collision-resistant, but content
 //! consistency is not evidence origin: `Color::Verified { lo, hi }` is
 //! public algebra (fs-evidence composition needs it), so any producer
 //! could mint a finite interval and the standalone checker would pass
-//! it. v5 seals claims AT THE PACKAGE BOUNDARY: every claim must carry
+//! it. v5 sealed claims AT THE PACKAGE BOUNDARY; v6 additionally makes
+//! every external trust decision an explicit, fingerprinted capability.
+//! Every claim must carry
 //! a [`ClaimOrigin`] consistent with its color, bound into the content
 //! address, and re-derivable by the checker — while the Color algebra
 //! itself stays public and untouched.
@@ -19,7 +21,8 @@
 //!   the certificate subpoenable without shipping it.
 //! - [`ClaimOrigin::AnchoredSource`] — a validated claim's reference
 //!   dataset by id + content hash; must MATCH the color's named
-//!   dataset exactly (an unrelated anchor is refused).
+//!   dataset exactly and be accepted by an injected
+//!   [`AnchoredSourceVerifier`] over the exact claim and regime.
 //! - [`ClaimOrigin::EstimatedSource`] — the estimator identity; must
 //!   match the color's estimator string exactly.
 //! - [`ClaimOrigin::Derived`] — a composition receipt; the checker
@@ -37,7 +40,47 @@ use core::fmt;
 
 use crate::{ContentHash, Provenance};
 
-/// An explicit waiver grant that travels WITH its claim (schema v5).
+/// A stable identity for one external verification policy.
+///
+/// Implementations must change this fingerprint whenever their trust roots,
+/// accepted artifact set, validation algorithm, or other decision semantics
+/// change. Verification receipts bind these values so replay cannot silently
+/// substitute a different policy.
+pub type PolicyFingerprint = ContentHash;
+
+/// Atomic result of one external policy decision. Acceptance and the exact
+/// policy identity are returned by the same callback, preventing a mutable
+/// verifier from making a decision under one policy while separately reporting
+/// another fingerprint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VerificationDecision {
+    /// Whether this exact request was accepted.
+    pub accepted: bool,
+    /// Stable identity of the policy that made this decision.
+    pub policy_fingerprint: PolicyFingerprint,
+}
+
+impl VerificationDecision {
+    /// Accepted under `policy_fingerprint`.
+    #[must_use]
+    pub const fn accept(policy_fingerprint: PolicyFingerprint) -> Self {
+        Self {
+            accepted: true,
+            policy_fingerprint,
+        }
+    }
+
+    /// Rejected under `policy_fingerprint`.
+    #[must_use]
+    pub const fn reject(policy_fingerprint: PolicyFingerprint) -> Self {
+        Self {
+            accepted: false,
+            policy_fingerprint,
+        }
+    }
+}
+
+/// An explicit waiver grant that travels WITH its claim (schema v6).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WaiverGrant {
     /// Stable, non-blank waiver identity (audit key).
@@ -54,11 +97,12 @@ pub struct WaiverGrant {
 /// cryptography — the same fail-closed pattern as the checker's
 /// [`SignatureVerifier`] and fs-ledger's waivers).
 pub trait WaiverVerifier {
-    /// True iff `mac` authenticates the package-owned, domain-separated
-    /// `message`. The message already binds the waiver id and expiry;
-    /// passing them separately would let an implementation accidentally
-    /// authenticate only a subset of the authorization context.
-    fn verify(&self, mac: &str, message: &[u8]) -> bool;
+    /// Return a decision whose `accepted` bit is true iff `mac` authenticates
+    /// the package-owned, domain-separated `message`. The message already binds
+    /// the waiver id and expiry; passing them separately would let an
+    /// implementation accidentally authenticate only a subset of the
+    /// authorization context.
+    fn verify(&self, mac: &str, message: &[u8]) -> VerificationDecision;
 }
 
 /// The in-tree default: nothing authenticates. A package whose claims
@@ -68,8 +112,11 @@ pub trait WaiverVerifier {
 pub struct NoWaiverVerifier;
 
 impl WaiverVerifier for NoWaiverVerifier {
-    fn verify(&self, _mac: &str, _message: &[u8]) -> bool {
-        false
+    fn verify(&self, _mac: &str, _message: &[u8]) -> VerificationDecision {
+        VerificationDecision::reject(fs_blake3::hash_domain(
+            "fs-package:v6:policy",
+            b"deny-all-waivers",
+        ))
     }
 }
 
@@ -103,7 +150,7 @@ pub struct SourceCertificateRequest<'a> {
 /// built-in implementation.
 pub trait SourceCertificateVerifier {
     /// True only when the addressed artifact establishes the supplied claim.
-    fn verify(&self, request: &SourceCertificateRequest<'_>) -> bool;
+    fn verify(&self, request: &SourceCertificateRequest<'_>) -> VerificationDecision;
 }
 
 /// The in-tree source-certificate default: no artifact is trusted.
@@ -111,9 +158,269 @@ pub trait SourceCertificateVerifier {
 pub struct NoSourceCertificateVerifier;
 
 impl SourceCertificateVerifier for NoSourceCertificateVerifier {
-    fn verify(&self, _request: &SourceCertificateRequest<'_>) -> bool {
-        false
+    fn verify(&self, _request: &SourceCertificateRequest<'_>) -> VerificationDecision {
+        VerificationDecision::reject(fs_blake3::hash_domain(
+            "fs-package:v6:policy",
+            b"deny-all-source-certificates",
+        ))
     }
+}
+
+/// Typed input to an injected anchoring-dataset verifier.
+///
+/// A content hash is an address, not evidence that the referenced dataset is
+/// appropriate for this exact validation claim. The verifier receives every
+/// semantic field whose substitution could change that decision.
+#[derive(Debug, Clone, Copy)]
+pub struct AnchoredSourceRequest<'a> {
+    /// Package provenance under which the dataset is admitted.
+    pub package_provenance: &'a Provenance,
+    /// Stable position of the claim in the package.
+    pub claim_index: usize,
+    /// Claim identity.
+    pub claim_id: &'a str,
+    /// Human-readable assertion bound to the dataset decision.
+    pub statement: &'a str,
+    /// Exact validity regime claimed for the dataset comparison.
+    pub regime: &'a fs_evidence::ValidityDomain,
+    /// Dataset identity named by both the color and origin.
+    pub dataset_id: &'a str,
+    /// Parsed content address of the anchoring dataset.
+    pub content_hash: ContentHash,
+}
+
+/// Capability that re-verifies an anchoring dataset against the exact claim.
+pub trait AnchoredSourceVerifier {
+    /// True only when the addressed dataset supports the supplied request.
+    fn verify(&self, request: &AnchoredSourceRequest<'_>) -> VerificationDecision;
+}
+
+/// The in-tree anchoring default: no dataset address is trusted by itself.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NoAnchoredSourceVerifier;
+
+impl AnchoredSourceVerifier for NoAnchoredSourceVerifier {
+    fn verify(&self, _request: &AnchoredSourceRequest<'_>) -> VerificationDecision {
+        VerificationDecision::reject(fs_blake3::hash_domain(
+            "fs-package:v6:policy",
+            b"deny-all-anchored-sources",
+        ))
+    }
+}
+
+/// Typed input to an injected falsifier-artifact verifier.
+#[derive(Debug, Clone, Copy)]
+pub struct FalsifierRequest<'a> {
+    /// Package provenance under which the falsifier is admitted.
+    pub package_provenance: &'a Provenance,
+    /// Recomputed package root, binding sibling context and package identity.
+    pub package_root: ContentHash,
+    /// Stable claim position.
+    pub claim_index: usize,
+    /// Claim identity and human assertion targeted by the falsifier.
+    pub claim_id: &'a str,
+    /// Human-readable claim assertion.
+    pub statement: &'a str,
+    /// Exact declared color of the target claim.
+    pub color: &'a fs_evidence::Color,
+    /// Exact declared origin of the target claim.
+    pub origin: &'a ClaimOrigin,
+    /// Domain-separated claim subject hash excluding external artifact
+    /// addresses and waiver MAC bytes, avoiding content-address fixed points.
+    pub claim_subject_hash: ContentHash,
+    /// Stable record position within the claim.
+    pub falsifier_index: usize,
+    /// Registered falsifier identity.
+    pub name: &'a str,
+    /// Number of represented adversarial attempts.
+    pub attempts: u64,
+    /// Whether the artifact refuted the claim.
+    pub refuted: bool,
+    /// Human-readable outcome summary.
+    pub detail: &'a str,
+    /// Parsed content address of the falsifier artifact.
+    pub artifact_hash: ContentHash,
+}
+
+/// Capability that authenticates a falsifier artifact against its exact claim.
+pub trait FalsifierVerifier {
+    /// Atomic acceptance and policy identity for this exact request.
+    fn verify(&self, request: &FalsifierRequest<'_>) -> VerificationDecision;
+}
+
+/// Typed input to an injected derivation-artifact verifier.
+#[derive(Debug, Clone, Copy)]
+pub struct DerivationRequest<'a> {
+    /// Package provenance and root binding the complete sibling context.
+    pub package_provenance: &'a Provenance,
+    /// Recomputed package root.
+    pub package_root: ContentHash,
+    /// Exact child identity, assertion, and declared color.
+    pub claim_index: usize,
+    /// Derived child identity.
+    pub claim_id: &'a str,
+    /// Derived child assertion.
+    pub statement: &'a str,
+    /// Derived child declared color.
+    pub color: &'a fs_evidence::Color,
+    /// Child subject hash excluding external artifact addresses and waiver MAC
+    /// bytes, avoiding content-address fixed points.
+    pub child_subject_hash: ContentHash,
+    /// Exact attached anchor declarations, if any.
+    pub anchors: &'a [crate::AnchorRecord],
+    /// Exact fold operation and ordered parent identities/content hashes.
+    pub op: fs_evidence::IntervalOp,
+    /// Ordered parent positions in the package.
+    pub parent_indices: &'a [usize],
+    /// Full content hashes of the ordered parent claims.
+    pub parent_claim_hashes: &'a [ContentHash],
+    /// Parsed content address of the derivation proof artifact.
+    pub artifact_hash: ContentHash,
+}
+
+/// Capability that authenticates a derivation artifact against the exact child
+/// and ordered parents. Re-folding the color remains a separate package check.
+pub trait DerivationVerifier {
+    /// Atomic acceptance and policy identity for this exact request.
+    fn verify(&self, request: &DerivationRequest<'_>) -> VerificationDecision;
+}
+
+/// The in-tree derivation default: a receipt and hash never authenticate themselves.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NoDerivationVerifier;
+
+impl DerivationVerifier for NoDerivationVerifier {
+    fn verify(&self, _request: &DerivationRequest<'_>) -> VerificationDecision {
+        VerificationDecision::reject(fs_blake3::hash_domain(
+            "fs-package:v6:policy",
+            b"deny-all-derivations",
+        ))
+    }
+}
+
+/// The in-tree falsifier default: an artifact address never authenticates itself.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NoFalsifierVerifier;
+
+impl FalsifierVerifier for NoFalsifierVerifier {
+    fn verify(&self, _request: &FalsifierRequest<'_>) -> VerificationDecision {
+        VerificationDecision::reject(fs_blake3::hash_domain(
+            "fs-package:v6:policy",
+            b"deny-all-falsifiers",
+        ))
+    }
+}
+
+/// Domain-separated purpose of one detached-signature decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignaturePurpose {
+    /// Policy-authenticated attestation over the package root only.
+    PackageRootAttestation,
+    /// Explicit release-gate approval under one checker protocol, expected
+    /// root, and exact scientific admission context. This cannot be substituted
+    /// by a generic root attestation or replayed under different trust policies.
+    ReleaseApproval {
+        /// Independently distributed checker protocol.
+        checker_protocol: u32,
+        /// Root expected by the release gate.
+        expected_root: ContentHash,
+        /// Domain-separated digest over non-signature policy fingerprints,
+        /// waiver clock, admissions, and the compact waiver graph.
+        admission_context: ContentHash,
+    },
+}
+
+/// Requested signature decision before `fs-package` computes the concrete
+/// scientific admission context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignatureIntent {
+    /// Authenticate the package root only.
+    PackageRootAttestation,
+    /// Authenticate a release decision under an explicit checker protocol and
+    /// expected root. `fs-package` adds the computed admission-context digest.
+    ReleaseApproval {
+        /// Independently distributed checker protocol.
+        checker_protocol: u32,
+        /// Root expected by the release gate.
+        expected_root: ContentHash,
+    },
+}
+
+/// Typed signature subject.
+#[derive(Debug, Clone, Copy)]
+pub struct SignatureRequest<'a> {
+    /// Recomputed package root.
+    pub package_root: ContentHash,
+    /// Detached signature bytes.
+    pub signature: &'a str,
+    /// Gate/domain purpose for this authentication decision.
+    pub purpose: SignaturePurpose,
+}
+
+impl SignatureRequest<'_> {
+    /// Canonical domain-separated digest that signature bytes must authenticate.
+    #[must_use]
+    pub fn subject_hash(&self) -> ContentHash {
+        signature_subject_hash(self.package_root, self.purpose)
+    }
+}
+
+/// Canonical digest for producing or verifying detached signature bytes.
+///
+/// Release subjects include the scientific admission-context digest, preventing
+/// a package-root signature from being replayed under different verifier
+/// policies, waiver time, or admission decisions.
+#[must_use]
+pub fn signature_subject_hash(package_root: ContentHash, purpose: SignaturePurpose) -> ContentHash {
+    let mut subject = Vec::with_capacity(108);
+    subject.extend_from_slice(package_root.as_bytes());
+    match purpose {
+        SignaturePurpose::PackageRootAttestation => {
+            subject.extend_from_slice(b"package-root-attestation");
+        }
+        SignaturePurpose::ReleaseApproval {
+            checker_protocol,
+            expected_root,
+            admission_context,
+        } => {
+            subject.extend_from_slice(b"release-approval");
+            subject.extend_from_slice(&checker_protocol.to_le_bytes());
+            subject.extend_from_slice(expected_root.as_bytes());
+            subject.extend_from_slice(admission_context.as_bytes());
+        }
+    }
+    fs_blake3::hash_domain("fs-package:v6:signature-subject", &subject)
+}
+
+/// The signature-verification capability. `fs-package` deliberately ships no
+/// cryptography; callers inject the policy used to authenticate the exact
+/// typed signature subject.
+pub trait SignatureVerifier {
+    /// Atomic acceptance and policy identity for this exact request.
+    fn verify(&self, request: &SignatureRequest<'_>) -> VerificationDecision;
+}
+
+/// The in-tree signature default: no signature authenticates.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NoSignatureVerifier;
+
+impl SignatureVerifier for NoSignatureVerifier {
+    fn verify(&self, _request: &SignatureRequest<'_>) -> VerificationDecision {
+        VerificationDecision::reject(fs_blake3::hash_domain(
+            "fs-package:v6:policy",
+            b"deny-all-signatures",
+        ))
+    }
+}
+
+/// Signature verifier plus its explicit purpose context.
+#[derive(Clone, Copy)]
+pub struct SignatureVerification<'a> {
+    /// Authenticator implementation.
+    pub verifier: &'a dyn SignatureVerifier,
+    /// Domain/gate intent; package verification materializes the concrete
+    /// purpose after scientific admission.
+    pub intent: SignatureIntent,
 }
 
 /// Waiver authentication capability plus its explicit clock context.
@@ -131,18 +438,52 @@ pub struct WaiverVerification<'a> {
 pub struct VerificationCapabilities<'a> {
     /// Source-certificate artifact verifier.
     pub source_certificates: Option<&'a dyn SourceCertificateVerifier>,
+    /// Anchoring-dataset artifact verifier.
+    pub anchored_sources: Option<&'a dyn AnchoredSourceVerifier>,
+    /// Falsifier-artifact verifier.
+    pub falsifiers: Option<&'a dyn FalsifierVerifier>,
+    /// Derivation-artifact verifier.
+    pub derivations: Option<&'a dyn DerivationVerifier>,
     /// Waiver authenticator and clock context.
     pub waivers: Option<WaiverVerification<'a>>,
+    /// Detached-signature verifier.
+    pub signatures: Option<SignatureVerification<'a>>,
 }
 
 impl<'a> VerificationCapabilities<'a> {
-    /// No source certificates and no waivers are trusted.
+    /// Deny every external source, anchor, falsifier, derivation, waiver, and
+    /// signature capability.
     #[must_use]
     pub const fn deny_all() -> Self {
         Self {
             source_certificates: None,
+            anchored_sources: None,
+            falsifiers: None,
+            derivations: None,
             waivers: None,
+            signatures: None,
         }
+    }
+
+    /// Install an anchoring-dataset verification capability.
+    #[must_use]
+    pub const fn with_anchored_sources(mut self, verifier: &'a dyn AnchoredSourceVerifier) -> Self {
+        self.anchored_sources = Some(verifier);
+        self
+    }
+
+    /// Install a falsifier-artifact verification capability.
+    #[must_use]
+    pub const fn with_falsifiers(mut self, verifier: &'a dyn FalsifierVerifier) -> Self {
+        self.falsifiers = Some(verifier);
+        self
+    }
+
+    /// Install a derivation-artifact verification capability.
+    #[must_use]
+    pub const fn with_derivations(mut self, verifier: &'a dyn DerivationVerifier) -> Self {
+        self.derivations = Some(verifier);
+        self
     }
 
     /// Install a source-certificate verification capability.
@@ -161,6 +502,34 @@ impl<'a> VerificationCapabilities<'a> {
         self.waivers = Some(WaiverVerification {
             verifier,
             today_day,
+        });
+        self
+    }
+
+    /// Install a detached-signature verification capability.
+    #[must_use]
+    pub const fn with_signatures(mut self, verifier: &'a dyn SignatureVerifier) -> Self {
+        self.signatures = Some(SignatureVerification {
+            verifier,
+            intent: SignatureIntent::PackageRootAttestation,
+        });
+        self
+    }
+
+    /// Install signature verification for explicit release approval.
+    #[must_use]
+    pub const fn with_release_signatures(
+        mut self,
+        verifier: &'a dyn SignatureVerifier,
+        checker_protocol: u32,
+        expected_root: ContentHash,
+    ) -> Self {
+        self.signatures = Some(SignatureVerification {
+            verifier,
+            intent: SignatureIntent::ReleaseApproval {
+                checker_protocol,
+                expected_root,
+            },
         });
         self
     }
@@ -198,6 +567,13 @@ pub(crate) fn identity_reason(text: &str) -> Option<&'static str> {
         Some("blank")
     } else if trimmed != text {
         Some("surrounding-whitespace")
+    } else if text.chars().any(char::is_control) {
+        Some("control-character")
+    } else if !text.bytes().all(|byte| {
+        byte.is_ascii_alphanumeric()
+            || matches!(byte, b'-' | b'_' | b'.' | b'/' | b':' | b'@' | b'+' | b'=')
+    }) {
+        Some("invalid-character")
     } else if is_placeholder_token(text) {
         Some("placeholder")
     } else {
@@ -205,7 +581,7 @@ pub(crate) fn identity_reason(text: &str) -> Option<&'static str> {
     }
 }
 
-/// Where a claim's certificate came from (schema v5). Bound into the
+/// Where a claim's certificate came from (schema v6). Bound into the
 /// content address and re-derived by the standalone checker.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ClaimOrigin {
@@ -450,7 +826,7 @@ mod tests {
             expiry_day: u64::MAX,
             mac: "anything".to_string(),
         };
-        assert!(!NoWaiverVerifier.verify(&grant.mac, b"message"));
+        assert!(!NoWaiverVerifier.verify(&grant.mac, b"message").accepted);
     }
 
     #[test]
@@ -466,7 +842,29 @@ mod tests {
             producer: "solver/cert",
             certificate_hash: ContentHash([0; 32]),
         };
-        assert!(!NoSourceCertificateVerifier.verify(&request));
+        assert!(!NoSourceCertificateVerifier.verify(&request).accepted);
+    }
+
+    #[test]
+    fn the_default_anchor_and_signature_verifiers_refuse_everything() {
+        let provenance = Provenance::new("v", "lock");
+        let regime = fs_evidence::ValidityDomain::unconstrained().with("Re", 1.0, 2.0);
+        let request = AnchoredSourceRequest {
+            package_provenance: &provenance,
+            claim_index: 0,
+            claim_id: "c",
+            statement: "matches",
+            regime: &regime,
+            dataset_id: "dataset",
+            content_hash: ContentHash([0; 32]),
+        };
+        assert!(!NoAnchoredSourceVerifier.verify(&request).accepted);
+        let signature = SignatureRequest {
+            package_root: ContentHash([0; 32]),
+            signature: "signature",
+            purpose: SignaturePurpose::PackageRootAttestation,
+        };
+        assert!(!NoSignatureVerifier.verify(&signature).accepted);
     }
 
     #[test]
@@ -474,5 +872,10 @@ mod tests {
         assert_eq!(identity_reason("todo"), Some("placeholder"));
         assert_eq!(identity_reason(" producer"), Some("surrounding-whitespace"));
         assert_eq!(identity_reason("producer"), None);
+        assert_eq!(
+            identity_reason("prod\u{202e}recudor"),
+            Some("invalid-character")
+        );
+        assert_eq!(identity_reason("prod\0ucer"), Some("control-character"));
     }
 }

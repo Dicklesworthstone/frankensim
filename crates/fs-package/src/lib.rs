@@ -2,13 +2,13 @@
 //! Proposal 12). Layer: L6.
 //!
 //! When FrankenSim asserts "this design meets spec", the assertion travels as a
-//! self-contained, CONTENT-ADDRESSED bundle: the color-typed claims, the raw
+//! transport-complete, CONTENT-ADDRESSED bundle: the color-typed claims, the raw
 //! certificate data behind each (carried in the [`fs_evidence::Color`]),
 //! provenance (code version + the constellation lockfile), and a Merkle root
 //! over the package identity so any tamper is detectable. A standalone,
 //! open-source CHECKER re-verifies the package WITHOUT re-running every solver.
-//! Self-contained origins use [`EvidencePackage::verify`]; source artifacts and
-//! waivers require explicit [`VerificationCapabilities`] through
+//! It is not self-authenticating: source, anchor, falsifier, derivation, waiver,
+//! and signature artifacts require explicit [`VerificationCapabilities`] through
 //! [`EvidencePackage::verify_with`].
 //!
 //! Completeness is enforced, not assumed: a validated-color claim that is
@@ -19,9 +19,9 @@
 //!
 //! The Merkle tree uses the in-house BLAKE3 content hash from [`fs_blake3`]
 //! (pure safe Rust, zero deps — Franken-compliant), with every leaf and node
-//! DOMAIN-SEPARATED under `fs-package:v5:…` tags (beads 7uq9 and krym), yielding a
-//! 32-byte [`ContentHash`] root; a cryptographic signature is DETACHED and
-//! OPTIONAL (the bundle is verifiable by content address regardless).
+//! DOMAIN-SEPARATED under `fs-package:v6:…` tags, yielding a
+//! 32-byte [`ContentHash`] root; signature bytes are DETACHED and OPTIONAL, and
+//! become authenticated only through an injected purpose-bound policy.
 //! Everything is deterministic: the same package yields the same root and
 //! JSON.
 
@@ -34,13 +34,18 @@ pub use fs_blake3::ContentHash;
 pub mod coverage;
 pub mod origin;
 pub use coverage::{
-    ConceptPresence, CoverageStatus, package_coverage, package_coverage_with, package_presence,
-    package_presence_with,
+    ConceptPresence, CoverageStatus, PackageCoverageReport, PackagePresenceReport,
+    package_coverage, package_coverage_with, package_presence, package_presence_with,
+    verified_package_coverage, verified_package_presence,
 };
 pub use origin::{
-    ClaimOrigin, NoSourceCertificateVerifier, NoWaiverVerifier, OriginError,
-    SourceCertificateRequest, SourceCertificateVerifier, VerificationCapabilities, WaiverGrant,
-    WaiverVerification, WaiverVerifier,
+    AnchoredSourceRequest, AnchoredSourceVerifier, ClaimOrigin, DerivationRequest,
+    DerivationVerifier, FalsifierRequest, FalsifierVerifier, NoAnchoredSourceVerifier,
+    NoDerivationVerifier, NoFalsifierVerifier, NoSignatureVerifier, NoSourceCertificateVerifier,
+    NoWaiverVerifier, OriginError, PolicyFingerprint, SignatureIntent, SignaturePurpose,
+    SignatureRequest, SignatureVerification, SignatureVerifier, SourceCertificateRequest,
+    SourceCertificateVerifier, VerificationCapabilities, VerificationDecision, WaiverGrant,
+    WaiverVerification, WaiverVerifier, signature_subject_hash,
 };
 
 /// A COMPOSITION RECEIPT (schema v3, bead xfxq): this claim's color was
@@ -55,6 +60,8 @@ pub struct CompositionReceipt {
     pub parents: Vec<usize>,
     /// The ledger operation the derivation used.
     pub op: IntervalOp,
+    /// Canonical 64-hex address of the derivation proof artifact.
+    pub artifact_hash: String,
 }
 
 /// One falsifier's adversarial record against a claim (schema v3):
@@ -71,6 +78,9 @@ pub struct FalsifierRecord {
     pub refuted: bool,
     /// Meaningful, non-placeholder outcome summary.
     pub detail: String,
+    /// Canonical 64-hex content address of the executable falsifier artifact
+    /// and retained results represented by this record.
+    pub artifact_hash: String,
 }
 
 /// An anchoring-dataset identity (schema v3): the reference data behind
@@ -89,7 +99,7 @@ pub struct AnchorRecord {
 /// falsifier records, and dataset anchors (schema v3).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Claim {
-    /// SEALED (schema v5, bead krym): fields are crate-private so a claim
+    /// SEALED (schema v6): fields are crate-private so a claim
     /// can only exist through the origin-typed constructors below — public
     /// `Color::Verified` alone can no longer mint a checker-passing claim.
     pub(crate) id: String,
@@ -201,9 +211,14 @@ impl Claim {
         color: Color,
         parents: Vec<usize>,
         op: IntervalOp,
+        artifact_hash: impl Into<String>,
     ) -> Claim {
         let mut claim = Claim::sealed(id, statement, color, ClaimOrigin::Derived);
-        claim.receipt = Some(CompositionReceipt { parents, op });
+        claim.receipt = Some(CompositionReceipt {
+            parents,
+            op,
+            artifact_hash: artifact_hash.into(),
+        });
         claim
     }
 
@@ -236,27 +251,52 @@ impl Claim {
     }
     /// The epistemic color + certificate payload.
     #[must_use]
-    pub fn color(&self) -> &Color {
+    pub fn declared_color_unverified(&self) -> &Color {
         &self.color
+    }
+    /// Domain-separated hash of the complete raw claim declaration. This is an
+    /// artifact address, not an admission decision.
+    #[must_use]
+    pub fn declared_content_hash_unverified(&self) -> ContentHash {
+        hash_domain("fs-package:v6:claim", self.canonical().as_bytes())
+    }
+
+    /// Domain-separated subject hash for external falsifier/derivation
+    /// artifacts. External artifact addresses and waiver MAC bytes are omitted
+    /// so an artifact may embed this digest without a fixed-point cycle; the
+    /// package root separately binds the complete declaration.
+    #[must_use]
+    pub fn declared_verification_subject_hash_unverified(&self) -> ContentHash {
+        let mut subject = self.clone();
+        if let Some(receipt) = &mut subject.receipt {
+            receipt.artifact_hash.clear();
+        }
+        for falsifier in &mut subject.falsifiers {
+            falsifier.artifact_hash.clear();
+        }
+        hash_domain(
+            "fs-package:v6:claim-verification-subject",
+            subject.authorization_canonical().as_bytes(),
+        )
     }
     /// The composition receipt, when derived.
     #[must_use]
-    pub fn receipt(&self) -> Option<&CompositionReceipt> {
+    pub fn declared_receipt_unverified(&self) -> Option<&CompositionReceipt> {
         self.receipt.as_ref()
     }
     /// Attached falsifier records.
     #[must_use]
-    pub fn falsifiers(&self) -> &[FalsifierRecord] {
+    pub fn declared_falsifiers_unverified(&self) -> &[FalsifierRecord] {
         &self.falsifiers
     }
     /// Attached anchor records.
     #[must_use]
-    pub fn anchors(&self) -> &[AnchorRecord] {
+    pub fn declared_anchors_unverified(&self) -> &[AnchorRecord] {
         &self.anchors
     }
     /// Where this claim's certificate came from.
     #[must_use]
-    pub fn origin(&self) -> &ClaimOrigin {
+    pub fn declared_origin_unverified(&self) -> &ClaimOrigin {
         &self.origin
     }
 
@@ -285,7 +325,7 @@ impl Claim {
     /// for the exact dataset named by its color. Other color classes return
     /// `false` because they have no validated dataset to anchor.
     #[must_use]
-    pub fn has_matching_validated_anchor(&self) -> bool {
+    pub fn has_declared_matching_validated_anchor_unverified(&self) -> bool {
         let Color::Validated { dataset, .. } = &self.color else {
             return false;
         };
@@ -311,7 +351,7 @@ impl Claim {
     /// no-falsifier-no-ship release rule. Estimated claims remain explicitly
     /// low-assurance rather than being promoted into this class.
     #[must_use]
-    pub fn requires_release_falsifier(&self) -> bool {
+    pub fn declared_requires_release_falsifier_unverified(&self) -> bool {
         matches!(
             &self.color,
             Color::Verified { .. } | Color::Validated { .. }
@@ -321,11 +361,11 @@ impl Claim {
     /// Whether release admission must find a matching content-hash dataset
     /// anchor for this claim.
     #[must_use]
-    pub fn requires_validated_anchor(&self) -> bool {
+    pub fn declared_requires_validated_anchor_unverified(&self) -> bool {
         matches!(&self.color, Color::Validated { .. })
     }
 
-    /// The schema-v5 canonical body (id, statement, color, receipt,
+    /// The schema-v6 canonical body (id, statement, color, receipt,
     /// falsifiers, anchors), excluding the claim origin.
     fn canonical_body(&self) -> String {
         use core::fmt::Write as _;
@@ -361,6 +401,7 @@ impl Claim {
                 for &p in &r.parents {
                     let _ = write!(out, "{p}|");
                 }
+                push_atom(&mut out, &r.artifact_hash);
             }
             None => out.push_str("no-receipt|"),
         }
@@ -369,6 +410,7 @@ impl Claim {
             push_atom(&mut out, &fr.name);
             let _ = write!(out, "{}|{}|", fr.attempts, fr.refuted);
             push_atom(&mut out, &fr.detail);
+            push_atom(&mut out, &fr.artifact_hash);
         }
         for a in &self.anchors {
             out.push_str("anchor|");
@@ -378,7 +420,7 @@ impl Claim {
         out
     }
 
-    /// Full canonical string (schema v5): the v4 body plus the origin.
+    /// Full canonical string (schema v6): the claim body plus the origin.
     fn canonical(&self) -> String {
         let mut out = self.canonical_body();
         out.push_str("origin|");
@@ -453,20 +495,25 @@ impl Provenance {
     }
 }
 
-/// A self-contained, content-addressed evidence bundle.
+/// A transport-complete, content-addressed evidence bundle whose external
+/// artifacts require explicit verification capabilities.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EvidencePackage {
     /// The format version (stability promise for external checkers).
     pub format_version: u32,
     /// The claims, in order.
-    pub claims: Vec<Claim>,
+    claims: Vec<Claim>,
     /// Provenance.
     pub provenance: Provenance,
-    /// An OPTIONAL detached signature over the Merkle root.
+    /// An OPTIONAL detached signature over a canonical typed signature subject.
     pub signature: Option<String>,
 }
 
-/// The by-color budget pie over a package's claims.
+/// The by-color budget pie over a package's ADMITTED claims.
+///
+/// The first three buckets contain scientific claims only. A directly waived
+/// claim and every derived descendant of one are counted exclusively in
+/// [`ColorBreakdown::waived`], irrespective of their underlying color.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ColorBreakdown {
     /// Verified-color claims.
@@ -475,17 +522,487 @@ pub struct ColorBreakdown {
     pub validated: usize,
     /// Estimated-color claims.
     pub estimated: usize,
+    /// Waiver-dependent claims, including the complete derived descendant cone.
+    pub waived: usize,
+}
+
+/// Whether a verified claim is admitted as scientific evidence or remains
+/// dependent on one or more administrative waivers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdmissionClass {
+    /// No waiver occurs in this claim's transitive derivation ancestry.
+    Scientific,
+    /// This claim is directly waived or derived from a waiver-dependent claim.
+    WaiverDependent,
+}
+
+/// Stable origin class captured in a verification receipt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdmissionOriginKind {
+    /// Externally re-verified certificate artifact.
+    SourceCertificate,
+    /// Externally re-verified anchoring dataset.
+    AnchoredSource,
+    /// Self-described estimate identity.
+    EstimatedSource,
+    /// Re-derived composition receipt.
+    Derived,
+    /// Authenticated administrative waiver.
+    AuthenticatedWaiver,
+}
+
+impl AdmissionOriginKind {
+    const fn tag(self) -> &'static str {
+        match self {
+            AdmissionOriginKind::SourceCertificate => "source-certificate",
+            AdmissionOriginKind::AnchoredSource => "anchored-source",
+            AdmissionOriginKind::EstimatedSource => "estimated-source",
+            AdmissionOriginKind::Derived => "derived",
+            AdmissionOriginKind::AuthenticatedWaiver => "authenticated-waiver",
+        }
+    }
+}
+
+/// Auditable admission decision for one claim in topological package order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaimAdmission {
+    /// Stable claim position.
+    claim_index: usize,
+    /// Stable claim identity.
+    claim_id: String,
+    /// Origin mechanism whose semantics were admitted for this claim.
+    origin_kind: AdmissionOriginKind,
+    /// Scientific or waiver-dependent admission class.
+    class: AdmissionClass,
+    /// Registry entry when this claim is directly waived.
+    direct_waiver: Option<usize>,
+    /// Immediate receipt parents that are waiver-dependent. Traversing these
+    /// edges reaches every transitive waiver without copying waiver-id strings
+    /// into every descendant.
+    waiver_parents: Vec<usize>,
+}
+
+impl ClaimAdmission {
+    /// Stable claim position in package order.
+    #[must_use]
+    pub const fn claim_index(&self) -> usize {
+        self.claim_index
+    }
+    /// Stable claim identity.
+    #[must_use]
+    pub fn claim_id(&self) -> &str {
+        &self.claim_id
+    }
+    /// Origin mechanism admitted for this claim.
+    #[must_use]
+    pub const fn origin_kind(&self) -> AdmissionOriginKind {
+        self.origin_kind
+    }
+    /// Scientific or waiver-dependent admission class.
+    #[must_use]
+    pub const fn class(&self) -> AdmissionClass {
+        self.class
+    }
+    /// Interned direct-waiver index, when directly waived.
+    #[must_use]
+    pub const fn direct_waiver(&self) -> Option<usize> {
+        self.direct_waiver
+    }
+    /// Immediate waiver-dependent parent claim indices.
+    #[must_use]
+    pub fn waiver_parents(&self) -> &[usize] {
+        &self.waiver_parents
+    }
+}
+
+/// One interned waiver identity in a verification receipt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReceiptWaiver {
+    /// Stable registry position referenced by `ClaimAdmission::direct_waiver`.
+    registry_index: usize,
+    /// Claim that directly carries this waiver.
+    claim_index: usize,
+    /// Authenticated waiver identity, stored exactly once in the receipt.
+    waiver_id: String,
+}
+
+impl ReceiptWaiver {
+    /// Stable position in the receipt waiver registry.
+    #[must_use]
+    pub const fn registry_index(&self) -> usize {
+        self.registry_index
+    }
+    /// Claim index that directly carries this waiver.
+    #[must_use]
+    pub const fn claim_index(&self) -> usize {
+        self.claim_index
+    }
+    /// Authenticated waiver identity.
+    #[must_use]
+    pub fn waiver_id(&self) -> &str {
+        &self.waiver_id
+    }
+}
+
+/// Stable identities of all external policies made available to one decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct VerificationPolicyFingerprints {
+    /// Source-certificate policy, when invoked.
+    source_certificates: Option<PolicyFingerprint>,
+    /// Anchoring-dataset policy, when invoked.
+    anchored_sources: Option<PolicyFingerprint>,
+    /// Falsifier-artifact policy, when invoked.
+    falsifiers: Option<PolicyFingerprint>,
+    /// Derivation-artifact policy, when invoked.
+    derivations: Option<PolicyFingerprint>,
+    /// Waiver-authorization policy, when invoked.
+    waivers: Option<PolicyFingerprint>,
+    /// Detached-signature policy, when invoked.
+    signatures: Option<PolicyFingerprint>,
+}
+
+impl VerificationPolicyFingerprints {
+    /// Source-certificate policy identity, when invoked.
+    #[must_use]
+    pub const fn source_certificates(&self) -> Option<PolicyFingerprint> {
+        self.source_certificates
+    }
+    /// Anchoring-source policy identity, when invoked.
+    #[must_use]
+    pub const fn anchored_sources(&self) -> Option<PolicyFingerprint> {
+        self.anchored_sources
+    }
+    /// Falsifier policy identity, when invoked.
+    #[must_use]
+    pub const fn falsifiers(&self) -> Option<PolicyFingerprint> {
+        self.falsifiers
+    }
+    /// Derivation policy identity, when invoked.
+    #[must_use]
+    pub const fn derivations(&self) -> Option<PolicyFingerprint> {
+        self.derivations
+    }
+    /// Waiver policy identity, when invoked.
+    #[must_use]
+    pub const fn waivers(&self) -> Option<PolicyFingerprint> {
+        self.waivers
+    }
+    /// Signature policy identity, when invoked.
+    #[must_use]
+    pub const fn signatures(&self) -> Option<PolicyFingerprint> {
+        self.signatures
+    }
+}
+
+/// Read-only authenticated signature payload. Private fields prevent safe
+/// downstream code from substituting a different signature or purpose into a
+/// genuine authentication decision.
+///
+/// ```compile_fail
+/// use fs_package::{AuthenticatedSignature, SignaturePurpose};
+///
+/// // Authentication payloads can only be created by package verification.
+/// let forged = AuthenticatedSignature {
+///     signature: "forged".to_string(),
+///     purpose: SignaturePurpose::PackageRootAttestation,
+/// };
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthenticatedSignature {
+    signature: String,
+    purpose: SignaturePurpose,
+}
+
+impl AuthenticatedSignature {
+    /// Detached signature bytes authenticated by the recorded policy.
+    #[must_use]
+    pub fn signature(&self) -> &str {
+        &self.signature
+    }
+
+    /// Exact domain/gate purpose authenticated by the recorded policy.
+    #[must_use]
+    pub const fn purpose(&self) -> SignaturePurpose {
+        self.purpose
+    }
+}
+
+/// Detached-signature decision made during package verification. Positive
+/// authority is meaningful only inside a sealed [`VerificationReceipt`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SignatureStatus {
+    /// No detached signature was present.
+    Unsigned,
+    /// Signature bytes may have been present, but the enclosing transport was
+    /// refused before bounded authentication. Raw rejected bytes are omitted.
+    Refused {
+        /// Stable bounded refusal reason.
+        reason: &'static str,
+    },
+    /// Signature bytes were present but no verifier was supplied.
+    Unverified(String),
+    /// The injected verifier authenticated the canonical typed signature subject.
+    Authenticated(AuthenticatedSignature),
+}
+
+/// Replayable record of one package admission decision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerificationReceipt {
+    /// Exact package root to which this decision applies.
+    package_root: ContentHash,
+    /// External policy identities used for the decision.
+    policy_fingerprints: VerificationPolicyFingerprints,
+    /// Explicit waiver clock context, when a waiver policy was installed.
+    waiver_day: Option<u64>,
+    /// Detached-signature decision.
+    signature: SignatureStatus,
+    /// Per-claim scientific/waiver-dependent decisions in package order.
+    admissions: Vec<ClaimAdmission>,
+    /// Interned direct waiver identities referenced by admissions.
+    waiver_registry: Vec<ReceiptWaiver>,
+    /// Domain-separated digest over every field above.
+    receipt_hash: ContentHash,
+}
+
+impl VerificationReceipt {
+    /// Exact package root admitted by this decision.
+    #[must_use]
+    pub const fn package_root(&self) -> ContentHash {
+        self.package_root
+    }
+    /// External policy identities actually invoked by this decision.
+    #[must_use]
+    pub const fn policy_fingerprints(&self) -> &VerificationPolicyFingerprints {
+        &self.policy_fingerprints
+    }
+    /// Waiver clock day, only when a waiver policy was invoked.
+    #[must_use]
+    pub const fn waiver_day(&self) -> Option<u64> {
+        self.waiver_day
+    }
+    /// Detached-signature decision.
+    #[must_use]
+    pub fn signature(&self) -> &SignatureStatus {
+        &self.signature
+    }
+    /// Per-claim admission decisions in package order.
+    #[must_use]
+    pub fn admissions(&self) -> &[ClaimAdmission] {
+        &self.admissions
+    }
+    /// Interned direct-waiver identities.
+    #[must_use]
+    pub fn waiver_registry(&self) -> &[ReceiptWaiver] {
+        &self.waiver_registry
+    }
+    /// Stored domain-separated receipt digest.
+    #[must_use]
+    pub const fn receipt_hash(&self) -> ContentHash {
+        self.receipt_hash
+    }
+
+    /// Canonical pre-signature context for release approval. Producers obtain
+    /// this from an unsigned verification pass, construct a concrete
+    /// [`SignaturePurpose::ReleaseApproval`], sign [`signature_subject_hash`],
+    /// attach the bytes, and then run the final release gate.
+    #[must_use]
+    pub fn release_admission_context(&self) -> ContentHash {
+        release_admission_context_hash(
+            self.package_root,
+            self.policy_fingerprints,
+            self.waiver_day,
+            &self.admissions,
+            &self.waiver_registry,
+        )
+    }
+    /// Recompute the integrity digest over every receipt field.
+    ///
+    /// This is an unkeyed integrity check, not independent authenticity; trust
+    /// still comes from replaying the named policies against the package.
+    #[must_use]
+    pub fn recomputed_hash(&self) -> ContentHash {
+        verification_receipt_hash(
+            self.package_root,
+            self.policy_fingerprints,
+            self.waiver_day,
+            &self.signature,
+            &self.admissions,
+            &self.waiver_registry,
+        )
+    }
+
+    /// Whether the stored receipt digest matches all receipt fields.
+    #[must_use]
+    pub fn validate_hash(&self) -> bool {
+        self.receipt_hash == self.recomputed_hash()
+    }
 }
 
 /// The result of verifying a package.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PackageReport {
     /// The recomputed content address (domain-separated BLAKE3 Merkle root).
-    pub merkle_root: ContentHash,
+    merkle_root: ContentHash,
     /// The by-color budget pie.
-    pub breakdown: ColorBreakdown,
+    breakdown: ColorBreakdown,
     /// The number of claims.
-    pub claims: usize,
+    claims: usize,
+    /// Scientific magnitude accounting with waiver-dependent values excluded.
+    magnitude_budget: MagnitudeBudget,
+    /// Policy-bound, replayable per-claim admission receipt.
+    receipt: VerificationReceipt,
+}
+
+impl PackageReport {
+    /// Recomputed package content root.
+    #[must_use]
+    pub const fn merkle_root(&self) -> ContentHash {
+        self.merkle_root
+    }
+    /// Admitted scientific/waiver-dependent color counts.
+    #[must_use]
+    pub const fn breakdown(&self) -> &ColorBreakdown {
+        &self.breakdown
+    }
+    /// Number of admitted claims.
+    #[must_use]
+    pub const fn claims(&self) -> usize {
+        self.claims
+    }
+    /// Admitted magnitude budget with waiver values excluded.
+    #[must_use]
+    pub const fn magnitude_budget(&self) -> MagnitudeBudget {
+        self.magnitude_budget
+    }
+    /// Policy-bound verification receipt.
+    #[must_use]
+    pub const fn receipt(&self) -> &VerificationReceipt {
+        &self.receipt
+    }
+}
+
+/// A checked package paired inseparably with the report and policy receipt that
+/// admitted its gated evidence. This does not imply authorship: the nested
+/// `SignatureStatus` may still be `Unsigned` or `Unverified`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VerifiedPackage {
+    package: EvidencePackage,
+    report: PackageReport,
+}
+
+impl VerifiedPackage {
+    /// Structurally parsed package. Its raw declarations remain explicitly
+    /// unverified when accessed outside the admission view below.
+    #[must_use]
+    pub fn package(&self) -> &EvidencePackage {
+        &self.package
+    }
+
+    /// Successful verification report and policy-bound receipt.
+    #[must_use]
+    pub fn report(&self) -> &PackageReport {
+        &self.report
+    }
+
+    /// Recheck structural binding between the retained package and report.
+    #[must_use]
+    pub fn validate_binding(&self) -> bool {
+        let (admissions, waiver_registry) = self.package.admission_decisions();
+        let breakdown = self.package.admitted_color_breakdown(&admissions);
+        let magnitude = self.package.magnitude_budget_from(&admissions);
+        self.report.receipt.validate_hash()
+            && self.package.try_merkle_root() == Ok(self.report.merkle_root)
+            && self.report.receipt.package_root() == self.report.merkle_root
+            && self.report.claims == self.package.claims.len()
+            && self.report.receipt.admissions == admissions
+            && self.report.receipt.waiver_registry == waiver_registry
+            && self.report.breakdown == breakdown
+            && magnitude_budgets_bitwise_equal(self.report.magnitude_budget, magnitude)
+    }
+
+    /// Claims paired with their admission decisions in topological order.
+    #[must_use]
+    pub fn admitted_claims(&self) -> impl ExactSizeIterator<Item = AdmittedClaim<'_>> {
+        self.package
+            .claims
+            .iter()
+            .zip(&self.report.receipt.admissions)
+            .map(|(claim, admission)| AdmittedClaim { claim, admission })
+    }
+}
+
+fn magnitude_budgets_bitwise_equal(left: MagnitudeBudget, right: MagnitudeBudget) -> bool {
+    left.verified_width.to_bits() == right.verified_width.to_bits()
+        && left.estimated_dispersion.to_bits() == right.estimated_dispersion.to_bits()
+        && left.validated_unquantified == right.validated_unquantified
+        && left.waived_unquantified == right.waived_unquantified
+        && left.quantified_total.to_bits() == right.quantified_total.to_bits()
+}
+
+/// Read-only admitted view of one claim.
+#[derive(Debug, Clone, Copy)]
+pub struct AdmittedClaim<'a> {
+    claim: &'a Claim,
+    admission: &'a ClaimAdmission,
+}
+
+impl AdmittedClaim<'_> {
+    /// Claim identity.
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.claim.id
+    }
+
+    /// Human-readable assertion bound to the admitted origin/artifacts.
+    #[must_use]
+    pub fn statement(&self) -> &str {
+        &self.claim.statement
+    }
+
+    /// Auditable admission decision.
+    #[must_use]
+    pub fn admission(&self) -> &ClaimAdmission {
+        self.admission
+    }
+
+    /// Scientific color only when the claim has no waiver in its transitive
+    /// derivation ancestry.
+    #[must_use]
+    pub fn scientific_color(&self) -> Option<&Color> {
+        (self.admission.class == AdmissionClass::Scientific).then_some(&self.claim.color)
+    }
+
+    /// Raw declared color, explicitly not a scientific-admission assertion.
+    #[must_use]
+    pub fn declared_color_unverified(&self) -> &Color {
+        &self.claim.color
+    }
+
+    /// Origin mechanism admitted by the policy recorded in the package receipt.
+    #[must_use]
+    pub fn origin(&self) -> &ClaimOrigin {
+        &self.claim.origin
+    }
+
+    /// Composition receipt admitted by the derivation policy, when derived.
+    #[must_use]
+    pub fn derivation(&self) -> Option<&CompositionReceipt> {
+        self.claim.receipt.as_ref()
+    }
+
+    /// Attached falsifier records, all authenticated by the recorded falsifier
+    /// policy when the slice is non-empty.
+    #[must_use]
+    pub fn falsifiers(&self) -> &[FalsifierRecord] {
+        &self.claim.falsifiers
+    }
+
+    /// Attached anchor declarations bound into the admitted claim subject.
+    /// Dataset quality remains limited by the origin/derivation policy.
+    #[must_use]
+    pub fn anchors(&self) -> &[AnchorRecord] {
+        &self.claim.anchors
+    }
 }
 
 /// A structured verification failure.
@@ -588,14 +1105,29 @@ pub enum PackageError {
         /// The offending parent index.
         parent: usize,
     },
-    /// Schema v5: an origin whose fields fail shape validation.
+    /// A derivation receipt lacks a canonical proof-artifact address.
+    InvalidDerivationArtifact {
+        /// Derived claim.
+        claim: String,
+    },
+    /// A derivation proof artifact could not be authenticated.
+    DerivationRefused {
+        /// Derived claim.
+        claim: String,
+        /// Why verification refused.
+        why: &'static str,
+        /// Atomic rejecting policy identity, absent for missing capability or
+        /// callback panic.
+        policy_fingerprint: Option<PolicyFingerprint>,
+    },
+    /// Schema v6: an origin whose fields fail shape validation.
     InvalidOrigin {
         /// The claim.
         claim: String,
         /// The field-level refusal.
         why: String,
     },
-    /// Schema v5: an origin inconsistent with its claim's color class
+    /// Schema v6: an origin inconsistent with its claim's color class
     /// (raw colors, unrelated anchors, estimator mismatches, Derived
     /// without a receipt or a receipt without Derived).
     OriginMismatch {
@@ -604,7 +1136,7 @@ pub enum PackageError {
         /// The origin kind tag.
         origin: &'static str,
     },
-    /// Schema v5: a source-certificate artifact could not be authenticated.
+    /// Schema v6: a source-certificate artifact could not be authenticated.
     SourceCertificateRefused {
         /// The claim.
         claim: String,
@@ -612,8 +1144,35 @@ pub enum PackageError {
         producer: String,
         /// Why verification refused.
         why: &'static str,
+        /// Atomic rejecting policy identity, absent for missing capability or
+        /// callback panic.
+        policy_fingerprint: Option<PolicyFingerprint>,
     },
-    /// Schema v5: a waiver grant that is expired or that the injected
+    /// Schema v6: an anchoring dataset could not be authenticated.
+    AnchoredSourceRefused {
+        /// The claim.
+        claim: String,
+        /// Declared dataset identity.
+        dataset: String,
+        /// Why verification refused.
+        why: &'static str,
+        /// Atomic rejecting policy identity, absent for missing capability or
+        /// callback panic.
+        policy_fingerprint: Option<PolicyFingerprint>,
+    },
+    /// Schema v6: a falsifier artifact could not be authenticated.
+    FalsifierRefused {
+        /// Target claim.
+        claim: String,
+        /// Falsifier record identity.
+        falsifier: String,
+        /// Why verification refused.
+        why: &'static str,
+        /// Atomic rejecting policy identity, absent for missing capability or
+        /// callback panic.
+        policy_fingerprint: Option<PolicyFingerprint>,
+    },
+    /// Schema v6: a waiver grant that is expired or that the injected
     /// verifier rejected (or no capability was injected at all).
     WaiverRefused {
         /// The claim.
@@ -621,6 +1180,34 @@ pub enum PackageError {
         /// The waiver id.
         waiver: String,
         /// Why.
+        why: &'static str,
+        /// Atomic rejecting policy identity, absent for missing capability,
+        /// expiry, unavailable context, or callback panic.
+        policy_fingerprint: Option<PolicyFingerprint>,
+    },
+    /// An installed verifier could not provide its policy identity.
+    PolicyFingerprintRefused {
+        /// Capability kind.
+        capability: &'static str,
+        /// Why the policy callback failed.
+        why: &'static str,
+        /// First policy identity observed for this capability kind.
+        previous: PolicyFingerprint,
+        /// Conflicting identity returned by a later decision.
+        observed: PolicyFingerprint,
+    },
+    /// A supplied detached-signature verifier rejected or could not evaluate
+    /// the signature.
+    SignatureRefused {
+        /// Why signature authentication refused.
+        why: &'static str,
+        /// Atomic rejecting policy identity, absent for callback panic.
+        policy_fingerprint: Option<PolicyFingerprint>,
+    },
+    /// Detached signature bytes are blank, padded, placeholder, or contain
+    /// control characters before policy evaluation.
+    InvalidSignature {
+        /// Stable shape refusal.
         why: &'static str,
     },
     /// Two claims reuse one waiver authorization identity.
@@ -667,18 +1254,33 @@ pub enum PackageError {
     },
 }
 
+impl core::fmt::Display for PackageError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(formatter, "package verification refused: {self:?}")
+    }
+}
+
+impl core::error::Error for PackageError {}
+
 /// The one format version this build understands. v2 (bead qmao.6.1)
 /// added complete color payloads + the strict parser + root
 /// recomputation; v3 (bead xfxq) added composition receipts (checker
 /// re-runs the derivation), falsifier records (refuted claims fail),
 /// and dataset anchors; v4 (bead 7uq9) replaces the 64-bit FNV-1a
 /// content address with a domain-separated 32-byte BLAKE3 root
-/// ([`ContentHash`]); v5 (bead krym) seals claims with typed ORIGINS
-/// (bound into the address, re-derived by the checker, waivers only
-/// through an injected capability) — v3/v4 transports are refused by
-/// version.
-pub const FORMAT_VERSION: u32 = 5;
+/// ([`ContentHash`]); v5 sealed claims with typed origins; v6 adds
+/// capability-gated anchoring datasets and signatures, policy-bound
+/// verification receipts, transitive waiver admission, and waiver-separated
+/// magnitude accounting. Earlier transports are refused by version.
+pub const FORMAT_VERSION: u32 = 6;
 const _: () = assert!(FORMAT_VERSION == fs_crosswalk::SUPPORTED_PACKAGE_FORMAT);
+
+/// Domain-separated integrity digest for the independently distributed
+/// checker's gate-context receipt. This is integrity-only, not a signature.
+#[must_use]
+pub fn hash_checker_decision(payload: &[u8]) -> ContentHash {
+    hash_domain("fs-package:v6:checker-decision", payload)
+}
 
 fn verify_attached_records(claim: &Claim) -> Result<(), PackageError> {
     for (falsifier, record) in claim.falsifiers.iter().enumerate() {
@@ -688,6 +1290,8 @@ fn verify_attached_records(claim: &Claim) -> Result<(), PackageError> {
             Some("attempts")
         } else if is_blank_or_placeholder(&record.detail) {
             Some("detail")
+        } else if !is_canonical_content_hash(&record.artifact_hash) {
+            Some("artifact_hash")
         } else {
             None
         };
@@ -783,6 +1387,49 @@ fn verify_color_payload(claim: &Claim) -> Result<(), PackageError> {
     Ok(())
 }
 
+/// Equality for receipt re-derivation is an identity check, not a numerical
+/// comparison. IEEE-754 signed zero is semantically distinct in canonical
+/// evidence bytes and therefore must remain distinct here as well.
+fn colors_bitwise_equal(left: &Color, right: &Color) -> bool {
+    match (left, right) {
+        (
+            Color::Verified {
+                lo: left_lo,
+                hi: left_hi,
+            },
+            Color::Verified { lo, hi },
+        ) => left_lo.to_bits() == lo.to_bits() && left_hi.to_bits() == hi.to_bits(),
+        (
+            Color::Validated {
+                regime: left_regime,
+                dataset: left_dataset,
+            },
+            Color::Validated { regime, dataset },
+        ) => {
+            left_dataset == dataset
+                && left_regime.bounds().len() == regime.bounds().len()
+                && left_regime.bounds().iter().zip(regime.bounds()).all(
+                    |((left_axis, (left_lo, left_hi)), (axis, (lo, hi)))| {
+                        left_axis == axis
+                            && left_lo.to_bits() == lo.to_bits()
+                            && left_hi.to_bits() == hi.to_bits()
+                    },
+                )
+        }
+        (
+            Color::Estimated {
+                estimator: left_estimator,
+                dispersion: left_dispersion,
+            },
+            Color::Estimated {
+                estimator,
+                dispersion,
+            },
+        ) => left_estimator == estimator && left_dispersion.to_bits() == dispersion.to_bits(),
+        _ => false,
+    }
+}
+
 fn verify_origin_binding(claim: &Claim) -> Result<(), PackageError> {
     validate_origin_shape(&claim.id, &claim.origin, &is_canonical_content_hash).map_err(
         |error| PackageError::InvalidOrigin {
@@ -829,11 +1476,11 @@ fn add_color_transport(
         Color::Verified { .. } => {}
         Color::Validated { regime, dataset } => {
             check_transport_count("validated regime axes", regime.bounds().len())?;
-            *nodes = nodes.saturating_add(regime.bounds().len() * 3);
+            add_transport_nodes(nodes, regime.bounds().len().saturating_mul(3))?;
             add_transport_text(bytes, &format!("claims[{index}].dataset"), dataset)?;
             for axis in regime.bounds().keys() {
                 add_transport_text(bytes, &format!("claims[{index}].regime axis"), axis)?;
-                *bytes = bytes.saturating_add(64);
+                add_transport_bytes(bytes, 64)?;
             }
         }
         Color::Estimated { estimator, .. } => {
@@ -850,16 +1497,37 @@ fn add_record_transport(
 ) -> Result<(), PackageError> {
     if let Some(receipt) = &claim.receipt {
         check_transport_count("receipt parents", receipt.parents.len())?;
-        *nodes = nodes.saturating_add(receipt.parents.len() + 3);
-        *bytes = bytes.saturating_add(32 * receipt.parents.len() + 64);
+        add_transport_nodes(nodes, receipt.parents.len().saturating_add(3))?;
+        add_transport_bytes(
+            bytes,
+            32usize
+                .saturating_mul(receipt.parents.len())
+                .saturating_add(64),
+        )?;
+        add_transport_text(bytes, "receipt.artifact_hash", &receipt.artifact_hash)?;
     }
     check_transport_count("falsifiers", claim.falsifiers.len())?;
     check_transport_count("anchors", claim.anchors.len())?;
-    *nodes = nodes.saturating_add(claim.falsifiers.len() * 6 + claim.anchors.len() * 4);
-    *bytes = bytes.saturating_add(claim.falsifiers.len() * 160 + claim.anchors.len() * 128);
+    add_transport_nodes(
+        nodes,
+        claim
+            .falsifiers
+            .len()
+            .saturating_mul(6)
+            .saturating_add(claim.anchors.len().saturating_mul(4)),
+    )?;
+    add_transport_bytes(
+        bytes,
+        claim
+            .falsifiers
+            .len()
+            .saturating_mul(160)
+            .saturating_add(claim.anchors.len().saturating_mul(128)),
+    )?;
     for falsifier in &claim.falsifiers {
         add_transport_text(bytes, "falsifier.name", &falsifier.name)?;
         add_transport_text(bytes, "falsifier.detail", &falsifier.detail)?;
+        add_transport_text(bytes, "falsifier.artifact_hash", &falsifier.artifact_hash)?;
     }
     for anchor in &claim.anchors {
         add_transport_text(bytes, "anchor.dataset_id", &anchor.dataset_id)?;
@@ -878,7 +1546,7 @@ fn add_origin_transport(
             producer,
             certificate_hash,
         } => {
-            *nodes = nodes.saturating_add(3);
+            add_transport_nodes(nodes, 3)?;
             add_transport_text(bytes, "origin.producer", producer)?;
             add_transport_text(bytes, "origin.certificate_hash", certificate_hash)?;
         }
@@ -886,18 +1554,18 @@ fn add_origin_transport(
             dataset_id,
             content_hash,
         } => {
-            *nodes = nodes.saturating_add(3);
+            add_transport_nodes(nodes, 3)?;
             add_transport_text(bytes, "origin.dataset_id", dataset_id)?;
             add_transport_text(bytes, "origin.content_hash", content_hash)?;
         }
         ClaimOrigin::EstimatedSource { estimator } => {
-            *nodes = nodes.saturating_add(2);
+            add_transport_nodes(nodes, 2)?;
             add_transport_text(bytes, "origin.estimator", estimator)?;
         }
-        ClaimOrigin::Derived => *nodes = nodes.saturating_add(1),
+        ClaimOrigin::Derived => add_transport_nodes(nodes, 1)?,
         ClaimOrigin::AuthenticatedWaiver(grant) => {
-            *nodes = nodes.saturating_add(4);
-            *bytes = bytes.saturating_add(32);
+            add_transport_nodes(nodes, 4)?;
+            add_transport_bytes(bytes, 32)?;
             add_transport_text(bytes, "origin.waiver_id", &grant.waiver_id)?;
             add_transport_text(bytes, "origin.mac", &grant.mac)?;
         }
@@ -911,13 +1579,8 @@ fn add_claim_transport(
     bytes: &mut usize,
     nodes: &mut usize,
 ) -> Result<(), PackageError> {
-    *bytes = bytes
-        .checked_add(256)
-        .ok_or_else(|| PackageError::TransportLimit {
-            what: "serialized package size".to_string(),
-            limit: MAX_PACKAGE_BYTES,
-        })?;
-    *nodes = nodes.saturating_add(10);
+    add_transport_bytes(bytes, 256)?;
+    add_transport_nodes(nodes, 11)?;
     add_transport_text(bytes, &format!("claims[{index}].id"), &claim.id)?;
     add_transport_text(
         bytes,
@@ -948,6 +1611,14 @@ impl EvidencePackage {
         self
     }
 
+    /// Raw claim declarations before external origin/falsifier/signature
+    /// admission. Callers needing scientific values must use
+    /// [`VerifiedPackage::admitted_claims`].
+    #[must_use]
+    pub fn declared_claims_unverified(&self) -> &[Claim] {
+        &self.claims
+    }
+
     /// Attach a detached signature (builder style).
     #[must_use]
     pub fn signed(mut self, signature: impl Into<String>) -> EvidencePackage {
@@ -955,22 +1626,29 @@ impl EvidencePackage {
         self
     }
 
-    /// The content address: a BLAKE3 Merkle root over the package identity
-    /// (format version, provenance, and ordered claims), with every leaf and
-    /// internal node domain-separated under `fs-package:v5:…` tags so no
-    /// leaf can masquerade as a node (or vice versa). Detached signatures
-    /// are excluded so signing does not change the address.
-    #[must_use]
-    pub fn merkle_root(&self) -> ContentHash {
+    /// Compute the BLAKE3 Merkle content address after enforcing the standalone
+    /// transport byte, node, string, and container limits. Every leaf and
+    /// internal node is domain-separated under `fs-package:v6:...`; detached
+    /// signatures are excluded so signing does not change the address.
+    ///
+    /// # Errors
+    /// [`PackageError::TransportLimit`] when an in-memory builder exceeds the
+    /// bounded package envelope.
+    pub fn try_merkle_root(&self) -> Result<ContentHash, PackageError> {
+        self.verify_transport_limits()?;
+        Ok(self.merkle_root_unchecked())
+    }
+
+    fn merkle_root_unchecked(&self) -> ContentHash {
         let mut level: Vec<ContentHash> = Vec::with_capacity(self.claims.len() + 1);
         level.push(hash_domain(
-            "fs-package:v5:header",
+            "fs-package:v6:header",
             self.package_header().as_bytes(),
         ));
         level.extend(
             self.claims
                 .iter()
-                .map(|c| hash_domain("fs-package:v5:claim", c.canonical().as_bytes())),
+                .map(|c| hash_domain("fs-package:v6:claim", c.canonical().as_bytes())),
         );
         while level.len() > 1 {
             let mut next = Vec::with_capacity(level.len().div_ceil(2));
@@ -985,8 +1663,8 @@ impl EvidencePackage {
         }
         match level.as_slice() {
             [root] => *root,
-            [] => hash_domain("fs-package:v5:empty-internal-level", b""),
-            _ => hash_domain("fs-package:v5:invalid-internal-level", b""),
+            [] => hash_domain("fs-package:v6:empty-internal-level", b""),
+            _ => hash_domain("fs-package:v6:invalid-internal-level", b""),
         }
     }
 
@@ -1009,16 +1687,22 @@ impl EvidencePackage {
         for claim in &self.claims {
             push_atom(&mut canonical, &claim.authorization_canonical());
         }
-        hash_domain("fs-package:v5:authorization-context", canonical.as_bytes())
+        hash_domain("fs-package:v6:authorization-context", canonical.as_bytes())
     }
 
     /// Stable, domain-separated bytes authenticated by a waiver MAC at
     /// `claim_index`. The context binds package provenance, ordered claims,
     /// target index, waiver id, and expiry. Detached signatures and every
     /// waiver MAC are intentionally excluded.
-    #[must_use]
-    pub fn waiver_message(&self, claim_index: usize) -> Option<Vec<u8>> {
+    ///
+    /// # Errors
+    /// [`PackageError::TransportLimit`] when the package exceeds the bounded
+    /// authorization envelope, or [`PackageError::InvalidWaiverTarget`] when
+    /// the index does not name a waiver-origin claim.
+    pub fn waiver_message(&self, claim_index: usize) -> Result<Vec<u8>, PackageError> {
+        self.verify_transport_limits()?;
         self.waiver_message_with_context(claim_index, self.authorization_context())
+            .ok_or(PackageError::InvalidWaiverTarget { index: claim_index })
     }
 
     fn waiver_message_with_context(
@@ -1032,7 +1716,7 @@ impl EvidencePackage {
         let ClaimOrigin::AuthenticatedWaiver(grant) = &claim.origin else {
             return None;
         };
-        let mut message = String::from("fs-package:v5:waiver-authorization|");
+        let mut message = String::from("fs-package:v6:waiver-authorization|");
         push_atom(&mut message, &authorization_context.to_hex());
         let _ = write!(message, "claim-index:{claim_index}|");
         push_atom(&mut message, &claim.canonical_body());
@@ -1063,9 +1747,68 @@ impl EvidencePackage {
         Ok(self)
     }
 
-    fn raw_color_breakdown(&self) -> ColorBreakdown {
+    fn admission_decisions(&self) -> (Vec<ClaimAdmission>, Vec<ReceiptWaiver>) {
+        let mut waiver_dependent = Vec::with_capacity(self.claims.len());
+        let mut decisions = Vec::with_capacity(self.claims.len());
+        let mut waiver_registry = Vec::new();
+        for (claim_index, claim) in self.claims.iter().enumerate() {
+            let mut direct_waiver = None;
+            let mut waiver_parents = Vec::new();
+            let class = match &claim.origin {
+                ClaimOrigin::AuthenticatedWaiver(grant) => {
+                    let registry_index = waiver_registry.len();
+                    waiver_registry.push(ReceiptWaiver {
+                        registry_index,
+                        claim_index,
+                        waiver_id: grant.waiver_id.clone(),
+                    });
+                    direct_waiver = Some(registry_index);
+                    AdmissionClass::WaiverDependent
+                }
+                ClaimOrigin::Derived => {
+                    if let Some(receipt) = &claim.receipt {
+                        for &parent in &receipt.parents {
+                            if waiver_dependent.get(parent).copied().unwrap_or(true) {
+                                waiver_parents.push(parent);
+                            }
+                        }
+                    }
+                    if waiver_parents.is_empty() {
+                        AdmissionClass::Scientific
+                    } else {
+                        AdmissionClass::WaiverDependent
+                    }
+                }
+                ClaimOrigin::SourceCertificate { .. }
+                | ClaimOrigin::AnchoredSource { .. }
+                | ClaimOrigin::EstimatedSource { .. } => AdmissionClass::Scientific,
+            };
+            waiver_dependent.push(class == AdmissionClass::WaiverDependent);
+            decisions.push(ClaimAdmission {
+                claim_index,
+                claim_id: claim.id.clone(),
+                origin_kind: match &claim.origin {
+                    ClaimOrigin::SourceCertificate { .. } => AdmissionOriginKind::SourceCertificate,
+                    ClaimOrigin::AnchoredSource { .. } => AdmissionOriginKind::AnchoredSource,
+                    ClaimOrigin::EstimatedSource { .. } => AdmissionOriginKind::EstimatedSource,
+                    ClaimOrigin::Derived => AdmissionOriginKind::Derived,
+                    ClaimOrigin::AuthenticatedWaiver(_) => AdmissionOriginKind::AuthenticatedWaiver,
+                },
+                class,
+                direct_waiver,
+                waiver_parents,
+            });
+        }
+        (decisions, waiver_registry)
+    }
+
+    fn admitted_color_breakdown(&self, admissions: &[ClaimAdmission]) -> ColorBreakdown {
         let mut b = ColorBreakdown::default();
-        for c in &self.claims {
+        for (c, admission) in self.claims.iter().zip(admissions) {
+            if admission.class == AdmissionClass::WaiverDependent {
+                b.waived += 1;
+                continue;
+            }
             match c.color.rank() {
                 ColorRank::Verified => b.verified += 1,
                 ColorRank::Validated => b.validated += 1,
@@ -1107,6 +1850,11 @@ impl EvidencePackage {
             });
         }
         if let Some(receipt) = &claim.receipt {
+            if !is_canonical_content_hash(&receipt.artifact_hash) {
+                return Err(PackageError::InvalidDerivationArtifact {
+                    claim: claim.id.clone(),
+                });
+            }
             let mut derived: Option<Color> = None;
             for &parent in &receipt.parents {
                 if parent >= index {
@@ -1121,7 +1869,7 @@ impl EvidencePackage {
                     Some(current) => compose(&current, parent_color, receipt.op),
                 });
             }
-            if !matches!(derived, Some(color) if color == claim.color) {
+            if !matches!(derived, Some(ref color) if colors_bitwise_equal(color, &claim.color)) {
                 return Err(PackageError::ReceiptMismatch {
                     claim: claim.id.clone(),
                 });
@@ -1140,16 +1888,82 @@ impl EvidencePackage {
     /// Any structural [`PackageError`],
     /// [`PackageError::SourceCertificateRefused`], or
     /// [`PackageError::WaiverRefused`].
+    #[allow(clippy::too_many_lines)] // one ordered, fail-closed transcript over every claim authority
     pub fn verify_with(
         &self,
         capabilities: &VerificationCapabilities<'_>,
     ) -> Result<PackageReport, PackageError> {
         self.verify_structural()?;
+        let merkle_root = self.merkle_root_unchecked();
+        let mut policy_fingerprints = VerificationPolicyFingerprints::default();
         // The authorization context serializes and hashes the whole package.
         // Compute it once so W waiver claims remain O(package size + W), not
         // O(W * package size).
         let waiver_context = (self.waiver_claims() > 0).then(|| self.authorization_context());
+        let claim_hashes: Vec<ContentHash> = self
+            .claims
+            .iter()
+            .map(Claim::declared_content_hash_unverified)
+            .collect();
+        let claim_subject_hashes: Vec<ContentHash> = self
+            .claims
+            .iter()
+            .map(Claim::declared_verification_subject_hash_unverified)
+            .collect();
         for (claim_index, claim) in self.claims.iter().enumerate() {
+            if let (ClaimOrigin::Derived, Some(receipt)) = (&claim.origin, &claim.receipt) {
+                let Some(verifier) = capabilities.derivations else {
+                    return Err(PackageError::DerivationRefused {
+                        claim: claim.id.clone(),
+                        why: "derivation capability missing",
+                        policy_fingerprint: None,
+                    });
+                };
+                let Some(artifact_hash) = ContentHash::from_hex(&receipt.artifact_hash) else {
+                    return Err(PackageError::InvalidDerivationArtifact {
+                        claim: claim.id.clone(),
+                    });
+                };
+                let parent_claim_hashes: Vec<ContentHash> = receipt
+                    .parents
+                    .iter()
+                    .map(|&parent| claim_hashes[parent])
+                    .collect();
+                let request = DerivationRequest {
+                    package_provenance: &self.provenance,
+                    package_root: merkle_root,
+                    claim_index,
+                    claim_id: &claim.id,
+                    statement: &claim.statement,
+                    color: &claim.color,
+                    child_subject_hash: claim_subject_hashes[claim_index],
+                    anchors: &claim.anchors,
+                    op: receipt.op,
+                    parent_indices: &receipt.parents,
+                    parent_claim_hashes: &parent_claim_hashes,
+                    artifact_hash,
+                };
+                let decision = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    verifier.verify(&request)
+                }))
+                .map_err(|_| PackageError::DerivationRefused {
+                    claim: claim.id.clone(),
+                    why: "verifier callback panicked",
+                    policy_fingerprint: None,
+                })?;
+                bind_policy_fingerprint(
+                    &mut policy_fingerprints.derivations,
+                    decision.policy_fingerprint,
+                    "derivations",
+                )?;
+                if !decision.accepted {
+                    return Err(PackageError::DerivationRefused {
+                        claim: claim.id.clone(),
+                        why: "rejected by the injected verifier",
+                        policy_fingerprint: Some(decision.policy_fingerprint),
+                    });
+                }
+            }
             match (&claim.origin, &claim.color) {
                 (
                     ClaimOrigin::SourceCertificate {
@@ -1163,6 +1977,7 @@ impl EvidencePackage {
                             claim: claim.id.clone(),
                             producer: producer.clone(),
                             why: "source-certificate capability missing",
+                            policy_fingerprint: None,
                         });
                     };
                     let Some(certificate_hash) = ContentHash::from_hex(certificate_hash) else {
@@ -1181,11 +1996,79 @@ impl EvidencePackage {
                         producer,
                         certificate_hash,
                     };
-                    if !verifier.verify(&request) {
+                    let decision = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        verifier.verify(&request)
+                    }))
+                    .map_err(|_| PackageError::SourceCertificateRefused {
+                        claim: claim.id.clone(),
+                        producer: producer.clone(),
+                        why: "verifier callback panicked",
+                        policy_fingerprint: None,
+                    })?;
+                    bind_policy_fingerprint(
+                        &mut policy_fingerprints.source_certificates,
+                        decision.policy_fingerprint,
+                        "source-certificates",
+                    )?;
+                    if !decision.accepted {
                         return Err(PackageError::SourceCertificateRefused {
                             claim: claim.id.clone(),
                             producer: producer.clone(),
                             why: "rejected by the injected verifier",
+                            policy_fingerprint: Some(decision.policy_fingerprint),
+                        });
+                    }
+                }
+                (
+                    ClaimOrigin::AnchoredSource {
+                        dataset_id,
+                        content_hash,
+                    },
+                    Color::Validated { regime, .. },
+                ) => {
+                    let Some(verifier) = capabilities.anchored_sources else {
+                        return Err(PackageError::AnchoredSourceRefused {
+                            claim: claim.id.clone(),
+                            dataset: dataset_id.clone(),
+                            why: "anchored-source capability missing",
+                            policy_fingerprint: None,
+                        });
+                    };
+                    let Some(content_hash) = ContentHash::from_hex(content_hash) else {
+                        return Err(PackageError::InvalidOrigin {
+                            claim: claim.id.clone(),
+                            why: "anchored-source hash is not canonical".to_string(),
+                        });
+                    };
+                    let request = AnchoredSourceRequest {
+                        package_provenance: &self.provenance,
+                        claim_index,
+                        claim_id: &claim.id,
+                        statement: &claim.statement,
+                        regime,
+                        dataset_id,
+                        content_hash,
+                    };
+                    let decision = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        verifier.verify(&request)
+                    }))
+                    .map_err(|_| PackageError::AnchoredSourceRefused {
+                        claim: claim.id.clone(),
+                        dataset: dataset_id.clone(),
+                        why: "verifier callback panicked",
+                        policy_fingerprint: None,
+                    })?;
+                    bind_policy_fingerprint(
+                        &mut policy_fingerprints.anchored_sources,
+                        decision.policy_fingerprint,
+                        "anchored-sources",
+                    )?;
+                    if !decision.accepted {
+                        return Err(PackageError::AnchoredSourceRefused {
+                            claim: claim.id.clone(),
+                            dataset: dataset_id.clone(),
+                            why: "rejected by the injected verifier",
+                            policy_fingerprint: Some(decision.policy_fingerprint),
                         });
                     }
                 }
@@ -1195,6 +2078,7 @@ impl EvidencePackage {
                             claim: claim.id.clone(),
                             waiver: grant.waiver_id.clone(),
                             why: "waiver capability missing",
+                            policy_fingerprint: None,
                         });
                     };
                     if grant.expiry_day < waivers.today_day {
@@ -1202,6 +2086,7 @@ impl EvidencePackage {
                             claim: claim.id.clone(),
                             waiver: grant.waiver_id.clone(),
                             why: "expired",
+                            policy_fingerprint: None,
                         });
                     }
                     let Some(message) = waiver_context
@@ -1211,24 +2096,207 @@ impl EvidencePackage {
                             claim: claim.id.clone(),
                             waiver: grant.waiver_id.clone(),
                             why: "authorization message unavailable",
+                            policy_fingerprint: None,
                         });
                     };
-                    if !waivers.verifier.verify(&grant.mac, &message) {
+                    let decision = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        waivers.verifier.verify(&grant.mac, &message)
+                    }))
+                    .map_err(|_| PackageError::WaiverRefused {
+                        claim: claim.id.clone(),
+                        waiver: grant.waiver_id.clone(),
+                        why: "verifier callback panicked",
+                        policy_fingerprint: None,
+                    })?;
+                    bind_policy_fingerprint(
+                        &mut policy_fingerprints.waivers,
+                        decision.policy_fingerprint,
+                        "waivers",
+                    )?;
+                    if !decision.accepted {
                         return Err(PackageError::WaiverRefused {
                             claim: claim.id.clone(),
                             waiver: grant.waiver_id.clone(),
                             why: "rejected by the injected verifier",
+                            policy_fingerprint: Some(decision.policy_fingerprint),
                         });
                     }
                 }
                 _ => {}
             }
+            self.verify_falsifiers(
+                claim_index,
+                claim,
+                claim_subject_hashes[claim_index],
+                merkle_root,
+                capabilities,
+                &mut policy_fingerprints,
+            )?;
         }
+        let (admissions, waiver_registry) = self.admission_decisions();
+        let breakdown = self.admitted_color_breakdown(&admissions);
+        let magnitude_budget = self.magnitude_budget_from(&admissions);
+        let waiver_day = policy_fingerprints
+            .waivers
+            .and_then(|_| capabilities.waivers.map(|waiver| waiver.today_day));
+        let admission_context = release_admission_context_hash(
+            merkle_root,
+            policy_fingerprints,
+            waiver_day,
+            &admissions,
+            &waiver_registry,
+        );
+        let (signature, signature_policy) =
+            self.verify_signature(merkle_root, admission_context, capabilities)?;
+        policy_fingerprints.signatures = signature_policy;
+        let receipt_hash = verification_receipt_hash(
+            merkle_root,
+            policy_fingerprints,
+            waiver_day,
+            &signature,
+            &admissions,
+            &waiver_registry,
+        );
         Ok(PackageReport {
-            merkle_root: self.merkle_root(),
-            breakdown: self.raw_color_breakdown(),
+            merkle_root,
+            breakdown,
             claims: self.claims.len(),
+            magnitude_budget,
+            receipt: VerificationReceipt {
+                package_root: merkle_root,
+                policy_fingerprints,
+                waiver_day,
+                signature,
+                admissions,
+                waiver_registry,
+                receipt_hash,
+            },
         })
+    }
+
+    fn verify_falsifiers(
+        &self,
+        claim_index: usize,
+        claim: &Claim,
+        claim_subject_hash: ContentHash,
+        merkle_root: ContentHash,
+        capabilities: &VerificationCapabilities<'_>,
+        policies: &mut VerificationPolicyFingerprints,
+    ) -> Result<(), PackageError> {
+        for (falsifier_index, falsifier) in claim.falsifiers.iter().enumerate() {
+            let Some(verifier) = capabilities.falsifiers else {
+                return Err(PackageError::FalsifierRefused {
+                    claim: claim.id.clone(),
+                    falsifier: falsifier.name.clone(),
+                    why: "falsifier capability missing",
+                    policy_fingerprint: None,
+                });
+            };
+            let Some(artifact_hash) = ContentHash::from_hex(&falsifier.artifact_hash) else {
+                return Err(PackageError::InvalidFalsifierRecord {
+                    claim: claim.id.clone(),
+                    falsifier: falsifier_index,
+                    field: "artifact_hash",
+                });
+            };
+            let request = FalsifierRequest {
+                package_provenance: &self.provenance,
+                package_root: merkle_root,
+                claim_index,
+                claim_id: &claim.id,
+                statement: &claim.statement,
+                color: &claim.color,
+                origin: &claim.origin,
+                claim_subject_hash,
+                falsifier_index,
+                name: &falsifier.name,
+                attempts: falsifier.attempts,
+                refuted: falsifier.refuted,
+                detail: &falsifier.detail,
+                artifact_hash,
+            };
+            let decision = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                verifier.verify(&request)
+            }))
+            .map_err(|_| PackageError::FalsifierRefused {
+                claim: claim.id.clone(),
+                falsifier: falsifier.name.clone(),
+                why: "verifier callback panicked",
+                policy_fingerprint: None,
+            })?;
+            bind_policy_fingerprint(
+                &mut policies.falsifiers,
+                decision.policy_fingerprint,
+                "falsifiers",
+            )?;
+            if !decision.accepted {
+                return Err(PackageError::FalsifierRefused {
+                    claim: claim.id.clone(),
+                    falsifier: falsifier.name.clone(),
+                    why: "rejected by the injected verifier",
+                    policy_fingerprint: Some(decision.policy_fingerprint),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn verify_signature(
+        &self,
+        merkle_root: ContentHash,
+        admission_context: ContentHash,
+        capabilities: &VerificationCapabilities<'_>,
+    ) -> Result<(SignatureStatus, Option<PolicyFingerprint>), PackageError> {
+        let Some(signature) = &self.signature else {
+            return Ok((SignatureStatus::Unsigned, None));
+        };
+        let Some(verification) = capabilities.signatures else {
+            return Ok((SignatureStatus::Unverified(signature.clone()), None));
+        };
+        let purpose = match verification.intent {
+            SignatureIntent::PackageRootAttestation => SignaturePurpose::PackageRootAttestation,
+            SignatureIntent::ReleaseApproval {
+                checker_protocol,
+                expected_root,
+            } => {
+                if expected_root != merkle_root {
+                    return Err(PackageError::SignatureRefused {
+                        why: "release-approval purpose names a different package root",
+                        policy_fingerprint: None,
+                    });
+                }
+                SignaturePurpose::ReleaseApproval {
+                    checker_protocol,
+                    expected_root,
+                    admission_context,
+                }
+            }
+        };
+        let request = SignatureRequest {
+            package_root: merkle_root,
+            signature,
+            purpose,
+        };
+        let decision = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            verification.verifier.verify(&request)
+        }))
+        .map_err(|_| PackageError::SignatureRefused {
+            why: "verifier callback panicked",
+            policy_fingerprint: None,
+        })?;
+        if !decision.accepted {
+            return Err(PackageError::SignatureRefused {
+                why: "rejected by the injected verifier",
+                policy_fingerprint: Some(decision.policy_fingerprint),
+            });
+        }
+        Ok((
+            SignatureStatus::Authenticated(AuthenticatedSignature {
+                signature: signature.clone(),
+                purpose,
+            }),
+            Some(decision.policy_fingerprint),
+        ))
     }
 
     /// The number of waiver-origin claims (a checker without an injected
@@ -1241,15 +2309,39 @@ impl EvidencePackage {
             .count()
     }
 
-    /// Re-verify the package with NO external trust capabilities. This accepts
-    /// origins that are solver-free and self-contained (anchored, estimated,
-    /// and derived) but refuses every source certificate and waiver. A positive
-    /// report therefore never means "certificate-shaped bytes were present".
+    /// Re-verify with NO external trust capabilities. Only an empty package or
+    /// ungated Estimated-source claims without falsifier records can pass.
+    /// Source certificates, anchored sources, derivations, waivers, and attached
+    /// artifact records all fail closed without their exact capabilities.
     ///
     /// # Errors
     /// [`PackageError`] on an unsupported format or an incomplete claim.
     pub fn verify(&self) -> Result<PackageReport, PackageError> {
         self.verify_with(&VerificationCapabilities::deny_all())
+    }
+
+    /// Consume an in-memory package and retain it with the exact report/receipt
+    /// that admitted it, avoiding a raw package/report split.
+    ///
+    /// # Errors
+    /// Any refusal from [`EvidencePackage::verify_with`].
+    pub fn into_verified_with(
+        self,
+        capabilities: &VerificationCapabilities<'_>,
+    ) -> Result<VerifiedPackage, PackageError> {
+        let report = self.verify_with(capabilities)?;
+        Ok(VerifiedPackage {
+            package: self,
+            report,
+        })
+    }
+
+    /// Consume a deny-all-admissible package into its receipt-bearing view.
+    ///
+    /// # Errors
+    /// Any refusal from [`EvidencePackage::verify`].
+    pub fn into_verified(self) -> Result<VerifiedPackage, PackageError> {
+        self.into_verified_with(&VerificationCapabilities::deny_all())
     }
 
     fn verify_structural(&self) -> Result<(), PackageError> {
@@ -1282,6 +2374,22 @@ impl EvidencePackage {
                 field: "provenance.constellation_lock",
                 reason,
             });
+        }
+        if let Some(signature) = &self.signature {
+            let why = if signature.trim().is_empty() {
+                Some("blank")
+            } else if signature.trim() != signature {
+                Some("surrounding-whitespace")
+            } else if signature.chars().any(char::is_control) {
+                Some("control-character")
+            } else if is_placeholder(signature) {
+                Some("placeholder")
+            } else {
+                None
+            };
+            if let Some(why) = why {
+                return Err(PackageError::InvalidSignature { why });
+            }
         }
         let mut claim_ids = std::collections::BTreeSet::new();
         let mut waiver_ids = std::collections::BTreeMap::new();
@@ -1330,9 +2438,13 @@ impl EvidencePackage {
     }
 
     fn verify_transport_limits(&self) -> Result<(), PackageError> {
+        self.transport_usage().map(|_| ())
+    }
+
+    fn transport_usage(&self) -> Result<(usize, usize), PackageError> {
         check_transport_count("claims", self.claims.len())?;
         let mut bytes = 512usize;
-        let mut nodes = 12usize;
+        let mut nodes = 13usize;
         add_transport_text(
             &mut bytes,
             "provenance.code_version",
@@ -1361,13 +2473,17 @@ impl EvidencePackage {
                 });
             }
         }
-        Ok(())
+        Ok((bytes, nodes))
     }
 
     fn verify_finite_magnitude_sums(&self) -> Result<(), PackageError> {
         let mut verified_width = 0.0f64;
         let mut estimated_finite = 0.0f64;
-        for claim in &self.claims {
+        let (admissions, _) = self.admission_decisions();
+        for (claim, admission) in self.claims.iter().zip(&admissions) {
+            if admission.class == AdmissionClass::WaiverDependent {
+                continue;
+            }
             match &claim.color {
                 Color::Verified { lo, hi } => {
                     let width = hi - lo;
@@ -1408,10 +2524,35 @@ impl EvidencePackage {
     /// dispersion; validated claims carry regional trust with no
     /// numeric bound and are reported as an unquantified COUNT rather
     /// than laundered into a number.
-    #[must_use]
-    pub fn magnitude_budget(&self) -> MagnitudeBudget {
+    pub fn magnitude_budget(&self) -> Result<MagnitudeBudget, PackageError> {
+        self.verify().map(|report| report.magnitude_budget)
+    }
+
+    /// Scientific magnitude attribution after verification with explicit
+    /// external capabilities.
+    ///
+    /// # Errors
+    /// Any package, origin, falsifier, waiver, or signature refusal.
+    pub fn magnitude_budget_with(
+        &self,
+        capabilities: &VerificationCapabilities<'_>,
+    ) -> Result<MagnitudeBudget, PackageError> {
+        self.verify_with(capabilities)
+            .map(|report| report.magnitude_budget)
+    }
+
+    fn declared_magnitude_budget_unverified(&self) -> MagnitudeBudget {
+        let (admissions, _) = self.admission_decisions();
+        self.magnitude_budget_from(&admissions)
+    }
+
+    fn magnitude_budget_from(&self, admissions: &[ClaimAdmission]) -> MagnitudeBudget {
         let mut b = MagnitudeBudget::default();
-        for c in &self.claims {
+        for (c, admission) in self.claims.iter().zip(admissions) {
+            if admission.class == AdmissionClass::WaiverDependent {
+                b.waived_unquantified += 1;
+                continue;
+            }
             match &c.color {
                 Color::Verified { lo, hi } => b.verified_width += hi - lo,
                 Color::Validated { .. } => b.validated_unquantified += 1,
@@ -1423,19 +2564,29 @@ impl EvidencePackage {
     }
 
     /// Emit the package as deterministic, self-describing JSON —
-    /// schema v5: COMPLETE color payloads and typed origins (floats as bit-exact hex),
+    /// schema v6: complete color payloads and typed origins (floats as bit-exact hex),
     /// provenance, signature, the 64-hex BLAKE3 content root, and the
-    /// magnitude budget. [`EvidencePackage::from_json`] round-trips
-    /// this semantically and refuses anything else.
-    #[must_use]
-    pub fn to_json(&self) -> String {
+    /// magnitude budget. [`EvidencePackage::from_json`] round-trips this
+    /// semantically and refuses anything else. Serialization is fallible so an
+    /// untrusted in-memory builder cannot bypass the standalone transport
+    /// envelope.
+    ///
+    /// # Errors
+    /// [`PackageError::TransportLimit`] when the builder cannot be serialized
+    /// within the package limits.
+    pub fn to_json(&self) -> Result<String, PackageError> {
+        self.verify_transport_limits()?;
+        Ok(self.to_json_unchecked())
+    }
+
+    fn to_json_unchecked(&self) -> String {
         use core::fmt::Write as _;
         let mut out = String::new();
         let _ = write!(
             out,
             "{{\"format_version\":{},\"merkle_root\":\"{}\",\"provenance\":{{\"code_version\":\"{}\",\"constellation_lock\":\"{}\"}},\"signature\":",
             self.format_version,
-            self.merkle_root(),
+            self.merkle_root_unchecked(),
             json_escape(&self.provenance.code_version),
             json_escape(&self.provenance.constellation_lock),
         );
@@ -1445,13 +2596,14 @@ impl EvidencePackage {
             }
             None => out.push_str("null"),
         }
-        let mb = self.magnitude_budget();
+        let mb = self.declared_magnitude_budget_unverified();
         let _ = write!(
             out,
-            ",\"magnitude_budget\":{{\"verified_width_bits\":\"{:016x}\",\"estimated_dispersion_bits\":\"{:016x}\",\"validated_unquantified\":{}}}",
+            ",\"magnitude_budget\":{{\"verified_width_bits\":\"{:016x}\",\"estimated_dispersion_bits\":\"{:016x}\",\"validated_unquantified\":{},\"waived_unquantified\":{}}}",
             mb.verified_width.to_bits(),
             mb.estimated_dispersion.to_bits(),
-            mb.validated_unquantified
+            mb.validated_unquantified,
+            mb.waived_unquantified
         );
         out.push_str(",\"claims\":[");
         for (i, c) in self.claims.iter().enumerate() {
@@ -1502,13 +2654,38 @@ fn add_transport_text(total: &mut usize, what: &str, value: &str) -> Result<(), 
             limit: MAX_JSON_STRING_BYTES,
         });
     }
+    add_transport_bytes(total, escaped_json_len(value).saturating_add(2))
+}
+
+fn add_transport_bytes(total: &mut usize, amount: usize) -> Result<(), PackageError> {
     *total = total
-        .checked_add(escaped_json_len(value))
-        .and_then(|sum| sum.checked_add(2))
+        .checked_add(amount)
         .ok_or_else(|| PackageError::TransportLimit {
             what: "serialized package size".to_string(),
             limit: MAX_PACKAGE_BYTES,
         })?;
+    if *total > MAX_PACKAGE_BYTES {
+        return Err(PackageError::TransportLimit {
+            what: "serialized package size".to_string(),
+            limit: MAX_PACKAGE_BYTES,
+        });
+    }
+    Ok(())
+}
+
+fn add_transport_nodes(total: &mut usize, amount: usize) -> Result<(), PackageError> {
+    *total = total
+        .checked_add(amount)
+        .ok_or_else(|| PackageError::TransportLimit {
+            what: "serialized JSON nodes".to_string(),
+            limit: MAX_JSON_NODES,
+        })?;
+    if *total > MAX_JSON_NODES {
+        return Err(PackageError::TransportLimit {
+            what: "serialized JSON nodes".to_string(),
+            limit: MAX_JSON_NODES,
+        });
+    }
     Ok(())
 }
 
@@ -1615,9 +2792,10 @@ fn push_claim_json(out: &mut String, claim: &Claim) {
         Some(receipt) => {
             let _ = write!(
                 out,
-                ",\"receipt\":{{\"op\":\"{}\",\"parents\":{:?}}}",
+                ",\"receipt\":{{\"op\":\"{}\",\"parents\":{:?},\"artifact_hash\":\"{}\"}}",
                 op_name(receipt.op),
-                receipt.parents
+                receipt.parents,
+                json_escape(&receipt.artifact_hash)
             );
         }
         None => out.push_str(",\"receipt\":null"),
@@ -1629,11 +2807,12 @@ fn push_claim_json(out: &mut String, claim: &Claim) {
         }
         let _ = write!(
             out,
-            "{{\"name\":\"{}\",\"attempts\":{},\"refuted\":{},\"detail\":\"{}\"}}",
+            "{{\"name\":\"{}\",\"attempts\":{},\"refuted\":{},\"detail\":\"{}\",\"artifact_hash\":\"{}\"}}",
             json_escape(&falsifier.name),
             falsifier.attempts,
             falsifier.refuted,
-            json_escape(&falsifier.detail)
+            json_escape(&falsifier.detail),
+            json_escape(&falsifier.artifact_hash)
         );
     }
     out.push_str("],\"anchors\":[");
@@ -1663,9 +2842,167 @@ pub struct MagnitudeBudget {
     /// Validated claims (regional trust, no numeric bound — counted,
     /// never converted into a fake magnitude).
     pub validated_unquantified: usize,
+    /// Directly waived claims and their complete derived descendant cone.
+    /// Their underlying colors contribute to no scientific magnitude subtotal.
+    pub waived_unquantified: usize,
     /// verified_width + estimated_dispersion (reconciles with the
     /// parts by construction; the parser re-derives and refuses drift).
     pub quantified_total: f64,
+}
+
+fn bind_policy_fingerprint(
+    slot: &mut Option<PolicyFingerprint>,
+    fingerprint: PolicyFingerprint,
+    capability: &'static str,
+) -> Result<(), PackageError> {
+    match slot {
+        Some(previous) if *previous != fingerprint => Err(PackageError::PolicyFingerprintRefused {
+            capability,
+            why: "policy fingerprint changed during package verification",
+            previous: *previous,
+            observed: fingerprint,
+        }),
+        Some(_) => Ok(()),
+        None => {
+            *slot = Some(fingerprint);
+            Ok(())
+        }
+    }
+}
+
+fn release_admission_context_hash(
+    package_root: ContentHash,
+    mut policies: VerificationPolicyFingerprints,
+    waiver_day: Option<u64>,
+    admissions: &[ClaimAdmission],
+    waiver_registry: &[ReceiptWaiver],
+) -> ContentHash {
+    // Signature verification happens after this context is formed. Excluding
+    // its own policy avoids a circular subject while binding every scientific
+    // and administrative decision the release approval is meant to authorize.
+    policies.signatures = None;
+    let provisional_receipt = verification_receipt_hash(
+        package_root,
+        policies,
+        waiver_day,
+        &SignatureStatus::Unsigned,
+        admissions,
+        waiver_registry,
+    );
+    hash_domain(
+        "fs-package:v6:release-admission-context",
+        provisional_receipt.as_bytes(),
+    )
+}
+
+fn verification_receipt_hash(
+    package_root: ContentHash,
+    policies: VerificationPolicyFingerprints,
+    waiver_day: Option<u64>,
+    signature: &SignatureStatus,
+    admissions: &[ClaimAdmission],
+    waiver_registry: &[ReceiptWaiver],
+) -> ContentHash {
+    fn stable_usize(value: usize) -> [u8; 8] {
+        u64::try_from(value)
+            .expect("schema-v6 transport bounds fit u64")
+            .to_le_bytes()
+    }
+
+    fn push_atom_hash(hasher: &mut fs_blake3::Blake3, value: &[u8]) {
+        hasher.update(&stable_usize(value.len()));
+        hasher.update(value);
+    }
+
+    fn push_policy(hasher: &mut fs_blake3::Blake3, label: &[u8], fingerprint: Option<ContentHash>) {
+        push_atom_hash(hasher, label);
+        match fingerprint {
+            Some(fingerprint) => push_atom_hash(hasher, fingerprint.as_bytes()),
+            None => push_atom_hash(hasher, b"none"),
+        }
+    }
+
+    let mut hasher = fs_blake3::Blake3::new();
+    hasher.update(b"fs-package:v6:verification-receipt\0");
+    push_atom_hash(&mut hasher, package_root.as_bytes());
+    push_policy(
+        &mut hasher,
+        b"source-certificates",
+        policies.source_certificates,
+    );
+    push_policy(&mut hasher, b"anchored-sources", policies.anchored_sources);
+    push_policy(&mut hasher, b"falsifiers", policies.falsifiers);
+    push_policy(&mut hasher, b"derivations", policies.derivations);
+    push_policy(&mut hasher, b"waivers", policies.waivers);
+    push_policy(&mut hasher, b"signatures", policies.signatures);
+    match waiver_day {
+        Some(day) => push_atom_hash(&mut hasher, &day.to_le_bytes()),
+        None => push_atom_hash(&mut hasher, b"none"),
+    }
+    match signature {
+        SignatureStatus::Unsigned => push_atom_hash(&mut hasher, b"signature:unsigned"),
+        SignatureStatus::Refused { reason } => {
+            push_atom_hash(&mut hasher, b"signature:refused");
+            push_atom_hash(&mut hasher, reason.as_bytes());
+        }
+        SignatureStatus::Unverified(value) => {
+            push_atom_hash(&mut hasher, b"signature:unverified");
+            push_atom_hash(&mut hasher, value.as_bytes());
+        }
+        SignatureStatus::Authenticated(authenticated) => {
+            push_atom_hash(&mut hasher, b"signature:authenticated");
+            push_atom_hash(&mut hasher, authenticated.signature().as_bytes());
+            match authenticated.purpose() {
+                SignaturePurpose::PackageRootAttestation => {
+                    push_atom_hash(&mut hasher, b"package-root-attestation");
+                }
+                SignaturePurpose::ReleaseApproval {
+                    checker_protocol,
+                    expected_root,
+                    admission_context,
+                } => {
+                    push_atom_hash(&mut hasher, b"release-approval");
+                    push_atom_hash(&mut hasher, &checker_protocol.to_le_bytes());
+                    push_atom_hash(&mut hasher, expected_root.as_bytes());
+                    push_atom_hash(&mut hasher, admission_context.as_bytes());
+                }
+            }
+        }
+    }
+    push_atom_hash(&mut hasher, b"waiver-registry");
+    push_atom_hash(&mut hasher, &stable_usize(waiver_registry.len()));
+    for waiver in waiver_registry {
+        push_atom_hash(&mut hasher, b"waiver-entry");
+        push_atom_hash(&mut hasher, &stable_usize(waiver.registry_index));
+        push_atom_hash(&mut hasher, &stable_usize(waiver.claim_index));
+        push_atom_hash(&mut hasher, waiver.waiver_id.as_bytes());
+    }
+    push_atom_hash(&mut hasher, b"admissions");
+    push_atom_hash(&mut hasher, &stable_usize(admissions.len()));
+    for admission in admissions {
+        push_atom_hash(&mut hasher, b"admission-entry");
+        push_atom_hash(&mut hasher, &stable_usize(admission.claim_index));
+        push_atom_hash(&mut hasher, admission.claim_id.as_bytes());
+        push_atom_hash(&mut hasher, admission.origin_kind.tag().as_bytes());
+        push_atom_hash(
+            &mut hasher,
+            match admission.class {
+                AdmissionClass::Scientific => b"scientific",
+                AdmissionClass::WaiverDependent => b"waiver-dependent",
+            },
+        );
+        match admission.direct_waiver {
+            Some(index) => push_atom_hash(&mut hasher, &stable_usize(index)),
+            None => push_atom_hash(&mut hasher, b"none"),
+        }
+        push_atom_hash(&mut hasher, b"waiver-parents");
+        push_atom_hash(&mut hasher, &stable_usize(admission.waiver_parents.len()));
+        for parent in &admission.waiver_parents {
+            push_atom_hash(&mut hasher, &stable_usize(*parent));
+        }
+    }
+    let inner = hasher.finalize();
+    hash_domain("fs-package:v6:verification-receipt", inner.as_bytes())
 }
 
 /// Combine two child hashes into a domain-separated parent node hash.
@@ -1673,7 +3010,7 @@ fn combine(a: &ContentHash, b: &ContentHash) -> ContentHash {
     let mut buf = [0u8; 64];
     buf[..32].copy_from_slice(a.as_bytes());
     buf[32..].copy_from_slice(b.as_bytes());
-    hash_domain("fs-package:v5:node", &buf)
+    hash_domain("fs-package:v6:node", &buf)
 }
 
 fn push_atom(out: &mut String, value: &str) {
@@ -1704,7 +3041,7 @@ fn json_escape(s: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Strict schema-v5 parser (beads qmao.6.1, xfxq, 7uq9, krym): the package is a PROOF
+// Strict schema-v6 parser: the package is a PROOF
 // ARTIFACT, so parsing fails closed — unknown fields, missing fields,
 // wrong types, bad hex, non-finite certificates, a magnitude budget
 // that does not re-derive, or an embedded root that does not recompute
@@ -2045,7 +3382,7 @@ fn no_leftovers(fields: &[(String, Jv)], what: &str) -> Result<(), ParseError> {
     if let Some((k, _)) = fields.first() {
         return Err(ParseError {
             what: what.to_string(),
-            why: format!("unknown field {k:?} (schema v5 is closed — fail closed)"),
+            why: format!("unknown field {k:?} (schema v6 is closed — fail closed)"),
         });
     }
     Ok(())
@@ -2063,7 +3400,11 @@ fn as_str(v: Jv, what: &str) -> Result<String, ParseError> {
 
 fn hex_u64(v: Jv, what: &str) -> Result<u64, ParseError> {
     let hex = as_str(v, what)?;
-    if hex.len() != 16 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+    if hex.len() != 16
+        || !hex
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
         return Err(ParseError {
             what: what.to_string(),
             why: format!("expected 16 hex digits, got {hex:?}"),
@@ -2197,11 +3538,16 @@ fn parse_magnitude_budget(fields: &mut Vec<(String, Jv)>) -> Result<MagnitudeBud
         take_field(&mut budget, "validated_unquantified", "magnitude_budget")?,
         "validated_unquantified",
     )?;
+    let waived_unquantified = decimal_usize(
+        take_field(&mut budget, "waived_unquantified", "magnitude_budget")?,
+        "waived_unquantified",
+    )?;
     no_leftovers(&budget, "magnitude_budget")?;
     Ok(MagnitudeBudget {
         verified_width,
         estimated_dispersion,
         validated_unquantified,
+        waived_unquantified,
         quantified_total: verified_width + estimated_dispersion,
     })
 }
@@ -2228,18 +3574,22 @@ fn verify_declarations(
     declared_root: ContentHash,
     declared_budget: MagnitudeBudget,
 ) -> Result<(), ParseError> {
-    let recomputed_budget = package.magnitude_budget();
+    let recomputed_budget = package.declared_magnitude_budget_unverified();
     if recomputed_budget.verified_width.to_bits() != declared_budget.verified_width.to_bits()
         || recomputed_budget.estimated_dispersion.to_bits()
             != declared_budget.estimated_dispersion.to_bits()
         || recomputed_budget.validated_unquantified != declared_budget.validated_unquantified
+        || recomputed_budget.waived_unquantified != declared_budget.waived_unquantified
     {
         return Err(ParseError {
             what: "magnitude_budget".to_string(),
             why: "declared budget does not re-derive from the claims (tamper or drift)".to_string(),
         });
     }
-    let recomputed_root = package.merkle_root();
+    let recomputed_root = package.try_merkle_root().map_err(|error| ParseError {
+        what: "merkle_root".to_string(),
+        why: format!("parsed package exceeds transport limits: {error:?}"),
+    })?;
     if recomputed_root != declared_root {
         return Err(ParseError {
             what: "merkle_root".to_string(),
@@ -2252,7 +3602,7 @@ fn verify_declarations(
     Ok(())
 }
 
-/// Parse the embedded content root: exactly 64 hex chars (schema v5).
+/// Parse the embedded content root: exactly 64 hex chars (schema v6).
 /// A 16-hex value is the legacy v3 FNV root and is named in the refusal.
 fn parse_declared_root(fields: &mut Vec<(String, Jv)>) -> Result<ContentHash, ParseError> {
     let raw = match take_field(fields, "merkle_root", "package")? {
@@ -2264,26 +3614,44 @@ fn parse_declared_root(fields: &mut Vec<(String, Jv)>) -> Result<ContentHash, Pa
             });
         }
     };
+    let canonical = raw.len() == 64
+        && raw
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+    if !canonical {
+        return Err(ParseError {
+            what: "merkle_root".to_string(),
+            why: match raw.len() {
+                16 => "a 16-hex root is the legacy v3 FNV content address; schema v6 requires \
+                       the 64-hex lowercase BLAKE3 root"
+                    .to_string(),
+                64 => "the 64-char root must use lowercase hexadecimal".to_string(),
+                n => format!("expected exactly 64 lowercase hex chars, got {n} chars"),
+            },
+        });
+    }
     ContentHash::from_hex(&raw).ok_or_else(|| ParseError {
         what: "merkle_root".to_string(),
         why: match raw.len() {
-            16 => "a 16-hex root is the legacy v3 FNV content address; schema v5 requires \
-                   the 64-hex BLAKE3 root"
+            16 => "a 16-hex root is the legacy v3 FNV content address; schema v6 requires \
+                   the 64-hex lowercase BLAKE3 root"
                 .to_string(),
-            64 => "the 64-char root contains non-hex characters".to_string(),
-            n => format!("expected exactly 64 hex chars (BLAKE3 content root), got {n} chars"),
+            64 => "the 64-char root contains non-lowercase-hex characters".to_string(),
+            n => format!("expected exactly 64 lowercase hex chars, got {n} chars"),
         },
     })
 }
 
 impl EvidencePackage {
-    /// Parse schema-v5 JSON STRICTLY and structurally: every field
+    /// Parse the deterministic schema-v6 FrankenSim JSON profile structurally:
+    /// every field
     /// mapped, unknown fields refused, floats reconstructed bit-exactly,
     /// the magnitude budget re-derived and compared, and the embedded
     /// content root recomputed from the parsed fields — a package whose
     /// root does not recompute is tampered or forged, and never loads.
-    /// Capability-gated source certificates and waivers are retained but not
-    /// authenticated; call [`EvidencePackage::from_json_with`] or
+    /// Capability-gated sources, anchors, falsifiers, derivations, waivers, and
+    /// signatures are retained but not authenticated; call
+    /// [`EvidencePackage::from_json_with`] or
     /// [`EvidencePackage::verify_with`] before using them as evidence.
     /// Earlier schema versions (v3's 16-hex FNV root) are refused by
     /// version before any field is interpreted.
@@ -2308,7 +3676,7 @@ impl EvidencePackage {
         verify_declarations(&pkg, declared_root, declared_budget)?;
         pkg.verify_structural().map_err(|error| ParseError {
             what: "package semantics".to_string(),
-            why: format!("{error:?}"),
+            why: error.to_string(),
         })?;
         Ok(pkg)
     }
@@ -2317,20 +3685,20 @@ impl EvidencePackage {
     /// returning it.
     ///
     /// # Errors
-    /// [`ParseError`] for syntax, transport, integrity, semantic, source
-    /// certificate, or waiver refusal.
+    /// [`ParseError`] for syntax, transport, integrity, semantic, artifact,
+    /// signature, or waiver refusal.
     pub fn from_json_with(
         text: &str,
         capabilities: &VerificationCapabilities<'_>,
-    ) -> Result<EvidencePackage, ParseError> {
+    ) -> Result<VerifiedPackage, ParseError> {
         let package = Self::from_json(text)?;
-        package
+        let report = package
             .verify_with(capabilities)
             .map_err(|error| ParseError {
                 what: "package verification capabilities".to_string(),
-                why: format!("{error:?}"),
+                why: error.to_string(),
             })?;
-        Ok(package)
+        Ok(VerifiedPackage { package, report })
     }
 }
 
@@ -2495,8 +3863,13 @@ fn parse_receipt(value: Jv, what: &str) -> Result<Option<CompositionReceipt>, Pa
             });
         }
     };
+    let artifact_hash = as_str(take_field(&mut fields, "artifact_hash", what)?, what)?;
     no_leftovers(&fields, "claim receipt")?;
-    Ok(Some(CompositionReceipt { parents, op }))
+    Ok(Some(CompositionReceipt {
+        parents,
+        op,
+        artifact_hash,
+    }))
 }
 
 fn parse_falsifiers(value: Jv, what: &str) -> Result<Vec<FalsifierRecord>, ParseError> {
@@ -2522,12 +3895,14 @@ fn parse_falsifiers(value: Jv, what: &str) -> Result<Vec<FalsifierRecord>, Parse
                 }
             };
             let detail = as_str(take_field(&mut fields, "detail", what)?, what)?;
+            let artifact_hash = as_str(take_field(&mut fields, "artifact_hash", what)?, what)?;
             no_leftovers(&fields, "falsifier record")?;
             Ok(FalsifierRecord {
                 name,
                 attempts,
                 refuted,
                 detail,
+                artifact_hash,
             })
         })
         .collect()
@@ -2580,7 +3955,7 @@ mod tests {
                 content_hash: origin_hash,
             },
         };
-        assert!(!claim.has_matching_validated_anchor());
+        assert!(!claim.has_declared_matching_validated_anchor_unverified());
         let package = EvidencePackage::new(Provenance::new("commit", "lock")).with_claim(claim);
         assert!(matches!(
             package.verify(),
@@ -2589,5 +3964,42 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn transport_node_accounting_matches_emitted_json_shapes() {
+        let empty = EvidencePackage::new(Provenance::new("commit", "lock"));
+        assert_eq!(
+            empty.transport_usage().expect("bounded empty package").1,
+            13
+        );
+
+        let estimated = EvidencePackage::new(Provenance::new("commit", "lock"))
+            .with_claim(Claim::estimated("estimate", "bounded", "estimator", 1.0));
+        assert_eq!(
+            estimated
+                .transport_usage()
+                .expect("bounded estimated package")
+                .1,
+            26
+        );
+
+        let verified = EvidencePackage::new(Provenance::new("commit", "lock")).with_claim(
+            Claim::from_certificate(
+                "certificate",
+                "bounded",
+                0.0,
+                1.0,
+                "producer",
+                "11".repeat(32),
+            ),
+        );
+        assert_eq!(
+            verified
+                .transport_usage()
+                .expect("bounded certificate package")
+                .1,
+            27
+        );
     }
 }

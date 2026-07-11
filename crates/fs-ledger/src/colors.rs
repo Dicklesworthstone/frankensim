@@ -1,14 +1,16 @@
 //! WRITE-TIME enforcement of the three-color schema (Proposal 3,
 //! bead qmao.1): the [`ColorGraph`] accepts only writes whose claimed
 //! color exactly matches what its evidence derives: Estimated leaves
-//! enter directly; positive leaves are minted from typed certificate or
-//! anchoring origins (or a separately scoped authenticated source
+//! enter through a validated weak-source gate; positive leaves are minted
+//! from typed certificate or anchoring origins authenticated by an injected
+//! source authority (or a separately scoped authenticated source
 //! waiver); derived colors are recomputed from their parents. An
 //! estimated result CANNOT be written as verified (the laundering
 //! refusal). Validated claims are re-checked against the CURRENT
-//! execution state and every regime exit AUTO-DEMOTES. Typed origins,
-//! all demotions, and authenticated operation-bound waivers participate
-//! in the node provenance hash and cannot be quietly dropped later.
+//! execution state and every regime exit AUTO-DEMOTES. Certificate artifacts,
+//! admitting policy identities, all demotions, and authenticated
+//! operation-bound waivers participate in the node provenance hash and cannot
+//! be quietly dropped later.
 //!
 //! The color enum and pairwise algebra live in fs-evidence (usable by
 //! every layer); this module is the HELM-side gatekeeper over
@@ -47,13 +49,16 @@ pub const WAIVER_SCOPE_COLOR_UPGRADE: &str = "color-upgrade";
 pub const WAIVER_SCOPE_SOURCE_COLOR: &str = "source-color";
 
 /// TYPED origin evidence for a positive-colored SOURCE leaf (bead
-/// gp3.16). Mirrors the schema-v5 claim-origin vocabulary
+/// gp3.16). Mirrors the schema-v6 claim-origin vocabulary
 /// (fs-package `ClaimOrigin::SourceCertificate` / `AnchoredSource`)
 /// without coupling this layer upward: the semantics agree, the types
 /// live here. The origin is an INPUT that re-derives the color, not a
 /// memo riding alongside it — a Verified leaf is minted through
 /// [`fs_evidence::verified_from`] on the carried certificate, and a
-/// Validated leaf must name its anchoring dataset exactly.
+/// Validated leaf must name its anchoring dataset exactly. Public data
+/// is not authority: [`ColorGraph::source_with_origin`] additionally
+/// requires an injected [`SourceOriginVerifier`], whose atomic policy decision
+/// is retained in the node provenance.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SourceOrigin {
     /// A Verified leaf's minting certificate plus the producer identity
@@ -64,6 +69,10 @@ pub enum SourceOrigin {
     Certificate {
         /// Non-blank producer identity.
         producer: String,
+        /// Content address of the retained certificate artifact. Two proof
+        /// objects yielding the same interval remain distinct, subpoenable
+        /// pieces of evidence.
+        certificate_hash: ContentHash,
         /// The interval certificate that mints the color.
         certificate: NumericalCertificate,
     },
@@ -79,6 +88,124 @@ pub enum SourceOrigin {
         /// instead of accepting a caller-asserted validity box.
         regime: ValidityDomain,
     },
+}
+
+/// Atomic result of an injected admission-policy decision. The decision and
+/// the policy identity come from one callback, so a mutable verifier cannot
+/// accept under one trust configuration and report another configuration in a
+/// second call. Fields are private: capability implementations construct
+/// decisions through [`Self::accept`] and [`Self::reject`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PolicyDecision {
+    accepted: bool,
+    policy_fingerprint: ContentHash,
+}
+
+impl PolicyDecision {
+    /// Accept under the exact policy identified by `policy_fingerprint`.
+    #[must_use]
+    pub const fn accept(policy_fingerprint: ContentHash) -> Self {
+        Self {
+            accepted: true,
+            policy_fingerprint,
+        }
+    }
+
+    /// Reject under the exact policy identified by `policy_fingerprint`.
+    #[must_use]
+    pub const fn reject(policy_fingerprint: ContentHash) -> Self {
+        Self {
+            accepted: false,
+            policy_fingerprint,
+        }
+    }
+
+    /// Whether the request was accepted.
+    #[must_use]
+    pub const fn accepted(self) -> bool {
+        self.accepted
+    }
+
+    /// Stable identity of the trust roots and decision semantics used.
+    #[must_use]
+    pub const fn policy_fingerprint(self) -> ContentHash {
+        self.policy_fingerprint
+    }
+}
+
+/// The exact source-admission question presented to a trusted origin
+/// verifier. Fields are private/read-only so a verifier cannot observe a
+/// partial request: node identity, claimed color, and the complete origin
+/// always travel together.
+#[derive(Debug, Clone, Copy)]
+pub struct SourceOriginRequest<'a> {
+    node_name: &'a str,
+    claimed_color: &'a Color,
+    origin: &'a SourceOrigin,
+}
+
+impl<'a> SourceOriginRequest<'a> {
+    /// Build the exact request a source gate will present.
+    #[must_use]
+    pub fn new(node_name: &'a str, claimed_color: &'a Color, origin: &'a SourceOrigin) -> Self {
+        Self {
+            node_name,
+            claimed_color,
+            origin,
+        }
+    }
+
+    /// Node identity covered by this admission.
+    #[must_use]
+    pub fn node_name(&self) -> &str {
+        self.node_name
+    }
+
+    /// Exact claimed color covered by this admission.
+    #[must_use]
+    pub fn claimed_color(&self) -> &Color {
+        self.claimed_color
+    }
+
+    /// Complete certificate or anchor presented for admission.
+    #[must_use]
+    pub fn origin(&self) -> &SourceOrigin {
+        self.origin
+    }
+
+    /// Domain-separated, versioned, length-prefixed identity bytes for
+    /// capability implementations that authenticate a request by MAC or
+    /// signature. Every floating-point field is bit-exact.
+    #[must_use]
+    pub fn canonical_bytes(&self) -> Vec<u8> {
+        let mut out = vec![1u8];
+        push_field(&mut out, SOURCE_ORIGIN_REQUEST_DOMAIN);
+        push_field(&mut out, self.node_name.as_bytes());
+        push_field(&mut out, &self.claimed_color.canonical_bytes());
+        push_source_origin(&mut out, self.origin);
+        out
+    }
+}
+
+/// Capability that authenticates a typed source origin. Merely constructing
+/// public certificate fields or writing down a dataset hash is not authority;
+/// the injected verifier must resolve and accept the whole request.
+pub trait SourceOriginVerifier {
+    /// Atomic acceptance and policy identity for this exact request.
+    fn verify(&self, request: &SourceOriginRequest<'_>) -> PolicyDecision;
+}
+
+/// Fail-closed default when no source-certificate or dataset authority is
+/// wired into the admission path.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NoSourceOriginVerifier;
+
+impl SourceOriginVerifier for NoSourceOriginVerifier {
+    fn verify(&self, _request: &SourceOriginRequest<'_>) -> PolicyDecision {
+        PolicyDecision::reject(hash_bytes(
+            b"frankensim/fs-ledger/source-origin-policy/v1/deny-all",
+        ))
+    }
 }
 
 /// Why a typed source origin failed to mint the claimed color
@@ -113,15 +240,24 @@ pub enum SourceOriginRejection {
     /// Estimated leaves state their own dispersion; they carry no
     /// origin and no waiver (use [`ColorGraph::source`]).
     EstimatedNeedsNoOrigin,
-    /// The producer identity is blank.
+    /// The producer identity is blank, placeholder text, or padded.
     BlankProducer,
-    /// The anchoring dataset identity is blank.
+    /// The anchoring dataset identity is blank, placeholder text, or padded.
     BlankDataset,
     /// The anchoring regime is empty or contains an unusable axis.
     InvalidRegime {
         /// Empty for an undeclared regime; otherwise the malformed axis.
         axis: String,
     },
+    /// The injected source-origin capability did not authenticate the
+    /// complete node/color/origin request under the named policy.
+    VerifierRefused {
+        /// Stable identity of the rejecting policy.
+        policy_fingerprint: ContentHash,
+    },
+    /// The injected capability panicked. External trust code cannot unwind
+    /// through the ledger write gate or leave a partially admitted node.
+    VerifierPanicked,
 }
 
 impl core::fmt::Display for SourceOriginRejection {
@@ -144,13 +280,25 @@ impl core::fmt::Display for SourceOriginRejection {
             Self::EstimatedNeedsNoOrigin => {
                 f.write_str("Estimated sources must use `source` without an origin")
             }
-            Self::BlankProducer => f.write_str("certificate producer identity is blank"),
-            Self::BlankDataset => f.write_str("anchoring dataset identity is blank"),
+            Self::BlankProducer => {
+                f.write_str("certificate producer identity is blank, placeholder text, or padded")
+            }
+            Self::BlankDataset => {
+                f.write_str("anchoring dataset identity is blank, placeholder text, or padded")
+            }
             Self::InvalidRegime { axis } if axis.is_empty() => {
                 f.write_str("anchoring regime declares no bounded axes")
             }
             Self::InvalidRegime { axis } => {
                 write!(f, "anchoring regime axis `{axis}` has invalid bounds")
+            }
+            Self::VerifierRefused { policy_fingerprint } => write!(
+                f,
+                "source-origin policy {} refused the complete admission request",
+                policy_fingerprint.to_hex()
+            ),
+            Self::VerifierPanicked => {
+                f.write_str("source-origin verifier panicked; admission failed closed")
             }
         }
     }
@@ -164,8 +312,9 @@ impl SourceOrigin {
             SourceOrigin::Certificate {
                 producer,
                 certificate,
+                ..
             } => {
-                if producer.trim().is_empty() {
+                if identity_reason(producer).is_some() {
                     return Err(SourceOriginRejection::BlankProducer);
                 }
                 verified_from(certificate).map_err(|error| {
@@ -177,7 +326,7 @@ impl SourceOrigin {
             SourceOrigin::Anchoring {
                 dataset_id, regime, ..
             } => {
-                if dataset_id.trim().is_empty() {
+                if identity_reason(dataset_id).is_some() {
                     return Err(SourceOriginRejection::BlankDataset);
                 }
                 if regime.bounds().is_empty() {
@@ -186,7 +335,7 @@ impl SourceOrigin {
                     });
                 }
                 if let Some((axis, _)) = regime.bounds().iter().find(|(axis, (lo, hi))| {
-                    axis.trim().is_empty() || !lo.is_finite() || !hi.is_finite() || lo > hi
+                    identity_reason(axis).is_some() || !lo.is_finite() || !hi.is_finite() || lo > hi
                 }) {
                     return Err(SourceOriginRejection::InvalidRegime { axis: axis.clone() });
                 }
@@ -199,8 +348,68 @@ impl SourceOrigin {
     }
 }
 
+/// Why a color payload is structurally unusable even if a policy authority
+/// signs the exact bytes. Waivers may authorize a claim-strength exception;
+/// they never authorize malformed epistemic data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ColorStructureRejection {
+    /// A machine identity is blank, reserved placeholder text, or padded.
+    InvalidIdentity {
+        /// Stable payload field (`dataset`, `axis`, or `estimator`).
+        field: &'static str,
+        /// The offending identity when it is useful for localization.
+        value: String,
+        /// Stable reason (`blank`, `placeholder`, or `surrounding whitespace`).
+        reason: &'static str,
+    },
+    /// A Verified interval is non-finite or inverted.
+    InvalidVerifiedInterval {
+        /// Stable field-level reason.
+        reason: &'static str,
+    },
+    /// A Validated color has no regime axes or one malformed axis.
+    InvalidValidatedRegime {
+        /// Empty for a wholly undeclared regime; otherwise the offending axis.
+        axis: String,
+        /// Stable field-level reason.
+        reason: &'static str,
+    },
+    /// An Estimated dispersion is NaN or negative.
+    InvalidEstimatedDispersion {
+        /// Stable field-level reason.
+        reason: &'static str,
+    },
+}
+
+impl core::fmt::Display for ColorStructureRejection {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::InvalidIdentity {
+                field,
+                value,
+                reason,
+            } => write!(f, "{field} identity {value:?} is invalid: {reason}"),
+            Self::InvalidVerifiedInterval { reason } => {
+                write!(f, "Verified interval is invalid: {reason}")
+            }
+            Self::InvalidValidatedRegime { axis, reason } if axis.is_empty() => {
+                write!(f, "Validated regime is invalid: {reason}")
+            }
+            Self::InvalidValidatedRegime { axis, reason } => {
+                write!(f, "Validated regime axis {axis:?} is invalid: {reason}")
+            }
+            Self::InvalidEstimatedDispersion { reason } => {
+                write!(f, "Estimated dispersion is invalid: {reason}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ColorStructureRejection {}
+
 const WAIVER_PAYLOAD_DOMAIN: &[u8] = b"frankensim/fs-ledger/color-waiver";
 const COLOR_NODE_HASH_DOMAIN: &[u8] = b"frankensim/fs-ledger/color-node";
+const SOURCE_ORIGIN_REQUEST_DOMAIN: &[u8] = b"frankensim/fs-ledger/source-origin-request";
 
 fn interval_op_tag(op: IntervalOp) -> u8 {
     match op {
@@ -233,6 +442,156 @@ fn numerical_kind_name(kind: fs_evidence::NumericalKind) -> &'static str {
         fs_evidence::NumericalKind::Enclosure => "enclosure",
         fs_evidence::NumericalKind::Estimate => "estimate",
         fs_evidence::NumericalKind::NoClaim => "no-claim",
+    }
+}
+
+fn is_placeholder_token(value: &str) -> bool {
+    [
+        "-",
+        "?",
+        "n/a",
+        "na",
+        "none",
+        "not run",
+        "pending",
+        "placeholder",
+        "tbd",
+        "todo",
+        "unknown",
+    ]
+    .iter()
+    .any(|placeholder| value.eq_ignore_ascii_case(placeholder))
+}
+
+fn identity_reason(value: &str) -> Option<&'static str> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        Some("blank")
+    } else if trimmed != value {
+        Some("surrounding-whitespace")
+    } else if is_placeholder_token(value) {
+        Some("placeholder")
+    } else {
+        None
+    }
+}
+
+fn validate_color_structure(color: &Color) -> Result<(), ColorStructureRejection> {
+    match color {
+        Color::Verified { lo, hi } => {
+            if !lo.is_finite() || !hi.is_finite() {
+                Err(ColorStructureRejection::InvalidVerifiedInterval {
+                    reason: "bounds must be finite",
+                })
+            } else if lo > hi {
+                Err(ColorStructureRejection::InvalidVerifiedInterval {
+                    reason: "lower bound exceeds upper bound",
+                })
+            } else {
+                Ok(())
+            }
+        }
+        Color::Validated { regime, dataset } => {
+            if let Some(reason) = identity_reason(dataset) {
+                return Err(ColorStructureRejection::InvalidIdentity {
+                    field: "dataset",
+                    value: dataset.clone(),
+                    reason,
+                });
+            }
+            if regime.bounds().is_empty() {
+                return Err(ColorStructureRejection::InvalidValidatedRegime {
+                    axis: String::new(),
+                    reason: "at least one bounded axis is required",
+                });
+            }
+            for (axis, (lo, hi)) in regime.bounds() {
+                if let Some(reason) = identity_reason(axis) {
+                    return Err(ColorStructureRejection::InvalidIdentity {
+                        field: "axis",
+                        value: axis.clone(),
+                        reason,
+                    });
+                }
+                if !lo.is_finite() || !hi.is_finite() {
+                    return Err(ColorStructureRejection::InvalidValidatedRegime {
+                        axis: axis.clone(),
+                        reason: "bounds must be finite",
+                    });
+                }
+                if lo > hi {
+                    return Err(ColorStructureRejection::InvalidValidatedRegime {
+                        axis: axis.clone(),
+                        reason: "lower bound exceeds upper bound",
+                    });
+                }
+            }
+            Ok(())
+        }
+        Color::Estimated {
+            estimator,
+            dispersion,
+        } => {
+            if let Some(reason) = identity_reason(estimator) {
+                return Err(ColorStructureRejection::InvalidIdentity {
+                    field: "estimator",
+                    value: estimator.clone(),
+                    reason,
+                });
+            }
+            if dispersion.is_nan() || *dispersion < 0.0 {
+                Err(ColorStructureRejection::InvalidEstimatedDispersion {
+                    reason: "value is NaN or negative",
+                })
+            } else {
+                Ok(())
+            }
+        }
+    }
+}
+
+fn estimated_payload_error(color: &Color) -> Option<(&'static str, &'static str)> {
+    match validate_color_structure(color) {
+        Err(ColorStructureRejection::InvalidIdentity {
+            field: "estimator",
+            reason,
+            ..
+        }) => Some(("estimator", reason)),
+        Err(ColorStructureRejection::InvalidEstimatedDispersion { reason }) => {
+            Some(("dispersion", reason))
+        }
+        Ok(()) | Err(_) => None,
+    }
+}
+
+fn push_source_origin(out: &mut Vec<u8>, origin: &SourceOrigin) {
+    match origin {
+        SourceOrigin::Certificate {
+            producer,
+            certificate_hash,
+            certificate,
+        } => {
+            out.push(1);
+            push_field(out, producer.as_bytes());
+            out.extend_from_slice(certificate_hash.as_bytes());
+            out.push(numerical_kind_tag(certificate.kind));
+            out.extend_from_slice(&certificate.lo.to_bits().to_le_bytes());
+            out.extend_from_slice(&certificate.hi.to_bits().to_le_bytes());
+        }
+        SourceOrigin::Anchoring {
+            dataset_id,
+            content_hash,
+            regime,
+        } => {
+            out.push(2);
+            push_field(out, dataset_id.as_bytes());
+            out.extend_from_slice(content_hash.as_bytes());
+            let color = Color::Validated {
+                regime: regime.clone(),
+                dataset: dataset_id.clone(),
+            };
+            push_field(out, &color.canonical_bytes());
+        }
     }
 }
 
@@ -358,8 +717,9 @@ fn push_field(out: &mut Vec<u8>, bytes: &[u8]) {
 /// no cryptography). Implementations resolve `key_id` and check
 /// `signature` over `payload`.
 pub trait WaiverVerifier {
-    /// True iff `signature` authenticates `payload` under `key_id`.
-    fn verify(&self, key_id: &str, payload: &[u8], signature: &[u8]) -> bool;
+    /// Atomic authentication decision and policy identity for the exact
+    /// `key_id`, `payload`, and `signature` tuple.
+    fn verify(&self, key_id: &str, payload: &[u8], signature: &[u8]) -> PolicyDecision;
 }
 
 /// The in-tree default: NO verifier exists, so NOTHING authenticates
@@ -369,8 +729,10 @@ pub trait WaiverVerifier {
 pub struct NoWaiverVerifier;
 
 impl WaiverVerifier for NoWaiverVerifier {
-    fn verify(&self, _key_id: &str, _payload: &[u8], _signature: &[u8]) -> bool {
-        false
+    fn verify(&self, _key_id: &str, _payload: &[u8], _signature: &[u8]) -> PolicyDecision {
+        PolicyDecision::reject(hash_bytes(
+            b"frankensim/fs-ledger/waiver-policy/v1/deny-all",
+        ))
     }
 }
 
@@ -388,9 +750,15 @@ pub enum WaiverRejection {
     LineageMismatch,
     /// Expired as of the supplied day.
     Expired,
-    /// The verifier refused the signature (wrong key, tampered
-    /// payload, rotated-out key, or no verifier capability at all).
-    BadSignature,
+    /// The verifier refused the signature (wrong key, tampered payload,
+    /// rotated-out key, or no verifier capability at all) under the named
+    /// policy.
+    VerifierRefused {
+        /// Stable identity of the rejecting signature policy.
+        policy_fingerprint: ContentHash,
+    },
+    /// The injected signature capability panicked; admission failed closed.
+    VerifierPanicked,
 }
 
 impl core::fmt::Display for WaiverRejection {
@@ -403,7 +771,14 @@ impl core::fmt::Display for WaiverRejection {
                 f.write_str("grant parent hashes differ from the actual lineage")
             }
             Self::Expired => f.write_str("grant was expired at the admission date"),
-            Self::BadSignature => f.write_str("signature verification failed"),
+            Self::VerifierRefused { policy_fingerprint } => write!(
+                f,
+                "signature policy {} refused the grant",
+                policy_fingerprint.to_hex()
+            ),
+            Self::VerifierPanicked => {
+                f.write_str("signature verifier panicked; admission failed closed")
+            }
         }
     }
 }
@@ -488,16 +863,40 @@ fn grant_json(grant: Option<&WaiverGrant>, operation: Option<IntervalOp>) -> Str
     })
 }
 
+fn waiver_dependencies_json(dependencies: &[WaiverDependency]) -> String {
+    dependencies
+        .iter()
+        .map(|dependency| {
+            let operation = dependency
+                .operation
+                .map_or("null".to_string(), |op| json_string(interval_op_name(op)));
+            format!(
+                "{{\"authorizing_node\":{},\"operation\":{},\"policy_fingerprint\":\"{}\",\
+                 \"admission_day\":{},\"waiver\":{},\"grant\":{}}}",
+                dependency.authorizing_node,
+                operation,
+                dependency.policy_fingerprint.to_hex(),
+                dependency.admission_day,
+                waiver_json(Some(&dependency.grant.annotation)),
+                grant_json(Some(&dependency.grant), dependency.operation),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 fn origin_json(origin: Option<&SourceOrigin>) -> String {
     origin.map_or("null".to_string(), |origin| match origin {
         SourceOrigin::Certificate {
             producer,
+            certificate_hash,
             certificate,
         } => format!(
             "{{\"kind\":\"certificate\",\"producer\":{},\"certificate_kind\":\
-             {},\"lo\":{},\"hi\":{}}}",
+             {},\"certificate_hash\":\"{}\",\"lo\":{},\"hi\":{}}}",
             json_string(producer),
             json_string(numerical_kind_name(certificate.kind)),
+            certificate_hash.to_hex(),
             json_f64(certificate.lo),
             json_f64(certificate.hi)
         ),
@@ -517,6 +916,14 @@ fn origin_json(origin: Option<&SourceOrigin>) -> String {
             .payload_json()
         ),
     })
+}
+
+fn optional_hash_json(hash: Option<ContentHash>) -> String {
+    hash.map_or("null".to_string(), |hash| format!("\"{}\"", hash.to_hex()))
+}
+
+fn optional_u32_json(value: Option<u32>) -> String {
+    value.map_or("null".to_string(), |value| value.to_string())
 }
 
 /// One regime-exit demotion observed while folding a derived node.
@@ -550,6 +957,51 @@ impl ColorDemotion {
     }
 }
 
+/// One authenticated waiver on which this node depends transitively. The
+/// authorizing node id and its original operation make the full signed grant
+/// independently resolvable during replay; entries are canonicalized by
+/// ascending authorizing-node id and never duplicated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WaiverDependency {
+    authorizing_node: u64,
+    operation: Option<IntervalOp>,
+    grant: WaiverGrant,
+    policy_fingerprint: ContentHash,
+    admission_day: u32,
+}
+
+impl WaiverDependency {
+    /// Node at which the grant was originally authenticated.
+    #[must_use]
+    pub fn authorizing_node(&self) -> u64 {
+        self.authorizing_node
+    }
+
+    /// Operation covered by the original grant (`None` for a waived source).
+    #[must_use]
+    pub fn operation(&self) -> Option<IntervalOp> {
+        self.operation
+    }
+
+    /// Complete signed grant retained from the authorizing node.
+    #[must_use]
+    pub fn grant(&self) -> &WaiverGrant {
+        &self.grant
+    }
+
+    /// Policy that authenticated the grant at its authorizing node.
+    #[must_use]
+    pub fn policy_fingerprint(&self) -> ContentHash {
+        self.policy_fingerprint
+    }
+
+    /// Historical day on which the grant was admitted.
+    #[must_use]
+    pub fn admission_day(&self) -> u32 {
+        self.admission_day
+    }
+}
+
 /// One colored ledger node. Fields are PRIVATE and read-only (bead
 /// gp3.16): a written node cannot be edited after the gate accepted
 /// it — the only mutation surface on the graph is the gated write
@@ -566,8 +1018,12 @@ pub struct ColorNode {
     /// parent list).
     demotions: Vec<ColorDemotion>,
     origin: Option<SourceOrigin>,
+    origin_policy_fingerprint: Option<ContentHash>,
     waiver: Option<Waiver>,
     grant: Option<WaiverGrant>,
+    waiver_policy_fingerprint: Option<ContentHash>,
+    waiver_admission_day: Option<u32>,
+    waiver_dependencies: Vec<WaiverDependency>,
     hash: ContentHash,
 }
 
@@ -615,6 +1071,12 @@ impl ColorNode {
         self.origin.as_ref()
     }
 
+    /// Policy that authenticated this node's typed source origin.
+    #[must_use]
+    pub fn origin_policy_fingerprint(&self) -> Option<ContentHash> {
+        self.origin_policy_fingerprint
+    }
+
     /// The human annotation, when one was recorded (never authorizing).
     #[must_use]
     pub fn waiver(&self) -> Option<&Waiver> {
@@ -627,8 +1089,36 @@ impl ColorNode {
         self.grant.as_ref()
     }
 
-    /// Provenance hash (name, color bytes, parent hashes, origin,
-    /// waiver, grant).
+    /// Policy that authenticated this node's direct waiver grant.
+    #[must_use]
+    pub fn waiver_policy_fingerprint(&self) -> Option<ContentHash> {
+        self.waiver_policy_fingerprint
+    }
+
+    /// Historical day on which this node's direct waiver was admitted.
+    #[must_use]
+    pub fn waiver_admission_day(&self) -> Option<u32> {
+        self.waiver_admission_day
+    }
+
+    /// Every earlier waiver on which this node transitively depends, sorted by
+    /// authorizing node id. The grant that authorized THIS node, if any,
+    /// remains available separately through [`Self::grant`].
+    #[must_use]
+    pub fn waiver_dependencies(&self) -> &[WaiverDependency] {
+        &self.waiver_dependencies
+    }
+
+    /// Whether this node's scientific claim depends on any authenticated
+    /// waiver, either at this write or transitively through its parents.
+    #[must_use]
+    pub fn depends_on_waiver(&self) -> bool {
+        self.grant.is_some() || !self.waiver_dependencies.is_empty()
+    }
+
+    /// Provenance hash (name, color bytes, parent hashes, origin and its
+    /// policy, waiver and its admission context, and transitive waiver
+    /// dependencies).
     #[must_use]
     pub fn hash(&self) -> ContentHash {
         self.hash
@@ -659,6 +1149,13 @@ pub enum ColorWriteError {
         /// The offending id.
         id: u64,
     },
+    /// A sealed parent carries a grant without the policy/day context needed
+    /// to preserve its authority transitively. This cannot arise through the
+    /// public write API, but is kept fallible for future persisted imports.
+    InvalidParentAuthority {
+        /// Parent whose direct grant context is incomplete.
+        id: u64,
+    },
     /// Derivations need at least one parent.
     NoParents,
     /// A waiver grant failed authentication or binding checks; the
@@ -678,6 +1175,19 @@ pub enum ColorWriteError {
     SourceOriginRefused {
         /// The structured reason.
         rejection: SourceOriginRejection,
+    },
+    /// A direct Estimated leaf has a malformed identity or dispersion.
+    InvalidEstimatedSource {
+        /// `"estimator"` or `"dispersion"`.
+        field: &'static str,
+        /// Stable field-level refusal.
+        why: &'static str,
+    },
+    /// A color payload is structurally malformed. Authentication cannot waive
+    /// finite/order, regime, identity, or dispersion invariants.
+    InvalidColor {
+        /// The exact structural refusal.
+        rejection: ColorStructureRejection,
     },
 }
 
@@ -711,6 +1221,10 @@ impl core::fmt::Display for ColorWriteError {
             ColorWriteError::UnknownParent { id } => {
                 write!(f, "parent node {id} does not exist in this color graph")
             }
+            ColorWriteError::InvalidParentAuthority { id } => write!(
+                f,
+                "parent node {id} has a waiver grant without its admitting policy and day"
+            ),
             ColorWriteError::NoParents => {
                 write!(f, "derived nodes need parents; use `source` for leaves")
             }
@@ -723,17 +1237,30 @@ impl core::fmt::Display for ColorWriteError {
             ColorWriteError::SourceOriginRequired { rank } => write!(
                 f,
                 "source origin required: a {rank:?} leaf cannot state its color by \
-                 assertion — carry typed origin evidence (a minting certificate for \
-                 verified, the anchoring dataset for validated) via \
+                 assertion — carry typed origin evidence authenticated by a source \
+                 verifier (a minting certificate for verified, the anchoring dataset \
+                 for validated) via \
                  `source_with_origin`, or an authenticated source-color grant via \
                  `source_waived`; estimates need neither"
             ),
             ColorWriteError::SourceOriginRefused { rejection } => write!(
                 f,
                 "source origin refused ({rejection}): the typed evidence must \
-                 actually mint the claimed color — a certificate re-derives the \
+                 actually mint the claimed color and its verifier must authenticate \
+                 the complete request — a certificate re-derives the \
                  verified interval bit-exactly, an anchoring names the validated \
                  dataset exactly — forged or mismatched origins fail closed"
+            ),
+            ColorWriteError::InvalidEstimatedSource { field, why } => write!(
+                f,
+                "Estimated source field `{field}` refused: {why}; use a meaningful estimator \
+                 identity and a nonnegative dispersion (positive infinity is the explicit \
+                 no-spread-claim sentinel)"
+            ),
+            ColorWriteError::InvalidColor { rejection } => write!(
+                f,
+                "color payload refused ({rejection}): a waiver may authorize claim policy, but \
+                 cannot authorize structurally invalid epistemic data"
             ),
         }
     }
@@ -745,16 +1272,24 @@ struct NodeWriteMetadata {
     operation: Option<IntervalOp>,
     demotions: Vec<ColorDemotion>,
     origin: Option<SourceOrigin>,
+    origin_policy_fingerprint: Option<ContentHash>,
     waiver: Option<Waiver>,
     grant: Option<WaiverGrant>,
+    waiver_policy_fingerprint: Option<ContentHash>,
+    waiver_admission_day: Option<u32>,
+    waiver_dependencies: Vec<WaiverDependency>,
 }
 
 struct NodeHashMetadata<'a> {
     operation: Option<IntervalOp>,
     demotions: &'a [ColorDemotion],
     origin: Option<&'a SourceOrigin>,
+    origin_policy_fingerprint: Option<ContentHash>,
     waiver: Option<&'a Waiver>,
     grant: Option<&'a WaiverGrant>,
+    waiver_policy_fingerprint: Option<ContentHash>,
+    waiver_admission_day: Option<u32>,
+    waiver_dependencies: &'a [WaiverDependency],
 }
 
 impl<'a> From<&'a NodeWriteMetadata> for NodeHashMetadata<'a> {
@@ -763,8 +1298,12 @@ impl<'a> From<&'a NodeWriteMetadata> for NodeHashMetadata<'a> {
             operation: metadata.operation,
             demotions: &metadata.demotions,
             origin: metadata.origin.as_ref(),
+            origin_policy_fingerprint: metadata.origin_policy_fingerprint,
             waiver: metadata.waiver.as_ref(),
             grant: metadata.grant.as_ref(),
+            waiver_policy_fingerprint: metadata.waiver_policy_fingerprint,
+            waiver_admission_day: metadata.waiver_admission_day,
+            waiver_dependencies: &metadata.waiver_dependencies,
         }
     }
 }
@@ -795,8 +1334,46 @@ impl ColorGraph {
         &self.rows
     }
 
-    /// Provenance hash over DOMAIN-SEPARATED, VERSIONED v6,
-    /// LENGTH-PREFIXED encoding. V6 binds every regime demotion and the
+    fn inherited_waiver_dependencies(
+        &self,
+        parents: &[u64],
+    ) -> Result<Vec<WaiverDependency>, ColorWriteError> {
+        let mut dependencies = BTreeMap::<u64, WaiverDependency>::new();
+        for parent_id in parents {
+            let parent = self
+                .node(*parent_id)
+                .ok_or(ColorWriteError::UnknownParent { id: *parent_id })?;
+            for dependency in &parent.waiver_dependencies {
+                dependencies
+                    .entry(dependency.authorizing_node)
+                    .or_insert_with(|| dependency.clone());
+            }
+            if let Some(grant) = &parent.grant {
+                let (Some(policy_fingerprint), Some(admission_day)) = (
+                    parent.waiver_policy_fingerprint,
+                    parent.waiver_admission_day,
+                ) else {
+                    return Err(ColorWriteError::InvalidParentAuthority { id: parent.id });
+                };
+                dependencies
+                    .entry(parent.id)
+                    .or_insert_with(|| WaiverDependency {
+                        authorizing_node: parent.id,
+                        operation: parent.operation,
+                        grant: grant.clone(),
+                        policy_fingerprint,
+                        admission_day,
+                    });
+            }
+        }
+        Ok(dependencies.into_values().collect())
+    }
+
+    /// Provenance hash over DOMAIN-SEPARATED, VERSIONED v8,
+    /// LENGTH-PREFIXED encoding. V8 binds certificate artifact identity,
+    /// direct source/waiver policy fingerprints, waiver admission days, and
+    /// those fields in the canonical transitive waiver dependency closure.
+    /// V7 first bound that dependency closure. V6 bound every regime demotion and the
     /// correct source/derived waiver payload. V5 bound the typed SOURCE ORIGIN (bead
     /// gp3.16) so a forged or substituted origin changes the node
     /// identity and every downstream hash. V4 bound source/derived
@@ -811,7 +1388,7 @@ impl ColorGraph {
         parents: &[u64],
         metadata: &NodeHashMetadata<'_>,
     ) -> ContentHash {
-        let mut buf = vec![6u8]; // encoding version
+        let mut buf = vec![8u8]; // encoding version
         push_field(&mut buf, COLOR_NODE_HASH_DOMAIN);
         match metadata.operation {
             Some(op) => {
@@ -824,7 +1401,10 @@ impl ColorGraph {
         push_field(&mut buf, &color.canonical_bytes());
         push_len(&mut buf, parents.len());
         for &p in parents {
-            push_field(&mut buf, self.nodes[p as usize].hash.as_bytes());
+            let parent = self
+                .node(p)
+                .expect("node_hash parents are validated before append");
+            push_field(&mut buf, parent.hash.as_bytes());
         }
         push_len(&mut buf, metadata.demotions.len());
         for demotion in metadata.demotions {
@@ -835,33 +1415,36 @@ impl ColorGraph {
             buf.extend_from_slice(&demotion.reason.value.to_bits().to_le_bytes());
         }
         match metadata.origin {
-            Some(SourceOrigin::Certificate {
-                producer,
-                certificate,
-            }) => {
-                buf.push(1); // origin present
-                buf.push(1); // kind: certificate
-                push_field(&mut buf, producer.as_bytes());
-                buf.push(numerical_kind_tag(certificate.kind));
-                buf.extend_from_slice(&certificate.lo.to_le_bytes());
-                buf.extend_from_slice(&certificate.hi.to_le_bytes());
-            }
-            Some(SourceOrigin::Anchoring {
-                dataset_id,
-                content_hash,
-                regime,
-            }) => {
-                buf.push(1); // origin present
-                buf.push(2); // kind: anchoring
-                push_field(&mut buf, dataset_id.as_bytes());
-                buf.extend_from_slice(content_hash.as_bytes());
-                let color = Color::Validated {
-                    regime: regime.clone(),
-                    dataset: dataset_id.clone(),
-                };
-                push_field(&mut buf, &color.canonical_bytes());
+            Some(origin) => {
+                buf.push(1);
+                push_source_origin(&mut buf, origin);
             }
             None => buf.push(0),
+        }
+        match metadata.origin_policy_fingerprint {
+            Some(policy) => {
+                buf.push(1);
+                buf.extend_from_slice(policy.as_bytes());
+            }
+            None => buf.push(0),
+        }
+        push_len(&mut buf, metadata.waiver_dependencies.len());
+        for dependency in metadata.waiver_dependencies {
+            buf.extend_from_slice(&dependency.authorizing_node.to_le_bytes());
+            match dependency.operation {
+                Some(op) => {
+                    buf.push(1);
+                    buf.push(interval_op_tag(op));
+                }
+                None => buf.push(0),
+            }
+            push_field(
+                &mut buf,
+                &dependency.grant.signing_payload_for(dependency.operation),
+            );
+            push_field(&mut buf, &dependency.grant.signature);
+            buf.extend_from_slice(dependency.policy_fingerprint.as_bytes());
+            buf.extend_from_slice(&dependency.admission_day.to_le_bytes());
         }
         match metadata.waiver {
             Some(w) => {
@@ -881,6 +1464,20 @@ impl ColorGraph {
             }
             None => buf.push(0),
         }
+        match metadata.waiver_policy_fingerprint {
+            Some(policy) => {
+                buf.push(1);
+                buf.extend_from_slice(policy.as_bytes());
+            }
+            None => buf.push(0),
+        }
+        match metadata.waiver_admission_day {
+            Some(day) => {
+                buf.push(1);
+                buf.extend_from_slice(&day.to_le_bytes());
+            }
+            None => buf.push(0),
+        }
         hash_bytes(&buf)
     }
 
@@ -897,8 +1494,12 @@ impl ColorGraph {
             operation,
             demotions,
             origin,
+            origin_policy_fingerprint,
             waiver,
             grant,
+            waiver_policy_fingerprint,
+            waiver_admission_day,
+            waiver_dependencies,
         } = metadata;
         // EVERY demotion is an event row, in canonical (parent write
         // order) sequence, each naming the demoted parent — losing all
@@ -920,17 +1521,24 @@ impl ColorGraph {
         let operation_json =
             operation.map_or("null".to_string(), |op| json_string(interval_op_name(op)));
         self.rows.push(format!(
-            "{{\"event\":\"color-write\",\"schema_version\":3,\"node\":{id},\
+            "{{\"event\":\"color-write\",\"schema_version\":5,\"node\":{id},\
              \"name\":{},\"operation\":{},\"color\":\"{}\",\"payload\":{},\
-             \"parents\":{:?},\"origin\":{},\"waiver\":{},\"grant\":{},\"hash\":\"{}\"}}",
+             \"parents\":{:?},\"origin\":{},\"origin_policy_fingerprint\":{},\
+             \"waiver_dependencies\":[{}],\"waiver\":{},\"grant\":{},\
+             \"waiver_policy_fingerprint\":{},\"waiver_admission_day\":{},\
+             \"hash\":\"{}\"}}",
             json_string(name),
             operation_json,
             color.name(),
             color.payload_json(),
             parents,
             origin_json(origin.as_ref()),
+            optional_hash_json(origin_policy_fingerprint),
+            waiver_dependencies_json(&waiver_dependencies),
             waiver_json(waiver.as_ref()),
             grant_json(grant.as_ref(), operation),
+            optional_hash_json(waiver_policy_fingerprint),
+            optional_u32_json(waiver_admission_day),
             hash.to_hex()
         ));
         self.nodes.push(ColorNode {
@@ -941,8 +1549,12 @@ impl ColorGraph {
             operation,
             demotions,
             origin,
+            origin_policy_fingerprint,
             waiver,
             grant,
+            waiver_policy_fingerprint,
+            waiver_admission_day,
+            waiver_dependencies,
             hash,
         });
         id
@@ -950,17 +1562,23 @@ impl ColorGraph {
 
     /// Write an ESTIMATED leaf (a surrogate, a heuristic, an estimator
     /// output). Estimates state their own dispersion and need no
-    /// origin. POSITIVE colors (Validated, Verified) are REFUSED here
+    /// origin, but the estimator identity must be meaningful and the
+    /// dispersion must be nonnegative/non-NaN (positive infinity is the
+    /// explicit no-spread-claim sentinel). POSITIVE colors (Validated, Verified) are REFUSED here
     /// (bead gp3.16): a leaf cannot assert a certificate into
     /// existence — carry the minting evidence via
     /// [`ColorGraph::source_with_origin`] or an authenticated grant via
     /// [`ColorGraph::source_waived`].
     ///
     /// # Errors
-    /// [`ColorWriteError::SourceOriginRequired`] for positive colors.
+    /// [`ColorWriteError::SourceOriginRequired`] for positive colors;
+    /// [`ColorWriteError::InvalidEstimatedSource`] for malformed estimates.
     pub fn source(&mut self, name: &str, color: Color) -> Result<u64, ColorWriteError> {
-        if color.rank() >= ColorRank::Validated {
+        if !matches!(color, Color::Estimated { .. }) {
             return Err(ColorWriteError::SourceOriginRequired { rank: color.rank() });
+        }
+        if let Some((field, why)) = estimated_payload_error(&color) {
+            return Err(ColorWriteError::InvalidEstimatedSource { field, why });
         }
         Ok(self.push_node(
             name,
@@ -970,8 +1588,12 @@ impl ColorGraph {
                 operation: None,
                 demotions: Vec::new(),
                 origin: None,
+                origin_policy_fingerprint: None,
                 waiver: None,
                 grant: None,
+                waiver_policy_fingerprint: None,
+                waiver_admission_day: None,
+                waiver_dependencies: Vec::new(),
             },
         ))
     }
@@ -981,8 +1603,9 @@ impl ColorGraph {
     /// claim is re-derived from the carried certificate through
     /// [`fs_evidence::verified_from`] and must match bit-exactly; a
     /// Validated claim is reconstructed from the origin's anchoring
-    /// dataset and exact regime. The
-    /// origin participates in the provenance hash — substituting it
+    /// dataset and exact regime. Because all evidence fields are public
+    /// data, the injected [`SourceOriginVerifier`] must also authenticate
+    /// the complete node/color/origin request. The origin participates in the provenance hash — substituting it
     /// later changes the node identity and every downstream hash.
     ///
     /// # Errors
@@ -993,6 +1616,7 @@ impl ColorGraph {
         name: &str,
         color: &Color,
         origin: SourceOrigin,
+        verifier: &dyn SourceOriginVerifier,
     ) -> Result<u64, ColorWriteError> {
         let refuse = |rejection| Err(ColorWriteError::SourceOriginRefused { rejection });
         if matches!(color, Color::Estimated { .. }) {
@@ -1028,6 +1652,17 @@ impl ColorGraph {
             };
             return refuse(rejection);
         }
+        let request = SourceOriginRequest::new(name, color, &origin);
+        let decision =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| verifier.verify(&request)))
+                .map_err(|_| ColorWriteError::SourceOriginRefused {
+                    rejection: SourceOriginRejection::VerifierPanicked,
+                })?;
+        if !decision.accepted() {
+            return refuse(SourceOriginRejection::VerifierRefused {
+                policy_fingerprint: decision.policy_fingerprint(),
+            });
+        }
         Ok(self.push_node(
             name,
             derived,
@@ -1036,8 +1671,12 @@ impl ColorGraph {
                 operation: None,
                 demotions: Vec::new(),
                 origin: Some(origin),
+                origin_policy_fingerprint: Some(decision.policy_fingerprint()),
                 waiver: None,
                 grant: None,
+                waiver_policy_fingerprint: None,
+                waiver_admission_day: None,
+                waiver_dependencies: Vec::new(),
             },
         ))
     }
@@ -1052,6 +1691,7 @@ impl ColorGraph {
     /// Fail closed on any mismatch.
     ///
     /// # Errors
+    /// [`ColorWriteError::InvalidColor`] if the claimed payload is malformed;
     /// [`ColorWriteError::WaiverRefused`] with the structured
     /// rejection; [`ColorWriteError::SourceOriginRequired`] doctrine
     /// does not apply here (this IS the waiver path), but Estimated
@@ -1065,6 +1705,8 @@ impl ColorGraph {
         verifier: &dyn WaiverVerifier,
         today_day: u32,
     ) -> Result<u64, ColorWriteError> {
+        validate_color_structure(&color)
+            .map_err(|rejection| ColorWriteError::InvalidColor { rejection })?;
         if color.rank() < ColorRank::Validated {
             return Err(ColorWriteError::SourceOriginRefused {
                 rejection: SourceOriginRejection::EstimatedNeedsNoOrigin,
@@ -1086,12 +1728,20 @@ impl ColorGraph {
         if today_day > grant.expires_day {
             return refuse(WaiverRejection::Expired);
         }
-        if !verifier.verify(
-            &grant.key_id,
-            &grant.signing_payload_source(),
-            &grant.signature,
-        ) {
-            return refuse(WaiverRejection::BadSignature);
+        let decision = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            verifier.verify(
+                &grant.key_id,
+                &grant.signing_payload_source(),
+                &grant.signature,
+            )
+        }))
+        .map_err(|_| ColorWriteError::WaiverRefused {
+            rejection: WaiverRejection::VerifierPanicked,
+        })?;
+        if !decision.accepted() {
+            return refuse(WaiverRejection::VerifierRefused {
+                policy_fingerprint: decision.policy_fingerprint(),
+            });
         }
         Ok(self.push_node(
             name,
@@ -1101,8 +1751,12 @@ impl ColorGraph {
                 operation: None,
                 demotions: Vec::new(),
                 origin: None,
+                origin_policy_fingerprint: None,
                 waiver: Some(grant.annotation.clone()),
                 grant: Some(grant),
+                waiver_policy_fingerprint: Some(decision.policy_fingerprint()),
+                waiver_admission_day: Some(today_day),
+                waiver_dependencies: Vec::new(),
             },
         ))
     }
@@ -1121,15 +1775,13 @@ impl ColorGraph {
         if parents.is_empty() {
             return Err(ColorWriteError::NoParents);
         }
-        for &p in parents {
-            if p as usize >= self.nodes.len() {
-                return Err(ColorWriteError::UnknownParent { id: p });
-            }
-        }
         let mut demotions = Vec::new();
         let mut effective: Vec<Color> = Vec::with_capacity(parents.len());
         for (parent_index, &p) in parents.iter().enumerate() {
-            let (c, d) = check_regime(&self.nodes[p as usize].color, state);
+            let parent = self
+                .node(p)
+                .ok_or(ColorWriteError::UnknownParent { id: p })?;
+            let (c, d) = check_regime(&parent.color, state);
             if let Some(reason) = d {
                 demotions.push(ColorDemotion {
                     parent_index,
@@ -1157,7 +1809,10 @@ impl ColorGraph {
             .iter()
             .copied()
             .filter(|&p| {
-                let (eff, _) = check_regime(&self.nodes[p as usize].color, state);
+                let parent = self
+                    .node(p)
+                    .expect("laundering parents were validated by fold_parents");
+                let (eff, _) = check_regime(&parent.color, state);
                 eff.rank() <= cap
             })
             .collect();
@@ -1191,6 +1846,7 @@ impl ColorGraph {
         waiver: Option<Waiver>,
     ) -> Result<u64, ColorWriteError> {
         let (derived, demotions) = self.fold_parents(parents, op, state)?;
+        let waiver_dependencies = self.inherited_waiver_dependencies(parents)?;
         let written = match claimed {
             None => derived,
             Some(c) if c.canonical_bytes() == derived.canonical_bytes() => c,
@@ -1204,6 +1860,8 @@ impl ColorGraph {
                 });
             }
         };
+        validate_color_structure(&written)
+            .map_err(|rejection| ColorWriteError::InvalidColor { rejection })?;
         Ok(self.push_node(
             name,
             written,
@@ -1212,8 +1870,12 @@ impl ColorGraph {
                 operation: Some(op),
                 demotions,
                 origin: None,
+                origin_policy_fingerprint: None,
                 waiver,
                 grant: None,
+                waiver_policy_fingerprint: None,
+                waiver_admission_day: None,
+                waiver_dependencies,
             },
         ))
     }
@@ -1231,6 +1893,7 @@ impl ColorGraph {
     /// no-claim).
     ///
     /// # Errors
+    /// [`ColorWriteError::InvalidColor`] if the claimed payload is malformed;
     /// [`ColorWriteError::WaiverRefused`] with the structured
     /// rejection, plus the ordinary derive errors.
     #[allow(clippy::too_many_arguments)] // the authorization surface is the point
@@ -1245,7 +1908,10 @@ impl ColorGraph {
         verifier: &dyn WaiverVerifier,
         today_day: u32,
     ) -> Result<u64, ColorWriteError> {
+        validate_color_structure(&claimed)
+            .map_err(|rejection| ColorWriteError::InvalidColor { rejection })?;
         let (_derived, demotions) = self.fold_parents(parents, op, state)?;
+        let waiver_dependencies = self.inherited_waiver_dependencies(parents)?;
         let refuse = |rejection| Err(ColorWriteError::WaiverRefused { rejection });
         if grant.scope != WAIVER_SCOPE_COLOR_UPGRADE {
             return refuse(WaiverRejection::ScopeMismatch);
@@ -1258,7 +1924,11 @@ impl ColorGraph {
         }
         let lineage: Vec<ContentHash> = parents
             .iter()
-            .map(|&p| self.nodes[p as usize].hash)
+            .map(|&p| {
+                self.node(p)
+                    .expect("waived parents were validated by fold_parents")
+                    .hash
+            })
             .collect();
         if grant.parent_hashes != lineage {
             return refuse(WaiverRejection::LineageMismatch);
@@ -1266,8 +1936,16 @@ impl ColorGraph {
         if today_day > grant.expires_day {
             return refuse(WaiverRejection::Expired);
         }
-        if !verifier.verify(&grant.key_id, &grant.signing_payload(op), &grant.signature) {
-            return refuse(WaiverRejection::BadSignature);
+        let decision = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            verifier.verify(&grant.key_id, &grant.signing_payload(op), &grant.signature)
+        }))
+        .map_err(|_| ColorWriteError::WaiverRefused {
+            rejection: WaiverRejection::VerifierPanicked,
+        })?;
+        if !decision.accepted() {
+            return refuse(WaiverRejection::VerifierRefused {
+                policy_fingerprint: decision.policy_fingerprint(),
+            });
         }
         Ok(self.push_node(
             name,
@@ -1277,8 +1955,12 @@ impl ColorGraph {
                 operation: Some(op),
                 demotions,
                 origin: None,
+                origin_policy_fingerprint: None,
                 waiver: Some(grant.annotation.clone()),
                 grant: Some(grant),
+                waiver_policy_fingerprint: Some(decision.policy_fingerprint()),
+                waiver_admission_day: Some(today_day),
+                waiver_dependencies,
             },
         ))
     }
@@ -1295,6 +1977,58 @@ impl ColorGraph {
             node: node.id,
             why: why.into(),
         }
+    }
+
+    fn validate_replay_waiver_dependencies(
+        &self,
+        node: &ColorNode,
+    ) -> Result<(), ColorReplayError> {
+        let mut previous = None;
+        for dependency in &node.waiver_dependencies {
+            if dependency.authorizing_node >= node.id {
+                return Err(Self::replay_error(
+                    node,
+                    "waiver dependency authorizing node is self/forward, not strictly earlier",
+                ));
+            }
+            if previous.is_some_and(|previous| previous >= dependency.authorizing_node) {
+                return Err(Self::replay_error(
+                    node,
+                    "waiver dependencies are duplicated or not in canonical ascending order",
+                ));
+            }
+            previous = Some(dependency.authorizing_node);
+            let Some(authorizing_node) = self.node(dependency.authorizing_node) else {
+                return Err(Self::replay_error(
+                    node,
+                    "waiver dependency authorizing node is missing",
+                ));
+            };
+            if authorizing_node.operation != dependency.operation
+                || authorizing_node.grant.as_ref() != Some(&dependency.grant)
+                || authorizing_node.waiver_policy_fingerprint != Some(dependency.policy_fingerprint)
+                || authorizing_node.waiver_admission_day != Some(dependency.admission_day)
+            {
+                return Err(Self::replay_error(
+                    node,
+                    "waiver dependency differs from its historical authorizing node",
+                ));
+            }
+        }
+
+        let expected = if node.parents.is_empty() {
+            Ok(Vec::new())
+        } else {
+            self.inherited_waiver_dependencies(&node.parents)
+        }
+        .map_err(|error| Self::replay_error(node, format!("invalid parent authority: {error}")))?;
+        if node.waiver_dependencies != expected {
+            return Err(Self::replay_error(
+                node,
+                "waiver dependency closure differs from the exact parent-derived union",
+            ));
+        }
+        Ok(())
     }
 
     fn validate_replay_demotions(&self, node: &ColorNode) -> Result<(), ColorReplayError> {
@@ -1366,12 +2100,39 @@ impl ColorGraph {
             ));
         }
         match (&node.color, &node.origin, &node.grant) {
-            (Color::Estimated { .. }, None, None) => Ok(()),
+            (Color::Estimated { .. }, None, None) => {
+                if node.origin_policy_fingerprint.is_some()
+                    || node.waiver_policy_fingerprint.is_some()
+                    || node.waiver_admission_day.is_some()
+                {
+                    return Err(Self::replay_error(
+                        node,
+                        "Estimated source carries orphan admission context",
+                    ));
+                }
+                if let Some((field, why)) = estimated_payload_error(&node.color) {
+                    Err(Self::replay_error(
+                        node,
+                        format!("Estimated source field `{field}` is invalid: {why}"),
+                    ))
+                } else {
+                    Ok(())
+                }
+            }
             (Color::Estimated { .. }, _, _) => Err(Self::replay_error(
                 node,
                 "Estimated leaf must not carry source authority",
             )),
             (_, Some(origin), None) => {
+                if node.origin_policy_fingerprint.is_none()
+                    || node.waiver_policy_fingerprint.is_some()
+                    || node.waiver_admission_day.is_some()
+                {
+                    return Err(Self::replay_error(
+                        node,
+                        "typed-origin source lacks its policy or carries waiver context",
+                    ));
+                }
                 let derived = origin.derive_color().map_err(|rejection| {
                     Self::replay_error(
                         node,
@@ -1393,7 +2154,13 @@ impl ColorGraph {
                 Ok(())
             }
             (_, None, Some(grant)) => {
-                if grant.scope != WAIVER_SCOPE_SOURCE_COLOR
+                if node.origin_policy_fingerprint.is_some()
+                    || node.waiver_policy_fingerprint.is_none()
+                    || node.waiver_admission_day.is_none()
+                    || node
+                        .waiver_admission_day
+                        .is_some_and(|day| day > grant.expires_day)
+                    || grant.scope != WAIVER_SCOPE_SOURCE_COLOR
                     || grant.node_name != node.name
                     || grant.claimed_color != node.color.canonical_bytes()
                     || !grant.parent_hashes.is_empty()
@@ -1428,6 +2195,12 @@ impl ColorGraph {
             return Err(Self::replay_error(
                 node,
                 "derived node carries a source-only origin",
+            ));
+        }
+        if node.origin_policy_fingerprint.is_some() {
+            return Err(Self::replay_error(
+                node,
+                "derived node carries source admission policy context",
             ));
         }
         let mut effective = Vec::with_capacity(node.parents.len());
@@ -1466,7 +2239,12 @@ impl ColorGraph {
                 };
                 lineage.push(parent_node.hash);
             }
-            if grant.scope != WAIVER_SCOPE_COLOR_UPGRADE
+            if node.waiver_policy_fingerprint.is_none()
+                || node.waiver_admission_day.is_none()
+                || node
+                    .waiver_admission_day
+                    .is_some_and(|day| day > grant.expires_day)
+                || grant.scope != WAIVER_SCOPE_COLOR_UPGRADE
                 || grant.node_name != node.name
                 || grant.claimed_color != node.color.canonical_bytes()
                 || grant.parent_hashes != lineage
@@ -1477,11 +2255,19 @@ impl ColorGraph {
                     "derived grant fields do not bind the stored node",
                 ));
             }
-        } else if derived.canonical_bytes() != node.color.canonical_bytes() {
-            return Err(Self::replay_error(
-                node,
-                "written color does not rederive from parents and demotions",
-            ));
+        } else {
+            if node.waiver_policy_fingerprint.is_some() || node.waiver_admission_day.is_some() {
+                return Err(Self::replay_error(
+                    node,
+                    "ordinary derived node carries orphan waiver admission context",
+                ));
+            }
+            if derived.canonical_bytes() != node.color.canonical_bytes() {
+                return Err(Self::replay_error(
+                    node,
+                    "written color does not rederive from parents and demotions",
+                ));
+            }
         }
         Ok(())
     }
@@ -1497,6 +2283,12 @@ impl ColorGraph {
                 "stored id differs from append position",
             ));
         }
+        if let Err(rejection) = validate_color_structure(&node.color) {
+            return Err(Self::replay_error(
+                node,
+                format!("stored color is structurally invalid: {rejection}"),
+            ));
+        }
         if node.parents.iter().any(|parent| {
             usize::try_from(*parent)
                 .ok()
@@ -1507,13 +2299,18 @@ impl ColorGraph {
                 "parent id is missing or does not precede the derived node",
             ));
         }
+        self.validate_replay_waiver_dependencies(node)?;
         self.validate_replay_demotions(node)?;
         let metadata = NodeHashMetadata {
             operation: node.operation,
             demotions: &node.demotions,
             origin: node.origin.as_ref(),
+            origin_policy_fingerprint: node.origin_policy_fingerprint,
             waiver: node.waiver.as_ref(),
             grant: node.grant.as_ref(),
+            waiver_policy_fingerprint: node.waiver_policy_fingerprint,
+            waiver_admission_day: node.waiver_admission_day,
+            waiver_dependencies: &node.waiver_dependencies,
         };
         if self.node_hash(&node.name, &node.color, &node.parents, &metadata) != node.hash {
             return Err(Self::replay_error(
@@ -1576,6 +2373,22 @@ impl std::error::Error for ColorReplayError {}
 mod tests {
     use super::*;
 
+    struct AllowFixtureSource;
+
+    impl SourceOriginVerifier for AllowFixtureSource {
+        fn verify(&self, request: &SourceOriginRequest<'_>) -> PolicyDecision {
+            let policy = hash_bytes(b"fs-ledger/internal-fixture/source-policy/v1");
+            if request.node_name() == "anchored"
+                && matches!(request.claimed_color(), Color::Validated { .. })
+                && matches!(request.origin(), SourceOrigin::Anchoring { .. })
+            {
+                PolicyDecision::accept(policy)
+            } else {
+                PolicyDecision::reject(policy)
+            }
+        }
+    }
+
     #[test]
     fn replay_rejects_hash_bound_source_origin_tamper() {
         let regime = ValidityDomain::unconstrained().with("re", 1e3, 1e5);
@@ -1593,6 +2406,7 @@ mod tests {
                     content_hash: hash_bytes(b"original artifact"),
                     regime,
                 },
+                &AllowFixtureSource,
             )
             .expect("valid anchor");
         graph.verify_replay().expect("untampered graph");
@@ -1608,5 +2422,224 @@ mod tests {
         let error = graph.verify_replay().expect_err("tamper must diverge");
         assert_eq!(error.node, id);
         assert!(error.why.contains("provenance hash"));
+    }
+
+    #[test]
+    fn replay_rejects_hash_consistent_malformed_waived_color() {
+        let color = Color::Verified {
+            lo: f64::NAN,
+            hi: 1.0,
+        };
+        let annotation = Waiver {
+            id: "historical-waiver".to_string(),
+            signer: "fixture-authority".to_string(),
+            reason: "replay must not trust historical admission".to_string(),
+        };
+        let grant = WaiverGrant {
+            annotation: annotation.clone(),
+            key_id: "fixture-key".to_string(),
+            scope: WAIVER_SCOPE_SOURCE_COLOR.to_string(),
+            node_name: "historical-malformed".to_string(),
+            claimed_color: color.canonical_bytes(),
+            parent_hashes: Vec::new(),
+            expires_day: u32::MAX,
+            signature: vec![1],
+        };
+        let mut graph = ColorGraph::new();
+        let id = graph.push_node(
+            "historical-malformed",
+            color,
+            Vec::new(),
+            NodeWriteMetadata {
+                operation: None,
+                demotions: Vec::new(),
+                origin: None,
+                origin_policy_fingerprint: None,
+                waiver: Some(annotation),
+                grant: Some(grant),
+                waiver_policy_fingerprint: Some(hash_bytes(b"historical waiver policy")),
+                waiver_admission_day: Some(1),
+                waiver_dependencies: Vec::new(),
+            },
+        );
+
+        let error = graph
+            .verify_replay()
+            .expect_err("replay must reject a hash-consistent malformed color");
+        assert_eq!(error.node, id);
+        assert!(error.why.contains("structurally invalid"));
+        assert!(error.why.contains("bounds must be finite"));
+    }
+
+    fn historical_waiver_dependency_graph() -> (ColorGraph, u64) {
+        let color = Color::Verified { lo: 1.0, hi: 2.0 };
+        let annotation = Waiver {
+            id: "historical-waiver".to_string(),
+            signer: "fixture-authority".to_string(),
+            reason: "historical policy exception".to_string(),
+        };
+        let grant = WaiverGrant {
+            annotation: annotation.clone(),
+            key_id: "fixture-key".to_string(),
+            scope: WAIVER_SCOPE_SOURCE_COLOR.to_string(),
+            node_name: "waived-source".to_string(),
+            claimed_color: color.canonical_bytes(),
+            parent_hashes: Vec::new(),
+            expires_day: u32::MAX,
+            signature: vec![1],
+        };
+        let mut graph = ColorGraph::new();
+        let source = graph.push_node(
+            "waived-source",
+            color.clone(),
+            Vec::new(),
+            NodeWriteMetadata {
+                operation: None,
+                demotions: Vec::new(),
+                origin: None,
+                origin_policy_fingerprint: None,
+                waiver: Some(annotation),
+                grant: Some(grant),
+                waiver_policy_fingerprint: Some(hash_bytes(b"historical waiver policy")),
+                waiver_admission_day: Some(1),
+                waiver_dependencies: Vec::new(),
+            },
+        );
+        let dependencies = graph
+            .inherited_waiver_dependencies(&[source])
+            .expect("complete historical authority");
+        let child = graph.push_node(
+            "ordinary-child",
+            color,
+            vec![source],
+            NodeWriteMetadata {
+                operation: Some(IntervalOp::Hull),
+                demotions: Vec::new(),
+                origin: None,
+                origin_policy_fingerprint: None,
+                waiver: None,
+                grant: None,
+                waiver_policy_fingerprint: None,
+                waiver_admission_day: None,
+                waiver_dependencies: dependencies,
+            },
+        );
+        graph.verify_replay().expect("fixture graph replays");
+        (graph, child)
+    }
+
+    fn rehash_node(graph: &mut ColorGraph, id: u64) -> ContentHash {
+        let index = usize::try_from(id).expect("small fixture id");
+        let old_hash = graph.nodes[index].hash;
+        let new_hash = {
+            let node = &graph.nodes[index];
+            let metadata = NodeHashMetadata {
+                operation: node.operation,
+                demotions: &node.demotions,
+                origin: node.origin.as_ref(),
+                origin_policy_fingerprint: node.origin_policy_fingerprint,
+                waiver: node.waiver.as_ref(),
+                grant: node.grant.as_ref(),
+                waiver_policy_fingerprint: node.waiver_policy_fingerprint,
+                waiver_admission_day: node.waiver_admission_day,
+                waiver_dependencies: &node.waiver_dependencies,
+            };
+            graph.node_hash(&node.name, &node.color, &node.parents, &metadata)
+        };
+        graph.nodes[index].hash = new_hash;
+        old_hash
+    }
+
+    #[test]
+    fn replay_rejects_hash_consistent_missing_admission_context() {
+        let regime = ValidityDomain::unconstrained().with("re", 1e3, 1e5);
+        let color = Color::Validated {
+            regime: regime.clone(),
+            dataset: "campaign-a".to_string(),
+        };
+        let mut source_graph = ColorGraph::new();
+        let source = source_graph
+            .source_with_origin(
+                "anchored",
+                &color,
+                SourceOrigin::Anchoring {
+                    dataset_id: "campaign-a".to_string(),
+                    content_hash: hash_bytes(b"anchor artifact"),
+                    regime,
+                },
+                &AllowFixtureSource,
+            )
+            .expect("valid source");
+        let source_index = usize::try_from(source).expect("small source id");
+        source_graph.nodes[source_index].origin_policy_fingerprint = None;
+        rehash_node(&mut source_graph, source);
+        let error = source_graph
+            .verify_replay()
+            .expect_err("typed source without policy must refuse");
+        assert!(error.why.contains("lacks its policy"));
+
+        let (mut waiver_graph, _) = historical_waiver_dependency_graph();
+        waiver_graph.nodes[0].waiver_admission_day = None;
+        rehash_node(&mut waiver_graph, 0);
+        let error = waiver_graph
+            .verify_replay()
+            .expect_err("direct waiver without admission day must refuse");
+        assert!(error.why.contains("source grant fields"));
+    }
+
+    #[test]
+    fn replay_rejects_hash_consistent_waiver_dependency_tamper() {
+        let (mut omitted, child) = historical_waiver_dependency_graph();
+        omitted.nodes[child as usize].waiver_dependencies.clear();
+        let old_hash = rehash_node(&mut omitted, child);
+        assert_ne!(old_hash, omitted.nodes[child as usize].hash);
+        let error = omitted
+            .verify_replay()
+            .expect_err("omitted dependency must refuse");
+        assert!(error.why.contains("parent-derived union"));
+
+        let (mut mutated, child) = historical_waiver_dependency_graph();
+        mutated.nodes[child as usize].waiver_dependencies[0]
+            .grant
+            .annotation
+            .reason
+            .push_str(" edited");
+        let old_hash = rehash_node(&mut mutated, child);
+        assert_ne!(old_hash, mutated.nodes[child as usize].hash);
+        let error = mutated
+            .verify_replay()
+            .expect_err("mutated dependency must refuse");
+        assert!(error.why.contains("historical authorizing node"));
+
+        let (mut policy_mutated, child) = historical_waiver_dependency_graph();
+        let index = usize::try_from(child).expect("small child id");
+        policy_mutated.nodes[index].waiver_dependencies[0].policy_fingerprint =
+            hash_bytes(b"substituted waiver policy");
+        rehash_node(&mut policy_mutated, child);
+        let error = policy_mutated
+            .verify_replay()
+            .expect_err("dependency policy substitution must refuse");
+        assert!(error.why.contains("historical authorizing node"));
+
+        let (mut duplicated, child) = historical_waiver_dependency_graph();
+        let duplicate = duplicated.nodes[child as usize].waiver_dependencies[0].clone();
+        duplicated.nodes[child as usize]
+            .waiver_dependencies
+            .push(duplicate);
+        let old_hash = rehash_node(&mut duplicated, child);
+        assert_ne!(old_hash, duplicated.nodes[child as usize].hash);
+        let error = duplicated
+            .verify_replay()
+            .expect_err("duplicate dependency must refuse");
+        assert!(error.why.contains("duplicated"));
+
+        let (mut self_referential, child) = historical_waiver_dependency_graph();
+        self_referential.nodes[child as usize].waiver_dependencies[0].authorizing_node = child;
+        let old_hash = rehash_node(&mut self_referential, child);
+        assert_ne!(old_hash, self_referential.nodes[child as usize].hash);
+        let error = self_referential
+            .verify_replay()
+            .expect_err("self/forward dependency must refuse");
+        assert!(error.why.contains("self/forward"));
     }
 }

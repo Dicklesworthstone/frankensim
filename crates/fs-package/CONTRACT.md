@@ -19,44 +19,72 @@ Injected verifier implementations are caller-owned synchronous capabilities.
   `derived`, or `waived`; callers cannot assemble an origin-free claim from a
   public `Color`. Claim ids are canonical, non-placeholder, and unique within a
   package; statements are non-blank and cannot be reserved placeholder text.
-  `has_matching_validated_anchor()` exposes the exact dataset-anchor predicate
-  used by release admission, while `requires_release_falsifier()` identifies
-  Verified/Validated certificate-class claims and
-  `requires_validated_anchor()` identifies the stricter validated-only
-  obligation without exposing a second color algebra.
+  Raw declarations are exposed only by explicitly named `*_unverified`
+  accessors. Scientific callers consume `VerifiedPackage::admitted_claims`,
+  where waiver-dependent descendants have no `scientific_color()`.
 - `Provenance { code_version, constellation_lock }`.
-- `VerificationCapabilities` — explicit source-certificate and waiver
+- `VerificationCapabilities` — explicit source-certificate, anchoring-dataset,
+  falsifier-artifact, derivation-artifact, waiver, and detached-signature
   verification capabilities. `deny_all()` is the default. A
   `SourceCertificateVerifier` receives a typed `SourceCertificateRequest`
   containing the exact claim, package provenance, index, producer, and parsed
-  artifact hash. A `WaiverVerification` pairs a `WaiverVerifier` with an
-  explicit Unix-day clock context.
+  artifact hash. An `AnchoredSourceVerifier` receives the same subject identity
+  plus the exact validity regime, dataset id, and parsed dataset hash. A
+  `FalsifierVerifier` and `DerivationVerifier` receive the exact package root,
+  claim subject, ordered records/parents, and parsed proof-artifact hash. A
+  `WaiverVerification` pairs a `WaiverVerifier` with an explicit Unix-day clock
+  context. Every callback atomically returns acceptance plus a stable
+  `PolicyFingerprint`; rejecting and conflicting fingerprints survive in
+  structured refusals.
 - `EvidencePackage { format_version, claims, provenance, signature }` —
   builder: `new(prov).with_claim(..).signed(..)`.
-  - `merkle_root() -> ContentHash` — a 32-byte BLAKE3 Merkle root over the
+  - `try_merkle_root() -> Result<ContentHash, PackageError>` — a bounded 32-byte
+    BLAKE3 Merkle root over the
     package identity: format version, claim count, provenance, and ordered
     claims. Header, claim, and internal-node hashes use standard BLAKE3
     derive-key domains. Detached signatures are excluded. Any reproducibility
     provenance or claim change changes the root.
-  - `verify()` uses `VerificationCapabilities::deny_all()`: anchored,
-    estimated, and independently re-derived claims can pass; source-certificate
-    and waiver origins cannot.
+  - `verify()` uses `VerificationCapabilities::deny_all()`. Only empty packages
+    and ungated Estimated-source claims without falsifier records can pass.
+    Source certificates, anchored sources, derivations, waivers, and attached
+    falsifier artifacts all require their exact capability. Detached signature
+    bytes remain `Unverified` without a signature capability.
   - `verify_with(&capabilities)` performs structural verification and then
     authenticates every capability-gated origin before returning a positive
     `PackageReport`.
   - `color_breakdown()` and `color_breakdown_with(..)` return a budget pie only
     through their corresponding verification path.
-  - `waiver_message(index)` constructs package-owned, domain-separated
-    authorization bytes; `with_waiver_mac` installs the final authenticator
-    without changing those bytes.
-  - `to_json()` is deterministic. `from_json()` strictly parses, checks
+  - `waiver_message(index) -> Result<Vec<u8>, PackageError>` constructs bounded,
+    package-owned, domain-separated authorization bytes; `with_waiver_mac`
+    installs the final authenticator without changing those bytes.
+  - `to_json() -> Result<String, PackageError>` is bounded and deterministic.
+    `from_json()` reads the deterministic FrankenSim JSON profile, checks
     structure, declared budgets, and the root while retaining unauthenticated
-    origins; `from_json_with()` also authenticates them.
-- `PackageReport { merkle_root, breakdown, claims }`.
+    origins; `from_json_with()` returns a `VerifiedPackage` after authenticating
+    every gated artifact.
+- `ColorBreakdown { verified, validated, estimated, waived }` counts admitted
+  scientific claims in the first three buckets. A direct waiver and its entire
+  derived descendant cone appear only in `waived`.
+- `PackageReport` and `VerificationReceipt` have sealed fields and read-only
+  accessors. The receipt binds the package root, every invoked policy
+  fingerprint, waiver day, signature status, and ordered `ClaimAdmission`
+  decisions into its own domain-separated `receipt_hash`. Direct waiver ids are
+  interned once; descendants store immediate waiver-dependent parent indices,
+  preventing quadratic string amplification while preserving the complete DAG.
+- `AuthenticatedSignature` has private fields and read-only accessors, so safe
+  downstream code cannot substitute a different signature or purpose into an
+  authenticated status. Positive status has authority only inside a sealed
+  receipt.
+- `PackagePresenceReport` and `PackageCoverageReport` retain the package receipt
+  and carry their own decision hashes. They do not implement consuming
+  `IntoIterator` or slice `Deref`. Bare row booleans/statuses are explicitly
+  non-authoritative when detached; authority requires validating the sealed
+  report hash and receipt.
 - `PackageError` — structured refusals for incomplete provenance, invalid or
   duplicate claim ids, blank/placeholder claim statements, malformed color
   payloads, unsupported formats, receipt mismatches/parents, malformed
-  falsifier/anchor records, and refuted claims.
+  falsifier/anchor records, refuted claims, transport limits, rejected policies,
+  and policy-identity drift. It implements `Display` and `Error`.
 
 ## Invariants
 
@@ -85,6 +113,8 @@ Injected verifier implementations are caller-owned synchronous capabilities.
   anchoring coverage for an `AnchoredSource` requires an attached record whose
   dataset id AND content hash exactly equal the origin tuple, and whose dataset
   id equals the `Validated` color. An unrelated canonical hash does not count.
+  Positive admission additionally requires an injected anchor verifier to
+  accept the complete typed subject; a matching hash is only an address.
 - SOURCE CERTIFICATES: a canonical certificate hash is only an artifact
   address. Positive verification requires an injected verifier to establish
   the exact typed claim request. Merely naming a producer and 64-hex hash never
@@ -94,20 +124,49 @@ Injected verifier implementations are caller-owned synchronous capabilities.
   context, target index, complete target claim, waiver id, and expiry. It
   excludes detached signatures and MAC fields so the message is stable before
   installing the authenticator. Expired, replayed, duplicated, or rejected
-  grants fail closed.
-- CONTENT-ADDRESSING: `merkle_root` is deterministic and tamper-evident across
+  grants fail closed. Authentication records an administrative exception; it
+  never promotes the waived color. Every derived child with any
+  waiver-dependent parent stores the immediate tainted-parent edge and remains
+  in the `waived` bucket; direct ids live once in the receipt waiver registry.
+  Such claims contribute nothing to scientific rank,
+  certificate coverage, regime/dataset coverage, or numeric magnitude totals;
+  `MagnitudeBudget::waived_unquantified` counts them explicitly.
+- SIGNATURES: raw detached bytes are `Unverified`. An installed verifier must
+  authenticate the canonical `signature_subject_hash` for the typed purpose or
+  verification refuses. Generic package-root attestation is integrity evidence
+  only. Regulatory signature coverage requires `ReleaseApproval` bound to an
+  explicit checker protocol, expected root, and `release_admission_context`
+  covering every non-signature policy fingerprint, waiver day, admission, and
+  compact waiver edge. Producers obtain that context from an unsigned
+  verification receipt, sign the public canonical subject hash, attach the
+  bytes, and run the final gate. No signer identity or role is claimed.
+  A release purpose naming any root other than the recomputed package root is
+  refused before the callback, even if a permissive verifier would accept it;
+  an approval from another policy or waiver day has a different subject hash.
+- POLICY RECEIPTS: invoked verifier fingerprints and waiver day are decision inputs,
+  not ambient process state. They, the root, signature result, origin class,
+  admission class, compact waiver registry, and immediate taint edges are bound
+  into the receipt hash.
+- CONTENT-ADDRESSING: `try_merkle_root` is deterministic and tamper-evident across
   format version, claim count, provenance, and ordered claims. Derive-key modes
   separate package leaves/nodes from plain artifact hashes and each other; a
   detached signature does not change the root.
 - Coverage is capability-aware. The plain coverage functions use deny-all
-  verification and suppress every concept when a gated origin is unauthenticated;
-  `_with` variants accept explicit capabilities. `ClaimOrigin` is present only
-  after package origin verification succeeds; `WaiverAuthorization` additionally
-  requires at least one authenticated, unexpired waiver.
+  verification and suppress every concept when a gated origin is
+  unauthenticated; `_with` variants accept explicit capabilities. Color rank,
+  certificate, regime, falsifier, and dataset coverage use only scientifically
+  admitted claims. `Certificate` requires admitted `Verified` evidence (an
+  all-estimated package has none). `ClaimOrigin` excludes Estimated declarations,
+  waived claims, and waiver-dependent descendants. `Signature` requires
+  release-purpose authentication. `WaiverAuthorization` remains an explicit
+  administrative concept.
 
 ## Error model
 
-Structured `PackageError` values (refusals that teach), never panics. The JSON
+Structured `PackageError` values (refusals that teach), never panics. Public
+root computation, JSON serialization, and waiver-message construction are
+fallible at the transport boundary. Panics from injected verifier callbacks are
+caught and converted to structured refusals. The JSON
 parser maps structural refusals into `ParseError`; `from_json_with` additionally
 maps capability refusals. Plain `from_json` is intentionally an integrity and
 structure boundary, not an authentication verdict. The untrusted JSON
@@ -115,15 +174,18 @@ boundary is bounded before schema mapping: 64 MiB input, depth 64, one million
 values, 100,000 members per container, 1 MiB decoded strings, and 128-byte
 number tokens. In-memory verification enforces the corresponding transport
 envelope before a package can pass, so a verified object remains serializable
-and checkable under those bounds. Limit violations are structured refusals.
+and checkable under those bounds. Accounting aborts at the first exceeded
+byte/node budget, including inside one large claim. Limit violations are
+structured refusals.
 
 ## Determinism class
 
-The Merkle root, JSON, strict parsing, structural verification, and deny-all
+The fallible Merkle root, JSON profile, strict parsing, structural verification, and deny-all
 verification are deterministic pure functions of the package (bit-exact on
 float certificate payloads via `to_bits`). `verify_with` additionally depends
 on caller-supplied capability decisions; reproducible deployments must provide
-deterministic verifiers over pinned artifact stores and an explicit date.
+deterministic verifiers over pinned artifact stores, stable policy
+fingerprints, and an explicit date.
 
 ## Cancellation behavior
 
@@ -141,7 +203,7 @@ None.
 
 ## Conformance tests
 
-`tests/package.rs` (Proposal 12): complete mixed-color package with injected
+`tests/package.rs` (51 cases, Proposal 12): complete mixed-color package with injected
 source verification;
 all-estimated boundary (valid + round-trips); validated-missing-regime and
 validated-missing-dataset completeness failures; verified bad-interval
@@ -151,11 +213,26 @@ unsupported-format rejection; optional detached signature; deterministic JSON
 carrying the root; in-memory/serialized semantic parity; exact full-width
 falsifier attempt-count round trips with overflow refusal; deny-all source and
 waiver behavior; exact typed source-subject checks; package-context waiver
-replay resistance; duplicate waiver ids; capability-aware coverage; and origin
-transport/identity limits. The crate unit battery additionally constructs a
-private adversarial anchored claim to prove exact origin-hash matching.
+replay resistance; duplicate waiver ids; capability-aware coverage; exact
+falsifier/derivation artifact subjects; policy-fingerprint drift; signed-zero
+receipt identity; compact waiver-taint DAGs; sealed verified-package binding;
+and origin transport/identity limits. The compile-fail battery proves that an
+authenticated signature payload cannot be constructed downstream.
 
-## Schema v5: sealed origins and explicit capabilities (bead krym)
+## Schema v6: admission receipts and non-launderable waivers
+
+Format 6 uses `fs-package:v6:*` domains and a closed JSON magnitude shape with
+`waived_unquantified`. Source certificates, anchoring datasets, falsifier
+artifacts, derivation artifacts, waivers, and signatures are explicit
+fingerprinted capabilities over exact typed subjects. Artifact hashes are
+addresses, never self-authentication. Verification emits a policy-bound receipt
+with a topological admission decision for every claim. Direct waiver identities
+are interned once and descendants retain immediate tainted-parent edges. Direct
+waivers and every one-parent, multi-hop, or multi-parent descendant remain
+waiver-dependent and cannot enter scientific color/magnitude/coverage summaries.
+Formats 5 and earlier are refused by the one-version contract.
+
+## Schema v5: sealed origins and explicit capabilities (historical)
 
 Every claim carries one content-addressed `ClaimOrigin`. `AnchoredSource` and
 `EstimatedSource` must agree exactly with the color; `Derived` must be paired
@@ -165,8 +242,7 @@ verification, breakdown, and coverage are deny-all, so certificate-shaped bytes
 cannot create a positive result. Waiver messages are package-owned and
 domain-separated, and source verifiers receive typed requests rather than raw
 strings. Origins and all their strings are included in the in-memory transport
-envelope. The Merkle domains are `fs-package:v5:*`; v4 readers and transports
-are refused by the one-version contract.
+envelope. Schema v6 supersedes these domains and capability semantics.
 
 ## Schema v4: mode-separated BLAKE3 roots (beads 7uq9, t7x3)
 
@@ -183,7 +259,8 @@ root width; checker protocol v2 is the matching standalone ABI.
 
 Claims optionally carry a COMPOSITION RECEIPT (parent claim indices +
 the ledger op): `verify` re-runs `fs_evidence::compose` over the
-parents in order and requires EXACT color equality — a claim whose
+parents in order and requires exact IEEE-754 bit identity (including signed
+zero) — a claim whose
 color cannot be re-derived is `ReceiptMismatch`, so laundering a
 Verified from Estimated parents is caught SEMANTICALLY, not just by
 the content address; parents must point strictly backwards
@@ -203,7 +280,7 @@ changes.
 
 ## Schema v2: round trip and fail-closed parsing (bead qmao.6.1)
 
-`to_json` emits the COMPLETE color payloads (floats as bit-exact hex
+Fallible `to_json` emits the COMPLETE color payloads (floats as bit-exact hex
 bits), provenance, signature, magnitude budget, and the content root;
 `from_json` is a STRICT parser — unknown fields, missing fields, wrong
 types, duplicate keys, bad hex, non-finite certificates, inverted
@@ -212,31 +289,34 @@ with a structured `ParseError`. The parser re-derives the magnitude
 budget from the parsed claims and RECOMPUTES the content root from the
 parsed fields: a package whose embedded root does not recompute is
 tampered in transit and never loads. This is an integrity check, not the
-schema-v5 source-origin proof named below. Decode-encode is both
+schema-v6 external-origin admission named above. Decode-encode is both
 semantically and textually stable (tested). The magnitude budget
 attributes ERROR MAGNITUDES (verified interval widths, estimated
 dispersions) and counts validated claims as unquantified regional
 trust — never numerified. JSON number tokens are retained as decimal text until
 they are converted into their target integer type; full-width `u64` falsifier
 attempt counts therefore round-trip exactly, and overflow refuses instead of
-rounding through `f64`.
+rounding through `f64`. The reader implements the deterministic FrankenSim JSON
+profile emitted by `to_json`; it does not claim to accept every optional escape
+spelling available in the general JSON grammar.
 
 ## No-claim boundaries
 
 - The Merkle hash is the shared in-house BLAKE3 implementation, with standard
   derive-key mode separation for typed package roots. This establishes content
   integrity, not authorship or scientific truth. A cryptographic SIGNATURE is
-  detached and OPTIONAL; wiring a default Franken signature primitive is later
-  work.
-- The crate does not fetch artifacts or choose trust roots. Callers provide a
-  `SourceCertificateVerifier`; that capability may retrieve and re-check the
-  addressed proof artifact, or refuse. `fs-package` supplies only the typed,
-  exact request and a deny-all default.
+  detached and OPTIONAL. Signature decisions are made only by explicitly
+  injected policy; the crate ships no default signing primitive or signer
+  identity model.
+- The crate does not fetch artifacts or choose trust roots. Callers provide
+  source, anchor, falsifier, derivation, signature, and waiver verifiers; those capabilities may
+  retrieve and re-check addressed artifacts, or refuse. `fs-package` supplies
+  typed exact requests, policy-bound receipts, and deny-all defaults.
 - The certificate payloads live in `fs-evidence::Color`; this crate bundles
   and content-addresses them, it does not produce them.
 - A validated dataset hash proves content identity, not experimental quality or
   custodial authenticity. Those stronger properties require an external
   evidence policy. Likewise, successful waiver authentication proves only that
-  the configured authority authorized the exact context through the stated
-  date; it does not convert the waived scientific claim into an independently
+  the configured policy accepted the exact context through the stated date; it
+  does not identify an authorized person or convert the waived claim into an independently
   reproduced result.

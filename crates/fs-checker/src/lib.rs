@@ -23,57 +23,28 @@
 //! deterministic for deterministic injected capabilities.
 
 pub use fs_package::{
-    ColorBreakdown, ContentHash, EvidencePackage, MagnitudeBudget, NoSourceCertificateVerifier,
-    NoWaiverVerifier, PackageError, ParseError, SourceCertificateRequest,
-    SourceCertificateVerifier, VerificationCapabilities, WaiverGrant, WaiverVerification,
-    WaiverVerifier,
+    AdmissionClass, AdmissionOriginKind, AnchoredSourceRequest, AnchoredSourceVerifier,
+    ClaimAdmission, ColorBreakdown, ContentHash, DerivationRequest, DerivationVerifier,
+    EvidencePackage, FalsifierRequest, FalsifierVerifier, MagnitudeBudget,
+    NoAnchoredSourceVerifier, NoDerivationVerifier, NoFalsifierVerifier, NoSignatureVerifier,
+    NoSourceCertificateVerifier, NoWaiverVerifier, PackageError, ParseError, PolicyFingerprint,
+    SignatureIntent, SignaturePurpose, SignatureRequest, SignatureStatus, SignatureVerification,
+    SignatureVerifier, SourceCertificateRequest, SourceCertificateVerifier,
+    VerificationCapabilities, VerificationDecision, VerificationPolicyFingerprints,
+    VerificationReceipt, VerifiedPackage, WaiverGrant, WaiverVerification, WaiverVerifier,
+    hash_checker_decision, signature_subject_hash,
 };
 
 /// The checker's own protocol version (it is distributed independently).
-pub const CHECKER_PROTOCOL_VERSION: u32 = 3;
+pub const CHECKER_PROTOCOL_VERSION: u32 = 4;
 
 /// The one evidence-package format understood by this checker protocol.
 ///
 /// Keep this as an explicit protocol literal rather than deriving it from
 /// `fs-package`: a package-format change must make this crate fail to compile
 /// until the independently distributed checker ABI is reviewed and versioned.
-pub const CHECKER_SUPPORTED_PACKAGE_FORMAT: u32 = 5;
+pub const CHECKER_SUPPORTED_PACKAGE_FORMAT: u32 = 6;
 const _: () = assert!(CHECKER_SUPPORTED_PACKAGE_FORMAT == fs_package::FORMAT_VERSION);
-
-/// Whether the package carried a detached signature and how far it was
-/// verified (bead qmao.6.1): a present signature is only ASSERTED valid
-/// when a [`SignatureVerifier`] capability accepts it over the
-/// recomputed content root — presence alone is recorded, never
-/// promoted.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SignatureStatus {
-    /// No signature — the bundle stands on its content address alone.
-    Unsigned,
-    /// A detached signature is present but NOT cryptographically
-    /// verified (no capability supplied, or none exists in-tree).
-    Unverified(String),
-    /// The supplied verifier accepted the signature over the
-    /// recomputed content root.
-    Valid(String),
-}
-
-/// The signature-verification CAPABILITY (injected; this crate ships no
-/// cryptography — the same fail-closed pattern as fs-ledger waivers).
-pub trait SignatureVerifier {
-    /// True iff `signature` authenticates the package's recomputed
-    /// 32-byte BLAKE3 content root.
-    fn verify(&self, merkle_root: &ContentHash, signature: &str) -> bool;
-}
-
-/// The in-tree default: nothing authenticates (no-crypto no-claim).
-#[derive(Debug, Default, Clone, Copy)]
-pub struct NoSignatureVerifier;
-
-impl SignatureVerifier for NoSignatureVerifier {
-    fn verify(&self, _merkle_root: &ContentHash, _signature: &str) -> bool {
-        false
-    }
-}
 
 /// The checker's overall verdict.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,6 +53,17 @@ pub enum Verdict {
     Pass,
     /// The package failed re-verification (see the findings).
     Fail,
+}
+
+/// Checker gate whose policy produced a report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckPolicy {
+    /// Integrity/origin admission; not release approval.
+    Integrity,
+    /// Non-admitting release readiness inventory.
+    ReleasePreflight,
+    /// Strong release admission under protocol v4.
+    ReleaseAdmission,
 }
 
 /// One reason a check failed.
@@ -97,22 +79,100 @@ pub struct Finding {
 #[derive(Debug, Clone, PartialEq)]
 pub struct CheckReport {
     /// Pass/Fail.
-    pub verdict: Verdict,
+    verdict: Verdict,
     /// The recomputed content address (domain-separated BLAKE3 root).
-    pub merkle_root: ContentHash,
+    merkle_root: ContentHash,
     /// The by-color budget pie.
-    pub breakdown: ColorBreakdown,
+    breakdown: ColorBreakdown,
     /// Signature presence.
-    pub signature: SignatureStatus,
+    signature: SignatureStatus,
+    /// Policy-bound package receipt. Present only after successful package
+    /// verification; parse and capability refusals expose no partial receipt.
+    receipt: Option<VerificationReceipt>,
     /// Reasons for failure (empty on Pass).
-    pub findings: Vec<Finding>,
+    findings: Vec<Finding>,
+    /// Gate intent bound into `decision_hash`.
+    policy: CheckPolicy,
+    /// External expected root, when the gate required one.
+    expected_root: Option<ContentHash>,
+    /// Domain-separated integrity digest over checker protocol, gate context,
+    /// package receipt, verdict, and findings.
+    decision_hash: ContentHash,
 }
 
 impl CheckReport {
+    /// Overall gate verdict.
+    #[must_use]
+    pub const fn verdict(&self) -> Verdict {
+        self.verdict
+    }
+    /// Bounded recomputed package root, or the zero refusal sentinel.
+    #[must_use]
+    pub const fn merkle_root(&self) -> ContentHash {
+        self.merkle_root
+    }
+    /// Admitted evidence-color breakdown.
+    #[must_use]
+    pub const fn breakdown(&self) -> &ColorBreakdown {
+        &self.breakdown
+    }
+    /// Detached-signature decision.
+    #[must_use]
+    pub fn signature(&self) -> &SignatureStatus {
+        &self.signature
+    }
+    /// Package verification receipt, only after successful package admission.
+    #[must_use]
+    pub fn receipt(&self) -> Option<&VerificationReceipt> {
+        self.receipt.as_ref()
+    }
+    /// Ordered deterministic refusal findings.
+    #[must_use]
+    pub fn findings(&self) -> &[Finding] {
+        &self.findings
+    }
+    /// Gate policy bound into this report.
+    #[must_use]
+    pub const fn policy(&self) -> CheckPolicy {
+        self.policy
+    }
+    /// Expected package root supplied by the caller, when any.
+    #[must_use]
+    pub const fn expected_root(&self) -> Option<ContentHash> {
+        self.expected_root
+    }
+    /// Stored domain-separated checker decision digest.
+    #[must_use]
+    pub const fn decision_hash(&self) -> ContentHash {
+        self.decision_hash
+    }
     /// Did the package pass?
     #[must_use]
     pub fn passed(&self) -> bool {
         matches!(self.verdict, Verdict::Pass)
+    }
+
+    /// Whether this is a hash-valid, receipt-bearing release-admission pass.
+    /// [`Self::passed`] is policy-local and must not be substituted for this at
+    /// a release boundary.
+    #[must_use]
+    pub fn release_admitted(&self) -> bool {
+        self.policy == CheckPolicy::ReleaseAdmission
+            && self.passed()
+            && self.receipt.is_some()
+            && self.validate_decision_hash()
+    }
+
+    /// Recompute the checker gate-context integrity digest.
+    #[must_use]
+    pub fn recomputed_decision_hash(&self) -> ContentHash {
+        checker_report_hash(self)
+    }
+
+    /// Whether the stored checker decision digest matches the report fields.
+    #[must_use]
+    pub fn validate_decision_hash(&self) -> bool {
+        self.decision_hash == self.recomputed_decision_hash()
     }
 
     /// Render the by-color budget pie as a deterministic text chart.
@@ -120,7 +180,8 @@ impl CheckReport {
     pub fn render_pie(&self) -> String {
         use core::fmt::Write as _;
         let b = &self.breakdown;
-        let total = b.verified + b.validated + b.estimated;
+        let total =
+            b.verified as u128 + b.validated as u128 + b.estimated as u128 + b.waived as u128;
         if total == 0 {
             return "budget pie: no claims".to_string();
         }
@@ -129,10 +190,12 @@ impl CheckReport {
             ("verified ", b.verified),
             ("validated", b.validated),
             ("estimated", b.estimated),
+            ("waived   ", b.waived),
         ] {
             // ten-cell bar, deterministic integer rounding.
-            let filled = (count * 10 + total / 2) / total;
-            let pct = (count * 100 + total / 2) / total;
+            let count_u128 = count as u128;
+            let filled = ((count_u128 * 10 + total / 2) / total) as usize;
+            let pct = (count_u128 * 100 + total / 2) / total;
             let bar: String = (0..10)
                 .map(|i| if i < filled { '#' } else { '.' })
                 .collect();
@@ -140,6 +203,87 @@ impl CheckReport {
         }
         out
     }
+}
+
+fn checker_report_hash(report: &CheckReport) -> ContentHash {
+    fn atom(out: &mut Vec<u8>, bytes: &[u8]) {
+        out.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+        out.extend_from_slice(bytes);
+    }
+
+    let mut canonical = Vec::new();
+    atom(&mut canonical, &CHECKER_PROTOCOL_VERSION.to_le_bytes());
+    atom(
+        &mut canonical,
+        match report.policy {
+            CheckPolicy::Integrity => b"integrity",
+            CheckPolicy::ReleasePreflight => b"release-preflight",
+            CheckPolicy::ReleaseAdmission => b"release-admission",
+        },
+    );
+    match report.expected_root {
+        Some(root) => atom(&mut canonical, root.as_bytes()),
+        None => atom(&mut canonical, b"no-expected-root"),
+    }
+    atom(&mut canonical, report.merkle_root.as_bytes());
+    atom(
+        &mut canonical,
+        match report.verdict {
+            Verdict::Pass => b"pass",
+            Verdict::Fail => b"fail",
+        },
+    );
+    match &report.receipt {
+        Some(receipt) => atom(&mut canonical, receipt.receipt_hash().as_bytes()),
+        None => atom(&mut canonical, b"no-package-receipt"),
+    }
+    match &report.signature {
+        SignatureStatus::Unsigned => atom(&mut canonical, b"signature:unsigned"),
+        SignatureStatus::Refused { reason } => {
+            atom(&mut canonical, b"signature:refused");
+            atom(&mut canonical, reason.as_bytes());
+        }
+        SignatureStatus::Unverified(signature) => {
+            atom(&mut canonical, b"signature:unverified");
+            atom(&mut canonical, signature.as_bytes());
+        }
+        SignatureStatus::Authenticated(authenticated) => {
+            atom(&mut canonical, b"signature:authenticated");
+            atom(&mut canonical, authenticated.signature().as_bytes());
+            match authenticated.purpose() {
+                SignaturePurpose::PackageRootAttestation => {
+                    atom(&mut canonical, b"package-root-attestation");
+                }
+                SignaturePurpose::ReleaseApproval {
+                    checker_protocol,
+                    expected_root,
+                    admission_context,
+                } => {
+                    atom(&mut canonical, b"release-approval");
+                    atom(&mut canonical, &checker_protocol.to_le_bytes());
+                    atom(&mut canonical, expected_root.as_bytes());
+                    atom(&mut canonical, admission_context.as_bytes());
+                }
+            }
+        }
+    }
+    for count in [
+        report.breakdown.verified,
+        report.breakdown.validated,
+        report.breakdown.estimated,
+        report.breakdown.waived,
+    ] {
+        atom(&mut canonical, &(count as u64).to_le_bytes());
+    }
+    atom(
+        &mut canonical,
+        &(report.findings.len() as u64).to_le_bytes(),
+    );
+    for finding in &report.findings {
+        atom(&mut canonical, finding.kind.as_bytes());
+        atom(&mut canonical, finding.detail.as_bytes());
+    }
+    hash_checker_decision(&canonical)
 }
 
 /// Re-verify a package (no expected content address, no signature
@@ -162,13 +306,13 @@ pub fn check_against_root(pkg: &EvidencePackage, expected_root: ContentHash) -> 
 }
 
 /// The full third-party entry point (bead qmao.6.1): parse the
-/// serialized package STRICTLY (schema v5 — the parser itself
+/// serialized package under the deterministic schema-v6 JSON profile (the parser itself
 /// recomputes the content root and re-derives the magnitude budget
 /// from the parsed claims), then re-verify semantics, optionally
 /// against an expected root and a signature capability. A package that
-/// fails parsing never produces a Pass. Source certificates and waivers
-/// are denied by default; use [`check_json_with_capabilities`] to admit
-/// them through explicit verification capabilities.
+/// fails parsing never produces a Pass. Every external artifact/authorization
+/// capability is denied by default; use [`check_json_with_capabilities`] for
+/// explicit typed admission.
 #[must_use]
 pub fn check_json(
     text: &str,
@@ -183,10 +327,9 @@ pub fn check_json(
     )
 }
 
-/// Strict JSON checking with explicit source-certificate and waiver
-/// capabilities. Signature verification remains independent and optional:
-/// pass `None` when the transport is unsigned or authorship is not part of
-/// this decision.
+/// Deterministic-profile JSON checking with explicit source, anchor, falsifier,
+/// derivation, waiver, and signature capabilities. The separate signature
+/// verifier remains optional for integrity decisions.
 #[must_use]
 pub fn check_json_with_capabilities(
     text: &str,
@@ -195,14 +338,21 @@ pub fn check_json_with_capabilities(
     capabilities: &VerificationCapabilities<'_>,
 ) -> CheckReport {
     match EvidencePackage::from_json(text) {
-        Ok(pkg) => build_report(&pkg, expected_root, signature_verifier, capabilities),
-        Err(e) => parse_refusal(e),
+        Ok(pkg) => build_report(
+            &pkg,
+            expected_root,
+            signature_verifier,
+            capabilities,
+            CheckPolicy::Integrity,
+        ),
+        Err(e) => parse_refusal(&e, CheckPolicy::Integrity, expected_root),
     }
 }
 
 /// [`check`] with an independent signature-verification capability. Package
 /// origins remain deny-all; use [`check_with_capabilities`] when source
-/// certificates or waivers are part of the decision.
+/// certificates, anchors, falsifiers, derivations, or waivers are part of the
+/// decision.
 #[must_use]
 pub fn check_with(
     pkg: &EvidencePackage,
@@ -228,34 +378,51 @@ pub fn check_with_capabilities(
     signature_verifier: Option<&dyn SignatureVerifier>,
     capabilities: &VerificationCapabilities<'_>,
 ) -> CheckReport {
-    build_report(pkg, expected_root, signature_verifier, capabilities)
+    build_report(
+        pkg,
+        expected_root,
+        signature_verifier,
+        capabilities,
+        CheckPolicy::Integrity,
+    )
 }
 
-/// Re-verify a package under the stronger RELEASE-ADMISSION policy.
+/// Fail-closed release preflight without scientific-origin capabilities.
 ///
-/// Unlike [`check`], which deliberately accepts an empty but well-formed
-/// transport, this gate requires a non-empty package, an authenticated
-/// detached signature over the expected content root, an attached falsifier
-/// record for every Verified or Validated claim, and a matching content-hash
-/// anchor for every Validated claim. This is the explicit
-/// no-falsifier-no-ship boundary; it does not claim to re-run source solvers.
+/// This helper intentionally supplies deny-all scientific capabilities, so it
+/// can inventory release blockers but cannot admit certificate-class evidence.
+/// Use [`check_for_release_with_capabilities`] for the actual release gate.
 #[must_use]
-pub fn check_for_release(
+pub fn check_release_preflight(
     pkg: &EvidencePackage,
     expected_root: ContentHash,
     verifier: &dyn SignatureVerifier,
 ) -> CheckReport {
-    check_for_release_with_capabilities(
+    let mut report = build_report(
         pkg,
-        expected_root,
-        verifier,
+        Some(expected_root),
+        Some(verifier),
         &VerificationCapabilities::deny_all(),
-    )
+        CheckPolicy::ReleasePreflight,
+    );
+    append_release_findings(pkg, &mut report);
+    report.findings.push(Finding {
+        kind: "release-preflight-only",
+        detail: "preflight inventories blockers but never grants release admission; invoke the \
+                 capability-bearing release gate"
+            .to_string(),
+    });
+    report.verdict = Verdict::Fail;
+    report.decision_hash = checker_report_hash(&report);
+    report
 }
 
-/// [`check_for_release`] with explicit source-certificate and waiver
-/// capabilities. Release signature authentication remains mandatory and
-/// independent from those scientific-origin capabilities.
+/// Actual release-admission gate with explicit source, anchor, falsifier,
+/// derivation, waiver, and signature capabilities. It requires a non-empty
+/// package, at least one scientifically admitted Verified or Validated claim,
+/// purpose-bound release signature, authenticated falsifiers for every
+/// certificate-class claim, and an exact authenticated anchor for every
+/// Validated claim.
 #[must_use]
 pub fn check_for_release_with_capabilities(
     pkg: &EvidencePackage,
@@ -263,25 +430,30 @@ pub fn check_for_release_with_capabilities(
     verifier: &dyn SignatureVerifier,
     capabilities: &VerificationCapabilities<'_>,
 ) -> CheckReport {
-    let mut report = build_report(pkg, Some(expected_root), Some(verifier), capabilities);
+    let mut report = build_report(
+        pkg,
+        Some(expected_root),
+        Some(verifier),
+        capabilities,
+        CheckPolicy::ReleaseAdmission,
+    );
     append_release_findings(pkg, &mut report);
+    report.decision_hash = checker_report_hash(&report);
     report
 }
 
-/// Strict JSON counterpart of [`check_for_release`]. Parse refusal can never
-/// become release admission.
+/// Strict JSON counterpart of [`check_release_preflight`]. This inventories
+/// blockers under deny-all scientific capabilities and cannot grant release.
 #[must_use]
-pub fn check_json_for_release(
+pub fn check_json_release_preflight(
     text: &str,
     expected_root: ContentHash,
     verifier: &dyn SignatureVerifier,
 ) -> CheckReport {
-    check_json_for_release_with_capabilities(
-        text,
-        expected_root,
-        verifier,
-        &VerificationCapabilities::deny_all(),
-    )
+    match EvidencePackage::from_json(text) {
+        Ok(pkg) => check_release_preflight(&pkg, expected_root, verifier),
+        Err(error) => parse_refusal(&error, CheckPolicy::ReleasePreflight, Some(expected_root)),
+    }
 }
 
 /// Strict JSON counterpart of [`check_for_release_with_capabilities`].
@@ -295,12 +467,16 @@ pub fn check_json_for_release_with_capabilities(
 ) -> CheckReport {
     match EvidencePackage::from_json(text) {
         Ok(pkg) => check_for_release_with_capabilities(&pkg, expected_root, verifier, capabilities),
-        Err(e) => parse_refusal(e),
+        Err(e) => parse_refusal(&e, CheckPolicy::ReleaseAdmission, Some(expected_root)),
     }
 }
 
-fn parse_refusal(error: ParseError) -> CheckReport {
-    CheckReport {
+fn parse_refusal(
+    error: &ParseError,
+    policy: CheckPolicy,
+    expected_root: Option<ContentHash>,
+) -> CheckReport {
+    let mut report = CheckReport {
         verdict: Verdict::Fail,
         // Fail-closed sentinel: parsing refused, so there is no recomputed
         // root. The Fail verdict is authoritative; the zero bytes are only a
@@ -308,30 +484,80 @@ fn parse_refusal(error: ParseError) -> CheckReport {
         merkle_root: ContentHash([0u8; 32]),
         breakdown: ColorBreakdown::default(),
         signature: SignatureStatus::Unsigned,
+        receipt: None,
         findings: vec![Finding {
             kind: "parse-refused",
             detail: error.to_string(),
         }],
-    }
+        policy,
+        expected_root,
+        decision_hash: ContentHash([0; 32]),
+    };
+    report.decision_hash = checker_report_hash(&report);
+    report
 }
 
 fn append_release_findings(pkg: &EvidencePackage, report: &mut CheckReport) {
-    if pkg.claims.is_empty() {
+    // Package admission is the bounded precondition for every raw-claim scan.
+    // Verification already emitted the precise refusal; do not amplify an
+    // oversized or malformed in-memory builder into per-claim diagnostics.
+    if report.receipt.is_none() {
+        report.verdict = Verdict::Fail;
+        return;
+    }
+    if pkg.declared_claims_unverified().is_empty() {
         report.findings.push(Finding {
             kind: "release-empty-package",
             detail: "release admission requires at least one claim".to_string(),
         });
     }
-    if matches!(report.signature, SignatureStatus::Unsigned) {
+    if let Some(receipt) = &report.receipt {
+        let has_scientific_certificate = pkg
+            .declared_claims_unverified()
+            .iter()
+            .zip(receipt.admissions())
+            .any(|(claim, admission)| {
+                admission.class() == AdmissionClass::Scientific
+                    && claim.declared_requires_release_falsifier_unverified()
+            });
+        if !has_scientific_certificate {
+            report.findings.push(Finding {
+                kind: "release-scientific-evidence-required",
+                detail: "release admission requires at least one scientifically admitted \
+                         Verified or Validated claim; all-estimated and all-waived packages are \
+                         publication/no-claim artifacts"
+                    .to_string(),
+            });
+        }
+    }
+    let receipt_admission_context = report
+        .receipt
+        .as_ref()
+        .map(VerificationReceipt::release_admission_context);
+    let release_signature = matches!(
+        &report.signature,
+        SignatureStatus::Authenticated(authenticated)
+            if matches!(authenticated.purpose(), SignaturePurpose::ReleaseApproval {
+                checker_protocol,
+                expected_root,
+                admission_context,
+            } if checker_protocol == CHECKER_PROTOCOL_VERSION
+                && Some(expected_root) == report.expected_root
+                && Some(admission_context) == receipt_admission_context)
+    );
+    if !release_signature {
         report.findings.push(Finding {
             kind: "release-signature-required",
-            detail: "release admission requires an authenticated detached signature over the \
-                     expected content root"
+            detail: "release admission requires a policy-authenticated detached release-approval \
+                     signature bound to this checker protocol, expected content root, and exact \
+                     scientific admission context"
                 .to_string(),
         });
     }
-    for claim in &pkg.claims {
-        if claim.requires_release_falsifier() && claim.falsifiers().is_empty() {
+    for claim in pkg.declared_claims_unverified() {
+        if claim.declared_requires_release_falsifier_unverified()
+            && claim.declared_falsifiers_unverified().is_empty()
+        {
             report.findings.push(Finding {
                 kind: "release-falsifier-required",
                 detail: format!(
@@ -341,7 +567,9 @@ fn append_release_findings(pkg: &EvidencePackage, report: &mut CheckReport) {
                 ),
             });
         }
-        if claim.requires_validated_anchor() && !claim.has_matching_validated_anchor() {
+        if claim.declared_requires_validated_anchor_unverified()
+            && !claim.has_declared_matching_validated_anchor_unverified()
+        {
             report.findings.push(Finding {
                 kind: "release-anchor-required",
                 detail: format!(
@@ -365,16 +593,43 @@ fn build_report(
     expected_root: Option<ContentHash>,
     signature_verifier: Option<&dyn SignatureVerifier>,
     capabilities: &VerificationCapabilities<'_>,
+    policy: CheckPolicy,
 ) -> CheckReport {
     let mut findings = Vec::new();
 
+    // Signature verification is now part of the package capability ledger.
+    // The legacy separate argument remains as a compatible checker entry
+    // point and overrides an optional signature capability in `capabilities`.
+    let signatures = signature_verifier
+        .map(|verifier| SignatureVerification {
+            verifier,
+            intent: match policy {
+                CheckPolicy::Integrity => SignatureIntent::PackageRootAttestation,
+                CheckPolicy::ReleasePreflight | CheckPolicy::ReleaseAdmission => {
+                    SignatureIntent::ReleaseApproval {
+                        checker_protocol: CHECKER_PROTOCOL_VERSION,
+                        expected_root: expected_root.unwrap_or(ContentHash([0; 32])),
+                    }
+                }
+            },
+        })
+        .or(capabilities.signatures);
+    let effective_capabilities = VerificationCapabilities {
+        source_certificates: capabilities.source_certificates,
+        anchored_sources: capabilities.anchored_sources,
+        falsifiers: capabilities.falsifiers,
+        derivations: capabilities.derivations,
+        waivers: capabilities.waivers,
+        signatures,
+    };
+
     // 1. Delegate format, claim semantics, and capability-gated origin
     // authentication to the package format. There is no permissive fallback.
-    let verified = pkg.verify_with(capabilities);
-    let breakdown = match verified {
-        Ok(report) => report.breakdown,
+    let verified = pkg.verify_with(&effective_capabilities);
+    let breakdown = match &verified {
+        Ok(report) => *report.breakdown(),
         Err(e) => {
-            findings.push(describe(&e));
+            findings.push(describe(e));
             // Invalid claims must not retain a normal-looking positive
             // evidence summary. The finding still identifies the exact
             // refusal; the pie fails closed to no admitted claims.
@@ -383,8 +638,11 @@ fn build_report(
     };
 
     // 2. content address (recomputed here, independently).
-    let merkle_root = pkg.merkle_root();
-    if let Some(expected) = expected_root
+    let bounded_root = pkg.try_merkle_root();
+    let root_refused = bounded_root.is_err();
+    let merkle_root = bounded_root.unwrap_or(ContentHash([0; 32]));
+    if !root_refused
+        && let Some(expected) = expected_root
         && merkle_root != expected
     {
         findings.push(Finding {
@@ -396,49 +654,63 @@ fn build_report(
     // 3. the magnitude budget must reconcile with its parts (the pie
     // is over error magnitudes, not claim counts — and it must not be
     // able to drift from the claims it summarizes).
-    let mb = pkg.magnitude_budget();
-    if mb.quantified_total.to_bits() != (mb.verified_width + mb.estimated_dispersion).to_bits() {
-        findings.push(Finding {
-            kind: "magnitude-budget-drift",
-            detail: "quantified total does not reconcile with its parts".to_string(),
-        });
+    if let Ok(report) = &verified {
+        let mb = report.magnitude_budget();
+        if mb.quantified_total.to_bits() != (mb.verified_width + mb.estimated_dispersion).to_bits()
+        {
+            findings.push(Finding {
+                kind: "magnitude-budget-drift",
+                detail: "quantified total does not reconcile with its parts".to_string(),
+            });
+        }
     }
 
-    // 4. signature: presence recorded; VALIDITY only through the
-    // supplied capability, over the recomputed root (fail closed).
-    let signature = match (&pkg.signature, signature_verifier) {
-        (None, _) => SignatureStatus::Unsigned,
-        (Some(s), None) => SignatureStatus::Unverified(s.clone()),
-        (Some(s), Some(v)) => {
-            if v.verify(&merkle_root, s) {
-                SignatureStatus::Valid(s.clone())
-            } else {
-                findings.push(Finding {
-                    kind: "signature-invalid",
-                    detail: "the supplied verifier rejected the detached signature over the \
-                             recomputed content root"
-                        .to_string(),
-                });
-                SignatureStatus::Unverified(s.clone())
-            }
-        }
+    // 4. The package verifier owns signature authentication so coverage and
+    // checker reports consume the exact same decision.
+    let signature = match &verified {
+        Ok(report) => report.receipt().signature().clone(),
+        Err(_) if root_refused => SignatureStatus::Refused {
+            reason: "package transport envelope refused",
+        },
+        Err(_) => match &pkg.signature {
+            Some(signature) => SignatureStatus::Unverified(signature.clone()),
+            None => SignatureStatus::Unsigned,
+        },
     };
+    let receipt = verified
+        .as_ref()
+        .ok()
+        .map(|report| report.receipt().clone());
 
     let verdict = if findings.is_empty() {
         Verdict::Pass
     } else {
         Verdict::Fail
     };
-    CheckReport {
+    let mut report = CheckReport {
         verdict,
         merkle_root,
         breakdown,
         signature,
+        receipt,
         findings,
+        policy,
+        expected_root,
+        decision_hash: ContentHash([0; 32]),
+    };
+    report.decision_hash = checker_report_hash(&report);
+    report
+}
+
+fn rejection_policy_suffix(policy_fingerprint: Option<ContentHash>) -> String {
+    match policy_fingerprint {
+        Some(fingerprint) => format!("; rejecting policy fingerprint {fingerprint}"),
+        None => "; no policy decision was produced".to_string(),
     }
 }
 
 /// Translate a package error into a checker finding.
+#[allow(clippy::too_many_lines)] // exhaustive one-to-one diagnostic mapping for every package refusal
 fn describe(e: &PackageError) -> Finding {
     match e {
         PackageError::IncompleteProvenance { missing } => Finding {
@@ -513,6 +785,21 @@ fn describe(e: &PackageError) -> Finding {
                  earlier in the package"
             ),
         },
+        PackageError::InvalidDerivationArtifact { claim } => Finding {
+            kind: "invalid-derivation-artifact",
+            detail: format!("claim '{claim}' has a non-canonical derivation artifact address"),
+        },
+        PackageError::DerivationRefused {
+            claim,
+            why,
+            policy_fingerprint,
+        } => Finding {
+            kind: "derivation-refused",
+            detail: format!(
+                "claim '{claim}': derivation artifact refused — {why}{}",
+                rejection_policy_suffix(*policy_fingerprint)
+            ),
+        },
         PackageError::InvalidOrigin { claim, why } => Finding {
             kind: "invalid-origin",
             detail: format!("claim '{claim}' has a malformed origin: {why}"),
@@ -528,15 +815,75 @@ fn describe(e: &PackageError) -> Finding {
             claim,
             producer,
             why,
+            policy_fingerprint,
         } => Finding {
             kind: "source-certificate-refused",
             detail: format!(
-                "claim '{claim}': source certificate from '{producer}' refused — {why}"
+                "claim '{claim}': source certificate from '{producer}' refused — {why}{}",
+                rejection_policy_suffix(*policy_fingerprint)
             ),
         },
-        PackageError::WaiverRefused { claim, waiver, why } => Finding {
+        PackageError::AnchoredSourceRefused {
+            claim,
+            dataset,
+            why,
+            policy_fingerprint,
+        } => Finding {
+            kind: "anchored-source-refused",
+            detail: format!(
+                "claim '{claim}': anchoring dataset '{dataset}' refused — {why}{}",
+                rejection_policy_suffix(*policy_fingerprint)
+            ),
+        },
+        PackageError::FalsifierRefused {
+            claim,
+            falsifier,
+            why,
+            policy_fingerprint,
+        } => Finding {
+            kind: "falsifier-refused",
+            detail: format!(
+                "claim '{claim}': falsifier '{falsifier}' refused — {why}{}",
+                rejection_policy_suffix(*policy_fingerprint)
+            ),
+        },
+        PackageError::WaiverRefused {
+            claim,
+            waiver,
+            why,
+            policy_fingerprint,
+        } => Finding {
             kind: "waiver-refused",
-            detail: format!("claim '{claim}': waiver '{waiver}' refused — {why}"),
+            detail: format!(
+                "claim '{claim}': waiver '{waiver}' refused — {why}{}",
+                rejection_policy_suffix(*policy_fingerprint)
+            ),
+        },
+        PackageError::PolicyFingerprintRefused {
+            capability,
+            why,
+            previous,
+            observed,
+        } => Finding {
+            kind: "policy-fingerprint-refused",
+            detail: format!(
+                "{capability} verification policy refused — {why}; previous {previous}, observed \
+                 {observed}"
+            ),
+        },
+        PackageError::SignatureRefused {
+            why,
+            policy_fingerprint,
+        } => Finding {
+            kind: "signature-invalid",
+            detail: format!(
+                "detached signature refused — {why}{}",
+                rejection_policy_suffix(*policy_fingerprint)
+            ),
+        },
+        PackageError::InvalidSignature { why } => Finding {
+            kind: "invalid-signature",
+            detail: format!("detached signature has invalid transport shape — {why}"),
         },
         PackageError::DuplicateWaiverId {
             waiver,
@@ -578,5 +925,68 @@ fn describe(e: &PackageError) -> Finding {
                  non-canonical"
             ),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fs_package::{Claim, Provenance};
+
+    fn report_fixture() -> CheckReport {
+        let package =
+            EvidencePackage::new(Provenance::new("checker-test", "lock-test")).with_claim(
+                Claim::estimated("estimate", "bounded estimate", "test-estimator", 1.0),
+            );
+        check(&package)
+    }
+
+    #[test]
+    fn decision_hash_binds_every_checker_authority_field() {
+        let report = report_fixture();
+        assert!(report.validate_decision_hash());
+
+        macro_rules! assert_mutation_refused {
+            ($mutation:expr) => {{
+                let mut changed = report.clone();
+                $mutation(&mut changed);
+                assert!(!changed.validate_decision_hash());
+            }};
+        }
+
+        assert_mutation_refused!(|changed: &mut CheckReport| changed.verdict = Verdict::Fail);
+        assert_mutation_refused!(
+            |changed: &mut CheckReport| changed.merkle_root = ContentHash([0; 32])
+        );
+        assert_mutation_refused!(|changed: &mut CheckReport| changed.breakdown.verified = 1);
+        assert_mutation_refused!(|changed: &mut CheckReport| changed.signature =
+            SignatureStatus::Refused {
+                reason: "mutated test status"
+            });
+        assert_mutation_refused!(|changed: &mut CheckReport| changed.receipt = None);
+        assert_mutation_refused!(|changed: &mut CheckReport| changed.findings.push(Finding {
+            kind: "mutated",
+            detail: "mutated finding".to_string(),
+        }));
+        assert_mutation_refused!(
+            |changed: &mut CheckReport| changed.policy = CheckPolicy::ReleasePreflight
+        );
+        assert_mutation_refused!(
+            |changed: &mut CheckReport| changed.expected_root = Some(ContentHash([7; 32]))
+        );
+    }
+
+    #[test]
+    fn budget_pie_uses_wide_arithmetic_for_extreme_counts() {
+        let mut report = report_fixture();
+        report.breakdown = ColorBreakdown {
+            verified: usize::MAX,
+            validated: usize::MAX,
+            estimated: usize::MAX,
+            waived: usize::MAX,
+        };
+        let rendered = report.render_pie();
+        assert!(rendered.contains("verified"));
+        assert!(rendered.contains("waived"));
     }
 }
