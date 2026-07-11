@@ -11,11 +11,12 @@
 //! exactly while held and never twice; free-list inventory belongs to no
 //! operation. Both gates must admit; a refusal names whichever refused.
 //!
-//! Receipts are deterministic in structure and, for a fixed tile plan, in
-//! their `requested` totals; `peak_bytes` is a CONSERVATIVE logical
-//! high-water (reservation attempts count when entered), matching the
-//! wf9.15 accounting doctrine. Thread stacks and allocator overhead are
-//! explicitly NOT claimed (CONTRACT no-claims).
+//! Receipts have a canonical structure and exact values for the observed
+//! admission trace. Identical plans with identical pool-cache state have
+//! deterministic cumulative demand; cache history and near-limit concurrent
+//! refusals/peaks are intentionally visible and can change the receipt.
+//! Thread stacks and allocator overhead are explicitly NOT claimed (CONTRACT
+//! no-claims).
 //!
 //! [`ArenaPool`]: crate::ArenaPool
 
@@ -48,19 +49,25 @@ impl fmt::Display for LeaseRefusal {
     }
 }
 
-/// Deterministic lease accounting snapshot.
+/// Canonically serialized lease accounting snapshot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LeaseReceipt {
     /// The limit in force (`None` = unbounded legacy wrapper).
     pub limit_bytes: Option<u64>,
     /// Cumulative bytes of granted reservations.
+    /// Saturates at `u64::MAX` rather than wrapping.
     pub requested_bytes: u64,
     /// Conservative logical high-water of concurrently held bytes.
     pub peak_bytes: u64,
     /// Bytes still held when the snapshot was taken.
     pub used_bytes: u64,
     /// Number of refused reservations.
+    /// Saturates at `u64::MAX` rather than wrapping.
     pub refusals: u64,
+    /// Internal release attempts that did not match a live reservation.
+    /// The counter remains fail-closed (used bytes are not changed) and makes
+    /// an invariant violation visible without panicking from `Drop`.
+    pub release_invariant_violations: u64,
     /// The first refusal, verbatim.
     pub first_refusal: Option<LeaseRefusal>,
 }
@@ -70,7 +77,7 @@ impl LeaseReceipt {
     #[must_use]
     pub fn to_json(&self) -> String {
         use std::fmt::Write as _;
-        let mut out = String::from("{\"schema\":\"fs-alloc-operation-lease-v1\"");
+        let mut out = String::from("{\"schema\":\"fs-alloc-operation-lease-v2\"");
         match self.limit_bytes {
             Some(limit) => {
                 let _ = write!(out, ",\"limit_bytes\":{limit}");
@@ -79,15 +86,20 @@ impl LeaseReceipt {
         }
         let _ = write!(
             out,
-            ",\"requested_bytes\":{},\"peak_bytes\":{},\"used_bytes\":{},\"refusals\":{}",
-            self.requested_bytes, self.peak_bytes, self.used_bytes, self.refusals
+            ",\"requested_bytes\":{},\"peak_bytes\":{},\"used_bytes\":{},\"refusals\":{},\"release_invariant_violations\":{}",
+            self.requested_bytes,
+            self.peak_bytes,
+            self.used_bytes,
+            self.refusals,
+            self.release_invariant_violations
         );
         match &self.first_refusal {
             Some(refusal) => {
+                let what = json_escape(refusal.what);
                 let _ = write!(
                     out,
                     ",\"first_refusal\":{{\"what\":\"{}\",\"requested_bytes\":{},\"used_bytes\":{},\"limit_bytes\":{}}}",
-                    refusal.what, refusal.requested_bytes, refusal.used_bytes, refusal.limit_bytes
+                    what, refusal.requested_bytes, refusal.used_bytes, refusal.limit_bytes
                 );
             }
             None => out.push_str(",\"first_refusal\":null"),
@@ -97,12 +109,41 @@ impl LeaseReceipt {
     }
 }
 
+pub(crate) fn json_escape(value: &str) -> String {
+    use core::fmt::Write as _;
+
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            '\u{08}' => escaped.push_str("\\b"),
+            '\u{0c}' => escaped.push_str("\\f"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            control if control <= '\u{1f}' => {
+                let _ = write!(escaped, "\\u{:04x}", u32::from(control));
+            }
+            other => escaped.push(other),
+        }
+    }
+    escaped
+}
+
+fn saturating_add(counter: &AtomicU64, value: u64) {
+    let _ = counter.try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+        Some(current.saturating_add(value))
+    });
+}
+
 struct LeaseShared {
     limit_bytes: Option<u64>,
     used_bytes: AtomicU64,
     peak_bytes: AtomicU64,
     requested_bytes: AtomicU64,
     refusals: AtomicU64,
+    release_invariant_violations: AtomicU64,
     first_refusal: Mutex<Option<LeaseRefusal>>,
 }
 
@@ -128,7 +169,8 @@ impl OperationMemoryLease {
         Self::with_limit(Some(limit_bytes))
     }
 
-    /// The legacy-wrapper lease: accounts but never refuses.
+    /// The legacy-wrapper lease: no configured limit; only an unrepresentable
+    /// live-set sum can refuse.
     #[must_use]
     pub fn unbounded() -> Self {
         Self::with_limit(None)
@@ -142,6 +184,7 @@ impl OperationMemoryLease {
                 peak_bytes: AtomicU64::new(0),
                 requested_bytes: AtomicU64::new(0),
                 refusals: AtomicU64::new(0),
+                release_invariant_violations: AtomicU64::new(0),
                 first_refusal: Mutex::new(None),
             }),
         }
@@ -160,11 +203,7 @@ impl OperationMemoryLease {
     /// # Errors
     /// [`LeaseRefusal`] when the reservation would exceed the limit; the
     /// refusal is also recorded in the receipt.
-    pub fn reserve(
-        &self,
-        what: &'static str,
-        bytes: u64,
-    ) -> Result<LeaseCharge, LeaseRefusal> {
+    pub fn reserve(&self, what: &'static str, bytes: u64) -> Result<LeaseCharge, LeaseRefusal> {
         self.try_reserve_raw(what, bytes)?;
         Ok(LeaseCharge {
             lease: self.clone(),
@@ -172,23 +211,19 @@ impl OperationMemoryLease {
         })
     }
 
-    /// Reserve without a guard; the caller owns the matching
-    /// [`OperationMemoryLease::release_raw`]. The arena integration uses
-    /// this because chunk lifetime is managed by `Arena::drop`.
+    /// Atomic reservation primitive behind the public RAII guard. Manual
+    /// ownership transfer happens only after the guard has protected every
+    /// fallible/unwinding acquisition step.
     ///
     /// # Errors
     /// As [`OperationMemoryLease::reserve`].
-    pub fn try_reserve_raw(&self, what: &'static str, bytes: u64) -> Result<(), LeaseRefusal> {
+    fn try_reserve_raw(&self, what: &'static str, bytes: u64) -> Result<(), LeaseRefusal> {
         loop {
             let used = self.shared.used_bytes.load(Ordering::Acquire);
             let Some(next) = used.checked_add(bytes) else {
                 return Err(self.record_refusal(what, bytes, used));
             };
-            if self
-                .shared
-                .limit_bytes
-                .is_some_and(|limit| next > limit)
-            {
+            if self.shared.limit_bytes.is_some_and(|limit| next > limit) {
                 return Err(self.record_refusal(what, bytes, used));
             }
             if self
@@ -198,22 +233,35 @@ impl OperationMemoryLease {
                 .is_ok()
             {
                 self.shared.peak_bytes.fetch_max(next, Ordering::AcqRel);
-                self.shared
-                    .requested_bytes
-                    .fetch_add(bytes, Ordering::Relaxed);
+                saturating_add(&self.shared.requested_bytes, bytes);
                 return Ok(());
             }
         }
     }
 
-    /// Release bytes previously reserved through
-    /// [`OperationMemoryLease::try_reserve_raw`].
-    pub fn release_raw(&self, bytes: u64) {
-        let previous = self.shared.used_bytes.fetch_sub(bytes, Ordering::AcqRel);
-        debug_assert!(
-            previous >= bytes,
-            "operation lease released more than it reserved"
-        );
+    /// A side-effect-free hint used only to choose between an oversized
+    /// cached chunk and the smaller fresh chunk for the same arena request.
+    /// The subsequent [`Self::reserve`] remains the atomic authority.
+    pub(crate) fn can_reserve_now(&self, bytes: u64) -> bool {
+        let used = self.shared.used_bytes.load(Ordering::Acquire);
+        used.checked_add(bytes)
+            .is_some_and(|next| self.shared.limit_bytes.is_none_or(|limit| next <= limit))
+    }
+
+    /// Release bytes whose RAII guard was transferred to a crate-internal
+    /// aggregate owner.
+    pub(crate) fn release_raw(&self, bytes: u64) -> bool {
+        let released =
+            self.shared
+                .used_bytes
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                    used.checked_sub(bytes)
+                });
+        if released.is_err() {
+            saturating_add(&self.shared.release_invariant_violations, 1);
+            return false;
+        }
+        true
     }
 
     fn record_refusal(&self, what: &'static str, bytes: u64, used: u64) -> LeaseRefusal {
@@ -223,19 +271,20 @@ impl OperationMemoryLease {
             used_bytes: used,
             limit_bytes: self.shared.limit_bytes.unwrap_or(u64::MAX),
         };
-        self.shared.refusals.fetch_add(1, Ordering::Relaxed);
+        saturating_add(&self.shared.refusals, 1);
         let mut first = self
             .shared
             .first_refusal
             .lock()
-            .expect("fs-alloc lease refusal record poisoned");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if first.is_none() {
             *first = Some(refusal.clone());
         }
         refusal
     }
 
-    /// Deterministic accounting snapshot.
+    /// Accounting snapshot with canonical serialization. Values derived from
+    /// concurrent admission retain that execution trace's scheduling.
     #[must_use]
     pub fn receipt(&self) -> LeaseReceipt {
         LeaseReceipt {
@@ -244,11 +293,15 @@ impl OperationMemoryLease {
             peak_bytes: self.shared.peak_bytes.load(Ordering::Acquire),
             used_bytes: self.shared.used_bytes.load(Ordering::Acquire),
             refusals: self.shared.refusals.load(Ordering::Acquire),
+            release_invariant_violations: self
+                .shared
+                .release_invariant_violations
+                .load(Ordering::Acquire),
             first_refusal: self
                 .shared
                 .first_refusal
                 .lock()
-                .expect("fs-alloc lease refusal record poisoned")
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone(),
         }
     }
@@ -267,11 +320,20 @@ impl LeaseCharge {
     pub fn bytes(&self) -> u64 {
         self.bytes
     }
+
+    /// Transfer this charge to a crate-internal owner that will release the
+    /// same bytes manually. Setting the guard to zero preserves unwind safety
+    /// until the transfer point without leaking its `Arc`.
+    pub(crate) fn commit_to_manual_release(mut self) {
+        self.bytes = 0;
+    }
 }
 
 impl Drop for LeaseCharge {
     fn drop(&mut self) {
-        self.lease.release_raw(self.bytes);
+        if self.bytes > 0 {
+            let _released = self.lease.release_raw(self.bytes);
+        }
     }
 }
 
@@ -296,6 +358,7 @@ mod tests {
         assert_eq!(receipt.requested_bytes, 1000);
         assert_eq!(receipt.peak_bytes, 1000);
         assert_eq!(receipt.refusals, 1);
+        assert_eq!(receipt.release_invariant_violations, 0);
         let first = receipt.first_refusal.as_ref().expect("recorded");
         assert_eq!(first.what, "chunk");
         assert_eq!(first.requested_bytes, 500);
@@ -303,7 +366,7 @@ mod tests {
     }
 
     #[test]
-    fn unbounded_lease_accounts_but_never_refuses() {
+    fn unbounded_lease_accounts_within_the_representable_live_set() {
         let lease = OperationMemoryLease::unbounded();
         let charge = lease
             .reserve("huge", u64::MAX / 2)
@@ -348,5 +411,44 @@ mod tests {
         let receipt = lease.receipt();
         assert_eq!(receipt.used_bytes, 0);
         assert!(receipt.peak_bytes <= 64);
+    }
+
+    #[test]
+    fn cumulative_counters_saturate_and_refusal_json_is_escaped() {
+        let lease = OperationMemoryLease::unbounded();
+        drop(
+            lease
+                .reserve("first", u64::MAX - 1)
+                .expect("representable live set"),
+        );
+        drop(
+            lease
+                .reserve("second", 2)
+                .expect("sequential reservation fits"),
+        );
+        assert_eq!(lease.receipt().requested_bytes, u64::MAX);
+
+        let refusing = OperationMemoryLease::bounded(0);
+        let hostile = "chunk\"}\n{\"forged\":true";
+        refusing
+            .reserve(hostile, 1)
+            .expect_err("zero-byte limit refuses");
+        let json = refusing.receipt().to_json();
+        assert!(!json.contains('\n'));
+        assert!(json.contains("chunk\\\"}\\n{\\\"forged\\\":true"));
+    }
+
+    #[test]
+    fn unmatched_release_is_visible_and_fail_closed() {
+        let lease = OperationMemoryLease::bounded(16);
+        assert!(!lease.release_raw(1));
+        let receipt = lease.receipt();
+        assert_eq!(receipt.used_bytes, 0, "underflow must not wrap");
+        assert_eq!(receipt.release_invariant_violations, 1);
+        assert!(
+            receipt
+                .to_json()
+                .contains("\"release_invariant_violations\":1")
+        );
     }
 }

@@ -52,8 +52,10 @@ impl Site {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct SiteStats {
     /// Cumulative 128-byte-padded payload bytes allocated under this site.
+    /// Saturates at `u64::MAX` rather than wrapping.
     pub bytes: u64,
     /// Cumulative allocation count under this site.
+    /// Saturates at `u64::MAX` rather than wrapping.
     pub allocations: u64,
 }
 
@@ -226,6 +228,53 @@ struct PoolShared {
     sites: Mutex<BTreeMap<&'static str, SiteStats>>,
 }
 
+/// A chunk admitted by both ledgers but not yet installed in an arena.
+/// Until `install_into` completes, dropping this value releases the operation
+/// charge first and returns the chunk to the pool. This closes the unwind gap
+/// between acquisition and arena ownership transfer.
+struct ChunkAcquisition<'a> {
+    shared: &'a PoolShared,
+    chunk: Option<Chunk>,
+    charge: Option<crate::LeaseCharge>,
+}
+
+impl ChunkAcquisition<'_> {
+    fn len(&self) -> usize {
+        self.chunk.as_ref().expect("pending chunk is present").len()
+    }
+
+    fn install_into(mut self, arena: &Arena, next_chunk_bytes: usize) {
+        let chunk_bytes = self.len() as u64;
+        let next_leased_bytes = self.charge.as_ref().map(|_| {
+            arena
+                .leased_bytes
+                .get()
+                .checked_add(chunk_bytes)
+                .expect("live arena chunks cannot exceed the address space")
+        });
+        let chunk = self.chunk.take().expect("pending chunk is present");
+        arena.raw.install_chunk(chunk);
+        arena.next_chunk_bytes.set(next_chunk_bytes);
+        if let Some(next) = next_leased_bytes {
+            arena.leased_bytes.set(next);
+        }
+        if let Some(charge) = self.charge.take() {
+            charge.commit_to_manual_release();
+        }
+    }
+}
+
+impl Drop for ChunkAcquisition<'_> {
+    fn drop(&mut self) {
+        // A rejected/unwinding acquisition must stop belonging to the
+        // operation before another operation can recycle the chunk.
+        drop(self.charge.take());
+        if let Some(chunk) = self.chunk.take() {
+            self.shared.release_chunk(chunk);
+        }
+    }
+}
+
 impl PoolShared {
     fn claim_new_chunk_bytes(&self, want: usize, site: Site) -> Result<(), AllocError> {
         loop {
@@ -240,7 +289,10 @@ impl PoolShared {
             if self.config.limit_bytes.is_some_and(|limit| next > limit) {
                 // Cached chunks count against the hard pool limit. Return them
                 // to the OS once before deciding that this request cannot fit.
-                let mut free = self.free.lock().expect("fs-alloc free list poisoned");
+                let mut free = self
+                    .free
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let drained = core::mem::take(&mut free.chunks);
                 let free_bytes = core::mem::replace(&mut free.bytes, 0);
                 drop(free);
@@ -287,34 +339,139 @@ impl PoolShared {
         min_bytes: usize,
         want: usize,
         site: Site,
-    ) -> Result<Chunk, AllocError> {
-        {
-            let mut free = self.free.lock().expect("fs-alloc free list poisoned");
-            if let Some(i) = free.chunks.iter().position(|c| c.len() >= min_bytes) {
-                let chunk = free.chunks.swap_remove(i);
-                free.bytes -= chunk.len();
-                self.chunks_recycled.fetch_add(1, Ordering::Relaxed);
-                return Ok(chunk);
-            }
-        }
+        lease: Option<&crate::OperationMemoryLease>,
+    ) -> Result<ChunkAcquisition<'_>, AllocError> {
         let want = want.max(min_bytes);
-        self.claim_new_chunk_bytes(want, site)?;
-        let align = self.hugepage.chunk_align(want);
-        let Some(chunk) = Chunk::allocate(want, align) else {
-            self.reserved_bytes.fetch_sub(want, Ordering::AcqRel);
-            return Err(AllocError::OutOfMemory {
-                site: site.name(),
-                requested_bytes: want,
+        let mut retried_after_pool_pressure = false;
+        loop {
+            {
+                let mut free = self
+                    .free
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if let Some((i, chunk_bytes)) = free
+                    .chunks
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, chunk)| (chunk.len() >= min_bytes).then_some((i, chunk.len())))
+                    .min_by_key(|(_, bytes)| *bytes)
+                {
+                    // A cached chunk can be larger than this arena's normal
+                    // fresh chunk. Do not let that historical cache shape
+                    // cause a false operation refusal when the smaller fresh
+                    // request fits.
+                    let prefer_fresh = lease.is_some_and(|lease| {
+                        chunk_bytes > want
+                            && !lease.can_reserve_now(chunk_bytes as u64)
+                            && lease.can_reserve_now(want as u64)
+                    });
+                    if !prefer_fresh {
+                        let charge = lease
+                            .map(|lease| lease.reserve("arena-chunk", chunk_bytes as u64))
+                            .transpose()
+                            .map_err(|refusal| AllocError::LeaseExhausted {
+                                site: site.name(),
+                                requested_bytes: refusal.requested_bytes,
+                                used_bytes: refusal.used_bytes,
+                                limit_bytes: refusal.limit_bytes,
+                            })?;
+                        let chunk = free.chunks.swap_remove(i);
+                        free.bytes -= chunk.len();
+                        self.chunks_recycled.fetch_add(1, Ordering::Relaxed);
+                        return Ok(ChunkAcquisition {
+                            shared: self,
+                            chunk: Some(chunk),
+                            charge,
+                        });
+                    }
+                }
+            }
+            let charge = lease
+                .map(|lease| lease.reserve("arena-chunk", want as u64))
+                .transpose()
+                .map_err(|refusal| AllocError::LeaseExhausted {
+                    site: site.name(),
+                    requested_bytes: refusal.requested_bytes,
+                    used_bytes: refusal.used_bytes,
+                    limit_bytes: refusal.limit_bytes,
+                })?;
+            match self.claim_new_chunk_bytes(want, site) {
+                Ok(()) => {}
+                Err(error @ AllocError::Exhausted { .. }) if !retried_after_pool_pressure => {
+                    // A concurrent arena can publish a suitable chunk after
+                    // the pressure drain's final capacity check. Drop this
+                    // tentative operation charge and recheck the free list
+                    // exactly once before returning the refusal.
+                    drop(charge);
+                    let free = self
+                        .free
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let cached_bytes = free
+                        .chunks
+                        .iter()
+                        .filter_map(|chunk| (chunk.len() >= min_bytes).then_some(chunk.len()))
+                        .min();
+                    drop(free);
+                    let cached_is_admissible = cached_bytes.is_some_and(|chunk_bytes| {
+                        lease.is_none_or(|lease| {
+                            let prefer_fresh = chunk_bytes > want
+                                && !lease.can_reserve_now(chunk_bytes as u64)
+                                && lease.can_reserve_now(want as u64);
+                            !prefer_fresh && lease.can_reserve_now(chunk_bytes as u64)
+                        })
+                    });
+                    if cached_is_admissible {
+                        retried_after_pool_pressure = true;
+                        continue;
+                    }
+                    return Err(error);
+                }
+                Err(error) => return Err(error),
+            }
+            let align = self.hugepage.chunk_align(want);
+            let Some(chunk) = Chunk::allocate(want, align) else {
+                self.reserved_bytes.fetch_sub(want, Ordering::AcqRel);
+                return Err(AllocError::OutOfMemory {
+                    site: site.name(),
+                    requested_bytes: want,
+                });
+            };
+            debug_assert_eq!(chunk.len(), want);
+            self.chunks_created.fetch_add(1, Ordering::Relaxed);
+            return Ok(ChunkAcquisition {
+                shared: self,
+                chunk: Some(chunk),
+                charge,
             });
-        };
-        debug_assert_eq!(chunk.len(), want);
-        self.chunks_created.fetch_add(1, Ordering::Relaxed);
-        Ok(chunk)
+        }
+    }
+
+    fn release_chunk(&self, chunk: Chunk) {
+        let mut free = self
+            .free
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(retained) = free
+            .bytes
+            .checked_add(chunk.len())
+            .filter(|&bytes| bytes <= self.config.free_list_max_bytes)
+        {
+            free.bytes = retained;
+            free.chunks.push(chunk);
+        } else {
+            let chunk_bytes = chunk.len();
+            drop(chunk);
+            self.reserved_bytes.fetch_sub(chunk_bytes, Ordering::AcqRel);
+        }
     }
 
     /// Return chunks for reuse, respecting the free-list cap.
     fn release_chunks(&self, chunks: Vec<Chunk>) {
-        let mut free = self.free.lock().expect("fs-alloc free list poisoned");
+        let mut free = self
+            .free
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         for chunk in chunks {
             if let Some(retained) = free
                 .bytes
@@ -467,7 +624,7 @@ impl ArenaPool {
             .shared
             .free
             .lock()
-            .expect("fs-alloc free list poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .bytes;
         PoolStats {
             arenas_live: self.shared.arenas_live.load(Ordering::Acquire),
@@ -494,7 +651,7 @@ impl ArenaPool {
             .shared
             .sites
             .lock()
-            .expect("fs-alloc site table poisoned");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         SiteReport {
             sites: sites.iter().map(|(k, v)| (*k, *v)).collect(),
         }
@@ -678,35 +835,21 @@ impl Arena {
     /// Install a fresh chunk sized for a `bytes`/`align` request.
     fn grow(&self, bytes: usize, align: usize, site: Site) -> Result<(), AllocError> {
         let min_bytes = reservation_min_bytes(bytes, align, site)?;
-        let chunk = self
-            .shared
-            .acquire_chunk(min_bytes, self.next_chunk_bytes.get(), site)?;
-        // Charge the operation lease for the hold interval (bead wf9.16) —
-        // fresh and recycled chunks alike enter this operation's live set.
-        // On refusal the chunk goes straight back to the pool: it never
-        // entered the arena, so nothing double-counts.
-        if let Some(lease) = &self.lease {
-            let chunk_bytes = chunk.len() as u64;
-            if let Err(refusal) = lease.try_reserve_raw("arena-chunk", chunk_bytes) {
-                self.shared.release_chunks(vec![chunk]);
-                return Err(AllocError::LeaseExhausted {
-                    site: site.name(),
-                    requested_bytes: refusal.requested_bytes,
-                    used_bytes: refusal.used_bytes,
-                    limit_bytes: refusal.limit_bytes,
-                });
-            }
-            self.leased_bytes
-                .set(self.leased_bytes.get() + chunk_bytes);
-        }
-        self.next_chunk_bytes.set(
-            chunk
-                .len()
-                .checked_mul(2)
-                .unwrap_or(self.shared.config.max_chunk_bytes)
-                .min(self.shared.config.max_chunk_bytes),
-        );
-        self.raw.install_chunk(chunk);
+        let acquisition = self.shared.acquire_chunk(
+            min_bytes,
+            self.next_chunk_bytes.get(),
+            site,
+            self.lease.as_ref(),
+        )?;
+        // Admission precedes recycled-chunk removal and fresh allocation, so
+        // the operation lease covers the complete hold interval. Pool/OS
+        // failures roll that charge back inside acquire_chunk.
+        let next_chunk_bytes = acquisition
+            .len()
+            .checked_mul(2)
+            .unwrap_or(self.shared.config.max_chunk_bytes)
+            .min(self.shared.config.max_chunk_bytes);
+        acquisition.install_into(self, next_chunk_bytes);
         Ok(())
     }
 
@@ -717,12 +860,13 @@ impl Arena {
     fn note(&self, site: Site, bytes: usize, align: usize) {
         let padded = padded_bytes(bytes, align);
         self.allocated_bytes
-            .set(self.allocated_bytes.get() + padded);
-        self.allocation_count.set(self.allocation_count.get() + 1);
+            .set(self.allocated_bytes.get().saturating_add(padded));
+        self.allocation_count
+            .set(self.allocation_count.get().saturating_add(1));
         let mut sites = self.sites.borrow_mut();
         if let Some((_, stats)) = sites.iter_mut().find(|(name, _)| *name == site.name()) {
-            stats.bytes += padded;
-            stats.allocations += 1;
+            stats.bytes = stats.bytes.saturating_add(padded);
+            stats.allocations = stats.allocations.saturating_add(1);
         } else {
             sites.push((
                 site.name(),
@@ -756,26 +900,28 @@ impl fmt::Debug for Arena {
 impl Drop for Arena {
     fn drop(&mut self) {
         let chunks = self.raw.take_chunks();
-        self.shared.release_chunks(chunks);
         // Chunks returned to the pool free list leave this operation's live
-        // set; release the lease charge for the whole hold (bead wf9.16).
+        // set. Drop the operation charge BEFORE publishing those chunks to
+        // the shared free list, so a concurrent recycler can never observe a
+        // free chunk that is still charged to its previous operation.
         if let Some(lease) = &self.lease {
             let held = self.leased_bytes.get();
             if held > 0 {
-                lease.release_raw(held);
+                let _released = lease.release_raw(held);
             }
         }
+        self.shared.release_chunks(chunks);
         let local = core::mem::take(self.sites.get_mut());
         if !local.is_empty() {
             let mut sites = self
                 .shared
                 .sites
                 .lock()
-                .expect("fs-alloc site table poisoned");
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             for (name, stats) in local {
                 let entry = sites.entry(name).or_default();
-                entry.bytes += stats.bytes;
-                entry.allocations += stats.allocations;
+                entry.bytes = entry.bytes.saturating_add(stats.bytes);
+                entry.allocations = entry.allocations.saturating_add(stats.allocations);
             }
         }
         self.shared.arenas_live.fetch_sub(1, Ordering::AcqRel);
@@ -822,8 +968,10 @@ fn padded_bytes(bytes: usize, align: usize) -> u64 {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArenaStats {
     /// Cumulative padded payload bytes allocated by this arena.
+    /// Saturates at `u64::MAX` rather than wrapping.
     pub allocated_bytes: u64,
     /// Cumulative allocation count.
+    /// Saturates at `u64::MAX` rather than wrapping.
     pub allocation_count: u64,
     /// Chunks currently owned by this arena.
     pub chunk_count: usize,
@@ -909,9 +1057,10 @@ impl SiteReport {
             if i > 0 {
                 s.push(',');
             }
+            let escaped_name = crate::lease::json_escape(name);
             let _ = write!(
                 s,
-                "{{\"site\":\"{name}\",\"bytes\":{},\"allocations\":{}}}",
+                "{{\"site\":\"{escaped_name}\",\"bytes\":{},\"allocations\":{}}}",
                 stats.bytes, stats.allocations
             );
         }
@@ -1093,6 +1242,160 @@ mod tests {
     }
 
     #[test]
+    fn leased_recycled_chunk_is_admitted_before_removal() {
+        let pool = small_pool(None);
+        pool.scope(|arena| {
+            arena
+                .alloc(Site::named("t/seed-recycled"), 1_u8)
+                .expect("seed free list");
+        });
+        let seeded = pool.stats();
+        assert_eq!(seeded.free_bytes, 4096);
+
+        let refusing = crate::OperationMemoryLease::bounded(0);
+        let error = pool.scope_leased(&refusing, |arena| {
+            arena
+                .alloc(Site::named("t/refuse-recycled"), 1_u8)
+                .expect_err("operation lease refuses before chunk removal")
+        });
+        assert!(matches!(error, AllocError::LeaseExhausted { .. }));
+        assert_eq!(refusing.receipt().used_bytes, 0);
+        let after_refusal = pool.stats();
+        assert_eq!(after_refusal.free_bytes, seeded.free_bytes);
+        assert_eq!(after_refusal.chunks_recycled, seeded.chunks_recycled);
+
+        let admitted = crate::OperationMemoryLease::unbounded();
+        pool.scope_leased(&admitted, |arena| {
+            arena
+                .alloc(Site::named("t/retry-recycled"), 1_u8)
+                .expect("unchanged free-list chunk remains reusable");
+        });
+        let after_retry = pool.stats();
+        assert_eq!(after_retry.chunks_created, seeded.chunks_created);
+        assert_eq!(after_retry.chunks_recycled, seeded.chunks_recycled + 1);
+        assert_eq!(admitted.receipt().used_bytes, 0);
+    }
+
+    #[test]
+    fn oversized_cached_chunk_does_not_force_a_false_lease_refusal() {
+        let pool = small_pool(None);
+        pool.scope(|arena| {
+            arena
+                .alloc_slice_fill(Site::named("t/seed-oversized"), 8192, 0_u8)
+                .expect("seed an oversized cached chunk");
+        });
+        let seeded = pool.stats();
+        assert_eq!(seeded.free_bytes, 8192);
+
+        let lease = crate::OperationMemoryLease::bounded(4096);
+        pool.scope_leased(&lease, |arena| {
+            arena
+                .alloc(Site::named("t/fresh-below-oversized-cache"), 1_u8)
+                .expect("the 4 KiB fresh chunk fits the lease");
+        });
+        let receipt = lease.receipt();
+        assert_eq!(receipt.requested_bytes, 4096);
+        assert_eq!(receipt.used_bytes, 0);
+        assert_eq!(receipt.refusals, 0);
+        let after_fresh = pool.stats();
+        assert_eq!(after_fresh.chunks_created, seeded.chunks_created + 1);
+        assert_eq!(after_fresh.chunks_recycled, seeded.chunks_recycled);
+        assert_eq!(after_fresh.free_bytes, 8192 + 4096);
+
+        let recycled = crate::OperationMemoryLease::bounded(4096);
+        pool.scope_leased(&recycled, |arena| {
+            arena
+                .alloc(Site::named("t/recycle-smallest"), 1_u8)
+                .expect("the smallest sufficient cached chunk is selected");
+        });
+        assert_eq!(recycled.receipt().requested_bytes, 4096);
+        assert_eq!(
+            pool.stats().chunks_recycled,
+            after_fresh.chunks_recycled + 1
+        );
+    }
+
+    #[test]
+    fn pending_chunk_unwind_rolls_back_both_ledgers() {
+        let pool = small_pool(None);
+        let lease = crate::OperationMemoryLease::bounded(4096);
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let pending = pool
+                .shared
+                .acquire_chunk(1, 4096, Site::named("t/pending-unwind"), Some(&lease))
+                .expect("both gates admit the pending chunk");
+            assert_eq!(pending.len(), 4096);
+            assert_eq!(lease.receipt().used_bytes, 4096);
+            panic!("unwind before arena installation");
+        }));
+        assert!(panicked.is_err());
+        let receipt = lease.receipt();
+        assert_eq!(receipt.used_bytes, 0);
+        assert_eq!(receipt.release_invariant_violations, 0);
+        let stats = pool.stats();
+        assert_eq!(stats.free_bytes, 4096);
+        assert!(stats.quiescent(), "{}", stats.to_json());
+    }
+
+    #[test]
+    fn poisoned_accounting_locks_do_not_break_acquire_recycle_or_cleanup() {
+        let pool = small_pool(None);
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _free = pool.shared.free.lock().expect("initial lock");
+            panic!("poison the free-list mutex without changing its state");
+        }));
+        assert!(poisoned.is_err());
+        assert!(pool.shared.free.is_poisoned());
+        let poisoned_sites = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _sites = pool.shared.sites.lock().expect("initial site lock");
+            panic!("poison the site-table mutex without changing its state");
+        }));
+        assert!(poisoned_sites.is_err());
+        assert!(pool.shared.sites.is_poisoned());
+
+        let first = crate::OperationMemoryLease::bounded(4096);
+        pool.scope_leased(&first, |arena| {
+            arena
+                .alloc(Site::named("t/poison-fresh"), 1_u8)
+                .expect("fresh acquisition recovers the poisoned lock");
+        });
+        assert_eq!(first.receipt().used_bytes, 0);
+        assert!(pool.stats().quiescent());
+
+        let recycled_before = pool.stats().chunks_recycled;
+        let second = crate::OperationMemoryLease::bounded(4096);
+        pool.scope_leased(&second, |arena| {
+            arena
+                .alloc(Site::named("t/poison-recycled"), 1_u8)
+                .expect("recycled acquisition recovers the poisoned lock");
+        });
+        assert_eq!(pool.stats().chunks_recycled, recycled_before + 1);
+        assert_eq!(second.receipt().used_bytes, 0);
+        assert!(pool.stats().quiescent());
+        let report = pool.site_report();
+        assert_eq!(report.sites.len(), 2);
+        assert_eq!(report.sites[0].0, "t/poison-fresh");
+        assert_eq!(report.sites[1].0, "t/poison-recycled");
+    }
+
+    #[test]
+    fn pool_refusal_rolls_back_prior_operation_admission() {
+        let pool = small_pool(Some(0));
+        let lease = crate::OperationMemoryLease::unbounded();
+        let error = pool.scope_leased(&lease, |arena| {
+            arena
+                .alloc(Site::named("t/pool-refusal-rollback"), 1_u8)
+                .expect_err("zero-byte pool gate refuses")
+        });
+        assert!(matches!(error, AllocError::Exhausted { .. }));
+        let receipt = lease.receipt();
+        assert_eq!(receipt.requested_bytes, 4096);
+        assert_eq!(receipt.used_bytes, 0, "failed pool gate must roll back");
+        assert_eq!(receipt.refusals, 0, "the operation gate admitted");
+        assert!(pool.stats().quiescent());
+    }
+
+    #[test]
     fn layout_overflow_is_reported() {
         let pool = small_pool(None);
         pool.scope(|a| {
@@ -1194,6 +1497,62 @@ mod tests {
             "{\"sites\":[{\"site\":\"t/a\",\"bytes\":128,\"allocations\":1},\
              {\"site\":\"t/b\",\"bytes\":256,\"allocations\":2}]}"
         );
+    }
+
+    #[test]
+    fn site_counters_saturate_instead_of_wrapping() {
+        let pool = small_pool(None);
+        let site = Site::named("t/saturating-site");
+        let arena = pool.arena();
+        arena.allocated_bytes.set(u64::MAX - 64);
+        arena.allocation_count.set(u64::MAX);
+        arena.sites.borrow_mut().push((
+            site.name(),
+            SiteStats {
+                bytes: u64::MAX - 64,
+                allocations: u64::MAX,
+            },
+        ));
+        pool.shared.sites.lock().expect("site table").insert(
+            site.name(),
+            SiteStats {
+                bytes: u64::MAX - 64,
+                allocations: u64::MAX,
+            },
+        );
+
+        arena.note(site, 1, 1);
+        assert_eq!(arena.allocated_bytes.get(), u64::MAX);
+        assert_eq!(arena.allocation_count.get(), u64::MAX);
+        assert_eq!(arena.sites.borrow()[0].1.bytes, u64::MAX);
+        assert_eq!(arena.sites.borrow()[0].1.allocations, u64::MAX);
+        drop(arena);
+
+        let report = pool.site_report();
+        assert_eq!(report.sites[0].1.bytes, u64::MAX);
+        assert_eq!(report.sites[0].1.allocations, u64::MAX);
+    }
+
+    #[test]
+    fn site_report_json_escapes_hostile_static_names() {
+        let pool = small_pool(None);
+        let hostile = Site::named("t/quote\"slash\\line\ncontrol\u{001f}");
+        pool.scope(|arena| {
+            arena.alloc(hostile, 1_u8).expect("hostile-name allocation");
+        });
+        let json = pool.site_report().to_json();
+        assert!(!json.contains('\n'));
+        assert!(json.contains("t/quote\\\"slash\\\\line\\ncontrol\\u001f"));
+
+        let mut emitter = fs_obs::Emitter::new("fs-alloc-test", "hostile-site");
+        let line = emitter
+            .emit(
+                fs_obs::Severity::Info,
+                pool.site_report().to_event_kind(),
+                None,
+            )
+            .to_jsonl();
+        fs_obs::validate_line(&line).unwrap_or_else(|error| panic!("{line}: {error}"));
     }
 
     #[test]

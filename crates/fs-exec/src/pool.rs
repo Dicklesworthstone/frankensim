@@ -142,7 +142,8 @@ pub enum RunError {
         message: String,
     },
     /// The operation memory lease refused the pool's root metadata BEFORE
-    /// worker launch (bead wf9.16); nothing ran and nothing was allocated.
+    /// worker launch (bead wf9.16); nothing ran and no root metadata was
+    /// allocated.
     /// Mid-run per-tile refusals surface as [`RunError::TileFailed`] with an
     /// allocation failure instead.
     MemoryRefused {
@@ -152,8 +153,28 @@ pub enum RunError {
         what: &'static str,
         /// Bytes the component requested.
         requested_bytes: u64,
+        /// Lease bytes already in use at refusal time.
+        used_bytes: u64,
         /// The lease limit in force.
         limit_bytes: u64,
+    },
+    /// A root-metadata dimension or byte total cannot be represented on this
+    /// target. Refused before lease mutation, allocation, or worker launch.
+    MemoryPlanOverflow {
+        /// Kernel name.
+        kernel: &'static str,
+        /// First root component whose checked sizing overflowed.
+        what: &'static str,
+    },
+    /// The global allocator refused fallible root-metadata reservation before
+    /// worker launch. The operation-lease charge is rolled back on return.
+    MemoryAllocationRefused {
+        /// Kernel name.
+        kernel: &'static str,
+        /// Root component whose backing allocation was refused.
+        what: &'static str,
+        /// Logical bytes requested for that component.
+        requested_bytes: u64,
     },
     /// A user-defined deterministic reduction merge panicked after every tile
     /// had completed. The unwind was contained at the pool boundary.
@@ -226,12 +247,28 @@ impl fmt::Display for RunError {
                 kernel,
                 what,
                 requested_bytes,
+                used_bytes,
                 limit_bytes,
             } => write!(
                 f,
                 "kernel `{kernel}` refused before launch: `{what}` needs {requested_bytes} B \
-                 but the operation memory lease holds {limit_bytes} B; nothing ran and \
-                 nothing was allocated"
+                 with {used_bytes} B of the {limit_bytes} B operation memory lease already in \
+                 use; nothing ran and no root metadata was allocated"
+            ),
+            RunError::MemoryPlanOverflow { kernel, what } => write!(
+                f,
+                "kernel `{kernel}` refused before launch: checked sizing for root component \
+                 `{what}` exceeds this target's representable memory domain; reduce the tile \
+                 or worker count"
+            ),
+            RunError::MemoryAllocationRefused {
+                kernel,
+                what,
+                requested_bytes,
+            } => write!(
+                f,
+                "kernel `{kernel}` refused before launch: the global allocator could not reserve \
+                 {requested_bytes} B for root component `{what}`; the lease charge was rolled back"
             ),
         }
     }
@@ -344,6 +381,20 @@ impl RunReport {
     }
 }
 
+fn prelaunch_report(kernel: &'static str, mode: &'static str, run: RunId, total: u64) -> RunReport {
+    RunReport {
+        kernel,
+        mode,
+        declared_run: run,
+        completed: 0,
+        total,
+        steals: 0,
+        cross_ccd_steals: 0,
+        cancel_latencies_ns: Vec::new(),
+        tiles_by_worker: Vec::new(),
+    }
+}
+
 /// Compute worker `w`'s CCD index under `topo` for `workers` total workers:
 /// contiguous blocks, so workers `[k*W/C, (k+1)*W/C)` share CCD `k`.
 fn ccd_of_worker(w: usize, workers: usize, topo: CcdTopology) -> usize {
@@ -351,27 +402,214 @@ fn ccd_of_worker(w: usize, workers: usize, topo: CcdTopology) -> usize {
     (w * ccds) / workers.max(1)
 }
 
-/// Conservative logical bytes for one run's root metadata (bead wf9.16):
-/// slots, deque headers and tile-id entries, victim tables, per-worker
-/// cache-padded atomics, the fold buffer, and the report vectors.
-/// Saturating arithmetic — an unrepresentable plan charges `u64::MAX` and
-/// fails the lease honestly. Thread stacks and allocator overhead are
-/// explicit no-claims (CONTRACT): this is the logical live set, not a
-/// platform byte census.
-fn root_metadata_bytes<K: TileKernel>(n: u64, workers: usize) -> u64 {
-    let workers = workers as u64;
+/// Checked conservative logical bytes for one run's tracked root metadata
+/// (bead wf9.16): slots, deque headers and initial tile-id entries, range-plan entries,
+/// victim-table headers/final entries/construction temporaries, per-worker
+/// cache-padded atomics, retained pairwise-fold buffers, and report vectors.
+/// Thread stacks, allocator bookkeeping, and heap owned by arbitrary kernel
+/// outputs are explicit no-claims (CONTRACT): this is an enforceable tracked
+/// envelope, not a full-process byte census.
+fn root_metadata_bytes<K: TileKernel>(n: u64, workers: usize) -> Result<u64, &'static str> {
+    let workers = u64::try_from(workers).map_err(|_| "worker-count")?;
     let slot = size_of::<Mutex<Option<K::Out>>>() as u64;
     let deque_header = size_of::<CachePadded<Mutex<VecDeque<u64>>>>() as u64;
+    let range = size_of::<core::ops::Range<u64>>() as u64;
+    let victim_header = size_of::<Vec<usize>>() as u64;
+    let tile_id = size_of::<u64>() as u64;
+    let report_value = size_of::<u64>() as u64;
     let atomic = size_of::<CachePadded<AtomicU64>>() as u64;
     let out = size_of::<K::Out>() as u64;
-    let victim_entries = workers.saturating_mul(workers.saturating_sub(1));
-    n.saturating_mul(slot)
-        .saturating_add(n.saturating_mul(8))
-        .saturating_add(workers.saturating_mul(deque_header))
-        .saturating_add(victim_entries.saturating_mul(8))
-        .saturating_add(workers.saturating_mul(2).saturating_mul(atomic))
-        .saturating_add(n.saturating_mul(out))
-        .saturating_add(workers.saturating_mul(16))
+    let victim_entries = root_mul(workers, workers.saturating_sub(1), "victim-table-entries")?;
+    // victim_order builds one final vector while its `other` partition is
+    // still live. The checked constructor reserves workers-1 entries for that
+    // temporary, so the peak is final tables plus one extra partition.
+    let victim_temporary_entries = workers.saturating_sub(1);
+    // pairwise_fold recursively split_offs right halves while parent buffers
+    // remain allocated: n + floor tree rights = at most 2n-1 elements.
+    let fold_elements = if n == 0 {
+        0
+    } else {
+        root_mul(n, 2, "fold-buffer-elements")?
+            .checked_sub(1)
+            .ok_or("fold-buffer-elements")?
+    };
+
+    let components = [
+        ("slot-table", root_mul(n, slot, "slot-table")?),
+        ("deque-entries", root_mul(n, tile_id, "deque-entries")?),
+        (
+            "deque-headers",
+            root_mul(workers, deque_header, "deque-headers")?,
+        ),
+        ("range-plans", root_mul(workers, range, "range-plans")?),
+        (
+            "victim-table-headers",
+            root_mul(workers, victim_header, "victim-table-headers")?,
+        ),
+        (
+            "victim-table-entries",
+            root_mul(
+                victim_entries,
+                size_of::<usize>() as u64,
+                "victim-table-entries",
+            )?,
+        ),
+        (
+            "victim-order-temporary",
+            root_mul(
+                victim_temporary_entries,
+                size_of::<usize>() as u64,
+                "victim-order-temporary",
+            )?,
+        ),
+        (
+            "worker-counters",
+            root_mul(
+                root_mul(workers, 2, "worker-counters")?,
+                atomic,
+                "worker-counters",
+            )?,
+        ),
+        (
+            "fold-buffers",
+            root_mul(fold_elements, out, "fold-buffers")?,
+        ),
+        (
+            "report-vectors",
+            root_mul(
+                root_mul(workers, 2, "report-vectors")?,
+                report_value,
+                "report-vectors",
+            )?,
+        ),
+    ];
+    components
+        .into_iter()
+        .try_fold(0_u64, |total, (what, bytes)| {
+            total.checked_add(bytes).ok_or(what)
+        })
+}
+
+fn root_mul(a: u64, b: u64, what: &'static str) -> Result<u64, &'static str> {
+    a.checked_mul(b).ok_or(what)
+}
+
+fn allocation_bytes<T>(capacity: usize) -> u64 {
+    u64::try_from(capacity)
+        .ok()
+        .and_then(|count| count.checked_mul(size_of::<T>() as u64))
+        .unwrap_or(u64::MAX)
+}
+
+fn try_reserve_root_vec<T>(
+    values: &mut Vec<T>,
+    capacity: usize,
+    kernel: &'static str,
+    what: &'static str,
+) -> Result<(), RunError> {
+    values
+        .try_reserve_exact(capacity)
+        .map_err(|_| RunError::MemoryAllocationRefused {
+            kernel,
+            what,
+            requested_bytes: allocation_bytes::<T>(capacity),
+        })
+}
+
+fn try_reserve_root_deque<T>(
+    values: &mut VecDeque<T>,
+    capacity: usize,
+    kernel: &'static str,
+    what: &'static str,
+) -> Result<(), RunError> {
+    values
+        .try_reserve_exact(capacity)
+        .map_err(|_| RunError::MemoryAllocationRefused {
+            kernel,
+            what,
+            requested_bytes: allocation_bytes::<T>(capacity),
+        })
+}
+
+struct RunRoot<T> {
+    slots: Vec<Mutex<Option<T>>>,
+    _ranges: Vec<core::ops::Range<u64>>,
+    deques: Vec<CachePadded<Mutex<VecDeque<u64>>>>,
+    victims: Vec<Vec<usize>>,
+    observed: Vec<CachePadded<AtomicU64>>,
+    done_by: Vec<CachePadded<AtomicU64>>,
+    cancel_latencies_ns: Vec<u64>,
+    tiles_by_worker: Vec<u64>,
+    outs: Vec<T>,
+}
+
+fn allocate_run_root<K: TileKernel>(
+    n: u64,
+    n_usize: usize,
+    workers: usize,
+    weights: &[u32],
+    topo: CcdTopology,
+    kernel: &'static str,
+) -> Result<RunRoot<K::Out>, RunError> {
+    let mut slots = Vec::new();
+    try_reserve_root_vec(&mut slots, n_usize, kernel, "slot-table")?;
+    for _ in 0..n_usize {
+        slots.push(Mutex::new(None));
+    }
+
+    let active_weights = weights.get(..workers).ok_or(RunError::MemoryPlanOverflow {
+        kernel,
+        what: "worker-weights",
+    })?;
+    let ranges = try_weighted_ranges(n, active_weights, kernel)?;
+    let mut deques = Vec::new();
+    try_reserve_root_vec(&mut deques, workers, kernel, "deque-headers")?;
+    for range in &ranges {
+        let entries =
+            usize::try_from(range.end - range.start).map_err(|_| RunError::MemoryPlanOverflow {
+                kernel,
+                what: "deque-entries",
+            })?;
+        let mut deque = VecDeque::new();
+        try_reserve_root_deque(&mut deque, entries, kernel, "deque-entries")?;
+        deque.extend(range.start..range.end);
+        deques.push(CachePadded::new(Mutex::new(deque)));
+    }
+
+    let mut victims = Vec::new();
+    try_reserve_root_vec(&mut victims, workers, kernel, "victim-table-headers")?;
+    for worker in 0..workers {
+        victims.push(try_victim_order(worker, workers, topo, kernel)?);
+    }
+
+    let mut observed = Vec::new();
+    let mut done_by = Vec::new();
+    try_reserve_root_vec(&mut observed, workers, kernel, "worker-counters")?;
+    try_reserve_root_vec(&mut done_by, workers, kernel, "worker-counters")?;
+    for _ in 0..workers {
+        observed.push(CachePadded::new(AtomicU64::new(0)));
+        done_by.push(CachePadded::new(AtomicU64::new(0)));
+    }
+
+    let mut cancel_latencies_ns = Vec::new();
+    let mut tiles_by_worker = Vec::new();
+    try_reserve_root_vec(&mut cancel_latencies_ns, workers, kernel, "report-vectors")?;
+    try_reserve_root_vec(&mut tiles_by_worker, workers, kernel, "report-vectors")?;
+
+    let mut outs = Vec::new();
+    try_reserve_root_vec(&mut outs, n_usize, kernel, "fold-buffers")?;
+
+    Ok(RunRoot {
+        slots,
+        _ranges: ranges,
+        deques,
+        victims,
+        observed,
+        done_by,
+        cancel_latencies_ns,
+        tiles_by_worker,
+        outs,
+    })
 }
 
 /// The steal victim order for worker `w`: same-CCD workers first (ring
@@ -380,19 +618,46 @@ fn root_metadata_bytes<K: TileKernel>(n: u64, workers: usize) -> u64 {
 /// topologies verifies the runtime behavior.
 #[must_use]
 pub fn victim_order(w: usize, workers: usize, topo: &CcdTopology) -> Vec<usize> {
-    let my_ccd = ccd_of_worker(w, workers, *topo);
-    let ring = (1..workers).map(|d| (w + d) % workers);
-    let mut same: Vec<usize> = Vec::new();
-    let mut other: Vec<usize> = Vec::new();
-    for v in ring {
-        if ccd_of_worker(v, workers, *topo) == my_ccd {
+    let capacity = workers.saturating_sub(1);
+    let mut same = Vec::with_capacity(capacity);
+    let mut other = Vec::with_capacity(capacity);
+    partition_victims(w, workers, *topo, &mut same, &mut other);
+    same.extend(other);
+    same
+}
+
+fn try_victim_order(
+    w: usize,
+    workers: usize,
+    topo: CcdTopology,
+    kernel: &'static str,
+) -> Result<Vec<usize>, RunError> {
+    let capacity = workers.saturating_sub(1);
+    let mut same = Vec::new();
+    let mut other = Vec::new();
+    try_reserve_root_vec(&mut same, capacity, kernel, "victim-table-entries")?;
+    try_reserve_root_vec(&mut other, capacity, kernel, "victim-order-temporary")?;
+    partition_victims(w, workers, topo, &mut same, &mut other);
+    same.extend(other);
+    Ok(same)
+}
+
+fn partition_victims(
+    w: usize,
+    workers: usize,
+    topo: CcdTopology,
+    same: &mut Vec<usize>,
+    other: &mut Vec<usize>,
+) {
+    let my_ccd = ccd_of_worker(w, workers, topo);
+    for d in 1..workers {
+        let v = (w + d) % workers;
+        if ccd_of_worker(v, workers, topo) == my_ccd {
             same.push(v);
         } else {
             other.push(v);
         }
     }
-    same.extend(other);
-    same
 }
 
 /// Split `0..tiles` into contiguous per-worker ranges proportional to
@@ -401,9 +666,25 @@ pub fn victim_order(w: usize, workers: usize, topo: &CcdTopology) -> Vec<usize> 
 /// that ratio exactly without a fixed-width intermediate product.
 #[must_use]
 pub fn weighted_ranges(tiles: u64, weights: &[u32]) -> Vec<core::ops::Range<u64>> {
+    let mut ranges = Vec::with_capacity(weights.len());
+    fill_weighted_ranges(tiles, weights, &mut ranges);
+    ranges
+}
+
+fn try_weighted_ranges(
+    tiles: u64,
+    weights: &[u32],
+    kernel: &'static str,
+) -> Result<Vec<core::ops::Range<u64>>, RunError> {
+    let mut ranges = Vec::new();
+    try_reserve_root_vec(&mut ranges, weights.len(), kernel, "range-plans")?;
+    fill_weighted_ranges(tiles, weights, &mut ranges);
+    Ok(ranges)
+}
+
+fn fill_weighted_ranges(tiles: u64, weights: &[u32], ranges: &mut Vec<core::ops::Range<u64>>) {
     let total_w: u128 = weights.iter().map(|&w| u128::from(w.max(1))).sum();
     let tiles = u128::from(tiles);
-    let mut ranges = Vec::with_capacity(weights.len());
     let mut start = 0u64;
     let mut acc = 0u128;
     for (i, &w) in weights.iter().enumerate() {
@@ -420,7 +701,6 @@ pub fn weighted_ranges(tiles: u64, weights: &[u32]) -> Vec<core::ops::Range<u64>
         ranges.push(start..end);
         start = end;
     }
-    ranges
 }
 
 fn mul_ratio_floor(value: u64, numerator: u128, denominator: u128) -> u64 {
@@ -563,8 +843,9 @@ impl TilePool {
     /// lease (bead wf9.16): root metadata is reserved fallibly BEFORE worker
     /// launch, and every tile arena's chunks charge the lease while held.
     /// The caller keeps the lease and reads `lease.receipt()` for the
-    /// deterministic requested/peak/refused accounting; thread stacks and
-    /// allocator overhead are explicitly not claimed.
+    /// canonical accounting of that admission trace. Thread stacks, allocator
+    /// bookkeeping, and arbitrary heap owned directly by kernels or their
+    /// outputs are explicitly not claimed.
     pub fn run_declared_leased_budgeted<K: TileKernel>(
         &self,
         kernel: &K,
@@ -615,18 +896,37 @@ impl TilePool {
         // former pool-global counter made keys depend on unrelated
         // prior runs and on concurrent invocation order.
         let iteration = run.0;
-        let workers = self.config.workers.min(n.max(1) as usize).max(1);
+        let Ok(n_usize) = usize::try_from(n) else {
+            return (
+                Err(RunError::MemoryPlanOverflow {
+                    kernel: plan.kernel,
+                    what: "tile-count",
+                }),
+                prelaunch_report(plan.kernel, self.config.mode.name(), run, n),
+            );
+        };
+        let workers = self.config.workers.min(n_usize.max(1)).max(1);
 
         // Root metadata is reserved fallibly BEFORE any of it is allocated
         // and BEFORE worker launch (bead wf9.16). The charge covers slots,
-        // deque headers and entries, victim tables, per-worker atomics, the
-        // fold buffer, and the report vectors; thread stacks and allocator
-        // overhead are explicit no-claims. The guard holds until the run
-        // returns (including unwinds).
-        let _root_charge = match lease.reserve(
-            "tilepool-root-metadata",
-            root_metadata_bytes::<K>(n, workers),
-        ) {
+        // deque headers/initial entries, range plans, victim tables plus their
+        // construction temporary, per-worker atomics, the retained
+        // pairwise-fold buffers, and report vectors. Thread stacks, allocator
+        // bookkeeping, and arbitrary kernel/output-owned heap are explicit
+        // no-claims. The guard holds until the run returns (including unwinds).
+        let root_bytes = match root_metadata_bytes::<K>(n, workers) {
+            Ok(bytes) => bytes,
+            Err(what) => {
+                return (
+                    Err(RunError::MemoryPlanOverflow {
+                        kernel: plan.kernel,
+                        what,
+                    }),
+                    prelaunch_report(plan.kernel, self.config.mode.name(), run, n),
+                );
+            }
+        };
+        let _root_charge = match lease.reserve("tilepool-root-metadata", root_bytes) {
             Ok(charge) => charge,
             Err(refusal) => {
                 return (
@@ -634,45 +934,45 @@ impl TilePool {
                         kernel: plan.kernel,
                         what: refusal.what,
                         requested_bytes: refusal.requested_bytes,
+                        used_bytes: refusal.used_bytes,
                         limit_bytes: refusal.limit_bytes,
                     }),
-                    RunReport {
-                        kernel: plan.kernel,
-                        mode: self.config.mode.name(),
-                        declared_run: run,
-                        completed: 0,
-                        total: n,
-                        steals: 0,
-                        cross_ccd_steals: 0,
-                        cancel_latencies_ns: Vec::new(),
-                        tiles_by_worker: Vec::new(),
-                    },
+                    prelaunch_report(plan.kernel, self.config.mode.name(), run, n),
                 );
             }
         };
 
-        // Fixed-slot reduction storage: one slot per tile, written once.
-        let slots: Vec<Mutex<Option<K::Out>>> = (0..n).map(|_| Mutex::new(None)).collect();
-        // Per-worker deques seeded with weight-proportional contiguous runs.
-        let ranges = weighted_ranges(n, &self.config.quantum_weights[..workers]);
-        let deques: Vec<CachePadded<Mutex<VecDeque<u64>>>> = ranges
-            .iter()
-            .map(|r| CachePadded::new(Mutex::new(r.clone().collect())))
-            .collect();
-        let victims: Vec<Vec<usize>> = (0..workers)
-            .map(|w| victim_order(w, workers, &self.config.topo))
-            .collect();
+        let RunRoot {
+            slots,
+            _ranges,
+            deques,
+            victims,
+            observed,
+            done_by,
+            mut cancel_latencies_ns,
+            mut tiles_by_worker,
+            mut outs,
+        } = match allocate_run_root::<K>(
+            n,
+            n_usize,
+            workers,
+            &self.config.quantum_weights,
+            self.config.topo,
+            plan.kernel,
+        ) {
+            Ok(root) => root,
+            Err(error) => {
+                return (
+                    Err(error),
+                    prelaunch_report(plan.kernel, self.config.mode.name(), run, n),
+                );
+            }
+        };
 
         let steals = AtomicU64::new(0);
         let cross_steals = AtomicU64::new(0);
         let panic_box: Mutex<Option<(u64, String)>> = Mutex::new(None);
         let refusal_sink = RefusalSink::default();
-        let observed: Vec<CachePadded<AtomicU64>> = (0..workers)
-            .map(|_| CachePadded::new(AtomicU64::new(0)))
-            .collect();
-        let done_by: Vec<CachePadded<AtomicU64>> = (0..workers)
-            .map(|_| CachePadded::new(AtomicU64::new(0)))
-            .collect();
 
         let mut spawn_failure = None;
         std::thread::scope(|s| {
@@ -799,6 +1099,19 @@ impl TilePool {
             .filter(|s| s.lock().expect("slot").is_some())
             .count() as u64;
         let requested_at = gate.requested_at_ns();
+        if let Some(requested_at) = requested_at {
+            for observed_at in &observed {
+                match observed_at.get().load(Ordering::Acquire) {
+                    0 => {}
+                    observed_at => {
+                        cancel_latencies_ns.push(observed_at.saturating_sub(requested_at));
+                    }
+                }
+            }
+        }
+        for completed_by_worker in &done_by {
+            tiles_by_worker.push(completed_by_worker.get().load(Ordering::Relaxed));
+        }
         let report = RunReport {
             kernel: plan.kernel,
             mode: self.config.mode.name(),
@@ -807,19 +1120,8 @@ impl TilePool {
             total: n,
             steals: steals.load(Ordering::Relaxed),
             cross_ccd_steals: cross_steals.load(Ordering::Relaxed),
-            cancel_latencies_ns: requested_at.map_or_else(Vec::new, |req| {
-                observed
-                    .iter()
-                    .filter_map(|o| match o.get().load(Ordering::Acquire) {
-                        0 => None,
-                        t => Some(t.saturating_sub(req)),
-                    })
-                    .collect()
-            }),
-            tiles_by_worker: done_by
-                .iter()
-                .map(|c| c.get().load(Ordering::Relaxed))
-                .collect(),
+            cancel_latencies_ns,
+            tiles_by_worker,
         };
 
         // Stable failure-class precedence preserves legacy panic containment
@@ -868,7 +1170,6 @@ impl TilePool {
         }
         // Fixed-shape fold: the pairwise tree over ascending tile order
         // (shape a pure function of the tile count — plan §5.4).
-        let mut outs: Vec<K::Out> = Vec::with_capacity(slots.len());
         for (i, slot) in slots.into_iter().enumerate() {
             match slot.into_inner().expect("slot") {
                 Some(out) => outs.push(out),
@@ -1121,6 +1422,20 @@ mod tests {
         }
     }
 
+    struct UnrepresentablePlan;
+
+    impl TileKernel for UnrepresentablePlan {
+        type Out = u64;
+
+        fn tiles(&self) -> TilePlan {
+            TilePlan::new("test/unrepresentable-root", u64::MAX)
+        }
+
+        fn run(&self, _tile: u64, _cx: &Cx<'_>) -> ControlFlow<crate::Cancelled, u64> {
+            panic!("an unrepresentable plan must be refused before launch")
+        }
+    }
+
     fn pool(workers: usize) -> TilePool {
         TilePool::new(PoolConfig::new(workers, CcdTopology::APPLE_M_CLASS, 0x5EED))
     }
@@ -1162,6 +1477,58 @@ mod tests {
                 u64::MAX.wrapping_mul(workers as u64)
             );
         }
+    }
+
+    #[test]
+    fn root_metadata_plan_counts_fold_and_victim_construction_peaks() {
+        let n = 9_u64;
+        let workers = 4_u64;
+        let slot = size_of::<Mutex<Option<u64>>>() as u64;
+        let deque_header = size_of::<CachePadded<Mutex<VecDeque<u64>>>>() as u64;
+        let range = size_of::<core::ops::Range<u64>>() as u64;
+        let victim_header = size_of::<Vec<usize>>() as u64;
+        let atomic = size_of::<CachePadded<AtomicU64>>() as u64;
+        let expected = n * slot
+            + n * size_of::<u64>() as u64
+            + workers * deque_header
+            + workers * range
+            + workers * victim_header
+            + (workers * (workers - 1) + (workers - 1)) * size_of::<usize>() as u64
+            + workers * 2 * atomic
+            + (2 * n - 1) * size_of::<u64>() as u64
+            + workers * 2 * size_of::<u64>() as u64;
+        assert_eq!(
+            root_metadata_bytes::<SumKernel>(n, workers as usize),
+            Ok(expected)
+        );
+    }
+
+    #[test]
+    fn unrepresentable_root_plan_is_refused_before_lease_or_launch() {
+        let pool = pool(2);
+        let lease = fs_alloc::OperationMemoryLease::unbounded();
+        let (result, report) = pool.run_declared_leased_budgeted(
+            &UnrepresentablePlan,
+            &CancelGate::new(),
+            RunId(29),
+            Budget::INFINITE,
+            &lease,
+        );
+        assert!(
+            matches!(
+                result,
+                Err(RunError::MemoryPlanOverflow {
+                    what: "fold-buffer-elements",
+                    ..
+                })
+            ),
+            "got {result:?}"
+        );
+        assert_eq!(report.completed, 0);
+        let receipt = lease.receipt();
+        assert_eq!(receipt.requested_bytes, 0);
+        assert_eq!(receipt.used_bytes, 0);
+        assert_eq!(receipt.refusals, 0);
     }
 
     #[test]

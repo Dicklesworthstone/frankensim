@@ -1,8 +1,9 @@
 //! Operation-memory-lease battery (bead wf9.16): one run-scoped lease
 //! covers TilePool root metadata and every tile arena chunk, with atomic
-//! reserve/release, deterministic accounting, and refusals that drain
-//! cleanly. Thread stacks and allocator overhead are explicit no-claims —
-//! the lease is the logical live set, not a platform byte census.
+//! reserve/release, canonical accounting, and refusals that drain cleanly.
+//! Pool-cache history and near-limit concurrent admission can change peaks;
+//! thread stacks, allocator overhead, and arbitrary kernel/output-owned heap
+//! are explicit no-claims.
 
 use core::ops::ControlFlow;
 
@@ -100,7 +101,13 @@ fn run_leased(
     kernel: &impl TileKernel<Out = u64>,
     lease: &OperationMemoryLease,
 ) -> (Result<u64, RunError>, fs_exec::RunReport) {
-    pool.run_declared_leased_budgeted(kernel, &CancelGate::new(), RunId(7), Budget::INFINITE, lease)
+    pool.run_declared_leased_budgeted(
+        kernel,
+        &CancelGate::new(),
+        RunId(7),
+        Budget::INFINITE,
+        lease,
+    )
 }
 
 #[test]
@@ -128,6 +135,7 @@ fn root_metadata_refusal_precedes_launch_and_pool_stays_usable() {
     match result {
         Err(RunError::MemoryRefused {
             what: "tilepool-root-metadata",
+            used_bytes: 0,
             limit_bytes: 1,
             ..
         }) => {}
@@ -209,7 +217,10 @@ fn cancellation_releases_all_charges() {
         Budget::INFINITE,
         &lease,
     );
-    assert!(matches!(result, Err(RunError::Cancelled { .. })), "got {result:?}");
+    assert!(
+        matches!(result, Err(RunError::Cancelled { .. })),
+        "got {result:?}"
+    );
     let receipt = lease.receipt();
     assert_eq!(receipt.used_bytes, 0);
     assert_eq!(receipt.refusals, 0);
@@ -262,7 +273,11 @@ fn varying_worker_counts_hold_the_lease_invariants() {
         let kernel = AllocatingKernel { tiles: 8 };
         let lease = OperationMemoryLease::bounded(1 << 22);
         let (result, _report) = run_leased(&pool, &kernel, &lease);
-        assert_eq!(result.expect("run"), (0..8).sum::<u64>(), "workers={workers}");
+        assert_eq!(
+            result.expect("run"),
+            (0..8).sum::<u64>(),
+            "workers={workers}"
+        );
         let receipt = lease.receipt();
         assert_eq!(receipt.used_bytes, 0, "workers={workers}");
         assert!(receipt.peak_bytes <= receipt.requested_bytes);

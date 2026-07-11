@@ -46,15 +46,23 @@ fs-blake3, fs-substrate, fs-obs.
   deliberately retain `Budget::INFINITE`. `run_declared_leased_budgeted`
   (bead wf9.16) further binds the run to a shared
   `fs_alloc::OperationMemoryLease`: root metadata (slots, deque headers and
-  entries, victim tables, per-worker atomics, fold buffer, report vectors)
-  is reserved fallibly BEFORE worker launch (`RunError::MemoryRefused`,
-  nothing ran, nothing allocated) and every tile arena charges the lease
+  initial entries, range plans, victim table headers/final entries/construction
+  temporary, per-worker atomics, retained pairwise-fold buffers, report
+  vectors) is sized with checked arithmetic and reserved fallibly BEFORE
+  worker launch (`RunError::MemoryPlanOverflow`, `MemoryRefused`, or
+  `MemoryAllocationRefused`; nothing ran and no root metadata remains
+  allocated) and every tile arena charges the lease
   while its chunks are held (mid-run refusals surface as `TileFailed` with
   `AllocError::LeaseExhausted` and drain like any typed refusal). Legacy
   wrappers pass an unbounded lease; the caller reads `lease.receipt()` for
-  deterministic requested/peak/refused accounting. Thread stacks and
-  allocator overhead are explicit no-claims — the lease is the logical live
-  set, not a platform byte census. Workers are scoped per run; per-worker deques are
+  canonical accounting of the observed admission trace. Identical fixed plans
+  with identical arena-cache state have deterministic cumulative demand;
+  cache history and near-limit concurrent refusal/peak fields are
+  state/schedule-sensitive. The enforced envelope is deliberately narrow:
+  tracked executor root metadata plus lease-bound arena chunks. Thread stacks,
+  allocator bookkeeping, panic strings, and arbitrary heap owned directly by
+  a kernel or a heap-bearing `K::Out` are explicit no-claims. Workers are
+  scoped per run; per-worker deques are
   seeded with contiguous, weight-proportional tile runs (`weighted_ranges`)
   and steal HALF a victim's deque in `victim_order` (same-CCD ring first).
   `PoolConfig::for_host` / `TilePool::for_host` select the recorded host-probe
@@ -64,8 +72,9 @@ fs-blake3, fs-substrate, fs-obs.
   normalized workers, weights, arena policy, the `ArenaPool`'s recorded
   hugepage decision/outcome, and exact requested pin groups. Pin success is not
   claimed by this identity.
-- `RunError { Cancelled, TilePanicked, TileFailed, WorkerSpawn, ReductionPanicked,
-  Incomplete }` — structured, teaching
+- `RunError { Cancelled, TilePanicked, TileFailed, WorkerSpawn, MemoryRefused,
+  MemoryPlanOverflow, MemoryAllocationRefused, ReductionPanicked, Incomplete }`
+  — structured, teaching
   outcomes with tile provenance. `RunReport` — the caller-declared `RunId`
   that keyed every tile stream, steal counts, cross-CCD steal counts,
   cancel-latency samples, `cancel_latency_p99_ns()`, canonical `to_json()`.
@@ -231,6 +240,13 @@ fs-blake3, fs-substrate, fs-obs.
     lookup and replay. Row and decision installation are explicit commits so
     failed persistence or cancelled execution cannot fabricate local state or
     a successful-dispatch receipt.
+13. Leased runs refuse before launch when tile counts or root-byte arithmetic
+    are unrepresentable, when the lease cannot admit the checked root charge,
+    or when fallible root-vector reservation fails. The root charge includes
+    the `pairwise_fold` split-buffer peak (`2n-1` output elements for `n>0`)
+    and one concurrent victim-order partition in addition to final tables;
+    it releases on every return/unwind. This invariant applies only to the
+    tracked envelope named above, not arbitrary kernel-owned heap.
 
 ## Snapshot envelope (bead wf9.8.2, v1)
 
@@ -299,6 +315,10 @@ executor-internal invariant violations become `RunError::Incomplete`
 kernel-authored asserts, which are contained per invariant 5.
 Typed kernel refusals become `RunError::TileFailed` after every sibling and
 scope arena has drained; they remain distinct from cancellation and panic.
+Prelaunch memory failures remain distinct as `MemoryPlanOverflow` (checked
+dimension/byte arithmetic), `MemoryRefused` (the shared lease, retaining used
+and limit bytes), or `MemoryAllocationRefused` (fallible root backing-store
+reservation after lease admission, with the lease charge rolled back).
 
 ## Determinism class
 Deterministic (P2): results and stream keys are bit-stable across runs,
@@ -378,11 +398,18 @@ and explicit row/decision commit semantics.
 - `run_declared_budgeted` propagates a finite asupersync budget unchanged, but
   generic enforcement of its poll/deadline/cost dimensions is NOT claimed:
   kernels must consume the dimensions they understand. Legacy run wrappers
-  still supply `Budget::INFINITE`. A shared executor-memory lease covering
-  slots, deques, report roots and their dynamic `cancel_latencies_ns` /
-  `tiles_by_worker` vectors, thread stacks, and aggregate arena reservations is
-  broader follow-up work; wf9.15 only uses the typed propagation/refusal
-  substrate for GEMM's explicitly preflighted memory envelope.
+  still supply `Budget::INFINITE`.
+- `run_declared_leased_budgeted` enforces one shared lease over the checked,
+  tracked root-metadata formula and all chunks acquired by its leased arenas.
+  It does NOT claim a full-process or arbitrary-kernel live-set ceiling:
+  thread stacks, allocator metadata/capacity rounding, panic diagnostics, and
+  direct heap allocations inside a kernel or heap-bearing output remain
+  outside the lease until `Cx` grows a lease-aware artifact allocator. The v1
+  mutex-deque stealer's temporary `VecDeque::split_off` transfer buffers are
+  also not yet included: their tight schedule-independent capacity bound or a
+  preallocated/range-based replacement remains follow-up work. None of these
+  allocations may be described as covered merely because their container
+  header or initial entry storage is charged.
 - The latency lane's ≤100 ms conversational guarantee is HELM's gate;
   exec-007 measures and ledgers turnaround without claiming it.
 - `ExecMode::Fast`'s 5–15% relaxed-reduction throughput claim is NOT made:
