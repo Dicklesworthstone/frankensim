@@ -10,15 +10,21 @@
 //! fs-ledger records). Reporting-only in v0: attainment verdicts inform;
 //! gating bands belong to nightly runs on ledgered reference machines.
 
+pub mod authority;
 pub mod axes;
 pub mod baseline;
 pub mod kernels;
 pub mod stats;
 
+pub use authority::{
+    KeyVerdict, NoPromotionAuthority, PromotionAttestation, PromotionAuthorityVerifier,
+    StaticKeyRegistry,
+};
 pub use axes::MachineAxes;
 pub use baseline::{
-    BASELINE_SCHEMA_VERSION, BaselineAxes, BaselineCandidate, BaselineClockError, BaselineIdentity,
-    BaselineProvenance, BaselineStore, BaselineVerdict, PromotionError, citable_axis_admission,
+    AttestedBaselineStore, BASELINE_SCHEMA_VERSION, BaselineAxes, BaselineCandidate,
+    BaselineClockError, BaselineIdentity, BaselineProvenance, BaselineStore, BaselineVerdict,
+    PromotionError, citable_axis_admission, citable_axis_admission_authorized,
     days_since_epoch_now, promote_baseline,
 };
 
@@ -29,7 +35,9 @@ pub mod regress;
 /// Crate version (compile-time stamp).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-const FINALIZED_RUN_DOMAIN: &str = "org.frankensim.fs-roofline.finalized-run.v1";
+const FINALIZED_RUN_DOMAIN: &str = "org.frankensim.fs-roofline.finalized-run.v2";
+const RESULT_MANIFEST_DOMAIN: &str = "org.frankensim.fs-roofline.run-result-manifest.v1";
+const RESULT_MANIFEST_SCHEMA: &str = "fs-roofline-run-manifest-v1";
 
 /// One-shot capability proving that every registry kernel observed the exact
 /// run's aggregate admission decision and completed its tuning lifecycle.
@@ -60,13 +68,20 @@ impl FinalizedRegistryRun {
 ///
 /// `None` is not a permissive default: it represents a first/unbaselined run,
 /// which may be reported as candidate evidence but cannot publish citable
-/// metrics or tune rows. The referenced store is a protected-operator trust
-/// root until promotion signatures are implemented.
-#[derive(Debug, Clone, Copy)]
+/// metrics or tune rows. Without [`AxisBaselinePolicy::with_authority`], the
+/// referenced store is an OPERATOR-TRUSTED root (tamper-evident, not
+/// independently verified); binding gates bind an attestation and an
+/// injected [`PromotionAuthorityVerifier`] (bead fz2.7), which re-verifies
+/// the promotion signature before every citable decision.
+#[derive(Clone, Copy)]
 pub struct AxisBaselinePolicy<'a> {
     baseline: Option<&'a BaselineAxes>,
     identity: &'a BaselineIdentity,
     now_day: u64,
+    authority: Option<(
+        Option<&'a PromotionAttestation>,
+        &'a dyn PromotionAuthorityVerifier,
+    )>,
 }
 
 impl<'a> AxisBaselinePolicy<'a> {
@@ -82,13 +97,39 @@ impl<'a> AxisBaselinePolicy<'a> {
             baseline,
             identity,
             now_day,
+            authority: None,
         }
+    }
+
+    /// Bind the promotion attestation and an injected authority (bead
+    /// fz2.7): the verdict then requires an AUTHORIZED signature over
+    /// the baseline's content hash before any band math, and the
+    /// receipt binds the verifying key identity.
+    #[must_use]
+    pub fn with_authority(
+        mut self,
+        attestation: Option<&'a PromotionAttestation>,
+        authority: &'a dyn PromotionAuthorityVerifier,
+    ) -> Self {
+        self.authority = Some((attestation, authority));
+        self
     }
 
     /// Evaluate the complete pre/probe/post baseline policy.
     #[must_use]
     pub fn verdict(&self, pre: &MachineAxes, post: &MachineAxes) -> BaselineVerdict {
-        citable_axis_admission(pre, post, self.baseline, self.identity, self.now_day)
+        match self.authority {
+            Some((attestation, authority)) => citable_axis_admission_authorized(
+                pre,
+                post,
+                self.baseline,
+                attestation,
+                self.identity,
+                self.now_day,
+                authority,
+            ),
+            None => citable_axis_admission(pre, post, self.baseline, self.identity, self.now_day),
+        }
     }
 
     /// Domain-separated identity of the selected baseline, if one exists.
@@ -107,14 +148,24 @@ impl<'a> AxisBaselinePolicy<'a> {
             || "null".to_string(),
             |hash| format!("\"{}\"", hash.to_hex()),
         );
+        // Authority binding (bead fz2.7): the verifying key identity (or
+        // the explicit operator-trusted tier) travels in the receipt.
+        let authority = match self.authority {
+            None => "\"operator-trusted\"".to_string(),
+            Some((attestation, _)) => attestation.map_or_else(
+                || "{\"key_id\":null}".to_string(),
+                |a| format!("{{\"key_id\":\"{}\"}}", json_escape(a.key_id())),
+            ),
+        };
         format!(
-            "{{\"schema\":\"fs-roofline-axis-admission-v1\",\"now_day\":{},\"identity\":{},\"pre\":{},\"post\":{},\"baseline_hash\":{},\"baseline\":{},\"verdict\":{}}}",
+            "{{\"schema\":\"fs-roofline-axis-admission-v1\",\"now_day\":{},\"identity\":{},\"pre\":{},\"post\":{},\"baseline_hash\":{},\"baseline\":{},\"authority\":{},\"verdict\":{}}}",
             self.now_day,
             baseline_identity_json(self.identity),
             machine_axes_receipt_json(pre),
             machine_axes_receipt_json(post),
             baseline_hash,
             baseline,
+            authority,
             self.verdict(pre, post).to_jsonl(),
         )
     }

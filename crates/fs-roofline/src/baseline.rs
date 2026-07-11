@@ -31,6 +31,7 @@
 //! 4. Baseline updates go through the same promotion gate; there is no
 //!    in-place mutation API.
 
+use crate::authority::{KeyVerdict, PromotionAttestation, PromotionAuthorityVerifier};
 use crate::axes::{MAX_AXIS_REPROBE_DRIFT, MachineAxes};
 use fs_blake3::{ContentHash, hash_domain};
 use std::collections::{BTreeMap, BTreeSet};
@@ -312,6 +313,237 @@ impl core::fmt::Display for BaselineClockError {
 
 impl core::error::Error for BaselineClockError {}
 
+/// An attested baseline store (bead fz2.7): every record travels with
+/// its [`PromotionAttestation`], and ADMISSION verifies authorization,
+/// signature, and source-receipt availability against injected
+/// capabilities — a locally editable store is no longer a silent trust
+/// root. Transport lines are `{"record":<canonical>,"attestation":
+/// {"key_id":..,"signature":..}}`; the record part is byte-identical to
+/// the signed preimage, so replay is deterministic.
+#[derive(Debug, Default)]
+pub struct AttestedBaselineStore {
+    store: BaselineStore,
+    attestations: BTreeMap<u64, PromotionAttestation>,
+}
+
+impl AttestedBaselineStore {
+    /// An empty store.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The admitted baseline for a fingerprint, if any.
+    #[must_use]
+    pub fn for_fingerprint(&self, fingerprint: u64) -> Option<&BaselineAxes> {
+        self.store.for_fingerprint(fingerprint)
+    }
+
+    /// The attestation admitted with a fingerprint's baseline.
+    #[must_use]
+    pub fn attestation_for(&self, fingerprint: u64) -> Option<&PromotionAttestation> {
+        self.attestations.get(&fingerprint)
+    }
+
+    /// VERIFIED admission (the only way in): the attestation must be
+    /// authorized by the injected authority over the record's exact
+    /// content hash, and every source receipt the provenance names must
+    /// be AVAILABLE (present in the retained-receipt set) — a promotion
+    /// whose evidence has vanished is refused, not trusted.
+    ///
+    /// # Errors
+    /// [`PromotionError`] naming the refusal: unattested records,
+    /// forged/edited records (wrong signature), unknown or revoked
+    /// keys, missing source receipts, and every structural refusal of
+    /// the underlying store.
+    pub fn admit_verified(
+        &mut self,
+        baseline: BaselineAxes,
+        attestation: PromotionAttestation,
+        authority: &dyn PromotionAuthorityVerifier,
+        available_receipts: &BTreeSet<ContentHash>,
+    ) -> Result<(), PromotionError> {
+        if !attestation.well_formed() {
+            return Err(PromotionError {
+                detail: "promotion attestation has a blank key id or signature".to_string(),
+            });
+        }
+        match baseline.authority_verdict(Some(&attestation), authority) {
+            KeyVerdict::Authorized => {}
+            refused => {
+                return Err(PromotionError {
+                    detail: format!(
+                        "promotion authority refused key {:?}: {}",
+                        attestation.key_id(),
+                        refused.name()
+                    ),
+                });
+            }
+        }
+        if let Some(missing) = baseline
+            .provenance()
+            .source_receipts()
+            .iter()
+            .find(|receipt| !available_receipts.contains(receipt))
+        {
+            return Err(PromotionError {
+                detail: format!(
+                    "source receipt {} named by the promotion is not available in the \
+                     retained-receipt set — evidence must outlive the promotion it backs",
+                    missing.to_hex()
+                ),
+            });
+        }
+        let fingerprint = baseline.identity().fingerprint();
+        self.store.admit(baseline)?;
+        self.attestations.insert(fingerprint, attestation);
+        Ok(())
+    }
+
+    /// Serialize as attested JSON lines.
+    #[must_use]
+    pub fn to_jsonl(&self) -> String {
+        let mut out = String::new();
+        for (fingerprint, attestation) in &self.attestations {
+            let Some(baseline) = self.store.for_fingerprint(*fingerprint) else {
+                continue;
+            };
+            out.push_str("{\"record\":");
+            out.push_str(&baseline.canonical_json());
+            out.push_str(",\"attestation\":{\"key_id\":");
+            push_json_string(&mut out, attestation.key_id());
+            out.push_str(",\"signature\":");
+            push_json_string(&mut out, attestation.signature());
+            out.push_str("}}\n");
+        }
+        out
+    }
+
+    /// Parse attested JSON lines STRICTLY. Parsing does NOT verify —
+    /// no capability exists at parse time; every CITABLE USE re-verifies
+    /// through [`citable_axis_admission_authorized`], so a tampered
+    /// store line is caught at the decision point, deterministically.
+    ///
+    /// # Errors
+    /// [`PromotionError`] naming the offending line.
+    pub fn from_jsonl(text: &str) -> Result<Self, PromotionError> {
+        if text.len() > MAX_BASELINE_STORE_BYTES {
+            return Err(PromotionError {
+                detail: format!("baseline store exceeds the {MAX_BASELINE_STORE_BYTES}-byte bound"),
+            });
+        }
+        let mut attested = AttestedBaselineStore::new();
+        for (line_number, line) in text.lines().enumerate() {
+            let refuse = |why: &str| PromotionError {
+                detail: format!("attested store line {}: {why}", line_number + 1),
+            };
+            let rest = line
+                .strip_prefix("{\"record\":")
+                .ok_or_else(|| refuse("missing the record envelope"))?;
+            // The canonical record is a FLAT object: it ends at the first '}'.
+            let record_end = rest
+                .find('}')
+                .ok_or_else(|| refuse("unterminated record object"))?;
+            let record_json = &rest[..=record_end];
+            let record_store = BaselineStore::from_jsonl(record_json)
+                .map_err(|e| refuse(&format!("record part: {e}")))?;
+            let tail = &rest[record_end + 1..];
+            let tail = tail
+                .strip_prefix(",\"attestation\":{\"key_id\":")
+                .ok_or_else(|| refuse("missing the attestation envelope"))?;
+            let (key_id, tail) =
+                take_json_string(tail).ok_or_else(|| refuse("malformed key id"))?;
+            let tail = tail
+                .strip_prefix(",\"signature\":")
+                .ok_or_else(|| refuse("missing the signature field"))?;
+            let (signature, tail) =
+                take_json_string(tail).ok_or_else(|| refuse("malformed signature"))?;
+            if tail != "}}" {
+                return Err(refuse("trailing bytes after the attestation"));
+            }
+            let attestation = PromotionAttestation::new(key_id, signature);
+            if !attestation.well_formed() {
+                return Err(refuse("blank key id or signature"));
+            }
+            for (fingerprint, baseline) in record_store.baselines {
+                if attested.attestations.contains_key(&fingerprint) {
+                    return Err(refuse(&format!("duplicate fingerprint {fingerprint:016x}")));
+                }
+                attested.store.baselines.insert(fingerprint, baseline);
+                attested
+                    .attestations
+                    .insert(fingerprint, attestation.clone());
+            }
+        }
+        Ok(attested)
+    }
+}
+
+/// [`citable_axis_admission`] plus MANDATORY promotion-authority
+/// verification (bead fz2.7): the citable tier for binding gates. The
+/// baseline (when present) must carry an attestation the injected
+/// authority accepts over its exact content hash; unattested, forged,
+/// edited, unknown-key, and revoked-key records all refuse with a
+/// typed [`BaselineVerdict::Unauthorized`] BEFORE any band math.
+#[must_use]
+#[allow(clippy::too_many_arguments)] // the complete admission context, spelled out
+pub fn citable_axis_admission_authorized(
+    pre: &MachineAxes,
+    post: &MachineAxes,
+    baseline: Option<&BaselineAxes>,
+    attestation: Option<&PromotionAttestation>,
+    identity: &BaselineIdentity,
+    now_day: u64,
+    authority: &dyn PromotionAuthorityVerifier,
+) -> BaselineVerdict {
+    if let Some(baseline) = baseline {
+        match baseline.authority_verdict(attestation, authority) {
+            KeyVerdict::Authorized => {}
+            refused => {
+                return BaselineVerdict::Unauthorized {
+                    verdict: refused.name(),
+                };
+            }
+        }
+    }
+    citable_axis_admission(pre, post, baseline, identity, now_day)
+}
+
+/// Take one JSON string literal off the front of `text`; returns the
+/// unescaped value and the remaining tail.
+fn take_json_string(text: &str) -> Option<(String, &str)> {
+    let rest = text.strip_prefix('"')?;
+    let mut out = String::new();
+    let mut chars = rest.char_indices();
+    loop {
+        let (index, c) = chars.next()?;
+        match c {
+            '"' => return Some((out, &rest[index + 1..])),
+            '\\' => {
+                let (_, escaped) = chars.next()?;
+                match escaped {
+                    '"' => out.push('"'),
+                    '\\' => out.push('\\'),
+                    'n' => out.push('\n'),
+                    'r' => out.push('\r'),
+                    't' => out.push('\t'),
+                    'u' => {
+                        let mut code = 0u32;
+                        for _ in 0..4 {
+                            let (_, hex) = chars.next()?;
+                            code = code * 16 + hex.to_digit(16)?;
+                        }
+                        out.push(char::from_u32(code)?);
+                    }
+                    _ => return None,
+                }
+            }
+            c if c.is_control() => return None,
+            c => out.push(c),
+        }
+    }
+}
+
 /// The verdict of checking current axes against a trusted baseline.
 /// Only [`BaselineVerdict::Trusted`] supports citable gates.
 #[derive(Debug, Clone, PartialEq)]
@@ -372,6 +604,13 @@ pub enum BaselineVerdict {
         /// Baseline promotion Unix-epoch day.
         promoted_day: u64,
     },
+    /// The promotion-authority check refused this baseline (bead fz2.7):
+    /// unattested, forged/edited (wrong signature), unknown key, or
+    /// revoked key. Only an Authorized attestation supports citable use.
+    Unauthorized {
+        /// The typed authority verdict name (stable).
+        verdict: &'static str,
+    },
     /// An in-memory record violated the sealed baseline invariants.
     InvalidBaseline {
         /// Structural validation diagnostic.
@@ -412,6 +651,9 @@ impl BaselineVerdict {
             ),
             BaselineVerdict::IdentityDrift { field } => {
                 format!("{{\"baseline\":\"identity-drift\",\"field\":\"{field}\"}}")
+            }
+            BaselineVerdict::Unauthorized { verdict } => {
+                format!("{{\"baseline\":\"unauthorized\",\"authority\":\"{verdict}\"}}")
             }
             BaselineVerdict::InvalidAxes { probe, reason } => format!(
                 "{{\"baseline\":\"invalid-axes\",\"probe\":\"{probe}\",\"reason\":\"{}\"}}",
@@ -782,6 +1024,36 @@ impl BaselineAxes {
     #[must_use]
     pub fn content_hash(&self) -> ContentHash {
         hash_domain(BASELINE_HASH_DOMAIN, self.canonical_json().as_bytes())
+    }
+
+    /// The exact bytes a promotion authority signs (bead fz2.7): the
+    /// record's content hash, which already binds the canonical
+    /// schema/domain hash, sorted source receipt identities, band and
+    /// drift policy, machine identity, and promotion time — signing the
+    /// hash signs all of them, and editing ANY of them (including the
+    /// free-text operator) invalidates the signature.
+    #[must_use]
+    pub fn promotion_message(&self) -> [u8; 32] {
+        *self.content_hash().as_bytes()
+    }
+
+    /// Judge this record's attestation against an injected authority.
+    /// `None` (unattested) is UnknownKey — never authorized.
+    #[must_use]
+    pub fn authority_verdict(
+        &self,
+        attestation: Option<&PromotionAttestation>,
+        authority: &dyn PromotionAuthorityVerifier,
+    ) -> KeyVerdict {
+        match attestation {
+            None => KeyVerdict::UnknownKey,
+            Some(attestation) if !attestation.well_formed() => KeyVerdict::UnknownKey,
+            Some(attestation) => authority.verify(
+                attestation.key_id(),
+                attestation.signature(),
+                &self.promotion_message(),
+            ),
+        }
     }
 
     /// Backwards-compatible JSON-lines spelling (without the trailing newline).
@@ -1739,5 +2011,259 @@ mod tests {
         let error = promote_baseline(&candidates, "z".repeat(4096), "q".repeat(4096), 20_000, 90)
             .expect_err("aggregate line bound");
         assert!(error.detail.contains("line bound"), "{}", error.detail);
+    }
+    // ---- fz2.7: promotion-authority drills -------------------------------
+
+    fn authority_with(key: &str) -> crate::StaticKeyRegistry {
+        let mut registry = crate::StaticKeyRegistry::new();
+        registry.authorize(key);
+        registry
+    }
+
+    fn attest(baseline: &BaselineAxes, key: &str) -> PromotionAttestation {
+        PromotionAttestation::new(
+            key,
+            crate::StaticKeyRegistry::tag(key, &baseline.promotion_message()),
+        )
+    }
+
+    fn retained(baseline: &BaselineAxes) -> BTreeSet<ContentHash> {
+        baseline
+            .provenance()
+            .source_receipts()
+            .iter()
+            .copied()
+            .collect()
+    }
+
+    /// Authorized admission round-trips through the attested store and
+    /// re-verifies identically after reload (deterministic replay).
+    #[test]
+    fn authorized_admission_round_trips_and_replays() {
+        let baseline = promoted();
+        let authority = authority_with("ops/2026-q3");
+        let attestation = attest(&baseline, "ops/2026-q3");
+        let mut store = AttestedBaselineStore::new();
+        store
+            .admit_verified(
+                baseline.clone(),
+                attestation.clone(),
+                &authority,
+                &retained(&baseline),
+            )
+            .expect("authorized admission");
+        let text = store.to_jsonl();
+        let back = AttestedBaselineStore::from_jsonl(&text).expect("attested store parses");
+        let fingerprint = baseline.identity().fingerprint();
+        assert_eq!(back.for_fingerprint(fingerprint), Some(&baseline));
+        assert_eq!(back.attestation_for(fingerprint), Some(&attestation));
+        // Citable use re-verifies the reloaded record end-to-end.
+        let verdict = citable_axis_admission_authorized(
+            &quiet_axes(),
+            &quiet_axes(),
+            back.for_fingerprint(fingerprint),
+            back.attestation_for(fingerprint),
+            &identity(),
+            20_010,
+            &authority,
+        );
+        assert_eq!(verdict, BaselineVerdict::Trusted);
+        assert_eq!(back.to_jsonl(), text, "replay is byte-identical");
+    }
+
+    /// FORGED OPERATOR / EDITED RECORD: the signature covers the content
+    /// hash, so editing the free-text operator (or anything else) makes
+    /// the attestation WrongSignature.
+    #[test]
+    fn forged_operator_and_edited_record_invalidate_the_attestation() {
+        let signed = promoted();
+        let authority = authority_with("ops/2026-q3");
+        let attestation = attest(&signed, "ops/2026-q3");
+        // Same candidates, different operator: a forged promoted_by.
+        let forged = promote_baseline(
+            &quiet_candidates("quiet"),
+            "operator-EVIL",
+            "three quiet-window runs on the reference host",
+            20_000,
+            90,
+        )
+        .expect("structurally valid");
+        assert_eq!(
+            forged.authority_verdict(Some(&attestation), &authority),
+            KeyVerdict::WrongSignature,
+            "operator edits move the signed hash"
+        );
+        // Edited record: different justification, same everything else.
+        let edited = promote_baseline(
+            &quiet_candidates("quiet"),
+            "operator-a",
+            "EDITED justification",
+            20_000,
+            90,
+        )
+        .expect("structurally valid");
+        assert_eq!(
+            edited.authority_verdict(Some(&attestation), &authority),
+            KeyVerdict::WrongSignature
+        );
+        let mut store = AttestedBaselineStore::new();
+        let refused = store
+            .admit_verified(forged, attestation, &authority, &retained(&signed))
+            .expect_err("forged record refused");
+        assert!(refused.detail.contains("wrong-signature"), "{refused}");
+    }
+
+    /// MISSING SOURCE: a promotion whose named receipt is not retained
+    /// is refused at admission, naming the hash.
+    #[test]
+    fn missing_source_receipt_refuses_admission() {
+        let baseline = promoted();
+        let authority = authority_with("ops/2026-q3");
+        let attestation = attest(&baseline, "ops/2026-q3");
+        let mut available = retained(&baseline);
+        let dropped = *baseline
+            .provenance()
+            .source_receipts()
+            .first()
+            .expect("receipts");
+        available.remove(&dropped);
+        let refused = AttestedBaselineStore::new()
+            .admit_verified(baseline, attestation, &authority, &available)
+            .expect_err("missing source refused");
+        assert!(refused.detail.contains(&dropped.to_hex()), "{refused}");
+    }
+
+    /// DUPLICATE SOURCE: two candidates sharing one retained receipt
+    /// cannot corroborate each other — refused at promotion.
+    #[test]
+    fn duplicate_source_receipts_refuse_promotion() {
+        let mut candidates = quiet_candidates("dup");
+        candidates[1] = candidate(quiet_axes(), "build-24F74", "dup-0"); // same as [0]
+        let refused = promote_baseline(&candidates, "operator-a", "why", 20_000, 90)
+            .expect_err("duplicate receipts refused");
+        assert!(refused.detail.contains("reuses"), "{refused}");
+    }
+
+    /// WRONG KEY: a valid tag claimed under a different key id fails —
+    /// authorized keys cannot vouch for each other.
+    #[test]
+    fn wrong_key_claims_are_refused() {
+        let baseline = promoted();
+        let mut authority = crate::StaticKeyRegistry::new();
+        authority.authorize("ops/a");
+        authority.authorize("ops/b");
+        let tag_a = crate::StaticKeyRegistry::tag("ops/a", &baseline.promotion_message());
+        let claimed_as_b = PromotionAttestation::new("ops/b", tag_a);
+        assert_eq!(
+            baseline.authority_verdict(Some(&claimed_as_b), &authority),
+            KeyVerdict::WrongSignature
+        );
+        let unknown = attest(&baseline, "ops/never-registered");
+        assert_eq!(
+            baseline.authority_verdict(Some(&unknown), &authority),
+            KeyVerdict::UnknownKey
+        );
+        // Unattested is never authorized, under ANY authority.
+        assert_eq!(
+            baseline.authority_verdict(None, &authority),
+            KeyVerdict::UnknownKey
+        );
+        assert_eq!(
+            baseline.authority_verdict(None, &crate::NoPromotionAuthority),
+            KeyVerdict::UnknownKey
+        );
+    }
+
+    /// REVOKED KEY + VALID ROTATION: revocation retroactively demands
+    /// re-promotion; a rotation to a newly authorized key re-verifies.
+    #[test]
+    fn revocation_demands_repromotion_and_rotation_recovers() {
+        let baseline = promoted();
+        let mut authority = authority_with("ops/2026-q3");
+        let old = attest(&baseline, "ops/2026-q3");
+        let mut store = AttestedBaselineStore::new();
+        store
+            .admit_verified(
+                baseline.clone(),
+                old.clone(),
+                &authority,
+                &retained(&baseline),
+            )
+            .expect("initially authorized");
+        authority.revoke("ops/2026-q3");
+        let verdict = citable_axis_admission_authorized(
+            &quiet_axes(),
+            &quiet_axes(),
+            store.for_fingerprint(baseline.identity().fingerprint()),
+            store.attestation_for(baseline.identity().fingerprint()),
+            &identity(),
+            20_010,
+            &authority,
+        );
+        assert_eq!(
+            verdict,
+            BaselineVerdict::Unauthorized {
+                verdict: "revoked-key"
+            },
+            "revoked keys stop citable use BEFORE any band math"
+        );
+        // Rotation: authorize the new key, RE-PROMOTE (newer day), re-attest.
+        authority.authorize("ops/2026-q4");
+        let rotated = promoted_at(20_005, "rotated");
+        let fresh = attest(&rotated, "ops/2026-q4");
+        store
+            .admit_verified(rotated.clone(), fresh, &authority, &retained(&rotated))
+            .expect("rotated admission");
+        let verdict = citable_axis_admission_authorized(
+            &quiet_axes(),
+            &quiet_axes(),
+            store.for_fingerprint(rotated.identity().fingerprint()),
+            store.attestation_for(rotated.identity().fingerprint()),
+            &identity(),
+            20_010,
+            &authority,
+        );
+        assert_eq!(verdict, BaselineVerdict::Trusted);
+    }
+
+    /// Tampered attested-store lines refuse at parse or at re-verify.
+    #[test]
+    fn tampered_attested_lines_fail_closed() {
+        let baseline = promoted();
+        let authority = authority_with("ops/2026-q3");
+        let attestation = attest(&baseline, "ops/2026-q3");
+        let mut store = AttestedBaselineStore::new();
+        store
+            .admit_verified(
+                baseline.clone(),
+                attestation,
+                &authority,
+                &retained(&baseline),
+            )
+            .expect("authorized admission");
+        let text = store.to_jsonl();
+        // Record tamper: the line still PARSES but citable re-verify refuses.
+        let tampered = text.replace("operator-a", "operator-b");
+        let back = AttestedBaselineStore::from_jsonl(&tampered).expect("parses structurally");
+        let fingerprint = baseline.identity().fingerprint();
+        let verdict = citable_axis_admission_authorized(
+            &quiet_axes(),
+            &quiet_axes(),
+            back.for_fingerprint(fingerprint),
+            back.attestation_for(fingerprint),
+            &identity(),
+            20_010,
+            &authority,
+        );
+        assert_eq!(
+            verdict,
+            BaselineVerdict::Unauthorized {
+                verdict: "wrong-signature"
+            }
+        );
+        // Envelope tamper: refused at parse.
+        assert!(
+            AttestedBaselineStore::from_jsonl(&text.replace("\"attestation\"", "\"x\"")).is_err()
+        );
     }
 }

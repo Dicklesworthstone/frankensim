@@ -10,7 +10,7 @@
 [![Rust](https://img.shields.io/badge/rust-nightly%202024-b7410e)](rust-toolchain.toml)
 [![Crates](https://img.shields.io/badge/workspace-125%20fs--%2A%20crates-0969da)](#implemented-workspace)
 [![Contracts](https://img.shields.io/badge/contracts-126%20of%20126%20crates-8250df)](#contracts-and-verification)
-[![Tests](https://img.shields.io/badge/tests-253%20crate%20test%20files-1f883d)](#contracts-and-verification)
+[![Tests](https://img.shields.io/badge/tests-254%20crate%20test%20files-1f883d)](#contracts-and-verification)
 [![License](https://img.shields.io/badge/license-MIT%20%2B%20AI%20rider-yellow)](LICENSE)
 
 </div>
@@ -38,7 +38,7 @@ There is not yet a packaged end-user simulation application or crates.io release
 | Geometry | Region/chart abstraction, SDF, mesh and F-rep charts, representation conversion hooks, transformations, tet meshing, remeshing, quality audits |
 | Evidence and ledger | Composable `Evidence<T>`/`Certified<T>`, model cards, bracketing, FrankenSQLite-backed design ledger, artifact hashes, event streams, tune cache, roofline recording |
 | Policy tooling | `xtask` checks for layer direction, Franken-only runtime dependencies, contracts, unsafe capsules, and constellation lock verification |
-| Tests | 253 crate-level conformance and integration test files in the intended snapshot, exercising the implemented contracts |
+| Tests | 254 crate-level conformance and integration test files in the intended snapshot, exercising the implemented contracts |
 
 ### What You Can Use Today
 
@@ -261,17 +261,13 @@ assert_eq!(value.value, 42.0);
 
 ```rust
 use fs_checker::check_against_root;
-use fs_evidence::{Color, ValidityDomain};
 use fs_package::{Claim, EvidencePackage, Provenance};
 
-let regime = ValidityDomain::unconstrained().with("Re", 100_000.0, 300_000.0);
-let claim = Claim::new(
-    "lift-window",
-    "lift coefficient was validated against the wind-tunnel fixture",
-    Color::Validated {
-        regime,
-        dataset: "wt-2026-a".to_string(),
-    },
+let claim = Claim::estimated(
+    "lift-preview",
+    "surrogate lift estimate before wind-tunnel admission",
+    "pod-surrogate-v3",
+    0.04,
 );
 
 let pkg = EvidencePackage::new(Provenance::new("commit-abc", "lock-def"))
@@ -282,13 +278,16 @@ let report = check_against_root(&pkg, root);
 
 assert!(report.passed());
 assert_eq!(report.merkle_root, root);
-assert!(report.render_pie().contains("validated"));
+assert!(report.render_pie().contains("estimated"));
 ```
 
-This example checks structural completeness and the expected content root. It
-does not authenticate authorship or admit the package for release; use
-`check_for_release` with a real injected `SignatureVerifier`, attached
-falsifiers, and matching validation anchors for that stronger boundary.
+This deny-all example checks an honestly Estimated claim and the expected
+content root. Verified certificates, anchoring datasets, waivers, signatures,
+and falsifier artifacts never authorize themselves: use the corresponding
+typed verifier capabilities and retain the returned verification receipt.
+Scientific release admission additionally requires authenticated authorship,
+at least one admitted scientific Verified or Validated claim, and authenticated
+falsifier evidence for every certificate-class claim.
 
 ### Repository Policy Checks
 

@@ -277,11 +277,27 @@ canonical `axis_baseline_admission` event.
   evidence, not independently citable proof.
 - Verdict gating in CI is deliberately absent on shared runners; bands
   bind only on ledgered reference machines (nightly lane, later).
-- Baseline content hashes and source receipt IDs are tamper-evident
-  traceability, not authentication. `promoted_by` is free-text annotation and
-  the baseline store is a protected-operator trust root until verifier-backed
-  signatures and source authorization close
-  `frankensim-epic-perf-fz2.7`.
+- Baseline promotion authority (bead fz2.7): the `authority` module adds
+  a `PromotionAuthorityVerifier` capability with typed verdicts
+  (authorized / wrong-signature / unknown-key / revoked-key) over a
+  `PromotionAttestation` signed on the record's content hash — which
+  binds the canonical schema/domain hash, sorted source receipts,
+  band/drift policy, machine identity, and promotion time, so editing
+  ANY of them (including the free-text `promoted_by`) invalidates the
+  signature. `AttestedBaselineStore::admit_verified` refuses
+  unattested/forged/edited records, unknown or revoked keys, and
+  promotions whose named source receipts are not in the retained set;
+  `citable_axis_admission_authorized` (and
+  `AxisBaselinePolicy::with_authority`) re-verify before EVERY citable
+  decision and bind the verifying key identity into the admission
+  receipt. Rotation = authorize the new key and re-promote; revocation
+  retroactively demands re-promotion. TRUST CLASS, stated honestly: the
+  in-tree `StaticKeyRegistry` is an operator-governed registry with
+  domain-separated keyed-hash tags — tamper-EVIDENT, not unforgeable
+  (its tag function is public); unforgeable signatures require an
+  EXTERNAL verifier implementation injected through the same trait. The
+  UNBOUND `AxisBaselinePolicy` tier remains operator-trusted and its
+  receipts say `"authority":"operator-trusted"`.
 
 ## Trusted historical axis baselines (bead dfh3)
 
