@@ -299,20 +299,54 @@ fn ir_0xx_exact_count_literals_survive_admission_and_identity() {
     let err = sexpr::parse("340282366920938463463374607431768211456B")
         .expect_err("2^128 cannot be an exact count");
     assert!(err.to_string().contains("exact count range"));
-    // Fractional semantics are SEPARATE: 1.5GiB still works exactly...
+    // Decimal/exponent semantics are exact too: useful fractional-unit
+    // spellings work without binary-float authority decisions.
     let frac = sexpr::parse("1.5GiB").expect("parses");
     let NodeKind::Count { value, unit } = &frac.kind else {
         panic!("count expected");
     };
     assert!(matches!(value, CountValue::Fractional(_)));
     assert_eq!(value.integral_bytes(*unit), Some(3 << 29));
-    // ...but a fractional form whose integrality is unverifiable above
-    // 2^53 refuses rather than guessing.
+    assert_eq!(sexpr::print(&frac), "15e-1GiB");
+    assert!(
+        sexpr::parse(&sexpr::print(&frac))
+            .expect("decimal canonical reparse")
+            .same_shape(&frac)
+    );
+    let exponent = sexpr::parse("1e3B").expect("exponent count parses");
+    let NodeKind::Count { value, unit } = &exponent.kind else {
+        panic!("count expected");
+    };
+    assert_eq!(value.integral_bytes(*unit), Some(1_000));
+    assert!(
+        json::parse(&json::print(&exponent))
+            .expect("exponent JSON reparse")
+            .same_shape(&exponent)
+    );
+
+    // Exact decimal storage distinguishes an integer-valued decimal above
+    // 2^53 from its neighbors without guessing through f64.
     let big_frac = sexpr::parse("9007199254740993.0B").expect("parses");
     let NodeKind::Count { value, unit } = &big_frac.kind else {
         panic!("count expected");
     };
-    assert_eq!(value.integral_bytes(*unit), None);
+    assert_eq!(value.integral_bytes(*unit), Some(9_007_199_254_740_993));
+    for fractional_byte in [
+        "0.1B",
+        "0.99999999999999999B",
+        "1.00000000000000001B",
+        "1e-1B",
+    ] {
+        let parsed = sexpr::parse(fractional_byte).expect("bounded decimal parses");
+        let NodeKind::Count { value, unit } = parsed.kind else {
+            panic!("count expected");
+        };
+        assert_eq!(
+            value.integral_bytes(unit),
+            None,
+            "{fractional_byte} must not round into a whole-byte claim"
+        );
+    }
     // Mixed written forms are distinct claims.
     let int_form = sexpr::parse("2B").expect("parses");
     let frac_form = sexpr::parse("2.0B").expect("parses");
@@ -321,7 +355,7 @@ fn ir_0xx_exact_count_literals_survive_admission_and_identity() {
 
 #[test]
 fn ir_006_version_pinning_round_trips() {
-    assert_eq!(IR_VERSION, 1);
+    assert_eq!(IR_VERSION, 2);
     let src = "(study \"v\" (seed 0x2) (versions (constellation :lock \"2026-07\")))";
     let ast = sexpr::parse(src).unwrap();
     // Through BOTH syntaxes, the pin survives verbatim.

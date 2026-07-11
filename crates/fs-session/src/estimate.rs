@@ -134,10 +134,10 @@ fn mem_ask(budget: Option<&Node>) -> Result<Option<u64>, crate::SessionError> {
                 what: "memory budget operand must be a byte count such as 96GiB".to_string(),
             });
         };
-        // EXACT conversion (gp3.20): integer literals scale in u128 and
-        // refuse overflow BEFORE any rounding; fractional forms carry
-        // their separately-defined semantics (integral after scaling,
-        // verifiable below 2^53). Zero asks are refused as before.
+        // EXACT conversion (gp3.20): integer and bounded-decimal literals
+        // scale in checked integer arithmetic and refuse overflow or
+        // fractional bytes before any binary-float projection. Zero asks are
+        // refused as before.
         let bytes = value.integral_bytes(*unit).filter(|&b| b > 0);
         let Some(bytes) = bytes else {
             return Err(crate::SessionError::InvalidResource {

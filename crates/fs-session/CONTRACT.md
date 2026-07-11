@@ -20,9 +20,10 @@ Consumers: the P2 marquee demo, the HELM e2e suite (gp3.11).
 - `CapabilityToken { session, ops globs, core_s, mem_bytes, wall_s,
   cores, ledger_scope }` — the explicit grant every IR program executes
   under; `to_admission()` bridges into fs-ir static admission (one token,
-  checked statically at admission AND continuously by the governor). fs-ir's
-  current memory-ask vocabulary is an `f64` planning projection; exact byte
-  enforcement remains the governor's integer-grant responsibility.
+  checked statically at admission AND continuously by the governor). Memory
+  bytes and concurrent cores remain exact `u64` values through the bridge;
+  source count scaling, token comparison, and governor enforcement never
+  project those authorities through `f64`.
 - `Governor` — `Send + Sync`; hot paths are mutex-guarded in-memory
   state. `open_session` rejects non-finite or negative floating grants
   before registration and rejects an already-open `SessionId` without

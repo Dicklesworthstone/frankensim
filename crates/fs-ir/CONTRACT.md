@@ -1,6 +1,6 @@
 # CONTRACT: fs-ir
 
-> Status: ACTIVE (FrankenScript core, IR language v1). Owns the typed AST,
+> Status: ACTIVE (FrankenScript core, IR language v2). Owns the typed AST,
 > both concrete syntaxes, study recognition, and verb lowering. Admission
 > (dimensional/chart/budget/capability checks) is the gp3.5 bead's;
 > the operator catalog is gp3.6's.
@@ -21,6 +21,12 @@ typed AST. Layer: L6 (HELM). Runtime deps: `std` + fs-qty.
   value+dims), `Count` (information/core grants: B/KiB/MiB/GiB/cores —
   deliberately outside fs-qty's SI domain), `Seed` (0x… u64), `Str`,
   `Symbol`, `Keyword`, `List`.
+- `CountValue` preserves bare integers as exact `u128` and decimal/exponent
+  spellings as a bounded exact decimal (`u128` significand + base-10
+  exponent). Whole-byte/core enforcement uses checked integer arithmetic;
+  binary floating point is reporting-only. Mixed syntax classes remain
+  distinct identities (`2B` differs from `2.0B`), while each class has one
+  deterministic canonical spelling.
 - `Node::same_shape` — semantic equality ignoring spans and Qty
   presentation; the isomorphism property is stated in terms of it.
 - `sexpr::parse/print` — total reader with spans, comments (`;`),
@@ -124,7 +130,11 @@ typed AST. Layer: L6 (HELM). Runtime deps: `std` + fs-qty.
    with an in-bounds span; recursion is depth-capped (no stack overflow).
 3. No silent reinterpretation: numeric-leading tokens either fully parse
    as int/float/quantity/count or refuse; non-finite literals refuse.
-4. Lowering is explicit, inspectable, and idempotent; the trace names
+4. Count authority is exact end to end: decimal text cannot round into a
+   different byte/core claim, checked unit scaling precedes admission, and
+   `SessionCapability` carries integer memory/core grants without an `f64`
+   projection.
+5. Lowering is explicit, inspectable, and idempotent; the trace names
    every injected default.
 
 - Admission determinism: same study + context → byte-identical
@@ -214,6 +224,10 @@ structured refusal).
   A self-contained `(capability ...)` clause supports static planning and
   source-level admission only; it does not mint runtime authority. Plan §11.3's
   session token remains mandatory before execution.
+- IR v2 changes Count identity from binary-float-backed count atoms to exact
+  integer/decimal atoms. V1 canonical artifacts must be reparsed and re-emitted
+  under v2 before their new identity is recorded; no silent v1 hash migration
+  is claimed.
 - The query language is v0: a FIXED QoI menu (max/integral/exceedance), not
   a general program surface. `Query::admit` type-checks well-posedness and
   dimensions ONLY — it does NOT plan, cost, or execute a query (the greedy

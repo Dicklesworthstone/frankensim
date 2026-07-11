@@ -78,8 +78,8 @@ fn token() -> SessionCapability {
             "topo.*".to_string(),
             "xform.*".to_string(),
         ],
-        cores: 128.0,
-        mem_bytes: 512.0 * 1024.0 * 1024.0 * 1024.0,
+        cores: 128,
+        mem_bytes: 512 * 1024 * 1024 * 1024,
         wall_s: 48.0 * 3600.0,
     }
 }
@@ -319,8 +319,8 @@ fn ad_002b_resource_domains_and_explicit_capabilities_fail_closed() {
         cost_models: BTreeMap::new(),
         capability: Some(SessionCapability {
             ops: vec!["flux.*".to_string()],
-            cores: f64::NAN,
-            mem_bytes: -1.0,
+            cores: 0,
+            mem_bytes: 0,
             wall_s: f64::INFINITY,
         }),
         regime: None,
@@ -334,7 +334,7 @@ fn ad_002b_resource_domains_and_explicit_capabilities_fail_closed() {
             .iter()
             .filter(|finding| finding.check == "capability" && finding.what.contains("session "))
             .count(),
-        3,
+        1,
         "{}",
         report.diagnosis()
     );
@@ -345,8 +345,8 @@ fn ad_002b_resource_domains_and_explicit_capabilities_fail_closed() {
         cost_models: BTreeMap::new(),
         capability: Some(SessionCapability {
             ops: vec!["flux*".to_string()],
-            cores: 1.0,
-            mem_bytes: 0.5,
+            cores: 1,
+            mem_bytes: 0,
             wall_s: 1.0,
         }),
         regime: None,
@@ -360,8 +360,8 @@ fn ad_002b_resource_domains_and_explicit_capabilities_fail_closed() {
                 .iter()
                 .filter(|finding| finding.check == "capability")
                 .count()
-                >= 2,
-        "fractional-byte and malformed-glob token admitted:\n{}",
+                >= 1,
+        "malformed-glob token admitted:\n{}",
         report.diagnosis()
     );
 
@@ -434,6 +434,71 @@ fn ad_002b_resource_domains_and_explicit_capabilities_fail_closed() {
         "ad-002b",
         "resource domains, self-contained operator grants, invalid tokens, and duplicate \
          pillars all fail closed",
+    );
+}
+
+#[test]
+fn ad_002c_exact_count_authority_boundaries_do_not_alias() {
+    const SOURCE: &str = r#"(study "exact-authority"
+  (seed 0x5EED020C) (versions (constellation :lock "2026-07"))
+  (capability :cores 1 :mem 1B :wall 1h :ops (flux.*))
+  (budget (wall 10s) (mem 1B))
+  (flux.solve))"#;
+
+    let context = |mem_bytes, cores| AdmissionContext {
+        router: None,
+        chart_requirements: Vec::new(),
+        cost_models: BTreeMap::new(),
+        capability: Some(SessionCapability {
+            ops: vec!["flux.*".to_string()],
+            cores,
+            mem_bytes,
+            wall_s: 3_600.0,
+        }),
+        regime: None,
+        regime_policy: RegimePolicy::Warn,
+    };
+
+    let max = SOURCE.replace(":mem 1B", ":mem 18446744073709551615B");
+    let report = admit_src(&max, &context(u64::MAX, 1));
+    assert!(
+        report.admitted,
+        "u64::MAX must remain exact:\n{}",
+        report.diagnosis()
+    );
+
+    let adjacent = SOURCE.replace(":mem 1B", ":mem 9007199254740993B");
+    let report = admit_src(&adjacent, &context(9_007_199_254_740_992, 1));
+    assert!(
+        !report.admitted
+            && report
+                .diagnosis()
+                .contains("9007199254740993 bytes asked, 9007199254740992 bytes granted"),
+        "adjacent byte authorities above 2^53 aliased:\n{}",
+        report.diagnosis()
+    );
+
+    let decimal = SOURCE.replace(":mem 1B", ":mem 1.5GiB");
+    let report = admit_src(&decimal, &context(3 << 29, 1));
+    assert!(
+        report.admitted,
+        "exact decimal scale refused:\n{}",
+        report.diagnosis()
+    );
+
+    let over = SOURCE.replace(":mem 1B", ":mem 18446744073709551616B");
+    let report = admit_src(&over, &context(u64::MAX, 1));
+    assert!(!report.admitted, "2^64-byte authority must refuse");
+
+    let adjacent_cores = SOURCE.replace(":cores 1", ":cores 9007199254740993cores");
+    let report = admit_src(&adjacent_cores, &context(1, 9_007_199_254_740_992));
+    assert!(
+        !report.admitted
+            && report
+                .diagnosis()
+                .contains("9007199254740993 cores asked, 9007199254740992 granted"),
+        "adjacent core authorities above 2^53 aliased:\n{}",
+        report.diagnosis()
     );
 }
 

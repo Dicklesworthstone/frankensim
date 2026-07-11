@@ -116,7 +116,12 @@ impl DecimalCount {
             }
             written_exponent = text[exponent_start..index].parse().ok()?;
         }
-        if index != bytes.len() || (!saw_decimal && !saw_exponent && text.as_bytes()[0] != b'+' && text.as_bytes()[0] != b'-') {
+        if index != bytes.len()
+            || (!saw_decimal
+                && !saw_exponent
+                && text.as_bytes()[0] != b'+'
+                && text.as_bytes()[0] != b'-')
+        {
             return None;
         }
 

@@ -1023,9 +1023,8 @@ fn check_capability(study: &Study<'_>, cx: &AdmissionContext<'_>, out: &mut Vec<
                     _ => None,
                 },
                 "mem" => count_bytes_exact(&pair[1]).and_then(|bytes| {
-                    (bytes > token.mem_bytes).then(|| {
-                        format!("{bytes} bytes asked, {} bytes granted", token.mem_bytes)
-                    })
+                    (bytes > token.mem_bytes)
+                        .then(|| format!("{bytes} bytes asked, {} bytes granted", token.mem_bytes))
                 }),
                 "wall" => qty_seconds(&pair[1]).and_then(|w| {
                     (w > token.wall_s)

@@ -40,7 +40,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// The IR language version this build reads and writes. Programs may pin
 /// it; readers refuse newer language versions (never guess semantics).
-pub const IR_VERSION: u32 = 1;
+pub const IR_VERSION: u32 = 2;
 
 /// What went wrong while reading a program.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -442,7 +442,6 @@ impl Governor {
     ) -> Result<(), SessionError> {
         validate_resource("core-seconds grant", token.core_s)?;
         validate_resource("wall-seconds grant", token.wall_s)?;
-        validate_resource("concurrent-cores grant", token.cores)?;
         let session = token.session.0;
         let mut g = self.inner.lock().expect("governor lock");
         if g.tokens.contains_key(&session) {
@@ -460,10 +459,11 @@ impl Governor {
     /// the lifetime of this governor; duplicate registration fails closed.
     ///
     /// # Errors
-    /// [`SessionError::InvalidResource`] when a floating-point grant is not
-    /// finite and non-negative, or [`SessionError::SessionAlreadyOpen`] when
-    /// the id is already registered. Rejection happens before any session
-    /// state is mutated.
+    /// [`SessionError::InvalidResource`] when a floating-point time grant is
+    /// not finite and non-negative, or [`SessionError::SessionAlreadyOpen`]
+    /// when the id is already registered. Integer memory/core grants are
+    /// structurally bounded. Rejection happens before any session state is
+    /// mutated.
     pub fn open_session(&self, token: CapabilityToken) -> Result<(), SessionError> {
         self.register_session(token, None)
     }

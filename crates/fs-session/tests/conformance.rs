@@ -35,7 +35,7 @@ fn token(id: u64, core_s: f64, wall_s: f64) -> CapabilityToken {
         core_s,
         mem_bytes: 64 * 1024 * 1024 * 1024,
         wall_s,
-        cores: 16.0,
+        cores: 16,
         ledger_scope: "main".to_string(),
     }
 }
@@ -63,6 +63,15 @@ fn ss_001_token_bridges_into_static_admission() {
     assert!(!t.grants_op("quantum.anneal"));
     let cap = t.to_admission();
     assert!((cap.wall_s - 7200.0).abs() < f64::EPSILON);
+    assert_eq!(cap.mem_bytes, t.mem_bytes);
+    assert_eq!(cap.cores, t.cores);
+
+    let mut boundary = token(2, 1.0, 1.0);
+    boundary.mem_bytes = u64::MAX;
+    boundary.cores = 9_007_199_254_740_993;
+    let boundary_cap = boundary.to_admission();
+    assert_eq!(boundary_cap.mem_bytes, u64::MAX);
+    assert_eq!(boundary_cap.cores, 9_007_199_254_740_993);
     // The bridge feeds fs-ir admission directly.
     let node = fs_ir::sexpr::parse(SPOUT).expect("parses");
     let cx = fs_ir::admission::AdmissionContext {
@@ -268,7 +277,7 @@ fn ss_002b_duplicate_session_open_preserves_original_authority_and_state() {
     let mut replacement = token(71, 1.0, 2.0);
     replacement.ops = vec!["unrelated.*".to_string()];
     replacement.mem_bytes = 1;
-    replacement.cores = 1.0;
+    replacement.cores = 1;
     replacement.ledger_scope = "replacement-scope".to_string();
     assert_eq!(
         gov.open_session(replacement.clone()),
@@ -696,7 +705,16 @@ fn ss_004b_estimate_refuses_invalid_resource_domains() {
         ));
     }
 
-    for memory in ["-1GiB", "0B", "0.1B", "100000000000000000000GiB", "3cores"] {
+    for memory in [
+        "-1GiB",
+        "0B",
+        "0.1B",
+        "0.99999999999999999B",
+        "1.00000000000000001B",
+        "1e-1B",
+        "100000000000000000000GiB",
+        "3cores",
+    ] {
         let study = fs_ir::sexpr::parse(&format!(
             "(study \"invalid-estimate\" (budget (mem {memory})))"
         ))
@@ -708,6 +726,23 @@ fn ss_004b_estimate_refuses_invalid_resource_domains() {
                 ..
             })
         ));
+    }
+    for (memory, expected) in [
+        ("1.5GiB", 3_u64 << 29),
+        ("1e3B", 1_000),
+        ("18446744073709551615B", u64::MAX),
+    ] {
+        let study = fs_ir::sexpr::parse(&format!(
+            "(study \"exact-estimate\" (budget (mem {memory})))"
+        ))
+        .expect("exact memory fixture parses");
+        assert_eq!(
+            estimate(&study, &models, 1.0)
+                .expect("exact memory estimate")
+                .mem_ask_bytes,
+            Some(expected),
+            "{memory} changed authority during estimation"
+        );
     }
     for malformed in [
         "(study \"missing-memory\" (budget (mem)))",
@@ -1179,14 +1214,13 @@ fn ss_009_invalid_resources_fail_closed_without_poisoning_meters() {
     let invalid = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0];
     let mut next_id = 90u64;
     for value in invalid {
-        for field in ["core_s", "wall_s", "cores"] {
+        for field in ["core_s", "wall_s"] {
             let id = next_id;
             next_id += 1;
             let mut bad = token(id, 100.0, 100.0);
             match field {
                 "core_s" => bad.core_s = value,
                 "wall_s" => bad.wall_s = value,
-                "cores" => bad.cores = value,
                 _ => unreachable!(),
             }
             assert!(matches!(

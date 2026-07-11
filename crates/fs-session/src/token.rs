@@ -23,23 +23,21 @@ pub struct CapabilityToken {
     /// Wall-clock grant in seconds.
     pub wall_s: f64,
     /// Cores the session may occupy at once.
-    pub cores: f64,
+    pub cores: u64,
     /// Ledger scope (branch/namespace this session may write).
     pub ledger_scope: String,
 }
 
 impl CapabilityToken {
-    /// The static-admission view of this token. fs-ir's current capability
-    /// vocabulary represents declared memory asks as `f64`, so this is a coarse
-    /// planning projection above 2^53 bytes. The enforcing governor retains and
-    /// compares the original integer byte grant exactly.
+    /// The static-admission view of this token. Memory remains an exact `u64`
+    /// through this bridge, so static admission and the enforcing governor make
+    /// the same byte-for-byte authority decision.
     #[must_use]
     pub fn to_admission(&self) -> SessionCapability {
         SessionCapability {
             ops: self.ops.clone(),
             cores: self.cores,
-            #[allow(clippy::cast_precision_loss)] // fs-ir's admission vocabulary is f64
-            mem_bytes: self.mem_bytes as f64,
+            mem_bytes: self.mem_bytes,
             wall_s: self.wall_s,
         }
     }
