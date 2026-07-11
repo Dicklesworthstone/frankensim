@@ -1,5 +1,9 @@
 [workspace]
 resolver = "3"
+# tools/bootstrap is DELIBERATELY excluded: it is the pre-Cargo clean-machine
+# entry point (bead 1t8i) and must build without resolving this workspace's
+# sibling path dependencies.
+exclude = ["tools/bootstrap"]
 members = [
     "crates/fs-dd",
     "crates/fs-flywheel-e2e",

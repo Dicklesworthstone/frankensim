@@ -11,12 +11,28 @@ can verify or refresh the pinned sources from the lock:
     cargo run -p xtask -- bootstrap-constellation --offline  # verify-only, no network
     cargo run -p xtask -- bootstrap-constellation --from B   # air-gapped mirror base
 
-This is **not yet a clean-clone bootstrap**. Cargo resolves every workspace
-manifest and its path dependencies before it can build `xtask`; therefore the
-command cannot start when the siblings are absent. The manifests also contain
-fixed relative sibling paths, so an arbitrary source cache cannot satisfy the
-workspace. Bead `frankensim-1t8i` tracks extraction of a zero-dependency
-pre-Cargo entry point and strict lock parsing.
+The xtask form requires a workspace that already resolves. A CLEAN CLONE
+cannot build xtask (Cargo resolves the fixed relative sibling path
+dependencies first), so the clean-machine entry point is the standalone,
+zero-dependency tool at `tools/bootstrap` (bead 1t8i) — deliberately NOT a
+workspace member, so it builds alone:
+
+    cargo run --manifest-path tools/bootstrap/Cargo.toml            # fetch + verify
+    cargo run --manifest-path tools/bootstrap/Cargo.toml -- --offline
+    cargo run --manifest-path tools/bootstrap/Cargo.toml -- --from <mirror-base>
+
+It reads `constellation.lock`, clones each missing sibling into the
+workspace parent (checkout DETACHED at the pin, head re-verified, no
+branches/worktrees created anywhere), verifies existing siblings (pinned
+head + clean tree; drift and dirt are refusals, never silent
+substitutions — a case-folding checkout collision surfaces as a dirty
+tree and refuses), and writes `constellation-bootstrap.json` provenance
+beside the siblings. The sibling layout itself is the reproducible Cargo
+configuration: no config files are generated or mutated. Idempotent:
+re-runs verify. Hermetic offline-cache replay drills (clean-machine
+clone from a local bare mirror, idempotent replay, drift/dirty/offline
+refusals) live in `tools/bootstrap/tests/replay.rs`. The xtask command
+below remains the in-workspace verifier once the workspace builds.
 
 Behavior of an already-built `xtask` binary, per library (the `cargo run`
 commands above can exercise only the verification path while every required

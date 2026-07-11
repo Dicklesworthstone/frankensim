@@ -1,0 +1,17 @@
+[package]
+name = "frankensim-bootstrap"
+version = "0.0.1"
+edition = "2021"
+license = "MIT"
+description = "Zero-dependency clean-machine bootstrap: materialize and verify the pinned Franken constellation siblings from constellation.lock."
+
+# Deliberately NOT a frankensim workspace member: a clean clone cannot
+# resolve the workspace (its path dependencies point at the siblings this
+# tool exists to fetch), so the bootstrap entry point must build alone.
+[workspace]
+
+[dependencies]
+
+[[bin]]
+name = "frankensim-bootstrap"
+path = "src/main.rs"
