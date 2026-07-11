@@ -29,7 +29,9 @@ use fs_evidence::{Color, ColorRank, IntervalOp, compose};
 pub use fs_blake3::ContentHash;
 
 pub mod coverage;
+pub mod origin;
 pub use coverage::{ConceptPresence, CoverageStatus, package_coverage, package_presence};
+pub use origin::{ClaimOrigin, NoWaiverVerifier, OriginError, WaiverGrant, WaiverVerifier};
 
 /// A COMPOSITION RECEIPT (schema v3, bead xfxq): this claim's color was
 /// derived from earlier claims in the package, and the standalone
