@@ -133,8 +133,9 @@ fn parse_promote_args(args: &[String]) -> Result<PromoteArgs, String> {
         }
     }
     if probes < 3 {
-        return Err("--probes must be at least 3 (governed promotion needs mutual agreement)"
-            .to_string());
+        return Err(
+            "--probes must be at least 3 (governed promotion needs mutual agreement)".to_string(),
+        );
     }
     Ok(PromoteArgs {
         store: store.ok_or("promote requires --store <jsonl>")?,
@@ -179,7 +180,9 @@ fn run_promote(args: &PromoteArgs) -> Result<(), String> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => BaselineStore::new(),
         Err(error) => return Err(format!("cannot read store {:?}: {error}", args.store)),
     };
-    store.admit(baseline.clone()).map_err(|error| error.to_string())?;
+    store
+        .admit(baseline.clone())
+        .map_err(|error| error.to_string())?;
     std::fs::write(&args.store, store.to_jsonl())
         .map_err(|error| format!("cannot write store {:?}: {error}", args.store))?;
     println!("{}", baseline.to_jsonl());

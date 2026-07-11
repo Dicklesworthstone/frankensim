@@ -222,7 +222,10 @@ fn fft_attainment() {
     // BOTH probes are admitted against the trusted baseline (drift
     // during the run, or a consistently-degraded host, both refuse).
     let post_axes = MachineAxes::probe();
-    println!("{{\"metric\":\"axes-post\",\"axes\":{}}}", post_axes.to_jsonl());
+    println!(
+        "{{\"metric\":\"axes-post\",\"axes\":{}}}",
+        post_axes.to_jsonl()
+    );
     let baseline_verdict = baseline_policy.verdict(&axes, &post_axes);
     println!("{}", baseline_policy.receipt_json(&axes, &post_axes));
     if !baseline_verdict.trusted() {
