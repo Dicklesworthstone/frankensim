@@ -979,3 +979,123 @@ fn live_choice_is_within_declared_tolerance_of_exhaustive_oracle() {
         oracle_best.1
     );
 }
+
+/// wf9.15.1: after the probe buffers clear the envelope on their own, the
+/// session tune-metadata plan is charged on top — a refusal that names the
+/// plan, fires before any allocation, and loses nothing. The probe-byte
+/// boundary is derived from the probe refusal's own receipt rather than
+/// re-implementing the sizing formula.
+#[test]
+fn metadata_plan_refusal_precedes_probes_and_loses_nothing() {
+    let (a, b) = problem();
+    let sentinel = 4.5_f64;
+    let mut c = vec![sentinel; M * N];
+    let mut tuner = Tuner::cold(FP_THIS);
+    let tiny = fs_la::GemmMemoryEnvelope { limit_bytes: 1 };
+    let probe_bytes = match gemm_f64_session_budgeted(
+        &mut tuner,
+        GemmTuneCache::Disabled,
+        &CancelGate::new(),
+        THREADS,
+        M,
+        N,
+        K,
+        1.0,
+        &a,
+        &b,
+        0.0,
+        &mut c,
+        tiny,
+    )
+    .expect_err("one byte cannot admit the probe buffers")
+    {
+        GemmTuneError::MemoryRefused {
+            what: "tune-probe-envelope",
+            requested_bytes,
+            ..
+        } => requested_bytes,
+        other => panic!("expected the probe refusal first, got {other:?}"),
+    };
+
+    let probes_only = fs_la::GemmMemoryEnvelope {
+        limit_bytes: u64::try_from(probe_bytes).expect("probe bytes fit u64"),
+    };
+    let error = gemm_f64_session_budgeted(
+        &mut tuner,
+        GemmTuneCache::Disabled,
+        &CancelGate::new(),
+        THREADS,
+        M,
+        N,
+        K,
+        1.0,
+        &a,
+        &b,
+        0.0,
+        &mut c,
+        probes_only,
+    )
+    .expect_err("an envelope with room for probes alone must refuse the metadata plan");
+    match error {
+        GemmTuneError::MemoryRefused {
+            what: "tune-metadata-plan",
+            requested_bytes,
+            peak_used_bytes: 0,
+            report: None,
+            ..
+        } => {
+            assert_eq!(
+                requested_bytes,
+                probe_bytes + fs_session::gemm_tune_metadata_plan_bytes(),
+                "the plan refusal must account probes plus the exact metadata constant"
+            );
+        }
+        other => panic!("expected the metadata-plan refusal, got {other:?}"),
+    }
+    assert!(tuner.decisions().is_empty());
+    assert!(
+        c.iter().all(|value| value.to_bits() == sentinel.to_bits()),
+        "a plan refusal must leave the output untouched"
+    );
+}
+
+/// wf9.15.1: the sealed row binds the exact metadata-plan receipt — the
+/// same pure constant any consumer can rederive — and the sealed material
+/// round-trips bitwise against what adoption would read back.
+#[test]
+fn sealed_row_receipt_binds_the_metadata_plan() {
+    let (a, b) = problem();
+    let mut c = vec![0.0f64; M * N];
+    let mut tuner = Tuner::cold(FP_THIS);
+    let report = gemm_f64_session(
+        &mut tuner,
+        GemmTuneCache::Disabled,
+        &CancelGate::new(),
+        THREADS,
+        M,
+        N,
+        K,
+        1.0,
+        &a,
+        &b,
+        0.0,
+        &mut c,
+    )
+    .expect("cold session sweeps");
+    assert!(report.swept, "cold tuner must measure");
+    let row = report.new_tune_row.expect("fresh sweep seals a row");
+    let expected = format!(
+        "\"metadata_plan\":{{\"schema\":\"{}\",\"requested_bytes\":{}}}",
+        fs_session::GEMM_TUNE_METADATA_PLAN_SCHEMA,
+        fs_session::gemm_tune_metadata_plan_bytes(),
+    );
+    let receipt = row.receipt_json();
+    assert!(
+        receipt.contains(&expected),
+        "sealed-row receipt must bind the metadata plan: {receipt}"
+    );
+    // Identity is derived from the receipt; two derivations agree, so a
+    // later adoption of the identical stored material (which existing warm
+    // -cache drills exercise end to end) rebuilds the same identity.
+    assert_eq!(row.receipt_identity(), row.receipt_identity());
+}

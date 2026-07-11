@@ -21,12 +21,14 @@ pub use estimate::{
     estimate,
 };
 pub use gemm_tune::{
-    GEMM_TUNE_ROW_RECEIPT_DOMAIN, GEMM_TUNER_SCHEMA_VERSION, GemmDispatch, GemmExecutionReceipt,
-    GemmMemoryReceipt, GemmPanelReceipt, GemmTuneCache, GemmTuneError, ValidatedGemmTuneRow,
-    gemm_f64_session, gemm_f64_session_budgeted, gemm_f64_session_with_pool,
+    GEMM_DEPGRAPH_RECEIPT_DOMAIN, GEMM_TUNE_METADATA_PLAN_SCHEMA, GEMM_TUNE_ROW_RECEIPT_DOMAIN,
+    GEMM_TUNER_SCHEMA_VERSION, GemmDispatch, GemmExecutionReceipt, GemmGraphEvidenceClass,
+    GemmMemoryReceipt, GemmPanelReceipt, GemmTuneBuildEvidence, GemmTuneCache, GemmTuneError,
+    ValidatedGemmTuneRow, gemm_f64_session, gemm_f64_session_budgeted, gemm_f64_session_with_pool,
     gemm_f64_session_with_pool_budgeted, gemm_f64_session_with_pool_declared,
-    gemm_f64_session_with_pool_declared_budgeted, gemm_kernel_key, gemm_shape_class, gemm_tune_key,
-    gemm_tune_key_budgeted, gemm_tune_key_with_pool, gemm_tune_key_with_pool_budgeted,
+    gemm_f64_session_with_pool_declared_budgeted, gemm_kernel_key, gemm_shape_class,
+    gemm_tune_build_evidence, gemm_tune_key, gemm_tune_key_budgeted, gemm_tune_key_with_pool,
+    gemm_tune_key_with_pool_budgeted, gemm_tune_metadata_plan_bytes,
 };
 pub use governor::{
     Charge, DegradationEvent, DegradationStep, Enforcement, Governor, StepPhase, SubmissionReceipt,

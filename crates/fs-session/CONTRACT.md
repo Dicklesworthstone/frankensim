@@ -115,6 +115,16 @@ Consumers: the P2 marquee demo, the HELM e2e suite (gp3.11).
   build fingerprint, plus `GEMM_TUNER_SCHEMA_VERSION`, which must bump whenever
   the producer lattice, probe/sample policy, ranking, or plan mapping changes;
   the ledger key also binds the machine fingerprint.
+  `gemm_tune_build_evidence()` exposes that exact build fingerprint together
+  with `GemmGraphEvidenceClass`, the fingerprint-bound class identity, and the
+  optional full canonical dependency receipt + domain digest. This lets root
+  orchestration require and retain the receipt artifact before publication.
+  `GEMM_DEPGRAPH_RECEIPT_DOMAIN` is re-exported so the root can recompute the
+  digest from retained bytes without copying a private domain string.
+  `OperatorObservedReceipt` means strict receipt structure was validated, not
+  that fs-session independently authenticated the operator or reconstructed
+  Cargo's invocation-exact unit graph. `DevelopmentEquivalenceSalt` is never
+  verified graph evidence.
   Shape/overflow and
   pre-requested-cancel checks happen before any tune mutation; one-thread,
   small-M, and no-product calls bypass tuning. Pinned plans skip measurement;
@@ -311,15 +321,31 @@ armed and runs when an x86 host picks it up.
 - **Two-lane executor integration** (interactive vs batch lanes with
   core quotas) is deferred to gp3.11's study-scale batteries; the
   enforcement/idempotency/estimate surfaces here are what it composes.
+- fs-session exposes fs-la's exact dependency receipt and trust class but does
+  not upgrade it: correspondence between an operator-supplied receipt and the
+  invoking Cargo build remains operator-trusted. Root publication from a
+  development-salt build is not claimed as receipt-backed evidence.
 - A mutex self-deadlock in the calibration renderer was found by the
   conformance run and fixed (single lock scope) — reentrancy is a
   documented non-assumption throughout.
 - GEMM minimum-wall-time ranking is a deterministic selection rule over the
   recorded samples, not statistical confidence. The x86 oracle lane remains
   armed rather than claimed as measured until it runs on the reference host.
-- The session envelope currently covers the four dominant numeric tune buffers
-  plus every fs-la-owned dispatch reservation. Candidate/BTree/ranking vectors,
-  sample/evidence/JSON strings, sealed-row strings, and ledger/cache transient
-  values are not yet under the same lease; that precise remaining scope is
-  `frankensim-epic-substrate-wf9.15.1`. Generic TilePool metadata remains the
-  separate `frankensim-epic-substrate-wf9.16` boundary.
+- The session envelope covers the four dominant numeric tune buffers, every
+  fs-la-owned dispatch reservation, AND the session tune-metadata plan (bead
+  wf9.15.1): candidate/ranking/observation collections (BTreeSet dedup was
+  replaced by a bounded linear scan — tree-node overhead is not honestly
+  accountable), one reused sample buffer plus per-observation exact copies,
+  canonical plan labels, and the sealed-row strings, all with documented
+  caps ENFORCED at observation/seal time. `run_sweep` charges the plan
+  constant after the probe buffers clear the envelope alone (refusal
+  `what: "tune-metadata-plan"`, before any allocation, never losing a
+  validated fs-la report) and the child envelope excludes probe + plan
+  bytes. The plan is a pure constant of the sweep lattice and schema caps —
+  `gemm_tune_metadata_plan_bytes()` / `GEMM_TUNE_METADATA_PLAN_SCHEMA` — and
+  every sealed row binds it into `receipt_json` as `metadata_plan`, so a
+  freshly measured row and the same row adopted later derive the identical
+  `receipt_identity`. Introducing the field rotates pre-plan row identities
+  once (stored ledger cache rows re-tune on first touch — the same rotation
+  class as a build-fingerprint change). Generic TilePool metadata remains
+  the separate `frankensim-epic-substrate-wf9.16` boundary.

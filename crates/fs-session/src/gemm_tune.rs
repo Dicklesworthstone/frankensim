@@ -42,6 +42,8 @@ use fs_exec::{
 };
 use fs_ledger::Ledger;
 
+pub use fs_la::{GEMM_DEPGRAPH_RECEIPT_DOMAIN, GemmGraphEvidenceClass};
+
 /// The bounded sweep lattice: up to 4 × 2 candidates, lattice order
 /// (mc-major ascending). Candidates that clamp to an identical effective
 /// `(mc, nc)` pair are deduplicated before measurement. Chosen around the
@@ -61,6 +63,81 @@ const PROBE_N_DIM_CAP: usize = 2048;
 /// evidence row).
 const SWEEP_SAMPLES: usize = 3;
 
+/// Session tune-metadata plan (bead wf9.15.1): the checked logical byte
+/// bound for every session-owned autotune metadata structure of one sweep —
+/// candidate/ranking/observation collections, the reused sample buffer,
+/// canonical plan labels, and the sealed-row strings. All components derive
+/// from the const sweep lattice and documented schema caps, so the plan is a
+/// pure constant: a freshly measured row and the same row adopted later
+/// derive the identical plan, keeping `receipt_identity` stable across both
+/// paths. Numeric probe buffers are wf9.15's domain and generic TilePool
+/// internals are wf9.16's; neither is claimed here.
+mod tune_metadata_plan {
+    use super::{SWEEP_MC, SWEEP_NC_CAP, SWEEP_SAMPLES, SweepCandidate};
+    use fs_exec::{GemmBlockPlan, TuneObservation};
+
+    /// Schema tag bound into the sealed-row receipt.
+    pub const SCHEMA: &str = "fs-session-tune-metadata-plan-v1";
+
+    /// Maximum distinct sweep candidates (the const lattice).
+    pub const CANDIDATE_CAP: usize = SWEEP_MC.len() * SWEEP_NC_CAP.len();
+
+    /// Documented cap on one canonical plan label (`mc=NNN,nc-cap=NNNN`);
+    /// enforced at observation time, not assumed.
+    pub const LABEL_BYTES_CAP: usize = 64;
+
+    /// Documented cap on the sealed row's `params` JSON; enforced at seal
+    /// time. The params string is the canonical plan spelling.
+    pub const PARAMS_BYTES_CAP: usize = 256;
+
+    /// Documented cap on the sealed row's `measured` evidence JSON
+    /// (observations for the full lattice at `SWEEP_SAMPLES` samples plus
+    /// fixed fields); enforced at seal time.
+    pub const MEASURED_BYTES_CAP: usize = 16 * 1024;
+
+    /// Total logical bytes the plan charges against the caller envelope
+    /// before any probe allocation.
+    #[must_use]
+    pub fn requested_bytes() -> u128 {
+        let candidates = CANDIDATE_CAP * size_of::<SweepCandidate>();
+        let ranked = CANDIDATE_CAP * size_of::<(u64, usize, GemmBlockPlan)>();
+        let observations = CANDIDATE_CAP * size_of::<TuneObservation>();
+        let samples_reused = SWEEP_SAMPLES * size_of::<u64>();
+        let labels = CANDIDATE_CAP * LABEL_BYTES_CAP;
+        let sample_storage = CANDIDATE_CAP * SWEEP_SAMPLES * size_of::<u64>();
+        let sealed_row = PARAMS_BYTES_CAP + MEASURED_BYTES_CAP;
+        candidates as u128
+            + ranked as u128
+            + observations as u128
+            + samples_reused as u128
+            + labels as u128
+            + sample_storage as u128
+            + sealed_row as u128
+    }
+
+    /// Canonical receipt fragment for the sealed-row JSON.
+    #[must_use]
+    pub fn receipt_fragment() -> String {
+        format!(
+            "{{\"schema\":\"{SCHEMA}\",\"requested_bytes\":{}}}",
+            requested_bytes()
+        )
+    }
+}
+
+/// Public schema tag of the session tune-metadata plan bound into every
+/// sealed-row receipt (bead wf9.15.1).
+pub const GEMM_TUNE_METADATA_PLAN_SCHEMA: &str = tune_metadata_plan::SCHEMA;
+
+/// Logical bytes the session tune-metadata plan charges against the caller
+/// envelope before any probe allocation. A pure constant of the sweep
+/// lattice and documented schema caps — the same value fresh measurement
+/// and later adoption bind into `receipt_identity`.
+#[must_use]
+pub fn gemm_tune_metadata_plan_bytes() -> u128 {
+    tune_metadata_plan::requested_bytes()
+}
+
 /// Durable identity of the autotune producer algorithm: candidate lattice,
 /// probe dimensions/sample policy, ranking, and plan-to-dispatch mapping. Any
 /// semantic change to those choices must bump this value before old rows may be
@@ -76,6 +153,39 @@ const GEMM_SWEEP_RUN_DOMAIN: &str = "org.frankensim.fs-session.gemm-sweep-run.v1
 /// Globally unique BLAKE3 derive-key context for canonical GEMM tune-row
 /// receipts.
 pub const GEMM_TUNE_ROW_RECEIPT_DOMAIN: &str = "org.frankensim.fs-session.gemm-tune-row-receipt.v2";
+
+/// Build/dependency identity available to a root before it admits or publishes
+/// GEMM tune evidence.
+///
+/// An operator-observed receipt can be retained as an exact artifact. It is not
+/// promoted to independently verified graph evidence by this projection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GemmTuneBuildEvidence {
+    /// Exact generated-code fingerprint already bound into every tune key.
+    pub build_fingerprint: &'static str,
+    /// Dependency evidence trust class.
+    pub graph_class: GemmGraphEvidenceClass,
+    /// Fingerprint-bound graph class identity.
+    pub graph_class_identity: &'static str,
+    /// Exact canonical receipt suitable for artifact retention, when supplied.
+    pub dependency_receipt: Option<&'static str>,
+    /// Domain-separated digest of `dependency_receipt`, when supplied.
+    pub dependency_receipt_digest: Option<&'static str>,
+}
+
+/// Evidence a root must inspect before citing or retaining this binary's GEMM
+/// tuning results.
+#[must_use]
+pub const fn gemm_tune_build_evidence() -> GemmTuneBuildEvidence {
+    let graph = fs_la::gemm_graph_evidence();
+    GemmTuneBuildEvidence {
+        build_fingerprint: fs_la::GEMM_BUILD_FINGERPRINT,
+        graph_class: graph.class,
+        graph_class_identity: graph.class_identity,
+        dependency_receipt: graph.receipt,
+        dependency_receipt_digest: graph.receipt_digest,
+    }
+}
 
 fn push_json_string(out: &mut String, value: &str) {
     use core::fmt::Write as _;
@@ -565,12 +675,26 @@ impl ValidatedGemmTuneRow {
                 limit_bytes: execution.memory_limit_bytes(),
             },
         )?;
+        let params = prepared.params_json();
+        let measured = prepared.row_json();
+        // Session tune-metadata plan caps are ENFORCED at seal time (bead
+        // wf9.15.1): a sealed-row string beyond its documented cap means the
+        // schema grew past the plan, which must fail loudly here rather
+        // than silently undercount.
+        assert!(
+            params.len() <= tune_metadata_plan::PARAMS_BYTES_CAP,
+            "sealed-row params JSON exceeds the tune-metadata plan cap (schema drift)"
+        );
+        assert!(
+            measured.len() <= tune_metadata_plan::MEASURED_BYTES_CAP,
+            "sealed-row measured JSON exceeds the tune-metadata plan cap (schema drift)"
+        );
         Ok(Self {
             kernel: prepared.key().kernel().to_string(),
             shape_class: prepared.key().shape_class().to_string(),
             machine: machine.to_le_bytes(),
-            params: prepared.params_json(),
-            measured: prepared.row_json(),
+            params,
+            measured,
             memory_limit_bytes: execution.memory_limit_bytes(),
             probe_buffer_bytes,
         })
@@ -599,6 +723,14 @@ impl ValidatedGemmTuneRow {
             ",\"memory_limit_bytes\":{},\"probe_buffer_bytes\":{}",
             self.memory_limit_bytes, self.probe_buffer_bytes
         );
+        // Bind the session tune-metadata plan into the row receipt (bead
+        // wf9.15.1). The plan is a pure constant of the sweep lattice and
+        // schema caps, so a freshly measured row and the same row adopted
+        // later derive the identical fragment — receipt identity stays
+        // stable across both paths. (This field's introduction rotates
+        // pre-plan row identities once; see CONTRACT.)
+        out.push_str(",\"metadata_plan\":");
+        out.push_str(&tune_metadata_plan::receipt_fragment());
         out.push('}');
         out
     }
@@ -975,9 +1107,19 @@ struct SweepResult {
 
 /// Build the lattice the kernel will ACTUALLY execute. Nominal plans that
 /// collapse to the same clamped `(mc, nc)` pair are measured only once.
-fn effective_sweep_candidates(pm: usize, pn: usize) -> Result<Vec<SweepCandidate>, GemmTuneError> {
-    let mut seen = std::collections::BTreeSet::new();
-    let mut candidates = Vec::with_capacity(SWEEP_MC.len() * SWEEP_NC_CAP.len());
+fn effective_sweep_candidates(
+    pm: usize,
+    pn: usize,
+    envelope: fs_la::GemmMemoryEnvelope,
+) -> Result<Vec<SweepCandidate>, GemmTuneError> {
+    // Dedup by linear scan (bead wf9.15.1): the lattice is at most
+    // CANDIDATE_CAP entries, and BTreeSet node overhead is not honestly
+    // accountable under the session tune-memory plan.
+    let mut candidates = try_reserved_vec::<SweepCandidate>(
+        tune_metadata_plan::CANDIDATE_CAP,
+        "tune-metadata-candidates",
+        envelope,
+    )?;
     for (mc, nc_cap) in SWEEP_MC
         .iter()
         .flat_map(|&mc| SWEEP_NC_CAP.iter().map(move |&nc| (mc, nc)))
@@ -986,7 +1128,9 @@ fn effective_sweep_candidates(pm: usize, pn: usize) -> Result<Vec<SweepCandidate
         // These are the clamps applied by fs-la's packed parallel engine.
         let effective_mc = plan.mc.max(8).min(pm.max(8));
         let effective_nc = pn.min(plan.nc_cap).max(4);
-        if seen.insert((effective_mc, effective_nc)) {
+        if !candidates.iter().any(|c: &SweepCandidate| {
+            c.effective_mc == effective_mc && c.effective_nc == effective_nc
+        }) {
             candidates.push(SweepCandidate {
                 plan,
                 effective_mc,
@@ -997,20 +1141,13 @@ fn effective_sweep_candidates(pm: usize, pn: usize) -> Result<Vec<SweepCandidate
     Ok(candidates)
 }
 
-/// Measure candidate executions supplied by `run`. Keeping this core
-/// injectable lets the Gauntlet force drift in each repeat and cache faults
-/// without adding test behavior to the production GEMM implementation.
-fn measure_candidates<R>(
-    gate: &CancelGate,
-    candidates: &[SweepCandidate],
+/// Checked logical peaks for the probe output and exact-bit reference
+/// buffers: (first-output peak, both-live peak).
+fn probe_output_peaks(
     output_len: usize,
     envelope: fs_la::GemmMemoryEnvelope,
     base_used_bytes: u128,
-    mut run: R,
-) -> Result<SweepResult, GemmTuneError>
-where
-    R: FnMut(&SweepCandidate, &mut [f64]) -> Result<u128, GemmTuneError>,
-{
+) -> Result<(u128, u128), GemmTuneError> {
     let output_bytes = (output_len as u128)
         .checked_mul(core::mem::size_of::<u64>() as u128)
         .ok_or(GemmTuneError::MemoryPlanOverflow {
@@ -1031,6 +1168,65 @@ where
                 what: "tune-probe-reference-peak",
                 limit_bytes: envelope.limit_bytes,
             })?;
+    Ok((first_output_peak, live_probe_bytes))
+}
+
+/// One candidate's evidence observation: an exact-length sample copy
+/// (accounted by the plan's per-candidate sample-storage component) under a
+/// label whose schema cap is ENFORCED, not assumed (bead wf9.15.1).
+fn candidate_observation(
+    candidate: &SweepCandidate,
+    sample_scratch: &[u64],
+    envelope: fs_la::GemmMemoryEnvelope,
+) -> Result<TuneObservation, GemmTuneError> {
+    let label = candidate.plan.canonical();
+    assert!(
+        label.len() <= tune_metadata_plan::LABEL_BYTES_CAP,
+        "canonical plan label exceeds the tune-metadata plan cap (schema drift)"
+    );
+    let mut samples_owned =
+        try_reserved_vec::<u64>(sample_scratch.len(), "tune-metadata-sample-copy", envelope)?;
+    samples_owned.extend_from_slice(sample_scratch);
+    Ok(TuneObservation::wall_time(label, samples_owned)?)
+}
+
+/// Fallibly pre-reserve one bounded metadata collection (bead wf9.15.1);
+/// allocator refusal is a typed diagnostic, never an abort.
+fn try_reserved_vec<T>(
+    cap: usize,
+    what: &'static str,
+    envelope: fs_la::GemmMemoryEnvelope,
+) -> Result<Vec<T>, GemmTuneError> {
+    let mut values = Vec::new();
+    values.try_reserve_exact(cap).map_err(|_| {
+        let requested_bytes = (cap as u128).saturating_mul(size_of::<T>() as u128);
+        GemmTuneError::MemoryRefused {
+            what,
+            requested_bytes,
+            limit_bytes: envelope.limit_bytes,
+            peak_used_bytes: 0,
+            report: None,
+        }
+    })?;
+    Ok(values)
+}
+
+/// Measure candidate executions supplied by `run`. Keeping this core
+/// injectable lets the Gauntlet force drift in each repeat and cache faults
+/// without adding test behavior to the production GEMM implementation.
+fn measure_candidates<R>(
+    gate: &CancelGate,
+    candidates: &[SweepCandidate],
+    output_len: usize,
+    envelope: fs_la::GemmMemoryEnvelope,
+    base_used_bytes: u128,
+    mut run: R,
+) -> Result<SweepResult, GemmTuneError>
+where
+    R: FnMut(&SweepCandidate, &mut [f64]) -> Result<u128, GemmTuneError>,
+{
+    let (first_output_peak, live_probe_bytes) =
+        probe_output_peaks(output_len, envelope, base_used_bytes)?;
     let mut c = try_filled_buffer(
         output_len,
         0.0_f64,
@@ -1045,8 +1241,21 @@ where
         envelope,
         first_output_peak,
     )?;
-    let mut observations = Vec::with_capacity(candidates.len());
-    let mut ranked: Vec<(u64, usize, GemmBlockPlan)> = Vec::with_capacity(candidates.len());
+    let mut observations = try_reserved_vec::<TuneObservation>(
+        candidates.len(),
+        "tune-metadata-observations",
+        envelope,
+    )?;
+    let mut ranked = try_reserved_vec::<(u64, usize, GemmBlockPlan)>(
+        candidates.len(),
+        "tune-metadata-ranked",
+        envelope,
+    )?;
+    // One reused sample buffer for the whole sweep (bead wf9.15.1): the
+    // per-candidate observation still receives its own exact-length copy,
+    // but scratch growth happens once, fallibly.
+    let mut sample_scratch =
+        try_reserved_vec::<u64>(SWEEP_SAMPLES, "tune-metadata-samples", envelope)?;
     let mut reference_initialized = false;
     let mut numerical_peak = 0_u128;
     for (index, candidate) in candidates.iter().enumerate() {
@@ -1057,7 +1266,7 @@ where
                 numerical_peak,
             ));
         }
-        let mut samples_ns = Vec::with_capacity(SWEEP_SAMPLES);
+        sample_scratch.clear();
         for repeat in 1..=SWEEP_SAMPLES {
             if gate.is_requested() {
                 return Err(cancelled_with_live_probe_memory(
@@ -1070,7 +1279,7 @@ where
             let t0 = std::time::Instant::now();
             numerical_peak = numerical_peak.max(run(candidate, &mut c)?);
             let ns = u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX);
-            samples_ns.push(ns.max(1));
+            sample_scratch.push(ns.max(1));
             if gate.is_requested() {
                 return Err(cancelled_with_live_probe_memory(
                     envelope,
@@ -1099,12 +1308,9 @@ where
                 });
             }
         }
-        let best = samples_ns.iter().copied().min().unwrap_or(u64::MAX);
+        let best = sample_scratch.iter().copied().min().unwrap_or(u64::MAX);
         ranked.push((best, index, candidate.plan));
-        observations.push(TuneObservation::wall_time(
-            candidate.plan.canonical(),
-            samples_ns,
-        )?);
+        observations.push(candidate_observation(candidate, &sample_scratch, envelope)?);
     }
     ranked.sort_unstable_by_key(|&(ns, index, _)| (ns, index));
     let winner = ranked
@@ -1152,10 +1358,33 @@ fn run_sweep(
             report: None,
         });
     }
+    // Session tune-metadata plan (bead wf9.15.1): after the probe buffers
+    // clear the envelope on their own, charge the bounded metadata byte
+    // plan ON TOP, still before any allocation. A refusal here loses
+    // nothing — no fs-la report exists yet — and the plan constant is the
+    // same one the sealed row binds into its receipt.
+    let metadata_bytes = tune_metadata_plan::requested_bytes();
+    let planned_bytes = probe_buffer_bytes.checked_add(metadata_bytes).ok_or(
+        GemmTuneError::MemoryPlanOverflow {
+            what: "tune-metadata-plan",
+            limit_bytes: envelope.limit_bytes,
+        },
+    )?;
+    if planned_bytes > u128::from(envelope.limit_bytes) {
+        return Err(GemmTuneError::MemoryRefused {
+            what: "tune-metadata-plan",
+            requested_bytes: planned_bytes,
+            limit_bytes: envelope.limit_bytes,
+            peak_used_bytes: 0,
+            report: None,
+        });
+    }
     let child_limit_bytes = if envelope == fs_la::GemmMemoryEnvelope::UNBOUNDED {
         u64::MAX
     } else {
-        u64::try_from(u128::from(envelope.limit_bytes) - probe_buffer_bytes)
+        // The metadata plan's bytes are live for the whole sweep, so the
+        // child envelope excludes them alongside the probe buffers.
+        u64::try_from(u128::from(envelope.limit_bytes) - planned_bytes)
             .expect("bounded probe preflight leaves a u64 child envelope")
     };
     let child_envelope = fs_la::GemmMemoryEnvelope {
@@ -1186,7 +1415,7 @@ fn run_sweep(
     let mut b = try_filled_buffer(b_len, 0.0_f64, "tune-probe-b", envelope, a_bytes)?;
     probe_fill(&mut a, 0xA);
     probe_fill(&mut b, 0xB);
-    let candidates = effective_sweep_candidates(pm, pn)?;
+    let candidates = effective_sweep_candidates(pm, pn, envelope)?;
     let mut sweep_ordinal = 0_u64;
     measure_candidates(
         gate,
@@ -1628,6 +1857,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn root_build_evidence_projects_exact_fs_la_material() {
+        let evidence = gemm_tune_build_evidence();
+        let graph = fs_la::gemm_graph_evidence();
+        assert_eq!(evidence.build_fingerprint, fs_la::gemm_build_identity());
+        assert_eq!(evidence.graph_class, graph.class);
+        assert_eq!(evidence.graph_class_identity, graph.class_identity);
+        assert_eq!(evidence.dependency_receipt, graph.receipt);
+        assert_eq!(evidence.dependency_receipt_digest, graph.receipt_digest);
+        if let (Some(receipt), Some(digest)) = (
+            evidence.dependency_receipt,
+            evidence.dependency_receipt_digest,
+        ) {
+            assert_eq!(
+                fs_blake3::hash_domain(GEMM_DEPGRAPH_RECEIPT_DOMAIN, receipt.as_bytes())
+                    .to_string(),
+                digest
+            );
+        }
+        match evidence.graph_class {
+            GemmGraphEvidenceClass::OperatorObservedReceipt => {
+                assert!(evidence.dependency_receipt.is_some());
+                assert!(evidence.dependency_receipt_digest.is_some());
+            }
+            GemmGraphEvidenceClass::DevelopmentEquivalenceSalt => {
+                assert!(evidence.dependency_receipt.is_none());
+                assert!(evidence.dependency_receipt_digest.is_none());
+            }
+        }
+    }
+
+    #[test]
     fn tuner_schema_bump_separates_durable_keys() {
         let v1 =
             gemm_tune_key_for_execution_schema(4, 4, u64::MAX, "test-placement", 512, 640, 512, 1)
@@ -1725,7 +1985,9 @@ mod tests {
 
     #[test]
     fn exact_bits_gate_catches_drift_in_every_repeat() {
-        let candidates = effective_sweep_candidates(320, 2048).expect("candidate lattice");
+        let candidates =
+            effective_sweep_candidates(320, 2048, fs_la::GemmMemoryEnvelope::UNBOUNDED)
+                .expect("candidate lattice");
         assert!(candidates.len() >= 2);
         for drift_repeat in 1..=SWEEP_SAMPLES {
             let mut call = 0usize;
@@ -1767,7 +2029,8 @@ mod tests {
 
     #[test]
     fn effective_candidate_lattice_is_unique_and_exercises_nc() {
-        let narrow = effective_sweep_candidates(320, 288).expect("narrow lattice");
+        let narrow = effective_sweep_candidates(320, 288, fs_la::GemmMemoryEnvelope::UNBOUNDED)
+            .expect("narrow lattice");
         assert_eq!(narrow.len(), SWEEP_MC.len());
         let narrow_pairs: std::collections::BTreeSet<_> = narrow
             .iter()
@@ -1775,7 +2038,8 @@ mod tests {
             .collect();
         assert_eq!(narrow_pairs.len(), narrow.len());
 
-        let wide = effective_sweep_candidates(320, 2048).expect("wide lattice");
+        let wide = effective_sweep_candidates(320, 2048, fs_la::GemmMemoryEnvelope::UNBOUNDED)
+            .expect("wide lattice");
         let wide_pairs: std::collections::BTreeSet<_> = wide
             .iter()
             .map(|candidate| (candidate.effective_mc, candidate.effective_nc))
@@ -1817,7 +2081,9 @@ mod tests {
 
     #[test]
     fn cancellation_between_repeats_returns_no_partial_evidence() {
-        let candidates = effective_sweep_candidates(320, 2048).expect("candidate lattice");
+        let candidates =
+            effective_sweep_candidates(320, 2048, fs_la::GemmMemoryEnvelope::UNBOUNDED)
+                .expect("candidate lattice");
         let gate = CancelGate::new();
         let error = measure_candidates(
             &gate,
