@@ -35,6 +35,49 @@ criteria.
 ## Runner honesty
 
 - `macos-14` = Apple Silicon (aarch64, NEON): a true reference-family runner.
+- The `scripts/ci/x86_cross_check.sh` lane (bead ebro) is the ARM-INVISIBLE
+  BREAKAGE firewall: `cargo check --locked --workspace --all-targets --target
+  x86_64-unknown-linux-gnu` from the aarch64 dev machines, followed by one
+  derived `cargo check --locked` for every test/bench/bin/example target whose
+  manifest declares `required-features`. This covers the default target surface and the
+  gated targets that `--all-targets` alone skips. No cross-linker is needed
+  (`check` does not link). Each invocation owns a collision-proof log directory
+  and a separate Cargo target directory; concurrent proofs never share mutable
+  build output.
+  Because this is part of the required DSR gate, a missing Rust target is a
+  named failure with the installation command, not a zero-exit skip.
+  Every Cargo command is lockfile-closed. Its retained JSONL verdict binds the
+  exact before/after root content, `constellation.lock`, and every clean pinned
+  sibling tree; root or sibling movement fails the lane. The sole terminal row
+  says whether that provenance is `sealed` or `incomplete`. It cannot prove
+  runtime behavior or generated machine-code quality - real x86 execution still
+  lives on the Threadripper lanes.
+- The `scripts/ci/x86_runtime_sweep.sh` lane (bead yuyy) closes that runtime
+  gap for the pre-release flow: full workspace tests (`--no-fail-fast`) on
+  the first quiet, reachable Threadripper (ts1/ts2), fast-forwarded to
+  origin/main, load-gated with bounded retries (the workers double as rch
+  lanes whose background traffic can kill long runs), and dirty/diverged
+  clones refused with a named host diagnostic. Local and remote pre/post dirt
+  probes disable global excludes, independently enumerate untracked paths using
+  only repository `.gitignore` rules, and reject hidden index flags. Exactly one terminal JSONL
+  verdict represents the overall run. The lane never stashes, drops, or
+  rewrites remote worktree changes; even `Cargo.lock` churn is a refusal.
+  Before Cargo, the remote lane retains a
+  `scripts/ci/checkout_constellation.sh --snapshot` identity; after Cargo it
+  captures the identity again and requires equality. That binds exact root
+  content, `constellation.lock`, and every pinned/clean path-dependency sibling.
+  Cargo runs with `--locked`, and a pass requires its exact exit status, an
+  unchanged before/after HEAD and snapshot, clean post-test remote and local
+  worktrees, at least one
+  completed suite, no failed suite, and a successfully retained full log. The
+  retained marker block includes the final porcelain diagnostic when a test or
+  build script dirties the clone. The local caller must itself be clean,
+  and the fast-forwarded remote HEAD must equal that admitted local HEAD; a
+  remote `origin/main` run can never stand in for uncommitted local changes.
+  ~20 min;
+  named-skip when no quiet host answers - staleness of the last pass row is
+  the alarm to watch. First catch of this class: the obq0 fs-cheb per-ISA
+  schedule divergence.
 - `ubuntu-24.04` = x86-64, but GitHub-hosted runners do **not** guarantee
   AVX-512. fs-substrate resolves the SIMD tier at startup and the tier is in
   the logs; the x86 lane therefore proves *portable correctness plus whatever
