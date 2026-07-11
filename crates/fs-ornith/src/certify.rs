@@ -36,7 +36,8 @@ pub struct CertifyReport {
 #[must_use]
 pub fn pitch_model(c: &OrnithCandidate) -> [[f64; 2]; 2] {
     let foil = c.section(crate::screen::PANELS);
-    let dcl = fs_bem::panel2d::dcl_dalpha_adjoint(&foil, c.alpha);
+    let dcl = fs_bem::panel2d::dcl_dalpha_adjoint(&foil, c.alpha)
+        .expect("ornith candidate must satisfy the bounded adjoint contract");
     let k = 0.4 * dcl; // restoring stiffness ∝ lift slope
     let d = 8.0 * c.thickness + 0.4 * c.flap_amp; // damping
     [[0.0, 1.0], [-k, -d]]

@@ -2,7 +2,8 @@
 //! sectional design: wing thickness, trim angle of attack, inlet
 //! position along the chord, and a flapping gait (amplitude ×
 //! reduced frequency). Every lever exposes a JACOBIAN ACTION — the
-//! landed fs-bem adjoint gives ∂cl/∂α exactly; the remaining levers
+//! landed fs-bem adjoint gives a solve-based ∂cl/∂α with finite-difference
+//! output partials; the remaining levers
 //! carry deterministic central differences (documented — the F-rep
 //! manifold-harmonics global form with analytic chart Jacobians is
 //! the recorded successor).
@@ -46,6 +47,7 @@ impl OrnithCandidate {
     #[must_use]
     pub fn section(&self, panels: usize) -> Airfoil2d {
         naca4_symmetric(self.thickness, panels)
+            .expect("ornith candidate section must satisfy the bounded NACA contract")
     }
 
     /// Inlet mass-flow satisfaction proxy: the panel tangential speed
@@ -54,14 +56,15 @@ impl OrnithCandidate {
     #[must_use]
     pub fn inlet_mass_flow(&self, panels: usize) -> f64 {
         let foil = self.section(panels);
-        let sol = solve(&foil, self.alpha);
+        let sol = solve(&foil, self.alpha)
+            .expect("ornith candidate must satisfy the bounded panel-solve contract");
         // Panel midpoints run TE → LE (lower) → TE (upper); find the
         // upper-surface panel nearest the inlet station.
-        let n = foil.nodes.len();
+        let n = foil.nodes().len();
         let mut best = (f64::INFINITY, 0usize);
         for i in 0..n {
-            let a = foil.nodes[i];
-            let b = foil.nodes[(i + 1) % n];
+            let a = foil.nodes()[i];
+            let b = foil.nodes()[(i + 1) % n];
             let mid = [f64::midpoint(a[0], b[0]), f64::midpoint(a[1], b[1])];
             if mid[1] > 0.0 {
                 let d = (mid[0] - self.inlet_x).abs();
@@ -74,16 +77,21 @@ impl OrnithCandidate {
     }
 
     /// The Jacobian ACTION of cl w.r.t. the design levers: ∂cl/∂α by
-    /// the landed BEM adjoint (exact), ∂cl/∂thickness by deterministic
-    /// central difference (documented interim).
+    /// the landed BEM adjoint with solve-free finite-difference output
+    /// partials, ∂cl/∂thickness by deterministic central difference.
     #[must_use]
     pub fn cl_gradient(&self, panels: usize) -> [f64; 2] {
         let foil = self.section(panels);
-        let dcl_da = dcl_dalpha_adjoint(&foil, self.alpha);
+        let dcl_da = dcl_dalpha_adjoint(&foil, self.alpha)
+            .expect("ornith candidate must satisfy the bounded adjoint contract");
         let h = 1e-5;
-        let up = naca4_symmetric(self.thickness + h, panels);
-        let dn = naca4_symmetric(self.thickness - h, panels);
-        let dcl_dt = (solve(&up, self.alpha).cl - solve(&dn, self.alpha).cl) / (2.0 * h);
+        let up = naca4_symmetric(self.thickness + h, panels)
+            .expect("bounded positive thickness perturbation");
+        let dn = naca4_symmetric(self.thickness - h, panels)
+            .expect("bounded positive thickness perturbation");
+        let dcl_dt = (solve(&up, self.alpha).expect("bounded panel solve").cl
+            - solve(&dn, self.alpha).expect("bounded panel solve").cl)
+            / (2.0 * h);
         [dcl_da, dcl_dt]
     }
 }

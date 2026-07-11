@@ -52,13 +52,16 @@ fn cloud(n: usize, seed: u64) -> (Vec<[f64; 3]>, Vec<f64>) {
 fn fmm_001_accuracy_vs_order() {
     let (pts, q) = cloud(1500, 0x1001_2026_0708_0001);
     let kernel = Laplace3d;
-    let oracle = Fmm::new(&kernel, pts.clone(), 2, 32).direct(&q);
+    let oracle = Fmm::new(&kernel, pts.clone(), 2, 32)
+        .expect("admitted fixture")
+        .direct(&q)
+        .expect("finite fixture");
     let scale = oracle.iter().map(|v| v * v).sum::<f64>().sqrt();
     let mut errs = Vec::new();
     let mut rows = String::new();
     for p in [3usize, 5, 7] {
-        let fmm = Fmm::new(&kernel, pts.clone(), p, 32);
-        let got = fmm.potentials(&q);
+        let fmm = Fmm::new(&kernel, pts.clone(), p, 32).expect("admitted order sweep");
+        let got = fmm.potentials(&q).expect("finite fixture");
         let err = got
             .iter()
             .zip(&oracle)
@@ -92,13 +95,19 @@ fn fmm_001_accuracy_vs_order() {
 fn fmm_002_translation_invariance() {
     let (pts, q) = cloud(1200, 0x1001_2026_0708_0002);
     let kernel = Laplace3d;
-    let base = Fmm::new(&kernel, pts.clone(), 6, 32).potentials(&q);
+    let base = Fmm::new(&kernel, pts.clone(), 6, 32)
+        .expect("admitted fixture")
+        .potentials(&q)
+        .expect("finite fixture");
     let shift = [17.25, -4.5, 9.75]; // dyadic-friendly rigid shift
     let moved: Vec<[f64; 3]> = pts
         .iter()
         .map(|p| [p[0] + shift[0], p[1] + shift[1], p[2] + shift[2]])
         .collect();
-    let shifted = Fmm::new(&kernel, moved, 6, 32).potentials(&q);
+    let shifted = Fmm::new(&kernel, moved, 6, 32)
+        .expect("admitted shifted fixture")
+        .potentials(&q)
+        .expect("finite fixture");
     let mut worst = 0.0f64;
     for (a, b) in base.iter().zip(&shifted) {
         worst = worst.max((a - b).abs() / a.abs().max(1e-12));
@@ -123,9 +132,9 @@ fn fmm_003_scaling_trend() {
     let mut rows = String::new();
     for &n in &sizes {
         let (pts, q) = cloud(n, 0x1001_2026_0708_0003);
-        let fmm = Fmm::new(&kernel, pts, 4, 48);
+        let fmm = Fmm::new(&kernel, pts, 4, 48).expect("admitted scaling fixture");
         let t0 = Instant::now();
-        let out = fmm.potentials(&q);
+        let out = fmm.potentials(&q).expect("finite fixture");
         let dt = t0.elapsed().as_secs_f64();
         assert!(out.iter().all(|v| v.is_finite()), "finite potentials");
         let _ = write!(rows, "{{\"n\":{n},\"seconds\":{dt:.3}}},");
@@ -149,4 +158,22 @@ fn fmm_003_scaling_trend() {
             rows.trim_end_matches(',')
         ),
     );
+}
+
+// ------------------------------------------------------------------ totality
+
+#[test]
+fn fmm_rejects_invalid_inputs_and_work_before_evaluation() {
+    let kernel = Laplace3d;
+    assert!(Fmm::new(&kernel, Vec::new(), 4, 32).is_err());
+    assert!(Fmm::new(&kernel, vec![[0.0; 3]], usize::MAX, 32).is_err());
+    assert!(Fmm::new(&kernel, vec![[f64::NAN, 0.0, 0.0]], 4, 32).is_err());
+    assert!(Fmm::new(&kernel, vec![[0.0; 3]], 4, 0).is_err());
+    assert!(Fmm::new(&kernel, vec![[0.0; 3]; 1_500], 12, 32).is_err());
+    assert!(Fmm::new(&kernel, vec![[0.0; 3]; 20_000], 2, 32).is_err());
+
+    let fmm =
+        Fmm::new(&kernel, vec![[0.0; 3], [1.0, 0.0, 0.0]], 4, 2).expect("small valid fixture");
+    assert!(fmm.potentials(&[1.0]).is_err());
+    assert!(fmm.potentials(&[1.0, f64::INFINITY]).is_err());
 }

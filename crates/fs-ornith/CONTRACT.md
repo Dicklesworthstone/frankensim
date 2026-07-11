@@ -20,9 +20,10 @@ at every joint.
 - `param::OrnithCandidate` — the smoke-tier design: NACA-4 section
   thickness, trim α, inlet chord position, flapping amplitude ×
   reduced frequency; `from_genes` decodes the NSGA gene box.
-  `cl_gradient` is the JACOBIAN ACTION: ∂cl/∂α by the EXACT fs-bem
-  adjoint, ∂cl/∂thickness by deterministic central difference
-  (documented interim). `inlet_mass_flow` reads the upper-surface
+  `cl_gradient` is the JACOBIAN ACTION: ∂cl/∂α by the fs-bem adjoint
+  solve with finite-difference output partials, ∂cl/∂thickness by
+  deterministic central difference (documented interim).
+  `inlet_mass_flow` reads the upper-surface
   panel speed at the inlet station (suction proxy).
 - `screen::{lift_to_drag, flap_metric, screen_generation,
   ScreenReport}` — panel L/D with the DOCUMENTED drag proxy (profile

@@ -24,7 +24,8 @@ const OSWALD: f64 = 0.9;
 /// The screening L/D of one candidate (higher is better).
 #[must_use]
 pub fn lift_to_drag(c: &OrnithCandidate) -> f64 {
-    let sol = solve(&c.section(PANELS), c.alpha);
+    let sol = solve(&c.section(PANELS), c.alpha)
+        .expect("ornith candidate must satisfy the bounded panel-solve contract");
     let cl = sol.cl;
     // Profile drag grows with thickness; induced drag with cl².
     let cd0 = 0.006 + 0.06 * c.thickness * c.thickness / 0.0144;
@@ -39,13 +40,15 @@ pub fn lift_to_drag(c: &OrnithCandidate) -> f64 {
 #[must_use]
 pub fn flap_metric(c: &OrnithCandidate) -> f64 {
     let foil = c.section(PANELS);
-    let mut sim = WakeSim::new(&foil, c.alpha, 0.08, 0.05);
+    let mut sim = WakeSim::new(&foil, c.alpha, 0.08, 0.05)
+        .expect("ornith candidate must satisfy the bounded wake contract");
     for _ in 0..24 {
-        sim.step();
+        sim.step()
+            .expect("short bounded wake fixture must remain finite");
     }
     // Lift the wake into vortex particles, modulate by the gait.
     let particles: Vec<VortexParticle> = sim
-        .wake
+        .wake()
         .iter()
         .enumerate()
         .map(|(k, w)| {

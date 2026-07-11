@@ -20,6 +20,141 @@
 
 use std::collections::BTreeMap;
 
+/// Lowest supported Chebyshev interpolation order.
+pub const MIN_INTERPOLATION_ORDER: usize = 2;
+/// Highest admitted interpolation order for this unfused v1 implementation.
+pub const MAX_INTERPOLATION_ORDER: usize = 12;
+/// Hard point-count ceiling for one in-memory FMM instance.
+pub const MAX_POINTS: usize = 1_048_576;
+/// Conservative ceiling on simultaneously materialized per-cell coefficients.
+pub const MAX_COEFFICIENT_SLOTS: usize = 16_777_216;
+/// Ceiling on same-level cell-pair admission tests across one pass.
+pub const MAX_CELL_PAIR_SCANS: usize = 33_554_432;
+/// Conservative ceiling on M2L kernel-grid multiply-add work.
+pub const MAX_TRANSLATION_WORK: usize = 4_000_000_000;
+/// Largest admitted distribution-aware direct near-field pair count.
+pub const MAX_NEAR_FIELD_PAIR_WORK: usize = 268_435_456;
+/// Largest cloud admitted by the quadratic direct oracle.
+pub const MAX_DIRECT_POINTS: usize = 16_384;
+const MAX_ABS_COORDINATE: f64 = 1.0e100;
+
+/// Invalid input or an inadmissible v1 work request.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FmmError {
+    /// A point cloud must contain at least one source/target.
+    EmptyPointCloud,
+    /// The point-count ceiling was exceeded.
+    TooManyPoints {
+        /// Requested points.
+        count: usize,
+        /// Admitted maximum.
+        max: usize,
+    },
+    /// A point coordinate was non-finite or outside the stable bounding range.
+    InvalidPoint {
+        /// Point index.
+        index: usize,
+        /// Coordinate axis.
+        axis: usize,
+        /// Rejected coordinate.
+        value: f64,
+    },
+    /// The interpolation order was outside the supported range.
+    InvalidOrder {
+        /// Requested order.
+        order: usize,
+        /// Supported minimum.
+        min: usize,
+        /// Supported maximum.
+        max: usize,
+    },
+    /// Leaf capacity must be nonzero and no larger than the point ceiling.
+    InvalidLeafCapacity {
+        /// Requested capacity.
+        capacity: usize,
+        /// Admitted maximum.
+        max: usize,
+    },
+    /// The conservative cell-grid work envelope was exceeded.
+    WorkEnvelopeExceeded {
+        /// Bounded work category.
+        operation: &'static str,
+        /// Conservative work count.
+        requested: usize,
+        /// Admitted maximum.
+        max: usize,
+    },
+    /// There must be exactly one finite charge per point.
+    InvalidCharges {
+        /// Point count.
+        expected: usize,
+        /// Charge count.
+        actual: usize,
+        /// First non-finite charge, when lengths matched.
+        non_finite_index: Option<usize>,
+    },
+    /// Kernel evaluation produced a non-finite potential.
+    NonFiniteOutput {
+        /// First invalid output index.
+        index: usize,
+    },
+}
+
+impl core::fmt::Display for FmmError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::EmptyPointCloud => f.write_str("FMM point cloud must not be empty"),
+            Self::TooManyPoints { count, max } => {
+                write!(
+                    f,
+                    "FMM point count {count} exceeds the admitted maximum {max}"
+                )
+            }
+            Self::InvalidPoint { index, axis, value } => write!(
+                f,
+                "FMM point {index} coordinate {axis} is invalid ({value}); coordinates must be finite with absolute value <= {MAX_ABS_COORDINATE}"
+            ),
+            Self::InvalidOrder { order, min, max } => {
+                write!(
+                    f,
+                    "FMM order {order} is outside the supported range {min}..={max}"
+                )
+            }
+            Self::InvalidLeafCapacity { capacity, max } => write!(
+                f,
+                "FMM leaf capacity {capacity} is invalid; expected 1..={max}"
+            ),
+            Self::WorkEnvelopeExceeded {
+                operation,
+                requested,
+                max,
+            } => write!(
+                f,
+                "FMM {operation} work {requested} exceeds the admitted maximum {max}"
+            ),
+            Self::InvalidCharges {
+                expected,
+                actual,
+                non_finite_index,
+            } => {
+                if let Some(index) = non_finite_index {
+                    write!(f, "FMM charge {index} is non-finite")
+                } else {
+                    write!(f, "FMM expected {expected} charges, received {actual}")
+                }
+            }
+            Self::NonFiniteOutput { index } => {
+                write!(
+                    f,
+                    "FMM kernel produced a non-finite potential at index {index}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for FmmError {}
+
 /// A smooth-off-diagonal kernel K(x, y).
 pub trait Kernel {
     /// Evaluate K(target, source).
@@ -104,23 +239,148 @@ pub struct Fmm<'k> {
 }
 
 impl<'k> Fmm<'k> {
+    /// Validate a construction request without allocating the octree.
+    ///
+    /// The coefficient bound is conservative: every point is charged for one
+    /// occupied cell at every tree level. The real tree can only contain fewer
+    /// cells, so admission cannot underestimate grid storage.
+    pub fn validate_request(
+        points: &[[f64; 3]],
+        order: usize,
+        leaf_cap: usize,
+    ) -> Result<(), FmmError> {
+        if points.is_empty() {
+            return Err(FmmError::EmptyPointCloud);
+        }
+        if points.len() > MAX_POINTS {
+            return Err(FmmError::TooManyPoints {
+                count: points.len(),
+                max: MAX_POINTS,
+            });
+        }
+        if !(MIN_INTERPOLATION_ORDER..=MAX_INTERPOLATION_ORDER).contains(&order) {
+            return Err(FmmError::InvalidOrder {
+                order,
+                min: MIN_INTERPOLATION_ORDER,
+                max: MAX_INTERPOLATION_ORDER,
+            });
+        }
+        if leaf_cap == 0 || leaf_cap > MAX_POINTS {
+            return Err(FmmError::InvalidLeafCapacity {
+                capacity: leaf_cap,
+                max: MAX_POINTS,
+            });
+        }
+        for (index, point) in points.iter().enumerate() {
+            for (axis, &value) in point.iter().enumerate() {
+                if !value.is_finite() || value.abs() > MAX_ABS_COORDINATE {
+                    return Err(FmmError::InvalidPoint { index, axis, value });
+                }
+            }
+        }
+
+        #[allow(clippy::cast_precision_loss)]
+        let mut max_level =
+            ((points.len() as f64 / leaf_cap as f64).max(1.0).ln() / (8.0f64).ln()).ceil() as usize;
+        max_level = max_level.clamp(1, 6);
+        let mut cell_bound = 0usize;
+        let mut nonroot_cell_bound = 0usize;
+        let mut pair_scans = 0usize;
+        for level in 0..=max_level {
+            let cells_at_level = 8usize
+                .checked_pow(level as u32)
+                .unwrap_or(usize::MAX)
+                .min(points.len());
+            cell_bound =
+                cell_bound
+                    .checked_add(cells_at_level)
+                    .ok_or(FmmError::WorkEnvelopeExceeded {
+                        operation: "cell-count",
+                        requested: usize::MAX,
+                        max: MAX_COEFFICIENT_SLOTS,
+                    })?;
+            if level > 0 {
+                nonroot_cell_bound = nonroot_cell_bound.checked_add(cells_at_level).ok_or(
+                    FmmError::WorkEnvelopeExceeded {
+                        operation: "cell-count",
+                        requested: usize::MAX,
+                        max: MAX_COEFFICIENT_SLOTS,
+                    },
+                )?;
+                pair_scans = pair_scans
+                    .checked_add(
+                        cells_at_level
+                            .checked_mul(cells_at_level)
+                            .unwrap_or(usize::MAX),
+                    )
+                    .ok_or(FmmError::WorkEnvelopeExceeded {
+                        operation: "cell-pair scan",
+                        requested: usize::MAX,
+                        max: MAX_CELL_PAIR_SCANS,
+                    })?;
+            }
+        }
+        if pair_scans > MAX_CELL_PAIR_SCANS {
+            return Err(FmmError::WorkEnvelopeExceeded {
+                operation: "cell-pair scan",
+                requested: pair_scans,
+                max: MAX_CELL_PAIR_SCANS,
+            });
+        }
+        let grid_size = order.checked_pow(3).ok_or(FmmError::WorkEnvelopeExceeded {
+            operation: "coefficient-slot",
+            requested: usize::MAX,
+            max: MAX_COEFFICIENT_SLOTS,
+        })?;
+        let requested = cell_bound
+            .checked_mul(grid_size)
+            .and_then(|slots| slots.checked_mul(2))
+            .ok_or(FmmError::WorkEnvelopeExceeded {
+                operation: "coefficient-slot",
+                requested: usize::MAX,
+                max: MAX_COEFFICIENT_SLOTS,
+            })?;
+        if requested > MAX_COEFFICIENT_SLOTS {
+            return Err(FmmError::WorkEnvelopeExceeded {
+                operation: "coefficient-slot",
+                requested,
+                max: MAX_COEFFICIENT_SLOTS,
+            });
+        }
+        let translation_work = nonroot_cell_bound
+            .checked_mul(189)
+            .and_then(|work| order.checked_pow(6).and_then(|p6| work.checked_mul(p6)))
+            .ok_or(FmmError::WorkEnvelopeExceeded {
+                operation: "M2L translation",
+                requested: usize::MAX,
+                max: MAX_TRANSLATION_WORK,
+            })?;
+        if translation_work > MAX_TRANSLATION_WORK {
+            return Err(FmmError::WorkEnvelopeExceeded {
+                operation: "M2L translation",
+                requested: translation_work,
+                max: MAX_TRANSLATION_WORK,
+            });
+        }
+        Ok(())
+    }
+
     /// Build the octree: UNIFORM depth chosen from N/leaf_cap (empty
     /// cells omitted) — on a uniform tree, "adjacent leaves run P2P,
     /// first-separated ancestors run M2L" partitions every pair
     /// EXACTLY ONCE (the adaptive U/V/W/X machinery is a recorded
     /// successor).
     ///
-    /// # Panics
-    /// On an empty cloud or `order < 2`.
-    #[must_use]
+    /// # Errors
+    /// Returns [`FmmError`] when geometry, tuning parameters, or the
+    /// conservative work envelope are invalid.
     pub fn new(
         kernel: &'k dyn Kernel,
         points: Vec<[f64; 3]>,
         order: usize,
         leaf_cap: usize,
-    ) -> Fmm<'k> {
-        assert!(!points.is_empty(), "empty cloud");
-        assert!(order >= 2, "interpolation order must be >= 2");
+    ) -> Result<Fmm<'k>, FmmError> {
+        Self::validate_request(&points, order, leaf_cap)?;
         let mut lo = [f64::INFINITY; 3];
         let mut hi = [f64::NEG_INFINITY; 3];
         for p in &points {
@@ -159,6 +419,46 @@ impl<'k> Fmm<'k> {
         }
         // Register ancestors of every nonempty leaf.
         let leaf_keys: Vec<CellKey> = cells.keys().copied().collect();
+        let mut near_field_pairs = 0usize;
+        for key in &leaf_keys {
+            let target_count = cells[key].points.len();
+            for di in -1i64..=1 {
+                for dj in -1i64..=1 {
+                    for dk in -1i64..=1 {
+                        let (ni, nj, nk) = (
+                            i64::from(key.1) + di,
+                            i64::from(key.2) + dj,
+                            i64::from(key.3) + dk,
+                        );
+                        if ni < 0 || nj < 0 || nk < 0 {
+                            continue;
+                        }
+                        #[allow(clippy::cast_sign_loss)]
+                        let neighbor = (key.0, ni as u32, nj as u32, nk as u32);
+                        let Some(source_cell) = cells.get(&neighbor) else {
+                            continue;
+                        };
+                        let pairs = target_count
+                            .checked_mul(source_cell.points.len())
+                            .unwrap_or(usize::MAX);
+                        near_field_pairs = near_field_pairs.checked_add(pairs).ok_or(
+                            FmmError::WorkEnvelopeExceeded {
+                                operation: "near-field pair",
+                                requested: usize::MAX,
+                                max: MAX_NEAR_FIELD_PAIR_WORK,
+                            },
+                        )?;
+                    }
+                }
+            }
+        }
+        if near_field_pairs > MAX_NEAR_FIELD_PAIR_WORK {
+            return Err(FmmError::WorkEnvelopeExceeded {
+                operation: "near-field pair",
+                requested: near_field_pairs,
+                max: MAX_NEAR_FIELD_PAIR_WORK,
+            });
+        }
         for key in leaf_keys {
             let (mut lv, mut i, mut j, mut k) = key;
             while lv > 0 {
@@ -172,7 +472,7 @@ impl<'k> Fmm<'k> {
                 });
             }
         }
-        Fmm {
+        Ok(Fmm {
             kernel,
             points,
             order,
@@ -180,7 +480,7 @@ impl<'k> Fmm<'k> {
             cells,
             lo,
             side,
-        }
+        })
     }
 
     fn cell_box(&self, key: CellKey) -> ([f64; 3], f64) {
@@ -238,10 +538,9 @@ impl<'k> Fmm<'k> {
 
     /// Evaluate potentials at every point: FMM (upward, M2L, downward,
     /// near-field direct).
-    #[must_use]
     #[allow(clippy::too_many_lines)] // the four classic passes, one narrative
-    pub fn potentials(&self, charges: &[f64]) -> Vec<f64> {
-        assert_eq!(charges.len(), self.points.len(), "one charge per point");
+    pub fn potentials(&self, charges: &[f64]) -> Result<Vec<f64>, FmmError> {
+        self.validate_charges(charges)?;
         let np = self.order.pow(3);
         // UPWARD: P2M at leaves, M2M to parents.
         let mut multipole: BTreeMap<CellKey, Vec<f64>> = BTreeMap::new();
@@ -396,13 +695,23 @@ impl<'k> Fmm<'k> {
                 }
             }
         }
-        out
+        if let Some(index) = out.iter().position(|value| !value.is_finite()) {
+            return Err(FmmError::NonFiniteOutput { index });
+        }
+        Ok(out)
     }
 
     /// The direct O(N²) oracle.
-    #[must_use]
-    pub fn direct(&self, charges: &[f64]) -> Vec<f64> {
+    pub fn direct(&self, charges: &[f64]) -> Result<Vec<f64>, FmmError> {
+        self.validate_charges(charges)?;
         let n = self.points.len();
+        if n > MAX_DIRECT_POINTS {
+            return Err(FmmError::WorkEnvelopeExceeded {
+                operation: "direct pair",
+                requested: n.checked_mul(n).unwrap_or(usize::MAX),
+                max: MAX_DIRECT_POINTS * MAX_DIRECT_POINTS,
+            });
+        }
         let mut out = vec![0.0f64; n];
         for (t, slot) in out.iter_mut().enumerate() {
             let mut s = 0.0;
@@ -413,7 +722,28 @@ impl<'k> Fmm<'k> {
             }
             *slot = s;
         }
-        out
+        if let Some(index) = out.iter().position(|value| !value.is_finite()) {
+            return Err(FmmError::NonFiniteOutput { index });
+        }
+        Ok(out)
+    }
+
+    fn validate_charges(&self, charges: &[f64]) -> Result<(), FmmError> {
+        if charges.len() != self.points.len() {
+            return Err(FmmError::InvalidCharges {
+                expected: self.points.len(),
+                actual: charges.len(),
+                non_finite_index: None,
+            });
+        }
+        if let Some(index) = charges.iter().position(|charge| !charge.is_finite()) {
+            return Err(FmmError::InvalidCharges {
+                expected: self.points.len(),
+                actual: charges.len(),
+                non_finite_index: Some(index),
+            });
+        }
+        Ok(())
     }
 
     /// Octree statistics (ledger row).

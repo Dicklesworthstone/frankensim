@@ -3,7 +3,8 @@
 //! recorded successor) over four objectives: −L/D, −ROA volume,
 //! −maneuver proxy, and inlet mass-flow violation. The front's winner
 //! gets a GRADIENT POLISH through the landed BEM adjoint (honestly
-//! labeled: α-direction exact, thickness by central difference). Every
+//! labeled: α-direction adjoint-assisted with finite-difference output
+//! partials, thickness by central difference). Every
 //! atlas row carries its stability certificate, its conformal
 //! screening band, and its lineage — the deliverable is evidence, not
 //! a scatter plot.
@@ -108,7 +109,7 @@ pub fn build_atlas(pop: usize, generations: usize, seed: u64, surrogate: &LdSurr
     let reference = vec![1.0, 1.0, 1.0, 2.0];
     let hv = hypervolume(&objs, &reference);
     let knee = knee_point(&objs);
-    // Gradient polish on the knee design: ascend L/D along the exact
+    // Gradient polish on the knee design: ascend L/D along the adjoint-assisted
     // ∂cl/∂α adjoint direction (thickness held — the honest lever).
     let knee_c = rows[knee].candidate;
     let ld0 = lift_to_drag(&knee_c);

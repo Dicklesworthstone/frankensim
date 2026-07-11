@@ -13,7 +13,7 @@ diagonal works unchanged, and accuracy is controlled by one number
 - `Kernel` (trait): `eval(x, y)` — smooth off the diagonal; the
   diagonal convention is the caller's (Laplace3d returns 0 there).
 - `Laplace3d`: `1/(4π|x−y|)`.
-- `Fmm::new(kernel, points, order, leaf_cap)`: UNIFORM-depth octree
+- `Fmm::new(kernel, points, order, leaf_cap)`: fallible UNIFORM-depth octree
   (depth from N/leaf_cap, empty cells omitted, ancestors registered) —
   on a uniform tree, "adjacent leaves run P2P, first-separated
   ancestors run M2L" partitions every source–target pair EXACTLY ONCE
@@ -38,9 +38,16 @@ diagonal works unchanged, and accuracy is controlled by one number
 
 ## Error model
 
-Structured asserts on programmer contracts (empty cloud, order < 2,
-charge-length mismatch). No silent accuracy degradation: the order is
-explicit at construction and the battery curves are the evidence.
+`FmmError` rejects empty/non-finite/oversized clouds, invalid order or leaf
+capacity, charge mismatches/non-finite charges, non-finite kernel output, and
+conservative coefficient-slot, cell-pair scan, M2L translation, direct-oracle,
+and distribution-aware near-field pair work envelopes before the corresponding
+large allocation or pass.
+No silent accuracy degradation: the order is explicit at construction and the
+battery curves are the evidence. These are admission guarantees, not a claim
+that process-level allocator exhaustion is recoverable: `BTreeMap` and several
+internal pass buffers still use Rust's infallible allocation APIs after the
+request has passed its bounded envelope.
 
 ## Determinism class
 
@@ -49,8 +56,10 @@ yet recorded.
 
 ## Cancellation behavior
 
-Bounded synchronous passes; chunked Cx polling belongs to the fs-exec
-driver (L2 discipline).
+The current passes are synchronous and do **not** accept a `Cx`, poll
+cancellation, or serialize mid-pass resume state. The explicit work envelope
+bounds admitted calls, but is not a cancellation-latency claim. Cross-crate
+Cx/resume integration is tracked separately under `frankensim-ccmn`.
 
 ## Unsafe boundary
 
@@ -64,7 +73,8 @@ gating rule).
 ## Conformance tests
 
 `tests/battery.rs`: fmm-001 order sweep vs oracle; fmm-002
-translation invariance; fmm-003 scaling trend.
+translation invariance; fmm-003 scaling trend; invalid geometry, tuning,
+charge, and work-envelope refusal.
 
 ## No-claim boundaries
 
@@ -74,3 +84,5 @@ translation invariance; fmm-003 scaling trend.
 - Gradient outputs (consumers run per-component kernels today;
   a fused gradient pass is follow-up).
 - Periodic/boundary-image variants; oscillatory kernels.
+- Recoverable allocator exhaustion for internal tree/map/pass buffers. Work is
+  bounded before those allocations, but allocator failure remains process-level.

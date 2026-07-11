@@ -28,7 +28,7 @@ fn generation(n: usize, seed: &mut u64) -> Vec<OrnithCandidate> {
         .collect()
 }
 
-/// orn-001: PARAMETERIZE — the Jacobian action's exact adjoint lane
+/// orn-001: PARAMETERIZE — the Jacobian action's adjoint-assisted lane
 /// (∂cl/∂α) matches central differences, and the inlet mass-flow
 /// responds to the inlet position lever.
 #[test]
@@ -59,7 +59,9 @@ fn orn_001_parameterize_jacobians() {
 }
 
 fn lift_to_drag_cl(c: &OrnithCandidate) -> f64 {
-    fs_bem::panel2d::solve(&c.section(64), c.alpha).cl
+    fs_bem::panel2d::solve(&c.section(64), c.alpha)
+        .expect("bounded ornith fixture")
+        .cl
 }
 
 /// orn-002: SCREEN — the e-raced generation finds the deterministic

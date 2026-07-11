@@ -49,11 +49,11 @@ fn rasterize(grid: &mut Grid, c: &OrnithCandidate, chord: f64, x0: f64, y0: f64)
 
 /// Point-in-polygon (even-odd) against the closed section.
 fn inside_section(foil: &fs_bem::panel2d::Airfoil2d, x: f64, y: f64) -> bool {
-    let n = foil.nodes.len();
+    let n = foil.nodes().len();
     let mut inside = false;
     for i in 0..n {
-        let a = foil.nodes[i];
-        let b = foil.nodes[(i + 1) % n];
+        let a = foil.nodes()[i];
+        let b = foil.nodes()[(i + 1) % n];
         if (a[1] > y) != (b[1] > y) {
             let t = (y - a[1]) / (b[1] - a[1]);
             let xc = t.mul_add(b[0] - a[0], a[0]);
@@ -146,7 +146,9 @@ pub fn refine(c: &OrnithCandidate) -> RefineReport {
         add_face(grid.idx(x, by0), [0.0, -1.0], &grid);
         add_face(grid.idx(x, by1), [0.0, 1.0], &grid);
     }
-    let panel_cl = fs_bem::panel2d::solve(&c.section(64), c.alpha).cl;
+    let panel_cl = fs_bem::panel2d::solve(&c.section(64), c.alpha)
+        .expect("ornith candidate must satisfy the bounded panel-solve contract")
+        .cl;
     RefineReport {
         lift: -fy,
         drag: -fx,

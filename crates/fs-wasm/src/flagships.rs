@@ -104,18 +104,21 @@ fn point_in_poly(poly: &[[f64; 2]], x: f64, y: f64) -> bool {
 
 /// The BEM lift coefficient of a candidate at trim.
 fn bem_cl(c: &OrnithCandidate) -> f64 {
-    solve(&c.section(PANELS), c.alpha).cl
+    solve(&c.section(PANELS), c.alpha).map_or(f64::NAN, |solution| solution.cl)
 }
 
 /// Central-difference `∂cl/∂α` (the trap-free 2-solve slope used everywhere
 /// EXCEPT the single certified adjoint call).
 fn slope_fd(foil: &Airfoil2d, alpha: f64) -> f64 {
     let h = 1.0e-4;
-    (solve(foil, alpha + h).cl - solve(foil, alpha - h).cl) / (2.0 * h)
+    let (Ok(plus), Ok(minus)) = (solve(foil, alpha + h), solve(foil, alpha - h)) else {
+        return f64::NAN;
+    };
+    (plus.cl - minus.cl) / (2.0 * h)
 }
 
 /// A trap-free replica of `fs_ornith::certify::certify` that uses the 2-solve
-/// slope in place of the expensive exact adjoint (the battery certifies
+/// slope in place of the expensive adjoint-assisted derivative (the battery certifies
 /// adjoint ≈ FD to < 1e-6). Returns `(k, d, p11, p12, p22, cstar, roa,
 /// maneuver, certified)`.
 #[allow(clippy::type_complexity)]
@@ -169,7 +172,7 @@ fn inlet_violation(c: &OrnithCandidate) -> f64 {
 ///   - `[6]` `Nrows` — NSGA-II Pareto front size (the "atlas" rows)
 ///   - `[7]` `atlas_pop`, `[8]` `atlas_gen` — NSGA-II population / generations
 ///   - `[9]` `adj_rel_err` — |adjoint − FD| / |adjoint| on the hero (STAGE 1)
-///   - `[10]` `dcl_adjoint` — the one exact adjoint `∂cl/∂α`
+///   - `[10]` `dcl_adjoint` — the one adjoint-assisted `∂cl/∂α`
 ///   - `[11]` `screen_winner_idx` — race winner candidate index
 ///   - `[12]` `evals_used`, `[13]` `fixed_n_equivalent` — race ledger
 ///   - `[14]` `candidates_eliminated` (= `Ne`)
@@ -219,8 +222,10 @@ pub fn run_ornithoid(seed: u32) -> Vec<f64> {
     let hero = candidates[hero_idx];
     let hero_foil = hero.section(PANELS);
 
-    // ---- STAGE 1: exactly one adjoint + the FD compare -------------------
-    let dcl_adjoint = dcl_dalpha_adjoint(&hero_foil, hero.alpha);
+    // ---- STAGE 1: one adjoint-assisted derivative + the FD compare -------
+    let Ok(dcl_adjoint) = dcl_dalpha_adjoint(&hero_foil, hero.alpha) else {
+        return Vec::new();
+    };
     let dcl_fd = slope_fd(&hero_foil, hero.alpha);
     let adj_rel_err = ((dcl_adjoint - dcl_fd) / dcl_adjoint.abs().max(1e-30)).abs();
     let dcl_dthickness = hero.cl_gradient(PANELS)[1];
@@ -258,12 +263,16 @@ pub fn run_ornithoid(seed: u32) -> Vec<f64> {
 
     // winner flapping wake → vortex particles → advect.
     let winner = candidates[race.winner];
-    let mut wake = WakeSim::new(&winner.section(PANELS), winner.alpha, 0.08, 0.05);
+    let Ok(mut wake) = WakeSim::new(&winner.section(PANELS), winner.alpha, 0.08, 0.05) else {
+        return Vec::new();
+    };
     for _ in 0..24 {
-        wake.step();
+        if wake.step().is_err() {
+            return Vec::new();
+        }
     }
     let mut particles: Vec<VortexParticle> = wake
-        .wake
+        .wake()
         .iter()
         .map(|w| VortexParticle::new(w.pos, w.gamma))
         .collect();
@@ -351,7 +360,7 @@ pub fn run_ornithoid(seed: u32) -> Vec<f64> {
     };
 
     /* ---- assemble the flat output --------------------------------------- */
-    let hero_p = hero_foil.nodes.len();
+    let hero_p = hero_foil.nodes().len();
     let w = particles.len();
     let mut out: Vec<f64> = vec![
         1.0, // schema
@@ -382,7 +391,7 @@ pub fn run_ornithoid(seed: u32) -> Vec<f64> {
         fon(polish_after),
     ];
     // BLOCK A: hero section + jacobian actions
-    for nd in &hero_foil.nodes {
+    for nd in hero_foil.nodes() {
         out.push(nd[0]);
         out.push(nd[1]);
     }
@@ -533,7 +542,7 @@ fn ornithoid_lbm(c: &OrnithCandidate, nx: usize, ny: usize) -> (Vec<f64>, f64, f
             let vv = (y as f64 - yc) / chord;
             let qx = ca * uu + sa * vv;
             let qy = -sa * uu + ca * vv;
-            if point_in_poly(&foil.nodes, qx, qy) {
+            if point_in_poly(foil.nodes(), qx, qy) {
                 let i = grid.idx(x, y);
                 grid.flags[i] = Cell::Wall;
             }

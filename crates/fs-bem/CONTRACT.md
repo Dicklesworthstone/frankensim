@@ -9,7 +9,7 @@ everywhere: this is screening, not a viscous truth source.
 
 ## Public types and semantics
 
-- `panel3d`: `SpherePanels` (centroid/normal/area panelization of
+- `panel3d`: validated `SpherePanels` (centroid/normal/area panelization of
   fs-rep-mesh icospheres); `dense_matrix` — the collocation Neumann
   operator with the outside-limit jump −σ/2 on the diagonal and
   centroid-monopole off-diagonal rows (screening-grade; measured
@@ -18,7 +18,12 @@ everywhere: this is screening, not a viscous truth source.
   `fmm_transpose_matvec` — the adjoint operator through the same FMM
   kernels, with panel-area placement and gradient antisymmetry tested
   against the dense transpose;
-  `solve_exterior` — GMRES over the FMM matvec; `surface_velocity`.
+  `solve_exterior` — GMRES over the FMM matvec, returning a converged
+  `ExteriorSolution` with its full `SolveReport` or an
+  `ExteriorSolveError::NotConverged` carrying the last iterate and report;
+  a fallible operator refusal is distinct and preserves its first `BemError`
+  plus the iterate/report rather than laundering the refusal into convergence;
+  `surface_velocity`.
 - `panel2d`: `Airfoil2d` + `naca4_symmetric`; Hess–Smith `solve` —
   constant sources per panel plus one shared vortex density, the KUTTA
   row closing the system (equal tangential speeds leaving the two
@@ -26,7 +31,8 @@ everywhere: this is screening, not a viscous truth source.
   PRESSURE INTEGRATION of the enforced surface field (the Γ-accounting
   shortcut was measurably wrong bookkeeping and is gone);
   `dcl_dalpha_adjoint` — one transposed solve for the solution
-  sensitivity plus solve-free output partials, FD-gated. The
+  sensitivity plus solve-free finite-difference output partials, FD-gated
+  and explicitly not claimed as an exact symbolic derivative. The
   constant-panel integrals carry a battery-pinned lesson: the normal
   component is (θ₂−θ₁)/2π — the reversed order self-cancels a closed
   sheet's field (caught by the single-panel-vs-quadrature and
@@ -51,18 +57,25 @@ everywhere: this is screening, not a viscous truth source.
    Kutta row satisfied to roundoff; adjoint dCl/dα matches central FD
    to 1e-6 (bem-004).
 5. Free wake: Wagner-like start (first/steady in [0.3, 0.7]),
-   asymptote within [0.9, 1.05] of the steady Kutta circulation,
+   asymptote within [0.9, 1.05] of the pressure-derived screening
+   circulation scale,
    coarse-grained monotone growth (early lumped-starting-vortex dips
-   are ledgered, not hidden), bounded stable roll-up, bitwise
-   determinism (bem-005).
+   are ledgered, not hidden), Kelvin circulation bookkeeping, bounded
+   stable roll-up, and bitwise determinism of the complete wake/history/trace
+   state (bem-005).
 
 ## Error model
 
-Structured panics on programmer contracts (mismatched public panel
-vectors, empty/degenerate panels, non-finite geometry, singular
-systems name themselves via the LU refusal). Physical honesty:
-inviscid screening labels in every battery row; no viscous claims
-anywhere.
+Public constructors and numerical entry points return typed `BemError` values
+for malformed/non-finite geometry, mismatched vectors, singular systems,
+invalid tolerances, zero trace stride, and explicit dense/FMM/transient work
+envelopes. `solve_exterior` never publishes an unconverged iterate as ordinary
+success. Airfoil, sphere-panel, and wake state storage is read-only after
+validated construction. Physical honesty: every battery verdict carries the
+`inviscid-screening` model label; no viscous claims anywhere.
+`BemError::AllocationFailed` covers explicitly reserved BEM geometry, dense,
+wake, and trace buffers; fs-fmm's separately documented process-level allocator
+no-claim still applies inside FMM passes.
 
 ## Determinism class
 
@@ -71,8 +84,11 @@ FMM underneath, fixed shedding/convection order).
 
 ## Cancellation behavior
 
-Bounded synchronous solves and stepped simulations with plain
-cloneable state; chunked Cx polling is the fs-exec driver's.
+Wake state is cloneable and callers can chunk at fallible `step` boundaries.
+Dense panel assembly/LU and each FMM/GMRES call do **not** currently accept a
+`Cx`, poll cancellation, or expose mid-call resume state. Cross-crate Cx/resume
+integration is tracked separately under `frankensim-ccmn`; no cancellation
+latency claim is made here.
 
 ## Unsafe boundary
 
@@ -85,11 +101,12 @@ None.
 ## Conformance tests
 
 `src/panel3d.rs` unit tests: the private `LinearOp::apply_transpose`
-wrapper matches the dense transpose, and public `SpherePanels` vector
-shape corruption is rejected before FMM math. `tests/battery.rs`:
+wrapper matches the dense transpose, and invalid `SpherePanels` vector
+shapes are rejected before FMM math. `tests/battery.rs`:
 bem-001 Gauss identity; bem-002 sphere analytic; bem-003 FMM-vs-dense
 matvec, transpose + GMRES; bem-004 Hess–Smith slope band, Cp sanity,
-Kutta, adjoint gate; bem-005 impulsive-start free wake.
+Kutta, adjoint gate; bem-005 impulsive-start free wake; invalid-input/work/trace
+refusal; unconverged exterior-solve refusal with retained report.
 
 ## No-claim boundaries
 
@@ -103,3 +120,6 @@ Kutta, adjoint gate; bem-005 impulsive-start free wake.
   machinery exists; the Trefftz-plane analysis is successor scope).
 - Elastostatic BEM (staged later per the bead, noted not promised).
 - XFOIL-class viscous corrections (never claimed — screening only).
+- FMM-accelerated 2D wake convection. The shipped path is a direct all-pairs
+  screening kernel with an explicit 1,024-vortex / 1,048,576-pair per-step
+  admission ceiling.
