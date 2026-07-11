@@ -1,7 +1,7 @@
 //! fs-cheb battery: machine-precision recovery with expected degree
 //! growth, algebra/calculus identities, plateau robustness, rootfinding,
 //! collocation-matrix spectral accuracy, the Dirichlet eigen demo, and
-//! the cross-ISA golden hash.
+//! the per-ISA deterministic golden hash (the x86-64 row remains armed).
 
 use fs_cheb::{Cheb1, diff_matrix, dirichlet_laplace_eigs, lobatto_points};
 
@@ -190,13 +190,16 @@ fn dirichlet_eigenvalues_match_analytic() {
     );
 }
 
-/// JUSTIFIED BUMP (bead 27d3, 2026-07-09): fs-fft moved its DCT substrate
-/// from radix-2 to mixed radix-4/2 Stockham. The resulting butterfly and
-/// twiddle order changes bits while the unchanged DCT oracle, recovery,
-/// calculus, root, and eigenvalue tests remain green. Previous radix-2
-/// golden: 0xaee4_8002_1eea_9097 (M4 Pro + trj). This radix-4 value is
-/// recorded on M4 Pro; the x86-64 row remains armed pending RCH admission.
-const GOLDEN_HASH: u64 = 0x22e7_ea21_58c9_e587;
+/// JUSTIFIED BUMP (bead 27d3, 2026-07-11): fs-fft commit 535aa839 moved
+/// the DCT substrate from mixed radix-4/2 to mixed radix-8/4/2 Stockham.
+/// That deliberately changes butterfly and twiddle order; the unchanged
+/// DCT oracle, recovery, calculus, root, and eigenvalue tests remain green.
+/// Debug and release both produce this value on M4 Pro. The upstream FFT
+/// stage-path golden is verified in all four ISA/profile quadrants; this
+/// downstream x86-64 row remains armed pending a successful RCH admission.
+/// HISTORY: radix-2 0xaee4_8002_1eea_9097 (M4 Pro + trj); radix-4/2
+/// 0x22e7_ea21_58c9_e587 (M4 Pro only).
+const GOLDEN_HASH: u64 = 0xeea0_4b0a_01de_46cd;
 
 #[test]
 fn cheb_golden_hash() {
