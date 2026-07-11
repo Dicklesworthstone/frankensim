@@ -167,10 +167,21 @@ fn kkt_dual_feasibility_blocks_negative_multiplier_false_certificate() {
     };
 
     let residual = kkt_residual(&mut problem, &[0.0], &[], &[-1.0]);
-    assert_eq!(residual.stationarity, 0.0);
-    assert_eq!(residual.feasibility, 0.0);
-    assert_eq!(residual.complementarity, 0.0);
-    assert_eq!(residual.dual_feasibility, 1.0);
+    assert_eq!(
+        [
+            residual.stationarity,
+            residual.feasibility,
+            residual.complementarity,
+            residual.dual_feasibility,
+        ]
+        .map(f64::to_bits),
+        [
+            0.0_f64.to_bits(),
+            0.0_f64.to_bits(),
+            0.0_f64.to_bits(),
+            1.0_f64.to_bits()
+        ],
+    );
     assert!(!residual.within_tolerance(1e-8));
 }
 
