@@ -154,15 +154,16 @@ fn signature_presence(report: &PackageReport) -> (bool, String) {
         {
             (
                 true,
-                "policy-authenticated release approval bound to an explicit checker protocol and \
-             expected package root plus the exact scientific admission context"
+                "policy-authenticated signature carrying a release-approval purpose bound to an \
+                 explicit checker protocol, expected package root, and scientific admission \
+                 context; signature coverage does not establish checker release admission"
                     .to_string(),
             )
         }
         SignatureStatus::Authenticated(_) => (
             false,
-            "generic package-root attestation is integrity evidence, not regulatory release \
-             approval"
+            "generic package-root attestation is integrity evidence, not a release-purpose \
+             signature and not checker release admission"
                 .to_string(),
         ),
         SignatureStatus::Unverified(_) => (

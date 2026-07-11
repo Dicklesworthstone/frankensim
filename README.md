@@ -285,9 +285,12 @@ This deny-all example checks an honestly Estimated claim and the expected
 content root. Verified certificates, anchoring datasets, waivers, signatures,
 and falsifier artifacts never authorize themselves: use the corresponding
 typed verifier capabilities and retain the returned verification receipt.
-Scientific release admission additionally requires authenticated authorship,
-at least one admitted scientific Verified or Validated claim, and authenticated
-falsifier evidence for every certificate-class claim.
+Scientific release admission additionally requires a purpose-bound approval
+signature over the exact checker protocol, expected root, scientific policy
+fingerprints, waiver clock, and per-claim admission context, at least one
+admitted scientific Verified or Validated claim, and authenticated falsifier
+evidence for every certificate-class claim. It does not infer signer identity,
+role, or authorship from detached signature bytes.
 
 ### Repository Policy Checks
 

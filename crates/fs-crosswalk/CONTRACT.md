@@ -75,8 +75,9 @@ in FAA/EASA CbA; Estimated declarations, administrative waivers, and
 waiver-dependent descendants do not establish this concept. V&V 10/20 have
 explicit no-counterpart rows. `WaiverAuthorization` maps only to FAA/EASA's
 approved deviations/limitations vocabulary. Signature rows refer specifically
-to policy-authenticated release approval bound to checker protocol and package
-root; the mapping does not claim signer identity, role, or authorship.
+to a policy-authenticated signature carrying release-purpose intent bound to
+checker protocol and package root. This mapping does not establish checker
+admission and does not claim signer identity, role, authorization, or authorship.
 
 ## Package-grounded coverage (bead qmao.6.1)
 
@@ -89,7 +90,8 @@ Coverage is `Covered` only for the intersection of mapped and authenticated
 evidence; a mapped concept with absent evidence is `MappedButAbsent`.
 Claim-origin presence requires scientific admission and a successfully invoked
 source/anchor/derivation policy. Waiver authorization requires an authenticated,
-unexpired waiver. Signature coverage requires release-purpose authentication.
+unexpired waiver. Signature coverage requires release-purpose authentication,
+but remains a signature-intent observation rather than checker admission.
 Provenance strings remain absent coverage until a provenance-artifact verifier
 exists. Raw declarations never count.
 

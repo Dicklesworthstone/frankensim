@@ -436,25 +436,25 @@ const CROSSWALK: [CrosswalkEntry; 48] = [
         Signature,
         AsmeVvV10,
         "Responsible-party review & approval",
-        "a policy-authenticated release approval is a digital approval record bound to the exact gate; signer identity and role are not claimed",
+        "a policy-authenticated signature carries a release-purpose intent bound to the exact gate context; checker admission, signer identity, role, and authorization are not established by this row",
     ),
     m(
         Signature,
         AsmeVvV20,
         "Documented review/approval of results",
-        "policy-authenticated release approval records the gate decision; it does not by itself identify an authorized person",
+        "release-purpose signature authentication records a bound approval intent; it does not establish the checker gate decision or identify an authorized person",
     ),
     m(
         Signature,
         AsmeVvV40,
         "Approval within the credibility assessment plan",
-        "release-purpose authentication binds approval to protocol and package root without asserting signer role",
+        "release-purpose signature authentication binds intent to protocol and package root without establishing checker admission or signer role",
     ),
     m(
         Signature,
         FaaEasaCbA,
         "Authorized sign-off / statement of compliance",
-        "release-purpose authentication attests the exact means-of-compliance package under the configured policy; signer identity is outside the package",
+        "release-purpose signature authentication binds the exact means-of-compliance package and policy context; checker admission and signer identity remain separate decisions",
     ),
     // Claim origin — typed, re-verified traceability to an evidence source.
     nc(

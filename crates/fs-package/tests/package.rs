@@ -990,13 +990,22 @@ fn signature_coverage_requires_authentication_and_rejection_fails_closed() {
         "test-signature:{}",
         signature_subject_hash(root, release_purpose)
     ));
+    let release_presence =
+        fs_package::package_presence_with(&release_signed, &release_capabilities);
+    let signature_presence = release_presence
+        .iter()
+        .find(|row| row.concept() == PackageConcept::Signature)
+        .expect("signature concept");
     assert!(
-        fs_package::package_presence_with(&release_signed, &release_capabilities)
-            .iter()
-            .find(|row| row.concept() == PackageConcept::Signature)
-            .expect("signature concept")
-            .present(),
-        "an authenticated, purpose-bound release approval establishes signature coverage"
+        signature_presence.present(),
+        "an authenticated release-purpose signature establishes signature coverage"
+    );
+    assert!(
+        signature_presence
+            .why()
+            .contains("does not establish checker release admission"),
+        "coverage must not represent signature intent as the checker gate decision: {}",
+        signature_presence.why()
     );
 
     let forged = EvidencePackage::new(prov())

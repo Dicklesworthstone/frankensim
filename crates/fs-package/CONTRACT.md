@@ -139,12 +139,14 @@ Injected verifier implementations are caller-owned synchronous capabilities.
 - SIGNATURES: raw detached bytes are `Unverified`. An installed verifier must
   authenticate the canonical `signature_subject_hash` for the typed purpose or
   verification refuses. Generic package-root attestation is integrity evidence
-  only. Regulatory signature coverage requires `ReleaseApproval` bound to an
+  only. Signature coverage requires a `ReleaseApproval` purpose bound to an
   explicit checker protocol, expected root, and `release_admission_context`
   covering every non-signature policy fingerprint, waiver day, admission, and
   compact waiver edge. Producers obtain that context from an unsigned
   verification receipt, sign the public canonical subject hash, attach the
-  bytes, and run the final gate. No signer identity or role is claimed.
+  bytes, and run the final gate. Coverage records authenticated signature intent;
+  it does not establish that `fs-checker` admitted the package. No signer
+  identity, role, or authorization is claimed.
   A release purpose naming any root other than the recomputed package root is
   refused before the callback, even if a permissive verifier would accept it;
   an approval from another policy or waiver day has a different subject hash.
@@ -163,8 +165,8 @@ Injected verifier implementations are caller-owned synchronous capabilities.
   admitted claims. `Certificate` requires admitted `Verified` evidence (an
   all-estimated package has none). `ClaimOrigin` excludes Estimated declarations,
   waived claims, and waiver-dependent descendants. `Signature` requires
-  release-purpose authentication. `WaiverAuthorization` remains an explicit
-  administrative concept.
+  release-purpose authentication but does not imply checker release admission.
+  `WaiverAuthorization` remains an explicit administrative concept.
 
 ## Error model
 

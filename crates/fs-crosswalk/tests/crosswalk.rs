@@ -95,6 +95,22 @@ fn a_validated_claim_maps_to_the_validation_metric() {
 }
 
 #[test]
+fn signature_mapping_does_not_claim_checker_release_admission() {
+    for standard in Standard::ALL {
+        let entry = lookup(PackageConcept::Signature, standard).expect("signature row");
+        let note = match entry.counterpart {
+            Counterpart::Mapped { note, .. } => note,
+            Counterpart::NoCounterpart { .. } => "",
+        };
+        assert!(
+            !note.is_empty()
+                && (note.contains("checker admission") || note.contains("checker gate decision")),
+            "signature relation must preserve the no-admission boundary: {note}"
+        );
+    }
+}
+
+#[test]
 fn labels_are_unique() {
     let concept_labels: Vec<&str> = PackageConcept::ALL.iter().map(|c| c.label()).collect();
     let mut sorted = concept_labels.clone();
