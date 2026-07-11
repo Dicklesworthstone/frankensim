@@ -11,9 +11,18 @@
 //! pass (32 B/element each), ping-pong copy-back passes, and the
 //! inverse's 1/n scale pass — the honest traffic of THIS algorithm,
 //! not a compulsory-miss fantasy.
+//!
+//! CITABLE GATES REQUIRE A TRUSTED BASELINE (beads dfh3/fz2.7, same
+//! doctrine as the fs-feec lane): run with
+//! `FRANKENSIM_BASELINE_STORE=<jsonl> FRANKENSIM_FIRMWARE_ID=<id>` —
+//! the pre/post axes must be admitted against the promoted baseline
+//! for this machine fingerprint or the lane FAILS with the receipt.
 
 use fs_fft::{C64, Fft};
-use fs_roofline::{KernelSpec, MachineAxes, RooflineKernel, TargetAxis, Threading, measure};
+use fs_roofline::{
+    AxisBaselinePolicy, BaselineIdentity, BaselineStore, KernelSpec, MachineAxes, RooflineKernel,
+    TargetAxis, Threading, days_since_epoch_now, measure,
+};
 
 /// Stockham stage count for the mixed radix-8/4/2 formulation — MUST
 /// mirror the transform's decomposition exactly or the traffic model
@@ -145,6 +154,38 @@ impl RooflineKernel for FftRoundTrip {
 fn fft_attainment() {
     let axes = MachineAxes::probe();
     println!("{}", axes.to_jsonl());
+    // Environment validity (bead 1n61): implausible axes poison both
+    // the numerator and denominator of attainment — refuse up front.
+    if let Some(reason) = axes.plausibility_error() {
+        println!(
+            "{{\"metric\":\"fft-gate\",\"verdict\":\"environment_invalid\",\
+             \"reason\":\"{reason}\",\"machine\":\"{}-{}\"}}",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        );
+        panic!("FFT roofline evidence rejected: {reason}");
+    }
+    // Trusted-baseline admission (beads dfh3/fz2.7): a citable row needs
+    // the promoted quiet-machine baseline for THIS fingerprint — static
+    // floors and pre/post self-agreement cannot detect a host that is
+    // consistently degraded through the whole run.
+    let baseline_path = std::env::var("FRANKENSIM_BASELINE_STORE")
+        .unwrap_or_else(|_| panic!("FRANKENSIM_BASELINE_STORE is required for a citable gate"));
+    let firmware = std::env::var("FRANKENSIM_FIRMWARE_ID")
+        .unwrap_or_else(|_| panic!("FRANKENSIM_FIRMWARE_ID is required for a citable gate"));
+    let baseline_text = std::fs::read_to_string(&baseline_path)
+        .unwrap_or_else(|error| panic!("cannot read baseline store {baseline_path:?}: {error}"));
+    let baseline_store = BaselineStore::from_jsonl(&baseline_text)
+        .unwrap_or_else(|error| panic!("invalid baseline store: {error}"));
+    let identity = BaselineIdentity::current(&axes, firmware)
+        .unwrap_or_else(|error| panic!("invalid baseline identity: {error}"));
+    let now_day = days_since_epoch_now()
+        .unwrap_or_else(|error| panic!("cannot establish baseline age: {error}"));
+    let baseline_policy = AxisBaselinePolicy::new(
+        baseline_store.for_fingerprint(axes.fingerprint),
+        &identity,
+        now_day,
+    );
     // Size ladder: L2-resident (2^16) reported for context; the gate
     // rows are the memory-resident sizes (2^20, 2^22 — 32/128 MB
     // working sets against the DRAM STREAM axis).
@@ -176,6 +217,22 @@ fn fft_attainment() {
             std::env::consts::ARCH
         );
         panic!("FFT roofline evidence rejected: contaminated environment");
+    }
+    // Post-run reprobe + baseline verdict: the run is citable only if
+    // BOTH probes are admitted against the trusted baseline (drift
+    // during the run, or a consistently-degraded host, both refuse).
+    let post_axes = MachineAxes::probe();
+    println!("{{\"metric\":\"axes-post\",\"axes\":{}}}", post_axes.to_jsonl());
+    let baseline_verdict = baseline_policy.verdict(&axes, &post_axes);
+    println!("{}", baseline_policy.receipt_json(&axes, &post_axes));
+    if !baseline_verdict.trusted() {
+        println!(
+            "{{\"metric\":\"fft-gate\",\"verdict\":\"environment_invalid\",\
+             \"reason\":\"historical baseline admission rejected\",\"machine\":\"{}-{}\"}}",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        );
+        panic!("FFT roofline evidence rejected: historical baseline admission rejected");
     }
     // The 0.40 target is REPORTED per row; measured 0.26–0.43 across
     // runs on this machine, dominated by axis and load noise from
