@@ -10,8 +10,9 @@ use fs_exec::{
 };
 use fs_session::gemm_tune::gemm_tune_key;
 use fs_session::{
-    GemmTuneCache, GemmTuneError, gemm_f64_session, gemm_f64_session_with_pool_declared,
-    gemm_kernel_key, gemm_shape_class, gemm_tune_key_with_pool,
+    GemmTuneCache, GemmTuneError, gemm_f64_session, gemm_f64_session_budgeted,
+    gemm_f64_session_with_pool_declared, gemm_kernel_key, gemm_shape_class, gemm_tune_key_budgeted,
+    gemm_tune_key_with_pool,
 };
 
 const FP_THIS: u64 = 0x00AA_11BB_22CC_33DD;
@@ -57,6 +58,55 @@ fn temp_ledger(tag: &str) -> (std::path::PathBuf, fs_ledger::Ledger) {
 
 fn key(threads: usize, m: usize, n: usize, k: usize) -> GemmTuneKey {
     gemm_tune_key(threads, m, n, k).expect("canonical GEMM key")
+}
+
+#[test]
+fn memory_envelope_is_tune_identity_and_tiny_probe_refuses_before_mutation() {
+    let bounded = fs_la::GemmMemoryEnvelope {
+        limit_bytes: 1 << 20,
+    };
+    let roomy = fs_la::GemmMemoryEnvelope {
+        limit_bytes: 2 << 20,
+    };
+    let bounded_key = gemm_tune_key_budgeted(THREADS, M, N, K, bounded).expect("bounded key");
+    let roomy_key = gemm_tune_key_budgeted(THREADS, M, N, K, roomy).expect("roomy key");
+    assert_ne!(bounded_key.kernel(), roomy_key.kernel());
+    assert_eq!(bounded_key.execution().memory_limit_bytes(), 1 << 20);
+
+    let (a, b) = problem();
+    let sentinel = 17.25_f64;
+    let mut c = vec![sentinel; M * N];
+    let mut tuner = Tuner::cold(FP_THIS);
+    let tiny = fs_la::GemmMemoryEnvelope { limit_bytes: 1 };
+    let tiny_key = gemm_tune_key_budgeted(THREADS, M, N, K, tiny).expect("tiny key");
+    let error = gemm_f64_session_budgeted(
+        &mut tuner,
+        GemmTuneCache::Disabled,
+        &CancelGate::new(),
+        THREADS,
+        M,
+        N,
+        K,
+        1.0,
+        &a,
+        &b,
+        0.0,
+        &mut c,
+        tiny,
+    )
+    .expect_err("one byte cannot admit the numeric tune buffers");
+    assert!(matches!(
+        error,
+        GemmTuneError::MemoryRefused {
+            what: "tune-probe-envelope",
+            peak_used_bytes: 0,
+            report: None,
+            ..
+        }
+    ));
+    assert!(!tuner.has_gemm_row(&tiny_key));
+    assert!(tuner.decisions().is_empty());
+    assert!(c.iter().all(|value| value.to_bits() == sentinel.to_bits()));
 }
 
 /// COLD DRILL: no pins, no rows, no ledger — the loop must sweep once,
@@ -540,6 +590,7 @@ fn old_std_thread_placement_key_is_refused() {
     let old_execution = GemmExecutionIdentity::new(
         THREADS,
         THREADS,
+        u64::MAX,
         [M, N, K],
         fs_la::gemm_execution_tier(),
         "std-thread-scope-work-stealing-unpinned-v1",

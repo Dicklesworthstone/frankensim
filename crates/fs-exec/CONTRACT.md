@@ -137,10 +137,12 @@ fs-blake3, fs-substrate, fs-obs.
   fail closed otherwise). A canonical scoped key binds the producer's
   bit-semantics version, shape class, requested thread count, normalized
   maximum thread budget (not the candidate-dependent spawned-worker count),
-  exact probe dimensions, resolved ISA tier, placement policy, and
+  explicit memory limit (`u64::MAX` is the canonical unbounded class), exact
+  probe dimensions, resolved ISA tier, placement policy, and
   implementation identity, plus a required producer-supplied build/codegen
-  identity. The scoped-key schema is `tune-v2`; older keys lack the build seam
-  and are not accepted as current GEMM keys. Row lookup, pin lookup, ledger
+  identity. The scoped-key schema is `tune-v3`; v2 keys lack the memory seam
+  (and older keys also lack the build seam) and are not accepted as current
+  GEMM keys. Row lookup, pin lookup, ledger
   lookup, and the recorded decision all use that SAME scoped key, so neither a
   neighboring shape nor a different execution or build configuration can
   reuse the row or pin.
@@ -366,7 +368,8 @@ and explicit row/decision commit semantics.
   generic enforcement of its poll/deadline/cost dimensions is NOT claimed:
   kernels must consume the dimensions they understand. Legacy run wrappers
   still supply `Budget::INFINITE`. A shared executor-memory lease covering
-  slots, deques, reports, thread stacks, and aggregate arena reservations is
+  slots, deques, report roots and their dynamic `cancel_latencies_ns` /
+  `tiles_by_worker` vectors, thread stacks, and aggregate arena reservations is
   broader follow-up work; wf9.15 only uses the typed propagation/refusal
   substrate for GEMM's explicitly preflighted memory envelope.
 - The latency lane's ≤100 ms conversational guarantee is HELM's gate;

@@ -131,13 +131,14 @@ impl GemmBlockPlan {
 /// Execution dimensions that can change which GEMM blocking plan wins.
 ///
 /// Every field participates in the persistent tune key. This prevents a row
-/// measured with one thread count, probe, ISA tier, placement policy, or
-/// implementation/build from silently dispatching under another
+/// measured with one thread count, memory envelope, probe, ISA tier, placement
+/// policy, or implementation/build from silently dispatching under another
 /// configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GemmExecutionIdentity {
     requested_threads: u64,
     thread_budget: u64,
+    memory_limit_bytes: u64,
     probe_dims: [u64; 3],
     isa_tier: String,
     placement: String,
@@ -161,6 +162,7 @@ impl GemmExecutionIdentity {
     pub fn new(
         requested_threads: usize,
         thread_budget: usize,
+        memory_limit_bytes: u64,
         probe_dims: [usize; 3],
         isa_tier: impl Into<String>,
         placement: impl Into<String>,
@@ -200,6 +202,7 @@ impl GemmExecutionIdentity {
         Ok(Self {
             requested_threads,
             thread_budget,
+            memory_limit_bytes,
             probe_dims: canonical_probe,
             isa_tier,
             placement,
@@ -219,6 +222,13 @@ impl GemmExecutionIdentity {
     #[must_use]
     pub const fn thread_budget(&self) -> u64 {
         self.thread_budget
+    }
+
+    /// Caller-declared memory ceiling for the measured and selected GEMM.
+    /// `u64::MAX` is the explicit legacy/unbounded class, not an omitted field.
+    #[must_use]
+    pub const fn memory_limit_bytes(&self) -> u64 {
+        self.memory_limit_bytes
     }
 
     /// Exact dimensions of the measured probe.
@@ -287,9 +297,10 @@ impl GemmTuneKey {
         let shape_class = shape_class.into();
         require_gemm_identity_component("shape class", &shape_class)?;
         let scoped_kernel = format!(
-            "{base_kernel}/tune-v2/shape={shape_class}/requested={}/thread-budget={}/probe={}x{}x{}/tier={}/placement={}/implementation={}/build={}",
+            "{base_kernel}/tune-v3/shape={shape_class}/requested={}/thread-budget={}/memory-limit={}/probe={}x{}x{}/tier={}/placement={}/implementation={}/build={}",
             execution.requested_threads,
             execution.thread_budget,
+            execution.memory_limit_bytes,
             execution.probe_dims[0],
             execution.probe_dims[1],
             execution.probe_dims[2],
@@ -384,12 +395,13 @@ fn parse_gemm_base_version(kernel: &str) -> Option<u64> {
 }
 
 fn gemm_shape_from_scoped_kernel(kernel: &str) -> Option<&str> {
-    let (base, scope) = kernel.split_once("/tune-v2/")?;
+    let (base, scope) = kernel.split_once("/tune-v3/")?;
     parse_gemm_base_version(base)?;
     let mut parts = scope.split('/');
     let shape = parts.next()?.strip_prefix("shape=")?;
     let requested = parts.next()?.strip_prefix("requested=")?;
     let thread_budget = parts.next()?.strip_prefix("thread-budget=")?;
+    let memory_limit = parts.next()?.strip_prefix("memory-limit=")?;
     let probe = parts.next()?.strip_prefix("probe=")?;
     let tier = parts.next()?.strip_prefix("tier=")?;
     let placement = parts.next()?.strip_prefix("placement=")?;
@@ -398,6 +410,7 @@ fn gemm_shape_from_scoped_kernel(kernel: &str) -> Option<&str> {
     if parts.next().is_some()
         || parse_canonical_u64(requested).is_none()
         || parse_canonical_u64(thread_budget)? == 0
+        || parse_canonical_u64(memory_limit).is_none()
         || require_gemm_identity_component("shape class", shape).is_err()
         || require_gemm_identity_component("ISA tier", tier).is_err()
         || require_gemm_identity_component("placement", placement).is_err()
@@ -2518,6 +2531,7 @@ mod tests {
         GemmExecutionIdentity::new(
             requested_threads,
             thread_budget,
+            u64::MAX,
             probe_dims,
             tier,
             placement,
@@ -2590,18 +2604,25 @@ mod tests {
     #[test]
     fn gemm_scoped_identity_has_one_canonical_spelling() {
         let key = gemm_key();
-        assert!(key.kernel().contains("/tune-v2/"));
+        assert!(key.kernel().contains("/tune-v3/"));
         assert!(key.kernel().contains("/requested=4/thread-budget=4/"));
+        assert!(key.kernel().contains("/memory-limit=18446744073709551615/"));
         assert!(key.kernel().contains("/build=release-opt3-cgu1-build-a"));
         assert_eq!(
             gemm_shape_from_scoped_kernel(key.kernel()),
             Some(key.shape_class())
         );
-        let legacy = key.kernel().replacen("/tune-v2/", "/tune-v1/", 1);
+        let mut bounded_identity = key.execution().clone();
+        bounded_identity.memory_limit_bytes = 1 << 20;
+        let bounded = gemm_key_with(bounded_identity);
+        assert_ne!(bounded.kernel(), key.kernel());
+        assert_eq!(bounded.execution().memory_limit_bytes(), 1 << 20);
+        assert!(bounded.kernel().contains("/memory-limit=1048576/"));
+        let legacy = key.kernel().replacen("/tune-v3/", "/tune-v2/", 1);
         assert_eq!(
             gemm_shape_from_scoped_kernel(&legacy),
             None,
-            "legacy keys without a build seam fail closed"
+            "legacy keys without an explicit memory seam fail closed"
         );
         assert!(
             Tuner::cold(1)
@@ -2619,20 +2640,56 @@ mod tests {
             "the bit-semantics version is canonical decimal"
         );
         assert!(
-            GemmExecutionIdentity::new(4, 0, [64, 128, 32], "avx2", "unpinned", "v1", "release-a")
-                .is_err()
+            GemmExecutionIdentity::new(
+                4,
+                0,
+                u64::MAX,
+                [64, 128, 32],
+                "avx2",
+                "unpinned",
+                "v1",
+                "release-a",
+            )
+            .is_err()
         );
         assert!(
-            GemmExecutionIdentity::new(4, 4, [64, 0, 32], "avx2", "unpinned", "v1", "release-a")
-                .is_err()
+            GemmExecutionIdentity::new(
+                4,
+                4,
+                u64::MAX,
+                [64, 0, 32],
+                "avx2",
+                "unpinned",
+                "v1",
+                "release-a",
+            )
+            .is_err()
         );
         assert!(
-            GemmExecutionIdentity::new(4, 4, [64, 128, 32], "avx/2", "unpinned", "v1", "release-a")
-                .is_err()
+            GemmExecutionIdentity::new(
+                4,
+                4,
+                u64::MAX,
+                [64, 128, 32],
+                "avx/2",
+                "unpinned",
+                "v1",
+                "release-a",
+            )
+            .is_err()
         );
         assert!(
-            GemmExecutionIdentity::new(4, 4, [64, 128, 32], "avx2", "unpinned", "v1", "release/a")
-                .is_err()
+            GemmExecutionIdentity::new(
+                4,
+                4,
+                u64::MAX,
+                [64, 128, 32],
+                "avx2",
+                "unpinned",
+                "v1",
+                "release/a",
+            )
+            .is_err()
         );
     }
 

@@ -36,7 +36,7 @@ const NC: usize = 512;
 /// surface. This is separate from [`GEMM_BIT_SEMANTICS_VERSION`]: a
 /// bit-neutral scheduling or cancellation change bumps this identity while
 /// leaving the numerical contract alone.
-pub const GEMM_IMPLEMENTATION_VERSION: u32 = 3;
+pub const GEMM_IMPLEMENTATION_VERSION: u32 = 4;
 
 /// Domain used to derive each NC/KC panel's child run identity from the
 /// caller-ledgered GEMM operation run.
@@ -90,22 +90,40 @@ impl Default for GemmMemoryEnvelope {
     }
 }
 
-/// Requested/limit bytes ledgered with every pool-GEMM run (wf9.15):
-/// the preflight plan the operation was admitted under.
+/// Deterministic logical-memory accounting for one pool GEMM (wf9.15).
+///
+/// Component and requested bytes describe the checked admission plan. Peak-used
+/// bytes are the largest fs-la-owned logical reservation concurrency entered:
+/// root buffers successfully reserved plus tile arena reservations whose
+/// allocation attempt had begun. Counting the attempt before the allocator call
+/// makes the high-water mark conservative even when one attempt refuses. This
+/// is not process RSS and deliberately excludes generic TilePool worker, deque,
+/// stack, and receipt internals (tracked separately by wf9.16).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct GemmMemoryReport {
     /// The envelope in force (u64::MAX = unbounded).
     pub limit_bytes: u64,
     /// Transactional C staging bytes.
-    pub staging_bytes: u64,
+    pub staging_bytes: u128,
     /// Shared packed-B panel bytes.
-    pub b_pack_bytes: u64,
-    /// Per-panel band-metadata bytes (mutex-guarded band slots).
-    pub band_metadata_bytes: u64,
-    /// Per-worker A micro-panel arena bytes x normalized worker count.
-    pub arena_bytes: u64,
+    pub b_pack_bytes: u128,
+    /// Reusable band-metadata bytes (mutex-guarded band slots).
+    pub band_metadata_bytes: u128,
+    /// Capacity reserved for fs-la's ordered panel-run receipt vector.
+    pub pool_run_bytes: u128,
+    /// Fresh-arena reservation for one A micro-panel.
+    pub arena_bytes_per_worker: u64,
+    /// Maximum number of workers that can be active for one M-band traversal.
+    pub active_arena_workers: usize,
+    /// Per-active-worker A micro-panel arena reservations.
+    pub arena_bytes: u128,
     /// Preflight total (checked sum of the above).
-    pub requested_bytes: u64,
+    pub requested_bytes: u128,
+    /// Largest fs-la-owned logical live set reached by this attempt.
+    pub peak_used_bytes: u128,
+    /// Reservation bytes rejected at the failure boundary, or zero on success
+    /// and cancellation.
+    pub refused_bytes: u128,
 }
 
 /// Structured progress for a cancellation-aware GEMM dispatch. A successful
@@ -162,21 +180,27 @@ pub enum GemmRunError {
         /// Compute and traversal progress accumulated before refusal.
         report: GemmRunReport,
     },
-    /// Refused at the memory boundary (wf9.15): the preflight plan
-    /// exceeded the caller's envelope, or the allocator declined a
-    /// reservation. Raised BEFORE the corresponding work starts; any
-    /// dispatched panels were drained by the pool's scoped join, and
+    /// Refused at the memory boundary (wf9.15): the preflight plan exceeded
+    /// the caller's envelope, or an fs-la-owned reservation was declined. Any
+    /// dispatched panel was drained by the pool's scoped join, and
     /// caller-visible C is bitwise unchanged.
     MemoryRefused {
-        /// Which reservation was refused ("preflight-envelope",
-        /// "c-staging", "b-pack", "band-metadata").
+        /// Which reservation was refused.
         what: &'static str,
         /// Bytes the refused reservation asked for.
-        requested_bytes: u64,
+        requested_bytes: u128,
         /// The envelope in force.
         limit_bytes: u64,
-        /// Progress (zero completed tiles by construction).
+        /// Progress and logical-memory accounting at the drained boundary.
         report: GemmRunReport,
+    },
+    /// Arithmetic needed to represent the logical memory plan exceeded u128.
+    /// No allocation, dispatch, or caller-visible mutation occurred.
+    MemoryPlanOverflow {
+        /// Component whose checked arithmetic overflowed.
+        what: &'static str,
+        /// The envelope in force.
+        limit_bytes: u64,
     },
 }
 
@@ -192,7 +216,14 @@ impl core::fmt::Display for GemmRunError {
                 ..
             } => write!(
                 f,
-                "gemm memory refused at {what}: {requested_bytes} bytes requested against a                  {limit_bytes}-byte envelope; output not touched — raise the envelope or                  shrink the operation"
+                "gemm memory refused at {what}: {requested_bytes} bytes requested against a \
+                 {limit_bytes}-byte envelope; output not committed; raise the envelope or shrink \
+                 the operation"
+            ),
+            Self::MemoryPlanOverflow { what, limit_bytes } => write!(
+                f,
+                "gemm memory-plan arithmetic overflowed at {what} under the \
+                 {limit_bytes}-byte envelope; output not touched"
             ),
         }
     }
@@ -203,7 +234,7 @@ impl core::error::Error for GemmRunError {
         match self {
             Self::Cancelled(error) => Some(error),
             Self::Executor { error, .. } => Some(error),
-            Self::MemoryRefused { .. } => None,
+            Self::MemoryRefused { .. } | Self::MemoryPlanOverflow { .. } => None,
         }
     }
 }
@@ -708,45 +739,208 @@ fn cancelled(
     }
 }
 
-/// Preflight byte plan (wf9.15): every root-orchestration reservation,
-/// checked against the caller's envelope BEFORE any allocation or C
-/// mutation. Arena bytes use the pool's normalized worker count (one
-/// bounded MR x KC A micro-panel per concurrently running tile).
+fn alloc_error_requested_bytes(error: &fs_alloc::AllocError) -> u128 {
+    match error {
+        fs_alloc::AllocError::Exhausted {
+            requested_bytes, ..
+        }
+        | fs_alloc::AllocError::OutOfMemory {
+            requested_bytes, ..
+        } => *requested_bytes as u128,
+        fs_alloc::AllocError::LayoutOverflow {
+            len, elem_bytes, ..
+        } => (*len as u128) * (*elem_bytes as u128),
+        fs_alloc::AllocError::ReservationOverflow {
+            base_bytes,
+            additional_bytes,
+            ..
+        } => (*base_bytes as u128) + (*additional_bytes as u128),
+    }
+}
+
+struct GemmMemoryPlan {
+    report: GemmMemoryReport,
+    b_pack_len: Option<usize>,
+    band_count: usize,
+    panel_count: Option<usize>,
+}
+
+fn checked_memory_product(what: &'static str, lhs: u128, rhs: u128) -> Result<u128, &'static str> {
+    lhs.checked_mul(rhs).ok_or(what)
+}
+
+fn checked_memory_sum(
+    what: &'static str,
+    values: impl IntoIterator<Item = u128>,
+) -> Result<u128, &'static str> {
+    values
+        .into_iter()
+        .try_fold(0_u128, |sum, value| sum.checked_add(value).ok_or(what))
+}
+
+/// Preflight byte plan (wf9.15): every fs-la-owned reservation is computed
+/// with checked arithmetic before allocation or C mutation. No-product calls
+/// require only transactional C staging. Product calls size arenas from the
+/// pool's exact fresh-arena reservation and the active M-band worker count.
+#[allow(clippy::too_many_arguments)]
 fn preflight_memory(
     c_len: usize,
     m: usize,
     n: usize,
+    k: usize,
+    has_product: bool,
     mc_q: usize,
     nc_q: usize,
     workers: usize,
+    arena_bytes_per_worker: u64,
     envelope: GemmMemoryEnvelope,
-) -> GemmMemoryReport {
-    const F64: u64 = 8;
-    let staging_bytes = (c_len as u64).saturating_mul(F64);
-    let b_pack_cols = checked_round_up("parallel B pack columns", nc_q, NR);
-    let b_pack_bytes =
-        (checked_product("parallel B pack", KC, b_pack_cols) as u64).saturating_mul(F64);
-    let bands = m.div_ceil(mc_q.max(1)).max(1) as u64;
-    let band_metadata_bytes =
-        bands.saturating_mul(core::mem::size_of::<std::sync::Mutex<&mut [f64]>>() as u64);
-    let arena_bytes = (workers as u64).saturating_mul((MR * KC) as u64 * F64);
-    let requested_bytes = staging_bytes
-        .saturating_add(b_pack_bytes)
-        .saturating_add(band_metadata_bytes)
-        .saturating_add(arena_bytes);
-    let _ = n;
-    GemmMemoryReport {
-        limit_bytes: envelope.limit_bytes,
-        staging_bytes,
-        b_pack_bytes,
-        band_metadata_bytes,
-        arena_bytes,
-        requested_bytes,
+) -> Result<GemmMemoryPlan, &'static str> {
+    let f64_bytes = core::mem::size_of::<f64>() as u128;
+    let staging_bytes = checked_memory_product("c-staging", c_len as u128, f64_bytes)?;
+    if !has_product {
+        return Ok(GemmMemoryPlan {
+            report: GemmMemoryReport {
+                limit_bytes: envelope.limit_bytes,
+                staging_bytes,
+                requested_bytes: staging_bytes,
+                ..GemmMemoryReport::default()
+            },
+            b_pack_len: Some(0),
+            band_count: 0,
+            panel_count: Some(0),
+        });
+    }
+
+    let b_pack_cols = (nc_q as u128)
+        .checked_add((NR - 1) as u128)
+        .ok_or("b-pack-columns")?
+        / NR as u128
+        * NR as u128;
+    let b_pack_len_u128 = checked_memory_product("b-pack-elements", KC as u128, b_pack_cols)?;
+    let b_pack_bytes = checked_memory_product("b-pack-bytes", b_pack_len_u128, f64_bytes)?;
+    let b_pack_len = usize::try_from(b_pack_len_u128).ok();
+
+    let band_count = m.div_ceil(mc_q);
+    let band_metadata_bytes = checked_memory_product(
+        "band-metadata",
+        band_count as u128,
+        core::mem::size_of::<std::sync::Mutex<&mut [f64]>>() as u128,
+    )?;
+    let panel_count_u128 = checked_memory_product(
+        "panel-run-count",
+        n.div_ceil(nc_q) as u128,
+        k.div_ceil(KC) as u128,
+    )?;
+    let pool_run_bytes = checked_memory_product(
+        "panel-run-receipts",
+        panel_count_u128,
+        core::mem::size_of::<fs_exec::RunReport>() as u128,
+    )?;
+    let panel_count = usize::try_from(panel_count_u128).ok();
+    let active_arena_workers = workers.min(band_count);
+    let arena_bytes = checked_memory_product(
+        "a-pack-arenas",
+        active_arena_workers as u128,
+        u128::from(arena_bytes_per_worker),
+    )?;
+    let requested_bytes = checked_memory_sum(
+        "gemm-memory-total",
+        [
+            staging_bytes,
+            b_pack_bytes,
+            band_metadata_bytes,
+            pool_run_bytes,
+            arena_bytes,
+        ],
+    )?;
+    Ok(GemmMemoryPlan {
+        report: GemmMemoryReport {
+            limit_bytes: envelope.limit_bytes,
+            staging_bytes,
+            b_pack_bytes,
+            band_metadata_bytes,
+            pool_run_bytes,
+            arena_bytes_per_worker,
+            active_arena_workers,
+            arena_bytes,
+            requested_bytes,
+            peak_used_bytes: 0,
+            refused_bytes: 0,
+        },
+        b_pack_len,
+        band_count,
+        panel_count,
+    })
+}
+
+#[derive(Default)]
+struct ArenaUseTracker {
+    current: std::sync::atomic::AtomicUsize,
+    peak: std::sync::atomic::AtomicUsize,
+}
+
+impl ArenaUseTracker {
+    fn enter(&self) -> ArenaUseGuard<'_> {
+        let current = self
+            .current
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
+            + 1;
+        self.peak
+            .fetch_max(current, std::sync::atomic::Ordering::AcqRel);
+        ArenaUseGuard { tracker: self }
+    }
+
+    fn peak(&self) -> usize {
+        self.peak.load(std::sync::atomic::Ordering::Acquire)
     }
 }
 
-struct GemmBandKernel<'a, P> {
-    bands: &'a [std::sync::Mutex<&'a mut [f64]>],
+struct ArenaUseGuard<'a> {
+    tracker: &'a ArenaUseTracker,
+}
+
+impl Drop for ArenaUseGuard<'_> {
+    fn drop(&mut self) {
+        self.tracker
+            .current
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
+fn refresh_peak_memory(
+    memory: &mut GemmMemoryReport,
+    root_used_bytes: u128,
+    arena_use: &ArenaUseTracker,
+) {
+    let live =
+        root_used_bytes + (arena_use.peak() as u128) * u128::from(memory.arena_bytes_per_worker);
+    memory.peak_used_bytes = memory.peak_used_bytes.max(live);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn memory_refused(
+    what: &'static str,
+    refused_bytes: u128,
+    completed: &std::sync::atomic::AtomicUsize,
+    total_tiles: usize,
+    pool_runs: Vec<fs_exec::RunReport>,
+    declared_run: fs_exec::RunId,
+    mut memory: GemmMemoryReport,
+    root_used_bytes: u128,
+    arena_use: &ArenaUseTracker,
+) -> GemmRunError {
+    refresh_peak_memory(&mut memory, root_used_bytes, arena_use);
+    memory.refused_bytes = refused_bytes;
+    GemmRunError::MemoryRefused {
+        what,
+        requested_bytes: refused_bytes,
+        limit_bytes: memory.limit_bytes,
+        report: report(completed, total_tiles, pool_runs, declared_run, memory),
+    }
+}
+
+struct GemmBandKernel<'kernel, 'staged, 'shared, P> {
+    bands: &'kernel [std::sync::Mutex<&'staged mut [f64]>],
     m: usize,
     n: usize,
     k: usize,
@@ -756,13 +950,15 @@ struct GemmBandKernel<'a, P> {
     kc: usize,
     nc: usize,
     alpha: f64,
-    a: &'a [f64],
-    b_pack: &'a [f64],
-    completed: &'a std::sync::atomic::AtomicUsize,
-    poll: &'a P,
+    a: &'shared [f64],
+    b_pack: &'kernel [f64],
+    completed: &'shared std::sync::atomic::AtomicUsize,
+    arena_bytes_per_worker: usize,
+    arena_use: &'shared ArenaUseTracker,
+    poll: &'shared P,
 }
 
-impl<P> fs_exec::TileKernel for GemmBandKernel<'_, P>
+impl<P> fs_exec::TileKernel for GemmBandKernel<'_, '_, '_, P>
 where
     P: Fn() -> bool + Sync,
 {
@@ -790,17 +986,53 @@ where
         let mc = self.ic_quantum.min(self.m - ic);
         let mut band = self.bands[tile].lock().expect("GEMM C-band lock poisoned");
 
+        // The run boundary must carry a finite quota equal to one fresh arena
+        // reservation. This executable check makes an accidental regression to
+        // TilePool::run_declared (Budget::INFINITE) fail closed in the same typed
+        // memory channel as an allocator refusal.
+        let Some(cost_quota) = cx.budget().remaining_cost() else {
+            let error = fs_alloc::AllocError::Exhausted {
+                site: "fs-la/gemm-a-micro-panel-budget",
+                requested_bytes: self.arena_bytes_per_worker,
+                reserved_bytes: 0,
+                limit_bytes: 0,
+            };
+            return core::ops::ControlFlow::Break(
+                cx.refuse(fs_exec::TileFailure::Allocation(error)),
+            );
+        };
+        let expected_cost = u64::try_from(self.arena_bytes_per_worker)
+            .expect("the preflight rejected arena reservations above u64");
+        if cost_quota < expected_cost {
+            let error = fs_alloc::AllocError::Exhausted {
+                site: "fs-la/gemm-a-micro-panel-budget",
+                requested_bytes: self.arena_bytes_per_worker,
+                reserved_bytes: 0,
+                limit_bytes: usize::try_from(cost_quota)
+                    .expect("quota below a usize-derived arena reservation fits usize"),
+            };
+            return core::ops::ControlFlow::Break(
+                cx.refuse(fs_exec::TileFailure::Allocation(error)),
+            );
+        }
+
         // One bounded A micro-panel lives in the Cx arena. It is reclaimed
-        // when this tile completes, cancels, or panics; no packing allocation
-        // can escape the executor scope.
-        let a_pack = cx
-            .arena()
-            .alloc_slice_fill(
-                fs_alloc::Site::named("fs-la/gemm-a-micro-panel"),
-                MR * KC,
-                0.0,
-            )
-            .unwrap_or_else(|error| panic!("GEMM A-pack arena allocation failed: {error}"));
+        // when this tile completes, cancels, refuses, or panics; no packing
+        // allocation can escape the executor scope.
+        let arena_use = self.arena_use.enter();
+        let a_pack = match cx.arena().alloc_slice_fill(
+            fs_alloc::Site::named("fs-la/gemm-a-micro-panel"),
+            MR * KC,
+            0.0,
+        ) {
+            Ok(pack) => pack,
+            Err(error) => {
+                return core::ops::ControlFlow::Break(
+                    cx.refuse(fs_exec::TileFailure::Allocation(error)),
+                );
+            }
+        };
+        let _arena_use = arena_use;
         let poll = || cx.checkpoint().is_err() || (self.poll)();
         let mut p = 0;
         while p < mc {
@@ -870,39 +1102,119 @@ where
         0
     };
     let completed = std::sync::atomic::AtomicUsize::new(0);
-    let mut pool_runs = Vec::new();
+    let arena_use = ArenaUseTracker::default();
     // MEMORY PREFLIGHT (wf9.15): the full reservation plan is checked
     // against the caller's envelope BEFORE anything is allocated or
     // mutated — a refusal here has touched nothing.
-    let memory = preflight_memory(c.len(), m, n, mc_q, nc_q, pool.workers(), envelope);
-    if memory.requested_bytes > memory.limit_bytes {
+    let arena_reservation = if has_product {
+        match pool.arena_pool().reservation_bytes_for_slice::<f64>(
+            fs_alloc::Site::named("fs-la/gemm-a-micro-panel"),
+            MR * KC,
+        ) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                let refused_bytes = alloc_error_requested_bytes(&error);
+                let memory = GemmMemoryReport {
+                    limit_bytes: envelope.limit_bytes,
+                    requested_bytes: refused_bytes,
+                    refused_bytes,
+                    ..GemmMemoryReport::default()
+                };
+                return Err(GemmRunError::MemoryRefused {
+                    what: "a-pack-arena-plan",
+                    requested_bytes: refused_bytes,
+                    limit_bytes: envelope.limit_bytes,
+                    report: report(&completed, total_tiles, Vec::new(), declared_run, memory),
+                });
+            }
+        }
+    } else {
+        0
+    };
+    let arena_reservation_u64 =
+        u64::try_from(arena_reservation).map_err(|_| GemmRunError::MemoryPlanOverflow {
+            what: "a-pack-arena-reservation",
+            limit_bytes: envelope.limit_bytes,
+        })?;
+    let plan = preflight_memory(
+        c.len(),
+        m,
+        n,
+        k,
+        has_product,
+        mc_q,
+        nc_q,
+        pool.workers(),
+        arena_reservation_u64,
+        envelope,
+    )
+    .map_err(|what| GemmRunError::MemoryPlanOverflow {
+        what,
+        limit_bytes: envelope.limit_bytes,
+    })?;
+    let mut memory = plan.report;
+    if memory.requested_bytes > u128::from(memory.limit_bytes) {
+        memory.refused_bytes = memory.requested_bytes;
         return Err(GemmRunError::MemoryRefused {
             what: "preflight-envelope",
             requested_bytes: memory.requested_bytes,
             limit_bytes: memory.limit_bytes,
-            report: report(&completed, total_tiles, pool_runs, declared_run, memory),
+            report: report(&completed, total_tiles, Vec::new(), declared_run, memory),
         });
     }
-    let refused = |what: &'static str,
-                   bytes: u64,
-                   completed: &std::sync::atomic::AtomicUsize,
-                   pool_runs: Vec<fs_exec::RunReport>| {
-        GemmRunError::MemoryRefused {
-            what,
-            requested_bytes: bytes,
-            limit_bytes: memory.limit_bytes,
-            report: report(completed, total_tiles, pool_runs, declared_run, memory),
-        }
+    let Some(b_pack_len) = plan.b_pack_len else {
+        return Err(memory_refused(
+            "b-pack-layout",
+            memory.b_pack_bytes,
+            &completed,
+            total_tiles,
+            Vec::new(),
+            declared_run,
+            memory,
+            0,
+            &arena_use,
+        ));
+    };
+    let Some(panel_count) = plan.panel_count else {
+        return Err(memory_refused(
+            "panel-run-layout",
+            memory.pool_run_bytes,
+            &completed,
+            total_tiles,
+            Vec::new(),
+            declared_run,
+            memory,
+            0,
+            &arena_use,
+        ));
     };
     if poll() {
         return Err(GemmRunError::Cancelled(cancelled(
             &completed,
             total_tiles,
-            pool_runs,
+            Vec::new(),
             declared_run,
             memory,
         )));
     }
+
+    let mut root_used_bytes = 0_u128;
+    let mut pool_runs = Vec::new();
+    if pool_runs.try_reserve_exact(panel_count).is_err() {
+        return Err(memory_refused(
+            "panel-run-receipts",
+            memory.pool_run_bytes,
+            &completed,
+            total_tiles,
+            pool_runs,
+            declared_run,
+            memory,
+            root_used_bytes,
+            &arena_use,
+        ));
+    }
+    root_used_bytes += memory.pool_run_bytes;
+    refresh_peak_memory(&mut memory, root_used_bytes, &arena_use);
 
     // Transactional staging is the no-torn-C boundary. Capacity reservation
     // itself is not a poll point, but initialization/copying is chunked under
@@ -910,14 +1222,21 @@ where
     let mut staged = match stage_beta(c, beta, poll) {
         Ok(staged) => staged,
         Err(StageAbort::AllocRefused) => {
-            return Err(refused(
+            return Err(memory_refused(
                 "c-staging",
                 memory.staging_bytes,
                 &completed,
+                total_tiles,
                 pool_runs,
+                declared_run,
+                memory,
+                root_used_bytes,
+                &arena_use,
             ));
         }
         Err(StageAbort::Cancelled) => {
+            root_used_bytes += memory.staging_bytes;
+            refresh_peak_memory(&mut memory, root_used_bytes, &arena_use);
             return Err(GemmRunError::Cancelled(cancelled(
                 &completed,
                 total_tiles,
@@ -927,6 +1246,8 @@ where
             )));
         }
     };
+    root_used_bytes += memory.staging_bytes;
+    refresh_peak_memory(&mut memory, root_used_bytes, &arena_use);
     if !has_product {
         if poll() {
             return Err(GemmRunError::Cancelled(cancelled(
@@ -947,20 +1268,25 @@ where
         ));
     }
 
-    let b_pack_cols = checked_round_up("parallel B pack columns", nc_q, NR);
-    let b_pack_len = checked_product("parallel B pack", KC, b_pack_cols);
     let band_len = checked_product("parallel C band", mc_q, n);
     let mut b_pack = match zeroed_with_poll(b_pack_len, poll) {
         Ok(pack) => pack,
         Err(StageAbort::AllocRefused) => {
-            return Err(refused(
+            return Err(memory_refused(
                 "b-pack",
                 memory.b_pack_bytes,
                 &completed,
+                total_tiles,
                 pool_runs,
+                declared_run,
+                memory,
+                root_used_bytes,
+                &arena_use,
             ));
         }
         Err(StageAbort::Cancelled) => {
+            root_used_bytes += memory.b_pack_bytes;
+            refresh_peak_memory(&mut memory, root_used_bytes, &arena_use);
             return Err(GemmRunError::Cancelled(cancelled(
                 &completed,
                 total_tiles,
@@ -970,6 +1296,28 @@ where
             )));
         }
     };
+    root_used_bytes += memory.b_pack_bytes;
+    refresh_peak_memory(&mut memory, root_used_bytes, &arena_use);
+
+    let mut bands: Vec<std::sync::Mutex<&mut [f64]>> = Vec::new();
+    if bands.try_reserve_exact(plan.band_count).is_err() {
+        return Err(memory_refused(
+            "band-metadata",
+            memory.band_metadata_bytes,
+            &completed,
+            total_tiles,
+            pool_runs,
+            declared_run,
+            memory,
+            root_used_bytes,
+            &arena_use,
+        ));
+    }
+    bands.extend(staged.chunks_mut(band_len).map(std::sync::Mutex::new));
+    debug_assert_eq!(bands.len(), plan.band_count);
+    root_used_bytes += memory.band_metadata_bytes;
+    refresh_peak_memory(&mut memory, root_used_bytes, &arena_use);
+
     let mut jc = 0;
     while jc < n {
         let nc = nc_q.min(n - jc);
@@ -985,19 +1333,6 @@ where
                     memory,
                 )));
             }
-            let mut bands: Vec<std::sync::Mutex<&mut [f64]>> = Vec::new();
-            if bands
-                .try_reserve_exact(staged.len().div_ceil(band_len.max(1)))
-                .is_err()
-            {
-                return Err(refused(
-                    "band-metadata",
-                    memory.band_metadata_bytes,
-                    &completed,
-                    pool_runs,
-                ));
-            }
-            bands.extend(staged.chunks_mut(band_len).map(std::sync::Mutex::new));
             let kernel = GemmBandKernel {
                 bands: &bands,
                 m,
@@ -1012,13 +1347,18 @@ where
                 a,
                 b_pack: &b_pack,
                 completed: &completed,
+                arena_bytes_per_worker: arena_reservation,
+                arena_use: &arena_use,
                 poll,
             };
             let panel_ordinal = u64::try_from(pool_runs.len())
                 .expect("supported Rust targets have at most 64-bit usize");
             let panel_run = gemm_panel_run_id(declared_run, panel_ordinal);
-            let (outcome, pool_report) = pool.run_declared(&kernel, gate, panel_run);
+            let budget = fs_exec::Budget::new().with_cost_quota(memory.arena_bytes_per_worker);
+            let (outcome, pool_report) =
+                pool.run_declared_budgeted(&kernel, gate, panel_run, budget);
             pool_runs.push(pool_report);
+            refresh_peak_memory(&mut memory, root_used_bytes, &arena_use);
             match outcome {
                 Ok(()) => {}
                 Err(fs_exec::RunError::Cancelled { .. }) => {
@@ -1029,6 +1369,23 @@ where
                         declared_run,
                         memory,
                     )));
+                }
+                Err(fs_exec::RunError::TileFailed {
+                    failure: fs_exec::TileFailure::Allocation(error),
+                    ..
+                }) => {
+                    let refused_bytes = alloc_error_requested_bytes(&error);
+                    return Err(memory_refused(
+                        "a-pack-arena",
+                        refused_bytes,
+                        &completed,
+                        total_tiles,
+                        pool_runs,
+                        declared_run,
+                        memory,
+                        root_used_bytes,
+                        &arena_use,
+                    ));
                 }
                 Err(error) => {
                     return Err(GemmRunError::Executor {
@@ -1051,6 +1408,8 @@ where
         jc += nc_q;
     }
 
+    drop(bands);
+    refresh_peak_memory(&mut memory, root_used_bytes, &arena_use);
     let final_report = report(&completed, total_tiles, pool_runs, declared_run, memory);
     debug_assert_eq!(final_report.completed_tiles, final_report.total_tiles);
     if poll() {
@@ -2248,6 +2607,7 @@ mod tests {
                     .map(|run| run.declared_run.0)
                     .collect::<Vec<_>>(),
                 (0..u64::try_from(report.pool_runs.len()).expect("panel count fits u64"))
+                    .map(|ordinal| gemm_panel_run_id(fs_exec::RunId::default(), ordinal).0)
                     .collect::<Vec<_>>(),
                 "NC/KC panel stream identities must be distinct and deterministic"
             );
@@ -2304,15 +2664,20 @@ mod tests {
             gemm_f64_parallel_with_pool(m, n, k, 1.0, &a, &b, 0.5, &mut c, &pool, 8, 7, &gate)
                 .expect_err("the zero-byte arena budget must refuse A packing");
         match error {
-            GemmRunError::Executor {
-                error: fs_exec::RunError::TilePanicked { message, .. },
+            GemmRunError::MemoryRefused {
+                what,
+                requested_bytes,
                 report,
+                ..
             } => {
-                assert!(message.contains("arena allocation failed"), "{message}");
+                assert_eq!(what, "a-pack-arena");
+                assert!(requested_bytes > 0);
                 assert_eq!(report.completed_tiles, 0);
                 assert_eq!(report.pool_runs.len(), 1);
+                assert_eq!(report.memory.refused_bytes, requested_bytes);
+                assert!(report.memory.peak_used_bytes > 0);
             }
-            other => panic!("expected contained arena refusal, got {other:?}"),
+            other => panic!("expected typed arena refusal, got {other:?}"),
         }
         assert!(
             gate.is_requested(),
@@ -2325,6 +2690,116 @@ mod tests {
             "executor refusal must not expose staged output"
         );
         assert!(pool.arena_pool().stats().quiescent());
+    }
+
+    #[test]
+    fn arena_refusal_after_completed_panel_preserves_progress_and_c() {
+        let (m, n, k) = (8usize, 4usize, KC + 1);
+        let a = rand_mat(m, k, 0xA220);
+        let b = rand_mat(k, n, 0xB220);
+        let original = rand_mat(m, n, 0xC220);
+        let mut c = original.clone();
+        let mut config = fs_exec::PoolConfig::for_host(1, 0xA220);
+        config.arena.chunk_bytes = 1 << 20;
+        config.arena.limit_bytes = Some(1 << 20);
+        let pool = fs_exec::TilePool::new(config);
+        let gate = fs_exec::CancelGate::new();
+        let holder = std::sync::Mutex::new(None::<fs_alloc::Arena>);
+        let poll = || {
+            let stats = pool.arena_pool().stats();
+            if stats.chunks_created > 0 && stats.arenas_live == 0 {
+                let mut held = holder.lock().expect("holder lock");
+                if held.is_none() {
+                    let arena = pool.arena_pool().arena();
+                    arena
+                        .alloc_slice_fill(fs_alloc::Site::named("fs-la/test-held-arena"), 1, 0_u8)
+                        .expect("recycle the first panel's chunk");
+                    *held = Some(arena);
+                }
+            }
+            false
+        };
+
+        let error = gemm_f64_parallel_with_pool_and_poll(
+            m,
+            n,
+            k,
+            1.0,
+            &a,
+            &b,
+            0.5,
+            &mut c,
+            &pool,
+            8,
+            4,
+            &gate,
+            fs_exec::RunId(22),
+            GemmMemoryEnvelope::UNBOUNDED,
+            &poll,
+        )
+        .expect_err("the held recycled chunk must refuse the second panel arena");
+        let GemmRunError::MemoryRefused {
+            what,
+            requested_bytes,
+            report,
+            ..
+        } = error
+        else {
+            panic!("expected post-progress memory refusal, got {error:?}");
+        };
+        assert_eq!(what, "a-pack-arena");
+        assert_eq!(report.completed_tiles, 1);
+        assert_eq!(report.total_tiles, 2);
+        assert_eq!(report.pool_runs.len(), 2);
+        assert_eq!(report.memory.refused_bytes, requested_bytes);
+        assert!(report.memory.peak_used_bytes <= report.memory.requested_bytes);
+        assert!(
+            c.iter()
+                .zip(&original)
+                .all(|(got, before)| got.to_bits() == before.to_bits())
+        );
+        drop(holder.lock().expect("holder lock").take());
+        assert!(pool.arena_pool().stats().quiescent());
+    }
+
+    #[test]
+    fn memory_planning_is_checked_and_no_product_ignores_huge_operands() {
+        assert_eq!(
+            checked_memory_sum("test-overflow", [u128::MAX, 1]),
+            Err("test-overflow")
+        );
+        let no_product = preflight_memory(
+            17,
+            usize::MAX,
+            usize::MAX,
+            usize::MAX,
+            false,
+            8,
+            4,
+            usize::MAX,
+            0,
+            GemmMemoryEnvelope { limit_bytes: 136 },
+        )
+        .expect("no-product planning does not inspect unused operand extents");
+        assert_eq!(no_product.report.requested_bytes, 136);
+        assert_eq!(no_product.report.b_pack_bytes, 0);
+        assert_eq!(no_product.report.arena_bytes, 0);
+
+        let huge_product = preflight_memory(
+            0,
+            1,
+            usize::MAX,
+            1,
+            true,
+            8,
+            usize::MAX,
+            1,
+            1,
+            GemmMemoryEnvelope::UNBOUNDED,
+        )
+        .expect("u128 plan represents the exact oversized layout");
+        assert!(huge_product.b_pack_len.is_none());
+        assert!(huge_product.report.b_pack_bytes > u128::from(u64::MAX));
     }
 
     /// Recorded on aarch64-apple (M4 Pro); must match on x86-64 (trj).

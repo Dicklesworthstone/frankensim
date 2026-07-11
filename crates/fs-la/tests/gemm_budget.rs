@@ -59,9 +59,10 @@ fn tiny_envelope_refuses_before_touching_c() {
             let sum = report.memory.staging_bytes
                 + report.memory.b_pack_bytes
                 + report.memory.band_metadata_bytes
+                + report.memory.pool_run_bytes
                 + report.memory.arena_bytes;
             assert_eq!(report.memory.requested_bytes, sum);
-            assert_eq!(report.memory.staging_bytes, (m * n * 8) as u64);
+            assert_eq!(report.memory.staging_bytes, (m * n * 8) as u128);
         }
         other => panic!("expected MemoryRefused, got {other:?}"),
     }
@@ -173,4 +174,89 @@ fn cancellation_during_init_leaves_c_unchanged_and_ledgers_the_plan() {
         c.iter().zip(&c0).all(|(x, y)| x.to_bits() == y.to_bits()),
         "cancellation during init must leave C bitwise unchanged"
     );
+}
+
+#[test]
+fn no_product_charges_only_transactional_staging() {
+    let (m, n, k) = (19usize, 11, 7);
+    let (a, b, c0) = fixtures(m, n, k);
+    let mut c = c0.clone();
+    let pool = pool();
+    let staging_bytes = (m * n * core::mem::size_of::<f64>()) as u64;
+    let report = gemm_f64_parallel_with_pool_budgeted(
+        m,
+        n,
+        k,
+        0.0,
+        &a,
+        &b,
+        0.5,
+        &mut c,
+        &pool,
+        32,
+        64,
+        &CancelGate::new(),
+        fs_exec::RunId(9),
+        GemmMemoryEnvelope {
+            limit_bytes: staging_bytes,
+        },
+    )
+    .expect("alpha-zero work needs only C staging");
+    assert_eq!(report.total_tiles, 0);
+    assert!(report.pool_runs.is_empty());
+    assert_eq!(report.memory.staging_bytes, u128::from(staging_bytes));
+    assert_eq!(report.memory.requested_bytes, u128::from(staging_bytes));
+    assert_eq!(report.memory.peak_used_bytes, u128::from(staging_bytes));
+    assert_eq!(report.memory.refused_bytes, 0);
+    assert_eq!(report.memory.b_pack_bytes, 0);
+    assert_eq!(report.memory.band_metadata_bytes, 0);
+    assert_eq!(report.memory.pool_run_bytes, 0);
+    assert_eq!(report.memory.arena_bytes, 0);
+    assert_eq!(report.memory.active_arena_workers, 0);
+    assert!(
+        c.iter()
+            .zip(&c0)
+            .all(|(actual, before)| actual.to_bits() == (before * 0.5).to_bits())
+    );
+}
+
+#[test]
+fn arena_plan_uses_real_chunk_size_and_active_workers() {
+    let (m, n, k) = (16usize, 8, 5);
+    let (a, b, mut c) = fixtures(m, n, k);
+    let mut config = PoolConfig::for_host(8, 0xA11C);
+    config.arena.chunk_bytes = 1 << 20;
+    let pool = TilePool::new(config);
+    let report = gemm_f64_parallel_with_pool_budgeted(
+        m,
+        n,
+        k,
+        1.0,
+        &a,
+        &b,
+        0.0,
+        &mut c,
+        &pool,
+        32,
+        64,
+        &CancelGate::new(),
+        fs_exec::RunId(10),
+        GemmMemoryEnvelope {
+            limit_bytes: 16 << 20,
+        },
+    )
+    .expect("one M band is admitted");
+    let expected = pool
+        .arena_pool()
+        .reservation_bytes_for_slice::<f64>(
+            fs_alloc::Site::named("fs-la/gemm-a-micro-panel"),
+            8 * 256,
+        )
+        .expect("fixed A panel reservation");
+    assert_eq!(report.memory.arena_bytes_per_worker, expected as u64);
+    assert_eq!(report.memory.active_arena_workers, 1);
+    assert_eq!(report.memory.arena_bytes, expected as u128);
+    assert_ne!(report.memory.arena_bytes_per_worker, u64::MAX);
+    assert_eq!(report.memory.refused_bytes, 0);
+    assert!(report.memory.peak_used_bytes <= report.memory.requested_bytes);
 }

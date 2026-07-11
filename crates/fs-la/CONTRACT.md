@@ -25,6 +25,19 @@ Dense linear algebra: GEMM, batched small dense, factorizations, eigensolvers. L
   caller-visible C bitwise unchanged. `gemm_f64_parallel_with_cancel` is the
   convenience wrapper that constructs an unpinned host pool and preserves the
   same structured cancellation/executor error surface.
+  `gemm_f64_parallel_with_pool_budgeted` additionally requires a
+  `GemmMemoryEnvelope`. Its checked plan covers transactional C staging, shared
+  B packing, the reusable M-band table, fs-la's ordered panel-receipt vector,
+  and one exact `ArenaPool::reservation_bytes_for_slice` A-panel reservation
+  per active `min(pool.workers(), m_bands)` worker. No-product calls plan only
+  C staging. Root capacities are fallibly pre-reserved before dispatch; every
+  tile receives a finite cost quota equal to one arena reservation; typed arena
+  allocation refusal drains siblings and returns `MemoryRefused` rather than a
+  panic. `GemmMemoryReport` records the requested plan, conservative logical
+  reservation high-water (arena attempts count when entered), and refused
+  component bytes. Arithmetic uses checked u128 accounting; unrepresentable
+  layouts or totals fail closed. Legacy wrappers explicitly use the unbounded
+  envelope while retaining the same finite per-tile arena quota.
   `gemm_tuning_is_effective` is the producer-owned routing query used to
   avoid publishing tune evidence for single-thread, small-M, and no-op
   calls. `gemm_execution_tier`, `GEMM_IMPLEMENTATION_VERSION`, the executing
@@ -320,11 +333,15 @@ diagonal) fixtures; 128-byte plane alignment; cross-ISA golden hash.
   the declared Cargo/Rust environment must set `FRANKENSIM_GEMM_CODEGEN_ID`.
   Tune reuse across an unsalted non-transparent wrapper configuration is not
   claimed.
-- Parallel GEMM's transactional C staging, shared B pack, and per-panel band
-  metadata are ordinary root `Vec` allocations today. They preserve
-  cancellation atomicity, but are not fallible structured refusals and are not
-  charged to a caller memory envelope; this remains
-  `frankensim-epic-substrate-wf9.15`.
+- `GemmMemoryReport` is deterministic logical reservation accounting, not RSS
+  or allocator-overhead measurement. It excludes TilePool slots, deques,
+  victim tables, worker stacks, and each `fs_exec::RunReport`'s dynamic
+  `cancel_latencies_ns` and `tiles_by_worker` vectors;
+  the shared generic executor lease is
+  `frankensim-epic-substrate-wf9.16`. Arena high-water counts an allocation
+  attempt before calling the allocator so concurrent live reservations cannot
+  be underreported; a refused attempt can therefore make the logical peak
+  conservatively exceed physically committed bytes.
 - Batched small-dense throughput is NOT claimed roofline-competitive
   yet (see 9ekv evidence above): in-kernel AoS repacking or per-matrix
   packed-GEMM routing for large k, the autotuned interleave, and the

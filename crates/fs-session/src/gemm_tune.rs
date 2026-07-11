@@ -75,7 +75,7 @@ const GEMM_SWEEP_RUN_DOMAIN: &str = "org.frankensim.fs-session.gemm-sweep-run.v1
 
 /// Globally unique BLAKE3 derive-key context for canonical GEMM tune-row
 /// receipts.
-pub const GEMM_TUNE_ROW_RECEIPT_DOMAIN: &str = "org.frankensim.fs-session.gemm-tune-row-receipt.v1";
+pub const GEMM_TUNE_ROW_RECEIPT_DOMAIN: &str = "org.frankensim.fs-session.gemm-tune-row-receipt.v2";
 
 fn push_json_string(out: &mut String, value: &str) {
     use core::fmt::Write as _;
@@ -123,14 +123,26 @@ pub enum GemmTuneError {
         /// One-based repeat whose exact output bits diverged.
         repeat: usize,
     },
-    /// The GEMM path refused at its memory boundary (wf9.15): plan
-    /// exceeded the caller envelope or the allocator declined. Output
-    /// untouched; the probe/dispatch simply did not run.
+    /// The GEMM path refused at its memory boundary (wf9.15): the plan
+    /// exceeded the caller envelope or an allocator declined a reservation.
+    /// Output is not committed; the retained report may contain drained
+    /// private progress from panels that completed before refusal.
     MemoryRefused {
         /// Which reservation was refused.
         what: &'static str,
         /// Bytes the refused reservation asked for.
-        requested_bytes: u64,
+        requested_bytes: u128,
+        /// The envelope in force.
+        limit_bytes: u64,
+        /// Largest session-owned logical reservation concurrency reached.
+        peak_used_bytes: u128,
+        /// Drained numerical-run report when refusal occurred inside fs-la.
+        report: Option<fs_la::GemmRunReport>,
+    },
+    /// Checked arithmetic could not represent the session or fs-la memory plan.
+    MemoryPlanOverflow {
+        /// Component whose arithmetic overflowed.
+        what: &'static str,
         /// The envelope in force.
         limit_bytes: u64,
     },
@@ -161,10 +173,20 @@ impl core::fmt::Display for GemmTuneError {
                 what,
                 requested_bytes,
                 limit_bytes,
+                peak_used_bytes,
+                report,
             } => write!(
                 f,
                 "gemm autotune memory refused at {what}: {requested_bytes} bytes against a \
-                 {limit_bytes}-byte envelope; nothing ran"
+                 {limit_bytes}-byte envelope after reaching {peak_used_bytes} logical bytes and \
+                 {}/{} compute tiles; output not committed",
+                report.as_ref().map_or(0, |run| run.completed_tiles),
+                report.as_ref().map_or(0, |run| run.total_tiles),
+            ),
+            Self::MemoryPlanOverflow { what, limit_bytes } => write!(
+                f,
+                "gemm autotune memory-plan arithmetic overflowed at {what} under the \
+                 {limit_bytes}-byte envelope; output not touched"
             ),
             Self::BitDrift { candidate, repeat } => write!(
                 f,
@@ -212,13 +234,47 @@ impl From<fs_la::GemmRunError> for GemmTuneError {
                 what,
                 requested_bytes,
                 limit_bytes,
-                ..
+                report,
             } => Self::MemoryRefused {
                 what,
                 requested_bytes,
                 limit_bytes,
+                peak_used_bytes: report.memory.peak_used_bytes,
+                report: Some(report),
             },
+            fs_la::GemmRunError::MemoryPlanOverflow { what, limit_bytes } => {
+                Self::MemoryPlanOverflow { what, limit_bytes }
+            }
         }
+    }
+}
+
+fn gemm_error_with_session_memory(
+    error: fs_la::GemmRunError,
+    envelope: fs_la::GemmMemoryEnvelope,
+    session_bytes: u128,
+) -> GemmTuneError {
+    match GemmTuneError::from(error) {
+        GemmTuneError::MemoryRefused {
+            what,
+            requested_bytes,
+            peak_used_bytes,
+            report,
+            ..
+        } => match session_bytes.checked_add(peak_used_bytes) {
+            Some(peak_used_bytes) => GemmTuneError::MemoryRefused {
+                what,
+                requested_bytes,
+                limit_bytes: envelope.limit_bytes,
+                peak_used_bytes,
+                report,
+            },
+            None => GemmTuneError::MemoryPlanOverflow {
+                what: "session-plus-gemm-peak",
+                limit_bytes: envelope.limit_bytes,
+            },
+        },
+        other => other,
     }
 }
 
@@ -292,18 +348,62 @@ pub struct GemmExecutionReceipt {
     pub completed_tiles: usize,
     /// Total bounded GEMM microtiles.
     pub total_tiles: usize,
+    /// Declared logical-memory plan. Schedule-observed peak and refusal bytes
+    /// remain in the full run report and are excluded from replay identity.
+    pub memory: GemmMemoryReceipt,
     /// Ordered NC/KC panel traversals through the caller's TilePool.
     pub panels: Vec<GemmPanelReceipt>,
 }
 
+/// Identity-stable projection of [`fs_la::GemmMemoryReport`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GemmMemoryReceipt {
+    /// Caller-declared memory ceiling.
+    pub limit_bytes: u64,
+    /// Transactional C staging bytes.
+    pub staging_bytes: u128,
+    /// Shared B-pack bytes.
+    pub b_pack_bytes: u128,
+    /// M-band metadata bytes.
+    pub band_metadata_bytes: u128,
+    /// fs-la panel-receipt vector bytes.
+    pub pool_run_bytes: u128,
+    /// Fresh arena reservation per active worker.
+    pub arena_bytes_per_worker: u64,
+    /// Planned maximum active arena workers.
+    pub active_arena_workers: usize,
+    /// Planned active arena bytes.
+    pub arena_bytes: u128,
+    /// Checked fs-la-owned plan total.
+    pub requested_bytes: u128,
+}
+
+impl From<fs_la::GemmMemoryReport> for GemmMemoryReceipt {
+    fn from(report: fs_la::GemmMemoryReport) -> Self {
+        Self {
+            limit_bytes: report.limit_bytes,
+            staging_bytes: report.staging_bytes,
+            b_pack_bytes: report.b_pack_bytes,
+            band_metadata_bytes: report.band_metadata_bytes,
+            pool_run_bytes: report.pool_run_bytes,
+            arena_bytes_per_worker: report.arena_bytes_per_worker,
+            active_arena_workers: report.active_arena_workers,
+            arena_bytes: report.arena_bytes,
+            requested_bytes: report.requested_bytes,
+        }
+    }
+}
+
 impl GemmExecutionReceipt {
-    /// Project a full numerical run report onto identity-stable fields.
+    /// Project a successful numerical run report onto identity-stable fields.
+    /// Error paths retain their full report in [`GemmTuneError`] instead.
     #[must_use]
     pub fn from_report(report: &fs_la::GemmRunReport) -> Self {
         Self {
             declared_run: report.declared_run.0,
             completed_tiles: report.completed_tiles,
             total_tiles: report.total_tiles,
+            memory: report.memory.into(),
             panels: report
                 .pool_runs
                 .iter()
@@ -322,9 +422,13 @@ impl GemmExecutionReceipt {
     /// from this receipt's declared operation identity and panel ordinal.
     #[must_use]
     pub fn is_complete(&self) -> bool {
-        self.total_tiles > 0
-            && self.completed_tiles == self.total_tiles
-            && !self.panels.is_empty()
+        if self.completed_tiles != self.total_tiles {
+            return false;
+        }
+        if self.total_tiles == 0 {
+            return self.panels.is_empty();
+        }
+        !self.panels.is_empty()
             && self.panels.iter().enumerate().all(|(ordinal, panel)| {
                 let Ok(ordinal) = u64::try_from(ordinal) else {
                     return false;
@@ -376,17 +480,28 @@ pub struct ValidatedGemmTuneRow {
     machine: [u8; 8],
     params: String,
     measured: String,
+    memory_limit_bytes: u64,
+    probe_buffer_bytes: u128,
 }
 
 impl ValidatedGemmTuneRow {
-    fn from_prepared(prepared: &PreparedGemmRow, machine: u64) -> Self {
-        Self {
+    fn from_prepared(prepared: &PreparedGemmRow, machine: u64) -> Result<Self, GemmTuneError> {
+        let execution = prepared.key().execution();
+        let probe_buffer_bytes = probe_buffer_bytes_for_dims(execution.probe_dims()).ok_or(
+            GemmTuneError::MemoryPlanOverflow {
+                what: "tune-probe-buffers",
+                limit_bytes: execution.memory_limit_bytes(),
+            },
+        )?;
+        Ok(Self {
             kernel: prepared.key().kernel().to_string(),
             shape_class: prepared.key().shape_class().to_string(),
             machine: machine.to_le_bytes(),
             params: prepared.params_json(),
             measured: prepared.row_json(),
-        }
+            memory_limit_bytes: execution.memory_limit_bytes(),
+            probe_buffer_bytes,
+        })
     }
 
     /// Canonical JSON preimage for this exact tune-table tuple.
@@ -407,6 +522,11 @@ impl ValidatedGemmTuneRow {
         out.push_str(&self.params);
         out.push_str(",\"measured\":");
         out.push_str(&self.measured);
+        let _ = write!(
+            out,
+            ",\"memory_limit_bytes\":{},\"probe_buffer_bytes\":{}",
+            self.memory_limit_bytes, self.probe_buffer_bytes
+        );
         out.push('}');
         out
     }
@@ -570,6 +690,17 @@ fn probe_dims(m: usize, n: usize, k: usize) -> [usize; 3] {
     ]
 }
 
+fn probe_buffer_bytes_for_dims([m, n, k]: [u64; 3]) -> Option<u128> {
+    let m = u128::from(m);
+    let n = u128::from(n);
+    let k = u128::from(k);
+    let elements = m
+        .checked_mul(k)?
+        .checked_add(k.checked_mul(n)?)?
+        .checked_add(m.checked_mul(n)?.checked_mul(2)?)?;
+    elements.checked_mul(core::mem::size_of::<u64>() as u128)
+}
+
 /// Construct the exact persistent tuning identity for this invocation.
 /// Studies normally replay the recorded decision key directly; exposing this
 /// constructor also lets admission and diagnostics explain why two calls do
@@ -584,8 +715,23 @@ pub fn gemm_tune_key(
     n: usize,
     k: usize,
 ) -> Result<GemmTuneKey, GemmTuneError> {
+    gemm_tune_key_budgeted(threads, m, n, k, fs_la::GemmMemoryEnvelope::UNBOUNDED)
+}
+
+/// Construct the persistent tuning identity under an explicit memory envelope.
+/// Otherwise-identical calls with different ceilings cannot share rows or pins.
+///
+/// # Errors
+/// As [`gemm_tune_key`].
+pub fn gemm_tune_key_budgeted(
+    threads: usize,
+    m: usize,
+    n: usize,
+    k: usize,
+    envelope: fs_la::GemmMemoryEnvelope,
+) -> Result<GemmTuneKey, GemmTuneError> {
     let pool = TilePool::for_host(threads, SESSION_GEMM_POOL_SEED);
-    gemm_tune_key_with_pool(&pool, m, n, k)
+    gemm_tune_key_with_pool_budgeted(&pool, m, n, k, envelope)
 }
 
 /// Construct the persistent tuning identity from the TilePool that will
@@ -600,9 +746,25 @@ pub fn gemm_tune_key_with_pool(
     n: usize,
     k: usize,
 ) -> Result<GemmTuneKey, GemmTuneError> {
+    gemm_tune_key_with_pool_budgeted(pool, m, n, k, fs_la::GemmMemoryEnvelope::UNBOUNDED)
+}
+
+/// Construct the persistent tuning identity from the executing pool and an
+/// explicit memory envelope.
+///
+/// # Errors
+/// As [`gemm_tune_key_with_pool`].
+pub fn gemm_tune_key_with_pool_budgeted(
+    pool: &TilePool,
+    m: usize,
+    n: usize,
+    k: usize,
+    envelope: fs_la::GemmMemoryEnvelope,
+) -> Result<GemmTuneKey, GemmTuneError> {
     gemm_tune_key_for_execution(
         pool.workers(),
         pool.workers(),
+        envelope.limit_bytes,
         &pool.placement_identity(),
         m,
         n,
@@ -613,6 +775,7 @@ pub fn gemm_tune_key_with_pool(
 fn gemm_tune_key_for_execution(
     requested_threads: usize,
     thread_budget: usize,
+    memory_limit_bytes: u64,
     placement: &str,
     m: usize,
     n: usize,
@@ -621,6 +784,7 @@ fn gemm_tune_key_for_execution(
     gemm_tune_key_for_execution_schema(
         requested_threads,
         thread_budget,
+        memory_limit_bytes,
         placement,
         m,
         n,
@@ -633,6 +797,7 @@ fn gemm_tune_key_for_execution(
 fn gemm_tune_key_for_execution_schema(
     requested_threads: usize,
     thread_budget: usize,
+    memory_limit_bytes: u64,
     placement: &str,
     m: usize,
     n: usize,
@@ -648,6 +813,7 @@ fn gemm_tune_key_for_execution_schema(
     let execution = GemmExecutionIdentity::new(
         requested_threads,
         thread_budget,
+        memory_limit_bytes,
         probe_dims(m, n, k),
         fs_la::gemm_execution_tier(),
         placement,
@@ -665,6 +831,33 @@ fn gemm_tune_key_for_execution_schema(
 fn checked_product(label: &str, lhs: usize, rhs: usize) -> usize {
     lhs.checked_mul(rhs)
         .unwrap_or_else(|| panic!("{label} extent overflow: {lhs} * {rhs}"))
+}
+
+fn try_filled_buffer<T: Copy>(
+    len: usize,
+    value: T,
+    what: &'static str,
+    envelope: fs_la::GemmMemoryEnvelope,
+    peak_used_bytes: u128,
+) -> Result<Vec<T>, GemmTuneError> {
+    let requested_bytes = (len as u128)
+        .checked_mul(core::mem::size_of::<T>() as u128)
+        .ok_or(GemmTuneError::MemoryPlanOverflow {
+            what,
+            limit_bytes: envelope.limit_bytes,
+        })?;
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(len)
+        .map_err(|_| GemmTuneError::MemoryRefused {
+            what,
+            requested_bytes,
+            limit_bytes: envelope.limit_bytes,
+            peak_used_bytes,
+            report: None,
+        })?;
+    values.resize(len, value);
+    Ok(values)
 }
 
 /// Mirror fs-la's public contiguous-slice precondition before consulting or
@@ -739,15 +932,41 @@ fn measure_candidates<R>(
     gate: &CancelGate,
     candidates: &[SweepCandidate],
     output_len: usize,
+    envelope: fs_la::GemmMemoryEnvelope,
+    base_used_bytes: u128,
     mut run: R,
 ) -> Result<SweepResult, GemmTuneError>
 where
     R: FnMut(&SweepCandidate, &mut [f64]) -> Result<(), GemmTuneError>,
 {
-    let mut c = vec![0.0f64; output_len];
+    let output_bytes = (output_len as u128)
+        .checked_mul(core::mem::size_of::<u64>() as u128)
+        .ok_or(GemmTuneError::MemoryPlanOverflow {
+            what: "tune-probe-output",
+            limit_bytes: envelope.limit_bytes,
+        })?;
+    let mut c = try_filled_buffer(
+        output_len,
+        0.0_f64,
+        "tune-probe-c",
+        envelope,
+        base_used_bytes,
+    )?;
+    let mut reference_bits = try_filled_buffer(
+        output_len,
+        0_u64,
+        "tune-probe-reference",
+        envelope,
+        base_used_bytes
+            .checked_add(output_bytes)
+            .ok_or(GemmTuneError::MemoryPlanOverflow {
+                what: "tune-probe-reference-peak",
+                limit_bytes: envelope.limit_bytes,
+            })?,
+    )?;
     let mut observations = Vec::with_capacity(candidates.len());
     let mut ranked: Vec<(u64, usize, GemmBlockPlan)> = Vec::with_capacity(candidates.len());
-    let mut reference_bits: Option<Vec<u64>> = None;
+    let mut reference_initialized = false;
     for (index, candidate) in candidates.iter().enumerate() {
         if gate.is_requested() {
             return Err(cancelled_before_compute());
@@ -770,16 +989,20 @@ where
             // not a proof of bit-neutrality and would also hide which repeat
             // drifted. `to_bits` intentionally distinguishes signed zero and
             // every NaN payload.
-            let bits: Vec<u64> = c.iter().map(|value| value.to_bits()).collect();
-            match &reference_bits {
-                None => reference_bits = Some(bits),
-                Some(expected) if bits != *expected => {
-                    return Err(GemmTuneError::BitDrift {
-                        candidate: candidate.plan.canonical(),
-                        repeat,
-                    });
+            if !reference_initialized {
+                for (dst, value) in reference_bits.iter_mut().zip(&c) {
+                    *dst = value.to_bits();
                 }
-                Some(_) => {}
+                reference_initialized = true;
+            } else if !reference_bits
+                .iter()
+                .zip(&c)
+                .all(|(&expected, value)| expected == value.to_bits())
+            {
+                return Err(GemmTuneError::BitDrift {
+                    candidate: candidate.plan.canonical(),
+                    repeat,
+                });
             }
         }
         let best = samples_ns.iter().copied().min().unwrap_or(u64::MAX);
@@ -810,6 +1033,7 @@ fn run_sweep(
     m: usize,
     n: usize,
     k: usize,
+    envelope: fs_la::GemmMemoryEnvelope,
 ) -> Result<SweepResult, GemmTuneError> {
     // Probe at the CALLER's dims (capped): the oracle lane showed that
     // probing at the class's power-of-two bucket flips winners — at
@@ -818,35 +1042,89 @@ fn run_sweep(
     // class, but the exact capped probe is also part of the scoped key so a
     // neighboring caller cannot silently inherit different evidence.
     let [pm, pn, pk] = probe_dims(m, n, k);
-    let mut a = vec![0.0f64; pm * pk];
-    let mut b = vec![0.0f64; pk * pn];
+    let probe_dims_u64 = [pm, pn, pk]
+        .map(|extent| u64::try_from(extent).expect("capped GEMM probe dimensions fit u64"));
+    let probe_buffer_bytes =
+        probe_buffer_bytes_for_dims(probe_dims_u64).ok_or(GemmTuneError::MemoryPlanOverflow {
+            what: "tune-probe-buffers",
+            limit_bytes: envelope.limit_bytes,
+        })?;
+    if probe_buffer_bytes > u128::from(envelope.limit_bytes) {
+        return Err(GemmTuneError::MemoryRefused {
+            what: "tune-probe-envelope",
+            requested_bytes: probe_buffer_bytes,
+            limit_bytes: envelope.limit_bytes,
+            peak_used_bytes: 0,
+            report: None,
+        });
+    }
+    let child_limit_bytes = if envelope == fs_la::GemmMemoryEnvelope::UNBOUNDED {
+        u64::MAX
+    } else {
+        u64::try_from(u128::from(envelope.limit_bytes) - probe_buffer_bytes)
+            .expect("bounded probe preflight leaves a u64 child envelope")
+    };
+    let child_envelope = fs_la::GemmMemoryEnvelope {
+        limit_bytes: child_limit_bytes,
+    };
+
+    let a_len = checked_product("tune probe A", pm, pk);
+    let b_len = checked_product("tune probe B", pk, pn);
+    let a_bytes = (a_len as u128)
+        .checked_mul(core::mem::size_of::<f64>() as u128)
+        .ok_or(GemmTuneError::MemoryPlanOverflow {
+            what: "tune-probe-a",
+            limit_bytes: envelope.limit_bytes,
+        })?;
+    let b_bytes = (b_len as u128)
+        .checked_mul(core::mem::size_of::<f64>() as u128)
+        .ok_or(GemmTuneError::MemoryPlanOverflow {
+            what: "tune-probe-b",
+            limit_bytes: envelope.limit_bytes,
+        })?;
+    let ab_bytes = a_bytes
+        .checked_add(b_bytes)
+        .ok_or(GemmTuneError::MemoryPlanOverflow {
+            what: "tune-probe-a-plus-b",
+            limit_bytes: envelope.limit_bytes,
+        })?;
+    let mut a = try_filled_buffer(a_len, 0.0_f64, "tune-probe-a", envelope, 0)?;
+    let mut b = try_filled_buffer(b_len, 0.0_f64, "tune-probe-b", envelope, a_bytes)?;
     probe_fill(&mut a, 0xA);
     probe_fill(&mut b, 0xB);
     let candidates = effective_sweep_candidates(pm, pn)?;
     let mut sweep_ordinal = 0_u64;
-    measure_candidates(gate, &candidates, pm * pn, |candidate, c| {
-        let sweep_run = declared_run.derive(GEMM_SWEEP_RUN_DOMAIN, sweep_ordinal);
-        sweep_ordinal = sweep_ordinal.checked_add(1).ok_or_else(|| TuneError {
-            detail: "GEMM sweep run ordinal exhausted".to_string(),
-        })?;
-        fs_la::gemm_f64_parallel_with_pool_declared(
-            pm,
-            pn,
-            pk,
-            1.0,
-            &a,
-            &b,
-            0.0,
-            c,
-            pool,
-            candidate.effective_mc,
-            candidate.effective_nc,
-            gate,
-            sweep_run,
-        )
-        .map(|_| ())
-        .map_err(GemmTuneError::from)
-    })
+    measure_candidates(
+        gate,
+        &candidates,
+        checked_product("tune probe C", pm, pn),
+        envelope,
+        ab_bytes,
+        |candidate, c| {
+            let sweep_run = declared_run.derive(GEMM_SWEEP_RUN_DOMAIN, sweep_ordinal);
+            sweep_ordinal = sweep_ordinal.checked_add(1).ok_or_else(|| TuneError {
+                detail: "GEMM sweep run ordinal exhausted".to_string(),
+            })?;
+            fs_la::gemm_f64_parallel_with_pool_budgeted(
+                pm,
+                pn,
+                pk,
+                1.0,
+                &a,
+                &b,
+                0.0,
+                c,
+                pool,
+                candidate.effective_mc,
+                candidate.effective_nc,
+                gate,
+                sweep_run,
+                child_envelope,
+            )
+            .map(|_| ())
+            .map_err(|error| gemm_error_with_session_memory(error, envelope, probe_buffer_bytes))
+        },
+    )
 }
 
 /// Persist a validated measured row before installing it in the process-local
@@ -862,7 +1140,7 @@ where
     P: FnOnce(&ValidatedGemmTuneRow) -> Result<(), GemmTuneError>,
 {
     let prepared = tuner.prepare_gemm_row(key, sweep.winner, sweep.evidence)?;
-    let validated = ValidatedGemmTuneRow::from_prepared(&prepared, tuner.machine());
+    let validated = ValidatedGemmTuneRow::from_prepared(&prepared, tuner.machine())?;
     persist(&validated)?;
     let winner = sweep.winner;
     tuner.commit_gemm_row(prepared)?;
@@ -881,7 +1159,7 @@ fn adopt_cached_row(
     if params != prepared.params_json() {
         return Ok(None);
     }
-    let validated = ValidatedGemmTuneRow::from_prepared(&prepared, tuner.machine());
+    let validated = ValidatedGemmTuneRow::from_prepared(&prepared, tuner.machine())?;
     tuner.commit_gemm_row(prepared)?;
     Ok(Some(validated))
 }
@@ -938,8 +1216,51 @@ pub fn gemm_f64_session(
     beta: f64,
     c: &mut [f64],
 ) -> Result<GemmDispatch, GemmTuneError> {
+    gemm_f64_session_budgeted(
+        tuner,
+        cache,
+        gate,
+        threads,
+        m,
+        n,
+        k,
+        alpha,
+        a,
+        b,
+        beta,
+        c,
+        fs_la::GemmMemoryEnvelope::UNBOUNDED,
+    )
+}
+
+/// As [`gemm_f64_session`], under an explicit memory envelope bound into tune
+/// identity and every numerical dispatch.
+///
+/// # Errors
+/// As [`gemm_f64_session`], plus structured memory refusal.
+///
+/// # Panics
+/// As [`gemm_f64_session`].
+#[allow(clippy::too_many_arguments)]
+pub fn gemm_f64_session_budgeted(
+    tuner: &mut Tuner,
+    cache: GemmTuneCache<'_>,
+    gate: &CancelGate,
+    threads: usize,
+    m: usize,
+    n: usize,
+    k: usize,
+    alpha: f64,
+    a: &[f64],
+    b: &[f64],
+    beta: f64,
+    c: &mut [f64],
+    envelope: fs_la::GemmMemoryEnvelope,
+) -> Result<GemmDispatch, GemmTuneError> {
     let pool = TilePool::for_host(threads, SESSION_GEMM_POOL_SEED);
-    gemm_f64_session_with_pool(tuner, cache, &pool, gate, m, n, k, alpha, a, b, beta, c)
+    gemm_f64_session_with_pool_budgeted(
+        tuner, cache, &pool, gate, m, n, k, alpha, a, b, beta, c, envelope,
+    )
 }
 
 /// The production autotuned f64 GEMM on a caller-owned, reusable TilePool.
@@ -967,7 +1288,47 @@ pub fn gemm_f64_session_with_pool(
     beta: f64,
     c: &mut [f64],
 ) -> Result<GemmDispatch, GemmTuneError> {
-    gemm_f64_session_with_pool_declared(
+    gemm_f64_session_with_pool_budgeted(
+        tuner,
+        cache,
+        pool,
+        gate,
+        m,
+        n,
+        k,
+        alpha,
+        a,
+        b,
+        beta,
+        c,
+        fs_la::GemmMemoryEnvelope::UNBOUNDED,
+    )
+}
+
+/// As [`gemm_f64_session_with_pool`], under an explicit memory envelope.
+///
+/// # Errors
+/// As [`gemm_f64_session_with_pool`], plus structured memory refusal.
+///
+/// # Panics
+/// As [`gemm_f64_session_with_pool`].
+#[allow(clippy::too_many_arguments)]
+pub fn gemm_f64_session_with_pool_budgeted(
+    tuner: &mut Tuner,
+    cache: GemmTuneCache<'_>,
+    pool: &TilePool,
+    gate: &CancelGate,
+    m: usize,
+    n: usize,
+    k: usize,
+    alpha: f64,
+    a: &[f64],
+    b: &[f64],
+    beta: f64,
+    c: &mut [f64],
+    envelope: fs_la::GemmMemoryEnvelope,
+) -> Result<GemmDispatch, GemmTuneError> {
+    gemm_f64_session_with_pool_declared_budgeted(
         tuner,
         cache,
         pool,
@@ -981,6 +1342,7 @@ pub fn gemm_f64_session_with_pool(
         b,
         beta,
         c,
+        envelope,
     )
 }
 
@@ -1010,6 +1372,49 @@ pub fn gemm_f64_session_with_pool_declared(
     beta: f64,
     c: &mut [f64],
 ) -> Result<GemmDispatch, GemmTuneError> {
+    gemm_f64_session_with_pool_declared_budgeted(
+        tuner,
+        cache,
+        pool,
+        gate,
+        declared_run,
+        m,
+        n,
+        k,
+        alpha,
+        a,
+        b,
+        beta,
+        c,
+        fs_la::GemmMemoryEnvelope::UNBOUNDED,
+    )
+}
+
+/// As [`gemm_f64_session_with_pool_declared`], under an explicit memory
+/// envelope bound into tune identity, sweep admission, and final dispatch.
+///
+/// # Errors
+/// As [`gemm_f64_session_with_pool_declared`], plus structured memory refusal.
+///
+/// # Panics
+/// As [`gemm_f64_session_with_pool_declared`].
+#[allow(clippy::too_many_arguments)]
+pub fn gemm_f64_session_with_pool_declared_budgeted(
+    tuner: &mut Tuner,
+    cache: GemmTuneCache<'_>,
+    pool: &TilePool,
+    gate: &CancelGate,
+    declared_run: fs_exec::RunId,
+    m: usize,
+    n: usize,
+    k: usize,
+    alpha: f64,
+    a: &[f64],
+    b: &[f64],
+    beta: f64,
+    c: &mut [f64],
+    envelope: fs_la::GemmMemoryEnvelope,
+) -> Result<GemmDispatch, GemmTuneError> {
     // Public slice/extent preconditions are checked before tier resolution,
     // cache reads, sweeps, rows, or decisions. Invalid work cannot poison the
     // tuning state and `c` is still untouched when this panics.
@@ -1018,7 +1423,7 @@ pub fn gemm_f64_session_with_pool_declared(
         return Err(cancelled_before_compute());
     }
 
-    let key = gemm_tune_key_with_pool(pool, m, n, k)?;
+    let key = gemm_tune_key_with_pool_budgeted(pool, m, n, k, envelope)?;
     let kernel = key.kernel().to_string();
     let shape_class = gemm_shape_class(m, n, k);
     let mut swept = false;
@@ -1030,7 +1435,7 @@ pub fn gemm_f64_session_with_pool_declared(
     // documented cold plan without reading or mutating tune state.
     if !fs_la::gemm_tuning_is_effective(m, n, k, alpha, pool.workers()) {
         let plan = GemmBlockPlan::COLD_START;
-        let run = fs_la::gemm_f64_parallel_with_pool_declared(
+        let run = fs_la::gemm_f64_parallel_with_pool_budgeted(
             m,
             n,
             k,
@@ -1044,6 +1449,7 @@ pub fn gemm_f64_session_with_pool_declared(
             n.min(plan.nc_cap).max(1),
             gate,
             declared_run,
+            envelope,
         )
         .map_err(GemmTuneError::from)?;
         return Ok(GemmDispatch {
@@ -1077,7 +1483,7 @@ pub fn gemm_f64_session_with_pool_declared(
             }
         }
         if validated_tune_row.is_none() {
-            let sweep = run_sweep(gate, pool, declared_run, m, n, k)?;
+            let sweep = run_sweep(gate, pool, declared_run, m, n, k, envelope)?;
             swept = true;
             let (_, validated) = install_sweep_row(tuner, &key, sweep, |row| match cache {
                 GemmTuneCache::ReadWrite(ledger) => row.replace_cache_row(ledger),
@@ -1093,7 +1499,7 @@ pub fn gemm_f64_session_with_pool_declared(
     }
     let decision = tuner.prepare_gemm_decision(&key);
     let (plan, source, run) = execute_prepared_decision(tuner, decision, |plan| {
-        fs_la::gemm_f64_parallel_with_pool_declared(
+        fs_la::gemm_f64_parallel_with_pool_budgeted(
             m,
             n,
             k,
@@ -1107,6 +1513,7 @@ pub fn gemm_f64_session_with_pool_declared(
             n.min(plan.nc_cap).max(1),
             gate,
             declared_run,
+            envelope,
         )
         .map_err(GemmTuneError::from)
     })?;
@@ -1128,10 +1535,12 @@ mod tests {
 
     #[test]
     fn tuner_schema_bump_separates_durable_keys() {
-        let v1 = gemm_tune_key_for_execution_schema(4, 4, "test-placement", 512, 640, 512, 1)
-            .expect("schema-v1 key");
-        let v2 = gemm_tune_key_for_execution_schema(4, 4, "test-placement", 512, 640, 512, 2)
-            .expect("schema-v2 key");
+        let v1 =
+            gemm_tune_key_for_execution_schema(4, 4, u64::MAX, "test-placement", 512, 640, 512, 1)
+                .expect("schema-v1 key");
+        let v2 =
+            gemm_tune_key_for_execution_schema(4, 4, u64::MAX, "test-placement", 512, 640, 512, 2)
+                .expect("schema-v2 key");
 
         assert_ne!(v1.kernel(), v2.kernel());
         assert_eq!(v1.shape_class(), v2.shape_class());
@@ -1142,6 +1551,17 @@ mod tests {
     #[test]
     fn execution_receipt_excludes_schedule_measurements() {
         let operation_run = fs_exec::RunId(7);
+        let no_product = fs_la::GemmRunReport {
+            declared_run: operation_run,
+            completed_tiles: 0,
+            total_tiles: 0,
+            pool_runs: Vec::new(),
+            memory: fs_la::GemmMemoryReport::default(),
+        };
+        assert!(
+            GemmExecutionReceipt::from_report(&no_product).is_complete(),
+            "a successful no-product dispatch is complete without panel traversals"
+        );
         let base_panel = fs_exec::RunReport {
             kernel: "fs-la/gemm-f64-m-band-v1",
             mode: "deterministic",
@@ -1158,24 +1578,35 @@ mod tests {
             completed_tiles: 32,
             total_tiles: 32,
             pool_runs: vec![base_panel.clone()],
+            memory: fs_la::GemmMemoryReport::default(),
         };
         let mut noisy_panel = base_panel;
         noisy_panel.steals = 99;
         noisy_panel.cross_ccd_steals = 17;
         noisy_panel.cancel_latencies_ns = vec![3, 5, 8];
         noisy_panel.tiles_by_worker = vec![4, 0];
-        let second = fs_la::GemmRunReport {
+        let mut second = fs_la::GemmRunReport {
             declared_run: operation_run,
             completed_tiles: 32,
             total_tiles: 32,
             pool_runs: vec![noisy_panel],
+            memory: fs_la::GemmMemoryReport::default(),
         };
+        second.memory.peak_used_bytes = 999;
+        second.memory.refused_bytes = 17;
         assert_eq!(
             GemmExecutionReceipt::from_report(&first),
             GemmExecutionReceipt::from_report(&second),
             "steal, latency, and worker-distribution envelopes are not replay identity"
         );
         assert!(GemmExecutionReceipt::from_report(&first).is_complete());
+        let mut different_memory_plan = second.clone();
+        different_memory_plan.memory.limit_bytes = 1 << 20;
+        assert_ne!(
+            GemmExecutionReceipt::from_report(&first),
+            GemmExecutionReceipt::from_report(&different_memory_plan),
+            "the declared memory plan is replay identity"
+        );
         let mut different_run = first;
         different_run.pool_runs[0].declared_run = fs_exec::RunId(1);
         assert_ne!(
@@ -1204,21 +1635,28 @@ mod tests {
         assert!(candidates.len() >= 2);
         for drift_repeat in 1..=SWEEP_SAMPLES {
             let mut call = 0usize;
-            let error = measure_candidates(&CancelGate::new(), &candidates, 2, |_, c| {
-                let candidate = call / SWEEP_SAMPLES;
-                let repeat = call % SWEEP_SAMPLES + 1;
-                call += 1;
-                c[0] = 0.0;
-                c[1] = f64::from_bits(0x7ff8_0000_0000_0001);
-                if candidate == 1 && repeat == drift_repeat {
-                    // Both changes are invisible to ordinary floating-point
-                    // equality: signed zero compares equal and NaNs compare
-                    // unequal regardless of payload. The contract is bits.
-                    c[0] = -0.0;
-                    c[1] = f64::from_bits(0x7ff8_0000_0000_0002);
-                }
-                Ok(())
-            })
+            let error = measure_candidates(
+                &CancelGate::new(),
+                &candidates,
+                2,
+                fs_la::GemmMemoryEnvelope::UNBOUNDED,
+                0,
+                |_, c| {
+                    let candidate = call / SWEEP_SAMPLES;
+                    let repeat = call % SWEEP_SAMPLES + 1;
+                    call += 1;
+                    c[0] = 0.0;
+                    c[1] = f64::from_bits(0x7ff8_0000_0000_0001);
+                    if candidate == 1 && repeat == drift_repeat {
+                        // Both changes are invisible to ordinary floating-point
+                        // equality: signed zero compares equal and NaNs compare
+                        // unequal regardless of payload. The contract is bits.
+                        c[0] = -0.0;
+                        c[1] = f64::from_bits(0x7ff8_0000_0000_0002);
+                    }
+                    Ok(())
+                },
+            )
             .expect_err("the injected repeat must fail closed");
             assert!(
                 matches!(
@@ -1258,11 +1696,18 @@ mod tests {
         );
 
         let mut executed = Vec::new();
-        measure_candidates(&CancelGate::new(), &wide, 1, |candidate, c| {
-            executed.push((candidate.effective_mc, candidate.effective_nc));
-            c[0] = 1.0;
-            Ok(())
-        })
+        measure_candidates(
+            &CancelGate::new(),
+            &wide,
+            1,
+            fs_la::GemmMemoryEnvelope::UNBOUNDED,
+            0,
+            |candidate, c| {
+                executed.push((candidate.effective_mc, candidate.effective_nc));
+                c[0] = 1.0;
+                Ok(())
+            },
+        )
         .expect("synthetic sweep");
         for pair in wide_pairs {
             assert_eq!(
@@ -1280,11 +1725,18 @@ mod tests {
     fn cancellation_between_repeats_returns_no_partial_evidence() {
         let candidates = effective_sweep_candidates(320, 2048).expect("candidate lattice");
         let gate = CancelGate::new();
-        let error = measure_candidates(&gate, &candidates, 1, |_, c| {
-            c[0] = 1.0;
-            gate.request();
-            Ok(())
-        })
+        let error = measure_candidates(
+            &gate,
+            &candidates,
+            1,
+            fs_la::GemmMemoryEnvelope::UNBOUNDED,
+            0,
+            |_, c| {
+                c[0] = 1.0;
+                gate.request();
+                Ok(())
+            },
+        )
         .expect_err("the post-repeat poll must observe cancellation");
         assert!(matches!(
             error,
@@ -1365,6 +1817,12 @@ mod tests {
         let mut tampered = sealed.clone();
         tampered.measured.push(' ');
         field_tampers.push(tampered);
+        let mut tampered = sealed.clone();
+        tampered.memory_limit_bytes ^= 1;
+        field_tampers.push(tampered);
+        let mut tampered = sealed.clone();
+        tampered.probe_buffer_bytes ^= 1;
+        field_tampers.push(tampered);
         assert!(
             field_tampers
                 .iter()
@@ -1397,6 +1855,7 @@ mod tests {
                     completed_tiles: 7,
                     total_tiles: 19,
                     pool_runs: Vec::new(),
+                    memory: fs_la::GemmMemoryReport::default(),
                 },
             }))
         })
