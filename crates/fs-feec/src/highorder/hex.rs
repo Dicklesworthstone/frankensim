@@ -87,6 +87,7 @@ impl TensorSpace {
     /// axis contractions per term.
     #[must_use]
     pub fn apply_stiffness(&self, u: &[f64]) -> Vec<f64> {
+        use super::fma::apply_mono_dispatch;
         assert_eq!(u.len(), self.ndof(), "apply_stiffness length mismatch");
         let mut y = vec![0.0f64; self.ndof()];
         // Dispatch ONCE per apply to a const-P element loop for the
@@ -103,7 +104,6 @@ impl TensorSpace {
         // (baseline x86 lowers mul_add to a per-element libm CALL —
         // measured 0.026 attainment); elsewhere identical codegen to
         // calling the body directly. Bit-identical either way.
-        use super::fma::apply_mono_dispatch;
         match self.r + 1 {
             2 => apply_mono_dispatch::<2>(self, u, &mut y),
             3 => apply_mono_dispatch::<3>(self, u, &mut y),
@@ -407,32 +407,34 @@ impl TensorSpace {
 // `inline(always)`: these are the innermost hot kernels of the whole
 // apply and MUST fuse into the monomorphized element loop — measured
 // on the perf lane, not assumed.
+// REGISTER-ARRAY ACCUMULATORS (bead cwjn, the a55x handoff's lead): each
+// output row accumulates in a local `[f64; P]` and stores ONCE, instead
+// of fma-ing through `&mut dst` memory. Bit-identical per element — the
+// chain is still "+0.0, then ascending-l mul_add" — but the value-array
+// form removes the load/store round-trip and every aliasing question
+// between passes, which is exactly what x86 SLP needs to pack the
+// unrolled const-P loops into ymm ops (the a55x objdump found all 69
+// vfmadds SCALAR on x86 in the through-memory form, while aarch64
+// autovectorized it). The `super::fma` target_feature capsule one level
+// up keeps mul_add an inline vfmadd on x86.
+//
+// `inline(always)`: these are the innermost hot kernels of the whole
+// apply and MUST fuse into the monomorphized element loop — measured
+// on the perf lane, not assumed.
 #[allow(clippy::inline_always)]
 #[inline(always)]
 fn contract_x_p<const P: usize>(a: &[f64], src: &[f64], dst: &mut [f64]) {
-    // Bead a55x, MEASURED both ways: raw f64::mul_add lowers to a
-    // PER-ELEMENT libm fma() call on baseline x86-64 (no compile-time
-    // FMA — a 28× per-core deficit on the 5995WX), so x86 routes rows
-    // through the fs-simd axpy capsule (runtime AVX2+FMA, one fused
-    // op per element in the same ascending order — bit-identical by
-    // the fs-simd contract). aarch64 KEEPS the plain loops: mul_add
-    // is a native inlined fma there, and routing 4–8-element rows
-    // through an indirect call measured 4× SLOWER (17.2 → 4.2
-    // GFLOP/s) — the dispatch must never cost more than it saves.
-    #[cfg(target_arch = "x86_64")]
-    let axpy = fs_simd::ops().axpy;
-    dst.fill(0.0);
     for i in 0..P {
-        let (dro, a_row) = (i * P * P, &a[i * P..(i + 1) * P]);
-        for (l, &ail) in a_row.iter().enumerate() {
-            let srow = &src[l * P * P..(l + 1) * P * P];
-            let drow = &mut dst[dro..dro + P * P];
-            #[cfg(target_arch = "x86_64")]
-            axpy(ail, srow, drow);
-            #[cfg(not(target_arch = "x86_64"))]
-            for (d, &s) in drow.iter_mut().zip(srow) {
-                *d = ail.mul_add(s, *d);
+        let a_row = &a[i * P..(i + 1) * P];
+        for j in 0..P {
+            let mut acc = [0.0f64; P];
+            for (l, &ail) in a_row.iter().enumerate() {
+                let srow = &src[(l * P + j) * P..(l * P + j + 1) * P];
+                for (av, &s) in acc.iter_mut().zip(srow) {
+                    *av = ail.mul_add(s, *av);
+                }
             }
+            dst[(i * P + j) * P..(i * P + j + 1) * P].copy_from_slice(&acc);
         }
     }
 }
@@ -440,25 +442,18 @@ fn contract_x_p<const P: usize>(a: &[f64], src: &[f64], dst: &mut [f64]) {
 #[allow(clippy::inline_always)]
 #[inline(always)]
 fn contract_y_p<const P: usize>(a: &[f64], src: &[f64], dst: &mut [f64]) {
-    // x86-only axpy routing (bead a55x — see contract_x_p).
-    #[cfg(target_arch = "x86_64")]
-    let axpy = fs_simd::ops().axpy;
-    dst.fill(0.0);
     for i in 0..P {
+        let sblock = &src[i * P * P..(i + 1) * P * P];
         for j in 0..P {
-            let dro = (i * P + j) * P;
             let a_row = &a[j * P..(j + 1) * P];
+            let mut acc = [0.0f64; P];
             for (l, &ajl) in a_row.iter().enumerate() {
-                let sro = (i * P + l) * P;
-                let srow = &src[sro..sro + P];
-                let drow = &mut dst[dro..dro + P];
-                #[cfg(target_arch = "x86_64")]
-                axpy(ajl, srow, drow);
-                #[cfg(not(target_arch = "x86_64"))]
-                for (d, &s) in drow.iter_mut().zip(srow) {
-                    *d = ajl.mul_add(s, *d);
+                let srow = &sblock[l * P..(l + 1) * P];
+                for (av, &s) in acc.iter_mut().zip(srow) {
+                    *av = ajl.mul_add(s, *av);
                 }
             }
+            dst[(i * P + j) * P..(i * P + j + 1) * P].copy_from_slice(&acc);
         }
     }
 }
@@ -467,34 +462,29 @@ fn contract_y_p<const P: usize>(a: &[f64], src: &[f64], dst: &mut [f64]) {
 #[inline(always)]
 fn contract_z_p<const P: usize>(a: &[f64], src: &[f64], dst: &mut [f64]) {
     // Transpose the 1D matrix (values unchanged) so the k loop is
-    // stride-1 in both the matrix and dst; each output still starts at
-    // 0.0 and accumulates over ascending l — the same op sequence per
-    // element as the k-inner fallback, hence bit-identical.
+    // stride-1 in both the matrix and the accumulator; each output
+    // still starts at 0.0 and accumulates over ascending l — the same
+    // op sequence per element as the k-inner fallback, bit-identical.
     let mut at = [0.0f64; 64]; // P <= 8, so P*P <= 64
     for k in 0..P {
         for l in 0..P {
             at[l * P + k] = a[k * P + l];
         }
     }
-    // x86-only axpy routing (bead a55x — see contract_x_p).
-    #[cfg(target_arch = "x86_64")]
-    let axpy = fs_simd::ops().axpy;
     for (drow, srow) in dst
         .as_chunks_mut::<P>()
         .0
         .iter_mut()
         .zip(src.as_chunks::<P>().0)
     {
-        drow.fill(0.0);
+        let mut acc = [0.0f64; P];
         for (l, &sl) in srow.iter().enumerate() {
             let arow = &at[l * P..(l + 1) * P];
-            #[cfg(target_arch = "x86_64")]
-            axpy(sl, arow, drow);
-            #[cfg(not(target_arch = "x86_64"))]
-            for (d, &av) in drow.iter_mut().zip(arow) {
-                *d = av.mul_add(sl, *d);
+            for (av, &av_a) in acc.iter_mut().zip(arow) {
+                *av = av_a.mul_add(sl, *av);
             }
         }
+        *drow = acc;
     }
 }
 
