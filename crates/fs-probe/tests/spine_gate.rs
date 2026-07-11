@@ -12,7 +12,9 @@ use fs_evidence::falsify::FalsifierRegistry;
 use fs_evidence::{Color, IntervalOp, NumericalCertificate, ValidityDomain};
 use fs_iface::{CouplingGraph, CouplingRole, PairingRegistry, SpaceType};
 use fs_ledger::tombstone::{Descriptor, ExplorationVerdict, TombstoneIndex};
-use fs_ledger::{ColorGraph, SourceOrigin};
+use fs_ledger::{
+    ColorGraph, PolicyDecision, SourceOrigin, SourceOriginRequest, SourceOriginVerifier, hash_bytes,
+};
 use fs_opt::{DeltaPerturbationStep, Endpoint, GoodhartGuard};
 use fs_probe::{BudgetPie, ErrorContribution};
 use fs_qty::{Dims, QtyAny};
@@ -22,6 +24,19 @@ fn verdict(case: &str, detail: &str) {
         "{{\"suite\":\"spine-gate\",\"case\":\"{case}\",\"verdict\":\"pass\",\
          \"detail\":\"{detail}\"}}"
     );
+}
+
+struct FixtureSourceVerifier(Vec<u8>);
+
+impl SourceOriginVerifier for FixtureSourceVerifier {
+    fn verify(&self, request: &SourceOriginRequest<'_>) -> PolicyDecision {
+        let fingerprint = hash_bytes(b"fs-probe/spine-gate/source-policy/v1");
+        if self.0 == request.canonical_bytes() {
+            PolicyDecision::accept(fingerprint)
+        } else {
+            PolicyDecision::reject(fingerprint)
+        }
+    }
 }
 
 /// EXIT TEST 1 — LAUNDERING: an adversarial pipeline that attempts to
@@ -39,15 +54,17 @@ fn spine_exit_1_laundering_refused() {
             },
         )
         .expect("Estimated source");
+    let mesh_color = Color::Verified { lo: 0.9, hi: 1.1 };
+    let mesh_origin = SourceOrigin::Certificate {
+        producer: "fs-probe/spine-gate".to_string(),
+        certificate_hash: hash_bytes(b"fs-probe/spine-gate/mesh-integral-certificate"),
+        certificate: NumericalCertificate::enclosure(0.9, 1.1),
+    };
+    let mesh_verifier = FixtureSourceVerifier(
+        SourceOriginRequest::new("mesh-integral", &mesh_color, &mesh_origin).canonical_bytes(),
+    );
     let mesh = graph
-        .source_with_origin(
-            "mesh-integral",
-            &Color::Verified { lo: 0.9, hi: 1.1 },
-            SourceOrigin::Certificate {
-                producer: "fs-probe/spine-gate".to_string(),
-                certificate: NumericalCertificate::enclosure(0.9, 1.1),
-            },
-        )
+        .source_with_origin("mesh-integral", &mesh_color, mesh_origin, &mesh_verifier)
         .expect("mesh enclosure mints Verified");
     // The adversarial upgrade: claim Verified from an Estimated parent.
     let laundered = graph.derive(

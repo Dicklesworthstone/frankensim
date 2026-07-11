@@ -217,9 +217,9 @@ fn epi_e2e_battery() {
         .expect("derivation runs");
     let node = graph.node(demoted).expect("demoted node");
     assert!(
-        matches!(node.color(), Color::Estimated { .. }),
+        matches!(node.declared_color_unverified(), Color::Estimated { .. }),
         "regime exit demotes: {:?}",
-        node.color()
+        node.declared_color_unverified()
     );
     assert_eq!(node.demotions().len(), 1, "the demotion event is recorded");
     log.log(

@@ -9,10 +9,11 @@ use fs_evidence::{
     check_regime, color_of, compose, verified_from,
 };
 use fs_ledger::{
-    ColorGraph, ColorStructureRejection, ColorWriteError, NoSourceOriginVerifier, NoWaiverVerifier,
-    PolicyDecision, SourceOrigin, SourceOriginRejection, SourceOriginRequest, SourceOriginVerifier,
-    WAIVER_SCOPE_COLOR_UPGRADE, WAIVER_SCOPE_SOURCE_COLOR, Waiver, WaiverDependency, WaiverGrant,
-    WaiverRejection, WaiverVerifier, hash_bytes,
+    ColorGraph, ColorStructureRejection, ColorWriteError, MAX_COLOR_PARENTS,
+    NoSourceOriginVerifier, NoWaiverVerifier, PolicyDecision, SourceOrigin, SourceOriginRejection,
+    SourceOriginRequest, SourceOriginVerifier, WAIVER_SCOPE_COLOR_UPGRADE,
+    WAIVER_SCOPE_SOURCE_COLOR, Waiver, WaiverDependency, WaiverGrant, WaiverRejection,
+    WaiverVerifier, hash_bytes,
 };
 use std::collections::BTreeMap as KeyMap;
 
@@ -488,8 +489,10 @@ fn col_003_laundering_gauntlet() {
             let a = ids[rng.below(ids.len() as u64) as usize];
             let b = ids[rng.below(ids.len() as u64) as usize];
             let derived_rank = {
-                let (ca, _) = check_regime(gg.node(a).expect("a").color(), &state);
-                let (cb, _) = check_regime(gg.node(b).expect("b").color(), &state);
+                let (ca, _) =
+                    check_regime(gg.node(a).expect("a").declared_color_unverified(), &state);
+                let (cb, _) =
+                    check_regime(gg.node(b).expect("b").declared_color_unverified(), &state);
                 compose(&ca, &cb, IntervalOp::Hull).rank()
             };
             // Claim strictly ABOVE what the parents support.
@@ -950,7 +953,7 @@ fn col_009_operation_identity_and_waivers_are_separated() {
             )
             .expect("single-parent derivation");
         let written = graph.node(node).expect("derived node");
-        (written.color().clone(), written.hash())
+        (written.declared_color_unverified().clone(), written.hash())
     };
     let (add_color, add_hash) = build(IntervalOp::Add);
     let (mul_color, mul_hash) = build(IntervalOp::Mul);
@@ -1284,7 +1287,10 @@ fn col_012_sources_are_minted_from_origin_evidence() {
     )
     .expect("matching enclosure mints Verified");
     assert_eq!(
-        graph.node(verified_id).expect("verified").color(),
+        graph
+            .node(verified_id)
+            .expect("verified")
+            .declared_color_unverified(),
         &verified
     );
     let authorized_origin = SourceOrigin::Certificate {
@@ -1400,7 +1406,10 @@ fn col_012_sources_are_minted_from_origin_evidence() {
     let validated_id = admitted_source(&mut graph, "anchored", &validated, anchor.clone())
         .expect("matching anchor mints Validated");
     assert_eq!(
-        graph.node(validated_id).expect("validated").color(),
+        graph
+            .node(validated_id)
+            .expect("validated")
+            .declared_color_unverified(),
         &validated
     );
     let anchor_verifier = TestSourceVerifier::authorizing("anchor-bound", &validated, &anchor);
@@ -2138,7 +2147,11 @@ fn col_016_waiver_dependencies_propagate_transitively() {
         vec![source_a, source_b]
     );
 
-    let merged_color = graph.node(merged).expect("merged").color().clone();
+    let merged_color = graph
+        .node(merged)
+        .expect("merged")
+        .declared_color_unverified()
+        .clone();
     let mut grant_c = signed_grant(
         secret,
         key_id,
@@ -2251,6 +2264,134 @@ fn col_016_waiver_dependencies_propagate_transitively() {
         .expect("multi-generation waiver union replays");
 }
 
+/// col-017 — authenticated metadata is structural data, not something an
+/// injected verifier may bless. Waiver taint also blocks the ordinary
+/// scientific-color accessor, and graph fan-in is bounded before append.
+#[test]
+#[allow(clippy::too_many_lines)] // one adversarial authority-shape matrix and taint proof
+fn col_017_waiver_shape_taint_and_resource_limits_fail_closed() {
+    let color = Color::Verified { lo: 1.0, hi: 2.0 };
+    let valid = signed_source_grant(17, "release-key", "waived-source", &color, 400);
+
+    let refusal = |grant: WaiverGrant| {
+        let mut graph = ColorGraph::new();
+        let result = graph.source_waived(
+            "waived-source",
+            color.clone(),
+            grant,
+            &PanickingWaiverVerifier,
+            200,
+        );
+        assert!(graph.nodes().is_empty(), "a refused grant must not append");
+        match result {
+            Err(ColorWriteError::WaiverRefused { rejection }) => rejection,
+            other => panic!("expected structural waiver refusal, got {other:?}"),
+        }
+    };
+
+    let mut malformed = valid.clone();
+    malformed.key_id.clear();
+    assert!(matches!(
+        refusal(malformed),
+        WaiverRejection::InvalidField {
+            field: "key_id",
+            reason: "blank"
+        }
+    ));
+
+    let mut malformed = valid.clone();
+    malformed.annotation.id = "TODO".to_string();
+    assert!(matches!(
+        refusal(malformed),
+        WaiverRejection::InvalidField {
+            field: "waiver_id",
+            reason: "placeholder"
+        }
+    ));
+
+    let mut malformed = valid.clone();
+    malformed.annotation.signer = "chief\u{202e}reenigne".to_string();
+    assert!(matches!(
+        refusal(malformed),
+        WaiverRejection::InvalidField {
+            field: "signer",
+            reason: "invalid-character"
+        }
+    ));
+
+    let mut malformed = valid.clone();
+    malformed.annotation.reason = "approved\nwithout a stable record".to_string();
+    assert!(matches!(
+        refusal(malformed),
+        WaiverRejection::InvalidField {
+            field: "reason",
+            reason: "control-character"
+        }
+    ));
+
+    let mut malformed = valid.clone();
+    malformed.signature.clear();
+    assert!(matches!(
+        refusal(malformed),
+        WaiverRejection::InvalidField {
+            field: "signature",
+            reason: "blank"
+        }
+    ));
+
+    let verifier = TestVerifier {
+        keys: KeyMap::from([("release-key".to_string(), 17)]),
+    };
+    let mut graph = ColorGraph::new();
+    let waived = graph
+        .source_waived("waived-source", color, valid, &verifier, 200)
+        .expect("well-formed signed grant");
+    let waived = graph.node(waived).expect("waived node");
+    assert!(matches!(
+        waived.declared_color_unverified(),
+        Color::Verified { .. }
+    ));
+    assert!(
+        waived.scientific_color().is_none(),
+        "waiver taint must not detach from the scientific accessor"
+    );
+
+    let clean = graph
+        .source(
+            "clean-estimate",
+            Color::Estimated {
+                estimator: "rom".to_string(),
+                dispersion: 0.1,
+            },
+        )
+        .expect("clean source");
+    assert!(
+        graph
+            .node(clean)
+            .expect("clean node")
+            .scientific_color()
+            .is_some()
+    );
+
+    let oversized_parents = vec![clean; MAX_COLOR_PARENTS + 1];
+    assert!(matches!(
+        graph.derive(
+            "oversized-fan-in",
+            &oversized_parents,
+            IntervalOp::Hull,
+            None,
+            &BTreeMap::new(),
+            None,
+        ),
+        Err(ColorWriteError::ResourceLimitExceeded {
+            resource: "parents",
+            limit: MAX_COLOR_PARENTS,
+            actual
+        }) if actual == MAX_COLOR_PARENTS + 1
+    ));
+    graph.verify_replay().expect("accepted prefix replays");
+}
+
 /// col-007 — color rows remain strict JSON when fail-closed demotion emits
 /// non-finite sentinels and caller-controlled metadata contains JSON syntax or
 /// control characters. Validation goes through the ledger's SQLite `json_valid`
@@ -2259,8 +2400,8 @@ fn col_016_waiver_dependencies_propagate_transitively() {
 fn col_007_color_rows_are_strict_json_under_hostile_metadata() {
     let build = || -> Vec<String> {
         let hostile = "meta\"\\\n\r\t\u{0007}";
-        let axis = format!("Re-{hostile}");
-        let dataset = format!("anchors-{hostile}");
+        let axis = "re-json".to_string();
+        let dataset = "anchors-json".to_string();
         let mut graph = ColorGraph::new();
         let validated = write_source(
             &mut graph,
@@ -2286,7 +2427,7 @@ fn col_007_color_rows_are_strict_json_under_hostile_metadata() {
             &mut graph,
             &format!("estimated-{hostile}"),
             Color::Estimated {
-                estimator: format!("surrogate-{hostile}"),
+                estimator: "surrogate-json".to_string(),
                 dispersion: f64::INFINITY,
             },
         );

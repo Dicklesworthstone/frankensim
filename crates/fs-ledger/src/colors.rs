@@ -24,6 +24,21 @@ use fs_evidence::{
 };
 use std::collections::BTreeMap;
 
+/// Maximum number of direct parents accepted by one color derivation.
+/// This also bounds lineage vectors presented to waiver verifiers.
+pub const MAX_COLOR_PARENTS: usize = 1_024;
+
+/// Maximum number of distinct historical waiver authorities copied into one
+/// node. The current inspectable closure representation is therefore bounded
+/// even before it is replaced by a compact authority registry.
+pub const MAX_WAIVER_DEPENDENCIES: usize = 1_024;
+
+const MAX_MACHINE_IDENTITY_BYTES: usize = 256;
+const MAX_WAIVER_REASON_BYTES: usize = 4_096;
+const MAX_WAIVER_SIGNATURE_BYTES: usize = 4_096;
+const MAX_CLAIMED_COLOR_BYTES: usize = 1_048_576;
+const MAX_VALIDITY_AXES: usize = 1_024;
+
 /// A human ANNOTATION (ticket, memo, name, rationale). It travels in
 /// provenance but AUTHORIZES NOTHING (bead qmao.1.1): presence of
 /// caller-created strings is not proof. The only path past a
@@ -469,6 +484,41 @@ fn identity_reason(value: &str) -> Option<&'static str> {
         Some("blank")
     } else if trimmed != value {
         Some("surrounding-whitespace")
+    } else if value.len() > MAX_MACHINE_IDENTITY_BYTES {
+        Some("too-long")
+    } else if value.chars().any(char::is_control) {
+        Some("control-character")
+    } else if !value.bytes().all(|byte| {
+        byte.is_ascii_alphanumeric()
+            || matches!(byte, b'-' | b'_' | b'.' | b'/' | b':' | b'@' | b'+' | b'=')
+    }) {
+        Some("invalid-character")
+    } else if is_placeholder_token(value) {
+        Some("placeholder")
+    } else {
+        None
+    }
+}
+
+fn human_text_reason(value: &str) -> Option<&'static str> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        Some("blank")
+    } else if trimmed != value {
+        Some("surrounding-whitespace")
+    } else if value.len() > MAX_WAIVER_REASON_BYTES {
+        Some("too-long")
+    } else if value.chars().any(|ch| {
+        ch.is_control()
+            || matches!(
+                ch,
+                '\u{200e}'
+                    | '\u{200f}'
+                    | '\u{202a}'..='\u{202e}'
+                    | '\u{2066}'..='\u{2069}'
+            )
+    }) {
+        Some("control-character")
     } else if is_placeholder_token(value) {
         Some("placeholder")
     } else {
@@ -503,6 +553,12 @@ fn validate_color_structure(color: &Color) -> Result<(), ColorStructureRejection
                 return Err(ColorStructureRejection::InvalidValidatedRegime {
                     axis: String::new(),
                     reason: "at least one bounded axis is required",
+                });
+            }
+            if regime.bounds().len() > MAX_VALIDITY_AXES {
+                return Err(ColorStructureRejection::InvalidValidatedRegime {
+                    axis: String::new(),
+                    reason: "validity regime exceeds the axis limit",
                 });
             }
             for (axis, (lo, hi)) in regime.bounds() {
@@ -739,6 +795,23 @@ impl WaiverVerifier for NoWaiverVerifier {
 /// Why a grant failed to authorize (structured, teaching).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WaiverRejection {
+    /// Authenticated metadata is malformed. A verifier cannot legitimize a
+    /// blank, placeholder, padded, hostile, or oversized authority field.
+    InvalidField {
+        /// Stable field name.
+        field: &'static str,
+        /// Stable structural reason.
+        reason: &'static str,
+    },
+    /// A bounded authority collection exceeded its declared limit.
+    ResourceLimitExceeded {
+        /// Stable resource name.
+        resource: &'static str,
+        /// Maximum accepted entries or bytes.
+        limit: usize,
+        /// Offered entries or bytes.
+        actual: usize,
+    },
     /// Scope is not [`WAIVER_SCOPE_COLOR_UPGRADE`].
     ScopeMismatch,
     /// The grant names a different node.
@@ -764,6 +837,17 @@ pub enum WaiverRejection {
 impl core::fmt::Display for WaiverRejection {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::InvalidField { field, reason } => {
+                write!(f, "grant field `{field}` is invalid ({reason})")
+            }
+            Self::ResourceLimitExceeded {
+                resource,
+                limit,
+                actual,
+            } => write!(
+                f,
+                "grant resource `{resource}` exceeds limit {limit} (offered {actual})"
+            ),
             Self::ScopeMismatch => f.write_str("scope does not authorize this write kind"),
             Self::NodeMismatch => f.write_str("grant names a different node"),
             Self::ColorMismatch => f.write_str("grant authorizes a different color"),
@@ -784,6 +868,60 @@ impl core::fmt::Display for WaiverRejection {
 }
 
 impl std::error::Error for WaiverRejection {}
+
+fn validate_waiver_grant(grant: &WaiverGrant) -> Result<(), WaiverRejection> {
+    for (field, value) in [
+        ("waiver_id", grant.annotation.id.as_str()),
+        ("signer", grant.annotation.signer.as_str()),
+        ("key_id", grant.key_id.as_str()),
+        ("scope", grant.scope.as_str()),
+        ("node_name", grant.node_name.as_str()),
+    ] {
+        if let Some(reason) = identity_reason(value) {
+            return Err(WaiverRejection::InvalidField { field, reason });
+        }
+    }
+    if let Some(reason) = human_text_reason(&grant.annotation.reason) {
+        return Err(WaiverRejection::InvalidField {
+            field: "reason",
+            reason,
+        });
+    }
+    if grant.claimed_color.is_empty() {
+        return Err(WaiverRejection::InvalidField {
+            field: "claimed_color",
+            reason: "blank",
+        });
+    }
+    if grant.claimed_color.len() > MAX_CLAIMED_COLOR_BYTES {
+        return Err(WaiverRejection::ResourceLimitExceeded {
+            resource: "claimed_color_bytes",
+            limit: MAX_CLAIMED_COLOR_BYTES,
+            actual: grant.claimed_color.len(),
+        });
+    }
+    if grant.parent_hashes.len() > MAX_COLOR_PARENTS {
+        return Err(WaiverRejection::ResourceLimitExceeded {
+            resource: "parent_hashes",
+            limit: MAX_COLOR_PARENTS,
+            actual: grant.parent_hashes.len(),
+        });
+    }
+    if grant.signature.is_empty() {
+        return Err(WaiverRejection::InvalidField {
+            field: "signature",
+            reason: "blank",
+        });
+    }
+    if grant.signature.len() > MAX_WAIVER_SIGNATURE_BYTES {
+        return Err(WaiverRejection::ResourceLimitExceeded {
+            resource: "signature_bytes",
+            limit: MAX_WAIVER_SIGNATURE_BYTES,
+            actual: grant.signature.len(),
+        });
+    }
+    Ok(())
+}
 
 fn json_f64(value: f64) -> String {
     if value.is_finite() {
@@ -1040,10 +1178,21 @@ impl ColorNode {
         &self.name
     }
 
-    /// The color as WRITTEN (post demotion, post waiver).
+    /// The color declaration as written, without applying waiver taint.
+    /// Scientific admission code must use [`Self::scientific_color`]; this
+    /// accessor is intentionally named as unverified so a transitive waiver
+    /// cannot disappear behind an innocuous `color()` call.
     #[must_use]
-    pub fn color(&self) -> &Color {
+    pub fn declared_color_unverified(&self) -> &Color {
         &self.color
+    }
+
+    /// The color available for ordinary scientific admission. Any direct or
+    /// inherited waiver makes the declaration unavailable; callers that elect
+    /// to consume waived evidence must do so through explicit waiver policy.
+    #[must_use]
+    pub fn scientific_color(&self) -> Option<&Color> {
+        (!self.depends_on_waiver()).then_some(&self.color)
     }
 
     /// Parent node ids.
@@ -1128,6 +1277,15 @@ impl ColorNode {
 /// Teaching errors at the write gate.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ColorWriteError {
+    /// A bounded graph resource exceeded its declared limit before append.
+    ResourceLimitExceeded {
+        /// Stable resource name.
+        resource: &'static str,
+        /// Maximum accepted entries.
+        limit: usize,
+        /// Offered entries.
+        actual: usize,
+    },
     /// The claimed color outranks what the parents support.
     LaunderingRefused {
         /// The claimed rank.
@@ -1194,6 +1352,15 @@ pub enum ColorWriteError {
 impl core::fmt::Display for ColorWriteError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            ColorWriteError::ResourceLimitExceeded {
+                resource,
+                limit,
+                actual,
+            } => write!(
+                f,
+                "color graph resource `{resource}` exceeds limit {limit} (offered {actual}); \
+                 split the derivation or compact its authority lineage before admission"
+            ),
             ColorWriteError::LaunderingRefused {
                 claimed,
                 derived,
@@ -1338,15 +1505,29 @@ impl ColorGraph {
         &self,
         parents: &[u64],
     ) -> Result<Vec<WaiverDependency>, ColorWriteError> {
+        if parents.len() > MAX_COLOR_PARENTS {
+            return Err(ColorWriteError::ResourceLimitExceeded {
+                resource: "parents",
+                limit: MAX_COLOR_PARENTS,
+                actual: parents.len(),
+            });
+        }
         let mut dependencies = BTreeMap::<u64, WaiverDependency>::new();
         for parent_id in parents {
             let parent = self
                 .node(*parent_id)
                 .ok_or(ColorWriteError::UnknownParent { id: *parent_id })?;
             for dependency in &parent.waiver_dependencies {
-                dependencies
-                    .entry(dependency.authorizing_node)
-                    .or_insert_with(|| dependency.clone());
+                if !dependencies.contains_key(&dependency.authorizing_node) {
+                    if dependencies.len() == MAX_WAIVER_DEPENDENCIES {
+                        return Err(ColorWriteError::ResourceLimitExceeded {
+                            resource: "waiver_dependencies",
+                            limit: MAX_WAIVER_DEPENDENCIES,
+                            actual: dependencies.len() + 1,
+                        });
+                    }
+                    dependencies.insert(dependency.authorizing_node, dependency.clone());
+                }
             }
             if let Some(grant) = &parent.grant {
                 let (Some(policy_fingerprint), Some(admission_day)) = (
@@ -1355,15 +1536,25 @@ impl ColorGraph {
                 ) else {
                     return Err(ColorWriteError::InvalidParentAuthority { id: parent.id });
                 };
-                dependencies
-                    .entry(parent.id)
-                    .or_insert_with(|| WaiverDependency {
-                        authorizing_node: parent.id,
-                        operation: parent.operation,
-                        grant: grant.clone(),
-                        policy_fingerprint,
-                        admission_day,
-                    });
+                if !dependencies.contains_key(&parent.id) {
+                    if dependencies.len() == MAX_WAIVER_DEPENDENCIES {
+                        return Err(ColorWriteError::ResourceLimitExceeded {
+                            resource: "waiver_dependencies",
+                            limit: MAX_WAIVER_DEPENDENCIES,
+                            actual: dependencies.len() + 1,
+                        });
+                    }
+                    dependencies.insert(
+                        parent.id,
+                        WaiverDependency {
+                            authorizing_node: parent.id,
+                            operation: parent.operation,
+                            grant: grant.clone(),
+                            policy_fingerprint,
+                            admission_day,
+                        },
+                    );
+                }
             }
         }
         Ok(dependencies.into_values().collect())
@@ -1713,6 +1904,8 @@ impl ColorGraph {
             });
         }
         let refuse = |rejection| Err(ColorWriteError::WaiverRefused { rejection });
+        validate_waiver_grant(&grant)
+            .map_err(|rejection| ColorWriteError::WaiverRefused { rejection })?;
         if grant.scope != WAIVER_SCOPE_SOURCE_COLOR {
             return refuse(WaiverRejection::ScopeMismatch);
         }
@@ -1774,6 +1967,13 @@ impl ColorGraph {
     ) -> Result<(Color, Vec<ColorDemotion>), ColorWriteError> {
         if parents.is_empty() {
             return Err(ColorWriteError::NoParents);
+        }
+        if parents.len() > MAX_COLOR_PARENTS {
+            return Err(ColorWriteError::ResourceLimitExceeded {
+                resource: "parents",
+                limit: MAX_COLOR_PARENTS,
+                actual: parents.len(),
+            });
         }
         let mut demotions = Vec::new();
         let mut effective: Vec<Color> = Vec::with_capacity(parents.len());
@@ -1913,6 +2113,8 @@ impl ColorGraph {
         let (_derived, demotions) = self.fold_parents(parents, op, state)?;
         let waiver_dependencies = self.inherited_waiver_dependencies(parents)?;
         let refuse = |rejection| Err(ColorWriteError::WaiverRefused { rejection });
+        validate_waiver_grant(&grant)
+            .map_err(|rejection| ColorWriteError::WaiverRefused { rejection })?;
         if grant.scope != WAIVER_SCOPE_COLOR_UPGRADE {
             return refuse(WaiverRejection::ScopeMismatch);
         }
@@ -1983,6 +2185,12 @@ impl ColorGraph {
         &self,
         node: &ColorNode,
     ) -> Result<(), ColorReplayError> {
+        if node.waiver_dependencies.len() > MAX_WAIVER_DEPENDENCIES {
+            return Err(Self::replay_error(
+                node,
+                "waiver dependency closure exceeds the replay limit",
+            ));
+        }
         let mut previous = None;
         for dependency in &node.waiver_dependencies {
             if dependency.authorizing_node >= node.id {
@@ -2014,6 +2222,12 @@ impl ColorGraph {
                     "waiver dependency differs from its historical authorizing node",
                 ));
             }
+            validate_waiver_grant(&dependency.grant).map_err(|rejection| {
+                Self::replay_error(
+                    node,
+                    format!("waiver dependency has invalid grant metadata: {rejection}"),
+                )
+            })?;
         }
 
         let expected = if node.parents.is_empty() {
@@ -2047,8 +2261,9 @@ impl ColorGraph {
                     "demotion parent position and id disagree",
                 ));
             }
-            let Some(Color::Validated { regime, dataset }) =
-                self.node(demotion.parent_id).map(ColorNode::color)
+            let Some(Color::Validated { regime, dataset }) = self
+                .node(demotion.parent_id)
+                .map(ColorNode::declared_color_unverified)
             else {
                 return Err(Self::replay_error(
                     node,
@@ -2154,6 +2369,12 @@ impl ColorGraph {
                 Ok(())
             }
             (_, None, Some(grant)) => {
+                validate_waiver_grant(grant).map_err(|rejection| {
+                    Self::replay_error(
+                        node,
+                        format!("source grant metadata is invalid: {rejection}"),
+                    )
+                })?;
                 if node.origin_policy_fingerprint.is_some()
                     || node.waiver_policy_fingerprint.is_none()
                     || node.waiver_admission_day.is_none()
@@ -2232,6 +2453,12 @@ impl ColorGraph {
             derived = compose(&derived, color, op);
         }
         if let Some(grant) = &node.grant {
+            validate_waiver_grant(grant).map_err(|rejection| {
+                Self::replay_error(
+                    node,
+                    format!("derived grant metadata is invalid: {rejection}"),
+                )
+            })?;
             let mut lineage = Vec::with_capacity(node.parents.len());
             for parent in &node.parents {
                 let Some(parent_node) = self.node(*parent) else {
@@ -2299,6 +2526,12 @@ impl ColorGraph {
                 "parent id is missing or does not precede the derived node",
             ));
         }
+        if node.parents.len() > MAX_COLOR_PARENTS {
+            return Err(Self::replay_error(
+                node,
+                "parent list exceeds the replay limit",
+            ));
+        }
         self.validate_replay_waiver_dependencies(node)?;
         self.validate_replay_demotions(node)?;
         let metadata = NodeHashMetadata {
@@ -2325,7 +2558,7 @@ impl ColorGraph {
         }
     }
 
-    /// REPLAY AUDIT (bead gp3.16): rederive every node from its stored
+    /// IN-MEMORY STRUCTURAL REPLAY AUDIT (bead gp3.16): rederive every node from its stored
     /// inputs and refuse on any divergence. For each derived node the
     /// recorded demotions reconstruct the effective parent colors
     /// (a demotion determines the demoted form exactly:
@@ -2334,8 +2567,10 @@ impl ColorGraph {
     /// color must match bit-exactly. Every node's provenance hash is
     /// recomputed and compared, so the graph's whole hash chain is
     /// re-earned, never trusted. Positive-colored leaves must carry
-    /// their typed origin or an authenticated grant (the sealed-source
-    /// invariant, re-checked).
+    /// their typed origin or a structurally bound historical grant (the
+    /// sealed-source invariant, re-checked). This method does not parse
+    /// persisted rows, resolve policy fingerprints, re-run external authority
+    /// capabilities, or apply a new current-day expiry decision.
     ///
     /// # Errors
     /// [`ColorReplayError`] naming the first diverging node.

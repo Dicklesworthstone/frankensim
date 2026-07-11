@@ -162,7 +162,10 @@ capability ships in this crate, so promotion is impossible until a
 Franken-compliant signature verifier is wired in (the no-crypto
 no-claim). Authentication runs for EVERY `derive_waived` call, including a
 claim that does not upgrade rank; choosing the waived path can never turn an
-invalid signature into a provenance-bearing grant. Verifiers return a sealed,
+invalid signature into a provenance-bearing grant. Before verifier dispatch,
+machine identities, human reason text, signature presence, claimed-color bytes,
+and lineage size are structurally validated and bounded; an accepting callback
+cannot authorize malformed epistemic metadata. Verifiers return a sealed,
 atomic `PolicyDecision`; the accepting policy fingerprint and historical
 admission day travel with the direct grant and every transitive
 `WaiverDependency`. Callback panic is a structured fail-closed refusal. Node
@@ -175,10 +178,12 @@ and the exact operation, v3 added bit-exact canonical color bytes, and v2 used
 display-rounded color JSON. Color-write row schema v5 serializes typed origins,
 the transitive waiver closure, the canonical v3 derived or v4 source signing
 payload, signature, key id, node name, parent hashes, exact claimed-color bytes,
-operation, scope, expiry, admission day, and policy fingerprint so persisted authorization can be independently
-reverified rather than trusting an `authorized:true` assertion. Refusals are structured
-(`WaiverRejection`: scope/node/color/lineage mismatch, expiry, policy refusal,
-or verifier panic) and grants re-verify from the stored ledger node.
+operation, scope, expiry, admission day, and policy fingerprint. Those fields
+are sufficient input for a separate importer to resolve the named policy and
+re-authenticate instead of trusting an `authorized:true` assertion; this
+in-memory graph does not itself parse persisted rows or dispatch that external
+authority. Refusals are structured (`WaiverRejection`: malformed/bounded field,
+scope/node/color/lineage mismatch, expiry, policy refusal, or verifier panic).
 
 ## Invariants
 
@@ -335,9 +340,11 @@ rederivation, structural color validity (including waived nodes),
 grant-to-node/lineage binding, ordinary derived colors, and every node hash.
 Ordinary and waived derivations retain the sorted, duplicate-free union of
 their parents' historical waiver dependencies plus each parent's own grant;
-scientific consumers can distinguish a transitively waived node without
-walking the graph through `waiver_dependencies()` or the convenience predicate
-`depends_on_waiver()` (own grant OR inherited dependency). Replay resolves each
+fan-in and retained authority closure have explicit limits before cloning or
+append. `scientific_color()` returns `None` for every directly or transitively
+waived node, while raw declaration inspection is deliberately named
+`declared_color_unverified()`. `waiver_dependencies()` and
+`depends_on_waiver()` expose the exact reason for that refusal. Replay resolves each
 dependency to its earlier authorizing node and recomputes the exact
 parent-derived closure, including the original policy fingerprint and
 admission day. Canonical schema-v5 color rows include the typed origin and
@@ -381,9 +388,14 @@ dependency (the colors are its types).
   independent verifier can resolve the named policy and re-authenticate.
   Regime demotion records retain the offending value and are hash-bound, but
   the complete execution-state map is not persisted by this in-memory gate.
+- Waiver expiry is checked at the authorizing node's admission day. Descendants
+  preserve that historical grant and remain tainted indefinitely; they do not
+  silently renew it, and `verify_replay()` has no caller-supplied current day
+  with which to make a new policy decision.
 - Transitive waiver visibility currently stores the complete unique grant
-  closure on each descendant. This is deliberately inspectable and replayable;
-  compact/sublinear waiver-lineage storage is not claimed.
+  closure on each descendant, bounded by `MAX_WAIVER_DEPENDENCIES`. This is
+  deliberately inspectable and replayable; compact/sublinear waiver-lineage
+  storage is not claimed.
 
 ## No-claim boundaries (tombstones)
 
