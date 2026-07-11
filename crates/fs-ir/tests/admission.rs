@@ -618,6 +618,32 @@ fn ad_004_budget_infeasible_with_ranked_cost_derived_fixes() {
         "registered non-namespaced cost model was ignored:\n{}",
         legacy.diagnosis()
     );
+    // A registered but evidence-thin model is categorically different
+    // from an absent model: its structured refusal must survive as an
+    // admission rejection instead of silently contributing zero cost.
+    let mut thin_cx = full_context(&regime);
+    thin_cx
+        .cost_models
+        .insert("xform.level-set-velocity".to_string(), CostModel::new());
+    let thin = admit_src(&src, &thin_cx);
+    let refusal = thin
+        .findings
+        .iter()
+        .find(|finding| finding.check == "budget" && finding.what.contains("CostModelRefused"))
+        .expect("registered InsufficientData must reject admission");
+    assert!(!thin.admitted, "registered thin model cannot be ignored");
+    assert!(
+        refusal.what.contains("0 observation(s)") && refusal.what.contains("need"),
+        "the underlying structured refusal was lost: {}",
+        refusal.what
+    );
+    assert!(
+        refusal
+            .fixes
+            .iter()
+            .any(|fix| fix.action.contains("tune observations")),
+        "refusal must include an evidence-acquisition fix: {refusal:?}"
+    );
     // Removing the cost models removes the screen (no false rejects).
     cx.cost_models.clear();
     assert!(admit_src(&src, &cx).admitted, "no models -> no wall screen");

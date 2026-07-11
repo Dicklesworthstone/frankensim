@@ -609,10 +609,13 @@ fn size_of_call(items: &[Node], verb: &str) -> Result<f64, String> {
 }
 
 /// Collect (verb, size, span) for every modeled call in the tree.
+type ModeledCall<'a> = (&'a str, f64, Span);
+type CostedCall<'a> = (&'a str, f64, f64, Span);
+
 fn modeled_calls<'a>(
     node: &'a Node,
     models: &BTreeMap<String, CostModel>,
-    out: &mut Vec<(&'a str, f64, Span)>,
+    out: &mut Vec<ModeledCall<'a>>,
     findings: &mut Vec<Finding>,
 ) {
     if let NodeKind::List(items) = &node.kind {
@@ -636,6 +639,79 @@ fn modeled_calls<'a>(
     }
 }
 
+fn cost_model_rejection(span: Span, what: String, action: String) -> Finding {
+    Finding {
+        check: "budget",
+        severity: Severity::Reject,
+        span,
+        what,
+        fixes: vec![RankedFix {
+            action,
+            predicted_wall_s: None,
+            qoi_impact: "evidence acquisition only; no modeled QoI change".to_string(),
+        }],
+    }
+}
+
+fn cost_registered_calls<'a>(
+    calls: &[ModeledCall<'a>],
+    models: &BTreeMap<String, CostModel>,
+    out: &mut Vec<Finding>,
+) -> Option<(f64, Vec<CostedCall<'a>>)> {
+    let mut total = 0.0f64;
+    let mut costed = Vec::with_capacity(calls.len());
+    let mut refused = false;
+    for &(verb, size, span) in calls {
+        let model = models
+            .get(verb)
+            .expect("modeled_calls only returns registered models");
+        match model.predict(size) {
+            Ok(prediction) if prediction.p90.is_finite() && prediction.p90 >= 0.0 => {
+                let next_total = total + prediction.p90;
+                if next_total.is_finite() {
+                    total = next_total;
+                    costed.push((verb, size, prediction.p90, span));
+                } else {
+                    refused = true;
+                    out.push(cost_model_rejection(
+                        span,
+                        format!(
+                            "CostModelInvalidPrediction: adding the registered model's p90 for operation {verb:?} at size {size} overflows finite wall time"
+                        ),
+                        format!(
+                            "re-fit {verb} from finite tune observations at representative sizes"
+                        ),
+                    ));
+                }
+            }
+            Ok(prediction) => {
+                refused = true;
+                out.push(cost_model_rejection(
+                    span,
+                    format!(
+                        "CostModelInvalidPrediction: registered model for operation {verb:?} returned non-finite or negative p90 {:?} at size {size}",
+                        prediction.p90
+                    ),
+                    format!("re-fit {verb} from valid finite tune observations"),
+                ));
+            }
+            Err(reason) => {
+                refused = true;
+                out.push(cost_model_rejection(
+                    span,
+                    format!(
+                        "CostModelRefused: registered model for operation {verb:?} at size {size} did not provide a wall-cost prediction: {reason}"
+                    ),
+                    format!(
+                        "run {verb} at representative sizes and record enough tune observations before admission"
+                    ),
+                ));
+            }
+        }
+    }
+    (!refused).then_some((total, costed))
+}
+
 fn check_budget(study: &Study<'_>, cx: &AdmissionContext<'_>, out: &mut Vec<Finding>) {
     check_budget_resource_domains(study, out);
     let mut calls = Vec::new();
@@ -651,20 +727,9 @@ fn check_budget(study: &Study<'_>, cx: &AdmissionContext<'_>, out: &mut Vec<Find
     if calls.is_empty() {
         return;
     }
-    let predict = |verb: &str, size: f64| -> Option<f64> {
-        cx.cost_models
-            .get(verb)
-            .and_then(|m| m.predict(size).ok())
-            .map(|p| p.p90)
+    let Some((total, mut costed)) = cost_registered_calls(&calls, &cx.cost_models, out) else {
+        return;
     };
-    let mut total = 0.0f64;
-    let mut costed: Vec<(&str, f64, f64, Span)> = Vec::new();
-    for (verb, size, span) in &calls {
-        if let Some(p90) = predict(verb, *size) {
-            total += p90;
-            costed.push((verb, *size, p90, *span));
-        }
-    }
     if total <= wall {
         return;
     }
@@ -672,7 +737,13 @@ fn check_budget(study: &Study<'_>, cx: &AdmissionContext<'_>, out: &mut Vec<Find
     costed.sort_by(|a, b| b.2.total_cmp(&a.2));
     let mut fixes = Vec::new();
     if let Some((verb, size, p90, _)) = costed.first() {
-        if let Some(halved) = predict(verb, size / 2.0) {
+        let halved = cx
+            .cost_models
+            .get(*verb)
+            .and_then(|model| model.predict(size / 2.0).ok())
+            .map(|prediction| prediction.p90)
+            .filter(|prediction| prediction.is_finite() && *prediction >= 0.0);
+        if let Some(halved) = halved {
             fixes.push(RankedFix {
                 action: format!(
                     "coarsen {verb}: halve its size feature ({size} -> {})",
