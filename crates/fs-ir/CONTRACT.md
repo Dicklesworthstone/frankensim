@@ -107,24 +107,74 @@ typed AST. Layer: L6 (HELM). Runtime deps: `std` + fs-qty.
   the per-element target `tol²/n` with per-element depth from its own
   gap). A discharged answer's bound is a REAL equilibrated enclosure
   (VERIFIED color) and never violates the query's certified-accuracy
-  contract; the cannot-discharge boundary refuses with the best
-  achieved certified interval (never a false in-budget answer);
-  operator choice tie-breaks deterministically (G5 replay).
+  contract. `ProblemFamily`, `CachedAnswer`, and `CostTable` have checked
+  constructors and private state; `plan -> Result<PlanOutcome, PlanError>`
+  validates finite theta/tolerance/budget, a non-empty strictly increasing
+  non-zero rung ladder, family coefficients/boundaries, meshes, candidates,
+  telemetry, verifier enclosures/refusals, and every arithmetic result. Bounded
+  FEM refusals retain their structured `Fem1dError` source in `PlanError`
+  instead of being flattened into a plausible result. Cache-declared
+  bounds are never trusted: hits are independently re-verified against an
+  exact length-framed family/theta key before discharge. Ladder transfers use
+  deterministic P1 interpolation over the actual coarse coordinates, including
+  non-dyadic ladders and adaptive-to-uniform moves. Actual solve/speculation
+  costs are admitted before execution, so spend never exceeds budget. Learned
+  costs rank the zero-cost refine/climb transition only; they never veto exact
+  affordable work. Transition telemetry is pending until its first downstream
+  verification/solve executes, records that actual compute cost before the
+  resulting certificate checkpoint, and is dropped when admission aborts before
+  downstream work. A rejected climb speculation completes that transition;
+  any subsequent fine-rung solve is separately charged as `SolveRung`. The
+  family degree is capped at five (six coefficients), matching the exactness
+  envelope of the verifier's five-point squared-residual quadrature; its work
+  preflight counts all five quadrature evaluations per coefficient/cell. The
+  homogeneous trace uses fs-verify's exact finite-f64 coefficient
+  superaccumulator, and parameter scaling is refused if independently rounded
+  products no longer sum exactly to zero at `x=1`. The
+  cannot-discharge boundary refuses with the best achieved certified interval;
+  if no solve is affordable it returns `RefusedWithoutAnswer` with no interval
+  or color rather than fabricating evidence. Operator choice tie-breaks
+  deterministically (G5 replay).
+  Every finite audit-log bound retains a private-constructor
+  `VerifierCertificate`: the guarded `fs-evidence` color, stable verifier-family
+  identity, and reconstructed-flux hash travel together instead of reminting a
+  bare `Color::Verified` from a discarded scalar. Resource admission caps cells,
+  family coefficients, fidelity-rung count, and their coefficient-by-cell-by-
+  quadrature-point work product. Uniform/adaptive mesh, indicator,
+  prolongation, trajectory, and
+  family-scaling allocations use fallible reservation; exact downstream solve
+  cost and the combined compute envelope are admitted before mesh allocation.
   `baseline_uniform` is the fixed control the kill criterion measures
-  against.
+  against and is fallible under the same numerical/family boundary.
 
 - `anytime` module (addendum Proposal 8, bead lmp4.17; ships behind
   `ladder-planner` but its CONTRACT survives even a frozen planner —
-  the product win): `run_anytime` drives the planner over an
-  increasing budget ladder — the first rung is the IMMEDIATE wide
-  certified interval, tightening is MONOTONE, every step carries its
-  Proposal-3 color and a PRICED "what would tighten this" hint
+  the product win): `run_anytime_observed` drives one cumulative planner
+  execution through operational certification/pre-work checkpoints. It emits
+  each affordable budget-rung certificate before work, allocation, cache
+  insertion, or telemetry for a later rung. An observer can return `Stop`; the
+  returned report is then the exact deterministic prefix and no later side
+  effect occurs. `run_anytime` is the collector wrapper whose observer always
+  continues. Total work never exceeds the final budget, no certificate appears
+  before its cumulative cost is affordable, and retaining the best checked
+  certificate makes tightening MONOTONE. The first affordable rung is the
+  IMMEDIATE wide certified interval, and every step carries its guarded
+  Proposal-3 color plus verifier family/flux identity and a PRICED "what would
+  tighten this" hint
   (`tighten_hint`: gap extrapolation naming the next menu move and the
   hot region where refinement concentrated; cold telemetry degrades to
   the generic priced form). REFUSAL semantics: an undischargeable
   query returns the achieved certified interval, the price of the gap,
   and the explicit no-point-estimate clause — never a silent
-  best-effort number. Replays reproduce trajectories bit-for-bit (G5).
+  best-effort number. `run_anytime -> Result<AnytimeReport, PlanError>` rejects
+  empty, non-finite, non-positive, or non-increasing budget ladders before work.
+  A valid rung too small for the initial solve contributes no trajectory point;
+  if it is the final rung the report explicitly says that no certified interval
+  or color exists. `tighten_hint` is likewise fallible and cannot emit NaN/∞
+  gap prices. Hints use the cost table at emission time and cannot consume
+  telemetry from future work. Budget-ladder length is resource-capped and its
+  trajectory allocation is fallible. Replays reproduce trajectories,
+  certificate identities, and observer-selected prefixes bit-for-bit (G5).
 
 ## Invariants
 
@@ -152,18 +202,27 @@ typed AST. Layer: L6 (HELM). Runtime deps: `std` + fs-qty.
 
 ## Error model
 
-All fallible APIs return `IrError` (span, stable `IrErrorKind::code()`,
-detail, hint). Never panics across the crate boundary (fuzz-tested).
+Syntax/study/lowering APIs return `IrError` (span, stable
+`IrErrorKind::code()`, detail, hint). Feature-gated planner/anytime APIs return
+`PlanError`, and valid but under-budget queries return structured
+`PlanOutcome` refusals. Neither boundary panics on malformed caller data.
 
 ## Determinism class
 
-Parsing, printing, and lowering are pure functions of their input text —
-bit-deterministic across runs, thread counts, and ISAs.
+Parsing, printing, and lowering are pure functions of their input text.
+Planner replay is deterministic for the same family, query, ladders, cache
+contents, and learned cost table: fixed operator ordering, exact cache-key
+framing, coordinate-ordered prolongation, and deterministic tie-breaking.
 
 ## Cancellation behavior
 
-No compute loops beyond input length; parsing is bounded by source size
-and the depth cap. No `Cx` integration needed at this layer.
+Parsing is bounded by source size and the depth cap. The feature-gated planner
+does perform numerical work. Its operational anytime API is synchronously
+stoppable between certified budget rungs: `Stop` prevents later planner work,
+allocation, cache insertion, and telemetry. Sub-operator cancellation still
+lands with fs-exec integration; no claim is made that a running solve or
+verification can be interrupted inside its admitted coefficient-by-cell work
+envelope.
 
 ## Unsafe boundary
 
@@ -208,6 +267,27 @@ BudgetInfeasible with ranked cost-derived fixes + fix-quality harness
 gating with alternatives + policy grading; ad-007 2000 mutants + all
 truncation prefixes never panic (a fuzz-found scanner panic became a
 structured refusal).
+
+`tests/planner.rs` + planner unit tests (`ladder-planner`, G0/G3/G5): existing
+accuracy, kill-ratio, cache, refusal, calibration, and replay checks plus
+empty/zero/non-monotone rungs; non-finite theta/tolerance/budget; malformed
+family/mesh/candidates; poisoned cost samples; unaffordable initial solves;
+independent replay of a falsely certified cache answer; non-dyadic
+prolongation; adaptive-to-uniform coordinate interpolation; pessimistic learned
+costs that cannot veto affordable exact work; bounded family/rung/cell and
+combined coefficient-by-cell resource drivers; pre-allocation budget refusal;
+verifier authority retained on every finite audit bound; and aborted
+transitions that do not enter observed telemetry.
+
+`tests/anytime.rs` (`ladder-planner`, G0/G5): monotone verified trajectories,
+priced refusal/hints, cache termination, empty/zero/non-monotone budget/rung
+ladders, malformed scalar/hint inputs, and explicit no-interval/no-color output
+when the final budget cannot fund one solve. A counting-cache regression proves
+that an entire budget ladder executes the planner once. Operational observer
+regressions prove callback order, actual rung/spend receipts, contemporaneous
+hints without future telemetry, verifier-family/flux identity retention, and
+that `Stop` prevents later work telemetry and cache insertion while retaining
+telemetry for a completed speculative transition.
 
 ## No-claim boundaries
 
@@ -254,6 +334,15 @@ structured refusal).
   as the ladder registry grows rungs.
 - Cost units are solved cells (the flywheel's telemetry currency);
   wall-clock costs arrive with the perf-CI lane.
+- The v0 synchronous numerical envelope additionally refuses when polynomial
+  coefficients times mesh cells exceeds `MAX_POLYNOMIAL_CELL_WORK`; this is a
+  deterministic resource guard, not a wall-time certificate.
+- Cache storage/transport authentication remains the content-addressed store's
+  responsibility. This planner treats cache data as untrusted and re-verifies
+  its numerical claim, but does not authenticate who wrote the entry.
+- The v0 family boundary checks finite polynomial structure and homogeneous
+  endpoints; it does not prove that arbitrary caller-supplied polynomial
+  semantics represent the intended physical model.
 - Confidence targets (`Target::Confidence`) are the e-process beads'
   contract; v0 discharges tolerance targets.
 - The kill measurement (>=2x vs mid-rung+uniform; measured 4.31x on the
@@ -266,6 +355,6 @@ structured refusal).
   an estimate for teaching, not a certified cost bound; Proposal C's
   full value-of-information ranking replaces it when C lands (the soft
   dependency the bead names).
-- Tile-boundary interruptibility rides the planner's operator
-  granularity (each budget rung is a clean cut); sub-operator
+- Operational interruption is rung-granular. A callback can stop before the
+  next operator and receive a clean deterministic prefix, but sub-operator
   cancellation lands with the fs-exec tile integration.

@@ -17,10 +17,34 @@
 //! with the best achieved certified interval — never a false in-budget
 //! answer.
 
+use core::fmt;
 use std::collections::BTreeMap;
 
+use fs_evidence::{
+    Color, MAX_COLOR_IDENTITY_BYTES, NumericalCertificate, color_leaf_identity_reason,
+    verified_from,
+};
 use fs_verify::estimator::verify;
-use fs_verify::fem1d::{MmsProblem, Poly, gauss5, solve_p1};
+use fs_verify::fem1d::{Fem1dError, MmsProblem, Poly, gauss5, solve_p1};
+
+const MAX_EXACT_CELLS: u128 = 1_u128 << 53;
+const MAX_EXACT_CELLS_F64: f64 = 9_007_199_254_740_992.0;
+/// Maximum cells a single v0 planner mesh may own.
+///
+/// Exact floating-point accounting is a weaker constraint than bounded memory:
+/// this ceiling is checked before every uniform or adaptive mesh allocation.
+pub const MAX_PLANNER_CELLS: usize = 1_000_000;
+/// Maximum polynomial coefficients admitted by the v0 family boundary.
+/// This is the equilibrated verifier's exact five-point-Gauss envelope:
+/// `(c - F - slope)^2` has degree `2 * (degree(u) - 1) <= 9`.
+pub const MAX_FAMILY_COEFFICIENTS: usize = fs_verify::fem1d::MAX_FEM1D_POLY_COEFFICIENTS;
+/// Maximum entries in one fidelity ladder.
+pub const MAX_LADDER_RUNGS: usize = 4_096;
+/// Maximum coefficient-by-cell-by-quadrature-point work admitted to one
+/// synchronous v0 solve or verification. This couples the otherwise
+/// independent family and mesh caps.
+pub const MAX_POLYNOMIAL_CELL_WORK: usize = 16_000_000;
+const VERIFIER_GAUSS_POINTS: usize = 5;
 
 /// One planner operator (the menu).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -51,23 +75,214 @@ impl PlanOp {
     }
 }
 
-/// A certified cached answer.
-#[derive(Debug, Clone)]
+/// A structured refusal at the planner's public validity boundary.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PlanError {
+    /// A scalar planner input violates its finite/range contract.
+    InvalidScalar {
+        /// Input name.
+        field: &'static str,
+        /// Stable rejection reason.
+        reason: &'static str,
+    },
+    /// A required ladder or coefficient sequence is empty.
+    EmptySequence {
+        /// Sequence name.
+        field: &'static str,
+    },
+    /// One sequence entry violates ordering, range, or finiteness.
+    InvalidSequenceEntry {
+        /// Sequence name.
+        field: &'static str,
+        /// Offending entry.
+        index: usize,
+        /// Stable rejection reason.
+        reason: &'static str,
+    },
+    /// The problem-family definition is not usable by this kernel.
+    InvalidFamily {
+        /// Family field (`kernel`, `base`, or `boundary`).
+        field: &'static str,
+        /// Offending coefficient, when applicable.
+        index: Option<usize>,
+        /// Stable rejection reason.
+        reason: &'static str,
+    },
+    /// A mesh violates the 1-D verifier's topology/domain contract.
+    InvalidMesh {
+        /// Offending node, when applicable.
+        index: Option<usize>,
+        /// Stable rejection reason.
+        reason: &'static str,
+    },
+    /// A nodal candidate cannot be evaluated on its declared mesh.
+    InvalidCandidate {
+        /// Offending node, when applicable.
+        index: Option<usize>,
+        /// Stable rejection reason.
+        reason: &'static str,
+    },
+    /// Cost telemetry overflowed while updating an operator mean.
+    CostOverflow {
+        /// Operator whose telemetry overflowed.
+        op: PlanOp,
+    },
+    /// A resource-driving public value exceeds the v0 planner envelope.
+    ResourceLimit {
+        /// Resource or public field name.
+        field: &'static str,
+        /// Requested count.
+        requested: usize,
+        /// Maximum admitted count.
+        limit: usize,
+    },
+    /// A bounded vector allocation failed before numerical work began.
+    AllocationFailed {
+        /// Stable allocation stage.
+        stage: &'static str,
+        /// Elements requested from the allocator.
+        requested: usize,
+    },
+    /// A checked numerical stage produced an unusable result.
+    NumericalFailure {
+        /// Stable computation stage.
+        stage: &'static str,
+    },
+    /// The bounded FEM solver refused or failed with structured context.
+    Fem1dFailure {
+        /// Planner stage invoking the solver.
+        stage: &'static str,
+        /// Original FEM boundary failure.
+        source: Fem1dError,
+    },
+}
+
+impl fmt::Display for PlanError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidScalar { field, reason } => {
+                write!(f, "invalid planner scalar `{field}`: {reason}")
+            }
+            Self::EmptySequence { field } => {
+                write!(f, "planner sequence `{field}` must not be empty")
+            }
+            Self::InvalidSequenceEntry {
+                field,
+                index,
+                reason,
+            } => write!(f, "invalid `{field}` entry {index}: {reason}"),
+            Self::InvalidFamily {
+                field,
+                index: Some(index),
+                reason,
+            } => write!(f, "invalid family `{field}` entry {index}: {reason}"),
+            Self::InvalidFamily {
+                field,
+                index: None,
+                reason,
+            } => write!(f, "invalid family field `{field}`: {reason}"),
+            Self::InvalidMesh {
+                index: Some(index),
+                reason,
+            } => write!(f, "invalid mesh node {index}: {reason}"),
+            Self::InvalidMesh {
+                index: None,
+                reason,
+            } => write!(f, "invalid mesh: {reason}"),
+            Self::InvalidCandidate {
+                index: Some(index),
+                reason,
+            } => write!(f, "invalid candidate node {index}: {reason}"),
+            Self::InvalidCandidate {
+                index: None,
+                reason,
+            } => write!(f, "invalid candidate: {reason}"),
+            Self::CostOverflow { op } => {
+                write!(f, "cost telemetry overflowed for `{}`", op.name())
+            }
+            Self::ResourceLimit {
+                field,
+                requested,
+                limit,
+            } => write!(
+                f,
+                "planner resource `{field}` requested {requested}, limit is {limit}"
+            ),
+            Self::AllocationFailed { stage, requested } => {
+                write!(
+                    f,
+                    "planner allocation failed during {stage} for {requested} elements"
+                )
+            }
+            Self::NumericalFailure { stage } => {
+                write!(f, "planner numerical failure during {stage}")
+            }
+            Self::Fem1dFailure { stage, source } => {
+                write!(f, "planner FEM failure during {stage}: {source}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for PlanError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Fem1dFailure { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+}
+
+/// A cache-declared answer. The planner independently re-verifies it before any
+/// certificate or discharge decision is emitted.
+#[derive(Debug, Clone, PartialEq)]
 pub struct CachedAnswer {
-    /// The nodal solution.
-    pub nodal: Vec<f64>,
-    /// The certified energy bound it carries.
-    pub bound: f64,
-    /// The mesh it lives on.
-    pub mesh: Vec<f64>,
+    nodal: Vec<f64>,
+    bound: f64,
+    mesh: Vec<f64>,
+}
+
+impl CachedAnswer {
+    /// Construct a structurally checked cache record.
+    ///
+    /// This does not trust the claimed certificate: [`plan`] independently
+    /// replays the verifier before using any returned cache entry.
+    ///
+    /// # Errors
+    /// Returns [`PlanError`] for an invalid bound, mesh, or nodal vector.
+    pub fn new(nodal: Vec<f64>, bound: f64, mesh: Vec<f64>) -> Result<Self, PlanError> {
+        validate_bound(bound, "cached_bound")?;
+        validate_mesh(&mesh)?;
+        validate_candidate(&mesh, &nodal)?;
+        Ok(Self { nodal, bound, mesh })
+    }
+
+    /// Cached nodal values.
+    #[must_use]
+    pub fn nodal(&self) -> &[f64] {
+        &self.nodal
+    }
+
+    /// Cache-declared bound. The planner never trusts it without replay.
+    #[must_use]
+    pub fn bound(&self) -> f64 {
+        self.bound
+    }
+
+    /// Cached mesh.
+    #[must_use]
+    pub fn mesh(&self) -> &[f64] {
+        &self.mesh
+    }
 }
 
 /// The Proposal-2 cache seam (implemented over the content-addressed
 /// store; the planner only needs lookup/insert semantics).
 pub trait AnswerCache {
-    /// A certified answer for `key` whose bound is ≤ `tol`, if any.
+    /// A candidate for `key` whose declared bound is ≤ `tol`, if any. The
+    /// implementation is not a trust root; [`plan`] re-verifies the candidate.
     fn lookup(&self, key: &str, tol: f64) -> Option<CachedAnswer>;
-    /// Record a certified answer.
+    /// Record an answer that the planner has just independently verified.
     fn insert(&mut self, key: &str, answer: CachedAnswer);
 }
 
@@ -92,25 +307,37 @@ impl AnswerCache for MemCache {
 #[derive(Debug)]
 pub struct CostTable {
     seen: BTreeMap<&'static str, (f64, u64)>,
-    /// The cold-telemetry fallback (conservative by design).
-    pub cold_default: f64,
+    cold_default: f64,
 }
 
 impl CostTable {
-    /// A table with the given conservative default.
-    #[must_use]
-    pub fn new(cold_default: f64) -> CostTable {
-        CostTable {
+    /// Construct a table with a finite, strictly positive cold fallback.
+    ///
+    /// # Errors
+    /// Returns [`PlanError`] when the fallback could poison operator choice.
+    pub fn new(cold_default: f64) -> Result<CostTable, PlanError> {
+        validate_positive_finite(cold_default, "cold_default")?;
+        Ok(CostTable {
             seen: BTreeMap::new(),
             cold_default,
-        }
+        })
     }
 
-    /// Record an actual cost.
-    pub fn record(&mut self, op: PlanOp, cost: f64) {
+    /// Record one finite, strictly positive observed cost.
+    ///
+    /// # Errors
+    /// Returns [`PlanError`] without mutating the table when the sample or
+    /// accumulator is unusable.
+    pub fn record(&mut self, op: PlanOp, cost: f64) -> Result<(), PlanError> {
+        validate_positive_finite(cost, "cost_sample")?;
         let e = self.seen.entry(op.name()).or_insert((0.0, 0));
-        e.0 += cost;
-        e.1 += 1;
+        let sum = e.0 + cost;
+        let count = e.1.checked_add(1).ok_or(PlanError::CostOverflow { op })?;
+        if !sum.is_finite() {
+            return Err(PlanError::CostOverflow { op });
+        }
+        *e = (sum, count);
+        Ok(())
     }
 
     /// Predict an operator's cost (learned mean, else the default).
@@ -126,6 +353,12 @@ impl CostTable {
                 }
             })
     }
+
+    /// The checked cold fallback used for unseen operators.
+    #[must_use]
+    pub fn cold_default(&self) -> f64 {
+        self.cold_default
+    }
 }
 
 /// One executed step in the plan (the audit trail).
@@ -137,10 +370,50 @@ pub struct OpLog {
     pub cost: f64,
     /// The certified bound after the step (∞ before any verify).
     pub bound_after: f64,
+    /// Full verifier authority after the step, when one was produced.
+    pub certificate_after: Option<VerifierCertificate>,
+}
+
+/// An equilibrated enclosure together with the verifier identity that minted it.
+///
+/// Fields are private so callers cannot detach a `Verified` color from the
+/// verifier family and reconstructed-flux identity checked by the planner.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VerifierCertificate {
+    bound: f64,
+    color: Color,
+    verifier_family: &'static str,
+    flux_hash: u64,
+}
+
+impl VerifierCertificate {
+    /// Certified energy-error half width.
+    #[must_use]
+    pub fn bound(&self) -> f64 {
+        self.bound
+    }
+
+    /// Evidence color minted through `fs-evidence`'s guarded enclosure door.
+    #[must_use]
+    pub fn color(&self) -> &Color {
+        &self.color
+    }
+
+    /// Stable verifier-family identity.
+    #[must_use]
+    pub fn verifier_family(&self) -> &'static str {
+        self.verifier_family
+    }
+
+    /// Identity of the verifier's reconstructed flux.
+    #[must_use]
+    pub fn flux_hash(&self) -> u64 {
+        self.flux_hash
+    }
 }
 
 /// The planner verdict.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum PlanOutcome {
     /// The query is discharged: the certified bound meets tolerance.
     Discharged {
@@ -151,6 +424,8 @@ pub enum PlanOutcome {
         /// The certified energy bound (VERIFIED color: an equilibrated
         /// enclosure, never a DWR guess).
         bound: f64,
+        /// Full verifier authority for `bound`.
+        certificate: VerifierCertificate,
         /// The executed operator sequence.
         ops: Vec<OpLog>,
         /// Total cost spent (cells).
@@ -162,69 +437,469 @@ pub enum PlanOutcome {
     RefusedWithBest {
         /// The best certified bound achieved.
         best_bound: f64,
+        /// Full verifier authority for `best_bound`.
+        best_certificate: VerifierCertificate,
         /// The nodal answer that achieved it.
         best_nodal: Vec<f64>,
         /// Its mesh.
         best_mesh: Vec<f64>,
         /// The executed operator sequence.
         ops: Vec<OpLog>,
-        /// Total cost spent (≤ budget + the final step's cost).
+        /// Total cost spent (never exceeds the admitted budget).
         cost: f64,
         /// What to tell the caller.
+        reason: String,
+    },
+    /// The request was valid, but its budget could not fund even one solve and
+    /// no independently verified cache answer existed. No interval or color is
+    /// fabricated.
+    RefusedWithoutAnswer {
+        /// Operators attempted before the refusal (normally cache lookup only).
+        ops: Vec<OpLog>,
+        /// Total solved-cell cost spent.
+        cost: f64,
+        /// Teaching refusal.
         reason: String,
     },
 }
 
 /// The 1-D elliptic problem family the v0 planner discharges (the
 /// verifier's kernel class): exact solution `theta`-scaled.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ProblemFamily {
-    /// The exact solution polynomial at θ = 1.
-    pub base: Poly,
-    /// The family's kernel name (cache keys, ladder).
-    pub kernel: String,
+    base: Poly,
+    kernel: String,
 }
 
 impl ProblemFamily {
-    /// Instantiate the problem at `theta` on `mesh`.
+    /// Construct a checked 1-D manufactured-problem family.
+    ///
+    /// # Errors
+    /// Returns [`PlanError`] for a malformed kernel identity, empty/non-finite
+    /// polynomial, or non-homogeneous boundary values.
+    pub fn new(mut base: Poly, kernel: impl Into<String>) -> Result<Self, PlanError> {
+        let kernel = kernel.into();
+        validate_family(&base, &kernel)?;
+        for coefficient in &mut base.0 {
+            *coefficient = canonicalize_zero(*coefficient);
+        }
+        Ok(Self { base, kernel })
+    }
+
+    /// Exact-solution polynomial at `theta = 1`.
     #[must_use]
-    pub fn at(&self, theta: f64, mesh: Vec<f64>) -> MmsProblem {
-        let scaled = Poly(self.base.0.iter().map(|c| c * theta).collect());
-        MmsProblem::new(&self.kernel, scaled, mesh)
+    pub fn base(&self) -> &Poly {
+        &self.base
+    }
+
+    /// Stable kernel identity.
+    #[must_use]
+    pub fn kernel(&self) -> &str {
+        &self.kernel
+    }
+
+    /// Instantiate the checked problem at `theta` on an arbitrary valid mesh.
+    ///
+    /// # Errors
+    /// Returns [`PlanError`] for invalid `theta`/mesh values or coefficient
+    /// overflow while scaling/differentiating the family.
+    pub fn at(&self, theta: f64, mut mesh: Vec<f64>) -> Result<MmsProblem, PlanError> {
+        validate_finite(theta, "theta")?;
+        canonicalize_mesh_zeros(&mut mesh);
+        validate_mesh(&mesh)?;
+        validate_family_cell_work(self, mesh.len() - 1)?;
+        let mut scaled = Vec::new();
+        scaled
+            .try_reserve_exact(self.base.0.len())
+            .map_err(|_| PlanError::AllocationFailed {
+                stage: "problem-family scaling",
+                requested: self.base.0.len(),
+            })?;
+        for (index, coefficient) in self.base.0.iter().enumerate() {
+            let value = coefficient * theta;
+            if !value.is_finite() {
+                return Err(PlanError::InvalidFamily {
+                    field: "scaled_base",
+                    index: Some(index),
+                    reason: "coefficient scaling is non-finite",
+                });
+            }
+            scaled.push(canonicalize_zero(value));
+        }
+        let scaled = Poly(scaled);
+        if !scaled.is_exactly_zero_at_one() {
+            return Err(PlanError::InvalidFamily {
+                field: "scaled_base",
+                index: None,
+                reason: "rounded coefficient scaling must preserve the exact homogeneous trace",
+            });
+        }
+        let problem = MmsProblem::new(&self.kernel, scaled, mesh);
+        if problem
+            .f
+            .0
+            .iter()
+            .chain(&problem.big_f.0)
+            .any(|coefficient| !coefficient.is_finite())
+        {
+            return Err(PlanError::InvalidFamily {
+                field: "derived_polynomial",
+                index: None,
+                reason: "differentiation or antiderivation overflowed",
+            });
+        }
+        Ok(problem)
     }
 }
 
-fn uniform_mesh(cells: usize) -> Vec<f64> {
+pub(crate) fn validate_finite(value: f64, field: &'static str) -> Result<(), PlanError> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(PlanError::InvalidScalar {
+            field,
+            reason: "must be finite",
+        })
+    }
+}
+
+pub(crate) fn validate_positive_finite(value: f64, field: &'static str) -> Result<(), PlanError> {
+    if !value.is_finite() {
+        Err(PlanError::InvalidScalar {
+            field,
+            reason: "must be finite",
+        })
+    } else if value <= 0.0 {
+        Err(PlanError::InvalidScalar {
+            field,
+            reason: "must be strictly positive",
+        })
+    } else {
+        Ok(())
+    }
+}
+
+pub(crate) fn validate_bound(bound: f64, field: &'static str) -> Result<(), PlanError> {
+    if !bound.is_finite() {
+        Err(PlanError::InvalidScalar {
+            field,
+            reason: "must be finite",
+        })
+    } else if bound < 0.0 {
+        Err(PlanError::InvalidScalar {
+            field,
+            reason: "must be non-negative",
+        })
+    } else {
+        Ok(())
+    }
+}
+
+pub(crate) fn validate_budget(value: f64, field: &'static str) -> Result<(), PlanError> {
+    validate_positive_finite(value, field)?;
+    if value > MAX_EXACT_CELLS_F64 {
+        Err(PlanError::InvalidScalar {
+            field,
+            reason: "exceeds exact f64 cell accounting",
+        })
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_family(base: &Poly, kernel: &str) -> Result<(), PlanError> {
+    if let Some(reason) = color_leaf_identity_reason(kernel) {
+        return Err(PlanError::InvalidFamily {
+            field: "kernel",
+            index: None,
+            reason,
+        });
+    }
+    if base.0.is_empty() {
+        return Err(PlanError::EmptySequence {
+            field: "family.base",
+        });
+    }
+    if base.0.len() > MAX_FAMILY_COEFFICIENTS {
+        return Err(PlanError::ResourceLimit {
+            field: "family.base",
+            requested: base.0.len(),
+            limit: MAX_FAMILY_COEFFICIENTS,
+        });
+    }
+    for (index, coefficient) in base.0.iter().enumerate() {
+        if !coefficient.is_finite() {
+            return Err(PlanError::InvalidFamily {
+                field: "base",
+                index: Some(index),
+                reason: "coefficient must be finite",
+            });
+        }
+    }
+    // The equilibrated verifier assumes the exact solution belongs to H_0^1.
+    // At x=1 the exact binary-rational coefficient sum is authoritative:
+    // point Horner can hide a residue and interval containment proves only that
+    // zero is possible. The lower-layer superaccumulator decides exact equality.
+    if base.0[0].to_bits() != 0.0_f64.to_bits() || !base.is_exactly_zero_at_one() {
+        return Err(PlanError::InvalidFamily {
+            field: "boundary",
+            index: None,
+            reason: "exact solution must vanish at x=0 and x=1",
+        });
+    }
+    Ok(())
+}
+
+fn validate_family_cell_work(family: &ProblemFamily, cells: usize) -> Result<(), PlanError> {
+    let requested = family
+        .base
+        .0
+        .len()
+        .checked_mul(cells)
+        .and_then(|work| work.checked_mul(VERIFIER_GAUSS_POINTS))
+        .ok_or(PlanError::ResourceLimit {
+            field: "polynomial_cell_work",
+            requested: usize::MAX,
+            limit: MAX_POLYNOMIAL_CELL_WORK,
+        })?;
+    if requested > MAX_POLYNOMIAL_CELL_WORK {
+        Err(PlanError::ResourceLimit {
+            field: "polynomial_cell_work",
+            requested,
+            limit: MAX_POLYNOMIAL_CELL_WORK,
+        })
+    } else {
+        Ok(())
+    }
+}
+
+pub(crate) fn validate_rung_cells(rung_cells: &[usize]) -> Result<(), PlanError> {
+    if rung_cells.is_empty() {
+        return Err(PlanError::EmptySequence {
+            field: "rung_cells",
+        });
+    }
+    if rung_cells.len() > MAX_LADDER_RUNGS {
+        return Err(PlanError::ResourceLimit {
+            field: "rung_cells",
+            requested: rung_cells.len(),
+            limit: MAX_LADDER_RUNGS,
+        });
+    }
+    for (index, &cells) in rung_cells.iter().enumerate() {
+        if cells == 0 {
+            return Err(PlanError::InvalidSequenceEntry {
+                field: "rung_cells",
+                index,
+                reason: "cell count must be non-zero",
+            });
+        }
+        if widened_usize(cells) > MAX_EXACT_CELLS {
+            return Err(PlanError::InvalidSequenceEntry {
+                field: "rung_cells",
+                index,
+                reason: "cell count exceeds exact f64 budget accounting",
+            });
+        }
+        if cells > MAX_PLANNER_CELLS {
+            return Err(PlanError::ResourceLimit {
+                field: "rung_cells",
+                requested: cells,
+                limit: MAX_PLANNER_CELLS,
+            });
+        }
+        if index > 0 && cells <= rung_cells[index - 1] {
+            return Err(PlanError::InvalidSequenceEntry {
+                field: "rung_cells",
+                index,
+                reason: "cell counts must be strictly increasing",
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_mesh(mesh: &[f64]) -> Result<(), PlanError> {
+    if mesh.len() < 2 {
+        return Err(PlanError::InvalidMesh {
+            index: None,
+            reason: "at least two boundary nodes are required",
+        });
+    }
+    let cells = mesh.len() - 1;
+    if widened_usize(cells) > MAX_EXACT_CELLS {
+        return Err(PlanError::InvalidMesh {
+            index: None,
+            reason: "cell count exceeds exact f64 budget accounting",
+        });
+    }
+    if cells > MAX_PLANNER_CELLS {
+        return Err(PlanError::ResourceLimit {
+            field: "mesh_cells",
+            requested: cells,
+            limit: MAX_PLANNER_CELLS,
+        });
+    }
+    for (index, node) in mesh.iter().enumerate() {
+        if !node.is_finite() {
+            return Err(PlanError::InvalidMesh {
+                index: Some(index),
+                reason: "node must be finite",
+            });
+        }
+    }
+    if canonical_f64_bits(mesh[0]) != 0 {
+        return Err(PlanError::InvalidMesh {
+            index: Some(0),
+            reason: "first node must equal 0",
+        });
+    }
+    if canonical_f64_bits(*mesh.last().ok_or(PlanError::InvalidMesh {
+        index: None,
+        reason: "at least two boundary nodes are required",
+    })?) != 1.0_f64.to_bits()
+    {
+        return Err(PlanError::InvalidMesh {
+            index: Some(mesh.len() - 1),
+            reason: "last node must equal 1",
+        });
+    }
+    for (index, pair) in mesh.windows(2).enumerate() {
+        if pair[0].partial_cmp(&pair[1]) != Some(core::cmp::Ordering::Less) {
+            return Err(PlanError::InvalidMesh {
+                index: Some(index + 1),
+                reason: "nodes must be strictly increasing",
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_candidate(mesh: &[f64], nodal: &[f64]) -> Result<(), PlanError> {
+    if nodal.len() != mesh.len() {
+        return Err(PlanError::InvalidCandidate {
+            index: None,
+            reason: "nodal length must equal mesh-node length",
+        });
+    }
+    for (index, value) in nodal.iter().enumerate() {
+        if !value.is_finite() {
+            return Err(PlanError::InvalidCandidate {
+                index: Some(index),
+                reason: "nodal value must be finite",
+            });
+        }
+    }
+    if canonical_f64_bits(nodal[0]) != 0
+        || canonical_f64_bits(*nodal.last().ok_or(PlanError::InvalidCandidate {
+            index: None,
+            reason: "nodal values must include both boundaries",
+        })?) != 0
+    {
+        return Err(PlanError::InvalidCandidate {
+            index: None,
+            reason: "homogeneous boundary values must equal zero",
+        });
+    }
+    Ok(())
+}
+
+fn canonical_f64_bits(value: f64) -> u64 {
+    const SIGN_BIT: u64 = 1_u64 << 63;
+    match value.to_bits() {
+        SIGN_BIT => 0,
+        bits => bits,
+    }
+}
+
+#[allow(clippy::cast_lossless)]
+const fn widened_usize(value: usize) -> u128 {
+    value as u128
+}
+
+fn canonicalize_zero(value: f64) -> f64 {
+    f64::from_bits(canonical_f64_bits(value))
+}
+
+fn canonicalize_mesh_zeros(mesh: &mut [f64]) {
+    for node in mesh {
+        *node = canonicalize_zero(*node);
+    }
+}
+
+fn meshes_have_same_nodes(left: &[f64], right: &[f64]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(left, right)| canonical_f64_bits(*left) == canonical_f64_bits(*right))
+}
+
+fn uniform_mesh(cells: usize) -> Result<Vec<f64>, PlanError> {
+    validate_rung_cells(&[cells])?;
+    let nodes = cells.checked_add(1).ok_or(PlanError::ResourceLimit {
+        field: "mesh_nodes",
+        requested: cells,
+        limit: MAX_PLANNER_CELLS + 1,
+    })?;
+    let mut mesh = Vec::new();
+    mesh.try_reserve_exact(nodes)
+        .map_err(|_| PlanError::AllocationFailed {
+            stage: "uniform mesh",
+            requested: nodes,
+        })?;
     #[allow(clippy::cast_precision_loss)]
-    (0..=cells).map(|k| k as f64 / cells as f64).collect()
+    for k in 0..=cells {
+        mesh.push(k as f64 / cells as f64);
+    }
+    validate_mesh(&mesh)?;
+    Ok(mesh)
 }
 
 /// Per-element energy-residual indicators (the same integrand the
 /// equilibrated verifier bounds, localized): `∫_K (c* − F − u′)²`.
-fn element_indicators(problem: &MmsProblem, nodal: &[f64]) -> Vec<f64> {
+fn element_indicators(problem: &MmsProblem, nodal: &[f64]) -> Result<Vec<f64>, PlanError> {
     let m = &problem.mesh;
-    let n = m.len();
+    validate_mesh(m)?;
+    validate_candidate(m, nodal)?;
     // The verifier's optimal constant.
     let mut c_star = 0.0f64;
-    for e in 0..n - 1 {
-        let h = m[e + 1] - m[e];
-        let slope = (nodal[e + 1] - nodal[e]) / h;
-        for (gx, gw) in gauss5(m[e], m[e + 1]) {
+    for (element, nodes) in m.windows(2).enumerate() {
+        let h = nodes[1] - nodes[0];
+        let slope = (nodal[element + 1] - nodal[element]) / h;
+        for (gx, gw) in gauss5(nodes[0], nodes[1]) {
             c_star += gw * (problem.big_f.eval(gx) + slope);
         }
     }
-    (0..n - 1)
-        .map(|e| {
-            let h = m[e + 1] - m[e];
-            let slope = (nodal[e + 1] - nodal[e]) / h;
-            let mut acc = 0.0f64;
-            for (gx, gw) in gauss5(m[e], m[e + 1]) {
-                let r = c_star - problem.big_f.eval(gx) - slope;
-                acc += gw * r * r;
-            }
-            acc
-        })
-        .collect()
+    if !c_star.is_finite() {
+        return Err(PlanError::NumericalFailure {
+            stage: "residual indicator flux constant",
+        });
+    }
+    let indicator_count = m.len() - 1;
+    let mut indicators = Vec::new();
+    indicators
+        .try_reserve_exact(indicator_count)
+        .map_err(|_| PlanError::AllocationFailed {
+            stage: "residual indicators",
+            requested: indicator_count,
+        })?;
+    for (element, nodes) in m.windows(2).enumerate() {
+        let h = nodes[1] - nodes[0];
+        let slope = (nodal[element + 1] - nodal[element]) / h;
+        let mut acc = 0.0f64;
+        for (gx, gw) in gauss5(nodes[0], nodes[1]) {
+            let r = c_star - problem.big_f.eval(gx) - slope;
+            acc += gw * r * r;
+        }
+        if !acc.is_finite() || acc < 0.0 {
+            return Err(PlanError::NumericalFailure {
+                stage: "residual indicator integration",
+            });
+        }
+        indicators.push(acc);
+    }
+    Ok(indicators)
 }
 
 /// EQUIDISTRIBUTION refinement (the textbook optimal-mesh criterion):
@@ -233,32 +908,426 @@ fn element_indicators(problem: &MmsProblem, nodal: &[f64]) -> Vec<f64> {
 /// gap (splitting an element into 2^d pieces cuts its contribution by
 /// ~4^d in this residual model). Deterministic; converges in a couple
 /// of solve rounds instead of crawling at the tail.
-fn refine_to_target(mesh: &[f64], indicators: &[f64], tol: f64) -> Vec<f64> {
-    let n = indicators.len().max(1);
-    #[allow(clippy::cast_precision_loss)]
-    let target = (tol * tol / n as f64).max(f64::MIN_POSITIVE);
-    let mut out = Vec::with_capacity(mesh.len() + 16);
-    for e in 0..mesh.len() - 1 {
-        out.push(mesh[e]);
-        if indicators[e] > target {
-            let gap = indicators[e] / target;
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            let depth = ((gap.log2() / 2.0).ceil() as u32).clamp(1, 5);
-            let pieces = 1usize << depth;
-            let (a, b) = (mesh[e], mesh[e + 1]);
+fn refine_to_target(mesh: &[f64], indicators: &[f64], tol: f64) -> Result<Vec<f64>, PlanError> {
+    validate_mesh(mesh)?;
+    validate_positive_finite(tol, "tolerance")?;
+    if indicators.len() + 1 != mesh.len() {
+        return Err(PlanError::InvalidSequenceEntry {
+            field: "indicators",
+            index: indicators.len(),
+            reason: "indicator count must equal mesh cell count",
+        });
+    }
+    if let Some(index) = indicators
+        .iter()
+        .position(|indicator| !indicator.is_finite() || *indicator < 0.0)
+    {
+        return Err(PlanError::InvalidSequenceEntry {
+            field: "indicators",
+            index,
+            reason: "indicator must be finite and non-negative",
+        });
+    }
+    let target = refinement_target(indicators.len(), tol);
+    let refined_cells = refined_cell_count(indicators, target)?;
+    let refined_nodes = refined_cells
+        .checked_add(1)
+        .ok_or(PlanError::ResourceLimit {
+            field: "adaptive_mesh_nodes",
+            requested: refined_cells,
+            limit: MAX_PLANNER_CELLS + 1,
+        })?;
+    let mut out = Vec::new();
+    out.try_reserve_exact(refined_nodes)
+        .map_err(|_| PlanError::AllocationFailed {
+            stage: "adaptive mesh",
+            requested: refined_nodes,
+        })?;
+    for (element, nodes) in mesh.windows(2).enumerate() {
+        out.push(nodes[0]);
+        let pieces = refinement_pieces(indicators[element], target);
+        if pieces > 1 {
+            let (a, b) = (nodes[0], nodes[1]);
             for k in 1..pieces {
                 #[allow(clippy::cast_precision_loss)]
                 out.push(a + (b - a) * k as f64 / pieces as f64);
             }
         }
     }
-    out.push(*mesh.last().expect("nonempty"));
-    out
+    out.push(1.0);
+    canonicalize_mesh_zeros(&mut out);
+    validate_mesh(&out)?;
+    Ok(out)
+}
+
+fn refinement_pieces(indicator: f64, target: f64) -> usize {
+    if indicator <= target {
+        return 1;
+    }
+    let gap = indicator / target;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let depth = if gap.is_finite() {
+        ((gap.log2() / 2.0).ceil() as u32).clamp(1, 5)
+    } else {
+        5
+    };
+    1usize << depth
+}
+
+fn refinement_target(indicator_count: usize, tol: f64) -> f64 {
+    let count = indicator_count.max(1);
+    #[allow(clippy::cast_precision_loss)]
+    let target = tol * tol / count as f64;
+    target.max(f64::MIN_POSITIVE)
+}
+
+fn refined_cell_count(indicators: &[f64], target: f64) -> Result<usize, PlanError> {
+    let mut cells = 0usize;
+    for indicator in indicators {
+        cells = cells
+            .checked_add(refinement_pieces(*indicator, target))
+            .ok_or(PlanError::ResourceLimit {
+                field: "adaptive_mesh_cells",
+                requested: usize::MAX,
+                limit: MAX_PLANNER_CELLS,
+            })?;
+        if cells > MAX_PLANNER_CELLS {
+            return Err(PlanError::ResourceLimit {
+                field: "adaptive_mesh_cells",
+                requested: cells,
+                limit: MAX_PLANNER_CELLS,
+            });
+        }
+    }
+    Ok(cells)
+}
+
+/// Deterministic P1 interpolation from an arbitrary valid coarse mesh onto an
+/// arbitrary valid target mesh over the same `[0,1]` domain.
+fn prolong_linear(
+    coarse_mesh: &[f64],
+    coarse_nodal: &[f64],
+    target_mesh: &[f64],
+) -> Result<Vec<f64>, PlanError> {
+    validate_mesh(coarse_mesh)?;
+    validate_candidate(coarse_mesh, coarse_nodal)?;
+    validate_mesh(target_mesh)?;
+
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(target_mesh.len())
+        .map_err(|_| PlanError::AllocationFailed {
+            stage: "linear prolongation",
+            requested: target_mesh.len(),
+        })?;
+    let mut coarse_element = 0usize;
+    for &x in target_mesh {
+        while coarse_element + 1 < coarse_mesh.len() - 1 && x > coarse_mesh[coarse_element + 1] {
+            coarse_element += 1;
+        }
+        let a = coarse_mesh[coarse_element];
+        let b = coarse_mesh[coarse_element + 1];
+        let value = if canonical_f64_bits(x) == canonical_f64_bits(a) {
+            coarse_nodal[coarse_element]
+        } else if canonical_f64_bits(x) == canonical_f64_bits(b) {
+            coarse_nodal[coarse_element + 1]
+        } else {
+            let fraction = (x - a) / (b - a);
+            coarse_nodal[coarse_element]
+                + fraction * (coarse_nodal[coarse_element + 1] - coarse_nodal[coarse_element])
+        };
+        if !value.is_finite() {
+            return Err(PlanError::NumericalFailure {
+                stage: "linear prolongation",
+            });
+        }
+        output.push(canonicalize_zero(value));
+    }
+    validate_candidate(target_mesh, &output)?;
+    Ok(output)
+}
+
+#[derive(Debug, Clone)]
+struct CheckedVerification {
+    certificate: VerifierCertificate,
+    accept: bool,
+}
+
+fn checked_verify(
+    problem: &MmsProblem,
+    candidate: &[f64],
+    tolerance: f64,
+) -> Result<CheckedVerification, PlanError> {
+    validate_candidate(&problem.mesh, candidate)?;
+    let report = verify(problem, candidate, tolerance);
+    if report.refusal.is_some() {
+        return Err(PlanError::NumericalFailure {
+            stage: "verifier refusal",
+        });
+    }
+    let lo = report.bound.lo;
+    let hi = report.bound.hi;
+    if !lo.is_finite() || !hi.is_finite() || lo < 0.0 || lo > hi {
+        return Err(PlanError::NumericalFailure {
+            stage: "verifier enclosure",
+        });
+    }
+    let expected_accept = hi <= tolerance;
+    if report.accept != expected_accept {
+        return Err(PlanError::NumericalFailure {
+            stage: "verifier acceptance consistency",
+        });
+    }
+    let guarded_color = verified_from(&NumericalCertificate::enclosure(0.0, hi)).map_err(|_| {
+        PlanError::NumericalFailure {
+            stage: "verifier evidence-color admission",
+        }
+    })?;
+    match (&report.color, expected_accept) {
+        (
+            Some(Color::Verified {
+                lo: color_lo,
+                hi: color_hi,
+            }),
+            true,
+        ) if canonical_f64_bits(*color_lo) == 0
+            && canonical_f64_bits(*color_hi) == canonical_f64_bits(hi) => {}
+        (None, false) => {}
+        _ => {
+            return Err(PlanError::NumericalFailure {
+                stage: "verifier color consistency",
+            });
+        }
+    }
+    Ok(CheckedVerification {
+        certificate: VerifierCertificate {
+            bound: canonicalize_zero(hi),
+            color: report.color.unwrap_or(guarded_color),
+            verifier_family: report.family,
+            flux_hash: report.flux_hash,
+        },
+        accept: expected_accept,
+    })
+}
+
+fn cache_key(family: &ProblemFamily, theta: f64) -> Result<String, PlanError> {
+    use core::fmt::Write as _;
+
+    let coefficient_bytes =
+        family
+            .base
+            .0
+            .len()
+            .checked_mul(16)
+            .ok_or(PlanError::ResourceLimit {
+                field: "cache_key_bytes",
+                requested: usize::MAX,
+                limit: 96 + MAX_COLOR_IDENTITY_BYTES + MAX_FAMILY_COEFFICIENTS * 16,
+            })?;
+    let capacity = 96usize
+        .checked_add(family.kernel.len())
+        .and_then(|size| size.checked_add(coefficient_bytes))
+        .ok_or(PlanError::ResourceLimit {
+            field: "cache_key_bytes",
+            requested: usize::MAX,
+            limit: 96 + MAX_COLOR_IDENTITY_BYTES + MAX_FAMILY_COEFFICIENTS * 16,
+        })?;
+    let mut key = String::new();
+    key.try_reserve_exact(capacity)
+        .map_err(|_| PlanError::AllocationFailed {
+            stage: "planner cache key",
+            requested: capacity,
+        })?;
+    let _ = write!(
+        key,
+        "fs-ir-ladder:v2:k{}:{}:theta={:016x}:n{}:",
+        family.kernel.len(),
+        family.kernel,
+        canonical_f64_bits(theta),
+        family.base.0.len()
+    );
+    for coefficient in &family.base.0 {
+        let _ = write!(key, "{:016x}", canonical_f64_bits(*coefficient));
+    }
+    Ok(key)
+}
+
+fn solved_cell_cost(mesh: &[f64]) -> Result<f64, PlanError> {
+    validate_mesh(mesh)?;
+    cell_count_cost(mesh.len() - 1)
+}
+
+fn cell_count_cost(cells: usize) -> Result<f64, PlanError> {
+    if cells == 0 || cells > MAX_PLANNER_CELLS {
+        return Err(PlanError::ResourceLimit {
+            field: "operator_cells",
+            requested: cells,
+            limit: MAX_PLANNER_CELLS,
+        });
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let cost = cells as f64;
+    validate_positive_finite(cost, "operator_cost")?;
+    Ok(cost)
+}
+
+fn can_afford(spent: f64, next_cost: f64, budget: f64) -> bool {
+    next_cost <= budget - spent
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PendingTransition {
+    op: PlanOp,
+    observed_cost: f64,
+}
+
+impl PendingTransition {
+    fn new(op: PlanOp) -> Self {
+        Self {
+            op,
+            observed_cost: 0.0,
+        }
+    }
+
+    fn observe(&mut self, cost: f64) -> Result<(), PlanError> {
+        validate_positive_finite(cost, "transition_observed_cost")?;
+        let observed_cost = self.observed_cost + cost;
+        if !observed_cost.is_finite() {
+            return Err(PlanError::CostOverflow { op: self.op });
+        }
+        self.observed_cost = observed_cost;
+        Ok(())
+    }
+}
+
+fn record_observed_transition(
+    costs: &mut CostTable,
+    pending: &mut Option<PendingTransition>,
+) -> Result<(), PlanError> {
+    if pending
+        .as_ref()
+        .is_some_and(|transition| transition.observed_cost > 0.0)
+    {
+        let transition = pending.take().ok_or(PlanError::NumericalFailure {
+            stage: "pending transition accounting",
+        })?;
+        costs.record(transition.op, transition.observed_cost)?;
+    }
+    Ok(())
+}
+
+/// Whether an operational planner observer permits later work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PlanControl {
+    Continue,
+    Stop,
+}
+
+/// Operational checkpoints exposed to the anytime adapter.
+pub(crate) trait PlanObserver {
+    /// Called before any paid operation or its resource allocation begins.
+    fn before_work(
+        &mut self,
+        spent: f64,
+        next_cost: f64,
+        best: Option<(&VerifierCertificate, &[f64])>,
+        costs: &CostTable,
+    ) -> Result<PlanControl, PlanError>;
+
+    /// Called immediately after a verifier certificate and its current-work
+    /// telemetry are committed, before any later transition, cache insertion,
+    /// telemetry, allocation, or numerical work.
+    fn certified(
+        &mut self,
+        spent: f64,
+        best: (&VerifierCertificate, &[f64]),
+        costs: &CostTable,
+    ) -> Result<PlanControl, PlanError>;
+}
+
+struct ContinueObserver;
+
+impl PlanObserver for ContinueObserver {
+    fn before_work(
+        &mut self,
+        _spent: f64,
+        _next_cost: f64,
+        _best: Option<(&VerifierCertificate, &[f64])>,
+        _costs: &CostTable,
+    ) -> Result<PlanControl, PlanError> {
+        Ok(PlanControl::Continue)
+    }
+
+    fn certified(
+        &mut self,
+        _spent: f64,
+        _best: (&VerifierCertificate, &[f64]),
+        _costs: &CostTable,
+    ) -> Result<PlanControl, PlanError> {
+        Ok(PlanControl::Continue)
+    }
+}
+
+pub(crate) struct ObservedPlan {
+    pub(crate) outcome: PlanOutcome,
+    pub(crate) stopped: bool,
+}
+
+fn finished_plan(outcome: PlanOutcome) -> ObservedPlan {
+    ObservedPlan {
+        outcome,
+        stopped: false,
+    }
+}
+
+fn refuse(
+    best: Option<(VerifierCertificate, Vec<f64>, Vec<f64>)>,
+    ops: Vec<OpLog>,
+    cost: f64,
+    reason: String,
+) -> PlanOutcome {
+    match best {
+        Some((best_certificate, best_nodal, best_mesh)) => PlanOutcome::RefusedWithBest {
+            best_bound: best_certificate.bound(),
+            best_certificate,
+            best_nodal,
+            best_mesh,
+            ops,
+            cost,
+            reason,
+        },
+        None => PlanOutcome::RefusedWithoutAnswer { ops, cost, reason },
+    }
+}
+
+fn best_ref(
+    best: Option<&(VerifierCertificate, Vec<f64>, Vec<f64>)>,
+) -> Option<(&VerifierCertificate, &[f64])> {
+    best.map(|(certificate, _, mesh)| (certificate, mesh.as_slice()))
+}
+
+fn stopped_plan(
+    best: Option<(VerifierCertificate, Vec<f64>, Vec<f64>)>,
+    ops: Vec<OpLog>,
+    cost: f64,
+) -> ObservedPlan {
+    ObservedPlan {
+        outcome: refuse(
+            best,
+            ops,
+            cost,
+            "execution stopped by the anytime observer before later planner work".to_string(),
+        ),
+        stopped: true,
+    }
 }
 
 /// The greedy ladder walk. `rung_cells` is the fidelity lattice
 /// (coarsest first); `budget_cells` is the cost budget in solved cells.
-#[must_use]
+///
+/// # Errors
+/// Returns [`PlanError`] before issuing a certificate when any public input,
+/// cache replay, telemetry update, or numerical intermediate is unusable.
 #[allow(clippy::too_many_lines)]
 pub fn plan(
     family: &ProblemFamily,
@@ -268,170 +1337,335 @@ pub fn plan(
     rung_cells: &[usize],
     cache: &mut dyn AnswerCache,
     costs: &mut CostTable,
-) -> PlanOutcome {
-    let key = format!("{}@theta={theta:.6e}@tol<=", family.kernel);
+) -> Result<PlanOutcome, PlanError> {
+    let observed = plan_observed(
+        family,
+        theta,
+        tol,
+        budget_cells,
+        rung_cells,
+        cache,
+        costs,
+        &mut ContinueObserver,
+    )?;
+    if observed.stopped {
+        return Err(PlanError::NumericalFailure {
+            stage: "non-stoppable planner observer",
+        });
+    }
+    Ok(observed.outcome)
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub(crate) fn plan_observed(
+    family: &ProblemFamily,
+    theta: f64,
+    tol: f64,
+    budget_cells: f64,
+    rung_cells: &[usize],
+    cache: &mut dyn AnswerCache,
+    costs: &mut CostTable,
+    observer: &mut dyn PlanObserver,
+) -> Result<ObservedPlan, PlanError> {
+    validate_finite(theta, "theta")?;
+    validate_positive_finite(tol, "tolerance")?;
+    validate_budget(budget_cells, "budget_cells")?;
+    validate_rung_cells(rung_cells)?;
+    for &cells in rung_cells {
+        validate_family_cell_work(family, cells)?;
+    }
+    // Re-instantiation below checks theta-scaled derived coefficients too.
+    let key = cache_key(family, theta)?;
     let mut ops: Vec<OpLog> = Vec::new();
     let mut spent = 0.0f64;
-    let mut best: Option<(f64, Vec<f64>, Vec<f64>)> = None; // (bound, nodal, mesh)
-    // ---- Operator 1: the cache (zero solves on a hit).
+    let mut best: Option<(VerifierCertificate, Vec<f64>, Vec<f64>)> = None;
+    // ---- Operator 1: the cache (zero solved-cell cost on a hit). Cache
+    // metadata is never evidence: independently replay the verifier.
     if let Some(hit) = cache.lookup(&key, tol) {
-        ops.push(OpLog {
-            op: PlanOp::CacheLookup,
-            cost: 0.0,
-            bound_after: hit.bound,
-        });
-        return PlanOutcome::Discharged {
-            nodal: hit.nodal,
-            mesh: hit.mesh,
-            bound: hit.bound,
-            ops,
-            cost: 0.0,
-        };
+        let replay = family
+            .at(theta, hit.mesh.clone())
+            .and_then(|problem| checked_verify(&problem, &hit.nodal, tol));
+        if let Ok(checked) = replay
+            && checked.accept
+        {
+            let certificate = checked.certificate;
+            ops.push(OpLog {
+                op: PlanOp::CacheLookup,
+                cost: 0.0,
+                bound_after: certificate.bound(),
+                certificate_after: Some(certificate.clone()),
+            });
+            best = Some((certificate.clone(), hit.nodal.clone(), hit.mesh.clone()));
+            let best_certificate = best_ref(best.as_ref()).ok_or(PlanError::NumericalFailure {
+                stage: "missing best certificate after cache replay",
+            })?;
+            if observer.certified(0.0, best_certificate, costs)? == PlanControl::Stop {
+                return Ok(stopped_plan(best, ops, 0.0));
+            }
+            return Ok(finished_plan(PlanOutcome::Discharged {
+                nodal: hit.nodal,
+                mesh: hit.mesh,
+                bound: certificate.bound(),
+                certificate,
+                ops,
+                cost: 0.0,
+            }));
+        }
     }
     ops.push(OpLog {
         op: PlanOp::CacheLookup,
         cost: 0.0,
         bound_after: f64::INFINITY,
+        certificate_after: None,
     });
+    let initial_cost = cell_count_cost(rung_cells[0])?;
+    validate_family_cell_work(family, rung_cells[0])?;
+    if observer.before_work(spent, initial_cost, best_ref(best.as_ref()), costs)?
+        == PlanControl::Stop
+    {
+        return Ok(stopped_plan(best, ops, spent));
+    }
+    if !can_afford(spent, initial_cost, budget_cells) {
+        return Ok(finished_plan(refuse(
+            best,
+            ops,
+            spent,
+            format!(
+                "budget {budget_cells} cells cannot fund the initial {initial_cost:.0}-cell solve; \
+                 refusal occurs before allocation, so no mesh is allocated and no uncertified \
+                 answer is returned"
+            ),
+        )));
+    }
     let mut rung = 0usize;
-    let mut mesh = uniform_mesh(rung_cells[0]);
+    let mut mesh = uniform_mesh(rung_cells[0])?;
     let mut carried: Option<Vec<f64>> = None; // prolongated candidate
+    let mut pending_transition: Option<PendingTransition> = None;
     loop {
         // ---- Operator 2: speculate — verify a carried candidate
         // WITHOUT solving (prolongation from the previous rung).
         if let Some(cand) = carried.take() {
-            let problem = family.at(theta, mesh.clone());
-            #[allow(clippy::cast_precision_loss)]
-            let vcost = 0.2 * (mesh.len() - 1) as f64;
+            let vcost = 0.2 * solved_cell_cost(&mesh)?;
+            if observer.before_work(spent, vcost, best_ref(best.as_ref()), costs)?
+                == PlanControl::Stop
+            {
+                return Ok(stopped_plan(best, ops, spent));
+            }
+            if !can_afford(spent, vcost, budget_cells) {
+                return Ok(finished_plan(refuse(
+                    best,
+                    ops,
+                    spent,
+                    format!(
+                        "budget {budget_cells} cells cannot fund speculative verification \
+                         costing {vcost:.1}; no unverified candidate is returned — hand off to \
+                         refusal/anytime semantics"
+                    ),
+                )));
+            }
+            let problem = family.at(theta, mesh.clone())?;
             spent += vcost;
-            let rep = verify(&problem, &cand, tol);
-            costs.record(PlanOp::Speculate, vcost);
+            let checked = checked_verify(&problem, &cand, tol)?;
+            let transition = pending_transition
+                .as_mut()
+                .ok_or(PlanError::NumericalFailure {
+                    stage: "speculation without a pending climb",
+                })?;
+            if transition.op != PlanOp::Climb {
+                return Err(PlanError::NumericalFailure {
+                    stage: "speculation attached to a non-climb transition",
+                });
+            }
+            transition.observe(vcost)?;
+            record_observed_transition(costs, &mut pending_transition)?;
+            costs.record(PlanOp::Speculate, vcost)?;
+            let certificate = checked.certificate;
             ops.push(OpLog {
                 op: PlanOp::Speculate,
                 cost: vcost,
-                bound_after: rep.bound.hi,
+                bound_after: certificate.bound(),
+                certificate_after: Some(certificate.clone()),
             });
-            if rep.accept {
+            let better = best
+                .as_ref()
+                .is_none_or(|(best, _, _)| certificate.bound() < best.bound());
+            if better {
+                best = Some((certificate.clone(), cand.clone(), mesh.clone()));
+            }
+            let best_certificate = best_ref(best.as_ref()).ok_or(PlanError::NumericalFailure {
+                stage: "missing best certificate after speculation",
+            })?;
+            if observer.certified(spent, best_certificate, costs)? == PlanControl::Stop {
+                return Ok(stopped_plan(best, ops, spent));
+            }
+            if checked.accept {
                 cache.insert(
                     &key,
-                    CachedAnswer {
-                        nodal: cand.clone(),
-                        bound: rep.bound.hi,
-                        mesh: mesh.clone(),
-                    },
+                    CachedAnswer::new(cand.clone(), certificate.bound(), mesh.clone())?,
                 );
-                return PlanOutcome::Discharged {
+                return Ok(finished_plan(PlanOutcome::Discharged {
                     nodal: cand,
                     mesh,
-                    bound: rep.bound.hi,
+                    bound: certificate.bound(),
+                    certificate,
                     ops,
                     cost: spent,
-                };
+                }));
             }
         }
         // ---- Operator 3: solve at the current rung.
-        let problem = family.at(theta, mesh.clone());
-        #[allow(clippy::cast_precision_loss)]
-        let scost = (mesh.len() - 1) as f64;
+        let scost = solved_cell_cost(&mesh)?;
+        if observer.before_work(spent, scost, best_ref(best.as_ref()), costs)? == PlanControl::Stop
+        {
+            return Ok(stopped_plan(best, ops, spent));
+        }
+        if !can_afford(spent, scost, budget_cells) {
+            // A climb may already have paid for speculative verification; that
+            // observed work is real. A zero-cost refine/climb whose first
+            // downstream compute never ran remains unobserved and is dropped.
+            record_observed_transition(costs, &mut pending_transition)?;
+            return Ok(finished_plan(refuse(
+                best,
+                ops,
+                spent,
+                format!(
+                    "budget {budget_cells} cells cannot fund the next {scost:.0}-cell solve; \
+                     no uncertified answer is returned — hand off to refusal/anytime semantics"
+                ),
+            )));
+        }
+        let problem = family.at(theta, mesh.clone())?;
         spent += scost;
-        let nodal = solve_p1(&problem);
-        let rep = verify(&problem, &nodal, tol);
-        costs.record(PlanOp::SolveRung, scost);
+        let nodal = solve_p1(&problem).map_err(|source| PlanError::Fem1dFailure {
+            stage: "solve rung",
+            source,
+        })?;
+        validate_candidate(&mesh, &nodal)?;
+        let checked = checked_verify(&problem, &nodal, tol)?;
+        if let Some(transition) = pending_transition.as_mut() {
+            transition.observe(scost)?;
+        }
+        record_observed_transition(costs, &mut pending_transition)?;
+        costs.record(PlanOp::SolveRung, scost)?;
+        let certificate = checked.certificate;
         ops.push(OpLog {
             op: PlanOp::SolveRung,
             cost: scost,
-            bound_after: rep.bound.hi,
+            bound_after: certificate.bound(),
+            certificate_after: Some(certificate.clone()),
         });
-        let better = best.as_ref().is_none_or(|(b, _, _)| rep.bound.hi < *b);
+        let better = best
+            .as_ref()
+            .is_none_or(|(best, _, _)| certificate.bound() < best.bound());
         if better {
-            best = Some((rep.bound.hi, nodal.clone(), mesh.clone()));
+            best = Some((certificate.clone(), nodal.clone(), mesh.clone()));
         }
-        if rep.accept {
+        let best_certificate = best_ref(best.as_ref()).ok_or(PlanError::NumericalFailure {
+            stage: "missing best certificate after solve",
+        })?;
+        if observer.certified(spent, best_certificate, costs)? == PlanControl::Stop {
+            return Ok(stopped_plan(best, ops, spent));
+        }
+        if checked.accept {
             cache.insert(
                 &key,
-                CachedAnswer {
-                    nodal: nodal.clone(),
-                    bound: rep.bound.hi,
-                    mesh: mesh.clone(),
-                },
+                CachedAnswer::new(nodal.clone(), certificate.bound(), mesh.clone())?,
             );
-            return PlanOutcome::Discharged {
+            return Ok(finished_plan(PlanOutcome::Discharged {
                 nodal,
                 mesh,
-                bound: rep.bound.hi,
+                bound: certificate.bound(),
+                certificate,
                 ops,
                 cost: spent,
-            };
+            }));
         }
-        // ---- Budget check BEFORE committing to more work.
+        // Predictions select a deterministic zero-cost transition. They are
+        // not an admission oracle: the exact verification/solve cost is
+        // checked at the top of the next iteration before work begins.
         let next_refine = costs.predict(PlanOp::DwrRefine);
         let next_climb = costs.predict(PlanOp::Climb);
-        let cheapest_next = next_refine.min(next_climb);
-        if spent + cheapest_next > budget_cells {
-            let (b, n, m) = best.expect("at least one solve ran");
-            return PlanOutcome::RefusedWithBest {
-                best_bound: b,
-                best_nodal: n,
-                best_mesh: m,
-                ops,
-                cost: spent,
-                reason: format!(
-                    "budget {budget_cells} cells cannot fund the next operator \
-                     (predicted {cheapest_next:.0}); best certified bound {b:.3e} vs \
-                     tol {tol:.3e} — hand off to refusal/anytime semantics"
-                ),
-            };
-        }
+        let climb_available = rung + 1 < rung_cells.len();
+        let choose_refine = !climb_available || next_refine <= next_climb;
         // ---- Greedy choice: refine-where-indicated vs climb, by
         // learned predicted cost; deterministic tie-break prefers
         // DwrRefine (the cheaper-in-principle local move).
-        let choose_refine = next_refine <= next_climb;
         if choose_refine {
-            let indicators = element_indicators(&problem, &nodal);
-            mesh = refine_to_target(&mesh, &indicators, tol);
-            #[allow(clippy::cast_precision_loss)]
-            let rcost = (mesh.len() - 1) as f64;
-            costs.record(PlanOp::DwrRefine, rcost);
+            let indicators = element_indicators(&problem, &nodal)?;
+            let target = refinement_target(indicators.len(), tol);
+            let refined_cells = refined_cell_count(&indicators, target)?;
+            let refined_cost = cell_count_cost(refined_cells)?;
+            validate_family_cell_work(family, refined_cells)?;
+            if observer.before_work(spent, refined_cost, best_ref(best.as_ref()), costs)?
+                == PlanControl::Stop
+            {
+                return Ok(stopped_plan(best, ops, spent));
+            }
+            if !can_afford(spent, refined_cost, budget_cells) {
+                return Ok(finished_plan(refuse(
+                    best,
+                    ops,
+                    spent,
+                    format!(
+                        "budget {budget_cells} cells cannot fund the next {refined_cost:.0}-cell \
+                         adaptive solve; refusal occurs before any refined mesh is allocated"
+                    ),
+                )));
+            }
+            let refined = refine_to_target(&mesh, &indicators, tol)?;
+            if meshes_have_same_nodes(&mesh, &refined) {
+                return Ok(finished_plan(refuse(
+                    best,
+                    ops,
+                    spent,
+                    "refinement produced no new representable mesh node; refusing instead of \
+                     repeating the same solve"
+                        .to_string(),
+                )));
+            }
             ops.push(OpLog {
                 op: PlanOp::DwrRefine,
                 cost: 0.0, // the refine itself is bookkeeping; the solve pays
                 bound_after: f64::INFINITY,
+                certificate_after: None,
             });
+            mesh = refined;
             carried = None;
-        } else if rung + 1 < rung_cells.len() {
+            pending_transition = Some(PendingTransition::new(PlanOp::DwrRefine));
+        } else {
             rung += 1;
-            let fine_mesh = uniform_mesh(rung_cells[rung]);
-            // Prolongate the current answer as the speculation candidate
-            // (dyadic meshes: midpoint interpolation).
-            let mut cand = Vec::with_capacity(fine_mesh.len());
-            for (i, _) in fine_mesh.iter().enumerate() {
-                if i % 2 == 0 {
-                    cand.push(nodal[i / 2]);
-                } else {
-                    cand.push(f64::midpoint(nodal[i / 2], nodal[i / 2 + 1]));
-                }
+            let speculative_cost = 0.2 * cell_count_cost(rung_cells[rung])?;
+            validate_family_cell_work(family, rung_cells[rung])?;
+            if observer.before_work(spent, speculative_cost, best_ref(best.as_ref()), costs)?
+                == PlanControl::Stop
+            {
+                return Ok(stopped_plan(best, ops, spent));
             }
-            #[allow(clippy::cast_precision_loss)]
-            let ccost = (fine_mesh.len() - 1) as f64;
-            costs.record(PlanOp::Climb, ccost);
+            if !can_afford(spent, speculative_cost, budget_cells) {
+                return Ok(finished_plan(refuse(
+                    best,
+                    ops,
+                    spent,
+                    format!(
+                        "budget {budget_cells} cells cannot fund {speculative_cost:.1}-cell \
+                         verification on rung {}; refusal occurs before any fine mesh is allocated",
+                        rung_cells[rung]
+                    ),
+                )));
+            }
+            let fine_mesh = uniform_mesh(rung_cells[rung])?;
+            // Interpolate over the actual current mesh. It may be non-dyadic,
+            // nonuniform, or locally finer than this uniform target after DWR.
+            let cand = prolong_linear(&mesh, &nodal, &fine_mesh)?;
             ops.push(OpLog {
                 op: PlanOp::Climb,
                 cost: 0.0,
                 bound_after: f64::INFINITY,
+                certificate_after: None,
             });
             mesh = fine_mesh;
             carried = Some(cand);
-        } else {
-            // Top of the ladder and still short: refine locally anyway
-            // (the only move left).
-            let indicators = element_indicators(&problem, &nodal);
-            mesh = refine_to_target(&mesh, &indicators, tol);
-            ops.push(OpLog {
-                op: PlanOp::DwrRefine,
-                cost: 0.0,
-                bound_after: f64::INFINITY,
-            });
-            carried = None;
+            pending_transition = Some(PendingTransition::new(PlanOp::Climb));
         }
     }
 }
@@ -439,28 +1673,76 @@ pub fn plan(
 /// The FIXED BASELINE the kill criterion measures against: a single
 /// mid-rung solve, then UNIFORM refinement until the tolerance is met
 /// (no cache, no speculation, no locality).
-#[must_use]
+///
+/// # Errors
+/// Returns [`PlanError`] for invalid inputs, cell-count overflow, or an
+/// unusable solver/verifier result.
 pub fn baseline_uniform(
     family: &ProblemFamily,
     theta: f64,
     tol: f64,
     mid_rung_cells: usize,
     max_doublings: usize,
-) -> (f64, f64) {
+) -> Result<(f64, f64), PlanError> {
+    validate_finite(theta, "theta")?;
+    validate_positive_finite(tol, "tolerance")?;
+    validate_rung_cells(&[mid_rung_cells])?;
     let mut cells = mid_rung_cells;
     let mut spent = 0.0f64;
     for _ in 0..=max_doublings {
-        let problem = family.at(theta, uniform_mesh(cells));
-        #[allow(clippy::cast_precision_loss)]
-        {
-            spent += cells as f64;
+        validate_family_cell_work(family, cells)?;
+        let mesh = uniform_mesh(cells)?;
+        let problem = family.at(theta, mesh)?;
+        spent += solved_cell_cost(&problem.mesh)?;
+        if !spent.is_finite() {
+            return Err(PlanError::NumericalFailure {
+                stage: "baseline cost accumulation",
+            });
         }
-        let nodal = solve_p1(&problem);
-        let rep = verify(&problem, &nodal, tol);
-        if rep.accept {
-            return (spent, rep.bound.hi);
+        let nodal = solve_p1(&problem).map_err(|source| PlanError::Fem1dFailure {
+            stage: "uniform baseline solve",
+            source,
+        })?;
+        validate_candidate(&problem.mesh, &nodal)?;
+        let checked = checked_verify(&problem, &nodal, tol)?;
+        if checked.accept {
+            return Ok((spent, checked.certificate.bound()));
         }
-        cells *= 2;
+        cells = cells.checked_mul(2).ok_or(PlanError::NumericalFailure {
+            stage: "baseline rung doubling",
+        })?;
+        if widened_usize(cells) > MAX_EXACT_CELLS {
+            return Err(PlanError::InvalidSequenceEntry {
+                field: "baseline_cells",
+                index: 0,
+                reason: "cell count exceeds exact f64 budget accounting",
+            });
+        }
     }
-    (spent, f64::INFINITY)
+    Ok((spent, f64::INFINITY))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::prolong_linear;
+
+    #[test]
+    fn adaptive_mesh_prolongates_to_unrelated_uniform_nodes() {
+        let coarse_mesh = [0.0, 0.1, 0.4, 0.9, 1.0];
+        let coarse_nodal = [0.0, 0.2, 0.6, 0.1, 0.0];
+        let target_mesh = [0.0, 0.25, 0.5, 0.75, 1.0];
+        let prolonged = prolong_linear(&coarse_mesh, &coarse_nodal, &target_mesh).unwrap();
+        let expected = [0.0, 0.4, 0.5, 0.25, 0.0];
+        for (actual, expected) in prolonged.iter().zip(expected) {
+            assert!((actual - expected).abs() < 1e-15);
+        }
+    }
+
+    #[test]
+    fn non_dyadic_prolongation_reproduces_coarse_nodes_exactly() {
+        let coarse_mesh = [0.0, 0.3, 0.55, 1.0];
+        let coarse_nodal = [0.0, 0.7, -0.2, 0.0];
+        let prolonged = prolong_linear(&coarse_mesh, &coarse_nodal, &coarse_mesh).unwrap();
+        assert_eq!(prolonged, coarse_nodal);
+    }
 }

@@ -7,21 +7,18 @@ use fs_verify::fem1d::{Poly, solve_p1};
 
 #[test]
 fn uniform_bound_curve() {
-    let mut c = vec![0.0; 11];
+    let mut c = vec![0.0; 6];
     c[1] = 0.2;
     c[2] = -0.2;
-    c[9] = 1.0;
-    c[10] = -1.0;
-    let family = ProblemFamily {
-        base: Poly(c),
-        kernel: "steep".to_string(),
-    };
+    c[4] = 1.0;
+    c[5] = -1.0;
+    let family = ProblemFamily::new(Poly(c), "steep").unwrap();
     for cells in [12, 24, 48, 96, 192, 384] {
         let mesh: Vec<f64> = (0..=cells)
             .map(|k| f64::from(k) / f64::from(cells))
             .collect();
-        let p = family.at(1.0, mesh);
-        let u = solve_p1(&p);
+        let p = family.at(1.0, mesh).unwrap();
+        let u = solve_p1(&p).expect("calibration fixture must solve");
         let rep = verify(&p, &u, 1e-9);
         println!("cells={cells} bound={:.4e}", rep.bound.hi);
     }
@@ -30,15 +27,12 @@ fn uniform_bound_curve() {
 #[test]
 fn trace_kill_run() {
     use fs_ir::planner::{CostTable, MemCache, PlanOutcome, plan};
-    let mut c = vec![0.0; 11];
+    let mut c = vec![0.0; 6];
     c[1] = 0.2;
     c[2] = -0.2;
-    c[9] = 1.0;
-    c[10] = -1.0;
-    let family = ProblemFamily {
-        base: Poly(c),
-        kernel: "steep".to_string(),
-    };
+    c[4] = 1.0;
+    c[5] = -1.0;
+    let family = ProblemFamily::new(Poly(c), "steep").unwrap();
     let out = plan(
         &family,
         1.0,
@@ -46,8 +40,9 @@ fn trace_kill_run() {
         100_000.0,
         &[12, 24, 48, 96],
         &mut MemCache::default(),
-        &mut CostTable::new(200.0),
-    );
+        &mut CostTable::new(200.0).unwrap(),
+    )
+    .unwrap();
     if let PlanOutcome::Discharged { ops, cost, .. } = out {
         for o in &ops {
             println!(
