@@ -64,13 +64,20 @@ fn probe(name: &str, target: &str, cost: f64, shrink: f64) -> Probe {
     }
 }
 
-fn ranked_probe(name: &str, cost: f64, score: f64) -> RankedPurchase {
-    RankedPurchase {
-        probe: probe(name, "target", cost, 0.5),
-        flip_before: 0.75,
-        flip_after: 0.25,
-        score,
-    }
+fn ranked_probe(name: &str, cost: f64) -> RankedPurchase {
+    let decision = LiveDecision {
+        margin: &margin,
+        arity: 3,
+    };
+    rank_purchases(
+        &decision,
+        &nodes(),
+        &[probe(name, "drag-gap", cost, 0.01)],
+        64,
+    )
+    .expect("valid ranked-probe fixture")
+    .pop()
+    .expect("one fixture purchase")
 }
 
 #[test]
@@ -161,20 +168,20 @@ fn voi_002_ranking_is_flip_prob_per_dollar() {
         },
     ];
     let ranked = rank_purchases(&decision, &ns, &menu, 64).expect("valid probe menu");
-    let names: Vec<&str> = ranked.iter().map(|r| r.probe.name.as_str()).collect();
+    let names: Vec<&str> = ranked.iter().map(|r| r.probe().name.as_str()).collect();
     println!(
         "{{\"metric\":\"ranking\",\"order\":{names:?},\"scores\":{:?}}}",
         ranked
             .iter()
-            .map(|r| (r.score * 1e4).round() / 1e4)
+            .map(|r| (r.score() * 1e4).round() / 1e4)
             .collect::<Vec<_>>()
     );
     assert_eq!(names[0], "climb-rung-drag", "cheap+decisive wins");
     assert_eq!(names[1], "wind-tunnel-drag", "decisive-but-pricey second");
     assert_eq!(names[2], "refine-mass-model", "irrelevant last");
-    assert!(ranked[0].score > ranked[1].score && ranked[1].score > 0.0);
+    assert!(ranked[0].score() > ranked[1].score() && ranked[1].score() > 0.0);
     assert_eq!(
-        ranked[2].score.to_bits(),
+        ranked[2].score().to_bits(),
         0.0f64.to_bits(),
         "an irrelevant probe buys nothing"
     );
@@ -212,12 +219,12 @@ fn voi_003_menu_unifies_compute_and_physical() {
         },
     ];
     let ranked = rank_purchases(&decision, &ns, &menu, 64).expect("valid mixed menu");
-    assert_eq!(ranked[0].probe.kind, ProbeKind::Physical);
+    assert_eq!(ranked[0].probe().kind, ProbeKind::Physical);
     assert!(
-        ranked[0].score > ranked[1].score,
+        ranked[0].score() > ranked[1].score(),
         "the physical anchor wins on flip-prob-per-dollar: {:.4} vs {:.4}",
-        ranked[0].score,
-        ranked[1].score
+        ranked[0].score(),
+        ranked[1].score()
     );
     verdict(
         "voi-003",
@@ -259,17 +266,26 @@ fn voi_004_surfacing_hint_and_scheduler() {
     let ranked = rank_purchases(&decision, &ns, &menu, 64).expect("valid scheduling menu");
     // (i) The query-result hint (the Proposal-8 anytime shape, now
     // decision-priced).
-    let hint = hint_for_query(&ranked);
+    let hint = hint_for_query(&ranked).expect("valid canonical hint");
     println!("{{\"metric\":\"hint\",\"text\":\"{hint}\"}}");
     assert!(hint.contains("climb-rung-drag") && hint.contains("$10"));
     assert!(hint.contains("flip-probability"));
     // (ii) The probe scheduler under a budget: greedy top-k affordable.
     let scheduled = schedule_probes(&ranked, 40.0).expect("valid finite schedule");
-    let names: Vec<&str> = scheduled.iter().map(|r| r.probe.name.as_str()).collect();
+    let names: Vec<&str> = scheduled.iter().map(|r| r.probe().name.as_str()).collect();
     assert_eq!(
         names,
         vec!["climb-rung-drag", "hazard-samples"],
         "greedy affordable top-k under $40"
+    );
+    // Input order carries no authority: both surfaces reapply the
+    // canonical score/cost/name comparator.
+    let mut reordered = ranked.clone();
+    reordered.reverse();
+    assert_eq!(hint_for_query(&reordered).expect("reordered hint"), hint);
+    assert_eq!(
+        schedule_probes(&reordered, 40.0).expect("reordered schedule"),
+        scheduled
     );
     // Myopic-only is structural: rank_purchases takes ONE state and
     // returns ONE ranked step — there is no sequential-tree API to
@@ -540,6 +556,20 @@ fn voi_009_menu_targets_and_probe_economics_refuse_before_sweep() {
         rank_purchases(&decision, &ns, &[], 4),
         Err(VoiError::SizeLimit { .. })
     ));
+    let duplicate_nodes = vec![ns[0].clone(), ns[0].clone()];
+    let duplicate_target_decision = LiveDecision {
+        margin: &counting,
+        arity: 2,
+    };
+    assert!(matches!(
+        rank_purchases(
+            &duplicate_target_decision,
+            &duplicate_nodes,
+            &[probe("ambiguous", "x", 1.0, 0.5)],
+            4,
+        ),
+        Err(VoiError::DuplicateName { .. })
+    ));
     let unknown = vec![probe("unknown", "missing", 1.0, 0.5)];
     let unknown_before = unknown.clone();
     assert!(matches!(
@@ -576,7 +606,29 @@ fn voi_009_menu_targets_and_probe_economics_refuse_before_sweep() {
         ));
     }
     assert_eq!(calls.get(), 0, "all malformed menus refuse before sweep");
+    verdict(
+        "voi-009",
+        "unknown/ambiguous targets, duplicate identities, and invalid probe economics refuse before evaluation",
+    );
+}
 
+#[test]
+fn voi_010_probe_name_and_score_arithmetic_boundaries() {
+    let calls = Cell::new(0usize);
+    let counting = |values: &[f64]| {
+        calls.set(calls.get() + 1);
+        values[0]
+    };
+    let decision = LiveDecision {
+        margin: &counting,
+        arity: 1,
+    };
+    let ns = vec![UncertaintyNode {
+        name: "x".to_string(),
+        lo: -1.0,
+        hi: 1.0,
+        nominal: 0.0,
+    }];
     let exact = "p".repeat(MAX_VOI_NAME_BYTES);
     assert!(
         rank_purchases(&decision, &ns, &[probe(&exact, "x", 1.0, 0.5)], 4).is_ok(),
@@ -614,14 +666,14 @@ fn voi_009_menu_targets_and_probe_economics_refuse_before_sweep() {
         Err(VoiError::ArithmeticRefusal { .. })
     ));
     verdict(
-        "voi-009",
-        "targets, identities, bounds, economics, and derived score arithmetic refuse before partial results",
+        "voi-010",
+        "probe names admit the exact byte bound, limit+1 refuses before callback, and derived score overflow refuses",
     );
 }
 
 #[test]
-fn voi_010_scheduler_is_transactional_and_budget_monotone() {
-    let valid = vec![ranked_probe("a", 10.0, 0.1), ranked_probe("b", 5.0, 0.05)];
+fn voi_011_scheduler_is_transactional_and_budget_monotone() {
+    let valid = vec![ranked_probe("a", 10.0), ranked_probe("b", 5.0)];
     assert!(
         schedule_probes(&valid, 0.0)
             .expect("zero budget is valid")
@@ -638,10 +690,7 @@ fn voi_010_scheduler_is_transactional_and_budget_monotone() {
         Err(VoiError::SizeLimit { .. })
     ));
 
-    let duplicated = vec![
-        ranked_probe("same", 10.0, 0.1),
-        ranked_probe("same", 10.0, 0.1),
-    ];
+    let duplicated = vec![ranked_probe("same", 10.0), ranked_probe("same", 10.0)];
     let before = duplicated.clone();
     assert!(matches!(
         schedule_probes(&duplicated, 100.0),
@@ -652,13 +701,15 @@ fn voi_010_scheduler_is_transactional_and_budget_monotone() {
         "duplicate refusal does not mutate input"
     );
 
-    let mut invalid_derived = valid.clone();
-    invalid_derived[1].score = f64::NAN;
     assert!(matches!(
-        schedule_probes(&invalid_derived, 100.0),
-        Err(VoiError::InvalidRankedValue { field: "score", .. })
+        hint_for_query(&[]),
+        Err(VoiError::SizeLimit { .. })
     ));
-    let no_progress = vec![ranked_probe("tiny", 1.0, 1.0)];
+    assert!(matches!(
+        hint_for_query(&duplicated),
+        Err(VoiError::DuplicateRankedProbe { .. })
+    ));
+    let no_progress = vec![ranked_probe("tiny", 1.0)];
     assert!(matches!(
         schedule_probes(&no_progress, f64::MAX),
         Err(VoiError::ArithmeticRefusal { .. })
@@ -669,12 +720,12 @@ fn voi_010_scheduler_is_transactional_and_budget_monotone() {
     assert_eq!(
         scheduled
             .iter()
-            .map(|purchase| purchase.probe.name.as_str())
+            .map(|purchase| purchase.probe().name.as_str())
             .collect::<Vec<_>>(),
-        vec!["a", "b"]
+        vec!["b", "a"]
     );
     verdict(
-        "voi-010",
-        "invalid budgets/derived rows and duplicate identities refuse transactionally; remaining budget strictly decreases",
+        "voi-011",
+        "invalid budgets and duplicate identities refuse transactionally; hints and schedules canonicalize authority",
     );
 }

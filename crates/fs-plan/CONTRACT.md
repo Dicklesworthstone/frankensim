@@ -59,8 +59,12 @@ Runtime deps: `std`, fs-geom, fs-ledger.
   ordered intervals, nominal containment, callback margins, target
   resolution, grid and aggregate evaluation work, probe economics,
   ranked values, and budgets are validated before evaluation or spend.
-  Duplicate ranked identities refuse rather than buying twice, and a
-  positive cost must strictly decrease a finite remaining budget.
+  `RankedPurchase` construction is sealed behind ranking with read-only
+  getters. Hinting and scheduling reapply the canonical
+  score-descending/cost-ascending/name-ascending comparator, so caller
+  order carries no authority. Duplicate ranked identities refuse rather
+  than buying twice, and a positive cost must strictly decrease a finite
+  remaining budget.
 
 - `alloc::{Knob, KnobSetting, AllocProblem, Plan, allocate, Allocator,
   AllocationError, PlanInputError, BudgetInfeasible, oracle_min_error}`
@@ -189,4 +193,11 @@ economics, duplicate scheduling identities, and monotone budget arithmetic.
   posteriors; the prospective audit is what keeps the menu honest.
 - The library bounds and validates surrogate calls but cannot prove an
   arbitrary callback pure; VoI determinism and replay require the caller to
-  supply the declared cached deterministic margin.
+  supply the declared cached deterministic margin. A callback panic is also
+  outside the typed-refusal contract and propagates to its owner.
+- Ranked rows cannot be forged or made authoritative by reordering, but a
+  caller passing a raw slice can omit valid rows or splice unique sealed rows
+  from different ranking requests. Scheduling authority assumes one complete
+  `rank_purchases` output (or ledger evidence retaining its context and
+  completeness); omission/splice detection requires a future sealed
+  ranked-menu receipt.

@@ -366,7 +366,7 @@ fn ac_003_package_recheck_solver_free_and_voi_hint() -> Result<(), PlanError> {
         kind: ProbeKind::Computational,
     }];
     let ranked = rank_purchases(&decision, &nodes, &menu, 32).expect("valid bounded VoI request");
-    let hint = fs_plan::voi::hint_for_query(&ranked);
+    let hint = fs_plan::voi::hint_for_query(&ranked).expect("valid VoI hint");
     // The package: colored claims, fixture-authenticated, Merkle-rooted.
     let Color::Verified { lo, hi } = last.color else {
         panic!("the wedge trajectory ends verified");

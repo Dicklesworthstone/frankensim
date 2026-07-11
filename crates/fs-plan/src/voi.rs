@@ -374,6 +374,13 @@ fn nominal_values(nodes: &[UncertaintyNode]) -> Vec<f64> {
     nodes.iter().map(|node| node.nominal).collect()
 }
 
+fn node_at(nodes: &[UncertaintyNode], node_idx: usize) -> Result<&UncertaintyNode, VoiError> {
+    nodes.get(node_idx).ok_or(VoiError::NodeIndexOutOfRange {
+        node_idx,
+        node_count: nodes.len(),
+    })
+}
+
 fn nominal_verdict_validated(
     decision: &LiveDecision<'_>,
     nodes: &[UncertaintyNode],
@@ -385,24 +392,31 @@ fn flip_probability_validated(
     decision: &LiveDecision<'_>,
     nodes: &[UncertaintyNode],
     node_idx: usize,
+    lo: f64,
+    hi: f64,
     grid: usize,
 ) -> Result<f64, VoiError> {
     let base = nominal_verdict_validated(decision, nodes)?;
     let mut values = nominal_values(nodes);
-    let node = &nodes[node_idx];
-    let width = node.hi - node.lo;
+    let node = node_at(nodes, node_idx)?;
+    let width = hi - lo;
     let mut flips = 0usize;
     for k in 0..grid {
         #[allow(clippy::cast_precision_loss)]
         let t = (k as f64 + 0.5) / grid as f64;
-        let sample = node.lo + t * width;
+        let sample = lo + t * width;
         if !sample.is_finite() {
             return Err(VoiError::ArithmeticRefusal {
                 operation: "interval sweep",
                 subject: node.name.clone(),
             });
         }
-        values[node_idx] = sample;
+        *values
+            .get_mut(node_idx)
+            .ok_or(VoiError::NodeIndexOutOfRange {
+                node_idx,
+                node_count: nodes.len(),
+            })? = sample;
         if (evaluate_margin(decision, &values)? > 0.0) != base {
             flips += 1;
         }
@@ -441,15 +455,16 @@ impl LiveDecision<'_> {
         grid: usize,
     ) -> Result<f64, VoiError> {
         validate_nodes(self, nodes)?;
-        if node_idx >= nodes.len() {
-            return Err(VoiError::NodeIndexOutOfRange {
-                node_idx,
-                node_count: nodes.len(),
-            });
-        }
+        let node = node_at(nodes, node_idx)?;
         validate_grid(grid)?;
-        validate_evaluations(grid + 1)?;
-        flip_probability_validated(self, nodes, node_idx, grid)
+        let evaluations = grid
+            .checked_add(1)
+            .ok_or_else(|| VoiError::ArithmeticRefusal {
+                operation: "sweep evaluation count",
+                subject: node.name.clone(),
+            })?;
+        validate_evaluations(evaluations)?;
+        flip_probability_validated(self, nodes, node_idx, node.lo, node.hi, grid)
     }
 }
 
@@ -483,13 +498,46 @@ pub struct Probe {
 #[derive(Debug, Clone, PartialEq)]
 pub struct RankedPurchase {
     /// The probe.
-    pub probe: Probe,
+    probe: Probe,
     /// Flip probability before the purchase.
-    pub flip_before: f64,
+    flip_before: f64,
     /// Expected flip probability after the purchase.
-    pub flip_after: f64,
+    flip_after: f64,
     /// THE SCORE: expected flip-probability reduction per dollar.
-    pub score: f64,
+    score: f64,
+}
+
+impl RankedPurchase {
+    /// The validated probe purchase.
+    #[must_use]
+    pub fn probe(&self) -> &Probe {
+        &self.probe
+    }
+
+    /// Flip probability before the purchase.
+    #[must_use]
+    pub fn flip_before(&self) -> f64 {
+        self.flip_before
+    }
+
+    /// Expected flip probability after the purchase.
+    #[must_use]
+    pub fn flip_after(&self) -> f64 {
+        self.flip_after
+    }
+
+    /// Expected flip-probability reduction per dollar.
+    #[must_use]
+    pub fn score(&self) -> f64 {
+        self.score
+    }
+}
+
+fn compare_ranked(a: &RankedPurchase, b: &RankedPurchase) -> core::cmp::Ordering {
+    b.score
+        .total_cmp(&a.score)
+        .then(a.probe.cost.total_cmp(&b.probe.cost))
+        .then(a.probe.name.cmp(&b.probe.name))
 }
 
 fn validate_probe(index: usize, probe: &Probe) -> Result<(), VoiError> {
@@ -532,14 +580,14 @@ fn validate_menu(nodes: &[UncertaintyNode], menu: &[Probe]) -> Result<Vec<usize>
                 matched = Some(node_idx);
             }
         }
-        if matches != 1 {
+        let Some(node_idx) = matched.filter(|_| matches == 1) else {
             return Err(VoiError::TargetResolution {
                 probe: probe.name.clone(),
                 target: probe.target.clone(),
                 matches,
             });
-        }
-        targets.push(matched.expect("exactly one target match"));
+        };
+        targets.push(node_idx);
     }
     Ok(targets)
 }
@@ -560,31 +608,40 @@ pub fn rank_purchases(
     validate_nodes(decision, nodes)?;
     validate_grid(grid)?;
     let targets = validate_menu(nodes, menu)?;
-    let evaluations = menu.len() * 2 * (grid + 1);
+    let evaluations = grid
+        .checked_add(1)
+        .and_then(|per_sweep| per_sweep.checked_mul(2))
+        .and_then(|per_probe| menu.len().checked_mul(per_probe))
+        .ok_or_else(|| VoiError::ArithmeticRefusal {
+            operation: "ranking evaluation count",
+            subject: "probe menu".to_string(),
+        })?;
     validate_evaluations(evaluations)?;
 
     let mut ranked = Vec::with_capacity(menu.len());
     for (probe, &node_idx) in menu.iter().zip(&targets) {
-        let flip_before = flip_probability_validated(decision, nodes, node_idx, grid)?;
+        let node = node_at(nodes, node_idx)?;
+        let flip_before =
+            flip_probability_validated(decision, nodes, node_idx, node.lo, node.hi, grid)?;
         // Myopic post-probe state: the interval shrinks around the
         // nominal by the probe's factor.
-        let mut post = nodes.to_vec();
-        let node = &nodes[node_idx];
         let half = (node.hi - node.lo) / 2.0 * probe.shrink;
-        post[node_idx].lo = node.nominal - half;
-        post[node_idx].hi = node.nominal + half;
+        let post_lo = node.nominal - half;
+        let post_hi = node.nominal + half;
         if !half.is_finite()
-            || !post[node_idx].lo.is_finite()
-            || !post[node_idx].hi.is_finite()
-            || post[node_idx].lo > node.nominal
-            || post[node_idx].hi < node.nominal
+            || !post_lo.is_finite()
+            || !post_hi.is_finite()
+            || !(post_hi - post_lo).is_finite()
+            || post_lo > node.nominal
+            || post_hi < node.nominal
         {
             return Err(VoiError::ArithmeticRefusal {
                 operation: "post-probe interval",
                 subject: probe.name.clone(),
             });
         }
-        let flip_after = flip_probability_validated(decision, &post, node_idx, grid)?;
+        let flip_after =
+            flip_probability_validated(decision, nodes, node_idx, post_lo, post_hi, grid)?;
         let score = (flip_before - flip_after).max(0.0) / probe.cost;
         if !score.is_finite() || score < 0.0 {
             return Err(VoiError::ArithmeticRefusal {
@@ -599,51 +656,14 @@ pub fn rank_purchases(
             score,
         });
     }
-    ranked.sort_by(|a, b| {
-        b.score
-            .total_cmp(&a.score)
-            .then(a.probe.cost.total_cmp(&b.probe.cost))
-            .then(a.probe.name.cmp(&b.probe.name))
-    });
+    ranked.sort_by(compare_ranked);
     Ok(ranked)
 }
 
-/// Surface the top purchase as the QUERY-RESULT HINT — the Proposal-8
-/// anytime-hint shape, now priced by decision impact instead of the
-/// O(h) extrapolation the fs-ir CONTRACT flagged as interim.
-#[must_use]
-pub fn hint_for_query(ranked: &[RankedPurchase]) -> String {
-    match ranked.first() {
-        Some(top) if top.score > 0.0 => format!(
-            "highest-value evidence: {} (${:.0}) — expected flip-probability drop \
-             {:.3} -> {:.3} on '{}' ({:.4}/$)",
-            top.probe.name,
-            top.probe.cost,
-            top.flip_before,
-            top.flip_after,
-            top.probe.target,
-            top.score
-        ),
-        _ => "no purchase on the menu changes the decision — spend nothing".to_string(),
-    }
-}
-
-/// THE PROBE SCHEDULER: greedy top-k purchases under a dollar budget
-/// (the discrepancy-probe scheduler surface for color-probes).
-///
-/// # Errors
-/// [`VoiError`] when the budget or a ranked purchase is malformed,
-/// purchase identities repeat, or finite positive cost cannot decrease
-/// the remaining budget monotonically.
-pub fn schedule_probes(
-    ranked: &[RankedPurchase],
-    budget: f64,
-) -> Result<Vec<RankedPurchase>, VoiError> {
-    if !budget.is_finite() || budget < 0.0 {
-        return Err(VoiError::InvalidBudget { budget });
-    }
+fn canonical_ranked(ranked: &[RankedPurchase]) -> Result<Vec<&RankedPurchase>, VoiError> {
     validate_size("ranked probe menu", ranked.len(), 1, MAX_VOI_PROBES)?;
     let mut names = BTreeSet::new();
+    let mut canonical = Vec::with_capacity(ranked.len());
     for (index, purchase) in ranked.iter().enumerate() {
         validate_probe(index, &purchase.probe)?;
         if !names.insert(purchase.probe.name.as_str()) {
@@ -676,11 +696,59 @@ pub fn schedule_probes(
                 });
             }
         }
+        canonical.push(purchase);
     }
+    canonical.sort_by(|a, b| compare_ranked(a, b));
+    Ok(canonical)
+}
+
+/// Surface the top purchase as the QUERY-RESULT HINT — the Proposal-8
+/// anytime-hint shape, now priced by decision impact instead of the
+/// O(h) extrapolation the fs-ir CONTRACT flagged as interim.
+///
+/// Input order is not authoritative: the validated score/cost/name
+/// comparator is re-applied before selecting a hint.
+///
+/// # Errors
+/// [`VoiError`] when the ranked menu is empty, oversized, duplicated,
+/// or internally malformed.
+pub fn hint_for_query(ranked: &[RankedPurchase]) -> Result<String, VoiError> {
+    let canonical = canonical_ranked(ranked)?;
+    let hint = match canonical.first() {
+        Some(top) if top.score > 0.0 => format!(
+            "highest-value evidence: {} (${:.0}) — expected flip-probability drop \
+             {:.3} -> {:.3} on '{}' ({:.4}/$)",
+            top.probe.name,
+            top.probe.cost,
+            top.flip_before,
+            top.flip_after,
+            top.probe.target,
+            top.score
+        ),
+        _ => "no purchase on the menu changes the decision — spend nothing".to_string(),
+    };
+    Ok(hint)
+}
+
+/// THE PROBE SCHEDULER: greedy top-k purchases under a dollar budget
+/// (the discrepancy-probe scheduler surface for color-probes).
+///
+/// # Errors
+/// [`VoiError`] when the budget or a ranked purchase is malformed,
+/// purchase identities repeat, or finite positive cost cannot decrease
+/// the remaining budget monotonically.
+pub fn schedule_probes(
+    ranked: &[RankedPurchase],
+    budget: f64,
+) -> Result<Vec<RankedPurchase>, VoiError> {
+    if !budget.is_finite() || budget < 0.0 {
+        return Err(VoiError::InvalidBudget { budget });
+    }
+    let canonical = canonical_ranked(ranked)?;
 
     let mut remaining = budget;
     let mut out = Vec::new();
-    for r in ranked {
+    for r in canonical {
         if r.score > 0.0 && r.probe.cost <= remaining {
             let next = remaining - r.probe.cost;
             if !next.is_finite() || next < 0.0 || next >= remaining {
@@ -689,8 +757,8 @@ pub fn schedule_probes(
                     subject: r.probe.name.clone(),
                 });
             }
-            remaining = if next == 0.0 { 0.0 } else { next };
-            out.push(r.clone());
+            remaining = next.max(0.0);
+            out.push((*r).clone());
         }
     }
     Ok(out)
