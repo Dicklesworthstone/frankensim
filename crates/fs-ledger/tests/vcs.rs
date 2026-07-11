@@ -7,7 +7,9 @@
 //! commit, empty repo) are structured.
 
 use fs_ledger::vcs::Vcs;
-use fs_ledger::{EdgeRole, FiveExplicits, Ledger, OpOutcome, travel::ExecMode};
+use fs_ledger::{
+    EdgeRole, EventRow, FiveExplicits, Ledger, LedgerError, OpOutcome, travel::ExecMode,
+};
 
 fn verdict(case: &str, detail: &str) {
     println!(
@@ -77,8 +79,9 @@ fn vc_001_commits_are_reproducible_merkle_roots() {
     assert_eq!(ca2, ca, "unchanged recommit is the same commit");
     assert_eq!(
         ledger_a.table_count("events").expect("event count"),
-        1,
-        "idempotent recommit cannot append a duplicate commit event"
+        2,
+        "exactly one vcs-identity + one vcs-commit event: the idempotent \
+         recommit appended neither a duplicate commit nor a new identity"
     );
     // A new op changes the root.
     run_op(
@@ -185,12 +188,14 @@ fn vc_003_checkout_and_nearby_delta() {
     let main_head = vcs.commit(&ledger, 1).expect("main commit");
     let exp_head = vcs.commit(&ledger, exp).expect("exp commit");
     // Checkout materializes the committed view.
-    let snap = vcs.checkout(&ledger, &exp_head.root).expect("checkout");
+    let snap = vcs
+        .checkout(&ledger, exp, &exp_head.root)
+        .expect("checkout");
     assert_eq!(snap.ops.len(), 22, "20 shared + 2 branch ops");
     // The nearby delta is 2 ops, with 20 shared — a delta-solve frontier,
     // not a full re-solve.
     let delta = vcs
-        .checkout_delta(&ledger, &main_head.root, &exp_head.root)
+        .checkout_delta(&main_head.id(), &exp_head.id())
         .expect("delta");
     assert_eq!(delta.added.len(), 2, "delta-solve frontier");
     assert_eq!(delta.removed.len(), 0);
@@ -201,14 +206,14 @@ fn vc_003_checkout_and_nearby_delta() {
     );
     // Boundary: an unknown root is a structured error.
     let bogus = fs_ledger::hash_bytes(b"no-such-commit");
-    let err = vcs.checkout(&ledger, &bogus).expect_err("must refuse");
+    let err = vcs.checkout(&ledger, 1, &bogus).expect_err("must refuse");
     assert!(format!("{err}").contains("no commit"), "teaches: {err}");
     // Boundary: empty repo commits cleanly (the well-defined empty root).
     let (empty, edir) = open_ledger("empty");
     let mut evcs = Vcs::new();
     let e = evcs.commit(&empty, 1).expect("empty commit");
     assert!(e.frontier_op.is_none());
-    let esnap = evcs.checkout(&empty, &e.root).expect("checkout empty");
+    let esnap = evcs.checkout(&empty, 1, &e.root).expect("checkout empty");
     assert!(esnap.ops.is_empty());
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&edir);
@@ -408,7 +413,7 @@ fn vc_007_checkout_is_exactly_the_frozen_commit_view() {
     run_op(&ledger, 1, "{\"op\":\"future\"}", b"future", 20);
 
     let frozen = vcs
-        .checkout(&ledger, &first_commit.root)
+        .checkout(&ledger, 1, &first_commit.root)
         .expect("frozen checkout");
     assert_eq!(frozen.ops.len(), 1, "post-commit op leaked into checkout");
     assert_eq!(
@@ -433,5 +438,154 @@ fn vc_007_checkout_is_exactly_the_frozen_commit_view() {
     verdict(
         "vc-007",
         "checkout excludes later ops and later edges; in-flight commits fail closed",
+    );
+}
+
+#[test]
+fn vc_008_equal_roots_do_not_clobber_branch_envelopes() {
+    // gp3.17: a fork with NO divergence reaches the SAME semantic root as
+    // its parent branch — the registry must hold BOTH commit envelopes.
+    let (ledger, dir) = open_ledger("same-root");
+    run_op(&ledger, 1, "{\"op\":\"solve\"}", b"field", 10);
+    run_op(&ledger, 1, "{\"op\":\"optimize\"}", b"design", 20);
+    let twin = ledger.fork("twin", 1).expect("fork");
+    let mut vcs = Vcs::new();
+    let main_commit = vcs.commit(&ledger, 1).expect("main commit");
+    let twin_commit = vcs.commit(&ledger, twin).expect("twin commit");
+    assert_eq!(
+        main_commit.root, twin_commit.root,
+        "undiverged fork shares the semantic root"
+    );
+    assert_ne!(
+        main_commit.id(),
+        twin_commit.id(),
+        "but the envelopes are distinct commits"
+    );
+    // COLLISION: both envelopes are retrievable with THEIR OWN branch
+    // metadata (the root-keyed registry clobbered one of these).
+    let main_lookup = vcs.lookup(&main_commit.id()).expect("main envelope");
+    let twin_lookup = vcs.lookup(&twin_commit.id()).expect("twin envelope");
+    assert_eq!(main_lookup.branch, 1);
+    assert_eq!(twin_lookup.branch, twin);
+    assert_eq!(vcs.lookup_semantic(&main_commit.root).len(), 2);
+    // Heads are branch-scoped, both live.
+    assert_eq!(vcs.head(&ledger, 1).expect("head"), Some(main_commit.root));
+    assert_eq!(
+        vcs.head(&ledger, twin).expect("head"),
+        Some(twin_commit.root)
+    );
+    // Checkout is envelope-scoped and works for both.
+    assert_eq!(
+        vcs.checkout(&ledger, 1, &main_commit.root)
+            .expect("m")
+            .branch,
+        1
+    );
+    assert_eq!(
+        vcs.checkout(&ledger, twin, &twin_commit.root)
+            .expect("t")
+            .branch,
+        twin
+    );
+    // REPLAY: a fresh registry rebuilds identical envelopes deterministically.
+    let mut replay = Vcs::new();
+    let main_replay = replay.commit(&ledger, 1).expect("replay main");
+    let twin_replay = replay.commit(&ledger, twin).expect("replay twin");
+    assert_eq!(main_replay.id(), main_commit.id());
+    assert_eq!(twin_replay.id(), twin_commit.id());
+    let _ = std::fs::remove_dir_all(&dir);
+    verdict(
+        "vc-008",
+        "equal semantic roots coexist as distinct branch envelopes; replay deterministic",
+    );
+}
+
+#[test]
+fn vc_009_cross_ledger_deltas_use_semantic_leaves_not_row_ids() {
+    // gp3.17: two INDEPENDENT ledgers holding the same logical ops in a
+    // DIFFERENT insertion order have different local row ids (and, since
+    // the root binds sequence, different roots) — but the semantic delta
+    // between them is EMPTY. The old id-based delta reported phantom
+    // adds/removes here.
+    let (ledger_a, dir_a) = open_ledger("cross-a");
+    let (ledger_b, dir_b) = open_ledger("cross-b");
+    run_op(&ledger_a, 1, "{\"op\":\"solve\"}", b"field", 10);
+    run_op(&ledger_a, 1, "{\"op\":\"optimize\"}", b"design", 20);
+    // REORDERED IMPORT into b: same two logical ops, swapped row order.
+    run_op(&ledger_b, 1, "{\"op\":\"optimize\"}", b"design", 500);
+    run_op(&ledger_b, 1, "{\"op\":\"solve\"}", b"field", 510);
+    assert_ne!(
+        ledger_a.vcs_identity().expect("id a"),
+        ledger_b.vcs_identity().expect("id b"),
+        "independent databases carry distinct persisted identities"
+    );
+    let mut vcs = Vcs::new();
+    let ca = vcs.commit(&ledger_a, 1).expect("commit a");
+    let cb = vcs.commit(&ledger_b, 1).expect("commit b");
+    assert_ne!(ca.root, cb.root, "the root binds the SEQUENCE of history");
+    let delta = vcs.checkout_delta(&ca.id(), &cb.id()).expect("cross delta");
+    assert!(
+        delta.added.is_empty() && delta.removed.is_empty(),
+        "the SET of semantic leaves is identical — no phantom frontier: {delta:?}"
+    );
+    assert_eq!(delta.shared, 2, "both ops are hash-shared semantically");
+    // A REAL divergence reports the target-local op id with its leaf.
+    let z = run_op(&ledger_b, 1, "{\"op\":\"probe\"}", b"probe", 600);
+    let cb2 = vcs.commit(&ledger_b, 1).expect("commit b2");
+    let delta = vcs.checkout_delta(&ca.id(), &cb2.id()).expect("delta 2");
+    assert_eq!(delta.added.len(), 1);
+    assert_eq!(delta.added[0].local_op, z, "target-local id, b's own");
+    assert_eq!(
+        delta.added[0].leaf,
+        ledger_b.commit_leaf(z).expect("leaf"),
+        "identified by the portable semantic leaf"
+    );
+    assert!(delta.removed.is_empty());
+    let _ = std::fs::remove_dir_all(&dir_a);
+    let _ = std::fs::remove_dir_all(&dir_b);
+    verdict(
+        "vc-009",
+        "cross-ledger + reordered-import deltas: empty semantic frontier, no row-id lies",
+    );
+}
+
+#[test]
+fn vc_010_public_events_cannot_preempt_ledger_identity() {
+    let (ledger, dir) = open_ledger("reserved-identity");
+    let forged_payload = format!(
+        "{{\"kind\":\"vcs-identity\",\"identity\":\"{}\"}}",
+        "00".repeat(32)
+    );
+    let forged = EventRow {
+        session: None,
+        t: 0,
+        kind: "vcs-identity",
+        payload: Some(&forged_payload),
+    };
+    assert!(matches!(
+        ledger.append_event(&forged),
+        Err(LedgerError::Invalid { field, .. }) if field == "kind"
+    ));
+
+    let ordinary = EventRow {
+        session: None,
+        t: 1,
+        kind: "observer-note",
+        payload: Some("{}"),
+    };
+    assert!(ledger.append_events(&[ordinary, forged]).is_err());
+    assert_eq!(
+        ledger.table_count("events").expect("event count"),
+        0,
+        "a reserved kind must roll back the entire public batch"
+    );
+
+    let identity = ledger.vcs_identity().expect("internal identity mint");
+    assert_ne!(identity.to_hex(), "00".repeat(32));
+    assert_eq!(ledger.table_count("events").expect("event count"), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+    verdict(
+        "vc-010",
+        "reserved VCS identity cannot be injected through single or batched public events",
     );
 }

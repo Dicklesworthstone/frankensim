@@ -14,7 +14,7 @@
 
 use crate::hash::{Blake3, ContentHash};
 use crate::travel::{ExecMode, ViewSnapshot};
-use crate::{EventRow, Ledger, LedgerError};
+use crate::{EventRow, Ledger, LedgerError, VCS_IDENTITY_EVENT_KIND};
 use fsqlite::SqliteValue;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -22,6 +22,7 @@ const COMMIT_LEAF_DOMAIN: &[u8] = b"frankensim.fs-ledger.vcs.commit-leaf.v2";
 const MERKLE_PAIR_DOMAIN: &[u8] = b"frankensim.fs-ledger.vcs.merkle-pair.v2";
 const MERKLE_ODD_DOMAIN: &[u8] = b"frankensim.fs-ledger.vcs.merkle-odd.v2";
 const COMMIT_ROOT_DOMAIN: &[u8] = b"frankensim.fs-ledger.vcs.commit-root.v2";
+const LEDGER_IDENTITY_DOMAIN: &[u8] = b"frankensim.fs-ledger.vcs.ledger-identity.v1";
 
 fn hash_frame(hasher: &mut Blake3, bytes: &[u8]) {
     let len = u64::try_from(bytes.len()).expect("frame length fits in u64");
@@ -60,28 +61,75 @@ fn framed_hash(domain: &[u8], fields: &[(&[u8], &[u8])]) -> ContentHash {
     hasher.finalize()
 }
 
+/// The full ENVELOPE identity of a commit (bead gp3.17): WHICH ledger,
+/// WHICH branch, WHICH semantic root. The Merkle root alone is the
+/// SEMANTIC-STATE identity — two branches (or two ledgers) can reach
+/// the same semantic state, and their commit envelopes must not
+/// overwrite each other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct CommitId {
+    /// The persisted ledger identity ([`Ledger::vcs_identity`]).
+    pub ledger: ContentHash,
+    /// The branch within that ledger.
+    pub branch: i64,
+    /// The semantic Merkle root.
+    pub root: ContentHash,
+}
+
 /// One recorded commit.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CommitInfo {
-    /// The Merkle root (the commit's identity).
+    /// The persisted identity of the ledger this commit came from.
+    pub ledger: ContentHash,
+    /// The Merkle root (the SEMANTIC identity; the envelope identity
+    /// is [`CommitInfo::id`]).
     pub root: ContentHash,
     /// The branch it snapshots.
     pub branch: i64,
-    /// The frontier op id captured (None for an empty history).
+    /// The frontier op id captured (None for an empty history);
+    /// LEDGER-LOCAL, never compared across ledgers.
     pub frontier_op: Option<i64>,
-    /// The parent commit on the same branch, if any.
+    /// The parent commit root on the same branch, if any.
     pub parent: Option<ContentHash>,
 }
 
+impl CommitInfo {
+    /// The full envelope identity.
+    #[must_use]
+    pub fn id(&self) -> CommitId {
+        CommitId {
+            ledger: self.ledger,
+            branch: self.branch,
+            root: self.root,
+        }
+    }
+}
+
+/// One op in a checkout delta: identified SEMANTICALLY by its commit
+/// leaf hash (portable across ledgers), with the op id THAT SIDE's
+/// ledger uses locally (added ops carry target-local ids, removed ops
+/// source-local ids).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeltaOp {
+    /// The stable semantic leaf identity ([`Ledger::commit_leaf`]).
+    pub leaf: ContentHash,
+    /// The op id in the ledger of the side this entry came from.
+    pub local_op: i64,
+}
+
 /// The checkout delta between two commits: the ops a delta-solver must
-/// reconcile (everything else is hash-shared and untouched).
+/// reconcile (everything else is hash-shared and untouched). Computed
+/// from SEMANTIC leaf identities (bead gp3.17), so commits from
+/// different ledger instances — or histories imported in a different
+/// row order — compare correctly; local row ids are never compared
+/// across ledgers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckoutDelta {
-    /// Op ids visible in the target but not the source.
-    pub added: Vec<i64>,
-    /// Op ids visible in the source but not the target.
-    pub removed: Vec<i64>,
-    /// Op ids shared by both views (the hash-shared bulk).
+    /// Ops visible in the target but not the source (target-local ids).
+    pub added: Vec<DeltaOp>,
+    /// Ops visible in the source but not the target (source-local ids).
+    pub removed: Vec<DeltaOp>,
+    /// Leaf instances shared by both views (the hash-shared bulk).
     pub shared: usize,
 }
 
@@ -107,13 +155,26 @@ pub struct StorageAudit {
     pub branches: u64,
 }
 
+type EnvelopeKey = (ContentHash, i64, [u8; 32]); // (ledger, branch, root)
+
+#[derive(Debug, Clone)]
+struct CommitRecord {
+    info: CommitInfo,
+    /// Semantic leaf hashes aligned with `snapshot.ops` (the portable
+    /// identities cross-ledger deltas compare).
+    leaves: Vec<ContentHash>,
+    snapshot: ViewSnapshot,
+}
+
 /// The in-session commit registry (commits are also persisted as
 /// `vcs-commit` events; the registry is the fast lookup surface).
+/// Keyed by the FULL envelope identity (ledger, branch, root) — equal
+/// semantic roots from different branches or ledgers coexist (bead
+/// gp3.17).
 #[derive(Debug, Default)]
 pub struct Vcs {
-    commits: BTreeMap<[u8; 32], CommitInfo>,
-    heads: BTreeMap<i64, CommitInfo>,
-    snapshots: BTreeMap<[u8; 32], ViewSnapshot>,
+    commits: BTreeMap<EnvelopeKey, CommitRecord>,
+    heads: BTreeMap<(ContentHash, i64), CommitInfo>,
 }
 
 impl Ledger {
@@ -259,6 +320,102 @@ impl Ledger {
         }
         Ok(hasher.finalize())
     }
+
+    /// The PERSISTED identity of this ledger database (bead gp3.17):
+    /// read from the first `vcs-identity` event, minted and recorded on
+    /// first use (a hash of the path and the wall clock at minting).
+    /// Copies of the file share the identity — they ARE the same ledger
+    /// lineage; independent databases get distinct identities, so
+    /// commit envelopes and local op ids are never conflated across
+    /// instances.
+    ///
+    /// # Errors
+    /// Engine errors.
+    pub fn vcs_identity(&self) -> Result<ContentHash, LedgerError> {
+        let rows = self
+            .conn
+            .query(
+                "SELECT payload FROM events WHERE kind = 'vcs-identity' \
+                 ORDER BY id LIMIT 1",
+            )
+            .map_err(|e| LedgerError::Sql {
+                context: "vcs_identity read".to_string(),
+                detail: e.to_string(),
+            })?;
+        if let Some(row) = rows.first() {
+            let payload = match row.get(0) {
+                Some(SqliteValue::Text(t)) => t.as_str().to_string(),
+                other => {
+                    return Err(LedgerError::Corrupt {
+                        hash_hex: String::new(),
+                        detail: format!("vcs-identity payload: expected TEXT, got {other:?}"),
+                    });
+                }
+            };
+            let hex = payload
+                .split("\"identity\":\"")
+                .nth(1)
+                .and_then(|rest| rest.split('"').next())
+                .ok_or_else(|| LedgerError::Corrupt {
+                    hash_hex: String::new(),
+                    detail: format!("vcs-identity payload is malformed: {payload}"),
+                })?;
+            return ContentHash::from_hex(hex).ok_or_else(|| LedgerError::Corrupt {
+                hash_hex: String::new(),
+                detail: format!("vcs-identity carries a malformed hash: {hex}"),
+            });
+        }
+        let minted = framed_hash(
+            LEDGER_IDENTITY_DOMAIN,
+            &[
+                (b"path", self.path().as_bytes()),
+                (b"minted_ns", &crate::now_wall_ns().to_le_bytes()),
+            ],
+        );
+        let payload = format!(
+            "{{\"kind\":\"vcs-identity\",\"identity\":\"{}\"}}",
+            minted.to_hex()
+        );
+        self.append_vcs_identity_event(&EventRow {
+            session: None,
+            t: 0,
+            kind: VCS_IDENTITY_EVENT_KIND,
+            payload: Some(&payload),
+        })?;
+        // Re-read: if a concurrent handle minted first, the FIRST event by
+        // rowid is the authority for every handle.
+        let rows = self
+            .conn
+            .query(
+                "SELECT payload FROM events WHERE kind = 'vcs-identity' \
+                 ORDER BY id LIMIT 1",
+            )
+            .map_err(|e| LedgerError::Sql {
+                context: "vcs_identity reread".to_string(),
+                detail: e.to_string(),
+            })?;
+        let payload = match rows.first().and_then(|row| row.get(0)) {
+            Some(SqliteValue::Text(t)) => t.as_str().to_string(),
+            other => {
+                return Err(LedgerError::Corrupt {
+                    hash_hex: String::new(),
+                    detail: format!("vcs-identity reread: expected TEXT, got {other:?}"),
+                });
+            }
+        };
+        let hex = payload
+            .split("\"identity\":\"")
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .ok_or_else(|| LedgerError::Corrupt {
+                hash_hex: String::new(),
+                detail: format!("vcs-identity payload is malformed: {payload}"),
+            })?;
+        ContentHash::from_hex(hex).ok_or_else(|| LedgerError::Corrupt {
+            hash_hex: String::new(),
+            detail: format!("vcs-identity carries a malformed hash: {hex}"),
+        })
+    }
 }
 
 /// Binary Merkle fold over leaves. Pair nodes, odd nodes, and the final root
@@ -312,6 +469,7 @@ impl Vcs {
     /// # Errors
     /// Unknown branches and engine errors.
     pub fn commit(&mut self, ledger: &Ledger, branch: i64) -> Result<CommitInfo, LedgerError> {
+        let ledger_id = ledger.vcs_identity()?;
         if ledger.branch(branch)?.is_none() {
             return Err(LedgerError::Invalid {
                 field: "branch".to_string(),
@@ -344,7 +502,7 @@ impl Vcs {
             }
             frozen_ops.push(row);
         }
-        let root = merkle_root(leaves);
+        let root = merkle_root(leaves.clone());
         let cutoff_ns = frozen_ops
             .iter()
             .filter_map(|op| op.t_end)
@@ -357,7 +515,7 @@ impl Vcs {
             in_flight: 0,
             artifacts,
         };
-        if let Some(head) = self.heads.get(&branch)
+        if let Some(head) = self.heads.get(&(ledger_id, branch))
             && head.root == root
         {
             // Commits identify state, not button presses. Recommitting an
@@ -366,10 +524,11 @@ impl Vcs {
             return Ok(head.clone());
         }
         let info = CommitInfo {
+            ledger: ledger_id,
             root,
             branch,
             frontier_op: ops.last().copied(),
-            parent: self.heads.get(&branch).map(|head| head.root),
+            parent: self.heads.get(&(ledger_id, branch)).map(|head| head.root),
         };
         let payload = format!(
             "{{\"kind\":\"vcs-commit\",\"root\":\"{}\",\"branch\":{},\"frontier\":{},\
@@ -387,79 +546,144 @@ impl Vcs {
             kind: "vcs-commit",
             payload: Some(&payload),
         })?;
-        self.commits.insert(root.0, info.clone());
-        self.heads.insert(branch, info.clone());
-        self.snapshots.insert(root.0, snapshot);
+        self.commits.insert(
+            (ledger_id, branch, root.0),
+            CommitRecord {
+                info: info.clone(),
+                leaves,
+                snapshot,
+            },
+        );
+        self.heads.insert((ledger_id, branch), info.clone());
         Ok(info)
     }
 
-    /// A commit by root.
+    /// A commit by its FULL envelope identity (bead gp3.17).
     #[must_use]
-    pub fn lookup(&self, root: &ContentHash) -> Option<&CommitInfo> {
-        self.commits.get(&root.0)
+    pub fn lookup(&self, id: &CommitId) -> Option<&CommitInfo> {
+        self.commits
+            .get(&(id.ledger, id.branch, id.root.0))
+            .map(|record| &record.info)
     }
 
-    /// The current head of a branch.
+    /// Every commit envelope sharing a SEMANTIC root — possibly several
+    /// branches or ledgers (deterministic order: ledger, then branch).
     #[must_use]
-    pub fn head(&self, branch: i64) -> Option<ContentHash> {
-        self.heads.get(&branch).map(|head| head.root)
+    pub fn lookup_semantic(&self, root: &ContentHash) -> Vec<&CommitInfo> {
+        self.commits
+            .values()
+            .filter(|record| record.info.root == *root)
+            .map(|record| &record.info)
+            .collect()
+    }
+
+    /// The current head of a branch WITHIN a ledger (bead gp3.17: heads
+    /// are envelope-scoped; equal roots on other branches or ledgers do
+    /// not clobber this pointer).
+    ///
+    /// # Errors
+    /// Engine errors while resolving the ledger identity.
+    pub fn head(&self, ledger: &Ledger, branch: i64) -> Result<Option<ContentHash>, LedgerError> {
+        let ledger_id = ledger.vcs_identity()?;
+        Ok(self.heads.get(&(ledger_id, branch)).map(|head| head.root))
     }
 
     /// CHECKOUT: return the exact frozen commit view (ops + finished output
-    /// artifacts). Later ops and edges cannot enter an older snapshot.
+    /// artifacts) for a commit ON THIS LEDGER AND BRANCH (bead gp3.17:
+    /// snapshots carry ledger-local op ids, so checkout is
+    /// envelope-scoped — an equal semantic root from another branch or
+    /// ledger is a different commit). Later ops and edges cannot enter
+    /// an older snapshot.
     ///
     /// # Errors
-    /// A structured error for an unknown root (the boundary case);
+    /// A structured error for an unknown commit (the boundary case);
     /// engine errors.
     pub fn checkout(
         &self,
-        _ledger: &Ledger,
+        ledger: &Ledger,
+        branch: i64,
         root: &ContentHash,
     ) -> Result<crate::travel::ViewSnapshot, LedgerError> {
-        self.lookup(root).ok_or_else(|| LedgerError::Invalid {
-            field: "commit".to_string(),
-            problem: format!("no commit with root {} is known", root.to_hex()),
-        })?;
-        self.snapshots
-            .get(&root.0)
-            .cloned()
-            .ok_or_else(|| LedgerError::Corrupt {
-                hash_hex: root.to_hex(),
-                detail: "commit registry has metadata without its frozen snapshot".to_string(),
+        let ledger_id = ledger.vcs_identity()?;
+        self.commits
+            .get(&(ledger_id, branch, root.0))
+            .map(|record| record.snapshot.clone())
+            .ok_or_else(|| LedgerError::Invalid {
+                field: "commit".to_string(),
+                problem: format!(
+                    "no commit with root {} is known on this ledger's branch {branch}",
+                    root.to_hex()
+                ),
             })
     }
 
     /// The CHECKOUT DELTA between two commits: the symmetric difference
-    /// of visible op sets — the frontier a delta-solver reconciles. A
-    /// nearby checkout is CHEAP because `shared` dominates.
+    /// of visible SEMANTIC LEAF multisets — the frontier a delta-solver
+    /// reconciles (bead gp3.17: leaf hashes are portable, so the two
+    /// commits may come from DIFFERENT ledger instances or from
+    /// histories imported in a different row order; local op ids are
+    /// reported per side and never compared across ledgers). A nearby
+    /// checkout is CHEAP because `shared` dominates.
     ///
     /// # Errors
-    /// Unknown roots; engine errors.
+    /// Unknown commits; engine errors.
     pub fn checkout_delta(
         &self,
-        _ledger: &Ledger,
-        from: &ContentHash,
-        to: &ContentHash,
+        from: &CommitId,
+        to: &CommitId,
     ) -> Result<CheckoutDelta, LedgerError> {
-        let visible = |root: &ContentHash| -> Result<BTreeSet<i64>, LedgerError> {
-            self.lookup(root).ok_or_else(|| LedgerError::Invalid {
-                field: "commit".to_string(),
-                problem: format!("no commit with root {} is known", root.to_hex()),
-            })?;
-            self.snapshots
-                .get(&root.0)
-                .map(|snapshot| snapshot.ops.iter().map(|op| op.id).collect())
-                .ok_or_else(|| LedgerError::Corrupt {
-                    hash_hex: root.to_hex(),
-                    detail: "commit registry has metadata without its frozen snapshot".to_string(),
+        let record = |id: &CommitId| -> Result<&CommitRecord, LedgerError> {
+            self.commits
+                .get(&(id.ledger, id.branch, id.root.0))
+                .ok_or_else(|| LedgerError::Invalid {
+                    field: "commit".to_string(),
+                    problem: format!(
+                        "no commit with root {} is known on ledger {} branch {}",
+                        id.root.to_hex(),
+                        id.ledger.to_hex(),
+                        id.branch
+                    ),
                 })
         };
-        let a = visible(from)?;
-        let b = visible(to)?;
+        let source = record(from)?;
+        let target = record(to)?;
+        // Leaf -> that side's local op ids (a multiset: semantically
+        // identical ops are distinct instances).
+        let index = |rec: &CommitRecord| -> BTreeMap<ContentHash, Vec<i64>> {
+            let mut map: BTreeMap<ContentHash, Vec<i64>> = BTreeMap::new();
+            for (leaf, op) in rec.leaves.iter().zip(rec.snapshot.ops.iter()) {
+                map.entry(*leaf).or_default().push(op.id);
+            }
+            map
+        };
+        let a = index(source);
+        let b = index(target);
+        let mut added = Vec::new();
+        let mut removed = Vec::new();
+        let mut shared = 0usize;
+        let keys: BTreeSet<&ContentHash> = a.keys().chain(b.keys()).collect();
+        for leaf in keys {
+            let from_ids = a.get(leaf).map_or(&[][..], Vec::as_slice);
+            let to_ids = b.get(leaf).map_or(&[][..], Vec::as_slice);
+            let common = from_ids.len().min(to_ids.len());
+            shared += common;
+            for &local_op in &to_ids[common..] {
+                added.push(DeltaOp {
+                    leaf: *leaf,
+                    local_op,
+                });
+            }
+            for &local_op in &from_ids[common..] {
+                removed.push(DeltaOp {
+                    leaf: *leaf,
+                    local_op,
+                });
+            }
+        }
         Ok(CheckoutDelta {
-            added: b.difference(&a).copied().collect(),
-            removed: a.difference(&b).copied().collect(),
-            shared: a.intersection(&b).count(),
+            added,
+            removed,
+            shared,
         })
     }
 

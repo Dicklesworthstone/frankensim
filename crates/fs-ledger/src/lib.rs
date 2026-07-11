@@ -44,6 +44,8 @@ use fsqlite::{Connection, FrankenError, SqliteValue};
 /// Crate version (compile-time stamp).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+pub(crate) const VCS_IDENTITY_EVENT_KIND: &str = "vcs-identity";
+
 // ---------------------------------------------------------------------------
 // Error model
 // ---------------------------------------------------------------------------
@@ -1582,8 +1584,35 @@ impl Ledger {
     /// Append one event-stream row; returns its rowid.
     ///
     /// # Errors
-    /// [`LedgerError::Invalid`] for malformed payload JSON; engine errors.
+    /// [`LedgerError::Invalid`] for malformed payload JSON or a reserved
+    /// internal event kind; engine errors.
     pub fn append_event(&self, event: &EventRow<'_>) -> Result<i64, LedgerError> {
+        if event.kind == VCS_IDENTITY_EVENT_KIND {
+            return Err(LedgerError::Invalid {
+                field: "kind".to_string(),
+                problem: format!(
+                    "event kind {VCS_IDENTITY_EVENT_KIND:?} is reserved for ledger identity"
+                ),
+            });
+        }
+        self.append_event_unchecked(event)
+    }
+
+    pub(crate) fn append_vcs_identity_event(
+        &self,
+        event: &EventRow<'_>,
+    ) -> Result<i64, LedgerError> {
+        if event.kind != VCS_IDENTITY_EVENT_KIND {
+            return Err(LedgerError::Invalid {
+                field: "kind".to_string(),
+                problem: "the VCS identity insertion path accepts only its reserved event kind"
+                    .to_string(),
+            });
+        }
+        self.append_event_unchecked(event)
+    }
+
+    fn append_event_unchecked(&self, event: &EventRow<'_>) -> Result<i64, LedgerError> {
         if let Some(p) = event.payload {
             self.require_json("payload", p, false)?;
         }

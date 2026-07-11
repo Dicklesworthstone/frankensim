@@ -106,12 +106,25 @@ valid STRICT SQL), and `artifacts` gains `len`/`chunk_count` +
   are EXCLUDED, so logically identical histories produce identical roots
   across ledgers and runs); unchanged recommits are idempotent (never a
   self-parent cycle), while changed commits chain to their branch predecessor
-  and persist as `vcs-commit` events. CHECKOUT returns the exact in-session frozen
-  op/artifact view captured by that commit, so later ops and later links to an
-  old op cannot leak future artifacts; `checkout_delta` returns the
-  symmetric-difference op frontier (the `perturb()`-style delta a
-  recompute solver consumes — nearby checkouts cost |delta|, not
-  |history|). `merge_views` splits base/only-A/only-B for the
+  and persist as `vcs-commit` events. ENVELOPE VS SEMANTIC IDENTITY (bead
+  gp3.17): the Merkle root is the SEMANTIC-STATE identity; the commit
+  ENVELOPE is `CommitId { ledger, branch, root }` where the ledger identity
+  is persisted on first use as a `vcs-identity` event (copies of a file
+  share it — same lineage; independent databases differ; the first event by
+  rowid is the authority under concurrent minting). The registry, heads,
+  lookup, and checkout are all envelope-keyed, so equal roots reached by
+  different branches or ledgers coexist without clobbering
+  (`lookup_semantic` lists every envelope sharing a root). CHECKOUT returns
+  the exact in-session frozen op/artifact view captured by that commit
+  (envelope-scoped, since snapshots carry ledger-local op ids), so later
+  ops and later links to an old op cannot leak future artifacts;
+  `checkout_delta` compares SEMANTIC LEAF MULTISETS — portable across
+  ledger instances and import orders, never local row ids — and reports
+  each differing op as `DeltaOp { leaf, local_op }` with the id from that
+  side's own ledger (the `perturb()`-style delta a recompute solver
+  consumes — nearby checkouts cost |delta|, not |history|). The root binds
+  history SEQUENCE; the delta binds the SET: a reordered import has a
+  different root but an empty semantic frontier. `merge_views` splits base/only-A/only-B for the
   diff/bisect/merge consumers; `storage_audit` measures the
   "N branches ≈ 1× + deltas" sharing claim; `op_artifact_hashes` and
   `commit_leaf` are the public leaf surface. GC safety is inherited:
