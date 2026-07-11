@@ -240,6 +240,86 @@ fn ir_005_verb_lowering_is_explicit_and_inspectable() {
 }
 
 #[test]
+fn ir_0xx_exact_count_literals_survive_admission_and_identity() {
+    use fs_ir::ast::CountValue;
+    // gp3.20: adjacent large integers stay distinguishable end to end.
+    let lo = sexpr::parse("9007199254740992B").expect("2^53 parses");
+    let hi = sexpr::parse("9007199254740993B").expect("2^53+1 parses");
+    assert!(
+        !lo.same_shape(&hi),
+        "2^53 and 2^53+1 bytes must be distinct identities"
+    );
+    // Canonical print preserves the exact digits (identity binding).
+    assert_eq!(sexpr::print(&hi), "9007199254740993B");
+    assert_eq!(
+        json::print(&hi),
+        "{\"c\":\"9007199254740993B\"}",
+        "exact digits bind into the JSON identity too"
+    );
+    // Round trips are lossless in both syntaxes.
+    assert!(
+        sexpr::parse(&sexpr::print(&hi))
+            .expect("reparse")
+            .same_shape(&hi)
+    );
+    assert!(
+        json::parse(&json::print(&hi))
+            .expect("reparse")
+            .same_shape(&hi)
+    );
+    // Exact scaling is checked in wide arithmetic: u64::MAX bytes is
+    // admissible; one more is refused (overflow BEFORE rounding).
+    let max = sexpr::parse("18446744073709551615B").expect("u64::MAX parses");
+    let NodeKind::Count { value, unit } = &max.kind else {
+        panic!("count expected");
+    };
+    assert_eq!(value.integral_bytes(*unit), Some(u64::MAX));
+    let over = sexpr::parse("18446744073709551616B").expect("2^64 parses as exact u128");
+    let NodeKind::Count { value, unit } = &over.kind else {
+        panic!("count expected");
+    };
+    assert_eq!(
+        value.integral_bytes(*unit),
+        None,
+        "2^64 B refuses, never rounds"
+    );
+    // GiB scaling near the boundary: 2^34 GiB = 2^64 bytes refuses;
+    // (2^34 - 1) GiB fits.
+    let fits = sexpr::parse("17179869183GiB").expect("parses");
+    let NodeKind::Count { value, unit } = &fits.kind else {
+        panic!("count expected");
+    };
+    assert_eq!(value.integral_bytes(*unit), Some((17_179_869_183u64) << 30));
+    let over_gib = sexpr::parse("17179869184GiB").expect("parses");
+    let NodeKind::Count { value, unit } = &over_gib.kind else {
+        panic!("count expected");
+    };
+    assert_eq!(value.integral_bytes(*unit), None);
+    // Beyond u128: a structured refusal at parse, not saturation.
+    let err = sexpr::parse("340282366920938463463374607431768211456B")
+        .expect_err("2^128 cannot be an exact count");
+    assert!(err.to_string().contains("exact count range"));
+    // Fractional semantics are SEPARATE: 1.5GiB still works exactly...
+    let frac = sexpr::parse("1.5GiB").expect("parses");
+    let NodeKind::Count { value, unit } = &frac.kind else {
+        panic!("count expected");
+    };
+    assert!(matches!(value, CountValue::Fractional(_)));
+    assert_eq!(value.integral_bytes(*unit), Some(3 << 29));
+    // ...but a fractional form whose integrality is unverifiable above
+    // 2^53 refuses rather than guessing.
+    let big_frac = sexpr::parse("9007199254740993.0B").expect("parses");
+    let NodeKind::Count { value, unit } = &big_frac.kind else {
+        panic!("count expected");
+    };
+    assert_eq!(value.integral_bytes(*unit), None);
+    // Mixed written forms are distinct claims.
+    let int_form = sexpr::parse("2B").expect("parses");
+    let frac_form = sexpr::parse("2.0B").expect("parses");
+    assert!(!int_form.same_shape(&frac_form));
+}
+
+#[test]
 fn ir_006_version_pinning_round_trips() {
     assert_eq!(IR_VERSION, 1);
     let src = "(study \"v\" (seed 0x2) (versions (constellation :lock \"2026-07\")))";

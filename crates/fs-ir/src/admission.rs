@@ -63,9 +63,9 @@ pub struct SessionCapability {
     /// Granted operator globs (`flux.*`, `ascent.optimize`, …).
     pub ops: Vec<String>,
     /// Core grant.
-    pub cores: f64,
+    pub cores: u64,
     /// Memory grant in bytes.
-    pub mem_bytes: f64,
+    pub mem_bytes: u64,
     /// Wall grant in seconds.
     pub wall_s: f64,
 }
@@ -416,37 +416,15 @@ fn qty_seconds(node: &Node) -> Option<f64> {
     None
 }
 
-fn count_bytes(node: &Node) -> Option<f64> {
+/// EXACT integral bytes for a Count node (gp3.20): u128-checked
+/// scaling for exact literals (overflow refuses BEFORE rounding),
+/// separately-defined fractional semantics for decimal forms. `None`
+/// for non-Count nodes, Cores, fractional/overflowing results.
+fn count_bytes_exact(node: &Node) -> Option<u64> {
     if let NodeKind::Count { value, unit } = &node.kind {
-        let factor = match unit {
-            CountUnit::B => 1.0,
-            CountUnit::KiB => 1024.0,
-            CountUnit::MiB => 1024.0 * 1024.0,
-            CountUnit::GiB => 1024.0 * 1024.0 * 1024.0,
-            CountUnit::Cores => return None,
-        };
-        return Some(value * factor);
+        return value.integral_bytes(*unit);
     }
     None
-}
-
-fn valid_byte_count(bytes: f64, allow_zero: bool) -> bool {
-    const U64_EXCLUSIVE_UPPER_BOUND: f64 = 18_446_744_073_709_551_616.0;
-    bytes.is_finite()
-        && (if allow_zero {
-            bytes >= 0.0
-        } else {
-            bytes > 0.0
-        })
-        && bytes.fract() == 0.0
-        && bytes < U64_EXCLUSIVE_UPPER_BOUND
-}
-
-fn valid_projected_byte_grant(bytes: f64) -> bool {
-    // `CapabilityToken::to_admission` rounds u64::MAX to exactly 2^64.
-    // Equality is therefore a valid planning projection, not an exact ask.
-    const U64_PROJECTION_UPPER_BOUND: f64 = 18_446_744_073_709_551_616.0;
-    bytes.is_finite() && bytes >= 0.0 && bytes.fract() == 0.0 && bytes <= U64_PROJECTION_UPPER_BOUND
 }
 
 fn invalid_resource_value(
@@ -547,8 +525,8 @@ fn check_budget_resource_domains(study: &Study<'_>, out: &mut Vec<Finding>) {
                 }
             }
             "mem" => {
-                let bytes = value.and_then(count_bytes);
-                if !bytes.is_some_and(|bytes| valid_byte_count(bytes, false)) {
+                let bytes = value.and_then(count_bytes_exact);
+                if !bytes.is_some_and(|bytes| bytes > 0) {
                     out.push(invalid_resource_value(
                         "budget",
                         clause.span,
@@ -797,25 +775,12 @@ fn namespaced_verbs<'a>(node: &'a Node, out: &mut Vec<(&'a str, Span)>) {
 fn check_capability(study: &Study<'_>, cx: &AdmissionContext<'_>, out: &mut Vec<Finding>) {
     let token = cx.capability.as_ref();
     if let Some(token) = token {
-        for (resource, value) in [
-            ("session core grant", token.cores),
-            ("session wall grant", token.wall_s),
-        ] {
-            if !value.is_finite() || value < 0.0 {
-                out.push(invalid_resource_value(
-                    "capability",
-                    Span::default(),
-                    resource,
-                    "finite and non-negative",
-                ));
-            }
-        }
-        if !valid_projected_byte_grant(token.mem_bytes) {
+        if !token.wall_s.is_finite() || token.wall_s < 0.0 {
             out.push(invalid_resource_value(
                 "capability",
                 Span::default(),
-                "session memory grant",
-                "a finite non-negative whole-byte projection no greater than 2^64",
+                "session wall grant",
+                "finite and non-negative",
             ));
         }
         if token
@@ -880,27 +845,25 @@ fn check_capability(study: &Study<'_>, cx: &AdmissionContext<'_>, out: &mut Vec<
             }
             match field.as_str() {
                 "cores" => {
-                    #[allow(clippy::cast_precision_loss)]
                     let value = match &value_node.kind {
-                        NodeKind::Int(value) => Some(*value as f64),
+                        NodeKind::Int(value) => u64::try_from(*value).ok(),
                         NodeKind::Count {
                             value,
                             unit: CountUnit::Cores,
-                        } => Some(*value),
+                        } => value.integral_count(),
                         _ => None,
                     };
-                    if !value.is_some_and(|value| value.is_finite() && value >= 0.0) {
+                    if value.is_none() {
                         out.push(invalid_resource_value(
                             "capability",
                             value_node.span,
                             "core ask",
-                            "a finite non-negative core count",
+                            "a non-negative whole core count fitting u64",
                         ));
                     }
                 }
                 "mem" => {
-                    let value = count_bytes(value_node);
-                    if !value.is_some_and(|value| valid_byte_count(value, true)) {
+                    if count_bytes_exact(value_node).is_none() {
                         out.push(invalid_resource_value(
                             "capability",
                             value_node.span,
@@ -1046,22 +1009,22 @@ fn check_capability(study: &Study<'_>, cx: &AdmissionContext<'_>, out: &mut Vec<
             };
             let over = match k.as_str() {
                 "cores" => match &pair[1].kind {
-                    NodeKind::Int(i) => (*i as f64 > token.cores)
-                        .then(|| format!("{i} cores asked, {} granted", token.cores)),
+                    NodeKind::Int(value) => u64::try_from(*value).ok().and_then(|cores| {
+                        (cores > token.cores)
+                            .then(|| format!("{cores} cores asked, {} granted", token.cores))
+                    }),
                     NodeKind::Count {
                         value,
                         unit: CountUnit::Cores,
-                    } => (*value > token.cores)
-                        .then(|| format!("{value} cores asked, {} granted", token.cores)),
+                    } => value.integral_count().and_then(|cores| {
+                        (cores > token.cores)
+                            .then(|| format!("{cores} cores asked, {} granted", token.cores))
+                    }),
                     _ => None,
                 },
-                "mem" => count_bytes(&pair[1]).and_then(|b| {
-                    (b > token.mem_bytes).then(|| {
-                        format!(
-                            "{:.0} MiB asked, {:.0} MiB granted",
-                            b / 1048576.0,
-                            token.mem_bytes / 1048576.0
-                        )
+                "mem" => count_bytes_exact(&pair[1]).and_then(|bytes| {
+                    (bytes > token.mem_bytes).then(|| {
+                        format!("{bytes} bytes asked, {} bytes granted", token.mem_bytes)
                     })
                 }),
                 "wall" => qty_seconds(&pair[1]).and_then(|w| {

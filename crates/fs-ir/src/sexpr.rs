@@ -263,19 +263,46 @@ fn classify_numeric(text: &str, span: Span) -> Result<Node, IrError> {
     }
     // Count units (information/core grants) before SI quantities: fs-qty
     // refuses information units by design.
-    let split = text
-        .char_indices()
-        .find(|(_, c)| c.is_ascii_alphabetic())
-        .map(|(i, _)| i);
-    if let Some(i) = split
-        && let Some(unit) = CountUnit::from_suffix(&text[i..])
-        && let Ok(v) = text[..i].parse::<f64>()
-        && v.is_finite()
-    {
-        return Ok(Node {
-            kind: NodeKind::Count { value: v, unit },
-            span,
-        });
+    let count = [
+        ("cores", CountUnit::Cores),
+        ("KiB", CountUnit::KiB),
+        ("MiB", CountUnit::MiB),
+        ("GiB", CountUnit::GiB),
+        ("B", CountUnit::B),
+    ]
+    .into_iter()
+    .find_map(|(suffix, unit)| text.strip_suffix(suffix).map(|number| (number, unit)));
+    if let Some((digits, unit)) = count {
+        // Bare integer literals are EXACT (gp3.20): u128 parse, so
+        // 2^53 + 1 bytes never rounds; overflow is a structured
+        // refusal, not a silent saturation.
+        if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
+            return match digits.parse::<u128>() {
+                Ok(v) => Ok(Node {
+                    kind: NodeKind::Count {
+                        value: crate::ast::CountValue::Exact(v),
+                        unit,
+                    },
+                    span,
+                }),
+                Err(_) => Err(IrError {
+                    span,
+                    kind: IrErrorKind::BadNumber,
+                    detail: format!("{text:?} exceeds the exact count range (u128)"),
+                    hint: "integer count literals are exact; this one cannot be represented"
+                        .to_string(),
+                }),
+            };
+        }
+        if let Some(value) = crate::ast::DecimalCount::parse(digits) {
+            return Ok(Node {
+                kind: NodeKind::Count {
+                    value: crate::ast::CountValue::Fractional(value),
+                    unit,
+                },
+                span,
+            });
+        }
     }
     match fs_qty::parse::parse_qty(text) {
         Ok(q) => Ok(Node {
@@ -314,9 +341,14 @@ fn print_into(node: &Node, out: &mut String) {
             let _ = write!(out, "{f:?}");
         }
         NodeKind::Qty { text, .. } => out.push_str(text),
-        NodeKind::Count { value, unit } => {
-            let _ = write!(out, "{value:?}{}", unit.suffix());
-        }
+        NodeKind::Count { value, unit } => match value {
+            crate::ast::CountValue::Exact(v) => {
+                let _ = write!(out, "{v}{}", unit.suffix());
+            }
+            crate::ast::CountValue::Fractional(f) => {
+                let _ = write!(out, "{}{}", f.canonical(), unit.suffix());
+            }
+        },
         NodeKind::Seed(v) => {
             let _ = write!(out, "0x{v:X}");
         }

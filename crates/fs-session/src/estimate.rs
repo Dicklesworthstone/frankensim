@@ -134,38 +134,19 @@ fn mem_ask(budget: Option<&Node>) -> Result<Option<u64>, crate::SessionError> {
                 what: "memory budget operand must be a byte count such as 96GiB".to_string(),
             });
         };
-        let factor: f64 = match unit {
-            fs_ir::CountUnit::B => 1.0,
-            fs_ir::CountUnit::KiB => 1024.0,
-            fs_ir::CountUnit::MiB => 1024.0 * 1024.0,
-            fs_ir::CountUnit::GiB => 1024.0 * 1024.0 * 1024.0,
-            fs_ir::CountUnit::Cores => {
-                return Err(crate::SessionError::InvalidResource {
-                    resource: "declared memory ask",
-                    value: *value,
-                    requirement: "must use a byte unit (B, KiB, MiB, or GiB)",
-                });
-            }
-        };
-        let bytes = value * factor;
-        // 2^64 is exactly representable as f64 and is the first value that
-        // cannot fit u64. `u64::MAX as f64` rounds to that same value, so a
-        // cast-based upper-bound check would accidentally accept overflow.
-        const U64_EXCLUSIVE_UPPER_BOUND: f64 = 18_446_744_073_709_551_616.0;
-        if !value.is_finite()
-            || *value <= 0.0
-            || !bytes.is_finite()
-            || bytes >= U64_EXCLUSIVE_UPPER_BOUND
-            || bytes.fract() != 0.0
-        {
+        // EXACT conversion (gp3.20): integer literals scale in u128 and
+        // refuse overflow BEFORE any rounding; fractional forms carry
+        // their separately-defined semantics (integral after scaling,
+        // verifiable below 2^53). Zero asks are refused as before.
+        let bytes = value.integral_bytes(*unit).filter(|&b| b > 0);
+        let Some(bytes) = bytes else {
             return Err(crate::SessionError::InvalidResource {
                 resource: "declared memory ask",
-                value: bytes,
-                requirement: "must be a finite, positive whole-byte quantity below 2^64 bytes",
+                value: value.approx_f64(),
+                requirement: "must be a positive whole-byte quantity in a byte unit \
+                              (B/KiB/MiB/GiB) fitting u64 exactly",
             });
-        }
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let bytes = bytes as u64;
+        };
         ask = Some(bytes);
     }
     Ok(ask)

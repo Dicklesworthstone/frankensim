@@ -358,7 +358,13 @@ fn print_into(node: &Node, out: &mut String) {
         }
         NodeKind::Count { value, unit } => {
             let _ = write!(out, "{{\"c\":");
-            print_json_string(&format!("{value:?}{}", unit.suffix()), out);
+            let literal = match value {
+                crate::ast::CountValue::Exact(v) => format!("{v}{}", unit.suffix()),
+                crate::ast::CountValue::Fractional(decimal) => {
+                    format!("{}{}", decimal.canonical(), unit.suffix())
+                }
+            };
+            print_json_string(&literal, out);
             out.push('}');
         }
         NodeKind::Seed(v) => {

@@ -28,7 +28,7 @@ pub mod query;
 pub mod sexpr;
 pub mod study;
 
-pub use ast::{CountUnit, Node, NodeKind, Span};
+pub use ast::{CountUnit, CountValue, Node, NodeKind, Span};
 pub use lower::{LowerStep, Lowered, lower};
 pub use query::{FieldRegistry, Qoi, QoiMeta, Query, QueryAdmission, Target};
 pub use study::Study;
