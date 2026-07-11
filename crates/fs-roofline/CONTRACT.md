@@ -160,6 +160,10 @@ crates plus `std`.
    or delayed benchmark receipt has no overwrite authority. A successful commit
    consumes its fresh marker, while rollback retains it for retry without
    allowing later reuse to replace a newer cache row.
+   Registry finalization additionally compares each kernel's current execution
+   binding and pending-row identity with the last repetition sealed in its
+   `Attainment`; results from an older run cannot clear, preserve, or publish a
+   newer unfinalized kernel state.
 9. Every citable GEMM repetition binds the same exact scoped tune key, shape,
    canonical MC/NC plan, tuned source, operation-specific SIMD tier, build
    identity, derive-key-domain tune-row hash, and deterministic execution-path

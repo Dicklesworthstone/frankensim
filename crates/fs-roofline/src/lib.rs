@@ -1214,6 +1214,24 @@ pub fn finalize_registry_tuning(
                 spec.name, spec.version, result.kernel, result.version
             ));
         }
+        let expected_binding = match &result.measurement_origin {
+            MeasurementOrigin::Timed {
+                decision_bindings, ..
+            } => decision_bindings.last().cloned().flatten(),
+            MeasurementOrigin::Analytic => None,
+        };
+        if kernel.execution_binding() != expected_binding {
+            registry_matches = false;
+            diagnostics.push(format!(
+                "kernel[{index}] execution state changed after this result was measured"
+            ));
+        }
+        if kernel.pending_tune_publication() != result.pending_tune_publication {
+            registry_matches = false;
+            diagnostics.push(format!(
+                "kernel[{index}] pending tune publication changed after this result was measured"
+            ));
+        }
     }
     let admitted =
         registry_matches && run_admission_error(axes, post_axes, baseline, results).is_none();

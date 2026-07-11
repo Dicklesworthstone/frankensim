@@ -182,7 +182,8 @@ fn fft_attainment() {
     // concurrent agent builds (bead 27d3 records the numbers). The
     // ASSERTED gate is the anti-collapse floor.
     println!(
-        "{{\"metric\":\"fft-gate\",\"target\":0.40,\"target_met\":{gate_ok},\"floor\":0.15,\"machine\":\"{}-{}\"}}",
+        "{{\"metric\":\"fft-gate\",\"target\":0.40,\"target_met\":{gate_ok},\
+         \"floor\":0.15,\"floor_met\":{floor_ok},\"machine\":\"{}-{}\"}}",
         std::env::consts::OS,
         std::env::consts::ARCH
     );

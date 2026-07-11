@@ -581,6 +581,44 @@ mod tests {
     }
 
     #[test]
+    fn stale_results_cannot_finalize_a_newer_gemm_execution_state() {
+        let axes = receipt_axes(0x51A1_E001);
+        let (baseline, identity) = trusted_baseline(&axes);
+        let baseline_policy = crate::AxisBaselinePolicy::new(Some(&baseline), &identity, 20_010);
+        let mut registry: Vec<Box<dyn RooflineKernel>> = vec![Box::new(GemmKernel::new(
+            256,
+            1,
+            1,
+            2,
+            axes.fingerprint,
+            None,
+        ))];
+        let first = crate::run_registry(&mut registry, 1, 1, &axes);
+        let second = crate::run_registry(&mut registry, 1, 1, &axes);
+        assert_ne!(
+            first[0].to_jsonl(),
+            second[0].to_jsonl(),
+            "declared execution runs distinguish the two result sets"
+        );
+
+        let error =
+            crate::finalize_registry_tuning(&mut registry, &axes, &axes, baseline_policy, &first)
+                .expect_err("an old result must not govern newer pending kernel state");
+        assert!(
+            error.contains("execution state changed after this result was measured"),
+            "{error}"
+        );
+        assert!(
+            registry[0].pending_tune_publication().is_none(),
+            "the newer run's pending tune publication must be drained on mismatch"
+        );
+        assert!(
+            registry[0].execution_binding().is_none(),
+            "the newer local decision must be invalidated rather than surviving the refusal"
+        );
+    }
+
+    #[test]
     fn production_registry_contains_session_gemm() {
         let axes = crate::MachineAxes {
             fingerprint: 0xA11_C0DE,
