@@ -16,6 +16,7 @@
 
 use crate::cx::{Budget, CancelGate, Cx, ExecMode, RefusalSink, RunId, StreamKey, TileFailure};
 use crate::kernel::TileKernel;
+use asupersync::cx::{CpuCx, ScopedCpuError};
 use core::fmt;
 use core::ops::ControlFlow;
 use fs_alloc::CachePadded;
@@ -722,10 +723,151 @@ fn mul_ratio_floor(value: u64, numerator: u128, denominator: u128) -> u64 {
     u64::try_from(quotient).expect("a ratio no greater than one cannot exceed its u64 multiplicand")
 }
 
+/// Everything one worker's loop touches, bundled so the two launch
+/// harnesses — `std::thread::scope` and asupersync's `Cx::scoped_cpu`
+/// (bead lx0e) — drive the IDENTICAL protocol: seed deques, steal-half,
+/// drain-on-cancel, per-tile panic containment. One loop, two scopes.
+struct WorkerCtx<'a, K: TileKernel> {
+    kernel: &'a K,
+    kernel_id: u64,
+    iteration: u64,
+    workers: usize,
+    budget: Budget,
+    gate: &'a CancelGate,
+    lease: &'a fs_alloc::OperationMemoryLease,
+    arenas: &'a fs_alloc::ArenaPool,
+    config: &'a PoolConfig,
+    deques: &'a [CachePadded<Mutex<VecDeque<u64>>>],
+    slots: &'a [Mutex<Option<K::Out>>],
+    victims: &'a [Vec<usize>],
+    observed: &'a [CachePadded<AtomicU64>],
+    done_by: &'a [CachePadded<AtomicU64>],
+    steals: &'a AtomicU64,
+    cross_steals: &'a AtomicU64,
+    panic_box: &'a Mutex<Option<(u64, String)>>,
+    refusal_sink: &'a RefusalSink,
+}
+
+/// The worker protocol, shared verbatim by both launch harnesses. When
+/// `task_cx` is present (the asupersync lane), the CALLING task's
+/// cancellation and budget bound the run: every tile boundary checkpoints
+/// the task context, and a failed checkpoint converts into a gate request
+/// so the pool's normal drain protocol — including its cancel-latency
+/// histogram — applies unchanged (P7: one drain semantics, two signals).
+fn worker_loop<Caps, K: TileKernel>(
+    ctx: &WorkerCtx<'_, K>,
+    w: usize,
+    task_cx: Option<&CpuCx<Caps>>,
+) {
+    if !ctx.config.pin_groups.is_empty() {
+        let g = ccd_of_worker(w, ctx.workers, ctx.config.topo) % ctx.config.pin_groups.len();
+        // Advisory (see PoolConfig::pin_groups docs).
+        let _ = fs_substrate::os_affinity::pin_current_thread(&ctx.config.pin_groups[g]);
+    }
+    loop {
+        // Tile boundary: the drain point (P7). Bridge the calling task's
+        // cancellation/budget first (charged once per boundary), then
+        // record the observation timestamp once for the histogram.
+        if let Some(task_cx) = task_cx
+            && !ctx.gate.is_requested()
+            && task_cx.checkpoint().is_err()
+        {
+            ctx.gate.request();
+        }
+        if ctx.gate.is_requested() {
+            let _ = ctx.observed[w].get().compare_exchange(
+                0,
+                ctx.gate.now_ns().max(1),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            );
+            break;
+        }
+        // Own deque first (front: preserve locality runs).
+        let mut tile = ctx.deques[w].get().lock().expect("deque").pop_front();
+        if tile.is_none() {
+            // Steal HALF from the first non-empty victim,
+            // same-CCD victims first.
+            for &v in &ctx.victims[w] {
+                let mut vd = ctx.deques[v].get().lock().expect("deque");
+                let take = vd.len().div_ceil(2);
+                if take == 0 {
+                    continue;
+                }
+                let split_at = vd.len() - take;
+                let stolen: VecDeque<u64> = vd.split_off(split_at);
+                drop(vd);
+                ctx.steals.fetch_add(1, Ordering::Relaxed);
+                if ccd_of_worker(v, ctx.workers, ctx.config.topo)
+                    != ccd_of_worker(w, ctx.workers, ctx.config.topo)
+                {
+                    ctx.cross_steals.fetch_add(1, Ordering::Relaxed);
+                }
+                let mut mine = ctx.deques[w].get().lock().expect("deque");
+                *mine = stolen;
+                tile = mine.pop_front();
+                break;
+            }
+        }
+        let Some(tile) = tile else {
+            break; // every deque empty: run complete
+        };
+        let key = StreamKey {
+            seed: ctx.config.seed,
+            kernel_id: ctx.kernel_id,
+            tile,
+            iteration: ctx.iteration,
+        };
+        // Every tile arena charges the shared operation
+        // lease while its chunks are held (bead wf9.16).
+        let outcome = ctx.arenas.scope_leased(ctx.lease, |arena| {
+            let cx = Cx::new_with_refusal_sink(
+                ctx.gate,
+                arena,
+                key,
+                ctx.budget,
+                ctx.config.mode,
+                ctx.refusal_sink,
+            );
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| ctx.kernel.run(tile, &cx)))
+        });
+        match outcome {
+            Ok(ControlFlow::Continue(out)) => {
+                *ctx.slots[tile as usize].lock().expect("slot") = Some(out);
+                ctx.done_by[w].get().fetch_add(1, Ordering::Relaxed);
+            }
+            Ok(ControlFlow::Break(_cancelled)) => {
+                // Kernel observed the gate (or self-cancelled):
+                // make it global and drain.
+                ctx.gate.request();
+            }
+            Err(payload) => {
+                let message = payload
+                    .downcast_ref::<&str>()
+                    .map(ToString::to_string)
+                    .or_else(|| payload.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "non-string panic payload".to_string());
+                let mut pb = ctx.panic_box.lock().expect("panic box");
+                if pb
+                    .as_ref()
+                    .is_none_or(|(recorded_tile, _)| tile < *recorded_tile)
+                {
+                    *pb = Some((tile, message));
+                }
+                drop(pb);
+                ctx.gate.request();
+            }
+        }
+    }
+}
+
 /// The throughput-lane pool. Workers are scoped per run (spawned at `run`,
 /// joined before it returns) so kernel borrows need no `'static` — the
 /// persistent-parked-worker optimization is deferred with the lock-free
-/// deques (CONTRACT no-claims).
+/// deques (CONTRACT no-claims). Two launch harnesses share one worker
+/// protocol: the std lane (`run`/`run_declared*`) and the asupersync lane
+/// ([`TilePool::run_scoped`], bead lx0e), where workers are scoped CPU
+/// children of the calling task via `Cx::scoped_cpu`.
 pub struct TilePool {
     config: PoolConfig,
     arenas: fs_alloc::ArenaPool,
@@ -817,6 +959,7 @@ impl TilePool {
             run,
             Budget::INFINITE,
             &fs_alloc::OperationMemoryLease::unbounded(),
+            None::<&asupersync::Cx>,
         )
     }
 
@@ -836,6 +979,7 @@ impl TilePool {
             run,
             budget,
             &fs_alloc::OperationMemoryLease::unbounded(),
+            None::<&asupersync::Cx>,
         )
     }
 
@@ -854,7 +998,48 @@ impl TilePool {
         budget: Budget,
         lease: &fs_alloc::OperationMemoryLease,
     ) -> (Result<K::Out, RunError>, RunReport) {
-        self.run_inner(kernel, gate, run, budget, lease)
+        self.run_inner(kernel, gate, run, budget, lease, None::<&asupersync::Cx>)
+    }
+
+    /// Run a kernel under a LIVE asupersync task context (bead lx0e): the
+    /// workers are scoped CPU children of the calling task via
+    /// `Cx::scoped_cpu`, so task cancellation and budget exhaustion drain
+    /// the pool exactly like a gate request, and the scope tree stays
+    /// honest (P7) — the pool cannot outlive or leak past the calling
+    /// task, which remains blocked here until every worker joins.
+    ///
+    /// `budget` remains the per-tile slice stamped into each tile's
+    /// [`Cx`] (fs-exec vocabulary), independent of the CALLING task's
+    /// asupersync budget, which bounds the run itself: each worker
+    /// checkpoints `task_cx` at every tile boundary (charging poll quota
+    /// per boundary), and cancellation or exhaustion converts to a drain.
+    ///
+    /// # Errors
+    /// Everything [`TilePool::run_declared_leased_budgeted`] can return,
+    /// plus [`RunError::Cancelled`] when the calling task is cancelled or
+    /// budget-exhausted at entry (nothing runs), mid-run (drain), or at
+    /// exit (completed results are refused fail-closed: a cancelled task
+    /// must not admit work finished under it).
+    ///
+    /// # Panics
+    /// Pool-invariant panics (a worker dying OUTSIDE per-tile
+    /// containment) propagate, exactly like the std-scope lane. OS-level
+    /// worker-spawn failure also panics in this lane (upstream
+    /// `scoped_cpu` spawns through `std::thread::Scope::spawn`), unlike
+    /// the std lane's structured [`RunError::WorkerSpawn`].
+    pub fn run_scoped<Caps, K: TileKernel>(
+        &self,
+        task_cx: &asupersync::Cx<Caps>,
+        kernel: &K,
+        gate: &CancelGate,
+        run: RunId,
+        budget: Budget,
+        lease: &fs_alloc::OperationMemoryLease,
+    ) -> (Result<K::Out, RunError>, RunReport)
+    where
+        Caps: Send + Sync + 'static,
+    {
+        self.run_inner(kernel, gate, run, budget, lease, Some(task_cx))
     }
 
     /// Run a kernel under an external cancel gate; returns the outcome and
@@ -874,6 +1059,7 @@ impl TilePool {
             RunId::default(),
             Budget::INFINITE,
             &fs_alloc::OperationMemoryLease::unbounded(),
+            None::<&asupersync::Cx>,
         )
     }
 
@@ -881,14 +1067,18 @@ impl TilePool {
     // splitting it would scatter the drain/containment invariants the
     // storm suite audits as a unit.
     #[allow(clippy::too_many_lines)]
-    fn run_inner<K: TileKernel>(
+    fn run_inner<Caps, K: TileKernel>(
         &self,
         kernel: &K,
         gate: &CancelGate,
         run: RunId,
         budget: Budget,
         lease: &fs_alloc::OperationMemoryLease,
-    ) -> (Result<K::Out, RunError>, RunReport) {
+        task_cx: Option<&asupersync::Cx<Caps>>,
+    ) -> (Result<K::Out, RunError>, RunReport)
+    where
+        Caps: Send + Sync + 'static,
+    {
         let plan = kernel.tiles();
         let kernel_id = plan.kernel_id();
         let n = plan.tiles;
@@ -974,125 +1164,89 @@ impl TilePool {
         let panic_box: Mutex<Option<(u64, String)>> = Mutex::new(None);
         let refusal_sink = RefusalSink::default();
 
+        let ctx = WorkerCtx {
+            kernel,
+            kernel_id,
+            iteration,
+            workers,
+            budget,
+            gate,
+            lease,
+            arenas: &self.arenas,
+            config: &self.config,
+            deques: &deques,
+            slots: &slots,
+            victims: &victims,
+            observed: &observed,
+            done_by: &done_by,
+            steals: &steals,
+            cross_steals: &cross_steals,
+            panic_box: &panic_box,
+            refusal_sink: &refusal_sink,
+        };
         let mut spawn_failure = None;
-        std::thread::scope(|s| {
-            for w in 0..workers {
-                let deques = &deques;
-                let slots = &slots;
-                let victims = &victims[w];
-                let steals = &steals;
-                let cross_steals = &cross_steals;
-                let panic_box = &panic_box;
-                let refusal_sink = &refusal_sink;
-                let observed = &observed[w];
-                let done_by = &done_by[w];
-                let arenas = &self.arenas;
-                let config = &self.config;
-                let spawned = std::thread::Builder::new().spawn_scoped(s, move || {
-                    if !config.pin_groups.is_empty() {
-                        let g = ccd_of_worker(w, workers, config.topo) % config.pin_groups.len();
-                        // Advisory (see PoolConfig::pin_groups docs).
-                        let _ =
-                            fs_substrate::os_affinity::pin_current_thread(&config.pin_groups[g]);
-                    }
-                    loop {
-                        // Tile boundary: the drain point (P7). Record the
-                        // observation timestamp once for the histogram.
-                        if gate.is_requested() {
-                            let _ = observed.get().compare_exchange(
-                                0,
-                                gate.now_ns().max(1),
-                                Ordering::AcqRel,
-                                Ordering::Acquire,
-                            );
+        let mut scope_refusal = None;
+        match task_cx {
+            None => {
+                std::thread::scope(|s| {
+                    for w in 0..workers {
+                        let ctx = &ctx;
+                        let spawned = std::thread::Builder::new()
+                            .spawn_scoped(s, move || worker_loop::<Caps, K>(ctx, w, None));
+                        if let Err(error) = spawned {
+                            spawn_failure = Some((w, error.to_string()));
+                            gate.request();
                             break;
-                        }
-                        // Own deque first (front: preserve locality runs).
-                        let mut tile = deques[w].get().lock().expect("deque").pop_front();
-                        if tile.is_none() {
-                            // Steal HALF from the first non-empty victim,
-                            // same-CCD victims first.
-                            for &v in victims {
-                                let mut vd = deques[v].get().lock().expect("deque");
-                                let take = vd.len().div_ceil(2);
-                                if take == 0 {
-                                    continue;
-                                }
-                                let split_at = vd.len() - take;
-                                let stolen: VecDeque<u64> = vd.split_off(split_at);
-                                drop(vd);
-                                steals.fetch_add(1, Ordering::Relaxed);
-                                if ccd_of_worker(v, workers, config.topo)
-                                    != ccd_of_worker(w, workers, config.topo)
-                                {
-                                    cross_steals.fetch_add(1, Ordering::Relaxed);
-                                }
-                                let mut mine = deques[w].get().lock().expect("deque");
-                                *mine = stolen;
-                                tile = mine.pop_front();
-                                break;
-                            }
-                        }
-                        let Some(tile) = tile else {
-                            break; // every deque empty: run complete
-                        };
-                        let key = StreamKey {
-                            seed: config.seed,
-                            kernel_id,
-                            tile,
-                            iteration,
-                        };
-                        // Every tile arena charges the shared operation
-                        // lease while its chunks are held (bead wf9.16).
-                        let outcome = arenas.scope_leased(lease, |arena| {
-                            let cx = Cx::new_with_refusal_sink(
-                                gate,
-                                arena,
-                                key,
-                                budget,
-                                config.mode,
-                                refusal_sink,
-                            );
-                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                kernel.run(tile, &cx)
-                            }))
-                        });
-                        match outcome {
-                            Ok(ControlFlow::Continue(out)) => {
-                                *slots[tile as usize].lock().expect("slot") = Some(out);
-                                done_by.get().fetch_add(1, Ordering::Relaxed);
-                            }
-                            Ok(ControlFlow::Break(_cancelled)) => {
-                                // Kernel observed the gate (or self-cancelled):
-                                // make it global and drain.
-                                gate.request();
-                            }
-                            Err(payload) => {
-                                let message = payload
-                                    .downcast_ref::<&str>()
-                                    .map(ToString::to_string)
-                                    .or_else(|| payload.downcast_ref::<String>().cloned())
-                                    .unwrap_or_else(|| "non-string panic payload".to_string());
-                                let mut pb = panic_box.lock().expect("panic box");
-                                if pb
-                                    .as_ref()
-                                    .is_none_or(|(recorded_tile, _)| tile < *recorded_tile)
-                                {
-                                    *pb = Some((tile, message));
-                                }
-                                drop(pb);
-                                gate.request();
-                            }
                         }
                     }
                 });
-                if let Err(error) = spawned {
-                    spawn_failure = Some((w, error.to_string()));
-                    gate.request();
-                    break;
+            }
+            Some(cx) => {
+                // The asupersync lane (bead lx0e): workers are scoped CPU
+                // children of the CALLING task via `Cx::scoped_cpu`, which
+                // blocks here until every child joins — the scope tree is
+                // honest by construction (the region cannot close under the
+                // workers because its task is inside this call).
+                match cx.scoped_cpu(workers, |scope| {
+                    for w in 0..workers {
+                        let ctx = &ctx;
+                        if let Err(error) = scope.spawn(move |cpu| worker_loop(ctx, w, Some(cpu))) {
+                            // Structurally unreachable (exactly `workers`
+                            // spawns under a cap of `workers`); kept as the
+                            // same failure class as an OS spawn refusal.
+                            spawn_failure = Some((w, error.to_string()));
+                            gate.request();
+                            break;
+                        }
+                    }
+                }) {
+                    Ok(()) => {}
+                    Err(refusal) => scope_refusal = Some(refusal),
                 }
             }
-        });
+        }
+        if let Some(refusal) = scope_refusal {
+            match refusal {
+                // Entry refusal (nothing ran) or exit checkpoint (the
+                // calling task was cancelled or exhausted its budget, even
+                // if every tile completed first): fail closed as a
+                // cancellation — the drain is already complete because the
+                // scope joins all workers before returning.
+                ScopedCpuError::Cancelled(_) => gate.request(),
+                // Parity with the std lane: kernel panics are contained per
+                // tile INSIDE the worker loop, so a panic escaping a worker
+                // is a pool invariant failure — propagate, exactly as
+                // `std::thread::scope` would have.
+                ScopedCpuError::ChildPanicked { child, message } => std::panic::panic_any(format!(
+                    "tile-pool worker {child} panicked outside tile containment: {message}"
+                )),
+                // Unreachable by construction; refuse loudly rather than
+                // misreport.
+                ScopedCpuError::WorkerCapExceeded { cap } => std::panic::panic_any(format!(
+                    "tile-pool scoped launch exceeded its own worker cap {cap}"
+                )),
+            }
+        }
 
         let completed = slots
             .iter()
@@ -1438,6 +1592,204 @@ mod tests {
 
     fn pool(workers: usize) -> TilePool {
         TilePool::new(PoolConfig::new(workers, CcdTopology::APPLE_M_CLASS, 0x5EED))
+    }
+
+    /// Run `f` inside a REAL asupersync root task (the canonical shape from
+    /// `latency.rs`): the scoped lane demands a live task context, and using
+    /// the runtime — not a synthetic Cx — is the P7-honest harness.
+    fn in_task<R, F>(f: F) -> R
+    where
+        F: FnOnce(asupersync::Cx) -> R + Send + 'static,
+        R: Send + 'static,
+    {
+        let lane = crate::LatencyLane::new(1).expect("lane");
+        let root = lane.runtime().handle().spawn(async move {
+            let cx = asupersync::Cx::current().expect("task Cx");
+            f(cx)
+        });
+        lane.block_on(root)
+    }
+
+    fn run_scoped_simple<K: TileKernel>(
+        p: &TilePool,
+        cx: &asupersync::Cx,
+        kernel: &K,
+    ) -> (Result<K::Out, RunError>, RunReport) {
+        p.run_scoped(
+            cx,
+            kernel,
+            &CancelGate::new(),
+            RunId(0),
+            Budget::INFINITE,
+            &fs_alloc::OperationMemoryLease::unbounded(),
+        )
+    }
+
+    /// A kernel that cancels the CALLING asupersync task from inside a tile
+    /// — the G4 mid-run cancellation storm's trigger.
+    struct CancelTaskAt {
+        tiles: u64,
+        at: u64,
+        task: asupersync::Cx,
+    }
+
+    impl TileKernel for CancelTaskAt {
+        type Out = u64;
+
+        fn tiles(&self) -> TilePlan {
+            TilePlan::new("test/cancel-task-at", self.tiles)
+        }
+
+        fn run(&self, tile: u64, _cx: &Cx<'_>) -> ControlFlow<crate::Cancelled, u64> {
+            if tile == self.at {
+                self.task.set_cancel_requested(true);
+            }
+            ControlFlow::Continue(1)
+        }
+    }
+
+    struct PanicAt {
+        tiles: u64,
+        at: u64,
+    }
+
+    impl TileKernel for PanicAt {
+        type Out = u64;
+
+        fn tiles(&self) -> TilePlan {
+            TilePlan::new("test/panic-at", self.tiles)
+        }
+
+        fn run(&self, tile: u64, _cx: &Cx<'_>) -> ControlFlow<crate::Cancelled, u64> {
+            assert!(tile != self.at, "scoped containment probe");
+            ControlFlow::Continue(1)
+        }
+    }
+
+    /// G5 (lx0e): the asupersync lane is deterministic across reruns and
+    /// bitwise-identical to the std lane — one worker protocol, two scopes —
+    /// with every tile accounted to a worker and arenas quiescent after.
+    #[test]
+    fn scoped_lane_is_deterministic_and_matches_std_lane_bitwise() {
+        let expected = pool(4).run(&SumKernel { tiles: 257 }).expect("std lane");
+        let (first, second, report) = in_task(|cx| {
+            let p = pool(4);
+            let (first, report) = run_scoped_simple(&p, &cx, &SumKernel { tiles: 257 });
+            let (second, _) = run_scoped_simple(&p, &cx, &SumKernel { tiles: 257 });
+            assert!(
+                p.arena_pool().stats().quiescent(),
+                "arenas quiescent after scoped runs"
+            );
+            (
+                first.expect("scoped lane"),
+                second.expect("scoped rerun"),
+                report,
+            )
+        });
+        assert_eq!(first, expected, "scoped lane bitwise-matches the std lane");
+        assert_eq!(second, expected, "scoped lane deterministic across reruns");
+        assert_eq!(report.completed, 257);
+        assert_eq!(
+            report.tiles_by_worker.iter().sum::<u64>(),
+            257,
+            "every tile accounted to a worker"
+        );
+    }
+
+    /// G4 (lx0e): a pre-cancelled task refuses at ENTRY — no worker spawns,
+    /// nothing runs — and the pool stays usable once the task is live again.
+    #[test]
+    fn scoped_lane_refuses_pre_cancelled_task_at_entry_and_pool_survives() {
+        in_task(|cx| {
+            let p = pool(2);
+            cx.set_cancel_requested(true);
+            let (out, report) = run_scoped_simple(&p, &cx, &SumKernel { tiles: 64 });
+            match out {
+                Err(RunError::Cancelled {
+                    completed: 0,
+                    total: 64,
+                    ..
+                }) => {}
+                other => panic!("entry refusal must be Cancelled with zero work: {other:?}"),
+            }
+            assert_eq!(report.completed, 0, "no tile ran under a cancelled task");
+            assert!(p.arena_pool().stats().quiescent(), "nothing to leak");
+            cx.set_cancel_requested(false);
+            let (out, _) = run_scoped_simple(&p, &cx, &SumKernel { tiles: 64 });
+            let rerun = out.expect("pool usable after an entry refusal");
+            assert_eq!(
+                rerun,
+                pool(2).run(&SumKernel { tiles: 64 }).expect("std lane"),
+                "post-refusal rerun bitwise-matches the std lane"
+            );
+        });
+    }
+
+    /// G4 (lx0e): cancelling the calling TASK mid-run converts into the
+    /// pool's own drain protocol — workers stop at tile boundaries, the run
+    /// fails closed as Cancelled, arenas quiesce, and the pool survives.
+    #[test]
+    fn scoped_lane_drains_on_mid_run_task_cancel_and_fails_closed() {
+        in_task(|cx| {
+            let p = pool(4);
+            let kernel = CancelTaskAt {
+                tiles: 16_384,
+                at: 0,
+                task: cx.clone(),
+            };
+            let (out, report) = run_scoped_simple(&p, &cx, &kernel);
+            match out {
+                Err(RunError::Cancelled {
+                    completed, total, ..
+                }) => {
+                    assert_eq!(total, 16_384);
+                    assert!(
+                        completed < total,
+                        "a tile-0 task cancel must drain before completion \
+                         (completed {completed})"
+                    );
+                }
+                other => panic!("task cancel must fail closed as Cancelled: {other:?}"),
+            }
+            assert!(
+                report.completed < 16_384,
+                "report agrees the drain preempted completion"
+            );
+            assert!(
+                p.arena_pool().stats().quiescent(),
+                "drained workers leaked no arena chunks"
+            );
+            cx.set_cancel_requested(false);
+            let (out, _) = run_scoped_simple(&p, &cx, &SumKernel { tiles: 64 });
+            out.expect("pool usable after a mid-run task cancel");
+        });
+    }
+
+    /// G4 (lx0e): per-tile panic containment holds unchanged in the scoped
+    /// lane — the panic is localized to its tile, siblings drain, the scope
+    /// joins, and the pool survives.
+    #[test]
+    fn scoped_lane_contains_tile_panics_and_survives() {
+        in_task(|cx| {
+            let p = pool(4);
+            let (out, _report) = run_scoped_simple(&p, &cx, &PanicAt { tiles: 512, at: 7 });
+            match out {
+                Err(RunError::TilePanicked { tile, message, .. }) => {
+                    assert_eq!(tile, 7, "the panic is localized to its tile");
+                    assert!(
+                        message.contains("scoped containment probe"),
+                        "payload survives: {message}"
+                    );
+                }
+                other => panic!("a tile panic must surface as TilePanicked: {other:?}"),
+            }
+            assert!(
+                p.arena_pool().stats().quiescent(),
+                "containment leaked no arena chunks"
+            );
+            let (out, _) = run_scoped_simple(&p, &cx, &SumKernel { tiles: 64 });
+            out.expect("pool usable after tile panic containment");
+        });
     }
 
     #[test]
