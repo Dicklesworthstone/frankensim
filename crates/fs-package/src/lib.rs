@@ -25,6 +25,7 @@
 
 use fs_blake3::hash_domain;
 use fs_evidence::{Color, ColorRank, IntervalOp, compose};
+use origin::validate_origin_shape;
 
 pub use fs_blake3::ContentHash;
 
@@ -79,24 +80,25 @@ pub struct AnchorRecord {
 /// falsifier records, and dataset anchors (schema v3).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Claim {
-    /// A stable claim id.
-    pub id: String,
-    /// The meaningful human-readable claim (not blank/placeholder text).
-    pub statement: String,
-    /// The epistemic color + its certificate payload.
-    pub color: Color,
-    /// The composition receipt, when this claim is derived.
-    pub receipt: Option<CompositionReceipt>,
-    /// Falsifier records (adversarial attempts + outcomes).
-    pub falsifiers: Vec<FalsifierRecord>,
-    /// Anchoring datasets.
-    pub anchors: Vec<AnchorRecord>,
+    /// SEALED (schema v5, bead krym): fields are crate-private so a claim
+    /// can only exist through the origin-typed constructors below — public
+    /// `Color::Verified` alone can no longer mint a checker-passing claim.
+    pub(crate) id: String,
+    pub(crate) statement: String,
+    pub(crate) color: Color,
+    pub(crate) receipt: Option<CompositionReceipt>,
+    pub(crate) falsifiers: Vec<FalsifierRecord>,
+    pub(crate) anchors: Vec<AnchorRecord>,
+    pub(crate) origin: ClaimOrigin,
 }
 
 impl Claim {
-    /// A claim.
-    #[must_use]
-    pub fn new(id: impl Into<String>, statement: impl Into<String>, color: Color) -> Claim {
+    fn sealed(
+        id: impl Into<String>,
+        statement: impl Into<String>,
+        color: Color,
+        origin: ClaimOrigin,
+    ) -> Claim {
         Claim {
             id: id.into(),
             statement: statement.into(),
@@ -104,14 +106,144 @@ impl Claim {
             receipt: None,
             falsifiers: Vec::new(),
             anchors: Vec::new(),
+            origin,
         }
     }
 
-    /// Attach a composition receipt (builder style).
+    /// A VERIFIED claim from a named producer's certificate artifact.
     #[must_use]
-    pub fn with_receipt(mut self, parents: Vec<usize>, op: IntervalOp) -> Claim {
-        self.receipt = Some(CompositionReceipt { parents, op });
-        self
+    pub fn from_certificate(
+        id: impl Into<String>,
+        statement: impl Into<String>,
+        lo: f64,
+        hi: f64,
+        producer: impl Into<String>,
+        certificate_hash: impl Into<String>,
+    ) -> Claim {
+        Claim::sealed(
+            id,
+            statement,
+            Color::Verified { lo, hi },
+            ClaimOrigin::SourceCertificate {
+                producer: producer.into(),
+                certificate_hash: certificate_hash.into(),
+            },
+        )
+    }
+
+    /// A VALIDATED claim anchored to its reference dataset: the origin
+    /// names the color's dataset and a matching content-hash anchor
+    /// record is attached automatically.
+    #[must_use]
+    pub fn anchored(
+        id: impl Into<String>,
+        statement: impl Into<String>,
+        regime: fs_evidence::ValidityDomain,
+        dataset: impl Into<String>,
+        content_hash: impl Into<String>,
+    ) -> Claim {
+        let dataset = dataset.into();
+        let content_hash = content_hash.into();
+        let mut claim = Claim::sealed(
+            id,
+            statement,
+            Color::Validated {
+                regime,
+                dataset: dataset.clone(),
+            },
+            ClaimOrigin::AnchoredSource {
+                dataset_id: dataset.clone(),
+                content_hash: content_hash.clone(),
+            },
+        );
+        claim.anchors.push(AnchorRecord {
+            dataset_id: dataset,
+            content_hash,
+        });
+        claim
+    }
+
+    /// An ESTIMATED claim from a named estimator.
+    #[must_use]
+    pub fn estimated(
+        id: impl Into<String>,
+        statement: impl Into<String>,
+        estimator: impl Into<String>,
+        dispersion: f64,
+    ) -> Claim {
+        let estimator = estimator.into();
+        Claim::sealed(
+            id,
+            statement,
+            Color::Estimated {
+                estimator: estimator.clone(),
+                dispersion,
+            },
+            ClaimOrigin::EstimatedSource { estimator },
+        )
+    }
+
+    /// A DERIVED claim: its color must re-derive bit-exactly from the
+    /// named parents under `op` (the checker re-runs the fold).
+    #[must_use]
+    pub fn derived(
+        id: impl Into<String>,
+        statement: impl Into<String>,
+        color: Color,
+        parents: Vec<usize>,
+        op: IntervalOp,
+    ) -> Claim {
+        let mut claim = Claim::sealed(id, statement, color, ClaimOrigin::Derived);
+        claim.receipt = Some(CompositionReceipt { parents, op });
+        claim
+    }
+
+    /// A WAIVED claim: any color, authorized only by an explicit,
+    /// expiring, MAC'd grant that an INJECTED verifier must accept.
+    #[must_use]
+    pub fn waived(
+        id: impl Into<String>,
+        statement: impl Into<String>,
+        color: Color,
+        grant: WaiverGrant,
+    ) -> Claim {
+        Claim::sealed(id, statement, color, ClaimOrigin::AuthenticatedWaiver(grant))
+    }
+
+    /// Read-only accessors (the sealed fields' public view).
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+    /// The human-readable claim text.
+    #[must_use]
+    pub fn statement(&self) -> &str {
+        &self.statement
+    }
+    /// The epistemic color + certificate payload.
+    #[must_use]
+    pub fn color(&self) -> &Color {
+        &self.color
+    }
+    /// The composition receipt, when derived.
+    #[must_use]
+    pub fn receipt(&self) -> Option<&CompositionReceipt> {
+        self.receipt.as_ref()
+    }
+    /// Attached falsifier records.
+    #[must_use]
+    pub fn falsifiers(&self) -> &[FalsifierRecord] {
+        &self.falsifiers
+    }
+    /// Attached anchor records.
+    #[must_use]
+    pub fn anchors(&self) -> &[AnchorRecord] {
+        &self.anchors
+    }
+    /// Where this claim's certificate came from.
+    #[must_use]
+    pub fn origin(&self) -> &ClaimOrigin {
+        &self.origin
     }
 
     /// Attach a falsifier record (builder style).
@@ -166,8 +298,9 @@ impl Claim {
         matches!(&self.color, Color::Validated { .. })
     }
 
-    /// A canonical string used for content hashing (bit-exact on floats).
-    fn canonical(&self) -> String {
+    /// The schema-v4 canonical body (id, statement, color, receipt,
+    /// falsifiers, anchors) — also the waiver MAC message.
+    fn canonical_body(&self) -> String {
         use core::fmt::Write as _;
         let mut out = String::from("claim|");
         push_atom(&mut out, &self.id);
@@ -214,6 +347,24 @@ impl Claim {
             out.push_str("anchor|");
             push_atom(&mut out, &a.dataset_id);
             push_atom(&mut out, &a.content_hash);
+        }
+        out
+    }
+
+    /// The canonical bytes a waiver MAC binds: everything EXCEPT the
+    /// origin section (which contains the MAC itself). Replaying a
+    /// grant onto any other claim changes this message.
+    #[must_use]
+    pub fn waiver_message(&self) -> String {
+        self.canonical_body()
+    }
+
+    /// Full canonical string (schema v5): the v4 body plus the origin.
+    fn canonical(&self) -> String {
+        let mut out = self.canonical_body();
+        out.push_str("origin|");
+        for part in self.origin.canonical_parts() {
+            push_atom(&mut out, &part);
         }
         out
     }
@@ -387,6 +538,32 @@ pub enum PackageError {
         parent: usize,
     },
     /// A falsifier REFUTED this claim; a refuted claim cannot verify.
+    /// Schema v5: an origin whose fields fail shape validation.
+    InvalidOrigin {
+        /// The claim.
+        claim: String,
+        /// The field-level refusal.
+        why: String,
+    },
+    /// Schema v5: an origin inconsistent with its claim's color class
+    /// (raw colors, unrelated anchors, estimator mismatches, Derived
+    /// without a receipt or a receipt without Derived).
+    OriginMismatch {
+        /// The claim.
+        claim: String,
+        /// The origin kind tag.
+        origin: &'static str,
+    },
+    /// Schema v5: a waiver grant that is expired or that the injected
+    /// verifier rejected (or no capability was injected at all).
+    WaiverRefused {
+        /// The claim.
+        claim: String,
+        /// The waiver id.
+        waiver: String,
+        /// Why.
+        why: &'static str,
+    },
     RefutedClaim {
         /// The claim id.
         claim: String,
@@ -422,8 +599,11 @@ pub enum PackageError {
 /// re-runs the derivation), falsifier records (refuted claims fail),
 /// and dataset anchors; v4 (bead 7uq9) replaces the 64-bit FNV-1a
 /// content address with a domain-separated 32-byte BLAKE3 root
-/// ([`ContentHash`]) — v3 transports are refused by version.
-pub const FORMAT_VERSION: u32 = 4;
+/// ([`ContentHash`]); v5 (bead krym) seals claims with typed ORIGINS
+/// (bound into the address, re-derived by the checker, waivers only
+/// through an injected capability) — v3/v4 transports are refused by
+/// version.
+pub const FORMAT_VERSION: u32 = 5;
 const _: () = assert!(FORMAT_VERSION == fs_crosswalk::SUPPORTED_PACKAGE_FORMAT);
 
 fn verify_attached_records(claim: &Claim) -> Result<(), PackageError> {
@@ -499,13 +679,13 @@ impl EvidencePackage {
     pub fn merkle_root(&self) -> ContentHash {
         let mut level: Vec<ContentHash> = Vec::with_capacity(self.claims.len() + 1);
         level.push(hash_domain(
-            "fs-package:v4:header",
+            "fs-package:v5:header",
             self.package_header().as_bytes(),
         ));
         level.extend(
             self.claims
                 .iter()
-                .map(|c| hash_domain("fs-package:v4:claim", c.canonical().as_bytes())),
+                .map(|c| hash_domain("fs-package:v5:claim", c.canonical().as_bytes())),
         );
         while level.len() > 1 {
             let mut next = Vec::with_capacity(level.len().div_ceil(2));
@@ -520,8 +700,8 @@ impl EvidencePackage {
         }
         match level.as_slice() {
             [root] => *root,
-            [] => hash_domain("fs-package:v4:empty-internal-level", b""),
-            _ => hash_domain("fs-package:v4:invalid-internal-level", b""),
+            [] => hash_domain("fs-package:v5:empty-internal-level", b""),
+            _ => hash_domain("fs-package:v5:invalid-internal-level", b""),
         }
     }
 
@@ -584,6 +764,38 @@ impl EvidencePackage {
                 });
             }
         }
+        // Schema-v5 origin discipline: shape, color-class consistency,
+        // and receipt<->Derived agreement. Waiver AUTHENTICATION is the
+        // package-level pass (it needs the injected capability + date).
+        validate_origin_shape(&claim.id, &claim.origin, &|h| is_canonical_content_hash(h))
+            .map_err(|e| PackageError::InvalidOrigin {
+                claim: e.claim,
+                why: e.why,
+            })?;
+        let consistent = match (&claim.origin, &claim.color) {
+            (ClaimOrigin::SourceCertificate { .. }, Color::Verified { .. }) => true,
+            (ClaimOrigin::AnchoredSource { dataset_id, .. }, Color::Validated { dataset, .. }) => {
+                dataset_id == dataset
+            }
+            (
+                ClaimOrigin::EstimatedSource { estimator: from },
+                Color::Estimated { estimator, .. },
+            ) => from == estimator,
+            (ClaimOrigin::Derived | ClaimOrigin::AuthenticatedWaiver(_), _) => true,
+            _ => false,
+        };
+        if !consistent {
+            return Err(PackageError::OriginMismatch {
+                claim: claim.id.clone(),
+                origin: claim.origin.kind(),
+            });
+        }
+        if matches!(claim.origin, ClaimOrigin::Derived) != claim.receipt.is_some() {
+            return Err(PackageError::OriginMismatch {
+                claim: claim.id.clone(),
+                origin: claim.origin.kind(),
+            });
+        }
         match &claim.color {
             Color::Verified { lo, hi } => {
                 if !(lo.is_finite() && hi.is_finite() && lo <= hi) {
@@ -634,9 +846,58 @@ impl EvidencePackage {
         Ok(())
     }
 
+    /// Authenticate every waiver-origin claim against an INJECTED
+    /// verifier and date context, then run the full structural
+    /// re-verification. The plain [`EvidencePackage::verify`] never
+    /// authenticates a waiver — it only checks structure — so a package
+    /// carrying waivers yields no positive verdict without this call
+    /// (the checker enforces that, fail closed).
+    ///
+    /// # Errors
+    /// [`PackageError::WaiverRefused`] for expired or rejected grants;
+    /// everything [`EvidencePackage::verify`] refuses.
+    pub fn verify_with(
+        &self,
+        waivers: &dyn WaiverVerifier,
+        today_day: u64,
+    ) -> Result<PackageReport, PackageError> {
+        let report = self.verify()?;
+        for claim in &self.claims {
+            if let ClaimOrigin::AuthenticatedWaiver(grant) = &claim.origin {
+                if grant.expiry_day < today_day {
+                    return Err(PackageError::WaiverRefused {
+                        claim: claim.id.clone(),
+                        waiver: grant.waiver_id.clone(),
+                        why: "expired",
+                    });
+                }
+                if !waivers.verify(grant, claim.waiver_message().as_bytes()) {
+                    return Err(PackageError::WaiverRefused {
+                        claim: claim.id.clone(),
+                        waiver: grant.waiver_id.clone(),
+                        why: "rejected by the injected verifier",
+                    });
+                }
+            }
+        }
+        Ok(report)
+    }
+
+    /// The number of waiver-origin claims (a checker without an injected
+    /// waiver capability must fail closed when this is non-zero).
+    #[must_use]
+    pub fn waiver_claims(&self) -> usize {
+        self.claims
+            .iter()
+            .filter(|c| matches!(c.origin, ClaimOrigin::AuthenticatedWaiver(_)))
+            .count()
+    }
+
     /// Re-verify the package WITHOUT any solver: the format must be supported
     /// and every claim's certificate must be complete for its color. Returns
-    /// the content address + budget pie on success.
+    /// the content address + budget pie on success. STRUCTURAL only: waiver
+    /// grants are shape-checked here and AUTHENTICATED only by
+    /// [`EvidencePackage::verify_with`].
     ///
     /// # Errors
     /// [`PackageError`] on an unsupported format or an incomplete claim.
@@ -1035,7 +1296,49 @@ fn push_claim_json(out: &mut String, claim: &Claim) {
             json_escape(&anchor.content_hash)
         );
     }
-    out.push_str("]}");
+    out.push_str("],\"origin\":");
+    match &claim.origin {
+        ClaimOrigin::SourceCertificate {
+            producer,
+            certificate_hash,
+        } => {
+            let _ = write!(
+                out,
+                "{{\"kind\":\"source-certificate\",\"producer\":\"{}\",\"certificate_hash\":\"{}\"}}",
+                json_escape(producer),
+                json_escape(certificate_hash)
+            );
+        }
+        ClaimOrigin::AnchoredSource {
+            dataset_id,
+            content_hash,
+        } => {
+            let _ = write!(
+                out,
+                "{{\"kind\":\"anchored-source\",\"dataset_id\":\"{}\",\"content_hash\":\"{}\"}}",
+                json_escape(dataset_id),
+                json_escape(content_hash)
+            );
+        }
+        ClaimOrigin::EstimatedSource { estimator } => {
+            let _ = write!(
+                out,
+                "{{\"kind\":\"estimated-source\",\"estimator\":\"{}\"}}",
+                json_escape(estimator)
+            );
+        }
+        ClaimOrigin::Derived => out.push_str("{\"kind\":\"derived\"}"),
+        ClaimOrigin::AuthenticatedWaiver(grant) => {
+            let _ = write!(
+                out,
+                "{{\"kind\":\"authenticated-waiver\",\"waiver_id\":\"{}\",\"expiry_day\":{},\"mac\":\"{}\"}}",
+                json_escape(&grant.waiver_id),
+                grant.expiry_day,
+                json_escape(&grant.mac)
+            );
+        }
+    }
+    out.push('}');
 }
 
 /// The magnitude budget (see [`EvidencePackage::magnitude_budget`]).
@@ -1058,7 +1361,7 @@ fn combine(a: &ContentHash, b: &ContentHash) -> ContentHash {
     let mut buf = [0u8; 64];
     buf[..32].copy_from_slice(a.as_bytes());
     buf[32..].copy_from_slice(b.as_bytes());
-    hash_domain("fs-package:v4:node", &buf)
+    hash_domain("fs-package:v5:node", &buf)
 }
 
 fn push_atom(out: &mut String, value: &str) {
@@ -1705,6 +2008,7 @@ fn parse_claim(v: Jv, index: usize) -> Result<Claim, ParseError> {
     let receipt_v = take_field(&mut f, "receipt", &what)?;
     let falsifiers_v = take_field(&mut f, "falsifiers", &what)?;
     let anchors_v = take_field(&mut f, "anchors", &what)?;
+    let origin_v = take_field(&mut f, "origin", &what)?;
     no_leftovers(&f, &what)?;
     Ok(Claim {
         id,
@@ -1713,7 +2017,40 @@ fn parse_claim(v: Jv, index: usize) -> Result<Claim, ParseError> {
         receipt: parse_receipt(receipt_v, &what)?,
         falsifiers: parse_falsifiers(falsifiers_v, &what)?,
         anchors: parse_anchors(anchors_v, &what)?,
+        origin: parse_origin(origin_v, &what)?,
     })
+}
+
+fn parse_origin(value: Jv, what: &str) -> Result<ClaimOrigin, ParseError> {
+    let mut fields = obj_fields(value, what)?;
+    let kind = as_str(take_field(&mut fields, "kind", what)?, what)?;
+    let origin = match kind.as_str() {
+        "source-certificate" => ClaimOrigin::SourceCertificate {
+            producer: as_str(take_field(&mut fields, "producer", what)?, what)?,
+            certificate_hash: as_str(take_field(&mut fields, "certificate_hash", what)?, what)?,
+        },
+        "anchored-source" => ClaimOrigin::AnchoredSource {
+            dataset_id: as_str(take_field(&mut fields, "dataset_id", what)?, what)?,
+            content_hash: as_str(take_field(&mut fields, "content_hash", what)?, what)?,
+        },
+        "estimated-source" => ClaimOrigin::EstimatedSource {
+            estimator: as_str(take_field(&mut fields, "estimator", what)?, what)?,
+        },
+        "derived" => ClaimOrigin::Derived,
+        "authenticated-waiver" => ClaimOrigin::AuthenticatedWaiver(WaiverGrant {
+            waiver_id: as_str(take_field(&mut fields, "waiver_id", what)?, what)?,
+            expiry_day: decimal_u64(take_field(&mut fields, "expiry_day", what)?, "expiry_day")?,
+            mac: as_str(take_field(&mut fields, "mac", what)?, what)?,
+        }),
+        other => {
+            return Err(ParseError {
+                what: what.to_string(),
+                why: format!("unknown origin kind {other:?} — fail closed"),
+            });
+        }
+    };
+    no_leftovers(&fields, "claim origin")?;
+    Ok(origin)
 }
 
 fn parse_color(value: Jv, what: &str) -> Result<Color, ParseError> {

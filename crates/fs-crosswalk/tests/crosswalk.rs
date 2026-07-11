@@ -11,7 +11,7 @@ use fs_crosswalk::{
 #[test]
 fn compatibility_versions_are_explicit() {
     assert_eq!(CROSSWALK_VERSION, 2);
-    assert_eq!(SUPPORTED_PACKAGE_FORMAT, 4);
+    assert_eq!(SUPPORTED_PACKAGE_FORMAT, 5);
 }
 
 #[test]

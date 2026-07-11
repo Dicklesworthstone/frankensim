@@ -28,7 +28,7 @@ pub const CROSSWALK_VERSION: u32 = 2;
 ///
 /// Kept independent of `fs-package` to preserve the dependency direction;
 /// the package crate asserts this value against its own format constant.
-pub const SUPPORTED_PACKAGE_FORMAT: u32 = 4;
+pub const SUPPORTED_PACKAGE_FORMAT: u32 = 5;
 
 /// An evidence-package field/concept (the FrankenSim side of the map).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

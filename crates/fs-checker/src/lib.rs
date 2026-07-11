@@ -22,18 +22,19 @@
 //! after package verification succeeds. Everything is deterministic.
 
 pub use fs_package::{
-    ColorBreakdown, ContentHash, EvidencePackage, MagnitudeBudget, PackageError, ParseError,
+    ColorBreakdown, ContentHash, EvidencePackage, MagnitudeBudget, NoWaiverVerifier, PackageError,
+    ParseError, WaiverGrant, WaiverVerifier,
 };
 
 /// The checker's own protocol version (it is distributed independently).
-pub const CHECKER_PROTOCOL_VERSION: u32 = 2;
+pub const CHECKER_PROTOCOL_VERSION: u32 = 3;
 
 /// The one evidence-package format understood by this checker protocol.
 ///
 /// Keep this as an explicit protocol literal rather than deriving it from
 /// `fs-package`: a package-format change must make this crate fail to compile
 /// until the independently distributed checker ABI is reviewed and versioned.
-pub const CHECKER_SUPPORTED_PACKAGE_FORMAT: u32 = 4;
+pub const CHECKER_SUPPORTED_PACKAGE_FORMAT: u32 = 5;
 const _: () = assert!(CHECKER_SUPPORTED_PACKAGE_FORMAT == fs_package::FORMAT_VERSION);
 
 /// Whether the package carried a detached signature and how far it was
@@ -170,6 +171,21 @@ pub fn check_json(
     }
 }
 
+/// [`check_with`] plus an injected WAIVER capability and date context
+/// (schema v5): the only way a package carrying waiver-origin claims
+/// can pass — grants are authenticated over each claim's canonical
+/// bytes and refused when expired, tampered, or replayed.
+#[must_use]
+pub fn check_with_waivers(
+    pkg: &EvidencePackage,
+    expected_root: Option<ContentHash>,
+    verifier: &dyn SignatureVerifier,
+    waivers: &dyn WaiverVerifier,
+    today_day: u64,
+) -> CheckReport {
+    build_report_with_waivers(pkg, expected_root, Some(verifier), Some((waivers, today_day)))
+}
+
 /// [`check`] with a signature-verification capability.
 #[must_use]
 pub fn check_with(
@@ -245,13 +261,13 @@ fn append_release_findings(pkg: &EvidencePackage, report: &mut CheckReport) {
         });
     }
     for claim in &pkg.claims {
-        if claim.requires_release_falsifier() && claim.falsifiers.is_empty() {
+        if claim.requires_release_falsifier() && claim.falsifiers().is_empty() {
             report.findings.push(Finding {
                 kind: "release-falsifier-required",
                 detail: format!(
                     "certificate-class claim '{}' cannot ship without an attached falsifier \
                      record",
-                    claim.id
+                    claim.id()
                 ),
             });
         }
@@ -261,7 +277,7 @@ fn append_release_findings(pkg: &EvidencePackage, report: &mut CheckReport) {
                 detail: format!(
                     "validated claim '{}' cannot ship without a canonical content-hash anchor \
                      for its named dataset",
-                    claim.id
+                    claim.id()
                 ),
             });
         }
@@ -276,10 +292,38 @@ fn build_report(
     expected_root: Option<ContentHash>,
     verifier: Option<&dyn SignatureVerifier>,
 ) -> CheckReport {
+    build_report_with_waivers(pkg, expected_root, verifier, None)
+}
+
+/// The full report builder. `waivers = None` FAILS CLOSED on any
+/// waiver-origin claim: authentication requires an explicitly injected
+/// capability plus a date context, never a default.
+fn build_report_with_waivers(
+    pkg: &EvidencePackage,
+    expected_root: Option<ContentHash>,
+    verifier: Option<&dyn SignatureVerifier>,
+    waivers: Option<(&dyn WaiverVerifier, u64)>,
+) -> CheckReport {
     let mut findings = Vec::new();
 
-    // 1. delegate format + per-claim completeness to the package format.
-    let breakdown = match pkg.verify() {
+    // 1. delegate format + per-claim completeness to the package format;
+    // with an injected waiver capability the grants are AUTHENTICATED,
+    // without one a package carrying waivers can never pass.
+    let verified = match waivers {
+        Some((capability, today_day)) => pkg.verify_with(capability, today_day),
+        None => pkg.verify(),
+    };
+    if waivers.is_none() && pkg.waiver_claims() > 0 {
+        findings.push(Finding {
+            kind: "unverified-waiver",
+            detail: format!(
+                "{} waiver-origin claim(s) present and no waiver capability was injected — \
+                 waivers are never self-authorizing",
+                pkg.waiver_claims()
+            ),
+        });
+    }
+    let breakdown = match verified {
         Ok(report) => report.breakdown,
         Err(e) => {
             findings.push(describe(&e));
@@ -409,6 +453,21 @@ fn describe(e: &PackageError) -> Finding {
                 "claim '{claim}': receipt parent {parent} is out of range or not strictly \
                  earlier in the package"
             ),
+        },
+        PackageError::InvalidOrigin { claim, why } => Finding {
+            kind: "invalid-origin",
+            detail: format!("claim '{claim}' has a malformed origin: {why}"),
+        },
+        PackageError::OriginMismatch { claim, origin } => Finding {
+            kind: "origin-mismatch",
+            detail: format!(
+                "claim '{claim}': its {origin} origin cannot justify its color class — a raw \
+                 color without a consistent origin is not evidence"
+            ),
+        },
+        PackageError::WaiverRefused { claim, waiver, why } => Finding {
+            kind: "waiver-refused",
+            detail: format!("claim '{claim}': waiver '{waiver}' refused — {why}"),
         },
         PackageError::RefutedClaim { claim, falsifier } => Finding {
             kind: "refuted-claim",

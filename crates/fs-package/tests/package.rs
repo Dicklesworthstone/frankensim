@@ -18,30 +18,25 @@ fn prov() -> Provenance {
     Provenance::new("commit-abc123", "lock-deadbeef")
 }
 fn verified(id: &str) -> Claim {
-    Claim::new(
+    Claim::from_certificate(
         id,
         format!("{id}: stress <= sigma*"),
-        Color::Verified { lo: -1.0, hi: 1.0 },
+        -1.0,
+        1.0,
+        "test-solver/cert",
+        CANONICAL_DATASET_HASH,
     )
 }
 fn estimated(id: &str) -> Claim {
-    Claim::new(
-        id,
-        format!("{id}: surrogate says ok"),
-        Color::Estimated {
-            estimator: "surrogate".into(),
-            dispersion: 2.0,
-        },
-    )
+    Claim::estimated(id, format!("{id}: surrogate says ok"), "surrogate", 2.0)
 }
 fn validated(id: &str, regime: ValidityDomain, dataset: &str) -> Claim {
-    Claim::new(
+    Claim::anchored(
         id,
         format!("{id}: matches data"),
-        Color::Validated {
-            regime,
-            dataset: dataset.into(),
-        },
+        regime,
+        dataset,
+        CANONICAL_DATASET_HASH,
     )
 }
 fn good_regime() -> ValidityDomain {
@@ -114,11 +109,7 @@ fn a_validated_claim_missing_its_dataset_fails_completeness() {
 
 #[test]
 fn a_verified_claim_with_a_bad_interval_fails() {
-    let pkg = EvidencePackage::new(prov()).with_claim(Claim::new(
-        "v",
-        "backwards",
-        Color::Verified { lo: 5.0, hi: 1.0 },
-    ));
+    let pkg = EvidencePackage::new(prov()).with_claim(Claim::from_certificate("v", "backwards", 5.0, 1.0, "test-solver/cert", CANONICAL_DATASET_HASH));
     assert!(matches!(
         pkg.verify(),
         Err(PackageError::IncompleteVerifiedClaim { .. })
@@ -177,11 +168,7 @@ fn in_memory_and_serialized_claim_statements_must_be_meaningful() {
         ("TODO", "placeholder"),
         (" n/A ", "placeholder"),
     ] {
-        let pkg = EvidencePackage::new(prov()).with_claim(Claim::new(
-            "claim",
-            statement,
-            Color::Verified { lo: 0.0, hi: 1.0 },
-        ));
+        let pkg = EvidencePackage::new(prov()).with_claim(Claim::from_certificate("claim", statement, 0.0, 1.0, "test-solver/cert", CANONICAL_DATASET_HASH));
         assert!(matches!(
             pkg.verify(),
             Err(PackageError::InvalidClaimStatement {
@@ -195,14 +182,7 @@ fn in_memory_and_serialized_claim_statements_must_be_meaningful() {
 
 #[test]
 fn in_memory_and_serialized_estimate_gates_are_identical() {
-    let blank_estimator = EvidencePackage::new(prov()).with_claim(Claim::new(
-        "e",
-        "missing estimator identity",
-        Color::Estimated {
-            estimator: " ".to_string(),
-            dispersion: 1.0,
-        },
-    ));
+    let blank_estimator = EvidencePackage::new(prov()).with_claim(Claim::estimated("e", "missing estimator identity", " ".to_string(), 1.0));
     assert!(matches!(
         blank_estimator.verify(),
         Err(PackageError::IncompleteEstimatedClaim {
@@ -213,14 +193,8 @@ fn in_memory_and_serialized_estimate_gates_are_identical() {
     assert_serialized_refuses(&blank_estimator);
 
     for dispersion in [-1.0, f64::NEG_INFINITY, f64::NAN] {
-        let pkg = EvidencePackage::new(prov()).with_claim(Claim::new(
-            "e",
-            "invalid dispersion",
-            Color::Estimated {
-                estimator: "probe".to_string(),
-                dispersion,
-            },
-        ));
+        let pkg = EvidencePackage::new(prov())
+            .with_claim(Claim::estimated("e", "invalid dispersion", "probe", dispersion));
         assert!(matches!(
             pkg.verify(),
             Err(PackageError::InvalidEstimatedDispersion { .. })
@@ -228,14 +202,7 @@ fn in_memory_and_serialized_estimate_gates_are_identical() {
         assert_serialized_refuses(&pkg);
     }
 
-    let explicitly_unbounded = EvidencePackage::new(prov()).with_claim(Claim::new(
-        "unbounded",
-        "honest no-spread-claim sentinel",
-        Color::Estimated {
-            estimator: "regime-exit".to_string(),
-            dispersion: f64::INFINITY,
-        },
-    ));
+    let explicitly_unbounded = EvidencePackage::new(prov()).with_claim(Claim::estimated("unbounded", "honest no-spread-claim sentinel", "regime-exit".to_string(), f64::INFINITY));
     assert!(explicitly_unbounded.verify().is_ok());
     assert!(
         explicitly_unbounded
@@ -251,14 +218,7 @@ fn in_memory_and_serialized_estimate_gates_are_identical() {
 
 #[test]
 fn in_memory_and_serialized_magnitude_gates_are_identical() {
-    let width_overflow = EvidencePackage::new(prov()).with_claim(Claim::new(
-        "wide",
-        "finite endpoints whose width overflows",
-        Color::Verified {
-            lo: -f64::MAX,
-            hi: f64::MAX,
-        },
-    ));
+    let width_overflow = EvidencePackage::new(prov()).with_claim(Claim::from_certificate("wide", "finite endpoints whose width overflows", -f64::MAX, f64::MAX, "test-solver/cert", CANONICAL_DATASET_HASH));
     assert!(matches!(
         width_overflow.verify(),
         Err(PackageError::MagnitudeOverflow {
@@ -269,22 +229,8 @@ fn in_memory_and_serialized_magnitude_gates_are_identical() {
     assert_serialized_refuses(&width_overflow);
 
     let dispersion_overflow = EvidencePackage::new(prov())
-        .with_claim(Claim::new(
-            "d1",
-            "large finite dispersion",
-            Color::Estimated {
-                estimator: "probe-1".to_string(),
-                dispersion: f64::MAX,
-            },
-        ))
-        .with_claim(Claim::new(
-            "d2",
-            "second large finite dispersion",
-            Color::Estimated {
-                estimator: "probe-2".to_string(),
-                dispersion: f64::MAX,
-            },
-        ));
+        .with_claim(Claim::estimated("d1", "large finite dispersion", "probe-1".to_string(), f64::MAX))
+        .with_claim(Claim::estimated("d2", "second large finite dispersion", "probe-2".to_string(), f64::MAX));
     assert!(matches!(
         dispersion_overflow.verify(),
         Err(PackageError::MagnitudeOverflow {
@@ -296,19 +242,8 @@ fn in_memory_and_serialized_magnitude_gates_are_identical() {
 
     let large = f64::MAX * 0.75;
     let cross_component_overflow = EvidencePackage::new(prov())
-        .with_claim(Claim::new(
-            "wide-finite",
-            "large but finite interval width",
-            Color::Verified { lo: 0.0, hi: large },
-        ))
-        .with_claim(Claim::new(
-            "spread-finite",
-            "large but finite estimated spread",
-            Color::Estimated {
-                estimator: "probe".to_string(),
-                dispersion: large,
-            },
-        ));
+        .with_claim(Claim::from_certificate("wide-finite", "large but finite interval width", 0.0, large, "test-solver/cert", CANONICAL_DATASET_HASH))
+        .with_claim(Claim::estimated("spread-finite", "large but finite estimated spread", "probe".to_string(), large));
     assert!(matches!(
         cross_component_overflow.verify(),
         Err(PackageError::MagnitudeOverflow {
@@ -377,10 +312,10 @@ fn falsifier_attempt_counts_round_trip_without_f64_precision_loss() {
     let back = EvidencePackage::from_json(&json).expect("full-width u64 values parse exactly");
     assert_eq!(back, pkg);
     assert_eq!(
-        back.claims[0].falsifiers[0].attempts,
+        back.claims[0].falsifiers()[0].attempts,
         first_unrepresentable_integer
     );
-    assert_eq!(back.claims[0].falsifiers[1].attempts, u64::MAX);
+    assert_eq!(back.claims[0].falsifiers()[1].attempts, u64::MAX);
 
     let overflow = json.replace("18446744073709551615", "18446744073709551616");
     let err = EvidencePackage::from_json(&overflow).expect_err("u64 overflow must refuse");
@@ -468,11 +403,7 @@ fn anchor_records_require_identity_and_canonical_content_hash() {
         ),
     ];
     for (dataset_id, content_hash, expected_field) in cases {
-        let mut claim = verified("a");
-        claim.anchors.push(AnchorRecord {
-            dataset_id: dataset_id.to_string(),
-            content_hash: content_hash.to_string(),
-        });
+        let claim = verified("a").with_anchor(dataset_id.to_string(), content_hash.to_string());
         let pkg = EvidencePackage::new(prov()).with_claim(claim);
         assert!(matches!(
             pkg.verify(),
@@ -516,14 +447,7 @@ fn untrusted_json_resource_limits_fail_before_schema_mapping() {
         EvidencePackage::from_json(&oversized_array).expect_err("oversized array must refuse");
     assert!(err.why.contains("array element count"), "{err}");
 
-    let oversized_in_memory = EvidencePackage::new(prov()).with_claim(Claim::new(
-        "large",
-        "x".repeat(MAX_JSON_STRING_BYTES + 1),
-        Color::Estimated {
-            estimator: "probe".to_string(),
-            dispersion: 1.0,
-        },
-    ));
+    let oversized_in_memory = EvidencePackage::new(prov()).with_claim(Claim::estimated("large", "x".repeat(MAX_JSON_STRING_BYTES + 1), "probe".to_string(), 1.0));
     assert!(matches!(
         oversized_in_memory.verify(),
         Err(PackageError::TransportLimit { .. })
@@ -547,11 +471,7 @@ fn the_merkle_root_is_deterministic_and_tamper_evident() {
     );
     // tampering with a claim changes the root.
     let tampered = EvidencePackage::new(prov())
-        .with_claim(Claim::new(
-            "c1",
-            "TAMPERED",
-            Color::Verified { lo: -1.0, hi: 1.0 },
-        ))
+        .with_claim(Claim::from_certificate("c1", "TAMPERED", -1.0, 1.0, "test-solver/cert", CANONICAL_DATASET_HASH))
         .with_claim(estimated("c2"));
     assert_ne!(build().merkle_root(), tampered.merkle_root());
 }
@@ -613,30 +533,15 @@ fn json_is_deterministic_and_carries_the_root() {
 #[test]
 fn v3_round_trip_and_fail_closed_walls() {
     let pkg = EvidencePackage::new(Provenance::new("frankensim@abc123", "lock:deadbeef"))
-        .with_claim(Claim::new(
-            "c-verified",
-            "tip deflection within bound",
-            Color::Verified {
-                lo: 0.1875,
-                hi: 0.25,
-            },
-        ))
-        .with_claim(Claim::new(
+        .with_claim(Claim::from_certificate("c-verified", "tip deflection within bound", 0.1875, 0.25, "test-solver/cert", CANONICAL_DATASET_HASH))
+        .with_claim(Claim::anchored(
             "c-validated",
             "k-epsilon matched within regime",
-            Color::Validated {
-                regime: fs_evidence::ValidityDomain::unconstrained().with("reynolds", 1e3, 1e5),
-                dataset: "tunnel-run-9".to_string(),
-            },
+            fs_evidence::ValidityDomain::unconstrained().with("reynolds", 1e3, 1e5),
+            "tunnel-run-9",
+            CANONICAL_DATASET_HASH,
         ))
-        .with_claim(Claim::new(
-            "c-estimated",
-            "surrogate prediction",
-            Color::Estimated {
-                estimator: "pod-deim".to_string(),
-                dispersion: 0.02,
-            },
-        ))
+        .with_claim(Claim::estimated("c-estimated", "surrogate prediction", "pod-deim".to_string(), 0.02))
         .signed("test-key/1234abcd");
     // Golden decode-encode stability: parse(to_json) == pkg, and the
     // re-emission is byte-identical (semantic AND textual round trip).
@@ -714,23 +619,15 @@ fn v3_round_trip_and_fail_closed_walls() {
 #[test]
 fn magnitude_budget_reconciles() {
     let pkg = EvidencePackage::new(Provenance::new("v", "l"))
-        .with_claim(Claim::new("a", "s", Color::Verified { lo: 0.0, hi: 0.5 }))
-        .with_claim(Claim::new("b", "s", Color::Verified { lo: 1.0, hi: 1.25 }))
-        .with_claim(Claim::new(
-            "c",
-            "s",
-            Color::Estimated {
-                estimator: "e".to_string(),
-                dispersion: 0.125,
-            },
-        ))
-        .with_claim(Claim::new(
+        .with_claim(Claim::from_certificate("a", "s", 0.0, 0.5, "test-solver/cert", CANONICAL_DATASET_HASH))
+        .with_claim(Claim::from_certificate("b", "s", 1.0, 1.25, "test-solver/cert", CANONICAL_DATASET_HASH))
+        .with_claim(Claim::estimated("c", "s", "e".to_string(), 0.125))
+        .with_claim(Claim::anchored(
             "d",
             "s",
-            Color::Validated {
-                regime: fs_evidence::ValidityDomain::unconstrained().with("re", 1.0, 2.0),
-                dataset: "ds".to_string(),
-            },
+            fs_evidence::ValidityDomain::unconstrained().with("re", 1.0, 2.0),
+            "ds",
+            CANONICAL_DATASET_HASH,
         ));
     let mb = pkg.magnitude_budget();
     assert_eq!(mb.verified_width.to_bits(), 0.75f64.to_bits());
@@ -758,11 +655,7 @@ fn coverage_cannot_claim_absent_evidence() {
     use fs_package::{CoverageStatus, package_coverage, package_presence};
     // Unsigned, verified-only package: no validated claims, no regime
     // tags, no datasets, no signature.
-    let pkg = EvidencePackage::new(Provenance::new("v", "lock")).with_claim(Claim::new(
-        "c",
-        "bounded",
-        Color::Verified { lo: 0.0, hi: 1.0 },
-    ));
+    let pkg = EvidencePackage::new(Provenance::new("v", "lock")).with_claim(Claim::from_certificate("c", "bounded", 0.0, 1.0, "test-solver/cert", CANONICAL_DATASET_HASH));
     let presence = package_presence(&pkg);
     let get = |c: PackageConcept| presence.iter().find(|p| p.concept == c).unwrap();
     assert!(get(PackageConcept::VerifiedColor).present);
@@ -877,15 +770,16 @@ fn v3_receipts_falsifiers_anchors() {
     let ve = |lo: f64, hi: f64| Color::Verified { lo, hi };
     // A well-formed derived package: c = a + b with a valid receipt.
     let good = EvidencePackage::new(Provenance::new("v", "l"))
-        .with_claim(Claim::new("a", "left", ve(1.0, 2.0)))
-        .with_claim(Claim::new("b", "right", ve(10.0, 20.0)))
+        .with_claim(Claim::from_certificate("a", "left", 1.0, 2.0, "test-solver/cert", CANONICAL_DATASET_HASH))
+        .with_claim(Claim::from_certificate("b", "right", 10.0, 20.0, "test-solver/cert", CANONICAL_DATASET_HASH))
         .with_claim(
-            Claim::new(
+            Claim::derived(
                 "c",
                 "sum",
                 fs_evidence::compose(&ve(1.0, 2.0), &ve(10.0, 20.0), IntervalOp::Add),
+                vec![0, 1],
+                IntervalOp::Add,
             )
-            .with_receipt(vec![0, 1], IntervalOp::Add)
             .with_falsifier(FalsifierRecord {
                 name: "interval-probe".to_string(),
                 attempts: 512,
@@ -898,23 +792,16 @@ fn v3_receipts_falsifiers_anchors() {
     // Round trip: the v3 fields survive the strict parser bit-for-bit.
     let back = EvidencePackage::from_json(&good.to_json()).expect("v3 parses");
     assert_eq!(back, good);
-    assert_eq!(back.claims[2].falsifiers[0].attempts, 512);
-    assert_eq!(back.claims[2].anchors[0].dataset_id, "wt-2026-run9");
+    assert_eq!(back.claims[2].falsifiers()[0].attempts, 512);
+    assert_eq!(back.claims[2].anchors()[0].dataset_id, "wt-2026-run9");
     // FORGED receipt: claiming Verified while a parent is Estimated —
     // the re-run composition cannot reproduce it (semantic catch, not
     // just the content-address catch).
     let forged = EvidencePackage::new(Provenance::new("v", "l"))
-        .with_claim(Claim::new(
-            "a",
-            "shaky",
-            Color::Estimated {
-                estimator: "guess".to_string(),
-                dispersion: 0.5,
-            },
-        ))
-        .with_claim(Claim::new("b", "solid", ve(1.0, 2.0)))
+        .with_claim(Claim::estimated("a", "shaky", "guess".to_string(), 0.5))
+        .with_claim(Claim::from_certificate("b", "solid", 1.0, 2.0, "test-solver/cert", CANONICAL_DATASET_HASH))
         .with_claim(
-            Claim::new("c", "laundered", ve(2.0, 4.0)).with_receipt(vec![0, 1], IntervalOp::Add),
+            Claim::derived("c", "laundered", ve(2.0, 4.0), vec![0, 1], IntervalOp::Add),
         );
     assert!(matches!(
         forged.verify(),
@@ -922,14 +809,14 @@ fn v3_receipts_falsifiers_anchors() {
     ));
     // Forward/self parent references refuse.
     let cyclic = EvidencePackage::new(Provenance::new("v", "l"))
-        .with_claim(Claim::new("a", "s", ve(0.0, 1.0)).with_receipt(vec![0], IntervalOp::Hull));
+        .with_claim(Claim::derived("a", "s", ve(0.0, 1.0), vec![0], IntervalOp::Hull));
     assert!(matches!(
         cyclic.verify(),
         Err(PackageError::BadReceiptParent { parent: 0, .. })
     ));
     // A refuted falsifier fails the whole claim.
     let refuted = EvidencePackage::new(Provenance::new("v", "l")).with_claim(
-        Claim::new("a", "wrong", ve(0.0, 1.0)).with_falsifier(FalsifierRecord {
+        Claim::from_certificate("a", "wrong", 0.0, 1.0, "test-solver/cert", CANONICAL_DATASET_HASH).with_falsifier(FalsifierRecord {
             name: "adversary".to_string(),
             attempts: 3,
             refuted: true,
