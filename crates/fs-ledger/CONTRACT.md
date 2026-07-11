@@ -58,16 +58,22 @@ fine-grained event stream. Layer: L6 (HELM). Runtime deps: `std` + `fsqlite`.
   `finish_op` (exactly once; `ok|error|cancelled`), `op`, `link` (FK-checked
   `in|out` edges), `edge_exists` (exact role-qualified verifier query).
 - Streams: `record_metric` (finite REAL only), `append_event` /
-  `append_events` (batched, atomic), `tune_put`/`tune_get` (upsert keyed
-  kernel × shape-class × machine fingerprint), and `tune_put_if_absent`
-  (insert-only conflict preservation for evidence-ledger adoption).
+  `append_events` (batched, atomic), `tune_put`/`tune_get` (single-statement
+  atomic upsert keyed kernel × shape-class × exact machine fingerprint),
+  `tune_put_if_absent` (insert-only conflict preservation for evidence-ledger
+  adoption), and `tune_rows` (deterministic `(shape_class, machine)` order).
+  Tune kernel/shape identities are 1..=64 KiB visible ASCII bytes; machine
+  identities are exact opaque 1..=256-byte BLOBs; parameter and measurement
+  JSON are each at most 1 MiB. Reads metadata-preflight stored values and
+  repeat bounds in guarded payload queries. A kernel scan refuses before
+  payload materialization above 1,024 rows or 16 MiB aggregate output.
 - Rev S extension tables (sparse v0, uniform `(name UNIQUE, body JSON)`
   shape): `put_extension`/`get_extension` over `requirements`, `model_cards`,
   `evidence`, `scenarios`, `constraints`, `capability_probes`, `imports`,
   `unsafe_capsules`.
-- Hygiene: `lint()` (orphan edges/metrics/chunks, storage-shape and length
-  invariants, half-finished ops, dangling branch references) — all-zero on
-  any healthy or crash-recovered ledger.
+- Hygiene: `lint()` (orphan edges/metrics/chunks, artifact and tune storage
+  bounds, storage-shape and length invariants, half-finished ops, dangling
+  branch references) — all-zero on any healthy or crash-recovered ledger.
 - Time travel (`travel` module, schema v2): `fork`/`branches`/`branch_diff`
   (a fork is a new op-log branch sharing every artifact by hash; visibility
   = own ops + ancestors' up to each fork point), `begin_op_on` (branch +
@@ -222,12 +228,22 @@ refusal, or verifier panic).
    storage counters. Canonical writes enforce the remaining bounds; ordinary
    reads fail closed through metadata-only preflight plus guarded selection,
    and `lint` detects envelope, length, row-bound, count, and sequence violations.
-3. Ops are event-sourced facts: `(t_end IS NULL) = (outcome IS NULL)` is a
+3. Tune rows have canonical, bounded envelopes: kernel and shape-class are
+   non-empty visible ASCII within `MAX_TUNE_KERNEL_BYTES` and
+   `MAX_TUNE_SHAPE_CLASS_BYTES`; the opaque machine BLOB is non-empty and at
+   most `MAX_TUNE_MACHINE_BYTES`; params/measured are valid JSON within their
+   1 MiB bounds. Both write APIs share this admission gate. `tune_get` and
+   `tune_rows` inspect type, exact BLOB byte length, and JSON validity before
+   payload selection; guarded queries repeat those predicates. `tune_rows`
+   additionally caps rows and checked aggregate output bytes before selecting
+   variable-size values. Raw-SQL rows outside this contract fail closed as
+   `TuneCorrupt`; valid but excessive histories fail as `TuneReadLimit`.
+4. Ops are event-sourced facts: `(t_end IS NULL) = (outcome IS NULL)` is a
    table CHECK; an op finishes at most once (`DoubleFinish` otherwise).
-4. Edges only reference existing ops and artifacts (enforced FKs).
-5. A crash-recovered ledger lints clean: transactions make op+edges+metric
+5. Edges only reference existing ops and artifacts (enforced FKs).
+6. A crash-recovered ledger lints clean: transactions make op+edges+metric
    groups all-or-nothing (kill -9 battery, `ledger_007`).
-6. Wall-clock timestamps are provenance envelope, never content identity.
+7. Wall-clock timestamps are provenance envelope, never content identity.
 
 ## Error model
 
@@ -236,17 +252,19 @@ All fallible APIs return `LedgerError` — structured variants with stable
 file refused, never clobbered), `Sql`, `Busy` (retryable contention —
 busy/locked/write-conflict; retry with backoff), `MissingExplicit` (names the
 offending Five Explicits field), `Invalid` (names the field),
-`Corrupt`, `NotFound`, `DoubleFinish`, `WriterInTransaction`. Never panics
-across the crate boundary. Signed database metadata that represents a length or
-count is converted with an explicit non-negative check; physical corruption
-cannot reinterpret `-1` as `u64::MAX`.
+`Corrupt`, `TuneCorrupt` (stored tune envelope violated), `TuneReadLimit`
+(bounded scan refused), `NotFound`, `DoubleFinish`, `WriterInTransaction`.
+Never panics across the crate boundary. Signed database metadata that
+represents a length or count is converted with an explicit non-negative check;
+physical corruption cannot reinterpret `-1` as `u64::MAX`.
 
 ## Determinism class
 
 Content hashing is bit-stable across runs, thread counts, and ISAs (pure
 function). Row ids, timestamps, and physical file bytes are NOT deterministic
 and are excluded from identity. Deterministic replays should pass logical
-times to `begin_op`/`append_event` (caller-controlled `t`).
+times to `begin_op`/`append_event` (caller-controlled `t`). Tune scans use the
+total order `(shape_class, machine)` and refuse rather than truncate.
 
 ## Cancellation behavior
 
@@ -275,7 +293,12 @@ with the file untouched), dual-path chunked dedupe + round trip,
 corruption-fails-loudly (inline + chunked), concurrent snapshot readers
 during a write sweep (monotone + internally consistent), kill -9 crash
 battery (6 seeded rounds → lint-clean + integrity-clean), and an events/sec
-throughput smoke ledgered as a metric. `tests/travel.rs`: genuine-v1 →
+throughput smoke ledgered as a metric. `ledger_013` races two file-backed
+connections through the same atomic tune upsert after forcing tune-table leaf
+splits, then proves a single untorn row, bounded scan, clean lint, and identical
+reopen. Tune unit regressions cover every exact field limit and limit+1,
+empty/NUL/non-ASCII identities, hostile oversized raw-SQL rows, lint detection,
+and deterministic row/aggregate scan caps. `tests/travel.rs`: genuine-v1 →
 v2 migration with history intact, fork storage audit (N forks = 1× artifacts
 + deltas) + branch independence, replay audit battery (clean /
 deterministic-failure / fast-divergence), explain() full-lineage
@@ -420,6 +443,11 @@ adds fs-evidence as a runtime dependency (the colors are its types).
   bounded canonical writes, metadata-only read preflights, guarded variable-size
   queries, and lint; resistance to a hostile client executing arbitrary SQL is
   not claimed as a DDL property.
+- The v1 `tune` DDL checks JSON syntax but does not encode the canonical
+  identity, machine, JSON byte, row-count, or scan-byte bounds. The public API
+  enforces them on writes, metadata-preflights and guards reads, and reports
+  bounded envelope violations through lint; arbitrary raw SQL is therefore
+  detected and refused, not prevented as a DDL property.
 - `ColorGraph::verify_replay()` structurally re-earns colors and hashes but does
   not itself re-run external source-origin or waiver capabilities. It retains
   the complete request/artifact fields, exact policy fingerprints, waiver

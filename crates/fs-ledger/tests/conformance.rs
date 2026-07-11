@@ -10,7 +10,10 @@
 //! Every case emits a JSON-lines verdict (seeds and fixture data inline) so
 //! failures are reproducible from the log alone (docs/CONVENTIONS.md).
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{
+    Arc, Barrier,
+    atomic::{AtomicU32, Ordering},
+};
 
 use fs_ledger::{
     Blake3, EdgeRole, EventRow, FiveExplicits, Ledger, LedgerError, OpOutcome, SCHEMA_VERSION,
@@ -895,6 +898,107 @@ fn ledger_012b_envelope_order_concurrency_replay() {
     verdict(
         "ledger-012b",
         "artifact envelopes: order-independent verdicts, concurrent + replay",
+    );
+}
+
+#[test]
+fn ledger_013_file_backed_concurrent_tune_upsert_is_atomic_and_replayable() {
+    let db = temp_db("tune-concurrent");
+    {
+        let seed = Ledger::open(&db).expect("open seed ledger");
+        let payload = format!(r#"{{"seed":true,"padding":"{}"}}"#, "x".repeat(1024));
+        for index in 0..160 {
+            seed.tune_put(
+                "concurrent-upsert",
+                &format!("seed-{index:04}"),
+                b"machine",
+                &payload,
+                &payload,
+            )
+            .expect("seed enough rows to split tune leaves");
+        }
+    }
+
+    let barrier = Arc::new(Barrier::new(2));
+    let mut workers = Vec::new();
+    for writer in 0..2 {
+        let path = db.clone();
+        let barrier = Arc::clone(&barrier);
+        workers.push(std::thread::spawn(move || {
+            let ledger = Ledger::open(&path).expect("open worker ledger");
+            barrier.wait();
+            for sequence in 0..64 {
+                let payload = format!(
+                    r#"{{"writer":{writer},"sequence":{sequence},"padding":"{}"}}"#,
+                    "y".repeat(1024)
+                );
+                let mut stored = false;
+                for _attempt in 0..200 {
+                    match ledger.tune_put(
+                        "concurrent-upsert",
+                        "shared-shape",
+                        b"machine",
+                        &payload,
+                        &payload,
+                    ) {
+                        Ok(()) => {
+                            stored = true;
+                            break;
+                        }
+                        Err(LedgerError::Busy { .. }) => {
+                            std::thread::sleep(std::time::Duration::from_millis(2));
+                        }
+                        Err(error) => panic!("writer {writer} sequence {sequence}: {error}"),
+                    }
+                }
+                assert!(
+                    stored,
+                    "writer {writer} sequence {sequence} exhausted retries"
+                );
+            }
+        }));
+    }
+    for worker in workers {
+        worker.join().expect("tune writer thread");
+    }
+
+    let final_payload = {
+        let ledger = Ledger::open(&db).expect("open verifier");
+        assert_eq!(ledger.table_count("tune").expect("count tune rows"), 161);
+        let row = ledger
+            .tune_get("concurrent-upsert", "shared-shape", b"machine")
+            .expect("read final shared row")
+            .expect("shared row exists");
+        assert_eq!(row.params, row.measured, "upsert fields must never tear");
+        assert!(
+            row.params.contains(r#""sequence":63"#),
+            "each writer's final operation has sequence 63: {}",
+            row.params
+        );
+        assert_eq!(
+            ledger
+                .tune_rows("concurrent-upsert")
+                .expect("bounded scan")
+                .len(),
+            161
+        );
+        assert!(ledger.lint().expect("lint after racing upserts").is_clean());
+        row.params
+    };
+    {
+        let replay = Ledger::open(&db).expect("reopen tune ledger");
+        let row = replay
+            .tune_get("concurrent-upsert", "shared-shape", b"machine")
+            .expect("replay final row")
+            .expect("replayed row exists");
+        assert_eq!(row.params, final_payload);
+        assert_eq!(row.measured, final_payload);
+        assert!(replay.lint().expect("lint replayed ledger").is_clean());
+    }
+    cleanup_db(&db);
+    verdict(
+        "ledger-013",
+        "file-backed concurrent tune upserts remain single-row, untorn, bounded, and replayable",
     );
 }
 

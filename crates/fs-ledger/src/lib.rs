@@ -50,6 +50,27 @@ pub const MAX_ARTIFACT_KIND_BYTES: usize = 256;
 /// Maximum UTF-8 byte length of optional artifact metadata JSON.
 pub const MAX_ARTIFACT_META_BYTES: usize = 1024 * 1024;
 
+/// Maximum byte length of a canonical autotuner kernel identity.
+pub const MAX_TUNE_KERNEL_BYTES: usize = 64 * 1024;
+
+/// Maximum byte length of a canonical autotuner shape-class identity.
+pub const MAX_TUNE_SHAPE_CLASS_BYTES: usize = 64 * 1024;
+
+/// Maximum byte length of an opaque autotuner machine fingerprint.
+pub const MAX_TUNE_MACHINE_BYTES: usize = 256;
+
+/// Maximum UTF-8 byte length of autotuner parameter JSON.
+pub const MAX_TUNE_PARAMS_BYTES: usize = 1024 * 1024;
+
+/// Maximum UTF-8 byte length of autotuner measurement JSON.
+pub const MAX_TUNE_MEASURED_BYTES: usize = 1024 * 1024;
+
+/// Maximum rows returned by one [`Ledger::tune_rows`] scan.
+pub const MAX_TUNE_ROWS_PER_KERNEL: usize = 1024;
+
+/// Maximum aggregate bytes returned by one [`Ledger::tune_rows`] scan.
+pub const MAX_TUNE_SCAN_BYTES: usize = 16 * 1024 * 1024;
+
 /// Crate version (compile-time stamp).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -113,6 +134,27 @@ pub enum LedgerError {
         /// Diagnosis.
         detail: String,
     },
+    /// A tune row bypassed the canonical write path and violates the bounded
+    /// storage contract. Reads refuse the row rather than materializing or
+    /// interpreting it.
+    TuneCorrupt {
+        /// Canonical kernel identity used to address the row or scan.
+        kernel: String,
+        /// Diagnosis without embedding hostile stored values.
+        detail: String,
+    },
+    /// A tune history exceeds a deterministic read budget. The caller must
+    /// narrow or compact the history before retrying.
+    TuneReadLimit {
+        /// Canonical kernel identity whose history was refused.
+        kernel: String,
+        /// Bounded resource: `rows` or `materialized_bytes`.
+        resource: &'static str,
+        /// Configured maximum.
+        limit: usize,
+        /// Exact observation or a conservative lower bound.
+        observed_at_least: usize,
+    },
     /// A referenced row does not exist.
     NotFound {
         /// Description of the missing row.
@@ -167,6 +209,8 @@ impl LedgerError {
             LedgerError::MissingExplicit { .. } => "LedgerMissingExplicit",
             LedgerError::Invalid { .. } => "LedgerInvalid",
             LedgerError::Corrupt { .. } => "LedgerCorruption",
+            LedgerError::TuneCorrupt { .. } => "LedgerTuneCorruption",
+            LedgerError::TuneReadLimit { .. } => "LedgerTuneReadLimit",
             LedgerError::NotFound { .. } => "LedgerNotFound",
             LedgerError::DoubleFinish { .. } => "LedgerDoubleFinish",
             LedgerError::WriterInTransaction => "LedgerWriterInTransaction",
@@ -207,6 +251,23 @@ impl std::fmt::Display for LedgerError {
                 f,
                 "LedgerCorruption: artifact {hash_hex}: {detail} — refuse to trust or replay \
                  from a tampered ledger"
+            ),
+            LedgerError::TuneCorrupt { kernel, detail } => write!(
+                f,
+                "LedgerTuneCorruption: tune history for kernel {:?}: {detail} — refuse to \
+                 materialize or interpret a row that bypassed the canonical tune API",
+                kernel.get(..kernel.len().min(96)).unwrap_or(kernel)
+            ),
+            LedgerError::TuneReadLimit {
+                kernel,
+                resource,
+                limit,
+                observed_at_least,
+            } => write!(
+                f,
+                "LedgerTuneReadLimit: tune history for kernel {:?} has {resource}=\
+                 {observed_at_least}, exceeding limit {limit}; narrow or compact the history",
+                kernel.get(..kernel.len().min(96)).unwrap_or(kernel)
             ),
             LedgerError::NotFound { what } => write!(f, "LedgerNotFound: {what}"),
             LedgerError::DoubleFinish { op } => write!(
@@ -490,6 +551,8 @@ pub struct LintReport {
     pub len_mismatches: u64,
     /// Chunk rows without a parent artifact row (e.g. abandoned staging).
     pub orphan_chunks: u64,
+    /// Tune rows violating bounded storage types, lengths, or JSON validity.
+    pub malformed_tune_rows: u64,
     /// Ops with exactly one of (t_end, outcome) set.
     pub half_finished_ops: u64,
     /// Ops whose branch id does not exist (v2).
@@ -659,6 +722,211 @@ fn nonnegative_u64(value: i64, context: &str) -> Result<u64, LedgerError> {
 
 fn row_u64(row: &fsqlite::Row, idx: usize, context: &str) -> Result<u64, LedgerError> {
     nonnegative_u64(row_i64(row, idx, context)?, context)
+}
+
+fn validate_tune_identity(field: &str, value: &str, max_bytes: usize) -> Result<(), LedgerError> {
+    if value.is_empty() {
+        return Err(LedgerError::Invalid {
+            field: field.to_string(),
+            problem: "empty; tune identities must be non-empty visible ASCII".to_string(),
+        });
+    }
+    if value.len() > max_bytes {
+        return Err(LedgerError::Invalid {
+            field: field.to_string(),
+            problem: format!(
+                "{} bytes exceeds the {max_bytes}-byte tune identity limit",
+                value.len()
+            ),
+        });
+    }
+    if let Some((offset, byte)) = value
+        .bytes()
+        .enumerate()
+        .find(|(_, byte)| !(b'!'..=b'~').contains(byte))
+    {
+        return Err(LedgerError::Invalid {
+            field: field.to_string(),
+            problem: format!(
+                "byte 0x{byte:02x} at offset {offset} is not visible ASCII; use bytes 0x21..=0x7e"
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn validate_tune_machine(machine: &[u8]) -> Result<(), LedgerError> {
+    if machine.is_empty() {
+        return Err(LedgerError::Invalid {
+            field: "machine".to_string(),
+            problem: "empty; supply an exact machine fingerprint blob".to_string(),
+        });
+    }
+    if machine.len() > MAX_TUNE_MACHINE_BYTES {
+        return Err(LedgerError::Invalid {
+            field: "machine".to_string(),
+            problem: format!(
+                "{} bytes exceeds the {MAX_TUNE_MACHINE_BYTES}-byte machine fingerprint limit",
+                machine.len()
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn tune_corrupt(kernel: &str, detail: impl Into<String>) -> LedgerError {
+    LedgerError::TuneCorrupt {
+        kernel: kernel.to_string(),
+        detail: detail.into(),
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TuneColumnSpec {
+    type_idx: usize,
+    len_idx: usize,
+    field: &'static str,
+    expected_type: &'static str,
+    min_bytes: usize,
+    max_bytes: usize,
+}
+
+fn tune_column_len(
+    row: &fsqlite::Row,
+    spec: TuneColumnSpec,
+    kernel: &str,
+) -> Result<usize, LedgerError> {
+    let stored_type = row_text(row, spec.type_idx, "tune metadata type")?;
+    if stored_type != spec.expected_type {
+        return Err(tune_corrupt(
+            kernel,
+            format!(
+                "{} has storage type {stored_type:?}, expected {}",
+                spec.field, spec.expected_type
+            ),
+        ));
+    }
+    let raw_len = row_i64(row, spec.len_idx, "tune metadata length")?;
+    let len = usize::try_from(raw_len).map_err(|_| {
+        tune_corrupt(
+            kernel,
+            format!(
+                "{} has negative or unrepresentable byte length {raw_len}",
+                spec.field
+            ),
+        )
+    })?;
+    if len < spec.min_bytes || len > spec.max_bytes {
+        return Err(tune_corrupt(
+            kernel,
+            format!(
+                "{} byte length {len} is outside {}..={}",
+                spec.field, spec.min_bytes, spec.max_bytes
+            ),
+        ));
+    }
+    Ok(len)
+}
+
+fn require_stored_json(
+    row: &fsqlite::Row,
+    valid_idx: usize,
+    field: &str,
+    kernel: &str,
+) -> Result<(), LedgerError> {
+    if row_i64(row, valid_idx, "tune metadata json_valid")? != 1 {
+        return Err(tune_corrupt(kernel, format!("{field} is not valid JSON")));
+    }
+    Ok(())
+}
+
+fn stored_tune_identity(
+    kernel: &str,
+    field: &str,
+    value: &str,
+    max_bytes: usize,
+) -> Result<(), LedgerError> {
+    validate_tune_identity(field, value, max_bytes).map_err(|error| match error {
+        LedgerError::Invalid { problem, .. } => tune_corrupt(kernel, format!("{field}: {problem}")),
+        other => other,
+    })
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TuneRowPreflight {
+    materialized_bytes: usize,
+}
+
+fn tune_row_preflight(row: &fsqlite::Row, kernel: &str) -> Result<TuneRowPreflight, LedgerError> {
+    let shape_len = tune_column_len(
+        row,
+        TuneColumnSpec {
+            type_idx: 0,
+            len_idx: 1,
+            field: "shape_class",
+            expected_type: "text",
+            min_bytes: 1,
+            max_bytes: MAX_TUNE_SHAPE_CLASS_BYTES,
+        },
+        kernel,
+    )?;
+    if row_i64(row, 2, "tune metadata canonical shape")? != 1 {
+        return Err(tune_corrupt(
+            kernel,
+            "shape_class is not canonical visible ASCII",
+        ));
+    }
+    let machine_len = tune_column_len(
+        row,
+        TuneColumnSpec {
+            type_idx: 3,
+            len_idx: 4,
+            field: "machine",
+            expected_type: "blob",
+            min_bytes: 1,
+            max_bytes: MAX_TUNE_MACHINE_BYTES,
+        },
+        kernel,
+    )?;
+    let params_len = tune_column_len(
+        row,
+        TuneColumnSpec {
+            type_idx: 5,
+            len_idx: 6,
+            field: "params",
+            expected_type: "text",
+            min_bytes: 1,
+            max_bytes: MAX_TUNE_PARAMS_BYTES,
+        },
+        kernel,
+    )?;
+    require_stored_json(row, 7, "params", kernel)?;
+    let measured_len = tune_column_len(
+        row,
+        TuneColumnSpec {
+            type_idx: 8,
+            len_idx: 9,
+            field: "measured",
+            expected_type: "text",
+            min_bytes: 1,
+            max_bytes: MAX_TUNE_MEASURED_BYTES,
+        },
+        kernel,
+    )?;
+    require_stored_json(row, 10, "measured", kernel)?;
+    let materialized_bytes = kernel
+        .len()
+        .checked_add(shape_len)
+        .and_then(|sum| sum.checked_add(machine_len))
+        .and_then(|sum| sum.checked_add(params_len))
+        .and_then(|sum| sum.checked_add(measured_len))
+        .ok_or_else(|| LedgerError::TuneReadLimit {
+            kernel: kernel.to_string(),
+            resource: "materialized_bytes",
+            limit: MAX_TUNE_SCAN_BYTES,
+            observed_at_least: usize::MAX,
+        })?;
+    Ok(TuneRowPreflight { materialized_bytes })
 }
 
 fn inline_artifact_bytes(row: &fsqlite::Row, expected_len: u64) -> Result<&[u8], String> {
@@ -1185,6 +1453,39 @@ impl Ledger {
                 problem,
             }),
         }
+    }
+
+    fn require_tune_json(
+        &self,
+        field: &str,
+        value: &str,
+        max_bytes: usize,
+    ) -> Result<(), LedgerError> {
+        if value.len() > max_bytes {
+            return Err(LedgerError::Invalid {
+                field: field.to_string(),
+                problem: format!(
+                    "{} bytes exceeds the {max_bytes}-byte tune JSON limit",
+                    value.len()
+                ),
+            });
+        }
+        self.require_json(field, value, false)
+    }
+
+    fn require_tune_row(
+        &self,
+        kernel: &str,
+        shape_class: &str,
+        machine: &[u8],
+        params: &str,
+        measured: &str,
+    ) -> Result<(), LedgerError> {
+        validate_tune_identity("kernel", kernel, MAX_TUNE_KERNEL_BYTES)?;
+        validate_tune_identity("shape_class", shape_class, MAX_TUNE_SHAPE_CLASS_BYTES)?;
+        validate_tune_machine(machine)?;
+        self.require_tune_json("params", params, MAX_TUNE_PARAMS_BYTES)?;
+        self.require_tune_json("measured", measured, MAX_TUNE_MEASURED_BYTES)
     }
 
     // -- transactions -------------------------------------------------------
@@ -2283,7 +2584,8 @@ impl Ledger {
     /// was re-verified clean on both ISAs before restoring this form.)
     ///
     /// # Errors
-    /// [`LedgerError::Invalid`] for malformed JSON; engine errors.
+    /// [`LedgerError::Invalid`] for a non-canonical or oversized key/blob/JSON;
+    /// engine errors otherwise.
     pub fn tune_put(
         &self,
         kernel: &str,
@@ -2292,8 +2594,7 @@ impl Ledger {
         params: &str,
         measured: &str,
     ) -> Result<(), LedgerError> {
-        self.require_json("params", params, false)?;
-        self.require_json("measured", measured, false)?;
+        self.require_tune_row(kernel, shape_class, machine, params, measured)?;
         self.conn
             .prepare(
                 "INSERT INTO tune(kernel, shape_class, machine, params, measured) \
@@ -2318,7 +2619,8 @@ impl Ledger {
     /// identity should fetch and compare after this call.
     ///
     /// # Errors
-    /// [`LedgerError::Invalid`] for malformed JSON; engine errors otherwise.
+    /// [`LedgerError::Invalid`] for a non-canonical or oversized key/blob/JSON;
+    /// engine errors otherwise.
     pub fn tune_put_if_absent(
         &self,
         kernel: &str,
@@ -2327,8 +2629,7 @@ impl Ledger {
         params: &str,
         measured: &str,
     ) -> Result<(), LedgerError> {
-        self.require_json("params", params, false)?;
-        self.require_json("measured", measured, false)?;
+        self.require_tune_row(kernel, shape_class, machine, params, measured)?;
         self.conn
             .prepare(
                 "INSERT INTO tune(kernel, shape_class, machine, params, measured) \
@@ -2350,17 +2651,25 @@ impl Ledger {
     /// Fetch one autotuner cache row, if present.
     ///
     /// # Errors
-    /// Engine errors; absence is `Ok(None)`.
+    /// [`LedgerError::Invalid`] for a non-canonical lookup key,
+    /// [`LedgerError::TuneCorrupt`] for a stored row outside the bounded tune
+    /// contract, or engine errors. Absence is `Ok(None)`.
     pub fn tune_get(
         &self,
         kernel: &str,
         shape_class: &str,
         machine: &[u8],
     ) -> Result<Option<TuneRow>, LedgerError> {
-        let rows = self
+        validate_tune_identity("kernel", kernel, MAX_TUNE_KERNEL_BYTES)?;
+        validate_tune_identity("shape_class", shape_class, MAX_TUNE_SHAPE_CLASS_BYTES)?;
+        validate_tune_machine(machine)?;
+
+        let metadata = self
             .conn
             .query_with_params(
-                "SELECT params, measured FROM tune \
+                "SELECT typeof(params), length(CAST(params AS BLOB)), json_valid(params), \
+                        typeof(measured), length(CAST(measured AS BLOB)), json_valid(measured) \
+                 FROM tune \
                  WHERE kernel = ?1 AND shape_class = ?2 AND machine = ?3",
                 &[
                     text_param(kernel),
@@ -2368,25 +2677,70 @@ impl Ledger {
                     blob_param(machine),
                 ],
             )
-            .map_err(|e| sql_err("tune fetch", &e))?;
-        let Some(row) = rows.first() else {
+            .map_err(|e| sql_err("tune fetch metadata", &e))?;
+        let Some(metadata_row) = metadata.first() else {
             return Ok(None);
         };
-        let text_at = |idx: usize| -> Result<String, LedgerError> {
-            match row.get(idx) {
-                Some(SqliteValue::Text(t)) => Ok(t.as_str().to_string()),
-                other => Err(LedgerError::Sql {
-                    context: "tune fetch".to_string(),
-                    detail: format!("column {idx}: expected TEXT, got {other:?}"),
-                }),
-            }
+        tune_column_len(
+            metadata_row,
+            TuneColumnSpec {
+                type_idx: 0,
+                len_idx: 1,
+                field: "params",
+                expected_type: "text",
+                min_bytes: 1,
+                max_bytes: MAX_TUNE_PARAMS_BYTES,
+            },
+            kernel,
+        )?;
+        require_stored_json(metadata_row, 2, "params", kernel)?;
+        tune_column_len(
+            metadata_row,
+            TuneColumnSpec {
+                type_idx: 3,
+                len_idx: 4,
+                field: "measured",
+                expected_type: "text",
+                min_bytes: 1,
+                max_bytes: MAX_TUNE_MEASURED_BYTES,
+            },
+            kernel,
+        )?;
+        require_stored_json(metadata_row, 5, "measured", kernel)?;
+
+        let guarded_sql = format!(
+            "SELECT params, measured FROM tune \
+             WHERE kernel = ?1 AND shape_class = ?2 AND machine = ?3 AND \
+                   typeof(params) = 'text' AND \
+                   length(CAST(params AS BLOB)) BETWEEN 1 AND {MAX_TUNE_PARAMS_BYTES} AND \
+                   json_valid(params) = 1 AND \
+                   typeof(measured) = 'text' AND \
+                   length(CAST(measured AS BLOB)) BETWEEN 1 AND {MAX_TUNE_MEASURED_BYTES} AND \
+                   json_valid(measured) = 1 LIMIT 1"
+        );
+        let guarded = self
+            .conn
+            .query_with_params(
+                &guarded_sql,
+                &[
+                    text_param(kernel),
+                    text_param(shape_class),
+                    blob_param(machine),
+                ],
+            )
+            .map_err(|e| sql_err("tune guarded fetch", &e))?;
+        let Some(row) = guarded.first() else {
+            return Err(LedgerError::Busy {
+                context: "tune guarded fetch".to_string(),
+                detail: "row changed after bounded metadata preflight".to_string(),
+            });
         };
         Ok(Some(TuneRow {
             kernel: kernel.to_string(),
             shape_class: shape_class.to_string(),
             machine: machine.to_vec(),
-            params: text_at(0)?,
-            measured: text_at(1)?,
+            params: row_text(row, 0, "tune guarded fetch params")?,
+            measured: row_text(row, 1, "tune guarded fetch measured")?,
         }))
     }
 
@@ -2394,43 +2748,161 @@ impl Ledger {
     /// machine fingerprints (staleness scans: "a target that was never
     /// re-measured is a lie waiting to happen", plan §14.1).
     ///
+    /// The result is ordered by `(shape_class, machine)`. The scan refuses
+    /// before JSON/blob materialization when either the row cap or aggregate
+    /// byte cap is exceeded.
+    ///
     /// # Errors
-    /// Engine errors; an unknown kernel is an empty vec.
+    /// [`LedgerError::Invalid`] for a non-canonical kernel,
+    /// [`LedgerError::TuneCorrupt`] for malformed stored rows,
+    /// [`LedgerError::TuneReadLimit`] for a history outside the scan budget,
+    /// or engine errors. An unknown kernel is an empty vec.
     pub fn tune_rows(&self, kernel: &str) -> Result<Vec<TuneRow>, LedgerError> {
+        validate_tune_identity("kernel", kernel, MAX_TUNE_KERNEL_BYTES)?;
+        let metadata_sql = format!(
+            "SELECT typeof(shape_class), length(CAST(shape_class AS BLOB)), \
+                    length(CAST(shape_class AS BLOB)) = length(shape_class) AND \
+                        shape_class NOT GLOB '*[^!-~]*', \
+                    typeof(machine), length(machine), \
+                    typeof(params), length(CAST(params AS BLOB)), json_valid(params), \
+                    typeof(measured), length(CAST(measured AS BLOB)), json_valid(measured) \
+             FROM tune WHERE kernel = ?1 LIMIT {}",
+            MAX_TUNE_ROWS_PER_KERNEL + 1
+        );
+        let metadata = self
+            .conn
+            .query_with_params(&metadata_sql, &[text_param(kernel)])
+            .map_err(|e| sql_err("tune scan metadata", &e))?;
+        if metadata.len() > MAX_TUNE_ROWS_PER_KERNEL {
+            return Err(LedgerError::TuneReadLimit {
+                kernel: kernel.to_string(),
+                resource: "rows",
+                limit: MAX_TUNE_ROWS_PER_KERNEL,
+                observed_at_least: MAX_TUNE_ROWS_PER_KERNEL + 1,
+            });
+        }
+        let mut aggregate_bytes = 0_usize;
+        for row in &metadata {
+            let preflight = tune_row_preflight(row, kernel)?;
+            aggregate_bytes = aggregate_bytes
+                .checked_add(preflight.materialized_bytes)
+                .ok_or_else(|| LedgerError::TuneReadLimit {
+                    kernel: kernel.to_string(),
+                    resource: "materialized_bytes",
+                    limit: MAX_TUNE_SCAN_BYTES,
+                    observed_at_least: usize::MAX,
+                })?;
+            if aggregate_bytes > MAX_TUNE_SCAN_BYTES {
+                return Err(LedgerError::TuneReadLimit {
+                    kernel: kernel.to_string(),
+                    resource: "materialized_bytes",
+                    limit: MAX_TUNE_SCAN_BYTES,
+                    observed_at_least: aggregate_bytes,
+                });
+            }
+        }
+        if metadata.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let guarded_sql = format!(
+            "SELECT shape_class, machine, params, measured FROM tune \
+             WHERE kernel = ?1 AND \
+                   (SELECT COUNT(*) FROM tune AS tune_count \
+                    WHERE tune_count.kernel = ?1) <= {MAX_TUNE_ROWS_PER_KERNEL} AND \
+                   (SELECT COALESCE(SUM(\
+                        length(CAST(tune_budget.shape_class AS BLOB)) + \
+                        length(tune_budget.machine) + \
+                        length(CAST(tune_budget.params AS BLOB)) + \
+                        length(CAST(tune_budget.measured AS BLOB)) + {}\
+                    ), 0) FROM tune AS tune_budget \
+                    WHERE tune_budget.kernel = ?1) <= {MAX_TUNE_SCAN_BYTES} AND \
+                   NOT EXISTS (SELECT 1 FROM tune AS tune_guard \
+                       WHERE tune_guard.kernel = ?1 AND (\
+                           typeof(tune_guard.shape_class) != 'text' OR \
+                           length(CAST(tune_guard.shape_class AS BLOB)) NOT BETWEEN 1 AND {MAX_TUNE_SHAPE_CLASS_BYTES} OR \
+                           length(CAST(tune_guard.shape_class AS BLOB)) != length(tune_guard.shape_class) OR \
+                           tune_guard.shape_class GLOB '*[^!-~]*' OR \
+                           typeof(tune_guard.machine) != 'blob' OR \
+                           length(tune_guard.machine) NOT BETWEEN 1 AND {MAX_TUNE_MACHINE_BYTES} OR \
+                           typeof(tune_guard.params) != 'text' OR \
+                           length(CAST(tune_guard.params AS BLOB)) NOT BETWEEN 1 AND {MAX_TUNE_PARAMS_BYTES} OR \
+                           json_valid(tune_guard.params) != 1 OR \
+                           typeof(tune_guard.measured) != 'text' OR \
+                           length(CAST(tune_guard.measured AS BLOB)) NOT BETWEEN 1 AND {MAX_TUNE_MEASURED_BYTES} OR \
+                           json_valid(tune_guard.measured) != 1)) \
+             ORDER BY shape_class, machine LIMIT {}",
+            kernel.len(),
+            MAX_TUNE_ROWS_PER_KERNEL + 1
+        );
         let rows = self
             .conn
-            .query_with_params(
-                "SELECT shape_class, machine, params, measured FROM tune \
-                 WHERE kernel = ?1 ORDER BY shape_class",
-                &[text_param(kernel)],
-            )
-            .map_err(|e| sql_err("tune scan", &e))?;
+            .query_with_params(&guarded_sql, &[text_param(kernel)])
+            .map_err(|e| sql_err("tune guarded scan", &e))?;
+        if rows.len() != metadata.len() {
+            return Err(LedgerError::Busy {
+                context: "tune guarded scan".to_string(),
+                detail: format!(
+                    "history changed after bounded metadata preflight ({} rows became {})",
+                    metadata.len(),
+                    rows.len()
+                ),
+            });
+        }
+
         let mut out = Vec::with_capacity(rows.len());
+        let mut materialized_bytes = 0_usize;
         for row in &rows {
-            let text_at = |idx: usize| -> Result<String, LedgerError> {
-                match row.get(idx) {
-                    Some(SqliteValue::Text(t)) => Ok(t.as_str().to_string()),
-                    other => Err(LedgerError::Sql {
-                        context: "tune scan".to_string(),
-                        detail: format!("column {idx}: expected TEXT, got {other:?}"),
-                    }),
-                }
-            };
+            let shape_class = row_text(row, 0, "tune guarded scan shape_class")?;
+            stored_tune_identity(
+                kernel,
+                "shape_class",
+                &shape_class,
+                MAX_TUNE_SHAPE_CLASS_BYTES,
+            )?;
             let machine = match row.get(1) {
                 Some(SqliteValue::Blob(b)) => b.to_vec(),
                 other => {
-                    return Err(LedgerError::Sql {
-                        context: "tune scan".to_string(),
-                        detail: format!("machine: expected BLOB, got {other:?}"),
-                    });
+                    return Err(tune_corrupt(
+                        kernel,
+                        format!("machine: expected BLOB, got {other:?}"),
+                    ));
                 }
             };
+            validate_tune_machine(&machine).map_err(|error| match error {
+                LedgerError::Invalid { problem, .. } => {
+                    tune_corrupt(kernel, format!("machine: {problem}"))
+                }
+                other => other,
+            })?;
+            let params = row_text(row, 2, "tune guarded scan params")?;
+            let measured = row_text(row, 3, "tune guarded scan measured")?;
+            materialized_bytes = materialized_bytes
+                .checked_add(kernel.len())
+                .and_then(|sum| sum.checked_add(shape_class.len()))
+                .and_then(|sum| sum.checked_add(machine.len()))
+                .and_then(|sum| sum.checked_add(params.len()))
+                .and_then(|sum| sum.checked_add(measured.len()))
+                .ok_or_else(|| LedgerError::TuneReadLimit {
+                    kernel: kernel.to_string(),
+                    resource: "materialized_bytes",
+                    limit: MAX_TUNE_SCAN_BYTES,
+                    observed_at_least: usize::MAX,
+                })?;
             out.push(TuneRow {
                 kernel: kernel.to_string(),
-                shape_class: text_at(0)?,
+                shape_class,
                 machine,
-                params: text_at(2)?,
-                measured: text_at(3)?,
+                params,
+                measured,
+            });
+        }
+        if materialized_bytes > MAX_TUNE_SCAN_BYTES {
+            return Err(LedgerError::TuneReadLimit {
+                kernel: kernel.to_string(),
+                resource: "materialized_bytes",
+                limit: MAX_TUNE_SCAN_BYTES,
+                observed_at_least: materialized_bytes,
             });
         }
         Ok(out)
@@ -2521,6 +2993,25 @@ impl Ledger {
                      AND (c.bytes IS NULL OR \
                           length(c.bytes) > {STORAGE_CHUNK_LEN}))"
         );
+        let malformed_tune_sql = format!(
+            "SELECT COUNT(*) FROM tune WHERE \
+             typeof(kernel) != 'text' OR \
+             length(CAST(kernel AS BLOB)) NOT BETWEEN 1 AND {MAX_TUNE_KERNEL_BYTES} OR \
+             length(CAST(kernel AS BLOB)) != length(kernel) OR \
+             kernel GLOB '*[^!-~]*' OR \
+             typeof(shape_class) != 'text' OR \
+             length(CAST(shape_class AS BLOB)) NOT BETWEEN 1 AND {MAX_TUNE_SHAPE_CLASS_BYTES} OR \
+             length(CAST(shape_class AS BLOB)) != length(shape_class) OR \
+             shape_class GLOB '*[^!-~]*' OR \
+             typeof(machine) != 'blob' OR \
+             length(machine) NOT BETWEEN 1 AND {MAX_TUNE_MACHINE_BYTES} OR \
+             typeof(params) != 'text' OR \
+             length(CAST(params AS BLOB)) NOT BETWEEN 1 AND {MAX_TUNE_PARAMS_BYTES} OR \
+             json_valid(params) != 1 OR \
+             typeof(measured) != 'text' OR \
+             length(CAST(measured AS BLOB)) NOT BETWEEN 1 AND {MAX_TUNE_MEASURED_BYTES} OR \
+             json_valid(measured) != 1"
+        );
         Ok(LintReport {
             orphan_edge_ops: count(
                 "SELECT COUNT(*) FROM edges e LEFT JOIN ops o ON e.op = o.id WHERE o.id IS NULL",
@@ -2560,6 +3051,7 @@ impl Ledger {
                  ON c.hash = a.hash WHERE a.hash IS NULL",
                 "lint orphan_chunks",
             )?,
+            malformed_tune_rows: count(&malformed_tune_sql, "lint malformed_tune_rows")?,
             // AND/OR form rather than `(a IS NULL) != (b IS NULL)`: fsqlite
             // mis-associates postfix IS NULL against comparison operators
             // when re-parsing stored CHECK text (upstream bug; see bead).
@@ -3291,6 +3783,21 @@ mod tests {
         assert_eq!(l.table_count("events").unwrap(), 2);
     }
 
+    fn json_with_exact_bytes(len: usize) -> String {
+        assert!(len >= 8);
+        format!(r#"{{"d":"{}"}}"#, "x".repeat(len - 8))
+    }
+
+    fn assert_invalid_field<T>(result: Result<T, LedgerError>, expected_field: &str) {
+        assert!(
+            matches!(
+                result,
+                Err(LedgerError::Invalid { ref field, .. }) if field == expected_field
+            ),
+            "expected LedgerInvalid for {expected_field}"
+        );
+    }
+
     #[test]
     fn tune_upserts() {
         let l = mem();
@@ -3381,6 +3888,197 @@ mod tests {
         assert!(rows.iter().any(|r| r.machine == b"m1"));
         assert!(rows.iter().any(|r| r.machine == b"m2"));
         assert!(l.tune_rows("nonexistent").unwrap().is_empty());
+    }
+
+    #[test]
+    fn tune_boundaries_accept_exact_limits_and_refuse_limit_plus_one() {
+        let l = mem();
+        let kernel = "k".repeat(MAX_TUNE_KERNEL_BYTES);
+        let shape = "s".repeat(MAX_TUNE_SHAPE_CLASS_BYTES);
+        let machine = vec![0_u8; MAX_TUNE_MACHINE_BYTES];
+        let params = json_with_exact_bytes(MAX_TUNE_PARAMS_BYTES);
+        let measured = json_with_exact_bytes(MAX_TUNE_MEASURED_BYTES);
+        l.tune_put(&kernel, &shape, &machine, &params, &measured)
+            .expect("every exact tune bound is admitted");
+        let stored = l
+            .tune_get(&kernel, &shape, &machine)
+            .expect("bounded read")
+            .expect("exact-limit row");
+        assert_eq!(stored.kernel.len(), MAX_TUNE_KERNEL_BYTES);
+        assert_eq!(stored.shape_class.len(), MAX_TUNE_SHAPE_CLASS_BYTES);
+        assert_eq!(stored.machine, machine);
+        assert_eq!(stored.params.len(), MAX_TUNE_PARAMS_BYTES);
+        assert_eq!(stored.measured.len(), MAX_TUNE_MEASURED_BYTES);
+
+        let oversized_kernel = "k".repeat(MAX_TUNE_KERNEL_BYTES + 1);
+        assert_invalid_field(
+            l.tune_put(&oversized_kernel, "s", b"m", "{}", "{}"),
+            "kernel",
+        );
+        let oversized_shape = "s".repeat(MAX_TUNE_SHAPE_CLASS_BYTES + 1);
+        assert_invalid_field(
+            l.tune_put("k", &oversized_shape, b"m", "{}", "{}"),
+            "shape_class",
+        );
+        let oversized_machine = vec![0_u8; MAX_TUNE_MACHINE_BYTES + 1];
+        assert_invalid_field(
+            l.tune_put("k", "s", &oversized_machine, "{}", "{}"),
+            "machine",
+        );
+        let oversized_params = json_with_exact_bytes(MAX_TUNE_PARAMS_BYTES + 1);
+        assert_invalid_field(
+            l.tune_put("k", "s", b"m", &oversized_params, "{}"),
+            "params",
+        );
+        let oversized_measured = json_with_exact_bytes(MAX_TUNE_MEASURED_BYTES + 1);
+        assert_invalid_field(
+            l.tune_put_if_absent("k", "s", b"m", "{}", &oversized_measured),
+            "measured",
+        );
+    }
+
+    #[test]
+    fn tune_identities_refuse_empty_nul_and_noncanonical_bytes() {
+        let l = mem();
+        for kernel in ["", "contains\0nul", " leading", "unicode-é"] {
+            assert_invalid_field(l.tune_put(kernel, "s", b"m", "{}", "{}"), "kernel");
+            assert_invalid_field(l.tune_rows(kernel), "kernel");
+        }
+        for shape in ["", "contains\0nul", "trailing ", "unicode-é"] {
+            assert_invalid_field(l.tune_put("k", shape, b"m", "{}", "{}"), "shape_class");
+            assert_invalid_field(l.tune_get("k", shape, b"m"), "shape_class");
+        }
+        assert_invalid_field(l.tune_put("k", "s", b"", "{}", "{}"), "machine");
+        assert_invalid_field(l.tune_get("k", "s", b""), "machine");
+    }
+
+    #[test]
+    fn tune_reads_refuse_oversized_raw_sql_rows_before_payload_materialization() {
+        let l = mem();
+        let oversized = json_with_exact_bytes(MAX_TUNE_PARAMS_BYTES + 1);
+        let insert = l
+            .conn
+            .prepare(
+                "INSERT INTO tune(kernel, shape_class, machine, params, measured) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            )
+            .unwrap();
+        insert
+            .execute_with_params(&[
+                text_param("raw-kernel"),
+                text_param("raw-shape"),
+                blob_param(b"raw-machine"),
+                text_param(&oversized),
+                text_param("{}"),
+            ])
+            .expect("schema permits valid JSON beyond the API bound");
+        insert
+            .execute_with_params(&[
+                text_param("raw-identity"),
+                text_param("bad\0shape"),
+                blob_param(b"raw-machine"),
+                text_param("{}"),
+                text_param("{}"),
+            ])
+            .expect("schema permits a NUL-bearing shape outside the API contract");
+        insert
+            .execute_with_params(&[
+                text_param("bad\0kernel"),
+                text_param("raw-shape"),
+                blob_param(b"raw-machine"),
+                text_param("{}"),
+                text_param("{}"),
+            ])
+            .expect("schema permits a NUL-bearing kernel outside the API contract");
+
+        assert!(matches!(
+            l.tune_get("raw-kernel", "raw-shape", b"raw-machine"),
+            Err(LedgerError::TuneCorrupt { detail, .. })
+                if detail.contains("params byte length")
+        ));
+        assert!(matches!(
+            l.tune_rows("raw-kernel"),
+            Err(LedgerError::TuneCorrupt { detail, .. })
+                if detail.contains("params byte length")
+        ));
+        assert!(matches!(
+            l.tune_rows("raw-identity"),
+            Err(LedgerError::TuneCorrupt { detail, .. })
+                if detail.contains("shape_class is not canonical")
+        ));
+        assert_eq!(l.lint().unwrap().malformed_tune_rows, 3);
+    }
+
+    #[test]
+    fn tune_scan_refuses_row_and_aggregate_caps_deterministically() {
+        let l = mem();
+        let insert = l
+            .conn
+            .prepare(
+                "INSERT INTO tune(kernel, shape_class, machine, params, measured) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            )
+            .unwrap();
+        l.begin().unwrap();
+        for index in 0..MAX_TUNE_ROWS_PER_KERNEL {
+            insert
+                .execute_with_params(&[
+                    text_param("row-cap"),
+                    text_param(&format!("shape-{index:04}")),
+                    blob_param(b"m"),
+                    text_param("{}"),
+                    text_param("{}"),
+                ])
+                .unwrap();
+        }
+        l.commit().unwrap();
+        let at_cap = l.tune_rows("row-cap").expect("exact row cap");
+        assert_eq!(at_cap.len(), MAX_TUNE_ROWS_PER_KERNEL);
+        assert_eq!(at_cap.first().unwrap().shape_class, "shape-0000");
+        assert_eq!(
+            at_cap.last().unwrap().shape_class,
+            format!("shape-{:04}", MAX_TUNE_ROWS_PER_KERNEL - 1)
+        );
+        insert
+            .execute_with_params(&[
+                text_param("row-cap"),
+                text_param("shape-overflow"),
+                blob_param(b"m"),
+                text_param("{}"),
+                text_param("{}"),
+            ])
+            .unwrap();
+        assert!(matches!(
+            l.tune_rows("row-cap"),
+            Err(LedgerError::TuneReadLimit {
+                resource: "rows",
+                limit: MAX_TUNE_ROWS_PER_KERNEL,
+                observed_at_least,
+                ..
+            }) if observed_at_least == MAX_TUNE_ROWS_PER_KERNEL + 1
+        ));
+
+        let max_json = json_with_exact_bytes(MAX_TUNE_PARAMS_BYTES);
+        for index in 0..8 {
+            insert
+                .execute_with_params(&[
+                    text_param("byte-cap"),
+                    text_param(&format!("shape-{index:04}")),
+                    blob_param(b"m"),
+                    text_param(&max_json),
+                    text_param(&max_json),
+                ])
+                .unwrap();
+        }
+        assert!(matches!(
+            l.tune_rows("byte-cap"),
+            Err(LedgerError::TuneReadLimit {
+                resource: "materialized_bytes",
+                limit: MAX_TUNE_SCAN_BYTES,
+                observed_at_least,
+                ..
+            }) if observed_at_least > MAX_TUNE_SCAN_BYTES
+        ));
     }
 
     #[test]
