@@ -26,7 +26,9 @@ pub mod oracle;
 pub mod voi;
 
 pub use alloc::{
-    AllocProblem, Allocator, BudgetInfeasible, Knob, KnobSetting, Plan, allocate, oracle_min_error,
+    AllocProblem, AllocationError, Allocator, BudgetInfeasible, Knob, KnobSetting,
+    MAX_ALLOCATION_KNOBS, MAX_EXECUTION_TRACKS, MAX_ORACLE_COMBINATIONS, MAX_SETTINGS_PER_KNOB,
+    MAX_TOTAL_SETTINGS, Plan, PlanInputError, allocate, oracle_min_error,
 };
 pub use cost::{CostModel, CostObservation, CostPrediction, CostRefusal, MIN_OBS};
 pub use ledgers::{

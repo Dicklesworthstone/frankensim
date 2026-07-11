@@ -9,7 +9,7 @@
 use fs_plan::moonshot::{
     RateKnob, ScoreRow, cma_continuous, optimize_exact, rate_error, waterfill,
 };
-use fs_plan::{AllocProblem, Knob, KnobSetting, allocate, oracle_min_error};
+use fs_plan::{AllocProblem, AllocationError, Knob, KnobSetting, allocate, oracle_min_error};
 
 fn verdict(name: &str, pass: bool, details: &str) {
     println!("{{\"test\":\"{name}\",\"pass\":{pass},\"details\":\"{details}\"}}");
@@ -43,7 +43,8 @@ fn random_problem(seed: &mut u64, tracks: usize) -> AllocProblem {
             err *= 0.25 + 0.3 * lcg(seed);
             cost *= 1.8 + 1.5 * lcg(seed);
         }
-        knobs.push(Knob::new(&format!("knob{k}"), k % tracks, settings));
+        knobs
+            .push(Knob::new(&format!("knob{k}"), k % tracks, settings).expect("valid random knob"));
     }
     AllocProblem {
         knobs,
@@ -62,7 +63,9 @@ fn ms_001_dp_is_exact() {
     for tracks in [1usize, 2] {
         for _ in 0..40 {
             let p = random_problem(&mut seed, tracks);
-            let (_, oracle_err) = oracle_min_error(&p).expect("cheapest fits");
+            let (_, oracle_err) = oracle_min_error(&p)
+                .expect("valid fixture")
+                .expect("cheapest fits");
             let v2 = optimize_exact(&p, 4000).expect("DP finds a plan");
             // Grid-conservative: DP may only lose oracle by bucket
             // rounding, never win.
@@ -78,7 +81,8 @@ fn ms_001_dp_is_exact() {
             );
             let v1_err = match allocate(&p) {
                 Ok(plan) => plan.total_error,
-                Err(inf) => inf.best_error_in_budget,
+                Err(AllocationError::BudgetInfeasible(inf)) => inf.best_error_in_budget,
+                Err(other) => panic!("valid fixture produced unexpected refusal: {other}"),
             };
             if v2.total_error <= v1_err + 1e-12 {
                 v2_wins_or_ties += 1;
@@ -169,17 +173,20 @@ fn ms_004_scoreboard_v2_beats_hand_on_fixtures() {
     for i in 0..25 {
         let p = random_problem(&mut seed, 1 + i % 2);
         let hand_choice: Vec<usize> = p.knobs.iter().map(|k| k.settings.len() / 2).collect();
-        let hand_wall = fs_plan::alloc::plan_wall_clock(&p.knobs, &hand_choice);
+        let hand_wall =
+            fs_plan::alloc::plan_wall_clock(&p.knobs, &hand_choice).expect("valid hand choice");
         let hand_error = if hand_wall <= p.budget_s {
-            fs_plan::alloc::plan_total_error(&p.knobs, &hand_choice)
+            fs_plan::alloc::plan_total_error(&p.knobs, &hand_choice).expect("valid hand choice")
         } else {
             // Hand plan busts the budget: charge it the cheapest plan
             // (the generous reading).
             fs_plan::alloc::plan_total_error(&p.knobs, &vec![0; p.knobs.len()])
+                .expect("valid cheapest choice")
         };
         let v1_error = match allocate(&p) {
             Ok(plan) => plan.total_error,
-            Err(inf) => inf.best_error_in_budget,
+            Err(AllocationError::BudgetInfeasible(inf)) => inf.best_error_in_budget,
+            Err(other) => panic!("valid fixture produced unexpected refusal: {other}"),
         };
         let v2_error = optimize_exact(&p, 4000).expect("plan").total_error;
         rows.push(ScoreRow {

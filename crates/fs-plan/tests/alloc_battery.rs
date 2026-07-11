@@ -4,7 +4,11 @@
 //! tropical slack upgrades, the §11.4 "drag to 2% in 2h" scenario, and
 //! determinism.
 
-use fs_plan::{AllocProblem, Allocator, Knob, KnobSetting, allocate, oracle_min_error};
+use fs_plan::{
+    AllocProblem, AllocationError, Allocator, Knob, KnobSetting, MAX_ALLOCATION_KNOBS,
+    MAX_EXECUTION_TRACKS, MAX_ORACLE_COMBINATIONS, MAX_SETTINGS_PER_KNOB, MAX_TOTAL_SETTINGS,
+    PlanInputError, allocate, oracle_min_error,
+};
 
 fn verdict(name: &str, pass: bool, details: &str) {
     println!("{{\"test\":\"{name}\",\"pass\":{pass},\"details\":\"{details}\"}}");
@@ -40,7 +44,7 @@ fn random_problem(seed: &mut u64) -> AllocProblem {
             err *= 0.25 + 0.3 * lcg(seed);
             cost *= 1.8 + 1.5 * lcg(seed);
         }
-        knobs.push(Knob::new(&format!("knob{k}"), 0, settings));
+        knobs.push(Knob::new(&format!("knob{k}"), 0, settings).expect("valid random knob"));
     }
     AllocProblem {
         knobs,
@@ -61,9 +65,12 @@ fn pl_001_greedy_near_oracle() {
         // reports infeasible carrying its best-in-budget error.
         let greedy_err = match allocate(&p) {
             Ok(plan) => plan.total_error,
-            Err(inf) => inf.best_error_in_budget,
+            Err(AllocationError::BudgetInfeasible(inf)) => inf.best_error_in_budget,
+            Err(other) => panic!("valid fixture produced unexpected refusal: {other}"),
         };
-        let (_, oracle_err) = oracle_min_error(&p).expect("cheapest plan always fits");
+        let (_, oracle_err) = oracle_min_error(&p)
+            .expect("valid fixture")
+            .expect("cheapest plan always fits");
         assert!(
             greedy_err + 1e-12 >= oracle_err,
             "greedy beats the exact oracle?! {greedy_err} < {oracle_err}"
@@ -86,15 +93,20 @@ fn pl_002_infeasibility_is_structured_and_actionable() {
             "mesh",
             0,
             vec![ks("coarse", 1.0, 1.0), ks("fine", 0.1, 10.0)],
-        ),
-        Knob::new("order", 0, vec![ks("p1", 0.5, 1.0), ks("p3", 0.05, 8.0)]),
+        )
+        .expect("valid mesh knob"),
+        Knob::new("order", 0, vec![ks("p1", 0.5, 1.0), ks("p3", 0.05, 8.0)])
+            .expect("valid order knob"),
     ];
     let p = AllocProblem {
         knobs,
         budget_s: 3.0,
         error_target: 0.2,
     };
-    let inf = allocate(&p).expect_err("3s cannot reach 0.2");
+    let inf = match allocate(&p).expect_err("3s cannot reach 0.2") {
+        AllocationError::BudgetInfeasible(inf) => inf,
+        other => panic!("expected target infeasibility, got {other}"),
+    };
     let feasible_again = allocate(&AllocProblem {
         budget_s: inf.budget_needed_for_target * 1.0001,
         ..p.clone()
@@ -127,29 +139,31 @@ fn pl_003_online_replanning_reacts_correctly() {
                 ks("m32", 0.2, 4.0),
                 ks("m64", 0.05, 16.0),
             ],
-        ),
+        )
+        .expect("valid mesh knob"),
         Knob::new(
             "samples",
             0,
             vec![ks("n100", 0.6, 1.0), ks("n1k", 0.06, 6.0)],
-        ),
+        )
+        .expect("valid samples knob"),
     ];
     let p = AllocProblem {
         knobs,
         budget_s: 12.0,
         error_target: 0.30,
     };
-    let mut alloc = Allocator::new(p);
+    let mut alloc = Allocator::new(p).expect("valid allocation problem");
     let plan0 = alloc.replan().expect("baseline feasible");
     // Unwarranted update: a tiny refinement of an estimate that does
     // not change any greedy comparison.
-    alloc.observe_error(0, 0, 0.79);
+    alloc.observe_error(0, 0, 0.79).expect("finite observation");
     let plan1 = alloc.replan().expect("still feasible");
     let unchanged = plan0.choice == plan1.choice;
     // Warranted update: the DWR estimate reveals the coarse mesh is
     // far BETTER than modeled — the expensive mesh upgrade is no
     // longer worth it and the plan must change.
-    alloc.observe_error(0, 0, 0.10);
+    alloc.observe_error(0, 0, 0.10).expect("finite observation");
     let plan2 = alloc.replan().expect("feasible after update");
     let changed = plan2.choice != plan0.choice;
     verdict(
@@ -168,13 +182,14 @@ fn pl_003_online_replanning_reacts_correctly() {
 fn pl_004_tropical_slack_upgrade() {
     let knobs = vec![
         // Track 0 dominates the wall-clock (the critical path).
-        Knob::new("cfd", 0, vec![ks("coarse", 0.5, 10.0)]),
+        Knob::new("cfd", 0, vec![ks("coarse", 0.5, 10.0)]).expect("valid CFD knob"),
         // Track 1 has slack: upgrading is free in wall-clock.
         Knob::new(
             "render",
             1,
             vec![ks("preview", 0.4, 1.0), ks("final", 0.05, 6.0)],
-        ),
+        )
+        .expect("valid render knob"),
     ];
     let p = AllocProblem {
         knobs,
@@ -205,7 +220,7 @@ fn pl_005_drag_to_two_percent_in_two_hours() {
             .enumerate()
             .map(|(i, &c)| ks(&format!("{name}{i}"), a * c.powf(-p_exp), c))
             .collect();
-        Knob::new(name, track, settings)
+        Knob::new(name, track, settings).expect("valid rate ladder")
     };
     let knobs = vec![
         ladder("mesh", 0, 0.9, 0.7, &[60.0, 240.0, 960.0, 3840.0]),
@@ -233,5 +248,318 @@ fn pl_005_drag_to_two_percent_in_two_hours() {
             plan.wall_clock,
             plan.rationale.len()
         ),
+    );
+}
+
+/// pl-007: the cheapest complete plan is still subject to the wall
+/// budget. Meeting the error target must never bypass feasibility.
+#[test]
+fn pl_007_success_never_exceeds_wall_budget() {
+    let knob =
+        Knob::new("single", 0, vec![ks("only", 0.1, 10.0)]).expect("valid single-setting knob");
+    for budget_s in [0.0, 1.0, 9.999, 10.0, 11.0] {
+        let result = allocate(&AllocProblem {
+            knobs: vec![knob.clone()],
+            budget_s,
+            error_target: 0.2,
+        });
+        match result {
+            Ok(plan) => assert!(
+                plan.wall_clock <= budget_s,
+                "successful plan used {}s against a {budget_s}s budget",
+                plan.wall_clock
+            ),
+            Err(AllocationError::MinimumPlanExceedsBudget {
+                budget_s: refused_budget,
+                minimum_wall_s,
+            }) => {
+                assert_eq!(refused_budget.to_bits(), budget_s.to_bits());
+                assert_eq!(minimum_wall_s.to_bits(), 10.0f64.to_bits());
+                assert!(budget_s < minimum_wall_s);
+            }
+            Err(other) => panic!("unexpected refusal for budget {budget_s}: {other}"),
+        }
+    }
+    verdict(
+        "pl-007-budget-safe-success",
+        true,
+        "target satisfaction cannot return an over-budget baseline plan",
+    );
+}
+
+/// pl-008: every numeric input domain is enforced with typed errors,
+/// including finite values whose aggregate would overflow.
+#[test]
+fn pl_008_invalid_numeric_domains_are_typed_refusals() {
+    for (field, error, cost) in [
+        ("error", f64::NAN, 1.0),
+        ("error", f64::INFINITY, 1.0),
+        ("error", -1.0, 1.0),
+        ("cost", 1.0, f64::NAN),
+        ("cost", 1.0, f64::INFINITY),
+        ("cost", 1.0, -1.0),
+    ] {
+        assert!(matches!(
+            Knob::new("bad-setting", 0, vec![ks("bad", error, cost)]),
+            Err(PlanInputError::InvalidSettingValue {
+                field: actual,
+                ..
+            }) if actual == field
+        ));
+    }
+
+    let valid = Knob::new("valid", 0, vec![ks("base", 1.0, 1.0)]).expect("valid control knob");
+    for (field, budget_s, error_target) in [
+        ("budget_s", f64::NAN, 0.0),
+        ("budget_s", f64::INFINITY, 0.0),
+        ("budget_s", -1.0, 0.0),
+        ("error_target", 1.0, f64::NAN),
+        ("error_target", 1.0, f64::INFINITY),
+        ("error_target", 1.0, -1.0),
+    ] {
+        assert!(matches!(
+            allocate(&AllocProblem {
+                knobs: vec![valid.clone()],
+                budget_s,
+                error_target,
+            }),
+            Err(AllocationError::InvalidInput(
+                PlanInputError::InvalidProblemValue { field: actual, .. }
+            )) if actual == field
+        ));
+    }
+
+    let overflow = AllocProblem {
+        knobs: vec![
+            Knob::new("a", 0, vec![ks("base", f64::MAX, f64::MAX)])
+                .expect("individual values are finite"),
+            Knob::new("b", 0, vec![ks("base", f64::MAX, f64::MAX)])
+                .expect("individual values are finite"),
+        ],
+        budget_s: f64::MAX,
+        error_target: 0.0,
+    };
+    assert!(matches!(
+        allocate(&overflow),
+        Err(AllocationError::InvalidInput(
+            PlanInputError::AggregateOverflow { .. }
+        ))
+    ));
+    verdict(
+        "pl-008-input-domains",
+        true,
+        "setting, budget, target, and aggregate domains reject explicitly",
+    );
+}
+
+/// pl-009: track IDs are rejected before any storage or iteration can
+/// be sized by the numeric ID. Validate both the constructor and the
+/// defensive check for callers that construct the public struct.
+#[test]
+fn pl_009_huge_track_ids_refuse_before_sizing() {
+    assert!(matches!(
+        Knob::new(
+            "too-many-tracks",
+            MAX_EXECUTION_TRACKS,
+            vec![ks("base", 1.0, 1.0)],
+        ),
+        Err(PlanInputError::TrackOutOfRange { .. })
+    ));
+
+    let forged = AllocProblem {
+        knobs: vec![Knob {
+            name: "forged".to_string(),
+            track: usize::MAX,
+            settings: vec![ks("base", 1.0, 1.0)],
+        }],
+        budget_s: 1.0,
+        error_target: 1.0,
+    };
+    assert!(matches!(
+        allocate(&forged),
+        Err(AllocationError::InvalidInput(
+            PlanInputError::TrackOutOfRange {
+                track: usize::MAX,
+                ..
+            }
+        ))
+    ));
+    assert!(matches!(
+        oracle_min_error(&forged),
+        Err(PlanInputError::TrackOutOfRange { .. })
+    ));
+    verdict(
+        "pl-009-bounded-tracks",
+        true,
+        "usize::MAX track IDs refuse before track-indexed work",
+    );
+}
+
+/// pl-010: invalid online evidence is a non-mutating refusal, and a
+/// valid update that changes dominance leaves a valid Pareto ladder.
+#[test]
+fn pl_010_online_observations_are_transactional() {
+    let knob = Knob::new(
+        "mesh",
+        0,
+        vec![ks("coarse", 0.8, 1.0), ks("fine", 0.2, 4.0)],
+    )
+    .expect("valid mesh knob");
+    let mut allocator = Allocator::new(AllocProblem {
+        knobs: vec![knob],
+        budget_s: 4.0,
+        error_target: 0.2,
+    })
+    .expect("valid allocation problem");
+    let before = allocator.problem().knobs[0].settings[0].error;
+    assert!(matches!(
+        allocator.observe_error(0, 0, f64::NAN),
+        Err(PlanInputError::InvalidSettingValue { .. })
+    ));
+    assert_eq!(
+        allocator.problem().knobs[0].settings[0].error.to_bits(),
+        before.to_bits()
+    );
+    assert!(matches!(
+        allocator.observe_error(1, 0, 0.1),
+        Err(PlanInputError::KnobIndexOutOfRange { .. })
+    ));
+
+    allocator
+        .observe_error(0, 0, 0.1)
+        .expect("valid measurement commits");
+    assert_eq!(allocator.problem().knobs[0].settings.len(), 1);
+    let plan = allocator.replan().expect("re-pruned problem remains valid");
+    assert_eq!(plan.choice, vec![0]);
+    assert!(plan.wall_clock <= allocator.problem().budget_s);
+    verdict(
+        "pl-010-transactional-observation",
+        true,
+        "invalid evidence does not mutate; valid evidence re-prunes dominance",
+    );
+}
+
+/// pl-011: no knobs is the intentional identity problem, not an
+/// indexing accident: one empty choice has zero additive error and
+/// zero tropical wall cost.
+#[test]
+fn pl_011_empty_problem_is_the_zero_cost_identity() {
+    let problem = AllocProblem {
+        knobs: Vec::new(),
+        budget_s: 0.0,
+        error_target: 1.0,
+    };
+    let plan = allocate(&problem).expect("identity problem is feasible");
+    assert!(plan.choice.is_empty());
+    assert_eq!(plan.total_error.to_bits(), 0.0f64.to_bits());
+    assert_eq!(plan.wall_clock.to_bits(), 0.0f64.to_bits());
+    assert_eq!(
+        oracle_min_error(&problem)
+            .expect("identity problem is valid")
+            .expect("identity plan exists")
+            .0,
+        Vec::<usize>::new()
+    );
+    verdict(
+        "pl-011-empty-identity",
+        true,
+        "empty knobs yield the unique zero-error, zero-wall plan",
+    );
+}
+
+fn pareto_settings(count: usize) -> Vec<KnobSetting> {
+    (0..count)
+        .map(|index| {
+            ks(
+                &format!("s{index}"),
+                (count - index) as f64,
+                (index + 1) as f64,
+            )
+        })
+        .collect()
+}
+
+/// pl-012: every planner-controlled work dimension is bounded, and
+/// the exact fixture oracle refuses before Cartesian enumeration.
+#[test]
+fn pl_012_work_domains_are_bounded() {
+    assert!(matches!(
+        Knob::new("oversized", 0, pareto_settings(MAX_SETTINGS_PER_KNOB + 1),),
+        Err(PlanInputError::TooManySettings { .. })
+    ));
+
+    let singleton = Knob::new("single", 0, vec![ks("base", 1.0, 1.0)]).expect("valid singleton");
+    let too_many_knobs = AllocProblem {
+        knobs: vec![singleton; MAX_ALLOCATION_KNOBS + 1],
+        budget_s: 1.0,
+        error_target: 1.0,
+    };
+    assert!(matches!(
+        allocate(&too_many_knobs),
+        Err(AllocationError::InvalidInput(
+            PlanInputError::TooManyKnobs { .. }
+        ))
+    ));
+
+    let dense = Knob::new("dense", 0, pareto_settings(MAX_SETTINGS_PER_KNOB))
+        .expect("per-knob boundary is valid");
+    let too_many_total = AllocProblem {
+        knobs: vec![dense; MAX_TOTAL_SETTINGS / MAX_SETTINGS_PER_KNOB + 1],
+        budget_s: f64::MAX,
+        error_target: 0.0,
+    };
+    assert!(matches!(
+        allocate(&too_many_total),
+        Err(AllocationError::InvalidInput(
+            PlanInputError::TooManyTotalSettings { .. }
+        ))
+    ));
+
+    let oracle_problem = AllocProblem {
+        knobs: (0..4)
+            .map(|index| {
+                Knob::new(&format!("oracle-{index}"), index, pareto_settings(33))
+                    .expect("valid oracle knob")
+            })
+            .collect(),
+        budget_s: 200.0,
+        error_target: 0.0,
+    };
+    assert!(33usize.pow(4) > MAX_ORACLE_COMBINATIONS);
+    assert!(matches!(
+        oracle_min_error(&oracle_problem),
+        Err(PlanInputError::OracleWorkLimitExceeded { .. })
+    ));
+    verdict(
+        "pl-012-bounded-work",
+        true,
+        "knob, setting, aggregate, and exact-oracle work caps refuse explicitly",
+    );
+}
+
+/// pl-013: the public evaluators validate their choice vectors rather
+/// than indexing caller input directly.
+#[test]
+fn pl_013_public_evaluators_are_fallible() {
+    let knobs =
+        vec![Knob::new("mesh", 0, vec![ks("coarse", 1.0, 1.0)]).expect("valid evaluator knob")];
+    assert!(matches!(
+        fs_plan::alloc::plan_wall_clock(&knobs, &[]),
+        Err(PlanInputError::ChoiceLengthMismatch { .. })
+    ));
+    assert!(matches!(
+        fs_plan::alloc::plan_total_error(&knobs, &[1]),
+        Err(PlanInputError::ChoiceIndexOutOfRange { .. })
+    ));
+    assert_eq!(
+        fs_plan::alloc::plan_wall_clock(&knobs, &[0])
+            .expect("valid choice")
+            .to_bits(),
+        1.0f64.to_bits()
+    );
+    verdict(
+        "pl-013-fallible-evaluators",
+        true,
+        "choice length and indices refuse without panicking",
     );
 }

@@ -23,7 +23,7 @@
 //! battery is necessary evidence, not sufficient — the feature ships
 //! OFF by default.
 
-use crate::alloc::{AllocProblem, Plan, plan_total_error, plan_wall_clock};
+use crate::alloc::{AllocProblem, Plan, plan_total_error, plan_wall_clock, validate_problem};
 
 /// Exact (grid-discretized) multiple-choice knapsack per track.
 /// `grid` = number of cost buckets per track (resolution B/grid).
@@ -33,6 +33,7 @@ use crate::alloc::{AllocProblem, Plan, plan_total_error, plan_wall_clock};
 #[must_use]
 pub fn optimize_exact(problem: &AllocProblem, grid: usize) -> Option<Plan> {
     assert!(grid > 0, "cost grid must be positive");
+    validate_problem(problem).ok()?;
     let knobs = &problem.knobs;
     let ntracks = knobs.iter().map(|k| k.track).max().unwrap_or(0) + 1;
     let step = problem.budget_s / grid as f64;
@@ -92,8 +93,8 @@ pub fn optimize_exact(problem: &AllocProblem, grid: usize) -> Option<Plan> {
             choice[ki] = back[bb][mi];
         }
     }
-    let total_error = plan_total_error(knobs, &choice);
-    let wall = plan_wall_clock(knobs, &choice);
+    let total_error = plan_total_error(knobs, &choice).ok()?;
+    let wall = plan_wall_clock(knobs, &choice).ok()?;
     if wall > problem.budget_s {
         return None;
     }
