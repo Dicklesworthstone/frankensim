@@ -1619,6 +1619,18 @@ impl EvidencePackage {
         &self.claims
     }
 
+    /// Whether raw declarations are safe to scan for bounded diagnostics.
+    ///
+    /// This checks the complete transport envelope and structural semantics but
+    /// performs no external authentication and grants no scientific authority.
+    /// It exists so standalone preflight tools can inventory declaration-level
+    /// blockers after a fail-closed capability refusal without rescanning an
+    /// oversized or malformed builder.
+    #[must_use]
+    pub fn is_structurally_inspectable_unverified(&self) -> bool {
+        self.verify_structural().is_ok()
+    }
+
     /// Attach a detached signature (builder style).
     #[must_use]
     pub fn signed(mut self, signature: impl Into<String>) -> EvidencePackage {

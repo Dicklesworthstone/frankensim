@@ -498,10 +498,11 @@ fn parse_refusal(
 }
 
 fn append_release_findings(pkg: &EvidencePackage, report: &mut CheckReport) {
-    // Package admission is the bounded precondition for every raw-claim scan.
-    // Verification already emitted the precise refusal; do not amplify an
-    // oversized or malformed in-memory builder into per-claim diagnostics.
-    if report.receipt.is_none() {
+    // Complete structural inspection is the bounded precondition for every raw
+    // declaration scan. Capability refusals deliberately carry no receipt, but
+    // preflight must still inventory independent release blockers. Oversized or
+    // malformed builders remain single-refusal inputs and are never amplified.
+    if report.receipt.is_none() && !pkg.is_structurally_inspectable_unverified() {
         report.verdict = Verdict::Fail;
         return;
     }
@@ -511,24 +512,23 @@ fn append_release_findings(pkg: &EvidencePackage, report: &mut CheckReport) {
             detail: "release admission requires at least one claim".to_string(),
         });
     }
-    if let Some(receipt) = &report.receipt {
-        let has_scientific_certificate = pkg
-            .declared_claims_unverified()
+    let has_scientific_certificate = report.receipt.as_ref().is_some_and(|receipt| {
+        pkg.declared_claims_unverified()
             .iter()
             .zip(receipt.admissions())
             .any(|(claim, admission)| {
                 admission.class() == AdmissionClass::Scientific
                     && claim.declared_requires_release_falsifier_unverified()
-            });
-        if !has_scientific_certificate {
-            report.findings.push(Finding {
-                kind: "release-scientific-evidence-required",
-                detail: "release admission requires at least one scientifically admitted \
-                         Verified or Validated claim; all-estimated and all-waived packages are \
-                         publication/no-claim artifacts"
-                    .to_string(),
-            });
-        }
+            })
+    });
+    if !has_scientific_certificate {
+        report.findings.push(Finding {
+            kind: "release-scientific-evidence-required",
+            detail: "release admission requires at least one scientifically admitted Verified or \
+                     Validated claim; a preflight capability refusal admits none, while \
+                     all-estimated and all-waived packages remain publication/no-claim artifacts"
+                .to_string(),
+        });
     }
     let receipt_admission_context = report
         .receipt

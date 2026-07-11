@@ -36,7 +36,10 @@ an incompatible checker ABI.
   structurally non-admitting blocker inventory. It uses
   `CheckPolicy::ReleasePreflight`, always returns `Fail` with a
   `release-preflight-only` finding, and cannot become release authority if a
-  future ungated origin is added.
+  future ungated origin is added. A bounded, structurally valid package still
+  receives declaration-level falsifier, anchor, signature, and scientific-rank
+  findings after its expected deny-all capability refusal. Malformed and
+  oversized packages are not rescanned or amplified.
 - `check_for_release_with_capabilities(...)` — release admission with explicit
   source-certificate, anchoring-dataset, falsifier, derivation, and waiver
   capabilities in addition to the mandatory signature verifier. It requires at
@@ -123,6 +126,9 @@ an incompatible checker ABI.
 - Oversized in-memory builders are refused before root/signature canonicalization
   and before per-claim release diagnostics. Rejected raw signature bytes are not
   retained in a refusal report.
+- Release preflight distinguishes capability refusal from structural refusal:
+  only `EvidencePackage::is_structurally_inspectable_unverified()` inputs are
+  scanned for independent declaration-level blockers when no receipt exists.
 - `render_pie`, reports, and decision hashes are deterministic; pie arithmetic
   widens counts to `u128` before multiplication.
 

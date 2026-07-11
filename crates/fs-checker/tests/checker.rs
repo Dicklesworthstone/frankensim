@@ -792,6 +792,48 @@ fn release_preflight_does_not_amplify_rejected_oversized_builders() {
 }
 
 #[test]
+fn release_preflight_inventories_declaration_blockers_after_capability_refusal() {
+    let validated_color = Color::Validated {
+        regime: good_regime(),
+        dataset: "wt-2026".to_string(),
+    };
+    let package = EvidencePackage::new(prov())
+        .with_claim(validated("parent", good_regime()))
+        .with_claim(Claim::derived(
+            "derived",
+            "matches",
+            validated_color,
+            vec![0],
+            IntervalOp::Hull,
+            ARTIFACT_HASH,
+        ));
+    assert!(package.is_structurally_inspectable_unverified());
+
+    let report = check_release_preflight(&package, package_root(&package), &ReleaseVerifier);
+    assert!(
+        report.receipt().is_none(),
+        "deny-all cannot admit the anchor"
+    );
+    for expected in [
+        "anchored-source-refused",
+        "release-scientific-evidence-required",
+        "release-signature-required",
+        "release-falsifier-required",
+        "release-anchor-required",
+        "release-preflight-only",
+    ] {
+        assert!(
+            report
+                .findings()
+                .iter()
+                .any(|finding| finding.kind == expected),
+            "missing {expected}: {:?}",
+            report.findings()
+        );
+    }
+}
+
+#[test]
 fn release_gate_requires_matching_anchor_signature_and_root() {
     // Schema v6: the sealed `anchored` constructor attaches the matching
     // anchor, so an in-memory validated-without-anchor package is
