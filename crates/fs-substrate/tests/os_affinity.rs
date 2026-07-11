@@ -35,7 +35,15 @@ fn page_audit_reports_touched_pages_or_refuses() {
     let buf = vec![1u8; 1 << 20];
     match page_nodes(&buf, 4096) {
         Ok(nodes) => {
-            assert_eq!(nodes.len(), (1 << 20) / 4096);
+            // The buffer touches however many 4 KiB pages its byte range
+            // spans, which depends on the allocation's alignment: an
+            // unaligned 1 MiB buffer crosses one extra boundary (256 pages
+            // when 4 KiB-aligned, 257 when not). aarch64 heap allocations
+            // landed page-aligned here; x86-64's did not — compute the true
+            // span from the actual start offset rather than assuming it.
+            let start = buf.as_ptr() as usize;
+            let expected = (start % 4096 + buf.len()).div_ceil(4096);
+            assert_eq!(nodes.len(), expected);
             // Touched pages report a non-negative node id.
             assert!(nodes.iter().all(|&n| n >= 0), "touched pages have nodes");
         }
