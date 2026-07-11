@@ -113,7 +113,7 @@ pub enum GemmTuneError {
         /// Drained numerical-run report when cancellation was returned by
         /// fs-la. `None` means the gate was observed between dispatch calls;
         /// earlier completed probes may still contribute to the peak.
-        report: Option<fs_la::GemmRunReport>,
+        report: Option<Box<fs_la::GemmRunReport>>,
     },
     /// Tuner-side refusal (invalid pin, evidence, or adoption).
     Tune(TuneError),
@@ -141,7 +141,7 @@ pub enum GemmTuneError {
         /// Largest session-owned logical reservation concurrency reached.
         peak_used_bytes: u128,
         /// Drained numerical-run report when refusal occurred inside fs-la.
-        report: Option<fs_la::GemmRunReport>,
+        report: Option<Box<fs_la::GemmRunReport>>,
     },
     /// Checked arithmetic could not represent the session or fs-la memory plan.
     MemoryPlanOverflow {
@@ -159,7 +159,7 @@ pub enum GemmTuneError {
         /// Largest session-owned logical reservation concurrency reached.
         peak_used_bytes: u128,
         /// Drained numerical-run report, including memory and tile progress.
-        report: fs_la::GemmRunReport,
+        report: Box<fs_la::GemmRunReport>,
     },
 }
 
@@ -232,7 +232,7 @@ impl From<fs_la::GemmCancelled> for GemmTuneError {
         Self::Cancelled {
             limit_bytes,
             peak_used_bytes,
-            report: Some(cancelled.report),
+            report: Some(Box::new(cancelled.report)),
         }
     }
 }
@@ -248,7 +248,7 @@ impl From<fs_la::GemmRunError> for GemmTuneError {
                     error,
                     limit_bytes,
                     peak_used_bytes,
-                    report,
+                    report: Box::new(report),
                 }
             }
             fs_la::GemmRunError::MemoryRefused {
@@ -261,7 +261,7 @@ impl From<fs_la::GemmRunError> for GemmTuneError {
                 requested_bytes,
                 limit_bytes,
                 peak_used_bytes: report.memory.peak_used_bytes,
-                report: Some(report),
+                report: Some(Box::new(report)),
             },
             fs_la::GemmRunError::MemoryPlanOverflow { what, limit_bytes } => {
                 Self::MemoryPlanOverflow { what, limit_bytes }
@@ -1960,24 +1960,20 @@ mod tests {
             }))
         })
         .expect_err("cancelled producer");
-        assert!(matches!(
-            error,
-            GemmTuneError::Cancelled {
-                limit_bytes: 1_024,
-                peak_used_bytes: 384,
-                report: Some(fs_la::GemmRunReport {
-                    completed_tiles: 7,
-                    total_tiles: 19,
-                    memory: fs_la::GemmMemoryReport {
-                        requested_bytes: 512,
-                        peak_used_bytes: 384,
-                        ..
-                    },
-                    ..
-                }),
-                ..
-            }
-        ));
+        let GemmTuneError::Cancelled {
+            limit_bytes,
+            peak_used_bytes,
+            report: Some(report),
+        } = error
+        else {
+            panic!("expected retained cancellation report");
+        };
+        assert_eq!(limit_bytes, 1_024);
+        assert_eq!(peak_used_bytes, 384);
+        assert_eq!(report.completed_tiles, 7);
+        assert_eq!(report.total_tiles, 19);
+        assert_eq!(report.memory.requested_bytes, 512);
+        assert_eq!(report.memory.peak_used_bytes, 384);
         assert!(tuner.decisions().is_empty());
         assert!(tuner.has_gemm_pin(&key));
     }
@@ -2003,23 +1999,29 @@ mod tests {
             },
             report,
         });
-        assert!(matches!(
-            error,
-            GemmTuneError::Executor {
-                limit_bytes: 2_048,
-                peak_used_bytes: 768,
-                report: fs_la::GemmRunReport {
-                    completed_tiles: 3,
-                    total_tiles: 11,
-                    memory: fs_la::GemmMemoryReport {
-                        requested_bytes: 1_024,
-                        peak_used_bytes: 768,
-                        ..
-                    },
-                    ..
-                },
-                ..
-            }
-        ));
+        let GemmTuneError::Executor {
+            limit_bytes,
+            peak_used_bytes,
+            report,
+            ..
+        } = error
+        else {
+            panic!("expected retained executor report");
+        };
+        assert_eq!(limit_bytes, 2_048);
+        assert_eq!(peak_used_bytes, 768);
+        assert_eq!(report.completed_tiles, 3);
+        assert_eq!(report.total_tiles, 11);
+        assert_eq!(report.memory.requested_bytes, 1_024);
+        assert_eq!(report.memory.peak_used_bytes, 768);
+    }
+
+    #[test]
+    fn error_reports_are_indirected_off_the_success_path() {
+        assert!(
+            core::mem::size_of::<GemmTuneError>() <= 128,
+            "GemmTuneError grew to {} bytes; keep full reports behind indirection",
+            core::mem::size_of::<GemmTuneError>()
+        );
     }
 }

@@ -427,8 +427,14 @@ fn ss_003b_idempotency_is_session_scoped_and_content_addressed() {
         first_receipt, second_receipt,
         "the owning session is part of receipt identity"
     );
-    assert_eq!(gov.consumption(SessionId(31)).unwrap().0, 3.0);
-    assert_eq!(gov.consumption(SessionId(32)).unwrap().0, 5.0);
+    assert_eq!(
+        gov.consumption(SessionId(31)).unwrap().0.to_bits(),
+        3.0_f64.to_bits()
+    );
+    assert_eq!(
+        gov.consumption(SessionId(32)).unwrap().0.to_bits(),
+        5.0_f64.to_bits()
+    );
     assert!(matches!(
         gov.submit_once(SessionId(31), &key, || panic!("duplicate ran"))
             .expect("duplicate returns"),

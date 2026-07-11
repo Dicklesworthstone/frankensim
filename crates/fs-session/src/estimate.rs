@@ -153,7 +153,6 @@ fn mem_ask(budget: Option<&Node>) -> Result<Option<u64>, crate::SessionError> {
 }
 
 /// Predict a study's cost without executing it.
-#[must_use]
 ///
 /// # Errors
 /// [`crate::SessionError::InvalidResource`] when cores, a declared memory ask,
