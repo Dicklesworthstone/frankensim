@@ -618,8 +618,10 @@ mod tests {
 
     #[test]
     fn tensor_extents_fail_closed_before_wrapping() {
-        let lattice = std::panic::catch_unwind(|| TensorSpace::new(usize::MAX, 1))
-            .expect_err("lattice extent must not wrap");
+        let lattice = match std::panic::catch_unwind(|| TensorSpace::new(usize::MAX, 1)) {
+            Ok(_) => panic!("lattice extent must not wrap"),
+            Err(payload) => payload,
+        };
         let lattice = lattice
             .downcast_ref::<&str>()
             .copied()
