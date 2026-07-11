@@ -268,7 +268,7 @@ impl<'a> StokesBlockDiag<'a> {
     pub fn new(sys: &'a StokesSystem, smooth_degree: usize) -> StokesBlockDiag<'a> {
         StokesBlockDiag {
             sys,
-            pmg: crate::PMultigrid::new(sys.space.m, sys.space.r, smooth_degree),
+            pmg: crate::PMultigrid::new(sys.space.m(), sys.space.r(), smooth_degree),
         }
     }
 }
