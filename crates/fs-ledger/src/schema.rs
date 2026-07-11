@@ -9,9 +9,10 @@
 //! incremental-blob API and multi-GiB fields must be stored as bounded-size
 //! chunk rows (CONTRACT.md documents the storage invariant).
 //!
-//! Migrations are versioned through `PRAGMA user_version`; every DDL batch is
-//! idempotent (`IF NOT EXISTS`) so a crash between DDL and the version bump
-//! re-applies harmlessly on the next open.
+//! Migrations are versioned through `PRAGMA user_version`; each version marker
+//! is committed in the same transaction as its DDL. The v2 recovery metadata
+//! also recognizes the exact columns an older build could commit before
+//! crashing ahead of its formerly separate version bump.
 
 /// The schema version this crate writes and reads.
 pub const SCHEMA_VERSION: i64 = 3;
@@ -153,8 +154,15 @@ pub const V1: &[&str] = &[
 ///
 /// `ADD COLUMN` keeps the defaults NON-NULL so every pre-v2 op lands on the
 /// main branch as a deterministic op — the correct reading of v1 history.
-/// The `INSERT ... WHERE NOT EXISTS` seed is idempotent (crash between DDL
-/// and the version bump re-applies harmlessly, like every batch here).
+/// The `INSERT ... WHERE NOT EXISTS` seed is idempotent. The two `ADD COLUMN`
+/// statements predate atomic version markers, so their exact definitions are
+/// also registered in [`RECOVERABLE_ADDED_COLUMNS`] for crash-window healing.
+pub(crate) const V2_ADD_BRANCH_COLUMN: &str =
+    "ALTER TABLE ops ADD COLUMN branch INTEGER NOT NULL DEFAULT 1";
+pub(crate) const V2_ADD_EXEC_MODE_COLUMN: &str =
+    "ALTER TABLE ops ADD COLUMN exec_mode TEXT NOT NULL DEFAULT 'deterministic'";
+
+/// Ordered v2 DDL batch.
 pub const V2: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS branches(
         id INTEGER PRIMARY KEY,
@@ -166,9 +174,45 @@ pub const V2: &[&str] = &[
     "INSERT INTO branches(id, name, parent, fork_op, created_at)
      SELECT 1, 'main', NULL, NULL, 0
      WHERE NOT EXISTS (SELECT 1 FROM branches WHERE id = 1)",
-    "ALTER TABLE ops ADD COLUMN branch INTEGER NOT NULL DEFAULT 1",
-    "ALTER TABLE ops ADD COLUMN exec_mode TEXT NOT NULL DEFAULT 'deterministic'",
+    V2_ADD_BRANCH_COLUMN,
+    V2_ADD_EXEC_MODE_COLUMN,
     "CREATE INDEX IF NOT EXISTS idx_ops_branch ON ops(branch)",
+];
+
+/// Exact metadata for a non-idempotent `ADD COLUMN` shipped before migration
+/// version markers became transactionally atomic.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RecoverableAddedColumn {
+    pub ddl: &'static str,
+    pub table: &'static str,
+    pub name: &'static str,
+    pub declared_type: &'static str,
+    pub not_null: bool,
+    pub default_sql: Option<&'static str>,
+    pub primary_key: bool,
+}
+
+/// Columns that may already exist while `user_version` still names the prior
+/// schema. Recovery skips an `ALTER` only after every declared property agrees.
+pub(crate) const RECOVERABLE_ADDED_COLUMNS: &[RecoverableAddedColumn] = &[
+    RecoverableAddedColumn {
+        ddl: V2_ADD_BRANCH_COLUMN,
+        table: "ops",
+        name: "branch",
+        declared_type: "INTEGER",
+        not_null: true,
+        default_sql: Some("1"),
+        primary_key: false,
+    },
+    RecoverableAddedColumn {
+        ddl: V2_ADD_EXEC_MODE_COLUMN,
+        table: "ops",
+        name: "exec_mode",
+        declared_type: "TEXT",
+        not_null: true,
+        default_sql: Some("'deterministic'"),
+        primary_key: false,
+    },
 ];
 
 /// Names of every table the v1 schema owns (used by lint and tests).

@@ -578,28 +578,114 @@ impl Ledger {
         }
         let start = usize::try_from(found).unwrap_or(usize::MAX);
         for (step, batch) in schema::MIGRATIONS.iter().enumerate().skip(start) {
+            let target = step + 1;
             self.conn
                 .begin_transaction()
                 .map_err(|e| sql_err("migrate: begin", &e))?;
-            for ddl in *batch {
-                if let Err(e) = self.conn.execute(ddl) {
-                    let _ = self.conn.rollback_transaction();
-                    return Err(LedgerError::Sql {
-                        context: format!("migrate to v{}", step + 1),
-                        detail: format!("{e} while executing: {}", ddl.get(..60).unwrap_or(ddl)),
-                    });
+            let migration = (|| {
+                for ddl in *batch {
+                    let already_applied = schema::RECOVERABLE_ADDED_COLUMNS
+                        .iter()
+                        .find(|column| column.ddl == *ddl)
+                        .map_or(Ok(false), |column| {
+                            self.recoverable_column_is_present(target, column)
+                        })?;
+                    if already_applied {
+                        continue;
+                    }
+                    self.conn.execute(ddl).map_err(|error| LedgerError::Sql {
+                        context: format!("migrate to v{target}"),
+                        detail: format!(
+                            "{error} while executing: {}",
+                            ddl.get(..60).unwrap_or(ddl)
+                        ),
+                    })?;
                 }
+                self.conn
+                    .execute(&format!("PRAGMA user_version = {target}"))
+                    .map_err(|error| sql_err("migrate: set user_version", &error))?;
+                self.conn
+                    .commit_transaction()
+                    .map_err(|error| sql_err("migrate: commit", &error))
+            })();
+            if let Err(error) = migration {
+                let _ = self.conn.rollback_transaction();
+                return Err(error);
             }
-            self.conn
-                .commit_transaction()
-                .map_err(|e| sql_err("migrate: commit", &e))?;
-            // Version bump after commit: the DDL is idempotent, so a crash in
-            // this window re-applies harmlessly on the next open.
-            self.conn
-                .execute(&format!("PRAGMA user_version = {}", step + 1))
-                .map_err(|e| sql_err("migrate: set user_version", &e))?;
         }
         Ok(())
+    }
+
+    fn recoverable_column_is_present(
+        &self,
+        target: usize,
+        expected: &schema::RecoverableAddedColumn,
+    ) -> Result<bool, LedgerError> {
+        let rows = self
+            .conn
+            .query(&format!("PRAGMA table_info({})", expected.table))
+            .map_err(|error| sql_err("migrate: inspect recoverable column", &error))?;
+        for row in &rows {
+            let name = match row.get(1) {
+                Some(SqliteValue::Text(value)) => value.as_str(),
+                other => {
+                    return Err(LedgerError::Sql {
+                        context: format!("migrate to v{target}"),
+                        detail: format!(
+                            "PRAGMA table_info({}) returned a non-TEXT column name: {other:?}",
+                            expected.table
+                        ),
+                    });
+                }
+            };
+            if name != expected.name {
+                continue;
+            }
+            let declared_type = match row.get(2) {
+                Some(SqliteValue::Text(value)) => value.as_str(),
+                other => {
+                    return Err(LedgerError::Sql {
+                        context: format!("migrate to v{target}"),
+                        detail: format!(
+                            "recoverable column {}.{} has non-TEXT declared type {other:?}",
+                            expected.table, expected.name
+                        ),
+                    });
+                }
+            };
+            let not_null = row_i64(row, 3, "migrate: inspect column not-null")? != 0;
+            let default_sql = match row.get(4) {
+                Some(SqliteValue::Null) => None,
+                Some(SqliteValue::Text(value)) => Some(value.as_str()),
+                other => {
+                    return Err(LedgerError::Sql {
+                        context: format!("migrate to v{target}"),
+                        detail: format!(
+                            "recoverable column {}.{} has invalid default metadata {other:?}",
+                            expected.table, expected.name
+                        ),
+                    });
+                }
+            };
+            let primary_key = row_i64(row, 5, "migrate: inspect column primary-key")? != 0;
+            if declared_type.eq_ignore_ascii_case(expected.declared_type)
+                && not_null == expected.not_null
+                && default_sql == expected.default_sql
+                && primary_key == expected.primary_key
+            {
+                return Ok(true);
+            }
+            return Err(LedgerError::Sql {
+                context: format!("migrate to v{target}"),
+                detail: format!(
+                    "existing column {}.{} does not match the recoverable migration definition: \
+                     type={declared_type:?}, not_null={not_null}, default={default_sql:?}, \
+                     primary_key={primary_key}",
+                    expected.table, expected.name
+                ),
+            });
+        }
+        Ok(false)
     }
 
     /// `json_valid` check through the same engine that enforces the schema
@@ -1205,6 +1291,35 @@ impl Ledger {
         }
     }
 
+    /// Whether the lineage DAG contains this exact role-qualified edge.
+    ///
+    /// This is the verifier-side companion to [`Ledger::link`]: callers can
+    /// prove that a content-addressed artifact was an input or output of the
+    /// claimed operation without scanning or reconstructing the whole DAG.
+    ///
+    /// # Errors
+    /// Engine errors only. Missing operations, artifacts, or edges return
+    /// `Ok(false)`.
+    pub fn edge_exists(
+        &self,
+        op: i64,
+        artifact: &ContentHash,
+        role: EdgeRole,
+    ) -> Result<bool, LedgerError> {
+        let rows = self
+            .conn
+            .query_with_params(
+                "SELECT 1 FROM edges WHERE op = ?1 AND artifact = ?2 AND role = ?3 LIMIT 1",
+                &[
+                    SqliteValue::Integer(op),
+                    blob_param(artifact.as_bytes()),
+                    text_param(role.as_str()),
+                ],
+            )
+            .map_err(|error| sql_err("edge existence query", &error))?;
+        Ok(!rows.is_empty())
+    }
+
     // -- metrics, events, tune ---------------------------------------------
 
     /// Append one metric sample. `value` must be finite (REAL NOT NULL).
@@ -1334,6 +1449,40 @@ impl Ledger {
                 text_param(measured),
             ])
             .map_err(|e| sql_err("tune upsert", &e))?;
+        Ok(())
+    }
+
+    /// Insert one autotuner row only when its exact storage key is absent.
+    /// Existing rows are never modified. Callers that require idempotent exact
+    /// identity should fetch and compare after this call.
+    ///
+    /// # Errors
+    /// [`LedgerError::Invalid`] for malformed JSON; engine errors otherwise.
+    pub fn tune_put_if_absent(
+        &self,
+        kernel: &str,
+        shape_class: &str,
+        machine: &[u8],
+        params: &str,
+        measured: &str,
+    ) -> Result<(), LedgerError> {
+        self.require_json("params", params, false)?;
+        self.require_json("measured", measured, false)?;
+        self.conn
+            .prepare(
+                "INSERT INTO tune(kernel, shape_class, machine, params, measured) \
+                 VALUES (?1, ?2, ?3, ?4, ?5) \
+                 ON CONFLICT(kernel, shape_class, machine) DO NOTHING",
+            )
+            .map_err(|e| sql_err("tune insert-if-absent prepare", &e))?
+            .execute_with_params(&[
+                text_param(kernel),
+                text_param(shape_class),
+                blob_param(machine),
+                text_param(params),
+                text_param(measured),
+            ])
+            .map_err(|e| sql_err("tune insert-if-absent", &e))?;
         Ok(())
     }
 
@@ -1821,6 +1970,9 @@ mod tests {
         assert_eq!(err.code(), "LedgerInvalid");
         let real = l.put_artifact("blob", b"real", None).unwrap();
         l.link(op, &real.hash, EdgeRole::Out).unwrap();
+        assert!(l.edge_exists(op, &real.hash, EdgeRole::Out).unwrap());
+        assert!(!l.edge_exists(op, &real.hash, EdgeRole::In).unwrap());
+        assert!(!l.edge_exists(op + 1, &real.hash, EdgeRole::Out).unwrap());
         assert_eq!(l.table_count("edges").unwrap(), 1);
     }
 
@@ -1878,6 +2030,57 @@ mod tests {
         let row = l.tune_get("gemm", "f64-512", b"m1").unwrap().unwrap();
         assert_eq!(row.params, r#"{"mc":384}"#);
         assert!(l.tune_get("gemm", "f64-512", b"m2").unwrap().is_none());
+    }
+
+    #[test]
+    fn tune_insert_if_absent_preserves_conflicts_and_transactions() {
+        let l = mem();
+        let original_params = r#"{"mc":256}"#;
+        let original_measured = r#"{"gflops":100}"#;
+        l.tune_put_if_absent("gemm", "f64-512", b"m1", original_params, original_measured)
+            .expect("insert absent row");
+        l.tune_put_if_absent("gemm", "f64-512", b"m1", original_params, original_measured)
+            .expect("identical insert is an idempotent no-op");
+        l.tune_put_if_absent(
+            "gemm",
+            "f64-512",
+            b"m1",
+            r#"{"mc":384}"#,
+            r#"{"gflops":120}"#,
+        )
+        .expect("conflicting insert is a non-overwriting no-op");
+        let retained = l
+            .tune_get("gemm", "f64-512", b"m1")
+            .expect("query")
+            .expect("retained row");
+        assert_eq!(retained.params, original_params);
+        assert_eq!(retained.measured, original_measured);
+        assert_eq!(l.table_count("tune").expect("count"), 1);
+
+        let malformed = l
+            .tune_put_if_absent("gemm", "bad-json", b"m1", "not-json", "{}")
+            .expect_err("malformed params must be refused");
+        assert_eq!(malformed.code(), "LedgerInvalid");
+        let malformed = l
+            .tune_put_if_absent("gemm", "bad-json", b"m1", "{}", "not-json")
+            .expect_err("malformed measured evidence must be refused");
+        assert_eq!(malformed.code(), "LedgerInvalid");
+        assert!(l.tune_get("gemm", "bad-json", b"m1").unwrap().is_none());
+
+        l.begin().expect("begin transaction");
+        l.tune_put_if_absent("gemm", "f64-1024", b"m1", "{}", "{}")
+            .expect("transactional insert");
+        assert!(
+            l.tune_get("gemm", "f64-1024", b"m1")
+                .expect("query in transaction")
+                .is_some()
+        );
+        l.rollback().expect("rollback transaction");
+        assert!(
+            l.tune_get("gemm", "f64-1024", b"m1")
+                .expect("query after rollback")
+                .is_none()
+        );
     }
 
     #[test]

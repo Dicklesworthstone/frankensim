@@ -7,7 +7,7 @@
 //! commit, empty repo) are structured.
 
 use fs_ledger::vcs::Vcs;
-use fs_ledger::{FiveExplicits, Ledger, OpOutcome, travel::ExecMode};
+use fs_ledger::{EdgeRole, FiveExplicits, Ledger, OpOutcome, travel::ExecMode};
 
 fn verdict(case: &str, detail: &str) {
     println!(
@@ -296,5 +296,135 @@ fn vc_005_gc_never_collects_live_branch_artifacts() {
     verdict(
         "vc-005",
         "GC collected only the unreferenced orphan; all 10 live-branch artifacts survive",
+    );
+}
+
+fn identity_op(
+    ledger: &Ledger,
+    mode: ExecMode,
+    seed: &[u8],
+    edge: Option<(EdgeRole, &[u8])>,
+) -> i64 {
+    let explicits = FiveExplicits { seed, ..EXPLICITS };
+    let op = ledger
+        .begin_op_on(1, mode, None, "{\"op\":\"identity\"}", &explicits, 1)
+        .expect("begin identity op");
+    if let Some((role, payload)) = edge {
+        let artifact = ledger
+            .put_artifact("identity", payload, None)
+            .expect("identity artifact");
+        ledger
+            .link(op, &artifact.hash, role)
+            .expect("identity edge");
+    }
+    ledger
+        .finish_op(op, OpOutcome::Ok, None, 2)
+        .expect("finish identity op");
+    op
+}
+
+#[test]
+fn vc_006_commit_identity_is_framed_role_qualified_and_mode_bound() {
+    let framed_a = Ledger::open(":memory:").expect("framed a");
+    let framed_b = Ledger::open(":memory:").expect("framed b");
+    let artifact_hash = fs_ledger::hash_bytes(b"edge-payload");
+    let op_a = identity_op(
+        &framed_a,
+        ExecMode::Deterministic,
+        b"seed",
+        Some((EdgeRole::Out, b"edge-payload")),
+    );
+    let mut boundary_alias_seed = b"seed".to_vec();
+    boundary_alias_seed.extend_from_slice(artifact_hash.as_bytes());
+    let op_b = identity_op(
+        &framed_b,
+        ExecMode::Deterministic,
+        &boundary_alias_seed,
+        None,
+    );
+    assert_ne!(
+        framed_a.commit_leaf(op_a).expect("framed leaf a"),
+        framed_b.commit_leaf(op_b).expect("framed leaf b"),
+        "seed/edge field boundaries must not alias"
+    );
+
+    let role_in = Ledger::open(":memory:").expect("role in");
+    let role_out = Ledger::open(":memory:").expect("role out");
+    let in_op = identity_op(
+        &role_in,
+        ExecMode::Deterministic,
+        b"seed",
+        Some((EdgeRole::In, b"same-artifact")),
+    );
+    let out_op = identity_op(
+        &role_out,
+        ExecMode::Deterministic,
+        b"seed",
+        Some((EdgeRole::Out, b"same-artifact")),
+    );
+    assert_ne!(
+        role_in.commit_leaf(in_op).expect("input leaf"),
+        role_out.commit_leaf(out_op).expect("output leaf"),
+        "edge role is semantic"
+    );
+
+    let deterministic = Ledger::open(":memory:").expect("deterministic");
+    let fast = Ledger::open(":memory:").expect("fast");
+    let deterministic_op = identity_op(&deterministic, ExecMode::Deterministic, b"seed", None);
+    let fast_op = identity_op(&fast, ExecMode::Fast, b"seed", None);
+    assert_ne!(
+        deterministic
+            .commit_leaf(deterministic_op)
+            .expect("deterministic leaf"),
+        fast.commit_leaf(fast_op).expect("fast leaf"),
+        "execution mode is semantic"
+    );
+    verdict(
+        "vc-006",
+        "commit identity separates frames, edge roles, and execution modes",
+    );
+}
+
+#[test]
+fn vc_007_checkout_is_exactly_the_frozen_commit_view() {
+    let (ledger, dir) = open_ledger("frozen-checkout");
+    let first_op = run_op(&ledger, 1, "{\"op\":\"first\"}", b"first", 10);
+    let mut vcs = Vcs::new();
+    let first_commit = vcs.commit(&ledger, 1).expect("first commit");
+
+    let late_link = ledger
+        .put_artifact("result", b"linked-after-commit", None)
+        .expect("late artifact");
+    ledger
+        .link(first_op, &late_link.hash, EdgeRole::Out)
+        .expect("late edge");
+    run_op(&ledger, 1, "{\"op\":\"future\"}", b"future", 20);
+
+    let frozen = vcs
+        .checkout(&ledger, &first_commit.root)
+        .expect("frozen checkout");
+    assert_eq!(frozen.ops.len(), 1, "post-commit op leaked into checkout");
+    assert_eq!(
+        frozen.artifacts,
+        vec![fs_ledger::hash_bytes(b"first")],
+        "post-commit op or late edge leaked a future artifact"
+    );
+
+    let in_flight = ledger
+        .begin_op_on(1, ExecMode::Deterministic, None, "{}", &EXPLICITS, 30)
+        .expect("begin in-flight op");
+    let error = vcs
+        .commit(&ledger, 1)
+        .expect_err("in-flight state cannot be frozen reproducibly");
+    assert!(
+        error
+            .to_string()
+            .contains(&format!("op {in_flight} is still in flight")),
+        "unexpected refusal: {error}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    verdict(
+        "vc-007",
+        "checkout excludes later ops and later edges; in-flight commits fail closed",
     );
 }

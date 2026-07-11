@@ -131,8 +131,9 @@ pub struct ReplayVerdict {
     pub deterministic_mismatches: Vec<ReplayMismatch>,
     /// Hash divergences on `fast` ops — allowed, reported.
     pub fast_divergences: Vec<ReplayMismatch>,
-    /// Set when the op sequences themselves disagree (different length,
-    /// ir/seed/mode mismatch) — the ledgers do not record the same study.
+    /// Set when the op sequences themselves disagree (different length or
+    /// any frozen operation-semantic mismatch) — the ledgers do not record
+    /// the same study.
     pub structure_mismatch: Option<String>,
 }
 
@@ -533,13 +534,35 @@ impl Ledger {
 
     /// Output artifact hashes of one op (edges with role `out`).
     fn op_output_hashes(&self, op: i64) -> Result<Vec<ContentHash>, LedgerError> {
+        self.op_edge_hashes(op, "out")
+    }
+
+    /// Input artifact hashes of one op (edges with role `in`).
+    fn op_input_hashes(&self, op: i64) -> Result<Vec<ContentHash>, LedgerError> {
+        self.op_edge_hashes(op, "in")
+    }
+
+    fn op_edge_hashes(&self, op: i64, role: &'static str) -> Result<Vec<ContentHash>, LedgerError> {
+        let (sql, context) = match role {
+            "in" => (
+                "SELECT artifact FROM edges WHERE op = ?1 AND role = 'in' ORDER BY artifact",
+                "op inputs",
+            ),
+            "out" => (
+                "SELECT artifact FROM edges WHERE op = ?1 AND role = 'out' ORDER BY artifact",
+                "op outputs",
+            ),
+            _ => {
+                return Err(LedgerError::Invalid {
+                    field: "edge.role".to_string(),
+                    problem: format!("unsupported internal edge role {role:?}"),
+                });
+            }
+        };
         let rows = self
             .conn
-            .query_with_params(
-                "SELECT artifact FROM edges WHERE op = ?1 AND role = 'out' ORDER BY artifact",
-                &[SqliteValue::Integer(op)],
-            )
-            .map_err(|e| sql_err("op outputs", &e))?;
+            .query_with_params(sql, &[SqliteValue::Integer(op)])
+            .map_err(|e| sql_err(context, &e))?;
         let mut out = Vec::with_capacity(rows.len());
         for row in &rows {
             match row.get(0) {
@@ -554,7 +577,7 @@ impl Ledger {
                 },
                 other => {
                     return Err(LedgerError::Sql {
-                        context: "op outputs".to_string(),
+                        context: context.to_string(),
                         detail: format!("artifact: expected BLOB, got {other:?}"),
                     });
                 }
@@ -717,9 +740,12 @@ impl Ledger {
     // -- replay audit ---------------------------------------------------------
 
     /// Compare this ledger's branch against another ledger's branch as a
-    /// replay: op sequences must agree structurally (ir, seed, exec mode,
+    /// replay: op sequences must agree semantically (IR, all frozen
+    /// explicits, execution mode, input lineage, outcome, and diagnostic,
     /// in order); `deterministic` ops must reproduce output hashes exactly;
-    /// `fast` divergences are reported without failing the audit.
+    /// `fast` divergences are reported without failing the audit. Row ids,
+    /// branch ids, sessions, and wall-clock timestamps are provenance
+    /// envelopes rather than study semantics and are deliberately excluded.
     ///
     /// # Errors
     /// [`LedgerError::NotFound`] for unknown branches; engine errors.
@@ -745,11 +771,51 @@ impl Ledger {
                 verdict.structure_mismatch = Some(format!("missing op row at position {position}"));
                 return Ok(verdict);
             };
-            let mode_a = self.op_exec_mode(ia)?;
-            if op_a.ir != op_b.ir || op_a.seed != op_b.seed || mode_a != other.op_exec_mode(ib)? {
+            let mode_a_raw = self.op_exec_mode(ia)?;
+            let mode_b_raw = other.op_exec_mode(ib)?;
+            let mode_a = ExecMode::parse(&mode_a_raw).ok_or_else(|| LedgerError::Corrupt {
+                hash_hex: String::new(),
+                detail: format!("op {ia}: invalid execution mode {mode_a_raw:?}"),
+            })?;
+            let mode_b = ExecMode::parse(&mode_b_raw).ok_or_else(|| LedgerError::Corrupt {
+                hash_hex: String::new(),
+                detail: format!("replay op {ib}: invalid execution mode {mode_b_raw:?}"),
+            })?;
+            let inputs_a = self.op_input_hashes(ia)?;
+            let inputs_b = other.op_input_hashes(ib)?;
+            let mut changed = Vec::new();
+            if op_a.ir != op_b.ir {
+                changed.push("ir");
+            }
+            if op_a.seed != op_b.seed {
+                changed.push("seed");
+            }
+            if op_a.versions != op_b.versions {
+                changed.push("versions");
+            }
+            if op_a.budget != op_b.budget {
+                changed.push("budget");
+            }
+            if op_a.capability != op_b.capability {
+                changed.push("capability");
+            }
+            if mode_a != mode_b {
+                changed.push("exec_mode");
+            }
+            if inputs_a != inputs_b {
+                changed.push("input_lineage");
+            }
+            if op_a.outcome != op_b.outcome {
+                changed.push("outcome");
+            }
+            if op_a.diag != op_b.diag {
+                changed.push("diag");
+            }
+            if !changed.is_empty() {
                 verdict.structure_mismatch = Some(format!(
-                    "op sequence diverges at position {position}: (ir, seed, exec_mode) differ \
-                     — the replay ran a different study"
+                    "op semantics diverge at position {position}: {} differ \
+                     — the replay ran a different study",
+                    changed.join(", ")
                 ));
                 return Ok(verdict);
             }
@@ -772,7 +838,7 @@ impl Ledger {
                     only_a: out_a.difference(&out_b).cloned().collect(),
                     only_b: out_b.difference(&out_a).cloned().collect(),
                 };
-                if mode_a == ExecMode::Fast.as_str() {
+                if mode_a == ExecMode::Fast {
                     verdict.fast_divergences.push(mismatch);
                 } else {
                     verdict.deterministic_mismatches.push(mismatch);
@@ -911,6 +977,71 @@ mod tests {
         receipt.hash
     }
 
+    #[derive(Clone, Copy)]
+    struct ReplayFixture<'a> {
+        session: Option<&'a [u8]>,
+        ir: &'a str,
+        seed: &'a [u8],
+        versions: &'a str,
+        budget: &'a str,
+        capability: &'a str,
+        mode: ExecMode,
+        input: &'a [u8],
+        outcome: OpOutcome,
+        diag: Option<&'a str>,
+        t: i64,
+    }
+
+    const REPLAY_FIXTURE: ReplayFixture<'static> = ReplayFixture {
+        session: Some(b"session-a"),
+        ir: "{\"op\":\"solve\"}",
+        seed: b"seed-a",
+        versions: "{\"solver\":1}",
+        budget: "{\"wall_ns\":10}",
+        capability: "{\"cores\":1}",
+        mode: ExecMode::Deterministic,
+        input: b"input-a",
+        outcome: OpOutcome::Ok,
+        diag: None,
+        t: 10,
+    };
+
+    fn replay_fixture(spec: ReplayFixture<'_>) -> Ledger {
+        let ledger = mem();
+        let explicits = FiveExplicits {
+            seed: spec.seed,
+            versions: spec.versions,
+            budget: spec.budget,
+            capability: spec.capability,
+        };
+        let op = ledger
+            .begin_op_on(
+                MAIN_BRANCH,
+                spec.mode,
+                spec.session,
+                spec.ir,
+                &explicits,
+                spec.t,
+            )
+            .expect("begin replay fixture");
+        let input = ledger
+            .put_artifact("fixture-input", spec.input, None)
+            .expect("put replay input");
+        ledger
+            .link(op, &input.hash, EdgeRole::In)
+            .expect("link replay input");
+        let output = ledger
+            .put_artifact("fixture-output", b"stable-output", None)
+            .expect("put replay output");
+        ledger
+            .link(op, &output.hash, EdgeRole::Out)
+            .expect("link replay output");
+        ledger
+            .finish_op(op, spec.outcome, spec.diag, spec.t + 1)
+            .expect("finish replay fixture");
+        ledger
+    }
+
     #[test]
     fn main_branch_exists_after_migration() {
         let l = mem();
@@ -958,6 +1089,108 @@ mod tests {
                 .code(),
             "LedgerNotFound"
         );
+    }
+
+    #[test]
+    fn replay_binds_every_operation_semantic_field() {
+        let original = replay_fixture(REPLAY_FIXTURE);
+        let mutations = [
+            (
+                "ir",
+                ReplayFixture {
+                    ir: "{\"op\":\"different\"}",
+                    ..REPLAY_FIXTURE
+                },
+            ),
+            (
+                "seed",
+                ReplayFixture {
+                    seed: b"seed-b",
+                    ..REPLAY_FIXTURE
+                },
+            ),
+            (
+                "versions",
+                ReplayFixture {
+                    versions: "{\"solver\":2}",
+                    ..REPLAY_FIXTURE
+                },
+            ),
+            (
+                "budget",
+                ReplayFixture {
+                    budget: "{\"wall_ns\":11}",
+                    ..REPLAY_FIXTURE
+                },
+            ),
+            (
+                "capability",
+                ReplayFixture {
+                    capability: "{\"cores\":2}",
+                    ..REPLAY_FIXTURE
+                },
+            ),
+            (
+                "exec_mode",
+                ReplayFixture {
+                    mode: ExecMode::Fast,
+                    ..REPLAY_FIXTURE
+                },
+            ),
+            (
+                "input_lineage",
+                ReplayFixture {
+                    input: b"input-b",
+                    ..REPLAY_FIXTURE
+                },
+            ),
+            (
+                "outcome",
+                ReplayFixture {
+                    outcome: OpOutcome::Error,
+                    ..REPLAY_FIXTURE
+                },
+            ),
+            (
+                "diag",
+                ReplayFixture {
+                    diag: Some("{\"code\":\"changed\"}"),
+                    ..REPLAY_FIXTURE
+                },
+            ),
+        ];
+        for (field, mutation) in mutations {
+            let replay = replay_fixture(mutation);
+            let verdict = original
+                .replay_verdict(MAIN_BRANCH, &replay, MAIN_BRANCH)
+                .expect("replay verdict");
+            assert!(
+                !verdict.is_replay_clean(),
+                "semantic mutation {field} passed replay"
+            );
+            assert!(
+                verdict
+                    .structure_mismatch
+                    .as_deref()
+                    .is_some_and(|message| message.contains(field)),
+                "semantic mutation {field} was not diagnosed: {verdict:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn replay_excludes_run_envelope_fields() {
+        let original = replay_fixture(REPLAY_FIXTURE);
+        let replay = replay_fixture(ReplayFixture {
+            session: Some(b"session-b"),
+            t: 99_000,
+            ..REPLAY_FIXTURE
+        });
+        let verdict = original
+            .replay_verdict(MAIN_BRANCH, &replay, MAIN_BRANCH)
+            .expect("replay verdict");
+        assert!(verdict.is_replay_clean(), "envelope drift: {verdict:?}");
+        assert_eq!(verdict.compared, 1);
     }
 
     #[test]

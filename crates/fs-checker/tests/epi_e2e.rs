@@ -167,7 +167,7 @@ fn epi_e2e_battery() {
         expires_day: 400,
         signature: Vec::new(),
     };
-    grant.signature = mac(&grant.signing_payload());
+    grant.signature = mac(&grant.signing_payload(IntervalOp::Hull));
     let waived = graph
         .derive_waived(
             "waived-upgrade",

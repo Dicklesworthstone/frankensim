@@ -44,6 +44,7 @@ fn signed_grant(
     name: &str,
     color: &Color,
     parent_hashes: Vec<fs_ledger::ContentHash>,
+    op: IntervalOp,
     expires_day: u32,
 ) -> WaiverGrant {
     let mut grant = WaiverGrant {
@@ -60,8 +61,37 @@ fn signed_grant(
         expires_day,
         signature: Vec::new(),
     };
-    grant.signature = test_mac(secret, &grant.signing_payload());
+    grant.signature = test_mac(secret, &grant.signing_payload(op));
     grant
+}
+
+fn test_hex(bytes: &[u8]) -> String {
+    use core::fmt::Write as _;
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
+fn decode_hex(hex: &str) -> Option<Vec<u8>> {
+    let (pairs, remainder) = hex.as_bytes().as_chunks::<2>();
+    if !remainder.is_empty() {
+        return None;
+    }
+    pairs
+        .iter()
+        .map(|pair| {
+            let digits = core::str::from_utf8(pair).ok()?;
+            u8::from_str_radix(digits, 16).ok()
+        })
+        .collect()
+}
+
+fn json_string_field<'a>(row: &'a str, key: &str) -> Option<&'a str> {
+    let marker = format!("\"{key}\":\"");
+    let value = row.get(row.find(&marker)? + marker.len()..)?;
+    value.get(..value.find('"')?)
 }
 use std::collections::BTreeMap;
 
@@ -431,6 +461,7 @@ fn col_004_waiver_in_provenance() {
         "release-metric",
         &claimed,
         lineage.clone(),
+        IntervalOp::Hull,
         400,
     );
     let id = g
@@ -455,7 +486,11 @@ fn col_004_waiver_in_provenance() {
     // Re-verifiable FROM the ledger: the stored grant's payload still
     // authenticates under the same verifier.
     let stored = node.grant.as_ref().unwrap();
-    assert!(verifier.verify(&stored.key_id, &stored.signing_payload(), &stored.signature));
+    assert!(verifier.verify(
+        &stored.key_id,
+        &stored.signing_payload(IntervalOp::Hull),
+        &stored.signature
+    ));
     // Provenance: the same write without the grant hashes differently.
     let (mut g2, d2) = fresh();
     let plain = g2
@@ -503,7 +538,7 @@ fn col_004_waiver_in_provenance() {
     // Replay to a different lineage.
     let mut wrong_lineage = grant.clone();
     wrong_lineage.parent_hashes = vec![];
-    wrong_lineage.signature = test_mac(0x5EC2E7, &wrong_lineage.signing_payload());
+    wrong_lineage.signature = test_mac(0x5EC2E7, &wrong_lineage.signing_payload(IntervalOp::Hull));
     assert_eq!(
         refusal(wrong_lineage, &verifier, 200),
         WaiverRejection::LineageMismatch
@@ -573,9 +608,13 @@ fn col_004_waiver_in_provenance() {
         "release-metric\ninjected",
         &claimed,
         lineage,
+        IntervalOp::Hull,
         400,
     );
-    assert_ne!(evil.signing_payload(), grant.signing_payload());
+    assert_ne!(
+        evil.signing_payload(IntervalOp::Hull),
+        grant.signing_payload(IntervalOp::Hull)
+    );
     // No-crypto no-claim: the in-tree default verifier refuses all.
     assert_eq!(
         refusal(grant, &NoWaiverVerifier, 200),
@@ -682,6 +721,301 @@ fn col_006b_bit_exact_color_identity() {
         first_graph.node(first_id).hash,
         second_graph.node(second_id).hash,
         "ledger identity must include the bit-exact color payload"
+    );
+}
+
+/// col-008 — an ordinary explicit claim must be the exact algebra result;
+/// equal rank is not permission to narrow intervals or invent a different
+/// lower-rank payload.
+#[test]
+fn col_008_ordinary_claim_must_equal_the_derived_color() {
+    let mut graph = ColorGraph::new();
+    let source_color = Color::Verified { lo: 0.0, hi: 1.0 };
+    let parent = graph.source("verified-source", source_color.clone());
+
+    let exact = graph.derive(
+        "exact-claim",
+        &[parent],
+        IntervalOp::Hull,
+        Some(source_color),
+        &BTreeMap::new(),
+        None,
+    );
+    assert!(
+        exact.is_ok(),
+        "the bit-exact derived color remains admissible"
+    );
+
+    let narrowed = graph.derive(
+        "narrowed-claim",
+        &[parent],
+        IntervalOp::Hull,
+        Some(Color::Verified { lo: 0.25, hi: 0.75 }),
+        &BTreeMap::new(),
+        None,
+    );
+    assert!(matches!(
+        narrowed,
+        Err(ColorWriteError::ClaimMismatch { .. })
+    ));
+
+    let invented_weakening = graph.derive(
+        "invented-weaker-claim",
+        &[parent],
+        IntervalOp::Hull,
+        Some(Color::Estimated {
+            estimator: "unsupported-relabel".to_string(),
+            dispersion: 0.0,
+        }),
+        &BTreeMap::new(),
+        None,
+    );
+    assert!(matches!(
+        invented_weakening,
+        Err(ColorWriteError::ClaimMismatch { .. })
+    ));
+
+    verdict(
+        "col-008",
+        true,
+        "ordinary derive admits only the exact canonical color; same-rank interval \
+         narrowing and unmodeled rank weakening both refuse",
+    );
+}
+
+/// col-009 — operation identity is part of both node provenance and signed
+/// waiver authority. Add and Mul cannot collide or reuse one grant.
+#[test]
+fn col_009_operation_identity_and_waivers_are_separated() {
+    let build = |op| {
+        let mut graph = ColorGraph::new();
+        let parent = graph.source("same-parent", Color::Verified { lo: 0.0, hi: 1.0 });
+        let node = graph
+            .derive(
+                "same-derived-node",
+                &[parent],
+                op,
+                None,
+                &BTreeMap::new(),
+                None,
+            )
+            .expect("single-parent derivation");
+        (graph.node(node).color.clone(), graph.node(node).hash)
+    };
+    let (add_color, add_hash) = build(IntervalOp::Add);
+    let (mul_color, mul_hash) = build(IntervalOp::Mul);
+    assert_eq!(
+        add_color, mul_color,
+        "the hash test needs equal color payloads"
+    );
+    assert_ne!(
+        add_hash, mul_hash,
+        "the operation must change node identity"
+    );
+
+    let secret = 0x5EC2E7;
+    let verifier = TestVerifier {
+        keys: KeyMap::from([("operation-key".to_string(), secret)]),
+    };
+    let mut graph = ColorGraph::new();
+    let parent = graph.source(
+        "estimated-parent",
+        Color::Estimated {
+            estimator: "rom".to_string(),
+            dispersion: 0.1,
+        },
+    );
+    let claimed = Color::Verified { lo: 0.0, hi: 1.0 };
+    let grant = signed_grant(
+        secret,
+        "operation-key",
+        "operation-bound-node",
+        &claimed,
+        vec![graph.node(parent).hash],
+        IntervalOp::Add,
+        400,
+    );
+    let wrong_operation = graph.derive_waived(
+        "operation-bound-node",
+        &[parent],
+        IntervalOp::Mul,
+        claimed.clone(),
+        &BTreeMap::new(),
+        grant.clone(),
+        &verifier,
+        200,
+    );
+    assert!(matches!(
+        wrong_operation,
+        Err(ColorWriteError::WaiverRefused {
+            rejection: WaiverRejection::BadSignature
+        })
+    ));
+    let authorized = graph
+        .derive_waived(
+            "operation-bound-node",
+            &[parent],
+            IntervalOp::Add,
+            claimed,
+            &BTreeMap::new(),
+            grant,
+            &verifier,
+            200,
+        )
+        .expect("the grant authorizes only Add");
+    assert_eq!(graph.node(authorized).operation, Some(IntervalOp::Add));
+
+    verdict(
+        "col-009",
+        true,
+        "v4 node identity separates equal-payload Add and Mul nodes; v3 grant \
+         signatures authorize exactly one operation",
+    );
+}
+
+/// col-010 — choosing the waived API is itself an authorization claim. A
+/// forged grant must refuse even when the claimed color needs no rank upgrade.
+#[test]
+fn col_010_no_upgrade_waiver_is_still_authenticated() {
+    let verifier = TestVerifier {
+        keys: KeyMap::from([("release-key".to_string(), 0xA11CE)]),
+    };
+    let mut graph = ColorGraph::new();
+    let claimed = Color::Verified { lo: 0.0, hi: 1.0 };
+    let parent = graph.source("verified-parent", claimed.clone());
+    let forged = signed_grant(
+        0xBAD,
+        "release-key",
+        "no-upgrade-node",
+        &claimed,
+        vec![graph.node(parent).hash],
+        IntervalOp::Hull,
+        400,
+    );
+    let result = graph.derive_waived(
+        "no-upgrade-node",
+        &[parent],
+        IntervalOp::Hull,
+        claimed,
+        &BTreeMap::new(),
+        forged,
+        &verifier,
+        200,
+    );
+    assert!(matches!(
+        result,
+        Err(ColorWriteError::WaiverRefused {
+            rejection: WaiverRejection::BadSignature
+        })
+    ));
+    assert_eq!(graph.nodes().len(), 1, "a refused grant writes no node");
+
+    verdict(
+        "col-010",
+        true,
+        "derive_waived authenticates every grant before writing, including exact \
+         no-upgrade claims",
+    );
+}
+
+/// col-011 — persisted rows carry the exact signed authorization material,
+/// allowing an independent verifier to replay the decision. Tampering either
+/// serialized payload or signature refuses.
+#[test]
+fn col_011_serialized_grant_reverifies_and_tamper_refuses() {
+    let secret = 0x51A1ED;
+    let verifier = TestVerifier {
+        keys: KeyMap::from([("persistence-key".to_string(), secret)]),
+    };
+    let mut graph = ColorGraph::new();
+    let parent = graph.source(
+        "persisted-parent",
+        Color::Estimated {
+            estimator: "surrogate".to_string(),
+            dispersion: 0.2,
+        },
+    );
+    let parent_hash = graph.node(parent).hash;
+    let claimed = Color::Verified { lo: -1.0, hi: 1.0 };
+    let grant = signed_grant(
+        secret,
+        "persistence-key",
+        "persisted-waiver",
+        &claimed,
+        vec![parent_hash],
+        IntervalOp::Add,
+        400,
+    );
+    let node = graph
+        .derive_waived(
+            "persisted-waiver",
+            &[parent],
+            IntervalOp::Add,
+            claimed.clone(),
+            &BTreeMap::new(),
+            grant,
+            &verifier,
+            200,
+        )
+        .expect("valid grant writes");
+    let row = graph
+        .rows()
+        .iter()
+        .find(|row| row.contains(&format!("\"node\":{node}")))
+        .expect("persisted color-write row");
+
+    let serialized_key = json_string_field(row, "key_id").expect("serialized key id");
+    let serialized_payload =
+        decode_hex(json_string_field(row, "signing_payload_hex").expect("serialized payload"))
+            .expect("payload hex");
+    let serialized_signature =
+        decode_hex(json_string_field(row, "signature_hex").expect("serialized signature"))
+            .expect("signature hex");
+    let stored_grant = graph.node(node).grant.as_ref().expect("stored grant");
+    assert_eq!(
+        serialized_payload,
+        stored_grant.signing_payload(IntervalOp::Add)
+    );
+    assert_ne!(
+        serialized_payload,
+        stored_grant.signing_payload(IntervalOp::Mul)
+    );
+    assert!(verifier.verify(serialized_key, &serialized_payload, &serialized_signature));
+    assert!(row.contains("\"schema_version\":2"));
+    assert!(row.contains("\"payload_version\":3"));
+    assert!(row.contains("\"operation\":\"add\""));
+    assert_eq!(
+        json_string_field(row, "node_name"),
+        Some("persisted-waiver")
+    );
+    let claimed_color_hex = test_hex(&claimed.canonical_bytes());
+    assert_eq!(
+        json_string_field(row, "claimed_color_hex"),
+        Some(claimed_color_hex.as_str())
+    );
+    assert!(row.contains(&parent_hash.to_hex()));
+    fs_ledger::Ledger::open(":memory:")
+        .expect("validation ledger")
+        .append_event(&fs_ledger::EventRow {
+            session: None,
+            t: 0,
+            kind: "serialized-color-grant",
+            payload: Some(row),
+        })
+        .expect("serialized grant row is strict JSON");
+
+    let mut tampered_payload = serialized_payload.clone();
+    tampered_payload[0] ^= 1;
+    assert!(!verifier.verify(serialized_key, &tampered_payload, &serialized_signature));
+    let mut tampered_signature = serialized_signature.clone();
+    tampered_signature[0] ^= 1;
+    assert!(!verifier.verify(serialized_key, &serialized_payload, &tampered_signature));
+
+    verdict(
+        "col-011",
+        true,
+        "schema-v2 rows persist the v3 payload, signature, node, canonical color, \
+         operation, and parent hashes; replay verifies and tampering refuses",
     );
 }
 

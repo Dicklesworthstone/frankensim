@@ -16,8 +16,11 @@ fine-grained event stream. Layer: L6 (HELM). Runtime deps: `std` + `fsqlite`.
 ## Public types and semantics
 
 - `Ledger` — one connection + the pragma contract (WAL, `synchronous=FULL`,
-  `busy_timeout`, enforced foreign keys) + versioned migrations
-  (`PRAGMA user_version`; idempotent DDL batches in `schema::MIGRATIONS`).
+  `busy_timeout`, enforced foreign keys) + versioned migrations. Each
+  `PRAGMA user_version` marker commits atomically with its DDL batch. Exact
+  column metadata heals the historical v2 crash window where both `ops`
+  columns were committed while the marker still named v1; incompatible
+  same-name columns fail closed.
 - `ContentHash`, `Blake3`, `hash_bytes` — in-house BLAKE3 (plain hash mode,
   32-byte output), pure safe Rust; artifact identity everywhere. The
   implementation is OWNED by the UTIL crate `fs-blake3` (bead 7uq9) and
@@ -31,10 +34,11 @@ fine-grained event stream. Layer: L6 (HELM). Runtime deps: `std` + `fsqlite`.
 - Ops/lineage: `begin_op` (validates the Five Explicits field-by-field;
   units travel inside the typed IR, the other four are mandatory columns),
   `finish_op` (exactly once; `ok|error|cancelled`), `op`, `link` (FK-checked
-  `in|out` edges).
+  `in|out` edges), `edge_exists` (exact role-qualified verifier query).
 - Streams: `record_metric` (finite REAL only), `append_event` /
   `append_events` (batched, atomic), `tune_put`/`tune_get` (upsert keyed
-  kernel × shape-class × machine fingerprint).
+  kernel × shape-class × machine fingerprint), and `tune_put_if_absent`
+  (insert-only conflict preservation for evidence-ledger adoption).
 - Rev S extension tables (sparse v0, uniform `(name UNIQUE, body JSON)`
   shape): `put_extension`/`get_extension` over `requirements`, `model_cards`,
   `evidence`, `scenarios`, `constraints`, `capability_probes`, `imports`,
@@ -48,8 +52,10 @@ fine-grained event stream. Layer: L6 (HELM). Runtime deps: `std` + `fsqlite`.
   recorded `ExecMode`), `at_time` (consistent views at arbitrary instants:
   outcomes not yet written are masked, unfinished ops' outputs invisible),
   `explain` (full causal trees, depth-limited, DAG-deduped, loud on orphan
-  inputs), `replay_verdict` (deterministic ops must reproduce output hashes
-  exactly; fast divergences reported without failing),
+  inputs), `replay_verdict` (IR, all frozen explicits, execution mode, input
+  lineage, outcome, and diagnostic must agree; deterministic ops must then
+  reproduce output hashes exactly; fast hash divergences are reported without
+  failing; row/branch/session/time envelopes are excluded),
   `gc_unreferenced_artifacts` (edge-less artifacts only; referenced
   artifacts are immortal).
 
@@ -76,13 +82,16 @@ valid STRICT SQL), and `artifacts` gains `len`/`chunk_count` +
 
 - `vcs` module (addendum Proposal 10 base verbs, bead lmp4.9): VERSION
   CONTROL FOR PHYSICS — commits/branches/checkout over Merkle roots,
-  free-riding on `travel`'s forkable worlds. A COMMIT is the binary
-  Merkle root of a branch's visible frozen ops (leaf = BLAKE3 of the
-  Five Explicits + outcome + diag + sorted linked-artifact hashes;
-  wall times and rowids EXCLUDED, so logically identical histories
-  produce identical roots across ledgers and runs); commits chain to
-  their branch predecessor and persist as `vcs-commit` events.
-  CHECKOUT materializes a committed view; `checkout_delta` returns the
+  free-riding on `travel`'s forkable worlds. A COMMIT drains first and is the
+  v2 domain-separated, length-framed Merkle root of a branch's visible frozen
+  ops (leaf = IR + Five Explicits + outcome + diagnostic + execution mode +
+  sorted role-qualified linked-artifact hashes; node/root domains and leaf
+  count are distinct; wall times, rowids, branch ids, and session envelopes
+  are EXCLUDED, so logically identical histories produce identical roots
+  across ledgers and runs); commits chain to their branch predecessor and
+  persist as `vcs-commit` events. CHECKOUT returns the exact in-session frozen
+  op/artifact view captured by that commit, so later ops and later links to an
+  old op cannot leak future artifacts; `checkout_delta` returns the
   symmetric-difference op frontier (the `perturb()`-style delta a
   recompute solver consumes — nearby checkouts cost |delta|, not
   |history|). `merge_views` splits base/only-A/only-B for the
@@ -100,19 +109,27 @@ nothing — `derive` refuses any upgrade claim regardless of annotation.
 The only path past a laundering refusal is `derive_waived` with a
 `WaiverGrant`: a versioned, length-prefixed canonical payload bound to
 the node name, exact parent provenance hashes (replay to another node
-or lineage fails), the claimed color, the color-upgrade scope, a
+or lineage fails), the exact `IntervalOp` (an Add grant cannot authorize
+Mul), the claimed color, the color-upgrade scope, a
 signer key id, and an expiry day — verified through the caller-
 supplied `WaiverVerifier` capability before any write. A grant carries and
-signs the full `Color::canonical_bytes` payload (signing encoding v2), not only
+signs the full `Color::canonical_bytes` payload (domain-separated signing
+encoding v3), not only
 the color rank name, so authorization for one interval, validity regime, or
 estimator payload cannot authorize another. The in-tree
 default is `NoWaiverVerifier` (refuses everything): no cryptographic
 capability ships in this crate, so promotion is impossible until a
 Franken-compliant signature verifier is wired in (the no-crypto
-no-claim). Node provenance hashes use a versioned length-prefixed encoding
-(v3), including the bit-exact canonical color bytes — the former v2 encoding
-used display-rounded color JSON and could alias distinct floating-point
-payloads. Refusals are structured
+no-claim). Authentication runs for EVERY `derive_waived` call, including a
+claim that does not upgrade rank; choosing the waived path can never turn an
+invalid signature into a provenance-bearing grant. Node provenance hashes use
+a domain-separated, versioned length-prefixed encoding (v4), including source
+versus derived status, the exact operation, and bit-exact canonical color bytes.
+The former v3 omitted the operation, and v2 used display-rounded color JSON.
+Color-write row schema v2 serializes the canonical v3 signing payload,
+signature, key id, node name, parent hashes, exact claimed-color bytes,
+operation, scope, and expiry so persisted authorization can be independently
+reverified rather than trusting an `authorized:true` assertion. Refusals are structured
 (`WaiverRejection`: scope/node/color/lineage mismatch, expiry, bad
 signature) and grants re-verify from the stored ledger node.
 
@@ -177,7 +194,12 @@ deterministic-failure / fast-divergence), explain() full-lineage
 reconstruction with loud orphan-input failure, at(t) monotone mid-sweep
 consistency, and a kill -9 battery during fork traffic. Unit tests in
 `src/lib.rs`, `src/hash.rs`, and `src/travel.rs` cover the API surface and
-edge cases.
+edge cases. `tests/vcs.rs` locks framed, role-qualified, mode-bound commit
+identity and proves checkout cannot expose later ops or later artifact links;
+in-flight commits are refused. The travel migration battery also reconstructs
+the old v2
+post-DDL/pre-version-marker crash state and proves reopen heals it without
+duplicating columns or losing v1 history.
 
 ## Speculation telemetry (bead lmp4.3, schema v3)
 
@@ -194,13 +216,17 @@ answers queries. The economics control loop lives in fs-verify
 color schema: derived nodes' colors are COMPUTED from their parents
 (with regime re-checks against the current execution state,
 auto-demoting validated parents whose regime the state has exited,
-demotion events logged); a claimed color that outranks the derivation
-REFUSES with the capping parents named (the laundering refusal, G3
-gauntlet-tested); the only override is a signed `Waiver` that appears
-in the ledger row AND participates in the node's provenance hash —
-it cannot be dropped without changing history. Rows are canonical
-JSON lines for the event stream. Note: this module adds fs-evidence
-as a runtime dependency (the colors are its types).
+demotion events logged). An ordinary explicit claim must equal the exact
+canonical derived color: equal rank alone is insufficient because it could
+narrow an interval, widen a validity regime, or shrink dispersion; unsupported
+rank weakening is likewise refused until a formal weakening relation exists.
+Claims that outrank the derivation REFUSE with the capping parents named (the
+laundering refusal, G3 gauntlet-tested). The only override is an authenticated
+`WaiverGrant`; its signed payload and annotation appear in the schema-v2 ledger
+row and participate in the operation-bound node provenance hash, so neither the
+operation nor grant can be dropped or substituted without changing history.
+Rows are canonical JSON lines for the event stream. Note: this module adds
+fs-evidence as a runtime dependency (the colors are its types).
 
 ## No-claim boundaries
 

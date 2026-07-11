@@ -101,6 +101,95 @@ fn tt_001_v1_database_migrates_to_v2_with_history_intact() {
 }
 
 #[test]
+fn tt_001b_v1_marker_with_committed_v2_ddl_recovers() {
+    let db = temp_db("migrate-v2-crash-window");
+    {
+        // Reproduce the old migrator's crash window exactly: v2 DDL committed,
+        // but the separately-written user_version marker remains at v1.
+        let raw = fsqlite::Connection::open(&db).expect("raw open");
+        for ddl in fs_ledger::schema::V1 {
+            raw.execute(ddl).expect("v1 ddl");
+        }
+        raw.execute(
+            "INSERT INTO ops(session, ir, seed, versions, budget, capability, t_start, \
+             t_end, outcome) VALUES (NULL, '{}', X'AB', '{}', '{}', '{}', 1, 2, 'ok')",
+        )
+        .expect("v1 op");
+        raw.execute("PRAGMA user_version = 1").expect("set v1");
+        raw.begin_transaction().expect("begin old v2 migration");
+        for ddl in fs_ledger::schema::V2 {
+            raw.execute(ddl).expect("old v2 ddl");
+        }
+        raw.commit_transaction().expect("commit old v2 ddl");
+        assert_eq!(
+            raw.query_row("PRAGMA user_version")
+                .expect("read stale marker")
+                .get(0),
+            Some(&fsqlite::SqliteValue::Integer(1))
+        );
+    }
+
+    let ledger = Ledger::open(&db).expect("reopen heals committed v2 ddl with stale marker");
+    assert_eq!(ledger.schema_version().expect("version"), SCHEMA_VERSION);
+    assert_eq!(ledger.visible_op_ids(MAIN_BRANCH, None).unwrap(), vec![1]);
+    assert_eq!(
+        ledger.branch(MAIN_BRANCH).unwrap().expect("main").name,
+        "main"
+    );
+    assert!(ledger.lint().unwrap().is_clean());
+    drop(ledger);
+    cleanup_db(&db);
+    verdict(
+        "tt-001b",
+        "stale v1 marker plus committed v2 columns heals without duplicate-column failure",
+    );
+}
+
+#[test]
+fn tt_001c_v1_marker_with_incompatible_v2_column_fails_closed() {
+    let db = temp_db("migrate-v2-incompatible-column");
+    {
+        let raw = fsqlite::Connection::open(&db).expect("raw open");
+        for ddl in fs_ledger::schema::V1 {
+            raw.execute(ddl).expect("v1 ddl");
+        }
+        raw.execute("ALTER TABLE ops ADD COLUMN branch INTEGER NOT NULL DEFAULT 2")
+            .expect("install incompatible branch column");
+        raw.execute("PRAGMA user_version = 1").expect("set v1");
+    }
+
+    let Err(error) = Ledger::open(&db) else {
+        panic!("incompatible same-name migration column must be refused");
+    };
+    assert_eq!(error.code(), "LedgerSql");
+    assert!(
+        error.to_string().contains("existing column ops.branch"),
+        "unexpected migration error: {error}"
+    );
+
+    // Refusal rolls back the attempted v2 batch and leaves the marker unchanged.
+    let raw = fsqlite::Connection::open(&db).expect("reopen refused database");
+    assert_eq!(
+        raw.query_row("PRAGMA user_version")
+            .expect("read marker after refusal")
+            .get(0),
+        Some(&fsqlite::SqliteValue::Integer(1))
+    );
+    assert!(
+        raw.query("PRAGMA table_info(branches)")
+            .expect("inspect rolled-back v2 table")
+            .is_empty(),
+        "failed migration must not leave the v2 branches table behind"
+    );
+    drop(raw);
+    cleanup_db(&db);
+    verdict(
+        "tt-001c",
+        "incompatible same-name v2 column is refused and the batch rolls back",
+    );
+}
+
+#[test]
 fn tt_002_forks_share_artifacts_storage_audit() {
     let db = temp_db("forks");
     let l = Ledger::open(&db).expect("open");
