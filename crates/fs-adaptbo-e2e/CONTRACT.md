@@ -1,7 +1,7 @@
 # CONTRACT: fs-adaptbo-e2e
 
-AnytimeBO — Bayesian optimization that provably knows when to stop. Layer L4
-(ASCENT).
+AnytimeBO — Bayesian optimization with anytime-valid evidence against a
+declared stall-rate null. Layer L4 (ASCENT).
 
 ## Purpose and layer
 
@@ -21,17 +21,23 @@ point downward.
 
 - CONVERGENCE: the loop finds the global well (`x ≈ 3`, value `≈ −0.45`), beating
   the shallower well.
-- ANYTIME-VALID STOP: the e-process stops the search when its log e-value crosses
-  `ln(1/α)` (Ville's threshold), so peeking after every iteration keeps the
-  false-stop rate `≤ α`. `stopped_early` ⇒ `Verified` stop color; the GP
-  surrogate is `Estimated`.
-- A shrinking anytime-valid interval on the best-value trace is always reported.
+- ANYTIME-VALID STALL DECISION: the e-process stops the search when its log
+  e-value crosses `ln(1/α)` (Ville's threshold), so peeking after every
+  iteration keeps type-I error `≤ α` under the declared conditional stall-rate
+  null. The report carries that e-value as a statistical certificate candidate.
+- The observed incumbent and GP surrogate remain `Estimated`; neither the
+  e-process decision nor the running trace diagnostic is a certified enclosure
+  of the global optimum.
+- A shrinking mixture-boundary trace diagnostic is always reported, with no
+  fixed-mean coverage claim for the adaptive incumbent sequence.
 - With an impossibly small `delta`, no step stalls and the search runs to the cap.
 - Deterministic (fixed grid + polynomial objective; no RNG, no libm).
 
 ## Error model
 
 Total on the default grid; a singular GP fit (`try_fit → None`) ends the loop.
+Malformed statistical controls and iteration counts above 64 panic before
+work begins.
 
 ## Determinism class
 
@@ -51,12 +57,15 @@ None.
 
 ## Conformance tests
 
-`tests/adaptbo.rs` (3): BO converges and stops with an anytime-valid certificate
-(log-e past the Ville threshold); a tiny delta never declares a stall;
-determinism.
+`tests/adaptbo.rs`: BO converges and stops with an anytime-valid e-value
+candidate (log-e past the Ville threshold); the incumbent stays Estimated; a
+tiny delta never declares a stall; determinism; malformed/unbounded controls
+refuse before work.
 
 ## No-claim boundaries
 
 1-D grid acquisition (not a continuous inner optimizer); the stall indicator is a
 binary improvement test; the confidence sequence uses a fixed sub-Gaussian σ.
-Multi-fidelity / TuRBO acquisition are `fs-bo`'s fuller deliverables.
+The trace CS is not a global-optimum confidence interval, and rejecting the
+stall null is not a convergence proof. Multi-fidelity / TuRBO acquisition are
+`fs-bo`'s fuller deliverables.

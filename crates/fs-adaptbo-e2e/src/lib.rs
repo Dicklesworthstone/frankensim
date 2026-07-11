@@ -1,5 +1,5 @@
-//! fs-adaptbo-e2e — AnytimeBO: Bayesian optimization that provably knows when to
-//! stop. Layer: L4 (ASCENT).
+//! fs-adaptbo-e2e — AnytimeBO: Bayesian optimization with anytime-valid
+//! evidence for a declared stall-rate null. Layer: L4 (ASCENT).
 //!
 //! # The campaign
 //!
@@ -16,17 +16,21 @@
 //!   null is "we are still improving often enough"; when the e-value crosses
 //!   `1/α` the search stops — an ANYTIME-VALID decision (Ville's inequality), so
 //!   testing after every iteration never inflates the false-stop rate beyond `α`.
-//! - **A trace interval** ([`fs_eproc::GaussianMixtureCs`]): an anytime-valid
-//!   confidence sequence on the best-value trace (a running-mean diagnostic).
-//! - **Honest colors** ([`fs_evidence`]): the anytime stop is `Verified`; the GP
-//!   surrogate is `Estimated`.
+//! - **A trace diagnostic** ([`fs_eproc::GaussianMixtureCs`]): the mixture
+//!   boundary is evaluated on the adaptive best-value trace to visualize its
+//!   contraction. No fixed-mean coverage claim is made for that trace.
+//! - **Honest evidence** ([`fs_evidence`]): the stop carries an e-value candidate
+//!   for its declared statistical null; the observed incumbent and GP remain
+//!   `Estimated` and do not masquerade as global-optimum enclosures.
 //!
 //! Deterministic (a fixed grid, a polynomial objective — no RNG, no libm). No
 //! dependencies beyond the composed crates.
 
 use fs_bo::{Gp, Kernel, Matern, expected_improvement};
 use fs_eproc::{BettingEProcess, GaussianMixtureCs};
-use fs_evidence::Color;
+use fs_evidence::{Color, StatisticalCertificate};
+
+const MAX_CAMPAIGN_ITERS: usize = 64;
 
 /// The black-box objective: a tilted double well on `[0, 4]`, minimized near
 /// `x ≈ 3` (polynomial ⇒ bit-identical on every ISA).
@@ -55,8 +59,11 @@ pub struct AdaptBoReport {
     pub ci_center: f64,
     /// Its (shrinking) radius.
     pub ci_radius: f64,
-    /// The stopping color (`Verified` iff the anytime stop fired).
-    pub stop_color: Color,
+    /// Statistical evidence against the declared stall-rate null. This is a
+    /// certificate candidate, not an admitted numerical optimum enclosure.
+    pub stop_evidence: StatisticalCertificate,
+    /// Epistemic color of the observed incumbent value.
+    pub incumbent_color: Color,
     /// The surrogate color (`Estimated` — a GP).
     pub surrogate_color: Color,
 }
@@ -71,13 +78,26 @@ fn argmin(xs: &[f64], ys: &[f64]) -> (f64, f64) {
     (xs[bi], ys[bi])
 }
 
-/// Run the AnytimeBO campaign. Stops when the e-process rejects at `alpha` (the
-/// search has provably stalled) or after `max_iters` iterations.
+/// Run the AnytimeBO campaign. Stops when the e-process rejects the declared
+/// stall-rate null at `alpha`, or after `max_iters` iterations.
 ///
 /// # Panics
-/// Never on the default grid.
+/// If `max_iters` exceeds the bounded native work envelope, `delta` is not
+/// finite and non-negative, or `alpha` is outside `(0, 1)`.
 #[must_use]
 pub fn run_campaign(max_iters: usize, delta: f64, alpha: f64) -> AdaptBoReport {
+    assert!(
+        max_iters <= MAX_CAMPAIGN_ITERS,
+        "max_iters exceeds the bounded campaign envelope ({MAX_CAMPAIGN_ITERS})"
+    );
+    assert!(
+        delta.is_finite() && delta >= 0.0,
+        "improvement threshold must be finite and non-negative"
+    );
+    assert!(
+        alpha.is_finite() && alpha > 0.0 && alpha < 1.0,
+        "alpha must be finite and lie in (0,1)"
+    );
     // Candidate grid over [0, 4].
     let grid: Vec<f64> = (0..=80).map(|i| 4.0 * f64::from(i) / 80.0).collect();
     // Deterministic spread-out initial design.
@@ -132,17 +152,18 @@ pub fn run_campaign(max_iters: usize, delta: f64, alpha: f64) -> AdaptBoReport {
 
     let (best_x, best_value) = argmin_flat(&xs, &ys);
     let (ci_center, ci_radius) = cs.interval().unwrap_or((best_value, f64::INFINITY));
-    let stop_color = if stopped_early {
-        // The e-value gives an anytime-valid guarantee at level α.
-        Color::Verified {
-            lo: best_value,
-            hi: ci_center + ci_radius,
+    let stop_evidence = StatisticalCertificate::EValue {
+        e: eproc.e_value(),
+        alpha,
+    };
+    let incumbent_color = Color::Estimated {
+        estimator: if stopped_early {
+            "observed-incumbent-at-e-stopping-time"
+        } else {
+            "observed-incumbent-at-budget-end"
         }
-    } else {
-        Color::Estimated {
-            estimator: "budget-exhausted".to_string(),
-            dispersion: ci_radius,
-        }
+        .to_string(),
+        dispersion: ci_radius,
     };
 
     AdaptBoReport {
@@ -154,7 +175,8 @@ pub fn run_campaign(max_iters: usize, delta: f64, alpha: f64) -> AdaptBoReport {
         log_e_value: eproc.log_e_value(),
         ci_center,
         ci_radius,
-        stop_color,
+        stop_evidence,
+        incumbent_color,
         surrogate_color: Color::Estimated {
             estimator: "gp-matern52".to_string(),
             dispersion: ci_radius,

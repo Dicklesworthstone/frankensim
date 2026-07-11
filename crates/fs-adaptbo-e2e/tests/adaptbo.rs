@@ -2,7 +2,7 @@
 //! anytime-valid e-process certificate before exhausting its budget.
 
 use fs_adaptbo_e2e::{objective, run_campaign};
-use fs_evidence::Color;
+use fs_evidence::{Color, StatisticalCertificate};
 
 #[test]
 fn bo_converges_and_stops_with_an_anytime_valid_certificate() {
@@ -31,9 +31,14 @@ fn bo_converges_and_stops_with_an_anytime_valid_certificate() {
         "log-e {}",
         report.log_e_value
     );
-    assert!(matches!(report.stop_color, Color::Verified { .. }));
+    assert!(matches!(
+        report.stop_evidence,
+        StatisticalCertificate::EValue { e, alpha }
+            if e >= 1.0 / alpha && alpha.to_bits() == 0.05_f64.to_bits()
+    ));
+    assert!(matches!(report.incumbent_color, Color::Estimated { .. }));
     assert!(matches!(report.surrogate_color, Color::Estimated { .. }));
-    // an anytime-valid interval on the optimum is reported.
+    // A trace diagnostic is reported, not mislabeled as an optimum enclosure.
     assert!(report.ci_radius > 0.0 && report.ci_radius.is_finite());
     assert!(report.evaluations >= report.iterations + 3);
     println!(
@@ -65,4 +70,12 @@ fn the_campaign_is_deterministic() {
     assert_eq!(a.best_x.to_bits(), b.best_x.to_bits());
     assert_eq!(a.iterations, b.iterations);
     assert_eq!(a.log_e_value.to_bits(), b.log_e_value.to_bits());
+}
+
+#[test]
+fn malformed_or_unbounded_campaign_controls_are_refused() {
+    assert!(std::panic::catch_unwind(|| run_campaign(65, 0.02, 0.05)).is_err());
+    assert!(std::panic::catch_unwind(|| run_campaign(30, f64::NAN, 0.05)).is_err());
+    assert!(std::panic::catch_unwind(|| run_campaign(30, -0.1, 0.05)).is_err());
+    assert!(std::panic::catch_unwind(|| run_campaign(30, 0.02, 0.0)).is_err());
 }

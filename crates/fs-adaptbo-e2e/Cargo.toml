@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "AnytimeBO: Bayesian optimization that PROVABLY knows when to stop. A Gaussian-process/Expected-Improvement loop is monitored by a betting e-process testing 'are we still improving?'; when it rejects at level alpha the search halts with an ANYTIME-VALID guarantee — you may peek after every single iteration without inflating the false-stop rate, unlike fixed-budget or naive-threshold stopping. A Gaussian-mixture confidence sequence reports an anytime-valid interval on the optimum. Composes fs-bo (GP + EI) x fs-eproc (e-process + confidence sequence) x fs-evidence (Verified anytime stop vs Estimated surrogate). Groundbreaking: a stopping rule with a real guarantee under optional stopping."
+description = "AnytimeBO: Bayesian optimization with anytime-valid evidence against a declared stall-rate null. A Gaussian-process/Expected-Improvement loop is monitored by a betting e-process; peeking after each iteration preserves the null's type-I guarantee. The observed incumbent and GP remain estimated, and the trace diagnostic is not mislabeled as a global-optimum enclosure."
 
 [package.metadata.frankensim]
 layer = "L4"
