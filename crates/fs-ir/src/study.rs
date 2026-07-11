@@ -75,10 +75,25 @@ impl<'a> Study<'a> {
             match clause.head() {
                 Some("seed") => {
                     reject_duplicate_pillar("seed", clause, &mut seen_seed)?;
-                    study.seed = seed_value(clause);
+                    let values = clause.items().expect("a clause head implies a list");
+                    if values.len() != 2 {
+                        return Err(malformed_clause(
+                            clause,
+                            "seed pillar takes exactly one value",
+                            "write (seed 0x...) with no extra operands",
+                        ));
+                    }
+                    study.seed = Some(seed_value(clause).ok_or_else(|| {
+                        malformed_clause(
+                            clause,
+                            "seed pillar does not contain a non-negative u64 seed",
+                            "supply one hexadecimal seed such as (seed 0x5EED0001)",
+                        )
+                    })?);
                 }
                 Some("versions") => {
                     reject_duplicate_pillar("versions", clause, &mut seen_versions)?;
+                    validate_versions_clause(clause)?;
                     study.versions = Some(clause);
                 }
                 Some("budget") => {
@@ -91,6 +106,7 @@ impl<'a> Study<'a> {
                 }
                 Some("let") => {
                     if let Some(list) = clause.items()
+                        && list.len() == 3
                         && let (Some(sym), Some(expr)) = (list.get(1), list.get(2))
                         && let NodeKind::Symbol(s) = &sym.kind
                     {
@@ -139,6 +155,91 @@ impl<'a> Study<'a> {
         }
         None
     }
+}
+
+fn malformed_clause(clause: &Node, detail: &str, hint: &str) -> IrError {
+    IrError {
+        span: clause.span,
+        kind: IrErrorKind::MalformedClause,
+        detail: detail.to_string(),
+        hint: hint.to_string(),
+    }
+}
+
+fn validate_versions_clause(clause: &Node) -> Result<(), IrError> {
+    let items = clause.items().expect("a clause head implies a list");
+    let mut seen_constellation = false;
+    for entry in &items[1..] {
+        let Some(entry_items) = entry.items() else {
+            return Err(malformed_clause(
+                entry,
+                "version entries must be parenthesized clauses",
+                "write entries such as (constellation :lock \"2026-07\")",
+            ));
+        };
+        if entry.head().is_none() {
+            return Err(malformed_clause(
+                entry,
+                "version entries must have a symbolic name",
+                "remove the empty entry or name the versioned component",
+            ));
+        }
+        if entry_items.len() < 2 {
+            return Err(malformed_clause(
+                entry,
+                "version entry has no identity value",
+                "supply the version or content identity after the component name",
+            ));
+        }
+        if entry.head() != Some("constellation") {
+            continue;
+        }
+        if seen_constellation {
+            return Err(malformed_clause(
+                entry,
+                "duplicate constellation version entry is ambiguous",
+                "retain exactly one (constellation :lock ...) entry",
+            ));
+        }
+        seen_constellation = true;
+        let fields = &entry_items[1..];
+        if !fields.len().is_multiple_of(2) {
+            return Err(malformed_clause(
+                entry,
+                "constellation version fields must be exact keyword/value pairs",
+                "supply one value after every version keyword",
+            ));
+        }
+        let mut seen_lock = false;
+        for pair in fields.chunks_exact(2) {
+            let NodeKind::Keyword(field) = &pair[0].kind else {
+                return Err(malformed_clause(
+                    &pair[0],
+                    "constellation version field names must be keywords",
+                    "write the pin as :lock \"...\"",
+                ));
+            };
+            if field != "lock" {
+                continue;
+            }
+            if seen_lock {
+                return Err(malformed_clause(
+                    &pair[0],
+                    "duplicate constellation :lock field is ambiguous",
+                    "retain exactly one :lock field",
+                ));
+            }
+            seen_lock = true;
+            if !matches!(&pair[1].kind, NodeKind::Str(value) if !value.trim().is_empty()) {
+                return Err(malformed_clause(
+                    &pair[1],
+                    "constellation :lock must be a non-blank string",
+                    "supply the exact constellation lock identity",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn reject_duplicate_pillar(name: &str, clause: &Node, seen: &mut bool) -> Result<(), IrError> {

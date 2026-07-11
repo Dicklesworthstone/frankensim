@@ -241,14 +241,17 @@ fn ad_002b_resource_domains_and_explicit_capabilities_fail_closed() {
                 .contains("outside the study's explicit capability")
     }));
 
-    let overflowing_memory =
-        SELF_CONTAINED.replace(":mem 1GiB", &format!(":mem 1{}GiB", "0".repeat(300)));
+    let overflowing_memory = SELF_CONTAINED.replace(":mem 1GiB", ":mem 17179869184GiB");
     for malformed in [
         SELF_CONTAINED.replace(":cores 1", ":cores -1"),
         overflowing_memory,
         SELF_CONTAINED.replace(":mem 1GiB", ":mem 0.5B"),
         SELF_CONTAINED.replace(":wall 1h", ":wall 1kg"),
         SELF_CONTAINED.replace(":ops (flux.*)", ":ops ()"),
+        SELF_CONTAINED.replace(":ops (flux.*)", ":ops (flux*)"),
+        SELF_CONTAINED.replace(":ops (flux.*)", ":ops (*)"),
+        SELF_CONTAINED.replace(":ops (flux.*)", ":ops (flux.*) :gpu true"),
+        SELF_CONTAINED.replace(":ops (flux.*)", ":ops (flux.*) garbage"),
         SELF_CONTAINED.replace(
             "(capability :cores 1 :mem 1GiB :wall 1h :ops (flux.*))",
             "(capability :cores 1 :wall 1h :ops (flux.*) :mem)",
@@ -273,7 +276,10 @@ fn ad_002b_resource_domains_and_explicit_capabilities_fail_closed() {
     for malformed in [
         SELF_CONTAINED.replace("(mem 1GiB)", "(mem -1GiB)"),
         SELF_CONTAINED.replace("(budget (wall 10s) (mem 1GiB))", "(budget)"),
+        SELF_CONTAINED.replace("(budget (wall 10s) (mem 1GiB))", "(budget nonsense)"),
         SELF_CONTAINED.replace("(wall 10s)", "(wall)"),
+        SELF_CONTAINED.replace("(wall 10s)", "(wall 10s 20s)"),
+        SELF_CONTAINED.replace("(wall 10s)", "(custom-budget)"),
         SELF_CONTAINED.replace("(wall 10s)", "(wall 10s) (wall 20s)"),
     ] {
         let report = admit_src(&malformed, &no_token);
@@ -291,6 +297,17 @@ fn ad_002b_resource_domains_and_explicit_capabilities_fail_closed() {
             report.diagnosis()
         );
     }
+
+    let extensible_budget = SELF_CONTAINED.replace(
+        "(budget (wall 10s) (mem 1GiB))",
+        "(budget (custom-budget 3))",
+    );
+    let report = admit_src(&extensible_budget, &no_token);
+    assert!(
+        report.admitted,
+        "structured operator-specific budgets remain extensible:\n{}",
+        report.diagnosis()
+    );
 
     let token_only = SELF_CONTAINED.replace(
         "  (capability :cores 1 :mem 1GiB :wall 1h :ops (flux.*))\n",
@@ -321,6 +338,65 @@ fn ad_002b_resource_domains_and_explicit_capabilities_fail_closed() {
         "{}",
         report.diagnosis()
     );
+
+    let malformed_token = AdmissionContext {
+        router: None,
+        chart_requirements: Vec::new(),
+        cost_models: BTreeMap::new(),
+        capability: Some(SessionCapability {
+            ops: vec!["flux*".to_string()],
+            cores: 1.0,
+            mem_bytes: 0.5,
+            wall_s: 1.0,
+        }),
+        regime: None,
+        regime_policy: RegimePolicy::Warn,
+    };
+    let report = admit_src(&token_only, &malformed_token);
+    assert!(
+        !report.admitted
+            && report
+                .findings
+                .iter()
+                .filter(|finding| finding.check == "capability")
+                .count()
+                >= 2,
+        "fractional-byte and malformed-glob token admitted:\n{}",
+        report.diagnosis()
+    );
+
+    for malformed in [
+        SELF_CONTAINED.replace("(seed 0x5EED020B)", "(seed 0x5EED020B 0x5EED020C)"),
+        SELF_CONTAINED.replace(
+            "(versions (constellation :lock \"2026-07\"))",
+            "(versions (constellation :lock \"2026-07\" :lock \"2026-08\"))",
+        ),
+        SELF_CONTAINED.replace(
+            "(versions (constellation :lock \"2026-07\"))",
+            "(versions (constellation :lock \"2026-07\") \
+             (constellation :lock \"2026-08\"))",
+        ),
+        SELF_CONTAINED.replace(
+            "(versions (constellation :lock \"2026-07\"))",
+            "(versions (constellation :lock \" \"))",
+        ),
+        SELF_CONTAINED.replace(
+            "(versions (constellation :lock \"2026-07\"))",
+            "(versions garbage)",
+        ),
+        SELF_CONTAINED.replace("(flux.solve)", "(let value (flux.solve) extra)"),
+    ] {
+        let report = admit_src(&malformed, &no_token);
+        assert!(
+            !report.admitted
+                && report
+                    .findings
+                    .iter()
+                    .any(|finding| finding.check == "structure"),
+            "malformed study structure admitted:\n{}",
+            report.diagnosis()
+        );
+    }
 
     for ambiguous in [
         SELF_CONTAINED.replace("(seed 0x5EED020B)", "(seed 0x5EED020B) (seed 0x5EED020C)"),

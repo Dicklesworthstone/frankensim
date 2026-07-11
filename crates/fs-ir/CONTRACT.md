@@ -72,7 +72,11 @@ typed AST. Layer: L6 (HELM). Runtime deps: `std` + fs-qty.
   totals vs the `(budget (wall …))` bound, with RANKED cost-model-derived
   fixes: coarsen / surrogate-screen / relax), capability sufficiency
   (finite non-negative session grants, session-token and self-contained
-  explicit globs vs namespaced verbs, and finite declared asks), chart
+  explicit globs vs namespaced verbs, and finite declared asks). Capability
+  fields are exact keyword/value pairs; operator grants are exact names or
+  namespace wildcards of the form `foo.*`. Wall/memory budget clauses have
+  exact arity; structured operator-specific budget clauses remain extensible
+  until the catalog lands. Chart
   routability (fs-geom Router as an admission predicate with the
   RouteRefusal's own fixes attached), and regime gating (explicit
   `(assert (regime.allows …))` plus `flux.*` verbs checked against an
@@ -205,6 +209,9 @@ structured refusal).
   yet derive them from raw study text.
 - `SessionCapability` is admission's view of a token; issuance,
   revocation, and idempotency keys are fs-session's bead (gp3.7).
+  A self-contained `(capability ...)` clause supports static planning and
+  source-level admission only; it does not mint runtime authority. Plan §11.3's
+  session token remains mandatory before execution.
 - The query language is v0: a FIXED QoI menu (max/integral/exceedance), not
   a general program surface. `Query::admit` type-checks well-posedness and
   dimensions ONLY — it does NOT plan, cost, or execute a query (the greedy

@@ -442,6 +442,13 @@ fn valid_byte_count(bytes: f64, allow_zero: bool) -> bool {
         && bytes < U64_EXCLUSIVE_UPPER_BOUND
 }
 
+fn valid_projected_byte_grant(bytes: f64) -> bool {
+    // `CapabilityToken::to_admission` rounds u64::MAX to exactly 2^64.
+    // Equality is therefore a valid planning projection, not an exact ask.
+    const U64_PROJECTION_UPPER_BOUND: f64 = 18_446_744_073_709_551_616.0;
+    bytes.is_finite() && bytes >= 0.0 && bytes.fract() == 0.0 && bytes <= U64_PROJECTION_UPPER_BOUND
+}
+
 fn invalid_resource_value(
     check: &'static str,
     span: Span,
@@ -475,10 +482,37 @@ fn check_budget_resource_domains(study: &Study<'_>, out: &mut Vec<Finding>) {
 
     let mut seen = BTreeSet::new();
     for clause in &items[1..] {
-        let Some(resource) = clause.head() else {
+        let Some(values) = clause.items() else {
+            out.push(reject(
+                "budget",
+                clause.span,
+                "budget entries must be parenthesized clauses".to_string(),
+                "write entries such as (wall 10s), (mem 1GiB), or (qoi ...)".to_string(),
+            ));
             continue;
         };
+        let Some(resource) = clause.head() else {
+            out.push(reject(
+                "budget",
+                clause.span,
+                "budget entries must have a symbolic name and a value".to_string(),
+                "remove the empty entry or name its budget dimension".to_string(),
+            ));
+            continue;
+        };
+        if values.len() < 2 {
+            out.push(reject(
+                "budget",
+                clause.span,
+                format!("{resource} budget entry has no value"),
+                format!("supply a value in ({resource} ...)"),
+            ));
+            continue;
+        }
         if !matches!(resource, "wall" | "mem") {
+            // Operator-specific and QoI budgets remain extensible until the
+            // catalog lands, but they must still be named, structured clauses
+            // with at least one value.
             continue;
         }
         if !seen.insert(resource) {
@@ -490,7 +524,16 @@ fn check_budget_resource_domains(study: &Study<'_>, out: &mut Vec<Finding>) {
             ));
             continue;
         }
-        let value = clause.items().and_then(|values| values.get(1));
+        if values.len() != 2 {
+            out.push(reject(
+                "budget",
+                clause.span,
+                format!("{resource} budget takes exactly one value"),
+                format!("write ({resource} <value>) with no extra operands"),
+            ));
+            continue;
+        }
+        let value = values.get(1);
         match resource {
             "wall" => {
                 let seconds = value.and_then(qty_seconds);
@@ -673,6 +716,29 @@ fn glob_matches(pattern: &str, verb: &str) -> bool {
         .map_or(pattern == verb, |prefix| verb.starts_with(prefix))
 }
 
+fn valid_operator_pattern(pattern: &str) -> bool {
+    if pattern.trim() != pattern
+        || pattern.is_empty()
+        || pattern.starts_with('.')
+        || pattern.ends_with('.')
+        || pattern.contains("..")
+        || !pattern
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'*'))
+    {
+        return false;
+    }
+    match pattern.find('*') {
+        None => true,
+        Some(index) => {
+            index >= 2
+                && index + 1 == pattern.len()
+                && pattern[..index].ends_with('.')
+                && !pattern[..index - 1].contains('*')
+        }
+    }
+}
+
 fn glob_covers(grant: &str, requested: &str) -> bool {
     if let Some(requested_prefix) = requested.strip_suffix('*') {
         return grant
@@ -700,7 +766,6 @@ fn check_capability(study: &Study<'_>, cx: &AdmissionContext<'_>, out: &mut Vec<
     if let Some(token) = token {
         for (resource, value) in [
             ("session core grant", token.cores),
-            ("session memory grant", token.mem_bytes),
             ("session wall grant", token.wall_s),
         ] {
             if !value.is_finite() || value < 0.0 {
@@ -712,12 +777,24 @@ fn check_capability(study: &Study<'_>, cx: &AdmissionContext<'_>, out: &mut Vec<
                 ));
             }
         }
-        if token.ops.iter().any(|pattern| pattern.trim().is_empty()) {
+        if !valid_projected_byte_grant(token.mem_bytes) {
+            out.push(invalid_resource_value(
+                "capability",
+                Span::default(),
+                "session memory grant",
+                "a finite non-negative whole-byte projection no greater than 2^64",
+            ));
+        }
+        if token
+            .ops
+            .iter()
+            .any(|pattern| !valid_operator_pattern(pattern))
+        {
             out.push(reject(
                 "capability",
                 Span::default(),
-                "the session token contains a blank operator grant".to_string(),
-                "remove blank grants or replace them with explicit operator patterns".to_string(),
+                "the session token contains an invalid operator grant pattern".to_string(),
+                "use exact operator names or namespace wildcards such as flux.*".to_string(),
             ));
         }
     }
@@ -728,11 +805,34 @@ fn check_capability(study: &Study<'_>, cx: &AdmissionContext<'_>, out: &mut Vec<
         && let Some(items) = capability.items()
     {
         let mut seen = BTreeSet::new();
-        for (index, field_node) in items.iter().enumerate().skip(1) {
+        let fields = &items[1..];
+        if !fields.len().is_multiple_of(2) {
+            out.push(reject(
+                "capability",
+                capability.span,
+                "capability fields must be exact keyword/value pairs".to_string(),
+                "remove the dangling field or supply its value".to_string(),
+            ));
+        }
+        for pair in fields.chunks_exact(2) {
+            let field_node = &pair[0];
+            let value_node = &pair[1];
             let NodeKind::Keyword(field) = &field_node.kind else {
+                out.push(reject(
+                    "capability",
+                    field_node.span,
+                    "capability field names must be keywords".to_string(),
+                    "use :cores, :mem, :wall, or :ops before each value".to_string(),
+                ));
                 continue;
             };
             if !matches!(field.as_str(), "cores" | "mem" | "wall" | "ops") {
+                out.push(reject(
+                    "capability",
+                    field_node.span,
+                    format!("unknown capability field :{field}"),
+                    "use only :cores, :mem, :wall, and :ops".to_string(),
+                ));
                 continue;
             }
             declared_field_count += 1;
@@ -745,15 +845,6 @@ fn check_capability(study: &Study<'_>, cx: &AdmissionContext<'_>, out: &mut Vec<
                 ));
                 continue;
             }
-            let Some(value_node) = items.get(index + 1) else {
-                out.push(reject(
-                    "capability",
-                    field_node.span,
-                    format!(":{field} capability field has no value"),
-                    format!("supply a value immediately after :{field}"),
-                ));
-                continue;
-            };
             match field.as_str() {
                 "cores" => {
                     #[allow(clippy::cast_precision_loss)]
@@ -800,7 +891,7 @@ fn check_capability(study: &Study<'_>, cx: &AdmissionContext<'_>, out: &mut Vec<
                     NodeKind::List(nodes)
                         if !nodes.is_empty()
                             && nodes.iter().all(|node| {
-                                matches!(&node.kind, NodeKind::Symbol(pattern) if !pattern.trim().is_empty())
+                                matches!(&node.kind, NodeKind::Symbol(pattern) if valid_operator_pattern(pattern))
                             }) =>
                     {
                         declared_ops = Some(
@@ -816,8 +907,10 @@ fn check_capability(study: &Study<'_>, cx: &AdmissionContext<'_>, out: &mut Vec<
                     _ => out.push(reject(
                         "capability",
                         value_node.span,
-                        ":ops must be a non-empty list of operator patterns".to_string(),
-                        "declare operator grants such as :ops (flux.* ascent.*)".to_string(),
+                        ":ops must be a non-empty list of exact names or namespace wildcards"
+                            .to_string(),
+                        "declare operator grants such as :ops (flux.* ascent.optimize)"
+                            .to_string(),
                     )),
                 },
                 _ => unreachable!("capability field filtered above"),
