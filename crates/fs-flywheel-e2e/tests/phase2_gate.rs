@@ -9,8 +9,8 @@
 //!   the fixed mid-rung + uniform-refinement baseline by ≥2× cost at
 //!   equal certified accuracy (Proposal 8's kill criterion).
 //! - p2-003 EVIDENCE PACKAGE + THE AMENDED OPTIMIZATION CONTRACT: the
-//!   benchmarks ship as a signed, Merkle-rooted, machine-checkable
-//!   package (Proposal 12), and no optimization can run against an
+//!   benchmarks enter a fixture-authenticated, Merkle-rooted,
+//!   machine-checkable package (Proposal 12), and no optimization can run against an
 //!   un-colored objective (Proposal F). The EXTERNAL-audit engagement
 //!   is the one exit item that cannot be synthesized in-repo: its
 //!   status is ledgered honestly as pending.
@@ -307,26 +307,115 @@ fn p2_002_planner_beats_baseline_two_x() {
 
 #[test]
 fn p2_003_evidence_package_and_colored_objective_contract() {
-    // Proposal 12: the gate's own results ship as a signed,
-    // Merkle-rooted, machine-checkable evidence package.
-    let package = EvidencePackage::new(Provenance::new("phase2-gate", "Cargo.lock"))
-        .with_claim(Claim::from_certificate("adjoint-vs-dfo", "adjoint-driven optimization beats the DFO baseline on >=70% of the battery", 0.7, 1.0, "test-solver/cert", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"))
-        .with_claim(Claim::from_certificate("planner-vs-baseline", "the ladder planner beats the uniform baseline by >=2x at equal accuracy", 2.0, 10.0, "test-solver/cert", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"))
+    struct Phase2CertificateVerifier;
+    struct Phase2SignatureVerifier;
+
+    impl fs_checker::SourceCertificateVerifier for Phase2CertificateVerifier {
+        fn verify(
+            &self,
+            request: &fs_checker::SourceCertificateRequest<'_>,
+        ) -> fs_checker::VerificationDecision {
+            let subject_matches = match request.claim_index {
+                0 => {
+                    request.claim_id == "adjoint-vs-dfo"
+                        && request.statement
+                            == "adjoint-driven optimization beats the DFO baseline on >=70% of the battery"
+                        && request.lo.to_bits() == 0.7f64.to_bits()
+                        && request.hi.to_bits() == 1.0f64.to_bits()
+                }
+                1 => {
+                    request.claim_id == "planner-vs-baseline"
+                        && request.statement
+                            == "the ladder planner beats the uniform baseline by >=2x at equal accuracy"
+                        && request.lo.to_bits() == 2.0f64.to_bits()
+                        && request.hi.to_bits() == 10.0f64.to_bits()
+                }
+                _ => false,
+            };
+            let accepted = request.package_provenance.code_version == "phase2-gate"
+                && request.package_provenance.constellation_lock == "Cargo.lock"
+                && request.producer == "test-solver/cert"
+                && request.certificate_hash.to_hex()
+                    == "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                && subject_matches;
+            let fingerprint =
+                fs_ledger::hash_bytes(b"fs-flywheel-e2e:phase2-certificate-policy:v1");
+            if accepted {
+                fs_checker::VerificationDecision::accept(fingerprint)
+            } else {
+                fs_checker::VerificationDecision::reject(fingerprint)
+            }
+        }
+    }
+
+    impl fs_checker::SignatureVerifier for Phase2SignatureVerifier {
+        fn verify(
+            &self,
+            request: &fs_checker::SignatureRequest<'_>,
+        ) -> fs_checker::VerificationDecision {
+            let fingerprint = fs_ledger::hash_bytes(b"fs-flywheel-e2e:phase2-signature-policy:v1");
+            if request.signature == format!("phase2-gate:{}", request.subject_hash().to_hex())
+                && request.purpose == fs_checker::SignaturePurpose::PackageRootAttestation
+            {
+                fs_checker::VerificationDecision::accept(fingerprint)
+            } else {
+                fs_checker::VerificationDecision::reject(fingerprint)
+            }
+        }
+    }
+
+    // Proposal 12 integration fixture: the gate's declared results cross the
+    // typed certificate/signature capabilities into a Merkle-rooted package.
+    // The exact-match callbacks below are not external artifact or crypto proof.
+    let unsigned = EvidencePackage::new(Provenance::new("phase2-gate", "Cargo.lock"))
+        .with_claim(Claim::from_certificate(
+            "adjoint-vs-dfo",
+            "adjoint-driven optimization beats the DFO baseline on >=70% of the battery",
+            0.7,
+            1.0,
+            "test-solver/cert",
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        ))
+        .with_claim(Claim::from_certificate(
+            "planner-vs-baseline",
+            "the ladder planner beats the uniform baseline by >=2x at equal accuracy",
+            2.0,
+            10.0,
+            "test-solver/cert",
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        ))
         .with_claim(Claim::estimated(
             "external-audit",
             "HONEST STATUS: external auditor engagement is pending — the package format is \
-         machine-checkable and signed, but third-party review cannot be synthesized \
+         machine-checkable and supports authenticated signatures, but third-party review cannot be synthesized \
          in-repo",
             "self-report",
             1.0,
-        ))
-        .signed("phase2-gate");
+        ));
+    let unsigned_root = unsigned.try_merkle_root().expect("bounded fixture root");
+    let signature_subject = fs_checker::signature_subject_hash(
+        unsigned_root,
+        fs_checker::SignaturePurpose::PackageRootAttestation,
+    );
+    let package = unsigned.signed(format!("phase2-gate:{}", signature_subject.to_hex()));
     // Machine-checkable: the Merkle root is deterministic and the
     // color breakdown is honest (the audit claim is NOT verified).
-    let root_a = package.merkle_root();
-    let root_b = package.merkle_root();
+    let root_a = package.try_merkle_root().expect("bounded fixture root");
+    let root_b = package.try_merkle_root().expect("bounded fixture root");
     assert_eq!(root_a, root_b, "the package root is replayable");
-    let breakdown = package.color_breakdown();
+    let source_verifier = Phase2CertificateVerifier;
+    let signature_verifier = Phase2SignatureVerifier;
+    let capabilities = fs_checker::VerificationCapabilities::deny_all()
+        .with_source_certificates(&source_verifier)
+        .with_signatures(&signature_verifier);
+    let package_report = package
+        .verify_with(&capabilities)
+        .expect("benchmark certificates and root-bound signature authenticate");
+    assert!(matches!(
+        package_report.receipt().signature(),
+        fs_checker::SignatureStatus::Authenticated(_)
+    ));
+    let breakdown = *package_report.breakdown();
     println!(
         "{{\"metric\":\"evidence-package\",\"merkle_root\":\"{root_a}\",\
          \"breakdown\":{breakdown:?}}}"
@@ -347,8 +436,8 @@ fn p2_003_evidence_package_and_colored_objective_contract() {
     assert!(robust_optimum(&[colored], 0.2).is_ok());
     verdict(
         "p2-003",
-        "the gate's results ship as a signed Merkle-rooted evidence package with the \
-         external-audit status honestly Estimated-not-Verified; the amended optimization \
-         contract refuses un-colored objectives at the API layer",
+        "the gate's results cross a fixture-authenticated Merkle-rooted evidence package \
+         with the external-audit status honestly Estimated-not-Verified; the amended \
+         optimization contract refuses un-colored objectives at the API layer",
     );
 }

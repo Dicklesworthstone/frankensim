@@ -1,12 +1,13 @@
 //! EPISTEMIC-ENGINE ACCEPTANCE (bead xpck.8): the TOP-LEVEL runnable
-//! proof that the whole addendum works FOR A USER — a declarative
-//! query becomes a colored, priced, auditable answer that a third
-//! party re-verifies WITHOUT trusting the vendor. "The product is
-//! justified belief at minimum cost", executed.
+//! integration gate for the whole addendum — a declarative query becomes a
+//! colored, priced, auditable answer and crosses the solver-free checker's
+//! typed capability boundary. The in-test certificate and signature policies
+//! are deterministic fixtures, not vendor-independent scientific or
+//! cryptographic verification.
 //!
 //! The path: admission (typed, teaching refusals) → flywheel discharge
 //! (planner + cache) → anytime colored answer (+ the VoI-priced hint)
-//! → signed evidence package → SOLVER-FREE third-party re-check →
+//! → fixture-authenticated evidence package → SOLVER-FREE policy re-check →
 //! G5 whole-path replay → the laundering invariant at every hop.
 #![cfg(feature = "flywheel-e2e")]
 
@@ -14,6 +15,140 @@ use fs_evidence::{Color, IntervalOp, compose};
 use fs_ir::planner::{CostTable, MemCache, ProblemFamily};
 use fs_ir::{admission, sexpr};
 use fs_package::{Claim, EvidencePackage, Provenance};
+
+const CERTIFICATE_HASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+// These fixtures prove exact request binding, policy plumbing, and fail-closed
+// substitution behavior. They do not resolve retained certificate artifacts
+// or establish an independent trust root.
+
+struct ExactCertificate {
+    provenance: Provenance,
+    claim_index: usize,
+    claim_id: String,
+    statement: String,
+    lo: f64,
+    hi: f64,
+    producer: String,
+}
+
+impl ExactCertificate {
+    fn matches(&self, request: &fs_checker::SourceCertificateRequest<'_>) -> bool {
+        request.package_provenance == &self.provenance
+            && request.claim_index == self.claim_index
+            && request.claim_id == self.claim_id
+            && request.statement == self.statement
+            && request.lo.to_bits() == self.lo.to_bits()
+            && request.hi.to_bits() == self.hi.to_bits()
+            && request.producer == self.producer
+            && request.certificate_hash.to_hex() == CERTIFICATE_HASH
+    }
+}
+
+struct ExactCertificateVerifier(Vec<ExactCertificate>);
+
+impl ExactCertificateVerifier {
+    fn policy_fingerprint(&self) -> fs_checker::ContentHash {
+        fn push(bytes: &mut Vec<u8>, value: &[u8]) {
+            let len = u64::try_from(value.len()).expect("fixture field length fits u64");
+            bytes.extend_from_slice(&len.to_le_bytes());
+            bytes.extend_from_slice(value);
+        }
+
+        let mut bytes = b"fs-flywheel-e2e:exact-certificate-policy:v1".to_vec();
+        for certificate in &self.0 {
+            push(&mut bytes, certificate.provenance.code_version.as_bytes());
+            push(
+                &mut bytes,
+                certificate.provenance.constellation_lock.as_bytes(),
+            );
+            let claim_index =
+                u64::try_from(certificate.claim_index).expect("fixture claim index fits u64");
+            bytes.extend_from_slice(&claim_index.to_le_bytes());
+            push(&mut bytes, certificate.claim_id.as_bytes());
+            push(&mut bytes, certificate.statement.as_bytes());
+            bytes.extend_from_slice(&certificate.lo.to_bits().to_le_bytes());
+            bytes.extend_from_slice(&certificate.hi.to_bits().to_le_bytes());
+            push(&mut bytes, certificate.producer.as_bytes());
+            push(&mut bytes, CERTIFICATE_HASH.as_bytes());
+        }
+        fs_ledger::hash_bytes(&bytes)
+    }
+}
+
+impl fs_checker::SourceCertificateVerifier for ExactCertificateVerifier {
+    fn verify(
+        &self,
+        request: &fs_checker::SourceCertificateRequest<'_>,
+    ) -> fs_checker::VerificationDecision {
+        let fingerprint = self.policy_fingerprint();
+        if self
+            .0
+            .iter()
+            .any(|certificate| certificate.matches(request))
+        {
+            fs_checker::VerificationDecision::accept(fingerprint)
+        } else {
+            fs_checker::VerificationDecision::reject(fingerprint)
+        }
+    }
+}
+
+fn certificate_claim(
+    provenance: &Provenance,
+    claim_index: usize,
+    claim_id: impl Into<String>,
+    statement: impl Into<String>,
+    lo: f64,
+    hi: f64,
+    producer: impl Into<String>,
+) -> (Claim, ExactCertificate) {
+    let claim_id = claim_id.into();
+    let statement = statement.into();
+    let producer = producer.into();
+    let certificate = ExactCertificate {
+        provenance: provenance.clone(),
+        claim_index,
+        claim_id: claim_id.clone(),
+        statement: statement.clone(),
+        lo,
+        hi,
+        producer: producer.clone(),
+    };
+    let claim = Claim::from_certificate(claim_id, statement, lo, hi, producer, CERTIFICATE_HASH);
+    (claim, certificate)
+}
+
+struct ExactRootSignatureVerifier {
+    domain: &'static str,
+}
+
+impl fs_checker::SignatureVerifier for ExactRootSignatureVerifier {
+    fn verify(
+        &self,
+        request: &fs_checker::SignatureRequest<'_>,
+    ) -> fs_checker::VerificationDecision {
+        let fingerprint = fs_ledger::hash_bytes(
+            format!("fs-flywheel-e2e:signature-policy:v1:{}", self.domain).as_bytes(),
+        );
+        if request.signature == format!("{}:{}", self.domain, request.subject_hash().to_hex())
+            && request.purpose == fs_checker::SignaturePurpose::PackageRootAttestation
+        {
+            fs_checker::VerificationDecision::accept(fingerprint)
+        } else {
+            fs_checker::VerificationDecision::reject(fingerprint)
+        }
+    }
+}
+
+fn signed_fixture(package: EvidencePackage, domain: &'static str) -> EvidencePackage {
+    let root = package.try_merkle_root().expect("bounded fixture root");
+    let subject = fs_checker::signature_subject_hash(
+        root,
+        fs_checker::SignaturePurpose::PackageRootAttestation,
+    );
+    package.signed(format!("{domain}:{}", subject.to_hex()))
+}
 
 /// A deliberately corrupted content root (one byte flipped): the v4
 /// 32-byte replacement for the old `root ^ 0xdead` tamper idiom.
@@ -189,9 +324,9 @@ fn ac_002_flywheel_discharge_and_anytime_answer() {
 fn ac_003_package_recheck_solver_free_and_voi_hint() {
     use fs_ir::anytime::run_anytime;
     use fs_plan::voi::{LiveDecision, Probe, ProbeKind, UncertaintyNode, rank_purchases};
-    // Discharge the query, wrap the answer, and let the STANDALONE
-    // checker re-verify it — certificates, composition, and content
-    // address — with zero solver dependency.
+    // Discharge the query, wrap the answer, and exercise the STANDALONE
+    // checker's certificate-policy, composition, and content-address paths
+    // with zero solver dependency.
     let family = steep_family();
     let mut cache = MemCache::default();
     let mut costs = CostTable::new(200.0);
@@ -219,35 +354,69 @@ fn ac_003_package_recheck_solver_free_and_voi_hint() {
     }];
     let ranked = rank_purchases(&decision, &nodes, &menu, 32);
     let hint = fs_plan::voi::hint_for_query(&ranked);
-    // The package: colored claims, signed, Merkle-rooted.
-    let pkg = EvidencePackage::new(Provenance::new("acceptance-e2e", "Cargo.lock"))
-        .with_claim({
-            let Color::Verified { lo, hi } = last.color else {
-                panic!("the wedge trajectory ends verified");
-            };
-            Claim::from_certificate(
-                "wedge-qoi-interval",
-                format!("certified half-width {bound:.3e} at tol 6e-3"),
-                lo,
-                hi,
-                "fs-wedge/dwr-certifier",
-                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-            )
-        })
-        .with_claim(Claim::estimated("voi-hint", hint.clone(), "voi-myopic", 1.0))
-        .signed("acceptance-gate");
-    // THIRD-PARTY RE-VERIFICATION: fs-checker has no solver deps —
-    // it checks certificates, composition, signature, and the root.
-    let check = fs_checker::check(&pkg);
-    assert!(check.passed(), "the package re-verifies solver-free");
-    let root = pkg.merkle_root();
+    // The package: colored claims, fixture-authenticated, Merkle-rooted.
+    let Color::Verified { lo, hi } = last.color else {
+        panic!("the wedge trajectory ends verified");
+    };
+    let provenance = Provenance::new("acceptance-e2e", "Cargo.lock");
+    let (qoi_claim, qoi_certificate) = certificate_claim(
+        &provenance,
+        0,
+        "wedge-qoi-interval",
+        format!("certified half-width {bound:.3e} at tol 6e-3"),
+        lo,
+        hi,
+        "fs-wedge/dwr-certifier",
+    );
+    let pkg = signed_fixture(
+        EvidencePackage::new(provenance)
+            .with_claim(qoi_claim)
+            .with_claim(Claim::estimated(
+                "voi-hint",
+                hint.clone(),
+                "voi-myopic",
+                1.0,
+            )),
+        "acceptance-gate",
+    );
+    // SOLVER-FREE FIXTURE RE-CHECK: fs-checker exercises exact certificate,
+    // signature-policy, composition, and root bindings without solver deps.
+    let source_verifier = ExactCertificateVerifier(vec![qoi_certificate]);
+    let signature_verifier = ExactRootSignatureVerifier {
+        domain: "acceptance-gate",
+    };
+    let capabilities =
+        fs_checker::VerificationCapabilities::deny_all().with_source_certificates(&source_verifier);
+    let check =
+        fs_checker::check_with_capabilities(&pkg, None, Some(&signature_verifier), &capabilities);
     assert!(
-        fs_checker::check_against_root(&pkg, root).passed(),
+        check.passed(),
+        "the package passes the solver-free fixture policy"
+    );
+    assert!(matches!(
+        check.signature(),
+        fs_checker::SignatureStatus::Authenticated(_)
+    ));
+    let root = pkg.try_merkle_root().expect("bounded fixture root");
+    assert!(
+        fs_checker::check_with_capabilities(
+            &pkg,
+            Some(root),
+            Some(&signature_verifier),
+            &capabilities,
+        )
+        .passed(),
         "the content address matches"
     );
     assert!(
-        !fs_checker::check_against_root(&pkg, flip(root)).passed(),
-        "a tampered root FAILS the third-party check"
+        !fs_checker::check_with_capabilities(
+            &pkg,
+            Some(flip(root)),
+            Some(&signature_verifier),
+            &capabilities,
+        )
+        .passed(),
+        "a tampered root fails the independent checker code path"
     );
     let pie = check.render_pie();
     println!(
@@ -257,9 +426,9 @@ fn ac_003_package_recheck_solver_free_and_voi_hint() {
     );
     verdict(
         "ac-003",
-        "the colored answer ships as a signed Merkle-rooted package carrying its \
-         VoI-priced hint; the standalone checker re-verifies it solver-free and \
-         catches a tampered root",
+        "the colored answer enters a fixture-authenticated Merkle-rooted package carrying \
+         its VoI-priced hint; the standalone checker exercises solver-free capability \
+         binding and catches a tampered root",
     );
 }
 
@@ -284,8 +453,8 @@ fn ac_004_g5_whole_path_replay() {
             .iter()
             .map(|s| s.bound.to_bits())
             .collect();
-        let pkg = EvidencePackage::new(Provenance::new("acceptance-e2e", "Cargo.lock"))
-            .with_claim({
+        let pkg = signed_fixture(
+            EvidencePackage::new(Provenance::new("acceptance-e2e", "Cargo.lock")).with_claim({
                 let Color::Verified { lo, hi } =
                     report.trajectory.last().expect("step").color.clone()
                 else {
@@ -299,9 +468,10 @@ fn ac_004_g5_whole_path_replay() {
                     "fs-wedge/dwr-certifier",
                     "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
                 )
-            })
-            .signed("acceptance-gate");
-        (bits, pkg.merkle_root())
+            }),
+            "acceptance-gate/ac-004",
+        );
+        (bits, pkg.try_merkle_root().expect("bounded fixture root"))
     };
     let (bits_a, root_a) = run();
     let (bits_b, root_b) = run();
@@ -330,17 +500,32 @@ fn ac_005_laundering_invariant_across_the_path() {
     );
     // At the package layer the breakdown keeps them apart — an audit
     // sees exactly how much of the answer is estimated.
-    let pkg = EvidencePackage::new(Provenance::new("acceptance-e2e", "Cargo.lock"))
-        .with_claim(Claim::from_certificate(
-            "hard",
-            "certified part",
-            1.0,
-            1.1,
-            "test-solver/cert", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-        ))
-        .with_claim(Claim::estimated("soft", "estimated part", "dwr-guess", 0.1))
-        .signed("acceptance-gate");
-    let breakdown = pkg.color_breakdown();
+    let provenance = Provenance::new("acceptance-e2e", "Cargo.lock");
+    let (hard_claim, hard_certificate) = certificate_claim(
+        &provenance,
+        0,
+        "hard",
+        "certified part",
+        1.0,
+        1.1,
+        "test-solver/cert",
+    );
+    let pkg = signed_fixture(
+        EvidencePackage::new(provenance)
+            .with_claim(hard_claim)
+            .with_claim(Claim::estimated("soft", "estimated part", "dwr-guess", 0.1)),
+        "acceptance-gate/ac-005",
+    );
+    let source_verifier = ExactCertificateVerifier(vec![hard_certificate]);
+    let signature_verifier = ExactRootSignatureVerifier {
+        domain: "acceptance-gate/ac-005",
+    };
+    let capabilities = fs_checker::VerificationCapabilities::deny_all()
+        .with_source_certificates(&source_verifier)
+        .with_signatures(&signature_verifier);
+    let breakdown = pkg
+        .color_breakdown_with(&capabilities)
+        .expect("the exact source certificate authenticates");
     assert!(
         breakdown.verified == 1 && breakdown.estimated == 1,
         "the package cannot blur colors: {breakdown:?}"

@@ -74,3 +74,9 @@ tests/cal.rs — the tolerance-calibration probe behind the gate's
   multi-process swarm trial is the xpck.3 milestone's territory.
 - The G4 storm is a deterministic stage-boundary cancel model, not the
   base plan's thread-storm harness (fs-exec owns that).
+- Acceptance/phase-gate certificate verifiers match exact in-memory fixture
+  declarations, and their signature verifiers accept deterministic,
+  publicly-derivable test strings. They prove typed capability plumbing,
+  policy/request binding, color separation, and root-tamper refusal. They do
+  not resolve retained scientific artifacts, provide cryptographic
+  authentication, or establish vendor-independent third-party review.

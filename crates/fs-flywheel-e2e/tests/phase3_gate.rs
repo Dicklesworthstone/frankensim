@@ -1,12 +1,11 @@
 //! ADDENDUM PHASE 3 — HORIZON: the terminal roadmap gate (bead
 //! xpck.5). NOT a build gate but an ACTIVATION LEDGER: each horizon
 //! proposal's trigger measurement is INSTRUMENTED and its current
-//! verdict recorded in writing (the signed holding-pen package is the
+//! verdict recorded in writing (the fixture-authenticated holding-pen package is the
 //! quarterly-review artifact). Nothing opens as a broad program;
 //! radical systems die of breadth more often than of ambition (R10).
 #![cfg(feature = "flywheel-e2e")]
 
-use fs_evidence::Color;
 use fs_package::{Claim, EvidencePackage, Provenance};
 
 fn verdict(case: &str, detail: &str) {
@@ -138,6 +137,52 @@ fn p3_004_proposal_13b_prevalence_measurement() {
 #[test]
 fn p3_005_proposal_11_r8_gate_and_the_holding_pen() {
     use fs_asbuilt::{Fiducial, Point2, register, well_posed};
+
+    struct Phase3CertificateVerifier;
+    struct Phase3SignatureVerifier;
+
+    impl fs_checker::SourceCertificateVerifier for Phase3CertificateVerifier {
+        fn verify(
+            &self,
+            request: &fs_checker::SourceCertificateRequest<'_>,
+        ) -> fs_checker::VerificationDecision {
+            let accepted = request.package_provenance.code_version == "phase3-horizon"
+                && request.package_provenance.constellation_lock == "Cargo.lock"
+                && request.claim_index == 0
+                && request.claim_id == "A-abstraction-ladder"
+                && request.statement == "trigger FIRED: rb_coverage 1.0 >= 0.2 on the beachhead"
+                && request.lo.to_bits() == 0.2f64.to_bits()
+                && request.hi.to_bits() == 1.0f64.to_bits()
+                && request.producer == "test-solver/cert"
+                && request.certificate_hash.to_hex()
+                    == "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+            let fingerprint =
+                fs_ledger::hash_bytes(b"fs-flywheel-e2e:phase3-certificate-policy:v1");
+            if accepted {
+                fs_checker::VerificationDecision::accept(fingerprint)
+            } else {
+                fs_checker::VerificationDecision::reject(fingerprint)
+            }
+        }
+    }
+
+    impl fs_checker::SignatureVerifier for Phase3SignatureVerifier {
+        fn verify(
+            &self,
+            request: &fs_checker::SignatureRequest<'_>,
+        ) -> fs_checker::VerificationDecision {
+            let fingerprint = fs_ledger::hash_bytes(b"fs-flywheel-e2e:phase3-signature-policy:v1");
+            if request.signature
+                == format!("phase3-horizon-gate:{}", request.subject_hash().to_hex())
+                && request.purpose == fs_checker::SignaturePurpose::PackageRootAttestation
+            {
+                fs_checker::VerificationDecision::accept(fingerprint)
+            } else {
+                fs_checker::VerificationDecision::reject(fingerprint)
+            }
+        }
+    }
+
     // Proposal 11's R8 instrument: registration must be tighter than
     // the deviations being certified. GOOD fiducials pass...
     let good: Vec<Fiducial> = [(0.0, 0.0), (10.0, 0.0), (10.0, 8.0), (0.0, 8.0)]
@@ -172,34 +217,79 @@ fn p3_005_proposal_11_r8_gate_and_the_holding_pen() {
         !well_posed(&reg, 0.05),
         "sloppy registration cannot certify what it cannot resolve"
     );
-    // THE HOLDING PEN, IN WRITING: the five statuses as a signed
-    // package — the quarterly-review artifact a third party can check.
-    let pkg = EvidencePackage::new(Provenance::new("phase3-horizon", "Cargo.lock"))
-        .with_claim(Claim::from_certificate("A-abstraction-ladder", "trigger FIRED: rb_coverage 1.0 >= 0.2 on the beachhead", 0.2, 1.0, "test-solver/cert", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"))
-        .with_claim(Claim::estimated("C-value-of-information", "instrumented; scheduling authority awaits the prospective audit", "prospective-audit-pending".to_string(), 1.0))
-        .with_claim(Claim::estimated("4-spacetime-complex", "instrumented-but-uncontrolled; control gated on a splitting-dominated \
-             paying workload", "workload-demand-pending".to_string(), 1.0))
-        .with_claim(Claim::estimated("13b-symmetry-solver", "prevalence instrument live; dedicated solver waits for >=15% real-workload \
-             symmetry", "prevalence-pending".to_string(), 1.0))
-        .with_claim(Claim::estimated("11-reality-as-a-chart", "R8 instrument live (registration vs certified deviation); full-field \
+    // THE HOLDING PEN, IN WRITING: the five statuses enter a
+    // fixture-authenticated package. This proves checker integration and honest
+    // color separation, not an external review or cryptographic signature.
+    let unsigned = EvidencePackage::new(Provenance::new("phase3-horizon", "Cargo.lock"))
+        .with_claim(Claim::from_certificate(
+            "A-abstraction-ladder",
+            "trigger FIRED: rb_coverage 1.0 >= 0.2 on the beachhead",
+            0.2,
+            1.0,
+            "test-solver/cert",
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        ))
+        .with_claim(Claim::estimated(
+            "C-value-of-information",
+            "instrumented; scheduling authority awaits the prospective audit",
+            "prospective-audit-pending".to_string(),
+            1.0,
+        ))
+        .with_claim(Claim::estimated(
+            "4-spacetime-complex",
+            "instrumented-but-uncontrolled; control gated on a splitting-dominated \
+             paying workload",
+            "workload-demand-pending".to_string(),
+            1.0,
+        ))
+        .with_claim(Claim::estimated(
+            "13b-symmetry-solver",
+            "prevalence instrument live; dedicated solver waits for >=15% real-workload \
+             symmetry",
+            "prevalence-pending".to_string(),
+            1.0,
+        ))
+        .with_claim(Claim::estimated(
+            "11-reality-as-a-chart",
+            "R8 instrument live (registration vs certified deviation); full-field \
              activation awaits metrology partnerships — point-sensor assimilation \
-             ships meanwhile", "metrology-partnership-pending".to_string(), 1.0))
-        .signed("phase3-horizon-gate");
-    let check = fs_checker::check(&pkg);
+             ships meanwhile",
+            "metrology-partnership-pending".to_string(),
+            1.0,
+        ));
+    let root = unsigned.try_merkle_root().expect("bounded fixture root");
+    let signature_subject = fs_checker::signature_subject_hash(
+        root,
+        fs_checker::SignaturePurpose::PackageRootAttestation,
+    );
+    let pkg = unsigned.signed(format!(
+        "phase3-horizon-gate:{}",
+        signature_subject.to_hex()
+    ));
+    let source_verifier = Phase3CertificateVerifier;
+    let signature_verifier = Phase3SignatureVerifier;
+    let capabilities = fs_checker::VerificationCapabilities::deny_all()
+        .with_source_certificates(&source_verifier)
+        .with_signatures(&signature_verifier);
+    let check = fs_checker::check_with_capabilities(&pkg, None, None, &capabilities);
     assert!(check.passed(), "the holding-pen record re-verifies");
-    let breakdown = pkg.color_breakdown();
+    assert!(matches!(
+        check.signature(),
+        fs_checker::SignatureStatus::Authenticated(_)
+    ));
+    let breakdown = *check.breakdown();
     assert!(
         breakdown.verified == 1 && breakdown.estimated == 4,
         "exactly one trigger has fired; four wait honestly: {breakdown:?}"
     );
     println!(
         "{{\"metric\":\"horizon-ledger\",\"root\":\"{}\",\"fired\":1,\"waiting\":4}}",
-        pkg.merkle_root()
+        pkg.try_merkle_root().expect("bounded fixture root")
     );
     verdict(
         "p3-005",
         "Proposal 11's R8 instrument passes clean registration and fails sloppy; the \
-         five-proposal holding pen ships as a signed, checker-verified package — one \
-         trigger fired, four waiting, in writing",
+         five-proposal holding pen crosses the fixture checker policy with one trigger \
+         fired and four waiting, in writing",
     );
 }
