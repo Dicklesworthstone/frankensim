@@ -338,7 +338,48 @@ fn tan_is_sin_over_cos_bitwise() {
 }
 
 /// Recorded on aarch64-apple (M4 Pro); must match on x86-64 (trj).
-const GOLDEN_HASH: u64 = 0x5bbb_0256_67a9_0b70;
+#[test]
+fn hypot_budget_specials_and_symmetry() {
+    // Accuracy vs the platform-libm oracle. The ULP distance is scale-invariant
+    // (error is relative), so a moderate range exercises every ratio r = lo/hi.
+    let mut seed = 0x0011_9207_u64;
+    let mut worst = 0u64;
+    for _ in 0..200_000 {
+        let x = lcg(&mut seed) * 1e6;
+        let y = lcg(&mut seed) * 1e6;
+        let got = det::hypot(x, y);
+        let d = ulp_distance(got, x.hypot(y));
+        worst = worst.max(d);
+        assert!(
+            d <= det::HYPOT_ULP_BUDGET,
+            "hypot({x},{y}) off by {d} ULP vs libm"
+        );
+        // BITWISE symmetric and sign-independent.
+        assert_eq!(det::hypot(y, x).to_bits(), got.to_bits(), "hypot not symmetric");
+        assert_eq!(det::hypot(-x, y).to_bits(), got.to_bits(), "hypot sign-dependent");
+    }
+    // Exact Pythagorean triple: representable, must be EXACT (not just close).
+    assert_eq!(det::hypot(3.0, 4.0), 5.0);
+    assert_eq!(det::hypot(-3.0, 4.0), 5.0);
+    // Overflow / underflow safety: naive √(x²+y²) would overflow / underflow.
+    assert!(det::hypot(1e300, 1e300).is_finite());
+    assert!(det::hypot(1e-300, 1e-300) > 0.0);
+    // IEEE-754 special values (∞ dominates NaN).
+    assert_eq!(det::hypot(0.0, 0.0), 0.0);
+    assert_eq!(det::hypot(f64::INFINITY, f64::NAN), f64::INFINITY);
+    assert_eq!(det::hypot(f64::NAN, f64::NEG_INFINITY), f64::INFINITY);
+    assert!(det::hypot(f64::NAN, 1.0).is_nan());
+    assert!(det::hypot(1.0, f64::NAN).is_nan());
+    println!(
+        "{{\"suite\":\"fs-math\",\"case\":\"hypot\",\"verdict\":\"pass\",\"detail\":\"200k samples, worst {worst} ULP (budget {})\"}}",
+        det::HYPOT_ULP_BUDGET
+    );
+}
+
+// Bumped (additive) when det::hypot joined the extension family: hypot is
+// built from IEEE-exact ops only, so the new hash is cross-ISA-identical —
+// verified aarch64 (M4) == x86-64 (ts1).
+const GOLDEN_HASH: u64 = 0x54da_4c4a_6de6_a101;
 
 #[test]
 fn extensions_golden_hash() {
@@ -358,6 +399,7 @@ fn extensions_golden_hash() {
         feed(det::erf(x / 100.0));
         feed(det::erfc((x / 40.0).abs()));
         feed(det::pow((x / 900.0).abs() + 0.1, lcg(&mut seed) * 8.0));
+        feed(det::hypot(x, lcg(&mut seed) * 3.0));
     }
     println!(
         "{{\"suite\":\"fs-math\",\"case\":\"extensions-golden\",\"verdict\":\"info\",\"detail\":\"{acc:#018x}\"}}"

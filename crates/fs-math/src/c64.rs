@@ -43,19 +43,11 @@ impl C64 {
         }
     }
 
-    /// Magnitude, overflow/underflow-safe (max-scaled — no libm hypot).
+    /// Magnitude, overflow/underflow-safe (deterministic max-scaled hypot,
+    /// no platform libm — see [`det::hypot`]).
     #[must_use]
     pub fn abs(self) -> f64 {
-        let (a, b) = (self.re.abs(), self.im.abs());
-        let (hi, lo) = if a >= b { (a, b) } else { (b, a) };
-        if hi == 0.0 {
-            return 0.0;
-        }
-        if hi.is_infinite() {
-            return f64::INFINITY;
-        }
-        let r = lo / hi;
-        hi * det::sqrt(r.mul_add(r, 1.0))
+        det::hypot(self.re, self.im)
     }
 
     /// Squared magnitude (fused).

@@ -361,6 +361,36 @@ pub fn pow_ulp_budget(x: f64, y: f64) -> u64 {
     (3.0 * (t + 1.0) + 5.0) as u64
 }
 
+/// Declared ULP budget for [`hypot`]: the fused `1 + r²` and the final
+/// multiply each spend ≤ 1 ULP against libm's (near-correctly-rounded)
+/// hypot; measured worst 2 ULP over 200k samples.
+pub const HYPOT_ULP_BUDGET: u64 = 2;
+
+/// √(x² + y²) — overflow/underflow-safe and DETERMINISTIC by construction:
+/// max-scaling, a fused `1 + r²`, and the correctly-rounded hardware `sqrt`
+/// are all IEEE-exact ops, so this is bit-identical on every conforming
+/// target — UNLIKE `f64::hypot`, whose platform libm diverges across ISAs
+/// (measured: an FNV hash over 250k results differs aarch64 vs x86-64). Route
+/// any hypot that feeds solver state or cross-ISA golden bits through here.
+/// Symmetric BITWISE (`hypot(x, y) == hypot(y, x)`). Per IEEE-754,
+/// `hypot(±∞, y) = +∞` for EVERY `y` (including NaN); any other NaN input
+/// yields NaN.
+#[must_use]
+pub fn hypot(x: f64, y: f64) -> f64 {
+    // An infinite operand forces +∞ even against a NaN (IEEE-754), so it must
+    // be handled before the magnitude ordering — a NaN would poison the `>=`.
+    if x.is_infinite() || y.is_infinite() {
+        return f64::INFINITY;
+    }
+    let (a, b) = (x.abs(), y.abs());
+    let (hi, lo) = if a >= b { (a, b) } else { (b, a) };
+    if hi == 0.0 {
+        return 0.0;
+    }
+    let r = lo / hi;
+    hi * sqrt(r.mul_add(r, 1.0))
+}
+
 /// tan(x), deterministic strict mode; budget valid for |x| ≤
 /// [`TRIG_DOMAIN`]. Odd BITWISE by construction (shared symmetric
 /// reduction + odd/even cores). Pole neighborhoods return the honest
