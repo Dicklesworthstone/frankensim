@@ -18,7 +18,7 @@
 //! the pre/post axes must be admitted against the promoted baseline
 //! for this machine fingerprint or the lane FAILS with the receipt.
 
-use fs_fft::{C64, Fft, SIXSTEP_FULL_ARRAY_PASSES, SIXSTEP_PERFORMANCE_MODEL_VERSION};
+use fs_fft::{C64, Fft, FftNd, SIXSTEP_FULL_ARRAY_PASSES, SIXSTEP_PERFORMANCE_MODEL_VERSION};
 use fs_roofline::{
     AxisBaselinePolicy, BaselineIdentity, BaselineStore, KernelSpec, MachineAxes, RooflineKernel,
     TargetAxis, Threading, days_since_epoch_now, measure,
@@ -146,6 +146,70 @@ impl RooflineKernel for FftRoundTrip {
     }
 }
 
+/// N-D pooled roundtrip (bead 27d3): the executor-tiled pencil path,
+/// all axes parallel — measured against the ALL-CORE axes since the
+/// TilePool owns placement.
+struct FftNdRoundTrip {
+    dims: Vec<usize>,
+    plan: FftNd,
+    data: Vec<C64>,
+    pool: fs_exec::TilePool,
+    gate: fs_exec::CancelGate,
+}
+
+impl FftNdRoundTrip {
+    fn new(dims: &[usize], workers: usize) -> FftNdRoundTrip {
+        let plan = FftNd::new(dims);
+        let total = plan.total();
+        FftNdRoundTrip {
+            dims: dims.to_vec(),
+            plan,
+            data: (0..total)
+                .map(|i| {
+                    C64::new(
+                        ((i * 37) % 101) as f64 * 0.02 - 1.0,
+                        ((i * 53) % 97) as f64 * 0.02,
+                    )
+                })
+                .collect(),
+            pool: fs_exec::TilePool::new(fs_exec::PoolConfig::for_host(workers, 0xFD1D)),
+            gate: fs_exec::CancelGate::new(),
+        }
+    }
+}
+
+impl RooflineKernel for FftNdRoundTrip {
+    fn spec(&self) -> KernelSpec {
+        // Per axis pass: gather one C64 + scatter one C64 per element
+        // (32 B); a roundtrip runs every axis twice. Line/scratch
+        // traffic is cache-resident and deliberately uncounted — the
+        // model stays a lower bound on traffic, which keeps attainment
+        // honest (never inflated).
+        let axes_count = self.dims.len() as f64;
+        let bf: f64 = self.dims.iter().map(|&n| butterfly_stages(n)).sum();
+        KernelSpec {
+            name: "fftnd-roundtrip",
+            version: "27d3-nd1",
+            bytes_per_elem: 2.0 * 32.0 * axes_count,
+            flops_per_elem: 2.0 * 12.5 * bf + 2.0,
+            threading: Threading::AllCore,
+            target_axis: TargetAxis::BindingRoof,
+            target_fraction: Some(0.40),
+        }
+    }
+    fn elements(&self) -> usize {
+        self.plan.total()
+    }
+    fn run_once(&mut self) {
+        self.plan
+            .forward_pooled(&mut self.data, &self.pool, &self.gate)
+            .expect("pooled forward runs");
+        self.plan
+            .inverse_pooled(&mut self.data, &self.pool, &self.gate)
+            .expect("pooled inverse runs");
+    }
+}
+
 #[test]
 fn fused_sixstep_traffic_and_evidence_version_are_bound() {
     assert_eq!(SIXSTEP_FULL_ARRAY_PASSES, 2);
@@ -162,6 +226,28 @@ fn fused_sixstep_traffic_and_evidence_version_are_bound() {
         assert_eq!(spec.version, SIXSTEP_PERFORMANCE_MODEL_VERSION);
         assert_eq!(spec.bytes_per_elem.to_bits(), 160.0f64.to_bits());
     }
+}
+
+/// N-D pooled rows (bead 27d3): REPORT-ONLY for now — first
+/// measurements show per-axis-pass worker-spawn overhead dominating
+/// at these sizes (scoped threads spawn per pool.run, 4-6 axis passes
+/// per roundtrip), so a floor gate would assert an aspiration, not a
+/// settled claim. The gate flips on once persistent workers or strip
+/// batching land. Returns false when any row is environment-invalid.
+fn fftnd_report_rows(axes: &MachineAxes) -> bool {
+    let workers = std::thread::available_parallelism().map_or(8, std::num::NonZero::get);
+    let mut env_ok = true;
+    for dims in [vec![256usize, 256], vec![1024, 1024], vec![128, 128, 64]] {
+        let mut kern = FftNdRoundTrip::new(&dims, workers);
+        let att = measure(&mut kern, 1, 5, axes);
+        let receipt = att.to_jsonl();
+        println!(
+            "{{\"metric\":\"fftnd-roundtrip\",\"dims\":{dims:?},\"workers\":{workers},\
+             \"gated\":false,\"receipt\":{receipt}}}"
+        );
+        env_ok &= att.verdict != fs_roofline::Verdict::EnvironmentInvalid;
+    }
+    env_ok
 }
 
 #[test]
@@ -225,6 +311,7 @@ fn fft_attainment() {
             floor_ok &= att.attainment >= 0.15;
         }
     }
+    env_ok &= fftnd_report_rows(&axes);
     if !env_ok {
         println!(
             "{{\"metric\":\"fft-gate\",\"verdict\":\"environment_invalid\",             \"machine\":\"{}-{}\"}}",
