@@ -1543,12 +1543,7 @@ impl Ledger {
         })
     }
 
-    /// Metadata for one artifact, if present.
-    ///
-    /// # Errors
-    /// Engine errors or [`LedgerError::Corrupt`] when the stored envelope is
-    /// malformed or exceeds its materialization bounds; absence is `Ok(None)`.
-    pub fn artifact_info(&self, h: &ContentHash) -> Result<Option<ArtifactInfo>, LedgerError> {
+    fn artifact_envelope_is_bounded(&self, h: &ContentHash) -> Result<bool, LedgerError> {
         let preflight = self
             .conn
             .query_with_params(
@@ -1559,7 +1554,7 @@ impl Ledger {
             )
             .map_err(|e| sql_err("artifact_info envelope preflight", &e))?;
         let Some(preflight) = preflight.first() else {
-            return Ok(None);
+            return Ok(false);
         };
         let envelope_detail = (|| {
             let kind_type = match preflight.get(0) {
@@ -1604,7 +1599,18 @@ impl Ledger {
             hash_hex: h.to_hex(),
             detail,
         })?;
+        Ok(true)
+    }
 
+    /// Metadata for one artifact, if present.
+    ///
+    /// # Errors
+    /// Engine errors or [`LedgerError::Corrupt`] when the stored envelope is
+    /// malformed or exceeds its materialization bounds; absence is `Ok(None)`.
+    pub fn artifact_info(&self, h: &ContentHash) -> Result<Option<ArtifactInfo>, LedgerError> {
+        if !self.artifact_envelope_is_bounded(h)? {
+            return Ok(None);
+        }
         let rows = self
             .conn
             .query_with_params(
