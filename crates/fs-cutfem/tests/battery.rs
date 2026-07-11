@@ -394,14 +394,28 @@ fn cut_004_mms_orders_across_randomized_cuts() {
     };
     let med_l2 = median(&mut l2_orders);
     let med_h1 = median(&mut h1_orders);
-    let pass = med_l2 >= 1.8 && med_h1 >= 0.85 && worst_fine_l2 < 2e-3;
+    // The median alone can mask a SINGLE non-converging config — precisely the
+    // pathological sliver this test deliberately includes. The "(sliver
+    // included)" claim is only honest if EVERY config converges, so gate the
+    // WORST order too (median() sorts the order vecs ascending in place, so
+    // index 0 is the min). Floors are set to catch genuine non-convergence
+    // (order → 0..1) without being brittle to the 2-level estimate's noise;
+    // observed worst is ~2.16 L2 / ~1.04 H1 across all 7 configs.
+    let worst_l2_order = l2_orders[0];
+    let worst_h1_order = h1_orders[0];
+    let pass = med_l2 >= 1.8
+        && med_h1 >= 0.85
+        && worst_fine_l2 < 2e-3
+        && worst_l2_order >= 1.5
+        && worst_h1_order >= 0.8;
     verdict(
         "cut-004",
         pass,
         &format!(
             "\"detail\":\"MMS orders across 7 randomized cut configs (sliver included)\",\
              \"configs\":[{}],\"median_l2_order\":{med_l2:.2},\
-             \"median_h1_order\":{med_h1:.2},\"worst_fine_l2\":{worst_fine_l2:.3e}",
+             \"median_h1_order\":{med_h1:.2},\"worst_l2_order\":{worst_l2_order:.2},\
+             \"worst_h1_order\":{worst_h1_order:.2},\"worst_fine_l2\":{worst_fine_l2:.3e}",
             rows.trim_end_matches(',')
         ),
     );
