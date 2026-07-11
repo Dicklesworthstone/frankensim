@@ -1,0 +1,23 @@
+# FrankenSim cargo configuration.
+#
+# ## Deliberately NO global `-C target-feature=+fma` for x86-64.
+#
+# It is tempting to add it to fix the "libm-fma trap" (baseline-x86 `f64::mul_add`
+# lowers to a per-element libm `fma()` CALL, ~1 GFLOP/s, capping mul_add-heavy
+# x86 kernels — e.g. fs-feec's apply, bead cwjn). DO NOT. Enabling `+fma`
+# globally BREAKS cross-ISA bit-determinism: with the FMA target feature LLVM
+# will CONTRACT ordinary `a*b + c` expressions (not just explicit `mul_add`)
+# into a single-rounding `vfmadd`, which diverges from the non-contracted
+# aarch64/baseline result. MEASURED 2026-07-10 on a Threadripper: `+fma`
+# changed fs-cheb's frozen golden hash (Clenshaw recurrences use `a*b + c`),
+# `cheb_golden_hash` FAILED, while fs-sparse/fft/la/topo/evidence/rand stayed
+# byte-stable. So the determinism guarantee (G5) is INCOMPATIBLE with a global
+# +fma.
+#
+# The libm-fma trap must be fixed PER-KERNEL instead: put the hot mul_add loop
+# behind a `#[target_feature(enable = "fma")]` function (runtime
+# is_x86_feature_detected gate + scalar fallback, registered unsafe capsule)
+# whose body contains ONLY explicit `mul_add` (bit-neutral: libm fma ==
+# vfmadd == aarch64 fmadd) and NO `a*b + c` that could contract. See bead cwjn
+# and crates/fs-simd for the capsule precedent. fs-roofline already does this
+# for its FMA probe (bead xlvx).
