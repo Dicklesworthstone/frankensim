@@ -26,7 +26,7 @@ criteria.
 
 | Workflow | Trigger | What it proves |
 | --- | --- | --- |
-| `dsr quality --tool frankensim` | manual DSR command | fmt, clippy `-D warnings`, workspace unit + conformance tests, xtask policy gates, constellation drift |
+| `dsr quality --tool frankensim` | manual DSR command | configured fmt, clippy `-D warnings`, workspace unit + conformance tests, xtask policy gates, constellation drift, required quality lanes, x86 cross-check; see the external-wrapper limitations below |
 | `dsr build frankensim --target darwin/arm64` | manual DSR command | native release artifact build for the configured Apple Silicon lane |
 | `ci.yml` | manual GitHub dispatch only | archived/manual version of the fmt, clippy, test, policy, and constellation gate shape |
 | `nightly.yml` | manual GitHub dispatch only | archived/manual version of the full dev/release suites and retained fs-ledger run record |
@@ -105,6 +105,36 @@ Each is also runnable alone (same names). Golden re-pins follow
 docs/GOLDEN_POLICY.md: committed tree, BOTH build modes, plausible root
 cause, coupling row updated in the same commit.
 
+## Required quality lanes
+
+`scripts/ci/quality_lanes.sh` is a REQUIRED DSR check. It derives every
+test, bench, binary, and example target with `required-features` from locked
+Cargo metadata and checks/runs each target with its declared features and
+`--locked`. The standalone
+`crates/fs-wasm` workspace has three required obligations:
+
+1. Native tests against its tracked lock.
+2. A locked `wasm32-unknown-unknown` Cargo check.
+3. A `wasm-pack build --dev --target web -- --locked` browser build whose
+   invocation must not modify the nested lock.
+
+The manifest, `wasm-pack`, and the Rust wasm target are DSR host prerequisites.
+Absence is a named FAILURE, not an advisory skip. Every admitted invocation gets
+a collision-proof run directory under `target/quality-lanes/` containing full
+per-lane logs, an isolated wasm-pack output, `verdicts.jsonl`, and
+`inventory.json`; it also owns a separate Cargo target directory. Override paths
+are normalized to absolute paths before any nested-workspace command runs. The
+inventory SHA-256 hashes canonical input file CONTENTS (manifests, locks, contracts, Rust
+sources/tests, CI scripts, and the derived gated-target list), not merely
+filenames. The same composite
+root + clean-constellation snapshot used by the x86 lane must match before and
+after the run.
+Per-lane rows and the summary are explicitly `provisional` and carry JSON `null`
+for the not-yet-known closing snapshot. The literal final JSONL row is
+`quality-proof-seal`; it binds the SHA-256 of every preceding row to the final
+snapshot and reports `sealed` or `incomplete`. Consumers MUST verify that seal
+rather than treating an earlier row as an independent receipt.
+
 ## Constellation
 
 The workspace path-depends on sibling repos. The canonical fresh-checkout
@@ -144,6 +174,27 @@ repositories at a mismatched HEAD are never repaired automatically. Bumping a
 sibling remains deliberate: re-run `cargo run -p xtask -- lock-constellation`
 locally and commit the new lock (schema v2 records remotes).
 
+## External DSR wrapper limitations
+
+The repo-local scripts above fail closed and retain their own complete evidence,
+but the current DSR wrapper/configuration lives outside this repository and is
+not yet an evidence-complete aggregate. As of this revision, external DSR:
+
+- can return success when its repository configuration is missing, malformed,
+  unreadable, or resolves to zero checks;
+- captures command output in memory and retains only the first 1,000 bytes in
+  its result instead of storing a full per-command log;
+- does not bind all configured checks to one before/after root + constellation
+  snapshot; and
+- reports dry-run commands as passed even though they were not executed.
+
+Its separately configured top-level Cargo checks/build also need `--locked`.
+Until those external issues are fixed, a bare "DSR 8/8" line is not sufficient
+evidence by itself. Cite the exact repo-local `verdicts.jsonl`, full-log paths,
+before/after snapshot, HEAD, and lock identities emitted by these scripts. DSR
+remains the required orchestrator; this is an explicit no-claim boundary on its
+current aggregate receipt, not permission to substitute GitHub Actions.
+
 ## Decalogue mapping (plan patch Rev 25)
 
 | Principle | Gate | Status |
@@ -157,7 +208,7 @@ locally and commit the new lock (schema v2 records remotes).
 | P7 cancellation-correct | G4 storm gate (kill/cancel batteries, leak accounting) | **partial** — fs-ledger kill -9 battery runs in `ci.yml` today; executor-wide storms land with fs-exec |
 | P8 one data model | conformance suites over shared complex/cochain types | **deferred** — with fs-geom/fs-feec |
 | P9 provenance-complete | golden-ledger replay + integrity re-hash; constellation drift + golden-coupling gates | **partial** — integrity, drift, `check-goldens` coupling discipline, and bootstrap fetch-provenance live; replay gate lands with fs-ledger time travel |
-| P10 agent-first | JSONL verdicts from every suite retained as artifacts; structured-error schema validation | **partial** — verdict retention live; catalog no-drift gate lands with fs-ir |
+| P10 agent-first | JSONL verdicts from every suite retained as artifacts; structured-error schema validation | **partial** — repo-local quality/x86 verdict and full-log retention live; external DSR aggregation limitations are named above; catalog no-drift gate lands with fs-ir |
 
 ## Gate meta-tests (are the gates real?)
 
