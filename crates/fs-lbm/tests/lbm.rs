@@ -24,7 +24,15 @@ fn mass_is_conserved() {
     let mut lbm = Lbm::channel(6, 12, 0.8, 1e-4);
     let m0 = lbm.total_mass();
     lbm.run(200);
-    assert!((lbm.total_mass() - m0).abs() < 1e-9, "mass drifted");
+    // Mass is conserved BY CONSTRUCTION (collision, forcing, streaming, and
+    // bounce-back all preserve Σf), so the only drift is summation roundoff:
+    // measured 9.38e-13 over 200 steps on mass 72, BIT-IDENTICAL on aarch64
+    // (M4 Pro) and x86-64 (Threadripper 5975WX). Gate at 1e-11 (~10x that
+    // roundoff floor) so the CONTRACT's "mass is conserved" claim is verified
+    // to roundoff and a future systematic per-step leak is actually caught —
+    // the old 1e-9 bound was ~1000x loose and would have passed a real
+    // ~5e-12/step leak.
+    assert!((lbm.total_mass() - m0).abs() < 1e-11, "mass drifted");
     assert!((m0 - f64::from(6 * 12)).abs() < 1e-9); // unit density
 }
 
