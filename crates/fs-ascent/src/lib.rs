@@ -44,5 +44,11 @@ pub type FnGrad<'a> = &'a mut dyn FnMut(&[f64]) -> (f64, Vec<f64>);
 /// Hessian-vector product callback: (x, v) ↦ H(x)·v.
 pub type FnHv<'a> = &'a mut dyn FnMut(&[f64], &[f64]) -> Vec<f64>;
 
+/// Constraint callback: x ↦ c(x).
+pub type FnConstraints<'a> = &'a dyn Fn(&[f64]) -> Vec<f64>;
+
+/// Jacobian-transpose action: (x, w) ↦ (∂c/∂x)ᵀ·w.
+pub type FnJacobianTranspose<'a> = &'a dyn Fn(&[f64], &[f64]) -> Vec<f64>;
+
 /// Crate version, re-exported for provenance stamping.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

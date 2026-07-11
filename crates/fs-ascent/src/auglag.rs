@@ -67,18 +67,17 @@ pub struct AugLagReport {
 
 /// Problem callbacks: objective+gradient, equality constraints and
 /// their Jacobian-transpose action, inequalities likewise.
-#[allow(clippy::type_complexity)]
 pub struct ConstrainedProblem<'a> {
     /// (f, ∇f).
     pub fg: crate::FnGrad<'a>,
     /// c_e(x) (empty vec for none).
-    pub ce: &'a dyn Fn(&[f64]) -> Vec<f64>,
+    pub ce: crate::FnConstraints<'a>,
     /// (∂c_e/∂x)ᵀ·w.
-    pub ce_jt: &'a dyn Fn(&[f64], &[f64]) -> Vec<f64>,
+    pub ce_jt: crate::FnJacobianTranspose<'a>,
     /// c_i(x) (≤ 0 feasible; empty vec for none).
-    pub ci: &'a dyn Fn(&[f64]) -> Vec<f64>,
+    pub ci: crate::FnConstraints<'a>,
     /// (∂c_i/∂x)ᵀ·w.
-    pub ci_jt: &'a dyn Fn(&[f64], &[f64]) -> Vec<f64>,
+    pub ci_jt: crate::FnJacobianTranspose<'a>,
 }
 
 fn inf_norm(v: &[f64]) -> f64 {
@@ -108,10 +107,7 @@ pub(crate) fn assert_finite(label: &str, values: &[f64]) {
     );
 }
 
-pub(crate) fn checked_fg(
-    fg: &mut dyn FnMut(&[f64]) -> (f64, Vec<f64>),
-    x: &[f64],
-) -> (f64, Vec<f64>) {
+pub(crate) fn checked_fg(fg: crate::FnGrad<'_>, x: &[f64]) -> (f64, Vec<f64>) {
     validate_point(x);
     let (f, gradient) = fg(x);
     assert!(f.is_finite(), "objective value must be finite");
@@ -126,7 +122,7 @@ pub(crate) fn checked_fg(
 
 pub(crate) fn checked_constraints(
     label: &str,
-    callback: &dyn Fn(&[f64]) -> Vec<f64>,
+    callback: crate::FnConstraints<'_>,
     x: &[f64],
     expected: Option<usize>,
 ) -> Vec<f64> {
@@ -145,7 +141,7 @@ pub(crate) fn checked_constraints(
 
 pub(crate) fn checked_jt(
     label: &str,
-    callback: &dyn Fn(&[f64], &[f64]) -> Vec<f64>,
+    callback: crate::FnJacobianTranspose<'_>,
     x: &[f64],
     weights: &[f64],
 ) -> Vec<f64> {
@@ -163,7 +159,7 @@ pub(crate) fn checked_jt(
 
 fn validate_jt_zero(
     label: &str,
-    callback: &dyn Fn(&[f64], &[f64]) -> Vec<f64>,
+    callback: crate::FnJacobianTranspose<'_>,
     x: &[f64],
     constraint_count: usize,
 ) {
