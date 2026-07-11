@@ -9,13 +9,33 @@ use fs_iga::{BsplineSpace, IgaError, solve_poisson};
 
 #[test]
 fn the_bspline_basis_is_a_partition_of_unity() {
-    let space = BsplineSpace::clamped_uniform(3, 5);
-    for &x in &[0.05, 0.3, 0.5, 0.73, 0.95] {
-        let sum: f64 = (0..space.num_basis()).map(|i| space.basis(i, x)).sum();
-        assert!(
-            (sum - 1.0).abs() < 1e-12,
-            "partition of unity at {x}: {sum}"
-        );
+    // Σ Nᵢ(x) = 1 is a GLOBAL invariant (CONTRACT), so sweep the whole family
+    // and — critically — sample the ENDPOINTS and the INTERIOR KNOTS, not just
+    // span interiors as the old 5-point check did: a knot-span off-by-one in
+    // Cox–de Boor is invisible away from knots but breaks the sum exactly at
+    // them, and the clamped ends are the sharpest single-basis PoU points.
+    // Worst |Σ-1| over degrees 1..=8 × elements 1..=6 × {0, 1, every interior
+    // knot, a 41-pt grid} measured 7.77e-16 (~3.5 ulp) — BIT-IDENTICAL on
+    // aarch64 (M4 Pro) and x86-64 (Threadripper 5975WX). Gate at 1e-13 (~130×
+    // that roundoff floor), also tighter than the old 1e-12.
+    for degree in 1..=8usize {
+        for elements in 1..=6usize {
+            let space = BsplineSpace::clamped_uniform(degree, elements);
+            let mut xs: Vec<f64> = vec![0.0, 1.0];
+            for e in 1..elements {
+                xs.push(e as f64 / elements as f64); // interior knots
+            }
+            for k in 0..=40usize {
+                xs.push(k as f64 / 40.0);
+            }
+            for x in xs {
+                let sum: f64 = (0..space.num_basis()).map(|i| space.basis(i, x)).sum();
+                assert!(
+                    (sum - 1.0).abs() < 1e-13,
+                    "partition of unity deg {degree} elem {elements} at {x}: {sum}"
+                );
+            }
+        }
     }
 }
 
@@ -31,14 +51,21 @@ fn a_polynomial_solution_is_reproduced_exactly() {
     let space = BsplineSpace::clamped_uniform(2, 4);
     let sol = solve_poisson(&space, |_x| 2.0).unwrap();
     let exact = |x: f64| x * (1.0 - x);
-    // reproduced to roundoff (Galerkin reproduces exactly-representable solutions).
+    // Galerkin reproduces an exactly-representable solution TO ROUNDOFF (the
+    // CONTRACT's consistency invariant), not merely "closely": measured L2 =
+    // 7.0e-17 and pointwise ~1.1e-16, BIT-IDENTICAL on aarch64 (M4 Pro) and
+    // x86-64 (Threadripper 5975WX). Gate at 1e-13 — 4 orders tighter than the
+    // old 1e-9 smoke bound, which would have passed a real ~1e-10 systematic
+    // consistency error (under-integration, a BC-lifting bug) while still
+    // claiming "exact" — yet ~1000× above the roundoff floor, robust to benign
+    // reordering of the dense solve.
     assert!(
-        sol.l2_error(exact) < 1e-9,
+        sol.l2_error(exact) < 1e-13,
         "L2 error {}",
         sol.l2_error(exact)
     );
-    assert!((sol.eval(0.5) - 0.25).abs() < 1e-9);
-    assert!((sol.eval(0.25) - 0.1875).abs() < 1e-9);
+    assert!((sol.eval(0.5) - 0.25).abs() < 1e-13);
+    assert!((sol.eval(0.25) - 0.1875).abs() < 1e-13);
 }
 
 #[test]
@@ -93,8 +120,14 @@ fn one_element_high_degree_spaces_are_not_underintegrated() {
             "degree {degree} produced non-finite coefficients"
         );
         let error = solution.l2_error(exact);
+        // reproduction stays at ROUNDOFF for every degree through 8 — the point
+        // of the (p+1)-pt rule is that it keeps the one-element high-degree
+        // space fully ranked (no under-integration). Worst measured L2 =
+        // 1.57e-16 (degree 8), BIT-IDENTICAL on aarch64 and x86-64; gate at
+        // 1e-13 (was 1e-9) so a real under-integration, which would cost
+        // several orders here, is caught.
         assert!(
-            error < 1e-9,
+            error < 1e-13,
             "degree {degree} polynomial reproduction error {error}"
         );
     }
