@@ -129,6 +129,9 @@ pub enum ReceiptError {
     EmptyDashboard,
     /// The verifier identity was empty.
     EmptyVerifier,
+    /// The supporting evidence artifact used the all-zero missing-value
+    /// sentinel rather than a content address.
+    EmptyEvidenceArtifact,
 }
 
 impl core::fmt::Display for ReceiptError {
@@ -137,6 +140,9 @@ impl core::fmt::Display for ReceiptError {
             ReceiptError::EmptySubject => "instrumentation receipt subject is empty",
             ReceiptError::EmptyDashboard => "instrumentation receipt dashboard is empty",
             ReceiptError::EmptyVerifier => "instrumentation receipt verifier is empty",
+            ReceiptError::EmptyEvidenceArtifact => {
+                "instrumentation receipt evidence artifact is the all-zero missing-value sentinel"
+            }
         })
     }
 }
@@ -186,6 +192,9 @@ impl InstrumentationReceipt {
         }
         if verifier.trim().is_empty() {
             return Err(ReceiptError::EmptyVerifier);
+        }
+        if evidence_artifact.as_bytes().iter().all(|byte| *byte == 0) {
+            return Err(ReceiptError::EmptyEvidenceArtifact);
         }
         Ok(Self {
             dashboard,

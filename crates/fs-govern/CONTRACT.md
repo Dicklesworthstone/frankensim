@@ -98,9 +98,10 @@ artifact checking are deployment policy. Calling a public hash an
 ## Error model
 
 `InstrumentationReceipt::new` returns `ReceiptError` for an empty subject,
-dashboard, or verifier. Audits report missing, stale, future-dated,
-subject-mismatched, and otherwise inconsistent receipts as data and fail
-closed; they do not panic or silently promote coverage.
+dashboard, verifier, or an all-zero missing-evidence artifact sentinel. Audits
+report missing, stale, future-dated, subject-mismatched, and otherwise
+inconsistent receipts as data and fail closed; they do not panic or silently
+promote coverage.
 
 ## Determinism class
 

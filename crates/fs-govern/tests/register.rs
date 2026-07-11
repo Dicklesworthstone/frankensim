@@ -212,6 +212,16 @@ fn receipt_constructor_rejects_missing_provenance() {
         InstrumentationReceipt::new("R2", "grafana://kills", "", artifact, 190),
         Err(ReceiptError::EmptyVerifier)
     );
+    assert_eq!(
+        InstrumentationReceipt::new(
+            "R2",
+            "grafana://kills",
+            "ci/a",
+            fs_govern::ContentHash([0; 32]),
+            190,
+        ),
+        Err(ReceiptError::EmptyEvidenceArtifact)
+    );
 }
 
 #[test]
