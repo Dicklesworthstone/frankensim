@@ -27,6 +27,7 @@ mod depgraph;
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -444,29 +445,44 @@ fn lock_identity(entries: &[ConstellationEntry]) -> String {
     s
 }
 
-fn render_lockfile(entries: &[ConstellationEntry], hash: u64) -> String {
+fn render_lock_rows(rows: &[LockRow], lock_hash: &str) -> String {
     let mut s = String::new();
-    s.push_str("{\n  \"schema\": \"frankensim-constellation-lock-v2\",\n");
-    let _ = writeln!(s, "  \"lock_hash\": \"{hash:016x}\",");
-    s.push_str(
-        "  \"note\": \"lock_hash covers (lib, version, git_head) only — paths are per-machine; \
-         remote is transport for bootstrap-constellation (content identity is the git head)\",\n",
-    );
+    s.push_str("{\n  \"schema\": \"");
+    s.push_str(CONSTELLATION_LOCK_SCHEMA);
+    s.push_str("\",\n  \"lock_hash\": \"");
+    s.push_str(lock_hash);
+    s.push_str("\",\n  \"note\": \"");
+    s.push_str(&json_escape(CONSTELLATION_LOCK_NOTE));
+    s.push_str("\",\n");
     s.push_str("  \"libraries\": [\n");
-    for (i, e) in entries.iter().enumerate() {
-        let comma = if i + 1 == entries.len() { "" } else { "," };
+    for (index, row) in rows.iter().enumerate() {
+        let comma = if index + 1 == rows.len() { "" } else { "," };
         let _ = writeln!(
             s,
             "    {{\"lib\": \"{}\", \"version\": \"{}\", \"git_head\": \"{}\", \"remote\": \"{}\", \"path\": \"{}\"}}{comma}",
-            e.lib,
-            e.version,
-            e.git_head,
-            e.remote,
-            e.dir.display()
+            json_escape(&row.lib),
+            json_escape(&row.version),
+            json_escape(&row.git_head),
+            json_escape(&row.remote),
+            json_escape(&row.path),
         );
     }
     s.push_str("  ]\n}\n");
     s
+}
+
+fn render_lockfile(entries: &[ConstellationEntry], hash: u64) -> String {
+    let rows = entries
+        .iter()
+        .map(|entry| LockRow {
+            lib: entry.lib.clone(),
+            version: entry.version.clone(),
+            git_head: entry.git_head.clone(),
+            remote: entry.remote.clone(),
+            path: entry.dir.display().to_string(),
+        })
+        .collect::<Vec<_>>();
+    render_lock_rows(&rows, &format!("{hash:016x}"))
 }
 
 /// `lock-constellation` writes the lockfile; `check-constellation` verifies
@@ -482,25 +498,50 @@ fn cmd_constellation(root: &Path, check: bool) -> ExitCode {
     let hash = fnv1a64(lock_identity(&entries).as_bytes());
     let lock_path = root.join("constellation.lock");
     if check {
-        let Ok(existing) = std::fs::read_to_string(&lock_path) else {
+        let existing = match read_constellation_lock(&lock_path) {
+            Ok(existing) => existing,
+            Err(error) => {
+                eprintln!(
+                    "error: {error}; run `cargo run -p xtask -- lock-constellation` if the lock is missing"
+                );
+                return ExitCode::FAILURE;
+            }
+        };
+        let (recorded, rows) = match parse_lock_rows(&existing) {
+            Ok(parsed) => parsed,
+            Err(detail) => {
+                println!(
+                    "{{\"check\":\"constellation-lock\",\"verdict\":\"invalid\",\"detail\":\"{}\"}}",
+                    json_escape(&detail)
+                );
+                eprintln!("constellation lock INVALID: {detail}");
+                return ExitCode::FAILURE;
+            }
+        };
+        let declared_identity = match lock_rows_identity(&rows) {
+            Ok(identity) => identity,
+            Err(detail) => {
+                println!(
+                    "{{\"check\":\"constellation-lock\",\"verdict\":\"invalid\",\"detail\":\"{}\"}}",
+                    json_escape(&detail)
+                );
+                eprintln!("constellation lock INVALID: {detail}");
+                return ExitCode::FAILURE;
+            }
+        };
+        let declared_hash = fnv1a64(declared_identity.as_bytes());
+        if recorded != format!("{declared_hash:016x}") {
+            println!(
+                "{{\"check\":\"constellation-lock\",\"verdict\":\"invalid\",\"recorded\":\"{}\",\"declared\":\"{declared_hash:016x}\"}}",
+                json_escape(&recorded)
+            );
             eprintln!(
-                "error: {} missing; run `cargo run -p xtask -- lock-constellation`",
-                lock_path.display()
+                "constellation lock SELF-DRIFT: recorded {recorded}, declared rows hash to \
+                 {declared_hash:016x}"
             );
             return ExitCode::FAILURE;
-        };
-        let recorded = existing
-            .lines()
-            .find_map(|l| l.trim().strip_prefix("\"lock_hash\": \""))
-            .and_then(|r| r.split('"').next())
-            .unwrap_or("");
-        if recorded == format!("{hash:016x}") {
-            println!(
-                "{{\"check\":\"constellation-lock\",\"verdict\":\"ok\",\"hash\":\"{hash:016x}\"}}"
-            );
-            eprintln!("constellation lock OK ({hash:016x})");
-            ExitCode::SUCCESS
-        } else {
+        }
+        if recorded != format!("{hash:016x}") {
             println!(
                 "{{\"check\":\"constellation-lock\",\"verdict\":\"drift\",\"recorded\":\"{recorded}\",\"live\":\"{hash:016x}\"}}"
             );
@@ -508,9 +549,26 @@ fn cmd_constellation(root: &Path, check: bool) -> ExitCode {
                 "constellation DRIFT: recorded {recorded}, live {hash:016x}; a constellation \
                  repo moved — re-lock deliberately with lock-constellation and note why"
             );
-            ExitCode::FAILURE
+            return ExitCode::FAILURE;
         }
+        if let Err(detail) = verify_constellation_rows(root, &rows) {
+            println!(
+                "{{\"check\":\"constellation-lock\",\"verdict\":\"refused\",\"hash\":\"{hash:016x}\",\"detail\":\"{}\"}}",
+                json_escape(&detail)
+            );
+            eprintln!("constellation lock REFUSED: {detail}");
+            return ExitCode::FAILURE;
+        }
+        println!(
+            "{{\"check\":\"constellation-lock\",\"verdict\":\"ok\",\"hash\":\"{hash:016x}\",\"clean\":true}}"
+        );
+        eprintln!("constellation lock OK and all sibling trees clean ({hash:016x})");
+        ExitCode::SUCCESS
     } else {
+        if let Err(detail) = verify_live_entries_clean(&entries) {
+            eprintln!("refusing to lock a dirty or unreadable constellation: {detail}");
+            return ExitCode::FAILURE;
+        }
         match std::fs::write(&lock_path, render_lockfile(&entries, hash)) {
             Ok(()) => {
                 println!(
@@ -1003,40 +1061,273 @@ fn check_goldens(root: &Path) -> Vec<Violation> {
 // diagnostics.
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct LockRow {
     lib: String,
+    version: String,
     git_head: String,
     remote: String,
+    path: String,
+}
+
+const CONSTELLATION_LOCK_SCHEMA: &str = "frankensim-constellation-lock-v2";
+const CONSTELLATION_LOCK_NOTE: &str = "lock_hash covers (lib, version, git_head) only — paths are per-machine; remote is transport for bootstrap-constellation (content identity is the git head)";
+const MAX_CONSTELLATION_LOCK_BYTES: usize = 1_048_576;
+
+fn decode_constellation_lock(bytes: Vec<u8>) -> Result<String, String> {
+    if bytes.len() > MAX_CONSTELLATION_LOCK_BYTES {
+        return Err(format!(
+            "constellation.lock exceeds the {MAX_CONSTELLATION_LOCK_BYTES}-byte parser bound"
+        ));
+    }
+    String::from_utf8(bytes).map_err(|error| format!("constellation.lock is not UTF-8: {error}"))
+}
+
+fn read_constellation_lock(path: &Path) -> Result<String, String> {
+    let file = std::fs::File::open(path)
+        .map_err(|error| format!("{} unreadable: {error}", path.display()))?;
+    let limit = u64::try_from(MAX_CONSTELLATION_LOCK_BYTES + 1)
+        .map_err(|_| "constellation lock read bound does not fit u64".to_string())?;
+    let mut bytes = Vec::new();
+    file.take(limit)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("{} unreadable: {error}", path.display()))?;
+    decode_constellation_lock(bytes)
+}
+
+struct CanonicalJsonParser<'a> {
+    input: &'a str,
+    cursor: usize,
+}
+
+impl<'a> CanonicalJsonParser<'a> {
+    const fn new(input: &'a str) -> Self {
+        Self { input, cursor: 0 }
+    }
+
+    fn rest(&self) -> &'a str {
+        &self.input[self.cursor..]
+    }
+
+    fn expect(&mut self, literal: &str) -> Result<(), String> {
+        if self.rest().starts_with(literal) {
+            self.cursor += literal.len();
+            Ok(())
+        } else {
+            Err(format!(
+                "expected canonical token {literal:?} at byte {}",
+                self.cursor
+            ))
+        }
+    }
+
+    fn consume(&mut self, literal: &str) -> bool {
+        if self.rest().starts_with(literal) {
+            self.cursor += literal.len();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn hex_quad(&mut self) -> Result<u16, String> {
+        let bytes = self
+            .input
+            .as_bytes()
+            .get(self.cursor..self.cursor + 4)
+            .ok_or_else(|| "truncated JSON Unicode escape".to_string())?;
+        let mut value = 0_u16;
+        for byte in bytes {
+            let digit = match byte {
+                b'0'..=b'9' => u16::from(byte - b'0'),
+                b'a'..=b'f' => u16::from(byte - b'a' + 10),
+                b'A'..=b'F' => u16::from(byte - b'A' + 10),
+                _ => return Err("invalid JSON Unicode escape".to_string()),
+            };
+            value = (value << 4) | digit;
+        }
+        self.cursor += 4;
+        Ok(value)
+    }
+
+    fn unicode_escape(&mut self) -> Result<char, String> {
+        let high = self.hex_quad()?;
+        let scalar = if (0xd800..=0xdbff).contains(&high) {
+            self.expect("\\u")?;
+            let low = self.hex_quad()?;
+            if !(0xdc00..=0xdfff).contains(&low) {
+                return Err("high surrogate is not followed by a low surrogate".to_string());
+            }
+            0x1_0000 + ((u32::from(high) - 0xd800) << 10) + (u32::from(low) - 0xdc00)
+        } else if (0xdc00..=0xdfff).contains(&high) {
+            return Err("unpaired low surrogate in JSON string".to_string());
+        } else {
+            u32::from(high)
+        };
+        char::from_u32(scalar).ok_or_else(|| "invalid JSON Unicode scalar".to_string())
+    }
+
+    fn string(&mut self) -> Result<String, String> {
+        self.expect("\"")?;
+        let mut value = String::new();
+        loop {
+            let Some(character) = self.rest().chars().next() else {
+                return Err("unterminated JSON string".to_string());
+            };
+            self.cursor += character.len_utf8();
+            match character {
+                '"' => return Ok(value),
+                '\\' => {
+                    let Some(escaped) = self.rest().chars().next() else {
+                        return Err("truncated JSON escape".to_string());
+                    };
+                    self.cursor += escaped.len_utf8();
+                    match escaped {
+                        '"' => value.push('"'),
+                        '\\' => value.push('\\'),
+                        '/' => value.push('/'),
+                        'b' => value.push('\u{0008}'),
+                        'f' => value.push('\u{000c}'),
+                        'n' => value.push('\n'),
+                        'r' => value.push('\r'),
+                        't' => value.push('\t'),
+                        'u' => value.push(self.unicode_escape()?),
+                        _ => return Err(format!("invalid JSON escape \\{escaped}")),
+                    }
+                }
+                control if control.is_control() => {
+                    return Err("unescaped control character in JSON string".to_string());
+                }
+                other => value.push(other),
+            }
+        }
+    }
+
+    fn finish(self) -> Result<(), String> {
+        if self.cursor == self.input.len() {
+            Ok(())
+        } else {
+            Err(format!("trailing JSON data at byte {}", self.cursor))
+        }
+    }
+}
+
+fn validate_lock_field(label: &str, value: &str) -> Result<(), String> {
+    if value.is_empty() || value.chars().any(char::is_control) {
+        return Err(format!(
+            "constellation lock {label} must be non-empty and control-free"
+        ));
+    }
+    Ok(())
 }
 
 fn parse_lock_rows(text: &str) -> Result<(String, Vec<LockRow>), String> {
-    let mut rows = Vec::new();
-    let mut lock_hash = String::new();
-    for line in text.lines() {
-        let t = line.trim();
-        if let Some(rest) = t.strip_prefix("\"lock_hash\": \"") {
-            lock_hash = rest.split('"').next().unwrap_or("").to_string();
-        }
-        if t.starts_with("{\"lib\"") {
-            let field = |key: &str| -> Option<String> {
-                let tag = format!("\"{key}\": \"");
-                let start = t.find(&tag)? + tag.len();
-                t[start..].split('"').next().map(str::to_string)
-            };
-            let (Some(lib), Some(git_head)) = (field("lib"), field("git_head")) else {
-                return Err(format!("malformed lock row: {t}"));
-            };
-            rows.push(LockRow {
-                lib,
-                git_head,
-                remote: field("remote").unwrap_or_else(|| "no-remote".to_string()),
-            });
-        }
+    if text.is_empty() || text.len() > MAX_CONSTELLATION_LOCK_BYTES {
+        return Err(format!(
+            "constellation.lock must contain 1..={MAX_CONSTELLATION_LOCK_BYTES} UTF-8 bytes"
+        ));
     }
-    if lock_hash.is_empty() || rows.is_empty() {
-        return Err("constellation.lock has no hash or no libraries".to_string());
+    let mut parser = CanonicalJsonParser::new(text);
+    parser.expect("{\n  \"schema\": ")?;
+    let schema = parser.string()?;
+    parser.expect(",\n  \"lock_hash\": ")?;
+    let lock_hash = parser.string()?;
+    parser.expect(",\n  \"note\": ")?;
+    let note = parser.string()?;
+    parser.expect(",\n  \"libraries\": [\n")?;
+
+    let mut rows = Vec::new();
+    loop {
+        parser.expect("    {\"lib\": ")?;
+        let lib = parser.string()?;
+        parser.expect(", \"version\": ")?;
+        let version = parser.string()?;
+        parser.expect(", \"git_head\": ")?;
+        let git_head = parser.string()?;
+        parser.expect(", \"remote\": ")?;
+        let remote = parser.string()?;
+        parser.expect(", \"path\": ")?;
+        let path = parser.string()?;
+        parser.expect("}")?;
+
+        for (label, value) in [
+            ("library", lib.as_str()),
+            ("version", version.as_str()),
+            ("remote", remote.as_str()),
+            ("path", path.as_str()),
+        ] {
+            validate_lock_field(label, value)?;
+        }
+        if !matches!(git_head.len(), 40 | 64)
+            || !git_head
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(format!("non-canonical git head for {lib}"));
+        }
+        rows.push(LockRow {
+            lib,
+            version,
+            git_head,
+            remote,
+            path,
+        });
+        if parser.consume(",\n") {
+            continue;
+        }
+        parser.expect("\n  ]\n}\n")?;
+        break;
+    }
+    parser.finish()?;
+
+    if schema != CONSTELLATION_LOCK_SCHEMA {
+        return Err(format!("unsupported constellation lock schema {schema:?}"));
+    }
+    if note != CONSTELLATION_LOCK_NOTE {
+        return Err("constellation.lock carries a non-canonical identity note".to_string());
+    }
+    if lock_hash.len() != 16
+        || !lock_hash
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        || rows.is_empty()
+    {
+        return Err("constellation.lock has no canonical hash or no libraries".to_string());
+    }
+    let mut expected: Vec<&str> = CONSTELLATION_REPOS.iter().map(|(lib, _)| *lib).collect();
+    expected.sort_unstable();
+    let mut declared: Vec<&str> = rows.iter().map(|row| row.lib.as_str()).collect();
+    declared.sort_unstable();
+    if declared != expected {
+        return Err(format!(
+            "constellation library set mismatch: declared={declared:?}, expected={expected:?}"
+        ));
+    }
+    if render_lock_rows(&rows, &lock_hash) != text {
+        return Err("constellation.lock is valid JSON but not canonical".to_string());
+    }
+    let identity = lock_rows_identity(&rows)?;
+    let expected_hash = format!("{:016x}", fnv1a64(identity.as_bytes()));
+    if lock_hash != expected_hash {
+        return Err(format!(
+            "constellation.lock hash {lock_hash} disagrees with declared rows {expected_hash}"
+        ));
     }
     Ok((lock_hash, rows))
+}
+
+fn lock_rows_identity(rows: &[LockRow]) -> Result<String, String> {
+    let mut ordered = BTreeMap::new();
+    for row in rows {
+        if ordered.insert(row.lib.as_str(), row).is_some() {
+            return Err(format!("duplicate constellation library {:?}", row.lib));
+        }
+    }
+    let mut identity = String::new();
+    for row in ordered.values() {
+        let _ = writeln!(identity, "{}={}@{}", row.lib, row.version, row.git_head);
+    }
+    Ok(identity)
 }
 
 fn git_out(dir: &Path, args: &[&str]) -> Result<String, String> {
@@ -1055,6 +1346,266 @@ fn git_out(dir: &Path, args: &[&str]) -> Result<String, String> {
             String::from_utf8_lossy(&out.stderr).trim()
         ))
     }
+}
+
+fn git_run(dir: &Path, args: &[&str]) -> Result<(), String> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .map_err(|error| format!("git {args:?} failed to spawn: {error}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "git {args:?} in {} failed: {}",
+            dir.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
+    }
+}
+
+fn repository_worktree_status(target: &Path) -> Result<String, String> {
+    let tracked = git_out(
+        target,
+        &[
+            "-c",
+            "core.fileMode=true",
+            "-c",
+            "core.excludesFile=/dev/null",
+            "status",
+            "--porcelain",
+            "-z",
+            "--untracked-files=all",
+        ],
+    )?;
+    let untracked = git_out(
+        target,
+        &[
+            "-c",
+            "core.excludesFile=/dev/null",
+            "ls-files",
+            "-z",
+            "--others",
+            "--exclude-per-directory=.gitignore",
+        ],
+    )?;
+    let index_flags = git_out(target, &["ls-files", "-v"])?;
+    let hidden_index_entry = hidden_index_entry(&index_flags);
+    Ok(match hidden_index_entry {
+        Some(entry) => format!("{tracked}{untracked}\nindex flag hides worktree state: {entry}"),
+        None => format!("{tracked}{untracked}"),
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RepositoryObservation {
+    head: String,
+    status: String,
+}
+
+fn repository_observation(target: &Path) -> Result<RepositoryObservation, String> {
+    let head_before = git_out(target, &["rev-parse", "HEAD"])
+        .map_err(|error| format!("{}: {error}", target.display()))?;
+    let status = repository_worktree_status(target)?;
+    let head_after = git_out(target, &["rev-parse", "HEAD"])
+        .map_err(|error| format!("{}: {error}", target.display()))?;
+    coherent_repository_observation(target, &head_before, status, head_after)
+}
+
+fn coherent_repository_observation(
+    target: &Path,
+    head_before: &str,
+    status: String,
+    head_after: String,
+) -> Result<RepositoryObservation, String> {
+    if head_before != head_after {
+        return Err(format!(
+            "{} moved while its worktree state was being observed: before={head_before}, after={head_after}",
+            target.display()
+        ));
+    }
+    Ok(RepositoryObservation {
+        head: head_after,
+        status,
+    })
+}
+
+fn hidden_index_entry(index_flags: &str) -> Option<&str> {
+    index_flags.lines().find(|line| {
+        line.as_bytes()
+            .first()
+            .is_some_and(|tag| *tag == b'S' || tag.is_ascii_lowercase())
+    })
+}
+
+const BOOTSTRAP_INCOMPLETE_KEY: &str = "frankensim.bootstrapIncomplete";
+const BOOTSTRAP_PROVENANCE_SCHEMA: &str = "frankensim-constellation-bootstrap-v2";
+
+fn clear_bootstrap_marker(target: &Path) -> Result<(), String> {
+    git_run(
+        target,
+        &["config", "--local", "--unset-all", BOOTSTRAP_INCOMPLETE_KEY],
+    )
+}
+
+fn directory_is_empty(path: &Path) -> Result<bool, String> {
+    let mut entries = std::fs::read_dir(path)
+        .map_err(|error| format!("cannot inspect {}: {error}", path.display()))?;
+    Ok(entries.next().is_none())
+}
+
+fn is_repository_root(target: &Path) -> bool {
+    let Ok(top_level) = git_out(target, &["rev-parse", "--show-toplevel"]) else {
+        return false;
+    };
+    let Ok(target) = target.canonicalize() else {
+        return false;
+    };
+    let Ok(top_level) = PathBuf::from(top_level).canonicalize() else {
+        return false;
+    };
+    target == top_level
+}
+
+fn ensure_bootstrap_repository(target: &Path, offline: bool) -> Result<bool, String> {
+    let existed = target.exists();
+    if existed {
+        let metadata = target
+            .symlink_metadata()
+            .map_err(|error| format!("cannot inspect {}: {error}", target.display()))?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(format!(
+                "{} exists but is not an ordinary directory",
+                target.display()
+            ));
+        }
+    }
+    if !existed {
+        if offline {
+            return Err(format!(
+                "{} missing from the source cache in --offline mode",
+                target.display()
+            ));
+        }
+        std::fs::create_dir_all(target)
+            .map_err(|error| format!("cannot create {}: {error}", target.display()))?;
+    }
+
+    if is_repository_root(target) {
+        return Ok(existed);
+    }
+    if existed && !directory_is_empty(target)? {
+        return Err(format!(
+            "{} is a non-empty non-git directory; refusing to repurpose it",
+            target.display()
+        ));
+    }
+    if offline {
+        return Err(format!(
+            "{} is not a usable cached git checkout in --offline mode",
+            target.display()
+        ));
+    }
+    git_run(target, &["init", "--quiet"])?;
+    git_run(
+        target,
+        &["config", "--local", BOOTSTRAP_INCOMPLETE_KEY, "true"],
+    )?;
+    Ok(existed)
+}
+
+/// Materialize or resume one exact-pin checkout without deleting or silently
+/// repurposing an ordinary existing repository. New checkouts carry a local
+/// incomplete marker before fetch; an existing wrong-head checkout is resumable
+/// only when that marker is present. An older unborn checkout is also safe to
+/// resume when it has no worktree content and its origin matches exactly.
+fn bootstrap_checkout(
+    row: &LockRow,
+    target: &Path,
+    url: &str,
+    offline: bool,
+) -> Result<&'static str, String> {
+    let existed = ensure_bootstrap_repository(target, offline)?;
+
+    let marker_present = git_out(
+        target,
+        &["config", "--local", "--get", BOOTSTRAP_INCOMPLETE_KEY],
+    )
+    .is_ok_and(|value| value == "true");
+    let current_head = git_out(target, &["rev-parse", "HEAD"]);
+    if let Ok(head) = &current_head {
+        if head.as_str() == row.git_head {
+            verify_pinned_clean(row, target)?;
+            if marker_present {
+                clear_bootstrap_marker(target)?;
+                return Ok("resumed");
+            }
+            return Ok("verified");
+        }
+        if !marker_present {
+            return check_pinned_clean_observation(row, target, head, "").map(|()| "verified");
+        }
+    }
+
+    if current_head.is_err() {
+        let existing_origin = git_out(target, &["remote", "get-url", "origin"]).ok();
+        if !may_resume_unborn_checkout(marker_present, existing_origin.as_deref(), url) {
+            return Err(format!(
+                "{} is an unmarked unborn checkout without the exact locked origin {url:?}; \
+                 refusing to adopt it",
+                target.display()
+            ));
+        }
+    }
+
+    let status = repository_worktree_status(target)?;
+    if !status.is_empty() {
+        return Err(format!(
+            "{} is an incomplete bootstrap with worktree changes; refusing to overwrite it",
+            target.display()
+        ));
+    }
+    if !offline && url == "no-remote" {
+        return Err(format!(
+            "lock declares no remote for {} — re-lock on a host that has one",
+            row.lib
+        ));
+    }
+    git_run(
+        target,
+        &["config", "--local", BOOTSTRAP_INCOMPLETE_KEY, "true"],
+    )?;
+    match git_out(target, &["remote", "get-url", "origin"]) {
+        Ok(existing) if existing != url => {
+            return Err(format!(
+                "{} incomplete bootstrap origin is {existing:?}, expected {url:?}",
+                target.display()
+            ));
+        }
+        Ok(_) => {}
+        Err(_) if offline => {}
+        Err(_) => git_run(target, &["remote", "add", "origin", url])?,
+    }
+    if !offline {
+        git_run(
+            target,
+            &["fetch", "--quiet", "--depth", "1", "origin", &row.git_head],
+        )?;
+    }
+    git_run(target, &["checkout", "--quiet", "--detach", &row.git_head])?;
+    verify_pinned_clean(row, target)?;
+    clear_bootstrap_marker(target)?;
+    Ok(if existed { "resumed" } else { "cloned" })
+}
+
+fn may_resume_unborn_checkout(
+    marker_present: bool,
+    existing_origin: Option<&str>,
+    expected_origin: &str,
+) -> bool {
+    marker_present || existing_origin == Some(expected_origin)
 }
 
 fn check_pinned_clean_observation(
@@ -1082,14 +1633,60 @@ fn check_pinned_clean_observation(
     Ok(())
 }
 
-fn verify_pinned_clean(row: &LockRow, target: &Path) -> Result<(), String> {
-    let head = git_out(target, &["rev-parse", "HEAD"])
-        .map_err(|e| format!("{}: {e}", target.display()))?;
-    if head != row.git_head {
-        return check_pinned_clean_observation(row, target, &head, "");
+fn verify_pinned_clean_with<F>(row: &LockRow, target: &Path, mut observe: F) -> Result<(), String>
+where
+    F: FnMut() -> Result<RepositoryObservation, String>,
+{
+    let first = observe()?;
+    check_pinned_clean_observation(row, target, &first.head, &first.status)?;
+    let confirmed = observe()?;
+    check_pinned_clean_observation(row, target, &confirmed.head, &confirmed.status)?;
+    if confirmed != first {
+        return Err(format!(
+            "{} changed between two complete pinned-state observations; refusing incoherent provenance",
+            target.display()
+        ));
     }
-    let status = git_out(target, &["status", "--porcelain"])?;
-    check_pinned_clean_observation(row, target, &head, &status)
+    Ok(())
+}
+
+fn verify_pinned_clean(row: &LockRow, target: &Path) -> Result<(), String> {
+    verify_pinned_clean_with(row, target, || repository_observation(target))
+}
+
+fn verify_constellation_rows(root: &Path, rows: &[LockRow]) -> Result<(), String> {
+    if rows.len() != CONSTELLATION_REPOS.len() {
+        return Err(format!(
+            "lock declares {} libraries, expected {}",
+            rows.len(),
+            CONSTELLATION_REPOS.len()
+        ));
+    }
+    let projects = root
+        .parent()
+        .ok_or_else(|| "workspace root has no parent".to_string())?;
+    for &(expected_lib, dirname) in CONSTELLATION_REPOS {
+        let row = rows
+            .iter()
+            .find(|row| row.lib == expected_lib)
+            .ok_or_else(|| format!("lock is missing constellation library {expected_lib}"))?;
+        verify_pinned_clean(row, &projects.join(dirname))?;
+    }
+    Ok(())
+}
+
+fn verify_live_entries_clean(entries: &[ConstellationEntry]) -> Result<(), String> {
+    for entry in entries {
+        let row = LockRow {
+            lib: entry.lib.clone(),
+            version: entry.version.clone(),
+            git_head: entry.git_head.clone(),
+            remote: entry.remote.clone(),
+            path: entry.dir.display().to_string(),
+        };
+        verify_pinned_clean(&row, &entry.dir)?;
+    }
+    Ok(())
 }
 
 fn dirname_of(lib: &str) -> &str {
@@ -1143,6 +1740,22 @@ fn parse_bootstrap_options(
     Ok(options)
 }
 
+fn bootstrap_provenance_row(
+    row: &LockRow,
+    selected_transport: &str,
+    transport_used: bool,
+    state: &str,
+) -> String {
+    format!(
+        "{{\"lib\": \"{}\", \"git_head\": \"{}\", \"remote\": \"{}\", \"selected_transport\": \"{}\", \"transport_used\": {transport_used}, \"state\": \"{}\"}}",
+        json_escape(&row.lib),
+        json_escape(&row.git_head),
+        json_escape(&row.remote),
+        json_escape(selected_transport),
+        json_escape(state),
+    )
+}
+
 /// `bootstrap-constellation [--offline] [--from <base>]`.
 /// dest defaults to the workspace parent (where the manifests' relative
 /// paths point). `--from <base>` overrides every remote with
@@ -1176,7 +1789,7 @@ fn cmd_bootstrap(root: &Path) -> ExitCode {
         );
         return ExitCode::FAILURE;
     }
-    let lock_text = match std::fs::read_to_string(root.join("constellation.lock")) {
+    let lock_text = match read_constellation_lock(&root.join("constellation.lock")) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("error: constellation.lock unreadable: {e} — the lock IS the input");
@@ -1195,66 +1808,26 @@ fn cmd_bootstrap(root: &Path) -> ExitCode {
     for row in &rows {
         let dirname = dirname_of(&row.lib);
         let target = dest.join(dirname);
-        let state: Result<&'static str, String> = if target.is_dir() {
-            // EXISTING tree: verify identity; never silently substitute.
-            verify_pinned_clean(row, &target).map(|()| "verified")
-        } else if options.offline {
-            Err(format!(
-                "{} missing from the source cache in --offline mode",
-                target.display()
-            ))
-        } else {
-            // FETCH: clone the declared transport, check out the pinned
-            // revision detached, then apply the same identity and cleanliness
-            // verifier as the existing-tree path.
-            let url = options
-                .from
-                .as_ref()
-                .map_or_else(|| row.remote.clone(), |b| format!("{b}/{dirname}"));
-            if url == "no-remote" {
-                Err(format!(
-                    "lock declares no remote for {} — re-lock on a host that has one",
-                    row.lib
-                ))
-            } else {
-                let clone = std::process::Command::new("git")
-                    .args(["clone", "--no-checkout", "-c", "core.autocrlf=false", &url])
-                    .arg(&target)
-                    .output();
-                match clone {
-                    Ok(o) if o.status.success() => {
-                        match git_out(&target, &["checkout", "--detach", &row.git_head]) {
-                            Ok(_) => verify_pinned_clean(row, &target).map(|()| "cloned"),
-                            Err(e) => Err(format!(
-                                "locked revision {} unavailable from {url}: {e}",
-                                row.git_head
-                            )),
-                        }
-                    }
-                    Ok(o) => Err(format!(
-                        "clone of {url} failed: {}",
-                        String::from_utf8_lossy(&o.stderr).trim()
-                    )),
-                    Err(e) => Err(format!("git clone failed to spawn: {e}")),
-                }
-            }
-        };
+        let url = options
+            .from
+            .as_ref()
+            .map_or_else(|| row.remote.clone(), |base| format!("{base}/{dirname}"));
+        let state = bootstrap_checkout(row, &target, &url, options.offline);
         match state {
             Ok(st) => {
+                let transport_used = st != "verified" && !options.offline;
                 println!(
                     "{{\"check\":\"constellation-bootstrap\",\"lib\":\"{}\",\"state\":\"{st}\",\"head\":\"{}\"}}",
-                    row.lib, row.git_head
+                    json_escape(&row.lib),
+                    json_escape(&row.git_head),
                 );
-                provenance.push(format!(
-                    "{{\"lib\": \"{}\", \"git_head\": \"{}\", \"remote\": \"{}\", \"state\": \"{st}\"}}",
-                    row.lib, row.git_head, row.remote
-                ));
+                provenance.push(bootstrap_provenance_row(row, &url, transport_used, st));
             }
             Err(why) => {
                 println!(
                     "{{\"check\":\"constellation-bootstrap\",\"lib\":\"{}\",\"state\":\"failed\",\"why\":\"{}\"}}",
-                    row.lib,
-                    why.replace('"', "'")
+                    json_escape(&row.lib),
+                    json_escape(&why),
                 );
                 eprintln!("bootstrap FAILED for {}: {why}", row.lib);
                 failures += 1;
@@ -1270,8 +1843,8 @@ fn cmd_bootstrap(root: &Path) -> ExitCode {
     }
     // Build provenance: the lock hash + every fetched/verified identity.
     let prov = format!(
-        "{{\n\"schema\": \"frankensim-constellation-bootstrap-v1\",\n\"lock_hash\": \"{lock_hash}\",\n\"dest\": \"{}\",\n\"libraries\": [\n{}\n]\n}}\n",
-        dest.display(),
+        "{{\n\"schema\": \"{BOOTSTRAP_PROVENANCE_SCHEMA}\",\n\"lock_hash\": \"{lock_hash}\",\n\"dest\": \"{}\",\n\"libraries\": [\n{}\n]\n}}\n",
+        json_escape(&dest.display().to_string()),
         provenance.join(",\n")
     );
     let prov_path = dest.join("constellation-bootstrap.json");
@@ -1757,11 +2330,102 @@ mod tests {
     }
 
     #[test]
+    fn unborn_bootstrap_requires_marker_or_exact_locked_origin() {
+        let expected = "https://example.invalid/repo";
+        assert!(may_resume_unborn_checkout(true, None, expected));
+        assert!(may_resume_unborn_checkout(false, Some(expected), expected));
+        assert!(!may_resume_unborn_checkout(false, None, expected));
+        assert!(!may_resume_unborn_checkout(
+            false,
+            Some("https://example.invalid/other"),
+            expected
+        ));
+    }
+
+    #[test]
+    fn hidden_index_flags_are_always_dirty() {
+        assert_eq!(hidden_index_entry("H ordinary.rs\n"), None);
+        assert_eq!(
+            hidden_index_entry("H ordinary.rs\nS skipped.rs\nH later.rs\n"),
+            Some("S skipped.rs")
+        );
+        assert_eq!(
+            hidden_index_entry("H ordinary.rs\nh assumed.rs\n"),
+            Some("h assumed.rs")
+        );
+        assert_eq!(
+            hidden_index_entry("m lowercase-modified.rs\n"),
+            Some("m lowercase-modified.rs")
+        );
+    }
+
+    #[test]
+    fn constellation_lock_decode_is_bounded_and_utf8_only() {
+        assert_eq!(
+            decode_constellation_lock(b"canonical".to_vec()).expect("bounded UTF-8"),
+            "canonical"
+        );
+        assert!(decode_constellation_lock(vec![b'x'; MAX_CONSTELLATION_LOCK_BYTES + 1]).is_err());
+        assert!(decode_constellation_lock(vec![0xff]).is_err());
+    }
+
+    #[test]
+    fn nested_directory_does_not_inherit_ancestor_repository_identity() {
+        let base = std::env::temp_dir().join(format!(
+            "xtask-bootstrap-root-identity-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        let ancestor = base.join("ancestor");
+        let target = ancestor.join("target");
+        std::fs::create_dir_all(&target).expect("fixture directories");
+        let init_ancestor = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&ancestor)
+            .args(["init", "--quiet"])
+            .output()
+            .expect("git init ancestor");
+        assert!(init_ancestor.status.success());
+        assert!(
+            !is_repository_root(&target),
+            "an empty child must not inherit its ancestor's repository identity"
+        );
+
+        let init_target = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&target)
+            .args(["init", "--quiet"])
+            .output()
+            .expect("git init target");
+        assert!(init_target.status.success());
+        assert!(is_repository_root(&target));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn bootstrap_provenance_distinguishes_canonical_remote_from_selected_mirror() {
+        let row = LockRow {
+            lib: "fixture".to_string(),
+            version: "1.0.0".to_string(),
+            git_head: "a".repeat(40),
+            remote: "https://canonical.invalid/fixture.git".to_string(),
+            path: "/constellation/fixture".to_string(),
+        };
+        let receipt = bootstrap_provenance_row(&row, "/airgap/mirror/fixture", true, "cloned");
+        assert!(receipt.contains("\"remote\": \"https://canonical.invalid/fixture.git\""));
+        assert!(receipt.contains("\"selected_transport\": \"/airgap/mirror/fixture\""));
+        assert!(receipt.contains("\"transport_used\": true"));
+        assert_ne!(row.remote, "/airgap/mirror/fixture");
+    }
+
+    #[test]
     fn bootstrap_pinned_tree_observation_requires_exact_head_and_clean_status() {
         let row = LockRow {
             lib: "fixture".to_string(),
+            version: "1.0.0".to_string(),
             git_head: "locked-head".to_string(),
             remote: "unused".to_string(),
+            path: "/constellation/fixture".to_string(),
         };
         let target = Path::new("/constellation/fixture");
 
@@ -1774,6 +2438,175 @@ mod tests {
         let dirty = check_pinned_clean_observation(&row, target, "locked-head", " M lib.rs")
             .expect_err("checkout-time dirt must refuse");
         assert!(dirty.contains("DIRTY"), "{dirty}");
+    }
+
+    #[test]
+    fn pinned_tree_acceptance_rechecks_status_after_the_first_clean_observation() {
+        let row = LockRow {
+            lib: "fixture".to_string(),
+            version: "1.0.0".to_string(),
+            git_head: "locked-head".to_string(),
+            remote: "unused".to_string(),
+            path: "/constellation/fixture".to_string(),
+        };
+        let target = Path::new("/constellation/fixture");
+        let clean = RepositoryObservation {
+            head: row.git_head.clone(),
+            status: String::new(),
+        };
+        let dirty = RepositoryObservation {
+            head: row.git_head.clone(),
+            status: " M src/lib.rs".to_string(),
+        };
+        let mut stable_observations = [clean.clone(), clean.clone()].into_iter();
+        verify_pinned_clean_with(&row, target, || {
+            Ok(stable_observations
+                .next()
+                .expect("verifier must take exactly two observations"))
+        })
+        .expect("two identical clean pinned observations must pass");
+        assert!(stable_observations.next().is_none());
+
+        let mut observations = [clean, dirty].into_iter();
+        let error = verify_pinned_clean_with(&row, target, || {
+            Ok(observations
+                .next()
+                .expect("verifier must take exactly two observations"))
+        })
+        .expect_err("dirt appearing after the first observation must refuse provenance");
+        assert!(error.contains("DIRTY"), "{error}");
+        assert!(
+            observations.next().is_none(),
+            "confirmation observation must be consumed before acceptance"
+        );
+
+        let moved = coherent_repository_observation(
+            target,
+            "locked-head",
+            String::new(),
+            "other-head".to_string(),
+        )
+        .expect_err("HEAD movement inside one status observation must refuse");
+        assert!(
+            moved.contains("worktree state was being observed"),
+            "{moved}"
+        );
+    }
+
+    #[test]
+    fn constellation_lock_identity_is_ordered_complete_and_duplicate_safe() {
+        let first = LockRow {
+            lib: "zeta".to_string(),
+            version: "2.0.0".to_string(),
+            git_head: "2222".to_string(),
+            remote: "unused-zeta".to_string(),
+            path: "/constellation/zeta".to_string(),
+        };
+        let second = LockRow {
+            lib: "alpha".to_string(),
+            version: "1.0.0".to_string(),
+            git_head: "1111".to_string(),
+            remote: "unused-alpha".to_string(),
+            path: "/constellation/alpha".to_string(),
+        };
+        let identity = lock_rows_identity(&[first, second]).expect("unique rows are canonical");
+        assert_eq!(identity, "alpha=1.0.0@1111\nzeta=2.0.0@2222\n");
+
+        let duplicate = [
+            LockRow {
+                lib: "same".to_string(),
+                version: "1".to_string(),
+                git_head: "a".to_string(),
+                remote: "one".to_string(),
+                path: "/constellation/same-a".to_string(),
+            },
+            LockRow {
+                lib: "same".to_string(),
+                version: "2".to_string(),
+                git_head: "b".to_string(),
+                remote: "two".to_string(),
+                path: "/constellation/same-b".to_string(),
+            },
+        ];
+        assert!(lock_rows_identity(&duplicate).is_err());
+    }
+
+    #[test]
+    fn tracked_constellation_lock_is_self_consistent_and_schema_bound() {
+        let tracked = include_str!("../../constellation.lock");
+        let (recorded, mut rows) = parse_lock_rows(tracked).expect("tracked lock is canonical");
+        let identity = lock_rows_identity(&rows).expect("tracked rows are unique");
+        assert_eq!(recorded, format!("{:016x}", fnv1a64(identity.as_bytes())));
+
+        rows[0].git_head = "0".repeat(rows[0].git_head.len());
+        let changed = lock_rows_identity(&rows).expect("mutated rows remain structurally valid");
+        assert_ne!(recorded, format!("{:016x}", fnv1a64(changed.as_bytes())));
+
+        let wrong_schema = tracked.replacen(
+            "frankensim-constellation-lock-v2",
+            "frankensim-constellation-lock-v3",
+            1,
+        );
+        assert!(parse_lock_rows(&wrong_schema).is_err());
+        assert!(parse_lock_rows(&format!("{tracked}trailing-junk\n")).is_err());
+
+        let escaped = render_lockfile(
+            &[ConstellationEntry {
+                lib: "fixture".to_string(),
+                dir: PathBuf::from("/tmp/quoted\"path"),
+                version: "1.0".to_string(),
+                git_head: "a".repeat(40),
+                remote: "https://example.invalid/quoted\"remote".to_string(),
+            }],
+            0,
+        );
+        assert!(escaped.contains("quoted\\\"path"));
+        assert!(escaped.contains("quoted\\\"remote"));
+    }
+
+    #[test]
+    fn constellation_lock_json_round_trips_escaped_fields_and_refuses_malformed_documents() {
+        let tracked = include_str!("../../constellation.lock");
+        let (recorded, mut rows) = parse_lock_rows(tracked).expect("tracked lock is canonical");
+        rows[0].remote = "https://example.invalid/quoted\"\\remote/é".to_string();
+        rows[0].path = "/constellation/quoted\"\\path/é".to_string();
+        let rendered = render_lock_rows(&rows, &recorded);
+        assert!(rendered.contains("quoted\\\"\\\\remote/é"));
+        let (reparsed_hash, reparsed_rows) =
+            parse_lock_rows(&rendered).expect("escaped canonical lock must parse");
+        assert_eq!(reparsed_hash, recorded);
+        assert_eq!(reparsed_rows, rows);
+
+        let malformed = [
+            format!("{tracked}trailing-junk\n"),
+            tracked.trim_end().to_string(),
+            tracked.replacen("\"schema\":", "\"extra\": 0, \"schema\":", 1),
+            tracked.replacen(
+                "  \"libraries\": [\n",
+                "  \"libraries\": [\n    \"junk\",\n",
+                1,
+            ),
+            tracked.replacen(
+                "\"lib\": \"asupersync\",",
+                "\"lib\": \"asupersync\", \"lib\": \"asupersync\",",
+                1,
+            ),
+            tracked.replacen("\"remote\": \"https", "\"remote\": \"bad\\qhttps", 1),
+            tracked.replacen("\"remote\": \"https", "\"remote\": \"\\ud800https", 1),
+            tracked.replacen("\n  ]", ",\n  ]", 1),
+            tracked.replacen(
+                "\"lib\": \"asupersync\", \"version\":",
+                "\"version\": \"0.3.5\", \"lib\": \"asupersync\", \"version\":",
+                1,
+            ),
+            tracked.replacen("https://", "https\\u003a//", 1),
+        ];
+        for document in malformed {
+            assert!(
+                parse_lock_rows(&document).is_err(),
+                "malformed or non-canonical lock unexpectedly parsed: {document}"
+            );
+        }
     }
 
     #[test]

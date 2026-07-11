@@ -70,13 +70,35 @@ huq.17 and 1t8i; docs/BOOTSTRAP.md). This standalone, zero-dependency package
 builds before the root workspace resolves, fetches every repo from
 `constellation.lock`'s recorded remotes at the pinned revisions, applies the
 same pinned-head and clean-tree verification to existing and newly cloned
-siblings, supports `--offline` cache verification and `--from` mirrors, and
-writes fetch provenance. `cargo run -p xtask -- bootstrap-constellation`
+siblings, and refuses a noncanonical/oversized lock, duplicate or unknown
+library, mismatched lock hash, or path-unsafe library identity before deriving
+any destination. Clean verification disables global ignores, catches files
+hidden by repository-local excludes, and rejects `assume-unchanged` or
+`skip-worktree` index entries. It supports `--offline` cache verification and `--from` mirrors, and
+writes v2 fetch provenance that distinguishes the canonical upstream remote from
+the selected mirror/transport and records whether that transport was actually
+used. `cargo run -p xtask -- bootstrap-constellation`
 remains the in-workspace command after the sibling paths already resolve.
 `scripts/ci/checkout_constellation.sh` remains the shell-only
-equivalent used by the manual workflow specs; `xtask
-check-constellation` then verifies zero drift. Bumping a sibling is a
-deliberate act: re-run `cargo run -p xtask -- lock-constellation`
+equivalent used by the manual workflow specs; both it and `xtask
+check-constellation` now require every sibling to be at the pinned head with a
+clean tracked/untracked working tree. The script's `--snapshot` mode is the
+canonical repo-local CI content identity. Snapshot v2 length-frames HEAD, index
+state, sorted paths, Git-semantic modes, regular-file SHA-256s, symlink target
+bytes, explicit missing entries, the exact lock bytes, and every clean pinned
+sibling head/tree. It never hashes rendered `git diff` text and fails closed on
+unsupported special files. Cleanliness forces executable-bit and full untracked
+reporting, disables global excludes, then independently enumerates untracked
+paths using only the repository's `.gitignore` rules; ignored build artifacts
+are intentionally outside source identity. Stable dirty FrankenSim roots are
+therefore hashed exactly, while any dirty sibling is refused.
+
+The standalone Rust, shell, and in-workspace xtask bootstrap paths initialize
+new siblings in place with a local incomplete-state marker before fetching. A retry may resume
+a clean marked checkout, or a clean unborn checkout with the exact expected
+origin, without deleting anything. Ordinary dirty repositories and ordinary
+repositories at a mismatched HEAD are never repaired automatically. Bumping a
+sibling remains deliberate: re-run `cargo run -p xtask -- lock-constellation`
 locally and commit the new lock (schema v2 records remotes).
 
 ## Decalogue mapping (plan patch Rev 25)
