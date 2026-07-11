@@ -1206,27 +1206,130 @@ pub fn run_is_citable(
     run_admission_error(axes, post_axes, baseline, results).is_none()
 }
 
+fn push_receipt_field(payload: &mut Vec<u8>, bytes: &[u8]) {
+    let len = u64::try_from(bytes.len()).expect("receipt field length fits u64");
+    payload.extend_from_slice(&len.to_le_bytes());
+    payload.extend_from_slice(bytes);
+}
+
+/// One row of the op-bound ordered result manifest: which kernel/version sits
+/// at which position of the finalized result set, and the content hash of its
+/// exact payload bytes.
+struct ManifestEntry {
+    ordinal: u64,
+    kernel: String,
+    version: String,
+    payload: fs_blake3::ContentHash,
+}
+
+fn manifest_entry_json(ordinal: u64, kernel: &str, version: &str, payload: &str) -> String {
+    format!(
+        "{{\"ordinal\":{ordinal},\"kernel\":\"{kernel}\",\"version\":\"{version}\",\"payload\":\"{payload}\"}}"
+    )
+}
+
+/// Canonical JSON for the ordered result manifest. Kernel names and versions
+/// are static registry identifiers; names needing JSON escaping are refused at
+/// parse time, so serialization never escapes.
+fn run_result_manifest_json(results: &[Attainment]) -> String {
+    let entries = results
+        .iter()
+        .enumerate()
+        .map(|(ordinal, result)| {
+            manifest_entry_json(
+                ordinal as u64,
+                &result.kernel,
+                &result.version,
+                &fs_ledger::hash_bytes(result.to_jsonl().as_bytes()).to_string(),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("{{\"schema\":\"{RESULT_MANIFEST_SCHEMA}\",\"entries\":[{entries}]}}")
+}
+
+/// Strict parse of a run-result manifest. Ordinals must be exactly
+/// `0..entries.len()` in order; kernel/version must be plain identifiers
+/// (no quotes, backslashes, or control bytes — escaping would break the
+/// byte-exact round-trip this parser enforces).
+fn parse_result_manifest(text: &str) -> Option<Vec<ManifestEntry>> {
+    let body = text
+        .strip_prefix(&format!(
+            "{{\"schema\":\"{RESULT_MANIFEST_SCHEMA}\",\"entries\":["
+        ))?
+        .strip_suffix("]}")?;
+    let mut entries = Vec::new();
+    if !body.is_empty() {
+        for raw in body.split("},") {
+            let raw_entry = if raw.ends_with('}') {
+                raw.to_string()
+            } else {
+                format!("{raw}}}")
+            };
+            let inner = raw_entry
+                .strip_prefix("{\"ordinal\":")?
+                .strip_suffix("\"}")?;
+            let (ordinal_text, rest) = inner.split_once(",\"kernel\":\"")?;
+            let (kernel, rest) = rest.split_once("\",\"version\":\"")?;
+            let (version, payload_hex) = rest.split_once("\",\"payload\":\"")?;
+            let plain = |s: &str| {
+                !s.is_empty()
+                    && s.bytes()
+                        .all(|b| (0x20..0x7f).contains(&b) && b != b'"' && b != b'\\')
+            };
+            if !plain(kernel) || !plain(version) {
+                return None;
+            }
+            let ordinal: u64 = ordinal_text.parse().ok()?;
+            if ordinal != u64::try_from(entries.len()).ok()? {
+                return None;
+            }
+            let payload = fs_blake3::ContentHash::from_hex(payload_hex)?;
+            entries.push(ManifestEntry {
+                ordinal,
+                kernel: kernel.to_string(),
+                version: version.to_string(),
+                payload,
+            });
+        }
+    }
+    // Byte-exact round trip: any formatting the serializer would not produce
+    // (whitespace, reordered fields, uppercase hex) is refused.
+    let reserialized = format!(
+        "{{\"schema\":\"{RESULT_MANIFEST_SCHEMA}\",\"entries\":[{}]}}",
+        entries
+            .iter()
+            .map(|e| manifest_entry_json(e.ordinal, &e.kernel, &e.version, &e.payload.to_string()))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    (reserialized == text).then_some(entries)
+}
+
 fn finalized_run_receipt(
     axes: &MachineAxes,
     post_axes: &MachineAxes,
     baseline: AxisBaselinePolicy<'_>,
     results: &[Attainment],
 ) -> fs_blake3::ContentHash {
-    fn push_field(payload: &mut Vec<u8>, bytes: &[u8]) {
-        let len = u64::try_from(bytes.len()).expect("receipt field length fits u64");
-        payload.extend_from_slice(&len.to_le_bytes());
-        payload.extend_from_slice(bytes);
-    }
-
     let mut payload = Vec::new();
     let baseline_receipt = baseline.receipt_json(axes, post_axes);
-    push_field(&mut payload, baseline_receipt.as_bytes());
+    push_receipt_field(&mut payload, baseline_receipt.as_bytes());
     let result_count = u64::try_from(results.len()).expect("result count fits u64");
     payload.extend_from_slice(&result_count.to_le_bytes());
     for result in results {
         let receipt = result.to_jsonl();
-        push_field(&mut payload, receipt.as_bytes());
+        push_receipt_field(&mut payload, receipt.as_bytes());
     }
+    // Bind the ordered result manifest (kernel/version/ordinal/payload hash
+    // per row) into the receipt itself: staleness later recomputes this whole
+    // hash from the manifest and the stored rows, so a row swap that keeps
+    // the old receipt can no longer classify as fresh evidence (bead gp3.15).
+    let manifest_hash = fs_blake3::hash_domain(
+        RESULT_MANIFEST_DOMAIN,
+        run_result_manifest_json(results).as_bytes(),
+    );
+    push_receipt_field(&mut payload, manifest_hash.as_bytes());
     fs_blake3::hash_domain(FINALIZED_RUN_DOMAIN, &payload)
 }
 
@@ -1420,7 +1523,12 @@ pub const SECTION_14_1_TARGETS: &[TargetRow] = &[
     },
 ];
 
-const ROOFLINE_ROW_SCHEMA: &str = "fs-roofline-ledger-row-v2";
+// v3: run receipts fold in the op-bound ordered result manifest and staleness
+// recomputes the full receipt from stored rows (bead gp3.15). v2 rows predate
+// the manifest and can no longer prove membership in their finalized run, so
+// the version bump retires them explicitly (they classify as CorruptEvidence,
+// never Fresh) instead of grandfathering them past the stronger check.
+const ROOFLINE_ROW_SCHEMA: &str = "fs-roofline-ledger-row-v3";
 const ROOFLINE_PAYLOAD_ARTIFACT_KIND: &str = "roofline-benchmark-result";
 const ROOFLINE_EXECUTABLE_DOMAIN: &str = "org.frankensim.fs-roofline.executable.v1";
 
@@ -1646,11 +1754,12 @@ pub fn record_run(
         capability: "{\"ops\":[\"perf.roofline\"]}",
     };
     let ir = format!(
-        "{{\"op\":\"perf.roofline\",\"kernels\":{},\"fingerprint\":\"{:016x}\",\"post_fingerprint\":\"{:016x}\",\"admitted\":{run_valid},\"finalized_run_receipt\":\"{}\",\"baseline_admission\":{baseline_receipt}}}",
+        "{{\"op\":\"perf.roofline\",\"kernels\":{},\"fingerprint\":\"{:016x}\",\"post_fingerprint\":\"{:016x}\",\"admitted\":{run_valid},\"finalized_run_receipt\":\"{}\",\"result_manifest\":{},\"baseline_admission\":{baseline_receipt}}}",
         results.len(),
         axes.fingerprint,
         post_axes.fingerprint,
         finalized.receipt,
+        run_result_manifest_json(results),
     );
     ledger.begin()?;
     let write_result: Result<i64, LedgerError> = (|| {
@@ -2036,10 +2145,81 @@ fn validate_roofline_row(
         .iter()
         .zip(params.post_axis_bits)
         .all(|(name, bits)| post.contains(&format!("\"{name}\":\"{bits:016x}\"")));
-    Ok(post_matches.then_some(ValidatedRooflineRow {
+    if !post_matches {
+        return Ok(None);
+    }
+
+    if !receipt_recomputes_from_stored_rows(
+        ledger,
+        &op.ir,
+        &params,
+        kernel,
+        version,
+        roofline_machine_key(current_fingerprint, current_baseline),
+    )? {
+        return Ok(None);
+    }
+
+    Ok(Some(ValidatedRooflineRow {
         build_identity: params.build_identity,
         recorded_at_ns,
     }))
+}
+
+/// Reconstruct the finalized run receipt from the operation-bound ordered
+/// result manifest and the rows actually stored today (bead gp3.15). The
+/// manifest lives in the op's `ir`, which no ledger API mutates after
+/// `begin_op`; the receipt binds baseline receipt bytes, ordered payload
+/// bytes, and the manifest hash. A writer who replaces one payload plus its
+/// matching artifact/params while retaining the old run receipt now fails
+/// this recomputation instead of classifying as fresh.
+fn receipt_recomputes_from_stored_rows(
+    ledger: &Ledger,
+    op_ir: &str,
+    params: &RooflineRowParams,
+    kernel: &str,
+    version: &str,
+    machine_key: [u8; 40],
+) -> Result<bool, LedgerError> {
+    let Some((_, manifest_and_later)) = op_ir.split_once("\"result_manifest\":") else {
+        return Ok(false);
+    };
+    let Some((manifest_text, _)) = manifest_and_later.split_once(",\"baseline_admission\":") else {
+        return Ok(false);
+    };
+    let Some(entries) = parse_result_manifest(manifest_text) else {
+        return Ok(false);
+    };
+    if entries.is_empty()
+        || !entries.iter().any(|e| {
+            e.kernel == kernel && e.version == version && e.payload == params.payload_artifact
+        })
+    {
+        return Ok(false);
+    }
+    let Some((_, admission_and_later)) = op_ir.split_once("\"baseline_admission\":") else {
+        return Ok(false);
+    };
+    let Some(baseline_receipt) = admission_and_later.strip_suffix('}') else {
+        return Ok(false);
+    };
+    let mut receipt_payload = Vec::new();
+    push_receipt_field(&mut receipt_payload, baseline_receipt.as_bytes());
+    let entry_count = u64::try_from(entries.len()).expect("manifest entry count fits u64");
+    receipt_payload.extend_from_slice(&entry_count.to_le_bytes());
+    for entry in &entries {
+        let shape = tune_measurement_shape_class(&entry.version, params.run_receipt, params.op);
+        let Some(stored) = ledger.tune_get(&entry.kernel, &shape, &machine_key)? else {
+            return Ok(false);
+        };
+        if fs_ledger::hash_bytes(stored.measured.as_bytes()) != entry.payload {
+            return Ok(false);
+        }
+        push_receipt_field(&mut receipt_payload, stored.measured.as_bytes());
+    }
+    let manifest_hash = fs_blake3::hash_domain(RESULT_MANIFEST_DOMAIN, manifest_text.as_bytes());
+    push_receipt_field(&mut receipt_payload, manifest_hash.as_bytes());
+    Ok(fs_blake3::hash_domain(FINALIZED_RUN_DOMAIN, &receipt_payload) == params.run_receipt)
 }
 
 #[cfg(test)]

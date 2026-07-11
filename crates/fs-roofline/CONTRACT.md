@@ -71,6 +71,19 @@ crates plus `std`.
   identity. `Fresh` requires the newest current-build op to be no more than 30
   days old. `staleness_at` takes explicit wall nanoseconds for deterministic
   replay; `staleness` supplies the current clock.
+- Ordered result manifest (bead gp3.15, ledger row schema v3): every recorded
+  run binds a versioned `result_manifest` (ordinal × kernel × version ×
+  payload content hash, canonical JSON) into the operation `ir` and folds its
+  domain-separated hash into the finalized run receipt
+  (`finalized-run.v2`). Staleness revalidation reconstructs the entire receipt
+  from the manifest and the rows stored **today** — baseline receipt bytes,
+  every payload in manifest order, manifest hash — and compares it to the
+  op-bound receipt. Replacing one payload plus its matching artifact/params
+  while retaining the old receipt, adding rows beyond the manifest, or
+  removing/altering any sibling row classifies as `CorruptEvidence` for every
+  row of that run (`tests/manifest_tamper.rs`). Pre-manifest v2 rows cannot
+  prove receipt membership and are retired the same way; identical honest
+  reruns stay `Fresh`.
 - `kernels::default_registry` — the stable test/meta registry: fs-simd
   axpy/dot/sum (report-only bands in v0). `SeededSlowKernel` is the separate
   meta-test kernel claiming a band it cannot meet.
