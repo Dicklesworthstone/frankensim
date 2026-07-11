@@ -702,6 +702,8 @@ impl TilePool {
                 .collect(),
         };
 
+        // Stable failure-class precedence preserves legacy panic containment
+        // while keeping typed refusals distinct from ordinary cancellation.
         if let Some((worker, message)) = spawn_failure {
             return (
                 Err(RunError::WorkerSpawn {
