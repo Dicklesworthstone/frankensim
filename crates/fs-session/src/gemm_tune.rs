@@ -232,7 +232,7 @@ impl From<fs_la::GemmCancelled> for GemmTuneError {
         Self::Cancelled {
             limit_bytes,
             peak_used_bytes,
-            report: Some(Box::new(cancelled.report)),
+            report: Some(cancelled.report),
         }
     }
 }
@@ -248,7 +248,7 @@ impl From<fs_la::GemmRunError> for GemmTuneError {
                     error,
                     limit_bytes,
                     peak_used_bytes,
-                    report: Box::new(report),
+                    report,
                 }
             }
             fs_la::GemmRunError::MemoryRefused {
@@ -261,7 +261,7 @@ impl From<fs_la::GemmRunError> for GemmTuneError {
                 requested_bytes,
                 limit_bytes,
                 peak_used_bytes: report.memory.peak_used_bytes,
-                report: Some(Box::new(report)),
+                report: Some(report),
             },
             fs_la::GemmRunError::MemoryPlanOverflow { what, limit_bytes } => {
                 Self::MemoryPlanOverflow { what, limit_bytes }
@@ -1945,7 +1945,7 @@ mod tests {
         let decision = tuner.prepare_gemm_decision(&key);
         let error = execute_prepared_decision(&mut tuner, decision, |_| {
             Err::<(), _>(GemmTuneError::from(fs_la::GemmCancelled {
-                report: fs_la::GemmRunReport {
+                report: Box::new(fs_la::GemmRunReport {
                     declared_run: fs_exec::RunId(9),
                     completed_tiles: 7,
                     total_tiles: 19,
@@ -1956,7 +1956,7 @@ mod tests {
                         peak_used_bytes: 384,
                         ..fs_la::GemmMemoryReport::default()
                     },
-                },
+                }),
             }))
         })
         .expect_err("cancelled producer");
@@ -1997,7 +1997,7 @@ mod tests {
                 kernel: "fixture",
                 tile: 4,
             },
-            report,
+            report: Box::new(report),
         });
         let GemmTuneError::Executor {
             limit_bytes,

@@ -151,7 +151,7 @@ pub struct GemmRunReport {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GemmCancelled {
     /// Work completed in private staging before the request was observed.
-    pub report: GemmRunReport,
+    pub report: Box<GemmRunReport>,
 }
 
 impl core::fmt::Display for GemmCancelled {
@@ -178,7 +178,7 @@ pub enum GemmRunError {
         /// Structured fs-exec failure with logical tile provenance.
         error: fs_exec::RunError,
         /// Compute and traversal progress accumulated before refusal.
-        report: GemmRunReport,
+        report: Box<GemmRunReport>,
     },
     /// Refused at the memory boundary (wf9.15): the preflight plan exceeded
     /// the caller's envelope, or an fs-la-owned reservation was declined. Any
@@ -192,7 +192,7 @@ pub enum GemmRunError {
         /// The envelope in force.
         limit_bytes: u64,
         /// Progress and logical-memory accounting at the drained boundary.
-        report: GemmRunReport,
+        report: Box<GemmRunReport>,
     },
     /// Arithmetic needed to represent the logical memory plan exceeded u128.
     /// No allocation, dispatch, or caller-visible mutation occurred.
@@ -735,7 +735,13 @@ fn cancelled(
     memory: GemmMemoryReport,
 ) -> GemmCancelled {
     GemmCancelled {
-        report: report(completed, total_tiles, pool_runs, declared_run, memory),
+        report: Box::new(report(
+            completed,
+            total_tiles,
+            pool_runs,
+            declared_run,
+            memory,
+        )),
     }
 }
 
@@ -935,7 +941,13 @@ fn memory_refused(
         what,
         requested_bytes: refused_bytes,
         limit_bytes: memory.limit_bytes,
-        report: report(completed, total_tiles, pool_runs, declared_run, memory),
+        report: Box::new(report(
+            completed,
+            total_tiles,
+            pool_runs,
+            declared_run,
+            memory,
+        )),
     }
 }
 
@@ -1124,7 +1136,13 @@ where
                     what: "a-pack-arena-plan",
                     requested_bytes: refused_bytes,
                     limit_bytes: envelope.limit_bytes,
-                    report: report(&completed, total_tiles, Vec::new(), declared_run, memory),
+                    report: Box::new(report(
+                        &completed,
+                        total_tiles,
+                        Vec::new(),
+                        declared_run,
+                        memory,
+                    )),
                 });
             }
         }
@@ -1159,7 +1177,13 @@ where
             what: "preflight-envelope",
             requested_bytes: memory.requested_bytes,
             limit_bytes: memory.limit_bytes,
-            report: report(&completed, total_tiles, Vec::new(), declared_run, memory),
+            report: Box::new(report(
+                &completed,
+                total_tiles,
+                Vec::new(),
+                declared_run,
+                memory,
+            )),
         });
     }
     let Some(b_pack_len) = plan.b_pack_len else {
@@ -1390,7 +1414,13 @@ where
                 Err(error) => {
                     return Err(GemmRunError::Executor {
                         error,
-                        report: report(&completed, total_tiles, pool_runs, declared_run, memory),
+                        report: Box::new(report(
+                            &completed,
+                            total_tiles,
+                            pool_runs,
+                            declared_run,
+                            memory,
+                        )),
                     });
                 }
             }
@@ -1414,7 +1444,7 @@ where
     debug_assert_eq!(final_report.completed_tiles, final_report.total_tiles);
     if poll() {
         return Err(GemmRunError::Cancelled(GemmCancelled {
-            report: final_report,
+            report: Box::new(final_report),
         }));
     }
     // FINALIZE: &mut C excludes safe concurrent observers. Once the final poll

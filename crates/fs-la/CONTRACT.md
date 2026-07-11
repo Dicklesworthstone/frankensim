@@ -204,7 +204,9 @@ exposes the pivot-growth statistic for ledgering. Pool GEMM returns
 or a fallible reservation is declined, retaining drained progress and memory
 accounting; `MemoryPlanOverflow` refuses before allocation when the plan cannot
 be represented. Cancellation and executor failures likewise retain the full
-`GemmRunReport`, and caller-visible `C` is unchanged on every error path.
+`GemmRunReport`, and caller-visible `C` is unchanged on every error path. The
+failure-only reports are boxed so the hot `Result` representation remains
+small; successful runs still return their report directly.
 
 ## Determinism class
 GEMM: bit-deterministic CROSS-ISA by construction (fixed per-element loop
