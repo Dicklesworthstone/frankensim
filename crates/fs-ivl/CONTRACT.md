@@ -58,8 +58,16 @@ implementation shared with fs-la — recorded relocation, beads
 
 - `expansion` — Shewchuk floating-point expansion arithmetic (exact sums,
   scaled products, expansion×expansion products, exact-diff two-component
-  constructors, sign extraction). Every op is error-free: the output's
-  exact sum equals the exact real result (residual-law tested).
+  constructors, sign extraction). For valid finite inputs whose result remains
+  representable as a finite expansion, every op is error-free: the output's
+  exact sum equals the exact real result (residual-law tested). Arithmetic
+  panics rather than emit a non-finite component when a result leaves that
+  domain.
+  `two_diff`/`diff_expansion` reject non-finite operands and finite operands
+  whose difference overflows rather than emit a NaN-bearing invalid expansion
+  that downstream sign checks could mistake for exact zero. `expansion_sign`
+  independently rejects every non-finite component, so invalid low-level
+  arithmetic fails closed at the certificate decision boundary.
 - `predicates` — adaptive-precision EXACT `orient2d`/`orient3d`/`incircle`/
   `insphere` (+ `*_with_stage` telemetry variants): fast float evaluation
   guarded by Shewchuk's proven stage-A error bounds (arrangement-specific
@@ -96,6 +104,13 @@ NaN/inverted constructor endpoints, sqrt of entirely-negative interval,
 ln with hi ≤ 0. Partial-domain overlaps degrade gracefully (sqrt clips at
 0; ln returns lower bound −∞). Division by zero-containing intervals
 returns `WHOLE`, never panics.
+
+Exact coordinate-difference expansion constructors panic on non-finite
+operands and on finite differences outside the representable expansion
+domain. Low-level expansion sum/product operations retain their documented
+valid-finite-expansion input precondition and panic if an intermediate result
+leaves the finite representable domain. Sign extraction panics if any component
+is non-finite rather than treating NaN as exact zero.
 
 Interval root isolation accepts only finite domains, finite positive target
 widths, and nonzero box budgets. `newton_roots_bounded` returns structured

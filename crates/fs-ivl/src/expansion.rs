@@ -9,25 +9,52 @@
 //! SIGN of the value is the sign of the largest (last) component — the
 //! property the exact predicates stand on.
 //!
-//! Every operation is error-free: the output's exact sum equals the exact
-//! real-arithmetic result. That is bitwise-testable algebra (the G0 suite
-//! reconstructs sums through a double-double ladder and an i128 lattice
-//! oracle), not approximation.
+//! For valid finite inputs whose exact result remains representable as a
+//! finite expansion, every operation is error-free: the output's exact sum
+//! equals the exact real-arithmetic result. That is bitwise-testable algebra
+//! (the G0 suite reconstructs sums through a double-double ladder and an i128
+//! lattice oracle), not approximation. Arithmetic that leaves this domain
+//! panics instead of emitting a non-finite pseudo-expansion.
+//! [`two_diff`] and [`diff_expansion`] reject non-finite operands and finite
+//! operands whose mathematical difference cannot be represented by a valid
+//! finite expansion. This prevents a NaN-bearing pseudo-expansion from being
+//! mistaken for exact zero by downstream certificate code. As a second
+//! fail-closed boundary, [`expansion_sign`] rejects any non-finite component.
 //!
 //! Determinism: pure +,−,×,`mul_add` — cross-ISA bit-deterministic by
 //! construction.
 
 use fs_math::eft::{quick_two_sum, two_prod, two_sum};
 
-/// Exact difference: `(d, tail)` with `d = fl(a−b)` and `d + tail = a − b`
+/// Exact difference: `(d, tail)` with `d = fl(a−b)` and `d + tail = a - b`
 /// exactly (Shewchuk's Two-Diff, via [`two_sum`] on the negation).
+///
+/// # Panics
+///
+/// Panics when either operand is non-finite or when the rounded difference
+/// overflows. Neither case has a valid finite floating-point expansion, and
+/// allowing the resulting NaNs through would make [`expansion_sign`] fail
+/// open.
 #[must_use]
 pub fn two_diff(a: f64, b: f64) -> (f64, f64) {
-    two_sum(a, -b)
+    assert!(
+        a.is_finite() && b.is_finite(),
+        "exact difference requires finite operands: a={a}, b={b}"
+    );
+    let (d, tail) = two_sum(a, -b);
+    assert!(
+        d.is_finite() && tail.is_finite(),
+        "exact difference overflowed the finite expansion domain: a={a}, b={b}"
+    );
+    (d, tail)
 }
 
 /// Push a component, eliminating zeros (empty output = exact zero).
 fn push_nonzero(h: &mut Vec<f64>, x: f64) {
+    assert!(
+        x.is_finite(),
+        "expansion arithmetic left the finite representable domain"
+    );
     if x != 0.0 {
         h.push(x);
     }
@@ -143,8 +170,17 @@ pub fn expansion_diff(a: &[f64], b: &[f64]) -> Vec<f64> {
 
 /// The sign of an expansion's exact value: the sign of its largest
 /// component (valid because components are nonoverlapping), 0 when empty.
+///
+/// # Panics
+///
+/// Panics when any component is non-finite. Such a slice is not a valid
+/// expansion; in particular, NaN must not be interpreted as exact zero.
 #[must_use]
 pub fn expansion_sign(e: &[f64]) -> i32 {
+    assert!(
+        e.iter().all(|x| x.is_finite()),
+        "expansion sign requires finite components: {e:?}"
+    );
     match e.last() {
         Some(&x) if x > 0.0 => 1,
         Some(&x) if x < 0.0 => -1,
@@ -171,12 +207,8 @@ pub fn prod_diff(a: f64, b: f64, c: f64, d: f64) -> Vec<f64> {
 /// Two-component expansion `(lo, hi)` with zeros eliminated.
 fn nonzero2(lo: f64, hi: f64) -> Vec<f64> {
     let mut v = Vec::with_capacity(2);
-    if lo != 0.0 {
-        v.push(lo);
-    }
-    if hi != 0.0 {
-        v.push(hi);
-    }
+    push_nonzero(&mut v, lo);
+    push_nonzero(&mut v, hi);
     v
 }
 
@@ -271,5 +303,29 @@ mod tests {
         assert!(expansion_product(&[], &[1.0]).is_empty());
         let x = diff_expansion(3.5, 3.5);
         assert!(x.is_empty(), "a − a is exactly zero: {x:?}");
+    }
+
+    #[test]
+    #[should_panic(expected = "exact difference requires finite operands")]
+    fn coordinate_difference_rejects_non_finite_operands() {
+        let _ = diff_expansion(f64::INFINITY, f64::INFINITY);
+    }
+
+    #[test]
+    #[should_panic(expected = "exact difference overflowed the finite expansion domain")]
+    fn coordinate_difference_rejects_overflowing_finite_operands() {
+        let _ = diff_expansion(f64::MAX, -f64::MAX);
+    }
+
+    #[test]
+    #[should_panic(expected = "expansion sign requires finite components")]
+    fn sign_rejects_nan_instead_of_misclassifying_it_as_zero() {
+        let _ = expansion_sign(&[f64::NAN]);
+    }
+
+    #[test]
+    #[should_panic(expected = "expansion arithmetic left the finite representable domain")]
+    fn scaled_expansion_rejects_overflow_instead_of_emitting_nan() {
+        let _ = scale_expansion_zeroelim(&[f64::MAX], 2.0);
     }
 }
