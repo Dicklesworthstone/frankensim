@@ -10,8 +10,8 @@ use fs_exec::CancelGate;
 use fs_exec::solver::{SolverState, codec};
 use fs_plan::{CostModel, CostObservation};
 use fs_session::{
-    CalibrationReport, CapabilityToken, Charge, DegradationStep, Enforcement, Governor, Guidance,
-    SessionError, SessionId, StepPhase, SubmitOutcome, estimate,
+    CalibrationReport, CapabilityToken, Charge, DegradationStep, Enforcement, Estimate, Governor,
+    Guidance, SessionError, SessionId, StepPhase, SubmitOutcome, estimate,
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
