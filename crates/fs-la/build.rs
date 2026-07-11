@@ -340,11 +340,7 @@ fn main() {
         "FRANKENSIM_GEMM_CODEGEN_ID",
     ] {
         let value = optional_env(name);
-        push_optional_field(
-            &mut payload,
-            name,
-            value.as_deref().map(str::as_bytes),
-        );
+        push_optional_field(&mut payload, name, value.as_deref().map(str::as_bytes));
     }
     let rustc_wrapper = optional_env("RUSTC_WRAPPER");
     push_optional_field(
@@ -374,11 +370,7 @@ fn main() {
         for key in PROFILE_CODEGEN_KEYS {
             let name = format!("CARGO_PROFILE_{profile}_{key}");
             let value = optional_env(&name);
-            push_optional_field(
-                &mut payload,
-                &name,
-                value.as_deref().map(str::as_bytes),
-            );
+            push_optional_field(&mut payload, &name, value.as_deref().map(str::as_bytes));
             watched_profile_vars.push(name);
         }
     }

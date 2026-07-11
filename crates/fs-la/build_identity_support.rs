@@ -21,7 +21,11 @@ pub fn push_optional_field(payload: &mut Vec<u8>, name: &str, value: Option<&[u8
     push_field(
         payload,
         &format!("{name}:presence"),
-        if value.is_some() { b"present" } else { b"absent" },
+        if value.is_some() {
+            b"present"
+        } else {
+            b"absent"
+        },
     );
     if let Some(value) = value {
         push_field(payload, name, value);
@@ -58,7 +62,11 @@ pub fn append_executable_identity(
     resolved_path: &str,
     bytes: &[u8],
 ) {
-    push_field(payload, &format!("executable:{label}:path"), resolved_path.as_bytes());
+    push_field(
+        payload,
+        &format!("executable:{label}:path"),
+        resolved_path.as_bytes(),
+    );
     let digest = fs_blake3::hash_domain(EXECUTABLE_CONTEXT, bytes);
     push_field(
         payload,

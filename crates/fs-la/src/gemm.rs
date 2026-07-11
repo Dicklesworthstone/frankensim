@@ -66,6 +66,48 @@ pub const GEMM_MAX_FMAS_BETWEEN_POLLS: usize = MR * NR * (KC + 1);
 /// Number of output elements staged between cancellation polls.
 const C_STAGE_TILE_ELEMENTS: usize = 4096;
 
+/// Explicit operation memory envelope for the pool GEMM path (bead
+/// wf9.15): the byte ceiling the caller grants root orchestration.
+/// Preflight-checked BEFORE any allocation or C mutation; the default
+/// is unbounded (existing callers unchanged).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GemmMemoryEnvelope {
+    /// Ceiling over staging + shared pack + band metadata + per-worker
+    /// arena panels, in bytes.
+    pub limit_bytes: u64,
+}
+
+impl GemmMemoryEnvelope {
+    /// No caller-imposed ceiling.
+    pub const UNBOUNDED: GemmMemoryEnvelope = GemmMemoryEnvelope {
+        limit_bytes: u64::MAX,
+    };
+}
+
+impl Default for GemmMemoryEnvelope {
+    fn default() -> Self {
+        Self::UNBOUNDED
+    }
+}
+
+/// Requested/limit bytes ledgered with every pool-GEMM run (wf9.15):
+/// the preflight plan the operation was admitted under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct GemmMemoryReport {
+    /// The envelope in force (u64::MAX = unbounded).
+    pub limit_bytes: u64,
+    /// Transactional C staging bytes.
+    pub staging_bytes: u64,
+    /// Shared packed-B panel bytes.
+    pub b_pack_bytes: u64,
+    /// Per-panel band-metadata bytes (mutex-guarded band slots).
+    pub band_metadata_bytes: u64,
+    /// Per-worker A micro-panel arena bytes x normalized worker count.
+    pub arena_bytes: u64,
+    /// Preflight total (checked sum of the above).
+    pub requested_bytes: u64,
+}
+
 /// Structured progress for a cancellation-aware GEMM dispatch. A successful
 /// return always has `completed_tiles == total_tiles`; a cancelled return may
 /// contain completed work, but that work exists only in private staging.
@@ -81,6 +123,9 @@ pub struct GemmRunReport {
     /// Empty only when the operation has no arithmetic product or cancellation
     /// happened before the first M-band dispatch.
     pub pool_runs: Vec<fs_exec::RunReport>,
+    /// The memory plan the operation was admitted under (wf9.15):
+    /// requested/limit bytes for staging, pack, metadata, and arenas.
+    pub memory: GemmMemoryReport,
 }
 
 /// Cancellation observed at a bounded GEMM poll point after all scoped
@@ -117,6 +162,22 @@ pub enum GemmRunError {
         /// Compute and traversal progress accumulated before refusal.
         report: GemmRunReport,
     },
+    /// Refused at the memory boundary (wf9.15): the preflight plan
+    /// exceeded the caller's envelope, or the allocator declined a
+    /// reservation. Raised BEFORE the corresponding work starts; any
+    /// dispatched panels were drained by the pool's scoped join, and
+    /// caller-visible C is bitwise unchanged.
+    MemoryRefused {
+        /// Which reservation was refused ("preflight-envelope",
+        /// "c-staging", "b-pack", "band-metadata").
+        what: &'static str,
+        /// Bytes the refused reservation asked for.
+        requested_bytes: u64,
+        /// The envelope in force.
+        limit_bytes: u64,
+        /// Progress (zero completed tiles by construction).
+        report: GemmRunReport,
+    },
 }
 
 impl core::fmt::Display for GemmRunError {
@@ -124,6 +185,15 @@ impl core::fmt::Display for GemmRunError {
         match self {
             Self::Cancelled(error) => error.fmt(f),
             Self::Executor { error, .. } => write!(f, "gemm executor: {error}"),
+            Self::MemoryRefused {
+                what,
+                requested_bytes,
+                limit_bytes,
+                ..
+            } => write!(
+                f,
+                "gemm memory refused at {what}: {requested_bytes} bytes requested against a                  {limit_bytes}-byte envelope; output not touched — raise the envelope or                  shrink the operation"
+            ),
         }
     }
 }
@@ -133,6 +203,7 @@ impl core::error::Error for GemmRunError {
         match self {
             Self::Cancelled(error) => Some(error),
             Self::Executor { error, .. } => Some(error),
+            Self::MemoryRefused { .. } => None,
         }
     }
 }
@@ -531,6 +602,58 @@ pub fn gemm_f64_parallel_with_pool_declared(
         nc_q,
         gate,
         declared_run,
+        GemmMemoryEnvelope::UNBOUNDED,
+        &|| gate.is_requested(),
+    )
+}
+
+/// As [`gemm_f64_parallel_with_pool_declared`], with an explicit
+/// operation MEMORY ENVELOPE (bead wf9.15): the full reservation plan
+/// (C staging + shared B pack + band metadata + per-worker arena
+/// panels) is preflight-checked against `envelope` BEFORE any
+/// allocation or C mutation, every root reservation is fallible, and
+/// the admitted plan is ledgered in [`GemmRunReport::memory`].
+///
+/// # Errors
+/// As [`gemm_f64_parallel_with_pool`], plus
+/// [`GemmRunError::MemoryRefused`] when the plan exceeds the envelope
+/// or the allocator declines a reservation — C is bitwise unchanged
+/// and any dispatched panels were drained.
+///
+/// # Panics
+/// As [`gemm_f64_parallel_with_pool`].
+#[allow(clippy::too_many_arguments)]
+pub fn gemm_f64_parallel_with_pool_budgeted(
+    m: usize,
+    n: usize,
+    k: usize,
+    alpha: f64,
+    a: &[f64],
+    b: &[f64],
+    beta: f64,
+    c: &mut [f64],
+    pool: &fs_exec::TilePool,
+    mc_q: usize,
+    nc_q: usize,
+    gate: &fs_exec::CancelGate,
+    declared_run: fs_exec::RunId,
+    envelope: GemmMemoryEnvelope,
+) -> Result<GemmRunReport, GemmRunError> {
+    gemm_f64_parallel_with_pool_and_poll(
+        m,
+        n,
+        k,
+        alpha,
+        a,
+        b,
+        beta,
+        c,
+        pool,
+        mc_q,
+        nc_q,
+        gate,
+        declared_run,
+        envelope,
         &|| gate.is_requested(),
     )
 }
@@ -562,12 +685,14 @@ fn report(
     total_tiles: usize,
     pool_runs: Vec<fs_exec::RunReport>,
     declared_run: fs_exec::RunId,
+    memory: GemmMemoryReport,
 ) -> GemmRunReport {
     GemmRunReport {
         declared_run,
         completed_tiles: completed.load(std::sync::atomic::Ordering::Acquire),
         total_tiles,
         pool_runs,
+        memory,
     }
 }
 
@@ -576,9 +701,47 @@ fn cancelled(
     total_tiles: usize,
     pool_runs: Vec<fs_exec::RunReport>,
     declared_run: fs_exec::RunId,
+    memory: GemmMemoryReport,
 ) -> GemmCancelled {
     GemmCancelled {
-        report: report(completed, total_tiles, pool_runs, declared_run),
+        report: report(completed, total_tiles, pool_runs, declared_run, memory),
+    }
+}
+
+/// Preflight byte plan (wf9.15): every root-orchestration reservation,
+/// checked against the caller's envelope BEFORE any allocation or C
+/// mutation. Arena bytes use the pool's normalized worker count (one
+/// bounded MR x KC A micro-panel per concurrently running tile).
+fn preflight_memory(
+    c_len: usize,
+    m: usize,
+    n: usize,
+    mc_q: usize,
+    nc_q: usize,
+    workers: usize,
+    envelope: GemmMemoryEnvelope,
+) -> GemmMemoryReport {
+    const F64: u64 = 8;
+    let staging_bytes = (c_len as u64).saturating_mul(F64);
+    let b_pack_cols = checked_round_up("parallel B pack columns", nc_q, NR);
+    let b_pack_bytes =
+        (checked_product("parallel B pack", KC, b_pack_cols) as u64).saturating_mul(F64);
+    let bands = m.div_ceil(mc_q.max(1)).max(1) as u64;
+    let band_metadata_bytes =
+        bands.saturating_mul(core::mem::size_of::<std::sync::Mutex<&mut [f64]>>() as u64);
+    let arena_bytes = (workers as u64).saturating_mul((MR * KC) as u64 * F64);
+    let requested_bytes = staging_bytes
+        .saturating_add(b_pack_bytes)
+        .saturating_add(band_metadata_bytes)
+        .saturating_add(arena_bytes);
+    let _ = n;
+    GemmMemoryReport {
+        limit_bytes: envelope.limit_bytes,
+        staging_bytes,
+        b_pack_bytes,
+        band_metadata_bytes,
+        arena_bytes,
+        requested_bytes,
     }
 }
 
@@ -690,6 +853,7 @@ fn gemm_f64_parallel_with_pool_and_poll<P>(
     nc_q: usize,
     gate: &fs_exec::CancelGate,
     declared_run: fs_exec::RunId,
+    envelope: GemmMemoryEnvelope,
     poll: &P,
 ) -> Result<GemmRunReport, GemmRunError>
 where
@@ -707,25 +871,61 @@ where
     };
     let completed = std::sync::atomic::AtomicUsize::new(0);
     let mut pool_runs = Vec::new();
+    // MEMORY PREFLIGHT (wf9.15): the full reservation plan is checked
+    // against the caller's envelope BEFORE anything is allocated or
+    // mutated — a refusal here has touched nothing.
+    let memory = preflight_memory(c.len(), m, n, mc_q, nc_q, pool.workers(), envelope);
+    if memory.requested_bytes > memory.limit_bytes {
+        return Err(GemmRunError::MemoryRefused {
+            what: "preflight-envelope",
+            requested_bytes: memory.requested_bytes,
+            limit_bytes: memory.limit_bytes,
+            report: report(&completed, total_tiles, pool_runs, declared_run, memory),
+        });
+    }
+    let refused = |what: &'static str,
+                   bytes: u64,
+                   completed: &std::sync::atomic::AtomicUsize,
+                   pool_runs: Vec<fs_exec::RunReport>| {
+        GemmRunError::MemoryRefused {
+            what,
+            requested_bytes: bytes,
+            limit_bytes: memory.limit_bytes,
+            report: report(completed, total_tiles, pool_runs, declared_run, memory),
+        }
+    };
     if poll() {
         return Err(GemmRunError::Cancelled(cancelled(
             &completed,
             total_tiles,
             pool_runs,
             declared_run,
+            memory,
         )));
     }
 
     // Transactional staging is the no-torn-C boundary. Capacity reservation
     // itself is not a poll point, but initialization/copying is chunked under
     // the gate so beta=0 cannot hide an unbounded zero-fill.
-    let Some(mut staged) = stage_beta(c, beta, poll) else {
-        return Err(GemmRunError::Cancelled(cancelled(
-            &completed,
-            total_tiles,
-            pool_runs,
-            declared_run,
-        )));
+    let mut staged = match stage_beta(c, beta, poll) {
+        Ok(staged) => staged,
+        Err(StageAbort::AllocRefused) => {
+            return Err(refused(
+                "c-staging",
+                memory.staging_bytes,
+                &completed,
+                pool_runs,
+            ));
+        }
+        Err(StageAbort::Cancelled) => {
+            return Err(GemmRunError::Cancelled(cancelled(
+                &completed,
+                total_tiles,
+                pool_runs,
+                declared_run,
+                memory,
+            )));
+        }
     };
     if !has_product {
         if poll() {
@@ -734,22 +934,41 @@ where
                 total_tiles,
                 pool_runs,
                 declared_run,
+                memory,
             )));
         }
         c.copy_from_slice(&staged);
-        return Ok(report(&completed, total_tiles, pool_runs, declared_run));
+        return Ok(report(
+            &completed,
+            total_tiles,
+            pool_runs,
+            declared_run,
+            memory,
+        ));
     }
 
     let b_pack_cols = checked_round_up("parallel B pack columns", nc_q, NR);
     let b_pack_len = checked_product("parallel B pack", KC, b_pack_cols);
     let band_len = checked_product("parallel C band", mc_q, n);
-    let Some(mut b_pack) = zeroed_with_poll(b_pack_len, poll) else {
-        return Err(GemmRunError::Cancelled(cancelled(
-            &completed,
-            total_tiles,
-            pool_runs,
-            declared_run,
-        )));
+    let mut b_pack = match zeroed_with_poll(b_pack_len, poll) {
+        Ok(pack) => pack,
+        Err(StageAbort::AllocRefused) => {
+            return Err(refused(
+                "b-pack",
+                memory.b_pack_bytes,
+                &completed,
+                pool_runs,
+            ));
+        }
+        Err(StageAbort::Cancelled) => {
+            return Err(GemmRunError::Cancelled(cancelled(
+                &completed,
+                total_tiles,
+                pool_runs,
+                declared_run,
+                memory,
+            )));
+        }
     };
     let mut jc = 0;
     while jc < n {
@@ -763,12 +982,22 @@ where
                     total_tiles,
                     pool_runs,
                     declared_run,
+                    memory,
                 )));
             }
-            let bands: Vec<std::sync::Mutex<&mut [f64]>> = staged
-                .chunks_mut(band_len)
-                .map(std::sync::Mutex::new)
-                .collect();
+            let mut bands: Vec<std::sync::Mutex<&mut [f64]>> = Vec::new();
+            if bands
+                .try_reserve_exact(staged.len().div_ceil(band_len.max(1)))
+                .is_err()
+            {
+                return Err(refused(
+                    "band-metadata",
+                    memory.band_metadata_bytes,
+                    &completed,
+                    pool_runs,
+                ));
+            }
+            bands.extend(staged.chunks_mut(band_len).map(std::sync::Mutex::new));
             let kernel = GemmBandKernel {
                 bands: &bands,
                 m,
@@ -798,12 +1027,13 @@ where
                         total_tiles,
                         pool_runs,
                         declared_run,
+                        memory,
                     )));
                 }
                 Err(error) => {
                     return Err(GemmRunError::Executor {
                         error,
-                        report: report(&completed, total_tiles, pool_runs, declared_run),
+                        report: report(&completed, total_tiles, pool_runs, declared_run, memory),
                     });
                 }
             }
@@ -813,6 +1043,7 @@ where
                     total_tiles,
                     pool_runs,
                     declared_run,
+                    memory,
                 )));
             }
             pc += KC;
@@ -820,7 +1051,7 @@ where
         jc += nc_q;
     }
 
-    let final_report = report(&completed, total_tiles, pool_runs, declared_run);
+    let final_report = report(&completed, total_tiles, pool_runs, declared_run, memory);
     debug_assert_eq!(final_report.completed_tiles, final_report.total_tiles);
     if poll() {
         return Err(GemmRunError::Cancelled(GemmCancelled {
@@ -834,29 +1065,49 @@ where
     Ok(final_report)
 }
 
-fn zeroed_with_poll<P>(len: usize, poll: &P) -> Option<Vec<f64>>
+/// Why a root-orchestration reservation stopped (wf9.15).
+enum StageAbort {
+    /// The gate/poll tripped mid-initialization.
+    Cancelled,
+    /// The allocator declined the reservation (never a process abort).
+    AllocRefused,
+}
+
+/// Fallible, poll-chunked zeroed buffer: capacity via try_reserve_exact
+/// (allocator refusal is a STRUCTURED outcome, not an abort), fill
+/// chunked under the gate.
+fn zeroed_with_poll<P>(len: usize, poll: &P) -> Result<Vec<f64>, StageAbort>
 where
     P: Fn() -> bool,
 {
-    let mut values = Vec::with_capacity(len);
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(len)
+        .map_err(|_| StageAbort::AllocRefused)?;
     while values.len() < len {
         if poll() {
-            return None;
+            return Err(StageAbort::Cancelled);
         }
         let next = (len - values.len()).min(C_STAGE_TILE_ELEMENTS);
         values.resize(values.len() + next, 0.0);
     }
-    (!poll()).then_some(values)
+    if poll() {
+        return Err(StageAbort::Cancelled);
+    }
+    Ok(values)
 }
 
-fn stage_beta<P>(source: &[f64], beta: f64, poll: &P) -> Option<Vec<f64>>
+fn stage_beta<P>(source: &[f64], beta: f64, poll: &P) -> Result<Vec<f64>, StageAbort>
 where
     P: Fn() -> bool,
 {
-    let mut staged = Vec::with_capacity(source.len());
+    let mut staged = Vec::new();
+    staged
+        .try_reserve_exact(source.len())
+        .map_err(|_| StageAbort::AllocRefused)?;
     for src in source.chunks(C_STAGE_TILE_ELEMENTS) {
         if poll() {
-            return None;
+            return Err(StageAbort::Cancelled);
         }
         if beta == 0.0 {
             staged.resize(staged.len() + src.len(), 0.0);
@@ -866,7 +1117,10 @@ where
             staged.extend(src.iter().map(|&value| value * beta));
         }
     }
-    (!poll()).then_some(staged)
+    if poll() {
+        return Err(StageAbort::Cancelled);
+    }
+    Ok(staged)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1466,6 +1720,24 @@ fn macro_kernel_mixed(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn root_reservations_refuse_structurally_never_abort() {
+        // wf9.15: an absurd reservation is a STRUCTURED refusal from
+        // try_reserve_exact (capacity overflow / allocator refusal) —
+        // the process must not abort. This is the fault-injection seam
+        // for the in-API MemoryRefused paths, which route through the
+        // same helpers.
+        assert!(matches!(
+            zeroed_with_poll(usize::MAX / 16, &|| false),
+            Err(StageAbort::AllocRefused)
+        ));
+        // And the poll path still cancels cleanly.
+        assert!(matches!(
+            zeroed_with_poll(1 << 20, &|| true),
+            Err(StageAbort::Cancelled)
+        ));
+    }
 
     #[test]
     fn build_fingerprint_is_stable_and_canonical_for_this_binary() {

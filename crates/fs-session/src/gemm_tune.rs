@@ -123,6 +123,17 @@ pub enum GemmTuneError {
         /// One-based repeat whose exact output bits diverged.
         repeat: usize,
     },
+    /// The GEMM path refused at its memory boundary (wf9.15): plan
+    /// exceeded the caller envelope or the allocator declined. Output
+    /// untouched; the probe/dispatch simply did not run.
+    MemoryRefused {
+        /// Which reservation was refused.
+        what: &'static str,
+        /// Bytes the refused reservation asked for.
+        requested_bytes: u64,
+        /// The envelope in force.
+        limit_bytes: u64,
+    },
     /// The TilePool contained a tile panic or executor invariant refusal.
     Executor {
         /// Structured fs-exec outcome with logical tile provenance.
@@ -146,6 +157,15 @@ impl core::fmt::Display for GemmTuneError {
             ),
             Self::Tune(e) => write!(f, "gemm autotune: {e}"),
             Self::Ledger(detail) => write!(f, "gemm autotune ledger cache: {detail}"),
+            Self::MemoryRefused {
+                what,
+                requested_bytes,
+                limit_bytes,
+            } => write!(
+                f,
+                "gemm autotune memory refused at {what}: {requested_bytes} bytes against a \
+                 {limit_bytes}-byte envelope; nothing ran"
+            ),
             Self::BitDrift { candidate, repeat } => write!(
                 f,
                 "gemm autotune: candidate {candidate} repeat {repeat} broke the MC/NC bit-neutrality contract"
@@ -187,6 +207,16 @@ impl From<fs_la::GemmRunError> for GemmTuneError {
                 error,
                 completed_tiles: report.completed_tiles,
                 total_tiles: report.total_tiles,
+            },
+            fs_la::GemmRunError::MemoryRefused {
+                what,
+                requested_bytes,
+                limit_bytes,
+                ..
+            } => Self::MemoryRefused {
+                what,
+                requested_bytes,
+                limit_bytes,
             },
         }
     }

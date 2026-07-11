@@ -16,11 +16,11 @@ pub mod rand_nla;
 
 pub use gemm::{
     GEMM_BUILD_FINGERPRINT, GEMM_IMPLEMENTATION_VERSION, GEMM_MAX_FMAS_BETWEEN_POLLS,
-    GEMM_PANEL_RUN_DOMAIN, GemmCancelled, GemmRunError, GemmRunReport, Trans,
-    gemm_build_identity, gemm_execution_tier, gemm_f32, gemm_f64, gemm_f64_op,
-    gemm_f64_parallel, gemm_f64_parallel_with, gemm_f64_parallel_with_cancel,
-    gemm_f64_parallel_with_pool, gemm_f64_parallel_with_pool_declared, gemm_mixed,
-    gemm_panel_run_id, gemm_tuning_is_effective,
+    GEMM_PANEL_RUN_DOMAIN, GemmCancelled, GemmMemoryEnvelope, GemmMemoryReport, GemmRunError,
+    GemmRunReport, Trans, gemm_build_identity, gemm_execution_tier, gemm_f32, gemm_f64,
+    gemm_f64_op, gemm_f64_parallel, gemm_f64_parallel_with, gemm_f64_parallel_with_cancel,
+    gemm_f64_parallel_with_pool, gemm_f64_parallel_with_pool_budgeted,
+    gemm_f64_parallel_with_pool_declared, gemm_mixed, gemm_panel_run_id, gemm_tuning_is_effective,
 };
 
 /// Crate version, re-exported for provenance stamping (the Five Explicits'

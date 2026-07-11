@@ -4,9 +4,8 @@
 mod support;
 
 use support::{
-    ASUPERSYNC_NON_SRC_INPUTS, EXECUTABLE_CONTEXT, FINGERPRINT_CONTEXT,
-    append_executable_identity, append_external_identity, append_source_fields, push_field,
-    push_optional_field,
+    ASUPERSYNC_NON_SRC_INPUTS, EXECUTABLE_CONTEXT, FINGERPRINT_CONTEXT, append_executable_identity,
+    append_external_identity, append_source_fields, push_field, push_optional_field,
 };
 
 #[test]
