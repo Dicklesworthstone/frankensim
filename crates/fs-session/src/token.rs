@@ -29,14 +29,16 @@ pub struct CapabilityToken {
 }
 
 impl CapabilityToken {
-    /// The static-admission view of this token (fs-ir admission's
-    /// `SessionCapability` bridge).
+    /// The static-admission view of this token. fs-ir's current capability
+    /// vocabulary represents declared memory asks as `f64`, so this is a coarse
+    /// planning projection above 2^53 bytes. The enforcing governor retains and
+    /// compares the original integer byte grant exactly.
     #[must_use]
     pub fn to_admission(&self) -> SessionCapability {
         SessionCapability {
             ops: self.ops.clone(),
             cores: self.cores,
-            #[allow(clippy::cast_precision_loss)] // grants are coarse
+            #[allow(clippy::cast_precision_loss)] // fs-ir's admission vocabulary is f64
             mem_bytes: self.mem_bytes as f64,
             wall_s: self.wall_s,
         }

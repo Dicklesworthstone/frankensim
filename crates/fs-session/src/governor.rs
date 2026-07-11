@@ -11,8 +11,12 @@ use fs_exec::CancelGate;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Condvar, Mutex};
 
-/// Hard-bound multiplier: past `HARD_FACTOR × grant` the session pauses.
-const HARD_FACTOR: f64 = 1.2;
+/// Hard-bound ratio: past 6/5 of a grant the session pauses. Float and exact
+/// integer resource paths derive from this one policy definition.
+const HARD_FACTOR_NUMERATOR: u32 = 6;
+const HARD_FACTOR_DENOMINATOR: u32 = 5;
+#[allow(clippy::cast_lossless)] // small policy integers are exactly representable as f64
+const HARD_FACTOR: f64 = HARD_FACTOR_NUMERATOR as f64 / HARD_FACTOR_DENOMINATOR as f64;
 const IDEMPOTENCY_KEY_DOMAIN: &str = "org.frankensim.fs-session.idempotency-key.v2";
 const SUBMISSION_RECEIPT_DOMAIN: &str = "org.frankensim.fs-session.submission-receipt.v1";
 const MAX_IDEMPOTENCY_KEY_BYTES: usize = 4096;
@@ -518,39 +522,53 @@ impl Governor {
         meters.core_s = next_core_s;
         meters.mem_peak_bytes = meters.mem_peak_bytes.max(delta.mem_peak_bytes);
         meters.wall_s = next_wall_s;
+        // Memory is an exact byte budget. Converting u64 values to f64 before
+        // admission collapses adjacent values above 2^53 and can throttle a
+        // session that is still below its grant. Compare the 6/5 hard boundary
+        // exactly in u128; f64 remains only the legacy diagnostic projection.
+        let memory_past_hard = u128::from(meters.mem_peak_bytes)
+            * u128::from(HARD_FACTOR_DENOMINATOR)
+            > u128::from(token.mem_bytes) * u128::from(HARD_FACTOR_NUMERATOR);
         #[allow(clippy::cast_precision_loss)]
-        let checks: [(&'static str, f64, f64); 3] = [
-            ("core-seconds", meters.core_s, token.core_s),
-            (
-                "memory-bytes",
-                meters.mem_peak_bytes as f64,
-                token.mem_bytes as f64,
-            ),
-            ("wall-seconds", meters.wall_s, token.wall_s),
-        ];
-        for (resource, used, granted) in checks {
-            if used > granted * HARD_FACTOR {
-                meters.paused += 1;
-                return Ok(Enforcement::Paused {
-                    resource,
-                    used,
-                    granted,
-                    resume_hint: format!(
-                        "checkpoint accepted; resume with a larger {resource} grant or a \
-                         coarsened study — consumption and checkpoint are ledgered"
-                    ),
-                });
-            }
+        let memory_diagnostic = (meters.mem_peak_bytes as f64, token.mem_bytes as f64);
+        let hard_violation = if meters.core_s > token.core_s * HARD_FACTOR {
+            Some(("core-seconds", meters.core_s, token.core_s))
+        } else if memory_past_hard {
+            Some(("memory-bytes", memory_diagnostic.0, memory_diagnostic.1))
+        } else if meters.wall_s > token.wall_s * HARD_FACTOR {
+            Some(("wall-seconds", meters.wall_s, token.wall_s))
+        } else {
+            None
+        };
+        if let Some((resource, used, granted)) = hard_violation {
+            meters.paused += 1;
+            return Ok(Enforcement::Paused {
+                resource,
+                used,
+                granted,
+                resume_hint: format!(
+                    "checkpoint required before continuing; resume with a larger {resource} \
+                     grant or a coarsened study — the caller must arrange and ledger the \
+                     checkpoint explicitly"
+                ),
+            });
         }
-        for (resource, used, granted) in checks {
-            if used >= granted {
-                meters.throttled += 1;
-                return Ok(Enforcement::Throttled {
-                    resource,
-                    used,
-                    granted,
-                });
-            }
+        let throttle_violation = if meters.core_s >= token.core_s {
+            Some(("core-seconds", meters.core_s, token.core_s))
+        } else if meters.mem_peak_bytes >= token.mem_bytes {
+            Some(("memory-bytes", memory_diagnostic.0, memory_diagnostic.1))
+        } else if meters.wall_s >= token.wall_s {
+            Some(("wall-seconds", meters.wall_s, token.wall_s))
+        } else {
+            None
+        };
+        if let Some((resource, used, granted)) = throttle_violation {
+            meters.throttled += 1;
+            return Ok(Enforcement::Throttled {
+                resource,
+                used,
+                granted,
+            });
         }
         Ok(Enforcement::Ok)
     }

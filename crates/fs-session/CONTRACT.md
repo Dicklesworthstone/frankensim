@@ -20,7 +20,9 @@ Consumers: the P2 marquee demo, the HELM e2e suite (gp3.11).
 - `CapabilityToken { session, ops globs, core_s, mem_bytes, wall_s,
   cores, ledger_scope }` — the explicit grant every IR program executes
   under; `to_admission()` bridges into fs-ir static admission (one token,
-  checked statically at admission AND continuously by the governor).
+  checked statically at admission AND continuously by the governor). fs-ir's
+  current memory-ask vocabulary is an `f64` planning projection; exact byte
+  enforcement remains the governor's integer-grant responsibility.
 - `Governor` — `Send + Sync`; hot paths are mutex-guarded in-memory
   state. `open_session` rejects non-finite or negative floating grants
   before registration and rejects an already-open `SessionId` without
@@ -30,7 +32,10 @@ Consumers: the P2 marquee demo, the HELM e2e suite (gp3.11).
   negative, or overflowing deltas before mutating meters, then meters
   core-seconds / peak memory / wall and returns `Enforcement`: `Ok` →
   `Throttled` (at the grant) → `Paused` (past 1.2× the grant, with a
-  teaching resume hint). The governor NEVER silently kills.
+  teaching resume hint). Memory admission compares integer bytes exactly,
+  including above f64's 53-bit integer precision, and evaluates the hard
+  threshold as `used * 5 > granted * 6`; diagnostic f64 fields do not drive the
+  verdict. The governor NEVER silently kills.
 - `submit_once(session, idem_key, work)` — exactly-once execution:
   the first caller in that session runs and is charged; concurrent/repeat callers block
   on a condvar and receive `Duplicate` with the SAME receipt and NO

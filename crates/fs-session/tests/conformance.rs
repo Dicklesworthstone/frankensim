@@ -138,6 +138,11 @@ fn ss_002_enforcement_throttles_then_pauses_never_kills() {
                 resume_hint.contains("resume"),
                 "hint must teach: {resume_hint}"
             );
+            assert!(
+                resume_hint.contains("checkpoint required")
+                    && !resume_hint.contains("checkpoint accepted"),
+                "charge() must not claim the separate checkpoint acknowledgement occurred: {resume_hint}"
+            );
         }
         other => panic!("expected Paused, got {other:?}"),
     }
@@ -150,6 +155,88 @@ fn ss_002_enforcement_throttles_then_pauses_never_kills() {
         "ss-002",
         "Ok -> Throttled -> Paused ladder with meters; no silent kills",
     );
+}
+
+#[test]
+fn ss_002a_memory_enforcement_is_exact_above_f64_integer_precision() {
+    const GRANT: u64 = (1_u64 << 53) + 1;
+
+    let gov = Governor::new();
+    let mut below = token(70, f64::MAX, f64::MAX);
+    below.mem_bytes = GRANT;
+    gov.open_session(below).expect("valid exact-byte token");
+    assert_eq!(
+        gov.charge(
+            SessionId(70),
+            Charge {
+                mem_peak_bytes: GRANT - 1,
+                ..Charge::default()
+            }
+        )
+        .expect("exact below-grant charge"),
+        Enforcement::Ok,
+        "adjacent u64 byte values must not collapse through f64"
+    );
+    assert!(matches!(
+        gov.charge(
+            SessionId(70),
+            Charge {
+                mem_peak_bytes: GRANT,
+                ..Charge::default()
+            }
+        )
+        .expect("exact at-grant charge"),
+        Enforcement::Throttled {
+            resource: "memory-bytes",
+            ..
+        }
+    ));
+
+    let hard_boundary =
+        u64::try_from(u128::from(GRANT) * 6 / 5).expect("fixture hard boundary fits u64");
+    let at_hard = Governor::new();
+    let mut at_hard_token = token(72, f64::MAX, f64::MAX);
+    at_hard_token.mem_bytes = GRANT;
+    at_hard
+        .open_session(at_hard_token)
+        .expect("valid exact-byte token");
+    assert!(matches!(
+        at_hard
+            .charge(
+                SessionId(72),
+                Charge {
+                    mem_peak_bytes: hard_boundary,
+                    ..Charge::default()
+                }
+            )
+            .expect("hard-boundary charge"),
+        Enforcement::Throttled {
+            resource: "memory-bytes",
+            ..
+        }
+    ));
+
+    let past_hard = Governor::new();
+    let mut past_hard_token = token(73, f64::MAX, f64::MAX);
+    past_hard_token.mem_bytes = GRANT;
+    past_hard
+        .open_session(past_hard_token)
+        .expect("valid exact-byte token");
+    assert!(matches!(
+        past_hard
+            .charge(
+                SessionId(73),
+                Charge {
+                    mem_peak_bytes: hard_boundary + 1,
+                    ..Charge::default()
+                }
+            )
+            .expect("past-hard-boundary charge"),
+        Enforcement::Paused {
+            resource: "memory-bytes",
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -379,6 +466,18 @@ fn ss_003c_receipts_bind_charge_failure_and_enforcement() {
         positive_zero_charge,
         &positive_enforcement,
     ));
+    assert!(
+        !positive_receipt.matches_success(
+            SessionId(33),
+            key,
+            Charge {
+                mem_peak_bytes: positive_zero_charge.mem_peak_bytes + 1,
+                ..positive_zero_charge
+            },
+            &positive_enforcement,
+        ),
+        "the exact u64 memory charge participates in receipt identity"
+    );
 
     let negative_zero_charge = Charge {
         core_s: -0.0,
