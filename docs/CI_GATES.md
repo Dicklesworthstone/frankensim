@@ -64,13 +64,15 @@ cause, coupling row updated in the same commit.
 
 ## Constellation
 
-The workspace path-depends on sibling repos. The canonical clean-host
-path is `cargo run -p xtask -- bootstrap-constellation` (bead huq.17;
-docs/BOOTSTRAP.md): it fetches every repo from `constellation.lock`'s
-recorded remotes at the pinned revisions, verifies content identity,
-refuses wrong-head or dirty trees (case-collision checkout artifacts
-are classified distinctly), supports `--offline` cache verification and
-`--from` mirrors, and writes fetch provenance.
+The workspace path-depends on sibling repos. The canonical fresh-checkout
+path is `cargo run --manifest-path tools/bootstrap/Cargo.toml` (beads
+huq.17 and 1t8i; docs/BOOTSTRAP.md). This standalone, zero-dependency package
+builds before the root workspace resolves, fetches every repo from
+`constellation.lock`'s recorded remotes at the pinned revisions, applies the
+same pinned-head and clean-tree verification to existing and newly cloned
+siblings, supports `--offline` cache verification and `--from` mirrors, and
+writes fetch provenance. `cargo run -p xtask -- bootstrap-constellation`
+remains the in-workspace command after the sibling paths already resolve.
 `scripts/ci/checkout_constellation.sh` remains the shell-only
 equivalent used by the manual workflow specs; `xtask
 check-constellation` then verifies zero drift. Bumping a sibling is a

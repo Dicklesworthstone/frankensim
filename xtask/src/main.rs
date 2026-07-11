@@ -1056,11 +1056,85 @@ fn git_out(dir: &Path, args: &[&str]) -> Result<String, String> {
     }
 }
 
+fn check_pinned_clean_observation(
+    row: &LockRow,
+    target: &Path,
+    head: &str,
+    status: &str,
+) -> Result<(), String> {
+    if head != row.git_head {
+        return Err(format!(
+            "{} is at {head}, lock pins {} — refusing to silently substitute a nearby \
+             working tree; align or replace that sibling deliberately",
+            target.display(),
+            row.git_head
+        ));
+    }
+    if !status.is_empty() {
+        return Err(format!(
+            "{} is DIRTY at the locked head — a modified working tree is not the pinned \
+             source (a case-folding checkout collision also surfaces here); restore or \
+             replace that sibling deliberately",
+            target.display()
+        ));
+    }
+    Ok(())
+}
+
+fn verify_pinned_clean(row: &LockRow, target: &Path) -> Result<(), String> {
+    let head = git_out(target, &["rev-parse", "HEAD"])
+        .map_err(|e| format!("{}: {e}", target.display()))?;
+    let status = git_out(target, &["status", "--porcelain"])?;
+    check_pinned_clean_observation(row, target, &head, &status)
+}
+
 fn dirname_of(lib: &str) -> &str {
     CONSTELLATION_REPOS
         .iter()
         .find(|(l, _)| *l == lib)
         .map_or(lib, |(_, d)| d)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct BootstrapOptions {
+    dest: Option<PathBuf>,
+    offline: bool,
+    from: Option<String>,
+}
+
+fn required_bootstrap_value<'a>(
+    flag: &str,
+    value: Option<&'a String>,
+) -> Result<&'a str, String> {
+    match value {
+        Some(value) if !value.is_empty() && !value.starts_with('-') => Ok(value),
+        _ => Err(format!("{flag} requires a non-empty value")),
+    }
+}
+
+fn parse_bootstrap_options(
+    default_dest: Option<PathBuf>,
+    args: &[String],
+) -> Result<BootstrapOptions, String> {
+    let mut options = BootstrapOptions {
+        dest: default_dest,
+        offline: false,
+        from: None,
+    };
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--dest" => {
+                options.dest = Some(PathBuf::from(required_bootstrap_value("--dest", it.next())?));
+            }
+            "--offline" => options.offline = true,
+            "--from" => {
+                options.from = Some(required_bootstrap_value("--from", it.next())?.to_string());
+            }
+            other => return Err(format!("unknown flag {other:?}")),
+        }
+    }
+    Ok(options)
 }
 
 /// `bootstrap-constellation [--offline] [--from <base>]`.
@@ -1072,22 +1146,14 @@ fn dirname_of(lib: &str) -> &str {
 #[allow(clippy::too_many_lines)]
 fn cmd_bootstrap(root: &Path) -> ExitCode {
     let args: Vec<String> = std::env::args().skip(2).collect();
-    let mut dest = root.parent().map(Path::to_path_buf);
-    let mut offline = false;
-    let mut from: Option<String> = None;
-    let mut it = args.iter();
-    while let Some(a) = it.next() {
-        match a.as_str() {
-            "--dest" => dest = it.next().map(PathBuf::from),
-            "--offline" => offline = true,
-            "--from" => from = it.next().cloned(),
-            other => {
-                eprintln!("bootstrap-constellation: unknown flag {other:?}");
-                return ExitCode::FAILURE;
-            }
+    let options = match parse_bootstrap_options(root.parent().map(Path::to_path_buf), &args) {
+        Ok(options) => options,
+        Err(error) => {
+            eprintln!("bootstrap-constellation: {error}");
+            return ExitCode::FAILURE;
         }
-    }
-    let Some(dest) = dest else {
+    };
+    let Some(dest) = options.dest else {
         eprintln!("bootstrap-constellation: no destination directory");
         return ExitCode::FAILURE;
     };
@@ -1125,27 +1191,8 @@ fn cmd_bootstrap(root: &Path) -> ExitCode {
         let target = dest.join(dirname);
         let state: Result<&'static str, String> = if target.is_dir() {
             // EXISTING tree: verify identity; never silently substitute.
-            match git_out(&target, &["rev-parse", "HEAD"]) {
-                Ok(head) if head == row.git_head => {
-                    match git_out(&target, &["status", "--porcelain"]) {
-                        Ok(st) if st.is_empty() => Ok("verified"),
-                        Ok(_) => Err(format!(
-                            "{} is DIRTY at the locked head — a modified working tree is not \
-                             the pinned source; restore or replace that sibling deliberately",
-                            target.display()
-                        )),
-                        Err(e) => Err(e),
-                    }
-                }
-                Ok(head) => Err(format!(
-                    "{} is at {head}, lock pins {} — refusing to silently substitute a \
-                     nearby working tree; align or replace that sibling deliberately",
-                    target.display(),
-                    row.git_head
-                )),
-                Err(e) => Err(format!("{}: {e}", target.display())),
-            }
-        } else if offline {
+            verify_pinned_clean(row, &target).map(|()| "verified")
+        } else if options.offline {
             Err(format!(
                 "{} missing from the source cache in --offline mode",
                 target.display()
@@ -1153,7 +1200,8 @@ fn cmd_bootstrap(root: &Path) -> ExitCode {
         } else {
             // FETCH: clone the declared transport, check out the pinned
             // revision detached, verify the resulting identity.
-            let url = from
+            let url = options
+                .from
                 .as_ref()
                 .map_or_else(|| row.remote.clone(), |b| format!("{b}/{dirname}"));
             if url == "no-remote" {
@@ -1169,14 +1217,7 @@ fn cmd_bootstrap(root: &Path) -> ExitCode {
                 match clone {
                     Ok(o) if o.status.success() => {
                         match git_out(&target, &["checkout", "--detach", &row.git_head]) {
-                            Ok(_) => match git_out(&target, &["rev-parse", "HEAD"]) {
-                                Ok(head) if head == row.git_head => Ok("cloned"),
-                                Ok(head) => Err(format!(
-                                    "post-checkout identity mismatch: {head} != {}",
-                                    row.git_head
-                                )),
-                                Err(e) => Err(e),
-                            },
+                            Ok(_) => verify_pinned_clean(row, &target).map(|()| "cloned"),
                             Err(e) => Err(format!(
                                 "locked revision {} unavailable from {url}: {e}",
                                 row.git_head
@@ -1663,6 +1704,38 @@ mod tests {
             Some("0.2.0".to_string())
         );
         assert_eq!(first_version_in("[package]\nname = \"x\"\n"), None);
+    }
+
+    #[test]
+    fn bootstrap_value_flags_refuse_missing_empty_and_option_operands() {
+        for flag in ["--dest", "--from"] {
+            for args in [vec![flag], vec![flag, ""], vec![flag, "--offline"]] {
+                let args: Vec<String> = args.into_iter().map(str::to_string).collect();
+                let error = parse_bootstrap_options(Some(PathBuf::from("/default")), &args)
+                    .expect_err("malformed value-taking flag must refuse");
+                assert_eq!(error, format!("{flag} requires a non-empty value"));
+            }
+        }
+    }
+
+    #[test]
+    fn bootstrap_pinned_tree_observation_requires_exact_head_and_clean_status() {
+        let row = LockRow {
+            lib: "fixture".to_string(),
+            git_head: "locked-head".to_string(),
+            remote: "unused".to_string(),
+        };
+        let target = Path::new("/constellation/fixture");
+
+        assert!(check_pinned_clean_observation(&row, target, "locked-head", "").is_ok());
+
+        let drift = check_pinned_clean_observation(&row, target, "other-head", "")
+            .expect_err("head drift must refuse");
+        assert!(drift.contains("lock pins locked-head"), "{drift}");
+
+        let dirty = check_pinned_clean_observation(&row, target, "locked-head", " M lib.rs")
+            .expect_err("checkout-time dirt must refuse");
+        assert!(dirty.contains("DIRTY"), "{dirty}");
     }
 
     #[test]

@@ -22,7 +22,8 @@ workspace member, so it builds alone:
     cargo run --manifest-path tools/bootstrap/Cargo.toml -- --from <mirror-base>
 
 It reads `constellation.lock`, clones each missing sibling into the
-workspace parent (checkout DETACHED at the pin, head re-verified, no
+workspace parent (checkout DETACHED at the pin, then the same pinned-head
+and clean-tree verification applied to an existing sibling; no
 branches/worktrees created anywhere), verifies existing siblings (pinned
 head + clean tree; drift and dirt are refusals, never silent
 substitutions — a case-folding checkout collision surfaces as a dirty
@@ -30,29 +31,32 @@ tree and refuses), and writes `constellation-bootstrap.json` provenance
 beside the siblings. The sibling layout itself is the reproducible Cargo
 configuration: no config files are generated or mutated. Idempotent:
 re-runs verify. Hermetic offline-cache replay drills (clean-machine
-clone from a local bare mirror, idempotent replay, drift/dirty/offline
-refusals) live in `tools/bootstrap/tests/replay.rs`. The xtask command
-below remains the in-workspace verifier once the workspace builds.
+clone from a local bare mirror, idempotent replay, existing- and
+newly-cloned-tree dirt, drift, offline-missing, and malformed CLI
+refusals) live in `tools/bootstrap/tests/replay.rs`. A bare `--root` or
+`--from`, including one immediately followed by another option, is a
+structured admission failure. The xtask command remains the in-workspace
+verifier once the workspace builds and applies the same post-clone clean-tree
+check; its bare, empty, or option-followed `--dest` and `--from` operands also
+refuse before any repository operation.
 
-Behavior of an already-built `xtask` binary, per library (the `cargo run`
-commands above can exercise only the verification path while every required
-sibling resolves):
+Standalone bootstrap behavior, per library:
 
-- **Missing from the workspace parent**: a previously built binary can clone
-  the declared remote (transform-free,
+- **Missing from the workspace parent**: clone the declared remote
+  (transform-free,
   `core.autocrlf=false`), check out the locked revision DETACHED, and
-  verify the resulting head equals the lock. An unavailable revision or
-  unreachable remote is a structured failure.
+  verify both the resulting head and clean tree. An unavailable revision,
+  unreachable remote, or dirty post-checkout result is a structured failure.
 - **Present in the workspace parent**: verify head == lock and the tree is clean.
   A wrong head or a dirty tree REFUSES — the bootstrap never silently
   substitutes a nearby working tree.
 - **Case-collision artifacts**: paths differing only by case cannot
   coexist on case-insensitive filesystems (macOS/Windows), so such
-  checkouts cannot satisfy the clean-tree contract. The currently pinned
-  FrankenNumpy revision contains a `seed_M`/`seed_m` collision and therefore
-  cannot be verified cleanly on a default macOS filesystem. A case-safe
-  upstream commit and deliberate lock update are the current clean-macOS
-  blocker; the bootstrap refuses rather than relabeling a changed byte.
+  checkouts cannot satisfy the clean-tree contract. FrankenNumpy was
+  deliberately re-pinned after the colliding corpus paths were renamed, and
+  the current pin has clean-checkout evidence on case-insensitive macOS and
+  case-sensitive Linux. Any future collision still surfaces as dirt and
+  refuses rather than relabeling a changed byte.
 - **Offline re-runs** succeed from a verified sibling set with no network.
 
 Provenance: `constellation-bootstrap.json` is written into the workspace parent
@@ -62,6 +66,9 @@ build-provenance record the acceptance requires.
 Re-locking (`lock-constellation`) is a DELIBERATE act: it re-records
 live heads and remotes; `check-constellation` gates drift in CI.
 
-Until `frankensim-1t8i` closes, provisioning a genuinely clean host requires a
-separately prepared, case-sensitive constellation checkout at the exact sibling
-paths. Do not cite the Cargo command above as clean-machine proof.
+`frankensim-1t8i` is closed with the standalone tool, hermetic local-mirror
+clone/replay drills, and a real seven-sibling offline verification. The
+recorded session did not perform a literal blank-host fetch from every public
+remote, so do not cite it as evidence for remote availability or public-network
+provisioning; that no-claim does not weaken the lock, checkout, or cleanliness
+contracts exercised by the retained replay tests.

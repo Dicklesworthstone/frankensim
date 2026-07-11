@@ -20,8 +20,9 @@
 //!   7n2n counterexample) surfaces here as a dirty tree and refuses.
 //! - A MISSING sibling is cloned from the lock's declared remote (or
 //!   `--from <base>/<dirname>` for air-gapped mirrors), checked out
-//!   DETACHED at the pinned revision, and the resulting head re-read
-//!   and compared. No branches or worktrees are created anywhere.
+//!   DETACHED at the pinned revision, then subjected to the same pinned-head
+//!   and clean-tree verification as an existing sibling. No branches or
+//!   worktrees are created anywhere.
 //! - `--offline` never touches the network: missing siblings are
 //!   structured failures (the offline-cache replay contract).
 //! - Idempotent: a second run over a successful first run verifies
@@ -119,6 +120,36 @@ fn usage() -> &'static str {
      (pinned head + clean tree) and never silently substituted."
 }
 
+fn required_option_value<'a>(flag: &str, value: Option<&'a String>) -> Result<&'a str, String> {
+    match value {
+        Some(value) if !value.is_empty() && !value.starts_with('-') => Ok(value),
+        _ => Err(format!("{flag} requires a non-empty value")),
+    }
+}
+
+fn verify_pinned_clean(row: &LockRow, target: &Path) -> Result<(), String> {
+    let head = git_out(target, &["rev-parse", "HEAD"])
+        .map_err(|e| format!("{}: {e}", target.display()))?;
+    if head != row.git_head {
+        return Err(format!(
+            "{} is at {head}, lock pins {} — refusing to silently substitute a nearby \
+             working tree; align or replace that sibling deliberately",
+            target.display(),
+            row.git_head
+        ));
+    }
+    let status = git_out(target, &["status", "--porcelain"])?;
+    if !status.is_empty() {
+        return Err(format!(
+            "{} is DIRTY at the locked head — a modified working tree is not the pinned \
+             source (a case-folding checkout collision also surfaces here); restore or \
+             replace that sibling deliberately",
+            target.display()
+        ));
+    }
+    Ok(())
+}
+
 /// One library's bootstrap: verify an existing tree or clone a missing
 /// one. Returns the terminal state name or the structured refusal.
 fn bootstrap_one(
@@ -131,25 +162,7 @@ fn bootstrap_one(
     let target = dest.join(dirname);
     if target.is_dir() {
         // EXISTING tree: verify identity; never silently substitute.
-        let head = git_out(&target, &["rev-parse", "HEAD"])
-            .map_err(|e| format!("{}: {e}", target.display()))?;
-        if head != row.git_head {
-            return Err(format!(
-                "{} is at {head}, lock pins {} — refusing to silently substitute a nearby \
-                 working tree; align or replace that sibling deliberately",
-                target.display(),
-                row.git_head
-            ));
-        }
-        let status = git_out(&target, &["status", "--porcelain"])?;
-        if !status.is_empty() {
-            return Err(format!(
-                "{} is DIRTY at the locked head — a modified working tree is not the pinned \
-                 source (a case-folding checkout collision also surfaces here); restore or \
-                 replace that sibling deliberately",
-                target.display()
-            ));
-        }
+        verify_pinned_clean(row, &target)?;
         return Ok("verified");
     }
     if offline {
@@ -159,7 +172,8 @@ fn bootstrap_one(
         ));
     }
     // FETCH: clone the declared transport, check out the pinned revision
-    // detached, verify the resulting identity.
+    // detached, then apply the same identity and cleanliness verifier as
+    // the existing-tree path.
     let url = from.map_or_else(|| row.remote.clone(), |b| format!("{b}/{dirname}"));
     if url == "no-remote" {
         return Err(format!(
@@ -184,13 +198,7 @@ fn bootstrap_one(
             row.git_head
         )
     })?;
-    let head = git_out(&target, &["rev-parse", "HEAD"])?;
-    if head != row.git_head {
-        return Err(format!(
-            "post-checkout identity mismatch: {head} != {}",
-            row.git_head
-        ));
-    }
+    verify_pinned_clean(row, &target)?;
     Ok("cloned")
 }
 
@@ -202,9 +210,21 @@ fn main() -> ExitCode {
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
-            "--root" => root = it.next().map(PathBuf::from),
+            "--root" => match required_option_value("--root", it.next()) {
+                Ok(value) => root = Some(PathBuf::from(value)),
+                Err(error) => {
+                    eprintln!("frankensim-bootstrap: {error}\n\n{}", usage());
+                    return ExitCode::FAILURE;
+                }
+            },
             "--offline" => offline = true,
-            "--from" => from = it.next().cloned(),
+            "--from" => match required_option_value("--from", it.next()) {
+                Ok(value) => from = Some(value.to_string()),
+                Err(error) => {
+                    eprintln!("frankensim-bootstrap: {error}\n\n{}", usage());
+                    return ExitCode::FAILURE;
+                }
+            },
             "--help" | "-h" => {
                 println!("{}", usage());
                 return ExitCode::SUCCESS;

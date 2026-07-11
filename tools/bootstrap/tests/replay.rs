@@ -9,8 +9,12 @@
 //!   provenance);
 //! - drift refusal: a sibling at the wrong head refuses;
 //! - dirty refusal: a modified tree at the right head refuses;
+//! - post-clone dirty refusal: checkout-time mutation is caught before a
+//!   freshly cloned sibling can be accepted;
 //! - `--offline` refusal: a missing sibling is a structured failure and
-//!   the network (here: the mirror) is never touched.
+//!   the network (here: the mirror) is never touched;
+//! - CLI admission: value-taking flags refuse absent operands before any
+//!   lock or sibling access.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -110,18 +114,38 @@ fn make_constellation(tag: &str) -> Constellation {
 }
 
 fn run_bootstrap(c: &Constellation, extra: &[&str]) -> (bool, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_frankensim-bootstrap"))
-        .arg("--root")
-        .arg(&c.root)
-        .args(extra)
-        .output()
-        .expect("bootstrap binary spawns");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_frankensim-bootstrap"));
+    command.arg("--root").arg(&c.root).args(extra);
+    run_command(&mut command)
+}
+
+fn run_command(command: &mut Command) -> (bool, String) {
+    let out = command.output().expect("bootstrap binary spawns");
     let text = format!(
         "{}\n{}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
     (out.status.success(), text)
+}
+
+#[test]
+fn value_taking_flags_refuse_missing_operands() {
+    for args in [
+        &["--root"][..],
+        &["--from"][..],
+        &["--root", "--offline"][..],
+        &["--from", "--offline"][..],
+    ] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_frankensim-bootstrap"));
+        command.args(args);
+        let (ok, text) = run_command(&mut command);
+        assert!(!ok, "missing operand must refuse for {args:?}:\n{text}");
+        assert!(
+            text.contains(&format!("{} requires a non-empty value", args[0])),
+            "{args:?} reports its admission defect:\n{text}"
+        );
+    }
 }
 
 #[test]
@@ -180,6 +204,52 @@ fn clean_machine_clone_then_idempotent_replay_from_offline_mirror() {
         prov1.replace("\"state\": \"cloned\"", "\"state\": \"verified\""),
         prov2,
         "replay provenance is byte-identical modulo the cloned→verified state"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn fresh_clone_is_rechecked_for_checkout_time_dirt() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let c = make_constellation("post-clone-dirty");
+    let hooks = c.base.join("hooks");
+    std::fs::create_dir_all(&hooks).expect("mkdir hooks");
+    let post_checkout = hooks.join("post-checkout");
+    std::fs::write(
+        &post_checkout,
+        "#!/bin/sh\nprintf 'checkout-time mutation\\n' > lib.rs\n",
+    )
+    .expect("write post-checkout hook");
+    let mut permissions = std::fs::metadata(&post_checkout)
+        .expect("hook metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&post_checkout, permissions).expect("make hook executable");
+
+    let mirror = c.mirror.to_str().expect("utf8");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_frankensim-bootstrap"));
+    command
+        .arg("--root")
+        .arg(&c.root)
+        .args(["--from", mirror])
+        .env("GIT_CONFIG_COUNT", "1")
+        .env("GIT_CONFIG_KEY_0", "core.hooksPath")
+        .env("GIT_CONFIG_VALUE_0", &hooks);
+    let (ok, text) = run_command(&mut command);
+
+    assert!(!ok, "a dirty post-checkout tree must refuse:\n{text}");
+    assert!(
+        text.contains("DIRTY") && text.contains("drill_alpha"),
+        "fresh-clone cleanliness refusal is explicit:\n{text}"
+    );
+    assert!(
+        !c.root
+            .parent()
+            .unwrap()
+            .join("constellation-bootstrap.json")
+            .exists(),
+        "failed bootstrap must not publish success provenance"
     );
 }
 

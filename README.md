@@ -72,12 +72,14 @@ There is not yet a packaged end-user simulation application or crates.io release
 
 FrankenSim currently builds from source. The workspace expects exact pinned
 sibling Franken projects for path dependencies, especially
-`~/projects/asupersync` and `~/projects/frankensqlite`. A true clean-clone
-bootstrap is not yet available: Cargo cannot build the in-workspace bootstrap
-tool before those paths resolve, and the current FrankenNumpy pin has a
-case-collision on default macOS filesystems. See
-[`docs/BOOTSTRAP.md`](docs/BOOTSTRAP.md) for the explicit blocker and supported
-verification path.
+`~/projects/asupersync` and `~/projects/frankensqlite`. On a fresh checkout,
+materialize those siblings first with the standalone, zero-dependency bootstrap
+at `tools/bootstrap`; it is deliberately outside the root workspace so Cargo
+does not have to resolve the missing path dependencies before building it. The
+current FrankenNumpy pin is case-collision-safe on default macOS filesystems.
+See [`docs/BOOTSTRAP.md`](docs/BOOTSTRAP.md) for offline and mirror modes, the
+fail-closed verification contract, and the remaining blank-machine evidence
+boundary.
 
 ```bash
 git clone https://github.com/Dicklesworthstone/frankensim.git
@@ -86,6 +88,9 @@ cd frankensim
 # Use the pinned nightly toolchain from rust-toolchain.toml.
 rustup toolchain install nightly
 rustup component add rustfmt clippy --toolchain nightly
+
+# Materialize every sibling at the exact constellation.lock pin.
+cargo run --manifest-path tools/bootstrap/Cargo.toml
 
 # Build and test the workspace.
 cargo test --workspace
@@ -113,6 +118,7 @@ FrankenSim does not yet ship an end-user simulator CLI. The commands below are t
 
 | Command | Purpose |
 |---------|---------|
+| `cargo run --manifest-path tools/bootstrap/Cargo.toml` | From a fresh checkout, materialize and verify the pinned sibling constellation before the root workspace resolves |
 | `cargo test --workspace` | Build the workspace and run crate-level unit, integration, and conformance tests |
 | `cargo fmt --check` | Check formatting under the pinned nightly toolchain |
 | `cargo clippy --workspace --all-targets -- -D warnings` | Run the strict local lint lane |
@@ -1087,6 +1093,12 @@ FrankenSim uses local path dependencies for the Franken constellation. Keep sibl
 ~/projects/frankensim
 ~/projects/asupersync
 ~/projects/frankensqlite
+```
+
+From a fresh checkout, the supported way to create and verify that layout is:
+
+```bash
+cargo run --manifest-path tools/bootstrap/Cargo.toml
 ```
 
 Then rerun:
