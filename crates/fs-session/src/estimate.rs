@@ -70,15 +70,19 @@ fn size_of_call(items: &[Node], verb: &str) -> Result<f64, crate::SessionError> 
     Ok(size.unwrap_or(1.0))
 }
 
-fn walk_calls(node: &Node, out: &mut Vec<(String, f64)>) -> Result<(), crate::SessionError> {
+fn walk_calls(
+    node: &Node,
+    models: &BTreeMap<String, CostModel>,
+    out: &mut Vec<(String, f64)>,
+) -> Result<(), crate::SessionError> {
     if let NodeKind::List(items) = &node.kind {
         if let Some(h) = node.head()
-            && h.contains('.')
+            && (h.contains('.') || models.contains_key(h))
         {
             out.push((h.to_string(), size_of_call(items, h)?));
         }
         for child in items {
-            walk_calls(child, out)?;
+            walk_calls(child, models, out)?;
         }
     }
     Ok(())
@@ -88,17 +92,30 @@ fn mem_ask(budget: Option<&Node>) -> Result<Option<u64>, crate::SessionError> {
     let Some(budget) = budget else {
         return Ok(None);
     };
-    let items = budget
-        .items()
-        .expect("a recognized budget clause is necessarily a list");
+    let Some(items) = budget.items() else {
+        return Err(crate::SessionError::Submission {
+            what: "recognized budget pillar is not a list".to_string(),
+        });
+    };
     let mut ask = None;
     for clause in &items[1..] {
-        if matches!(&clause.kind, NodeKind::Symbol(symbol) if symbol == "mem") {
+        let Some(values) = clause.items() else {
             return Err(crate::SessionError::Submission {
-                what: "memory budget must have exactly the shape (mem COUNT)".to_string(),
+                what: "budget entries must be parenthesized clauses such as (mem 96GiB)"
+                    .to_string(),
+            });
+        };
+        let Some(resource) = clause.head() else {
+            return Err(crate::SessionError::Submission {
+                what: "budget entries must have a symbolic name and at least one value".to_string(),
+            });
+        };
+        if values.len() < 2 {
+            return Err(crate::SessionError::Submission {
+                what: format!("budget entry {resource:?} has no value"),
             });
         }
-        if clause.head() != Some("mem") {
+        if resource != "mem" {
             continue;
         }
         if ask.is_some() {
@@ -107,9 +124,6 @@ fn mem_ask(budget: Option<&Node>) -> Result<Option<u64>, crate::SessionError> {
                     .to_string(),
             });
         }
-        let values = clause
-            .items()
-            .expect("a clause with a recognized head is necessarily a list");
         if values.len() != 2 {
             return Err(crate::SessionError::Submission {
                 what: "memory budget must have exactly the shape (mem COUNT)".to_string(),
@@ -184,10 +198,10 @@ pub fn estimate(
     let mem_ask_bytes = mem_ask(recognized.budget)?;
     let mut calls = Vec::new();
     for (_, expression) in &recognized.lets {
-        walk_calls(expression, &mut calls)?;
+        walk_calls(expression, models, &mut calls)?;
     }
     for clause in &recognized.body {
-        walk_calls(clause, &mut calls)?;
+        walk_calls(clause, models, &mut calls)?;
     }
     let (mut p10, mut p50, mut p90) = (0.0f64, 0.0f64, 0.0f64);
     let mut unmodeled = Vec::new();

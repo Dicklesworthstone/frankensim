@@ -643,6 +643,16 @@ fn ss_004_estimate_dry_run_and_ledgered_calibration() {
         est.unmodeled_ops.contains(&"ascent.optimize".to_string()),
         "coverage gaps are stated, not silent"
     );
+    let undotted = fs_ir::sexpr::parse("(study \"undotted-model\" (simulate :size 4))")
+        .expect("undotted operation parses");
+    models.insert("simulate".to_string(), lbm_cost_model());
+    let undotted_est = estimate(&undotted, &models, 1.0)
+        .expect("a registered undotted operation is modeled by registry identity");
+    assert!(undotted_est.wall_p50_s > 0.0);
+    assert!(
+        undotted_est.unmodeled_ops.is_empty(),
+        "a registered undotted operation must not disappear from dry-run coverage"
+    );
     // Calibration: synthetic actuals at 1.1x the estimate.
     let calib = CalibrationReport::new();
     for k in 0..20 {
@@ -702,6 +712,9 @@ fn ss_004b_estimate_refuses_invalid_resource_domains() {
     for malformed in [
         "(study \"missing-memory\" (budget (mem)))",
         "(study \"bare-memory\" (budget mem))",
+        "(study \"keyword-memory\" (budget :mem 1GiB))",
+        "(study \"headless-memory\" (budget (:mem 1GiB)))",
+        "(study \"empty-budget-entry\" (budget ()))",
         "(study \"wrong-memory-kind\" (budget (mem 3kg)))",
         "(study \"extra-memory-operand\" (budget (mem 1GiB 2GiB)))",
         "(study \"duplicate-memory\" (budget (mem 1GiB) (mem 2GiB)))",

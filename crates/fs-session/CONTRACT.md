@@ -62,6 +62,9 @@ Consumers: the P2 marquee demo, the HELM e2e suite (gp3.11).
   cores and derived wall/energy values must stay finite and non-negative, and a
   memory Count must scale to an exact positive whole-byte `u64`; zero, negative,
   fractional-byte, wrong-unit, and overflowed asks are structured refusals.
+  Operation discovery includes namespaced verbs and any undotted verb present
+  in the supplied model registry; registry-backed work cannot silently vanish
+  from a dry-run estimate because of its spelling.
   Memory is read only from the recognized study's direct `(budget (mem ...))`
   clause: duplicate or malformed memory clauses fail closed, and a body call
   named `mem` has no authority to grant a budget.
