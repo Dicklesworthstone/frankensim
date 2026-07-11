@@ -972,9 +972,7 @@ mod tests {
 
         fn run(&self, tile: u64, cx: &Cx<'_>) -> ControlFlow<crate::Cancelled, ()> {
             self.barrier.wait();
-            if tile == 1 {
-                panic!("mixed failure panic");
-            }
+            assert!(tile != 1, "mixed failure panic");
             match cx
                 .arena()
                 .alloc_slice_fill(fs_alloc::Site::named("test/mixed-refusal"), 1, 0_u8)

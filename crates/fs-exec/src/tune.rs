@@ -159,6 +159,7 @@ impl GemmExecutionIdentity {
     /// # Errors
     /// Returns [`TuneError`] for unrepresentable dimensions, zero effective
     /// dimensions, or non-canonical text components.
+    #[allow(clippy::too_many_arguments)] // every field participates independently in the execution identity
     pub fn new(
         requested_threads: usize,
         thread_budget: usize,

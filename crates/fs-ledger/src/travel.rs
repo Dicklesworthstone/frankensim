@@ -800,6 +800,7 @@ impl Ledger {
     ///
     /// # Errors
     /// [`LedgerError::NotFound`] for unknown branches; engine errors.
+    #[allow(clippy::too_many_lines)] // one fail-closed comparison keeps replay semantics visibly ordered
     pub fn replay_verdict(
         &self,
         branch_self: i64,

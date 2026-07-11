@@ -448,6 +448,7 @@ fn ss_003b_idempotency_is_session_scoped_and_content_addressed() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // One receipt-identity conformance scenario.
 fn ss_003c_receipts_bind_charge_failure_and_enforcement() {
     fn opened(core_s: f64) -> Governor {
         let governor = Governor::new();
@@ -697,6 +698,7 @@ fn ss_004_estimate_dry_run_and_ledgered_calibration() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // One hostile resource-domain conformance matrix.
 fn ss_004b_estimate_refuses_invalid_resource_domains() {
     let valid = fs_ir::sexpr::parse(SPOUT).expect("valid fixture");
     let mut models = BTreeMap::new();

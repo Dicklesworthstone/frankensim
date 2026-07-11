@@ -859,6 +859,10 @@ mod tests {
 
     #[test]
     fn first_slice_reservation_uses_normalized_chunk_and_checked_layout() {
+        #[derive(Clone, Copy)]
+        #[repr(align(256))]
+        struct Wide(u8);
+
         let default_pool = ArenaPool::new(ArenaConfig::default());
         assert_eq!(
             default_pool
@@ -884,10 +888,6 @@ mod tests {
                 .expect("empty plan"),
             0
         );
-
-        #[derive(Clone, Copy)]
-        #[repr(align(256))]
-        struct Wide(u8);
 
         let error = pool
             .reservation_bytes_for_slice::<Wide>(

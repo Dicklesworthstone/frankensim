@@ -310,6 +310,7 @@ fn add_asupersync_identity(
     append_external_identity(payload, constellation_lock, head_text, source_fields);
 }
 
+#[allow(clippy::too_many_lines)] // one ordered payload defines the complete code-generation identity
 fn main() {
     let mut payload = Vec::new();
     push_field(&mut payload, "schema", b"fs-la-gemm-codegen-v1");

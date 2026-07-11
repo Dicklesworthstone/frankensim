@@ -240,6 +240,7 @@ fn ir_005_verb_lowering_is_explicit_and_inspectable() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // One exact-count authority and identity matrix.
 fn ir_0xx_exact_count_literals_survive_admission_and_identity() {
     use fs_ir::ast::CountValue;
     // gp3.20: adjacent large integers stay distinguishable end to end.

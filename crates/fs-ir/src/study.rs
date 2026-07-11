@@ -30,6 +30,7 @@ impl<'a> Study<'a> {
     ///
     /// # Errors
     /// Structured [`IrError`] pointing at the malformed clause.
+    #[allow(clippy::too_many_lines)] // One ordered study-clause recognition pass.
     pub fn from_node(node: &'a Node) -> Result<Study<'a>, IrError> {
         let items = match node.head() {
             Some("study") => node.items().expect("head implies list"),

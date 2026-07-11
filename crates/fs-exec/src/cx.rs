@@ -199,7 +199,7 @@ impl RefusalSink {
         let mut lowest = self
             .lowest
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if lowest
             .as_ref()
             .is_none_or(|(recorded_tile, _)| tile < *recorded_tile)
@@ -211,7 +211,7 @@ impl RefusalSink {
     pub(crate) fn take(&self) -> Option<(u64, TileFailure)> {
         self.lowest
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take()
     }
 }

@@ -880,6 +880,7 @@ impl Governor {
     ///
     /// # Errors
     /// [`SessionError::Persistence`] wrapping the ledger error.
+    #[allow(clippy::too_many_lines)] // One atomic prepare/append/commit-cursors transaction.
     pub fn flush_to_ledger(&self, ledger: &fs_ledger::Ledger) -> Result<(), SessionError> {
         let mut g = self.inner.lock().expect("governor lock");
         let sink_identity = ledger_sink_identity(ledger);

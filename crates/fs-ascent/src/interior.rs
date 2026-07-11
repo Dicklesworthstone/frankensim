@@ -88,6 +88,7 @@ fn phase1(
 /// Run the log-barrier interior-point loop from `x0`.
 ///
 /// `tol` gates the KKT certificate; `max_outer` caps μ reductions.
+#[allow(clippy::too_many_lines)] // One ordered barrier solve and certificate protocol.
 pub fn interior_point(
     problem: &mut ConstrainedProblem<'_>,
     x0: &[f64],

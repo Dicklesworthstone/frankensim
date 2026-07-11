@@ -210,6 +210,7 @@ fn ad_002_violation_zoo_zero_false_admits() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // One fail-closed capability/resource matrix.
 fn ad_002b_resource_domains_and_explicit_capabilities_fail_closed() {
     const SELF_CONTAINED: &str = r#"(study "resource-domain"
   (seed 0x5EED020B) (versions (constellation :lock "2026-07"))

@@ -772,6 +772,7 @@ fn namespaced_verbs<'a>(node: &'a Node, out: &mut Vec<(&'a str, Span)>) {
     }
 }
 
+#[allow(clippy::too_many_lines)] // One ordered, fail-closed capability admission matrix.
 fn check_capability(study: &Study<'_>, cx: &AdmissionContext<'_>, out: &mut Vec<Finding>) {
     let token = cx.capability.as_ref();
     if let Some(token) = token {

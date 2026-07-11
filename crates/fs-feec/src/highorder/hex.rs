@@ -669,9 +669,8 @@ mod tests {
 
     #[test]
     fn tensor_extents_fail_closed_before_wrapping() {
-        let lattice = match std::panic::catch_unwind(|| TensorSpace::new(usize::MAX, 1)) {
-            Ok(_) => panic!("lattice extent must not wrap"),
-            Err(payload) => payload,
+        let Err(lattice) = std::panic::catch_unwind(|| TensorSpace::new(usize::MAX, 1)) else {
+            panic!("lattice extent must not wrap");
         };
         let lattice = lattice
             .downcast_ref::<&str>()
@@ -680,10 +679,9 @@ mod tests {
             .unwrap_or("non-string panic");
         assert!(lattice.contains("lattice-size overflow"), "{lattice}");
 
-        let local_p = 1usize << (usize::BITS + 2) / 3;
-        let local = match std::panic::catch_unwind(|| TensorSpace::new(1, local_p - 1)) {
-            Ok(_) => panic!("local cube extent must not wrap"),
-            Err(payload) => payload,
+        let local_p = 1usize << usize::BITS.div_ceil(3);
+        let Err(local) = std::panic::catch_unwind(|| TensorSpace::new(1, local_p - 1)) else {
+            panic!("local cube extent must not wrap");
         };
         let local = local
             .downcast_ref::<&str>()
@@ -692,9 +690,8 @@ mod tests {
             .unwrap_or("non-string panic");
         assert!(local.contains("local-cube extent overflow"), "{local}");
 
-        let dofs = match std::panic::catch_unwind(|| TensorSpace::new(usize::MAX / 2, 1)) {
-            Ok(_) => panic!("global dof extent must not wrap"),
-            Err(payload) => payload,
+        let Err(dofs) = std::panic::catch_unwind(|| TensorSpace::new(usize::MAX / 2, 1)) else {
+            panic!("global dof extent must not wrap");
         };
         let dofs = dofs
             .downcast_ref::<&str>()

@@ -63,6 +63,7 @@ impl Region {
     ///
     /// # Errors
     /// [`Cancelled`] when the context's gate was requested mid-check.
+    #[allow(clippy::too_many_lines)] // One ordered seeded sampling and reduction protocol.
     pub fn check_agreement(
         &self,
         config: &AgreementConfig,
@@ -254,6 +255,7 @@ fn valid_support(support: crate::Aabb) -> bool {
         && (support.max.z - support.min.z).is_finite()
 }
 
+#[allow(clippy::float_cmp)] // An Exact certificate must have a numerically singleton interval.
 fn validate_sample(sample: &crate::ChartSample) -> Result<(), AgreementUnknownReason> {
     if !sample.signed_distance.is_finite() {
         return Err(AgreementUnknownReason::NonFiniteSignedDistance {
