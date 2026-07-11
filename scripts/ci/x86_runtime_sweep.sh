@@ -192,7 +192,12 @@ if test "$snapshot_before_status" -ne 0 \
   exit 126
 fi
 set +e
+# HERMETIC target dir: host-global CARGO_TARGET_DIR values point at
+# shared caches where other toolchains' artifacts cause E0514
+# cross-rustc contamination (seen live on ts2) and concurrent-agent
+# artifact races. The sweep owns its own warm dir inside the clone.
 setsid env PATH="$HOME/.cargo/bin:$PATH" \
+  CARGO_TARGET_DIR="$clone/target-x86-runtime-sweep" \
   cargo test --locked --workspace --no-fail-fast >>"$log" 2>&1
 status=$?
 set -e
