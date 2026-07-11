@@ -41,14 +41,17 @@ fn cleanup_db(path: &str) {
 }
 
 fn synthetic_axes(fingerprint: u64) -> MachineAxes {
+    // Roofs far above any real machine (bead xjhz): cache-resident test
+    // kernels on a fast core would otherwise trip the bead-1n61
+    // attainment>1.5 guard and flip verdicts to EnvironmentInvalid.
     MachineAxes {
         fingerprint,
         cpu_brand: "synthetic".to_string(),
         logical_cpus: 8,
-        bandwidth_single_gbs: 100.0,
-        bandwidth_all_core_gbs: 400.0,
-        peak_single_gflops: 50.0,
-        peak_all_core_gflops: 300.0,
+        bandwidth_single_gbs: 100_000.0,
+        bandwidth_all_core_gbs: 400_000.0,
+        peak_single_gflops: 50_000.0,
+        peak_all_core_gflops: 300_000.0,
     }
 }
 
