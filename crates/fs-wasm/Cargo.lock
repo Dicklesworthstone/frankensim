@@ -613,6 +613,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-blake3"
+version = "0.0.1"
+
+[[package]]
 name = "fs-bo"
 version = "0.0.1"
 dependencies = [
@@ -688,6 +692,7 @@ version = "0.0.1"
 dependencies = [
  "asupersync",
  "fs-alloc",
+ "fs-blake3",
  "fs-obs",
  "fs-substrate",
 ]
@@ -707,7 +712,6 @@ dependencies = [
  "fs-math",
  "fs-qty",
  "fs-rep-mesh",
- "fs-simd",
  "fs-soa",
  "fs-sparse",
 ]
@@ -804,6 +808,8 @@ dependencies = [
 name = "fs-la"
 version = "0.0.1"
 dependencies = [
+ "fs-alloc",
+ "fs-blake3",
  "fs-exec",
  "fs-math",
  "fs-rand",
