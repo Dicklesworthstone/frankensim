@@ -247,7 +247,12 @@ fn build_table() -> Ops {
                     // pointer and never repeat feature detection.
                     mk8x4_f64,
                     btile4x4_f64: scalar::btile4x4_f64,
-                    btile4x4p_f64: scalar::btile4x4p_f64,
+                    // Packed batched tile: the AVX2+FMA capsule (bead 9ekv,
+                    // x86/SAFETY.md) — bit-identical to the scalar twin
+                    // (fused accumulate, same l-ascending order); without it
+                    // baseline-x86 mul_add is a per-element libm CALL and
+                    // batch_gemm collapses to ~0.7 GFLOP/s (measured, ts1).
+                    btile4x4p_f64: x86::gemm::btile4x4p_f64,
                     btile4x4pf32: scalar::btile4x4pf32,
                     r4qrun_f64: x86::r4qrun_f64,
                     trn1c64: scalar::trn1c64,
