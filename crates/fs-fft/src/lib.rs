@@ -876,6 +876,174 @@ impl FftNd {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Executor-tiled N-D pencils (bead 27d3): the per-axis pencil loop is
+// embarrassingly parallel over OUTER BLOCKS (contiguous n*stride slices,
+// disjoint by construction), so those axes run on the TilePool with the
+// GEMM-band Mutex-chunk pattern — per-pencil arithmetic and order are
+// EXACTLY the serial path's, so output is bitwise identical across
+// worker counts (P2 by construction, gated). The FIRST axis has a single
+// outer block (outer == 1) and runs gate-checked serial in v1; the
+// column-group row-locking design for it is recorded on the bead.
+// ---------------------------------------------------------------------------
+
+/// One parallel axis pass: each tile owns one outer block and transforms
+/// the `stride` pencils inside it, in the serial path's exact order.
+struct PencilBlockKernel<'a> {
+    blocks: &'a [std::sync::Mutex<&'a mut [C64]>],
+    plan: &'a Fft,
+    n: usize,
+    stride: usize,
+    inverse: bool,
+}
+
+impl fs_exec::TileKernel for PencilBlockKernel<'_> {
+    type Out = ();
+
+    fn tiles(&self) -> fs_exec::TilePlan {
+        fs_exec::TilePlan::new(
+            "fs-fft/ndim-pencil-block-v1",
+            u64::try_from(self.blocks.len()).expect("block count fits u64"),
+        )
+    }
+
+    fn run(
+        &self,
+        tile: u64,
+        cx: &fs_exec::Cx<'_>,
+    ) -> core::ops::ControlFlow<fs_exec::Cancelled, ()> {
+        let tile = usize::try_from(tile).expect("tile index fits usize");
+        let mut block = self.blocks[tile].lock().expect("pencil block lock");
+        let mut line = vec![C64::default(); self.n];
+        let mut scratch = vec![C64::default(); self.n];
+        for i in 0..self.stride {
+            if cx.checkpoint().is_err() {
+                return core::ops::ControlFlow::Break(fs_exec::Cancelled);
+            }
+            for (t, slot) in line.iter_mut().enumerate() {
+                *slot = block[i + t * self.stride];
+            }
+            if self.inverse {
+                self.plan.inverse(&mut line, &mut scratch);
+            } else {
+                self.plan.forward(&mut line, &mut scratch);
+            }
+            for (t, &v) in line.iter().enumerate() {
+                block[i + t * self.stride] = v;
+            }
+        }
+        core::ops::ControlFlow::Continue(())
+    }
+}
+
+impl FftNd {
+    /// Executor-tiled forward N-D DFT: bitwise identical to
+    /// [`FftNd::forward`] at every worker count (gated). See
+    /// [`FftNd::run_pooled`] for the cancellation contract.
+    ///
+    /// # Errors
+    /// [`fs_exec::RunError`] on cancellation or a contained executor
+    /// failure.
+    ///
+    /// # Panics
+    /// If `data.len()` differs from [`FftNd::total`].
+    pub fn forward_pooled(
+        &self,
+        data: &mut [C64],
+        pool: &fs_exec::TilePool,
+        gate: &fs_exec::CancelGate,
+    ) -> Result<(), fs_exec::RunError> {
+        self.run_pooled(data, false, pool, gate)
+    }
+
+    /// Executor-tiled inverse (1/total-normalized), bitwise identical to
+    /// [`FftNd::inverse`] at every worker count.
+    ///
+    /// # Errors
+    /// As [`FftNd::forward_pooled`].
+    ///
+    /// # Panics
+    /// As [`FftNd::forward_pooled`].
+    pub fn inverse_pooled(
+        &self,
+        data: &mut [C64],
+        pool: &fs_exec::TilePool,
+        gate: &fs_exec::CancelGate,
+    ) -> Result<(), fs_exec::RunError> {
+        self.run_pooled(data, true, pool, gate)
+    }
+
+    /// CANCELLATION CONTRACT: this is a scratch-transform API — on `Err`
+    /// the buffer contents are UNSPECIFIED (some axes may be transformed,
+    /// some pencils of the interrupted axis may be). Callers needing
+    /// transactional output stage a copy first; the drained pool and the
+    /// structured error are the guarantees, torn-freedom of `data` is not.
+    fn run_pooled(
+        &self,
+        data: &mut [C64],
+        inverse: bool,
+        pool: &fs_exec::TilePool,
+        gate: &fs_exec::CancelGate,
+    ) -> Result<(), fs_exec::RunError> {
+        let total = self.total();
+        assert_eq!(
+            data.len(),
+            total,
+            "buffer length {} must equal the product of dims {total}",
+            data.len()
+        );
+        for (ax, plan) in self.plans.iter().enumerate() {
+            let n = self.dims[ax];
+            if n == 1 {
+                continue;
+            }
+            let stride: usize = self.dims[ax + 1..].iter().product();
+            let outer: usize = self.dims[..ax].iter().product();
+            if outer == 1 {
+                // v1 serial axis (single outer block), gate-checked per
+                // pencil so cancellation stays bounded.
+                let mut line = vec![C64::default(); n];
+                let mut scratch = vec![C64::default(); n];
+                for i in 0..stride {
+                    if gate.is_requested() {
+                        return Err(fs_exec::RunError::Cancelled {
+                            kernel: "fs-fft/ndim-axis-serial-v1",
+                            completed: u64::try_from(i).expect("pencil index fits u64"),
+                            total: u64::try_from(stride).expect("pencil count fits u64"),
+                        });
+                    }
+                    for (t, slot) in line.iter_mut().enumerate() {
+                        *slot = data[i + t * stride];
+                    }
+                    if inverse {
+                        plan.inverse(&mut line, &mut scratch);
+                    } else {
+                        plan.forward(&mut line, &mut scratch);
+                    }
+                    for (t, &v) in line.iter().enumerate() {
+                        data[i + t * stride] = v;
+                    }
+                }
+                continue;
+            }
+            let blocks: Vec<std::sync::Mutex<&mut [C64]>> = data
+                .chunks_mut(n * stride)
+                .map(std::sync::Mutex::new)
+                .collect();
+            let kernel = PencilBlockKernel {
+                blocks: &blocks,
+                plan,
+                n,
+                stride,
+                inverse,
+            };
+            let (outcome, _report) = pool.run_with_gate(&kernel, gate);
+            outcome?;
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

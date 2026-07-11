@@ -19,6 +19,7 @@ layer = "L1"
 frontier-sixstep = []
 
 [dependencies]
+fs-exec = { path = "../fs-exec" }
 fs-math = { path = "../fs-math" }
 fs-simd = { path = "../fs-simd" }
 
