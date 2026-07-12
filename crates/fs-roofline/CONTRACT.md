@@ -478,3 +478,49 @@ Metamorphic property (tested): rescaling phase durations by a constant
   fs-report — the named seams, each consuming these verdicts.
 - Suspect-commit bisection hooks are diff-vs-last-green consumers of
   the same attribution output, not re-implemented here.
+
+## Bounded authenticated staleness-history checkpoints (bead vm3i)
+
+The `checkpoint` module seals one exhaustive staleness verification into a
+chained checkpoint so sustained probing stops re-paying O(H·(K+4)) ledger
+queries per kernel:
+
+- `checkpoint_staleness_history(ledger, kernel, version, fingerprint,
+  baseline)` runs the exhaustive per-row verifier once and appends a
+  checkpoint row to the tune table under the reserved kernel
+  `roofline-staleness-checkpoint:<kernel>` (invisible to production row
+  queries, machine-keyed identically to the rows it covers). The body is
+  canonical JSON: per covered row a domain-separated content hash over the
+  row's full stored identity (kernel ‖ shape_class ‖ machine ‖ params ‖
+  measured, length-prefixed), the validated build identity, the op-bound
+  dependency-receipt digests, the recorded timestamp, and a verdict.
+  Checkpoints chain: `digest_i = blake3_domain(chain-domain,
+  prev_digest ‖ body)`; ordinals are dense from 0 and the row's params
+  restate the expected digest. Insertion is `tune_put_if_absent` plus a
+  read-back equality check, so a colliding ordinal can never overwrite
+  sealed history.
+- `staleness_at_checkpointed(...)` mirrors `staleness_at` exactly on the
+  selection lattice (NeverMeasured/FingerprintDrift/BaselineUnavailable/
+  BaselineDrift decided identically, before any chain access). With a
+  verified chain, covered rows are checked by content hash and replayed
+  through the build/dependency scan from sealed metadata — two bounded
+  read queries total, independent of history depth (tested at 40 retained
+  runs). Rows newer than the seal (the delta) run the full exhaustive
+  validator. Any anomaly FAILS CLOSED: a missing, gapped, duplicate,
+  reparse-failing, digest-mismatching, or params-inconsistent chain routes
+  the probe to the exhaustive path, and a covered row that was altered or
+  removed classifies CorruptEvidence.
+- Tombstones are permanent: a row sealed `corrupt` stays corrupt in every
+  later checkpoint (re-sealing inherits tombstones before re-validating),
+  and restoring the original bytes never un-corrupts the fast-path verdict
+  — an operator who trusts checkpoints keeps seeing the incident.
+- Sealing over a chain that fails verification is refused
+  (`LedgerError::Invalid`): a broken chain is permanent evidence, never
+  extended and never overwritten.
+- No-claim: the chain authenticates against *later mutation of covered
+  history*; it is tamper-EVIDENT, not unforgeable. A writer with tune-table
+  access can mint a fresh chain for uncovered history; what they cannot do
+  is alter rows under an existing seal (or truncate them) without the next
+  checkpointed probe classifying CorruptEvidence. Chain length shares the
+  ledger's per-kernel tune-row bound (1024); compaction of old checkpoints
+  is future work and must preserve tombstone permanence.

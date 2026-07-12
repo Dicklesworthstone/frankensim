@@ -13,6 +13,7 @@
 pub mod authority;
 pub mod axes;
 pub mod baseline;
+pub mod checkpoint;
 pub mod kernels;
 pub mod production;
 pub mod stats;
@@ -2345,6 +2346,75 @@ fn staleness_at_with_build(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Shared row-selection prefix of the staleness lattice: everything decided
+/// BEFORE per-row validation (bead vm3i — the checkpointed fast path must
+/// classify NeverMeasured/FingerprintDrift/BaselineUnavailable/BaselineDrift
+/// identically to the exhaustive path, so both call this).
+pub(crate) enum RowSelection {
+    Verdict(Staleness),
+    Rows(Vec<fs_ledger::TuneRow>),
+}
+
+pub(crate) fn select_matching_rows(
+    ledger: &Ledger,
+    kernel: &str,
+    version: &str,
+    current_fingerprint: u64,
+    current_baseline: Option<fs_blake3::ContentHash>,
+) -> Result<RowSelection, LedgerError> {
+    let rows = ledger.tune_rows(kernel)?;
+    let shape_prefix = format!("{}:run=", tune_shape_class(version));
+    let roofline_rows: Vec<_> = rows
+        .into_iter()
+        .filter(|r| r.shape_class.starts_with(&shape_prefix))
+        .collect();
+    if roofline_rows.is_empty() {
+        return Ok(RowSelection::Verdict(Staleness::NeverMeasured));
+    }
+    let fp = current_fingerprint.to_le_bytes();
+    let same_machine: Vec<_> = roofline_rows
+        .into_iter()
+        .filter(|row| row.machine.get(..8) == Some(fp.as_slice()))
+        .collect();
+    if same_machine.is_empty() {
+        return Ok(RowSelection::Verdict(Staleness::FingerprintDrift));
+    }
+    let Some(current_baseline) = current_baseline else {
+        return Ok(RowSelection::Verdict(Staleness::BaselineUnavailable));
+    };
+    let key = roofline_machine_key(current_fingerprint, current_baseline);
+    let matching: Vec<_> = same_machine
+        .into_iter()
+        .filter(|row| row.machine == key)
+        .collect();
+    if matching.is_empty() {
+        return Ok(RowSelection::Verdict(Staleness::BaselineDrift));
+    }
+    Ok(RowSelection::Rows(matching))
+}
+
+/// Final age/rollback classification over a completed build scan (bead vm3i:
+/// shared by the exhaustive and checkpointed paths).
+pub(crate) fn classify_scanned_rows(
+    build_scan: BuildRowScan,
+    observed_wall_ns: i64,
+) -> Staleness {
+    let Some(recorded_at_ns) = build_scan.newest_current_build else {
+        return if build_scan.saw_foreign_build {
+            Staleness::BuildDrift
+        } else {
+            Staleness::CorruptEvidence
+        };
+    };
+    if observed_wall_ns < recorded_at_ns {
+        return Staleness::ClockRollback;
+    }
+    if observed_wall_ns.saturating_sub(recorded_at_ns) > STALENESS_MAX_AGE_NS {
+        return Staleness::Expired;
+    }
+    Staleness::Fresh
+}
+
 fn staleness_at_with_build_and_dependency(
     ledger: &Ledger,
     kernel: &str,
@@ -2355,36 +2425,20 @@ fn staleness_at_with_build_and_dependency(
     current_build: fs_blake3::ContentHash,
     expected_dependency: Option<DependencyReceiptBinding>,
 ) -> Result<Staleness, LedgerError> {
-    let rows = ledger.tune_rows(kernel)?;
-    let shape_prefix = format!("{}:run=", tune_shape_class(version));
-    let roofline_rows: Vec<_> = rows
-        .iter()
-        .filter(|r| r.shape_class.starts_with(&shape_prefix))
-        .collect();
-    if roofline_rows.is_empty() {
-        return Ok(Staleness::NeverMeasured);
-    }
-    let fp = current_fingerprint.to_le_bytes();
-    let same_machine = roofline_rows
-        .iter()
-        .filter(|row| row.machine.get(..8) == Some(fp.as_slice()))
-        .collect::<Vec<_>>();
-    if same_machine.is_empty() {
-        return Ok(Staleness::FingerprintDrift);
-    }
-    let Some(current_baseline) = current_baseline else {
-        return Ok(Staleness::BaselineUnavailable);
+    let matching_rows = match select_matching_rows(
+        ledger,
+        kernel,
+        version,
+        current_fingerprint,
+        current_baseline,
+    )? {
+        RowSelection::Verdict(v) => return Ok(v),
+        RowSelection::Rows(rows) => rows,
     };
-    let key = roofline_machine_key(current_fingerprint, current_baseline);
-    let matching_rows = same_machine
-        .into_iter()
-        .filter(|row| row.machine == key)
-        .collect::<Vec<_>>();
-    if matching_rows.is_empty() {
-        return Ok(Staleness::BaselineDrift);
-    }
+    // select_matching_rows only returns Rows after the baseline gate.
+    let current_baseline = current_baseline.expect("baseline present when rows match");
     let mut build_scan = BuildRowScan::default();
-    for row in matching_rows {
+    for row in &matching_rows {
         let Some(validated) = validate_roofline_row(
             ledger,
             row,
@@ -2401,32 +2455,25 @@ fn staleness_at_with_build_and_dependency(
             return Ok(Staleness::CorruptEvidence);
         }
     }
-    let Some(recorded_at_ns) = build_scan.newest_current_build else {
-        return Ok(if build_scan.saw_foreign_build {
-            Staleness::BuildDrift
-        } else {
-            Staleness::CorruptEvidence
-        });
-    };
-    if observed_wall_ns < recorded_at_ns {
-        return Ok(Staleness::ClockRollback);
-    }
-    if observed_wall_ns.saturating_sub(recorded_at_ns) > STALENESS_MAX_AGE_NS {
-        return Ok(Staleness::Expired);
-    }
-    Ok(Staleness::Fresh)
+    Ok(classify_scanned_rows(build_scan, observed_wall_ns))
 }
 
-struct ValidatedRooflineRow {
-    build_identity: fs_blake3::ContentHash,
-    recorded_at_ns: i64,
-    dependency_matches_current: bool,
+pub(crate) struct ValidatedRooflineRow {
+    pub(crate) build_identity: fs_blake3::ContentHash,
+    pub(crate) recorded_at_ns: i64,
+    pub(crate) dependency_matches_current: bool,
+    /// The row's op-bound dependency-receipt digests (bead vm3i): the
+    /// checkpoint stores these so the fast path can re-derive
+    /// `dependency_matches_current` against a FUTURE current binding
+    /// without refetching the op.
+    pub(crate) dependency_receipt_digest: fs_blake3::ContentHash,
+    pub(crate) dependency_receipt_artifact: fs_blake3::ContentHash,
 }
 
-#[derive(Default)]
-struct BuildRowScan {
-    newest_current_build: Option<i64>,
-    saw_foreign_build: bool,
+#[derive(Default, Clone, Copy)]
+pub(crate) struct BuildRowScan {
+    pub(crate) newest_current_build: Option<i64>,
+    pub(crate) saw_foreign_build: bool,
 }
 
 impl BuildRowScan {
@@ -2861,6 +2908,8 @@ fn validate_roofline_row(
             &protocol,
             expected_dependency,
         ),
+        dependency_receipt_digest: protocol.dependency_receipt_digest,
+        dependency_receipt_artifact: protocol.dependency_receipt_artifact,
     }))
 }
 
@@ -4042,11 +4091,14 @@ mod tests {
         let current_build = fs_blake3::hash_domain("fs-roofline.test-build.v1", b"current");
         let historical_build = fs_blake3::hash_domain("fs-roofline.test-build.v1", b"historical");
         let mut scan = BuildRowScan::default();
+        let zero = fs_blake3::hash_domain("fs-roofline.test-dep.v1", b"placeholder");
         assert!(scan.observe(
             &ValidatedRooflineRow {
                 build_identity: historical_build,
                 recorded_at_ns: 10,
                 dependency_matches_current: false,
+                dependency_receipt_digest: zero,
+                dependency_receipt_artifact: zero,
             },
             current_build,
         ));
@@ -4055,6 +4107,8 @@ mod tests {
                 build_identity: current_build,
                 recorded_at_ns: 20,
                 dependency_matches_current: true,
+                dependency_receipt_digest: zero,
+                dependency_receipt_artifact: zero,
             },
             current_build,
         ));
@@ -4066,6 +4120,8 @@ mod tests {
                 build_identity: current_build,
                 recorded_at_ns: 30,
                 dependency_matches_current: false,
+                dependency_receipt_digest: zero,
+                dependency_receipt_artifact: zero,
             },
             current_build,
         ));
