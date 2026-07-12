@@ -1580,8 +1580,8 @@ mod retained_capacity_tests {
             assert!(value.capacity() <= MAX_VOI_NAME_BYTES);
         }
 
-        let scheduler = VoiScheduler::new(spare_capacity("policy-v1"), 1.0)
-            .expect("bounded scheduler policy");
+        let scheduler =
+            VoiScheduler::new(spare_capacity("policy-v1"), 1.0).expect("bounded scheduler policy");
         assert!(scheduler.policy_scope.capacity() <= MAX_VOI_NAME_BYTES);
     }
 }
