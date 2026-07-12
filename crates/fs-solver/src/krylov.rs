@@ -14,8 +14,9 @@ use fs_sparse::precond::Precond;
 /// timeout mystery).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StallDiagnosis {
-    /// Residual plateaued: relative improvement over the last window
-    /// fell below 1e-3 — preconditioner quality is the first suspect.
+    /// Residual plateaued: it stayed within ±5% of the window start over
+    /// the last 50 iterations (flat, not diverging) — preconditioner
+    /// quality is the first suspect.
     Plateau,
     /// Residual still falling when the budget ran out — raise the
     /// budget or improve the preconditioner.
@@ -53,7 +54,12 @@ fn diagnose(history: &[f64], tol: f64) -> Option<StallDiagnosis> {
     let window = 50.min(history.len());
     if history.len() >= 20 {
         let prev = history[history.len() - window];
-        if prev.is_finite() && last > prev * 0.95 {
+        // The residual must be roughly FLAT — within ±5% of the window start.
+        // The lower bound alone (`last > prev*0.95`) also matches a DIVERGING
+        // tail (last ≫ prev), which the CONTRACT says must never read as
+        // Plateau (singular-system CG diverges to a large finite value). The
+        // upper bound routes divergence to BudgetExhausted instead.
+        if prev.is_finite() && last > prev * 0.95 && last < prev * 1.05 {
             return Some(StallDiagnosis::Plateau);
         }
     }
@@ -554,5 +560,44 @@ impl GmresState {
             }
         }
         report(self.iters, &self.history, self.rel, tol)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{StallDiagnosis, diagnose};
+
+    #[test]
+    fn diverging_tail_is_not_diagnosed_as_plateau() {
+        // Regression (CONTRACT: "singular-system CG diverges — must never read
+        // Plateau"). A monotonically GROWING residual satisfies the old lower
+        // bound `last > prev*0.95` and was mislabeled Plateau. With the flat
+        // ±5% band it must fall through to BudgetExhausted instead.
+        let diverging: Vec<f64> = (0..60).map(|i| 1.05_f64.powi(i)).collect();
+        assert_eq!(
+            diagnose(&diverging, 1e-8),
+            Some(StallDiagnosis::BudgetExhausted),
+            "a diverging residual must not read as Plateau"
+        );
+    }
+
+    #[test]
+    fn genuinely_flat_residual_is_plateau() {
+        // A residual pinned near a fixed value across the window is the real
+        // plateau (e.g. restarted-GMRES stagnation) and must still be labeled.
+        let flat = vec![2.0_f64; 60];
+        assert_eq!(diagnose(&flat, 1e-8), Some(StallDiagnosis::Plateau));
+        // Slow-but-real progress (< 5% over the window) is a plateau too.
+        let creeping: Vec<f64> = (0..60).map(|i| 2.0 - 0.0005 * f64::from(i)).collect();
+        assert_eq!(diagnose(&creeping, 1e-8), Some(StallDiagnosis::Plateau));
+    }
+
+    #[test]
+    fn converged_and_broken_are_classified() {
+        assert_eq!(diagnose(&[1.0, 1e-12], 1e-8), None); // below tol
+        assert_eq!(
+            diagnose(&[1.0, f64::NAN], 1e-8),
+            Some(StallDiagnosis::Breakdown)
+        );
     }
 }
