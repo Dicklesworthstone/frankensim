@@ -165,6 +165,47 @@ fn fresh_ledger_instance_id() -> Result<LedgerInstanceId, LedgerError> {
     }
 }
 
+fn decode_ledger_instance_id(
+    row_count: usize,
+    singleton: Option<&SqliteValue>,
+    instance_id: Option<&SqliteValue>,
+) -> Result<LedgerInstanceId, LedgerError> {
+    if row_count != 1 {
+        return Err(LedgerError::InstanceIdentityCorrupt {
+            detail: format!(
+                "ledger_identity must contain exactly one total row, found {row_count}"
+            ),
+        });
+    }
+    if !matches!(singleton, Some(SqliteValue::Integer(1))) {
+        return Err(LedgerError::InstanceIdentityCorrupt {
+            detail: format!("ledger_identity singleton key must be INTEGER 1, found {singleton:?}"),
+        });
+    }
+    let Some(SqliteValue::Blob(bytes)) = instance_id else {
+        return Err(LedgerError::InstanceIdentityCorrupt {
+            detail: "ledger_identity.instance_id is not a BLOB".to_string(),
+        });
+    };
+    let uuid: [u8; 16] =
+        bytes
+            .as_ref()
+            .try_into()
+            .map_err(|_| LedgerError::InstanceIdentityCorrupt {
+                detail: format!(
+                    "ledger_identity.instance_id must be a 16-byte UUID, found {} bytes",
+                    bytes.len()
+                ),
+            })?;
+    if uuid[6] & 0xf0 != 0x40 || uuid[8] & 0xc0 != 0x80 {
+        return Err(LedgerError::InstanceIdentityCorrupt {
+            detail: "ledger_identity.instance_id has invalid UUID version or variant bits"
+                .to_string(),
+        });
+    }
+    Ok(LedgerInstanceId(uuid))
+}
+
 // ---------------------------------------------------------------------------
 // Error model
 // ---------------------------------------------------------------------------
@@ -1642,9 +1683,10 @@ impl Ledger {
     fn seed_instance_id_if_missing(&self) -> Result<(), LedgerError> {
         let existing = self
             .conn
-            .query("SELECT 1 FROM ledger_identity WHERE singleton = 1")
+            .query("SELECT singleton, instance_id FROM ledger_identity LIMIT 2")
             .map_err(|error| sql_err("inspect ledger instance identity", &error))?;
         if !existing.is_empty() {
+            let _ = self.read_current_instance_id()?;
             return Ok(());
         }
         let instance_id = fresh_ledger_instance_id()?;
@@ -1663,38 +1705,13 @@ impl Ledger {
     fn read_current_instance_id(&self) -> Result<LedgerInstanceId, LedgerError> {
         let rows = self
             .conn
-            .query("SELECT instance_id FROM ledger_identity WHERE singleton = 1")
+            .query("SELECT singleton, instance_id FROM ledger_identity LIMIT 2")
             .map_err(|error| sql_err("read ledger instance identity", &error))?;
-        if rows.len() != 1 {
-            return Err(LedgerError::InstanceIdentityCorrupt {
-                detail: format!(
-                    "ledger_identity must contain exactly one singleton row, found {}",
-                    rows.len()
-                ),
-            });
-        }
-        let Some(SqliteValue::Blob(bytes)) = rows[0].get(0) else {
-            return Err(LedgerError::InstanceIdentityCorrupt {
-                detail: "ledger_identity.instance_id is not a BLOB".to_string(),
-            });
-        };
-        let uuid: [u8; 16] =
-            bytes
-                .as_ref()
-                .try_into()
-                .map_err(|_| LedgerError::InstanceIdentityCorrupt {
-                    detail: format!(
-                        "ledger_identity.instance_id must be a 16-byte UUID, found {} bytes",
-                        bytes.len()
-                    ),
-                })?;
-        if uuid[6] & 0xf0 != 0x40 || uuid[8] & 0xc0 != 0x80 {
-            return Err(LedgerError::InstanceIdentityCorrupt {
-                detail: "ledger_identity.instance_id has invalid UUID version or variant bits"
-                    .to_string(),
-            });
-        }
-        Ok(LedgerInstanceId(uuid))
+        decode_ledger_instance_id(
+            rows.len(),
+            rows.first().and_then(|row| row.get(0)),
+            rows.first().and_then(|row| row.get(1)),
+        )
     }
 
     fn recoverable_column_is_present(
@@ -3577,6 +3594,23 @@ mod tests {
                 "{table} fresh count"
             );
         }
+    }
+
+    #[test]
+    fn identity_decoder_rejects_hidden_extra_or_noncanonical_rows() {
+        assert!(matches!(
+            decode_ledger_instance_id(2, None, None),
+            Err(LedgerError::InstanceIdentityCorrupt { .. })
+        ));
+        let uuid = [
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x46, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+            0xee, 0xff,
+        ];
+        let blob = blob_param(&uuid);
+        assert!(matches!(
+            decode_ledger_instance_id(1, Some(&SqliteValue::Integer(2)), Some(&blob)),
+            Err(LedgerError::InstanceIdentityCorrupt { .. })
+        ));
     }
 
     #[test]

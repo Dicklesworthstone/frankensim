@@ -42,9 +42,12 @@ fine-grained event stream. Layer: L6 (HELM). Runtime deps: `std` + `fsqlite`.
   agree, while replacement files at the same path and independent in-memory
   handles differ. `instance_id()` is the cached open-time value;
   `checked_instance_id()` re-reads the current row and refuses a missing,
-  malformed, or changed identity. `lint()` performs that checked comparison.
-  A v4 or v5 ledger with missing or malformed identity refuses open rather
-  than silently rotating authority.
+  malformed, changed, or extra identity row. Validation reads at most two rows
+  across the whole table before requiring exactly one `singleton = 1` row, so
+  constraint-bypassed rows cannot hide outside a filtered query or force an
+  unbounded corruption scan. `lint()` performs that checked
+  comparison. A v4 or v5 ledger with missing or malformed identity refuses
+  open rather than silently rotating authority.
 - `ContentHash`, `Blake3`, `hash_bytes` — in-house BLAKE3 (plain hash mode,
   32-byte output), pure safe Rust; artifact identity everywhere. The
   implementation is OWNED by the UTIL crate `fs-blake3` (bead 7uq9) and

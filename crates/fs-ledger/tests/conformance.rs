@@ -555,6 +555,7 @@ fn ledger_003c_missing_persisted_identity_fails_closed() {
         );
     }
     cleanup_db(&premature);
+
     verdict(
         "ledger-003c",
         "v4 and premature-v4 schemas missing or carrying malformed identity refuse before version advancement",
