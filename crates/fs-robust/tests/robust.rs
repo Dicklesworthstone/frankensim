@@ -30,6 +30,20 @@ fn cvar_weights_the_worst_tail() {
 }
 
 #[test]
+fn cvar_fractionally_weights_a_non_integral_tail_boundary() {
+    // n*(1-alpha) = 1.5: the worst sample has full mass and the boundary
+    // sample has half mass. Equal-weighting the top two would return 15 and
+    // under-report this upper-tail risk.
+    let actual = cvar(&[0.0, 10.0, 20.0], 0.5).unwrap();
+    let expected = (20.0 + 0.5 * 10.0) / 1.5;
+    assert!((actual - expected).abs() < 1e-12, "{actual} vs {expected}");
+    assert!(
+        actual > 15.0,
+        "the old rounded-tail estimator was anti-conservative"
+    );
+}
+
+#[test]
 fn cvar_rejects_bad_inputs() {
     assert_eq!(cvar(&[], 0.9), Err(RobustError::EmptySamples));
     assert!(matches!(

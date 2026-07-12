@@ -11,8 +11,9 @@ random numbers) are supplied by the caller (fs-scenario).
 
 ## Public types and semantics
 
-- `cvar(samples, alpha)` — Conditional Value at Risk: the mean of the worst
-  `(1 − alpha)` tail (robust risk measure, weights the tail vs the mean).
+- `cvar(samples, alpha)` — finite-sample Conditional Value at Risk: the mean
+  of exactly the worst `(1 - alpha)` empirical mass, with fractional weight on
+  the boundary order statistic when the tail mass is non-integral.
 - `weakest_color(&[Color]) -> Option<Color>` — the lowest-rank color.
 - `ColoredObjective { design, cost_samples, input_colors }` — `robust_value`
   (CVaR), `nominal_value` (mean), `headline_color` (weakest input color; errors
@@ -61,10 +62,11 @@ None.
 
 ## Conformance tests
 
-`tests/robust.rs` (Proposal F, 8 cases): CVaR weights the worst tail + rejects
-bad inputs; the weakest-input color rule; robust vs nominal optima diverge; the
-un-colored-objective contract (+ no-candidates); the kill-criterion dominance
-test; monotone colored fragility curves; determinism.
+`tests/robust.rs` (Proposal F, 9 cases): CVaR weights integral and non-integral
+worst tails + rejects bad inputs; the weakest-input color rule; robust vs
+nominal optima diverge; the un-colored-objective contract (+ no-candidates);
+the kill-criterion dominance test; monotone colored fragility curves;
+determinism.
 
 ## No-claim boundaries
 

@@ -68,13 +68,26 @@ pub fn cvar(samples: &[f64], alpha: f64) -> Result<f64, RobustError> {
     reject_non_finite(samples)?;
     let mut sorted: Vec<f64> = samples.to_vec();
     sorted.sort_by(f64::total_cmp);
-    // number of worst-tail samples: at least the (1 - alpha) fraction, >= 1.
-    // Subtract a tiny epsilon before ceil so float error (e.g. 5.0000000004)
-    // does not over-count the tail by one.
-    let n = sorted.len();
-    let tail = ((((1.0 - alpha) * n as f64) - 1e-9).ceil().max(1.0) as usize).clamp(1, n);
-    let tail_sum = sorted.iter().rev().take(tail).sum::<f64>();
-    Ok(tail_sum / tail as f64)
+    // Standard finite-sample empirical CVaR: when n*alpha is not an
+    // integer, the boundary order statistic contributes only the fractional
+    // mass needed to make the tail measure exactly n*(1-alpha). Giving every
+    // one of ceil(n*(1-alpha)) samples equal weight dilutes the upper tail and
+    // is anti-conservative.
+    #[allow(clippy::cast_precision_loss)]
+    let n = sorted.len() as f64;
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
+    let boundary_rank = ((n * alpha).ceil() as usize).clamp(1, sorted.len());
+    let tail_mass = n * (1.0 - alpha);
+    #[allow(clippy::cast_precision_loss)]
+    let boundary_weight = boundary_rank as f64 - n * alpha;
+    let (at_or_below, above) = sorted.split_at(boundary_rank);
+    let boundary = *at_or_below.last().ok_or(RobustError::EmptySamples)?;
+    let strictly_above = above.iter().sum::<f64>();
+    Ok((boundary_weight * boundary + strictly_above) / tail_mass)
 }
 
 /// The weakest (lowest-rank) color among the inputs — the reporting rule.
