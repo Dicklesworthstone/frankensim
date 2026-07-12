@@ -341,6 +341,27 @@ fn admitted_headline_ignores_surplus_admitted_values_and_is_order_free() {
 }
 
 #[test]
+fn admitted_headline_same_color_surplus_is_order_free() {
+    // Regression: a SAME-COLOR surplus — two admitted counterparts that both
+    // cover the single declared input but carry DIFFERENT receipts. Only one is
+    // consumed (count-aware coverage), and WHICH one must be canonical, not
+    // input-order-dependent. The old first-match consumption let the headline
+    // lineage flip on reordering; the existing surplus test missed it because
+    // its surplus was a DIFFERENT color (never a coverage candidate).
+    let objective = ColoredObjective::new("clean", vec![1.0], vec![verified()]);
+    let node_a = admit(verified(), b"node-a");
+    let node_b = admit(verified(), b"node-b");
+    let forward = [node_a.clone(), node_b.clone()];
+    let reversed = [node_b, node_a];
+    let a = admitted_headline_for(&objective, &forward).expect("covered");
+    let b = admitted_headline_for(&objective, &reversed).expect("covered");
+    assert_eq!(
+        a, b,
+        "same-color surplus: the headline receipt must not depend on input order"
+    );
+}
+
+#[test]
 fn admitted_optimum_requires_every_candidate_admitted() {
     let a = ColoredObjective::new("A", vec![1.0, 1.0, 1.0, 1.0, 50.0], vec![verified()]);
     let b = ColoredObjective::new("B", vec![12.0; 5], vec![verified()]);

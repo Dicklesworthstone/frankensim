@@ -173,11 +173,35 @@ pub fn admitted_headline_for(
     let mut consumed: Vec<AdmittedColor> = Vec::with_capacity(objective.input_colors.len());
     for color in &objective.input_colors {
         let declared_bytes = color.canonical_bytes();
-        let matched = available.iter_mut().find(|slot| {
-            slot.is_some_and(|a| a.admitted_color().canonical_bytes() == declared_bytes)
-        });
-        match matched {
-            Some(slot) => consumed.push(slot.take().expect("matched slot is occupied").clone()),
+        // Among ALL available counterparts with matching canonical bytes,
+        // consume the CANONICAL one — minimal under the SAME total key
+        // `weakest_admitted_color` uses — never the first in input order. A
+        // same-color surplus (two admitted colors covering one declared input
+        // but carrying DIFFERENT receipts) would otherwise make WHICH receipt
+        // enters the headline depend on the order of `admitted`, breaking the
+        // permutation-invariance the report promises.
+        let chosen = available
+            .iter()
+            .enumerate()
+            .filter(|(_, slot)| {
+                slot.is_some_and(|a| a.admitted_color().canonical_bytes() == declared_bytes)
+            })
+            .min_by_key(|(_, slot)| {
+                let a = slot.expect("filtered to occupied");
+                (
+                    a.rank(),
+                    a.admitted_color().canonical_bytes(),
+                    *a.receipt().node_hash().as_bytes(),
+                )
+            })
+            .map(|(index, _)| index);
+        match chosen {
+            Some(index) => consumed.push(
+                available[index]
+                    .take()
+                    .expect("chosen slot is occupied")
+                    .clone(),
+            ),
             None => {
                 return Err(RobustError::UnadmittedInput {
                     design: objective.design.clone(),
