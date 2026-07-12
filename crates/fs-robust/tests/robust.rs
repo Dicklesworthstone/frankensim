@@ -217,3 +217,156 @@ fn optimization_is_deterministic() {
         robust_optimum(&[a, b], 0.8)
     );
 }
+
+// ── Admitted-headline battery (bead 6pf9, stage S2) ─────────────────────────
+
+use fs_evidence::{
+    AdmissionDecision, AdmissionReceipt, AdmissionVerifier, AdmittedColor, COLOR_ALGEBRA_VERSION,
+};
+use fs_robust::{AdmittedRobustReport, admitted_headline_for, robust_optimum_admitted};
+
+/// Test-fixture capability: accepts everything, standing in for the ledger
+/// authority at the composition root. The real deny-all default and the
+/// ledger oracle are exercised in fs-evidence and fs-ledger batteries.
+struct FixtureAuthority;
+impl AdmissionVerifier for FixtureAuthority {
+    fn verify(&self, _c: &Color, _r: &AdmissionReceipt) -> AdmissionDecision {
+        AdmissionDecision::accept(fs_blake3::hash_bytes(b"fixture-authority"))
+    }
+}
+
+fn admit(color: Color, tag: &[u8]) -> AdmittedColor {
+    AdmittedColor::from_receipt(
+        color,
+        AdmissionReceipt::from_parts(
+            fs_blake3::hash_bytes(tag),
+            7,
+            COLOR_ALGEBRA_VERSION,
+            fs_blake3::hash_bytes(b"fixture-policy"),
+        ),
+        &FixtureAuthority,
+    )
+    .expect("fixture admission")
+}
+
+fn verified_wide() -> Color {
+    Color::Verified { lo: -9.0, hi: 9.0 }
+}
+
+#[test]
+fn weakest_color_is_permutation_invariant_on_rank_ties() {
+    let forward = weakest_color(&[verified(), verified_wide()]).expect("tie");
+    let reversed = weakest_color(&[verified_wide(), verified()]).expect("tie");
+    assert_eq!(
+        forward, reversed,
+        "reordering equal-rank inputs must not change the reported payload"
+    );
+    // The winner is content-determined (canonical-bytes minimum), so a
+    // shuffled triple agrees too.
+    let triple = weakest_color(&[verified_wide(), verified(), verified_wide()]).expect("tie");
+    assert_eq!(triple, forward);
+}
+
+#[test]
+fn headline_refuses_structurally_malformed_inputs() {
+    let obj = ColoredObjective::new(
+        "garbage",
+        vec![1.0, 2.0],
+        vec![Color::Verified {
+            lo: f64::NAN,
+            hi: 1.0,
+        }],
+    );
+    assert!(matches!(
+        obj.headline_color(),
+        Err(RobustError::MalformedInputColor { design, .. }) if design == "garbage"
+    ));
+}
+
+#[test]
+fn admitted_headline_requires_full_count_aware_coverage() {
+    let objective = ColoredObjective::new(
+        "bridge",
+        vec![1.0, 2.0],
+        vec![verified(), verified(), verified_wide()],
+    );
+    // Full coverage: two admitted copies of the duplicate + the wide one.
+    let full = [
+        admit(verified(), b"node-a"),
+        admit(verified(), b"node-b"),
+        admit(verified_wide(), b"node-c"),
+    ];
+    let headline = admitted_headline_for(&objective, &full).expect("covered");
+    assert_eq!(headline.rank(), ColorRank::Verified);
+
+    // Count-aware: ONE admitted copy cannot cover TWO identical declared
+    // inputs.
+    let short = [
+        admit(verified(), b"node-a"),
+        admit(verified_wide(), b"node-c"),
+    ];
+    assert!(matches!(
+        admitted_headline_for(&objective, &short),
+        Err(RobustError::UnadmittedInput { design }) if design == "bridge"
+    ));
+
+    // An estimated declared input can never be covered: AdmittedColor is
+    // always positive, so the objective keeps a declared-only headline.
+    let mixed = ColoredObjective::new("mixed", vec![1.0], vec![verified(), estimated()]);
+    assert!(matches!(
+        admitted_headline_for(&mixed, &full),
+        Err(RobustError::UnadmittedInput { design }) if design == "mixed"
+    ));
+}
+
+#[test]
+fn admitted_headline_ignores_surplus_admitted_values_and_is_order_free() {
+    // The caller holds an admitted color WEAKER-ranked than anything the
+    // objective declares; it must not leak into the headline.
+    let regime = fs_evidence::ValidityDomain::unconstrained().with("re", 1e3, 1e5);
+    let surplus = admit(
+        Color::Validated {
+            regime,
+            dataset: "unrelated-campaign".to_string(),
+        },
+        b"node-surplus",
+    );
+    let objective = ColoredObjective::new("clean", vec![1.0], vec![verified()]);
+    let forward = [admit(verified(), b"node-a"), surplus.clone()];
+    let reversed = [surplus, admit(verified(), b"node-a")];
+    let a = admitted_headline_for(&objective, &forward).expect("covered");
+    let b = admitted_headline_for(&objective, &reversed).expect("covered");
+    assert_eq!(a.rank(), ColorRank::Verified, "surplus Validated must not leak");
+    assert_eq!(a, b, "admitted headline must be order-free");
+}
+
+#[test]
+fn admitted_optimum_requires_every_candidate_admitted() {
+    let a = ColoredObjective::new("A", vec![1.0, 1.0, 1.0, 1.0, 50.0], vec![verified()]);
+    let b = ColoredObjective::new("B", vec![12.0; 5], vec![verified()]);
+    let admitted_a = [admit(verified(), b"node-a")];
+    let admitted_b = [admit(verified(), b"node-b")];
+
+    let report: AdmittedRobustReport = robust_optimum_admitted(
+        &[
+            (a.clone(), admitted_a.as_slice()),
+            (b.clone(), admitted_b.as_slice()),
+        ],
+        0.8,
+    )
+    .expect("wholly admitted run");
+    assert_eq!(report.design, "B");
+    assert_eq!(report.headline.rank(), ColorRank::Verified);
+    assert_eq!(
+        report.headline.receipt().node_hash(),
+        fs_blake3::hash_bytes(b"node-b"),
+        "the headline must carry the WINNER'S admission lineage"
+    );
+
+    // One unadmitted candidate poisons the whole positive claim — even when
+    // that candidate would lose the optimization anyway.
+    assert!(matches!(
+        robust_optimum_admitted(&[(a, admitted_a.as_slice()), (b, &[])], 0.8),
+        Err(RobustError::UnadmittedInput { design }) if design == "B"
+    ));
+}

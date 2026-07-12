@@ -14,7 +14,23 @@ random numbers) are supplied by the caller (fs-scenario).
 - `cvar(samples, alpha)` — finite-sample Conditional Value at Risk: the mean
   of exactly the worst `(1 - alpha)` empirical mass, with fractional weight on
   the boundary order statistic when the tail mass is non-integral.
-- `weakest_color(&[Color]) -> Option<Color>` — the lowest-rank color.
+- `weakest_color(&[Color]) -> Option<Color>` — the lowest-rank DECLARED
+  color; rank ties break by canonical payload bytes, so the result is
+  permutation-invariant (bead 6pf9). Declaration-level API: it authenticates
+  nothing.
+- `weakest_admitted_color(&[AdmittedColor]) -> Option<AdmittedColor>` — the
+  lowest-rank ADMITTED color; ties break by canonical payload bytes, then
+  admission-receipt node hash — never input order.
+- `admitted_headline_for(&ColoredObjective, &[AdmittedColor])` — the positive
+  headline: available only when every declared input is covered COUNT-AWARE
+  (canonical bytes) by an admitted counterpart; only consumed counterparts
+  enter the headline (surplus admitted values a caller holds cannot leak in).
+  An Estimated declared input can never be covered, so mixed objectives keep
+  a declared-only headline.
+- `robust_optimum_admitted(&[(ColoredObjective, &[AdmittedColor])], alpha) ->
+  AdmittedRobustReport` — the admitted-evidence contract: EVERY candidate must
+  be fully admitted before the run may claim a positive headline (fail
+  closed), and the report's headline carries the winner's admission lineage.
 - `ColoredObjective { design, cost_samples, input_colors }` — `robust_value`
   (CVaR), `nominal_value` (mean), `headline_color` (weakest input color; errors
   if un-colored).
@@ -28,7 +44,8 @@ random numbers) are supplied by the caller (fs-scenario).
   `P(failure)` = fraction of capacities below each intensity, with a color band;
   output points are canonically sorted by finite intensity.
 - `RobustError` — `EmptySamples` / `BadAlpha` / `BadSample` /
-  `UncoloredObjective` / `NoCandidates`.
+  `UncoloredObjective` / `NoCandidates` / `MalformedInputColor` /
+  `UnadmittedInput`.
 
 ## Invariants
 
@@ -36,6 +53,13 @@ random numbers) are supplied by the caller (fs-scenario).
   objective (no optimizing a fiction with certified precision).
 - WEAKEST-INPUT RULE: a headline's color is the minimum-rank input color — a
   verified solve under an estimated hazard is an estimated answer.
+- STRUCTURAL GATE (bead 6pf9): `headline_color` and `admitted_headline_for`
+  validate every input payload (`validate_color_payload`) and refuse
+  structural garbage with `MalformedInputColor` before any rank arithmetic.
+- ADMISSION BOUNDARY (bead 6pf9): positive-evidence reporting goes through
+  `AdmittedColor` (opaque, capability-minted in fs-evidence/fs-ledger). Raw
+  `Color` values remain accepted by declaration-level APIs for rendering and
+  diagnostics; they cannot satisfy the admitted APIs.
 - CVaR of the tail is `>=` the mean; `alpha ∈ (0, 1)` enforced; non-finite
   samples are refused instead of sorted into risk or headline values. CVaR and
   nominal means use bounded convex combinations, so finite constant samples
@@ -67,12 +91,16 @@ None.
 
 ## Conformance tests
 
-`tests/robust.rs` (Proposal F, 11 cases): CVaR weights integral and non-integral
+`tests/robust.rs` (Proposal F, 16 cases): CVaR weights integral and non-integral
 worst tails + rejects bad inputs; the weakest-input color rule; robust vs
 nominal optima diverge; the un-colored-objective contract (+ no-candidates);
 extreme finite means remain finite; the kill-criterion dominance test;
 non-finite dominance costs refuse; unsorted fragility inputs produce monotone
-canonical curves; determinism.
+canonical curves; determinism. Admitted battery (bead 6pf9): tie
+permutation-invariance, malformed-payload refusal, count-aware coverage
+(duplicate declared inputs need duplicate admitted counterparts; estimated
+inputs are never coverable), surplus-admitted isolation + order-freedom, and
+the wholly-admitted optimum contract with winner-lineage headline.
 
 ## No-claim boundaries
 

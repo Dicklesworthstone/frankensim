@@ -24,7 +24,8 @@
 //! Deterministic; sample paths are supplied by the caller (common random
 //! numbers live in fs-scenario). This crate is the coloring + risk algebra.
 
-pub use fs_evidence::{Color, ColorRank};
+pub use fs_evidence::{AdmittedColor, Color, ColorPayloadError, ColorRank};
+use fs_evidence::validate_color_payload;
 
 /// A structured objective-epistemics failure.
 #[derive(Debug, Clone, PartialEq)]
@@ -49,6 +50,20 @@ pub enum RobustError {
     },
     /// No candidate designs.
     NoCandidates,
+    /// An input color's payload is structurally malformed (bead 6pf9): a
+    /// headline can never be derived over structural garbage.
+    MalformedInputColor {
+        /// The offending design.
+        design: String,
+        /// The exact structural defect.
+        error: ColorPayloadError,
+    },
+    /// A declared input color is not covered by an admitted counterpart, so
+    /// no positive (admitted) headline exists for this objective.
+    UnadmittedInput {
+        /// The offending design.
+        design: String,
+    },
 }
 
 /// Conditional Value at Risk at confidence `alpha`: the expected loss in the
@@ -92,10 +107,87 @@ pub fn cvar(samples: &[f64], alpha: f64) -> Result<f64, RobustError> {
     .ok_or(RobustError::EmptySamples)
 }
 
-/// The weakest (lowest-rank) color among the inputs — the reporting rule.
+/// The weakest (lowest-rank) DECLARED color among the inputs — the
+/// reporting rule over unverified candidates. Rank ties break by canonical
+/// payload bytes, so the result is PERMUTATION-INVARIANT: reordering equal
+/// inputs can never change which payload the report carries (bead 6pf9).
+/// This is a declaration-level API; positive-evidence reporting goes
+/// through [`admitted_headline_for`].
 #[must_use]
 pub fn weakest_color(colors: &[Color]) -> Option<Color> {
-    colors.iter().min_by_key(|c| c.rank()).cloned()
+    colors
+        .iter()
+        .min_by_key(|c| (c.rank(), c.canonical_bytes()))
+        .cloned()
+}
+
+/// The weakest ADMITTED color among positive inputs, permutation-invariant:
+/// rank ties break by canonical payload bytes, then by admission-receipt
+/// node hash, never by input order (bead 6pf9).
+#[must_use]
+pub fn weakest_admitted_color(inputs: &[AdmittedColor]) -> Option<AdmittedColor> {
+    inputs
+        .iter()
+        .min_by_key(|a| {
+            (
+                a.rank(),
+                a.admitted_color().canonical_bytes(),
+                *a.receipt().node_hash().as_bytes(),
+            )
+        })
+        .cloned()
+}
+
+/// The admitted headline for one objective: the weakest admitted input,
+/// available ONLY when every declared input color is covered (count-aware,
+/// canonical bytes) by an admitted counterpart. An Estimated declared input
+/// can never be covered — [`AdmittedColor`] is always positive — so an
+/// objective with estimated ingredients keeps its declared-only headline,
+/// exactly as the no-laundering law requires.
+///
+/// # Errors
+/// [`RobustError::UncoloredObjective`] with no declared inputs,
+/// [`RobustError::MalformedInputColor`] on structural garbage, and
+/// [`RobustError::UnadmittedInput`] when any declared input lacks an
+/// admitted counterpart.
+pub fn admitted_headline_for(
+    objective: &ColoredObjective,
+    admitted: &[AdmittedColor],
+) -> Result<AdmittedColor, RobustError> {
+    if objective.input_colors.is_empty() {
+        return Err(RobustError::UncoloredObjective {
+            design: objective.design.clone(),
+        });
+    }
+    for color in &objective.input_colors {
+        validate_color_payload(color).map_err(|error| RobustError::MalformedInputColor {
+            design: objective.design.clone(),
+            error,
+        })?;
+    }
+    // Count-aware coverage: each declared input consumes one admitted
+    // counterpart with identical canonical bytes. Only CONSUMED counterparts
+    // enter the headline — surplus admitted values a caller happens to hold
+    // must not influence this objective's report.
+    let mut available: Vec<Option<&AdmittedColor>> = admitted.iter().map(Some).collect();
+    let mut consumed: Vec<AdmittedColor> = Vec::with_capacity(objective.input_colors.len());
+    for color in &objective.input_colors {
+        let declared_bytes = color.canonical_bytes();
+        let matched = available.iter_mut().find(|slot| {
+            slot.is_some_and(|a| a.admitted_color().canonical_bytes() == declared_bytes)
+        });
+        match matched {
+            Some(slot) => consumed.push(slot.take().expect("matched slot is occupied").clone()),
+            None => {
+                return Err(RobustError::UnadmittedInput {
+                    design: objective.design.clone(),
+                });
+            }
+        }
+    }
+    weakest_admitted_color(&consumed).ok_or(RobustError::UnadmittedInput {
+        design: objective.design.clone(),
+    })
 }
 
 /// A colored objective for one design: its realized-cost samples under the
@@ -156,6 +248,12 @@ impl ColoredObjective {
     /// # Errors
     /// [`RobustError::UncoloredObjective`] if no input colors are declared.
     pub fn headline_color(&self) -> Result<Color, RobustError> {
+        for color in &self.input_colors {
+            validate_color_payload(color).map_err(|error| RobustError::MalformedInputColor {
+                design: self.design.clone(),
+                error,
+            })?;
+        }
         weakest_color(&self.input_colors).ok_or_else(|| RobustError::UncoloredObjective {
             design: self.design.clone(),
         })
@@ -212,6 +310,60 @@ pub fn robust_optimum(
         robust_value,
         nominal_value: winner.nominal_value()?,
         headline_color: winner.headline_color()?,
+    })
+}
+
+/// A robust-optimization report whose headline is ADMITTED scientific
+/// evidence (bead 6pf9): holding this value means every candidate's declared
+/// inputs were covered by admitted counterparts and the winner's headline is
+/// the weakest admitted input, permutation-invariant.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AdmittedRobustReport {
+    /// The winning design.
+    pub design: String,
+    /// Its robust value (CVaR) — the objective minimized.
+    pub robust_value: f64,
+    /// Its nominal value (mean) — for comparison.
+    pub nominal_value: f64,
+    /// The admitted headline: the weakest admitted input of the winner.
+    pub headline: AdmittedColor,
+}
+
+/// [`robust_optimum`] under the admitted-evidence contract: EVERY candidate's
+/// declared inputs must be covered by its paired admitted colors before the
+/// optimization is allowed to claim a positive headline — an optimization run
+/// publishing admitted evidence must be wholly admitted, not admitted only at
+/// the winner (fail closed).
+///
+/// # Errors
+/// Everything [`robust_optimum`] refuses, plus
+/// [`RobustError::MalformedInputColor`] and [`RobustError::UnadmittedInput`]
+/// from any candidate.
+pub fn robust_optimum_admitted(
+    candidates: &[(ColoredObjective, &[AdmittedColor])],
+    alpha: f64,
+) -> Result<AdmittedRobustReport, RobustError> {
+    if candidates.is_empty() {
+        return Err(RobustError::NoCandidates);
+    }
+    let mut headlines = Vec::with_capacity(candidates.len());
+    for (objective, admitted) in candidates {
+        headlines.push(admitted_headline_for(objective, admitted)?);
+    }
+    let mut best: Option<(usize, f64)> = None;
+    for (index, (objective, _)) in candidates.iter().enumerate() {
+        let rv = objective.robust_value(alpha)?;
+        if best.is_none_or(|(_, best_rv)| rv < best_rv) {
+            best = Some((index, rv));
+        }
+    }
+    let (index, robust_value) = best.ok_or(RobustError::NoCandidates)?;
+    let winner = &candidates[index].0;
+    Ok(AdmittedRobustReport {
+        design: winner.design.clone(),
+        robust_value,
+        nominal_value: winner.nominal_value()?,
+        headline: headlines.swap_remove(index),
     })
 }
 
