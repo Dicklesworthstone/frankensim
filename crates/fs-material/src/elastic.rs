@@ -71,7 +71,11 @@ impl IsotropicElastic {
 fn apply(c: &Tangent6, strain: &Voigt) -> Voigt {
     let mut s = [0.0f64; 6];
     for (row, out) in c.iter().zip(s.iter_mut()) {
-        // Tensor-Voigt contraction: shear strain columns count twice.
+        // Plain σ = C·ε matvec. This crate uses the TENSOR-shear Voigt
+        // convention, so the factor-2 lives in the 2μ shear entries of C (built
+        // in `isotropic`/`orthotropic`), NOT here — the shear strain columns
+        // must NOT be doubled. Do NOT "fix" this into `2·row[i]·strain[i]` for
+        // i ≥ 3; that reintroduces a factor-2 error on every shear stress.
         *out = row[0] * strain[0]
             + row[1] * strain[1]
             + row[2] * strain[2]
