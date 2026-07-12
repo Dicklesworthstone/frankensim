@@ -241,7 +241,13 @@ pub fn cyclic_residual(v: &[f64], k_fold: usize) -> Result<SymmetryResidual, Sym
     Ok(SymmetryResidual {
         residual,
         relative,
-        is_exact: residual <= 1e-12,
+        // Gate the "exactly k-fold symmetric" verdict on the RELATIVE asymmetry,
+        // not the raw residual: `residual = ‖v − rot(v)‖` scales with the field
+        // magnitude, so an absolute `residual <= 1e-12` would certify a tiny but
+        // wildly-asymmetric field (e.g. magnitude 1e-13, relative ≈ 1.4) as
+        // exactly symmetric, and reject a large field symmetric to full double
+        // precision. `relative` is 0 for the zero field (trivially symmetric).
+        is_exact: relative <= 1e-12,
     })
 }
 
