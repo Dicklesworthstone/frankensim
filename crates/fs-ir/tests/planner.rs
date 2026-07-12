@@ -378,8 +378,7 @@ fn pl_007_family_mesh_candidate_and_cost_admission_are_fail_closed() {
     assert!(CachedAnswer::new(vec![0.0, 0.0], -1.0, vec![0.0, 1.0]).is_err());
     assert!(CachedAnswer::new(vec![0.0], 0.1, vec![0.0, 1.0]).is_err());
     assert!(CachedAnswer::new(vec![1.0, 0.0], 0.1, vec![0.0, 1.0]).is_err());
-    let normalized_cache =
-        CachedAnswer::new(vec![-0.0, 0.0], 0.1, vec![-0.0, 1.0]).unwrap();
+    let normalized_cache = CachedAnswer::new(vec![-0.0, 0.0], 0.1, vec![-0.0, 1.0]).unwrap();
     assert_eq!(normalized_cache.nodal()[0].to_bits(), 0.0_f64.to_bits());
     assert_eq!(normalized_cache.mesh()[0].to_bits(), 0.0_f64.to_bits());
 }

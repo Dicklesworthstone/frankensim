@@ -251,11 +251,7 @@ impl CachedAnswer {
     ///
     /// # Errors
     /// Returns [`PlanError`] for an invalid bound, mesh, or nodal vector.
-    pub fn new(
-        mut nodal: Vec<f64>,
-        bound: f64,
-        mut mesh: Vec<f64>,
-    ) -> Result<Self, PlanError> {
+    pub fn new(mut nodal: Vec<f64>, bound: f64, mut mesh: Vec<f64>) -> Result<Self, PlanError> {
         validate_bound(bound, "cached_bound")?;
         validate_mesh(&mesh)?;
         validate_candidate(&mesh, &nodal)?;
