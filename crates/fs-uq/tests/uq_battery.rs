@@ -311,3 +311,31 @@ fn uq_golden_hash() {
          justification (golden-evidence policy)"
     );
 }
+
+#[test]
+#[should_panic(expected = "nonzero pilot")]
+fn mlmc_rejects_a_zero_pilot() {
+    // Regression: pilot = 0 divides by n = 0 in the variance estimate; the
+    // 1e-30 floor then masks the NaN and the report would claim a tiny,
+    // fake-confident estimator variance built on ZERO data. Fail closed.
+    let mut sampler = |_l: usize, _g: u64| 1.0;
+    let _ = mlmc_estimate(&mut sampler, &[1.0, 2.0], 0, 5e-5);
+}
+
+#[test]
+#[should_panic(expected = "positive target variance")]
+fn mlmc_rejects_a_nonpositive_target_variance() {
+    // Regression: target_variance = 0 makes n_opt = INFINITY as usize =
+    // usize::MAX, so the top-up loop samples essentially forever (a hang).
+    let mut sampler = |_l: usize, _g: u64| 1.0;
+    let _ = mlmc_estimate(&mut sampler, &[1.0, 2.0], 8, 0.0);
+}
+
+#[test]
+#[should_panic(expected = "positive per-level costs")]
+fn mlmc_rejects_a_zero_cost_level() {
+    // Regression: costs[l] = 0 makes v / costs[l] = +inf → n_opt = usize::MAX
+    // → the same unbounded sampling loop. (NaN costs fail the same > 0 test.)
+    let mut sampler = |_l: usize, _g: u64| 1.0;
+    let _ = mlmc_estimate(&mut sampler, &[1.0, 0.0], 8, 5e-5);
+}

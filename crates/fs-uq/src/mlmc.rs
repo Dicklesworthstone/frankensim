@@ -44,6 +44,23 @@ pub fn mlmc_estimate(
     pilot: usize,
     target_variance: f64,
 ) -> MlmcReport {
+    // Fail closed on degenerate inputs (mirrors `adaptive_mlmc`'s pilot guard).
+    // pilot == 0 would divide by n = 0 in `var_of` — the `.max(1e-30)` floor
+    // then masks the NaN and the report claims a tiny (fake-confident)
+    // estimator variance from ZERO pilot data. A non-positive `target_variance`
+    // or `costs[l]` drives `v / costs[l]` or `.../ target_variance` to +∞, so
+    // `n_opt = f64::INFINITY as usize = usize::MAX` and the top-up loop samples
+    // essentially forever (a hang, not a wrong number). NaN costs are rejected
+    // by the same `> 0.0` test.
+    assert!(pilot > 0, "mlmc_estimate needs a nonzero pilot sample count");
+    assert!(
+        target_variance > 0.0,
+        "mlmc_estimate needs a positive target variance"
+    );
+    assert!(
+        costs.iter().all(|&c| c > 0.0),
+        "mlmc_estimate needs strictly positive per-level costs"
+    );
     let nl = costs.len();
     let mut sums = vec![(0.0f64, 0.0f64, 0usize); nl]; // (Σy, Σy², n)
     for (l, s) in sums.iter_mut().enumerate() {
