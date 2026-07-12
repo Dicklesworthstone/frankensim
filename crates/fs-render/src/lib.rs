@@ -25,6 +25,7 @@ pub mod charts;
 
 #[cfg(feature = "differentiable")]
 pub mod diff;
+pub mod spectral;
 #[cfg(feature = "volumes")]
 pub mod volumes;
 
