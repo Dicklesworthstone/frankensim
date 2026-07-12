@@ -109,3 +109,12 @@ fn st_002_steering_actually_steers() {
          landscape — steering is real, and every step of it is a ledgered op",
     );
 }
+
+#[test]
+#[should_panic(expected = "steered study needs a positive population")]
+fn steered_study_rejects_an_empty_population() {
+    // Regression: `advance` selects parents via `... % population.len()`; an
+    // empty population divides by zero. Fail closed at construction.
+    let mut obj = |x: &[f64]| vec![x[0], x[1]];
+    let _ = SteeredStudy::start(&mut obj, 3, (0.0, 1.0), 0, 2, 0x5eed);
+}

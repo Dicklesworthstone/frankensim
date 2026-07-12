@@ -405,6 +405,13 @@ fn hv_recursive(pts: &[Vec<f64>], reference: &[f64]) -> f64 {
 pub fn knee_point(front: &[Vec<f64>]) -> usize {
     let n = front.len();
     assert!(n >= 3, "knee needs at least 3 points");
+    // The perpendicular-distance formula reads p[0] and p[1]; a front of
+    // <2-objective points would index out of bounds. Fail closed with the
+    // crate's structured-panic error model rather than panic on `p[1]`.
+    assert!(
+        front.iter().all(|p| p.len() >= 2),
+        "knee needs 2-objective points"
+    );
     let (mut lo0, mut hi0) = (f64::INFINITY, f64::NEG_INFINITY);
     let (mut lo1, mut hi1) = (f64::INFINITY, f64::NEG_INFINITY);
     for p in front {

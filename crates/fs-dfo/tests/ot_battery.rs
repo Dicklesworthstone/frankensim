@@ -137,3 +137,14 @@ fn ot_golden_hash() {
          justification (golden-evidence policy)"
     );
 }
+
+#[test]
+#[should_panic(expected = "epsilon must be positive")]
+fn sinkhorn_rejects_a_nonpositive_epsilon() {
+    // Regression: the Gibbs kernel exp(-c/epsilon) is 0/inf -> NaN potentials
+    // for epsilon <= 0. Fail closed instead of returning a NaN plan.
+    let a = [0.5, 0.5];
+    let b = [0.5, 0.5];
+    let c = [0.0, 1.0, 1.0, 0.0]; // 2x2 cost matrix
+    let _ = sinkhorn(&a, &b, &c, 0.0, 100);
+}

@@ -441,3 +441,11 @@ fn hv_archive_eviction_is_least_contributor() {
         &format!("final HV {got:.4} == best subset"),
     );
 }
+
+#[test]
+#[should_panic(expected = "knee needs 2-objective points")]
+fn knee_point_rejects_sub_two_objective_points() {
+    // Regression: `knee_point` reads p[0] and p[1]; a 1-objective front would
+    // index out of bounds. Fail closed with a structured message.
+    let _ = knee_point(&[vec![0.0], vec![1.0], vec![2.0]]);
+}

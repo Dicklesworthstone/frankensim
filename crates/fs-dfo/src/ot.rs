@@ -41,6 +41,12 @@ pub fn sinkhorn(a: &[f64], b: &[f64], c: &[f64], epsilon: f64, max_iters: usize)
     let m = b.len();
     assert_eq!(c.len(), n * m);
     assert!(a.iter().all(|&w| w > 0.0) && b.iter().all(|&w| w > 0.0));
+    // The Gibbs kernel is exp(-c/epsilon); a non-positive epsilon gives
+    // exp(±inf) -> 0/inf and NaN potentials. Fail closed.
+    assert!(
+        epsilon > 0.0,
+        "sinkhorn entropic regularization epsilon must be positive"
+    );
     let (sa, sb): (f64, f64) = (a.iter().sum(), b.iter().sum());
     assert!(
         (sa - sb).abs() < 1e-12,

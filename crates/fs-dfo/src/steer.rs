@@ -78,6 +78,9 @@ impl SteeredStudy {
         n_obj: usize,
         seed: u64,
     ) -> SteeredStudy {
+        // `advance` selects parents via `... % population.len()`; an empty
+        // population would divide by zero. Fail closed at construction.
+        assert!(pop > 0, "steered study needs a positive population");
         let (lo, hi) = bounds;
         let population: Vec<Individual> = (0..pop)
             .map(|i| {
