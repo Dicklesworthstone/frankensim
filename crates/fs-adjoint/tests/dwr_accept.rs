@@ -13,8 +13,18 @@ use fs_adjoint::dwr_accept::{
 use fs_evidence::Color;
 use fs_evidence::falsify::{FalsifierRegistry, FalsifierSpec};
 use fs_verify::estimator::{EstimatorFamily, VerifierReport};
-use fs_verify::fem1d::{MmsProblem, Poly, solve_p1};
+use fs_verify::fem1d::{
+    Fem1dError, MAX_FEM1D_POLY_COEFFICIENTS, MmsClass, MmsProblem, Poly, solve_p1,
+};
 use fs_verify::interval::Iv;
+
+fn poly(coefficients: Vec<f64>) -> Poly {
+    Poly::new(coefficients).expect("valid DWR fixture polynomial")
+}
+
+fn admitted_problem(name: &str, coefficients: Vec<f64>, mesh: Vec<f64>) -> MmsProblem {
+    MmsProblem::new(name, poly(coefficients), mesh).expect("valid DWR fixture problem")
+}
 
 fn verdict(case: &str, detail: &str) {
     println!(
@@ -27,15 +37,17 @@ fn verdict(case: &str, detail: &str) {
 /// u = x(1 − x)(1 + 2x²), rich enough that P1 has visible error.
 fn quartic_problem(cells: usize) -> MmsProblem {
     // u = (x − x²)(1 + 2x²) = x + 2x³ − x² − 2x⁴.
-    let u = Poly(vec![0.0, 1.0, -1.0, 2.0, -2.0]);
     #[allow(clippy::cast_precision_loss)]
     let mesh: Vec<f64> = (0..=cells).map(|k| k as f64 / cells as f64).collect();
-    MmsProblem::new("dwr-quartic", u, mesh)
+    admitted_problem("dwr-quartic", vec![0.0, 1.0, -1.0, 2.0, -2.0], mesh)
 }
 
 /// The exact QoI ∫_{a}^{b} u dx from the polynomial antiderivative.
 fn exact_qoi(problem: &MmsProblem, a: f64, b: f64) -> f64 {
-    let big_u = problem.u.antiderive();
+    let big_u = problem
+        .exact_solution()
+        .antiderive()
+        .expect("quartic fixture antiderivative stays inside the shared cap");
     big_u.eval(b) - big_u.eval(a)
 }
 
@@ -98,10 +110,10 @@ fn dw_002_reverified_energy_product_does_not_promote_without_a_typed_dual_relati
     // by posing the dual as an MMS problem on the window via a smooth
     // stand-in (a parabola matching the interior load): honest bound on
     // a HARDER dual surrogate.
-    let dual_problem = MmsProblem::new(
+    let dual_problem = admitted_problem(
         "dual-surrogate",
-        Poly(vec![0.0, 0.5, -0.5]), // z = x(1−x)/2 solves −z″ = 1
-        problem.mesh.clone(),
+        vec![0.0, 0.5, -0.5], // z = x(1−x)/2 solves −z″ = 1
+        problem.mesh().to_vec(),
     );
     let dual_h = solve_p1(&dual_problem).expect("dual surrogate fixture must solve");
     let bracket = Bracket::cauchy_schwarz(&problem, &u_h, &dual_problem, &dual_h)
@@ -279,10 +291,10 @@ fn unrelated_over_tolerance_energy_product_cannot_veto_the_dwr_decision() {
     };
     let primal = quartic_problem(4);
     let primal_h = solve_p1(&primal).expect("primal fixture must solve");
-    let unrelated_dual = MmsProblem::new(
+    let unrelated_dual = admitted_problem(
         "unrelated-dual",
-        Poly(vec![0.0, 4.0, -4.0]),
-        primal.mesh.clone(),
+        vec![0.0, 4.0, -4.0],
+        primal.mesh().to_vec(),
     );
     let unrelated_h = solve_p1(&unrelated_dual).expect("unrelated dual fixture must solve");
     let bracket = Bracket::cauchy_schwarz(&primal, &primal_h, &unrelated_dual, &unrelated_h)
@@ -362,7 +374,7 @@ fn malformed_accept_inputs_fail_closed_without_minting_invalid_colors() {
 
 #[test]
 fn dwr_two_node_mesh_is_a_finite_supported_boundary_case() {
-    let problem = MmsProblem::new("two-node", Poly(vec![0.0]), vec![0.0, 1.0]);
+    let problem = admitted_problem("two-node", vec![0.0], vec![0.0, 1.0]);
     let output = dwr_integral_qoi(&problem, &[0.0, 0.0], 0.0, 1.0)
         .expect("two boundary nodes refine to one interior dual degree of freedom");
     assert_eq!(output.indicators.len(), 1);
@@ -372,16 +384,18 @@ fn dwr_two_node_mesh_is_a_finite_supported_boundary_case() {
 }
 
 #[test]
-fn dwr_refuses_malformed_meshes_and_candidates_before_execution() {
+fn dwr_relies_on_problem_admission_and_refuses_bad_candidates() {
     for mesh in [Vec::new(), vec![0.0]] {
-        let problem = MmsProblem::new("too-small", Poly(vec![0.0]), mesh.clone());
         assert!(matches!(
-            dwr_integral_qoi(&problem, &vec![0.0; mesh.len()], 0.0, 1.0),
-            Err(DwrError::MeshNodeCount { .. })
+            MmsProblem::new("too-small", poly(vec![0.0]), mesh),
+            Err(Fem1dError::ResourceLimit {
+                resource: "mesh nodes",
+                ..
+            })
         ));
     }
 
-    let base = MmsProblem::new("base", Poly(vec![0.0]), vec![0.0, 1.0]);
+    let base = admitted_problem("base", vec![0.0], vec![0.0, 1.0]);
     assert!(matches!(
         dwr_integral_qoi(&base, &[0.0], 0.0, 1.0),
         Err(DwrError::CandidateLengthMismatch { .. })
@@ -391,44 +405,31 @@ fn dwr_refuses_malformed_meshes_and_candidates_before_execution() {
         Err(DwrError::NonFiniteCandidate { index: 1 })
     ));
 
-    for mesh in [vec![0.0, 0.0], vec![1.0, 0.0]] {
-        let problem = MmsProblem::new("unordered", Poly(vec![0.0]), mesh);
+    for mesh in [vec![0.0, 0.5, 0.5, 1.0], vec![0.0, 0.75, 0.5, 1.0]] {
         assert!(matches!(
-            dwr_integral_qoi(&problem, &[0.0, 0.0], 0.0, 1.0),
-            Err(DwrError::NonIncreasingMeshCell { cell: 0 })
+            MmsProblem::new("unordered", poly(vec![0.0]), mesh),
+            Err(Fem1dError::NonIncreasingMeshCell { .. })
         ));
     }
-    let nonfinite = MmsProblem::new("nonfinite", Poly(vec![0.0]), vec![0.0, f64::INFINITY]);
     assert!(matches!(
-        dwr_integral_qoi(&nonfinite, &[0.0, 0.0], 0.0, 1.0),
-        Err(DwrError::NonFiniteMeshNode { index: 1 })
+        MmsProblem::new("nonfinite", poly(vec![0.0]), vec![0.0, f64::NAN, 1.0],),
+        Err(Fem1dError::NonFiniteMeshNode { index: 1 })
     ));
-    let overflowing_width = MmsProblem::new(
-        "overflowing-width",
-        Poly(vec![0.0]),
-        vec![-f64::MAX, f64::MAX],
-    );
     assert!(matches!(
-        dwr_integral_qoi(&overflowing_width, &[0.0, 0.0], -1.0, 1.0),
-        Err(DwrError::NonFiniteCellWidth { cell: 0 })
+        MmsProblem::new("tiny", poly(vec![0.0]), vec![0.0, f64::from_bits(2), 1.0],),
+        Err(Fem1dError::NonFiniteReciprocal { cell: 0 })
     ));
-    let adjacent = MmsProblem::new("adjacent", Poly(vec![0.0]), vec![1.0, 1.0_f64.next_up()]);
+
+    let adjacent = admitted_problem("adjacent", vec![0.0], vec![0.0, 1.0_f64.next_down(), 1.0]);
     assert!(matches!(
-        dwr_integral_qoi(&adjacent, &[0.0, 0.0], 1.0, 2.0),
-        Err(DwrError::NonInteriorMidpoint { cell: 0 })
+        dwr_integral_qoi(&adjacent, &[0.0, 0.0, 0.0], 0.0, 1.0),
+        Err(DwrError::NonInteriorMidpoint { cell: 1 })
     ));
-    let tiny = MmsProblem::new("tiny", Poly(vec![0.0]), vec![0.0, f64::from_bits(2)]);
-    assert!(matches!(
-        dwr_integral_qoi(&tiny, &[0.0, 0.0], 0.0, 1.0),
-        Err(DwrError::NonFiniteReciprocal {
-            cell: 0,
-            refined_half: None
-        })
-    ));
-    let refined_tiny = MmsProblem::new("refined-tiny", Poly(vec![0.0]), vec![0.0, 1.0e-308]);
+
+    let refined_tiny = admitted_problem("refined-tiny", vec![0.0], vec![0.0, 1.0e-308, 1.0]);
     assert!((1.0_f64 / 1.0e-308_f64).is_finite());
     assert!(matches!(
-        dwr_integral_qoi(&refined_tiny, &[0.0, 0.0], 0.0, 1.0),
+        dwr_integral_qoi(&refined_tiny, &[0.0, 0.0, 0.0], 0.0, 1.0),
         Err(DwrError::NonFiniteReciprocal {
             cell: 0,
             refined_half: Some(0 | 1)
@@ -437,8 +438,8 @@ fn dwr_refuses_malformed_meshes_and_candidates_before_execution() {
 }
 
 #[test]
-fn dwr_refuses_invalid_windows_polynomials_and_resource_counts() {
-    let base = MmsProblem::new("base", Poly(vec![0.0]), vec![0.0, 1.0]);
+fn dwr_refuses_invalid_windows_and_resource_counts_at_owner_boundaries() {
+    let base = admitted_problem("base", vec![0.0], vec![0.0, 1.0]);
     for (lo, hi) in [
         (f64::NAN, 1.0),
         (0.0, f64::INFINITY),
@@ -451,77 +452,61 @@ fn dwr_refuses_invalid_windows_polynomials_and_resource_counts() {
         ));
     }
 
-    let empty_poly = MmsProblem::new("empty-poly", Poly(Vec::new()), vec![0.0, 1.0]);
     assert!(matches!(
-        dwr_integral_qoi(&empty_poly, &[0.0, 0.0], 0.0, 1.0),
-        Err(DwrError::PolynomialCoefficientCount { count: 0, .. })
+        Poly::new(Vec::new()),
+        Err(Fem1dError::PolynomialCoefficientCount { count: 0, .. })
     ));
-    let nonfinite_poly = MmsProblem::new("nan-poly", Poly(vec![0.0, f64::NAN]), vec![0.0, 1.0]);
     assert!(matches!(
-        dwr_integral_qoi(&nonfinite_poly, &[0.0, 0.0], 0.0, 1.0),
-        Err(DwrError::NonFinitePolynomialCoefficient { index: 1 })
+        Poly::new(vec![0.0, f64::NAN]),
+        Err(Fem1dError::NonFinitePolynomialCoefficient { index: 1, .. })
     ));
-    let oversized_poly = MmsProblem::new(
-        "oversized-poly",
-        Poly(vec![0.0; MAX_DWR_POLY_COEFFICIENTS + 1]),
-        vec![0.0, 1.0],
+    let mut too_many_semantic_coefficients = vec![0.0; MAX_DWR_POLY_COEFFICIENTS + 1];
+    *too_many_semantic_coefficients.last_mut().unwrap() = 1.0;
+    assert!(matches!(
+        Poly::new(too_many_semantic_coefficients),
+        Err(Fem1dError::PolynomialCoefficientCount { .. })
+    ));
+    assert_eq!(
+        MAX_DWR_POLY_COEFFICIENTS, MAX_FEM1D_POLY_COEFFICIENTS,
+        "DWR must not advertise a larger polynomial class than fs-verify admits"
     );
-    assert!(matches!(
-        dwr_integral_qoi(&oversized_poly, &[0.0, 0.0], 0.0, 1.0),
-        Err(DwrError::PolynomialCoefficientCount { .. })
-    ));
 
     let too_many_candidates = vec![0.0; MAX_DWR_MESH_NODES + 1];
     assert!(matches!(
         dwr_integral_qoi(&base, &too_many_candidates, 0.0, 1.0),
         Err(DwrError::CandidateNodeCount { .. })
     ));
-    let oversized_mesh = MmsProblem::new(
-        "oversized-mesh",
-        Poly(vec![0.0]),
-        vec![0.0; MAX_DWR_MESH_NODES + 1],
-    );
     assert!(matches!(
-        dwr_integral_qoi(&oversized_mesh, &[], 0.0, 1.0),
-        Err(DwrError::MeshNodeCount { .. })
-    ));
-
-    let mesh_nodes = 100_001;
-    let coefficients = 100;
-    assert!(mesh_nodes <= MAX_DWR_MESH_NODES);
-    assert!(coefficients <= MAX_DWR_POLY_COEFFICIENTS);
-    let cross_product = MmsProblem::new(
-        "work-cross-product",
-        Poly(vec![0.0; coefficients]),
-        vec![0.0; mesh_nodes],
-    );
-    let cross_product_candidate = vec![0.0; mesh_nodes];
-    assert!(matches!(
-        dwr_integral_qoi(&cross_product, &cross_product_candidate, 0.0, 1.0),
-        Err(DwrError::WorkBudgetExceeded {
-            estimated_work: Some(work),
-            maximum: MAX_DWR_WORK_UNITS,
-            ..
-        }) if work > MAX_DWR_WORK_UNITS
-    ));
-}
-
-#[test]
-fn dwr_refuses_finite_inputs_that_overflow_derived_arithmetic() {
-    let overflowing_forcing = MmsProblem::new(
-        "overflowing-forcing",
-        Poly(vec![0.0, 0.0, f64::MAX]),
-        vec![0.0, 1.0],
-    );
-    assert!(matches!(
-        dwr_integral_qoi(&overflowing_forcing, &[0.0, 0.0], 0.0, 1.0),
-        Err(DwrError::NonFiniteDerived {
-            quantity: "forcing coefficient",
+        MmsProblem::new(
+            "oversized-mesh",
+            poly(vec![0.0]),
+            vec![0.0; MAX_DWR_MESH_NODES + 1],
+        ),
+        Err(Fem1dError::ResourceLimit {
+            resource: "mesh nodes",
             ..
         })
     ));
 
-    let base = MmsProblem::new("base", Poly(vec![0.0]), vec![0.0, 1.0]);
+    let maximum_admitted_work = (MAX_DWR_MESH_NODES - 1)
+        .checked_mul(MAX_DWR_POLY_COEFFICIENTS * 10 + 15)
+        .expect("shared finite caps have a representable work product");
+    assert!(maximum_admitted_work <= MAX_DWR_WORK_UNITS);
+}
+
+#[test]
+fn dwr_refuses_finite_inputs_that_overflow_derived_arithmetic() {
+    let overflowing_forcing =
+        MmsClass::new("overflowing-forcing", poly(vec![0.0, f64::MAX, -f64::MAX]));
+    assert!(matches!(
+        overflowing_forcing,
+        Err(Fem1dError::NonFiniteIntermediate {
+            stage: "polynomial derivative",
+            index: Some(1),
+        })
+    ));
+
+    let base = admitted_problem("base", vec![0.0], vec![0.0, 1.0]);
     assert!(matches!(
         dwr_integral_qoi(&base, &[-f64::MAX, f64::MAX], 2.0, 3.0),
         Err(DwrError::NonFiniteDerived {
@@ -529,4 +514,34 @@ fn dwr_refuses_finite_inputs_that_overflow_derived_arithmetic() {
             index: Some(0)
         })
     ));
+}
+
+#[test]
+fn dwr_consumes_canonical_mms_class_and_problem_identities() {
+    let normalized = MmsClass::new("dwr-identity", poly(vec![-0.0, 1.0, -1.0, -0.0]))
+        .expect("canonical admitted class");
+    let ordinary = MmsClass::new("dwr-identity", poly(vec![0.0, 1.0, -1.0]))
+        .expect("same canonical admitted class");
+    assert_eq!(normalized.identity(), ordinary.identity());
+    assert_eq!(normalized.canonical_bytes(), ordinary.canonical_bytes());
+    assert_eq!(normalized.forcing().coefficients(), &[2.0]);
+
+    let coarse = MmsProblem::from_class(normalized.clone(), vec![-0.0, 0.5, 1.0])
+        .expect("canonicalized coarse problem");
+    let same =
+        MmsProblem::from_class(ordinary, vec![0.0, 0.5, 1.0]).expect("same canonical problem");
+    let refined = coarse
+        .with_mesh(vec![0.0, 0.25, 0.5, 1.0])
+        .expect("same class on a refined mesh");
+    assert_eq!(coarse.identity(), same.identity());
+    assert_eq!(coarse.class().identity(), normalized.identity());
+    assert_eq!(refined.class().identity(), normalized.identity());
+    assert_ne!(coarse.identity(), refined.identity());
+
+    let renamed = MmsClass::new("dwr-identity-renamed", poly(vec![0.0, 1.0, -1.0]))
+        .expect("renamed admitted class");
+    let rescaled =
+        MmsClass::new("dwr-identity", poly(vec![0.0, 2.0, -2.0])).expect("rescaled admitted class");
+    assert_ne!(normalized.identity(), renamed.identity());
+    assert_ne!(normalized.identity(), rescaled.identity());
 }

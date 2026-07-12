@@ -110,11 +110,14 @@ solver without a passing gradient check cannot merge.
   `dwr-accept` → optional fs-verify dep): the GOAL-ORIENTED accept
   test. `dwr_integral_qoi` is the 1-D reference DWR (enriched dual on
   the once-refined mesh, per-element indicators) and returns
-  `Result<DwrOutput, DwrError>`. Admission validates 2..=1,000,000 coarse mesh
-  nodes, candidate shape/finite values, 1..=4096 finite manufactured-solution
-  coefficients, strict finite cell geometry and representable midpoints/QoI
-  window, and a conservative mesh×polynomial aggregate budget of 100,000,000
-  work units before refined allocation. Assembly, quadrature, forcing,
+  `Result<DwrOutput, DwrError>`. The problem arrives as fs-verify's immutable,
+  fallibly admitted `MmsProblem`: its canonical class identity binds the exact
+  solution and derived forcing, and DWR shares fs-verify's 1..=6 coefficient
+  envelope rather than advertising a divergent class. DWR admission validates
+  2..=1,000,000 coarse mesh nodes, candidate shape/finite values, strict finite
+  cell geometry and representable midpoints/QoI window, and a conservative
+  mesh×polynomial aggregate budget of 100,000,000 work units before refined
+  allocation. Assembly, quadrature, forcing,
   elimination pivots, slopes, residuals, and outputs refuse on any non-finite
   derived value; zero-interior-DOF dual systems are handled explicitly rather
   than indexed through an empty solver. `accept` encodes the color logic

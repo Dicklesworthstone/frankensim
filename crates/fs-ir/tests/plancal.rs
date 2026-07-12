@@ -12,7 +12,7 @@ fn uniform_bound_curve() {
     c[2] = -0.2;
     c[4] = 1.0;
     c[5] = -1.0;
-    let family = ProblemFamily::new(Poly(c), "steep").unwrap();
+    let family = ProblemFamily::new(Poly::new(c).unwrap(), "steep").unwrap();
     for cells in [12, 24, 48, 96, 192, 384] {
         let mesh: Vec<f64> = (0..=cells)
             .map(|k| f64::from(k) / f64::from(cells))
@@ -32,7 +32,7 @@ fn trace_kill_run() {
     c[2] = -0.2;
     c[4] = 1.0;
     c[5] = -1.0;
-    let family = ProblemFamily::new(Poly(c), "steep").unwrap();
+    let family = ProblemFamily::new(Poly::new(c).unwrap(), "steep").unwrap();
     let out = plan(
         &family,
         1.0,

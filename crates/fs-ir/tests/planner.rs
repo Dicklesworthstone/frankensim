@@ -16,6 +16,10 @@ use fs_ir::planner::{
 };
 use fs_verify::fem1d::Poly;
 
+fn poly(coefficients: Vec<f64>) -> Poly {
+    Poly::new(coefficients).expect("valid planner polynomial")
+}
+
 fn verdict(case: &str, detail: &str) {
     println!(
         "{{\"suite\":\"fs-ir/planner\",\"case\":\"{case}\",\"verdict\":\"pass\",\
@@ -34,7 +38,7 @@ fn steep_family() -> ProblemFamily {
     c[2] = -0.2;
     c[4] = 1.0;
     c[5] = -1.0;
-    ProblemFamily::new(Poly(c), "cht-wedge-steep").unwrap()
+    ProblemFamily::new(poly(c), "cht-wedge-steep").unwrap()
 }
 
 const RUNGS: [usize; 4] = [12, 24, 48, 96];
@@ -322,13 +326,13 @@ fn pl_006_malformed_planner_inputs_refuse_structurally() {
 
 #[test]
 fn pl_007_family_mesh_candidate_and_cost_admission_are_fail_closed() {
-    assert!(ProblemFamily::new(Poly(vec![]), "kernel").is_err());
-    assert!(ProblemFamily::new(Poly(vec![0.0, f64::NAN, 0.0]), "kernel").is_err());
-    assert!(ProblemFamily::new(Poly(vec![1.0, -1.0]), "kernel").is_err());
-    assert!(ProblemFamily::new(Poly(vec![f64::EPSILON, -f64::EPSILON]), "kernel").is_err());
+    assert!(Poly::new(vec![]).is_err());
+    assert!(Poly::new(vec![0.0, f64::NAN, 0.0]).is_err());
+    assert!(ProblemFamily::new(poly(vec![1.0, -1.0]), "kernel").is_err());
+    assert!(ProblemFamily::new(poly(vec![f64::EPSILON, -f64::EPSILON]), "kernel").is_err());
     assert!(
         ProblemFamily::new(
-            Poly(vec![0.0, 1.0e16, -1.0e16, 1.0]),
+            poly(vec![0.0, 1.0e16, -1.0e16, 1.0]),
             "hidden-boundary-residue"
         )
         .is_err(),
@@ -336,40 +340,28 @@ fn pl_007_family_mesh_candidate_and_cost_admission_are_fail_closed() {
     );
     assert!(
         ProblemFamily::new(
-            Poly(vec![0.0, 1.0, 1.0e16, -1.0e16, -1.0]),
+            poly(vec![0.0, 1.0, 1.0e16, -1.0e16, -1.0]),
             "exact-cancellation"
         )
         .is_ok(),
         "an exact binary-rational cancellation survives point-Horner rounding"
     );
-    assert!(ProblemFamily::new(Poly(vec![0.0, 0.0]), "unknown").is_err());
-    assert_eq!(
-        ProblemFamily::new(
-            Poly(vec![0.0; MAX_FAMILY_COEFFICIENTS + 1]),
-            "oversized-family"
-        ),
-        Err(PlanError::ResourceLimit {
-            field: "family.base",
-            requested: MAX_FAMILY_COEFFICIENTS + 1,
-            limit: MAX_FAMILY_COEFFICIENTS,
-        })
-    );
+    assert!(ProblemFamily::new(poly(vec![0.0, 0.0]), "unknown").is_err());
+    let mut too_many_semantic_coefficients = vec![0.0; MAX_FAMILY_COEFFICIENTS + 1];
+    *too_many_semantic_coefficients.last_mut().unwrap() = 1.0;
+    assert!(matches!(
+        Poly::new(too_many_semantic_coefficients),
+        Err(fs_verify::fem1d::Fem1dError::PolynomialCoefficientCount { .. })
+    ));
 
     let family = steep_family();
     assert!(family.at(1.0, vec![]).is_err());
     assert!(family.at(1.0, vec![0.0, 0.7, 0.6, 1.0]).is_err());
     assert!(family.at(1.0, vec![0.0, f64::NAN, 1.0]).is_err());
-    let explosive = ProblemFamily::new(Poly(vec![0.0, f64::MAX, -f64::MAX]), "explosive").unwrap();
-    assert!(explosive.at(1.0, vec![0.0, 0.5, 1.0]).is_err());
+    assert!(ProblemFamily::new(poly(vec![0.0, f64::MAX, -f64::MAX]), "explosive").is_err());
     let scaling_sensitive =
-        ProblemFamily::new(Poly(vec![0.0, 1.0, 2.0, -3.0]), "scaling-sensitive").unwrap();
-    assert!(matches!(
-        scaling_sensitive.at(0.1, vec![0.0, 0.5, 1.0]),
-        Err(PlanError::InvalidFamily {
-            field: "scaled_base",
-            ..
-        })
-    ));
+        ProblemFamily::new(poly(vec![0.0, 1.0, 2.0, -3.0]), "scaling-sensitive").unwrap();
+    assert!(scaling_sensitive.at(0.1, vec![0.0, 0.5, 1.0]).is_err());
 
     assert!(CostTable::new(f64::NAN).is_err());
     assert!(CostTable::new(0.0).is_err());
@@ -386,7 +378,7 @@ fn pl_007_family_mesh_candidate_and_cost_admission_are_fail_closed() {
 #[test]
 fn pl_007b_combined_polynomial_mesh_work_refuses_before_mesh_allocation() {
     let family = ProblemFamily::new(
-        Poly(vec![0.0; MAX_FAMILY_COEFFICIENTS]),
+        poly(vec![0.0, 1.0, 0.0, 0.0, 0.0, -1.0]),
         "bounded-but-combined-too-large",
     )
     .unwrap();
@@ -413,7 +405,7 @@ fn pl_007b_combined_polynomial_mesh_work_refuses_before_mesh_allocation() {
 #[test]
 fn pl_007c_later_public_rung_resource_failure_precedes_all_planner_work() {
     let family = ProblemFamily::new(
-        Poly(vec![0.0; MAX_FAMILY_COEFFICIENTS]),
+        poly(vec![0.0, 1.0, 0.0, 0.0, 0.0, -1.0]),
         "later-rung-too-expensive",
     )
     .unwrap();

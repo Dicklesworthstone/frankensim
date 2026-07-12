@@ -11,7 +11,7 @@
 
 use fs_evidence::Color;
 use fs_verify::estimator::{EstimatorFamily, verify};
-use fs_verify::fem1d::{MmsProblem, gauss5};
+use fs_verify::fem1d::{MAX_FEM1D_POLY_COEFFICIENTS, MmsProblem, gauss5};
 use fs_verify::interval::up;
 
 /// Maximum mesh nodes admitted by the in-process rigorous bracket verifier.
@@ -19,7 +19,7 @@ pub const MAX_BRACKET_MESH_NODES: usize = 1_000_000;
 /// Maximum coarse mesh/candidate nodes admitted by the DWR execution path.
 pub const MAX_DWR_MESH_NODES: usize = 1_000_000;
 /// Maximum manufactured-solution polynomial coefficients admitted by DWR.
-pub const MAX_DWR_POLY_COEFFICIENTS: usize = 4_096;
+pub const MAX_DWR_POLY_COEFFICIENTS: usize = MAX_FEM1D_POLY_COEFFICIENTS;
 /// Maximum conservative scalar work units admitted by one DWR execution.
 pub const MAX_DWR_WORK_UNITS: usize = 100_000_000;
 const MAX_DWR_REFINED_NODES: usize = MAX_DWR_MESH_NODES * 2 - 1;
@@ -108,13 +108,13 @@ fn verify_factor(
     problem: &MmsProblem,
     candidate: &[f64],
 ) -> Result<fs_verify::estimator::VerifierReport, BracketError> {
-    if !(2..=MAX_BRACKET_MESH_NODES).contains(&problem.mesh.len()) {
+    if !(2..=MAX_BRACKET_MESH_NODES).contains(&problem.mesh().len()) {
         return Err(BracketError::InvalidInput {
             factor,
             reason: "mesh node count is outside 2..=MAX_BRACKET_MESH_NODES",
         });
     }
-    if candidate.len() != problem.mesh.len() {
+    if candidate.len() != problem.mesh().len() {
         return Err(BracketError::InvalidInput {
             factor,
             reason: "candidate length differs from mesh length",
@@ -126,8 +126,8 @@ fn verify_factor(
             reason: "candidate contains a non-finite value",
         });
     }
-    if !problem.mesh.iter().all(|value| value.is_finite())
-        || !problem.mesh.windows(2).all(|pair| pair[0] < pair[1])
+    if !problem.mesh().iter().all(|value| value.is_finite())
+        || !problem.mesh().windows(2).all(|pair| pair[0] < pair[1])
     {
         return Err(BracketError::InvalidInput {
             factor,
@@ -570,7 +570,8 @@ fn validate_dwr_inputs(
     w_lo: f64,
     w_hi: f64,
 ) -> Result<usize, DwrError> {
-    let mesh = &problem.mesh;
+    let mesh = problem.mesh();
+    let coefficients = problem.exact_solution().coefficients();
     if !(2..=MAX_DWR_MESH_NODES).contains(&mesh.len()) {
         return Err(DwrError::MeshNodeCount {
             count: mesh.len(),
@@ -590,18 +591,18 @@ fn validate_dwr_inputs(
             candidate_values: candidate.len(),
         });
     }
-    if !(1..=MAX_DWR_POLY_COEFFICIENTS).contains(&problem.u.0.len()) {
+    if !(1..=MAX_DWR_POLY_COEFFICIENTS).contains(&coefficients.len()) {
         return Err(DwrError::PolynomialCoefficientCount {
-            count: problem.u.0.len(),
+            count: coefficients.len(),
             minimum: 1,
             maximum: MAX_DWR_POLY_COEFFICIENTS,
         });
     }
-    let estimated_work = dwr_work_units(mesh.len(), problem.u.0.len());
+    let estimated_work = dwr_work_units(mesh.len(), coefficients.len());
     if estimated_work.is_none_or(|work| work > MAX_DWR_WORK_UNITS) {
         return Err(DwrError::WorkBudgetExceeded {
             mesh_nodes: mesh.len(),
-            polynomial_coefficients: problem.u.0.len(),
+            polynomial_coefficients: coefficients.len(),
             estimated_work,
             maximum: MAX_DWR_WORK_UNITS,
         });
@@ -616,7 +617,7 @@ fn validate_dwr_inputs(
             reason: "lower endpoint must be strictly below upper endpoint",
         });
     }
-    if let Some(index) = problem.u.0.iter().position(|value| !value.is_finite()) {
+    if let Some(index) = coefficients.iter().position(|value| !value.is_finite()) {
         return Err(DwrError::NonFinitePolynomialCoefficient { index });
     }
     if let Some(index) = candidate.iter().position(|value| !value.is_finite()) {
@@ -840,9 +841,9 @@ pub fn dwr_integral_qoi(
     w_hi: f64,
 ) -> Result<DwrOutput, DwrError> {
     let refined_nodes = validate_dwr_inputs(problem, candidate, w_lo, w_hi)?;
-    let mesh = &problem.mesh;
-    let f = problem.u.derive().derive().neg();
-    if let Some(index) = f.0.iter().position(|value| !value.is_finite()) {
+    let mesh = problem.mesh();
+    let f = problem.forcing();
+    if let Some(index) = f.coefficients().iter().position(|value| !value.is_finite()) {
         return Err(non_finite_derived("forcing coefficient", Some(index)));
     }
     // J(u_h): the P1 interpolant integrated over the window.

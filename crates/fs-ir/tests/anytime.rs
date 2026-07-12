@@ -30,7 +30,7 @@ fn steep_family() -> ProblemFamily {
     c[2] = -0.2;
     c[4] = 1.0;
     c[5] = -1.0;
-    ProblemFamily::new(Poly(c), "cht-wedge-steep").unwrap()
+    ProblemFamily::new(Poly::new(c).unwrap(), "cht-wedge-steep").unwrap()
 }
 
 const RUNGS: [usize; 4] = [12, 24, 48, 96];

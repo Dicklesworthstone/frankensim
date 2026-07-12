@@ -117,10 +117,13 @@ typed AST. Layer: L6 (HELM). Runtime deps: `std` + fs-qty.
   telemetry, verifier enclosures/refusals, and every arithmetic result. Bounded
   FEM refusals retain their structured `Fem1dError` source in `PlanError`
   instead of being flattened into a plausible result. Cache-declared
-  bounds are never trusted: hits are independently re-verified against an
-  exact length-framed family/theta key before discharge. Ladder transfers use
-  deterministic P1 interpolation over the actual coarse coordinates, including
-  non-dyadic ladders and adaptive-to-uniform moves. Actual solve/speculation
+  bounds are never trusted: hits are independently re-verified against a
+  lower-layer canonical MMS class identity before discharge. The family owns
+  an admitted immutable `fs-verify::MmsClass`; theta scaling constructs a new
+  admitted class, and cache keys bind that class's versioned canonical bytes
+  instead of independently serializing planner coefficients. Ladder transfers
+  use deterministic P1 interpolation over the actual coarse coordinates,
+  including non-dyadic ladders and adaptive-to-uniform moves. Actual solve/speculation
   costs are admitted before execution, so spend never exceeds budget. Learned
   costs rank the zero-cost refine/climb transition only; they never veto exact
   affordable work. Transition telemetry is pending until its first downstream
@@ -131,9 +134,10 @@ typed AST. Layer: L6 (HELM). Runtime deps: `std` + fs-qty.
   family degree is capped at five (six coefficients), matching the exactness
   envelope of the verifier's five-point squared-residual quadrature; its work
   preflight counts all five quadrature evaluations per coefficient/cell. The
-  homogeneous trace uses fs-verify's exact finite-f64 coefficient
-  superaccumulator, and parameter scaling is refused if independently rounded
-  products no longer sum exactly to zero at `x=1`. The
+  homogeneous trace, six-coefficient cap, signed/trailing-zero
+  normalization, derived forcing, and stable identity all come from the single
+  lower-layer fs-verify admission type. Parameter scaling is refused if
+  independently rounded products no longer sum exactly to zero at `x=1`. The
   cannot-discharge boundary refuses with the best achieved certified interval;
   if no solve is affordable it returns `RefusedWithoutAnswer` with no interval
   or color rather than fabricating evidence. Operator choice tie-breaks
@@ -272,7 +276,8 @@ truncation prefixes never panic (a fuzz-found scanner panic became a
 structured refusal).
 
 `tests/planner.rs` + planner unit tests (`ladder-planner`, G0/G3/G5): existing
-accuracy, kill-ratio, cache, refusal, calibration, and replay checks plus
+accuracy, kill-ratio, cache, refusal, calibration, canonical family/cache
+identity equivalence and semantic-mutation separation, and replay checks plus
 empty/zero/non-monotone rungs; non-finite theta/tolerance/budget; malformed
 family/mesh/candidates; poisoned cost samples; unaffordable initial solves;
 independent replay of a falsely certified cache answer; non-dyadic

@@ -20,12 +20,9 @@
 use core::fmt;
 use std::collections::BTreeMap;
 
-use fs_evidence::{
-    Color, MAX_COLOR_IDENTITY_BYTES, NumericalCertificate, color_leaf_identity_reason,
-    verified_from,
-};
+use fs_evidence::{Color, NumericalCertificate, color_leaf_identity_reason, verified_from};
 use fs_verify::estimator::verify;
-use fs_verify::fem1d::{Fem1dError, MmsProblem, Poly, gauss5, solve_p1};
+use fs_verify::fem1d::{Fem1dError, MmsClass, MmsProblem, Poly, gauss5, solve_p1};
 
 const MAX_EXACT_CELLS: u128 = 1_u128 << 53;
 const MAX_EXACT_CELLS_F64: f64 = 9_007_199_254_740_992.0;
@@ -467,8 +464,7 @@ pub enum PlanOutcome {
 /// verifier's kernel class): exact solution `theta`-scaled.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProblemFamily {
-    base: Poly,
-    kernel: String,
+    base_class: MmsClass,
 }
 
 impl ProblemFamily {
@@ -477,45 +473,52 @@ impl ProblemFamily {
     /// # Errors
     /// Returns [`PlanError`] for a malformed kernel identity, empty/non-finite
     /// polynomial, or non-homogeneous boundary values.
-    pub fn new(mut base: Poly, kernel: impl Into<String>) -> Result<Self, PlanError> {
+    pub fn new(base: Poly, kernel: impl Into<String>) -> Result<Self, PlanError> {
         let kernel = kernel.into();
-        validate_family(&base, &kernel)?;
-        for coefficient in &mut base.0 {
-            *coefficient = canonicalize_zero(*coefficient);
+        if let Some(reason) = color_leaf_identity_reason(&kernel) {
+            return Err(PlanError::InvalidFamily {
+                field: "kernel",
+                index: None,
+                reason,
+            });
         }
-        Ok(Self { base, kernel })
+        let base_class =
+            MmsClass::new(&kernel, base).map_err(|source| PlanError::Fem1dFailure {
+                stage: "problem-family admission",
+                source,
+            })?;
+        Ok(Self { base_class })
     }
 
     /// Exact-solution polynomial at `theta = 1`.
     #[must_use]
     pub fn base(&self) -> &Poly {
-        &self.base
+        self.base_class.exact_solution()
     }
 
     /// Stable kernel identity.
     #[must_use]
     pub fn kernel(&self) -> &str {
-        &self.kernel
+        self.base_class.name()
     }
 
-    /// Instantiate the checked problem at `theta` on an arbitrary valid mesh.
-    ///
-    /// # Errors
-    /// Returns [`PlanError`] for invalid `theta`/mesh values or coefficient
-    /// overflow while scaling/differentiating the family.
-    pub fn at(&self, theta: f64, mut mesh: Vec<f64>) -> Result<MmsProblem, PlanError> {
+    /// Canonical lower-layer bytes of the unscaled family class.
+    #[must_use]
+    pub fn canonical_bytes(&self) -> &[u8] {
+        self.base_class.canonical_bytes()
+    }
+
+    fn scaled_class(&self, theta: f64) -> Result<MmsClass, PlanError> {
         validate_finite(theta, "theta")?;
-        canonicalize_mesh_zeros(&mut mesh);
-        validate_mesh(&mesh)?;
-        validate_family_cell_work(self, mesh.len() - 1)?;
+        let coefficients = self.base().coefficients();
         let mut scaled = Vec::new();
         scaled
-            .try_reserve_exact(self.base.0.len())
+            .try_reserve_exact(coefficients.len())
             .map_err(|_| PlanError::AllocationFailed {
                 stage: "problem-family scaling",
-                requested: self.base.0.len(),
+                requested: coefficients.len(),
             })?;
-        for (index, coefficient) in self.base.0.iter().enumerate() {
+        for (index, coefficient) in coefficients.iter().enumerate() {
             let value = coefficient * theta;
             if !value.is_finite() {
                 return Err(PlanError::InvalidFamily {
@@ -526,29 +529,29 @@ impl ProblemFamily {
             }
             scaled.push(canonicalize_zero(value));
         }
-        let scaled = Poly(scaled);
-        if !scaled.is_exactly_zero_at_one() {
-            return Err(PlanError::InvalidFamily {
-                field: "scaled_base",
-                index: None,
-                reason: "rounded coefficient scaling must preserve the exact homogeneous trace",
-            });
-        }
-        let problem = MmsProblem::new(&self.kernel, scaled, mesh);
-        if problem
-            .f
-            .0
-            .iter()
-            .chain(&problem.big_f.0)
-            .any(|coefficient| !coefficient.is_finite())
-        {
-            return Err(PlanError::InvalidFamily {
-                field: "derived_polynomial",
-                index: None,
-                reason: "differentiation or antiderivation overflowed",
-            });
-        }
-        Ok(problem)
+        let scaled = Poly::new(scaled).map_err(|source| PlanError::Fem1dFailure {
+            stage: "scaled problem-family polynomial",
+            source,
+        })?;
+        MmsClass::new(self.kernel(), scaled).map_err(|source| PlanError::Fem1dFailure {
+            stage: "scaled problem-family admission",
+            source,
+        })
+    }
+
+    /// Instantiate the checked problem at `theta` on an arbitrary valid mesh.
+    ///
+    /// # Errors
+    /// Returns [`PlanError`] for invalid `theta`/mesh values or coefficient
+    /// overflow while scaling/differentiating the family.
+    pub fn at(&self, theta: f64, mesh: Vec<f64>) -> Result<MmsProblem, PlanError> {
+        validate_mesh(&mesh)?;
+        validate_family_cell_work(self, mesh.len() - 1)?;
+        let class = self.scaled_class(theta)?;
+        MmsProblem::from_class(class, mesh).map_err(|source| PlanError::Fem1dFailure {
+            stage: "problem-family mesh admission",
+            source,
+        })
     }
 }
 
@@ -607,53 +610,10 @@ pub(crate) fn validate_budget(value: f64, field: &'static str) -> Result<(), Pla
     }
 }
 
-fn validate_family(base: &Poly, kernel: &str) -> Result<(), PlanError> {
-    if let Some(reason) = color_leaf_identity_reason(kernel) {
-        return Err(PlanError::InvalidFamily {
-            field: "kernel",
-            index: None,
-            reason,
-        });
-    }
-    if base.0.is_empty() {
-        return Err(PlanError::EmptySequence {
-            field: "family.base",
-        });
-    }
-    if base.0.len() > MAX_FAMILY_COEFFICIENTS {
-        return Err(PlanError::ResourceLimit {
-            field: "family.base",
-            requested: base.0.len(),
-            limit: MAX_FAMILY_COEFFICIENTS,
-        });
-    }
-    for (index, coefficient) in base.0.iter().enumerate() {
-        if !coefficient.is_finite() {
-            return Err(PlanError::InvalidFamily {
-                field: "base",
-                index: Some(index),
-                reason: "coefficient must be finite",
-            });
-        }
-    }
-    // The equilibrated verifier assumes the exact solution belongs to H_0^1.
-    // At x=1 the exact binary-rational coefficient sum is authoritative:
-    // point Horner can hide a residue and interval containment proves only that
-    // zero is possible. The lower-layer superaccumulator decides exact equality.
-    if base.0[0].to_bits() != 0.0_f64.to_bits() || !base.is_exactly_zero_at_one() {
-        return Err(PlanError::InvalidFamily {
-            field: "boundary",
-            index: None,
-            reason: "exact solution must vanish at x=0 and x=1",
-        });
-    }
-    Ok(())
-}
-
 fn validate_family_cell_work(family: &ProblemFamily, cells: usize) -> Result<(), PlanError> {
     let requested = family
-        .base
-        .0
+        .base()
+        .coefficients()
         .len()
         .checked_mul(cells)
         .and_then(|work| work.checked_mul(VERIFIER_GAUSS_POINTS))
@@ -859,7 +819,7 @@ fn uniform_mesh(cells: usize) -> Result<Vec<f64>, PlanError> {
 /// Per-element energy-residual indicators (the same integrand the
 /// equilibrated verifier bounds, localized): `∫_K (c* − F − u′)²`.
 fn element_indicators(problem: &MmsProblem, nodal: &[f64]) -> Result<Vec<f64>, PlanError> {
-    let m = &problem.mesh;
+    let m = problem.mesh();
     validate_mesh(m)?;
     validate_candidate(m, nodal)?;
     // The verifier's optimal constant.
@@ -868,7 +828,7 @@ fn element_indicators(problem: &MmsProblem, nodal: &[f64]) -> Result<Vec<f64>, P
         let h = nodes[1] - nodes[0];
         let slope = (nodal[element + 1] - nodal[element]) / h;
         for (gx, gw) in gauss5(nodes[0], nodes[1]) {
-            c_star += gw * (problem.big_f.eval(gx) + slope);
+            c_star += gw * (problem.rounded_forcing_antiderivative().eval(gx) + slope);
         }
     }
     if !c_star.is_finite() {
@@ -889,7 +849,7 @@ fn element_indicators(problem: &MmsProblem, nodal: &[f64]) -> Result<Vec<f64>, P
         let slope = (nodal[element + 1] - nodal[element]) / h;
         let mut acc = 0.0f64;
         for (gx, gw) in gauss5(nodes[0], nodes[1]) {
-            let r = c_star - problem.big_f.eval(gx) - slope;
+            let r = c_star - problem.rounded_forcing_antiderivative().eval(gx) - slope;
             acc += gw * r * r;
         }
         if !acc.is_finite() || acc < 0.0 {
@@ -1058,7 +1018,7 @@ fn checked_verify(
     candidate: &[f64],
     tolerance: f64,
 ) -> Result<CheckedVerification, PlanError> {
-    validate_candidate(&problem.mesh, candidate)?;
+    validate_candidate(problem.mesh(), candidate)?;
     let report = verify(problem, candidate, tolerance);
     if report.refusal.is_some() {
         return Err(PlanError::NumericalFailure {
@@ -1111,43 +1071,28 @@ fn checked_verify(
 }
 
 fn cache_key(family: &ProblemFamily, theta: f64) -> Result<String, PlanError> {
-    use core::fmt::Write as _;
-
-    let coefficient_bytes =
-        family
-            .base
-            .0
-            .len()
-            .checked_mul(16)
-            .ok_or(PlanError::ResourceLimit {
-                field: "cache_key_bytes",
-                requested: usize::MAX,
-                limit: 96 + MAX_COLOR_IDENTITY_BYTES + MAX_FAMILY_COEFFICIENTS * 16,
-            })?;
-    let capacity = 96usize
-        .checked_add(family.kernel.len())
-        .and_then(|size| size.checked_add(coefficient_bytes))
-        .ok_or(PlanError::ResourceLimit {
-            field: "cache_key_bytes",
+    let class = family.scaled_class(theta)?;
+    const PREFIX: &str = "fs-ir-ladder:v3:";
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let bytes = class.canonical_bytes();
+    let requested = bytes
+        .len()
+        .checked_mul(2)
+        .and_then(|encoded| encoded.checked_add(PREFIX.len()))
+        .ok_or(PlanError::AllocationFailed {
+            stage: "planner canonical cache key",
             requested: usize::MAX,
-            limit: 96 + MAX_COLOR_IDENTITY_BYTES + MAX_FAMILY_COEFFICIENTS * 16,
         })?;
     let mut key = String::new();
-    key.try_reserve_exact(capacity)
+    key.try_reserve_exact(requested)
         .map_err(|_| PlanError::AllocationFailed {
-            stage: "planner cache key",
-            requested: capacity,
+            stage: "planner canonical cache key",
+            requested,
         })?;
-    let _ = write!(
-        key,
-        "fs-ir-ladder:v2:k{}:{}:theta={:016x}:n{}:",
-        family.kernel.len(),
-        family.kernel,
-        canonical_f64_bits(theta),
-        family.base.0.len()
-    );
-    for coefficient in &family.base.0 {
-        let _ = write!(key, "{:016x}", canonical_f64_bits(*coefficient));
+    key.push_str(PREFIX);
+    for byte in bytes {
+        key.push(char::from(HEX[usize::from(byte >> 4)]));
+        key.push(char::from(HEX[usize::from(byte & 0x0f)]));
     }
     Ok(key)
 }
@@ -1693,7 +1638,7 @@ pub fn baseline_uniform(
         validate_family_cell_work(family, cells)?;
         let mesh = uniform_mesh(cells)?;
         let problem = family.at(theta, mesh)?;
-        spent += solved_cell_cost(&problem.mesh)?;
+        spent += solved_cell_cost(problem.mesh())?;
         if !spent.is_finite() {
             return Err(PlanError::NumericalFailure {
                 stage: "baseline cost accumulation",
@@ -1703,7 +1648,7 @@ pub fn baseline_uniform(
             stage: "uniform baseline solve",
             source,
         })?;
-        validate_candidate(&problem.mesh, &nodal)?;
+        validate_candidate(problem.mesh(), &nodal)?;
         let checked = checked_verify(&problem, &nodal, tol)?;
         if checked.accept {
             return Ok((spent, checked.certificate.bound()));
@@ -1724,7 +1669,16 @@ pub fn baseline_uniform(
 
 #[cfg(test)]
 mod tests {
-    use super::prolong_linear;
+    use super::{ProblemFamily, cache_key, prolong_linear};
+    use fs_verify::fem1d::Poly;
+
+    fn family(coefficients: Vec<f64>, kernel: &str) -> ProblemFamily {
+        ProblemFamily::new(
+            Poly::new(coefficients).expect("valid planner test polynomial"),
+            kernel,
+        )
+        .expect("valid planner test family")
+    }
 
     #[test]
     fn adaptive_mesh_prolongates_to_unrelated_uniform_nodes() {
@@ -1744,5 +1698,48 @@ mod tests {
         let coarse_nodal = [0.0, 0.7, -0.2, 0.0];
         let prolonged = prolong_linear(&coarse_mesh, &coarse_nodal, &coarse_mesh).unwrap();
         assert_eq!(prolonged, coarse_nodal);
+    }
+
+    #[test]
+    fn cache_key_uses_the_canonical_lower_layer_class_identity() {
+        let normalized = family(vec![-0.0, 1.0, -1.0, -0.0], "elliptic");
+        let ordinary = family(vec![0.0, 1.0, -1.0], "elliptic");
+        assert_eq!(normalized.canonical_bytes(), ordinary.canonical_bytes());
+        let normalized_key = cache_key(&normalized, 1.0).unwrap();
+        let ordinary_key = cache_key(&ordinary, 1.0).unwrap();
+        assert_eq!(normalized_key, ordinary_key);
+
+        let scaled = ordinary.scaled_class(1.0).unwrap();
+        let encoded = normalized_key
+            .strip_prefix("fs-ir-ladder:v3:")
+            .expect("cache-key schema prefix");
+        assert_eq!(encoded.len(), scaled.canonical_bytes().len() * 2);
+        for (pair, expected) in encoded
+            .as_bytes()
+            .chunks_exact(2)
+            .zip(scaled.canonical_bytes())
+        {
+            let pair = core::str::from_utf8(pair).expect("ASCII hexadecimal cache key");
+            assert_eq!(u8::from_str_radix(pair, 16).unwrap(), *expected);
+        }
+        assert_eq!(
+            cache_key(&ordinary, -0.0).unwrap(),
+            cache_key(&ordinary, 0.0).unwrap()
+        );
+
+        let renamed = family(vec![0.0, 1.0, -1.0], "elliptic-renamed");
+        let rescaled = family(vec![0.0, 2.0, -2.0], "elliptic");
+        assert_ne!(
+            cache_key(&ordinary, 1.0).unwrap(),
+            cache_key(&renamed, 1.0).unwrap()
+        );
+        assert_ne!(
+            cache_key(&ordinary, 1.0).unwrap(),
+            cache_key(&rescaled, 1.0).unwrap()
+        );
+        assert_ne!(
+            cache_key(&ordinary, 1.0).unwrap(),
+            cache_key(&ordinary, 2.0).unwrap()
+        );
     }
 }
