@@ -250,6 +250,23 @@ pub enum Differentiability {
     Smooth,
 }
 
+/// The theorem a chart exposes to ray steppers. A finite Lipschitz number by
+/// itself is not enough: the field must also have a certified relationship to
+/// the represented boundary. The default is deliberately no-claim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraceStepClaim {
+    /// No generic no-tunneling theorem. Callers may offer an explicitly
+    /// uncertified preview, but production render paths must fail closed.
+    NoClaim,
+    /// `signed_distance` is the exact signed distance and `error` is `Exact`.
+    ExactDistance,
+    /// The field has the exact sign and zero set of the represented region;
+    /// each sample's positive finite Lipschitz bound is certified over the
+    /// entire closed `|f| / L` step ball, making that radius safe even when
+    /// the magnitude is not the exact distance.
+    LipschitzImplicit,
+}
+
 /// One signed-distance query's answer (plan Appendix B: value + gradient +
 /// certified Lipschitz data + the declared error model).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -261,7 +278,9 @@ pub struct ChartSample {
     /// axis/edges or for C0 charts).
     pub gradient: Option<Vec3>,
     /// Certified LOCAL Lipschitz bound for the signed distance near the
-    /// query (sphere-tracing fuel; `None` = no claim).
+    /// query (sphere-tracing fuel; `None` = no claim). A chart opting into
+    /// [`TraceStepClaim::LipschitzImplicit`] strengthens this to validity over
+    /// the entire closed step ball specified by that claim.
     pub lipschitz: Option<f64>,
     /// Declared error of `signed_distance` relative to the ABSTRACT region
     /// (fs-evidence certificate: exact charts say Exact, sampled charts say
@@ -279,6 +298,13 @@ pub trait Chart: Send + Sync {
     /// A box guaranteed to contain the region (queries outside are
     /// positive-distance by definition).
     fn support(&self) -> Aabb;
+
+    /// State the certified relationship that makes this chart safe for a ray
+    /// stepper. Implementations must opt in explicitly; a `Some(lipschitz)`
+    /// sample does not upgrade the default no-claim.
+    fn trace_step_claim(&self) -> TraceStepClaim {
+        TraceStepClaim::NoClaim
+    }
 
     /// Topology bounds this chart is willing to state.
     fn topology_hint(&self) -> BettiBounds {

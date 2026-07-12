@@ -5,7 +5,9 @@
 //! downstream conformance suites import these instead of inventing their
 //! own spheres.
 
-use crate::{Aabb, BettiBounds, Chart, ChartSample, Differentiability, Point3, Vec3};
+use crate::{
+    Aabb, BettiBounds, Chart, ChartSample, Differentiability, Point3, TraceStepClaim, Vec3,
+};
 use fs_evidence::NumericalCertificate;
 use fs_exec::Cx;
 
@@ -43,6 +45,14 @@ impl Chart for SphereChart {
         )
     }
 
+    fn trace_step_claim(&self) -> TraceStepClaim {
+        if self.radius.is_finite() && self.radius > 0.0 {
+            TraceStepClaim::ExactDistance
+        } else {
+            TraceStepClaim::NoClaim
+        }
+    }
+
     fn topology_hint(&self) -> BettiBounds {
         BettiBounds::exact(1, 0, 1)
     }
@@ -61,6 +71,22 @@ impl Chart for SphereChart {
 pub struct BoxChart {
     /// The box.
     pub aabb: Aabb,
+}
+
+impl BoxChart {
+    fn is_solid_box(&self) -> bool {
+        let min = self.aabb.min;
+        let max = self.aabb.max;
+        min.x.is_finite()
+            && min.y.is_finite()
+            && min.z.is_finite()
+            && max.x.is_finite()
+            && max.y.is_finite()
+            && max.z.is_finite()
+            && max.x > min.x
+            && max.y > min.y
+            && max.z > min.z
+    }
 }
 
 impl Chart for BoxChart {
@@ -91,8 +117,20 @@ impl Chart for BoxChart {
         self.aabb
     }
 
+    fn trace_step_claim(&self) -> TraceStepClaim {
+        if self.is_solid_box() {
+            TraceStepClaim::ExactDistance
+        } else {
+            TraceStepClaim::NoClaim
+        }
+    }
+
     fn topology_hint(&self) -> BettiBounds {
-        BettiBounds::exact(1, 0, 1)
+        if self.is_solid_box() {
+            BettiBounds::exact(1, 0, 1)
+        } else {
+            BettiBounds::unknown()
+        }
     }
 
     fn name(&self) -> &'static str {
@@ -100,7 +138,8 @@ impl Chart for BoxChart {
     }
 }
 
-/// Exact torus SDF (major radius `major`, tube radius `minor`, z-axis).
+/// Torus implicit field (major radius `major`, tube radius `minor`, z-axis).
+/// It is an exact signed distance only for the ring case `major > minor`.
 #[derive(Debug, Clone, Copy)]
 pub struct TorusChart {
     /// Center of the torus.
@@ -109,6 +148,16 @@ pub struct TorusChart {
     pub major: f64,
     /// Minor (tube) radius.
     pub minor: f64,
+}
+
+impl TorusChart {
+    fn is_exact_distance(&self) -> bool {
+        self.major.is_finite()
+            && self.minor.is_finite()
+            && self.major > 0.0
+            && self.minor > 0.0
+            && self.major > self.minor
+    }
 }
 
 impl Chart for TorusChart {
@@ -120,7 +169,11 @@ impl Chart for TorusChart {
             signed_distance: sd,
             gradient: None, // analytic gradient lands with rep-frep
             lipschitz: Some(1.0),
-            error: NumericalCertificate::exact(sd),
+            error: if self.is_exact_distance() {
+                NumericalCertificate::exact(sd)
+            } else {
+                NumericalCertificate::estimate(sd, sd)
+            },
         }
     }
 
@@ -132,8 +185,26 @@ impl Chart for TorusChart {
         )
     }
 
+    fn trace_step_claim(&self) -> TraceStepClaim {
+        if self.is_exact_distance() {
+            TraceStepClaim::ExactDistance
+        } else if self.major.is_finite()
+            && self.minor.is_finite()
+            && self.major > 0.0
+            && self.minor > 0.0
+        {
+            TraceStepClaim::LipschitzImplicit
+        } else {
+            TraceStepClaim::NoClaim
+        }
+    }
+
     fn topology_hint(&self) -> BettiBounds {
-        BettiBounds::exact(1, 1, 1)
+        if self.is_exact_distance() {
+            BettiBounds::exact(1, 1, 1)
+        } else {
+            BettiBounds::unknown()
+        }
     }
 
     fn name(&self) -> &'static str {
@@ -215,6 +286,13 @@ mod tests {
             };
             assert!((b.eval(Point3::new(2.0, 0.0, 0.0), cx).signed_distance - 1.0).abs() < 1e-12);
             assert!((b.eval(Point3::new(0.0, 0.0, 0.0), cx).signed_distance + 1.0).abs() < 1e-12);
+            assert_eq!(b.trace_step_claim(), TraceStepClaim::ExactDistance);
+
+            let degenerate = BoxChart {
+                aabb: Aabb::new(Point3::new(-1.0, -1.0, 0.0), Point3::new(1.0, 1.0, 0.0)),
+            };
+            assert_eq!(degenerate.trace_step_claim(), TraceStepClaim::NoClaim);
+            assert_eq!(degenerate.topology_hint(), BettiBounds::unknown());
 
             let t = TorusChart {
                 center: Point3::new(0.0, 0.0, 0.0),

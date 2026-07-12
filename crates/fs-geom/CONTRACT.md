@@ -17,8 +17,17 @@ Depends on fs-exec (Cx), fs-evidence, fs-alloc, fs-obs.
   error: NumericalCertificate }` — plan Appendix B's value + gradient +
   certified Lipschitz + DECLARED error model relative to the abstract
   region. SDF sign convention: negative inside.
-- `Chart` (object-safe): `eval(x, &Cx)`, `support()`, `topology_hint()`,
-  `name()`, `differentiability()`, provided `inside()`. Implementations
+- `TraceStepClaim::{NoClaim, ExactDistance, LipschitzImplicit}` — the typed
+  theorem available to a ray stepper. The default is `NoClaim`: a sample-level
+  `Some(lipschitz)` alone cannot mint a no-tunneling certificate.
+  `ExactDistance` additionally requires an exact singleton numerical
+  certificate; `LipschitzImplicit` states that the field has the represented
+  region's exact sign and zero set and that each sample's bound is valid over
+  the entire closed `|f|/L` step ball, so that radius is safe but not a
+  geometric-distance upper bound.
+- `Chart` (object-safe): `eval(x, &Cx)`, `support()`, `trace_step_claim()`,
+  `topology_hint()`, `name()`, `differentiability()`, provided `inside()`.
+  Implementations
   poll `cx.checkpoint()` at bounded strides. The plan's `type Param`
   lives on the `DesignChart: Chart` subtrait so `Region` can hold
   heterogeneous `Arc<dyn Chart>` (same contract, object-safe core;
@@ -47,9 +56,14 @@ Depends on fs-exec (Cx), fs-evidence, fs-alloc, fs-obs.
   `impl<C: Chart> Convert<SampledSdf> for C` (specialized edges arrive
   with rep-* beads). Resolution cap `SAMPLED_SDF_MAX_RESOLUTION = 96`.
 - `fixtures` (PUBLIC on purpose — the shared MORPH test vocabulary):
-  exact `SphereChart`/`BoxChart`/`TorusChart` (unit Lipschitz, Exact error
-  models, known Betti numbers) and `LyingSphereChart` (deliberately biased
-  with a lying error model) for detection tests.
+  valid positive-radius `SphereChart`, finite strictly three-dimensional
+  `BoxChart`, and valid ring `TorusChart` instances (unit
+  Lipschitz, Exact error models, `ExactDistance` trace claim, known Betti
+  numbers); degenerate/invalid boxes downgrade to `NoClaim` and unknown
+  topology, while horn/spindle torus parameters downgrade to
+  `LipschitzImplicit`, `Estimate`, and unknown topology. `LyingSphereChart` is
+  deliberately biased with a lying error model and the default `NoClaim` for
+  detection tests.
 
 - `router` (the Rep Router, Bet 1): converter-edge registry
   (`ConverterSpec`: cost model, error model with declared composition rule,
@@ -234,6 +248,9 @@ limit+1 refusals.
 - `SampledSdf` claims no Lipschitz bound for its interpolant and no
   gradients (rep-sdf's job); its outside-box enclosure relies on the
   SOURCE's certified Lipschitz constant being truthful.
+- `TraceStepClaim::LipschitzImplicit` certifies no-tunneling step radii, not
+  Euclidean proximity from a small normalized residual. Consumers must retain
+  that distinction in hit/error language.
 - `ConverterSpec::certified` is a declaration, not an authenticated admission
   receipt. Runtime certified runners must return `Certified<f64>` local-error
   evidence and fs-ir rejects routes containing an estimated declaration, but a
