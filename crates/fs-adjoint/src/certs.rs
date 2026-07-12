@@ -540,7 +540,7 @@ fn validate_fd_perturbations(
                     reason: "perturbed coordinate is non-finite",
                 });
             }
-            if perturbed == point {
+            if perturbed.to_bits() == point.to_bits() {
                 return Err(GradientCertError::UnrepresentablePerturbation {
                     direction,
                     component,
@@ -553,21 +553,12 @@ fn validate_fd_perturbations(
     Ok(())
 }
 
-/// The mandatory FD spot checks: seeded random directions through the
-/// falsifier pairing (`adjoint-gradient` → `finite-difference-spot-
-/// check`). Deterministic directions; conditioning-aware tolerances.
-///
-/// # Errors
-/// Refuses mismatched/non-finite vectors, non-finite objective responses, or a
-/// direction request outside the bounded resource envelope.
-pub fn fd_spot_checks(
+fn validate_fd_inputs(
     objective_identity: &str,
-    f: &dyn Fn(&[f64]) -> f64,
     x: &[f64],
     grad: &[f64],
     directions: usize,
-    seed: u64,
-) -> Result<FdCheckBatch, GradientCertError> {
+) -> Result<(), GradientCertError> {
     if let Some(reason) = color_leaf_identity_reason(objective_identity) {
         return Err(GradientCertError::InvalidObjectiveIdentity { reason });
     }
@@ -631,6 +622,25 @@ pub fn fd_spot_checks(
             });
         }
     }
+    Ok(())
+}
+
+/// The mandatory FD spot checks: seeded random directions through the
+/// falsifier pairing (`adjoint-gradient` → `finite-difference-spot-
+/// check`). Deterministic directions; conditioning-aware tolerances.
+///
+/// # Errors
+/// Refuses mismatched/non-finite vectors, non-finite objective responses, or a
+/// direction request outside the bounded resource envelope.
+pub fn fd_spot_checks(
+    objective_identity: &str,
+    f: &dyn Fn(&[f64]) -> f64,
+    x: &[f64],
+    grad: &[f64],
+    directions: usize,
+    seed: u64,
+) -> Result<FdCheckBatch, GradientCertError> {
+    validate_fd_inputs(objective_identity, x, grad, directions)?;
     let mut state = seed;
     let mut lcg = move || {
         state = state

@@ -305,10 +305,7 @@ fn xp_005_narrative_is_non_authoritative() {
     );
 }
 
-#[test]
-fn xp_006_edge_contracts_fail_fast_and_one_node_solves() {
-    // The one-interior-node fixture is the smallest real SPD problem;
-    // the tridiagonal solve must handle its empty off-diagonal.
+fn assert_xp_006_one_node_fixture() {
     let fixture = elliptic_fixture(1);
     let a0 = vec![1.0, 1.0];
     let a1 = vec![1.2, 0.9];
@@ -328,7 +325,12 @@ fn xp_006_edge_contracts_fail_fast_and_one_node_solves() {
     assert!(matches!(explanation, Explanation::Refused { .. }));
     assert!(explanation.is_structurally_valid());
     assert!(!explanation.reconciles());
+}
 
+fn assert_xp_006_fail_fast_contracts() {
+    let fixture = elliptic_fixture(1);
+    let a0 = vec![1.0, 1.0];
+    let a1 = vec![1.2, 0.9];
     assert!(matches!(
         fixture.solve(&[1.0]),
         Err(ExplanationError::LengthMismatch {
@@ -385,9 +387,9 @@ fn xp_006_edge_contracts_fail_fast_and_one_node_solves() {
             ..
         })
     ));
+}
 
-    // Color is part of the re-derivation payload. Same numeric term
-    // with different epistemic color must not collide.
+fn assert_xp_006_color_bound_fingerprint() {
     let verified = ExplanationNode::new(
         "same",
         1.0,
@@ -412,6 +414,13 @@ fn xp_006_edge_contracts_fail_fast_and_one_node_solves() {
         estimated.fingerprint(),
         "fingerprints must include evidence color"
     );
+}
+
+#[test]
+fn xp_006_edge_contracts_fail_fast_and_one_node_solves() {
+    assert_xp_006_one_node_fixture();
+    assert_xp_006_fail_fast_contracts();
+    assert_xp_006_color_bound_fingerprint();
     verdict(
         "xp-006",
         "edge contracts fail fast; the one-node heuristic attribution refuses certification; fingerprints include color",
@@ -738,8 +747,7 @@ fn node_and_text_identity_tampering_fail_closed() {
     ));
 }
 
-#[test]
-fn exact_engine_collection_contracts_fail_closed() {
+fn assert_provenance_collection_contracts() {
     assert!(matches!(
         provenance_attribution(&[]),
         Err(ExplanationError::InvalidCount {
@@ -805,7 +813,9 @@ fn exact_engine_collection_contracts_fail_closed() {
     ])
     .expect("signed-zero history telescopes");
     assert_eq!(signed_zero_chain.len(), 2);
+}
 
+fn assert_adjoint_and_elliptic_collection_contracts() {
     let fixture = elliptic_fixture(1);
     assert!(matches!(
         Elliptic1d::new(0),
@@ -890,6 +900,9 @@ fn exact_engine_collection_contracts_fail_closed() {
             ..
         })
     ));
+}
+
+fn assert_drag_and_finalize_collection_contracts() {
     let finite_wing = LiftingLine::elliptic(0.1, 8.0, 1.0, 8.0, 8).expect("valid finite wing");
     assert!(matches!(
         LiftingLine::elliptic(f64::NAN, 8.0, 1.0, 8.0, 8),
@@ -953,6 +966,13 @@ fn exact_engine_collection_contracts_fail_closed() {
             ..
         })
     ));
+}
+
+#[test]
+fn exact_engine_collection_contracts_fail_closed() {
+    assert_provenance_collection_contracts();
+    assert_adjoint_and_elliptic_collection_contracts();
+    assert_drag_and_finalize_collection_contracts();
 }
 
 #[test]

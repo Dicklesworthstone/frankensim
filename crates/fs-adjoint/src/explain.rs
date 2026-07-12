@@ -153,11 +153,8 @@ impl core::fmt::Display for ExplanationError {
                 field,
                 index,
                 reason,
-            } => match index {
-                Some(index) => write!(f, "invalid {field}[{index}]: {reason}"),
-                None => write!(f, "invalid {field}: {reason}"),
-            },
-            Self::InvalidNumber {
+            }
+            | Self::InvalidNumber {
                 field,
                 index,
                 reason,
@@ -1006,17 +1003,11 @@ impl Explanation {
     }
 }
 
-/// Assemble + gate: compute the residual against the observed change
-/// and REFUSE when it exceeds `threshold`.
-///
-/// # Errors
-/// Returns [`ExplanationError`] when inputs, retained node integrity, or
-/// derived arithmetic are unusable.
-pub fn finalize(
-    nodes: Vec<ExplanationNode>,
+fn validate_explanation_inputs(
+    nodes: &[ExplanationNode],
     observed: f64,
     threshold: f64,
-) -> Result<Explanation, ExplanationError> {
+) -> Result<(), ExplanationError> {
     if !observed.is_finite() {
         return Err(ExplanationError::InvalidNumber {
             field: "observed change",
@@ -1039,12 +1030,12 @@ pub fn finalize(
             max: MAX_EXPLANATION_NODES,
         });
     }
-    if !nodes_are_unique(&nodes) {
+    if !nodes_are_unique(nodes) {
         return Err(ExplanationError::DuplicateIdentity {
             field: "node fingerprint or derivation digest",
         });
     }
-    if !built_in_batch_is_coherent(&nodes) {
+    if !built_in_batch_is_coherent(nodes) {
         return Err(ExplanationError::IntegrityMismatch {
             field: "built-in attribution batch",
             index: None,
@@ -1065,6 +1056,21 @@ pub fn finalize(
             });
         }
     }
+    Ok(())
+}
+
+/// Assemble + gate: compute the residual against the observed change
+/// and REFUSE when it exceeds `threshold`.
+///
+/// # Errors
+/// Returns [`ExplanationError`] when inputs, retained node integrity, or
+/// derived arithmetic are unusable.
+pub fn finalize(
+    nodes: Vec<ExplanationNode>,
+    observed: f64,
+    threshold: f64,
+) -> Result<Explanation, ExplanationError> {
+    validate_explanation_inputs(&nodes, observed, threshold)?;
     let contributions = nodes
         .iter()
         .map(|node| node.contribution)
@@ -1184,12 +1190,7 @@ impl Elliptic1d {
         Ok(())
     }
 
-    /// Solve with per-element conductivity `a` (length n+1).
-    ///
-    /// # Errors
-    /// Refuses malformed dimensions/conductivities and non-finite assembly or
-    /// pivot arithmetic.
-    pub fn solve(&self, a: &[f64]) -> Result<Vec<f64>, ExplanationError> {
+    fn assemble_stiffness(&self, a: &[f64]) -> Result<(f64, Vec<f64>, Vec<f64>), ExplanationError> {
         self.validate()?;
         let n = self.n;
         let element_count = n + 1;
@@ -1258,6 +1259,17 @@ impl Elliptic1d {
                 off[index] = value;
             }
         }
+        Ok((h, diag, off))
+    }
+
+    /// Solve with per-element conductivity `a` (length n+1).
+    ///
+    /// # Errors
+    /// Refuses malformed dimensions/conductivities and non-finite assembly or
+    /// pivot arithmetic.
+    pub fn solve(&self, a: &[f64]) -> Result<Vec<f64>, ExplanationError> {
+        let n = self.n;
+        let (h, diag, off) = self.assemble_stiffness(a)?;
         let mut c = off.clone();
         let mut d = vec![h; n];
         if !diag[0].is_finite() || diag[0] <= 0.0 {
@@ -1443,6 +1455,37 @@ fn validate_adjoint_channels(
     Ok(())
 }
 
+fn adjoint_derivation_digests(
+    fixture: &Elliptic1d,
+    a0: &[f64],
+    a1: &[f64],
+    channels: &[(&str, Vec<usize>)],
+) -> (String, String) {
+    let mut problem_payload = Vec::new();
+    push_usize(&mut problem_payload, fixture.n);
+    push_len(&mut problem_payload, a0.len());
+    for &value in a0 {
+        push_f64(&mut problem_payload, value);
+    }
+    push_len(&mut problem_payload, a1.len());
+    for &value in a1 {
+        push_f64(&mut problem_payload, value);
+    }
+    let problem_digest = derivation_digest(ADJOINT_DERIVATION_DOMAIN, &problem_payload);
+    let mut batch_payload = Vec::new();
+    push_str(&mut batch_payload, &problem_digest);
+    push_len(&mut batch_payload, channels.len());
+    for (name, elements) in channels {
+        push_str(&mut batch_payload, name);
+        push_len(&mut batch_payload, elements.len());
+        for &element in elements {
+            push_usize(&mut batch_payload, element);
+        }
+    }
+    let batch_digest = derivation_digest(ADJOINT_DERIVATION_DOMAIN, &batch_payload);
+    (problem_digest, batch_digest)
+}
+
 /// ADJOINT attribution of a conductivity edit `a0 → a1` over named
 /// disjoint channel masks (element index sets). Uses the EXACT bilinear
 /// identity `J(a1) − J(a0) = −∫ Δa · u0′ · u1′` (compliance is
@@ -1481,28 +1524,7 @@ pub fn adjoint_attribution(
     validate_adjoint_channels(fixture, channels)?;
     let u0 = fixture.solve(a0)?;
     let u1 = fixture.solve(a1)?;
-    let mut problem_payload = Vec::new();
-    push_usize(&mut problem_payload, fixture.n);
-    push_len(&mut problem_payload, a0.len());
-    for &value in a0 {
-        push_f64(&mut problem_payload, value);
-    }
-    push_len(&mut problem_payload, a1.len());
-    for &value in a1 {
-        push_f64(&mut problem_payload, value);
-    }
-    let problem_digest = derivation_digest(ADJOINT_DERIVATION_DOMAIN, &problem_payload);
-    let mut batch_payload = Vec::new();
-    push_str(&mut batch_payload, &problem_digest);
-    push_len(&mut batch_payload, channels.len());
-    for (name, elements) in channels {
-        push_str(&mut batch_payload, name);
-        push_len(&mut batch_payload, elements.len());
-        for &element in elements {
-            push_usize(&mut batch_payload, element);
-        }
-    }
-    let batch_digest = derivation_digest(ADJOINT_DERIVATION_DOMAIN, &batch_payload);
+    let (problem_digest, batch_digest) = adjoint_derivation_digests(fixture, a0, a1, channels);
     #[allow(clippy::cast_precision_loss)]
     let h = 1.0 / (fixture.n as f64 + 1.0);
     let mut nodes = Vec::with_capacity(channels.len());
