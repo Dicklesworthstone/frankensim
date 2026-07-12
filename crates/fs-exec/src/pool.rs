@@ -1,10 +1,11 @@
 //! The throughput lane: a work-stealing fork-join tile pool (plan §5.2).
 //!
-//! Semantics first, lock-freedom later: workers own per-worker deques
-//! (`CachePadded<Mutex<VecDeque>>`) seeded with contiguous, weight-
-//! proportional tile ranges; an empty worker steals HALF a victim's deque,
-//! visiting same-CCD victims before cross-CCD ones (plan §5.1 consequence
-//! 3). The protocol — weighted quanta, CCD-local-first stealing, fixed-slot
+//! Semantics first, lock-freedom later: each worker owns one contiguous
+//! tile run (`CachePadded<Mutex<TileRun>>`, bead wf9.16.2 — ownership is
+//! two u64s, so stealing allocates NOTHING after launch) seeded with
+//! contiguous, weight-proportional ranges; an empty worker steals the BACK
+//! HALF of a victim's run, visiting same-CCD victims before cross-CCD ones
+//! (plan §5.1 consequence 3). The protocol — weighted quanta, CCD-local-first stealing, fixed-slot
 //! reductions, drain-on-cancel, panic containment — is the contract; the
 //! Chase–Lev lock-free deque is a later optimization gated on roofline
 //! evidence (CONTRACT no-claims).
@@ -21,7 +22,6 @@ use core::fmt;
 use core::ops::ControlFlow;
 use fs_alloc::CachePadded;
 use fs_substrate::affinity::CcdTopology;
-use std::collections::VecDeque;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -413,10 +413,9 @@ fn ccd_of_worker(w: usize, workers: usize, topo: CcdTopology) -> usize {
 fn root_metadata_bytes<K: TileKernel>(n: u64, workers: usize) -> Result<u64, &'static str> {
     let workers = u64::try_from(workers).map_err(|_| "worker-count")?;
     let slot = size_of::<Mutex<Option<K::Out>>>() as u64;
-    let deque_header = size_of::<CachePadded<Mutex<VecDeque<u64>>>>() as u64;
+    let deque_header = size_of::<CachePadded<Mutex<TileRun>>>() as u64;
     let range = size_of::<core::ops::Range<u64>>() as u64;
     let victim_header = size_of::<Vec<usize>>() as u64;
-    let tile_id = size_of::<u64>() as u64;
     let report_value = size_of::<u64>() as u64;
     let atomic = size_of::<CachePadded<AtomicU64>>() as u64;
     let out = size_of::<K::Out>() as u64;
@@ -437,7 +436,8 @@ fn root_metadata_bytes<K: TileKernel>(n: u64, workers: usize) -> Result<u64, &'s
 
     let components = [
         ("slot-table", root_mul(n, slot, "slot-table")?),
-        ("deque-entries", root_mul(n, tile_id, "deque-entries")?),
+        // No deque-entries component (bead wf9.16.2): worker ownership is a
+        // TileRun of two u64s inside the header, never per-tile storage.
         (
             "deque-headers",
             root_mul(workers, deque_header, "deque-headers")?,
@@ -517,25 +517,10 @@ fn try_reserve_root_vec<T>(
         })
 }
 
-fn try_reserve_root_deque<T>(
-    values: &mut VecDeque<T>,
-    capacity: usize,
-    kernel: &'static str,
-    what: &'static str,
-) -> Result<(), RunError> {
-    values
-        .try_reserve_exact(capacity)
-        .map_err(|_| RunError::MemoryAllocationRefused {
-            kernel,
-            what,
-            requested_bytes: allocation_bytes::<T>(capacity),
-        })
-}
-
 struct RunRoot<T> {
     slots: Vec<Mutex<Option<T>>>,
     _ranges: Vec<core::ops::Range<u64>>,
-    deques: Vec<CachePadded<Mutex<VecDeque<u64>>>>,
+    deques: Vec<CachePadded<Mutex<TileRun>>>,
     victims: Vec<Vec<usize>>,
     observed: Vec<CachePadded<AtomicU64>>,
     done_by: Vec<CachePadded<AtomicU64>>,
@@ -566,15 +551,10 @@ fn allocate_run_root<K: TileKernel>(
     let mut deques = Vec::new();
     try_reserve_root_vec(&mut deques, workers, kernel, "deque-headers")?;
     for range in &ranges {
-        let entries =
-            usize::try_from(range.end - range.start).map_err(|_| RunError::MemoryPlanOverflow {
-                kernel,
-                what: "deque-entries",
-            })?;
-        let mut deque = VecDeque::new();
-        try_reserve_root_deque(&mut deque, entries, kernel, "deque-entries")?;
-        deque.extend(range.start..range.end);
-        deques.push(CachePadded::new(Mutex::new(deque)));
+        // One contiguous run per worker (bead wf9.16.2): ownership is two
+        // u64s, so there is no per-tile entry storage to reserve and the
+        // steal protocol allocates nothing after launch.
+        deques.push(CachePadded::new(Mutex::new(TileRun::from_range(range))));
     }
 
     let mut victims = Vec::new();
@@ -611,6 +591,61 @@ fn allocate_run_root<K: TileKernel>(
         tiles_by_worker,
         outs,
     })
+}
+
+/// One worker's owned work: a contiguous ascending run of logical tile ids
+/// (bead wf9.16.2). The pool's stealing protocol maintains a structural
+/// invariant that makes this exact: deques are seeded with contiguous
+/// weighted ranges, workers only ever pop the FRONT, and a (necessarily
+/// empty) thief wholesale-adopts the victim's BACK half — which is itself
+/// contiguous. Ownership transfer is therefore pure `Copy` arithmetic on
+/// two `u64`s: ZERO allocation after launch, and the peak storage is
+/// exactly one cache-padded slot per worker, admitted pre-launch.
+#[derive(Debug, Clone, Copy)]
+struct TileRun {
+    /// Next tile to execute (front).
+    next: u64,
+    /// One past the last owned tile.
+    end: u64,
+}
+
+impl TileRun {
+    fn from_range(range: &core::ops::Range<u64>) -> Self {
+        TileRun {
+            next: range.start,
+            end: range.end,
+        }
+    }
+
+    fn len(self) -> u64 {
+        self.end.saturating_sub(self.next)
+    }
+
+    fn pop_front(&mut self) -> Option<u64> {
+        if self.next < self.end {
+            let tile = self.next;
+            self.next += 1;
+            Some(tile)
+        } else {
+            None
+        }
+    }
+
+    /// Split off the BACK `ceil(len/2)` tiles — the exact `take`
+    /// arithmetic of the previous `VecDeque::split_off` protocol, so the
+    /// tile→worker transfer is preserved verbatim, not just semantically.
+    fn steal_back_half(&mut self) -> Option<TileRun> {
+        let take = self.len().div_ceil(2);
+        if take == 0 {
+            return None;
+        }
+        let stolen = TileRun {
+            next: self.end - take,
+            end: self.end,
+        };
+        self.end -= take;
+        Some(stolen)
+    }
 }
 
 /// The steal victim order for worker `w`: same-CCD workers first (ring
@@ -737,7 +772,7 @@ struct WorkerCtx<'a, K: TileKernel> {
     lease: &'a fs_alloc::OperationMemoryLease,
     arenas: &'a fs_alloc::ArenaPool,
     config: &'a PoolConfig,
-    deques: &'a [CachePadded<Mutex<VecDeque<u64>>>],
+    deques: &'a [CachePadded<Mutex<TileRun>>],
     slots: &'a [Mutex<Option<K::Out>>],
     victims: &'a [Vec<usize>],
     observed: &'a [CachePadded<AtomicU64>],
@@ -790,12 +825,9 @@ fn worker_loop<Caps, K: TileKernel>(
             // same-CCD victims first.
             for &v in &ctx.victims[w] {
                 let mut vd = ctx.deques[v].get().lock().expect("deque");
-                let take = vd.len().div_ceil(2);
-                if take == 0 {
+                let Some(stolen) = vd.steal_back_half() else {
                     continue;
-                }
-                let split_at = vd.len() - take;
-                let stolen: VecDeque<u64> = vd.split_off(split_at);
+                };
                 drop(vd);
                 ctx.steals.fetch_add(1, Ordering::Relaxed);
                 if ccd_of_worker(v, ctx.workers, ctx.config.topo)
@@ -1849,12 +1881,12 @@ mod tests {
         let n = 9_u64;
         let workers = 4_u64;
         let slot = size_of::<Mutex<Option<u64>>>() as u64;
-        let deque_header = size_of::<CachePadded<Mutex<VecDeque<u64>>>>() as u64;
+        let deque_header = size_of::<CachePadded<Mutex<TileRun>>>() as u64;
         let range = size_of::<core::ops::Range<u64>>() as u64;
         let victim_header = size_of::<Vec<usize>>() as u64;
         let atomic = size_of::<CachePadded<AtomicU64>>() as u64;
+        // No per-tile deque-entries term (bead wf9.16.2).
         let expected = n * slot
-            + n * size_of::<u64>() as u64
             + workers * deque_header
             + workers * range
             + workers * victim_header

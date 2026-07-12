@@ -415,12 +415,20 @@ and explicit row/decision commit semantics.
   with every charge released by the unwind. Still NOT claimed: thread
   stacks, allocator metadata/capacity rounding, bounded panic-diagnostic
   strings, and heap a kernel allocates and drops entirely within its own
-  tile body (invisible to any output/arena boundary). The v1 mutex-deque
-  stealer's temporary `VecDeque::split_off` transfer buffers are also not
-  yet included: their tight schedule-independent capacity bound or a
-  preallocated/range-based replacement is wf9.16.2. None of these
-  allocations may be described as covered merely because their container
-  header or initial entry storage is charged.
+  tile body (invisible to any output/arena boundary). Work stealing is
+  ALLOCATION-STABLE (bead wf9.16.2): each worker owns one contiguous
+  `TileRun` (two u64s in its cache-padded slot, admitted pre-launch — the
+  root formula has NO per-tile deque-entries term), and a half-steal is a
+  midpoint split with the exact `ceil(len/2)`-from-the-back arithmetic of
+  the previous `VecDeque::split_off` protocol, so the tile→worker transfer
+  is preserved verbatim while allocating nothing after launch. The
+  contiguous-run invariant that makes this exact (seed contiguous, pop
+  only the front, adopt only a victim's back half) is structural; proven
+  by the steal-storm battery plus a counting-global-allocator differential
+  (`tests/steal_stability.rs`): materially different steal traffic at
+  identical run shape shows a ZERO allocation-count delta. None of the
+  no-claim allocations may be described as covered merely because their
+  container header or initial entry storage is charged.
 - The latency lane's ≤100 ms conversational guarantee is HELM's gate;
   exec-007 measures and ledgers turnaround without claiming it.
 - `ExecMode::Fast`'s 5–15% relaxed-reduction throughput claim is NOT made:

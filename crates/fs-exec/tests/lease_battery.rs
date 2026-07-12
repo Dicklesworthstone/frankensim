@@ -369,11 +369,13 @@ fn output_payload_refusal_drains_and_releases() {
     // re-admission (the documented ReductionPanicked containment). Both
     // drain and both release every charge.
     match result {
-        Err(RunError::TileFailed {
-            failure: TileFailure::Allocation(AllocError::LeaseExhausted { .. }),
-            ..
-        })
-        | Err(RunError::ReductionPanicked { .. }) => {}
+        Err(
+            RunError::TileFailed {
+                failure: TileFailure::Allocation(AllocError::LeaseExhausted { .. }),
+                ..
+            }
+            | RunError::ReductionPanicked { .. },
+        ) => {}
         other => panic!("expected a lease refusal on the starved run, got {other:?}"),
     }
     assert_eq!(

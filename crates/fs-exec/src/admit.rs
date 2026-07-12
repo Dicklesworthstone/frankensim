@@ -79,8 +79,8 @@ impl<A: AdmittedStorage, B: AdmittedStorage, C: AdmittedStorage, D: AdmittedStor
     for (A, B, C, D)
 {
 }
-impl<A: AdmittedStorage, B: AdmittedStorage, C: AdmittedStorage, D: AdmittedStorage>
-    AdmittedStorage for (A, B, C, D)
+impl<A: AdmittedStorage, B: AdmittedStorage, C: AdmittedStorage, D: AdmittedStorage> AdmittedStorage
+    for (A, B, C, D)
 {
 }
 
@@ -155,9 +155,7 @@ mod tests {
             a.push(i).expect("in capacity");
             b.push(10 + i).expect("in capacity");
         }
-        let merged = Concat::identity()
-            .merge(Concat(a))
-            .merge(Concat(b));
+        let merged = Concat::identity().merge(Concat(a)).merge(Concat(b));
         assert_eq!(merged.0.as_slice(), &[0, 1, 2, 3, 10, 11, 12, 13]);
         drop(merged);
         assert_eq!(lease.receipt().used_bytes, 0);
