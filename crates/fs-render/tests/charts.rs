@@ -679,7 +679,7 @@ fn rb_001c_scale_direction_and_touching_spheres_are_conservative() {
             dir: Vec3::new(3.0, 0.0, 0.0),
         };
         let beyond_limit = ExactPlaneChart {
-            boundary: (0.1 * 3.0).next_up(),
+            boundary: (0.1_f64 * 3.0).next_up(),
             lipschitz: 1.0,
         };
         let (boundary_hit, boundary_audit) =
