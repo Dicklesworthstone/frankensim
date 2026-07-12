@@ -12,10 +12,14 @@
 //! Migrations are versioned through `PRAGMA user_version`; each version marker
 //! is committed in the same transaction as its DDL. The v2 recovery metadata
 //! also recognizes the exact columns an older build could commit before
-//! crashing ahead of its formerly separate version bump.
+//! crashing ahead of its formerly separate version bump. Schema v4 adds one
+//! immutable database-instance identity row. The row is seeded by Rust inside
+//! the same migration transaction as the table and version marker because the
+//! identity bytes must come from the in-tree domain-separated generator rather
+//! than from engine-specific SQL randomness.
 
 /// The schema version this crate writes and reads.
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 /// Storage chunk length for large artifacts (bytes). Artifacts strictly
 /// larger than this are stored as `artifact_chunks` rows of at most this
@@ -24,7 +28,7 @@ pub const STORAGE_CHUNK_LEN: usize = 4 * 1024 * 1024;
 
 /// Migration ladder: `MIGRATIONS[i]` migrates a database at `user_version`
 /// `i` to `i + 1`. Append-only; never edit a shipped batch.
-pub(crate) const MIGRATIONS: &[&[&str]] = &[V1, V2, V3];
+pub(crate) const MIGRATIONS: &[&[&str]] = &[V1, V2, V3, V4];
 
 /// v1: the six core tables (Appendix D), chunk storage, and the Rev S
 /// extension tables (sparse in v0 but present EARLY so downstream crates can
@@ -245,7 +249,17 @@ pub const V3: &[&str] = &["CREATE TABLE IF NOT EXISTS speculation(
         created_at INTEGER NOT NULL
     ) STRICT"];
 
-/// Every table the CURRENT schema owns (v1 set + v2/v3 additions); the
+/// v4 (bead pifg): one immutable, move-stable identity for the physical
+/// ledger instance. File-backed ledgers retain this row across path aliases and
+/// reopenings; a replacement database at the same path receives a new value.
+/// Independent in-memory handles likewise receive distinct values that live in
+/// the handle rather than depending on a movable Rust address.
+pub const V4: &[&str] = &["CREATE TABLE IF NOT EXISTS ledger_identity(
+    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+    instance_id BLOB NOT NULL CHECK(length(instance_id) = 16)
+) STRICT"];
+
+/// Every table the CURRENT schema owns (v1 set + v2/v3/v4 additions); the
 /// `table_count`/lint whitelist.
 pub const ALL_TABLES: &[&str] = &[
     "artifacts",
@@ -265,4 +279,5 @@ pub const ALL_TABLES: &[&str] = &[
     "unsafe_capsules",
     "branches",
     "speculation",
+    "ledger_identity",
 ];

@@ -1,6 +1,6 @@
 # CONTRACT: fs-ledger
 
-> Status: ACTIVE (Design Ledger, schema v3). Owns the core schema + Rev S
+> Status: ACTIVE (Design Ledger, schema v4). Owns the core schema + Rev S
 > extension tables, BLAKE3 content addressing, the WAL/snapshot concurrency
 > contract, and — since schema v2 — forkable worlds, `at(t)` views,
 > `explain()`, the replay audit, and unreferenced-artifact GC (`travel`
@@ -33,6 +33,13 @@ fine-grained event stream. Layer: L6 (HELM). Runtime deps: `std` + `fsqlite`.
   match the current shipped definition exactly — this generalizes the
   historical v2 crash window (committed DDL, stale marker), which still
   heals; incompatible same-name early objects still fail closed.
+- `LedgerInstanceId` / `Ledger::instance_id()` — opaque, move-stable identity
+  of one physical ledger. Schema v4 stores exactly one 16-byte UUID in
+  `ledger_identity`; fresh initialization and v1-v3 migration seed it inside
+  the same transaction as the v4 version marker. Reopenings and path aliases
+  of one file agree, while replacement files at the same path and independent
+  in-memory handles differ. An existing v4 ledger with missing or malformed
+  identity refuses open rather than silently rotating authority.
 - `ContentHash`, `Blake3`, `hash_bytes` — in-house BLAKE3 (plain hash mode,
   32-byte output), pure safe Rust; artifact identity everywhere. The
   implementation is OWNED by the UTIL crate `fs-blake3` (bead 7uq9) and
@@ -93,10 +100,12 @@ fine-grained event stream. Layer: L6 (HELM). Runtime deps: `std` + `fsqlite`.
   `gc_unreferenced_artifacts` (edge-less artifacts only; referenced
   artifacts are immortal).
 
-Schema divergences from plan Appendix D, both deliberate: `JSON` columns are
+Schema divergences from plan Appendix D, all deliberate: `JSON` columns are
 STRICT-legal `TEXT` with `json_valid()` CHECKs (Appendix D as written is not
 valid STRICT SQL), and `artifacts` gains `len`/`chunk_count` +
-`artifact_chunks` for bounded-memory large-field storage.
+`artifact_chunks` for bounded-memory large-field storage. Schema v4 adds the
+singleton `ledger_identity` table so higher-layer sink authority is tied to
+the database instance rather than a path string or Rust object address.
 
 - `tombstone` module (addendum Proposal E, bead lmp4.13): the TOMBSTONE
   LEDGER — swarm memory's cheap half. `Descriptor` (name + dimensioned
@@ -248,6 +257,9 @@ refusal, or verifier panic).
 6. A crash-recovered ledger lints clean: transactions make op+edges+metric
    groups all-or-nothing (kill -9 battery, `ledger_007`).
 7. Wall-clock timestamps are provenance envelope, never content identity.
+8. Physical ledger identity is a persisted opaque 16-byte UUID. It survives
+   handle moves, file aliases, and reopenings, but never transfers to a new
+   database merely because that database occupies the same path.
 
 ## Error model
 
@@ -258,6 +270,8 @@ busy/locked/write-conflict; retry with backoff), `MissingExplicit` (names the
 offending Five Explicits field), `Invalid` (names the field),
 `Corrupt`, `TuneCorrupt` (stored tune envelope violated), `TuneReadLimit`
 (bounded scan refused), `NotFound`, `DoubleFinish`, `WriterInTransaction`.
+`InstanceIdentityCorrupt` refuses a v4 database whose singleton identity is
+missing or malformed.
 Never panics across the crate boundary. Signed database metadata that
 represents a length or count is converted with an explicit non-negative check;
 physical corruption cannot reinterpret `-1` as `u64::MAX`.
@@ -304,6 +318,10 @@ reopen. Tune unit regressions cover every exact field limit and limit+1,
 empty/NUL/non-ASCII identities, hostile oversized raw-SQL rows, lint detection,
 and deterministic row/aggregate scan caps (including an exact 16 MiB boundary
 that counts the cloned kernel identity once per returned row).
+The `ledger_003b`/`ledger_003c` identity battery covers handle movement,
+independent memory ledgers, file reopen and aliasing, same-path file
+replacement, genuine-v3 migration, UUID shape, and fail-closed missing,
+malformed, or prematurely installed identity without advancing the marker.
 `tests/travel.rs`: genuine-v1 →
 v2 migration with history intact, fork storage audit (N forks = 1× artifacts
 + deltas) + branch independence, replay audit battery (clean /
@@ -434,6 +452,9 @@ adds fs-evidence as a runtime dependency (the colors are its types).
   implemented.
 - Cryptographic security claims: the implementation matches official vectors
   but has no side-channel or performance hardening (scalar, unoptimized).
+- `LedgerInstanceId` is a collision-resistant uniqueness token, not a secret,
+  signature, or authentication credential. Byte-for-byte database copies
+  intentionally retain one identity because they are copies of one lineage.
 - Throughput numbers are smoke floors, not roofline claims (§14 discipline:
   real claims need machine fingerprints and acceptance bands).
 - Branch DELETION and cross-branch merge (as opposed to merge-view

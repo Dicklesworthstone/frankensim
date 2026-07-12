@@ -272,6 +272,191 @@ fn ledger_003_schema_migration_versioned() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // One move/alias/replacement/migration identity scenario.
+fn ledger_003b_instance_identity_survives_moves_aliases_and_migration() {
+    let first_memory = Ledger::open(":memory:").expect("first memory ledger");
+    let first_memory_id = first_memory.instance_id();
+    let uuid = first_memory_id.as_bytes();
+    assert_eq!(uuid[6] & 0xf0, 0x40, "identity has UUID v4 shape");
+    assert_eq!(uuid[8] & 0xc0, 0x80, "identity has RFC 4122 variant");
+    let rendered = first_memory_id.to_uuid_string();
+    assert_eq!(rendered.len(), 36);
+    assert_eq!(
+        rendered
+            .bytes()
+            .enumerate()
+            .filter_map(|(index, byte)| (byte == b'-').then_some(index))
+            .collect::<Vec<_>>(),
+        vec![8, 13, 18, 23]
+    );
+    let moved_memory = Box::new(first_memory);
+    assert_eq!(
+        moved_memory.instance_id(),
+        first_memory_id,
+        "moving one handle cannot change its sink authority"
+    );
+    assert_ne!(
+        moved_memory.instance_id(),
+        Ledger::open(":memory:")
+            .expect("independent memory ledger")
+            .instance_id(),
+        "independent memory databases must never alias by address reuse"
+    );
+
+    let db = temp_db("instance-id");
+    let original_id = {
+        let ledger = Ledger::open(&db).expect("create persistent ledger");
+        ledger.instance_id()
+    };
+    assert_eq!(
+        Ledger::open(&db).expect("reopen").instance_id(),
+        original_id,
+        "reopening the same file preserves identity"
+    );
+    let path = std::path::Path::new(&db);
+    let alias = format!(
+        "{}/./{}",
+        path.parent().expect("temporary parent").display(),
+        path.file_name()
+            .expect("temporary filename")
+            .to_string_lossy()
+    );
+    assert_eq!(
+        Ledger::open(&alias).expect("path alias").instance_id(),
+        original_id,
+        "path spelling is not physical sink identity"
+    );
+
+    let archived = format!("{db}.archived");
+    std::fs::rename(&db, &archived).expect("archive the original database without deleting it");
+    // A SQLite WAL is part of the physical database, not disposable path
+    // decoration. Move any surviving sidecars with the archived main file so
+    // the original path truly denotes a fresh physical database.
+    for suffix in ["-wal", "-shm"] {
+        let sidecar = format!("{db}{suffix}");
+        if std::path::Path::new(&sidecar).exists() {
+            std::fs::rename(&sidecar, format!("{archived}{suffix}"))
+                .expect("archive the original database sidecar");
+        }
+    }
+    let replacement_id = Ledger::open(&db)
+        .expect("replacement database at the same path")
+        .instance_id();
+    assert_ne!(
+        replacement_id, original_id,
+        "a replacement database cannot inherit path-based authority"
+    );
+    cleanup_db(&db);
+    cleanup_db(&archived);
+
+    let old = temp_db("instance-id-v3");
+    {
+        let raw = fsqlite::Connection::open(&old).expect("raw v3 ledger");
+        for batch in [
+            fs_ledger::schema::V1,
+            fs_ledger::schema::V2,
+            fs_ledger::schema::V3,
+        ] {
+            for ddl in batch {
+                raw.execute(ddl).expect("construct shipped v3 schema");
+            }
+        }
+        raw.execute("PRAGMA user_version = 3")
+            .expect("mark v3 schema");
+    }
+    let migrated = Ledger::open(&old).expect("v3 identity migration");
+    assert_eq!(migrated.schema_version().unwrap(), SCHEMA_VERSION);
+    assert_eq!(migrated.table_count("ledger_identity").unwrap(), 1);
+    let migrated_id = migrated.instance_id();
+    drop(migrated);
+    assert_eq!(
+        Ledger::open(&old)
+            .expect("reopen migrated v3")
+            .instance_id(),
+        migrated_id,
+        "migration seeds identity atomically and only once"
+    );
+    cleanup_db(&old);
+    verdict(
+        "ledger-003b",
+        "opaque instance identity survives moves, aliases, reopen, and v3 migration; replacement rotates",
+    );
+}
+
+#[test]
+fn ledger_003c_missing_persisted_identity_fails_closed() {
+    let db = temp_db("missing-instance-id");
+    drop(Ledger::open(&db).expect("seed identity"));
+    {
+        let raw = fsqlite::Connection::open(&db).expect("raw identity mutation");
+        raw.execute("DELETE FROM ledger_identity WHERE singleton = 1")
+            .expect("remove identity fixture");
+    }
+    assert!(matches!(
+        Ledger::open(&db),
+        Err(LedgerError::InstanceIdentityCorrupt { .. })
+    ));
+    cleanup_db(&db);
+
+    let malformed = temp_db("malformed-instance-id");
+    drop(Ledger::open(&malformed).expect("seed malformed fixture"));
+    {
+        let raw = fsqlite::Connection::open(&malformed).expect("raw identity mutation");
+        raw.execute(
+            "UPDATE ledger_identity SET instance_id = \
+             X'00000000000000000000000000000000' WHERE singleton = 1",
+        )
+        .expect("install invalid UUID bits");
+    }
+    assert!(matches!(
+        Ledger::open(&malformed),
+        Err(LedgerError::InstanceIdentityCorrupt { .. })
+    ));
+    cleanup_db(&malformed);
+
+    let premature = temp_db("premature-malformed-instance-id");
+    {
+        let raw = fsqlite::Connection::open(&premature).expect("raw premature v4 ledger");
+        for batch in [
+            fs_ledger::schema::V1,
+            fs_ledger::schema::V2,
+            fs_ledger::schema::V3,
+            fs_ledger::schema::V4,
+        ] {
+            for ddl in batch {
+                raw.execute(ddl).expect("construct premature v4 schema");
+            }
+        }
+        raw.execute(
+            "INSERT INTO ledger_identity(singleton, instance_id) VALUES \
+             (1, X'00000000000000000000000000000000')",
+        )
+        .expect("install premature invalid UUID bits");
+        raw.execute("PRAGMA user_version = 3")
+            .expect("retain the old marker");
+    }
+    assert!(matches!(
+        Ledger::open(&premature),
+        Err(LedgerError::InstanceIdentityCorrupt { .. })
+    ));
+    {
+        let raw = fsqlite::Connection::open(&premature).expect("reopen refused migration");
+        assert_eq!(
+            raw.query_row("PRAGMA user_version")
+                .expect("version")
+                .get(0),
+            Some(&fsqlite::SqliteValue::Integer(3)),
+            "malformed premature identity must not receive the v4 marker"
+        );
+    }
+    cleanup_db(&premature);
+    verdict(
+        "ledger-003c",
+        "a current schema missing or carrying malformed persisted identity refuses instead of rotating",
+    );
+}
+
+#[test]
 fn ledger_004_dedupe_and_chunked_round_trip() {
     let db = temp_db("chunk");
     let l = Ledger::open(&db).expect("open");

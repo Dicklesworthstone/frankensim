@@ -31,7 +31,10 @@ pub use gemm_tune::{
     gemm_tune_key_with_pool_budgeted, gemm_tune_metadata_plan_bytes,
 };
 pub use governor::{
-    Charge, DegradationEvent, DegradationStep, Enforcement, Governor, StepPhase, SubmissionReceipt,
+    Charge, DegradationEvent, DegradationStep, Enforcement, FlushReport, Governor,
+    MAX_DEGRADATION_EVENTS_PER_SCOPE, MAX_EVENT_PAGE_ROWS, MAX_FLUSH_ENCODED_BYTES, MAX_FLUSH_ROWS,
+    MAX_IDEMPOTENCY_KEYS_PER_SESSION, MAX_RETAINED_EVIDENCE_BYTES, MAX_SESSIONS_PER_GOVERNOR,
+    MAX_SESSIONS_PER_SCOPE, RetainedEvidence, ScopeFlushPermit, StepPhase, SubmissionReceipt,
     SubmitOutcome,
 };
 pub use guidance::Guidance;
@@ -77,9 +80,30 @@ pub enum SessionError {
         /// Scope whose history would be split.
         scope: String,
         /// Sink bound by the first successful non-empty flush.
-        bound_sink: String,
+        bound_sink: fs_ledger::LedgerInstanceId,
         /// Rejected sink.
-        attempted_sink: String,
+        attempted_sink: fs_ledger::LedgerInstanceId,
+    },
+    /// A scoped flush permit was minted by a different governor.
+    ScopePermitMismatch {
+        /// Exact bounded scope carried by the foreign permit.
+        scope: String,
+    },
+    /// A flush for this scope is already outside the state lock performing
+    /// ledger I/O; another flush must retry rather than race its cursors.
+    ScopeFlushInFlight {
+        /// Exact bounded scope.
+        scope: String,
+    },
+    /// A deterministic governor collection, payload, or ordinal bound was
+    /// reached. Refusal happens before partial state mutation.
+    LimitExceeded {
+        /// Bounded resource name.
+        resource: &'static str,
+        /// Configured maximum.
+        limit: usize,
+        /// Exact observation or conservative lower bound.
+        observed_at_least: usize,
     },
     /// A resource grant, charge, or accumulated meter is outside its valid
     /// finite, non-negative domain.
@@ -120,6 +144,14 @@ pub enum SessionError {
         /// The id.
         id: u64,
     },
+    /// Level-3 pressure was requested while an earlier pause request still
+    /// awaits its checkpoint acknowledgement.
+    PauseAlreadyPending {
+        /// The session id.
+        id: u64,
+        /// Ordinal of the still-pending request.
+        requested_ordinal: i64,
+    },
 }
 
 impl fmt::Display for SessionError {
@@ -149,7 +181,23 @@ impl fmt::Display for SessionError {
                 attempted_sink,
             } => write!(
                 f,
-                "ledger scope {scope:?} is already bound to sink {bound_sink:?}; refusing sink {attempted_sink:?} and leaving every scope cursor unchanged"
+                "ledger scope {scope:?} is already bound to ledger instance {bound_sink}; refusing instance {attempted_sink} and leaving every scope cursor unchanged"
+            ),
+            SessionError::ScopePermitMismatch { scope } => write!(
+                f,
+                "scope flush permit for {scope:?} belongs to a different governor; no sink or cursor state was changed"
+            ),
+            SessionError::ScopeFlushInFlight { scope } => write!(
+                f,
+                "ledger scope {scope:?} already has a bounded flush in flight; retry after it completes"
+            ),
+            SessionError::LimitExceeded {
+                resource,
+                limit,
+                observed_at_least,
+            } => write!(
+                f,
+                "session {resource} limit {limit} exceeded (observed at least {observed_at_least}); no partial authority mutation was committed"
             ),
             SessionError::InvalidResource {
                 resource,
@@ -175,6 +223,13 @@ impl fmt::Display for SessionError {
             SessionError::NoPendingPause { id } => write!(
                 f,
                 "session {id} has no outstanding pause request to acknowledge"
+            ),
+            SessionError::PauseAlreadyPending {
+                id,
+                requested_ordinal,
+            } => write!(
+                f,
+                "session {id} already has a pause request pending at ordinal {requested_ordinal}; acknowledge it before requesting level-3 pressure again"
             ),
         }
     }

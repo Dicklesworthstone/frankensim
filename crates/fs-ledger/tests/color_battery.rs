@@ -2916,7 +2916,10 @@ fn col_007_color_rows_are_strict_json_under_hostile_metadata() {
 #[test]
 fn speculation_schema_migration() {
     let ledger = fs_ledger::Ledger::open(":memory:").expect("open");
-    assert_eq!(ledger.schema_version().expect("version"), 3);
+    assert_eq!(
+        ledger.schema_version().expect("version"),
+        fs_ledger::SCHEMA_VERSION
+    );
     let body = "{\"proposer_id\":\"neighbor-extrapolation\",\"accepted\":true,\
                 \"bound\":3.2e-4,\"iterations_saved\":4}";
     ledger

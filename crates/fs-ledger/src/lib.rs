@@ -75,6 +75,88 @@ pub const MAX_TUNE_SCAN_BYTES: usize = 16 * 1024 * 1024;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub(crate) const VCS_IDENTITY_EVENT_KIND: &str = "vcs-identity";
+const LEDGER_INSTANCE_ID_DOMAIN: &str = "org.frankensim.fs-ledger.instance-id.v1";
+static LEDGER_INSTANCE_NONCE: AtomicU64 = AtomicU64::new(0);
+
+/// Opaque identity of one physical ledger instance.
+///
+/// File-backed ledgers persist this value in schema metadata, so aliases and
+/// reopenings agree while a replacement database at the same path does not.
+/// In-memory ledgers retain a generated value inside the handle, so moving the
+/// Rust value cannot change its identity and independent handles never alias by
+/// address reuse.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct LedgerInstanceId([u8; 16]);
+
+impl LedgerInstanceId {
+    /// Exact RFC 4122-shaped UUID bytes carrying the opaque identity.
+    #[must_use]
+    pub const fn as_bytes(self) -> [u8; 16] {
+        self.0
+    }
+
+    /// Stable lowercase UUID rendering for diagnostics and manifests.
+    #[must_use]
+    pub fn to_uuid_string(self) -> String {
+        self.to_string()
+    }
+}
+
+impl std::fmt::Display for LedgerInstanceId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let bytes = self.0;
+        write!(
+            f,
+            "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-\
+             {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            bytes[0],
+            bytes[1],
+            bytes[2],
+            bytes[3],
+            bytes[4],
+            bytes[5],
+            bytes[6],
+            bytes[7],
+            bytes[8],
+            bytes[9],
+            bytes[10],
+            bytes[11],
+            bytes[12],
+            bytes[13],
+            bytes[14],
+            bytes[15],
+        )
+    }
+}
+
+impl std::fmt::Debug for LedgerInstanceId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "LedgerInstanceId({self})")
+    }
+}
+
+fn fresh_ledger_instance_id() -> LedgerInstanceId {
+    let mut payload = Vec::with_capacity(32);
+    payload.extend_from_slice(&std::process::id().to_le_bytes());
+    payload.extend_from_slice(
+        &LEDGER_INSTANCE_NONCE
+            .fetch_add(1, Ordering::Relaxed)
+            .to_le_bytes(),
+    );
+    payload.extend_from_slice(&now_wall_ns().to_le_bytes());
+    // The static's process address supplies an additional process-local salt;
+    // the persisted result, never this address, is the public identity.
+    payload.extend_from_slice(&(&raw const LEDGER_INSTANCE_NONCE as usize).to_le_bytes());
+    let digest = fs_blake3::hash_domain(LEDGER_INSTANCE_ID_DOMAIN, &payload);
+    let mut uuid = [0_u8; 16];
+    uuid.copy_from_slice(&digest.as_bytes()[..16]);
+    // RFC 4122 variant plus version 4 shape. Randomness comes from the
+    // domain-separated digest; setting these bits makes persisted values
+    // structurally recognizable and fail-closed on malformed replacement.
+    uuid[6] = (uuid[6] & 0x0f) | 0x40;
+    uuid[8] = (uuid[8] & 0x3f) | 0x80;
+    LedgerInstanceId(uuid)
+}
 
 // ---------------------------------------------------------------------------
 // Error model
@@ -180,6 +262,13 @@ pub enum LedgerError {
         /// Every attestation violation found (object-level diffs).
         violations: Vec<String>,
     },
+    /// The schema attests but its singleton physical-ledger identity row is
+    /// missing or malformed. Opening refuses rather than silently replacing
+    /// the authority identity of an existing database.
+    InstanceIdentityCorrupt {
+        /// Bounded structural diagnosis.
+        detail: String,
+    },
     /// Identical bytes offered with a DIFFERENT envelope (kind or
     /// metadata) than the stored artifact carries (bead gp3.19).
     /// Byte deduplication stays content-addressed, but an envelope
@@ -215,6 +304,7 @@ impl LedgerError {
             LedgerError::DoubleFinish { .. } => "LedgerDoubleFinish",
             LedgerError::WriterInTransaction => "LedgerWriterInTransaction",
             LedgerError::SchemaMismatch { .. } => "LedgerSchemaMismatch",
+            LedgerError::InstanceIdentityCorrupt { .. } => "LedgerInstanceIdentityCorrupt",
             LedgerError::ArtifactEnvelopeConflict { .. } => "LedgerArtifactEnvelopeConflict",
         }
     }
@@ -291,6 +381,11 @@ impl std::fmt::Display for LedgerError {
                  data out manually or delete the file if it is disposable",
                 violations.len(),
                 violations.join("; ")
+            ),
+            LedgerError::InstanceIdentityCorrupt { detail } => write!(
+                f,
+                "LedgerInstanceIdentityCorrupt: {detail}; refusing to replace or guess the \
+                 physical ledger identity"
             ),
             LedgerError::ArtifactEnvelopeConflict {
                 hash_hex,
@@ -1291,6 +1386,11 @@ impl ArtifactChunkValidator {
 pub struct Ledger {
     conn: Connection,
     path: String,
+    instance_id: LedgerInstanceId,
+    /// Monotone count of read-side queries issued through the typed read
+    /// APIs (bead vm3i): the measurable basis for verification query
+    /// budgets. Diagnostic only — never part of any receipt or identity.
+    read_queries: core::cell::Cell<u64>,
 }
 
 impl Ledger {
@@ -1319,18 +1419,45 @@ impl Ledger {
                 detail: format!("{pragma}: {e}"),
             })?;
         }
-        let ledger = Ledger {
+        let mut ledger = Ledger {
             conn,
             path: path.to_string(),
+            instance_id: fresh_ledger_instance_id(),
+            read_queries: core::cell::Cell::new(0),
         };
         ledger.migrate()?;
+        ledger.instance_id = ledger.read_instance_id()?;
         Ok(ledger)
+    }
+
+    /// Monotone count of typed read-API queries issued through this
+    /// connection (bead vm3i): `tune_rows`/`tune_get`/`get_artifact`/`op`/
+    /// `edge_exists` each count once. The measurable basis for verification
+    /// query budgets; diagnostic only, never part of a receipt.
+    #[must_use]
+    pub fn read_queries(&self) -> u64 {
+        self.read_queries.get()
+    }
+
+    fn note_read_query(&self) {
+        self.read_queries
+            .set(self.read_queries.get().saturating_add(1));
     }
 
     /// The path this ledger was opened at.
     #[must_use]
     pub fn path(&self) -> &str {
         &self.path
+    }
+
+    /// Move-stable identity of this physical ledger instance.
+    ///
+    /// This is the authority key for binding higher-level sinks. It is stable
+    /// across aliases and reopenings of one file, distinct for a replacement
+    /// file at the same path, and distinct for independent in-memory handles.
+    #[must_use]
+    pub const fn instance_id(&self) -> LedgerInstanceId {
+        self.instance_id
     }
 
     /// The schema version recorded in the file.
@@ -1392,6 +1519,8 @@ impl Ledger {
                         })?;
                     }
                 }
+                self.seed_instance_id_if_missing()?;
+                let _ = self.read_instance_id()?;
                 self.conn
                     .execute(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))
                     .map_err(|error| sql_err("init: set user_version", &error))?;
@@ -1431,6 +1560,10 @@ impl Ledger {
                         ),
                     })?;
                 }
+                if target == 4 {
+                    self.seed_instance_id_if_missing()?;
+                    let _ = self.read_instance_id()?;
+                }
                 self.conn
                     .execute(&format!("PRAGMA user_version = {target}"))
                     .map_err(|error| sql_err("migrate: set user_version", &error))?;
@@ -1444,6 +1577,56 @@ impl Ledger {
             }
         }
         Ok(())
+    }
+
+    fn seed_instance_id_if_missing(&self) -> Result<(), LedgerError> {
+        self.conn
+            .prepare(
+                "INSERT INTO ledger_identity(singleton, instance_id) \
+                 SELECT 1, ?1 WHERE NOT EXISTS \
+                 (SELECT 1 FROM ledger_identity WHERE singleton = 1)",
+            )
+            .map_err(|error| sql_err("seed ledger instance identity: prepare", &error))?
+            .execute_with_params(&[blob_param(&self.instance_id.0)])
+            .map_err(|error| sql_err("seed ledger instance identity", &error))?;
+        Ok(())
+    }
+
+    fn read_instance_id(&self) -> Result<LedgerInstanceId, LedgerError> {
+        let rows = self
+            .conn
+            .query("SELECT instance_id FROM ledger_identity WHERE singleton = 1")
+            .map_err(|error| sql_err("read ledger instance identity", &error))?;
+        if rows.len() != 1 {
+            return Err(LedgerError::InstanceIdentityCorrupt {
+                detail: format!(
+                    "ledger_identity must contain exactly one singleton row, found {}",
+                    rows.len()
+                ),
+            });
+        }
+        let Some(SqliteValue::Blob(bytes)) = rows[0].get(0) else {
+            return Err(LedgerError::InstanceIdentityCorrupt {
+                detail: "ledger_identity.instance_id is not a BLOB".to_string(),
+            });
+        };
+        let uuid: [u8; 16] =
+            bytes
+                .as_ref()
+                .try_into()
+                .map_err(|_| LedgerError::InstanceIdentityCorrupt {
+                    detail: format!(
+                        "ledger_identity.instance_id must be a 16-byte UUID, found {} bytes",
+                        bytes.len()
+                    ),
+                })?;
+        if uuid[6] & 0xf0 != 0x40 || uuid[8] & 0xc0 != 0x80 {
+            return Err(LedgerError::InstanceIdentityCorrupt {
+                detail: "ledger_identity.instance_id has invalid UUID version or variant bits"
+                    .to_string(),
+            });
+        }
+        Ok(LedgerInstanceId(uuid))
     }
 
     fn recoverable_column_is_present(
@@ -2223,6 +2406,7 @@ impl Ledger {
     /// recorded shape, or [`LedgerError::Invalid`] when memory cannot be
     /// reserved for the result; absence is `Ok(None)`.
     pub fn get_artifact(&self, h: &ContentHash) -> Result<Option<Vec<u8>>, LedgerError> {
+        self.note_read_query();
         let mut out = Vec::new();
         let mut allocation_error = None;
         let streamed = self.read_artifact_chunks(h, &mut |chunk| {
@@ -2503,6 +2687,7 @@ impl Ledger {
     /// # Errors
     /// Engine errors; absence is `Ok(None)`.
     pub fn op(&self, id: i64) -> Result<Option<OpRow>, LedgerError> {
+        self.note_read_query();
         let rows = self
             .conn
             .query_with_params(
@@ -2604,6 +2789,7 @@ impl Ledger {
         artifact: &ContentHash,
         role: EdgeRole,
     ) -> Result<bool, LedgerError> {
+        self.note_read_query();
         let rows = self
             .conn
             .query_with_params(
@@ -2830,6 +3016,7 @@ impl Ledger {
         shape_class: &str,
         machine: &[u8],
     ) -> Result<Option<TuneRow>, LedgerError> {
+        self.note_read_query();
         validate_tune_identity("kernel", kernel, MAX_TUNE_KERNEL_BYTES)?;
         validate_tune_identity("shape_class", shape_class, MAX_TUNE_SHAPE_CLASS_BYTES)?;
         validate_tune_machine(machine)?;
@@ -2945,6 +3132,7 @@ impl Ledger {
     /// [`LedgerError::TuneReadLimit`] for a history outside the scan budget,
     /// or engine errors. An unknown kernel is an empty vec.
     pub fn tune_rows(&self, kernel: &str) -> Result<Vec<TuneRow>, LedgerError> {
+        self.note_read_query();
         validate_tune_identity("kernel", kernel, MAX_TUNE_KERNEL_BYTES)?;
         let expected_rows = preflight_tune_scan(&self.conn, kernel)?;
         if expected_rows == 0 {
@@ -3311,8 +3499,9 @@ mod tests {
         let l = mem();
         assert_eq!(l.schema_version().unwrap(), SCHEMA_VERSION);
         for table in ALL_TABLES {
-            // A fresh ledger is empty except the seeded main branch row.
-            let expected = u64::from(*table == "branches");
+            // A fresh ledger is empty except the seeded main branch and
+            // immutable physical-instance identity rows.
+            let expected = u64::from(matches!(*table, "branches" | "ledger_identity"));
             assert_eq!(
                 l.table_count(table).unwrap(),
                 expected,
@@ -4238,5 +4427,26 @@ mod tests {
             .map(|e| e.code().to_string());
         assert_eq!(err.as_deref(), Some("LedgerWriterInTransaction"));
         l.rollback().unwrap();
+    }
+
+    #[test]
+    fn read_query_counter_counts_typed_reads_exactly() {
+        // bead vm3i: the counter is the measurable basis for verification
+        // query budgets — each typed read API counts exactly once, writes
+        // count nothing.
+        let l = mem();
+        assert_eq!(l.read_queries(), 0);
+        l.tune_put("k", "s", b"m", "{}", "{}").unwrap();
+        assert_eq!(l.read_queries(), 0, "writes are not read queries");
+        let _ = l.tune_get("k", "s", b"m").unwrap();
+        assert_eq!(l.read_queries(), 1);
+        let _ = l.tune_rows("k").unwrap();
+        assert_eq!(l.read_queries(), 2);
+        let _ = l.op(1).unwrap();
+        assert_eq!(l.read_queries(), 3);
+        let absent = hash_bytes(b"absent");
+        let _ = l.get_artifact(&absent).unwrap();
+        let _ = l.edge_exists(1, &absent, EdgeRole::Out).unwrap();
+        assert_eq!(l.read_queries(), 5);
     }
 }

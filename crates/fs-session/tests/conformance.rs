@@ -11,7 +11,10 @@ use fs_exec::solver::{SolverState, codec};
 use fs_plan::{CostModel, CostObservation};
 use fs_session::{
     CalibrationReport, CapabilityToken, Charge, DegradationStep, Enforcement, Estimate, Governor,
-    Guidance, MAX_LEDGER_SCOPE_BYTES, SessionError, SessionId, StepPhase, SubmitOutcome, estimate,
+    Guidance, MAX_EVENT_PAGE_ROWS, MAX_FLUSH_ENCODED_BYTES, MAX_FLUSH_ROWS,
+    MAX_IDEMPOTENCY_KEYS_PER_SESSION, MAX_LEDGER_SCOPE_BYTES, MAX_RETAINED_EVIDENCE_BYTES,
+    MAX_SESSIONS_PER_GOVERNOR, MAX_SESSIONS_PER_SCOPE, SessionError, SessionId, StepPhase,
+    SubmitOutcome, estimate,
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -367,10 +370,22 @@ fn ss_003_idempotency_races_execute_exactly_once() {
         _ => unreachable!(),
     };
     for o in &outcomes {
-        if let SubmitOutcome::Duplicate { receipt: r, .. } = o {
-            assert_eq!(*r, receipt, "duplicates share the original receipt");
+        match o {
+            SubmitOutcome::Executed { .. } | SubmitOutcome::InFlight => {}
+            SubmitOutcome::Duplicate { receipt: r, .. } => {
+                assert_eq!(
+                    *r, receipt,
+                    "terminal duplicates share the original receipt"
+                );
+            }
+            other => panic!("race produced an impossible outcome: {other:?}"),
         }
     }
+    assert!(matches!(
+        gov.submit_once(SessionId(3), &key, || panic!("terminal duplicate ran"))
+            .expect("terminal state remains queryable"),
+        SubmitOutcome::Duplicate { receipt: r, .. } if r == receipt
+    ));
     // ONE charge only.
     let (core_s, ..) = gov.consumption(SessionId(3)).expect("meters");
     assert!(
@@ -387,7 +402,40 @@ fn ss_003_idempotency_races_execute_exactly_once() {
     assert!(matches!(other, SubmitOutcome::Executed { .. }));
     verdict(
         "ss-003",
-        "16-thread race: one execution, one charge, shared receipt",
+        "16-thread race: one execution, one charge, non-blocking InFlight or shared terminal receipt",
+    );
+}
+
+#[test]
+fn ss_003a_same_thread_reentrant_duplicate_returns_in_flight() {
+    let gov = Governor::new();
+    gov.open_session(token(30, 1e9, 1e9))
+        .expect("reentrant fixture session");
+    let executions = AtomicU32::new(0);
+    let key = "same-thread-reentrant";
+
+    let outer = gov
+        .submit_once(SessionId(30), key, || {
+            executions.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(
+                gov.submit_once(SessionId(30), key, || {
+                    panic!("a reentrant duplicate must never execute")
+                })
+                .expect("reentrant lookup"),
+                SubmitOutcome::InFlight,
+                "Pending is observable without waiting on the owning thread"
+            );
+            Charge {
+                core_s: 2.0,
+                ..Charge::default()
+            }
+        })
+        .expect("outer execution returns");
+    assert!(matches!(outer, SubmitOutcome::Executed { .. }));
+    assert_eq!(executions.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        gov.consumption(SessionId(30)).expect("meters").0.to_bits(),
+        2.0_f64.to_bits()
     );
 }
 
@@ -484,6 +532,7 @@ fn ss_003c_receipts_bind_charge_failure_and_enforcement() {
     assert_eq!(positive_enforcement, Enforcement::Ok);
     assert!(positive_receipt.matches_success(
         SessionId(33),
+        "main",
         key,
         positive_zero_charge,
         &positive_enforcement,
@@ -491,6 +540,17 @@ fn ss_003c_receipts_bind_charge_failure_and_enforcement() {
     assert!(
         !positive_receipt.matches_success(
             SessionId(33),
+            "other-scope",
+            key,
+            positive_zero_charge,
+            &positive_enforcement,
+        ),
+        "receipt v2 binds the immutable ledger scope"
+    );
+    assert!(
+        !positive_receipt.matches_success(
+            SessionId(33),
+            "main",
             key,
             Charge {
                 mem_peak_bytes: positive_zero_charge.mem_peak_bytes + 1,
@@ -521,15 +581,19 @@ fn ss_003c_receipts_bind_charge_failure_and_enforcement() {
         .submit_once(SessionId(33), key, || panic!("receipt-bound failure"))
         .expect("panic is a terminal outcome");
     let failed_receipt = match failed {
-        SubmitOutcome::Failed { receipt, what } => {
-            assert!(receipt.matches_failure(SessionId(33), key, &what));
+        SubmitOutcome::Failed { receipt, evidence } => {
+            assert!(receipt.matches_failure(SessionId(33), "main", key, &evidence));
+            assert!(evidence.preview().contains("receipt-bound failure"));
             receipt
         }
         other => panic!("expected failed receipt, got {other:?}"),
     };
     assert_ne!(positive_receipt, failed_receipt);
 
-    let throttled = opened(1.0);
+    let throttled = Governor::new();
+    let throttled_permit = throttled
+        .open_session(token(33, 1.0, 1e9))
+        .expect("valid receipt-test token");
     let charge = Charge {
         core_s: 1.0,
         ..Charge::default()
@@ -546,7 +610,7 @@ fn ss_003c_receipts_bind_charge_failure_and_enforcement() {
         other => panic!("expected execution, got {other:?}"),
     };
     assert!(matches!(enforcement, Enforcement::Throttled { .. }));
-    assert!(receipt.matches_success(SessionId(33), key, charge, &enforcement));
+    assert!(receipt.matches_success(SessionId(33), "main", key, charge, &enforcement));
     assert!(matches!(
         throttled
             .submit_once(SessionId(33), key, || panic!("duplicate ran"))
@@ -559,7 +623,7 @@ fn ss_003c_receipts_bind_charge_failure_and_enforcement() {
 
     let ledger = fs_ledger::Ledger::open(":memory:").expect("receipt ledger");
     throttled
-        .flush_scope_to_ledger("main", &ledger)
+        .flush_scope_to_ledger(&throttled_permit, &ledger)
         .expect("strict JSON receipt event");
     assert_eq!(ledger.table_count("events").unwrap(), 2);
     assert!(ledger.lint().unwrap().is_clean());
@@ -568,7 +632,8 @@ fn ss_003c_receipts_bind_charge_failure_and_enforcement() {
 #[test]
 fn ss_003d_ledger_flush_is_atomic_incremental_and_retryable() {
     let gov = Governor::new();
-    gov.open_session(token(34, 1e9, 1e9))
+    let permit = gov
+        .open_session(token(34, 1e9, 1e9))
         .expect("flush-test session");
     let key = "flush-once";
     assert!(matches!(
@@ -584,20 +649,20 @@ fn ss_003d_ledger_flush_is_atomic_incremental_and_retryable() {
 
     ledger.begin().expect("caller transaction");
     let refused = gov
-        .flush_scope_to_ledger("main", &ledger)
+        .flush_scope_to_ledger(&permit, &ledger)
         .expect_err("flush cannot promise durability inside a caller transaction");
     assert!(matches!(refused, SessionError::Persistence { .. }));
     assert_eq!(ledger.table_count("events").unwrap(), 0);
     ledger.rollback().expect("caller rollback");
 
-    gov.flush_scope_to_ledger("main", &ledger)
+    gov.flush_scope_to_ledger(&permit, &ledger)
         .expect("the refused batch remains fully dirty for retry");
     assert_eq!(
         ledger.table_count("events").unwrap(),
         2,
         "one consumption snapshot and one terminal idempotency event"
     );
-    gov.flush_scope_to_ledger("main", &ledger)
+    gov.flush_scope_to_ledger(&permit, &ledger)
         .expect("unchanged no-op flush");
     assert_eq!(
         ledger.table_count("events").unwrap(),
@@ -609,7 +674,7 @@ fn ss_003d_ledger_flush_is_atomic_incremental_and_retryable() {
             .expect("terminal duplicate"),
         SubmitOutcome::Duplicate { .. }
     ));
-    gov.flush_scope_to_ledger("main", &ledger)
+    gov.flush_scope_to_ledger(&permit, &ledger)
         .expect("duplicate observation is not a new event");
     assert_eq!(ledger.table_count("events").unwrap(), 2);
 
@@ -623,7 +688,7 @@ fn ss_003d_ledger_flush_is_atomic_incremental_and_retryable() {
     .expect("new consumption");
     let foreign_ledger = fs_ledger::Ledger::open(":memory:").expect("foreign ledger");
     assert!(matches!(
-        gov.flush_scope_to_ledger("main", &foreign_ledger),
+        gov.flush_scope_to_ledger(&permit, &foreign_ledger),
         Err(SessionError::LedgerScopeSinkMismatch { .. })
     ));
     assert_eq!(
@@ -631,15 +696,15 @@ fn ss_003d_ledger_flush_is_atomic_incremental_and_retryable() {
         0,
         "a governor must not split its event history across ledger sinks"
     );
-    gov.flush_scope_to_ledger("main", &ledger)
+    gov.flush_scope_to_ledger(&permit, &ledger)
         .expect("sink refusal leaves the changed meter dirty for its owning ledger");
     assert_eq!(ledger.table_count("events").unwrap(), 3);
     gov.apply_memory_pressure(SessionId(34), 1)
         .expect("one degradation event");
-    gov.flush_scope_to_ledger("main", &ledger)
+    gov.flush_scope_to_ledger(&permit, &ledger)
         .expect("new degradation event appends once");
     assert_eq!(ledger.table_count("events").unwrap(), 4);
-    gov.flush_scope_to_ledger("main", &ledger)
+    gov.flush_scope_to_ledger(&permit, &ledger)
         .expect("second no-op flush");
     assert_eq!(ledger.table_count("events").unwrap(), 4);
     assert!(ledger.lint().unwrap().is_clean());
@@ -688,12 +753,14 @@ fn ss_003e_ledger_scope_authority_is_canonical_and_fail_closed() {
         other => panic!("expected UTF-8-safe scope preview, got {other:?}"),
     }
     let boundary = "a".repeat(MAX_LEDGER_SCOPE_BYTES);
-    gov.open_session(token_in_scope(44, &boundary))
+    let boundary_permit = gov
+        .open_session(token_in_scope(44, &boundary))
         .expect("the exact scope-length boundary is admitted after refusal");
 
     // Reuse an id rejected above: invalid scope admission must not reserve or
     // partially initialize the session.
-    gov.open_session(token_in_scope(40, "main"))
+    let main_permit = gov
+        .open_session(token_in_scope(40, "main"))
         .expect("valid scope after atomic refusal");
     gov.charge(
         SessionId(40),
@@ -704,20 +771,36 @@ fn ss_003e_ledger_scope_authority_is_canonical_and_fail_closed() {
     )
     .expect("dirty main meter");
     let ledger = fs_ledger::Ledger::open(":memory:").expect("scope ledger");
+    let foreign_governor = Governor::new();
+    let foreign_permit = foreign_governor
+        .open_session(token_in_scope(48, "main"))
+        .expect("foreign permit fixture");
     assert!(matches!(
-        gov.flush_scope_to_ledger("bad scope", &ledger),
-        Err(SessionError::InvalidLedgerScope { .. })
+        gov.flush_scope_to_ledger(&foreign_permit, &ledger),
+        Err(SessionError::ScopePermitMismatch { scope }) if scope == "main"
     ));
     assert!(matches!(
-        gov.flush_scope_to_ledger("missing", &ledger),
-        Err(SessionError::UnknownLedgerScope { .. })
+        gov.events_page(&foreign_permit, 0, 1),
+        Err(SessionError::ScopePermitMismatch { scope }) if scope == "main"
+    ));
+    assert!(
+        gov.events_page(&main_permit, 0, MAX_EVENT_PAGE_ROWS)
+            .is_ok()
+    );
+    assert!(matches!(
+        gov.events_page(&main_permit, 0, MAX_EVENT_PAGE_ROWS + 1),
+        Err(SessionError::LimitExceeded {
+            resource: "event_page_rows",
+            limit: MAX_EVENT_PAGE_ROWS,
+            observed_at_least,
+        }) if observed_at_least == MAX_EVENT_PAGE_ROWS + 1
     ));
     assert_eq!(ledger.table_count("events").unwrap(), 0);
-    gov.flush_scope_to_ledger("main", &ledger)
-        .expect("invalid and unknown attempts leave the main cursor dirty");
+    gov.flush_scope_to_ledger(&main_permit, &ledger)
+        .expect("foreign authority refusal leaves the main cursor dirty");
     assert_eq!(ledger.table_count("events").unwrap(), 1);
     let boundary_ledger = fs_ledger::Ledger::open(":memory:").expect("boundary scope ledger");
-    gov.flush_scope_to_ledger(&boundary, &boundary_ledger)
+    gov.flush_scope_to_ledger(&boundary_permit, &boundary_ledger)
         .expect("main flush did not consume the other scope's meter");
     assert_eq!(boundary_ledger.table_count("events").unwrap(), 1);
 }
@@ -728,9 +811,11 @@ fn ss_003f_scoped_flush_isolated_interleaved_retryable_and_sink_bound() {
     const ALPHA: &str = r#"alpha/"quoted"\branch"#;
     const BETA: &str = "beta";
     let gov = Governor::new();
-    gov.open_session(token_in_scope(45, ALPHA))
+    let alpha_permit = gov
+        .open_session(token_in_scope(45, ALPHA))
         .expect("canonical JSON-hostile alpha scope");
-    gov.open_session(token_in_scope(46, BETA))
+    let beta_permit = gov
+        .open_session(token_in_scope(46, BETA))
         .expect("canonical beta scope");
     assert!(matches!(
         gov.submit_once(SessionId(45), "alpha-once", || Charge {
@@ -769,13 +854,13 @@ fn ss_003f_scoped_flush_isolated_interleaved_retryable_and_sink_bound() {
     let beta_ledger = fs_ledger::Ledger::open(":memory:").expect("beta ledger");
     alpha_ledger.begin().expect("caller transaction");
     assert!(matches!(
-        gov.flush_scope_to_ledger(ALPHA, &alpha_ledger),
+        gov.flush_scope_to_ledger(&alpha_permit, &alpha_ledger),
         Err(SessionError::Persistence { .. })
     ));
     assert_eq!(alpha_ledger.table_count("events").unwrap(), 0);
     alpha_ledger.rollback().expect("caller rollback");
 
-    gov.flush_scope_to_ledger(ALPHA, &alpha_ledger)
+    gov.flush_scope_to_ledger(&alpha_permit, &alpha_ledger)
         .expect("alpha retry writes only alpha state");
     assert_eq!(
         alpha_ledger.table_count("events").unwrap(),
@@ -783,7 +868,7 @@ fn ss_003f_scoped_flush_isolated_interleaved_retryable_and_sink_bound() {
         "alpha meter + terminal receipt + two alpha degradation events"
     );
     assert_eq!(beta_ledger.table_count("events").unwrap(), 0);
-    gov.flush_scope_to_ledger(BETA, &beta_ledger)
+    gov.flush_scope_to_ledger(&beta_permit, &beta_ledger)
         .expect("beta independently binds its own sink");
     assert_eq!(
         beta_ledger.table_count("events").unwrap(),
@@ -810,7 +895,7 @@ fn ss_003f_scoped_flush_isolated_interleaved_retryable_and_sink_bound() {
         .expect("alpha event three");
 
     assert!(matches!(
-        gov.flush_scope_to_ledger(ALPHA, &beta_ledger),
+        gov.flush_scope_to_ledger(&alpha_permit, &beta_ledger),
         Err(SessionError::LedgerScopeSinkMismatch { scope, .. }) if scope == ALPHA
     ));
     assert_eq!(
@@ -818,19 +903,104 @@ fn ss_003f_scoped_flush_isolated_interleaved_retryable_and_sink_bound() {
         4,
         "cross-scope sink attempt must append nothing"
     );
-    gov.flush_scope_to_ledger(ALPHA, &alpha_ledger)
+    gov.flush_scope_to_ledger(&alpha_permit, &alpha_ledger)
         .expect("wrong-sink attempt leaves both alpha cursors dirty");
     assert_eq!(alpha_ledger.table_count("events").unwrap(), 6);
-    gov.flush_scope_to_ledger(BETA, &beta_ledger)
+    gov.flush_scope_to_ledger(&beta_permit, &beta_ledger)
         .expect("alpha activity did not consume beta's degradation cursor");
     assert_eq!(beta_ledger.table_count("events").unwrap(), 5);
 
-    gov.flush_scope_to_ledger(ALPHA, &alpha_ledger)
+    gov.flush_scope_to_ledger(&alpha_permit, &alpha_ledger)
         .expect("alpha unchanged no-op");
-    gov.flush_scope_to_ledger(BETA, &beta_ledger)
+    gov.flush_scope_to_ledger(&beta_permit, &beta_ledger)
         .expect("beta unchanged no-op");
     assert_eq!(alpha_ledger.table_count("events").unwrap(), 6);
     assert_eq!(beta_ledger.table_count("events").unwrap(), 5);
+}
+
+#[test]
+fn ss_003g_sink_binding_uses_move_stable_ledger_identity() {
+    let gov = Governor::new();
+    let permit = gov
+        .open_session(token(49, 1e9, 1e9))
+        .expect("identity fixture session");
+    let ledger = fs_ledger::Ledger::open(":memory:").expect("identity fixture ledger");
+    let identity = ledger.instance_id();
+    let first = gov
+        .flush_scope_to_ledger(&permit, &ledger)
+        .expect("bind initial sink");
+    assert_eq!(first.appended_rows, 1);
+
+    let ledger = Box::new(ledger);
+    assert_eq!(ledger.instance_id(), identity, "moving the handle is inert");
+    gov.charge(
+        SessionId(49),
+        Charge {
+            core_s: 1.0,
+            ..Charge::default()
+        },
+    )
+    .expect("new dirty meter");
+    gov.flush_scope_to_ledger(&permit, &ledger)
+        .expect("the moved handle remains the same authority");
+
+    let distinct = fs_ledger::Ledger::open(":memory:").expect("distinct ledger");
+    assert_ne!(distinct.instance_id(), identity);
+    assert!(matches!(
+        gov.flush_scope_to_ledger(&permit, &distinct),
+        Err(SessionError::LedgerScopeSinkMismatch {
+            bound_sink,
+            attempted_sink,
+            ..
+        }) if bound_sink == identity && attempted_sink == distinct.instance_id()
+    ));
+}
+
+#[test]
+fn ss_003h_bounded_flush_drains_multiple_atomic_chunks_without_duplicates() {
+    let gov = Governor::new();
+    let permit = gov
+        .open_session(token(50, 1e9, 1e9))
+        .expect("chunk fixture session");
+    for index in 0..MAX_FLUSH_ROWS {
+        assert!(matches!(
+            gov.submit_once(
+                SessionId(50),
+                &format!("chunk-key-{index:04}"),
+                Charge::default
+            )
+            .expect("bounded key fixture"),
+            SubmitOutcome::Executed { .. }
+        ));
+    }
+    let ledger = fs_ledger::Ledger::open(":memory:").expect("chunk fixture ledger");
+    let first = gov
+        .flush_scope_to_ledger(&permit, &ledger)
+        .expect("first bounded chunk");
+    assert_eq!(first.appended_rows, MAX_FLUSH_ROWS);
+    assert!(first.encoded_bytes <= MAX_FLUSH_ENCODED_BYTES);
+    assert!(first.remaining_dirty, "one terminal row remains dirty");
+
+    let second = gov
+        .flush_scope_to_ledger(&permit, &ledger)
+        .expect("second bounded chunk");
+    assert_eq!(second.appended_rows, 1);
+    assert!(!second.remaining_dirty);
+    assert_eq!(
+        ledger.table_count("events").unwrap(),
+        u64::try_from(MAX_FLUSH_ROWS + 1).expect("fixture count fits")
+    );
+
+    let no_op = gov
+        .flush_scope_to_ledger(&permit, &ledger)
+        .expect("fully drained flush is a no-op");
+    assert_eq!(no_op.appended_rows, 0);
+    assert!(!no_op.remaining_dirty);
+    assert_eq!(
+        ledger.table_count("events").unwrap(),
+        u64::try_from(MAX_FLUSH_ROWS + 1).expect("fixture count fits"),
+        "cursor commit prevents duplicate rows"
+    );
 }
 
 #[test]
@@ -1065,7 +1235,8 @@ fn ss_005_degradation_ladder_declared_order_and_pause_resume() {
     }
     let gov = Governor::new();
     let gate = Arc::new(CancelGate::new());
-    gov.open_session_gated(token(5, 1e9, 1e9), Arc::clone(&gate))
+    let permit = gov
+        .open_session_gated(token(5, 1e9, 1e9), Arc::clone(&gate))
         .expect("valid token");
     // Level 1: only the spill step fires.
     let l1 = gov.apply_memory_pressure(SessionId(5), 1).expect("session");
@@ -1095,7 +1266,9 @@ fn ss_005_degradation_ladder_declared_order_and_pause_resume() {
     let resumed = ToySolver::from_bytes(&bytes).expect("resume");
     assert_eq!(resumed, solver, "pause-serialize-resume must be lossless");
     // Events are attributed and ordinal-ordered.
-    let events = gov.events();
+    let events = gov
+        .events_page(&permit, 0, MAX_EVENT_PAGE_ROWS)
+        .expect("bounded event page");
     assert_eq!(events.len(), 4);
     assert!(events.windows(2).all(|w| w[0].ordinal < w[1].ordinal));
     assert!(events.iter().all(|e| !e.attribution.is_empty()));
@@ -1106,6 +1279,7 @@ fn ss_005_degradation_ladder_declared_order_and_pause_resume() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // One owned-gate pause lifecycle conformance scenario.
 fn ss_011_pressure_actions_bind_to_owned_session_gates() {
     // Bead gp3.13 acceptance battery: gates are OWNED (bound at open),
     // wrong-session pauses unrepresentable, out-of-ladder levels fail,
@@ -1113,7 +1287,8 @@ fn ss_011_pressure_actions_bind_to_owned_session_gates() {
     let gov = Governor::new();
     let gate_a = Arc::new(CancelGate::new());
     let gate_b = Arc::new(CancelGate::new());
-    gov.open_session_gated(token(41, 1e9, 1e9), Arc::clone(&gate_a))
+    let permit_a = gov
+        .open_session_gated(token(41, 1e9, 1e9), Arc::clone(&gate_a))
         .expect("valid token");
     gov.open_session_gated(token(42, 1e9, 1e9), Arc::clone(&gate_b))
         .expect("valid token");
@@ -1128,7 +1303,9 @@ fn ss_011_pressure_actions_bind_to_owned_session_gates() {
         );
     }
     assert!(
-        gov.events().is_empty(),
+        gov.events_page(&permit_a, 0, MAX_EVENT_PAGE_ROWS)
+            .expect("bounded event page")
+            .is_empty(),
         "refused levels must not ledger events"
     );
 
@@ -1141,7 +1318,9 @@ fn ss_011_pressure_actions_bind_to_owned_session_gates() {
         "ungated session must refuse level 3"
     );
     assert!(
-        gov.events().is_empty(),
+        gov.events_page(&permit_a, 0, MAX_EVENT_PAGE_ROWS)
+            .expect("bounded event page")
+            .is_empty(),
         "a refused pause must not half-apply the ladder"
     );
     // Levels 1-2 need no gate: spill/coarsen are synchronous.
@@ -1164,6 +1343,24 @@ fn ss_011_pressure_actions_bind_to_owned_session_gates() {
     assert_eq!(pause.phase, StepPhase::Requested);
     assert!(gov.pause_pending(SessionId(41)).expect("known session"));
 
+    let before_repeat = gov
+        .events_page(&permit_a, 0, MAX_EVENT_PAGE_ROWS)
+        .expect("bounded event page");
+    assert_eq!(
+        gov.apply_memory_pressure(SessionId(41), 3),
+        Err(SessionError::PauseAlreadyPending {
+            id: 41,
+            requested_ordinal: pause.ordinal,
+        }),
+        "a repeated level-3 request must refuse before replaying spill/coarsen"
+    );
+    assert_eq!(
+        gov.events_page(&permit_a, 0, MAX_EVENT_PAGE_ROWS)
+            .expect("bounded event page"),
+        before_repeat,
+        "repeated level-3 refusal must not mutate the scoped event stream"
+    );
+
     // (e) A blank receipt cannot complete the pause (and the pending
     // request survives the refusal).
     assert!(matches!(
@@ -1178,11 +1375,21 @@ fn ss_011_pressure_actions_bind_to_owned_session_gates() {
     );
     // (g) The checkpoint receipt is the ONLY route to Complete; the
     // completion event cites the request it acknowledges.
+    let checkpoint_receipt = format!(
+        "solver-state-0xf00d:{}",
+        "é".repeat(MAX_RETAINED_EVIDENCE_BYTES)
+    );
     let done = gov
-        .acknowledge_pause(SessionId(41), "solver-state-0xf00d")
+        .acknowledge_pause(SessionId(41), &checkpoint_receipt)
         .expect("pending pause");
     assert_eq!(done.phase, StepPhase::Complete);
     assert!(done.attribution.contains("solver-state-0xf00d"));
+    let checkpoint = done
+        .checkpoint
+        .as_ref()
+        .expect("complete event carries structured checkpoint evidence");
+    assert_eq!(checkpoint.preview().len(), MAX_RETAINED_EVIDENCE_BYTES);
+    assert_eq!(checkpoint.byte_len(), checkpoint_receipt.len());
     assert!(
         done.attribution
             .contains(&format!("ordinal {}", pause.ordinal)),
@@ -1191,12 +1398,14 @@ fn ss_011_pressure_actions_bind_to_owned_session_gates() {
     assert!(!gov.pause_pending(SessionId(41)).expect("known session"));
     // Double-acknowledgement is refused (the claim is consumed).
     assert_eq!(
-        gov.acknowledge_pause(SessionId(41), "solver-state-0xf00d"),
+        gov.acknowledge_pause(SessionId(41), &checkpoint_receipt),
         Err(SessionError::NoPendingPause { id: 41 })
     );
     // (h) The ledgered stream never contains an unacknowledged Complete:
     // exactly one Complete, and it follows its Requested ordinal.
-    let events = gov.events();
+    let events = gov
+        .events_page(&permit_a, 0, MAX_EVENT_PAGE_ROWS)
+        .expect("bounded event page");
     let completes: Vec<_> = events
         .iter()
         .filter(|e| e.phase == StepPhase::Complete)
@@ -1313,30 +1522,28 @@ fn ss_007_governor_storm_structured_outcomes_only() {
 }
 
 #[test]
-fn ss_008_panicking_submission_releases_every_idempotency_waiter() {
+fn ss_008_panicking_submission_is_non_blocking_and_terminal() {
     const WAITERS: usize = 8;
     let gov = Arc::new(Governor::new());
     gov.open_session(token(80, 1e9, 1e9)).expect("valid token");
     let executions = Arc::new(AtomicU32::new(0));
-    let rendezvous = Arc::new(std::sync::Barrier::new(WAITERS + 1));
     let (started_tx, started_rx) = std::sync::mpsc::channel();
-    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
     let key = "panic-terminal".to_string();
+    let panic_text = "seeded submission panic".to_string();
 
     let owner = {
         let gov = Arc::clone(&gov);
         let executions = Arc::clone(&executions);
-        let rendezvous = Arc::clone(&rendezvous);
-        let done_tx = done_tx.clone();
         let key = key.clone();
+        let panic_text = panic_text.clone();
         std::thread::spawn(move || {
-            let outcome = gov.submit_once(SessionId(80), &key, || {
+            gov.submit_once(SessionId(80), &key, || {
                 executions.fetch_add(1, Ordering::SeqCst);
                 started_tx.send(()).expect("test receiver alive");
-                rendezvous.wait();
-                panic!("seeded submission panic");
-            });
-            done_tx.send(outcome).expect("test receiver alive");
+                release_rx.recv().expect("release sender alive");
+                std::panic::panic_any(panic_text);
+            })
         })
     };
 
@@ -1346,44 +1553,35 @@ fn ss_008_panicking_submission_releases_every_idempotency_waiter() {
     let mut waiters = Vec::new();
     for _ in 0..WAITERS {
         let gov = Arc::clone(&gov);
-        let rendezvous = Arc::clone(&rendezvous);
-        let done_tx = done_tx.clone();
         let key = key.clone();
         waiters.push(std::thread::spawn(move || {
-            rendezvous.wait();
-            let outcome = gov.submit_once(SessionId(80), &key, || {
+            gov.submit_once(SessionId(80), &key, || {
                 panic!("a duplicate must never execute");
-            });
-            done_tx.send(outcome).expect("test receiver alive");
+            })
+            .expect("session remains valid")
         }));
     }
-    drop(done_tx);
-
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    let mut failures = Vec::with_capacity(WAITERS + 1);
-    for _ in 0..=WAITERS {
-        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        let outcome = done_rx
-            .recv_timeout(remaining)
-            .expect("a panicking owner must not strand idempotency waiters")
-            .expect("session remains valid");
-        match outcome {
-            SubmitOutcome::Failed { receipt, what } => failures.push((receipt, what)),
-            other => panic!("every caller must observe the terminal failure, got {other:?}"),
-        }
-    }
-    owner.join().expect("panic was contained by submit_once");
     for waiter in waiters {
-        waiter.join().expect("waiter returned");
+        assert_eq!(
+            waiter.join().expect("waiter returned"),
+            SubmitOutcome::InFlight,
+            "a duplicate of Pending must return immediately without blocking"
+        );
     }
+    release_tx.send(()).expect("owner is still waiting");
+    let owner_outcome = owner
+        .join()
+        .expect("panic was contained by submit_once")
+        .expect("session remains valid");
 
     assert_eq!(executions.load(Ordering::SeqCst), 1, "work ran once");
-    let (receipt, diagnosis) = &failures[0];
-    assert!(
-        failures.iter().all(|(r, d)| r == receipt && d == diagnosis),
-        "owner and duplicates must share one failure receipt"
-    );
-    assert!(diagnosis.contains("seeded submission panic"), "{diagnosis}");
+    let (receipt, evidence) = match owner_outcome {
+        SubmitOutcome::Failed { receipt, evidence } => (receipt, evidence),
+        other => panic!("owner must publish one terminal failure, got {other:?}"),
+    };
+    assert_eq!(evidence.preview(), panic_text);
+    assert_eq!(evidence.byte_len(), panic_text.len());
+    assert!(receipt.matches_failure(SessionId(80), "main", &key, &evidence));
     assert_eq!(
         gov.consumption(SessionId(80)).expect("meters").0.to_bits(),
         0.0f64.to_bits(),
@@ -1397,7 +1595,7 @@ fn ss_008_panicking_submission_releases_every_idempotency_waiter() {
         })
         .expect("terminal failure is readable");
     assert!(
-        matches!(retry, SubmitOutcome::Failed { receipt: r, .. } if r == *receipt),
+        matches!(retry, SubmitOutcome::Failed { receipt: r, evidence: ref e } if r == receipt && e == &evidence),
         "same-key retry receives the terminal failure; a new key is explicit retry"
     );
     assert_eq!(executions.load(Ordering::SeqCst), 1);
@@ -1408,7 +1606,7 @@ fn ss_008_panicking_submission_releases_every_idempotency_waiter() {
     ));
     verdict(
         "ss-008",
-        "seeded panic: one execution, one terminal failure receipt, all waiters released within 5s, no charge",
+        "seeded panic: one execution, bounded full-digest terminal evidence, Pending callers return InFlight, no charge",
     );
 }
 
@@ -1548,4 +1746,81 @@ fn ss_010_exact_grant_throttles_and_accumulated_overflow_is_atomic() {
         "ss-010",
         "exact grant throttles; accumulated overflow is refused without mutating the finite meter",
     );
+}
+
+#[test]
+fn ss_012_session_and_idempotency_collection_caps_are_exact_and_atomic() {
+    let sessions = Governor::new();
+    for id in 0..MAX_SESSIONS_PER_SCOPE {
+        sessions
+            .open_session(token_in_scope(
+                u64::try_from(id).expect("fixture id fits"),
+                "crowded",
+            ))
+            .expect("exact per-scope boundary is admitted");
+    }
+    let refused_id = u64::try_from(MAX_SESSIONS_PER_SCOPE).expect("fixture id fits");
+    assert!(matches!(
+        sessions.open_session(token_in_scope(refused_id, "crowded")),
+        Err(SessionError::LimitExceeded {
+            resource: "sessions_per_scope",
+            limit: MAX_SESSIONS_PER_SCOPE,
+            observed_at_least,
+        }) if observed_at_least == MAX_SESSIONS_PER_SCOPE + 1
+    ));
+    assert!(matches!(
+        sessions.token(SessionId(refused_id)),
+        Err(SessionError::UnknownSession { id }) if id == refused_id
+    ));
+
+    for id in MAX_SESSIONS_PER_SCOPE..MAX_SESSIONS_PER_GOVERNOR {
+        let id = u64::try_from(id).expect("fixture id fits");
+        sessions
+            .open_session(token_in_scope(id, &format!("scope-{id}")))
+            .expect("fill exact governor boundary");
+    }
+    let governor_overflow = u64::try_from(MAX_SESSIONS_PER_GOVERNOR).expect("fixture id fits");
+    assert!(matches!(
+        sessions.open_session(token_in_scope(governor_overflow, "overflow")),
+        Err(SessionError::LimitExceeded {
+            resource: "sessions_per_governor",
+            limit: MAX_SESSIONS_PER_GOVERNOR,
+            observed_at_least,
+        }) if observed_at_least == MAX_SESSIONS_PER_GOVERNOR + 1
+    ));
+
+    let keys = Governor::new();
+    keys.open_session(token(9_000, 1e9, 1e9))
+        .expect("key-cap fixture session");
+    for index in 0..MAX_IDEMPOTENCY_KEYS_PER_SESSION {
+        assert!(matches!(
+            keys.submit_once(
+                SessionId(9_000),
+                &format!("bounded-key-{index:04}"),
+                Charge::default,
+            )
+            .expect("exact key boundary is admitted"),
+            SubmitOutcome::Executed { .. }
+        ));
+    }
+    let overflow_work = AtomicU32::new(0);
+    assert!(matches!(
+        keys.submit_once(SessionId(9_000), "one-key-too-many", || {
+            overflow_work.fetch_add(1, Ordering::SeqCst);
+            Charge::default()
+        }),
+        Err(SessionError::LimitExceeded {
+            resource: "idempotency_keys_per_session",
+            limit: MAX_IDEMPOTENCY_KEYS_PER_SESSION,
+            observed_at_least,
+        }) if observed_at_least == MAX_IDEMPOTENCY_KEYS_PER_SESSION + 1
+    ));
+    assert_eq!(overflow_work.load(Ordering::SeqCst), 0);
+    assert!(matches!(
+        keys.submit_once(SessionId(9_000), "bounded-key-0000", || {
+            panic!("terminal duplicate at the cap must not rerun")
+        })
+        .expect("existing terminal keys remain queryable"),
+        SubmitOutcome::Duplicate { .. }
+    ));
 }

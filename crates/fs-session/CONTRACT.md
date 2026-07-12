@@ -30,8 +30,10 @@ Consumers: the P2 marquee demo, the HELM e2e suite (gp3.11).
   exact input length, so refusing an oversized authority string is itself
   memory-bounded.
 - `Governor` — `Send + Sync`; hot paths are mutex-guarded in-memory
-  state. `open_session` rejects invalid ledger scope, non-finite, or negative
-  floating grants before registration and rejects an already-open `SessionId`
+  state. `open_session` returns a private-field `ScopeFlushPermit` bound to the
+  exact governor and immutable ledger scope; callers cannot manufacture scope
+  authority from strings. It rejects invalid ledger scope, non-finite, or
+  negative floating grants before registration and rejects an already-open `SessionId`
   without replacing its immutable token or inheriting its meters, gate, pause
   state, or idempotency receipts. Token and optional gate registration are one
   atomic critical section. `charge(session, Charge)` rejects non-finite,
@@ -43,16 +45,19 @@ Consumers: the P2 marquee demo, the HELM e2e suite (gp3.11).
   threshold as `used * 5 > granted * 6`; diagnostic f64 fields do not drive the
   verdict. The governor NEVER silently kills.
 - `submit_once(session, idem_key, work)` — exactly-once execution:
-  the first caller in that session runs and is charged; concurrent/repeat callers block
-  on a condvar and receive `Duplicate` with the SAME receipt and NO
-  charge. Caller panics and invalid returned charges are contained as a
-  terminal `Failed { receipt, what }`; all waiters receive that same
-  failure, no charge is committed, and retry requires an explicit new
-  key. A private-field `SubmissionReceipt` is a domain-separated BLAKE3
-  identity of the owning session, exact key, and terminal charge plus
-  enforcement decision or failure. `Executed` and every later `Duplicate`
-  expose the same `Enforcement`, so a throttled/paused charge is never hidden
-  behind a generic success.
+  the first caller in that session runs and is charged. A concurrent or
+  same-thread reentrant caller observing `Pending` returns `InFlight`
+  immediately without executing or waiting; a repeat after terminal
+  publication receives `Duplicate` with the SAME receipt and NO charge.
+  Caller panics and invalid returned charges are contained as a terminal
+  `Failed { receipt, evidence }`; no charge is committed, and retry requires an
+  explicit new key. A private-field `SubmissionReceipt` is a domain-separated BLAKE3
+  v2 identity of the owning session, immutable ledger scope, exact key, and
+  terminal charge plus enforcement decision or full failure evidence.
+  Caller-controlled evidence retains at most 16 KiB of UTF-8-safe preview,
+  while its exact byte length and BLAKE3 digest bind the complete original.
+  `Executed` and every later `Duplicate` expose the same `Enforcement`, so a
+  throttled/paused charge is never hidden behind a generic success.
   `idempotency_key(agent_key, program)` length-frames both inputs under a
   separate BLAKE3 domain; blank or oversized supplied keys are refused.
 - `apply_memory_pressure(session, level)` — the DECLARED
@@ -61,7 +66,11 @@ Consumers: the P2 marquee demo, the HELM e2e suite (gp3.11).
   the pause step resolves the session-owned `CancelGate` bound by
   `open_session_gated` and requests it so the solver
   checkpoints at its next tile boundary (P7). Every event carries
-  attribution and a deterministic ordinal.
+  attribution and a deterministic ordinal. A repeated level-3 request while
+  its predecessor is pending refuses before replaying any ladder step. Pause
+  completion retains the checkpoint receipt under the same bounded
+  preview/full-length/full-digest evidence model. `events_page` is the only
+  event reader and returns at most 1,024 rows under the permit's exact scope.
 - `estimate(study, cost_models, cores)` — the dry run: p10/p50/p90 wall
   from fs-plan quantile models over `:dof`/`:size` features, declared
   memory ask, energy (p50 × cores × 45 W/core), and an HONEST
@@ -97,20 +106,33 @@ Consumers: the P2 marquee demo, the HELM e2e suite (gp3.11).
 - `Guidance { code, diagnosis, fixes }` — errors as teaching:
   `from_finding` lifts fs-ir admission findings (the canonical §11.3
   `BudgetInfeasible` fixture) with their cost-model-ranked fixes intact.
-- `flush_scope_to_ledger(scope, &Ledger)` — changed consumption snapshots plus
-  new degradation and terminal idempotency receipts for sessions whose
-  immutable token grants that exact scope, persisted exactly once as an atomic
-  `session.*` event batch. Invalid and unknown scopes fail closed. Every payload
+- `flush_scope_to_ledger(&ScopeFlushPermit, &Ledger)` — changed consumption
+  snapshots plus new degradation and terminal idempotency receipts for sessions
+  whose immutable token grants that exact scope, persisted exactly once as an
+  atomic bounded `session.*` event chunk. Foreign permits fail closed. Every payload
   carries the exact JSON-escaped `ledger_scope`; consumption/idempotency schemas
-  are v3 and degradation is v2. An unchanged repeated call is a no-op; failed
-  persistence leaves every selected generation-aware cursor dirty for retry.
+  are v3/v4 and degradation is v3. `FlushReport` names appended rows, encoded
+  bytes, and whether more state remains dirty; each call admits at most 1,024
+  rows and 4 MiB of conservatively encoded payload. An unchanged repeated call
+  is a no-op; failed persistence leaves every selected generation-aware cursor
+  dirty for retry.
   The call refuses an already-open ledger transaction because it cannot know
-  whether the owner will commit or roll back. Explicitly single-threaded:
-  fsqlite connections are `!Send` by design. Each scope owns an independent
-  degradation cursor and flush generation. Its first successful non-empty flush
-  binds that scope to one owning ledger path (and exact handle for independent
-  `:memory:` ledgers); a different sink is refused before writes without
-  advancing any scope cursor.
+  whether the owner will commit or roll back. Preparation reserves one scope
+  under the governor mutex, database I/O runs after releasing that mutex, and
+  cursor commit validates the reservation plus generation/revision snapshot.
+  A concurrent same-scope flush returns `ScopeFlushInFlight`; unrelated hot
+  paths remain live. Each scope owns indexed dirty meter/receipt sets, an
+  independent event cursor, sink, revision, and flush generation. A rotating
+  three-lane start order prevents sustained meter traffic from starving
+  receipts or events. Its first successful non-empty flush binds that scope to
+  the ledger's opaque persisted `LedgerInstanceId`;
+  aliases and moved handles remain the same sink, while a replacement file at
+  the same path or independent memory ledger is refused before writes.
+- Deterministic hard caps bound retained governor state and public
+  materialization: 4,096 sessions/governor, 1,024 sessions/scope, 4,096
+  idempotency keys/session, 65,536 degradation events/scope, 16 KiB evidence
+  previews, 1,024 event-page and flush rows, 4 MiB flush bytes, and checked
+  signed-ledger ordinals. Limit+1 refuses before partial mutation.
 - `gemm_f64_session_with_pool(tuner, cache_policy, pool, gate, m, n, k, α,
   a, b, β, c)`
   — the production GEMM autotune loop (bead yqug): measure → cache →
@@ -179,12 +201,13 @@ Consumers: the P2 marquee demo, the HELM e2e suite (gp3.11).
 1. **Enforcement is structured**: every over-grant outcome is `Throttled`
    or `Paused` with resource, used, granted, and a resume hint — no kill
    path exists in the API.
-2. **Exactly-once within the owning session**: for any `(session,
+2. **Exactly-once within the owning session and scope**: for any `(session,
    idempotency-key)` pair, `work` runs at most once; all callers in that scope
-   observe the same content-derived receipt and consumption is charged exactly
-   once (16-thread race-tested). The same caller key in another session is
-   independent and produces a different receipt, so one tenant cannot suppress
-   another tenant's work.
+   observe either non-blocking `InFlight` or the same terminal content-derived
+   receipt, and consumption is charged exactly once (16-thread and reentrant
+   race-tested). The receipt binds the immutable ledger scope. The same caller
+   key in another session is independent and produces a different receipt, so
+   one tenant cannot suppress another tenant's work.
 3. **The ladder order is the contract**: spill before coarsen before
    pause, always; pause requests cancellation, and `SolverState`
    snapshots round-trip losslessly (pause-serialize-resume equality).
@@ -192,8 +215,8 @@ Consumers: the P2 marquee demo, the HELM e2e suite (gp3.11).
    wall is excluded, nothing is silently assumed.
 5. **Meters are exact under storm**: concurrent charges accumulate
    without loss (32-way storm test asserts exact totals).
-6. **Every idempotency key terminates**: success or caller panic transitions
-   `Pending` exactly once, wakes every waiter, and carries one shared receipt;
+6. **Every owned idempotency execution terminates**: success or caller panic
+   transitions `Pending` exactly once and carries one shared terminal receipt;
    failed work never charges and same-key retry never executes implicitly.
    Successful receipts bind bit-exact charge fields and the resulting
    enforcement verdict; duplicates replay that verdict without recharging.
@@ -217,15 +240,23 @@ Consumers: the P2 marquee demo, the HELM e2e suite (gp3.11).
     generation, degradation event, or distinct meter snapshot is appended at
     most once to the sink bound by its token's exact ledger scope. Interleaved
     scopes have independent sink, generation, and degradation cursors. One
-    scope's atomic success advances only its cursors; invalid/unknown scope,
-    wrong-sink refusal, or persistence failure advances none, while successful
-    unchanged repeats append zero rows.
+    scope's atomic success advances only its cursors; wrong-sink,
+    foreign-permit, in-flight refusal, or persistence failure advances none,
+    while successful unchanged repeats append zero rows. Each bounded chunk
+    commits only its prepared cursors and reports whether another chunk or
+    concurrently-created state remains dirty.
+11. **All retained collections are bounded**: session, scope-session,
+    idempotency-key, degradation-event, evidence-preview, pagination, flush
+    row/byte, and ordinal limits are checked before their corresponding state
+    transition. Limit refusal never runs caller work or partially advances a
+    cursor, gate, meter, event stream, or authority binding.
 
 ## Error model
 
 `SessionError`: `UnknownSession`, `SessionAlreadyOpen`, `InvalidLedgerScope`,
-`UnknownLedgerScope`, `LedgerScopeSinkMismatch`, `InvalidResource`, `Submission`,
-`Persistence`. `GemmTuneError`: cancellation with
+`UnknownLedgerScope`, `LedgerScopeSinkMismatch`, `ScopePermitMismatch`,
+`ScopeFlushInFlight`, `LimitExceeded`, `PauseAlreadyPending`, `InvalidResource`,
+`Submission`, `Persistence`. `GemmTuneError`: cancellation with
 the drained numerical report when dispatch began, structured TilePool failure
 with tile provenance and its full report, typed tuner refusal, ledger refusal,
 exact-bit drift with candidate and repeat, `MemoryRefused` with the outer
@@ -236,7 +267,7 @@ by fs-la and every executor/memory refusal preserve the full drained report.
 All such paths leave caller-visible `C` unchanged. Refusals that teach travel
 as `Guidance` values with ranked fixes.
 A caller-work panic is data, not an unwind across the governor API:
-`SubmitOutcome::Failed` records its receipt and diagnosis.
+`SubmitOutcome::Failed` records its receipt and bounded retained evidence.
 
 ## Determinism class
 
@@ -272,7 +303,8 @@ None.
 `tests/conformance.rs` (JSON verdicts, suite `fs-session/conformance`):
 ss-001 token→admission bridge end-to-end; ss-002 Ok→Throttled→Paused
 with exact meters and structured unknown-session errors; ss-003
-16-thread idempotency race (one execution, one charge, shared receipt,
+16-thread idempotency race (one execution, one charge, non-blocking in-flight
+observations or shared terminal receipt, plus same-thread reentrancy and
 independent keys); ss-004 estimate p10/p50/p90 + energy + declared mem +
 honest coverage, calibration ratio quantiles, ledgered artifact
 round-trip; ss-004b invalid estimator/calibration numeric domains fail closed
@@ -280,16 +312,23 @@ without poisoning JSON; ss-005 ladder order + gate request + toy-SolverState
 snapshot equality + attributed ordinal-ordered events; ss-006 the
 canonical BudgetInfeasible finding surfacing as ranked `Guidance`;
 ss-007 32-way adversarial-grant storm with exact meters and structured
-outcomes only; ss-008 seeded caller panic with eight concurrent duplicates,
-bounded completion, one shared terminal failure receipt, and zero charge;
-ss-009 NaN/infinite/negative grant and charge refusal with no-mutation checks;
+outcomes only; ss-008 seeded caller panic with eight concurrent duplicates
+returning `InFlight`, bounded full-digest evidence, one terminal failure
+receipt, and zero charge; ss-009 NaN/infinite/negative grant and charge refusal
+with no-mutation checks;
 ss-010 the exact-grant throttle boundary and atomic accumulated-overflow
 refusal; ss-002b duplicate session registration preserving the original token,
 meters, gate, and terminal idempotency state; ss-003d atomic incremental ledger
 flush, unchanged-call no-op behavior, and dirty-cursor retry after transaction
-refusal; ss-003e canonical scope validation plus invalid/unknown no-mutation
+refusal; ss-003e canonical scope validation plus foreign-permit and page-bound
 refusals; ss-003f two-scope interleaving, independent sink binding, exact scoped
 payload escaping, cross-scope wrong-sink refusal, and per-scope cursor retry.
+ss-003g proves moved handles retain opaque sink identity while independent
+ledgers differ; ss-003h drains a limit+1 batch through bounded atomic chunks;
+ss-011 covers repeated-level-3 no-mutation refusal and bounded checkpoint
+evidence; ss-012 covers exact session/scope/key boundaries and atomic limit+1
+refusal. In-module tests cover exact flush row/byte limits, event/ordinal caps,
+pagination, and same-scope in-flight reservation refusal.
 
 `tests/gemm_tune.rs` (bead yqug drills): cold start sweeps once and
 matches serial bits; ledger warm start seeds a fresh session without
@@ -329,11 +368,12 @@ armed and runs when an x86 host picks it up.
 - **Energy is a declared-constant model** (45 W/core), not measured
   power telemetry; the calibration channel is where reality lands.
 - **Idempotency persistence is flush-based**: in-process registry +
-  session-bound ledgered success/failure receipts; cross-process replay reconstruction
-  belongs to the HELM e2e/crash-recovery bead (gp3.11).
+  session-and-scope-bound ledgered success/failure receipts; cross-process
+  replay reconstruction belongs to the HELM e2e/crash-recovery bead (gp3.11).
 - **Each exact ledger scope flushes to one owning sink**: per-scope in-memory
   cursors prevent duplicate appends, while a later different sink for that
-  scope is refused before writes rather than receiving a partial history.
+  scope is refused by opaque `LedgerInstanceId` before writes rather than
+  receiving a partial history. Paths are not sink identity.
   Different scopes can bind independent sinks. Cross-ledger replication of one
   scope remains an event-log concern above this API.
 - **Two-lane executor integration** (interactive vs batch lanes with
@@ -344,8 +384,9 @@ armed and runs when an x86 host picks it up.
   invoking Cargo build remains operator-trusted. Root publication from a
   development-salt build is not claimed as receipt-backed evidence.
 - A mutex self-deadlock in the calibration renderer was found by the
-  conformance run and fixed (single lock scope) — reentrancy is a
-  documented non-assumption throughout.
+  conformance run and fixed (single lock scope). That renderer remains
+  non-reentrant; governor idempotency separately guarantees that same-thread
+  duplicate submission returns `InFlight` rather than deadlocking.
 - GEMM minimum-wall-time ranking is a deterministic selection rule over the
   recorded samples, not statistical confidence. The x86 oracle lane remains
   armed rather than claimed as measured until it runs on the reference host.
