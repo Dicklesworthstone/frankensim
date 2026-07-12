@@ -22,7 +22,9 @@ use std::collections::BTreeMap;
 
 use fs_evidence::{Color, NumericalCertificate, color_leaf_identity_reason, verified_from};
 use fs_verify::estimator::verify;
-use fs_verify::fem1d::{Fem1dError, MmsClass, MmsProblem, Poly, gauss5, solve_p1};
+use fs_verify::fem1d::{
+    Fem1dError, MAX_FEM1D_MESH_NODES, MmsClass, MmsProblem, Poly, gauss5, solve_p1,
+};
 
 const MAX_EXACT_CELLS: u128 = 1_u128 << 53;
 const MAX_EXACT_CELLS_F64: f64 = 9_007_199_254_740_992.0;
@@ -30,7 +32,9 @@ const MAX_EXACT_CELLS_F64: f64 = 9_007_199_254_740_992.0;
 ///
 /// Exact floating-point accounting is a weaker constraint than bounded memory:
 /// this ceiling is checked before every uniform or adaptive mesh allocation.
-pub const MAX_PLANNER_CELLS: usize = 1_000_000;
+/// One mesh with `n` cells owns `n + 1` nodes, so this is derived from the
+/// lower-layer MMS node envelope rather than maintained independently.
+pub const MAX_PLANNER_CELLS: usize = MAX_FEM1D_MESH_NODES - 1;
 /// Maximum polynomial coefficients admitted by the v0 family boundary.
 /// This is the equilibrated verifier's exact five-point-Gauss envelope:
 /// `(c - F - slope)^2` has degree `2 * (degree(u) - 1) <= 9`.
@@ -247,10 +251,16 @@ impl CachedAnswer {
     ///
     /// # Errors
     /// Returns [`PlanError`] for an invalid bound, mesh, or nodal vector.
-    pub fn new(nodal: Vec<f64>, bound: f64, mesh: Vec<f64>) -> Result<Self, PlanError> {
+    pub fn new(
+        mut nodal: Vec<f64>,
+        bound: f64,
+        mut mesh: Vec<f64>,
+    ) -> Result<Self, PlanError> {
         validate_bound(bound, "cached_bound")?;
         validate_mesh(&mesh)?;
         validate_candidate(&mesh, &nodal)?;
+        canonicalize_mesh_zeros(&mut mesh);
+        canonicalize_mesh_zeros(&mut nodal);
         Ok(Self { nodal, bound, mesh })
     }
 
@@ -473,20 +483,19 @@ impl ProblemFamily {
     /// # Errors
     /// Returns [`PlanError`] for a malformed kernel identity, empty/non-finite
     /// polynomial, or non-homogeneous boundary values.
-    pub fn new(base: Poly, kernel: impl Into<String>) -> Result<Self, PlanError> {
-        let kernel = kernel.into();
-        if let Some(reason) = color_leaf_identity_reason(&kernel) {
+    pub fn new(base: Poly, kernel: impl AsRef<str>) -> Result<Self, PlanError> {
+        let kernel = kernel.as_ref();
+        if let Some(reason) = color_leaf_identity_reason(kernel) {
             return Err(PlanError::InvalidFamily {
                 field: "kernel",
                 index: None,
                 reason,
             });
         }
-        let base_class =
-            MmsClass::new(&kernel, base).map_err(|source| PlanError::Fem1dFailure {
-                stage: "problem-family admission",
-                source,
-            })?;
+        let base_class = MmsClass::new(kernel, base).map_err(|source| PlanError::Fem1dFailure {
+            stage: "problem-family admission",
+            source,
+        })?;
         Ok(Self { base_class })
     }
 

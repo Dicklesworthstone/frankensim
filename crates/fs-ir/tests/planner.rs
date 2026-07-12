@@ -301,6 +301,11 @@ fn pl_006_malformed_planner_inputs_refuse_structurally() {
             limit: MAX_PLANNER_CELLS,
         })
     );
+    assert_eq!(
+        MAX_PLANNER_CELLS + 1,
+        fs_verify::fem1d::MAX_FEM1D_MESH_NODES,
+        "the planner cell cap must fit the lower-layer MMS node envelope"
+    );
     let oversized_ladder = (1..=MAX_LADDER_RUNGS + 1).collect::<Vec<_>>();
     assert_eq!(
         run(1.0, 0.1, 100.0, &oversized_ladder),
@@ -373,6 +378,10 @@ fn pl_007_family_mesh_candidate_and_cost_admission_are_fail_closed() {
     assert!(CachedAnswer::new(vec![0.0, 0.0], -1.0, vec![0.0, 1.0]).is_err());
     assert!(CachedAnswer::new(vec![0.0], 0.1, vec![0.0, 1.0]).is_err());
     assert!(CachedAnswer::new(vec![1.0, 0.0], 0.1, vec![0.0, 1.0]).is_err());
+    let normalized_cache =
+        CachedAnswer::new(vec![-0.0, 0.0], 0.1, vec![-0.0, 1.0]).unwrap();
+    assert_eq!(normalized_cache.nodal()[0].to_bits(), 0.0_f64.to_bits());
+    assert_eq!(normalized_cache.mesh()[0].to_bits(), 0.0_f64.to_bits());
 }
 
 #[test]
@@ -468,7 +477,7 @@ fn pl_008b_large_admitted_rung_is_budget_checked_before_mesh_allocation() {
     .unwrap();
 
     let PlanOutcome::RefusedWithoutAnswer { ops, cost, reason } = outcome else {
-        panic!("one cell cannot admit a million-cell initial mesh");
+        panic!("one cell cannot admit the maximum-cell initial mesh");
     };
     assert_eq!(ops.len(), 1);
     assert_eq!(ops[0].op, PlanOp::CacheLookup);
@@ -478,7 +487,7 @@ fn pl_008b_large_admitted_rung_is_budget_checked_before_mesh_allocation() {
 
 #[test]
 fn pl_008c_over_work_rung_is_refused_by_the_polynomial_cell_work_cap() {
-    // A MAX_PLANNER_CELLS rung of steep_family implies 6 x 5 x 1M = 30M
+    // A MAX_PLANNER_CELLS rung of steep_family exceeds the coupled work cap
     // units of verifier work — past the 16M cap. The planner must refuse
     // with the structured resource error BEFORE any budget arithmetic,
     // mesh allocation, or cache traffic.
@@ -496,7 +505,7 @@ fn pl_008c_over_work_rung_is_refused_by_the_polynomial_cell_work_cap() {
         err,
         PlanError::ResourceLimit {
             field: "polynomial_cell_work",
-            requested: 30_000_000,
+            requested: MAX_PLANNER_CELLS * MAX_FAMILY_COEFFICIENTS * 5,
             limit: MAX_POLYNOMIAL_CELL_WORK,
         }
     );

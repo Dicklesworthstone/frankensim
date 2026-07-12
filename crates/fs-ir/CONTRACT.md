@@ -121,7 +121,8 @@ typed AST. Layer: L6 (HELM). Runtime deps: `std` + fs-qty.
   lower-layer canonical MMS class identity before discharge. The family owns
   an admitted immutable `fs-verify::MmsClass`; theta scaling constructs a new
   admitted class, and cache keys bind that class's versioned canonical bytes
-  instead of independently serializing planner coefficients. Ladder transfers
+  instead of independently serializing planner coefficients. Cache records
+  normalize signed-zero mesh and nodal values before retention. Ladder transfers
   use deterministic P1 interpolation over the actual coarse coordinates,
   including non-dyadic ladders and adaptive-to-uniform moves. Actual solve/speculation
   costs are admitted before execution, so spend never exceeds budget. Learned
@@ -145,7 +146,8 @@ typed AST. Layer: L6 (HELM). Runtime deps: `std` + fs-qty.
   Every finite audit-log bound retains a private-constructor
   `VerifierCertificate`: the guarded `fs-evidence` color, stable verifier-family
   identity, and reconstructed-flux hash travel together instead of reminting a
-  bare `Color::Verified` from a discarded scalar. Resource admission caps cells,
+  bare `Color::Verified` from a discarded scalar. The cell cap is derived as
+  one less than the lower-layer `fs-verify` node cap. Resource admission caps cells,
   family coefficients, fidelity-rung count, and their coefficient-by-cell-by-
   quadrature-point work product. Uniform/adaptive mesh, indicator,
   prolongation, trajectory, and
