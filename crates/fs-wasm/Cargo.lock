@@ -51,7 +51,7 @@ checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
 
 [[package]]
 name = "asupersync"
-version = "0.3.5"
+version = "0.3.8"
 dependencies = [
  "aes-gcm",
  "asupersync-macros",
@@ -93,6 +93,7 @@ dependencies = [
  "sysinfo",
  "tempfile",
  "thiserror",
+ "unicode-normalization",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
@@ -103,7 +104,7 @@ dependencies = [
 
 [[package]]
 name = "asupersync-macros"
-version = "0.3.5"
+version = "0.3.8"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -516,7 +517,7 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "franken-decision"
-version = "0.3.5"
+version = "0.3.8"
 dependencies = [
  "franken-evidence",
  "franken-kernel",
@@ -525,7 +526,7 @@ dependencies = [
 
 [[package]]
 name = "franken-evidence"
-version = "0.3.5"
+version = "0.3.8"
 dependencies = [
  "serde",
  "serde_json",
@@ -533,7 +534,7 @@ dependencies = [
 
 [[package]]
 name = "franken-kernel"
-version = "0.3.5"
+version = "0.3.8"
 dependencies = [
  "serde",
 ]
@@ -660,6 +661,7 @@ version = "0.0.1"
 dependencies = [
  "fs-ivl",
  "fs-la",
+ "fs-material",
  "fs-solver",
  "fs-sparse",
 ]
@@ -936,8 +938,12 @@ dependencies = [
 name = "fs-render"
 version = "0.0.1"
 dependencies = [
+ "fs-evidence",
+ "fs-exec",
+ "fs-geom",
  "fs-math",
  "fs-rand",
+ "fs-rep-nurbs",
 ]
 
 [[package]]
@@ -955,6 +961,17 @@ dependencies = [
 [[package]]
 name = "fs-rep-neural"
 version = "0.0.1"
+
+[[package]]
+name = "fs-rep-nurbs"
+version = "0.0.1"
+dependencies = [
+ "fs-evidence",
+ "fs-exec",
+ "fs-geom",
+ "fs-ivl",
+ "fs-math",
+]
 
 [[package]]
 name = "fs-rep-sdf"
@@ -2093,6 +2110,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "tinyvec"
+version = "1.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bb4ebadaa0af04fab11ae01eb5f9fdb5f9c5b875506e210e71c07873528baa7f"
+dependencies = [
+ "tinyvec_macros",
+]
+
+[[package]]
+name = "tinyvec_macros"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
+
+[[package]]
 name = "typenum"
 version = "1.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2103,6 +2135,15 @@ name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+
+[[package]]
+name = "unicode-normalization"
+version = "0.1.25"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5fd4f6878c9cb28d874b009da9e8d183b5abc80117c40bbd187a1fde336be6e8"
+dependencies = [
+ "tinyvec",
+]
 
 [[package]]
 name = "universal-hash"
@@ -2402,80 +2443,80 @@ checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
 
 [[patch.unused]]
 name = "fsqlite"
-version = "0.1.15"
+version = "0.1.16"
 
 [[patch.unused]]
 name = "fsqlite-ast"
-version = "0.1.15"
+version = "0.1.16"
 
 [[patch.unused]]
 name = "fsqlite-btree"
-version = "0.1.15"
+version = "0.1.16"
 
 [[patch.unused]]
 name = "fsqlite-core"
-version = "0.1.15"
+version = "0.1.16"
 
 [[patch.unused]]
 name = "fsqlite-error"
-version = "0.1.15"
+version = "0.1.16"
 
 [[patch.unused]]
 name = "fsqlite-ext-fts5"
-version = "0.1.15"
+version = "0.1.16"
 
 [[patch.unused]]
 name = "fsqlite-ext-icu"
-version = "0.1.15"
+version = "0.1.16"
 
 [[patch.unused]]
 name = "fsqlite-ext-json"
-version = "0.1.15"
+version = "0.1.16"
 
 [[patch.unused]]
 name = "fsqlite-ext-misc"
-version = "0.1.15"
+version = "0.1.16"
 
 [[patch.unused]]
 name = "fsqlite-ext-rtree"
-version = "0.1.15"
+version = "0.1.16"
 
 [[patch.unused]]
 name = "fsqlite-func"
-version = "0.1.15"
+version = "0.1.16"
 
 [[patch.unused]]
 name = "fsqlite-mvcc"
-version = "0.1.15"
+version = "0.1.16"
 
 [[patch.unused]]
 name = "fsqlite-observability"
-version = "0.1.15"
+version = "0.1.16"
 
 [[patch.unused]]
 name = "fsqlite-pager"
-version = "0.1.15"
+version = "0.1.16"
 
 [[patch.unused]]
 name = "fsqlite-parser"
-version = "0.1.15"
+version = "0.1.16"
 
 [[patch.unused]]
 name = "fsqlite-planner"
-version = "0.1.15"
+version = "0.1.16"
 
 [[patch.unused]]
 name = "fsqlite-types"
-version = "0.1.15"
+version = "0.1.16"
 
 [[patch.unused]]
 name = "fsqlite-vdbe"
-version = "0.1.15"
+version = "0.1.16"
 
 [[patch.unused]]
 name = "fsqlite-vfs"
-version = "0.1.15"
+version = "0.1.16"
 
 [[patch.unused]]
 name = "fsqlite-wal"
-version = "0.1.15"
+version = "0.1.16"

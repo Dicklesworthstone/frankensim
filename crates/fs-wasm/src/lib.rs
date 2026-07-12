@@ -1,9 +1,10 @@
 //! fs-wasm — a thin browser surface over FrankenSim's pure numerical leaves.
 //!
-//! Every function here runs the *real* kernel code — the same code the native
-//! workspace compiles — just targeted at `wasm32-unknown-unknown`. No mocks,
-//! no re-implementations: the in-browser showcase on the website is driven end
-//! to end by these functions.
+//! Every function here runs FrankenSim's real pure-Rust numerical stack just
+//! targeted at `wasm32-unknown-unknown`; there are no mock results. A small
+//! number of browser-safe campaign transcriptions avoid native-only support
+//! code, and their contracts explicitly state where native/WASM bit identity
+//! has not yet been established by a retained golden.
 //!
 //! Kernels surfaced: `fs-sparse` (sparse assembly + SpMV + CG), `fs-cheb`
 //! (Chebyshev spectral + Orr–Sommerfeld), `fs-rand` (Philox streams + Sobol'
@@ -863,7 +864,7 @@ mod wasm {
     }
 
     /* ------------------------------------------------------------------- */
-    /*  Tier-4 CAMPAIGN demos: certified end-to-end pipelines               */
+    /*  Tier-4 CAMPAIGN demos: evidence-bearing end-to-end pipelines        */
     /* ------------------------------------------------------------------- */
 
     #[wasm_bindgen]

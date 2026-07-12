@@ -1,15 +1,16 @@
-//! fs-wasm · CAMPAIGN tier (Tier IV) — the ten certified END-TO-END campaign
+//! fs-wasm · CAMPAIGN tier (Tier IV) — ten evidence-bearing end-to-end campaign
 //! pipelines in the browser.
 //!
-//! Each function here runs a *real* FrankenSim campaign — the same code the
-//! native `fs-*-e2e` crates compile and certify in their test batteries —
-//! targeted at `wasm32-unknown-unknown`. No mocks, no re-derived math: the
+//! Each function here runs a real FrankenSim campaign targeted at
+//! `wasm32-unknown-unknown`. There are no mock results; where browser-only
+//! constraints require a checked transcription, that boundary is called out.
+//! The
 //! sum-of-squares global-optimality proofs, the numerical homogenization, the
 //! Lyapunov/spectral flutter certificates, the tropical critical-path
 //! scheduler, the PDHG truss layout LP, the Kalman/VoI sensor planner, the
 //! interval-certified neural SDF, the MAP-Elites grammar illuminator, the
 //! anytime-valid Bayesian-optimization stop, and the lattice-Boltzmann
-//! credibility map are all invoked directly.
+//! credibility map are composed from the same pure-Rust numerical leaves.
 //!
 //! SAFETY CONTRACT (identical to the rest of the crate): `unsafe_code` is
 //! forbidden, every input is clamped to a safe range, every fallible kernel
@@ -22,10 +23,11 @@
 //!
 //! Where a campaign's `run_campaign` returns only final scalars but the viz
 //! needs a per-iteration trajectory / geometry, the campaign's `run_campaign`
-//! body is transcribed FAITHFULLY here using the same public APIs (and the
-//! campaign crate's public helpers) so results stay bit-identical to the
-//! certified tests. Those campaigns are: AnytimeBO, FlowCert, GrammarForge,
-//! TrussPath, and CampaignSchedule (to surface per-study slack).
+//! body is transcribed here using the same public APIs (and the campaign
+//! crate's public helpers) so results stay aligned with the native conformance
+//! tests. Those campaigns are: AnytimeBO, FlowCert, GrammarForge,
+//! and TrussPath. CampaignSchedule now exposes its visualization fields directly
+//! and is invoked through its canonical admitted API.
 
 use fs_archive::MapElites;
 use fs_bo::{Gp, Kernel, Matern, expected_improvement};
@@ -34,14 +36,12 @@ use fs_evidence::{Color, ColorRank};
 use fs_fab::min_feature_size;
 use fs_lbm::{Lbm, plan_scaling, poiseuille_analytic};
 use fs_rep_neural::{Layer, MlpSdf};
+use fs_schedule_e2e::{ScheduleDisposition, Study};
 use fs_shapeprog::{max_sdf_discrepancy, simplify};
 use fs_sparse::{Coo, Csr};
-use fs_tropical::TaskDag;
+use fs_truss_e2e::analyze_load_path;
 use fs_viz::Grid2;
-use fs_voi::{
-    Action, ActionKind, DesignEstimate, Recommendation, Uncertainty, evpi,
-    ranking_flip_probability, recommend,
-};
+use fs_voi::{Action, ActionKind, DesignEstimate, Uncertainty};
 
 /* ======================================================================= */
 /*  Small shared helpers                                                    */
@@ -274,11 +274,12 @@ pub fn fluttercert(lo: f64, hi: f64, steps: usize) -> Vec<f64> {
 /*  4 · CampaignSchedule — fs-schedule-e2e (fs-tropical × fs-voi)            */
 /* ======================================================================= */
 
-/// **CampaignSchedule**: the exact makespan of a design campaign as a tropical
-/// (max-plus) critical path ([`fs_tropical`]) — `Verified` by construction —
+/// **CampaignSchedule**: the outward-bounded makespan of a design campaign as a
+/// tropical (max-plus) critical path ([`fs_tropical`]) — `Verified` by an
+/// enclosure —
 /// plus an EVPI-driven Act/Stop recommendation over the candidate designs
-/// ([`fs_voi`]). The `run_campaign` body is transcribed here so the per-study
-/// slack vector can be surfaced for the viz.
+/// ([`fs_voi`]). The canonical [`fs_schedule_e2e::run_campaign`] admission path
+/// supplies the per-study slack vector and typed disposition for the viz.
 ///
 /// Fixed scenario (studies `surrogate-B(2)`, `hifi-B(8,[0])`,
 /// `sample-scenarios(4)`, `windtunnel-A(latency)`, `decide(1,[1,2,3])`;
@@ -292,8 +293,8 @@ pub fn fluttercert(lo: f64, hi: f64, steps: usize) -> Vec<f64> {
 /// Output layout (length `12 + 2·N + P`, `N` = studies = 5, `P` = critical
 /// path length):
 /// - `[0]` — `makespan`.
-/// - `[1]`,`[2]` — `makespan_lo`, `makespan_hi` (the `Verified` interval;
-///   both equal `makespan`).
+/// - `[1]`,`[2]` — outward-rounded `makespan_lo`, `makespan_hi` (the
+///   `Verified` interval containing `makespan`).
 /// - `[3]` — `N` (study count).
 /// - `[4]` — `P` (critical-path length).
 /// - `[5]` — `bottleneck_idx` (study index; `-1` if none).
@@ -301,7 +302,7 @@ pub fn fluttercert(lo: f64, hi: f64, steps: usize) -> Vec<f64> {
 /// - `[7]` — `flip_risk` (top-two ranking-flip probability).
 /// - `[8]` — `should_stop` (0/1).
 /// - `[9]` — `leading_design_idx` (0=A,1=B,2=C — lowest cost).
-/// - `[10]` — `rec_code` (0 = Act, 1 = Stop).
+/// - `[10]` — `rec_code` (0 = Act, 1 = robust Stop, 2 = expand menu).
 /// - `[11]` — `value_per_cost` of the recommended action (`NaN` if Stop).
 /// - then `N` study latencies; then `N` study slacks; then `P` critical-path
 ///   study indices (source → sink).
@@ -314,16 +315,15 @@ pub fn schedule_campaign(
     let b_mean = design_b_mean.clamp(0.60, 1.10);
     let thr = stop_threshold.clamp(0.0, 1.0e3);
 
-    // Studies (the precedence DAG). Names index-aligned with the arrays below.
-    let latencies = vec![2.0, 8.0, 4.0, wt, 1.0];
-    let deps: [&[usize]; 5] = [&[], &[0], &[], &[], &[1, 2, 3]];
-    let n = latencies.len();
-    let mut dag = TaskDag::new(latencies.clone());
-    for (v, d) in deps.iter().enumerate() {
-        for &u in *d {
-            dag = dag.with_edge(u, v);
-        }
-    }
+    let studies = vec![
+        Study::new("surrogate-B", 2.0, vec![]),
+        Study::new("hifi-B", 8.0, vec![0]),
+        Study::new("sample-scenarios", 4.0, vec![]),
+        Study::new("windtunnel-A", wt, vec![]),
+        Study::new("decide", 1.0, vec![1, 2, 3]),
+    ];
+    let latencies: Vec<f64> = studies.iter().map(|study| study.latency).collect();
+    let n = studies.len();
 
     // Candidate designs (fs-voi MINIMIZES; lower cost is better).
     let designs = vec![
@@ -379,8 +379,7 @@ pub fn schedule_campaign(
         },
     ];
 
-    // WHEN: tropical critical path. Fold an (impossible) cyclic error to NaN.
-    let Ok(cp) = dag.critical_path() else {
+    let Ok(report) = fs_schedule_e2e::run_campaign(&studies, &designs, &actions, thr) else {
         let mut out = vec![f64::NAN; 12];
         out[3] = n as f64;
         out[4] = 0.0;
@@ -388,42 +387,41 @@ pub fn schedule_campaign(
         out.extend(std::iter::repeat_n(f64::NAN, n));
         return out;
     };
-    let bottleneck_idx = dag.bottleneck(&cp).map_or(-1.0, |i| i as f64);
-
-    // WHETHER: value of information over the designs.
-    let current_evpi = evpi(&designs);
-    let mut ranked: Vec<(usize, &DesignEstimate)> = designs.iter().enumerate().collect();
-    ranked.sort_by(|a, b| a.1.mean.total_cmp(&b.1.mean));
-    let leading_idx = ranked.first().map_or(-1.0, |(i, _)| *i as f64);
-    let flip_risk = if ranked.len() >= 2 {
-        ranking_flip_probability(ranked[0].1, ranked[1].1)
-    } else {
-        0.0
+    let (makespan_lo, makespan_hi) = match &report.makespan_color {
+        Color::Verified { lo, hi } => (*lo, *hi),
+        _ => (f64::NAN, f64::NAN),
     };
-    let (rec_code, should_stop, value_per_cost) = match recommend(&designs, &actions, thr) {
-        Recommendation::Act { value_per_cost, .. } => (0.0, 0.0, value_per_cost),
-        Recommendation::Stop { .. } => (1.0, 1.0, f64::NAN),
+    let leading_idx = designs
+        .iter()
+        .position(|design| design.name == report.leading_design)
+        .map_or(-1.0, |index| index as f64);
+    let rec_code = match report.disposition {
+        ScheduleDisposition::Act => 0.0,
+        ScheduleDisposition::RobustStop => 1.0,
+        ScheduleDisposition::NoEffectiveAction => 2.0,
     };
 
-    let p = cp.path.len();
+    let p = report.critical_path.len();
     let mut out = Vec::with_capacity(12 + 2 * n + p);
-    out.push(cp.makespan);
-    out.push(cp.makespan);
-    out.push(cp.makespan);
+    out.push(report.makespan);
+    out.push(makespan_lo);
+    out.push(makespan_hi);
     out.push(n as f64);
     out.push(p as f64);
-    out.push(bottleneck_idx);
-    out.push(fon(current_evpi));
-    out.push(fon(flip_risk));
-    out.push(should_stop);
+    out.push(report.bottleneck_index.map_or(-1.0, |index| index as f64));
+    out.push(fon(report.evpi));
+    out.push(fon(report.flip_risk));
+    out.push(if report.should_stop { 1.0 } else { 0.0 });
     out.push(leading_idx);
     out.push(rec_code);
-    out.push(fon(value_per_cost));
+    out.push(fon(report
+        .recommendation_value_per_cost
+        .unwrap_or(f64::NAN)));
     out.extend_from_slice(&latencies);
-    for &s in &cp.slack {
+    for &s in &report.slack {
         out.push(fon(s));
     }
-    for &i in &cp.path {
+    for &i in &report.critical_path {
         out.push(i as f64);
     }
     out
@@ -441,9 +439,10 @@ pub fn schedule_campaign(
 /// / `SystemTime::now()` (fine natively) which *compile but TRAP at runtime* on
 /// `wasm32-unknown-unknown` ("time not implemented on this platform") — killing
 /// the page. The truss LP never reads that graph, so the grid generator, the
-/// LP `assemble`, and the PDHG `solve`/`certificate` (all fs-sparse-only) are
-/// transcribed FAITHFULLY here so the wasm runtime path never touches fnx. The
-/// certified result is bit-identical to `fs_truss_e2e::run_campaign`.
+/// LP `assemble`, and the PDHG `solve`/`diagnostics` (all fs-sparse-only) are
+/// transcribed here so the wasm runtime path never touches fnx. It shares the
+/// same bounded tropical analysis, but cross-implementation bit identity is not
+/// claimed until a retained native/WASM golden verifies it.
 struct LeanGround {
     nodes: Vec<[f64; 2]>,
     members: Vec<(usize, usize)>,
@@ -514,7 +513,7 @@ struct LeanLp {
     norm_est: f64,
 }
 
-/// The PDHG solve certificate.
+/// The PDHG solve diagnostics.
 struct LeanReport {
     iters: usize,
     volume: f64,
@@ -597,8 +596,8 @@ impl LeanLp {
         }
     }
 
-    /// Faithful transcription of `fs_truss::LayoutLp::certificate`.
-    fn certificate(&self, x: &[f64], y: &[f64], bnorm: f64) -> (f64, f64, f64) {
+    /// Faithful transcription of `fs_truss::LayoutLp::diagnostics`.
+    fn diagnostics(&self, x: &[f64], y: &[f64], bnorm: f64) -> (f64, f64, f64) {
         let primal: f64 = self.c.iter().zip(x).map(|(c, x)| c * x).sum();
         let mut aty = vec![0.0f64; self.c.len()];
         self.at.spmv(y, &mut aty);
@@ -641,23 +640,22 @@ impl LeanLp {
         let mut aty = vec![0.0f64; nvar];
         let mut ax = vec![0.0f64; nrow];
         let mut x_prev = x.clone();
+        let mut xbar = vec![0.0f64; nvar];
         for it in 0..max_iters {
             self.at.spmv(&y, &mut aty);
             x_prev.copy_from_slice(&x);
             for i in 0..nvar {
                 x[i] = (x[i] - tau * (self.c[i] + aty[i])).max(0.0);
             }
-            let xbar: Vec<f64> = x
-                .iter()
-                .zip(&x_prev)
-                .map(|(xi, xp)| 2.0 * xi - xp)
-                .collect();
+            for ((extrapolated, xi), previous) in xbar.iter_mut().zip(&x).zip(&x_prev) {
+                *extrapolated = 2.0 * xi - previous;
+            }
             self.a.spmv(&xbar, &mut ax);
             for r in 0..nrow {
                 y[r] += sigma * (ax[r] - self.b[r]);
             }
             if (it + 1) % check_every == 0 || it + 1 == max_iters {
-                let (gap, eq_res, primal) = self.certificate(&x, &y, bnorm);
+                let (gap, eq_res, primal) = self.diagnostics(&x, &y, bnorm);
                 report.iters = it + 1;
                 report.volume = primal;
                 report.gap = gap;
@@ -671,35 +669,14 @@ impl LeanLp {
     }
 }
 
-fn truss_dist_to_support(p: [f64; 2], supports: &[[f64; 2]]) -> f64 {
-    supports
-        .iter()
-        .map(|s| (p[0] - s[0]).hypot(p[1] - s[1]))
-        .fold(f64::INFINITY, f64::min)
-}
-
-fn truss_mid_dist(gs: &LeanGround, k: usize, supports: &[[f64; 2]]) -> f64 {
-    let (a, b) = gs.members[k];
-    let mid = [
-        f64::midpoint(gs.nodes[a][0], gs.nodes[b][0]),
-        f64::midpoint(gs.nodes[a][1], gs.nodes[b][1]),
-    ];
-    truss_dist_to_support(mid, supports)
-}
-
-fn truss_shares_joint(gs: &LeanGround, i: usize, j: usize) -> bool {
-    let (a, b) = gs.members[i];
-    let (c, d) = gs.members[j];
-    a == c || a == d || b == c || b == d
-}
-
-/// **TrussPath**: a Michell ground-structure truss sized to minimum volume
-/// under equilibrium by a first-order PDHG LP ([`fs_truss`], emitting a
-/// certified duality gap), then the tropical critical LOAD PATH through the
-/// active bars ([`fs_tropical`]). The `run_campaign` body is transcribed here
-/// so the node coordinates, per-member force/volume/active flag, and the
-/// critical path can all be drawn. Cantilever on `[0,4]×[0,2]`, left edge
-/// supported, unit downward load at the free bottom-right corner.
+/// **TrussPath**: a Michell ground-structure truss iterated toward minimum
+/// volume and equilibrium by a first-order PDHG LP ([`fs_truss`], emitting a
+/// reported objective-separation diagnostic), then an advisory tropical load
+/// path through thresholded active bars. The checked endpoint/path analyzer is
+/// shared with [`fs_truss_e2e`]; the solver body remains transcribed so the node
+/// coordinates and per-member draw fields are available. Cantilever on
+/// `[0,4]×[0,2]`, left edge supported, unit downward load at the free
+/// bottom-right corner.
 ///
 /// `nx`/`ny` — grid nodes per axis (clamped `2..=5` / `2..=4`); `gap_tol` —
 /// PDHG relative-gap tolerance (clamped `1e-8..=1e-1`). Default `(4, 3, 1e-4)`
@@ -709,10 +686,10 @@ fn truss_shares_joint(gs: &LeanGround, i: usize, j: usize) -> bool {
 /// - `[0]` — `M` (candidate members).
 /// - `[1]` — `num_active`.
 /// - `[2]` — `total_volume`.
-/// - `[3]` — `gap` (PDHG relative duality gap).
+/// - `[3]` — `gap` (PDHG relative primal/dual objective separation).
 /// - `[4]` — `eq_residual`.
 /// - `[5]` — `iters`.
-/// - `[6]` — `certified_optimal` (0/1).
+/// - `[6]` — `solver_converged` (0/1; not a finite optimum certificate).
 /// - `[7]` — `P` (critical-path length).
 /// - `[8]` — `critical_path_volume`.
 /// - `[9]` — `bottleneck_member_idx` (original member index; `-1` if none).
@@ -725,7 +702,11 @@ fn truss_shares_joint(gs: &LeanGround, i: usize, j: usize) -> bool {
 pub fn trusspath(nx: usize, ny: usize, gap_tol: f64) -> Vec<f64> {
     let nx = nx.clamp(2, 5);
     let ny = ny.clamp(2, 4);
-    let gap_tol = gap_tol.clamp(1e-8, 1e-1);
+    let gap_tol = if gap_tol.is_finite() {
+        gap_tol.clamp(1e-8, 1e-1)
+    } else {
+        1e-4
+    };
     let (w, h) = (4.0f64, 2.0f64);
 
     // Fabrication rules (empty angle set): min/max member length.
@@ -735,13 +716,9 @@ pub fn trusspath(nx: usize, ny: usize, gap_tol: f64) -> Vec<f64> {
     let m = gs.members.len();
     let nn = gs.nodes.len();
 
-    let supported = |node: usize, _comp: usize| gs.nodes[node][0] < 1e-9;
-    let support_pts: Vec<[f64; 2]> = gs.nodes.iter().copied().filter(|p| p[0] < 1e-9).collect();
-    let load_node = (0..nn)
-        .max_by(|&a, &b| {
-            (gs.nodes[a][0] - gs.nodes[a][1]).total_cmp(&(gs.nodes[b][0] - gs.nodes[b][1]))
-        })
-        .unwrap_or(0);
+    let support_nodes: Vec<usize> = (0..ny).map(|row| row * nx).collect();
+    let supported = |node: usize, _comp: usize| node % nx == 0;
+    let load_node = nx - 1;
     let loads = |node: usize| {
         if node == load_node {
             [0.0, -1.0]
@@ -770,41 +747,28 @@ pub fn trusspath(nx: usize, ny: usize, gap_tol: f64) -> Vec<f64> {
     let max_force = (0..m).map(|k| force(k).abs()).fold(0.0, f64::max);
     let active_tol = 1e-3 * max_force.max(1e-12);
 
-    let mut active: Vec<usize> = (0..m).filter(|&k| force(k).abs() > active_tol).collect();
-    active.sort_by(|&a, &b| {
-        let da = truss_mid_dist(&gs, a, &support_pts);
-        let db = truss_mid_dist(&gs, b, &support_pts);
-        db.total_cmp(&da)
-    });
+    let active: Vec<usize> = (0..m).filter(|&k| force(k).abs() > active_tol).collect();
     let num_active = active.len();
 
-    // Tropical critical path over the active-bar DAG (latency = bar volume).
-    let latencies: Vec<f64> = active.iter().map(|&k| volume(k)).collect();
-    let mut dag = TaskDag::new(latencies);
-    for i in 0..num_active {
-        for j in (i + 1)..num_active {
-            let (ki, kj) = (active[i], active[j]);
-            if truss_shares_joint(&gs, ki, kj)
-                && truss_mid_dist(&gs, ki, &support_pts)
-                    > truss_mid_dist(&gs, kj, &support_pts) + 1e-9
-            {
-                dag = dag.with_edge(i, j);
-            }
-        }
-    }
-    let (critical_path, critical_path_volume, bottleneck_member) = match dag.critical_path() {
-        Ok(cp) => {
-            let orig: Vec<usize> = cp.path.iter().map(|&i| active[i]).collect();
-            let bottleneck = dag
-                .bottleneck(&cp)
-                .map(|i| active[i])
-                .or_else(|| orig.first().copied());
-            (orig, cp.makespan, bottleneck)
-        }
-        Err(_) => (Vec::new(), 0.0, None),
+    let volumes: Vec<f64> = (0..m).map(volume).collect();
+    let (critical_path, critical_path_volume, bottleneck_member) = match analyze_load_path(
+        &gs.nodes,
+        &gs.members,
+        &active,
+        &volumes,
+        load_node,
+        &support_nodes,
+    ) {
+        Ok(path) => (path.members, path.weight, path.bottleneck_member),
+        Err(_) => (Vec::new(), f64::NAN, None),
     };
 
-    let certified_optimal = report.gap < gap_tol * 10.0 && report.eq_residual < 1e-3;
+    let solver_converged = report.gap.is_finite()
+        && report.eq_residual.is_finite()
+        && report.gap >= 0.0
+        && report.eq_residual >= 0.0
+        && report.gap < gap_tol
+        && report.eq_residual < gap_tol;
 
     let p = critical_path.len();
     let mut out = Vec::with_capacity(12 + 2 * nn + 5 * m + p);
@@ -814,7 +778,7 @@ pub fn trusspath(nx: usize, ny: usize, gap_tol: f64) -> Vec<f64> {
     out.push(fon(report.gap));
     out.push(fon(report.eq_residual));
     out.push(report.iters as f64);
-    out.push(if certified_optimal { 1.0 } else { 0.0 });
+    out.push(if solver_converged { 1.0 } else { 0.0 });
     out.push(p as f64);
     out.push(fon(critical_path_volume));
     out.push(bottleneck_member.map_or(-1.0, |i| i as f64));
@@ -1603,8 +1567,8 @@ mod tests {
     fn schedule_defaults() {
         let v = schedule_campaign(12.0, 0.65, 1e-6);
         assert_eq!(v[0], 13.0, "makespan");
-        assert_eq!(v[1], 13.0);
-        assert_eq!(v[2], 13.0);
+        assert!(v[1] <= v[0], "lower bound {} > {}", v[1], v[0]);
+        assert!(v[0] <= v[2], "{} > upper bound {}", v[0], v[2]);
         assert_eq!(v[8], 0.0, "should_stop = false");
         assert_eq!(v[9], 0.0, "leading design A (idx 0)");
         assert_eq!(v[10], 0.0, "rec = Act");
@@ -1620,7 +1584,16 @@ mod tests {
         assert_eq!(m, 43, "members");
         assert_eq!(v[1], 6.0, "active");
         assert!(v[3] < 1e-3, "gap {}", v[3]);
-        assert_eq!(v[6], 1.0, "certified_optimal");
+        assert_eq!(v[6], 1.0, "solver_converged");
+        assert!(v[7] >= 2.0, "connected path length {}", v[7]);
+        assert!(v[8].is_finite() && v[8] > 0.0, "path weight {}", v[8]);
+    }
+
+    #[test]
+    fn trusspath_non_finite_tolerance_uses_the_bounded_default() {
+        let default = trusspath(4, 3, 1e-4);
+        let non_finite = trusspath(4, 3, f64::NAN);
+        assert_eq!(non_finite, default);
     }
 
     #[test]

@@ -1,6 +1,6 @@
-//! fs-wasm · FLAGSHIP tier (Tier V) — three LIVE, end-to-end certified design
-//! pipelines in the browser, each a sized-down but genuinely real run of a
-//! FrankenSim flagship campaign.
+//! fs-wasm · FLAGSHIP tier (Tier V) — three live, end-to-end evidence-bearing
+//! design pipelines in the browser, each a sized-down but genuinely real run
+//! of a FrankenSim flagship campaign.
 //!
 //! - [`run_ornithoid`] — the ornithoid (flapping micro-flyer) pipeline:
 //!   PARAMETERIZE → SCREEN (e-race) → VALIDATE (LBM) → CERTIFY (Lyapunov +
@@ -1112,7 +1112,7 @@ impl FrameLp {
         }
     }
 
-    fn certificate(&self, x: &[f64], y: &[f64], bnorm: f64) -> (f64, f64, f64) {
+    fn diagnostics(&self, x: &[f64], y: &[f64], bnorm: f64) -> (f64, f64, f64) {
         let primal: f64 = self.c.iter().zip(x).map(|(c, x)| c * x).sum();
         let mut aty = vec![0.0f64; self.c.len()];
         self.at.spmv(y, &mut aty);
@@ -1153,23 +1153,22 @@ impl FrameLp {
         let mut aty = vec![0.0f64; nvar];
         let mut ax = vec![0.0f64; nrow];
         let mut x_prev = x.clone();
+        let mut xbar = vec![0.0f64; nvar];
         for it in 0..max_iters {
             self.at.spmv(&y, &mut aty);
             x_prev.copy_from_slice(&x);
             for i in 0..nvar {
                 x[i] = (x[i] - tau * (self.c[i] + aty[i])).max(0.0);
             }
-            let xbar: Vec<f64> = x
-                .iter()
-                .zip(&x_prev)
-                .map(|(xi, xp)| 2.0 * xi - xp)
-                .collect();
+            for ((extrapolated, xi), previous) in xbar.iter_mut().zip(&x).zip(&x_prev) {
+                *extrapolated = 2.0 * xi - previous;
+            }
             self.a.spmv(&xbar, &mut ax);
             for r in 0..nrow {
                 y[r] += sigma * (ax[r] - self.b[r]);
             }
             if (it + 1) % check_every == 0 || it + 1 == max_iters {
-                let (gap, eq_res, primal) = self.certificate(&x, &y, bnorm);
+                let (gap, eq_res, primal) = self.diagnostics(&x, &y, bnorm);
                 report.iters = it + 1;
                 report.volume = primal;
                 report.gap = gap;
@@ -1428,7 +1427,7 @@ fn story_history(params: &fs_frame::StoryParams, ag: &[f64], dt: f64) -> (Vec<f6
 ///   `[4]` off_sizing, `[5]` off_history, `[6]` off_fragility, `[7]` off_cvar,
 ///   `[8]` total_len, `[9..12]` reserved (0).
 /// - LAYOUT block (@ off_layout): `gap, eq_residual, volume_phys, iters,
-///   certified_optimal, Nn, M, load_node_idx`; then `2·Nn` node coords
+///   solver_converged, Nn, M, load_node_idx`; then `2·Nn` node coords
 ///   `[x,y]…`; then `M·4` `[na, nb, force_q, is_survivor]`.
 /// - SIZING block (@ off_sizing): `all_pass, eq_residual_postprune, pruned, Ms`;
 ///   then `Ms·7` `[member_idx, na, nb, force, area_yield, area_euler,
@@ -1468,7 +1467,7 @@ pub fn run_frame(seed: u32) -> Vec<f64> {
     let force = |k: usize| x[k] - x[m + k];
     let max_force = (0..m).map(|k| force(k).abs()).fold(0.0, f64::max);
     let active_tol = 1e-3 * max_force.max(1e-12);
-    let certified_optimal = report.gap < 1e-3 && report.eq_residual < 1e-3;
+    let solver_converged = report.gap < 1e-3 && report.eq_residual < 1e-3;
 
     // ---- STAGE 2: SIZING (yield + Euler-buckling, catalog snap) ----------
     let sigma_y = 250.0e6;
@@ -1570,7 +1569,7 @@ pub fn run_frame(seed: u32) -> Vec<f64> {
     layout.push(fon(report.eq_residual));
     layout.push(fon(report.volume)); // volume_phys (sigma_y = 1 in the LP)
     layout.push(report.iters as f64);
-    layout.push(if certified_optimal { 1.0 } else { 0.0 });
+    layout.push(if solver_converged { 1.0 } else { 0.0 });
     layout.push(nn as f64);
     layout.push(m as f64);
     layout.push(load_node as f64);
@@ -1834,7 +1833,7 @@ mod tests {
         let off_fragility = v[6] as usize;
         let gap = v[off_layout];
         let eq_residual = v[off_layout + 1];
-        let certified_optimal = v[off_layout + 4];
+        let solver_converged = v[off_layout + 4];
         let all_pass = v[off_sizing];
         let sizing_eq = v[off_sizing + 1];
         let p_hat = v[off_fragility];
@@ -1844,12 +1843,13 @@ mod tests {
         let exceedances = v[off_fragility + 6];
         let mlmc_estimate = v[off_fragility + 9];
         eprintln!(
-            "frame: gap={gap:e} eq_residual={eq_residual:e} certified_optimal={certified_optimal} \
+            "frame: gap={gap:e} eq_residual={eq_residual:e} solver_converged={solver_converged} \
              all_pass={all_pass} sizing_eq={sizing_eq:e} p_hat={p_hat} radius={radius} \
              members_used={members_used} stopped_early={stopped_early} exceedances={exceedances} \
              mlmc_estimate={mlmc_estimate}"
         );
         assert!(gap < 1e-3, "layout gap {gap:e}");
+        assert_eq!(solver_converged, 1.0, "layout solver convergence");
         assert_eq!(all_pass, 1.0, "sizing all_pass");
         assert!(p_hat > 0.0 && p_hat < 1.0, "fragility p_hat {p_hat}");
         assert!(members_used < 48.0, "members_used {members_used}");
