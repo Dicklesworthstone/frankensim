@@ -250,8 +250,11 @@ fn fnv_extend(mut h: u64, bytes: &[u8]) -> u64 {
 }
 
 fn hash_polynomial(mut hash: u64, polynomial: &crate::fem1d::Poly) -> u64 {
-    hash = fnv_extend(hash, &(polynomial.0.len() as u64).to_le_bytes());
-    for coefficient in &polynomial.0 {
+    hash = fnv_extend(
+        hash,
+        &(polynomial.coefficients().len() as u64).to_le_bytes(),
+    );
+    for coefficient in polynomial.coefficients() {
         hash = fnv_extend(hash, &coefficient.to_bits().to_le_bytes());
     }
     hash
@@ -264,11 +267,11 @@ fn flux_hash(c_star: f64, f: &crate::fem1d::Poly, big_f: &crate::fem1d::Poly) ->
 }
 
 fn poly_bits_equal(left: &crate::fem1d::Poly, right: &crate::fem1d::Poly) -> bool {
-    left.0.len() == right.0.len()
+    left.coefficients().len() == right.coefficients().len()
         && left
-            .0
+            .coefficients()
             .iter()
-            .zip(&right.0)
+            .zip(right.coefficients())
             .all(|(left, right)| left.to_bits() == right.to_bits())
 }
 
@@ -277,31 +280,34 @@ fn validate_inputs(
     candidate: &[f64],
     tolerance: f64,
 ) -> Result<(crate::fem1d::Poly, crate::fem1d::Poly), VerifierRefusal> {
-    if !(2..=MAX_VERIFIER_MESH_NODES).contains(&problem.mesh.len()) {
+    if !(2..=MAX_VERIFIER_MESH_NODES).contains(&problem.mesh().len()) {
         return Err(VerifierRefusal::MeshNodeCount);
     }
-    if candidate.len() != problem.mesh.len() {
+    if candidate.len() != problem.mesh().len() {
         return Err(VerifierRefusal::CandidateLength);
     }
     for (role, polynomial) in [
-        (VerifierPolynomial::ExactSolution, &problem.u),
-        (VerifierPolynomial::Forcing, &problem.f),
-        (VerifierPolynomial::ForcingAntiderivative, &problem.big_f),
+        (VerifierPolynomial::ExactSolution, problem.exact_solution()),
+        (VerifierPolynomial::Forcing, problem.forcing()),
+        (
+            VerifierPolynomial::ForcingAntiderivative,
+            problem.rounded_forcing_antiderivative(),
+        ),
     ] {
-        if !(1..=MAX_VERIFIER_POLY_COEFFICIENTS).contains(&polynomial.0.len()) {
+        if !(1..=MAX_VERIFIER_POLY_COEFFICIENTS).contains(&polynomial.coefficients().len()) {
             return Err(VerifierRefusal::PolynomialCoefficientCount { polynomial: role });
         }
     }
     if !tolerance.is_finite() || tolerance <= 0.0 {
         return Err(VerifierRefusal::InvalidTolerance);
     }
-    if problem.mesh.first().map(|value| value.to_bits()) != Some(0.0_f64.to_bits())
-        || problem.mesh.last().map(|value| value.to_bits()) != Some(1.0_f64.to_bits())
+    if problem.mesh().first().map(|value| value.to_bits()) != Some(0.0_f64.to_bits())
+        || problem.mesh().last().map(|value| value.to_bits()) != Some(1.0_f64.to_bits())
     {
         return Err(VerifierRefusal::MeshDomain);
     }
-    if !problem.mesh.iter().all(|value| value.is_finite())
-        || !problem.mesh.windows(2).all(|pair| pair[0] < pair[1])
+    if !problem.mesh().iter().all(|value| value.is_finite())
+        || !problem.mesh().windows(2).all(|pair| pair[0] < pair[1])
     {
         return Err(VerifierRefusal::MeshCoordinates);
     }
@@ -314,28 +320,52 @@ fn validate_inputs(
         return Err(VerifierRefusal::CandidateBoundary);
     }
     for (role, polynomial) in [
-        (VerifierPolynomial::ExactSolution, &problem.u),
-        (VerifierPolynomial::Forcing, &problem.f),
-        (VerifierPolynomial::ForcingAntiderivative, &problem.big_f),
+        (VerifierPolynomial::ExactSolution, problem.exact_solution()),
+        (VerifierPolynomial::Forcing, problem.forcing()),
+        (
+            VerifierPolynomial::ForcingAntiderivative,
+            problem.rounded_forcing_antiderivative(),
+        ),
     ] {
-        if !polynomial.0.iter().all(|value| value.is_finite()) {
+        if !polynomial
+            .coefficients()
+            .iter()
+            .all(|value| value.is_finite())
+        {
             return Err(VerifierRefusal::PolynomialNonFinite { polynomial: role });
         }
     }
-    if problem.u.0.first().map(|value| value.to_bits()) != Some(0.0_f64.to_bits())
-        || !problem.u.is_exactly_zero_at_one()
+    if problem
+        .exact_solution()
+        .coefficients()
+        .first()
+        .map(|value| value.to_bits())
+        != Some(0.0_f64.to_bits())
+        || !problem.exact_solution().is_exactly_zero_at_one()
     {
         return Err(VerifierRefusal::ExactSolutionBoundary);
     }
 
-    let expected_f = problem.u.derive().derive().neg();
-    if !poly_bits_equal(&problem.f, &expected_f) {
+    let expected_f = problem
+        .exact_solution()
+        .derive()
+        .and_then(|derivative| derivative.derive())
+        .map(|second_derivative| second_derivative.neg())
+        .map_err(|_| VerifierRefusal::PolynomialNonFinite {
+            polynomial: VerifierPolynomial::Forcing,
+        })?;
+    if !poly_bits_equal(problem.forcing(), &expected_f) {
         return Err(VerifierRefusal::DerivedPolynomialMismatch {
             polynomial: VerifierPolynomial::Forcing,
         });
     }
-    let expected_big_f = expected_f.antiderive();
-    if !poly_bits_equal(&problem.big_f, &expected_big_f) {
+    let expected_big_f =
+        expected_f
+            .antiderive()
+            .map_err(|_| VerifierRefusal::PolynomialNonFinite {
+                polynomial: VerifierPolynomial::ForcingAntiderivative,
+            })?;
+    if !poly_bits_equal(problem.rounded_forcing_antiderivative(), &expected_big_f) {
         return Err(VerifierRefusal::DerivedPolynomialMismatch {
             polynomial: VerifierPolynomial::ForcingAntiderivative,
         });
@@ -349,8 +379,8 @@ fn tightness_constant(
     big_f: &crate::fem1d::Poly,
 ) -> Result<f64, VerifierRefusal> {
     let mut mean = 0.0;
-    for element in 0..problem.mesh.len() - 1 {
-        let (x0, x1) = (problem.mesh[element], problem.mesh[element + 1]);
+    for element in 0..problem.mesh().len() - 1 {
+        let (x0, x1) = (problem.mesh()[element], problem.mesh()[element + 1]);
         let h = x1 - x0;
         let slope = (candidate[element + 1] - candidate[element]) / h;
         if !h.is_finite() || h <= 0.0 || !slope.is_finite() {
@@ -432,7 +462,7 @@ fn interval_forcing_antiderivative(
     // intervalized: the rounded coefficients in `big_f` are replay metadata,
     // not point enclosures of the exact antiderivative of the authoritative f.
     let mut accumulated = Iv::zero();
-    for (degree, coefficient) in forcing.0.iter().copied().enumerate().rev() {
+    for (degree, coefficient) in forcing.coefficients().iter().copied().enumerate().rev() {
         let antiderivative_coefficient =
             interval_antiderivative_coefficient(coefficient, degree + 1)?;
         accumulated = finite_interval(accumulated.mul(x).add(antiderivative_coefficient))?;
@@ -447,9 +477,9 @@ fn equilibrated_bound(
     c_star: f64,
 ) -> Result<Iv, VerifierRefusal> {
     let mut eta_sq = Iv::zero();
-    for element in 0..problem.mesh.len() - 1 {
+    for element in 0..problem.mesh().len() - 1 {
         let (h, midpoint, half) =
-            interval_element_geometry(problem.mesh[element], problem.mesh[element + 1])?;
+            interval_element_geometry(problem.mesh()[element], problem.mesh()[element + 1])?;
         let slope = interval_candidate_slope(candidate[element], candidate[element + 1], h)?;
         for (node_constant, weight_constant) in GAUSS5_REF {
             let (node, weight) =
@@ -550,7 +580,7 @@ pub fn hierarchical_estimate(problem: &MmsProblem, candidate: &[f64]) -> Result<
     validate_problem(problem)?;
     validate_candidate(problem, candidate, "candidate")?;
     let fine_nodes = problem
-        .mesh
+        .mesh()
         .len()
         .checked_mul(2)
         .and_then(|nodes| nodes.checked_sub(1))
@@ -573,22 +603,22 @@ pub fn hierarchical_estimate(problem: &MmsProblem, candidate: &[f64]) -> Result<
             stage: "hierarchical mesh",
             requested: fine_nodes,
         })?;
-    for w in problem.mesh.windows(2) {
+    for w in problem.mesh().windows(2) {
         fine_mesh.push(w[0]);
         fine_mesh.push(f64::midpoint(w[0], w[1]));
     }
-    fine_mesh.push(problem.mesh[problem.mesh.len() - 1]);
-    let fine = MmsProblem::new(&problem.name, problem.u.clone(), fine_mesh);
+    fine_mesh.push(problem.mesh()[problem.mesh().len() - 1]);
+    let fine = problem.with_mesh(fine_mesh)?;
     let fine_u = crate::fem1d::solve_p1(&fine)?;
     // ‖u_{h/2}′ − u_h′‖ over the fine mesh.
     let mut acc = 0.0;
-    for e in 0..fine.mesh.len() - 1 {
-        let (x0, x1) = (fine.mesh[e], fine.mesh[e + 1]);
+    for e in 0..fine.mesh().len() - 1 {
+        let (x0, x1) = (fine.mesh()[e], fine.mesh()[e + 1]);
         let h = x1 - x0;
         let fine_slope = (fine_u[e + 1] - fine_u[e]) / h;
         // The coarse element containing this fine element.
         let coarse_e = e / 2;
-        let ch = problem.mesh[coarse_e + 1] - problem.mesh[coarse_e];
+        let ch = problem.mesh()[coarse_e + 1] - problem.mesh()[coarse_e];
         let coarse_slope = (candidate[coarse_e + 1] - candidate[coarse_e]) / ch;
         let d = fine_slope - coarse_slope;
         let updated = (h * d).mul_add(d, acc);
@@ -640,7 +670,7 @@ pub fn warm_start(
 ) -> Result<WarmStartReport, Fem1dError> {
     validate_problem(problem)?;
     validate_candidate(problem, candidate, "candidate")?;
-    let zero = try_zeroed("cold nonlinear start", problem.mesh.len())?;
+    let zero = try_zeroed("cold nonlinear start", problem.mesh().len())?;
     let cold = crate::fem1d::solve_nonlinear(problem, &zero, max_iter)?;
     require_converged(&cold, "cold nonlinear solve")?;
     let warm = crate::fem1d::solve_nonlinear(problem, candidate, max_iter)?;

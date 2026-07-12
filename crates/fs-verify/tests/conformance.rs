@@ -7,14 +7,21 @@
 //! verdicts; seeded cases carry seeds.
 
 use fs_verify::estimator::{
-    EstimatorFamily, MAX_VERIFIER_MESH_NODES, MAX_VERIFIER_POLY_COEFFICIENTS, VerifierPolynomial,
-    VerifierRefusal, effectivity as try_effectivity,
+    EstimatorFamily, VerifierRefusal, effectivity as try_effectivity,
     hierarchical_estimate as try_hierarchical_estimate, verify, warm_start as try_warm_start,
 };
 use fs_verify::fem1d::{
-    Fem1dError, MmsProblem, Poly, solve_p1 as try_solve_p1,
-    true_energy_error as try_true_energy_error,
+    Fem1dError, MAX_FEM1D_MESH_NODES, MAX_FEM1D_POLY_COEFFICIENTS, MmsProblem, Poly,
+    solve_p1 as try_solve_p1, true_energy_error as try_true_energy_error,
 };
+
+fn poly(coefficients: Vec<f64>) -> Poly {
+    Poly::new(coefficients).expect("valid conformance polynomial")
+}
+
+fn problem(name: &str, u: Poly, mesh: Vec<f64>) -> MmsProblem {
+    MmsProblem::new(name, u, mesh).expect("valid conformance problem")
+}
 
 fn solve_p1(problem: &MmsProblem) -> Vec<f64> {
     try_solve_p1(problem).expect("conformance problem must solve")
@@ -73,15 +80,15 @@ impl Lcg {
 /// integrand within 5-point Gauss exactness).
 fn mms_zoo() -> Vec<(&'static str, Poly)> {
     // x(1−x) = x − x²
-    let u1 = Poly(vec![0.0, 1.0, -1.0]);
+    let u1 = poly(vec![0.0, 1.0, -1.0]);
     // x(1−x)(x−0.25) = −0.25x + 1.25x² − x³ (dyadic-exact).
-    let u2 = Poly(vec![0.0, -0.25, 1.25, -1.0]);
+    let u2 = poly(vec![0.0, -0.25, 1.25, -1.0]);
     // x²(1−x)² = x² − 2x³ + x⁴
-    let u3 = Poly(vec![0.0, 0.0, 1.0, -2.0, 1.0]);
+    let u3 = poly(vec![0.0, 0.0, 1.0, -2.0, 1.0]);
     // x(1−x)(x−0.25)(x−0.75), expanded in dyadic-exact coefficients.
-    let u4 = Poly(vec![0.0, 0.1875, -1.1875, 2.0, -1.0]);
+    let u4 = poly(vec![0.0, 0.1875, -1.1875, 2.0, -1.0]);
     // Degree 5: x(1−x)(x−0.5)(x²+0.25), also dyadic-exact.
-    let u5 = Poly(vec![0.0, -0.125, 0.375, -0.75, 1.5, -1.0]);
+    let u5 = poly(vec![0.0, -0.125, 0.375, -0.75, 1.5, -1.0]);
     vec![("u1", u1), ("u2", u2), ("u3", u3), ("u4", u4), ("u5", u5)]
 }
 
@@ -118,7 +125,7 @@ fn ver_001_upper_bound_property() {
     let mut violations = 0u32;
     for (name, u) in mms_zoo() {
         for mesh in meshes() {
-            let p = MmsProblem::new(name, u.clone(), mesh);
+            let p = problem(name, u.clone(), mesh);
             let galerkin = solve_p1(&p);
             let mut candidates = vec![galerkin.clone()];
             // Untrusted proposers: noisy variants (BCs preserved).
@@ -127,7 +134,7 @@ fn ver_001_upper_bound_property() {
                 for v in noisy
                     .iter_mut()
                     .skip(1)
-                    .take(p.mesh.len().saturating_sub(2))
+                    .take(p.mesh().len().saturating_sub(2))
                 {
                     *v += (rng.unit() - 0.5) * 0.02;
                 }
@@ -145,7 +152,7 @@ fn ver_001_upper_bound_property() {
         }
     }
     // Exact zero solution: bound ≥ 0, accepted at any tolerance.
-    let zero = MmsProblem::new("zero", Poly(vec![0.0]), vec![0.0, 0.5, 1.0]);
+    let zero = problem("zero", poly(vec![0.0]), vec![0.0, 0.5, 1.0]);
     let z = verify(&zero, &[0.0, 0.0, 0.0], 1e-12);
     let zero_ok = z.accept && z.bound.hi >= 0.0 && z.color.is_some();
     verdict(
@@ -175,7 +182,7 @@ fn ver_002_effectivity_band() {
             if mesh.len() < 4 {
                 continue; // effectivity on trivial meshes is noise
             }
-            let p = MmsProblem::new(name, u.clone(), mesh);
+            let p = problem(name, u.clone(), mesh);
             let cand = solve_p1(&p);
             let rep = verify(&p, &cand, 1e-3);
             let eff = effectivity(&p, &cand, &rep);
@@ -224,7 +231,7 @@ fn ver_002_effectivity_band() {
 #[test]
 fn ver_003_interval_soundness_fail_closed() {
     let (name, u) = &mms_zoo()[2];
-    let p = MmsProblem::new(name, u.clone(), meshes()[2].clone());
+    let p = problem(name, u.clone(), meshes()[2].clone());
     let cand = solve_p1(&p);
     let rep = verify(&p, &cand, 1e-3);
     // ver-001 covers truth-side domination; here: the enclosure is a
@@ -263,7 +270,7 @@ fn ver_003_interval_soundness_fail_closed() {
 #[test]
 fn ver_004_determinism_and_boundaries() {
     let (name, u) = &mms_zoo()[1];
-    let p = MmsProblem::new(name, u.clone(), meshes()[1].clone());
+    let p = problem(name, u.clone(), meshes()[1].clone());
     let cand = solve_p1(&p);
     let (r1, r2) = (verify(&p, &cand, 1e-4), verify(&p, &cand, 1e-4));
     let bitwise = r1.bound.lo.to_bits() == r2.bound.lo.to_bits()
@@ -275,12 +282,12 @@ fn ver_004_determinism_and_boundaries() {
     let tol_eq = verify(&p, &cand, r1.bound.hi);
     let equality_accepts = tol_eq.accept;
     // Single interior DOF.
-    let p1dof = MmsProblem::new(name, u.clone(), vec![0.0, 0.5, 1.0]);
+    let p1dof = problem(name, u.clone(), vec![0.0, 0.5, 1.0]);
     let c1 = solve_p1(&p1dof);
     let rep1 = verify(&p1dof, &c1, 1.0);
     let single_ok = rep1.bound.hi >= true_energy_error(&p1dof, &c1) * (1.0 - 1e-9);
     // No interior DOF (2 nodes): the zero candidate is all we have.
-    let p0dof = MmsProblem::new(name, u.clone(), vec![0.0, 1.0]);
+    let p0dof = problem(name, u.clone(), vec![0.0, 1.0]);
     let rep0 = verify(&p0dof, &[0.0, 0.0], 10.0);
     let none_ok = rep0.bound.hi >= true_energy_error(&p0dof, &[0.0, 0.0]) * (1.0 - 1e-9);
     verdict(
@@ -306,7 +313,7 @@ fn ver_005_certify_the_certifiers() {
             if mesh.len() < 5 {
                 continue;
             }
-            let p = MmsProblem::new(name, u.clone(), mesh);
+            let p = problem(name, u.clone(), mesh);
             let cand = solve_p1(&p);
             let rep = verify(&p, &cand, 1e-3);
             let truth = true_energy_error(&p, &cand);
@@ -345,7 +352,7 @@ fn ver_005_certify_the_certifiers() {
 #[test]
 fn ver_006_warm_start_and_ledger() {
     let (name, u) = &mms_zoo()[2];
-    let p = MmsProblem::new(name, u.clone(), meshes()[2].clone());
+    let p = problem(name, u.clone(), meshes()[2].clone());
     let cand = solve_p1(&p);
     let ws = warm_start(&p, &cand, 50);
     let saves = f64::from(ws.cold_iterations) / f64::from(ws.warm_iterations.max(1));
@@ -353,7 +360,7 @@ fn ver_006_warm_start_and_ledger() {
     // Ledger rows for a battery slice.
     let rep = verify(&p, &cand, 1e-3);
     let truth = true_energy_error(&p, &cand);
-    let row = rep.to_row(&p.name, truth);
+    let row = rep.to_row(p.name(), truth);
     let row_complete = row.contains("estimator_family_id")
         && row.contains("flux_hash")
         && row.contains("bound_lo")
@@ -407,13 +414,18 @@ fn assert_refused(
 #[test]
 #[allow(clippy::too_many_lines)] // one adversarial admission matrix
 fn ver_007_hostile_public_inputs_fail_closed() {
-    let exact = Poly(vec![0.0, 1.0, -1.0]);
-    let base = MmsProblem::new("hostile", exact.clone(), vec![0.0, 0.5, 1.0]);
+    let exact = poly(vec![0.0, 1.0, -1.0]);
+    let base = problem("hostile", exact.clone(), vec![0.0, 0.5, 1.0]);
     let candidate = vec![0.0, 0.25, 0.0];
 
     for mesh in [Vec::new(), vec![0.0]] {
-        let problem = MmsProblem::new("short-mesh", exact.clone(), mesh);
-        assert_refused(&problem, &[], 1.0, VerifierRefusal::MeshNodeCount);
+        assert!(matches!(
+            MmsProblem::new("short-mesh", exact.clone(), mesh),
+            Err(Fem1dError::ResourceLimit {
+                resource: "mesh nodes",
+                ..
+            })
+        ));
     }
     assert_refused(&base, &[0.0, 0.0], 1.0, VerifierRefusal::CandidateLength);
 
@@ -426,22 +438,25 @@ fn ver_007_hostile_public_inputs_fail_closed() {
         );
     }
 
-    for mesh in [
-        vec![-0.0, 0.5, 1.0],
-        vec![0.0, 0.5, 2.0],
-        vec![0.0, 0.5, f64::NAN],
-    ] {
-        let problem = MmsProblem::new("wrong-domain", exact.clone(), mesh);
-        assert_refused(&problem, &candidate, 1.0, VerifierRefusal::MeshDomain);
+    let signed_zero_mesh = problem("signed-zero", exact.clone(), vec![-0.0, 0.5, 1.0]);
+    let canonical_mesh = problem("signed-zero", exact.clone(), vec![0.0, 0.5, 1.0]);
+    assert_eq!(signed_zero_mesh.identity(), canonical_mesh.identity());
+    for mesh in [vec![0.0, 0.5, 2.0], vec![0.0, 0.5, f64::NAN]] {
+        assert!(matches!(
+            MmsProblem::new("wrong-domain", exact.clone(), mesh),
+            Err(Fem1dError::MeshDomain) | Err(Fem1dError::NonFiniteMeshNode { .. })
+        ));
     }
     for mesh in [
         vec![0.0, 0.5, 0.5, 1.0],
         vec![0.0, f64::NAN, 1.0],
         vec![0.0, f64::INFINITY, 1.0],
     ] {
-        let problem = MmsProblem::new("bad-coordinates", exact.clone(), mesh);
-        let values = vec![0.0; problem.mesh.len()];
-        assert_refused(&problem, &values, 1.0, VerifierRefusal::MeshCoordinates);
+        assert!(matches!(
+            MmsProblem::new("bad-coordinates", exact.clone(), mesh),
+            Err(Fem1dError::NonIncreasingMeshCell { .. })
+                | Err(Fem1dError::NonFiniteMeshNode { .. })
+        ));
     }
 
     for values in [
@@ -457,64 +472,36 @@ fn ver_007_hostile_public_inputs_fail_closed() {
         assert_refused(&base, &values, 1.0, VerifierRefusal::CandidateNonFinite);
     }
 
-    let oversized_mesh = MmsProblem::new(
-        "oversized-mesh",
-        exact.clone(),
-        vec![0.0; MAX_VERIFIER_MESH_NODES + 1],
-    );
-    assert_refused(&oversized_mesh, &[], 1.0, VerifierRefusal::MeshNodeCount);
-    for polynomial in [
-        VerifierPolynomial::ExactSolution,
-        VerifierPolynomial::Forcing,
-        VerifierPolynomial::ForcingAntiderivative,
-    ] {
-        let mut problem = base.clone();
-        match polynomial {
-            VerifierPolynomial::ExactSolution => {
-                problem.u.0 = vec![0.0; MAX_VERIFIER_POLY_COEFFICIENTS + 1];
-            }
-            VerifierPolynomial::Forcing => {
-                problem.f.0 = vec![0.0; MAX_VERIFIER_POLY_COEFFICIENTS + 1];
-            }
-            VerifierPolynomial::ForcingAntiderivative => {
-                problem.big_f.0 = vec![0.0; MAX_VERIFIER_POLY_COEFFICIENTS + 1];
-            }
-        }
-        assert_refused(
-            &problem,
-            &candidate,
-            1.0,
-            VerifierRefusal::PolynomialCoefficientCount { polynomial },
-        );
-    }
-
-    for polynomial in [
-        VerifierPolynomial::ExactSolution,
-        VerifierPolynomial::Forcing,
-        VerifierPolynomial::ForcingAntiderivative,
-    ] {
-        let mut problem = base.clone();
-        match polynomial {
-            VerifierPolynomial::ExactSolution => problem.u.0[1] = f64::NAN,
-            VerifierPolynomial::Forcing => problem.f.0[0] = f64::INFINITY,
-            VerifierPolynomial::ForcingAntiderivative => {
-                problem.big_f.0[0] = f64::NEG_INFINITY;
-            }
-        }
-        assert_refused(
-            &problem,
-            &candidate,
-            1.0,
-            VerifierRefusal::PolynomialNonFinite { polynomial },
-        );
+    assert!(matches!(
+        MmsProblem::new(
+            "oversized-mesh",
+            exact.clone(),
+            vec![0.0; MAX_FEM1D_MESH_NODES + 1],
+        ),
+        Err(Fem1dError::ResourceLimit {
+            resource: "mesh nodes",
+            ..
+        })
+    ));
+    let mut too_many_semantic_coefficients = vec![0.0; MAX_FEM1D_POLY_COEFFICIENTS + 1];
+    *too_many_semantic_coefficients.last_mut().unwrap() = 1.0;
+    assert!(matches!(
+        Poly::new(too_many_semantic_coefficients),
+        Err(Fem1dError::PolynomialCoefficientCount { .. })
+    ));
+    for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert!(matches!(
+            Poly::new(vec![0.0, value]),
+            Err(Fem1dError::NonFinitePolynomialCoefficient { .. })
+        ));
     }
 
     // The stored binary64 coefficients cancel exactly at x=1, even though
     // ordinary Horner evaluation rounds to a nonzero value.
-    let cancellation_boundary = MmsProblem::new(
+    let cancellation_boundary = problem(
         "cancellation-boundary",
-        Poly(vec![0.0, 1.0, 1.0e16, -1.0e16, -1.0]),
-        base.mesh.clone(),
+        poly(vec![0.0, 1.0, 1.0e16, -1.0e16, -1.0]),
+        base.mesh().to_vec(),
     );
     let cancellation_report = verify(&cancellation_boundary, &[0.0, 0.0, 0.0], 10.0);
     assert_eq!(cancellation_report.refusal, None);
@@ -522,46 +509,24 @@ fn ver_007_hostile_public_inputs_fail_closed() {
 
     // Point Horner loses the final exact residue and returns zero, but the
     // binary-rational polynomial is nonzero at x=1 and must be refused.
-    let hidden_residue = MmsProblem::new(
-        "hidden-boundary-residue",
-        Poly(vec![0.0, 1.0e16, -1.0e16, 1.0]),
-        base.mesh.clone(),
-    );
-    assert_eq!(hidden_residue.u.eval(1.0).to_bits(), 0.0_f64.to_bits());
-    assert_refused(
-        &hidden_residue,
-        &candidate,
-        1.0,
-        VerifierRefusal::ExactSolutionBoundary,
-    );
+    let hidden_residue = poly(vec![0.0, 1.0e16, -1.0e16, 1.0]);
+    assert_eq!(hidden_residue.eval(1.0).to_bits(), 0.0_f64.to_bits());
+    assert!(matches!(
+        MmsProblem::new(
+            "hidden-boundary-residue",
+            hidden_residue,
+            base.mesh().to_vec(),
+        ),
+        Err(Fem1dError::ExactSolutionBoundary)
+    ));
+    assert!(matches!(
+        MmsProblem::new("nonvanishing", poly(vec![1.0]), base.mesh().to_vec()),
+        Err(Fem1dError::ExactSolutionBoundary)
+    ));
 
-    let nonvanishing = MmsProblem::new("nonvanishing", Poly(vec![1.0]), base.mesh.clone());
-    assert_refused(
-        &nonvanishing,
-        &candidate,
-        1.0,
-        VerifierRefusal::ExactSolutionBoundary,
-    );
-    let mut wrong_f = base.clone();
-    wrong_f.f.0[0] = 1.0;
-    assert_refused(
-        &wrong_f,
-        &candidate,
-        1.0,
-        VerifierRefusal::DerivedPolynomialMismatch {
-            polynomial: VerifierPolynomial::Forcing,
-        },
-    );
-    let mut wrong_big_f = base.clone();
-    wrong_big_f.big_f.0[0] = 1.0;
-    assert_refused(
-        &wrong_big_f,
-        &candidate,
-        1.0,
-        VerifierRefusal::DerivedPolynomialMismatch {
-            polynomial: VerifierPolynomial::ForcingAntiderivative,
-        },
-    );
+    let changed_solution = problem("hostile", poly(vec![0.0, 2.0, -2.0]), base.mesh().to_vec());
+    assert_ne!(base.identity(), changed_solution.identity());
+    assert_ne!(base.forcing(), changed_solution.forcing());
 
     let mut refused = verify(&base, &candidate, f64::NAN);
     assert!(matches!(
@@ -571,8 +536,8 @@ fn ver_007_hostile_public_inputs_fail_closed() {
             ..
         })
     ));
-    let zero_problem = MmsProblem::new("zero", Poly(vec![0.0]), base.mesh.clone());
-    let zero_candidate = vec![0.0; zero_problem.mesh.len()];
+    let zero_problem = problem("zero", poly(vec![0.0]), base.mesh().to_vec());
+    let zero_candidate = vec![0.0; zero_problem.mesh().len()];
     let zero_report = verify(&zero_problem, &zero_candidate, 1.0);
     assert!(matches!(
         try_effectivity(&zero_problem, &zero_candidate, &zero_report),
@@ -604,6 +569,6 @@ fn ver_007_hostile_public_inputs_fail_closed() {
     verdict(
         "ver-007",
         true,
-        "empty/short/oversized meshes, malformed coordinates/domain, candidate shape/value/BC errors, invalid tolerances, degree overflow, non-finite/tampered polynomials, and nonvanishing exact data all refused without color",
+        "canonical construction refuses malformed classes/meshes before a problem exists; verifier candidate/tolerance faults still refuse without color; signed/trailing zeros normalize and semantic identity changes remain observable",
     );
 }

@@ -27,12 +27,17 @@ quadrature.
   meets — rigor rests on rounding alone), fallible Thomas solves, a
   fallible high-resolution oracle, and the toy nonlinear class
   (`−u″ + u³ = f`, Newton). `Fem1dError` is the shared structured
-  validity boundary. Every operation revalidates the public problem
-  before indexing or allocation: canonical domain/BCs and derived
-  polynomials, finite strictly increasing mesh, exact nodal shape,
+  validity boundary. `Poly::new` normalizes signed and trailing zeroes;
+  `MmsClass::new` admits the homogeneous exact solution and exclusively
+  derives `f = -u''` plus the rounded zero-constant antiderivative;
+  `MmsProblem::from_class` admits and owns the mesh. All semantic fields are
+  private and immutable. Construction, followed by defensive operation-level
+  validation, checks canonical domain/BCs and derived polynomials, finite
+  strictly increasing mesh, exact nodal shape,
   finite values, and bounded resources. v0 caps are 1,000,000 mesh
   nodes, six polynomial coefficients (exact-solution degree at most
-  five), 10,000 Newton updates, 4,096
+  five) after canonical zero trimming, 4,096 raw coefficients before
+  normalization, 10,000 Newton updates, 4,096
   identity bytes, and 50,000,000 conservative scalar-work units per
   synchronous call. Solver, refinement, ordering, and candidate work
   vectors use fallible reserve. The degree-five envelope is
@@ -58,7 +63,7 @@ quadrature.
   authoritative forcing. Gauss nodes and weights use correctly rounded
   full-precision literals, then widen one ulp; independent adjacent-f64
   truth brackets lock that the irrational constants are enclosed. The
-  rounded public `big_f` is replay metadata
+  rounded `MmsClass::rounded_forcing_antiderivative` value is replay metadata
   and a tightness aid, never silently treated as a point enclosure of
   exact antiderivative coefficients. The bound `‖σ − u_h′‖` is then
   interval-evaluated. Accept ⟺ `bound.hi ≤ tolerance`; an accept
@@ -67,16 +72,22 @@ quadrature.
   `2..=1_000_000` finite, strictly increasing nodes with bit-canonical
   `+0.0` and `1.0` endpoints. Candidates have exactly the mesh length,
   finite values, and bit-canonical homogeneous `+0.0` endpoints.
-  Tolerances are finite and positive. Each polynomial is nonempty,
-  finite, and has at most six coefficients (degree at most five).
+  Tolerances are finite and positive. Each polynomial input is nonempty,
+  finite, bounded to 4,096 raw coefficients, and has at most six canonical
+  coefficients (degree at most five) after signed/trailing-zero normalization.
   Manufactured `u(0)` is canonical `+0.0`; `u(1)` is checked by a bounded
   exact binary superaccumulator over the stored finite f64 coefficients.
   Point Horner can hide a nonzero residue, while interval containment only
   proves that zero is possible, so neither is boundary authority. Exact
   binary-rational cancellations remain admissible even when ordinary Horner
-  rounds to a nonzero value. Canonical `f = -u''` and its
-  zero-constant `big_f` are recomputed from `u` and must match the
-  public fields bit for bit.
+  rounds to a nonzero value. Canonical `f = -u''` and its rounded
+  zero-constant antiderivative are computed from `u` at the sole class
+  construction boundary and exposed only by borrowed accessors. A versioned
+  `fs-obs::ReplayIdentity` binds the class name, exact solution, both derived
+  polynomials, and their explicit schema; the problem identity additionally
+  binds the exact canonical mesh bytes. Canonically equivalent
+  signed/trailing-zero inputs therefore share identity, while changing any
+  admitted semantic field changes the corresponding identity.
 - `VerifierReport::refusal` carries a closed structured reason. A
   refusal preserves the requested tolerance and estimator family but
   returns `[-∞,+∞]`, `accept=false`, no color, and flux hash zero. A
@@ -280,12 +291,9 @@ ledger rows. Any reimplementation must pass the suite unchanged.
   certificate is for the homogeneous-boundary problem defined by the
   recomputed canonical forcing and the conforming candidate; it does
   not claim that rounded Horner evaluation is symbolic algebra.
-- Phase 1 validates every operation but leaves `Poly` and
-  `MmsProblem::new` as open data containers for hostile-input testing.
-  Canonical construction, trailing-zero normalization, private
-  derived fields, and one shared cross-crate admission type are the
-  phase-2 identity migration tracked by `frankensim-oaxj`; callers
-  must not treat construction alone as admission.
+- Canonical bytes are an in-process replay identity for this versioned MMS
+  schema. They do not authenticate provenance or replace a ledger signature;
+  consumers must still use the evidence and ledger trust boundaries.
 - Variable diffusion coefficients, non-polynomial data (with data-
   oscillation terms and explicit Poincaré constants), and quadrature
   ERROR bounds for transcendental integrands are the same successor.

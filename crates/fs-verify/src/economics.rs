@@ -383,7 +383,7 @@ pub fn run_speculative(
             // Consume first-pass verified rejects. Proposers are never rerun:
             // stateful proposal side effects cannot change the warm-start choice.
             let (attempted, best) = rejected.into_parts();
-            let zero = try_zeroed("economic cold start", query.problem.mesh.len())?;
+            let zero = try_zeroed("economic cold start", query.problem.mesh().len())?;
             let cold = solve_nonlinear(&query.problem, &zero, max_iter)?;
             require_converged(&cold, "economic cold solve")?;
             if let Some(rejected) = best {
@@ -411,7 +411,7 @@ pub fn run_speculative(
             }
         }
         Outcome::NoCandidates => {
-            let zero = try_zeroed("economic cold start", query.problem.mesh.len())?;
+            let zero = try_zeroed("economic cold start", query.problem.mesh().len())?;
             let cold = solve_nonlinear(&query.problem, &zero, max_iter)?;
             require_converged(&cold, "economic cold solve")?;
             Ok(EconDecision::ColdSolve {

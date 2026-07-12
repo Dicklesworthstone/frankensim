@@ -22,6 +22,14 @@ fn solve_p1(problem: &MmsProblem) -> Vec<f64> {
     try_solve_p1(problem).expect("zoo problem must solve")
 }
 
+fn poly(coefficients: Vec<f64>) -> Poly {
+    Poly::new(coefficients).expect("valid zoo polynomial")
+}
+
+fn problem(name: &str, u: Poly, mesh: Vec<f64>) -> MmsProblem {
+    MmsProblem::new(name, u, mesh).expect("valid zoo problem")
+}
+
 fn true_energy_error(problem: &MmsProblem, candidate: &[f64]) -> f64 {
     try_true_energy_error(problem, candidate).expect("zoo oracle must evaluate")
 }
@@ -64,7 +72,7 @@ fn family(theta: f64) -> Poly {
     // `(1 + theta)` may round. Preserve its error term on x^4 so the stored
     // binary64 polynomial, not only the ideal formula, vanishes exactly at 1.
     let (middle, correction) = two_sum(1.0, theta);
-    Poly(vec![0.0, -theta, middle, -1.0, correction])
+    poly(vec![0.0, -theta, middle, -1.0, correction])
 }
 
 fn uniform(n: usize) -> Vec<f64> {
@@ -73,7 +81,7 @@ fn uniform(n: usize) -> Vec<f64> {
 
 fn query(theta: f64, n: usize, tol: f64) -> SpeculationQuery {
     SpeculationQuery {
-        problem: MmsProblem::new("family", family(theta), uniform(n)),
+        problem: problem("family", family(theta), uniform(n)),
         theta,
         tolerance: tol,
         regime: "wedge-v0".to_string(),
@@ -89,7 +97,7 @@ impl Proposer for AdversarialSurrogate {
     }
 
     fn propose(&self, q: &SpeculationQuery) -> Result<Option<Proposal>, Fem1dError> {
-        let mut candidate: Vec<f64> = q.problem.mesh.iter().map(|x| (x * 941.0).sin()).collect();
+        let mut candidate: Vec<f64> = q.problem.mesh().iter().map(|x| (x * 941.0).sin()).collect();
         candidate[0] = 0.0;
         let last = candidate.len() - 1;
         candidate[last] = 0.0;
@@ -126,7 +134,7 @@ impl Proposer for QuotedIdentity {
 
     fn propose(&self, q: &SpeculationQuery) -> Result<Option<Proposal>, Fem1dError> {
         Ok(Some(Proposal {
-            candidate: vec![0.0; q.problem.mesh.len()],
+            candidate: vec![0.0; q.problem.mesh().len()],
             confidence: 0.5,
         }))
     }
@@ -192,7 +200,7 @@ fn zoo_001_interface_and_safety() {
 fn zoo_002_neighbor_extrapolation() {
     let n = 32;
     // Certified cache at θ ∈ {0.2, 0.5, 0.8} with FD sensitivities.
-    let solved = |th: f64| solve_p1(&MmsProblem::new("f", family(th), uniform(n)));
+    let solved = |th: f64| solve_p1(&problem("f", family(th), uniform(n)));
     let sens = |th: f64| -> Vec<f64> {
         let h = 1e-4;
         let (up, dn) = (solved(th + h), solved(th - h));
@@ -355,7 +363,7 @@ fn zoo_004_adversarial_falsifier() {
 #[test]
 fn zoo_005_economics_loop() {
     let n = 32;
-    let solved = |th: f64| solve_p1(&MmsProblem::new("f", family(th), uniform(n)));
+    let solved = |th: f64| solve_p1(&problem("f", family(th), uniform(n)));
     let cache: Vec<(f64, Vec<f64>, Option<Vec<f64>>)> = [0.2, 0.4, 0.6, 0.8]
         .iter()
         .map(|&t| (t, solved(t), None))
@@ -432,14 +440,8 @@ fn zoo_006_invalid_queries_refuse_before_proposal_work() {
         Err(Fem1dError::InvalidScalar { field: "theta", .. })
     ));
 
-    let malformed = SpeculationQuery {
-        problem: MmsProblem::new("malformed", family(0.4), Vec::new()),
-        theta: 0.4,
-        tolerance: 1e-2,
-        regime: "wedge-v0".to_string(),
-    };
     assert!(matches!(
-        try_speculate(&malformed, &registry, &mut telemetry),
+        MmsProblem::new("malformed", family(0.4), Vec::new()),
         Err(Fem1dError::ResourceLimit {
             resource: "mesh nodes",
             ..
@@ -448,7 +450,7 @@ fn zoo_006_invalid_queries_refuse_before_proposal_work() {
 
     let q = query(0.4, 8, 1e-2);
     let poisoned_neighbor = NeighborExtrapolation {
-        cache: vec![(f64::NAN, vec![0.0; q.problem.mesh.len()], None)],
+        cache: vec![(f64::NAN, vec![0.0; q.problem.mesh().len()], None)],
     };
     assert!(matches!(
         poisoned_neighbor.propose(&q),
@@ -470,7 +472,7 @@ fn zoo_006_invalid_queries_refuse_before_proposal_work() {
     verdict(
         "zoo-006",
         true,
-        "non-finite query coordinates, malformed meshes, and poisoned neighbor identities return structured errors before ordering, solving, or verification",
+        "non-finite query coordinates and poisoned neighbor identities return structured errors before ordering, solving, or verification; malformed meshes cannot construct a query problem",
     );
 }
 
@@ -522,9 +524,9 @@ fn zoo_008_coarse_rung_routes_large_nonuniform_mesh() {
             coordinate * coordinate
         })
         .collect();
-    let problem = MmsProblem::new("nonuniform-coarse-rung", family(0.3), mesh.clone());
+    let fine_problem = problem("nonuniform-coarse-rung", family(0.3), mesh.clone());
     let query = SpeculationQuery {
-        problem,
+        problem: fine_problem,
         theta: 0.3,
         tolerance: 1.0,
         regime: "nonuniform-routing".to_string(),
@@ -535,7 +537,7 @@ fn zoo_008_coarse_rung_routes_large_nonuniform_mesh() {
         .expect("large nonuniform mesh has a coarse rung");
 
     let coarse_mesh: Vec<f64> = mesh.iter().step_by(2).copied().collect();
-    let coarse_problem = MmsProblem::new("nonuniform-coarse-rung", family(0.3), coarse_mesh);
+    let coarse_problem = problem("nonuniform-coarse-rung", family(0.3), coarse_mesh);
     let coarse_solution = solve_p1(&coarse_problem);
     assert_eq!(proposal.candidate.len(), mesh.len());
     assert!(proposal.candidate.iter().all(|value| value.is_finite()));

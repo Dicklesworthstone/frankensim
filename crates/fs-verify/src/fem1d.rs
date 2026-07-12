@@ -6,18 +6,28 @@
 //! metadata; the verifier intervalizes their exact construction separately.
 
 use crate::interval::Iv;
-use core::fmt;
+use core::{fmt, mem::size_of};
+use fs_obs::ident::{IdentityBuilder, ReplayIdentity};
 
 /// Largest mesh admitted by one synchronous v0 fem1d operation.
 pub const MAX_FEM1D_MESH_NODES: usize = 1_000_000;
 /// Polynomial exactness envelope: degree at most five.
 pub const MAX_FEM1D_POLY_COEFFICIENTS: usize = 6;
+/// Largest non-canonical coefficient vector inspected before zero trimming.
+///
+/// This bounds hostile-input work while allowing semantically redundant
+/// trailing zeroes to normalize before the degree-five class cap is applied.
+pub const MAX_FEM1D_RAW_POLY_COEFFICIENTS: usize = 4_096;
 /// Largest Newton update budget accepted by the synchronous toy solver.
 pub const MAX_FEM1D_NEWTON_ITERATIONS: u32 = 10_000;
 /// Conservative scalar-work ceiling for one synchronous fem1d call.
 pub const MAX_FEM1D_WORK_UNITS: usize = 50_000_000;
 /// Largest provenance/diagnostic identity admitted at this boundary.
 pub const MAX_FEM1D_IDENTITY_BYTES: usize = 4_096;
+/// Semantic schema for canonical manufactured-solution class identities.
+pub const MMS_CLASS_IDENTITY_VERSION: u64 = 1;
+/// Semantic schema for canonical meshed manufactured-problem identities.
+pub const MMS_PROBLEM_IDENTITY_VERSION: u64 = 1;
 
 const NEWTON_RESIDUAL_TOLERANCE: f64 = 1.0e-10;
 
@@ -254,11 +264,68 @@ impl fmt::Display for Fem1dError {
 
 impl std::error::Error for Fem1dError {}
 
-/// A polynomial in monomial coefficients (`c[0] + c[1]x + …`).
+/// An immutable canonical polynomial in monomial coefficients
+/// (`c[0] + c[1]x + …`).
+///
+/// Construction normalizes every signed zero to `+0.0` and removes trailing
+/// zero coefficients while retaining one coefficient for the zero polynomial.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Poly(pub Vec<f64>);
+pub struct Poly(Vec<f64>);
 
 impl Poly {
+    /// Construct one finite polynomial inside the degree-five MMS envelope.
+    ///
+    /// # Errors
+    /// Returns [`Fem1dError`] for an empty, oversized, or non-finite input.
+    pub fn new(coefficients: Vec<f64>) -> Result<Self, Fem1dError> {
+        Self::from_coefficients(coefficients, "poly")
+    }
+
+    fn from_coefficients(
+        mut coefficients: Vec<f64>,
+        field: &'static str,
+    ) -> Result<Self, Fem1dError> {
+        if coefficients.is_empty() {
+            return Err(Fem1dError::PolynomialCoefficientCount {
+                field,
+                count: coefficients.len(),
+            });
+        }
+        if coefficients.len() > MAX_FEM1D_RAW_POLY_COEFFICIENTS {
+            return Err(Fem1dError::ResourceLimit {
+                resource: "raw polynomial coefficients",
+                requested: coefficients.len(),
+                limit: MAX_FEM1D_RAW_POLY_COEFFICIENTS,
+            });
+        }
+        if let Some(index) = coefficients.iter().position(|value| !value.is_finite()) {
+            return Err(Fem1dError::NonFinitePolynomialCoefficient { field, index });
+        }
+        for coefficient in &mut coefficients {
+            *coefficient = canonicalize_zero(*coefficient);
+        }
+        while coefficients.len() > 1
+            && coefficients
+                .last()
+                .is_some_and(|coefficient| *coefficient == 0.0)
+        {
+            coefficients.pop();
+        }
+        if coefficients.len() > MAX_FEM1D_POLY_COEFFICIENTS {
+            return Err(Fem1dError::PolynomialCoefficientCount {
+                field,
+                count: coefficients.len(),
+            });
+        }
+        Ok(Self(coefficients))
+    }
+
+    /// Canonical monomial coefficients.
+    #[must_use]
+    pub fn coefficients(&self) -> &[f64] {
+        &self.0
+    }
+
     /// Whether the finite binary64 coefficients sum to exactly zero.
     ///
     /// At `x = 1`, every monomial equals one, so this is the exact
@@ -328,31 +395,75 @@ impl Poly {
 
     /// Derivative.
     #[must_use]
-    pub fn derive(&self) -> Poly {
+    pub fn derive(&self) -> Result<Poly, Fem1dError> {
         if self.0.len() <= 1 {
-            return Poly(vec![0.0]);
+            return Poly::from_coefficients(vec![0.0], "derived polynomial");
         }
-        Poly(
-            self.0[1..]
-                .iter()
-                .enumerate()
-                .map(|(k, &c)| c * (k + 1) as f64)
-                .collect(),
-        )
+        let mut derived = Vec::new();
+        derived
+            .try_reserve_exact(self.0.len() - 1)
+            .map_err(|_| Fem1dError::AllocationFailed {
+                stage: "polynomial derivative",
+                requested: self.0.len() - 1,
+            })?;
+        for (k, &coefficient) in self.0[1..].iter().enumerate() {
+            let value = coefficient * (k + 1) as f64;
+            if !value.is_finite() {
+                return Err(Fem1dError::NonFiniteIntermediate {
+                    stage: "polynomial derivative",
+                    index: Some(k),
+                });
+            }
+            derived.push(value);
+        }
+        Poly::from_coefficients(derived, "derived polynomial")
     }
 
     /// Antiderivative with zero constant term.
     #[must_use]
-    pub fn antiderive(&self) -> Poly {
-        let mut out = vec![0.0];
-        out.extend(self.0.iter().enumerate().map(|(k, &c)| c / (k + 1) as f64));
-        Poly(out)
+    pub fn antiderive(&self) -> Result<Poly, Fem1dError> {
+        let requested =
+            self.0
+                .len()
+                .checked_add(1)
+                .ok_or(Fem1dError::PolynomialCoefficientCount {
+                    field: "antiderivative",
+                    count: usize::MAX,
+                })?;
+        if requested > MAX_FEM1D_POLY_COEFFICIENTS {
+            return Err(Fem1dError::PolynomialCoefficientCount {
+                field: "antiderivative",
+                count: requested,
+            });
+        }
+        let mut out = Vec::new();
+        out.try_reserve_exact(requested)
+            .map_err(|_| Fem1dError::AllocationFailed {
+                stage: "polynomial antiderivative",
+                requested,
+            })?;
+        out.push(0.0);
+        for (k, &coefficient) in self.0.iter().enumerate() {
+            let value = coefficient / (k + 1) as f64;
+            if !value.is_finite() {
+                return Err(Fem1dError::NonFiniteIntermediate {
+                    stage: "polynomial antiderivative",
+                    index: Some(k),
+                });
+            }
+            out.push(value);
+        }
+        Poly::from_coefficients(out, "antiderivative")
     }
 
-    /// Negate.
+    /// Negate this canonical polynomial without another allocation.
     #[must_use]
-    pub fn neg(&self) -> Poly {
-        Poly(self.0.iter().map(|c| -c).collect())
+    pub fn neg(mut self) -> Poly {
+        for coefficient in &mut self.0 {
+            *coefficient = canonicalize_zero(-*coefficient);
+        }
+        // Negating in place preserves finiteness, size, and canonical shape.
+        self
     }
 
     /// Horner evaluation (f64).
@@ -377,36 +488,241 @@ impl Poly {
     }
 }
 
-/// A manufactured problem: `−u″ = f`, `u(0) = u(1) = 0`.
-#[derive(Debug, Clone)]
+/// One admitted manufactured-solution class, independent of discretization.
+///
+/// The exact solution is canonical and immutable. The forcing and its rounded
+/// zero-constant antiderivative are derived once during construction and cannot
+/// drift independently. The replay identity binds all stored semantic fields.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MmsClass {
+    name: String,
+    u: Poly,
+    forcing: Poly,
+    rounded_forcing_antiderivative: Poly,
+    identity: ReplayIdentity,
+}
+
+impl MmsClass {
+    /// Construct and admit one canonical degree-five manufactured class.
+    ///
+    /// # Errors
+    /// Returns [`Fem1dError`] for invalid identity text, non-homogeneous
+    /// endpoint data, or non-finite derived arithmetic.
+    pub fn new(name: &str, u: Poly) -> Result<Self, Fem1dError> {
+        validate_identity(name, "problem.name")?;
+        if u.0[0].to_bits() != 0.0_f64.to_bits() || !u.is_exactly_zero_at_one() {
+            return Err(Fem1dError::ExactSolutionBoundary);
+        }
+        let forcing = u.derive()?.derive()?.neg();
+        let rounded_forcing_antiderivative = forcing.antiderive()?;
+
+        let mut owned_name = String::new();
+        owned_name
+            .try_reserve_exact(name.len())
+            .map_err(|_| Fem1dError::AllocationFailed {
+                stage: "manufactured class name",
+                requested: name.len(),
+            })?;
+        owned_name.push_str(name);
+        let identity = class_identity(&owned_name, &u, &forcing, &rounded_forcing_antiderivative)?;
+        Ok(Self {
+            name: owned_name,
+            u,
+            forcing,
+            rounded_forcing_antiderivative,
+            identity,
+        })
+    }
+
+    /// Stable kernel/problem-class name.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Canonical exact-solution polynomial.
+    #[must_use]
+    pub fn exact_solution(&self) -> &Poly {
+        &self.u
+    }
+
+    /// Canonical forcing `f = -u''`.
+    #[must_use]
+    pub fn forcing(&self) -> &Poly {
+        &self.forcing
+    }
+
+    /// Rounded coefficients of the zero-constant forcing antiderivative.
+    ///
+    /// These bytes are replay/tightness metadata. The certified estimator still
+    /// intervalizes exact coefficient division instead of treating them as an
+    /// exact mathematical antiderivative.
+    #[must_use]
+    pub fn rounded_forcing_antiderivative(&self) -> &Poly {
+        &self.rounded_forcing_antiderivative
+    }
+
+    /// Versioned canonical replay identity for the class.
+    #[must_use]
+    pub fn identity(&self) -> &ReplayIdentity {
+        &self.identity
+    }
+
+    /// Exact canonical bytes bound by [`Self::identity`].
+    #[must_use]
+    pub fn canonical_bytes(&self) -> &[u8] {
+        self.identity.canonical_bytes()
+    }
+}
+
+/// A canonical manufactured problem: one admitted class on one admitted mesh.
+#[derive(Debug, Clone, PartialEq)]
 pub struct MmsProblem {
-    /// Name (ledger rows).
-    pub name: String,
-    /// The exact solution (must vanish at 0 and 1).
-    pub u: Poly,
-    /// The load `f = −u″`.
-    pub f: Poly,
-    /// Rounded coefficients for `F(x) = ∫₀ˣ f`, used for replay and
-    /// tightness only. The verifier intervalizes exact coefficient division.
-    pub big_f: Poly,
-    /// Mesh nodes (ascending, first 0, last 1).
-    pub mesh: Vec<f64>,
+    class: MmsClass,
+    mesh: Vec<f64>,
+    identity: ReplayIdentity,
 }
 
 impl MmsProblem {
     /// Build from an exact polynomial solution and a mesh.
-    #[must_use]
-    pub fn new(name: &str, u: Poly, mesh: Vec<f64>) -> Self {
-        let f = u.derive().derive().neg();
-        let big_f = f.antiderive();
-        MmsProblem {
-            name: name.to_string(),
-            u,
-            f,
-            big_f,
-            mesh,
-        }
+    ///
+    /// # Errors
+    /// Returns [`Fem1dError`] when either the class or mesh is inadmissible.
+    pub fn new(name: &str, u: Poly, mesh: Vec<f64>) -> Result<Self, Fem1dError> {
+        Self::from_class(MmsClass::new(name, u)?, mesh)
     }
+
+    /// Place an admitted class on an admitted canonical mesh.
+    ///
+    /// # Errors
+    /// Returns [`Fem1dError`] for invalid mesh size, coordinates, ordering, or
+    /// reciprocal widths.
+    pub fn from_class(class: MmsClass, mut mesh: Vec<f64>) -> Result<Self, Fem1dError> {
+        validate_mesh_size(&mesh)?;
+        for node in &mut mesh {
+            *node = canonicalize_zero(*node);
+        }
+        validate_mesh(&mesh)?;
+        let identity = problem_identity(&class, &mesh)?;
+        Ok(Self {
+            class,
+            mesh,
+            identity,
+        })
+    }
+
+    /// Reuse the same admitted class on a new mesh.
+    ///
+    /// # Errors
+    /// Returns [`Fem1dError`] when the new mesh is inadmissible.
+    pub fn with_mesh(&self, mesh: Vec<f64>) -> Result<Self, Fem1dError> {
+        Self::from_class(self.class.clone(), mesh)
+    }
+
+    /// Admitted manufactured-solution class.
+    #[must_use]
+    pub fn class(&self) -> &MmsClass {
+        &self.class
+    }
+
+    /// Stable problem name.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        self.class.name()
+    }
+
+    /// Canonical exact-solution polynomial.
+    #[must_use]
+    pub fn exact_solution(&self) -> &Poly {
+        self.class.exact_solution()
+    }
+
+    /// Canonical forcing polynomial.
+    #[must_use]
+    pub fn forcing(&self) -> &Poly {
+        self.class.forcing()
+    }
+
+    /// Rounded forcing-antiderivative replay metadata.
+    #[must_use]
+    pub fn rounded_forcing_antiderivative(&self) -> &Poly {
+        self.class.rounded_forcing_antiderivative()
+    }
+
+    /// Canonical mesh nodes.
+    #[must_use]
+    pub fn mesh(&self) -> &[f64] {
+        &self.mesh
+    }
+
+    /// Versioned canonical replay identity for class plus mesh.
+    #[must_use]
+    pub fn identity(&self) -> &ReplayIdentity {
+        &self.identity
+    }
+
+    /// Exact canonical bytes bound by [`Self::identity`].
+    #[must_use]
+    pub fn canonical_bytes(&self) -> &[u8] {
+        self.identity.canonical_bytes()
+    }
+}
+
+fn canonicalize_zero(value: f64) -> f64 {
+    if value == 0.0 { 0.0 } else { value }
+}
+
+fn f64_bytes(values: &[f64], stage: &'static str) -> Result<Vec<u8>, Fem1dError> {
+    let requested =
+        values
+            .len()
+            .checked_mul(size_of::<u64>())
+            .ok_or(Fem1dError::AllocationFailed {
+                stage,
+                requested: usize::MAX,
+            })?;
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(requested)
+        .map_err(|_| Fem1dError::AllocationFailed { stage, requested })?;
+    for value in values {
+        bytes.extend_from_slice(&value.to_bits().to_le_bytes());
+    }
+    Ok(bytes)
+}
+
+fn class_identity(
+    name: &str,
+    exact_solution: &Poly,
+    forcing: &Poly,
+    rounded_forcing_antiderivative: &Poly,
+) -> Result<ReplayIdentity, Fem1dError> {
+    let exact_solution_bytes = f64_bytes(&exact_solution.0, "MMS exact-solution identity")?;
+    let forcing_bytes = f64_bytes(&forcing.0, "MMS forcing identity")?;
+    let antiderivative_bytes = f64_bytes(
+        &rounded_forcing_antiderivative.0,
+        "MMS forcing-antiderivative identity",
+    )?;
+    Ok(IdentityBuilder::new("fs-verify/fem1d-mms-class")
+        .u64("class_schema", MMS_CLASS_IDENTITY_VERSION)
+        .str("name", name)
+        .bytes("exact_solution_f64_le", &exact_solution_bytes)
+        .bytes("forcing_f64_le", &forcing_bytes)
+        .bytes(
+            "rounded_forcing_antiderivative_f64_le",
+            &antiderivative_bytes,
+        )
+        .finish())
+}
+
+fn problem_identity(class: &MmsClass, mesh: &[f64]) -> Result<ReplayIdentity, Fem1dError> {
+    let mesh_bytes = f64_bytes(mesh, "MMS problem mesh identity")?;
+    Ok(IdentityBuilder::new("fs-verify/fem1d-mms-problem")
+        .u64("problem_schema", MMS_PROBLEM_IDENTITY_VERSION)
+        .child("class", class.identity())
+        .bytes("class_canonical_bytes", class.canonical_bytes())
+        .bytes("mesh_f64_le", &mesh_bytes)
+        .finish())
 }
 
 fn poly_bits_equal(left: &Poly, right: &Poly) -> bool {
@@ -420,18 +736,12 @@ fn poly_bits_equal(left: &Poly, right: &Poly) -> bool {
 
 /// Validate the complete v0 MMS problem before allocation or numerical work.
 pub(crate) fn validate_problem(problem: &MmsProblem) -> Result<(), Fem1dError> {
-    validate_identity(&problem.name, "problem.name")?;
-    if !(2..=MAX_FEM1D_MESH_NODES).contains(&problem.mesh.len()) {
-        return Err(Fem1dError::ResourceLimit {
-            resource: "mesh nodes",
-            requested: problem.mesh.len(),
-            limit: MAX_FEM1D_MESH_NODES,
-        });
-    }
+    validate_identity(problem.name(), "problem.name")?;
+    validate_mesh(problem.mesh())?;
     for (field, polynomial) in [
-        ("u", &problem.u),
-        ("f", &problem.f),
-        ("big_f", &problem.big_f),
+        ("u", problem.exact_solution()),
+        ("f", problem.forcing()),
+        ("big_f", problem.rounded_forcing_antiderivative()),
     ] {
         if !(1..=MAX_FEM1D_POLY_COEFFICIENTS).contains(&polynomial.0.len()) {
             return Err(Fem1dError::PolynomialCoefficientCount {
@@ -443,15 +753,44 @@ pub(crate) fn validate_problem(problem: &MmsProblem) -> Result<(), Fem1dError> {
             return Err(Fem1dError::NonFinitePolynomialCoefficient { field, index });
         }
     }
-    if problem.mesh[0].to_bits() != 0.0_f64.to_bits()
-        || problem.mesh[problem.mesh.len() - 1].to_bits() != 1.0_f64.to_bits()
+    if problem.exact_solution().0[0].to_bits() != 0.0_f64.to_bits()
+        || !problem.exact_solution().is_exactly_zero_at_one()
+    {
+        return Err(Fem1dError::ExactSolutionBoundary);
+    }
+    let expected_f = problem.exact_solution().derive()?.derive()?.neg();
+    if expected_f.0.iter().any(|value| !value.is_finite()) {
+        return Err(Fem1dError::NonFiniteIntermediate {
+            stage: "canonical forcing",
+            index: None,
+        });
+    }
+    if !poly_bits_equal(problem.forcing(), &expected_f) {
+        return Err(Fem1dError::DerivedPolynomialMismatch { field: "f" });
+    }
+    let expected_big_f = expected_f.antiderive()?;
+    if expected_big_f.0.iter().any(|value| !value.is_finite()) {
+        return Err(Fem1dError::NonFiniteIntermediate {
+            stage: "canonical forcing antiderivative",
+            index: None,
+        });
+    }
+    if !poly_bits_equal(problem.rounded_forcing_antiderivative(), &expected_big_f) {
+        return Err(Fem1dError::DerivedPolynomialMismatch { field: "big_f" });
+    }
+    Ok(())
+}
+
+fn validate_mesh(mesh: &[f64]) -> Result<(), Fem1dError> {
+    validate_mesh_size(mesh)?;
+    if mesh[0].to_bits() != 0.0_f64.to_bits() || mesh[mesh.len() - 1].to_bits() != 1.0_f64.to_bits()
     {
         return Err(Fem1dError::MeshDomain);
     }
-    if let Some(index) = problem.mesh.iter().position(|value| !value.is_finite()) {
+    if let Some(index) = mesh.iter().position(|value| !value.is_finite()) {
         return Err(Fem1dError::NonFiniteMeshNode { index });
     }
-    for (cell, nodes) in problem.mesh.windows(2).enumerate() {
+    for (cell, nodes) in mesh.windows(2).enumerate() {
         if nodes[0] >= nodes[1] {
             return Err(Fem1dError::NonIncreasingMeshCell { cell });
         }
@@ -460,28 +799,16 @@ pub(crate) fn validate_problem(problem: &MmsProblem) -> Result<(), Fem1dError> {
             return Err(Fem1dError::NonFiniteReciprocal { cell });
         }
     }
-    if problem.u.0[0].to_bits() != 0.0_f64.to_bits() || !problem.u.is_exactly_zero_at_one() {
-        return Err(Fem1dError::ExactSolutionBoundary);
-    }
-    let expected_f = problem.u.derive().derive().neg();
-    if expected_f.0.iter().any(|value| !value.is_finite()) {
-        return Err(Fem1dError::NonFiniteIntermediate {
-            stage: "canonical forcing",
-            index: None,
+    Ok(())
+}
+
+fn validate_mesh_size(mesh: &[f64]) -> Result<(), Fem1dError> {
+    if !(2..=MAX_FEM1D_MESH_NODES).contains(&mesh.len()) {
+        return Err(Fem1dError::ResourceLimit {
+            resource: "mesh nodes",
+            requested: mesh.len(),
+            limit: MAX_FEM1D_MESH_NODES,
         });
-    }
-    if !poly_bits_equal(&problem.f, &expected_f) {
-        return Err(Fem1dError::DerivedPolynomialMismatch { field: "f" });
-    }
-    let expected_big_f = expected_f.antiderive();
-    if expected_big_f.0.iter().any(|value| !value.is_finite()) {
-        return Err(Fem1dError::NonFiniteIntermediate {
-            stage: "canonical forcing antiderivative",
-            index: None,
-        });
-    }
-    if !poly_bits_equal(&problem.big_f, &expected_big_f) {
-        return Err(Fem1dError::DerivedPolynomialMismatch { field: "big_f" });
     }
     Ok(())
 }
@@ -515,10 +842,10 @@ pub(crate) fn validate_candidate(
     candidate: &[f64],
     field: &'static str,
 ) -> Result<(), Fem1dError> {
-    if candidate.len() != problem.mesh.len() {
+    if candidate.len() != problem.mesh().len() {
         return Err(Fem1dError::CandidateLength {
             field,
-            expected: problem.mesh.len(),
+            expected: problem.mesh().len(),
             actual: candidate.len(),
         });
     }
@@ -680,14 +1007,19 @@ fn solve_tridiagonal_into(
 /// bounded work envelope, allocation, assembly, or elimination is unusable.
 pub fn solve_p1(problem: &MmsProblem) -> Result<Vec<f64>, Fem1dError> {
     validate_problem(problem)?;
-    let m = &problem.mesh;
+    let m = problem.mesh();
     let n = m.len();
     let interior = n - 2;
     validate_work(
         "P1 solve",
         &[
             n - 1,
-            problem.f.0.len().saturating_mul(5).saturating_add(16),
+            problem
+                .forcing()
+                .coefficients()
+                .len()
+                .saturating_mul(5)
+                .saturating_add(16),
         ],
     )?;
     if interior == 0 {
@@ -713,7 +1045,7 @@ pub fn solve_p1(problem: &MmsProblem) -> Result<Vec<f64>, Fem1dError> {
         }
         // Load: ∫ f φ_a over the element, exact Gauss.
         for (gx, gw) in gauss5(x0, x1) {
-            let fv = problem.f.eval(gx);
+            let fv = problem.forcing().eval(gx);
             let phi_left = (x1 - gx) / h;
             let phi_right = (gx - x0) / h;
             if !gx.is_finite()
@@ -782,8 +1114,8 @@ pub fn gauss5(x0: f64, x1: f64) -> [(f64, f64); 5] {
 pub fn true_energy_error(problem: &MmsProblem, candidate: &[f64]) -> Result<f64, Fem1dError> {
     validate_problem(problem)?;
     validate_candidate(problem, candidate, "candidate")?;
-    let m = &problem.mesh;
-    let du = problem.u.derive();
+    let m = problem.mesh();
+    let du = problem.exact_solution().derive()?;
     validate_work(
         "energy-error oracle",
         &[m.len() - 1, 32, 5, du.0.len().saturating_add(8)],
@@ -864,7 +1196,7 @@ fn assemble_nonlinear(
     jac_diag: &mut [f64],
     jac_off: &mut [f64],
 ) -> Result<f64, Fem1dError> {
-    let m = &problem.mesh;
+    let m = problem.mesh();
     let interior = m.len() - 2;
     if resid.len() != interior
         || jac_diag.len() != interior
@@ -942,7 +1274,7 @@ fn assemble_nonlinear(
             )?;
         }
         for (gx, gw) in gauss5(x0, x1) {
-            let forcing = problem.f.eval(gx) + problem.u.eval(gx).powi(3);
+            let forcing = problem.forcing().eval(gx) + problem.exact_solution().eval(gx).powi(3);
             let phi_left = (x1 - gx) / h;
             let phi_right = (gx - x0) / h;
             if !gx.is_finite()
@@ -1016,10 +1348,10 @@ pub fn solve_nonlinear(
             limit: MAX_FEM1D_WORK_UNITS,
         })?;
     let per_cell = problem
-        .u
-        .0
+        .exact_solution()
+        .coefficients()
         .len()
-        .checked_add(problem.f.0.len())
+        .checked_add(problem.forcing().coefficients().len())
         .and_then(|polynomial_work| polynomial_work.checked_mul(5))
         .and_then(|polynomial_work| polynomial_work.checked_add(32))
         .ok_or(Fem1dError::WorkBudgetExceeded {
@@ -1029,10 +1361,10 @@ pub fn solve_nonlinear(
         })?;
     validate_work(
         "nonlinear solve",
-        &[problem.mesh.len() - 1, passes, per_cell],
+        &[problem.mesh().len() - 1, passes, per_cell],
     )?;
 
-    let interior = problem.mesh.len() - 2;
+    let interior = problem.mesh().len() - 2;
     let mut u = try_copy_slice("nonlinear start", start)?;
     let mut resid = try_zeroed("nonlinear residual", interior)?;
     let mut jac_diag = try_zeroed("nonlinear Jacobian diagonal", interior)?;
@@ -1097,34 +1429,25 @@ pub fn solve_nonlinear(
 mod tests {
     use super::*;
 
+    fn poly(coefficients: Vec<f64>) -> Poly {
+        Poly::new(coefficients).expect("valid test polynomial")
+    }
+
     fn test_problem(mesh: Vec<f64>) -> MmsProblem {
-        MmsProblem::new("fem1d-test", Poly(vec![0.0, 1.0, -1.0]), mesh)
+        MmsProblem::new("fem1d-test", poly(vec![0.0, 1.0, -1.0]), mesh).expect("valid test problem")
     }
 
     #[test]
     fn malformed_public_inputs_refuse_before_indexing() {
         for mesh in [Vec::new(), vec![0.0]] {
-            let problem = test_problem(mesh);
+            let error = MmsProblem::new("fem1d-test", poly(vec![0.0, 1.0, -1.0]), mesh)
+                .expect_err("short mesh must refuse during construction");
             assert!(matches!(
-                solve_p1(&problem),
-                Err(Fem1dError::ResourceLimit {
+                error,
+                Fem1dError::ResourceLimit {
                     resource: "mesh nodes",
                     ..
-                })
-            ));
-            assert!(matches!(
-                solve_nonlinear(&problem, &[], 1),
-                Err(Fem1dError::ResourceLimit {
-                    resource: "mesh nodes",
-                    ..
-                })
-            ));
-            assert!(matches!(
-                true_energy_error(&problem, &[]),
-                Err(Fem1dError::ResourceLimit {
-                    resource: "mesh nodes",
-                    ..
-                })
+                }
             ));
         }
 
@@ -1151,16 +1474,14 @@ mod tests {
             Err(Fem1dError::NonFiniteCandidate { field: "start", .. })
         ));
 
-        let duplicate = test_problem(vec![0.0, 0.5, 0.5, 1.0]);
+        let duplicate = MmsProblem::new(
+            "duplicate",
+            poly(vec![0.0, 1.0, -1.0]),
+            vec![0.0, 0.5, 0.5, 1.0],
+        );
         assert!(matches!(
-            solve_p1(&duplicate),
+            duplicate,
             Err(Fem1dError::NonIncreasingMeshCell { .. })
-        ));
-        let mut tampered = problem.clone();
-        tampered.f.0[0] = 123.0;
-        assert!(matches!(
-            solve_p1(&tampered),
-            Err(Fem1dError::DerivedPolynomialMismatch { field: "f" })
         ));
     }
 
@@ -1184,7 +1505,7 @@ mod tests {
         let solved = solve_nonlinear(&problem, &zero, 50).expect("bounded Newton solve");
         assert!(solved.converged);
         assert!(solved.residual_norm < NEWTON_RESIDUAL_TOLERANCE);
-        assert_eq!(solved.solution.len(), problem.mesh.len());
+        assert_eq!(solved.solution.len(), problem.mesh().len());
         assert_eq!(solved.solution[0].to_bits(), 0.0_f64.to_bits());
         assert_eq!(
             solved.solution[solved.solution.len() - 1].to_bits(),
@@ -1245,21 +1566,21 @@ mod tests {
 
     #[test]
     fn exact_boundary_sum_distinguishes_hidden_residue_from_true_cancellation() {
-        let hidden_residue = Poly(vec![0.0, 1.0e16, -1.0e16, 1.0]);
+        let hidden_residue = poly(vec![0.0, 1.0e16, -1.0e16, 1.0]);
         assert_eq!(hidden_residue.eval(1.0).to_bits(), 0.0_f64.to_bits());
         assert!(
             !hidden_residue.is_exactly_zero_at_one(),
             "an absorbed exact residue is not a homogeneous trace"
         );
 
-        let rounded_point = Poly(vec![0.0, 1.0, 1.0e16, -1.0e16, -1.0]);
+        let rounded_point = poly(vec![0.0, 1.0, 1.0e16, -1.0e16, -1.0]);
         assert_ne!(rounded_point.eval(1.0).to_bits(), 0.0_f64.to_bits());
         assert!(
             rounded_point.is_exactly_zero_at_one(),
             "the exact binary-rational coefficient sum is authoritative"
         );
 
-        let extremes = Poly(vec![
+        let extremes = poly(vec![
             0.0,
             f64::MAX,
             -f64::MAX,
@@ -1267,6 +1588,84 @@ mod tests {
             -f64::MIN_POSITIVE,
         ]);
         assert!(extremes.is_exactly_zero_at_one());
-        assert!(!Poly(vec![0.0, f64::INFINITY, f64::NEG_INFINITY]).is_exactly_zero_at_one());
+        assert!(matches!(
+            Poly::new(vec![0.0, f64::INFINITY, f64::NEG_INFINITY]),
+            Err(Fem1dError::NonFinitePolynomialCoefficient { .. })
+        ));
+    }
+
+    #[test]
+    fn canonical_class_and_problem_identity_bind_every_semantic_field() {
+        let normalized = MmsClass::new(
+            "elliptic",
+            poly(vec![-0.0, 1.0, -1.0, -0.0, 0.0, -0.0, 0.0]),
+        )
+        .expect("canonical class");
+        let ordinary =
+            MmsClass::new("elliptic", poly(vec![0.0, 1.0, -1.0])).expect("same canonical class");
+        assert_eq!(normalized, ordinary);
+        assert_eq!(normalized.exact_solution().coefficients().len(), 3);
+        assert_eq!(
+            normalized.exact_solution().coefficients()[0].to_bits(),
+            0.0_f64.to_bits()
+        );
+        assert_eq!(normalized.forcing().coefficients(), &[2.0]);
+        assert_eq!(
+            normalized.rounded_forcing_antiderivative().coefficients(),
+            &[0.0, 2.0]
+        );
+        assert_eq!(normalized.identity(), ordinary.identity());
+        assert_eq!(normalized.canonical_bytes(), ordinary.canonical_bytes());
+        assert_eq!(normalized.identity().root(), 0xff26_2525_aacf_380f);
+        assert_eq!(normalized.canonical_bytes().len(), 278);
+
+        let renamed =
+            MmsClass::new("elliptic-renamed", poly(vec![0.0, 1.0, -1.0])).expect("renamed class");
+        let rescaled =
+            MmsClass::new("elliptic", poly(vec![0.0, 2.0, -2.0])).expect("rescaled class");
+        assert_ne!(normalized.identity(), renamed.identity());
+        assert_ne!(normalized.identity(), rescaled.identity());
+        assert_ne!(normalized.forcing(), rescaled.forcing());
+
+        let coarse = MmsProblem::from_class(normalized.clone(), vec![-0.0, 0.5, 1.0])
+            .expect("canonicalized mesh");
+        let same =
+            MmsProblem::from_class(ordinary, vec![0.0, 0.5, 1.0]).expect("same canonical mesh");
+        let shifted = MmsProblem::from_class(normalized.clone(), vec![0.0, 0.75, 1.0])
+            .expect("same-size different mesh");
+        let refined =
+            MmsProblem::from_class(normalized, vec![0.0, 0.25, 0.5, 1.0]).expect("different mesh");
+        assert_eq!(coarse.identity(), same.identity());
+        assert_eq!(coarse.canonical_bytes(), same.canonical_bytes());
+        assert_ne!(coarse.identity(), shifted.identity());
+        assert_ne!(coarse.identity(), refined.identity());
+
+        let rounded = MmsClass::new(
+            "rounded-antiderivative",
+            poly(vec![0.0, 0.1, 0.0, 0.0, -0.1]),
+        )
+        .expect("nontrivial rounded antiderivative class");
+        let rounded_coefficient = rounded.rounded_forcing_antiderivative().coefficients()[3];
+        assert_ne!(rounded_coefficient.to_bits(), 0.4_f64.to_bits());
+        assert_eq!(
+            rounded_coefficient.to_bits(),
+            (rounded.forcing().coefficients()[2] / 3.0).to_bits()
+        );
+
+        assert!(matches!(
+            Poly::new(Vec::new()),
+            Err(Fem1dError::PolynomialCoefficientCount { count: 0, .. })
+        ));
+        assert!(matches!(
+            Poly::new(vec![0.0; MAX_FEM1D_RAW_POLY_COEFFICIENTS + 1]),
+            Err(Fem1dError::ResourceLimit {
+                resource: "raw polynomial coefficients",
+                ..
+            })
+        ));
+        assert!(matches!(
+            MmsClass::new("not-homogeneous", poly(vec![0.0, 1.0])),
+            Err(Fem1dError::ExactSolutionBoundary)
+        ));
     }
 }

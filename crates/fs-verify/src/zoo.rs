@@ -578,7 +578,7 @@ impl Proposer for CoarseRungProlongation {
 
     fn propose(&self, query: &SpeculationQuery) -> Result<Option<Proposal>, Fem1dError> {
         validate_query(query)?;
-        let mesh = &query.problem.mesh;
+        let mesh = query.problem.mesh();
         if mesh.len() < 5 {
             return Ok(None); // no coarser rung exists
         }
@@ -595,7 +595,7 @@ impl Proposer for CoarseRungProlongation {
         if mesh.len().is_multiple_of(2) {
             coarse_mesh.push(mesh[mesh.len() - 1]);
         }
-        let coarse = MmsProblem::new(&query.problem.name, query.problem.u.clone(), coarse_mesh);
+        let coarse = query.problem.with_mesh(coarse_mesh)?;
         let cu = solve_p1(&coarse)?;
         // Linear prolongation onto the fine mesh.
         let mut candidate = Vec::new();
@@ -607,10 +607,10 @@ impl Proposer for CoarseRungProlongation {
             })?;
         let mut segment = 0usize;
         for (index, &x) in mesh.iter().enumerate() {
-            while segment + 1 < coarse.mesh.len() - 1 && x > coarse.mesh[segment + 1] {
+            while segment + 1 < coarse.mesh().len() - 1 && x > coarse.mesh()[segment + 1] {
                 segment += 1;
             }
-            let (x0, x1) = (coarse.mesh[segment], coarse.mesh[segment + 1]);
+            let (x0, x1) = (coarse.mesh()[segment], coarse.mesh()[segment + 1]);
             if x < x0 || x > x1 {
                 return Err(Fem1dError::NonFiniteIntermediate {
                     stage: "coarse-rung segment routing",

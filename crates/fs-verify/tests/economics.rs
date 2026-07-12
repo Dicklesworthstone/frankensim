@@ -24,6 +24,14 @@ fn solve_p1(problem: &MmsProblem) -> Vec<f64> {
     try_solve_p1(problem).expect("economics problem must solve")
 }
 
+fn poly(coefficients: Vec<f64>) -> Poly {
+    Poly::new(coefficients).expect("valid economics polynomial")
+}
+
+fn problem(name: &str, u: Poly, mesh: Vec<f64>) -> MmsProblem {
+    MmsProblem::new(name, u, mesh).expect("valid economics problem")
+}
+
 fn run_speculative(
     query: &SpeculationQuery,
     registry: &Registry,
@@ -46,7 +54,7 @@ fn verdict(case: &str, pass: bool, detail: &str) {
 
 fn family(theta: f64) -> Poly {
     let (middle, correction) = two_sum(1.0, theta);
-    Poly(vec![0.0, -theta, middle, -1.0, correction])
+    poly(vec![0.0, -theta, middle, -1.0, correction])
 }
 
 /// The amplified family (×40): the u³ term dominates, so Newton
@@ -56,7 +64,7 @@ fn family(theta: f64) -> Poly {
 fn family_big(theta: f64) -> Poly {
     let scaled_theta = 40.0 * theta;
     let (middle, correction) = two_sum(40.0, scaled_theta);
-    Poly(vec![0.0, -scaled_theta, middle, -40.0, correction])
+    poly(vec![0.0, -scaled_theta, middle, -40.0, correction])
 }
 
 fn uniform(n: usize) -> Vec<f64> {
@@ -65,7 +73,7 @@ fn uniform(n: usize) -> Vec<f64> {
 
 fn query(theta: f64, n: usize, tol: f64, regime: &str) -> SpeculationQuery {
     SpeculationQuery {
-        problem: MmsProblem::new("family", family(theta), uniform(n)),
+        problem: problem("family", family(theta), uniform(n)),
         theta,
         tolerance: tol,
         regime: regime.to_string(),
@@ -110,7 +118,7 @@ impl Proposer for Antithetical {
     }
 
     fn propose(&self, q: &SpeculationQuery) -> Result<Option<Proposal>, Fem1dError> {
-        let mut candidate = q.problem.mesh.iter().map(|_| 50.0).collect::<Vec<_>>();
+        let mut candidate = q.problem.mesh().iter().map(|_| 50.0).collect::<Vec<_>>();
         candidate[0] = 0.0;
         let last = candidate.len() - 1;
         candidate[last] = 0.0;
@@ -134,7 +142,7 @@ impl Proposer for ConfidentReject {
 
     fn propose(&self, q: &SpeculationQuery) -> Result<Option<Proposal>, Fem1dError> {
         Ok(Some(Proposal {
-            candidate: vec![0.0; q.problem.mesh.len()],
+            candidate: vec![0.0; q.problem.mesh().len()],
             confidence: 1.0,
         }))
     }
@@ -164,7 +172,7 @@ impl Proposer for SinglePass {
         let prior = self.calls.fetch_add(1, Ordering::SeqCst);
         assert_eq!(prior, 0, "economics reran a stateful proposer");
         Ok(Some(Proposal {
-            candidate: vec![0.0; q.problem.mesh.len()],
+            candidate: vec![0.0; q.problem.mesh().len()],
             confidence: 0.5,
         }))
     }
@@ -176,7 +184,7 @@ impl Proposer for SinglePass {
 #[test]
 fn econ_001_outright_and_warm() {
     let n = 32;
-    let solved = solve_p1(&MmsProblem::new("f", family_big(0.4), uniform(n)));
+    let solved = solve_p1(&problem("f", family_big(0.4), uniform(n)));
     let mut reg = Registry::new();
     reg.register(Box::new(NeighborExtrapolation {
         cache: vec![(0.4, solved, None)],
@@ -186,7 +194,7 @@ fn econ_001_outright_and_warm() {
     let mut guard = DriftGuard::default();
     // Near the cache at loose tolerance: outright accept.
     let q1 = SpeculationQuery {
-        problem: MmsProblem::new("family", family_big(0.42), uniform(n)),
+        problem: problem("family", family_big(0.42), uniform(n)),
         theta: 0.42,
         tolerance: 1.0,
         regime: "wedge".to_string(),
@@ -196,7 +204,7 @@ fn econ_001_outright_and_warm() {
         if *proposer == "neighbor-extrapolation" && *bound <= 1.0);
     // Tight tolerance: rejected → warm start, savings measured > 0.
     let q2 = SpeculationQuery {
-        problem: MmsProblem::new("family", family_big(0.42), uniform(n)),
+        problem: problem("family", family_big(0.42), uniform(n)),
         theta: 0.42,
         tolerance: 1e-9,
         regime: "wedge".to_string(),
@@ -253,7 +261,7 @@ fn econ_002_worse_than_cold_clamps() {
 #[test]
 fn econ_003_drift_localized() {
     let n = 32;
-    let solved = solve_p1(&MmsProblem::new("f", family(0.3), uniform(n)));
+    let solved = solve_p1(&problem("f", family(0.3), uniform(n)));
     let mut reg = Registry::new();
     reg.register(Box::new(RegimeBound {
         cache_theta: 0.3,
@@ -350,7 +358,7 @@ fn econ_005_priors_determinism_dashboard() {
     let conservative = prior == 0.0;
     let run = || -> (Vec<String>, String) {
         let n = 32;
-        let solved = solve_p1(&MmsProblem::new("f", family(0.4), uniform(n)));
+        let solved = solve_p1(&problem("f", family(0.4), uniform(n)));
         let mut reg = Registry::new();
         reg.register(Box::new(NeighborExtrapolation {
             cache: vec![(0.4, solved, None)],
@@ -449,15 +457,8 @@ fn econ_006_nonconvergence_never_counts_as_savings() {
     assert_eq!(cap_calls.load(Ordering::SeqCst), 0);
     assert!(cap_telemetry.rows().is_empty());
 
-    let malformed = SpeculationQuery {
-        problem: MmsProblem::new("malformed", family(0.4), Vec::new()),
-        theta: 0.4,
-        tolerance: 1e-3,
-        regime: "bounded-failure".to_string(),
-    };
-    let refused = try_run_speculative(&malformed, &registry, &mut telemetry, &mut guard, 10);
     assert!(matches!(
-        refused,
+        MmsProblem::new("malformed", family(0.4), Vec::new()),
         Err(Fem1dError::ResourceLimit {
             resource: "mesh nodes",
             ..
@@ -466,7 +467,7 @@ fn econ_006_nonconvergence_never_counts_as_savings() {
     verdict(
         "econ-006",
         true,
-        "zero-budget nonconvergence and malformed problems return structured errors without drift observations; an oversized iteration budget refuses before proposal work or zoo telemetry",
+        "zero-budget nonconvergence returns a structured error without drift observations; malformed problems cannot be constructed, and an oversized iteration budget refuses before proposal work or zoo telemetry",
     );
 }
 
