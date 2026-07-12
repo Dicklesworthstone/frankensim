@@ -249,6 +249,14 @@ pub fn plan_repair(
     budgets: &[f64],
     reroute: Option<(&Router, &dyn CostOracle, &RouteRequest)>,
 ) -> RepairPlan {
+    // One gauge budget per patch. Without this, the per-patch budget check below
+    // (`potential.iter().zip(budgets)`) would silently TRUNCATE to the shorter
+    // length: a short `budgets` leaves the trailing patches unchecked, so
+    // `auto_repairable` could report true while an unchecked patch's gauge
+    // offset exceeds its budget — silently distorting geometry beyond budget,
+    // the one thing this planner promises never to do. Fail closed, matching
+    // `hodge_decompose`'s cochain-size assertion.
+    assert_eq!(budgets.len(), skeleton.n_patches, "one gauge budget per patch");
     let split = hodge_decompose(skeleton, mismatch);
     let residual_after_exact: Vec<f64> = mismatch
         .iter()

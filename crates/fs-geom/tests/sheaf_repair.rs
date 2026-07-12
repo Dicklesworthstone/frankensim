@@ -207,6 +207,18 @@ fn sr_002_exact_defect_auto_repairs_within_budget() {
 }
 
 #[test]
+#[should_panic(expected = "one gauge budget per patch")]
+fn sr_002b_short_budget_vector_is_refused_not_silently_truncated() {
+    // Regression: a budgets slice shorter than n_patches was silently truncated
+    // by `potential.iter().zip(budgets)`, leaving trailing patches unchecked so
+    // `auto_repairable` could bless an over-budget distortion — the one thing
+    // the planner promises never to do. Must fail closed.
+    let sk = triangle(); // n_patches = 3
+    let mismatch = vec![0.0; sk.edges.len()];
+    let _ = plan_repair(&sk, &mismatch, &[1.0, 1.0], None); // only 2 budgets
+}
+
+#[test]
 fn sr_003_coexact_seeding_diagnoses_converter_side() {
     let sk = triangle();
     // Seed a pure circulation (the flipped-orientation signature): the
