@@ -62,14 +62,13 @@ solver without a passing gradient check cannot merge.
 - `mitigate` module (addendum Proposal 1, bead bk0o.2; [F], behind
   `diff-mitigations` → `ledger-transpose`): the three meshing
   mitigations IN ORDER. (1) DIFFERENTIABILITY AS ROUTING: the Rep
-  Router's fitness gains a differentiability term at the cost-oracle
-  seam (`DiffAwareOracle` penalizes non-differentiable edges under a
-  gradient request — no fs-geom changes; the oracle IS the fitness),
-  so SDF/spline paths win when gradients are requested while plain
-  queries keep the cheap mesh path. This wrapper is a read-only planning
-  view: its fallible `record` refuses and directs execution to record through
-  the backing oracle, so routing actuals cannot disappear silently. (2)
-  HADAMARD boundary forms as the
+  Router first plans over a smooth-only subgraph under the request's ORIGINAL
+  cost/error budgets. Only when no differentiable route is admissible does it
+  plan over the complete graph and downgrade a winning remesh path. This is a
+  deterministic lexicographic policy, not a synthetic wall-cost penalty, so an
+  expensive but admissible smooth path still wins and an unavoidable affordable
+  remesh is not made infeasible by policy arithmetic. Plain queries keep the
+  ordinary cost-optimal mesh path. (2) HADAMARD boundary forms as the
   mesh-free path (base `hadamard` module, verified against
   perturbation-resolve). (3) UNAVOIDABLE remesh in the path →
   `GradientGrade::EstimatedWithDiscontinuity`: Proposal-3 Estimated
@@ -242,7 +241,7 @@ this section previously said "None" while the manifest declared five):
   registry); disabled until its Gauntlet tier + kill metric are green.
 - `explanation-objects` [F] — explanation objects (knh1.5, Proposal B).
 - `diff-mitigations` [F] — non-differentiable meshing mitigations
-  (routing term, Hadamard path, estimated+flag downgrade); implies
+  (smooth-first routing, Hadamard path, estimated+flag downgrade); implies
   `ledger-transpose`.
 - `gradient-certs` [S] — gradient certificates (colors + interval
   residual bounds + the FD-falsifier merge gate); implies
@@ -266,6 +265,15 @@ normal trace is low-order, so the volumetric form is the production
 path at lowest order); revolve-checkpointed heat adjoint vs FD
 (recompute counts logged); the verification gate accepting a correct
 gradient and REJECTING a corrupted one; cross-ISA golden hash.
+
+`tests/mitigate.rs` (8 cases, feature `diff-mitigations`): ordinary routing
+takes the cheap mesh path while gradient routing selects an admissible smooth
+path; unavoidable remeshing remains affordable under the ORIGINAL budget and
+is downgraded to Estimated with an explicit discontinuity; Hadamard and direct
+path checks retain their falsifiers; tie-breaking is deterministic; an
+admissible smooth route wins even above the former fixed-penalty scale; an
+over-budget smooth route falls back honestly; and an empty graph preserves the
+router's structured no-path refusal.
 
 ## No-claim boundaries
 

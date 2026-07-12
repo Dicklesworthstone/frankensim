@@ -6,29 +6,11 @@
 //! deterministic fits from ledger snapshots; the Rep Router plans with
 //! these models live.
 
-use std::sync::atomic::{AtomicU32, Ordering};
-
 use fs_plan::{
     Contribution, CostModel, CostObservation, ErrorLedger, ErrorSource, LedgerDefect,
     PlanCostOracle, Rigor, TimeLedger, TimeLedgerDefect, TimeStage, TuneModelError,
     cost_model_from_tune,
 };
-
-static NEXT_DB: AtomicU32 = AtomicU32::new(0);
-
-fn temp_db(tag: &str) -> String {
-    let n = NEXT_DB.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir()
-        .join(format!("fs-plan-conf-{tag}-{}-{n}.db", std::process::id()))
-        .display()
-        .to_string()
-}
-
-fn cleanup_db(path: &str) {
-    for suffix in ["", "-wal", "-shm", ".fsqlite-wal", ".fsqlite-shm"] {
-        let _ = std::fs::remove_file(format!("{path}{suffix}"));
-    }
-}
 
 fn verdict(case: &str, detail: &str) {
     println!(
@@ -223,7 +205,6 @@ fn pl_005_tune_loader_refuses_legacy_schema_and_foreign_scope() {
 
 #[test]
 fn pl_006_router_plans_with_live_cost_models() {
-    use fs_geom::CostOracle as _;
     use fs_geom::{ConverterSpec, ErrorModel, RouteRequest, Router};
     let mut router = Router::new();
     for (name, cost) in [("frep->sdf/coarse", 1.0), ("frep->sdf/fine", 4.0)] {
@@ -250,16 +231,16 @@ fn pl_006_router_plans_with_live_cost_models() {
     };
     // A-priori: the coarse edge (base 1.0s) wins.
     let before = router.plan(&req, &oracle).unwrap();
-    assert_eq!(before.edges, vec!["frep->sdf/coarse"]);
+    assert_eq!(before.edges(), ["frep->sdf/coarse"]);
     // Measured history says coarse is actually slow on THIS machine.
     for _ in 0..5 {
-        oracle.record("frep->sdf/coarse", 9.0, 0.005).unwrap();
-        oracle.record("frep->sdf/fine", 2.0, 0.004).unwrap();
+        oracle.try_record("frep->sdf/coarse", 9.0, 0.005).unwrap();
+        oracle.try_record("frep->sdf/fine", 2.0, 0.004).unwrap();
     }
     let after = router.plan(&req, &oracle).unwrap();
     assert_eq!(
-        after.edges,
-        vec!["frep->sdf/fine"],
+        after.edges(),
+        ["frep->sdf/fine"],
         "quantile cost models must reroute the router: {after:?}"
     );
     verdict(

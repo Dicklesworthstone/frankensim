@@ -56,9 +56,11 @@ pub use sheaf::{
 };
 
 pub use router::{
-    Binding, ChainOutcome, ConverterSpec, CostOracle, CostOracleError, EdgeOutcome, EdgeRunner,
-    ErrorModel, ExecuteError, ExecuteErrorKind, MAX_MEMORY_ORACLE_EDGES, MemoryCostOracle,
-    RouteCandidate, RouteExplanation, RoutePlan, RouteRefusal, RouteRequest, Router, RouterError,
+    Binding, ChainOutcome, ConverterSpec, CostOracle, CostOracleError, EdgeEvidenceClass,
+    EdgeOutcome, EdgeOutcomeError, EdgeRunner, ErrorModel, ExecuteError, ExecuteErrorKind,
+    MAX_MEMORY_ORACLE_EDGES, MAX_ROUTER_ID_BYTES, MemoryCostOracle, RouteCandidate,
+    RouteExplanation, RoutePlan, RoutePlanError, RouteRefusal, RouteRequest, Router, RouterError,
+    ValidatedEdgeObservation,
 };
 
 /// Crate version, re-exported for provenance stamping.

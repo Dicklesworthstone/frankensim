@@ -13,7 +13,7 @@
 
 use crate::ast::{CountUnit, Node, NodeKind, Span};
 use crate::study::Study;
-use fs_geom::{CostOracle, RouteRequest, Router};
+use fs_geom::{CostOracle, RoutePlanError, RouteRequest, Router};
 use fs_plan::CostModel;
 use fs_qty::Dims;
 use fs_regime::RegimeReport;
@@ -1154,24 +1154,46 @@ fn check_charts(cx: &AdmissionContext<'_>, out: &mut Vec<Finding>) {
             max_abs_error: req.max_abs_error,
             max_cost_s: req.max_cost_s,
         };
-        if let Err(refusal) = router.plan(&request, oracle) {
+        if let Err(error) = router.plan(&request, oracle) {
+            let (what, fixes) = match error {
+                RoutePlanError::Infeasible(refusal) => {
+                    let fixes = refusal
+                        .fixes
+                        .iter()
+                        .map(|fix| RankedFix {
+                            action: fix.clone(),
+                            predicted_wall_s: refusal.best_cost_s,
+                            qoi_impact: refusal.best_abs_error.map_or_else(
+                                || "route feasibility change".to_string(),
+                                |value| format!("best achievable composed error {value:.3e}"),
+                            ),
+                        })
+                        .collect();
+                    (
+                        format!("no conversion route {} -> {}: {refusal}", req.from, req.to),
+                        fixes,
+                    )
+                }
+                invalid => (
+                    format!(
+                        "conversion route authority {} -> {} is invalid: {invalid}",
+                        req.from, req.to
+                    ),
+                    vec![RankedFix {
+                        action: "repair the route request or measured cost/error oracle evidence"
+                            .to_string(),
+                        predicted_wall_s: None,
+                        qoi_impact: "invalid routing authority cannot support admission"
+                            .to_string(),
+                    }],
+                ),
+            };
             out.push(Finding {
                 check: "charts",
                 severity: Severity::Reject,
                 span: Span::default(),
-                what: format!("no conversion route {} -> {}: {refusal}", req.from, req.to),
-                fixes: refusal
-                    .fixes
-                    .iter()
-                    .map(|f| RankedFix {
-                        action: f.clone(),
-                        predicted_wall_s: refusal.best_cost_s,
-                        qoi_impact: refusal.best_abs_error.map_or_else(
-                            || "route feasibility change".to_string(),
-                            |e| format!("best achievable composed error {e:.3e}"),
-                        ),
-                    })
-                    .collect(),
+                what,
+                fixes,
             });
         }
     }

@@ -120,7 +120,7 @@ impl From<PlanOracleError> for fs_geom::CostOracleError {
 /// A [`fs_geom::CostOracle`] backed by per-edge quantile cost models.
 /// Each edge is registered with the reference problem size its routing
 /// requests are quoted at; recorded actuals feed the online refits.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct PlanCostOracle {
     models: BTreeMap<String, (f64, CostModel)>,
     errors: BTreeMap<String, Vec<f64>>,
@@ -237,13 +237,22 @@ impl fs_geom::CostOracle for PlanCostOracle {
         errs.get(idx.min(last)).copied()
     }
 
-    fn record(
+    fn record_batch(
         &mut self,
-        edge: &str,
-        cost_s: f64,
-        error_abs: f64,
+        observations: &[fs_geom::ValidatedEdgeObservation],
     ) -> Result<(), fs_geom::CostOracleError> {
-        self.try_record(edge, cost_s, error_abs).map_err(Into::into)
+        let mut candidate = self.clone();
+        for observation in observations {
+            candidate
+                .try_record(
+                    observation.edge(),
+                    observation.cost_s(),
+                    observation.conservative_error_abs(),
+                )
+                .map_err(fs_geom::CostOracleError::from)?;
+        }
+        *self = candidate;
+        Ok(())
     }
 }
 

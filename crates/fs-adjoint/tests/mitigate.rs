@@ -15,7 +15,7 @@ use fs_adjoint::transpose::fd_falsifier;
 use fs_evidence::Color;
 use fs_feec::kuhn_cube;
 use fs_feec::whitney::element_geometry;
-use fs_geom::{ConverterSpec, ErrorModel, MemoryCostOracle, RouteRequest, Router};
+use fs_geom::{ConverterSpec, ErrorModel, MemoryCostOracle, RoutePlanError, RouteRequest, Router};
 
 fn verdict(case: &str, detail: &str) {
     println!(
@@ -54,12 +54,16 @@ fn two_path_router() -> (Router, BTreeSet<String>) {
 }
 
 fn request() -> RouteRequest {
+    request_with_cost(1e9)
+}
+
+fn request_with_cost(max_cost_s: f64) -> RouteRequest {
     RouteRequest {
         from: "nurbs".to_string(),
         to: "sdf".to_string(),
         scale: 1.0,
         max_abs_error: 1e-3,
-        max_cost_s: 1e9,
+        max_cost_s,
     }
 }
 
@@ -70,16 +74,19 @@ fn mg_001_gradient_queries_prefer_the_smooth_path() {
     // WITHOUT a gradient request the cheap mesh path wins.
     let plain = router.plan(&request(), &oracle).expect("plain route");
     assert_eq!(
-        plain.edges,
-        vec!["nurbs->mesh/remesh-v1", "mesh->sdf/rasterize-v1"],
+        plain.edges(),
+        &[
+            "nurbs->mesh/remesh-v1".to_string(),
+            "mesh->sdf/rasterize-v1".to_string()
+        ],
         "cost-only planning takes the cheap mesh path"
     );
     // WITH a gradient request the differentiability term dominates.
     let (plan, grade) =
         plan_gradient_route(&router, &request(), &oracle, &nd).expect("gradient route");
     assert_eq!(
-        plan.edges,
-        vec!["nurbs->sdf/bezier-clip-v1"],
+        plan.edges(),
+        &["nurbs->sdf/bezier-clip-v1".to_string()],
         "the smooth spline path is preferred under a gradient request"
     );
     assert!(
@@ -106,9 +113,9 @@ fn mg_002_unavoidable_remesh_downgrades_never_fakes() {
     let mut nd = BTreeSet::new();
     nd.insert("nurbs->mesh/remesh-v1".to_string());
     let oracle = MemoryCostOracle::new();
-    let (plan, grade) =
-        plan_gradient_route(&router, &request(), &oracle, &nd).expect("route exists");
-    assert_eq!(plan.edges.len(), 2, "the only path is taken");
+    let (plan, grade) = plan_gradient_route(&router, &request_with_cost(2.0), &oracle, &nd)
+        .expect("the real budget admits the unavoidable route");
+    assert_eq!(plan.edges().len(), 2, "the only path is taken");
     match &grade {
         GradientGrade::EstimatedWithDiscontinuity {
             crossing, color, ..
@@ -247,16 +254,93 @@ fn mg_005_deterministic_tie_break() {
     let first = plan_gradient_route(&router, &request(), &oracle, &nd)
         .expect("route")
         .0
-        .edges;
+        .edges()
+        .to_vec();
     for _ in 0..5 {
         let again = plan_gradient_route(&router, &request(), &oracle, &nd)
             .expect("route")
             .0
-            .edges;
+            .edges()
+            .to_vec();
         assert_eq!(again, first, "tie-break is deterministic");
     }
     verdict(
         "mg-005",
         "equal-fitness paths: five repeated plans pick the identical route",
+    );
+}
+
+#[test]
+fn mg_006_smooth_preference_is_lexicographic_not_a_fixed_cost_penalty() {
+    let mut router = Router::new();
+    router
+        .register(edge("nurbs->sdf/remesh-v1", "nurbs", "sdf", 1.0))
+        .expect("register remesh route");
+    router
+        .register(edge(
+            "nurbs->sdf/smooth-expensive-v1",
+            "nurbs",
+            "sdf",
+            2_000_000.0,
+        ))
+        .expect("register smooth route");
+    let mut nd = BTreeSet::new();
+    nd.insert("nurbs->sdf/remesh-v1".to_string());
+    let oracle = MemoryCostOracle::new();
+
+    let (plan, grade) = plan_gradient_route(&router, &request_with_cost(3_000_000.0), &oracle, &nd)
+        .expect("the expensive smooth route is still within the real budget");
+    assert_eq!(
+        plan.edges(),
+        &["nurbs->sdf/smooth-expensive-v1".to_string()]
+    );
+    assert!(matches!(grade, GradientGrade::Smooth { .. }));
+    verdict(
+        "mg-006",
+        "an admissible smooth route wins lexicographically even when its real cost exceeds the old fixed penalty",
+    );
+}
+
+#[test]
+fn mg_007_smooth_budget_failure_falls_back_under_the_original_budget() {
+    let mut router = Router::new();
+    router
+        .register(edge("nurbs->sdf/remesh-v1", "nurbs", "sdf", 1.0))
+        .expect("register remesh route");
+    router
+        .register(edge("nurbs->sdf/smooth-v1", "nurbs", "sdf", 5.0))
+        .expect("register smooth route");
+    let mut nd = BTreeSet::new();
+    nd.insert("nurbs->sdf/remesh-v1".to_string());
+    let oracle = MemoryCostOracle::new();
+
+    let (plan, grade) = plan_gradient_route(&router, &request_with_cost(2.0), &oracle, &nd)
+        .expect("fallback must retain the request's real cost budget");
+    assert_eq!(plan.edges(), &["nurbs->sdf/remesh-v1".to_string()]);
+    assert!(matches!(
+        grade,
+        GradientGrade::EstimatedWithDiscontinuity { .. }
+    ));
+    verdict(
+        "mg-007",
+        "an over-budget smooth route falls back to the affordable remesh route with an explicit discontinuity grade",
+    );
+}
+
+#[test]
+fn mg_008_no_route_preserves_the_router_refusal() {
+    let router = Router::new();
+    let oracle = MemoryCostOracle::new();
+    let error = plan_gradient_route(&router, &request_with_cost(2.0), &oracle, &BTreeSet::new())
+        .expect_err("an empty graph has no route in either pass");
+    match error {
+        RoutePlanError::Infeasible(refusal) => {
+            assert_eq!(refusal.binding, fs_geom::Binding::NoPath);
+        }
+        other => panic!("empty graph must produce an infeasibility, got {other:?}"),
+    }
+    verdict(
+        "mg-008",
+        "smooth-first planning preserves the original structured no-path refusal",
     );
 }

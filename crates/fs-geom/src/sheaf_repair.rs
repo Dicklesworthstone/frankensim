@@ -302,10 +302,10 @@ pub fn plan_repair(
                 "reroute worst patch {} -> {} via [{}] (router-planned alternative chart)",
                 req.from,
                 req.to,
-                route.edges.join(", ")
+                route.edges().join(", ")
             ),
-            expected_post_norm: route.composed_abs_error,
-            cost_s: route.predicted_cost_s,
+            expected_post_norm: route.composed_abs_error(),
+            cost_s: route.predicted_cost_s(),
         });
     }
     proposals.sort_by(|a, b| {

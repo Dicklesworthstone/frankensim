@@ -4,12 +4,11 @@
 //! across topology events; rather than pretend otherwise, three
 //! mitigations apply IN ORDER OF PREFERENCE:
 //!
-//! 1. DIFFERENTIABILITY AS A ROUTING REQUIREMENT — the Rep Router's
-//!    fitness gains a differentiability term (implemented at the cost
-//!    -oracle seam: non-differentiable edges carry a penalty when a
-//!    query requests gradients), so SDF/spline paths are PREFERRED and
-//!    multi-representation becomes the asset that provides
-//!    differentiable paths where mesh-locked pipelines have none;
+//! 1. DIFFERENTIABILITY AS A ROUTING REQUIREMENT — a gradient query first
+//!    plans over the subgraph containing only differentiable edges. The
+//!    original graph is considered only when no smooth route satisfies the
+//!    request's real cost/error budgets, so SDF/spline paths are PREFERRED
+//!    without disguising differentiability policy as wall-clock cost;
 //! 2. HADAMARD boundary-form shape derivatives that avoid mesh
 //!    sensitivities entirely where applicable (the base crate's
 //!    `hadamard` module, wired as the mesh-free path);
@@ -19,65 +18,8 @@
 //!    verified gradient.
 
 use fs_evidence::Color;
-use fs_geom::{CostOracle, RoutePlan, RouteRefusal, RouteRequest, Router};
+use fs_geom::{CostOracle, RoutePlan, RoutePlanError, RouteRequest, Router};
 use std::collections::BTreeSet;
-
-/// The routing penalty applied to non-differentiable edges when a query
-/// requests gradients (large enough to dominate any realistic cost).
-pub const NON_DIFF_PENALTY_S: f64 = 1e6;
-
-/// A cost-oracle wrapper that adds the DIFFERENTIABILITY TERM to the
-/// router's fitness: when `gradients_requested`, edges named in the
-/// non-differentiable set report a huge measured cost, so the Pareto
-/// planner prefers smooth (SDF/spline) paths. Recording refuses — this
-/// wrapper is a PLANNING view; actuals must go to the real oracle.
-pub struct DiffAwareOracle<'a> {
-    inner: &'a dyn CostOracle,
-    non_differentiable: &'a BTreeSet<String>,
-    gradients_requested: bool,
-}
-
-impl<'a> DiffAwareOracle<'a> {
-    /// Wrap an oracle with the differentiability term.
-    #[must_use]
-    pub fn new(
-        inner: &'a dyn CostOracle,
-        non_differentiable: &'a BTreeSet<String>,
-        gradients_requested: bool,
-    ) -> Self {
-        DiffAwareOracle {
-            inner,
-            non_differentiable,
-            gradients_requested,
-        }
-    }
-}
-
-impl CostOracle for DiffAwareOracle<'_> {
-    fn measured_cost_s(&self, edge: &str) -> Option<f64> {
-        let base = self.inner.measured_cost_s(edge);
-        if self.gradients_requested && self.non_differentiable.contains(edge) {
-            Some(base.unwrap_or(0.0) + NON_DIFF_PENALTY_S)
-        } else {
-            base
-        }
-    }
-
-    fn measured_error_abs(&self, edge: &str) -> Option<f64> {
-        self.inner.measured_error_abs(edge)
-    }
-
-    fn record(
-        &mut self,
-        _edge: &str,
-        _cost_s: f64,
-        _error_abs: f64,
-    ) -> Result<(), fs_geom::CostOracleError> {
-        Err(fs_geom::CostOracleError::Backend {
-            problem: "differentiability-aware oracle is a read-only planning view; record actuals through its backing oracle".to_string(),
-        })
-    }
-}
 
 /// How a gradient answer must be graded (Proposal 3 colors + the
 /// discontinuity flag).
@@ -115,42 +57,52 @@ impl GradientGrade {
 /// Plan a conversion route UNDER a gradient request and grade the
 /// resulting gradient honestly:
 ///
-/// - if a differentiable path exists, the penalty steers the router
-///   onto it and the answer is [`GradientGrade::Smooth`];
-/// - if every viable path crosses a non-differentiable edge, the
-///   cheapest such path is taken and the answer is
+/// - if a differentiable path satisfies the request's original budgets, the
+///   deterministic router selects within that smooth-only subgraph and the
+///   answer is [`GradientGrade::Smooth`];
+/// - otherwise the original graph is planned under the unchanged budgets; if
+///   its winning path crosses a non-differentiable edge, the answer is
 ///   estimated-with-discontinuity — NEVER a silently-verified gradient
 ///   across a topology event (the review-round-3 boundary case).
 ///
 /// # Errors
-/// Propagates the router's structured refusals (no route at all).
+/// Propagates malformed requests, invalid oracle evidence, arithmetic failures,
+/// and the router's structured refusal when no route is admissible.
 pub fn plan_gradient_route(
     router: &Router,
     req: &RouteRequest,
     oracle: &dyn CostOracle,
     non_differentiable: &BTreeSet<String>,
-) -> Result<(RoutePlan, GradientGrade), RouteRefusal> {
-    let wrapped = DiffAwareOracle::new(oracle, non_differentiable, true);
-    let plan = router.plan(req, &wrapped)?;
-    let crossing: Vec<String> = plan
-        .edges
+) -> Result<(RoutePlan, GradientGrade), RoutePlanError> {
+    match router.plan_with_edge_filter(req, oracle, |spec| !non_differentiable.contains(&spec.name))
+    {
+        Ok(plan) => {
+            let route = plan.edges().to_vec();
+            return Ok((plan, GradientGrade::Smooth { route }));
+        }
+        Err(RoutePlanError::Infeasible(_)) => {}
+        Err(error) => return Err(error),
+    }
+
+    let plan = router.plan(req, oracle)?;
+    let route = plan.edges().to_vec();
+    let crossing: Vec<String> = route
         .iter()
         .filter(|e| non_differentiable.contains(*e))
         .cloned()
         .collect();
     let grade = if crossing.is_empty() {
-        GradientGrade::Smooth {
-            route: plan.edges.clone(),
-        }
+        GradientGrade::Smooth { route }
     } else {
+        let estimator = format!(
+            "gradient across non-differentiable edge(s) {crossing:?}: remesh/topology \
+             event inside the differentiation path"
+        );
         GradientGrade::EstimatedWithDiscontinuity {
-            route: plan.edges.clone(),
-            crossing: crossing.clone(),
+            route,
+            crossing,
             color: Color::Estimated {
-                estimator: format!(
-                    "gradient across non-differentiable edge(s) {crossing:?}: remesh/topology \
-                     event inside the differentiation path"
-                ),
+                estimator,
                 dispersion: f64::INFINITY,
             },
         }
@@ -173,11 +125,12 @@ pub fn grade_ops(ops: &[&str], non_differentiable: &BTreeSet<String>) -> Gradien
             route: ops.iter().map(|o| (*o).to_string()).collect(),
         }
     } else {
+        let estimator = format!("non-differentiable op(s) {crossing:?} in the path");
         GradientGrade::EstimatedWithDiscontinuity {
             route: ops.iter().map(|o| (*o).to_string()).collect(),
-            crossing: crossing.clone(),
+            crossing,
             color: Color::Estimated {
-                estimator: format!("non-differentiable op(s) {crossing:?} in the path"),
+                estimator,
                 dispersion: f64::INFINITY,
             },
         }
