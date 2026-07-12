@@ -99,15 +99,13 @@ impl<T> LeasedVec<T> {
     /// # Errors
     /// As [`LeasedVec::push`].
     pub fn append(&mut self, mut other: LeasedVec<T>) -> Result<(), AllocError> {
-        let needed =
-            self.values
-                .len()
-                .checked_add(other.values.len())
-                .ok_or(AllocError::LayoutOverflow {
-                    site: self.what,
-                    len: usize::MAX,
-                    elem_bytes: size_of::<T>(),
-                })?;
+        let needed = self.values.len().checked_add(other.values.len()).ok_or(
+            AllocError::LayoutOverflow {
+                site: self.what,
+                len: usize::MAX,
+                elem_bytes: size_of::<T>(),
+            },
+        )?;
         if needed > self.values.capacity() {
             self.regrow(needed)?;
         }
@@ -119,8 +117,7 @@ impl<T> LeasedVec<T> {
         let Some(lease) = self.lease.clone() else {
             return Err(AllocError::LeaseExhausted {
                 site: self.what,
-                requested_bytes: payload_bytes::<T>(self.what, target_capacity)
-                    .unwrap_or(u64::MAX),
+                requested_bytes: payload_bytes::<T>(self.what, target_capacity).unwrap_or(u64::MAX),
                 used_bytes: 0,
                 limit_bytes: 0,
             });
@@ -237,7 +234,13 @@ mod tests {
         let refusal = LeasedVec::<u64>::with_capacity(&lease, "t/too-big", 200)
             .expect_err("1600 B over a 1024 B lease");
         assert!(
-            matches!(refusal, AllocError::LeaseExhausted { site: "t/too-big", .. }),
+            matches!(
+                refusal,
+                AllocError::LeaseExhausted {
+                    site: "t/too-big",
+                    ..
+                }
+            ),
             "{refusal:?}"
         );
         assert_eq!(lease.receipt().used_bytes, 0, "refusal charges nothing");

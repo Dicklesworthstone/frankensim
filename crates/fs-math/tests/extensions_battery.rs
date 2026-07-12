@@ -355,8 +355,16 @@ fn hypot_budget_specials_and_symmetry() {
             "hypot({x},{y}) off by {d} ULP vs libm"
         );
         // BITWISE symmetric and sign-independent.
-        assert_eq!(det::hypot(y, x).to_bits(), got.to_bits(), "hypot not symmetric");
-        assert_eq!(det::hypot(-x, y).to_bits(), got.to_bits(), "hypot sign-dependent");
+        assert_eq!(
+            det::hypot(y, x).to_bits(),
+            got.to_bits(),
+            "hypot not symmetric"
+        );
+        assert_eq!(
+            det::hypot(-x, y).to_bits(),
+            got.to_bits(),
+            "hypot sign-dependent"
+        );
     }
     // Exact Pythagorean triple: representable, must be EXACT (not just close).
     assert_eq!(det::hypot(3.0, 4.0), 5.0);
