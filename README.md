@@ -10,7 +10,7 @@
 [![Rust](https://img.shields.io/badge/rust-nightly%202024-b7410e)](rust-toolchain.toml)
 [![Crates](https://img.shields.io/badge/workspace-126%20fs--%2A%20crates-0969da)](#implemented-workspace)
 [![Contracts](https://img.shields.io/badge/contracts-127%20of%20127%20crates-8250df)](#contracts-and-verification)
-[![Tests](https://img.shields.io/badge/tests-260%20crate%20test%20files-1f883d)](#contracts-and-verification)
+[![Tests](https://img.shields.io/badge/tests-263%20crate%20test%20files-1f883d)](#contracts-and-verification)
 [![License](https://img.shields.io/badge/license-MIT%20%2B%20AI%20rider-yellow)](LICENSE)
 
 </div>
@@ -38,7 +38,7 @@ There is not yet a packaged end-user simulation application or crates.io release
 | Geometry | Region/chart abstraction, SDF, mesh and F-rep charts, representation conversion hooks, transformations, tet meshing, remeshing, quality audits |
 | Evidence and ledger | Composable `Evidence<T>`/`Certified<T>`, model cards, bracketing, FrankenSQLite-backed design ledger, artifact hashes, event streams, tune cache, roofline recording |
 | Policy tooling | `xtask` checks for layer direction, Franken-only runtime dependencies, contracts, unsafe capsules, and constellation lock verification |
-| Tests | 260 crate-level conformance and integration test files in the intended snapshot, exercising the implemented contracts |
+| Tests | 263 crate-level conformance and integration test files in the intended snapshot, exercising the implemented contracts |
 
 ### What You Can Use Today
 
@@ -533,7 +533,7 @@ but they prove that lower-level pieces compose into end-to-end workflows.
 | Slice | What it demonstrates | Why it matters |
 |-------|----------------------|----------------|
 | `fs-marquee` | A feature-gated raw-SDF/CutFEM/DWR smoke runner for a topology-style layout study | Geometry, embedded-boundary physics, gradient checks, and certificate fields can live on the same path without meshing as the first operation |
-| `fs-frame` | A seismic-minimal frame smoke tier: truss layout, sizing, fiber hysteresis, e-stopped fragility, and CVaR sizing | Structural optimization can carry layout certificates, nonlinear response evidence, anytime-valid probability intervals, and robust tail metrics together |
+| `fs-frame` | A seismic-minimal frame smoke tier: truss layout, sizing, fiber hysteresis, e-stopped fragility, and CVaR sizing | Structural optimization can carry layout diagnostics, nonlinear response evidence, anytime-valid probability intervals, and robust tail metrics together |
 | `fs-thrust-e2e` | CertQD-Thrust: point-vortex thruster simulation, certify-or-escalate surrogate use, MAP-Elites illumination, evidence colors, and a content-addressed notebook | Quality-diversity search can produce an atlas with per-elite trust labels instead of a single unqualified best design |
 | `fs-vskeleton` | A photovoltaic vertical skeleton connecting SDF/PDE/objective/adjoint/optimization/ledger ideas | A narrow domain slice is useful for testing orchestration seams before every physics model is mature |
 
@@ -589,7 +589,7 @@ does not need to invent its own story for cancellation, uncertainty, provenance,
 or validation. It plugs into the same carriers and either satisfies their
 contracts or refuses loudly.
 
-## Certified Campaign Catalog
+## Evidence-Bearing Campaign Catalog
 
 The e2e crates are small, but they are the best way to see the workspace acting
 as one system. Each campaign composes several lower-level crates and forces a
@@ -605,7 +605,7 @@ real answer to carry evidence instead of just a number.
 | `fs-grammar-e2e` | Shape-program synthesis, archive illumination, fabrication checks, evidence | A diverse family of simplified CSG programs that match a target while retaining certificates |
 | `fs-oed-e2e` | Kalman assimilation, value-of-information, tolerance allocation, evidence | A sensor placement plan that stops when the design decision is robust |
 | `fs-metamat-e2e` | Lattice homogenization, SOS PSD checks, evidence | A stiffness-density frontier whose points are stable and Voigt-admissible |
-| `fs-truss-e2e` | Ground-structure truss optimization, tropical load paths, evidence | A near-optimal truss plus a named critical load path and bottleneck member |
+| `fs-truss-e2e` | Ground-structure truss optimization, endpoint-checked tropical load paths, evidence | A deterministic approximate truss iterate plus an advisory connected load path and conditionally unique bottleneck member |
 | `fs-adaptbo-e2e` | Bayesian optimization, e-process stopping, confidence sequences, evidence | An anytime BO run that can stop early under optional-stopping-valid evidence |
 | `fs-flowcert-e2e` | LBM, analytic Poiseuille checks, MAP-Elites, evidence | A CFD credibility map over Reynolds number and resolution |
 | `fs-vessel` | Chebyshev stability objective, free-surface LBM, e-racing, robust CVaR, volume rendering | A laminar-pour vessel study with stability, mass-ledger, robust-family, and render evidence |

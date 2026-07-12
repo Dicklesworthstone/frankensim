@@ -932,8 +932,11 @@ version = "0.0.1"
 name = "fs-cutfem"
 version = "0.0.1"
 dependencies = [
+ "fs-adjoint",
+ "fs-blake3",
  "fs-ivl",
  "fs-la",
+ "fs-material",
  "fs-solver",
  "fs-sparse",
 ]
@@ -1237,6 +1240,7 @@ name = "fs-ivl"
 version = "0.0.1"
 dependencies = [
  "fs-math",
+ "fs-propcheck",
 ]
 
 [[package]]
@@ -1447,8 +1451,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-propcheck"
+version = "0.0.1"
+
+[[package]]
 name = "fs-qty"
 version = "0.0.1"
+dependencies = [
+ "fs-propcheck",
+]
 
 [[package]]
 name = "fs-query"
@@ -1507,8 +1518,10 @@ dependencies = [
  "asupersync",
  "fs-ad",
  "fs-alloc",
+ "fs-evidence",
  "fs-exec",
  "fs-geom",
+ "fs-img",
  "fs-lbm",
  "fs-math",
  "fs-rand",
@@ -1929,6 +1942,7 @@ version = "0.0.1"
 name = "fs-vskeleton"
 version = "0.0.1"
 dependencies = [
+ "fs-blake3",
  "fs-obs",
  "fs-qty",
  "fsqlite",
