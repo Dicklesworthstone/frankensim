@@ -169,6 +169,7 @@ impl<'g> Space<'g> {
     /// # Errors
     /// Teaching errors: [`CutFemError::EmptyDomain`],
     /// [`CutFemError::CutBandNotUniform`],
+    /// [`CutFemError::InvalidFemInput`],
     /// [`CutFemError::AggregationNoAnchor`],
     /// [`CutFemError::ConstraintCycle`].
     #[allow(clippy::too_many_lines)] // one linear build pipeline; splitting would smear the invariants
@@ -177,6 +178,11 @@ impl<'g> Space<'g> {
         sdf: &dyn CutSdf,
         params: FemParams,
     ) -> Result<Space<'g>, CutFemError> {
+        if !params.ghost_gamma.is_finite() || params.ghost_gamma < 0.0 {
+            return Err(CutFemError::InvalidFemInput {
+                what: "ghost_gamma must be finite and nonnegative".to_string(),
+            });
+        }
         let mut class = BTreeMap::new();
         let mut rules = BTreeMap::new();
         let mut frac = BTreeMap::new();

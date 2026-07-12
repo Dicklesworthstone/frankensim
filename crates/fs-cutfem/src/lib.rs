@@ -86,6 +86,12 @@ pub enum CutFemError {
         /// Its differently-leveled active neighbor.
         neighbor: CellKey,
     },
+    /// A scalar CutFEM parameter cannot define the documented finite,
+    /// nonnegative stabilization path.
+    InvalidFemInput {
+        /// Actionable description of the invalid field/value.
+        what: String,
+    },
     /// The vector Q1 elasticity frontend currently requires one uniform
     /// active level. Unlike the scalar space it does not yet eliminate
     /// hanging-node constraints componentwise. Repair: use a uniform
@@ -145,6 +151,9 @@ impl core::fmt::Display for CutFemError {
                  different level; refine the interface band uniformly \
                  (Quadtree::refine_toward_interface) before building"
             ),
+            CutFemError::InvalidFemInput { what } => {
+                write!(f, "invalid scalar CutFEM input: {what}")
+            }
             CutFemError::ElasticityGridNotUniform {
                 cell,
                 expected_level,

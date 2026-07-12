@@ -21,7 +21,7 @@
 //!   tree) and estimate-driven h-refinement efficiency.
 
 use fs_cutfem::{
-    AggPolicy, CellClass, Circle, CutSdf, FemParams, HalfPlane, Quadtree, Space,
+    AggPolicy, CellClass, Circle, CutFemError, CutSdf, FemParams, HalfPlane, Quadtree, Space,
     condition_estimate, cut_cell_rules,
 };
 use fs_solver::krylov::CgState;
@@ -708,6 +708,15 @@ fn cut_007b_ghost_free_aggregation_accepts_graded_interface_band() {
         solver_tol: 1e-13,
         ..FemParams::default()
     };
+    let ghost_enabled = FemParams {
+        ghost_gamma: 0.5,
+        agg: None,
+        ..params
+    };
+    assert!(matches!(
+        Space::build(&grid, &sdf, ghost_enabled),
+        Err(CutFemError::CutBandNotUniform { .. })
+    ));
     let space = Space::build(&grid, &sdf, params)
         .expect("ghost-free aggregation must accept a graded interface band");
     let exact = |x: f64, y: f64| 1.0 + 2.0 * x + 3.0 * y;
@@ -741,6 +750,26 @@ fn cut_007b_ghost_free_aggregation_accepts_graded_interface_band() {
             space.stats().ghost_faces
         ),
     );
+}
+
+#[test]
+fn scalar_space_rejects_invalid_ghost_penalty() {
+    let grid = Quadtree::uniform(2);
+    let sdf = Circle {
+        center: [0.5, 0.5],
+        radius: 0.4,
+    };
+    for ghost_gamma in [f64::NAN, f64::INFINITY, -0.25] {
+        let error = Space::build(
+            &grid,
+            &sdf,
+            FemParams {
+                ghost_gamma,
+                ..FemParams::default()
+            },
+        );
+        assert!(matches!(error, Err(CutFemError::InvalidFemInput { .. })));
+    }
 }
 
 // ------------------------------------------------------------------- cut-008

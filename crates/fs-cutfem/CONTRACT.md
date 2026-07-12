@@ -133,6 +133,8 @@ same certified cuts; its constitutive parameters come from
 the grid), `CutBandNotUniform` (enabled ghost faces need an equal-level
 interface band; names the offending pair and the repair; ghost-free
 aggregation does not impose this precondition),
+`InvalidFemInput` (a scalar stabilization parameter is non-finite or
+outside its documented range),
 `ElasticityGridNotUniform` (the vector frontend refuses graded active
 cells until componentwise hanging constraints exist),
 `InvalidElasticityInput` (non-finite/non-coercive or unsupported
