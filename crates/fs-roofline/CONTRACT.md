@@ -119,9 +119,18 @@ crates plus `std`.
   trusted-writer boundary. External package/ledger authentication is required
   before evidence can claim authority against a malicious writer.
   `ProductionRunConfig::validate` runs before registry allocation/timing and
-  bounds `n` to `1..=2^24`, warmups to `0..=1000`, and repetitions to
-  `1..=1000`; it additionally bounds the combined
-  `n * (warmup + repetitions)` work proxy to `2^28` with checked arithmetic.
+  bounds `n` to `1..=2^24`, warmups to `0..=63`, repetitions to `1..=64`, and
+  at most 64 combined warmup and timed invocations per kernel. The generic
+  custom-registry measurement API retains its separate 1,000-per-field limits.
+  Before constructing any production registry buffer, a
+  checked integer model derives every shipped kernel's work from the actual
+  production shape: axpy + dot + sum vector traffic and FLOPs, plus the square
+  GEMM's `24 * side^2` logical bytes and `2 * side^3` FLOPs where
+  `side = max(isqrt(n), 256)`. The complete run is refused above `2^39`
+  modeled FLOPs or `2^33` modeled logical bytes. These orthogonal limits retain
+  the 32 MiB streaming default while preventing both large-shape amplification
+  and thousands of minimum-shape GEMM/receipt invocations; all additions and
+  multiplications are checked.
   The CLI also caps promotion probes at 1000 and baseline age at
   36,500 days before allocation or loops. Promotion reads the existing store
   through the same 1 MiB bound as runtime admission, serializes same-store
@@ -171,6 +180,10 @@ crates plus `std`.
 - `kernels::production_registry` / `GemmKernel` — the shipped command's
   registry adds real f64 GEMM through
   `fs_session::gemm_f64_session_with_pool`.
+  `production_registry_work` is the crate-private source of truth for the
+  registry's four per-kernel intensity rows; sealed configuration admission
+  evaluates it before allocation, rather than treating vector length as a GEMM
+  work proxy.
   One kernel instance owns one tuner, reusable TilePool, and cancellation gate: the first
   warmup closes measure → cache → model → dispatch and later warmups/timed
   reps reuse its validated process-local row. With `--ledger`, the kernel owns
@@ -188,12 +201,23 @@ crates plus `std`.
 
 - `regress` module (plan §14.4, bead fz2.4): the regression layer.
   `gate` — DISPERSION-AWARE bands (k·σ against the rolling baseline,
-  never a naive threshold), and a red arrives WITH its diagnosis: the
+  never a naive threshold), evaluated in a shared normalized scale. An exact
+  zero-dispersion baseline yields z=0 for equality and signed infinity for a
+  change, so tiny finite regressions cannot disappear behind an absolute
+  epsilon. A red arrives WITH its diagnosis: the
   phase-share flame-graph diff ranked by growth. `Cusum` — the
   complementary slow-drift detector (slack k, threshold h) over
   expanding-baseline standardized scores. `slower_this_month` — the
-  canonical dashboard question as ONE call: (kernel, drop %, guilty
-  phase). Calibration is meta-tested: zero false alarms across 20
+  canonical fallible dashboard question as ONE call: (kernel, drop %, guilty
+  phase), refusing non-finite or negative thresholds. Its percentage uses a
+  common opening/trailing scale and its phase diagnosis compares those exact
+  same seven-night windows; sustained regressed middle nights cannot dilute the
+  causal phase shift. Public histories,
+  kernels, phase identities/counts, per-history observations, dashboard-wide
+  aggregate nights/phase observations, and standardized streams have explicit
+  deterministic caps. Night histories use
+  strictly increasing unique logical indices (gaps allowed); duplicates or
+  reversals are invalid evidence. Calibration is meta-tested: zero false alarms across 20
   kernels × 60 stable nights at the default settings; a 0.3σ/night
   drift invisible to the single-night band trips the CUSUM mid-month.
 
@@ -375,6 +399,11 @@ canonical `axis_baseline_admission` event.
   are the implementation trust root. Public callers still supply custom
   pre/post `MachineAxes`; those rows are exploratory and never classify Fresh.
   `ProductionProbe` owns both probes and registry selection for citable rows.
+- The sealed production preflight bounds the shipped kernels' declared logical
+  FLOPs, logical bytes, and invocation count. It is not a wall-clock, energy,
+  physical-memory-traffic, or instruction-count certificate; one bounded cold
+  tuning sweep and machine-axis probes add control/calibration work outside the
+  four registry intensity rows.
 - Dependency receipts are operator-observed, structurally validated evidence,
   not Cargo-authenticated invocation proofs or signatures. Protocol v2 proves
   that the exact bytes compiled into fs-session were retained, rehashed, linked
@@ -455,17 +484,30 @@ receipt uniqueness, and store round-trip + tamper/duplicate refusal.
 
 ## Fail-closed evidence screening (bead fz2.4.1)
 
-Every public regress entry point screens its floating inputs before
+Every public regress entry point screens its floating and collection inputs before
 any verdict arithmetic: `gate` returns `GateVerdict::Invalid { reason }`
 — never Green — for non-finite or negative attainment or phase
 durations anywhere in the history and for unusable specs (non-finite
-or non-positive k_sigma, min_baseline < 2); `Cusum::first_alarm`
+or non-positive k_sigma, or a min_baseline outside 2..=4095); `Cusum::first_alarm`
 alarms AT the first non-finite residual (NaN previously reset the
 shortfall via `max`, silently suppressing detection) and an invalid
-detector spec cannot certify quiet; `standardize` maps history to −∞
+detector spec cannot certify quiet; fallible `standardize` refuses an oversized
+stream and maps an admitted history to −∞
 from the first non-finite entry so poison never enters the expanding
-baseline; `slower_this_month` reports poisoned kernels FIRST with an
-infinite drop and the flaw as the "why", never skipping them.
+baseline; duplicate or reversed logical nights likewise invalidate `gate`;
+`slower_this_month` rejects malformed global thresholds and reports poisoned
+or non-chronological kernels FIRST with an infinite drop and the flaw as the
+"why", never skipping them. Mean/dispersion, relative-drop, and phase-share
+normalization use scaled arithmetic, so extreme finite values cannot overflow
+into a silent NaN or turn an improvement into an invalid regression. Exact
+zero-dispersion changes remain scale-independent rather than using an absolute
+attainment floor.
+`standardize` applies the same rule to its expanding baseline: equal values
+score zero, a nonzero residual against exact zero dispersion saturates at the
+sign-appropriate finite f64 bound, and positive improvements therefore cannot
+overflow into poison or a false one-sided CUSUM alarm.
+Phase medians include zero for nights where a phase is absent; sparse phases
+cannot select their baseline only from nights where they happened to appear.
 Metamorphic property (tested): rescaling phase durations by a constant
 (time-unit change) preserves verdicts and attribution ranking.
 

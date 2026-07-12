@@ -895,7 +895,7 @@ mod tests {
         let max_warmup = fs_roofline::production::MAX_PRODUCTION_WARMUP.to_string();
         let error = parse_args(&args(&["roofline", "--n", &max_n, "--warmup", &max_warmup]))
             .expect_err("an oversized combined loop budget must fail before probing");
-        assert!(error.contains("n * (warmup + reps)"));
+        assert!(error.contains("warmup + reps"));
     }
 
     #[test]
@@ -996,16 +996,14 @@ mod tests {
             .expect("create unique regular-file fixture");
 
         symlink(&original, &symlink_path).expect("create symlink fixture");
-        let symlink_error = match open_promotion_store(&symlink_path) {
-            Err(error) => error,
-            Ok(_) => panic!("symlink store must be refused"),
+        let Err(symlink_error) = open_promotion_store(&symlink_path) else {
+            panic!("symlink store must be refused");
         };
         assert!(symlink_error.contains("regular file"), "{symlink_error}");
 
         std::fs::hard_link(&original, &hardlink_path).expect("create hardlink fixture");
-        let hardlink_error = match open_promotion_store(&hardlink_path) {
-            Err(error) => error,
-            Ok(_) => panic!("hardlinked store must be refused"),
+        let Err(hardlink_error) = open_promotion_store(&hardlink_path) else {
+            panic!("hardlinked store must be refused");
         };
         assert!(hardlink_error.contains("hard link"), "{hardlink_error}");
     }

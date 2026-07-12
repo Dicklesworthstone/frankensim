@@ -37,6 +37,110 @@ pub const MAX_GEMM_THREADS: usize = 4_096;
 
 const GEMM_ROOFLINE_POOL_SEED: u64 = 0x524F_4F46_4C49_4E45;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProductionKernelWork {
+    name: &'static str,
+    flops_per_run: u128,
+    bytes_per_run: u128,
+}
+
+impl ProductionKernelWork {
+    fn scaled(
+        name: &'static str,
+        elements: u128,
+        flops_per_element: u128,
+        bytes_per_element: u128,
+    ) -> Result<Self, String> {
+        let flops_per_run = elements
+            .checked_mul(flops_per_element)
+            .ok_or_else(|| format!("production roofline `{name}` FLOP estimate overflowed u128"))?;
+        let bytes_per_run = elements
+            .checked_mul(bytes_per_element)
+            .ok_or_else(|| format!("production roofline `{name}` byte estimate overflowed u128"))?;
+        Ok(Self {
+            name,
+            flops_per_run,
+            bytes_per_run,
+        })
+    }
+}
+
+/// Checked work estimate for every kernel in the shipped production registry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ProductionRegistryWork {
+    /// Number of warmup plus timed invocations made for each kernel.
+    pub(crate) runs_per_kernel: usize,
+    /// Sum of declared floating-point operations across the complete run.
+    pub(crate) total_flops: u128,
+    /// Sum of declared logical bytes across the complete run.
+    pub(crate) total_bytes: u128,
+}
+
+fn production_gemm_side(n: usize) -> usize {
+    n.isqrt().max(256)
+}
+
+/// Derive the complete shipped-registry work before constructing its buffers.
+///
+/// The integer model is the exact composition of the four built-in intensity
+/// declarations: axpy, dot, sum, and square GEMM at the registry-derived side.
+/// It deliberately does not use `n` as a proxy for GEMM: the floor-256 GEMM
+/// performs `2 * side^3` FLOPs even when the vector length is one.
+pub(crate) fn production_registry_work(
+    n: usize,
+    runs_per_kernel: usize,
+) -> Result<ProductionRegistryWork, String> {
+    let n_u128 = n as u128;
+    let side = production_gemm_side(n) as u128;
+    let gemm_outputs = side
+        .checked_mul(side)
+        .ok_or_else(|| "production roofline GEMM output extent overflowed u128".to_string())?;
+    let gemm_flops_per_output = side
+        .checked_mul(2)
+        .ok_or_else(|| "production roofline GEMM FLOPs per output overflowed u128".to_string())?;
+    let kernels = [
+        ProductionKernelWork::scaled("simd-axpy-f64", n_u128, 2, 24)?,
+        ProductionKernelWork::scaled("simd-dot-f64", n_u128, 2, 16)?,
+        ProductionKernelWork::scaled("simd-sum-f64", n_u128, 1, 8)?,
+        ProductionKernelWork::scaled("gemm-f64", gemm_outputs, gemm_flops_per_output, 24)?,
+    ];
+    aggregate_production_work(&kernels, runs_per_kernel)
+}
+
+fn aggregate_production_work(
+    kernels: &[ProductionKernelWork],
+    runs_per_kernel: usize,
+) -> Result<ProductionRegistryWork, String> {
+    let runs = runs_per_kernel as u128;
+    let mut total_flops = 0_u128;
+    let mut total_bytes = 0_u128;
+    for kernel in kernels {
+        let kernel_flops = kernel.flops_per_run.checked_mul(runs).ok_or_else(|| {
+            format!(
+                "production roofline `{}` total FLOP estimate overflowed u128",
+                kernel.name
+            )
+        })?;
+        let kernel_bytes = kernel.bytes_per_run.checked_mul(runs).ok_or_else(|| {
+            format!(
+                "production roofline `{}` total byte estimate overflowed u128",
+                kernel.name
+            )
+        })?;
+        total_flops = total_flops.checked_add(kernel_flops).ok_or_else(|| {
+            "production roofline registry FLOP estimate overflowed u128".to_string()
+        })?;
+        total_bytes = total_bytes.checked_add(kernel_bytes).ok_or_else(|| {
+            "production roofline registry byte estimate overflowed u128".to_string()
+        })?;
+    }
+    Ok(ProductionRegistryWork {
+        runs_per_kernel,
+        total_flops,
+        total_bytes,
+    })
+}
+
 /// Production f64 GEMM benchmark routed through the session autotuner.
 ///
 /// The kernel owns its [`fs_exec::Tuner`], reusable [`fs_exec::TilePool`], and
@@ -182,19 +286,13 @@ impl RooflineKernel for GemmKernel {
                 return Err(format!("production roofline GEMM dispatch failed: {error}"));
             }
         };
-        let next_dispatches = match self.dispatches.checked_add(1) {
-            Some(next) => next,
-            None => {
-                self.invalidate_tuning_state();
-                return Err("roofline GEMM dispatch counter overflowed usize".to_string());
-            }
+        let Some(next_dispatches) = self.dispatches.checked_add(1) else {
+            self.invalidate_tuning_state();
+            return Err("roofline GEMM dispatch counter overflowed usize".to_string());
         };
-        let next_sweeps = match self.sweeps.checked_add(usize::from(dispatch.swept)) {
-            Some(next) => next,
-            None => {
-                self.invalidate_tuning_state();
-                return Err("roofline GEMM sweep counter overflowed usize".to_string());
-            }
+        let Some(next_sweeps) = self.sweeps.checked_add(usize::from(dispatch.swept)) else {
+            self.invalidate_tuning_state();
+            return Err("roofline GEMM sweep counter overflowed usize".to_string());
         };
         let next_active_row = dispatch
             .validated_tune_row
@@ -518,7 +616,7 @@ pub fn production_registry_with_ledger(
     tune_ledger: Option<fs_ledger::Ledger>,
 ) -> Result<Vec<Box<dyn RooflineKernel>>, String> {
     validate_vector_elements("production registry", n)?;
-    let side = n.isqrt().max(256);
+    let side = production_gemm_side(n);
     validate_gemm_request(side, side, side, axes.logical_cpus as usize)?;
     let mut registry = default_registry(n)?;
     registry.push(Box::new(GemmKernel::new(
@@ -657,6 +755,47 @@ mod tests {
         let mut hostile_threads = axes;
         hostile_threads.logical_cpus = (MAX_GEMM_THREADS + 1) as u32;
         assert!(production_registry(1, &hostile_threads).is_err());
+    }
+
+    #[test]
+    fn production_work_model_includes_the_floor_gemm_and_every_vector_kernel() {
+        let work = production_registry_work(1, 1).expect("minimum production work is bounded");
+        assert_eq!(work.runs_per_kernel, 1);
+        assert_eq!(
+            work.total_flops, 33_554_437,
+            "2*256^3 GEMM FLOPs plus five vector FLOPs must be charged"
+        );
+        assert_eq!(
+            work.total_bytes, 1_572_912,
+            "24*256^2 GEMM bytes plus 48 vector bytes must be charged"
+        );
+    }
+
+    #[test]
+    fn production_work_aggregation_refuses_integer_overflow() {
+        let hostile_flops = [ProductionKernelWork {
+            name: "overflow-fixture",
+            flops_per_run: u128::MAX,
+            bytes_per_run: 0,
+        }];
+        let error = aggregate_production_work(&hostile_flops, 2)
+            .expect_err("checked work aggregation must refuse FLOP multiplication overflow");
+        assert!(
+            error.contains("FLOP estimate overflowed u128"),
+            "unexpected diagnostic: {error}"
+        );
+
+        let hostile_bytes = [ProductionKernelWork {
+            name: "overflow-fixture",
+            flops_per_run: 0,
+            bytes_per_run: u128::MAX,
+        }];
+        let error = aggregate_production_work(&hostile_bytes, 2)
+            .expect_err("checked work aggregation must refuse byte multiplication overflow");
+        assert!(
+            error.contains("byte estimate overflowed u128"),
+            "unexpected diagnostic: {error}"
+        );
     }
 
     fn trusted_baseline(

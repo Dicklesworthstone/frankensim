@@ -202,10 +202,7 @@ fn body_json(
     )
 }
 
-fn chain_digest(
-    prev: Option<fs_blake3::ContentHash>,
-    body: &str,
-) -> fs_blake3::ContentHash {
+fn chain_digest(prev: Option<fs_blake3::ContentHash>, body: &str) -> fs_blake3::ContentHash {
     let mut material = Vec::new();
     if let Some(prev) = prev {
         material.extend_from_slice(prev.as_bytes());
@@ -225,7 +222,9 @@ struct ParsedBody {
 
 /// Strict parse of one checkpoint body; byte-exact round trip enforced.
 fn parse_body(text: &str) -> Option<ParsedBody> {
-    let rest = text.strip_prefix(&format!("{{\"schema\":\"{CHECKPOINT_SCHEMA}\",\"kernel\":\""))?;
+    let rest = text.strip_prefix(&format!(
+        "{{\"schema\":\"{CHECKPOINT_SCHEMA}\",\"kernel\":\""
+    ))?;
     let (kernel, rest) = rest.split_once("\",\"version\":\"")?;
     let (version, rest) = rest.split_once("\",\"ordinal\":")?;
     let (ordinal_text, rest) = rest.split_once(",\"prev\":")?;
@@ -855,9 +854,17 @@ mod tests {
                 at - fx.recorded_at
             );
         }
-        assert_eq!(fast(&fx, kernel, version, fx.recorded_at + 1), Staleness::Fresh);
         assert_eq!(
-            fast(&fx, kernel, version, fx.recorded_at + STALENESS_MAX_AGE_NS + 1),
+            fast(&fx, kernel, version, fx.recorded_at + 1),
+            Staleness::Fresh
+        );
+        assert_eq!(
+            fast(
+                &fx,
+                kernel,
+                version,
+                fx.recorded_at + STALENESS_MAX_AGE_NS + 1
+            ),
             Staleness::Expired
         );
         assert_eq!(
@@ -932,7 +939,10 @@ mod tests {
         let (kernel, version) = &fx.kernels[0];
 
         let before = fx.ledger.read_queries();
-        assert_eq!(fast(&fx, kernel, version, fx.recorded_at + 1), Staleness::Fresh);
+        assert_eq!(
+            fast(&fx, kernel, version, fx.recorded_at + 1),
+            Staleness::Fresh
+        );
         let fast_reads = fx.ledger.read_queries() - before;
 
         let before = fx.ledger.read_queries();
@@ -961,13 +971,22 @@ mod tests {
         let fx = fixture(&db);
         seal(&fx);
         let (kernel, version) = &fx.kernels[0];
-        assert_eq!(fast(&fx, kernel, version, fx.recorded_at + 1), Staleness::Fresh);
+        assert_eq!(
+            fast(&fx, kernel, version, fx.recorded_at + 1),
+            Staleness::Fresh
+        );
 
         let row = production_row(&fx.ledger, kernel);
         let forged = row.measured.replace("\"dispersion\":", "\"dispersion\": ");
         assert_ne!(forged, row.measured);
         fx.ledger
-            .tune_put(&row.kernel, &row.shape_class, &row.machine, &row.params, &forged)
+            .tune_put(
+                &row.kernel,
+                &row.shape_class,
+                &row.machine,
+                &row.params,
+                &forged,
+            )
             .expect("overwrite row");
 
         assert_eq!(
@@ -989,7 +1008,10 @@ mod tests {
         assert_eq!(fx.kernels, kernels2);
         seal(&fx); // covers both runs' rows
         let (kernel, version) = &fx.kernels[0];
-        assert_eq!(fast(&fx, kernel, version, recorded_at2 + 1), Staleness::Fresh);
+        assert_eq!(
+            fast(&fx, kernel, version, recorded_at2 + 1),
+            Staleness::Fresh
+        );
 
         let replay_db = temp_db("rollback-dst");
         let replay = Ledger::open(&replay_db).expect("open replay ledger");
@@ -1000,7 +1022,13 @@ mod tests {
             .expect("chain rows")
         {
             replay
-                .tune_put(&row.kernel, &row.shape_class, &row.machine, &row.params, &row.measured)
+                .tune_put(
+                    &row.kernel,
+                    &row.shape_class,
+                    &row.machine,
+                    &row.params,
+                    &row.measured,
+                )
                 .expect("copy chain row");
         }
         // Copy only the NEWER of the two production rows.
@@ -1015,7 +1043,13 @@ mod tests {
         rows.sort_by_key(|row| row.shape_class.clone());
         let kept = rows.pop().expect("newest row");
         replay
-            .tune_put(&kept.kernel, &kept.shape_class, &kept.machine, &kept.params, &kept.measured)
+            .tune_put(
+                &kept.kernel,
+                &kept.shape_class,
+                &kept.machine,
+                &kept.params,
+                &kept.measured,
+            )
             .expect("copy surviving row");
 
         let verdict = staleness_at_checkpointed_with(
@@ -1053,15 +1087,29 @@ mod tests {
             .expect("chain rows")
             .pop()
             .expect("chain row");
-        let forged = row.measured.replace("\"verdict\":\"valid\"", "\"verdict\":\"corrupt\"");
-        assert_ne!(forged, row.measured, "fixture must have a valid entry to flip");
+        let forged = row
+            .measured
+            .replace("\"verdict\":\"valid\"", "\"verdict\":\"corrupt\"");
+        assert_ne!(
+            forged, row.measured,
+            "fixture must have a valid entry to flip"
+        );
         fx.ledger
-            .tune_put(&row.kernel, &row.shape_class, &row.machine, &row.params, &forged)
+            .tune_put(
+                &row.kernel,
+                &row.shape_class,
+                &row.machine,
+                &row.params,
+                &forged,
+            )
             .expect("tamper chain");
 
         // Fail closed: the fast path falls back to the exhaustive verdict.
         let before = fx.ledger.read_queries();
-        assert_eq!(fast(&fx, kernel, version, fx.recorded_at + 1), Staleness::Fresh);
+        assert_eq!(
+            fast(&fx, kernel, version, fx.recorded_at + 1),
+            Staleness::Fresh
+        );
         let fallback_reads = fx.ledger.read_queries() - before;
         assert!(
             fallback_reads > 2,
@@ -1107,7 +1155,10 @@ mod tests {
             )
             .expect("gapped row");
         let before = fx.ledger.read_queries();
-        assert_eq!(fast(&fx, kernel, version, fx.recorded_at + 1), Staleness::Fresh);
+        assert_eq!(
+            fast(&fx, kernel, version, fx.recorded_at + 1),
+            Staleness::Fresh
+        );
         assert!(
             fx.ledger.read_queries() - before > 2,
             "gapped chain must fail closed to exhaustive"
@@ -1123,7 +1174,9 @@ mod tests {
         let original = production_row(&fx.ledger, kernel);
 
         // Tamper, then seal: the exhaustive pass records tombstones.
-        let forged = original.measured.replace("\"dispersion\":", "\"dispersion\": ");
+        let forged = original
+            .measured
+            .replace("\"dispersion\":", "\"dispersion\": ");
         assert_ne!(forged, original.measured);
         fx.ledger
             .tune_put(
@@ -1135,7 +1188,10 @@ mod tests {
             )
             .expect("tamper row");
         let sealed = seal(&fx);
-        assert!(sealed.corrupt_rows >= 1, "tampered history must seal tombstones");
+        assert!(
+            sealed.corrupt_rows >= 1,
+            "tampered history must seal tombstones"
+        );
 
         // Restore the original bytes: the row would re-verify exhaustively...
         fx.ledger
@@ -1187,7 +1243,10 @@ mod tests {
             fast(&fx, kernel, version, recorded_at2 + 1),
             exhaustive(&fx, kernel, version, recorded_at2 + 1)
         );
-        assert_eq!(fast(&fx, kernel, version, recorded_at2 + 1), Staleness::Fresh);
+        assert_eq!(
+            fast(&fx, kernel, version, recorded_at2 + 1),
+            Staleness::Fresh
+        );
 
         // Delta validation costs more than covered but the next seal
         // re-covers everything.
@@ -1199,7 +1258,10 @@ mod tests {
         let receipt = seal(&fx);
         assert_eq!(receipt.ordinal, 1);
         let before = fx.ledger.read_queries();
-        assert_eq!(fast(&fx, kernel, version, recorded_at2 + 1), Staleness::Fresh);
+        assert_eq!(
+            fast(&fx, kernel, version, recorded_at2 + 1),
+            Staleness::Fresh
+        );
         assert_eq!(
             fx.ledger.read_queries() - before,
             2,
@@ -1228,7 +1290,10 @@ mod tests {
         assert_eq!(fast_reads, 2, "40 covered rows must still cost two reads");
 
         let before = fx.ledger.read_queries();
-        assert_eq!(exhaustive(&fx, kernel, version, newest + 1), Staleness::Fresh);
+        assert_eq!(
+            exhaustive(&fx, kernel, version, newest + 1),
+            Staleness::Fresh
+        );
         exhaustive_read_counts.push(fx.ledger.read_queries() - before);
         assert!(
             exhaustive_read_counts[0] > 40,

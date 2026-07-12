@@ -2395,10 +2395,7 @@ pub(crate) fn select_matching_rows(
 
 /// Final age/rollback classification over a completed build scan (bead vm3i:
 /// shared by the exhaustive and checkpointed paths).
-pub(crate) fn classify_scanned_rows(
-    build_scan: BuildRowScan,
-    observed_wall_ns: i64,
-) -> Staleness {
+pub(crate) fn classify_scanned_rows(build_scan: BuildRowScan, observed_wall_ns: i64) -> Staleness {
     let Some(recorded_at_ns) = build_scan.newest_current_build else {
         return if build_scan.saw_foreign_build {
             Staleness::BuildDrift
@@ -2415,6 +2412,7 @@ pub(crate) fn classify_scanned_rows(
     Staleness::Fresh
 }
 
+#[allow(clippy::too_many_arguments)] // Exact roofline row identity and dependency receipt key.
 fn staleness_at_with_build_and_dependency(
     ledger: &Ledger,
     kernel: &str,

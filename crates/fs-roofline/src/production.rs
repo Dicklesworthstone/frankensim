@@ -89,12 +89,30 @@ pub struct ProductionRunConfig {
 /// `n`-element GEMM matrices, so this bounds aggregate allocation as well as
 /// each individual kernel input.
 pub const MAX_PRODUCTION_ELEMENTS: usize = crate::kernels::MAX_VECTOR_KERNEL_ELEMENTS;
+/// Largest total warmup plus timed invocation count for each production kernel.
+///
+/// This is intentionally much tighter than the generic measurement API's
+/// per-field limits. It bounds dispatch/receipt overhead, cancellation latency,
+/// and repeated minimum-shape amplification while leaving ample room above the
+/// shipped default's eleven runs.
+pub const MAX_PRODUCTION_KERNEL_RUNS: usize = 64;
 /// Largest untimed warmup count accepted by the sealed production runner.
-pub const MAX_PRODUCTION_WARMUP: usize = crate::MAX_MEASUREMENT_WARMUP;
+///
+/// At least one timed repetition is mandatory, so warmups alone can occupy at
+/// most 63 of the 64 per-kernel invocation slots.
+pub const MAX_PRODUCTION_WARMUP: usize = MAX_PRODUCTION_KERNEL_RUNS - 1;
 /// Largest timed repetition count accepted by the sealed production runner.
-pub const MAX_PRODUCTION_REPS: usize = crate::MAX_MEASUREMENT_REPS;
-/// Largest `n * (warmup + reps)` admitted by one production invocation.
-pub const MAX_PRODUCTION_ELEMENT_PASSES: usize = 1 << 28;
+pub const MAX_PRODUCTION_REPS: usize = MAX_PRODUCTION_KERNEL_RUNS;
+/// Largest modeled floating-point work admitted across the complete registry.
+///
+/// `2^39` admits the shipped profile's approximately 189 billion FLOPs while
+/// limiting the maximum vector/GEMM shape to three complete registry runs.
+pub const MAX_PRODUCTION_REGISTRY_FLOPS: u128 = 1 << 39;
+/// Largest modeled logical byte traffic admitted across the complete registry.
+///
+/// `2^33` admits the shipped profile's approximately 3.3 GiB of declared
+/// traffic while independently bounding bandwidth-heavy repetition profiles.
+pub const MAX_PRODUCTION_REGISTRY_BYTES: u128 = 1 << 33;
 
 impl ProductionRunConfig {
     /// Validate resource-driving inputs before registry allocation or timing.
@@ -120,14 +138,27 @@ impl ProductionRunConfig {
                 self.reps
             ));
         }
-        let passes = self
+        let runs_per_kernel = self
             .warmup
             .checked_add(self.reps)
-            .and_then(|count| self.n.checked_mul(count))
-            .ok_or_else(|| "production element-pass budget overflowed usize".to_string())?;
-        if passes > MAX_PRODUCTION_ELEMENT_PASSES {
+            .ok_or_else(|| "production warmup + repetition count overflowed usize".to_string())?;
+        if runs_per_kernel > MAX_PRODUCTION_KERNEL_RUNS {
             return Err(format!(
-                "production n * (warmup + reps) must be at most {MAX_PRODUCTION_ELEMENT_PASSES}, got {passes}"
+                "production warmup + reps must be at most {MAX_PRODUCTION_KERNEL_RUNS} runs per kernel, got {runs_per_kernel}"
+            ));
+        }
+        let work = crate::kernels::production_registry_work(self.n, runs_per_kernel)?;
+        debug_assert_eq!(work.runs_per_kernel, runs_per_kernel);
+        if work.total_flops > MAX_PRODUCTION_REGISTRY_FLOPS {
+            return Err(format!(
+                "production registry requires {} modeled FLOPs, exceeding the {MAX_PRODUCTION_REGISTRY_FLOPS}-FLOP bound",
+                work.total_flops
+            ));
+        }
+        if work.total_bytes > MAX_PRODUCTION_REGISTRY_BYTES {
+            return Err(format!(
+                "production registry requires {} modeled logical bytes, exceeding the {MAX_PRODUCTION_REGISTRY_BYTES}-byte bound",
+                work.total_bytes
             ));
         }
         Ok(())
@@ -571,6 +602,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One exact/limit-plus-one work-admission matrix.
     fn production_config_rejects_zero_and_unbounded_work_before_running() {
         for (config, expected) in [
             (
@@ -617,9 +649,17 @@ mod tests {
                 ProductionRunConfig {
                     n: MAX_PRODUCTION_ELEMENTS,
                     warmup: MAX_PRODUCTION_WARMUP,
-                    reps: 1,
+                    reps: 2,
                 },
-                "n * (warmup + reps)",
+                "warmup + reps",
+            ),
+            (
+                ProductionRunConfig {
+                    n: 1,
+                    warmup: MAX_PRODUCTION_WARMUP,
+                    reps: MAX_PRODUCTION_REPS,
+                },
+                "warmup + reps",
             ),
         ] {
             let error = config.validate().expect_err("invalid config must fail");
@@ -632,13 +672,71 @@ mod tests {
         }
         .validate()
         .expect("maximum allocation with one pass is admitted without allocating");
+
         ProductionRunConfig {
             n: 1,
-            warmup: MAX_PRODUCTION_WARMUP,
-            reps: MAX_PRODUCTION_REPS,
+            warmup: 0,
+            reps: MAX_PRODUCTION_KERNEL_RUNS,
         }
         .validate()
-        .expect("maximum repetition counts with a minimal input are admitted");
+        .expect("the exact per-kernel run cap is admitted");
+        let error = ProductionRunConfig {
+            n: 1,
+            warmup: 1,
+            reps: MAX_PRODUCTION_KERNEL_RUNS,
+        }
+        .validate()
+        .expect_err("one run beyond the per-kernel cap must be refused");
+        assert!(
+            error.contains("warmup + reps"),
+            "unexpected diagnostic: {error}"
+        );
+
+        ProductionRunConfig {
+            n: 1 << 22,
+            warmup: 2,
+            reps: 9,
+        }
+        .validate()
+        .expect("the shipped default profile remains inside every derived-work cap");
+
+        ProductionRunConfig {
+            n: MAX_PRODUCTION_ELEMENTS,
+            warmup: 2,
+            reps: 1,
+        }
+        .validate()
+        .expect("three maximum-shape runs remain below the modeled FLOP cap");
+        let error = ProductionRunConfig {
+            n: MAX_PRODUCTION_ELEMENTS,
+            warmup: 3,
+            reps: 1,
+        }
+        .validate()
+        .expect_err("four maximum-shape runs must exceed the modeled FLOP cap");
+        assert!(
+            error.contains("modeled FLOPs"),
+            "unexpected diagnostic: {error}"
+        );
+
+        ProductionRunConfig {
+            n: 1 << 22,
+            warmup: 27,
+            reps: 1,
+        }
+        .validate()
+        .expect("twenty-eight default-shape runs remain below the byte cap");
+        let error = ProductionRunConfig {
+            n: 1 << 22,
+            warmup: 28,
+            reps: 1,
+        }
+        .validate()
+        .expect_err("twenty-nine default-shape runs must exceed the byte cap");
+        assert!(
+            error.contains("modeled logical bytes"),
+            "unexpected diagnostic: {error}"
+        );
     }
 
     #[test]

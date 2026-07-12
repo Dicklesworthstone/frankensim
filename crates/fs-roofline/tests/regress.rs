@@ -7,7 +7,10 @@
 use std::collections::BTreeMap;
 
 use fs_roofline::regress::{
-    Cusum, GateSpec, GateVerdict, Night, gate, slower_this_month, standardize,
+    Cusum, GateSpec, GateVerdict, MAX_REGRESSION_DASHBOARD_NIGHTS,
+    MAX_REGRESSION_DASHBOARD_PHASE_OBSERVATIONS, MAX_REGRESSION_HISTORY_NIGHTS,
+    MAX_REGRESSION_KERNELS, MAX_REGRESSION_PHASES_PER_NIGHT, MAX_REGRESSION_SERIES_SAMPLES, Night,
+    gate, slower_this_month, standardize,
 };
 
 fn verdict(case: &str, detail: &str) {
@@ -66,7 +69,7 @@ fn rg_001_noise_robustness_zero_false_alarms() {
             }
         }
         let xs: Vec<f64> = history.iter().map(|n| n.attainment).collect();
-        let z = standardize(&xs, 8);
+        let z = standardize(&xs, 8).expect("bounded history");
         if Cusum::default().first_alarm(&z).is_some() {
             cusum_alarms += 1;
         }
@@ -131,7 +134,7 @@ fn rg_003_cusum_catches_the_slow_drift() {
         let drift = 0.003 * (n - 19) as f64;
         xs.push(0.72 - drift + 0.01 * gauss(0xd1f7, n));
     }
-    let z = standardize(&xs, 8);
+    let z = standardize(&xs, 8).expect("bounded history");
     let single_night_reds = z.iter().skip(10).filter(|&&v| v < -4.0).count();
     let alarm = Cusum::default().first_alarm(&z);
     println!(
@@ -167,7 +170,7 @@ fn rg_004_dashboard_one_liner() {
         *night.phases.get_mut("reduce").expect("reduce") *= 3.0;
     }
     kernels.insert("fft".to_string(), regressed);
-    let report = slower_this_month(&kernels, 5.0);
+    let report = slower_this_month(&kernels, 5.0).expect("finite non-negative threshold");
     println!("{{\"metric\":\"dashboard\",\"report\":{report:?}}}");
     assert_eq!(report.len(), 1, "only the regressed kernel is named");
     assert_eq!(report[0].0, "fft");
@@ -308,7 +311,8 @@ fn rg_007_poison_never_enters_state() {
     };
     assert_eq!(bad.first_alarm(&[0.0, 0.0]), Some(0));
     // standardize: poison propagates as -inf from the first bad index.
-    let zs = standardize(&[1.0, 1.0, 1.0, f64::INFINITY, 1.0], 2);
+    let zs =
+        standardize(&[1.0, 1.0, 1.0, f64::INFINITY, 1.0], 2).expect("bounded poisoned history");
     assert!(zs[..3].iter().all(|v| v.is_finite()));
     assert!(zs[3] == f64::NEG_INFINITY && zs[4] == f64::NEG_INFINITY);
     // ...and the -inf stream alarms downstream.
@@ -327,7 +331,7 @@ fn rg_007_poison_never_enters_state() {
         ("clean".to_string(), good_hist),
         ("poisoned".to_string(), poisoned),
     ]);
-    let report = slower_this_month(&kernels, 5.0);
+    let report = slower_this_month(&kernels, 5.0).expect("finite non-negative threshold");
     assert_eq!(
         report.len(),
         1,
@@ -339,4 +343,337 @@ fn rg_007_poison_never_enters_state() {
         "{{\"suite\":\"fs-roofline/regress\",\"case\":\"rg-007\",\"verdict\":\"pass\",\
          \"detail\":\"poison alarms instead of suppressing; invalid kernels flagged loudest\"}}"
     );
+}
+
+/// rg-008: logical time and dashboard configuration are evidence, not hints.
+/// Duplicate/reversed nights and invalid thresholds must fail closed, while the
+/// inclusive zero bound and the dashboard's strict `drop > floor` boundary
+/// remain usable and deterministic.
+#[test]
+fn rg_008_history_order_and_thresholds_fail_closed() {
+    let history = |attainment: f64| {
+        (0..14)
+            .map(|night| Night {
+                night,
+                attainment,
+                phases: BTreeMap::from([("solve".to_string(), 1.0)]),
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let mut duplicate = history(0.8);
+    duplicate[8].night = duplicate[7].night;
+    let duplicate_gate = gate(&duplicate, GateSpec::default());
+    assert!(
+        matches!(duplicate_gate, GateVerdict::Invalid { .. }),
+        "duplicate logical time must not be treated as chronological: {duplicate_gate:?}"
+    );
+
+    let mut reversed = history(0.8);
+    reversed.swap(7, 8);
+    let reversed_gate = gate(&reversed, GateSpec::default());
+    assert!(
+        matches!(reversed_gate, GateVerdict::Invalid { .. }),
+        "reversed logical time must not be treated as chronological: {reversed_gate:?}"
+    );
+
+    let kernels = BTreeMap::from([
+        ("duplicate".to_string(), duplicate),
+        ("reversed".to_string(), reversed),
+    ]);
+    let invalid_rows = slower_this_month(&kernels, 0.0).expect("zero is a valid threshold");
+    assert_eq!(invalid_rows.len(), 2);
+    assert!(invalid_rows.iter().all(|row| {
+        row.1.is_infinite()
+            && row
+                .2
+                .starts_with("INVALID: logical night must increase strictly")
+    }));
+
+    for threshold in [f64::NAN, f64::INFINITY, -f64::MIN_POSITIVE] {
+        let error = slower_this_month(&BTreeMap::new(), threshold)
+            .expect_err("non-finite or negative threshold must fail closed");
+        assert!(error.reason().contains("pct_floor"));
+    }
+
+    let mut exact = history(1.0);
+    for night in exact.iter_mut().skip(7) {
+        night.attainment = 0.5;
+    }
+    let exact = BTreeMap::from([("exact-bound".to_string(), exact)]);
+    assert!(
+        slower_this_month(&exact, 50.0)
+            .expect("exact finite threshold")
+            .is_empty(),
+        "the documented 'more than pct_floor' comparison is strict at equality"
+    );
+
+    println!(
+        "{{\"suite\":\"fs-roofline/regress\",\"case\":\"rg-008\",\"verdict\":\"pass\",\
+         \"detail\":\"logical time is strictly increasing and dashboard thresholds fail closed\"}}"
+    );
+}
+
+#[test]
+fn rg_009_extreme_finite_values_and_sparse_phases_remain_sound() {
+    let extreme: Vec<Night> = (0..14)
+        .map(|night| Night {
+            night,
+            attainment: f64::MAX,
+            phases: BTreeMap::from([
+                ("left".to_string(), f64::MAX),
+                ("right".to_string(), f64::MAX),
+            ]),
+        })
+        .collect();
+    assert!(matches!(
+        gate(&extreme, GateSpec::default()),
+        GateVerdict::Green { z } if z == 0.0
+    ));
+    assert!(
+        slower_this_month(&BTreeMap::from([("extreme".to_string(), extreme)]), 0.0)
+            .expect("bounded extreme history")
+            .is_empty(),
+        "finite values must not overflow into a silent NaN trend"
+    );
+    assert_eq!(
+        standardize(&[f64::MAX, f64::MAX, f64::MAX], 1).expect("stable extreme series is bounded"),
+        vec![0.0, 0.0, 0.0],
+        "a stable extreme series must not underflow its normalized floor into 0/0 poison"
+    );
+
+    let mut sparse: Vec<Night> = (0..8)
+        .map(|night| Night {
+            night,
+            attainment: 1.0,
+            phases: if night == 0 {
+                BTreeMap::from([("common".to_string(), 1.0), ("rare".to_string(), 9.0)])
+            } else {
+                BTreeMap::from([("common".to_string(), 1.0)])
+            },
+        })
+        .collect();
+    sparse.push(Night {
+        night: 8,
+        attainment: 0.0,
+        phases: BTreeMap::from([("common".to_string(), 4.0), ("rare".to_string(), 6.0)]),
+    });
+    let GateVerdict::Red { attribution, .. } = gate(&sparse, GateSpec::default()) else {
+        panic!("sparse-phase regression must gate red");
+    };
+    assert_eq!(attribution[0].0, "rare");
+    assert_eq!(
+        attribution[0].1.to_bits(),
+        0.0_f64.to_bits(),
+        "seven absent nights contribute positive zero"
+    );
+    assert!((attribution[0].2 - 0.6).abs() < 1e-12);
+}
+
+#[test]
+fn rg_010_public_regression_inputs_are_bounded() {
+    let night = |night| Night {
+        night,
+        attainment: 1.0,
+        phases: BTreeMap::new(),
+    };
+    let oversized_history: Vec<_> = (0..=MAX_REGRESSION_HISTORY_NIGHTS as u64)
+        .map(night)
+        .collect();
+    assert!(matches!(
+        gate(&oversized_history, GateSpec::default()),
+        GateVerdict::Invalid { .. }
+    ));
+
+    let mut too_many_phases = night(0);
+    too_many_phases.phases = (0..=MAX_REGRESSION_PHASES_PER_NIGHT)
+        .map(|index| (format!("phase-{index}"), 1.0))
+        .collect();
+    assert!(matches!(
+        gate(&[too_many_phases], GateSpec::default()),
+        GateVerdict::Invalid { .. }
+    ));
+
+    let kernels: BTreeMap<_, _> = (0..=MAX_REGRESSION_KERNELS)
+        .map(|index| (format!("kernel-{index}"), Vec::new()))
+        .collect();
+    assert!(slower_this_month(&kernels, 0.0).is_err());
+    assert!(standardize(&vec![0.0; MAX_REGRESSION_SERIES_SAMPLES + 1], 8).is_err());
+
+    for min_baseline in [MAX_REGRESSION_HISTORY_NIGHTS, usize::MAX] {
+        assert!(matches!(
+            gate(
+                &[],
+                GateSpec {
+                    k_sigma: 4.0,
+                    min_baseline,
+                }
+            ),
+            GateVerdict::Invalid { .. }
+        ));
+    }
+    assert!(matches!(
+        gate(
+            &[],
+            GateSpec {
+                k_sigma: 4.0,
+                min_baseline: MAX_REGRESSION_HISTORY_NIGHTS - 1,
+            }
+        ),
+        GateVerdict::Green { z: 0.0 }
+    ));
+
+    let mut dashboard_nights = BTreeMap::new();
+    for kernel in 0..(MAX_REGRESSION_DASHBOARD_NIGHTS / MAX_REGRESSION_HISTORY_NIGHTS) {
+        dashboard_nights.insert(
+            format!("history-{kernel}"),
+            (0..MAX_REGRESSION_HISTORY_NIGHTS as u64)
+                .map(night)
+                .collect(),
+        );
+    }
+    dashboard_nights.insert("history-overflow".to_string(), vec![night(0)]);
+    let error = slower_this_month(&dashboard_nights, 0.0)
+        .expect_err("dashboard-wide night limit+1 must refuse");
+    assert!(error.reason().contains("dashboard night count"));
+
+    let phases: BTreeMap<_, _> = (0..MAX_REGRESSION_PHASES_PER_NIGHT)
+        .map(|index| (format!("phase-{index}"), 1.0))
+        .collect();
+    let full_phase_nights =
+        MAX_REGRESSION_DASHBOARD_PHASE_OBSERVATIONS / MAX_REGRESSION_PHASES_PER_NIGHT;
+    let phase_history: Vec<_> = (0..full_phase_nights as u64)
+        .map(|night| Night {
+            night,
+            attainment: 1.0,
+            phases: phases.clone(),
+        })
+        .collect();
+    let phase_overflow = Night {
+        night: 0,
+        attainment: 1.0,
+        phases: BTreeMap::from([("phase-overflow".to_string(), 1.0)]),
+    };
+    let error = slower_this_month(
+        &BTreeMap::from([
+            ("phase-full".to_string(), phase_history),
+            ("phase-overflow".to_string(), vec![phase_overflow]),
+        ]),
+        0.0,
+    )
+    .expect_err("dashboard-wide phase observation limit+1 must refuse");
+    assert!(error.reason().contains("dashboard phase observation count"));
+}
+
+#[test]
+fn rg_011_tiny_regressions_and_extreme_improvements_are_scale_sound() {
+    let phase = || BTreeMap::from([("solve".to_string(), 1.0)]);
+    let mut gate_history: Vec<_> = (0..8)
+        .map(|night| Night {
+            night,
+            attainment: 1e-20,
+            phases: phase(),
+        })
+        .collect();
+    gate_history.push(Night {
+        night: 8,
+        attainment: 0.0,
+        phases: phase(),
+    });
+    assert!(matches!(
+        gate(&gate_history, GateSpec::default()),
+        GateVerdict::Red { z, .. } if z == f64::NEG_INFINITY
+    ));
+
+    let tiny: Vec<_> = (0..14)
+        .map(|night| Night {
+            night,
+            attainment: if night < 7 { 1e-20 } else { 0.0 },
+            phases: phase(),
+        })
+        .collect();
+    let tiny_report = slower_this_month(&BTreeMap::from([("tiny".to_string(), tiny)]), 99.0)
+        .expect("tiny finite values are valid evidence");
+    assert_eq!(tiny_report.len(), 1);
+    assert_eq!(tiny_report[0].0, "tiny");
+    assert_eq!(tiny_report[0].1.to_bits(), 100.0_f64.to_bits());
+
+    let improvement: Vec<_> = (0..14)
+        .map(|night| Night {
+            night,
+            attainment: if night < 7 { 0.0 } else { f64::MAX },
+            phases: phase(),
+        })
+        .collect();
+    assert!(
+        slower_this_month(
+            &BTreeMap::from([("extreme-improvement".to_string(), improvement)]),
+            0.0,
+        )
+        .expect("extreme finite improvement is valid evidence")
+        .is_empty(),
+        "an improvement must not overflow into an INVALID regression"
+    );
+}
+
+#[test]
+fn rg_012_dashboard_attribution_uses_its_opening_and_trailing_windows() {
+    let history: Vec<_> = (0..30)
+        .map(|night| {
+            let regressed = night >= 7;
+            Night {
+                night,
+                attainment: if regressed { 0.5 } else { 1.0 },
+                phases: if regressed {
+                    BTreeMap::from([("base".to_string(), 1.0), ("slow".to_string(), 9.0)])
+                } else {
+                    BTreeMap::from([("base".to_string(), 9.0), ("slow".to_string(), 1.0)])
+                },
+            }
+        })
+        .collect();
+    let report = slower_this_month(
+        &BTreeMap::from([("sustained-shift".to_string(), history)]),
+        5.0,
+    )
+    .expect("bounded sustained regression");
+    assert_eq!(report.len(), 1);
+    assert_eq!(report[0].0, "sustained-shift");
+    assert!((report[0].1 - 50.0).abs() < f64::EPSILON);
+    assert_eq!(
+        report[0].2, "slow",
+        "the trailing-window phase increase must not be diluted by regressed middle nights"
+    );
+}
+
+#[test]
+fn rg_013_standardization_is_scale_invariant_without_false_improvement_alarm() {
+    let canonical = [1.0, 1.01, 0.99, 1.005, 0.995, 1.002, 0.998, 1.0, 0.5, 0.5];
+    let tiny: Vec<_> = canonical.iter().map(|value| value * 1e-200).collect();
+    let canonical_z = standardize(&canonical, 8).expect("bounded canonical series");
+    let tiny_z = standardize(&tiny, 8).expect("bounded rescaled series");
+    for (canonical, tiny) in canonical_z.iter().zip(&tiny_z) {
+        let tolerance = 1e-10 * canonical.abs().max(1.0);
+        assert!(
+            (canonical - tiny).abs() <= tolerance,
+            "standardized score changed under positive rescaling: {canonical} vs {tiny}"
+        );
+    }
+    let canonical_alarm = Cusum::default().first_alarm(&canonical_z);
+    assert_eq!(canonical_alarm, Some(8));
+    assert_eq!(Cusum::default().first_alarm(&tiny_z), canonical_alarm);
+
+    let improvement =
+        standardize(&[1.0, 1.0, 1.0, f64::MAX], 2).expect("bounded extreme improvement series");
+    assert_eq!(improvement[3].to_bits(), f64::MAX.to_bits());
+    assert_eq!(
+        Cusum::default().first_alarm(&improvement),
+        None,
+        "a positive zero-dispersion improvement must not become poison or shortfall"
+    );
+
+    let decline =
+        standardize(&[1.0, 1.0, 1.0, 0.0], 2).expect("bounded zero-dispersion decline series");
+    assert_eq!(decline[3].to_bits(), (-f64::MAX).to_bits());
+    assert_eq!(Cusum::default().first_alarm(&decline), Some(3));
 }
