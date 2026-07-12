@@ -10,10 +10,12 @@ use fs_verify::zoo::{
 };
 
 fn family(theta: f64, cells: usize) -> MmsProblem {
-    let base = Poly(vec![0.0, theta, -theta, 0.25 * theta, -0.25 * theta]);
+    let base = Poly::new(vec![0.0, theta, -theta, 0.25 * theta, -0.25 * theta])
+        .expect("calibration polynomial fixture must be admissible");
     #[allow(clippy::cast_precision_loss)]
     let mesh: Vec<f64> = (0..=cells).map(|k| k as f64 / cells as f64).collect();
     MmsProblem::new("elliptic-theta", base, mesh)
+        .expect("calibration manufactured problem fixture must be admissible")
 }
 
 fn accepts_at(tol: f64) -> usize {

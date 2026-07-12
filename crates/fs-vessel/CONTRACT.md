@@ -91,8 +91,8 @@ kills, but fs-vessel itself never blocks.
 
 ## Feature flags
 
-None. The fs-render dependency enables its `volumes` feature; nothing
-in fs-vessel is gated.
+None. The fs-render dependency enables `volumes` in addition to fs-render's
+default certified chart backends; nothing in fs-vessel itself is gated.
 
 ## Conformance tests
 

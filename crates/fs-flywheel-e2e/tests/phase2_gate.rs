@@ -284,7 +284,8 @@ fn p2_002_planner_beats_baseline_two_x() -> Result<(), fs_ir::planner::PlanError
     c[2] = -0.2;
     c[4] = 1.0;
     c[5] = -1.0;
-    let family = ProblemFamily::new(Poly(c), "cht-wedge-steep")?;
+    let polynomial = Poly::new(c).expect("wedge planner polynomial fixture must be admissible");
+    let family = ProblemFamily::new(polynomial, "cht-wedge-steep")?;
     let tol = 6e-3;
     let mut costs = CostTable::new(200.0)?;
     let mut cache = MemCache::default();

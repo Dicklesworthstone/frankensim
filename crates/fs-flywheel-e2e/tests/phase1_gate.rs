@@ -102,10 +102,12 @@ fn p1_001_skip_yield_dashboard_live() {
 /// exact up to FEM error — the realistic best case the proposer zoo
 /// was designed around.
 fn family(theta: f64, cells: usize) -> MmsProblem {
-    let base = Poly(vec![0.0, theta, -theta, 0.25 * theta, -0.25 * theta]);
+    let base = Poly::new(vec![0.0, theta, -theta, 0.25 * theta, -0.25 * theta])
+        .expect("theta-family polynomial fixture must be admissible");
     #[allow(clippy::cast_precision_loss)]
     let mesh: Vec<f64> = (0..=cells).map(|k| k as f64 / cells as f64).collect();
     MmsProblem::new("elliptic-theta", base, mesh)
+        .expect("theta-family manufactured problem fixture must be admissible")
 }
 
 fn certified_run(theta: f64, cells: usize) -> (f64, Vec<f64>) {

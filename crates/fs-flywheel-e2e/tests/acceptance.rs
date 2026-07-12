@@ -225,7 +225,8 @@ fn steep_family() -> Result<ProblemFamily, PlanError> {
     c[2] = -0.2;
     c[4] = 1.0;
     c[5] = -1.0;
-    ProblemFamily::new(Poly(c), "cht-wedge-acceptance")
+    let polynomial = Poly::new(c).expect("wedge acceptance polynomial fixture must be admissible");
+    ProblemFamily::new(polynomial, "cht-wedge-acceptance")
 }
 
 const RUNGS: [usize; 4] = [12, 24, 48, 96];
