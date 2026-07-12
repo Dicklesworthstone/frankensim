@@ -246,13 +246,14 @@ fn p3_002_proposal_c_instrumented_awaiting_audit() {
     // (Phase-2 benchmarks), but SCHEDULING AUTHORITY requires the
     // prospective audit to show recommendations beat agent choices —
     // and with no audit evidence the verdict is Demote by design.
-    let report = audit_scheduling(&[]).expect("empty bounded audit reports safely");
+    let report =
+        audit_scheduling("fs-flywheel-phase3-v1", &[]).expect("empty bounded audit reports safely");
     assert_eq!(
         report.verdict(),
         AuditVerdict::DemoteToReporting,
         "no evidence, no authority — the default is the safe one"
     );
-    assert!(report.authority().is_none());
+    assert_eq!(report.verdict(), AuditVerdict::DemoteToReporting);
     println!(
         "{{\"metric\":\"horizon-C\",\"status\":\"INSTRUMENTED — authority awaits the \
          prospective audit (two quarters of matched-cost comparisons)\"}}"

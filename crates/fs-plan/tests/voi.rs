@@ -14,9 +14,26 @@ use std::cell::RefCell;
 use fs_plan::voi::{
     AuditReport, AuditVerdict, LiveDecision, MAX_VOI_AUDIT_RECORDS, MAX_VOI_EVALUATIONS,
     MAX_VOI_GRID, MAX_VOI_NAME_BYTES, MAX_VOI_NODES, MAX_VOI_PROBES, MatchedAuditRecord, Probe,
-    ProbeKind, RankedMenu, UncertaintyNode, VoiError, audit_scheduling, hint_for_query,
-    rank_purchases, schedule_probes,
+    ProbeKind, RankedMenu, UncertaintyNode, VoiError, VoiScheduler,
+    audit_scheduling as audit_scheduling_scoped, hint_for_query,
+    rank_purchases as rank_purchases_scoped,
 };
+
+const POLICY_SCOPE: &str = "fixture-policy-v1";
+const SNAPSHOT_ID: &str = "fixture-snapshot-v1";
+
+fn rank_purchases(
+    decision: &LiveDecision<'_>,
+    nodes: &[UncertaintyNode],
+    menu: &[Probe],
+    grid: usize,
+) -> Result<RankedMenu, VoiError> {
+    rank_purchases_scoped(decision, nodes, menu, grid, POLICY_SCOPE, SNAPSHOT_ID)
+}
+
+fn audit_scheduling(records: &[MatchedAuditRecord]) -> Result<AuditReport, VoiError> {
+    audit_scheduling_scoped(POLICY_SCOPE, records)
+}
 
 fn verdict(case: &str, detail: &str) {
     println!(
@@ -68,11 +85,16 @@ fn probe(name: &str, target: &str, cost: f64, shrink: f64) -> Probe {
 }
 
 fn ranked_menu(probes: &[Probe]) -> RankedMenu {
+    ranked_menu_for_snapshot(probes, SNAPSHOT_ID)
+}
+
+fn ranked_menu_for_snapshot(probes: &[Probe], snapshot_id: &str) -> RankedMenu {
     let decision = LiveDecision {
         margin: &margin,
         arity: 3,
     };
-    rank_purchases(&decision, &nodes(), probes, 64).expect("valid ranked-menu fixture")
+    rank_purchases_scoped(&decision, &nodes(), probes, 64, POLICY_SCOPE, snapshot_id)
+        .expect("valid ranked-menu fixture")
 }
 
 fn audit_record(index: usize, recommended_wins: bool) -> MatchedAuditRecord {
@@ -89,11 +111,19 @@ fn audit_record(index: usize, recommended_wins: bool) -> MatchedAuditRecord {
     .expect("valid matched-cost audit fixture")
 }
 
-fn winning_audit() -> AuditReport {
+fn winning_scheduler(budget: f64) -> VoiScheduler {
     let records: Vec<_> = (0..128).map(|index| audit_record(index, true)).collect();
-    let report = audit_scheduling(&records).expect("valid anytime audit");
-    assert_eq!(report.verdict(), AuditVerdict::KeepScheduling);
-    report
+    let mut scheduler = VoiScheduler::new(POLICY_SCOPE, budget).expect("valid scheduler fixture");
+    for record in records {
+        scheduler
+            .observe_audit(record)
+            .expect("valid prospective audit observation");
+    }
+    assert_eq!(
+        scheduler.audit_report().expect("audit report").verdict(),
+        AuditVerdict::KeepScheduling
+    );
+    scheduler
 }
 
 fn scheduler_menu() -> RankedMenu {
@@ -309,13 +339,17 @@ fn voi_004_surfacing_hint_and_scheduler() {
         rank_purchases(&decision, &ns, &reordered_menu, 64).expect("reordered source menu");
     assert_eq!(reordered.context_id(), ranked.context_id());
     assert_eq!(reordered, ranked);
-    let audit = winning_audit();
-    let scheduled = schedule_probes(ranked, 40.0, audit.authority())
+    let mut scheduler = winning_scheduler(40.0);
+    let audit = scheduler.audit_report().expect("live audit snapshot");
+    let scheduled = scheduler
+        .schedule(ranked)
         .expect("valid finite schedule")
         .expect("one affordable purchase");
     assert_eq!(scheduled.purchase().probe().name, "climb-rung-drag");
     assert_eq!(scheduled.ranked_context_id(), reordered.context_id());
     assert_eq!(scheduled.ranked_grid(), 64);
+    assert_eq!(scheduled.policy_scope(), POLICY_SCOPE);
+    assert_eq!(scheduled.snapshot_id(), SNAPSHOT_ID);
     assert_eq!(scheduled.audit_context_id(), audit.audit_context_id());
     assert_eq!(scheduled.audit_observations(), audit.observations());
     assert_eq!(
@@ -338,32 +372,36 @@ fn voi_004_surfacing_hint_and_scheduler() {
 fn voi_005_prospective_audit_kill_criterion() {
     let empty = audit_scheduling(&[]).expect("empty audit reports safely");
     assert_eq!(empty.verdict(), AuditVerdict::DemoteToReporting);
-    assert!(empty.authority().is_none());
 
     let insufficient = vec![audit_record(0, true)];
     let insufficient = audit_scheduling(&insufficient).expect("bounded prefix");
     assert_eq!(insufficient.verdict(), AuditVerdict::DemoteToReporting);
-    assert!(matches!(
-        schedule_probes(scheduler_menu(), 15.0, insufficient.authority()),
-        Err(VoiError::MissingSchedulingAuthority)
-    ));
 
     let losing: Vec<_> = (0..128).map(|index| audit_record(index, false)).collect();
     let losing = audit_scheduling(&losing).expect("valid losing audit");
     assert_eq!(losing.verdict(), AuditVerdict::DemoteToReporting);
-    assert!(matches!(
-        schedule_probes(scheduler_menu(), 15.0, losing.authority()),
-        Err(VoiError::MissingSchedulingAuthority)
-    ));
 
     let mut winning: Vec<_> = (0..128).map(|index| audit_record(index, true)).collect();
     let won = audit_scheduling(&winning).expect("valid winning audit");
     assert_eq!(won.verdict(), AuditVerdict::KeepScheduling);
-    assert!(won.authority().is_some());
     winning.reverse();
-    let replay = audit_scheduling(&winning).expect("input order is non-authoritative");
-    assert_eq!(replay.audit_context_id(), won.audit_context_id());
+    let replay = audit_scheduling(&winning).expect("reversed chronology remains well formed");
+    assert_ne!(replay.audit_context_id(), won.audit_context_id());
     assert_eq!(replay.log_e_value().to_bits(), won.log_e_value().to_bits());
+
+    let mut wins_then_loss: Vec<_> = (0..11).map(|index| audit_record(index, true)).collect();
+    wins_then_loss.push(audit_record(11, false));
+    let mut loss_second = wins_then_loss.clone();
+    let loss = loss_second.pop().expect("loss record");
+    loss_second.insert(1, loss);
+    let wins_first = audit_scheduling(&wins_then_loss).expect("prospective winning prefix");
+    let loss_second = audit_scheduling(&loss_second).expect("different prospective order");
+    assert_eq!(wins_first.verdict(), AuditVerdict::KeepScheduling);
+    assert_eq!(loss_second.verdict(), AuditVerdict::DemoteToReporting);
+    assert_ne!(
+        wins_first.audit_context_id(),
+        loss_second.audit_context_id()
+    );
     verdict(
         "voi-005",
         "the fixed-alpha pairwise e-process mints authority only after a sufficient winning \
@@ -463,18 +501,30 @@ fn voi_007_menu_and_aggregate_evaluation_boundaries() {
         hi: 1.0,
         nominal: 0.0,
     }];
-    let menu: Vec<Probe> = (0..MAX_VOI_PROBES)
+    let exact_evaluation_menu: Vec<Probe> = (0..818)
         .map(|index| probe(&format!("probe-{index}"), "x", index as f64 + 1.0, 0.5))
         .collect();
-    assert_eq!(MAX_VOI_PROBES * 2 * (1 + 1), MAX_VOI_EVALUATIONS);
-    let ranked = rank_purchases(&decision, &ns, &menu, 1)
-        .expect("exact menu/evaluation boundary is admitted");
-    assert_eq!(ranked.len(), MAX_VOI_PROBES);
+    assert_eq!(
+        1 + 5 * (exact_evaluation_menu.len() + 1),
+        MAX_VOI_EVALUATIONS
+    );
+    let ranked = rank_purchases(&decision, &ns, &exact_evaluation_menu, 5)
+        .expect("exact evaluation boundary is admitted");
+    assert_eq!(ranked.len(), exact_evaluation_menu.len());
     assert_eq!(calls.get(), MAX_VOI_EVALUATIONS);
 
     calls.set(0);
+    let menu: Vec<Probe> = (0..MAX_VOI_PROBES)
+        .map(|index| probe(&format!("max-probe-{index}"), "x", index as f64 + 1.0, 0.5))
+        .collect();
+    let ranked =
+        rank_purchases(&decision, &ns, &menu, 3).expect("exact menu-count boundary is admitted");
+    assert_eq!(ranked.len(), MAX_VOI_PROBES);
+    assert_eq!(calls.get(), 1 + 3 * (MAX_VOI_PROBES + 1));
+
+    calls.set(0);
     assert!(matches!(
-        rank_purchases(&decision, &ns, &menu, 2),
+        rank_purchases(&decision, &ns, &menu, 4),
         Err(VoiError::EvaluationLimitExceeded { .. })
     ));
     assert_eq!(calls.get(), 0, "aggregate refusal precedes callbacks");
@@ -719,35 +769,64 @@ fn voi_010_probe_name_and_score_arithmetic_boundaries() {
 
 #[test]
 fn voi_011_scheduler_is_transactional_and_budget_monotone() {
-    let audit = winning_audit();
+    let mut zero_budget = winning_scheduler(0.0);
     assert!(
-        schedule_probes(scheduler_menu(), 0.0, audit.authority())
+        zero_budget
+            .schedule(scheduler_menu())
             .expect("zero budget is valid")
             .is_none()
     );
+    assert_eq!(zero_budget.consumed_snapshots(), 1);
     for budget in [-1.0, f64::NAN, f64::INFINITY] {
         assert!(matches!(
-            schedule_probes(scheduler_menu(), budget, audit.authority()),
+            VoiScheduler::new(POLICY_SCOPE, budget),
             Err(VoiError::InvalidBudget { .. })
         ));
     }
+    let mut unaudited = VoiScheduler::new(POLICY_SCOPE, 15.0).expect("valid scheduler");
     assert!(matches!(
-        schedule_probes(scheduler_menu(), 15.0, None),
+        unaudited.schedule(scheduler_menu()),
         Err(VoiError::MissingSchedulingAuthority)
     ));
     let no_progress = ranked_menu(&[probe("tiny", "drag-gap", 1.0, 0.01)]);
+    let mut huge_budget = winning_scheduler(f64::MAX);
     assert!(matches!(
-        schedule_probes(no_progress, f64::MAX, audit.authority()),
+        huge_budget.schedule(no_progress),
         Err(VoiError::ArithmeticRefusal { .. })
     ));
+    assert_eq!(huge_budget.consumed_snapshots(), 0);
 
-    let scheduled = schedule_probes(scheduler_menu(), 15.0, audit.authority())
+    let mut scheduler = winning_scheduler(15.0);
+    let scheduled = scheduler
+        .schedule(scheduler_menu())
         .expect("exact finite budget")
         .expect("one purchase");
     assert_eq!(scheduled.purchase().probe().name, "b");
+    assert_eq!(
+        scheduler.remaining_budget_dollars().to_bits(),
+        10.0f64.to_bits()
+    );
+    assert!(matches!(
+        scheduler.schedule(scheduler_menu()),
+        Err(VoiError::RankingSnapshotAlreadyConsumed { .. })
+    ));
+    let second =
+        ranked_menu_for_snapshot(&[probe("a", "drag-gap", 10.0, 0.01)], "fixture-snapshot-v2");
+    let second = scheduler
+        .schedule(second)
+        .expect("fresh snapshot")
+        .expect("remaining budget admits exact-cost purchase");
+    assert_eq!(
+        second.remaining_budget_dollars().to_bits(),
+        0.0f64.to_bits()
+    );
+    assert_eq!(
+        scheduler.remaining_budget_dollars().to_bits(),
+        0.0f64.to_bits()
+    );
     verdict(
         "voi-011",
-        "invalid budgets and absent authority refuse; one sealed ranking epoch is consumed to schedule at most one purchase",
+        "one live scheduler gates audit authority, consumes each snapshot once, and owns a monotone cumulative budget",
     );
 }
 
@@ -776,8 +855,8 @@ fn voi_012_asymmetric_contraction_is_a_subset_and_preflights() {
     )
     .expect("asymmetric interval contracts inside its support");
     let samples = samples.borrow();
-    assert_eq!(samples.len(), 6, "two nominal-plus-grid sweeps");
-    let after = &samples[4..6];
+    assert_eq!(samples.len(), 5, "one shared nominal plus two grid sweeps");
+    let after = &samples[3..5];
     assert!(after.iter().all(|sample| (0.0..=1.0).contains(sample)));
     assert!((after[0] - 0.38).abs() < 1e-12, "left midpoint");
     assert!((after[1] - 0.78).abs() < 1e-12, "right midpoint");
@@ -842,10 +921,47 @@ fn voi_013_context_and_sampled_zero_are_explicit() {
     let expanded =
         rank_purchases(&decision, &ns, &expanded_menu, 1).expect("expanded supplied menu");
     assert_ne!(grid_one.context_id(), expanded.context_id());
-    let mut changed = ns;
+    let mut changed = ns.clone();
     changed[0].hi = 1.5;
     let changed = rank_purchases(&decision, &changed, &menu, 1).expect("changed snapshot");
     assert_ne!(grid_one.context_id(), changed.context_id());
+
+    let shifted_margin = |values: &[f64]| values[0] + 0.75;
+    let shifted = LiveDecision {
+        margin: &shifted_margin,
+        arity: 1,
+    };
+    let source_a = rank_purchases_scoped(&decision, &ns, &menu, 4, POLICY_SCOPE, SNAPSHOT_ID)
+        .expect("first decision model");
+    let source_b = rank_purchases_scoped(&shifted, &ns, &menu, 4, POLICY_SCOPE, SNAPSHOT_ID)
+        .expect("second decision model");
+    assert_eq!(source_a.source_context_id(), source_b.source_context_id());
+    assert_ne!(
+        source_a.context_id(),
+        source_b.context_id(),
+        "canonical ranking outputs participate in the final context identity"
+    );
+
+    let other_snapshot = rank_purchases_scoped(
+        &decision,
+        &ns,
+        &menu,
+        4,
+        POLICY_SCOPE,
+        "fixture-snapshot-other",
+    )
+    .expect("other snapshot");
+    assert_ne!(
+        source_a.source_context_id(),
+        other_snapshot.source_context_id()
+    );
+    let other_policy =
+        rank_purchases_scoped(&decision, &ns, &menu, 4, "fixture-policy-v2", SNAPSHOT_ID)
+            .expect("other policy");
+    assert_ne!(
+        source_a.source_context_id(),
+        other_policy.source_context_id()
+    );
 }
 
 #[test]
@@ -938,4 +1054,90 @@ fn voi_015_structured_hint_escapes_and_preserves_price() {
         Err(VoiError::InvalidName { .. })
     ));
     assert_eq!(calls.get(), 0, "control characters refuse before callback");
+}
+
+#[test]
+fn voi_016_live_scheduler_scopes_serializes_and_revokes_authority() {
+    let decision = LiveDecision {
+        margin: &margin,
+        arity: 3,
+    };
+    let foreign = rank_purchases_scoped(
+        &decision,
+        &nodes(),
+        &[probe("foreign", "drag-gap", 5.0, 0.01)],
+        64,
+        "foreign-policy-v1",
+        "foreign-snapshot-v1",
+    )
+    .expect("valid foreign ranking");
+    let mut scheduler = winning_scheduler(100.0);
+    assert!(matches!(
+        scheduler.schedule(foreign),
+        Err(VoiError::PolicyScopeMismatch { .. })
+    ));
+    assert_eq!(scheduler.consumed_snapshots(), 0);
+    assert_eq!(
+        scheduler.remaining_budget_dollars().to_bits(),
+        100.0f64.to_bits()
+    );
+
+    let mut demoted = false;
+    for index in 128..MAX_VOI_AUDIT_RECORDS {
+        scheduler
+            .observe_audit(audit_record(index, false))
+            .expect("append-only losing observation");
+        if index % 16 == 15
+            && scheduler.audit_report().expect("audit snapshot").verdict()
+                == AuditVerdict::DemoteToReporting
+        {
+            demoted = true;
+            break;
+        }
+    }
+    assert!(
+        demoted,
+        "later prospective losses revoke live scheduling eligibility"
+    );
+    let after_demotion = ranked_menu_for_snapshot(
+        &[probe("after-demotion", "drag-gap", 5.0, 0.01)],
+        "fixture-snapshot-after-demotion",
+    );
+    assert!(matches!(
+        scheduler.schedule(after_demotion),
+        Err(VoiError::MissingSchedulingAuthority)
+    ));
+
+    let scheduler = std::sync::Arc::new(std::sync::Mutex::new(winning_scheduler(15.0)));
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+    let mut joins = Vec::new();
+    for _ in 0..2 {
+        let scheduler = std::sync::Arc::clone(&scheduler);
+        let barrier = std::sync::Arc::clone(&barrier);
+        let ranked = scheduler_menu();
+        joins.push(std::thread::spawn(move || {
+            barrier.wait();
+            scheduler.lock().expect("scheduler lock").schedule(ranked)
+        }));
+    }
+    barrier.wait();
+    let outcomes = joins
+        .into_iter()
+        .map(|join| join.join().expect("scheduler thread"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        outcomes.iter().filter(|outcome| outcome.is_ok()).count(),
+        1,
+        "exclusive mutation admits exactly one identical snapshot"
+    );
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| matches!(
+                outcome,
+                Err(VoiError::RankingSnapshotAlreadyConsumed { .. })
+            ))
+            .count(),
+        1
+    );
 }

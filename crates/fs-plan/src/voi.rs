@@ -13,10 +13,10 @@
 //! upgrade the fs-ir anytime module's CONTRACT reserved for Proposal C
 //! — and (ii) the scheduler for discrepancy probes.
 //!
-//! THE KILL CRITERION AS CODE: [`audit_scheduling`] feeds validated
-//! matched-cost outcomes to an anytime-valid pairwise e-process. Only a
-//! successful bounded audit can mint the private-construction capability
-//! accepted by [`schedule_probes`]; otherwise VoI remains reporting-only.
+//! THE KILL CRITERION AS CODE: [`VoiScheduler`] owns one append-only
+//! chronological pairwise e-process, the remaining spend budget, and consumed
+//! decision snapshots. Scheduling consults the CURRENT audit verdict under
+//! exclusive mutation; stale reports carry no spending authority.
 
 use std::collections::BTreeSet;
 
@@ -35,11 +35,14 @@ pub const MAX_VOI_GRID: usize = 1024;
 pub const MAX_VOI_EVALUATIONS: usize = 4096;
 /// Maximum matched-cost observations admitted by one prospective audit.
 pub const MAX_VOI_AUDIT_RECORDS: usize = 4096;
+/// Maximum distinct ranking snapshots retained by one live scheduler.
+pub const MAX_VOI_SCHEDULED_CONTEXTS: usize = 4096;
 /// Fixed anytime-valid false-activation level for VoI scheduling authority.
 pub const VOI_AUDIT_ALPHA: f64 = 0.05;
 
-const RANKED_MENU_CONTEXT_DOMAIN: &str = "frankensim.fs-plan.voi-ranked-menu.v1";
-const AUDIT_CONTEXT_DOMAIN: &str = "frankensim.fs-plan.voi-audit.v1";
+const RANKED_MENU_SOURCE_DOMAIN: &str = "frankensim.fs-plan.voi-ranked-source.v1";
+const RANKED_MENU_CONTEXT_DOMAIN: &str = "frankensim.fs-plan.voi-ranked-menu.v2";
+const AUDIT_CONTEXT_DOMAIN: &str = "frankensim.fs-plan.voi-audit.v2";
 
 /// Why a VoI query, audit, or schedule was refused.
 #[derive(Debug, Clone, PartialEq)]
@@ -160,7 +163,19 @@ pub enum VoiError {
         /// Repeated observation identity.
         observation: String,
     },
-    /// Scheduling was requested without an anytime-valid authority capability.
+    /// A ranked menu belongs to a different scheduling policy.
+    PolicyScopeMismatch {
+        /// Policy scope owned by the scheduler.
+        expected: String,
+        /// Policy scope bound into the ranked menu.
+        actual: String,
+    },
+    /// One decision snapshot was already evaluated by this scheduler.
+    RankingSnapshotAlreadyConsumed {
+        /// Duplicate caller-declared decision/ledger snapshot.
+        snapshot_id: String,
+    },
+    /// Scheduling was requested before the live audit crossed its threshold.
     MissingSchedulingAuthority,
     /// Finite inputs could not produce a finite, monotone result.
     ArithmeticRefusal {
@@ -260,9 +275,17 @@ impl core::fmt::Display for VoiError {
                 f,
                 "audit observation {observation:?} appears more than once"
             ),
+            Self::PolicyScopeMismatch { expected, actual } => write!(
+                f,
+                "ranked menu policy scope {actual:?} does not match scheduler scope {expected:?}"
+            ),
+            Self::RankingSnapshotAlreadyConsumed { snapshot_id } => write!(
+                f,
+                "decision snapshot {snapshot_id:?} was already consumed by this scheduler"
+            ),
             Self::MissingSchedulingAuthority => write!(
                 f,
-                "VoI scheduling requires a live anytime-valid audit authority capability"
+                "the live VoI audit has not crossed the anytime-valid scheduling threshold"
             ),
             Self::ArithmeticRefusal { operation, subject } => {
                 write!(
@@ -422,12 +445,12 @@ fn nominal_verdict_validated(
 fn flip_probability_validated(
     decision: &LiveDecision<'_>,
     nodes: &[UncertaintyNode],
+    base: bool,
     node_idx: usize,
     lo: f64,
     hi: f64,
     grid: usize,
 ) -> Result<f64, VoiError> {
-    let base = nominal_verdict_validated(decision, nodes)?;
     let mut values = nominal_values(nodes);
     let node = node_at(nodes, node_idx)?;
     let width = hi - lo;
@@ -495,7 +518,8 @@ impl LiveDecision<'_> {
                 subject: node.name.clone(),
             })?;
         validate_evaluations(evaluations)?;
-        flip_probability_validated(self, nodes, node_idx, node.lo, node.hi, grid)
+        let base = nominal_verdict_validated(self, nodes)?;
+        flip_probability_validated(self, nodes, base, node_idx, node.lo, node.hi, grid)
     }
 }
 
@@ -570,7 +594,10 @@ impl RankedPurchase {
 #[derive(Debug, PartialEq)]
 pub struct RankedMenu {
     rows: Vec<RankedPurchase>,
+    source_context_id: ContentHash,
     context_id: ContentHash,
+    policy_scope: String,
+    snapshot_id: String,
     grid: usize,
 }
 
@@ -619,6 +646,25 @@ impl RankedMenu {
     #[must_use]
     pub fn context_id(&self) -> ContentHash {
         self.context_id
+    }
+
+    /// Identity of policy, snapshot, nodes, source menu, and grid before
+    /// evaluating the decision surrogate.
+    #[must_use]
+    pub fn source_context_id(&self) -> ContentHash {
+        self.source_context_id
+    }
+
+    /// Caller-declared policy/version scope bound into this ranking.
+    #[must_use]
+    pub fn policy_scope(&self) -> &str {
+        &self.policy_scope
+    }
+
+    /// Caller-declared decision/ledger snapshot bound into this ranking.
+    #[must_use]
+    pub fn snapshot_id(&self) -> &str {
+        &self.snapshot_id
     }
 }
 
@@ -794,13 +840,17 @@ fn push_text(out: &mut Vec<u8>, value: &str, subject: &'static str) -> Result<()
     Ok(())
 }
 
-fn ranked_menu_context(
+fn ranked_source_context(
     nodes: &[UncertaintyNode],
     menu: &[Probe],
     grid: usize,
+    policy_scope: &str,
+    snapshot_id: &str,
 ) -> Result<ContentHash, VoiError> {
     let mut canonical = Vec::new();
     canonical.extend_from_slice(&1u32.to_le_bytes());
+    push_text(&mut canonical, policy_scope, "VoI policy scope")?;
+    push_text(&mut canonical, snapshot_id, "VoI snapshot identity")?;
     push_u32(&mut canonical, grid, "grid")?;
     push_u32(&mut canonical, nodes.len(), "uncertainty nodes")?;
     for node in nodes {
@@ -821,6 +871,23 @@ fn ranked_menu_context(
             ProbeKind::Computational => 0,
             ProbeKind::Physical => 1,
         });
+    }
+    Ok(hash_domain(RANKED_MENU_SOURCE_DOMAIN, &canonical))
+}
+
+fn ranked_output_context(
+    source_context_id: ContentHash,
+    rows: &[RankedPurchase],
+) -> Result<ContentHash, VoiError> {
+    let mut canonical = Vec::new();
+    canonical.extend_from_slice(&2u32.to_le_bytes());
+    canonical.extend_from_slice(source_context_id.as_bytes());
+    push_u32(&mut canonical, rows.len(), "ranked output rows")?;
+    for row in rows {
+        push_text(&mut canonical, &row.probe.name, "ranked probe name")?;
+        canonical.extend_from_slice(&row.flip_before.to_bits().to_le_bytes());
+        canonical.extend_from_slice(&row.flip_after.to_bits().to_le_bytes());
+        canonical.extend_from_slice(&row.score.to_bits().to_le_bytes());
     }
     Ok(hash_domain(RANKED_MENU_CONTEXT_DOMAIN, &canonical))
 }
@@ -886,14 +953,25 @@ pub fn rank_purchases(
     nodes: &[UncertaintyNode],
     menu: &[Probe],
     grid: usize,
+    policy_scope: &str,
+    snapshot_id: &str,
 ) -> Result<RankedMenu, VoiError> {
+    validate_name("VoI policy scope", 0, policy_scope)?;
+    validate_name("VoI snapshot identity", 0, snapshot_id)?;
     validate_nodes(decision, nodes)?;
     validate_grid(grid)?;
     let targets = validate_menu(nodes, menu)?;
+    let unique_targets = targets.iter().copied().collect::<BTreeSet<_>>();
+    let sweep_count = unique_targets
+        .len()
+        .checked_add(menu.len())
+        .ok_or_else(|| VoiError::ArithmeticRefusal {
+            operation: "ranking sweep count",
+            subject: "probe menu".to_string(),
+        })?;
     let evaluations = grid
-        .checked_add(1)
-        .and_then(|per_sweep| per_sweep.checked_mul(2))
-        .and_then(|per_probe| menu.len().checked_mul(per_probe))
+        .checked_mul(sweep_count)
+        .and_then(|sweeps| sweeps.checked_add(1))
         .ok_or_else(|| VoiError::ArithmeticRefusal {
             operation: "ranking evaluation count",
             subject: "probe menu".to_string(),
@@ -902,22 +980,36 @@ pub fn rank_purchases(
     // All input-derived intervals are prepared before the first callback, so
     // a malformed later probe cannot leave observable partial callback work.
     let prepared = prepare_probes(nodes, menu, &targets)?;
-    let context_id = ranked_menu_context(nodes, menu, grid)?;
+    let source_context_id = ranked_source_context(nodes, menu, grid, policy_scope, snapshot_id)?;
+    let base = nominal_verdict_validated(decision, nodes)?;
+    let mut flip_before = vec![None; nodes.len()];
+    for node_idx in unique_targets {
+        let node = node_at(nodes, node_idx)?;
+        flip_before[node_idx] = Some(flip_probability_validated(
+            decision, nodes, base, node_idx, node.lo, node.hi, grid,
+        )?);
+    }
 
     let mut ranked = Vec::with_capacity(menu.len());
-    for (probe, prepared) in menu.iter().zip(&prepared) {
-        let node = node_at(nodes, prepared.node_idx)?;
-        let flip_before =
-            flip_probability_validated(decision, nodes, prepared.node_idx, node.lo, node.hi, grid)?;
+    let mut evaluation_order = (0..menu.len()).collect::<Vec<_>>();
+    evaluation_order.sort_by(|left, right| menu[*left].name.cmp(&menu[*right].name));
+    for index in evaluation_order {
+        let probe = &menu[index];
+        let prepared = prepared[index];
+        let before = flip_before[prepared.node_idx].ok_or_else(|| VoiError::ArithmeticRefusal {
+            operation: "pre-probe sweep lookup",
+            subject: probe.name.clone(),
+        })?;
         let flip_after = flip_probability_validated(
             decision,
             nodes,
+            base,
             prepared.node_idx,
             prepared.post_lo,
             prepared.post_hi,
             grid,
         )?;
-        let score = (flip_before - flip_after).max(0.0) / probe.cost;
+        let score = (before - flip_after).max(0.0) / probe.cost;
         if !score.is_finite() || score < 0.0 {
             return Err(VoiError::ArithmeticRefusal {
                 operation: "sampled flip-fraction-per-dollar score",
@@ -926,15 +1018,19 @@ pub fn rank_purchases(
         }
         ranked.push(RankedPurchase {
             probe: probe.clone(),
-            flip_before,
+            flip_before: before,
             flip_after,
             score,
         });
     }
     ranked.sort_by(compare_ranked);
+    let context_id = ranked_output_context(source_context_id, &ranked)?;
     Ok(RankedMenu {
         rows: ranked,
+        source_context_id,
         context_id,
+        policy_scope: policy_scope.to_string(),
+        snapshot_id: snapshot_id.to_string(),
         grid,
     })
 }
@@ -952,7 +1048,7 @@ pub fn hint_for_query(ranked: &RankedMenu) -> QueryHint {
 }
 
 /// The audit verdict for reporting. This enum is not scheduling authority;
-/// only the private-construction [`SchedulingAuthority`] capability is.
+/// only the live [`VoiScheduler`] owns executable state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuditVerdict {
     /// Anytime-valid evidence crossed the fixed activation threshold.
@@ -1074,17 +1170,6 @@ impl MatchedAuditRecord {
     }
 }
 
-/// Unforgeable-in-safe-Rust scheduling capability minted only by a successful
-/// bounded e-process audit. Construction and fields are module-private. The
-/// capability proves that supplied records crossed policy; ledger
-/// authentication of those records is a separate boundary.
-#[derive(Debug)]
-pub struct SchedulingAuthority {
-    audit_context_id: ContentHash,
-    observations: usize,
-    log_e_value: f64,
-}
-
 /// One authorized, single-epoch scheduling decision. The receipt retains the
 /// ranked snapshot, audit evidence root, and exact budget transition instead of
 /// returning a provenance-free probe row.
@@ -1092,6 +1177,9 @@ pub struct SchedulingAuthority {
 pub struct ScheduledPurchase {
     purchase: RankedPurchase,
     ranked_context_id: ContentHash,
+    ranked_source_context_id: ContentHash,
+    policy_scope: String,
+    snapshot_id: String,
     ranked_grid: usize,
     audit_context_id: ContentHash,
     audit_observations: usize,
@@ -1111,6 +1199,24 @@ impl ScheduledPurchase {
     #[must_use]
     pub fn ranked_context_id(&self) -> ContentHash {
         self.ranked_context_id
+    }
+
+    /// Source policy/snapshot/node/menu/grid identity before evaluation.
+    #[must_use]
+    pub fn ranked_source_context_id(&self) -> ContentHash {
+        self.ranked_source_context_id
+    }
+
+    /// Scheduling policy/version scope shared by the audit and ranking.
+    #[must_use]
+    pub fn policy_scope(&self) -> &str {
+        &self.policy_scope
+    }
+
+    /// Decision/ledger snapshot whose ranking was consumed.
+    #[must_use]
+    pub fn snapshot_id(&self) -> &str {
+        &self.snapshot_id
     }
 
     /// Midpoint grid supporting the sampled purchase score.
@@ -1150,52 +1256,28 @@ impl ScheduledPurchase {
     }
 }
 
-impl SchedulingAuthority {
-    /// Content identity of the matched-cost evidence prefix.
-    #[must_use]
-    pub fn audit_context_id(&self) -> ContentHash {
-        self.audit_context_id
-    }
-
-    /// Number of observations supporting activation.
-    #[must_use]
-    pub fn observations(&self) -> usize {
-        self.observations
-    }
-
-    /// Final log e-value supporting activation.
-    #[must_use]
-    pub fn log_e_value(&self) -> f64 {
-        self.log_e_value
-    }
-}
-
-/// Bounded prospective-audit result. A reporting verdict is intentionally
-/// separate from the optional private-construction scheduling capability.
-#[derive(Debug)]
+/// Immutable reporting snapshot of one live prospective-audit prefix. This is
+/// never scheduling authority; only the owning [`VoiScheduler`] can spend.
+#[derive(Debug, Clone, PartialEq)]
 pub struct AuditReport {
+    policy_scope: String,
     audit_context_id: ContentHash,
     observations: usize,
     log_e_value: f64,
-    authority: Option<SchedulingAuthority>,
+    verdict: AuditVerdict,
 }
 
 impl AuditReport {
     /// Reporting verdict.
     #[must_use]
     pub fn verdict(&self) -> AuditVerdict {
-        if self.authority.is_some() {
-            AuditVerdict::KeepScheduling
-        } else {
-            AuditVerdict::DemoteToReporting
-        }
+        self.verdict
     }
 
-    /// Scheduling capability, absent until the fixed anytime-valid threshold
-    /// is satisfied.
+    /// Caller-declared audit policy/version scope.
     #[must_use]
-    pub fn authority(&self) -> Option<&SchedulingAuthority> {
-        self.authority.as_ref()
+    pub fn policy_scope(&self) -> &str {
+        &self.policy_scope
     }
 
     /// Content identity of the canonical evidence prefix.
@@ -1217,9 +1299,13 @@ impl AuditReport {
     }
 }
 
-fn audit_context(records: &[&MatchedAuditRecord]) -> Result<ContentHash, VoiError> {
+fn audit_context(
+    policy_scope: &str,
+    records: &[MatchedAuditRecord],
+) -> Result<ContentHash, VoiError> {
     let mut canonical = Vec::new();
-    canonical.extend_from_slice(&1u32.to_le_bytes());
+    canonical.extend_from_slice(&2u32.to_le_bytes());
+    push_text(&mut canonical, policy_scope, "VoI audit policy scope")?;
     canonical.extend_from_slice(&VOI_AUDIT_ALPHA.to_bits().to_le_bytes());
     push_u32(
         &mut canonical,
@@ -1247,100 +1333,210 @@ fn audit_context(records: &[&MatchedAuditRecord]) -> Result<ContentHash, VoiErro
     Ok(hash_domain(AUDIT_CONTEXT_DOMAIN, &canonical))
 }
 
-/// Evaluate a canonical matched-cost evidence prefix with an anytime-valid
-/// pairwise e-process. Input order is non-authoritative: observation identity
-/// defines the deterministic replay order.
+/// Single-owner live VoI audit and purchase scheduler.
 ///
-/// Records are caller-supplied and content-bound, not ledger-authenticated.
-/// See `frankensim-wk4m` for signed outcomes, freshness, and expiry.
-///
-/// # Errors
-/// [`VoiError`] when the bounded record limit or unique-identity invariant is
-/// violated, or the e-process produces invalid arithmetic.
-pub fn audit_scheduling(records: &[MatchedAuditRecord]) -> Result<AuditReport, VoiError> {
-    validate_size("VoI audit records", records.len(), 0, MAX_VOI_AUDIT_RECORDS)?;
-    let mut canonical: Vec<&MatchedAuditRecord> = records.iter().collect();
-    canonical.sort_by(|left, right| left.observation_id.cmp(&right.observation_id));
-    for pair in canonical.windows(2) {
-        if pair[0].observation_id == pair[1].observation_id {
-            return Err(VoiError::DuplicateAuditObservation {
-                observation: pair[0].observation_id.clone(),
+/// Audit observations enter one append-only [`PairwiseRace`] in prospective
+/// order. The scheduler owns the remaining budget and the bounded set of
+/// decision snapshots it has already evaluated, so one process cannot reuse a
+/// stale ranking or reset the budget through the safe API. Caller-declared
+/// identities and outcomes remain unauthenticated until `frankensim-wk4m`.
+#[derive(Debug)]
+pub struct VoiScheduler {
+    policy_scope: String,
+    remaining_budget_dollars: f64,
+    audit_records: Vec<MatchedAuditRecord>,
+    observation_ids: BTreeSet<String>,
+    race: PairwiseRace,
+    consumed_snapshots: BTreeSet<String>,
+}
+
+impl VoiScheduler {
+    /// Create one live scheduler for a fixed policy/version and total budget.
+    ///
+    /// # Errors
+    /// [`VoiError`] when the policy identity or budget is malformed.
+    pub fn new(policy_scope: impl Into<String>, budget: f64) -> Result<Self, VoiError> {
+        let policy_scope = policy_scope.into();
+        validate_name("VoI policy scope", 0, &policy_scope)?;
+        if !budget.is_finite() || budget < 0.0 {
+            return Err(VoiError::InvalidBudget { budget });
+        }
+        Ok(Self {
+            policy_scope,
+            remaining_budget_dollars: budget,
+            audit_records: Vec::new(),
+            observation_ids: BTreeSet::new(),
+            race: PairwiseRace::new(LossSpan::ONE),
+            consumed_snapshots: BTreeSet::new(),
+        })
+    }
+
+    /// Append one prospectively ordered matched-cost result to the one live
+    /// e-process. Duplicate identities and limit+1 refuse before wealth or
+    /// retained state changes.
+    ///
+    /// # Errors
+    /// [`VoiError`] on a duplicate observation, the audit cap, or invalid
+    /// e-process arithmetic.
+    pub fn observe_audit(&mut self, record: MatchedAuditRecord) -> Result<(), VoiError> {
+        if self.audit_records.len() >= MAX_VOI_AUDIT_RECORDS {
+            return Err(VoiError::SizeLimit {
+                collection: "VoI audit records",
+                count: self.audit_records.len().saturating_add(1),
+                min: 0,
+                max: MAX_VOI_AUDIT_RECORDS,
             });
         }
-    }
-    let audit_context_id = audit_context(&canonical)?;
-    let mut race = PairwiseRace::new(LossSpan::ONE);
-    for record in &canonical {
+        if self.observation_ids.contains(&record.observation_id) {
+            return Err(VoiError::DuplicateAuditObservation {
+                observation: record.observation_id.clone(),
+            });
+        }
         let recommended_loss = f64::from(u8::from(!record.recommended_changed_decision));
         let alternative_loss = f64::from(u8::from(!record.alternative_changed_decision));
-        race.observe(recommended_loss, alternative_loss)
+        let mut next_race = self.race.clone();
+        next_race
+            .observe(recommended_loss, alternative_loss)
             .map_err(|_| VoiError::ArithmeticRefusal {
                 operation: "VoI matched-cost e-process",
                 subject: record.observation_id.clone(),
             })?;
+        self.observation_ids.insert(record.observation_id.clone());
+        self.audit_records.push(record);
+        self.race = next_race;
+        Ok(())
     }
-    let log_e_value = race.log_e_value();
-    if !log_e_value.is_finite() {
-        return Err(VoiError::ArithmeticRefusal {
-            operation: "VoI audit log e-value",
-            subject: audit_context_id.to_hex(),
-        });
-    }
-    let authority = race
-        .a_beats_b(VOI_AUDIT_ALPHA)
-        .then_some(SchedulingAuthority {
+
+    /// Immutable reporting snapshot of the current chronological audit prefix.
+    /// The report carries no scheduling capability.
+    ///
+    /// # Errors
+    /// [`VoiError`] if the e-process or content identity leaves its finite
+    /// bounded domain.
+    pub fn audit_report(&self) -> Result<AuditReport, VoiError> {
+        let audit_context_id = audit_context(&self.policy_scope, &self.audit_records)?;
+        let log_e_value = self.race.log_e_value();
+        if !log_e_value.is_finite() {
+            return Err(VoiError::ArithmeticRefusal {
+                operation: "VoI audit log e-value",
+                subject: audit_context_id.to_hex(),
+            });
+        }
+        Ok(AuditReport {
+            policy_scope: self.policy_scope.clone(),
             audit_context_id,
-            observations: records.len(),
+            observations: self.audit_records.len(),
             log_e_value,
-        });
-    Ok(AuditReport {
-        audit_context_id,
-        observations: records.len(),
-        log_e_value,
-        authority,
-    })
+            verdict: if self.race.a_beats_b(VOI_AUDIT_ALPHA) {
+                AuditVerdict::KeepScheduling
+            } else {
+                AuditVerdict::DemoteToReporting
+            },
+        })
+    }
+
+    /// Fixed policy/version scope owned by this scheduler.
+    #[must_use]
+    pub fn policy_scope(&self) -> &str {
+        &self.policy_scope
+    }
+
+    /// Current unspent scheduler budget.
+    #[must_use]
+    pub fn remaining_budget_dollars(&self) -> f64 {
+        self.remaining_budget_dollars
+    }
+
+    /// Number of decision snapshots already evaluated by this scheduler.
+    #[must_use]
+    pub fn consumed_snapshots(&self) -> usize {
+        self.consumed_snapshots.len()
+    }
+
+    /// Evaluate at most one purchase from one previously unseen decision
+    /// snapshot. The current live audit must still be above threshold. All
+    /// validation and arithmetic precede mutation; success (including a
+    /// no-affordable-purchase result) consumes the snapshot atomically.
+    ///
+    /// # Errors
+    /// [`VoiError`] when audit authority is currently absent, policy scopes
+    /// differ, the snapshot was already consumed, retained snapshot capacity
+    /// is exhausted, or budget arithmetic cannot decrease monotonically.
+    pub fn schedule(&mut self, ranked: RankedMenu) -> Result<Option<ScheduledPurchase>, VoiError> {
+        if ranked.policy_scope != self.policy_scope {
+            return Err(VoiError::PolicyScopeMismatch {
+                expected: self.policy_scope.clone(),
+                actual: ranked.policy_scope,
+            });
+        }
+        if self.consumed_snapshots.contains(&ranked.snapshot_id) {
+            return Err(VoiError::RankingSnapshotAlreadyConsumed {
+                snapshot_id: ranked.snapshot_id,
+            });
+        }
+        if self.consumed_snapshots.len() >= MAX_VOI_SCHEDULED_CONTEXTS {
+            return Err(VoiError::SizeLimit {
+                collection: "VoI consumed ranking snapshots",
+                count: self.consumed_snapshots.len().saturating_add(1),
+                min: 0,
+                max: MAX_VOI_SCHEDULED_CONTEXTS,
+            });
+        }
+        if !self.race.a_beats_b(VOI_AUDIT_ALPHA) {
+            return Err(VoiError::MissingSchedulingAuthority);
+        }
+        let audit = self.audit_report()?;
+        let budget = self.remaining_budget_dollars;
+        let purchase = ranked
+            .rows
+            .iter()
+            .find(|row| row.score > 0.0 && row.probe.cost <= budget)
+            .cloned();
+        let remaining = if let Some(purchase) = &purchase {
+            let remaining = budget - purchase.probe.cost;
+            if !remaining.is_finite() || remaining < 0.0 || remaining >= budget {
+                return Err(VoiError::ArithmeticRefusal {
+                    operation: "remaining-budget subtraction",
+                    subject: purchase.probe.name.clone(),
+                });
+            }
+            remaining
+        } else {
+            budget
+        };
+
+        self.consumed_snapshots.insert(ranked.snapshot_id.clone());
+        self.remaining_budget_dollars = remaining;
+        Ok(purchase.map(|purchase| ScheduledPurchase {
+            purchase,
+            ranked_context_id: ranked.context_id,
+            ranked_source_context_id: ranked.source_context_id,
+            policy_scope: ranked.policy_scope,
+            snapshot_id: ranked.snapshot_id,
+            ranked_grid: ranked.grid,
+            audit_context_id: audit.audit_context_id,
+            audit_observations: audit.observations,
+            audit_log_e_value: audit.log_e_value,
+            budget_dollars: budget,
+            remaining_budget_dollars: remaining,
+        }))
+    }
 }
 
-/// Execute at most one highest-value affordable purchase for this ranking
-/// epoch. The caller must obtain new evidence, update the uncertainty snapshot,
-/// and rerank before another purchase.
+/// Recompute a bounded reporting-only audit from a supplied chronological
+/// prefix. This helper never returns scheduling authority; executable callers
+/// must retain one live [`VoiScheduler`] and append observations to it.
 ///
 /// # Errors
-/// [`VoiError`] when the budget is malformed, no scheduling authority was
-/// minted, or finite positive cost cannot decrease the budget monotonically.
-pub fn schedule_probes(
-    ranked: RankedMenu,
-    budget: f64,
-    authority: Option<&SchedulingAuthority>,
-) -> Result<Option<ScheduledPurchase>, VoiError> {
-    if !budget.is_finite() || budget < 0.0 {
-        return Err(VoiError::InvalidBudget { budget });
+/// [`VoiError`] for malformed policy identity, duplicate/oversized records, or
+/// invalid e-process arithmetic.
+pub fn audit_scheduling(
+    policy_scope: &str,
+    records: &[MatchedAuditRecord],
+) -> Result<AuditReport, VoiError> {
+    let mut scheduler = VoiScheduler::new(policy_scope, 0.0)?;
+    for record in records {
+        scheduler.observe_audit(record.clone())?;
     }
-    let authority = authority.ok_or(VoiError::MissingSchedulingAuthority)?;
-    let ranked_context_id = ranked.context_id;
-    let ranked_grid = ranked.grid;
-    let Some(purchase) = ranked
-        .rows
-        .into_iter()
-        .find(|row| row.score > 0.0 && row.probe.cost <= budget)
-    else {
-        return Ok(None);
-    };
-    let remaining = budget - purchase.probe.cost;
-    if !remaining.is_finite() || remaining < 0.0 || remaining >= budget {
-        return Err(VoiError::ArithmeticRefusal {
-            operation: "remaining-budget subtraction",
-            subject: purchase.probe.name.clone(),
-        });
-    }
-    Ok(Some(ScheduledPurchase {
-        purchase,
-        ranked_context_id,
-        ranked_grid,
-        audit_context_id: authority.audit_context_id,
-        audit_observations: authority.observations,
-        audit_log_e_value: authority.log_e_value,
-        budget_dollars: budget,
-        remaining_budget_dollars: remaining,
-    }))
+    scheduler.audit_report()
 }

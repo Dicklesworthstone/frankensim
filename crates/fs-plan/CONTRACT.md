@@ -71,25 +71,31 @@ fs-eproc for anytime-valid audit authority.
   physical evidence), `rank_purchases` (MYOPIC one-step sampled VoI:
   flip-fraction reduction per dollar, deterministic tie-breaks) returning a
   sealed complete `RankedMenu`. Its private rows cannot be omitted, spliced,
-  or reordered; its BLAKE3 `context_id` binds validated nodes, the complete
-  supplied source menu, and grid. `QueryHint` is structured and grid-qualified,
-  with escaped lossless text and strict JSON renderers. A sampled zero is
-  explicitly non-authoritative. `MatchedAuditRecord` validates private matched-cost
-  observations with bounded identities/provenance; `audit_scheduling` runs a
-  bounded fixed-alpha fs-eproc `PairwiseRace` and is the only constructor of
-  `SchedulingAuthority`. `schedule_probes` requires that capability, consumes
-  one sealed ranking epoch, and returns at most one highest-value affordable
-  `ScheduledPurchase` receipt retaining the menu root/grid, audit root/e-value
-  support, and exact budget transition; the caller must update evidence and
-  rerank before another spend.
+  or reordered. `source_context_id` binds the caller-declared policy and
+  decision snapshot, validated nodes, complete supplied source menu, and grid;
+  final `context_id` additionally binds every canonical output row and score.
+  `QueryHint` is structured and grid-qualified, with escaped lossless text and
+  strict JSON renderers. A sampled zero is explicitly non-authoritative.
+  `MatchedAuditRecord` validates private matched-cost observations with bounded
+  identities/provenance. A non-cloneable `VoiScheduler` owns one append-only
+  chronological fixed-alpha fs-eproc `PairwiseRace`, the remaining total
+  budget, and a bounded set of consumed decision snapshots. `observe_audit`
+  updates that one live process transactionally; `schedule(&mut self, menu)`
+  rechecks the current verdict, refuses a foreign policy or repeated snapshot,
+  and returns at most one highest-value affordable `ScheduledPurchase` receipt
+  retaining source/final menu roots, policy/snapshot, audit root/e-value
+  support, and the exact internal budget transition. `audit_scheduling` is a
+  reporting-only replay helper and returns no spending capability.
   Decision, sweep, ranking, and scheduling entry points are fallible:
   arity, nonempty bounded collections/names, unique identities, finite
   ordered intervals, nominal containment, callback margins, target
   resolution, grid and aggregate evaluation work, probe economics,
   ranked values, and budgets are validated before evaluation or spend.
-  Probe-menu identity, score ordering, and matched-audit order are canonical.
-  Duplicate source or audit identities refuse, and a positive scheduled cost
-  must strictly decrease a finite budget.
+  Probe-menu identity and score ordering are canonical. Matched-audit order is
+  authoritative chronological input and is bound exactly; completed outcomes
+  are never sorted through the adaptive e-process. Duplicate source/audit
+  identities refuse, and a positive scheduled cost must strictly decrease the
+  scheduler-owned finite budget.
 
 - `alloc::{Knob, KnobSetting, AllocProblem, Plan, allocate, Allocator,
   AllocationError, PlanInputError, BudgetInfeasible, oracle_min_error}`
@@ -162,12 +168,15 @@ cached surrogate callback is itself deterministic.
 
 ## Cancellation behavior
 
-All calls are bounded pure computations or bounded ledger reads. Cost-model
+Library-owned work is bounded pure computation or bounded ledger reads. Cost-model
 history/evaluation, oracle edges/errors, receipt bytes/depth/nodes/container
 items, and tune sample counts each have explicit caps. VoI sweeps are bounded
-by `MAX_VOI_EVALUATIONS`; audits are bounded by `MAX_VOI_AUDIT_RECORDS`; the
-fixture oracle has its own Cartesian-work cap. No `Cx` integration is needed at
-this layer.
+by `MAX_VOI_EVALUATIONS`; audits and consumed snapshots are bounded by
+`MAX_VOI_AUDIT_RECORDS` and `MAX_VOI_SCHEDULED_CONTEXTS`; the fixture oracle has
+its own Cartesian-work cap. The VoI limit bounds callback INVOCATIONS, not the
+time or memory of arbitrary caller callback bodies. No `Cx` crosses this pure
+planning API; callback owners must provide already-budgeted, cached,
+cancellation-correct surrogate evaluation.
 
 ## No-claim boundaries
 
@@ -216,9 +225,10 @@ refusals, online re-planning, oracle bounds, evaluator safety, and tropical
 composition. Feature-gated `tests/voi.rs` covers exact boundaries and limit+1,
 callback/domain refusals before evaluation, exact target resolution, probe
 economics, sealed menu/context identity, asymmetric subset contraction,
-structured estimated hints, single-purchase epochs, bounded matched-cost
-audits, anytime-valid authority activation/demotion, and monotone budget
-arithmetic.
+structured estimated hints, chronological-order e-process counterexamples,
+bounded append-only matched-cost audits, live activation/demotion, policy and
+snapshot isolation, concurrent duplicate-spend refusal, and cumulative monotone
+budget arithmetic.
 
 ## No-claim boundaries
 
@@ -253,14 +263,15 @@ arithmetic.
   arbitrary callback pure; VoI determinism and replay require the caller to
   supply the declared cached deterministic margin. A callback panic is also
   outside the typed-refusal contract and propagates to its owner.
-- `RankedMenu::context_id` is a deterministic content identity, not a freshness
-  oracle: it binds nodes/menu/grid but cannot identify arbitrary callback code
-  or prove that the supplied menu is complete relative to an external catalog
-  or that the caller's ledger/session snapshot is still current.
+- `RankedMenu` identities bind caller-declared policy/snapshot, nodes, source
+  menu, grid, and canonical output rows, but they cannot authenticate the
+  declared policy/snapshot, identify arbitrary callback code, prove external
+  catalog completeness, or prove that a ledger/session snapshot is current.
 - Matched audit records are structurally validated, canonically content-bound,
-  bounded, and cannot mint authority without the e-process gate, but they are
-  caller-supplied rather than ledger-authenticated. Safe Rust cannot forge a
-  `SchedulingAuthority`; a dishonest producer can still lie in the evidence
-  supplied to `MatchedAuditRecord::new`. Ledger signatures, snapshot freshness,
-  expiry, and independent outcome authentication remain required follow-up
-  work (`frankensim-wk4m`); this crate makes no authenticated-audit claim yet.
+  bounded, and enter one live scheduler in append order, but they are
+  caller-supplied rather than ledger-authenticated. A dishonest producer can
+  lie, postselect before constructing a scheduler, or replay the same evidence
+  into a second scheduler. Ledger-enforced unique audit streams, signatures,
+  snapshot freshness, expiry, and independent outcome authentication remain
+  required follow-up work (`frankensim-wk4m`); this crate makes no
+  authenticated or cross-process exactly-once audit claim yet.

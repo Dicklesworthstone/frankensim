@@ -370,7 +370,15 @@ fn stage_6_value_of_information() {
         shrink: 0.1,
         kind: ProbeKind::Physical,
     }];
-    let ranked = rank_purchases(&decision, &live, &menu, 64).expect("valid live VoI request");
+    let ranked = rank_purchases(
+        &decision,
+        &live,
+        &menu,
+        64,
+        "fs-selfknow-stage6-v1",
+        "live-snapshot-v1",
+    )
+    .expect("valid live VoI request");
     let top = ranked.top().expect("nonempty sealed menu");
     h.log("voi.live", &format!("{{\"top_score\":{:.5}}}", top.score()));
     assert!(
@@ -386,7 +394,15 @@ fn stage_6_value_of_information() {
         hi: 1.0,
         nominal: 0.95,
     }];
-    let ranked = rank_purchases(&decision, &settled, &menu, 64).expect("valid settled VoI request");
+    let ranked = rank_purchases(
+        &decision,
+        &settled,
+        &menu,
+        64,
+        "fs-selfknow-stage6-v1",
+        "settled-snapshot-v1",
+    )
+    .expect("valid settled VoI request");
     let top = ranked.top().expect("nonempty sealed menu");
     h.log(
         "voi.settled",
