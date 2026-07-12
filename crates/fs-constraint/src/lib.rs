@@ -406,6 +406,24 @@ pub fn evaluate(
                     value: *level,
                 });
             }
+            // The Hoeffding bound `√(ln(1/δ)/(2n))` assumes `0 < δ < 1` and
+            // `n ≥ 1`. Unvalidated, `δ ≥ 1` makes `ln(1/δ) ≤ 0` → a NaN
+            // half-width (negative radicand), and any `δ` outside (0,1) makes
+            // `confidence = 1 − δ` fall outside [0,1] (e.g. δ=1.5 → −0.5);
+            // `n = 0` makes the half-width `+∞` and `empirical = 0/0 = NaN`. All
+            // produce a garbage certificate instead of a teaching refusal.
+            if !(delta > 0.0 && delta < 1.0) {
+                return Err(ConError::BadParam {
+                    what: "chance failure probability (delta)",
+                    value: delta,
+                });
+            }
+            if samples == 0 {
+                return Err(ConError::BadParam {
+                    what: "chance sample count",
+                    value: f64::from(samples),
+                });
+            }
             let noise = noise.ok_or(ConError::BadParam {
                 what: "chance noise model (required)",
                 value: f64::NAN,

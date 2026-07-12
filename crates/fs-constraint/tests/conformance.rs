@@ -647,3 +647,43 @@ fn a_non_finite_constraint_value_is_never_certified_feasible() {
         "a NaN (out-of-domain) constraint is Violated, not a feasible exact-0 certificate",
     );
 }
+
+#[test]
+fn a_chance_constraint_with_a_bad_delta_or_zero_samples_is_refused() {
+    // Regression: the Hoeffding half-width sqrt(ln(1/delta)/(2n)) is NaN for
+    // delta >= 1 (ln(1/delta) <= 0) and +inf for n = 0, and confidence = 1-delta
+    // falls outside [0,1] for delta outside (0,1). Unvalidated, these produced a
+    // garbage certificate; they must be refused as BadParam, like the level.
+    let host = linear_host(&[(1.0, 0.0, 1.0)]);
+    let noise = |_s: u64| -> Vec<f64> { vec![0.5, 0.0] };
+    let x = [0.2, 0.0];
+    let chance = |samples: u32, delta: f64| ConstraintSpec {
+        name: "chance".to_string(),
+        node: host.nodes[0],
+        kind: ConstraintKind::Chance {
+            level: 0.9,
+            estimator: ChanceEstimator::MonteCarlo { samples, delta },
+        },
+        active_tol: 1e-9,
+    };
+    for (s, d, why) in [
+        (400u32, 1.5f64, "delta >= 1"),
+        (400, 0.0, "delta = 0"),
+        (0, 0.05, "zero samples"),
+    ] {
+        assert!(
+            matches!(
+                evaluate(&host.problem, &chance(s, d), &x, Some(&noise)),
+                Err(ConError::BadParam { .. })
+            ),
+            "{why} must be refused as BadParam"
+        );
+    }
+    // A valid (delta, samples) still evaluates.
+    assert!(evaluate(&host.problem, &chance(400, 0.05), &x, Some(&noise)).is_ok());
+    verdict(
+        "fscon-chance-params",
+        true,
+        "invalid chance delta / zero samples are refused, not turned into a NaN certificate",
+    );
+}
