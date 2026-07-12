@@ -21,10 +21,12 @@ random numbers) are supplied by the caller (fs-scenario).
 - `robust_optimum(&[ColoredObjective], alpha) -> RobustReport` — the design
   minimizing CVaR; ENFORCES the amended optimization contract (every candidate
   must be colored) and returns the weakest-input headline color.
-- `dominated_by_nominal(robust_cost, nominal_plus_safety_cost) -> bool` — the
-  Proposal-F kill-criterion test.
+- `dominated_by_nominal(robust_cost, nominal_plus_safety_cost) -> Result<bool,
+  RobustError>` — the Proposal-F kill-criterion test; non-finite costs are
+  refused rather than silently suppressing domination.
 - `fragility_curve(capacity_samples, intensities, color) -> ColoredFragility` —
-  `P(failure)` = fraction of capacities below each intensity, with a color band.
+  `P(failure)` = fraction of capacities below each intensity, with a color band;
+  output points are canonically sorted by finite intensity.
 - `RobustError` — `EmptySamples` / `BadAlpha` / `BadSample` /
   `UncoloredObjective` / `NoCandidates`.
 
@@ -35,9 +37,12 @@ random numbers) are supplied by the caller (fs-scenario).
 - WEAKEST-INPUT RULE: a headline's color is the minimum-rank input color — a
   verified solve under an estimated hazard is an estimated answer.
 - CVaR of the tail is `>=` the mean; `alpha ∈ (0, 1)` enforced; non-finite
-  samples are refused instead of sorted into risk or headline values.
-- A fragility curve is nondecreasing in intensity (`P(failure)` = CDF of demand
-  exceeding capacity).
+  samples are refused instead of sorted into risk or headline values. CVaR and
+  nominal means use bounded convex combinations, so finite constant samples
+  near `f64::MAX` do not overflow through an intermediate sum. Both statistics
+  canonically total-order samples, making them permutation-invariant.
+- A fragility curve is sorted and nondecreasing in intensity (`P(failure)` =
+  CDF of demand exceeding capacity), independent of caller input order.
 
 ## Error model
 
@@ -62,11 +67,12 @@ None.
 
 ## Conformance tests
 
-`tests/robust.rs` (Proposal F, 9 cases): CVaR weights integral and non-integral
+`tests/robust.rs` (Proposal F, 11 cases): CVaR weights integral and non-integral
 worst tails + rejects bad inputs; the weakest-input color rule; robust vs
 nominal optima diverge; the un-colored-objective contract (+ no-candidates);
-the kill-criterion dominance test; monotone colored fragility curves;
-determinism.
+extreme finite means remain finite; the kill-criterion dominance test;
+non-finite dominance costs refuse; unsorted fragility inputs produce monotone
+canonical curves; determinism.
 
 ## No-claim boundaries
 

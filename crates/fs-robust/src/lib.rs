@@ -81,13 +81,15 @@ pub fn cvar(samples: &[f64], alpha: f64) -> Result<f64, RobustError> {
         clippy::cast_sign_loss
     )]
     let boundary_rank = ((n * alpha).ceil() as usize).clamp(1, sorted.len());
-    let tail_mass = n * (1.0 - alpha);
     #[allow(clippy::cast_precision_loss)]
     let boundary_weight = boundary_rank as f64 - n * alpha;
     let (at_or_below, above) = sorted.split_at(boundary_rank);
     let boundary = *at_or_below.last().ok_or(RobustError::EmptySamples)?;
-    let strictly_above = above.iter().sum::<f64>();
-    Ok((boundary_weight * boundary + strictly_above) / tail_mass)
+    weighted_mean(
+        core::iter::once((boundary, boundary_weight))
+            .chain(above.iter().copied().map(|value| (value, 1.0))),
+    )
+    .ok_or(RobustError::EmptySamples)
 }
 
 /// The weakest (lowest-rank) color among the inputs — the reporting rule.
@@ -142,7 +144,10 @@ impl ColoredObjective {
             return Err(RobustError::EmptySamples);
         }
         reject_non_finite(&self.cost_samples)?;
-        Ok(self.cost_samples.iter().sum::<f64>() / self.cost_samples.len() as f64)
+        let mut ordered = self.cost_samples.clone();
+        ordered.sort_by(f64::total_cmp);
+        weighted_mean(ordered.into_iter().map(|value| (value, 1.0)))
+            .ok_or(RobustError::EmptySamples)
     }
 
     /// The headline color = the WEAKEST input color. An objective with no
@@ -214,12 +219,15 @@ pub fn robust_optimum(
 /// nominal-optimum-plus-standard-safety-factor on realized cost (at equal
 /// achieved safety)? If robust designs are consistently dominated, the
 /// ambiguity sets are miscalibrated.
-#[must_use]
+///
+/// # Errors
+/// [`RobustError::BadSample`] if either realized cost is non-finite.
 pub fn dominated_by_nominal(
     robust_realized_cost: f64,
     nominal_plus_safety_realized_cost: f64,
-) -> bool {
-    nominal_plus_safety_realized_cost < robust_realized_cost
+) -> Result<bool, RobustError> {
+    reject_non_finite(&[robust_realized_cost, nominal_plus_safety_realized_cost])?;
+    Ok(nominal_plus_safety_realized_cost < robust_realized_cost)
 }
 
 /// A fragility-curve point: the probability of failure at a hazard intensity.
@@ -242,7 +250,9 @@ pub struct ColoredFragility {
 
 /// Build a fragility curve: at each intensity, `P(failure)` is the fraction of
 /// `capacity_samples` that fall below it (the structure fails when demand
-/// exceeds capacity). The `color` is the honest confidence band.
+/// exceeds capacity). Intensities are returned in deterministic ascending
+/// order, so the empirical CDF is structurally monotone. The `color` is the
+/// honest confidence band.
 ///
 /// # Errors
 /// [`RobustError::EmptySamples`] if there are no capacity samples;
@@ -258,9 +268,11 @@ pub fn fragility_curve(
     reject_non_finite(capacity_samples)?;
     reject_non_finite(intensities)?;
     let n = capacity_samples.len() as f64;
-    let curve = intensities
-        .iter()
-        .map(|&intensity| {
+    let mut ordered_intensities = intensities.to_vec();
+    ordered_intensities.sort_by(f64::total_cmp);
+    let curve = ordered_intensities
+        .into_iter()
+        .map(|intensity| {
             let failures = capacity_samples.iter().filter(|&&c| c < intensity).count();
             FragilityPoint {
                 intensity,
@@ -276,4 +288,29 @@ fn reject_non_finite(values: &[f64]) -> Result<(), RobustError> {
         return Err(RobustError::BadSample { value });
     }
     Ok(())
+}
+
+fn weighted_mean(values: impl IntoIterator<Item = (f64, f64)>) -> Option<f64> {
+    let mut mean = 0.0_f64;
+    let mut total_weight = 0.0_f64;
+    let mut present = false;
+    for (value, weight) in values {
+        if weight <= 0.0 {
+            continue;
+        }
+        let combined_weight = total_weight + weight;
+        if present {
+            let incoming_share = weight / combined_weight;
+            mean = if mean.is_sign_positive() == value.is_sign_positive() {
+                mean + (value - mean) * incoming_share
+            } else {
+                mean * (total_weight / combined_weight) + value * incoming_share
+            };
+        } else {
+            mean = value;
+            present = true;
+        }
+        total_weight = combined_weight;
+    }
+    present.then_some(mean)
 }

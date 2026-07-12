@@ -44,6 +44,33 @@ fn cvar_fractionally_weights_a_non_integral_tail_boundary() {
 }
 
 #[test]
+fn risk_means_do_not_overflow_on_finite_constant_samples() {
+    let samples = [f64::MAX, f64::MAX, f64::MAX];
+    assert_eq!(cvar(&samples, 0.5).unwrap().to_bits(), f64::MAX.to_bits());
+    let objective = ColoredObjective::new("extreme", samples.to_vec(), vec![verified()]);
+    assert_eq!(
+        objective.nominal_value().unwrap().to_bits(),
+        f64::MAX.to_bits()
+    );
+    let mixed = ColoredObjective::new(
+        "mixed-extremes",
+        vec![f64::MAX, -f64::MAX],
+        vec![verified()],
+    );
+    let reversed = ColoredObjective::new(
+        "mixed-extremes-reversed",
+        vec![-f64::MAX, f64::MAX],
+        vec![verified()],
+    );
+    assert_eq!(mixed.nominal_value().unwrap().to_bits(), 0.0_f64.to_bits());
+    assert_eq!(
+        mixed.nominal_value().unwrap().to_bits(),
+        reversed.nominal_value().unwrap().to_bits(),
+        "a sample statistic must not depend on input permutation"
+    );
+}
+
+#[test]
 fn cvar_rejects_bad_inputs() {
     assert_eq!(cvar(&[], 0.9), Err(RobustError::EmptySamples));
     assert!(matches!(
@@ -126,9 +153,17 @@ fn optimization_refuses_an_un_colored_objective() {
 #[test]
 fn the_kill_criterion_detects_domination_by_nominal_plus_safety() {
     // robust design costs 100, nominal+safety costs 90 -> robust is dominated.
-    assert!(dominated_by_nominal(100.0, 90.0));
+    assert!(dominated_by_nominal(100.0, 90.0).unwrap());
     // robust costs 80, nominal+safety costs 90 -> robust wins (not dominated).
-    assert!(!dominated_by_nominal(80.0, 90.0));
+    assert!(!dominated_by_nominal(80.0, 90.0).unwrap());
+    assert!(matches!(
+        dominated_by_nominal(f64::NAN, 90.0),
+        Err(RobustError::BadSample { value }) if value.is_nan()
+    ));
+    assert!(matches!(
+        dominated_by_nominal(100.0, f64::INFINITY),
+        Err(RobustError::BadSample { value }) if value.is_infinite()
+    ));
 }
 
 #[test]
@@ -157,6 +192,20 @@ fn fragility_curves_are_monotone_and_colored() {
         fragility_curve(&capacities, &[1.0, f64::INFINITY], verified()),
         Err(RobustError::BadSample { value }) if value.is_infinite()
     ));
+}
+
+#[test]
+fn fragility_curve_canonicalizes_unsorted_intensities() {
+    let capacities = [3.0, 4.0, 5.0, 6.0, 7.0];
+    let result = fragility_curve(&capacities, &[9.0, 1.0, 6.0, 4.0], estimated()).unwrap();
+    let intensities: Vec<f64> = result.curve.iter().map(|point| point.intensity).collect();
+    assert_eq!(intensities, vec![1.0, 4.0, 6.0, 9.0]);
+    assert!(
+        result
+            .curve
+            .windows(2)
+            .all(|pair| pair[0].prob_failure <= pair[1].prob_failure)
+    );
 }
 
 #[test]
