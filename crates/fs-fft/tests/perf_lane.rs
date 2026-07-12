@@ -149,17 +149,20 @@ impl RooflineKernel for FftRoundTrip {
 
 /// N-D pooled roundtrip (bead 27d3): the executor-tiled pencil path,
 /// all axes parallel — measured against the ALL-CORE axes since the
-/// TilePool owns placement.
-struct FftNdRoundTrip {
+/// TilePool owns placement. Generic over the pool lane so the parked
+/// crew (bead tkr7) serves every axis pass and every row without
+/// respawning — the per-run spawn/join overhead that made the first
+/// N-D rows report-only is out of the measured path.
+struct FftNdRoundTrip<'p, P> {
     dims: Vec<usize>,
     plan: FftNd,
     data: Vec<C64>,
-    pool: fs_exec::TilePool,
+    pool: &'p P,
     gate: fs_exec::CancelGate,
 }
 
-impl FftNdRoundTrip {
-    fn new(dims: &[usize], workers: usize) -> FftNdRoundTrip {
+impl<'p, P: fs_exec::KernelRunner> FftNdRoundTrip<'p, P> {
+    fn new(dims: &[usize], pool: &'p P) -> FftNdRoundTrip<'p, P> {
         let plan = FftNd::new(dims);
         let total = plan.total();
         FftNdRoundTrip {
@@ -173,13 +176,13 @@ impl FftNdRoundTrip {
                     )
                 })
                 .collect(),
-            pool: fs_exec::TilePool::new(fs_exec::PoolConfig::for_host(workers, 0xFD1D)),
+            pool,
             gate: fs_exec::CancelGate::new(),
         }
     }
 }
 
-impl RooflineKernel for FftNdRoundTrip {
+impl<P: fs_exec::KernelRunner> RooflineKernel for FftNdRoundTrip<'_, P> {
     fn spec(&self) -> KernelSpec {
         // Per axis pass: gather one C64 + scatter one C64 per element
         // (32 B); a roundtrip runs every axis twice. Line/scratch
@@ -203,10 +206,10 @@ impl RooflineKernel for FftNdRoundTrip {
     }
     fn run_once(&mut self) -> Result<(), String> {
         self.plan
-            .forward_pooled(&mut self.data, &self.pool, &self.gate)
+            .forward_pooled(&mut self.data, self.pool, &self.gate)
             .map_err(|error| format!("pooled forward failed: {error}"))?;
         self.plan
-            .inverse_pooled(&mut self.data, &self.pool, &self.gate)
+            .inverse_pooled(&mut self.data, self.pool, &self.gate)
             .map_err(|error| format!("pooled inverse failed: {error}"))?;
         Ok(())
     }
@@ -230,26 +233,30 @@ fn fused_sixstep_traffic_and_evidence_version_are_bound() {
     }
 }
 
-/// N-D pooled rows (bead 27d3): REPORT-ONLY for now — first
-/// measurements show per-axis-pass worker-spawn overhead dominating
-/// at these sizes (scoped threads spawn per pool.run, 4-6 axis passes
-/// per roundtrip), so a floor gate would assert an aspiration, not a
-/// settled claim. The gate flips on once persistent workers or strip
-/// batching land. Returns false when any row is environment-invalid.
+/// N-D pooled rows (bead 27d3): measured on the PARKED-CREW lane (bead
+/// tkr7) — one crew parked for the whole sweep, so per-axis-pass worker
+/// spawn/join (the overhead that made the first rows report-only:
+/// 0.011 attainment at 256×256 on a 5995WX) is out of the measured
+/// path. Rows stay REPORT-ONLY until both baseline machines clear the
+/// 0.40 floor with band margin — floors assert settled claims.
+/// Returns false when any row is environment-invalid.
 fn fftnd_report_rows(axes: &MachineAxes) -> bool {
     let workers = std::thread::available_parallelism().map_or(8, std::num::NonZero::get);
-    let mut env_ok = true;
-    for dims in [vec![256usize, 256], vec![1024, 1024], vec![128, 128, 64]] {
-        let mut kern = FftNdRoundTrip::new(&dims, workers);
-        let att = measure(&mut kern, 1, 5, axes).expect("bounded FFT-ND measurement");
-        let receipt = att.to_jsonl();
-        println!(
-            "{{\"metric\":\"fftnd-roundtrip\",\"dims\":{dims:?},\"workers\":{workers},\
-             \"gated\":false,\"receipt\":{receipt}}}"
-        );
-        env_ok &= att.verdict != fs_roofline::Verdict::EnvironmentInvalid;
-    }
-    env_ok
+    let pool = fs_exec::TilePool::new(fs_exec::PoolConfig::for_host(workers, 0xFD1D));
+    pool.with_parked_crew_local(|parked| {
+        let mut env_ok = true;
+        for dims in [vec![256usize, 256], vec![1024, 1024], vec![128, 128, 64]] {
+            let mut kern = FftNdRoundTrip::new(&dims, parked);
+            let att = measure(&mut kern, 1, 5, axes).expect("bounded FFT-ND measurement");
+            let receipt = att.to_jsonl();
+            println!(
+                "{{\"metric\":\"fftnd-roundtrip\",\"dims\":{dims:?},\"workers\":{workers},\
+                 \"lane\":\"parked-crew\",\"gated\":false,\"receipt\":{receipt}}}"
+            );
+            env_ok &= att.verdict != fs_roofline::Verdict::EnvironmentInvalid;
+        }
+        env_ok
+    })
 }
 
 #[test]
