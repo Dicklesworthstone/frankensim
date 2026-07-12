@@ -170,7 +170,7 @@ reimplementation must pass the suite unchanged.
 - Invalidation traversal (dirty propagation through the DAG) and the
   cache-policy surface are the recompute-invalidate / recompute-api
   beads; this store supplies their pinning hooks.
-- The SQLite-backed persistent form (fs-ledger schema v3 tables) is
+- The SQLite-backed persistent form (fs-ledger schema v5 tables) is
   deferred; `snapshot()` v2 is the interim durable form.
 - Slack SPENDING policies (which skips to take under a budget) are
   the recompute-api bead's.

@@ -276,6 +276,12 @@ fn ledger_003_schema_migration_versioned() {
 fn ledger_003b_instance_identity_survives_moves_aliases_and_migration() {
     let first_memory = Ledger::open(":memory:").expect("first memory ledger");
     let first_memory_id = first_memory.instance_id();
+    assert_eq!(
+        first_memory
+            .checked_instance_id()
+            .expect("checked identity"),
+        first_memory_id
+    );
     let uuid = first_memory_id.as_bytes();
     assert_eq!(uuid[6] & 0xf0, 0x40, "identity has UUID v4 shape");
     assert_eq!(uuid[8] & 0xc0, 0x80, "identity has RFC 4122 variant");
@@ -377,36 +383,135 @@ fn ledger_003b_instance_identity_survives_moves_aliases_and_migration() {
         "migration seeds identity atomically and only once"
     );
     cleanup_db(&old);
+
+    let old_v4 = temp_db("instance-id-v4");
+    let expected_v4_id = [
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x46, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee,
+        0xff,
+    ];
+    {
+        let raw = fsqlite::Connection::open(&old_v4).expect("raw v4 ledger");
+        for batch in [
+            fs_ledger::schema::V1,
+            fs_ledger::schema::V2,
+            fs_ledger::schema::V3,
+            fs_ledger::schema::V4,
+        ] {
+            for ddl in batch {
+                raw.execute(ddl).expect("construct shipped v4 schema");
+            }
+        }
+        raw.execute(
+            "INSERT INTO ledger_identity(singleton, instance_id) VALUES \
+             (1, X'00112233445546778899AABBCCDDEEFF')",
+        )
+        .expect("seed v4 identity");
+        raw.execute("PRAGMA user_version = 4")
+            .expect("mark v4 schema");
+    }
+    let migrated_v4 = Ledger::open(&old_v4).expect("v4 guard migration");
+    assert_eq!(migrated_v4.schema_version().unwrap(), SCHEMA_VERSION);
+    assert_eq!(migrated_v4.instance_id().as_bytes(), expected_v4_id);
+    let second_v5_handle = Ledger::open(&old_v4).expect("second v5 handle");
+    assert_eq!(
+        second_v5_handle
+            .checked_instance_id()
+            .expect("second checked identity"),
+        migrated_v4.instance_id()
+    );
+    {
+        let raw = fsqlite::Connection::open(&old_v4).expect("raw immutable identity check");
+        assert!(
+            raw.execute(
+                "UPDATE ledger_identity SET instance_id = \
+                 X'102132435465467788A9BACBDCEDFE0F' WHERE singleton = 1",
+            )
+            .is_err(),
+            "v5 must refuse even a valid UUID-shaped identity replacement"
+        );
+        assert!(
+            raw.execute("DELETE FROM ledger_identity WHERE singleton = 1")
+                .is_err(),
+            "v5 must refuse identity deletion"
+        );
+        assert!(
+            raw.execute(
+                "INSERT OR REPLACE INTO ledger_identity(singleton, instance_id) VALUES \
+                 (1, X'102132435465467788A9BACBDCEDFE0F')",
+            )
+            .is_err(),
+            "v5 must refuse replacement through the insert conflict path"
+        );
+    }
+    assert_eq!(
+        migrated_v4
+            .checked_instance_id()
+            .expect("identity after refused mutations")
+            .as_bytes(),
+        expected_v4_id
+    );
+    drop(second_v5_handle);
+    drop(migrated_v4);
+    cleanup_db(&old_v4);
     verdict(
         "ledger-003b",
-        "opaque instance identity survives moves, aliases, reopen, and v3 migration; replacement rotates",
+        "opaque identity survives moves, aliases, v3/v4 migration, and v5 mutation guards; replacement rotates",
     );
 }
 
 #[test]
 fn ledger_003c_missing_persisted_identity_fails_closed() {
     let db = temp_db("missing-instance-id");
-    drop(Ledger::open(&db).expect("seed identity"));
     {
-        let raw = fsqlite::Connection::open(&db).expect("raw identity mutation");
-        raw.execute("DELETE FROM ledger_identity WHERE singleton = 1")
-            .expect("remove identity fixture");
+        let raw = fsqlite::Connection::open(&db).expect("raw missing-identity v4 ledger");
+        for batch in [
+            fs_ledger::schema::V1,
+            fs_ledger::schema::V2,
+            fs_ledger::schema::V3,
+            fs_ledger::schema::V4,
+        ] {
+            for ddl in batch {
+                raw.execute(ddl).expect("construct shipped v4 schema");
+            }
+        }
+        raw.execute("PRAGMA user_version = 4")
+            .expect("mark missing-identity v4 schema");
     }
     assert!(matches!(
         Ledger::open(&db),
         Err(LedgerError::InstanceIdentityCorrupt { .. })
     ));
+    {
+        let raw = fsqlite::Connection::open(&db).expect("inspect refused v4 migration");
+        assert_eq!(
+            raw.query_row("PRAGMA user_version")
+                .expect("version")
+                .get(0),
+            Some(&fsqlite::SqliteValue::Integer(4))
+        );
+    }
     cleanup_db(&db);
 
     let malformed = temp_db("malformed-instance-id");
-    drop(Ledger::open(&malformed).expect("seed malformed fixture"));
     {
-        let raw = fsqlite::Connection::open(&malformed).expect("raw identity mutation");
+        let raw = fsqlite::Connection::open(&malformed).expect("raw malformed v4 ledger");
+        for batch in [
+            fs_ledger::schema::V1,
+            fs_ledger::schema::V2,
+            fs_ledger::schema::V3,
+            fs_ledger::schema::V4,
+        ] {
+            for ddl in batch {
+                raw.execute(ddl).expect("construct shipped v4 schema");
+            }
+        }
         raw.execute(
-            "UPDATE ledger_identity SET instance_id = \
-             X'00000000000000000000000000000000' WHERE singleton = 1",
+            "INSERT INTO ledger_identity(singleton, instance_id) VALUES \
+             (1, X'00000000000000000000000000000000')",
         )
         .expect("install invalid UUID bits");
+        raw.execute("PRAGMA user_version = 4")
+            .expect("mark malformed v4 schema");
     }
     assert!(matches!(
         Ledger::open(&malformed),
@@ -452,7 +557,63 @@ fn ledger_003c_missing_persisted_identity_fails_closed() {
     cleanup_db(&premature);
     verdict(
         "ledger-003c",
-        "a current schema missing or carrying malformed persisted identity refuses instead of rotating",
+        "v4 and premature-v4 schemas missing or carrying malformed identity refuse before version advancement",
+    );
+}
+
+#[test]
+fn ledger_003d_checked_identity_detects_stale_open_handles() {
+    let db = temp_db("stale-instance-id-handle");
+    let old = Ledger::open(&db).expect("old handle");
+    let peer = Ledger::open(&db).expect("peer old handle");
+    let original = old.instance_id();
+    assert_eq!(peer.instance_id(), original);
+
+    {
+        let raw = fsqlite::Connection::open(&db).expect("raw DDL bypass fixture");
+        raw.execute("DROP TRIGGER trg_ledger_identity_immutable_update")
+            .expect("remove update guard for out-of-band fixture");
+        assert!(matches!(
+            Ledger::open(&db),
+            Err(LedgerError::SchemaMismatch { .. })
+        ));
+        raw.execute(
+            "UPDATE ledger_identity SET instance_id = \
+             X'102132435465467788A9BACBDCEDFE0F' WHERE singleton = 1",
+        )
+        .expect("install valid replacement identity out of band");
+        raw.execute(fs_ledger::schema::V5[0])
+            .expect("restore exact shipped update guard");
+    }
+
+    assert!(matches!(
+        old.checked_instance_id(),
+        Err(LedgerError::InstanceIdentityCorrupt { .. })
+    ));
+    assert!(matches!(
+        peer.checked_instance_id(),
+        Err(LedgerError::InstanceIdentityCorrupt { .. })
+    ));
+    assert!(matches!(
+        old.lint(),
+        Err(LedgerError::InstanceIdentityCorrupt { .. })
+    ));
+
+    let current = Ledger::open(&db).expect("new handle after out-of-band replacement");
+    assert_ne!(current.instance_id(), original);
+    assert_eq!(
+        current
+            .checked_instance_id()
+            .expect("new handle agrees with current row"),
+        current.instance_id()
+    );
+    drop(current);
+    drop(peer);
+    drop(old);
+    cleanup_db(&db);
+    verdict(
+        "ledger-003d",
+        "checked identity and lint reject old handles after an out-of-band valid UUID replacement",
     );
 }
 

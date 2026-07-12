@@ -1,6 +1,6 @@
 # CONTRACT: fs-ledger
 
-> Status: ACTIVE (Design Ledger, schema v4). Owns the core schema + Rev S
+> Status: ACTIVE (Design Ledger, schema v5). Owns the core schema + Rev S
 > extension tables, BLAKE3 content addressing, the WAL/snapshot concurrency
 > contract, and — since schema v2 — forkable worlds, `at(t)` views,
 > `explain()`, the replay audit, and unreferenced-artifact GC (`travel`
@@ -36,10 +36,15 @@ fine-grained event stream. Layer: L6 (HELM). Runtime deps: `std` + `fsqlite`.
 - `LedgerInstanceId` / `Ledger::instance_id()` — opaque, move-stable identity
   of one physical ledger. Schema v4 stores exactly one 16-byte UUID in
   `ledger_identity`; fresh initialization and v1-v3 migration seed it inside
-  the same transaction as the v4 version marker. Reopenings and path aliases
-  of one file agree, while replacement files at the same path and independent
-  in-memory handles differ. An existing v4 ledger with missing or malformed
-  identity refuses open rather than silently rotating authority.
+  the same transaction as the v4 version marker. Schema v5 adds attested
+  update/delete refusal triggers plus a reinsert guard that permits only the
+  initial empty-table seed. Reopenings and path aliases of one file
+  agree, while replacement files at the same path and independent in-memory
+  handles differ. `instance_id()` is the cached open-time value;
+  `checked_instance_id()` re-reads the current row and refuses a missing,
+  malformed, or changed identity. `lint()` performs that checked comparison.
+  A v4 or v5 ledger with missing or malformed identity refuses open rather
+  than silently rotating authority.
 - `ContentHash`, `Blake3`, `hash_bytes` — in-house BLAKE3 (plain hash mode,
   32-byte output), pure safe Rust; artifact identity everywhere. The
   implementation is OWNED by the UTIL crate `fs-blake3` (bead 7uq9) and
@@ -105,7 +110,9 @@ STRICT-legal `TEXT` with `json_valid()` CHECKs (Appendix D as written is not
 valid STRICT SQL), and `artifacts` gains `len`/`chunk_count` +
 `artifact_chunks` for bounded-memory large-field storage. Schema v4 adds the
 singleton `ledger_identity` table so higher-layer sink authority is tied to
-the database instance rather than a path string or Rust object address.
+the database instance rather than a path string or Rust object address;
+schema v5 makes ordinary SQL update/delete/replacement mutation of that row
+fail closed.
 
 - `tombstone` module (addendum Proposal E, bead lmp4.13): the TOMBSTONE
   LEDGER — swarm memory's cheap half. `Descriptor` (name + dimensioned
@@ -259,7 +266,12 @@ refusal, or verifier panic).
 7. Wall-clock timestamps are provenance envelope, never content identity.
 8. Physical ledger identity is a persisted opaque 16-byte UUID. It survives
    handle moves, file aliases, and reopenings, but never transfers to a new
-   database merely because that database occupies the same path.
+   database merely because that database occupies the same path. New
+   identities use 122 bits from the operating system's `/dev/urandom` source
+   on supported Unix targets, with RFC 4122 version/variant bits overlaid.
+   Schema v5 refuses every UPDATE, DELETE, or non-initial INSERT through
+   attested triggers, and the checked accessor detects drift against an
+   already-open handle.
 
 ## Error model
 
@@ -270,8 +282,11 @@ busy/locked/write-conflict; retry with backoff), `MissingExplicit` (names the
 offending Five Explicits field), `Invalid` (names the field),
 `Corrupt`, `TuneCorrupt` (stored tune envelope violated), `TuneReadLimit`
 (bounded scan refused), `NotFound`, `DoubleFinish`, `WriterInTransaction`.
-`InstanceIdentityCorrupt` refuses a v4 database whose singleton identity is
-missing or malformed.
+`InstanceIdentityCorrupt` refuses a v4/v5 database whose singleton identity is
+missing, malformed, or differs from the handle's cached open-time authority.
+`InstanceIdentityUnavailable` refuses to mint a new identity when the safe
+std-only OS entropy source is unavailable; it never falls back to process ids,
+timestamps, addresses, or counters.
 Never panics across the crate boundary. Signed database metadata that
 represents a length or count is converted with an explicit non-negative check;
 physical corruption cannot reinterpret `-1` as `u64::MAX`.
@@ -318,10 +333,12 @@ reopen. Tune unit regressions cover every exact field limit and limit+1,
 empty/NUL/non-ASCII identities, hostile oversized raw-SQL rows, lint detection,
 and deterministic row/aggregate scan caps (including an exact 16 MiB boundary
 that counts the cloned kernel identity once per returned row).
-The `ledger_003b`/`ledger_003c` identity battery covers handle movement,
-independent memory ledgers, file reopen and aliasing, same-path file
-replacement, genuine-v3 migration, UUID shape, and fail-closed missing,
-malformed, or prematurely installed identity without advancing the marker.
+The `ledger_003b`/`ledger_003c`/`ledger_003d` identity battery covers handle
+movement, independent memory ledgers, file reopen and aliasing, same-path file
+replacement, genuine v3 and v4 migrations, UUID shape, v5 update/delete/insert
+refusal for valid UUID-shaped replacements, fail-closed missing/malformed
+identity without advancing the marker, and checked old-handle/lint refusal
+after a deliberate DDL bypass plus restoration of the shipped trigger.
 `tests/travel.rs`: genuine-v1 →
 v2 migration with history intact, fork storage audit (N forks = 1× artifacts
 + deltas) + branch independence, replay audit battery (clean /
@@ -455,6 +472,12 @@ adds fs-evidence as a runtime dependency (the colors are its types).
 - `LedgerInstanceId` is a collision-resistant uniqueness token, not a secret,
   signature, or authentication credential. Byte-for-byte database copies
   intentionally retain one identity because they are copies of one lineage.
+- Safe std-only identity generation is implemented through `/dev/urandom` on
+  Unix. Fresh identity creation on non-Unix targets is explicitly refused;
+  existing v4/v5 ledgers remain readable when their persisted identity and
+  schema attest. A client with arbitrary DDL authority can remove and restore
+  guards; already-open handles detect resulting row drift, but the identity is
+  not cryptographically authenticated against a hostile database owner.
 - Throughput numbers are smoke floors, not roofline claims (§14 discipline:
   real claims need machine fingerprints and acceptance bands).
 - Branch DELETION and cross-branch merge (as opposed to merge-view

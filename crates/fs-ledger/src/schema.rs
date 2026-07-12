@@ -13,13 +13,12 @@
 //! is committed in the same transaction as its DDL. The v2 recovery metadata
 //! also recognizes the exact columns an older build could commit before
 //! crashing ahead of its formerly separate version bump. Schema v4 adds one
-//! immutable database-instance identity row. The row is seeded by Rust inside
-//! the same migration transaction as the table and version marker because the
-//! identity bytes must come from the in-tree domain-separated generator rather
-//! than from engine-specific SQL randomness.
+//! database-instance identity row, seeded by Rust inside the same migration
+//! transaction as the table and version marker. Schema v5 makes that row
+//! immutable through attested update/delete refusal triggers.
 
 /// The schema version this crate writes and reads.
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 
 /// Storage chunk length for large artifacts (bytes). Artifacts strictly
 /// larger than this are stored as `artifact_chunks` rows of at most this
@@ -28,7 +27,7 @@ pub const STORAGE_CHUNK_LEN: usize = 4 * 1024 * 1024;
 
 /// Migration ladder: `MIGRATIONS[i]` migrates a database at `user_version`
 /// `i` to `i + 1`. Append-only; never edit a shipped batch.
-pub(crate) const MIGRATIONS: &[&[&str]] = &[V1, V2, V3, V4];
+pub(crate) const MIGRATIONS: &[&[&str]] = &[V1, V2, V3, V4, V5];
 
 /// v1: the six core tables (Appendix D), chunk storage, and the Rev S
 /// extension tables (sparse in v0 but present EARLY so downstream crates can
@@ -249,7 +248,7 @@ pub const V3: &[&str] = &["CREATE TABLE IF NOT EXISTS speculation(
         created_at INTEGER NOT NULL
     ) STRICT"];
 
-/// v4 (bead pifg): one immutable, move-stable identity for the physical
+/// v4 (bead pifg): one persisted, move-stable identity for the physical
 /// ledger instance. File-backed ledgers retain this row across path aliases and
 /// reopenings; a replacement database at the same path receives a new value.
 /// Independent in-memory handles likewise receive distinct values that live in
@@ -258,6 +257,30 @@ pub const V4: &[&str] = &["CREATE TABLE IF NOT EXISTS ledger_identity(
     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
     instance_id BLOB NOT NULL CHECK(length(instance_id) = 16)
 ) STRICT"];
+
+/// v5: make the physical-ledger identity immutable under ordinary SQL writes.
+/// All guards are schema-attested like every other shipped object. The
+/// update guard fires even for a no-op assignment: ledger identity is creation
+/// metadata, never mutable application state. The insert guard permits the
+/// initial seed only while the singleton row is absent, closing `OR REPLACE`.
+pub const V5: &[&str] = &[
+    "CREATE TRIGGER IF NOT EXISTS trg_ledger_identity_immutable_update
+     BEFORE UPDATE ON ledger_identity
+     BEGIN
+       SELECT RAISE(ABORT, 'ledger_identity is immutable');
+     END",
+    "CREATE TRIGGER IF NOT EXISTS trg_ledger_identity_immutable_delete
+     BEFORE DELETE ON ledger_identity
+     BEGIN
+       SELECT RAISE(ABORT, 'ledger_identity is immutable');
+     END",
+    "CREATE TRIGGER IF NOT EXISTS trg_ledger_identity_immutable_reinsert
+     BEFORE INSERT ON ledger_identity
+     WHEN EXISTS(SELECT 1 FROM ledger_identity WHERE singleton = 1)
+     BEGIN
+       SELECT RAISE(ABORT, 'ledger_identity is immutable');
+     END",
+];
 
 /// Every table the CURRENT schema owns (v1 set + v2/v3/v4 additions); the
 /// `table_count`/lint whitelist.
