@@ -106,8 +106,16 @@ fn min_dihedral_deg(p: &[[f64; 3]; 4]) -> f64 {
         for j in (i + 1)..4 {
             let (a, b) = (n[i], n[j]);
             let c = dot(a, b) / (dot(a, a).sqrt() * dot(b, b).sqrt()).max(1e-300);
-            // Dihedral along the shared edge is π − angle(normals).
-            let dihedral = 180.0 - c.clamp(-1.0, 1.0).acos().to_degrees();
+            // Dihedral along the shared edge is π − angle(normals). Route `acos`
+            // through the deterministic layer (like hexdom's `det::powi`): this
+            // dihedral drives the sliver census and the `new_count < best_count`
+            // ACCEPTANCE that selects the output mesh, and the exact audit only
+            // checks the chosen mesh is valid — not that the SAME mesh is chosen.
+            // Platform libm `acos` is not correctly-rounded, so a ULP difference
+            // near the sliver threshold could pick a different mesh across
+            // builds/ISAs. `det::acos` is bit-identical on every conforming
+            // target. (`sqrt`/`to_degrees` are already IEEE-deterministic.)
+            let dihedral = 180.0 - fs_math::det::acos(c.clamp(-1.0, 1.0)).to_degrees();
             worst = worst.min(dihedral);
         }
     }
