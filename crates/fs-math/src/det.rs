@@ -382,6 +382,14 @@ pub fn hypot(x: f64, y: f64) -> f64 {
     if x.is_infinite() || y.is_infinite() {
         return f64::INFINITY;
     }
+    // With ∞ handled, any remaining NaN operand yields NaN — a finite magnitude
+    // cannot rescue it. This MUST precede the max-ordering: `NaN >= b` is false,
+    // so `hypot(NaN, 0.0)` would otherwise select hi = 0.0 and the `hi == 0.0`
+    // short-circuit would return 0.0, swallowing the NaN and breaking the
+    // documented bitwise symmetry (hypot(0.0, NaN) already returns NaN).
+    if x.is_nan() || y.is_nan() {
+        return f64::NAN;
+    }
     let (a, b) = (x.abs(), y.abs());
     let (hi, lo) = if a >= b { (a, b) } else { (b, a) };
     if hi == 0.0 {
@@ -741,6 +749,15 @@ pub fn pow(x: f64, y: f64) -> f64 {
     // General path: exp(y·ln x) with the product carried in dd.
     let lx = ln(x);
     let (p_hi, p_lo) = crate::eft::two_prod(y, lx);
+    // When the product y·ln(x) itself overflows (|y·ln x| > f64::MAX, i.e. a
+    // huge but finite exponent), p_hi is ±∞ and two_prod's error term
+    // p_lo = fma(y, lx, -p_hi) becomes ∓∞ (finite product + ∓∞). Then
+    // exp(p_hi)·(1 + p_lo) collapses to +∞·−∞ = −∞ or 0·+∞ = NaN instead of the
+    // correct ±∞ / 0 limit. Read the limit straight off the infinite hi part:
+    // exp(+∞) = +∞, exp(−∞) = 0 give the right answer for every sign of ln x.
+    if !p_hi.is_finite() {
+        return exp(p_hi);
+    }
     // exp(hi + lo) = exp(hi)·exp(lo) ≈ exp(hi)·(1 + lo): lo ≤ ½ulp(hi),
     // so the first-order correction is exact to ~2⁻¹⁰⁶.
     exp(p_hi) * (1.0 + p_lo)

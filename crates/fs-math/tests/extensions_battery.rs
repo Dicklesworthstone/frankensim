@@ -315,6 +315,14 @@ fn pow_budget_and_specials() {
     assert_eq!(det::pow(1.0, f64::INFINITY), 1.0);
     assert_eq!(det::pow(1.0, f64::NAN), 1.0);
     assert!(det::pow(-1.0, f64::NAN).is_nan()); // x ≠ 1 → NaN propagates
+    // Regression: a huge FINITE exponent that overflows the PRODUCT y·ln(x)
+    // (|y| ≳ 2.5e305) must still give the correct ±∞ / 0 limit. The old code
+    // let two_prod's error term become ∓∞, collapsing exp(p_hi)·(1+p_lo) to −∞
+    // or 0·∞ = NaN. Both signs of ln(x), both signs of y:
+    assert_eq!(det::pow(10.0, 1e308), f64::INFINITY, "x>1, y→+∞ ⇒ +∞");
+    assert_eq!(det::pow(10.0, -1e308), 0.0, "x>1, y→−∞ ⇒ 0");
+    assert_eq!(det::pow(0.1, 1e308), 0.0, "0<x<1, y→+∞ ⇒ 0");
+    assert_eq!(det::pow(0.1, -1e308), f64::INFINITY, "0<x<1, y→−∞ ⇒ +∞");
     println!(
         "{{\"suite\":\"fs-math\",\"case\":\"pow\",\"verdict\":\"pass\",\"detail\":\"100k samples within honest budget + specials\"}}"
     );
@@ -378,6 +386,17 @@ fn hypot_budget_specials_and_symmetry() {
     assert_eq!(det::hypot(f64::NAN, f64::NEG_INFINITY), f64::INFINITY);
     assert!(det::hypot(f64::NAN, 1.0).is_nan());
     assert!(det::hypot(1.0, f64::NAN).is_nan());
+    // Regression: a NaN against a ZERO magnitude must still be NaN (the
+    // max-ordering picks hi = 0.0 for `NaN >= 0.0 == false`, and the old
+    // `hi == 0.0` short-circuit returned 0.0, swallowing the NaN and breaking
+    // symmetry). Both orderings must agree.
+    assert!(det::hypot(f64::NAN, 0.0).is_nan(), "hypot(NaN, 0) must be NaN");
+    assert!(det::hypot(0.0, f64::NAN).is_nan(), "hypot(0, NaN) must be NaN");
+    assert_eq!(
+        det::hypot(f64::NAN, 0.0).to_bits(),
+        det::hypot(0.0, f64::NAN).to_bits(),
+        "hypot must stay symmetric even with a zero operand"
+    );
     println!(
         "{{\"suite\":\"fs-math\",\"case\":\"hypot\",\"verdict\":\"pass\",\"detail\":\"200k samples, worst {worst} ULP (budget {})\"}}",
         det::HYPOT_ULP_BUDGET
