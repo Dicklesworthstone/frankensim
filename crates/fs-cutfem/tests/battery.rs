@@ -15,7 +15,8 @@
 //! - cut-006 G1: moving-interface sequence without re-meshing (the
 //!   topology-optimization rehearsal).
 //! - cut-007: aggregated-element fallback — conditioning restored and
-//!   accuracy held with ghost penalty OFF (policy logged).
+//!   accuracy held with ghost penalty OFF (policy logged), including a
+//!   graded interface band that has no ghost-specific uniformity contract.
 //! - cut-008: hanging-node patch test (linear reproduction on a graded
 //!   tree) and estimate-driven h-refinement efficiency.
 
@@ -685,6 +686,61 @@ fn cut_007_aggregation_fallback() {
     for row in log.iter().take(3) {
         println!("{{\"test\":\"cut-007\",\"policy\":{row}}}");
     }
+}
+
+#[test]
+fn cut_007b_ghost_free_aggregation_accepts_graded_interface_band() {
+    // Refine only the left half. Balance leaves a deliberately graded
+    // level-4/level-3 interface at x=0.5. The material sliver lies in the
+    // fine cell immediately to its left, while its active face-neighbor is
+    // coarser on the right: exactly the configuration ghost faces must
+    // refuse, but aggregation with ghost OFF must accept.
+    let mut grid = Quadtree::with_room(2, 4);
+    grid.refine_where(4, &|_lo: [f64; 2], hi: [f64; 2]| hi[0] <= 0.5);
+    let sdf = HalfPlane {
+        normal: [-1.0, 0.0],
+        offset: -0.499,
+    };
+    let params = FemParams {
+        ghost_gamma: 0.0,
+        agg: Some(AggPolicy::default()),
+        strong_outer: true,
+        solver_tol: 1e-13,
+        ..FemParams::default()
+    };
+    let space = Space::build(&grid, &sdf, params)
+        .expect("ghost-free aggregation must accept a graded interface band");
+    let exact = |x: f64, y: f64| 1.0 + 2.0 * x + 3.0 * y;
+    let solution = space
+        .solve(&|_, _| 0.0, &exact)
+        .expect("graded aggregation patch solves");
+    let nodal_errors: Vec<f64> = solution
+        .nodal
+        .iter()
+        .map(|(&node, &value)| {
+            let point = grid.node_pos(node);
+            (value - exact(point[0], point[1])).abs()
+        })
+        .collect();
+    let all_finite = nodal_errors.iter().all(|error| error.is_finite());
+    let max_nodal_error = nodal_errors.iter().copied().fold(0.0f64, f64::max);
+    let pass = space.stats().hanging > 0
+        && space.stats().aggregated > 0
+        && space.stats().ghost_faces == 0
+        && all_finite
+        && max_nodal_error < 1e-8;
+    verdict(
+        "cut-007b",
+        pass,
+        &format!(
+            "\"detail\":\"graded aggregation path omits ghost-only band check\",\
+             \"hanging\":{},\"aggregated\":{},\"ghost_faces\":{},\
+             \"max_nodal_error\":{max_nodal_error:.3e}",
+            space.stats().hanging,
+            space.stats().aggregated,
+            space.stats().ghost_faces
+        ),
+    );
 }
 
 // ------------------------------------------------------------------- cut-008

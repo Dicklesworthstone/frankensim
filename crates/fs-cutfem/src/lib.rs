@@ -23,6 +23,10 @@
 //! - [`fem`]: Q1 spaces on active cells, Nitsche weak embedded
 //!   Dirichlet conditions, GHOST-PENALTY stabilization (small-cut
 //!   conditioning), assembly to fs-sparse, fs-solver CG.
+//! - [`elastic`]: vector Q1 small-strain elasticity over the same cut
+//!   rules, with symmetric vector Nitsche terms, cut-independent
+//!   penalty scaling, componentwise ghost stabilization, and an
+//!   optional fs-adjoint VJP registration.
 //! - [`agg`]: aggregated-element fallback — small-cut cells lend their
 //!   ill-supported DOFs to a well-cut anchor by polynomial extension
 //!   (belt + suspenders with ghost penalty; policy documented).
@@ -38,6 +42,7 @@
 
 pub mod agg;
 pub mod cond;
+pub mod elastic;
 pub mod fem;
 pub mod grid;
 pub mod quad;
@@ -45,8 +50,14 @@ pub mod sdf;
 
 pub use agg::AggPolicy;
 pub use cond::{CondReport, condition_estimate};
+pub use elastic::MAX_PLANE_STRAIN_STIFFNESS_RATIO;
+pub use elastic::{CutElasticity, CutElasticityOperator, CutElasticitySolution};
+#[cfg(feature = "adjoint-vjp")]
+pub use elastic::{
+    ELASTICITY_APPLY_VJP_OP, elasticity_apply_vjp_key, register_elasticity_apply_vjp,
+};
 pub use fem::{BuildStats, CellClass, FemParams, Solution, Space};
-pub use grid::{CellKey, Quadtree};
+pub use grid::{CellKey, NodeKey, Quadtree};
 pub use quad::{CutRules, cut_cell_rules};
 pub use sdf::{Circle, CutSdf, HalfPlane};
 
@@ -64,8 +75,9 @@ pub enum CutFemError {
     /// the grid extent.
     EmptyDomain,
     /// A cut cell has an active face-neighbor at a DIFFERENT tree
-    /// level. Ghost-penalty faces are assembled between equal-level
-    /// cells only; the interface band must be uniformly refined.
+    /// level while ghost stabilization is enabled. Ghost-penalty faces
+    /// are assembled between equal-level cells only; the interface band
+    /// must be uniformly refined. Ghost-free paths do not raise this error.
     /// Repair: call [`Quadtree::refine_toward_interface`] with the
     /// tree's max level before building the space.
     CutBandNotUniform {
@@ -73,6 +85,24 @@ pub enum CutFemError {
         cell: CellKey,
         /// Its differently-leveled active neighbor.
         neighbor: CellKey,
+    },
+    /// The vector Q1 elasticity frontend currently requires one uniform
+    /// active level. Unlike the scalar space it does not yet eliminate
+    /// hanging-node constraints componentwise. Repair: use a uniform
+    /// background grid (or uniformly refine the active band) before
+    /// building the elasticity operator.
+    ElasticityGridNotUniform {
+        /// The first active cell whose level differs from the canonical
+        /// active level.
+        cell: CellKey,
+        /// The active level established by the first classified cell.
+        expected_level: u32,
+    },
+    /// A vector-elasticity parameter or callback returned a value that
+    /// cannot define a finite coercive discrete problem.
+    InvalidElasticityInput {
+        /// Actionable description of the invalid field/value.
+        what: String,
     },
     /// Aggregation found no well-supported anchor cell within the
     /// search radius of a small-cut node. Repair: refine the interface
@@ -115,6 +145,18 @@ impl core::fmt::Display for CutFemError {
                  different level; refine the interface band uniformly \
                  (Quadtree::refine_toward_interface) before building"
             ),
+            CutFemError::ElasticityGridNotUniform {
+                cell,
+                expected_level,
+            } => write!(
+                f,
+                "vector CutFEM cell {cell:?} is not on the required uniform active \
+                 level {expected_level}; uniformly refine the active domain before \
+                 building elasticity"
+            ),
+            CutFemError::InvalidElasticityInput { what } => {
+                write!(f, "invalid vector CutFEM elasticity input: {what}")
+            }
             CutFemError::AggregationNoAnchor { node } => write!(
                 f,
                 "aggregation found no well-cut anchor near node {node:?}; \

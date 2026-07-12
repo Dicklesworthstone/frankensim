@@ -13,8 +13,10 @@
 //! - Ghost penalty: γ_g Σ_F h ∫_F [∂ₙu][∂ₙv] over faces between two
 //!   active equal-level cells where at least one is cut — restoring
 //!   λ_min against arbitrarily small cuts. The equal-level requirement
-//!   is a build-time contract ([`crate::CutFemError::CutBandNotUniform`]);
-//!   [`Quadtree::refine_toward_interface`] establishes it.
+//!   is a build-time contract only when `ghost_gamma > 0`
+//!   ([`crate::CutFemError::CutBandNotUniform`]);
+//!   [`Quadtree::refine_toward_interface`] establishes it. Ghost-free
+//!   aggregation paths do not enumerate ghost faces and may remain graded.
 //! - Constraints (hanging, aggregation, strong outer Dirichlet) are
 //!   eliminated at scatter time through affine node expansions, so the
 //!   assembled system is SPD on the free DOFs and fs-solver CG applies
@@ -259,30 +261,35 @@ impl<'g> Space<'g> {
         }
         // Ghost faces: between equal-level active cells, at least one
         // cut. A differently-leveled active neighbor of a cut cell is
-        // a build refusal — the interface band must be uniform.
+        // a build refusal only when ghost stabilization is enabled.
+        // Aggregation-only and unstabilized paths assemble no ghost faces,
+        // so imposing the ghost-specific uniform-band contract there would
+        // reject a valid graded space.
         let mut ghost_faces = Vec::new();
-        let mut seen: BTreeSet<(CellKey, CellKey)> = BTreeSet::new();
-        for (&c, &cl) in &class {
-            if cl != CellClass::Cut {
-                continue;
-            }
-            for dir in 0..4u8 {
-                let Some(nb) = grid.covering_neighbor(c, dir) else {
-                    continue;
-                };
-                if !active.contains(&nb) {
+        if params.ghost_gamma > 0.0 {
+            let mut seen: BTreeSet<(CellKey, CellKey)> = BTreeSet::new();
+            for (&c, &cl) in &class {
+                if cl != CellClass::Cut {
                     continue;
                 }
-                if nb.0 != c.0 {
-                    return Err(CutFemError::CutBandNotUniform {
-                        cell: c,
-                        neighbor: nb,
-                    });
-                }
-                let key = if c < nb { (c, nb) } else { (nb, c) };
-                let axis = u8::from(dir >= 2);
-                if seen.insert(key) {
-                    ghost_faces.push((key.0, key.1, axis));
+                for dir in 0..4u8 {
+                    let Some(nb) = grid.covering_neighbor(c, dir) else {
+                        continue;
+                    };
+                    if !active.contains(&nb) {
+                        continue;
+                    }
+                    if nb.0 != c.0 {
+                        return Err(CutFemError::CutBandNotUniform {
+                            cell: c,
+                            neighbor: nb,
+                        });
+                    }
+                    let key = if c < nb { (c, nb) } else { (nb, c) };
+                    let axis = u8::from(dir >= 2);
+                    if seen.insert(key) {
+                        ghost_faces.push((key.0, key.1, axis));
+                    }
                 }
             }
         }
@@ -638,12 +645,12 @@ impl<'g> Space<'g> {
 }
 
 /// SPD diagonal (Jacobi) preconditioner.
-struct JacobiPrecond {
+pub(crate) struct JacobiPrecond {
     inv_diag: Vec<f64>,
 }
 
 impl JacobiPrecond {
-    fn new(a: &Csr) -> JacobiPrecond {
+    pub(crate) fn new(a: &Csr) -> JacobiPrecond {
         let n = a.nrows();
         let inv_diag = (0..n)
             .map(|i| {
@@ -712,7 +719,7 @@ fn expand_node(
 
 /// Q1 shape values and gradients on an axis-aligned cell, corner order
 /// (0,0), (1,0), (1,1), (0,1) — matching [`Quadtree::corner_nodes`].
-fn q1(lo: [f64; 2], hi: [f64; 2], p: [f64; 2]) -> ([f64; 4], [[f64; 2]; 4]) {
+pub(crate) fn q1(lo: [f64; 2], hi: [f64; 2], p: [f64; 2]) -> ([f64; 4], [[f64; 2]; 4]) {
     let hx = hi[0] - lo[0];
     let hy = hi[1] - lo[1];
     let xi = (p[0] - lo[0]) / hx;

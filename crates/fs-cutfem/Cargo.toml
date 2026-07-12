@@ -5,16 +5,29 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "CutFEM on SDFs: certified cut-cell classification, cut quadrature with error control, ghost-penalty stabilization, aggregation fallback, Nitsche embedded BCs on quadtree background grids."
+description = "Scalar diffusion and vector elasticity CutFEM on SDFs: certified cut-cell quadrature, Nitsche conditions, ghost stabilization, and aggregation on quadtree grids."
 
 [package.metadata.frankensim]
 layer = "L3"
 
+[features]
+# The ledger-shaped VJP registry is itself a frontier fs-adjoint surface.
+# Keep the core elasticity operator available without pulling in that layer;
+# callers that compose recorded differentiation DAGs opt in explicitly.
+adjoint-vjp = ["dep:fs-adjoint", "dep:fs-blake3"]
+
 [dependencies]
+fs-adjoint = { path = "../fs-adjoint", features = ["ledger-transpose"], optional = true }
+fs-blake3 = { path = "../fs-blake3", optional = true }
 fs-ivl = { path = "../fs-ivl" }
 fs-la = { path = "../fs-la" }
+fs-material = { path = "../fs-material" }
 fs-solver = { path = "../fs-solver" }
 fs-sparse = { path = "../fs-sparse" }
 
 [lints]
 workspace = true
+
+[[test]]
+name = "elasticity_adjoint"
+required-features = ["adjoint-vjp"]

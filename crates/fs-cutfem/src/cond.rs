@@ -36,6 +36,10 @@ pub fn condition_estimate(a: &Csr) -> CondReport {
     );
     let dense = a.to_dense();
     let (vals, _) = jacobi_eigh(&dense, n);
+    assert!(
+        vals.iter().all(|value| value.is_finite()),
+        "dense conditioning probe produced a non-finite eigenvalue"
+    );
     let lambda_min = vals.iter().copied().fold(f64::INFINITY, f64::min);
     let lambda_max = vals.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     let cond = if lambda_min > 0.0 {
