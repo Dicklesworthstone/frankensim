@@ -94,6 +94,16 @@ pub enum TileError {
         /// Maximum cells per axis at this edge.
         max_cells_per_axis: u64,
     },
+    /// The TOTAL tile count (product of the per-axis tile dimensions) exceeds
+    /// the `u32` tile-index space used by `AffinityMap`/`zorder_ranks`/`slot`.
+    TileCountOverflow {
+        /// The offending `[x, y, z]` cell dimensions.
+        cells: [u32; 3],
+        /// The tile edge that was requested.
+        edge: u32,
+        /// The total tile count that overflowed the `u32` index space.
+        tile_count: u64,
+    },
 }
 
 impl fmt::Display for TileError {
@@ -112,6 +122,16 @@ impl fmt::Display for TileError {
                 f,
                 "domain {cells:?} at tile edge {edge} exceeds the 21-bit Morton axis budget \
                  ({max_cells_per_axis} cells/axis); raise the tile edge or split the domain"
+            ),
+            TileError::TileCountOverflow {
+                cells,
+                edge,
+                tile_count,
+            } => write!(
+                f,
+                "domain {cells:?} at tile edge {edge} has {tile_count} tiles, which exceeds the \
+                 u32 tile-index space (max {}); raise the tile edge or split the domain",
+                u32::MAX
             ),
         }
     }
@@ -151,6 +171,20 @@ impl TileGrid {
                 cells,
                 edge: e,
                 max_cells_per_axis: u64::from(MORTON_COORD_LIMIT - 1) * u64::from(e),
+            });
+        }
+        // The per-axis Morton budget (< 2^21 each) still allows a PRODUCT up to
+        // ~2^63, but `AffinityMap`/`zorder_ranks`/`slot` index tiles with u32
+        // (`grid.tile_count() as u32`), silently TRUNCATING a larger count into
+        // a wrong partition. Fail closed at the u32 index-space limit. (Each
+        // factor < 2^21, so the u64 product cannot itself overflow.)
+        let total_tiles =
+            u64::from(tile_dims[0]) * u64::from(tile_dims[1]) * u64::from(tile_dims[2]);
+        if total_tiles > u64::from(u32::MAX) {
+            return Err(TileError::TileCountOverflow {
+                cells,
+                edge: e,
+                tile_count: total_tiles,
             });
         }
         let stable = format!(
@@ -298,6 +332,13 @@ mod tests {
         let e = TileGrid::new([u32::MAX, 8, 8], TileEdge::E4).unwrap_err();
         assert!(matches!(e, TileError::DomainTooLarge { .. }), "{e}");
         assert!(e.to_string().contains("21-bit"), "{e}");
+        // Each axis is within the 21-bit Morton budget (1626 < 2^21), but the
+        // PRODUCT (~4.30e9) exceeds the u32 tile-index space AffinityMap/slot
+        // use — reject rather than silently truncating `tile_count() as u32`.
+        let e = TileGrid::new([13008, 13008, 13008], TileEdge::E8).unwrap_err();
+        assert!(matches!(e, TileError::TileCountOverflow { .. }), "{e}");
+        assert!(e.to_string().contains("u32 tile-index space"), "{e}");
+        assert_eq!(u64::from(u32::MAX), 4_294_967_295);
     }
 
     #[test]

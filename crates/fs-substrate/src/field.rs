@@ -24,7 +24,7 @@ pub enum Boundary<T> {
 /// Per-tile metadata: first-touch ownership tag, dirty flag for incremental
 /// algorithms, and an occupancy hint (the hook FrankenVDB-style sparse
 /// charts key off later — full per-cell masks are that bead's business).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TileMeta {
     /// Shard (CCD) that first-touch-initialized this tile; `u16::MAX` until
     /// an owner is recorded.
@@ -33,6 +33,20 @@ pub struct TileMeta {
     pub dirty: bool,
     /// Occupancy hint for sparse-use consumers.
     pub occupied: bool,
+}
+
+impl Default for TileMeta {
+    fn default() -> TileMeta {
+        // owner_shard MUST default to the `u16::MAX` "unowned" sentinel, not the
+        // derived `0` — shard 0 is a valid owner, so a derived Default would
+        // silently mark every fresh TileMeta as owned by shard 0, contradicting
+        // the field's documented invariant.
+        TileMeta {
+            owner_shard: u16::MAX,
+            dirty: false,
+            occupied: false,
+        }
+    }
 }
 
 /// 128-byte-aligned owned buffer (safe over-allocate + `align_offset`; no
