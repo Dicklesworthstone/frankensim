@@ -326,7 +326,15 @@ fn infer_dims(
         }
         NodeKind::List(items) => {
             let head = node.head();
-            let args = &items[1..];
+            // A bare `()` has no head and no operands. `check_dimensional`
+            // recurses `infer_dims` into every body clause and let-expression,
+            // so an empty list is reachable from parseable input such as
+            // `(study "x" ())`; the old `&items[1..]` was a usize range panic
+            // (start 1 > len 0). Fail closed: treat it as dimensionless-unknown,
+            // exactly like the other operand-free atoms above (Str/Keyword/Count
+            // → None). `items.get(1..)` is `None` precisely when `items` is
+            // empty, so `?` returns None (unknown dims) instead of panicking.
+            let args = items.get(1..)?;
             if let Some(h) = head
                 && (ARITH_SAME_DIMS.contains(&h) || COMPARE.contains(&h))
             {

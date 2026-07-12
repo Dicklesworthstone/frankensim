@@ -848,3 +848,53 @@ fn ad_007_fuzz_mutations_never_crash_admission() {
         "2000 mutants + all truncation prefixes: admission never panicked",
     );
 }
+
+#[test]
+fn ad_007b_empty_list_operand_does_not_panic_dimensional_inference() {
+    // Regression: `check_dimensional` recurses `infer_dims` into every body
+    // clause and let-expression. A bare `()` has no head symbol and no
+    // operands, so the old `&items[1..]` was a usize range panic (start 1 >
+    // len 0) — a fail-OPEN crash on parseable input, exactly the kind the
+    // Gauntlet forbids. Byte-mutation fuzz (ad-007) never happened to land a
+    // surviving `()` in operand position; this pins the minimal reproducers.
+    let cx = AdmissionContext {
+        router: None,
+        chart_requirements: Vec::new(),
+        cost_models: BTreeMap::new(),
+        capability: None,
+        regime: None,
+        regime_policy: RegimePolicy::Warn,
+    };
+    // (a) a bare empty list as a body clause.
+    let bare = r#"(study "empty-body-clause" ())"#;
+    // (b) an empty list nested as an ARITHMETIC operand inside a let — this
+    // reaches infer_dims's List arm via the same-dims recursion, the exact
+    // path that panicked.
+    let nested = r#"(study "empty-list-operand"
+  (seed 0x5EED07B0) (versions (constellation :lock "2026-07"))
+  (capability :cores 1 :mem 1GiB :wall 1h :ops (flux.*))
+  (budget (wall 10s) (mem 1GiB))
+  (let bad (+ 1 ()))
+  (flux.solve))"#;
+    // Reaching each `admit` return at all proves the range-slice panic is gone;
+    // the concrete assertions below pin the behavior the fix guarantees.
+    // (a) The bare `()` study fails CLOSED (missing pillars) — never a crash.
+    let bare_report = admit(&sexpr::parse(bare).expect("bare parses"), &cx);
+    assert!(
+        !bare_report.admitted,
+        "a study whose only body clause is () must not admit:\n{}",
+        bare_report.diagnosis()
+    );
+    // (b) The nested `(+ 1 ())` study runs dimensional inference to completion:
+    // the empty list is treated as dimensionless-unknown (no false conflict, no
+    // panic), so admission proceeds and names the study it parsed.
+    let nested_report = admit(&sexpr::parse(nested).expect("nested parses"), &cx);
+    assert_eq!(
+        nested_report.study, "empty-list-operand",
+        "dimensional inference must complete over an () operand instead of panicking"
+    );
+    verdict(
+        "ad-007b",
+        "bare () body clause fails closed; () arithmetic operand infers without panic",
+    );
+}
