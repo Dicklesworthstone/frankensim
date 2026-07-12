@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "CampaignSchedule: schedule a multi-fidelity design campaign with a provably-optimal critical path (max-plus tropical algebra) while deciding WHICH studies are worth running via value-of-information, and knowing when to STOP because the decision is already robust. Composes fs-tropical (critical path) x fs-voi (EVPI + certify-or-stop) x fs-evidence (Verified makespan vs Estimated information value). Groundbreaking: two orthogonal certified analyses — WHEN it finishes and WHETHER to keep going — from one campaign spec."
+description = "CampaignSchedule: outward-bounded max-plus makespan analysis plus an explicitly Estimated value-of-information recommendation with distinct act, robust-stop, and deficient-menu outcomes."
 
 [package.metadata.frankensim]
 layer = "L6"

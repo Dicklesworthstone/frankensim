@@ -18,10 +18,14 @@ const HARD_FACTOR_NUMERATOR: u32 = 6;
 const HARD_FACTOR_DENOMINATOR: u32 = 5;
 #[allow(clippy::cast_lossless)] // small policy integers are exactly representable as f64
 const HARD_FACTOR: f64 = HARD_FACTOR_NUMERATOR as f64 / HARD_FACTOR_DENOMINATOR as f64;
-const IDEMPOTENCY_KEY_DOMAIN: &str = "org.frankensim.fs-session.idempotency-key.v2";
+const IDEMPOTENCY_KEY_DOMAIN: &str = "org.frankensim.fs-session.idempotency-key.v3";
+const IDEMPOTENCY_AGENT_DOMAIN: &str = "org.frankensim.fs-session.idempotency-agent.v1";
+const IDEMPOTENCY_PROGRAM_DOMAIN: &str = "org.frankensim.fs-session.idempotency-program.v1";
 const SUBMISSION_RECEIPT_DOMAIN: &str = "org.frankensim.fs-session.submission-receipt.v2";
 const RETAINED_EVIDENCE_DOMAIN: &str = "org.frankensim.fs-session.retained-evidence.v1";
 const MAX_IDEMPOTENCY_KEY_BYTES: usize = 4096;
+/// Maximum bytes hashed from either canonical-idempotency-key input.
+pub const MAX_IDEMPOTENCY_INPUT_BYTES: usize = 1024 * 1024;
 // Fixed-width conservative framing for t, three byte lengths, and the two
 // optional-field discriminants in one persisted event row.
 const FLUSH_ROW_FRAMING_BYTES: usize =
@@ -37,12 +41,24 @@ pub const MAX_IDEMPOTENCY_KEYS_PER_SESSION: usize = 4096;
 pub const MAX_DEGRADATION_EVENTS_PER_SCOPE: usize = 65_536;
 /// Maximum UTF-8 bytes retained from caller-controlled diagnostic evidence.
 pub const MAX_RETAINED_EVIDENCE_BYTES: usize = 16 * 1024;
+/// Maximum caller-supplied checkpoint-claim bytes hashed by acknowledgement.
+pub const MAX_CHECKPOINT_CLAIM_BYTES: usize = 1024 * 1024;
+/// Maximum caller-controlled payload bytes retained for one ledger scope.
+pub const MAX_RETAINED_BYTES_PER_SCOPE: usize = 64 * 1024 * 1024;
+/// Maximum caller-controlled payload bytes retained by one governor.
+pub const MAX_RETAINED_BYTES_PER_GOVERNOR: usize = 256 * 1024 * 1024;
 /// Maximum event rows emitted by one bounded flush call.
 pub const MAX_FLUSH_ROWS: usize = 1024;
 /// Maximum encoded event bytes emitted by one bounded flush call.
 pub const MAX_FLUSH_ENCODED_BYTES: usize = 4 * 1024 * 1024;
 /// Maximum degradation events returned by one page request.
 pub const MAX_EVENT_PAGE_ROWS: usize = 1024;
+
+const IDEMPOTENCY_KEY_RETAINED_COPIES: usize = 3;
+const MAX_IDEMPOTENCY_TERMINAL_RETAINED_BYTES: usize = MAX_RETAINED_EVIDENCE_BYTES;
+const MAX_PAUSE_COMPLETION_METADATA_BYTES: usize = 512;
+const MAX_PAUSE_COMPLETION_RETAINED_BYTES: usize =
+    MAX_RETAINED_EVIDENCE_BYTES + MAX_PAUSE_COMPLETION_METADATA_BYTES;
 
 static NEXT_GOVERNOR_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -195,13 +211,47 @@ pub const LADDER: [DegradationStep; 3] = [
 /// acknowledged can never read as complete.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StepPhase {
-    /// The step's action was applied synchronously (spill/coarsen).
-    Applied,
-    /// Cancellation was requested on the session's OWN gate; the solver
-    /// has not yet acknowledged with a checkpoint receipt.
+    /// The governor declared an orchestration action that its owning subsystem
+    /// must still perform and attest (spill/coarsen).
+    Declared,
+    /// Cancellation was requested on the session's OWN gate; the orchestrator
+    /// has not yet acknowledged with a checkpoint claim.
     Requested,
-    /// The solver acknowledged: checkpoint receipt recorded.
+    /// The owning orchestrator acknowledged: bounded checkpoint claim recorded.
     Complete,
+}
+
+/// Opaque in-process authority for acknowledging one exact pause request.
+///
+/// Private fields bind the governor, session, gate generation, and request
+/// ordinal so stale or cross-governor acknowledgements cannot complete a
+/// different pause generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PauseRequestId {
+    governor_id: u64,
+    session: SessionId,
+    gate_generation: u64,
+    requested_ordinal: i64,
+}
+
+impl PauseRequestId {
+    /// Session whose pause this request controls.
+    #[must_use]
+    pub const fn session(self) -> SessionId {
+        self.session
+    }
+
+    /// Cancellation-gate generation requested to drain.
+    #[must_use]
+    pub const fn gate_generation(self) -> u64 {
+        self.gate_generation
+    }
+
+    /// Deterministic request-event ordinal.
+    #[must_use]
+    pub const fn requested_ordinal(self) -> i64 {
+        self.requested_ordinal
+    }
 }
 
 /// A ledgered degradation event.
@@ -223,6 +273,48 @@ pub struct DegradationEvent {
     pub requested_ordinal: Option<i64>,
     /// Bounded checkpoint evidence carried by completion events.
     pub checkpoint: Option<RetainedEvidence>,
+    /// Cancellation-gate generation for pause request/completion events.
+    pub gate_generation: Option<u64>,
+    /// Opaque acknowledgement authority for pause request/completion events.
+    pub pause_request_id: Option<PauseRequestId>,
+}
+
+/// Successful pause acknowledgement plus the fresh gate that resumed work
+/// must adopt and pass to [`Governor::activate_resume`]. The prior generation
+/// remains permanently requested so old workers still drain; it is never reset
+/// in place.
+#[derive(Debug, Clone)]
+pub struct PauseAcknowledgement {
+    request_id: PauseRequestId,
+    event: DegradationEvent,
+    resume_gate: Arc<CancelGate>,
+    resume_generation: u64,
+}
+
+impl PauseAcknowledgement {
+    /// Exact request consumed by this acknowledgement.
+    #[must_use]
+    pub const fn request_id(&self) -> PauseRequestId {
+        self.request_id
+    }
+
+    /// Ledgerable completion event retained by the governor.
+    #[must_use]
+    pub const fn event(&self) -> &DegradationEvent {
+        &self.event
+    }
+
+    /// Fresh unrequested gate for the next resumed generation.
+    #[must_use]
+    pub fn resume_gate(&self) -> Arc<CancelGate> {
+        Arc::clone(&self.resume_gate)
+    }
+
+    /// Generation carried by the resume gate.
+    #[must_use]
+    pub const fn resume_generation(&self) -> u64 {
+        self.resume_generation
+    }
 }
 
 /// Opaque content identity for one terminal idempotent submission.
@@ -337,7 +429,9 @@ fn same_meter_snapshot(left: &SessionMeters, right: &SessionMeters) -> bool {
 
 #[derive(Debug)]
 enum IdemState {
-    Pending,
+    Pending {
+        reserved_terminal_bytes: usize,
+    },
     Done {
         ordinal: u64,
         receipt: SubmissionReceipt,
@@ -542,6 +636,62 @@ fn enforcement_json(enforcement: &Enforcement) -> String {
     }
 }
 
+fn enforcement_retained_bytes(enforcement: &Enforcement) -> usize {
+    match enforcement {
+        Enforcement::Paused { resume_hint, .. } => resume_hint.len(),
+        Enforcement::Ok | Enforcement::Throttled { .. } => 0,
+    }
+}
+
+fn degradation_step_name(step: DegradationStep) -> &'static str {
+    match step {
+        DegradationStep::SpillColdArenas => "spill-cold-arenas",
+        DegradationStep::CoarsenAdaptively => "coarsen-adaptively",
+        DegradationStep::PauseSerializeResume => "pause-serialize-resume",
+    }
+}
+
+fn step_phase_name(phase: StepPhase) -> &'static str {
+    match phase {
+        StepPhase::Declared => "declared",
+        StepPhase::Requested => "requested",
+        StepPhase::Complete => "complete",
+    }
+}
+
+fn degradation_attribution(step: DegradationStep) -> &'static str {
+    match step {
+        DegradationStep::SpillColdArenas => {
+            "declared spill of coldest arenas (least-recently-touched first)"
+        }
+        DegradationStep::CoarsenAdaptively => {
+            "declared adaptive coarsening outside protected bands"
+        }
+        DegradationStep::PauseSerializeResume => {
+            "requested pause on the session-owned gate: owning orchestrator must drain at a tile \
+             boundary and checkpoint before acknowledge_pause; completion currently records an \
+             operator-asserted checkpoint claim"
+        }
+    }
+}
+
+fn degradation_event_retained_bytes(event: &DegradationEvent) -> Result<usize, SessionError> {
+    event
+        .attribution
+        .len()
+        .checked_add(
+            event
+                .checkpoint
+                .as_ref()
+                .map_or(0, |checkpoint| checkpoint.preview.len()),
+        )
+        .ok_or(SessionError::LimitExceeded {
+            resource: "retained_bytes_per_scope",
+            limit: MAX_RETAINED_BYTES_PER_SCOPE,
+            observed_at_least: usize::MAX,
+        })
+}
+
 struct PreparedFlush {
     reservation_id: u64,
     generation: i64,
@@ -594,6 +744,30 @@ struct ScopeState {
     in_flight: Option<u64>,
     revision: u64,
     next_flush_lane: u8,
+    reserved_pause_completions: usize,
+    retained_bytes: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PendingPause {
+    request_id: PauseRequestId,
+    reserved_retained_bytes: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CompletedPause {
+    request_id: PauseRequestId,
+    checkpoint_byte_len: usize,
+    checkpoint_digest: fs_blake3::ContentHash,
+    completion_event_index: usize,
+    completion_ordinal: i64,
+    resume_generation: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GatePhase {
+    Running,
+    ReadyToResume,
 }
 
 #[derive(Default)]
@@ -603,16 +777,86 @@ struct Inner {
     /// only route to a pause request, so a foreign gate is
     /// unrepresentable at the pressure API.
     gates: BTreeMap<u64, Arc<CancelGate>>,
+    /// Current cancellation-gate generation for every gated session.
+    gate_generations: BTreeMap<u64, u64>,
+    /// Whether the current gate is running or awaiting explicit activation.
+    gate_phases: BTreeMap<u64, GatePhase>,
     /// Pause requests awaiting a checkpoint acknowledgement, keyed by
     /// session → ordinal of the Requested event.
-    pending_pause: BTreeMap<u64, i64>,
+    pending_pause: BTreeMap<u64, PendingPause>,
+    /// Last completed request per session for idempotent response replay.
+    completed_pause: BTreeMap<u64, CompletedPause>,
     meters: BTreeMap<u64, SessionMeters>,
     idempotency: BTreeMap<(u64, String), IdemState>,
     idempotency_keys: BTreeMap<u64, BTreeSet<String>>,
     scopes: BTreeMap<String, ScopeState>,
     next_submission_ordinal: u64,
     next_ordinal: i64,
+    reserved_pause_ordinals: usize,
     next_flush_reservation: u64,
+    retained_bytes: usize,
+}
+
+fn checked_retained_add(current: usize, added: usize) -> usize {
+    current.saturating_add(added)
+}
+
+fn ensure_retained_capacity(
+    inner: &Inner,
+    ledger_scope: &str,
+    added: usize,
+) -> Result<(), SessionError> {
+    let scope_current = inner
+        .scopes
+        .get(ledger_scope)
+        .map_or(0, |scope| scope.retained_bytes);
+    let scope_next = checked_retained_add(scope_current, added);
+    if scope_next > MAX_RETAINED_BYTES_PER_SCOPE {
+        return Err(SessionError::LimitExceeded {
+            resource: "retained_bytes_per_scope",
+            limit: MAX_RETAINED_BYTES_PER_SCOPE,
+            observed_at_least: scope_next,
+        });
+    }
+    let governor_next = checked_retained_add(inner.retained_bytes, added);
+    if governor_next > MAX_RETAINED_BYTES_PER_GOVERNOR {
+        return Err(SessionError::LimitExceeded {
+            resource: "retained_bytes_per_governor",
+            limit: MAX_RETAINED_BYTES_PER_GOVERNOR,
+            observed_at_least: governor_next,
+        });
+    }
+    Ok(())
+}
+
+fn commit_retained_bytes(inner: &mut Inner, ledger_scope: &str, added: usize) {
+    inner.retained_bytes = inner
+        .retained_bytes
+        .checked_add(added)
+        .expect("retained-capacity preflight prevents governor overflow");
+    let scope = inner
+        .scopes
+        .get_mut(ledger_scope)
+        .expect("registered session scope");
+    scope.retained_bytes = scope
+        .retained_bytes
+        .checked_add(added)
+        .expect("retained-capacity preflight prevents scope overflow");
+}
+
+fn release_retained_bytes(inner: &mut Inner, ledger_scope: &str, released: usize) {
+    inner.retained_bytes = inner
+        .retained_bytes
+        .checked_sub(released)
+        .expect("released bytes were previously reserved");
+    let scope = inner
+        .scopes
+        .get_mut(ledger_scope)
+        .expect("registered session scope");
+    scope.retained_bytes = scope
+        .retained_bytes
+        .checked_sub(released)
+        .expect("released scope bytes were previously reserved");
 }
 
 fn bump_scope_revision(inner: &mut Inner, ledger_scope: &str) {
@@ -650,12 +894,29 @@ impl Governor {
 
     fn register_session(
         &self,
-        token: CapabilityToken,
+        mut token: CapabilityToken,
         gate: Option<Arc<CancelGate>>,
     ) -> Result<ScopeFlushPermit, SessionError> {
+        if gate.as_ref().is_some_and(|gate| gate.is_requested()) {
+            return Err(SessionError::PreRequestedGate {
+                id: token.session.0,
+            });
+        }
+        token.validate_operator_grants()?;
         CapabilityToken::validate_ledger_scope(&token.ledger_scope)?;
         validate_resource("core-seconds grant", token.core_s)?;
         validate_resource("wall-seconds grant", token.wall_s)?;
+        // Public tokens are caller-constructed, so valid short strings and
+        // vectors may still carry attacker-chosen spare capacities. Rebuild
+        // them from validated slices before retention; allocator rounding is
+        // then bounded by the admitted content instead of caller history.
+        token.ops = token
+            .ops
+            .iter()
+            .map(|grant| grant.as_str().to_owned())
+            .collect();
+        let caller_scope = std::mem::take(&mut token.ledger_scope);
+        token.ledger_scope = String::from(caller_scope.as_str());
         let session = token.session.0;
         let ledger_scope = token.ledger_scope.clone();
         let mut g = self.inner.lock().expect("governor lock");
@@ -680,6 +941,23 @@ impl Governor {
                 observed_at_least: scope_session_count.saturating_add(1),
             });
         }
+        let operator_bytes: usize = token.ops.iter().map(String::len).sum();
+        let retained_bytes = ledger_scope
+            .len()
+            .checked_add(operator_bytes)
+            .and_then(|bytes| {
+                bytes.checked_add(if g.scopes.contains_key(&ledger_scope) {
+                    0
+                } else {
+                    ledger_scope.len()
+                })
+            })
+            .ok_or(SessionError::LimitExceeded {
+                resource: "retained_bytes_per_governor",
+                limit: MAX_RETAINED_BYTES_PER_GOVERNOR,
+                observed_at_least: usize::MAX,
+            })?;
+        ensure_retained_capacity(&g, &ledger_scope, retained_bytes)?;
         let next_revision = g
             .scopes
             .get(&ledger_scope)
@@ -689,11 +967,14 @@ impl Governor {
         g.tokens.insert(session, token);
         if let Some(gate) = gate {
             g.gates.insert(session, gate);
+            g.gate_generations.insert(session, 0);
+            g.gate_phases.insert(session, GatePhase::Running);
         }
         let scope = g.scopes.entry(ledger_scope.clone()).or_default();
         scope.sessions.insert(session);
         scope.dirty_meters.insert(session);
         scope.revision = next_revision;
+        commit_retained_bytes(&mut g, &ledger_scope, retained_bytes);
         Ok(ScopeFlushPermit {
             governor_id: self.id,
             ledger_scope,
@@ -874,7 +1155,7 @@ impl Governor {
         idem_key: &str,
         work: impl FnOnce() -> Charge,
     ) -> Result<SubmitOutcome, SessionError> {
-        if idem_key.trim().is_empty() || idem_key.len() > MAX_IDEMPOTENCY_KEY_BYTES {
+        if idem_key.len() > MAX_IDEMPOTENCY_KEY_BYTES || idem_key.trim().is_empty() {
             return Err(SessionError::Submission {
                 what: format!(
                     "idempotency key must be non-blank and at most {MAX_IDEMPOTENCY_KEY_BYTES} bytes"
@@ -908,7 +1189,7 @@ impl Governor {
                         evidence: evidence.clone(),
                     });
                 }
-                Some(IdemState::Pending) => return Ok(SubmitOutcome::InFlight),
+                Some(IdemState::Pending { .. }) => return Ok(SubmitOutcome::InFlight),
                 None => {}
             }
             let key_count = g.idempotency_keys.get(&session.0).map_or(0, BTreeSet::len);
@@ -919,6 +1200,20 @@ impl Governor {
                     observed_at_least: key_count.saturating_add(1),
                 });
             }
+            // Reserve all three retained key copies (terminal map, per-session
+            // index, dirty-flush index) plus the worst-case terminal evidence
+            // before caller work begins. A panic or charge refusal can then
+            // always become terminal without an unrepresentable rollback.
+            let retained_bytes = idem_key
+                .len()
+                .checked_mul(IDEMPOTENCY_KEY_RETAINED_COPIES)
+                .and_then(|bytes| bytes.checked_add(MAX_IDEMPOTENCY_TERMINAL_RETAINED_BYTES))
+                .ok_or(SessionError::LimitExceeded {
+                    resource: "retained_bytes_per_scope",
+                    limit: MAX_RETAINED_BYTES_PER_SCOPE,
+                    observed_at_least: usize::MAX,
+                })?;
+            ensure_retained_capacity(&g, &ledger_scope, retained_bytes)?;
             let ordinal =
                 g.next_submission_ordinal
                     .checked_add(1)
@@ -935,12 +1230,17 @@ impl Governor {
                 });
             }
             g.next_submission_ordinal = ordinal;
-            g.idempotency
-                .insert(idempotency_scope.clone(), IdemState::Pending);
+            g.idempotency.insert(
+                idempotency_scope.clone(),
+                IdemState::Pending {
+                    reserved_terminal_bytes: MAX_IDEMPOTENCY_TERMINAL_RETAINED_BYTES,
+                },
+            );
             g.idempotency_keys
                 .get_mut(&session.0)
                 .expect("registered session key index")
                 .insert(idem_key.to_string());
+            commit_retained_bytes(&mut g, &ledger_scope, retained_bytes);
             (ordinal, ledger_scope)
         };
         // Execute OUTSIDE the lock (work may be long). Catching here is
@@ -956,9 +1256,34 @@ impl Governor {
             Err(payload) => SubmissionCompletion::Failed(panic_evidence(payload.as_ref())),
         };
         let receipt = submission_receipt(session, &ledger_scope, idem_key, &completion);
+        let terminal_retained_bytes = match &completion {
+            SubmissionCompletion::Done(_, enforcement) => enforcement_retained_bytes(enforcement),
+            SubmissionCompletion::Failed(evidence) => evidence.preview.len(),
+        };
         let outcome;
         {
             let mut g = self.inner.lock().expect("governor lock");
+            let reserved_terminal_bytes = match g.idempotency.get(&idempotency_scope) {
+                Some(IdemState::Pending {
+                    reserved_terminal_bytes,
+                }) => *reserved_terminal_bytes,
+                Some(IdemState::Done { .. } | IdemState::Failed { .. }) | None => {
+                    return Err(SessionError::Persistence {
+                        what: format!(
+                            "session {} idempotency key lost its owned pending generation before terminal publication",
+                            session.0
+                        ),
+                    });
+                }
+            };
+            if terminal_retained_bytes > reserved_terminal_bytes {
+                return Err(SessionError::Persistence {
+                    what: format!(
+                        "session {} terminal state requires {terminal_retained_bytes} retained bytes but reserved only {reserved_terminal_bytes}",
+                        session.0
+                    ),
+                });
+            }
             let dirty_idempotency = idempotency_scope.clone();
             match completion {
                 SubmissionCompletion::Done(charge, enforcement) => {
@@ -995,32 +1320,68 @@ impl Governor {
                 .expect("registered session scope")
                 .dirty_idempotency
                 .insert(dirty_idempotency);
+            release_retained_bytes(
+                &mut g,
+                &ledger_scope,
+                reserved_terminal_bytes - terminal_retained_bytes,
+            );
         }
         Ok(outcome)
     }
 
-    /// The canonical idempotency key: length-framed agent key and program text
-    /// under a domain-separated BLAKE3 identity.
-    #[must_use]
-    pub fn idempotency_key(agent_key: &str, program_text: &str) -> String {
-        let mut payload = Vec::new();
-        push_framed(&mut payload, agent_key.as_bytes());
-        push_framed(&mut payload, program_text.as_bytes());
-        format!(
-            "fs-session-idem-v2:{}",
+    /// The canonical idempotency key: separately domain-hashed agent/program
+    /// inputs plus their exact lengths under a final domain. Memory stays
+    /// fixed-size after the bounded input hashes.
+    ///
+    /// # Errors
+    /// [`SessionError::LimitExceeded`] before hashing when either input exceeds
+    /// [`MAX_IDEMPOTENCY_INPUT_BYTES`].
+    pub fn idempotency_key(agent_key: &str, program_text: &str) -> Result<String, SessionError> {
+        for (resource, value) in [
+            ("idempotency_agent_key_bytes", agent_key),
+            ("idempotency_program_text_bytes", program_text),
+        ] {
+            if value.len() > MAX_IDEMPOTENCY_INPUT_BYTES {
+                return Err(SessionError::LimitExceeded {
+                    resource,
+                    limit: MAX_IDEMPOTENCY_INPUT_BYTES,
+                    observed_at_least: value.len(),
+                });
+            }
+        }
+        let agent_digest = fs_blake3::hash_domain(IDEMPOTENCY_AGENT_DOMAIN, agent_key.as_bytes());
+        let program_digest =
+            fs_blake3::hash_domain(IDEMPOTENCY_PROGRAM_DOMAIN, program_text.as_bytes());
+        let mut payload = Vec::with_capacity(80);
+        payload.extend_from_slice(
+            &u64::try_from(agent_key.len())
+                .expect("bounded idempotency agent key length fits u64")
+                .to_le_bytes(),
+        );
+        payload.extend_from_slice(agent_digest.as_bytes());
+        payload.extend_from_slice(
+            &u64::try_from(program_text.len())
+                .expect("bounded idempotency program length fits u64")
+                .to_le_bytes(),
+        );
+        payload.extend_from_slice(program_digest.as_bytes());
+        Ok(format!(
+            "fs-session-idem-v3:{}",
             fs_blake3::hash_domain(IDEMPOTENCY_KEY_DOMAIN, &payload)
-        )
+        ))
     }
 
     /// Apply memory pressure at `level` (1..=3 ONLY): ladder steps
-    /// `1..=level` fire IN THE DECLARED ORDER, each recorded with
-    /// attribution. The `PauseSerializeResume` step requests
+    /// `1..=level` are emitted IN THE DECLARED ORDER with attribution. Spill
+    /// and coarsen remain `Declared` orchestration work; this governor does not
+    /// falsely mark their subsystem effects complete. The
+    /// `PauseSerializeResume` step requests
     /// cancellation on the session's OWN gate, resolved by `SessionId`
     /// from the binding made at [`Governor::open_session_gated`] — no
     /// gate crosses this API, so pausing a different session's work is
     /// unrepresentable (bead gp3.13). The request event is phase
     /// `Requested`; it becomes `Complete` only through
-    /// [`Governor::acknowledge_pause`] with a checkpoint receipt.
+    /// [`Governor::acknowledge_pause`] with a checkpoint claim.
     ///
     /// # Errors
     /// - [`SessionError::InvalidPressureLevel`] for levels 0 and > 3.
@@ -1028,8 +1389,10 @@ impl Governor {
     /// - [`SessionError::UngatedSession`] when level 3 targets a
     ///   session opened without a cancellation gate. Validation is
     ///   ATOMIC: no step fires and nothing is ledgered.
-    /// - [`SessionError::PauseAlreadyPending`] when level 3 would overwrite an
-    ///   unacknowledged request.
+    /// - [`SessionError::PauseAlreadyPending`] while any earlier pause request
+    ///   for the session remains unacknowledged.
+    /// - [`SessionError::ResumeNotActivated`] while a fresh gate awaits explicit
+    ///   resumed-worker activation.
     /// - [`SessionError::LimitExceeded`] for event or ordinal exhaustion.
     #[allow(clippy::too_many_lines)] // The ordered preflight and ladder commit are one state machine.
     pub fn apply_memory_pressure(
@@ -1046,21 +1409,33 @@ impl Governor {
             .get(&session.0)
             .map(|token| token.ledger_scope.clone())
             .ok_or(SessionError::UnknownSession { id: session.0 })?;
-        if usize::from(level) >= LADDER.len()
-            && let Some(requested_ordinal) = g.pending_pause.get(&session.0)
-        {
+        if let Some(pending) = g.pending_pause.get(&session.0) {
             return Err(SessionError::PauseAlreadyPending {
                 id: session.0,
-                requested_ordinal: *requested_ordinal,
+                requested_ordinal: pending.request_id.requested_ordinal,
             });
         }
-        let scope_event_count = g
+        if g.gate_phases.get(&session.0) == Some(&GatePhase::ReadyToResume) {
+            let generation = *g
+                .gate_generations
+                .get(&session.0)
+                .expect("ready gate has a generation");
+            return Err(SessionError::ResumeNotActivated {
+                id: session.0,
+                generation,
+            });
+        }
+        let scope = g
             .scopes
             .get(&ledger_scope)
-            .expect("registered session scope")
+            .expect("registered session scope");
+        let reserve_completion = usize::from(usize::from(level) >= LADDER.len());
+        let requested_event_count = scope
             .events
-            .len();
-        let requested_event_count = scope_event_count.saturating_add(usize::from(level));
+            .len()
+            .saturating_add(scope.reserved_pause_completions)
+            .saturating_add(usize::from(level))
+            .saturating_add(reserve_completion);
         if requested_event_count > MAX_DEGRADATION_EVENTS_PER_SCOPE {
             return Err(SessionError::LimitExceeded {
                 resource: "degradation_events_per_scope",
@@ -1068,62 +1443,117 @@ impl Governor {
                 observed_at_least: requested_event_count,
             });
         }
-        let final_ordinal =
-            g.next_ordinal
-                .checked_add(i64::from(level))
-                .ok_or(SessionError::LimitExceeded {
-                    resource: "degradation_ordinal",
-                    limit: i64::MAX as usize,
-                    observed_at_least: usize::MAX,
+        let immediate_retained_bytes =
+            LADDER[..usize::from(level)]
+                .iter()
+                .try_fold(0usize, |bytes, step| {
+                    bytes
+                        .checked_add(degradation_attribution(*step).len())
+                        .ok_or(SessionError::LimitExceeded {
+                            resource: "retained_bytes_per_scope",
+                            limit: MAX_RETAINED_BYTES_PER_SCOPE,
+                            observed_at_least: usize::MAX,
+                        })
                 })?;
+        let reserved_completion_bytes = if usize::from(level) >= LADDER.len() {
+            MAX_PAUSE_COMPLETION_RETAINED_BYTES
+        } else {
+            0
+        };
+        let retained_bytes = immediate_retained_bytes
+            .checked_add(reserved_completion_bytes)
+            .ok_or(SessionError::LimitExceeded {
+                resource: "retained_bytes_per_scope",
+                limit: MAX_RETAINED_BYTES_PER_SCOPE,
+                observed_at_least: usize::MAX,
+            })?;
+        ensure_retained_capacity(&g, &ledger_scope, retained_bytes)?;
+        let required_ordinal_advance = g
+            .reserved_pause_ordinals
+            .checked_add(usize::from(level))
+            .and_then(|advance| advance.checked_add(reserve_completion))
+            .and_then(|advance| i64::try_from(advance).ok())
+            .ok_or(SessionError::LimitExceeded {
+                resource: "degradation_ordinal",
+                limit: i64::MAX as usize,
+                observed_at_least: usize::MAX,
+            })?;
+        g.next_ordinal.checked_add(required_ordinal_advance).ok_or(
+            SessionError::LimitExceeded {
+                resource: "degradation_ordinal",
+                limit: i64::MAX as usize,
+                observed_at_least: usize::MAX,
+            },
+        )?;
+        let final_ordinal = g
+            .next_ordinal
+            .checked_add(i64::from(level))
+            .expect("reserved ordinal preflight covers immediate events");
         // Resolve the session's own gate BEFORE any step fires: a
         // refused level-3 request must not half-apply the ladder.
-        let gate = if usize::from(level) >= LADDER.len() {
-            Some(
-                g.gates
-                    .get(&session.0)
-                    .cloned()
-                    .ok_or(SessionError::UngatedSession { id: session.0 })?,
-            )
+        let (gate, gate_generation) = if usize::from(level) >= LADDER.len() {
+            let gate = g
+                .gates
+                .get(&session.0)
+                .cloned()
+                .ok_or(SessionError::UngatedSession { id: session.0 })?;
+            let generation = *g
+                .gate_generations
+                .get(&session.0)
+                .expect("gated session has a generation");
+            generation
+                .checked_add(1)
+                .ok_or(SessionError::LimitExceeded {
+                    resource: "pause_gate_generation",
+                    limit: usize::MAX,
+                    observed_at_least: usize::MAX,
+                })?;
+            if g.gate_phases.get(&session.0) != Some(&GatePhase::Running) {
+                return Err(SessionError::Persistence {
+                    what: format!(
+                        "session {} has a gate and generation but no running gate phase",
+                        session.0
+                    ),
+                });
+            }
+            (Some(gate), Some(generation))
         } else {
-            None
+            (None, None)
         };
         if let Some(gate) = &gate {
             gate.request();
         }
         let first_ordinal = g.next_ordinal + 1;
+        let pause_request_id = gate_generation.map(|generation| PauseRequestId {
+            governor_id: self.id,
+            session,
+            gate_generation: generation,
+            requested_ordinal: final_ordinal,
+        });
         let mut fired = Vec::with_capacity(usize::from(level));
         for (i, step) in LADDER.iter().enumerate() {
             if i >= usize::from(level) {
                 break;
             }
-            let (phase, attribution) = match step {
-                DegradationStep::SpillColdArenas => (
-                    StepPhase::Applied,
-                    "spilled coldest arenas (least-recently-touched first)".to_string(),
-                ),
-                DegradationStep::CoarsenAdaptively => (
-                    StepPhase::Applied,
-                    "coarsened adaptive resolutions outside protected bands".to_string(),
-                ),
-                DegradationStep::PauseSerializeResume => (
-                    StepPhase::Requested,
-                    "requested pause on the session-owned gate: solver checkpoints \
-                         at the next tile boundary (SolverState snapshot to the ledger); \
-                         complete only on acknowledge_pause with a checkpoint receipt"
-                        .to_string(),
-                ),
+            let phase = match step {
+                DegradationStep::SpillColdArenas | DegradationStep::CoarsenAdaptively => {
+                    StepPhase::Declared
+                }
+                DegradationStep::PauseSerializeResume => StepPhase::Requested,
             };
+            let is_pause = *step == DegradationStep::PauseSerializeResume;
             let event = DegradationEvent {
                 session,
                 step: *step,
                 pressure_level: level,
                 phase,
-                attribution,
+                attribution: degradation_attribution(*step).to_string(),
                 ordinal: first_ordinal
                     + i64::try_from(i).expect("the fixed degradation ladder length fits i64"),
                 requested_ordinal: None,
                 checkpoint: None,
+                gate_generation: if is_pause { gate_generation } else { None },
+                pause_request_id: if is_pause { pause_request_id } else { None },
             };
             fired.push(event.clone());
         }
@@ -1132,61 +1562,218 @@ impl Governor {
             .iter()
             .find(|event| event.phase == StepPhase::Requested)
         {
-            g.pending_pause.insert(session.0, requested.ordinal);
+            g.pending_pause.insert(
+                session.0,
+                PendingPause {
+                    request_id: requested
+                        .pause_request_id
+                        .expect("pause request carries acknowledgement authority"),
+                    reserved_retained_bytes: reserved_completion_bytes,
+                },
+            );
+            g.reserved_pause_ordinals = g
+                .reserved_pause_ordinals
+                .checked_add(1)
+                .expect("session bounds prevent pause-reservation overflow");
+            g.scopes
+                .get_mut(&ledger_scope)
+                .expect("registered session scope")
+                .reserved_pause_completions += 1;
         }
         g.scopes
             .get_mut(&ledger_scope)
             .expect("registered session scope")
             .events
             .extend(fired.iter().cloned());
+        commit_retained_bytes(&mut g, &ledger_scope, retained_bytes);
         bump_scope_revision(&mut g, &ledger_scope);
         Ok(fired)
     }
 
-    /// Acknowledge a pending pause with the solver's checkpoint receipt
-    /// (bead gp3.13): the ONLY route to a `Complete` pause event. A
-    /// pause that was never requested, or a blank receipt, is refused —
-    /// a missing acknowledgement can never be ledgered as complete.
+    /// Acknowledge one exact pending pause request with the solver's checkpoint
+    /// claim (bead gp3.13): the ONLY route to a `Complete` pause event.
+    /// Identical replay of a completed request returns the same event and gate.
+    /// If that gate was requested while it was still `ReadyToResume`, replay
+    /// replaces the never-activated gate at the same generation and returns the
+    /// replacement; the prior acknowledgement then fails exact-gate activation.
+    /// Conflicting evidence or authority from another request fails closed.
     ///
     /// # Errors
     /// - [`SessionError::UnknownSession`].
-    /// - [`SessionError::Submission`] for a blank checkpoint receipt
+    /// - [`SessionError::Submission`] for a blank checkpoint claim
     ///   (refused BEFORE the pending request is consumed).
-    /// - [`SessionError::NoPendingPause`] when no pause request is
-    ///   outstanding for the session.
+    /// - [`SessionError::PauseRequestMismatch`] when the request is foreign,
+    ///   stale, or does not name the session's pending/completed generation.
+    /// - [`SessionError::PauseAcknowledgementConflict`] when a completed
+    ///   request is replayed with different checkpoint evidence.
     /// - [`SessionError::LimitExceeded`] for event or ordinal exhaustion.
+    #[allow(clippy::too_many_lines)] // One lock-held, rollback-free pause completion transition.
     pub fn acknowledge_pause(
         &self,
-        session: SessionId,
-        checkpoint_receipt: &str,
-    ) -> Result<DegradationEvent, SessionError> {
-        if checkpoint_receipt.trim().is_empty() {
-            return Err(SessionError::Submission {
-                what: "pause acknowledgement requires a non-empty checkpoint receipt".to_string(),
+        request_id: PauseRequestId,
+        checkpoint_claim: &str,
+    ) -> Result<PauseAcknowledgement, SessionError> {
+        if request_id.governor_id != self.id {
+            return Err(SessionError::PauseRequestMismatch {
+                id: request_id.session.0,
+                requested_ordinal: request_id.requested_ordinal,
             });
         }
-        let evidence = RetainedEvidence::capture(checkpoint_receipt);
+        let session = request_id.session;
+        if checkpoint_claim.len() > MAX_CHECKPOINT_CLAIM_BYTES {
+            return Err(SessionError::LimitExceeded {
+                resource: "checkpoint_claim_bytes",
+                limit: MAX_CHECKPOINT_CLAIM_BYTES,
+                observed_at_least: checkpoint_claim.len(),
+            });
+        }
+        if checkpoint_claim.trim().is_empty() {
+            return Err(SessionError::Submission {
+                what: "pause acknowledgement requires a non-empty checkpoint claim".to_string(),
+            });
+        }
+        let ledger_scope = {
+            let g = self.inner.lock().expect("governor lock");
+            let ledger_scope = g
+                .tokens
+                .get(&session.0)
+                .map(|token| token.ledger_scope.clone())
+                .ok_or(SessionError::UnknownSession { id: session.0 })?;
+            let pending = g
+                .pending_pause
+                .get(&session.0)
+                .is_some_and(|pending| pending.request_id == request_id);
+            let completed = g
+                .completed_pause
+                .get(&session.0)
+                .is_some_and(|completed| completed.request_id == request_id);
+            if !pending && !completed {
+                return Err(SessionError::PauseRequestMismatch {
+                    id: session.0,
+                    requested_ordinal: request_id.requested_ordinal,
+                });
+            }
+            ledger_scope
+        };
+        let evidence = RetainedEvidence::capture(checkpoint_claim);
         let mut g = self.inner.lock().expect("governor lock");
-        let ledger_scope = g
-            .tokens
+        if let Some(completed) = g
+            .completed_pause
             .get(&session.0)
-            .map(|token| token.ledger_scope.clone())
-            .ok_or(SessionError::UnknownSession { id: session.0 })?;
-        let requested_ordinal = *g
+            .copied()
+            .filter(|completed| completed.request_id == request_id)
+        {
+            if completed.checkpoint_byte_len != evidence.byte_len
+                || completed.checkpoint_digest != evidence.digest
+            {
+                return Err(SessionError::PauseAcknowledgementConflict {
+                    id: session.0,
+                    requested_ordinal: request_id.requested_ordinal,
+                });
+            }
+            let event = g
+                .scopes
+                .get(&ledger_scope)
+                .expect("registered session scope")
+                .events
+                .get(completed.completion_event_index)
+                .cloned()
+                .ok_or_else(|| SessionError::Persistence {
+                    what: format!(
+                        "session {} completed pause event {} is missing from its scope",
+                        session.0, completed.completion_ordinal
+                    ),
+                })?;
+            if event.ordinal != completed.completion_ordinal
+                || event.pause_request_id != Some(request_id)
+            {
+                return Err(SessionError::Persistence {
+                    what: format!(
+                        "session {} completed pause index no longer matches request ordinal {}",
+                        session.0, request_id.requested_ordinal
+                    ),
+                });
+            }
+            let current_generation = g
+                .gate_generations
+                .get(&session.0)
+                .copied()
+                .ok_or(SessionError::UngatedSession { id: session.0 })?;
+            if current_generation != completed.resume_generation {
+                return Err(SessionError::PauseRequestMismatch {
+                    id: session.0,
+                    requested_ordinal: request_id.requested_ordinal,
+                });
+            }
+            let mut resume_gate = g
+                .gates
+                .get(&session.0)
+                .cloned()
+                .ok_or(SessionError::UngatedSession { id: session.0 })?;
+            if g.gate_phases.get(&session.0) == Some(&GatePhase::ReadyToResume)
+                && resume_gate.is_requested()
+            {
+                // This gate was never activated, so it never named a running
+                // execution generation. Replace only its Arc identity while
+                // retaining the completion event and generation. The replayed
+                // acknowledgement is then the sole activation authority; any
+                // acknowledgement carrying the cancelled Arc fails ptr_eq.
+                resume_gate = Arc::new(CancelGate::new());
+                g.gates.insert(session.0, Arc::clone(&resume_gate));
+            }
+            return Ok(PauseAcknowledgement {
+                request_id,
+                event,
+                resume_gate,
+                resume_generation: completed.resume_generation,
+            });
+        }
+        let pending = *g
             .pending_pause
             .get(&session.0)
-            .ok_or(SessionError::NoPendingPause { id: session.0 })?;
+            .filter(|pending| pending.request_id == request_id)
+            .ok_or(SessionError::PauseRequestMismatch {
+                id: session.0,
+                requested_ordinal: request_id.requested_ordinal,
+            })?;
+        let reserved = g
+            .scopes
+            .get(&ledger_scope)
+            .expect("registered session scope")
+            .reserved_pause_completions;
+        if reserved == 0 || g.reserved_pause_ordinals == 0 {
+            return Err(SessionError::Persistence {
+                what: format!(
+                    "session {} pending pause lost its completion row or ordinal reservation",
+                    session.0
+                ),
+            });
+        }
+        let resume_generation =
+            request_id
+                .gate_generation
+                .checked_add(1)
+                .ok_or(SessionError::LimitExceeded {
+                    resource: "pause_gate_generation",
+                    limit: usize::MAX,
+                    observed_at_least: usize::MAX,
+                })?;
+        let resume_gate = Arc::new(CancelGate::new());
         let event_count = g
             .scopes
             .get(&ledger_scope)
             .expect("registered session scope")
             .events
             .len();
-        if event_count >= MAX_DEGRADATION_EVENTS_PER_SCOPE {
-            return Err(SessionError::LimitExceeded {
-                resource: "degradation_events_per_scope",
-                limit: MAX_DEGRADATION_EVENTS_PER_SCOPE,
-                observed_at_least: event_count.saturating_add(1),
+        let reserved = g
+            .scopes
+            .get(&ledger_scope)
+            .expect("registered session scope")
+            .reserved_pause_completions;
+        if reserved == 0 || event_count.saturating_add(reserved) > MAX_DEGRADATION_EVENTS_PER_SCOPE
+        {
+            return Err(SessionError::Persistence {
+                what: format!("scope {ledger_scope:?} lost its reserved pause-completion capacity"),
             });
         }
         let ordinal = g
@@ -1203,23 +1790,161 @@ impl Governor {
             pressure_level: 3,
             phase: StepPhase::Complete,
             attribution: format!(
-                "pause complete: checkpoint evidence {:?} ({} bytes, digest {}) acknowledges \
-                 the request at ordinal {requested_ordinal}",
-                evidence.preview, evidence.byte_len, evidence.digest
+                "pause complete: checkpoint evidence ({} bytes, digest {}) acknowledges \
+                 the request at ordinal {} and rotates gate generation {} to {resume_generation}",
+                evidence.byte_len,
+                evidence.digest,
+                request_id.requested_ordinal,
+                request_id.gate_generation,
             ),
             ordinal,
-            requested_ordinal: Some(requested_ordinal),
+            requested_ordinal: Some(request_id.requested_ordinal),
             checkpoint: Some(evidence),
+            gate_generation: Some(request_id.gate_generation),
+            pause_request_id: Some(request_id),
         };
+        let event_retained_bytes = degradation_event_retained_bytes(&event)?;
+        if event_retained_bytes > pending.reserved_retained_bytes {
+            return Err(SessionError::Persistence {
+                what: format!(
+                    "pause completion requires {event_retained_bytes} retained bytes but generation {} reserved only {}",
+                    request_id.gate_generation, pending.reserved_retained_bytes
+                ),
+            });
+        }
+        let released_retained_bytes = pending.reserved_retained_bytes - event_retained_bytes;
         g.pending_pause.remove(&session.0);
+        g.reserved_pause_ordinals = g
+            .reserved_pause_ordinals
+            .checked_sub(1)
+            .expect("pending pause owns one ordinal reservation");
+        g.gates.insert(session.0, Arc::clone(&resume_gate));
+        g.gate_generations.insert(session.0, resume_generation);
+        g.gate_phases.insert(session.0, GatePhase::ReadyToResume);
+        g.completed_pause.insert(
+            session.0,
+            CompletedPause {
+                request_id,
+                checkpoint_byte_len: event
+                    .checkpoint
+                    .as_ref()
+                    .expect("completion carries evidence")
+                    .byte_len,
+                checkpoint_digest: event
+                    .checkpoint
+                    .as_ref()
+                    .expect("completion carries evidence")
+                    .digest,
+                completion_event_index: event_count,
+                completion_ordinal: ordinal,
+                resume_generation,
+            },
+        );
         g.next_ordinal = ordinal;
-        g.scopes
-            .get_mut(&ledger_scope)
+        {
+            let scope = g
+                .scopes
+                .get_mut(&ledger_scope)
+                .expect("registered session scope");
+            scope.reserved_pause_completions -= 1;
+            scope.events.push(event.clone());
+        }
+        release_retained_bytes(&mut g, &ledger_scope, released_retained_bytes);
+        bump_scope_revision(&mut g, &ledger_scope);
+        Ok(PauseAcknowledgement {
+            request_id,
+            event,
+            resume_gate,
+            resume_generation,
+        })
+    }
+
+    /// Declare that resumed workers have adopted the acknowledgement's fresh
+    /// gate. Identical activation is idempotent; pressure remains refused while
+    /// the gate is only `ReadyToResume`.
+    ///
+    /// # Errors
+    /// Foreign/stale acknowledgements, replaced gates, or a gate already
+    /// requested before activation fail closed.
+    pub fn activate_resume(
+        &self,
+        acknowledgement: &PauseAcknowledgement,
+    ) -> Result<(), SessionError> {
+        let request_id = acknowledgement.request_id;
+        if request_id.governor_id != self.id {
+            return Err(SessionError::ResumeAcknowledgementMismatch {
+                id: request_id.session.0,
+            });
+        }
+        let session = request_id.session.0;
+        let mut g = self.inner.lock().expect("governor lock");
+        if !g.tokens.contains_key(&session) {
+            return Err(SessionError::UnknownSession { id: session });
+        }
+        let completed = g
+            .completed_pause
+            .get(&session)
+            .copied()
+            .ok_or(SessionError::ResumeAcknowledgementMismatch { id: session })?;
+        let current_generation = g
+            .gate_generations
+            .get(&session)
+            .copied()
+            .ok_or(SessionError::UngatedSession { id: session })?;
+        let current_gate = g
+            .gates
+            .get(&session)
+            .cloned()
+            .ok_or(SessionError::UngatedSession { id: session })?;
+        let ledger_scope = &g
+            .tokens
+            .get(&session)
+            .expect("known session checked above")
+            .ledger_scope;
+        let stored_event = g
+            .scopes
+            .get(ledger_scope)
             .expect("registered session scope")
             .events
-            .push(event.clone());
-        bump_scope_revision(&mut g, &ledger_scope);
-        Ok(event)
+            .get(completed.completion_event_index)
+            .ok_or_else(|| SessionError::Persistence {
+                what: format!(
+                    "session {session} completed pause event {} is missing from its scope",
+                    completed.completion_ordinal
+                ),
+            })?;
+        if stored_event.ordinal != completed.completion_ordinal
+            || stored_event.pause_request_id != Some(completed.request_id)
+        {
+            return Err(SessionError::Persistence {
+                what: format!(
+                    "session {session} completed pause index no longer matches request ordinal {}",
+                    completed.request_id.requested_ordinal
+                ),
+            });
+        }
+        if completed.request_id != request_id
+            || stored_event != &acknowledgement.event
+            || completed.resume_generation != acknowledgement.resume_generation
+            || current_generation != acknowledgement.resume_generation
+            || !Arc::ptr_eq(&current_gate, &acknowledgement.resume_gate)
+        {
+            return Err(SessionError::ResumeAcknowledgementMismatch { id: session });
+        }
+        match g.gate_phases.get(&session) {
+            Some(GatePhase::ReadyToResume) => {
+                if current_gate.is_requested() {
+                    return Err(SessionError::ResumeGateAlreadyRequested {
+                        id: session,
+                        generation: current_generation,
+                    });
+                }
+                g.gate_phases.insert(session, GatePhase::Running);
+                Ok(())
+            }
+            Some(GatePhase::Running) => Ok(()),
+            None => Err(SessionError::UngatedSession { id: session }),
+        }
     }
 
     /// Whether a pause request is outstanding (requested, not yet
@@ -1318,7 +2043,14 @@ impl Governor {
             });
         }
         let ledger_scope = permit.ledger_scope.clone();
-        let sink_identity = ledger.instance_id();
+        let sink_identity =
+            ledger
+                .checked_instance_id()
+                .map_err(|error| SessionError::Persistence {
+                    what: format!(
+                        "ledger sink identity failed revalidation before scoped flush: {error}"
+                    ),
+                })?;
         let prepared = {
             let mut g = self.inner.lock().expect("governor lock");
             let scope =
@@ -1445,7 +2177,7 @@ impl Governor {
                                 }
                             })?;
                             let (ordinal, receipt, kind, body) = match state {
-                                IdemState::Pending => {
+                                IdemState::Pending { .. } => {
                                     return Err(SessionError::Persistence {
                                         what: format!(
                                             "scope dirty-idempotency index references pending session {session} key"
@@ -1522,18 +2254,21 @@ impl Governor {
                                 .checkpoint
                                 .as_ref()
                                 .map_or_else(|| "null".to_string(), evidence_json);
+                            let gate_generation = event
+                                .gate_generation
+                                .map_or_else(|| "null".to_string(), |value| value.to_string());
                             let row = BufferedLedgerEvent {
                                 session: event.session.0.to_be_bytes(),
                                 t: event.ordinal,
                                 kind: "session.degradation",
                                 payload: scoped_payload(
-                                    "fs-session-degradation-v3",
+                                    "fs-session-degradation-v4",
                                     &ledger_scope,
                                     &format!(
-                                        "\"step\":\"{:?}\",\"level\":{},\"phase\":\"{:?}\",\"attribution\":\"{}\",\"requested_ordinal\":{requested},\"checkpoint\":{checkpoint}",
-                                        event.step,
+                                        "\"step\":\"{}\",\"level\":{},\"phase\":\"{}\",\"attribution\":\"{}\",\"requested_ordinal\":{requested},\"checkpoint\":{checkpoint},\"gate_generation\":{gate_generation}",
+                                        degradation_step_name(event.step),
                                         event.pressure_level,
-                                        event.phase,
+                                        step_phase_name(event.phase),
                                         json_escape(&event.attribution),
                                     ),
                                 ),
@@ -1655,7 +2390,7 @@ impl Governor {
                         ordinal, receipt, ..
                     },
                 ) => (*ordinal, *receipt) == generation,
-                Some(IdemState::Pending) | None => false,
+                Some(IdemState::Pending { .. }) | None => false,
             };
             if still_current {
                 g.scopes
@@ -1748,6 +2483,185 @@ mod tests {
     }
 
     #[test]
+    fn registration_rebuilds_caller_controlled_spare_capacity() {
+        let governor = Governor::new();
+        let mut ledger_scope = String::with_capacity(4096);
+        ledger_scope.push_str("canonical-capacity");
+        let mut grant = String::with_capacity(4096);
+        grant.push_str("flux.*");
+        let mut ops = Vec::with_capacity(4096);
+        ops.push(grant);
+        let token = CapabilityToken {
+            session: SessionId(88),
+            ops,
+            core_s: 1.0,
+            mem_bytes: 1,
+            wall_s: 1.0,
+            cores: 1,
+            ledger_scope,
+        };
+        governor.open_session(token).expect("valid bounded token");
+
+        let inner = governor.inner.lock().expect("governor lock");
+        let stored = &inner.tokens[&88];
+        assert!(stored.ledger_scope.capacity() <= crate::token::MAX_LEDGER_SCOPE_BYTES);
+        assert!(stored.ops.capacity() <= crate::token::MAX_CAPABILITY_OPS);
+        assert!(stored.ops[0].capacity() <= crate::token::MAX_CAPABILITY_OP_BYTES);
+    }
+
+    #[test]
+    fn retained_byte_budget_refuses_before_caller_work() {
+        let governor = Governor::new();
+        governor
+            .open_session(test_token(89, "retained-budget"))
+            .expect("fixture session");
+        let key = "budget-key";
+        let reservation =
+            key.len() * IDEMPOTENCY_KEY_RETAINED_COPIES + MAX_IDEMPOTENCY_TERMINAL_RETAINED_BYTES;
+        {
+            let mut inner = governor.inner.lock().expect("governor lock");
+            inner.retained_bytes = MAX_RETAINED_BYTES_PER_SCOPE - reservation + 1;
+            inner
+                .scopes
+                .get_mut("retained-budget")
+                .expect("fixture scope")
+                .retained_bytes = MAX_RETAINED_BYTES_PER_SCOPE - reservation + 1;
+        }
+        let executions = AtomicU64::new(0);
+        assert!(matches!(
+            governor.submit_once(SessionId(89), key, || {
+                executions.fetch_add(1, Ordering::SeqCst);
+                Charge::default()
+            }),
+            Err(SessionError::LimitExceeded {
+                resource: "retained_bytes_per_scope",
+                limit: MAX_RETAINED_BYTES_PER_SCOPE,
+                ..
+            })
+        ));
+        assert_eq!(executions.load(Ordering::SeqCst), 0);
+        let inner = governor.inner.lock().expect("governor lock");
+        assert!(inner.idempotency.is_empty());
+        assert!(inner.idempotency_keys[&89].is_empty());
+        assert_eq!(inner.next_submission_ordinal, 0);
+    }
+
+    #[test]
+    fn pause_byte_budget_refuses_before_requesting_the_gate() {
+        let governor = Governor::new();
+        let gate = Arc::new(CancelGate::new());
+        governor
+            .open_session_gated(test_token(90, "pause-byte-budget"), Arc::clone(&gate))
+            .expect("gated fixture session");
+        {
+            let mut inner = governor.inner.lock().expect("governor lock");
+            inner.retained_bytes = MAX_RETAINED_BYTES_PER_SCOPE;
+            inner
+                .scopes
+                .get_mut("pause-byte-budget")
+                .expect("fixture scope")
+                .retained_bytes = MAX_RETAINED_BYTES_PER_SCOPE;
+        }
+        assert!(matches!(
+            governor.apply_memory_pressure(SessionId(90), 3),
+            Err(SessionError::LimitExceeded {
+                resource: "retained_bytes_per_scope",
+                ..
+            })
+        ));
+        assert!(!gate.is_requested());
+        let inner = governor.inner.lock().expect("governor lock");
+        assert!(inner.pending_pause.is_empty());
+        assert_eq!(inner.reserved_pause_ordinals, 0);
+        let scope = &inner.scopes["pause-byte-budget"];
+        assert!(scope.events.is_empty());
+        assert_eq!(scope.reserved_pause_completions, 0);
+    }
+
+    #[test]
+    fn missing_gate_phase_refuses_before_requesting_the_gate() {
+        let governor = Governor::new();
+        let gate = Arc::new(CancelGate::new());
+        governor
+            .open_session_gated(test_token(91, "missing-gate-phase"), Arc::clone(&gate))
+            .expect("gated fixture session");
+        governor
+            .inner
+            .lock()
+            .expect("governor lock")
+            .gate_phases
+            .remove(&91);
+
+        assert!(matches!(
+            governor.apply_memory_pressure(SessionId(91), 3),
+            Err(SessionError::Persistence { what })
+                if what.contains("no running gate phase")
+        ));
+        assert!(!gate.is_requested());
+        let inner = governor.inner.lock().expect("governor lock");
+        assert!(inner.pending_pause.is_empty());
+        assert!(inner.scopes["missing-gate-phase"].events.is_empty());
+    }
+
+    #[test]
+    fn externally_requested_registered_gate_enters_the_pause_protocol() {
+        let governor = Governor::new();
+        let gate = Arc::new(CancelGate::new());
+        governor
+            .open_session_gated(test_token(93, "external-cancel"), Arc::clone(&gate))
+            .expect("gated fixture session");
+        gate.request();
+
+        let events = governor
+            .apply_memory_pressure(SessionId(93), 3)
+            .expect("an owned runtime cancellation can be formalized as a pause");
+        let request_id = events
+            .last()
+            .and_then(|event| event.pause_request_id)
+            .expect("pause request authority");
+        let acknowledgement = governor
+            .acknowledge_pause(request_id, "external-cancel-checkpoint")
+            .expect("pending cancellation can rotate to a fresh gate");
+        governor
+            .activate_resume(&acknowledgement)
+            .expect("fresh gate activates");
+        assert!(!acknowledgement.resume_gate().is_requested());
+    }
+
+    #[test]
+    fn gate_generation_overflow_refuses_before_requesting_the_gate() {
+        let governor = Governor::new();
+        let gate = Arc::new(CancelGate::new());
+        governor
+            .open_session_gated(
+                test_token(92, "gate-generation-overflow"),
+                Arc::clone(&gate),
+            )
+            .expect("gated fixture session");
+        governor
+            .inner
+            .lock()
+            .expect("governor lock")
+            .gate_generations
+            .insert(92, u64::MAX);
+
+        assert!(matches!(
+            governor.apply_memory_pressure(SessionId(92), 3),
+            Err(SessionError::LimitExceeded {
+                resource: "pause_gate_generation",
+                ..
+            })
+        ));
+        assert!(!gate.is_requested());
+        let inner = governor.inner.lock().expect("governor lock");
+        assert!(inner.pending_pause.is_empty());
+        assert_eq!(inner.reserved_pause_ordinals, 0);
+        let scope = &inner.scopes["gate-generation-overflow"];
+        assert!(scope.events.is_empty());
+        assert_eq!(scope.reserved_pause_completions, 0);
+    }
+
+    #[test]
     fn bounded_flush_builder_enforces_exact_row_and_byte_limits() {
         let mut rows = Vec::new();
         let mut row_bytes = 0;
@@ -1797,11 +2711,13 @@ mod tests {
             session: SessionId(1),
             step: DegradationStep::SpillColdArenas,
             pressure_level: 1,
-            phase: StepPhase::Applied,
+            phase: StepPhase::Declared,
             attribution: String::new(),
             ordinal: 0,
             requested_ordinal: None,
             checkpoint: None,
+            gate_generation: None,
+            pause_request_id: None,
         };
         {
             let mut inner = governor.inner.lock().expect("governor lock");
@@ -1879,6 +2795,222 @@ mod tests {
         assert!(inner.scopes["ordinal"].events.is_empty());
         assert!(inner.idempotency.is_empty());
         assert!(inner.idempotency_keys[&2].is_empty());
+    }
+
+    #[test]
+    fn level_three_reserves_its_mandatory_completion_capacity() {
+        let governor = Governor::new();
+        let gate = Arc::new(CancelGate::new());
+        governor
+            .open_session_gated(test_token(9, "pause-capacity"), Arc::clone(&gate))
+            .expect("gated fixture session");
+        governor
+            .open_session(test_token(10, "pause-capacity"))
+            .expect("competing fixture session in the same scope");
+        let fixture = DegradationEvent {
+            session: SessionId(9),
+            step: DegradationStep::SpillColdArenas,
+            pressure_level: 1,
+            phase: StepPhase::Declared,
+            attribution: String::new(),
+            ordinal: 0,
+            requested_ordinal: None,
+            checkpoint: None,
+            gate_generation: None,
+            pause_request_id: None,
+        };
+        {
+            let mut inner = governor.inner.lock().expect("governor lock");
+            inner
+                .scopes
+                .get_mut("pause-capacity")
+                .expect("fixture scope")
+                .events = vec![fixture; MAX_DEGRADATION_EVENTS_PER_SCOPE - 4];
+        }
+        let requested = governor
+            .apply_memory_pressure(SessionId(9), 3)
+            .expect("three events plus one completion reservation fit exactly");
+        let request_id = requested
+            .last()
+            .and_then(|event| event.pause_request_id)
+            .expect("level three mints request authority");
+        {
+            let inner = governor.inner.lock().expect("governor lock");
+            let scope = &inner.scopes["pause-capacity"];
+            assert_eq!(scope.events.len(), MAX_DEGRADATION_EVENTS_PER_SCOPE - 1);
+            assert_eq!(scope.reserved_pause_completions, 1);
+        }
+        assert!(matches!(
+            governor.apply_memory_pressure(SessionId(10), 1),
+            Err(SessionError::LimitExceeded {
+                resource: "degradation_events_per_scope",
+                ..
+            })
+        ));
+        governor
+            .acknowledge_pause(request_id, "checkpoint-at-cap")
+            .expect("reserved completion remains admissible");
+        let inner = governor.inner.lock().expect("governor lock");
+        let scope = &inner.scopes["pause-capacity"];
+        assert_eq!(scope.events.len(), MAX_DEGRADATION_EVENTS_PER_SCOPE);
+        assert_eq!(scope.reserved_pause_completions, 0);
+    }
+
+    #[test]
+    fn level_three_reserves_its_mandatory_completion_ordinal() {
+        let governor = Governor::new();
+        governor
+            .open_session_gated(test_token(10, "pause-ordinal"), Arc::new(CancelGate::new()))
+            .expect("gated fixture session");
+        governor
+            .open_session(test_token(11, "pause-ordinal"))
+            .expect("interleaving fixture session");
+        {
+            let mut inner = governor.inner.lock().expect("governor lock");
+            inner.next_ordinal = i64::MAX - 4;
+        }
+
+        let requested = governor
+            .apply_memory_pressure(SessionId(10), 3)
+            .expect("three immediate ordinals plus completion fit exactly");
+        let request_id = requested
+            .last()
+            .and_then(|event| event.pause_request_id)
+            .expect("level three mints request authority");
+        {
+            let inner = governor.inner.lock().expect("governor lock");
+            assert_eq!(inner.next_ordinal, i64::MAX - 1);
+            assert_eq!(inner.reserved_pause_ordinals, 1);
+        }
+        assert!(matches!(
+            governor.apply_memory_pressure(SessionId(11), 1),
+            Err(SessionError::LimitExceeded {
+                resource: "degradation_ordinal",
+                ..
+            })
+        ));
+        governor
+            .acknowledge_pause(request_id, "checkpoint-at-ordinal-cap")
+            .expect("reserved completion ordinal remains admissible");
+        let inner = governor.inner.lock().expect("governor lock");
+        assert_eq!(inner.next_ordinal, i64::MAX);
+        assert_eq!(inner.reserved_pause_ordinals, 0);
+    }
+
+    #[test]
+    fn concurrent_identical_pause_acknowledgements_commit_once_and_replay() {
+        let governor = Arc::new(Governor::new());
+        governor
+            .open_session_gated(test_token(12, "pause-replay"), Arc::new(CancelGate::new()))
+            .expect("gated fixture session");
+        let request_id = governor
+            .apply_memory_pressure(SessionId(12), 3)
+            .expect("pause request")
+            .last()
+            .and_then(|event| event.pause_request_id)
+            .expect("request authority");
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let mut workers = Vec::new();
+        for _ in 0..2 {
+            let governor = Arc::clone(&governor);
+            let barrier = Arc::clone(&barrier);
+            workers.push(std::thread::spawn(move || {
+                barrier.wait();
+                governor
+                    .acknowledge_pause(request_id, "same-checkpoint")
+                    .expect("commit or replay")
+            }));
+        }
+        barrier.wait();
+        let first = workers.remove(0).join().expect("first worker");
+        let second = workers.remove(0).join().expect("second worker");
+        assert_eq!(first.event, second.event);
+        assert_eq!(first.resume_generation, second.resume_generation);
+        assert!(Arc::ptr_eq(&first.resume_gate(), &second.resume_gate()));
+
+        let inner = governor.inner.lock().expect("governor lock");
+        let scope = &inner.scopes["pause-replay"];
+        assert_eq!(
+            scope
+                .events
+                .iter()
+                .filter(|event| event.phase == StepPhase::Complete)
+                .count(),
+            1
+        );
+        assert_eq!(scope.reserved_pause_completions, 0);
+        assert_eq!(inner.reserved_pause_ordinals, 0);
+    }
+
+    #[test]
+    fn altered_pause_acknowledgement_cannot_activate_resume() {
+        let governor = Governor::new();
+        governor
+            .open_session_gated(
+                test_token(15, "pause-ack-integrity"),
+                Arc::new(CancelGate::new()),
+            )
+            .expect("gated fixture session");
+        let request_id = governor
+            .apply_memory_pressure(SessionId(15), 3)
+            .expect("pause request")
+            .last()
+            .and_then(|event| event.pause_request_id)
+            .expect("request authority");
+        let acknowledgement = governor
+            .acknowledge_pause(request_id, "checkpoint-claim")
+            .expect("pause acknowledgement");
+        let mut altered = acknowledgement.clone();
+        altered.event.phase = StepPhase::Requested;
+
+        assert_eq!(
+            governor.activate_resume(&altered),
+            Err(SessionError::ResumeAcknowledgementMismatch { id: 15 })
+        );
+        governor
+            .activate_resume(&acknowledgement)
+            .expect("unaltered acknowledgement remains authoritative");
+    }
+
+    #[test]
+    fn independent_pending_pauses_share_and_consume_scope_reservations() {
+        let governor = Governor::new();
+        let mut requests = Vec::new();
+        for session in [13, 14] {
+            governor
+                .open_session_gated(
+                    test_token(session, "parallel-pauses"),
+                    Arc::new(CancelGate::new()),
+                )
+                .expect("gated fixture session");
+            requests.push(
+                governor
+                    .apply_memory_pressure(SessionId(session), 3)
+                    .expect("parallel pause request")
+                    .last()
+                    .and_then(|event| event.pause_request_id)
+                    .expect("request authority"),
+            );
+        }
+        {
+            let inner = governor.inner.lock().expect("governor lock");
+            assert_eq!(inner.reserved_pause_ordinals, 2);
+            assert_eq!(
+                inner.scopes["parallel-pauses"].reserved_pause_completions,
+                2
+            );
+        }
+        for (index, request) in requests.into_iter().rev().enumerate() {
+            governor
+                .acknowledge_pause(request, &format!("checkpoint-{index}"))
+                .expect("each reservation is independently consumable");
+        }
+        let inner = governor.inner.lock().expect("governor lock");
+        assert_eq!(inner.reserved_pause_ordinals, 0);
+        assert_eq!(
+            inner.scopes["parallel-pauses"].reserved_pause_completions,
+            0
+        );
     }
 
     #[test]

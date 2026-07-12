@@ -32,13 +32,18 @@ pub use gemm_tune::{
 };
 pub use governor::{
     Charge, DegradationEvent, DegradationStep, Enforcement, FlushReport, Governor,
-    MAX_DEGRADATION_EVENTS_PER_SCOPE, MAX_EVENT_PAGE_ROWS, MAX_FLUSH_ENCODED_BYTES, MAX_FLUSH_ROWS,
-    MAX_IDEMPOTENCY_KEYS_PER_SESSION, MAX_RETAINED_EVIDENCE_BYTES, MAX_SESSIONS_PER_GOVERNOR,
-    MAX_SESSIONS_PER_SCOPE, RetainedEvidence, ScopeFlushPermit, StepPhase, SubmissionReceipt,
-    SubmitOutcome,
+    MAX_CHECKPOINT_CLAIM_BYTES, MAX_DEGRADATION_EVENTS_PER_SCOPE, MAX_EVENT_PAGE_ROWS,
+    MAX_FLUSH_ENCODED_BYTES, MAX_FLUSH_ROWS, MAX_IDEMPOTENCY_INPUT_BYTES,
+    MAX_IDEMPOTENCY_KEYS_PER_SESSION, MAX_RETAINED_BYTES_PER_GOVERNOR,
+    MAX_RETAINED_BYTES_PER_SCOPE, MAX_RETAINED_EVIDENCE_BYTES, MAX_SESSIONS_PER_GOVERNOR,
+    MAX_SESSIONS_PER_SCOPE, PauseAcknowledgement, PauseRequestId, RetainedEvidence,
+    ScopeFlushPermit, StepPhase, SubmissionReceipt, SubmitOutcome,
 };
 pub use guidance::Guidance;
-pub use token::{CapabilityToken, MAX_LEDGER_SCOPE_BYTES, SessionId};
+pub use token::{
+    CapabilityToken, MAX_CAPABILITY_OP_BYTES, MAX_CAPABILITY_OPS, MAX_CAPABILITY_TOTAL_OP_BYTES,
+    MAX_LEDGER_SCOPE_BYTES, SessionId,
+};
 
 use core::fmt;
 
@@ -69,6 +74,22 @@ pub enum SessionError {
         scope_bytes: usize,
         /// Canonical scope grammar.
         requirement: &'static str,
+    },
+    /// One operator grant is not a bounded canonical authority string.
+    InvalidOperatorGrant {
+        /// Position in the token's operator list.
+        index: usize,
+        /// Bounded diagnostic prefix.
+        grant_preview: String,
+        /// Exact input byte length.
+        grant_bytes: usize,
+        /// Canonical grant grammar.
+        requirement: &'static str,
+    },
+    /// A token repeats one operator grant.
+    DuplicateOperatorGrant {
+        /// Exact already-bounded duplicate.
+        grant: String,
     },
     /// No open session carries the requested ledger scope.
     UnknownLedgerScope {
@@ -138,14 +159,47 @@ pub enum SessionError {
         /// The id.
         id: u64,
     },
-    /// A pause acknowledgement arrived with no outstanding pause
-    /// request for the session (bead gp3.13).
-    NoPendingPause {
-        /// The id.
+    /// A caller attempted to bind an already-requested cancellation gate.
+    PreRequestedGate {
+        /// The session that would have inherited stale cancellation.
         id: u64,
     },
-    /// Level-3 pressure was requested while an earlier pause request still
-    /// awaits its checkpoint acknowledgement.
+    /// An acknowledgement request belongs to another governor or does not
+    /// match the session's pending/completed generation.
+    PauseRequestMismatch {
+        /// Session named by the opaque request.
+        id: u64,
+        /// Request ordinal carried by the stale/foreign authority.
+        requested_ordinal: i64,
+    },
+    /// A completed request was replayed with different checkpoint evidence.
+    PauseAcknowledgementConflict {
+        /// Session whose terminal acknowledgement cannot be replaced.
+        id: u64,
+        /// Completed request ordinal.
+        requested_ordinal: i64,
+    },
+    /// Pressure arrived before a fresh resume gate was explicitly activated.
+    ResumeNotActivated {
+        /// Session awaiting activation.
+        id: u64,
+        /// Fresh gate generation awaiting activation.
+        generation: u64,
+    },
+    /// A supplied acknowledgement is stale, altered, or from another governor.
+    ResumeAcknowledgementMismatch {
+        /// Session named by the acknowledgement.
+        id: u64,
+    },
+    /// The fresh resume gate was requested before activation completed.
+    ResumeGateAlreadyRequested {
+        /// Session whose gate is already cancelled.
+        id: u64,
+        /// Affected gate generation.
+        generation: u64,
+    },
+    /// A pressure transition was requested while an earlier pause request
+    /// still awaits its checkpoint acknowledgement.
     PauseAlreadyPending {
         /// The session id.
         id: u64,
@@ -155,6 +209,7 @@ pub enum SessionError {
 }
 
 impl fmt::Display for SessionError {
+    #[allow(clippy::too_many_lines)] // Exhaustive rendering stays adjacent to the error variants.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             SessionError::UnknownSession { id } => write!(f, "unknown session {id}"),
@@ -170,6 +225,19 @@ impl fmt::Display for SessionError {
             } => write!(
                 f,
                 "invalid ledger scope {scope_preview:?} (input bytes: {scope_bytes}): {requirement}; session and flush state were not mutated"
+            ),
+            SessionError::InvalidOperatorGrant {
+                index,
+                grant_preview,
+                grant_bytes,
+                requirement,
+            } => write!(
+                f,
+                "invalid operator grant {index} {grant_preview:?} (input bytes: {grant_bytes}): {requirement}; session authority was not registered"
+            ),
+            SessionError::DuplicateOperatorGrant { grant } => write!(
+                f,
+                "duplicate operator grant {grant:?}; session authority was not registered"
             ),
             SessionError::UnknownLedgerScope { scope } => write!(
                 f,
@@ -220,16 +288,42 @@ impl fmt::Display for SessionError {
                  (pause-serialize-resume) is refused — open with open_session_gated to \
                  bind the session's own gate"
             ),
-            SessionError::NoPendingPause { id } => write!(
+            SessionError::PreRequestedGate { id } => write!(
                 f,
-                "session {id} has no outstanding pause request to acknowledge"
+                "session {id} supplied an already-requested cancellation gate; registration was refused so stale cancellation cannot become a new execution generation"
+            ),
+            SessionError::PauseRequestMismatch {
+                id,
+                requested_ordinal,
+            } => write!(
+                f,
+                "pause request at ordinal {requested_ordinal} does not match session {id}'s live or replayable generation"
+            ),
+            SessionError::PauseAcknowledgementConflict {
+                id,
+                requested_ordinal,
+            } => write!(
+                f,
+                "session {id} pause request at ordinal {requested_ordinal} was already acknowledged with different checkpoint evidence"
+            ),
+            SessionError::ResumeNotActivated { id, generation } => write!(
+                f,
+                "session {id} gate generation {generation} is ready to resume but not activated; pressure transitions remain refused"
+            ),
+            SessionError::ResumeAcknowledgementMismatch { id } => write!(
+                f,
+                "session {id} resume acknowledgement is foreign, stale, or inconsistent with the governor's current gate"
+            ),
+            SessionError::ResumeGateAlreadyRequested { id, generation } => write!(
+                f,
+                "session {id} resume gate generation {generation} was requested before activation; refusing to start work on a cancelled generation"
             ),
             SessionError::PauseAlreadyPending {
                 id,
                 requested_ordinal,
             } => write!(
                 f,
-                "session {id} already has a pause request pending at ordinal {requested_ordinal}; acknowledge it before requesting level-3 pressure again"
+                "session {id} already has a pause request pending at ordinal {requested_ordinal}; acknowledge it before requesting another pressure transition"
             ),
         }
     }

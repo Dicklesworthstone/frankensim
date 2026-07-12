@@ -11,7 +11,8 @@ use fs_exec::solver::{SolverState, codec};
 use fs_plan::{CostModel, CostObservation};
 use fs_session::{
     CalibrationReport, CapabilityToken, Charge, DegradationStep, Enforcement, Estimate, Governor,
-    Guidance, MAX_EVENT_PAGE_ROWS, MAX_FLUSH_ENCODED_BYTES, MAX_FLUSH_ROWS,
+    Guidance, MAX_CAPABILITY_OP_BYTES, MAX_CAPABILITY_OPS, MAX_CHECKPOINT_CLAIM_BYTES,
+    MAX_EVENT_PAGE_ROWS, MAX_FLUSH_ENCODED_BYTES, MAX_FLUSH_ROWS, MAX_IDEMPOTENCY_INPUT_BYTES,
     MAX_IDEMPOTENCY_KEYS_PER_SESSION, MAX_LEDGER_SCOPE_BYTES, MAX_RETAINED_EVIDENCE_BYTES,
     MAX_SESSIONS_PER_GOVERNOR, MAX_SESSIONS_PER_SCOPE, SessionError, SessionId, StepPhase,
     SubmitOutcome, estimate,
@@ -70,7 +71,10 @@ fn ss_001_token_bridges_into_static_admission() {
     let t = token(1, 3600.0, 7200.0);
     assert!(t.grants_op("flux.free-surface-lbm"));
     assert!(!t.grants_op("quantum.anneal"));
-    let cap = t.to_admission();
+    assert!(!t.grants_op("flux."));
+    assert!(!t.grants_op("flux..solve"));
+    assert!(!t.grants_op("flux.*"));
+    let cap = t.to_admission().expect("bounded grants project");
     assert!((cap.wall_s - 7200.0).abs() < f64::EPSILON);
     assert_eq!(cap.mem_bytes, t.mem_bytes);
     assert_eq!(cap.cores, t.cores);
@@ -78,9 +82,29 @@ fn ss_001_token_bridges_into_static_admission() {
     let mut boundary = token(2, 1.0, 1.0);
     boundary.mem_bytes = u64::MAX;
     boundary.cores = 9_007_199_254_740_993;
-    let boundary_cap = boundary.to_admission();
+    let boundary_cap = boundary.to_admission().expect("bounded grants project");
     assert_eq!(boundary_cap.mem_bytes, u64::MAX);
     assert_eq!(boundary_cap.cores, 9_007_199_254_740_993);
+
+    let mut mixed_invalid = t.clone();
+    mixed_invalid.ops.push("*".to_string());
+    assert!(!mixed_invalid.grants_op("flux.free-surface-lbm"));
+    assert!(matches!(
+        mixed_invalid.to_admission(),
+        Err(SessionError::InvalidOperatorGrant { index: 3, .. })
+    ));
+    let mut over_count = t.clone();
+    over_count.ops = (0..=MAX_CAPABILITY_OPS)
+        .map(|index| format!("operator-{index}"))
+        .collect();
+    assert!(!over_count.grants_op("operator-0"));
+    assert!(matches!(
+        over_count.to_admission(),
+        Err(SessionError::LimitExceeded {
+            resource: "capability_operator_grants",
+            ..
+        })
+    ));
     // The bridge feeds fs-ir admission directly.
     let node = fs_ir::sexpr::parse(SPOUT).expect("parses");
     let cx = fs_ir::admission::AdmissionContext {
@@ -333,7 +357,7 @@ fn ss_003_idempotency_races_execute_exactly_once() {
     let gov = Arc::new(Governor::new());
     gov.open_session(token(3, 1e9, 1e9)).expect("valid token");
     let executions = Arc::new(AtomicU32::new(0));
-    let key = Governor::idempotency_key("agent-a", SPOUT);
+    let key = Governor::idempotency_key("agent-a", SPOUT).expect("bounded canonical key");
     let mut handles = Vec::new();
     for _ in 0..16 {
         let gov = Arc::clone(&gov);
@@ -444,16 +468,18 @@ fn ss_003b_idempotency_is_session_scoped_and_content_addressed() {
     let gov = Governor::new();
     gov.open_session(token(31, 1e9, 1e9)).expect("session 31");
     gov.open_session(token(32, 1e9, 1e9)).expect("session 32");
-    let key = Governor::idempotency_key("agent:alpha", "program:beta");
-    assert!(key.starts_with("fs-session-idem-v2:"));
-    assert_eq!(key.len(), "fs-session-idem-v2:".len() + 64);
+    let key =
+        Governor::idempotency_key("agent:alpha", "program:beta").expect("bounded canonical key");
+    assert!(key.starts_with("fs-session-idem-v3:"));
+    assert_eq!(key.len(), "fs-session-idem-v3:".len() + 64);
     assert_eq!(
         key,
         Governor::idempotency_key("agent:alpha", "program:beta")
+            .expect("deterministic canonical key")
     );
     assert_ne!(
         key,
-        Governor::idempotency_key("agent", "alpha:program:beta"),
+        Governor::idempotency_key("agent", "alpha:program:beta").expect("bounded canonical key"),
         "length framing must distinguish delimiter-equivalent inputs"
     );
 
@@ -499,6 +525,14 @@ fn ss_003b_idempotency_is_session_scoped_and_content_addressed() {
             .is_err(),
         "blank idempotency keys must fail before execution"
     );
+    let oversized = "x".repeat(MAX_IDEMPOTENCY_INPUT_BYTES + 1);
+    assert!(matches!(
+        Governor::idempotency_key("agent", &oversized),
+        Err(SessionError::LimitExceeded {
+            resource: "idempotency_program_text_bytes",
+            ..
+        })
+    ));
 }
 
 #[test]
@@ -711,6 +745,7 @@ fn ss_003d_ledger_flush_is_atomic_incremental_and_retryable() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // One canonical session and scope authority refusal story.
 fn ss_003e_ledger_scope_authority_is_canonical_and_fail_closed() {
     let gov = Governor::new();
     for (id, invalid_scope) in [
@@ -756,6 +791,64 @@ fn ss_003e_ledger_scope_authority_is_canonical_and_fail_closed() {
     let boundary_permit = gov
         .open_session(token_in_scope(44, &boundary))
         .expect("the exact scope-length boundary is admitted after refusal");
+
+    let mut invalid_ops = token_in_scope(49, "ops-invalid");
+    invalid_ops.ops = vec!["bad operator".to_string()];
+    assert!(matches!(
+        gov.open_session(invalid_ops),
+        Err(SessionError::InvalidOperatorGrant { index: 0, .. })
+    ));
+    for (session, malformed) in [(54, "*"), (55, "flux*"), (56, ".flux"), (57, "flux..solve")] {
+        let mut malformed_token = token_in_scope(session, "ops-malformed-wildcard");
+        malformed_token.ops = vec![malformed.to_string()];
+        assert!(matches!(
+            gov.open_session(malformed_token),
+            Err(SessionError::InvalidOperatorGrant { index: 0, .. })
+        ));
+    }
+    let mut duplicate_ops = token_in_scope(50, "ops-duplicate");
+    duplicate_ops.ops = vec!["flux.*".to_string(), "flux.*".to_string()];
+    assert!(matches!(
+        gov.open_session(duplicate_ops),
+        Err(SessionError::DuplicateOperatorGrant { .. })
+    ));
+    let mut too_many_ops = token_in_scope(51, "ops-count");
+    too_many_ops.ops = (0..=MAX_CAPABILITY_OPS)
+        .map(|index| format!("op-{index}"))
+        .collect();
+    assert!(matches!(
+        gov.open_session(too_many_ops),
+        Err(SessionError::LimitExceeded {
+            resource: "capability_operator_grants",
+            ..
+        })
+    ));
+    let mut long_op = token_in_scope(52, "ops-bytes");
+    long_op.ops = vec!["x".repeat(MAX_CAPABILITY_OP_BYTES + 1)];
+    assert!(matches!(
+        gov.open_session(long_op),
+        Err(SessionError::InvalidOperatorGrant { .. })
+    ));
+    let mut too_many_op_bytes = token_in_scope(58, "ops-total-bytes");
+    too_many_op_bytes.ops = (0..68)
+        .map(|index| format!("namespace{index:03}.{}", "x".repeat(110)))
+        .collect();
+    assert!(matches!(
+        gov.open_session(too_many_op_bytes),
+        Err(SessionError::LimitExceeded {
+            resource: "capability_operator_bytes",
+            ..
+        })
+    ));
+    let requested_gate = Arc::new(CancelGate::new());
+    requested_gate.request();
+    assert!(matches!(
+        gov.open_session_gated(
+            token_in_scope(53, "pre-requested-gate"),
+            Arc::clone(&requested_gate),
+        ),
+        Err(SessionError::PreRequestedGate { id: 53 })
+    ));
 
     // Reuse an id rejected above: invalid scope admission must not reserve or
     // partially initialize the session.
@@ -1283,7 +1376,7 @@ fn ss_005_degradation_ladder_declared_order_and_pause_resume() {
 fn ss_011_pressure_actions_bind_to_owned_session_gates() {
     // Bead gp3.13 acceptance battery: gates are OWNED (bound at open),
     // wrong-session pauses unrepresentable, out-of-ladder levels fail,
-    // and a pause is never complete without a checkpoint receipt.
+    // and a pause is never complete without a generation-bound checkpoint claim.
     let gov = Governor::new();
     let gate_a = Arc::new(CancelGate::new());
     let gate_b = Arc::new(CancelGate::new());
@@ -1328,7 +1421,7 @@ fn ss_011_pressure_actions_bind_to_owned_session_gates() {
         .apply_memory_pressure(SessionId(43), 2)
         .expect("levels 1-2 need no gate");
     assert_eq!(l2.len(), 2);
-    assert!(l2.iter().all(|e| e.phase == StepPhase::Applied));
+    assert!(l2.iter().all(|e| e.phase == StepPhase::Declared));
 
     // (c) Level 3 on session A requests ONLY A's gate; B is untouched.
     let l3 = gov.apply_memory_pressure(SessionId(41), 3).expect("gated");
@@ -1341,6 +1434,21 @@ fn ss_011_pressure_actions_bind_to_owned_session_gates() {
     let pause = l3.last().expect("three steps fired");
     assert_eq!(pause.step, DegradationStep::PauseSerializeResume);
     assert_eq!(pause.phase, StepPhase::Requested);
+    let request_id = pause
+        .pause_request_id
+        .expect("level three mints opaque request authority");
+    assert_eq!(request_id.session(), SessionId(41));
+    assert_eq!(request_id.gate_generation(), 0);
+    assert_eq!(request_id.requested_ordinal(), pause.ordinal);
+    assert!(gov.pause_pending(SessionId(41)).expect("known session"));
+    let oversized_checkpoint = "x".repeat(MAX_CHECKPOINT_CLAIM_BYTES + 1);
+    assert!(matches!(
+        gov.acknowledge_pause(request_id, &oversized_checkpoint),
+        Err(SessionError::LimitExceeded {
+            resource: "checkpoint_claim_bytes",
+            ..
+        })
+    ));
     assert!(gov.pause_pending(SessionId(41)).expect("known session"));
 
     let before_repeat = gov
@@ -1355,52 +1463,180 @@ fn ss_011_pressure_actions_bind_to_owned_session_gates() {
         "a repeated level-3 request must refuse before replaying spill/coarsen"
     );
     assert_eq!(
+        gov.apply_memory_pressure(SessionId(41), 1),
+        Err(SessionError::PauseAlreadyPending {
+            id: 41,
+            requested_ordinal: pause.ordinal,
+        }),
+        "synchronous pressure also refuses while a checkpoint generation is draining"
+    );
+    assert_eq!(
         gov.events_page(&permit_a, 0, MAX_EVENT_PAGE_ROWS)
             .expect("bounded event page"),
         before_repeat,
         "repeated level-3 refusal must not mutate the scoped event stream"
     );
 
-    // (e) A blank receipt cannot complete the pause (and the pending
+    // (e) A blank claim cannot complete the pause (and the pending
     // request survives the refusal).
     assert!(matches!(
-        gov.acknowledge_pause(SessionId(41), "  "),
+        gov.acknowledge_pause(request_id, "  "),
         Err(SessionError::Submission { .. })
     ));
     assert!(gov.pause_pending(SessionId(41)).expect("known session"));
-    // (f) Acknowledging a session with NO outstanding request is refused.
-    assert_eq!(
-        gov.acknowledge_pause(SessionId(42), "ckpt-b-1"),
-        Err(SessionError::NoPendingPause { id: 42 })
-    );
-    // (g) The checkpoint receipt is the ONLY route to Complete; the
+    // (f) Cross-governor request authority is refused.
+    let foreign = Governor::new();
+    foreign
+        .open_session_gated(token(42, 1e9, 1e9), Arc::new(CancelGate::new()))
+        .expect("foreign fixture session");
+    let foreign_request = foreign
+        .apply_memory_pressure(SessionId(42), 3)
+        .expect("foreign pause request")
+        .last()
+        .and_then(|event| event.pause_request_id)
+        .expect("foreign request authority");
+    assert!(matches!(
+        gov.acknowledge_pause(foreign_request, "ckpt-b-1"),
+        Err(SessionError::PauseRequestMismatch { id: 42, .. })
+    ));
+    // (g) The checkpoint claim is the ONLY route to Complete; the
     // completion event cites the request it acknowledges.
-    let checkpoint_receipt = format!(
+    let checkpoint_claim = format!(
         "solver-state-0xf00d:{}",
         "é".repeat(MAX_RETAINED_EVIDENCE_BYTES)
     );
-    let done = gov
-        .acknowledge_pause(SessionId(41), &checkpoint_receipt)
+    let acknowledged = gov
+        .acknowledge_pause(request_id, &checkpoint_claim)
         .expect("pending pause");
+    let done = acknowledged.event();
     assert_eq!(done.phase, StepPhase::Complete);
-    assert!(done.attribution.contains("solver-state-0xf00d"));
+    assert_eq!(done.gate_generation, Some(0));
+    assert_eq!(acknowledged.resume_generation(), 1);
+    assert!(!acknowledged.resume_gate().is_requested());
     let checkpoint = done
         .checkpoint
         .as_ref()
         .expect("complete event carries structured checkpoint evidence");
+    assert!(checkpoint.preview().starts_with("solver-state-0xf00d"));
     assert_eq!(checkpoint.preview().len(), MAX_RETAINED_EVIDENCE_BYTES);
-    assert_eq!(checkpoint.byte_len(), checkpoint_receipt.len());
+    assert_eq!(checkpoint.byte_len(), checkpoint_claim.len());
+    assert!(
+        done.attribution
+            .contains(&checkpoint.byte_len().to_string())
+    );
+    assert!(done.attribution.contains(&checkpoint.digest().to_string()));
     assert!(
         done.attribution
             .contains(&format!("ordinal {}", pause.ordinal)),
         "completion must cite the request it acknowledges"
     );
     assert!(!gov.pause_pending(SessionId(41)).expect("known session"));
-    // Double-acknowledgement is refused (the claim is consumed).
+    // Lost-response replay is idempotent and recovers the exact same gate.
+    let replayed = gov
+        .acknowledge_pause(request_id, &checkpoint_claim)
+        .expect("identical acknowledgement replay");
+    assert_eq!(replayed.event(), acknowledged.event());
     assert_eq!(
-        gov.acknowledge_pause(SessionId(41), &checkpoint_receipt),
-        Err(SessionError::NoPendingPause { id: 41 })
+        replayed.resume_generation(),
+        acknowledged.resume_generation()
     );
+    assert!(Arc::ptr_eq(
+        &replayed.resume_gate(),
+        &acknowledged.resume_gate()
+    ));
+    // Conflicting evidence cannot replace the completed generation.
+    assert!(matches!(
+        gov.acknowledge_pause(request_id, "different-checkpoint"),
+        Err(SessionError::PauseAcknowledgementConflict { id: 41, .. })
+    ));
+
+    // No pressure transition can request the fresh gate before resumed workers
+    // explicitly adopt it. If an external owner requests that never-activated
+    // gate, activation refuses and identical acknowledgement replay replaces
+    // only the Arc identity at the SAME generation.
+    assert!(matches!(
+        gov.apply_memory_pressure(SessionId(41), 3),
+        Err(SessionError::ResumeNotActivated {
+            id: 41,
+            generation: 1,
+        })
+    ));
+    let events_before_gate_recovery = gov
+        .events_page(&permit_a, 0, MAX_EVENT_PAGE_ROWS)
+        .expect("bounded pre-recovery event page");
+    let cancelled_before_activation = acknowledged.resume_gate();
+    cancelled_before_activation.request();
+    assert_eq!(
+        gov.activate_resume(&acknowledged),
+        Err(SessionError::ResumeGateAlreadyRequested {
+            id: 41,
+            generation: 1,
+        })
+    );
+    let recovered = gov
+        .acknowledge_pause(request_id, &checkpoint_claim)
+        .expect("identical replay replaces a never-activated requested gate");
+    assert_eq!(recovered.event(), acknowledged.event());
+    assert_eq!(recovered.resume_generation(), 1);
+    assert!(!recovered.resume_gate().is_requested());
+    assert!(!Arc::ptr_eq(
+        &recovered.resume_gate(),
+        &cancelled_before_activation
+    ));
+    assert_eq!(
+        gov.activate_resume(&acknowledged),
+        Err(SessionError::ResumeAcknowledgementMismatch { id: 41 }),
+        "the acknowledgement carrying the replaced Arc must stay stale"
+    );
+    let recovered_replay = gov
+        .acknowledge_pause(request_id, &checkpoint_claim)
+        .expect("replacement acknowledgement replay");
+    assert!(Arc::ptr_eq(
+        &recovered.resume_gate(),
+        &recovered_replay.resume_gate()
+    ));
+    assert_eq!(
+        gov.events_page(&permit_a, 0, MAX_EVENT_PAGE_ROWS)
+            .expect("bounded post-recovery event page"),
+        events_before_gate_recovery,
+        "replacing a never-activated gate is not another pause generation"
+    );
+    assert!(matches!(
+        gov.apply_memory_pressure(SessionId(41), 1),
+        Err(SessionError::ResumeNotActivated {
+            id: 41,
+            generation: 1,
+        })
+    ));
+    gov.activate_resume(&recovered)
+        .expect("workers adopted fresh gate");
+    gov.activate_resume(&recovered)
+        .expect("activation replay is idempotent");
+
+    // A second cycle requests the fresh generation rather than inheriting the
+    // monotonic cancellation state of the drained first gate.
+    let second = gov
+        .apply_memory_pressure(SessionId(41), 3)
+        .expect("fresh gate admits a second pause cycle");
+    let second_pause = second.last().expect("second pause request");
+    assert_eq!(second_pause.gate_generation, Some(1));
+    let second_request = second_pause
+        .pause_request_id
+        .expect("second request authority");
+    assert!(recovered.resume_gate().is_requested());
+    gov.activate_resume(&recovered)
+        .expect("activation replay remains idempotent after the next pause request");
+    assert!(gov.pause_pending(SessionId(41)).expect("known session"));
+    let second_ack = gov
+        .acknowledge_pause(second_request, "solver-state-second-generation")
+        .expect("second pending pause");
+    assert_eq!(second_ack.event().gate_generation, Some(1));
+    assert_eq!(second_ack.resume_generation(), 2);
+    assert!(!second_ack.resume_gate().is_requested());
+    assert!(matches!(
+        gov.acknowledge_pause(request_id, &checkpoint_claim),
+        Err(SessionError::PauseRequestMismatch { id: 41, .. })
+    ));
     // (h) The ledgered stream never contains an unacknowledged Complete:
     // exactly one Complete, and it follows its Requested ordinal.
     let events = gov
@@ -1410,13 +1646,13 @@ fn ss_011_pressure_actions_bind_to_owned_session_gates() {
         .iter()
         .filter(|e| e.phase == StepPhase::Complete)
         .collect();
-    assert_eq!(completes.len(), 1);
+    assert_eq!(completes.len(), 2);
     assert!(completes[0].ordinal > pause.ordinal);
     assert!(events.windows(2).all(|w| w[0].ordinal < w[1].ordinal));
     verdict(
         "ss-011",
         "pressure binds to owned gates: bad levels refused, ungated level-3 atomic refusal, \
-         target-only request, complete only via checkpoint receipt",
+         target-only request, complete only via a bounded checkpoint claim",
     );
 }
 
@@ -1432,7 +1668,11 @@ fn ss_006_budget_infeasible_surfaces_as_ranked_guidance() {
         router: None,
         chart_requirements: Vec::new(),
         cost_models,
-        capability: Some(token(9, 1e9, 1e9).to_admission()),
+        capability: Some(
+            token(9, 1e9, 1e9)
+                .to_admission()
+                .expect("bounded grants project"),
+        ),
         regime: None,
         regime_policy: fs_ir::admission::RegimePolicy::Warn,
     };

@@ -19,8 +19,12 @@ Consumers: the P2 marquee demo, the HELM e2e suite (gp3.11).
 
 - `CapabilityToken { session, ops globs, core_s, mem_bytes, wall_s,
   cores, ledger_scope }` — the explicit grant every IR program executes
-  under; `to_admission()` bridges into fs-ir static admission (one token,
-  checked statically at admission AND continuously by the governor). Memory
+  under; fallible `to_admission()` validates bounded canonical operator grants
+  before cloning them into fs-ir static admission. The
+  governor independently validates the declaration at registration and
+  continuously meters core-seconds, peak memory, and wall time. Operator names
+  and concurrent cores are static-admission fields today, not dynamically
+  leased execution resources. Memory
   bytes and concurrent cores remain exact `u64` values through the bridge;
   source count scaling, token comparison, and governor enforcement never
   project those authorities through `f64`. `ledger_scope` is exact authority,
@@ -28,15 +32,21 @@ Consumers: the P2 marquee demo, the HELM e2e suite (gp3.11).
   normalization aliases, and oversized namespaces fail before registration.
   Invalid-scope diagnostics retain only a UTF-8-safe 128-byte preview plus the
   exact input length, so refusing an oversized authority string is itself
-  memory-bounded.
+  memory-bounded. Operator authority is likewise structural: at most 256
+  unique canonical exact names or namespace wildcards ending in `.*`, each
+  1..=128 bytes and at most 8 KiB in aggregate, are admitted under fs-ir's
+  shared grammar before any governor state changes. Validated strings and the
+  operator vector are rebuilt before retention, so caller-chosen spare capacity
+  cannot bypass byte accounting.
 - `Governor` — `Send + Sync`; hot paths are mutex-guarded in-memory
   state. `open_session` returns a private-field `ScopeFlushPermit` bound to the
   exact governor and immutable ledger scope; callers cannot manufacture scope
   authority from strings. It rejects invalid ledger scope, non-finite, or
   negative floating grants before registration and rejects an already-open `SessionId`
   without replacing its immutable token or inheriting its meters, gate, pause
-  state, or idempotency receipts. Token and optional gate registration are one
-  atomic critical section. `charge(session, Charge)` rejects non-finite,
+  state, or idempotency receipts. A pre-requested gate is refused before
+  registration. Token and optional gate registration are one atomic critical
+  section. `charge(session, Charge)` rejects non-finite,
   negative, or overflowing deltas before mutating meters, then meters
   core-seconds / peak memory / wall and returns `Enforcement`: `Ok` →
   `Throttled` (at the grant) → `Paused` (past 1.2× the grant, with a
@@ -56,21 +66,53 @@ Consumers: the P2 marquee demo, the HELM e2e suite (gp3.11).
   terminal charge plus enforcement decision or full failure evidence.
   Caller-controlled evidence retains at most 16 KiB of UTF-8-safe preview,
   while its exact byte length and BLAKE3 digest bind the complete original.
+  Admission reserves three retained key copies plus worst-case terminal
+  evidence before caller work begins, then releases unused terminal capacity
+  when the result is published. A panic or invalid charge therefore cannot
+  strand an unpublishable `Pending` generation at a byte boundary.
   `Executed` and every later `Duplicate` expose the same `Enforcement`, so a
   throttled/paused charge is never hidden behind a generic success.
-  `idempotency_key(agent_key, program)` length-frames both inputs under a
-  separate BLAKE3 domain; blank or oversized supplied keys are refused.
+  `idempotency_key(agent_key, program)` accepts at most 1 MiB per input,
+  separately domain-hashes them, then binds exact lengths and the two digests
+  into a fixed-memory v3 key; blank or oversized supplied execution keys are
+  refused length-first.
 - `apply_memory_pressure(session, level)` — the DECLARED
   degradation ladder (`LADDER`: spill coldest arenas → coarsen
   adaptively → pause-serialize-resume) fires steps `1..=level` in order;
   the pause step resolves the session-owned `CancelGate` bound by
-  `open_session_gated` and requests it so the solver
-  checkpoints at its next tile boundary (P7). Every event carries
-  attribution and a deterministic ordinal. A repeated level-3 request while
-  its predecessor is pending refuses before replaying any ladder step. Pause
-  completion retains the checkpoint receipt under the same bounded
-  preview/full-length/full-digest evidence model. `events_page` is the only
-  event reader and returns at most 1,024 rows under the permit's exact scope.
+  `open_session_gated` and requests it so the solver checkpoints at its next
+  tile boundary (P7). Pause gates are generational: level 3 mints a
+  private-field `PauseRequestId` bound to this governor, session, old gate
+  generation, and request ordinal. `acknowledge_pause(request_id, claim)`
+  consumes only that exact generation; while it remains the session's latest
+  completed generation, identical response replay returns the same event and
+  `Arc<CancelGate>`, while conflicting evidence fails closed. If an external
+  owner requests that gate before activation, `activate_resume` refuses it and
+  identical acknowledgement replay replaces the never-activated `Arc` at the
+  same generation. The old acknowledgement becomes stale by exact pointer
+  identity; repeated recovery replay returns the one current replacement.
+  Completing a later generation invalidates older replay authority rather than
+  retaining an unbounded gate history.
+  `PauseAcknowledgement` has private fields and activation compares its full
+  event, request, generation, and exact gate identity with retained state, so a
+  caller-altered acknowledgement cannot activate work.
+  The fresh gate remains `ReadyToResume` until
+  `activate_resume(&acknowledgement)` records that resumed workers adopted it;
+  all pressure levels refuse while a request is pending or a gate awaits
+  activation. The old gate stays permanently requested so drained workers
+  cannot re-enter. Request and completion events bind the old generation.
+  Every event carries attribution and a deterministic ordinal. Admitting level
+  3 reserves the mandatory future
+  completion row, and all other event admission counts outstanding
+  reservations so the completion cannot be starved at the cap. The request
+  also reserves worst-case retained completion evidence and one global event
+  ordinal before it requests the gate. Other event admission must preserve all
+  outstanding completion reservations. Pause completion accepts at most 1 MiB
+  of checkpoint-claim input and retains it under the bounded
+  preview/full-length/full-digest evidence model, releasing unused reserved
+  capacity atomically with completion.
+  `events_page` is the only event reader and returns at most 1,024 rows under
+  the permit's exact scope.
 - `estimate(study, cost_models, cores)` — the dry run: p10/p50/p90 wall
   from fs-plan quantile models over `:dof`/`:size` features, declared
   memory ask, energy (p50 × cores × 45 W/core), and an HONEST
@@ -111,7 +153,7 @@ Consumers: the P2 marquee demo, the HELM e2e suite (gp3.11).
   whose immutable token grants that exact scope, persisted exactly once as an
   atomic bounded `session.*` event chunk. Foreign permits fail closed. Every payload
   carries the exact JSON-escaped `ledger_scope`; consumption/idempotency schemas
-  are v3/v4 and degradation is v3. `FlushReport` names appended rows, encoded
+  are v3/v4 and degradation is v4. `FlushReport` names appended rows, encoded
   bytes, and whether more state remains dirty; each call admits at most 1,024
   rows and 4 MiB of conservatively encoded payload. An unchanged repeated call
   is a no-op; failed persistence leaves every selected generation-aware cursor
@@ -125,14 +167,19 @@ Consumers: the P2 marquee demo, the HELM e2e suite (gp3.11).
   independent event cursor, sink, revision, and flush generation. A rotating
   three-lane start order prevents sustained meter traffic from starving
   receipts or events. Its first successful non-empty flush binds that scope to
-  the ledger's opaque persisted `LedgerInstanceId`;
+  the ledger's opaque persisted `LedgerInstanceId`, revalidated against the
+  live schema before every authority-bearing flush;
   aliases and moved handles remain the same sink, while a replacement file at
   the same path or independent memory ledger is refused before writes.
 - Deterministic hard caps bound retained governor state and public
   materialization: 4,096 sessions/governor, 1,024 sessions/scope, 4,096
   idempotency keys/session, 65,536 degradation events/scope, 16 KiB evidence
-  previews, 1,024 event-page and flush rows, 4 MiB flush bytes, and checked
-  signed-ledger ordinals. Limit+1 refuses before partial mutation.
+  previews, 64 MiB of retained caller-controlled payload/scope, 256 MiB of
+  retained caller-controlled payload/governor, 1,024 event-page and flush rows,
+  4 MiB flush bytes, and checked signed-ledger ordinals. Counts bound fixed
+  structure overhead; byte budgets conservatively count duplicated key strings,
+  token text, event attribution/evidence, and terminal reservations. Limit+1
+  refuses before partial mutation.
 - `gemm_f64_session_with_pool(tuner, cache_policy, pool, gate, m, n, k, α,
   a, b, β, c)`
   — the production GEMM autotune loop (bead yqug): measure → cache →
@@ -208,9 +255,16 @@ Consumers: the P2 marquee demo, the HELM e2e suite (gp3.11).
    race-tested). The receipt binds the immutable ledger scope. The same caller
    key in another session is independent and produces a different receipt, so
    one tenant cannot suppress another tenant's work.
-3. **The ladder order is the contract**: spill before coarsen before
-   pause, always; pause requests cancellation, and `SolverState`
-   snapshots round-trip losslessly (pause-serialize-resume equality).
+3. **The ladder order is the contract**: spill before coarsen before pause,
+   always; pause requests one gate generation, reserves its completion event,
+   exact opaque acknowledgement rotates to a fresh gate, and explicit
+   activation precedes the next pressure transition. Identical acknowledgement
+   replay is idempotent while that completion is latest; a requested
+   never-activated resume gate is recoverable by same-generation replay without
+   another ledger event, and the replaced acknowledgement cannot activate.
+   Activation replay is idempotent while its gate generation remains current,
+   including after the next pause requests that gate. `SolverState` snapshots round-trip
+   losslessly across repeated pause-resume cycles.
 4. **Estimates state their coverage**: unmodeled ops are listed, their
    wall is excluded, nothing is silently assumed.
 5. **Meters are exact under storm**: concurrent charges accumulate
@@ -246,17 +300,24 @@ Consumers: the P2 marquee demo, the HELM e2e suite (gp3.11).
     commits only its prepared cursors and reports whether another chunk or
     concurrently-created state remains dirty.
 11. **All retained collections are bounded**: session, scope-session,
-    idempotency-key, degradation-event, evidence-preview, pagination, flush
-    row/byte, and ordinal limits are checked before their corresponding state
-    transition. Limit refusal never runs caller work or partially advances a
-    cursor, gate, meter, event stream, or authority binding.
+    operator-authority, idempotency-key, degradation-event plus reserved
+    completion row/ordinal, checkpoint-input, evidence-preview,
+    per-scope/per-governor retained payload, pagination, flush row/byte, and
+    ordinal limits are checked
+    before their corresponding state transition. Limit refusal never runs
+    caller work or partially advances a cursor, gate, meter, event stream, or
+    authority binding.
 
 ## Error model
 
 `SessionError`: `UnknownSession`, `SessionAlreadyOpen`, `InvalidLedgerScope`,
+`InvalidOperatorGrant`, `DuplicateOperatorGrant`,
 `UnknownLedgerScope`, `LedgerScopeSinkMismatch`, `ScopePermitMismatch`,
-`ScopeFlushInFlight`, `LimitExceeded`, `PauseAlreadyPending`, `InvalidResource`,
-`Submission`, `Persistence`. `GemmTuneError`: cancellation with
+`ScopeFlushInFlight`, `LimitExceeded`, `PauseAlreadyPending`,
+`PreRequestedGate`, `PauseRequestMismatch`, `PauseAcknowledgementConflict`,
+`ResumeNotActivated`, `ResumeAcknowledgementMismatch`,
+`ResumeGateAlreadyRequested`, `InvalidResource`, `Submission`, `Persistence`.
+`GemmTuneError`: cancellation with
 the drained numerical report when dispatch began, structured TilePool failure
 with tile provenance and its full report, typed tuner refusal, ledger refusal,
 exact-bit drift with candidate and repeat, `MemoryRefused` with the outer
@@ -325,9 +386,15 @@ refusals; ss-003f two-scope interleaving, independent sink binding, exact scoped
 payload escaping, cross-scope wrong-sink refusal, and per-scope cursor retry.
 ss-003g proves moved handles retain opaque sink identity while independent
 ledgers differ; ss-003h drains a limit+1 batch through bounded atomic chunks;
-ss-011 covers repeated-level-3 no-mutation refusal and bounded checkpoint
-evidence; ss-012 covers exact session/scope/key boundaries and atomic limit+1
-refusal. In-module tests cover exact flush row/byte limits, event/ordinal caps,
+ss-011 covers pending/ready pressure refusal, cross-governor request authority,
+bounded checkpoint evidence, identical response replay, same-generation
+replacement of an externally requested never-activated gate, stale-
+acknowledgement refusal, conflicting evidence refusal, explicit idempotent
+activation, and repeated generations; ss-012
+covers exact session/scope/key boundaries and atomic limit+1 refusal. In-module
+tests cover exact flush row/byte limits, event/ordinal/retained-byte caps,
+concurrent acknowledgement replay, altered-acknowledgement refusal, multiple
+simultaneous reservations,
 pagination, and same-scope in-flight reservation refusal.
 
 `tests/gemm_tune.rs` (bead yqug drills): cold start sweeps once and
@@ -361,10 +428,34 @@ armed and runs when an x86 host picks it up.
 - **The governor meters what it is TOLD** (`Charge` deltas from the
   executor); OS-level resource sampling and per-thread accounting are
   the executor/observability beads' territory.
-- **Degradation steps are orchestration events**: actual arena spilling
-  and adaptive coarsening are fs-alloc/solver behaviors triggered by
-  these events, not implemented here. Pause IS wired (CancelGate +
-  SolverState protocol).
+- **Degradation steps are orchestration events**: actual arena spilling and
+  adaptive coarsening are fs-alloc/solver behaviors triggered by these events,
+  not implemented here. Their v4 phase is therefore `declared`, never
+  `applied`. Pause requests, generational gates, exact request
+  authority, replay, and activation are wired, but the checkpoint claim passed
+  to `acknowledge_pause` is still operator-asserted. fs-session does not yet
+  verify a ledger-minted solver-state artifact or an executor drain receipt, so
+  `Complete` means "the owning orchestrator acknowledged this request," not an
+  independently attested request-drain-finalize proof.
+- **Capability issuance is not authenticated yet**: `CapabilityToken` and the
+  fs-ir projection are caller-constructible declarations. Registration makes a
+  declaration immutable inside one governor, but does not prove an external
+  issuer, entitlement, expiry/revocation policy, dynamic operator binding, or a
+  shared concurrent-core lease. This authority boundary is tracked by
+  `frankensim-authenticate-session-capability-issuance-aeq7`.
+- **Mutator retry and causal replay are incomplete**: `submit_once` and pause
+  acknowledgement are keyed, but raw `charge`, pressure, and session-open calls
+  are not. A lost successful open response can strand the caller without its
+  private flush permit; exact token/gate replay and conflict detection remain
+  required.
+  Submission rows currently carry admission order while meter enforcement
+  commits in completion order; they bind the returned outcome but do not yet
+  contain the commit ordinal and pre/post meter snapshots needed to re-earn a
+  concurrent throttle decision from row order. `submit_once` also accepts raw
+  string keys without retaining an independent request/program digest, so
+  callers must use the canonical helper and the governor cannot yet diagnose a
+  same-key/different-request conflict. This is tracked by
+  `frankensim-retry-idempotent-session-mutations-ujhp`.
 - **Energy is a declared-constant model** (45 W/core), not measured
   power telemetry; the calibration channel is where reality lands.
 - **Idempotency persistence is flush-based**: in-process registry +
