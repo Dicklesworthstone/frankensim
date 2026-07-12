@@ -828,6 +828,7 @@ fn worker_loop<Caps, K: TileKernel>(
                 ctx.budget,
                 ctx.config.mode,
                 ctx.refusal_sink,
+                ctx.lease,
             );
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| ctx.kernel.run(tile, &cx)))
         });
@@ -990,6 +991,11 @@ impl TilePool {
     /// canonical accounting of that admission trace. Thread stacks, allocator
     /// bookkeeping, and arbitrary heap owned directly by kernels or their
     /// outputs are explicitly not claimed.
+    /// The output bound is the sealed admission contract (bead wf9.16.1):
+    /// `K::Out` must be [`crate::LeaseAdmittedOut`], so a heap-bearing
+    /// custom output whose payload is invisible to `size_of` FAILS TO
+    /// COMPILE here. List-shaped outputs use [`crate::Concat`] over
+    /// [`fs_alloc::LeasedVec`]; legacy unleased entries stay unconstrained.
     pub fn run_declared_leased_budgeted<K: TileKernel>(
         &self,
         kernel: &K,
@@ -997,7 +1003,10 @@ impl TilePool {
         run: RunId,
         budget: Budget,
         lease: &fs_alloc::OperationMemoryLease,
-    ) -> (Result<K::Out, RunError>, RunReport) {
+    ) -> (Result<K::Out, RunError>, RunReport)
+    where
+        K::Out: crate::LeaseAdmittedOut,
+    {
         self.run_inner(kernel, gate, run, budget, lease, None::<&asupersync::Cx>)
     }
 
@@ -1038,6 +1047,7 @@ impl TilePool {
     ) -> (Result<K::Out, RunError>, RunReport)
     where
         Caps: Send + Sync + 'static,
+        K::Out: crate::LeaseAdmittedOut,
     {
         self.run_inner(kernel, gate, run, budget, lease, Some(task_cx))
     }
@@ -1614,7 +1624,10 @@ mod tests {
         p: &TilePool,
         cx: &asupersync::Cx,
         kernel: &K,
-    ) -> (Result<K::Out, RunError>, RunReport) {
+    ) -> (Result<K::Out, RunError>, RunReport)
+    where
+        K::Out: crate::LeaseAdmittedOut,
+    {
         p.run_scoped(
             cx,
             kernel,
