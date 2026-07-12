@@ -80,21 +80,15 @@ to a policy-authenticated signature carrying release-purpose intent bound to
 checker protocol and package root. This mapping does not establish checker
 admission and does not claim signer identity, role, authorization, or authorship.
 
-## Package-grounded coverage (bead qmao.6.1)
+## Package-grounded coverage (owned by fs-package)
 
-The static concept↔standard table is a MAPPING, never coverage.
-`package_presence` judges each concept after deny-all package verification, and
-`package_presence_with` accepts explicit origin/artifact capabilities.
-`PackagePresenceReport` and `PackageCoverageReport` are sealed, retain the exact
-package receipt, and bind rows plus mapping context into decision hashes.
-Coverage is `Covered` only for the intersection of mapped and authenticated
-evidence; a mapped concept with absent evidence is `MappedButAbsent`.
-Claim-origin presence requires scientific admission and a successfully invoked
-source/anchor/derivation policy. Waiver authorization requires an authenticated,
-unexpired waiver. Signature coverage requires release-purpose authentication,
-but remains a signature-intent observation rather than checker admission.
-Provenance strings remain absent coverage until a provenance-artifact verifier
-exists. Raw declarations never count.
+This crate provides ONLY the static concept↔standard MAPPING — never coverage.
+Judging which mapped concepts are actually PRESENT in a verified package
+(`package_presence`, `package_presence_with`, `PackagePresenceReport`,
+`PackageCoverageReport`, and the `Covered`/`MappedButAbsent` verdicts) lives in
+`fs-package` (see its CONTRACT, bead qmao.6.1), which consumes this table. None
+of that API exists in fs-crosswalk; this section previously described it here by
+mistake.
 
 ## No-claim boundaries
 
