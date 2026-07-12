@@ -320,14 +320,24 @@ pub fn descend_ir(
     opts: DescentOptions,
     cx: &Cx<'_>,
 ) -> Result<DescentReport, OptError> {
-    let obj = problem.objectives[0];
+    // A problem with no objective or no variable is unsolvable — return a
+    // structured error, never an index panic (`ProblemBuilder` does not
+    // require either, and `descend_ir` is public).
+    let obj = *problem
+        .objectives
+        .first()
+        .ok_or(OptError::IndexOut { index: 0, len: 0 })?;
     let sign = match obj.sense {
         crate::ir::Sense::Minimize => 1.0,
         crate::ir::Sense::Maximize => -1.0,
     };
     // Surface evaluation errors (PDE/stochastic nodes) BEFORE descending.
     eval(problem, obj.node, &[x0.to_vec()])?;
-    let manifold = problem.vars[0].manifold;
+    let manifold = problem
+        .vars
+        .first()
+        .ok_or(OptError::IndexOut { index: 0, len: 0 })?
+        .manifold;
     let f = |x: &[f64]| -> f64 {
         let v = eval(problem, obj.node, &[x.to_vec()]).expect("checked evaluable above");
         sign * v.scalar().expect("objective roots are scalar")

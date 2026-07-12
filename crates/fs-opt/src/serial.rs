@@ -12,37 +12,53 @@ use crate::ir::{
 use fs_qty::Dims;
 use std::fmt::Write as _;
 
-/// Escape a string for single-token embedding.
+/// Escape a string for single-token embedding. Percent-encodes the token
+/// delimiters AND every control / non-ASCII byte, so ANY value (including
+/// multibyte UTF-8) round-trips exactly. Graphic ASCII except `%` passes
+/// through verbatim, so ASCII fields serialize byte-identically to before.
 fn esc(s: &str) -> String {
+    use std::fmt::Write;
     let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '%' => out.push_str("%25"),
-            ' ' => out.push_str("%20"),
-            '\n' => out.push_str("%0A"),
-            _ => out.push(c),
+    for &b in s.as_bytes() {
+        if b.is_ascii_graphic() && b != b'%' {
+            out.push(b as char);
+        } else {
+            let _ = write!(out, "%{b:02X}");
         }
     }
     out
 }
 
+/// Inverse of [`esc`]. Decodes `%XX` on the raw BYTE stream (so a multibyte
+/// value reassembles correctly — the old byte-wise `as char` was a lossy
+/// Latin-1 decode that corrupted every non-ASCII field), and never slices a
+/// `str` at a non-char boundary, so a tampered token cannot panic.
 fn unesc(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let bytes = s.as_bytes();
+    let src = s.as_bytes();
+    let mut bytes = Vec::with_capacity(src.len());
     let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() + 1 && i + 3 <= bytes.len() {
-            let hex = &s[i + 1..i + 3];
-            if let Ok(v) = u8::from_str_radix(hex, 16) {
-                out.push(v as char);
-                i += 3;
-                continue;
-            }
+    while i < src.len() {
+        if src[i] == b'%'
+            && i + 3 <= src.len()
+            && let (Some(hi), Some(lo)) = (hex_nibble(src[i + 1]), hex_nibble(src[i + 2]))
+        {
+            bytes.push((hi << 4) | lo);
+            i += 3;
+            continue;
         }
-        out.push(bytes[i] as char);
+        bytes.push(src[i]);
         i += 1;
     }
-    out
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+fn hex_nibble(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn dims_str(d: Dims) -> String {
@@ -449,5 +465,29 @@ fn parse_expr(b: &mut ProblemBuilder, toks: &[&str], ln: usize) -> Result<NodeId
             b.quantile(of, q, &cfg)
         }
         other => Err(perr(ln, format!("unknown expr kind `{other}`"))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{esc, unesc};
+
+    #[test]
+    fn esc_unesc_round_trips_utf8_and_delimiters() {
+        // Non-ASCII, delimiters, and control bytes must round-trip EXACTLY —
+        // the old byte-wise `as char` decode was a lossy Latin-1 pass that
+        // corrupted every multibyte field (breaking the BITWISE round-trip
+        // contract) and could panic slicing a str at a non-char boundary.
+        for s in ["café", "α+β·γ", "a b\n%c", "π²∇🎯", "plain-ascii_123", "", "100%"] {
+            assert_eq!(unesc(&esc(s)), *s, "round-trip failed for {s:?}");
+        }
+        // ASCII fields keep the exact prior wire format (backward compatible).
+        assert_eq!(esc("a b%c\n"), "a%20b%25c%0A");
+        assert_eq!(unesc("a%20b%25c%0A"), "a b%c\n");
+        // Crafted/truncated tokens must NOT panic (a literal `%` before a
+        // 3-byte char used to split a str mid-character).
+        let _ = unesc("%\u{20AC}x");
+        let _ = unesc("%");
+        let _ = unesc("%2");
     }
 }
