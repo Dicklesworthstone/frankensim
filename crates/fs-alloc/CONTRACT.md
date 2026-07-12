@@ -90,6 +90,16 @@ recorded, sharded object pools, and diffable allocation-site accounting
    first-refusal snapshots, and peaks are schedule/state-sensitive and carry
    no cross-schedule bit-stability claim.
 
+7. `LeasedVec` (bead wf9.16.1) is lease-admitted OWNED storage: its backing
+   buffer is admitted through the operation lease BEFORE the allocator is
+   asked (admission precedes allocation — no over-limit live interval),
+   the RAII charge lives inside the value and releases on drop/unwind,
+   and growth admits the full replacement buffer before reallocating (the
+   old+new concurrent peak is the honest cost). The detached-empty state
+   backs contextless fold identities: charges nothing, refuses growth.
+   Payload bytes are tracked exactly; allocator rounding beyond the
+   `try_reserve_exact`-sized buffer is a no-claim.
+
 ## Error model
 All fallible APIs return `Result<_, AllocError>`; `AllocError` is a
 structured enum (`Exhausted`, `OutOfMemory`, `LeaseExhausted`,

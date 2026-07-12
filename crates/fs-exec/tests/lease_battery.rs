@@ -284,3 +284,102 @@ fn varying_worker_counts_hold_the_lease_invariants() {
         assert!(pool.arena_pool().stats().quiescent());
     }
 }
+
+/// wf9.16.1: a list-shaped output flows through the leased path with its
+/// payload admitted BEFORE allocation via `cx.lease()`, folds through
+/// `Concat`'s detached identity, and every payload charge releases with
+/// the results' drop — the full-run live-set ceiling now covers output
+/// payloads, not just headers.
+struct AdmittedListKernel {
+    tiles: u64,
+}
+
+impl TileKernel for AdmittedListKernel {
+    type Out = fs_exec::Concat<u64>;
+
+    fn tiles(&self) -> TilePlan {
+        TilePlan::new("lease/admitted-list", self.tiles)
+    }
+
+    fn run(&self, tile: u64, cx: &Cx<'_>) -> ControlFlow<Cancelled, Self::Out> {
+        let lease = cx.lease().expect("pool runs carry the operation lease");
+        let mut out = match fs_alloc::LeasedVec::with_capacity(lease, "lease-battery/list", 4) {
+            Ok(out) => out,
+            Err(error) => return ControlFlow::Break(cx.refuse(TileFailure::Allocation(error))),
+        };
+        for i in 0..4u64 {
+            if let Err(error) = out.push(tile * 4 + i) {
+                return ControlFlow::Break(cx.refuse(TileFailure::Allocation(error)));
+            }
+        }
+        ControlFlow::Continue(fs_exec::Concat(out))
+    }
+}
+
+#[test]
+fn admitted_list_outputs_carry_their_payload_charges_through_the_fold() {
+    let pool = small_chunk_pool(2, 0x1EA66);
+    let kernel = AdmittedListKernel { tiles: 4 };
+    let lease = OperationMemoryLease::bounded(1 << 20);
+    let (result, report) = pool.run_declared_leased_budgeted(
+        &kernel,
+        &CancelGate::new(),
+        RunId(7),
+        Budget::INFINITE,
+        &lease,
+    );
+    let merged = result.expect("leased list run");
+    assert_eq!(report.completed, 4);
+    // Deterministic fold order: tiles ascending, each contributing 4
+    // consecutive values.
+    assert_eq!(merged.0.as_slice(), (0..16).collect::<Vec<_>>().as_slice());
+    // The merged output's payload is still lease-charged while owned...
+    assert!(lease.receipt().used_bytes >= 16 * 8);
+    drop(merged);
+    // ...and releases exactly when the caller drops it.
+    assert_eq!(lease.receipt().used_bytes, 0);
+    assert!(pool.arena_pool().stats().quiescent());
+}
+
+/// wf9.16.1: an output-payload admission refusal mid-run is a typed tile
+/// failure that drains and releases, exactly like an arena-chunk refusal.
+#[test]
+fn output_payload_refusal_drains_and_releases() {
+    let pool = small_chunk_pool(1, 0x1EA67);
+    let kernel = AdmittedListKernel { tiles: 2 };
+    // Fit the root metadata but starve the first tile's payload+chunk.
+    let probe = OperationMemoryLease::unbounded();
+    let _ = pool.run_declared_leased_budgeted(
+        &kernel,
+        &CancelGate::new(),
+        RunId(7),
+        Budget::INFINITE,
+        &probe,
+    );
+    let starved = OperationMemoryLease::bounded(probe.receipt().peak_bytes - 1);
+    let (result, _report) = pool.run_declared_leased_budgeted(
+        &kernel,
+        &CancelGate::new(),
+        RunId(7),
+        Budget::INFINITE,
+        &starved,
+    );
+    // One byte under the peak refuses wherever the peak lives: a tile's
+    // payload/chunk admission (typed TileFailed) or the fold's merge
+    // re-admission (the documented ReductionPanicked containment). Both
+    // drain and both release every charge.
+    match result {
+        Err(RunError::TileFailed {
+            failure: TileFailure::Allocation(AllocError::LeaseExhausted { .. }),
+            ..
+        })
+        | Err(RunError::ReductionPanicked { .. }) => {}
+        other => panic!("expected a lease refusal on the starved run, got {other:?}"),
+    }
+    assert_eq!(
+        starved.receipt().used_bytes,
+        0,
+        "every charge releases whether the refusal hit a tile or the fold"
+    );
+    assert!(pool.arena_pool().stats().quiescent());
+}

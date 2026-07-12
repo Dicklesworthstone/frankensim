@@ -37,6 +37,7 @@
 mod arena;
 mod hugepage;
 mod lease;
+mod lease_vec;
 mod pool;
 mod raw;
 
@@ -45,6 +46,7 @@ pub use arena::{
 };
 pub use hugepage::{HUGEPAGE_BYTES, HugepageDecision, HugepageOutcome, HugepagePolicy};
 pub use lease::{LeaseCharge, LeaseReceipt, LeaseRefusal, OperationMemoryLease};
+pub use lease_vec::LeasedVec;
 pub use pool::{PoolItem, ShardStats, ShardedPool, ShardedPoolStats};
 
 /// Crate version, re-exported for provenance stamping (the Five Explicits'

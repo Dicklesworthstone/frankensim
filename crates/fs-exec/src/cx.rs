@@ -227,6 +227,7 @@ pub struct Cx<'s> {
     budget: Budget,
     mode: ExecMode,
     refusals: Option<&'s RefusalSink>,
+    lease: Option<&'s fs_alloc::OperationMemoryLease>,
 }
 
 impl<'s> Cx<'s> {
@@ -246,6 +247,7 @@ impl<'s> Cx<'s> {
             budget,
             mode,
             refusals: None,
+            lease: None,
         }
     }
 
@@ -256,6 +258,7 @@ impl<'s> Cx<'s> {
         budget: Budget,
         mode: ExecMode,
         refusals: &'s RefusalSink,
+        lease: &'s fs_alloc::OperationMemoryLease,
     ) -> Self {
         Cx {
             gate,
@@ -264,7 +267,17 @@ impl<'s> Cx<'s> {
             budget,
             mode,
             refusals: Some(refusals),
+            lease: Some(lease),
         }
+    }
+
+    /// The run's operation memory lease, when this context came from a
+    /// pool run (bead wf9.16.1). Kernels admit output payload storage
+    /// through it (`fs_alloc::LeasedVec::with_capacity(cx.lease()?, ..)`);
+    /// manually constructed contexts have none.
+    #[must_use]
+    pub fn lease(&self) -> Option<&'s fs_alloc::OperationMemoryLease> {
+        self.lease
     }
 
     /// Poll the cancellation gate: the MANDATORY call at tile boundaries

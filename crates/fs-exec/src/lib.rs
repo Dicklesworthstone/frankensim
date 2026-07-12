@@ -35,6 +35,7 @@
 //! See CONTRACT.md for invariants, determinism class, cancellation
 //! behavior, and no-claim boundaries.
 
+mod admit;
 mod cx;
 mod kernel;
 mod kill;
@@ -45,6 +46,7 @@ pub mod reduce;
 pub mod solver;
 mod tune;
 
+pub use admit::{AdmittedStorage, Concat, LeaseAdmittedOut};
 pub use cx::{Budget, CancelGate, Cancelled, Cx, ExecMode, RunId, StreamKey, TileFailure};
 pub use kernel::{Reduce, TileKernel, TilePlan};
 pub use kill::{CandidateId, KillRegistry, UnregisteredKill};

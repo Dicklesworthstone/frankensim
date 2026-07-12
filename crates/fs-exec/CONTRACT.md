@@ -399,15 +399,26 @@ and explicit row/decision commit semantics.
   generic enforcement of its poll/deadline/cost dimensions is NOT claimed:
   kernels must consume the dimensions they understand. Legacy run wrappers
   still supply `Budget::INFINITE`.
-- `run_declared_leased_budgeted` enforces one shared lease over the checked,
-  tracked root-metadata formula and all chunks acquired by its leased arenas.
-  It does NOT claim a full-process or arbitrary-kernel live-set ceiling:
-  thread stacks, allocator metadata/capacity rounding, panic diagnostics, and
-  direct heap allocations inside a kernel or heap-bearing output remain
-  outside the lease until `Cx` grows a lease-aware artifact allocator. The v1
-  mutex-deque stealer's temporary `VecDeque::split_off` transfer buffers are
-  also not yet included: their tight schedule-independent capacity bound or a
-  preallocated/range-based replacement remains follow-up work. None of these
+- `run_declared_leased_budgeted` / `run_scoped` enforce one shared lease over
+  the checked, tracked root-metadata formula, all chunks acquired by their
+  leased arenas, AND output payload storage (bead wf9.16.1): both leased
+  entries bound `K::Out: LeaseAdmittedOut`, the sealed inductive contract
+  (scalars, fixed arrays/tuples of admitted types, `fs_alloc::LeasedVec`
+  of admitted elements, and the `Concat` fold wrapper) under which every
+  owned byte is inline — visible to the slot/fold accounting — or
+  lease-admitted before allocation. A heap-bearing custom output
+  (`Vec`/`String`/opaque payloads invisible to `size_of`) FAILS TO COMPILE
+  on the leased entries (`compile_fail` battery in `admit.rs`); `Vec<T>`
+  keeps its `Reduce` impl for the legacy unleased wrappers only. Kernels
+  admit payloads through `Cx::lease()`; a merge-time re-admission refusal
+  in `Concat` surfaces as the documented `ReductionPanicked` containment
+  with every charge released by the unwind. Still NOT claimed: thread
+  stacks, allocator metadata/capacity rounding, bounded panic-diagnostic
+  strings, and heap a kernel allocates and drops entirely within its own
+  tile body (invisible to any output/arena boundary). The v1 mutex-deque
+  stealer's temporary `VecDeque::split_off` transfer buffers are also not
+  yet included: their tight schedule-independent capacity bound or a
+  preallocated/range-based replacement is wf9.16.2. None of these
   allocations may be described as covered merely because their container
   header or initial entry storage is charged.
 - The latency lane's ≤100 ms conversational guarantee is HELM's gate;
