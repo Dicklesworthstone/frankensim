@@ -14,12 +14,15 @@ about THAT region — no silent promotion to "exact distance".
 
 - `FrepBuilder` → `Frep`: arena-style DAG construction. Node ids are a
   topological order; SHARING a subexpression is reusing its id.
-- Primitives (exact SDFs, L = 1): `sphere`, `half_space`, `box_prim`,
-  `torus` (+z axis), `cylinder` (infinite, +z). Unbounded supports are
+- Primitives (L = 1): exact `sphere`, `half_space`, `box_prim`, and
+  `cylinder` (infinite, +z); `torus` (+z axis) is exact for ring geometry
+  (`major > minor`) and otherwise retains only its exact sign/zero set.
+  Unbounded supports are
   reported as ±`UNBOUNDED_HALF` boxes; intersections shrink them back.
 - Transforms: `translate`, `rotate` (axis-angle Rodrigues; GA motors
   join with fs-ga), `scale` (uniform, SDF-preserving `s·f(p/s)`),
-  `offset` (dilation exact; erosion conservative).
+  `offset` (exact sign/zero set; magnitude remains conservative until a reach
+  certificate proves exact-distance preservation).
 - `boolean(op, style, a, b)` with `BoolOp::{Union, Intersect,
   Difference}` × `BoolStyle::{Hard, Blend{radius}}`. Every op routes
   through ONE smooth/hard min via sign flips (difference is
@@ -43,11 +46,15 @@ about THAT region — no silent promotion to "exact distance".
   `d_value_d_param` is the Jacobian action (symmetric FD v1 — see
   no-claims).
 - `Chart` impl: composed Lipschitz bound in every sample; certificate
-  honesty — pure rigid/dilation chains stamp `Exact`, anything with a
-  Boolean or erosion stamps `Estimate` (the value is a conservative
+  honesty — pure sphere/half-space/cylinder/box/valid-ring-torus chains under
+  rigid/uniform-scale transforms stamp `Exact`;
+  spindle tori, offsets, and anything with a Boolean stamp `Estimate` (the value is a conservative
   bound: exact SIGN, `|f(p)| ≤ dist(p, ∂Ω)` — exactly the
-  sphere-tracing safety contract); `differentiability()` reports C1
-  only for kink-free DAGs (no hard Booleans, no box edges).
+  sphere-tracing safety contract). The matching typed
+  `Chart::trace_step_claim()` is `ExactDistance` for the exact chains and
+  `LipschitzImplicit` for composites; the latter certifies safe steps and the
+  zero set, not a geometric-distance upper bound. `differentiability()`
+  reports C1 only for kink-free DAGs (no hard Booleans, no box edges).
 
 ## Invariants
 
@@ -114,7 +121,9 @@ reimplementation must pass the suite unchanged.
 
 - The composite field's MAGNITUDE is a one-sided conservative bound,
   not the exact distance; samples say `Estimate` on purpose. Per-query
-  rigorous sd enclosures join with fs-ivl.
+  rigorous sd enclosures join with fs-ivl. Accordingly a renderer's
+  `|f|/L` termination is a normalized-residual hit, not a certified Euclidean
+  distance-to-boundary enclosure.
 - The local interval kit rounds to nearest, not outward (frep-001
   carries 1e-9 fp slack); unification with fs-ivl's outward-rounded
   types is the tightening path.

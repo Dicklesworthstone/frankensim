@@ -17,20 +17,24 @@
 //!   (smooth min with radius `r`): C¹ everywhere, weights sum to one, and
 //!   the radius is a DESIGN LEVER (`(fillet :r 3mm)` is a blend radius).
 //!
-//! Honesty of the field: every primitive here is an exact SDF and every
-//! node preserves `L ≤ max(L_children)`, so the composed field is
-//! 1-Lipschitz and vanishes on its own region's boundary — hence
+//! Honesty of the field: valid sphere/half-space/cylinder/box primitives and
+//! ring tori carry exact-distance semantics; horn/spindle tori, offsets, and
+//! Boolean composites explicitly downgrade magnitude exactness. Every valid
+//! node preserves its recorded Lipschitz composition rule and vanishes on its
+//! own region's boundary — hence
 //! `|f(p)| ≤ dist(p, ∂Ω)` with the EXACT sign. That one-sided conservative
 //! bound is precisely the sphere-tracing safety contract; the magnitude
 //! is NOT the exact distance once a Boolean or erosion is involved, so
 //! composite samples carry an `Estimate` certificate (see CONTRACT.md
-//! no-claims), while pure rigid/dilation chains stay `Exact`.
+//! no-claims). Only primitive paths proven by `is_exact` stay `Exact`.
 
 mod ival;
 
 use fs_evidence::NumericalCertificate;
 use fs_exec::Cx;
-use fs_geom::{Aabb, BettiBounds, Chart, ChartSample, Differentiability, Point3, Vec3};
+use fs_geom::{
+    Aabb, BettiBounds, Chart, ChartSample, Differentiability, Point3, TraceStepClaim, Vec3,
+};
 
 /// Crate version, re-exported for provenance stamping.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -92,7 +96,9 @@ pub enum Node {
         /// Half extents (all > 0).
         half: Vec3,
     },
-    /// Exact torus SDF, axis +z through `center`.
+    /// Torus implicit field, axis +z through `center`. It is an exact signed
+    /// distance for ring tori (`major > minor`); horn/spindle tori retain the
+    /// same exact sign/zero set but only the Lipschitz-implicit trace claim.
     Torus {
         /// Center.
         center: Point3,
@@ -132,8 +138,9 @@ pub enum Node {
         /// Scale factor (> 0).
         factor: f64,
     },
-    /// Offset surface `f − distance` (dilation for `distance > 0` —
-    /// exact; erosion for `< 0` — conservative).
+    /// Offset surface `f − distance`. Its sign/zero set is exact, but without
+    /// a reach certificate neither dilation nor erosion is promoted to an
+    /// exact signed distance.
     Offset {
         /// Child node.
         child: NodeId,
@@ -650,7 +657,7 @@ impl Frep {
     }
 
     /// Composed Lipschitz bound of the field (valid everywhere; frep-002
-    /// hunts for violations). Primitives are exact SDFs (L = 1); rigid
+    /// hunts for violations). Primitive fields are unit-Lipschitz; rigid
     /// motions, uniform scale, offsets, and both Boolean styles all
     /// preserve `L ≤ max(L_children)` (the blend's weights are convex).
     #[must_use]
@@ -687,13 +694,14 @@ impl Frep {
         })
     }
 
-    /// True when the field is the EXACT signed distance (pure primitive +
-    /// rigid motion + uniform scale + dilation chain — no Booleans, no
-    /// erosion).
+    /// True when the field is the EXACT signed distance (a valid ring primitive
+    /// under rigid motion and uniform scale, with no Boolean or offset that
+    /// would require a reach certificate).
     fn is_exact(&self) -> bool {
         self.nodes.iter().all(|n| match n {
             Node::Bool { .. } => false,
-            Node::Offset { distance, .. } => *distance >= 0.0,
+            Node::Offset { .. } => false,
+            Node::Torus { major, minor, .. } => major > minor,
             _ => true,
         })
     }
@@ -1034,6 +1042,14 @@ impl Chart for Frep {
 
     fn support(&self) -> Aabb {
         self.support
+    }
+
+    fn trace_step_claim(&self) -> TraceStepClaim {
+        if self.is_exact() {
+            TraceStepClaim::ExactDistance
+        } else {
+            TraceStepClaim::LipschitzImplicit
+        }
     }
 
     fn topology_hint(&self) -> BettiBounds {
