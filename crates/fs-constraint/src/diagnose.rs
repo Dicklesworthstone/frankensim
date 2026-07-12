@@ -55,6 +55,13 @@ impl Lcg {
 /// Feasibility tolerance for the elastic optimum.
 pub(crate) const FEAS_TOL: f64 = 1e-6;
 
+/// Penalty charged for a NON-FINITE constraint value (design point outside the
+/// constraint's domain). Large enough to dominate any legitimate violation so
+/// the elastic optimum treats the domain hole as maximally infeasible, but
+/// finite so the finite-difference subgradient stays defined and steers descent
+/// away from it (a raw `NaN.max(0.0)` would DROP the NaN and count it as 0).
+const NONFINITE_PENALTY: f64 = 1e30;
+
 /// Minimize `Σ max(gᵢ(x), 0)` over the box: multi-start projected
 /// subgradient descent (deterministic). Small-fixture machinery — the
 /// production restoration solver is a later ASCENT bead.
@@ -74,7 +81,12 @@ pub fn elastic_solve(
     let total = |x: &[f64], evals: &mut u64| -> Result<f64, ConError> {
         let mut t = 0.0;
         for &i in &active {
-            t += scalar_at(problem, specs[i].node, x)?.max(0.0);
+            let gi = scalar_at(problem, specs[i].node, x)?;
+            t += if gi.is_finite() {
+                gi.max(0.0)
+            } else {
+                NONFINITE_PENALTY
+            };
             *evals += 1;
         }
         Ok(t)
@@ -259,7 +271,11 @@ fn feasible_fraction(
                 continue;
             }
             let slack = relax.iter().find(|(j, _)| *j == i).map_or(0.0, |(_, s)| *s);
-            if scalar_at(problem, spec.node, &x)? > slack {
+            // A non-finite constraint value is undefined here, hence NOT feasible
+            // — `NaN > slack` is false, which would otherwise count the sample as
+            // feasible and inflate the feasibility estimate.
+            let gi = scalar_at(problem, spec.node, &x)?;
+            if !gi.is_finite() || gi > slack {
                 ok = false;
                 break;
             }

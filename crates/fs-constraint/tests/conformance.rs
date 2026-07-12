@@ -602,3 +602,48 @@ const _: () = {
         d.to_json(s)
     }
 };
+
+#[test]
+fn a_non_finite_constraint_value_is_never_certified_feasible() {
+    // Regression: a design point OUTSIDE a constraint's domain (here `sqrt` of a
+    // negative argument -> NaN) must be maximally VIOLATED, never Satisfied.
+    // Every IEEE comparison with NaN is false, so the old status ladder fell
+    // through to `Satisfied` and `NaN.max(0.0) == 0.0` attached an EXACT
+    // zero-violation certificate -- certifying an undefined constraint as
+    // strictly feasible (a false certificate).
+    let mut b = ProblemBuilder::new();
+    let v = b.var("x", Manifold::Rn { dim: 1 }, Dims::NONE);
+    let vr = b.var_ref(v).expect("ref");
+    let x0 = b.component(vr, 0).expect("x0");
+    let g = b.sqrt(x0).expect("sqrt"); // g = sqrt(x0): NaN for x0 < 0
+    let obj = b.norm_sq(vr).expect("obj");
+    b.objective(obj, fs_opt::Sense::Minimize, 1.0).expect("o");
+    let problem = b.finish();
+    let spec = hard("domain", g);
+
+    // Out-of-domain point (x0 = -0.5 -> sqrt = NaN): must be Violated, never
+    // Satisfied, with a positive (infinite) violation.
+    let nan_ev = evaluate(&problem, &spec, &[-0.5], None).expect("evaluate returns Ok");
+    assert!(
+        matches!(nan_ev.status, Status::Violated),
+        "a non-finite constraint must be Violated, got {:?}",
+        nan_ev.status
+    );
+    assert!(
+        nan_ev.violation > 0.0,
+        "a non-finite constraint must report a positive violation, got {}",
+        nan_ev.violation
+    );
+    // A finite in-domain point still classifies with a FINITE violation.
+    let finite_ev = evaluate(&problem, &spec, &[4.0], None).expect("evaluate returns Ok");
+    assert!(
+        finite_ev.violation.is_finite(),
+        "a finite constraint value must yield a finite violation, got {}",
+        finite_ev.violation
+    );
+    verdict(
+        "fscon-nonfinite",
+        matches!(nan_ev.status, Status::Violated) && finite_ev.violation.is_finite(),
+        "a NaN (out-of-domain) constraint is Violated, not a feasible exact-0 certificate",
+    );
+}

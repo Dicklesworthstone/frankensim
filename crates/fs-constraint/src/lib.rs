@@ -356,8 +356,18 @@ pub fn evaluate(
     noise: Option<&dyn Fn(u64) -> Vec<f64>>,
 ) -> Result<ConstraintEvidence, ConError> {
     let g = scalar_at(problem, spec.node, x)?;
-    let violation = g.max(0.0);
-    let base_status = if g > spec.active_tol {
+    // A non-finite g means the design point is OUTSIDE the constraint's domain
+    // (ln/sqrt/reciprocal of an out-of-range argument evaluates to NaN/±∞).
+    // Every IEEE comparison with NaN is false, so the ladder below would fall
+    // through to `Satisfied` and `g.max(0.0)` (which DROPS NaN) would report an
+    // EXACT zero violation — certifying an undefined Hard/Soft constraint as
+    // strictly feasible. Fail closed: an undefined constraint is maximally
+    // violated. (The Chance/Robust arms below re-derive their own verdict from
+    // sampling / interval evaluation, both already fail-closed, and overwrite
+    // this base status, so guarding here is safe for every kind.)
+    let finite = g.is_finite();
+    let violation = if finite { g.max(0.0) } else { f64::INFINITY };
+    let base_status = if !finite || g > spec.active_tol {
         Status::Violated
     } else if g >= -spec.active_tol {
         Status::Active
