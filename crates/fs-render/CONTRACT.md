@@ -92,6 +92,24 @@ the same Ambition-Tag rule as `chart-backends`.
 `differentiable` (bead qfx.5) gates the edge-aware differentiable
 renderer (fs-ad + fs-math dependencies), same Ambition-Tag rule.
 
+`tracer` (bead 872c) gates the spectral path tracer v1
+(chart-backends + fs-rand + fs-img): hero-wavelength (4-packet)
+NEE+MIS path integration, Lambertian + GGX with spectral reflectance
+(the `spectral` module's bounded sigmoid lift; round-trip RGB error
+pinned under 1e-3), one rect area light per scene, CIE-XYZ film →
+Bradford-adapted linear sRGB → byte-exact EXR. Streams are
+counter-based and keyed (pixel, sample, dimension) — Philox for path
+decisions, optional Owen-scrambled Sobol' for pixel dimensions
+(measured at 64 spp on the Cornell fixture: variance ratio 0.676 vs
+iid, ledgered on bead 872c) — so images are bitwise invariant to any
+pixel/tile scheduling and progressive checkpoints resume bitwise.
+Radiance-path transcendentals go through `fs_math::det`; the Cornell
+golden (`fs-render:cornell` in golden-couplings.json) reproduced
+identically in all four ISA/profile quadrants at freeze. v1 no-claims:
+single NEE light, no volumetric coupling, no environment light, no
+Russian roulette, GGX samples the NDF (VNDF is a recorded follow-up),
+emitters do not reflect.
+
 ## Conformance tests
 
 `tests/render.rs` (7 cases): radical inverse known values; cosine samples are
