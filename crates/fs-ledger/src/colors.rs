@@ -3089,16 +3089,17 @@ mod tests {
     }
 
     fn strict_lower_hex(value: &str) -> Option<Vec<u8>> {
-        if value.len() % 2 != 0
+        if !value.len().is_multiple_of(2)
             || !value
                 .bytes()
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         {
             return None;
         }
-        value
-            .as_bytes()
-            .chunks_exact(2)
+        let (pairs, remainder) = value.as_bytes().as_chunks::<2>();
+        debug_assert!(remainder.is_empty());
+        pairs
+            .iter()
             .map(|pair| {
                 core::str::from_utf8(pair)
                     .ok()
@@ -3108,6 +3109,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One canonical schema-v7 reconstruction and tamper story.
     fn schema_v7_rows_reconstruct_exact_node_hash_payloads() {
         let mut graph = ColorGraph::new();
         let estimated_base = graph

@@ -1626,15 +1626,11 @@ fn col_012_sources_are_minted_from_origin_evidence() {
             rejection: SourceOriginRejection::RegimeMismatch
         })
     ));
-    let empty_regime_color = Color::Validated {
-        regime: ValidityDomain::unconstrained(),
-        dataset: "wind-tunnel-a".to_string(),
-    };
     assert!(matches!(
         admitted_source(
             &mut graph,
             "empty-regime",
-            &empty_regime_color,
+            &validated,
             SourceOrigin::Anchoring {
                 dataset_id: "wind-tunnel-a".to_string(),
                 content_hash: hash_bytes(b"campaign-a"),
@@ -1651,15 +1647,11 @@ fn col_012_sources_are_minted_from_origin_evidence() {
         ValidityDomain::unconstrained().with("re", f64::NAN, 1.0),
         ValidityDomain::unconstrained().with("re", 0.0, f64::INFINITY),
     ] {
-        let bad_color = Color::Validated {
-            regime: bad_regime.clone(),
-            dataset: "wind-tunnel-a".to_string(),
-        };
         assert!(matches!(
             admitted_source(
                 &mut graph,
                 "bad-regime",
-                &bad_color,
+                &validated,
                 SourceOrigin::Anchoring {
                     dataset_id: "wind-tunnel-a".to_string(),
                     content_hash: hash_bytes(b"campaign-a"),
@@ -1671,15 +1663,11 @@ fn col_012_sources_are_minted_from_origin_evidence() {
             })
         ));
     }
-    let placeholder_dataset_color = Color::Validated {
-        regime: regime.clone(),
-        dataset: "pending".to_string(),
-    };
     assert!(matches!(
         admitted_source(
             &mut graph,
             "placeholder-dataset",
-            &placeholder_dataset_color,
+            &validated,
             SourceOrigin::Anchoring {
                 dataset_id: "pending".to_string(),
                 content_hash: hash_bytes(b"campaign-a"),
@@ -1690,15 +1678,11 @@ fn col_012_sources_are_minted_from_origin_evidence() {
             rejection: SourceOriginRejection::BlankDataset
         })
     ));
-    let padded_dataset_color = Color::Validated {
-        regime: regime.clone(),
-        dataset: "wind-tunnel-a ".to_string(),
-    };
     assert!(matches!(
         admitted_source(
             &mut graph,
             "padded-dataset",
-            &padded_dataset_color,
+            &validated,
             SourceOrigin::Anchoring {
                 dataset_id: "wind-tunnel-a ".to_string(),
                 content_hash: hash_bytes(b"campaign-a"),
@@ -2247,6 +2231,7 @@ fn col_015c_source_artifact_and_policy_are_hash_bound() {
 /// graph cannot later replay. The validity-axis bound is checked before the
 /// injected verifier, and the accepted prefix still passes replay.
 #[test]
+#[allow(clippy::too_many_lines)] // One ordered proof that structure precedes authority callbacks.
 fn col_015d_typed_source_structure_precedes_authority() {
     let mut oversized_regime = ValidityDomain::unconstrained();
     for axis in 0..=MAX_VALIDITY_AXES {

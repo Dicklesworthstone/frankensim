@@ -3292,6 +3292,7 @@ impl Ledger {
     ///
     /// # Errors
     /// Engine errors.
+    #[allow(clippy::too_many_lines)] // One ordered, bounded cross-table hygiene report.
     pub fn lint(&self) -> Result<LintReport, LedgerError> {
         let _ = self.checked_instance_id()?;
         let count = |sql: &str, context: &str| -> Result<u64, LedgerError> {
