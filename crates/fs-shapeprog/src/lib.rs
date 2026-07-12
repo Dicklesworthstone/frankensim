@@ -293,10 +293,38 @@ fn rewrite_pass(g: &Geom, tol: f64, log: &mut Vec<Rewrite>) -> Geom {
             Box::new(rewrite_pass(a, tol, log)),
             Box::new(rewrite_pass(b, tol, log)),
         ),
-        Geom::Offset { child, radius } => Geom::Offset {
-            child: Box::new(rewrite_pass(child, tol, log)),
-            radius: *radius,
-        },
+        Geom::Offset { child, radius } => {
+            // Flatten a consecutive offset chain into ONE offset (radius = Σrᵢ)
+            // BEFORE recursing, so the tiny-offset drop below sees the composed
+            // whole. Composition is EXACT, and the SUM is what a subsequent
+            // `drop-tiny-offset` must certify. The old bottom-up recursion
+            // dropped each nested tiny offset independently (each below `tol`),
+            // shifting the SDF by Σ|rᵢ| while `simplify`'s `max_error` folds the
+            // per-drop bounds by MAX — so e.g. two 0.006 offsets under a 0.01
+            // tol truly shift 0.012 yet reported a 0.006 bound: an UNSOUND
+            // safety certificate (`max_sdf_discrepancy ≤ max_error` violated).
+            // Composing first means a chain summing to ≥ tol is retained EXACTLY
+            // (never dropped), and a chain summing to < tol is a single drop
+            // whose bound |Σrᵢ| is a true error bound.
+            let mut total = *radius;
+            let mut base: &Geom = child;
+            let mut composed = false;
+            while let Geom::Offset { child: inner, radius: r } = base {
+                total += *r;
+                base = inner;
+                composed = true;
+            }
+            if composed {
+                log.push(Rewrite {
+                    rule: "offset-compose",
+                    certificate: Certificate::Exact,
+                });
+            }
+            Geom::Offset {
+                child: Box::new(rewrite_pass(base, tol, log)),
+                radius: total,
+            }
+        }
         Geom::Translate { child, t } => Geom::Translate {
             child: Box::new(rewrite_pass(child, tol, log)),
             t: *t,

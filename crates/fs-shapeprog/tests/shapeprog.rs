@@ -91,6 +91,39 @@ fn a_certified_approximate_rewrite_stays_within_its_bound() {
 }
 
 #[test]
+fn stacked_tiny_offsets_do_not_forge_a_safety_certificate() {
+    // Regression: two offsets each below `tol` were dropped INDEPENDENTLY
+    // (bottom-up), so the SDF shifted by their SUM (0.012) while `max_error`
+    // only folded the per-drop bounds by MAX (0.006) — a false certificate
+    // (max_sdf_discrepancy 0.012 > max_error 0.006). Composing first, a chain
+    // whose radii sum to >= tol is RETAINED exactly.
+    let pre = Geom::sphere(1.0).offset(0.006).offset(0.006);
+    let out = simplify(&pre, 0.01);
+    assert_eq!(out.program, Geom::sphere(1.0).offset(0.012));
+    assert!(
+        (out.max_error - 0.0).abs() < 1e-15,
+        "a retained (composed) chain has zero error, got {}",
+        out.max_error
+    );
+    assert!(
+        max_sdf_discrepancy(&pre, &out.program, &grid()) <= out.max_error + 1e-12,
+        "the headline safety invariant must hold"
+    );
+
+    // A chain whose radii sum BELOW tol is a single drop; its bound is the SUM,
+    // and the discrepancy respects it.
+    let pre2 = Geom::sphere(1.0).offset(0.003).offset(0.003);
+    let out2 = simplify(&pre2, 0.01);
+    assert_eq!(out2.program, Geom::sphere(1.0));
+    assert!(
+        (out2.max_error - 0.006).abs() < 1e-12,
+        "the drop bound is the summed radius, got {}",
+        out2.max_error
+    );
+    assert!(max_sdf_discrepancy(&pre2, &out2.program, &grid()) <= out2.max_error + 1e-12);
+}
+
+#[test]
 fn canonicalization_deduplicates_commutative_programs() {
     let a = Geom::sphere(1.0);
     let b = Geom::cube(2.0);
