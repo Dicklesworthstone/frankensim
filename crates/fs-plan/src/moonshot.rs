@@ -61,7 +61,15 @@ pub fn optimize_exact(problem: &AllocProblem, grid: usize) -> Option<Plan> {
                     // Ceil-bucket the cost (conservative: never
                     // understates wall-clock).
                     let buckets = (s.cost / step).ceil() as usize;
-                    let nb = b + buckets;
+                    // `buckets` saturates to usize::MAX when a setting's cost
+                    // dwarfs `step` (or `step == 0` from a zero budget, giving
+                    // cost/step = +inf), so a plain `b + buckets` OVERFLOWS —
+                    // a debug/test panic, or a release wrap that poisons a valid
+                    // bucket with a huge-cost setting (spurious infeasible).
+                    // Such a setting cannot fit; skip it via a checked add.
+                    let Some(nb) = b.checked_add(buckets) else {
+                        continue;
+                    };
                     if nb > grid {
                         continue;
                     }

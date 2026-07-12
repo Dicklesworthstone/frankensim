@@ -212,3 +212,28 @@ fn ms_004_scoreboard_v2_beats_hand_on_fixtures() {
         ),
     );
 }
+
+/// ms-006: a setting whose cost dwarfs the bucket step must not overflow the
+/// knapsack DP — it simply never fits. Regression for `b + buckets` where
+/// `buckets` saturated to usize::MAX (debug/test panic; release wrap poisoning
+/// a valid bucket with the huge-cost setting → spurious infeasible).
+#[test]
+fn ms_006_huge_cost_setting_does_not_overflow_the_dp() {
+    let knobs = vec![
+        Knob::new("a", 0, vec![ks("a0", 1.0, 1.0), ks("a1", 0.5, 2.0)]).expect("knob a"),
+        Knob::new("b", 0, vec![ks("b0", 1.0, 1.0), ks("b_huge", 0.1, 1e20)]).expect("knob b"),
+    ];
+    let problem = AllocProblem {
+        knobs,
+        budget_s: 6.0,
+        error_target: 0.0,
+    };
+    // Old code panicked here on the usize overflow; the unaffordable setting is
+    // now skipped and a plan over the affordable settings is returned.
+    let plan = optimize_exact(&problem, 64);
+    verdict(
+        "ms-006",
+        plan.is_some(),
+        "1e20-cost knob is skipped; a feasible plan over affordable settings is returned",
+    );
+}
