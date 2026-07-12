@@ -204,27 +204,34 @@ impl Mesh {
             Sign::Positive => true,
             Sign::Negative => false,
             Sign::Zero => {
-                // Project along a fixed axis order; the first
-                // non-degenerate projection decides (exact 2D ladder).
-                for drop in [2usize, 0, 1] {
-                    let q = |v: [f64; 3]| -> [f64; 2] {
-                        match drop {
-                            2 => [v[0], v[1]],
-                            0 => [v[1], v[2]],
-                            _ => [v[2], v[0]],
-                        }
-                    };
-                    return match fs_ivl::orient2d(q(a), q(b), q(c)) {
-                        Sign::Zero => continue,
-                        Sign::Positive => {
-                            fs_ivl::incircle(q(a), q(b), q(c), q(p)) == Sign::Positive
-                        }
-                        Sign::Negative => {
-                            fs_ivl::incircle(q(a), q(c), q(b), q(p)) == Sign::Positive
-                        }
-                    };
-                }
-                false // degenerate hull facet cannot exist
+                // `p` is EXACTLY coplanar with the hull facet (a, b, c), so the
+                // ghost's "circumsphere" degenerates to the halfspace closed by
+                // the facet's IN-PLANE circumdisk; test `p` against that circle
+                // EXACTLY. Every sphere through a, b, c meets the facet plane in
+                // that same circumcircle, so lifting with the facet normal
+                // `n = (b-a)×(c-a)` gives an apex strictly off the plane (n ≠ 0
+                // for a non-degenerate facet) and reuses the exact `insphere`
+                // predicate. `insphere`'s sign is relative to `orient3d(a,b,c,apex)`
+                // (positively-oriented ⇒ Positive-is-inside; negatively-oriented
+                // flips), so `p` is strictly inside the disk — a conflict — iff the
+                // two predicates AGREE. `insphere == Zero` (p exactly on the circle)
+                // disagrees with the nonzero orientation ⇒ NOT a conflict, matching
+                // the cospherical-tie convention above.
+                //
+                // The previous axis-drop 2D projection was exact ONLY for
+                // axis-aligned facets: a tilted facet's parallel projection is not
+                // an isometry, so it maps the circumcircle to an ellipse and flips
+                // the in-circle decision, producing silently non-Delaunay meshes on
+                // coplanar inputs (tilted flats, lattices, collinear runs + apex).
+                let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+                let ac = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+                let n = [
+                    ab[1] * ac[2] - ab[2] * ac[1],
+                    ab[2] * ac[0] - ab[0] * ac[2],
+                    ab[0] * ac[1] - ab[1] * ac[0],
+                ];
+                let apex = [a[0] + n[0], a[1] + n[1], a[2] + n[2]];
+                insphere(a, b, c, apex, p) == orient3d(a, b, c, apex)
             }
         }
     }

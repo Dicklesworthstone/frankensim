@@ -215,6 +215,89 @@ fn tmesh_002_degeneracy_battery() {
 /// runs; relabeling invariance (same GEOMETRIC tet set under a vertex
 /// permutation); exact G3 equivariance under a dyadic translation.
 #[test]
+fn tmesh_002b_tilted_coplanar_delaunay_is_exact() {
+    // Regression: `ghost_conflict` decided a coplanar query's in-circle
+    // membership against a hull facet by dropping a coordinate axis and running
+    // 2D incircle. On a TILTED facet that parallel projection is not an isometry
+    // — it maps the circumcircle to an ellipse and flips the in-circle decision,
+    // producing valid-topology-but-NON-DELAUNAY meshes (empty-circumsphere
+    // invariant violated) on coplanar inputs. Both integer reproducers below
+    // failed the exact audit before the insphere-with-lifted-apex fix; the
+    // tilted-coplanar case was previously untested (only solid axis-aligned
+    // grids exercised the coplanar path, where the axis-drop happens to be exact).
+    with_cx(|cx| {
+        let build = |pts: &[[f64; 3]]| -> Vec<Point3> {
+            pts.iter().map(|p| Point3::new(p[0], p[1], p[2])).collect()
+        };
+        // Tilted flat (base on plane x + z = 0) plus apexes.
+        let tilted = build(&[
+            [1.0, -1.0, -1.0],
+            [0.0, -4.0, 0.0],
+            [-5.0, -1.0, 5.0],
+            [1.0, -2.0, -1.0],
+            [5.0, 2.0, -5.0],
+            [-4.0, -2.0, 4.0],
+            [1.0, -3.0, 5.0],
+            [0.0, -2.0, 5.0],
+        ]);
+        // Axis-aligned base with a collinear run that induces tilted hull facets.
+        let collinear_run = build(&[
+            [1.0, 2.0, 0.0],
+            [-3.0, -5.0, 0.0],
+            [0.0, -4.0, 0.0],
+            [4.0, 5.0, 0.0],
+            [-1.0, 2.0, 0.0],
+            [2.0, 1.0, 0.0],
+            [-5.0, 2.0, 0.0],
+            [-5.0, -2.0, 0.0],
+            [0.0, 3.0, 6.0],
+            [-3.0, 3.0, 2.0],
+            [0.0, 0.0, 5.0],
+            [0.0, 0.0, 7.0],
+        ]);
+        let rep_a = delaunay(&tilted, cx).expect("tilted builds").audit(true);
+        let rep_b = delaunay(&collinear_run, cx)
+            .expect("collinear-run builds")
+            .audit(true);
+
+        // Seeded sweep: seven base points EXACTLY on the tilted plane x + z = 0
+        // (z = -x, so every base pair is coplanar bitwise) plus four off-plane
+        // apexes — the exact tilted-coplanar configuration the old projection
+        // mishandled. Every built mesh must pass the exact empty-sphere audit.
+        let mut seed = Lcg(0x7115_ED00_C0B1_A11E);
+        let coord = |s: &mut Lcg| -> f64 { ((s.next() >> 40) % 13) as f64 - 6.0 };
+        let (mut sweep_clean, mut sweep_total) = (0u32, 0u32);
+        for _ in 0..300 {
+            let mut pts: Vec<Point3> = Vec::new();
+            for _ in 0..7 {
+                let x = coord(&mut seed);
+                let y = coord(&mut seed);
+                pts.push(Point3::new(x, y, -x));
+            }
+            for _ in 0..4 {
+                let x = coord(&mut seed);
+                let y = coord(&mut seed);
+                let z = -x + (coord(&mut seed) + 7.0); // strictly off plane x+z=0
+                pts.push(Point3::new(x, y, z));
+            }
+            if let Ok(t) = delaunay(&pts, cx) {
+                sweep_total += 1;
+                sweep_clean += u32::from(t.audit(true).clean());
+            }
+        }
+
+        verdict(
+            "tmesh-002b",
+            rep_a.clean() && rep_b.clean() && sweep_clean == sweep_total && sweep_total > 200,
+            &format!(
+                "tilted + collinear-run reproducers audit-clean; {sweep_clean}/{sweep_total} \
+                 tilted-coplanar (x+z=0) sweep configs pass the exact empty-sphere audit"
+            ),
+        );
+    });
+}
+
+#[test]
 fn tmesh_003_determinism_relabeling_translation() {
     with_cx(|cx| {
         let pts = cloud(0x1001_2026_0706_0023, 150);
