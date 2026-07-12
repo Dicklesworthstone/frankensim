@@ -102,3 +102,5 @@ frankensim_illustration.png
 
 # Beads compliance audit dir (managed by /beads-compliance-and-completion-verification skill)
 /beads_compliance_audit/
+# br doctor per-run artifacts
+.doctor/
