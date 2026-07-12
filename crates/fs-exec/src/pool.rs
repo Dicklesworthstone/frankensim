@@ -758,10 +758,36 @@ fn mul_ratio_floor(value: u64, numerator: u128, denominator: u128) -> u64 {
     u64::try_from(quotient).expect("a ratio no greater than one cannot exceed its u64 multiplicand")
 }
 
-/// Everything one worker's loop touches, bundled so the two launch
-/// harnesses — `std::thread::scope` and asupersync's `Cx::scoped_cpu`
-/// (bead lx0e) — drive the IDENTICAL protocol: seed deques, steal-half,
-/// drain-on-cancel, per-tile panic containment. One loop, two scopes.
+/// Worker-lifetime strategy for one run: spawn into a fresh std scope,
+/// spawn as scoped-CPU children of the calling task (bead lx0e), or
+/// dispatch to an already-parked crew (bead tkr7). All three drive
+/// [`worker_loop`], so results are bitwise-identical across strategies
+/// by construction (P2).
+enum Launch<'a, Caps: 'static> {
+    OwnScope,
+    TaskScope(&'a asupersync::Cx<Caps>),
+    Crew(&'a crate::crew::Crew<Caps>),
+}
+
+// Manual impls: every variant is a reference (or unit), so Launch is Copy
+// regardless of whether Caps itself is — the derive would demand
+// `Caps: Copy` spuriously.
+impl<Caps: 'static> Clone for Launch<'_, Caps> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<Caps: 'static> Copy for Launch<'_, Caps> {}
+
+/// Caps stand-in for launches that carry no task context.
+type NoTask = asupersync::cx::cap::All;
+
+/// Everything one worker's loop touches, bundled so the launch
+/// harnesses — `std::thread::scope`, asupersync's `Cx::scoped_cpu`
+/// (bead lx0e), and the parked crew (bead tkr7) — drive the IDENTICAL
+/// protocol: seed deques, steal-half, drain-on-cancel, per-tile panic
+/// containment. One loop, three worker-lifetime strategies.
 struct WorkerCtx<'a, K: TileKernel> {
     kernel: &'a K,
     kernel_id: u64,
@@ -895,12 +921,15 @@ fn worker_loop<Caps, K: TileKernel>(
 }
 
 /// The throughput-lane pool. Workers are scoped per run (spawned at `run`,
-/// joined before it returns) so kernel borrows need no `'static` — the
-/// persistent-parked-worker optimization is deferred with the lock-free
-/// deques (CONTRACT no-claims). Two launch harnesses share one worker
-/// protocol: the std lane (`run`/`run_declared*`) and the asupersync lane
-/// ([`TilePool::run_scoped`], bead lx0e), where workers are scoped CPU
-/// children of the calling task via `Cx::scoped_cpu`.
+/// joined before it returns) so kernel borrows need no `'static`; callers
+/// with many small runs park a crew once instead
+/// ([`TilePool::with_parked_crew`], bead tkr7) — the lock-free deques
+/// remain deferred (CONTRACT no-claims). Three launch harnesses share one
+/// worker protocol: the std lane (`run`/`run_declared*`), the asupersync
+/// lane ([`TilePool::run_scoped`], bead lx0e) where workers are scoped
+/// CPU children of the calling task via `Cx::scoped_cpu`, and the parked
+/// lane ([`ParkedTilePool`]) where runs dispatch to workers already
+/// parked inside their owner's scope.
 pub struct TilePool {
     config: PoolConfig,
     arenas: fs_alloc::ArenaPool,
@@ -992,7 +1021,7 @@ impl TilePool {
             run,
             Budget::INFINITE,
             &fs_alloc::OperationMemoryLease::unbounded(),
-            None::<&asupersync::Cx>,
+            Launch::<NoTask>::OwnScope,
         )
     }
 
@@ -1012,7 +1041,7 @@ impl TilePool {
             run,
             budget,
             &fs_alloc::OperationMemoryLease::unbounded(),
-            None::<&asupersync::Cx>,
+            Launch::<NoTask>::OwnScope,
         )
     }
 
@@ -1039,7 +1068,7 @@ impl TilePool {
     where
         K::Out: crate::LeaseAdmittedOut,
     {
-        self.run_inner(kernel, gate, run, budget, lease, None::<&asupersync::Cx>)
+        self.run_inner(kernel, gate, run, budget, lease, Launch::<NoTask>::OwnScope)
     }
 
     /// Run a kernel under a LIVE asupersync task context (bead lx0e): the
@@ -1081,7 +1110,90 @@ impl TilePool {
         Caps: Send + Sync + 'static,
         K::Out: crate::LeaseAdmittedOut,
     {
-        self.run_inner(kernel, gate, run, budget, lease, Some(task_cx))
+        self.run_inner(kernel, gate, run, budget, lease, Launch::TaskScope(task_cx))
+    }
+
+    /// Park a crew of exactly [`TilePool::workers`] workers as scoped CPU
+    /// children of the CALLING task (bead tkr7) and run `f` with a
+    /// [`ParkedTilePool`] whose runs dispatch to those parked workers
+    /// instead of spawning — the per-run spawn/join cost that collapses
+    /// small-kernel attainment (measured on N-D FFT axis passes, bead
+    /// 27d3) drops to a condvar wake/sleep.
+    ///
+    /// The scope tree stays honest (P7): the crew lives inside this
+    /// task's `Cx::scoped_cpu` scope, the calling task blocks here until
+    /// every worker joins, and a shutdown guard releases parked workers
+    /// on BOTH normal return and unwind of `f`, so the join can never
+    /// hang. Task cancellation and budget exhaustion drain RUNNING
+    /// kernels at tile boundaries through each worker's own scoped-CPU
+    /// context, exactly like [`TilePool::run_scoped`].
+    ///
+    /// # Errors
+    /// [`CrewScopeError::Cancelled`] when the calling task is cancelled
+    /// or budget-exhausted at the crew scope's entry (nothing runs, `f`
+    /// is never called) or exit (fail closed: a cancelled task must not
+    /// admit results computed under it).
+    ///
+    /// # Panics
+    /// Pool-invariant panics (a parked worker dying outside job
+    /// containment) propagate, with spawned-lane parity.
+    pub fn with_parked_crew<Caps, R, F>(
+        &self,
+        task_cx: &asupersync::Cx<Caps>,
+        f: F,
+    ) -> Result<R, CrewScopeError>
+    where
+        Caps: Send + Sync + 'static,
+        F: FnOnce(&ParkedTilePool<'_, Caps>) -> R,
+    {
+        let crew = crate::crew::Crew::new(self.config.workers);
+        match task_cx.scoped_cpu(self.config.workers, |scope| {
+            let _shutdown = crate::crew::CrewShutdown(&crew);
+            for w in 0..crew.workers() {
+                let crew = &crew;
+                scope
+                    .spawn(move |cpu| crew.park_loop(w, Some(cpu)))
+                    .expect("crew spawns exactly its own cap of workers");
+            }
+            f(&ParkedTilePool {
+                pool: self,
+                crew: &crew,
+            })
+        }) {
+            Ok(out) => Ok(out),
+            Err(ScopedCpuError::Cancelled(_)) => Err(CrewScopeError::Cancelled),
+            // Parked workers contain job panics inside the crew; a panic
+            // escaping park bookkeeping is a pool invariant failure.
+            Err(ScopedCpuError::ChildPanicked { child, message }) => std::panic::panic_any(
+                format!("parked crew worker {child} panicked outside job containment: {message}"),
+            ),
+            Err(ScopedCpuError::WorkerCapExceeded { cap }) => std::panic::panic_any(format!(
+                "parked crew launch exceeded its own worker cap {cap}"
+            )),
+        }
+    }
+
+    /// [`TilePool::with_parked_crew`] for callers with NO ambient
+    /// asupersync task (perf lanes, tests, batch tools): the crew parks
+    /// inside a plain `std::thread::scope`, which is itself scope-sound
+    /// (function-blocks-until-join). Cancellation still flows through
+    /// each run's [`CancelGate`]; there is simply no task to bridge.
+    pub fn with_parked_crew_local<R, F>(&self, f: F) -> R
+    where
+        F: FnOnce(&ParkedTilePool<'_, NoTask>) -> R,
+    {
+        let crew: crate::crew::Crew<NoTask> = crate::crew::Crew::new(self.config.workers);
+        std::thread::scope(|s| {
+            let _shutdown = crate::crew::CrewShutdown(&crew);
+            for w in 0..crew.workers() {
+                let crew = &crew;
+                s.spawn(move || crew.park_loop(w, None));
+            }
+            f(&ParkedTilePool {
+                pool: self,
+                crew: &crew,
+            })
+        })
     }
 
     /// Run a kernel under an external cancel gate; returns the outcome and
@@ -1101,7 +1213,7 @@ impl TilePool {
             RunId::default(),
             Budget::INFINITE,
             &fs_alloc::OperationMemoryLease::unbounded(),
-            None::<&asupersync::Cx>,
+            Launch::<NoTask>::OwnScope,
         )
     }
 
@@ -1116,7 +1228,7 @@ impl TilePool {
         run: RunId,
         budget: Budget,
         lease: &fs_alloc::OperationMemoryLease,
-        task_cx: Option<&asupersync::Cx<Caps>>,
+        launch: Launch<'_, Caps>,
     ) -> (Result<K::Out, RunError>, RunReport)
     where
         Caps: Send + Sync + 'static,
@@ -1228,8 +1340,8 @@ impl TilePool {
         };
         let mut spawn_failure = None;
         let mut scope_refusal = None;
-        match task_cx {
-            None => {
+        match launch {
+            Launch::OwnScope => {
                 std::thread::scope(|s| {
                     for w in 0..workers {
                         let ctx = &ctx;
@@ -1243,7 +1355,31 @@ impl TilePool {
                     }
                 });
             }
-            Some(cx) => {
+            Launch::Crew(crew) => {
+                // The parked lane (bead tkr7): no spawns at all — the job
+                // is dispatched to workers already parked inside their
+                // owner's scope, and dispatch blocks until every one of
+                // them reports done, so run-local borrows in `ctx` outlive
+                // every use (the crew capsule's latch argument). Task
+                // cancellation/budget bridging rides each worker's own
+                // park-time CpuCx, exactly like the scoped lane. Crew
+                // workers beyond this run's normalized count no-op: the
+                // run-local tables are sized to `ctx.workers`.
+                let job = |w: usize, cpu: Option<&CpuCx<Caps>>| {
+                    if w < ctx.workers {
+                        worker_loop(&ctx, w, cpu);
+                    }
+                };
+                if let Some((worker, message)) = crew.dispatch(&job) {
+                    // Parity with the spawned lanes: a panic escaping a
+                    // worker (kernel panics are contained per tile) is a
+                    // pool invariant failure — propagate.
+                    std::panic::panic_any(format!(
+                        "tile-pool worker {worker} panicked outside tile containment: {message}"
+                    ));
+                }
+            }
+            Launch::TaskScope(cx) => {
                 // The asupersync lane (bead lx0e): workers are scoped CPU
                 // children of the CALLING task via `Cx::scoped_cpu`, which
                 // blocks here until every child joins — the scope tree is
@@ -1399,6 +1535,132 @@ impl TilePool {
                 )
             }
         }
+    }
+}
+
+/// Structured refusal from [`TilePool::with_parked_crew`]: the calling
+/// task was cancelled or budget-exhausted at the crew scope's entry or
+/// exit checkpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CrewScopeError {
+    /// Entry refusal (`f` never ran) or exit fail-closed (a cancelled
+    /// task must not admit results computed under it).
+    Cancelled,
+}
+
+impl fmt::Display for CrewScopeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CrewScopeError::Cancelled => write!(
+                f,
+                "parked-crew scope refused: the calling task was cancelled or exhausted its \
+                 budget at the scope boundary"
+            ),
+        }
+    }
+}
+
+impl core::error::Error for CrewScopeError {}
+
+/// A [`TilePool`] view whose runs dispatch to an already-parked worker
+/// crew (bead tkr7) instead of spawning per run. Created by
+/// [`TilePool::with_parked_crew`] / [`TilePool::with_parked_crew_local`];
+/// same run surface and the SAME worker protocol, so results are
+/// bitwise-identical to the spawned lanes by construction (P2) — only
+/// the worker-lifetime strategy differs.
+pub struct ParkedTilePool<'a, Caps: 'static> {
+    pool: &'a TilePool,
+    crew: &'a crate::crew::Crew<Caps>,
+}
+
+impl<Caps: Send + Sync + 'static> ParkedTilePool<'_, Caps> {
+    /// Normalized worker count (the crew's size — the same value the
+    /// spawned lanes normalize to).
+    #[must_use]
+    pub fn workers(&self) -> usize {
+        self.pool.workers()
+    }
+
+    /// The arena pool backing per-tile scopes (leak oracle for G4 tests).
+    #[must_use]
+    pub fn arena_pool(&self) -> &fs_alloc::ArenaPool {
+        self.pool.arena_pool()
+    }
+
+    /// [`TilePool::run`] on the parked crew.
+    ///
+    /// # Errors
+    /// As [`TilePool::run`].
+    pub fn run<K: TileKernel>(&self, kernel: &K) -> Result<K::Out, RunError> {
+        self.run_with_gate(kernel, &CancelGate::new()).0
+    }
+
+    /// [`TilePool::run_with_gate`] on the parked crew.
+    pub fn run_with_gate<K: TileKernel>(
+        &self,
+        kernel: &K,
+        gate: &CancelGate,
+    ) -> (Result<K::Out, RunError>, RunReport) {
+        self.pool.run_inner(
+            kernel,
+            gate,
+            RunId::default(),
+            Budget::INFINITE,
+            &fs_alloc::OperationMemoryLease::unbounded(),
+            Launch::Crew(self.crew),
+        )
+    }
+
+    /// [`TilePool::run_declared`] on the parked crew.
+    pub fn run_declared<K: TileKernel>(
+        &self,
+        kernel: &K,
+        gate: &CancelGate,
+        run: RunId,
+    ) -> (Result<K::Out, RunError>, RunReport) {
+        self.pool.run_inner(
+            kernel,
+            gate,
+            run,
+            Budget::INFINITE,
+            &fs_alloc::OperationMemoryLease::unbounded(),
+            Launch::Crew(self.crew),
+        )
+    }
+
+    /// [`TilePool::run_declared_leased_budgeted`] on the parked crew.
+    pub fn run_declared_leased_budgeted<K: TileKernel>(
+        &self,
+        kernel: &K,
+        gate: &CancelGate,
+        run: RunId,
+        budget: Budget,
+        lease: &fs_alloc::OperationMemoryLease,
+    ) -> (Result<K::Out, RunError>, RunReport) {
+        self.pool
+            .run_inner(kernel, gate, run, budget, lease, Launch::Crew(self.crew))
+    }
+}
+
+impl<Caps: Send + Sync + 'static> crate::kernel::KernelRunner for ParkedTilePool<'_, Caps> {
+    fn workers(&self) -> usize {
+        ParkedTilePool::workers(self)
+    }
+
+    fn run_with_gate<K: TileKernel>(
+        &self,
+        kernel: &K,
+        gate: &CancelGate,
+    ) -> (Result<K::Out, RunError>, RunReport) {
+        ParkedTilePool::run_with_gate(self, kernel, gate)
+    }
+}
+
+impl<Caps: 'static> fmt::Debug for ParkedTilePool<'_, Caps> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ParkedTilePool")
+            .field("workers", &self.crew.workers())
+            .finish_non_exhaustive()
     }
 }
 
@@ -2238,5 +2500,154 @@ mod tests {
         let ok = p.run(&SumKernel { tiles: 16 }).expect("pool survives");
         assert_eq!(ok, (0..16).map(|t| t + 1).sum::<u64>());
         assert!(p.arena_pool().stats().quiescent());
+    }
+
+    /// G5 (tkr7): the parked lane is deterministic across reruns on ONE
+    /// crew and bitwise-identical to the spawned std lane — one worker
+    /// protocol, three lifetime strategies — including runs with fewer
+    /// tiles than crew workers (excess workers no-op).
+    #[test]
+    fn parked_local_lane_matches_std_lane_bitwise_across_reruns() {
+        let p = pool(4);
+        let expected = p.run(&SumKernel { tiles: 257 }).expect("std lane");
+        let expected_small = p.run(&SumKernel { tiles: 2 }).expect("std lane small");
+        p.with_parked_crew_local(|parked| {
+            let first = parked.run(&SumKernel { tiles: 257 }).expect("parked");
+            let second = parked.run(&SumKernel { tiles: 257 }).expect("parked rerun");
+            assert_eq!(first, expected, "parked lane bitwise-matches the std lane");
+            assert_eq!(second, expected, "parked lane deterministic across reruns");
+            let small = parked
+                .run(&SumKernel { tiles: 2 })
+                .expect("fewer tiles than crew workers");
+            assert_eq!(small, expected_small, "excess crew workers no-op cleanly");
+            let (_, report) = parked.run_with_gate(&SumKernel { tiles: 257 }, &CancelGate::new());
+            assert_eq!(report.completed, 257);
+            assert_eq!(
+                report.tiles_by_worker.iter().sum::<u64>(),
+                257,
+                "every tile accounted to a worker"
+            );
+        });
+        assert!(p.arena_pool().stats().quiescent(), "arenas quiescent");
+    }
+
+    /// G4 (tkr7): per-tile panic containment holds unchanged on the
+    /// parked lane, and the SAME crew keeps serving runs afterwards.
+    #[test]
+    fn parked_lane_contains_tile_panics_and_the_crew_survives() {
+        let p = pool(4);
+        p.with_parked_crew_local(|parked| {
+            let err = parked
+                .run(&PanicAt { tiles: 512, at: 7 })
+                .expect_err("tile panic surfaces");
+            match &err {
+                RunError::TilePanicked {
+                    tile: 7, message, ..
+                } => {
+                    assert!(message.contains("scoped containment probe"), "{message}");
+                }
+                other => panic!("expected TilePanicked{{tile:7}}, got {other:?}"),
+            }
+            let ok = parked
+                .run(&SumKernel { tiles: 64 })
+                .expect("crew survives a contained tile panic");
+            assert_eq!(ok, (0..64).map(|t| t + 1).sum::<u64>());
+        });
+        assert!(p.arena_pool().stats().quiescent());
+    }
+
+    /// G4 (tkr7): a gate request mid-run drains a parked run exactly like
+    /// a spawned run, and the crew serves the next run.
+    #[test]
+    fn parked_lane_drains_on_gate_request_and_reuses_the_crew() {
+        struct SelfCancel {
+            tiles: u64,
+        }
+        impl TileKernel for SelfCancel {
+            type Out = u64;
+
+            fn tiles(&self) -> TilePlan {
+                TilePlan::new("test/self-cancel", self.tiles)
+            }
+
+            fn run(&self, tile: u64, _cx: &Cx<'_>) -> ControlFlow<crate::Cancelled, u64> {
+                if tile == 0 {
+                    return ControlFlow::Break(crate::Cancelled);
+                }
+                ControlFlow::Continue(1)
+            }
+        }
+        let p = pool(4);
+        p.with_parked_crew_local(|parked| {
+            let (out, _report) =
+                parked.run_with_gate(&SelfCancel { tiles: 16_384 }, &CancelGate::new());
+            match out {
+                Err(RunError::Cancelled {
+                    completed, total, ..
+                }) => {
+                    assert_eq!(total, 16_384);
+                    assert!(completed < total, "drain preempted completion");
+                }
+                other => panic!("expected Cancelled, got {other:?}"),
+            }
+            parked
+                .run(&SumKernel { tiles: 64 })
+                .expect("crew serves runs after a drained cancellation");
+        });
+        assert!(p.arena_pool().stats().quiescent());
+    }
+
+    /// G4+G5 (tkr7): the parked crew under a REAL task scope — bitwise
+    /// equality with the spawned lanes, mid-run task cancellation drains
+    /// through each parked worker's own scoped-CPU context, and a
+    /// pre-cancelled task refuses the whole crew scope at entry.
+    #[test]
+    fn parked_task_crew_bridges_cancellation_and_matches_other_lanes() {
+        let expected = pool(4).run(&SumKernel { tiles: 257 }).expect("std lane");
+        in_task(move |cx| {
+            let p = pool(4);
+            let out = p
+                .with_parked_crew(&cx, |parked| {
+                    let first = parked
+                        .run(&SumKernel { tiles: 257 })
+                        .expect("parked task lane");
+                    assert_eq!(first, expected, "parked task lane bitwise-matches");
+
+                    // Mid-run task cancel: drains at tile boundaries via the
+                    // park-time CpuCx bridge, then the task is revived and
+                    // the SAME crew serves the next run.
+                    let kernel = CancelTaskAt {
+                        tiles: 16_384,
+                        at: 0,
+                        task: cx.clone(),
+                    };
+                    let (out, _) = parked.run_with_gate(&kernel, &CancelGate::new());
+                    match out {
+                        Err(RunError::Cancelled {
+                            completed, total, ..
+                        }) => {
+                            assert_eq!(total, 16_384);
+                            assert!(completed < total, "task cancel drained the parked run");
+                        }
+                        other => panic!("expected Cancelled, got {other:?}"),
+                    }
+                    cx.set_cancel_requested(false);
+                    parked
+                        .run(&SumKernel { tiles: 64 })
+                        .expect("crew serves runs after task revival")
+                })
+                .expect("crew scope completes");
+            assert_eq!(out, (0..64).map(|t| t + 1).sum::<u64>());
+            assert!(p.arena_pool().stats().quiescent(), "arenas quiescent");
+
+            // Entry refusal: a pre-cancelled task parks nothing and runs
+            // nothing — f is never called.
+            cx.set_cancel_requested(true);
+            let refused = p.with_parked_crew(&cx, |_parked| {
+                panic!("f must not run under a pre-cancelled task")
+            });
+            assert_eq!(refused, Err(CrewScopeError::Cancelled));
+            cx.set_cancel_requested(false);
+        });
     }
 }

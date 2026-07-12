@@ -83,11 +83,11 @@ impl<Caps: 'static> Crew<Caps> {
                     if st.shutdown {
                         return;
                     }
-                    if st.epoch != seen {
-                        if let Some(job) = st.job {
-                            seen = st.epoch;
-                            break job;
-                        }
+                    if st.epoch != seen
+                        && let Some(job) = st.job
+                    {
+                        seen = st.epoch;
+                        break job;
                     }
                     st = self.work_cv.wait(st).expect("crew state");
                 }
@@ -143,7 +143,10 @@ impl<Caps: 'static> Crew<Caps> {
                 st.job.is_none() && st.remaining == 0,
                 "crew dispatch overlap (programmer error)"
             );
-            assert!(!st.shutdown, "crew dispatch after shutdown (programmer error)");
+            assert!(
+                !st.shutdown,
+                "crew dispatch after shutdown (programmer error)"
+            );
             st.job = Some(erased);
             st.epoch = st.epoch.wrapping_add(1);
             st.remaining = self.workers;
