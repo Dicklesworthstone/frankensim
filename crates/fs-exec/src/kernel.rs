@@ -112,7 +112,10 @@ pub trait KernelRunner {
         &self,
         kernel: &K,
         gate: &crate::cx::CancelGate,
-    ) -> (Result<K::Out, crate::pool::RunError>, crate::pool::RunReport);
+    ) -> (
+        Result<K::Out, crate::pool::RunError>,
+        crate::pool::RunReport,
+    );
 }
 
 /// The spawned-per-run pool is the reference runner: the trait methods
@@ -126,7 +129,10 @@ impl KernelRunner for crate::pool::TilePool {
         &self,
         kernel: &K,
         gate: &crate::cx::CancelGate,
-    ) -> (Result<K::Out, crate::pool::RunError>, crate::pool::RunReport) {
+    ) -> (
+        Result<K::Out, crate::pool::RunError>,
+        crate::pool::RunReport,
+    ) {
         crate::pool::TilePool::run_with_gate(self, kernel, gate)
     }
 }

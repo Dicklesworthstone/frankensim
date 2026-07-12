@@ -88,10 +88,7 @@ impl TileKernel for SpinKernel {
         }
         let mut acc = tile.max(1);
         for _ in 0..self.spins {
-            acc = std::hint::black_box(
-                acc.wrapping_mul(6_364_136_223_846_793_005)
-                    .wrapping_add(1),
-            );
+            acc = std::hint::black_box(acc.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1));
         }
         self.executed[usize::try_from(tile).expect("tile index")].fetch_add(1, Ordering::Relaxed);
         ControlFlow::Continue(tile.wrapping_add(acc & 1))
@@ -114,14 +111,13 @@ fn multi_level_steal_storm_executes_every_tile_exactly_once() {
     for workers in [2usize, 4, 8] {
         let pool = single_owner_pool(workers, 0x57EA1 + workers as u64);
         let kernel = SpinKernel::new(512, 300);
-        let (result, report) =
-            pool.run_declared_leased_budgeted(
-                &kernel,
-                &CancelGate::new(),
-                RunId(3),
-                Budget::INFINITE,
-                &fs_alloc::OperationMemoryLease::unbounded(),
-            );
+        let (result, report) = pool.run_declared_leased_budgeted(
+            &kernel,
+            &CancelGate::new(),
+            RunId(3),
+            Budget::INFINITE,
+            &fs_alloc::OperationMemoryLease::unbounded(),
+        );
         let sum = result.expect("storm run");
         assert_eq!(report.completed, 512, "workers={workers}");
         for (tile, count) in kernel.executed.iter().enumerate() {
