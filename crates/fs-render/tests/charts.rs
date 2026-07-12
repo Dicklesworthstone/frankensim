@@ -674,6 +674,23 @@ fn rb_001c_scale_direction_and_touching_spheres_are_conservative() {
         assert!(invalid_hit.is_none());
         assert_eq!(invalid_audit.termination, TraceTermination::InvalidSample);
 
+        let boundary_ray = Ray {
+            origin: Point3::new(0.0, 0.0, 0.0),
+            dir: Vec3::new(3.0, 0.0, 0.0),
+        };
+        let beyond_limit = ExactPlaneChart {
+            boundary: (0.1 * 3.0).next_up(),
+            lipschitz: 1.0,
+        };
+        let (boundary_hit, boundary_audit) =
+            sphere_trace(&beyond_limit, cx, &boundary_ray, 0.1, 1e-18, 1.0);
+        assert!(
+            boundary_hit.is_none(),
+            "outward t_max rounding must not leak a hit"
+        );
+        assert_eq!(boundary_audit.termination, TraceTermination::Miss);
+        assert!(boundary_audit.certified);
+
         let slab = ExactSlabChart {
             lo: 1.0,
             hi: 1.0 + 2e-13,
@@ -684,6 +701,7 @@ fn rb_001c_scale_direction_and_touching_spheres_are_conservative() {
         };
         let (slab_hit, slab_audit) = sphere_trace(&slab, cx, &near_unit_ray, 2.0, 1e-15, 1.0);
         let slab_hit = slab_hit.expect("parameter steps account for non-unit ray speed");
+        assert_eq!(slab_hit.point, near_unit_ray.at(slab_hit.t));
         assert!((slab_hit.point.x - 1.0).abs() <= 1e-14);
         assert!(slab_audit.certified);
 
@@ -851,6 +869,11 @@ fn rb_003_nurbs_newton_matches_analytic() {
             };
             let scaled_hit = ray_intersect_nurbs(&sphere, &scaled_ray, 8, 1e-9)
                 .expect("direction scaling preserves the NURBS hit");
+            assert_eq!(
+                scaled_hit.point,
+                scaled_ray.at(scaled_hit.t),
+                "NURBS Hit.point must use the caller's parameterization"
+            );
             assert!(
                 (scaled_hit.t * scale - t_ref).abs() < 1e-6,
                 "scaled Newton parameter maps to the same point"
@@ -1024,6 +1047,11 @@ fn rb_004_mixed_scene_consistency_and_frame_invariance() {
                 let scaled_hit = mesh
                     .intersect(&scaled_ray)
                     .expect("direction scaling preserves the mesh hit");
+                assert_eq!(
+                    scaled_hit.point,
+                    scaled_ray.at(scaled_hit.t),
+                    "mesh Hit.point must use the caller's parameterization"
+                );
                 assert!(
                     (scaled_hit.t * scale - c).abs() <= 1e-12 * c.abs().max(1.0),
                     "mesh hit is invariant after mapping back to world distance"

@@ -372,7 +372,7 @@ pub fn sphere_trace(
                 );
             }
             let hit_t = t / parameter_scale;
-            if !hit_t.is_finite() {
+            if !hit_t.is_finite() || (t > 0.0 && hit_t <= 0.0) {
                 return (
                     None,
                     TraceAudit {
@@ -396,10 +396,23 @@ pub fn sphere_trace(
                     },
                 );
             }
+            let hit_point = ray.at(hit_t);
+            if !hit_point.x.is_finite() || !hit_point.y.is_finite() || !hit_point.z.is_finite() {
+                return (
+                    None,
+                    TraceAudit {
+                        steps,
+                        worst_step_ratio: worst_ratio,
+                        certified: false,
+                        fallbacks,
+                        termination: TraceTermination::InvalidSample,
+                    },
+                );
+            }
             return (
                 Some(Hit {
                     t: hit_t,
-                    point: p,
+                    point: hit_point,
                     normal,
                     steps,
                 }),
@@ -837,12 +850,15 @@ fn ray_intersect_nurbs_impl(
                 let parameter_t = t / parameter_scale;
                 let hit = Hit {
                     t: parameter_t,
-                    point: ray.at(t),
+                    point: input_ray.at(parameter_t),
                     normal: (nn > 1e-12).then(|| n.scale(1.0 / nn)),
                     steps: iter_count,
                 };
                 if parameter_t.is_finite()
                     && parameter_t > 0.0
+                    && hit.point.x.is_finite()
+                    && hit.point.y.is_finite()
+                    && hit.point.z.is_finite()
                     && best.as_ref().is_none_or(|b| hit.t < b.t)
                 {
                     best = Some(hit);
@@ -1102,6 +1118,10 @@ impl TriMesh {
                 return None;
             }
             hit.t = parameter_t;
+            hit.point = input_ray.at(parameter_t);
+            if !hit.point.x.is_finite() || !hit.point.y.is_finite() || !hit.point.z.is_finite() {
+                return None;
+            }
             Some(hit)
         }))
     }
@@ -1124,6 +1144,10 @@ impl TriMesh {
                 return None;
             }
             hit.t = parameter_t;
+            hit.point = input_ray.at(parameter_t);
+            if !hit.point.x.is_finite() || !hit.point.y.is_finite() || !hit.point.z.is_finite() {
+                return None;
+            }
             Some(hit)
         })
     }

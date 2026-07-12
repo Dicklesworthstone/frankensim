@@ -220,6 +220,9 @@ pub enum TracerError {
     UncertifiedTrace,
     /// A progressive sample range had its exclusive end before its start.
     InvalidRange { from: u32, to: u32 },
+    /// Render dimensions or a public film buffer were structurally invalid or
+    /// could not be allocated without exceeding address-space bounds.
+    InvalidInput,
     /// Shading requires a finite surface normal; no arbitrary fallback normal
     /// may be minted.
     MissingNormal,
@@ -238,6 +241,7 @@ impl core::fmt::Display for TracerError {
             Self::InvalidRange { from, to } => {
                 write!(formatter, "invalid progressive sample range {from}..{to}")
             }
+            Self::InvalidInput => formatter.write_str("invalid spectral render input"),
             Self::MissingNormal => formatter.write_str("surface hit has no finite normal"),
         }
     }
@@ -270,12 +274,28 @@ impl Film {
     /// An empty film.
     #[must_use]
     pub fn new(width: u32, height: u32) -> Film {
-        Film {
+        Self::try_new(width, height).expect("film dimensions must fit the address space")
+    }
+
+    /// Allocate an empty film without panicking on malformed or excessive
+    /// dimensions.
+    pub fn try_new(width: u32, height: u32) -> Result<Film, TracerError> {
+        if width == 0 || height == 0 {
+            return Err(TracerError::InvalidInput);
+        }
+        let len = (width as usize)
+            .checked_mul(height as usize)
+            .ok_or(TracerError::InvalidInput)?;
+        let mut xyz = Vec::new();
+        xyz.try_reserve_exact(len)
+            .map_err(|_| TracerError::InvalidInput)?;
+        xyz.resize(len, [0.0; 3]);
+        Ok(Film {
             width,
             height,
-            xyz: vec![[0.0; 3]; width as usize * height as usize],
+            xyz,
             spp_done: 0,
-        }
+        })
     }
 
     /// Linear-sRGB planes (R, G, B row-major), Bradford-adapted like
@@ -306,7 +326,8 @@ impl Film {
 /// accumulation; `film.spp_done` must equal `from`).
 ///
 /// # Panics
-/// If the film shape or checkpoint does not match.
+/// If the film dimensions or checkpoint do not match. A malformed public XYZ
+/// buffer or invalid range is returned as a structured error.
 pub fn render_range(
     scene: &Scene,
     cx: &Cx<'_>,
@@ -316,6 +337,15 @@ pub fn render_range(
     to: u32,
 ) -> Result<(), TracerError> {
     assert_eq!((film.width, film.height), (s.width, s.height), "film shape");
+    if film.width == 0 || film.height == 0 || s.width == 0 || s.height == 0 {
+        return Err(TracerError::InvalidInput);
+    }
+    let expected_len = (film.width as usize)
+        .checked_mul(film.height as usize)
+        .ok_or(TracerError::InvalidInput)?;
+    if film.xyz.len() != expected_len {
+        return Err(TracerError::InvalidInput);
+    }
     assert_eq!(film.spp_done, from, "progressive checkpoint mismatch");
     if to < from {
         return Err(TracerError::InvalidRange { from, to });
@@ -330,7 +360,10 @@ pub fn render_range(
     // Cancellation and backend refusals are transactional: a failed range
     // leaves both the accumulated sums and checkpoint unchanged, so retrying
     // cannot double-count a partially completed range.
-    let mut staged_xyz = Vec::with_capacity(film.xyz.len());
+    let mut staged_xyz = Vec::new();
+    staged_xyz
+        .try_reserve_exact(film.xyz.len())
+        .map_err(|_| TracerError::InvalidInput)?;
     for chunk in film.xyz.chunks(4096) {
         cx.checkpoint()?;
         staged_xyz.extend_from_slice(chunk);
@@ -358,7 +391,8 @@ pub fn render_range(
 
 /// Render the full image (fresh film, samples `[0, spp)`).
 pub fn render(scene: &Scene, cx: &Cx<'_>, s: &Settings) -> Result<Film, TracerError> {
-    let mut film = Film::new(s.width, s.height);
+    cx.checkpoint()?;
+    let mut film = Film::try_new(s.width, s.height)?;
     render_range(scene, cx, s, &mut film, 0, s.spp)?;
     Ok(film)
 }

@@ -97,8 +97,8 @@ miss, or hit without conflation. Differentiable rendering returns
 `RenderError` for cancellation, invalid parameters/configuration/targets,
 backend refusal, uncertified traces, and singular implicit/boundary
 derivatives. The tracer returns `TracerError`, preserving cancellation,
-invalid progressive ranges, backend refusal, uncertified traces, and missing
-normals. `halton`
+invalid dimensions/film buffers/progressive ranges, backend refusal,
+uncertified traces, and missing normals. `halton`
 panics only on `dim >= 8` (out of the prime table).
 
 ## Determinism class

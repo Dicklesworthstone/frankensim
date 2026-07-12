@@ -427,6 +427,41 @@ fn reversed_progressive_range_is_rejected_transactionally() {
 }
 
 #[test]
+fn film_allocation_and_public_buffer_shape_fail_closed() {
+    assert_eq!(Film::try_new(0, 1), Err(TracerError::InvalidInput));
+    assert_eq!(
+        Film::try_new(u32::MAX, u32::MAX),
+        Err(TracerError::InvalidInput)
+    );
+
+    let scene = cornell();
+    let s = settings(DirectStrategy::Mis, Sampler::Iid, 41, 2, 1);
+    let mut malformed = Film::new(s.width, s.height);
+    malformed.xyz.pop();
+    assert_eq!(
+        with_cx(|cx| render_range(&scene, cx, &s, &mut malformed, 0, 0)),
+        Err(TracerError::InvalidInput),
+        "an empty range must still validate the public film buffer"
+    );
+
+    let zero_settings = Settings {
+        width: 0,
+        height: 0,
+        ..s
+    };
+    let mut zero_film = Film {
+        width: 0,
+        height: 0,
+        xyz: Vec::new(),
+        spp_done: 0,
+    };
+    assert_eq!(
+        with_cx(|cx| render_range(&scene, cx, &zero_settings, &mut zero_film, 0, 0)),
+        Err(TracerError::InvalidInput)
+    );
+}
+
+#[test]
 fn production_tracer_rejects_uncertified_misses() {
     let mut scene = cornell();
     scene.primitives[5].shape = Shape::Chart(Box::new(ConstantNoClaim));
