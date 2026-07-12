@@ -460,12 +460,16 @@ fn pl_008_budget_below_first_solve_returns_no_certificate() {
 
 #[test]
 fn pl_008b_large_admitted_rung_is_budget_checked_before_mesh_allocation() {
+    // The largest steep_family rung the polynomial-work cap admits:
+    // work/cell = 6 coefficients x 5 Gauss points = 30 (pl_008c pins the
+    // cap refusal above this, so drift in either constant fails loudly).
+    let largest_admitted = MAX_POLYNOMIAL_CELL_WORK / 30;
     let outcome = plan(
         &steep_family(),
         1.0,
         1e-4,
         1.0,
-        &[MAX_PLANNER_CELLS],
+        &[largest_admitted],
         &mut MemCache::default(),
         &mut CostTable::new(20.0).unwrap(),
     )
@@ -478,6 +482,32 @@ fn pl_008b_large_admitted_rung_is_budget_checked_before_mesh_allocation() {
     assert_eq!(ops[0].op, PlanOp::CacheLookup);
     assert_eq!(cost.to_bits(), 0.0f64.to_bits());
     assert!(reason.contains("no mesh is allocated"));
+}
+
+#[test]
+fn pl_008c_over_work_rung_is_refused_by_the_polynomial_cell_work_cap() {
+    // A MAX_PLANNER_CELLS rung of steep_family implies 6 x 5 x 1M = 30M
+    // units of verifier work — past the 16M cap. The planner must refuse
+    // with the structured resource error BEFORE any budget arithmetic,
+    // mesh allocation, or cache traffic.
+    let err = plan(
+        &steep_family(),
+        1.0,
+        1e-4,
+        1.0,
+        &[MAX_PLANNER_CELLS],
+        &mut MemCache::default(),
+        &mut CostTable::new(20.0).unwrap(),
+    )
+    .unwrap_err();
+    assert_eq!(
+        err,
+        PlanError::ResourceLimit {
+            field: "polynomial_cell_work",
+            requested: 30_000_000,
+            limit: MAX_POLYNOMIAL_CELL_WORK,
+        }
+    );
 }
 
 #[derive(Clone)]

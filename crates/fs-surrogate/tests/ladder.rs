@@ -80,10 +80,23 @@ fn la_001_rb_estimators_empirically_contain_fixture_errors() {
                 .3
         })
         .collect();
+    // The estimator improved to the point where k=4 and k=6 both land at
+    // the roundoff floor (~1e-16); strict ordering BETWEEN two at-floor
+    // values is noise, not tightening. The observation keeps its teeth:
+    // every adjacent pair must tighten OR both sit at the floor, and the
+    // first refinement must still tighten visibly from above the floor.
+    const ROUNDOFF_FLOOR: f64 = 1e-15; // matches the effectivity guard above
     assert!(
-        bounds.windows(2).all(|pair| pair[1] < pair[0]),
-        "the canonical off-grid fixture stopped showing its observed adjacent tightening: \
-         {bounds:?}"
+        bounds
+            .windows(2)
+            .all(|pair| pair[1] < pair[0]
+                || (pair[0] <= ROUNDOFF_FLOOR && pair[1] <= ROUNDOFF_FLOOR)),
+        "the canonical off-grid fixture stopped showing its observed adjacent tightening \
+         (or floor containment): {bounds:?}"
+    );
+    assert!(
+        bounds[0] > ROUNDOFF_FLOOR && bounds[1] < bounds[0],
+        "the first refinement must still tighten from above the floor: {bounds:?}"
     );
     verdict(
         "la-001",

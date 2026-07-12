@@ -36,6 +36,23 @@ impl SourceOriginVerifier for FixtureSourceVerifier {
 struct PackageSourceVerifier;
 struct PackageSignatureVerifier;
 
+/// Counts dispatches; used to prove the checker NEVER hands
+/// attacker-selected certificate addresses to a trusted capability
+/// before the package content-address authenticates (bead x2ch).
+struct CountingSourceVerifier {
+    calls: std::cell::Cell<usize>,
+}
+
+impl fs_checker::SourceCertificateVerifier for CountingSourceVerifier {
+    fn verify(
+        &self,
+        _request: &fs_checker::SourceCertificateRequest<'_>,
+    ) -> fs_checker::VerificationDecision {
+        self.calls.set(self.calls.get() + 1);
+        fs_checker::VerificationDecision::reject(hash_bytes(b"counting-policy"))
+    }
+}
+
 impl fs_checker::SourceCertificateVerifier for PackageSourceVerifier {
     fn verify(
         &self,
@@ -546,32 +563,53 @@ fn epi_e2e_battery() {
             "fs-checker:epi-subject:{}",
             signature_subject.to_hex()
         ));
+    // DELIBERATE CONTRACT UPDATE (bead x2ch): pre-v7 this expected a
+    // source-certificate-refused finding here — which required the
+    // checker to hand the ATTACKER-SELECTED certificate hash to the
+    // trusted capability before the package authenticated. The v7
+    // preflight boundary (correctly) refuses to dispatch any injected
+    // capability on unauthenticated bytes, so the contract is now the
+    // STRONGER one: tamper fails closed on the content root alone, and
+    // the capability is provably NEVER dispatched.
+    let counting_verifier = CountingSourceVerifier {
+        calls: std::cell::Cell::new(0),
+    };
+    let counting_capabilities = fs_checker::VerificationCapabilities::deny_all()
+        .with_source_certificates(&counting_verifier);
     let bad = fs_checker::check_with_capabilities(
         &tampered,
         Some(root),
         Some(&package_signature_verifier),
-        &capabilities,
+        &counting_capabilities,
     );
     assert!(!bad.passed(), "tampering fails closed");
     assert!(
         bad.findings()
             .iter()
-            .any(|finding| finding.kind == "source-certificate-refused"),
-        "substituted source claim must fail exact subject authentication: {:?}",
+            .any(|finding| finding.kind == "content-address-mismatch"),
+        "claim substitution must break the expected content root: {:?}",
         bad.findings()
     );
     assert!(
-        bad.findings()
+        !bad.findings()
             .iter()
-            .any(|finding| finding.kind == "content-address-mismatch"),
-        "claim substitution must also break the expected content root: {:?}",
+            .any(|finding| finding.kind == "source-certificate-refused"),
+        "per-claim certificate authentication must NOT run before the \
+         content address authenticates (capability trust boundary): {:?}",
         bad.findings()
     );
-    let named = bad
-        .findings()
-        .iter()
-        .any(|f| f.detail.contains("fatigue") || f.detail.contains("root"));
-    assert!(named, "the failure is localized: {:?}", bad.findings());
+    assert_eq!(
+        counting_verifier.calls.get(),
+        0,
+        "the attacker-selected certificate address was dispatched to a \
+         trusted capability on unauthenticated bytes"
+    );
+    let named = bad.findings().iter().any(|f| f.detail.contains("root"));
+    assert!(
+        named,
+        "the failure is localized to the root: {:?}",
+        bad.findings()
+    );
     log.log(
         "package",
         "\"event\":\"round-trip\",\"claims\":2,\"reverified\":true,\
