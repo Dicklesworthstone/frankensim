@@ -136,7 +136,13 @@ pub fn graph_snapshot_to_csr(snap: &GraphSnapshot) -> Result<Csr, InteropError> 
             .get(e.right.as_str())
             .ok_or_else(|| InteropError::UnknownNode(e.right.clone()))?;
         let w = e.attrs.get(WEIGHT_KEY).map_or(1.0, weight_of);
-        *acc.entry((r, c)).or_insert(0.0) += w;
+        // Assign the FIRST contribution verbatim (`or_insert(w)`), accumulate
+        // only on a genuine duplicate. Seeding at 0.0 and adding lost the sign
+        // of a stored `-0.0` (`0.0 + -0.0 == +0.0`) and canonicalized a NaN
+        // payload, breaking the CONTRACT's "bitwise round-trip" guarantee. For
+        // finite values `0.0 + w == w` exactly, so summed duplicates are
+        // unchanged.
+        acc.entry((r, c)).and_modify(|a| *a += w).or_insert(w);
     }
     let mut row_ptr = vec![0usize; n + 1];
     let mut col_idx = Vec::with_capacity(acc.len());
@@ -229,6 +235,10 @@ mod tests {
             Csr::identity(5),
             sample(),
             Csr::from_parts(1, 1, vec![0, 1], vec![0], vec![7.5]),
+            // Regression: a stored -0.0 must round-trip BITWISE (the old
+            // `0.0 + w` accumulator canonicalized it to +0.0, silently breaking
+            // the CONTRACT's unconditional "bitwise on values" round-trip).
+            Csr::from_parts(1, 1, vec![0, 1], vec![0], vec![-0.0]),
         ];
         for a in fixtures {
             let snap = csr_to_graph_snapshot(&a, CompatibilityMode::Strict).expect("square");
