@@ -86,7 +86,14 @@ pub fn flux_model_cards() -> Vec<ModelCard> {
             "flux.potential-flow",
             Ambition::Solid,
             vec!["inviscid", "irrotational", "attached flow"],
-            ValidityDomain::unconstrained().with("Re", 1.0e4, f64::INFINITY),
+            // `f64::MAX`, NOT `f64::INFINITY`: `ValidityDomain` enforces a
+            // finite-bounds contract — an infinite endpoint makes both
+            // `contains` and `is_empty` treat the whole domain as unusable, so
+            // this card could never be admitted and rejected valid points with
+            // an EMPTY reason list (violating admission Invariant 4). The
+            // largest finite f64 expresses "no upper limit" faithfully: it
+            // accepts every physical Re ≥ 1e4, exactly like ∞ would.
+            ValidityDomain::unconstrained().with("Re", 1.0e4, f64::MAX),
             vec!["no separation, no drag from viscosity (d'Alembert)"],
             0.15,
         ),
@@ -97,7 +104,7 @@ pub fn flux_model_cards() -> Vec<ModelCard> {
                 "plane sections remain plane",
                 "shear deformation negligible",
             ],
-            ValidityDomain::unconstrained().with("slenderness", 20.0, f64::INFINITY),
+            ValidityDomain::unconstrained().with("slenderness", 20.0, f64::MAX), // unbounded above; see potential-flow
             vec!["stiff-in-error for deep beams (shear ignored)"],
             0.02,
         ),
@@ -105,7 +112,7 @@ pub fn flux_model_cards() -> Vec<ModelCard> {
             "solid.timoshenko",
             Ambition::Solid,
             vec!["first-order shear deformation"],
-            ValidityDomain::unconstrained().with("slenderness", 5.0, f64::INFINITY),
+            ValidityDomain::unconstrained().with("slenderness", 5.0, f64::MAX), // unbounded above; see potential-flow
             vec!["cross-section warping ignored"],
             0.02,
         ),

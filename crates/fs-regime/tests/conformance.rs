@@ -272,6 +272,59 @@ fn rg_003_validity_predicates_catch_seeded_misuse() {
 }
 
 #[test]
+fn rg_003b_unbounded_above_cards_admit_in_range_points() {
+    // Regression: cards with a one-sided "no upper limit" domain
+    // (potential-flow Re ≥ 1e4, euler-bernoulli slenderness ≥ 20, timoshenko
+    // ≥ 5) previously used f64::INFINITY, which ValidityDomain treats as an
+    // unusable/empty domain — so they could NEVER be admitted and rejected
+    // valid points with an EMPTY reason list (violating Invariant 4, and
+    // self-contradicting distance_to_validity = 0). They now use f64::MAX.
+    let registry = flux_model_cards();
+
+    // A slender beam well inside Euler-Bernoulli's [20, ∞) admits cleanly.
+    let mut slender = BTreeMap::new();
+    slender.insert("slenderness".to_string(), 30.0);
+    let v = admit(&registry, &slender, "solid.euler-bernoulli").expect("known model");
+    assert!(v.allowed, "slenderness=30 is valid for Euler-Bernoulli");
+    assert!(v.reasons.is_empty(), "an admitted card has no reasons: {:?}", v.reasons);
+
+    // "Unbounded above" really is unbounded: an astronomically slender member
+    // must still admit (the pre-fix INFINITY made even this fail).
+    let mut very_slender = BTreeMap::new();
+    very_slender.insert("slenderness".to_string(), 1.0e6);
+    assert!(
+        admit(&registry, &very_slender, "solid.euler-bernoulli").expect("model").allowed,
+        "there is no upper slenderness limit for Euler-Bernoulli"
+    );
+
+    // High-Re potential flow admits.
+    let mut hi_re = BTreeMap::new();
+    hi_re.insert("Re".to_string(), 5.0e4);
+    assert!(
+        admit(&registry, &hi_re, "flux.potential-flow").expect("model").allowed,
+        "Re=5e4 is valid for potential flow"
+    );
+
+    // The lower bound is still enforced, and its violation is NAMED
+    // (Invariant 4 holds): a stubby beam (slenderness 10 < 20) is refused.
+    let mut stubby = BTreeMap::new();
+    stubby.insert("slenderness".to_string(), 10.0);
+    let refused = admit(&registry, &stubby, "solid.euler-bernoulli").expect("model");
+    assert!(!refused.allowed, "slenderness=10 is below Euler-Bernoulli's floor");
+    assert!(
+        refused.reasons.iter().any(|r| r.contains("slenderness")),
+        "refusal must name the violated bound, not be empty: {:?}",
+        refused.reasons
+    );
+
+    verdict(
+        "rg-003b",
+        "one-sided (unbounded-above) cards admit in-range points and still name a \
+         violated lower bound",
+    );
+}
+
+#[test]
 fn rg_004_recommended_scaling_improves_conditioning() {
     // Fixture: a 3-DOF elastic system assembled in raw SI with mixed
     // magnitudes (GPa stiffness, mm displacements, kN loads) vs the same
