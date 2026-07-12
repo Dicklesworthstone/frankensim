@@ -273,7 +273,9 @@ is downgraded to Estimated with an explicit discontinuity; Hadamard and direct
 path checks retain their falsifiers; tie-breaking is deterministic; an
 admissible smooth route wins even above the former fixed-penalty scale; an
 over-budget smooth route falls back honestly; and an empty graph preserves the
-router's structured no-path refusal.
+router's structured no-path refusal. Smooth-first and fallback planning consume
+one spec-scoped oracle snapshot, so a live cost backend cannot change authority
+between the two policy passes.
 
 ## No-claim boundaries
 

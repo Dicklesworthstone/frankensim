@@ -26,6 +26,8 @@ pub enum PlanOracleError {
     InvalidReferenceSize,
     /// Re-registering an observed edge attempted to change its size domain.
     ReferenceSizeConflict,
+    /// A reused edge name attempted to cross converter-specification domains.
+    SpecificationConflict,
     /// An executed edge was never registered with an explicit reference size.
     UnregisteredEdge,
     /// The measured absolute error is not finite and nonnegative.
@@ -58,6 +60,10 @@ impl core::fmt::Display for PlanOracleError {
                 f,
                 "cannot change an edge reference size after observations exist"
             ),
+            Self::SpecificationConflict => write!(
+                f,
+                "edge identity is already registered for a different converter specification"
+            ),
             Self::UnregisteredEdge => write!(
                 f,
                 "edge is not registered; register its explicit reference size before recording"
@@ -85,7 +91,8 @@ impl From<PlanOracleError> for fs_geom::CostOracleError {
         match error {
             PlanOracleError::InvalidEdge
             | PlanOracleError::UnregisteredEdge
-            | PlanOracleError::ReferenceSizeConflict => Self::InvalidEdge { problem },
+            | PlanOracleError::ReferenceSizeConflict
+            | PlanOracleError::SpecificationConflict => Self::InvalidEdge { problem },
             PlanOracleError::InvalidReferenceSize => Self::InvalidMeasurement {
                 field: "reference_size",
                 problem,
@@ -117,12 +124,20 @@ impl From<PlanOracleError> for fs_geom::CostOracleError {
     }
 }
 
-/// A [`fs_geom::CostOracle`] backed by per-edge quantile cost models.
-/// Each edge is registered with the reference problem size its routing
-/// requests are quoted at; recorded actuals feed the online refits.
+#[derive(Debug, Clone)]
+struct RegisteredPlanEdge {
+    spec: fs_geom::ConverterSpec,
+    reference_size: f64,
+    model: CostModel,
+}
+
+/// A [`fs_geom::CostOracle`] backed by spec-scoped per-edge quantile cost
+/// models. Each converter is registered with the reference problem size its
+/// routing requests are quoted at; sealed execution observations feed the
+/// online refits.
 #[derive(Debug, Clone, Default)]
 pub struct PlanCostOracle {
-    models: BTreeMap<String, (f64, CostModel)>,
+    models: BTreeMap<String, RegisteredPlanEdge>,
     errors: BTreeMap<String, Vec<f64>>,
 }
 
@@ -137,18 +152,23 @@ impl PlanCostOracle {
     /// existing observations).
     pub fn register_edge(
         &mut self,
-        edge: &str,
+        spec: &fs_geom::ConverterSpec,
         reference_size: f64,
     ) -> Result<(), PlanOracleError> {
-        Self::validate_edge(edge)?;
+        Self::validate_edge(&spec.name)?;
         if !reference_size.is_finite() || reference_size <= 0.0 {
             return Err(PlanOracleError::InvalidReferenceSize);
         }
-        if let Some((registered_size, model)) = self.models.get_mut(edge) {
-            if model.n_obs() > 0 && registered_size.to_bits() != reference_size.to_bits() {
+        if let Some(registered) = self.models.get_mut(&spec.name) {
+            if registered.spec != *spec {
+                return Err(PlanOracleError::SpecificationConflict);
+            }
+            if registered.model.n_obs() > 0
+                && registered.reference_size.to_bits() != reference_size.to_bits()
+            {
                 return Err(PlanOracleError::ReferenceSizeConflict);
             }
-            *registered_size = reference_size;
+            registered.reference_size = reference_size;
             return Ok(());
         }
         if self.models.len() >= MAX_PLAN_ORACLE_EDGES {
@@ -156,15 +176,21 @@ impl PlanCostOracle {
                 limit: MAX_PLAN_ORACLE_EDGES,
             });
         }
-        self.models
-            .insert(edge.to_string(), (reference_size, CostModel::new()));
+        self.models.insert(
+            spec.name.clone(),
+            RegisteredPlanEdge {
+                spec: spec.clone(),
+                reference_size,
+                model: CostModel::new(),
+            },
+        );
         Ok(())
     }
 
     /// The fitted model for an edge, if any.
     #[must_use]
     pub fn model(&self, edge: &str) -> Option<&CostModel> {
-        self.models.get(edge).map(|(_, m)| m)
+        self.models.get(edge).map(|registered| &registered.model)
     }
 
     fn validate_edge(edge: &str) -> Result<(), PlanOracleError> {
@@ -180,29 +206,33 @@ impl PlanCostOracle {
 
     /// Record one edge atomically: cost and error histories either both
     /// advance, or neither does.
-    pub fn try_record(
+    fn record_one(
         &mut self,
-        edge: &str,
-        cost_s: f64,
-        error_abs: f64,
+        observation: &fs_geom::ValidatedEdgeObservation,
     ) -> Result<(), PlanOracleError> {
+        let edge = observation.edge();
+        let cost_s = observation.cost_s();
+        let error_abs = observation.conservative_error_abs();
         Self::validate_edge(edge)?;
         if !error_abs.is_finite() || error_abs < 0.0 {
             return Err(PlanOracleError::InvalidError);
         }
-        let Some((reference_size, model)) = self.models.get(edge) else {
+        let Some(registered) = self.models.get(edge) else {
             return Err(PlanOracleError::UnregisteredEdge);
         };
+        if registered.spec != *observation.spec() {
+            return Err(PlanOracleError::SpecificationConflict);
+        }
         let prior_errors = self.errors.get(edge).map_or(0, Vec::len);
         if prior_errors >= MAX_PLAN_ORACLE_ERROR_OBSERVATIONS {
             return Err(PlanOracleError::ErrorObservationLimit {
                 limit: MAX_PLAN_ORACLE_ERROR_OBSERVATIONS,
             });
         }
-        let mut candidate_model = model.clone();
+        let mut candidate_model = registered.model.clone();
         candidate_model
             .observe(CostObservation {
-                size: *reference_size,
+                size: registered.reference_size,
                 cost_s,
             })
             .map_err(PlanOracleError::Cost)?;
@@ -216,25 +246,46 @@ impl PlanCostOracle {
             .models
             .get_mut(edge)
             .ok_or(PlanOracleError::UnregisteredEdge)?;
-        entry.1 = candidate_model;
+        entry.model = candidate_model;
         self.errors.insert(edge.to_string(), candidate_errors);
         Ok(())
     }
 }
 
 impl fs_geom::CostOracle for PlanCostOracle {
-    fn measured_cost_s(&self, edge: &str) -> Option<f64> {
-        let (size, model) = self.models.get(edge)?;
-        model.predict(*size).ok().map(|p| p.p50)
+    fn measured_cost_s(
+        &self,
+        spec: &fs_geom::ConverterSpec,
+    ) -> Result<Option<f64>, fs_geom::CostOracleError> {
+        let Some(registered) = self.models.get(&spec.name) else {
+            return Ok(None);
+        };
+        if registered.spec != *spec {
+            return Err(PlanOracleError::SpecificationConflict.into());
+        }
+        match registered.model.predict(registered.reference_size) {
+            Ok(prediction) => Ok(Some(prediction.p50)),
+            Err(CostRefusal::InsufficientData { .. }) => Ok(None),
+            Err(error) => Err(fs_geom::CostOracleError::Backend {
+                problem: format!("registered cost model prediction failed: {error}"),
+            }),
+        }
     }
 
-    fn measured_error_abs(&self, edge: &str) -> Option<f64> {
-        // Conservative: the p90 of observed absolute errors. `try_record`
-        // maintains this bounded vector in total order.
-        let errs = self.errors.get(edge)?;
-        let last = errs.len().checked_sub(1)?;
-        let idx = ((errs.len() as f64 - 1.0) * 0.9).round() as usize;
-        errs.get(idx.min(last)).copied()
+    fn measured_error_abs(
+        &self,
+        spec: &fs_geom::ConverterSpec,
+    ) -> Result<Option<f64>, fs_geom::CostOracleError> {
+        let Some(registered) = self.models.get(&spec.name) else {
+            return Ok(None);
+        };
+        if registered.spec != *spec {
+            return Err(PlanOracleError::SpecificationConflict.into());
+        }
+        Ok(self
+            .errors
+            .get(&spec.name)
+            .and_then(|errs| errs.last().copied()))
     }
 
     fn record_batch(
@@ -244,11 +295,7 @@ impl fs_geom::CostOracle for PlanCostOracle {
         let mut candidate = self.clone();
         for observation in observations {
             candidate
-                .try_record(
-                    observation.edge(),
-                    observation.cost_s(),
-                    observation.conservative_error_abs(),
-                )
+                .record_one(observation)
                 .map_err(fs_geom::CostOracleError::from)?;
         }
         *self = candidate;
@@ -584,7 +631,7 @@ impl<'a> StrictJson<'a> {
             .get(start..self.offset)
             .and_then(|bytes| core::str::from_utf8(bytes).ok())
             .ok_or_else(|| self.error("number", "number is not UTF-8"))?;
-        let finite = text.parse::<f64>().ok().is_some_and(f64::is_finite);
+        let finite = text.parse::<f64>().is_ok_and(f64::is_finite);
         if !finite {
             return Err(self.error("number", "number is not finite"));
         }
@@ -882,6 +929,22 @@ struct RowBinding {
     reps: u64,
 }
 
+struct DecodedMeasurement {
+    elements: u64,
+    sample_times: Vec<f64>,
+    decision_count: usize,
+    median_bits: u64,
+    median_seconds: f64,
+    p25_bits: u64,
+    p75_bits: u64,
+    dispersion_bits: u64,
+}
+
+struct ReceiptMetrics {
+    rate_bits: u64,
+    reps: u64,
+}
+
 fn decode_row_binding(text: &str) -> Result<RowBinding, TuneModelError> {
     let mut object = ObjectFields::new(
         StrictJson::parse(text, fs_ledger::MAX_TUNE_PARAMS_BYTES)?,
@@ -942,29 +1005,8 @@ fn decode_row_binding(text: &str) -> Result<RowBinding, TuneModelError> {
     })
 }
 
-fn decode_receipt(text: &str) -> Result<ReceiptObservation, TuneModelError> {
-    let mut receipt = ObjectFields::new(
-        StrictJson::parse(text, MAX_ROOFLINE_RECEIPT_BYTES)?,
-        "receipt",
-    )?;
-    let version = expect_u64(receipt.take("receipt_version")?, "receipt.receipt_version")?;
-    if version != ROOFLINE_RECEIPT_VERSION {
-        return Err(invalid_receipt(
-            "receipt.receipt_version",
-            format!("unsupported version {version}"),
-        ));
-    }
-    let kernel = expect_string(receipt.take("kernel")?, "receipt.kernel")?;
-    let version = expect_string(receipt.take("version")?, "receipt.version")?;
-    if kernel.is_empty() || version.is_empty() {
-        return Err(invalid_receipt(
-            "receipt.identity",
-            "kernel and version must be nonempty",
-        ));
-    }
-    let machine = expect_hex_u64(receipt.take("machine")?, "receipt.machine")?;
-
-    let mut axes = ObjectFields::new(receipt.take("axes")?, "receipt.axes")?;
+fn decode_receipt_axes(value: JsonValue) -> Result<(), TuneModelError> {
+    let mut axes = ObjectFields::new(value, "receipt.axes")?;
     let logical_cpus = expect_u64(axes.take("logical_cpus")?, "receipt.axes.logical_cpus")?;
     if logical_cpus == 0 || u32::try_from(logical_cpus).is_err() {
         return Err(invalid_receipt(
@@ -980,9 +1022,11 @@ fn decode_receipt(text: &str) -> Result<ReceiptObservation, TuneModelError> {
     ] {
         let _ = finite_from_bits(axes.take(field)?, &format!("receipt.axes.{field}"), true)?;
     }
-    axes.finish()?;
+    axes.finish()
+}
 
-    let mut spec = ObjectFields::new(receipt.take("spec")?, "receipt.spec")?;
+fn decode_receipt_spec(value: JsonValue) -> Result<(), TuneModelError> {
+    let mut spec = ObjectFields::new(value, "receipt.spec")?;
     let _ = finite_from_bits(
         spec.take("bytes_per_elem_bits")?,
         "receipt.spec.bytes_per_elem_bits",
@@ -1022,9 +1066,34 @@ fn decode_receipt(text: &str) -> Result<ReceiptObservation, TuneModelError> {
             }
         }
     }
-    spec.finish()?;
+    spec.finish()
+}
 
-    let mut measurement = ObjectFields::new(receipt.take("measurement")?, "receipt.measurement")?;
+fn validate_decision_hashes(values: &[JsonValue]) -> Result<(), TuneModelError> {
+    for (index, value) in values.iter().enumerate() {
+        match value {
+            JsonValue::Null => {}
+            JsonValue::String(hash)
+                if hash.len() == 64
+                    && hash
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)) => {}
+            other => {
+                return Err(invalid_receipt(
+                    format!("receipt.measurement.decision_binding_hashes[{index}]"),
+                    format!(
+                        "expected null or lowercase hash string, got {}",
+                        other.kind()
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn decode_receipt_measurement(value: JsonValue) -> Result<DecodedMeasurement, TuneModelError> {
+    let mut measurement = ObjectFields::new(value, "receipt.measurement")?;
     let origin = expect_string(measurement.take("origin")?, "receipt.measurement.origin")?;
     if origin != "timed" {
         return Err(invalid_receipt(
@@ -1062,8 +1131,7 @@ fn decode_receipt(text: &str) -> Result<ReceiptObservation, TuneModelError> {
             format!("length must be in 1..={MAX_ROOFLINE_REPS}"),
         ));
     }
-    let sample_count = sample_bits.len();
-    let mut sample_times = Vec::with_capacity(sample_count);
+    let mut sample_times = Vec::with_capacity(sample_bits.len());
     for (index, value) in sample_bits.into_iter().enumerate() {
         let (_, seconds) = finite_from_bits(
             value,
@@ -1082,25 +1150,7 @@ fn decode_receipt(text: &str) -> Result<ReceiptObservation, TuneModelError> {
             format!("length exceeds limit {MAX_ROOFLINE_REPS}"),
         ));
     }
-    for (index, value) in decision_hashes.iter().enumerate() {
-        match value {
-            JsonValue::Null => {}
-            JsonValue::String(hash)
-                if hash.len() == 64
-                    && hash
-                        .bytes()
-                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)) => {}
-            other => {
-                return Err(invalid_receipt(
-                    format!("receipt.measurement.decision_binding_hashes[{index}]"),
-                    format!(
-                        "expected null or lowercase hash string, got {}",
-                        other.kind()
-                    ),
-                ));
-            }
-        }
-    }
+    validate_decision_hashes(&decision_hashes)?;
     let (median_bits, median_seconds) = finite_from_bits(
         measurement.take("median_seconds_bits")?,
         "receipt.measurement.median_seconds_bits",
@@ -1116,7 +1166,7 @@ fn decode_receipt(text: &str) -> Result<ReceiptObservation, TuneModelError> {
         "receipt.measurement.p75_seconds_bits",
         true,
     )?;
-    let (measurement_dispersion_bits, _) = finite_from_bits(
+    let (dispersion_bits, _) = finite_from_bits(
         measurement.take("dispersion_bits")?,
         "receipt.measurement.dispersion_bits",
         false,
@@ -1128,7 +1178,22 @@ fn decode_receipt(text: &str) -> Result<ReceiptObservation, TuneModelError> {
         ));
     }
     measurement.finish()?;
+    Ok(DecodedMeasurement {
+        elements,
+        sample_times,
+        decision_count: decision_hashes.len(),
+        median_bits,
+        median_seconds,
+        p25_bits,
+        p75_bits,
+        dispersion_bits,
+    })
+}
 
+fn decode_receipt_metrics(
+    receipt: &mut ObjectFields,
+    measurement: &DecodedMeasurement,
+) -> Result<ReceiptMetrics, TuneModelError> {
     match receipt.take("execution")? {
         JsonValue::Null | JsonValue::Object(_) => {}
         other => {
@@ -1157,7 +1222,7 @@ fn decode_receipt(text: &str) -> Result<ReceiptObservation, TuneModelError> {
         "receipt.dispersion_bits",
         false,
     )?;
-    if dispersion_bits != measurement_dispersion_bits {
+    if dispersion_bits != measurement.dispersion_bits {
         return Err(invalid_receipt(
             "receipt.dispersion_bits",
             "does not match measurement dispersion",
@@ -1196,7 +1261,9 @@ fn decode_receipt(text: &str) -> Result<ReceiptObservation, TuneModelError> {
         ));
     }
     let expected_reps = sample_bits_len(reps)?;
-    if sample_count != expected_reps || decision_hashes.len() != expected_reps {
+    if measurement.sample_times.len() != expected_reps
+        || measurement.decision_count != expected_reps
+    {
         return Err(invalid_receipt(
             "receipt.measurement",
             "sample and decision-binding lengths must both match reps",
@@ -1215,40 +1282,80 @@ fn decode_receipt(text: &str) -> Result<ReceiptObservation, TuneModelError> {
             "citable tune evidence must have null invalid_reason",
         ));
     }
-    receipt.finish()?;
+    Ok(ReceiptMetrics { rate_bits, reps })
+}
 
-    let mut sorted_times = sample_times.clone();
+fn validate_rederived_metrics(
+    measurement: &DecodedMeasurement,
+    rate_bits: u64,
+) -> Result<f64, TuneModelError> {
+    let mut sorted_times = measurement.sample_times.clone();
     sorted_times.sort_by(f64::total_cmp);
     let recomputed_median = nearest_rank(&sorted_times, 0.5)?;
     let recomputed_p25 = nearest_rank(&sorted_times, 0.25)?;
     let recomputed_p75 = nearest_rank(&sorted_times, 0.75)?;
     let recomputed_dispersion = (recomputed_p75 - recomputed_p25) / recomputed_median;
-    if recomputed_median.to_bits() != median_bits
-        || recomputed_p25.to_bits() != p25_bits
-        || recomputed_p75.to_bits() != p75_bits
-        || recomputed_dispersion.to_bits() != measurement_dispersion_bits
+    if recomputed_median.to_bits() != measurement.median_bits
+        || recomputed_p25.to_bits() != measurement.p25_bits
+        || recomputed_p75.to_bits() != measurement.p75_bits
+        || recomputed_dispersion.to_bits() != measurement.dispersion_bits
     {
         return Err(invalid_receipt(
             "receipt.measurement.statistics",
             "stored median/p25/p75/dispersion do not rederive from sample_seconds_bits",
         ));
     }
-    let size = elements as f64;
-    if (size / median_seconds).to_bits() != rate_bits {
+    let size = measurement.elements as f64;
+    if (size / measurement.median_seconds).to_bits() != rate_bits {
         return Err(invalid_receipt(
             "receipt.elems_per_sec_bits",
             "does not rederive from measurement elements / median seconds",
         ));
     }
+    Ok(size)
+}
+
+fn decode_receipt(text: &str) -> Result<ReceiptObservation, TuneModelError> {
+    let mut receipt = ObjectFields::new(
+        StrictJson::parse(text, MAX_ROOFLINE_RECEIPT_BYTES)?,
+        "receipt",
+    )?;
+    let version = expect_u64(receipt.take("receipt_version")?, "receipt.receipt_version")?;
+    if version != ROOFLINE_RECEIPT_VERSION {
+        return Err(invalid_receipt(
+            "receipt.receipt_version",
+            format!("unsupported version {version}"),
+        ));
+    }
+    let kernel = expect_string(receipt.take("kernel")?, "receipt.kernel")?;
+    let version = expect_string(receipt.take("version")?, "receipt.version")?;
+    if kernel.is_empty() || version.is_empty() {
+        return Err(invalid_receipt(
+            "receipt.identity",
+            "kernel and version must be nonempty",
+        ));
+    }
+    let machine = expect_hex_u64(receipt.take("machine")?, "receipt.machine")?;
+
+    decode_receipt_axes(receipt.take("axes")?)?;
+
+    decode_receipt_spec(receipt.take("spec")?)?;
+
+    let measurement = decode_receipt_measurement(receipt.take("measurement")?)?;
+
+    let metrics = decode_receipt_metrics(&mut receipt, &measurement)?;
+    receipt.finish()?;
+    let size = validate_rederived_metrics(&measurement, metrics.rate_bits)?;
     Ok(ReceiptObservation {
         kernel,
         version,
         machine,
-        observations: sample_times
+        observations: measurement
+            .sample_times
             .into_iter()
             .map(|cost_s| CostObservation { size, cost_s })
             .collect(),
-        reps,
+        reps: metrics.reps,
     })
 }
 
@@ -1602,7 +1709,17 @@ pub fn cost_model_from_tune(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fs_geom::CostOracle as _;
+
+    fn oracle_spec(name: &str) -> fs_geom::ConverterSpec {
+        fs_geom::ConverterSpec {
+            from: "source".to_string(),
+            to: "target".to_string(),
+            name: name.to_string(),
+            base_cost_s: 1.0,
+            error: fs_geom::ErrorModel::AdditiveAbs(0.1),
+            certified: false,
+        }
+    }
 
     fn bits(value: f64) -> String {
         format!("{:016x}", value.to_bits())
@@ -1653,8 +1770,14 @@ mod tests {
     fn receipt_v3_decodes_every_timed_sample() {
         let decoded = decode_receipt(&production_receipt()).unwrap();
         assert_eq!(decoded.observations.len(), 3);
-        assert_eq!(decoded.observations[0].size, 1_000.0);
-        assert_eq!(decoded.observations[0].cost_s, 0.003);
+        assert_eq!(
+            decoded.observations[0].size.to_bits(),
+            1_000.0_f64.to_bits()
+        );
+        assert_eq!(
+            decoded.observations[0].cost_s.to_bits(),
+            0.003_f64.to_bits()
+        );
         let model = CostModel::fit(&decoded.observations).unwrap();
         assert_eq!(model.n_obs(), 3);
         assert!(model.predict(1_000.0).is_ok());
@@ -1700,30 +1823,22 @@ mod tests {
     }
 
     #[test]
-    fn planner_oracle_record_is_transactional_and_requires_registration() {
+    fn planner_oracle_registration_is_spec_scoped() {
         let mut oracle = PlanCostOracle::new();
-        assert_eq!(
-            oracle.try_record("frep->sdf", 1.0, 0.1),
-            Err(PlanOracleError::UnregisteredEdge)
-        );
-        oracle.register_edge("frep->sdf", 100.0).unwrap();
-        oracle.try_record("frep->sdf", 1.0, 0.1).unwrap();
-        let before_count = oracle.model("frep->sdf").unwrap().n_obs();
-        let before_error = oracle.measured_error_abs("frep->sdf");
+        let spec = oracle_spec("frep->sdf");
+        oracle.register_edge(&spec, 100.0).unwrap();
+        assert_eq!(oracle.model("frep->sdf").unwrap().n_obs(), 0);
 
+        let mut changed = spec.clone();
+        changed.error = fs_geom::ErrorModel::AdditiveAbs(0.2);
         assert_eq!(
-            oracle.try_record("frep->sdf", f64::NAN, 0.2),
-            Err(PlanOracleError::Cost(CostRefusal::BadInput))
+            oracle.register_edge(&changed, 100.0),
+            Err(PlanOracleError::SpecificationConflict)
         );
+        oracle.register_edge(&spec, 200.0).unwrap();
         assert_eq!(
-            oracle.try_record("frep->sdf", 2.0, f64::NAN),
-            Err(PlanOracleError::InvalidError)
-        );
-        assert_eq!(oracle.model("frep->sdf").unwrap().n_obs(), before_count);
-        assert_eq!(oracle.measured_error_abs("frep->sdf"), before_error);
-        assert_eq!(
-            oracle.register_edge("frep->sdf", 200.0),
-            Err(PlanOracleError::ReferenceSizeConflict)
+            oracle.register_edge(&spec, f64::NAN),
+            Err(PlanOracleError::InvalidReferenceSize)
         );
     }
 
@@ -1731,10 +1846,12 @@ mod tests {
     fn planner_oracle_accepts_edge_cap_and_refuses_limit_plus_one() {
         let mut oracle = PlanCostOracle::new();
         for index in 0..MAX_PLAN_ORACLE_EDGES {
-            oracle.register_edge(&format!("edge-{index}"), 1.0).unwrap();
+            oracle
+                .register_edge(&oracle_spec(&format!("edge-{index}")), 1.0)
+                .unwrap();
         }
         assert_eq!(
-            oracle.register_edge("one-too-many", 1.0),
+            oracle.register_edge(&oracle_spec("one-too-many"), 1.0),
             Err(PlanOracleError::EdgeLimit {
                 limit: MAX_PLAN_ORACLE_EDGES
             })

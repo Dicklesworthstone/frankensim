@@ -91,7 +91,10 @@ typed AST. Layer: L6 (HELM). Runtime deps: `std` + fs-qty.
   exact arity; structured operator-specific budget clauses remain extensible
   until the catalog lands. Chart
   routability (fs-geom Router as an admission predicate with the
-  RouteRefusal's own fixes attached), and regime gating (explicit
+  `RouteRefusal`'s own fixes attached; malformed/spec-mismatched oracle
+  authority and bounded-search exhaustion reject distinctly; a route containing
+  any converter not declared certificate-backed is estimated and cannot
+  authorize admission), and regime gating (explicit
   `(assert (regime.allows …))` plus `flux.*` verbs checked against an
   fs-regime report; policy-graded Reject/Warn). Findings carry spans,
   diagnoses, and `RankedFix { action, predicted_wall_s, qoi_impact }`.
@@ -304,6 +307,11 @@ telemetry for a completed speculative transition.
   with the operator registry.
 - Chart requirements are supplied by lowering/callers; admission does not
   yet derive them from raw study text.
+- Router certification is currently a validated declaration on
+  `ConverterSpec`, not an authenticated checker/ledger receipt. Admission
+  refuses explicitly estimated routes, but full opaque admitted-converter
+  authority remains part of the scientific-evidence migration; callers must not
+  interpret the declaration Boolean as independent proof.
 - `SessionCapability` is admission's view of a token; issuance,
   revocation, and idempotency keys are fs-session's bead (gp3.7).
   A self-contained `(capability ...)` clause supports static planning and

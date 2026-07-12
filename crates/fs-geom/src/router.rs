@@ -18,10 +18,11 @@
 //!   HELM wires the ledger `tune` table behind it, and
 //!   [`MemoryCostOracle`] serves in-process learning and tests.
 //! - **Execution**: [`Router::execute`] runs a plan's chain through
-//!   [`EdgeRunner`]s, COMPOSES the per-edge Evidence receipts
-//!   (fs-evidence `Op::Add` over achieved-error enclosures — total error
-//!   of a chain is bounded by the sum), and records actual cost/error
-//!   back into the oracle so later plans improve.
+//!   [`EdgeRunner`]s and COMPOSES per-edge local-error receipts with the same
+//!   directed-rounding algebra used by planning: additive errors add,
+//!   multiplicative errors amplify the accumulated enclosure before adding
+//!   their local receipt, and exact edges must return zero. Actuals are
+//!   recorded back into the oracle so later plans improve.
 //! - **Refusals teach** (P10): no admissible path → a structured refusal
 //!   naming the BINDING constraint and the cheapest relaxations.
 //!
@@ -32,10 +33,37 @@
 //! CONTRACT.md documents the boundary.
 
 use core::fmt;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use fs_evidence::{Certified, Evidence, NumericalCertificate, Op, ProvenanceHash};
 use fs_exec::Cx;
+
+fn nonnegative_add_upper(a: f64, b: f64) -> f64 {
+    let sum = a + b;
+    if !sum.is_finite() {
+        return sum;
+    }
+    // Knuth TwoSum residual: positive means the nearest result rounded below
+    // the exact nonnegative sum and needs one upward step. Exact or already-
+    // upward results are retained, avoiding a false ulp at 0 + bound.
+    let virtual_b = sum - a;
+    let residual = (a - (sum - virtual_b)) + (b - virtual_b);
+    if residual > 0.0 { sum.next_up() } else { sum }
+}
+
+fn nonnegative_mul_upper(a: f64, b: f64) -> f64 {
+    let product = a * b;
+    if !product.is_finite() {
+        return product;
+    }
+    // The fused residual has the sign of exact(a*b) - rounded(a*b).
+    let residual = a.mul_add(b, -product);
+    if residual > 0.0 {
+        product.next_up()
+    } else {
+        product
+    }
+}
 
 /// Per-edge error model with its path-composition rule.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -49,12 +77,27 @@ pub enum ErrorModel {
 }
 
 impl ErrorModel {
-    /// Composed absolute error after crossing this edge.
-    fn compose(self, incoming_abs: f64, scale: f64) -> f64 {
+    /// Composed upper bound after crossing this edge. This mirrors the
+    /// execution receipt algebra exactly: every floating add/multiply rounds
+    /// upward once, while an exact edge leaves the incoming bound unchanged.
+    fn compose_upper(self, incoming_abs: f64, scale: f64) -> f64 {
         match self {
             ErrorModel::Exact => incoming_abs,
-            ErrorModel::AdditiveAbs(a) => incoming_abs + a,
-            ErrorModel::MultiplicativeRel(r) => incoming_abs * (1.0 + r) + r * scale,
+            ErrorModel::AdditiveAbs(a) => nonnegative_add_upper(incoming_abs, a),
+            ErrorModel::MultiplicativeRel(r) => {
+                let factor_hi = nonnegative_add_upper(1.0, r);
+                let amplified = nonnegative_mul_upper(incoming_abs, factor_hi);
+                let local = nonnegative_mul_upper(r, scale);
+                nonnegative_add_upper(amplified, local)
+            }
+        }
+    }
+
+    fn identity_fields(self) -> (u64, f64) {
+        match self {
+            Self::Exact => (0, 0.0),
+            Self::AdditiveAbs(value) => (1, value),
+            Self::MultiplicativeRel(value) => (2, value),
         }
     }
 }
@@ -72,20 +115,25 @@ pub struct ConverterSpec {
     pub base_cost_s: f64,
     /// Declared error model.
     pub error: ErrorModel,
-    /// Whether the edge's error claim is certificate-backed. Certified
+    /// Whether the edge's error claim is DECLARED certificate-backed. Certified
     /// edges are PREFERRED by the winner rule; uncertified (estimated)
     /// edges may have their additive error magnitude replaced by learned
-    /// measurements — certificates are never "learned" away.
+    /// measurements — certificates are never "learned" away. This Boolean is
+    /// not an authenticated checker/ledger receipt; authoritative admission
+    /// additionally refuses any route containing a false value, while opaque
+    /// admitted converter authority remains a tracked no-claim.
     pub certified: bool,
 }
 
 /// Measured-cost source (HELM wires the ledger `tune` table behind this;
 /// L2 stays ledger-free).
 pub trait CostOracle {
-    /// Mean measured wall cost for an edge, if any measurement exists.
-    fn measured_cost_s(&self, edge: &str) -> Option<f64>;
-    /// Mean measured absolute error for an edge, if any.
-    fn measured_error_abs(&self, edge: &str) -> Option<f64>;
+    /// Predictive measured wall cost for this exact converter specification.
+    /// `Ok(None)` means no evidence; backend/read failure is explicit.
+    fn measured_cost_s(&self, spec: &ConverterSpec) -> Result<Option<f64>, CostOracleError>;
+    /// Conservative observed absolute-error ceiling for this exact converter
+    /// specification. `Ok(None)` means no evidence.
+    fn measured_error_abs(&self, spec: &ConverterSpec) -> Result<Option<f64>, CostOracleError>;
     /// Atomically record one validated execution batch.
     ///
     /// # Errors
@@ -112,7 +160,7 @@ pub enum EdgeEvidenceClass {
 /// private so raw scalars cannot become future routing authority.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ValidatedEdgeObservation {
-    edge: String,
+    spec: ConverterSpec,
     cost_s: f64,
     conservative_error_abs: f64,
     evidence_class: EdgeEvidenceClass,
@@ -123,7 +171,13 @@ impl ValidatedEdgeObservation {
     /// Exact converter identity.
     #[must_use]
     pub fn edge(&self) -> &str {
-        &self.edge
+        &self.spec.name
+    }
+
+    /// Exact converter specification whose execution produced this row.
+    #[must_use]
+    pub fn spec(&self) -> &ConverterSpec {
+        &self.spec
     }
 
     /// Measured wall cost in seconds.
@@ -202,6 +256,18 @@ impl core::error::Error for CostOracleError {}
 pub const MAX_MEMORY_ORACLE_EDGES: usize = 4_096;
 /// Maximum visible-ASCII bytes in a converter/oracle identity.
 pub const MAX_ROUTER_ID_BYTES: usize = 256;
+/// Maximum converter edges registered in one router.
+pub const MAX_ROUTER_EDGES: usize = 4_096;
+/// Maximum distinct chart kinds registered in one router.
+pub const MAX_ROUTER_NODES: usize = 4_096;
+/// Maximum edges retained in one simple candidate path.
+pub const MAX_ROUTE_PATH_EDGES: usize = 256;
+/// Maximum non-dominated labels retained at any chart kind.
+pub const MAX_ROUTER_LABELS_PER_NODE: usize = 1_024;
+/// Maximum labels created during one planning decision.
+pub const MAX_ROUTER_TOTAL_LABELS: usize = 16_384;
+/// Maximum outgoing candidate expansions during one planning decision.
+pub const MAX_ROUTER_EXPANSIONS: usize = 65_536;
 
 fn validate_identity(field: &str, value: &str) -> Result<(), String> {
     if value.is_empty() {
@@ -219,10 +285,20 @@ fn validate_identity(field: &str, value: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// In-memory running-mean oracle (tests, in-process learning).
+#[derive(Debug, Clone)]
+struct MemoryOracleRow {
+    spec: ConverterSpec,
+    cost_sum: f64,
+    error_max: f64,
+    count: u32,
+}
+
+/// In-memory bounded oracle (tests, in-process learning). Costs use a running
+/// mean; errors retain the maximum observed upper bound and never average a
+/// bound downward.
 #[derive(Debug, Clone, Default)]
 pub struct MemoryCostOracle {
-    rows: BTreeMap<String, (f64, f64, u32)>,
+    rows: BTreeMap<String, MemoryOracleRow>,
 }
 
 impl MemoryCostOracle {
@@ -253,16 +329,27 @@ impl MemoryCostOracle {
                 problem: "must be nonnegative and finite".to_string(),
             });
         }
-        let prior = self.rows.get(edge).copied();
+        let prior = self.rows.get(edge).cloned();
+        if let Some(prior) = &prior
+            && prior.spec != *observation.spec()
+        {
+            return Err(CostOracleError::InvalidEdge {
+                problem: format!(
+                    "converter {edge:?} was already learned under a different specification"
+                ),
+            });
+        }
         if prior.is_none() && self.rows.len() >= MAX_MEMORY_ORACLE_EDGES {
             return Err(CostOracleError::CapacityExceeded {
                 resource: "edges",
                 limit: MAX_MEMORY_ORACLE_EDGES,
             });
         }
-        let (cost_sum, error_sum, count) = prior.unwrap_or((0.0, 0.0, 0));
+        let (cost_sum, error_max, count) = prior.map_or((0.0, 0.0, 0), |row| {
+            (row.cost_sum, row.error_max, row.count)
+        });
         let next_cost = cost_sum + cost_s;
-        let next_error = error_sum + error_abs;
+        let next_error = error_max.max(error_abs);
         let next_count = count
             .checked_add(1)
             .ok_or(CostOracleError::CapacityExceeded {
@@ -279,19 +366,48 @@ impl MemoryCostOracle {
                 problem: "error accumulator overflowed".to_string(),
             });
         }
-        self.rows
-            .insert(edge.to_string(), (next_cost, next_error, next_count));
+        self.rows.insert(
+            edge.to_string(),
+            MemoryOracleRow {
+                spec: observation.spec().clone(),
+                cost_sum: next_cost,
+                error_max: next_error,
+                count: next_count,
+            },
+        );
         Ok(())
     }
 }
 
 impl CostOracle for MemoryCostOracle {
-    fn measured_cost_s(&self, edge: &str) -> Option<f64> {
-        self.rows.get(edge).map(|(c, _, n)| c / f64::from(*n))
+    fn measured_cost_s(&self, spec: &ConverterSpec) -> Result<Option<f64>, CostOracleError> {
+        let Some(row) = self.rows.get(&spec.name) else {
+            return Ok(None);
+        };
+        if row.spec != *spec {
+            return Err(CostOracleError::InvalidEdge {
+                problem: format!(
+                    "converter {:?} measurement belongs to a different specification",
+                    spec.name
+                ),
+            });
+        }
+        Ok(Some(row.cost_sum / f64::from(row.count)))
     }
 
-    fn measured_error_abs(&self, edge: &str) -> Option<f64> {
-        self.rows.get(edge).map(|(_, e, n)| e / f64::from(*n))
+    fn measured_error_abs(&self, spec: &ConverterSpec) -> Result<Option<f64>, CostOracleError> {
+        let Some(row) = self.rows.get(&spec.name) else {
+            return Ok(None);
+        };
+        if row.spec != *spec {
+            return Err(CostOracleError::InvalidEdge {
+                problem: format!(
+                    "converter {:?} measurement belongs to a different specification",
+                    spec.name
+                ),
+            });
+        }
+        Ok(Some(row.error_max))
     }
 
     fn record_batch(
@@ -333,6 +449,8 @@ pub struct RoutePlan {
     planned_specs: Vec<ConverterSpec>,
     /// Exact request/budgets under which the plan was admitted.
     request: RouteRequest,
+    /// Canonical identity of the one-pass oracle snapshot used to plan.
+    oracle_snapshot_root: u64,
     /// Predicted total cost, seconds.
     predicted_cost_s: f64,
     /// Composed absolute error bound.
@@ -360,7 +478,8 @@ impl RoutePlan {
         self.composed_abs_error
     }
 
-    /// Whether every planned converter requires certified evidence.
+    /// Whether every planned converter is declared certificate-backed.
+    /// This does not authenticate the declarations themselves.
     #[must_use]
     pub fn all_certified(&self) -> bool {
         self.all_certified
@@ -370,6 +489,12 @@ impl RoutePlan {
     #[must_use]
     pub fn request(&self) -> &RouteRequest {
         &self.request
+    }
+
+    /// Canonical root of the spec-scoped oracle snapshot used by this plan.
+    #[must_use]
+    pub fn oracle_snapshot_root(&self) -> u64 {
+        self.oracle_snapshot_root
     }
 }
 
@@ -469,6 +594,13 @@ pub enum RoutePlanError {
         /// Actionable diagnosis.
         problem: String,
     },
+    /// A deterministic graph-search work or memory envelope was exhausted.
+    ResourceLimit {
+        /// Bounded search resource.
+        resource: &'static str,
+        /// Maximum admitted amount.
+        limit: usize,
+    },
     /// No route satisfies the valid request.
     Infeasible(RouteRefusal),
 }
@@ -486,6 +618,9 @@ impl fmt::Display for RoutePlanError {
             } => write!(f, "invalid oracle {field} for edge {edge:?}: {problem}"),
             Self::Arithmetic { edge, problem } => {
                 write!(f, "route arithmetic failed at edge {edge:?}: {problem}")
+            }
+            Self::ResourceLimit { resource, limit } => {
+                write!(f, "route planning exceeded {resource} limit {limit}")
             }
             Self::Infeasible(refusal) => refusal.fmt(f),
         }
@@ -507,6 +642,13 @@ pub enum RouterError {
     DuplicateEdge(String),
     /// Nonsensical spec (empty names, negative cost/error).
     InvalidSpec(String),
+    /// A bounded registry collection is full.
+    CapacityExceeded {
+        /// Bounded registry resource.
+        resource: &'static str,
+        /// Maximum admitted entries.
+        limit: usize,
+    },
 }
 
 impl fmt::Display for RouterError {
@@ -516,6 +658,9 @@ impl fmt::Display for RouterError {
                 write!(f, "converter edge {name:?} is already registered")
             }
             RouterError::InvalidSpec(why) => write!(f, "invalid converter spec: {why}"),
+            RouterError::CapacityExceeded { resource, limit } => {
+                write!(f, "router {resource} capacity {limit} is exhausted")
+            }
         }
     }
 }
@@ -528,6 +673,18 @@ struct Label {
     uncertified: u32,
     path: Vec<usize>,
     nodes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct EffectiveEdge {
+    cost: f64,
+    error: ErrorModel,
+}
+
+#[derive(Debug, Clone)]
+struct OracleSnapshot {
+    edges: Vec<EffectiveEdge>,
+    root: u64,
 }
 
 struct ExecutedRoute {
@@ -589,6 +746,25 @@ impl Router {
         if self.edges.iter().any(|e| e.name == spec.name) {
             return Err(RouterError::DuplicateEdge(spec.name));
         }
+        if self.edges.len() >= MAX_ROUTER_EDGES {
+            return Err(RouterError::CapacityExceeded {
+                resource: "edges",
+                limit: MAX_ROUTER_EDGES,
+            });
+        }
+        let mut nodes = BTreeSet::new();
+        for edge in &self.edges {
+            nodes.insert(edge.from.as_str());
+            nodes.insert(edge.to.as_str());
+        }
+        nodes.insert(spec.from.as_str());
+        nodes.insert(spec.to.as_str());
+        if nodes.len() > MAX_ROUTER_NODES {
+            return Err(RouterError::CapacityExceeded {
+                resource: "nodes",
+                limit: MAX_ROUTER_NODES,
+            });
+        }
         self.edges.push(spec);
         // Deterministic expansion order regardless of registration order.
         self.edges.sort_by(|a, b| a.name.cmp(&b.name));
@@ -601,12 +777,18 @@ impl Router {
         &self.edges
     }
 
-    /// Effective cost of an edge: measured mean when the oracle has one,
-    /// else the a-priori base cost.
+    /// Effective cost of an edge: measured prediction when the oracle has one,
+    /// else the a-priori base cost. Backend failure never aliases missing data.
     fn edge_cost(spec: &ConverterSpec, oracle: &dyn CostOracle) -> Result<f64, RoutePlanError> {
-        let cost = oracle
-            .measured_cost_s(&spec.name)
-            .unwrap_or(spec.base_cost_s);
+        let measured =
+            oracle
+                .measured_cost_s(spec)
+                .map_err(|error| RoutePlanError::InvalidOracle {
+                    edge: spec.name.clone(),
+                    field: "measured_cost_s",
+                    problem: error.to_string(),
+                })?;
+        let cost = measured.unwrap_or(spec.base_cost_s);
         if !cost.is_finite() || cost < 0.0 {
             return Err(RoutePlanError::InvalidOracle {
                 edge: spec.name.clone(),
@@ -617,9 +799,10 @@ impl Router {
         Ok(cost)
     }
 
-    /// Effective error model: learned measurements may replace the
-    /// declared magnitude ONLY on uncertified additive edges (estimates
-    /// learn; certificates are never learned away).
+    /// Effective error model: learned observations may only INCREASE an
+    /// uncertified additive declaration. Retrospective measurements are not a
+    /// calibrated future enclosure and therefore cannot tighten hard routing
+    /// authority.
     fn edge_error(
         spec: &ConverterSpec,
         oracle: &dyn CostOracle,
@@ -627,8 +810,16 @@ impl Router {
         if spec.certified {
             return Ok(spec.error);
         }
-        match (spec.error, oracle.measured_error_abs(&spec.name)) {
-            (ErrorModel::AdditiveAbs(_), Some(measured)) => {
+        let measured =
+            oracle
+                .measured_error_abs(spec)
+                .map_err(|error| RoutePlanError::InvalidOracle {
+                    edge: spec.name.clone(),
+                    field: "measured_error_abs",
+                    problem: error.to_string(),
+                })?;
+        match (spec.error, measured) {
+            (ErrorModel::AdditiveAbs(declared), Some(measured)) => {
                 if !measured.is_finite() || measured < 0.0 {
                     return Err(RoutePlanError::InvalidOracle {
                         edge: spec.name.clone(),
@@ -636,10 +827,36 @@ impl Router {
                         problem: "must be finite and nonnegative".to_string(),
                     });
                 }
-                Ok(ErrorModel::AdditiveAbs(measured))
+                Ok(ErrorModel::AdditiveAbs(declared.max(measured)))
             }
             (declared, _) => Ok(declared),
         }
+    }
+
+    fn oracle_snapshot(&self, oracle: &dyn CostOracle) -> Result<OracleSnapshot, RoutePlanError> {
+        let mut effective = Vec::with_capacity(self.edges.len());
+        let mut identity = fs_obs::ident::IdentityBuilder::new("rep-router-oracle-snapshot-v1");
+        for spec in &self.edges {
+            let cost = Self::edge_cost(spec, oracle)?;
+            let error = Self::edge_error(spec, oracle)?;
+            let (error_tag, error_value) = error.identity_fields();
+            identity = identity
+                .str("edge_name", &spec.name)
+                .str("edge_from", &spec.from)
+                .str("edge_to", &spec.to)
+                .f64_bits("base_cost_s", spec.base_cost_s)
+                .u64("declared_error_tag", spec.error.identity_fields().0)
+                .f64_bits("declared_error_value", spec.error.identity_fields().1)
+                .flag("declared_certified", spec.certified)
+                .f64_bits("effective_cost_s", cost)
+                .u64("effective_error_tag", error_tag)
+                .f64_bits("effective_error_value", error_value);
+            effective.push(EffectiveEdge { cost, error });
+        }
+        Ok(OracleSnapshot {
+            edges: effective,
+            root: identity.finish().root(),
+        })
     }
 
     fn validate_request(req: &RouteRequest) -> Result<(), RoutePlanError> {
@@ -667,7 +884,7 @@ impl Router {
     fn pareto_front(
         &self,
         req: &RouteRequest,
-        oracle: &dyn CostOracle,
+        snapshot: &OracleSnapshot,
         include: &dyn Fn(&ConverterSpec) -> bool,
     ) -> Result<Vec<Label>, RoutePlanError> {
         Self::validate_request(req)?;
@@ -681,6 +898,8 @@ impl Router {
         let mut fronts: BTreeMap<String, Vec<Label>> = BTreeMap::new();
         fronts.insert(req.from.clone(), vec![start.clone()]);
         let mut queue = vec![start];
+        let mut labels_created = 1usize;
+        let mut expansions = 0usize;
         while let Some(label) = queue.pop() {
             let at = label
                 .nodes
@@ -691,49 +910,58 @@ impl Router {
                 if !include(spec) || spec.from != at || label.nodes.iter().any(|n| n == &spec.to) {
                     continue; // not outgoing, or would revisit (simple paths)
                 }
-                let edge_cost = Self::edge_cost(spec, oracle)?;
-                let cost = label.cost + edge_cost;
-                if !cost.is_finite() {
-                    return Err(RoutePlanError::Arithmetic {
-                        edge: spec.name.clone(),
-                        problem: "path cost overflowed the finite domain".to_string(),
-                    });
-                }
-                let err = Self::edge_error(spec, oracle)?.compose(label.err, req.scale);
-                if !err.is_finite() || err < 0.0 {
-                    return Err(RoutePlanError::Arithmetic {
-                        edge: spec.name.clone(),
-                        problem: "path error composition left the finite nonnegative domain"
-                            .to_string(),
-                    });
-                }
-                let uncertified = label
-                    .uncertified
-                    .checked_add(u32::from(!spec.certified))
-                    .ok_or_else(|| RoutePlanError::Arithmetic {
-                        edge: spec.name.clone(),
-                        problem: "uncertified-edge counter overflowed".to_string(),
+                expansions = expansions
+                    .checked_add(1)
+                    .ok_or(RoutePlanError::ResourceLimit {
+                        resource: "candidate expansions",
+                        limit: MAX_ROUTER_EXPANSIONS,
                     })?;
-                let next = Label {
-                    cost,
-                    err,
-                    uncertified,
-                    path: {
-                        let mut p = label.path.clone();
-                        p.push(idx);
-                        p
-                    },
-                    nodes: {
-                        let mut n = label.nodes.clone();
-                        n.push(spec.to.clone());
-                        n
-                    },
-                };
+                if expansions > MAX_ROUTER_EXPANSIONS {
+                    return Err(RoutePlanError::ResourceLimit {
+                        resource: "candidate expansions",
+                        limit: MAX_ROUTER_EXPANSIONS,
+                    });
+                }
+                if label.path.len() >= MAX_ROUTE_PATH_EDGES {
+                    return Err(RoutePlanError::ResourceLimit {
+                        resource: "path edges",
+                        limit: MAX_ROUTE_PATH_EDGES,
+                    });
+                }
+                let effective =
+                    snapshot
+                        .edges
+                        .get(idx)
+                        .ok_or_else(|| RoutePlanError::Arithmetic {
+                            edge: spec.name.clone(),
+                            problem: "oracle snapshot cardinality drifted from registry"
+                                .to_string(),
+                        })?;
+                let next = Self::extend_label(&label, idx, spec, *effective, req.scale)?;
                 let front = fronts.entry(spec.to.clone()).or_default();
                 if front.iter().any(|l| l.dominates(&next)) {
                     continue;
                 }
                 front.retain(|l| !next.dominates(l));
+                if front.len() >= MAX_ROUTER_LABELS_PER_NODE {
+                    return Err(RoutePlanError::ResourceLimit {
+                        resource: "labels per node",
+                        limit: MAX_ROUTER_LABELS_PER_NODE,
+                    });
+                }
+                labels_created =
+                    labels_created
+                        .checked_add(1)
+                        .ok_or(RoutePlanError::ResourceLimit {
+                            resource: "total labels",
+                            limit: MAX_ROUTER_TOTAL_LABELS,
+                        })?;
+                if labels_created > MAX_ROUTER_TOTAL_LABELS {
+                    return Err(RoutePlanError::ResourceLimit {
+                        resource: "total labels",
+                        limit: MAX_ROUTER_TOTAL_LABELS,
+                    });
+                }
                 front.push(next.clone());
                 queue.push(next);
             }
@@ -747,6 +975,47 @@ impl Router {
                 .then_with(|| self.path_names(&a.path).cmp(&self.path_names(&b.path)))
         });
         Ok(result)
+    }
+
+    fn extend_label(
+        label: &Label,
+        edge_index: usize,
+        spec: &ConverterSpec,
+        effective: EffectiveEdge,
+        scale: f64,
+    ) -> Result<Label, RoutePlanError> {
+        let cost = label.cost + effective.cost;
+        if !cost.is_finite() {
+            return Err(RoutePlanError::Arithmetic {
+                edge: spec.name.clone(),
+                problem: "path cost overflowed the finite domain".to_string(),
+            });
+        }
+        let err = effective.error.compose_upper(label.err, scale);
+        if !err.is_finite() || err < 0.0 {
+            return Err(RoutePlanError::Arithmetic {
+                edge: spec.name.clone(),
+                problem: "path error composition left the finite nonnegative domain".to_string(),
+            });
+        }
+        let uncertified = label
+            .uncertified
+            .checked_add(u32::from(!spec.certified))
+            .ok_or_else(|| RoutePlanError::Arithmetic {
+                edge: spec.name.clone(),
+                problem: "uncertified-edge counter overflowed".to_string(),
+            })?;
+        let mut path = label.path.clone();
+        path.push(edge_index);
+        let mut nodes = label.nodes.clone();
+        nodes.push(spec.to.clone());
+        Ok(Label {
+            cost,
+            err,
+            uncertified,
+            path,
+            nodes,
+        })
     }
 
     fn path_names(&self, path: &[usize]) -> Vec<String> {
@@ -778,7 +1047,41 @@ impl Router {
         oracle: &dyn CostOracle,
         include: impl Fn(&ConverterSpec) -> bool,
     ) -> Result<RoutePlan, RoutePlanError> {
-        let front = self.pareto_front(req, oracle, &include)?;
+        let snapshot = self.oracle_snapshot(oracle)?;
+        self.plan_from_snapshot(req, &snapshot, &include)
+    }
+
+    /// Prefer a filtered route, then fall back to the full graph only when the
+    /// filtered graph is genuinely infeasible. Both attempts consume the SAME
+    /// one-pass oracle snapshot, so a live backend cannot change authority
+    /// between policy passes.
+    ///
+    /// # Errors
+    /// Malformed authority and resource/arithmetic failures never trigger a
+    /// fallback. If neither graph is feasible, returns the full-graph refusal.
+    pub fn plan_prefer_edge_filter(
+        &self,
+        req: &RouteRequest,
+        oracle: &dyn CostOracle,
+        include: impl Fn(&ConverterSpec) -> bool,
+    ) -> Result<RoutePlan, RoutePlanError> {
+        let snapshot = self.oracle_snapshot(oracle)?;
+        match self.plan_from_snapshot(req, &snapshot, &include) {
+            Ok(plan) => Ok(plan),
+            Err(RoutePlanError::Infeasible(_)) => {
+                self.plan_from_snapshot(req, &snapshot, &|_| true)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn plan_from_snapshot(
+        &self,
+        req: &RouteRequest,
+        snapshot: &OracleSnapshot,
+        include: &dyn Fn(&ConverterSpec) -> bool,
+    ) -> Result<RoutePlan, RoutePlanError> {
+        let front = self.pareto_front(req, snapshot, include)?;
         let admissible: Vec<&Label> = front
             .iter()
             .filter(|l| l.err <= req.max_abs_error && l.cost <= req.max_cost_s)
@@ -792,6 +1095,7 @@ impl Router {
                     .map(|&index| self.edges[index].clone())
                     .collect(),
                 request: req.clone(),
+                oracle_snapshot_root: snapshot.root,
                 predicted_cost_s: winner.cost,
                 composed_abs_error: winner.err,
                 all_certified: winner.uncertified == 0,
@@ -804,8 +1108,8 @@ impl Router {
         admissible
             .iter()
             .min_by(|a, b| {
-                a.uncertified
-                    .cmp(&b.uncertified)
+                u8::from(a.uncertified != 0)
+                    .cmp(&u8::from(b.uncertified != 0))
                     .then(a.cost.total_cmp(&b.cost))
                     .then(a.err.total_cmp(&b.err))
                     .then_with(|| self.path_names(&a.path).cmp(&self.path_names(&b.path)))
@@ -836,24 +1140,57 @@ impl Router {
             _ => Binding::Both,
         };
         let mut fixes = Vec::new();
-        if !error_feasible {
+        let best_error_within_cost = front
+            .iter()
+            .filter(|label| label.cost <= req.max_cost_s)
+            .map(|label| label.err)
+            .min_by(f64::total_cmp);
+        let best_cost_within_error = front
+            .iter()
+            .filter(|label| label.err <= req.max_abs_error)
+            .map(|label| label.cost)
+            .min_by(f64::total_cmp);
+        if let Some(required_error) = best_error_within_cost
+            && required_error > req.max_abs_error
+        {
             fixes.push(format!(
-                "relax max_abs_error from {} to {best_err} (the best any chain achieves)",
+                "relax max_abs_error from {} to {required_error} (best chain within the current \
+                 cost budget)",
                 req.max_abs_error
             ));
         }
-        if !cost_feasible {
+        if let Some(required_cost) = best_cost_within_error
+            && required_cost > req.max_cost_s
+        {
             fixes.push(format!(
-                "relax max_cost_s from {} to {best_cost} (the cheapest chain)",
+                "relax max_cost_s from {} to {required_cost} (cheapest chain within the current \
+                 error budget)",
                 req.max_cost_s
             ));
         }
-        if binding == Binding::Both {
-            fixes.push(
-                "no single relaxation suffices: the low-error and low-cost chains differ; \
-                 consider registering a certified direct converter"
-                    .to_string(),
-            );
+        if fixes.is_empty() {
+            let ratio = |value: f64, budget: f64| {
+                if budget > 0.0 {
+                    value / budget
+                } else if value == 0.0 {
+                    1.0
+                } else {
+                    f64::INFINITY
+                }
+            };
+            if let Some(candidate) = front.iter().min_by(|a, b| {
+                ratio(a.err, req.max_abs_error)
+                    .max(ratio(a.cost, req.max_cost_s))
+                    .total_cmp(&ratio(b.err, req.max_abs_error).max(ratio(b.cost, req.max_cost_s)))
+                    .then(a.err.total_cmp(&b.err))
+                    .then(a.cost.total_cmp(&b.cost))
+            }) {
+                fixes.push(format!(
+                    "relax both budgets to max_abs_error={} and max_cost_s={} for the smallest \
+                     coupled Pareto relaxation",
+                    candidate.err, candidate.cost
+                ));
+            }
         }
         RouteRefusal {
             binding,
@@ -870,7 +1207,8 @@ impl Router {
         req: &RouteRequest,
         oracle: &dyn CostOracle,
     ) -> Result<RouteExplanation, RoutePlanError> {
-        let front = self.pareto_front(req, oracle, &|_| true)?;
+        let snapshot = self.oracle_snapshot(oracle)?;
+        let front = self.pareto_front(req, &snapshot, &|_| true)?;
         let candidates: Vec<RouteCandidate> = front
             .iter()
             .map(|l| RouteCandidate {
@@ -906,9 +1244,9 @@ impl Router {
         })
     }
 
-    /// Execute a plan through per-edge runners: composes the edges'
-    /// Evidence receipts (error enclosures add along a chain) and records
-    /// actual cost/error into the oracle so later plans improve.
+    /// Execute a plan through per-edge runners: composes local-error Evidence
+    /// receipts using the declared additive/multiplicative/exact algebra and
+    /// records actual cost/error into the oracle so later plans improve.
     ///
     /// # Errors
     /// The failing edge's name and its runner error.
@@ -920,8 +1258,20 @@ impl Router {
         cx: &Cx<'_>,
     ) -> Result<ChainOutcome, ExecuteError> {
         self.validate_plan_binding(plan)?;
+        let snapshot = self.oracle_snapshot(oracle).map_err(|error| ExecuteError {
+            edge: "<plan>".to_string(),
+            kind: ExecuteErrorKind::OracleRead,
+            detail: error.to_string(),
+        })?;
+        if snapshot.root != plan.oracle_snapshot_root {
+            return Err(ExecuteError {
+                edge: "<plan>".to_string(),
+                kind: ExecuteErrorKind::InvalidPlan,
+                detail: "oracle evidence changed after this plan was admitted".to_string(),
+            });
+        }
         let executed = Self::run_plan(plan, runners, cx)?;
-        Self::record_and_validate(plan, executed, oracle)
+        self.record_and_validate(plan, executed, oracle, cx)
     }
 
     fn validate_plan_binding(&self, plan: &RoutePlan) -> Result<(), ExecuteError> {
@@ -950,10 +1300,18 @@ impl Router {
         runners: &BTreeMap<String, Box<dyn EdgeRunner>>,
         cx: &Cx<'_>,
     ) -> Result<ExecutedRoute, ExecuteError> {
-        let mut composed: Option<Evidence<f64>> = None;
+        let mut composed = Evidence::exact(
+            0.0,
+            ProvenanceHash::of_bytes(b"rep-router-identity-error-v1"),
+        );
         let mut total_cost = 0.0;
         let mut observations = Vec::with_capacity(plan.edges.len());
         for (edge, planned_spec) in plan.edges.iter().zip(&plan.planned_specs) {
+            cx.checkpoint().map_err(|_| ExecuteError {
+                edge: edge.clone(),
+                kind: ExecuteErrorKind::Cancelled,
+                detail: "route cancellation requested before edge execution".to_string(),
+            })?;
             let (receipt, observation) = Self::run_edge(edge, planned_spec, runners, cx)?;
             total_cost += observation.cost_s;
             if !total_cost.is_finite() {
@@ -963,13 +1321,11 @@ impl Router {
                     detail: "measured chain cost overflowed the finite domain".to_string(),
                 });
             }
-            composed = Some(Self::compose_actual(composed, receipt, edge)?);
+            composed = Self::compose_actual(&composed, &receipt, planned_spec, edge)?;
             observations.push(observation);
         }
-        let receipt = composed
-            .unwrap_or_else(|| Evidence::exact(0.0, ProvenanceHash::of_bytes(b"identity-route")));
         Ok(ExecutedRoute {
-            receipt,
+            receipt: composed,
             measured_cost_s: total_cost,
             observations,
         })
@@ -1002,7 +1358,7 @@ impl Router {
         let evidence_class = outcome.evidence_class();
         let receipt = outcome.into_receipt();
         let observation = ValidatedEdgeObservation {
-            edge: edge.to_string(),
+            spec: planned_spec.clone(),
             cost_s: measured_cost_s,
             conservative_error_abs: receipt.numerical.hi,
             evidence_class,
@@ -1012,25 +1368,100 @@ impl Router {
     }
 
     fn compose_actual(
-        composed: Option<Evidence<f64>>,
-        receipt: Evidence<f64>,
+        composed: &Evidence<f64>,
+        receipt: &Evidence<f64>,
+        planned_spec: &ConverterSpec,
         edge: &str,
     ) -> Result<Evidence<f64>, ExecuteError> {
-        let Some(acc) = composed else {
-            return Ok(receipt);
+        let combined = match planned_spec.error {
+            ErrorModel::Exact => {
+                if receipt.qoi != 0.0 || receipt.numerical.lo != 0.0 || receipt.numerical.hi != 0.0
+                {
+                    return Err(ExecuteError {
+                        edge: edge.to_string(),
+                        kind: ExecuteErrorKind::Evidence,
+                        detail: "exact converter returned a nonzero error receipt".to_string(),
+                    });
+                }
+                let mut exact = Evidence::combine(Op::Add, composed, receipt, composed.qoi);
+                exact.qoi = composed.qoi;
+                exact.value = composed.value;
+                exact.numerical.lo = composed.numerical.lo;
+                exact.numerical.hi = composed.numerical.hi;
+                exact
+            }
+            ErrorModel::AdditiveAbs(_) => {
+                let sum = composed.qoi + receipt.qoi;
+                if !sum.is_finite() {
+                    return Err(ExecuteError {
+                        edge: edge.to_string(),
+                        kind: ExecuteErrorKind::Arithmetic,
+                        detail: "measured error QoI overflowed the finite domain".to_string(),
+                    });
+                }
+                let upper = nonnegative_add_upper(composed.numerical.hi, receipt.numerical.hi);
+                let mut result = Evidence::combine(Op::Add, composed, receipt, sum);
+                result.numerical.hi = upper;
+                result
+            }
+            ErrorModel::MultiplicativeRel(relative) => {
+                let factor = 1.0 + relative;
+                if !factor.is_finite() {
+                    return Err(ExecuteError {
+                        edge: edge.to_string(),
+                        kind: ExecuteErrorKind::Arithmetic,
+                        detail: "relative error amplification overflowed".to_string(),
+                    });
+                }
+                let factor_provenance = ProvenanceHash::chain(
+                    "rep-router-relative-factor-v1",
+                    &[
+                        ProvenanceHash::of_bytes(edge.as_bytes()),
+                        ProvenanceHash::of_bytes(&relative.to_bits().to_le_bytes()),
+                    ],
+                );
+                let mut factor_evidence = Evidence::exact(factor, factor_provenance);
+                let factor_hi = nonnegative_add_upper(1.0, relative);
+                factor_evidence.numerical =
+                    NumericalCertificate::enclosure(factor.next_down(), factor_hi);
+                let product = composed.qoi * factor;
+                if !product.is_finite() {
+                    return Err(ExecuteError {
+                        edge: edge.to_string(),
+                        kind: ExecuteErrorKind::Arithmetic,
+                        detail: "measured error amplification overflowed".to_string(),
+                    });
+                }
+                let mut amplified = Evidence::combine(Op::Mul, composed, &factor_evidence, product);
+                amplified.numerical.lo = amplified.numerical.lo.max(0.0);
+                amplified.numerical.hi = nonnegative_mul_upper(composed.numerical.hi, factor_hi);
+                let sum = amplified.qoi + receipt.qoi;
+                if !sum.is_finite() {
+                    return Err(ExecuteError {
+                        edge: edge.to_string(),
+                        kind: ExecuteErrorKind::Arithmetic,
+                        detail: "measured error QoI overflowed after amplification".to_string(),
+                    });
+                }
+                let upper = nonnegative_add_upper(amplified.numerical.hi, receipt.numerical.hi);
+                let mut result = Evidence::combine(Op::Add, &amplified, receipt, sum);
+                result.numerical.hi = upper;
+                result
+            }
         };
-        let sum = acc.qoi + receipt.qoi;
-        if !sum.is_finite() {
-            return Err(ExecuteError {
-                edge: edge.to_string(),
-                kind: ExecuteErrorKind::Arithmetic,
-                detail: "measured error QoI overflowed the finite domain".to_string(),
-            });
-        }
-        let combined = Evidence::combine(Op::Add, &acc, &receipt, sum);
+        Self::validate_actual_receipt(combined, edge)
+    }
+
+    fn validate_actual_receipt(
+        mut combined: Evidence<f64>,
+        edge: &str,
+    ) -> Result<Evidence<f64>, ExecuteError> {
+        combined.numerical.lo = combined.numerical.lo.max(0.0);
         if !combined.numerical.lo.is_finite()
             || !combined.numerical.hi.is_finite()
             || combined.numerical.lo > combined.numerical.hi
+            || !combined.qoi.is_finite()
+            || combined.qoi < 0.0
         {
             return Err(ExecuteError {
                 edge: edge.to_string(),
@@ -1042,47 +1473,82 @@ impl Router {
     }
 
     fn record_and_validate(
+        &self,
         plan: &RoutePlan,
         executed: ExecutedRoute,
         oracle: &mut dyn CostOracle,
+        cx: &Cx<'_>,
     ) -> Result<ChainOutcome, ExecuteError> {
-        oracle
-            .record_batch(&executed.observations)
-            .map_err(|error| ExecuteError {
-                edge: executed
-                    .observations
-                    .last()
-                    .map_or_else(|| "<identity-route>".to_string(), |row| row.edge.clone()),
-                kind: ExecuteErrorKind::OracleRecord,
-                detail: error.to_string(),
-            })?;
-        if executed.receipt.numerical.hi > plan.composed_abs_error {
+        cx.checkpoint().map_err(|_| ExecuteError {
+            edge: plan
+                .edges
+                .last()
+                .cloned()
+                .unwrap_or_else(|| "<identity-route>".to_string()),
+            kind: ExecuteErrorKind::Cancelled,
+            detail: "route cancellation requested before evidence persistence".to_string(),
+        })?;
+        let current_snapshot = self.oracle_snapshot(oracle).map_err(|error| ExecuteError {
+            edge: "<plan>".to_string(),
+            kind: ExecuteErrorKind::OracleRead,
+            detail: error.to_string(),
+        })?;
+        if current_snapshot.root != plan.oracle_snapshot_root {
             return Err(ExecuteError {
-                edge: plan
-                    .edges
-                    .last()
-                    .cloned()
-                    .unwrap_or_else(|| "<identity-route>".to_string()),
-                kind: ExecuteErrorKind::PlanContradiction,
-                detail: format!(
-                    "actual conservative error {} exceeds planned bound {}",
-                    executed.receipt.numerical.hi, plan.composed_abs_error
-                ),
+                edge: "<plan>".to_string(),
+                kind: ExecuteErrorKind::InvalidPlan,
+                detail: "oracle evidence changed while the route was executing".to_string(),
             });
         }
+        let mut contradiction_details = Vec::new();
+        if executed.receipt.numerical.hi > plan.composed_abs_error {
+            contradiction_details.push(format!(
+                "actual conservative error {} exceeds planned bound {}",
+                executed.receipt.numerical.hi, plan.composed_abs_error
+            ));
+        }
         if executed.measured_cost_s > plan.request.max_cost_s {
-            return Err(ExecuteError {
-                edge: plan
-                    .edges
-                    .last()
-                    .cloned()
-                    .unwrap_or_else(|| "<identity-route>".to_string()),
-                kind: ExecuteErrorKind::PlanContradiction,
-                detail: format!(
-                    "actual measured cost {} exceeds request budget {}",
-                    executed.measured_cost_s, plan.request.max_cost_s
-                ),
-            });
+            contradiction_details.push(format!(
+                "actual measured cost {} exceeds request budget {}",
+                executed.measured_cost_s, plan.request.max_cost_s
+            ));
+        }
+        let contradiction = (!contradiction_details.is_empty()).then(|| ExecuteError {
+            edge: plan
+                .edges
+                .last()
+                .cloned()
+                .unwrap_or_else(|| "<identity-route>".to_string()),
+            kind: ExecuteErrorKind::PlanContradiction,
+            detail: contradiction_details.join("; "),
+        });
+        let mut record_error = None;
+        if !executed.observations.is_empty()
+            && let Err(error) = oracle.record_batch(&executed.observations)
+        {
+            record_error = Some(error);
+        }
+        match (contradiction, record_error) {
+            (Some(mut contradiction), Some(record_error)) => {
+                contradiction.kind = ExecuteErrorKind::PlanContradictionAndOracleRecord;
+                contradiction.detail = format!(
+                    "{}; oracle also refused the contradiction evidence: {record_error}",
+                    contradiction.detail
+                );
+                return Err(contradiction);
+            }
+            (Some(contradiction), None) => return Err(contradiction),
+            (None, Some(error)) => {
+                return Err(ExecuteError {
+                    edge: executed.observations.last().map_or_else(
+                        || "<identity-route>".to_string(),
+                        |row| row.edge().to_string(),
+                    ),
+                    kind: ExecuteErrorKind::OracleRecord,
+                    detail: error.to_string(),
+                });
+            }
+            (None, None) => {}
         }
         Ok(ChainOutcome {
             receipt: executed.receipt,
@@ -1091,8 +1557,9 @@ impl Router {
     }
 }
 
-/// Executes one converter edge; the receipt's QoI is the edge's ACHIEVED
-/// absolute error with its enclosure (rigorous for certified edges).
+/// Executes one converter edge; the receipt's QoI is the edge's achieved LOCAL
+/// absolute error with its enclosure (rigorous for certified edges). For a
+/// relative model, Router separately amplifies the incoming chain error.
 pub trait EdgeRunner {
     /// Run the conversion under `cx`.
     ///
@@ -1247,6 +1714,10 @@ pub enum ExecuteErrorKind {
     MissingRunner,
     /// The edge runner itself failed.
     Runner,
+    /// The orchestration boundary observed cancellation.
+    Cancelled,
+    /// The planning oracle could not produce a valid, stable read snapshot.
+    OracleRead,
     /// The runner's evidence class contradicts the converter contract.
     Evidence,
     /// Finite per-edge values overflowed during chain composition.
@@ -1255,6 +1726,8 @@ pub enum ExecuteErrorKind {
     OracleRecord,
     /// Valid actual evidence contradicts the plan's admitted bound/budget.
     PlanContradiction,
+    /// A plan contradiction occurred and the oracle also refused its evidence.
+    PlanContradictionAndOracleRecord,
 }
 
 impl fmt::Display for ExecuteError {
@@ -1390,6 +1863,14 @@ mod tests {
         }
     }
 
+    fn registered_spec<'a>(router: &'a Router, name: &str) -> &'a ConverterSpec {
+        router
+            .edges()
+            .iter()
+            .find(|spec| spec.name == name)
+            .expect("fixture registers the requested converter")
+    }
+
     /// Brute-force oracle: every simple path by DFS, Pareto-filtered.
     fn oracle_front(r: &Router, request: &RouteRequest) -> Vec<(f64, f64, u32)> {
         let oracle = MemoryCostOracle::new();
@@ -1415,7 +1896,7 @@ mod tests {
                         cost + Router::edge_cost(spec, &oracle).expect("fixture oracle is valid"),
                         Router::edge_error(spec, &oracle)
                             .expect("fixture oracle is valid")
-                            .compose(err, request.scale),
+                            .compose_upper(err, request.scale),
                         unc + u32::from(!spec.certified),
                         n2,
                     ));
@@ -1500,7 +1981,7 @@ mod tests {
         assert_eq!(before.edges[0], "frep->sdf/coarse");
         // Measurements reveal the coarse edge is actually slow (10s).
         let observation = ValidatedEdgeObservation {
-            edge: "frep->sdf/coarse".to_string(),
+            spec: registered_spec(&r, "frep->sdf/coarse").clone(),
             cost_s: 10.0,
             conservative_error_abs: 0.02,
             evidence_class: EdgeEvidenceClass::Certified,
@@ -1599,12 +2080,15 @@ mod tests {
     }
 
     impl CostOracle for MalformedOracle {
-        fn measured_cost_s(&self, _edge: &str) -> Option<f64> {
-            self.cost
+        fn measured_cost_s(&self, _spec: &ConverterSpec) -> Result<Option<f64>, CostOracleError> {
+            Ok(self.cost)
         }
 
-        fn measured_error_abs(&self, _edge: &str) -> Option<f64> {
-            self.error
+        fn measured_error_abs(
+            &self,
+            _spec: &ConverterSpec,
+        ) -> Result<Option<f64>, CostOracleError> {
+            Ok(self.error)
         }
 
         fn record_batch(
@@ -1612,6 +2096,78 @@ mod tests {
             _observations: &[ValidatedEdgeObservation],
         ) -> Result<(), CostOracleError> {
             Ok(())
+        }
+    }
+
+    struct FlippingOracle(std::cell::Cell<u64>);
+
+    impl CostOracle for FlippingOracle {
+        fn measured_cost_s(&self, _spec: &ConverterSpec) -> Result<Option<f64>, CostOracleError> {
+            let call = self.0.get();
+            self.0.set(call + 1);
+            Ok(Some(if call == 0 { 1.0 } else { 2.0 }))
+        }
+
+        fn measured_error_abs(
+            &self,
+            _spec: &ConverterSpec,
+        ) -> Result<Option<f64>, CostOracleError> {
+            Ok(None)
+        }
+
+        fn record_batch(
+            &mut self,
+            _observations: &[ValidatedEdgeObservation],
+        ) -> Result<(), CostOracleError> {
+            Ok(())
+        }
+    }
+
+    struct ReadFailureOracle;
+
+    impl CostOracle for ReadFailureOracle {
+        fn measured_cost_s(&self, _spec: &ConverterSpec) -> Result<Option<f64>, CostOracleError> {
+            Err(CostOracleError::Backend {
+                problem: "fixture read failure".to_string(),
+            })
+        }
+
+        fn measured_error_abs(
+            &self,
+            _spec: &ConverterSpec,
+        ) -> Result<Option<f64>, CostOracleError> {
+            Ok(None)
+        }
+
+        fn record_batch(
+            &mut self,
+            _observations: &[ValidatedEdgeObservation],
+        ) -> Result<(), CostOracleError> {
+            Ok(())
+        }
+    }
+
+    struct RejectWritesOracle;
+
+    impl CostOracle for RejectWritesOracle {
+        fn measured_cost_s(&self, _spec: &ConverterSpec) -> Result<Option<f64>, CostOracleError> {
+            Ok(None)
+        }
+
+        fn measured_error_abs(
+            &self,
+            _spec: &ConverterSpec,
+        ) -> Result<Option<f64>, CostOracleError> {
+            Ok(None)
+        }
+
+        fn record_batch(
+            &mut self,
+            _observations: &[ValidatedEdgeObservation],
+        ) -> Result<(), CostOracleError> {
+            Err(CostOracleError::Backend {
+                problem: "writes forbidden".to_string(),
+            })
         }
     }
 
@@ -1705,6 +2261,360 @@ mod tests {
                 ..
             })
         ));
+        assert!(matches!(
+            direct.plan(&request, &ReadFailureOracle),
+            Err(RoutePlanError::InvalidOracle {
+                field: "measured_cost_s",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn planned_and_executed_error_algebras_match_at_exact_bounds() {
+        with_cx(|cx| {
+            let mut router = Router::new();
+            for spec in [
+                edge(
+                    "a",
+                    "b",
+                    "a->b/add",
+                    1.0,
+                    ErrorModel::AdditiveAbs(0.1),
+                    true,
+                ),
+                edge(
+                    "b",
+                    "c",
+                    "b->c/relative",
+                    1.0,
+                    ErrorModel::MultiplicativeRel(0.1),
+                    true,
+                ),
+            ] {
+                router.register(spec).unwrap();
+            }
+            let additive = ErrorModel::AdditiveAbs(0.1).compose_upper(0.0, 2.0);
+            assert_eq!(
+                additive.to_bits(),
+                0.1_f64.to_bits(),
+                "0 + an admitted bound is bit-exact"
+            );
+            let expected = ErrorModel::MultiplicativeRel(0.1).compose_upper(additive, 2.0);
+            let request = RouteRequest {
+                from: "a".to_string(),
+                to: "c".to_string(),
+                scale: 2.0,
+                max_abs_error: expected,
+                max_cost_s: 3.0,
+            };
+            let mut oracle = MemoryCostOracle::new();
+            let plan = router.plan(&request, &oracle).unwrap();
+            assert_eq!(plan.composed_abs_error().to_bits(), expected.to_bits());
+            let runners: BTreeMap<String, Box<dyn EdgeRunner>> = BTreeMap::from([
+                (
+                    "a->b/add".to_string(),
+                    Box::new(FixedRunner {
+                        err: 0.1,
+                        cost: 1.0,
+                    }) as Box<dyn EdgeRunner>,
+                ),
+                (
+                    "b->c/relative".to_string(),
+                    Box::new(FixedRunner {
+                        err: nonnegative_mul_upper(0.1, 2.0),
+                        cost: 1.0,
+                    }) as Box<dyn EdgeRunner>,
+                ),
+            ]);
+            let outcome = router.execute(&plan, &runners, &mut oracle, cx).unwrap();
+            assert_eq!(outcome.receipt.numerical.hi.to_bits(), expected.to_bits());
+        });
+    }
+
+    #[test]
+    fn oracle_snapshot_rejects_read_failure_and_post_plan_drift() {
+        with_cx(|cx| {
+            let mut router = Router::new();
+            router
+                .register(edge(
+                    "a",
+                    "b",
+                    "a->b/snapshot",
+                    1.0,
+                    ErrorModel::AdditiveAbs(0.1),
+                    true,
+                ))
+                .unwrap();
+            let request = RouteRequest {
+                from: "a".to_string(),
+                to: "b".to_string(),
+                scale: 1.0,
+                max_abs_error: 0.1,
+                max_cost_s: 3.0,
+            };
+            assert!(matches!(
+                router.plan(&request, &ReadFailureOracle),
+                Err(RoutePlanError::InvalidOracle { .. })
+            ));
+            let mut oracle = FlippingOracle(std::cell::Cell::new(0));
+            let plan = router.plan(&request, &oracle).unwrap();
+            let runners: BTreeMap<String, Box<dyn EdgeRunner>> = BTreeMap::from([(
+                "a->b/snapshot".to_string(),
+                Box::new(FixedRunner {
+                    err: 0.1,
+                    cost: 1.0,
+                }) as Box<dyn EdgeRunner>,
+            )]);
+            let error = router
+                .execute(&plan, &runners, &mut oracle, cx)
+                .unwrap_err();
+            assert_eq!(error.kind, ExecuteErrorKind::InvalidPlan);
+            assert!(error.detail.contains("oracle evidence changed"));
+        });
+    }
+
+    #[test]
+    fn registry_path_and_pareto_label_limits_fail_closed() {
+        let mut registry = Router::new();
+        for index in 0..MAX_ROUTER_EDGES {
+            registry
+                .register(edge(
+                    "a",
+                    "b",
+                    &format!("edge-{index:04}"),
+                    1.0,
+                    ErrorModel::Exact,
+                    true,
+                ))
+                .unwrap();
+        }
+        assert!(matches!(
+            registry.register(edge(
+                "a",
+                "b",
+                "edge-over-limit",
+                1.0,
+                ErrorModel::Exact,
+                true,
+            )),
+            Err(RouterError::CapacityExceeded {
+                resource: "edges",
+                limit: MAX_ROUTER_EDGES,
+            })
+        ));
+
+        let mut chain = Router::new();
+        for index in 0..=MAX_ROUTE_PATH_EDGES {
+            chain
+                .register(edge(
+                    &format!("n{index}"),
+                    &format!("n{}", index + 1),
+                    &format!("step-{index:03}"),
+                    1.0,
+                    ErrorModel::Exact,
+                    true,
+                ))
+                .unwrap();
+        }
+        let request = RouteRequest {
+            from: "n0".to_string(),
+            to: format!("n{}", MAX_ROUTE_PATH_EDGES + 1),
+            scale: 1.0,
+            max_abs_error: 1.0,
+            max_cost_s: f64::MAX,
+        };
+        assert!(matches!(
+            chain.plan(&request, &MemoryCostOracle::new()),
+            Err(RoutePlanError::ResourceLimit {
+                resource: "path edges",
+                limit: MAX_ROUTE_PATH_EDGES,
+            })
+        ));
+
+        let mut parallel = Router::new();
+        for index in 0..=MAX_ROUTER_LABELS_PER_NODE {
+            parallel
+                .register(edge(
+                    "a",
+                    "b",
+                    &format!("tradeoff-{index:04}"),
+                    (index + 1) as f64,
+                    ErrorModel::AdditiveAbs(
+                        ((MAX_ROUTER_LABELS_PER_NODE + 1 - index) as f64) * 1e-6,
+                    ),
+                    true,
+                ))
+                .unwrap();
+        }
+        let request = RouteRequest {
+            from: "a".to_string(),
+            to: "b".to_string(),
+            scale: 1.0,
+            max_abs_error: f64::MAX,
+            max_cost_s: f64::MAX,
+        };
+        assert!(matches!(
+            parallel.plan(&request, &MemoryCostOracle::new()),
+            Err(RoutePlanError::ResourceLimit {
+                resource: "labels per node",
+                limit: MAX_ROUTER_LABELS_PER_NODE,
+            })
+        ));
+    }
+
+    #[test]
+    fn uncertified_winner_and_coupled_refusals_follow_declared_policy() {
+        let mut router = Router::new();
+        for spec in [
+            edge(
+                "a",
+                "c",
+                "direct-one-uncertified",
+                10.0,
+                ErrorModel::Exact,
+                false,
+            ),
+            edge("a", "b", "cheap-first", 1.0, ErrorModel::Exact, false),
+            edge("b", "c", "cheap-second", 1.0, ErrorModel::Exact, false),
+        ] {
+            router.register(spec).unwrap();
+        }
+        let request = RouteRequest {
+            from: "a".to_string(),
+            to: "c".to_string(),
+            scale: 1.0,
+            max_abs_error: 1.0,
+            max_cost_s: 20.0,
+        };
+        assert_eq!(
+            router
+                .plan(&request, &MemoryCostOracle::new())
+                .unwrap()
+                .edges(),
+            ["cheap-first", "cheap-second"]
+        );
+
+        let mut tradeoff = Router::new();
+        for spec in [
+            edge(
+                "a",
+                "c",
+                "cheap-imprecise",
+                1.0,
+                ErrorModel::AdditiveAbs(10.0),
+                true,
+            ),
+            edge(
+                "a",
+                "b",
+                "precise-first",
+                5.0,
+                ErrorModel::AdditiveAbs(0.5),
+                true,
+            ),
+            edge(
+                "b",
+                "c",
+                "precise-second",
+                5.0,
+                ErrorModel::AdditiveAbs(0.5),
+                true,
+            ),
+        ] {
+            tradeoff.register(spec).unwrap();
+        }
+        let refusal = tradeoff
+            .plan(
+                &RouteRequest {
+                    max_abs_error: 5.0,
+                    max_cost_s: 5.0,
+                    ..request
+                },
+                &MemoryCostOracle::new(),
+            )
+            .unwrap_err();
+        let RoutePlanError::Infeasible(refusal) = refusal else {
+            panic!("valid tradeoff request must be an ordinary refusal")
+        };
+        assert_eq!(refusal.binding, Binding::Both);
+        assert!(
+            refusal
+                .fixes
+                .iter()
+                .any(|fix| fix.contains("max_abs_error"))
+        );
+        assert!(refusal.fixes.iter().any(|fix| fix.contains("max_cost_s")));
+        assert!(!refusal.fixes.iter().any(|fix| fix.contains("no single")));
+    }
+
+    #[test]
+    fn identity_routes_skip_writes_and_cancellation_precedes_runners() {
+        with_cx(|cx| {
+            let router = Router::new();
+            let request = RouteRequest {
+                from: "a".to_string(),
+                to: "a".to_string(),
+                scale: 1.0,
+                max_abs_error: 0.0,
+                max_cost_s: 0.0,
+            };
+            let mut oracle = RejectWritesOracle;
+            let plan = router.plan(&request, &oracle).unwrap();
+            let outcome = router
+                .execute(&plan, &BTreeMap::new(), &mut oracle, cx)
+                .unwrap();
+            assert_eq!(outcome.receipt.numerical.hi.to_bits(), 0.0_f64.to_bits());
+        });
+
+        let mut router = Router::new();
+        router
+            .register(edge(
+                "a",
+                "b",
+                "a->b/cancel",
+                1.0,
+                ErrorModel::AdditiveAbs(0.1),
+                true,
+            ))
+            .unwrap();
+        let mut oracle = MemoryCostOracle::new();
+        let request = RouteRequest {
+            from: "a".to_string(),
+            to: "b".to_string(),
+            scale: 1.0,
+            max_abs_error: 0.1,
+            max_cost_s: 2.0,
+        };
+        let plan = router.plan(&request, &oracle).unwrap();
+        let gate = CancelGate::new();
+        gate.request();
+        let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+        pool.scope(|arena| {
+            let cx = Cx::new(
+                &gate,
+                arena,
+                StreamKey {
+                    seed: 1,
+                    kernel_id: 1,
+                    tile: 0,
+                    iteration: 0,
+                },
+                asupersync::types::Budget::INFINITE,
+                ExecMode::Deterministic,
+            );
+            let runners: BTreeMap<String, Box<dyn EdgeRunner>> = BTreeMap::from([(
+                "a->b/cancel".to_string(),
+                Box::new(FixedRunner {
+                    err: 0.1,
+                    cost: 1.0,
+                }) as Box<dyn EdgeRunner>,
+            )]);
+            let error = router
+                .execute(&plan, &runners, &mut oracle, &cx)
+                .unwrap_err();
+            assert_eq!(error.kind, ExecuteErrorKind::Cancelled);
+        });
     }
 
     #[test]
@@ -1746,7 +2656,10 @@ mod tests {
                 .execute(&plan, &runners, &mut oracle, cx)
                 .unwrap_err();
             assert_eq!(error.kind, ExecuteErrorKind::Evidence);
-            assert_eq!(oracle.measured_error_abs("a->b/certified"), None);
+            assert_eq!(
+                oracle.measured_error_abs(registered_spec(&router, "a->b/certified")),
+                Ok(None)
+            );
         });
     }
 
@@ -1786,33 +2699,52 @@ mod tests {
                 .unwrap_err();
             assert_eq!(error.kind, ExecuteErrorKind::PlanContradiction);
             assert_eq!(
-                oracle.measured_error_abs("a->b/estimated"),
-                Some(0.02),
+                oracle.measured_error_abs(registered_spec(&router, "a->b/estimated")),
+                Ok(Some(0.02)),
                 "learning must retain the conservative upper bound, not the 0.005 QoI"
             );
-            assert_eq!(oracle.measured_cost_s("a->b/estimated"), Some(2.0));
+            assert_eq!(
+                oracle.measured_cost_s(registered_spec(&router, "a->b/estimated")),
+                Ok(Some(2.0))
+            );
         });
     }
 
     #[test]
     fn oracle_batches_are_atomic_and_plans_are_registry_bound() {
         let mut oracle = MemoryCostOracle::new();
+        let valid_spec = edge(
+            "a",
+            "b",
+            "a->b/valid",
+            1.0,
+            ErrorModel::AdditiveAbs(0.1),
+            false,
+        );
         let valid = ValidatedEdgeObservation {
-            edge: "a->b/valid".to_string(),
+            spec: valid_spec.clone(),
             cost_s: 1.0,
             conservative_error_abs: 0.1,
             evidence_class: EdgeEvidenceClass::Estimated,
             provenance: ProvenanceHash::of_bytes(b"valid"),
         };
+        let invalid_spec = edge(
+            "b",
+            "c",
+            "b->c/invalid",
+            1.0,
+            ErrorModel::AdditiveAbs(0.1),
+            false,
+        );
         let invalid = ValidatedEdgeObservation {
-            edge: "b->c/invalid".to_string(),
+            spec: invalid_spec,
             cost_s: f64::NAN,
             conservative_error_abs: 0.1,
             evidence_class: EdgeEvidenceClass::Estimated,
             provenance: ProvenanceHash::of_bytes(b"invalid"),
         };
         assert!(oracle.record_batch(&[valid, invalid]).is_err());
-        assert_eq!(oracle.measured_cost_s("a->b/valid"), None);
+        assert_eq!(oracle.measured_cost_s(&valid_spec), Ok(None));
 
         with_cx(|cx| {
             let mut first = Router::new();
@@ -1893,11 +2825,24 @@ mod tests {
             );
             assert!(out.receipt.numerical.hi >= out.receipt.qoi);
             // Actuals recorded: the oracle learned both edges.
-            assert!(oracle.measured_cost_s("frep->sdf/coarse").is_some());
-            assert!(oracle.measured_cost_s("sdf->mesh/dc").is_some());
+            assert!(
+                oracle
+                    .measured_cost_s(registered_spec(&r, "frep->sdf/coarse"))
+                    .unwrap()
+                    .is_some()
+            );
+            assert!(
+                oracle
+                    .measured_cost_s(registered_spec(&r, "sdf->mesh/dc"))
+                    .unwrap()
+                    .is_some()
+            );
             // Missing runner is a structured, edge-attributed failure.
+            let current_plan = r.plan(&req("mesh", 0.06, 10.0), &oracle).unwrap();
             let empty: BTreeMap<String, Box<dyn EdgeRunner>> = BTreeMap::new();
-            let err = r.execute(&plan, &empty, &mut oracle, cx).unwrap_err();
+            let err = r
+                .execute(&current_plan, &empty, &mut oracle, cx)
+                .unwrap_err();
             assert_eq!(err.edge, "frep->sdf/coarse");
         });
     }
@@ -1923,8 +2868,9 @@ mod tests {
                 .expect_err("nonfinite actual must fail at the sealed outcome boundary");
             assert_eq!(error.edge, edge);
             assert_eq!(error.kind, ExecuteErrorKind::Runner);
-            assert_eq!(oracle.measured_cost_s(&error.edge), None);
-            assert_eq!(oracle.measured_error_abs(&error.edge), None);
+            let spec = registered_spec(&r, &error.edge);
+            assert_eq!(oracle.measured_cost_s(spec), Ok(None));
+            assert_eq!(oracle.measured_error_abs(spec), Ok(None));
         });
     }
 
@@ -1994,7 +2940,12 @@ mod tests {
                 out.receipt.qoi,
                 plan.composed_abs_error
             );
-            assert!(oracle.measured_cost_s("frep->sdf/sampled-real").is_some());
+            assert!(
+                oracle
+                    .measured_cost_s(registered_spec(&r, "frep->sdf/sampled-real"))
+                    .unwrap()
+                    .is_some()
+            );
         });
     }
 }

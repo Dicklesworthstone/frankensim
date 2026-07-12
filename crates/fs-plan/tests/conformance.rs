@@ -11,6 +11,7 @@ use fs_plan::{
     PlanCostOracle, Rigor, TimeLedger, TimeLedgerDefect, TimeStage, TuneModelError,
     cost_model_from_tune,
 };
+use std::collections::BTreeMap;
 
 fn verdict(case: &str, detail: &str) {
     println!(
@@ -24,6 +25,72 @@ fn lcg(seed: &mut u64) -> f64 {
         .wrapping_mul(6364136223846793005)
         .wrapping_add(1442695040888963407);
     ((*seed >> 11) as f64) / (1u64 << 53) as f64
+}
+
+struct MeasuredEdgeRunner {
+    error_abs: f64,
+    cost_s: f64,
+}
+
+impl fs_geom::EdgeRunner for MeasuredEdgeRunner {
+    fn run(&self, _cx: &fs_exec::Cx<'_>) -> Result<fs_geom::EdgeOutcome, String> {
+        fs_geom::EdgeOutcome::estimated(
+            self.error_abs,
+            0.0,
+            self.error_abs,
+            fs_evidence::ProvenanceHash::of_bytes(b"fs-plan-conformance-edge"),
+            self.cost_s,
+        )
+        .map_err(|error| error.to_string())
+    }
+}
+
+fn with_cx<R>(f: impl FnOnce(&fs_exec::Cx<'_>) -> R) -> R {
+    let gate = fs_exec::CancelGate::new();
+    let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+    pool.scope(|arena| {
+        let cx = fs_exec::Cx::new(
+            &gate,
+            arena,
+            fs_exec::StreamKey {
+                seed: 1,
+                kernel_id: 1,
+                tile: 0,
+                iteration: 0,
+            },
+            asupersync::types::Budget::INFINITE,
+            fs_exec::ExecMode::Deterministic,
+        );
+        f(&cx)
+    })
+}
+
+fn record_edge_measurement(
+    spec: &fs_geom::ConverterSpec,
+    oracle: &mut PlanCostOracle,
+    cost_s: f64,
+    error_abs: f64,
+    cx: &fs_exec::Cx<'_>,
+) {
+    let mut router = fs_geom::Router::new();
+    router.register(spec.clone()).unwrap();
+    let plan = router
+        .plan(
+            &fs_geom::RouteRequest {
+                from: spec.from.clone(),
+                to: spec.to.clone(),
+                scale: 1.0,
+                max_abs_error: 1.0,
+                max_cost_s: 100.0,
+            },
+            oracle,
+        )
+        .unwrap();
+    let runners: BTreeMap<String, Box<dyn fs_geom::EdgeRunner>> = BTreeMap::from([(
+        spec.name.clone(),
+        Box::new(MeasuredEdgeRunner { error_abs, cost_s }) as Box<dyn fs_geom::EdgeRunner>,
+    )]);
+    router.execute(&plan, &runners, oracle, cx).unwrap();
 }
 
 #[test]
@@ -207,21 +274,24 @@ fn pl_005_tune_loader_refuses_legacy_schema_and_foreign_scope() {
 fn pl_006_router_plans_with_live_cost_models() {
     use fs_geom::{ConverterSpec, ErrorModel, RouteRequest, Router};
     let mut router = Router::new();
-    for (name, cost) in [("frep->sdf/coarse", 1.0), ("frep->sdf/fine", 4.0)] {
-        router
-            .register(ConverterSpec {
-                from: "frep".to_string(),
-                to: "sdf".to_string(),
-                name: name.to_string(),
-                base_cost_s: cost,
-                error: ErrorModel::AdditiveAbs(0.01),
-                certified: true,
-            })
-            .unwrap();
-    }
+    let coarse = ConverterSpec {
+        from: "frep".to_string(),
+        to: "sdf".to_string(),
+        name: "frep->sdf/coarse".to_string(),
+        base_cost_s: 1.0,
+        error: ErrorModel::AdditiveAbs(0.01),
+        certified: false,
+    };
+    let fine = ConverterSpec {
+        base_cost_s: 4.0,
+        name: "frep->sdf/fine".to_string(),
+        ..coarse.clone()
+    };
+    router.register(coarse.clone()).unwrap();
+    router.register(fine.clone()).unwrap();
     let mut oracle = PlanCostOracle::new();
-    oracle.register_edge("frep->sdf/coarse", 1e6).unwrap();
-    oracle.register_edge("frep->sdf/fine", 1e6).unwrap();
+    oracle.register_edge(&coarse, 1e6).unwrap();
+    oracle.register_edge(&fine, 1e6).unwrap();
     let req = RouteRequest {
         from: "frep".to_string(),
         to: "sdf".to_string(),
@@ -233,10 +303,16 @@ fn pl_006_router_plans_with_live_cost_models() {
     let before = router.plan(&req, &oracle).unwrap();
     assert_eq!(before.edges(), ["frep->sdf/coarse"]);
     // Measured history says coarse is actually slow on THIS machine.
-    for _ in 0..5 {
-        oracle.try_record("frep->sdf/coarse", 9.0, 0.005).unwrap();
-        oracle.try_record("frep->sdf/fine", 2.0, 0.004).unwrap();
-    }
+    with_cx(|cx| {
+        for _ in 0..5 {
+            record_edge_measurement(&coarse, &mut oracle, 9.0, 0.005, cx);
+            record_edge_measurement(&fine, &mut oracle, 2.0, 0.004, cx);
+        }
+    });
+    assert_eq!(
+        oracle.register_edge(&coarse, 2e6),
+        Err(fs_plan::PlanOracleError::ReferenceSizeConflict)
+    );
     let after = router.plan(&req, &oracle).unwrap();
     assert_eq!(
         after.edges(),

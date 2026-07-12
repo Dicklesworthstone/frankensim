@@ -1154,47 +1154,71 @@ fn check_charts(cx: &AdmissionContext<'_>, out: &mut Vec<Finding>) {
             max_abs_error: req.max_abs_error,
             max_cost_s: req.max_cost_s,
         };
-        if let Err(error) = router.plan(&request, oracle) {
-            let (what, fixes) = match error {
-                RoutePlanError::Infeasible(refusal) => {
-                    let fixes = refusal
-                        .fixes
-                        .iter()
-                        .map(|fix| RankedFix {
-                            action: fix.clone(),
-                            predicted_wall_s: refusal.best_cost_s,
-                            qoi_impact: refusal.best_abs_error.map_or_else(
-                                || "route feasibility change".to_string(),
-                                |value| format!("best achievable composed error {value:.3e}"),
-                            ),
-                        })
-                        .collect();
-                    (
-                        format!("no conversion route {} -> {}: {refusal}", req.from, req.to),
-                        fixes,
-                    )
-                }
-                invalid => (
-                    format!(
-                        "conversion route authority {} -> {} is invalid: {invalid}",
-                        req.from, req.to
-                    ),
-                    vec![RankedFix {
-                        action: "repair the route request or measured cost/error oracle evidence"
-                            .to_string(),
-                        predicted_wall_s: None,
-                        qoi_impact: "invalid routing authority cannot support admission"
-                            .to_string(),
-                    }],
-                ),
-            };
-            out.push(Finding {
+        match router.plan(&request, oracle) {
+            Ok(plan) if !plan.all_certified() => out.push(Finding {
                 check: "charts",
                 severity: Severity::Reject,
                 span: Span::default(),
-                what,
-                fixes,
-            });
+                what: format!(
+                    "conversion route {} -> {} is only estimated; at least one converter is not \
+                     declared certificate-backed",
+                    req.from, req.to
+                ),
+                fixes: vec![RankedFix {
+                    action: "register and validate a certificate-backed converter chain, or keep \
+                             this study outside authoritative admission"
+                        .to_string(),
+                    predicted_wall_s: Some(plan.predicted_cost_s()),
+                    qoi_impact: format!(
+                        "estimated route has declared composed error {:.3e}",
+                        plan.composed_abs_error()
+                    ),
+                }],
+            }),
+            Ok(_) => {}
+            Err(error) => {
+                let (what, fixes) = match error {
+                    RoutePlanError::Infeasible(refusal) => {
+                        let fixes = refusal
+                            .fixes
+                            .iter()
+                            .map(|fix| RankedFix {
+                                action: fix.clone(),
+                                predicted_wall_s: refusal.best_cost_s,
+                                qoi_impact: refusal.best_abs_error.map_or_else(
+                                    || "route feasibility change".to_string(),
+                                    |value| format!("best achievable composed error {value:.3e}"),
+                                ),
+                            })
+                            .collect();
+                        (
+                            format!("no conversion route {} -> {}: {refusal}", req.from, req.to),
+                            fixes,
+                        )
+                    }
+                    invalid => (
+                        format!(
+                            "conversion route authority {} -> {} is invalid: {invalid}",
+                            req.from, req.to
+                        ),
+                        vec![RankedFix {
+                            action:
+                                "repair the route request or measured cost/error oracle evidence"
+                                    .to_string(),
+                            predicted_wall_s: None,
+                            qoi_impact: "invalid routing authority cannot support admission"
+                                .to_string(),
+                        }],
+                    ),
+                };
+                out.push(Finding {
+                    check: "charts",
+                    severity: Severity::Reject,
+                    span: Span::default(),
+                    what,
+                    fixes,
+                });
+            }
         }
     }
 }

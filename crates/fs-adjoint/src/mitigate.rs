@@ -74,17 +74,8 @@ pub fn plan_gradient_route(
     oracle: &dyn CostOracle,
     non_differentiable: &BTreeSet<String>,
 ) -> Result<(RoutePlan, GradientGrade), RoutePlanError> {
-    match router.plan_with_edge_filter(req, oracle, |spec| !non_differentiable.contains(&spec.name))
-    {
-        Ok(plan) => {
-            let route = plan.edges().to_vec();
-            return Ok((plan, GradientGrade::Smooth { route }));
-        }
-        Err(RoutePlanError::Infeasible(_)) => {}
-        Err(error) => return Err(error),
-    }
-
-    let plan = router.plan(req, oracle)?;
+    let plan = router
+        .plan_prefer_edge_filter(req, oracle, |spec| !non_differentiable.contains(&spec.name))?;
     let route = plan.edges().to_vec();
     let crossing: Vec<String> = route
         .iter()

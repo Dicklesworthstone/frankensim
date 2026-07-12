@@ -115,6 +115,11 @@ pub const MAX_COST_OBSERVATIONS: usize = 4_096;
 /// Maximum held-out observations processed by one evaluation call.
 pub const MAX_COST_EVALUATION_OBSERVATIONS: usize = 4_096;
 
+struct DerivedFit {
+    loglog: Option<(f64, f64)>,
+    residuals: Vec<f64>,
+}
+
 /// A fitted per-(operator × shape-class × machine) cost model.
 #[derive(Debug, Clone, Default)]
 pub struct CostModel {
@@ -147,7 +152,7 @@ impl CostModel {
         }
         let mut obs = observations.to_vec();
         obs.sort_by(Self::observation_order);
-        let (loglog, residuals) = Self::derive_fit(&obs)?;
+        let DerivedFit { loglog, residuals } = Self::derive_fit(&obs)?;
         Ok(Self {
             obs,
             loglog,
@@ -172,7 +177,7 @@ impl CostModel {
             .binary_search_by(|existing| Self::observation_order(existing, &o))
             .unwrap_or_else(|index| index);
         candidate.insert(insertion, o);
-        let (loglog, residuals) = Self::derive_fit(&candidate)?;
+        let DerivedFit { loglog, residuals } = Self::derive_fit(&candidate)?;
         self.obs = candidate;
         self.loglog = loglog;
         self.residuals = residuals;
@@ -220,11 +225,12 @@ impl CostModel {
         Ok(sum)
     }
 
-    fn derive_fit(
-        observations: &[CostObservation],
-    ) -> Result<(Option<(f64, f64)>, Vec<f64>), CostRefusal> {
+    fn derive_fit(observations: &[CostObservation]) -> Result<DerivedFit, CostRefusal> {
         if observations.len() < MIN_OBS {
-            return Ok((None, Vec::new()));
+            return Ok(DerivedFit {
+                loglog: None,
+                residuals: Vec::new(),
+            });
         }
         let xs = observations
             .iter()
@@ -288,7 +294,10 @@ impl CostModel {
             });
         }
         residuals.sort_by(f64::total_cmp);
-        Ok((Some((intercept, slope)), residuals))
+        Ok(DerivedFit {
+            loglog: Some((intercept, slope)),
+            residuals,
+        })
     }
 
     fn residual_quantile(&self, p: f64) -> Result<f64, CostRefusal> {

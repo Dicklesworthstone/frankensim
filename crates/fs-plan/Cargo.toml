@@ -18,6 +18,10 @@ fs-geom = { path = "../fs-geom" }
 fs-ledger = { path = "../fs-ledger" }
 
 [dev-dependencies]
+asupersync = { path = "../../../asupersync" }
+fs-alloc = { path = "../fs-alloc" }
+fs-evidence = { path = "../fs-evidence" }
+fs-exec = { path = "../fs-exec" }
 
 [features]
 # [F]-gated per the Ambition-Tag rule (bead knh1.6, Proposal C).

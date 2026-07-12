@@ -53,22 +53,32 @@ Depends on fs-exec (Cx), fs-evidence, fs-alloc, fs-obs.
 
 - `router` (the Rep Router, Bet 1): converter-edge registry
   (`ConverterSpec`: cost model, error model with declared composition rule,
-  certificate availability), exact Pareto label-correcting planner over
+  declared certificate availability), bounded Pareto label-correcting planner over
   (cost, composed absolute error, uncertified-edge count) with the
   deterministic winner rule certified-preferred → min cost → min error →
   lexicographic path; `explain()` returns every Pareto candidate and why
   the winner won; refusals name the binding constraint (error/cost/
   no-path) with ranked relaxations; `execute()` runs chains through
-  `EdgeRunner`s, composes per-edge Evidence receipts additively, and
-  records actuals through `CostOracle` (an L2-clean abstraction — HELM
+  `EdgeRunner`s, composes local-error Evidence receipts with one shared
+  directed-rounding algebra (additive sum; relative upstream amplification plus
+  local receipt; exact requires zero), and records actuals through `CostOracle`
+  (an L2-clean abstraction — HELM
   wires the ledger tune table behind it; `MemoryCostOracle` in-process).
-  `CostOracle::record` is fallible: invalid/nonfinite/overflowing/capacity-
+  Oracle reads are fallible and scoped to the exact `ConverterSpec`; one-pass
+  read snapshots are identity-bound into opaque `RoutePlan`s and rechecked
+  before and after execution. `CostOracle::record_batch` is fallible:
+  invalid/nonfinite/overflowing/capacity-
   exceeding evidence returns `CostOracleError`, and `execute()` propagates it
   as edge-attributed `ExecuteErrorKind::OracleRecord` instead of reporting a
   successful chain whose actuals were silently dropped. `MemoryCostOracle`
-  updates sums/count atomically and bounds distinct edges.
-  Learned measurements replace declared error magnitudes ONLY on
-  uncertified additive edges; certificates are never learned away.
+  updates cost sums/counts and observed error maxima atomically and bounds
+  distinct specs. Learned observations can only increase an uncertified
+  additive declaration; retrospective means/quantiles never tighten hard error
+  authority. Router edges/nodes, path length, total/per-node labels, and
+  candidate expansions have deterministic caps with typed refusals.
+  Identity routes skip empty oracle writes; execution polls cancellation before
+  each edge and before evidence persistence. Optional sheaf rerouting retains a
+  structured `RoutePlanError` instead of silently dropping malformed authority.
 
 - `sheaf` module (bead wqd.13, Bet 11 [F/M]): cellular-sheaf
   WATERTIGHTNESS certificates. `SheafComplex::from_charts` discovers
@@ -205,7 +215,12 @@ diagnostics, rigorous conversion receipts + teaching refusals, and
 cancellation. In-module suites cover Aabb/vector laws, fixture known values,
 agreement determinism, cancellation, zero-evidence/one-chart refusal,
 non-finite configuration and chart output, `NoClaim`, malformed certificates
-and support, and exact disagreement with zero diagnostic retention.
+and support, and exact disagreement with zero diagnostic retention. The 30-case
+library battery additionally covers router/brute-force Pareto agreement,
+directed additive/relative exact-bound composition, sealed plan/oracle/spec
+identity, read/write failure, retrospective error maxima, conditional
+refusals, winner policy, cancellation, identity routes, and registry/path/label
+limit+1 refusals.
 
 ## No-claim boundaries
 - NO watertightness/manifoldness/self-intersection certificates here —
@@ -219,6 +234,11 @@ and support, and exact disagreement with zero diagnostic retention.
 - `SampledSdf` claims no Lipschitz bound for its interpolant and no
   gradients (rep-sdf's job); its outside-box enclosure relies on the
   SOURCE's certified Lipschitz constant being truthful.
+- `ConverterSpec::certified` is a declaration, not an authenticated admission
+  receipt. Runtime certified runners must return `Certified<f64>` local-error
+  evidence and fs-ir rejects routes containing an estimated declaration, but a
+  malicious caller can still lie in the Boolean until the opaque admitted-color
+  / converter-authority migration lands.
 - The trilinear bound uses the conservative `L·h` constant; sharper
   (√3/2) constants and fs-ivl interval-verified sampling arrive with
   rep-sdf.

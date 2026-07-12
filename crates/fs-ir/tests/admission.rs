@@ -705,6 +705,44 @@ fn ad_005_chart_feasibility_via_the_router() {
 }
 
 #[test]
+fn ad_005b_estimated_chart_routes_do_not_authorize_admission() {
+    let regime = spout_regime();
+    let mut router = fs_geom::Router::new();
+    router
+        .register(fs_geom::ConverterSpec {
+            name: "frep->sdf/estimated".to_string(),
+            from: "frep".to_string(),
+            to: "sdf-grid".to_string(),
+            base_cost_s: 0.5,
+            error: fs_geom::ErrorModel::AdditiveAbs(1e-4),
+            certified: false,
+        })
+        .expect("register estimated converter");
+    let oracle = fs_geom::MemoryCostOracle::new();
+    let mut cx = full_context(&regime);
+    cx.router = Some((&router, &oracle));
+    cx.chart_requirements = vec![ChartRequirement {
+        from: "frep".to_string(),
+        to: "sdf-grid".to_string(),
+        scale: 1.0,
+        max_abs_error: 1e-3,
+        max_cost_s: 10.0,
+    }];
+    let report = admit_src(SPOUT, &cx);
+    assert!(!report.admitted);
+    let finding = report
+        .findings
+        .iter()
+        .find(|finding| finding.check == "charts")
+        .expect("estimated route must leave a chart finding");
+    assert!(finding.what.contains("only estimated"), "{}", finding.what);
+    verdict(
+        "ad-005b",
+        "estimated converter routes remain usable for planning but cannot authorize admission",
+    );
+}
+
+#[test]
 fn ad_006_regime_gating_enforced_and_policy_graded() {
     // A creeping-pour regime (mu = 8 Pa·s ⇒ Re ≈ 0.9): free-surface LBM
     // is OUTSIDE its validity box (Re >= 1) — the study's flux verb must

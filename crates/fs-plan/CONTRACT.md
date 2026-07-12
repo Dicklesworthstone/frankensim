@@ -41,12 +41,15 @@ fs-eproc for anytime-valid audit authority.
   nonnegative ordered quantiles/measured times and aggregate overflow, and a
   strict-JSON `explain()` (`null`, never Rust `Some`/`None` syntax).
 - `PlanCostOracle` — implements fs-geom's `CostOracle`, so the Rep Router
-  plans with THIS machine's measured history (per-edge models at
-  registered reference sizes; recorded actuals feed refits; observed
-  error p90 backs `measured_error_abs`). Edge registration and recording are
-  fallible and bounded. A record is atomic across cost and error histories;
-  unregistered edges, nonfinite values, capacity exhaustion, and reference
-  size changes after observation refuse without changing routing authority.
+  plans with THIS machine's measured history (models are bound to the complete
+  `ConverterSpec` at registered reference sizes; sealed execution actuals feed
+  refits; the maximum observed error upper bound backs
+  `measured_error_abs`). Raw scalar recording is private. Reads and writes are
+  fallible and bounded; a record is atomic across cost and error histories.
+  Unregistered or same-name/different-spec edges, nonfinite values, capacity
+  exhaustion, and reference-size changes after observation refuse without
+  changing routing authority. Router never uses observed errors to tighten a
+  declared hard bound.
 - `cost_model_from_tune` — rebuilds a model from one EXACT
   `(kernel, shape_class, machine)` fs-ledger key. It accepts only the current
   fs-roofline receipt-v3 / row-v4 production schema through a bounded strict
@@ -176,6 +179,10 @@ this layer.
   residual bands, but they cover one problem size and one run environment. The
   model marks other sizes as extrapolation; it does not claim cross-shape or
   cross-machine transfer.
+- `PlanCostOracle` costs are predictive empirical estimates, not worst-case
+  wall-time certificates. Its observed error maximum is retrospective; the Rep
+  Router therefore uses it only to enlarge an uncertified declaration. Fully
+  authenticated admitted cost-model authority remains tracked separately.
 
 ## Unsafe boundary
 

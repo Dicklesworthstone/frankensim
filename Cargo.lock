@@ -1423,9 +1423,13 @@ dependencies = [
 name = "fs-plan"
 version = "0.0.1"
 dependencies = [
+ "asupersync",
+ "fs-alloc",
  "fs-blake3",
  "fs-dfo",
  "fs-eproc",
+ "fs-evidence",
+ "fs-exec",
  "fs-geom",
  "fs-ledger",
 ]

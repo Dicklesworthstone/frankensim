@@ -18,7 +18,7 @@
 //! optional Rep-Router reroute costs; they apply only under an explicit
 //! budget.
 
-use crate::router::{CostOracle, RouteRequest, Router};
+use crate::router::{CostOracle, RoutePlanError, RouteRequest, Router};
 use crate::sheaf::SheafComplex;
 use std::fmt::Write as _;
 
@@ -228,6 +228,9 @@ pub struct RepairPlan {
     /// Interfaces in the harmonic support (the minimal cut-set needing
     /// topology-level changes) with their magnitudes.
     pub obstruction_cutset: Vec<((usize, usize), f64)>,
+    /// Structured reason an optional router alternative could not be planned.
+    /// `None` means no reroute was requested or a proposal was produced.
+    pub reroute_error: Option<RoutePlanError>,
 }
 
 /// Threshold below which a component is treated as absent (fractions).
@@ -294,19 +297,21 @@ pub fn plan_repair(
             cost_s: f64::INFINITY,
         });
     }
-    if let Some((router, oracle, req)) = reroute
-        && let Ok(route) = router.plan(req, oracle)
-    {
-        proposals.push(RepairProposal {
-            action: format!(
-                "reroute worst patch {} -> {} via [{}] (router-planned alternative chart)",
-                req.from,
-                req.to,
-                route.edges().join(", ")
-            ),
-            expected_post_norm: route.composed_abs_error(),
-            cost_s: route.predicted_cost_s(),
-        });
+    let mut reroute_error = None;
+    if let Some((router, oracle, req)) = reroute {
+        match router.plan(req, oracle) {
+            Ok(route) => proposals.push(RepairProposal {
+                action: format!(
+                    "reroute worst patch {} -> {} via [{}] (router-planned alternative chart)",
+                    req.from,
+                    req.to,
+                    route.edges().join(", ")
+                ),
+                expected_post_norm: route.composed_abs_error(),
+                cost_s: route.predicted_cost_s(),
+            }),
+            Err(error) => reroute_error = Some(error),
+        }
     }
     proposals.sort_by(|a, b| {
         a.expected_post_norm
@@ -319,6 +324,7 @@ pub fn plan_repair(
         proposals,
         auto_repairable,
         obstruction_cutset,
+        reroute_error,
     }
 }
 
