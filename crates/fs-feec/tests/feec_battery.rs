@@ -473,3 +473,33 @@ fn feec_golden_hash() {
          justification (golden-evidence policy)"
     );
 }
+
+#[test]
+fn on_unit_cube_boundary_detects_reconstructed_far_faces() {
+    // Regression: `kuhn_cube(n)` reconstructs the far face as `n * (1.0/n)`,
+    // which is 1 ULP below 1.0 for many n (first at n = 49). A bit-exact
+    // boundary check treated those face vertices as INTERIOR — under Dirichlet
+    // pinning that yields a near-singular reduced system. `far` below is EXACTLY
+    // the coordinate `kuhn_cube` stores for the i = n plane.
+    for &n in &[49usize, 98, 103, 107] {
+        let far = n as f64 * (1.0 / n as f64);
+        assert!(far < 1.0, "n={n}: far-face reconstruction must be < 1.0 (the bug trigger)");
+        assert!(
+            on_unit_cube_boundary([far, 0.5, 0.5]),
+            "n={n}: x = {far} (the i=n plane) must be on the cube boundary"
+        );
+        assert!(on_unit_cube_boundary([0.5, far, 0.5]), "n={n}: y = {far}");
+        assert!(on_unit_cube_boundary([0.5, 0.5, far]), "n={n}: z = {far}");
+    }
+    // Exact endpoints/origin stay boundary; strictly-interior vertices (≥ 1/n
+    // from every face) stay interior — no false positives.
+    assert!(on_unit_cube_boundary([0.0, 0.5, 0.5]));
+    assert!(on_unit_cube_boundary([1.0, 0.5, 0.5]));
+    assert!(!on_unit_cube_boundary([0.5, 0.5, 0.5]));
+    assert!(!on_unit_cube_boundary([1.0 / 49.0, 0.5, 0.5])); // one lattice step in
+    log(
+        "unit-cube-boundary",
+        "pass",
+        "reconstructed far faces detected; interior unaffected",
+    );
+}

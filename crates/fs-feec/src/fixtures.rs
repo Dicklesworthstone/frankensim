@@ -107,8 +107,14 @@ pub fn kuhn_cube(n: usize) -> (TetComplex, Vec<[f64; 3]>) {
 /// (fixture helper for Dirichlet pinning in tests).
 #[must_use]
 pub fn on_unit_cube_boundary(p: [f64; 3]) -> bool {
+    // A face coordinate is 0 or 1, but `kuhn_cube(n)` reconstructs the far face
+    // as `n * (1.0/n)`, which for many n is 1 ULP below 1.0 (first at n = 49),
+    // so an EXACT bit compare misclassifies those face vertices as INTERIOR
+    // (and, under Dirichlet pinning, yields a near-singular reduced system).
+    // Interior vertices sit ≥ 1/n from a face — far outside this tolerance for
+    // any realistic mesh — so a small absolute band is unambiguous.
     p.iter()
-        .any(|&c| c.to_bits() == 0.0f64.to_bits() || c.to_bits() == 1.0f64.to_bits())
+        .any(|&c| c.abs() < 1e-9 || (c - 1.0).abs() < 1e-9)
 }
 /// A masked cube grid: `nx × ny × nz` cells, keeping only cells where
 /// `keep(i, j, k)` — the MULTIPLY-CONNECTED fixture builder (rings,
