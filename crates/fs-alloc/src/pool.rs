@@ -65,19 +65,27 @@ impl<T> ShardedPool<T> {
     /// The item returns to ITS shard when the guard drops.
     pub fn acquire_with(&self, shard: usize, make: impl FnOnce() -> T) -> PoolItem<'_, T> {
         let home = &self.shards[shard % self.shards.len()];
-        let value = {
+        let recycled = {
             let mut s = home.get().lock().expect("fs-alloc shard poisoned");
-            s.live += 1;
             let recycled = s.free.pop();
             if recycled.is_some() {
+                // Recycled hit: the object already exists — count it now.
+                s.live += 1;
                 s.recycled += 1;
-            } else {
-                s.created += 1;
             }
             recycled
         };
-        // Construction happens OUTSIDE the lock, on the acquiring thread.
-        let value = value.unwrap_or_else(make);
+        // Free-list miss: CONSTRUCT OUTSIDE THE LOCK (the first-touch hook),
+        // then account. `make` runs BEFORE any bookkeeping so a panicking
+        // constructor leaves `live`/`created` honest — a leaked `live` would
+        // defeat the `quiescent()` leak oracle permanently.
+        let value = recycled.unwrap_or_else(|| {
+            let value = make();
+            let mut s = home.get().lock().expect("fs-alloc shard poisoned");
+            s.live += 1;
+            s.created += 1;
+            value
+        });
         PoolItem {
             value: Some(value),
             home: home.get(),
@@ -251,6 +259,31 @@ mod tests {
             "{\"shards\":[{\"created\":1,\"recycled\":1,\"detached\":1,\"live\":0,\"free\":0},\
              {\"created\":0,\"recycled\":0,\"detached\":0,\"live\":0,\"free\":0}]}"
         );
+    }
+
+    #[test]
+    fn panicking_constructor_leaves_the_leak_oracle_honest() {
+        // A free-list-miss `make` that panics must NOT inflate `live`/`created`:
+        // the object is never constructed, so there is no `PoolItem` to
+        // decrement `live` on drop. A leaked `live` would wedge `quiescent()`
+        // — the pool-side G4 leak oracle — at `false` forever.
+        let pool: ShardedPool<Vec<u8>> = ShardedPool::new(4);
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = pool.acquire_with(1, || panic!("ctor boom"));
+        }));
+        assert!(caught.is_err(), "the constructor panic must propagate");
+        assert!(pool.quiescent(), "a panicking make must not leak the live count");
+        let (created, live) = pool
+            .stats()
+            .shards
+            .iter()
+            .fold((0u64, 0u64), |(c, l), s| (c + s.created, l + s.live));
+        assert_eq!(created, 0, "a never-constructed object must not count as created");
+        assert_eq!(live, 0, "a never-constructed object must not count as live");
+        // The shard is not poisoned (make runs outside the lock), so the pool
+        // stays usable afterward.
+        let ok = pool.acquire_with(1, || vec![9u8; 8]);
+        assert_eq!(ok.len(), 8);
     }
 
     #[test]
