@@ -1,10 +1,10 @@
-//! fs-lbm — lattice Boltzmann core (D2Q9). Layer: L3.
+//! fs-lbm — lattice Boltzmann cores (D2Q9 and D3Q19). Layer: L3.
 //!
-//! Lattice Boltzmann is the many-core queen. This v0 is the D2Q9 BGK
-//! stream-and-collide kernel with Guo body forcing and halfway bounce-back
-//! walls — enough to reproduce analytic Poiseuille channel flow (a parabolic
-//! velocity profile) from first principles — plus the LATTICE-SCALING
-//! ASSISTANT.
+//! Lattice Boltzmann is the many-core queen. The crate provides a D2Q9 BGK
+//! stream-and-collide kernel and a tile-major D3Q19 BGK/Guo kernel with
+//! deterministic link-wise wall and regularized open boundaries. These paths
+//! reproduce analytic Poiseuille fixtures from first principles and share the
+//! LATTICE-SCALING ASSISTANT.
 //!
 //! The scaling assistant ([`ScalingPlan`]) automates the `dx`/`dt`/`τ`/`Mach`
 //! bookkeeping that is a chronic source of human LBM error: given a Reynolds
@@ -23,7 +23,10 @@ pub mod rheology;
 pub mod thermal;
 
 pub use core2::{Cell, Grid};
-pub use d3q19::{Duct, Q3, duct_analytic, equilibrium3};
+pub use d3q19::{
+    BoundaryGrid3, BoundaryLink3, BoundarySpec3, Duct, Face3, FaceBoundary3, LinkMaskTile3, Q3,
+    duct_analytic, equilibrium3,
+};
 pub use freesurface::{ContactModel, FreeSurface};
 pub use refine::RefinedChannel;
 pub use rheology::Rheology;

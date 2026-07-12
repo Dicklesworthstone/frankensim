@@ -21,6 +21,13 @@
 //! Dimensions must be multiples of 4 (asserted): the fixture scales in
 //! WS1 are, and padding is a later concern, not silent slop.
 
+mod boundary;
+
+pub use boundary::{
+    BoundaryGrid3, BoundaryLink3, BoundarySpec3, D3Q19_BOUNDARY_BIT_SEMANTICS_VERSION, Face3,
+    FaceBoundary3, LinkMaskTile3,
+};
+
 /// Bit-semantics version of the D3Q19 surface (golden-couplings.json):
 /// covers the velocity/weight/opposite tables and ordering, the
 /// equilibrium form, the Guo forcing form, the pull-stream + halfway
