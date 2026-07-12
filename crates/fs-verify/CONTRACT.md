@@ -31,7 +31,9 @@ quadrature.
   `MmsClass::new` admits the homogeneous exact solution and exclusively
   derives `f = -u''` plus the rounded zero-constant antiderivative;
   `MmsProblem::from_class` admits and owns the mesh. All semantic fields are
-  private and immutable. Construction, followed by defensive operation-level
+  private and immutable. `MmsProblem::new` fully admits/canonicalizes its mesh
+  before constructing the class, and `with_mesh` does so before cloning the
+  retained class identity. Construction, followed by defensive operation-level
   validation, checks canonical domain/BCs and derived polynomials, finite
   strictly increasing mesh, exact nodal shape,
   finite values, and bounded resources. v0 caps are 1,000,000 mesh

@@ -589,7 +589,8 @@ impl MmsProblem {
     /// # Errors
     /// Returns [`Fem1dError`] when either the class or mesh is inadmissible.
     pub fn new(name: &str, u: Poly, mesh: Vec<f64>) -> Result<Self, Fem1dError> {
-        Self::from_class(MmsClass::new(name, u)?, mesh)
+        let mesh = admit_mesh(mesh)?;
+        Self::from_admitted_parts(MmsClass::new(name, u)?, mesh)
     }
 
     /// Place an admitted class on an admitted canonical mesh.
@@ -597,12 +598,12 @@ impl MmsProblem {
     /// # Errors
     /// Returns [`Fem1dError`] for invalid mesh size, coordinates, ordering, or
     /// reciprocal widths.
-    pub fn from_class(class: MmsClass, mut mesh: Vec<f64>) -> Result<Self, Fem1dError> {
-        validate_mesh_size(&mesh)?;
-        for node in &mut mesh {
-            *node = canonicalize_zero(*node);
-        }
-        validate_mesh(&mesh)?;
+    pub fn from_class(class: MmsClass, mesh: Vec<f64>) -> Result<Self, Fem1dError> {
+        let mesh = admit_mesh(mesh)?;
+        Self::from_admitted_parts(class, mesh)
+    }
+
+    fn from_admitted_parts(class: MmsClass, mesh: Vec<f64>) -> Result<Self, Fem1dError> {
         let identity = problem_identity(&class, &mesh)?;
         Ok(Self {
             class,
@@ -616,7 +617,8 @@ impl MmsProblem {
     /// # Errors
     /// Returns [`Fem1dError`] when the new mesh is inadmissible.
     pub fn with_mesh(&self, mesh: Vec<f64>) -> Result<Self, Fem1dError> {
-        Self::from_class(self.class.clone(), mesh)
+        let mesh = admit_mesh(mesh)?;
+        Self::from_admitted_parts(self.class.clone(), mesh)
     }
 
     /// Admitted manufactured-solution class.
@@ -670,6 +672,15 @@ impl MmsProblem {
 
 fn canonicalize_zero(value: f64) -> f64 {
     if value == 0.0 { 0.0 } else { value }
+}
+
+fn admit_mesh(mut mesh: Vec<f64>) -> Result<Vec<f64>, Fem1dError> {
+    validate_mesh_size(&mesh)?;
+    for node in &mut mesh {
+        *node = canonicalize_zero(*node);
+    }
+    validate_mesh(&mesh)?;
+    Ok(mesh)
 }
 
 fn f64_bytes(values: &[f64], stage: &'static str) -> Result<Vec<u8>, Fem1dError> {
@@ -1637,6 +1648,8 @@ mod tests {
             MmsProblem::from_class(normalized, vec![0.0, 0.25, 0.5, 1.0]).expect("different mesh");
         assert_eq!(coarse.identity(), same.identity());
         assert_eq!(coarse.canonical_bytes(), same.canonical_bytes());
+        assert_eq!(coarse.identity().root(), 0x447c_875d_7d12_a8e3);
+        assert_eq!(coarse.canonical_bytes().len(), 484);
         assert_ne!(coarse.identity(), shifted.identity());
         assert_ne!(coarse.identity(), refined.identity());
 
@@ -1666,6 +1679,14 @@ mod tests {
         assert!(matches!(
             MmsClass::new("not-homogeneous", poly(vec![0.0, 1.0])),
             Err(Fem1dError::ExactSolutionBoundary)
+        ));
+        assert!(matches!(
+            MmsProblem::new("", poly(vec![0.0]), Vec::new()),
+            Err(Fem1dError::ResourceLimit {
+                resource: "mesh nodes",
+                requested: 0,
+                ..
+            })
         ));
     }
 }
