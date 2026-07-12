@@ -94,11 +94,14 @@ fma_dispatch!(sell_spmv_chunked_dispatch, Sell, spmv_chunked_body, (x: &[f64], y
 fma_dispatch!(sell_shard_dispatch, Sell, shard_body, (x: &[f64], lo: usize, hi: usize) -> Vec<(usize, f64)>);
 fma_dispatch!(compact_spmv_dispatch, CsrCompact, spmv_body, (x: &[f64], y: &mut [f64]));
 fma_dispatch!(compact_shard_dispatch, CsrCompact, shard_body, (x: &[f64], lo: usize, hi: usize, mine: &mut [f64]));
+fma_dispatch!(spgemm_dispatch, Csr, spgemm_body, (b: &Csr) -> Csr);
+fma_dispatch!(spgemm_sparse_spa_dispatch, Csr, spgemm_sparse_spa_body, (b: &Csr) -> Csr);
+fma_dispatch!(spmm_blocked_dispatch, Csr, spmm_blocked_body, (b: &[f64], nrhs: usize, y: &mut [f64]));
 
 /// The `target_feature`-recompiled bodies (one per dispatcher above).
 #[cfg(target_arch = "x86_64")]
 mod paste_x86 {
-    use super::{Bsr, CsrCompact, Sell};
+    use super::{Bsr, Csr, CsrCompact, Sell};
 
     macro_rules! fma_body {
         ($name:ident, $ty:ty, $body:ident, ($($arg:ident: $t:ty),*) $(-> $ret:ty)?) => {
@@ -118,4 +121,7 @@ mod paste_x86 {
     fma_body!(sell_shard_dispatch, Sell, shard_body, (x: &[f64], lo: usize, hi: usize) -> Vec<(usize, f64)>);
     fma_body!(compact_spmv_dispatch, CsrCompact, spmv_body, (x: &[f64], y: &mut [f64]));
     fma_body!(compact_shard_dispatch, CsrCompact, shard_body, (x: &[f64], lo: usize, hi: usize, mine: &mut [f64]));
+    fma_body!(spgemm_dispatch, Csr, spgemm_body, (b: &Csr) -> Csr);
+    fma_body!(spgemm_sparse_spa_dispatch, Csr, spgemm_sparse_spa_body, (b: &Csr) -> Csr);
+    fma_body!(spmm_blocked_dispatch, Csr, spmm_blocked_body, (b: &[f64], nrhs: usize, y: &mut [f64]));
 }

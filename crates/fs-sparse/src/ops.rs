@@ -93,36 +93,7 @@ pub fn spgemm(a: &Csr, b: &Csr) -> Csr {
         b.nrows(),
         b.ncols()
     );
-    let (m, n) = (a.nrows(), b.ncols());
-    let mut spa = vec![0.0f64; n];
-    let mut occupied = vec![false; n];
-    let mut touched: Vec<usize> = Vec::new();
-    let mut row_ptr = vec![0usize; m + 1];
-    let mut col_idx = Vec::new();
-    let mut vals = Vec::new();
-    for i in 0..m {
-        let (acols, avals) = a.row(i);
-        for (&k, &aik) in acols.iter().zip(avals) {
-            let (bcols, bvals) = b.row(k);
-            for (&j, &bkj) in bcols.iter().zip(bvals) {
-                spa[j] = aik.mul_add(bkj, spa[j]);
-                if !occupied[j] {
-                    occupied[j] = true;
-                    touched.push(j);
-                }
-            }
-        }
-        touched.sort_unstable();
-        for &j in &touched {
-            col_idx.push(j);
-            vals.push(spa[j]);
-            spa[j] = 0.0;
-            occupied[j] = false;
-        }
-        row_ptr[i + 1] = col_idx.len();
-        touched.clear();
-    }
-    Csr::from_parts(m, n, row_ptr, col_idx, vals)
+    crate::fma::spgemm_dispatch(a, b)
 }
 
 /// C = A·B with a SPARSE accumulator (bead wsbf item 6): a per-row
@@ -144,31 +115,79 @@ pub fn spgemm_sparse_spa(a: &Csr, b: &Csr) -> Csr {
         b.nrows(),
         b.ncols()
     );
-    let (m, n) = (a.nrows(), b.ncols());
-    let mut row_ptr = vec![0usize; m + 1];
-    let mut col_idx = Vec::new();
-    let mut vals = Vec::new();
-    let mut spa: std::collections::BTreeMap<usize, f64> = std::collections::BTreeMap::new();
-    for i in 0..m {
-        let (acols, avals) = a.row(i);
-        for (&k, &aik) in acols.iter().zip(avals) {
-            let (bcols, bvals) = b.row(k);
-            for (&j, &bkj) in bcols.iter().zip(bvals) {
-                let slot = spa.entry(j).or_insert(0.0);
-                *slot = aik.mul_add(bkj, *slot);
-            }
-        }
-        for (&j, &v) in &spa {
-            col_idx.push(j);
-            vals.push(v);
-        }
-        row_ptr[i + 1] = col_idx.len();
-        spa.clear();
-    }
-    Csr::from_parts(m, n, row_ptr, col_idx, vals)
+    crate::fma::spgemm_sparse_spa_dispatch(a, b)
 }
 
 impl crate::Csr {
+    /// The [`spgemm`] loop body (dense SPA), extracted so the x86
+    /// FMA-codegen capsule can recompile it under `target_feature`
+    /// (bead nabk). MUST stay `inline(always)`: a non-inlined call
+    /// keeps baseline codegen and the per-element libm `fma()` call.
+    /// Accumulation order and output pattern untouched: pure codegen.
+    #[allow(clippy::inline_always)] // required to inherit the target-feature FMA capsule
+    #[inline(always)]
+    pub(crate) fn spgemm_body(&self, b: &Csr) -> Csr {
+        let (m, n) = (self.nrows(), b.ncols());
+        let mut spa = vec![0.0f64; n];
+        let mut occupied = vec![false; n];
+        let mut touched: Vec<usize> = Vec::new();
+        let mut row_ptr = vec![0usize; m + 1];
+        let mut col_idx = Vec::new();
+        let mut vals = Vec::new();
+        for i in 0..m {
+            let (acols, avals) = self.row(i);
+            for (&k, &aik) in acols.iter().zip(avals) {
+                let (bcols, bvals) = b.row(k);
+                for (&j, &bkj) in bcols.iter().zip(bvals) {
+                    spa[j] = aik.mul_add(bkj, spa[j]);
+                    if !occupied[j] {
+                        occupied[j] = true;
+                        touched.push(j);
+                    }
+                }
+            }
+            touched.sort_unstable();
+            for &j in &touched {
+                col_idx.push(j);
+                vals.push(spa[j]);
+                spa[j] = 0.0;
+                occupied[j] = false;
+            }
+            row_ptr[i + 1] = col_idx.len();
+            touched.clear();
+        }
+        Csr::from_parts(m, n, row_ptr, col_idx, vals)
+    }
+
+    /// The [`spgemm_sparse_spa`] loop body (see `spgemm_body`'s
+    /// extraction note).
+    #[allow(clippy::inline_always)] // required to inherit the target-feature FMA capsule
+    #[inline(always)]
+    pub(crate) fn spgemm_sparse_spa_body(&self, b: &Csr) -> Csr {
+        let (m, n) = (self.nrows(), b.ncols());
+        let mut row_ptr = vec![0usize; m + 1];
+        let mut col_idx = Vec::new();
+        let mut vals = Vec::new();
+        let mut spa: std::collections::BTreeMap<usize, f64> = std::collections::BTreeMap::new();
+        for i in 0..m {
+            let (acols, avals) = self.row(i);
+            for (&k, &aik) in acols.iter().zip(avals) {
+                let (bcols, bvals) = b.row(k);
+                for (&j, &bkj) in bcols.iter().zip(bvals) {
+                    let slot = spa.entry(j).or_insert(0.0);
+                    *slot = aik.mul_add(bkj, *slot);
+                }
+            }
+            for (&j, &v) in &spa {
+                col_idx.push(j);
+                vals.push(v);
+            }
+            row_ptr[i + 1] = col_idx.len();
+            spa.clear();
+        }
+        Csr::from_parts(m, n, row_ptr, col_idx, vals)
+    }
+
     /// Blocked SpMM (bead wsbf segment 2): Y = A · B for row-major
     /// dense B (ncols × nrhs) into row-major Y (nrows × nrhs). The
     /// rhs columns are processed in blocks so each A traversal feeds
@@ -178,9 +197,17 @@ impl crate::Csr {
     /// k-ascending order — bitwise equality with per-column SpMV is
     /// GATED in conformance.
     pub fn spmm_blocked(&self, b: &[f64], nrhs: usize, y: &mut [f64]) {
-        const NB: usize = 8;
         assert_eq!(b.len(), self.ncols() * nrhs, "spmm: B is ncols x nrhs");
         assert_eq!(y.len(), self.nrows() * nrhs, "spmm: Y is nrows x nrhs");
+        crate::fma::spmm_blocked_dispatch(self, b, nrhs, y);
+    }
+
+    /// The [`Csr::spmm_blocked`] loop body (see `spgemm_body`'s
+    /// extraction note).
+    #[allow(clippy::inline_always)] // required to inherit the target-feature FMA capsule
+    #[inline(always)]
+    pub(crate) fn spmm_blocked_body(&self, b: &[f64], nrhs: usize, y: &mut [f64]) {
+        const NB: usize = 8;
         let mut acc = [0.0f64; NB];
         for j0 in (0..nrhs).step_by(NB) {
             let jw = NB.min(nrhs - j0);
