@@ -77,7 +77,8 @@ fs-eproc for anytime-valid audit authority.
   `QueryHint` is structured and grid-qualified, with escaped lossless text and
   strict JSON renderers. A sampled zero is explicitly non-authoritative.
   `MatchedAuditRecord` validates private matched-cost observations with bounded
-  identities/provenance. A non-cloneable `VoiScheduler` owns one append-only
+  identities/provenance and rebuilds caller-owned strings before retention so
+  spare capacity cannot bypass the record cap. A non-cloneable `VoiScheduler` owns one append-only
   chronological fixed-alpha fs-eproc `PairwiseRace`, the remaining total
   budget, and a bounded set of consumed decision snapshots. `observe_audit`
   updates that one live process transactionally; `schedule(&mut self, menu)`
@@ -161,10 +162,11 @@ failure, scope mismatch, and numerical refusal.
 
 ## Determinism class
 
-Deterministic: sorted observations, nearest-rank quantiles with
-deterministic tie-breaking, BTreeMap iteration. No RNG anywhere. VoI uses a
-fixed sweep and ranking order; its result is deterministic when the supplied
-cached surrogate callback is itself deterministic.
+Deterministic: sorted cost-model observations, nearest-rank quantiles with
+deterministic tie-breaking, and BTreeMap iteration. No RNG anywhere. VoI uses
+a fixed sweep and ranking order while preserving prospective audit append
+order; its result is deterministic when the supplied cached surrogate callback
+is itself deterministic.
 
 ## Cancellation behavior
 

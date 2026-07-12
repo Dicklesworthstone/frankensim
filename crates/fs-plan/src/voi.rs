@@ -1116,6 +1116,13 @@ impl MatchedAuditRecord {
                 alternative_cost,
             });
         }
+        // Caller-owned Strings can carry arbitrary spare capacity despite
+        // bounded content. Rebuild every retained identity from its validated
+        // slice so the audit-record cap is also an operational memory bound.
+        let observation_id = observation_id.as_str().to_owned();
+        let recommended_id = recommended_id.as_str().to_owned();
+        let alternative_id = alternative_id.as_str().to_owned();
+        let provenance = provenance.as_str().to_owned();
         Ok(Self {
             observation_id,
             recommended_id,
@@ -1362,7 +1369,7 @@ impl VoiScheduler {
             return Err(VoiError::InvalidBudget { budget });
         }
         Ok(Self {
-            policy_scope,
+            policy_scope: policy_scope.as_str().to_owned(),
             remaining_budget_dollars: budget,
             audit_records: Vec::new(),
             observation_ids: BTreeSet::new(),
@@ -1539,4 +1546,42 @@ pub fn audit_scheduling(
         scheduler.observe_audit(record.clone())?;
     }
     scheduler.audit_report()
+}
+
+#[cfg(test)]
+mod retained_capacity_tests {
+    use super::*;
+
+    fn spare_capacity(value: &str) -> String {
+        let mut out = String::with_capacity(4096);
+        out.push_str(value);
+        out
+    }
+
+    #[test]
+    fn audit_authority_rebuilds_caller_owned_string_capacity() {
+        let record = MatchedAuditRecord::new(
+            spare_capacity("obs-1"),
+            spare_capacity("recommended"),
+            spare_capacity("alternative"),
+            spare_capacity("ledger-row-1"),
+            1.0,
+            1.0,
+            true,
+            false,
+        )
+        .expect("bounded matched audit record");
+        for value in [
+            &record.observation_id,
+            &record.recommended_id,
+            &record.alternative_id,
+            &record.provenance,
+        ] {
+            assert!(value.capacity() <= MAX_VOI_NAME_BYTES);
+        }
+
+        let scheduler = VoiScheduler::new(spare_capacity("policy-v1"), 1.0)
+            .expect("bounded scheduler policy");
+        assert!(scheduler.policy_scope.capacity() <= MAX_VOI_NAME_BYTES);
+    }
 }
