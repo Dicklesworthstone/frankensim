@@ -58,11 +58,18 @@ impl VelocityBand {
         let d = x.delta_from(self.origin);
         let g = [d.x / self.spacing, d.y / self.spacing, d.z / self.spacing];
         // Clamp into the grid (velocity extends constantly at the border).
+        // The BASE INDEX is capped at n-2 (so i+1 is a valid node), but the
+        // interpolation fraction must come from the coordinate clamped to the
+        // full grid extent n-1 — NOT to n-2. Clamping the coordinate to n-2
+        // first collapsed the last cell (fraction pinned to 0), so node n-1
+        // never contributed: the entire outer DOF layer was dead weight, with
+        // zero velocity/jacobian sensitivity, and the near-border interpolation
+        // latched onto node n-2 instead of blending to the boundary.
         let cell = |v: f64, n: usize| -> (usize, f64) {
-            let max = (n - 2) as f64;
-            let c = v.clamp(0.0, max);
-            let i = c.floor().min(max) as usize;
-            (i, (c - i as f64).clamp(0.0, 1.0))
+            #[allow(clippy::cast_precision_loss)]
+            let clamped = v.clamp(0.0, (n - 1) as f64);
+            let i = (clamped.floor() as usize).min(n - 2);
+            (i, (clamped - i as f64).clamp(0.0, 1.0))
         };
         let (i, fx) = cell(g[0], self.dims[0]);
         let (j, fy) = cell(g[1], self.dims[1]);
@@ -174,5 +181,43 @@ mod tests {
                 got: 1
             })
         ));
+    }
+
+    #[test]
+    fn trilinear_interpolates_the_last_cell_and_uses_the_outer_dof_layer() {
+        // Regression: the interpolation fraction must span the FULL last cell so
+        // the outer DOF layer (index dims[axis]-1) participates. The old code
+        // clamped the coordinate to n-2, collapsing the last cell (fraction
+        // pinned to 0), so node n-1 was dead weight with zero velocity/jacobian
+        // sensitivity and near-border points latched onto node n-2.
+        let band = VelocityBand {
+            origin: Point3::new(0.0, 0.0, 0.0),
+            spacing: 1.0,
+            dims: [4, 4, 4],
+            band: 10.0, // wide, nothing masked
+        };
+        // theta(node) = its x-index: a linear ramp along x, flat in y/z.
+        let mut theta = vec![0.0; band.dof()];
+        for i in 0..4 {
+            for j in 0..4 {
+                for k in 0..4 {
+                    theta[band.node(i, j, k)] = i as f64;
+                }
+            }
+        }
+        // A point in the LAST x-cell (grid 2.5) must interpolate to 2.5, not the
+        // collapsed node-2 value 2.0.
+        let x = Point3::new(2.5, 1.0, 1.0);
+        let v = band.velocity(&theta, x, 0.0).unwrap();
+        assert!((v - 2.5).abs() < 1e-12, "last cell must interpolate: got {v}");
+        // The outer x-layer (i = 3) must have nonzero jacobian sensitivity there:
+        // perturb only node (3,1,1) → weight fx·(1-fy)·(1-fz) = 0.5·1·1.
+        let mut dtheta = vec![0.0; band.dof()];
+        dtheta[band.node(3, 1, 1)] = 1.0;
+        let sens = band.jacobian_action(&dtheta, x, 0.0).unwrap();
+        assert!(
+            (sens - 0.5).abs() < 1e-12,
+            "outer DOF layer must influence the last cell: sensitivity {sens}"
+        );
     }
 }
