@@ -232,8 +232,9 @@ fn gemm_regress_nightly() {
         .collect();
     let verdict = gate(&history, GateSpec::default());
     let attainments: Vec<f64> = history.iter().map(|n| n.attainment).collect();
-    let alarm =
-        Cusum::default().first_alarm(&standardize(&attainments, GateSpec::default().min_baseline));
+    let standardized = standardize(&attainments, GateSpec::default().min_baseline)
+        .expect("the retained regression ledger is bounded");
+    let alarm = Cusum::default().first_alarm(&standardized);
     println!(
         "{{\"metric\":\"gemm-regress\",\"nights\":{},\"tonight\":{att:.3},\"gate\":\"{}\",\"cusum_alarm\":{}}}",
         history.len(),

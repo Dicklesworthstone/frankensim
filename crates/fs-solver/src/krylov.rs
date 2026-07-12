@@ -573,7 +573,7 @@ mod tests {
         // Plateau"). A monotonically GROWING residual satisfies the old lower
         // bound `last > prev*0.95` and was mislabeled Plateau. With the flat
         // ±5% band it must fall through to BudgetExhausted instead.
-        let diverging: Vec<f64> = (0..60).map(|i| 1.05_f64.powi(i)).collect();
+        let diverging: Vec<f64> = (0..60).map(|i| fs_math::det::powi(1.05, i)).collect();
         assert_eq!(
             diagnose(&diverging, 1e-8),
             Some(StallDiagnosis::BudgetExhausted),
