@@ -68,6 +68,28 @@ fn the_energy_audit_measures_passivity_and_alarms_on_generation() {
 }
 
 #[test]
+fn the_energy_audit_fails_closed_on_a_nan_interface_power() {
+    // Regression: a NaN interface power is a hard numerical breakdown — the
+    // worst thing the passivity audit exists to flag. `f64::max` drops NaN
+    // (`f64::max(0.0, NaN) == 0.0`), so the old fold reported ZERO generation
+    // and certified the blown-up coupling as passive — a false certificate.
+    let mut audit = EnergyAudit::new();
+    audit.record(0.0); // a clean, conserved exchange first
+    assert!(audit.is_passive(1e-12), "a conserved exchange is passive");
+    audit.record(f64::NAN); // then a diverged exchange
+    assert!(
+        audit.max_generation().is_nan(),
+        "a NaN balance must poison the metric, not vanish"
+    );
+    assert!(
+        !audit.is_passive(1e-12),
+        "a NaN interface power must never certify as passive"
+    );
+    // An arbitrarily large tolerance cannot rescue a NaN, either.
+    assert!(!audit.is_passive(f64::INFINITY));
+}
+
+#[test]
 fn the_aitken_factor_follows_the_delta_squared_formula() {
     let mut a = AitkenRelaxation::new(0.5, 2.0);
     // first call returns the initial ω.

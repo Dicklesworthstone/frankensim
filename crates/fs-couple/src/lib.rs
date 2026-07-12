@@ -137,8 +137,19 @@ impl EnergyAudit {
     }
 
     /// The worst interface power generation seen (the bug-alarm metric).
+    ///
+    /// A recorded NaN interface power means the coupling numerically broke
+    /// down — the single worst thing this audit exists to catch. `f64::max`
+    /// SILENTLY DROPS NaN (`f64::max(0.0, NaN) == 0.0`), so a plain fold would
+    /// report zero generation and `is_passive` would certify the blown-up
+    /// coupling as passive — a false certificate. Poison instead: any NaN
+    /// balance makes the metric NaN, and `NaN <= tol` is false, so the audit
+    /// fails closed. (`±∞` already survives `f64::max` and alarms correctly.)
     #[must_use]
     pub fn max_generation(&self) -> f64 {
+        if self.balances.iter().any(|b| b.is_nan()) {
+            return f64::NAN;
+        }
         self.balances.iter().map(|b| b.abs()).fold(0.0, f64::max)
     }
 
