@@ -23,10 +23,15 @@ fn pod_reproduces_a_low_rank_snapshot_set_exactly() {
     let rom = pod(&snaps, 0.999).unwrap();
     assert!(rom.rank() <= 2);
     assert!(rom.energy_captured() >= 0.999);
-    // every snapshot lies in the reduced space -> reconstructed exactly.
+    // Every snapshot lies in the reduced space, so POD reconstructs it TO
+    // ROUNDOFF, not merely "closely": worst error measured 2.2e-16 over the four
+    // snapshots (the Jacobi eigensolver is IEEE-only — sqrt/±/×/÷, no libm — so
+    // this is cross-ISA bit-stable). Gate at 1e-12 (~4500× the roundoff floor),
+    // 1000× tighter than the old 1e-9, which sat far above any real projection
+    // defect while the test still promised the set is reproduced "exactly".
     for s in &snaps {
         assert!(
-            rom.reconstruction_error(s) < 1e-9,
+            rom.reconstruction_error(s) < 1e-12,
             "err {}",
             rom.reconstruction_error(s)
         );
