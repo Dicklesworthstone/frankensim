@@ -11,6 +11,7 @@ description = "PV vertical skeleton: SDF -> PDE -> objective -> adjoint check ->
 layer = "L6"
 
 [dependencies]
+fs-blake3 = { path = "../fs-blake3" }
 fs-qty = { path = "../fs-qty" }
 fs-obs = { path = "../fs-obs" }
 fsqlite = { path = "../../../frankensqlite/crates/fsqlite" }

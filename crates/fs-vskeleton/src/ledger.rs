@@ -2,15 +2,25 @@
 //! content-addressed artifacts + lineage edges. Replay = re-execute the
 //! recorded study and compare hashes; stored-byte corruption fails loudly.
 //!
-//! Hashing is FNV-1a 64 (fs-obs) — a documented placeholder for the
-//! BLAKE3-class tree hash that fs-ledger-core owns.
+//! Hashing is domain-separated BLAKE3 (bead frankensim-ynsl): this crate
+//! patterns the flagship runner binaries and sits inside the flywheel
+//! loop, where content-address integrity is the merge/skip soundness
+//! basis — a 64-bit FNV placeholder was collision-cheap there. Ledger
+//! files carry a FORMAT VERSION; pre-BLAKE3 (v1/FNV) files are
+//! version-refused with a teaching error, never silently misread.
 
 use fsqlite::{Connection, SqliteValue};
 
-/// Content hash rendered as fixed-width hex.
+/// The ledger format this crate writes and reads. v1 was the FNV-1a era
+/// (16-hex hashes, no meta table); v2 is domain-separated BLAKE3.
+pub const LEDGER_FORMAT_VERSION: &str = "2";
+
+const ARTIFACT_HASH_DOMAIN: &str = "frankensim.fs-vskeleton.artifact.v2";
+
+/// Content hash rendered as fixed-width hex (64 chars, BLAKE3).
 #[must_use]
 pub fn content_hash(bytes: &[u8]) -> String {
-    format!("{:016x}", fs_obs::fnv1a64(bytes))
+    fs_blake3::hash_domain(ARTIFACT_HASH_DOMAIN, bytes).to_hex()
 }
 
 /// A thin ledger over one fsqlite database file.
@@ -29,8 +39,42 @@ impl MiniLedger {
             "CREATE TABLE IF NOT EXISTS artifacts(hash TEXT PRIMARY KEY, kind TEXT, bytes BLOB)",
             "CREATE TABLE IF NOT EXISTS ops(id INTEGER PRIMARY KEY, kind TEXT, ir TEXT, seed TEXT)",
             "CREATE TABLE IF NOT EXISTS edges(op INTEGER, artifact TEXT, role TEXT)",
+            "CREATE TABLE IF NOT EXISTS vskeleton_meta(key TEXT PRIMARY KEY, value TEXT)",
         ] {
             conn.execute(ddl).map_err(|e| format!("ledger DDL: {e}"))?;
+        }
+        // FORMAT ATTESTATION (the gp3.18 doctrine at embryo scale): a
+        // version row is stamped on first use of an EMPTY ledger; a file
+        // with artifacts but no (or a different) version is another
+        // format's data and is refused with the migration named — never
+        // silently misread under a new hash function.
+        let version = conn
+            .query("SELECT value FROM vskeleton_meta WHERE key = 'format_version'")
+            .map_err(|e| format!("ledger version read: {e}"))?;
+        match version.first().and_then(|row| row.get(0)) {
+            Some(SqliteValue::Text(v)) if v.as_str() == LEDGER_FORMAT_VERSION => {}
+            Some(SqliteValue::Text(v)) => {
+                return Err(format!(
+                    "LedgerFormatMismatch: {path} is format v{} but this build reads/writes                      v{LEDGER_FORMAT_VERSION}; replay it with a matching build or re-run the                      study into a fresh ledger — hashes are not comparable across formats",
+                    v.as_str()
+                ));
+            }
+            _ => {
+                let artifacts = conn
+                    .query("SELECT hash FROM artifacts LIMIT 1")
+                    .map_err(|e| format!("ledger census: {e}"))?;
+                if !artifacts.is_empty() {
+                    return Err(format!(
+                        "LedgerFormatMismatch: {path} holds artifacts but no format version —                          a pre-v2 (FNV-era) ledger; its 16-hex hashes are not comparable to                          v{LEDGER_FORMAT_VERSION} BLAKE3 addresses; replay the original study                          into a fresh ledger instead of migrating hashes in place"
+                    ));
+                }
+                conn.prepare(
+                    "INSERT INTO vskeleton_meta(key, value) VALUES ('format_version', ?1)",
+                )
+                .map_err(|e| format!("ledger version stamp prepare: {e}"))?
+                .execute_with_params(&[SqliteValue::Text(LEDGER_FORMAT_VERSION.into())])
+                .map_err(|e| format!("ledger version stamp: {e}"))?;
+            }
         }
         Ok(MiniLedger { conn })
     }

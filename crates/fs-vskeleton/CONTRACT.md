@@ -14,7 +14,7 @@ traces, budget spent, report, artifact hashes); `replay(db_path)` (integrity
 scan + re-execute + hash compare); `sexpr` (minimal total s-expr reader);
 `model` (StudySpec parse w/ mandatory seed+budget, EdgeLaw one-source-of-truth
 stencil, CG w/ cancellation polls, adjoint + central-difference gradients);
-`ledger::MiniLedger` (fsqlite ops/artifacts/edges, FNV content addressing).
+`ledger::MiniLedger` (fsqlite ops/artifacts/edges, domain-separated BLAKE3 content addressing, format-versioned: pre-v2 FNV ledgers are version-refused).
 
 ## Invariants
 - Bitwise deterministic: same study → identical artifact hashes across runs
@@ -50,5 +50,5 @@ gradient gates, budget teaching errors) + 7 model/parser unit tests including
 the Poisson series-reference check (peak u ≈ 0.0736713 for -Δu=1).
 
 ## No-claim boundaries
-Performance (unoptimized by design); FNV hashing (not BLAKE3-class); no RNG
+Performance (unoptimized by design); no RNG
 consumption (seed recorded for provenance only); 2D scalar physics only.

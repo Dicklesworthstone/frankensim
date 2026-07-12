@@ -131,3 +131,72 @@ fn pv_005_bad_studies_teach() {
     );
     let _ = std::fs::remove_file(&db);
 }
+
+#[test]
+fn blake3_content_addresses_are_64_hex_and_domain_separated() {
+    // Bead frankensim-ynsl: the FNV placeholder (16 hex) is retired; the
+    // v2 format uses domain-separated BLAKE3 (64 hex). The domain string
+    // matters: the same bytes under a different domain must not collide
+    // with artifact addresses.
+    let h = fs_vskeleton::ledger::content_hash(b"payload");
+    assert_eq!(h.len(), 64, "BLAKE3 hex width: {h}");
+    assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
+    assert_ne!(
+        h,
+        fs_blake3::hash_bytes(b"payload").to_hex(),
+        "artifact addresses must be domain-separated from plain hashing"
+    );
+    println!("{{\"suite\":\"fs-vskeleton\",\"case\":\"hash-shape\",\"verdict\":\"pass\",\"hash\":\"{h}\"}}");
+}
+
+#[test]
+fn pre_v2_ledger_is_version_refused_with_teaching_error() {
+    // Bead frankensim-ynsl: a ledger holding artifacts but no format
+    // version is FNV-era data; opening it under v2 must refuse with the
+    // migration named, never silently misread 16-hex addresses as v2.
+    let db = temp_db();
+    {
+        // Forge a v1-shaped ledger: schema without the meta stamp, one
+        // FNV-style artifact row.
+        let raw = fsqlite::Connection::open(&db).expect("raw open");
+        raw.execute("CREATE TABLE artifacts(hash TEXT PRIMARY KEY, kind TEXT, bytes BLOB)")
+            .expect("v1 ddl");
+        raw.prepare("INSERT INTO artifacts(hash, kind, bytes) VALUES (?1, ?2, ?3)")
+            .expect("prepare")
+            .execute_with_params(&[
+                fsqlite::SqliteValue::Text("00000000cbf29ce4".into()),
+                fsqlite::SqliteValue::Text("field".into()),
+                fsqlite::SqliteValue::Blob(b"legacy".to_vec().into()),
+            ])
+            .expect("v1 row");
+    }
+    let err = fs_vskeleton::ledger::MiniLedger::open(&db)
+        .err()
+        .expect("pre-v2 ledger must refuse");
+    assert!(
+        err.contains("LedgerFormatMismatch") && err.contains("fresh ledger"),
+        "teaching refusal expected, got: {err}"
+    );
+    println!("{{\"suite\":\"fs-vskeleton\",\"case\":\"v1-refusal\",\"verdict\":\"pass\",\"detail\":\"{}\"}}",
+        err.split(':').next().unwrap_or(""));
+    let _ = std::fs::remove_file(&db); // test temp file cleanup, same as temp_db siblings
+}
+
+#[test]
+fn future_format_ledger_is_version_refused() {
+    let db = temp_db();
+    {
+        let l = fs_vskeleton::ledger::MiniLedger::open(&db).expect("fresh v2");
+        l.put_artifact("field", b"bytes").expect("put");
+    }
+    {
+        let raw = fsqlite::Connection::open(&db).expect("raw");
+        raw.execute("UPDATE vskeleton_meta SET value = '99' WHERE key = 'format_version'")
+            .expect("forge future version");
+    }
+    let err = fs_vskeleton::ledger::MiniLedger::open(&db)
+        .err()
+        .expect("future format must refuse");
+    assert!(err.contains("v99"), "names the found version: {err}");
+    let _ = std::fs::remove_file(&db);
+}
