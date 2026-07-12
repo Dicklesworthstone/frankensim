@@ -33,16 +33,26 @@ control flow over a caller-supplied `CommitOracle`, and pure data plumbing for
   `InvariantClass`, contract surface, detail); `Shrink` (deterministic
   candidate order) + `minimize` (greedy first-failing descent to a fixpoint or
   step budget, `converged` flag, typed `NotFailing` refusal on a passing input,
-  and hard per-step/aggregate evaluation ceilings); `probe_neighborhood` over
-  a bounded, uniquely labeled caller set; sealed `RegressionFamily<I>`
-  construction (minimum + failing neighbors, nonempty unique tracking refs,
-  `recommended_admission`) with construction-time bounded `Canon` snapshots,
-  `content_hash` (domain-separated in-tree BLAKE3 over versioned, tagged,
-  length-prefixed bytes — floats via `to_bits`), escaped JSON-lines `manifest`
-  (hash trailer), and `replay` (members that stop failing are REPORTED as
-  `now_passing`, never silently dropped); `compound(...)` drives the whole
-  workflow. `COMPOUND_CANON_VERSION` is the golden-couplings surface const: any
-  canon/tag/hash-assembly change bumps it and deliberately re-freezes dependents.
+  and hard per-step/aggregate evaluation ceilings including the seed call);
+  `probe_neighborhood` over a count- and aggregate-byte-bounded, uniquely
+  labeled caller set; internally
+  constructed `RegressionFamily<I>` (minimum + failing neighbors, nonempty
+  unique tracking refs, `recommended_admission`) only after minimization reaches
+  a fixpoint. The accepted-step budget still checks whether the value reached
+  at the exact cap is a fixpoint. `Canon` requires a stable globally unique
+  codec id/schema, a pure encoding of every predicate-relevant field, writes
+  through a bounded `CanonWriter`, and supplies the payload snapshots that
+  `content_hash` binds with the complete codec schema using
+  domain-separated in-tree BLAKE3. The escaped JSON-lines `manifest` exposes
+  codec/schema fields and a hash trailer. `replay` re-canonicalizes every live
+  member globally before work, immediately before and after its predicate,
+  and again after all callbacks; candidate generation, retained minimization
+  witnesses, and cross-neighbor shared state receive the same checks, so
+  persistent identity drift is refused. Members
+  that authentically stop failing are REPORTED as `now_passing`, never silently
+  dropped. `COMPOUND_CANON_VERSION` is the golden-couplings surface const: any
+  codec/tag/hash/manifest assembly change bumps it and deliberately re-freezes
+  dependents.
 
 ## Invariants
 
@@ -54,25 +64,29 @@ control flow over a caller-supplied `CommitOracle`, and pure data plumbing for
   evaluation in order.
 - Failure compounding validates identifiers and descriptions before descent,
   rejects empty tracking, duplicate labels/references, reserved custom
-  invariant names, and limit+1 work. Content identity uses the canonical bytes
-  sealed at family construction, so stateful caller implementations cannot
-  change a manifest after admission.
+  invariant names, the reserved `minimized` neighbor label, incomplete
+  minimization, and limit+1 work. Content identity uses the type/schema domain
+  and canonical bytes sealed at family construction. Callback bracketing and a
+  final replay pass refuse persistent canonical mutation; authoritative replay
+  additionally requires the documented pure-and-complete `Canon` contract.
 
 ## Error model
 
 No errors/panics on valid indices; degenerate inputs map to explicit result
 variants (`Empty`, `AllGood`, `AllBad`, `NonMonotone`). Failure compounding
 returns `CompoundError::{NotFailing, InvalidField, LimitExceeded,
-DuplicateIdentity}`; it never silently truncates or repairs an inadmissible
-family.
+DuplicateIdentity, MinimizationIncomplete, ReplayIdentityDrift,
+CallbackIdentityDrift}`; it never
+silently truncates, repairs, or replays an unauthenticated family.
 
 ## Determinism class
 
 Fully deterministic: a bisect is a pure function of `(len, oracle)`; the same
 oracle reproduces the same culprit + probe path (sound only if the oracle's own
 commit replay is deterministic — the ledger's `at(t)`/ExecMode contract).
-Compounding identity is BLAKE3 over the versioned construction-time canonical
-snapshot and is independent of later interior mutation in a caller's input.
+Compounding identity is BLAKE3 over the versioned codec/schema domain and
+construction-time canonical snapshot. Persistent interior mutation leaves the
+identity stable but makes replay fail closed at a pre/post/final check.
 
 ## Cancellation behavior
 
@@ -95,20 +109,30 @@ boundaries; `verify_monotone` witness; `bisect_checked` flags non-monotone;
 two-tier agreement, re-search on full-fidelity rejection, and endpoint
 confirmation; confirmed-flag semantics; determinism.
 
-`tests/compound_battery.rs` (6nb.9 + j3q2 acceptance, 12 cases): a deliberately
+`tests/compound_battery.rs` (6nb.9 + j3q2 acceptance, 22 cases): a deliberately
 broken cross-crate golden modeled on the real powi incident (sequential vs
 square-multiply chains; minimizes to the exact k=7 divergence boundary for
 base 0.7, neighborhood shows the sharp region edge, family replays live and
 goes stale under the fixed implementation); a falsifier hit on a wrong tail
 constant (systematic error minimizes to n=1, whole neighborhood fails);
-frozen manifest content hash
-`ff9c945e8f3ecbaee37e82b5d57e7da7f710644ce9d8d0095c4974815aa132b7`
+frozen content identity
+`6aed2aab4250ca30b657e6e016f628eb5ba33e09c3e49b732156a5058eb9141f`
+and complete JSON-lines manifest hash
+`43bd1ebddb606eb5a156ca06c642cf03ddd06770223584c5ea45ae031d0cf6b2`
 (registered in `golden-couplings.json` against
-`fs-bisect:compound-canon=2`); bitwise
+`fs-bisect:compound-canon=3`); bitwise
 minimization determinism + `NotFailing` refusal; canon concatenation-collision
-resistance; per-field content-hash sensitivity; exact work boundaries and
-limit+1 refusals; nonempty tracking/reserved-invariant/canonical-byte gates;
-JSON escaping; and construction-time canonical snapshot stability.
+resistance; stable codec-domain separation for identical payload bytes;
+per-field content-hash sensitivity; exact work boundaries and limit+1
+refusals, including the aggregate seed-inclusive evaluation ceiling; nonempty
+tracking/reserved-invariant/canonical-byte gates; incomplete-minimization
+refusal; parsed unique-key JSON-lines and escaping; exact-cap fixpoint
+recognition; fail-closed predicate/neighbor/replay mutation; and an executable
+no-claim fixture for intentionally incomplete codecs.
+
+The battery's `serde`/`serde_json` dev dependencies are an isolated independent
+parser oracle for the emitted JSON-lines manifest and duplicate-key rejection;
+they are not linked into `fs-bisect` production code.
 
 ## No-claim boundaries
 
@@ -129,12 +153,26 @@ JSON escaping; and construction-time canonical snapshot stability.
 - `minimize` finds A minimal failing input under the caller's `Shrink` order,
   not THE global minimum (greedy, not exhaustive); `converged = false` marks a
   budget-limited descent honestly.
-- Caller callbacks (`fails`, `shrink_candidates`, and `neighbors_of`) execute
-  outside FrankenSim's control and must enforce their own cancellation and
-  allocation budgets. This crate bounds the candidate counts it accepts and
-  the predicate calls it makes after those callbacks return; it cannot prevent
-  a callback from doing excessive work internally.
-- The manifest carries typed canonical bytes but this generic crate does not
-  supply a decoder for arbitrary caller-defined `I`; replay uses the sealed
-  in-memory typed family. Durable type-specific decoding belongs with each
-  regression-family owner.
+- Caller callbacks (`fails`, `shrink_candidates`, `neighbors_of`, and `Canon`
+  implementations) execute outside FrankenSim's control and must enforce their
+  own cancellation and internal allocation budgets. `CanonWriter` bounds bytes
+  retained by this crate before allocation, but cannot prevent a codec from
+  doing excessive private work. Typed members themselves remain caller-owned
+  allocations. Persistent callback mutation is detected, but a callback that
+  transiently mutates and restores hidden state remains outside the claim.
+- `Canon` completeness and purity are implementor obligations: Rust cannot
+  prove that a caller omitted no predicate-relevant field. An incomplete codec
+  may replay changed hidden semantics under unchanged bytes and is explicitly
+  unauthenticated; authoritative families should use derived/field-by-field
+  codecs over immutable replay values.
+- Stable codec ids and versions are an implementor contract; this crate binds
+  and validates their syntax but cannot prove that two independent owners did
+  not choose the same id. A semantic codec change must change its schema
+  version.
+- The manifest carries codec/schema-qualified canonical bytes but this generic
+  crate does not supply a decoder for arbitrary caller-defined `I`; replay uses
+  the sealed in-memory typed family. Durable type-specific decoding belongs
+  with each regression-family owner.
+- The v3 manifest/content fixtures are reproduced in debug and release on the
+  aarch64 Apple M4 Pro. Post-v3 x86-64 reproduction is pending and cross-ISA
+  equality is not yet claimed.

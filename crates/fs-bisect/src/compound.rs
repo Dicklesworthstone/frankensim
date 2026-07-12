@@ -2,7 +2,7 @@
 //!
 //! Every golden break, falsifier hit, guard failure, or property
 //! counterexample should STRENGTHEN the permanent test surface instead of
-//! being fixed and forgotten. This module is the v1 mechanism:
+//! being fixed and forgotten. This module is the v3 mechanism:
 //!
 //! 1. **Capture** the failure as a [`FailureCase`]: seed, typed input, the
 //!    violated [`InvariantClass`], and the contract surface it broke.
@@ -16,15 +16,17 @@
 //!    neighbors, with tracking-issue references and a recommended admission
 //!    rule when the class is general.
 //! 5. **Replay** ([`RegressionFamily::replay`]): the family is
-//!    content-addressed ([`Canon`] bytes → domain-separated BLAKE3) and
-//!    re-executable — a
-//!    member that stops failing is REPORTED, because a regression family
-//!    whose members silently pass is stale evidence.
+//!    content-addressed (stable [`Canon`] codec/schema + bounded bytes →
+//!    domain-separated BLAKE3) and re-executable. Live typed values must match
+//!    the sealed snapshots before any predicate work; an authentic member that
+//!    stops failing is REPORTED because silently passing members are stale
+//!    evidence.
 //!
-//! Everything is plain data and deterministic: same case + same predicate
-//! ⇒ bitwise-identical minimum, probes, manifest, and content hash, on
-//! every ISA and in every build mode (the canon encoding is integer bytes
-//! and `f64::to_bits`, never formatted floats).
+//! Everything is plain data and deterministic: same case + same predicate +
+//! stable member codec ⇒ bitwise-identical minimum, probes, manifest, and
+//! content hash. Cross-ISA equality is a member-codec claim: the built-in
+//! integer and `f64::to_bits` codecs make it, while caller-defined codecs must
+//! state and test their own portability boundary.
 //!
 //! What this module does NOT do (no-claims): it does not write to the
 //! ledger or emit fs-obs events (recorded follow-up once the huq.16 schema
@@ -38,10 +40,10 @@
 /// field order in [`RegressionFamily::content_hash`] changes every
 /// family hash — bump this and deliberately re-freeze the dependents
 /// listed in golden-couplings.json (docs/GOLDEN_POLICY.md).
-pub const COMPOUND_CANON_VERSION: u32 = 2;
+pub const COMPOUND_CANON_VERSION: u32 = 3;
 
 /// Domain separating regression-family identities from every other BLAKE3 use.
-pub const COMPOUND_FAMILY_HASH_DOMAIN: &str = "org.frankensim.fs-bisect.compound-family.v2";
+pub const COMPOUND_FAMILY_HASH_DOMAIN: &str = "org.frankensim.fs-bisect.compound-family.v3";
 
 /// Maximum accepted minimizer descent steps.
 pub const MAX_MINIMIZE_STEPS: usize = 65_536;
@@ -61,6 +63,8 @@ pub const MAX_DESCRIPTION_BYTES: usize = 16 * 1024;
 pub const MAX_CANONICAL_MEMBER_BYTES: usize = 1024 * 1024;
 /// Maximum canonical payload bytes retained across one family.
 pub const MAX_CANONICAL_FAMILY_BYTES: usize = 16 * 1024 * 1024;
+/// Maximum bytes in the stable member codec/schema descriptor.
+pub const MAX_CANONICAL_SCHEMA_BYTES: usize = 16 * 1024;
 
 const RESERVED_INVARIANT_NAMES: [&str; 7] = [
     "build-mode-determinism",
@@ -223,6 +227,31 @@ pub enum CompoundError {
         /// Repeated value.
         value: String,
     },
+    /// Permanent families require a completed minimization, not merely the
+    /// best witness found before a caller budget expired.
+    MinimizationIncomplete {
+        /// The case whose minimization did not reach a fixpoint.
+        id: String,
+        /// Accepted shrink steps before exhaustion.
+        steps: usize,
+        /// Predicate evaluations, including the seed input.
+        evaluations: usize,
+    },
+    /// A live typed member or its codec schema no longer matches the identity
+    /// sealed at family construction, so replay semantics are unauthenticated.
+    ReplayIdentityDrift {
+        /// Member label, or `None` when the codec/schema itself drifted.
+        member: Option<String>,
+    },
+    /// An evidence-producing callback mutated the canonical semantics of the
+    /// value it inspected.
+    CallbackIdentityDrift {
+        /// Callback phase (`shrink_candidates`, `minimize`, `neighborhood`, or
+        /// `neighbors_of`).
+        phase: &'static str,
+        /// Stable case/member identity.
+        identity: String,
+    },
 }
 
 impl core::fmt::Display for CompoundError {
@@ -245,6 +274,29 @@ impl core::fmt::Display for CompoundError {
             Self::DuplicateIdentity { field, value } => {
                 write!(f, "duplicate {field} identity {value:?}")
             }
+            Self::MinimizationIncomplete {
+                id,
+                steps,
+                evaluations,
+            } => write!(
+                f,
+                "failure family {id:?} did not reach a minimization fixpoint \
+                 ({steps} accepted steps, {evaluations} predicate evaluations)"
+            ),
+            Self::ReplayIdentityDrift {
+                member: Some(member),
+            } => write!(
+                f,
+                "failure-family member {member:?} changed after its identity was sealed"
+            ),
+            Self::ReplayIdentityDrift { member: None } => write!(
+                f,
+                "failure-family member codec/schema changed after its identity was sealed"
+            ),
+            Self::CallbackIdentityDrift { phase, identity } => write!(
+                f,
+                "failure-compounding callback {phase} mutated canonical identity {identity:?}"
+            ),
         }
     }
 }
@@ -283,6 +335,7 @@ fn validate_family_name(value: &str) -> Result<(), CompoundError> {
     if !alphanumeric(first)
         || !alphanumeric(last)
         || !value.bytes().all(|byte| alphanumeric(byte) || byte == b'-')
+        || value.as_bytes().windows(2).any(|pair| pair == b"--")
     {
         return Err(CompoundError::InvalidField {
             field: "case_id",
@@ -358,11 +411,28 @@ pub struct MinimizeReport<I> {
     pub minimized: I,
     /// Accepted shrink steps.
     pub steps: usize,
-    /// Total candidates evaluated.
+    /// Total predicate evaluations, including the captured seed input.
     pub tried: usize,
     /// False when the step budget ran out before a fixpoint — the minimum
     /// is honest but possibly not minimal.
     pub converged: bool,
+}
+
+fn evaluate_stable<I: Canon>(
+    phase: &'static str,
+    identity: &str,
+    input: &I,
+    predicate: &dyn Fn(&I) -> bool,
+) -> Result<bool, CompoundError> {
+    let before = canonical_bytes(input)?;
+    let result = predicate(input);
+    if canonical_bytes(input)? != before {
+        return Err(CompoundError::CallbackIdentityDrift {
+            phase,
+            identity: identity.to_string(),
+        });
+    }
+    Ok(result)
 }
 
 /// Greedy deterministic minimization: repeatedly take the FIRST failing
@@ -371,7 +441,7 @@ pub struct MinimizeReport<I> {
 ///
 /// # Errors
 /// [`CompoundError::NotFailing`] when `input` does not fail `fails`.
-pub fn minimize<I: Shrink>(
+pub fn minimize<I: Shrink + Canon>(
     id: &str,
     input: &I,
     fails: &dyn Fn(&I) -> bool,
@@ -385,18 +455,22 @@ pub fn minimize<I: Shrink>(
             max: MAX_MINIMIZE_STEPS,
         });
     }
-    if !fails(input) {
+    let mut tried = 1usize;
+    if !evaluate_stable("minimize", id, input, fails)? {
         return Err(CompoundError::NotFailing { id: id.to_string() });
     }
     let mut current = input.clone();
     let mut steps = 0usize;
-    let mut tried = 0usize;
     let mut converged = false;
     'outer: loop {
-        if steps == max_steps {
-            break;
-        }
+        let current_before_candidates = canonical_bytes(&current)?;
         let candidates = current.shrink_candidates();
+        if canonical_bytes(&current)? != current_before_candidates {
+            return Err(CompoundError::CallbackIdentityDrift {
+                phase: "shrink_candidates",
+                identity: id.to_string(),
+            });
+        }
         if candidates.len() > MAX_SHRINK_CANDIDATES_PER_STEP {
             return Err(CompoundError::LimitExceeded {
                 resource: "shrink_candidates_per_step",
@@ -417,7 +491,17 @@ pub fn minimize<I: Shrink>(
                 requested: usize::MAX,
                 max: MAX_MINIMIZE_EVALUATIONS,
             })?;
-            if fails(&cand) {
+            let candidate_fails = evaluate_stable("minimize", id, &cand, fails)?;
+            if canonical_bytes(&current)? != current_before_candidates {
+                return Err(CompoundError::CallbackIdentityDrift {
+                    phase: "minimize",
+                    identity: id.to_string(),
+                });
+            }
+            if candidate_fails {
+                if steps == max_steps {
+                    break 'outer;
+                }
                 current = cand;
                 steps += 1;
                 continue 'outer;
@@ -454,9 +538,11 @@ pub struct NeighborhoodReport {
 
 /// Evaluate a bounded, labeled set of neighbors of a minimized failure.
 /// The caller supplies the neighbors; this function validates the hard count
-/// cap and unique canonical labels before making any predicate call. Its order
-/// is the caller's order.
-pub fn probe_neighborhood<I>(
+/// cap, aggregate canonical-byte cap, and unique canonical labels before making
+/// any predicate call. Its order is the caller's order. A final identity pass
+/// catches later predicates that mutate an earlier neighbor through shared
+/// interior state.
+pub fn probe_neighborhood<I: Canon>(
     neighbors: &[(String, I)],
     fails: &dyn Fn(&I) -> bool,
 ) -> Result<NeighborhoodReport, CompoundError> {
@@ -470,6 +556,12 @@ pub fn probe_neighborhood<I>(
     let mut seen = std::collections::BTreeSet::new();
     for (label, _) in neighbors {
         validate_identifier("neighbor_label", label)?;
+        if label == "minimized" {
+            return Err(CompoundError::DuplicateIdentity {
+                field: "neighbor_label",
+                value: label.clone(),
+            });
+        }
         if !seen.insert(label.as_str()) {
             return Err(CompoundError::DuplicateIdentity {
                 field: "neighbor_label",
@@ -477,92 +569,295 @@ pub fn probe_neighborhood<I>(
             });
         }
     }
-    let probes: Vec<NeighborProbe> = neighbors
-        .iter()
-        .map(|(label, input)| NeighborProbe {
+    let mut snapshots = Vec::with_capacity(neighbors.len());
+    let mut canonical_bytes_total = 0usize;
+    for (_, input) in neighbors {
+        let snapshot = canonical_bytes(input)?;
+        canonical_bytes_total = canonical_bytes_total.checked_add(snapshot.len()).ok_or(
+            CompoundError::LimitExceeded {
+                resource: "canonical_neighborhood_bytes",
+                requested: usize::MAX,
+                max: MAX_CANONICAL_FAMILY_BYTES,
+            },
+        )?;
+        if canonical_bytes_total > MAX_CANONICAL_FAMILY_BYTES {
+            return Err(CompoundError::LimitExceeded {
+                resource: "canonical_neighborhood_bytes",
+                requested: canonical_bytes_total,
+                max: MAX_CANONICAL_FAMILY_BYTES,
+            });
+        }
+        snapshots.push(snapshot);
+    }
+    let mut probes = Vec::with_capacity(neighbors.len());
+    for ((label, input), snapshot) in neighbors.iter().zip(&snapshots) {
+        if canonical_bytes(input)? != *snapshot {
+            return Err(CompoundError::CallbackIdentityDrift {
+                phase: "neighborhood",
+                identity: label.clone(),
+            });
+        }
+        probes.push(NeighborProbe {
             label: label.clone(),
-            fails: fails(input),
-        })
-        .collect();
+            fails: evaluate_stable("neighborhood", label, input, fails)?,
+        });
+    }
+    for ((label, input), snapshot) in neighbors.iter().zip(&snapshots) {
+        if canonical_bytes(input)? != *snapshot {
+            return Err(CompoundError::CallbackIdentityDrift {
+                phase: "neighborhood",
+                identity: label.clone(),
+            });
+        }
+    }
     let failing = probes.iter().filter(|p| p.fails).count();
     Ok(NeighborhoodReport { probes, failing })
 }
 
-/// Canonical bytes for content addressing. Tagged and length-prefixed so
-/// distinct structures cannot collide by concatenation; floats canonicalize
-/// through `to_bits`, never through formatting.
+/// Bounded append-only sink supplied to [`Canon`] implementations.
+///
+/// The sink refuses an oversized append before allocating it. A codec can
+/// still perform caller-owned work internally, but it cannot force this crate
+/// to retain an unbounded canonical payload.
+#[derive(Debug)]
+pub struct CanonWriter {
+    bytes: Vec<u8>,
+    max: usize,
+    resource: &'static str,
+}
+
+impl CanonWriter {
+    fn new(max: usize, resource: &'static str) -> Self {
+        Self {
+            bytes: Vec::new(),
+            max,
+            resource,
+        }
+    }
+
+    /// Append one byte within the configured bound.
+    pub fn push(&mut self, byte: u8) -> Result<(), CompoundError> {
+        self.extend_from_slice(&[byte])
+    }
+
+    /// Append a byte slice, refusing before allocation when it would exceed
+    /// the configured bound.
+    pub fn extend_from_slice(&mut self, bytes: &[u8]) -> Result<(), CompoundError> {
+        let requested =
+            self.bytes
+                .len()
+                .checked_add(bytes.len())
+                .ok_or(CompoundError::LimitExceeded {
+                    resource: self.resource,
+                    requested: usize::MAX,
+                    max: self.max,
+                })?;
+        if requested > self.max {
+            return Err(CompoundError::LimitExceeded {
+                resource: self.resource,
+                requested,
+                max: self.max,
+            });
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(())
+    }
+
+    /// Append `count` copies without allocating a temporary buffer.
+    pub fn repeat(&mut self, byte: u8, count: usize) -> Result<(), CompoundError> {
+        let requested =
+            self.bytes
+                .len()
+                .checked_add(count)
+                .ok_or(CompoundError::LimitExceeded {
+                    resource: self.resource,
+                    requested: usize::MAX,
+                    max: self.max,
+                })?;
+        if requested > self.max {
+            return Err(CompoundError::LimitExceeded {
+                resource: self.resource,
+                requested,
+                max: self.max,
+            });
+        }
+        self.bytes.resize(requested, byte);
+        Ok(())
+    }
+
+    fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
+}
+
+/// Canonical bytes for content addressing. Every implementation declares a
+/// globally unique, stable codec id and schema version in addition to its
+/// tagged, length-prefixed payload. Floats use `to_bits`, never formatting.
+///
+/// # Codec trust boundary
+/// Implementations must be pure and must encode every field that can affect
+/// the failure predicate. The workflow detects persistent mutation around
+/// callbacks, but Rust cannot prove that a caller-written codec is complete or
+/// that a callback did not transiently mutate and restore hidden state. Use
+/// derived/field-by-field codecs and immutable replay inputs for authoritative
+/// families; incomplete or impure codecs are explicitly outside the replay
+/// authentication claim.
 pub trait Canon {
-    /// Append this value's canonical bytes.
-    fn canon(&self, out: &mut Vec<u8>);
+    /// Stable codec id. Changing its meaning requires a new id or schema
+    /// version; Rust type names are intentionally not used because they are
+    /// not a durable wire contract.
+    const TYPE_ID: &'static str;
+    /// Version of this type's canonical payload semantics. Zero is reserved.
+    const SCHEMA_VERSION: u32 = 1;
+
+    /// Append this value's complete, side-effect-free canonical bytes to the
+    /// bounded sink.
+    fn canon(&self, out: &mut CanonWriter) -> Result<(), CompoundError>;
+
+    /// Append stable child codec schemas for generic containers. The outer
+    /// type's own id/version is always emitted by this crate and cannot be
+    /// skipped by an implementation.
+    #[doc(hidden)]
+    fn canon_child_schemas(_out: &mut CanonWriter) -> Result<(), CompoundError> {
+        Ok(())
+    }
+}
+
+fn append_canon_schema<T: Canon + ?Sized>(out: &mut CanonWriter) -> Result<(), CompoundError> {
+    validate_identifier("canon_type_id", T::TYPE_ID)?;
+    if T::SCHEMA_VERSION == 0 {
+        return Err(CompoundError::InvalidField {
+            field: "canon_schema_version",
+            problem: format!("codec {:?} uses reserved schema version 0", T::TYPE_ID),
+        });
+    }
+    out.push(13)?;
+    out.extend_from_slice(&(T::TYPE_ID.len() as u64).to_le_bytes())?;
+    out.extend_from_slice(T::TYPE_ID.as_bytes())?;
+    out.extend_from_slice(&T::SCHEMA_VERSION.to_le_bytes())?;
+    T::canon_child_schemas(out)
+}
+
+fn canon_schema<T: Canon + ?Sized>() -> Result<Vec<u8>, CompoundError> {
+    let mut out = CanonWriter::new(MAX_CANONICAL_SCHEMA_BYTES, "canonical_schema_bytes");
+    append_canon_schema::<T>(&mut out)?;
+    Ok(out.into_bytes())
+}
+
+/// Produce one bounded canonical payload using the same path family
+/// construction and replay use.
+pub fn canonical_bytes<T: Canon + ?Sized>(value: &T) -> Result<Vec<u8>, CompoundError> {
+    let mut out = CanonWriter::new(MAX_CANONICAL_MEMBER_BYTES, "canonical_member_bytes");
+    value.canon(&mut out)?;
+    let bytes = out.into_bytes();
+    if bytes.is_empty() {
+        return Err(CompoundError::InvalidField {
+            field: "member_canon",
+            problem: "Canon implementations must emit a non-empty tagged value".to_string(),
+        });
+    }
+    Ok(bytes)
 }
 
 impl Canon for u64 {
-    fn canon(&self, out: &mut Vec<u8>) {
-        out.push(1);
-        out.extend_from_slice(&self.to_le_bytes());
+    const TYPE_ID: &'static str = "org.frankensim.canon.u64";
+
+    fn canon(&self, out: &mut CanonWriter) -> Result<(), CompoundError> {
+        out.push(1)?;
+        out.extend_from_slice(&self.to_le_bytes())
     }
 }
 impl Canon for u32 {
-    fn canon(&self, out: &mut Vec<u8>) {
-        out.push(11);
-        out.extend_from_slice(&self.to_le_bytes());
+    const TYPE_ID: &'static str = "org.frankensim.canon.u32";
+
+    fn canon(&self, out: &mut CanonWriter) -> Result<(), CompoundError> {
+        out.push(11)?;
+        out.extend_from_slice(&self.to_le_bytes())
     }
 }
 impl Canon for i64 {
-    fn canon(&self, out: &mut Vec<u8>) {
-        out.push(2);
-        out.extend_from_slice(&self.to_le_bytes());
+    const TYPE_ID: &'static str = "org.frankensim.canon.i64";
+
+    fn canon(&self, out: &mut CanonWriter) -> Result<(), CompoundError> {
+        out.push(2)?;
+        out.extend_from_slice(&self.to_le_bytes())
     }
 }
 impl Canon for i32 {
-    fn canon(&self, out: &mut Vec<u8>) {
-        out.push(3);
-        out.extend_from_slice(&self.to_le_bytes());
+    const TYPE_ID: &'static str = "org.frankensim.canon.i32";
+
+    fn canon(&self, out: &mut CanonWriter) -> Result<(), CompoundError> {
+        out.push(3)?;
+        out.extend_from_slice(&self.to_le_bytes())
     }
 }
 impl Canon for f64 {
-    fn canon(&self, out: &mut Vec<u8>) {
-        out.push(4);
-        out.extend_from_slice(&self.to_bits().to_le_bytes());
+    const TYPE_ID: &'static str = "org.frankensim.canon.f64-bits";
+
+    fn canon(&self, out: &mut CanonWriter) -> Result<(), CompoundError> {
+        out.push(4)?;
+        out.extend_from_slice(&self.to_bits().to_le_bytes())
     }
 }
 impl Canon for bool {
-    fn canon(&self, out: &mut Vec<u8>) {
-        out.push(5);
-        out.push(u8::from(*self));
+    const TYPE_ID: &'static str = "org.frankensim.canon.bool";
+
+    fn canon(&self, out: &mut CanonWriter) -> Result<(), CompoundError> {
+        out.push(5)?;
+        out.push(u8::from(*self))
     }
 }
 impl Canon for str {
-    fn canon(&self, out: &mut Vec<u8>) {
-        out.push(6);
-        out.extend_from_slice(&(self.len() as u64).to_le_bytes());
-        out.extend_from_slice(self.as_bytes());
+    const TYPE_ID: &'static str = "org.frankensim.canon.str";
+
+    fn canon(&self, out: &mut CanonWriter) -> Result<(), CompoundError> {
+        out.push(6)?;
+        out.extend_from_slice(&(self.len() as u64).to_le_bytes())?;
+        out.extend_from_slice(self.as_bytes())
     }
 }
 impl Canon for String {
-    fn canon(&self, out: &mut Vec<u8>) {
-        self.as_str().canon(out);
+    const TYPE_ID: &'static str = "org.frankensim.canon.string";
+
+    fn canon(&self, out: &mut CanonWriter) -> Result<(), CompoundError> {
+        self.as_str().canon(out)
     }
 }
 impl<T: Canon> Canon for Vec<T> {
-    fn canon(&self, out: &mut Vec<u8>) {
-        out.push(7);
-        out.extend_from_slice(&(self.len() as u64).to_le_bytes());
+    const TYPE_ID: &'static str = "org.frankensim.canon.vec";
+
+    fn canon(&self, out: &mut CanonWriter) -> Result<(), CompoundError> {
+        out.push(7)?;
+        out.extend_from_slice(&(self.len() as u64).to_le_bytes())?;
         for item in self {
-            item.canon(out);
+            item.canon(out)?;
         }
+        Ok(())
+    }
+
+    fn canon_child_schemas(out: &mut CanonWriter) -> Result<(), CompoundError> {
+        append_canon_schema::<T>(out)
     }
 }
 impl<A: Canon, B: Canon> Canon for (A, B) {
-    fn canon(&self, out: &mut Vec<u8>) {
-        out.push(8);
-        self.0.canon(out);
-        self.1.canon(out);
+    const TYPE_ID: &'static str = "org.frankensim.canon.tuple2";
+
+    fn canon(&self, out: &mut CanonWriter) -> Result<(), CompoundError> {
+        out.push(8)?;
+        self.0.canon(out)?;
+        self.1.canon(out)
+    }
+
+    fn canon_child_schemas(out: &mut CanonWriter) -> Result<(), CompoundError> {
+        append_canon_schema::<A>(out)?;
+        append_canon_schema::<B>(out)
     }
 }
 
 impl Canon for InvariantClass {
-    fn canon(&self, out: &mut Vec<u8>) {
+    const TYPE_ID: &'static str = "org.frankensim.fs-bisect.invariant-class";
+
+    fn canon(&self, out: &mut CanonWriter) -> Result<(), CompoundError> {
         match self {
             Self::BuildModeDeterminism => out.push(0),
             Self::CrossIsaDeterminism => out.push(1),
@@ -572,8 +867,8 @@ impl Canon for InvariantClass {
             Self::ConservationViolation => out.push(5),
             Self::AdjointInconsistency => out.push(6),
             Self::Other(name) => {
-                out.push(7);
-                name.canon(out);
+                out.push(7)?;
+                name.canon(out)
             }
         }
     }
@@ -596,6 +891,8 @@ pub struct RegressionFamily<I> {
     /// Construction-time canonical snapshots paired one-for-one with members.
     /// Hashes and manifests never re-run a stateful caller implementation.
     member_canon: Vec<Vec<u8>>,
+    /// Stable codec/schema domain for `I`, including generic child schemas.
+    member_schema: Vec<u8>,
     /// Tracking references (bead ids / issue ids) — never empty for a
     /// landed family; a failure without a paper trail cannot compound.
     tracking: Vec<String>,
@@ -642,7 +939,7 @@ impl<I: Canon> RegressionFamily<I> {
     /// # Errors
     /// Refuses empty/duplicate/oversized identifiers, an empty tracking set,
     /// an empty member set, or a malformed custom invariant.
-    pub fn new(
+    fn new(
         name: String,
         invariant: InvariantClass,
         members: Vec<(String, I)>,
@@ -654,6 +951,7 @@ impl<I: Canon> RegressionFamily<I> {
         invariant.validate()?;
         validate_tracking_refs(&tracking)?;
         validate_admission_rule(recommended_admission.as_deref())?;
+        let member_schema = canon_schema::<I>()?;
         if members.is_empty() {
             return Err(CompoundError::InvalidField {
                 field: "members",
@@ -685,21 +983,7 @@ impl<I: Canon> RegressionFamily<I> {
                     value: label.clone(),
                 });
             }
-            let mut canonical = Vec::new();
-            input.canon(&mut canonical);
-            if canonical.is_empty() {
-                return Err(CompoundError::InvalidField {
-                    field: "member_canon",
-                    problem: "Canon implementations must emit a non-empty tagged value".to_string(),
-                });
-            }
-            if canonical.len() > MAX_CANONICAL_MEMBER_BYTES {
-                return Err(CompoundError::LimitExceeded {
-                    resource: "canonical_member_bytes",
-                    requested: canonical.len(),
-                    max: MAX_CANONICAL_MEMBER_BYTES,
-                });
-            }
+            let canonical = canonical_bytes(input)?;
             canonical_family_bytes = canonical_family_bytes.checked_add(canonical.len()).ok_or(
                 CompoundError::LimitExceeded {
                     resource: "canonical_family_bytes",
@@ -722,6 +1006,7 @@ impl<I: Canon> RegressionFamily<I> {
             provenance,
             members,
             member_canon,
+            member_schema,
             tracking,
             recommended_admission,
         })
@@ -745,10 +1030,19 @@ impl<I: Canon> RegressionFamily<I> {
         &self.provenance
     }
 
-    /// Minimized case followed by failing neighbors.
+    /// Number of sealed members (the minimized case followed by failing
+    /// neighbors).
     #[must_use]
-    pub fn members(&self) -> &[(String, I)] {
-        &self.members
+    pub fn member_count(&self) -> usize {
+        self.members.len()
+    }
+
+    /// Stable label for one sealed member. Typed member values are not
+    /// exposed because mutating interior state must not bypass replay's
+    /// identity check.
+    #[must_use]
+    pub fn member_label(&self, index: usize) -> Option<&str> {
+        self.members.get(index).map(|(label, _)| label.as_str())
     }
 
     /// Beads or issue references that own the family.
@@ -764,38 +1058,72 @@ impl<I: Canon> RegressionFamily<I> {
     }
 
     /// Content hash over the full canonical encoding: name, invariant,
-    /// members (labels + inputs), tracking, admission. Deterministic across
-    /// runs, build modes, and ISAs.
+    /// member codec/schema, members (labels + inputs), tracking, and admission.
+    /// Deterministic across runs and build modes; cross-ISA equality additionally
+    /// requires the member codec and predicate domain to make that claim.
     #[must_use]
     pub fn content_hash(&self) -> fs_blake3::ContentHash {
-        let mut bytes = Vec::new();
-        COMPOUND_CANON_VERSION.canon(&mut bytes);
-        self.name.canon(&mut bytes);
-        self.invariant.canon(&mut bytes);
-        self.provenance.seed.canon(&mut bytes);
-        self.provenance.contract.canon(&mut bytes);
-        self.provenance.detail.canon(&mut bytes);
-        bytes.push(7);
-        bytes.extend_from_slice(&(self.members.len() as u64).to_le_bytes());
+        let mut bytes = CanonWriter::new(usize::MAX, "sealed_family_hash_bytes");
+        COMPOUND_CANON_VERSION
+            .canon(&mut bytes)
+            .expect("sealed canon version is bounded");
+        self.name
+            .canon(&mut bytes)
+            .expect("validated family name is bounded");
+        self.invariant
+            .canon(&mut bytes)
+            .expect("validated invariant is bounded");
+        self.provenance
+            .seed
+            .canon(&mut bytes)
+            .expect("seed is fixed width");
+        self.provenance
+            .contract
+            .canon(&mut bytes)
+            .expect("validated contract is bounded");
+        self.provenance
+            .detail
+            .canon(&mut bytes)
+            .expect("validated detail is bounded");
+        bytes.push(14).expect("unbounded sealed writer");
+        bytes
+            .extend_from_slice(&(self.member_schema.len() as u64).to_le_bytes())
+            .expect("unbounded sealed writer");
+        bytes
+            .extend_from_slice(&self.member_schema)
+            .expect("sealed schema is bounded");
+        bytes.push(7).expect("unbounded sealed writer");
+        bytes
+            .extend_from_slice(&(self.members.len() as u64).to_le_bytes())
+            .expect("unbounded sealed writer");
         for ((label, _), canonical) in self.members.iter().zip(&self.member_canon) {
-            label.canon(&mut bytes);
-            bytes.push(12);
-            bytes.extend_from_slice(
-                &u64::try_from(canonical.len())
-                    .expect("bounded canonical member length fits u64")
-                    .to_le_bytes(),
-            );
-            bytes.extend_from_slice(canonical);
+            label
+                .canon(&mut bytes)
+                .expect("validated member label is bounded");
+            bytes.push(12).expect("unbounded sealed writer");
+            bytes
+                .extend_from_slice(
+                    &u64::try_from(canonical.len())
+                        .expect("bounded canonical member length fits u64")
+                        .to_le_bytes(),
+                )
+                .expect("unbounded sealed writer");
+            bytes
+                .extend_from_slice(canonical)
+                .expect("sealed canonical member is bounded");
         }
-        self.tracking.canon(&mut bytes);
+        self.tracking
+            .canon(&mut bytes)
+            .expect("validated tracking references are bounded");
         match &self.recommended_admission {
             Some(a) => {
-                bytes.push(9);
-                a.canon(&mut bytes);
+                bytes.push(9).expect("unbounded sealed writer");
+                a.canon(&mut bytes)
+                    .expect("validated admission rule is bounded");
             }
-            None => bytes.push(10),
+            None => bytes.push(10).expect("unbounded sealed writer"),
         }
-        fs_blake3::hash_domain(COMPOUND_FAMILY_HASH_DOMAIN, &bytes)
+        fs_blake3::hash_domain(COMPOUND_FAMILY_HASH_DOMAIN, &bytes.into_bytes())
     }
 
     /// The canonical capture manifest: JSON-lines, one header, one line per
@@ -817,6 +1145,20 @@ impl<I: Canon> RegressionFamily<I> {
         write_json_string(&mut out, &self.provenance.contract);
         let _ = write!(out, ",\"detail\":");
         write_json_string(&mut out, &self.provenance.detail);
+        let _ = write!(out, ",\"member_type\":");
+        write_json_string(&mut out, I::TYPE_ID);
+        let schema_hex: String = self
+            .member_schema
+            .iter()
+            .fold(String::new(), |mut s, byte| {
+                let _ = write!(s, "{byte:02x}");
+                s
+            });
+        let _ = write!(
+            out,
+            ",\"member_schema_version\":{},\"member_schema\":\"{schema_hex}\"",
+            I::SCHEMA_VERSION
+        );
         let _ = write!(out, ",\"members\":{},\"tracking\":[", self.members.len());
         for (index, reference) in self.tracking.iter().enumerate() {
             if index != 0 {
@@ -844,23 +1186,57 @@ impl<I: Canon> RegressionFamily<I> {
         out
     }
 
-    /// Re-execute every member against the predicate. A live family has
-    /// `now_passing` empty; anything else is stale evidence to act on.
-    #[must_use]
-    pub fn replay(&self, fails: &dyn Fn(&I) -> bool) -> ReplayReport {
+    /// Re-execute every member against the predicate. All live typed values
+    /// are re-canonicalized and matched to the sealed snapshots before any
+    /// predicate work. A live family has `now_passing` empty; anything else is
+    /// stale evidence to act on.
+    ///
+    /// # Errors
+    /// Refuses replay if the codec schema or any live member no longer matches
+    /// the content-addressed identity.
+    pub fn replay(&self, fails: &dyn Fn(&I) -> bool) -> Result<ReplayReport, CompoundError> {
+        if canon_schema::<I>()? != self.member_schema {
+            return Err(CompoundError::ReplayIdentityDrift { member: None });
+        }
+        self.verify_live_members()?;
         let mut still_failing = Vec::new();
         let mut now_passing = Vec::new();
-        for (label, input) in &self.members {
-            if fails(input) {
+        for ((label, input), canonical) in self.members.iter().zip(&self.member_canon) {
+            if canonical_bytes(input)? != *canonical {
+                return Err(CompoundError::ReplayIdentityDrift {
+                    member: Some(label.clone()),
+                });
+            }
+            let failed = fails(input);
+            if canonical_bytes(input)? != *canonical {
+                return Err(CompoundError::ReplayIdentityDrift {
+                    member: Some(label.clone()),
+                });
+            }
+            if failed {
                 still_failing.push(label.clone());
             } else {
                 now_passing.push(label.clone());
             }
         }
-        ReplayReport {
+        // A later callback can share interior state with and mutate an earlier
+        // member; the final pass closes that persistent cross-member TOCTOU.
+        self.verify_live_members()?;
+        Ok(ReplayReport {
             still_failing,
             now_passing,
+        })
+    }
+
+    fn verify_live_members(&self) -> Result<(), CompoundError> {
+        for ((label, input), canonical) in self.members.iter().zip(&self.member_canon) {
+            if canonical_bytes(input)? != *canonical {
+                return Err(CompoundError::ReplayIdentityDrift {
+                    member: Some(label.clone()),
+                });
+            }
         }
+        Ok(())
     }
 }
 
@@ -869,8 +1245,10 @@ impl<I: Canon> RegressionFamily<I> {
 pub struct CompoundReport<I> {
     /// The captured case with its input replaced by the minimum.
     pub case: FailureCase<I>,
-    /// Minimization statistics.
+    /// Accepted minimization steps.
     pub steps: usize,
+    /// Predicate evaluations during minimization, including the seed input.
+    pub tried: usize,
     /// Whether minimization reached a fixpoint.
     pub converged: bool,
     /// The bounded neighborhood around the minimum.
@@ -881,7 +1259,7 @@ pub struct CompoundReport<I> {
     pub content_hash: fs_blake3::ContentHash,
 }
 
-/// The v2 workflow driver: validate → minimize → probe → seal the family.
+/// The v3 workflow driver: validate → minimize → probe → seal the family.
 ///
 /// `neighbors_of` receives the MINIMIZED input and returns a deterministically
 /// ordered, labeled neighbor set. Its callback work is caller-owned; the
@@ -889,8 +1267,10 @@ pub struct CompoundReport<I> {
 /// evaluated. Failing neighbors join the family behind the minimum.
 ///
 /// # Errors
-/// [`CompoundError::NotFailing`] when the captured input does not fail, plus
-/// structured field, identity, and deterministic work-limit refusals.
+/// [`CompoundError::NotFailing`] when the captured input does not fail,
+/// [`CompoundError::MinimizationIncomplete`] when the caller budget expires
+/// before a fixpoint, plus structured field, identity, and deterministic
+/// work-limit refusals.
 pub fn compound<I: Shrink + Canon>(
     case: FailureCase<I>,
     fails: &dyn Fn(&I) -> bool,
@@ -905,7 +1285,21 @@ pub fn compound<I: Shrink + Canon>(
     validate_tracking_refs(&tracking)?;
     validate_admission_rule(recommended_admission.as_deref())?;
     let report = minimize(&case.id, &case.input, fails, max_steps)?;
+    if !report.converged {
+        return Err(CompoundError::MinimizationIncomplete {
+            id: case.id,
+            steps: report.steps,
+            evaluations: report.tried,
+        });
+    }
+    let minimized_before_neighbors = canonical_bytes(&report.minimized)?;
     let neighbors = neighbors_of(&report.minimized);
+    if canonical_bytes(&report.minimized)? != minimized_before_neighbors {
+        return Err(CompoundError::CallbackIdentityDrift {
+            phase: "neighbors_of",
+            identity: case.id,
+        });
+    }
     let neighborhood = probe_neighborhood(&neighbors, fails)?;
     let mut members: Vec<(String, I)> = vec![("minimized".to_string(), report.minimized.clone())];
     for ((label, input), probe) in neighbors.into_iter().zip(&neighborhood.probes) {
@@ -928,7 +1322,8 @@ pub fn compound<I: Shrink + Canon>(
             ..case
         },
         steps: report.steps,
-        converged: report.converged,
+        tried: report.tried,
+        converged: true,
         neighborhood,
         family,
         content_hash,

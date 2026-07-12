@@ -4,14 +4,14 @@
 //! certificate constant; both must produce minimized replayable cases,
 //! neighborhood boundary evidence, permanent regression families with
 //! tracking references, and a content-addressed manifest whose hash is
-//! frozen as a golden (identical in both build modes and on both ISAs —
-//! integer/`to_bits` arithmetic only).
+//! frozen as a golden (identical in both build modes on the recorded aarch64
+//! host; cross-ISA reproduction remains pending).
 
 use fs_bisect::compound::{
-    Canon, CompoundError, FailureCase, FamilyProvenance, InvariantClass,
-    MAX_CANONICAL_MEMBER_BYTES, MAX_IDENTIFIER_BYTES, MAX_MINIMIZE_STEPS, MAX_NEIGHBOR_PROBES,
-    MAX_SHRINK_CANDIDATES_PER_STEP, RegressionFamily, Shrink, compound, minimize,
-    probe_neighborhood,
+    Canon, CanonWriter, CompoundError, FailureCase, FamilyProvenance, InvariantClass,
+    MAX_CANONICAL_MEMBER_BYTES, MAX_IDENTIFIER_BYTES, MAX_MINIMIZE_EVALUATIONS, MAX_MINIMIZE_STEPS,
+    MAX_NEIGHBOR_PROBES, MAX_SHRINK_CANDIDATES_PER_STEP, RegressionFamily, Shrink, canonical_bytes,
+    compound, minimize, probe_neighborhood,
 };
 
 fn modeled_golden_hash(bytes: &[u8]) -> u64 {
@@ -32,23 +32,48 @@ fn provenance(seed: u64) -> FamilyProvenance {
     .expect("valid provenance")
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TestMember(u64);
+
+impl Shrink for TestMember {
+    fn shrink_candidates(&self) -> Vec<Self> {
+        Vec::new()
+    }
+}
+
+impl Canon for TestMember {
+    const TYPE_ID: &'static str = "org.frankensim.fs-bisect.test-member";
+
+    fn canon(&self, out: &mut CanonWriter) -> Result<(), CompoundError> {
+        self.0.canon(out)
+    }
+}
+
 fn test_family_with_provenance(
     name: &str,
     invariant: InvariantClass,
     member: u64,
     tracking: Vec<String>,
     admission: Option<String>,
-    provenance: FamilyProvenance,
-) -> RegressionFamily<u64> {
-    RegressionFamily::new(
-        name.to_string(),
-        invariant,
-        vec![("minimized".to_string(), member)],
+    provenance: &FamilyProvenance,
+) -> RegressionFamily<TestMember> {
+    compound(
+        FailureCase {
+            id: name.to_string(),
+            seed: provenance.seed(),
+            input: TestMember(member),
+            invariant,
+            contract: provenance.contract().to_string(),
+            detail: provenance.detail().to_string(),
+        },
+        &|_| true,
+        &|_| Vec::new(),
         tracking,
         admission,
-        provenance,
+        1,
     )
     .expect("valid family")
+    .family
 }
 
 fn test_family(
@@ -57,8 +82,8 @@ fn test_family(
     member: u64,
     tracking: Vec<String>,
     admission: Option<String>,
-) -> RegressionFamily<u64> {
-    test_family_with_provenance(name, invariant, member, tracking, admission, provenance(7))
+) -> RegressionFamily<TestMember> {
+    test_family_with_provenance(name, invariant, member, tracking, admission, &provenance(7))
 }
 
 // ---- Scenario (a): the powi golden break, faithfully modeled ----
@@ -101,10 +126,12 @@ struct Sweep {
 }
 
 impl Canon for Sweep {
-    fn canon(&self, out: &mut Vec<u8>) {
-        self.base.canon(out);
+    const TYPE_ID: &'static str = "org.frankensim.fs-bisect.test.sweep";
+
+    fn canon(&self, out: &mut CanonWriter) -> Result<(), CompoundError> {
+        self.base.canon(out)?;
         let exps: Vec<i64> = self.exponents.iter().map(|&e| i64::from(e)).collect();
-        exps.canon(out);
+        exps.canon(out)
     }
 }
 
@@ -142,7 +169,9 @@ fn golden_breaks(s: &Sweep) -> bool {
     let feed = |f: &dyn Fn(f64, u32) -> f64| -> u64 {
         let mut bytes = Vec::new();
         for &k in &s.exponents {
-            f(s.base, k).canon(&mut bytes);
+            bytes.extend_from_slice(
+                &canonical_bytes(&f(s.base, k)).expect("fixed-width f64 canonical payload"),
+            );
         }
         modeled_golden_hash(&bytes)
     };
@@ -222,27 +251,65 @@ fn powi_model_minimizes_to_the_exact_boundary() {
         .collect();
     assert_eq!(failing, ["k=7", "k=8", "k=9", "k=10"]);
     // The family: minimum first, then every failing neighbor; tracked.
-    assert_eq!(report.family.members().len(), 5);
-    assert_eq!(report.family.members()[0].0, "minimized");
+    assert_eq!(report.family.member_count(), 5);
+    assert_eq!(report.family.member_label(0), Some("minimized"));
     assert!(
         !report.family.tracking().is_empty(),
         "no paper trail, no family"
     );
     // Replay: every member still fails under the suspect implementation...
-    let live = report.family.replay(&golden_breaks);
+    let live = report
+        .family
+        .replay(&golden_breaks)
+        .expect("sealed family replays");
     assert!(live.now_passing.is_empty(), "family must be live: {live:?}");
     // ...and the SAME family goes fully stale once the bug is "fixed"
     // (both chains sequential) — stale detection is the point of replay.
     let fixed = |_: &Sweep| false;
-    let stale = report.family.replay(&fixed);
+    let stale = report.family.replay(&fixed).expect("sealed family replays");
     assert!(stale.still_failing.is_empty());
     assert_eq!(stale.now_passing.len(), 5);
 }
 
-/// Recorded on aarch64-apple (M4 Pro); must be identical in debug and
-/// release and on x86-64 (integer/to_bits arithmetic only).
+/// Recorded on aarch64-apple (M4 Pro); reproduced in debug and release.
+/// Cross-ISA reproduction is pending and is not claimed by this fixture.
+const POWI_FAMILY_CONTENT_HASH: &str =
+    "6aed2aab4250ca30b657e6e016f628eb5ba33e09c3e49b732156a5058eb9141f";
 const POWI_FAMILY_MANIFEST_HASH: &str =
-    "ff9c945e8f3ecbaee37e82b5d57e7da7f710644ce9d8d0095c4974815aa132b7";
+    "43bd1ebddb606eb5a156ca06c642cf03ddd06770223584c5ea45ae031d0cf6b2";
+
+fn assert_unique_json_object(line: &str) {
+    use serde::Deserializer as _;
+    use serde::de::{Error as _, MapAccess, Visitor};
+    use std::collections::BTreeSet;
+
+    struct UniqueKeys;
+
+    impl<'de> Visitor<'de> for UniqueKeys {
+        type Value = ();
+
+        fn expecting(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            formatter.write_str("a JSON object with unique keys")
+        }
+
+        fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<(), M::Error> {
+            let mut keys = BTreeSet::new();
+            while let Some(key) = map.next_key::<String>()? {
+                if !keys.insert(key.clone()) {
+                    return Err(M::Error::custom(format!("duplicate key {key:?}")));
+                }
+                let _: serde_json::Value = map.next_value()?;
+            }
+            Ok(())
+        }
+    }
+
+    let mut parser = serde_json::Deserializer::from_str(line);
+    parser
+        .deserialize_map(UniqueKeys)
+        .expect("manifest line is valid JSON with unique keys");
+    parser.end().expect("manifest line has no trailing syntax");
+}
 
 #[test]
 fn powi_family_manifest_is_content_addressed_and_frozen() {
@@ -268,19 +335,33 @@ fn powi_family_manifest_is_content_addressed_and_frozen() {
     )
     .expect("must minimize");
     let manifest = report.family.manifest();
-    // The manifest carries the hash in its trailer and is replay-complete.
+    for line in manifest.lines() {
+        assert_unique_json_object(line);
+    }
+    // The manifest carries its member codec and content hash explicitly.
     assert!(manifest.contains("\"family\":\"powi-order-divergence\""));
-    assert_eq!(manifest.lines().count(), 2 + report.family.members().len());
+    assert!(manifest.contains("\"member_type\":\"org.frankensim.fs-bisect.test.sweep\""));
+    assert!(manifest.contains("\"member_schema_version\":1"));
+    assert_eq!(manifest.lines().count(), 2 + report.family.member_count());
+    assert_eq!(
+        manifest.lines().next_back(),
+        Some(format!("{{\"content_hash\":\"{}\"}}", report.content_hash).as_str())
+    );
+    let manifest_hash = fs_blake3::hash_bytes(manifest.as_bytes()).to_hex();
     println!(
-        "{{\"suite\":\"fs-bisect\",\"case\":\"compound-manifest\",\"verdict\":\"info\",\"detail\":\"{}\"}}",
-        report.content_hash
+        "{{\"suite\":\"fs-bisect\",\"case\":\"compound-manifest\",\"verdict\":\"info\",\"content_hash\":\"{}\",\"manifest_hash\":\"{manifest_hash}\"}}",
+        report.content_hash,
     );
     assert_eq!(
         report.content_hash.to_hex(),
-        POWI_FAMILY_MANIFEST_HASH,
-        "family bits changed: {} vs {POWI_FAMILY_MANIFEST_HASH} — bump only with \
+        POWI_FAMILY_CONTENT_HASH,
+        "family bits changed: {} vs {POWI_FAMILY_CONTENT_HASH} — bump only with \
          semantic justification (golden-evidence policy)",
         report.content_hash
+    );
+    assert_eq!(
+        manifest_hash, POWI_FAMILY_MANIFEST_HASH,
+        "manifest bytes changed without a deliberate golden re-freeze"
     );
 }
 
@@ -296,8 +377,10 @@ struct TailClaim {
 }
 
 impl Canon for TailClaim {
-    fn canon(&self, out: &mut Vec<u8>) {
-        self.n.canon(out);
+    const TYPE_ID: &'static str = "org.frankensim.fs-bisect.test.tail-claim";
+
+    fn canon(&self, out: &mut CanonWriter) -> Result<(), CompoundError> {
+        self.n.canon(out)
     }
 }
 
@@ -357,7 +440,10 @@ fn falsifier_hit_compounds_into_a_family() {
         "systematic constant error: every probe must fail"
     );
     assert!(report.family.recommended_admission().is_some());
-    let live = report.family.replay(&falsifier_refutes);
+    let live = report
+        .family
+        .replay(&falsifier_refutes)
+        .expect("sealed family replays");
     assert!(live.now_passing.is_empty());
 }
 
@@ -368,11 +454,7 @@ fn minimize_is_deterministic_and_refuses_non_failures() {
     let case = powi_case();
     let a = minimize("a", &case.input, &golden_breaks, 1000).expect("fails");
     let b = minimize("b", &case.input, &golden_breaks, 1000).expect("fails");
-    let canon = |s: &Sweep| {
-        let mut v = Vec::new();
-        s.canon(&mut v);
-        v
-    };
+    let canon = |s: &Sweep| canonical_bytes(s).expect("bounded sweep canon");
     assert_eq!(
         canon(&a.minimized),
         canon(&b.minimized),
@@ -396,18 +478,12 @@ fn minimize_is_deterministic_and_refuses_non_failures() {
 #[test]
 fn canon_encoding_resists_concatenation_collisions() {
     let h = |parts: &[&str]| {
-        let mut v = Vec::new();
-        for p in parts {
-            p.canon(&mut v);
-        }
-        fs_blake3::hash_bytes(&v)
+        let owned: Vec<String> = parts.iter().map(|part| (*part).to_string()).collect();
+        fs_blake3::hash_bytes(&canonical_bytes(&owned).expect("bounded strings"))
     };
     assert_ne!(h(&["ab", "c"]), h(&["a", "bc"]));
-    let mut v1 = Vec::new();
-    vec![1u64, 2].canon(&mut v1);
-    let mut v2 = Vec::new();
-    vec![1u64].canon(&mut v2);
-    2u64.canon(&mut v2);
+    let v1 = canonical_bytes(&vec![1u64, 2]).expect("bounded vector");
+    let v2 = canonical_bytes(&(vec![1u64], 2u64)).expect("bounded tuple");
     assert_ne!(
         fs_blake3::hash_bytes(&v1),
         fs_blake3::hash_bytes(&v2),
@@ -491,7 +567,7 @@ fn content_hash_is_sensitive_to_provenance_fields() {
             1,
             vec!["t".to_string()],
             None,
-            provenance,
+            &provenance,
         )
         .content_hash()
     };
@@ -533,23 +609,45 @@ impl Shrink for WideShrink {
 }
 
 impl Canon for WideShrink {
-    fn canon(&self, out: &mut Vec<u8>) {
-        1u64.canon(out);
+    const TYPE_ID: &'static str = "org.frankensim.fs-bisect.test.wide-shrink";
+
+    fn canon(&self, out: &mut CanonWriter) -> Result<(), CompoundError> {
+        1u64.canon(out)
     }
 }
 
+#[derive(Clone)]
 struct HugeCanon;
 
 impl Canon for HugeCanon {
-    fn canon(&self, out: &mut Vec<u8>) {
-        out.resize(MAX_CANONICAL_MEMBER_BYTES + 1, 0);
+    const TYPE_ID: &'static str = "org.frankensim.fs-bisect.test.huge-canon";
+
+    fn canon(&self, out: &mut CanonWriter) -> Result<(), CompoundError> {
+        out.repeat(0, MAX_CANONICAL_MEMBER_BYTES + 1)
     }
 }
 
+impl Shrink for HugeCanon {
+    fn shrink_candidates(&self) -> Vec<Self> {
+        Vec::new()
+    }
+}
+
+#[derive(Clone)]
 struct EmptyCanon;
 
 impl Canon for EmptyCanon {
-    fn canon(&self, _out: &mut Vec<u8>) {}
+    const TYPE_ID: &'static str = "org.frankensim.fs-bisect.test.empty-canon";
+
+    fn canon(&self, _out: &mut CanonWriter) -> Result<(), CompoundError> {
+        Ok(())
+    }
+}
+
+impl Shrink for EmptyCanon {
+    fn shrink_candidates(&self) -> Vec<Self> {
+        Vec::new()
+    }
 }
 
 #[test]
@@ -586,8 +684,283 @@ fn work_envelopes_refuse_at_limit_plus_one() {
     ));
 }
 
+#[derive(Clone)]
+struct EvaluationBudgetInput {
+    generation: usize,
+    passing_candidate: bool,
+}
+
+impl Shrink for EvaluationBudgetInput {
+    fn shrink_candidates(&self) -> Vec<Self> {
+        let mut candidates = vec![
+            Self {
+                generation: self.generation + 1,
+                passing_candidate: true,
+            };
+            MAX_SHRINK_CANDIDATES_PER_STEP - 1
+        ];
+        candidates.push(Self {
+            generation: self.generation + 1,
+            passing_candidate: false,
+        });
+        candidates
+    }
+}
+
+impl Canon for EvaluationBudgetInput {
+    const TYPE_ID: &'static str = "org.frankensim.fs-bisect.test.evaluation-budget-input";
+
+    fn canon(&self, out: &mut CanonWriter) -> Result<(), CompoundError> {
+        u64::try_from(self.generation)
+            .map_err(|_| CompoundError::LimitExceeded {
+                resource: "test_generation",
+                requested: usize::MAX,
+                max: u64::MAX as usize,
+            })?
+            .canon(out)?;
+        self.passing_candidate.canon(out)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct OneStep(u8);
+
+impl Shrink for OneStep {
+    fn shrink_candidates(&self) -> Vec<Self> {
+        (self.0 > 0).then(|| Self(self.0 - 1)).into_iter().collect()
+    }
+}
+
+impl Canon for OneStep {
+    const TYPE_ID: &'static str = "org.frankensim.fs-bisect.test.one-step";
+
+    fn canon(&self, out: &mut CanonWriter) -> Result<(), CompoundError> {
+        out.push(self.0)
+    }
+}
+
+#[test]
+fn aggregate_evaluation_ceiling_counts_the_seed_call() {
+    use std::cell::Cell;
+
+    let calls = Cell::new(0usize);
+    let result = minimize(
+        "evaluation-budget",
+        &EvaluationBudgetInput {
+            generation: 0,
+            passing_candidate: false,
+        },
+        &|candidate| {
+            calls.set(calls.get() + 1);
+            !candidate.passing_candidate
+        },
+        MAX_MINIMIZE_STEPS,
+    );
+    assert!(matches!(
+        result,
+        Err(CompoundError::LimitExceeded {
+            resource: "minimize_evaluations",
+            requested,
+            max: MAX_MINIMIZE_EVALUATIONS,
+        }) if requested == MAX_MINIMIZE_EVALUATIONS + 1
+    ));
+    assert_eq!(
+        calls.get(),
+        MAX_MINIMIZE_EVALUATIONS,
+        "the hard ceiling covers every predicate evaluation"
+    );
+}
+
+#[test]
+fn permanent_family_refuses_budget_limited_minimization() {
+    use std::cell::Cell;
+
+    let neighbor_calls = Cell::new(0usize);
+    let result = compound(
+        FailureCase {
+            id: "budget-limited".to_string(),
+            seed: 0,
+            input: OneStep(1),
+            invariant: InvariantClass::GoldenDrift,
+            contract: "fs-bisect::compound".to_string(),
+            detail: "zero-step minimization budget".to_string(),
+        },
+        &|_| true,
+        &|_| {
+            neighbor_calls.set(neighbor_calls.get() + 1);
+            Vec::new()
+        },
+        vec!["frankensim-j3q2".to_string()],
+        None,
+        0,
+    );
+    assert_eq!(
+        result.unwrap_err(),
+        CompoundError::MinimizationIncomplete {
+            id: "budget-limited".to_string(),
+            steps: 0,
+            evaluations: 2,
+        }
+    );
+    assert_eq!(neighbor_calls.get(), 0, "incomplete evidence cannot probe");
+}
+
+#[test]
+fn exact_accepted_step_budget_still_checks_the_reached_fixpoint() {
+    let report = minimize("exact-step-budget", &OneStep(1), &|_| true, 1)
+        .expect("one accepted step reaches a fixpoint");
+    assert!(report.converged);
+    assert_eq!(report.steps, 1);
+    assert_eq!(report.tried, 2);
+    assert_eq!(report.minimized.0, 0);
+
+    let already_minimal = minimize("zero-step-fixpoint", &OneStep(0), &|_| true, 0)
+        .expect("zero accepted steps suffice for an existing fixpoint");
+    assert!(already_minimal.converged);
+    assert_eq!(already_minimal.tried, 1);
+}
+
+#[test]
+fn codec_type_domain_separates_identical_payload_bytes() {
+    #[derive(Clone)]
+    struct CodecA(u64);
+    #[derive(Clone)]
+    struct CodecB(u64);
+    #[derive(Clone)]
+    struct CodecV2(u64);
+
+    impl Shrink for CodecA {
+        fn shrink_candidates(&self) -> Vec<Self> {
+            Vec::new()
+        }
+    }
+    impl Shrink for CodecB {
+        fn shrink_candidates(&self) -> Vec<Self> {
+            Vec::new()
+        }
+    }
+    impl Shrink for CodecV2 {
+        fn shrink_candidates(&self) -> Vec<Self> {
+            Vec::new()
+        }
+    }
+    impl Canon for CodecA {
+        const TYPE_ID: &'static str = "org.frankensim.fs-bisect.test.codec-a";
+
+        fn canon(&self, out: &mut CanonWriter) -> Result<(), CompoundError> {
+            self.0.canon(out)
+        }
+    }
+    impl Canon for CodecB {
+        const TYPE_ID: &'static str = "org.frankensim.fs-bisect.test.codec-b";
+
+        fn canon(&self, out: &mut CanonWriter) -> Result<(), CompoundError> {
+            self.0.canon(out)
+        }
+    }
+    impl Canon for CodecV2 {
+        const TYPE_ID: &'static str = "org.frankensim.fs-bisect.test.codec-a";
+        const SCHEMA_VERSION: u32 = 2;
+
+        fn canon(&self, out: &mut CanonWriter) -> Result<(), CompoundError> {
+            self.0.canon(out)
+        }
+    }
+
+    fn family_hash<I: Shrink + Canon>(input: I) -> fs_blake3::ContentHash {
+        compound(
+            FailureCase {
+                id: "codec-domain".to_string(),
+                seed: 0,
+                input,
+                invariant: InvariantClass::GoldenDrift,
+                contract: "fs-bisect::compound".to_string(),
+                detail: "identical payload, distinct codec".to_string(),
+            },
+            &|_| true,
+            &|_| Vec::new(),
+            vec!["frankensim-j3q2".to_string()],
+            None,
+            1,
+        )
+        .expect("codec-domain family")
+        .content_hash
+    }
+
+    assert_eq!(
+        canonical_bytes(&CodecA(7)).unwrap(),
+        canonical_bytes(&CodecB(7)).unwrap(),
+        "the regression requires identical payload bytes"
+    );
+    let a = family_hash(CodecA(7));
+    assert_ne!(a, family_hash(CodecB(7)), "codec id is semantic");
+    assert_ne!(a, family_hash(CodecV2(7)), "codec version is semantic");
+}
+
+#[test]
+fn replay_refuses_codec_schema_drift_before_predicate_work() {
+    use std::cell::Cell;
+    use std::sync::atomic::{AtomicU8, Ordering};
+
+    static CHILD_SCHEMA: AtomicU8 = AtomicU8::new(1);
+
+    #[derive(Clone)]
+    struct MutableSchema;
+
+    impl Shrink for MutableSchema {
+        fn shrink_candidates(&self) -> Vec<Self> {
+            Vec::new()
+        }
+    }
+    impl Canon for MutableSchema {
+        const TYPE_ID: &'static str = "org.frankensim.fs-bisect.test.mutable-schema";
+
+        fn canon(&self, out: &mut CanonWriter) -> Result<(), CompoundError> {
+            7u64.canon(out)
+        }
+
+        fn canon_child_schemas(out: &mut CanonWriter) -> Result<(), CompoundError> {
+            out.push(CHILD_SCHEMA.load(Ordering::SeqCst))
+        }
+    }
+
+    CHILD_SCHEMA.store(1, Ordering::SeqCst);
+    let family = compound(
+        FailureCase {
+            id: "schema-drift".to_string(),
+            seed: 0,
+            input: MutableSchema,
+            invariant: InvariantClass::GoldenDrift,
+            contract: "fs-bisect::compound".to_string(),
+            detail: "stateful codec schema".to_string(),
+        },
+        &|_| true,
+        &|_| Vec::new(),
+        vec!["frankensim-j3q2".to_string()],
+        None,
+        1,
+    )
+    .expect("initial schema is admitted")
+    .family;
+    CHILD_SCHEMA.store(2, Ordering::SeqCst);
+    let predicate_calls = Cell::new(0usize);
+    assert_eq!(
+        family
+            .replay(&|_| {
+                predicate_calls.set(predicate_calls.get() + 1);
+                true
+            })
+            .unwrap_err(),
+        CompoundError::ReplayIdentityDrift { member: None }
+    );
+    assert_eq!(predicate_calls.get(), 0);
+    CHILD_SCHEMA.store(1, Ordering::SeqCst);
+}
+
 #[test]
 fn neighborhood_count_and_labels_are_bounded_and_unambiguous() {
+    use std::cell::Cell;
+
     let at_limit: Vec<(String, u64)> = (0..MAX_NEIGHBOR_PROBES)
         .map(|index| (format!("n-{index}"), index as u64))
         .collect();
@@ -616,18 +989,37 @@ fn neighborhood_count_and_labels_are_bounded_and_unambiguous() {
             ..
         })
     ));
+    let calls = Cell::new(0usize);
+    assert!(matches!(
+        probe_neighborhood(&[("minimized".to_string(), 1u64)], &|_| {
+            calls.set(calls.get() + 1);
+            true
+        }),
+        Err(CompoundError::DuplicateIdentity {
+            field: "neighbor_label",
+            ..
+        })
+    ));
+    assert_eq!(calls.get(), 0, "reserved labels refuse before work");
 }
 
 #[test]
-fn family_construction_seals_tracking_invariants_and_canonical_size() {
+fn family_construction_seals_authority_fields() {
     assert!(matches!(
-        RegressionFamily::new(
-            "Not_Kebab".to_string(),
-            InvariantClass::GoldenDrift,
-            vec![("minimized".to_string(), 1u64)],
+        compound(
+            FailureCase {
+                id: "double--separator".to_string(),
+                seed: 0,
+                input: TestMember(1),
+                invariant: InvariantClass::GoldenDrift,
+                contract: "fs-bisect::compound".to_string(),
+                detail: "ambiguous family separator".to_string(),
+            },
+            &|_| true,
+            &|_| Vec::new(),
             vec!["frankensim-j3q2".to_string()],
             None,
-            provenance(0),
+            1,
         ),
         Err(CompoundError::InvalidField {
             field: "case_id",
@@ -635,13 +1027,41 @@ fn family_construction_seals_tracking_invariants_and_canonical_size() {
         })
     ));
     assert!(matches!(
-        RegressionFamily::new(
-            "untracked".to_string(),
-            InvariantClass::GoldenDrift,
-            vec![("minimized".to_string(), 1u64)],
+        compound(
+            FailureCase {
+                id: "Not_Kebab".to_string(),
+                seed: 0,
+                input: TestMember(1),
+                invariant: InvariantClass::GoldenDrift,
+                contract: "fs-bisect::compound".to_string(),
+                detail: "invalid family".to_string(),
+            },
+            &|_| true,
+            &|_| Vec::new(),
+            vec!["frankensim-j3q2".to_string()],
+            None,
+            1,
+        ),
+        Err(CompoundError::InvalidField {
+            field: "case_id",
+            ..
+        })
+    ));
+    assert!(matches!(
+        compound(
+            FailureCase {
+                id: "untracked".to_string(),
+                seed: 0,
+                input: TestMember(1),
+                invariant: InvariantClass::GoldenDrift,
+                contract: "fs-bisect::compound".to_string(),
+                detail: "untracked family".to_string(),
+            },
+            &|_| true,
+            &|_| Vec::new(),
             Vec::new(),
             None,
-            provenance(0),
+            1,
         ),
         Err(CompoundError::InvalidField {
             field: "tracking",
@@ -649,42 +1069,45 @@ fn family_construction_seals_tracking_invariants_and_canonical_size() {
         })
     ));
     assert!(matches!(
-        RegressionFamily::new(
-            "wrong-first".to_string(),
-            InvariantClass::GoldenDrift,
-            vec![("neighbor".to_string(), 1u64)],
-            vec!["frankensim-j3q2".to_string()],
-            None,
-            provenance(0),
-        ),
-        Err(CompoundError::InvalidField {
-            field: "members",
-            ..
-        })
-    ));
-    assert!(matches!(
-        RegressionFamily::new(
-            "reserved".to_string(),
-            InvariantClass::Other("golden-drift".to_string()),
-            vec![("minimized".to_string(), 1u64)],
+        compound(
+            FailureCase {
+                id: "reserved".to_string(),
+                seed: 0,
+                input: TestMember(1),
+                invariant: InvariantClass::Other("golden-drift".to_string()),
+                contract: "fs-bisect::compound".to_string(),
+                detail: "reserved invariant".to_string(),
+            },
+            &|_| true,
+            &|_| Vec::new(),
             vec!["t".to_string()],
             None,
-            provenance(0),
+            1,
         ),
         Err(CompoundError::InvalidField {
             field: "invariant",
             ..
         })
     ));
+}
 
+#[test]
+fn family_construction_bounds_canonical_payloads() {
     assert!(matches!(
-        RegressionFamily::new(
-            "huge".to_string(),
-            InvariantClass::Other("custom-bound".to_string()),
-            vec![("minimized".to_string(), HugeCanon)],
+        compound(
+            FailureCase {
+                id: "huge".to_string(),
+                seed: 0,
+                input: HugeCanon,
+                invariant: InvariantClass::Other("custom-bound".to_string()),
+                contract: "fs-bisect::compound".to_string(),
+                detail: "huge canonical payload".to_string(),
+            },
+            &|_| true,
+            &|_| Vec::new(),
             vec!["frankensim-j3q2".to_string()],
             None,
-            provenance(0),
+            1,
         ),
         Err(CompoundError::LimitExceeded {
             resource: "canonical_member_bytes",
@@ -693,13 +1116,20 @@ fn family_construction_seals_tracking_invariants_and_canonical_size() {
         }) if requested == MAX_CANONICAL_MEMBER_BYTES + 1
     ));
     assert!(matches!(
-        RegressionFamily::new(
-            "empty-canon".to_string(),
-            InvariantClass::Other("custom-bound".to_string()),
-            vec![("minimized".to_string(), EmptyCanon)],
+        compound(
+            FailureCase {
+                id: "empty-canon".to_string(),
+                seed: 0,
+                input: EmptyCanon,
+                invariant: InvariantClass::Other("custom-bound".to_string()),
+                contract: "fs-bisect::compound".to_string(),
+                detail: "empty canonical payload".to_string(),
+            },
+            &|_| true,
+            &|_| Vec::new(),
             vec!["frankensim-j3q2".to_string()],
             None,
-            provenance(0),
+            1,
         ),
         Err(CompoundError::InvalidField {
             field: "member_canon",
@@ -713,6 +1143,7 @@ fn invalid_family_authority_refuses_before_predicate_work() {
     use std::cell::Cell;
 
     let calls = Cell::new(0usize);
+    let neighbor_calls = Cell::new(0usize);
     let result = compound(
         FailureCase {
             id: "preflight".to_string(),
@@ -726,7 +1157,10 @@ fn invalid_family_authority_refuses_before_predicate_work() {
             calls.set(calls.get() + 1);
             true
         },
-        &|_| panic!("neighbors must not run for an untracked family"),
+        &|_| {
+            neighbor_calls.set(neighbor_calls.get() + 1);
+            Vec::new()
+        },
         Vec::new(),
         None,
         0,
@@ -739,42 +1173,78 @@ fn invalid_family_authority_refuses_before_predicate_work() {
         })
     ));
     assert_eq!(calls.get(), 0, "authority preflight must precede work");
+    assert_eq!(neighbor_calls.get(), 0, "invalid authority cannot probe");
 }
 
 #[test]
 fn manifest_escapes_fields_and_hashes_the_canonical_snapshot() {
     use std::cell::Cell;
+    use std::rc::Rc;
 
-    struct MutableCanon(Cell<u64>);
-    impl Canon for MutableCanon {
-        fn canon(&self, out: &mut Vec<u8>) {
-            self.0.get().canon(out);
+    #[derive(Clone)]
+    struct MutableCanon(Rc<Cell<u64>>);
+
+    impl Shrink for MutableCanon {
+        fn shrink_candidates(&self) -> Vec<Self> {
+            Vec::new()
         }
     }
 
-    let family = RegressionFamily::new(
-        "family-escape".to_string(),
-        InvariantClass::Other("custom-\"\\".to_string()),
-        vec![
-            ("minimized".to_string(), MutableCanon(Cell::new(7))),
-            ("member-\"\\".to_string(), MutableCanon(Cell::new(9))),
-        ],
+    impl Canon for MutableCanon {
+        const TYPE_ID: &'static str = "org.frankensim.fs-bisect.test.mutable-canon";
+
+        fn canon(&self, out: &mut CanonWriter) -> Result<(), CompoundError> {
+            self.0.get().canon(out)
+        }
+    }
+
+    let live_value = Rc::new(Cell::new(7));
+    let mutation_handle = Rc::clone(&live_value);
+    let family = compound(
+        FailureCase {
+            id: "family-escape".to_string(),
+            seed: 11,
+            input: MutableCanon(live_value),
+            invariant: InvariantClass::Other("custom-\"\\".to_string()),
+            contract: "contract \"quoted\"".to_string(),
+            detail: "detail line one\nline two".to_string(),
+        },
+        &|_| true,
+        &|_| {
+            vec![(
+                "member-\"\\".to_string(),
+                MutableCanon(Rc::new(Cell::new(9))),
+            )]
+        },
         vec!["bead-\"\\".to_string()],
         Some("line one\n\"line two\" \\".to_string()),
-        FamilyProvenance::new(
-            11,
-            "contract \"quoted\"".to_string(),
-            "detail line one\nline two".to_string(),
-        )
-        .expect("valid escaped provenance"),
+        1,
     )
-    .expect("escapable visible identifiers");
+    .expect("escapable visible identifiers")
+    .family;
     let before = family.content_hash();
-    family.members()[0].1.0.set(8);
+    mutation_handle.set(8);
     assert_eq!(
         family.content_hash(),
         before,
         "content identity must use the sealed construction-time canonical bytes"
+    );
+    let predicate_calls = Cell::new(0usize);
+    assert_eq!(
+        family
+            .replay(&|_| {
+                predicate_calls.set(predicate_calls.get() + 1);
+                true
+            })
+            .unwrap_err(),
+        CompoundError::ReplayIdentityDrift {
+            member: Some("minimized".to_string())
+        }
+    );
+    assert_eq!(
+        predicate_calls.get(),
+        0,
+        "identity preflight must precede predicate work"
     );
     let manifest = family.manifest();
     let header = manifest.lines().next().expect("header");
@@ -783,4 +1253,271 @@ fn manifest_escapes_fields_and_hashes_the_canonical_snapshot() {
     assert!(header.contains("\\n"), "newlines escaped: {header}");
     assert!(!header.contains('\n'), "one JSON object per line");
     assert!(manifest.ends_with('\n'));
+}
+
+#[derive(Clone)]
+struct CallbackMutable(std::rc::Rc<std::cell::Cell<u64>>);
+
+impl Shrink for CallbackMutable {
+    fn shrink_candidates(&self) -> Vec<Self> {
+        Vec::new()
+    }
+}
+
+impl Canon for CallbackMutable {
+    const TYPE_ID: &'static str = "org.frankensim.fs-bisect.test.callback-mutable";
+
+    fn canon(&self, out: &mut CanonWriter) -> Result<(), CompoundError> {
+        self.0.get().canon(out)
+    }
+}
+
+#[derive(Clone)]
+struct MutatingShrink(std::rc::Rc<std::cell::Cell<u64>>);
+
+impl Shrink for MutatingShrink {
+    fn shrink_candidates(&self) -> Vec<Self> {
+        self.0.set(self.0.get() + 1);
+        Vec::new()
+    }
+}
+
+impl Canon for MutatingShrink {
+    const TYPE_ID: &'static str = "org.frankensim.fs-bisect.test.mutating-shrink";
+
+    fn canon(&self, out: &mut CanonWriter) -> Result<(), CompoundError> {
+        self.0.get().canon(out)
+    }
+}
+
+#[derive(Clone)]
+struct DetachedCandidate {
+    rank: u8,
+    state: std::rc::Rc<std::cell::Cell<u64>>,
+}
+
+impl Shrink for DetachedCandidate {
+    fn shrink_candidates(&self) -> Vec<Self> {
+        (self.rank > 0)
+            .then(|| Self {
+                rank: self.rank - 1,
+                state: std::rc::Rc::new(std::cell::Cell::new(self.state.get())),
+            })
+            .into_iter()
+            .collect()
+    }
+}
+
+impl Canon for DetachedCandidate {
+    const TYPE_ID: &'static str = "org.frankensim.fs-bisect.test.detached-candidate";
+
+    fn canon(&self, out: &mut CanonWriter) -> Result<(), CompoundError> {
+        out.push(self.rank)?;
+        self.state.get().canon(out)
+    }
+}
+
+#[test]
+fn predicates_cannot_mutate_direct_arguments_or_replay_members() {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    let state = Rc::new(Cell::new(1));
+    assert!(matches!(
+        minimize(
+            "mutating-minimizer",
+            &CallbackMutable(Rc::clone(&state)),
+            &|input| {
+                input.0.set(2);
+                true
+            },
+            0,
+        ),
+        Err(CompoundError::CallbackIdentityDrift {
+            phase: "minimize",
+            ..
+        })
+    ));
+
+    state.set(1);
+    let family = compound(
+        FailureCase {
+            id: "mutating-replay".to_string(),
+            seed: 0,
+            input: CallbackMutable(Rc::clone(&state)),
+            invariant: InvariantClass::GoldenDrift,
+            contract: "fs-bisect::compound".to_string(),
+            detail: "callback-time interior mutation".to_string(),
+        },
+        &|_| true,
+        &|_| Vec::new(),
+        vec!["frankensim-j3q2".to_string()],
+        None,
+        0,
+    )
+    .expect("stable construction")
+    .family;
+    assert!(matches!(
+        family.replay(&|input| {
+            input.0.set(2);
+            true
+        }),
+        Err(CompoundError::ReplayIdentityDrift {
+            member: Some(member)
+        }) if member == "minimized"
+    ));
+}
+
+#[test]
+fn minimizer_callbacks_cannot_mutate_retained_witnesses() {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    let shrink_state = Rc::new(Cell::new(1));
+    assert!(matches!(
+        minimize(
+            "mutating-shrink-generator",
+            &MutatingShrink(Rc::clone(&shrink_state)),
+            &|_| true,
+            0,
+        ),
+        Err(CompoundError::CallbackIdentityDrift {
+            phase: "shrink_candidates",
+            ..
+        })
+    ));
+
+    let retained_state = Rc::new(Cell::new(7));
+    assert!(matches!(
+        minimize(
+            "mutating-retained-witness",
+            &DetachedCandidate {
+                rank: 1,
+                state: Rc::clone(&retained_state),
+            },
+            &|input| {
+                if input.rank == 0 {
+                    retained_state.set(8);
+                }
+                true
+            },
+            1,
+        ),
+        Err(CompoundError::CallbackIdentityDrift {
+            phase: "minimize",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn neighborhood_callbacks_cannot_mutate_other_members() {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    let state = Rc::new(Cell::new(1));
+    assert!(matches!(
+        compound(
+            FailureCase {
+                id: "mutating-neighbor-generator".to_string(),
+                seed: 0,
+                input: CallbackMutable(Rc::clone(&state)),
+                invariant: InvariantClass::GoldenDrift,
+                contract: "fs-bisect::compound".to_string(),
+                detail: "neighbor callback mutation".to_string(),
+            },
+            &|_| true,
+            &|input| {
+                input.0.set(2);
+                Vec::new()
+            },
+            vec!["frankensim-j3q2".to_string()],
+            None,
+            0,
+        ),
+        Err(CompoundError::CallbackIdentityDrift {
+            phase: "neighbors_of",
+            ..
+        })
+    ));
+
+    let first_neighbor = Rc::new(Cell::new(10));
+    let second_neighbor = Rc::new(Cell::new(20));
+    assert!(matches!(
+        probe_neighborhood(
+            &[
+                (
+                    "first".to_string(),
+                    CallbackMutable(Rc::clone(&first_neighbor)),
+                ),
+                (
+                    "second".to_string(),
+                    CallbackMutable(Rc::clone(&second_neighbor)),
+                ),
+            ],
+            &|input| {
+                if input.0.get() == 20 {
+                    first_neighbor.set(11);
+                }
+                true
+            },
+        ),
+        Err(CompoundError::CallbackIdentityDrift {
+            phase: "neighborhood",
+            identity,
+        }) if identity == "first"
+    ));
+}
+
+#[test]
+fn incomplete_canon_is_an_explicit_replay_no_claim() {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    #[derive(Clone)]
+    struct IncompleteCanon {
+        encoded: u64,
+        hidden_semantic: Rc<Cell<bool>>,
+    }
+
+    impl Shrink for IncompleteCanon {
+        fn shrink_candidates(&self) -> Vec<Self> {
+            Vec::new()
+        }
+    }
+
+    impl Canon for IncompleteCanon {
+        const TYPE_ID: &'static str = "org.frankensim.fs-bisect.test.intentionally-incomplete";
+
+        fn canon(&self, out: &mut CanonWriter) -> Result<(), CompoundError> {
+            self.encoded.canon(out)
+        }
+    }
+
+    let hidden = Rc::new(Cell::new(true));
+    let family = compound(
+        FailureCase {
+            id: "incomplete-codec-no-claim".to_string(),
+            seed: 0,
+            input: IncompleteCanon {
+                encoded: 7,
+                hidden_semantic: Rc::clone(&hidden),
+            },
+            invariant: InvariantClass::Other("codec-trust-boundary".to_string()),
+            contract: "fs-bisect::Canon completeness".to_string(),
+            detail: "fixture intentionally omits predicate state".to_string(),
+        },
+        &|input| input.hidden_semantic.get(),
+        &|_| Vec::new(),
+        vec!["frankensim-j3q2".to_string()],
+        None,
+        0,
+    )
+    .expect("stable but incomplete codec is caller-owned")
+    .family;
+    hidden.set(false);
+    let replay = family
+        .replay(&|input| input.hidden_semantic.get())
+        .expect("omitted fields are outside the authentication claim");
+    assert_eq!(replay.now_passing, vec!["minimized"]);
 }
