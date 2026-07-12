@@ -1,20 +1,18 @@
 [package]
-name = "fs-ivl"
+name = "fs-propcheck"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Certified arithmetic: outward-rounded intervals, affine, Taylor models, exact predicates."
+description = "In-house property-based testing with integrated shrinking (Gauntlet G0): deterministic seeded generators, greedy minimization, replay seeds."
 
 [package.metadata.frankensim]
-layer = "L1"
+layer = "UTIL"
 
 [dependencies]
-fs-math = { path = "../fs-math" }
 
 [dev-dependencies]
-fs-propcheck = { path = "../fs-propcheck" }
 
 [lints]
 workspace = true

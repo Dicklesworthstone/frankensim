@@ -11,6 +11,7 @@ members = [
     "crates/fs-frame",
     "crates/fs-marquee",
     "crates/fs-selfknow-e2e",
+    "crates/fs-propcheck",
     "crates/fs-qty",
     "crates/fs-race",
     "crates/fs-obs",

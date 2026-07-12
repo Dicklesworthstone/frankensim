@@ -108,3 +108,65 @@ fn qty_005_parser_total_over_garbage() {
     }
     verdict("qty-005/no-panic", true, "2000 garbage inputs, no panic");
 }
+
+// ---------------------------------------------------------------------------
+// G0 property adoption (bead frankensim-4nh8): the dimension algebra laws,
+// generated + shrunk via fs-propcheck. The fixed cases above REMAIN as
+// regression pins; these properties cover the space between them and
+// deliver minimal counterexamples on failure.
+// ---------------------------------------------------------------------------
+
+/// Generate a small Dims vector (exponents in [-3, 3] — the physically
+/// meaningful range; overflow semantics are a separate documented bound).
+fn gen_dims(s: &mut fs_propcheck::Stream) -> Vec<i64> {
+    (0..5).map(|_| s.int_in(-3, 3)).collect()
+}
+
+fn to_dims(v: &[i64]) -> fs_qty::Dims {
+    let mut a = [0i8; 5];
+    for (slot, &x) in a.iter_mut().zip(v) {
+        *slot = x as i8;
+    }
+    fs_qty::Dims(a)
+}
+
+#[test]
+fn g0_dims_plus_commutes_and_minus_inverts() {
+    fs_propcheck::check(
+        "dims-plus-commutes",
+        0x9_71_0001,
+        400,
+        |s| (gen_dims(s), gen_dims(s)),
+        |(a, b)| {
+            let (da, db) = (to_dims(a), to_dims(b));
+            da.plus(db) == db.plus(da)
+        },
+    );
+    fs_propcheck::check(
+        "dims-minus-inverts-plus",
+        0x9_71_0002,
+        400,
+        |s| (gen_dims(s), gen_dims(s)),
+        |(a, b)| {
+            let (da, db) = (to_dims(a), to_dims(b));
+            da.plus(db).minus(db) == da
+        },
+    );
+    println!("{{\"suite\":\"fs-qty\",\"case\":\"g0-dims-laws\",\"verdict\":\"pass\",\"detail\":\"800 generated cases, shrink-armed\"}}");
+}
+
+#[test]
+fn g0_dims_times_distributes_over_plus() {
+    fs_propcheck::check(
+        "dims-times-distributes",
+        0x9_71_0003,
+        400,
+        |s| (gen_dims(s), gen_dims(s), s.int_in(-3, 3)),
+        |args| {
+            let ((a, b), n) = ((&args.0, &args.1), args.2 as i8);
+            let (da, db) = (to_dims(a), to_dims(b));
+            da.plus(db).times(n) == da.times(n).plus(db.times(n))
+        },
+    );
+    println!("{{\"suite\":\"fs-qty\",\"case\":\"g0-times-distributes\",\"verdict\":\"pass\",\"detail\":\"400 generated cases\"}}");
+}

@@ -183,3 +183,42 @@ fn golden_hash_of_interval_endpoints() {
          semantic justification (golden-evidence policy)"
     );
 }
+
+// ---------------------------------------------------------------------------
+// G0 property adoption (bead frankensim-4nh8): THE interval law —
+// containment under arithmetic — generated + shrunk via fs-propcheck.
+// The plan (sec 13.1 G0) names "interval containment under random
+// rewrites" explicitly; this covers add/mul composition over generated
+// endpoints including the signed-zero/negative corners the specials
+// generator draws by design. Fixed cases above remain as pins.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn g0_interval_arithmetic_contains_the_pointwise_result() {
+    fs_propcheck::check(
+        "interval-add-mul-containment",
+        0x1F_1234,
+        600,
+        |s| {
+            // Two intervals as (center, halfwidth>=0) plus interior picks.
+            (
+                (s.f64_in(-1e6, 1e6), s.f64_in(0.0, 1e3)),
+                (s.f64_in(-1e6, 1e6), s.f64_in(0.0, 1e3)),
+            )
+        },
+        |&((c1, w1), (c2, w2))| {
+            let a = fs_ivl::Interval::new(c1 - w1, c1 + w1);
+            let b = fs_ivl::Interval::new(c2 - w2, c2 + w2);
+            // Pointwise members: endpoints and centers are the adversarial
+            // picks (extremes of the exact image under monotone ops).
+            let xs = [c1 - w1, c1, c1 + w1];
+            let ys = [c2 - w2, c2, c2 + w2];
+            xs.iter().all(|&x| {
+                ys.iter().all(|&y| {
+                    (a + b).contains(x + y) && (a * b).contains(x * y)
+                })
+            })
+        },
+    );
+    println!("{{\"suite\":\"fs-ivl\",\"case\":\"g0-containment\",\"verdict\":\"pass\",\"detail\":\"600 generated interval pairs, add+mul, shrink-armed\"}}");
+}

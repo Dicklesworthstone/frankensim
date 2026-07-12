@@ -13,6 +13,7 @@ layer = "UTIL"
 [dependencies]
 
 [dev-dependencies]
+fs-propcheck = { path = "../fs-propcheck" }
 
 [lints]
 workspace = true
