@@ -456,9 +456,7 @@ fn poll_checkpoint<P: WorkPoll>(poll: &mut P) -> Result<(), PolledError<P::Cance
     poll.checkpoint().map_err(PolledError::Cancelled)
 }
 
-fn finish_unpolled<T>(
-    result: Result<T, PolledError<Infallible>>,
-) -> Result<T, SurrogateError> {
+fn finish_unpolled<T>(result: Result<T, PolledError<Infallible>>) -> Result<T, SurrogateError> {
     match result {
         Ok(value) => Ok(value),
         Err(PolledError::Numerical(error)) => Err(error),
@@ -2017,10 +2015,7 @@ impl RbCoveragePlan {
             }
         }
 
-        let strictest_tolerance = tolerances
-            .iter()
-            .copied()
-            .fold(f64::INFINITY, f64::min);
+        let strictest_tolerance = tolerances.iter().copied().fold(f64::INFINITY, f64::min);
         Ok(Self {
             family: ladder.family(),
             rb_dimensions: ladder.rb_levels().iter().map(RbLevel::dim).collect(),
@@ -2382,8 +2377,7 @@ impl<Caps> WorkPoll for CoverageWorkPoll<'_, Caps> {
     type Cancel = Cancelled;
 
     fn work(&mut self, units: u64) -> Result<(), Self::Cancel> {
-        self.progress.logical_work_units =
-            self.progress.logical_work_units.saturating_add(units);
+        self.progress.logical_work_units = self.progress.logical_work_units.saturating_add(units);
         self.work_since_checkpoint = self.work_since_checkpoint.saturating_add(units);
         if self.work_since_checkpoint >= RB_COVERAGE_CHECKPOINT_WORK_UNITS {
             self.work_since_checkpoint %= RB_COVERAGE_CHECKPOINT_WORK_UNITS;
@@ -2509,12 +2503,7 @@ fn conservative_coverage_memory_bytes(
     workers: usize,
 ) -> Result<usize, SurrogateError> {
     let truth_nodes = ladder.truth.n();
-    let largest_dimension = ladder
-        .rb_levels
-        .iter()
-        .map(RbLevel::dim)
-        .max()
-        .unwrap_or(0);
+    let largest_dimension = ladder.rb_levels.iter().map(RbLevel::dim).max().unwrap_or(0);
     let truth_scratch = checked_budget_product(
         "RB coverage live scratch memory",
         &[truth_nodes, 8, size_of::<f64>()],
@@ -2539,11 +2528,12 @@ fn conservative_coverage_memory_bytes(
             resource: "RB coverage live scratch memory",
         })?;
     let active_tiles = workers.max(1).min(plan.mu_bits.len());
-    let tile_scratch = per_tile.checked_mul(active_tiles).ok_or(
-        SurrogateError::BudgetArithmeticOverflow {
-            resource: "RB coverage live scratch memory",
-        },
-    )?;
+    let tile_scratch =
+        per_tile
+            .checked_mul(active_tiles)
+            .ok_or(SurrogateError::BudgetArithmeticOverflow {
+                resource: "RB coverage live scratch memory",
+            })?;
     let slots = checked_budget_product(
         "RB coverage live scratch memory",
         &[plan.mu_bits.len(), size_of::<Mutex<CoverageSlot>>()],
@@ -2597,8 +2587,8 @@ fn progress_receipt(
         covered_queries += result.covered_queries;
         rb_queries_in_prefix += result.progress.rungs_completed;
         truth_fallbacks_in_prefix += usize::from(result.progress.truth_fallback_completed);
-        logical_work_units_in_prefix = logical_work_units_in_prefix
-            .saturating_add(result.progress.logical_work_units);
+        logical_work_units_in_prefix =
+            logical_work_units_in_prefix.saturating_add(result.progress.logical_work_units);
     }
     let current_parameter = slots.get(completed_parameter_prefix).map(|slot| {
         slot.lock()
@@ -2676,14 +2666,8 @@ pub fn rb_coverage_scoped<Caps: Send + Sync + 'static>(
         gate,
         slots: &slots,
     };
-    let (run_result, report) = pool.run_scoped(
-        task_cx,
-        &kernel,
-        gate,
-        run,
-        tile_budget,
-        memory_lease,
-    );
+    let (run_result, report) =
+        pool.run_scoped(task_cx, &kernel, gate, run, tile_budget, memory_lease);
 
     for slot in &slots {
         let slot = slot
@@ -2884,7 +2868,10 @@ mod tests {
         let mut matrix = vec![vec![4.0, 1.0], vec![1.0, 3.0]];
         let mut rhs = vec![1.0, 2.0];
         solve_dense_polled(&mut matrix, &mut rhs, &mut poll).expect("recorded dense solve");
-        assert!(poll.calls > 512, "long loops must reach the shared poll seam");
+        assert!(
+            poll.calls > 512,
+            "long loops must reach the shared poll seam"
+        );
         assert!(
             poll.largest_work_step <= RB_COVERAGE_CHECKPOINT_WORK_UNITS,
             "one unobserved logical step exceeded the cancellation stride: {}",

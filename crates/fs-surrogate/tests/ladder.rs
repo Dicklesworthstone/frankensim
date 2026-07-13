@@ -440,7 +440,10 @@ fn la_004c_g4_cancellation_drains_retains_prefix_and_reuses_pool() {
         &plan,
     )
     .expect("pool remains reusable after cancellation storms");
-    assert!(matches!(healthy.outcome(), RbCoverageOutcome::Complete { .. }));
+    assert!(matches!(
+        healthy.outcome(),
+        RbCoverageOutcome::Complete { .. }
+    ));
     assert!(pool.arena_pool().stats().quiescent());
     verdict(
         "la-004c",

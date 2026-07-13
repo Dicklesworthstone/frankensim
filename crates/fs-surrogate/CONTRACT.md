@@ -7,7 +7,9 @@ validity bands — ML proposes, certified numerics disposes.
 
 Layer L4 (surrogate / ROM). The default core is dependency-free and pure Rust
 (an in-house symmetric eigensolver for the method of snapshots); the optional
-ladder feature depends on `fs-evidence` for color payloads.
+ladder feature depends downward on `fs-evidence`, `fs-exec`, `fs-alloc`, and
+asupersync for evidence, bounded tile execution, memory admission, and live
+task cancellation.
 
 ## Public types and semantics
 
@@ -38,8 +40,11 @@ ladder feature depends on `fs-evidence` for color payloads.
   `Ladder::at_level(k)?.query(μ, tol)` performs AUTOMATIC BOUNDED
   DESCENT: an RB/concept rung answers only when its estimator is within
   tolerance; otherwise the leak is recorded and the query descends.
-  `ladder::SurrogateError` names all ladder refusals. `rb_coverage` is
-  the bounded, fallible kill measurement.
+  `ladder::SurrogateError` names all ladder refusals. `RbCoveragePlan`
+  retains the exact ordered battery and ladder shape. `rb_coverage_scoped`
+  executes one logical parameter tile per μ and returns a complete Estimated
+  fraction or an incomplete no-claim plus deterministic prefix/progress
+  receipt. `rb_coverage` remains the smaller synchronous compatibility oracle.
 
 ## Invariants
 
@@ -74,6 +79,17 @@ ladder feature depends on `fs-evidence` for color payloads.
   product, and conservative aggregate work. Each parameter performs at most
   one descent (including at most one truth fallback), and the resulting RB
   estimators classify every requested tolerance without repeating solves.
+- Production coverage validates and retains exact IEEE-754 input bits, rung
+  dimensions, family, Cartesian count, and conservative work before execution.
+  A worst-case live-scratch charge is reserved on the caller's bounded
+  `OperationMemoryLease` before slots or workers are created. Results commit to
+  unique parameter slots only after their final checkpoint; final aggregation
+  is ascending by parameter index and ignores out-of-order completions beyond
+  the first gap.
+- Incomplete coverage cannot expose a fraction through its type. Its receipt
+  contains only the longest fully committed parameter prefix and the first
+  unfinished parameter's operational progress, together with an absorbing
+  `NumericalCertificate::no_claim()`.
 
 ## Error model
 
@@ -85,14 +101,28 @@ still panics on nonsensical inputs (empty residuals, `α ∉ (0,1)`).
 
 ## Determinism class
 
-Fully deterministic: the eigensolver, POD, band, and policy are pure functions
-of their inputs.
+Fully deterministic for synchronous work. A completed scoped coverage result is
+bit-identical across worker counts and steal schedules because each parameter
+has a unique slot and final integer aggregation is in parameter order. The
+semantic receipt excludes timing/steal data. A cancellation triggered at the
+same logical checkpoint replays the same retained prefix; wall-time-triggered
+cancellation may naturally observe a different prefix and remains no-claim.
 
 ## Cancellation behavior
 
-None (synchronous pure functions). In particular, the feature-gated coverage
-battery has checked admission but no `Cx` or bounded cancellation latency; it
-is not yet a production hot-kernel execution surface.
+The POD/conformal API and `rb_coverage` compatibility wrapper remain
+synchronous; `rb_coverage` has the explicit smaller
+`MAX_SYNCHRONOUS_COVERAGE_WORK_UNITS` cap and no interruption claim.
+
+`rb_coverage_scoped` requires a live asupersync `Cx`, `TilePool`, external
+`CancelGate`, declared `RunId`/per-tile `Budget`, and bounded operation memory
+lease. It polls both the tile gate and ambient task at every parameter/rung
+phase boundary and after at most 256 logical scalar updates inside allocation
+initialization, validation, assembly, Thomas solves, dense elimination,
+reconstruction, residual/Riesz work, and tolerance classification. A request
+raises the shared gate, all workers drain and join, scratch is released, and
+only then is an incomplete no-claim returned. A final ambient checkpoint occurs
+after drain and before a coverage fraction can be published.
 
 ## Unsafe boundary
 
@@ -101,8 +131,9 @@ None. `#![deny(unsafe_code)]` via the workspace lint.
 ## Feature flags
 
 - `abstraction-ladder` [F] (default OFF) — the estimated, leak-alarmed
-  abstraction ladder (knh1.4/y6yv, Proposal A; `dep:fs-evidence`); gates
-  the `ladder` integration target.
+  abstraction ladder (knh1.4/y6yv, Proposal A; `dep:fs-evidence`,
+  `dep:fs-exec`, `dep:fs-alloc`, `dep:asupersync`); gates the `ladder`
+  integration target.
 
 ## Conformance tests
 
@@ -117,7 +148,9 @@ elliptic fixture, bounded descent, Estimated-only payload authority,
 deterministic replay, structured hostile-input refusals, representable
 grid and family binding, requested/retained fidelity descent,
 lower-rung uncertainty inheritance, pre-training memory/work limits,
-and bounded coverage batteries.
+bounded coverage batteries, complete scoped replay across worker counts,
+pre-cancel and budget-exhaustion storms, deterministic retained prefixes,
+bounded observation latency, memory/arena quiescence, and successful pool reuse.
 
 ## No-claim boundaries
 
@@ -154,11 +187,18 @@ and bounded coverage batteries.
   `|concept − lower RB| + lower RB QoI estimator`, augmented by the same
   query-local quantity. Neither is an enclosure over the continuous range.
   The Estimated color is load-bearing.
-- Coverage is currently a synchronous feature-gated measurement helper. Its
-  checked work cap bounds admission, but it has no `Cx`, tile polling, or
-  cancellation/drain contract. Production-scale batteries remain out of claim
-  until that execution surface is added; the current implementation is for
-  bounded Gauntlet/activation fixtures.
+- The synchronous `rb_coverage` helper is only a small compatibility oracle and
+  makes no interruption claim. Production-scale authority requires
+  `rb_coverage_scoped` and its explicit execution/memory inputs.
+- Scoped coverage's static scratch reservation covers its bounded vector,
+  matrix, slot, and receipt payload plan plus executor-charged arena/root
+  metadata. Thread stacks, allocator bookkeeping, the immutable pre-existing
+  ladder, and OS scheduling latency remain outside the numerical claim. A
+  callback or dependency that ignores its supplied cancellation protocol would
+  likewise be outside claim; the current sealed arithmetic path does not do so.
+- A completed coverage fraction still classifies round-to-nearest f64 RB
+  estimators. It is `Estimated` with infinite dispersion, never a certificate
+  that the continuous model error lies below the requested tolerances.
 - The eventual certificate destination is an outward-rounded residual,
   Riesz solve, reduced solve, coercivity floor, and QoI enclosure whose
   complete arithmetic path is independently checkable. Only that path,
