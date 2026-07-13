@@ -595,6 +595,7 @@ fn frep_005_sphere_tracing_safety() {
 /// Rounded primitive arithmetic is enclosed, while generic normalization and
 /// nontrivial Rodrigues maps cannot mint an exact-distance theorem.
 #[test]
+#[allow(clippy::too_many_lines)] // One claim-separation regression per producer family.
 fn frep_005b_evaluation_enclosures_do_not_overpromote_geometry() {
     with_cx(|cx| {
         let mut sphere_builder = FrepBuilder::new();
@@ -666,15 +667,95 @@ fn frep_005b_evaluation_enclosures_do_not_overpromote_geometry() {
             .boolean(BoolOp::Union, BoolStyle::Hard, root, unused)
             .expect("unused boolean");
         let reachable = reachable_builder.finish(root).expect("reachable frep");
-        let reachable_ok = reachable.trace_step_claim() == TraceStepClaim::ExactDistance;
+        let unused_hard_ok = reachable.trace_step_claim() == TraceStepClaim::ExactDistance
+            && reachable.differentiability() == Differentiability::C1;
+
+        let mut hard_root_builder = FrepBuilder::new();
+        let left = hard_root_builder
+            .sphere(Point3::new(-0.25, 0.0, 0.0), 1.0)
+            .expect("hard left");
+        let right = hard_root_builder
+            .sphere(Point3::new(0.25, 0.0, 0.0), 1.0)
+            .expect("hard right");
+        let hard_root = hard_root_builder
+            .boolean(BoolOp::Union, BoolStyle::Hard, left, right)
+            .expect("reachable hard boolean");
+        let hard_root = hard_root_builder.finish(hard_root).expect("hard-root frep");
+        let reachable_hard_ok = hard_root.differentiability() == Differentiability::C0;
+
+        // Regression seed: a far, ulp-scale-thin box rotated by pi around a
+        // rounded diagonal axis. The represented field says `preimage` is
+        // inside, while a rounded +angle corner map used to miss it by one
+        // ulp. Support is now the certified preimage of the inverse map.
+        let mut support_builder = FrepBuilder::new();
+        let thin_box = support_builder
+            .box_prim(
+                Point3::new(
+                    -59_387_588.392_124_265,
+                    6_896_459.806_064_8,
+                    -80_159_548.321_525_37,
+                ),
+                Vec3::new(
+                    2.980_232_238_769_531_2e-8,
+                    1.490_116_119_384_765_6e-8,
+                    5.960_464_477_539_063e-8,
+                ),
+            )
+            .expect("thin far box");
+        let thin_box = support_builder
+            .rotate(thin_box, Vec3::new(1.0, 1.0, 0.0), core::f64::consts::PI)
+            .expect("rounded-axis rotation");
+        let thin_box = support_builder.finish(thin_box).expect("rotated thin box");
+        let preimage = Point3::new(
+            6_896_459.806_064_783,
+            -59_387_588.392_124_27,
+            80_159_548.321_525_37,
+        );
+        let thin_support = thin_box.support();
+        let support_ok = thin_box.value(preimage) < 0.0
+            && thin_support.contains(preimage)
+            && [
+                thin_support.min.x,
+                thin_support.min.y,
+                thin_support.min.z,
+                thin_support.max.x,
+                thin_support.max.y,
+                thin_support.max.z,
+            ]
+            .into_iter()
+            .all(f64::is_finite);
+
+        let mut wide_trig_builder = FrepBuilder::new();
+        let wide_trig = wide_trig_builder
+            .sphere(Point3::new(0.0, 0.0, 0.0), 1.0)
+            .expect("wide-trig sphere");
+        let wide_trig = wide_trig_builder
+            .rotate(wide_trig, Vec3::new(1.0, 1.0, 0.0), 2_000_000.0)
+            .expect("wide-trig rotation");
+        let wide_trig = wide_trig_builder.finish(wide_trig).expect("wide-trig frep");
+        let fallback = wide_trig.support();
+        let singular_fallback_ok = [fallback.min.x, fallback.min.y, fallback.min.z]
+            .into_iter()
+            .all(|bound| bound.is_infinite() && bound.is_sign_negative())
+            && [fallback.max.x, fallback.max.y, fallback.max.z]
+                .into_iter()
+                .all(|bound| bound.is_infinite() && bound.is_sign_positive());
 
         verdict(
             "frep-005b",
-            sphere_ok && plane_ok && axis_ok && rotation_ok && reachable_ok,
+            sphere_ok
+                && plane_ok
+                && axis_ok
+                && rotation_ok
+                && unused_hard_ok
+                && reachable_hard_ok
+                && support_ok
+                && singular_fallback_ok,
             "the seeded rounded sphere contains the independent residual; generic \
              half-spaces and nontrivial rotations are Lipschitz-implicit with widened \
-             bounds; coordinate planes and exact root-reachable chains retain \
-             ExactDistance",
+             bounds; differentiability follows only the root-reachable DAG; rotated \
+             support encloses the certified inverse-map preimage and fails closed \
+             when matrix regularity is uncertified",
         );
     });
 }

@@ -14,15 +14,20 @@ about THAT region — no silent promotion to "exact distance".
 
 - `FrepBuilder` → `Frep`: arena-style DAG construction. Node ids are a
   topological order; SHARING a subexpression is reusing its id.
-- Primitives (L = 1): exact `sphere`, `half_space`, `box_prim`, and
-  `cylinder` (infinite, +z); `torus` (+z axis) is exact for ring geometry
+- Primitives: exact unit-Lipschitz `sphere`, `box_prim`, and `cylinder`
+  (infinite, +z); coordinate-axis `half_space` is exact, while a generic
+  rounded normalized half-space uses a certified norm upper bound and an
+  implicit-field claim. `torus` (+z axis) is exact for ring geometry
   (`major > minor`) and otherwise retains only its exact sign/zero set.
   Unbounded supports are
   reported as ±`UNBOUNDED_HALF` boxes; intersections shrink them back.
 - Transforms: `translate`, `rotate` (axis-angle Rodrigues; GA motors
   join with fs-ga), `scale` (uniform, SDF-preserving `s·f(p/s)`),
   `offset` (exact sign/zero set; magnitude remains conservative until a reach
-  certificate proves exact-distance preservation).
+  certificate proves exact-distance preservation). Rotation support is the
+  interval-certified preimage of the same inverse Rodrigues map used for
+  evaluation; if its determinant interval includes zero, support fails closed
+  to the whole-space AABB instead of assuming rounded orthogonality.
 - `boolean(op, style, a, b)` with `BoolOp::{Union, Intersect,
   Difference}` × `BoolStyle::{Hard, Blend{radius}}`. Every op routes
   through ONE smooth/hard min via sign flips (difference is
@@ -41,8 +46,9 @@ about THAT region — no silent promotion to "exact distance".
     multiply by a rigorous operator-norm upper bound; scale/offset preserve;
     Booleans take `max(La, Lb)` (blend weights are convex). Valid EVERYWHERE.
   - `interval(box)` — outward-rounded distance/field ranges; rotated inputs
-    use a deliberately wide interval evaluation of Rodrigues without assuming
-    a platform-libm ULP budget; Booleans use monotonicity of min/smin.
+    evaluate Rodrigues with fs-ivl's deterministic fs-math trig budgets (and
+    fail closed to `[-1,1]` outside the certified reduction domain); Booleans
+    use monotonicity of min/smin.
 - Design levers: `params()` enumerates every numeric in the DAG as
   `(ParamId, name, value)`; `set_param` validates like the builder;
   `d_value_d_param` is the Jacobian action (symmetric FD v1 — see
@@ -59,8 +65,9 @@ about THAT region — no silent promotion to "exact distance".
   never back a certified step. The implicit value remains a conservative bound
   with exact sign and `|f(p)|/L ≤ dist(p, ∂Ω)`. `LipschitzImplicit` certifies safe
   steps and the zero set, not a geometric-distance upper bound.
-  `differentiability()`
-  reports C1 only for kink-free DAGs (no hard Booleans, no box edges).
+  `differentiability()` reports C1 only when the root-reachable subgraph is
+  kink-free (no reachable hard Booleans or box edges); abandoned builder nodes
+  cannot downgrade the declared root.
 
 ## Invariants
 
@@ -80,7 +87,10 @@ about THAT region — no silent promotion to "exact distance".
    tunnels: zero safety violations against a dense-scan + bisection
    oracle over random DAGs and rays; certificate kinds and C-class
    report as declared (frep-005).
-6. Metamorphic algebra: hard idempotence and commutativity BITWISE;
+6. Evaluation enclosures do not promote rounded geometry; differentiability
+   follows only root-reachable nodes; and interval-preimage rotation support
+   contains a far, thin rounded-axis regression seed (frep-005b).
+7. Metamorphic algebra: hard idempotence and commutativity BITWISE;
    blend self-union equals dilation by exactly r/4 BITWISE; rotations
    round-trip and dyadic translations are equivariant to 1e-12; the
    radius/offset levers differentiate exactly (−1), and the
@@ -97,11 +107,11 @@ says what to fix. Evaluation itself is total: honest gaps surface as
 
 ## Determinism class
 
-Fully deterministic: plain `f64` expression evaluation, no
-parallelism, no iteration over unordered containers, no time or
-randomness. Identical inputs give bitwise-identical values, gradients,
-intervals, and supports on a given target (frep-004's bitwise law is
-the regression trip-wire).
+Fully deterministic: plain `f64` expression evaluation plus fs-math's strict
+trigonometric functions, no parallelism, no iteration over unordered
+containers, no time or randomness. Identical inputs give bitwise-identical
+values, gradients, intervals, and supports on a given target (frep-004's
+bitwise law is the regression trip-wire).
 
 ## Cancellation behavior
 
@@ -132,9 +142,11 @@ reimplementation must pass the suite unchanged.
   `|f|/L` termination is a normalized-residual hit, not a certified Euclidean
   distance-to-boundary enclosure.
 - The local interval kit rounds every arithmetic endpoint outward. Rotation
-  currently uses `sin,cos ∈ [-1,1]` instead of a tight deterministic trig
-  enclosure; this is rigorous but can stall certified tracing of rotated DAGs.
-  Tight fs-math/fs-ivl trig bounds are the progress-preserving successor.
+  uses fs-ivl's deterministic trig enclosure; angles outside its certified
+  reduction domain deliberately widen to `sin,cos ∈ [-1,1]` and may stall
+  rather than overstate progress. Rotation support likewise inverts the
+  interval inverse-map matrix only when its determinant excludes zero;
+  otherwise it deliberately returns an infinite AABB.
 - `d_value_d_param` is symmetric finite difference; exact parameter
   adjoints (chain rule through the DAG) join with fs-xform.
 - Revolved/extruded fs-cheb profiles ("revolve THIS function") join

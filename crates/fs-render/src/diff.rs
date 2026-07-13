@@ -495,7 +495,7 @@ fn trace_hit<T: BackendHitScalar>(
     }
     if matches!(
         audit.termination,
-        TraceTermination::Hit | TraceTermination::Miss
+        TraceTermination::Hit | TraceTermination::ResidualLimit | TraceTermination::Miss
     ) && !audit.certified
     {
         return Err(RenderError::UncertifiedTrace);

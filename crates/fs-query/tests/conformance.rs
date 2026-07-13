@@ -8,9 +8,10 @@
 //! carry seeds.
 
 use asupersync::types::Budget;
+use fs_evidence::NumericalCertificate;
 use fs_exec::{CancelGate, Cx, ExecMode, StreamKey};
 use fs_geom::fixtures::SphereChart;
-use fs_geom::{Chart, Point3, Vec3};
+use fs_geom::{Aabb, Chart, ChartSample, Point3, TraceStepClaim, Vec3};
 use fs_query::{
     CurvatureClass, OffsetChart, QueryError, closest_point, curvature, medial_poles, min_thickness,
     minkowski_ball, raycast, separation, thickness_at,
@@ -183,10 +184,14 @@ fn gq_002_raycast_safety() {
         // Tangent rays: aimed exactly at radius 1 (grazing) and 1.05
         // (clean miss): no tunneling, misses classified.
         let graze_o = Point3::new(-3.0, 1.0, 0.0);
-        let graze = raycast(&frep, graze_o, Vec3::new(1.0, 0.0, 0.0), 10.0, cx).expect("graze");
+        let graze = raycast(&frep, graze_o, Vec3::new(1.0, 0.0, 0.0), 10.0, cx);
         let graze_ok = match graze {
-            Some(h) => (h.point.delta_from(Point3::new(0.0, 0.0, 0.0)).norm() - 1.0).abs() < 1e-3,
-            None => true, // grazing may legitimately exhaust its budget
+            Ok(Some(h)) => {
+                (h.point.delta_from(Point3::new(0.0, 0.0, 0.0)).norm() - 1.0).abs() < 1e-3
+            }
+            Err(QueryError::UnresolvedTrace { .. }) => true,
+            Ok(None) => false,
+            Err(error) => panic!("unexpected grazing-ray failure: {error}"),
         };
         let miss = raycast(
             &frep,
@@ -220,7 +225,12 @@ fn gq_002_raycast_safety() {
             let dir = target.delta_from(o);
             let dn = dir.norm();
             let d = dir.scale(1.0 / dn);
-            let hit = raycast(&csg, o, d, 6.0, cx).expect("cast");
+            let (hit, clean_miss) = match raycast(&csg, o, d, 6.0, cx) {
+                Ok(Some(hit)) => (Some(hit), false),
+                Ok(None) => (None, true),
+                Err(QueryError::UnresolvedTrace { .. }) => (None, false),
+                Err(error) => panic!("unexpected CSG raycast failure: {error}"),
+            };
             // Dense oracle: first sign change.
             let mut oracle = None;
             let mut prev = csg.value(o);
@@ -236,8 +246,11 @@ fn gq_002_raycast_safety() {
             if let (Some(t_true), Some(h)) = (oracle, hit) {
                 safety &= h.t <= t_true + 1e-3;
             }
-            // Oracle-hit + tracer-miss = grazing budget exhaustion:
-            // incomplete, not unsafe. Oracle-miss cases carry no claim.
+            if oracle.is_some() && clean_miss {
+                safety = false;
+            }
+            // Oracle-hit + explicit UnresolvedTrace is incomplete, not unsafe;
+            // an oracle hit plus a clean certified miss is a failure.
         }
         verdict(
             "gq-002",
@@ -250,12 +263,269 @@ fn gq_002_raycast_safety() {
     });
 }
 
+#[derive(Debug, Clone, Copy)]
+enum EndpointFailure {
+    MissingLipschitz,
+    UncertifiedValue,
+    ZeroStraddlingValue,
+}
+
+struct EndpointFailureChart {
+    failure: EndpointFailure,
+}
+
+impl Chart for EndpointFailureChart {
+    fn eval(&self, x: Point3, _cx: &Cx<'_>) -> ChartSample {
+        let at_endpoint = x.x >= 0.5;
+        ChartSample {
+            signed_distance: if at_endpoint
+                && matches!(self.failure, EndpointFailure::ZeroStraddlingValue)
+            {
+                1e-8
+            } else {
+                1.0
+            },
+            gradient: Some(Vec3::new(1.0, 0.0, 0.0)),
+            lipschitz: if at_endpoint && matches!(self.failure, EndpointFailure::MissingLipschitz) {
+                None
+            } else {
+                Some(1.0)
+            },
+            error: NumericalCertificate::estimate(1.0, 1.0),
+        }
+    }
+
+    fn support(&self) -> Aabb {
+        Aabb::new(Point3::new(-2.0, -2.0, -2.0), Point3::new(2.0, 2.0, 2.0))
+    }
+
+    fn trace_step_claim(&self) -> TraceStepClaim {
+        TraceStepClaim::LipschitzImplicit
+    }
+
+    fn trace_value_enclosure(
+        &self,
+        x: Point3,
+        _sample: &ChartSample,
+        _cx: &Cx<'_>,
+    ) -> NumericalCertificate {
+        if x.x >= 0.5 && matches!(self.failure, EndpointFailure::UncertifiedValue) {
+            NumericalCertificate::estimate(1.0, 1.0)
+        } else if x.x >= 0.5 && matches!(self.failure, EndpointFailure::ZeroStraddlingValue) {
+            NumericalCertificate::enclosure(-1e-8, 1e-8)
+        } else {
+            NumericalCertificate::exact(1.0)
+        }
+    }
+
+    fn name(&self) -> &'static str {
+        "test/endpoint-failure"
+    }
+}
+
+/// gq-002c — the generic tracer validates every point, including the caller's
+/// bounded endpoint. Missing local evidence and an Estimate cannot be silently
+/// inherited from the origin or reported as a clean miss.
+#[test]
+fn gq_002c_raycast_validates_each_sample_and_tmax() {
+    with_cx(|cx| {
+        let cast = |failure| {
+            raycast(
+                &EndpointFailureChart { failure },
+                Point3::new(0.0, 0.0, 0.0),
+                Vec3::new(1.0, 0.0, 0.0),
+                0.5,
+                cx,
+            )
+        };
+        let missing = cast(EndpointFailure::MissingLipschitz);
+        let uncertified = cast(EndpointFailure::UncertifiedValue);
+        let straddling = cast(EndpointFailure::ZeroStraddlingValue);
+        let subnormal_direction = raycast(
+            &EndpointFailureChart {
+                failure: EndpointFailure::UncertifiedValue,
+            },
+            Point3::new(0.0, 0.0, 0.0),
+            Vec3::new(f64::from_bits(1), 0.0, 0.0),
+            0.5,
+            cx,
+        );
+        verdict(
+            "gq-002c",
+            matches!(missing, Err(QueryError::NoLipschitz))
+                && matches!(uncertified, Err(QueryError::InvalidTraceSample { .. }))
+                && matches!(straddling, Err(QueryError::UnresolvedTrace { .. }))
+                && matches!(
+                    subnormal_direction,
+                    Err(QueryError::InvalidTraceSample { .. })
+                ),
+            "raycast revalidates the local Lipschitz bound and Exact/Enclosure trace \
+             evidence at tmax; a zero-straddling endpoint remains unresolved, and finite \
+             nonzero subnormal directions normalize without overflow",
+        );
+    });
+}
+
+#[derive(Debug, Clone, Copy)]
+enum CancelDuring {
+    Eval,
+    TraceEnclosure,
+}
+
+struct CancellingTraceChart<'a> {
+    gate: &'a CancelGate,
+    during: CancelDuring,
+}
+
+impl Chart for CancellingTraceChart<'_> {
+    fn eval(&self, _x: Point3, _cx: &Cx<'_>) -> ChartSample {
+        if matches!(self.during, CancelDuring::Eval) {
+            self.gate.request();
+        }
+        ChartSample {
+            signed_distance: 0.0,
+            gradient: Some(Vec3::new(1.0, 0.0, 0.0)),
+            lipschitz: Some(1.0),
+            error: NumericalCertificate::exact(0.0),
+        }
+    }
+
+    fn support(&self) -> Aabb {
+        Aabb::new(Point3::new(-1.0, -1.0, -1.0), Point3::new(1.0, 1.0, 1.0))
+    }
+
+    fn trace_step_claim(&self) -> TraceStepClaim {
+        TraceStepClaim::ExactDistance
+    }
+
+    fn trace_value_enclosure(
+        &self,
+        _x: Point3,
+        _sample: &ChartSample,
+        _cx: &Cx<'_>,
+    ) -> NumericalCertificate {
+        if matches!(self.during, CancelDuring::TraceEnclosure) {
+            self.gate.request();
+        }
+        NumericalCertificate::exact(0.0)
+    }
+
+    fn name(&self) -> &'static str {
+        "test/cancelling-trace"
+    }
+}
+
+/// gq-002d — cancellation requested inside a chart producer wins over that
+/// same call's otherwise-valid hit evidence.
+#[test]
+fn gq_002d_raycast_rechecks_cancellation_after_chart_calls() {
+    let run = |during| {
+        let gate = CancelGate::new();
+        let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+        pool.scope(|arena| {
+            let cx = Cx::new(
+                &gate,
+                arena,
+                StreamKey {
+                    seed: 0x9E4,
+                    kernel_id: 2,
+                    tile: 0,
+                    iteration: 0,
+                },
+                Budget::INFINITE,
+                ExecMode::Deterministic,
+            );
+            raycast(
+                &CancellingTraceChart {
+                    gate: &gate,
+                    during,
+                },
+                Point3::new(0.0, 0.0, 0.0),
+                Vec3::new(1.0, 0.0, 0.0),
+                1.0,
+                &cx,
+            )
+        })
+    };
+    let after_eval = run(CancelDuring::Eval);
+    let after_trace = run(CancelDuring::TraceEnclosure);
+    verdict(
+        "gq-002d",
+        matches!(after_eval, Err(QueryError::Cancelled))
+            && matches!(after_trace, Err(QueryError::Cancelled)),
+        "cancellation requested during eval or trace_value_enclosure is observed before \
+         either producer can authorize a hit",
+    );
+}
+
+struct LooseLipschitzChart;
+
+impl Chart for LooseLipschitzChart {
+    fn eval(&self, x: Point3, _cx: &Cx<'_>) -> ChartSample {
+        let value = 1e-12 * (x.x - 1.0);
+        ChartSample {
+            signed_distance: value,
+            gradient: Some(Vec3::new(1e-12, 0.0, 0.0)),
+            // Valid but deliberately loose: the true field Lipschitz constant
+            // is 1e-12, so 1.0 remains an upper bound.
+            lipschitz: Some(1.0),
+            error: NumericalCertificate::estimate(value, value),
+        }
+    }
+
+    fn support(&self) -> Aabb {
+        Aabb::new(Point3::new(-2.0, -1.0, -1.0), Point3::new(2.0, 1.0, 1.0))
+    }
+
+    fn trace_step_claim(&self) -> TraceStepClaim {
+        TraceStepClaim::LipschitzImplicit
+    }
+
+    fn trace_value_enclosure(
+        &self,
+        _x: Point3,
+        sample: &ChartSample,
+        _cx: &Cx<'_>,
+    ) -> NumericalCertificate {
+        NumericalCertificate::enclosure(
+            sample.signed_distance.next_down(),
+            sample.signed_distance.next_up(),
+        )
+    }
+
+    fn name(&self) -> &'static str {
+        "test/loose-lipschitz"
+    }
+}
+
+/// gq-002e — `|f|/L` is a safe-step lower bound, not a proximity upper
+/// bound. A loose valid L must not turn a point one world unit from the zero
+/// set into an immediate geometric hit.
+#[test]
+fn gq_002e_lipschitz_implicit_residual_cannot_authorize_hit() {
+    with_cx(|cx| {
+        let result = raycast(
+            &LooseLipschitzChart,
+            Point3::new(0.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            1.0,
+            cx,
+        );
+        verdict(
+            "gq-002e",
+            matches!(result, Err(QueryError::UnresolvedTrace { .. })),
+            "a valid loose Lipschitz upper bound supports conservative marching but \
+             cannot promote a 1e-12 normalized residual one unit from zero into RayHit",
+        );
+    });
+}
+
 /// gq-002b — raycast fails CLOSED on a chart that reports a Lipschitz value but
 /// makes no tunneling-safe trace claim. Regression: raycast admitted any
 /// `Some(lipschitz)` chart and stepped by φ/L, so an enclosure/heuristic chart
 /// (dense SDF, mesh — `Some(lipschitz)` but `NoClaim`) whose reported distance
 /// overshoots the true one would tunnel through the surface. Exact and
-/// Lipschitz-implicit charts still trace (gq-002).
+/// Lipschitz-implicit charts still march conservatively (gq-002/e).
 #[test]
 fn gq_002b_raycast_refuses_no_claim_charts() {
     with_cx(|cx| {
@@ -289,7 +559,7 @@ fn gq_002b_raycast_refuses_no_claim_charts() {
             "gq-002b",
             matches!(r, Err(QueryError::NoTraceClaim)),
             "raycast fails closed (NoTraceClaim) on a Some(lipschitz)+NoClaim chart \
-             instead of tunneling; exact/Lipschitz-implicit charts still trace",
+             instead of tunneling; typed charts retain their certified march path",
         );
     });
 }
@@ -324,8 +594,9 @@ fn gq_003_offset_minkowski() {
                     == mink.eval(p, cx).signed_distance.to_bits();
             }
         }
-        // Offset charts remain queryable: closest point on the grown
-        // sphere lands at radius 1.3.
+        // Offset charts retain differential queries: closest point on the
+        // grown sphere lands at radius 1.3. Generic raycast remains an honest
+        // NoClaim without a reach/proximity theorem for the offset level set.
         let grown = OffsetChart::new(&exact, 0.3);
         let cp = closest_point(&grown, Point3::new(2.0, 0.5, -0.3), cx).expect("cp");
         let on_grown = (cp.point.delta_from(Point3::new(0.0, 0.0, 0.0)).norm() - 1.3).abs() < 1e-9;
@@ -334,7 +605,7 @@ fn gq_003_offset_minkowski() {
             ok && on_grown,
             "offset spheres are exactly spheres of the summed radius across chart \
              types, erosion shrinks exactly, minkowski_ball is BITWISE the offset \
-             chart, and offset charts stay fully queryable; \
+             chart, and offset charts retain closest-point queries; \
              seed 0x1001_2026_0707_0013",
         );
     });

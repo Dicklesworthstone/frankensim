@@ -17,10 +17,14 @@ answers to the MULTI-CHART AGREEMENT discipline (same abstract region
   assumed. Charts that honestly decline gradients (mesh charts near
   edges) fall back to a central FD on the signed distance — usable,
   with the residual still carrying the honesty.
-- `raycast`: conservative sphere tracing on the chart's certified
-  Lipschitz bound (`|φ| ≤ dist` makes stepping by `φ/L` safe); clean
-  misses are `None`; grazing rays may exhaust the step budget while
-  approaching — incomplete, never unsafe.
+- `raycast`: conservative sphere tracing from each sample's rigorous
+  trace-value enclosure and certified local Lipschitz bound. The endpoint
+  actually produced by floating-point ray evaluation must remain inside the
+  certified safe ball. Clean misses are `None` only after the caller's `tmax`
+  endpoint is classified; grazing or rounding stalls return an explicit
+  `UnresolvedTrace` error. A Lipschitz-implicit chart's `|f|/L` certifies only
+  the step radius; without separate proximity evidence, only a rigorous exact
+  zero can authorize `RayHit` — incomplete, never unsafe.
 - `OffsetChart` / `minkowski_ball`: dilation/erosion as a chart
   wrapper (`φ − r`); the ball case of the Minkowski sum IS the offset
   (bitwise), which is the fillet/clearance workhorse.
@@ -52,11 +56,17 @@ answers to the MULTI-CHART AGREEMENT discipline (same abstract region
    tiled at its declared bound, mesh at faceting scale), residuals
    are honest, and answers are translation-equivariant (gq-001).
 2. Raycasts match analytic hits across chart types; tangent rays
-   never tunnel (grazes land on the surface or approach); the CSG
-   tracer never claims a hit past a dense oracle (gq-002).
+   never tunnel (grazes land on the surface or report unresolved); the CSG
+   tracer never claims a hit past a dense oracle, and every sample including
+   `tmax` revalidates its local Lipschitz and rigorous trace evidence, and
+   cancellation requested inside either chart producer wins before hit/miss
+   authority, and a loose valid implicit-field `L` cannot promote a small
+   normalized residual into a geometric hit (gq-002..gq-002e).
 3. Offsets of spheres are exactly spheres of the summed radius;
    erosion shrinks exactly; `minkowski_ball` is BITWISE the offset;
-   offset charts remain fully queryable (gq-003).
+   offset charts retain closest-point and other differential queries; generic
+   raycast remains `NoClaim` until a reach/proximity theorem is supplied
+   (gq-003).
 4. Separation brackets hold across shrinking gaps (truth in
    `[lower_bound, observed]`) and the clearance field dominates the
    separation everywhere (gq-004).
@@ -72,9 +82,10 @@ answers to the MULTI-CHART AGREEMENT discipline (same abstract region
 ## Error model
 
 `QueryError` teaching errors: `NoGradient` (with the location),
-`NoLipschitz`, `NotOnBoundary` (with the sd found and the advice to
-project first), `NoOppositeWall`, `Cancelled`, `Mesh` (fs-mesh
-refusals carried through). Honest gaps refuse; nothing guesses.
+`NoLipschitz`, `NoTraceClaim`, `InvalidRay`, `InvalidTraceSample` (with the location),
+`UnresolvedTrace` (with the location and sample count), `NotOnBoundary` (with
+the sd found and the advice to project first), `NoOppositeWall`, `Cancelled`,
+`Mesh` (fs-mesh refusals carried through). Honest gaps refuse; nothing guesses.
 
 ## Determinism class
 
@@ -83,9 +94,10 @@ no randomness. Identical inputs give identical answers bitwise.
 
 ## Cancellation behavior
 
-`separation` polls per grid slab; `min_thickness` polls every 64
-samples; both return `Cancelled` teaching errors. Point queries are
-O(iterations) and non-blocking.
+`raycast` polls before each sample and again after `eval` and
+`trace_value_enclosure`; `separation` polls per grid slab; `min_thickness`
+polls every 64 samples. All return `Cancelled` teaching errors. Other point
+queries are O(iterations) and non-blocking.
 
 ## Unsafe boundary
 
@@ -97,7 +109,7 @@ None.
 
 ## Conformance tests
 
-`tests/conformance.rs`, cases gq-001..gq-006 (+ refusal spot checks)
+`tests/conformance.rs`, cases gq-001..gq-006 (+ typed trace refusal checks)
 — JSON-line verdicts, seeded LCG randomness, fs-obs events for the
 thickness oracle and curvature convergence tables. Any
 reimplementation must pass the suite unchanged.

@@ -25,12 +25,14 @@ Depends on fs-exec (Cx), fs-evidence, fs-ivl, fs-alloc, fs-obs.
   outward enclosure of each rounded evaluation. A stepper uses the enclosure
   endpoint closest to zero for its no-tunneling radius and the farthest endpoint
   for its hit residual. `LipschitzImplicit` states that the field has the
-  represented region's exact sign and zero set and that each sample's bound is
-  valid over the entire closed `|f|/L` step ball. Its separate
+  represented region's exact sign and zero set, is continuous on every finite
+  line segment, and that each sample's bound is valid over the entire closed
+  `|f|/L` step ball. Its separate
   `trace_value_enclosure` rigorously encloses `f(p)`; `ChartSample.error` remains
   relative to abstract Euclidean signed distance and may honestly be only an
   `Estimate`. The resulting radius is safe but not a geometric-distance upper
-  bound.
+  bound. Finite-segment continuity does let consumers use rigorously opposite
+  endpoint signs as existence evidence for a zero inside a short segment.
 - `Chart` (object-safe): `eval(x, &Cx)`, `support()`, `trace_step_claim()`,
   `trace_value_enclosure(x, sample, &Cx)`, `topology_hint()`, `name()`,
   `differentiability()`, provided `inside()`.
@@ -259,7 +261,9 @@ limit+1 refusals.
   SOURCE's certified Lipschitz constant being truthful.
 - `TraceStepClaim::LipschitzImplicit` certifies no-tunneling step radii, not
   Euclidean proximity from a small normalized residual. Consumers must retain
-  that distinction in hit/error language.
+  that distinction in hit/error language. A short opposite-sign bracket can
+  separately prove boundary existence; same-sign or indeterminate endpoint
+  evidence, including a generic tangency, cannot.
 - `ConverterSpec::certified` is a declaration, not an authenticated admission
   receipt. Runtime certified runners must return `Certified<f64>` local-error
   evidence and fs-ir rejects routes containing an estimated declaration, but a

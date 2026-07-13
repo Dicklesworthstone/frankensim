@@ -5,11 +5,12 @@
 //! not rely on a rounded corner AABB or a platform-libm ULP assumption.
 //! Booleans use monotonicity: `min`/`smin` are nondecreasing in both
 //! arguments, so endpoint evaluation is an inclusion. The minimal local
-//! interval kit rounds every arithmetic endpoint outward; unification with
-//! fs-ivl's richer types remains a contract no-claim.
+//! interval kit rounds every arithmetic endpoint outward; rotation trig reuses
+//! fs-ivl's deterministic fs-math ULP budgets.
 
 use crate::{BoolStyle, Frep, Node, NodeId, bool_signs};
-use fs_geom::{Aabb, Point3};
+use fs_geom::{Aabb, Point3, Vec3};
+use fs_ivl::Interval as CertifiedInterval;
 
 /// Closed interval `[lo, hi]`.
 #[derive(Debug, Clone, Copy)]
@@ -95,6 +96,32 @@ impl Iv {
         Iv::outward(self.lo / divisor, self.hi / divisor)
     }
 
+    fn contains_zero(self) -> bool {
+        self.lo <= 0.0 && 0.0 <= self.hi
+    }
+
+    fn div(self, other: Iv) -> Iv {
+        if other.contains_zero() {
+            return Iv::WHOLE;
+        }
+        let quotients = [
+            self.lo / other.lo,
+            self.lo / other.hi,
+            self.hi / other.lo,
+            self.hi / other.hi,
+        ];
+        if quotients.iter().any(|value| value.is_nan()) {
+            return Iv::WHOLE;
+        }
+        let lo = quotients.iter().copied().fold(f64::INFINITY, f64::min);
+        let hi = quotients.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        Iv::outward(lo, hi)
+    }
+
+    fn is_finite(self) -> bool {
+        self.lo.is_finite() && self.hi.is_finite()
+    }
+
     fn abs(self) -> Iv {
         if self.lo >= 0.0 {
             self
@@ -176,6 +203,138 @@ fn dist_iv(b: &Aabb, c: Point3) -> Iv {
     x.sq().add(y.sq()).add(z.sq()).sqrt()
 }
 
+fn rotation_trig(angle: f64) -> (Iv, Iv) {
+    if angle.is_finite() {
+        let angle = CertifiedInterval::point(angle);
+        let sine = angle.sin();
+        let cosine = angle.cos();
+        (
+            Iv::new(sine.lo(), sine.hi()),
+            Iv::new(cosine.lo(), cosine.hi()),
+        )
+    } else {
+        (Iv::new(-1.0, 1.0), Iv::new(-1.0, 1.0))
+    }
+}
+
+/// Interval matrix for the real Rodrigues map represented by `axis, angle`.
+/// The coefficient intervals share the same fs-ivl trig enclosure as field
+/// evaluation; treating their dependencies independently only widens results.
+fn rodrigues_matrix(axis: Vec3, angle: f64) -> [[Iv; 3]; 3] {
+    let (sine, cosine) = rotation_trig(angle);
+    let one_minus_cosine = Iv::point(1.0).sub(cosine);
+    let zero = Iv::point(0.0);
+    let a = [Iv::point(axis.x), Iv::point(axis.y), Iv::point(axis.z)];
+    let cross = [
+        [zero, a[2].neg(), a[1]],
+        [a[2], zero, a[0].neg()],
+        [a[1].neg(), a[0], zero],
+    ];
+    core::array::from_fn(|row| {
+        core::array::from_fn(|column| {
+            let diagonal = if row == column { cosine } else { zero };
+            diagonal
+                .add(cross[row][column].mul(sine))
+                .add(a[row].mul(a[column]).mul(one_minus_cosine))
+        })
+    })
+}
+
+fn inverse_3x3(matrix: [[Iv; 3]; 3]) -> Option<[[Iv; 3]; 3]> {
+    let cofactor_00 = matrix[1][1]
+        .mul(matrix[2][2])
+        .sub(matrix[1][2].mul(matrix[2][1]));
+    let cofactor_01 = matrix[1][2]
+        .mul(matrix[2][0])
+        .sub(matrix[1][0].mul(matrix[2][2]));
+    let cofactor_02 = matrix[1][0]
+        .mul(matrix[2][1])
+        .sub(matrix[1][1].mul(matrix[2][0]));
+    let determinant = matrix[0][0]
+        .mul(cofactor_00)
+        .add(matrix[0][1].mul(cofactor_01))
+        .add(matrix[0][2].mul(cofactor_02));
+    if determinant.contains_zero() || !determinant.is_finite() {
+        return None;
+    }
+
+    let adjugate = [
+        [
+            cofactor_00,
+            matrix[0][2]
+                .mul(matrix[2][1])
+                .sub(matrix[0][1].mul(matrix[2][2])),
+            matrix[0][1]
+                .mul(matrix[1][2])
+                .sub(matrix[0][2].mul(matrix[1][1])),
+        ],
+        [
+            cofactor_01,
+            matrix[0][0]
+                .mul(matrix[2][2])
+                .sub(matrix[0][2].mul(matrix[2][0])),
+            matrix[0][2]
+                .mul(matrix[1][0])
+                .sub(matrix[0][0].mul(matrix[1][2])),
+        ],
+        [
+            cofactor_02,
+            matrix[0][1]
+                .mul(matrix[2][0])
+                .sub(matrix[0][0].mul(matrix[2][1])),
+            matrix[0][0]
+                .mul(matrix[1][1])
+                .sub(matrix[0][1].mul(matrix[1][0])),
+        ],
+    ];
+    let inverse = adjugate.map(|row| row.map(|entry| entry.div(determinant)));
+    inverse
+        .iter()
+        .flatten()
+        .all(|entry| entry.is_finite())
+        .then_some(inverse)
+}
+
+fn infinite_aabb() -> Aabb {
+    Aabb::new(
+        Point3::new(f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY),
+        Point3::new(f64::INFINITY, f64::INFINITY, f64::INFINITY),
+    )
+}
+
+/// Enclose the preimage `{p | R(-angle) p in child}` used by `Node::Rotate`.
+/// Inverting the certified inverse-map matrix avoids assuming that rounded
+/// Rodrigues coefficients remain exactly orthogonal. If regularity cannot be
+/// certified, the only honest support is the whole space.
+#[allow(clippy::float_cmp)] // Exact zero is the identity map, including -0.0.
+pub(crate) fn rotation_preimage_support(child: &Aabb, axis: Vec3, angle: f64) -> Aabb {
+    if angle == 0.0 {
+        return *child;
+    }
+    let inverse_map = rodrigues_matrix(axis, -angle);
+    let Some(preimage_map) = inverse_3x3(inverse_map) else {
+        return infinite_aabb();
+    };
+    let child_coordinates = [
+        Iv::new(child.min.x, child.max.x),
+        Iv::new(child.min.y, child.max.y),
+        Iv::new(child.min.z, child.max.z),
+    ];
+    let preimage: [Iv; 3] = core::array::from_fn(|row| {
+        preimage_map[row][0]
+            .mul(child_coordinates[0])
+            .add(preimage_map[row][1].mul(child_coordinates[1]))
+            .add(preimage_map[row][2].mul(child_coordinates[2]))
+    });
+    if !preimage.iter().all(|coordinate| coordinate.is_finite()) {
+        return infinite_aabb();
+    }
+    Aabb::new(
+        Point3::new(preimage[0].lo, preimage[1].lo, preimage[2].lo),
+        Point3::new(preimage[0].hi, preimage[1].hi, preimage[2].hi),
+    )
+}
+
 impl Frep {
     /// Range guaranteed to contain `f(p)` for all `p ∈ region`.
     #[must_use]
@@ -238,20 +397,15 @@ impl Frep {
                 self.iv_at(child, &shifted)
             }
             Node::Rotate { child, axis, angle } => {
-                // The platform trig result is finite and lies in [-1, 1], but
-                // this local evaluator does not assume a libm ULP budget.
-                // Enclose Rodrigues for every such sine/cosine value. This is
-                // deliberately wide, yet it is rigorous and therefore cannot
-                // turn a rotated exact chain into a false singleton.
-                let _ = angle;
                 let v = [
                     Iv::new(b.min.x, b.max.x),
                     Iv::new(b.min.y, b.max.y),
                     Iv::new(b.min.z, b.max.z),
                 ];
                 let a = [Iv::point(axis.x), Iv::point(axis.y), Iv::point(axis.z)];
-                let sine = Iv::new(-1.0, 1.0);
-                let cosine = Iv::new(-1.0, 1.0);
+                // Evaluate the inverse rotation with the same trig enclosure
+                // used by the support preimage proof.
+                let (sine, cosine) = rotation_trig(-angle);
                 let one_minus_cosine = Iv::point(1.0).sub(cosine);
                 let cross = [
                     a[1].mul(v[2]).sub(a[2].mul(v[1])),

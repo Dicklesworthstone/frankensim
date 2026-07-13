@@ -601,7 +601,9 @@ fn intersect(scene: &Scene, cx: &Cx<'_>, ray: &Ray) -> Result<Option<(usize, Hit
                 let (hit, audit) = sphere_trace(chart.as_ref(), cx, ray, 1e4, TRACE_EPS, 1.0);
                 if matches!(
                     audit.termination,
-                    TraceTermination::Hit | TraceTermination::Miss
+                    TraceTermination::Hit
+                        | TraceTermination::ResidualLimit
+                        | TraceTermination::Miss
                 ) && !audit.certified
                 {
                     return Err(TracerError::UncertifiedTrace);

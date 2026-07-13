@@ -264,10 +264,14 @@ pub enum TraceStepClaim {
     /// to zero as the no-tunneling radius.
     ExactDistance,
     /// The field has the exact sign and zero set of the represented region;
+    /// the represented real field is continuous on every finite line segment;
     /// each sample's positive finite Lipschitz bound is certified over the
     /// entire closed `|f| / L` step ball. [`Chart::trace_value_enclosure`]
     /// encloses the real implicit-field evaluation used for that step, making
-    /// the radius safe even when the magnitude is not the exact distance.
+    /// the radius safe even when the magnitude is not the exact distance. The
+    /// continuity theorem also lets a consumer turn rigorously opposite signs
+    /// at the ends of a short segment into existence of a zero inside it; the
+    /// Lipschitz bound alone still supplies no upper proximity bound.
     LipschitzImplicit,
 }
 

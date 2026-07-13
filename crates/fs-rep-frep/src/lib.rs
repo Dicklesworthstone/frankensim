@@ -419,7 +419,7 @@ pub struct ParamId {
 
 /// Rotate `p` by `angle` around unit `axis` (Rodrigues).
 pub(crate) fn rotate_vec(v: Vec3, axis: Vec3, angle: f64) -> Vec3 {
-    let (s, c) = angle.sin_cos();
+    let (s, c) = (fs_math::det::sin(angle), fs_math::det::cos(angle));
     let kv = Vec3::new(
         axis.y * v.z - axis.z * v.y,
         axis.z * v.x - axis.x * v.z,
@@ -747,18 +747,35 @@ impl Frep {
         }
     }
 
-    /// True when any hard Boolean (or box edge) can break C¹ — the
-    /// differentiability class the chart advertises.
+    /// True when the root-reachable field contains a hard Boolean or box edge
+    /// that can break C¹. Node ids are topological, so a bounded forward DP
+    /// ignores abandoned builder nodes without recursion.
     fn has_kink(&self) -> bool {
-        self.nodes.iter().any(|n| {
-            matches!(
-                n,
-                Node::Bool {
+        let mut has_kink = vec![false; self.nodes.len()];
+        for (index, node) in self.nodes.iter().copied().enumerate() {
+            has_kink[index] = match node {
+                Node::BoxPrim { .. }
+                | Node::Bool {
                     style: BoolStyle::Hard,
                     ..
-                } | Node::BoxPrim { .. }
-            )
-        })
+                } => true,
+                Node::Translate { child, .. }
+                | Node::Rotate { child, .. }
+                | Node::Scale { child, .. }
+                | Node::Offset { child, .. } => has_kink[child.0 as usize],
+                Node::Bool {
+                    style: BoolStyle::Blend { .. },
+                    a,
+                    b,
+                    ..
+                } => has_kink[a.0 as usize] || has_kink[b.0 as usize],
+                Node::Sphere { .. }
+                | Node::HalfSpace { .. }
+                | Node::Torus { .. }
+                | Node::Cylinder { .. } => false,
+            };
+        }
+        has_kink[self.root.0 as usize]
     }
 
     /// True when the root-reachable field is an exact signed distance. Rounded
@@ -841,17 +858,7 @@ impl Frep {
             }
             Node::Rotate { child, axis, angle } => {
                 let b = self.support_of(child);
-                let mut out: Option<Aabb> = None;
-                for corner in corners(&b) {
-                    let v = rotate_vec(corner.delta_from(Point3::new(0.0, 0.0, 0.0)), axis, angle);
-                    let p = Point3::new(v.x, v.y, v.z);
-                    let cell = Aabb::new(p, p);
-                    out = Some(match out {
-                        Some(acc) => acc.union(&cell),
-                        None => cell,
-                    });
-                }
-                out.expect("a box has corners")
+                ival::rotation_preimage_support(&b, axis, angle)
             }
             Node::Scale { child, factor } => {
                 let b = self.support_of(child);
@@ -935,20 +942,6 @@ impl Frep {
         lo.set_param(id, theta - h)?;
         Ok((hi.value(p) - lo.value(p)) / (2.0 * h))
     }
-}
-
-pub(crate) fn corners(b: &Aabb) -> [Point3; 8] {
-    let (lo, hi) = (b.min, b.max);
-    [
-        Point3::new(lo.x, lo.y, lo.z),
-        Point3::new(hi.x, lo.y, lo.z),
-        Point3::new(lo.x, hi.y, lo.z),
-        Point3::new(hi.x, hi.y, lo.z),
-        Point3::new(lo.x, lo.y, hi.z),
-        Point3::new(hi.x, lo.y, hi.z),
-        Point3::new(lo.x, hi.y, hi.z),
-        Point3::new(hi.x, hi.y, hi.z),
-    ]
 }
 
 fn intersect_boxes(a: &Aabb, b: &Aabb) -> Aabb {

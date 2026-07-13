@@ -7,6 +7,8 @@
 //! ledgered (debug-build numbers; the perf GATE lives in perf-CI).
 #![cfg(feature = "chart-backends")]
 
+use core::sync::atomic::{AtomicUsize, Ordering};
+
 use asupersync::types::Budget;
 use fs_evidence::{NumericalCertificate, NumericalKind};
 use fs_exec::{CancelGate, Cx, ExecMode, StreamKey};
@@ -238,6 +240,207 @@ impl Chart for ConstantNoClaim {
     }
 }
 
+/// A valid Lipschitz-implicit field whose deliberately loose `L` makes the
+/// normalized residual tiny one world unit from its zero set.
+struct LooseLipschitzChart;
+
+impl Chart for LooseLipschitzChart {
+    fn eval(&self, x: Point3, _cx: &Cx<'_>) -> ChartSample {
+        let value = 1e-12 * (x.x - 1.0);
+        ChartSample {
+            signed_distance: value,
+            gradient: Some(Vec3::new(1e-12, 0.0, 0.0)),
+            // The tight constant is 1e-12, so 1.0 is a valid but loose upper
+            // bound and must not become geometric proximity evidence.
+            lipschitz: Some(1.0),
+            error: NumericalCertificate::estimate(value, value),
+        }
+    }
+
+    fn support(&self) -> Aabb {
+        Aabb::new(Point3::new(-2.0, -1.0, -1.0), Point3::new(2.0, 1.0, 1.0))
+    }
+
+    fn trace_step_claim(&self) -> TraceStepClaim {
+        TraceStepClaim::LipschitzImplicit
+    }
+
+    fn trace_value_enclosure(
+        &self,
+        x: Point3,
+        sample: &ChartSample,
+        _cx: &Cx<'_>,
+    ) -> NumericalCertificate {
+        let delta = x.x - 1.0;
+        NumericalCertificate::enclosure(
+            (delta.next_down() * 1e-12)
+                .next_down()
+                .min(sample.signed_distance),
+            (delta.next_up() * 1e-12)
+                .next_up()
+                .max(sample.signed_distance),
+        )
+    }
+
+    fn name(&self) -> &'static str {
+        "loose-lipschitz"
+    }
+}
+
+/// An exact scalar plane evaluation that deliberately advertises only the
+/// Lipschitz-implicit theorem. At `x = 0`, `[0, 0]` is still geometric zero-set
+/// evidence even though nonzero residuals carry no proximity claim.
+struct SingletonZeroImplicitChart;
+
+impl Chart for SingletonZeroImplicitChart {
+    fn eval(&self, x: Point3, _cx: &Cx<'_>) -> ChartSample {
+        ChartSample {
+            signed_distance: x.x,
+            gradient: Some(Vec3::new(1.0, 0.0, 0.0)),
+            lipschitz: Some(1.0),
+            error: NumericalCertificate::estimate(x.x, x.x),
+        }
+    }
+
+    fn support(&self) -> Aabb {
+        Aabb::new(Point3::new(0.0, -1.0, -1.0), Point3::new(1.0, 1.0, 1.0))
+    }
+
+    fn trace_step_claim(&self) -> TraceStepClaim {
+        TraceStepClaim::LipschitzImplicit
+    }
+
+    fn trace_value_enclosure(
+        &self,
+        _x: Point3,
+        sample: &ChartSample,
+        _cx: &Cx<'_>,
+    ) -> NumericalCertificate {
+        NumericalCertificate::exact(sample.signed_distance)
+    }
+
+    fn name(&self) -> &'static str {
+        "singleton-zero-implicit"
+    }
+}
+
+/// A linear implicit field whose second evaluation requests cancellation. A
+/// residual witness must observe that request before it can return a hit.
+struct CancelOnWitnessChart<'a> {
+    gate: &'a CancelGate,
+    evaluations: AtomicUsize,
+}
+
+impl Chart for CancelOnWitnessChart<'_> {
+    fn eval(&self, x: Point3, _cx: &Cx<'_>) -> ChartSample {
+        if self.evaluations.fetch_add(1, Ordering::SeqCst) == 1 {
+            self.gate.request();
+        }
+        ChartSample {
+            signed_distance: x.x,
+            gradient: Some(Vec3::new(1.0, 0.0, 0.0)),
+            lipschitz: Some(1.0),
+            error: NumericalCertificate::estimate(x.x, x.x),
+        }
+    }
+
+    fn support(&self) -> Aabb {
+        Aabb::new(Point3::new(0.0, -1.0, -1.0), Point3::new(1.0, 1.0, 1.0))
+    }
+
+    fn trace_step_claim(&self) -> TraceStepClaim {
+        TraceStepClaim::LipschitzImplicit
+    }
+
+    fn trace_value_enclosure(
+        &self,
+        _x: Point3,
+        sample: &ChartSample,
+        _cx: &Cx<'_>,
+    ) -> NumericalCertificate {
+        NumericalCertificate::exact(sample.signed_distance)
+    }
+
+    fn name(&self) -> &'static str {
+        "cancel-on-witness"
+    }
+}
+
+/// The current sample has a strict sign, while every nonnegative witness is
+/// deliberately enclosed across zero. Containment remains rigorous, but it
+/// cannot prove which side of the boundary the witness occupies.
+struct StraddlingWitnessChart;
+
+impl Chart for StraddlingWitnessChart {
+    fn eval(&self, x: Point3, _cx: &Cx<'_>) -> ChartSample {
+        ChartSample {
+            signed_distance: x.x,
+            gradient: Some(Vec3::new(1.0, 0.0, 0.0)),
+            lipschitz: Some(1.0),
+            error: NumericalCertificate::estimate(x.x, x.x),
+        }
+    }
+
+    fn support(&self) -> Aabb {
+        Aabb::new(Point3::new(0.0, -1.0, -1.0), Point3::new(1.0, 1.0, 1.0))
+    }
+
+    fn trace_step_claim(&self) -> TraceStepClaim {
+        TraceStepClaim::LipschitzImplicit
+    }
+
+    fn trace_value_enclosure(
+        &self,
+        _x: Point3,
+        sample: &ChartSample,
+        _cx: &Cx<'_>,
+    ) -> NumericalCertificate {
+        if sample.signed_distance < 0.0 {
+            NumericalCertificate::exact(sample.signed_distance)
+        } else {
+            let radius = sample.signed_distance.abs().next_up();
+            NumericalCertificate::enclosure(-radius, radius)
+        }
+    }
+
+    fn name(&self) -> &'static str {
+        "straddling-witness"
+    }
+}
+
+/// An exact sphere deliberately advertised through the weaker implicit theorem
+/// so a tangent ray exercises the no-sign-change boundary.
+struct ImplicitSphereChart {
+    inner: SphereChart,
+}
+
+impl Chart for ImplicitSphereChart {
+    fn eval(&self, x: Point3, cx: &Cx<'_>) -> ChartSample {
+        self.inner.eval(x, cx)
+    }
+
+    fn support(&self) -> Aabb {
+        self.inner.support()
+    }
+
+    fn trace_step_claim(&self) -> TraceStepClaim {
+        TraceStepClaim::LipschitzImplicit
+    }
+
+    fn trace_value_enclosure(
+        &self,
+        x: Point3,
+        sample: &ChartSample,
+        cx: &Cx<'_>,
+    ) -> NumericalCertificate {
+        self.inner.trace_value_enclosure(x, sample, cx)
+    }
+
+    fn name(&self) -> &'static str {
+        "implicit-sphere"
+    }
+}
+
 struct CancelOnEvalChart<'a> {
     gate: &'a CancelGate,
 }
@@ -389,17 +592,19 @@ fn oracle_first_hit(chart: &dyn Chart, cx: &Cx<'_>, ray: &Ray, t_max: f64) -> Op
 #[test]
 fn rb_001_zero_tunneling_headline() {
     with_cx(|cx| {
-        assert_eq!(CHART_BACKEND_BIT_SEMANTICS_VERSION, 3);
+        assert_eq!(CHART_BACKEND_BIT_SEMANTICS_VERSION, 5);
         // Falsifier pairing: four thin-feature fields whose L > 1. The naive
         // unit-bound marcher tunnels in every case; the certified d/L path
-        // reaches the first surface.
+        // approaches under a no-tunneling theorem and closes a short rigorous
+        // sign bracket around the first crossing.
         let axial_ray = Ray {
             origin: Point3::new(0.0, 0.0, 3.0),
             dir: Vec3::new(0.0, 0.0, -1.0),
         };
         let fixtures = [(4e-3, 4.0), (2e-3, 8.0), (1e-3, 16.0), (5e-4, 32.0)];
         let mut naive_tunnels = 0usize;
-        let mut certified_tunnels = 0usize;
+        let mut certified_hits = 0usize;
+        let mut residual_limits = 0usize;
         for (thickness, scale) in fixtures {
             let scaled = ScaledChart {
                 inner: thin_shell_with_thickness(thickness),
@@ -413,23 +618,22 @@ fn rb_001_zero_tunneling_headline() {
                 naive_tunnels += 1;
             }
             let (hit, audit) = sphere_trace(&scaled, cx, &axial_ray, 6.0, 1e-6, 1.0);
-            let Some(hit) = hit else {
-                certified_tunnels += 1;
-                continue;
-            };
-            assert!(audit.certified, "published finite bound carries the claim");
-            assert_eq!(audit.termination, TraceTermination::Hit);
+            let hit = hit.expect("a transverse short sign bracket certifies the first crossing");
             assert!(
                 (hit.t - oracle_t).abs() <= 1e-6,
-                "certified path must hit the earliest oracle root: {} vs {oracle_t}",
+                "certified path must stay within tolerance of the earliest oracle root: {} vs {oracle_t}",
                 hit.t
             );
+            assert!(audit.certified, "published finite bound carries the claim");
+            assert_eq!(audit.termination, TraceTermination::Hit);
+            assert!(audit.certifies_hit());
             let normal = hit.normal.expect("scaled chart supplies a normal");
             assert!(
                 (normal.norm() - 1.0).abs() <= 1e-12,
                 "backend normal must be unit length, got {}",
                 normal.norm()
             );
+            certified_hits += 1;
         }
         // A chart that withholds the same bound may still use the preview
         // fallback, but the audit must refuse the certified headline.
@@ -478,25 +682,18 @@ fn rb_001_zero_tunneling_headline() {
             };
             let oracle = oracle_first_hit(&shell, cx, &ray, 6.0);
             let (traced, audit) = sphere_trace(&shell, cx, &ray, 6.0, 1e-6, 1.0);
-            match (traced, oracle) {
-                (Some(hit), Some(oracle_t)) => {
+            match (traced, audit.termination, oracle) {
+                (Some(hit), TraceTermination::Hit, Some(oracle_t)) => {
                     assert!(
-                        hit.t <= oracle_t.next_up(),
-                        "ray {k}: tracer tunneled past the earliest oracle root: {} vs {oracle_t}",
+                        (hit.t - oracle_t).abs() <= 1e-6,
+                        "ray {k}: bracketed hit must stay within tolerance of the earliest oracle root: {} vs {oracle_t}",
                         hit.t
                     );
-                    let hit_sample = shell.eval(hit.point, cx);
-                    let hit_bound = hit_sample
-                        .lipschitz
-                        .expect("the F-rep hit publishes a finite Lipschitz bound");
-                    assert!(
-                        hit_sample.signed_distance.abs() / hit_bound <= 1e-6,
-                        "ray {k}: entry-side hit must satisfy the normalized residual tolerance"
-                    );
                 }
-                (None, None) => {}
-                (traced, oracle) => panic!(
-                    "ray {k}: tracer/oracle hit disagreement: traced={} oracle={}",
+                (None, TraceTermination::ResidualLimit, None) => residual_limits += 1,
+                (None, TraceTermination::Miss, None) => {}
+                (traced, termination, oracle) => panic!(
+                    "ray {k}: dishonest trace/oracle result: traced={} termination={termination:?} oracle={}",
                     traced.is_some(),
                     oracle.is_some()
                 ),
@@ -511,17 +708,17 @@ fn rb_001_zero_tunneling_headline() {
             audited += 1;
         }
         println!(
-            "{{\"metric\":\"tunneling-audit\",\"falsifiers\":{},\"naive_tunnels\":{naive_tunnels},\"certified_tunnels\":{certified_tunnels},\"oracle_rays\":{audited},\"missed\":0}}",
+            "{{\"metric\":\"tunneling-audit\",\"falsifiers\":{},\"naive_tunnels\":{naive_tunnels},\"certified_hits\":{certified_hits},\"residual_limits\":{residual_limits},\"oracle_rays\":{audited},\"geometric_false_hits\":0}}",
             fixtures.len()
         );
         assert_eq!(naive_tunnels, fixtures.len());
-        assert_eq!(certified_tunnels, 0);
+        assert_eq!(certified_hits, fixtures.len());
         verdict(
             "rb-001",
             "four scaled thin-shell falsifiers defeat the naive unit-bound marcher; the \
-             certified path hits all four, then reaches the entry-side residual envelope \
-             without passing the micro-step oracle root on 120 grazing-biased rays; missing \
-             bounds remain explicitly uncertified",
+             certified path brackets and localizes every transverse first crossing, retains its \
+             safe-step ratio audit on 120 grazing-biased rays, and leaves missing bounds \
+             explicitly uncertified",
         );
     });
 }
@@ -535,22 +732,27 @@ fn rb_001a_over_relaxation_cannot_accept_a_far_shell_boundary() {
             dir: Vec3::new(0.0, 0.0, -1.0),
         };
         let (plain, plain_audit) = sphere_trace(&shell, cx, &ray, 6.0, 1e-9, 1.0);
-        let plain = plain.expect("plain trace hits the front shell boundary");
+        let plain = plain.expect("plain trace closes a short bracket at the front boundary");
         assert_eq!(plain_audit.termination, TraceTermination::Hit);
+        assert!(plain_audit.certified && plain_audit.certifies_hit());
         assert!((plain.t - 2.0).abs() <= 1e-9, "analytic first root is t=2");
 
         for (omega, t_max) in [(1.001, 6.0), (1.6, 2.5)] {
             let (relaxed, audit) = sphere_trace(&shell, cx, &ray, t_max, 1e-9, omega);
-            let relaxed = relaxed.expect("relaxed trace must retreat to the front boundary");
-            assert_eq!(relaxed.t.to_bits(), plain.t.to_bits());
-            assert!(audit.certified);
+            let relaxed = relaxed.expect("relaxed trace must retreat then bracket the front root");
+            assert!(
+                (relaxed.t - 2.0).abs() <= 1e-9,
+                "a wide speculative bracket must not select the far boundary: {}",
+                relaxed.t
+            );
+            assert!(audit.certified && audit.certifies_hit());
             assert_eq!(audit.termination, TraceTermination::Hit);
             assert!(audit.fallbacks > 0, "thin-shell overshoot must retreat");
         }
         verdict(
             "rb-001a-over-relaxed-thin-shell",
-            "pending relaxed steps are validated before hit/miss acceptance; omega 1.001 and a \
-             t_max-crossing omega 1.6 both retreat to the bit-identical front boundary",
+            "wide sign-changing relaxed probes are never accepted directly; omega 1.001 and a \
+             t_max-crossing omega 1.6 both retreat, then close a short bracket at the front root",
         );
     });
 }
@@ -720,6 +922,183 @@ fn rb_001e_production_rejects_uncertified_misses() {
 }
 
 #[test]
+fn rb_001h_implicit_residual_is_not_a_geometric_hit() {
+    with_cx(|cx| {
+        let ray = Ray {
+            origin: Point3::new(0.0, 0.0, 0.0),
+            dir: Vec3::new(1.0, 0.0, 0.0),
+        };
+        let (hit, audit) = sphere_trace(&LooseLipschitzChart, cx, &ray, 2.0, 1e-9, 1.0);
+        assert!(
+            hit.is_none(),
+            "a loose valid L must not create a Hit one world unit from the zero set"
+        );
+        assert_eq!(audit.termination, TraceTermination::ResidualLimit);
+        assert!(
+            audit.certified,
+            "the no-tunneling step theorem remains valid"
+        );
+        assert!(
+            !audit.certifies_hit(),
+            "certified marching does not promote residual evidence to proximity"
+        );
+        assert_eq!(
+            trace_scene(&[Backend::Chart(&LooseLipschitzChart)], cx, &ray, 2.0, 1e-9),
+            Err(SceneTraceError::BackendFailure(
+                TraceTermination::ResidualLimit
+            )),
+            "production scene composition rejects residual-only terminal evidence"
+        );
+    });
+}
+
+#[test]
+fn rb_001i_implicit_singleton_zero_is_a_geometric_hit() {
+    with_cx(|cx| {
+        let ray = Ray {
+            origin: Point3::new(0.0, 0.0, 0.0),
+            dir: Vec3::new(1.0, 0.0, 0.0),
+        };
+        let (hit, audit) = sphere_trace(&SingletonZeroImplicitChart, cx, &ray, 2.0, 1e-12, 1.0);
+        let hit = hit.expect("a rigorous implicit [0,0] is exact zero-set evidence");
+        assert_eq!(hit.t.to_bits(), 0.0f64.to_bits());
+        assert_eq!(hit.point, ray.origin);
+        assert_eq!(audit.termination, TraceTermination::Hit);
+        assert!(audit.certified && audit.certifies_hit());
+    });
+}
+
+#[test]
+fn rb_001j_short_bracket_clips_to_tmax_without_adopting_the_witness() {
+    with_cx(|cx| {
+        let eps = 1e-6;
+        let ray = Ray {
+            origin: Point3::new(-0.5 * eps, 0.0, 0.0),
+            dir: Vec3::new(1.0, 0.0, 0.0),
+        };
+
+        let (hit, audit) =
+            sphere_trace(&SingletonZeroImplicitChart, cx, &ray, 0.75 * eps, eps, 1.0);
+        let hit = hit.expect("the caller boundary supplies the opposite-sign witness");
+        assert!(
+            hit.t <= 0.75 * eps,
+            "the witness is clipped to caller t_max"
+        );
+        assert!(
+            hit.point.x.abs() <= eps,
+            "the evaluated midpoint stays within eps of the exact plane"
+        );
+        assert_eq!(audit.steps, 0, "the witness is evidence, not march state");
+        assert!(audit.certified && audit.certifies_hit());
+
+        let (blocked_hit, blocked_audit) =
+            sphere_trace(&SingletonZeroImplicitChart, cx, &ray, 0.25 * eps, eps, 1.0);
+        assert!(
+            blocked_hit.is_none(),
+            "a root beyond t_max must not leak in"
+        );
+        assert_eq!(blocked_audit.termination, TraceTermination::ResidualLimit);
+        assert_eq!(
+            blocked_audit.steps, 0,
+            "a same-sign witness never becomes the next march sample"
+        );
+        assert!(blocked_audit.certified && !blocked_audit.certifies_hit());
+    });
+}
+
+#[test]
+fn rb_001k_indeterminate_same_sign_and_tangent_witnesses_fail_closed() {
+    with_cx(|cx| {
+        let eps = 1e-6;
+        let x_ray = Ray {
+            origin: Point3::new(-0.5 * eps, 0.0, 0.0),
+            dir: Vec3::new(1.0, 0.0, 0.0),
+        };
+        let (straddling_hit, straddling_audit) =
+            sphere_trace(&StraddlingWitnessChart, cx, &x_ray, 1.0, eps, 1.0);
+        assert!(straddling_hit.is_none());
+        assert_eq!(
+            straddling_audit.termination,
+            TraceTermination::ResidualLimit,
+            "an enclosure containing zero does not prove a root"
+        );
+        assert_eq!(straddling_audit.steps, 0, "the witness is not adopted");
+
+        let shell = thin_shell_with_thickness(0.5 * eps);
+        let shell_ray = Ray {
+            origin: Point3::new(0.0, 0.0, 1.0 + 0.5 * eps),
+            dir: Vec3::new(0.0, 0.0, -1.0),
+        };
+        let (shell_hit, shell_audit) = sphere_trace(&shell, cx, &shell_ray, 0.01, eps, 1.0);
+        assert!(
+            shell_hit.is_none(),
+            "a probe spanning both sides of an ultra-thin shell has no sign witness"
+        );
+        assert_eq!(shell_audit.termination, TraceTermination::ResidualLimit);
+        assert_eq!(shell_audit.steps, 0, "the same-sign probe is never a step");
+
+        let tangent = ImplicitSphereChart {
+            inner: SphereChart {
+                center: Point3::new(0.0, 0.0, 0.0),
+                radius: 1.0,
+            },
+        };
+        let tangent_ray = Ray {
+            origin: Point3::new(-0.5 * eps, 1.0, 0.0),
+            dir: Vec3::new(1.0, 0.0, 0.0),
+        };
+        let (tangent_hit, tangent_audit) = sphere_trace(&tangent, cx, &tangent_ray, 1.0, eps, 1.0);
+        assert!(
+            tangent_hit.is_none(),
+            "a tangent needs proximity or first-root evidence beyond endpoint signs"
+        );
+        assert_eq!(tangent_audit.termination, TraceTermination::ResidualLimit);
+        assert_eq!(tangent_audit.steps, 0, "the tangent probe is never adopted");
+        assert!(straddling_audit.certified && shell_audit.certified && tangent_audit.certified);
+    });
+}
+
+#[test]
+fn rb_001l_cancellation_during_short_witness_wins() {
+    let gate = CancelGate::new();
+    let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+    pool.scope(|arena| {
+        let cx = Cx::new(
+            &gate,
+            arena,
+            StreamKey {
+                seed: 3,
+                kernel_id: 9,
+                tile: 0,
+                iteration: 0,
+            },
+            Budget::INFINITE,
+            ExecMode::Deterministic,
+        );
+        let chart = CancelOnWitnessChart {
+            gate: &gate,
+            evaluations: AtomicUsize::new(0),
+        };
+        let ray = Ray {
+            origin: Point3::new(-5e-7, 0.0, 0.0),
+            dir: Vec3::new(1.0, 0.0, 0.0),
+        };
+        let (hit, audit) = sphere_trace(&chart, &cx, &ray, 1.0, 1e-6, 1.0);
+        assert!(hit.is_none());
+        assert_eq!(audit.termination, TraceTermination::Cancelled);
+        assert!(
+            !audit.certified,
+            "cancellation cannot publish a completed proof"
+        );
+        assert_eq!(
+            chart.evaluations.load(Ordering::SeqCst),
+            2,
+            "only the current sample and speculative witness are evaluated"
+        );
+    });
+}
+
+#[test]
 fn rb_001f_cancellation_requested_by_terminal_eval_wins() {
     let gate = CancelGate::new();
     let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
@@ -763,9 +1142,10 @@ fn rb_001c_scale_direction_and_touching_spheres_are_conservative() {
             trace_claim: TraceStepClaim::LipschitzImplicit,
         };
         let (scaled_hit, scaled_audit) = sphere_trace(&tiny_scale, cx, &axial_ray, 6.0, 1e-6, 1.0);
-        let scaled_hit = scaled_hit.expect("field scaling cannot create a t=0 hit or a miss");
+        let scaled_hit = scaled_hit.expect("the short bracket is invariant to field scaling");
         assert!((scaled_hit.t - 2.0).abs() <= 1e-6);
-        assert!(scaled_audit.certified);
+        assert_eq!(scaled_audit.termination, TraceTermination::Hit);
+        assert!(scaled_audit.certified && scaled_audit.certifies_hit());
 
         let plane = ExactPlaneChart {
             boundary: 1.0,
@@ -978,6 +1358,62 @@ fn rb_001d_rounded_exact_distance_overstatement_fails_closed() {
 }
 
 #[test]
+fn rb_001g_rotated_frep_retains_certified_trace_progress() {
+    with_cx(|cx| {
+        let mut builder = FrepBuilder::new();
+        let sphere = builder
+            .sphere(Point3::new(1.0, 0.0, 0.0), 0.5)
+            .expect("sphere");
+        let rotated = builder
+            .rotate(
+                sphere,
+                Vec3::new(0.0, 0.0, 1.0),
+                core::f64::consts::FRAC_PI_2,
+            )
+            .expect("rotation");
+        let rotated = builder.finish(rotated).expect("rotated F-rep");
+        assert_eq!(
+            rotated.trace_step_claim(),
+            TraceStepClaim::LipschitzImplicit,
+            "nontrivial rounded Rodrigues maps do not claim exact distance"
+        );
+
+        let ray = Ray {
+            origin: Point3::new(0.0, 1.0, 3.0),
+            dir: Vec3::new(0.0, 0.0, -1.0),
+        };
+        let first = rotated.eval(ray.origin, cx);
+        let first_trace = rotated.trace_value_enclosure(ray.origin, &first, cx);
+        assert_eq!(first_trace.kind, NumericalKind::Enclosure);
+        assert!(
+            first_trace.lo > 0.0,
+            "ordinary-angle trig bounds must preserve a useful outside sign"
+        );
+        let (hit, audit) = sphere_trace(&rotated, cx, &ray, 6.0, 1e-9, 1.0);
+        assert!(
+            hit.is_none(),
+            "the conservative Rodrigues L leaves the first residual outside a 2eps bracket"
+        );
+        assert_eq!(audit.termination, TraceTermination::ResidualLimit);
+        assert!(audit.certified && !audit.certifies_hit());
+        assert!(audit.steps > 0, "tight trig bounds retain trace progress");
+        assert_eq!(
+            trace_scene(&[Backend::Chart(&rotated)], cx, &ray, 6.0, 1e-9),
+            Err(SceneTraceError::BackendFailure(
+                TraceTermination::ResidualLimit
+            )),
+            "production refuses a transverse root that the bounded witness did not reach"
+        );
+        verdict(
+            "rb-001g-rotated-frep",
+            "a nontrivial rotated sphere retains certified progress under fs-ivl trig \
+             enclosures, then remains residual-only when the conservative L leaves the root \
+             beyond the bounded sign witness",
+        );
+    });
+}
+
+#[test]
 fn rb_002_over_relaxation_stays_certified() {
     with_cx(|cx| {
         let shell = thin_shell();
@@ -1002,19 +1438,28 @@ fn rb_002_over_relaxation_stays_certified() {
             };
             let (h1, a1) = sphere_trace(&shell, cx, &ray, 9.0, 1e-6, 1.0);
             let (h2, a2) = sphere_trace(&shell, cx, &ray, 9.0, 1e-6, 1.6);
-            assert_eq!(
-                h1.is_some(),
-                h2.is_some(),
-                "relaxation never changes hits (ray {k})"
-            );
-            if let (Some(a), Some(b)) = (h1, h2) {
-                assert!(
-                    (a.t - b.t).abs() < 1e-4,
-                    "same intersection: {} vs {}",
-                    a.t,
-                    b.t
-                );
+            assert_eq!(h1.is_some(), h2.is_some(), "same hit decision (ray {k})");
+            match (h1, h2) {
+                (Some(plain), Some(relaxed)) => {
+                    assert_eq!(a1.termination, TraceTermination::Hit);
+                    assert_eq!(a2.termination, TraceTermination::Hit);
+                    assert!(
+                        (plain.t - relaxed.t).abs() <= 2e-6,
+                        "same tolerance bracket: {} vs {}",
+                        plain.t,
+                        relaxed.t
+                    );
+                }
+                (None, None) => {
+                    assert_eq!(a1.termination, a2.termination, "same typed stop (ray {k})");
+                    assert!(matches!(
+                        a1.termination,
+                        TraceTermination::ResidualLimit | TraceTermination::Miss
+                    ));
+                }
+                _ => unreachable!("presence equality checked above"),
             }
+            assert!(a1.certified && a2.certified);
             plain_steps += u64::from(a1.steps);
             relaxed_steps += u64::from(a2.steps);
         }
@@ -1028,8 +1473,8 @@ fn rb_002_over_relaxation_stays_certified() {
         );
         verdict(
             "rb-002",
-            "omega=1.6 marching hits identical intersections with fewer steps (certified \
-             fallback preserves the no-tunnel invariant)",
+            "omega=1.6 preserves bracketed hit and typed miss/residual decisions with fewer \
+             steps (certified fallback preserves the no-tunnel invariant)",
         );
     });
 }

@@ -10,10 +10,11 @@
 //!
 //! - [`closest_point`]: Newton projection along the chart gradient,
 //!   with the post-projection residual REPORTED (not assumed);
-//! - [`raycast`]: conservative sphere tracing on the chart's certified
-//!   Lipschitz bound — the no-tunneling property is inherited from the
-//!   field's `|φ| ≤ dist` contract, and the battery checks it against
-//!   a dense oracle including tangent rays;
+//! - [`raycast`]: conservative sphere tracing from each chart sample's
+//!   rigorous trace-value enclosure and local Lipschitz theorem — only an
+//!   actually evaluated endpoint inside the certified safe ball is admitted,
+//!   and the battery checks that no-tunneling path against a dense oracle
+//!   including tangent rays;
 //! - [`OffsetChart`]: dilation/erosion as a chart wrapper (`φ − r`);
 //!   [`minkowski_ball`] IS that wrapper — the ball case of Minkowski
 //!   sums is exact (general Minkowski is a CONTRACT no-claim);
@@ -30,8 +31,9 @@
 //!   stencils on the signed distance, with a PER-CHART ACCURACY CLASS
 //!   ([`CurvatureClass`]) documented and measured under refinement.
 
+use fs_evidence::{NumericalCertificate, NumericalKind};
 use fs_exec::Cx;
-use fs_geom::{Aabb, Chart, Point3, TraceStepClaim, Vec3};
+use fs_geom::{Aabb, Chart, ChartSample, Point3, TraceStepClaim, Vec3};
 use fs_mesh::delaunay;
 use fs_rep_mesh::Soup;
 
@@ -55,6 +57,27 @@ pub enum QueryError {
     /// true surface (an enclosure/heuristic chart under-reports the
     /// distance). Fails closed rather than tunneling.
     NoTraceClaim,
+    /// The ray itself is malformed.
+    InvalidRay {
+        /// Actionable refusal reason.
+        reason: &'static str,
+    },
+    /// A nominal trace sample or its claimed enclosure is malformed. A typed
+    /// trace theorem is usable only when every point supplies a finite field
+    /// value, a positive finite local Lipschitz bound, and a rigorous
+    /// enclosure containing the nominal value.
+    InvalidTraceSample {
+        /// Where validation failed.
+        at: [f64; 3],
+    },
+    /// A valid certificate could not prove a positive next step or a hit. This
+    /// is an incomplete result, not a clean miss.
+    UnresolvedTrace {
+        /// Where progress stopped.
+        at: [f64; 3],
+        /// Samples already evaluated.
+        steps: u32,
+    },
     /// The query point is not on/near the boundary as required.
     NotOnBoundary {
         /// The signed distance found.
@@ -87,6 +110,22 @@ impl core::fmt::Display for QueryError {
                 "the chart states no tunneling-safe trace claim (NoClaim); a Lipschitz \
                  value alone does not make sphere tracing safe on an enclosure/heuristic \
                  chart — use the chart's native tracer or an exact/Lipschitz-implicit chart"
+            ),
+            QueryError::InvalidRay { reason } => {
+                write!(f, "invalid raycast input: {reason}")
+            }
+            QueryError::InvalidTraceSample { at } => write!(
+                f,
+                "the chart supplied a malformed certified trace sample at ({}, {}, {}); \
+                 field values and Lipschitz bounds must be finite, and an Exact/Enclosure \
+                 trace certificate must contain the nominal value",
+                at[0], at[1], at[2]
+            ),
+            QueryError::UnresolvedTrace { at, steps } => write!(
+                f,
+                "certified ray tracing could not prove a hit or positive next step at \
+                 ({}, {}, {}) after {steps} samples; this is unresolved, not a clean miss",
+                at[0], at[1], at[2]
             ),
             QueryError::NotOnBoundary { sd } => write!(
                 f,
@@ -185,8 +224,11 @@ pub struct RayHit {
     pub steps: u32,
 }
 
-/// Conservative sphere tracing: steps by `φ/L` (safe because certified
-/// charts guarantee `|φ| ≤ dist`). Returns `None` on a clean miss.
+/// Conservative sphere tracing: steps by the zero-nearest magnitude of a
+/// rigorous field enclosure (divided by the current sample's `L` for a
+/// Lipschitz-implicit field). The candidate endpoint is accepted only after
+/// its outward-rounded Euclidean displacement fits inside that certified
+/// ball. Returns `None` only after classifying the caller's `tmax` endpoint.
 ///
 /// Fails closed on any chart that does not state a tunneling-safe trace
 /// claim: per the [`Chart`] contract a `Some(lipschitz)` sample does NOT
@@ -199,8 +241,12 @@ pub struct RayHit {
 /// uncertified preview must opt in elsewhere.
 ///
 /// # Errors
-/// [`QueryError::NoLipschitz`] when the chart carries no bound;
-/// [`QueryError::NoTraceClaim`] when the chart states no trace-safe claim.
+/// [`QueryError::InvalidRay`] for malformed or overflowing ray inputs;
+/// [`QueryError::NoLipschitz`] when a sample carries no bound;
+/// [`QueryError::NoTraceClaim`] when the chart states no trace-safe claim;
+/// [`QueryError::InvalidTraceSample`] for malformed claimed evidence; or
+/// [`QueryError::UnresolvedTrace`] when rounding or the step budget prevents a
+/// certified hit/miss classification.
 pub fn raycast(
     chart: &dyn Chart,
     origin: Point3,
@@ -214,25 +260,316 @@ pub fn raycast(
         TraceStepClaim::ExactDistance | TraceStepClaim::LipschitzImplicit => {}
         TraceStepClaim::NoClaim => return Err(QueryError::NoTraceClaim),
     }
-    let l = chart
-        .eval(origin, cx)
-        .lipschitz
-        .ok_or(QueryError::NoLipschitz)?;
-    let dn = dir.norm().max(1e-300);
-    let d = dir.scale(1.0 / dn);
+    if !origin.x.is_finite() || !origin.y.is_finite() || !origin.z.is_finite() {
+        return Err(QueryError::InvalidRay {
+            reason: "the origin must have finite coordinates",
+        });
+    }
+    if !tmax.is_finite() || tmax < 0.0 {
+        return Err(QueryError::InvalidRay {
+            reason: "tmax must be finite and non-negative",
+        });
+    }
+    let d = normalized_direction(dir).ok_or(QueryError::InvalidRay {
+        reason: "the direction must be finite and nonzero",
+    })?;
+    let speed_upper = conservative_norm_upper(d);
     let mut t = 0.0;
     for steps in 0..4096 {
+        if cx.checkpoint().is_err() {
+            return Err(QueryError::Cancelled);
+        }
         let p = origin.offset(d.scale(t));
-        let v = chart.eval(p, cx).signed_distance;
-        if v < 1e-9 {
+        if !point_is_finite(p) {
+            return Err(QueryError::InvalidRay {
+                reason: "ray evaluation overflowed to a non-finite point",
+            });
+        }
+        let sample = chart.eval(p, cx);
+        if cx.checkpoint().is_err() {
+            return Err(QueryError::Cancelled);
+        }
+        let lipschitz = sample.lipschitz.ok_or(QueryError::NoLipschitz)?;
+        let trace_value = chart.trace_value_enclosure(p, &sample, cx);
+        if cx.checkpoint().is_err() {
+            return Err(QueryError::Cancelled);
+        }
+        let validated =
+            validate_raycast_sample(&sample, chart.trace_step_claim(), trace_value, lipschitz)
+                .ok_or(QueryError::InvalidTraceSample {
+                    at: [p.x, p.y, p.z],
+                })?;
+        if validated.hit_residual_upper <= 1e-9 {
             return Ok(Some(RayHit { t, point: p, steps }));
         }
-        t += v / l;
-        if t > tmax {
-            return Ok(None);
+        if t >= tmax {
+            return if validated.safe_radius > 0.0 {
+                Ok(None)
+            } else {
+                Err(QueryError::UnresolvedTrace {
+                    at: [p.x, p.y, p.z],
+                    steps: steps + 1,
+                })
+            };
+        }
+        let safe_dt = conservative_quotient_lower(validated.safe_radius, speed_upper);
+        let next_t =
+            certified_raycast_endpoint(origin, d, p, t, safe_dt, validated.safe_radius, tmax);
+        if cx.checkpoint().is_err() {
+            return Err(QueryError::Cancelled);
+        }
+        let Some(next_t) = next_t else {
+            return Err(QueryError::UnresolvedTrace {
+                at: [p.x, p.y, p.z],
+                steps: steps + 1,
+            });
+        };
+        t = next_t;
+    }
+    if cx.checkpoint().is_err() {
+        return Err(QueryError::Cancelled);
+    }
+    let p = origin.offset(d.scale(t));
+    Err(QueryError::UnresolvedTrace {
+        at: [p.x, p.y, p.z],
+        steps: 4096,
+    })
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ValidatedRaycastSample {
+    safe_radius: f64,
+    hit_residual_upper: f64,
+}
+
+#[allow(clippy::float_cmp)] // Exact evidence must be the nominal singleton.
+fn validate_raycast_sample(
+    sample: &ChartSample,
+    claim: TraceStepClaim,
+    trace_value: NumericalCertificate,
+    lipschitz: f64,
+) -> Option<ValidatedRaycastSample> {
+    let nominal = sample.signed_distance;
+    if claim == TraceStepClaim::NoClaim
+        || !nominal.is_finite()
+        || !lipschitz.is_finite()
+        || lipschitz <= 0.0
+        || !matches!(
+            trace_value.kind,
+            NumericalKind::Exact | NumericalKind::Enclosure
+        )
+        || !trace_value.lo.is_finite()
+        || !trace_value.hi.is_finite()
+        || trace_value.lo > nominal
+        || trace_value.hi < nominal
+        || (trace_value.kind == NumericalKind::Exact
+            && (trace_value.lo != trace_value.hi || trace_value.lo != nominal))
+        || (claim == TraceStepClaim::ExactDistance && lipschitz < 1.0)
+    {
+        return None;
+    }
+    let magnitude_lower = if trace_value.lo > 0.0 {
+        trace_value.lo
+    } else if trace_value.hi < 0.0 {
+        -trace_value.hi
+    } else {
+        0.0
+    };
+    let magnitude_upper = trace_value.lo.abs().max(trace_value.hi.abs());
+    let (safe_radius, hit_residual_upper) = match claim {
+        TraceStepClaim::ExactDistance => (magnitude_lower, magnitude_upper),
+        TraceStepClaim::LipschitzImplicit => (
+            conservative_quotient_lower(magnitude_lower, lipschitz),
+            // An upper Lipschitz bound proves only that |f|/L is a safe
+            // no-tunneling radius. It cannot upper-bound distance to the zero
+            // set: a valid but loose L makes the normalized residual
+            // arbitrarily small far from the boundary. Without a separate
+            // proximity theorem, only a rigorously exact field zero can
+            // authorize a geometric RayHit.
+            if magnitude_upper == 0.0 {
+                0.0
+            } else {
+                f64::INFINITY
+            },
+        ),
+        TraceStepClaim::NoClaim => return None,
+    };
+    Some(ValidatedRaycastSample {
+        safe_radius,
+        hit_residual_upper,
+    })
+}
+
+fn normalized_direction(direction: Vec3) -> Option<Vec3> {
+    if !direction.x.is_finite() || !direction.y.is_finite() || !direction.z.is_finite() {
+        return None;
+    }
+    let scale = direction
+        .x
+        .abs()
+        .max(direction.y.abs())
+        .max(direction.z.abs());
+    if !scale.is_finite() || scale <= 0.0 {
+        return None;
+    }
+    let scaled = Vec3::new(
+        direction.x / scale,
+        direction.y / scale,
+        direction.z / scale,
+    );
+    let norm = scaled.norm();
+    if !norm.is_finite() || norm <= 0.0 {
+        None
+    } else {
+        Some(scaled.scale(1.0 / norm))
+    }
+}
+
+fn point_is_finite(point: Point3) -> bool {
+    point.x.is_finite() && point.y.is_finite() && point.z.is_finite()
+}
+
+fn conservative_quotient_lower(numerator_lower: f64, denominator: f64) -> f64 {
+    if numerator_lower <= 0.0 {
+        return 0.0;
+    }
+    let quotient = numerator_lower / denominator.next_up();
+    if quotient <= 0.0 {
+        0.0
+    } else {
+        quotient.next_down().max(0.0)
+    }
+}
+
+#[allow(clippy::float_cmp)] // Exact zero makes a product or sum exact.
+fn conservative_norm_upper(vector: Vec3) -> f64 {
+    let component_square = |value: f64| {
+        if value == 0.0 {
+            0.0
+        } else {
+            (value.abs() * value.abs()).next_up()
+        }
+    };
+    let add = |lhs: f64, rhs: f64| {
+        if lhs == 0.0 {
+            rhs
+        } else if rhs == 0.0 {
+            lhs
+        } else {
+            (lhs + rhs).next_up()
+        }
+    };
+    let squared = add(
+        add(component_square(vector.x), component_square(vector.y)),
+        component_square(vector.z),
+    );
+    if squared.is_finite() {
+        squared.sqrt().next_up()
+    } else {
+        f64::INFINITY
+    }
+}
+
+#[allow(clippy::float_cmp)] // Equal stored coordinates have exact zero separation.
+fn point_distance_upper(lhs: Point3, rhs: Point3) -> f64 {
+    if !lhs.x.is_finite()
+        || !lhs.y.is_finite()
+        || !lhs.z.is_finite()
+        || !rhs.x.is_finite()
+        || !rhs.y.is_finite()
+        || !rhs.z.is_finite()
+    {
+        return f64::INFINITY;
+    }
+    let component = |left: f64, right: f64| {
+        if left == right {
+            0.0
+        } else {
+            (right - left).abs().next_up()
+        }
+    };
+    conservative_norm_upper(Vec3::new(
+        component(lhs.x, rhs.x),
+        component(lhs.y, rhs.y),
+        component(lhs.z, rhs.z),
+    ))
+}
+
+fn conservative_positive_sum(lhs: f64, rhs: f64) -> f64 {
+    let sum = lhs + rhs;
+    if sum <= lhs {
+        lhs
+    } else {
+        sum.next_down().max(lhs)
+    }
+}
+
+#[allow(clippy::float_cmp)] // Equal stored points prove that no geometric progress occurred.
+fn certified_raycast_endpoint(
+    origin: Point3,
+    direction: Vec3,
+    current_point: Point3,
+    current_t: f64,
+    safe_dt: f64,
+    safe_radius: f64,
+    tmax: f64,
+) -> Option<f64> {
+    enum Probe {
+        NoProgress,
+        Safe,
+        TooFar,
+    }
+
+    if !safe_dt.is_finite()
+        || safe_dt <= 0.0
+        || !safe_radius.is_finite()
+        || safe_radius <= 0.0
+        || tmax <= current_t
+    {
+        return None;
+    }
+    let conservative_candidate = conservative_positive_sum(current_t, safe_dt).min(tmax);
+    let candidate = if conservative_candidate <= current_t {
+        current_t.next_up().min(tmax)
+    } else {
+        conservative_candidate
+    };
+    if candidate <= current_t {
+        return None;
+    }
+    let admissible = |candidate_t: f64| {
+        let point = origin.offset(direction.scale(candidate_t));
+        if point == current_point {
+            Probe::NoProgress
+        } else if point_distance_upper(current_point, point) <= safe_radius {
+            Probe::Safe
+        } else {
+            Probe::TooFar
+        }
+    };
+    match admissible(candidate) {
+        Probe::Safe => return Some(candidate),
+        Probe::NoProgress => return None,
+        Probe::TooFar => {}
+    }
+
+    let (mut lower, mut upper) = (current_t, candidate);
+    let mut best = None;
+    for _ in 0..128 {
+        let probe = f64::midpoint(lower, upper);
+        if probe <= lower || probe >= upper {
+            break;
+        }
+        match admissible(probe) {
+            Probe::NoProgress => lower = probe,
+            Probe::Safe => {
+                lower = probe;
+                best = Some(probe);
+            }
+            Probe::TooFar => upper = probe,
         }
     }
-    Ok(None) // step budget spent while approaching (grazing)
+    best
 }
 
 /// Dilation (`r > 0`) / erosion (`r < 0`) as a chart wrapper: exact

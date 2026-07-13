@@ -41,22 +41,29 @@ differentiable lift). Pure Rust throughout.
   Newton on `S(u,v) − o − t·d` with the `[S_u, S_v, −d]` Jacobian.
   Certification requires the chart-level typed `TraceStepClaim`; a sample
   carrying `Some(L)` cannot upgrade the default `NoClaim`. Exact-distance hits
-  use world-space distance tolerance. Generic Lipschitz implicit hits use the
-  scale-invariant normalized residual `|f|/L`, which certifies step safety but
-  is not promoted to a geometric-distance enclosure. Pending over-relaxed
+  use world-space distance tolerance. A Lipschitz-implicit chart authorizes a
+  geometric `Hit` with either a rigorous singleton-zero field enclosure or a
+  short sign bracket. At a strict-sign residual limit, the marcher may inspect
+  one cancellation-aware witness no more than `2*eps` ahead in actual
+  outward-rounded Euclidean distance. Rigorously opposite endpoint signs plus
+  the claim's finite-segment continuity prove a boundary in that segment; only
+  an evaluated midpoint within `eps` of both endpoints becomes the hit. The
+  witness is evidence only and is never adopted as march state. A nonzero
+  normalized residual `|f|/L` by itself certifies step safety, not proximity,
+  and stops as `ResidualLimit` with no `Hit`. Pending over-relaxed
   endpoints are validated before either hit or miss acceptance. An
   outward-rounded working limit is classified at the caller's actual endpoint:
   hits require a validated endpoint sample, and misses require an
   epsilon-clear safe-ball bridge across any coordinate-rounding gap. Normalized
   working parameters size steps, but every chart and overlap evaluation uses
   the caller ray's own `Ray::at` arithmetic so a certificate is never returned
-  for a numerically different point. This is chart-backend bit-semantics v3.
+  for a numerically different point. This is chart-backend bit-semantics v5.
   `TraceAudit`
   states whether every marched sample supplied a positive finite certified
   bound and compatible rigorous trace-value certificate, counts retreats to the
   safe endpoint, and
-  distinguishes hit, clean miss, step-limit, invalid-input, and invalid-sample
-  termination. Returned chart gradients are normalized before becoming hit
+  distinguishes geometric hit, residual limit, clean miss, step-limit,
+  invalid-input, and invalid-sample termination. Returned chart gradients are normalized before becoming hit
   normals. `trace_scene` and the spectral/differentiable renderers accept chart
   terminal results only when the full trace stayed certified; an uncertified
   miss is not evidence of empty geometry. The uncertified `L = 1` fallback is
@@ -104,7 +111,8 @@ differentiable lift). Pure Rust throughout.
 ## Error model
 
 `TraceTermination` reports invalid input/sample, cancellation, iteration-limit,
-miss, or hit without conflation. Differentiable rendering returns
+residual-only stop, miss, or geometrically authorized hit without conflation.
+Differentiable rendering returns
 `RenderError` for cancellation, invalid parameters/configuration/targets,
 backend refusal, uncertified traces, and singular implicit/boundary
 derivatives. The tracer returns `TracerError`, preserving cancellation,
@@ -183,11 +191,13 @@ across backend-semantic changes.
 
 `tests/charts.rs` (beads qfx.2 + 8ll9, default feature): four distinct
 thin-shell/scaling falsifiers that all defeat the naive unit-bound marcher while
-the certified `d/L` path hits; pending-overlap regressions at both a far shell
-boundary and `t_max`; 120 additional grazing-biased rays against a micro-step
-oracle; fail-closed audit-state coverage; explicit no-certificate behavior when
-a bound is withheld; analytic NURBS hits; one BVH fingerprint and bit-identical
-hit receipt across 1/2/4/8 concurrent builders; mixed-backend and
+the certified `d/L` path closes a short first-root bracket; pending-overlap
+regressions at both a far shell boundary and `t_max`; witness cancellation,
+caller-limit clipping, non-adoption, loose-L, indeterminate-enclosure,
+same-sign ultra-thin-shell, and tangent fail-closed controls; 120 additional
+grazing-biased rays against a micro-step oracle; explicit no-certificate
+behavior when a bound is withheld; analytic NURBS hits; one BVH fingerprint and
+bit-identical hit receipt across 1/2/4/8 concurrent builders; mixed-backend and
 translated-scene consistency; and honestly labeled throughput telemetry. The
 tracer's Cornell EXR golden composes both F-rep sphere tracing and the mesh BVH;
 its prior 872c freeze was four-quadrant, and 8ll9 requires current-tree replay.
@@ -237,9 +247,13 @@ its prior 872c freeze was four-quadrant, and 8ll9 requires current-tree replay.
   fallback, but `TraceAudit::certified` is false and production render paths
   reject every terminal result from that trace, including a miss. Malformed
   claims stop as `InvalidSample`.
-- A `LipschitzImplicit` normalized-residual hit is not a Euclidean
-  distance-to-boundary certificate. Exact-distance charts retain world-space
-  tolerance semantics.
+- A nonzero `LipschitzImplicit` normalized residual is not a Euclidean
+  distance-to-boundary certificate. Without a rigorous singleton zero or the
+  short opposite-sign witness above, it returns `ResidualLimit` and no `Hit`.
+  Same-sign and indeterminate witnesses — including generic tangencies and
+  even-contact intervals — remain explicit no-claim outcomes until a chart
+  supplies a proximity or first-ray-root certificate. Exact-distance charts
+  retain world-space tolerance semantics.
 - The mesh BVH is the interim scalar backend; the 8-wide SIMD BVH and
   ray streams are qfx.1's ledgered follow-up scope.
 - Ray-rate NUMBERS are measured and ledgered per build/machine; the

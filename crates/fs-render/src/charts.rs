@@ -1,11 +1,12 @@
 //! CHART BACKENDS (plan §10.2, beads qfx.2 + 8ll9; [S], default-on):
-//! render any chart that supplies the typed theorem its production backend
-//! needs, WITHOUT conversion. No-claim charts remain direct-call previews and
-//! both their hits and misses are refused by production composition. Certified
+//! march any chart that supplies a typed no-tunneling theorem, WITHOUT
+//! conversion. Production accepts only geometrically authorized hits; residual
+//! limits and no-claim preview results are refused. Certified
 //! sphere tracing for SDF/F-rep charts (step sizes that PROVABLY never tunnel:
 //! the rigorous field enclosure's zero-nearest magnitude divided by certified
 //! `L` bounds a ball around `p` in which the field cannot change sign —
-//! the certificate machinery earning visual credibility), Bézier-seeded
+//! the certificate machinery earning visual credibility; short rigorously
+//! sign-changing residual brackets certify transverse hits), Bézier-seeded
 //! Newton intersection for NURBS patches, native triangle tracing over
 //! a deterministic median-split BVH, and mixed-chart scenes: one scene,
 //! three backend kinds, one image.
@@ -22,7 +23,7 @@ use fs_rep_nurbs::NurbsSurface;
 /// Bit-affecting semantics of certified sphere tracing and scalar-BVH
 /// traversal. Downstream image goldens pin this surface separately from the
 /// spectral estimator so geometry changes cannot silently move image bytes.
-pub const CHART_BACKEND_BIT_SEMANTICS_VERSION: u32 = 3;
+pub const CHART_BACKEND_BIT_SEMANTICS_VERSION: u32 = 5;
 
 /// A ray with a finite, nonzero direction. The marcher converts certified
 /// physical step radii into this ray's parameter space; unit directions remain
@@ -43,7 +44,9 @@ impl Ray {
     }
 }
 
-/// One intersection.
+/// One geometrically certified intersection. A normalized implicit-field
+/// residual without a proximity theorem is reported as
+/// [`TraceTermination::ResidualLimit`] and never constructs this type.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Hit {
     /// Ray parameter.
@@ -60,11 +63,15 @@ pub struct Hit {
 /// iteration budget is not interchangeable with a geometrically clean miss.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TraceTermination {
-    /// The surface tolerance was reached. For exact-distance charts this is a
-    /// world-space distance; for Lipschitz implicit fields it is the normalized
-    /// residual `|f| / L`, which certifies step safety but is not an upper bound
-    /// on geometric distance.
+    /// Geometric hit authority was reached: an exact-distance enclosure is
+    /// within the world-space tolerance, or a Lipschitz-implicit field has a
+    /// rigorous singleton zero enclosure or short opposite-sign bracket.
     Hit,
+    /// A non-geometric field residual reached its tolerance. In particular,
+    /// `|f| / L` for a Lipschitz-implicit field certifies a no-tunneling step
+    /// radius, not an upper bound on distance to the zero set. No [`Hit`] is
+    /// returned for this termination.
+    ResidualLimit,
     /// The ray advanced beyond `t_max` without reaching the surface.
     Miss,
     /// The fixed step budget was exhausted.
@@ -97,11 +104,10 @@ pub struct TraceAudit {
 }
 
 impl TraceAudit {
-    /// True only for a residual hit whose entire march retained the certified
-    /// no-tunneling contract. Production render paths require this stronger
-    /// verdict; direct callers may still inspect uncertified preview traces.
-    /// For [`TraceStepClaim::LipschitzImplicit`], this does not promote the
-    /// normalized residual to a geometric-distance enclosure.
+    /// True only for a geometrically authorized hit whose entire march retained
+    /// the certified no-tunneling contract. A
+    /// [`TraceTermination::ResidualLimit`] is deliberately false even when its
+    /// march was certified.
     #[must_use]
     pub const fn certifies_hit(self) -> bool {
         self.certified && matches!(self.termination, TraceTermination::Hit)
@@ -121,7 +127,12 @@ impl TraceAudit {
 /// requires the chart's typed [`TraceStepClaim`]; a sample-level Lipschitz
 /// number cannot promote the default no-claim. No-claim charts retain the
 /// historical `L = 1` preview fallback, but [`TraceAudit::certified`] is false;
-/// malformed claims fail closed.
+/// malformed claims fail closed. At a strict-sign Lipschitz-implicit residual,
+/// one non-adopted witness at most `2*eps` ahead may prove a short transverse
+/// bracket; only its evaluated midpoint, verified within `eps` of both bracket
+/// endpoints, becomes a geometric hit. Without that bracket or a rigorous
+/// singleton zero, the residual stops as [`TraceTermination::ResidualLimit`]
+/// with no [`Hit`].
 #[must_use]
 #[allow(clippy::float_cmp)] // Exact equality is the IEEE no-forward-progress test.
 #[allow(clippy::too_many_lines)] // Explicit fail-closed trace state is easier to audit in one place.
@@ -215,6 +226,7 @@ pub fn sphere_trace(
     let mut fallback_t = 0.0f64;
     let mut pending_distance_upper = 0.0f64;
     let mut pending_negative = false;
+    let mut pending_sign = CertifiedSign::Indeterminate;
     let max_steps = 4096u32;
     loop {
         // A relaxed step may not bypass either termination boundary. When its
@@ -330,8 +342,12 @@ pub fn sphere_trace(
         // feature can land on its far boundary and mint a false certificate.
         if relaxed_pending {
             let radii_lower = conservative_positive_sum(prev_radius, safe);
-            let sign_changed = d.is_sign_negative() != pending_negative;
-            if sign_changed || radii_lower <= pending_distance_upper {
+            let sign_incompatible = if trace_claim == TraceStepClaim::NoClaim {
+                d.is_sign_negative() != pending_negative
+            } else {
+                !pending_sign.same_strict(validated.certified_sign)
+            };
+            if sign_incompatible || radii_lower <= pending_distance_upper {
                 t = fallback_t;
                 relaxed_pending = false;
                 fallbacks += 1;
@@ -341,8 +357,99 @@ pub fn sphere_trace(
             relaxed_pending = false;
         }
 
-        let hit_residual_upper = validated.hit_residual_upper;
-        if caller_t <= t_max && hit_residual_upper <= eps {
+        let hit_termination = validated.hit_termination(eps);
+        if caller_t <= t_max && hit_termination == Some(TraceTermination::ResidualLimit) {
+            if trace_claim == TraceStepClaim::LipschitzImplicit {
+                match certify_short_implicit_bracket(
+                    chart,
+                    cx,
+                    ray,
+                    parameter_scale,
+                    speed_upper,
+                    t,
+                    caller_t,
+                    p,
+                    validated.certified_sign,
+                    march_t_max,
+                    t_max,
+                    eps,
+                ) {
+                    ShortBracketOutcome::Hit {
+                        caller_t,
+                        point,
+                        sample,
+                    } => {
+                        let normal = sample
+                            .gradient
+                            .and_then(normalize_gradient)
+                            .or_else(|| gradient_fd(chart, cx, point));
+                        if cx.checkpoint().is_err() {
+                            return (
+                                None,
+                                TraceAudit {
+                                    steps,
+                                    worst_step_ratio: worst_ratio,
+                                    certified: false,
+                                    fallbacks,
+                                    termination: TraceTermination::Cancelled,
+                                },
+                            );
+                        }
+                        return (
+                            Some(Hit {
+                                t: caller_t,
+                                point,
+                                normal,
+                                steps,
+                            }),
+                            TraceAudit {
+                                steps,
+                                worst_step_ratio: worst_ratio,
+                                certified,
+                                fallbacks,
+                                termination: TraceTermination::Hit,
+                            },
+                        );
+                    }
+                    ShortBracketOutcome::NoWitness => {}
+                    ShortBracketOutcome::Cancelled => {
+                        return (
+                            None,
+                            TraceAudit {
+                                steps,
+                                worst_step_ratio: worst_ratio,
+                                certified: false,
+                                fallbacks,
+                                termination: TraceTermination::Cancelled,
+                            },
+                        );
+                    }
+                    ShortBracketOutcome::InvalidSample => {
+                        return (
+                            None,
+                            TraceAudit {
+                                steps,
+                                worst_step_ratio: worst_ratio,
+                                certified: false,
+                                fallbacks,
+                                termination: TraceTermination::InvalidSample,
+                            },
+                        );
+                    }
+                }
+            }
+            return (
+                None,
+                TraceAudit {
+                    steps,
+                    worst_step_ratio: worst_ratio,
+                    certified,
+                    fallbacks,
+                    termination: TraceTermination::ResidualLimit,
+                },
+            );
+        }
+        if caller_t <= t_max && hit_termination == Some(TraceTermination::Hit) {
             let normal = s
                 .gradient
                 .and_then(normalize_gradient)
@@ -454,7 +561,20 @@ pub fn sphere_trace(
                 };
                 (sample, validated)
             };
-            if boundary_validated.hit_residual_upper <= eps {
+            let boundary_hit_termination = boundary_validated.hit_termination(eps);
+            if boundary_hit_termination == Some(TraceTermination::ResidualLimit) {
+                return (
+                    None,
+                    TraceAudit {
+                        steps,
+                        worst_step_ratio: worst_ratio,
+                        certified,
+                        fallbacks,
+                        termination: TraceTermination::ResidualLimit,
+                    },
+                );
+            }
+            if boundary_hit_termination == Some(TraceTermination::Hit) {
                 let normal = boundary_sample
                     .gradient
                     .and_then(normalize_gradient)
@@ -565,6 +685,7 @@ pub fn sphere_trace(
                     );
                 }
                 pending_negative = d.is_sign_negative();
+                pending_sign = validated.certified_sign;
                 relaxed_pending = true;
                 t = relaxed_endpoint;
             }
@@ -605,8 +726,61 @@ pub fn sphere_trace(
 struct ValidatedTraceSample {
     signed_distance: f64,
     safe_radius: f64,
-    hit_residual_upper: f64,
+    geometric_hit_upper: f64,
+    residual_upper: f64,
     hit_clearance_lower: f64,
+    certified_sign: CertifiedSign,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CertifiedSign {
+    Negative,
+    Zero,
+    Positive,
+    Indeterminate,
+}
+
+impl CertifiedSign {
+    const fn is_strict(self) -> bool {
+        matches!(self, Self::Negative | Self::Positive)
+    }
+
+    const fn same_strict(self, other: Self) -> bool {
+        matches!(
+            (self, other),
+            (Self::Negative, Self::Negative) | (Self::Positive, Self::Positive)
+        )
+    }
+
+    const fn is_opposite(self, other: Self) -> bool {
+        matches!(
+            (self, other),
+            (Self::Negative, Self::Positive) | (Self::Positive, Self::Negative)
+        )
+    }
+}
+
+enum ShortBracketOutcome {
+    Hit {
+        caller_t: f64,
+        point: Point3,
+        sample: ChartSample,
+    },
+    NoWitness,
+    Cancelled,
+    InvalidSample,
+}
+
+impl ValidatedTraceSample {
+    fn hit_termination(self, eps: f64) -> Option<TraceTermination> {
+        if self.geometric_hit_upper <= eps {
+            Some(TraceTermination::Hit)
+        } else if self.residual_upper <= eps {
+            Some(TraceTermination::ResidualLimit)
+        } else {
+            None
+        }
+    }
 }
 
 #[allow(clippy::float_cmp)] // Exact zero has exact residual and clearance.
@@ -651,25 +825,45 @@ fn validate_trace_sample(
             0.0
         };
         let magnitude_upper = trace_value.lo.abs().max(trace_value.hi.abs());
-        Some((magnitude_lower, magnitude_upper))
+        let certified_sign = if trace_value.hi < 0.0 {
+            CertifiedSign::Negative
+        } else if trace_value.lo > 0.0 {
+            CertifiedSign::Positive
+        } else if trace_value.lo == 0.0 && trace_value.hi == 0.0 {
+            CertifiedSign::Zero
+        } else {
+            CertifiedSign::Indeterminate
+        };
+        Some((magnitude_lower, magnitude_upper, certified_sign))
     } else {
         None
     };
-    let (safe_radius, hit_residual_upper, hit_clearance_lower) =
-        if let Some((magnitude_lower, magnitude_upper)) = certified_bounds {
+    let (safe_radius, geometric_hit_upper, residual_upper, hit_clearance_lower) =
+        if let Some((magnitude_lower, magnitude_upper, _)) = certified_bounds {
             if trace_claim == TraceStepClaim::ExactDistance {
                 // `ExactDistance` is a theorem about the represented real field,
                 // while a binary64 evaluation may need an outward enclosure. The
                 // closest certified endpoint to zero is the largest no-tunneling
                 // radius.
-                (magnitude_lower, magnitude_upper, magnitude_lower)
+                (
+                    magnitude_lower,
+                    magnitude_upper,
+                    magnitude_upper,
+                    magnitude_lower,
+                )
             } else {
                 // For a certified L-Lipschitz implicit field, the enclosure's
                 // distance from zero — not the rounded point estimate — backs the
-                // safe ball. The upper normalized residual remains the explicitly
-                // documented hit criterion for this claim class.
+                // safe ball. Point-local evidence authorizes a geometric hit only
+                // at exact field zero; a separate short sign bracket may later
+                // prove boundary proximity around a nonzero residual.
                 (
                     conservative_quotient_lower(magnitude_lower, lipschitz),
+                    if magnitude_upper == 0.0 {
+                        0.0
+                    } else {
+                        f64::INFINITY
+                    },
                     conservative_quotient_upper(magnitude_upper, lipschitz),
                     conservative_quotient_lower(magnitude_lower, lipschitz),
                 )
@@ -678,6 +872,7 @@ fn validate_trace_sample(
             let safe_radius = conservative_safe_radius(signed_distance, lipschitz);
             (
                 safe_radius,
+                f64::INFINITY,
                 conservative_normalized_residual_upper(signed_distance, lipschitz),
                 safe_radius,
             )
@@ -685,9 +880,152 @@ fn validate_trace_sample(
     Some(ValidatedTraceSample {
         signed_distance,
         safe_radius,
-        hit_residual_upper,
+        geometric_hit_upper,
+        residual_upper,
         hit_clearance_lower,
+        certified_sign: certified_bounds.map_or(CertifiedSign::Indeterminate, |(_, _, sign)| sign),
     })
+}
+
+/// Try to turn a residual-only implicit sample into geometric proximity by
+/// looking for a rigorous sign witness in a SHORT forward segment. The probe
+/// is evidence only: it is never adopted as march state. Opposite strict signs
+/// (or a rigorous zero at the probe) establish a real boundary in the segment;
+/// an evaluated midpoint is returned only when its outward-rounded distance to
+/// both endpoints is at most `eps`.
+#[allow(clippy::too_many_arguments)]
+fn certify_short_implicit_bracket(
+    chart: &dyn Chart,
+    cx: &Cx<'_>,
+    ray: &Ray,
+    parameter_scale: f64,
+    speed_upper: f64,
+    current_working_t: f64,
+    current_caller_t: f64,
+    current_point: Point3,
+    current_sign: CertifiedSign,
+    working_t_max: f64,
+    caller_t_max: f64,
+    eps: f64,
+) -> ShortBracketOutcome {
+    if !current_sign.is_strict() || current_caller_t >= caller_t_max {
+        return ShortBracketOutcome::NoWitness;
+    }
+    if cx.checkpoint().is_err() {
+        return ShortBracketOutcome::Cancelled;
+    }
+
+    // A segment of diameter at most 2*eps has a midpoint within eps of
+    // every point in that segment. Keep the comparison in actual evaluated
+    // Euclidean geometry; parameter-space estimates only seed the candidate.
+    let max_distance = eps * 2.0;
+    if !max_distance.is_finite() || max_distance <= 0.0 {
+        return ShortBracketOutcome::NoWitness;
+    }
+
+    let boundary_point = ray.at(caller_t_max);
+    let boundary_distance = point_distance_upper(current_point, boundary_point);
+    let (probe_caller_t, probe_point) = if boundary_point != current_point
+        && boundary_distance.is_finite()
+        && boundary_distance <= max_distance
+    {
+        (caller_t_max, boundary_point)
+    } else {
+        let probe_dt = conservative_safe_parameter(max_distance, speed_upper);
+        let Some((probe_working_t, _)) = certified_safe_endpoint(
+            ray,
+            parameter_scale,
+            current_point,
+            current_working_t,
+            probe_dt,
+            max_distance,
+            working_t_max,
+        ) else {
+            return ShortBracketOutcome::NoWitness;
+        };
+        let probe_caller_t = (probe_working_t / parameter_scale).min(caller_t_max);
+        if !probe_caller_t.is_finite() || probe_caller_t <= current_caller_t {
+            return ShortBracketOutcome::NoWitness;
+        }
+        let probe_point = ray.at(probe_caller_t);
+        let probe_distance = point_distance_upper(current_point, probe_point);
+        if probe_point == current_point
+            || !probe_distance.is_finite()
+            || probe_distance > max_distance
+        {
+            return ShortBracketOutcome::NoWitness;
+        }
+        (probe_caller_t, probe_point)
+    };
+
+    if cx.checkpoint().is_err() {
+        return ShortBracketOutcome::Cancelled;
+    }
+    let probe_sample = chart.eval(probe_point, cx);
+    if cx.checkpoint().is_err() {
+        return ShortBracketOutcome::Cancelled;
+    }
+    let probe_trace = chart.trace_value_enclosure(probe_point, &probe_sample, cx);
+    if cx.checkpoint().is_err() {
+        return ShortBracketOutcome::Cancelled;
+    }
+    let Some(probe_validated) = validate_trace_sample(
+        &probe_sample,
+        TraceStepClaim::LipschitzImplicit,
+        probe_trace,
+    ) else {
+        return ShortBracketOutcome::InvalidSample;
+    };
+    if probe_validated.certified_sign != CertifiedSign::Zero
+        && !current_sign.is_opposite(probe_validated.certified_sign)
+    {
+        return ShortBracketOutcome::NoWitness;
+    }
+
+    let midpoint_t = f64::midpoint(current_caller_t, probe_caller_t);
+    if !midpoint_t.is_finite() || midpoint_t <= current_caller_t || midpoint_t >= probe_caller_t {
+        return ShortBracketOutcome::NoWitness;
+    }
+    let midpoint = ray.at(midpoint_t);
+    if !midpoint.x.is_finite() || !midpoint.y.is_finite() || !midpoint.z.is_finite() {
+        return ShortBracketOutcome::InvalidSample;
+    }
+    let from_current = point_distance_upper(midpoint, current_point);
+    let from_probe = point_distance_upper(midpoint, probe_point);
+    if !from_current.is_finite()
+        || !from_probe.is_finite()
+        || from_current > eps
+        || from_probe > eps
+    {
+        return ShortBracketOutcome::NoWitness;
+    }
+
+    if cx.checkpoint().is_err() {
+        return ShortBracketOutcome::Cancelled;
+    }
+    let midpoint_sample = chart.eval(midpoint, cx);
+    if cx.checkpoint().is_err() {
+        return ShortBracketOutcome::Cancelled;
+    }
+    let midpoint_trace = chart.trace_value_enclosure(midpoint, &midpoint_sample, cx);
+    if cx.checkpoint().is_err() {
+        return ShortBracketOutcome::Cancelled;
+    }
+    if validate_trace_sample(
+        &midpoint_sample,
+        TraceStepClaim::LipschitzImplicit,
+        midpoint_trace,
+    )
+    .is_none()
+    {
+        return ShortBracketOutcome::InvalidSample;
+    }
+
+    ShortBracketOutcome::Hit {
+        caller_t: midpoint_t,
+        point: midpoint,
+        sample: midpoint_sample,
+    }
 }
 
 fn conservative_quotient_lower(numerator_lower: f64, denominator: f64) -> f64 {
@@ -1523,7 +1861,8 @@ fn outward_slab_interval(lo: f64, hi: f64, origin: f64, direction: f64) -> (f64,
 
 /// One scene, three backend kinds, one image: closest hit wins.
 pub enum Backend<'a> {
-    /// Any chart with a certified Lipschitz bound (SDF / F-rep).
+    /// A chart with certified trace evidence. Nonzero implicit residual limits
+    /// remain backend refusals until the chart supplies geometric proximity.
     Chart(&'a dyn Chart),
     /// A NURBS patch.
     Nurbs(&'a NurbsSurface<f64>),
@@ -1599,7 +1938,9 @@ pub fn trace_scene(
                 let (hit, audit) = sphere_trace(*chart, cx, ray, t_max, eps, 1.0);
                 if matches!(
                     audit.termination,
-                    TraceTermination::Hit | TraceTermination::Miss
+                    TraceTermination::Hit
+                        | TraceTermination::ResidualLimit
+                        | TraceTermination::Miss
                 ) && !audit.certified
                 {
                     return Err(SceneTraceError::UncertifiedTrace);
