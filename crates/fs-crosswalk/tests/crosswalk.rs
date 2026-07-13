@@ -10,8 +10,8 @@ use fs_crosswalk::{
 
 #[test]
 fn compatibility_versions_are_explicit() {
-    assert_eq!(CROSSWALK_VERSION, 4);
-    assert_eq!(SUPPORTED_PACKAGE_FORMAT, 7);
+    assert_eq!(CROSSWALK_VERSION, 5);
+    assert_eq!(SUPPORTED_PACKAGE_FORMAT, 8);
 }
 
 #[test]
@@ -82,6 +82,22 @@ fn every_standard_covers_all_twelve_concepts() {
     for s in Standard::ALL {
         assert_eq!(for_standard(s).len(), 12, "{:?}", s.label());
         assert!(!s.full_name().is_empty());
+    }
+}
+
+#[test]
+fn certificate_rows_explicitly_cover_portable_witnesses_without_claiming_verification() {
+    for standard in Standard::ALL {
+        let entry = lookup(PackageConcept::Certificate, standard)
+            .expect("every standard has one certificate row");
+        let Counterpart::Mapped { note, .. } = entry.counterpart else {
+            panic!("certificate unexpectedly lacks a counterpart for {standard:?}");
+        };
+        assert!(note.contains("portable witness"), "{standard:?}: {note}");
+        assert!(
+            note.contains("does not establish semantic re-verification"),
+            "{standard:?}: {note}"
+        );
     }
 }
 

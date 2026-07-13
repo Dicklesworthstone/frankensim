@@ -22,13 +22,13 @@
 //! for engineering use; they are not an official ASME/FAA/EASA determination.
 
 /// The crosswalk vocabulary version.
-pub const CROSSWALK_VERSION: u32 = 4;
+pub const CROSSWALK_VERSION: u32 = 5;
 
 /// Evidence-package schema whose concepts this crosswalk describes.
 ///
 /// Kept independent of `fs-package` to preserve the dependency direction;
 /// the package crate asserts this value against its own format constant.
-pub const SUPPORTED_PACKAGE_FORMAT: u32 = 7;
+pub const SUPPORTED_PACKAGE_FORMAT: u32 = 8;
 
 /// An evidence-package field/concept (the FrankenSim side of the map).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,7 +39,7 @@ pub enum PackageConcept {
     ValidatedColor,
     /// An estimated-color claim (a conjecture with dispersion).
     EstimatedColor,
-    /// The raw certificate payload behind a claim.
+    /// The raw certificate payload and its portable semantic witness, when present.
     Certificate,
     /// A falsifier log (adversarial attempts / negative results).
     FalsifierLog,
@@ -287,30 +287,30 @@ const CROSSWALK: [CrosswalkEntry; 48] = [
         "Analysis uncertainty / declared conservatism",
         "estimated results carry explicit conservatism assumptions",
     ),
-    // Certificate — the raw bound payload.
+    // Certificate — the raw bound payload and its portable witness, when present.
     m(
         Certificate,
         AsmeVvV10,
         "Numerical error estimate (e.g. GCI)",
-        "the certificate is the numerical-error estimate record",
+        "the certificate, including a portable witness when present, is the numerical-error estimate record; the mapping alone does not establish semantic re-verification",
     ),
     m(
         Certificate,
         AsmeVvV20,
         "u_num record (grid-convergence / residual basis)",
-        "the raw interval is the u_num evidence",
+        "the raw interval and any portable witness are the u_num evidence record; the mapping alone does not establish semantic re-verification",
     ),
     m(
         Certificate,
         AsmeVvV40,
         "Verification output evidence",
-        "the certificate is the verification artifact",
+        "the certificate and portable witness are verification artifacts; the mapping alone does not establish semantic re-verification",
     ),
     m(
         Certificate,
         FaaEasaCbA,
         "Documented accuracy metric",
-        "the certificate is the reported accuracy figure",
+        "the certificate and portable witness carry the reported accuracy evidence; the mapping alone does not establish semantic re-verification",
     ),
     // Falsifier log — adversarial negative results.
     nc(

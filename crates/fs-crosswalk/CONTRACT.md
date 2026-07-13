@@ -8,14 +8,15 @@ evidence-package fields onto the regulator's existing standards language.
 Layer UTIL (pure data + audit; no dependencies). It owns risk R9
 (standards-body latency): every field is mapped or explicitly flagged, so the
 package doubles as internal-QA / B2B diligence collateral regardless of
-standards-body pace. `CROSSWALK_VERSION = 4` identifies this vocabulary and
-`SUPPORTED_PACKAGE_FORMAT = 7` makes package compatibility explicit without a
+standards-body pace. `CROSSWALK_VERSION = 5` identifies this vocabulary and
+`SUPPORTED_PACKAGE_FORMAT = 8` makes package compatibility explicit without a
 dependency cycle.
 
 ## Public types and semantics
 
 - `PackageConcept` (12) — the evidence-package fields (three colors,
-  certificate, falsifier log, regime tag, anchoring dataset, provenance, Merkle
+  certificate including its portable semantic witness when present, falsifier
+  log, regime tag, anchoring dataset, provenance, Merkle
   root, signature, re-verified claim origin, and authenticated waiver
   authorization); `Standard` (4) — ASME V&V 10 / 20 / 40 and FAA/EASA CbA.
   Both expose `ALL` and `label()`; `Standard::full_name()`.
@@ -60,25 +61,35 @@ None.
 
 ## Conformance tests
 
-`tests/crosswalk.rs` (Proposal 12, 8 cases): explicit package/vocabulary
+`tests/crosswalk.rs` (Proposal 12): explicit package/vocabulary
 compatibility versions; full coverage + no silent gaps; honesty (explicit
 no-counterpart rows exist, verified-color does map);
 per-concept (×4) and per-standard (×12) slices; representative validation,
-claim-origin, and waiver decisions; unique labels; deterministic JSON.
+claim-origin, waiver, and portable-witness decisions; unique labels;
+deterministic JSON.
 
-## Vocabulary v4: authenticated concepts on schema v7
+## Vocabulary v5: portable certificate transport on schema v8
+
+Package format 8 adds a portable semantic witness to a source certificate.
+The static crosswalk subsumes that envelope into `Certificate`: the raw bound
+and its family-owned witness are one verification-evidence record in every
+target vocabulary. Each certificate row explicitly states that this mapping
+alone does not establish semantic re-verification. Only a successful
+`fs-checker` plugin pass can establish that proof state.
+
+## Vocabulary v4: authenticated concepts (historical basis)
 
 Package format 6 introduced scientific claim origin and waiver authorization as
-independently observable proof states; current package format 7 retains those
-semantics. `ClaimOrigin` maps to
+independently observable proof states. `ClaimOrigin` maps to
 credibility-evidence traceability in ASME V&V 40 and analysis-data traceability
 in FAA/EASA CbA; Estimated declarations, administrative waivers, and
 waiver-dependent descendants do not establish this concept. V&V 10/20 have
 explicit no-counterpart rows. `WaiverAuthorization` maps only to FAA/EASA's
 approved deviations/limitations vocabulary. Signature rows refer specifically
 to a policy-authenticated signature carrying release-purpose intent bound to
-checker protocol and package root. This mapping does not establish checker
-admission and does not claim signer identity, role, authorization, or authorship.
+checker protocol, package root, and semantic-checker context. This mapping does
+not establish checker admission and does not claim signer identity, role,
+authorization, or authorship.
 
 ## Package-grounded coverage (owned by fs-package)
 
