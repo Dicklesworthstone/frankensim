@@ -22,8 +22,11 @@ fs-blake3, fs-substrate, fs-obs.
   worker (Decalogue P2). fs-rand's Philox consumes the 128-bit key.
 - `CancelGate` — request → drain → finalize: `request()` is idempotent and
   stamps the first-request time; workers finish their current tile, stop
-  claiming, and the run returns a structured outcome. Timestamps feed
-  reports only, never results.
+  claiming, and the run returns a structured outcome. `new_clock_free()` is
+  the explicit exception for bounded manually assembled contexts on targets
+  where reading a platform time source can trap: it keeps only a private
+  sentinel request marker, while timestamp accessors and `RunReport` expose no
+  latency sample. Timestamps feed reports only, never results.
 - `TileKernel` (`type Out: Reduce; tiles() -> TilePlan; run(tile, &Cx) ->
   ControlFlow<Cancelled, Out>`) and `TilePlan { tiles, kernel }` with the
   FNV-stable `kernel_id()`.
@@ -389,9 +392,11 @@ quarantined in `RunReport`/events, never in results.
 The throughput lane polls the gate at every tile boundary and requires
 kernels to poll `cx.checkpoint()` at bounded strides inside long tiles;
 drain semantics per invariant 4. The latency lane inherits asupersync's
-region state machine (request → drain → finalize) unmodified. Cancel
-latency is MEASURED per run (histogram in `RunReport`, ledgered via events);
-see no-claims for the 200 µs target's status.
+region state machine (request → drain → finalize) unmodified. Cancel latency is
+MEASURED per run only for ordinary pool gates (histogram in `RunReport`,
+ledgered via events); clock-free manual gates produce an empty latency sample
+set and explicitly make no latency claim.
+See no-claims for the 200 µs target's status.
 
 ## Unsafe boundary
 None. The pool is safe Rust (scoped threads, mutex deques, atomics);
@@ -421,7 +426,8 @@ complete `pairwise_fold` syntax tree against an independently stated
 `next_power_of_two(n) / 2` recursion (seed `0xE008_0001`). Existing fixed and
 G5 reduction pins remain unchanged.
 tests/constellation_smoke.rs pins the
-asupersync Budget vocabulary. In-module unit suites cover the gate, keys,
+asupersync Budget vocabulary. In-module unit suites cover ordinary and
+clock-free gate stamping, keys,
 Reduce laws, partitioning, victim orders, self-cancellation, and pool
 survival after panics, exact finite-budget propagation, simultaneous typed
 allocation refusals, and mixed panic/refusal precedence. GEMM tuner unit drills cover hostile embedded cache

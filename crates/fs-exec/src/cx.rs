@@ -98,23 +98,33 @@ impl StreamKey {
 /// then stop claiming) and the run finalizes with structured outcomes —
 /// never a silent drop (Decalogue P7).
 ///
-/// The gate owns a monotonic origin so request/observation timestamps share
-/// one domain for latency histograms. Timestamps feed REPORTS only — they
+/// An ordinary gate owns a monotonic origin so request/observation timestamps
+/// share one domain for latency histograms. A deliberately clock-free gate is
+/// also available for bounded, manually constructed contexts on targets where
+/// reading a platform time source can trap. Its request stamp is only a private
+/// presence marker, never latency evidence. Timestamps feed REPORTS only — they
 /// never influence results (determinism discipline, like fs-substrate's
 /// measured bandwidth).
 #[derive(Debug)]
 pub struct CancelGate {
     requested: AtomicBool,
-    origin: std::time::Instant,
-    /// Nanoseconds after `origin` of the FIRST request. 0 = unset.
+    timestamp_source: CancelTimestampSource,
+    /// Nanoseconds after the monotonic origin of the FIRST request, or the
+    /// clock-free sentinel `1`. Zero means unset.
     requested_at_ns: AtomicU64,
+}
+
+#[derive(Debug)]
+enum CancelTimestampSource {
+    Monotonic(std::time::Instant),
+    ClockFree,
 }
 
 impl Default for CancelGate {
     fn default() -> Self {
         CancelGate {
             requested: AtomicBool::new(false),
-            origin: std::time::Instant::now(),
+            timestamp_source: CancelTimestampSource::Monotonic(std::time::Instant::now()),
             requested_at_ns: AtomicU64::new(0),
         }
     }
@@ -127,17 +137,43 @@ impl CancelGate {
         CancelGate::default()
     }
 
-    /// Nanoseconds since this gate's origin (shared timestamp domain for
-    /// latency accounting).
+    /// Fresh gate that never reads a platform time source.
+    ///
+    /// This is for bounded, manually assembled [`Cx`] values on targets such as
+    /// `wasm32-unknown-unknown`, where `std::time::Instant::now()` can trap. A
+    /// cancellation request is internally marked with the sentinel `1`, but the
+    /// timestamp accessors and pool reports expose no latency sample.
     #[must_use]
-    pub fn now_ns(&self) -> u64 {
-        self.origin.elapsed().as_nanos() as u64
+    pub const fn new_clock_free() -> Self {
+        Self {
+            requested: AtomicBool::new(false),
+            timestamp_source: CancelTimestampSource::ClockFree,
+            requested_at_ns: AtomicU64::new(0),
+        }
     }
 
-    /// Request cancellation (idempotent; the first request's timestamp is
-    /// the one latency histograms measure from).
+    /// Nanoseconds since an ordinary gate's origin (shared timestamp domain for
+    /// latency accounting). A clock-free gate always returns `0`, meaning no
+    /// timestamp is available.
+    #[must_use]
+    pub fn now_ns(&self) -> u64 {
+        self.latency_now_ns().unwrap_or(0)
+    }
+
+    pub(crate) fn latency_now_ns(&self) -> Option<u64> {
+        match &self.timestamp_source {
+            CancelTimestampSource::Monotonic(origin) => Some(origin.elapsed().as_nanos() as u64),
+            CancelTimestampSource::ClockFree => None,
+        }
+    }
+
+    /// Request cancellation (idempotent; for ordinary gates, the first
+    /// request's timestamp is the one latency histograms measure from).
     pub fn request(&self) {
-        let now = self.now_ns().max(1);
+        let now = match &self.timestamp_source {
+            CancelTimestampSource::Monotonic(origin) => (origin.elapsed().as_nanos() as u64).max(1),
+            CancelTimestampSource::ClockFree => 1,
+        };
         let _ = self
             .requested_at_ns
             .compare_exchange(0, now, Ordering::AcqRel, Ordering::Acquire);
@@ -150,9 +186,13 @@ impl CancelGate {
         self.requested.load(Ordering::Acquire)
     }
 
-    /// Timestamp of the first request (ns after origin), if any.
+    /// Timestamp of the first request (ns after an ordinary gate's origin).
+    /// Clock-free gates always return `None`, even after a request.
     #[must_use]
     pub fn requested_at_ns(&self) -> Option<u64> {
+        if matches!(&self.timestamp_source, CancelTimestampSource::ClockFree) {
+            return None;
+        }
         match self.requested_at_ns.load(Ordering::Acquire) {
             0 => None,
             t => Some(t),
@@ -400,6 +440,23 @@ mod tests {
         assert!(gate.is_requested());
         assert_eq!(gate.requested_at_ns(), Some(first));
         assert!(gate.now_ns() >= first);
+    }
+
+    #[test]
+    fn clock_free_gate_uses_only_a_non_duration_request_marker() {
+        let gate = CancelGate::new_clock_free();
+        assert!(!gate.is_requested());
+        assert_eq!(gate.now_ns(), 0);
+        assert_eq!(gate.requested_at_ns(), None);
+
+        gate.request();
+        assert!(gate.is_requested());
+        assert_eq!(gate.now_ns(), 0);
+        assert_eq!(gate.requested_at_ns(), None);
+
+        gate.request();
+        assert_eq!(gate.now_ns(), 0);
+        assert_eq!(gate.requested_at_ns(), None);
     }
 
     #[test]

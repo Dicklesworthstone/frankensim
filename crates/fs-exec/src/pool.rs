@@ -991,12 +991,14 @@ fn worker_loop<Caps, K: TileKernel>(
             ctx.gate.request();
         }
         if ctx.gate.is_requested() {
-            let _ = ctx.observed[w].get().compare_exchange(
-                0,
-                ctx.gate.now_ns().max(1),
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            );
+            if let Some(observed_at_ns) = ctx.gate.latency_now_ns() {
+                let _ = ctx.observed[w].get().compare_exchange(
+                    0,
+                    observed_at_ns.max(1),
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                );
+            }
             break;
         }
         // Own deque first (front: preserve locality runs).
@@ -3045,6 +3047,18 @@ mod tests {
             p.arena_pool().stats().quiescent(),
             "cancelled work must reclaim"
         );
+    }
+
+    #[test]
+    fn clock_free_gate_never_mints_cancel_latency_samples() {
+        let p = pool(2);
+        let gate = CancelGate::new_clock_free();
+        gate.request();
+
+        let (result, report) = p.run_with_gate(&SumKernel { tiles: 64 }, &gate);
+        assert!(matches!(result, Err(RunError::Cancelled { .. })));
+        assert!(report.cancel_latencies_ns.is_empty());
+        assert_eq!(report.cancel_latency_p99_ns(), None);
     }
 
     #[test]
