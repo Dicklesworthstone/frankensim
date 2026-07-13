@@ -674,6 +674,7 @@ dependencies = [
  "fs-math",
  "fs-obs",
  "fs-rand",
+ "fs-robust",
 ]
 
 [[package]]
@@ -768,6 +769,8 @@ name = "fs-frame"
 version = "0.0.1"
 dependencies = [
  "fs-eproc",
+ "fs-exec",
+ "fs-robust",
  "fs-scenario",
  "fs-solid",
  "fs-truss",
@@ -1141,6 +1144,7 @@ dependencies = [
  "fnx-classes",
  "fnx-runtime",
  "fs-constraint",
+ "fs-exec",
  "fs-solid",
  "fs-sparse",
 ]
@@ -1150,6 +1154,7 @@ name = "fs-truss-e2e"
 version = "0.0.1"
 dependencies = [
  "fs-evidence",
+ "fs-exec",
  "fs-tropical",
  "fs-truss",
 ]
@@ -1163,6 +1168,7 @@ dependencies = [
  "fs-la",
  "fs-math",
  "fs-rand",
+ "fs-robust",
 ]
 
 [[package]]
@@ -1175,6 +1181,7 @@ dependencies = [
  "fs-math",
  "fs-race",
  "fs-render",
+ "fs-robust",
 ]
 
 [[package]]

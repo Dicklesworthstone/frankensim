@@ -29,7 +29,9 @@ crates. Layer: **L6 HELM / interface surface**. The crate compiles as an
 2. Public demo inputs are clamped or bounded before allocating or
    iterating so browser calls cannot request unbounded work.
 3. Fallible demo paths return `NaN`, empty vectors, or bounded fallback
-   values rather than trapping across the WASM boundary.
+   values rather than trapping across the WASM boundary. The vessel CVaR
+   surface maps canonical `fs-robust` validation errors to `NaN` here instead
+   of reintroducing a panic-only risk implementation.
 4. The nested workspace isolates browser-only dependencies from the
    native workspace dependency policy.
 

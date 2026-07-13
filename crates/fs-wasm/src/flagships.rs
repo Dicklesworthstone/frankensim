@@ -643,6 +643,10 @@ fn growth_mm(
         .fold(f64::NEG_INFINITY, f64::max)
 }
 
+fn canonical_cvar_or_nan(losses: &[f64], beta: f64) -> f64 {
+    fs_robust::cvar(losses, beta).unwrap_or(f64::NAN)
+}
+
 /// **VESSEL** — the never-dribbling carafe flagship, run end to end at reduced
 /// size. Five stages, one flat `Vec<f64>`.
 ///
@@ -736,11 +740,7 @@ pub fn run_vessel(lip_x1000: u32) -> Vec<f64> {
         let pr = fs_vessel::stability::VesselProfile::carafe(lp);
         let nominal = growth_mm(&pr, 1.0, 1.0, 3, 3, 16);
         let losses = band_losses(lp);
-        let cvar = if losses.iter().all(|v| v.is_finite()) {
-            fs_vessel::robust::empirical_cvar(&losses, beta)
-        } else {
-            f64::NAN
-        };
+        let cvar = canonical_cvar_or_nan(&losses, beta);
         cvar_rows.push((lp, nominal, cvar));
     }
     // nominal lip minimizes nominal growth; robust lip minimizes CVaR.
@@ -1752,7 +1752,14 @@ mod tests {
         let v = run_vessel(1000);
         let robust_offband = v[17];
         let nominal_offband = v[18];
+        let profile_samples = v[1] as usize;
+        let growth_stations = v[2] as usize;
+        let nx = v[4] as usize;
+        let ny = v[5] as usize;
+        let frames = v[6] as usize;
         let render_res = v[7] as usize;
+        let cvar_rows = v[8] as usize;
+        let cvar_start = 20 + 2 * profile_samples + 2 * growth_stations + frames * nx * ny;
         let tail = v.len();
         let robust_lip = v[tail - 3];
         let nominal_lip = v[tail - 2];
@@ -1777,6 +1784,12 @@ mod tests {
             "robust_offband {robust_offband} !< nominal_offband {nominal_offband}"
         );
         assert!(
+            v[cvar_start..cvar_start + 3 * cvar_rows]
+                .chunks_exact(3)
+                .all(|row| row[2].is_finite()),
+            "canonical CVaR returned a non-finite value for a finite vessel fluid band"
+        );
+        assert!(
             tmin >= 0.0 && tmax <= 1.0,
             "transmittance out of [0,1]: [{tmin},{tmax}]"
         );
@@ -1784,6 +1797,13 @@ mod tests {
             tmax - tmin > 0.05,
             "transmittance range too small: [{tmin},{tmax}]"
         );
+    }
+
+    #[test]
+    fn vessel_cvar_validation_refuses_without_trapping() {
+        assert!(canonical_cvar_or_nan(&[], 0.8).is_nan());
+        assert!(canonical_cvar_or_nan(&[1.0], f64::NAN).is_nan());
+        assert!(canonical_cvar_or_nan(&[1.0, f64::INFINITY], 0.8).is_nan());
     }
 
     #[test]
