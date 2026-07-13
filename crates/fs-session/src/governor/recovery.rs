@@ -728,10 +728,40 @@ fn decode_pressure_terminal_receipt(
     }
     let content_hash = decoder.hash()?;
     decoder.finish()?;
+    let canonical_events = events.iter().enumerate().all(|(index, event)| {
+        let expected_step = LADDER[index];
+        let is_pause = expected_step == DegradationStep::PauseSerializeResume;
+        let expected_phase = if is_pause {
+            StepPhase::Requested
+        } else {
+            StepPhase::Declared
+        };
+        let expected_request = is_pause.then_some(PauseRequestId {
+            governor_id: action_id.governor_id,
+            session: action_id.session,
+            gate_generation: action_id.generation,
+            requested_ordinal: event.ordinal,
+        });
+        event.session == action_id.session
+            && event.step == expected_step
+            && event.pressure_level == level
+            && event.phase == expected_phase
+            && event.attribution == degradation_attribution(expected_step)
+            && event.requested_ordinal.is_none()
+            && event.checkpoint.is_none()
+            && event.gate_generation == is_pause.then_some(action_id.generation)
+            && event.pause_request_id == expected_request
+            && event.pressure_action_id == Some(action_id)
+    });
+    let dense_ordinals = events.windows(2).all(|pair| {
+        pair[0]
+            .ordinal
+            .checked_add(1)
+            .is_some_and(|next| next == pair[1].ordinal)
+    });
     if level != u8::try_from(event_count).expect("ladder length fits u8")
-        || events.iter().any(|event| {
-            event.session != action_id.session || event.pressure_action_id != Some(action_id)
-        })
+        || !canonical_events
+        || !dense_ordinals
         || pressure_receipt_hash(action_id, level, &events) != content_hash
     {
         return Err(SessionError::TerminalCorrupt {
@@ -940,9 +970,34 @@ fn decode_pause_ack_terminal_receipt(
     let gate_binding = decoder.hash()?;
     let content_hash = decoder.hash()?;
     decoder.finish()?;
-    if event.pause_request_id != Some(request_id)
+    let expected_resume_generation = request_id.gate_generation.checked_add(1);
+    let expected_attribution = event.checkpoint.as_ref().map(|evidence| {
+        format!(
+            "pause complete: checkpoint evidence ({} bytes, digest {}) acknowledges \
+             the request at ordinal {} and rotates gate generation {} to {resume_generation}",
+            evidence.byte_len,
+            evidence.digest,
+            request_id.requested_ordinal,
+            request_id.gate_generation,
+        )
+    });
+    let canonical_action = event.pressure_action_id.is_some_and(|action| {
+        action.governor_id == request_id.governor_id
+            && action.session == request_id.session
+            && action.generation == request_id.gate_generation
+    });
+    if event.session != request_id.session
+        || event.step != DegradationStep::PauseSerializeResume
+        || event.pressure_level != 3
+        || event.pause_request_id != Some(request_id)
         || event.phase != StepPhase::Complete
         || event.checkpoint.is_none()
+        || event.attribution != expected_attribution.unwrap_or_default()
+        || event.ordinal <= request_id.requested_ordinal
+        || event.requested_ordinal != Some(request_id.requested_ordinal)
+        || event.gate_generation != Some(request_id.gate_generation)
+        || !canonical_action
+        || expected_resume_generation != Some(resume_generation)
         || resumed_gate_binding(request_id, resume_generation) != gate_binding
         || pause_acknowledgement_hash(request_id, &event, resume_generation, gate_binding)
             != content_hash
@@ -1054,6 +1109,7 @@ fn cached_pause_acknowledgement(
     let Some(replay) = inner.pause_acknowledgements.get(&request_id) else {
         return Ok(None);
     };
+    let completed = inner.completed_pause.get(&request_id.session.0).copied();
     let token = inner
         .tokens
         .get(&request_id.session.0)
@@ -1078,6 +1134,14 @@ fn cached_pause_acknowledgement(
                 id: request_id.session.0,
             })?;
     if event != &expected.event
+        || !completed.is_some_and(|completed| {
+            completed.request_id == request_id
+                && completed.resume_generation == replay.resume_generation
+                && completed.gate_binding == replay.gate_binding
+                && completed.acknowledgement_hash == replay.content_hash
+        })
+        || inner.gate_generations.get(&request_id.session.0)
+            != Some(&replay.resume_generation)
         || replay.resume_generation != expected.resume_generation
         || replay.gate_binding != expected.gate_binding
         || replay.content_hash != expected.content_hash
@@ -1126,7 +1190,6 @@ fn cached_resume_activation(
         || completed.gate_binding != acknowledgement.gate_binding
         || inner.gate_phases.get(&request_id.session.0) != Some(&GatePhase::Running)
         || !Arc::ptr_eq(current_gate, &acknowledgement.resume_gate)
-        || current_gate.is_requested()
         || receipt.acknowledgement_hash != acknowledgement.content_hash
         || receipt.gate_binding != acknowledgement.gate_binding
     {

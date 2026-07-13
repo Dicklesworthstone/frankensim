@@ -17,18 +17,20 @@
 //!   (smooth min with radius `r`): C¹ everywhere, weights sum to one, and
 //!   the radius is a DESIGN LEVER (`(fillet :r 3mm)` is a blend radius).
 //!
-//! Honesty of the field: valid sphere/half-space/cylinder/box primitives and
-//! ring tori carry exact-distance semantics; horn/spindle tori, offsets, and
-//! Boolean composites explicitly downgrade magnitude exactness. Every valid
-//! node preserves its recorded Lipschitz composition rule and vanishes on its
-//! own region's boundary — hence
+//! Honesty of the field: valid sphere/cylinder/box primitives, ring tori, and
+//! coordinate-axis half-spaces carry exact-distance semantics. A generic
+//! normalized half-space or a nontrivial binary64 Rodrigues transform instead
+//! carries a rigorous Lipschitz-implicit claim: rounded normalization does not
+//! justify an exact Euclidean-distance theorem. Horn/spindle tori, offsets, and
+//! Boolean composites likewise downgrade magnitude exactness. Every valid node
+//! preserves its recorded Lipschitz composition rule and vanishes on its own
+//! region's boundary — hence
 //! `|f(p)| ≤ dist(p, ∂Ω)` with the EXACT sign. That one-sided conservative
 //! bound is precisely the sphere-tracing safety contract; the magnitude
 //! is NOT the exact distance once a Boolean or erosion is involved, so
-//! composite samples carry an `Estimate` certificate (see CONTRACT.md
-//! no-claims). Primitive paths proven by `is_exact` retain the exact-distance
-//! theorem but publish outward evaluation enclosures rather than false
-//! binary64 singletons.
+//! composite samples still carry rigorous outward evaluation enclosures.
+//! Primitive paths proven by `is_exact` retain the exact-distance theorem, but
+//! likewise publish enclosures rather than false binary64 singletons.
 
 mod ival;
 
@@ -257,11 +259,16 @@ impl FrepBuilder {
     }
 
     fn unit(field: &'static str, v: Vec3) -> Result<Vec3, FrepError> {
-        let n = v.norm();
-        if n < 1e-12 {
+        let scale = v.x.abs().max(v.y.abs()).max(v.z.abs());
+        if !scale.is_finite() || scale == 0.0 {
             return Err(FrepError::ZeroVector { field });
         }
-        Ok(v.scale(1.0 / n))
+        let scaled = v.scale(1.0 / scale);
+        let scaled_norm = scaled.norm();
+        if !scaled_norm.is_finite() || scale * scaled_norm < 1e-12 {
+            return Err(FrepError::ZeroVector { field });
+        }
+        Ok(scaled.scale(1.0 / scaled_norm))
     }
 
     /// Sphere primitive.
@@ -422,6 +429,63 @@ pub(crate) fn rotate_vec(v: Vec3, axis: Vec3, angle: f64) -> Vec3 {
         v.y * c + kv.y * s + axis.y * kd * (1.0 - c),
         v.z * c + kv.z * s + axis.z * kd * (1.0 - c),
     )
+}
+
+fn finite_point(point: Point3) -> bool {
+    point.x.is_finite() && point.y.is_finite() && point.z.is_finite()
+}
+
+fn finite_vec(vector: Vec3) -> bool {
+    vector.x.is_finite() && vector.y.is_finite() && vector.z.is_finite()
+}
+
+#[allow(clippy::float_cmp)] // Only exactly representable coordinate axes retain the theorem.
+fn coordinate_axis_unit(vector: Vec3) -> bool {
+    (vector.x.abs() == 1.0 && vector.y == 0.0 && vector.z == 0.0)
+        || (vector.x == 0.0 && vector.y.abs() == 1.0 && vector.z == 0.0)
+        || (vector.x == 0.0 && vector.y == 0.0 && vector.z.abs() == 1.0)
+}
+
+fn add_upper(lhs: f64, rhs: f64) -> f64 {
+    let sum = lhs + rhs;
+    if sum.is_nan() {
+        f64::INFINITY
+    } else if sum.is_finite() {
+        sum.next_up()
+    } else {
+        sum
+    }
+}
+
+fn mul_upper(lhs: f64, rhs: f64) -> f64 {
+    let product = lhs * rhs;
+    if product.is_nan() {
+        f64::INFINITY
+    } else if product.is_finite() {
+        product.next_up()
+    } else {
+        product
+    }
+}
+
+/// Euclidean-norm upper bound via the outward-rounded L1 norm.
+fn vector_norm_upper(vector: Vec3) -> f64 {
+    if !finite_vec(vector) {
+        return f64::INFINITY;
+    }
+    add_upper(
+        add_upper(vector.x.abs(), vector.y.abs()),
+        vector.z.abs(),
+    )
+    .max(1.0)
+}
+
+/// Operator-norm upper bound for Rodrigues:
+/// `||cI + s[a]x + (1-c)aaᵀ||₂ ≤ 1 + ||a||₂ + 2||a||₂²`.
+fn rodrigues_norm_upper(axis: Vec3) -> f64 {
+    let axis_norm = vector_norm_upper(axis);
+    let square = mul_upper(axis_norm, axis_norm);
+    add_upper(add_upper(1.0, axis_norm), mul_upper(2.0, square))
 }
 
 /// Quadratic smooth min (C¹): `min(a,b) − r·h²/4`, `h = max(r−|a−b|,0)/r`.
@@ -670,12 +734,14 @@ impl Frep {
     fn lipschitz_of(&self, id: NodeId) -> f64 {
         match self.nodes[id.0 as usize] {
             Node::Sphere { .. }
-            | Node::HalfSpace { .. }
             | Node::BoxPrim { .. }
             | Node::Torus { .. }
             | Node::Cylinder { .. } => 1.0,
+            Node::HalfSpace { normal, .. } => vector_norm_upper(normal),
+            Node::Rotate { child, axis, .. } => {
+                mul_upper(self.lipschitz_of(child), rodrigues_norm_upper(axis))
+            }
             Node::Translate { child, .. }
-            | Node::Rotate { child, .. }
             | Node::Scale { child, .. }
             | Node::Offset { child, .. } => self.lipschitz_of(child),
             Node::Bool { a, b, .. } => self.lipschitz_of(a).max(self.lipschitz_of(b)),
@@ -696,16 +762,52 @@ impl Frep {
         })
     }
 
-    /// True when the field is the EXACT signed distance (a valid ring primitive
-    /// under rigid motion and uniform scale, with no Boolean or offset that
-    /// would require a reach certificate).
+    /// True when the root-reachable field is an exact signed distance. Rounded
+    /// generic normalization and nontrivial Rodrigues transforms deliberately
+    /// remain Lipschitz-implicit until their geometric maps carry certificates.
     fn is_exact(&self) -> bool {
-        self.nodes.iter().all(|n| match n {
-            Node::Bool { .. } => false,
-            Node::Offset { .. } => false,
-            Node::Torus { major, minor, .. } => major > minor,
-            _ => true,
-        })
+        self.is_exact_at(self.root)
+    }
+
+    fn is_exact_at(&self, id: NodeId) -> bool {
+        match self.nodes[id.0 as usize] {
+            Node::Sphere { center, radius } | Node::Cylinder { center, radius } => {
+                finite_point(center) && radius.is_finite() && radius > 0.0
+            }
+            Node::HalfSpace { normal, offset } => {
+                coordinate_axis_unit(normal) && offset.is_finite()
+            }
+            Node::BoxPrim { center, half } => {
+                finite_point(center)
+                    && finite_vec(half)
+                    && half.x > 0.0
+                    && half.y > 0.0
+                    && half.z > 0.0
+            }
+            Node::Torus {
+                center,
+                major,
+                minor,
+            } => {
+                finite_point(center)
+                    && major.is_finite()
+                    && minor.is_finite()
+                    && major > minor
+                    && minor > 0.0
+            }
+            Node::Translate { child, offset } => {
+                finite_vec(offset) && self.is_exact_at(child)
+            }
+            Node::Rotate {
+                child,
+                axis,
+                angle,
+            } => angle == 0.0 && finite_vec(axis) && self.is_exact_at(child),
+            Node::Scale { child, factor } => {
+                factor.is_finite() && factor > 0.0 && self.is_exact_at(child)
+            }
+            Node::Offset { .. } | Node::Bool { .. } => false,
+        }
     }
 
     fn support_of(&self, id: NodeId) -> Aabb {
@@ -1028,7 +1130,7 @@ fn write_slot(node: &mut Node, node_ix: u32, slot: u8, value: f64) -> Result<(),
 impl Chart for Frep {
     fn eval(&self, x: Point3, _cx: &Cx<'_>) -> ChartSample {
         let (f, gradient) = self.value_grad(x);
-        let exact_evaluation_enclosure = || {
+        let evaluation_enclosure = || {
             if !f.is_finite() || !x.x.is_finite() || !x.y.is_finite() || !x.z.is_finite() {
                 return NumericalCertificate::no_claim();
             }
@@ -1043,17 +1145,10 @@ impl Chart for Frep {
             signed_distance: f,
             gradient,
             lipschitz: Some(self.lipschitz()),
-            // Composite fields are a conservative bound, not the exact
-            // distance (module docs): sign exact, |f| ≤ true distance.
-            error: if self.is_exact() {
-                // The real field is an exact distance, but its binary64 DAG
-                // evaluation is not generally exact. Retain the geometric
-                // theorem while enclosing every rounded primitive/transform
-                // operation used to obtain this sample.
-                exact_evaluation_enclosure()
-            } else {
-                NumericalCertificate::estimate(f, f)
-            },
+            // Exact-distance and Lipschitz-implicit fields both need a rigorous
+            // enclosure of the real point evaluation. A rounded estimate cannot
+            // back a certified no-tunneling step.
+            error: evaluation_enclosure(),
         }
     }
 

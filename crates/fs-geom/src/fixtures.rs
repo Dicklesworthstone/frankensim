@@ -250,12 +250,15 @@ pub struct TorusChart {
 }
 
 impl TorusChart {
-    fn is_exact_distance(&self) -> bool {
+    fn has_lipschitz_field(&self) -> bool {
         self.major.is_finite()
             && self.minor.is_finite()
             && self.major > 0.0
             && self.minor > 0.0
-            && self.major > self.minor
+    }
+
+    fn is_exact_distance(&self) -> bool {
+        self.has_lipschitz_field() && self.major > self.minor
     }
 }
 
@@ -268,10 +271,10 @@ impl Chart for TorusChart {
             signed_distance: sd,
             gradient: None, // analytic gradient lands with rep-frep
             lipschitz: Some(1.0),
-            error: if self.is_exact_distance() {
+            error: if self.has_lipschitz_field() {
                 torus_distance_enclosure(x, self.center, self.major, self.minor, sd)
             } else {
-                NumericalCertificate::estimate(sd, sd)
+                NumericalCertificate::no_claim()
             },
         }
     }
@@ -287,11 +290,7 @@ impl Chart for TorusChart {
     fn trace_step_claim(&self) -> TraceStepClaim {
         if self.is_exact_distance() {
             TraceStepClaim::ExactDistance
-        } else if self.major.is_finite()
-            && self.minor.is_finite()
-            && self.major > 0.0
-            && self.minor > 0.0
-        {
+        } else if self.has_lipschitz_field() {
             TraceStepClaim::LipschitzImplicit
         } else {
             TraceStepClaim::NoClaim

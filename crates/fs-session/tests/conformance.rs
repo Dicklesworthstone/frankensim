@@ -2851,11 +2851,25 @@ fn ss_013_durable_meter_and_l3_lifecycle_reopen_without_state_or_row_drift() {
         SubmitOutcome::Executed { receipt, .. } => receipt,
         other => panic!("expected resumed execution, got {other:?}"),
     };
+    let second_l3_id = governor
+        .pressure_action_id(session, "durable-pressure-l3-second")
+        .expect("second L3 authority");
+    let second_l3 = governor
+        .apply_memory_pressure(second_l3_id, 3)
+        .expect("second L3 request after activation");
+    let second_pause_request = second_l3
+        .events()
+        .iter()
+        .find_map(|event| event.pause_request_id)
+        .expect("second L3 request authority");
+    let second_acknowledgement = governor
+        .acknowledge_pause(second_pause_request, "durable-checkpoint-second")
+        .expect("second pause acknowledgement");
     let flushed = governor
         .flush_scope_to_ledger(&permit, &ledger)
         .expect("meter and lifecycle terminal batch");
-    assert_eq!(flushed.committed_terminals, 7);
-    assert_eq!(flushed.appended_rows, 9);
+    assert_eq!(flushed.committed_terminals, 9);
+    assert_eq!(flushed.appended_rows, 13);
     assert!(!flushed.remaining_dirty);
     let counts = (
         ledger.table_count("session_claims").unwrap(),
@@ -2865,10 +2879,10 @@ fn ss_013_durable_meter_and_l3_lifecycle_reopen_without_state_or_row_drift() {
         ledger.table_count("session_flush_batch_members").unwrap(),
         ledger.table_count("events").unwrap(),
     );
-    assert_eq!(counts.0, 8);
-    assert_eq!(counts.1, 8);
-    assert_eq!(counts.2, 10);
-    assert_eq!(counts.5, 10);
+    assert_eq!(counts.0, 10);
+    assert_eq!(counts.1, 10);
+    assert_eq!(counts.2, 14);
+    assert_eq!(counts.5, 14);
     drop(governor);
     drop(ledger);
 
@@ -2949,6 +2963,18 @@ fn ss_013_durable_meter_and_l3_lifecycle_reopen_without_state_or_row_drift() {
         SubmitOutcome::Duplicate { receipt, .. } if receipt == resumed_submission_receipt
     ));
     assert_eq!(executions.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        governor
+            .recover_pressure(&ledger, second_l3_id, 3)
+            .expect("recover next L3 request"),
+        second_l3
+    );
+    assert_eq!(
+        governor
+            .recover_resume_activation(&ledger, &recovered_acknowledgement)
+            .expect("prior activation remains replayable after next gate request"),
+        activation
+    );
 
     assert_eq!(
         governor
@@ -2974,6 +3000,28 @@ fn ss_013_durable_meter_and_l3_lifecycle_reopen_without_state_or_row_drift() {
             .expect("exact activation replay"),
         activation
     );
+    let recovered_second_gate = Arc::new(CancelGate::new());
+    assert_eq!(
+        governor
+            .recover_pause_acknowledgement(
+                &ledger,
+                second_pause_request,
+                "durable-checkpoint-second",
+                Arc::clone(&recovered_second_gate),
+            )
+            .expect("recover second acknowledgement")
+            .content_hash(),
+        second_acknowledgement.content_hash()
+    );
+    assert!(matches!(
+        governor.recover_pause_acknowledgement(
+            &ledger,
+            pause_request,
+            "durable-checkpoint",
+            Arc::clone(&recovered_resume_gate),
+        ),
+        Err(SessionError::PauseAcknowledgementConflict { .. })
+    ));
     assert!(matches!(
         governor.recover_pause_acknowledgement(
             &ledger,

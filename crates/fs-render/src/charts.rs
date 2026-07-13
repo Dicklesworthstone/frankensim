@@ -604,13 +604,13 @@ fn validate_trace_sample(
     {
         return None;
     }
-    let exact_distance_bounds = if trace_claim == TraceStepClaim::ExactDistance {
+    let certified_bounds = if trace_claim != TraceStepClaim::NoClaim {
         if !matches!(
             sample.error.kind,
             NumericalKind::Exact | NumericalKind::Enclosure
         ) || (sample.error.kind == NumericalKind::Exact
             && (sample.error.lo != sample.error.hi || sample.error.lo != signed_distance))
-            || lipschitz < 1.0
+            || (trace_claim == TraceStepClaim::ExactDistance && lipschitz < 1.0)
         {
             return None;
         }
@@ -626,30 +626,63 @@ fn validate_trace_sample(
     } else {
         None
     };
-    let safe_radius = if let Some((magnitude_lower, _)) = exact_distance_bounds {
-        // `ExactDistance` is a theorem about the represented real field, while
-        // a binary64 evaluation may need an outward enclosure. The closest
-        // certified endpoint to zero is the largest no-tunneling radius.
-        magnitude_lower
-    } else {
-        conservative_safe_radius(signed_distance, lipschitz)
-    };
-    let hit_residual_upper = if let Some((_, magnitude_upper)) = exact_distance_bounds {
-        magnitude_upper
-    } else {
-        conservative_normalized_residual_upper(signed_distance, lipschitz)
-    };
-    let hit_clearance_lower = if let Some((magnitude_lower, _)) = exact_distance_bounds {
-        magnitude_lower
-    } else {
-        safe_radius
-    };
+    let (safe_radius, hit_residual_upper, hit_clearance_lower) =
+        if let Some((magnitude_lower, magnitude_upper)) = certified_bounds {
+            if trace_claim == TraceStepClaim::ExactDistance {
+                // `ExactDistance` is a theorem about the represented real field,
+                // while a binary64 evaluation may need an outward enclosure. The
+                // closest certified endpoint to zero is the largest no-tunneling
+                // radius.
+                (magnitude_lower, magnitude_upper, magnitude_lower)
+            } else {
+                // For a certified L-Lipschitz implicit field, the enclosure's
+                // distance from zero — not the rounded point estimate — backs the
+                // safe ball. The upper normalized residual remains the explicitly
+                // documented hit criterion for this claim class.
+                (
+                    conservative_quotient_lower(magnitude_lower, lipschitz),
+                    conservative_quotient_upper(magnitude_upper, lipschitz),
+                    conservative_quotient_lower(magnitude_lower, lipschitz),
+                )
+            }
+        } else {
+            let safe_radius = conservative_safe_radius(signed_distance, lipschitz);
+            (
+                safe_radius,
+                conservative_normalized_residual_upper(signed_distance, lipschitz),
+                safe_radius,
+            )
+        };
     Some(ValidatedTraceSample {
         signed_distance,
         safe_radius,
         hit_residual_upper,
         hit_clearance_lower,
     })
+}
+
+fn conservative_quotient_lower(numerator_lower: f64, denominator: f64) -> f64 {
+    if numerator_lower <= 0.0 {
+        return 0.0;
+    }
+    let quotient = numerator_lower / denominator.next_up();
+    if quotient <= 0.0 {
+        0.0
+    } else {
+        quotient.next_down().max(0.0)
+    }
+}
+
+fn conservative_quotient_upper(numerator_upper: f64, denominator: f64) -> f64 {
+    if numerator_upper == 0.0 {
+        return 0.0;
+    }
+    let denominator_lower = denominator.next_down();
+    if denominator_lower <= 0.0 {
+        f64::INFINITY
+    } else {
+        (numerator_upper / denominator_lower).next_up()
+    }
 }
 
 fn conservative_safe_radius(value: f64, lipschitz: f64) -> f64 {
