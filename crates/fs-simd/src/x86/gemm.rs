@@ -213,11 +213,11 @@ unsafe fn btile4x4p_256(
                         }
                     }
                     if l + 1 < k {
-                        for t in 0..2 {
-                            ap[t] = ap[t].add(mb);
+                        for ptr in &mut ap {
+                            *ptr = (*ptr).add(mb);
                         }
-                        for t in 0..4 {
-                            bp[t] = bp[t].add(mb);
+                        for ptr in &mut bp {
+                            *ptr = (*ptr).add(mb);
                         }
                     }
                 }

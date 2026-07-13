@@ -22,6 +22,22 @@ fn assert_extent_overflow(f: impl FnOnce() + std::panic::UnwindSafe, label: &str
     );
 }
 
+fn cycle_scaled(values: &[i64], len: usize) -> Vec<f64> {
+    if values.is_empty() {
+        vec![0.0; len]
+    } else {
+        (0..len)
+            .map(|index| values[index % values.len()] as f64 / 7.0)
+            .collect()
+    }
+}
+
+fn independent_dot(left: &[f64], right: &[f64]) -> f64 {
+    left.iter()
+        .zip(right)
+        .fold(0.0, |sum, (&a, &b)| sum + a * b)
+}
+
 /// G0: safe GEMM facades reject impossible extents identically in debug and
 /// release. In particular, validation happens before beta can mutate C.
 #[test]
@@ -84,6 +100,62 @@ fn public_facades_reject_extent_overflow_before_mutation() {
         "gemm_f64_op",
     );
     assert_eq!(op[0].to_bits(), 7.0f64.to_bits());
+}
+
+/// G0 adjoint-consistency property from plan §13.1 (bead
+/// frankensim-4nh8), scoped to small dense GEMM and its live transposed-view
+/// API. Existing GEMM shape sweeps and goldens remain unchanged.
+#[test]
+fn generated_gemm_transpose_action_satisfies_the_adjoint_identity() {
+    fs_propcheck::check(
+        "gemm-transpose-adjoint-dot-identity",
+        0x1A_4A48_0001,
+        600,
+        |s| {
+            (
+                s.vec_of(16, |s| s.int_in(-32, 32)),
+                s.vec_of(16, |s| s.int_in(-32, 32)),
+                s.vec_of(16, |s| s.int_in(-32, 32)),
+            )
+        },
+        |(matrix_seed, vector_seed, covector_seed)| {
+            let m = covector_seed.len() % 4 + 1;
+            let n = vector_seed.len() % 4 + 1;
+            let matrix = cycle_scaled(matrix_seed, m * n);
+            let vector = cycle_scaled(vector_seed, n);
+            let covector = cycle_scaled(covector_seed, m);
+
+            let mut applied = vec![0.0; m];
+            fs_la::gemm_f64(m, 1, n, 1.0, &matrix, &vector, 0.0, &mut applied);
+
+            let mut transpose_applied = vec![0.0; n];
+            fs_la::gemm_f64_op(
+                n,
+                1,
+                m,
+                1.0,
+                &matrix,
+                n,
+                fs_la::Trans::T,
+                &covector,
+                1,
+                fs_la::Trans::N,
+                0.0,
+                &mut transpose_applied,
+                1,
+            );
+
+            let lhs = independent_dot(&applied, &covector);
+            let rhs = independent_dot(&vector, &transpose_applied);
+            lhs.is_finite()
+                && rhs.is_finite()
+                && (lhs - rhs).abs() <= 1e-12 * (1.0 + lhs.abs() + rhs.abs())
+        },
+    );
+    println!(
+        "{{\"suite\":\"fs-la\",\"case\":\"g0-gemm-adjoint\",\"verdict\":\"pass\",\
+         \"detail\":\"600 shrink-armed 1..4 dense GEMM transpose-action cases\"}}"
+    );
 }
 
 /// G0: alpha-zero is a true product no-op on every public precision and

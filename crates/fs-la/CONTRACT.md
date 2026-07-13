@@ -12,6 +12,12 @@ Dense linear algebra: GEMM, batched small dense, factorizations, eigensolvers. L
   garbage in C are ignored — the uninitialized-output convention).
   `gemm_mixed` is f32 STORAGE with f64 ACCUMULATION (exact widening; the
   bandwidth-vs-accuracy mode the plan uses throughout).
+- `gemm_f64_op(..., lda, Trans, ..., ldb, Trans, ..., ldc)` — the live f64
+  transposed/strided view entry point. `Trans::{N,T}` and each leading
+  dimension describe the stored operand without copying; packing absorbs the
+  view mapping, so all four operand orientations are bitwise equal to
+  `gemm_f64` on materialized operands and rows of C outside the declared view
+  remain untouched (tested).
 - f64 path: BLIS-style NC→KC→MC blocking with A/B panel packing and an
   MR×NR register-tiled microkernel (safe Rust, fused mul_add). f32/mixed
   paths share the loop order and KC chunking, unpacked in v1.
@@ -214,7 +220,10 @@ Dense linear algebra: GEMM, batched small dense, factorizations, eigensolvers. L
    completed private microtiles, but C remains bitwise unchanged after the
    request is observed and every scoped worker drains. A successful call
    crosses one documented non-cancellable final commit boundary.
-5. (A·B)ᵀ = Bᵀ·Aᵀ within 1e-13 relative (order differs; not bitwise).
+5. (A·B)ᵀ = Bᵀ·Aᵀ within 1e-13 relative (order differs; not bitwise). The
+   transpose action also satisfies the G0 adjoint identity
+   `⟨Av,w⟩ = ⟨v,Aᵀw⟩` to `1e−12·(1+|lhs|+|rhs|)` on the generated small-dense
+   battery; both dot products must be finite.
 6. Factorization residuals (tested): ‖A−LLᵀ‖/‖A‖ ≤ n·1e-14 on SPD;
    LU solve round-trips at 1e-9 on random; A = QR reconstruction at
    1e-12 with Q orthogonal to 1e-13; TSQR R equals direct QR's
@@ -325,6 +334,12 @@ traversal receipts, worker drain, arena quiescence, and unchanged C; G5 proves
 the success path is bitwise the serial contract across 1, 2, host-parallelism,
 and advisory-pinned pool configurations.
 tests/conformance.rs placeholder remains for the shared-harness migration.
+`tests/gemm_suite.rs` additionally runs bead 4nh8's 600-case shrink-armed
+adjoint-consistency property (seed `0x1A_4A48_0001`) over generated 1×1 through
+4×4 dense matrices and vectors. It exercises `gemm_f64` for `Av` and the live
+`gemm_f64_op(..., Trans::T, ...)` path for `Aᵀw`; the fixed GEMM golden
+`0x1d7a_a3c6_b631_7ef0` and all existing shape pins remain unchanged. This is
+a claim about the dense GEMM transpose action, not every operator in fs-la.
 Batched battery (tests/batched_battery.rs): GEMM vs scalar oracle
 across size classes + β-accumulate path; batch-membership bitwise
 invariance for Cholesky and pivoted LU; L·Lᵀ reconstruction and solve
@@ -408,7 +423,6 @@ diagonal) fixtures; 128-byte plane alignment; cross-ISA golden hash.
   CCD-aware fs-exec parallel tiling (fz2.2 lane), f32/mixed packed
   paths + capsules, AVX-512 microkernel, nightly perf-regression
   history through fs-roofline::regress.
-- No transposed-operand or strided (non-contiguous) input forms yet.
 - Factorization v1 is single-threaded; fs-exec tile-parallel
   panel/update drivers and arena packing are recorded follow-up scope.
   The compact-WY trailing update is applied reflector-sequentially (the
