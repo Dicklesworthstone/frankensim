@@ -14,6 +14,12 @@ suites, and (once fs-ledger lands) the ledger `events` table. Layer: UTIL.
 - `Severity` (trace/info/warn/error), `Emitter` (per-scope monotone seq),
   `validate_line` (strict structural validator), `lint_failure_record`
   (failure-records-must-reproduce lint v1), `fnv1a64`, `SCHEMA_VERSION`.
+- `ident::ReplayIdentity` and `ident::IdentityBuilder` — schema-v1 canonical
+  replay identity and the original infallible builder for already-bounded
+  internal producers. `ident::BoundedIdentityBuilder` emits exactly the same
+  bytes and root while requiring an explicit canonical-byte ceiling. Its
+  consuming typed appends return `IdentityBuildError`, reserve a complete
+  field before mutation, and cannot finish after a refusal.
 
 ## Invariants
 - One event = one line; strings escaped so no literal newlines appear.
@@ -25,10 +31,17 @@ suites, and (once fs-ledger lands) the ledger `events` table. Layer: UTIL.
 - Additive schema evolution only: kinds may be added, fields never repurposed.
 - Non-finite floats serialize as tagged strings ("non-finite:NaN"), never
   invalid JSON.
+- Replay identity v1 frames the kind and each typed field with little-endian
+  u64 lengths. The bounded builder checks native-to-u64 framing, checked total
+  length, and the producer's byte cap before reserving and appending. Field
+  tags, order, duplicate keys, float bits, and child identities are semantic;
+  documented exclusions remain outside the canonical byte stream.
 
 ## Error model
-`SchemaError { at, message }` with fix guidance. No panics across the
-boundary; the validator rejects rather than repairs.
+`SchemaError { at, message }` with fix guidance. `IdentityBuildError`
+distinguishes canonical-byte-cap refusal, unrepresentable framing, length
+overflow, and allocation failure. No panics cross the bounded identity or
+event-validation boundaries; they reject rather than repair.
 
 ## Determinism class
 Deterministic: pure functions; no clocks (callers supply `wall_ns`), no I/O,
@@ -57,3 +70,7 @@ answers.
   crate's REMAINING bead scope — not yet claimed.
 - The validator is structural, not a full JSON parser (the writer is ours;
   external JSON is out of scope).
+- The legacy `IdentityBuilder`, `ReplayIdentity::clone`, and `hex()` remain
+  allocation-infallible conveniences. Public admission paths that can receive
+  resource-driving input must use `BoundedIdentityBuilder`; later migrations
+  must make their owner APIs fallible rather than wrapping it in `expect`.

@@ -4,7 +4,10 @@
 //! confusion, order sensitivity, float bit-pattern binding, child
 //! (dependency) propagation, and fail-closed schema versioning.
 
-use fs_obs::ident::{IDENT_SCHEMA_VERSION, IdentError, IdentityBuilder, check_version};
+use fs_obs::ident::{
+    BoundedIdentityBuilder, IDENT_SCHEMA_VERSION, IdentError, IdentityBuildError, IdentityBuilder,
+    ReplayIdentity, check_version,
+};
 
 fn verdict(case: &str, pass: bool, detail: &str) {
     println!(
@@ -233,5 +236,77 @@ fn ident_006_unknown_schema_versions_fail_closed() {
         current_ok && future_refused && past_refused && versioned_display,
         "declared schema versions other than the supported one are refused (fail closed); \
          the version is framed into the root and the display form",
+    );
+}
+
+fn bounded_reference(
+    parent: &ReplayIdentity,
+    max_canonical_bytes: usize,
+) -> Result<ReplayIdentity, IdentityBuildError> {
+    let builder = BoundedIdentityBuilder::new("bounded-artifact", max_canonical_bytes)?;
+    let builder = builder.str("algorithm", "gemm")?;
+    let builder = builder.u64("n", 64)?;
+    let builder = builder.i64("offset", -3)?;
+    let builder = builder.f64_bits("tolerance", -0.0)?;
+    let builder = builder.bytes("payload", b"a|b\0c")?;
+    let builder = builder.flag("deterministic", true)?;
+    let builder = builder.child("upstream", parent)?;
+    let builder = builder.child_root64("legacy", 0x0123_4567_89ab_cdef)?;
+    let builder = builder.exclude("wall_ns", "timing is evidence, not identity")?;
+    Ok(builder.finish())
+}
+
+#[test]
+fn ident_007_bounded_builder_is_byte_exact_and_refuses_at_the_cap() {
+    let parent = IdentityBuilder::new("kernel").u64("kc", 256).finish();
+    let legacy = IdentityBuilder::new("bounded-artifact")
+        .str("algorithm", "gemm")
+        .u64("n", 64)
+        .i64("offset", -3)
+        .f64_bits("tolerance", -0.0)
+        .bytes("payload", b"a|b\0c")
+        .flag("deterministic", true)
+        .child("upstream", &parent)
+        .child_root64("legacy", 0x0123_4567_89ab_cdef)
+        .exclude("wall_ns", "timing is evidence, not identity")
+        .finish();
+    let exact_limit = legacy.canonical_bytes().len();
+    let bounded = bounded_reference(&parent, exact_limit).expect("exact byte cap is admitted");
+    assert_eq!(bounded, legacy);
+    assert_eq!(bounded.exclusions(), legacy.exclusions());
+
+    assert_eq!(
+        bounded_reference(&parent, exact_limit - 1),
+        Err(IdentityBuildError::CanonicalBytesExceeded {
+            requested: exact_limit,
+            limit: exact_limit - 1,
+        })
+    );
+
+    // For kind "x" and key "k", the v1 header and field framing consume
+    // 35 bytes before payload. This locks exact-limit and limit+1 behavior.
+    let payload_limit = 39;
+    let exact_payload = BoundedIdentityBuilder::new("x", payload_limit)
+        .expect("header fits")
+        .bytes("k", b"1234")
+        .expect("four-byte payload reaches the exact cap")
+        .finish();
+    assert_eq!(exact_payload.canonical_bytes().len(), payload_limit);
+    let payload_error = BoundedIdentityBuilder::new("x", payload_limit)
+        .expect("header fits")
+        .bytes("k", b"12345")
+        .expect_err("limit+1 payload must refuse before mutation");
+    assert_eq!(
+        payload_error,
+        IdentityBuildError::CanonicalBytesExceeded {
+            requested: payload_limit + 1,
+            limit: payload_limit,
+        }
+    );
+
+    verdict(
+        "ident-007",
+        true,
+        "bounded and legacy builders are byte-identical; exact caps admit and limit+1 refuses",
     );
 }
