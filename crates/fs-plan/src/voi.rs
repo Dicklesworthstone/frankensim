@@ -17,9 +17,16 @@
 //! chronological pairwise e-process, the remaining spend budget, and consumed
 //! decision snapshots. Scheduling consults the CURRENT audit verdict under
 //! exclusive mutation; stale reports carry no spending authority.
+//!
+//! Decision evaluation is cooperatively cancellation-aware: each call is
+//! bracketed by [`Cx`] checkpoints and receives a private declared-work permit
+//! under an explicit [`DecisionBudget`]. [`LiveDecision`] is only the bounded-
+//! invocation adapter for an already-cached callback; arbitrary callback time
+//! and memory remain outside the library's enforceable claim.
 
 use std::collections::BTreeSet;
 
+pub use asupersync::Cx;
 use fs_blake3::{ContentHash, hash_domain};
 use fs_eproc::{LossSpan, PairwiseRace};
 
@@ -33,6 +40,8 @@ pub const MAX_VOI_NAME_BYTES: usize = 128;
 pub const MAX_VOI_GRID: usize = 1024;
 /// Maximum surrogate evaluations admitted by one public VoI call.
 pub const MAX_VOI_EVALUATIONS: usize = 4096;
+/// Maximum abstract oracle work units admitted by one public VoI call.
+pub const MAX_VOI_WORK_UNITS: u64 = 1_000_000_000;
 /// Maximum matched-cost observations admitted by one prospective audit.
 pub const MAX_VOI_AUDIT_RECORDS: usize = 4096;
 /// Maximum distinct ranking snapshots retained by one live scheduler.
@@ -40,7 +49,7 @@ pub const MAX_VOI_SCHEDULED_CONTEXTS: usize = 4096;
 /// Fixed anytime-valid false-activation level for VoI scheduling authority.
 pub const VOI_AUDIT_ALPHA: f64 = 0.05;
 
-const RANKED_MENU_SOURCE_DOMAIN: &str = "frankensim.fs-plan.voi-ranked-source.v1";
+const RANKED_MENU_SOURCE_DOMAIN: &str = "frankensim.fs-plan.voi-ranked-source.v2";
 const RANKED_MENU_CONTEXT_DOMAIN: &str = "frankensim.fs-plan.voi-ranked-menu.v2";
 const AUDIT_CONTEXT_DOMAIN: &str = "frankensim.fs-plan.voi-audit.v2";
 
@@ -121,6 +130,36 @@ pub enum VoiError {
         /// Inclusive limit.
         max: usize,
     },
+    /// A caller-supplied evaluation budget is zero or above the public cap.
+    InvalidEvaluationBudget {
+        /// Supplied evaluation limit.
+        supplied: usize,
+        /// Inclusive public cap.
+        max: usize,
+    },
+    /// A caller-supplied work budget is zero or above the public cap.
+    InvalidWorkBudget {
+        /// Supplied abstract work-unit limit.
+        supplied: u64,
+        /// Inclusive public cap.
+        max: u64,
+    },
+    /// The oracle's declared cost per evaluation is zero or outside the cap.
+    InvalidOracleWorkUnits {
+        /// Supplied abstract work units per evaluation.
+        work_units_per_evaluation: u64,
+        /// Inclusive upper bound.
+        max: u64,
+    },
+    /// A request would exceed the explicit oracle work budget.
+    WorkLimitExceeded {
+        /// Required abstract work units.
+        requested: u64,
+        /// Inclusive caller-supplied limit.
+        max: u64,
+    },
+    /// The asupersync context refused at an evaluation boundary.
+    DecisionEvaluationCancelled,
     /// A probe has an invalid numeric field.
     InvalidProbeValue {
         /// Probe name.
@@ -240,6 +279,28 @@ impl core::fmt::Display for VoiError {
                 f,
                 "VoI request needs {requested} surrogate evaluations; the limit is {max}"
             ),
+            Self::InvalidEvaluationBudget { supplied, max } => write!(
+                f,
+                "decision evaluation budget is {supplied}; expected 1..={max}"
+            ),
+            Self::InvalidWorkBudget { supplied, max } => {
+                write!(f, "decision work budget is {supplied}; expected 1..={max}")
+            }
+            Self::InvalidOracleWorkUnits {
+                work_units_per_evaluation,
+                max,
+            } => write!(
+                f,
+                "decision oracle declares {work_units_per_evaluation} work units per evaluation; expected 1..={max}"
+            ),
+            Self::WorkLimitExceeded { requested, max } => write!(
+                f,
+                "VoI request needs {requested} oracle work units; the explicit limit is {max}"
+            ),
+            Self::DecisionEvaluationCancelled => write!(
+                f,
+                "decision evaluation was cancelled or its asupersync budget was exhausted"
+            ),
             Self::InvalidProbeValue {
                 probe,
                 field,
@@ -313,13 +374,208 @@ pub struct UncertaintyNode {
     pub nominal: f64,
 }
 
-/// A live decision over the uncertain quantities: v0 is a threshold
-/// verdict on a cheap cached surrogate `margin(values) > 0`.
+/// Explicit resource envelope for one decision-oracle query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DecisionBudget {
+    max_evaluations: usize,
+    max_work_units: u64,
+}
+
+impl DecisionBudget {
+    /// Construct a bounded decision-oracle envelope.
+    ///
+    /// # Errors
+    /// [`VoiError`] when either limit is zero or exceeds the public cap.
+    pub fn new(max_evaluations: usize, max_work_units: u64) -> Result<Self, VoiError> {
+        if !(1..=MAX_VOI_EVALUATIONS).contains(&max_evaluations) {
+            return Err(VoiError::InvalidEvaluationBudget {
+                supplied: max_evaluations,
+                max: MAX_VOI_EVALUATIONS,
+            });
+        }
+        if !(1..=MAX_VOI_WORK_UNITS).contains(&max_work_units) {
+            return Err(VoiError::InvalidWorkBudget {
+                supplied: max_work_units,
+                max: MAX_VOI_WORK_UNITS,
+            });
+        }
+        Ok(Self {
+            max_evaluations,
+            max_work_units,
+        })
+    }
+
+    /// Maximum oracle calls authorized by this envelope.
+    #[must_use]
+    pub const fn max_evaluations(self) -> usize {
+        self.max_evaluations
+    }
+
+    /// Maximum abstract oracle work authorized by this envelope.
+    #[must_use]
+    pub const fn max_work_units(self) -> u64 {
+        self.max_work_units
+    }
+}
+
+/// Exact evaluation count and declared-work charge retained by a ranking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DecisionComputationReceipt {
+    evaluations: usize,
+    work_units: u64,
+    budget: DecisionBudget,
+}
+
+impl DecisionComputationReceipt {
+    /// Number of completed oracle evaluations.
+    #[must_use]
+    pub const fn evaluations(self) -> usize {
+        self.evaluations
+    }
+
+    /// Deterministic declared work charged for the evaluations.
+    #[must_use]
+    pub const fn work_units(self) -> u64 {
+        self.work_units
+    }
+
+    /// Caller-supplied resource envelope.
+    #[must_use]
+    pub const fn budget(self) -> DecisionBudget {
+        self.budget
+    }
+}
+
+/// One library-issued permit for a deterministic oracle evaluation.
+///
+/// The private fields prevent callers from inventing permits. Charged work is
+/// the oracle's declaration, not a wall-clock, allocation, or instruction
+/// measurement; cooperative oracles must use [`Cx`] checkpoints internally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DecisionEvaluationPermit {
+    ordinal: usize,
+    total_evaluations: usize,
+    charged_work_units: u64,
+    remaining_evaluations: usize,
+    remaining_work_units: u64,
+    envelope: DecisionBudget,
+}
+
+impl DecisionEvaluationPermit {
+    /// Zero-based position in the canonical evaluation sequence.
+    #[must_use]
+    pub const fn ordinal(self) -> usize {
+        self.ordinal
+    }
+
+    /// Exact number of evaluations admitted for the whole query.
+    #[must_use]
+    pub const fn total_evaluations(self) -> usize {
+        self.total_evaluations
+    }
+
+    /// Declared work charged for this evaluation.
+    #[must_use]
+    pub const fn charged_work_units(self) -> u64 {
+        self.charged_work_units
+    }
+
+    /// Admitted evaluations remaining after this evaluation.
+    #[must_use]
+    pub const fn remaining_evaluations(self) -> usize {
+        self.remaining_evaluations
+    }
+
+    /// Caller-authorized work units remaining after this evaluation's charge.
+    #[must_use]
+    pub const fn remaining_work_units(self) -> u64 {
+        self.remaining_work_units
+    }
+
+    /// Caller-supplied envelope enclosing the complete query.
+    #[must_use]
+    pub const fn envelope(self) -> DecisionBudget {
+        self.envelope
+    }
+}
+
+/// Fallible, cooperatively cancellation-aware decision surface consumed by
+/// VoI ranking.
+///
+/// Implementations must checkpoint `cx` inside long-running work and must
+/// refuse a permit whose charged work is insufficient. The library cannot
+/// preempt an implementation that blocks or ignores this protocol.
+pub trait DecisionOracle {
+    /// Number of scalar inputs expected by the oracle. This metadata accessor
+    /// must be bounded, deterministic, and side-effect free.
+    fn arity(&self) -> usize;
+
+    /// Deterministic abstract cost charged before every oracle call. This
+    /// metadata accessor must be bounded and side-effect free.
+    fn work_units_per_evaluation(&self) -> u64;
+
+    /// Evaluate a decision margin under the supplied cancellation context and
+    /// library-issued declared-work permit.
+    fn evaluate(
+        &self,
+        cx: &Cx,
+        permit: DecisionEvaluationPermit,
+        values: &[f64],
+    ) -> Result<f64, VoiError>;
+}
+
+/// Adapter for an already-cached, caller-budgeted synchronous margin.
+///
+/// This adapter charges one declared work unit and only checks cancellation
+/// before and after the callback. It makes no time or memory bound for an
+/// arbitrary closure. Long-running or fallible work must implement
+/// [`DecisionOracle`] directly and checkpoint its [`Cx`] internally.
 pub struct LiveDecision<'a> {
-    /// The cached surrogate margin (cheap by Proposals 9/2).
+    /// The already-cached surrogate margin.
     pub margin: &'a dyn Fn(&[f64]) -> f64,
     /// Node count.
     pub arity: usize,
+}
+
+impl DecisionOracle for LiveDecision<'_> {
+    fn arity(&self) -> usize {
+        self.arity
+    }
+
+    fn work_units_per_evaluation(&self) -> u64 {
+        1
+    }
+
+    fn evaluate(
+        &self,
+        _cx: &Cx,
+        _permit: DecisionEvaluationPermit,
+        values: &[f64],
+    ) -> Result<f64, VoiError> {
+        Ok((self.margin)(values))
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DecisionOracleMetadata {
+    arity: usize,
+    work_units_per_evaluation: u64,
+}
+
+fn decision_oracle_metadata(
+    decision: &dyn DecisionOracle,
+) -> Result<DecisionOracleMetadata, VoiError> {
+    let metadata = DecisionOracleMetadata {
+        arity: decision.arity(),
+        work_units_per_evaluation: decision.work_units_per_evaluation(),
+    };
+    if !(1..=MAX_VOI_WORK_UNITS).contains(&metadata.work_units_per_evaluation) {
+        return Err(VoiError::InvalidOracleWorkUnits {
+            work_units_per_evaluation: metadata.work_units_per_evaluation,
+            max: MAX_VOI_WORK_UNITS,
+        });
+    }
+    Ok(metadata)
 }
 
 fn validate_size(
@@ -356,11 +612,11 @@ fn validate_name(kind: &'static str, index: usize, name: &str) -> Result<(), Voi
     }
 }
 
-fn validate_nodes(decision: &LiveDecision<'_>, nodes: &[UncertaintyNode]) -> Result<(), VoiError> {
+fn validate_nodes(arity: usize, nodes: &[UncertaintyNode]) -> Result<(), VoiError> {
     validate_size("uncertainty nodes", nodes.len(), 1, MAX_VOI_NODES)?;
-    if decision.arity != nodes.len() {
+    if arity != nodes.len() {
         return Err(VoiError::ArityMismatch {
-            arity: decision.arity,
+            arity,
             node_count: nodes.len(),
         });
     }
@@ -415,8 +671,136 @@ fn validate_evaluations(requested: usize) -> Result<(), VoiError> {
     }
 }
 
-fn evaluate_margin(decision: &LiveDecision<'_>, values: &[f64]) -> Result<f64, VoiError> {
-    let margin = (decision.margin)(values);
+fn admit_decision_computation(
+    metadata: DecisionOracleMetadata,
+    evaluations: usize,
+    budget: DecisionBudget,
+) -> Result<DecisionComputationReceipt, VoiError> {
+    validate_evaluations(evaluations)?;
+    if evaluations > budget.max_evaluations {
+        return Err(VoiError::EvaluationLimitExceeded {
+            requested: evaluations,
+            max: budget.max_evaluations,
+        });
+    }
+    let evaluations_u64 = u64::try_from(evaluations).map_err(|_| VoiError::ArithmeticRefusal {
+        operation: "decision evaluation count conversion",
+        subject: "decision oracle".to_string(),
+    })?;
+    let work_units = evaluations_u64
+        .checked_mul(metadata.work_units_per_evaluation)
+        .ok_or_else(|| VoiError::ArithmeticRefusal {
+            operation: "decision oracle work accounting",
+            subject: "decision oracle".to_string(),
+        })?;
+    if work_units > budget.max_work_units {
+        return Err(VoiError::WorkLimitExceeded {
+            requested: work_units,
+            max: budget.max_work_units,
+        });
+    }
+    Ok(DecisionComputationReceipt {
+        evaluations,
+        work_units,
+        budget,
+    })
+}
+
+struct DecisionComputationMeter {
+    receipt: DecisionComputationReceipt,
+    work_units_per_evaluation: u64,
+    completed_evaluations: usize,
+    charged_work_units: u64,
+}
+
+impl DecisionComputationMeter {
+    const fn new(metadata: DecisionOracleMetadata, receipt: DecisionComputationReceipt) -> Self {
+        Self {
+            receipt,
+            work_units_per_evaluation: metadata.work_units_per_evaluation,
+            completed_evaluations: 0,
+            charged_work_units: 0,
+        }
+    }
+
+    fn next_permit(&mut self) -> Result<DecisionEvaluationPermit, VoiError> {
+        if self.completed_evaluations >= self.receipt.evaluations {
+            return Err(VoiError::ArithmeticRefusal {
+                operation: "decision evaluation permit overrun",
+                subject: "decision oracle".to_string(),
+            });
+        }
+        let ordinal = self.completed_evaluations;
+        let completed_evaluations =
+            ordinal
+                .checked_add(1)
+                .ok_or_else(|| VoiError::ArithmeticRefusal {
+                    operation: "decision evaluation permit accounting",
+                    subject: "decision oracle".to_string(),
+                })?;
+        let charged_work_units = self
+            .charged_work_units
+            .checked_add(self.work_units_per_evaluation)
+            .ok_or_else(|| VoiError::ArithmeticRefusal {
+                operation: "decision evaluation permit work accounting",
+                subject: "decision oracle".to_string(),
+            })?;
+        let remaining_evaluations = self
+            .receipt
+            .evaluations
+            .checked_sub(completed_evaluations)
+            .ok_or_else(|| VoiError::ArithmeticRefusal {
+                operation: "decision evaluation permit remainder",
+                subject: "decision oracle".to_string(),
+            })?;
+        let remaining_work_units = self
+            .receipt
+            .budget
+            .max_work_units
+            .checked_sub(charged_work_units)
+            .ok_or_else(|| VoiError::ArithmeticRefusal {
+                operation: "decision evaluation permit work remainder",
+                subject: "decision oracle".to_string(),
+            })?;
+        self.completed_evaluations = completed_evaluations;
+        self.charged_work_units = charged_work_units;
+        Ok(DecisionEvaluationPermit {
+            ordinal,
+            total_evaluations: self.receipt.evaluations,
+            charged_work_units: self.work_units_per_evaluation,
+            remaining_evaluations,
+            remaining_work_units,
+            envelope: self.receipt.budget,
+        })
+    }
+
+    fn finish(&self) -> Result<(), VoiError> {
+        if self.completed_evaluations == self.receipt.evaluations
+            && self.charged_work_units == self.receipt.work_units
+        {
+            Ok(())
+        } else {
+            Err(VoiError::ArithmeticRefusal {
+                operation: "decision evaluation permit underrun",
+                subject: "decision oracle".to_string(),
+            })
+        }
+    }
+}
+
+fn evaluate_margin(
+    cx: &Cx,
+    decision: &dyn DecisionOracle,
+    meter: &mut DecisionComputationMeter,
+    values: &[f64],
+) -> Result<f64, VoiError> {
+    cx.checkpoint()
+        .map_err(|_| VoiError::DecisionEvaluationCancelled)?;
+    let permit = meter.next_permit()?;
+    let margin = decision.evaluate(cx, permit, values);
+    cx.checkpoint()
+        .map_err(|_| VoiError::DecisionEvaluationCancelled)?;
+    let margin = margin?;
     if margin.is_finite() {
         Ok(margin)
     } else {
@@ -436,14 +820,19 @@ fn node_at(nodes: &[UncertaintyNode], node_idx: usize) -> Result<&UncertaintyNod
 }
 
 fn nominal_verdict_validated(
-    decision: &LiveDecision<'_>,
+    cx: &Cx,
+    decision: &dyn DecisionOracle,
+    meter: &mut DecisionComputationMeter,
     nodes: &[UncertaintyNode],
 ) -> Result<bool, VoiError> {
-    Ok(evaluate_margin(decision, &nominal_values(nodes))? > 0.0)
+    Ok(evaluate_margin(cx, decision, meter, &nominal_values(nodes))? > 0.0)
 }
 
+#[allow(clippy::too_many_arguments)] // keeps the validated sweep inputs explicit
 fn flip_probability_validated(
-    decision: &LiveDecision<'_>,
+    cx: &Cx,
+    decision: &dyn DecisionOracle,
+    meter: &mut DecisionComputationMeter,
     nodes: &[UncertaintyNode],
     base: bool,
     node_idx: usize,
@@ -471,7 +860,7 @@ fn flip_probability_validated(
                 node_idx,
                 node_count: nodes.len(),
             })? = sample;
-        if (evaluate_margin(decision, &values)? > 0.0) != base {
+        if (evaluate_margin(cx, decision, meter, &values)? > 0.0) != base {
             flips += 1;
         }
     }
@@ -486,10 +875,19 @@ impl LiveDecision<'_> {
     /// # Errors
     /// [`VoiError`] when node/arity/interval invariants fail or the
     /// cached surrogate returns a nonfinite margin.
-    pub fn nominal_verdict(&self, nodes: &[UncertaintyNode]) -> Result<bool, VoiError> {
-        validate_nodes(self, nodes)?;
-        validate_evaluations(1)?;
-        nominal_verdict_validated(self, nodes)
+    pub fn nominal_verdict(
+        &self,
+        cx: &Cx,
+        nodes: &[UncertaintyNode],
+        budget: DecisionBudget,
+    ) -> Result<bool, VoiError> {
+        let metadata = decision_oracle_metadata(self)?;
+        validate_nodes(metadata.arity, nodes)?;
+        let computation = admit_decision_computation(metadata, 1, budget)?;
+        let mut meter = DecisionComputationMeter::new(metadata, computation);
+        let verdict = nominal_verdict_validated(cx, self, &mut meter, nodes)?;
+        meter.finish()?;
+        Ok(verdict)
     }
 
     /// DECISION SENSITIVITY of one node: sweep the node's interval on
@@ -504,11 +902,14 @@ impl LiveDecision<'_> {
     /// margin.
     pub fn flip_probability(
         &self,
+        cx: &Cx,
         nodes: &[UncertaintyNode],
         node_idx: usize,
         grid: usize,
+        budget: DecisionBudget,
     ) -> Result<f64, VoiError> {
-        validate_nodes(self, nodes)?;
+        let metadata = decision_oracle_metadata(self)?;
+        validate_nodes(metadata.arity, nodes)?;
         let node = node_at(nodes, node_idx)?;
         validate_grid(grid)?;
         let evaluations = grid
@@ -517,9 +918,14 @@ impl LiveDecision<'_> {
                 operation: "sweep evaluation count",
                 subject: node.name.clone(),
             })?;
-        validate_evaluations(evaluations)?;
-        let base = nominal_verdict_validated(self, nodes)?;
-        flip_probability_validated(self, nodes, base, node_idx, node.lo, node.hi, grid)
+        let computation = admit_decision_computation(metadata, evaluations, budget)?;
+        let mut meter = DecisionComputationMeter::new(metadata, computation);
+        let base = nominal_verdict_validated(cx, self, &mut meter, nodes)?;
+        let probability = flip_probability_validated(
+            cx, self, &mut meter, nodes, base, node_idx, node.lo, node.hi, grid,
+        )?;
+        meter.finish()?;
+        Ok(probability)
     }
 }
 
@@ -599,6 +1005,7 @@ pub struct RankedMenu {
     policy_scope: String,
     snapshot_id: String,
     grid: usize,
+    computation: DecisionComputationReceipt,
 }
 
 impl RankedMenu {
@@ -665,6 +1072,12 @@ impl RankedMenu {
     #[must_use]
     pub fn snapshot_id(&self) -> &str {
         &self.snapshot_id
+    }
+
+    /// Exact admitted decision-oracle resource use and enclosing budget.
+    #[must_use]
+    pub const fn computation(&self) -> DecisionComputationReceipt {
+        self.computation
     }
 }
 
@@ -846,12 +1259,28 @@ fn ranked_source_context(
     grid: usize,
     policy_scope: &str,
     snapshot_id: &str,
+    metadata: DecisionOracleMetadata,
+    computation: DecisionComputationReceipt,
 ) -> Result<ContentHash, VoiError> {
     let mut canonical = Vec::new();
-    canonical.extend_from_slice(&1u32.to_le_bytes());
+    canonical.extend_from_slice(&2u32.to_le_bytes());
     push_text(&mut canonical, policy_scope, "VoI policy scope")?;
     push_text(&mut canonical, snapshot_id, "VoI snapshot identity")?;
     push_u32(&mut canonical, grid, "grid")?;
+    push_u32(&mut canonical, metadata.arity, "decision oracle arity")?;
+    canonical.extend_from_slice(&metadata.work_units_per_evaluation.to_le_bytes());
+    push_u32(
+        &mut canonical,
+        computation.evaluations,
+        "decision evaluations",
+    )?;
+    canonical.extend_from_slice(&computation.work_units.to_le_bytes());
+    push_u32(
+        &mut canonical,
+        computation.budget.max_evaluations,
+        "decision evaluation budget",
+    )?;
+    canonical.extend_from_slice(&computation.budget.max_work_units.to_le_bytes());
     push_u32(&mut canonical, nodes.len(), "uncertainty nodes")?;
     for node in nodes {
         push_text(&mut canonical, &node.name, "uncertainty node name")?;
@@ -945,20 +1374,30 @@ fn prepare_probes(
 /// decision — MYOPIC one-step VoI (each probe is evaluated against the
 /// CURRENT state only; no sequential tree).
 ///
+/// The complete evaluation count and declared-work charge are admitted before
+/// the first callback. Calls then receive canonical ordinal permits and are
+/// bracketed by [`Cx`] checkpoints. A refusal returns no [`RankedMenu`]; oracle
+/// implementations remain responsible for internal checkpoints and truthful
+/// declared work.
+///
 /// # Errors
 /// [`VoiError`] when the decision, node set, menu, targets, grid, probe
 /// economics, callback margins, or derived arithmetic are invalid.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)] // explicit query/proof pipeline
 pub fn rank_purchases(
-    decision: &LiveDecision<'_>,
+    cx: &Cx,
+    decision: &dyn DecisionOracle,
     nodes: &[UncertaintyNode],
     menu: &[Probe],
     grid: usize,
+    budget: DecisionBudget,
     policy_scope: &str,
     snapshot_id: &str,
 ) -> Result<RankedMenu, VoiError> {
     validate_name("VoI policy scope", 0, policy_scope)?;
     validate_name("VoI snapshot identity", 0, snapshot_id)?;
-    validate_nodes(decision, nodes)?;
+    let metadata = decision_oracle_metadata(decision)?;
+    validate_nodes(metadata.arity, nodes)?;
     validate_grid(grid)?;
     let targets = validate_menu(nodes, menu)?;
     let unique_targets = targets.iter().copied().collect::<BTreeSet<_>>();
@@ -976,17 +1415,26 @@ pub fn rank_purchases(
             operation: "ranking evaluation count",
             subject: "probe menu".to_string(),
         })?;
-    validate_evaluations(evaluations)?;
+    let computation = admit_decision_computation(metadata, evaluations, budget)?;
     // All input-derived intervals are prepared before the first callback, so
     // a malformed later probe cannot leave observable partial callback work.
     let prepared = prepare_probes(nodes, menu, &targets)?;
-    let source_context_id = ranked_source_context(nodes, menu, grid, policy_scope, snapshot_id)?;
-    let base = nominal_verdict_validated(decision, nodes)?;
+    let source_context_id = ranked_source_context(
+        nodes,
+        menu,
+        grid,
+        policy_scope,
+        snapshot_id,
+        metadata,
+        computation,
+    )?;
+    let mut meter = DecisionComputationMeter::new(metadata, computation);
+    let base = nominal_verdict_validated(cx, decision, &mut meter, nodes)?;
     let mut flip_before = vec![None; nodes.len()];
     for node_idx in unique_targets {
         let node = node_at(nodes, node_idx)?;
         flip_before[node_idx] = Some(flip_probability_validated(
-            decision, nodes, base, node_idx, node.lo, node.hi, grid,
+            cx, decision, &mut meter, nodes, base, node_idx, node.lo, node.hi, grid,
         )?);
     }
 
@@ -1001,7 +1449,9 @@ pub fn rank_purchases(
             subject: probe.name.clone(),
         })?;
         let flip_after = flip_probability_validated(
+            cx,
             decision,
+            &mut meter,
             nodes,
             base,
             prepared.node_idx,
@@ -1023,6 +1473,7 @@ pub fn rank_purchases(
             score,
         });
     }
+    meter.finish()?;
     ranked.sort_by(compare_ranked);
     let context_id = ranked_output_context(source_context_id, &ranked)?;
     Ok(RankedMenu {
@@ -1032,6 +1483,7 @@ pub fn rank_purchases(
         policy_scope: policy_scope.to_string(),
         snapshot_id: snapshot_id.to_string(),
         grid,
+        computation,
     })
 }
 

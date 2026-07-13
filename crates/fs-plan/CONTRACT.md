@@ -12,7 +12,8 @@ and a cost model; composition composes the models, so "how accurate is
 this number and where did the error come from" — and "where did the
 seconds go" — are queries over attribution trees. Layer: L6 (HELM).
 Runtime deps: `std`, fs-blake3, fs-geom, fs-ledger; feature-gated VoI uses
-fs-eproc for anytime-valid audit authority.
+asupersync for cancellation-aware decision-oracle evaluation and fs-eproc for
+anytime-valid audit authority.
 
 ## Public types and semantics
 
@@ -59,20 +60,34 @@ fs-eproc for anytime-valid audit authority.
   identities, the baseline-bound 40-byte machine key, completed production-v2
   op envelope, build identity, result-manifest membership, payload artifact
   bytes/metadata/OUT edge, and dependency-receipt bytes/domain digest/IN edge
-  must all agree before the model sees any evidence. Foreign machine/shape
+  must all agree before the model sees any evidence. The op row uses
+  fs-ledger's metadata-preflighted bounded read; the measured artifact is
+  capped at its exact tune-row byte length and the fs-la dependency receipt at
+  its producer-owned 1 MiB ceiling before either payload is materialized; a
+  source-pin unit test fails if fs-la changes that declaration independently.
+  Foreign machine/shape
   rows are never scanned or mixed.
 
 - `voi` module (addendum Proposal C, bead knh1.6; [F], behind
   `voi-queries`): the ignorance market, v0 as a RANKED LIST.
-  `UncertaintyNode` (interval + nominal), `LiveDecision` (a cached
-  surrogate threshold verdict; `flip_probability` sweeps one node's
-  interval at grid cost — near-free by construction),
+  `UncertaintyNode` (interval + nominal), `DecisionBudget` (explicit
+  evaluation and declared-work caps), and `DecisionOracle` (fallible
+  evaluation under an asupersync `Cx` and a library-issued private permit).
+  The permit binds canonical ordinal, exact query size, charged work,
+  remaining envelope, and the caller's full budget; callers cannot forge one.
+  `LiveDecision` is the cached synchronous adapter: it charges exactly one
+  declared work unit and brackets the callback with library-owned checkpoints,
+  but makes no time or memory claim for an arbitrary closure.
+  `flip_probability` sweeps one node's interval at grid cost,
   `Probe`/`ProbeKind` (the priced menu UNIFYING computational and
   physical evidence), `rank_purchases` (MYOPIC one-step sampled VoI:
   flip-fraction reduction per dollar, deterministic tie-breaks) returning a
   sealed complete `RankedMenu`. Its private rows cannot be omitted, spliced,
-  or reordered. `source_context_id` binds the caller-declared policy and
-  decision snapshot, validated nodes, complete supplied source menu, and grid;
+  or reordered. Its `DecisionComputationReceipt` retains the exact evaluation
+  count, exact declared-work charge, and caller-supplied budget.
+  `source_context_id` binds the caller-declared policy and decision snapshot,
+  validated nodes, complete supplied source menu, grid, oracle metadata, exact
+  declared-work charge, and full budget;
   final `context_id` additionally binds every canonical output row and score.
   `QueryHint` is structured and grid-qualified, with escaped lossless text and
   strict JSON renderers. A sampled zero is explicitly non-authoritative.
@@ -164,21 +179,25 @@ failure, scope mismatch, and numerical refusal.
 
 Deterministic: sorted cost-model observations, nearest-rank quantiles with
 deterministic tie-breaking, and BTreeMap iteration. No RNG anywhere. VoI uses
-a fixed sweep and ranking order while preserving prospective audit append
-order; its result is deterministic when the supplied cached surrogate callback
-is itself deterministic.
+a fixed sweep and ranking order, canonical evaluation-permit ordinals, and
+exact computation receipts while preserving prospective audit append order;
+its result is deterministic when the supplied oracle is deterministic and its
+bounded metadata and declared work are truthful.
 
 ## Cancellation behavior
 
 Library-owned work is bounded pure computation or bounded ledger reads. Cost-model
 history/evaluation, oracle edges/errors, receipt bytes/depth/nodes/container
-items, and tune sample counts each have explicit caps. VoI sweeps are bounded
+items, op fields, retained artifacts, and tune sample counts each have explicit caps. VoI sweeps are bounded
 by `MAX_VOI_EVALUATIONS`; audits and consumed snapshots are bounded by
 `MAX_VOI_AUDIT_RECORDS` and `MAX_VOI_SCHEDULED_CONTEXTS`; the fixture oracle has
-its own Cartesian-work cap. The VoI limit bounds callback INVOCATIONS, not the
-time or memory of arbitrary caller callback bodies. No `Cx` crosses this pure
-planning API; callback owners must provide already-budgeted, cached,
-cancellation-correct surrogate evaluation.
+its own Cartesian-work cap. VoI admits the exact evaluation count and exact
+declared-work charge against both public caps and the caller's `DecisionBudget`
+before the first oracle call. Every call receives a canonical private permit
+and has a `Cx` checkpoint before and after it; direct `DecisionOracle`
+implementations must also checkpoint long-running internal work and refuse an
+insufficient charge. `LiveDecision` remains invocation-bounded only: it cannot
+preempt or enforce a time or memory limit on an arbitrary synchronous closure.
 
 ## No-claim boundaries
 
@@ -194,6 +213,11 @@ cancellation-correct surrogate evaluation.
   wall-time certificates. Its observed error maximum is retrospective; the Rep
   Router therefore uses it only to enlarge an uncertified declaration. Fully
   authenticated admitted cost-model authority remains tracked separately.
+- VoI work units are oracle-declared accounting, not measured wall time,
+  instructions, allocations, or proof of cooperation. A direct oracle that
+  ignores `Cx`, understates work, blocks, or panics, and an arbitrary
+  `LiveDecision` callback with those behaviors, remain outside the typed
+  cancellation and resource guarantee; refusals produce no ranking authority.
 
 ## Unsafe boundary
 
@@ -217,7 +241,9 @@ quantile-band calibration (coverage logged), online-update improvement
 under cost drift, exact-scope/legacy-schema tune refusals, LIVE Rep Router
 replanning from fitted models, Time Ledger attribution + calibration. The
 fs-roofline producer integration records a real production receipt-v3 row and
-rebuilds a three-sample exact-key model through this crate. Unit tests cover
+rebuilds a three-sample exact-key model through this crate at the exact 1 MiB
+dependency-receipt ceiling; the paired retained cap+1 case returns
+`LedgerArtifactReadLimit` before fitting or payload materialization. Unit tests cover
 refusals, stable degenerate fits, band ordering, extrapolation, transactional
 invalid observations, exact caps plus limit+1, empty evaluation, hostile
 duplicate-key receipts, and producer-statistic rederivation.
@@ -225,8 +251,11 @@ duplicate-key receipts, and producer-statistic rederivation.
 `tests/alloc_battery.rs` covers budget-safe allocation, typed input/work
 refusals, online re-planning, oracle bounds, evaluator safety, and tropical
 composition. Feature-gated `tests/voi.rs` covers exact boundaries and limit+1,
-callback/domain refusals before evaluation, exact target resolution, probe
-economics, sealed menu/context identity, asymmetric subset contraction,
+callback/domain refusals before evaluation, cancellation at every evaluation
+position, ambient `Cx` budget exhaustion before callback entry, zero-callback
+evaluation/work preflight refusals, permit ordinal/remainder accounting, exact
+computation receipts and budget-bound provenance, exact target resolution,
+probe economics, sealed menu/context identity, asymmetric subset contraction,
 structured estimated hints, chronological-order e-process counterexamples,
 bounded append-only matched-cost audits, live activation/demotion, policy and
 snapshot isolation, concurrent duplicate-spend refusal, and cumulative monotone

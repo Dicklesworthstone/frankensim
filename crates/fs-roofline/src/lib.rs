@@ -50,6 +50,9 @@ const CUSTOM_TUNE_SHAPE_CLASS: &str = "roofline-candidate-v1";
 const DEPGRAPH_RECEIPT_ARTIFACT_KIND: &str = "fs-la-depgraph-receipt";
 const DEPGRAPH_RECEIPT_ARTIFACT_META: &str =
     "{\"schema\":\"fs-la-depgraph-receipt-v1\",\"trust\":\"operator-observed\"}";
+// Exact producer ceiling from fs-la/depgraph_receipt_format.rs. A source-pin
+// test detects producer drift without adding a backwards L6 -> L1 edge.
+const MAX_DEPGRAPH_RECEIPT_BYTES: u64 = 1_048_576;
 const INCONSISTENT_RECEIPT_REFUSAL: &str = "dependency receipt fields compiled into fs-session are incomplete or fail their exported domain digest";
 
 const ROOFLINE_SEED: &[u8] = b"roofline";
@@ -2362,7 +2365,13 @@ pub(crate) fn select_matching_rows(
     current_fingerprint: u64,
     current_baseline: Option<fs_blake3::ContentHash>,
 ) -> Result<RowSelection, LedgerError> {
-    let rows = ledger.tune_rows(kernel)?;
+    let rows = match ledger.tune_rows(kernel) {
+        Ok(rows) => rows,
+        Err(LedgerError::TuneCorrupt { .. }) => {
+            return Ok(RowSelection::Verdict(Staleness::CorruptEvidence));
+        }
+        Err(error) => return Err(error),
+    };
     let shape_prefix = format!("{}:run=", tune_shape_class(version));
     let roofline_rows: Vec<_> = rows
         .into_iter()
@@ -2534,7 +2543,6 @@ impl CanonicalProductionOp {
 }
 
 fn parse_canonical_production_op(ir: &str) -> Option<CanonicalProductionOp> {
-    const MAX_OP_IR_BYTES: usize = 1024 * 1024;
     fn take(rest: &mut &str, prefix: &str) -> Option<()> {
         *rest = rest.strip_prefix(prefix)?;
         Some(())
@@ -2569,7 +2577,7 @@ fn parse_canonical_production_op(ir: &str) -> Option<CanonicalProductionOp> {
         u64::from_str_radix(raw, 16).ok()
     }
 
-    if ir.len() > MAX_OP_IR_BYTES {
+    if ir.len() > fs_ledger::MAX_OP_IR_BYTES {
         return None;
     }
     let mut rest = ir;
@@ -2761,10 +2769,11 @@ fn validate_protocol_axes(
 fn artifact_bytes_for_validation(
     ledger: &Ledger,
     artifact: &fs_blake3::ContentHash,
+    max_bytes: u64,
 ) -> Result<Option<Vec<u8>>, LedgerError> {
-    match ledger.get_artifact(artifact) {
+    match ledger.get_artifact_bounded(artifact, max_bytes) {
         Ok(bytes) => Ok(bytes),
-        Err(LedgerError::Corrupt { .. }) => Ok(None),
+        Err(LedgerError::Corrupt { .. } | LedgerError::ArtifactReadLimit { .. }) => Ok(None),
         Err(error) => Err(error),
     }
 }
@@ -2798,7 +2807,11 @@ fn dependency_receipt_is_structurally_valid(
     )? {
         return Ok(false);
     }
-    let Some(bytes) = artifact_bytes_for_validation(ledger, &protocol.dependency_receipt_artifact)?
+    let Some(bytes) = artifact_bytes_for_validation(
+        ledger,
+        &protocol.dependency_receipt_artifact,
+        MAX_DEPGRAPH_RECEIPT_BYTES,
+    )?
     else {
         return Ok(false);
     };
@@ -2845,8 +2858,10 @@ fn validate_roofline_row(
     let Some(params) = parse_roofline_row_params(&row.params) else {
         return Ok(None);
     };
-    let Some(op) = ledger.op(params.op)? else {
-        return Ok(None);
+    let op = match ledger.op(params.op) {
+        Ok(Some(op)) => op,
+        Ok(None) | Err(LedgerError::OpCorrupt { .. }) => return Ok(None),
+        Err(error) => return Err(error),
     };
     let Some(recorded_at_ns) = op.t_end else {
         return Ok(None);
@@ -2948,7 +2963,11 @@ fn stored_manifest_member_is_valid(
     {
         return Ok(false);
     }
-    let Some(artifact_bytes) = artifact_bytes_for_validation(ledger, &params.payload_artifact)?
+    let Some(artifact_bytes) = artifact_bytes_for_validation(
+        ledger,
+        &params.payload_artifact,
+        u64::try_from(row.measured.len()).expect("a Rust slice length fits u64"),
+    )?
     else {
         return Ok(false);
     };
@@ -3904,7 +3923,14 @@ mod tests {
 
     #[test]
     fn production_receipt_v3_feeds_exact_scoped_plan_cost_model() {
-        const SYNTHETIC_RECEIPT: &str = "{\"schema\":\"fs-roofline-plan-loader-integration-v1\",\"purpose\":\"exercise-real-producer-schema\"}";
+        let receipt_len = usize::try_from(MAX_DEPGRAPH_RECEIPT_BYTES).unwrap();
+        let synthetic_receipt: &'static str =
+            Box::leak(format!("{{\"d\":\"{}\"}}", "x".repeat(receipt_len - 8)).into_boxed_str());
+        assert_eq!(
+            synthetic_receipt.len(),
+            receipt_len,
+            "fixture must exercise the producer's exact 1 MiB receipt cap"
+        );
         let axes = synthetic_axes();
         let (baseline, identity) = trusted_baseline(&axes);
         let baseline_policy = AxisBaselinePolicy::new(Some(&baseline), &identity, 20_010);
@@ -3922,13 +3948,30 @@ mod tests {
                 baseline_policy,
                 registry,
                 || axes.clone(),
-                SYNTHETIC_RECEIPT,
+                synthetic_receipt,
             )
             .expect("seal real receipt-v3 fixture");
         assert!(run.citation_eligible());
         let kernel = run.results()[0].kernel.clone();
+        let version = run.results()[0].version.clone();
+        let build_identity = read_executable_build_identity()
+            .expect("test executable identity remains readable after measurement");
+        let dependency = DependencyReceiptBinding::from_parts(
+            synthetic_receipt,
+            fs_blake3::hash_domain(
+                fs_session::GEMM_DEPGRAPH_RECEIPT_DOMAIN,
+                synthetic_receipt.as_bytes(),
+            ),
+        )
+        .expect("exact-cap dependency receipt agrees with its digest");
         let ledger = Ledger::open(":memory:").expect("in-memory ledger");
-        run.record(&ledger).expect("record production evidence");
+        let op = run.record(&ledger).expect("record production evidence");
+        let recorded_at = ledger
+            .op(op)
+            .expect("query exact-cap op")
+            .expect("stored exact-cap op")
+            .t_end
+            .expect("exact-cap op finished");
         let rows = ledger.tune_rows(&kernel).expect("read exact tune row");
         assert_eq!(rows.len(), 1);
         let row = &rows[0];
@@ -3936,6 +3979,117 @@ mod tests {
             .expect("strict planner loader accepts producer-authored row");
         assert_eq!(model.n_obs(), 3, "every timed repetition is retained");
         assert!(model.predict(64.0).is_ok());
+        assert_eq!(
+            staleness_at_with_build_and_dependency(
+                &ledger,
+                &kernel,
+                &version,
+                axes.fingerprint,
+                Some(baseline.content_hash()),
+                recorded_at,
+                build_identity,
+                Some(dependency),
+            )
+            .expect("classify exact-cap retained receipt"),
+            Staleness::Fresh
+        );
+    }
+
+    #[test]
+    fn retained_over_cap_dependency_is_refused_by_both_consumers() {
+        let receipt_len = usize::try_from(MAX_DEPGRAPH_RECEIPT_BYTES).unwrap() + 1;
+        let synthetic_receipt: &'static str =
+            Box::leak(format!("{{\"d\":\"{}\"}}", "x".repeat(receipt_len - 8)).into_boxed_str());
+        let axes = synthetic_axes();
+        let (baseline, identity) = trusted_baseline(&axes);
+        let baseline_policy = AxisBaselinePolicy::new(Some(&baseline), &identity, 20_010);
+        let registry: Vec<Box<dyn RooflineKernel>> = vec![Box::new(ReceiptKernel {
+            elements: 64,
+            value: 0,
+        })];
+        let run = production::ProductionProbe::from_observed(axes.clone())
+            .run_with_test_receipt(
+                production::ProductionRunConfig {
+                    n: 64,
+                    warmup: 1,
+                    reps: 3,
+                },
+                baseline_policy,
+                registry,
+                || axes.clone(),
+                synthetic_receipt,
+            )
+            .expect("seal hostile over-cap retained receipt");
+        let kernel = run.results()[0].kernel.clone();
+        let version = run.results()[0].version.clone();
+        let build_identity = read_executable_build_identity()
+            .expect("test executable identity remains readable after measurement");
+        let dependency = DependencyReceiptBinding::from_parts(
+            synthetic_receipt,
+            fs_blake3::hash_domain(
+                fs_session::GEMM_DEPGRAPH_RECEIPT_DOMAIN,
+                synthetic_receipt.as_bytes(),
+            ),
+        )
+        .expect("over-cap fixture still agrees with its retained digest");
+        let ledger = Ledger::open(":memory:").expect("in-memory ledger");
+        let op = run
+            .record(&ledger)
+            .expect("retain hostile dependency receipt");
+        let recorded_at = ledger
+            .op(op)
+            .expect("query hostile receipt op")
+            .expect("stored hostile receipt op")
+            .t_end
+            .expect("hostile receipt op finished");
+        let rows = ledger
+            .tune_rows(&kernel)
+            .expect("read hostile exact tune row");
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert!(matches!(
+            fs_plan::cost_model_from_tune(&ledger, &kernel, &row.shape_class, &row.machine),
+            Err(fs_plan::TuneModelError::Ledger(
+                LedgerError::ArtifactReadLimit {
+                    limit,
+                    observed,
+                    ..
+                }
+            )) if limit == MAX_DEPGRAPH_RECEIPT_BYTES
+                && observed == MAX_DEPGRAPH_RECEIPT_BYTES + 1
+        ));
+        assert_eq!(
+            staleness_at_with_build_and_dependency(
+                &ledger,
+                &kernel,
+                &version,
+                axes.fingerprint,
+                Some(baseline.content_hash()),
+                recorded_at,
+                build_identity,
+                Some(dependency),
+            )
+            .expect("classify hostile retained receipt"),
+            Staleness::CorruptEvidence
+        );
+    }
+
+    #[test]
+    fn dependency_receipt_cap_matches_the_fs_la_producer_source() {
+        let source = include_str!("../../fs-la/depgraph_receipt_format.rs");
+        let declaration = source
+            .lines()
+            .find_map(|line| {
+                line.trim()
+                    .strip_prefix("pub const MAX_RECEIPT_BYTES: usize = ")
+            })
+            .and_then(|value| value.strip_suffix(';'))
+            .expect("fs-la producer must declare MAX_RECEIPT_BYTES");
+        let producer_cap = declaration
+            .replace('_', "")
+            .parse::<u64>()
+            .expect("fs-la producer cap must remain a decimal byte count");
+        assert_eq!(producer_cap, MAX_DEPGRAPH_RECEIPT_BYTES);
     }
 
     #[test]

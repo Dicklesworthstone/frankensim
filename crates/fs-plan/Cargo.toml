@@ -11,6 +11,7 @@ description = "Per-operator cost/error models, Error Ledger and Time Ledger attr
 layer = "L6"
 
 [dependencies]
+asupersync = { path = "../../../asupersync", optional = true }
 fs-dfo = { path = "../fs-dfo", optional = true }
 fs-blake3 = { path = "../fs-blake3" }
 fs-eproc = { path = "../fs-eproc", optional = true }
@@ -18,14 +19,14 @@ fs-geom = { path = "../fs-geom" }
 fs-ledger = { path = "../fs-ledger" }
 
 [dev-dependencies]
-asupersync = { path = "../../../asupersync" }
+asupersync = { path = "../../../asupersync", features = ["test-internals"] }
 fs-alloc = { path = "../fs-alloc" }
 fs-evidence = { path = "../fs-evidence" }
 fs-exec = { path = "../fs-exec" }
 
 [features]
 # [F]-gated per the Ambition-Tag rule (bead knh1.6, Proposal C).
-voi-queries = ["dep:fs-eproc"]
+voi-queries = ["dep:asupersync", "dep:fs-eproc"]
 # [M]-gated (bead gp3.9): the co-optimizing allocator. Ships OFF; the
 # promotion gate (beats hand allocation on all three flagships) is the
 # huq.15 milestone's Gauntlet call — the fixture-matrix scoreboard here

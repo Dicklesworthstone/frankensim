@@ -319,6 +319,11 @@ pub const ROOFLINE_MACHINE_KEY_BYTES: usize = 40;
 /// tune measurement admission bound, so parsing is bounded before allocation.
 pub const MAX_ROOFLINE_RECEIPT_BYTES: usize = fs_ledger::MAX_TUNE_MEASURED_BYTES;
 
+/// Exact payload ceiling owned by fs-la's dependency-receipt grammar.
+/// A source-pin test fails if the producer declaration drifts without this
+/// consumer being updated; no L6-to-L1 runtime edge is added solely for a cap.
+pub const MAX_DEPGRAPH_RECEIPT_BYTES: u64 = 1_048_576;
+
 const MAX_RECEIPT_JSON_DEPTH: usize = 32;
 const MAX_RECEIPT_JSON_NODES: usize = 65_536;
 const MAX_RECEIPT_JSON_STRING_BYTES: usize = 256 * 1024;
@@ -1603,10 +1608,15 @@ fn validate_provenance(
             .ok_or(TuneModelError::ScopeMismatch {
                 field: "payload_artifact",
             })?;
+    let payload_limit = u64::try_from(row.measured.len())
+        .map_err(|_| invalid_receipt("measured", "payload length exceeds u64"))?;
     if payload_info.kind != "roofline-benchmark-result"
         || payload_info.meta.as_deref() != Some("{\"schema\":\"fs-roofline-benchmark-result-v1\"}")
         || u64::try_from(row.measured.len()).ok() != Some(payload_info.len)
-        || ledger.get_artifact(&payload_hash)?.as_deref() != Some(row.measured.as_bytes())
+        || ledger
+            .get_artifact_bounded(&payload_hash, payload_limit)?
+            .as_deref()
+            != Some(row.measured.as_bytes())
         || !ledger.edge_exists(op_id, &payload_hash, fs_ledger::EdgeRole::Out)?
     {
         return Err(TuneModelError::ScopeMismatch {
@@ -1624,12 +1634,11 @@ fn validate_provenance(
             .ok_or(TuneModelError::ScopeMismatch {
                 field: "dependency_receipt_artifact",
             })?;
-    let dependency_bytes =
-        ledger
-            .get_artifact(&dependency_hash)?
-            .ok_or(TuneModelError::ScopeMismatch {
-                field: "dependency_receipt_artifact",
-            })?;
+    let dependency_bytes = ledger
+        .get_artifact_bounded(&dependency_hash, MAX_DEPGRAPH_RECEIPT_BYTES)?
+        .ok_or(TuneModelError::ScopeMismatch {
+            field: "dependency_receipt_artifact",
+        })?;
     if dependency_info.kind != "fs-la-depgraph-receipt"
         || dependency_info.meta.as_deref()
             != Some("{\"schema\":\"fs-la-depgraph-receipt-v1\",\"trust\":\"operator-observed\"}")
@@ -1709,6 +1718,24 @@ pub fn cost_model_from_tune(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dependency_receipt_cap_matches_the_fs_la_producer_source() {
+        let source = include_str!("../../fs-la/depgraph_receipt_format.rs");
+        let declaration = source
+            .lines()
+            .find_map(|line| {
+                line.trim()
+                    .strip_prefix("pub const MAX_RECEIPT_BYTES: usize = ")
+            })
+            .and_then(|value| value.strip_suffix(';'))
+            .expect("fs-la producer must declare MAX_RECEIPT_BYTES");
+        let producer_cap = declaration
+            .replace('_', "")
+            .parse::<u64>()
+            .expect("fs-la producer cap must remain a decimal byte count");
+        assert_eq!(producer_cap, MAX_DEPGRAPH_RECEIPT_BYTES);
+    }
 
     fn oracle_spec(name: &str) -> fs_geom::ConverterSpec {
         fs_geom::ConverterSpec {

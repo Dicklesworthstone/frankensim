@@ -82,7 +82,12 @@ crates plus `std`.
   baseline, and exact current executable. Exact current-key rows are
   semantically revalidated against canonical params, artifact bytes and output
   edge, successful operation receipt, admitted baseline, and executable
-  identity. Validation also requires the canonical `production-v2` stamp,
+  identity. Operation fields are metadata-preflighted by fs-ledger before
+  materialization; measured artifacts are capped at the exact tune-row length
+  and dependency receipts at fs-la's producer-owned 1 MiB ceiling, with a
+  source-pin test that fails on independent producer drift. A bound
+  refusal is corrupt evidence, never an engine failure. Validation also
+  requires the canonical `production-v2` stamp,
   well-formed nonce/pre-probe/post-probe fields, exact dependency artifact
   kind/metadata/bytes, an `In` lineage edge, and a digest recomputed with
   `fs_session::GEMM_DEPGRAPH_RECEIPT_DOMAIN`. Historical rows validate against
@@ -249,6 +254,9 @@ crates plus `std`.
    linked as an output of the row's exact successful op. Current-build evidence
    is fresh through 30 days inclusive, expired afterward, and a clock earlier
    than its newest op fails closed as rollback.
+   Every retained artifact read reaches bytes only through fs-ledger's shared
+   bounded path; an oversized op row or artifact cannot be materialized merely
+   to decide that it is corrupt.
 5. Axes must be finite and positive, have a nonzero logical-CPU count, meet
    the 5 GB/s and 5 GFLOP/s single-thread reference-family floors, and have
    aggregate axes at least half their single-thread counterparts. These
@@ -357,7 +365,10 @@ and never-measured states (rf-004), plus rejection-without-publication (rf-004b)
 re-run reproducibility
 within stated dispersion allowance (rf-005); CLI smoke incl. §14.1
 coverage table and structured refusals (rf-006). Unit tests cover
-attainment hand-calculations, order statistics, and axes sanity. The GEMM
+attainment hand-calculations, order statistics, axes sanity, exact-cap
+dependency evidence accepted by both roofline and fs-plan, and a retained
+cap+1 dependency classified as `CorruptEvidence` by roofline while fs-plan
+returns the typed pre-materialization refusal. The GEMM
 registry regression executes the production session call twice and proves
 exactly one cold sweep plus two recorded dispatch decisions (warm-row reuse,
 not a test-only wrapper). Durable-cache regressions prove all three publication

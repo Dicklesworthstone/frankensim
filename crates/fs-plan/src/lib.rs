@@ -14,7 +14,8 @@
 //!   these models; [`oracle::cost_model_from_tune`] rebuilds models
 //!   deterministically from fs-ledger `tune` snapshots.
 //!
-//! Layer: L6 (HELM). Runtime deps: `std`, fs-geom, fs-ledger.
+//! Layer: L6 (HELM). Runtime deps: `std`, fs-geom, fs-ledger; feature-gated
+//! VoI adds asupersync cancellation and fs-eproc audit authority.
 
 pub mod alloc;
 pub mod cost;
@@ -47,7 +48,7 @@ pub use oracle::{
 #[cfg(feature = "voi-queries")]
 pub use voi::{
     MAX_VOI_AUDIT_RECORDS, MAX_VOI_EVALUATIONS, MAX_VOI_GRID, MAX_VOI_NAME_BYTES, MAX_VOI_NODES,
-    MAX_VOI_PROBES, MAX_VOI_SCHEDULED_CONTEXTS, VOI_AUDIT_ALPHA, VoiError,
+    MAX_VOI_PROBES, MAX_VOI_SCHEDULED_CONTEXTS, MAX_VOI_WORK_UNITS, VOI_AUDIT_ALPHA, VoiError,
 };
 
 /// Crate version (compile-time stamp).

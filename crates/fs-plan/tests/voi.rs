@@ -11,16 +11,46 @@
 use std::cell::Cell;
 use std::cell::RefCell;
 
+use asupersync::types::Budget;
 use fs_plan::voi::{
-    AuditReport, AuditVerdict, LiveDecision, MAX_VOI_AUDIT_RECORDS, MAX_VOI_EVALUATIONS,
-    MAX_VOI_GRID, MAX_VOI_NAME_BYTES, MAX_VOI_NODES, MAX_VOI_PROBES, MatchedAuditRecord, Probe,
-    ProbeKind, RankedMenu, UncertaintyNode, VoiError, VoiScheduler,
+    AuditReport, AuditVerdict, Cx, DecisionBudget, DecisionEvaluationPermit, DecisionOracle,
+    LiveDecision, MAX_VOI_AUDIT_RECORDS, MAX_VOI_EVALUATIONS, MAX_VOI_GRID, MAX_VOI_NAME_BYTES,
+    MAX_VOI_NODES, MAX_VOI_PROBES, MAX_VOI_WORK_UNITS, MatchedAuditRecord, Probe, ProbeKind,
+    RankedMenu, UncertaintyNode, VoiError, VoiScheduler,
     audit_scheduling as audit_scheduling_scoped, hint_for_query,
-    rank_purchases as rank_purchases_scoped,
+    rank_purchases as rank_purchases_impl,
 };
 
 const POLICY_SCOPE: &str = "fixture-policy-v1";
 const SNAPSHOT_ID: &str = "fixture-snapshot-v1";
+const ORACLE_TEST_EVALUATIONS: usize = 5;
+const ORACLE_TEST_WORK_UNITS: u64 = 5;
+
+fn decision_budget() -> DecisionBudget {
+    DecisionBudget::new(MAX_VOI_EVALUATIONS, MAX_VOI_WORK_UNITS)
+        .expect("valid fixture decision budget")
+}
+
+fn rank_purchases_scoped(
+    decision: &LiveDecision<'_>,
+    nodes: &[UncertaintyNode],
+    menu: &[Probe],
+    grid: usize,
+    policy_scope: &str,
+    snapshot_id: &str,
+) -> Result<RankedMenu, VoiError> {
+    let cx = Cx::for_testing();
+    rank_purchases_impl(
+        &cx,
+        decision,
+        nodes,
+        menu,
+        grid,
+        decision_budget(),
+        policy_scope,
+        snapshot_id,
+    )
+}
 
 fn rank_purchases(
     decision: &LiveDecision<'_>,
@@ -29,6 +59,22 @@ fn rank_purchases(
     grid: usize,
 ) -> Result<RankedMenu, VoiError> {
     rank_purchases_scoped(decision, nodes, menu, grid, POLICY_SCOPE, SNAPSHOT_ID)
+}
+
+fn nominal_verdict(
+    decision: &LiveDecision<'_>,
+    nodes: &[UncertaintyNode],
+) -> Result<bool, VoiError> {
+    decision.nominal_verdict(&Cx::for_testing(), nodes, decision_budget())
+}
+
+fn flip_probability(
+    decision: &LiveDecision<'_>,
+    nodes: &[UncertaintyNode],
+    node_idx: usize,
+    grid: usize,
+) -> Result<f64, VoiError> {
+    decision.flip_probability(&Cx::for_testing(), nodes, node_idx, grid, decision_budget())
 }
 
 fn audit_scheduling(records: &[MatchedAuditRecord]) -> Result<AuditReport, VoiError> {
@@ -146,15 +192,9 @@ fn voi_001_sensitivity_from_cached_sweeps() {
     };
     let ns = nodes();
     let grid = 32;
-    let p_pivotal = decision
-        .flip_probability(&ns, 0, grid)
-        .expect("valid pivotal sweep");
-    let p_irrelevant = decision
-        .flip_probability(&ns, 1, grid)
-        .expect("valid irrelevant sweep");
-    let p_mild = decision
-        .flip_probability(&ns, 2, grid)
-        .expect("valid mild sweep");
+    let p_pivotal = flip_probability(&decision, &ns, 0, grid).expect("valid pivotal sweep");
+    let p_irrelevant = flip_probability(&decision, &ns, 1, grid).expect("valid irrelevant sweep");
+    let p_mild = flip_probability(&decision, &ns, 2, grid).expect("valid mild sweep");
     println!(
         "{{\"metric\":\"sensitivity\",\"drag_gap\":{p_pivotal:.3},\
          \"mass_penalty\":{p_irrelevant:.3},\"hazard\":{p_mild:.3},\"surrogate_calls\":{}}}",
@@ -425,7 +465,7 @@ fn voi_006_node_name_and_grid_boundaries() {
         arity: MAX_VOI_NODES,
     };
     assert!(
-        boundary_decision.nominal_verdict(&boundary_nodes).is_ok(),
+        nominal_verdict(&boundary_decision, &boundary_nodes).is_ok(),
         "the exact node-count boundary is admitted"
     );
     let mut too_many = boundary_nodes.clone();
@@ -440,7 +480,7 @@ fn voi_006_node_name_and_grid_boundaries() {
         arity: too_many.len(),
     };
     assert!(matches!(
-        oversized_decision.nominal_verdict(&too_many),
+        nominal_verdict(&oversized_decision, &too_many),
         Err(VoiError::SizeLimit { .. })
     ));
 
@@ -454,11 +494,11 @@ fn voi_006_node_name_and_grid_boundaries() {
         margin: &wide_margin,
         arity: 1,
     };
-    assert!(one.nominal_verdict(&exact_name).is_ok());
+    assert!(nominal_verdict(&one, &exact_name).is_ok());
     let mut long_name = exact_name;
     long_name[0].name.push('n');
     assert!(matches!(
-        one.nominal_verdict(&long_name),
+        nominal_verdict(&one, &long_name),
         Err(VoiError::InvalidName { .. })
     ));
 
@@ -469,12 +509,12 @@ fn voi_006_node_name_and_grid_boundaries() {
         nominal: 0.0,
     }];
     assert!(
-        one.flip_probability(&single, 0, MAX_VOI_GRID).is_ok(),
+        flip_probability(&one, &single, 0, MAX_VOI_GRID).is_ok(),
         "the exact grid boundary is admitted"
     );
     for grid in [0, MAX_VOI_GRID + 1] {
         assert!(matches!(
-            one.flip_probability(&single, 0, grid),
+            flip_probability(&one, &single, 0, grid),
             Err(VoiError::InvalidGrid { .. })
         ));
     }
@@ -554,7 +594,7 @@ fn voi_008_decision_interval_and_callback_refusals() {
         arity: 1,
     };
     assert!(matches!(
-        decision.nominal_verdict(&[]),
+        nominal_verdict(&decision, &[]),
         Err(VoiError::SizeLimit { .. })
     ));
     assert_eq!(calls.get(), 0);
@@ -569,11 +609,11 @@ fn voi_008_decision_interval_and_callback_refusals() {
         arity: 2,
     };
     assert!(matches!(
-        wrong_arity.nominal_verdict(&ns),
+        nominal_verdict(&wrong_arity, &ns),
         Err(VoiError::ArityMismatch { .. })
     ));
     assert!(matches!(
-        decision.flip_probability(&ns, 1, 4),
+        flip_probability(&decision, &ns, 1, 4),
         Err(VoiError::NodeIndexOutOfRange { .. })
     ));
 
@@ -584,7 +624,7 @@ fn voi_008_decision_interval_and_callback_refusals() {
         arity: 2,
     };
     assert!(matches!(
-        duplicate_decision.nominal_verdict(&duplicate),
+        nominal_verdict(&duplicate_decision, &duplicate),
         Err(VoiError::DuplicateName { .. })
     ));
     for (lo, nominal, hi) in [
@@ -600,7 +640,7 @@ fn voi_008_decision_interval_and_callback_refusals() {
             nominal,
         }];
         assert!(matches!(
-            decision.nominal_verdict(&invalid),
+            nominal_verdict(&decision, &invalid),
             Err(VoiError::InvalidInterval { .. })
         ));
     }
@@ -611,7 +651,7 @@ fn voi_008_decision_interval_and_callback_refusals() {
         arity: 1,
     };
     assert!(matches!(
-        malformed.nominal_verdict(&ns),
+        nominal_verdict(&malformed, &ns),
         Err(VoiError::NonFiniteMargin { .. })
     ));
     let interior_nan = |values: &[f64]| {
@@ -622,7 +662,7 @@ fn voi_008_decision_interval_and_callback_refusals() {
         arity: 1,
     };
     assert!(matches!(
-        malformed.flip_probability(&ns, 0, 2),
+        flip_probability(&malformed, &ns, 0, 2),
         Err(VoiError::NonFiniteMargin { .. })
     ));
     verdict(
@@ -1140,4 +1180,400 @@ fn voi_016_live_scheduler_scopes_serializes_and_revokes_authority() {
             .count(),
         1
     );
+}
+
+struct ControlledOracle<'a> {
+    calls: &'a Cell<usize>,
+    cancel_at: Option<usize>,
+    refuse_at: Option<usize>,
+    work_units_per_evaluation: u64,
+}
+
+impl DecisionOracle for ControlledOracle<'_> {
+    fn arity(&self) -> usize {
+        1
+    }
+
+    fn work_units_per_evaluation(&self) -> u64 {
+        self.work_units_per_evaluation
+    }
+
+    fn evaluate(
+        &self,
+        cx: &Cx,
+        permit: DecisionEvaluationPermit,
+        values: &[f64],
+    ) -> Result<f64, VoiError> {
+        let call = self.calls.get() + 1;
+        self.calls.set(call);
+        assert_eq!(permit.ordinal() + 1, call);
+        assert_eq!(permit.total_evaluations(), ORACLE_TEST_EVALUATIONS);
+        assert_eq!(permit.charged_work_units(), self.work_units_per_evaluation);
+        assert_eq!(
+            permit.remaining_evaluations(),
+            ORACLE_TEST_EVALUATIONS - call
+        );
+        assert!(
+            permit.envelope().max_evaluations() >= permit.total_evaluations(),
+            "the permit remains inside the caller envelope"
+        );
+        let completed_work = u64::try_from(call)
+            .expect("fixture call count fits u64")
+            .checked_mul(self.work_units_per_evaluation)
+            .expect("fixture work accounting stays bounded");
+        assert_eq!(
+            permit.remaining_work_units(),
+            permit.envelope().max_work_units() - completed_work
+        );
+        if self.cancel_at == Some(call) {
+            cx.set_cancel_requested(true);
+        }
+        if self.refuse_at == Some(call) {
+            return Err(VoiError::ArithmeticRefusal {
+                operation: "fixture oracle refusal",
+                subject: "x".to_string(),
+            });
+        }
+        Ok(values[0] - 0.5)
+    }
+}
+
+struct UnderdeclaringOracle<'a> {
+    calls: &'a Cell<usize>,
+}
+
+impl DecisionOracle for UnderdeclaringOracle<'_> {
+    fn arity(&self) -> usize {
+        1
+    }
+
+    fn work_units_per_evaluation(&self) -> u64 {
+        1
+    }
+
+    fn evaluate(
+        &self,
+        _cx: &Cx,
+        permit: DecisionEvaluationPermit,
+        _values: &[f64],
+    ) -> Result<f64, VoiError> {
+        self.calls.set(self.calls.get() + 1);
+        Err(VoiError::WorkLimitExceeded {
+            requested: 100,
+            max: permit.charged_work_units(),
+        })
+    }
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // one adversarial boundary/refusal matrix
+fn voi_017_oracle_cancellation_and_work_budget_fail_closed() {
+    assert_eq!(
+        DecisionBudget::new(0, 1),
+        Err(VoiError::InvalidEvaluationBudget {
+            supplied: 0,
+            max: MAX_VOI_EVALUATIONS,
+        })
+    );
+    assert_eq!(
+        DecisionBudget::new(1, 0),
+        Err(VoiError::InvalidWorkBudget {
+            supplied: 0,
+            max: MAX_VOI_WORK_UNITS,
+        })
+    );
+    assert_eq!(
+        DecisionBudget::new(MAX_VOI_EVALUATIONS + 1, 1),
+        Err(VoiError::InvalidEvaluationBudget {
+            supplied: MAX_VOI_EVALUATIONS + 1,
+            max: MAX_VOI_EVALUATIONS,
+        })
+    );
+    assert_eq!(
+        DecisionBudget::new(1, MAX_VOI_WORK_UNITS + 1),
+        Err(VoiError::InvalidWorkBudget {
+            supplied: MAX_VOI_WORK_UNITS + 1,
+            max: MAX_VOI_WORK_UNITS,
+        })
+    );
+    let nodes = [UncertaintyNode {
+        name: "x".to_string(),
+        lo: 0.0,
+        hi: 1.0,
+        nominal: 0.6,
+    }];
+    let menu = [probe("measure-x", "x", 1.0, 0.5)];
+    let required_evaluations = ORACLE_TEST_EVALUATIONS;
+
+    let pre_cancel_calls = Cell::new(0);
+    let pre_cancel_oracle = ControlledOracle {
+        calls: &pre_cancel_calls,
+        cancel_at: None,
+        refuse_at: None,
+        work_units_per_evaluation: 1,
+    };
+    let cancelled = Cx::for_testing();
+    cancelled.set_cancel_requested(true);
+    let result = rank_purchases_impl(
+        &cancelled,
+        &pre_cancel_oracle,
+        &nodes,
+        &menu,
+        2,
+        DecisionBudget::new(required_evaluations, ORACLE_TEST_WORK_UNITS)
+            .expect("exact computation budget"),
+        POLICY_SCOPE,
+        SNAPSHOT_ID,
+    );
+    assert_eq!(result, Err(VoiError::DecisionEvaluationCancelled));
+    assert_eq!(
+        pre_cancel_calls.get(),
+        0,
+        "pre-cancellation precedes every callback"
+    );
+
+    let exhausted_calls = Cell::new(0);
+    let exhausted_oracle = ControlledOracle {
+        calls: &exhausted_calls,
+        cancel_at: None,
+        refuse_at: None,
+        work_units_per_evaluation: 1,
+    };
+    let exhausted = Cx::for_testing_with_budget(Budget::new().with_poll_quota(0));
+    let result = rank_purchases_impl(
+        &exhausted,
+        &exhausted_oracle,
+        &nodes,
+        &menu,
+        2,
+        DecisionBudget::new(required_evaluations, ORACLE_TEST_WORK_UNITS)
+            .expect("exact computation budget"),
+        POLICY_SCOPE,
+        SNAPSHOT_ID,
+    );
+    assert_eq!(result, Err(VoiError::DecisionEvaluationCancelled));
+    assert_eq!(
+        exhausted_calls.get(),
+        0,
+        "ambient asupersync budget refusal precedes every callback"
+    );
+
+    for cancel_at in 1..=required_evaluations {
+        let calls = Cell::new(0);
+        let oracle = ControlledOracle {
+            calls: &calls,
+            cancel_at: Some(cancel_at),
+            refuse_at: None,
+            work_units_per_evaluation: 1,
+        };
+        let result = rank_purchases_impl(
+            &Cx::for_testing(),
+            &oracle,
+            &nodes,
+            &menu,
+            2,
+            DecisionBudget::new(required_evaluations, ORACLE_TEST_WORK_UNITS)
+                .expect("exact computation budget"),
+            POLICY_SCOPE,
+            SNAPSHOT_ID,
+        );
+        assert_eq!(result, Err(VoiError::DecisionEvaluationCancelled));
+        assert_eq!(
+            calls.get(),
+            cancel_at,
+            "cancel after oracle call {cancel_at}"
+        );
+    }
+
+    let refusal_calls = Cell::new(0);
+    let refusal_oracle = ControlledOracle {
+        calls: &refusal_calls,
+        cancel_at: None,
+        refuse_at: Some(3),
+        work_units_per_evaluation: 1,
+    };
+    let result = rank_purchases_impl(
+        &Cx::for_testing(),
+        &refusal_oracle,
+        &nodes,
+        &menu,
+        2,
+        DecisionBudget::new(required_evaluations, ORACLE_TEST_WORK_UNITS)
+            .expect("exact computation budget"),
+        POLICY_SCOPE,
+        SNAPSHOT_ID,
+    );
+    assert!(matches!(
+        result,
+        Err(VoiError::ArithmeticRefusal {
+            operation: "fixture oracle refusal",
+            ..
+        })
+    ));
+    assert_eq!(
+        refusal_calls.get(),
+        3,
+        "oracle refusal returns no partial ranking"
+    );
+
+    let expensive_calls = Cell::new(0);
+    let expensive_oracle = ControlledOracle {
+        calls: &expensive_calls,
+        cancel_at: None,
+        refuse_at: None,
+        work_units_per_evaluation: 100,
+    };
+    let result = rank_purchases_impl(
+        &Cx::for_testing(),
+        &expensive_oracle,
+        &nodes,
+        &menu,
+        2,
+        DecisionBudget::new(required_evaluations, 499).expect("bounded work budget"),
+        POLICY_SCOPE,
+        SNAPSHOT_ID,
+    );
+    assert_eq!(
+        result,
+        Err(VoiError::WorkLimitExceeded {
+            requested: 500,
+            max: 499,
+        })
+    );
+    assert_eq!(
+        expensive_calls.get(),
+        0,
+        "work refusal must precede every callback"
+    );
+    let expensive = rank_purchases_impl(
+        &Cx::for_testing(),
+        &expensive_oracle,
+        &nodes,
+        &menu,
+        2,
+        DecisionBudget::new(required_evaluations, 500).expect("exact expensive-work budget"),
+        POLICY_SCOPE,
+        SNAPSHOT_ID,
+    )
+    .expect("the exact declared-work envelope admits the expensive oracle");
+    assert_eq!(expensive_calls.get(), required_evaluations);
+    assert_eq!(expensive.computation().work_units(), 500);
+    expensive_calls.set(0);
+
+    let underdeclaring_calls = Cell::new(0);
+    let underdeclaring = UnderdeclaringOracle {
+        calls: &underdeclaring_calls,
+    };
+    let result = rank_purchases_impl(
+        &Cx::for_testing(),
+        &underdeclaring,
+        &nodes,
+        &menu,
+        2,
+        DecisionBudget::new(required_evaluations, ORACLE_TEST_WORK_UNITS)
+            .expect("declared-work envelope"),
+        POLICY_SCOPE,
+        SNAPSHOT_ID,
+    );
+    assert_eq!(
+        result,
+        Err(VoiError::WorkLimitExceeded {
+            requested: 100,
+            max: 1,
+        })
+    );
+    assert_eq!(
+        underdeclaring_calls.get(),
+        1,
+        "a cooperative under-declaring oracle refuses before authority exists"
+    );
+
+    let invalid_calls = Cell::new(0);
+    let invalid_oracle = ControlledOracle {
+        calls: &invalid_calls,
+        cancel_at: None,
+        refuse_at: None,
+        work_units_per_evaluation: 0,
+    };
+    let result = rank_purchases_impl(
+        &Cx::for_testing(),
+        &invalid_oracle,
+        &nodes,
+        &menu,
+        2,
+        DecisionBudget::new(required_evaluations, 500).expect("bounded work budget"),
+        POLICY_SCOPE,
+        SNAPSHOT_ID,
+    );
+    assert_eq!(
+        result,
+        Err(VoiError::InvalidOracleWorkUnits {
+            work_units_per_evaluation: 0,
+            max: MAX_VOI_WORK_UNITS,
+        })
+    );
+    assert_eq!(
+        invalid_calls.get(),
+        0,
+        "invalid oracle metadata must precede every callback"
+    );
+
+    let result = rank_purchases_impl(
+        &Cx::for_testing(),
+        &expensive_oracle,
+        &nodes,
+        &menu,
+        2,
+        DecisionBudget::new(required_evaluations - 1, 500).expect("evaluation budget"),
+        POLICY_SCOPE,
+        SNAPSHOT_ID,
+    );
+    assert_eq!(
+        result,
+        Err(VoiError::EvaluationLimitExceeded {
+            requested: required_evaluations,
+            max: required_evaluations - 1,
+        })
+    );
+    assert_eq!(
+        expensive_calls.get(),
+        0,
+        "evaluation refusal must precede every callback"
+    );
+
+    let calls = Cell::new(0);
+    let oracle = ControlledOracle {
+        calls: &calls,
+        cancel_at: None,
+        refuse_at: None,
+        work_units_per_evaluation: 1,
+    };
+    let first = rank_purchases_impl(
+        &Cx::for_testing(),
+        &oracle,
+        &nodes,
+        &menu,
+        2,
+        DecisionBudget::new(5, 5).expect("exact budget"),
+        POLICY_SCOPE,
+        SNAPSHOT_ID,
+    )
+    .expect("exact budget admits the ranking");
+    calls.set(0);
+    let second = rank_purchases_impl(
+        &Cx::for_testing(),
+        &oracle,
+        &nodes,
+        &menu,
+        2,
+        DecisionBudget::new(6, 6).expect("larger budget"),
+        POLICY_SCOPE,
+        SNAPSHOT_ID,
+    )
+    .expect("larger budget admits the same numeric ranking");
+    assert!(first.iter().eq(second.iter()));
+    assert_ne!(first.source_context_id(), second.source_context_id());
+    assert_ne!(first.context_id(), second.context_id());
+    assert_eq!(first.computation().evaluations(), required_evaluations);
+    assert_eq!(first.computation().work_units(), ORACLE_TEST_WORK_UNITS);
 }
