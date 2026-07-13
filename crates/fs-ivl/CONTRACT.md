@@ -33,8 +33,21 @@ implementation shared with fs-la — recorded relocation, beads
 - `TaylorModel1` — univariate Taylor models: f64 polynomial in (x−c)
   plus a RIGOROUS interval remainder; the containment law extended to
   FUNCTIONS (f(x) ∈ P(x−c) + rem for all x in the domain, tested).
-  Coefficient rounding absorbed into the remainder via interval
-  arithmetic (the affine-module pattern); elementary compositions
+  Constants admit orders 0..=169; the identity variable admits 1..=169.
+  The maximum is numerical and operational, not cosmetic: elementary
+  remainders use `1/(order+1)!`; `1/170!` remains normal in binary64 while
+  `1/171!` is subnormal. The cap also limits live centered-domain powers to
+  339 intervals, multiplication to 28,900 coefficient pairs, and one `exp` or
+  `sin` composition to about 4.9 million pairs. Requests above the cap,
+  unbounded domains, and non-finite scalar inputs are rejected before
+  allocation or arithmetic.
+  A degree-k coefficient's rounding interval is multiplied by the
+  outward-rounded centered-domain power `(domain−c)^k` before absorption;
+  flat absorption is not generally sound because it loses both degree and sign
+  dependence. Sequential domain powers keep each coefficient-absorption pass
+  linear in the emitted vector length (no linear-time claim is made for the
+  polynomial multiplication itself).
+  Elementary compositions
   (exp, sin) carry Lagrange remainders with declared-budget slack.
   Remainders shrink SUPERLINEARLY under subdivision (>20× per halving
   at order 5, tested) and beat plain interval excess by ≥1e6 on
@@ -127,12 +140,32 @@ exhaustion, unevaluated regions remain `Possible`; they are never silently
 dropped or promoted to certified. The compatibility `newton_roots` entry point
 uses a fixed 65,536-box ceiling and panics only for invalid parameters.
 
+Taylor construction and arithmetic return `TaylorModelError`. The error
+distinguishes variable order below one, order above 169, non-finite domain,
+non-finite scalar, bounded coefficient-reservation failure, and incompatible
+domains. `variable`, `constant`, `scale`, `exp`, `sin`, and the reference
+Add/Sub/Mul operators are fallible; operator output is `Result`. All arithmetic
+borrows its inputs and builds a fresh output, so a refusal cannot partially
+mutate or escape a model. Coefficient vectors contain at most 170 entries;
+polynomial multiplication remains quadratic inside that admitted envelope.
+Elementary-series coefficients and Lagrange terms use outward-rounded interval
+reciprocal factorials rather than treating a rounded reciprocal as exact. If
+finite admitted inputs overflow an interval intermediate, the affected Taylor
+remainder/evaluation normalizes to `Interval::WHOLE`; tightness is lost, but a
+one-sided infinity is never emitted as a false finite-real certificate.
+
 ## Determinism class
 Bit-deterministic CROSS-ISA by construction (straight-line IEEE arithmetic
 + fs-math strict functions). Evidence: FNV-64 golden hash over 500 random
 DAG enclosure endpoints + affine collapses = `0x3712_a4c1_2d5e_5864`,
 recorded on aarch64-apple (M4 Pro), required to match on x86-64
 (Threadripper) in tests/conformance.rs. Golden-evidence policy applies.
+The Taylor/root battery separately pins `0x2cdd_5d22_d018_9466`, re-frozen on
+remote x86-64 after reciprocal-factorial and exponential scalars became
+outward intervals, and required to match on aarch64-apple. The same test
+target, outside the hash payload, includes an executable double-double
+wide-domain coefficient-rounding falsifier and path-specific wide-domain
+containment cases.
 
 ## Cancellation behavior
 Straight-line arithmetic needs no poll points. Root isolation is a bulk search
@@ -146,7 +179,12 @@ None. `unsafe_code` denied; no capsules.
 None.
 
 ## Conformance tests
-`tests/conformance.rs`: random-DAG containment battery + golden hash.
+`tests/conformance.rs`: random-DAG containment battery + golden hash, plus 600
+deterministic fs-propcheck interval-pair cases proving add/multiply pointwise
+containment with shrinking enabled and the fixed cases retained.
+`tests/taylor_battery.rs`: functional containment, subdivision convergence,
+double-double-bracketed wide-domain coefficient rounding, certified-root
+honesty, Lipschitz extraction, and a cross-ISA Taylor/root golden hash.
 `tests/predicates.rs`: adversarial degeneracy batteries (cocircular /
 cospherical / collinear lattice configurations), dyadic and 1-ulp
 perturbation classification, SoS tie determinism, measured stage-A filter
@@ -166,7 +204,13 @@ golden-hash case bit-for-bit.
   enforced there): if a budget were violated, elementary enclosures could
   under-cover by the violation amount. Basic-op enclosures are
   unconditionally rigorous.
-- No Taylor models yet (future bead 6ys.13).
+- `TaylorModel1` is univariate and fixed-order; multivariate Taylor models and
+  sparse polynomial bases are not implemented. Public construction and
+  arithmetic enforce the 169-order resource/numerics envelope and use fallible
+  Vec reservation. Arithmetic overflow can conservatively return a whole-line
+  enclosure rather than a useful bound. The API makes no throughput claim near
+  the cap and does not expose a user-selected memory budget below the fixed
+  envelope.
 - Predicates are certified for inputs whose difference monomials (degree
   ≤ 5) stay inside the normal f64 range. Non-finite coordinates and detected
   overflow fail closed; intermediate underflow remains Shewchuk's inherited

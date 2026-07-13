@@ -4,19 +4,32 @@
 //! Lipschitz extraction, and the cross-ISA golden hash.
 
 use fs_ivl::{
-    Interval, RootBox, RootSearchConfig, RootSearchError, TaylorModel1, krawczyk_step,
-    lipschitz_bound, newton_roots, newton_roots_bounded,
+    Interval, MAX_TAYLOR_ORDER, RootBox, RootSearchConfig, RootSearchError, TaylorModel1,
+    TaylorModelError, krawczyk_step, lipschitz_bound, newton_roots, newton_roots_bounded,
 };
+use fs_math::dd::Dd;
 
 /// f(x) = x·sin(x) + exp(x·0.3) as a Taylor model (order 5).
 fn model_f(domain: Interval) -> TaylorModel1 {
-    let x = TaylorModel1::variable(domain, 5);
-    let xs = &x * &x.sin();
-    &xs + &x.scale(0.3).exp()
+    let x = TaylorModel1::variable(domain, 5).expect("admitted Taylor variable");
+    let sine = x.sin().expect("admitted sine composition");
+    let xs = (&x * &sine).expect("compatible product");
+    let scaled = x.scale(0.3).expect("finite scale");
+    let exponential = scaled.exp().expect("admitted exponential composition");
+    (&xs + &exponential).expect("compatible sum")
 }
 
 fn point_f(x: f64) -> f64 {
     x * fs_math::det::sin(x) + fs_math::det::exp(0.3 * x)
+}
+
+fn assert_point_contained(label: &str, model: &TaylorModel1, x: f64, truth: f64) {
+    let enclosure = model.eval_interval(Interval::point(x));
+    let truth_bracket = Interval::new(fs_math::next_down(truth), fs_math::next_up(truth));
+    assert!(
+        enclosure.encloses(truth_bracket),
+        "{label} under-covered at {x}: {enclosure:?} vs {truth_bracket:?}"
+    );
 }
 
 #[test]
@@ -39,6 +52,222 @@ fn functional_containment() {
     println!(
         "{{\"suite\":\"fs-ivl\",\"case\":\"tm-containment\",\"verdict\":\"pass\",\"detail\":\"41 point checks inside model enclosures\"}}"
     );
+}
+
+#[test]
+fn wide_domain_coefficient_rounding_stays_contained() {
+    // The two expressions have identical f64 perturbation points but different
+    // coefficient-rounding schedules. The shared double-double oracle derives
+    // their exact real difference at x=10. Flat
+    // coefficient-error absorption under-covered this by forgetting the h^1
+    // factor on the centered domain [-10, 10].
+    let domain = Interval::new(-10.0, 10.0);
+    let x = TaylorModel1::variable(domain, 1).expect("admitted Taylor variable");
+    let staged = x
+        .scale(0.1)
+        .and_then(|model| model.scale(0.2))
+        .expect("finite staged scales");
+    let direct = x.scale(0.1 * 0.2).expect("finite direct scale");
+    let difference = (&staged - &direct).expect("compatible difference");
+    let enclosure = difference.eval_interval(Interval::point(10.0));
+    let dd_value =
+        (Dd::from_f64(0.1) * Dd::from_f64(0.2) - Dd::from_f64(0.1 * 0.2)) * Dd::from_f64(10.0);
+    let dd_nearest = dd_value.to_f64();
+    assert_eq!(
+        dd_nearest.to_bits(),
+        (-1.665_334_536_937_734_7e-17_f64).to_bits(),
+        "the executable DD oracle must retain its independently reviewed value"
+    );
+    let dd_bracket = Interval::new(fs_math::next_down(dd_nearest), fs_math::next_up(dd_nearest));
+    assert!(
+        enclosure.encloses(dd_bracket),
+        "wide-domain coefficient error under-covered: {enclosure:?} vs DD {dd_bracket:?}"
+    );
+}
+
+#[test]
+fn wide_domain_all_coefficient_emission_paths_contain_points() {
+    let domain = Interval::new(-3.0, 3.0);
+    let x = TaylorModel1::variable(domain, 5).expect("admitted Taylor variable");
+    let scaled_positive = x.scale(0.1).expect("finite scale");
+    let scaled_negative = x.scale(-0.3).expect("finite scale");
+    let sum = (&scaled_positive + &scaled_negative).expect("compatible sum");
+    let difference = (&scaled_positive - &scaled_negative).expect("compatible difference");
+    let shift = TaylorModel1::constant(0.25, domain, 5).expect("admitted constant");
+    let shifted = (&x + &shift).expect("compatible shift");
+    let product = (&scaled_positive * &shifted).expect("compatible product");
+    let exponential = x
+        .scale(0.2)
+        .and_then(|model| model.exp())
+        .expect("admitted exponential");
+    let sine = x
+        .scale(0.4)
+        .and_then(|model| model.sin())
+        .expect("admitted sine");
+
+    for point in [-3.0, -1.5, 0.0, 1.5, 3.0] {
+        assert_point_contained("add", &sum, point, 0.1 * point + (-0.3 * point));
+        assert_point_contained("sub", &difference, point, 0.1 * point - (-0.3 * point));
+        assert_point_contained("mul", &product, point, (0.1 * point) * (point + 0.25));
+        assert_point_contained("exp", &exponential, point, fs_math::det::exp(0.2 * point));
+        assert_point_contained("sin", &sine, point, fs_math::det::sin(0.4 * point));
+    }
+}
+
+fn assert_order_admission(domain: Interval) -> TaylorModel1 {
+    let constant_zero =
+        TaylorModel1::constant(0.25, domain, 0).expect("order-zero constants are valid");
+    assert_eq!(constant_zero.order(), 0);
+    assert_eq!(
+        TaylorModel1::constant(0.25, domain, 1)
+            .expect("order-one constant")
+            .order(),
+        1
+    );
+    assert!(matches!(
+        TaylorModel1::variable(domain, 0),
+        Err(TaylorModelError::VariableOrderTooSmall {
+            requested: 0,
+            minimum: 1
+        })
+    ));
+
+    let max_model = TaylorModel1::constant(0.125, domain, MAX_TAYLOR_ORDER)
+        .expect("the exact maximum order is admitted");
+    assert_eq!(max_model.order(), MAX_TAYLOR_ORDER);
+    assert_eq!(
+        TaylorModel1::variable(domain, MAX_TAYLOR_ORDER)
+            .expect("the exact maximum variable order is admitted")
+            .order(),
+        MAX_TAYLOR_ORDER
+    );
+    for requested in [MAX_TAYLOR_ORDER + 1, 170, 171, usize::MAX] {
+        assert!(matches!(
+            TaylorModel1::constant(0.0, domain, requested),
+            Err(TaylorModelError::OrderTooLarge {
+                requested: rejected,
+                maximum: MAX_TAYLOR_ORDER
+            }) if rejected == requested
+        ));
+        assert!(matches!(
+            TaylorModel1::variable(domain, requested),
+            Err(TaylorModelError::OrderTooLarge {
+                requested: rejected,
+                maximum: MAX_TAYLOR_ORDER
+            }) if rejected == requested
+        ));
+    }
+
+    max_model
+}
+
+fn assert_non_finite_admission_is_rejected(domain: Interval) {
+    let extreme_variable = TaylorModel1::variable(Interval::new(f64::MAX, f64::MAX), 1)
+        .expect("finite extreme endpoints remain structurally admissible");
+    assert_eq!(
+        extreme_variable.bound(),
+        Interval::WHOLE,
+        "finite arithmetic overflow must lose tightness, never soundness"
+    );
+
+    for unbounded in [
+        Interval::new(f64::NEG_INFINITY, 1.0),
+        Interval::new(-1.0, f64::INFINITY),
+        Interval::WHOLE,
+    ] {
+        assert!(matches!(
+            TaylorModel1::constant(0.0, unbounded, 1),
+            Err(TaylorModelError::NonFiniteDomain)
+        ));
+        assert!(matches!(
+            TaylorModel1::variable(unbounded, 1),
+            Err(TaylorModelError::NonFiniteDomain)
+        ));
+    }
+    for value in [f64::NAN, f64::NEG_INFINITY, f64::INFINITY] {
+        assert!(matches!(
+            TaylorModel1::constant(value, domain, 1),
+            Err(TaylorModelError::NonFiniteConstant)
+        ));
+    }
+}
+
+fn assert_arithmetic_is_bounded_and_non_mutating(domain: Interval, max_model: &TaylorModel1) {
+    let before_bound = max_model.bound();
+    let before_remainder = max_model.remainder();
+    for value in [f64::NAN, f64::NEG_INFINITY, f64::INFINITY] {
+        assert!(matches!(
+            max_model.scale(value),
+            Err(TaylorModelError::NonFiniteScaleFactor)
+        ));
+    }
+    let overflowed = TaylorModel1::constant(f64::MAX, domain, 1)
+        .expect("a finite scalar is admissible")
+        .scale(2.0)
+        .expect("finite overflow degrades to a no-claim enclosure");
+    assert_eq!(overflowed.remainder(), Interval::WHOLE);
+    assert_eq!(overflowed.bound(), Interval::WHOLE);
+    let other_domain = TaylorModel1::constant(0.125, Interval::new(-2.0, 2.0), MAX_TAYLOR_ORDER)
+        .expect("admitted comparison model");
+    assert!(matches!(
+        max_model.try_add(&other_domain),
+        Err(TaylorModelError::IncompatibleModels)
+    ));
+    assert!(matches!(
+        max_model.try_sub(&other_domain),
+        Err(TaylorModelError::IncompatibleModels)
+    ));
+    assert!(matches!(
+        max_model.try_mul(&other_domain),
+        Err(TaylorModelError::IncompatibleModels)
+    ));
+    assert!(matches!(
+        max_model + &other_domain,
+        Err(TaylorModelError::IncompatibleModels)
+    ));
+    assert!(matches!(
+        max_model - &other_domain,
+        Err(TaylorModelError::IncompatibleModels)
+    ));
+    assert!(matches!(
+        max_model * &other_domain,
+        Err(TaylorModelError::IncompatibleModels)
+    ));
+    assert_eq!(max_model.order(), MAX_TAYLOR_ORDER);
+    assert_eq!(max_model.bound(), before_bound);
+    assert_eq!(max_model.remainder(), before_remainder);
+
+    let exp_model = max_model.exp().expect("maximum-order exp is admitted");
+    let sin_model = max_model.sin().expect("maximum-order sin is admitted");
+    assert_point_contained("max-order exp", &exp_model, 0.0, fs_math::det::exp(0.125));
+    assert_point_contained("max-order sin", &sin_model, 0.0, fs_math::det::sin(0.125));
+
+    let replay = TaylorModel1::constant(0.125, domain, MAX_TAYLOR_ORDER)
+        .expect("deterministic replay construction");
+    assert_eq!(
+        replay.bound().lo().to_bits(),
+        max_model.bound().lo().to_bits()
+    );
+    assert_eq!(
+        replay.bound().hi().to_bits(),
+        max_model.bound().hi().to_bits()
+    );
+    assert_eq!(
+        replay.remainder().lo().to_bits(),
+        max_model.remainder().lo().to_bits()
+    );
+    assert_eq!(
+        replay.remainder().hi().to_bits(),
+        max_model.remainder().hi().to_bits()
+    );
+}
+
+#[test]
+fn taylor_admission_is_bounded_fallible_and_non_mutating() {
+    let domain = Interval::new(-1.0, 1.0);
+    let max_model = assert_order_admission(domain);
+    assert_non_finite_admission_is_rejected(domain);
+    assert_arithmetic_is_bounded_and_non_mutating(domain, &max_model);
 }
 
 #[test]
@@ -87,8 +316,9 @@ fn subdivision_convergence_beats_intervals() {
     let _ = ia_excess;
     let w = 0.05;
     let box_ = Interval::new(0.4 - w / 2.0, 0.4 + w / 2.0);
-    let x = TaylorModel1::variable(box_, 5);
-    let p = &x - &(&x * &x);
+    let x = TaylorModel1::variable(box_, 5).expect("admitted Taylor variable");
+    let square = (&x * &x).expect("compatible square");
+    let p = (&x - &square).expect("compatible difference");
     let tm_excess = p.remainder().width();
     let ia = box_ - box_ * box_;
     let mut lo = f64::INFINITY;
@@ -275,8 +505,9 @@ fn lipschitz_bounds_are_certified_and_tight() {
     );
 }
 
-/// Recorded on aarch64-apple (M4 Pro); must match on x86-64 (trj).
-const GOLDEN_HASH: u64 = 0xa16d_9759_a352_95d8;
+/// Re-frozen on remote x86-64 after intervalizing reciprocal factorials and
+/// exponential scalars; must match on aarch64-apple.
+const GOLDEN_HASH: u64 = 0x2cdd_5d22_d018_9466;
 
 #[test]
 fn taylor_golden_hash() {

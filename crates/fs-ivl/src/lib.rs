@@ -11,8 +11,10 @@
 //!   problem on correlated expressions (x − x, deep F-rep DAGs).
 //! - The high-precision oracle rungs live in `fs_math::{eft, dd}` (L0;
 //!   single implementation shared with fs-la's iterative refinement —
-//!   recorded relocation, beads 6ys.8/6ys.12). Quad-double and Taylor
-//!   models are recorded follow-up scope.
+//!   recorded relocation, beads 6ys.8/6ys.12).
+//! - [`TaylorModel1`]: bounded fixed-order univariate models with a rigorous
+//!   interval remainder and fallible finite-input admission. Multivariate
+//!   Taylor models and quad-double arithmetic remain follow-up scope.
 //!
 //! Determinism: everything here is straight-line IEEE arithmetic on
 //! fs-math strict functions — cross-ISA bit-deterministic BY CONSTRUCTION
@@ -36,7 +38,7 @@ pub use predicates::{
     Sign, Stage, incircle, incircle_with_stage, insphere, insphere_with_stage, orient2d,
     orient2d_sos, orient2d_with_stage, orient3d, orient3d_sos, orient3d_with_stage,
 };
-pub use taylor::TaylorModel1;
+pub use taylor::{MAX_TAYLOR_ORDER, TaylorModel1, TaylorModelError};
 
 /// Crate version, re-exported for provenance stamping (the Five Explicits'
 /// "versions" pillar reaches down to individual crates).

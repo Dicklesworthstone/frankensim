@@ -160,7 +160,7 @@ FrankenSim is organized as layered Rust crates. The names below are crates prese
 | `fs-la` | Dense GEMM, batched small dense operations, factorizations, mixed-precision helpers, real and complex eigensolver scaffolding, randomized NLA range/trace estimators, and conformance tests |
 | `fs-sparse` | COO, CSR, BSR, and SELL formats, deterministic assembly, transpose/symmetrize, SpMV/SpMM, Chebyshev, ILU0, PCG, and smoothed-aggregation AMG pieces |
 | `fs-fft` | Complex FFT, real FFT, DCT-II/DCT-III, Stockham-style transform structure, and transform conformance tests |
-| `fs-ivl` | Outward-rounded intervals, affine arithmetic, first-order Taylor models, Newton/Krawczyk root helpers, expansions, and exact predicates (`orient`, `incircle`, `insphere`) |
+| `fs-ivl` | Outward-rounded intervals, affine arithmetic, bounded fixed-order univariate Taylor models, Newton/Krawczyk root helpers, expansions, and exact predicates (`orient`, `incircle`, `insphere`) |
 | `fs-cheb` | Adaptive 1D Chebyshev functions, Lobatto points, differentiation matrices, Dirichlet Laplacian eigen checks, and Orr-Sommerfeld growth-rate utilities |
 | `fs-rand` | Philox counter-based streams keyed by logical identity, distributions, Sobol sequences, Owen/QMC-style components, and lattice helpers |
 | `fs-ad` | `Real` trait, forward-mode dual numbers, gradient checks, implicit-function adjoint hooks, and checkpointed/full adjoint scaffolding |
