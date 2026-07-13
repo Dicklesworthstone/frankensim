@@ -45,6 +45,74 @@ pub const COMPOUND_CANON_VERSION: u32 = 3;
 /// Domain separating regression-family identities from every other BLAKE3 use.
 pub const COMPOUND_FAMILY_HASH_DOMAIN: &str = "org.frankensim.fs-bisect.compound-family.v3";
 
+/// Owner-local declaration consumed by `xtask check-identities`.
+pub const COMPOUND_FAMILY_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
+    "frankensim-identity-schema-v1",
+    "id=fs-bisect:compound-family",
+    "version_const=COMPOUND_CANON_VERSION",
+    "version=3",
+    "domain=org.frankensim.fs-bisect.compound-family.v3",
+    "domain_const=COMPOUND_FAMILY_HASH_DOMAIN",
+    "encoder=compound_family_content_hash",
+    "encoder_helpers=compound_family_content_hash_with_domain,RegressionFamily::identity_source",
+    "schema_functions=RegressionFamily::new,RegressionFamily::content_hash,CanonWriter::new,CanonWriter::push,CanonWriter::extend_from_slice,CanonWriter::into_bytes,append_canon_schema,canon_schema,canonical_bytes,u32::canon,u64::canon,str::canon,String::canon,Vec::canon,InvariantClass::canon,crates/fs-blake3/src/lib.rs#hash_domain",
+    "schema_constants=COMPOUND_CANON_VERSION,COMPOUND_FAMILY_HASH_DOMAIN,MAX_NEIGHBOR_PROBES,MAX_CANONICAL_MEMBER_BYTES,MAX_CANONICAL_FAMILY_BYTES,MAX_CANONICAL_SCHEMA_BYTES",
+    "schema_dependencies=none",
+    "digest=fs-blake3",
+    "encoding=typed-binary",
+    "sources=CompoundFamilyIdentitySource",
+    "source_fields=CompoundFamilyIdentitySource.canon_version:semantic,CompoundFamilyIdentitySource.name:semantic,CompoundFamilyIdentitySource.invariant:semantic,CompoundFamilyIdentitySource.seed:semantic,CompoundFamilyIdentitySource.contract:semantic,CompoundFamilyIdentitySource.detail:semantic,CompoundFamilyIdentitySource.member_schema:semantic,CompoundFamilyIdentitySource.member_labels:semantic,CompoundFamilyIdentitySource.member_canon:semantic,CompoundFamilyIdentitySource.tracking:semantic,CompoundFamilyIdentitySource.recommended_admission:semantic",
+    "source_bindings=CompoundFamilyIdentitySource.canon_version>canon-version,CompoundFamilyIdentitySource.name>family-name,CompoundFamilyIdentitySource.invariant>invariant,CompoundFamilyIdentitySource.seed>provenance-seed,CompoundFamilyIdentitySource.contract>provenance-contract,CompoundFamilyIdentitySource.detail>provenance-detail,CompoundFamilyIdentitySource.member_schema>member-codec-schema,CompoundFamilyIdentitySource.member_labels>ordered-member-labels,CompoundFamilyIdentitySource.member_canon>ordered-member-canonical-bytes,CompoundFamilyIdentitySource.tracking>tracking-references,CompoundFamilyIdentitySource.recommended_admission>recommended-admission",
+    "external_semantic_fields=artifact-domain",
+    "semantic_fields=artifact-domain,canon-version,family-name,invariant,provenance-seed,provenance-contract,provenance-detail,member-codec-schema,ordered-member-labels,ordered-member-canonical-bytes,tracking-references,recommended-admission",
+    "excluded_fields=live-member-object-state:sealed-canonical-snapshot-is-authority",
+    "consumers=CompoundReport::content_hash,RegressionFamily::manifest,RegressionFamily::replay,golden-couplings.json",
+    "mutations=artifact-domain:crates/fs-bisect/src/compound.rs#compound_family_domain_moves_identity,canon-version:crates/fs-bisect/src/compound.rs#compound_family_identity_version_fails_closed,family-name:crates/fs-bisect/tests/compound_battery.rs#compound_family_name_moves_identity,invariant:crates/fs-bisect/tests/compound_battery.rs#compound_family_invariant_moves_identity,provenance-seed:crates/fs-bisect/tests/compound_battery.rs#compound_family_seed_moves_identity,provenance-contract:crates/fs-bisect/tests/compound_battery.rs#compound_family_contract_moves_identity,provenance-detail:crates/fs-bisect/tests/compound_battery.rs#compound_family_detail_moves_identity,member-codec-schema:crates/fs-bisect/tests/compound_battery.rs#codec_type_domain_separates_identical_payload_bytes,ordered-member-labels:crates/fs-bisect/tests/compound_battery.rs#compound_family_member_labels_move_identity,ordered-member-canonical-bytes:crates/fs-bisect/tests/compound_battery.rs#compound_family_member_bytes_move_identity,tracking-references:crates/fs-bisect/tests/compound_battery.rs#compound_family_tracking_moves_identity,recommended-admission:crates/fs-bisect/tests/compound_battery.rs#compound_family_admission_moves_identity",
+    "nonsemantic_mutations=live-member-object-state:crates/fs-bisect/tests/compound_battery.rs#manifest_escapes_fields_and_hashes_the_canonical_snapshot",
+    "field_guard=classify_compound_family_identity_fields",
+    "transport_guard=RegressionFamily::content_hash",
+    "version_guard=crates/fs-bisect/src/compound.rs#compound_family_identity_version_fails_closed",
+    "coupling_surface=fs-bisect:compound-canon",
+];
+
+struct CompoundFamilyIdentitySource<'a> {
+    canon_version: u32,
+    name: &'a str,
+    invariant: &'a InvariantClass,
+    seed: u64,
+    contract: &'a str,
+    detail: &'a str,
+    member_schema: &'a [u8],
+    member_labels: Vec<&'a str>,
+    member_canon: &'a [Vec<u8>],
+    tracking: &'a Vec<String>,
+    recommended_admission: Option<&'a str>,
+}
+
+/// Whether retained compound-family identities use the one canonical
+/// semantic version understood by this build.
+#[must_use]
+pub const fn compound_family_identity_version_is_supported(declared: u32) -> bool {
+    declared == COMPOUND_CANON_VERSION
+}
+
+#[allow(dead_code)] // exhaustive source-shape guard consumed by xtask
+fn classify_compound_family_identity_fields(source: &CompoundFamilyIdentitySource<'_>) {
+    let CompoundFamilyIdentitySource {
+        canon_version: _,
+        name: _,
+        invariant: _,
+        seed: _,
+        contract: _,
+        detail: _,
+        member_schema: _,
+        member_labels: _,
+        member_canon: _,
+        tracking: _,
+        recommended_admission: _,
+    } = source;
+}
+
 /// Maximum accepted minimizer descent steps.
 pub const MAX_MINIMIZE_STEPS: usize = 65_536;
 /// Maximum shrink candidates returned for one descent step.
@@ -936,6 +1004,81 @@ fn write_json_string(out: &mut String, value: &str) {
     out.push('"');
 }
 
+fn compound_family_content_hash(
+    source: &CompoundFamilyIdentitySource<'_>,
+) -> fs_blake3::ContentHash {
+    compound_family_content_hash_with_domain(COMPOUND_FAMILY_HASH_DOMAIN, source)
+}
+
+fn compound_family_content_hash_with_domain(
+    domain: &str,
+    source: &CompoundFamilyIdentitySource<'_>,
+) -> fs_blake3::ContentHash {
+    let mut bytes = CanonWriter::new(usize::MAX, "sealed_family_hash_bytes");
+    source
+        .canon_version
+        .canon(&mut bytes)
+        .expect("sealed canon version is bounded");
+    source
+        .name
+        .canon(&mut bytes)
+        .expect("validated family name is bounded");
+    source
+        .invariant
+        .canon(&mut bytes)
+        .expect("validated invariant is bounded");
+    source.seed.canon(&mut bytes).expect("seed is fixed width");
+    source
+        .contract
+        .canon(&mut bytes)
+        .expect("validated contract is bounded");
+    source
+        .detail
+        .canon(&mut bytes)
+        .expect("validated detail is bounded");
+    bytes.push(14).expect("unbounded sealed writer");
+    bytes
+        .extend_from_slice(&(source.member_schema.len() as u64).to_le_bytes())
+        .expect("unbounded sealed writer");
+    bytes
+        .extend_from_slice(source.member_schema)
+        .expect("sealed schema is bounded");
+    bytes.push(7).expect("unbounded sealed writer");
+    bytes
+        .extend_from_slice(&(source.member_labels.len() as u64).to_le_bytes())
+        .expect("unbounded sealed writer");
+    for (label, canonical) in source.member_labels.iter().zip(source.member_canon) {
+        label
+            .canon(&mut bytes)
+            .expect("validated member label is bounded");
+        bytes.push(12).expect("unbounded sealed writer");
+        bytes
+            .extend_from_slice(
+                &u64::try_from(canonical.len())
+                    .expect("bounded canonical member length fits u64")
+                    .to_le_bytes(),
+            )
+            .expect("unbounded sealed writer");
+        bytes
+            .extend_from_slice(canonical)
+            .expect("sealed canonical member is bounded");
+    }
+    source
+        .tracking
+        .canon(&mut bytes)
+        .expect("validated tracking references are bounded");
+    match source.recommended_admission {
+        Some(admission) => {
+            bytes.push(9).expect("unbounded sealed writer");
+            admission
+                .canon(&mut bytes)
+                .expect("validated admission rule is bounded");
+        }
+        None => bytes.push(10).expect("unbounded sealed writer"),
+    }
+    fs_blake3::hash_domain(domain, &bytes.into_bytes())
+}
+
 impl<I: Canon> RegressionFamily<I> {
     /// Build a canonical, bounded regression family.
     ///
@@ -1060,73 +1203,33 @@ impl<I: Canon> RegressionFamily<I> {
         self.recommended_admission.as_deref()
     }
 
+    fn identity_source(&self) -> CompoundFamilyIdentitySource<'_> {
+        CompoundFamilyIdentitySource {
+            canon_version: COMPOUND_CANON_VERSION,
+            name: &self.name,
+            invariant: &self.invariant,
+            seed: self.provenance.seed,
+            contract: &self.provenance.contract,
+            detail: &self.provenance.detail,
+            member_schema: &self.member_schema,
+            member_labels: self
+                .members
+                .iter()
+                .map(|(label, _)| label.as_str())
+                .collect(),
+            member_canon: &self.member_canon,
+            tracking: &self.tracking,
+            recommended_admission: self.recommended_admission.as_deref(),
+        }
+    }
+
     /// Content hash over the full canonical encoding: name, invariant,
     /// member codec/schema, members (labels + inputs), tracking, and admission.
     /// Deterministic across runs and build modes; cross-ISA equality additionally
     /// requires the member codec and predicate domain to make that claim.
     #[must_use]
     pub fn content_hash(&self) -> fs_blake3::ContentHash {
-        let mut bytes = CanonWriter::new(usize::MAX, "sealed_family_hash_bytes");
-        COMPOUND_CANON_VERSION
-            .canon(&mut bytes)
-            .expect("sealed canon version is bounded");
-        self.name
-            .canon(&mut bytes)
-            .expect("validated family name is bounded");
-        self.invariant
-            .canon(&mut bytes)
-            .expect("validated invariant is bounded");
-        self.provenance
-            .seed
-            .canon(&mut bytes)
-            .expect("seed is fixed width");
-        self.provenance
-            .contract
-            .canon(&mut bytes)
-            .expect("validated contract is bounded");
-        self.provenance
-            .detail
-            .canon(&mut bytes)
-            .expect("validated detail is bounded");
-        bytes.push(14).expect("unbounded sealed writer");
-        bytes
-            .extend_from_slice(&(self.member_schema.len() as u64).to_le_bytes())
-            .expect("unbounded sealed writer");
-        bytes
-            .extend_from_slice(&self.member_schema)
-            .expect("sealed schema is bounded");
-        bytes.push(7).expect("unbounded sealed writer");
-        bytes
-            .extend_from_slice(&(self.members.len() as u64).to_le_bytes())
-            .expect("unbounded sealed writer");
-        for ((label, _), canonical) in self.members.iter().zip(&self.member_canon) {
-            label
-                .canon(&mut bytes)
-                .expect("validated member label is bounded");
-            bytes.push(12).expect("unbounded sealed writer");
-            bytes
-                .extend_from_slice(
-                    &u64::try_from(canonical.len())
-                        .expect("bounded canonical member length fits u64")
-                        .to_le_bytes(),
-                )
-                .expect("unbounded sealed writer");
-            bytes
-                .extend_from_slice(canonical)
-                .expect("sealed canonical member is bounded");
-        }
-        self.tracking
-            .canon(&mut bytes)
-            .expect("validated tracking references are bounded");
-        match &self.recommended_admission {
-            Some(a) => {
-                bytes.push(9).expect("unbounded sealed writer");
-                a.canon(&mut bytes)
-                    .expect("validated admission rule is bounded");
-            }
-            None => bytes.push(10).expect("unbounded sealed writer"),
-        }
-        fs_blake3::hash_domain(COMPOUND_FAMILY_HASH_DOMAIN, &bytes.into_bytes())
+        compound_family_content_hash(&self.identity_source())
     }
 
     /// The canonical capture manifest: JSON-lines, one header, one line per
@@ -1331,4 +1434,71 @@ pub fn compound<I: Shrink + Canon>(
         family,
         content_hash,
     })
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+
+    #[derive(Clone)]
+    struct IdentityMember(u64);
+
+    impl Shrink for IdentityMember {
+        fn shrink_candidates(&self) -> Vec<Self> {
+            Vec::new()
+        }
+    }
+
+    impl Canon for IdentityMember {
+        const TYPE_ID: &'static str = "org.frankensim.fs-bisect.identity-test-member";
+
+        fn canon(&self, out: &mut CanonWriter) -> Result<(), CompoundError> {
+            self.0.canon(out)
+        }
+    }
+
+    fn fixture() -> RegressionFamily<IdentityMember> {
+        RegressionFamily::new(
+            "identity-fixture".to_string(),
+            InvariantClass::GoldenDrift,
+            vec![("minimized".to_string(), IdentityMember(7))],
+            vec!["frankensim-semantic-identity-coverage-iu5l".to_string()],
+            None,
+            FamilyProvenance::new(
+                11,
+                "fs-bisect::compound".to_string(),
+                "identity fixture".to_string(),
+            )
+            .expect("bounded provenance"),
+        )
+        .expect("valid identity fixture")
+    }
+
+    #[test]
+    fn compound_family_domain_moves_identity() {
+        let family = fixture();
+        let source = family.identity_source();
+        assert_ne!(
+            compound_family_content_hash(&source),
+            compound_family_content_hash_with_domain(
+                "org.frankensim.fs-bisect.compound-family.v3.alternate",
+                &source,
+            )
+        );
+    }
+
+    #[test]
+    fn compound_family_identity_version_fails_closed() {
+        let family = fixture();
+        let current = family.identity_source();
+        let mut changed = family.identity_source();
+        changed.canon_version = COMPOUND_CANON_VERSION + 1;
+        assert_ne!(
+            compound_family_content_hash(&current),
+            compound_family_content_hash(&changed)
+        );
+        assert!(compound_family_identity_version_is_supported(3));
+        assert!(!compound_family_identity_version_is_supported(2));
+        assert!(!compound_family_identity_version_is_supported(4));
+    }
 }

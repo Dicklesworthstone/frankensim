@@ -25,6 +25,48 @@ use fs_substrate::affinity::CcdTopology;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+/// Semantic version of the tile-pool placement/tuning identity.
+///
+/// Version 2 is the already-shipped key and payload. Making the version
+/// explicit does not rotate or re-key it.
+pub const TILEPOOL_PLACEMENT_IDENTITY_VERSION: u32 = 2;
+
+/// BLAKE3 derive-key domain for the exact v2 placement payload.
+pub const TILEPOOL_PLACEMENT_IDENTITY_DOMAIN: &str = "org.frankensim.fs-exec.tilepool-placement.v2";
+
+const TILEPOOL_PLACEMENT_IDENTITY_PREFIX_STEM: &str = "fs-exec-tilepool-v";
+
+/// Owner-local declaration consumed by `xtask check-identities`.
+#[allow(dead_code)]
+pub const TILEPOOL_PLACEMENT_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
+    "frankensim-identity-schema-v1",
+    "id=fs-exec:tilepool-placement",
+    "version_const=TILEPOOL_PLACEMENT_IDENTITY_VERSION",
+    "version=2",
+    "domain=org.frankensim.fs-exec.tilepool-placement.v2",
+    "domain_const=TILEPOOL_PLACEMENT_IDENTITY_DOMAIN",
+    "encoder=TilePool::placement_identity",
+    "encoder_helpers=placement_identity_with_schema,placement_digest_with_domain,encode_tilepool_placement,PlacementCounts::from_inputs,append_placement_usize,append_placement_bytes",
+    "schema_constants=TILEPOOL_PLACEMENT_IDENTITY_VERSION,TILEPOOL_PLACEMENT_IDENTITY_DOMAIN,TILEPOOL_PLACEMENT_IDENTITY_PREFIX_STEM,crates/fs-blake3/src/lib.rs#IV,crates/fs-blake3/src/lib.rs#MSG_PERMUTATION,crates/fs-blake3/src/lib.rs#BLOCK_LEN,crates/fs-blake3/src/lib.rs#CHUNK_LEN,crates/fs-blake3/src/lib.rs#CHUNK_START,crates/fs-blake3/src/lib.rs#CHUNK_END,crates/fs-blake3/src/lib.rs#PARENT,crates/fs-blake3/src/lib.rs#ROOT,crates/fs-blake3/src/lib.rs#DERIVE_KEY_CONTEXT,crates/fs-blake3/src/lib.rs#DERIVE_KEY_MATERIAL,crates/fs-blake3/src/lib.rs#MAX_DEPTH",
+    "schema_functions=crates/fs-exec/src/cx.rs#ExecMode::name,crates/fs-blake3/src/lib.rs#hash_domain,crates/fs-blake3/src/lib.rs#ContentHash::to_hex,crates/fs-blake3/src/lib.rs#g,crates/fs-blake3/src/lib.rs#round,crates/fs-blake3/src/lib.rs#permute,crates/fs-blake3/src/lib.rs#compress,crates/fs-blake3/src/lib.rs#words_from_block,crates/fs-blake3/src/lib.rs#first_8_words,crates/fs-blake3/src/lib.rs#Output::chaining_value,crates/fs-blake3/src/lib.rs#Output::root_hash,crates/fs-blake3/src/lib.rs#parent_output,crates/fs-blake3/src/lib.rs#ChunkState::new,crates/fs-blake3/src/lib.rs#ChunkState::len,crates/fs-blake3/src/lib.rs#ChunkState::start_flag,crates/fs-blake3/src/lib.rs#ChunkState::update,crates/fs-blake3/src/lib.rs#ChunkState::output,crates/fs-blake3/src/lib.rs#Blake3::new_internal,crates/fs-blake3/src/lib.rs#Blake3::push_stack,crates/fs-blake3/src/lib.rs#Blake3::pop_stack,crates/fs-blake3/src/lib.rs#Blake3::add_chunk_chaining_value,crates/fs-blake3/src/lib.rs#Blake3::update,crates/fs-blake3/src/lib.rs#Blake3::finalize",
+    "schema_dependencies=fs-alloc:hugepage-decision",
+    "digest=blake3-derive-key",
+    "encoding=typed-binary",
+    "sources=PoolConfig,TilePoolPlacementTopologyFields,TilePoolPlacementArenaFields,TilePoolPlacementHugepageFields,PlacementCounts",
+    "source_fields=PoolConfig.workers:semantic,PoolConfig.topo:derived:expanded-into-exact-topology-fields,PoolConfig.quantum_weights:semantic,PoolConfig.seed:nonsemantic:logical-stream-identity-not-placement,PoolConfig.mode:semantic,PoolConfig.arena:derived:expanded-into-exact-arena-fields,PoolConfig.pin_groups:semantic,TilePoolPlacementTopologyFields.ccds:semantic,TilePoolPlacementTopologyFields.cores_per_ccd:semantic,TilePoolPlacementArenaFields.chunk_bytes:semantic,TilePoolPlacementArenaFields.max_chunk_bytes:semantic,TilePoolPlacementArenaFields.limit_bytes:semantic,TilePoolPlacementArenaFields.free_list_max_bytes:semantic,TilePoolPlacementArenaFields.hugepage:semantic,TilePoolPlacementHugepageFields.policy:semantic,TilePoolPlacementHugepageFields.outcome:semantic,TilePoolPlacementHugepageFields.detail:semantic,PlacementCounts.workers:derived:exact-count-of-normalized-workers,PlacementCounts.quantum_weights:derived:exact-count-of-normalized-quantum-weights,PlacementCounts.hugepage_json_bytes:derived:exact-byte-count-of-canonical-hugepage-json,PlacementCounts.pin_groups:derived:exact-count-of-requested-pin-groups,PlacementCounts.pin_cpus:derived:ordered-exact-counts-of-cpus-per-requested-pin-group",
+    "source_bindings=PoolConfig.workers>workers,PoolConfig.quantum_weights>quantum-weight-count+quantum-weights-in-order,PoolConfig.mode>mode-tag,PoolConfig.pin_groups>pinning-intent+pin-group-count+pin-cpu-counts+pin-cpu-ids-in-order,TilePoolPlacementTopologyFields.ccds>topology-ccds,TilePoolPlacementTopologyFields.cores_per_ccd>topology-cores-per-ccd,TilePoolPlacementArenaFields.chunk_bytes>arena-chunk-bytes,TilePoolPlacementArenaFields.max_chunk_bytes>arena-max-chunk-bytes,TilePoolPlacementArenaFields.limit_bytes>arena-limit-presence+arena-limit-bytes,TilePoolPlacementArenaFields.free_list_max_bytes>arena-free-list-max-bytes,TilePoolPlacementArenaFields.hugepage>arena-hugepage-policy-tag,TilePoolPlacementHugepageFields.policy>hugepage-decision-policy,TilePoolPlacementHugepageFields.outcome>hugepage-decision-outcome,TilePoolPlacementHugepageFields.detail>hugepage-json-byte-count+hugepage-decision-detail-json",
+    "external_semantic_fields=digest-domain,identity-prefix-stem,identity-version",
+    "semantic_fields=digest-domain,identity-prefix-stem,identity-version,workers,topology-ccds,topology-cores-per-ccd,mode-tag,quantum-weight-count,quantum-weights-in-order,arena-chunk-bytes,arena-max-chunk-bytes,arena-limit-presence,arena-limit-bytes,arena-free-list-max-bytes,arena-hugepage-policy-tag,hugepage-decision-policy,hugepage-decision-outcome,hugepage-json-byte-count,hugepage-decision-detail-json,pinning-intent,pin-group-count,pin-cpu-counts,pin-cpu-ids-in-order",
+    "excluded_fields=pin-success:observed-timing-fact-not-requested-placement",
+    "consumers=TilePool::placement_identity,TilePool::admit_retained_placement_identity,fs-exec::tuner,replay-and-tune-rows",
+    "mutations=digest-domain:crates/fs-exec/src/pool.rs#tilepool_placement_identity_fields_move_independently,identity-prefix-stem:crates/fs-exec/src/pool.rs#tilepool_placement_identity_fields_move_independently,identity-version:crates/fs-exec/src/pool.rs#tilepool_placement_identity_fields_move_independently,workers:crates/fs-exec/src/pool.rs#tilepool_placement_identity_fields_move_independently,topology-ccds:crates/fs-exec/src/pool.rs#tilepool_placement_identity_fields_move_independently,topology-cores-per-ccd:crates/fs-exec/src/pool.rs#tilepool_placement_identity_fields_move_independently,mode-tag:crates/fs-exec/src/pool.rs#tilepool_placement_identity_fields_move_independently,quantum-weight-count:crates/fs-exec/src/pool.rs#tilepool_placement_identity_fields_move_independently,quantum-weights-in-order:crates/fs-exec/src/pool.rs#tilepool_placement_identity_fields_move_independently,arena-chunk-bytes:crates/fs-exec/src/pool.rs#tilepool_placement_identity_fields_move_independently,arena-max-chunk-bytes:crates/fs-exec/src/pool.rs#tilepool_placement_identity_fields_move_independently,arena-limit-presence:crates/fs-exec/src/pool.rs#tilepool_placement_identity_fields_move_independently,arena-limit-bytes:crates/fs-exec/src/pool.rs#tilepool_placement_identity_fields_move_independently,arena-free-list-max-bytes:crates/fs-exec/src/pool.rs#tilepool_placement_identity_fields_move_independently,arena-hugepage-policy-tag:crates/fs-exec/src/pool.rs#tilepool_placement_identity_fields_move_independently,hugepage-decision-policy:crates/fs-exec/src/pool.rs#tilepool_placement_identity_fields_move_independently,hugepage-decision-outcome:crates/fs-exec/src/pool.rs#tilepool_placement_identity_fields_move_independently,hugepage-json-byte-count:crates/fs-exec/src/pool.rs#tilepool_placement_identity_fields_move_independently,hugepage-decision-detail-json:crates/fs-exec/src/pool.rs#tilepool_placement_identity_fields_move_independently,pinning-intent:crates/fs-exec/src/pool.rs#tilepool_placement_identity_fields_move_independently,pin-group-count:crates/fs-exec/src/pool.rs#tilepool_placement_identity_fields_move_independently,pin-cpu-counts:crates/fs-exec/src/pool.rs#tilepool_placement_identity_fields_move_independently,pin-cpu-ids-in-order:crates/fs-exec/src/pool.rs#tilepool_placement_identity_fields_move_independently",
+    "nonsemantic_mutations=PoolConfig.seed:crates/fs-exec/src/pool.rs#tilepool_placement_seed_is_nonsemantic,pin-success:crates/fs-exec/src/pool.rs#pinning_is_bit_invariant_and_advisory",
+    "field_guard=classify_tilepool_placement_identity_fields",
+    "transport_guard=TilePool::admit_retained_placement_identity",
+    "version_guard=crates/fs-exec/src/pool.rs#tilepool_placement_identity_versions_fail_closed",
+    "coupling_surface=fs-exec:tilepool-placement",
+];
+
 /// Pool configuration. Normalized (not rejected) by [`TilePool::new`]:
 /// `workers` is clamped to at least 1 and `quantum_weights` is resized to
 /// `workers` (missing entries take weight 1, zero weights are raised to 1).
@@ -56,6 +98,119 @@ pub struct PoolConfig {
     /// ignored by design — results are bit-identical either way, and
     /// the ccd_ab harness verifies the mechanism separately.
     pub pin_groups: Vec<Vec<u32>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TilePoolPlacementTopologyFields {
+    ccds: u32,
+    cores_per_ccd: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TilePoolPlacementArenaFields {
+    chunk_bytes: usize,
+    max_chunk_bytes: usize,
+    limit_bytes: Option<usize>,
+    free_list_max_bytes: usize,
+    hugepage: fs_alloc::HugepagePolicy,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TilePoolPlacementHugepageFields<'a> {
+    policy: fs_alloc::HugepagePolicy,
+    outcome: fs_alloc::HugepageOutcome,
+    detail: &'a str,
+}
+
+#[allow(dead_code)]
+fn classify_tilepool_placement_identity_fields(
+    config: &PoolConfig,
+    topology_fields: TilePoolPlacementTopologyFields,
+    arena_fields: &TilePoolPlacementArenaFields,
+    hugepage_fields: &TilePoolPlacementHugepageFields<'_>,
+    counts: &PlacementCounts,
+    hugepage_decision: &fs_alloc::HugepageDecision,
+) {
+    let PoolConfig {
+        workers,
+        topo,
+        quantum_weights,
+        seed,
+        mode,
+        arena,
+        pin_groups,
+    } = config;
+    let CcdTopology {
+        ccds,
+        cores_per_ccd,
+    } = topo;
+    let fs_alloc::ArenaConfig {
+        chunk_bytes,
+        max_chunk_bytes,
+        limit_bytes,
+        free_list_max_bytes,
+        hugepage,
+    } = arena;
+    let TilePoolPlacementTopologyFields {
+        ccds: identity_ccds,
+        cores_per_ccd: identity_cores_per_ccd,
+    } = topology_fields;
+    let TilePoolPlacementArenaFields {
+        chunk_bytes: identity_chunk_bytes,
+        max_chunk_bytes: identity_max_chunk_bytes,
+        limit_bytes: identity_limit_bytes,
+        free_list_max_bytes: identity_free_list_max_bytes,
+        hugepage: identity_hugepage,
+    } = arena_fields;
+    let TilePoolPlacementHugepageFields {
+        policy,
+        outcome,
+        detail,
+    } = hugepage_fields;
+    let PlacementCounts {
+        workers: counted_workers,
+        quantum_weights: counted_quantum_weights,
+        hugepage_json_bytes,
+        pin_groups: counted_pin_groups,
+        pin_cpus,
+    } = counts;
+    let fs_alloc::HugepageDecision {
+        policy: recorded_policy,
+        outcome: recorded_outcome,
+        detail: recorded_detail,
+    } = hugepage_decision;
+    let _ = (
+        workers,
+        ccds,
+        cores_per_ccd,
+        quantum_weights,
+        seed,
+        mode,
+        chunk_bytes,
+        max_chunk_bytes,
+        limit_bytes,
+        free_list_max_bytes,
+        hugepage,
+        pin_groups,
+        identity_ccds,
+        identity_cores_per_ccd,
+        identity_chunk_bytes,
+        identity_max_chunk_bytes,
+        identity_limit_bytes,
+        identity_free_list_max_bytes,
+        identity_hugepage,
+        policy,
+        outcome,
+        detail,
+        counted_workers,
+        counted_quantum_weights,
+        hugepage_json_bytes,
+        counted_pin_groups,
+        pin_cpus,
+        recorded_policy,
+        recorded_outcome,
+        recorded_detail,
+    );
 }
 
 impl PoolConfig {
@@ -936,6 +1091,12 @@ pub struct TilePool {
 }
 
 impl TilePool {
+    /// Current producer version for placement and tune-row identities.
+    pub const PLACEMENT_IDENTITY_VERSION: u32 = TILEPOOL_PLACEMENT_IDENTITY_VERSION;
+
+    /// Current BLAKE3 derive-key domain for placement identities.
+    pub const PLACEMENT_IDENTITY_DOMAIN: &str = TILEPOOL_PLACEMENT_IDENTITY_DOMAIN;
+
     /// Normalized worker count — preflight sizing for callers that
     /// budget per-worker scratch (bead wf9.15).
     #[must_use]
@@ -973,18 +1134,46 @@ impl TilePool {
     /// on a host where the OS rejects the affinity request.
     #[must_use]
     pub fn placement_identity(&self) -> String {
-        let digest = placement_digest(&self.config, self.arenas.hugepage_decision());
         let pinning_intent = if self.config.pin_groups.is_empty() {
             "pin-unrequested"
         } else {
             "ccd-pin-requested"
         };
-        format!(
-            "fs-exec-tilepool-v2-{pinning_intent}-ccd{}x{}-mode-{}-cfg-{digest}",
-            self.config.topo.ccds,
-            self.config.topo.cores_per_ccd,
-            self.config.mode.name(),
+        let hugepage = self.arenas.hugepage_decision();
+        let counts = PlacementCounts::from_inputs(&self.config, hugepage);
+        placement_identity_with_schema(
+            &self.config,
+            hugepage,
+            TILEPOOL_PLACEMENT_IDENTITY_PREFIX_STEM,
+            TILEPOOL_PLACEMENT_IDENTITY_VERSION,
+            TILEPOOL_PLACEMENT_IDENTITY_DOMAIN,
+            pinning_intent,
+            &counts,
         )
+    }
+
+    /// Fail-closed admission for a retained placement/tuning identity.
+    ///
+    /// Only the current explicit producer version and the exact identity
+    /// recomputed from this normalized pool are admitted. A stale/future
+    /// version or any byte mismatch is refused; callers must migrate old
+    /// tune rows deliberately rather than treating them as current.
+    ///
+    /// # Errors
+    /// Returns a stable refusal message when the producer version is not v2
+    /// or the retained identity differs from the current normalized pool.
+    pub fn admit_retained_placement_identity(
+        &self,
+        declared_version: u32,
+        retained_identity: &str,
+    ) -> Result<(), &'static str> {
+        if declared_version != TILEPOOL_PLACEMENT_IDENTITY_VERSION {
+            return Err("tile-pool placement identity version is unsupported");
+        }
+        if retained_identity != self.placement_identity() {
+            return Err("tile-pool placement identity does not match normalized configuration");
+        }
+        Ok(())
     }
 
     /// The arena pool backing per-tile scopes (leak oracle for G4 tests).
@@ -1664,43 +1853,122 @@ impl<Caps: 'static> fmt::Debug for ParkedTilePool<'_, Caps> {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PlacementCounts {
+    workers: usize,
+    quantum_weights: usize,
+    hugepage_json_bytes: usize,
+    pin_groups: usize,
+    pin_cpus: Vec<usize>,
+}
+
+impl PlacementCounts {
+    fn from_inputs(config: &PoolConfig, hugepage: &fs_alloc::HugepageDecision) -> Self {
+        Self {
+            workers: config.workers,
+            quantum_weights: config.quantum_weights.len(),
+            hugepage_json_bytes: hugepage.to_json().len(),
+            pin_groups: config.pin_groups.len(),
+            pin_cpus: config.pin_groups.iter().map(Vec::len).collect(),
+        }
+    }
+}
+
+fn placement_identity_with_schema(
+    config: &PoolConfig,
+    hugepage: &fs_alloc::HugepageDecision,
+    prefix_stem: &str,
+    version: u32,
+    domain: &str,
+    pinning_intent: &str,
+    counts: &PlacementCounts,
+) -> String {
+    let digest = placement_digest_with_domain(config, hugepage, domain, counts);
+    format!(
+        "{prefix_stem}{version}-{pinning_intent}-ccd{}x{}-mode-{}-cfg-{digest}",
+        config.topo.ccds,
+        config.topo.cores_per_ccd,
+        config.mode.name(),
+    )
+}
+
+#[cfg(test)]
 fn placement_digest(config: &PoolConfig, hugepage: &fs_alloc::HugepageDecision) -> String {
-    const DOMAIN: &str = "org.frankensim.fs-exec.tilepool-placement.v2";
+    let counts = PlacementCounts::from_inputs(config, hugepage);
+    placement_digest_with_domain(
+        config,
+        hugepage,
+        TILEPOOL_PLACEMENT_IDENTITY_DOMAIN,
+        &counts,
+    )
+}
+
+fn placement_digest_with_domain(
+    config: &PoolConfig,
+    hugepage: &fs_alloc::HugepageDecision,
+    domain: &str,
+    counts: &PlacementCounts,
+) -> String {
+    let payload = encode_tilepool_placement(config, hugepage, counts);
+    fs_blake3::hash_domain(domain, &payload).to_hex()
+}
+
+fn encode_tilepool_placement(
+    config: &PoolConfig,
+    hugepage: &fs_alloc::HugepageDecision,
+    counts: &PlacementCounts,
+) -> Vec<u8> {
+    let topology = TilePoolPlacementTopologyFields {
+        ccds: config.topo.ccds,
+        cores_per_ccd: config.topo.cores_per_ccd,
+    };
+    let arena = TilePoolPlacementArenaFields {
+        chunk_bytes: config.arena.chunk_bytes,
+        max_chunk_bytes: config.arena.max_chunk_bytes,
+        limit_bytes: config.arena.limit_bytes,
+        free_list_max_bytes: config.arena.free_list_max_bytes,
+        hugepage: config.arena.hugepage,
+    };
     let mut payload = Vec::new();
-    append_placement_usize(&mut payload, config.workers);
-    payload.extend_from_slice(&config.topo.ccds.to_le_bytes());
-    payload.extend_from_slice(&config.topo.cores_per_ccd.to_le_bytes());
+    append_placement_usize(&mut payload, counts.workers);
+    payload.extend_from_slice(&topology.ccds.to_le_bytes());
+    payload.extend_from_slice(&topology.cores_per_ccd.to_le_bytes());
     payload.push(match config.mode {
         ExecMode::Deterministic => 0,
         ExecMode::Fast => 1,
     });
-    append_placement_usize(&mut payload, config.quantum_weights.len());
+    append_placement_usize(&mut payload, counts.quantum_weights);
     for weight in &config.quantum_weights {
         payload.extend_from_slice(&weight.to_le_bytes());
     }
-    append_placement_usize(&mut payload, config.arena.chunk_bytes);
-    append_placement_usize(&mut payload, config.arena.max_chunk_bytes);
-    match config.arena.limit_bytes {
+    append_placement_usize(&mut payload, arena.chunk_bytes);
+    append_placement_usize(&mut payload, arena.max_chunk_bytes);
+    match arena.limit_bytes {
         Some(limit) => {
             payload.push(1);
             append_placement_usize(&mut payload, limit);
         }
         None => payload.push(0),
     }
-    append_placement_usize(&mut payload, config.arena.free_list_max_bytes);
-    payload.push(match config.arena.hugepage {
+    append_placement_usize(&mut payload, arena.free_list_max_bytes);
+    payload.push(match arena.hugepage {
         fs_alloc::HugepagePolicy::Auto => 0,
         fs_alloc::HugepagePolicy::Never => 1,
     });
-    append_placement_bytes(&mut payload, hugepage.to_json().as_bytes());
-    append_placement_usize(&mut payload, config.pin_groups.len());
-    for group in &config.pin_groups {
-        append_placement_usize(&mut payload, group.len());
+    let hugepage_json = hugepage.to_json();
+    append_placement_bytes(
+        &mut payload,
+        hugepage_json.as_bytes(),
+        counts.hugepage_json_bytes,
+    );
+    append_placement_usize(&mut payload, counts.pin_groups);
+    for (index, group) in config.pin_groups.iter().enumerate() {
+        append_placement_usize(&mut payload, counts.pin_cpus[index]);
         for cpu in group {
             payload.extend_from_slice(&cpu.to_le_bytes());
         }
     }
-    fs_blake3::hash_domain(DOMAIN, &payload).to_hex()
+    payload
 }
 
 fn append_placement_usize(payload: &mut Vec<u8>, value: usize) {
@@ -1711,8 +1979,8 @@ fn append_placement_usize(payload: &mut Vec<u8>, value: usize) {
     );
 }
 
-fn append_placement_bytes(payload: &mut Vec<u8>, bytes: &[u8]) {
-    append_placement_usize(payload, bytes.len());
+fn append_placement_bytes(payload: &mut Vec<u8>, bytes: &[u8], declared_len: usize) {
+    append_placement_usize(payload, declared_len);
     payload.extend_from_slice(bytes);
 }
 
@@ -2298,6 +2566,315 @@ mod tests {
             "a contained reduction panic must not poison the pool"
         );
         assert!(pool.arena_pool().stats().quiescent());
+    }
+
+    fn placement_identity_fixture() -> (PoolConfig, fs_alloc::HugepageDecision) {
+        let mut config = PoolConfig::new(
+            3,
+            CcdTopology {
+                ccds: 3,
+                cores_per_ccd: 5,
+            },
+            0xA110_CAFE,
+        );
+        config.quantum_weights = vec![2, 3, 5];
+        config.mode = ExecMode::Fast;
+        config.arena = fs_alloc::ArenaConfig {
+            chunk_bytes: 2 << 20,
+            max_chunk_bytes: 32 << 20,
+            limit_bytes: Some(96 << 20),
+            free_list_max_bytes: 48 << 20,
+            hugepage: fs_alloc::HugepagePolicy::Auto,
+        };
+        config.pin_groups = vec![vec![3, 1], vec![7, 9, 11]];
+        let hugepage = fs_alloc::HugepageDecision {
+            policy: fs_alloc::HugepagePolicy::Auto,
+            outcome: fs_alloc::HugepageOutcome::ThpNotEnabled,
+            detail: "fixture detail alpha".to_string(),
+        };
+        (config, hugepage)
+    }
+
+    fn fixture_placement_identity(
+        config: &PoolConfig,
+        hugepage: &fs_alloc::HugepageDecision,
+        counts: &PlacementCounts,
+    ) -> String {
+        placement_identity_with_schema(
+            config,
+            hugepage,
+            TILEPOOL_PLACEMENT_IDENTITY_PREFIX_STEM,
+            TILEPOOL_PLACEMENT_IDENTITY_VERSION,
+            TILEPOOL_PLACEMENT_IDENTITY_DOMAIN,
+            "ccd-pin-requested",
+            counts,
+        )
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn tilepool_placement_identity_fields_move_independently() {
+        let (config, hugepage) = placement_identity_fixture();
+        let counts = PlacementCounts::from_inputs(&config, &hugepage);
+        let canonical = fixture_placement_identity(&config, &hugepage, &counts);
+        let assert_moves = |field: &str, changed: String| {
+            assert_ne!(
+                changed, canonical,
+                "semantic placement field {field} did not move the identity"
+            );
+        };
+
+        assert_moves(
+            "digest-domain",
+            placement_identity_with_schema(
+                &config,
+                &hugepage,
+                TILEPOOL_PLACEMENT_IDENTITY_PREFIX_STEM,
+                TILEPOOL_PLACEMENT_IDENTITY_VERSION,
+                "org.frankensim.fs-exec.tilepool-placement.w2",
+                "ccd-pin-requested",
+                &counts,
+            ),
+        );
+        assert_moves(
+            "identity-prefix-stem",
+            placement_identity_with_schema(
+                &config,
+                &hugepage,
+                "xs-exec-tilepool-v",
+                TILEPOOL_PLACEMENT_IDENTITY_VERSION,
+                TILEPOOL_PLACEMENT_IDENTITY_DOMAIN,
+                "ccd-pin-requested",
+                &counts,
+            ),
+        );
+        assert_moves(
+            "identity-version",
+            placement_identity_with_schema(
+                &config,
+                &hugepage,
+                TILEPOOL_PLACEMENT_IDENTITY_PREFIX_STEM,
+                TILEPOOL_PLACEMENT_IDENTITY_VERSION + 1,
+                TILEPOOL_PLACEMENT_IDENTITY_DOMAIN,
+                "ccd-pin-requested",
+                &counts,
+            ),
+        );
+
+        let mut changed_counts = counts.clone();
+        changed_counts.workers += 1;
+        assert_moves(
+            "workers",
+            fixture_placement_identity(&config, &hugepage, &changed_counts),
+        );
+        let mut changed = config.clone();
+        changed.topo.ccds += 1;
+        assert_moves(
+            "topology-ccds",
+            fixture_placement_identity(
+                &changed,
+                &hugepage,
+                &PlacementCounts::from_inputs(&changed, &hugepage),
+            ),
+        );
+        let mut changed = config.clone();
+        changed.topo.cores_per_ccd += 1;
+        assert_moves(
+            "topology-cores-per-ccd",
+            fixture_placement_identity(
+                &changed,
+                &hugepage,
+                &PlacementCounts::from_inputs(&changed, &hugepage),
+            ),
+        );
+        let mut changed = config.clone();
+        changed.mode = ExecMode::Deterministic;
+        assert_moves(
+            "mode-tag",
+            fixture_placement_identity(
+                &changed,
+                &hugepage,
+                &PlacementCounts::from_inputs(&changed, &hugepage),
+            ),
+        );
+
+        let mut changed_counts = counts.clone();
+        changed_counts.quantum_weights += 1;
+        assert_moves(
+            "quantum-weight-count",
+            fixture_placement_identity(&config, &hugepage, &changed_counts),
+        );
+        let mut changed = config.clone();
+        changed.quantum_weights.swap(0, 1);
+        assert_moves(
+            "quantum-weights-in-order",
+            fixture_placement_identity(
+                &changed,
+                &hugepage,
+                &PlacementCounts::from_inputs(&changed, &hugepage),
+            ),
+        );
+
+        let mut changed = config.clone();
+        changed.arena.chunk_bytes += 4096;
+        assert_moves(
+            "arena-chunk-bytes",
+            fixture_placement_identity(
+                &changed,
+                &hugepage,
+                &PlacementCounts::from_inputs(&changed, &hugepage),
+            ),
+        );
+        let mut changed = config.clone();
+        changed.arena.max_chunk_bytes += 4096;
+        assert_moves(
+            "arena-max-chunk-bytes",
+            fixture_placement_identity(
+                &changed,
+                &hugepage,
+                &PlacementCounts::from_inputs(&changed, &hugepage),
+            ),
+        );
+        let mut changed = config.clone();
+        changed.arena.limit_bytes = None;
+        assert_moves(
+            "arena-limit-presence",
+            fixture_placement_identity(
+                &changed,
+                &hugepage,
+                &PlacementCounts::from_inputs(&changed, &hugepage),
+            ),
+        );
+        let mut changed = config.clone();
+        changed.arena.limit_bytes = changed.arena.limit_bytes.map(|limit| limit + 4096);
+        assert_moves(
+            "arena-limit-bytes",
+            fixture_placement_identity(
+                &changed,
+                &hugepage,
+                &PlacementCounts::from_inputs(&changed, &hugepage),
+            ),
+        );
+        let mut changed = config.clone();
+        changed.arena.free_list_max_bytes += 4096;
+        assert_moves(
+            "arena-free-list-max-bytes",
+            fixture_placement_identity(
+                &changed,
+                &hugepage,
+                &PlacementCounts::from_inputs(&changed, &hugepage),
+            ),
+        );
+        let mut changed = config.clone();
+        changed.arena.hugepage = fs_alloc::HugepagePolicy::Never;
+        assert_moves(
+            "arena-hugepage-policy-tag",
+            fixture_placement_identity(
+                &changed,
+                &hugepage,
+                &PlacementCounts::from_inputs(&changed, &hugepage),
+            ),
+        );
+
+        let mut changed_hugepage = hugepage.clone();
+        changed_hugepage.policy = fs_alloc::HugepagePolicy::Never;
+        assert_moves(
+            "hugepage-decision-policy",
+            fixture_placement_identity(&config, &changed_hugepage, &counts),
+        );
+        let mut changed_hugepage = hugepage.clone();
+        changed_hugepage.outcome = fs_alloc::HugepageOutcome::AlignedForThp;
+        assert_moves(
+            "hugepage-decision-outcome",
+            fixture_placement_identity(&config, &changed_hugepage, &counts),
+        );
+        let mut changed_counts = counts.clone();
+        changed_counts.hugepage_json_bytes += 1;
+        assert_moves(
+            "hugepage-json-byte-count",
+            fixture_placement_identity(&config, &hugepage, &changed_counts),
+        );
+        let mut changed_hugepage = hugepage.clone();
+        changed_hugepage.detail = "fixture detail omega".to_string();
+        assert_eq!(changed_hugepage.detail.len(), hugepage.detail.len());
+        assert_moves(
+            "hugepage-decision-detail-json",
+            fixture_placement_identity(&config, &changed_hugepage, &counts),
+        );
+
+        assert_moves(
+            "pinning-intent",
+            placement_identity_with_schema(
+                &config,
+                &hugepage,
+                TILEPOOL_PLACEMENT_IDENTITY_PREFIX_STEM,
+                TILEPOOL_PLACEMENT_IDENTITY_VERSION,
+                TILEPOOL_PLACEMENT_IDENTITY_DOMAIN,
+                "pin-unrequested",
+                &counts,
+            ),
+        );
+        let mut changed_counts = counts.clone();
+        changed_counts.pin_groups += 1;
+        assert_moves(
+            "pin-group-count",
+            fixture_placement_identity(&config, &hugepage, &changed_counts),
+        );
+        let mut changed_counts = counts.clone();
+        changed_counts.pin_cpus[0] += 1;
+        assert_moves(
+            "pin-cpu-counts",
+            fixture_placement_identity(&config, &hugepage, &changed_counts),
+        );
+        let mut changed = config.clone();
+        changed.pin_groups[0].swap(0, 1);
+        assert_moves(
+            "pin-cpu-ids-in-order",
+            fixture_placement_identity(
+                &changed,
+                &hugepage,
+                &PlacementCounts::from_inputs(&changed, &hugepage),
+            ),
+        );
+    }
+
+    #[test]
+    fn tilepool_placement_seed_is_nonsemantic() {
+        let (mut first, _) = placement_identity_fixture();
+        first.arena.hugepage = fs_alloc::HugepagePolicy::Never;
+        let mut second = first.clone();
+        second.seed ^= u64::MAX;
+        assert_eq!(
+            TilePool::new(first).placement_identity(),
+            TilePool::new(second).placement_identity(),
+            "the scheduling-stream seed must not partition placement tune rows"
+        );
+    }
+
+    #[test]
+    fn tilepool_placement_identity_versions_fail_closed() {
+        let (mut config, _) = placement_identity_fixture();
+        config.arena.hugepage = fs_alloc::HugepagePolicy::Never;
+        let pool = TilePool::new(config);
+        let identity = pool.placement_identity();
+        let admitted =
+            pool.admit_retained_placement_identity(TILEPOOL_PLACEMENT_IDENTITY_VERSION, &identity);
+        assert_eq!(admitted, Ok(()));
+        for version in [
+            TILEPOOL_PLACEMENT_IDENTITY_VERSION - 1,
+            TILEPOOL_PLACEMENT_IDENTITY_VERSION + 1,
+        ] {
+            assert!(
+                pool.admit_retained_placement_identity(version, &identity)
+                    .is_err(),
+                "retained producer version {version} must fail closed"
+            );
+        }
+        let mut tampered = identity;
+        tampered.push('x');
+        let refused =
+            pool.admit_retained_placement_identity(TILEPOOL_PLACEMENT_IDENTITY_VERSION, &tampered);
+        assert!(refused.is_err());
     }
 
     #[test]

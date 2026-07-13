@@ -8,8 +8,9 @@ mod build_identity_support;
 mod depgraph_receipt_format;
 
 use build_identity_support::{
-    ASUPERSYNC_NON_SRC_INPUTS, FINGERPRINT_CONTEXT, append_executable_identity,
-    append_external_identity, append_source_fields, push_field, push_optional_field,
+    ASUPERSYNC_NON_SRC_INPUTS, GEMM_BUILD_PAYLOAD_SCHEMA, GemmBuildIdentityInput,
+    append_executable_identity, append_external_identity, append_source_fields,
+    gemm_build_fingerprint, push_field, push_optional_field,
 };
 
 const CARGO_PROFILES: [&str; 4] = ["DEV", "RELEASE", "TEST", "BENCH"];
@@ -26,8 +27,6 @@ const PROFILE_CODEGEN_KEYS: [&str; 11] = [
     "STRIP",
     "SPLIT_DEBUGINFO",
 ];
-const DEPGRAPH_RECEIPT_DOMAIN: &str = "org.frankensim.fs-la.depgraph-receipt.v1";
-
 fn required_env(name: &str) -> String {
     println!("cargo:rerun-if-env-changed={name}");
     env::var(name)
@@ -338,15 +337,16 @@ fn add_depgraph_evidence(payload: &mut Vec<u8>) -> DepgraphEvidence {
     let receipt = optional_env("FRANKENSIM_DEPGRAPH_RECEIPT");
     let salt = optional_env("FRANKENSIM_DEPGRAPH_SALT");
     if let Some(receipt) = receipt {
-        depgraph_receipt_format::parse(&receipt).unwrap_or_else(|error| {
+        let parsed = depgraph_receipt_format::parse(&receipt).unwrap_or_else(|error| {
             panic!(
                 "FRANKENSIM_DEPGRAPH_RECEIPT is not the strict canonical single-root fs-la \
                  receipt minted by xtask: {error}"
             )
         });
         push_field(payload, "depgraph-receipt", receipt.as_bytes());
-        let digest =
-            fs_blake3::hash_domain(DEPGRAPH_RECEIPT_DOMAIN, receipt.as_bytes()).to_string();
+        let digest = depgraph_receipt_format::content_identity(&parsed)
+            .expect("a parsed canonical dependency receipt has a content identity")
+            .to_hex();
         push_field(payload, "depgraph-receipt-domain-digest", digest.as_bytes());
         return DepgraphEvidence {
             class_identity: format!("receipt:{digest}"),
@@ -385,7 +385,7 @@ fn add_depgraph_evidence(payload: &mut Vec<u8>) -> DepgraphEvidence {
 #[allow(clippy::too_many_lines)] // one ordered payload defines the complete code-generation identity
 fn main() {
     let mut payload = Vec::new();
-    push_field(&mut payload, "schema", b"fs-la-gemm-codegen-v2");
+    push_field(&mut payload, "schema", GEMM_BUILD_PAYLOAD_SCHEMA.as_bytes());
     let graph_evidence = add_depgraph_evidence(&mut payload);
     println!(
         "cargo:rustc-env=FS_LA_GEMM_GRAPH_EVIDENCE={}",
@@ -529,6 +529,9 @@ fn main() {
     add_asupersync_identity(&mut payload, &workspace_root, &constellation_lock);
     add_source_closure(&mut payload, &workspace_root);
 
-    let fingerprint = fs_blake3::hash_domain(FINGERPRINT_CONTEXT, &payload).to_hex();
+    let fingerprint = gemm_build_fingerprint(&GemmBuildIdentityInput {
+        canonical_payload: &payload,
+    })
+    .to_hex();
     println!("cargo:rustc-env=FS_LA_GEMM_BUILD_FINGERPRINT={fingerprint}");
 }

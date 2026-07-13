@@ -121,7 +121,20 @@ typed AST. Layer: L6 (HELM). Runtime deps: `std` + fs-qty.
   lower-layer canonical MMS class identity before discharge. The family owns
   an admitted immutable `fs-verify::MmsClass`; theta scaling constructs a new
   admitted class, and cache keys bind that class's versioned canonical bytes
-  instead of independently serializing planner coefficients. Cache records
+  instead of independently serializing planner coefficients. The retained key
+  grammar is explicitly `PLANNER_CACHE_KEY_VERSION = 3` with the already-shipped
+  exact `fs-ir-ladder:v3:` domain/prefix; this declaration does not re-key
+  existing entries. The lowercase-hex payload is the exact canonical byte
+  stream of the theta-scaled lower-layer class, so one-ULP theta changes that
+  survive lower-layer admission remain distinct even when display formatting is
+  identical. Signed-zero theta and signed/trailing-zero polynomial spelling are
+  intentional admission normalizations. Retained adapters must call
+  `admit_planner_cache_key`: changed domains, stale versions, version aliases,
+  uppercase hex, and malformed payloads fail closed rather than being guessed.
+  Tolerance, budget, ladder, telemetry, and observer state are deliberately not
+  key fields: tolerance is enforced at lookup and every hit is independently
+  re-verified, while the others affect execution policy rather than answer
+  identity. Cache records
   normalize signed-zero mesh and nodal values before retention. Ladder transfers
   use deterministic P1 interpolation over the actual coarse coordinates,
   including non-dyadic ladders and adaptive-to-uniform moves. Actual solve/speculation

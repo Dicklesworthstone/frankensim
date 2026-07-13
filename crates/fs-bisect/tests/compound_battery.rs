@@ -492,6 +492,175 @@ fn canon_encoding_resists_concatenation_collisions() {
 }
 
 #[test]
+fn compound_family_name_moves_identity() {
+    let left = test_family(
+        "family-a",
+        InvariantClass::GoldenDrift,
+        1,
+        vec!["tracking".to_string()],
+        None,
+    );
+    let right = test_family(
+        "family-b",
+        InvariantClass::GoldenDrift,
+        1,
+        vec!["tracking".to_string()],
+        None,
+    );
+    assert_ne!(left.content_hash(), right.content_hash());
+}
+
+#[test]
+fn compound_family_invariant_moves_identity() {
+    let left = test_family(
+        "family",
+        InvariantClass::GoldenDrift,
+        1,
+        vec!["tracking".to_string()],
+        None,
+    );
+    let right = test_family(
+        "family",
+        InvariantClass::EnclosureViolation,
+        1,
+        vec!["tracking".to_string()],
+        None,
+    );
+    assert_ne!(left.content_hash(), right.content_hash());
+}
+
+#[test]
+fn compound_family_seed_moves_identity() {
+    let hash = |seed| {
+        test_family_with_provenance(
+            "family",
+            InvariantClass::GoldenDrift,
+            1,
+            vec!["tracking".to_string()],
+            None,
+            &provenance(seed),
+        )
+        .content_hash()
+    };
+    assert_ne!(hash(7), hash(8));
+}
+
+#[test]
+fn compound_family_contract_moves_identity() {
+    let hash = |contract: &str| {
+        test_family_with_provenance(
+            "family",
+            InvariantClass::GoldenDrift,
+            1,
+            vec!["tracking".to_string()],
+            None,
+            &FamilyProvenance::new(7, contract.to_string(), "seeded regression".to_string())
+                .expect("valid provenance"),
+        )
+        .content_hash()
+    };
+    assert_ne!(hash("fs-bisect::compound"), hash("fs-bisect::other"));
+}
+
+#[test]
+fn compound_family_detail_moves_identity() {
+    let hash = |detail: &str| {
+        test_family_with_provenance(
+            "family",
+            InvariantClass::GoldenDrift,
+            1,
+            vec!["tracking".to_string()],
+            None,
+            &FamilyProvenance::new(7, "fs-bisect::compound".to_string(), detail.to_string())
+                .expect("valid provenance"),
+        )
+        .content_hash()
+    };
+    assert_ne!(hash("diagnosis-a"), hash("diagnosis-b"));
+}
+
+#[test]
+fn compound_family_member_labels_move_identity() {
+    let family = |label: &str| {
+        compound(
+            FailureCase {
+                id: "family".to_string(),
+                seed: 7,
+                input: TestMember(1),
+                invariant: InvariantClass::GoldenDrift,
+                contract: "fs-bisect::compound".to_string(),
+                detail: "seeded regression".to_string(),
+            },
+            &|_| true,
+            &|_| vec![(label.to_string(), TestMember(2))],
+            vec!["tracking".to_string()],
+            None,
+            1,
+        )
+        .expect("valid family")
+        .content_hash
+    };
+    assert_ne!(family("neighbor-a"), family("neighbor-b"));
+}
+
+#[test]
+fn compound_family_member_bytes_move_identity() {
+    let left = test_family(
+        "family",
+        InvariantClass::GoldenDrift,
+        1,
+        vec!["tracking".to_string()],
+        None,
+    );
+    let right = test_family(
+        "family",
+        InvariantClass::GoldenDrift,
+        2,
+        vec!["tracking".to_string()],
+        None,
+    );
+    assert_ne!(left.content_hash(), right.content_hash());
+}
+
+#[test]
+fn compound_family_tracking_moves_identity() {
+    let left = test_family(
+        "family",
+        InvariantClass::GoldenDrift,
+        1,
+        vec!["tracking-a".to_string()],
+        None,
+    );
+    let right = test_family(
+        "family",
+        InvariantClass::GoldenDrift,
+        1,
+        vec!["tracking-b".to_string()],
+        None,
+    );
+    assert_ne!(left.content_hash(), right.content_hash());
+}
+
+#[test]
+fn compound_family_admission_moves_identity() {
+    let left = test_family(
+        "family",
+        InvariantClass::GoldenDrift,
+        1,
+        vec!["tracking".to_string()],
+        None,
+    );
+    let right = test_family(
+        "family",
+        InvariantClass::GoldenDrift,
+        1,
+        vec!["tracking".to_string()],
+        Some("admit only after replay".to_string()),
+    );
+    assert_ne!(left.content_hash(), right.content_hash());
+}
+
+#[test]
 fn content_hash_is_sensitive_to_every_field() {
     let base = test_family(
         "f",

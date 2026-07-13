@@ -4,9 +4,71 @@
 mod support;
 
 use support::{
-    ASUPERSYNC_NON_SRC_INPUTS, EXECUTABLE_CONTEXT, FINGERPRINT_CONTEXT, append_executable_identity,
-    append_external_identity, append_source_fields, push_field, push_optional_field,
+    ASUPERSYNC_NON_SRC_INPUTS, EXECUTABLE_CONTEXT, GEMM_BUILD_FINGERPRINT_IDENTITY_DOMAIN,
+    GEMM_BUILD_FINGERPRINT_IDENTITY_VERSION, GEMM_BUILD_PAYLOAD_SCHEMA, GemmBuildIdentityInput,
+    append_executable_identity, append_external_identity, append_source_fields,
+    gemm_build_fingerprint, gemm_build_fingerprint_identity_version_is_supported,
+    gemm_build_fingerprint_with_domain, push_field, push_optional_field,
 };
+
+fn fingerprint(payload: &[u8]) -> fs_blake3::ContentHash {
+    gemm_build_fingerprint(&GemmBuildIdentityInput {
+        canonical_payload: payload,
+    })
+}
+
+#[test]
+fn gemm_build_identity_domain_moves_fingerprint() {
+    let input = GemmBuildIdentityInput {
+        canonical_payload: b"canonical-build-payload",
+    };
+    assert_ne!(
+        gemm_build_fingerprint(&input),
+        gemm_build_fingerprint_with_domain(
+            "frankensim.fs-la.gemm-build-fingerprint.v1.alternate",
+            &input,
+        )
+    );
+}
+
+#[test]
+fn embedded_payload_schema_moves_gemm_build_fingerprint() {
+    let mut current = Vec::new();
+    push_field(&mut current, "schema", GEMM_BUILD_PAYLOAD_SCHEMA.as_bytes());
+    let mut changed = Vec::new();
+    push_field(&mut changed, "schema", b"fs-la-gemm-codegen-v3");
+    assert_ne!(fingerprint(&current), fingerprint(&changed));
+}
+
+#[test]
+fn depgraph_evidence_moves_gemm_build_fingerprint() {
+    let mut current = Vec::new();
+    push_field(
+        &mut current,
+        "depgraph-receipt",
+        br#"{"schema":"fs-la-depgraph-receipt-v1","packages":["a"]}"#,
+    );
+    let mut changed = Vec::new();
+    push_field(
+        &mut changed,
+        "depgraph-receipt",
+        br#"{"schema":"fs-la-depgraph-receipt-v1","packages":["b"]}"#,
+    );
+    assert_ne!(fingerprint(&current), fingerprint(&changed));
+}
+
+#[test]
+fn gemm_build_fingerprint_identity_version_fails_closed() {
+    assert_eq!(GEMM_BUILD_FINGERPRINT_IDENTITY_VERSION, 1);
+    assert_eq!(
+        GEMM_BUILD_FINGERPRINT_IDENTITY_DOMAIN,
+        "frankensim.fs-la.gemm-build-fingerprint.v1"
+    );
+    assert_eq!(GEMM_BUILD_PAYLOAD_SCHEMA, "fs-la-gemm-codegen-v2");
+    assert!(gemm_build_fingerprint_identity_version_is_supported(1));
+    assert!(!gemm_build_fingerprint_identity_version_is_supported(0));
+    assert!(!gemm_build_fingerprint_identity_version_is_supported(2));
+}
 
 #[test]
 fn source_fields_are_order_independent_and_content_sensitive() {
@@ -19,6 +81,11 @@ fn source_fields_are_order_independent_and_content_sensitive() {
     let mut reverse = Vec::new();
     append_source_fields(&mut reverse, fields.into_iter().rev().collect());
     assert_eq!(forward, reverse, "directory order must be irrelevant");
+    assert_eq!(
+        fingerprint(&forward),
+        fingerprint(&reverse),
+        "directory order must not move the outer build fingerprint"
+    );
 
     let mut changed = Vec::new();
     append_source_fields(
@@ -29,11 +96,16 @@ fn source_fields_are_order_independent_and_content_sensitive() {
         ],
     );
     assert_ne!(forward, changed, "one source byte must change the payload");
+    assert_ne!(
+        fingerprint(&forward),
+        fingerprint(&changed),
+        "one source byte must change the outer build fingerprint"
+    );
 }
 
 #[test]
 fn field_framing_separates_names_and_values() {
-    assert!(!FINGERPRINT_CONTEXT.is_empty());
+    assert!(!GEMM_BUILD_FINGERPRINT_IDENTITY_DOMAIN.is_empty());
     assert!(!EXECUTABLE_CONTEXT.is_empty());
     let mut left = Vec::new();
     push_field(&mut left, "ab", b"c");
@@ -54,6 +126,10 @@ fn executable_identity_binds_resolved_path_and_content() {
     assert_ne!(baseline, payload("/other/bin/rustc", b"compiler-a"));
     assert_ne!(baseline, payload("/toolchain/bin/rustc", b"compiler-b"));
     assert_eq!(baseline, payload("/toolchain/bin/rustc", b"compiler-a"));
+    assert_ne!(
+        fingerprint(&baseline),
+        fingerprint(&payload("/toolchain/bin/rustc", b"compiler-b"))
+    );
 }
 
 #[test]
@@ -67,6 +143,10 @@ fn optional_fields_separate_absent_empty_and_literal_sentinel() {
     assert_ne!(payload(None), payload(Some(b"")));
     assert_ne!(payload(None), payload(Some(b"<unset>")));
     assert_ne!(payload(Some(b"")), payload(Some(b"<unset>")));
+    assert_ne!(
+        fingerprint(&payload(None)),
+        fingerprint(&payload(Some(b"")))
+    );
 }
 
 #[test]
@@ -134,5 +214,15 @@ fn external_identity_binds_lock_head_source_and_include_inputs() {
             b"dashboard-b"
         ),
         "an included non-source compiler input must change the payload"
+    );
+    assert_ne!(
+        fingerprint(&baseline),
+        fingerprint(&payload(
+            b"lock-a",
+            "1111111111111111111111111111111111111111",
+            b"src-a",
+            b"dashboard-b"
+        )),
+        "an included external input must change the outer build fingerprint"
     );
 }

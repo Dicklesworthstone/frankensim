@@ -4,13 +4,19 @@
 //! cross-ISA golden hash.
 
 use fs_rand::dist::AliasTable;
-use fs_rand::{Stream, StreamKey};
+use fs_rand::{Stream, StreamCheckpoint, StreamKey};
 
 const KEY: StreamKey = StreamKey {
     seed: 0xD157_0001,
     kernel: 11,
     tile: 3,
 };
+
+fn resume(index: u64) -> Stream {
+    let retained = StreamCheckpoint::current(KEY, index).to_canonical_le_bytes();
+    Stream::resume_retained(&retained)
+        .expect("fixture checkpoints use the current canonical replay transport")
+}
 
 #[test]
 fn gamma_moments_and_replay() {
@@ -39,12 +45,12 @@ fn gamma_moments_and_replay() {
         );
         // Deterministic-consumption replay: same key + index → same value
         // AND same post-index, even mid-stream.
-        let mut a = Stream::resume(KEY, 777);
+        let mut a = resume(777);
         let _ = a.next_f64(); // interleave
         let idx_before = a.index();
         let va = a.next_gamma(alpha);
         let consumed = a.index() - idx_before;
-        let mut b = Stream::resume(KEY, idx_before);
+        let mut b = resume(idx_before);
         let vb = b.next_gamma(alpha);
         assert_eq!(va.to_bits(), vb.to_bits(), "gamma replay value");
         assert_eq!(b.index() - idx_before, consumed, "gamma replay consumption");
@@ -114,14 +120,14 @@ fn extreme_beta_and_dirichlet_shapes_are_total_and_replay_safe() {
     .enumerate()
     {
         let start = 120_000 + 100 * case as u64;
-        let mut a = Stream::resume(KEY, start);
+        let mut a = resume(start);
         let value = a.next_beta(alpha, beta);
         let end = a.index();
 
         assert!(value.is_finite(), "extreme-shape beta returned {value}");
         assert!((0.0..=1.0).contains(&value), "beta out of range: {value}");
 
-        let mut replay = Stream::resume(KEY, start);
+        let mut replay = resume(start);
         let replayed = replay.next_beta(alpha, beta);
         assert_eq!(value.to_bits(), replayed.to_bits(), "beta replay bits");
         assert_eq!(end, replay.index(), "beta fallback consumed hidden draws");
@@ -137,7 +143,7 @@ fn extreme_beta_and_dirichlet_shapes_are_total_and_replay_safe() {
     .enumerate()
     {
         let start = 140_000 + 100 * case as u64;
-        let mut a = Stream::resume(KEY, start);
+        let mut a = resume(start);
         let mut values = [0.0; 3];
         a.next_dirichlet(&alphas, &mut values);
         let end = a.index();
@@ -150,7 +156,7 @@ fn extreme_beta_and_dirichlet_shapes_are_total_and_replay_safe() {
         assert!(sum > 0.0, "Dirichlet normalization was all zero");
         assert!((sum - 1.0).abs() <= f64::EPSILON, "simplex sum {sum}");
 
-        let mut replay = Stream::resume(KEY, start);
+        let mut replay = resume(start);
         let mut replayed = [0.0; 3];
         replay.next_dirichlet(&alphas, &mut replayed);
         assert_eq!(
@@ -174,8 +180,8 @@ fn alias_table_bitwise_construction_and_chi_square() {
     let t2 = AliasTable::new(&weights);
     // Bitwise-identical construction (P2 on setup).
     for i in 0..weights.len() {
-        let mut s1 = Stream::resume(KEY, 40_000 + i as u64);
-        let mut s2 = Stream::resume(KEY, 40_000 + i as u64);
+        let mut s1 = resume(40_000 + i as u64);
+        let mut s2 = resume(40_000 + i as u64);
         assert_eq!(
             t1.sample(&mut s1),
             t2.sample(&mut s2),
@@ -194,7 +200,7 @@ fn alias_table_bitwise_construction_and_chi_square() {
     // Chi-square against the pmf.
     let total: f64 = weights.iter().sum();
     let mut counts = [0u32; 5];
-    let mut st = Stream::resume(KEY, 90_000);
+    let mut st = resume(90_000);
     for _ in 0..N {
         counts[t1.sample(&mut st)] += 1;
     }
@@ -294,7 +300,7 @@ fn truncated_variants_respect_bounds() {
 }
 
 /// Recorded on aarch64-apple (M4 Pro); must match on x86-64 (trj).
-const GOLDEN_HASH: u64 = 0x4224_6e28_56de_673c;
+const DIST_STREAM_V1_AGGREGATE_FNV1A64_GOLDEN: u64 = 0x4224_6e28_56de_673c;
 
 #[test]
 fn dist_golden_hash() {
@@ -323,8 +329,8 @@ fn dist_golden_hash() {
         "{{\"suite\":\"fs-rand\",\"case\":\"dist-golden\",\"verdict\":\"info\",\"detail\":\"{acc:#018x}\"}}"
     );
     assert_eq!(
-        acc, GOLDEN_HASH,
-        "distribution bits changed: {acc:#018x} vs {GOLDEN_HASH:#018x} — bump only with \
+        acc, DIST_STREAM_V1_AGGREGATE_FNV1A64_GOLDEN,
+        "distribution bits changed: {acc:#018x} vs {DIST_STREAM_V1_AGGREGATE_FNV1A64_GOLDEN:#018x} — bump only with \
          semantic justification (golden-evidence policy)"
     );
 }

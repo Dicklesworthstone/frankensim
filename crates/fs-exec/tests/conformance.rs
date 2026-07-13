@@ -752,7 +752,7 @@ fn exec_013_autotuner_calibrates_persists_and_pins_reproducibly() {
     // Rows carry the fingerprint plus typed, versioned measurement evidence.
     let fp_hex = format!("{fingerprint:016x}");
     let rows_keyed = report.contains(&fp_hex)
-        && report.contains("\"evidence_version\":1")
+        && report.contains("\"evidence_version\":2")
         && report.contains("\"kind\":\"wall-time\"")
         && report.contains("\"kind\":\"work-count\"")
         && report.contains("\"kind\":\"throughput\"")
@@ -795,7 +795,7 @@ fn exec_013_autotuner_calibrates_persists_and_pins_reproducibly() {
         rows_keyed && tuned && idempotent && persisted && stale && replayable,
         &format!(
             "calibrate->persist->consume round trip on machine {fp_hex}: rows fingerprinted \
-             with typed evidence v1, recalibration idempotent (refresh=2), foreign fingerprints \
+             with typed evidence v2, recalibration idempotent (refresh=2), foreign fingerprints \
              stale, pinned replay reproduces the recorded plan (edge={})",
             edge_reloaded.cells()
         ),

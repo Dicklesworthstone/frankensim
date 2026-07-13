@@ -75,7 +75,12 @@ fs-blake3, fs-substrate, fs-obs.
   topology/mode/pinning-intent prefix plus a derive-key BLAKE3 suffix over
   normalized workers, weights, arena policy, the `ArenaPool`'s recorded
   hugepage decision/outcome, and exact requested pin groups. Pin success is not
-  claimed by this identity.
+  claimed by this identity. Its already-shipped schema is now explicit as
+  `TILEPOOL_PLACEMENT_IDENTITY_VERSION = 2` under
+  `org.frankensim.fs-exec.tilepool-placement.v2`; this declaration does not
+  rotate any v2 byte or root. `admit_retained_placement_identity` accepts only
+  that exact producer version and a byte-for-byte identity recomputed from the
+  normalized pool.
 - `RunError { Cancelled, TilePanicked, TileFailed, WorkerSpawn, MemoryRefused,
   MemoryPlanOverflow, MemoryAllocationRefused, ReductionPanicked, Incomplete }`
   — structured, teaching
@@ -117,8 +122,10 @@ fs-blake3, fs-substrate, fs-obs.
   lowest-index tie law), reduction cost, steal cost, and selects the
   schedule kind from measured per-core bandwidth; rows are keyed kernel ×
   shape-class × MACHINE FINGERPRINT with typed evidence and a refresh
-  counter (recalibration idempotent). Evidence schema v1 preserves every
-  wall-time sample plus revalidated min/max summaries, distinguishes
+  counter (recalibration idempotent). Tune-row identity v2 is the exact,
+  domain-separated canonical JSON transport; it carries evidence schema v2.
+  Evidence v2 preserves every wall-time sample plus explicit observation and
+  per-observation sample counts with revalidated min/max summaries, distinguishes
   completed-tile and steal counters by `WorkUnit`, and records throughput as
   a checked nearest integral milli-unit with `ThroughputUnit` (the resulting
   integer is persisted exactly). Its optional
@@ -128,8 +135,10 @@ fs-blake3, fs-substrate, fs-obs.
   confidence. Persistence is a strict JSON-lines file store;
   migrating it to fs-ledger requires retaining these typed fields rather than
   relabeling opaque integers. Foreign-fingerprint rows are stale and ignored
-  on load. The loader accepts only evidence version 1, the canonical writer
-  grammar, summaries and separation re-derived from the exact observations,
+  on load. The loader accepts only tune-row identity version 2 and evidence
+  version 2 in their exact declared domains and canonical writer grammar,
+  requires count prefixes to match the exact arrays, and re-derives summaries
+  and separation from the exact observations,
   recognized units, full-width canonical integers, strictly positive wall-time
   samples (internally measured sub-nanosecond elapsed values are represented by
   the 1 ns floor), and positive integral refresh counters; suffixes and
@@ -140,18 +149,25 @@ fs-blake3, fs-substrate, fs-obs.
   Every locally generated row must be a canonical writer-to-parser fixed point
   before preparation, commit, insertion, or persistence. Duplicate kernel ×
   shape-class rows for the selected fingerprint are corruption rather than
-  last-write-wins.
-  Decisions (`tile_edge_for`, `schedule`) are RECORDED; studies pin them
-  through typed helpers or the validating canonical replay API and replay uses
-  recorded plans, never re-tuned ones (replay fidelity). The process-local
+  last-write-wins. `TuneRow` keeps its state private and exposes a validating
+  constructor plus read-only accessors; the public `to_canonical_json` path
+  revalidates the complete row before emitting exact transport bytes, so
+  callers cannot construct or stamp an unadmitted row with the current
+  domain/version.
+  Decisions (`tile_edge_for`, `schedule`) are RECORDED as tuning-decision v1
+  exact canonical JSON with a domain, identity version, kernel, canonical
+  parameters, and source. The strict parser rejects field reordering, stale
+  domains/versions, alternate parameter spellings, and trailing bytes. Studies
+  pin decisions through typed helpers or this validating replay API and replay
+  uses recorded plans, never re-tuned ones (replay fidelity). The process-local
   diagnostic history is a deterministic bounded window: at most 4096 entries
-  and 1 MiB of owned kernel/parameter payload, with oldest-prefix batch
-  eviction. `decision_history()` exposes the evicted count and
-  `is_complete()`; a window with an evicted prefix MUST NOT be presented as a
-  complete replay record. Production dispatch receipts belong in the Design
-  Ledger. General decision kernel identities are nonblank and bounded to the
-  canonical 64 KiB tune-string domain before cloning. Cold-start defaults:
-  8-cube tiles, bandwidth-rich schedule.
+  and 1 MiB of canonical serialized decision bytes (including domain and field
+  framing), with oldest-prefix batch eviction. `decision_history()` exposes the
+  evicted count and `is_complete()`; a window with an evicted prefix MUST NOT be
+  presented as a complete replay record. Production dispatch receipts belong
+  in the Design Ledger. General decision kernel identities are nonblank and
+  bounded to the canonical 64 KiB tune-string domain before cloning.
+  Cold-start defaults: 8-cube tiles, bandwidth-rich schedule.
 - `GemmBlockPlan` / `GemmExecutionIdentity` / `GemmTuneKey` /
   `PreparedGemmRow` / `PreparedGemmDecision` / `GEMM_KERNEL_PREFIX` — the
   MC/NC blocking lane for the parallel-GEMM consumer (bead yqug). Plans live
@@ -164,9 +180,11 @@ fs-blake3, fs-substrate, fs-obs.
   explicit memory limit (`u64::MAX` is the canonical unbounded class), exact
   probe dimensions, resolved ISA tier, placement policy, and
   implementation identity, plus a required producer-supplied build/codegen
-  identity. The scoped-key schema is `tune-v3`; v2 keys lack the memory seam
-  (and older keys also lack the build seam) and are not accepted as current
-  GEMM keys. Row lookup, pin lookup, ledger
+  identity. The scoped-key identity is v4 in domain
+  `org.frankensim.fs-exec.gemm-tune-key.v4`; it additionally frames the exact
+  three-element probe count. v3 keys lack that explicit count, v2 keys lack the
+  memory seam, and older keys also lack the build seam; none are accepted as
+  current GEMM keys. Row lookup, pin lookup, ledger
   lookup, and the recorded decision all use that SAME scoped key, so neither a
   neighboring shape nor a different execution or build configuration can
   reuse the row or pin.
@@ -251,6 +269,37 @@ fs-blake3, fs-substrate, fs-obs.
     and one concurrent victim-order partition in addition to final tables;
     it releases on every return/unwind. This invariant applies only to the
     tracked envelope named above, not arbitrary kernel-owned heap.
+
+## Tile-pool placement identity (v2)
+
+The placement payload remains the historical v2 typed-binary sequence: u64
+normalized workers; topology CCD/core dimensions; mode tag; declared weight
+count plus ordered u32 weights; normalized arena chunk, maximum, optional
+limit, free-list, and hugepage-policy fields; the declared byte count plus
+exact canonical hugepage-decision JSON; then declared pin-group and per-group
+CPU counts plus ordered u32 CPU ids. BLAKE3 derive-key hashing uses the exact
+versioned domain above, and the readable key prefix repeats the schema version,
+topology, mode, and requested pinning intent.
+
+Every normalized `PoolConfig` placement field and every recorded
+`HugepageDecision` field is semantic. The study seed is deliberately excluded:
+it keys logical random streams, not hardware placement or tune-row population,
+and a dedicated nonmovement test locks that boundary. Requested pin groups are
+semantic; observed pin success remains a timing fact and no-claim. Mutation
+tests move domain, prefix stem, version, every scalar and enum field, ordered
+weights/CPU ids, and each declared count prefix independently without relying
+on adding or removing elements. The schema depends on
+`fs-alloc:hugepage-decision`, including its strict JSON writer/parser
+fixed-point surface; the placement encoder therefore never hashes unchecked
+display JSON. Its internal `PlacementCounts` transport fields are also
+exhaustively classified as derived, so adding a new count frame cannot bypass
+the owner gate.
+
+Retained placement rows fail closed: only producer v2 and an exact recomputed
+identity are admitted. Stale/future versions and any identity mismatch require
+an explicit migration or recalibration. The re-exported `TilePool` exposes the
+current values as `PLACEMENT_IDENTITY_VERSION` and
+`PLACEMENT_IDENTITY_DOMAIN` associated constants.
 
 ## Snapshot envelope (bead wf9.8.2, v1)
 
@@ -378,7 +427,9 @@ survival after panics, exact finite-budget propagation, simultaneous typed
 allocation refusals, and mixed panic/refusal precedence. GEMM tuner unit drills cover hostile embedded cache
 keys, invalid params, unranked evidence, selection/argmin disagreement,
 identity-dimension isolation, exact-key replay, parameter-family collisions,
-and explicit row/decision commit semantics.
+and explicit row/decision commit semantics. The pool unit suite also locks the
+complete placement-v2 mutation matrix, independent count-prefix movement,
+seed nonmovement, and fail-closed retained-version admission.
 
 ## No-claim boundaries
 - NO 200 µs cancel-latency CLAIM yet: the reference-hardware p99 gate
@@ -462,7 +513,7 @@ and explicit row/decision commit semantics.
   noise; the improvement is DOCUMENTED via the ledgered calibration
   report, and the perf harness owns throughput verdicts (same doctrine as
   every other latency/perf claim here).
-- NO statistical-confidence claim for tune rows: evidence v1 records exact
+- NO statistical-confidence claim for tune rows: evidence v2 records exact
   observations, wall-time extrema, and (when meaningful) a descriptive
   candidate-separation ratio. It does not estimate repeatability,
   uncertainty, or a probability that the selected candidate is optimal.

@@ -47,6 +47,45 @@ pub const MAX_LADDER_RUNGS: usize = 4_096;
 pub const MAX_POLYNOMIAL_CELL_WORK: usize = 16_000_000;
 const VERIFIER_GAUSS_POINTS: usize = 5;
 
+/// Semantic version of the retained planner-cache key transport.
+///
+/// Version 3 is the already-shipped `fs-ir-ladder:v3:` grammar. This constant
+/// makes that existing version explicit; it does not rotate or re-key it.
+pub const PLANNER_CACHE_KEY_VERSION: u32 = 3;
+/// Exact domain and prefix of every canonical planner-cache key.
+pub const PLANNER_CACHE_KEY_DOMAIN: &str = "fs-ir-ladder:v3:";
+const PLANNER_CACHE_KEY_PREFIX_STEM: &str = "fs-ir-ladder:v";
+
+/// Owner-local declaration consumed by `xtask check-identities`.
+pub const PLANNER_CACHE_KEY_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
+    "frankensim-identity-schema-v1",
+    "id=fs-ir:planner-cache-key",
+    "version_const=PLANNER_CACHE_KEY_VERSION",
+    "version=3",
+    "domain=fs-ir-ladder:v3:",
+    "domain_const=PLANNER_CACHE_KEY_DOMAIN",
+    "encoder=cache_key",
+    "encoder_helpers=cache_key_with_prefix,ProblemFamily::scaled_class",
+    "schema_constants=PLANNER_CACHE_KEY_VERSION,PLANNER_CACHE_KEY_DOMAIN,PLANNER_CACHE_KEY_PREFIX_STEM",
+    "schema_functions=ProblemFamily::base,ProblemFamily::kernel,validate_finite,canonicalize_zero,canonical_f64_bits",
+    "schema_dependencies=fs-verify:fem1d-mms-class",
+    "digest=none-exact-canonical-transport",
+    "encoding=canonical-transport-exact-bits",
+    "sources=ProblemFamily",
+    "source_fields=ProblemFamily.base_class:semantic",
+    "source_bindings=ProblemFamily.base_class>base-class-canonical-identity",
+    "external_semantic_fields=domain-prefix,identity-version,theta-scaled-class-exact-bits",
+    "semantic_fields=domain-prefix,identity-version,base-class-canonical-identity,theta-scaled-class-exact-bits",
+    "excluded_fields=base-class-signed-zero-and-trailing-zero-spelling:normalized-before-ProblemFamily-admission,theta-signed-zero-sign:normalized-by-scaled-MmsClass-admission,tolerance:lookup-filter-and-independent-reverification-only,budget-and-ladder:execution-policy-not-answer-identity",
+    "consumers=plan_observed,AnswerCache,MemCache,retained-planner-cache",
+    "mutations=domain-prefix:crates/fs-ir/src/planner.rs#planner_cache_schema_and_domain_move_identity,identity-version:crates/fs-ir/src/planner.rs#planner_cache_schema_and_domain_move_identity,base-class-canonical-identity:crates/fs-ir/src/planner.rs#planner_cache_base_class_identity_moves_key,theta-scaled-class-exact-bits:crates/fs-ir/src/planner.rs#planner_cache_theta_exact_bits_move_key",
+    "nonsemantic_mutations=base-class-signed-zero-and-trailing-zero-spelling:crates/fs-ir/src/planner.rs#planner_cache_intentional_normalizations_do_not_move_identity,theta-signed-zero-sign:crates/fs-ir/src/planner.rs#planner_cache_intentional_normalizations_do_not_move_identity,tolerance:crates/fs-ir/src/planner.rs#planner_cache_execution_policy_does_not_move_answer_identity,budget-and-ladder:crates/fs-ir/src/planner.rs#planner_cache_execution_policy_does_not_move_answer_identity",
+    "field_guard=classify_planner_cache_identity_fields",
+    "transport_guard=admit_planner_cache_key",
+    "version_guard=crates/fs-ir/src/planner.rs#planner_cache_key_versions_fail_closed",
+    "coupling_surface=fs-ir:planner-cache-key",
+];
+
 /// One planner operator (the menu).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PlanOp {
@@ -234,6 +273,89 @@ impl std::error::Error for PlanError {
     }
 }
 
+/// Fail-closed reason for refusing a retained planner-cache key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlannerCacheKeyAdmissionError {
+    /// The key does not use the planner-cache namespace/version grammar.
+    MalformedPrefix,
+    /// The key declares a well-formed but unsupported schema version.
+    UnsupportedVersion {
+        /// Version declared by retained state.
+        declared: u32,
+        /// Exact version supported by this build.
+        supported: u32,
+    },
+    /// The version parses as current but is not in its one canonical spelling.
+    NonCanonicalPrefix,
+    /// The lower-layer canonical bytes are not canonical lowercase hex.
+    MalformedPayload,
+}
+
+impl fmt::Display for PlannerCacheKeyAdmissionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MalformedPrefix => f.write_str("malformed planner-cache key prefix"),
+            Self::UnsupportedVersion {
+                declared,
+                supported,
+            } => write!(
+                f,
+                "planner-cache key v{declared} is unsupported; this build accepts exactly v{supported}"
+            ),
+            Self::NonCanonicalPrefix => {
+                f.write_str("planner-cache key version prefix is not canonically encoded")
+            }
+            Self::MalformedPayload => {
+                f.write_str("planner-cache key payload is not non-empty lowercase hexadecimal")
+            }
+        }
+    }
+}
+
+impl std::error::Error for PlannerCacheKeyAdmissionError {}
+
+/// Admit a retained cache key under the exact current prefix and return its
+/// canonical lower-layer payload.
+///
+/// Unknown versions, aliases such as `v03`, changed domains, uppercase hex,
+/// and malformed payloads are refused rather than guessed or normalized.
+///
+/// # Errors
+/// Returns [`PlannerCacheKeyAdmissionError`] for any non-current or
+/// non-canonical retained key.
+pub fn admit_planner_cache_key(key: &str) -> Result<&str, PlannerCacheKeyAdmissionError> {
+    let versioned = key
+        .strip_prefix(PLANNER_CACHE_KEY_PREFIX_STEM)
+        .ok_or(PlannerCacheKeyAdmissionError::MalformedPrefix)?;
+    let (version_text, payload) = versioned
+        .split_once(':')
+        .ok_or(PlannerCacheKeyAdmissionError::MalformedPrefix)?;
+    if version_text.is_empty() || !version_text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(PlannerCacheKeyAdmissionError::MalformedPrefix);
+    }
+    let declared = version_text
+        .parse::<u32>()
+        .map_err(|_| PlannerCacheKeyAdmissionError::MalformedPrefix)?;
+    if declared != PLANNER_CACHE_KEY_VERSION {
+        return Err(PlannerCacheKeyAdmissionError::UnsupportedVersion {
+            declared,
+            supported: PLANNER_CACHE_KEY_VERSION,
+        });
+    }
+    if !key.starts_with(PLANNER_CACHE_KEY_DOMAIN) {
+        return Err(PlannerCacheKeyAdmissionError::NonCanonicalPrefix);
+    }
+    if payload.is_empty()
+        || !payload.len().is_multiple_of(2)
+        || !payload
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        return Err(PlannerCacheKeyAdmissionError::MalformedPayload);
+    }
+    Ok(payload)
+}
+
 /// A cache-declared answer. The planner independently re-verifies it before any
 /// certificate or discharge decision is emitted.
 #[derive(Debug, Clone, PartialEq)]
@@ -284,8 +406,11 @@ impl CachedAnswer {
 pub trait AnswerCache {
     /// A candidate for `key` whose declared bound is ≤ `tol`, if any. The
     /// implementation is not a trust root; [`plan`] re-verifies the candidate.
+    /// Implementations backed by retained state must fail closed through
+    /// [`admit_planner_cache_key`] before interpreting a key.
     fn lookup(&self, key: &str, tol: f64) -> Option<CachedAnswer>;
-    /// Record an answer that the planner has just independently verified.
+    /// Record an answer that the planner has just independently verified. A
+    /// retained implementation must refuse non-current/non-canonical keys.
     fn insert(&mut self, key: &str, answer: CachedAnswer);
 }
 
@@ -297,11 +422,14 @@ pub struct MemCache {
 
 impl AnswerCache for MemCache {
     fn lookup(&self, key: &str, tol: f64) -> Option<CachedAnswer> {
+        admit_planner_cache_key(key).ok()?;
         self.items.get(key).filter(|a| a.bound <= tol).cloned()
     }
 
     fn insert(&mut self, key: &str, answer: CachedAnswer) {
-        self.items.insert(key.to_string(), answer);
+        if admit_planner_cache_key(key).is_ok() {
+            self.items.insert(key.to_string(), answer);
+        }
     }
 }
 
@@ -471,6 +599,11 @@ pub enum PlanOutcome {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProblemFamily {
     base_class: MmsClass,
+}
+
+#[allow(dead_code)]
+fn classify_planner_cache_identity_fields(family: &ProblemFamily) {
+    let ProblemFamily { base_class: _ } = family;
 }
 
 impl ProblemFamily {
@@ -1088,14 +1221,21 @@ fn checked_verify(
 }
 
 fn cache_key(family: &ProblemFamily, theta: f64) -> Result<String, PlanError> {
+    cache_key_with_prefix(family, theta, PLANNER_CACHE_KEY_DOMAIN)
+}
+
+fn cache_key_with_prefix(
+    family: &ProblemFamily,
+    theta: f64,
+    prefix: &str,
+) -> Result<String, PlanError> {
     let class = family.scaled_class(theta)?;
-    const PREFIX: &str = "fs-ir-ladder:v3:";
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let bytes = class.canonical_bytes();
     let requested = bytes
         .len()
         .checked_mul(2)
-        .and_then(|encoded| encoded.checked_add(PREFIX.len()))
+        .and_then(|encoded| encoded.checked_add(prefix.len()))
         .ok_or(PlanError::AllocationFailed {
             stage: "planner canonical cache key",
             requested: usize::MAX,
@@ -1106,7 +1246,7 @@ fn cache_key(family: &ProblemFamily, theta: f64) -> Result<String, PlanError> {
             stage: "planner canonical cache key",
             requested,
         })?;
-    key.push_str(PREFIX);
+    key.push_str(prefix);
     for byte in bytes {
         key.push(char::from(HEX[usize::from(byte >> 4)]));
         key.push(char::from(HEX[usize::from(byte & 0x0f)]));
@@ -1686,7 +1826,10 @@ pub fn baseline_uniform(
 
 #[cfg(test)]
 mod tests {
-    use super::{ProblemFamily, cache_key, prolong_linear};
+    use super::{
+        PLANNER_CACHE_KEY_DOMAIN, PLANNER_CACHE_KEY_VERSION, PlannerCacheKeyAdmissionError,
+        ProblemFamily, admit_planner_cache_key, cache_key, cache_key_with_prefix, prolong_linear,
+    };
     use fs_verify::fem1d::Poly;
 
     fn family(coefficients: Vec<f64>, kernel: &str) -> ProblemFamily {
@@ -1718,17 +1861,12 @@ mod tests {
     }
 
     #[test]
-    fn cache_key_uses_the_canonical_lower_layer_class_identity() {
-        let normalized = family(vec![-0.0, 1.0, -1.0, -0.0], "elliptic");
+    fn cache_key_remains_v3_prefix_plus_lower_class_hex() {
         let ordinary = family(vec![0.0, 1.0, -1.0], "elliptic");
-        assert_eq!(normalized.canonical_bytes(), ordinary.canonical_bytes());
-        let normalized_key = cache_key(&normalized, 1.0).unwrap();
-        let ordinary_key = cache_key(&ordinary, 1.0).unwrap();
-        assert_eq!(normalized_key, ordinary_key);
-
+        let key = cache_key(&ordinary, 1.0).unwrap();
         let scaled = ordinary.scaled_class(1.0).unwrap();
-        let encoded = normalized_key
-            .strip_prefix("fs-ir-ladder:v3:")
+        let encoded = key
+            .strip_prefix(PLANNER_CACHE_KEY_DOMAIN)
             .expect("cache-key schema prefix");
         assert_eq!(encoded.len(), scaled.canonical_bytes().len() * 2);
         for (pair, expected) in encoded
@@ -1739,13 +1877,47 @@ mod tests {
             let pair = core::str::from_utf8(pair).expect("ASCII hexadecimal cache key");
             assert_eq!(u8::from_str_radix(pair, 16).unwrap(), *expected);
         }
+    }
+
+    #[test]
+    fn planner_cache_intentional_normalizations_do_not_move_identity() {
+        let normalized = family(vec![-0.0, 1.0, -1.0, -0.0], "elliptic");
+        let ordinary = family(vec![0.0, 1.0, -1.0], "elliptic");
+        assert_eq!(normalized.canonical_bytes(), ordinary.canonical_bytes());
+        let normalized_key = cache_key(&normalized, 1.0).unwrap();
+        let ordinary_key = cache_key(&ordinary, 1.0).unwrap();
+        assert_eq!(normalized_key, ordinary_key);
         assert_eq!(
             cache_key(&ordinary, -0.0).unwrap(),
             cache_key(&ordinary, 0.0).unwrap()
         );
+    }
 
+    #[test]
+    fn planner_cache_execution_policy_does_not_move_answer_identity() {
+        fn key_under_policy(
+            family: &ProblemFamily,
+            theta: f64,
+            _tolerance: f64,
+            _budget_cells: usize,
+            _rung_cells: &[usize],
+        ) -> String {
+            cache_key(family, theta).expect("valid cache identity")
+        }
+
+        let ordinary = family(vec![0.0, 1.0, -1.0], "elliptic");
+        let strict = key_under_policy(&ordinary, 1.0, 1.0e-12, 1_024, &[8, 16, 32]);
+        let permissive = key_under_policy(&ordinary, 1.0, 1.0e-3, 65_536, &[64, 256]);
+        assert_eq!(strict, permissive);
+    }
+
+    #[test]
+    fn planner_cache_base_class_identity_moves_key() {
+        let ordinary = family(vec![0.0, 1.0, -1.0], "elliptic");
         let renamed = family(vec![0.0, 1.0, -1.0], "elliptic-renamed");
         let rescaled = family(vec![0.0, 2.0, -2.0], "elliptic");
+        assert_ne!(ordinary.canonical_bytes(), renamed.canonical_bytes());
+        assert_ne!(ordinary.canonical_bytes(), rescaled.canonical_bytes());
         assert_ne!(
             cache_key(&ordinary, 1.0).unwrap(),
             cache_key(&renamed, 1.0).unwrap()
@@ -1754,9 +1926,74 @@ mod tests {
             cache_key(&ordinary, 1.0).unwrap(),
             cache_key(&rescaled, 1.0).unwrap()
         );
+    }
+
+    #[test]
+    fn planner_cache_theta_exact_bits_move_key() {
+        let ordinary = family(vec![0.0, 1.0, -1.0], "elliptic");
+        let theta = 1.0_f64;
+        let next_theta = f64::from_bits(theta.to_bits() + 1);
+        assert_ne!(theta.to_bits(), next_theta.to_bits());
+        assert_eq!(format!("{theta:.6e}"), format!("{next_theta:.6e}"));
         assert_ne!(
-            cache_key(&ordinary, 1.0).unwrap(),
-            cache_key(&ordinary, 2.0).unwrap()
+            cache_key(&ordinary, theta).unwrap(),
+            cache_key(&ordinary, next_theta).unwrap()
+        );
+    }
+
+    #[test]
+    fn planner_cache_schema_and_domain_move_identity() {
+        let ordinary = family(vec![0.0, 1.0, -1.0], "elliptic");
+        let current = cache_key(&ordinary, 1.0).unwrap();
+        let next_schema = cache_key_with_prefix(&ordinary, 1.0, "fs-ir-ladder:v4:").unwrap();
+        let next_domain = cache_key_with_prefix(&ordinary, 1.0, "fs-ir-shadow-ladder:v3:").unwrap();
+        assert_ne!(current, next_schema);
+        assert_ne!(current, next_domain);
+        assert_ne!(next_schema, next_domain);
+    }
+
+    #[test]
+    fn planner_cache_key_replay_is_deterministic() {
+        let first = family(vec![0.0, 1.0, -1.0], "elliptic");
+        let replay = family(vec![-0.0, 1.0, -1.0, 0.0], "elliptic");
+        assert_eq!(
+            cache_key(&first, 1.25).unwrap(),
+            cache_key(&replay, 1.25).unwrap()
+        );
+    }
+
+    #[test]
+    fn planner_cache_key_versions_fail_closed() {
+        let ordinary = family(vec![0.0, 1.0, -1.0], "elliptic");
+        let current = cache_key(&ordinary, 1.0).unwrap();
+        assert_eq!(PLANNER_CACHE_KEY_VERSION, 3);
+        assert_eq!(
+            admit_planner_cache_key(&current).unwrap(),
+            current.strip_prefix(PLANNER_CACHE_KEY_DOMAIN).unwrap()
+        );
+
+        let stale = cache_key_with_prefix(&ordinary, 1.0, "fs-ir-ladder:v2:").unwrap();
+        assert_eq!(
+            admit_planner_cache_key(&stale),
+            Err(PlannerCacheKeyAdmissionError::UnsupportedVersion {
+                declared: 2,
+                supported: PLANNER_CACHE_KEY_VERSION,
+            })
+        );
+        let aliased = cache_key_with_prefix(&ordinary, 1.0, "fs-ir-ladder:v03:").unwrap();
+        assert_eq!(
+            admit_planner_cache_key(&aliased),
+            Err(PlannerCacheKeyAdmissionError::NonCanonicalPrefix)
+        );
+        let wrong_domain =
+            cache_key_with_prefix(&ordinary, 1.0, "fs-ir-shadow-ladder:v3:").unwrap();
+        assert_eq!(
+            admit_planner_cache_key(&wrong_domain),
+            Err(PlannerCacheKeyAdmissionError::MalformedPrefix)
+        );
+        assert_eq!(
+            admit_planner_cache_key("fs-ir-ladder:v3:ABC0"),
+            Err(PlannerCacheKeyAdmissionError::MalformedPayload)
         );
     }
 }

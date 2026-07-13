@@ -1,17 +1,61 @@
 //! Shared canonical format for fs-la dependency-graph receipts.
 //!
-//! This module is deliberately dependency-free: xtask mints the receipt and
-//! fs-la's build script parses the exact same grammar before fingerprinting it.
+//! This module is independent of higher FrankenSim crates: xtask mints the
+//! receipt and fs-la's build script parses and hashes the exact same grammar.
+//! Its only workspace dependency is the shared `fs-blake3` implementation.
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
 pub const SCHEMA: &str = "fs-la-depgraph-receipt-v1";
 pub const SCOPE: &str = "single-root-normal-build-fs-la-closure-v2";
+/// Semantic version of the canonical dependency-graph receipt identity.
+pub const DEPGRAPH_RECEIPT_IDENTITY_VERSION: u32 = 1;
+/// Domain separating dependency-graph receipts from other BLAKE3 inputs.
+pub const DEPGRAPH_RECEIPT_IDENTITY_DOMAIN: &str = "org.frankensim.fs-la.depgraph-receipt.v1";
 pub const MAX_RECEIPT_BYTES: usize = 1_048_576;
 pub const MAX_PACKAGES: usize = 8_192;
 pub const MAX_FEATURES: usize = 1_024;
 pub const MAX_STRING_BYTES: usize = 8_192;
+
+/// Owner-local declaration consumed by `xtask check-identities`.
+#[allow(dead_code)] // consumed as source text by xtask in build-script mode
+pub const DEPGRAPH_RECEIPT_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
+    "frankensim-identity-schema-v1",
+    "id=fs-la:depgraph-receipt",
+    "version_const=DEPGRAPH_RECEIPT_IDENTITY_VERSION",
+    "version=1",
+    "domain=org.frankensim.fs-la.depgraph-receipt.v1",
+    "domain_const=DEPGRAPH_RECEIPT_IDENTITY_DOMAIN",
+    "encoder=content_identity",
+    "encoder_helpers=content_identity_with_domain,emit",
+    "schema_functions=validate,parse,is_lower_hex_64,validate_string,validate_feature_set,validate_identity,push_json_string,push_optional_string,push_string_array,push_identity,Parser::new,Parser::expect,Parser::byte,Parser::hex4,Parser::string,Parser::optional_string,Parser::boolean,Parser::strings,Parser::identity,depgraph_receipt_identity_version_is_supported,crates/fs-blake3/src/lib.rs#hash_domain",
+    "schema_constants=DEPGRAPH_RECEIPT_IDENTITY_VERSION,DEPGRAPH_RECEIPT_IDENTITY_DOMAIN,SCHEMA,SCOPE,MAX_RECEIPT_BYTES,MAX_PACKAGES,MAX_FEATURES,MAX_STRING_BYTES",
+    "schema_dependencies=none",
+    "digest=fs-blake3",
+    "encoding=canonical-transport-exact-bits",
+    "sources=Receipt,CargoIdentity,RootRow,SelectionRow,PackageRow,PackageIdentity",
+    "source_fields=Receipt.cargo:semantic,Receipt.root:semantic,Receipt.selection:semantic,Receipt.packages:semantic,CargoIdentity.executable_digest:derived:nested-under-receipt-cargo,CargoIdentity.version:derived:nested-under-receipt-cargo,RootRow.identity:derived:nested-under-receipt-root,RootRow.features:derived:nested-under-receipt-root,SelectionRow.target:derived:nested-under-receipt-selection,SelectionRow.features:derived:nested-under-receipt-selection,SelectionRow.all_features:derived:nested-under-receipt-selection,SelectionRow.default_features:derived:nested-under-receipt-selection,PackageRow.identity:derived:nested-under-receipt-packages,PackageRow.features:derived:nested-under-receipt-packages,PackageIdentity.name:derived:nested-under-root-or-package-row,PackageIdentity.version:derived:nested-under-root-or-package-row,PackageIdentity.package_id:derived:nested-under-root-or-package-row,PackageIdentity.source_id:derived:nested-under-root-or-package-row,PackageIdentity.path_digest:derived:nested-under-root-or-package-row",
+    "source_bindings=Receipt.cargo>cargo-identity,Receipt.root>root-identity,Receipt.selection>root-selection,Receipt.packages>ordered-package-closure",
+    "external_semantic_fields=artifact-domain,receipt-schema,receipt-scope",
+    "semantic_fields=artifact-domain,receipt-schema,receipt-scope,cargo-identity,root-identity,root-selection,ordered-package-closure",
+    "excluded_fields=none",
+    "consumers=crates/fs-la/build.rs#add_depgraph_evidence,FRANKENSIM_DEPGRAPH_RECEIPT,FS_LA_GEMM_DEPGRAPH_RECEIPT_DIGEST",
+    "mutations=artifact-domain:crates/fs-la/depgraph_receipt_format.rs#depgraph_receipt_domain_moves_identity,receipt-schema:crates/fs-la/depgraph_receipt_format.rs#depgraph_receipt_schema_moves_identity,receipt-scope:crates/fs-la/depgraph_receipt_format.rs#depgraph_receipt_scope_moves_identity,cargo-identity:crates/fs-la/depgraph_receipt_format.rs#depgraph_receipt_cargo_identity_moves_identity,root-identity:crates/fs-la/depgraph_receipt_format.rs#depgraph_receipt_root_identity_moves_identity,root-selection:crates/fs-la/depgraph_receipt_format.rs#depgraph_receipt_selection_moves_identity,ordered-package-closure:crates/fs-la/depgraph_receipt_format.rs#depgraph_receipt_package_closure_moves_identity",
+    "nonsemantic_mutations=none",
+    "field_guard=classify_depgraph_receipt_identity_fields",
+    "transport_guard=parse",
+    "version_guard=crates/fs-la/depgraph_receipt_format.rs#depgraph_receipt_identity_version_fails_closed",
+    "coupling_surface=fs-la:depgraph-receipt",
+];
+
+/// Whether a retained dependency-graph receipt uses the one identity version
+/// accepted by this build and its shared xtask emitter.
+#[must_use]
+#[allow(dead_code)] // exercised by the module identity-version guard
+pub const fn depgraph_receipt_identity_version_is_supported(declared: u32) -> bool {
+    declared == DEPGRAPH_RECEIPT_IDENTITY_VERSION
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CargoIdentity {
@@ -54,6 +98,48 @@ pub struct Receipt {
     pub root: RootRow,
     pub selection: SelectionRow,
     pub packages: Vec<PackageRow>,
+}
+
+#[allow(dead_code)] // exhaustive source-shape guard consumed by xtask
+fn classify_depgraph_receipt_identity_fields(
+    receipt: &Receipt,
+    cargo: &CargoIdentity,
+    root: &RootRow,
+    selection: &SelectionRow,
+    package: &PackageRow,
+    identity: &PackageIdentity,
+) {
+    let Receipt {
+        cargo: _,
+        root: _,
+        selection: _,
+        packages: _,
+    } = receipt;
+    let CargoIdentity {
+        executable_digest: _,
+        version: _,
+    } = cargo;
+    let RootRow {
+        identity: _,
+        features: _,
+    } = root;
+    let SelectionRow {
+        target: _,
+        features: _,
+        all_features: _,
+        default_features: _,
+    } = selection;
+    let PackageRow {
+        identity: _,
+        features: _,
+    } = package;
+    let PackageIdentity {
+        name: _,
+        version: _,
+        package_id: _,
+        source_id: _,
+        path_digest: _,
+    } = identity;
 }
 
 fn is_lower_hex_64(value: &str) -> bool {
@@ -300,6 +386,19 @@ pub fn emit(receipt: &Receipt) -> Result<String, String> {
     }
     debug_assert!(out.is_ascii());
     Ok(out)
+}
+
+/// Content identity of one validated receipt under the canonical emitter.
+pub fn content_identity(receipt: &Receipt) -> Result<fs_blake3::ContentHash, String> {
+    content_identity_with_domain(DEPGRAPH_RECEIPT_IDENTITY_DOMAIN, receipt)
+}
+
+fn content_identity_with_domain(
+    domain: &str,
+    receipt: &Receipt,
+) -> Result<fs_blake3::ContentHash, String> {
+    let canonical = emit(receipt)?;
+    Ok(fs_blake3::hash_domain(domain, canonical.as_bytes()))
 }
 
 struct Parser<'a> {
@@ -589,6 +688,99 @@ mod tests {
                 features: BTreeSet::new(),
             }],
         }
+    }
+
+    #[test]
+    fn depgraph_receipt_domain_moves_identity() {
+        let receipt = sample();
+        assert_ne!(
+            content_identity(&receipt).expect("current identity"),
+            content_identity_with_domain(
+                "org.frankensim.fs-la.depgraph-receipt.v1.alternate",
+                &receipt,
+            )
+            .expect("alternate identity")
+        );
+    }
+
+    #[test]
+    fn depgraph_receipt_schema_moves_identity() {
+        let canonical = emit(&sample()).expect("canonical receipt");
+        let changed = canonical.replacen(SCHEMA, "fs-la-depgraph-receipt-v1-alternate", 1);
+        assert_ne!(
+            fs_blake3::hash_domain(DEPGRAPH_RECEIPT_IDENTITY_DOMAIN, canonical.as_bytes()),
+            fs_blake3::hash_domain(DEPGRAPH_RECEIPT_IDENTITY_DOMAIN, changed.as_bytes())
+        );
+    }
+
+    #[test]
+    fn depgraph_receipt_scope_moves_identity() {
+        let canonical = emit(&sample()).expect("canonical receipt");
+        let changed = canonical.replacen(SCOPE, "single-root-normal-build-fs-la-alternate", 1);
+        assert_ne!(
+            fs_blake3::hash_domain(DEPGRAPH_RECEIPT_IDENTITY_DOMAIN, canonical.as_bytes()),
+            fs_blake3::hash_domain(DEPGRAPH_RECEIPT_IDENTITY_DOMAIN, changed.as_bytes())
+        );
+    }
+
+    #[test]
+    fn depgraph_receipt_cargo_identity_moves_identity() {
+        let baseline = sample();
+        let mut changed = baseline.clone();
+        changed.cargo.executable_digest = "44".repeat(32);
+        assert_ne!(
+            content_identity(&baseline).expect("baseline"),
+            content_identity(&changed).expect("changed Cargo identity")
+        );
+    }
+
+    #[test]
+    fn depgraph_receipt_root_identity_moves_identity() {
+        let baseline = sample();
+        let mut changed = baseline.clone();
+        changed.root.identity = path_identity("workspace-root");
+        assert_ne!(
+            content_identity(&baseline).expect("baseline"),
+            content_identity(&changed).expect("changed root identity")
+        );
+    }
+
+    #[test]
+    fn depgraph_receipt_selection_moves_identity() {
+        let baseline = sample();
+        let mut changed = baseline.clone();
+        changed.selection.target = Some("aarch64-apple-darwin".to_string());
+        assert_ne!(
+            content_identity(&baseline).expect("baseline"),
+            content_identity(&changed).expect("changed selection")
+        );
+    }
+
+    #[test]
+    fn depgraph_receipt_package_closure_moves_identity() {
+        let baseline = sample();
+        let mut changed = baseline.clone();
+        changed.packages.push(PackageRow {
+            identity: path_identity("fs-simd"),
+            features: BTreeSet::new(),
+        });
+        changed.packages.sort();
+        assert_ne!(
+            content_identity(&baseline).expect("baseline"),
+            content_identity(&changed).expect("changed package closure")
+        );
+    }
+
+    #[test]
+    fn depgraph_receipt_identity_version_fails_closed() {
+        assert_eq!(DEPGRAPH_RECEIPT_IDENTITY_VERSION, 1);
+        assert_eq!(
+            DEPGRAPH_RECEIPT_IDENTITY_DOMAIN,
+            "org.frankensim.fs-la.depgraph-receipt.v1"
+        );
+        assert!(depgraph_receipt_identity_version_is_supported(1));
+        assert!(!depgraph_receipt_identity_version_is_supported(0));
+        assert!(!depgraph_receipt_identity_version_is_supported(2));
     }
 
     #[test]

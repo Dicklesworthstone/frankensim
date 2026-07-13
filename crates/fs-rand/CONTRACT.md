@@ -9,7 +9,16 @@ distributions (plan §6.7; P2's seed pillar). Layer: L1.
 - `StreamKey { seed: u64, kernel: u32, tile: u32 }` — the Cx-carried logical
   identity; field widths are contract (2⁶⁴ draws per stream, 2³² kernels/tiles).
 - `Stream` — sequential view with RANDOM ACCESS (`Stream::at(key, index)`),
-  checkpoint/resume by index, `Copy` (forks diverge by IDENTITY, not state).
+  `Copy` (forks diverge by IDENTITY, not state). Persisted replay uses
+  `StreamCheckpoint { checkpoint_version, stream_semantics_version, key,
+  index }`; `Stream::resume` accepts only both exact current versions.
+- Canonical retained checkpoints are exactly 83 bytes from
+  `StreamCheckpoint::to_canonical_le_bytes`: the 8-byte `FSRCKPT\0` magic,
+  the exact 43-byte `org.frankensim.fs-rand.stream-checkpoint.v1` domain, and
+  little-endian checkpoint version, stream-semantics version, seed, kernel,
+  tile, and next index. `StreamCheckpoint::from_canonical_le_bytes` and
+  `Stream::resume_retained` refuse truncation, trailing bytes, foreign magic or
+  domain, and past or future versions before replay.
 - Draws: `next_u64`, `next_f64` (53-bit, [0,1)), `next_below` (Lemire,
   deterministic rejection consumption), `next_normal` (Box–Muller on
   fs-math strict fns — cross-ISA deterministic SAMPLES), `next_normal_ziggurat`
@@ -55,6 +64,13 @@ distributions (plan §6.7; P2's seed pillar). Layer: L1.
 - Random access ≡ sequential access (tested bitwise).
 - Rejection sampling advances the index deterministically (replay-safe;
   consumed-count is content-determined — tested).
+- A retained checkpoint cannot bypass version admission: stale/future
+  checkpoint transports and stale/future stream semantics return structured
+  `StreamReplayError` before any draw.
+- Canonical transport binds every replay field at one documented little-endian
+  offset. Independent mutations prove that checkpoint version, stream version,
+  seed, kernel, tile, and index move only their own fixed-width byte range;
+  magic/domain mutations are refused as cross-type/cross-domain input.
 - Integer core is trivially cross-ISA; float distributions inherit fs-math's
   proven cross-ISA determinism.
 
@@ -65,6 +81,10 @@ Dirichlet outputs, and invalid truncation/vMF parameters). Within those
 documented domains, operations are total; in particular, every valid beta is
 finite in `[0,1]` and every valid Dirichlet result is a finite non-negative
 simplex point even at `f64::MIN_POSITIVE` shapes.
+Untrusted retained replay state returns `StreamReplayError` for a non-canonical
+length (including trailing data), foreign magic/domain, or an unknown past or
+future checkpoint/stream-semantics version; it is never interpreted under the
+current Philox mapping by guesswork.
 
 ## Determinism class
 Deterministic CROSS-ISA (integer core + fs-math-strict distributions).
@@ -82,7 +102,11 @@ None.
 Random123 KATs (3 vectors), avalanche battery, random-access≡sequential,
 16-tile×3-order shuffle invariance, adjacent-identity decorrelation,
 chi-square/moment gates (uniform/normal/exponential), Lemire bias +
-rejection-replay, checkpoint-resume equality. Bead 1za9: `tests/ziggurat.rs`
+rejection-replay, versioned checkpoint-resume equality, stale-version refusal,
+the exact 83-byte canonical checkpoint KAT, truncation/trailing refusal,
+independent transport-field mutations, the nonzero Random123 `Stream::at`
+mapping KAT, and independent low/high seed/index plus kernel/tile draw-identity
+mutations. Bead 1za9: `tests/ziggurat.rs`
 (ziggurat moments + bit-determinism + two-sample KS vs Box–Muller) and
 `tests/stream_battery.rs` (DEV-ONLY: uniform χ², lag-1 serial correlation,
 monobit balance, the fixed 8-stream × 100,000 inter-stream correlation
@@ -104,6 +128,11 @@ plus a 4,096-sample `|correlation| < 0.10` smoke band; seed
   5.26e-5@1031, beats naive vectors), `baker` periodization.
 
 ## No-claim boundaries
+- The canonical checkpoint frame is deterministic type/domain separation, not
+  a cryptographic authenticator. Retained storage must provide its own content
+  digest or authenticated envelope when corruption or hostile modification is
+  in scope; a changed but well-formed seed/kernel/tile/index is a different
+  valid replay identity.
 - Sobol dims > 10 (full Joe-Kuo table import = recorded follow-up).
 - Owen scrambling performance (correct lazy-tree v1 is 32 Philox calls per
   point-dim; hash-based fast path = recorded follow-up).

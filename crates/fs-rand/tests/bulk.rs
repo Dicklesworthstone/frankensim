@@ -2,7 +2,7 @@
 //! The batched fill path MUST produce the exact same stream as sequential
 //! draws (the fs-simd twin doctrine) and advance the index identically.
 
-use fs_rand::{Stream, StreamKey};
+use fs_rand::{Stream, StreamCheckpoint, StreamKey};
 
 fn stream() -> Stream {
     StreamKey {
@@ -61,11 +61,12 @@ fn counter_wraps_match_sequential_draws() {
         kernel: 9,
         tile: 5,
     };
-    let mut scalar = Stream::resume(key, u64::MAX - 3);
+    let checkpoint = StreamCheckpoint::current(key, u64::MAX - 3);
+    let mut scalar = Stream::resume(checkpoint).expect("current checkpoint is supported");
     let want: Vec<u64> = (0..10).map(|_| scalar.next_u64()).collect();
     assert_eq!(scalar.index(), 6);
 
-    let mut bulk = Stream::resume(key, u64::MAX - 3);
+    let mut bulk = Stream::resume(checkpoint).expect("current checkpoint is supported");
     let mut got = vec![0u64; 10];
     bulk.fill_u64(&mut got);
     assert_eq!(got, want);

@@ -10,7 +10,7 @@
 //! on a different (or re-calibrated) machine.
 //!
 //! Persistence: a strict JSON-lines file store keyed by kernel × shape-class
-//! × machine fingerprint. Evidence schema v1 distinguishes wall-time
+//! × machine fingerprint. Evidence schema v2 distinguishes wall-time
 //! samples, work counters, and scaled throughput instead of laundering every
 //! integer as nanoseconds. Rows keyed to a DIFFERENT fingerprint are stale by
 //! definition and ignored on load.
@@ -35,6 +35,114 @@ const MAX_TUNE_ROW_WALL_TIME_SAMPLES: usize = 4096;
 const MAX_GEMM_IDENTITY_COMPONENT_BYTES: usize = 256;
 const MAX_RETAINED_TUNING_DECISIONS: usize = 4096;
 const MAX_RETAINED_TUNING_DECISION_BYTES: usize = 1024 * 1024;
+
+/// Semantic version of the fully scoped GEMM tuning key.
+pub const GEMM_TUNE_KEY_IDENTITY_VERSION: u32 = 4;
+/// Exact domain carried by every fully scoped GEMM tuning key.
+pub const GEMM_TUNE_KEY_IDENTITY_DOMAIN: &str = "org.frankensim.fs-exec.gemm-tune-key.v4";
+/// Semantic version of the canonical tune-row JSON transport.
+pub const TUNE_ROW_IDENTITY_VERSION: u32 = 2;
+/// Exact domain carried by every canonical tune-row JSON transport.
+pub const TUNE_ROW_IDENTITY_DOMAIN: &str = "org.frankensim.fs-exec.tune-row.v2";
+/// Semantic version of the typed evidence nested in every tune row.
+pub const TUNE_EVIDENCE_VERSION: u32 = 2;
+/// Semantic version of the canonical tuning-decision JSON transport.
+pub const TUNING_DECISION_IDENTITY_VERSION: u32 = 1;
+/// Exact domain carried by every canonical tuning-decision JSON transport.
+pub const TUNING_DECISION_IDENTITY_DOMAIN: &str = "org.frankensim.fs-exec.tuning-decision.v1";
+
+/// Owner-local GEMM tune-key declaration consumed by `xtask check-identities`.
+#[allow(dead_code)]
+pub const GEMM_TUNE_KEY_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
+    "frankensim-identity-schema-v1",
+    "id=fs-exec:gemm-tune-key",
+    "version_const=GEMM_TUNE_KEY_IDENTITY_VERSION",
+    "version=4",
+    "domain=org.frankensim.fs-exec.gemm-tune-key.v4",
+    "domain_const=GEMM_TUNE_KEY_IDENTITY_DOMAIN",
+    "encoder=GemmTuneKey::new",
+    "encoder_helpers=scoped_gemm_kernel_with_schema",
+    "schema_constants=GEMM_TUNE_KEY_IDENTITY_VERSION,GEMM_TUNE_KEY_IDENTITY_DOMAIN,GEMM_KERNEL_PREFIX,MAX_GEMM_IDENTITY_COMPONENT_BYTES,MAX_TUNE_STRING_BYTES",
+    "schema_functions=GemmExecutionIdentity::new,require_gemm_identity_component,parse_canonical_u64,parse_gemm_base_version,gemm_shape_from_scoped_kernel,gemm_shape_from_scoped_kernel_with_schema,classify_gemm_tune_key_identity_fields,GemmBlockPlan::new,GemmBlockPlan::parse,GemmBlockPlan::canonical,PinnedParam::parse,PinnedParam::canonical,Tuner::has_gemm_pin,Tuner::has_gemm_row,Tuner::pin,Tuner::pin_gemm_blocking,Tuner::prepare_gemm_row,Tuner::prepare_adopt_gemm_row_json,Tuner::commit_gemm_row,Tuner::record_gemm_row,Tuner::gemm_row_json,Tuner::adopt_gemm_row_json,Tuner::prepare_gemm_decision,Tuner::commit_gemm_decision,Tuner::resolve_gemm,PreparedGemmRow::key,PreparedGemmDecision::key",
+    "schema_dependencies=none",
+    "digest=none-exact-canonical-transport",
+    "encoding=canonical-transport-exact-bits",
+    "sources=GemmTuneKey,GemmExecutionIdentity",
+    "source_fields=GemmTuneKey.base_kernel:semantic,GemmTuneKey.shape_class:semantic,GemmTuneKey.execution:derived:nested-execution-fields-encoded-separately,GemmTuneKey.scoped_kernel:derived:recomputed-canonical-transport,GemmExecutionIdentity.requested_threads:semantic,GemmExecutionIdentity.thread_budget:semantic,GemmExecutionIdentity.memory_limit_bytes:semantic,GemmExecutionIdentity.probe_dims:semantic,GemmExecutionIdentity.isa_tier:semantic,GemmExecutionIdentity.placement:semantic,GemmExecutionIdentity.implementation:semantic,GemmExecutionIdentity.build:semantic",
+    "source_bindings=GemmTuneKey.base_kernel>base-kernel,GemmTuneKey.shape_class>shape-class,GemmExecutionIdentity.requested_threads>requested-threads,GemmExecutionIdentity.thread_budget>thread-budget,GemmExecutionIdentity.memory_limit_bytes>memory-limit-bytes,GemmExecutionIdentity.probe_dims>probe-m+probe-n+probe-k,GemmExecutionIdentity.isa_tier>isa-tier,GemmExecutionIdentity.placement>placement-policy,GemmExecutionIdentity.implementation>implementation-id,GemmExecutionIdentity.build>build-id",
+    "external_semantic_fields=artifact-domain,identity-version,canonical-field-order,probe-count",
+    "semantic_fields=artifact-domain,identity-version,canonical-field-order,base-kernel,shape-class,requested-threads,thread-budget,memory-limit-bytes,probe-count,probe-m,probe-n,probe-k,isa-tier,placement-policy,implementation-id,build-id",
+    "excluded_fields=none",
+    "consumers=GemmTuneKey::kernel,gemm_shape_from_scoped_kernel,PreparedGemmRow::key,PreparedGemmDecision::key,Tuner::has_gemm_pin,Tuner::has_gemm_row,Tuner::pin,Tuner::pin_gemm_blocking,Tuner::prepare_gemm_row,Tuner::prepare_adopt_gemm_row_json,Tuner::commit_gemm_row,Tuner::record_gemm_row,Tuner::gemm_row_json,Tuner::adopt_gemm_row_json,Tuner::prepare_gemm_decision,Tuner::commit_gemm_decision,Tuner::resolve_gemm",
+    "mutations=artifact-domain:crates/fs-exec/src/tune.rs#gemm_tune_key_identity_fields_move_independently,identity-version:crates/fs-exec/src/tune.rs#gemm_tune_key_identity_fields_move_independently,canonical-field-order:crates/fs-exec/src/tune.rs#gemm_tune_key_identity_fields_move_independently,base-kernel:crates/fs-exec/src/tune.rs#gemm_tune_key_identity_fields_move_independently,shape-class:crates/fs-exec/src/tune.rs#gemm_tune_key_identity_fields_move_independently,requested-threads:crates/fs-exec/src/tune.rs#gemm_tune_key_identity_fields_move_independently,thread-budget:crates/fs-exec/src/tune.rs#gemm_tune_key_identity_fields_move_independently,memory-limit-bytes:crates/fs-exec/src/tune.rs#gemm_tune_key_identity_fields_move_independently,probe-count:crates/fs-exec/src/tune.rs#gemm_tune_key_identity_fields_move_independently,probe-m:crates/fs-exec/src/tune.rs#gemm_tune_key_identity_fields_move_independently,probe-n:crates/fs-exec/src/tune.rs#gemm_tune_key_identity_fields_move_independently,probe-k:crates/fs-exec/src/tune.rs#gemm_tune_key_identity_fields_move_independently,isa-tier:crates/fs-exec/src/tune.rs#gemm_tune_key_identity_fields_move_independently,placement-policy:crates/fs-exec/src/tune.rs#gemm_tune_key_identity_fields_move_independently,implementation-id:crates/fs-exec/src/tune.rs#gemm_tune_key_identity_fields_move_independently,build-id:crates/fs-exec/src/tune.rs#gemm_tune_key_identity_fields_move_independently",
+    "nonsemantic_mutations=none",
+    "field_guard=classify_gemm_tune_key_identity_fields",
+    "transport_guard=gemm_shape_from_scoped_kernel",
+    "version_guard=crates/fs-exec/src/tune.rs#gemm_tune_key_identity_versions_fail_closed",
+    "coupling_surface=fs-exec:gemm-tune-key",
+];
+
+/// Owner-local tune-row declaration consumed by `xtask check-identities`.
+#[allow(dead_code)]
+pub const TUNE_ROW_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
+    "frankensim-identity-schema-v1",
+    "id=fs-exec:tune-row",
+    "version_const=TUNE_ROW_IDENTITY_VERSION",
+    "version=2",
+    "domain=org.frankensim.fs-exec.tune-row.v2",
+    "domain_const=TUNE_ROW_IDENTITY_DOMAIN",
+    "encoder=TuneRow::to_canonical_json",
+    "encoder_helpers=TuneRow::to_json,TuneRow::write_json,TuneRow::write_json_with_schema,TuneEvidence::write_json,TuneEvidence::write_json_with_schema,write_json_string,WorkUnit::name,ThroughputUnit::name",
+    "schema_constants=TUNE_ROW_IDENTITY_VERSION,TUNE_ROW_IDENTITY_DOMAIN,TUNE_EVIDENCE_VERSION,MAX_TUNE_STORE_BYTES,MAX_TUNE_ROW_BYTES,MAX_TUNE_STRING_BYTES,MAX_TUNE_OBSERVATIONS,MAX_WALL_TIME_SAMPLES,MAX_TUNE_ROW_WALL_TIME_SAMPLES",
+    "schema_functions=TuneRow::new,TuneRow::kernel,TuneRow::shape_class,TuneRow::machine,TuneRow::params,TuneRow::evidence,TuneRow::refresh,TuneRow::from_canonical_json,TuneRow::validated_generated_json,parse_row,parse_evidence,parse_observation,RowParser::take,RowParser::string,RowParser::canonical_u64,push_bounded_char,BoundedJsonWriter::new,BoundedJsonWriter::finish,BoundedJsonWriter::write_str,TuneEvidence::new,TuneEvidence::ranked_wall_times,TuneEvidence::validate,TuneObservation::wall_time,TuneObservation::work_count,TuneObservation::throughput,TuneObservation::label,TuneObservation::wall_minimum,TuneObservation::validate,WorkUnit::parse,ThroughputUnit::parse,require_observation_label,validate_observations,candidate_separation_ppm,gemm_evidence_argmin,validate_gemm_selection,validate_scoped_gemm_row,PinnedParam::parse,GemmBlockPlan::new,GemmBlockPlan::parse,GemmBlockPlan::canonical,classify_tune_row_identity_fields,PreparedGemmRow::params_json,PreparedGemmRow::row_json,PreparedGemmRow::key,Tuner::has_row,Tuner::has_gemm_row,Tuner::insert_row,Tuner::prepare_gemm_row,Tuner::commit_gemm_row,Tuner::record_gemm_row,Tuner::gemm_row_json,Tuner::row_json,Tuner::save,Tuner::load,Tuner::adopt_row_json,Tuner::prepare_adopt_gemm_row_json,Tuner::adopt_gemm_row_json,Tuner::resolve_gemm,Tuner::calibration_report",
+    "schema_dependencies=fs-exec:gemm-tune-key",
+    "digest=none-exact-canonical-transport",
+    "encoding=canonical-transport-exact-bits",
+    "sources=TuneRow,TuneEvidence,TuneObservation,WallTimeSummary,WorkUnit,ThroughputUnit",
+    "source_fields=TuneRow.kernel:semantic,TuneRow.shape_class:semantic,TuneRow.machine:semantic,TuneRow.params:semantic,TuneRow.evidence:derived:nested-evidence-fields-encoded-separately,TuneRow.refresh:semantic,TuneEvidence.observations:semantic,TuneEvidence.candidate_separation_ppm:derived:recomputed-from-ranked-wall-time-observations,TuneObservation.variant:semantic,TuneObservation.label:semantic,TuneObservation.samples_ns:semantic,TuneObservation.summary:derived:recomputed-from-exact-wall-time-samples,TuneObservation.unit:derived:nested-unit-variant-classified-separately,TuneObservation.count:semantic,TuneObservation.milli_units:semantic,WallTimeSummary.minimum_ns:derived:recomputed-minimum-of-exact-wall-time-samples,WallTimeSummary.maximum_ns:derived:recomputed-maximum-of-exact-wall-time-samples,WorkUnit.variant:semantic,ThroughputUnit.variant:semantic",
+    "source_bindings=TuneRow.kernel>kernel,TuneRow.shape_class>shape-class,TuneRow.machine>machine-fingerprint,TuneRow.params>selected-params,TuneRow.refresh>refresh-counter,TuneEvidence.observations>observation-count+observation-order+candidate-separation-ppm,TuneObservation.variant>observation-kind,TuneObservation.label>observation-label,TuneObservation.samples_ns>wall-sample-count+wall-sample-order+wall-sample-ns+wall-summary-minimum-ns+wall-summary-maximum-ns,TuneObservation.count>work-count,TuneObservation.milli_units>throughput-milli-units,WorkUnit.variant>work-unit,ThroughputUnit.variant>throughput-unit",
+    "external_semantic_fields=artifact-domain,identity-version,canonical-field-order,evidence-version,machine-hex-width",
+    "semantic_fields=artifact-domain,identity-version,canonical-field-order,kernel,shape-class,machine-fingerprint,machine-hex-width,selected-params,evidence-version,observation-count,observation-order,observation-kind,observation-label,wall-sample-count,wall-sample-order,wall-sample-ns,wall-summary-minimum-ns,wall-summary-maximum-ns,work-unit,work-count,throughput-unit,throughput-milli-units,candidate-separation-ppm,refresh-counter",
+    "excluded_fields=none",
+    "consumers=TuneRow::new,TuneRow::to_canonical_json,TuneRow::from_canonical_json,TuneRow::to_json,TuneRow::kernel,TuneRow::shape_class,TuneRow::machine,TuneRow::params,TuneRow::evidence,TuneRow::refresh,parse_row,PreparedGemmRow::params_json,PreparedGemmRow::row_json,PreparedGemmRow::key,Tuner::has_row,Tuner::has_gemm_row,Tuner::prepare_gemm_row,Tuner::prepare_adopt_gemm_row_json,Tuner::commit_gemm_row,Tuner::record_gemm_row,Tuner::gemm_row_json,Tuner::row_json,Tuner::save,Tuner::load,Tuner::adopt_row_json,Tuner::adopt_gemm_row_json,Tuner::resolve_gemm,Tuner::calibration_report",
+    "mutations=artifact-domain:crates/fs-exec/src/tune.rs#tune_row_identity_fields_move_independently,identity-version:crates/fs-exec/src/tune.rs#tune_row_identity_fields_move_independently,canonical-field-order:crates/fs-exec/src/tune.rs#tune_row_identity_fields_move_independently,kernel:crates/fs-exec/src/tune.rs#tune_row_identity_fields_move_independently,shape-class:crates/fs-exec/src/tune.rs#tune_row_identity_fields_move_independently,machine-fingerprint:crates/fs-exec/src/tune.rs#tune_row_identity_fields_move_independently,machine-hex-width:crates/fs-exec/src/tune.rs#tune_row_identity_fields_move_independently,selected-params:crates/fs-exec/src/tune.rs#tune_row_identity_fields_move_independently,evidence-version:crates/fs-exec/src/tune.rs#tune_row_identity_fields_move_independently,observation-count:crates/fs-exec/src/tune.rs#tune_row_identity_fields_move_independently,observation-order:crates/fs-exec/src/tune.rs#tune_row_identity_fields_move_independently,observation-kind:crates/fs-exec/src/tune.rs#tune_row_identity_fields_move_independently,observation-label:crates/fs-exec/src/tune.rs#tune_row_identity_fields_move_independently,wall-sample-count:crates/fs-exec/src/tune.rs#tune_row_identity_fields_move_independently,wall-sample-order:crates/fs-exec/src/tune.rs#tune_row_identity_fields_move_independently,wall-sample-ns:crates/fs-exec/src/tune.rs#tune_row_identity_fields_move_independently,wall-summary-minimum-ns:crates/fs-exec/src/tune.rs#tune_row_identity_fields_move_independently,wall-summary-maximum-ns:crates/fs-exec/src/tune.rs#tune_row_identity_fields_move_independently,work-unit:crates/fs-exec/src/tune.rs#tune_row_identity_fields_move_independently,work-count:crates/fs-exec/src/tune.rs#tune_row_identity_fields_move_independently,throughput-unit:crates/fs-exec/src/tune.rs#tune_row_identity_fields_move_independently,throughput-milli-units:crates/fs-exec/src/tune.rs#tune_row_identity_fields_move_independently,candidate-separation-ppm:crates/fs-exec/src/tune.rs#tune_row_identity_fields_move_independently,refresh-counter:crates/fs-exec/src/tune.rs#tune_row_identity_fields_move_independently",
+    "nonsemantic_mutations=none",
+    "field_guard=classify_tune_row_identity_fields",
+    "transport_guard=TuneRow::from_canonical_json",
+    "version_guard=crates/fs-exec/src/tune.rs#tune_row_identity_versions_fail_closed",
+    "coupling_surface=fs-exec:tune-row",
+];
+
+/// Owner-local tuning-decision declaration consumed by `xtask check-identities`.
+#[allow(dead_code)]
+pub const TUNING_DECISION_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
+    "frankensim-identity-schema-v1",
+    "id=fs-exec:tuning-decision",
+    "version_const=TUNING_DECISION_IDENTITY_VERSION",
+    "version=1",
+    "domain=org.frankensim.fs-exec.tuning-decision.v1",
+    "domain_const=TUNING_DECISION_IDENTITY_DOMAIN",
+    "encoder=TuningDecision::to_canonical_json",
+    "encoder_helpers=TuningDecision::to_json,TuningDecision::write_json,TuningDecision::write_json_with_schema,write_json_string",
+    "schema_constants=TUNING_DECISION_IDENTITY_VERSION,TUNING_DECISION_IDENTITY_DOMAIN,MAX_TUNE_STRING_BYTES,MAX_RETAINED_TUNING_DECISIONS,MAX_RETAINED_TUNING_DECISION_BYTES",
+    "schema_functions=TuningDecision::validate,TuningDecision::from_canonical_json,TuningDecision::retained_bytes,require_decision_kernel,PinnedParam::parse,PinnedParam::canonical,GemmBlockPlan::new,GemmBlockPlan::parse,GemmBlockPlan::canonical,ScheduleKind::name,TuneSource::name,gemm_shape_from_scoped_kernel,RowParser::take,RowParser::string,RowParser::canonical_u64,push_bounded_char,BoundedJsonWriter::new,BoundedJsonWriter::finish,BoundedJsonWriter::write_str,classify_tuning_decision_identity_fields,PreparedGemmDecision::plan,PreparedGemmDecision::source,PreparedGemmDecision::key,Tuner::pin_tile_edge,Tuner::pin_schedule,Tuner::pin_gemm_blocking,Tuner::prepare_gemm_decision,Tuner::commit_gemm_decision,Tuner::resolve_gemm,Tuner::tile_edge_for,Tuner::schedule,Tuner::resolve,Tuner::record_decision,Tuner::pin,Tuner::decisions,Tuner::decision_history",
+    "schema_dependencies=fs-exec:gemm-tune-key",
+    "digest=none-exact-canonical-transport",
+    "encoding=canonical-transport-exact-bits",
+    "sources=TuningDecision",
+    "source_fields=TuningDecision.kernel:semantic,TuningDecision.params:semantic,TuningDecision.source:semantic",
+    "source_bindings=TuningDecision.kernel>kernel,TuningDecision.params>selected-params,TuningDecision.source>decision-source",
+    "external_semantic_fields=artifact-domain,identity-version,canonical-field-order",
+    "semantic_fields=artifact-domain,identity-version,canonical-field-order,kernel,selected-params,decision-source",
+    "excluded_fields=none",
+    "consumers=TuningDecision::to_canonical_json,TuningDecision::to_json,TuningDecision::from_canonical_json,PreparedGemmDecision::plan,PreparedGemmDecision::source,PreparedGemmDecision::key,Tuner::pin_tile_edge,Tuner::pin_schedule,Tuner::pin_gemm_blocking,Tuner::prepare_gemm_decision,Tuner::commit_gemm_decision,Tuner::resolve_gemm,Tuner::tile_edge_for,Tuner::schedule,Tuner::resolve,Tuner::record_decision,Tuner::pin,Tuner::decisions,Tuner::decision_history",
+    "mutations=artifact-domain:crates/fs-exec/src/tune.rs#tuning_decision_identity_fields_move_independently,identity-version:crates/fs-exec/src/tune.rs#tuning_decision_identity_fields_move_independently,canonical-field-order:crates/fs-exec/src/tune.rs#tuning_decision_identity_fields_move_independently,kernel:crates/fs-exec/src/tune.rs#tuning_decision_identity_fields_move_independently,selected-params:crates/fs-exec/src/tune.rs#tuning_decision_identity_fields_move_independently,decision-source:crates/fs-exec/src/tune.rs#tuning_decision_identity_fields_move_independently",
+    "nonsemantic_mutations=none",
+    "field_guard=classify_tuning_decision_identity_fields",
+    "transport_guard=TuningDecision::from_canonical_json",
+    "version_guard=crates/fs-exec/src/tune.rs#tuning_decision_identity_versions_fail_closed",
+    "coupling_surface=fs-exec:tuning-decision",
+];
 
 /// Schedule polymorphism (plan §5.1 consequence 2): the same algorithm
 /// ships a bandwidth-rich schedule (fewer, fatter, streaming-friendly
@@ -297,19 +405,14 @@ impl GemmTuneKey {
         }
         let shape_class = shape_class.into();
         require_gemm_identity_component("shape class", &shape_class)?;
-        let scoped_kernel = format!(
-            "{base_kernel}/tune-v3/shape={shape_class}/requested={}/thread-budget={}/memory-limit={}/probe={}x{}x{}/tier={}/placement={}/implementation={}/build={}",
-            execution.requested_threads,
-            execution.thread_budget,
-            execution.memory_limit_bytes,
-            execution.probe_dims[0],
-            execution.probe_dims[1],
-            execution.probe_dims[2],
-            execution.isa_tier,
-            execution.placement,
-            execution.implementation,
-            execution.build,
-        );
+        let scoped_kernel = scoped_gemm_kernel_with_schema(
+            GEMM_TUNE_KEY_IDENTITY_DOMAIN,
+            GEMM_TUNE_KEY_IDENTITY_VERSION,
+            3,
+            &base_kernel,
+            &shape_class,
+            &execution,
+        )?;
         if scoped_kernel.len() > MAX_TUNE_STRING_BYTES {
             return Err(TuneError {
                 detail: format!(
@@ -354,6 +457,73 @@ impl GemmTuneKey {
     }
 }
 
+fn scoped_gemm_kernel_with_schema(
+    domain: &str,
+    identity_version: u32,
+    probe_count: u32,
+    base_kernel: &str,
+    shape_class: &str,
+    execution: &GemmExecutionIdentity,
+) -> Result<String, TuneError> {
+    require_gemm_identity_component("identity domain", domain)?;
+    let scoped_kernel = format!(
+        "{base_kernel}/identity-domain={domain}/identity-version={identity_version}/shape={shape_class}/requested={}/thread-budget={}/memory-limit={}/probe-count={probe_count}/probe={}x{}x{}/tier={}/placement={}/implementation={}/build={}",
+        execution.requested_threads,
+        execution.thread_budget,
+        execution.memory_limit_bytes,
+        execution.probe_dims[0],
+        execution.probe_dims[1],
+        execution.probe_dims[2],
+        execution.isa_tier,
+        execution.placement,
+        execution.implementation,
+        execution.build,
+    );
+    if scoped_kernel.len() > MAX_TUNE_STRING_BYTES {
+        return Err(TuneError {
+            detail: format!("scoped GEMM kernel exceeds the {MAX_TUNE_STRING_BYTES}-byte limit"),
+        });
+    }
+    Ok(scoped_kernel)
+}
+
+#[allow(dead_code)]
+fn classify_gemm_tune_key_identity_fields(
+    key: &GemmTuneKey,
+    execution_identity: &GemmExecutionIdentity,
+) {
+    let GemmTuneKey {
+        base_kernel,
+        shape_class,
+        execution,
+        scoped_kernel,
+    } = key;
+    let GemmExecutionIdentity {
+        requested_threads,
+        thread_budget,
+        memory_limit_bytes,
+        probe_dims,
+        isa_tier,
+        placement,
+        implementation,
+        build,
+    } = execution_identity;
+    let _ = (
+        base_kernel,
+        shape_class,
+        execution,
+        scoped_kernel,
+        requested_threads,
+        thread_budget,
+        memory_limit_bytes,
+        probe_dims,
+        isa_tier,
+        placement,
+        implementation,
+        build,
+    );
+}
+
 fn require_gemm_identity_component(label: &str, value: &str) -> Result<(), TuneError> {
     if value.is_empty()
         || value.len() > MAX_GEMM_IDENTITY_COMPONENT_BYTES
@@ -396,22 +566,43 @@ fn parse_gemm_base_version(kernel: &str) -> Option<u64> {
 }
 
 fn gemm_shape_from_scoped_kernel(kernel: &str) -> Option<&str> {
-    let (base, scope) = kernel.split_once("/tune-v3/")?;
+    gemm_shape_from_scoped_kernel_with_schema(
+        kernel,
+        GEMM_TUNE_KEY_IDENTITY_DOMAIN,
+        GEMM_TUNE_KEY_IDENTITY_VERSION,
+        3,
+    )
+}
+
+fn gemm_shape_from_scoped_kernel_with_schema<'a>(
+    kernel: &'a str,
+    expected_domain: &str,
+    expected_version: u32,
+    expected_probe_count: u32,
+) -> Option<&'a str> {
+    let (base, scope) = kernel.split_once("/identity-domain=")?;
     parse_gemm_base_version(base)?;
     let mut parts = scope.split('/');
+    let domain = parts.next()?;
+    let identity_version = parts.next()?.strip_prefix("identity-version=")?;
     let shape = parts.next()?.strip_prefix("shape=")?;
     let requested = parts.next()?.strip_prefix("requested=")?;
     let thread_budget = parts.next()?.strip_prefix("thread-budget=")?;
     let memory_limit = parts.next()?.strip_prefix("memory-limit=")?;
+    let probe_count = parts.next()?.strip_prefix("probe-count=")?;
     let probe = parts.next()?.strip_prefix("probe=")?;
     let tier = parts.next()?.strip_prefix("tier=")?;
     let placement = parts.next()?.strip_prefix("placement=")?;
     let implementation = parts.next()?.strip_prefix("implementation=")?;
     let build = parts.next()?.strip_prefix("build=")?;
     if parts.next().is_some()
+        || domain != expected_domain
+        || parse_canonical_u64(identity_version)? != u64::from(expected_version)
         || parse_canonical_u64(requested).is_none()
         || parse_canonical_u64(thread_budget)? == 0
         || parse_canonical_u64(memory_limit).is_none()
+        || parse_canonical_u64(probe_count)? != u64::from(expected_probe_count)
+        || expected_probe_count != 3
         || require_gemm_identity_component("shape class", shape).is_err()
         || require_gemm_identity_component("ISA tier", tier).is_err()
         || require_gemm_identity_component("placement", placement).is_err()
@@ -676,7 +867,7 @@ pub struct TuneEvidence {
 
 impl TuneEvidence {
     /// Canonical serialized evidence schema.
-    pub const VERSION: u32 = 1;
+    pub const VERSION: u32 = TUNE_EVIDENCE_VERSION;
 
     /// Validate observations without asserting that they are ranked candidates.
     ///
@@ -750,7 +941,19 @@ impl TuneEvidence {
     }
 
     fn write_json<W: fmt::Write>(&self, out: &mut W) -> fmt::Result {
-        write!(out, "{{\"version\":{},\"observations\":[", Self::VERSION)?;
+        self.write_json_with_schema(Self::VERSION, self.observations.len(), out)
+    }
+
+    fn write_json_with_schema<W: fmt::Write>(
+        &self,
+        evidence_version: u32,
+        observation_count: usize,
+        out: &mut W,
+    ) -> fmt::Result {
+        write!(
+            out,
+            "{{\"version\":{evidence_version},\"observation_count\":{observation_count},\"observations\":["
+        )?;
         for (index, observation) in self.observations.iter().enumerate() {
             if index > 0 {
                 out.write_char(',')?;
@@ -763,7 +966,11 @@ impl TuneEvidence {
                 } => {
                     out.write_str("{\"kind\":\"wall-time\",\"label\":")?;
                     write_json_string(out, label)?;
-                    out.write_str(",\"samples_ns\":[")?;
+                    write!(
+                        out,
+                        ",\"sample_count\":{},\"samples_ns\":[",
+                        samples_ns.len()
+                    )?;
                     for (sample_index, sample) in samples_ns.iter().enumerate() {
                         if sample_index > 0 {
                             out.write_char(',')?;
@@ -947,22 +1154,59 @@ fn validate_scoped_gemm_row(row: &TuneRow) -> Result<GemmBlockPlan, TuneError> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TuneRow {
     /// Kernel identity (e.g. "stencil7-f32").
-    pub kernel: String,
+    kernel: String,
     /// Shape class (e.g. "48c-cube").
-    pub shape_class: String,
+    shape_class: String,
     /// Machine fingerprint the measurements belong to.
-    pub machine: u64,
+    machine: u64,
     /// Chosen parameter, canonical form (e.g. "edge=8", "schedule=bandwidth-rich").
-    pub params: String,
+    params: String,
     /// Typed, versioned measurement evidence.
-    pub evidence: TuneEvidence,
+    evidence: TuneEvidence,
     /// Recalibration counter (idempotence witness).
-    pub refresh: u32,
+    refresh: u32,
 }
 
 impl TuneRow {
+    /// Construct one admitted tune row under the current exact transport.
+    ///
+    /// # Errors
+    /// Returns [`TuneError`] unless all strings, evidence, counters, and any
+    /// reserved kernel/parameter relationship form a bounded writer/parser
+    /// fixed point under tune-row identity v2.
+    pub fn new(
+        kernel: impl Into<String>,
+        shape_class: impl Into<String>,
+        machine: u64,
+        params: impl Into<String>,
+        evidence: TuneEvidence,
+        refresh: u32,
+    ) -> Result<Self, TuneError> {
+        let row = Self {
+            kernel: kernel.into(),
+            shape_class: shape_class.into(),
+            machine,
+            params: params.into(),
+            evidence,
+            refresh,
+        };
+        row.validated_generated_json()?;
+        Ok(row)
+    }
+
     fn write_json<W: fmt::Write>(&self, out: &mut W) -> fmt::Result {
-        out.write_str("{\"kernel\":")?;
+        self.write_json_with_schema(TUNE_ROW_IDENTITY_DOMAIN, TUNE_ROW_IDENTITY_VERSION, out)
+    }
+
+    fn write_json_with_schema<W: fmt::Write>(
+        &self,
+        domain: &str,
+        identity_version: u32,
+        out: &mut W,
+    ) -> fmt::Result {
+        out.write_str("{\"identity_domain\":")?;
+        write_json_string(out, domain)?;
+        write!(out, ",\"identity_version\":{identity_version},\"kernel\":")?;
         write_json_string(out, &self.kernel)?;
         out.write_str(",\"shape_class\":")?;
         write_json_string(out, &self.shape_class)?;
@@ -973,12 +1217,71 @@ impl TuneRow {
         write!(out, ",\"refresh\":{}}}", self.refresh)
     }
 
-    /// Canonical JSON-line (deterministic field order).
-    #[must_use]
-    pub fn to_json(&self) -> String {
+    fn to_json(&self) -> String {
         let mut s = String::with_capacity(160);
         self.write_json(&mut s).expect("String writes cannot fail");
         s
+    }
+
+    /// Kernel identity carried by this admitted row.
+    #[must_use]
+    pub fn kernel(&self) -> &str {
+        &self.kernel
+    }
+
+    /// Shape class carried by this admitted row.
+    #[must_use]
+    pub fn shape_class(&self) -> &str {
+        &self.shape_class
+    }
+
+    /// Machine fingerprint carried by this admitted row.
+    #[must_use]
+    pub const fn machine(&self) -> u64 {
+        self.machine
+    }
+
+    /// Canonical selected parameters carried by this admitted row.
+    #[must_use]
+    pub fn params(&self) -> &str {
+        &self.params
+    }
+
+    /// Validated typed evidence carried by this admitted row.
+    #[must_use]
+    pub const fn evidence(&self) -> &TuneEvidence {
+        &self.evidence
+    }
+
+    /// Positive recalibration counter carried by this admitted row.
+    #[must_use]
+    pub const fn refresh(&self) -> u32 {
+        self.refresh
+    }
+
+    /// Admit one exact canonical tune-row transport.
+    ///
+    /// This is the public replay boundary for retained tune rows. It applies
+    /// the same bounded parser, identity-domain/version checks, typed evidence
+    /// validation, GEMM-row validation, and writer/parser fixed-point rule as
+    /// the tune store itself.
+    ///
+    /// # Errors
+    /// Returns [`TuneError`] when `json` is stale, malformed, non-canonical,
+    /// over a schema bound, or fails a tune-row semantic invariant.
+    pub fn from_canonical_json(json: &str) -> Result<Self, TuneError> {
+        parse_row(json).ok_or_else(|| TuneError {
+            detail: "tune row is outside the current canonical parser domain".to_string(),
+        })
+    }
+
+    /// Validate and emit the exact current canonical tune-row transport.
+    ///
+    /// # Errors
+    /// Returns [`TuneError`] unless the row is bounded, internally consistent,
+    /// and a writer/parser fixed point under the current identity schema.
+    pub fn to_canonical_json(&self) -> Result<String, TuneError> {
+        self.validated_generated_json()
     }
 
     fn validated_generated_json(&self) -> Result<String, TuneError> {
@@ -1001,6 +1304,92 @@ impl TuneRow {
         }
         Ok(json)
     }
+}
+
+#[allow(dead_code)]
+fn classify_tune_row_identity_fields(
+    row: &TuneRow,
+    evidence_source: &TuneEvidence,
+    observation_source: &TuneObservation,
+    summary_source: &WallTimeSummary,
+    work_unit_source: WorkUnit,
+    throughput_unit_source: ThroughputUnit,
+) {
+    let TuneRow {
+        kernel,
+        shape_class,
+        machine,
+        params,
+        evidence,
+        refresh,
+    } = row;
+    let TuneEvidence {
+        observations,
+        candidate_separation_ppm,
+    } = evidence_source;
+    let observation_fields = match observation_source {
+        TuneObservation::WallTime {
+            label,
+            samples_ns,
+            summary,
+        } => (
+            "wall-time",
+            label,
+            Some(samples_ns),
+            Some(summary),
+            None,
+            None,
+            None,
+        ),
+        TuneObservation::WorkCount { label, unit, count } => (
+            "work-count",
+            label,
+            None,
+            None,
+            Some(unit.name()),
+            Some(count),
+            None,
+        ),
+        TuneObservation::Throughput {
+            label,
+            unit,
+            milli_units,
+        } => (
+            "throughput",
+            label,
+            None,
+            None,
+            Some(unit.name()),
+            None,
+            Some(milli_units),
+        ),
+    };
+    let WallTimeSummary {
+        minimum_ns,
+        maximum_ns,
+    } = summary_source;
+    let work_unit_variant = match work_unit_source {
+        WorkUnit::CompletedTiles => WorkUnit::CompletedTiles.name(),
+        WorkUnit::Steals => WorkUnit::Steals.name(),
+    };
+    let throughput_unit_variant = match throughput_unit_source {
+        ThroughputUnit::GigabytesPerSecond => ThroughputUnit::GigabytesPerSecond.name(),
+    };
+    let _ = (
+        kernel,
+        shape_class,
+        machine,
+        params,
+        evidence,
+        refresh,
+        observations,
+        candidate_separation_ppm,
+        observation_fields,
+        minimum_ns,
+        maximum_ns,
+        work_unit_variant,
+        throughput_unit_variant,
+    );
 }
 
 /// A validated GEMM row awaiting failure-atomic installation.
@@ -1057,7 +1446,9 @@ impl PreparedGemmRow {
     /// Canonical tune-row JSON for the ledger's measured body.
     #[must_use]
     pub fn row_json(&self) -> String {
-        self.row.to_json()
+        self.row
+            .to_canonical_json()
+            .expect("prepared GEMM rows remain canonical")
     }
 
     /// Fully scoped key this row was validated against.
@@ -1143,22 +1534,152 @@ pub struct TuningDecision {
 }
 
 impl TuningDecision {
+    fn validate(&self) -> Result<(), TuneError> {
+        require_decision_kernel(&self.kernel)?;
+        if PinnedParam::parse(&self.kernel, &self.params).is_none() {
+            return Err(TuneError {
+                detail: format!(
+                    "tuning decision params {:?} are not canonical for kernel {:?}",
+                    self.params, self.kernel
+                ),
+            });
+        }
+        if !matches!(self.source, "pinned" | "tuned" | "cold-start") {
+            return Err(TuneError {
+                detail: format!(
+                    "tuning decision source {:?} is outside the canonical source set",
+                    self.source
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    fn write_json<W: fmt::Write>(&self, out: &mut W) -> fmt::Result {
+        self.write_json_with_schema(
+            TUNING_DECISION_IDENTITY_DOMAIN,
+            TUNING_DECISION_IDENTITY_VERSION,
+            out,
+        )
+    }
+
+    fn write_json_with_schema<W: fmt::Write>(
+        &self,
+        domain: &str,
+        identity_version: u32,
+        out: &mut W,
+    ) -> fmt::Result {
+        out.write_str("{\"identity_domain\":")?;
+        write_json_string(out, domain)?;
+        write!(out, ",\"identity_version\":{identity_version},\"kernel\":")?;
+        write_json_string(out, &self.kernel)?;
+        out.write_str(",\"params\":")?;
+        write_json_string(out, &self.params)?;
+        out.write_str(",\"source\":")?;
+        write_json_string(out, self.source)?;
+        out.write_char('}')
+    }
+
+    /// Canonical, versioned JSON transport for one admitted decision.
+    ///
+    /// # Errors
+    /// Returns [`TuneError`] unless every decision field is canonical and the
+    /// exact writer/parser fixed point fits the retained-decision budget.
+    pub fn to_canonical_json(&self) -> Result<String, TuneError> {
+        self.validate()?;
+        let mut bounded = BoundedJsonWriter::new(MAX_RETAINED_TUNING_DECISION_BYTES);
+        self.write_json(&mut bounded).map_err(|_| TuneError {
+            detail: format!(
+                "tuning decision exceeds the {MAX_RETAINED_TUNING_DECISION_BYTES}-byte canonical transport limit"
+            ),
+        })?;
+        let json = bounded.finish();
+        match Self::from_canonical_json(&json) {
+            Ok(reparsed) if reparsed == *self => {}
+            Ok(_) | Err(_) => {
+                return Err(TuneError {
+                    detail:
+                        "generated tuning decision is outside the exact canonical parser domain"
+                            .to_string(),
+                });
+            }
+        }
+        Ok(json)
+    }
+
+    /// Parse one exact canonical tuning-decision transport.
+    ///
+    /// Field reordering, stale domains or versions, non-canonical parameter
+    /// spellings, and trailing content all fail closed.
+    pub fn from_canonical_json(line: &str) -> Result<Self, TuneError> {
+        let fail = || TuneError {
+            detail: "tuning decision is not an exact current canonical transport".to_string(),
+        };
+        if line.len() > MAX_RETAINED_TUNING_DECISION_BYTES {
+            return Err(fail());
+        }
+        let mut parser = RowParser { rest: line };
+        parser.take("{\"identity_domain\":").ok_or_else(fail)?;
+        if parser.string().ok_or_else(fail)? != TUNING_DECISION_IDENTITY_DOMAIN {
+            return Err(fail());
+        }
+        parser.take(",\"identity_version\":").ok_or_else(fail)?;
+        if parser.canonical_u64().ok_or_else(fail)? != u64::from(TUNING_DECISION_IDENTITY_VERSION) {
+            return Err(fail());
+        }
+        parser.take(",\"kernel\":").ok_or_else(fail)?;
+        let kernel = parser.string().ok_or_else(fail)?;
+        parser.take(",\"params\":").ok_or_else(fail)?;
+        let params = parser.string().ok_or_else(fail)?;
+        parser.take(",\"source\":").ok_or_else(fail)?;
+        let source = match parser.string().ok_or_else(fail)?.as_str() {
+            "pinned" => "pinned",
+            "tuned" => "tuned",
+            "cold-start" => "cold-start",
+            _ => return Err(fail()),
+        };
+        parser.take("}").ok_or_else(fail)?;
+        if !parser.rest.is_empty() {
+            return Err(fail());
+        }
+        let decision = Self {
+            kernel,
+            params,
+            source,
+        };
+        decision.validate()?;
+        let mut canonical = String::new();
+        decision
+            .write_json(&mut canonical)
+            .expect("String writes cannot fail");
+        if canonical != line {
+            return Err(fail());
+        }
+        Ok(decision)
+    }
+
     /// Canonical JSON object.
-    #[must_use]
-    pub fn to_json(&self) -> String {
-        let mut out = String::from("{\"kernel\":");
-        write_json_string(&mut out, &self.kernel).expect("String writes cannot fail");
-        out.push_str(",\"params\":");
-        write_json_string(&mut out, &self.params).expect("String writes cannot fail");
-        out.push_str(",\"source\":");
-        write_json_string(&mut out, self.source).expect("String writes cannot fail");
-        out.push('}');
-        out
+    ///
+    /// # Errors
+    /// Returns [`TuneError`] when any caller-provided field is outside the
+    /// canonical tuning-decision domain.
+    pub fn to_json(&self) -> Result<String, TuneError> {
+        self.to_canonical_json()
     }
 
     fn retained_bytes(&self) -> Option<usize> {
-        self.kernel.len().checked_add(self.params.len())
+        self.to_canonical_json().ok().map(|json| json.len())
     }
+}
+
+#[allow(dead_code)]
+fn classify_tuning_decision_identity_fields(decision: &TuningDecision) {
+    let TuningDecision {
+        kernel,
+        params,
+        source,
+    } = decision;
+    let _ = (kernel, params, source);
 }
 
 /// Borrowed metadata for the tuner's bounded in-memory decision window.
@@ -1186,7 +1707,9 @@ impl<'a> TuningDecisionHistory<'a> {
         self.evicted
     }
 
-    /// Owned string payload retained by the current window.
+    /// Canonical serialized bytes charged to the current retained window.
+    /// This includes the decision domain and field framing, not only the two
+    /// owned strings stored by [`TuningDecision`].
     #[must_use]
     pub const fn retained_bytes(self) -> usize {
         self.retained_bytes
@@ -1493,15 +2016,14 @@ impl Tuner {
                 ),
             })
         })?;
-        let row = TuneRow {
-            kernel: key.kernel().to_string(),
-            shape_class: key.shape_class().to_string(),
-            machine: self.fingerprint,
-            params: plan.canonical(),
+        let row = TuneRow::new(
+            key.kernel(),
+            key.shape_class(),
+            self.fingerprint,
+            plan.canonical(),
             evidence,
             refresh,
-        };
-        row.validated_generated_json()?;
+        )?;
         Ok(PreparedGemmRow {
             key: key.clone(),
             row,
@@ -1615,7 +2137,10 @@ impl Tuner {
     pub fn gemm_row_json(&self, key: &GemmTuneKey) -> Option<String> {
         self.rows
             .get(&(key.kernel().to_string(), key.shape_class().to_string()))
-            .map(TuneRow::to_json)
+            .map(|row| {
+                row.to_canonical_json()
+                    .expect("installed GEMM rows remain canonical")
+            })
     }
 
     /// The canonical JSON line for one general row (what an external cache
@@ -1625,7 +2150,10 @@ impl Tuner {
     pub fn row_json(&self, kernel: &str, shape_class: &str) -> Option<String> {
         self.rows
             .get(&(kernel.to_string(), shape_class.to_string()))
-            .map(TuneRow::to_json)
+            .map(|row| {
+                row.to_canonical_json()
+                    .expect("installed tune rows remain canonical")
+            })
     }
 
     /// Adopt one canonical JSON tune-row line from an external cache (the
@@ -1776,13 +2304,14 @@ impl Tuner {
     }
 
     fn record_decision(&mut self, decision: TuningDecision) -> Result<(), TuneError> {
+        decision.validate()?;
         let bytes = decision.retained_bytes().ok_or_else(|| TuneError {
-            detail: "tuning decision payload length overflowed usize".to_string(),
+            detail: "canonical tuning-decision length overflowed usize".to_string(),
         })?;
         if bytes > MAX_RETAINED_TUNING_DECISION_BYTES {
             return Err(TuneError {
                 detail: format!(
-                    "tuning decision exceeds the {MAX_RETAINED_TUNING_DECISION_BYTES}-byte retained-payload limit"
+                    "tuning decision exceeds the {MAX_RETAINED_TUNING_DECISION_BYTES}-byte retained canonical-transport limit"
                 ),
             });
         }
@@ -1983,7 +2512,10 @@ impl Tuner {
             if i > 0 {
                 s.push(',');
             }
-            s.push_str(&row.to_json());
+            s.push_str(
+                &row.to_canonical_json()
+                    .expect("calibration rows remain canonical"),
+            );
         }
         s.push_str("]}");
         s
@@ -2086,15 +2618,14 @@ impl Tuner {
                 ),
             })
         })?;
-        let row = TuneRow {
-            kernel: kernel.to_string(),
-            shape_class: shape_class.to_string(),
-            machine: self.fingerprint,
+        let row = TuneRow::new(
+            kernel,
+            shape_class,
+            self.fingerprint,
             params,
             evidence,
             refresh,
-        };
-        row.validated_generated_json()?;
+        )?;
         self.rows.insert(key, row);
         Ok(())
     }
@@ -2310,7 +2841,15 @@ fn parse_row(line: &str) -> Option<TuneRow> {
         return None;
     }
     let mut parser = RowParser { rest: line };
-    parser.take("{\"kernel\":")?;
+    parser.take("{\"identity_domain\":")?;
+    if parser.string()? != TUNE_ROW_IDENTITY_DOMAIN {
+        return None;
+    }
+    parser.take(",\"identity_version\":")?;
+    if parser.canonical_u64()? != u64::from(TUNE_ROW_IDENTITY_VERSION) {
+        return None;
+    }
+    parser.take(",\"kernel\":")?;
     let kernel = parser.string()?;
     parser.take(",\"shape_class\":")?;
     let shape_class = parser.string()?;
@@ -2363,6 +2902,11 @@ fn parse_evidence(parser: &mut RowParser<'_>) -> Option<TuneEvidence> {
     if version != TuneEvidence::VERSION {
         return None;
     }
+    parser.take(",\"observation_count\":")?;
+    let observation_count = usize::try_from(parser.canonical_u64()?).ok()?;
+    if observation_count == 0 || observation_count > MAX_TUNE_OBSERVATIONS {
+        return None;
+    }
     parser.take(",\"observations\":[")?;
     let mut observations = Vec::new();
     loop {
@@ -2375,6 +2919,9 @@ fn parse_evidence(parser: &mut RowParser<'_>) -> Option<TuneEvidence> {
         } else {
             break;
         }
+    }
+    if observations.len() != observation_count {
+        return None;
     }
     parser.take("],\"candidate_separation_ppm\":")?;
     let stored_separation = if parser.rest.starts_with("null") {
@@ -2400,6 +2947,11 @@ fn parse_observation(parser: &mut RowParser<'_>) -> Option<TuneObservation> {
     let label = parser.string()?;
     match kind.as_str() {
         "wall-time" => {
+            parser.take(",\"sample_count\":")?;
+            let sample_count = usize::try_from(parser.canonical_u64()?).ok()?;
+            if sample_count == 0 || sample_count > MAX_WALL_TIME_SAMPLES {
+                return None;
+            }
             parser.take(",\"samples_ns\":[")?;
             let mut samples_ns = Vec::new();
             loop {
@@ -2412,6 +2964,9 @@ fn parse_observation(parser: &mut RowParser<'_>) -> Option<TuneObservation> {
                 } else {
                     break;
                 }
+            }
+            if samples_ns.len() != sample_count {
+                return None;
             }
             parser.take("],\"summary\":{\"minimum_ns\":")?;
             let minimum_ns = parser.canonical_u64()?;
@@ -2602,10 +3157,562 @@ mod tests {
         }
     }
 
+    fn identity_test_row() -> TuneRow {
+        TuneRow {
+            kernel: "identity-row".to_string(),
+            shape_class: "shape-a".to_string(),
+            machine: 0xAB,
+            params: "mode=base".to_string(),
+            evidence: TuneEvidence::new(vec![
+                TuneObservation::wall_time("wall", vec![10, 20]).expect("wall time"),
+                TuneObservation::work_count("work", WorkUnit::CompletedTiles, 7)
+                    .expect("work count"),
+                TuneObservation::throughput("bandwidth", ThroughputUnit::GigabytesPerSecond, 1_250)
+                    .expect("throughput"),
+            ])
+            .expect("mixed identity evidence"),
+            refresh: 1,
+        }
+    }
+
+    fn row_json_with_schema(row: &TuneRow, domain: &str, version: u32) -> String {
+        let mut json = String::new();
+        row.write_json_with_schema(domain, version, &mut json)
+            .expect("String writes cannot fail");
+        json
+    }
+
+    fn decision_json_with_schema(decision: &TuningDecision, domain: &str, version: u32) -> String {
+        let mut json = String::new();
+        decision
+            .write_json_with_schema(domain, version, &mut json)
+            .expect("String writes cannot fail");
+        json
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // one table proves every independently framed key field
+    fn gemm_tune_key_identity_fields_move_independently() {
+        let key = gemm_key();
+        let base = key.kernel().to_string();
+        assert_eq!(gemm_shape_from_scoped_kernel(&base), Some("m64-n128-k32"));
+
+        let schema_key = |domain: &str, version: u32, probe_count: u32| {
+            scoped_gemm_kernel_with_schema(
+                domain,
+                version,
+                probe_count,
+                key.base_kernel(),
+                key.shape_class(),
+                key.execution(),
+            )
+            .expect("bounded schema variant")
+        };
+        let source_key = |base_kernel: &str, shape: &str, execution: GemmExecutionIdentity| {
+            GemmTuneKey::new(base_kernel, shape, execution)
+                .expect("canonical semantic variant")
+                .kernel()
+                .to_string()
+        };
+
+        let mut reordered = base.clone();
+        let old_order = "/shape=m64-n128-k32/requested=4/";
+        let new_order = "/requested=4/shape=m64-n128-k32/";
+        reordered = reordered.replacen(old_order, new_order, 1);
+        assert_ne!(reordered, base, "field-order fixture must move bytes");
+
+        let mut requested = key.execution().clone();
+        requested.requested_threads += 1;
+        let mut thread_budget = key.execution().clone();
+        thread_budget.thread_budget += 1;
+        let mut memory = key.execution().clone();
+        memory.memory_limit_bytes -= 1;
+        let mut probe_m = key.execution().clone();
+        probe_m.probe_dims[0] += 1;
+        let mut probe_n = key.execution().clone();
+        probe_n.probe_dims[1] += 1;
+        let mut probe_k = key.execution().clone();
+        probe_k.probe_dims[2] += 1;
+        let mut tier = key.execution().clone();
+        tier.isa_tier.push_str("-v2");
+        let mut placement = key.execution().clone();
+        placement.placement.push_str("-numa0");
+        let mut implementation = key.execution().clone();
+        implementation.implementation.push_str("-v2");
+        let mut build = key.execution().clone();
+        build.build.push_str("-b");
+
+        let variants = vec![
+            (
+                "artifact-domain",
+                schema_key(
+                    "org.frankensim.fs-exec.gemm-tune-key.v5",
+                    GEMM_TUNE_KEY_IDENTITY_VERSION,
+                    3,
+                ),
+                false,
+            ),
+            (
+                "identity-version",
+                schema_key(
+                    GEMM_TUNE_KEY_IDENTITY_DOMAIN,
+                    GEMM_TUNE_KEY_IDENTITY_VERSION + 1,
+                    3,
+                ),
+                false,
+            ),
+            ("canonical-field-order", reordered, false),
+            (
+                "base-kernel",
+                source_key(
+                    &format!("{GEMM_KERNEL_PREFIX}2"),
+                    key.shape_class(),
+                    key.execution().clone(),
+                ),
+                true,
+            ),
+            (
+                "shape-class",
+                source_key(key.base_kernel(), "m65-n128-k32", key.execution().clone()),
+                true,
+            ),
+            (
+                "requested-threads",
+                source_key(key.base_kernel(), key.shape_class(), requested),
+                true,
+            ),
+            (
+                "thread-budget",
+                source_key(key.base_kernel(), key.shape_class(), thread_budget),
+                true,
+            ),
+            (
+                "memory-limit-bytes",
+                source_key(key.base_kernel(), key.shape_class(), memory),
+                true,
+            ),
+            (
+                "probe-count",
+                schema_key(
+                    GEMM_TUNE_KEY_IDENTITY_DOMAIN,
+                    GEMM_TUNE_KEY_IDENTITY_VERSION,
+                    4,
+                ),
+                false,
+            ),
+            (
+                "probe-m",
+                source_key(key.base_kernel(), key.shape_class(), probe_m),
+                true,
+            ),
+            (
+                "probe-n",
+                source_key(key.base_kernel(), key.shape_class(), probe_n),
+                true,
+            ),
+            (
+                "probe-k",
+                source_key(key.base_kernel(), key.shape_class(), probe_k),
+                true,
+            ),
+            (
+                "isa-tier",
+                source_key(key.base_kernel(), key.shape_class(), tier),
+                true,
+            ),
+            (
+                "placement-policy",
+                source_key(key.base_kernel(), key.shape_class(), placement),
+                true,
+            ),
+            (
+                "implementation-id",
+                source_key(key.base_kernel(), key.shape_class(), implementation),
+                true,
+            ),
+            (
+                "build-id",
+                source_key(key.base_kernel(), key.shape_class(), build),
+                true,
+            ),
+        ];
+        let mut unique = BTreeSet::new();
+        for (field, variant, admitted) in variants {
+            assert_ne!(variant, base, "{field} did not move the identity");
+            assert!(unique.insert(variant.clone()), "{field} collided");
+            assert_eq!(
+                gemm_shape_from_scoped_kernel(&variant).is_some(),
+                admitted,
+                "unexpected admission result for {field}"
+            );
+        }
+    }
+
+    #[test]
+    fn gemm_tune_key_identity_versions_fail_closed() {
+        let key = gemm_key();
+        let stale_domain = key.kernel().replacen(
+            GEMM_TUNE_KEY_IDENTITY_DOMAIN,
+            "org.frankensim.fs-exec.gemm-tune-key.v3",
+            1,
+        );
+        let stale_version = key.kernel().replacen(
+            &format!("identity-version={GEMM_TUNE_KEY_IDENTITY_VERSION}"),
+            "identity-version=3",
+            1,
+        );
+        let legacy = format!("{}/tune-v3/shape={}", key.base_kernel(), key.shape_class());
+        for stale in [stale_domain, stale_version, legacy] {
+            assert!(gemm_shape_from_scoped_kernel(&stale).is_none());
+            assert!(
+                Tuner::cold(1)
+                    .pin(stale, GemmBlockPlan::COLD_START.canonical())
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // one table proves every independently framed row field
+    fn tune_row_identity_fields_move_independently() {
+        let base_row = identity_test_row();
+        let base = base_row.to_json();
+        assert_eq!(parse_row(&base), Some(base_row.clone()));
+
+        let mut reordered = base.clone();
+        reordered = reordered.replacen(
+            "\"kernel\":\"identity-row\",\"shape_class\":\"shape-a\"",
+            "\"shape_class\":\"shape-a\",\"kernel\":\"identity-row\"",
+            1,
+        );
+        let mut kernel = base_row.clone();
+        kernel.kernel.push_str("-v2");
+        let mut shape = base_row.clone();
+        shape.shape_class.push_str("-v2");
+        let mut machine = base_row.clone();
+        machine.machine += 1;
+        let mut params = base_row.clone();
+        params.params.push_str("-v2");
+        let mut observation_order = base_row.clone();
+        observation_order.evidence.observations.swap(0, 1);
+        let mut observation_label = base_row.clone();
+        observation_label.evidence.observations[0] =
+            TuneObservation::wall_time("wall-v2", vec![10, 20]).expect("wall label");
+        let mut wall_sample_order = base_row.clone();
+        wall_sample_order.evidence.observations[0] =
+            TuneObservation::wall_time("wall", vec![20, 10]).expect("sample order");
+        let mut wall_sample = base_row.clone();
+        wall_sample.evidence.observations[0] =
+            TuneObservation::wall_time("wall", vec![10, 21]).expect("sample value");
+        let mut work_unit = base_row.clone();
+        work_unit.evidence.observations[1] =
+            TuneObservation::work_count("work", WorkUnit::Steals, 7).expect("work unit");
+        let mut work_count = base_row.clone();
+        work_count.evidence.observations[1] =
+            TuneObservation::work_count("work", WorkUnit::CompletedTiles, 8).expect("work count");
+        let mut throughput = base_row.clone();
+        throughput.evidence.observations[2] =
+            TuneObservation::throughput("bandwidth", ThroughputUnit::GigabytesPerSecond, 1_251)
+                .expect("throughput");
+        let mut refresh = base_row.clone();
+        refresh.refresh += 1;
+
+        let variants = vec![
+            (
+                "artifact-domain",
+                row_json_with_schema(
+                    &base_row,
+                    "org.frankensim.fs-exec.tune-row.v3",
+                    TUNE_ROW_IDENTITY_VERSION,
+                ),
+                false,
+            ),
+            (
+                "identity-version",
+                row_json_with_schema(
+                    &base_row,
+                    TUNE_ROW_IDENTITY_DOMAIN,
+                    TUNE_ROW_IDENTITY_VERSION + 1,
+                ),
+                false,
+            ),
+            ("canonical-field-order", reordered, false),
+            ("kernel", kernel.to_json(), true),
+            ("shape-class", shape.to_json(), true),
+            ("machine-fingerprint", machine.to_json(), true),
+            (
+                "machine-hex-width",
+                base.replacen("00000000000000ab", "0000000000000ab", 1),
+                false,
+            ),
+            ("selected-params", params.to_json(), true),
+            (
+                "evidence-version",
+                base.replacen("\"version\":2", "\"version\":3", 1),
+                false,
+            ),
+            (
+                "observation-count",
+                base.replacen("\"observation_count\":3", "\"observation_count\":4", 1),
+                false,
+            ),
+            ("observation-order", observation_order.to_json(), true),
+            (
+                "observation-kind",
+                base.replacen("\"kind\":\"wall-time\"", "\"kind\":\"wall-clock\"", 1),
+                false,
+            ),
+            ("observation-label", observation_label.to_json(), true),
+            (
+                "wall-sample-count",
+                base.replacen("\"sample_count\":2", "\"sample_count\":3", 1),
+                false,
+            ),
+            ("wall-sample-order", wall_sample_order.to_json(), true),
+            ("wall-sample-ns", wall_sample.to_json(), true),
+            (
+                "wall-summary-minimum-ns",
+                base.replacen("\"minimum_ns\":10", "\"minimum_ns\":11", 1),
+                false,
+            ),
+            (
+                "wall-summary-maximum-ns",
+                base.replacen("\"maximum_ns\":20", "\"maximum_ns\":21", 1),
+                false,
+            ),
+            ("work-unit", work_unit.to_json(), true),
+            ("work-count", work_count.to_json(), true),
+            (
+                "throughput-unit",
+                base.replacen(
+                    "\"unit\":\"gigabytes-per-second\"",
+                    "\"unit\":\"bytes-per-second\"",
+                    1,
+                ),
+                false,
+            ),
+            ("throughput-milli-units", throughput.to_json(), true),
+            (
+                "candidate-separation-ppm",
+                base.replacen(
+                    "\"candidate_separation_ppm\":null",
+                    "\"candidate_separation_ppm\":1",
+                    1,
+                ),
+                false,
+            ),
+            ("refresh-counter", refresh.to_json(), true),
+        ];
+        let mut unique = BTreeSet::new();
+        for (field, variant, admitted) in variants {
+            assert_ne!(variant, base, "{field} did not move the identity");
+            assert!(unique.insert(variant.clone()), "{field} collided");
+            assert_eq!(
+                parse_row(&variant).is_some(),
+                admitted,
+                "unexpected admission result for {field}: {variant}"
+            );
+        }
+    }
+
+    #[test]
+    fn tune_row_identity_versions_fail_closed() {
+        let row = identity_test_row();
+        let current = row.to_json();
+        let stale_domain = row_json_with_schema(
+            &row,
+            "org.frankensim.fs-exec.tune-row.v1",
+            TUNE_ROW_IDENTITY_VERSION,
+        );
+        let stale_version = row_json_with_schema(
+            &row,
+            TUNE_ROW_IDENTITY_DOMAIN,
+            TUNE_ROW_IDENTITY_VERSION + 1,
+        );
+        let stale_evidence = current.replacen("\"version\":2", "\"version\":1", 1);
+        let unversioned = current
+            .strip_prefix(&format!(
+                "{{\"identity_domain\":\"{TUNE_ROW_IDENTITY_DOMAIN}\",\"identity_version\":{TUNE_ROW_IDENTITY_VERSION},"
+            ))
+            .map(|rest| format!("{{{rest}"))
+            .expect("canonical prefix");
+        for stale in [stale_domain, stale_version, stale_evidence, unversioned] {
+            assert!(parse_row(&stale).is_none());
+            assert!(Tuner::cold(0xAB).adopt_row_json(&stale).is_err());
+        }
+    }
+
+    #[test]
+    fn tune_row_public_exact_transport_refuses_unvalidated_state() {
+        let mut row = identity_test_row();
+        let canonical = row.to_canonical_json().expect("canonical test row");
+        assert!(
+            matches!(
+                TuneRow::from_canonical_json(&canonical),
+                Ok(reparsed) if reparsed == row
+            ),
+            "the public replay boundary must recover the exact admitted row"
+        );
+        assert!(
+            TuneRow::from_canonical_json(&format!("{canonical}\n")).is_err(),
+            "the public replay boundary must reject trailing transport bytes"
+        );
+
+        let construction_error = TuneRow::new(
+            row.kernel.clone(),
+            row.shape_class.clone(),
+            row.machine,
+            row.params.clone(),
+            row.evidence.clone(),
+            0,
+        )
+        .expect_err("the public constructor must reject an invalid row");
+        assert!(
+            construction_error
+                .detail
+                .contains("canonical parser domain"),
+            "{construction_error}"
+        );
+
+        // Module-private code cannot bypass the exact transport's revalidation
+        // even if an internal bug corrupts otherwise sealed state.
+        row.refresh = 0;
+        let error = row
+            .to_canonical_json()
+            .expect_err("the public exact transport must reject an invalid row");
+        assert!(error.detail.contains("canonical parser domain"), "{error}");
+        assert!(
+            parse_row(&row.to_json()).is_none(),
+            "the private raw writer must not turn invalid state into an admitted row"
+        );
+    }
+
+    #[test]
+    fn tuning_decision_identity_fields_move_independently() {
+        let decision = TuningDecision {
+            kernel: "kernel-a".to_string(),
+            params: "edge=8".to_string(),
+            source: "tuned",
+        };
+        let base = decision.to_canonical_json().expect("canonical decision");
+        assert!(matches!(
+            TuningDecision::from_canonical_json(&base),
+            Ok(reparsed) if reparsed == decision
+        ));
+        let mut reordered = base.clone();
+        reordered = reordered.replacen(
+            "\"kernel\":\"kernel-a\",\"params\":\"edge=8\"",
+            "\"params\":\"edge=8\",\"kernel\":\"kernel-a\"",
+            1,
+        );
+        let variants = vec![
+            (
+                "artifact-domain",
+                decision_json_with_schema(
+                    &decision,
+                    "org.frankensim.fs-exec.tuning-decision.v2",
+                    TUNING_DECISION_IDENTITY_VERSION,
+                ),
+                false,
+            ),
+            (
+                "identity-version",
+                decision_json_with_schema(
+                    &decision,
+                    TUNING_DECISION_IDENTITY_DOMAIN,
+                    TUNING_DECISION_IDENTITY_VERSION + 1,
+                ),
+                false,
+            ),
+            ("canonical-field-order", reordered, false),
+            (
+                "kernel",
+                TuningDecision {
+                    kernel: "kernel-b".to_string(),
+                    ..decision.clone()
+                }
+                .to_canonical_json()
+                .expect("kernel variant"),
+                true,
+            ),
+            (
+                "selected-params",
+                TuningDecision {
+                    params: "edge=4".to_string(),
+                    ..decision.clone()
+                }
+                .to_canonical_json()
+                .expect("params variant"),
+                true,
+            ),
+            (
+                "decision-source",
+                TuningDecision {
+                    source: "pinned",
+                    ..decision.clone()
+                }
+                .to_canonical_json()
+                .expect("source variant"),
+                true,
+            ),
+        ];
+        let mut unique = BTreeSet::new();
+        for (field, variant, admitted) in variants {
+            assert_ne!(variant, base, "{field} did not move the identity");
+            assert!(unique.insert(variant.clone()), "{field} collided");
+            assert_eq!(
+                TuningDecision::from_canonical_json(&variant).is_ok(),
+                admitted,
+                "unexpected admission result for {field}"
+            );
+        }
+    }
+
+    #[test]
+    fn tuning_decision_identity_versions_fail_closed() {
+        let decision = TuningDecision {
+            kernel: "kernel".to_string(),
+            params: "edge=8".to_string(),
+            source: "cold-start",
+        };
+        let stale_domain = decision_json_with_schema(
+            &decision,
+            "org.frankensim.fs-exec.tuning-decision.v0",
+            TUNING_DECISION_IDENTITY_VERSION,
+        );
+        let stale_version = decision_json_with_schema(
+            &decision,
+            TUNING_DECISION_IDENTITY_DOMAIN,
+            TUNING_DECISION_IDENTITY_VERSION + 1,
+        );
+        let unversioned = "{\"kernel\":\"kernel\",\"params\":\"edge=8\",\"source\":\"cold-start\"}";
+        for stale in [stale_domain.as_str(), stale_version.as_str(), unversioned] {
+            assert!(TuningDecision::from_canonical_json(stale).is_err());
+        }
+    }
+
+    #[test]
+    fn tuning_decision_json_rejects_caller_constructed_invalid_state() {
+        let invalid = TuningDecision {
+            kernel: String::new(),
+            params: "edge=8".to_string(),
+            source: "tuned",
+        };
+        let error = invalid
+            .to_json()
+            .expect_err("public serialization must reject invalid caller state");
+        assert!(error.detail.contains("must be non-blank"), "{error}");
+    }
+
     #[test]
     fn gemm_scoped_identity_has_one_canonical_spelling() {
         let key = gemm_key();
-        assert!(key.kernel().contains("/tune-v3/"));
+        assert!(
+            key.kernel()
+                .contains("/identity-domain=org.frankensim.fs-exec.gemm-tune-key.v4/")
+        );
+        assert!(key.kernel().contains("/identity-version=4/"));
+        assert!(key.kernel().contains("/probe-count=3/"));
         assert!(key.kernel().contains("/requested=4/thread-budget=4/"));
         assert!(key.kernel().contains("/memory-limit=18446744073709551615/"));
         assert!(key.kernel().contains("/build=release-opt3-cgu1-build-a"));
@@ -2619,11 +3726,15 @@ mod tests {
         assert_ne!(bounded.kernel(), key.kernel());
         assert_eq!(bounded.execution().memory_limit_bytes(), 1 << 20);
         assert!(bounded.kernel().contains("/memory-limit=1048576/"));
-        let legacy = key.kernel().replacen("/tune-v3/", "/tune-v2/", 1);
+        let legacy = key.kernel().replacen(
+            GEMM_TUNE_KEY_IDENTITY_DOMAIN,
+            "org.frankensim.fs-exec.gemm-tune-key.v3",
+            1,
+        );
         assert_eq!(
             gemm_shape_from_scoped_kernel(&legacy),
             None,
-            "legacy keys without an explicit memory seam fail closed"
+            "legacy tune-key domains fail closed"
         );
         assert!(
             Tuner::cold(1)
@@ -3080,7 +4191,12 @@ mod tests {
             (ScheduleKind::BandwidthRich, TuneSource::ColdStart)
         );
         assert_eq!(t.decisions().len(), 2);
-        assert!(t.decisions()[0].to_json().contains("cold-start"));
+        assert!(
+            t.decisions()[0]
+                .to_json()
+                .expect("recorded decision is canonical")
+                .contains("cold-start")
+        );
     }
 
     #[test]
@@ -3340,7 +4456,7 @@ mod tests {
 
         for corrupt in [
             format!("{row} trailing"),
-            row.replace("\"version\":1", "\"version\":2"),
+            row.replace("\"version\":2", "\"version\":3"),
             row.replace("\"minimum_ns\":100", "\"minimum_ns\":99"),
             row.replace("\"maximum_ns\":100", "\"maximum_ns\":101"),
             row.replace(

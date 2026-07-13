@@ -27,6 +27,10 @@ recorded, sharded object pools, and diffable allocation-site accounting
   deterministic (diffable between runs).
 - `HugepagePolicy` / `HugepageOutcome` / `HugepageDecision` — intent, probe
   outcome, and recorded reason; `HUGEPAGE_BYTES = 2 MiB`.
+  `HugepageDecision::to_canonical_bytes` / `from_canonical_bytes` are the
+  exact retained v1 identity transport; `to_json` / `from_json` form one
+  strict canonical human/agent-readable transport with exact fixed-point
+  admission.
 - `ShardedPool<T>` / `PoolItem<T>` / `ShardedPoolStats` — per-shard locked
   free lists (shards `CachePadded`), first-touch construction on the
   acquiring thread, RAII return, explicit `detach` for artifacts that
@@ -100,6 +104,27 @@ recorded, sharded object pools, and diffable allocation-site accounting
    Payload bytes are tracked exactly; allocator rounding beyond the
    `try_reserve_exact`-sized buffer is a no-claim.
 
+## Hugepage decision identity (v1)
+
+`HUGEPAGE_DECISION_IDENTITY_VERSION = 1` and the exact domain
+`org.frankensim.fs-alloc.hugepage-decision.v1` define the retained decision
+transport (also exposed through the re-exported
+`HugepageDecision::{IDENTITY_VERSION, IDENTITY_DOMAIN}` associated constants).
+Its little-endian frame binds the declared domain-byte count,
+domain bytes, u32 version, policy tag, outcome tag, detail-byte count, and
+exact UTF-8 detail. Detail is semantic: the placement v2 consumer historically
+hashes `HugepageDecision::to_json()` verbatim, so changing the recorded reason
+must not be silently classified as presentation-only. That JSON is admitted
+as identity input only because `from_json()` rejects field reordering,
+non-canonical escapes, unknown tags, literal controls, duplicates, and trailing
+content, then requires byte-for-byte writer/parser fixed-point equality.
+
+Admission is fail closed. Foreign domains, stale or future versions, unknown
+enum tags, malformed UTF-8, independently incorrect count prefixes,
+truncation, and suffix bytes are refused before a decoded decision can become
+replay authority. The per-field mutation battery covers policy, outcome,
+detail, domain, version, and both declared byte-count prefixes independently.
+
 ## Error model
 All fallible APIs return `Result<_, AllocError>`; `AllocError` is a
 structured enum (`Exhausted`, `OutOfMemory`, `LeaseExhausted`,
@@ -157,7 +182,10 @@ disjointness, concurrent leak-freedom, G5 deterministic reports, recorded
 hugepage decisions, and chunk-recycling bounds. Any reimplementation must
 pass this suite.
 In-module tests additionally verify first-chunk preflight sizing, structured
-reservation overflow, and concurrent hard-limit claims.
+reservation overflow, concurrent hard-limit claims, the exhaustive v1
+hugepage-decision identity mutation battery, exact round trips, and fail-closed
+retained-version/transport admission, plus the canonical JSON writer/parser
+fixed point required by the placement-v2 dependency.
 
 ## No-claim boundaries
 - NO claim that hugepages actually back any allocation: without `madvise`
