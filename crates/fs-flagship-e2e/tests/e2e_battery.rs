@@ -6,6 +6,7 @@
 
 use std::time::Instant;
 
+use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_flagship_e2e::{StageArtifact, Tier, artifact, lbm_core_roll_hash, log_row, notebook};
 use fs_frame::history::StoryParams;
 use fs_frame::{e_stopped_fragility, layout_and_size};
@@ -23,6 +24,26 @@ fn verdict(name: &str, pass: bool, details: &str) {
 
 const TIME: Dims = Dims([0, 0, 1, 0, 0]);
 const RATE: Dims = Dims([0, 0, -1, 0, 0]);
+
+fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
+    let gate = CancelGate::new();
+    let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+    pool.scope(|arena| {
+        let cx = Cx::new(
+            &gate,
+            arena,
+            StreamKey {
+                seed: 0xF1A6_5A1D,
+                kernel_id: 1,
+                tile: 0,
+                iteration: 0,
+            },
+            Budget::INFINITE,
+            ExecMode::Deterministic,
+        );
+        f(&cx)
+    })
+}
 
 // ------------------------------------------------------------------
 // Golden hashes: frozen at bead mye.5. Bump ONLY with justification
@@ -142,7 +163,10 @@ fn ornith_smoke() -> (StageArtifact, f64) {
 fn frame_smoke() -> StageArtifact {
     let t0 = Instant::now();
     let catalog = [0.5f64, 0.75, 1.0, 1.5, 2.0];
-    let layout = layout_and_size(5, 3, 4.0, 2.0, 250e6, 200e9, &catalog);
+    let layout = with_cx(|cx| {
+        layout_and_size(5, 3, 4.0, 2.0, 250e6, 200e9, &catalog, cx)
+            .expect("valid flagship frame layout is admitted")
+    });
     let ensemble = StochasticEnsemble {
         name: "e2e-kt".to_string(),
         seed: 90210,

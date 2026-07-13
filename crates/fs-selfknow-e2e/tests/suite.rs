@@ -348,7 +348,8 @@ fn stage_5_explanation_objects() {
 #[test]
 fn stage_6_value_of_information() {
     use fs_plan::voi::{
-        LiveDecision, Probe, ProbeKind, UncertaintyNode, hint_for_query, rank_purchases,
+        Cx, DecisionBudget, LiveDecision, MAX_VOI_EVALUATIONS, MAX_VOI_WORK_UNITS, Probe,
+        ProbeKind, UncertaintyNode, hint_for_query, rank_purchases,
     };
     let h = Harness::new("voi");
     let margin = |v: &[f64]| 2.0 * v[0] - 1.0;
@@ -371,10 +372,13 @@ fn stage_6_value_of_information() {
         kind: ProbeKind::Physical,
     }];
     let ranked = rank_purchases(
+        &Cx::for_testing(),
         &decision,
         &live,
         &menu,
         64,
+        DecisionBudget::new(MAX_VOI_EVALUATIONS, MAX_VOI_WORK_UNITS)
+            .expect("valid live VoI budget"),
         "fs-selfknow-stage6-v1",
         "live-snapshot-v1",
     )
@@ -395,10 +399,13 @@ fn stage_6_value_of_information() {
         nominal: 0.95,
     }];
     let ranked = rank_purchases(
+        &Cx::for_testing(),
         &decision,
         &settled,
         &menu,
         64,
+        DecisionBudget::new(MAX_VOI_EVALUATIONS, MAX_VOI_WORK_UNITS)
+            .expect("valid settled VoI budget"),
         "fs-selfknow-stage6-v1",
         "settled-snapshot-v1",
     )

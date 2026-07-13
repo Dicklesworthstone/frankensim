@@ -337,7 +337,10 @@ fn ac_002_flywheel_discharge_and_anytime_answer() -> Result<(), PlanError> {
 #[allow(clippy::too_many_lines)] // one auditable query-to-package fixture
 fn ac_003_package_recheck_solver_free_and_voi_hint() -> Result<(), PlanError> {
     use fs_ir::anytime::run_anytime;
-    use fs_plan::voi::{LiveDecision, Probe, ProbeKind, UncertaintyNode, rank_purchases};
+    use fs_plan::voi::{
+        Cx, DecisionBudget, LiveDecision, MAX_VOI_EVALUATIONS, MAX_VOI_WORK_UNITS, Probe,
+        ProbeKind, UncertaintyNode, rank_purchases,
+    };
     // Discharge the query, wrap the answer, and exercise the STANDALONE
     // checker's certificate-policy, composition, and content-address paths
     // with zero solver dependency.
@@ -367,10 +370,13 @@ fn ac_003_package_recheck_solver_free_and_voi_hint() -> Result<(), PlanError> {
         kind: ProbeKind::Computational,
     }];
     let ranked = rank_purchases(
+        &Cx::for_testing(),
         &decision,
         &nodes,
         &menu,
         32,
+        DecisionBudget::new(MAX_VOI_EVALUATIONS, MAX_VOI_WORK_UNITS)
+            .expect("valid VoI computation budget"),
         "fs-flywheel-acceptance-v1",
         "ac-003-snapshot-v1",
     )

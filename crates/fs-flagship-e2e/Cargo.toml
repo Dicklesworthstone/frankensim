@@ -24,6 +24,7 @@ fs-scenario = { path = "../fs-scenario" }
 fs-vessel = { path = "../fs-vessel" }
 
 [dev-dependencies]
+fs-alloc = { path = "../fs-alloc" }
 
 [lints]
 workspace = true

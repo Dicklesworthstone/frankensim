@@ -14,6 +14,7 @@ layer = "L4"
 fs-evidence = { path = "../fs-evidence" }
 
 [dev-dependencies]
+asupersync = { path = "../../../asupersync", features = ["test-internals"] }
 fs-adjoint = { path = "../fs-adjoint", features = ["explanation-objects"] }
 fs-iface = { path = "../fs-iface" }
 fs-ledger = { path = "../fs-ledger" }
