@@ -15,10 +15,12 @@
 //! crashing ahead of its formerly separate version bump. Schema v4 adds one
 //! database-instance identity row, seeded by Rust inside the same migration
 //! transaction as the table and version marker. Schema v5 makes that row
-//! immutable through attested update/delete refusal triggers.
+//! immutable through attested update/delete refusal triggers. Schema v6 adds
+//! immutable terminal-session receipts and deterministic flush-batch markers
+//! so retry after a database commit cannot append the same audit events twice.
 
 /// The schema version this crate writes and reads.
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 6;
 
 /// Storage chunk length for large artifacts (bytes). Artifacts strictly
 /// larger than this are stored as `artifact_chunks` rows of at most this
@@ -27,7 +29,7 @@ pub const STORAGE_CHUNK_LEN: usize = 4 * 1024 * 1024;
 
 /// Migration ladder: `MIGRATIONS[i]` migrates a database at `user_version`
 /// `i` to `i + 1`. Append-only; never edit a shipped batch.
-pub(crate) const MIGRATIONS: &[&[&str]] = &[V1, V2, V3, V4, V5];
+pub(crate) const MIGRATIONS: &[&[&str]] = &[V1, V2, V3, V4, V5, V6];
 
 /// v1: the six core tables (Appendix D), chunk storage, and the Rev S
 /// extension tables (sparse in v0 but present EARLY so downstream crates can
@@ -282,7 +284,194 @@ pub const V5: &[&str] = &[
      END",
 ];
 
-/// Every table the CURRENT schema owns (v1 set + v2/v3/v4 additions); the
+/// v6: immutable session-mutation claims, authenticated terminal receipts,
+/// explicit ownership links to global audit events, and exact flush-batch
+/// membership witnesses. The public API verifies every bounded BLOB/hash and
+/// commits each terminal plus its owned event group in one transaction.
+pub const V6: &[&str] = &[
+    "CREATE TABLE IF NOT EXISTS session_claims(
+        authority BLOB NOT NULL PRIMARY KEY CHECK(length(authority) = 32),
+        ledger_instance_id BLOB NOT NULL CHECK(length(ledger_instance_id) = 16),
+        governor_hash BLOB NOT NULL CHECK(length(governor_hash) = 32),
+        session_open_hash BLOB NOT NULL CHECK(length(session_open_hash) = 32),
+        registry_schema_version INTEGER NOT NULL CHECK(registry_schema_version = 1),
+        kind TEXT NOT NULL CHECK(
+            length(CAST(kind AS BLOB)) BETWEEN 1 AND 64 AND
+            length(CAST(kind AS BLOB)) = length(kind) AND
+            kind NOT GLOB '*[^!-~]*'
+        ),
+        session BLOB NOT NULL CHECK(length(session) = 8),
+        ledger_scope TEXT NOT NULL CHECK(
+            length(CAST(ledger_scope AS BLOB)) BETWEEN 1 AND 128 AND
+            length(CAST(ledger_scope AS BLOB)) = length(ledger_scope) AND
+            ledger_scope NOT GLOB '*[^!-~]*'
+        ),
+        generation BLOB NOT NULL CHECK(length(generation) = 8),
+        causal_ordinal BLOB CHECK(
+            causal_ordinal IS NULL OR
+            (typeof(causal_ordinal) = 'blob' AND length(causal_ordinal) = 8)
+        ),
+        payload BLOB NOT NULL CHECK(length(payload) BETWEEN 0 AND 1048576),
+        payload_hash BLOB NOT NULL CHECK(length(payload_hash) = 32),
+        claim_hash BLOB NOT NULL CHECK(length(claim_hash) = 32),
+        created_at INTEGER NOT NULL
+    ) STRICT",
+    "CREATE TABLE IF NOT EXISTS session_terminals(
+        authority BLOB NOT NULL PRIMARY KEY CHECK(length(authority) = 32)
+            REFERENCES session_claims(authority),
+        receipt BLOB NOT NULL CHECK(length(receipt) BETWEEN 1 AND 1048576),
+        receipt_hash BLOB NOT NULL CHECK(length(receipt_hash) = 32),
+        event_count INTEGER NOT NULL CHECK(event_count BETWEEN 0 AND 1024),
+        events_hash BLOB NOT NULL CHECK(length(events_hash) = 32),
+        encoded_bytes INTEGER NOT NULL CHECK(encoded_bytes BETWEEN 1 AND 4194304),
+        created_at INTEGER NOT NULL
+    ) STRICT",
+    "CREATE TABLE IF NOT EXISTS session_terminal_events(
+        authority BLOB NOT NULL CHECK(length(authority) = 32)
+            REFERENCES session_terminals(authority),
+        seq INTEGER NOT NULL CHECK(seq BETWEEN 0 AND 1023),
+        event_id INTEGER NOT NULL UNIQUE CHECK(event_id > 0) REFERENCES events(id),
+        PRIMARY KEY(authority, seq)
+    ) STRICT",
+    "CREATE TABLE IF NOT EXISTS session_flush_batches(
+        batch_id BLOB NOT NULL PRIMARY KEY CHECK(length(batch_id) = 32),
+        ledger_instance_id BLOB NOT NULL CHECK(length(ledger_instance_id) = 16),
+        registry_schema_version INTEGER NOT NULL CHECK(registry_schema_version = 1),
+        terminal_count INTEGER NOT NULL CHECK(terminal_count BETWEEN 1 AND 1024),
+        event_count INTEGER NOT NULL CHECK(event_count BETWEEN 0 AND 1024),
+        encoded_bytes INTEGER NOT NULL CHECK(encoded_bytes BETWEEN 1 AND 4194304),
+        created_at INTEGER NOT NULL
+    ) STRICT",
+    "CREATE TABLE IF NOT EXISTS session_flush_batch_members(
+        batch_id BLOB NOT NULL CHECK(length(batch_id) = 32)
+            REFERENCES session_flush_batches(batch_id),
+        seq INTEGER NOT NULL CHECK(seq BETWEEN 0 AND 1023),
+        authority BLOB NOT NULL CHECK(length(authority) = 32)
+            REFERENCES session_terminals(authority),
+        PRIMARY KEY(batch_id, seq),
+        UNIQUE(batch_id, authority)
+    ) STRICT",
+    "CREATE INDEX IF NOT EXISTS idx_session_flush_batch_members_authority
+     ON session_flush_batch_members(authority)",
+    "CREATE TRIGGER IF NOT EXISTS trg_session_claims_immutable_update
+     BEFORE UPDATE ON session_claims
+     BEGIN
+       SELECT RAISE(ABORT, 'session claim is immutable');
+     END",
+    "CREATE TRIGGER IF NOT EXISTS trg_session_claims_immutable_delete
+     BEFORE DELETE ON session_claims
+     BEGIN
+       SELECT RAISE(ABORT, 'session claim is immutable');
+     END",
+    "CREATE TRIGGER IF NOT EXISTS trg_session_claims_immutable_reinsert
+     BEFORE INSERT ON session_claims
+     WHEN EXISTS(SELECT 1 FROM session_claims WHERE authority = NEW.authority)
+     BEGIN
+       SELECT RAISE(ABORT, 'session claim is immutable');
+     END",
+    "CREATE TRIGGER IF NOT EXISTS trg_session_terminals_immutable_update
+     BEFORE UPDATE ON session_terminals
+     BEGIN
+       SELECT RAISE(ABORT, 'session terminal is immutable');
+     END",
+    "CREATE TRIGGER IF NOT EXISTS trg_session_terminals_immutable_delete
+     BEFORE DELETE ON session_terminals
+     BEGIN
+       SELECT RAISE(ABORT, 'session terminal is immutable');
+     END",
+    "CREATE TRIGGER IF NOT EXISTS trg_session_terminals_immutable_reinsert
+     BEFORE INSERT ON session_terminals
+     WHEN EXISTS(
+         SELECT 1 FROM session_terminals WHERE authority = NEW.authority
+     )
+     BEGIN
+       SELECT RAISE(ABORT, 'session terminal is immutable');
+     END",
+    "CREATE TRIGGER IF NOT EXISTS trg_session_terminal_events_immutable_update
+     BEFORE UPDATE ON session_terminal_events
+     BEGIN
+       SELECT RAISE(ABORT, 'session terminal event link is immutable');
+     END",
+    "CREATE TRIGGER IF NOT EXISTS trg_session_terminal_events_immutable_delete
+     BEFORE DELETE ON session_terminal_events
+     BEGIN
+       SELECT RAISE(ABORT, 'session terminal event link is immutable');
+     END",
+    "CREATE TRIGGER IF NOT EXISTS trg_session_terminal_events_immutable_reinsert
+     BEFORE INSERT ON session_terminal_events
+     WHEN EXISTS(
+         SELECT 1 FROM session_terminal_events
+         WHERE (authority = NEW.authority AND seq = NEW.seq)
+            OR event_id = NEW.event_id
+     )
+     BEGIN
+       SELECT RAISE(ABORT, 'session terminal event link is immutable');
+     END",
+    "CREATE TRIGGER IF NOT EXISTS trg_session_flush_batches_immutable_update
+     BEFORE UPDATE ON session_flush_batches
+     BEGIN
+       SELECT RAISE(ABORT, 'session flush batch is immutable');
+     END",
+    "CREATE TRIGGER IF NOT EXISTS trg_session_flush_batches_immutable_delete
+     BEFORE DELETE ON session_flush_batches
+     BEGIN
+       SELECT RAISE(ABORT, 'session flush batch is immutable');
+     END",
+    "CREATE TRIGGER IF NOT EXISTS trg_session_flush_batches_immutable_reinsert
+     BEFORE INSERT ON session_flush_batches
+     WHEN EXISTS(
+         SELECT 1 FROM session_flush_batches WHERE batch_id = NEW.batch_id
+     )
+     BEGIN
+       SELECT RAISE(ABORT, 'session flush batch is immutable');
+     END",
+    "CREATE TRIGGER IF NOT EXISTS trg_session_flush_batch_members_immutable_update
+     BEFORE UPDATE ON session_flush_batch_members
+     BEGIN
+       SELECT RAISE(ABORT, 'session flush batch member is immutable');
+     END",
+    "CREATE TRIGGER IF NOT EXISTS trg_session_flush_batch_members_immutable_delete
+     BEFORE DELETE ON session_flush_batch_members
+     BEGIN
+       SELECT RAISE(ABORT, 'session flush batch member is immutable');
+     END",
+    "CREATE TRIGGER IF NOT EXISTS trg_session_flush_batch_members_immutable_reinsert
+     BEFORE INSERT ON session_flush_batch_members
+     WHEN EXISTS(
+         SELECT 1 FROM session_flush_batch_members
+         WHERE (batch_id = NEW.batch_id AND seq = NEW.seq)
+            OR (batch_id = NEW.batch_id AND authority = NEW.authority)
+     )
+     BEGIN
+       SELECT RAISE(ABORT, 'session flush batch member is immutable');
+     END",
+    "CREATE TRIGGER IF NOT EXISTS trg_owned_session_events_immutable_update
+     BEFORE UPDATE ON events
+     WHEN EXISTS(
+         SELECT 1 FROM session_terminal_events WHERE event_id = OLD.id
+     )
+     BEGIN
+       SELECT RAISE(ABORT, 'owned session event is immutable');
+     END",
+    "CREATE TRIGGER IF NOT EXISTS trg_owned_session_events_immutable_delete
+     BEFORE DELETE ON events
+     WHEN EXISTS(
+         SELECT 1 FROM session_terminal_events WHERE event_id = OLD.id
+     )
+     BEGIN
+       SELECT RAISE(ABORT, 'owned session event is immutable');
+     END",
+    "CREATE TRIGGER IF NOT EXISTS trg_owned_session_events_immutable_reinsert
+     BEFORE INSERT ON events
+     WHEN EXISTS(
+         SELECT 1 FROM session_terminal_events WHERE event_id = NEW.id
+     )
+     BEGIN
+       SELECT RAISE(ABORT, 'owned session event is immutable');
+     END",
+];
+
+/// Every table the CURRENT schema owns (v1 set + v2 through v6 additions); the
 /// `table_count`/lint whitelist.
 pub const ALL_TABLES: &[&str] = &[
     "artifacts",
@@ -303,4 +492,9 @@ pub const ALL_TABLES: &[&str] = &[
     "branches",
     "speculation",
     "ledger_identity",
+    "session_claims",
+    "session_terminals",
+    "session_terminal_events",
+    "session_flush_batches",
+    "session_flush_batch_members",
 ];

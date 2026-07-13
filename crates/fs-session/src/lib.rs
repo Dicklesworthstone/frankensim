@@ -31,13 +31,16 @@ pub use gemm_tune::{
     gemm_tune_key_with_pool_budgeted, gemm_tune_metadata_plan_bytes,
 };
 pub use governor::{
-    Charge, DegradationEvent, DegradationStep, Enforcement, FlushReport, Governor,
-    MAX_CHECKPOINT_CLAIM_BYTES, MAX_DEGRADATION_EVENTS_PER_SCOPE, MAX_EVENT_PAGE_ROWS,
+    Charge, DegradationEvent, DegradationStep, DurableGovernorNonce, Enforcement, FlushReport,
+    Governor, MAX_CHECKPOINT_CLAIM_BYTES, MAX_DEGRADATION_EVENTS_PER_SCOPE, MAX_EVENT_PAGE_ROWS,
     MAX_FLUSH_ENCODED_BYTES, MAX_FLUSH_ROWS, MAX_IDEMPOTENCY_INPUT_BYTES,
-    MAX_IDEMPOTENCY_KEYS_PER_SESSION, MAX_RETAINED_BYTES_PER_GOVERNOR,
+    MAX_IDEMPOTENCY_KEYS_PER_SESSION, MAX_METER_REPORTS_PER_SESSION,
+    MAX_PRESSURE_ACTIONS_PER_SESSION, MAX_RETAINED_BYTES_PER_GOVERNOR,
     MAX_RETAINED_BYTES_PER_SCOPE, MAX_RETAINED_EVIDENCE_BYTES, MAX_SESSIONS_PER_GOVERNOR,
-    MAX_SESSIONS_PER_SCOPE, PauseAcknowledgement, PauseRequestId, RetainedEvidence,
-    ScopeFlushPermit, StepPhase, SubmissionReceipt, SubmitOutcome,
+    MAX_SESSIONS_PER_SCOPE, MeterReceipt, MeterReportId, MeterSnapshot, PauseAcknowledgement,
+    PauseRequestId, PressureActionId, PressureReceipt, ResumeActivationId, ResumeActivationReceipt,
+    RetainedEvidence, ScopeFlushPermit, SessionOpenId, SessionOpenReceipt, StepPhase,
+    SubmissionReceipt, SubmissionRequestId, SubmitOutcome,
 };
 pub use guidance::Guidance;
 pub use token::{
@@ -64,6 +67,34 @@ pub enum SessionError {
     SessionAlreadyOpen {
         /// The duplicate id.
         id: u64,
+    },
+    /// An opaque mutation authority belongs to another governor, session, or
+    /// immutable session-open identity.
+    MutationAuthorityMismatch {
+        /// Bounded authority family.
+        kind: &'static str,
+        /// Domain-separated identity of the rejected authority.
+        id: fs_blake3::ContentHash,
+    },
+    /// An already-committed retry authority was reused with a different
+    /// payload or execution capability.
+    MutationConflict {
+        /// Bounded authority family.
+        kind: &'static str,
+        /// Domain-separated identity whose first payload remains authoritative.
+        id: fs_blake3::ContentHash,
+    },
+    /// An unused authority names an execution generation that is no longer
+    /// current. Exact replay of an already-committed receipt is still allowed.
+    StaleMutationGeneration {
+        /// Bounded authority family.
+        kind: &'static str,
+        /// Session named by the authority.
+        id: u64,
+        /// Generation captured when the authority was minted.
+        supplied: u64,
+        /// Current live generation.
+        current: u64,
     },
     /// A ledger scope was not a canonical bounded authority string.
     InvalidLedgerScope {
@@ -146,6 +177,71 @@ pub enum SessionError {
         /// Diagnosis.
         what: String,
     },
+    /// A restart-stable governor refused a fresh execution through the
+    /// process-local API because no ledger was supplied for its mandatory
+    /// pre-execution claim.
+    DurableLedgerRequired {
+        /// Mutation family.
+        kind: &'static str,
+        /// Restart-stable authority that must use the durable path.
+        authority: fs_blake3::ContentHash,
+    },
+    /// Durable recovery found no terminal receipt for an authority whose
+    /// caller must explicitly choose a reconciliation path.
+    RecoveryRequired {
+        /// Mutation family.
+        kind: &'static str,
+        /// Restart-stable authority.
+        authority: fs_blake3::ContentHash,
+    },
+    /// A durable execution claim exists without a terminal receipt. Caller
+    /// work may have produced side effects, so it is never run automatically.
+    IndeterminateMutation {
+        /// Mutation family.
+        kind: &'static str,
+        /// Restart-stable authority.
+        authority: fs_blake3::ContentHash,
+    },
+    /// A durable terminal row, receipt codec, or owned event group violated
+    /// its authenticated bounded schema.
+    TerminalCorrupt {
+        /// Mutation family.
+        kind: &'static str,
+        /// Restart-stable authority.
+        authority: fs_blake3::ContentHash,
+        /// Bounded structural diagnosis.
+        detail: String,
+    },
+    /// A durable receipt uses a newer fs-session codec schema.
+    UnsupportedTerminalSchema {
+        /// Stored schema version.
+        found: u32,
+        /// Highest version understood by this build.
+        supported: u32,
+    },
+    /// Recovery was attempted against a different physical ledger.
+    RecoveryLedgerMismatch {
+        /// Ledger bound into the durable governor identity.
+        expected: fs_ledger::LedgerInstanceId,
+        /// Ledger supplied to recovery.
+        attempted: fs_ledger::LedgerInstanceId,
+    },
+    /// A stored terminal names a different durable governor namespace.
+    RecoveryGovernorMismatch {
+        /// Current governor namespace.
+        expected: fs_blake3::ContentHash,
+        /// Namespace stored by the terminal.
+        found: fs_blake3::ContentHash,
+    },
+    /// Causal meter recovery skipped or reordered a committed ordinal.
+    RecoveryCausalGap {
+        /// Session whose meter chain is discontinuous.
+        session: u64,
+        /// Next required commit ordinal.
+        expected: u64,
+        /// Stored ordinal offered to recovery.
+        found: u64,
+    },
     /// A memory-pressure level outside the declared ladder 1..=3
     /// (bead gp3.13: out-of-ladder levels are refused, never clamped).
     InvalidPressureLevel {
@@ -206,6 +302,22 @@ pub enum SessionError {
         /// Ordinal of the still-pending request.
         requested_ordinal: i64,
     },
+    /// A pause acknowledgement arrived before every admitted submission in
+    /// the draining generation published its terminal meter outcome.
+    PauseDrainPending {
+        /// Session whose gate generation cannot rotate yet.
+        id: u64,
+        /// Exact number of admitted submissions still executing.
+        pending_submissions: usize,
+    },
+    /// New work was offered after the current cancellation gate entered its
+    /// draining state but before a replacement generation was activated.
+    SessionGateDraining {
+        /// Session refusing new work.
+        id: u64,
+        /// Requested gate generation that is draining.
+        generation: u64,
+    },
 }
 
 impl fmt::Display for SessionError {
@@ -217,6 +329,23 @@ impl fmt::Display for SessionError {
                 f,
                 "session {id} is already open; capability tokens are immutable and the existing \
                  session state was left unchanged"
+            ),
+            SessionError::MutationAuthorityMismatch { kind, id } => write!(
+                f,
+                "{kind} authority {id} belongs to another governor, session, or immutable open identity; no mutation was committed"
+            ),
+            SessionError::MutationConflict { kind, id } => write!(
+                f,
+                "{kind} authority {id} was already claimed or committed with a different payload; the original authority remains authoritative"
+            ),
+            SessionError::StaleMutationGeneration {
+                kind,
+                id,
+                supplied,
+                current,
+            } => write!(
+                f,
+                "{kind} authority for session {id} captured stale generation {supplied}; current generation is {current} and no mutation was committed"
             ),
             SessionError::InvalidLedgerScope {
                 scope_preview,
@@ -277,6 +406,49 @@ impl fmt::Display for SessionError {
             ),
             SessionError::Submission { what } => write!(f, "submission failed: {what}"),
             SessionError::Persistence { what } => write!(f, "persistence failed: {what}"),
+            SessionError::DurableLedgerRequired { kind, authority } => write!(
+                f,
+                "durable {kind} authority {authority} requires the ledger-bound submission API before fresh caller work can run"
+            ),
+            SessionError::RecoveryRequired { kind, authority } => write!(
+                f,
+                "durable {kind} authority {authority} has no terminal receipt; explicit recovery or reconciliation is required"
+            ),
+            SessionError::IndeterminateMutation { kind, authority } => write!(
+                f,
+                "durable {kind} authority {authority} was claimed but has no terminal receipt; caller work may have run, so automatic re-execution is refused"
+            ),
+            SessionError::TerminalCorrupt {
+                kind,
+                authority,
+                detail,
+            } => write!(
+                f,
+                "durable {kind} terminal {authority} is corrupt: {detail}; typed replay is refused"
+            ),
+            SessionError::UnsupportedTerminalSchema { found, supported } => write!(
+                f,
+                "durable terminal codec schema v{found} is newer than supported v{supported}; upgrade before recovery"
+            ),
+            SessionError::RecoveryLedgerMismatch {
+                expected,
+                attempted,
+            } => write!(
+                f,
+                "durable recovery is bound to ledger {expected}; refusing foreign ledger {attempted}"
+            ),
+            SessionError::RecoveryGovernorMismatch { expected, found } => write!(
+                f,
+                "durable terminal belongs to governor {found}; current recovery namespace is {expected}"
+            ),
+            SessionError::RecoveryCausalGap {
+                session,
+                expected,
+                found,
+            } => write!(
+                f,
+                "durable meter recovery for session {session} expected commit ordinal {expected} but found {found}; recover the contiguous prefix first"
+            ),
             SessionError::InvalidPressureLevel { level } => write!(
                 f,
                 "memory-pressure level {level} is outside the declared ladder 1..=3; \
@@ -324,6 +496,17 @@ impl fmt::Display for SessionError {
             } => write!(
                 f,
                 "session {id} already has a pause request pending at ordinal {requested_ordinal}; acknowledge it before requesting another pressure transition"
+            ),
+            SessionError::PauseDrainPending {
+                id,
+                pending_submissions,
+            } => write!(
+                f,
+                "session {id} still has {pending_submissions} admitted submission(s) draining; their terminal meter outcomes must publish before the pause generation can rotate"
+            ),
+            SessionError::SessionGateDraining { id, generation } => write!(
+                f,
+                "session {id} gate generation {generation} is draining after cancellation; exact terminal replays remain available but new work is refused"
             ),
         }
     }

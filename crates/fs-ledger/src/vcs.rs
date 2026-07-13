@@ -257,28 +257,11 @@ impl Ledger {
     }
 
     fn commit_exec_mode(&self, op: i64) -> Result<ExecMode, LedgerError> {
-        let rows = self
-            .conn
-            .query_with_params(
-                "SELECT exec_mode FROM ops WHERE id = ?1",
-                &[SqliteValue::Integer(op)],
-            )
-            .map_err(|e| LedgerError::Sql {
-                context: "commit_exec_mode".to_string(),
-                detail: e.to_string(),
-            })?;
-        match rows.first().and_then(|row| row.get(0)) {
-            Some(SqliteValue::Text(mode)) => {
-                ExecMode::parse(mode.as_str()).ok_or_else(|| LedgerError::Corrupt {
-                    hash_hex: String::new(),
-                    detail: format!("op {op}: invalid execution mode {mode:?}"),
-                })
-            }
-            other => Err(LedgerError::Corrupt {
-                hash_hex: String::new(),
-                detail: format!("op {op}: missing execution mode, got {other:?}"),
-            }),
-        }
+        let mode = self.bounded_op_exec_mode(op)?;
+        ExecMode::parse(&mode).ok_or_else(|| LedgerError::OpCorrupt {
+            op,
+            detail: "execution mode passed storage guard but not enum parsing".to_string(),
+        })
     }
 
     /// The commit LEAF hash of one op: canonical frozen content (Five

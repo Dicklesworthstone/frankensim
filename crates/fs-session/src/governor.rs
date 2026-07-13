@@ -12,6 +12,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+mod recovery;
+
 /// Hard-bound ratio: past 6/5 of a grant the session pauses. Float and exact
 /// integer resource paths derive from this one policy definition.
 const HARD_FACTOR_NUMERATOR: u32 = 6;
@@ -21,15 +23,35 @@ const HARD_FACTOR: f64 = HARD_FACTOR_NUMERATOR as f64 / HARD_FACTOR_DENOMINATOR 
 const IDEMPOTENCY_KEY_DOMAIN: &str = "org.frankensim.fs-session.idempotency-key.v3";
 const IDEMPOTENCY_AGENT_DOMAIN: &str = "org.frankensim.fs-session.idempotency-agent.v1";
 const IDEMPOTENCY_PROGRAM_DOMAIN: &str = "org.frankensim.fs-session.idempotency-program.v1";
-const SUBMISSION_RECEIPT_DOMAIN: &str = "org.frankensim.fs-session.submission-receipt.v2";
+const SUBMISSION_RECEIPT_DOMAIN: &str = "org.frankensim.fs-session.submission-receipt.v3";
 const RETAINED_EVIDENCE_DOMAIN: &str = "org.frankensim.fs-session.retained-evidence.v1";
-const MAX_IDEMPOTENCY_KEY_BYTES: usize = 4096;
+const SESSION_OPEN_ID_DOMAIN: &str = "org.frankensim.fs-session.open-id.v2";
+const SESSION_OPEN_RECEIPT_DOMAIN: &str = "org.frankensim.fs-session.open-receipt.v1";
+const SESSION_TOKEN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-session.token-identity.v1";
+const GATE_BINDING_ID_DOMAIN: &str = "org.frankensim.fs-session.gate-binding-id.v1";
+const METER_REPORT_ID_DOMAIN: &str = "org.frankensim.fs-session.meter-report-id.v2";
+const METER_RECEIPT_DOMAIN: &str = "org.frankensim.fs-session.meter-receipt.v1";
+const PRESSURE_ACTION_ID_DOMAIN: &str = "org.frankensim.fs-session.pressure-action-id.v2";
+const PRESSURE_RECEIPT_DOMAIN: &str = "org.frankensim.fs-session.pressure-receipt.v1";
+const SUBMISSION_REQUEST_ID_DOMAIN: &str = "org.frankensim.fs-session.submission-request-id.v2";
+const PAUSE_ACKNOWLEDGEMENT_ID_DOMAIN: &str =
+    "org.frankensim.fs-session.pause-acknowledgement-id.v1";
+const PAUSE_ACKNOWLEDGEMENT_RECEIPT_DOMAIN: &str =
+    "org.frankensim.fs-session.pause-acknowledgement-receipt.v1";
+const RESUME_ACTIVATION_ID_DOMAIN: &str = "org.frankensim.fs-session.resume-activation-id.v1";
+const RESUME_ACTIVATION_RECEIPT_DOMAIN: &str =
+    "org.frankensim.fs-session.resume-activation-receipt.v1";
+const EPHEMERAL_GOVERNOR_ID_DOMAIN: &str = "org.frankensim.fs-session.ephemeral-governor-id.v1";
+const DURABLE_GOVERNOR_ID_DOMAIN: &str = "org.frankensim.fs-session.durable-governor-id.v1";
 /// Maximum bytes hashed from either canonical-idempotency-key input.
 pub const MAX_IDEMPOTENCY_INPUT_BYTES: usize = 1024 * 1024;
 // Fixed-width conservative framing for t, three byte lengths, and the two
 // optional-field discriminants in one persisted event row.
 const FLUSH_ROW_FRAMING_BYTES: usize =
     core::mem::size_of::<i64>() + 3 * core::mem::size_of::<u64>() + 2 * core::mem::size_of::<u8>();
+// Conservative claim + terminal + batch-member framing. The fs-ledger API
+// performs the authoritative exact bound check before opening its transaction.
+const FLUSH_TERMINAL_FRAMING_BYTES: usize = 512;
 
 /// Maximum sessions admitted by one governor.
 pub const MAX_SESSIONS_PER_GOVERNOR: usize = 4096;
@@ -37,6 +59,10 @@ pub const MAX_SESSIONS_PER_GOVERNOR: usize = 4096;
 pub const MAX_SESSIONS_PER_SCOPE: usize = 1024;
 /// Maximum distinct idempotency keys retained for one session.
 pub const MAX_IDEMPOTENCY_KEYS_PER_SESSION: usize = 4096;
+/// Maximum distinct metering reports retained for one session.
+pub const MAX_METER_REPORTS_PER_SESSION: usize = 8192;
+/// Maximum distinct pressure actions retained for one session.
+pub const MAX_PRESSURE_ACTIONS_PER_SESSION: usize = 4096;
 /// Maximum degradation events retained in memory for one scope.
 pub const MAX_DEGRADATION_EVENTS_PER_SCOPE: usize = 65_536;
 /// Maximum UTF-8 bytes retained from caller-controlled diagnostic evidence.
@@ -54,13 +80,34 @@ pub const MAX_FLUSH_ENCODED_BYTES: usize = 4 * 1024 * 1024;
 /// Maximum degradation events returned by one page request.
 pub const MAX_EVENT_PAGE_ROWS: usize = 1024;
 
-const IDEMPOTENCY_KEY_RETAINED_COPIES: usize = 3;
 const MAX_IDEMPOTENCY_TERMINAL_RETAINED_BYTES: usize = MAX_RETAINED_EVIDENCE_BYTES;
 const MAX_PAUSE_COMPLETION_METADATA_BYTES: usize = 512;
 const MAX_PAUSE_COMPLETION_RETAINED_BYTES: usize =
     MAX_RETAINED_EVIDENCE_BYTES + MAX_PAUSE_COMPLETION_METADATA_BYTES;
+const MAX_METER_RECEIPT_RETAINED_BYTES: usize = 1024;
+const PRESSURE_ACTION_RETAINED_BYTES: usize = 4 * core::mem::size_of::<u64>() + 64;
+const OPEN_REQUEST_RETAINED_BYTES: usize = 4 * core::mem::size_of::<u64>() + 96;
+const SUBMISSION_REQUEST_RETAINED_BYTES: usize = 3 * 32 + 64;
 
 static NEXT_GOVERNOR_ID: AtomicU64 = AtomicU64::new(1);
+
+fn ephemeral_governor_id() -> fs_blake3::ContentHash {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&std::process::id().to_le_bytes());
+    payload.extend_from_slice(
+        &std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+            .to_le_bytes(),
+    );
+    payload.extend_from_slice(
+        &NEXT_GOVERNOR_ID
+            .fetch_add(1, Ordering::Relaxed)
+            .to_le_bytes(),
+    );
+    fs_blake3::hash_domain(EPHEMERAL_GOVERNOR_ID_DOMAIN, &payload)
+}
 
 fn utf8_prefix(value: &str, max_bytes: usize) -> String {
     let mut end = 0;
@@ -114,10 +161,32 @@ impl RetainedEvidence {
     }
 }
 
+/// Explicit stable nonce used to reconstruct one governor identity against
+/// the same physical Design Ledger after a process restart.
+///
+/// This is an identity input, not an authentication secret. The caller must
+/// persist and version it alongside its session orchestration state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DurableGovernorNonce(fs_blake3::ContentHash);
+
+impl DurableGovernorNonce {
+    /// Construct an explicit nonce from exactly 32 caller-persisted bytes.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(fs_blake3::ContentHash(bytes))
+    }
+
+    /// Exact persisted nonce bytes.
+    #[must_use]
+    pub const fn as_bytes(self) -> [u8; 32] {
+        self.0.0
+    }
+}
+
 /// Unforgeable authority to flush one exact scope from one governor.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ScopeFlushPermit {
-    governor_id: u64,
+    governor_id: fs_blake3::ContentHash,
     ledger_scope: String,
 }
 
@@ -137,11 +206,273 @@ impl core::fmt::Debug for ScopeFlushPermit {
     }
 }
 
+/// Opaque authority for one retryable session-open request.
+///
+/// The private fields bind the request to one governor and `SessionId`. The
+/// caller supplies only a bounded request key; exact token and gate identity
+/// are committed by the first successful open and checked on every replay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SessionOpenId {
+    governor_id: fs_blake3::ContentHash,
+    session: SessionId,
+    content_hash: fs_blake3::ContentHash,
+}
+
+impl SessionOpenId {
+    /// Session this request is allowed to open.
+    #[must_use]
+    pub const fn session(self) -> SessionId {
+        self.session
+    }
+
+    /// Domain-separated request identity.
+    #[must_use]
+    pub const fn content_hash(self) -> fs_blake3::ContentHash {
+        self.content_hash
+    }
+}
+
+/// Receipt for an admitted or exactly replayed session open.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionOpenReceipt {
+    open_id: SessionOpenId,
+    token_digest: fs_blake3::ContentHash,
+    gate_identity: Option<fs_blake3::ContentHash>,
+    permit: ScopeFlushPermit,
+    content_hash: fs_blake3::ContentHash,
+}
+
+impl SessionOpenReceipt {
+    /// Exact retry authority consumed by this open.
+    #[must_use]
+    pub const fn open_id(&self) -> SessionOpenId {
+        self.open_id
+    }
+
+    /// Digest of the complete admitted capability token.
+    #[must_use]
+    pub const fn token_digest(&self) -> fs_blake3::ContentHash {
+        self.token_digest
+    }
+
+    /// Governor-local identity of the bound cancellation gate, when gated.
+    #[must_use]
+    pub const fn gate_identity(&self) -> Option<fs_blake3::ContentHash> {
+        self.gate_identity
+    }
+
+    /// Replayable permit for the exact immutable ledger scope.
+    #[must_use]
+    pub fn flush_permit(&self) -> ScopeFlushPermit {
+        self.permit.clone()
+    }
+
+    /// Content identity binding authority, token, gate, and scope.
+    #[must_use]
+    pub const fn content_hash(&self) -> fs_blake3::ContentHash {
+        self.content_hash
+    }
+}
+
+/// Opaque authority for one retryable meter report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct MeterReportId {
+    governor_id: fs_blake3::ContentHash,
+    session: SessionId,
+    session_open: fs_blake3::ContentHash,
+    generation: u64,
+    content_hash: fs_blake3::ContentHash,
+}
+
+impl MeterReportId {
+    /// Session whose meter this report can mutate.
+    #[must_use]
+    pub const fn session(self) -> SessionId {
+        self.session
+    }
+
+    /// Session execution generation captured when the authority was minted.
+    #[must_use]
+    pub const fn generation(self) -> u64 {
+        self.generation
+    }
+
+    /// Domain-separated report identity.
+    #[must_use]
+    pub const fn content_hash(self) -> fs_blake3::ContentHash {
+        self.content_hash
+    }
+}
+
+/// Exact consumption state before or after one committed report.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MeterSnapshot {
+    /// Total core-seconds.
+    pub core_s: f64,
+    /// Peak resident bytes.
+    pub mem_peak_bytes: u64,
+    /// Total wall seconds.
+    pub wall_s: f64,
+    /// Number of committed throttling verdicts.
+    pub throttled: u32,
+    /// Number of committed pause verdicts.
+    pub paused: u32,
+}
+
+/// Receipt for one atomically committed or exactly replayed meter report.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MeterReceipt {
+    report_id: MeterReportId,
+    commit_ordinal: u64,
+    delta: Charge,
+    before: MeterSnapshot,
+    after: MeterSnapshot,
+    enforcement: Enforcement,
+    content_hash: fs_blake3::ContentHash,
+}
+
+impl MeterReceipt {
+    /// Report authority consumed by this commit.
+    #[must_use]
+    pub const fn report_id(&self) -> MeterReportId {
+        self.report_id
+    }
+
+    /// Global causal meter-commit ordinal allocated with the charge.
+    #[must_use]
+    pub const fn commit_ordinal(&self) -> u64 {
+        self.commit_ordinal
+    }
+
+    /// Exact-bit charge payload.
+    #[must_use]
+    pub const fn delta(&self) -> Charge {
+        self.delta
+    }
+
+    /// Meter state immediately before the commit.
+    #[must_use]
+    pub const fn before(&self) -> MeterSnapshot {
+        self.before
+    }
+
+    /// Meter state immediately after the commit.
+    #[must_use]
+    pub const fn after(&self) -> MeterSnapshot {
+        self.after
+    }
+
+    /// Enforcement decision derived from `after`.
+    #[must_use]
+    pub const fn enforcement(&self) -> &Enforcement {
+        &self.enforcement
+    }
+
+    /// Content identity binding authority, payload, causal order, and states.
+    #[must_use]
+    pub const fn content_hash(&self) -> fs_blake3::ContentHash {
+        self.content_hash
+    }
+}
+
+/// Opaque authority for one retryable declared pressure action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PressureActionId {
+    governor_id: fs_blake3::ContentHash,
+    session: SessionId,
+    session_open: fs_blake3::ContentHash,
+    generation: u64,
+    content_hash: fs_blake3::ContentHash,
+}
+
+impl PressureActionId {
+    /// Session this action can mutate.
+    #[must_use]
+    pub const fn session(self) -> SessionId {
+        self.session
+    }
+
+    /// Cancellation/execution generation captured at minting.
+    #[must_use]
+    pub const fn generation(self) -> u64 {
+        self.generation
+    }
+
+    /// Domain-separated action identity.
+    #[must_use]
+    pub const fn content_hash(self) -> fs_blake3::ContentHash {
+        self.content_hash
+    }
+}
+
+/// Receipt for one committed or exactly replayed pressure action.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PressureReceipt {
+    action_id: PressureActionId,
+    level: u8,
+    events: Vec<DegradationEvent>,
+    content_hash: fs_blake3::ContentHash,
+}
+
+impl PressureReceipt {
+    /// Action authority consumed by this receipt.
+    #[must_use]
+    pub const fn action_id(&self) -> PressureActionId {
+        self.action_id
+    }
+
+    /// Exact declared pressure level.
+    #[must_use]
+    pub const fn level(&self) -> u8 {
+        self.level
+    }
+
+    /// Canonical event prefix committed exactly once by the action.
+    #[must_use]
+    pub fn events(&self) -> &[DegradationEvent] {
+        &self.events
+    }
+
+    /// Content identity binding authority, level, and emitted events.
+    #[must_use]
+    pub const fn content_hash(&self) -> fs_blake3::ContentHash {
+        self.content_hash
+    }
+}
+
+/// Opaque authority for one admitted program submission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SubmissionRequestId {
+    governor_id: fs_blake3::ContentHash,
+    session: SessionId,
+    session_open: fs_blake3::ContentHash,
+    generation: u64,
+    key_hash: fs_blake3::ContentHash,
+    request_hash: fs_blake3::ContentHash,
+    content_hash: fs_blake3::ContentHash,
+}
+
+impl SubmissionRequestId {
+    /// Session this request can submit into.
+    #[must_use]
+    pub const fn session(self) -> SessionId {
+        self.session
+    }
+
+    /// Domain-separated identity of agent key plus canonical program.
+    #[must_use]
+    pub const fn content_hash(self) -> fs_blake3::ContentHash {
+        self.content_hash
+    }
+}
+
 /// Result of one bounded flush chunk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FlushReport {
     /// Rows atomically appended by this call.
     pub appended_rows: usize,
+    /// Typed terminal receipts atomically committed or verified by this call.
+    pub committed_terminals: usize,
     /// Conservatively encoded bytes admitted to the batch.
     pub encoded_bytes: usize,
     /// More scoped state was dirty at return; call again with the same permit
@@ -228,7 +559,7 @@ pub enum StepPhase {
 /// different pause generation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PauseRequestId {
-    governor_id: u64,
+    governor_id: fs_blake3::ContentHash,
     session: SessionId,
     gate_generation: u64,
     requested_ordinal: i64,
@@ -277,6 +608,8 @@ pub struct DegradationEvent {
     pub gate_generation: Option<u64>,
     /// Opaque acknowledgement authority for pause request/completion events.
     pub pause_request_id: Option<PauseRequestId>,
+    /// Retry authority that committed this declared action.
+    pub pressure_action_id: Option<PressureActionId>,
 }
 
 /// Successful pause acknowledgement plus the fresh gate that resumed work
@@ -289,6 +622,8 @@ pub struct PauseAcknowledgement {
     event: DegradationEvent,
     resume_gate: Arc<CancelGate>,
     resume_generation: u64,
+    gate_binding: fs_blake3::ContentHash,
+    content_hash: fs_blake3::ContentHash,
 }
 
 impl PauseAcknowledgement {
@@ -315,13 +650,93 @@ impl PauseAcknowledgement {
     pub const fn resume_generation(&self) -> u64 {
         self.resume_generation
     }
+
+    /// Restart-stable semantic binding for the fresh gate generation. The
+    /// process-local [`Arc`] may be rebound during recovery without changing
+    /// this identity.
+    #[must_use]
+    pub const fn gate_binding(&self) -> fs_blake3::ContentHash {
+        self.gate_binding
+    }
+
+    /// Content identity of the checkpoint acknowledgement terminal.
+    #[must_use]
+    pub const fn content_hash(&self) -> fs_blake3::ContentHash {
+        self.content_hash
+    }
+}
+
+/// Opaque authority for the idempotent activation of one acknowledged resume
+/// generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ResumeActivationId {
+    governor_id: fs_blake3::ContentHash,
+    session: SessionId,
+    session_open: fs_blake3::ContentHash,
+    resume_generation: u64,
+    content_hash: fs_blake3::ContentHash,
+}
+
+impl ResumeActivationId {
+    /// Session whose resumed generation this authority activates.
+    #[must_use]
+    pub const fn session(self) -> SessionId {
+        self.session
+    }
+
+    /// Resumed gate generation named by this authority.
+    #[must_use]
+    pub const fn resume_generation(self) -> u64 {
+        self.resume_generation
+    }
+
+    /// Domain-separated activation authority.
+    #[must_use]
+    pub const fn content_hash(self) -> fs_blake3::ContentHash {
+        self.content_hash
+    }
+}
+
+/// Structured receipt for an activated or exactly replayed resume generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResumeActivationReceipt {
+    activation_id: ResumeActivationId,
+    acknowledgement_hash: fs_blake3::ContentHash,
+    gate_binding: fs_blake3::ContentHash,
+    content_hash: fs_blake3::ContentHash,
+}
+
+impl ResumeActivationReceipt {
+    /// Exact activation authority consumed by this receipt.
+    #[must_use]
+    pub const fn activation_id(self) -> ResumeActivationId {
+        self.activation_id
+    }
+
+    /// Checkpoint acknowledgement this activation adopts.
+    #[must_use]
+    pub const fn acknowledgement_hash(self) -> fs_blake3::ContentHash {
+        self.acknowledgement_hash
+    }
+
+    /// Restart-stable semantic gate binding adopted by workers.
+    #[must_use]
+    pub const fn gate_binding(self) -> fs_blake3::ContentHash {
+        self.gate_binding
+    }
+
+    /// Content identity of the terminal activation receipt.
+    #[must_use]
+    pub const fn content_hash(self) -> fs_blake3::ContentHash {
+        self.content_hash
+    }
 }
 
 /// Opaque content identity for one terminal idempotent submission.
 ///
 /// The private field prevents callers from minting receipts from arbitrary
-/// integers. Identity binds the owning session, exact idempotency key, terminal
-/// outcome, and charge or failure diagnosis.
+/// integers. Identity binds the opaque request, admission order, immutable
+/// ledger scope, and exact terminal meter receipt or failure diagnosis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SubmissionReceipt(fs_blake3::ContentHash);
 
@@ -336,17 +751,17 @@ impl SubmissionReceipt {
     #[must_use]
     pub fn matches_success(
         self,
-        session: SessionId,
+        request_id: SubmissionRequestId,
         ledger_scope: &str,
-        idem_key: &str,
+        admission_ordinal: u64,
         charge: Charge,
-        enforcement: &Enforcement,
+        meter_receipt: &MeterReceipt,
     ) -> bool {
         self == submission_receipt(
-            session,
+            request_id,
             ledger_scope,
-            idem_key,
-            &SubmissionCompletion::Done(charge, enforcement.clone()),
+            admission_ordinal,
+            &SubmissionCompletion::Done(charge, meter_receipt.clone()),
         )
     }
 
@@ -354,15 +769,15 @@ impl SubmissionReceipt {
     #[must_use]
     pub fn matches_failure(
         self,
-        session: SessionId,
+        request_id: SubmissionRequestId,
         ledger_scope: &str,
-        idem_key: &str,
+        admission_ordinal: u64,
         evidence: &RetainedEvidence,
     ) -> bool {
         self == submission_receipt(
-            session,
+            request_id,
             ledger_scope,
-            idem_key,
+            admission_ordinal,
             &SubmissionCompletion::Failed(evidence.clone()),
         )
     }
@@ -379,25 +794,35 @@ impl core::fmt::Display for SubmissionReceipt {
 pub enum SubmitOutcome {
     /// This call executed the work.
     Executed {
+        /// Admission order reserved before caller work began.
+        admission_ordinal: u64,
         /// The charge recorded.
         charge: Charge,
         /// Enforcement decision produced by committing that charge.
         enforcement: Enforcement,
+        /// Causal pre/post meter receipt committed atomically with terminal publication.
+        meter_receipt: MeterReceipt,
         /// Content-derived terminal receipt.
         receipt: SubmissionReceipt,
     },
     /// The key had already executed (or raced and lost): same receipt,
     /// NO additional charge.
     Duplicate {
+        /// Original admission order.
+        admission_ordinal: u64,
         /// The original execution's receipt.
         receipt: SubmissionReceipt,
         /// The original execution's enforcement decision.
         enforcement: Enforcement,
+        /// The original execution's exact causal meter receipt.
+        meter_receipt: MeterReceipt,
     },
     /// The one attempted execution failed before a charge could be committed.
     /// The key remains terminal: all duplicates receive this same receipt and
     /// diagnosis, and an explicit retry requires a new key.
     Failed {
+        /// Original admission order.
+        admission_ordinal: u64,
         /// The failed execution's receipt.
         receipt: SubmissionReceipt,
         /// Bounded preview plus full length/digest of the failure diagnosis.
@@ -419,35 +844,89 @@ struct SessionMeters {
     paused: u32,
 }
 
-fn same_meter_snapshot(left: &SessionMeters, right: &SessionMeters) -> bool {
-    left.core_s.to_bits() == right.core_s.to_bits()
-        && left.mem_peak_bytes == right.mem_peak_bytes
-        && left.wall_s.to_bits() == right.wall_s.to_bits()
-        && left.throttled == right.throttled
-        && left.paused == right.paused
+impl SessionMeters {
+    fn snapshot(&self) -> MeterSnapshot {
+        MeterSnapshot {
+            core_s: self.core_s,
+            mem_peak_bytes: self.mem_peak_bytes,
+            wall_s: self.wall_s,
+            throttled: self.throttled,
+            paused: self.paused,
+        }
+    }
 }
 
 #[derive(Debug)]
 enum IdemState {
     Pending {
+        admission_ordinal: u64,
+        request_id: SubmissionRequestId,
         reserved_terminal_bytes: usize,
+        reserved_meter_bytes: usize,
+        durable_permit: Option<fs_ledger::session_registry::SessionClaimPermit>,
     },
     Done {
-        ordinal: u64,
+        admission_ordinal: u64,
         receipt: SubmissionReceipt,
         charge: Charge,
-        enforcement: Enforcement,
+        meter_receipt: MeterReceipt,
+        durable_permit: Option<fs_ledger::session_registry::SessionClaimPermit>,
     },
     Failed {
-        ordinal: u64,
+        admission_ordinal: u64,
         receipt: SubmissionReceipt,
         evidence: RetainedEvidence,
+        durable_permit: Option<fs_ledger::session_registry::SessionClaimPermit>,
     },
 }
 
+fn durable_submission_permit(
+    state: &IdemState,
+) -> Option<fs_ledger::session_registry::SessionClaimPermit> {
+    match state {
+        IdemState::Done { durable_permit, .. } | IdemState::Failed { durable_permit, .. } => {
+            *durable_permit
+        }
+        IdemState::Pending { .. } => None,
+    }
+}
+
+#[allow(clippy::large_enum_variant)] // Lock-local transition value; boxing would add a hot-path allocation.
 enum SubmissionCompletion {
-    Done(Charge, Enforcement),
+    Done(Charge, MeterReceipt),
     Failed(RetainedEvidence),
+}
+
+/// One meter-causal durable row. Successful submissions substitute their
+/// self-contained terminal row for the private meter report that they own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum DirtyCausalMutation {
+    Meter(MeterReportId),
+    Submission(SubmissionRequestId),
+}
+
+/// One indivisible durable control terminal. Variant order is causal when two
+/// lifecycle terminals share the completion event ordinal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum DirtyControlMutation {
+    Pressure(PressureActionId),
+    PauseAcknowledgement(PauseRequestId),
+    ResumeActivation(ResumeActivationId),
+}
+
+#[derive(Clone)]
+struct OpenReplay {
+    token_digest: fs_blake3::ContentHash,
+    gate: Option<Arc<CancelGate>>,
+    receipt: SessionOpenReceipt,
+}
+
+#[derive(Clone)]
+struct PressureReplay {
+    level: u8,
+    event_start: usize,
+    event_len: usize,
+    content_hash: fs_blake3::ContentHash,
 }
 
 struct BufferedLedgerEvent {
@@ -481,6 +960,233 @@ impl BufferedLedgerEvent {
     }
 }
 
+fn buffered_open_receipt(
+    ledger_scope: &str,
+    open_id: SessionOpenId,
+    receipt: &SessionOpenReceipt,
+    token: &CapabilityToken,
+) -> BufferedLedgerEvent {
+    let gate_identity = receipt
+        .gate_identity
+        .map_or_else(|| "null".to_string(), |value| format!("\"{value}\""));
+    BufferedLedgerEvent {
+        session: open_id.session.0.to_be_bytes(),
+        t: 0,
+        kind: "session.open",
+        payload: scoped_payload(
+            "fs-session-open-v1",
+            ledger_scope,
+            &format!(
+                "\"open_id\":\"{}\",\"token_digest\":\"{}\",\"gate_identity\":{gate_identity},\"receipt\":\"{}\",\"core_s_bits\":\"{:016x}\",\"mem_bytes\":{},\"wall_s_bits\":\"{:016x}\",\"cores\":{},\"ops\":{}",
+                open_id.content_hash,
+                receipt.token_digest,
+                receipt.content_hash,
+                token.core_s.to_bits(),
+                token.mem_bytes,
+                token.wall_s.to_bits(),
+                token.cores,
+                string_array_json(&token.ops),
+            ),
+        ),
+    }
+}
+
+fn buffered_meter_receipt(
+    ledger_scope: &str,
+    report_id: MeterReportId,
+    receipt: &MeterReceipt,
+) -> Result<BufferedLedgerEvent, SessionError> {
+    let before = receipt.before;
+    let after = receipt.after;
+    Ok(BufferedLedgerEvent {
+        session: report_id.session.0.to_be_bytes(),
+        t: i64::try_from(receipt.commit_ordinal).map_err(|_| SessionError::LimitExceeded {
+            resource: "meter_commit_ordinal",
+            limit: i64::MAX as usize,
+            observed_at_least: usize::MAX,
+        })?,
+        kind: "session.meter-report",
+        payload: scoped_payload(
+            "fs-session-meter-report-v1",
+            ledger_scope,
+            &format!(
+                "\"session_open\":\"{}\",\"report_id\":\"{}\",\"generation\":{},\"commit_ordinal\":{},\"core_s_bits\":\"{:016x}\",\"mem_peak_bytes\":{},\"wall_s_bits\":\"{:016x}\",\"before\":{{\"core_s_bits\":\"{:016x}\",\"mem_peak_bytes\":{},\"wall_s_bits\":\"{:016x}\",\"throttled\":{},\"paused\":{}}},\"after\":{{\"core_s_bits\":\"{:016x}\",\"mem_peak_bytes\":{},\"wall_s_bits\":\"{:016x}\",\"throttled\":{},\"paused\":{}}},\"enforcement\":{},\"receipt\":\"{}\"",
+                report_id.session_open,
+                report_id.content_hash,
+                report_id.generation,
+                receipt.commit_ordinal,
+                receipt.delta.core_s.to_bits(),
+                receipt.delta.mem_peak_bytes,
+                receipt.delta.wall_s.to_bits(),
+                before.core_s.to_bits(),
+                before.mem_peak_bytes,
+                before.wall_s.to_bits(),
+                before.throttled,
+                before.paused,
+                after.core_s.to_bits(),
+                after.mem_peak_bytes,
+                after.wall_s.to_bits(),
+                after.throttled,
+                after.paused,
+                enforcement_json(&receipt.enforcement),
+                receipt.content_hash,
+            ),
+        ),
+    })
+}
+
+fn buffered_submission_success(
+    ledger_scope: &str,
+    request_id: SubmissionRequestId,
+    state: &IdemState,
+) -> Result<(BufferedLedgerEvent, (u64, SubmissionReceipt, u64)), SessionError> {
+    let IdemState::Done {
+        admission_ordinal,
+        receipt,
+        charge,
+        meter_receipt,
+        ..
+    } = state
+    else {
+        return Err(SessionError::Persistence {
+            what: format!(
+                "causal submission index references non-success request {}",
+                request_id.content_hash
+            ),
+        });
+    };
+    let derived_report_id = Governor::submission_meter_report_id(request_id);
+    if meter_receipt.report_id != derived_report_id {
+        return Err(SessionError::Persistence {
+            what: format!(
+                "submission {} terminal meter authority {} disagrees with derived authority {}",
+                request_id.content_hash,
+                meter_receipt.report_id.content_hash,
+                derived_report_id.content_hash,
+            ),
+        });
+    }
+    let event_ordinal = meter_receipt.commit_ordinal;
+    let session = request_id.session.0;
+    let body = format!(
+        "\"session\":{session},\"session_open\":\"{}\",\"generation\":{},\"request_id\":\"{}\",\"key_hash\":\"{}\",\"request_hash\":\"{}\",\"admission_ordinal\":{},\"meter_report_id\":\"{}\",\"meter_commit_ordinal\":{},\"meter_receipt\":\"{}\",\"receipt\":\"{receipt}\",\"core_s_bits\":\"{:016x}\",\"mem_peak_bytes\":{},\"wall_s_bits\":\"{:016x}\",\"before\":{},\"after\":{},\"enforcement\":{}",
+        request_id.session_open,
+        request_id.generation,
+        request_id.content_hash,
+        request_id.key_hash,
+        request_id.request_hash,
+        admission_ordinal,
+        meter_receipt.report_id.content_hash,
+        meter_receipt.commit_ordinal,
+        meter_receipt.content_hash,
+        charge.core_s.to_bits(),
+        charge.mem_peak_bytes,
+        charge.wall_s.to_bits(),
+        meter_snapshot_json(meter_receipt.before),
+        meter_snapshot_json(meter_receipt.after),
+        enforcement_json(&meter_receipt.enforcement),
+    );
+    let event = BufferedLedgerEvent {
+        session: session.to_be_bytes(),
+        t: i64::try_from(event_ordinal).map_err(|_| SessionError::LimitExceeded {
+            resource: "meter_commit_ordinal",
+            limit: i64::MAX as usize,
+            observed_at_least: usize::MAX,
+        })?,
+        kind: "session.idempotent-execution",
+        payload: scoped_payload("fs-session-idempotency-v5", ledger_scope, &body),
+    };
+    Ok((event, (*admission_ordinal, *receipt, event_ordinal)))
+}
+
+fn buffered_submission_failure(
+    ledger_scope: &str,
+    request_id: SubmissionRequestId,
+    state: &IdemState,
+) -> Result<(BufferedLedgerEvent, (u64, SubmissionReceipt, u64)), SessionError> {
+    let IdemState::Failed {
+        admission_ordinal,
+        receipt,
+        evidence,
+        ..
+    } = state
+    else {
+        return Err(SessionError::Persistence {
+            what: format!(
+                "failed-submission index references non-failure request {}",
+                request_id.content_hash
+            ),
+        });
+    };
+    let session = request_id.session.0;
+    let body = format!(
+        "\"session\":{session},\"session_open\":\"{}\",\"generation\":{},\"request_id\":\"{}\",\"key_hash\":\"{}\",\"request_hash\":\"{}\",\"admission_ordinal\":{},\"receipt\":\"{receipt}\",\"error_evidence\":{}",
+        request_id.session_open,
+        request_id.generation,
+        request_id.content_hash,
+        request_id.key_hash,
+        request_id.request_hash,
+        admission_ordinal,
+        evidence_json(evidence),
+    );
+    let event = BufferedLedgerEvent {
+        session: session.to_be_bytes(),
+        t: i64::try_from(*admission_ordinal).map_err(|_| SessionError::LimitExceeded {
+            resource: "submission_ordinal",
+            limit: i64::MAX as usize,
+            observed_at_least: usize::MAX,
+        })?,
+        kind: "session.idempotent-failure",
+        payload: scoped_payload("fs-session-idempotency-v5", ledger_scope, &body),
+    };
+    Ok((event, (*admission_ordinal, *receipt, *admission_ordinal)))
+}
+
+fn buffered_degradation_event(
+    ledger_scope: &str,
+    event: &DegradationEvent,
+    action_receipt_hash: fs_blake3::ContentHash,
+) -> Result<BufferedLedgerEvent, SessionError> {
+    let pressure_action_id = event
+        .pressure_action_id
+        .ok_or_else(|| SessionError::Persistence {
+            what: format!(
+                "degradation event {} lacks its pressure action authority",
+                event.ordinal
+            ),
+        })?;
+    let requested = event
+        .requested_ordinal
+        .map_or_else(|| "null".to_string(), |ordinal| ordinal.to_string());
+    let checkpoint = event
+        .checkpoint
+        .as_ref()
+        .map_or_else(|| "null".to_string(), evidence_json);
+    let gate_generation = event
+        .gate_generation
+        .map_or_else(|| "null".to_string(), |value| value.to_string());
+    Ok(BufferedLedgerEvent {
+        session: event.session.0.to_be_bytes(),
+        t: event.ordinal,
+        kind: "session.degradation",
+        payload: scoped_payload(
+            "fs-session-degradation-v5",
+            ledger_scope,
+            &format!(
+                "\"session_open\":\"{}\",\"generation\":{},\"action_id\":\"{}\",\"action_receipt\":\"{}\",\"step\":\"{}\",\"level\":{},\"phase\":\"{}\",\"attribution\":\"{}\",\"requested_ordinal\":{requested},\"checkpoint\":{checkpoint},\"gate_generation\":{gate_generation}",
+                pressure_action_id.session_open,
+                pressure_action_id.generation,
+                pressure_action_id.content_hash,
+                action_receipt_hash,
+                degradation_step_name(event.step),
+                event.pressure_level,
+                step_phase_name(event.phase),
+                json_escape(&event.attribution),
+            ),
+        ),
+    })
+}
+
 fn validate_resource(resource: &'static str, value: f64) -> Result<(), SessionError> {
     if value.is_finite() && value >= 0.0 {
         Ok(())
@@ -512,6 +1218,315 @@ fn push_framed(payload: &mut Vec<u8>, bytes: &[u8]) {
     payload.extend_from_slice(bytes);
 }
 
+fn bounded_request_digest(
+    resource: &'static str,
+    domain: &str,
+    value: &str,
+) -> Result<fs_blake3::ContentHash, SessionError> {
+    if value.len() > MAX_IDEMPOTENCY_INPUT_BYTES {
+        return Err(SessionError::LimitExceeded {
+            resource,
+            limit: MAX_IDEMPOTENCY_INPUT_BYTES,
+            observed_at_least: value.len(),
+        });
+    }
+    if value.trim().is_empty() {
+        return Err(SessionError::Submission {
+            what: format!("{resource} must be non-blank"),
+        });
+    }
+    Ok(fs_blake3::hash_domain(domain, value.as_bytes()))
+}
+
+fn push_hash(payload: &mut Vec<u8>, hash: fs_blake3::ContentHash) {
+    payload.extend_from_slice(hash.as_bytes());
+}
+
+fn capability_token_identity(token: &CapabilityToken) -> fs_blake3::ContentHash {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&token.session.0.to_le_bytes());
+    payload.extend_from_slice(&token.core_s.to_bits().to_le_bytes());
+    payload.extend_from_slice(&token.mem_bytes.to_le_bytes());
+    payload.extend_from_slice(&token.wall_s.to_bits().to_le_bytes());
+    payload.extend_from_slice(&token.cores.to_le_bytes());
+    push_framed(&mut payload, token.ledger_scope.as_bytes());
+    payload.extend_from_slice(
+        &u64::try_from(token.ops.len())
+            .expect("bounded operator count fits u64")
+            .to_le_bytes(),
+    );
+    for operation in &token.ops {
+        push_framed(&mut payload, operation.as_bytes());
+    }
+    fs_blake3::hash_domain(SESSION_TOKEN_IDENTITY_DOMAIN, &payload)
+}
+
+fn same_charge(left: Charge, right: Charge) -> bool {
+    left.core_s.to_bits() == right.core_s.to_bits()
+        && left.mem_peak_bytes == right.mem_peak_bytes
+        && left.wall_s.to_bits() == right.wall_s.to_bits()
+}
+
+fn push_meter_snapshot(payload: &mut Vec<u8>, snapshot: MeterSnapshot) {
+    payload.extend_from_slice(&snapshot.core_s.to_bits().to_le_bytes());
+    payload.extend_from_slice(&snapshot.mem_peak_bytes.to_le_bytes());
+    payload.extend_from_slice(&snapshot.wall_s.to_bits().to_le_bytes());
+    payload.extend_from_slice(&snapshot.throttled.to_le_bytes());
+    payload.extend_from_slice(&snapshot.paused.to_le_bytes());
+}
+
+fn meter_receipt_hash(
+    report_id: MeterReportId,
+    commit_ordinal: u64,
+    delta: Charge,
+    before: MeterSnapshot,
+    after: MeterSnapshot,
+    enforcement: &Enforcement,
+) -> fs_blake3::ContentHash {
+    let mut payload = Vec::new();
+    push_hash(&mut payload, report_id.content_hash);
+    payload.extend_from_slice(&commit_ordinal.to_le_bytes());
+    payload.extend_from_slice(&delta.core_s.to_bits().to_le_bytes());
+    payload.extend_from_slice(&delta.mem_peak_bytes.to_le_bytes());
+    payload.extend_from_slice(&delta.wall_s.to_bits().to_le_bytes());
+    push_meter_snapshot(&mut payload, before);
+    push_meter_snapshot(&mut payload, after);
+    push_enforcement_identity(&mut payload, enforcement);
+    fs_blake3::hash_domain(METER_RECEIPT_DOMAIN, &payload)
+}
+
+fn push_pressure_event_identity(payload: &mut Vec<u8>, event: &DegradationEvent) {
+    payload.extend_from_slice(&event.session.0.to_le_bytes());
+    payload.push(match event.step {
+        DegradationStep::SpillColdArenas => 0,
+        DegradationStep::CoarsenAdaptively => 1,
+        DegradationStep::PauseSerializeResume => 2,
+    });
+    payload.push(event.pressure_level);
+    payload.push(match event.phase {
+        StepPhase::Declared => 0,
+        StepPhase::Requested => 1,
+        StepPhase::Complete => 2,
+    });
+    push_framed(payload, event.attribution.as_bytes());
+    payload.extend_from_slice(&event.ordinal.to_le_bytes());
+    match event.requested_ordinal {
+        Some(value) => {
+            payload.push(1);
+            payload.extend_from_slice(&value.to_le_bytes());
+        }
+        None => payload.push(0),
+    }
+    match &event.checkpoint {
+        Some(checkpoint) => {
+            payload.push(1);
+            payload.extend_from_slice(
+                &u64::try_from(checkpoint.byte_len)
+                    .expect("bounded evidence fits u64")
+                    .to_le_bytes(),
+            );
+            push_hash(payload, checkpoint.digest);
+        }
+        None => payload.push(0),
+    }
+    match event.gate_generation {
+        Some(value) => {
+            payload.push(1);
+            payload.extend_from_slice(&value.to_le_bytes());
+        }
+        None => payload.push(0),
+    }
+}
+
+fn pressure_receipt_hash(
+    action_id: PressureActionId,
+    level: u8,
+    events: &[DegradationEvent],
+) -> fs_blake3::ContentHash {
+    let mut payload = Vec::new();
+    push_hash(&mut payload, action_id.content_hash);
+    payload.push(level);
+    payload.extend_from_slice(
+        &u64::try_from(events.len())
+            .expect("bounded degradation event count fits u64")
+            .to_le_bytes(),
+    );
+    for event in events {
+        push_pressure_event_identity(&mut payload, event);
+    }
+    fs_blake3::hash_domain(PRESSURE_RECEIPT_DOMAIN, &payload)
+}
+
+fn session_open_receipt_hash(
+    open_id: SessionOpenId,
+    token_digest: fs_blake3::ContentHash,
+    gate_identity: Option<fs_blake3::ContentHash>,
+    ledger_scope: &str,
+) -> fs_blake3::ContentHash {
+    let mut payload = Vec::new();
+    push_hash(&mut payload, open_id.content_hash);
+    push_hash(&mut payload, token_digest);
+    match gate_identity {
+        Some(identity) => {
+            payload.push(1);
+            push_hash(&mut payload, identity);
+        }
+        None => payload.push(0),
+    }
+    push_framed(&mut payload, ledger_scope.as_bytes());
+    fs_blake3::hash_domain(SESSION_OPEN_RECEIPT_DOMAIN, &payload)
+}
+
+fn session_gate_binding(open_id: SessionOpenId) -> fs_blake3::ContentHash {
+    fs_blake3::hash_domain(GATE_BINDING_ID_DOMAIN, open_id.content_hash.as_bytes())
+}
+
+fn resumed_gate_binding(
+    request_id: PauseRequestId,
+    resume_generation: u64,
+) -> fs_blake3::ContentHash {
+    let mut payload = Vec::new();
+    push_hash(&mut payload, request_id.governor_id);
+    payload.extend_from_slice(&request_id.session.0.to_le_bytes());
+    payload.extend_from_slice(&request_id.gate_generation.to_le_bytes());
+    payload.extend_from_slice(&request_id.requested_ordinal.to_le_bytes());
+    payload.extend_from_slice(&resume_generation.to_le_bytes());
+    fs_blake3::hash_domain(GATE_BINDING_ID_DOMAIN, &payload)
+}
+
+fn pause_acknowledgement_hash(
+    request_id: PauseRequestId,
+    event: &DegradationEvent,
+    resume_generation: u64,
+    gate_binding: fs_blake3::ContentHash,
+) -> fs_blake3::ContentHash {
+    let mut payload = Vec::new();
+    push_hash(&mut payload, request_id.governor_id);
+    payload.extend_from_slice(&request_id.session.0.to_le_bytes());
+    payload.extend_from_slice(&request_id.gate_generation.to_le_bytes());
+    payload.extend_from_slice(&request_id.requested_ordinal.to_le_bytes());
+    push_pressure_event_identity(&mut payload, event);
+    payload.extend_from_slice(&resume_generation.to_le_bytes());
+    push_hash(&mut payload, gate_binding);
+    fs_blake3::hash_domain(PAUSE_ACKNOWLEDGEMENT_RECEIPT_DOMAIN, &payload)
+}
+
+fn resume_activation_id(
+    governor_id: fs_blake3::ContentHash,
+    session: SessionId,
+    session_open: fs_blake3::ContentHash,
+    acknowledgement_hash: fs_blake3::ContentHash,
+    resume_generation: u64,
+) -> ResumeActivationId {
+    let mut payload = Vec::new();
+    push_hash(&mut payload, governor_id);
+    payload.extend_from_slice(&session.0.to_le_bytes());
+    push_hash(&mut payload, session_open);
+    push_hash(&mut payload, acknowledgement_hash);
+    payload.extend_from_slice(&resume_generation.to_le_bytes());
+    ResumeActivationId {
+        governor_id,
+        session,
+        session_open,
+        resume_generation,
+        content_hash: fs_blake3::hash_domain(RESUME_ACTIVATION_ID_DOMAIN, &payload),
+    }
+}
+
+fn resume_activation_receipt(
+    activation_id: ResumeActivationId,
+    acknowledgement_hash: fs_blake3::ContentHash,
+    gate_binding: fs_blake3::ContentHash,
+) -> ResumeActivationReceipt {
+    let mut payload = Vec::new();
+    push_hash(&mut payload, activation_id.content_hash);
+    push_hash(&mut payload, acknowledgement_hash);
+    push_hash(&mut payload, gate_binding);
+    ResumeActivationReceipt {
+        activation_id,
+        acknowledgement_hash,
+        gate_binding,
+        content_hash: fs_blake3::hash_domain(RESUME_ACTIVATION_RECEIPT_DOMAIN, &payload),
+    }
+}
+
+fn meter_transition(
+    token: &CapabilityToken,
+    before: &SessionMeters,
+    delta: Charge,
+) -> Result<(SessionMeters, Enforcement), SessionError> {
+    validate_resource("core-seconds charge", delta.core_s)?;
+    validate_resource("wall-seconds charge", delta.wall_s)?;
+    let mut next = before.clone();
+    let next_core_s = next.core_s + delta.core_s;
+    let next_wall_s = next.wall_s + delta.wall_s;
+    validate_resource("accumulated core-seconds", next_core_s)?;
+    validate_resource("accumulated wall-seconds", next_wall_s)?;
+    next.core_s = next_core_s;
+    next.mem_peak_bytes = next.mem_peak_bytes.max(delta.mem_peak_bytes);
+    next.wall_s = next_wall_s;
+    let memory_past_hard = u128::from(next.mem_peak_bytes) * u128::from(HARD_FACTOR_DENOMINATOR)
+        > u128::from(token.mem_bytes) * u128::from(HARD_FACTOR_NUMERATOR);
+    #[allow(clippy::cast_precision_loss)]
+    let memory_diagnostic = (next.mem_peak_bytes as f64, token.mem_bytes as f64);
+    let hard_violation = if next.core_s > token.core_s * HARD_FACTOR {
+        Some(("core-seconds", next.core_s, token.core_s))
+    } else if memory_past_hard {
+        Some(("memory-bytes", memory_diagnostic.0, memory_diagnostic.1))
+    } else if next.wall_s > token.wall_s * HARD_FACTOR {
+        Some(("wall-seconds", next.wall_s, token.wall_s))
+    } else {
+        None
+    };
+    let enforcement = if let Some((resource, used, granted)) = hard_violation {
+        next.paused = next
+            .paused
+            .checked_add(1)
+            .ok_or(SessionError::LimitExceeded {
+                resource: "paused_meter_count",
+                limit: u32::MAX as usize,
+                observed_at_least: u32::MAX as usize,
+            })?;
+        Enforcement::Paused {
+            resource,
+            used,
+            granted,
+            resume_hint: format!(
+                "checkpoint required before continuing; resume with a larger {resource} grant or \
+                 a coarsened study — the caller must arrange and ledger the checkpoint explicitly"
+            ),
+        }
+    } else {
+        let throttle_violation = if next.core_s >= token.core_s {
+            Some(("core-seconds", next.core_s, token.core_s))
+        } else if next.mem_peak_bytes >= token.mem_bytes {
+            Some(("memory-bytes", memory_diagnostic.0, memory_diagnostic.1))
+        } else if next.wall_s >= token.wall_s {
+            Some(("wall-seconds", next.wall_s, token.wall_s))
+        } else {
+            None
+        };
+        if let Some((resource, used, granted)) = throttle_violation {
+            next.throttled = next
+                .throttled
+                .checked_add(1)
+                .ok_or(SessionError::LimitExceeded {
+                    resource: "throttled_meter_count",
+                    limit: u32::MAX as usize,
+                    observed_at_least: u32::MAX as usize,
+                })?;
+            Enforcement::Throttled {
+                resource,
+                used,
+                granted,
+            }
+        } else {
+            Enforcement::Ok
+        }
+    };
+    Ok((next, enforcement))
+}
+
 fn push_enforcement_identity(payload: &mut Vec<u8>, enforcement: &Enforcement) {
     match enforcement {
         Enforcement::Ok => payload.push(0),
@@ -541,22 +1556,22 @@ fn push_enforcement_identity(payload: &mut Vec<u8>, enforcement: &Enforcement) {
 }
 
 fn submission_receipt(
-    session: SessionId,
+    request_id: SubmissionRequestId,
     ledger_scope: &str,
-    idem_key: &str,
+    admission_ordinal: u64,
     completion: &SubmissionCompletion,
 ) -> SubmissionReceipt {
     let mut payload = Vec::new();
-    payload.extend_from_slice(&session.0.to_le_bytes());
+    push_hash(&mut payload, request_id.content_hash);
     push_framed(&mut payload, ledger_scope.as_bytes());
-    push_framed(&mut payload, idem_key.as_bytes());
+    payload.extend_from_slice(&admission_ordinal.to_le_bytes());
     match completion {
-        SubmissionCompletion::Done(charge, enforcement) => {
+        SubmissionCompletion::Done(charge, meter_receipt) => {
             payload.push(0);
             payload.extend_from_slice(&charge.core_s.to_bits().to_le_bytes());
             payload.extend_from_slice(&charge.mem_peak_bytes.to_le_bytes());
             payload.extend_from_slice(&charge.wall_s.to_bits().to_le_bytes());
-            push_enforcement_identity(&mut payload, enforcement);
+            push_hash(&mut payload, meter_receipt.content_hash);
         }
         SubmissionCompletion::Failed(evidence) => {
             payload.push(1);
@@ -608,6 +1623,20 @@ fn scoped_payload(schema: &str, ledger_scope: &str, body: &str) -> String {
     )
 }
 
+fn string_array_json(values: &[String]) -> String {
+    let mut out = String::from("[");
+    for (index, value) in values.iter().enumerate() {
+        if index != 0 {
+            out.push(',');
+        }
+        out.push('"');
+        out.push_str(&json_escape(value));
+        out.push('"');
+    }
+    out.push(']');
+    out
+}
+
 fn enforcement_json(enforcement: &Enforcement) -> String {
     match enforcement {
         Enforcement::Ok => "{\"kind\":\"ok\"}".to_string(),
@@ -634,6 +1663,17 @@ fn enforcement_json(enforcement: &Enforcement) -> String {
             json_escape(resume_hint),
         ),
     }
+}
+
+fn meter_snapshot_json(snapshot: MeterSnapshot) -> String {
+    format!(
+        "{{\"core_s_bits\":\"{:016x}\",\"mem_peak_bytes\":{},\"wall_s_bits\":\"{:016x}\",\"throttled\":{},\"paused\":{}}}",
+        snapshot.core_s.to_bits(),
+        snapshot.mem_peak_bytes,
+        snapshot.wall_s.to_bits(),
+        snapshot.throttled,
+        snapshot.paused,
+    )
 }
 
 fn enforcement_retained_bytes(enforcement: &Enforcement) -> usize {
@@ -697,13 +1737,96 @@ struct PreparedFlush {
     generation: i64,
     revision: u64,
     next_flush_lane: u8,
-    buffered: Vec<BufferedLedgerEvent>,
+    terminals: Vec<BufferedTerminal>,
     encoded_bytes: usize,
-    meter_marks: Vec<(u64, SessionMeters)>,
-    idempotency_marks: Vec<((u64, String), (u64, SubmissionReceipt))>,
-    event_target: usize,
+    open_marks: Vec<(SessionOpenId, fs_blake3::ContentHash)>,
+    meter_report_marks: Vec<(MeterReportId, fs_blake3::ContentHash)>,
+    idempotency_marks: Vec<(SubmissionRequestId, (u64, SubmissionReceipt, u64))>,
+    control_marks: Vec<(i64, DirtyControlMutation, fs_blake3::ContentHash, usize)>,
 }
 
+struct BufferedTerminal {
+    authority: fs_blake3::ContentHash,
+    session_open: fs_blake3::ContentHash,
+    kind: &'static str,
+    session: SessionId,
+    generation: u64,
+    causal_ordinal: Option<u64>,
+    payload: Vec<u8>,
+    receipt: Vec<u8>,
+    events: Vec<BufferedLedgerEvent>,
+    permit: Option<fs_ledger::session_registry::SessionClaimPermit>,
+}
+
+impl BufferedTerminal {
+    fn encoded_len(&self, ledger_scope: &str) -> Result<usize, SessionError> {
+        let mut bytes = FLUSH_TERMINAL_FRAMING_BYTES
+            .checked_add(self.kind.len())
+            .and_then(|value| value.checked_add(ledger_scope.len()))
+            .and_then(|value| value.checked_add(self.payload.len()))
+            .and_then(|value| value.checked_add(self.receipt.len()))
+            .ok_or(SessionError::LimitExceeded {
+                resource: "flush_encoded_bytes",
+                limit: MAX_FLUSH_ENCODED_BYTES,
+                observed_at_least: usize::MAX,
+            })?;
+        for event in &self.events {
+            bytes = bytes
+                .checked_add(event.encoded_len()?)
+                .ok_or(SessionError::LimitExceeded {
+                    resource: "flush_encoded_bytes",
+                    limit: MAX_FLUSH_ENCODED_BYTES,
+                    observed_at_least: usize::MAX,
+                })?;
+        }
+        Ok(bytes)
+    }
+}
+
+fn push_bounded_terminal(
+    terminals: &mut Vec<BufferedTerminal>,
+    event_rows: &mut usize,
+    encoded_bytes: &mut usize,
+    ledger_scope: &str,
+    terminal: BufferedTerminal,
+) -> Result<bool, SessionError> {
+    let terminal_bytes = terminal.encoded_len(ledger_scope)?;
+    let next_events =
+        event_rows
+            .checked_add(terminal.events.len())
+            .ok_or(SessionError::LimitExceeded {
+                resource: "flush_rows",
+                limit: MAX_FLUSH_ROWS,
+                observed_at_least: usize::MAX,
+            })?;
+    let next_bytes =
+        encoded_bytes
+            .checked_add(terminal_bytes)
+            .ok_or(SessionError::LimitExceeded {
+                resource: "flush_encoded_bytes",
+                limit: MAX_FLUSH_ENCODED_BYTES,
+                observed_at_least: usize::MAX,
+            })?;
+    if terminal.events.len() > MAX_FLUSH_ROWS || terminal_bytes > MAX_FLUSH_ENCODED_BYTES {
+        return Err(SessionError::LimitExceeded {
+            resource: "flush_terminal_encoded_bytes",
+            limit: MAX_FLUSH_ENCODED_BYTES,
+            observed_at_least: terminal_bytes,
+        });
+    }
+    if terminals.len() == MAX_FLUSH_ROWS
+        || next_events > MAX_FLUSH_ROWS
+        || next_bytes > MAX_FLUSH_ENCODED_BYTES
+    {
+        return Ok(false);
+    }
+    terminals.push(terminal);
+    *event_rows = next_events;
+    *encoded_bytes = next_bytes;
+    Ok(true)
+}
+
+#[cfg(test)]
 fn push_bounded_event(
     buffered: &mut Vec<BufferedLedgerEvent>,
     encoded_bytes: &mut usize,
@@ -735,8 +1858,10 @@ fn push_bounded_event(
 #[derive(Default)]
 struct ScopeState {
     sessions: BTreeSet<u64>,
-    dirty_meters: BTreeSet<u64>,
-    dirty_idempotency: BTreeSet<(u64, String)>,
+    dirty_open_receipts: BTreeSet<SessionOpenId>,
+    dirty_causal: BTreeSet<(u64, DirtyCausalMutation)>,
+    dirty_submission_failures: BTreeSet<(u64, SubmissionRequestId)>,
+    dirty_control: BTreeSet<(i64, DirtyControlMutation)>,
     events: Vec<DegradationEvent>,
     flushed_events: usize,
     sink: Option<fs_ledger::LedgerInstanceId>,
@@ -751,6 +1876,7 @@ struct ScopeState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PendingPause {
     request_id: PauseRequestId,
+    pressure_action_id: PressureActionId,
     reserved_retained_bytes: usize,
 }
 
@@ -762,6 +1888,16 @@ struct CompletedPause {
     completion_event_index: usize,
     completion_ordinal: i64,
     resume_generation: u64,
+    gate_binding: fs_blake3::ContentHash,
+    acknowledgement_hash: fs_blake3::ContentHash,
+}
+
+#[derive(Debug, Clone)]
+struct PauseAcknowledgementReplay {
+    completion_event_index: usize,
+    resume_generation: u64,
+    gate_binding: fs_blake3::ContentHash,
+    content_hash: fs_blake3::ContentHash,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -772,6 +1908,8 @@ enum GatePhase {
 
 #[derive(Default)]
 struct Inner {
+    open_requests: BTreeMap<SessionOpenId, OpenReplay>,
+    session_open_ids: BTreeMap<u64, SessionOpenId>,
     tokens: BTreeMap<u64, CapabilityToken>,
     /// Session-OWNED cancellation gates, bound at open (gp3.13): the
     /// only route to a pause request, so a foreign gate is
@@ -786,11 +1924,21 @@ struct Inner {
     pending_pause: BTreeMap<u64, PendingPause>,
     /// Last completed request per session for idempotent response replay.
     completed_pause: BTreeMap<u64, CompletedPause>,
+    pause_acknowledgements: BTreeMap<PauseRequestId, PauseAcknowledgementReplay>,
+    resume_activations: BTreeMap<ResumeActivationId, ResumeActivationReceipt>,
     meters: BTreeMap<u64, SessionMeters>,
-    idempotency: BTreeMap<(u64, String), IdemState>,
-    idempotency_keys: BTreeMap<u64, BTreeSet<String>>,
+    meter_reports: BTreeMap<MeterReportId, MeterReceipt>,
+    meter_report_ids: BTreeMap<u64, BTreeSet<MeterReportId>>,
+    reserved_meter_reports: BTreeMap<u64, usize>,
+    pressure_actions: BTreeMap<PressureActionId, PressureReplay>,
+    pressure_action_ids: BTreeMap<u64, BTreeSet<PressureActionId>>,
+    idempotency: BTreeMap<SubmissionRequestId, IdemState>,
+    idempotency_keys: BTreeMap<u64, BTreeMap<fs_blake3::ContentHash, SubmissionRequestId>>,
+    pending_submissions: BTreeMap<u64, usize>,
     scopes: BTreeMap<String, ScopeState>,
     next_submission_ordinal: u64,
+    next_meter_commit_ordinal: u64,
+    reserved_meter_ordinals: usize,
     next_ordinal: i64,
     reserved_pause_ordinals: usize,
     next_flush_reservation: u64,
@@ -872,7 +2020,8 @@ fn bump_scope_revision(inner: &mut Inner, ledger_scope: &str) {
 /// The governor. `Send + Sync`: hot paths are mutex-guarded in-memory
 /// state; ledger persistence is the explicit single-threaded flush.
 pub struct Governor {
-    id: u64,
+    id: fs_blake3::ContentHash,
+    durable_sink: Option<fs_ledger::LedgerInstanceId>,
     inner: Mutex<Inner>,
 }
 
@@ -887,19 +2036,79 @@ impl Governor {
     #[must_use]
     pub fn new() -> Self {
         Governor {
-            id: NEXT_GOVERNOR_ID.fetch_add(1, Ordering::Relaxed),
+            id: ephemeral_governor_id(),
+            durable_sink: None,
             inner: Mutex::new(Inner::default()),
         }
     }
 
+    /// Construct a restart-stable governor identity bound to one physical
+    /// ledger instance and one explicit caller-persisted nonce.
+    ///
+    /// Repeating this call after reopening the same ledger with the same nonce
+    /// reconstructs the exact authority namespace. A replacement or foreign
+    /// ledger derives a different identity.
+    ///
+    /// # Errors
+    /// Corrupt or unavailable physical-ledger identity fails closed.
+    pub fn new_durable(
+        ledger: &fs_ledger::Ledger,
+        nonce: DurableGovernorNonce,
+    ) -> Result<Self, SessionError> {
+        let sink = ledger
+            .checked_instance_id()
+            .map_err(|error| SessionError::Persistence {
+                what: format!("durable governor ledger identity validation failed: {error}"),
+            })?;
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&sink.as_bytes());
+        payload.extend_from_slice(&nonce.as_bytes());
+        Ok(Self {
+            id: fs_blake3::hash_domain(DURABLE_GOVERNOR_ID_DOMAIN, &payload),
+            durable_sink: Some(sink),
+            inner: Mutex::new(Inner::default()),
+        })
+    }
+
+    /// Opaque governor identity carried by every typed mutation authority.
+    #[must_use]
+    pub const fn identity(&self) -> fs_blake3::ContentHash {
+        self.id
+    }
+
+    /// Mint bounded retry authority before opening a session.
+    ///
+    /// # Errors
+    /// Blank or oversized client keys are refused without retaining state.
+    pub fn session_open_id(
+        &self,
+        session: SessionId,
+        client_key: &str,
+    ) -> Result<SessionOpenId, SessionError> {
+        let key_hash =
+            bounded_request_digest("session_open_key_bytes", SESSION_OPEN_ID_DOMAIN, client_key)?;
+        let mut payload = Vec::new();
+        push_hash(&mut payload, self.id);
+        payload.extend_from_slice(&session.0.to_le_bytes());
+        push_hash(&mut payload, key_hash);
+        Ok(SessionOpenId {
+            governor_id: self.id,
+            session,
+            content_hash: fs_blake3::hash_domain(SESSION_OPEN_ID_DOMAIN, &payload),
+        })
+    }
+
+    #[allow(clippy::too_many_lines)] // One rollback-free authority registration transaction.
     fn register_session(
         &self,
+        open_id: SessionOpenId,
         mut token: CapabilityToken,
         gate: Option<Arc<CancelGate>>,
-    ) -> Result<ScopeFlushPermit, SessionError> {
-        if gate.as_ref().is_some_and(|gate| gate.is_requested()) {
-            return Err(SessionError::PreRequestedGate {
-                id: token.session.0,
+    ) -> Result<SessionOpenReceipt, SessionError> {
+        if open_id.governor_id != self.id || open_id.session != token.session {
+            return Err(SessionError::MutationAuthorityMismatch {
+                kind: "session-open",
+                id: open_id.content_hash,
             });
         }
         token.validate_operator_grants()?;
@@ -919,7 +2128,25 @@ impl Governor {
         token.ledger_scope = String::from(caller_scope.as_str());
         let session = token.session.0;
         let ledger_scope = token.ledger_scope.clone();
+        let token_digest = capability_token_identity(&token);
         let mut g = self.inner.lock().expect("governor lock");
+        if let Some(replay) = g.open_requests.get(&open_id) {
+            let same_gate = match (&replay.gate, &gate) {
+                (None, None) => true,
+                (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+                (None, Some(_)) | (Some(_), None) => false,
+            };
+            if replay.token_digest == token_digest && same_gate {
+                return Ok(replay.receipt.clone());
+            }
+            return Err(SessionError::MutationConflict {
+                kind: "session-open",
+                id: open_id.content_hash,
+            });
+        }
+        if gate.as_ref().is_some_and(|gate| gate.is_requested()) {
+            return Err(SessionError::PreRequestedGate { id: session });
+        }
         if g.tokens.contains_key(&session) {
             return Err(SessionError::SessionAlreadyOpen { id: session });
         }
@@ -952,6 +2179,7 @@ impl Governor {
                     ledger_scope.len()
                 })
             })
+            .and_then(|bytes| bytes.checked_add(OPEN_REQUEST_RETAINED_BYTES))
             .ok_or(SessionError::LimitExceeded {
                 resource: "retained_bytes_per_governor",
                 limit: MAX_RETAINED_BYTES_PER_GOVERNOR,
@@ -962,23 +2190,50 @@ impl Governor {
             .scopes
             .get(&ledger_scope)
             .map_or(1, |scope| scope.revision.saturating_add(1));
+        let gate_identity = gate.as_ref().map(|_| session_gate_binding(open_id));
+        let permit = ScopeFlushPermit {
+            governor_id: self.id,
+            ledger_scope: ledger_scope.clone(),
+        };
+        let receipt = SessionOpenReceipt {
+            open_id,
+            token_digest,
+            gate_identity,
+            permit,
+            content_hash: session_open_receipt_hash(
+                open_id,
+                token_digest,
+                gate_identity,
+                &ledger_scope,
+            ),
+        };
         g.meters.insert(session, SessionMeters::default());
-        g.idempotency_keys.insert(session, BTreeSet::new());
+        g.meter_report_ids.insert(session, BTreeSet::new());
+        g.reserved_meter_reports.insert(session, 0);
+        g.pressure_action_ids.insert(session, BTreeSet::new());
+        g.idempotency_keys.insert(session, BTreeMap::new());
+        g.pending_submissions.insert(session, 0);
+        g.session_open_ids.insert(session, open_id);
         g.tokens.insert(session, token);
-        if let Some(gate) = gate {
-            g.gates.insert(session, gate);
+        if let Some(bound_gate) = &gate {
+            g.gates.insert(session, Arc::clone(bound_gate));
             g.gate_generations.insert(session, 0);
             g.gate_phases.insert(session, GatePhase::Running);
         }
         let scope = g.scopes.entry(ledger_scope.clone()).or_default();
         scope.sessions.insert(session);
-        scope.dirty_meters.insert(session);
+        scope.dirty_open_receipts.insert(open_id);
         scope.revision = next_revision;
+        g.open_requests.insert(
+            open_id,
+            OpenReplay {
+                token_digest,
+                gate,
+                receipt: receipt.clone(),
+            },
+        );
         commit_retained_bytes(&mut g, &ledger_scope, retained_bytes);
-        Ok(ScopeFlushPermit {
-            governor_id: self.id,
-            ledger_scope,
-        })
+        Ok(receipt)
     }
 
     /// Register a session's token (issuance). Session ids are single-use for
@@ -996,8 +2251,12 @@ impl Governor {
     ///
     /// Integer memory/core grants are structurally bounded. Rejection happens
     /// before any session state is mutated.
-    pub fn open_session(&self, token: CapabilityToken) -> Result<ScopeFlushPermit, SessionError> {
-        self.register_session(token, None)
+    pub fn open_session(
+        &self,
+        open_id: SessionOpenId,
+        token: CapabilityToken,
+    ) -> Result<SessionOpenReceipt, SessionError> {
+        self.register_session(open_id, token, None)
     }
 
     /// Register a session's token WITH its cancellation capability
@@ -1014,10 +2273,11 @@ impl Governor {
     /// [`Governor::open_session`].
     pub fn open_session_gated(
         &self,
+        open_id: SessionOpenId,
         token: CapabilityToken,
         gate: Arc<CancelGate>,
-    ) -> Result<ScopeFlushPermit, SessionError> {
-        self.register_session(token, Some(gate))
+    ) -> Result<SessionOpenReceipt, SessionError> {
+        self.register_session(open_id, token, Some(gate))
     }
 
     /// The token for a session.
@@ -1034,157 +2294,600 @@ impl Governor {
             .ok_or(SessionError::UnknownSession { id: session.0 })
     }
 
-    /// Meter a consumption delta and enforce the token bounds:
-    /// at the grant → `Throttled`; past `HARD_FACTOR ×` grant → `Paused`.
-    /// Structured outcomes only — the governor NEVER silently kills.
-    ///
-    /// # Errors
-    /// [`SessionError::UnknownSession`], [`SessionError::InvalidResource`], or
-    /// [`SessionError::LimitExceeded`] if a throttle/pause counter is exhausted.
-    pub fn charge(&self, session: SessionId, delta: Charge) -> Result<Enforcement, SessionError> {
-        validate_resource("core-seconds charge", delta.core_s)?;
-        validate_resource("wall-seconds charge", delta.wall_s)?;
-        let mut g = self.inner.lock().expect("governor lock");
-        let token = g
-            .tokens
-            .get(&session.0)
-            .cloned()
-            .ok_or(SessionError::UnknownSession { id: session.0 })?;
-        let mut next = g.meters.get(&session.0).cloned().unwrap_or_default();
-        let next_core_s = next.core_s + delta.core_s;
-        let next_wall_s = next.wall_s + delta.wall_s;
-        validate_resource("accumulated core-seconds", next_core_s)?;
-        validate_resource("accumulated wall-seconds", next_wall_s)?;
-        next.core_s = next_core_s;
-        next.mem_peak_bytes = next.mem_peak_bytes.max(delta.mem_peak_bytes);
-        next.wall_s = next_wall_s;
-        // Memory is an exact byte budget. Converting u64 values to f64 before
-        // admission collapses adjacent values above 2^53 and can throttle a
-        // session that is still below its grant. Compare the 6/5 hard boundary
-        // exactly in u128; f64 remains only the legacy diagnostic projection.
-        let memory_past_hard = u128::from(next.mem_peak_bytes)
-            * u128::from(HARD_FACTOR_DENOMINATOR)
-            > u128::from(token.mem_bytes) * u128::from(HARD_FACTOR_NUMERATOR);
-        #[allow(clippy::cast_precision_loss)]
-        let memory_diagnostic = (next.mem_peak_bytes as f64, token.mem_bytes as f64);
-        let hard_violation = if next.core_s > token.core_s * HARD_FACTOR {
-            Some(("core-seconds", next.core_s, token.core_s))
-        } else if memory_past_hard {
-            Some(("memory-bytes", memory_diagnostic.0, memory_diagnostic.1))
-        } else if next.wall_s > token.wall_s * HARD_FACTOR {
-            Some(("wall-seconds", next.wall_s, token.wall_s))
-        } else {
-            None
-        };
-        let enforcement = if let Some((resource, used, granted)) = hard_violation {
-            next.paused = next
-                .paused
-                .checked_add(1)
-                .ok_or(SessionError::LimitExceeded {
-                    resource: "paused_meter_count",
-                    limit: u32::MAX as usize,
-                    observed_at_least: u32::MAX as usize,
-                })?;
-            Enforcement::Paused {
-                resource,
-                used,
-                granted,
-                resume_hint: format!(
-                    "checkpoint required before continuing; resume with a larger {resource} \
-                     grant or a coarsened study — the caller must arrange and ledger the \
-                     checkpoint explicitly"
-                ),
-            }
-        } else {
-            let throttle_violation = if next.core_s >= token.core_s {
-                Some(("core-seconds", next.core_s, token.core_s))
-            } else if next.mem_peak_bytes >= token.mem_bytes {
-                Some(("memory-bytes", memory_diagnostic.0, memory_diagnostic.1))
-            } else if next.wall_s >= token.wall_s {
-                Some(("wall-seconds", next.wall_s, token.wall_s))
-            } else {
-                None
-            };
-            if let Some((resource, used, granted)) = throttle_violation {
-                next.throttled =
-                    next.throttled
-                        .checked_add(1)
-                        .ok_or(SessionError::LimitExceeded {
-                            resource: "throttled_meter_count",
-                            limit: u32::MAX as usize,
-                            observed_at_least: u32::MAX as usize,
-                        })?;
-                Enforcement::Throttled {
-                    resource,
-                    used,
-                    granted,
-                }
-            } else {
-                Enforcement::Ok
-            }
-        };
-        bump_scope_revision(&mut g, &token.ledger_scope);
-        g.meters.insert(session.0, next);
-        g.scopes
-            .get_mut(&token.ledger_scope)
-            .expect("registered session scope")
-            .dirty_meters
-            .insert(session.0);
-        Ok(enforcement)
-    }
-
-    /// Idempotency-keyed exactly-once execution: the first caller runs `work`
-    /// and is charged. A concurrent caller observes [`SubmitOutcome::InFlight`]
-    /// without blocking; after terminal publication, repeat callers receive the
-    /// same receipt and no additional charge.
-    ///
-    /// # Errors
-    /// [`SessionError::UnknownSession`] for an unknown owner,
-    /// [`SessionError::Submission`] for a blank/oversized key, or
-    /// [`SessionError::LimitExceeded`] for retained-key or logical-ordinal
-    /// exhaustion.
-    ///
-    /// A panic in `work` is contained and committed as a terminal
-    /// [`SubmitOutcome::Failed`] receipt. The same key never reruns implicitly:
-    /// duplicates receive that same failure receipt and callers must choose a
-    /// new idempotency key for an explicit retry.
-    #[allow(clippy::too_many_lines)] // Keep the Pending-to-terminal transaction contiguous.
-    pub fn submit_once(
+    fn mutation_context(
         &self,
         session: SessionId,
-        idem_key: &str,
-        work: impl FnOnce() -> Charge,
-    ) -> Result<SubmitOutcome, SessionError> {
-        if idem_key.len() > MAX_IDEMPOTENCY_KEY_BYTES || idem_key.trim().is_empty() {
-            return Err(SessionError::Submission {
+    ) -> Result<(fs_blake3::ContentHash, u64), SessionError> {
+        let g = self.inner.lock().expect("governor lock");
+        let session_open = Self::current_open_identity(&g, session)?;
+        let generation = g.gate_generations.get(&session.0).copied().unwrap_or(0);
+        Ok((session_open, generation))
+    }
+
+    fn current_open_identity(
+        g: &Inner,
+        session: SessionId,
+    ) -> Result<fs_blake3::ContentHash, SessionError> {
+        let open_id = g
+            .session_open_ids
+            .get(&session.0)
+            .ok_or(SessionError::UnknownSession { id: session.0 })?;
+        g.open_requests
+            .get(open_id)
+            .map(|replay| replay.receipt.content_hash)
+            .ok_or_else(|| SessionError::Persistence {
                 what: format!(
-                    "idempotency key must be non-blank and at most {MAX_IDEMPOTENCY_KEY_BYTES} bytes"
+                    "session {} lost its immutable open receipt identity",
+                    session.0
+                ),
+            })
+    }
+
+    /// Mint a bounded authority for one exact-bit meter report.
+    ///
+    /// # Errors
+    /// Blank/oversized keys, unknown sessions, or corrupt immutable open state
+    /// are refused without minting an authority.
+    pub fn meter_report_id(
+        &self,
+        session: SessionId,
+        client_key: &str,
+    ) -> Result<MeterReportId, SessionError> {
+        let key_hash =
+            bounded_request_digest("meter_report_key_bytes", METER_REPORT_ID_DOMAIN, client_key)?;
+        let (session_open, generation) = self.mutation_context(session)?;
+        let mut payload = Vec::new();
+        push_hash(&mut payload, self.id);
+        payload.extend_from_slice(&session.0.to_le_bytes());
+        push_hash(&mut payload, session_open);
+        payload.extend_from_slice(&generation.to_le_bytes());
+        push_hash(&mut payload, key_hash);
+        Ok(MeterReportId {
+            governor_id: self.id,
+            session,
+            session_open,
+            generation,
+            content_hash: fs_blake3::hash_domain(METER_REPORT_ID_DOMAIN, &payload),
+        })
+    }
+
+    fn validate_meter_authority(
+        &self,
+        g: &Inner,
+        report_id: MeterReportId,
+    ) -> Result<CapabilityToken, SessionError> {
+        let token =
+            g.tokens
+                .get(&report_id.session.0)
+                .cloned()
+                .ok_or(SessionError::UnknownSession {
+                    id: report_id.session.0,
+                })?;
+        let current_open = Self::current_open_identity(g, report_id.session)?;
+        if report_id.governor_id != self.id || report_id.session_open != current_open {
+            return Err(SessionError::MutationAuthorityMismatch {
+                kind: "meter-report",
+                id: report_id.content_hash,
+            });
+        }
+        let current_generation = g
+            .gate_generations
+            .get(&report_id.session.0)
+            .copied()
+            .unwrap_or(0);
+        if report_id.generation != current_generation {
+            return Err(SessionError::StaleMutationGeneration {
+                kind: "meter-report",
+                id: report_id.session.0,
+                supplied: report_id.generation,
+                current: current_generation,
+            });
+        }
+        Ok(token)
+    }
+
+    #[allow(clippy::too_many_lines)] // Validation, reservation, transition, and receipt commit are one atomic path.
+    fn commit_meter_locked(
+        &self,
+        g: &mut Inner,
+        report_id: MeterReportId,
+        delta: Charge,
+        consumes_reservation: bool,
+    ) -> Result<MeterReceipt, SessionError> {
+        if report_id.governor_id != self.id {
+            return Err(SessionError::MutationAuthorityMismatch {
+                kind: "meter-report",
+                id: report_id.content_hash,
+            });
+        }
+        if let Some(receipt) = g.meter_reports.get(&report_id) {
+            if same_charge(receipt.delta, delta) {
+                return Ok(receipt.clone());
+            }
+            return Err(SessionError::MutationConflict {
+                kind: "meter-report",
+                id: report_id.content_hash,
+            });
+        }
+        let token = self.validate_meter_authority(g, report_id)?;
+        let report_count = g
+            .meter_report_ids
+            .get(&report_id.session.0)
+            .map_or(0, BTreeSet::len);
+        let reserved = g
+            .reserved_meter_reports
+            .get(&report_id.session.0)
+            .copied()
+            .unwrap_or(0);
+        let occupied = report_count
+            .checked_add(reserved)
+            .ok_or(SessionError::LimitExceeded {
+                resource: "meter_reports_per_session",
+                limit: MAX_METER_REPORTS_PER_SESSION,
+                observed_at_least: usize::MAX,
+            })?;
+        if (!consumes_reservation && occupied >= MAX_METER_REPORTS_PER_SESSION)
+            || (consumes_reservation && reserved == 0)
+        {
+            return Err(SessionError::LimitExceeded {
+                resource: "meter_reports_per_session",
+                limit: MAX_METER_REPORTS_PER_SESSION,
+                observed_at_least: occupied.saturating_add(usize::from(!consumes_reservation)),
+            });
+        }
+        if consumes_reservation && g.reserved_meter_ordinals == 0 {
+            return Err(SessionError::Persistence {
+                what: "a pending submission lost its reserved meter-commit ordinal capacity"
+                    .to_string(),
+            });
+        }
+        let unowned_advance = usize::from(!consumes_reservation);
+        let reserved_advance = g
+            .reserved_meter_ordinals
+            .checked_add(unowned_advance)
+            .and_then(|advance| u64::try_from(advance).ok())
+            .ok_or(SessionError::LimitExceeded {
+                resource: "meter_commit_ordinal",
+                limit: i64::MAX as usize,
+                observed_at_least: usize::MAX,
+            })?;
+        if g.next_meter_commit_ordinal
+            .checked_add(reserved_advance)
+            .is_none_or(|last| last > i64::MAX as u64)
+        {
+            return Err(SessionError::LimitExceeded {
+                resource: "meter_commit_ordinal",
+                limit: i64::MAX as usize,
+                observed_at_least: i64::MAX as usize,
+            });
+        }
+        if !consumes_reservation {
+            ensure_retained_capacity(g, &token.ledger_scope, MAX_METER_RECEIPT_RETAINED_BYTES)?;
+        }
+        let before = g
+            .meters
+            .get(&report_id.session.0)
+            .cloned()
+            .unwrap_or_default();
+        let (next, enforcement) = meter_transition(&token, &before, delta)?;
+        let commit_ordinal =
+            g.next_meter_commit_ordinal
+                .checked_add(1)
+                .ok_or(SessionError::LimitExceeded {
+                    resource: "meter_commit_ordinal",
+                    limit: i64::MAX as usize,
+                    observed_at_least: usize::MAX,
+                })?;
+        if commit_ordinal > i64::MAX as u64 {
+            return Err(SessionError::LimitExceeded {
+                resource: "meter_commit_ordinal",
+                limit: i64::MAX as usize,
+                observed_at_least: i64::MAX as usize,
+            });
+        }
+        let before_snapshot = before.snapshot();
+        let after_snapshot = next.snapshot();
+        let receipt = MeterReceipt {
+            report_id,
+            commit_ordinal,
+            delta,
+            before: before_snapshot,
+            after: after_snapshot,
+            content_hash: meter_receipt_hash(
+                report_id,
+                commit_ordinal,
+                delta,
+                before_snapshot,
+                after_snapshot,
+                &enforcement,
+            ),
+            enforcement,
+        };
+        g.next_meter_commit_ordinal = commit_ordinal;
+        if consumes_reservation {
+            *g.reserved_meter_reports
+                .get_mut(&report_id.session.0)
+                .expect("open session has meter reservation count") -= 1;
+            g.reserved_meter_ordinals -= 1;
+        } else {
+            commit_retained_bytes(g, &token.ledger_scope, MAX_METER_RECEIPT_RETAINED_BYTES);
+        }
+        g.meters.insert(report_id.session.0, next);
+        g.meter_report_ids
+            .get_mut(&report_id.session.0)
+            .expect("open session has meter-report index")
+            .insert(report_id);
+        g.meter_reports.insert(report_id, receipt.clone());
+        let scope = g
+            .scopes
+            .get_mut(&token.ledger_scope)
+            .expect("registered session scope");
+        if !consumes_reservation {
+            scope
+                .dirty_causal
+                .insert((commit_ordinal, DirtyCausalMutation::Meter(report_id)));
+        }
+        bump_scope_revision(g, &token.ledger_scope);
+        Ok(receipt)
+    }
+
+    /// Commit or exactly replay one metering report. The payload comparison is
+    /// exact-bit and a duplicate changes no meter, counter, ordinal, or cursor.
+    ///
+    /// # Errors
+    /// Foreign/stale/conflicting authority, invalid charge, capacity, and
+    /// corrupt session-state failures are returned before partial mutation.
+    pub fn charge(
+        &self,
+        report_id: MeterReportId,
+        delta: Charge,
+    ) -> Result<MeterReceipt, SessionError> {
+        let mut g = self.inner.lock().expect("governor lock");
+        self.commit_meter_locked(&mut g, report_id, delta, false)
+    }
+
+    /// Mint a retry authority from a stable caller key and canonical program.
+    /// The caller key selects one mutation slot; changing the program under
+    /// that slot is detected as a conflict when submitted.
+    ///
+    /// # Errors
+    /// Blank/oversized inputs, unknown sessions, or corrupt immutable open
+    /// state are refused without minting an authority.
+    pub fn submission_request_id(
+        &self,
+        session: SessionId,
+        agent_key: &str,
+        program_text: &str,
+    ) -> Result<SubmissionRequestId, SessionError> {
+        let key_hash = bounded_request_digest(
+            "idempotency_agent_key_bytes",
+            IDEMPOTENCY_AGENT_DOMAIN,
+            agent_key,
+        )?;
+        let request_hash = bounded_request_digest(
+            "idempotency_program_text_bytes",
+            IDEMPOTENCY_PROGRAM_DOMAIN,
+            program_text,
+        )?;
+        let (session_open, generation) = self.mutation_context(session)?;
+        let mut payload = Vec::new();
+        push_hash(&mut payload, self.id);
+        payload.extend_from_slice(&session.0.to_le_bytes());
+        push_hash(&mut payload, session_open);
+        payload.extend_from_slice(&generation.to_le_bytes());
+        push_hash(&mut payload, key_hash);
+        Ok(SubmissionRequestId {
+            governor_id: self.id,
+            session,
+            session_open,
+            generation,
+            key_hash,
+            request_hash,
+            content_hash: fs_blake3::hash_domain(SUBMISSION_REQUEST_ID_DOMAIN, &payload),
+        })
+    }
+
+    fn submission_meter_report_id(request_id: SubmissionRequestId) -> MeterReportId {
+        let mut payload = Vec::new();
+        push_hash(&mut payload, request_id.content_hash);
+        MeterReportId {
+            governor_id: request_id.governor_id,
+            session: request_id.session,
+            session_open: request_id.session_open,
+            generation: request_id.generation,
+            content_hash: fs_blake3::hash_domain(METER_REPORT_ID_DOMAIN, &payload),
+        }
+    }
+
+    #[allow(clippy::too_many_lines)] // Preflight every accounting invariant before one exact rollback.
+    fn rollback_submission_admission(
+        &self,
+        request_id: SubmissionRequestId,
+        admission_ordinal: u64,
+        ledger_scope: &str,
+    ) -> Result<(), SessionError> {
+        let session = request_id.session;
+        let mut g = self.inner.lock().expect("governor lock");
+        let (reserved_terminal_bytes, reserved_meter_bytes) = match g.idempotency.get(&request_id) {
+            Some(IdemState::Pending {
+                admission_ordinal: pending_ordinal,
+                request_id: pending_request,
+                reserved_terminal_bytes,
+                reserved_meter_bytes,
+                durable_permit: None,
+            }) if *pending_ordinal == admission_ordinal && *pending_request == request_id => {
+                (*reserved_terminal_bytes, *reserved_meter_bytes)
+            }
+            _ => {
+                return Err(SessionError::Persistence {
+                    what: format!(
+                        "session {} cannot roll back submission admission {} because its exact unclaimed Pending state changed",
+                        session.0, admission_ordinal
+                    ),
+                });
+            }
+        };
+        let retained_bytes = SUBMISSION_REQUEST_RETAINED_BYTES
+            .checked_add(reserved_terminal_bytes)
+            .and_then(|bytes| bytes.checked_add(reserved_meter_bytes))
+            .ok_or(SessionError::LimitExceeded {
+                resource: "retained_bytes_per_scope",
+                limit: MAX_RETAINED_BYTES_PER_SCOPE,
+                observed_at_least: usize::MAX,
+            })?;
+        let pending_count = g
+            .pending_submissions
+            .get(&session.0)
+            .copied()
+            .ok_or_else(|| SessionError::Persistence {
+                what: format!(
+                    "session {} lost its pending-submission counter during claim rollback",
+                    session.0
+                ),
+            })?;
+        let reserved_reports = g
+            .reserved_meter_reports
+            .get(&session.0)
+            .copied()
+            .ok_or_else(|| SessionError::Persistence {
+                what: format!(
+                    "session {} lost its meter-reservation counter during claim rollback",
+                    session.0
+                ),
+            })?;
+        if pending_count == 0 || reserved_reports == 0 || g.reserved_meter_ordinals == 0 {
+            return Err(SessionError::Persistence {
+                what: format!(
+                    "session {} has exhausted reservation counters during claim rollback",
+                    session.0
                 ),
             });
         }
-        let idempotency_scope = (session.0, idem_key.to_string());
-        let (ordinal, ledger_scope) = {
-            let mut g = self.inner.lock().expect("governor lock");
-            let ledger_scope = g
-                .tokens
+        let key_index =
+            g.idempotency_keys
                 .get(&session.0)
-                .map(|token| token.ledger_scope.clone())
-                .ok_or(SessionError::UnknownSession { id: session.0 })?;
-            match g.idempotency.get(&idempotency_scope) {
+                .ok_or_else(|| SessionError::Persistence {
+                    what: format!(
+                        "session {} lost its submission-key index during claim rollback",
+                        session.0
+                    ),
+                })?;
+        if key_index.get(&request_id.key_hash) != Some(&request_id) {
+            return Err(SessionError::Persistence {
+                what: format!(
+                    "session {} submission key changed during claim rollback",
+                    session.0
+                ),
+            });
+        }
+        let scope_retained = g
+            .scopes
+            .get(ledger_scope)
+            .map(|scope| scope.retained_bytes)
+            .ok_or_else(|| SessionError::Persistence {
+                what: format!("scope {ledger_scope} disappeared during claim rollback"),
+            })?;
+        if scope_retained < retained_bytes || g.retained_bytes < retained_bytes {
+            return Err(SessionError::Persistence {
+                what: format!(
+                    "scope {ledger_scope} retained-byte accounting underflow during claim rollback"
+                ),
+            });
+        }
+
+        g.idempotency.remove(&request_id);
+        g.idempotency_keys
+            .get_mut(&session.0)
+            .expect("submission-key index checked above")
+            .remove(&request_id.key_hash);
+        *g.pending_submissions
+            .get_mut(&session.0)
+            .expect("pending-submission counter checked above") -= 1;
+        *g.reserved_meter_reports
+            .get_mut(&session.0)
+            .expect("meter-reservation counter checked above") -= 1;
+        g.reserved_meter_ordinals -= 1;
+        if g.next_submission_ordinal == admission_ordinal {
+            g.next_submission_ordinal -= 1;
+        }
+        release_retained_bytes(&mut g, ledger_scope, retained_bytes);
+        Ok(())
+    }
+
+    fn attach_submission_permit(
+        &self,
+        request_id: SubmissionRequestId,
+        admission_ordinal: u64,
+        permit: fs_ledger::session_registry::SessionClaimPermit,
+    ) -> Result<(), SessionError> {
+        let mut g = self.inner.lock().expect("governor lock");
+        match g.idempotency.get_mut(&request_id) {
+            Some(IdemState::Pending {
+                admission_ordinal: pending_ordinal,
+                request_id: pending_request,
+                durable_permit,
+                ..
+            }) if *pending_ordinal == admission_ordinal && *pending_request == request_id => {
+                if durable_permit.is_some() {
+                    return Err(SessionError::Persistence {
+                        what: format!(
+                            "submission {} already carries a durable claim permit",
+                            request_id.content_hash
+                        ),
+                    });
+                }
+                *durable_permit = Some(permit);
+                Ok(())
+            }
+            _ => Err(SessionError::Persistence {
+                what: format!(
+                    "submission {} lost its owned Pending state after durable claim commit",
+                    request_id.content_hash
+                ),
+            }),
+        }
+    }
+
+    /// Exactly-once execution under one typed request authority. Admission and
+    /// causal meter commit have distinct ordinals; terminal publication and
+    /// meter mutation occur in the same lock-held transition.
+    ///
+    /// # Errors
+    /// Foreign/stale/conflicting authority, draining/paused gate state,
+    /// capacity exhaustion, and corrupt session state fail closed. A panic or
+    /// invalid returned charge becomes one replayable [`SubmitOutcome::Failed`]
+    /// terminal rather than escaping as a partial mutation.
+    #[allow(clippy::too_many_lines)]
+    pub fn submit_once(
+        &self,
+        request_id: SubmissionRequestId,
+        work: impl FnOnce() -> Charge,
+    ) -> Result<SubmitOutcome, SessionError> {
+        self.submit_once_inner(request_id, None, work)
+    }
+
+    /// Exactly-once execution with a durable pre-execution Pending claim.
+    ///
+    /// Only the call that inserts a fresh claim may invoke `work`. A recovered
+    /// identical Pending claim returns [`SessionError::IndeterminateMutation`]
+    /// because external side effects cannot be inferred. An existing terminal
+    /// is recovered and replayed without invoking `work`. The terminal receipt
+    /// and its audit event become restart-replayable when the scope is flushed.
+    ///
+    /// # Errors
+    /// A non-durable governor, foreign ledger, altered canonical program,
+    /// Pending claim, claim conflict, admission refusal, execution failure, or
+    /// corrupt durable state fails closed. Panics in `work` become a terminal
+    /// [`SubmitOutcome::Failed`] as in [`Self::submit_once`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn submit_once_durable(
+        &self,
+        ledger: &fs_ledger::Ledger,
+        request_id: SubmissionRequestId,
+        canonical_program: &str,
+        work: impl FnOnce() -> Charge,
+    ) -> Result<SubmitOutcome, SessionError> {
+        let ledger_instance_id = self.recovery_ledger(ledger)?;
+        let supplied_request_hash = bounded_request_digest(
+            "idempotency_program_text_bytes",
+            IDEMPOTENCY_PROGRAM_DOMAIN,
+            canonical_program,
+        )?;
+        if supplied_request_hash != request_id.request_hash {
+            return Err(SessionError::MutationConflict {
+                kind: recovery::KIND_SUBMISSION,
+                id: request_id.content_hash,
+            });
+        }
+        let (open_id, token, gate) = {
+            let inner = self.inner.lock().expect("governor lock");
+            let open_id = inner
+                .session_open_ids
+                .get(&request_id.session.0)
+                .copied()
+                .ok_or(SessionError::UnknownSession {
+                    id: request_id.session.0,
+                })?;
+            let token = inner.tokens.get(&request_id.session.0).cloned().ok_or(
+                SessionError::UnknownSession {
+                    id: request_id.session.0,
+                },
+            )?;
+            let current_open = Self::current_open_identity(&inner, request_id.session)?;
+            if current_open != request_id.session_open {
+                return Err(SessionError::MutationAuthorityMismatch {
+                    kind: recovery::KIND_SUBMISSION,
+                    id: request_id.content_hash,
+                });
+            }
+            let current_generation = inner
+                .gate_generations
+                .get(&request_id.session.0)
+                .copied()
+                .unwrap_or(0);
+            if current_generation != request_id.generation {
+                return Err(SessionError::StaleMutationGeneration {
+                    kind: recovery::KIND_SUBMISSION,
+                    id: request_id.session.0,
+                    supplied: request_id.generation,
+                    current: current_generation,
+                });
+            }
+            (
+                open_id,
+                token,
+                inner
+                    .open_requests
+                    .get(&open_id)
+                    .and_then(|replay| replay.gate.clone()),
+            )
+        };
+        self.recover_open(ledger, open_id, token, gate)?;
+        self.submit_once_inner(
+            request_id,
+            Some((ledger, ledger_instance_id, canonical_program)),
+            work,
+        )
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn submit_once_inner(
+        &self,
+        request_id: SubmissionRequestId,
+        durable: Option<(&fs_ledger::Ledger, fs_ledger::LedgerInstanceId, &str)>,
+        work: impl FnOnce() -> Charge,
+    ) -> Result<SubmitOutcome, SessionError> {
+        if request_id.governor_id != self.id {
+            return Err(SessionError::MutationAuthorityMismatch {
+                kind: "submission-request",
+                id: request_id.content_hash,
+            });
+        }
+        let session = request_id.session;
+        let (admission_ordinal, ledger_scope) = {
+            let mut g = self.inner.lock().expect("governor lock");
+            match g.idempotency.get(&request_id) {
                 Some(IdemState::Done {
+                    admission_ordinal,
                     receipt,
-                    enforcement,
+                    meter_receipt,
                     ..
                 }) => {
                     return Ok(SubmitOutcome::Duplicate {
+                        admission_ordinal: *admission_ordinal,
                         receipt: *receipt,
-                        enforcement: enforcement.clone(),
+                        enforcement: meter_receipt.enforcement.clone(),
+                        meter_receipt: meter_receipt.clone(),
                     });
                 }
                 Some(IdemState::Failed {
-                    receipt, evidence, ..
+                    admission_ordinal,
+                    receipt,
+                    evidence,
+                    ..
                 }) => {
                     return Ok(SubmitOutcome::Failed {
+                        admission_ordinal: *admission_ordinal,
                         receipt: *receipt,
                         evidence: evidence.clone(),
                     });
@@ -1192,29 +2895,115 @@ impl Governor {
                 Some(IdemState::Pending { .. }) => return Ok(SubmitOutcome::InFlight),
                 None => {}
             }
-            let key_count = g.idempotency_keys.get(&session.0).map_or(0, BTreeSet::len);
-            if key_count >= MAX_IDEMPOTENCY_KEYS_PER_SESSION {
+            if self.durable_sink.is_some() && durable.is_none() {
+                return Err(SessionError::DurableLedgerRequired {
+                    kind: recovery::KIND_SUBMISSION,
+                    authority: request_id.content_hash,
+                });
+            }
+            let token = g
+                .tokens
+                .get(&session.0)
+                .cloned()
+                .ok_or(SessionError::UnknownSession { id: session.0 })?;
+            let current_open = Self::current_open_identity(&g, session)?;
+            if request_id.session_open != current_open {
+                return Err(SessionError::MutationAuthorityMismatch {
+                    kind: "submission-request",
+                    id: request_id.content_hash,
+                });
+            }
+            let current_generation = g.gate_generations.get(&session.0).copied().unwrap_or(0);
+            if request_id.generation != current_generation {
+                return Err(SessionError::StaleMutationGeneration {
+                    kind: "submission-request",
+                    id: session.0,
+                    supplied: request_id.generation,
+                    current: current_generation,
+                });
+            }
+            if let Some(pending) = g.pending_pause.get(&session.0) {
+                return Err(SessionError::PauseAlreadyPending {
+                    id: session.0,
+                    requested_ordinal: pending.request_id.requested_ordinal,
+                });
+            }
+            if g.gate_phases.get(&session.0) == Some(&GatePhase::ReadyToResume) {
+                return Err(SessionError::ResumeNotActivated {
+                    id: session.0,
+                    generation: current_generation,
+                });
+            }
+            if g.gates
+                .get(&session.0)
+                .is_some_and(|gate| gate.is_requested())
+            {
+                return Err(SessionError::SessionGateDraining {
+                    id: session.0,
+                    generation: current_generation,
+                });
+            }
+            let key_index = g
+                .idempotency_keys
+                .get(&session.0)
+                .expect("open session has submission key index");
+            if let Some(existing) = key_index.get(&request_id.key_hash)
+                && existing != &request_id
+            {
+                return Err(SessionError::MutationConflict {
+                    kind: "submission-request",
+                    id: existing.content_hash,
+                });
+            }
+            if key_index.len() >= MAX_IDEMPOTENCY_KEYS_PER_SESSION {
                 return Err(SessionError::LimitExceeded {
                     resource: "idempotency_keys_per_session",
                     limit: MAX_IDEMPOTENCY_KEYS_PER_SESSION,
-                    observed_at_least: key_count.saturating_add(1),
+                    observed_at_least: key_index.len().saturating_add(1),
                 });
             }
-            // Reserve all three retained key copies (terminal map, per-session
-            // index, dirty-flush index) plus the worst-case terminal evidence
-            // before caller work begins. A panic or charge refusal can then
-            // always become terminal without an unrepresentable rollback.
-            let retained_bytes = idem_key
-                .len()
-                .checked_mul(IDEMPOTENCY_KEY_RETAINED_COPIES)
-                .and_then(|bytes| bytes.checked_add(MAX_IDEMPOTENCY_TERMINAL_RETAINED_BYTES))
+            let report_count = g.meter_report_ids.get(&session.0).map_or(0, BTreeSet::len);
+            let reserved_reports = g
+                .reserved_meter_reports
+                .get(&session.0)
+                .copied()
+                .unwrap_or(0);
+            if report_count.saturating_add(reserved_reports) >= MAX_METER_REPORTS_PER_SESSION {
+                return Err(SessionError::LimitExceeded {
+                    resource: "meter_reports_per_session",
+                    limit: MAX_METER_REPORTS_PER_SESSION,
+                    observed_at_least: report_count
+                        .saturating_add(reserved_reports)
+                        .saturating_add(1),
+                });
+            }
+            let future_ordinals = g
+                .reserved_meter_ordinals
+                .checked_add(1)
+                .and_then(|advance| u64::try_from(advance).ok())
+                .and_then(|advance| g.next_meter_commit_ordinal.checked_add(advance))
+                .ok_or(SessionError::LimitExceeded {
+                    resource: "meter_commit_ordinal",
+                    limit: i64::MAX as usize,
+                    observed_at_least: usize::MAX,
+                })?;
+            if future_ordinals > i64::MAX as u64 {
+                return Err(SessionError::LimitExceeded {
+                    resource: "meter_commit_ordinal",
+                    limit: i64::MAX as usize,
+                    observed_at_least: i64::MAX as usize,
+                });
+            }
+            let retained_bytes = SUBMISSION_REQUEST_RETAINED_BYTES
+                .checked_add(MAX_IDEMPOTENCY_TERMINAL_RETAINED_BYTES)
+                .and_then(|bytes| bytes.checked_add(MAX_METER_RECEIPT_RETAINED_BYTES))
                 .ok_or(SessionError::LimitExceeded {
                     resource: "retained_bytes_per_scope",
                     limit: MAX_RETAINED_BYTES_PER_SCOPE,
                     observed_at_least: usize::MAX,
                 })?;
-            ensure_retained_capacity(&g, &ledger_scope, retained_bytes)?;
-            let ordinal =
+            ensure_retained_capacity(&g, &token.ledger_scope, retained_bytes)?;
+            let admission_ordinal =
                 g.next_submission_ordinal
                     .checked_add(1)
                     .ok_or(SessionError::LimitExceeded {
@@ -1222,110 +3011,243 @@ impl Governor {
                         limit: i64::MAX as usize,
                         observed_at_least: usize::MAX,
                     })?;
-            if ordinal > i64::MAX as u64 {
+            if admission_ordinal > i64::MAX as u64 {
                 return Err(SessionError::LimitExceeded {
                     resource: "submission_ordinal",
                     limit: i64::MAX as usize,
                     observed_at_least: i64::MAX as usize,
                 });
             }
-            g.next_submission_ordinal = ordinal;
+            g.next_submission_ordinal = admission_ordinal;
+            g.reserved_meter_ordinals += 1;
+            *g.reserved_meter_reports
+                .get_mut(&session.0)
+                .expect("open session has report reservation count") += 1;
+            *g.pending_submissions
+                .get_mut(&session.0)
+                .expect("open session has pending-submission count") += 1;
             g.idempotency.insert(
-                idempotency_scope.clone(),
+                request_id,
                 IdemState::Pending {
+                    admission_ordinal,
+                    request_id,
                     reserved_terminal_bytes: MAX_IDEMPOTENCY_TERMINAL_RETAINED_BYTES,
+                    reserved_meter_bytes: MAX_METER_RECEIPT_RETAINED_BYTES,
+                    durable_permit: None,
                 },
             );
             g.idempotency_keys
                 .get_mut(&session.0)
-                .expect("registered session key index")
-                .insert(idem_key.to_string());
-            commit_retained_bytes(&mut g, &ledger_scope, retained_bytes);
-            (ordinal, ledger_scope)
+                .expect("open session has submission key index")
+                .insert(request_id.key_hash, request_id);
+            commit_retained_bytes(&mut g, &token.ledger_scope, retained_bytes);
+            (admission_ordinal, token.ledger_scope)
         };
-        // Execute OUTSIDE the lock (work may be long). Catching here is
-        // load-bearing: every Pending key must reach a terminal state even when
-        // caller-authored work unwinds.
-        let completion = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)) {
-            Ok(charge) => match self.charge(session, charge) {
-                Ok(enforcement) => SubmissionCompletion::Done(charge, enforcement),
+
+        if let Some((ledger, ledger_instance_id, canonical_program)) = durable {
+            let payload = recovery::encode_submission_payload(request_id);
+            let claim = fs_ledger::session_registry::SessionMutationClaim {
+                authority: request_id.content_hash,
+                ledger_instance_id,
+                governor_hash: self.id,
+                session_open_hash: request_id.session_open,
+                kind: recovery::KIND_SUBMISSION,
+                session: request_id.session.0,
+                ledger_scope: &ledger_scope,
+                generation: request_id.generation,
+                causal_ordinal: None,
+                payload: &payload,
+            };
+            let claim_result = match ledger.claim_session_mutation(&claim) {
+                Ok(result) => result,
                 Err(error) => {
-                    SubmissionCompletion::Failed(RetainedEvidence::capture(&error.to_string()))
-                }
-            },
-            Err(payload) => SubmissionCompletion::Failed(panic_evidence(payload.as_ref())),
-        };
-        let receipt = submission_receipt(session, &ledger_scope, idem_key, &completion);
-        let terminal_retained_bytes = match &completion {
-            SubmissionCompletion::Done(_, enforcement) => enforcement_retained_bytes(enforcement),
-            SubmissionCompletion::Failed(evidence) => evidence.preview.len(),
-        };
-        let outcome;
-        {
-            let mut g = self.inner.lock().expect("governor lock");
-            let reserved_terminal_bytes = match g.idempotency.get(&idempotency_scope) {
-                Some(IdemState::Pending {
-                    reserved_terminal_bytes,
-                }) => *reserved_terminal_bytes,
-                Some(IdemState::Done { .. } | IdemState::Failed { .. }) | None => {
-                    return Err(SessionError::Persistence {
-                        what: format!(
-                            "session {} idempotency key lost its owned pending generation before terminal publication",
-                            session.0
-                        ),
-                    });
+                    self.rollback_submission_admission(
+                        request_id,
+                        admission_ordinal,
+                        &ledger_scope,
+                    )?;
+                    return match &error {
+                        fs_ledger::LedgerError::Invalid { field, .. }
+                            if field == "session_claim.authority" =>
+                        {
+                            Err(SessionError::MutationConflict {
+                                kind: recovery::KIND_SUBMISSION,
+                                id: request_id.content_hash,
+                            })
+                        }
+                        _ => Err(SessionError::Persistence {
+                            what: format!(
+                                "durable submission claim {} failed before work: {error}",
+                                request_id.content_hash
+                            ),
+                        }),
+                    };
                 }
             };
-            if terminal_retained_bytes > reserved_terminal_bytes {
+            match claim_result {
+                fs_ledger::session_registry::SessionMutationClaimResult::Claimed { permit } => {
+                    self.attach_submission_permit(request_id, admission_ordinal, permit)?;
+                }
+                fs_ledger::session_registry::SessionMutationClaimResult::Pending { .. } => {
+                    self.rollback_submission_admission(
+                        request_id,
+                        admission_ordinal,
+                        &ledger_scope,
+                    )?;
+                    return Err(SessionError::IndeterminateMutation {
+                        kind: recovery::KIND_SUBMISSION,
+                        authority: request_id.content_hash,
+                    });
+                }
+                fs_ledger::session_registry::SessionMutationClaimResult::Terminal { .. } => {
+                    self.rollback_submission_admission(
+                        request_id,
+                        admission_ordinal,
+                        &ledger_scope,
+                    )?;
+                    return self.recover_submission(ledger, request_id, canonical_program);
+                }
+            }
+        }
+
+        let work_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work));
+        let mut g = self.inner.lock().expect("governor lock");
+        let (reserved_terminal_bytes, reserved_meter_bytes, durable_permit) = match g
+            .idempotency
+            .get(&request_id)
+        {
+            Some(IdemState::Pending {
+                admission_ordinal: pending_ordinal,
+                request_id: pending_request,
+                reserved_terminal_bytes,
+                reserved_meter_bytes,
+                durable_permit,
+            }) if *pending_ordinal == admission_ordinal && *pending_request == request_id => (
+                *reserved_terminal_bytes,
+                *reserved_meter_bytes,
+                *durable_permit,
+            ),
+            Some(IdemState::Pending { .. } | IdemState::Done { .. } | IdemState::Failed { .. })
+            | None => {
                 return Err(SessionError::Persistence {
                     what: format!(
-                        "session {} terminal state requires {terminal_retained_bytes} retained bytes but reserved only {reserved_terminal_bytes}",
+                        "session {} submission request lost its owned pending generation before terminal publication",
                         session.0
                     ),
                 });
             }
-            let dirty_idempotency = idempotency_scope.clone();
-            match completion {
-                SubmissionCompletion::Done(charge, enforcement) => {
-                    g.idempotency.insert(
-                        idempotency_scope,
-                        IdemState::Done {
-                            ordinal,
-                            receipt,
-                            charge,
-                            enforcement: enforcement.clone(),
-                        },
-                    );
-                    outcome = SubmitOutcome::Executed {
-                        charge,
-                        enforcement,
-                        receipt,
-                    };
-                }
-                SubmissionCompletion::Failed(evidence) => {
-                    g.idempotency.insert(
-                        idempotency_scope,
-                        IdemState::Failed {
-                            ordinal,
-                            receipt,
-                            evidence: evidence.clone(),
-                        },
-                    );
-                    outcome = SubmitOutcome::Failed { receipt, evidence };
+        };
+
+        let completion = match work_result {
+            Ok(charge) => {
+                let report_id = Self::submission_meter_report_id(request_id);
+                match self.commit_meter_locked(&mut g, report_id, charge, true) {
+                    Ok(meter_receipt) => SubmissionCompletion::Done(charge, meter_receipt),
+                    Err(error) => {
+                        *g.reserved_meter_reports
+                            .get_mut(&session.0)
+                            .expect("open session has report reservation count") -= 1;
+                        g.reserved_meter_ordinals -= 1;
+                        SubmissionCompletion::Failed(RetainedEvidence::capture(&error.to_string()))
+                    }
                 }
             }
-            bump_scope_revision(&mut g, &ledger_scope);
-            g.scopes
-                .get_mut(&ledger_scope)
-                .expect("registered session scope")
-                .dirty_idempotency
-                .insert(dirty_idempotency);
-            release_retained_bytes(
-                &mut g,
-                &ledger_scope,
-                reserved_terminal_bytes - terminal_retained_bytes,
-            );
+            Err(payload) => {
+                *g.reserved_meter_reports
+                    .get_mut(&session.0)
+                    .expect("open session has report reservation count") -= 1;
+                g.reserved_meter_ordinals -= 1;
+                SubmissionCompletion::Failed(panic_evidence(payload.as_ref()))
+            }
+        };
+        let receipt = submission_receipt(request_id, &ledger_scope, admission_ordinal, &completion);
+        let terminal_event_ordinal = match &completion {
+            SubmissionCompletion::Done(_, meter_receipt) => meter_receipt.commit_ordinal,
+            SubmissionCompletion::Failed(_) => admission_ordinal,
+        };
+        *g.pending_submissions
+            .get_mut(&session.0)
+            .expect("open session has pending-submission count") -= 1;
+        let (outcome, terminal_retained_bytes, release_meter_bytes, terminal_succeeded) =
+            match completion {
+                SubmissionCompletion::Done(charge, meter_receipt) => {
+                    let terminal_retained_bytes =
+                        enforcement_retained_bytes(&meter_receipt.enforcement);
+                    let enforcement = meter_receipt.enforcement.clone();
+                    g.idempotency.insert(
+                        request_id,
+                        IdemState::Done {
+                            admission_ordinal,
+                            receipt,
+                            charge,
+                            meter_receipt: meter_receipt.clone(),
+                            durable_permit,
+                        },
+                    );
+                    (
+                        SubmitOutcome::Executed {
+                            admission_ordinal,
+                            charge,
+                            enforcement,
+                            meter_receipt,
+                            receipt,
+                        },
+                        terminal_retained_bytes,
+                        0,
+                        true,
+                    )
+                }
+                SubmissionCompletion::Failed(evidence) => {
+                    let terminal_retained_bytes = evidence.preview.len();
+                    g.idempotency.insert(
+                        request_id,
+                        IdemState::Failed {
+                            admission_ordinal,
+                            receipt,
+                            evidence: evidence.clone(),
+                            durable_permit,
+                        },
+                    );
+                    (
+                        SubmitOutcome::Failed {
+                            admission_ordinal,
+                            receipt,
+                            evidence,
+                        },
+                        terminal_retained_bytes,
+                        reserved_meter_bytes,
+                        false,
+                    )
+                }
+            };
+        if terminal_retained_bytes > reserved_terminal_bytes {
+            return Err(SessionError::Persistence {
+                what: format!(
+                    "session {} terminal state requires {terminal_retained_bytes} retained bytes but reserved only {reserved_terminal_bytes}",
+                    session.0
+                ),
+            });
         }
+        bump_scope_revision(&mut g, &ledger_scope);
+        let scope = g
+            .scopes
+            .get_mut(&ledger_scope)
+            .expect("registered session scope");
+        if terminal_succeeded {
+            scope.dirty_causal.insert((
+                terminal_event_ordinal,
+                DirtyCausalMutation::Submission(request_id),
+            ));
+        } else {
+            scope
+                .dirty_submission_failures
+                .insert((terminal_event_ordinal, request_id));
+        }
+        release_retained_bytes(
+            &mut g,
+            &ledger_scope,
+            reserved_terminal_bytes - terminal_retained_bytes + release_meter_bytes,
+        );
         Ok(outcome)
     }
 
@@ -1371,6 +3293,38 @@ impl Governor {
         ))
     }
 
+    /// Mint a bounded authority for one declared pressure action in the
+    /// session's current execution generation.
+    ///
+    /// # Errors
+    /// Blank/oversized keys, unknown sessions, or corrupt immutable open state
+    /// are refused without minting an authority.
+    pub fn pressure_action_id(
+        &self,
+        session: SessionId,
+        client_key: &str,
+    ) -> Result<PressureActionId, SessionError> {
+        let key_hash = bounded_request_digest(
+            "pressure_action_key_bytes",
+            PRESSURE_ACTION_ID_DOMAIN,
+            client_key,
+        )?;
+        let (session_open, generation) = self.mutation_context(session)?;
+        let mut payload = Vec::new();
+        push_hash(&mut payload, self.id);
+        payload.extend_from_slice(&session.0.to_le_bytes());
+        push_hash(&mut payload, session_open);
+        payload.extend_from_slice(&generation.to_le_bytes());
+        push_hash(&mut payload, key_hash);
+        Ok(PressureActionId {
+            governor_id: self.id,
+            session,
+            session_open,
+            generation,
+            content_hash: fs_blake3::hash_domain(PRESSURE_ACTION_ID_DOMAIN, &payload),
+        })
+    }
+
     /// Apply memory pressure at `level` (1..=3 ONLY): ladder steps
     /// `1..=level` are emitted IN THE DECLARED ORDER with attribution. Spill
     /// and coarsen remain `Declared` orchestration work; this governor does not
@@ -1397,18 +3351,83 @@ impl Governor {
     #[allow(clippy::too_many_lines)] // The ordered preflight and ladder commit are one state machine.
     pub fn apply_memory_pressure(
         &self,
-        session: SessionId,
+        action_id: PressureActionId,
         level: u8,
-    ) -> Result<Vec<DegradationEvent>, SessionError> {
+    ) -> Result<PressureReceipt, SessionError> {
         if !(1..=3).contains(&level) {
             return Err(SessionError::InvalidPressureLevel { level });
         }
+        if action_id.governor_id != self.id {
+            return Err(SessionError::MutationAuthorityMismatch {
+                kind: "pressure-action",
+                id: action_id.content_hash,
+            });
+        }
+        let session = action_id.session;
         let mut g = self.inner.lock().expect("governor lock");
         let ledger_scope = g
             .tokens
             .get(&session.0)
             .map(|token| token.ledger_scope.clone())
             .ok_or(SessionError::UnknownSession { id: session.0 })?;
+        if let Some(replay) = g.pressure_actions.get(&action_id) {
+            if replay.level != level {
+                return Err(SessionError::MutationConflict {
+                    kind: "pressure-action",
+                    id: action_id.content_hash,
+                });
+            }
+            let scope = g
+                .scopes
+                .get(&ledger_scope)
+                .expect("registered session scope");
+            let end = replay
+                .event_start
+                .checked_add(replay.event_len)
+                .ok_or_else(|| SessionError::Persistence {
+                    what: "pressure replay event range overflowed".to_string(),
+                })?;
+            let events = scope
+                .events
+                .get(replay.event_start..end)
+                .ok_or_else(|| SessionError::Persistence {
+                    what: "pressure replay event range is no longer retained".to_string(),
+                })?
+                .to_vec();
+            return Ok(PressureReceipt {
+                action_id,
+                level,
+                events,
+                content_hash: replay.content_hash,
+            });
+        }
+        let current_open = Self::current_open_identity(&g, session)?;
+        if action_id.session_open != current_open {
+            return Err(SessionError::MutationAuthorityMismatch {
+                kind: "pressure-action",
+                id: action_id.content_hash,
+            });
+        }
+        let current_generation = g.gate_generations.get(&session.0).copied().unwrap_or(0);
+        if action_id.generation != current_generation {
+            return Err(SessionError::StaleMutationGeneration {
+                kind: "pressure-action",
+                id: session.0,
+                supplied: action_id.generation,
+                current: current_generation,
+            });
+        }
+        let action_count = g
+            .pressure_action_ids
+            .get(&session.0)
+            .map_or(0, BTreeSet::len);
+        if action_count >= MAX_PRESSURE_ACTIONS_PER_SESSION {
+            return Err(SessionError::LimitExceeded {
+                resource: "pressure_actions_per_session",
+                limit: MAX_PRESSURE_ACTIONS_PER_SESSION,
+                observed_at_least: action_count.saturating_add(1),
+            });
+        }
         if let Some(pending) = g.pending_pause.get(&session.0) {
             return Err(SessionError::PauseAlreadyPending {
                 id: session.0,
@@ -1462,6 +3481,7 @@ impl Governor {
         };
         let retained_bytes = immediate_retained_bytes
             .checked_add(reserved_completion_bytes)
+            .and_then(|bytes| bytes.checked_add(PRESSURE_ACTION_RETAINED_BYTES))
             .ok_or(SessionError::LimitExceeded {
                 resource: "retained_bytes_per_scope",
                 limit: MAX_RETAINED_BYTES_PER_SCOPE,
@@ -1554,6 +3574,7 @@ impl Governor {
                 checkpoint: None,
                 gate_generation: if is_pause { gate_generation } else { None },
                 pause_request_id: if is_pause { pause_request_id } else { None },
+                pressure_action_id: Some(action_id),
             };
             fired.push(event.clone());
         }
@@ -1568,6 +3589,7 @@ impl Governor {
                     request_id: requested
                         .pause_request_id
                         .expect("pause request carries acknowledgement authority"),
+                    pressure_action_id: action_id,
                     reserved_retained_bytes: reserved_completion_bytes,
                 },
             );
@@ -1580,14 +3602,44 @@ impl Governor {
                 .expect("registered session scope")
                 .reserved_pause_completions += 1;
         }
-        g.scopes
-            .get_mut(&ledger_scope)
+        let event_start = g
+            .scopes
+            .get(&ledger_scope)
             .expect("registered session scope")
             .events
-            .extend(fired.iter().cloned());
+            .len();
+        {
+            let scope = g
+                .scopes
+                .get_mut(&ledger_scope)
+                .expect("registered session scope");
+            scope.events.extend(fired.iter().cloned());
+            scope
+                .dirty_control
+                .insert((first_ordinal, DirtyControlMutation::Pressure(action_id)));
+        }
+        let content_hash = pressure_receipt_hash(action_id, level, &fired);
+        g.pressure_actions.insert(
+            action_id,
+            PressureReplay {
+                level,
+                event_start,
+                event_len: fired.len(),
+                content_hash,
+            },
+        );
+        g.pressure_action_ids
+            .get_mut(&session.0)
+            .expect("open session has pressure-action index")
+            .insert(action_id);
         commit_retained_bytes(&mut g, &ledger_scope, retained_bytes);
         bump_scope_revision(&mut g, &ledger_scope);
-        Ok(fired)
+        Ok(PressureReceipt {
+            action_id,
+            level,
+            events: fired,
+            content_hash,
+        })
     }
 
     /// Acknowledge one exact pending pause request with the solver's checkpoint
@@ -1726,6 +3778,19 @@ impl Governor {
                 event,
                 resume_gate,
                 resume_generation: completed.resume_generation,
+                gate_binding: completed.gate_binding,
+                content_hash: completed.acknowledgement_hash,
+            });
+        }
+        let pending_submissions = g
+            .pending_submissions
+            .get(&session.0)
+            .copied()
+            .ok_or(SessionError::UnknownSession { id: session.0 })?;
+        if pending_submissions != 0 {
+            return Err(SessionError::PauseDrainPending {
+                id: session.0,
+                pending_submissions,
             });
         }
         let pending = *g
@@ -1802,6 +3867,7 @@ impl Governor {
             checkpoint: Some(evidence),
             gate_generation: Some(request_id.gate_generation),
             pause_request_id: Some(request_id),
+            pressure_action_id: Some(pending.pressure_action_id),
         };
         let event_retained_bytes = degradation_event_retained_bytes(&event)?;
         if event_retained_bytes > pending.reserved_retained_bytes {
@@ -1813,6 +3879,9 @@ impl Governor {
             });
         }
         let released_retained_bytes = pending.reserved_retained_bytes - event_retained_bytes;
+        let gate_binding = resumed_gate_binding(request_id, resume_generation);
+        let acknowledgement_hash =
+            pause_acknowledgement_hash(request_id, &event, resume_generation, gate_binding);
         g.pending_pause.remove(&session.0);
         g.reserved_pause_ordinals = g
             .reserved_pause_ordinals
@@ -1838,6 +3907,17 @@ impl Governor {
                 completion_event_index: event_count,
                 completion_ordinal: ordinal,
                 resume_generation,
+                gate_binding,
+                acknowledgement_hash,
+            },
+        );
+        g.pause_acknowledgements.insert(
+            request_id,
+            PauseAcknowledgementReplay {
+                completion_event_index: event_count,
+                resume_generation,
+                gate_binding,
+                content_hash: acknowledgement_hash,
             },
         );
         g.next_ordinal = ordinal;
@@ -1848,6 +3928,10 @@ impl Governor {
                 .expect("registered session scope");
             scope.reserved_pause_completions -= 1;
             scope.events.push(event.clone());
+            scope.dirty_control.insert((
+                ordinal,
+                DirtyControlMutation::PauseAcknowledgement(request_id),
+            ));
         }
         release_retained_bytes(&mut g, &ledger_scope, released_retained_bytes);
         bump_scope_revision(&mut g, &ledger_scope);
@@ -1856,6 +3940,8 @@ impl Governor {
             event,
             resume_gate,
             resume_generation,
+            gate_binding,
+            content_hash: acknowledgement_hash,
         })
     }
 
@@ -1869,7 +3955,7 @@ impl Governor {
     pub fn activate_resume(
         &self,
         acknowledgement: &PauseAcknowledgement,
-    ) -> Result<(), SessionError> {
+    ) -> Result<ResumeActivationReceipt, SessionError> {
         let request_id = acknowledgement.request_id;
         if request_id.governor_id != self.id {
             return Err(SessionError::ResumeAcknowledgementMismatch {
@@ -1896,14 +3982,15 @@ impl Governor {
             .get(&session)
             .cloned()
             .ok_or(SessionError::UngatedSession { id: session })?;
-        let ledger_scope = &g
+        let ledger_scope = g
             .tokens
             .get(&session)
             .expect("known session checked above")
-            .ledger_scope;
+            .ledger_scope
+            .clone();
         let stored_event = g
             .scopes
-            .get(ledger_scope)
+            .get(&ledger_scope)
             .expect("registered session scope")
             .events
             .get(completed.completion_event_index)
@@ -1926,12 +4013,27 @@ impl Governor {
         if completed.request_id != request_id
             || stored_event != &acknowledgement.event
             || completed.resume_generation != acknowledgement.resume_generation
+            || completed.gate_binding != acknowledgement.gate_binding
+            || completed.acknowledgement_hash != acknowledgement.content_hash
             || current_generation != acknowledgement.resume_generation
             || !Arc::ptr_eq(&current_gate, &acknowledgement.resume_gate)
         {
             return Err(SessionError::ResumeAcknowledgementMismatch { id: session });
         }
-        match g.gate_phases.get(&session) {
+        let session_open = Self::current_open_identity(&g, request_id.session)?;
+        let activation_id = resume_activation_id(
+            self.id,
+            request_id.session,
+            session_open,
+            acknowledgement.content_hash,
+            acknowledgement.resume_generation,
+        );
+        let receipt = resume_activation_receipt(
+            activation_id,
+            acknowledgement.content_hash,
+            acknowledgement.gate_binding,
+        );
+        match g.gate_phases.get(&session).copied() {
             Some(GatePhase::ReadyToResume) => {
                 if current_gate.is_requested() {
                     return Err(SessionError::ResumeGateAlreadyRequested {
@@ -1940,9 +4042,26 @@ impl Governor {
                     });
                 }
                 g.gate_phases.insert(session, GatePhase::Running);
-                Ok(())
+                g.resume_activations.insert(activation_id, receipt);
+                g.scopes
+                    .get_mut(&ledger_scope)
+                    .expect("registered session scope")
+                    .dirty_control
+                    .insert((
+                        completed.completion_ordinal,
+                        DirtyControlMutation::ResumeActivation(activation_id),
+                    ));
+                bump_scope_revision(&mut g, &ledger_scope);
+                Ok(receipt)
             }
-            Some(GatePhase::Running) => Ok(()),
+            Some(GatePhase::Running) => match g.resume_activations.get(&activation_id) {
+                Some(stored) if *stored == receipt => Ok(receipt),
+                Some(_) | None => Err(SessionError::Persistence {
+                    what: format!(
+                        "session {session} running generation {current_generation} lost its immutable resume-activation receipt"
+                    ),
+                }),
+            },
             None => Err(SessionError::UngatedSession { id: session }),
         }
     }
@@ -2051,6 +4170,15 @@ impl Governor {
                         "ledger sink identity failed revalidation before scoped flush: {error}"
                     ),
                 })?;
+        if let Some(bound_sink) = self.durable_sink
+            && bound_sink != sink_identity
+        {
+            return Err(SessionError::LedgerScopeSinkMismatch {
+                scope: ledger_scope,
+                bound_sink,
+                attempted_sink: sink_identity,
+            });
+        }
         let prepared = {
             let mut g = self.inner.lock().expect("governor lock");
             let scope =
@@ -2083,73 +4211,100 @@ impl Governor {
                         observed_at_least: usize::MAX,
                     })?;
             let revision = scope.revision;
-            let start_flush_lane = scope.next_flush_lane;
-            let next_flush_lane = (start_flush_lane + 1) % 3;
-            let mut event_target = scope.flushed_events;
-            let event_count = scope.events.len();
-            if event_target > event_count {
-                return Err(SessionError::Persistence {
-                    what: format!(
-                        "scope event cursor {event_target} exceeds event count {event_count}"
-                    ),
-                });
-            }
-
-            let mut buffered = Vec::with_capacity(MAX_FLUSH_ROWS.min(64));
+            // An open receipt is the durable authority prerequisite for every
+            // later row belonging to that session.  Prioritize the bounded
+            // open lane whenever it is dirty so lane rotation can never make
+            // a dependent mutation visible in an earlier transaction.  If
+            // the byte cap splits the open lane, the same override applies to
+            // the next chunk; once it drains, rotation resumes at lane one.
+            let start_flush_lane = if scope.dirty_open_receipts.is_empty() {
+                scope.next_flush_lane
+            } else {
+                0
+            };
+            let next_flush_lane = (start_flush_lane + 1) % 4;
+            let mut terminals = Vec::with_capacity(MAX_FLUSH_ROWS.min(64));
+            let mut event_rows = 0usize;
             let mut encoded_bytes = 0usize;
-            let mut meter_marks = Vec::new();
+            let mut open_marks = Vec::new();
+            let mut meter_report_marks = Vec::new();
             let mut idempotency_marks = Vec::new();
+            let mut control_marks = Vec::new();
 
             // Rotate the first lane after every successful non-empty chunk.
             // This bounds preparation by dirty rows rather than retained state
-            // and prevents continuously dirty meters from starving terminal
-            // receipts or degradation events.
-            'lanes: for lane_offset in 0..3 {
-                let remaining_rows = MAX_FLUSH_ROWS - buffered.len();
+            // and prevents continuously dirty report streams from starving
+            // open, terminal, or degradation receipts.
+            'lanes: for lane_offset in 0..4 {
+                let remaining_rows = MAX_FLUSH_ROWS - terminals.len();
                 if remaining_rows == 0 {
                     break;
                 }
-                match (start_flush_lane + lane_offset) % 3 {
+                match (start_flush_lane + lane_offset) % 4 {
                     0 => {
                         let (dirty, has_more) = {
                             let scope = g.scopes.get(&ledger_scope).expect("scope checked above");
-                            let dirty: Vec<u64> = scope
-                                .dirty_meters
+                            let dirty: Vec<SessionOpenId> = scope
+                                .dirty_open_receipts
                                 .iter()
                                 .take(remaining_rows)
                                 .copied()
                                 .collect();
-                            let has_more = scope.dirty_meters.len() > dirty.len();
+                            let has_more = scope.dirty_open_receipts.len() > dirty.len();
                             (dirty, has_more)
                         };
-                        for id in dirty {
-                            let meters =
-                                g.meters.get(&id).ok_or_else(|| SessionError::Persistence {
+                        for open_id in dirty {
+                            let replay = g.open_requests.get(&open_id).ok_or_else(|| {
+                                SessionError::Persistence {
                                     what: format!(
-                                        "scope dirty-meter index references missing session {id}"
+                                        "scope dirty-open index references missing authority {}",
+                                        open_id.content_hash
                                     ),
-                                })?;
-                            let event = BufferedLedgerEvent {
-                                session: id.to_be_bytes(),
-                                t: generation,
-                                kind: "session.consumption",
-                                payload: scoped_payload(
-                                    "fs-session-consumption-v3",
-                                    &ledger_scope,
-                                    &format!(
-                                        "\"flush_generation\":{generation},\"core_s\":{},\"mem_peak\":{},\"wall_s\":{},\"throttled\":{},\"paused\":{}",
-                                        meters.core_s,
-                                        meters.mem_peak_bytes,
-                                        meters.wall_s,
-                                        meters.throttled,
-                                        meters.paused,
+                                }
+                            })?;
+                            let receipt = &replay.receipt;
+                            let token = g.tokens.get(&open_id.session.0).ok_or_else(|| {
+                                SessionError::Persistence {
+                                    what: format!(
+                                        "scope dirty-open index references missing token for session {}",
+                                        open_id.session.0
                                     ),
+                                }
+                            })?;
+                            if capability_token_identity(token) != receipt.token_digest {
+                                return Err(SessionError::Persistence {
+                                    what: format!(
+                                        "session {} token no longer matches its immutable open receipt",
+                                        open_id.session.0
+                                    ),
+                                });
+                            }
+                            let row = buffered_open_receipt(&ledger_scope, open_id, receipt, token);
+                            let terminal = BufferedTerminal {
+                                authority: open_id.content_hash,
+                                session_open: receipt.content_hash,
+                                kind: recovery::KIND_OPEN,
+                                session: open_id.session,
+                                generation: 0,
+                                causal_ordinal: None,
+                                payload: recovery::encode_open_payload(
+                                    token,
+                                    receipt.gate_identity,
                                 ),
+                                receipt: recovery::encode_open_receipt(receipt),
+                                events: vec![row],
+                                permit: None,
                             };
-                            if !push_bounded_event(&mut buffered, &mut encoded_bytes, event)? {
+                            if !push_bounded_terminal(
+                                &mut terminals,
+                                &mut event_rows,
+                                &mut encoded_bytes,
+                                &ledger_scope,
+                                terminal,
+                            )? {
                                 break 'lanes;
                             }
-                            meter_marks.push((id, meters.clone()));
+                            open_marks.push((open_id, receipt.content_hash));
                         }
                         if has_more {
                             break 'lanes;
@@ -2158,144 +4313,414 @@ impl Governor {
                     1 => {
                         let (dirty, has_more) = {
                             let scope = g.scopes.get(&ledger_scope).expect("scope checked above");
-                            let dirty: Vec<(u64, String)> = scope
-                                .dirty_idempotency
+                            let dirty: Vec<(u64, DirtyCausalMutation)> = scope
+                                .dirty_causal
                                 .iter()
                                 .take(remaining_rows)
-                                .cloned()
+                                .copied()
                                 .collect();
-                            let has_more = scope.dirty_idempotency.len() > dirty.len();
+                            let has_more = scope.dirty_causal.len() > dirty.len();
                             (dirty, has_more)
                         };
-                        for idempotency_scope in dirty {
-                            let (session, key) = &idempotency_scope;
-                            let state = g.idempotency.get(&idempotency_scope).ok_or_else(|| {
-                                SessionError::Persistence {
-                                    what: format!(
-                                        "scope dirty-idempotency index references missing session {session} key"
-                                    ),
-                                }
-                            })?;
-                            let (ordinal, receipt, kind, body) = match state {
-                                IdemState::Pending { .. } => {
-                                    return Err(SessionError::Persistence {
-                                        what: format!(
-                                            "scope dirty-idempotency index references pending session {session} key"
-                                        ),
-                                    });
-                                }
-                                IdemState::Done {
-                                    ordinal,
-                                    receipt,
-                                    charge,
-                                    enforcement,
-                                } => (
-                                    *ordinal,
-                                    *receipt,
-                                    "session.idempotent-execution",
-                                    format!(
-                                        "\"session\":{session},\"key\":\"{}\",\"receipt\":\"{receipt}\",\"core_s_bits\":\"{:016x}\",\"mem_peak_bytes\":{},\"wall_s_bits\":\"{:016x}\",\"enforcement\":{}",
-                                        json_escape(key),
-                                        charge.core_s.to_bits(),
-                                        charge.mem_peak_bytes,
-                                        charge.wall_s.to_bits(),
-                                        enforcement_json(enforcement),
-                                    ),
-                                ),
-                                IdemState::Failed {
-                                    ordinal,
-                                    receipt,
-                                    evidence,
-                                } => (
-                                    *ordinal,
-                                    *receipt,
-                                    "session.idempotent-failure",
-                                    format!(
-                                        "\"session\":{session},\"key\":\"{}\",\"receipt\":\"{receipt}\",\"error_evidence\":{}",
-                                        json_escape(key),
-                                        evidence_json(evidence),
-                                    ),
-                                ),
-                            };
-                            let terminal_generation = (ordinal, receipt);
-                            let event = BufferedLedgerEvent {
-                                session: session.to_be_bytes(),
-                                t: i64::try_from(ordinal).map_err(|_| {
-                                    SessionError::LimitExceeded {
-                                        resource: "submission_ordinal",
-                                        limit: i64::MAX as usize,
-                                        observed_at_least: usize::MAX,
+                        for (indexed_ordinal, mutation) in dirty {
+                            match mutation {
+                                DirtyCausalMutation::Meter(report_id) => {
+                                    let receipt =
+                                        g.meter_reports.get(&report_id).ok_or_else(|| {
+                                            SessionError::Persistence {
+                                                what: format!(
+                                                    "scope causal index references missing meter authority {}",
+                                                    report_id.content_hash
+                                                ),
+                                            }
+                                        })?;
+                                    if receipt.commit_ordinal != indexed_ordinal {
+                                        return Err(SessionError::Persistence {
+                                            what: format!(
+                                                "meter report {} causal index ordinal {indexed_ordinal} disagrees with receipt ordinal {}",
+                                                report_id.content_hash, receipt.commit_ordinal
+                                            ),
+                                        });
                                     }
-                                })?,
-                                kind,
-                                payload: scoped_payload(
-                                    "fs-session-idempotency-v4",
-                                    &ledger_scope,
-                                    &body,
-                                ),
-                            };
-                            if !push_bounded_event(&mut buffered, &mut encoded_bytes, event)? {
-                                break 'lanes;
+                                    let row =
+                                        buffered_meter_receipt(&ledger_scope, report_id, receipt)?;
+                                    let terminal = BufferedTerminal {
+                                        authority: report_id.content_hash,
+                                        session_open: report_id.session_open,
+                                        kind: recovery::KIND_METER,
+                                        session: report_id.session,
+                                        generation: report_id.generation,
+                                        causal_ordinal: Some(receipt.commit_ordinal),
+                                        payload: recovery::encode_meter_payload(receipt.delta),
+                                        receipt: recovery::encode_meter_terminal_receipt(receipt),
+                                        events: vec![row],
+                                        permit: None,
+                                    };
+                                    if !push_bounded_terminal(
+                                        &mut terminals,
+                                        &mut event_rows,
+                                        &mut encoded_bytes,
+                                        &ledger_scope,
+                                        terminal,
+                                    )? {
+                                        break 'lanes;
+                                    }
+                                    meter_report_marks.push((report_id, receipt.content_hash));
+                                }
+                                DirtyCausalMutation::Submission(request_id) => {
+                                    let state =
+                                        g.idempotency.get(&request_id).ok_or_else(|| {
+                                            SessionError::Persistence {
+                                                what: format!(
+                                                    "scope causal index references missing submission {}",
+                                                    request_id.content_hash
+                                                ),
+                                            }
+                                        })?;
+                                    let (row, generation) = buffered_submission_success(
+                                        &ledger_scope,
+                                        request_id,
+                                        state,
+                                    )?;
+                                    if generation.2 != indexed_ordinal {
+                                        return Err(SessionError::Persistence {
+                                            what: format!(
+                                                "submission {} causal index ordinal {indexed_ordinal} disagrees with terminal ordinal {}",
+                                                request_id.content_hash, generation.2
+                                            ),
+                                        });
+                                    }
+                                    let terminal = BufferedTerminal {
+                                        authority: request_id.content_hash,
+                                        session_open: request_id.session_open,
+                                        kind: recovery::KIND_SUBMISSION,
+                                        session: request_id.session,
+                                        generation: request_id.generation,
+                                        causal_ordinal: None,
+                                        payload: recovery::encode_submission_payload(request_id),
+                                        receipt: recovery::encode_submission_terminal_receipt(
+                                            state,
+                                        )?,
+                                        events: vec![row],
+                                        permit: durable_submission_permit(state),
+                                    };
+                                    if !push_bounded_terminal(
+                                        &mut terminals,
+                                        &mut event_rows,
+                                        &mut encoded_bytes,
+                                        &ledger_scope,
+                                        terminal,
+                                    )? {
+                                        break 'lanes;
+                                    }
+                                    idempotency_marks.push((request_id, generation));
+                                }
                             }
-                            idempotency_marks.push((idempotency_scope, terminal_generation));
                         }
                         if has_more {
                             break 'lanes;
                         }
                     }
                     2 => {
-                        let scope = g.scopes.get(&ledger_scope).expect("scope checked above");
-                        let end = event_target.saturating_add(remaining_rows).min(event_count);
-                        for event in &scope.events[event_target..end] {
-                            let requested = event
-                                .requested_ordinal
-                                .map_or_else(|| "null".to_string(), |ordinal| ordinal.to_string());
-                            let checkpoint = event
-                                .checkpoint
-                                .as_ref()
-                                .map_or_else(|| "null".to_string(), evidence_json);
-                            let gate_generation = event
-                                .gate_generation
-                                .map_or_else(|| "null".to_string(), |value| value.to_string());
-                            let row = BufferedLedgerEvent {
-                                session: event.session.0.to_be_bytes(),
-                                t: event.ordinal,
-                                kind: "session.degradation",
-                                payload: scoped_payload(
-                                    "fs-session-degradation-v4",
-                                    &ledger_scope,
-                                    &format!(
-                                        "\"step\":\"{}\",\"level\":{},\"phase\":\"{}\",\"attribution\":\"{}\",\"requested_ordinal\":{requested},\"checkpoint\":{checkpoint},\"gate_generation\":{gate_generation}",
-                                        degradation_step_name(event.step),
-                                        event.pressure_level,
-                                        step_phase_name(event.phase),
-                                        json_escape(&event.attribution),
+                        let (dirty, has_more) = {
+                            let scope = g.scopes.get(&ledger_scope).expect("scope checked above");
+                            let dirty: Vec<(u64, SubmissionRequestId)> = scope
+                                .dirty_submission_failures
+                                .iter()
+                                .take(remaining_rows)
+                                .copied()
+                                .collect();
+                            let has_more = scope.dirty_submission_failures.len() > dirty.len();
+                            (dirty, has_more)
+                        };
+                        for (indexed_ordinal, request_id) in dirty {
+                            let state = g.idempotency.get(&request_id).ok_or_else(|| {
+                                SessionError::Persistence {
+                                    what: format!(
+                                        "scope failed-submission index references missing request {}",
+                                        request_id.content_hash
                                     ),
-                                ),
+                                }
+                            })?;
+                            let (event, generation) =
+                                buffered_submission_failure(&ledger_scope, request_id, state)?;
+                            if generation.2 != indexed_ordinal {
+                                return Err(SessionError::Persistence {
+                                    what: format!(
+                                        "failed submission {} index ordinal {indexed_ordinal} disagrees with terminal ordinal {}",
+                                        request_id.content_hash, generation.2
+                                    ),
+                                });
+                            }
+                            let terminal = BufferedTerminal {
+                                authority: request_id.content_hash,
+                                session_open: request_id.session_open,
+                                kind: recovery::KIND_SUBMISSION,
+                                session: request_id.session,
+                                generation: request_id.generation,
+                                causal_ordinal: None,
+                                payload: recovery::encode_submission_payload(request_id),
+                                receipt: recovery::encode_submission_terminal_receipt(state)?,
+                                events: vec![event],
+                                permit: durable_submission_permit(state),
                             };
-                            if !push_bounded_event(&mut buffered, &mut encoded_bytes, row)? {
+                            if !push_bounded_terminal(
+                                &mut terminals,
+                                &mut event_rows,
+                                &mut encoded_bytes,
+                                &ledger_scope,
+                                terminal,
+                            )? {
                                 break 'lanes;
                             }
-                            event_target =
-                                event_target
-                                    .checked_add(1)
-                                    .ok_or(SessionError::LimitExceeded {
-                                        resource: "scope_event_cursor",
-                                        limit: usize::MAX,
-                                        observed_at_least: usize::MAX,
-                                    })?;
+                            idempotency_marks.push((request_id, generation));
                         }
-                        if event_target < event_count {
+                        if has_more {
                             break 'lanes;
                         }
                     }
-                    _ => unreachable!("flush lane modulo three"),
+                    3 => {
+                        let (dirty, has_more) = {
+                            let scope = g.scopes.get(&ledger_scope).expect("scope checked above");
+                            let dirty: Vec<(i64, DirtyControlMutation)> = scope
+                                .dirty_control
+                                .iter()
+                                .take(remaining_rows)
+                                .copied()
+                                .collect();
+                            let has_more = scope.dirty_control.len() > dirty.len();
+                            (dirty, has_more)
+                        };
+                        for (indexed_ordinal, mutation) in dirty {
+                            let causal_ordinal =
+                                u64::try_from(indexed_ordinal).map_err(|_| {
+                                    SessionError::Persistence {
+                                        what: format!(
+                                            "control terminal has negative causal ordinal {indexed_ordinal}"
+                                        ),
+                                    }
+                                })?;
+                            let (terminal, content_hash, owned_events) = match mutation {
+                                DirtyControlMutation::Pressure(action_id) => {
+                                    let replay = g.pressure_actions.get(&action_id).ok_or_else(|| {
+                                        SessionError::Persistence {
+                                            what: format!(
+                                                "scope control index references missing pressure action {}",
+                                                action_id.content_hash
+                                            ),
+                                        }
+                                    })?;
+                                    let scope =
+                                        g.scopes.get(&ledger_scope).expect("scope checked above");
+                                    let events = scope
+                                        .events
+                                        .get(
+                                            replay.event_start
+                                                ..replay.event_start + replay.event_len,
+                                        )
+                                        .ok_or_else(|| SessionError::Persistence {
+                                            what: format!(
+                                                "pressure action {} lost its retained event group",
+                                                action_id.content_hash
+                                            ),
+                                        })?
+                                        .to_vec();
+                                    if events.first().map(|event| event.ordinal)
+                                        != Some(indexed_ordinal)
+                                    {
+                                        return Err(SessionError::Persistence {
+                                            what: format!(
+                                                "pressure action {} control ordinal disagrees with its first event",
+                                                action_id.content_hash
+                                            ),
+                                        });
+                                    }
+                                    let receipt = PressureReceipt {
+                                        action_id,
+                                        level: replay.level,
+                                        events: events.clone(),
+                                        content_hash: replay.content_hash,
+                                    };
+                                    let rows = events
+                                        .iter()
+                                        .map(|event| {
+                                            buffered_degradation_event(
+                                                &ledger_scope,
+                                                event,
+                                                replay.content_hash,
+                                            )
+                                        })
+                                        .collect::<Result<Vec<_>, _>>()?;
+                                    (
+                                        BufferedTerminal {
+                                            authority: action_id.content_hash,
+                                            session_open: action_id.session_open,
+                                            kind: recovery::KIND_PRESSURE,
+                                            session: action_id.session,
+                                            generation: action_id.generation,
+                                            causal_ordinal: Some(causal_ordinal),
+                                            payload: recovery::encode_pressure_payload(
+                                                replay.level,
+                                            ),
+                                            receipt: recovery::encode_pressure_terminal_receipt(
+                                                &receipt,
+                                            ),
+                                            events: rows,
+                                            permit: None,
+                                        },
+                                        replay.content_hash,
+                                        events.len(),
+                                    )
+                                }
+                                DirtyControlMutation::PauseAcknowledgement(request_id) => {
+                                    let replay = g
+                                        .pause_acknowledgements
+                                        .get(&request_id)
+                                        .ok_or_else(|| SessionError::Persistence {
+                                            what: format!(
+                                                "scope control index references missing pause acknowledgement {}",
+                                                recovery::pause_ack_authority(request_id)
+                                            ),
+                                        })?;
+                                    let event = g
+                                        .scopes
+                                        .get(&ledger_scope)
+                                        .and_then(|scope| {
+                                            scope.events.get(replay.completion_event_index)
+                                        })
+                                        .cloned()
+                                        .ok_or_else(|| SessionError::Persistence {
+                                            what: "pause acknowledgement lost its completion event"
+                                                .to_string(),
+                                        })?;
+                                    if event.ordinal != indexed_ordinal {
+                                        return Err(SessionError::Persistence {
+                                            what: "pause acknowledgement control ordinal disagrees with its completion event"
+                                                .to_string(),
+                                        });
+                                    }
+                                    let action_id = event.pressure_action_id.ok_or_else(|| {
+                                        SessionError::Persistence {
+                                            what: "pause completion lost its pressure action"
+                                                .to_string(),
+                                        }
+                                    })?;
+                                    let action_hash = g
+                                        .pressure_actions
+                                        .get(&action_id)
+                                        .ok_or_else(|| SessionError::Persistence {
+                                            what: "pause completion action receipt is missing"
+                                                .to_string(),
+                                        })?
+                                        .content_hash;
+                                    let gate = g.gates.get(&request_id.session.0).cloned().ok_or(
+                                        SessionError::UngatedSession {
+                                            id: request_id.session.0,
+                                        },
+                                    )?;
+                                    let acknowledgement = PauseAcknowledgement {
+                                        request_id,
+                                        event: event.clone(),
+                                        resume_gate: gate,
+                                        resume_generation: replay.resume_generation,
+                                        gate_binding: replay.gate_binding,
+                                        content_hash: replay.content_hash,
+                                    };
+                                    let evidence = event.checkpoint.as_ref().ok_or_else(|| {
+                                        SessionError::Persistence {
+                                            what: "pause acknowledgement lacks checkpoint evidence"
+                                                .to_string(),
+                                        }
+                                    })?;
+                                    let row = buffered_degradation_event(
+                                        &ledger_scope,
+                                        &event,
+                                        action_hash,
+                                    )?;
+                                    (
+                                        BufferedTerminal {
+                                            authority: recovery::pause_ack_authority(request_id),
+                                            session_open: Self::current_open_identity(
+                                                &g,
+                                                request_id.session,
+                                            )?,
+                                            kind: recovery::KIND_PAUSE_ACK,
+                                            session: request_id.session,
+                                            generation: replay.resume_generation,
+                                            causal_ordinal: Some(causal_ordinal),
+                                            payload: recovery::encode_pause_ack_payload(evidence),
+                                            receipt: recovery::encode_pause_ack_terminal_receipt(
+                                                &acknowledgement,
+                                            ),
+                                            events: vec![row],
+                                            permit: None,
+                                        },
+                                        replay.content_hash,
+                                        1,
+                                    )
+                                }
+                                DirtyControlMutation::ResumeActivation(activation_id) => {
+                                    let receipt = *g
+                                        .resume_activations
+                                        .get(&activation_id)
+                                        .ok_or_else(|| SessionError::Persistence {
+                                            what: format!(
+                                                "scope control index references missing activation {}",
+                                                activation_id.content_hash
+                                            ),
+                                        })?;
+                                    (
+                                        BufferedTerminal {
+                                            authority: activation_id.content_hash,
+                                            session_open: activation_id.session_open,
+                                            kind: recovery::KIND_RESUME_ACTIVATION,
+                                            session: activation_id.session,
+                                            generation: activation_id.resume_generation,
+                                            causal_ordinal: Some(causal_ordinal),
+                                            payload: recovery::encode_activation_payload_parts(
+                                                receipt.acknowledgement_hash,
+                                                activation_id.resume_generation,
+                                                receipt.gate_binding,
+                                            ),
+                                            receipt: recovery::encode_activation_terminal_receipt(
+                                                receipt,
+                                            ),
+                                            events: Vec::new(),
+                                            permit: None,
+                                        },
+                                        receipt.content_hash,
+                                        0,
+                                    )
+                                }
+                            };
+                            if !push_bounded_terminal(
+                                &mut terminals,
+                                &mut event_rows,
+                                &mut encoded_bytes,
+                                &ledger_scope,
+                                terminal,
+                            )? {
+                                break 'lanes;
+                            }
+                            control_marks.push((
+                                indexed_ordinal,
+                                mutation,
+                                content_hash,
+                                owned_events,
+                            ));
+                        }
+                        if has_more {
+                            break 'lanes;
+                        }
+                    }
+                    _ => unreachable!("flush lane modulo four"),
                 }
             }
 
-            if buffered.is_empty() {
+            if terminals.is_empty() {
                 return Ok(FlushReport {
                     appended_rows: 0,
+                    committed_terminals: 0,
                     encoded_bytes: 0,
                     remaining_dirty: false,
                 });
@@ -2318,36 +4743,82 @@ impl Governor {
                 generation,
                 revision,
                 next_flush_lane,
-                buffered,
+                terminals,
                 encoded_bytes,
-                meter_marks,
+                open_marks,
+                meter_report_marks,
                 idempotency_marks,
-                event_target,
+                control_marks,
             }
         };
 
-        let rows: Vec<_> = prepared
-            .buffered
+        let event_groups: Vec<Vec<_>> = prepared
+            .terminals
             .iter()
-            .map(BufferedLedgerEvent::as_row)
+            .map(|terminal| {
+                terminal
+                    .events
+                    .iter()
+                    .map(BufferedLedgerEvent::as_row)
+                    .collect()
+            })
             .collect();
-        if let Err(error) = ledger.append_events(&rows) {
-            let mut g = self.inner.lock().expect("governor lock");
-            let scope = g
-                .scopes
-                .get_mut(&ledger_scope)
-                .expect("reserved scope remains registered");
-            if scope.in_flight == Some(prepared.reservation_id) {
-                scope.in_flight = None;
+        let terminal_groups: Vec<_> = prepared
+            .terminals
+            .iter()
+            .zip(&event_groups)
+            .map(|(terminal, events)| {
+                let claim = fs_ledger::session_registry::SessionMutationClaim {
+                    authority: terminal.authority,
+                    ledger_instance_id: sink_identity,
+                    governor_hash: self.id,
+                    session_open_hash: terminal.session_open,
+                    kind: terminal.kind,
+                    session: terminal.session.0,
+                    ledger_scope: &ledger_scope,
+                    generation: terminal.generation,
+                    causal_ordinal: terminal.causal_ordinal,
+                    payload: &terminal.payload,
+                };
+                fs_ledger::session_registry::SessionTerminalGroup {
+                    terminal: fs_ledger::session_registry::SessionTerminalRow {
+                        claim,
+                        permit: terminal.permit,
+                        receipt: &terminal.receipt,
+                    },
+                    events,
+                }
+            })
+            .collect();
+        let batch = fs_ledger::session_registry::SessionTerminalBatch {
+            groups: &terminal_groups,
+        };
+        let persistence = ledger.append_session_terminal_batch(&batch);
+        let (appended_rows, committed_terminals) = match persistence {
+            Ok(fs_ledger::session_registry::SessionTerminalBatchResult::Committed {
+                events_appended,
+                ..
+            }) => (events_appended, prepared.terminals.len()),
+            Ok(fs_ledger::session_registry::SessionTerminalBatchResult::Replayed { .. }) => {
+                (0, prepared.terminals.len())
             }
-            return Err(SessionError::Persistence {
-                what: format!(
-                    "atomic bounded session batch failed; every semantic cursor remains dirty: {error}"
-                ),
-            });
-        }
+            Err(error) => {
+                let mut g = self.inner.lock().expect("governor lock");
+                let scope = g
+                    .scopes
+                    .get_mut(&ledger_scope)
+                    .expect("reserved scope remains registered");
+                if scope.in_flight == Some(prepared.reservation_id) {
+                    scope.in_flight = None;
+                }
+                return Err(SessionError::Persistence {
+                    what: format!(
+                        "atomic bounded session batch failed; every semantic cursor remains dirty: {error}"
+                    ),
+                });
+            }
+        };
 
-        let appended_rows = prepared.buffered.len();
         let mut g = self.inner.lock().expect("governor lock");
         {
             let scope = g
@@ -2364,40 +4835,102 @@ impl Governor {
             scope.in_flight = None;
             scope.sink.get_or_insert(sink_identity);
             scope.flush_generation = prepared.generation;
-            scope.flushed_events = prepared.event_target;
             scope.next_flush_lane = prepared.next_flush_lane;
         }
-        for (session, meters) in prepared.meter_marks {
+        for (open_id, content_hash) in prepared.open_marks {
             let still_current = g
-                .meters
-                .get(&session)
-                .is_some_and(|current| same_meter_snapshot(current, &meters));
+                .open_requests
+                .get(&open_id)
+                .is_some_and(|replay| replay.receipt.content_hash == content_hash);
             if still_current {
                 g.scopes
                     .get_mut(&ledger_scope)
                     .expect("committed scope remains registered")
-                    .dirty_meters
-                    .remove(&session);
+                    .dirty_open_receipts
+                    .remove(&open_id);
             }
         }
-        for (idempotency_scope, generation) in prepared.idempotency_marks {
-            let still_current = match g.idempotency.get(&idempotency_scope) {
-                Some(
-                    IdemState::Done {
-                        ordinal, receipt, ..
-                    }
-                    | IdemState::Failed {
-                        ordinal, receipt, ..
-                    },
-                ) => (*ordinal, *receipt) == generation,
+        for (report_id, content_hash) in prepared.meter_report_marks {
+            let current = g.meter_reports.get(&report_id);
+            if let Some(receipt) = current.filter(|receipt| receipt.content_hash == content_hash) {
+                let commit_ordinal = receipt.commit_ordinal;
+                g.scopes
+                    .get_mut(&ledger_scope)
+                    .expect("committed scope remains registered")
+                    .dirty_causal
+                    .remove(&(commit_ordinal, DirtyCausalMutation::Meter(report_id)));
+            }
+        }
+        for (request_id, generation) in prepared.idempotency_marks {
+            let still_current = match g.idempotency.get(&request_id) {
+                Some(IdemState::Done {
+                    admission_ordinal,
+                    receipt,
+                    meter_receipt,
+                    ..
+                }) => (*admission_ordinal, *receipt, meter_receipt.commit_ordinal) == generation,
+                Some(IdemState::Failed {
+                    admission_ordinal,
+                    receipt,
+                    ..
+                }) => (*admission_ordinal, *receipt, *admission_ordinal) == generation,
                 Some(IdemState::Pending { .. }) | None => false,
             };
             if still_current {
-                g.scopes
+                let terminal_succeeded =
+                    matches!(g.idempotency.get(&request_id), Some(IdemState::Done { .. }));
+                let scope = g
+                    .scopes
                     .get_mut(&ledger_scope)
-                    .expect("committed scope remains registered")
-                    .dirty_idempotency
-                    .remove(&idempotency_scope);
+                    .expect("committed scope remains registered");
+                if terminal_succeeded {
+                    scope
+                        .dirty_causal
+                        .remove(&(generation.2, DirtyCausalMutation::Submission(request_id)));
+                } else {
+                    scope
+                        .dirty_submission_failures
+                        .remove(&(generation.2, request_id));
+                }
+            }
+        }
+        for (ordinal, mutation, content_hash, owned_events) in prepared.control_marks {
+            let still_current = match mutation {
+                DirtyControlMutation::Pressure(action_id) => g
+                    .pressure_actions
+                    .get(&action_id)
+                    .is_some_and(|replay| replay.content_hash == content_hash),
+                DirtyControlMutation::PauseAcknowledgement(request_id) => g
+                    .pause_acknowledgements
+                    .get(&request_id)
+                    .is_some_and(|replay| replay.content_hash == content_hash),
+                DirtyControlMutation::ResumeActivation(activation_id) => g
+                    .resume_activations
+                    .get(&activation_id)
+                    .is_some_and(|receipt| receipt.content_hash == content_hash),
+            };
+            if still_current {
+                let scope = g
+                    .scopes
+                    .get_mut(&ledger_scope)
+                    .expect("committed scope remains registered");
+                scope.dirty_control.remove(&(ordinal, mutation));
+                scope.flushed_events = scope.flushed_events.checked_add(owned_events).ok_or(
+                    SessionError::LimitExceeded {
+                        resource: "scope_event_cursor",
+                        limit: usize::MAX,
+                        observed_at_least: usize::MAX,
+                    },
+                )?;
+                if scope.flushed_events > scope.events.len() {
+                    return Err(SessionError::Persistence {
+                        what: format!(
+                            "scope committed-event count {} exceeds retained event count {}",
+                            scope.flushed_events,
+                            scope.events.len()
+                        ),
+                    });
+                }
             }
         }
         let scope = g
@@ -2405,11 +4938,13 @@ impl Governor {
             .get(&ledger_scope)
             .expect("committed scope remains registered");
         let remaining_dirty = scope.revision != prepared.revision
-            || !scope.dirty_meters.is_empty()
-            || !scope.dirty_idempotency.is_empty()
-            || scope.flushed_events < scope.events.len();
+            || !scope.dirty_open_receipts.is_empty()
+            || !scope.dirty_causal.is_empty()
+            || !scope.dirty_submission_failures.is_empty()
+            || !scope.dirty_control.is_empty();
         Ok(FlushReport {
             appended_rows,
+            committed_terminals,
             encoded_bytes: prepared.encoded_bytes,
             remaining_dirty,
         })
@@ -2419,6 +4954,89 @@ impl Governor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct LegacyGovernor {
+        governor: super::Governor,
+        next_mutation: AtomicU64,
+    }
+
+    use LegacyGovernor as Governor;
+
+    impl LegacyGovernor {
+        fn new() -> Self {
+            Self {
+                governor: super::Governor::new(),
+                next_mutation: AtomicU64::new(1),
+            }
+        }
+
+        fn next_key(&self, kind: &str, session: SessionId) -> String {
+            let ordinal = self.next_mutation.fetch_add(1, Ordering::Relaxed);
+            format!("legacy-test-{kind}-{}-{ordinal}", session.0)
+        }
+
+        fn open_session(&self, token: CapabilityToken) -> Result<ScopeFlushPermit, SessionError> {
+            let open_id = self
+                .governor
+                .session_open_id(token.session, &self.next_key("open", token.session))?;
+            self.governor
+                .open_session(open_id, token)
+                .map(|receipt| receipt.flush_permit())
+        }
+
+        fn open_session_gated(
+            &self,
+            token: CapabilityToken,
+            gate: Arc<CancelGate>,
+        ) -> Result<ScopeFlushPermit, SessionError> {
+            let open_id = self
+                .governor
+                .session_open_id(token.session, &self.next_key("open", token.session))?;
+            self.governor
+                .open_session_gated(open_id, token, gate)
+                .map(|receipt| receipt.flush_permit())
+        }
+
+        fn charge(&self, session: SessionId, delta: Charge) -> Result<Enforcement, SessionError> {
+            let report_id = self
+                .governor
+                .meter_report_id(session, &self.next_key("meter", session))?;
+            self.governor
+                .charge(report_id, delta)
+                .map(|receipt| receipt.enforcement.clone())
+        }
+
+        fn submit_once(
+            &self,
+            session: SessionId,
+            key: &str,
+            work: impl FnOnce() -> Charge,
+        ) -> Result<SubmitOutcome, SessionError> {
+            let request_id = self.governor.submission_request_id(session, key, key)?;
+            self.governor.submit_once(request_id, work)
+        }
+
+        fn apply_memory_pressure(
+            &self,
+            session: SessionId,
+            level: u8,
+        ) -> Result<Vec<DegradationEvent>, SessionError> {
+            let action_id = self
+                .governor
+                .pressure_action_id(session, &self.next_key("pressure", session))?;
+            self.governor
+                .apply_memory_pressure(action_id, level)
+                .map(|receipt| receipt.events)
+        }
+    }
+
+    impl core::ops::Deref for LegacyGovernor {
+        type Target = super::Governor;
+
+        fn deref(&self) -> &Self::Target {
+            &self.governor
+        }
+    }
 
     fn test_token(session: u64, ledger_scope: &str) -> CapabilityToken {
         CapabilityToken {
@@ -2441,6 +5059,46 @@ mod tests {
         }
     }
 
+    fn durable_test_ledger_path(case: &str) -> String {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        let ordinal = NEXT.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir()
+            .join(format!(
+                "fs-session-ujhp-{}-{ordinal}-{case}.ledger",
+                std::process::id()
+            ))
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    fn bounded_terminal_with_events(event_count: usize) -> BufferedTerminal {
+        let authority = fs_blake3::hash_domain(
+            "org.frankensim.fs-session.test-terminal.v1",
+            &u64::try_from(event_count)
+                .expect("bounded test event count fits u64")
+                .to_le_bytes(),
+        );
+        BufferedTerminal {
+            authority,
+            session_open: authority,
+            kind: recovery::KIND_PRESSURE,
+            session: SessionId(1),
+            generation: 0,
+            causal_ordinal: None,
+            payload: Vec::new(),
+            receipt: Vec::new(),
+            events: (0..event_count)
+                .map(|index| BufferedLedgerEvent {
+                    session: 1_u64.to_be_bytes(),
+                    t: i64::try_from(index).expect("bounded test ordinal fits i64"),
+                    kind: "session.test-group",
+                    payload: "{}".to_string(),
+                })
+                .collect(),
+            permit: None,
+        }
+    }
+
     #[test]
     fn scoped_payload_preserves_and_escapes_the_exact_authority() {
         let payload = scoped_payload(
@@ -2455,6 +5113,104 @@ mod tests {
     }
 
     #[test]
+    fn durable_governor_identity_reconstructs_only_on_the_same_ledger() {
+        let ledger = fs_ledger::Ledger::open(":memory:").expect("fixture ledger");
+        let nonce = DurableGovernorNonce::from_bytes([0x5a; 32]);
+        let first = super::Governor::new_durable(&ledger, nonce).expect("first governor");
+        let reopened =
+            super::Governor::new_durable(&ledger, nonce).expect("reconstructed governor");
+        assert_eq!(first.identity(), reopened.identity());
+        let first_open = first
+            .session_open_id(SessionId(30), "stable-open")
+            .expect("first authority");
+        let reopened_open = reopened
+            .session_open_id(SessionId(30), "stable-open")
+            .expect("reconstructed authority");
+        assert_eq!(first_open, reopened_open);
+
+        let foreign_ledger = fs_ledger::Ledger::open(":memory:").expect("foreign ledger");
+        let foreign =
+            super::Governor::new_durable(&foreign_ledger, nonce).expect("foreign durable governor");
+        assert_ne!(first.identity(), foreign.identity());
+        assert_ne!(
+            first_open,
+            foreign
+                .session_open_id(SessionId(30), "stable-open")
+                .expect("foreign authority")
+        );
+        assert_ne!(
+            super::Governor::new().identity(),
+            super::Governor::new().identity(),
+            "ephemeral governor namespaces must not alias"
+        );
+    }
+
+    #[test]
+    fn submission_payload_carries_reconstructible_typed_authorities() {
+        let governor = super::Governor::new();
+        let session = SessionId(31);
+        let open_id = governor
+            .session_open_id(session, "payload-open")
+            .expect("open authority");
+        governor
+            .open_session(open_id, test_token(session.0, "payload-authority"))
+            .expect("fixture session");
+
+        let success_id = governor
+            .submission_request_id(session, "success-key", "success-program")
+            .expect("success authority");
+        governor
+            .submit_once(success_id, Charge::default)
+            .expect("success terminal");
+        let failure_id = governor
+            .submission_request_id(session, "failure-key", "failure-program")
+            .expect("failure authority");
+        governor
+            .submit_once(failure_id, || Charge {
+                core_s: f64::NAN,
+                ..Charge::default()
+            })
+            .expect("invalid charge becomes a terminal failure");
+
+        let inner = governor.inner.lock().expect("governor lock");
+        let success_state = inner
+            .idempotency
+            .get(&success_id)
+            .expect("success terminal retained");
+        let (success, _) =
+            buffered_submission_success("payload-authority", success_id, success_state)
+                .expect("success payload");
+        let derived_meter = super::Governor::submission_meter_report_id(success_id);
+        for field in [
+            format!("\"session_open\":\"{}\"", success_id.session_open),
+            format!("\"generation\":{}", success_id.generation),
+            format!("\"meter_report_id\":\"{}\"", derived_meter.content_hash),
+        ] {
+            assert!(
+                success.payload.contains(&field),
+                "success payload omitted {field}"
+            );
+        }
+
+        let failure_state = inner
+            .idempotency
+            .get(&failure_id)
+            .expect("failure terminal retained");
+        let (failure, _) =
+            buffered_submission_failure("payload-authority", failure_id, failure_state)
+                .expect("failure payload");
+        for field in [
+            format!("\"session_open\":\"{}\"", failure_id.session_open),
+            format!("\"generation\":{}", failure_id.generation),
+        ] {
+            assert!(
+                failure.payload.contains(&field),
+                "failure payload omitted {field}"
+            );
+        }
+    }
+
+    #[test]
     fn retained_evidence_bounds_preview_but_receipts_bind_the_full_tail() {
         let shared_prefix = "x".repeat(MAX_RETAINED_EVIDENCE_BYTES);
         let evidence_a = RetainedEvidence::capture(&format!("{shared_prefix}A"));
@@ -2464,16 +5220,29 @@ mod tests {
         assert_eq!(evidence_a.byte_len(), MAX_RETAINED_EVIDENCE_BYTES + 1);
         assert_ne!(evidence_a.digest(), evidence_b.digest());
 
+        let governor = super::Governor::new();
+        let open_id = governor
+            .session_open_id(SessionId(1), "receipt-test-open")
+            .expect("bounded open authority");
+        let request_id = SubmissionRequestId {
+            governor_id: governor.id,
+            session: SessionId(1),
+            session_open: open_id.content_hash,
+            generation: 0,
+            key_hash: fs_blake3::hash_domain(IDEMPOTENCY_AGENT_DOMAIN, b"key"),
+            request_hash: fs_blake3::hash_domain(IDEMPOTENCY_PROGRAM_DOMAIN, b"program"),
+            content_hash: fs_blake3::hash_domain(SUBMISSION_REQUEST_ID_DOMAIN, b"request"),
+        };
         let receipt_a = submission_receipt(
-            SessionId(1),
+            request_id,
             "scope",
-            "key",
+            1,
             &SubmissionCompletion::Failed(evidence_a),
         );
         let receipt_b = submission_receipt(
-            SessionId(1),
+            request_id,
             "scope",
-            "key",
+            1,
             &SubmissionCompletion::Failed(evidence_b),
         );
         assert_ne!(
@@ -2516,8 +5285,9 @@ mod tests {
             .open_session(test_token(89, "retained-budget"))
             .expect("fixture session");
         let key = "budget-key";
-        let reservation =
-            key.len() * IDEMPOTENCY_KEY_RETAINED_COPIES + MAX_IDEMPOTENCY_TERMINAL_RETAINED_BYTES;
+        let reservation = SUBMISSION_REQUEST_RETAINED_BYTES
+            + MAX_IDEMPOTENCY_TERMINAL_RETAINED_BYTES
+            + MAX_METER_RECEIPT_RETAINED_BYTES;
         {
             let mut inner = governor.inner.lock().expect("governor lock");
             inner.retained_bytes = MAX_RETAINED_BYTES_PER_SCOPE - reservation + 1;
@@ -2718,6 +5488,7 @@ mod tests {
             checkpoint: None,
             gate_generation: None,
             pause_request_id: None,
+            pressure_action_id: None,
         };
         {
             let mut inner = governor.inner.lock().expect("governor lock");
@@ -2818,6 +5589,7 @@ mod tests {
             checkpoint: None,
             gate_generation: None,
             pause_request_id: None,
+            pressure_action_id: None,
         };
         {
             let mut inner = governor.inner.lock().expect("governor lock");
@@ -3051,21 +5823,39 @@ mod tests {
             permit.get_or_insert(opened);
         }
         governor
-            .submit_once(SessionId(0), "terminal", Charge::default)
+            .submit_once(
+                SessionId(0),
+                "terminal",
+                Charge {
+                    core_s: 1.0,
+                    ..Charge::default()
+                },
+            )
             .expect("terminal fixture");
         governor
             .apply_memory_pressure(SessionId(0), 1)
             .expect("event fixture");
+        {
+            let inner = governor.inner.lock().expect("governor lock");
+            let scope = &inner.scopes["fair"];
+            assert_eq!(
+                scope.dirty_causal.len(),
+                1,
+                "the submission terminal occupies its meter-commit position"
+            );
+            assert!(scope.dirty_submission_failures.is_empty());
+        }
         let ledger = fs_ledger::Ledger::open(":memory:").expect("fixture ledger");
         let permit = permit.expect("at least one fixture session");
         let first = governor
             .flush_scope_to_ledger(&permit, &ledger)
-            .expect("meter-first chunk");
+            .expect("open-receipt chunk");
         assert_eq!(first.appended_rows, MAX_FLUSH_ROWS);
         assert!(first.remaining_dirty);
 
-        // Keep every meter dirty. The next chunk must rotate to terminal and
-        // event lanes before consuming its remaining row budget on meters.
+        // Add one later standalone causal report per session. The unified
+        // causal lane must emit the submission terminal before any report
+        // whose pre-state includes that submission charge.
         for session in 0..MAX_SESSIONS_PER_SCOPE {
             governor
                 .charge(
@@ -3074,15 +5864,700 @@ mod tests {
                 )
                 .expect("re-dirty meter");
         }
+        {
+            let inner = governor.inner.lock().expect("governor lock");
+            assert!(matches!(
+                inner.scopes["fair"].dirty_causal.first(),
+                Some((_, DirtyCausalMutation::Submission(_)))
+            ));
+        }
         let second = governor
             .flush_scope_to_ledger(&permit, &ledger)
-            .expect("rotated chunk");
+            .expect("causal-meter chunk");
+        assert_eq!(second.appended_rows, MAX_FLUSH_ROWS);
+        assert!(second.remaining_dirty);
+        let third = governor
+            .flush_scope_to_ledger(&permit, &ledger)
+            .expect("terminal/event chunk");
+        assert_eq!(third.appended_rows, 2);
+        assert!(!third.remaining_dirty);
+        let inner = governor.inner.lock().expect("governor lock");
+        let scope = &inner.scopes["fair"];
+        assert!(scope.dirty_submission_failures.is_empty());
+        assert_eq!(scope.flushed_events, scope.events.len());
+        assert!(scope.dirty_open_receipts.is_empty());
+        assert!(scope.dirty_causal.is_empty());
+    }
+
+    #[test]
+    fn dirty_open_receipt_precedes_rotated_dependent_causal_rows() {
+        let governor = Governor::new();
+        let permit = governor
+            .open_session(test_token(20, "open-prerequisite"))
+            .expect("first fixture session");
+        let ledger = fs_ledger::Ledger::open(":memory:").expect("fixture ledger");
+        let first = governor
+            .flush_scope_to_ledger(&permit, &ledger)
+            .expect("first open receipt");
+        assert_eq!(first.appended_rows, 1);
+        assert!(!first.remaining_dirty);
+        {
+            let inner = governor.inner.lock().expect("governor lock");
+            assert_eq!(inner.scopes["open-prerequisite"].next_flush_lane, 1);
+        }
+
+        governor
+            .open_session(test_token(21, "open-prerequisite"))
+            .expect("later session with a dirty open receipt");
+        for _ in 0..MAX_FLUSH_ROWS {
+            governor
+                .charge(SessionId(21), Charge::default())
+                .expect("dependent causal report");
+        }
+
+        let second = governor
+            .flush_scope_to_ledger(&permit, &ledger)
+            .expect("open prerequisite plus bounded causal prefix");
         assert_eq!(second.appended_rows, MAX_FLUSH_ROWS);
         assert!(second.remaining_dirty);
         let inner = governor.inner.lock().expect("governor lock");
-        let scope = &inner.scopes["fair"];
-        assert!(scope.dirty_idempotency.is_empty());
-        assert_eq!(scope.flushed_events, scope.events.len());
-        assert_eq!(scope.dirty_meters.len(), 2);
+        let scope = &inner.scopes["open-prerequisite"];
+        assert!(
+            scope.dirty_open_receipts.is_empty(),
+            "the later open receipt must commit in the same or an earlier transaction"
+        );
+        assert_eq!(
+            scope.dirty_causal.len(),
+            1,
+            "one causal row remains because the open prerequisite occupied the first batch slot"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // Directly snapshots every replay-sensitive internal counter.
+    fn typed_duplicate_replay_changes_no_internal_counter_gate_or_cursor() {
+        let governor = super::Governor::new();
+        let session = SessionId(93);
+        let open_id = governor
+            .session_open_id(session, "internal-replay-open")
+            .expect("open authority");
+        let gate = Arc::new(CancelGate::new());
+        governor
+            .open_session_gated(
+                open_id,
+                test_token(93, "internal-replay"),
+                Arc::clone(&gate),
+            )
+            .expect("open gated session");
+        let report = governor
+            .meter_report_id(session, "internal-report")
+            .expect("meter authority");
+        let charge = Charge {
+            core_s: 2.0,
+            ..Charge::default()
+        };
+        let meter_receipt = governor.charge(report, charge).expect("first charge");
+        let before_meter_replay = {
+            let inner = governor.inner.lock().expect("governor lock");
+            (
+                inner.next_meter_commit_ordinal,
+                inner.scopes["internal-replay"].revision,
+                inner.scopes["internal-replay"].dirty_causal.clone(),
+                inner.meters[&session.0].snapshot(),
+            )
+        };
+        assert_eq!(
+            governor.charge(report, charge).expect("exact meter replay"),
+            meter_receipt
+        );
+        {
+            let inner = governor.inner.lock().expect("governor lock");
+            assert_eq!(inner.next_meter_commit_ordinal, before_meter_replay.0);
+            assert_eq!(
+                inner.scopes["internal-replay"].revision,
+                before_meter_replay.1
+            );
+            assert_eq!(
+                inner.scopes["internal-replay"].dirty_causal,
+                before_meter_replay.2
+            );
+            assert_eq!(inner.meters[&session.0].snapshot(), before_meter_replay.3);
+        }
+
+        let action = governor
+            .pressure_action_id(session, "internal-pressure")
+            .expect("pressure authority");
+        let pressure_receipt = governor
+            .apply_memory_pressure(action, 3)
+            .expect("first pressure action");
+        let before_pressure_replay = {
+            let inner = governor.inner.lock().expect("governor lock");
+            (
+                inner.next_ordinal,
+                inner.reserved_pause_ordinals,
+                inner.scopes["internal-replay"].reserved_pause_completions,
+                inner.scopes["internal-replay"].events.clone(),
+                inner.scopes["internal-replay"].revision,
+                Arc::clone(&inner.gates[&session.0]),
+                inner.gate_generations[&session.0],
+            )
+        };
+        assert_eq!(
+            governor
+                .apply_memory_pressure(action, 3)
+                .expect("exact pressure replay"),
+            pressure_receipt
+        );
+        let inner = governor.inner.lock().expect("governor lock");
+        assert_eq!(inner.next_ordinal, before_pressure_replay.0);
+        assert_eq!(inner.reserved_pause_ordinals, before_pressure_replay.1);
+        assert_eq!(
+            inner.scopes["internal-replay"].reserved_pause_completions,
+            before_pressure_replay.2
+        );
+        assert_eq!(
+            inner.scopes["internal-replay"].events,
+            before_pressure_replay.3
+        );
+        assert_eq!(
+            inner.scopes["internal-replay"].revision,
+            before_pressure_replay.4
+        );
+        assert!(Arc::ptr_eq(
+            &inner.gates[&session.0],
+            &before_pressure_replay.5
+        ));
+        assert_eq!(inner.gate_generations[&session.0], before_pressure_replay.6);
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One exact-cap matrix for both typed mutation registries.
+    fn typed_report_and_action_caps_admit_replay_but_refuse_limit_plus_one() {
+        let governor = super::Governor::new();
+        let session = SessionId(94);
+        let open_id = governor
+            .session_open_id(session, "cap-open")
+            .expect("open authority");
+        governor
+            .open_session(open_id, test_token(94, "typed-caps"))
+            .expect("open session");
+
+        let charge = Charge {
+            core_s: 1.0,
+            ..Charge::default()
+        };
+        let real_report = governor
+            .meter_report_id(session, "real-report")
+            .expect("real report authority");
+        let meter_receipt = governor.charge(real_report, charge).expect("first report");
+        let new_report = governor
+            .meter_report_id(session, "limit-plus-one-report")
+            .expect("uncommitted report authority");
+        {
+            let mut inner = governor.inner.lock().expect("governor lock");
+            let open_hash = super::Governor::current_open_identity(&inner, session)
+                .expect("open receipt identity");
+            let reports = inner
+                .meter_report_ids
+                .get_mut(&session.0)
+                .expect("report index");
+            for ordinal in 1..MAX_METER_REPORTS_PER_SESSION {
+                let hash = fs_blake3::hash_domain(
+                    METER_REPORT_ID_DOMAIN,
+                    &u64::try_from(ordinal)
+                        .expect("bounded ordinal")
+                        .to_le_bytes(),
+                );
+                reports.insert(MeterReportId {
+                    governor_id: governor.id,
+                    session,
+                    session_open: open_hash,
+                    generation: 0,
+                    content_hash: hash,
+                });
+            }
+            assert_eq!(reports.len(), MAX_METER_REPORTS_PER_SESSION);
+        }
+        assert_eq!(
+            governor
+                .charge(real_report, charge)
+                .expect("known report replays at cap"),
+            meter_receipt
+        );
+        assert!(matches!(
+            governor.charge(new_report, charge),
+            Err(SessionError::LimitExceeded {
+                resource: "meter_reports_per_session",
+                limit: MAX_METER_REPORTS_PER_SESSION,
+                ..
+            })
+        ));
+
+        let real_action = governor
+            .pressure_action_id(session, "real-action")
+            .expect("real action authority");
+        let pressure_receipt = governor
+            .apply_memory_pressure(real_action, 1)
+            .expect("first pressure action");
+        let new_action = governor
+            .pressure_action_id(session, "limit-plus-one-action")
+            .expect("uncommitted action authority");
+        {
+            let mut inner = governor.inner.lock().expect("governor lock");
+            let open_hash = super::Governor::current_open_identity(&inner, session)
+                .expect("open receipt identity");
+            let actions = inner
+                .pressure_action_ids
+                .get_mut(&session.0)
+                .expect("action index");
+            for ordinal in 1..MAX_PRESSURE_ACTIONS_PER_SESSION {
+                let hash = fs_blake3::hash_domain(
+                    PRESSURE_ACTION_ID_DOMAIN,
+                    &u64::try_from(ordinal)
+                        .expect("bounded ordinal")
+                        .to_le_bytes(),
+                );
+                actions.insert(PressureActionId {
+                    governor_id: governor.id,
+                    session,
+                    session_open: open_hash,
+                    generation: 0,
+                    content_hash: hash,
+                });
+            }
+            assert_eq!(actions.len(), MAX_PRESSURE_ACTIONS_PER_SESSION);
+        }
+        assert_eq!(
+            governor
+                .apply_memory_pressure(real_action, 1)
+                .expect("known action replays at cap"),
+            pressure_receipt
+        );
+        assert!(matches!(
+            governor.apply_memory_pressure(new_action, 1),
+            Err(SessionError::LimitExceeded {
+                resource: "pressure_actions_per_session",
+                limit: MAX_PRESSURE_ACTIONS_PER_SESSION,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn bounded_flush_never_splits_an_indivisible_terminal_event_group() {
+        let mut terminals = Vec::new();
+        let mut event_rows = MAX_FLUSH_ROWS - 3;
+        let mut encoded_bytes = 0;
+        assert!(
+            push_bounded_terminal(
+                &mut terminals,
+                &mut event_rows,
+                &mut encoded_bytes,
+                "group-boundary",
+                bounded_terminal_with_events(3),
+            )
+            .expect("exact event-row boundary is admitted")
+        );
+        assert_eq!(terminals.len(), 1);
+        assert_eq!(event_rows, MAX_FLUSH_ROWS);
+
+        let mut terminals = Vec::new();
+        let mut event_rows = MAX_FLUSH_ROWS - 2;
+        let mut encoded_bytes = 0;
+        assert!(
+            !push_bounded_terminal(
+                &mut terminals,
+                &mut event_rows,
+                &mut encoded_bytes,
+                "group-boundary",
+                bounded_terminal_with_events(3),
+            )
+            .expect("over-bound group is deferred intact")
+        );
+        assert!(terminals.is_empty());
+        assert_eq!(event_rows, MAX_FLUSH_ROWS - 2);
+        assert_eq!(encoded_bytes, 0);
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // Real reopen snapshots every reservation before/after refusal.
+    fn durable_pending_reopen_never_invokes_work_and_rolls_back_local_admission() {
+        let path = durable_test_ledger_path("pending");
+        let nonce = DurableGovernorNonce::from_bytes([0x51; 32]);
+        let ledger = fs_ledger::Ledger::open(&path).expect("on-disk ledger");
+        let governor = super::Governor::new_durable(&ledger, nonce).expect("durable governor");
+        let session = SessionId(951);
+        let token = test_token(session.0, "durable-pending");
+        let open_id = governor
+            .session_open_id(session, "durable-open")
+            .expect("open authority");
+        let open_receipt = governor
+            .open_session(open_id, token.clone())
+            .expect("open session");
+        governor
+            .flush_scope_to_ledger(&open_receipt.flush_permit(), &ledger)
+            .expect("open terminal is durable before execution claims");
+        let request_id = governor
+            .submission_request_id(session, "pending-slot", "canonical-program")
+            .expect("submission authority");
+        let payload = recovery::encode_submission_payload(request_id);
+        let claim = fs_ledger::session_registry::SessionMutationClaim {
+            authority: request_id.content_hash,
+            ledger_instance_id: ledger.checked_instance_id().expect("ledger identity"),
+            governor_hash: governor.id,
+            session_open_hash: request_id.session_open,
+            kind: recovery::KIND_SUBMISSION,
+            session: session.0,
+            ledger_scope: &token.ledger_scope,
+            generation: request_id.generation,
+            causal_ordinal: None,
+            payload: &payload,
+        };
+        assert!(matches!(
+            ledger
+                .claim_session_mutation(&claim)
+                .expect("fresh Pending claim"),
+            fs_ledger::session_registry::SessionMutationClaimResult::Claimed { .. }
+        ));
+        assert_eq!(ledger.table_count("session_claims").unwrap(), 2);
+        assert_eq!(ledger.table_count("session_terminals").unwrap(), 1);
+        drop(governor);
+        drop(ledger);
+
+        let ledger = fs_ledger::Ledger::open(&path).expect("reopened ledger");
+        let governor = super::Governor::new_durable(&ledger, nonce).expect("reopened governor");
+        governor
+            .recover_open(&ledger, open_id, token, None)
+            .expect("recover open prerequisite");
+        let before = {
+            let inner = governor.inner.lock().expect("governor lock");
+            (
+                inner.next_submission_ordinal,
+                inner.reserved_meter_ordinals,
+                inner.pending_submissions[&session.0],
+                inner.reserved_meter_reports[&session.0],
+                inner.idempotency.len(),
+                inner.idempotency_keys[&session.0].len(),
+                inner.retained_bytes,
+                inner.scopes["durable-pending"].retained_bytes,
+            )
+        };
+        let executions = AtomicU64::new(0);
+        assert_eq!(
+            governor.submit_once_durable(&ledger, request_id, "canonical-program", || {
+                executions.fetch_add(1, Ordering::SeqCst);
+                Charge::default()
+            },),
+            Err(SessionError::IndeterminateMutation {
+                kind: recovery::KIND_SUBMISSION,
+                authority: request_id.content_hash,
+            })
+        );
+        assert_eq!(executions.load(Ordering::SeqCst), 0);
+        let after = {
+            let inner = governor.inner.lock().expect("governor lock");
+            (
+                inner.next_submission_ordinal,
+                inner.reserved_meter_ordinals,
+                inner.pending_submissions[&session.0],
+                inner.reserved_meter_reports[&session.0],
+                inner.idempotency.len(),
+                inner.idempotency_keys[&session.0].len(),
+                inner.retained_bytes,
+                inner.scopes["durable-pending"].retained_bytes,
+            )
+        };
+        assert_eq!(after, before, "non-fresh claim leaves no local reservation");
+        assert!(matches!(
+            governor.submit_once(request_id, || {
+                executions.fetch_add(1, Ordering::SeqCst);
+                Charge::default()
+            }),
+            Err(SessionError::DurableLedgerRequired {
+                kind: recovery::KIND_SUBMISSION,
+                authority,
+            }) if authority == request_id.content_hash
+        ));
+        assert_eq!(executions.load(Ordering::SeqCst), 0);
+        assert_eq!(ledger.table_count("session_claims").unwrap(), 2);
+        assert_eq!(ledger.table_count("session_terminals").unwrap(), 1);
+        assert_eq!(ledger.table_count("events").unwrap(), 1);
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // Real reopen covers success, failure, and commit-before-cursor replay.
+    fn durable_submission_terminals_reopen_exactly_and_append_once() {
+        let path = durable_test_ledger_path("terminal");
+        let nonce = DurableGovernorNonce::from_bytes([0xA7; 32]);
+        let ledger = fs_ledger::Ledger::open(&path).expect("on-disk ledger");
+        let governor = super::Governor::new_durable(&ledger, nonce).expect("durable governor");
+        let session = SessionId(952);
+        let token = test_token(session.0, "durable-terminal");
+        let open_id = governor
+            .session_open_id(session, "durable-open")
+            .expect("open authority");
+        let open_receipt = governor
+            .open_session(open_id, token.clone())
+            .expect("open session");
+        let permit = open_receipt.flush_permit();
+        governor
+            .flush_scope_to_ledger(&permit, &ledger)
+            .expect("open prerequisite flush");
+
+        let success_id = governor
+            .submission_request_id(session, "success-slot", "success-program")
+            .expect("success authority");
+        let success = governor
+            .submit_once_durable(&ledger, success_id, "success-program", || Charge {
+                core_s: 7.0,
+                mem_peak_bytes: 11,
+                wall_s: 13.0,
+            })
+            .expect("fresh durable execution");
+        let (success_receipt, meter_receipt) = match &success {
+            SubmitOutcome::Executed {
+                receipt,
+                meter_receipt,
+                ..
+            } => (*receipt, meter_receipt.clone()),
+            other => panic!("expected execution, got {other:?}"),
+        };
+        let failed_id = governor
+            .submission_request_id(session, "failed-slot", "failed-program")
+            .expect("failure authority");
+        let failed = governor
+            .submit_once_durable(&ledger, failed_id, "failed-program", || {
+                panic!("durable failure evidence")
+            })
+            .expect("panic becomes durable terminal failure");
+        let failed_receipt = match &failed {
+            SubmitOutcome::Failed { receipt, .. } => *receipt,
+            other => panic!("expected failure terminal, got {other:?}"),
+        };
+        let lane_before_flush = {
+            let inner = governor.inner.lock().expect("governor lock");
+            inner.scopes["durable-terminal"].next_flush_lane
+        };
+        let committed = governor
+            .flush_scope_to_ledger(&permit, &ledger)
+            .expect("submission terminal batch");
+        assert_eq!(committed.appended_rows, 2);
+        assert_eq!(committed.committed_terminals, 2);
+        assert!(!committed.remaining_dirty);
+        let counts = (
+            ledger.table_count("session_claims").unwrap(),
+            ledger.table_count("session_terminals").unwrap(),
+            ledger.table_count("session_terminal_events").unwrap(),
+            ledger.table_count("session_flush_batches").unwrap(),
+            ledger.table_count("session_flush_batch_members").unwrap(),
+            ledger.table_count("events").unwrap(),
+        );
+
+        // Model a process death after the atomic database commit but before
+        // the in-memory cursor publication by restoring the exact prepared
+        // dirty set and lane start. The identical retry must write no row.
+        {
+            let mut inner = governor.inner.lock().expect("governor lock");
+            let scope = inner
+                .scopes
+                .get_mut("durable-terminal")
+                .expect("fixture scope");
+            scope.next_flush_lane = lane_before_flush;
+            scope.dirty_causal.insert((
+                meter_receipt.commit_ordinal,
+                DirtyCausalMutation::Submission(success_id),
+            ));
+            let failed_ordinal = match failed {
+                SubmitOutcome::Failed {
+                    admission_ordinal, ..
+                } => admission_ordinal,
+                _ => unreachable!("failure checked above"),
+            };
+            scope
+                .dirty_submission_failures
+                .insert((failed_ordinal, failed_id));
+        }
+        let replayed_flush = governor
+            .flush_scope_to_ledger(&permit, &ledger)
+            .expect("commit-before-cursor retry");
+        assert_eq!(replayed_flush.appended_rows, 0);
+        assert_eq!(replayed_flush.committed_terminals, 2);
+        assert!(!replayed_flush.remaining_dirty);
+        assert_eq!(
+            (
+                ledger.table_count("session_claims").unwrap(),
+                ledger.table_count("session_terminals").unwrap(),
+                ledger.table_count("session_terminal_events").unwrap(),
+                ledger.table_count("session_flush_batches").unwrap(),
+                ledger.table_count("session_flush_batch_members").unwrap(),
+                ledger.table_count("events").unwrap(),
+            ),
+            counts
+        );
+        drop(governor);
+        drop(ledger);
+
+        let ledger = fs_ledger::Ledger::open(&path).expect("reopened ledger");
+        let governor = super::Governor::new_durable(&ledger, nonce).expect("reopened governor");
+        governor
+            .recover_open(&ledger, open_id, token, None)
+            .expect("recover open prerequisite");
+        let executions = AtomicU64::new(0);
+        let success_replay = governor
+            .submit_once_durable(&ledger, success_id, "success-program", || {
+                executions.fetch_add(1, Ordering::SeqCst);
+                Charge::default()
+            })
+            .expect("recover successful terminal");
+        match success_replay {
+            SubmitOutcome::Duplicate {
+                receipt,
+                meter_receipt: recovered_meter,
+                ..
+            } => {
+                assert_eq!(receipt, success_receipt);
+                assert_eq!(recovered_meter, meter_receipt);
+            }
+            other => panic!("expected duplicate replay, got {other:?}"),
+        }
+        let failed_replay = governor
+            .submit_once_durable(&ledger, failed_id, "failed-program", || {
+                executions.fetch_add(1, Ordering::SeqCst);
+                Charge::default()
+            })
+            .expect("recover failed terminal");
+        assert!(matches!(
+            failed_replay,
+            SubmitOutcome::Failed { receipt, .. } if receipt == failed_receipt
+        ));
+        assert_eq!(executions.load(Ordering::SeqCst), 0);
+
+        let altered_id = governor
+            .submission_request_id(session, "success-slot", "altered-program")
+            .expect("same slot authority with altered payload");
+        assert_eq!(altered_id.content_hash, success_id.content_hash);
+        assert!(matches!(
+            governor.submit_once_durable(&ledger, altered_id, "altered-program", || {
+                executions.fetch_add(1, Ordering::SeqCst);
+                Charge::default()
+            }),
+            Err(SessionError::MutationConflict {
+                kind: recovery::KIND_SUBMISSION,
+                ..
+            })
+        ));
+        assert_eq!(executions.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            (
+                ledger.table_count("session_claims").unwrap(),
+                ledger.table_count("session_terminals").unwrap(),
+                ledger.table_count("session_terminal_events").unwrap(),
+                ledger.table_count("session_flush_batches").unwrap(),
+                ledger.table_count("session_flush_batch_members").unwrap(),
+                ledger.table_count("events").unwrap(),
+            ),
+            counts
+        );
+
+        // A fresh process has no in-memory key index. Altered program bytes
+        // must still conflict against the durable claim and roll back every
+        // provisional local reservation before caller work can run.
+        drop(governor);
+        drop(ledger);
+        let ledger = fs_ledger::Ledger::open(&path).expect("second reopened ledger");
+        let governor = super::Governor::new_durable(&ledger, nonce).expect("second governor");
+        governor
+            .recover_open(
+                &ledger,
+                open_id,
+                test_token(session.0, "durable-terminal"),
+                None,
+            )
+            .expect("recover only the open prerequisite");
+        let altered_id = governor
+            .submission_request_id(session, "success-slot", "altered-program")
+            .expect("same slot authority with altered durable payload");
+        let before = {
+            let inner = governor.inner.lock().expect("governor lock");
+            (
+                inner.next_submission_ordinal,
+                inner.reserved_meter_ordinals,
+                inner.pending_submissions[&session.0],
+                inner.reserved_meter_reports[&session.0],
+                inner.idempotency.len(),
+                inner.idempotency_keys[&session.0].len(),
+                inner.retained_bytes,
+                inner.scopes["durable-terminal"].retained_bytes,
+            )
+        };
+        let executions = AtomicU64::new(0);
+        assert!(matches!(
+            governor.submit_once_durable(&ledger, altered_id, "altered-program", || {
+                executions.fetch_add(1, Ordering::SeqCst);
+                Charge::default()
+            }),
+            Err(SessionError::MutationConflict {
+                kind: recovery::KIND_SUBMISSION,
+                ..
+            })
+        ));
+        assert_eq!(executions.load(Ordering::SeqCst), 0);
+        let after = {
+            let inner = governor.inner.lock().expect("governor lock");
+            (
+                inner.next_submission_ordinal,
+                inner.reserved_meter_ordinals,
+                inner.pending_submissions[&session.0],
+                inner.reserved_meter_reports[&session.0],
+                inner.idempotency.len(),
+                inner.idempotency_keys[&session.0].len(),
+                inner.retained_bytes,
+                inner.scopes["durable-terminal"].retained_bytes,
+            )
+        };
+        assert_eq!(after, before);
+        let failed_retained_bytes = SUBMISSION_REQUEST_RETAINED_BYTES
+            + RetainedEvidence::capture("durable failure evidence")
+                .preview
+                .len();
+        let retained_before_recovery = governor.inner.lock().expect("governor lock").retained_bytes;
+        let governor = Arc::new(governor);
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let mut workers = Vec::new();
+        for _ in 0..2 {
+            let governor = Arc::clone(&governor);
+            let barrier = Arc::clone(&barrier);
+            let path = path.clone();
+            workers.push(std::thread::spawn(move || {
+                let ledger = fs_ledger::Ledger::open(&path).expect("worker ledger handle");
+                barrier.wait();
+                governor.recover_submission(&ledger, failed_id, "failed-program")
+            }));
+        }
+        for worker in workers {
+            assert!(matches!(
+                worker.join().expect("recovery worker joins"),
+                Ok(SubmitOutcome::Failed { receipt, .. }) if receipt == failed_receipt
+            ));
+        }
+        let inner = governor.inner.lock().expect("governor lock");
+        assert_eq!(inner.idempotency.len(), 1);
+        assert_eq!(
+            inner.retained_bytes,
+            retained_before_recovery + failed_retained_bytes,
+            "concurrent recovery installs retained failure evidence once"
+        );
+        drop(inner);
+        assert_eq!(
+            (
+                ledger.table_count("session_claims").unwrap(),
+                ledger.table_count("session_terminals").unwrap(),
+                ledger.table_count("session_terminal_events").unwrap(),
+                ledger.table_count("session_flush_batches").unwrap(),
+                ledger.table_count("session_flush_batch_members").unwrap(),
+                ledger.table_count("events").unwrap(),
+            ),
+            counts
+        );
     }
 }

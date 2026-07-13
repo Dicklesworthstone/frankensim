@@ -10,16 +10,102 @@ use fs_exec::CancelGate;
 use fs_exec::solver::{SolverState, codec};
 use fs_plan::{CostModel, CostObservation};
 use fs_session::{
-    CalibrationReport, CapabilityToken, Charge, DegradationStep, Enforcement, Estimate, Governor,
-    Guidance, MAX_CAPABILITY_OP_BYTES, MAX_CAPABILITY_OPS, MAX_CHECKPOINT_CLAIM_BYTES,
-    MAX_EVENT_PAGE_ROWS, MAX_FLUSH_ENCODED_BYTES, MAX_FLUSH_ROWS, MAX_IDEMPOTENCY_INPUT_BYTES,
+    CalibrationReport, CapabilityToken, Charge, DegradationEvent, DegradationStep,
+    DurableGovernorNonce, Enforcement, Estimate, Governor as SessionGovernor, Guidance,
+    MAX_CAPABILITY_OP_BYTES, MAX_CAPABILITY_OPS, MAX_CHECKPOINT_CLAIM_BYTES, MAX_EVENT_PAGE_ROWS,
+    MAX_FLUSH_ENCODED_BYTES, MAX_FLUSH_ROWS, MAX_IDEMPOTENCY_INPUT_BYTES,
     MAX_IDEMPOTENCY_KEYS_PER_SESSION, MAX_LEDGER_SCOPE_BYTES, MAX_RETAINED_EVIDENCE_BYTES,
-    MAX_SESSIONS_PER_GOVERNOR, MAX_SESSIONS_PER_SCOPE, SessionError, SessionId, StepPhase,
-    SubmitOutcome, estimate,
+    MAX_SESSIONS_PER_GOVERNOR, MAX_SESSIONS_PER_SCOPE, ScopeFlushPermit, SessionError, SessionId,
+    StepPhase, SubmitOutcome, estimate,
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+
+struct Governor {
+    inner: SessionGovernor,
+    next_mutation: AtomicU64,
+}
+
+impl Governor {
+    fn new() -> Self {
+        Self {
+            inner: SessionGovernor::new(),
+            next_mutation: AtomicU64::new(1),
+        }
+    }
+
+    fn next_key(&self, kind: &str, session: SessionId) -> String {
+        let ordinal = self.next_mutation.fetch_add(1, Ordering::Relaxed);
+        format!("legacy-conformance-{kind}-{}-{ordinal}", session.0)
+    }
+
+    fn idempotency_key(agent_key: &str, program_text: &str) -> Result<String, SessionError> {
+        SessionGovernor::idempotency_key(agent_key, program_text)
+    }
+
+    fn open_session(&self, token: CapabilityToken) -> Result<ScopeFlushPermit, SessionError> {
+        let open_id = self
+            .inner
+            .session_open_id(token.session, &self.next_key("open", token.session))?;
+        self.inner
+            .open_session(open_id, token)
+            .map(|receipt| receipt.flush_permit())
+    }
+
+    fn open_session_gated(
+        &self,
+        token: CapabilityToken,
+        gate: Arc<CancelGate>,
+    ) -> Result<ScopeFlushPermit, SessionError> {
+        let open_id = self
+            .inner
+            .session_open_id(token.session, &self.next_key("open", token.session))?;
+        self.inner
+            .open_session_gated(open_id, token, gate)
+            .map(|receipt| receipt.flush_permit())
+    }
+
+    fn charge(&self, session: SessionId, delta: Charge) -> Result<Enforcement, SessionError> {
+        let report_id = self
+            .inner
+            .meter_report_id(session, &self.next_key("meter", session))?;
+        self.inner
+            .charge(report_id, delta)
+            .map(|receipt| receipt.enforcement().clone())
+    }
+
+    fn submit_once(
+        &self,
+        session: SessionId,
+        key: &str,
+        work: impl FnOnce() -> Charge,
+    ) -> Result<SubmitOutcome, SessionError> {
+        let request_id = self.inner.submission_request_id(session, key, key)?;
+        self.inner.submit_once(request_id, work)
+    }
+
+    fn apply_memory_pressure(
+        &self,
+        session: SessionId,
+        level: u8,
+    ) -> Result<Vec<DegradationEvent>, SessionError> {
+        let action_id = self
+            .inner
+            .pressure_action_id(session, &self.next_key("pressure", session))?;
+        self.inner
+            .apply_memory_pressure(action_id, level)
+            .map(|receipt| receipt.events().to_vec())
+    }
+}
+
+impl core::ops::Deref for Governor {
+    type Target = SessionGovernor;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
 
 fn verdict(case: &str, detail: &str) {
     println!(
@@ -48,6 +134,18 @@ fn token_in_scope(id: u64, ledger_scope: &str) -> CapabilityToken {
     let mut token = token(id, 1.0e9, 1.0e9);
     token.ledger_scope = ledger_scope.to_string();
     token
+}
+
+fn durable_ledger_path(case: &str) -> String {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    let ordinal = NEXT.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir()
+        .join(format!(
+            "fs-session-conformance-ujhp-{}-{ordinal}-{case}.ledger",
+            std::process::id()
+        ))
+        .to_string_lossy()
+        .into_owned()
 }
 
 const SPOUT: &str = r#"(study "spout-laminar-v3"
@@ -340,6 +438,7 @@ fn ss_002b_duplicate_session_open_preserves_original_authority_and_state() {
         SubmitOutcome::Duplicate {
             receipt: duplicate_receipt,
             enforcement: duplicate_enforcement,
+            ..
         } if duplicate_receipt == receipt && duplicate_enforcement == enforcement
     ));
 
@@ -552,45 +651,53 @@ fn ss_003c_receipts_bind_charge_failure_and_enforcement() {
         mem_peak_bytes: 7,
         wall_s: 1.0,
     };
-    let positive = opened(10.0)
+    let positive_governor = opened(10.0);
+    let positive_request = positive_governor
+        .inner
+        .submission_request_id(SessionId(33), key, key)
+        .expect("typed request");
+    let positive = positive_governor
         .submit_once(SessionId(33), key, || positive_zero_charge)
         .expect("positive-zero submit");
-    let (positive_receipt, positive_enforcement) = match positive {
-        SubmitOutcome::Executed {
-            receipt,
-            enforcement,
-            ..
-        } => (receipt, enforcement),
-        other => panic!("expected execution, got {other:?}"),
-    };
+    let (positive_receipt, positive_admission, positive_meter, positive_enforcement) =
+        match positive {
+            SubmitOutcome::Executed {
+                admission_ordinal,
+                receipt,
+                meter_receipt,
+                enforcement,
+                ..
+            } => (receipt, admission_ordinal, meter_receipt, enforcement),
+            other => panic!("expected execution, got {other:?}"),
+        };
     assert_eq!(positive_enforcement, Enforcement::Ok);
     assert!(positive_receipt.matches_success(
-        SessionId(33),
+        positive_request,
         "main",
-        key,
+        positive_admission,
         positive_zero_charge,
-        &positive_enforcement,
+        &positive_meter,
     ));
     assert!(
         !positive_receipt.matches_success(
-            SessionId(33),
+            positive_request,
             "other-scope",
-            key,
+            positive_admission,
             positive_zero_charge,
-            &positive_enforcement,
+            &positive_meter,
         ),
-        "receipt v2 binds the immutable ledger scope"
+        "receipt v3 binds the immutable ledger scope"
     );
     assert!(
         !positive_receipt.matches_success(
-            SessionId(33),
+            positive_request,
             "main",
-            key,
+            positive_admission,
             Charge {
                 mem_peak_bytes: positive_zero_charge.mem_peak_bytes + 1,
                 ..positive_zero_charge
             },
-            &positive_enforcement,
+            &positive_meter,
         ),
         "the exact u64 memory charge participates in receipt identity"
     );
@@ -611,12 +718,21 @@ fn ss_003c_receipts_bind_charge_failure_and_enforcement() {
         "bit-exact charge fields are receipt semantics"
     );
 
-    let failed = opened(10.0)
+    let failed_governor = opened(10.0);
+    let failed_request = failed_governor
+        .inner
+        .submission_request_id(SessionId(33), key, key)
+        .expect("typed failure request");
+    let failed = failed_governor
         .submit_once(SessionId(33), key, || panic!("receipt-bound failure"))
         .expect("panic is a terminal outcome");
     let failed_receipt = match failed {
-        SubmitOutcome::Failed { receipt, evidence } => {
-            assert!(receipt.matches_failure(SessionId(33), "main", key, &evidence));
+        SubmitOutcome::Failed {
+            admission_ordinal,
+            receipt,
+            evidence,
+        } => {
+            assert!(receipt.matches_failure(failed_request, "main", admission_ordinal, &evidence));
             assert!(evidence.preview().contains("receipt-bound failure"));
             receipt
         }
@@ -635,16 +751,28 @@ fn ss_003c_receipts_bind_charge_failure_and_enforcement() {
     let executed = throttled
         .submit_once(SessionId(33), key, || charge)
         .expect("throttled work still completes");
-    let (receipt, enforcement) = match executed {
+    let (receipt, admission_ordinal, meter_receipt, enforcement) = match executed {
         SubmitOutcome::Executed {
+            admission_ordinal,
             receipt,
+            meter_receipt,
             enforcement,
             ..
-        } => (receipt, enforcement),
+        } => (receipt, admission_ordinal, meter_receipt, enforcement),
         other => panic!("expected execution, got {other:?}"),
     };
     assert!(matches!(enforcement, Enforcement::Throttled { .. }));
-    assert!(receipt.matches_success(SessionId(33), "main", key, charge, &enforcement));
+    let throttled_request = throttled
+        .inner
+        .submission_request_id(SessionId(33), key, key)
+        .expect("typed throttled request");
+    assert!(receipt.matches_success(
+        throttled_request,
+        "main",
+        admission_ordinal,
+        charge,
+        &meter_receipt
+    ));
     assert!(matches!(
         throttled
             .submit_once(SessionId(33), key, || panic!("duplicate ran"))
@@ -652,6 +780,7 @@ fn ss_003c_receipts_bind_charge_failure_and_enforcement() {
         SubmitOutcome::Duplicate {
             receipt: duplicate_receipt,
             enforcement: Enforcement::Throttled { .. },
+            ..
         } if duplicate_receipt == receipt
     ));
 
@@ -694,7 +823,7 @@ fn ss_003d_ledger_flush_is_atomic_incremental_and_retryable() {
     assert_eq!(
         ledger.table_count("events").unwrap(),
         2,
-        "one consumption snapshot and one terminal idempotency event"
+        "open and self-contained terminal submission receipts"
     );
     gov.flush_scope_to_ledger(&permit, &ledger)
         .expect("unchanged no-op flush");
@@ -742,6 +871,586 @@ fn ss_003d_ledger_flush_is_atomic_incremental_and_retryable() {
         .expect("second no-op flush");
     assert_eq!(ledger.table_count("events").unwrap(), 4);
     assert!(ledger.lint().unwrap().is_clean());
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // Complete typed open/meter replay and conflict matrix.
+fn ss_003m_typed_open_and_meter_authorities_replay_without_double_spend() {
+    let governor = Arc::new(SessionGovernor::new());
+    let session = SessionId(35);
+    let capability = token(35, 100.0, 1e9);
+    let open_id = governor
+        .session_open_id(session, "typed-open-35")
+        .expect("bounded open authority");
+    let open_barrier = Arc::new(std::sync::Barrier::new(3));
+    let mut open_workers = Vec::new();
+    for _ in 0..2 {
+        let governor = Arc::clone(&governor);
+        let capability = capability.clone();
+        let open_barrier = Arc::clone(&open_barrier);
+        open_workers.push(std::thread::spawn(move || {
+            open_barrier.wait();
+            governor
+                .open_session(open_id, capability)
+                .expect("commit or replay open")
+        }));
+    }
+    open_barrier.wait();
+    let opened = open_workers.remove(0).join().expect("first open worker");
+    let replayed = open_workers.remove(0).join().expect("second open worker");
+    assert_eq!(opened, replayed);
+    assert_eq!(
+        governor
+            .open_session(open_id, capability.clone())
+            .expect("lost open response replays"),
+        opened
+    );
+    let foreign = SessionGovernor::new();
+    assert!(matches!(
+        foreign.open_session(open_id, capability.clone()),
+        Err(SessionError::MutationAuthorityMismatch {
+            kind: "session-open",
+            ..
+        })
+    ));
+    let mut altered = capability;
+    altered.core_s = 99.0;
+    assert!(matches!(
+        governor.open_session(open_id, altered),
+        Err(SessionError::MutationConflict {
+            kind: "session-open",
+            ..
+        })
+    ));
+
+    let report_id = governor
+        .meter_report_id(session, "typed-meter-35")
+        .expect("bounded report authority");
+    let charge = Charge {
+        core_s: 7.0,
+        mem_peak_bytes: 11,
+        wall_s: 3.0,
+    };
+    let barrier = Arc::new(std::sync::Barrier::new(3));
+    let mut workers = Vec::new();
+    for _ in 0..2 {
+        let governor = Arc::clone(&governor);
+        let barrier = Arc::clone(&barrier);
+        workers.push(std::thread::spawn(move || {
+            barrier.wait();
+            governor
+                .charge(report_id, charge)
+                .expect("commit or exact replay")
+        }));
+    }
+    barrier.wait();
+    let first = workers.remove(0).join().expect("first meter worker");
+    let second = workers.remove(0).join().expect("second meter worker");
+    assert_eq!(first, second);
+    assert_eq!(
+        governor.consumption(session).expect("meter state"),
+        (7.0, 11, 3.0, 0, 0),
+        "concurrent duplicate changes the meter exactly once"
+    );
+    assert!(matches!(
+        governor.charge(
+            report_id,
+            Charge {
+                core_s: -0.0,
+                ..charge
+            }
+        ),
+        Err(SessionError::MutationConflict {
+            kind: "meter-report",
+            ..
+        })
+    ));
+    assert!(matches!(
+        foreign.charge(report_id, charge),
+        Err(SessionError::MutationAuthorityMismatch {
+            kind: "meter-report",
+            ..
+        })
+    ));
+    let zero_report = governor
+        .meter_report_id(session, "signed-zero-report")
+        .expect("signed-zero report authority");
+    governor
+        .charge(
+            zero_report,
+            Charge {
+                core_s: 0.0,
+                ..Charge::default()
+            },
+        )
+        .expect("positive zero report");
+    assert!(matches!(
+        governor.charge(
+            zero_report,
+            Charge {
+                core_s: -0.0,
+                ..Charge::default()
+            }
+        ),
+        Err(SessionError::MutationConflict {
+            kind: "meter-report",
+            ..
+        })
+    ));
+
+    let gated = Arc::new(SessionGovernor::new());
+    let gated_token = token(36, 100.0, 1e9);
+    let gated_id = gated
+        .session_open_id(SessionId(36), "typed-gated-open")
+        .expect("gated open authority");
+    let gate = Arc::new(CancelGate::new());
+    let gated_barrier = Arc::new(std::sync::Barrier::new(3));
+    let mut gated_workers = Vec::new();
+    for _ in 0..2 {
+        let gated = Arc::clone(&gated);
+        let gated_token = gated_token.clone();
+        let gate = Arc::clone(&gate);
+        let gated_barrier = Arc::clone(&gated_barrier);
+        gated_workers.push(std::thread::spawn(move || {
+            gated_barrier.wait();
+            gated
+                .open_session_gated(gated_id, gated_token, gate)
+                .expect("commit or replay gated open")
+        }));
+    }
+    gated_barrier.wait();
+    let gated_receipt = gated_workers.remove(0).join().expect("first gated worker");
+    assert_eq!(
+        gated_workers.remove(0).join().expect("second gated worker"),
+        gated_receipt
+    );
+    let foreign_gated = SessionGovernor::new();
+    assert!(matches!(
+        foreign_gated.open_session_gated(gated_id, gated_token.clone(), Arc::clone(&gate),),
+        Err(SessionError::MutationAuthorityMismatch {
+            kind: "session-open",
+            ..
+        })
+    ));
+    assert!(matches!(
+        gated.open_session_gated(gated_id, gated_token.clone(), Arc::new(CancelGate::new())),
+        Err(SessionError::MutationConflict {
+            kind: "session-open",
+            ..
+        })
+    ));
+    let draining_submission = gated
+        .submission_request_id(SessionId(36), "draining-caller", "draining-program")
+        .expect("submission authority before external cancellation");
+    gate.request();
+    assert_eq!(
+        gated
+            .open_session_gated(gated_id, gated_token, Arc::clone(&gate))
+            .expect("exact replay precedes stale gate validation"),
+        gated_receipt
+    );
+    assert!(matches!(
+        gated.submit_once(draining_submission, || panic!("cancelled-gate work ran")),
+        Err(SessionError::SessionGateDraining {
+            id: 36,
+            generation: 0,
+        })
+    ));
+}
+
+#[test]
+fn ss_003n_pressure_action_replays_across_pause_lifecycle_and_refuses_stale_ids() {
+    let governor = Arc::new(SessionGovernor::new());
+    let session = SessionId(37);
+    let capability = token(37, 1e9, 1e9);
+    let open_id = governor
+        .session_open_id(session, "pressure-open")
+        .expect("open authority");
+    let gate = Arc::new(CancelGate::new());
+    let permit = governor
+        .open_session_gated(open_id, capability, Arc::clone(&gate))
+        .expect("gated open")
+        .flush_permit();
+    let action_id = governor
+        .pressure_action_id(session, "pressure-action")
+        .expect("action authority");
+    let foreign = SessionGovernor::new();
+    assert!(matches!(
+        foreign.apply_memory_pressure(action_id, 3),
+        Err(SessionError::MutationAuthorityMismatch {
+            kind: "pressure-action",
+            ..
+        })
+    ));
+    let stale_unused = governor
+        .pressure_action_id(session, "stale-unused")
+        .expect("unused generation-zero authority");
+    let stale_meter = governor
+        .meter_report_id(session, "stale-unused-meter")
+        .expect("unused generation-zero meter authority");
+    let stale_submission = governor
+        .submission_request_id(session, "stale-submission", "stale-program")
+        .expect("unused generation-zero submission authority");
+    let committed_meter = governor
+        .meter_report_id(session, "committed-generation-zero-meter")
+        .expect("committed generation-zero meter authority");
+    let committed_meter_receipt = governor
+        .charge(committed_meter, Charge::default())
+        .expect("commit generation-zero meter");
+    let barrier = Arc::new(std::sync::Barrier::new(3));
+    let mut workers = Vec::new();
+    for _ in 0..2 {
+        let governor = Arc::clone(&governor);
+        let barrier = Arc::clone(&barrier);
+        workers.push(std::thread::spawn(move || {
+            barrier.wait();
+            governor
+                .apply_memory_pressure(action_id, 3)
+                .expect("commit or replay pressure")
+        }));
+    }
+    barrier.wait();
+    let first = workers.remove(0).join().expect("first pressure worker");
+    let concurrent_replay = workers.remove(0).join().expect("second pressure worker");
+    assert_eq!(first, concurrent_replay);
+    assert_eq!(
+        governor
+            .apply_memory_pressure(action_id, 3)
+            .expect("pending replay"),
+        first
+    );
+    assert!(matches!(
+        governor.apply_memory_pressure(action_id, 2),
+        Err(SessionError::MutationConflict {
+            kind: "pressure-action",
+            ..
+        })
+    ));
+    let request_id = first
+        .events()
+        .last()
+        .and_then(|event| event.pause_request_id)
+        .expect("pause request");
+    let acknowledgement = governor
+        .acknowledge_pause(request_id, "typed-pressure-checkpoint")
+        .expect("pause completion");
+    assert_eq!(
+        governor
+            .apply_memory_pressure(action_id, 3)
+            .expect("ready-to-resume replay"),
+        first
+    );
+    governor
+        .activate_resume(&acknowledgement)
+        .expect("activate generation one");
+    assert_eq!(
+        governor
+            .apply_memory_pressure(action_id, 3)
+            .expect("activated replay"),
+        first
+    );
+    assert!(matches!(
+        governor.apply_memory_pressure(stale_unused, 1),
+        Err(SessionError::StaleMutationGeneration {
+            kind: "pressure-action",
+            supplied: 0,
+            current: 1,
+            ..
+        })
+    ));
+    assert!(matches!(
+        governor.charge(stale_meter, Charge::default()),
+        Err(SessionError::StaleMutationGeneration {
+            kind: "meter-report",
+            supplied: 0,
+            current: 1,
+            ..
+        })
+    ));
+    assert_eq!(
+        governor
+            .charge(committed_meter, Charge::default())
+            .expect("known old-generation report replays"),
+        committed_meter_receipt
+    );
+    let executions = AtomicU32::new(0);
+    assert!(matches!(
+        governor.submit_once(stale_submission, || {
+            executions.fetch_add(1, Ordering::SeqCst);
+            Charge::default()
+        }),
+        Err(SessionError::StaleMutationGeneration {
+            kind: "submission-request",
+            supplied: 0,
+            current: 1,
+            ..
+        })
+    ));
+    assert_eq!(executions.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        governor
+            .events_page(&permit, 0, MAX_EVENT_PAGE_ROWS)
+            .expect("bounded events")
+            .len(),
+        4,
+        "three action events plus one completion are retained exactly once"
+    );
+
+    let low_pressure = SessionGovernor::new();
+    let low_session = SessionId(137);
+    let low_open = low_pressure
+        .session_open_id(low_session, "low-pressure-open")
+        .expect("low-pressure open authority");
+    low_pressure
+        .open_session(low_open, token(137, 1e9, 1e9))
+        .expect("ungated low-pressure session");
+    for level in 1..=2 {
+        let action = low_pressure
+            .pressure_action_id(low_session, &format!("level-{level}"))
+            .expect("low-pressure authority");
+        let receipt = low_pressure
+            .apply_memory_pressure(action, level)
+            .expect("first low-pressure action");
+        assert_eq!(
+            low_pressure
+                .apply_memory_pressure(action, level)
+                .expect("exact low-pressure replay"),
+            receipt
+        );
+    }
+}
+
+#[test]
+fn ss_003o_submission_meter_commit_order_is_completion_order_and_atomic() {
+    let governor = Arc::new(SessionGovernor::new());
+    let session = SessionId(38);
+    let open_id = governor
+        .session_open_id(session, "causal-open")
+        .expect("open authority");
+    let permit = governor
+        .open_session(open_id, token(38, 20.0, 1e9))
+        .expect("open session")
+        .flush_permit();
+    let request_a = governor
+        .submission_request_id(session, "caller-a", "program-a")
+        .expect("request A");
+    let conflicting_a = governor
+        .submission_request_id(session, "caller-a", "different-program")
+        .expect("conflicting request A");
+    let request_b = governor
+        .submission_request_id(session, "caller-b", "program-b")
+        .expect("request B");
+    let foreign = SessionGovernor::new();
+    assert!(matches!(
+        foreign.submit_once(request_a, Charge::default),
+        Err(SessionError::MutationAuthorityMismatch {
+            kind: "submission-request",
+            ..
+        })
+    ));
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let worker = {
+        let governor = Arc::clone(&governor);
+        std::thread::spawn(move || {
+            governor.submit_once(request_a, || {
+                started_tx.send(()).expect("test receiver");
+                release_rx.recv().expect("release sender");
+                Charge {
+                    core_s: 15.0,
+                    ..Charge::default()
+                }
+            })
+        })
+    };
+    started_rx.recv().expect("request A admitted first");
+    assert!(matches!(
+        governor.submit_once(conflicting_a, Charge::default),
+        Err(SessionError::MutationConflict {
+            kind: "submission-request",
+            ..
+        })
+    ));
+    let outcome_b = governor
+        .submit_once(request_b, || Charge {
+            core_s: 5.0,
+            ..Charge::default()
+        })
+        .expect("request B completes first");
+    release_tx.send(()).expect("release request A");
+    let outcome_a = worker
+        .join()
+        .expect("request A worker")
+        .expect("request A completes second");
+    let (admission_a, meter_a) = match outcome_a {
+        SubmitOutcome::Executed {
+            admission_ordinal,
+            meter_receipt,
+            ..
+        } => (admission_ordinal, meter_receipt),
+        other => panic!("request A must execute, got {other:?}"),
+    };
+    let (admission_b, meter_b) = match outcome_b {
+        SubmitOutcome::Executed {
+            admission_ordinal,
+            meter_receipt,
+            ..
+        } => (admission_ordinal, meter_receipt),
+        other => panic!("request B must execute, got {other:?}"),
+    };
+    assert!(admission_a < admission_b, "A was admitted first");
+    assert!(
+        meter_b.commit_ordinal() < meter_a.commit_ordinal(),
+        "B completed and committed first"
+    );
+    assert_eq!(
+        meter_b.after(),
+        meter_a.before(),
+        "causal receipts form an exact pre/post chain"
+    );
+    assert_eq!(meter_b.enforcement(), &Enforcement::Ok);
+    assert!(matches!(
+        meter_a.enforcement(),
+        Enforcement::Throttled {
+            resource: "core-seconds",
+            used,
+            granted,
+        } if *used == 20.0 && *granted == 20.0
+    ));
+    let before_duplicate = governor.consumption(session).expect("meter state");
+    assert!(matches!(
+        governor
+            .submit_once(request_a, || panic!("duplicate reran"))
+            .expect("exact replay"),
+        SubmitOutcome::Duplicate {
+            enforcement,
+            meter_receipt,
+            ..
+        } if meter_receipt == meter_a && enforcement == *meter_a.enforcement()
+    ));
+    assert_eq!(
+        governor.consumption(session).expect("meter state"),
+        before_duplicate
+    );
+
+    let ledger = fs_ledger::Ledger::open(":memory:").expect("causal ledger");
+    loop {
+        let report = governor
+            .flush_scope_to_ledger(&permit, &ledger)
+            .expect("bounded flush");
+        if !report.remaining_dirty {
+            break;
+        }
+    }
+    assert_eq!(
+        ledger.table_count("events").expect("event count"),
+        3,
+        "one open receipt and two self-contained causal terminal receipts"
+    );
+    assert!(ledger.lint().expect("ledger lint").is_clean());
+}
+
+#[test]
+fn ss_003p_pause_acknowledgement_waits_for_pending_submission_meter_commit() {
+    let governor = Arc::new(SessionGovernor::new());
+    let session = SessionId(39);
+    let gate = Arc::new(CancelGate::new());
+    let open_id = governor
+        .session_open_id(session, "drain-open")
+        .expect("open authority");
+    governor
+        .open_session_gated(open_id, token(39, 100.0, 1e9), Arc::clone(&gate))
+        .expect("gated session");
+    let request = governor
+        .submission_request_id(session, "draining-caller", "draining-program")
+        .expect("submission authority");
+    let pressure = governor
+        .pressure_action_id(session, "draining-pause")
+        .expect("pressure authority");
+    let refused_while_draining = governor
+        .submission_request_id(session, "late-drain-caller", "late-drain-program")
+        .expect("same-generation late authority");
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let worker = {
+        let governor = Arc::clone(&governor);
+        std::thread::spawn(move || {
+            governor.submit_once(request, || {
+                started_tx.send(()).expect("test receiver");
+                release_rx.recv().expect("release sender");
+                Charge {
+                    core_s: 7.0,
+                    ..Charge::default()
+                }
+            })
+        })
+    };
+    started_rx.recv().expect("submission admitted");
+    let pressure_receipt = governor
+        .apply_memory_pressure(pressure, 3)
+        .expect("pause requested");
+    let pause_request = pressure_receipt
+        .events()
+        .iter()
+        .find_map(|event| event.pause_request_id)
+        .expect("pause request authority");
+    assert!(matches!(
+        governor.submit_once(refused_while_draining, || panic!("draining work ran")),
+        Err(SessionError::PauseAlreadyPending { id: 39, .. })
+    ));
+    assert!(matches!(
+        governor.acknowledge_pause(pause_request, "premature-checkpoint"),
+        Err(SessionError::PauseDrainPending {
+            id: 39,
+            pending_submissions: 1,
+        })
+    ));
+
+    release_tx.send(()).expect("release submission");
+    let executed = worker
+        .join()
+        .expect("submission worker")
+        .expect("submission terminal outcome");
+    let meter_receipt = match executed {
+        SubmitOutcome::Executed { meter_receipt, .. } => meter_receipt,
+        other => panic!("draining submission must execute, got {other:?}"),
+    };
+    assert_eq!(meter_receipt.after().core_s, 7.0);
+    let acknowledgement = governor
+        .acknowledge_pause(pause_request, "settled-checkpoint")
+        .expect("settled generation can rotate");
+    assert!(matches!(
+        governor
+            .submit_once(request, || panic!("terminal replay reran work"))
+            .expect("terminal replay"),
+        SubmitOutcome::Duplicate {
+            meter_receipt: replayed,
+            ..
+        } if replayed == meter_receipt
+    ));
+    let refused_while_ready = governor
+        .submission_request_id(session, "ready-caller", "ready-program")
+        .expect("fresh-generation authority");
+    assert!(matches!(
+        governor.submit_once(refused_while_ready, || panic!("ready work ran")),
+        Err(SessionError::ResumeNotActivated {
+            id: 39,
+            generation: 1,
+        })
+    ));
+    governor
+        .activate_resume(&acknowledgement)
+        .expect("fresh generation activated");
+    assert!(matches!(
+        governor
+            .submit_once(refused_while_ready, || Charge {
+                core_s: 1.0,
+                ..Charge::default()
+            })
+            .expect("activated generation admits work"),
+        SubmitOutcome::Executed { .. }
+    ));
+    assert_eq!(governor.consumption(session).expect("consumption").0, 8.0);
 }
 
 #[test]
@@ -891,7 +1600,7 @@ fn ss_003e_ledger_scope_authority_is_canonical_and_fail_closed() {
     assert_eq!(ledger.table_count("events").unwrap(), 0);
     gov.flush_scope_to_ledger(&main_permit, &ledger)
         .expect("foreign authority refusal leaves the main cursor dirty");
-    assert_eq!(ledger.table_count("events").unwrap(), 1);
+    assert_eq!(ledger.table_count("events").unwrap(), 2);
     let boundary_ledger = fs_ledger::Ledger::open(":memory:").expect("boundary scope ledger");
     gov.flush_scope_to_ledger(&boundary_permit, &boundary_ledger)
         .expect("main flush did not consume the other scope's meter");
@@ -958,7 +1667,7 @@ fn ss_003f_scoped_flush_isolated_interleaved_retryable_and_sink_bound() {
     assert_eq!(
         alpha_ledger.table_count("events").unwrap(),
         4,
-        "alpha meter + terminal receipt + two alpha degradation events"
+        "alpha open + terminal receipt + two degradation events"
     );
     assert_eq!(beta_ledger.table_count("events").unwrap(), 0);
     gov.flush_scope_to_ledger(&beta_permit, &beta_ledger)
@@ -966,7 +1675,7 @@ fn ss_003f_scoped_flush_isolated_interleaved_retryable_and_sink_bound() {
     assert_eq!(
         beta_ledger.table_count("events").unwrap(),
         4,
-        "beta meter + success/failure receipts + one beta degradation event"
+        "beta open + success/failure receipts + one degradation event"
     );
     assert!(
         alpha_ledger.lint().unwrap().is_clean(),
@@ -1815,13 +2524,21 @@ fn ss_008_panicking_submission_is_non_blocking_and_terminal() {
         .expect("session remains valid");
 
     assert_eq!(executions.load(Ordering::SeqCst), 1, "work ran once");
-    let (receipt, evidence) = match owner_outcome {
-        SubmitOutcome::Failed { receipt, evidence } => (receipt, evidence),
+    let (admission_ordinal, receipt, evidence) = match owner_outcome {
+        SubmitOutcome::Failed {
+            admission_ordinal,
+            receipt,
+            evidence,
+        } => (admission_ordinal, receipt, evidence),
         other => panic!("owner must publish one terminal failure, got {other:?}"),
     };
     assert_eq!(evidence.preview(), panic_text);
     assert_eq!(evidence.byte_len(), panic_text.len());
-    assert!(receipt.matches_failure(SessionId(80), "main", &key, &evidence));
+    let request_id = gov
+        .inner
+        .submission_request_id(SessionId(80), &key, &key)
+        .expect("typed panic request");
+    assert!(receipt.matches_failure(request_id, "main", admission_ordinal, &evidence));
     assert_eq!(
         gov.consumption(SessionId(80)).expect("meters").0.to_bits(),
         0.0f64.to_bits(),
@@ -1835,7 +2552,7 @@ fn ss_008_panicking_submission_is_non_blocking_and_terminal() {
         })
         .expect("terminal failure is readable");
     assert!(
-        matches!(retry, SubmitOutcome::Failed { receipt: r, evidence: ref e } if r == receipt && e == &evidence),
+        matches!(retry, SubmitOutcome::Failed { receipt: r, evidence: ref e, .. } if r == receipt && e == &evidence),
         "same-key retry receives the terminal failure; a new key is explicit retry"
     );
     assert_eq!(executions.load(Ordering::SeqCst), 1);
@@ -2063,4 +2780,236 @@ fn ss_012_session_and_idempotency_collection_caps_are_exact_and_atomic() {
         .expect("existing terminal keys remain queryable"),
         SubmitOutcome::Duplicate { .. }
     ));
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // One real-reopen proof for the complete typed lifecycle chain.
+fn ss_013_durable_meter_and_l3_lifecycle_reopen_without_state_or_row_drift() {
+    let path = durable_ledger_path("lifecycle");
+    let nonce = DurableGovernorNonce::from_bytes([0xD3; 32]);
+    let ledger = fs_ledger::Ledger::open(&path).expect("on-disk lifecycle ledger");
+    let governor = SessionGovernor::new_durable(&ledger, nonce).expect("durable governor");
+    let session = SessionId(9_013);
+    let token = token_in_scope(session.0, "durable-lifecycle");
+    let initial_gate = Arc::new(CancelGate::new());
+    let open_id = governor
+        .session_open_id(session, "durable-lifecycle-open")
+        .expect("open authority");
+    let open_receipt = governor
+        .open_session_gated(open_id, token.clone(), Arc::clone(&initial_gate))
+        .expect("gated open");
+    let permit = open_receipt.flush_permit();
+    governor
+        .flush_scope_to_ledger(&permit, &ledger)
+        .expect("open prerequisite terminal");
+
+    let delta = Charge {
+        core_s: 17.0,
+        mem_peak_bytes: 19,
+        wall_s: 23.0,
+    };
+    let meter_id = governor
+        .meter_report_id(session, "durable-meter")
+        .expect("meter authority");
+    let meter_receipt = governor.charge(meter_id, delta).expect("meter commit");
+    let l1_id = governor
+        .pressure_action_id(session, "durable-pressure-l1")
+        .expect("L1 authority");
+    let l1 = governor.apply_memory_pressure(l1_id, 1).expect("L1 action");
+    let l2_id = governor
+        .pressure_action_id(session, "durable-pressure-l2")
+        .expect("L2 authority");
+    let l2 = governor.apply_memory_pressure(l2_id, 2).expect("L2 action");
+    let l3_id = governor
+        .pressure_action_id(session, "durable-pressure-l3")
+        .expect("L3 authority");
+    let l3 = governor.apply_memory_pressure(l3_id, 3).expect("L3 action");
+    assert!(initial_gate.is_requested());
+    let pause_request = l3
+        .events()
+        .iter()
+        .find_map(|event| event.pause_request_id)
+        .expect("L3 request authority");
+    let acknowledgement = governor
+        .acknowledge_pause(pause_request, "durable-checkpoint")
+        .expect("pause acknowledgement");
+    let activation = governor
+        .activate_resume(&acknowledgement)
+        .expect("resume activation");
+    let resumed_submission_id = governor
+        .submission_request_id(session, "resumed-slot", "resumed-program")
+        .expect("resumed-generation submission authority");
+    let resumed_submission = governor
+        .submit_once_durable(&ledger, resumed_submission_id, "resumed-program", || {
+            Charge {
+                core_s: 29.0,
+                ..Charge::default()
+            }
+        })
+        .expect("durable submission after gate rotation");
+    let resumed_submission_receipt = match resumed_submission {
+        SubmitOutcome::Executed { receipt, .. } => receipt,
+        other => panic!("expected resumed execution, got {other:?}"),
+    };
+    let flushed = governor
+        .flush_scope_to_ledger(&permit, &ledger)
+        .expect("meter and lifecycle terminal batch");
+    assert_eq!(flushed.committed_terminals, 7);
+    assert_eq!(flushed.appended_rows, 9);
+    assert!(!flushed.remaining_dirty);
+    let counts = (
+        ledger.table_count("session_claims").unwrap(),
+        ledger.table_count("session_terminals").unwrap(),
+        ledger.table_count("session_terminal_events").unwrap(),
+        ledger.table_count("session_flush_batches").unwrap(),
+        ledger.table_count("session_flush_batch_members").unwrap(),
+        ledger.table_count("events").unwrap(),
+    );
+    assert_eq!(counts.0, 8);
+    assert_eq!(counts.1, 8);
+    assert_eq!(counts.2, 10);
+    assert_eq!(counts.5, 10);
+    drop(governor);
+    drop(ledger);
+
+    let ledger = fs_ledger::Ledger::open(&path).expect("reopened lifecycle ledger");
+    let governor = SessionGovernor::new_durable(&ledger, nonce).expect("reopened governor");
+    let recovered_initial_gate = Arc::new(CancelGate::new());
+    let recovered_open = governor
+        .recover_open(
+            &ledger,
+            open_id,
+            token,
+            Some(Arc::clone(&recovered_initial_gate)),
+        )
+        .expect("recover gated open");
+    assert_eq!(recovered_open.content_hash(), open_receipt.content_hash());
+    assert_eq!(
+        governor
+            .recover_meter(&ledger, meter_id, delta)
+            .expect("recover meter"),
+        meter_receipt
+    );
+    assert_eq!(
+        governor
+            .recover_pressure(&ledger, l1_id, 1)
+            .expect("recover L1"),
+        l1
+    );
+    assert_eq!(
+        governor
+            .recover_pressure(&ledger, l2_id, 2)
+            .expect("recover L2"),
+        l2
+    );
+    assert_eq!(
+        governor
+            .recover_pressure(&ledger, l3_id, 3)
+            .expect("recover L3"),
+        l3
+    );
+    assert!(recovered_initial_gate.is_requested());
+    let recovered_resume_gate = Arc::new(CancelGate::new());
+    let recovered_acknowledgement = governor
+        .recover_pause_acknowledgement(
+            &ledger,
+            pause_request,
+            "durable-checkpoint",
+            Arc::clone(&recovered_resume_gate),
+        )
+        .expect("recover pause acknowledgement");
+    assert_eq!(
+        recovered_acknowledgement.content_hash(),
+        acknowledgement.content_hash()
+    );
+    assert_eq!(recovered_acknowledgement.event(), acknowledgement.event());
+    assert!(Arc::ptr_eq(
+        &recovered_acknowledgement.resume_gate(),
+        &recovered_resume_gate
+    ));
+    assert_eq!(
+        governor
+            .recover_resume_activation(&ledger, &recovered_acknowledgement)
+            .expect("recover activation"),
+        activation
+    );
+    let executions = AtomicU32::new(0);
+    assert!(matches!(
+        governor
+            .submit_once_durable(
+                &ledger,
+                resumed_submission_id,
+                "resumed-program",
+                || {
+                    executions.fetch_add(1, Ordering::SeqCst);
+                    Charge::default()
+                },
+            )
+            .expect("recover resumed-generation submission"),
+        SubmitOutcome::Duplicate { receipt, .. } if receipt == resumed_submission_receipt
+    ));
+    assert_eq!(executions.load(Ordering::SeqCst), 0);
+
+    assert_eq!(
+        governor
+            .recover_pressure(&ledger, l3_id, 3)
+            .expect("terminal pressure replay after activation"),
+        l3
+    );
+    assert_eq!(
+        governor
+            .recover_pause_acknowledgement(
+                &ledger,
+                pause_request,
+                "durable-checkpoint",
+                Arc::clone(&recovered_resume_gate),
+            )
+            .expect("exact acknowledgement replay")
+            .content_hash(),
+        acknowledgement.content_hash()
+    );
+    assert_eq!(
+        governor
+            .recover_resume_activation(&ledger, &recovered_acknowledgement)
+            .expect("exact activation replay"),
+        activation
+    );
+    assert!(matches!(
+        governor.recover_pause_acknowledgement(
+            &ledger,
+            pause_request,
+            "durable-checkpoint",
+            Arc::new(CancelGate::new()),
+        ),
+        Err(SessionError::PauseAcknowledgementConflict { .. })
+    ));
+    assert!(matches!(
+        governor.recover_pause_acknowledgement(
+            &ledger,
+            pause_request,
+            "altered-checkpoint",
+            Arc::clone(&recovered_resume_gate),
+        ),
+        Err(SessionError::PauseAcknowledgementConflict { .. })
+    ));
+    let foreign = fs_ledger::Ledger::open(":memory:").expect("foreign ledger");
+    assert!(matches!(
+        governor.recover_meter(&foreign, meter_id, delta),
+        Err(SessionError::RecoveryLedgerMismatch { .. })
+    ));
+    assert_eq!(
+        (
+            ledger.table_count("session_claims").unwrap(),
+            ledger.table_count("session_terminals").unwrap(),
+            ledger.table_count("session_terminal_events").unwrap(),
+            ledger.table_count("session_flush_batches").unwrap(),
+            ledger.table_count("session_flush_batch_members").unwrap(),
+            ledger.table_count("events").unwrap(),
+        ),
+        counts
+    );
+    verdict(
+        "ss-013",
+        "durable meter and complete L3 lifecycle recover exactly after real ledger reopen",
+    );
 }

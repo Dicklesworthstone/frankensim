@@ -56,7 +56,10 @@ fine-grained event stream. Layer: L6 (HELM). Runtime deps: `std` + `fsqlite`.
   `artifact_chunks` rows because fsqlite has no incremental-blob API),
   `ArtifactWriter` (streaming; hashes incrementally, stages chunks under a
   provisional key inside a writer-owned transaction, promotes on `finish`),
-  `get_artifact` / `read_artifact_chunks` / `artifact_info`,
+  `get_artifact` / `read_artifact_chunks` / `artifact_info`, plus
+  `get_artifact_bounded` / `read_artifact_chunks_bounded` for consumers that
+  must refuse above a caller-supplied payload cap before any byte callback or
+  result-buffer allocation,
   `verify_artifact_integrity` (full re-hash), `corrupt_artifact_for_test`.
   Every byte-returning retrieval re-hashes stored content against its key.
   Retrieval treats signed database integers as untrusted: it never
@@ -68,9 +71,15 @@ fine-grained event stream. Layer: L6 (HELM). Runtime deps: `std` + `fsqlite`.
   materialization still cannot deliver an oversized row. Same-length byte
   tampering is necessarily a late hash failure: streaming callbacks retain
   effects for the delivered prefix, while `get_artifact` returns no bytes.
-- Ops/lineage: `begin_op` (validates the Five Explicits field-by-field;
+- Ops/lineage: `begin_op` (validates the Five Explicits field-by-field and
+  byte-bounds session, IR, seed, versions, budget, and capability fields at
+  1 MiB each before JSON validation and stores execution mode only
+  as the exact `deterministic|fast` enum;
   units travel inside the typed IR, the other four are mandatory columns),
-  `finish_op` (exactly once; `ok|error|cancelled`), `op`, `link` (FK-checked
+  `finish_op` (exactly once; `ok|error|cancelled`; optional diagnostic JSON is
+  bounded at 1 MiB before validation), `op` (metadata-only
+  type/length/CASE-gated JSON preflight followed by the same guarded payload
+  query), `link` (FK-checked
   `in|out` edges), `edge_exists` (exact role-qualified verifier query).
 - Streams: `record_metric` (finite REAL only), `append_event` /
   `append_events` (batched, atomic), `tune_put`/`tune_get` (single-statement
@@ -88,7 +97,7 @@ fine-grained event stream. Layer: L6 (HELM). Runtime deps: `std` + `fsqlite`.
   shape): `put_extension`/`get_extension` over `requirements`, `model_cards`,
   `evidence`, `scenarios`, `constraints`, `capability_probes`, `imports`,
   `unsafe_capsules`.
-- Hygiene: `lint()` (orphan edges/metrics/chunks, artifact and tune storage
+- Hygiene: `lint()` (orphan edges/metrics/chunks, artifact, op, and tune storage
   bounds, storage-shape and length invariants, half-finished ops, dangling
   branch references) — all-zero on any healthy or crash-recovered ledger.
 - Time travel (`travel` module, schema v2): `fork`/`branches`/`branch_diff`
@@ -261,13 +270,21 @@ refusal, or verifier panic).
    selecting variable-size values. Raw-SQL rows outside this contract fail
    closed as `TuneCorrupt`; valid but excessive histories fail as
    `TuneReadLimit`.
-4. Ops are event-sourced facts: `(t_end IS NULL) = (outcome IS NULL)` is a
+4. Ops have canonical bounded envelopes: optional session, IR, seed, versions,
+   budget, capability, and optional diagnostic are each at most 1 MiB; required
+   BLOB/JSON fields are nonempty, JSON fields are valid, and execution mode is
+   exactly `deterministic` or `fast`. Canonical writes
+   apply byte limits before JSON parsing. `op` first reads only storage types,
+   byte lengths, and nested-CASE JSON-validity bits, then repeats every bound in
+   the payload query; hostile raw rows fail as `OpCorrupt` without materializing
+   their variable-size values. `lint().malformed_ops` reports the same contract.
+5. Ops are event-sourced facts: `(t_end IS NULL) = (outcome IS NULL)` is a
    table CHECK; an op finishes at most once (`DoubleFinish` otherwise).
-5. Edges only reference existing ops and artifacts (enforced FKs).
-6. A crash-recovered ledger lints clean: transactions make op+edges+metric
+6. Edges only reference existing ops and artifacts (enforced FKs).
+7. A crash-recovered ledger lints clean: transactions make op+edges+metric
    groups all-or-nothing (kill -9 battery, `ledger_007`).
-7. Wall-clock timestamps are provenance envelope, never content identity.
-8. Physical ledger identity is a persisted opaque 16-byte UUID. It survives
+8. Wall-clock timestamps are provenance envelope, never content identity.
+9. Physical ledger identity is a persisted opaque 16-byte UUID. It survives
    handle moves, file aliases, and reopenings, but never transfers to a new
    database merely because that database occupies the same path. New
    identities use 122 bits from the operating system's `/dev/urandom` source
@@ -285,6 +302,11 @@ busy/locked/write-conflict; retry with backoff), `MissingExplicit` (names the
 offending Five Explicits field), `Invalid` (names the field),
 `Corrupt`, `TuneCorrupt` (stored tune envelope violated), `TuneReadLimit`
 (bounded scan refused), `NotFound`, `DoubleFinish`, `WriterInTransaction`.
+`ArtifactReadLimit` refuses an artifact whose stored metadata declares a length
+above the caller's explicit validation/materialization budget before payload
+delivery; it makes no independent content-integrity claim.
+`OpCorrupt` refuses a stored op envelope that violates its type, byte, JSON, or
+finish-state contract before materialization.
 `InstanceIdentityCorrupt` refuses a v4/v5 database whose singleton identity is
 missing, malformed, or differs from the handle's cached open-time authority.
 `InstanceIdentityUnavailable` refuses to mint a new identity when the safe
@@ -336,6 +358,11 @@ reopen. Tune unit regressions cover every exact field limit and limit+1,
 empty/NUL/non-ASCII identities, hostile oversized raw-SQL rows, lint detection,
 and deterministic row/aggregate scan caps (including an exact 16 MiB boundary
 that counts the cloned kernel identity once per returned row).
+Artifact unit regressions cover inline and chunked exact caller caps, cap+1
+refusal with zero payload callbacks, and the explicit metadata-declaration
+precedence for a tampered length. Op unit regressions cover exact and cap+1 canonical writes
+for every variable-size field, raw-SQL oversized IR/version rows, guarded read
+refusal, and `malformed_ops` lint detection.
 The `ledger_003b`/`ledger_003c`/`ledger_003d` identity battery covers handle
 movement, independent memory ledgers, file reopen and aliasing, same-path file
 replacement, genuine v3 and v4 migrations, UUID shape, v5 update/delete/insert
@@ -525,6 +552,10 @@ The graph is the minting authority for `fs_evidence::AdmittedColor`:
   bounded canonical writes, metadata-only read preflights, guarded variable-size
   queries, and lint; resistance to a hostile client executing arbitrary SQL is
   not claimed as a DDL property.
+- The v1 `ops` DDL checks JSON syntax and seed non-emptiness but does not encode
+  the API's per-field 1 MiB ceilings. Canonical writes enforce them, `op`
+  metadata-preflights and guards reads, and lint reports violations; arbitrary
+  raw SQL is detected and refused rather than prevented as a DDL property.
 - The v1 `tune` DDL checks JSON syntax but does not encode the canonical
   identity, machine, JSON byte, row-count, or scan-byte bounds. The public API
   enforces them on writes, metadata-preflights and guards reads, and reports

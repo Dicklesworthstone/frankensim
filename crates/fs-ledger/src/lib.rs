@@ -50,6 +50,32 @@ pub const MAX_ARTIFACT_KIND_BYTES: usize = 256;
 /// Maximum UTF-8 byte length of optional artifact metadata JSON.
 pub const MAX_ARTIFACT_META_BYTES: usize = 1024 * 1024;
 
+/// Conservative maximum byte length shared by each variable-size operation
+/// field. Field-specific aliases keep the public contract independently
+/// tunable without changing callers.
+pub const MAX_OP_FIELD_BYTES: usize = 1024 * 1024;
+
+/// Maximum byte length of an optional operation session identity.
+pub const MAX_OP_SESSION_BYTES: usize = MAX_OP_FIELD_BYTES;
+
+/// Maximum UTF-8 byte length of one operation IR JSON document.
+pub const MAX_OP_IR_BYTES: usize = MAX_OP_FIELD_BYTES;
+
+/// Maximum byte length of one operation RNG seed.
+pub const MAX_OP_SEED_BYTES: usize = MAX_OP_FIELD_BYTES;
+
+/// Maximum UTF-8 byte length of one operation versions JSON document.
+pub const MAX_OP_VERSIONS_BYTES: usize = MAX_OP_FIELD_BYTES;
+
+/// Maximum UTF-8 byte length of one operation budget JSON document.
+pub const MAX_OP_BUDGET_BYTES: usize = MAX_OP_FIELD_BYTES;
+
+/// Maximum UTF-8 byte length of one operation capability JSON document.
+pub const MAX_OP_CAPABILITY_BYTES: usize = MAX_OP_FIELD_BYTES;
+
+/// Maximum UTF-8 byte length of an optional operation diagnostic JSON document.
+pub const MAX_OP_DIAG_BYTES: usize = MAX_OP_FIELD_BYTES;
+
 /// Maximum byte length of a canonical autotuner kernel identity.
 pub const MAX_TUNE_KERNEL_BYTES: usize = 64 * 1024;
 
@@ -264,6 +290,26 @@ pub enum LedgerError {
         /// Diagnosis.
         detail: String,
     },
+    /// Stored metadata declares an artifact larger than the caller's explicit
+    /// materialization budget. The payload is refused before any byte callback
+    /// or allocation; this refusal makes no independent integrity claim.
+    ArtifactReadLimit {
+        /// Hex content hash of the refused artifact.
+        hash_hex: String,
+        /// Caller-supplied maximum payload bytes.
+        limit: u64,
+        /// Stored payload length observed during metadata-only preflight.
+        observed: u64,
+    },
+    /// An operation row bypassed the canonical write path and violates the
+    /// bounded storage contract. Reads refuse it before materializing any
+    /// variable-size field.
+    OpCorrupt {
+        /// Operation id addressed by the read.
+        op: i64,
+        /// Bounded structural diagnosis without hostile stored values.
+        detail: String,
+    },
     /// A tune row bypassed the canonical write path and violates the bounded
     /// storage contract. Reads refuse the row rather than materializing or
     /// interpreting it.
@@ -352,6 +398,8 @@ impl LedgerError {
             LedgerError::MissingExplicit { .. } => "LedgerMissingExplicit",
             LedgerError::Invalid { .. } => "LedgerInvalid",
             LedgerError::Corrupt { .. } => "LedgerCorruption",
+            LedgerError::ArtifactReadLimit { .. } => "LedgerArtifactReadLimit",
+            LedgerError::OpCorrupt { .. } => "LedgerOpCorruption",
             LedgerError::TuneCorrupt { .. } => "LedgerTuneCorruption",
             LedgerError::TuneReadLimit { .. } => "LedgerTuneReadLimit",
             LedgerError::NotFound { .. } => "LedgerNotFound",
@@ -396,6 +444,20 @@ impl std::fmt::Display for LedgerError {
                 f,
                 "LedgerCorruption: artifact {hash_hex}: {detail} — refuse to trust or replay \
                  from a tampered ledger"
+            ),
+            LedgerError::ArtifactReadLimit {
+                hash_hex,
+                limit,
+                observed,
+            } => write!(
+                f,
+                "LedgerArtifactReadLimit: stored metadata for artifact {hash_hex} declares \
+                 {observed} bytes, exceeding the caller's {limit}-byte materialization budget"
+            ),
+            LedgerError::OpCorrupt { op, detail } => write!(
+                f,
+                "LedgerOpCorruption: op {op}: {detail} — refuse to materialize an operation \
+                 row that bypassed the canonical bounded write path"
             ),
             LedgerError::TuneCorrupt { kernel, detail } => write!(
                 f,
@@ -708,6 +770,9 @@ pub struct LintReport {
     pub orphan_chunks: u64,
     /// Tune rows violating bounded storage types, lengths, or JSON validity.
     pub malformed_tune_rows: u64,
+    /// Operation rows violating bounded storage types, lengths, JSON validity,
+    /// or the start/finish outcome envelope.
+    pub malformed_ops: u64,
     /// Ops with exactly one of (t_end, outcome) set.
     pub half_finished_ops: u64,
     /// Ops whose branch id does not exist (v2).
@@ -934,6 +999,33 @@ fn tune_corrupt(kernel: &str, detail: impl Into<String>) -> LedgerError {
         kernel: kernel.to_string(),
         detail: detail.into(),
     }
+}
+
+fn op_storage_predicate() -> String {
+    format!(
+        "(session IS NULL OR (typeof(session) = 'blob' AND length(session) <= {MAX_OP_SESSION_BYTES})) AND \
+         CASE WHEN typeof(ir) = 'text' THEN \
+             CASE WHEN length(CAST(ir AS BLOB)) BETWEEN 1 AND {MAX_OP_IR_BYTES} \
+                  THEN json_valid(ir) ELSE 0 END ELSE 0 END = 1 AND \
+         typeof(seed) = 'blob' AND length(seed) BETWEEN 1 AND {MAX_OP_SEED_BYTES} AND \
+         CASE WHEN typeof(versions) = 'text' THEN \
+             CASE WHEN length(CAST(versions AS BLOB)) BETWEEN 1 AND {MAX_OP_VERSIONS_BYTES} \
+                  THEN json_valid(versions) ELSE 0 END ELSE 0 END = 1 AND \
+         CASE WHEN typeof(budget) = 'text' THEN \
+             CASE WHEN length(CAST(budget AS BLOB)) BETWEEN 1 AND {MAX_OP_BUDGET_BYTES} \
+                  THEN json_valid(budget) ELSE 0 END ELSE 0 END = 1 AND \
+         CASE WHEN typeof(capability) = 'text' THEN \
+             CASE WHEN length(CAST(capability AS BLOB)) BETWEEN 1 AND {MAX_OP_CAPABILITY_BYTES} \
+                  THEN json_valid(capability) ELSE 0 END ELSE 0 END = 1 AND \
+         typeof(t_start) = 'integer' AND \
+         ((t_end IS NULL AND outcome IS NULL) OR \
+          (typeof(t_end) = 'integer' AND typeof(outcome) = 'text' AND \
+           outcome IN ('ok','error','cancelled'))) AND \
+         typeof(exec_mode) = 'text' AND exec_mode IN ('deterministic','fast') AND \
+         CASE WHEN diag IS NULL THEN 1 WHEN typeof(diag) = 'text' THEN \
+             CASE WHEN length(CAST(diag AS BLOB)) BETWEEN 1 AND {MAX_OP_DIAG_BYTES} \
+                  THEN json_valid(diag) ELSE 0 END ELSE 0 END = 1"
+    )
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1893,6 +1985,43 @@ impl Ledger {
         }
     }
 
+    fn require_op_field_bound(
+        &self,
+        field: &str,
+        len: usize,
+        max_bytes: usize,
+        explicit: bool,
+    ) -> Result<(), LedgerError> {
+        if len <= max_bytes {
+            return Ok(());
+        }
+        let problem = format!(
+            "{len} bytes exceeds the {max_bytes}-byte operation-field limit; shorten the frozen provenance value"
+        );
+        if explicit {
+            Err(LedgerError::MissingExplicit {
+                field: field.to_string(),
+                problem,
+            })
+        } else {
+            Err(LedgerError::Invalid {
+                field: field.to_string(),
+                problem,
+            })
+        }
+    }
+
+    fn require_bounded_op_json(
+        &self,
+        field: &str,
+        value: &str,
+        max_bytes: usize,
+        explicit: bool,
+    ) -> Result<(), LedgerError> {
+        self.require_op_field_bound(field, value.len(), max_bytes, explicit)?;
+        self.require_json(field, value, explicit)
+    }
+
     fn require_tune_json(
         &self,
         field: &str,
@@ -2492,9 +2621,58 @@ impl Ledger {
     /// reserved for the result; absence is `Ok(None)`.
     pub fn get_artifact(&self, h: &ContentHash) -> Result<Option<Vec<u8>>, LedgerError> {
         self.note_read_query();
+        let Some(info) = self.artifact_info(h)? else {
+            return Ok(None);
+        };
+        self.materialize_artifact_with_info(h, &info).map(Some)
+    }
+
+    /// Fetch an artifact only when its metadata-declared length is within the
+    /// caller's explicit materialization budget. The length comparison occurs
+    /// before any payload callback or result-buffer allocation.
+    ///
+    /// # Errors
+    /// The same errors as [`Ledger::get_artifact`], plus
+    /// [`LedgerError::ArtifactReadLimit`] when stored metadata declares an
+    /// artifact larger than `max_bytes`.
+    pub fn get_artifact_bounded(
+        &self,
+        h: &ContentHash,
+        max_bytes: u64,
+    ) -> Result<Option<Vec<u8>>, LedgerError> {
+        self.note_read_query();
+        let Some(info) = self.artifact_info(h)? else {
+            return Ok(None);
+        };
+        self.require_artifact_read_limit(h, &info, max_bytes)?;
+        self.materialize_artifact_with_info(h, &info).map(Some)
+    }
+
+    fn require_artifact_read_limit(
+        &self,
+        h: &ContentHash,
+        info: &ArtifactInfo,
+        max_bytes: u64,
+    ) -> Result<(), LedgerError> {
+        if info.len <= max_bytes {
+            Ok(())
+        } else {
+            Err(LedgerError::ArtifactReadLimit {
+                hash_hex: h.to_hex(),
+                limit: max_bytes,
+                observed: info.len,
+            })
+        }
+    }
+
+    fn materialize_artifact_with_info(
+        &self,
+        h: &ContentHash,
+        info: &ArtifactInfo,
+    ) -> Result<Vec<u8>, LedgerError> {
         let mut out = Vec::new();
         let mut allocation_error = None;
-        let streamed = self.read_artifact_chunks(h, &mut |chunk| {
+        self.read_artifact_chunks_with_info(h, info, &mut |chunk| {
             if allocation_error.is_some() {
                 return;
             }
@@ -2513,13 +2691,10 @@ impl Ledger {
             // copy cannot trigger another allocation.
             out.extend_from_slice(chunk);
         })?;
-        if streamed.is_none() {
-            return Ok(None);
-        }
         if let Some(error) = allocation_error {
             return Err(error);
         }
-        Ok(Some(out))
+        Ok(out)
     }
 
     /// Stream an artifact's bytes chunk-by-chunk without materializing the
@@ -2550,8 +2725,38 @@ impl Ledger {
         let Some(info) = self.artifact_info(h)? else {
             return Ok(None);
         };
+        self.read_artifact_chunks_with_info(h, &info, f).map(Some)
+    }
+
+    /// Stream an artifact only when its metadata-declared length is within the
+    /// caller's explicit byte budget. A limit refusal occurs before storage
+    /// preflight and before the callback can observe any payload byte.
+    ///
+    /// # Errors
+    /// The same errors as [`Ledger::read_artifact_chunks`], plus
+    /// [`LedgerError::ArtifactReadLimit`] when stored metadata declares an
+    /// artifact larger than `max_bytes`.
+    pub fn read_artifact_chunks_bounded(
+        &self,
+        h: &ContentHash,
+        max_bytes: u64,
+        f: &mut dyn FnMut(&[u8]),
+    ) -> Result<Option<u64>, LedgerError> {
+        let Some(info) = self.artifact_info(h)? else {
+            return Ok(None);
+        };
+        self.require_artifact_read_limit(h, &info, max_bytes)?;
+        self.read_artifact_chunks_with_info(h, &info, f).map(Some)
+    }
+
+    fn read_artifact_chunks_with_info(
+        &self,
+        h: &ContentHash,
+        info: &ArtifactInfo,
+        f: &mut dyn FnMut(&[u8]),
+    ) -> Result<u64, LedgerError> {
         if info.chunk_count == 0 {
-            self.preflight_inline_artifact(h, &info)?;
+            self.preflight_inline_artifact(h, info)?;
             let rows = self
                 .conn
                 .query_with_params(
@@ -2584,11 +2789,11 @@ impl Ledger {
                     ),
                 });
             }
-            return Ok(Some(info.len));
+            return Ok(info.len);
         }
 
-        self.preflight_chunked_artifact(h, &info)?;
-        let mut validator = ArtifactChunkValidator::new(&info);
+        self.preflight_chunked_artifact(h, info)?;
+        let mut validator = ArtifactChunkValidator::new(info);
         let mut hasher = Blake3::new();
         let mut corrupt_detail = None;
         self.conn
@@ -2634,7 +2839,7 @@ impl Ledger {
                 ),
             });
         }
-        Ok(Some(streamed))
+        Ok(streamed)
     }
 
     /// Re-hash every stored artifact against its recorded identity.
@@ -2709,6 +2914,8 @@ impl Ledger {
     ///
     /// # Errors
     /// [`LedgerError::MissingExplicit`] naming the offending field;
+    /// [`LedgerError::Invalid`] for an oversized session or malformed or
+    /// oversized IR;
     /// engine errors otherwise.
     pub fn begin_op(
         &self,
@@ -2731,7 +2938,10 @@ impl Ledger {
     ///
     /// # Errors
     /// [`LedgerError::DoubleFinish`] on a second finish;
-    /// [`LedgerError::NotFound`] for an unknown op.
+    /// [`LedgerError::NotFound`] for an unknown op;
+    /// [`LedgerError::Invalid`] for an oversized or malformed diagnostic;
+    /// [`LedgerError::OpCorrupt`] if a non-finishable stored row violates the
+    /// bounded operation envelope.
     pub fn finish_op(
         &self,
         op: i64,
@@ -2740,7 +2950,7 @@ impl Ledger {
         t_end_ns: i64,
     ) -> Result<(), LedgerError> {
         if let Some(d) = diag {
-            self.require_json("diag", d, false)?;
+            self.require_bounded_op_json("diag", d, MAX_OP_DIAG_BYTES, false)?;
         }
         let affected = self
             .conn
@@ -2767,23 +2977,82 @@ impl Ledger {
         }
     }
 
-    /// Fetch one op row, if present.
-    ///
-    /// # Errors
-    /// Engine errors; absence is `Ok(None)`.
-    pub fn op(&self, id: i64) -> Result<Option<OpRow>, LedgerError> {
-        self.note_read_query();
+    fn op_row_is_bounded(&self, id: i64) -> Result<bool, LedgerError> {
         let rows = self
             .conn
             .query_with_params(
-                "SELECT id, session, ir, seed, versions, budget, capability, t_start, t_end, \
-                 outcome, diag FROM ops WHERE id = ?1",
+                &format!(
+                    "SELECT CASE WHEN {} THEN 1 ELSE 0 END FROM ops WHERE id = ?1",
+                    op_storage_predicate()
+                ),
+                &[SqliteValue::Integer(id)],
+            )
+            .map_err(|e| sql_err("op bounded-storage preflight", &e))?;
+        let Some(row) = rows.first() else {
+            return Ok(false);
+        };
+        if row_i64(row, 0, "op bounded-storage preflight")? != 1 {
+            return Err(LedgerError::OpCorrupt {
+                op: id,
+                detail: "a variable-size field has the wrong storage type, exceeds its byte \
+                         bound, contains invalid JSON, or the outcome envelope is malformed"
+                    .to_string(),
+            });
+        }
+        Ok(true)
+    }
+
+    pub(crate) fn bounded_op_exec_mode(&self, id: i64) -> Result<String, LedgerError> {
+        if !self.op_row_is_bounded(id)? {
+            return Err(LedgerError::NotFound {
+                what: format!("op {id}"),
+            });
+        }
+        let rows = self
+            .conn
+            .query_with_params(
+                "SELECT exec_mode FROM ops WHERE id = ?1 AND typeof(exec_mode) = 'text' \
+                 AND exec_mode IN ('deterministic','fast')",
+                &[SqliteValue::Integer(id)],
+            )
+            .map_err(|e| sql_err("bounded op exec_mode", &e))?;
+        match rows.first().and_then(|row| row.get(0)) {
+            Some(SqliteValue::Text(mode)) => Ok(mode.as_str().to_string()),
+            _ => Err(LedgerError::OpCorrupt {
+                op: id,
+                detail: "execution mode disappeared or changed after bounded preflight".to_string(),
+            }),
+        }
+    }
+
+    /// Fetch one op row, if present. Every variable-size field is checked by
+    /// a metadata-only SQL preflight before the guarded payload query can
+    /// materialize it.
+    ///
+    /// # Errors
+    /// Engine errors or [`LedgerError::OpCorrupt`] when a stored envelope
+    /// violates the bounded read contract; absence is `Ok(None)`.
+    pub fn op(&self, id: i64) -> Result<Option<OpRow>, LedgerError> {
+        self.note_read_query();
+        if !self.op_row_is_bounded(id)? {
+            return Ok(None);
+        }
+        let rows = self
+            .conn
+            .query_with_params(
+                &format!(
+                    "SELECT id, session, ir, seed, versions, budget, capability, t_start, t_end, \
+                     outcome, diag FROM ops WHERE id = ?1 AND {}",
+                    op_storage_predicate()
+                ),
                 &[SqliteValue::Integer(id)],
             )
             .map_err(|e| sql_err("op fetch", &e))?;
-        let Some(row) = rows.first() else {
-            return Ok(None);
-        };
+        let row = rows.first().ok_or_else(|| LedgerError::OpCorrupt {
+            op: id,
+            detail: "operation row disappeared or exceeded a guarded field bound after preflight"
+                .to_string(),
+        })?;
         let text_at = |idx: usize| -> Result<String, LedgerError> {
             match row.get(idx) {
                 Some(SqliteValue::Text(t)) => Ok(t.as_str().to_string()),
@@ -3338,6 +3607,10 @@ impl Ledger {
                      THEN json_valid(measured) ELSE 0 END \
                  ELSE 0 END != 1"
         );
+        let malformed_ops_sql = format!(
+            "SELECT COUNT(*) FROM ops WHERE NOT ({})",
+            op_storage_predicate()
+        );
         Ok(LintReport {
             orphan_edge_ops: count(
                 "SELECT COUNT(*) FROM edges e LEFT JOIN ops o ON e.op = o.id WHERE o.id IS NULL",
@@ -3378,6 +3651,7 @@ impl Ledger {
                 "lint orphan_chunks",
             )?,
             malformed_tune_rows: count(&malformed_tune_sql, "lint malformed_tune_rows")?,
+            malformed_ops: count(&malformed_ops_sql, "lint malformed_ops")?,
             // AND/OR form rather than `(a IS NULL) != (b IS NULL)`: fsqlite
             // mis-associates postfix IS NULL against comparison operators
             // when re-parsing stored CHECK text (upstream bug; see bead).
@@ -3925,6 +4199,108 @@ mod tests {
     }
 
     #[test]
+    fn bounded_artifact_read_accepts_exact_cap_and_refuses_over_cap_before_callback() {
+        let ledger = mem();
+        let cap = u64::try_from(MAX_TUNE_MEASURED_BYTES).unwrap();
+        let exact_bytes = vec![0xA5; MAX_TUNE_MEASURED_BYTES];
+        let exact = ledger
+            .put_artifact("bounded-fixture", &exact_bytes, None)
+            .unwrap();
+        let mut exact_callbacks = 0usize;
+        let exact_len = ledger
+            .read_artifact_chunks_bounded(&exact.hash, cap, &mut |chunk| {
+                exact_callbacks += 1;
+                assert_eq!(chunk, exact_bytes.as_slice());
+            })
+            .unwrap();
+        assert_eq!(exact_len, Some(cap));
+        assert_eq!(exact_callbacks, 1);
+        assert_eq!(
+            ledger
+                .get_artifact_bounded(&exact.hash, cap)
+                .unwrap()
+                .as_deref(),
+            Some(exact_bytes.as_slice())
+        );
+
+        let oversized_bytes = vec![0x5A; MAX_TUNE_MEASURED_BYTES + 1];
+        let oversized = ledger
+            .put_artifact("bounded-fixture", &oversized_bytes, None)
+            .unwrap();
+        let mut refused_callbacks = 0usize;
+        let error = ledger
+            .read_artifact_chunks_bounded(&oversized.hash, cap, &mut |_| {
+                refused_callbacks += 1;
+            })
+            .unwrap_err();
+        assert_eq!(refused_callbacks, 0);
+        assert!(matches!(
+            error,
+            LedgerError::ArtifactReadLimit {
+                limit,
+                observed,
+                ..
+            } if limit == cap && observed == cap + 1
+        ));
+        assert!(matches!(
+            ledger.get_artifact_bounded(&oversized.hash, cap),
+            Err(LedgerError::ArtifactReadLimit {
+                limit,
+                observed,
+                ..
+            }) if limit == cap && observed == cap + 1
+        ));
+
+        let chunked =
+            insert_raw_chunked_artifact(&ledger, b"chunked", 7, 2, &[(0, b"chu"), (1, b"nked")]);
+        let mut reconstructed = Vec::new();
+        let streamed = ledger
+            .read_artifact_chunks_bounded(&chunked, 7, &mut |chunk| {
+                reconstructed.extend_from_slice(chunk);
+            })
+            .unwrap();
+        assert_eq!(streamed, Some(7));
+        assert_eq!(reconstructed, b"chunked");
+        let mut chunked_refused_callbacks = 0usize;
+        assert!(matches!(
+            ledger.read_artifact_chunks_bounded(&chunked, 6, &mut |_| {
+                chunked_refused_callbacks += 1;
+            }),
+            Err(LedgerError::ArtifactReadLimit {
+                limit: 6,
+                observed: 7,
+                ..
+            })
+        ));
+        assert_eq!(chunked_refused_callbacks, 0);
+
+        let hostile_metadata = ledger
+            .put_artifact("bounded-fixture", b"tiny", None)
+            .unwrap();
+        ledger
+            .conn
+            .prepare("UPDATE artifacts SET len = ?1 WHERE hash = ?2")
+            .unwrap()
+            .execute_with_params(&[
+                SqliteValue::Integer(int_from_u64(cap + 1)),
+                blob_param(hostile_metadata.hash.as_bytes()),
+            ])
+            .unwrap();
+        let mut hostile_callbacks = 0usize;
+        assert!(matches!(
+            ledger.read_artifact_chunks_bounded(&hostile_metadata.hash, cap, &mut |_| {
+                hostile_callbacks += 1;
+            }),
+            Err(LedgerError::ArtifactReadLimit {
+                limit,
+                observed,
+                ..
+            }) if limit == cap && observed == cap + 1
+        ));
+        assert_eq!(hostile_callbacks, 0);
+    }
+
+    #[test]
     fn chunked_duplicate_insert_returns_winner_and_restores_corrupt_prefix() {
         let ledger = mem();
         let hash = insert_raw_chunked_artifact(&ledger, b"abcde", 5, 2, &[(0, b"abc"), (1, b"de")]);
@@ -4060,6 +4436,155 @@ mod tests {
         assert!(
             matches!(err, LedgerError::MissingExplicit { ref field, .. } if field == "versions")
         );
+    }
+
+    #[test]
+    fn op_writes_accept_exact_caps_and_refuse_limit_plus_one_before_json_validation() {
+        let ledger = mem();
+        let session = vec![0x53; MAX_OP_SESSION_BYTES];
+        let seed = vec![0xA7; MAX_OP_SEED_BYTES];
+        let ir = json_with_exact_bytes(MAX_OP_IR_BYTES);
+        let versions = json_with_exact_bytes(MAX_OP_VERSIONS_BYTES);
+        let budget = json_with_exact_bytes(MAX_OP_BUDGET_BYTES);
+        let capability = json_with_exact_bytes(MAX_OP_CAPABILITY_BYTES);
+        let explicits = FiveExplicits {
+            seed: &seed,
+            versions: &versions,
+            budget: &budget,
+            capability: &capability,
+        };
+        let op = ledger.begin_op(Some(&session), &ir, &explicits, 1).unwrap();
+        let diag = json_with_exact_bytes(MAX_OP_DIAG_BYTES);
+        ledger.finish_op(op, OpOutcome::Ok, Some(&diag), 2).unwrap();
+        let row = ledger.op(op).unwrap().unwrap();
+        assert_eq!(row.session.as_deref(), Some(session.as_slice()));
+        assert_eq!(row.seed, seed);
+        assert_eq!(row.ir.len(), MAX_OP_IR_BYTES);
+        assert_eq!(row.versions.len(), MAX_OP_VERSIONS_BYTES);
+        assert_eq!(row.budget.len(), MAX_OP_BUDGET_BYTES);
+        assert_eq!(row.capability.len(), MAX_OP_CAPABILITY_BYTES);
+        assert_eq!(row.diag.as_deref(), Some(diag.as_str()));
+
+        let oversized_session = vec![0; MAX_OP_SESSION_BYTES + 1];
+        assert!(matches!(
+            ledger.begin_op(Some(&oversized_session), "{}", &FX, 3),
+            Err(LedgerError::Invalid { field, problem })
+                if field == "session" && problem.contains("operation-field limit")
+        ));
+        let oversized_ir = "not-json".repeat(MAX_OP_IR_BYTES / 8 + 1);
+        assert!(oversized_ir.len() > MAX_OP_IR_BYTES);
+        assert!(matches!(
+            ledger.begin_op(None, &oversized_ir, &FX, 3),
+            Err(LedgerError::Invalid { field, problem })
+                if field == "ir" && problem.contains("operation-field limit")
+        ));
+        let oversized_seed = vec![0; MAX_OP_SEED_BYTES + 1];
+        let oversized_seed_fx = FiveExplicits {
+            seed: &oversized_seed,
+            ..FX
+        };
+        assert!(matches!(
+            ledger.begin_op(None, "{}", &oversized_seed_fx, 3),
+            Err(LedgerError::MissingExplicit { field, problem })
+                if field == "seed" && problem.contains("operation-field limit")
+        ));
+
+        let oversized_json = "not-json".repeat(MAX_OP_FIELD_BYTES / 8 + 1);
+        assert!(oversized_json.len() > MAX_OP_FIELD_BYTES);
+        for (field, explicits) in [
+            (
+                "versions",
+                FiveExplicits {
+                    versions: &oversized_json,
+                    ..FX
+                },
+            ),
+            (
+                "budget",
+                FiveExplicits {
+                    budget: &oversized_json,
+                    ..FX
+                },
+            ),
+            (
+                "capability",
+                FiveExplicits {
+                    capability: &oversized_json,
+                    ..FX
+                },
+            ),
+        ] {
+            assert!(matches!(
+                ledger.begin_op(None, "{}", &explicits, 3),
+                Err(LedgerError::MissingExplicit {
+                    field: rejected,
+                    problem,
+                }) if rejected == field && problem.contains("operation-field limit")
+            ));
+        }
+
+        let unfinished = ledger.begin_op(None, "{}", &FX, 3).unwrap();
+        assert!(matches!(
+            ledger.finish_op(unfinished, OpOutcome::Error, Some(&oversized_json), 4),
+            Err(LedgerError::Invalid { field, problem })
+                if field == "diag" && problem.contains("operation-field limit")
+        ));
+        assert!(ledger.op(unfinished).unwrap().unwrap().outcome.is_none());
+    }
+
+    #[test]
+    fn op_reads_preflight_raw_sql_bounds_before_materialization() {
+        let ledger = mem();
+        let op = ledger.begin_op(None, "{}", &FX, 1).unwrap();
+        let exact_ir = json_with_exact_bytes(MAX_OP_IR_BYTES);
+        ledger
+            .conn
+            .prepare("UPDATE ops SET ir = ?1 WHERE id = ?2")
+            .unwrap()
+            .execute_with_params(&[text_param(&exact_ir), SqliteValue::Integer(op)])
+            .unwrap();
+        assert_eq!(ledger.op(op).unwrap().unwrap().ir.len(), MAX_OP_IR_BYTES);
+
+        let oversized_ir = json_with_exact_bytes(MAX_OP_IR_BYTES + 1);
+        ledger
+            .conn
+            .prepare("UPDATE ops SET ir = ?1 WHERE id = ?2")
+            .unwrap()
+            .execute_with_params(&[text_param(&oversized_ir), SqliteValue::Integer(op)])
+            .unwrap();
+        assert!(matches!(
+            ledger.op(op),
+            Err(LedgerError::OpCorrupt { op: rejected, .. }) if rejected == op
+        ));
+        assert_eq!(ledger.lint().unwrap().malformed_ops, 1);
+
+        ledger
+            .conn
+            .prepare("UPDATE ops SET ir = '{}', versions = ?1 WHERE id = ?2")
+            .unwrap()
+            .execute_with_params(&[
+                text_param(&json_with_exact_bytes(MAX_OP_VERSIONS_BYTES + 1)),
+                SqliteValue::Integer(op),
+            ])
+            .unwrap();
+        assert!(matches!(
+            ledger.op(op),
+            Err(LedgerError::OpCorrupt { op: rejected, .. }) if rejected == op
+        ));
+        assert_eq!(ledger.lint().unwrap().malformed_ops, 1);
+
+        let oversized_mode = "m".repeat(MAX_OP_FIELD_BYTES + 1);
+        ledger
+            .conn
+            .prepare("UPDATE ops SET versions = '{}', exec_mode = ?1 WHERE id = ?2")
+            .unwrap()
+            .execute_with_params(&[text_param(&oversized_mode), SqliteValue::Integer(op)])
+            .unwrap();
+        assert!(matches!(
+            ledger.op(op),
+            Err(LedgerError::OpCorrupt { op: rejected, .. }) if rejected == op
+        ));
+        assert_eq!(ledger.lint().unwrap().malformed_ops, 1);
     }
 
     #[test]

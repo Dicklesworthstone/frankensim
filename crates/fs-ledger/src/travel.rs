@@ -400,7 +400,8 @@ impl Ledger {
     ///
     /// # Errors
     /// [`LedgerError::NotFound`] for an unknown branch;
-    /// [`LedgerError::MissingExplicit`] naming the offending field.
+    /// [`LedgerError::MissingExplicit`] naming an offending frozen explicit;
+    /// [`LedgerError::Invalid`] for oversized session or IR fields.
     pub fn begin_op_on(
         &self,
         branch: i64,
@@ -410,16 +411,35 @@ impl Ledger {
         explicits: &FiveExplicits<'_>,
         t_start_ns: i64,
     ) -> Result<i64, LedgerError> {
+        if let Some(session) = session {
+            self.require_op_field_bound(
+                "session",
+                session.len(),
+                crate::MAX_OP_SESSION_BYTES,
+                false,
+            )?;
+        }
         if explicits.seed.is_empty() {
             return Err(LedgerError::MissingExplicit {
                 field: "seed".to_string(),
                 problem: "empty; record the RNG seed bytes that reproduce this op".to_string(),
             });
         }
-        self.require_json("ir", ir, false)?;
-        self.require_json("versions", explicits.versions, true)?;
-        self.require_json("budget", explicits.budget, true)?;
-        self.require_json("capability", explicits.capability, true)?;
+        self.require_op_field_bound("seed", explicits.seed.len(), crate::MAX_OP_SEED_BYTES, true)?;
+        self.require_bounded_op_json("ir", ir, crate::MAX_OP_IR_BYTES, false)?;
+        self.require_bounded_op_json(
+            "versions",
+            explicits.versions,
+            crate::MAX_OP_VERSIONS_BYTES,
+            true,
+        )?;
+        self.require_bounded_op_json("budget", explicits.budget, crate::MAX_OP_BUDGET_BYTES, true)?;
+        self.require_bounded_op_json(
+            "capability",
+            explicits.capability,
+            crate::MAX_OP_CAPABILITY_BYTES,
+            true,
+        )?;
         if self.branch(branch)?.is_none() {
             return Err(LedgerError::NotFound {
                 what: format!("branch {branch}"),
@@ -757,19 +777,7 @@ impl Ledger {
     }
 
     fn op_exec_mode(&self, op: i64) -> Result<String, LedgerError> {
-        let rows = self
-            .conn
-            .query_with_params(
-                "SELECT exec_mode FROM ops WHERE id = ?1",
-                &[SqliteValue::Integer(op)],
-            )
-            .map_err(|e| sql_err("op exec_mode", &e))?;
-        match rows.first().and_then(|r| r.get(0)) {
-            Some(SqliteValue::Text(t)) => Ok(t.as_str().to_string()),
-            _ => Err(LedgerError::NotFound {
-                what: format!("op {op}"),
-            }),
-        }
+        self.bounded_op_exec_mode(op)
     }
 
     fn op_branch(&self, op: i64) -> Result<i64, LedgerError> {
