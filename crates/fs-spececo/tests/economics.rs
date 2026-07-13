@@ -114,6 +114,17 @@ fn drift_new_rejects_an_inverted_band() {
 }
 
 #[test]
+#[should_panic(expected = "hysteresis band inverted")]
+fn drift_new_rejects_a_zero_width_band() {
+    // Regression: `new` used `restore_above >= demote_below`, admitting an
+    // equal-threshold band. That band has NO dead-zone, so a rate at the shared
+    // threshold T flaps: undemoted & rate<=T -> demote, then demoted & rate>T ->
+    // restore, toggling every update — exactly the flapping hysteresis is meant
+    // to prevent. The band must be STRICT (`demote_below < restore_above`).
+    let _ = DriftDetector::new(10, 0.5, 0.5);
+}
+
+#[test]
 fn telemetry_and_drift_are_deterministic() {
     let build = || {
         let mut t = ProposerTelemetry::new();

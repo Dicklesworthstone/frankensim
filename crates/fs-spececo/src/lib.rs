@@ -182,13 +182,16 @@ impl DriftDetector {
     /// must exceed to be restored; `min_samples` gates both against noise.
     ///
     /// # Panics
-    /// If `restore_above < demote_below` (the hysteresis band would be
-    /// inverted).
+    /// If `restore_above <= demote_below` (the hysteresis band would be
+    /// inverted OR zero-width — an equal-threshold band has no dead-zone, so a
+    /// rate hovering at the shared threshold flaps demote↔restore on
+    /// consecutive updates, defeating the whole point of hysteresis).
     #[must_use]
     pub fn new(min_samples: u64, demote_below: f64, restore_above: f64) -> DriftDetector {
         assert!(
-            restore_above >= demote_below,
-            "hysteresis band inverted: restore_above must be >= demote_below"
+            restore_above > demote_below,
+            "hysteresis band inverted or degenerate: restore_above must be > demote_below (a \
+             zero-width band flaps)"
         );
         DriftDetector {
             min_samples,
