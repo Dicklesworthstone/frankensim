@@ -34,6 +34,15 @@ crates. Layer: **L6 HELM / interface surface**. The crate compiles as an
    of reintroducing a panic-only risk implementation.
 4. The nested workspace isolates browser-only dependencies from the
    native workspace dependency policy.
+5. TrussPath optimality uses the same `fs-truss-e2e` promotion gate as the
+   native campaign. The transcribed sparse arrays and PDHG iterates are bound
+   into the private `fs-truss` receipt; only a matching outward certificate
+   serializes rank `2`, a verified flag, and finite optimum endpoints. A hard
+   error or numerical unavailability serializes Estimated/no-bound fields.
+6. FRAME wire version 2 applies that same gate to its normalized layout LP,
+   then outward-divides verified endpoints by the physical yield stress. The
+   four claim fields are appended to the layout block immediately before the
+   existing sizing offset, so all earlier layout fields retain their positions.
 
 ## Error model
 
@@ -50,7 +59,14 @@ cross-ISA bit identity is not claimed for floating-point visual demos.
 
 ## Cancellation behavior
 
-None in v0. Work is bounded by input clamps and fixed iteration caps.
+Most browser work is bounded by input clamps and fixed iteration caps.
+TrussPath certificate construction additionally runs under a deterministic
+`fs-exec::Cx` and polls cancellation through its cold proof stages. That scoped
+context uses `CancelGate::new_clock_free`, so constructing it never reads the
+unsupported `wasm32-unknown-unknown` platform time source; its private sentinel
+request marker is omitted from timestamp accessors and latency reports. The
+browser surface does not yet expose an external
+cancellation handle.
 
 ## Unsafe boundary
 
@@ -64,7 +80,11 @@ None. WASM-only dependencies are target-gated under `cfg(target_arch =
 ## Conformance tests
 
 Native unit tests in the nested workspace exercise root demos, campaign
-defaults, geometry/PDE/deep modules, and flagship headline/determinism cases.
+defaults, geometry/PDE/deep modules, flagship headline/determinism cases, and
+the exact clock-free TrussPath certificate context. The native-host TrussPath
+transcription test compares the serialized claim rank, verified flag, and both
+outward endpoints against the native campaign; it is not browser execution or
+cross-target bit-identity evidence.
 Current verification is native cargo test/clippy of the nested workspace plus
 any wasm32 build lane provided by DSR or site automation. The wasm32 browser
 surface itself remains a build/smoke lane rather than a browser-E2E test suite.
@@ -72,7 +92,11 @@ surface itself remains a build/smoke lane rather than a browser-E2E test suite.
 ## No-claim boundaries
 
 - Not a packaged public simulator API.
-- Not a certification surface; campaign functions surface summaries and
-  visualizable traces from lower crates.
+- Not a general certification API; campaign functions surface summaries and
+  visualizable traces from lower crates. TrussPath's serialized optimum interval
+  is the narrow exception and carries only the lower-layer certificate's claim.
+- The shared promotion gate gives native and browser code the same claim-strength
+  rules, but cross-target endpoint bit identity remains unclaimed until a retained
+  browser runner or WASM golden exists.
 - No browser performance claim without wasm32 benchmark artifacts.
 - No guarantee that every native crate feature is available in WASM.

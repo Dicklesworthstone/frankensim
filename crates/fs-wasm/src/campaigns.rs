@@ -33,13 +33,17 @@ use fs_archive::MapElites;
 use fs_bo::{Gp, Kernel, Matern, expected_improvement};
 use fs_eproc::{BettingEProcess, GaussianMixtureCs};
 use fs_evidence::{Color, ColorRank};
+use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_fab::min_feature_size;
 use fs_lbm::{Lbm, plan_scaling, poiseuille_analytic};
 use fs_rep_neural::{Layer, MlpSdf};
 use fs_schedule_e2e::{ScheduleDisposition, Study};
 use fs_shapeprog::{max_sdf_discrepancy, simplify};
 use fs_sparse::{Coo, Csr};
-use fs_truss_e2e::analyze_load_path;
+use fs_truss::{LayoutCertificateLimits, LayoutCertificateProblem, PdhgSettings};
+use fs_truss_e2e::{
+    analyze_load_path, estimated_optimality_color, optimality_color_from_certificate,
+};
 use fs_viz::Grid2;
 use fs_voi::{Action, ActionKind, DesignEstimate, Uncertainty};
 
@@ -49,7 +53,7 @@ use fs_voi::{Action, ActionKind, DesignEstimate, Uncertainty};
 
 /// Map an epistemic [`ColorRank`] to the wire code `2 = Verified`,
 /// `1 = Validated`, `0 = Estimated`.
-fn rank_code(r: ColorRank) -> f64 {
+pub(crate) fn rank_code(r: ColorRank) -> f64 {
     match r {
         ColorRank::Verified => 2.0,
         ColorRank::Validated => 1.0,
@@ -59,11 +63,33 @@ fn rank_code(r: ColorRank) -> f64 {
 
 /// `(verified_flag, lo, hi)` for a [`Color`] — the `Verified` interval, or
 /// `(0, NaN, NaN)` for anything weaker.
-fn verified_bounds(c: &Color) -> (f64, f64, f64) {
+pub(crate) fn verified_bounds(c: &Color) -> (f64, f64, f64) {
     match c {
         Color::Verified { lo, hi } => (1.0, *lo, *hi),
         _ => (0.0, f64::NAN, f64::NAN),
     }
+}
+
+/// Construct the bounded deterministic context used only by cold certificate
+/// work in browser campaigns. No task, thread, or context escapes this scope.
+pub(crate) fn with_certificate_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
+    let gate = CancelGate::new_clock_free();
+    let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+    pool.scope(|arena| {
+        let cx = Cx::new(
+            &gate,
+            arena,
+            StreamKey {
+                seed: 0x7A55_5741_534D_0001,
+                kernel_id: 1,
+                tile: 0,
+                iteration: 0,
+            },
+            Budget::INFINITE,
+            ExecMode::Deterministic,
+        );
+        f(&cx)
+    })
 }
 
 /// A finite value passes through; `±∞` / `NaN` fold to `NaN` (log/plot-safe).
@@ -436,7 +462,7 @@ pub fn schedule_campaign(
 ///
 /// WHY THIS EXISTS: `fs_truss::GroundStructure::try_grid` additionally builds
 /// an `fnx_classes::Graph`, whose internal compatibility-evidence path reads a
-/// wall clock during construction (fine natively) that *compiles but TRAPS at
+/// platform time source during construction (fine natively) that *compiles but TRAPS at
 /// runtime* on `wasm32-unknown-unknown` ("time not implemented on this
 /// platform") — killing the page. The truss LP never reads that graph, so the
 /// grid enumeration, the numerical core of LP `try_assemble`, and the PDHG
@@ -626,7 +652,12 @@ impl LeanLp {
 
     /// Faithful transcription of `fs_truss::LayoutLp::solve` (cold start,
     /// PDHG / Chambolle–Pock; trace dropped — the viz does not draw it).
-    fn solve(&self, max_iters: usize, gap_tol: f64, check_every: usize) -> (Vec<f64>, LeanReport) {
+    fn solve(
+        &self,
+        max_iters: usize,
+        gap_tol: f64,
+        check_every: usize,
+    ) -> (Vec<f64>, Vec<f64>, LeanReport) {
         let nvar = self.c.len();
         let nrow = self.b.len();
         let mut x = vec![0.0; nvar];
@@ -668,7 +699,7 @@ impl LeanLp {
                 }
             }
         }
-        (x, report)
+        (x, y, report)
     }
 }
 
@@ -702,6 +733,9 @@ impl LeanLp {
 /// - then `M` blocks of 5: `[node_a, node_b, force, volume, is_active]`.
 /// - then `P` critical-path member indices (original bar indices, load →
 ///   support).
+/// - final 4 fields: `[optimality_rank, verified_flag, optimum_lo,
+///   optimum_hi]`, where rank `2` and finite endpoints can come only from the
+///   shared native/browser certificate-promotion gate.
 pub fn trusspath(nx: usize, ny: usize, gap_tol: f64) -> Vec<f64> {
     let nx = nx.clamp(2, 5);
     let ny = ny.clamp(2, 4);
@@ -739,11 +773,42 @@ pub fn trusspath(nx: usize, ny: usize, gap_tol: f64) -> Vec<f64> {
             out.push(p[0]);
             out.push(p[1]);
         }
+        out.extend_from_slice(&[0.0, 0.0, f64::NAN, f64::NAN]);
         return out;
     }
 
     let lp = LeanLp::assemble(&gs, &supported, &loads, 1.0);
-    let (x, report) = lp.solve(60_000, gap_tol, 500);
+    let settings = PdhgSettings {
+        max_iters: 60_000,
+        gap_tol,
+        check_every: 500,
+    };
+    let (x, y, report) = lp.solve(settings.max_iters, settings.gap_tol, settings.check_every);
+    let optimality_color = match LayoutCertificateProblem::try_new(&lp.a, &lp.c, &lp.b) {
+        Ok(problem) => with_certificate_cx(|cx| {
+            problem
+                .certify_optimum(&x, &y, settings, LayoutCertificateLimits::default(), cx)
+                .map_or_else(
+                    |_| estimated_optimality_color(report.gap, report.eq_residual),
+                    |status| {
+                        optimality_color_from_certificate(
+                            &problem,
+                            &x,
+                            &y,
+                            settings,
+                            &status,
+                            report.gap,
+                            report.eq_residual,
+                            cx,
+                        )
+                        .unwrap_or_else(|_| {
+                            estimated_optimality_color(report.gap, report.eq_residual)
+                        })
+                    },
+                )
+        }),
+        Err(_) => estimated_optimality_color(report.gap, report.eq_residual),
+    };
 
     let force = |k: usize| x[k] - x[m + k];
     let volume = |k: usize| lp.c[k] * x[k] + lp.c[m + k] * x[m + k];
@@ -774,7 +839,7 @@ pub fn trusspath(nx: usize, ny: usize, gap_tol: f64) -> Vec<f64> {
         && report.eq_residual < gap_tol;
 
     let p = critical_path.len();
-    let mut out = Vec::with_capacity(12 + 2 * nn + 5 * m + p);
+    let mut out = Vec::with_capacity(12 + 2 * nn + 5 * m + p + 4);
     out.push(m as f64);
     out.push(num_active as f64);
     out.push(fon(report.volume));
@@ -803,6 +868,11 @@ pub fn trusspath(nx: usize, ny: usize, gap_tol: f64) -> Vec<f64> {
     for &k in &critical_path {
         out.push(k as f64);
     }
+    let (verified, optimum_lo, optimum_hi) = verified_bounds(&optimality_color);
+    out.push(rank_code(optimality_color.rank()));
+    out.push(verified);
+    out.push(optimum_lo);
+    out.push(optimum_hi);
     out
 }
 
@@ -1590,6 +1660,20 @@ mod tests {
         assert_eq!(v[6], 1.0, "solver_converged");
         assert!(v[7] >= 2.0, "connected path length {}", v[7]);
         assert!(v[8].is_finite() && v[8] > 0.0, "path weight {}", v[8]);
+        let claim = &v[v.len() - 4..];
+        assert_eq!(claim[0], 2.0, "optimality rank must be Verified");
+        assert_eq!(claim[1], 1.0, "verified interval flag");
+        assert!(claim[2].is_finite() && claim[3].is_finite());
+        assert!(claim[2] > 0.0 && claim[2] <= claim[3]);
+
+        let native = with_certificate_cx(|cx| {
+            fs_truss_e2e::run_campaign(4, 3, 4.0, 2.0, 1e-4, cx).expect("native TrussPath campaign")
+        });
+        let native_claim = verified_bounds(&native.optimality_color);
+        assert_eq!(claim[0], rank_code(native.optimality_color.rank()));
+        assert_eq!(claim[1], native_claim.0);
+        assert_eq!(claim[2].to_bits(), native_claim.1.to_bits());
+        assert_eq!(claim[3].to_bits(), native_claim.2.to_bits());
     }
 
     #[test]

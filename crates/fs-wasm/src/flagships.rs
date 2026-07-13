@@ -19,13 +19,14 @@
 //! the whole page. In particular the LAYOUT stage of the frame flagship uses a
 //! fnx-free vendor of the truss numerical core (the compatibility-evidence path
 //! reached while `fs_truss::GroundStructure::try_grid` builds its `fnx` graph
-//! reads a wall clock, which compiles but TRAPS at runtime on
+//! reads a platform time source, which compiles but TRAPS at runtime on
 //! `wasm32-unknown-unknown`); the trap-free racing path
 //! (`fs_race::race_field` over an empty `KillRegistry`) never reads a clock.
 //!
 //! Determinism: no clocks, no entropy RNG. All stochastic paths are
 //! counter-based Philox keyed by seed / logical identity.
 
+use crate::campaigns::{rank_code, verified_bounds, with_certificate_cx};
 use fs_bem::panel2d::{Airfoil2d, dcl_dalpha_adjoint, solve};
 use fs_bem::wake2d::WakeSim;
 use fs_dfo::moo::{Individual, NsgaParams, hypervolume, knee_point, nsga2};
@@ -44,6 +45,10 @@ use fs_scenario::ensemble::{SpectrumModel, StochasticEnsemble};
 use fs_solid::fiber::{Section, rc_section};
 use fs_sos::lyapunov_certifies_stability;
 use fs_sparse::{Coo, Csr};
+use fs_truss::{LayoutCertificateLimits, LayoutCertificateProblem, PdhgSettings};
+use fs_truss_e2e::{
+    estimated_optimality_color, optimality_color_from_certificate, rescale_optimality_color,
+};
 use fs_vpm::{VortexParticle, advect};
 
 /* ======================================================================= */
@@ -970,7 +975,7 @@ struct FrameGround {
 
 /// Replicates the candidate enumeration in
 /// `fs_truss::GroundStructure::try_grid` WITHOUT the fnx `Graph` (whose
-/// construction-evidence path reads a wall clock — a wasm runtime trap).
+/// construction-evidence path reads a platform time source — a wasm runtime trap).
 fn frame_grid(nx: usize, ny: usize, w: f64, h: f64, min_len: f64, max_len: f64) -> FrameGround {
     let mut nodes = Vec::with_capacity(nx * ny);
     for j in 0..ny {
@@ -1138,7 +1143,12 @@ impl FrameLp {
         (gap, eq_res, primal)
     }
 
-    fn solve(&self, max_iters: usize, gap_tol: f64, check_every: usize) -> (Vec<f64>, FrameReport) {
+    fn solve(
+        &self,
+        max_iters: usize,
+        gap_tol: f64,
+        check_every: usize,
+    ) -> (Vec<f64>, Vec<f64>, FrameReport) {
         let nvar = self.c.len();
         let nrow = self.b.len();
         let mut x = vec![0.0; nvar];
@@ -1180,7 +1190,7 @@ impl FrameLp {
                 }
             }
         }
-        (x, report)
+        (x, y, report)
     }
 }
 
@@ -1425,12 +1435,13 @@ fn story_history(params: &fs_frame::StoryParams, ag: &[f64], dt: f64) -> (Vec<f6
 ///
 /// OUTPUT LAYOUT (flat `Vec<f64>`):
 /// - HEADER, 12 values (offsets are f64 indices into this array):
-///   `[0]` MAGIC (= 2), `[1]` version, `[2]` seed, `[3]` off_layout,
+///   `[0]` MAGIC (= 2), `[1]` version (= 2), `[2]` seed, `[3]` off_layout,
 ///   `[4]` off_sizing, `[5]` off_history, `[6]` off_fragility, `[7]` off_cvar,
 ///   `[8]` total_len, `[9..12]` reserved (0).
 /// - LAYOUT block (@ off_layout): `gap, eq_residual, volume_phys, iters,
 ///   solver_converged, Nn, M, load_node_idx`; then `2·Nn` node coords
-///   `[x,y]…`; then `M·4` `[na, nb, force_q, is_survivor]`.
+///   `[x,y]…`; then `M·4` `[na, nb, force_q, is_survivor]`; then
+///   `optimality_rank, verified_flag, optimum_lo_phys, optimum_hi_phys`.
 /// - SIZING block (@ off_sizing): `all_pass, eq_residual_postprune, pruned, Ms`;
 ///   then `Ms·7` `[member_idx, na, nb, force, area_yield, area_euler,
 ///   area_catalog]`.
@@ -1464,15 +1475,46 @@ pub fn run_frame(seed: u32) -> Vec<f64> {
             [0.0, 0.0]
         }
     };
+    let sigma_y = 250.0e6;
     let lp = FrameLp::assemble(&gs, &supported, &loads, 1.0);
-    let (x, report) = lp.solve(60_000, 1e-4, 500);
+    let settings = PdhgSettings {
+        max_iters: 60_000,
+        gap_tol: 1e-4,
+        check_every: 500,
+    };
+    let (x, y, report) = lp.solve(settings.max_iters, settings.gap_tol, settings.check_every);
+    let normalized_optimality = match LayoutCertificateProblem::try_new(&lp.a, &lp.c, &lp.b) {
+        Ok(problem) => with_certificate_cx(|cx| {
+            problem
+                .certify_optimum(&x, &y, settings, LayoutCertificateLimits::default(), cx)
+                .map_or_else(
+                    |_| estimated_optimality_color(report.gap, report.eq_residual),
+                    |status| {
+                        optimality_color_from_certificate(
+                            &problem,
+                            &x,
+                            &y,
+                            settings,
+                            &status,
+                            report.gap,
+                            report.eq_residual,
+                            cx,
+                        )
+                        .unwrap_or_else(|_| {
+                            estimated_optimality_color(report.gap, report.eq_residual)
+                        })
+                    },
+                )
+        }),
+        Err(_) => estimated_optimality_color(report.gap, report.eq_residual),
+    };
+    let optimality_color = rescale_optimality_color(&normalized_optimality, sigma_y);
     let force = |k: usize| x[k] - x[m + k];
     let max_force = (0..m).map(|k| force(k).abs()).fold(0.0, f64::max);
     let active_tol = 1e-3 * max_force.max(1e-12);
     let solver_converged = report.gap < 1e-3 && report.eq_residual < 1e-3;
 
     // ---- STAGE 2: SIZING (yield + Euler-buckling, catalog snap) ----------
-    let sigma_y = 250.0e6;
     let youngs = 200.0e9;
     let area_catalog: Vec<f64> = (1..=20).map(|k| 2.0e-4 * f64::from(k)).collect();
     let audit = frame_size_and_snap(&gs, &lp, &x, sigma_y, youngs, &area_catalog, 1e-3);
@@ -1569,7 +1611,7 @@ pub fn run_frame(seed: u32) -> Vec<f64> {
     let mut layout: Vec<f64> = Vec::new();
     layout.push(fon(report.gap));
     layout.push(fon(report.eq_residual));
-    layout.push(fon(report.volume)); // volume_phys (sigma_y = 1 in the LP)
+    layout.push(fon(report.volume / sigma_y));
     layout.push(report.iters as f64);
     layout.push(if solver_converged { 1.0 } else { 0.0 });
     layout.push(nn as f64);
@@ -1590,6 +1632,11 @@ pub fn run_frame(seed: u32) -> Vec<f64> {
             0.0
         });
     }
+    let (verified, optimum_lo, optimum_hi) = verified_bounds(&optimality_color);
+    layout.push(rank_code(optimality_color.rank()));
+    layout.push(verified);
+    layout.push(optimum_lo);
+    layout.push(optimum_hi);
 
     let mut sizing: Vec<f64> = Vec::new();
     sizing.push(if audit.all_pass { 1.0 } else { 0.0 });
@@ -1668,7 +1715,7 @@ pub fn run_frame(seed: u32) -> Vec<f64> {
 
     let mut out: Vec<f64> = Vec::with_capacity(total_len);
     out.push(2.0); // MAGIC
-    out.push(1.0); // version
+    out.push(2.0); // version
     out.push(f64::from(seed));
     out.push(off_layout as f64);
     out.push(off_sizing as f64);
@@ -1689,7 +1736,7 @@ pub fn run_frame(seed: u32) -> Vec<f64> {
 
 /// A minimal, non-trapping frame body used only if the ensemble is malformed.
 fn frame_nan_body(seed: u32) -> Vec<f64> {
-    let mut out = vec![2.0, 1.0, f64::from(seed)];
+    let mut out = vec![2.0, 2.0, f64::from(seed)];
     out.extend(std::iter::repeat_n(f64::NAN, 9));
     out
 }
@@ -1850,12 +1897,14 @@ mod tests {
     fn frame_headline() {
         let v = run_frame(90210);
         assert_eq!(v[0], 2.0, "MAGIC");
+        assert_eq!(v[1], 2.0, "wire version");
         let off_layout = v[3] as usize;
         let off_sizing = v[4] as usize;
         let off_fragility = v[6] as usize;
         let gap = v[off_layout];
         let eq_residual = v[off_layout + 1];
         let solver_converged = v[off_layout + 4];
+        let optimality = &v[off_sizing - 4..off_sizing];
         let all_pass = v[off_sizing];
         let sizing_eq = v[off_sizing + 1];
         let p_hat = v[off_fragility];
@@ -1872,6 +1921,10 @@ mod tests {
         );
         assert!(gap < 1e-3, "layout gap {gap:e}");
         assert_eq!(solver_converged, 1.0, "layout solver convergence");
+        assert_eq!(optimality[0], 2.0, "layout optimality rank");
+        assert_eq!(optimality[1], 1.0, "layout verified flag");
+        assert!(optimality[2].is_finite() && optimality[3].is_finite());
+        assert!(optimality[2] > 0.0 && optimality[2] <= optimality[3]);
         assert_eq!(all_pass, 1.0, "sizing all_pass");
         assert!(p_hat > 0.0 && p_hat < 1.0, "fragility p_hat {p_hat}");
         assert!(members_used < 48.0, "members_used {members_used}");

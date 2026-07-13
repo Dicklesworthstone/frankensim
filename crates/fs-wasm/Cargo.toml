@@ -75,6 +75,7 @@ fs-render = { path = "../fs-render" }
 fs-scenario = { path = "../fs-scenario" }
 fs-uq = { path = "../fs-uq" }
 fs-material = { path = "../fs-material" }
+fs-alloc = { path = "../fs-alloc" }
 fs-exec = { path = "../fs-exec" }
 fs-qty = { path = "../fs-qty" }
 # ── The end-to-end CAMPAIGN crates themselves (Tier IV): each composes the
