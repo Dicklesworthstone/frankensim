@@ -5,18 +5,20 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Flagship 2 (plan 15.2): the seismic-minimal building frame - ground-structure layout with PDHG diagnostics, code-checked sizing, fiber-hinge nonlinear time history under Kanai-Tajimi ensembles, anytime-valid e-stopped fragility, and CVaR-constrained mass minimization. Smoke tier."
+description = "Flagship 2 (plan 15.2): the seismic-minimal building frame - outward-certified ground-structure layout, code-checked sizing, fiber-hinge nonlinear time history under Kanai-Tajimi ensembles, anytime-valid e-stopped fragility, and CVaR-constrained mass minimization. Smoke tier."
 
 [package.metadata.frankensim]
 layer = "L6"
 
 [dependencies]
+fs-evidence = { path = "../fs-evidence" }
 fs-eproc = { path = "../fs-eproc" }
 fs-exec = { path = "../fs-exec" }
 fs-robust = { path = "../fs-robust" }
 fs-scenario = { path = "../fs-scenario" }
 fs-solid = { path = "../fs-solid" }
 fs-truss = { path = "../fs-truss" }
+fs-truss-e2e = { path = "../fs-truss-e2e" }
 fs-uq = { path = "../fs-uq" }
 
 [dev-dependencies]

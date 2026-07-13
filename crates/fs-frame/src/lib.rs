@@ -2,7 +2,8 @@
 //! building frame, smoke tier. Layer: L6 HELM.
 //!
 //! Five stages, each riding a crate that already carries its own
-//! battery: LAYOUT (fs-truss ground structure + PDHG LP diagnostics),
+//! battery: LAYOUT (fs-truss ground structure + PDHG diagnostics + outward
+//! optimum certificate),
 //! SIZING (Euler floors, catalog
 //! up-snapping, code rows), TIME HISTORY (fiber-hinge story model —
 //! Mander concrete + Menegotto–Pinto steel through fs-solid sections —

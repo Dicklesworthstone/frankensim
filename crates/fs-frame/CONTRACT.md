@@ -21,7 +21,10 @@ their own battery: fs-truss (layout LP + sizing), fs-solid/fs-material
   objective, never equilibrium — a 250 MPa σ_y measurably stalled the
   primal-dual scaling, objective separation stuck at 1.0), relative
   primal/dual objective separation + equilibrium residual are diagnostics, and
-  physical returned-iterate volume is rescaled on report. It then calls
+  physical returned-iterate volume is rescaled on report. Independently, the
+  shared `fs-truss-e2e` promotion gate binds an exact-feasibility repair and
+  outward-checked dual to the LP/settings/iterates; verified optimum endpoints
+  are outward-divided by physical σ_y. It then calls
   fs-truss `size_and_snap` (Euler floors, catalog up-snap,
   mandatory post-prune equilibrium refit, member code rows).
 - `history::StoryFrame`: single-story, two fiber-hinge columns —
@@ -52,8 +55,10 @@ their own battery: fs-truss (layout LP + sizing), fs-solid/fs-material
 
 1. Layout LP diagnostics: objective separation 3.4e-7, equilibrium residual
    4.1e-7 on the smoke fixture; returned-iterate volume positive and
-   physically rescaled (frame-001). These values do not form a finite optimum
-   certificate because the primal is not exactly equilibrated.
+   physically rescaled (frame-001). Those diagnostics do not confer proof
+   strength. A separate Neumann-repaired exactly feasible primal and outward-
+   feasible scaled dual produce the finite physical `Color::Verified` optimum
+   interval; numerical proof unavailability remains `Estimated`.
 2. Sizing: post-prune equilibrium refit 1.8e-13, every member code
    row passes post-snap (frame-002).
 3. Dynamics: elastic runs do not ratchet over 10× duration (Newmark
@@ -77,7 +82,10 @@ their own battery: fs-truss (layout LP + sizing), fs-solid/fs-material
 `layout_and_size` returns `LayoutError::Construction` for malformed geometry,
 physical parameters, catalog, resource excess, allocation refusal, or observed
 cancellation, and `LayoutError::Solver` for rejected PDHG/diagnostic state. It
-does not publish a partial layout. Direct empirical-CVaR calls return
+returns `LayoutError::Certificate` for malformed proof state, allocation
+failure, or cancellation during receipt construction/binding. A sound numerical
+proof refusal is published only as Estimated, never as finite bounds. It does
+not publish a partial layout. Direct empirical-CVaR calls return
 `RobustError`; smoke-tier orchestration contracts still panic with teaching
 messages when internally generated losses violate that contract, an ensemble
 spec is malformed, or a CVaR study is infeasible (the drill gates the
@@ -93,10 +101,11 @@ frame-006 pins bitwise replay.
 ## Cancellation behavior
 
 Ground construction and LP assembly poll the explicit `Cx` at deterministic
-bounded strides and return structured cancellation before publication. Later
-fixed solver/dynamics loops remain synchronously bounded by iteration/member
-budgets. The e-stop is itself the anytime-cancellation story: stopping at ANY
-member count leaves a valid interval.
+bounded strides and return structured cancellation before publication. The
+outward certificate stage polls the same context through repair, verification,
+identity binding, and publication. Later fixed solver/dynamics loops remain
+synchronously bounded by iteration/member budgets. The e-stop is itself the
+anytime-cancellation story: stopping at ANY member count leaves a valid interval.
 
 ## Unsafe boundary
 
@@ -108,7 +117,8 @@ None (the smoke tier ships enabled; heavier tiers will gate).
 
 ## Conformance tests
 
-`tests/battery.rs`: frame-001 LP diagnostics; frame-002 sizing code
+`tests/battery.rs`: frame-001 LP diagnostics and physical outward optimum bounds;
+frame-002 sizing code
 rows plus pre-cancelled construction refusal; frame-003 elastic stability + hysteretic dissipation;
 frame-004 e-stopped fragility coverage + ledgered savings; frame-005
 CVaR monotonicity + design; frame-006 replay, infeasibility, and structured

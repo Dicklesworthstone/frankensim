@@ -1,15 +1,18 @@
-//! Stages 1–2: ground-structure layout (PDHG LP with explicit convergence
-//! diagnostics) and code-checked sizing (Euler floors, catalog
+//! Stages 1–2: ground-structure layout (PDHG LP diagnostics plus an outward
+//! optimum certificate) and code-checked sizing (Euler floors, catalog
 //! up-snap, mandatory post-prune equilibrium re-verification, member
 //! code rows) — thin, honest composition over fs-truss, whose own
 //! battery (truss-001..006) carries the per-stage evidence. The
 //! Michell-continuum catalogue comparison stays LEDGERED PENDING
 //! exactly as in the fs-truss contract.
 
+use fs_evidence::Color;
 use fs_exec::Cx;
 use fs_truss::ground::{GroundLimits, GroundRules, GroundStructure, TrussConstructionError};
 use fs_truss::lp::{LayoutCase, LayoutLimits, LayoutLp, PdhgError, PdhgSettings};
 use fs_truss::sizing::{CatalogAudit, size_and_snap};
+use fs_truss::{LayoutCertificateError, LayoutCertificateLimits, LayoutCertificateProblem};
+use fs_truss_e2e::{optimality_color_from_certificate, rescale_optimality_color};
 
 /// Structured failure from the frame layout and sizing composition.
 #[derive(Debug)]
@@ -18,6 +21,9 @@ pub enum LayoutError {
     Construction(TrussConstructionError),
     /// The admitted PDHG solve or its returned-state diagnostics failed.
     Solver(PdhgError),
+    /// The outward optimum-certificate stage encountered malformed state,
+    /// allocation failure, or cancellation.
+    Certificate(LayoutCertificateError),
 }
 
 impl core::fmt::Display for LayoutError {
@@ -27,6 +33,9 @@ impl core::fmt::Display for LayoutError {
                 write!(formatter, "frame layout construction failed: {error}")
             }
             Self::Solver(error) => write!(formatter, "frame layout solve failed: {error}"),
+            Self::Certificate(error) => {
+                write!(formatter, "frame layout certificate failed: {error}")
+            }
         }
     }
 }
@@ -36,6 +45,7 @@ impl std::error::Error for LayoutError {
         match self {
             Self::Construction(error) => Some(error),
             Self::Solver(error) => Some(error),
+            Self::Certificate(error) => Some(error),
         }
     }
 }
@@ -52,6 +62,12 @@ impl From<PdhgError> for LayoutError {
     }
 }
 
+impl From<LayoutCertificateError> for LayoutError {
+    fn from(error: LayoutCertificateError) -> Self {
+        Self::Certificate(error)
+    }
+}
+
 /// The layout + sizing record: approximate solution, diagnostics, and audit.
 pub struct LayoutReport {
     /// The ground structure.
@@ -64,6 +80,9 @@ pub struct LayoutReport {
     pub residual: f64,
     /// Approximate returned-iterate volume Σ l·|q|/σ_y.
     pub volume: f64,
+    /// Outward-certified physical optimum-volume interval, or an honest
+    /// diagnostic estimate when the proof is numerically unavailable.
+    pub optimality_color: Color,
     /// Sizing/catalog audit (Euler floors, snap, code rows).
     pub audit: CatalogAudit,
 }
@@ -77,7 +96,9 @@ pub struct LayoutReport {
 /// Returns [`LayoutError::Construction`] when the geometry, physical
 /// parameters, catalog, construction budgets, or cancellation state are not
 /// admitted. Returns [`LayoutError::Solver`] when the PDHG controls or its
-/// returned state are invalid.
+/// returned state are invalid. Returns [`LayoutError::Certificate`] when the
+/// outward proof stage encounters malformed state, allocation failure, or
+/// cancellation.
 #[allow(clippy::too_many_arguments)] // Five physical inputs, catalog, and explicit execution context.
 pub fn layout_and_size(
     nx: usize,
@@ -142,9 +163,30 @@ pub fn layout_and_size(
     // scaling (measured: gap stuck at 1.0). Volume is rescaled to
     // physical units on report; sizing gets the TRUE σ_y.
     let lp = LayoutLp::try_assemble(&gs, &case, 1.0, LayoutLimits::default(), cx)?;
-    let (x, y, _report) = lp.solve(None, None, PdhgSettings::default())?;
+    let settings = PdhgSettings::default();
+    let (x, y, mut pdhg_report) = lp.solve(None, None, settings)?;
     let bnorm = 1.0;
     let (gap, residual, volume_unit) = lp.diagnostics(&x, &y, bnorm)?;
+    let certificate_status = lp.certify_optimum_for_report(
+        &x,
+        &y,
+        settings,
+        &mut pdhg_report,
+        LayoutCertificateLimits::default(),
+        cx,
+    )?;
+    let certificate_problem = LayoutCertificateProblem::try_new(lp.a(), lp.c(), lp.b())?;
+    let normalized_optimality = optimality_color_from_certificate(
+        &certificate_problem,
+        &x,
+        &y,
+        settings,
+        &certificate_status,
+        gap,
+        residual,
+        cx,
+    )?;
+    let optimality_color = rescale_optimality_color(&normalized_optimality, sigma_y);
     let volume = volume_unit / sigma_y;
     let audit = size_and_snap(&gs, &lp, &x, sigma_y, youngs, catalog, 1e-3);
     Ok(LayoutReport {
@@ -153,6 +195,7 @@ pub fn layout_and_size(
         gap,
         residual,
         volume,
+        optimality_color,
         audit,
     })
 }

@@ -1147,12 +1147,14 @@ version = "0.0.1"
 dependencies = [
  "fs-alloc",
  "fs-eproc",
+ "fs-evidence",
  "fs-exec",
  "fs-qty",
  "fs-robust",
  "fs-scenario",
  "fs-solid",
  "fs-truss",
+ "fs-truss-e2e",
  "fs-uq",
 ]
 

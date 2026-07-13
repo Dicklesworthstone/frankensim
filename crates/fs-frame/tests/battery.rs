@@ -3,6 +3,7 @@
 //! fragility with verified coverage and ledgered savings, CVaR mass
 //! minimization, and the replay/drill gates.
 
+use fs_evidence::Color;
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_frame::cvar::{RobustError, cvar, empirical_cvar};
 use fs_frame::history::{StoryFrame, StoryParams, peak_drift};
@@ -75,6 +76,14 @@ fn frame_001_layout_and_sizing() {
             "objective separation {:.2e}, eq residual {:.2e}, approximate volume {:.4e}",
             report.gap, report.residual, report.volume
         ),
+    );
+    let Color::Verified { lo, hi } = report.optimality_color else {
+        panic!("frame layout optimum must carry the fs-truss certificate");
+    };
+    verdict(
+        "frame-001-outward-optimum-bounds",
+        lo.is_finite() && hi.is_finite() && lo > 0.0 && lo <= hi,
+        &format!("physical optimum volume in outward interval [{lo:.8e}, {hi:.8e}]"),
     );
     verdict(
         "frame-002-sizing-code-rows",
