@@ -45,13 +45,16 @@ same certified cuts; its constitutive parameters come from
   solver knobs.
 - `CutElasticity`: vector Q1 small-strain elasticity on uniform or 2:1
   graded active quadtrees. Hanging nodes are reduced componentwise through
-  deterministic terminal expansions: bulk, Nitsche, boundary-traction, and
-  equal-level ghost terms use `T^T K T` / `T^T f`, and solution
-  reconstruction restores every active mesh node. A literal no-constraint
-  path retains the original uniform-grid numbering, COO/RHS insertion order,
-  clamp mask, and topology bits. `IsotropicElastic` supplies the plane-strain
-  Lamé parameters. Symmetric Nitsche imposes displacement data on the SDF
-  interface with the cut-independent penalty
+  deterministic terminal expansions: bulk and embedded-interface Nitsche
+  terms use `T^T K T` / `T^T f`, equal-level ghost terms use the same
+  componentwise transform, and solution reconstruction restores every active
+  mesh node. Design-box traction is assembled on outer-edge terminal nodes;
+  that transform is necessarily identity for a valid leaf partition and the
+  assembler refuses if the topology invariant is broken. A literal
+  no-constraint path retains the original uniform-grid numbering, COO/RHS
+  insertion order, clamp mask, and topology bits. `IsotropicElastic` supplies
+  the plane-strain Lamé parameters. Symmetric Nitsche imposes displacement
+  data on the SDF interface with the cut-independent penalty
   `nitsche_beta * mu / h`; the componentwise ghost penalty scales as
   `ghost_gamma * mu * h` and controls degenerating cut fractions. The
   certified v1 material regime requires
@@ -60,9 +63,23 @@ same certified cuts; its constitutive parameters come from
   incompressibility. An
   explicit natural,
   traction-free interface mode and zero design-box clamps support
-  topology-optimization frontends. Loaded design-box edges must be
-  certified wholly inside or wholly outside each boundary cell; an
-  SDF-cut loaded edge refuses until certified 1-D clipping exists.
+  topology-optimization frontends. The legacy `boundary_traction` field is an
+  uncertified full-edge callback, so every active design-box edge must be
+  certified wholly inside or wholly outside. The explicit
+  `assemble_with_boundary_traction` / `solve_with_boundary_traction` methods
+  require that field to be `None` and accept either the same
+  `BoundaryTraction::Uncertified` semantics or typed support.
+- `DesignBoxEdge` / `EdgeBand` / `BoundaryTraction`: a checked closed
+  normalized support interval on one named unit-box edge and its traction
+  callback. `EdgeBand::new` refuses non-finite, out-of-range, or reversed
+  endpoints; its fields are private. The applied traction is definitionally
+  zero on all other edges and outside the band. Assembly intersects the band
+  with each boundary-cell edge exactly, retains endpoint contact as
+  potentially nonzero support, classifies that supported subsegment with the
+  SDF enclosure, skips certified-outside support, refuses a straddling
+  subsegment, and applies two-point Gauss only to wholly-inside support. It
+  never uses callback samples or Gauss-node zeros to infer support and never
+  performs generic SDF clipping.
 - `CutElasticityOperator`: the assembled symmetric CSR operator, load,
   public deterministic terminal-node/block map, clamp mask, canonical active-cell /
   cut-rule / ghost-face topology, dropped-cut count, exact algebraic
@@ -147,14 +164,27 @@ same certified cuts; its constitutive parameters come from
 14. GRADED VECTOR REDUCTION (cte-005, G0/G3): a closed-polygon affine
     two-component patch on a 2:1 tree passes the exact algebraic residual,
     CG residual, bit-symmetry, field-error, explicit midpoint reconstruction,
-    deterministic replay, and a nonzero constrained-node ghost-energy oracle.
-    Separate all-inside graded fixtures exercise body and design-box traction
-    reduction against an independent analytic `T^T` load. Synthetic corrupted
-    graphs refuse cycles, empty/non-finite/non-unit transforms, and partially
-    clamped hanging traces. The uniform pre-graded operator is frozen in both
-    mostly-clamped (cte-000) and fully-unclamped (cte-000b) fixtures by portable
-    whole-operator FNV-1a goldens over CSR, RHS, terminal map, clamp, active/cut
-    topology, certified rule bits, ghost faces, and dropped count.
+    deterministic replay, and a nonzero equal-level ghost-energy oracle. A
+    separate private equal-level-face oracle derives a real hanging midpoint
+    from a 2:1 tree and verifies every terminal basis against `T^T K T`, with a
+    nonzero constrained-corner contribution.
+    A ghost-off mixed-level interface independently compares the reduced
+    Nitsche matrix energy and load pairing against the reconstructed physical
+    field, with a nonzero Nitsche contribution from cut cells carrying
+    constrained corners.
+    Separate all-inside graded fixtures exercise nonidentity body-load
+    reduction and graded design-box traction conservation against independent
+    analytic loads; every outer traction node is asserted terminal. Synthetic
+    corrupted graphs refuse cycles, empty/non-finite/non-unit transforms, and
+    partially clamped hanging traces. The uniform pre-graded operator is frozen
+    in both mostly-clamped (cte-000) and fully-unclamped (cte-000b) fixtures by
+    portable whole-operator FNV-1a goldens over CSR, RHS, terminal map, clamp,
+    active/cut topology, certified rule bits, ghost faces, and dropped count.
+15. TYPED BOX-EDGE SUPPORT (G0/G3): invalid normalized bands refuse; a right
+    edge band disjoint from an SDF crossing integrates its exact constant-load
+    length; a crossing through the supported band refuses; an uncertified zero
+    callback still refuses; and an all-inside band aligned to cell edges is
+    bit-identical to the legacy callback operator evidence.
 
 ## Error model
 
@@ -167,7 +197,7 @@ outside its documented range, or a scalar field/goal evaluation has
 missing, non-finite, inactive, or topology-inconsistent evidence),
 `InvalidElasticityInput` (non-finite/non-coercive or unsupported
 near-incompressible material, parameter, load, boundary data, or an
-uncertified SDF-cut loaded box edge; malformed/non-finite coefficient,
+invalid edge band or SDF-cut supported box-edge segment; malformed/non-finite coefficient,
 Q1 field-evaluation, terminal transform, or incompatible hanging-clamp
 requests also refuse),
 `AggregationNoAnchor` (no well-cut anchor within 4 BFS rings),
@@ -233,7 +263,14 @@ solution, three-level fitted convergence slopes, and adjacent-slope
 evidence; cte-003
 condition-number sweep over cut fractions 0.5…1e-8
 with fixed Nitsche scaling and ghost ON/OFF; fail-closed invalid-input,
-material, and cut-loaded-edge coverage. `tests/elasticity_adjoint.rs`
+material, and cut-loaded-edge coverage, including typed edge-band validation,
+exact supported-subsegment classification, load conservation, legacy
+full-edge refusal, and aligned legacy/typed operator-bit equivalence; cte-005
+graded vector reduction, including an independent mixed-level Nitsche
+matrix/RHS oracle, body-load reduction, terminal outer-traction conservation,
+solution reconstruction, deterministic replay, and malformed-constraint
+refusals.
+`tests/elasticity_adjoint.rs`
 is a declared `adjoint-vjp`-required target: cte-004 exact registered
 transpose, two-operator key isolation, and independent central-FD gate.
 The acceptance tests emit deterministic JSON verdict rows suitable for
@@ -274,13 +311,16 @@ ledger evidence.
 - `b^T x` is the exact algebraic assembled-load compliance. With nonzero
   embedded displacement data, the Nitsche data terms are part of `b`; this
   value alone is not claimed to equal physical external work.
-- Certified clipping quadrature for nonzero traction on an SDF-cut
-  design-box edge is not implemented; that configuration refuses rather
-  than sample-masking a partial edge.
-- `fs-solid::cutfront` and its `fs-topols` / `fs-lattice` consumers still
-  use a legacy independent CutFEM elasticity facade. Migrating that
-  facade to delegate to this operator is separate follow-up work; this
-  bead does not claim workspace-wide de-duplication or consumer migration.
+- Certified clipping quadrature for a supported traction subsegment that the
+  SDF itself cuts is not implemented; that configuration refuses rather than
+  sample-masking or clipping a partial segment. A named band may safely avoid
+  a different cut portion of the same design-box edge because zero support
+  outside the band is part of its checked input semantics.
+- `fs-cutfem` is the canonical owner of certified CutFEM elasticity and typed
+  design-box traction support. `fs-solid::cutfront` owns only consumer-facing
+  delegation for `fs-topols` / `fs-lattice`; it must not grow an independent
+  clipping or boundary-support implementation. Completing every consumer
+  migration remains separately tracked integration work.
 - Coupling to fs-scenario BC descriptors and FrankenVDB tile storage
   (the dyadic alignment is designed in; the wiring is a consumer
   bead).

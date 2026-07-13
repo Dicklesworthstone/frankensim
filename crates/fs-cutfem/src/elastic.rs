@@ -43,6 +43,103 @@ type NodeExpansion = Vec<(usize, f64)>;
 type TerminalIds = BTreeMap<NodeKey, usize>;
 type NodeExpansions = BTreeMap<NodeKey, NodeExpansion>;
 
+/// One named edge of the unit-square CutFEM design box.
+///
+/// [`EdgeBand`] coordinates increase with the corresponding Cartesian
+/// coordinate: `x` on [`Self::Bottom`] and [`Self::Top`], and `y` on
+/// [`Self::Left`] and [`Self::Right`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum DesignBoxEdge {
+    /// The edge `y = 0`, parameterized by increasing `x`.
+    Bottom,
+    /// The edge `x = 1`, parameterized by increasing `y`.
+    Right,
+    /// The edge `y = 1`, parameterized by increasing `x`.
+    Top,
+    /// The edge `x = 0`, parameterized by increasing `y`.
+    Left,
+}
+
+/// Checked closed support band on one named design-box edge.
+///
+/// Both endpoints are normalized design-box coordinates in `[0, 1]`. The
+/// fields are private so an invalid, non-finite, or reversed band cannot enter
+/// certified boundary assembly.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EdgeBand {
+    edge: DesignBoxEdge,
+    start: f64,
+    end: f64,
+}
+
+impl EdgeBand {
+    /// Construct a closed support band `start..=end` on `edge`.
+    ///
+    /// A zero-length band is valid and represents measure-zero support. Its
+    /// endpoint is still classified rather than assumed to carry zero data.
+    ///
+    /// # Errors
+    /// Refuses non-finite endpoints, endpoints outside `[0, 1]`, or a reversed
+    /// interval.
+    pub fn new(edge: DesignBoxEdge, start: f64, end: f64) -> Result<Self, CutFemError> {
+        if !(start.is_finite() && end.is_finite()) {
+            return Err(CutFemError::InvalidElasticityInput {
+                what: format!(
+                    "boundary traction edge-band endpoints {start}..={end} must be finite"
+                ),
+            });
+        }
+        if !(0.0..=1.0).contains(&start) || !(0.0..=1.0).contains(&end) {
+            return Err(CutFemError::InvalidElasticityInput {
+                what: format!(
+                    "boundary traction edge-band endpoints {start}..={end} must lie in [0, 1]"
+                ),
+            });
+        }
+        if start > end {
+            return Err(CutFemError::InvalidElasticityInput {
+                what: format!("boundary traction edge-band start {start} exceeds end {end}"),
+            });
+        }
+        Ok(Self { edge, start, end })
+    }
+
+    /// Named design-box edge carrying this support.
+    #[must_use]
+    pub fn edge(self) -> DesignBoxEdge {
+        self.edge
+    }
+
+    /// Inclusive normalized start coordinate.
+    #[must_use]
+    pub fn start(self) -> f64 {
+        self.start
+    }
+
+    /// Inclusive normalized end coordinate.
+    #[must_use]
+    pub fn end(self) -> f64 {
+        self.end
+    }
+}
+
+/// Boundary-traction data supplied explicitly to typed assembly.
+#[derive(Clone, Copy)]
+pub enum BoundaryTraction<'a> {
+    /// A legacy callback with uncertified, potentially nonzero support on every
+    /// design-box edge. Every active box-edge segment is therefore classified.
+    Uncertified(&'a dyn Fn(f64, f64) -> [f64; 2]),
+    /// A callback whose applied value is defined to be zero outside `support`.
+    /// Only the exact intersection with that named band is classified and
+    /// integrated.
+    EdgeBand {
+        /// Checked closed support on one named design-box edge.
+        support: EdgeBand,
+        /// Traction value evaluated only on the supported subsegment.
+        value: &'a dyn Fn(f64, f64) -> [f64; 2],
+    },
+}
+
 /// Vector Q1 CutFEM problem on `Omega = {phi < 0}`.
 ///
 /// The constitutive parameters come from [`IsotropicElastic`], so the
@@ -66,7 +163,9 @@ pub struct CutElasticity<'a> {
     pub quad_depth: u32,
     /// Optional zero-displacement clamp on active design-box boundary nodes.
     pub clamp: Option<&'a dyn Fn(f64, f64) -> bool>,
-    /// Optional dead traction on active design-box boundary edges.
+    /// Optional legacy dead traction with uncertified, potentially nonzero
+    /// support on every active design-box boundary edge. Prefer
+    /// [`Self::assemble_with_boundary_traction`] for checked named support.
     pub boundary_traction: Option<&'a dyn Fn(f64, f64) -> [f64; 2]>,
     /// Use a natural traction-free embedded interface instead of Nitsche
     /// displacement data. A clamp is then normally required to remove
@@ -511,6 +610,16 @@ impl CutElasticity<'_> {
         Ok(())
     }
 
+    fn require_explicit_boundary_traction_slot(&self) -> Result<(), CutFemError> {
+        if self.boundary_traction.is_some() {
+            return Err(CutFemError::InvalidElasticityInput {
+                what: "assemble_with_boundary_traction/solve_with_boundary_traction require CutElasticity::boundary_traction to be None"
+                    .to_string(),
+            });
+        }
+        Ok(())
+    }
+
     /// Assemble `K u = b` for `-div sigma(u) = f`.
     ///
     /// On the embedded interface, `g` is imposed by symmetric Nitsche unless
@@ -524,6 +633,42 @@ impl CutElasticity<'_> {
         &self,
         f: &dyn Fn(f64, f64) -> [f64; 2],
         g: &dyn Fn(f64, f64) -> [f64; 2],
+    ) -> Result<CutElasticityOperator, CutFemError> {
+        self.assemble_impl(
+            f,
+            g,
+            self.boundary_traction.map(BoundaryTraction::Uncertified),
+        )
+    }
+
+    /// Assemble with an explicit boundary-traction support descriptor.
+    ///
+    /// [`BoundaryTraction::Uncertified`] preserves the full-edge fail-closed
+    /// callback semantics of [`Self::boundary_traction`]. A checked
+    /// [`BoundaryTraction::EdgeBand`] instead defines the applied traction as
+    /// zero outside its named support, so only the exact supported subsegment
+    /// is classified and integrated.
+    ///
+    /// # Errors
+    /// In addition to the ordinary assembly refusals, this method requires
+    /// [`Self::boundary_traction`] to be `None`; two competing sources are
+    /// never merged implicitly.
+    pub fn assemble_with_boundary_traction(
+        &self,
+        f: &dyn Fn(f64, f64) -> [f64; 2],
+        g: &dyn Fn(f64, f64) -> [f64; 2],
+        boundary_traction: BoundaryTraction<'_>,
+    ) -> Result<CutElasticityOperator, CutFemError> {
+        self.require_explicit_boundary_traction_slot()?;
+        self.assemble_impl(f, g, Some(boundary_traction))
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn assemble_impl(
+        &self,
+        f: &dyn Fn(f64, f64) -> [f64; 2],
+        g: &dyn Fn(f64, f64) -> [f64; 2],
+        boundary_traction: Option<BoundaryTraction<'_>>,
     ) -> Result<CutElasticityOperator, CutFemError> {
         let (lambda, mu) = self.validate_assembly()?;
         let mut active = Vec::new();
@@ -672,13 +817,7 @@ impl CutElasticity<'_> {
             }
         }
 
-        self.assemble_outer_traction(
-            &active,
-            &node_ids,
-            node_expansions.as_ref(),
-            &clamped,
-            &mut rhs,
-        )?;
+        self.assemble_outer_traction(boundary_traction, &active, &node_ids, &clamped, &mut rhs)?;
         for (dof, is_clamped) in clamped.iter().enumerate() {
             if *is_clamped {
                 coo.push(dof, dof, 1.0);
@@ -761,13 +900,13 @@ impl CutElasticity<'_> {
 
     fn assemble_outer_traction(
         &self,
+        boundary_traction: Option<BoundaryTraction<'_>>,
         active: &[CellKey],
         node_ids: &TerminalIds,
-        expansions: Option<&NodeExpansions>,
         clamped: &[bool],
         rhs: &mut [f64],
     ) -> Result<(), CutFemError> {
-        let Some(traction) = self.boundary_traction else {
+        let Some(boundary_traction) = boundary_traction else {
             return Ok(());
         };
         for &cell in active {
@@ -775,12 +914,12 @@ impl CutElasticity<'_> {
             let nmax = 1u32 << level;
             let corners = self.grid.corner_nodes(cell);
             let edges = [
-                (j == 0, [0usize, 1usize]),
-                (i + 1 == nmax, [1, 2]),
-                (j + 1 == nmax, [2, 3]),
-                (i == 0, [3, 0]),
+                (j == 0, DesignBoxEdge::Bottom, [0usize, 1usize]),
+                (i + 1 == nmax, DesignBoxEdge::Right, [1, 2]),
+                (j + 1 == nmax, DesignBoxEdge::Top, [2, 3]),
+                (i == 0, DesignBoxEdge::Left, [3, 0]),
             ];
-            for (on_boundary, corner_indices) in edges {
+            for (on_boundary, edge, corner_indices) in edges {
                 if !on_boundary {
                     continue;
                 }
@@ -788,21 +927,69 @@ impl CutElasticity<'_> {
                 let pb = self.grid.node_pos(corners[corner_indices[1]]);
                 let dx = pb[0] - pa[0];
                 let dy = pb[1] - pa[1];
-                let edge_lo = [pa[0].min(pb[0]), pa[1].min(pb[1])];
-                let edge_hi = [pa[0].max(pb[0]), pa[1].max(pb[1])];
-                let enclosure = self.sdf.enclose(edge_lo, edge_hi);
+                let (traction, local_start, local_end, segment_a, segment_b) =
+                    match boundary_traction {
+                        BoundaryTraction::Uncertified(value) => (value, 0.0, 1.0, pa, pb),
+                        BoundaryTraction::EdgeBand { support, value } => {
+                            if support.edge != edge {
+                                continue;
+                            }
+                            let (coordinate_a, coordinate_b) = match edge {
+                                DesignBoxEdge::Bottom | DesignBoxEdge::Top => (pa[0], pb[0]),
+                                DesignBoxEdge::Left | DesignBoxEdge::Right => (pa[1], pb[1]),
+                            };
+                            let edge_start = coordinate_a.min(coordinate_b);
+                            let edge_end = coordinate_a.max(coordinate_b);
+                            // Closed intervals deliberately use strict disjointness:
+                            // endpoint contact remains part of potentially nonzero
+                            // support and is classified fail-closed.
+                            if support.end < edge_start || support.start > edge_end {
+                                continue;
+                            }
+                            let supported_start = support.start.max(edge_start);
+                            let supported_end = support.end.min(edge_end);
+                            let first =
+                                (supported_start - coordinate_a) / (coordinate_b - coordinate_a);
+                            let second =
+                                (supported_end - coordinate_a) / (coordinate_b - coordinate_a);
+                            let (segment_a, segment_b) = match edge {
+                                DesignBoxEdge::Bottom | DesignBoxEdge::Top => {
+                                    ([supported_start, pa[1]], [supported_end, pa[1]])
+                                }
+                                DesignBoxEdge::Left | DesignBoxEdge::Right => {
+                                    ([pa[0], supported_start], [pa[0], supported_end])
+                                }
+                            };
+                            (
+                                value,
+                                first.min(second),
+                                first.max(second),
+                                segment_a,
+                                segment_b,
+                            )
+                        }
+                    };
+                let segment_lo = [
+                    segment_a[0].min(segment_b[0]),
+                    segment_a[1].min(segment_b[1]),
+                ];
+                let segment_hi = [
+                    segment_a[0].max(segment_b[0]),
+                    segment_a[1].max(segment_b[1]),
+                ];
+                let enclosure = self.sdf.enclose(segment_lo, segment_hi);
                 if !(enclosure.lo().is_finite() && enclosure.hi().is_finite()) {
                     return Err(CutFemError::InvalidElasticityInput {
                         what: format!(
-                            "SDF enclosure is non-finite on loaded design-box edge {pa:?}--{pb:?}"
+                            "SDF enclosure is non-finite on supported {edge:?} design-box segment {segment_a:?}--{segment_b:?}"
                         ),
                     });
                 }
                 if enclosure.lo() <= 0.0 && enclosure.hi() >= 0.0 {
                     return Err(CutFemError::InvalidElasticityInput {
                         what: format!(
-                            "boundary traction edge {pa:?}--{pb:?} is cut by the SDF; \
-                             cut-edge traction quadrature is not yet certified"
+                            "supported {edge:?} boundary traction segment {segment_a:?}--{segment_b:?} is cut by the SDF; \
+                             supported cut-edge traction quadrature is not yet certified"
                         ),
                     });
                 }
@@ -810,8 +997,10 @@ impl CutElasticity<'_> {
                     continue;
                 }
                 let length = dx.hypot(dy);
-                let gauss = 0.5 / 3.0f64.sqrt();
-                for t in [0.5 - gauss, 0.5 + gauss] {
+                let midpoint = 0.5 * (local_start + local_end);
+                let half_span = 0.5 * (local_end - local_start);
+                let gauss = half_span / 3.0f64.sqrt();
+                for t in [midpoint - gauss, midpoint + gauss] {
                     let point = [pa[0] + t * dx, pa[1] + t * dy];
                     let value = traction(point[0], point[1]);
                     if value.iter().any(|component| !component.is_finite()) {
@@ -819,25 +1008,23 @@ impl CutElasticity<'_> {
                             what: format!("boundary traction is non-finite at {point:?}"),
                         });
                     }
-                    let weight = 0.5 * length;
+                    let weight = half_span * length;
                     for (corner_index, shape) in
                         [(corner_indices[0], 1.0 - t), (corner_indices[1], t)]
                     {
+                        let node = corners[corner_index];
+                        let id = node_ids.get(&node).copied().ok_or_else(|| {
+                            CutFemError::InvalidElasticityInput {
+                                what: format!(
+                                    "design-box boundary traction node {node:?} is not an unconstrained terminal"
+                                ),
+                            }
+                        })?;
                         for (component, traction_component) in value.iter().enumerate() {
                             let load = weight * shape * traction_component;
-                            if let Some(expansions) = expansions {
-                                for &(id, terminal_weight) in &expansions[&corners[corner_index]] {
-                                    let dof = 2 * id + component;
-                                    if !clamped[dof] {
-                                        rhs[dof] += terminal_weight * load;
-                                    }
-                                }
-                            } else {
-                                let id = node_ids[&corners[corner_index]];
-                                let dof = 2 * id + component;
-                                if !clamped[dof] {
-                                    rhs[dof] += load;
-                                }
+                            let dof = 2 * id + component;
+                            if !clamped[dof] {
+                                rhs[dof] += load;
                             }
                         }
                     }
@@ -952,8 +1139,37 @@ impl CutElasticity<'_> {
         f: &dyn Fn(f64, f64) -> [f64; 2],
         g: &dyn Fn(f64, f64) -> [f64; 2],
     ) -> Result<CutElasticitySolution, CutFemError> {
+        self.solve_impl(
+            f,
+            g,
+            self.boundary_traction.map(BoundaryTraction::Uncertified),
+        )
+    }
+
+    /// Assemble and solve with an explicit boundary-traction support
+    /// descriptor.
+    ///
+    /// # Errors
+    /// In addition to the ordinary solve and assembly refusals, this method
+    /// requires [`Self::boundary_traction`] to be `None`.
+    pub fn solve_with_boundary_traction(
+        &self,
+        f: &dyn Fn(f64, f64) -> [f64; 2],
+        g: &dyn Fn(f64, f64) -> [f64; 2],
+        boundary_traction: BoundaryTraction<'_>,
+    ) -> Result<CutElasticitySolution, CutFemError> {
+        self.require_explicit_boundary_traction_slot()?;
+        self.solve_impl(f, g, Some(boundary_traction))
+    }
+
+    fn solve_impl(
+        &self,
+        f: &dyn Fn(f64, f64) -> [f64; 2],
+        g: &dyn Fn(f64, f64) -> [f64; 2],
+        boundary_traction: Option<BoundaryTraction<'_>>,
+    ) -> Result<CutElasticitySolution, CutFemError> {
         self.validate_solver()?;
-        let operator = self.assemble(f, g)?;
+        let operator = self.assemble_impl(f, g, boundary_traction)?;
         let preconditioner = JacobiPrecond::new(operator.matrix());
         let mut state = CgState::new(&operator, &preconditioner, operator.rhs());
         let report = state.run(
@@ -1457,6 +1673,163 @@ mod tests {
         let selected_id = node_ids[&(0, 0)];
         assert!(one_clamped[2 * selected_id] && one_clamped[2 * selected_id + 1]);
         assert_eq!(one_clamped.iter().filter(|&&value| value).count(), 2);
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn equal_level_ghost_face_applies_nonidentity_terminal_transform() {
+        let mut grid = Quadtree::with_room(1, 2);
+        grid.split((1, 1, 0));
+        let active: BTreeSet<_> = grid.leaves().collect();
+        let nodes: BTreeSet<_> = active
+            .iter()
+            .flat_map(|&cell| grid.corner_nodes(cell))
+            .collect();
+        let constraints: BTreeMap<_, Vec<_>> = grid
+            .hanging_constraints(&active, &nodes)
+            .into_iter()
+            .map(|(node, terms)| (node, terms.into()))
+            .collect();
+        let (terminal_ids, expansions) =
+            build_terminal_expansions(&nodes, &constraints).expect("valid 2:1 transform");
+
+        let midpoint = (2, 1);
+        assert_eq!(
+            expansions[&midpoint],
+            vec![(terminal_ids[&(2, 0)], 0.5), (terminal_ids[&(2, 2)], 0.5),],
+            "fixture midpoint must use the real quadtree hanging constraint"
+        );
+
+        let face = ((2, 2, 0), (2, 3, 0));
+        assert!(grid.is_leaf(face.0) && grid.is_leaf(face.1));
+        assert_eq!(face.0.0, face.1.0, "ghost face must be equal-level");
+        assert!(
+            grid.corner_nodes(face.0).contains(&midpoint),
+            "constrained midpoint must participate in the face kernel"
+        );
+
+        let physical_ids: TerminalIds = nodes
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(id, node)| (node, id))
+            .collect();
+        let material = IsotropicElastic::new(1.0, 0.3, 10.0).expect("valid fixture material");
+        let sdf = crate::sdf::HalfPlane {
+            normal: [1.0, 0.0],
+            offset: 0.75,
+        };
+        let problem = CutElasticity {
+            grid: &grid,
+            sdf: &sdf,
+            material: &material,
+            nitsche_beta: 100.0,
+            ghost_gamma: 0.5,
+            quad_depth: 4,
+            clamp: None,
+            boundary_traction: None,
+            traction_free_interface: false,
+            solver_tol: 1e-10,
+            solver_max_iters: 100,
+        };
+        let (_, mu) = material.lame();
+
+        let physical_dofs = 2 * physical_ids.len();
+        let physical_clamped = vec![false; physical_dofs];
+        let mut physical_coo = Coo::new(physical_dofs, physical_dofs);
+        problem
+            .assemble_ghost_face(
+                face,
+                mu,
+                &physical_ids,
+                None,
+                &physical_clamped,
+                &mut physical_coo,
+            )
+            .expect("physical face assembly");
+        let physical = physical_coo.assemble();
+        let (_, midpoint_row) = physical.row(2 * physical_ids[&midpoint]);
+        assert!(
+            midpoint_row.iter().any(|value| *value != 0.0),
+            "constrained midpoint must carry nonzero physical ghost stiffness"
+        );
+
+        let terminal_dofs = 2 * terminal_ids.len();
+        let terminal_clamped = vec![false; terminal_dofs];
+        let mut reduced_coo = Coo::new(terminal_dofs, terminal_dofs);
+        problem
+            .assemble_ghost_face(
+                face,
+                mu,
+                &terminal_ids,
+                Some(&expansions),
+                &terminal_clamped,
+                &mut reduced_coo,
+            )
+            .expect("reduced face assembly");
+        let reduced = reduced_coo.assemble();
+
+        let mut saw_nonidentity_effect = false;
+        for basis_index in 0..terminal_dofs {
+            let mut basis = vec![0.0; terminal_dofs];
+            basis[basis_index] = 1.0;
+
+            let mut transformed = vec![0.0; physical_dofs];
+            for (&node, &physical_id) in &physical_ids {
+                for &(terminal_id, weight) in &expansions[&node] {
+                    for component in 0..2 {
+                        transformed[2 * physical_id + component] +=
+                            weight * basis[2 * terminal_id + component];
+                    }
+                }
+            }
+            let mut physical_applied = vec![0.0; physical_dofs];
+            physical.spmv(&transformed, &mut physical_applied);
+            let mut expected = vec![0.0; terminal_dofs];
+            for (&node, &physical_id) in &physical_ids {
+                for &(terminal_id, weight) in &expansions[&node] {
+                    for component in 0..2 {
+                        expected[2 * terminal_id + component] +=
+                            weight * physical_applied[2 * physical_id + component];
+                    }
+                }
+            }
+
+            let mut actual = vec![0.0; terminal_dofs];
+            reduced.spmv(&basis, &mut actual);
+            for (row, (&actual_value, &expected_value)) in actual.iter().zip(&expected).enumerate()
+            {
+                let tolerance =
+                    256.0 * f64::EPSILON * actual_value.abs().max(expected_value.abs()).max(1.0);
+                assert!(
+                    (actual_value - expected_value).abs() <= tolerance,
+                    "T^T K T mismatch at ({row}, {basis_index}): \
+                     actual={actual_value:e}, expected={expected_value:e}, tolerance={tolerance:e}"
+                );
+            }
+
+            let mut untransformed = vec![0.0; physical_dofs];
+            for (&node, &terminal_id) in &terminal_ids {
+                let physical_id = physical_ids[&node];
+                for component in 0..2 {
+                    untransformed[2 * physical_id + component] = basis[2 * terminal_id + component];
+                }
+            }
+            let mut untransformed_applied = vec![0.0; physical_dofs];
+            physical.spmv(&untransformed, &mut untransformed_applied);
+            for (&node, &terminal_id) in &terminal_ids {
+                let physical_id = physical_ids[&node];
+                for component in 0..2 {
+                    let naive = untransformed_applied[2 * physical_id + component];
+                    saw_nonidentity_effect |=
+                        (expected[2 * terminal_id + component] - naive).abs() > 1e-12;
+                }
+            }
+        }
+        assert!(
+            saw_nonidentity_effect,
+            "hanging-node transform must differ from deleting the constrained block"
+        );
     }
 }
 

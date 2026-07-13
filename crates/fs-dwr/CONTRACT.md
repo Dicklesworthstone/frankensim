@@ -110,6 +110,10 @@ that knows the difference.
     coarse/enriched adjoint corner needed by a retained quadrature rule exists and is
     finite. One active child is sufficient; four-child coverage is not
     invented as a stronger topology precondition.
+12. A non-final adaptive iteration with marked cells derives its reserved
+    balance/interface refinement headroom with checked arithmetic. A zero-level
+    grid refuses as `InvalidFemInput`; it never underflows or silently wraps the
+    refinement ceiling. An empty marked set requires no headroom.
 
 ## Error model
 
@@ -117,7 +121,8 @@ fs-cutfem's `CutFemError` teaching errors propagate unchanged
 (build/solve refusals). The scalar estimator and `goal_value` use
 `InvalidFemInput` to refuse the level-16 enrichment cap, active-space
 parent/child mismatch, missing or non-finite nodal/adjoint-corner data,
-non-finite goal/residual terms or totals, and retained topology/rule mismatch.
+non-finite goal/residual terms or totals, retained topology/rule mismatch, or a
+zero-level adaptive grid that needs another marked refinement iteration.
 Non-finite primal source/boundary callbacks may first surface through the
 propagated scalar build/solve teaching error because they enter assembly before
 the residual sweep.

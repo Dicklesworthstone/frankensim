@@ -23,11 +23,13 @@
 //!   buckling-adjacent compressed strip converge under load stepping +
 //!   line search, with iteration histories logged.
 
-use fs_cutfem::{Circle, Quadtree};
+use fs_cutfem::{Circle, CutElasticity as CanonicalCutElasticity, HalfPlane, Quadtree};
+use fs_material::IsotropicElastic;
 use fs_material::hyper::{Hyperelastic, HyperelasticModel};
 use fs_solid::linear::{Formulation, LinearProblem, PlaneKind, l2_h1_error};
 use fs_solid::{
-    CutElasticity, HyperProblem, Mesh2, NewtonSettings, Patch, RegimeIndicators, select_formulation,
+    BoundaryTraction, CutElasticity, DesignBoxEdge, EdgeBand, HyperProblem, Mesh2, NewtonSettings,
+    Patch, RegimeIndicators, SolidError, select_formulation,
 };
 use std::f64::consts::PI;
 use std::fmt::Write as _;
@@ -246,6 +248,269 @@ fn sol_002_mms_orders_families_and_frontends() {
         pass,
         &format!("\"detail\":\"MMS orders, families x frontends\",\"rows\":[{rows}]"),
     );
+}
+
+// ------------------------------------------------ canonical CutFEM ownership
+
+#[test]
+fn cutfront_delegates_bitwise_to_canonical_cutfem() {
+    let grid = Quadtree::uniform(3);
+    let sdf = Circle {
+        center: [0.5, 0.5],
+        radius: 0.35,
+    };
+    let displacement = |x: f64, y: f64| [0.1 + 0.2 * x + 0.3 * y, 0.4 - 0.1 * x + 0.05 * y];
+    let body = |_: f64, _: f64| [0.0, 0.0];
+    let facade = CutElasticity {
+        grid: &grid,
+        sdf: &sdf,
+        youngs: E_MOD,
+        poisson: NU,
+        nitsche_beta: 20.0,
+        ghost_gamma: 0.5,
+        quad_depth: 3,
+        clamp: None,
+        boundary_traction: None,
+        traction_free_interface: false,
+    };
+
+    let material = IsotropicElastic::new(E_MOD, NU, 1.0).expect("valid parity material");
+    let (lambda, mu) = material.lame();
+    let legacy_stiffness_scale = (lambda + 2.0 * mu) / mu;
+    let canonical = CanonicalCutElasticity {
+        grid: &grid,
+        sdf: &sdf,
+        material: &material,
+        nitsche_beta: 20.0 * legacy_stiffness_scale,
+        ghost_gamma: 0.5 * legacy_stiffness_scale,
+        quad_depth: 3,
+        clamp: None,
+        boundary_traction: None,
+        traction_free_interface: false,
+        solver_tol: 1e-12,
+        solver_max_iters: 60_000,
+    };
+
+    let facade_solution = facade
+        .solve(&body, &displacement)
+        .expect("facade solve delegates");
+    let canonical_solution = canonical
+        .solve(&body, &displacement)
+        .expect("canonical parity solve");
+
+    assert_eq!(
+        facade_solution.active_cells(),
+        canonical_solution.active_cells()
+    );
+    assert_eq!(facade_solution.iters, canonical_solution.iters);
+    assert_eq!(
+        facade_solution.rel_residual.to_bits(),
+        canonical_solution.rel_residual.to_bits()
+    );
+    assert_eq!(
+        facade_solution
+            .coefficients()
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>(),
+        canonical_solution
+            .coefficients()
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        facade_solution.nodal().len(),
+        canonical_solution.nodal().len()
+    );
+    for ((facade_node, facade_value), (canonical_node, canonical_value)) in facade_solution
+        .nodal()
+        .iter()
+        .zip(canonical_solution.nodal())
+    {
+        assert_eq!(facade_node, canonical_node);
+        assert_eq!(
+            facade_value.map(f64::to_bits),
+            canonical_value.map(f64::to_bits)
+        );
+    }
+
+    let facade_error = facade.l2_h1_error(&facade_solution, &displacement, &|_, _| {
+        [[0.2, 0.3], [-0.1, 0.05]]
+    });
+    let canonical_error = canonical.l2_h1_error(&canonical_solution, &displacement, &|_, _| {
+        [[0.2, 0.3], [-0.1, 0.05]]
+    });
+    assert_eq!(facade_error.0.to_bits(), canonical_error.0.to_bits());
+    assert_eq!(facade_error.1.to_bits(), canonical_error.1.to_bits());
+}
+
+#[test]
+fn cutfront_typed_edge_band_delegates_bitwise_to_canonical_cutfem() {
+    let grid = Quadtree::uniform(3);
+    let sdf = HalfPlane {
+        normal: [1.0, 0.0],
+        offset: 2.0,
+    };
+    let clamp = |x: f64, _: f64| x == 0.0;
+    let traction = |_: f64, _: f64| [0.0, -1.0];
+    let zero = |_: f64, _: f64| [0.0, 0.0];
+    let support =
+        EdgeBand::new(DesignBoxEdge::Right, 0.25, 0.75).expect("valid typed right-edge support");
+    let facade = CutElasticity {
+        grid: &grid,
+        sdf: &sdf,
+        youngs: E_MOD,
+        poisson: NU,
+        nitsche_beta: 20.0,
+        ghost_gamma: 0.5,
+        quad_depth: 2,
+        clamp: Some(&clamp),
+        boundary_traction: None,
+        traction_free_interface: true,
+    };
+
+    let material = IsotropicElastic::new(E_MOD, NU, 1.0).expect("valid parity material");
+    let (lambda, mu) = material.lame();
+    let legacy_stiffness_scale = (lambda + 2.0 * mu) / mu;
+    let canonical = CanonicalCutElasticity {
+        grid: &grid,
+        sdf: &sdf,
+        material: &material,
+        nitsche_beta: 20.0 * legacy_stiffness_scale,
+        ghost_gamma: 0.5 * legacy_stiffness_scale,
+        quad_depth: 2,
+        clamp: Some(&clamp),
+        boundary_traction: None,
+        traction_free_interface: true,
+        solver_tol: 1e-12,
+        solver_max_iters: 60_000,
+    };
+
+    let facade_solution = facade
+        .solve_with_boundary_traction(
+            &zero,
+            &zero,
+            BoundaryTraction::EdgeBand {
+                support,
+                value: &traction,
+            },
+        )
+        .expect("typed facade solve delegates");
+    let canonical_solution = canonical
+        .solve_with_boundary_traction(
+            &zero,
+            &zero,
+            BoundaryTraction::EdgeBand {
+                support,
+                value: &traction,
+            },
+        )
+        .expect("typed canonical parity solve");
+
+    assert_eq!(
+        facade_solution
+            .coefficients()
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>(),
+        canonical_solution
+            .coefficients()
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        facade_solution.compliance().to_bits(),
+        canonical_solution.compliance().to_bits()
+    );
+    assert_eq!(facade_solution.nodal(), canonical_solution.nodal());
+
+    let occupied = CutElasticity {
+        boundary_traction: Some(&zero),
+        ..facade
+    };
+    assert!(matches!(
+        occupied.solve_with_boundary_traction(
+            &zero,
+            &zero,
+            BoundaryTraction::EdgeBand {
+                support,
+                value: &traction,
+            },
+        ),
+        Err(SolidError::InvalidInput { .. })
+    ));
+}
+
+#[test]
+fn cutfront_maps_canonical_refusals_fail_closed() {
+    fn invalid_what(error: SolidError) -> String {
+        match error {
+            SolidError::InvalidInput { what } => what,
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+    }
+
+    let grid = Quadtree::uniform(2);
+    let sdf = Circle {
+        center: [0.5, 0.5],
+        radius: 0.3,
+    };
+    let invalid_material = CutElasticity {
+        grid: &grid,
+        sdf: &sdf,
+        youngs: f64::NAN,
+        poisson: NU,
+        nitsche_beta: 20.0,
+        ghost_gamma: 0.5,
+        quad_depth: 2,
+        clamp: None,
+        boundary_traction: None,
+        traction_free_interface: false,
+    };
+    let error = invalid_material
+        .solve(&|_, _| [0.0, 0.0], &|_, _| [0.0, 0.0])
+        .expect_err("non-finite material must be refused");
+    assert!(invalid_what(error).contains("material card refused"));
+
+    let unsupported_regime = CutElasticity {
+        grid: &grid,
+        sdf: &sdf,
+        youngs: E_MOD,
+        poisson: 0.49,
+        nitsche_beta: 20.0,
+        ghost_gamma: 0.5,
+        quad_depth: 2,
+        clamp: None,
+        boundary_traction: None,
+        traction_free_interface: false,
+    };
+    let error = unsupported_regime
+        .solve(&|_, _| [0.0, 0.0], &|_, _| [0.0, 0.0])
+        .expect_err("uncertified near-incompressible regime must be refused");
+    assert!(invalid_what(error).contains("certified compressible-regime limit"));
+
+    let empty_sdf = Circle {
+        center: [2.0, 2.0],
+        radius: 0.1,
+    };
+    let empty_domain = CutElasticity {
+        grid: &grid,
+        sdf: &empty_sdf,
+        youngs: E_MOD,
+        poisson: NU,
+        nitsche_beta: 20.0,
+        ghost_gamma: 0.5,
+        quad_depth: 2,
+        clamp: None,
+        boundary_traction: None,
+        traction_free_interface: false,
+    };
+    let error = empty_domain
+        .solve(&|_, _| [0.0, 0.0], &|_, _| [0.0, 0.0])
+        .expect_err("empty domain must be refused");
+    assert!(invalid_what(error).contains("no active cells"));
 }
 
 // ------------------------------------------------------------------ sol-003

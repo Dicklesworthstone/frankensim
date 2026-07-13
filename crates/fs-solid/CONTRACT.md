@@ -6,8 +6,10 @@ Layer: L3 (FLUX). The elasticity core (plan §8.2, bead tfz.13):
 small-strain elasticity through finite-strain hyperelasticity, with a
 MEASURED locking-free formulation, on both the body-fitted and the
 CutFEM-on-SDF frontends. Constitutive laws live in fs-material; this
-crate owns kinematics, weak forms, boundary operators, and the
-globalized Newton loop.
+crate owns body-fitted kinematics, weak forms, boundary operators, and
+the globalized Newton loop. Vector CutFEM assembly and solution are
+owned canonically by fs-cutfem; fs-solid retains only a legacy
+constructor facade.
 
 ## Public types and semantics
 
@@ -31,11 +33,33 @@ globalized Newton loop.
   step) under linear load stepping; systems solve with MINRES
   (symmetric, indefinite-safe near buckling). `residual_and_tangent` /
   `potential_energy` are the public consistency probes.
-- `CutElasticity`/`CutSolution`: vector Q1 linear elasticity on
-  fs-cutfem background quadtrees — certified classification and cut
-  quadrature reused verbatim; VECTOR symmetric Nitsche (full traction
-  consistency `σ(N_a e_i)·n`, penalty β(λ+2μ)/h tied to certified cut
-  cells); componentwise ghost penalty γ(λ+2μ)h.
+- `CutElasticity`/`CutSolution`: source-compatible legacy facade over
+  `fs_cutfem::CutElasticity` and its canonical solution type. The facade
+  constructs `IsotropicElastic::new(E, ν, 1.0)`; the fixed strain limit
+  supplies compatibility metadata only and is not evidence that a solved
+  field remains inside that domain. Historical stabilization knobs retain
+  their physical coefficients by translating
+  `β_canonical = β_legacy(λ+2μ)/μ` and
+  `γ_canonical = γ_legacy(λ+2μ)/μ` before delegation. Canonical assembly,
+  graded-tree constraints, Nitsche and ghost terms, deterministic CG,
+  retained topology, and error integration are not reimplemented here.
+  The facade fixes the legacy solver controls at tolerance `1e-12` and
+  `60_000` iterations. The removed implementation's post-hoc
+  `1e-8` acceptance after targeting `1e-12` is not reproduced: a miss
+  of the canonical `1e-12` gate fails closed. `BoundaryTraction`,
+  `DesignBoxEdge`, and opaque checked `EdgeBand` are direct fs-cutfem
+  re-exports. `solve_with_boundary_traction` delegates the typed support
+  descriptor without inspecting or reimplementing it; the legacy callback
+  field must be `None`, and an SDF crossing through supported load still
+  refuses canonically.
+  Physical-coefficient equivalence is claimed only when each active term's
+  dimensionless translated coefficient is finite. Canonical validation refuses
+  an overflowing Nitsche translation when `traction_free_interface` is false
+  and any overflowing ghost translation. When `traction_free_interface` is
+  true, the unused translated Nitsche value is deliberately ignored and
+  carries no physical-coefficient claim. A future physical-coefficient input
+  surface is required to represent active terms without a non-representable
+  intermediate.
 - `select_formulation(RegimeIndicators)`: the documented
   element-selection policy — B-bar when ν ≥ 0.45 or slenderness ≥ 5
   (fs-regime's indicators feed this; the locking battery measures the
@@ -161,12 +185,24 @@ smaller steps), `UnknownPatch`, `UnsupportedBc` (fs-scenario mapping
 outside Dirichlet/Traction × Elasticity), and `InvalidInput`
 (non-finite/inconsistent caller data such as invalid contact
 parameters, infeasible starts, or malformed adjoint seeds).
+`InternalInvariant` distinguishes a corrupted lower-level solver graph from
+repairable caller input.
+
+The CutFEM facade maps only `CutFemError::SolveNotConverged` to
+`SolidError::SolveFailed`, preserving its iteration count and relative
+residual. A canonical `ConstraintCycle` maps to `InternalInvariant`; every
+material, parameter, geometry, callback, topology-admission, and
+unsupported-regime refusal, including an invalid typed edge band or a cut
+supported segment, maps to `SolidError::InvalidInput` with the canonical
+diagnostic. No canonical refusal is converted into a solution.
 
 ## Determinism class
 
 Bit-deterministic across runs on a fixed platform (ordered assembly,
-fs-solver CG/MINRES, no threading, no ambient state). Cross-ISA
-golden hashes are not yet recorded (follow-up).
+fs-solver CG/MINRES, no threading, no ambient state). CutFEM determinism
+and topology ordering are inherited directly from fs-cutfem rather than
+duplicated in this crate. Cross-ISA golden hashes are not yet recorded
+(follow-up).
 
 ## Cancellation behavior
 
@@ -224,7 +260,14 @@ cards); sol-004 tangent/energy consistency (≤ 1e-6); sol-005 locking
 battery (standard degrades ≥10×, B-bar ≤2×); sol-006 Cook's envelope;
 sol-007 Newton robustness (5-step large bending, 8-step compression,
 terminal contraction ≥ 100×); the selection-policy probe. Unit tests:
-mapped-mesh areas, selection thresholds.
+mapped-mesh areas, selection thresholds. The CutFEM ownership probes
+compare facade and direct canonical coefficients, nodal values,
+residuals, iteration counts, active cells, and error norms bitwise after
+the documented stabilization translation. A typed right-edge band likewise
+compares coefficients, nodal values, and assembled-load compliance bitwise and
+proves that an occupied legacy callback slot refuses. The probes also require
+invalid material data, the uncertified near-incompressible regime, and an
+empty domain to fail closed as `InvalidInput`.
 
 `tests/stability.rs` (bead tfz.15): stab-001 Euler pencil (analytic
 G2 + Richardson indicator); stab-002 von Mises truss closed-form
@@ -252,6 +295,15 @@ reversal dissipation, G4 bitwise resume.
 
 ## No-claim boundaries
 
+- The facade inherits fs-cutfem's no-claim for clipping a supported traction
+  segment cut by the SDF and for quadrature error bounds on arbitrary traction
+  callbacks. It only delegates checked support; it does not certify callback
+  smoothness or grow a second boundary assembler.
+- Extreme `(E, beta, gamma)` combinations whose active physical stabilization
+  products are finite but whose fs-cutfem dimensionless coefficients are not
+  representable are not claimed. Nitsche-active and ghost-active terms fail
+  closed pending a canonical physical-coefficient API; an unused Nitsche value
+  in traction-free mode is ignored rather than validated.
 - TDNNS-proper / weakly-imposed-symmetry FEEC stress elements: awaits
   the simplicial H(curl)/H(div) family bead (dcng); B-bar is the
   shipped, measured locking-free path with the same acceptance metric.
@@ -260,6 +312,11 @@ reversal dissipation, G4 bitwise resume.
 - Hyperelasticity on the CutFEM frontend (linear ships there; the
   finite-strain cut path composes this crate's Newton loop with
   fs-cutfem quadrature in a successor bead).
+- The legacy CutFEM facade makes no independent coercivity,
+  near-incompressible, quadrature, graded-tree, convergence, or
+  cancellation claim. In particular, material ratios beyond
+  fs-cutfem's certified compressible regime are refused rather than
+  routed to fs-solid's body-fitted B-bar formulation.
 - fs-opdsl-generated residual/adjoint paths (the DSL coverage bead);
   the hand path here passes the same consistency gates the DSL output
   must pass.

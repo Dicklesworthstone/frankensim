@@ -9,8 +9,8 @@
 //! The feature-required cte-004 VJP gate lives in `elasticity_adjoint.rs`.
 
 use fs_cutfem::{
-    Circle, CutElasticity, CutElasticityOperator, CutElasticitySolution, CutFemError, CutSdf,
-    HalfPlane, NodeKey, Quadtree, condition_estimate,
+    BoundaryTraction, Circle, CutElasticity, CutElasticityOperator, CutElasticitySolution,
+    CutFemError, CutSdf, DesignBoxEdge, EdgeBand, HalfPlane, NodeKey, Quadtree, condition_estimate,
 };
 use fs_ivl::Interval;
 use fs_material::IsotropicElastic;
@@ -745,6 +745,89 @@ fn test_q1_gradients(lo: [f64; 2], hi: [f64; 2], point: [f64; 2]) -> [[f64; 2]; 
     ]
 }
 
+fn test_elastic_traction(
+    gradient: [[f64; 2]; 2],
+    lambda: f64,
+    mu: f64,
+    normal: [f64; 2],
+) -> [f64; 2] {
+    let trace = gradient[0][0] + gradient[1][1];
+    let sigma_xx = lambda * trace + 2.0 * mu * gradient[0][0];
+    let sigma_yy = lambda * trace + 2.0 * mu * gradient[1][1];
+    let sigma_xy = mu * (gradient[0][1] + gradient[1][0]);
+    [
+        sigma_xx * normal[0] + sigma_xy * normal[1],
+        sigma_xy * normal[0] + sigma_yy * normal[1],
+    ]
+}
+
+fn test_vector_field(
+    grid: &Quadtree,
+    cell: (u32, u32, u32),
+    point: [f64; 2],
+    nodal: &BTreeMap<NodeKey, [f64; 2]>,
+) -> ([f64; 2], [[f64; 2]; 2]) {
+    let (lo, hi) = grid.rect(cell);
+    let hx = hi[0] - lo[0];
+    let hy = hi[1] - lo[1];
+    let xi = (point[0] - lo[0]) / hx;
+    let eta = (point[1] - lo[1]) / hy;
+    let shape = [
+        (1.0 - xi) * (1.0 - eta),
+        xi * (1.0 - eta),
+        xi * eta,
+        (1.0 - xi) * eta,
+    ];
+    let gradients = test_q1_gradients(lo, hi, point);
+    let values = grid.corner_nodes(cell).map(|node| nodal[&node]);
+    let mut value = [0.0; 2];
+    let mut gradient = [[0.0; 2]; 2];
+    for corner in 0..4 {
+        for component in 0..2 {
+            value[component] += shape[corner] * values[corner][component];
+            gradient[component][0] += gradients[corner][0] * values[corner][component];
+            gradient[component][1] += gradients[corner][1] * values[corner][component];
+        }
+    }
+    (value, gradient)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn independent_nitsche_forms(
+    grid: &Quadtree,
+    operator: &CutElasticityOperator,
+    test_nodal: &BTreeMap<NodeKey, [f64; 2]>,
+    trial_nodal: &BTreeMap<NodeKey, [f64; 2]>,
+    data: &dyn Fn(f64, f64) -> [f64; 2],
+    nitsche_beta: f64,
+    lambda: f64,
+    mu: f64,
+) -> (f64, f64) {
+    let mut bilinear = 0.0;
+    let mut linear = 0.0;
+    for (&cell, rules) in operator.cut_rules() {
+        let penalty = nitsche_beta * mu / grid.cell_h(cell);
+        for &(point, weight, normal) in &rules.iface {
+            let (test_value, test_gradient) = test_vector_field(grid, cell, point, test_nodal);
+            let (trial_value, trial_gradient) = test_vector_field(grid, cell, point, trial_nodal);
+            let test_traction = test_elastic_traction(test_gradient, lambda, mu, normal);
+            let trial_traction = test_elastic_traction(trial_gradient, lambda, mu, normal);
+            let boundary_data = data(point[0], point[1]);
+            bilinear += weight
+                * (penalty * (test_value[0] * trial_value[0] + test_value[1] * trial_value[1])
+                    - test_traction[0] * trial_value[0]
+                    - test_traction[1] * trial_value[1]
+                    - test_value[0] * trial_traction[0]
+                    - test_value[1] * trial_traction[1]);
+            linear += weight
+                * (penalty * (test_value[0] * boundary_data[0] + test_value[1] * boundary_data[1])
+                    - test_traction[0] * boundary_data[0]
+                    - test_traction[1] * boundary_data[1]);
+        }
+    }
+    (bilinear, linear)
+}
+
 fn independent_ghost_energy(
     grid: &Quadtree,
     operator: &CutElasticityOperator,
@@ -822,16 +905,6 @@ fn cte_005_graded_componentwise_patch_reconstructs_midpoints_and_replays() {
     );
     assert_public_expansion_basis(&operator, &constraints);
 
-    let hanging: BTreeSet<NodeKey> = constraints.iter().map(|(node, _)| *node).collect();
-    assert!(
-        operator.ghost_faces().iter().any(|&(left, right)| {
-            grid.corner_nodes(left)
-                .into_iter()
-                .chain(grid.corner_nodes(right))
-                .any(|node| hanging.contains(&node))
-        }),
-        "graded ghost support must include a constrained node"
-    );
     let ghost_free = CutElasticity {
         ghost_gamma: 0.0,
         ..cut
@@ -858,7 +931,7 @@ fn cte_005_graded_componentwise_patch_reconstructs_midpoints_and_replays() {
     assert!(
         (actual_ghost_energy - expected_ghost_energy).abs()
             <= 2e-11 * expected_ghost_energy.abs().max(1.0),
-        "constrained ghost energy mismatch: actual={actual_ghost_energy:e}, expected={expected_ghost_energy:e}"
+        "equal-level ghost energy mismatch: actual={actual_ghost_energy:e}, expected={expected_ghost_energy:e}"
     );
 
     let mut exact_coefficients = vec![0.0; operator.dof_count()];
@@ -935,7 +1008,189 @@ fn cte_005_graded_componentwise_patch_reconstructs_midpoints_and_replays() {
 }
 
 #[test]
-fn graded_body_and_outer_traction_loads_reduce_to_terminal_blocks() {
+#[allow(clippy::too_many_lines)]
+fn graded_nitsche_reduction_matches_reconstructed_field_energy() {
+    // Split only the lower-right base cell. The vertical interface x=0.6
+    // cuts two fine cells whose left corners include the midpoint hanging on
+    // the coarse lower-left cell. Ghost stabilization is disabled because its
+    // mixed-level cut-band redesign is deliberately outside v6dn.2.1.
+    let mut grid = Quadtree::with_room(1, 2);
+    grid.split((1, 1, 0));
+    let sdf = HalfPlane {
+        normal: [1.0, 0.0],
+        offset: 0.6,
+    };
+    let mat = material();
+    let data = |x: f64, y: f64| [0.2 + 0.1 * x, -0.3 + 0.05 * y];
+    let zero = |_: f64, _: f64| [0.0, 0.0];
+    let nitsche_problem = problem(&grid, &sdf, &mat, 0.0);
+    let nitsche = nitsche_problem
+        .assemble(&zero, &data)
+        .expect("mixed-level Nitsche operator");
+    let natural = CutElasticity {
+        traction_free_interface: true,
+        ..nitsche_problem
+    }
+    .assemble(&zero, &data)
+    .expect("matching natural-interface operator");
+    assert_eq!(nitsche.node_ids(), natural.node_ids());
+
+    let nodes = active_nodes(&grid, &nitsche);
+    let active: BTreeSet<_> = nitsche.active_cells().iter().copied().collect();
+    let constraints = grid.hanging_constraints(&active, &nodes);
+    let hanging: BTreeSet<_> = constraints.iter().map(|(node, _)| *node).collect();
+    let constrained_cut_cells: BTreeSet<_> = nitsche
+        .cut_rules()
+        .keys()
+        .copied()
+        .filter(|&cell| {
+            grid.corner_nodes(cell)
+                .into_iter()
+                .any(|node| hanging.contains(&node))
+        })
+        .collect();
+    assert!(
+        !constrained_cut_cells.is_empty(),
+        "fixture must put a non-identity hanging transform on Nitsche support"
+    );
+
+    let constraint_map: BTreeMap<_, _> = constraints.iter().copied().collect();
+    let mut expansions = BTreeMap::new();
+    for &node in &nodes {
+        expand_expected_node(
+            node,
+            &constraint_map,
+            nitsche.node_ids(),
+            &mut expansions,
+            &mut BTreeSet::new(),
+        );
+    }
+    assert!(
+        constrained_cut_cells.iter().any(|&cell| {
+            grid.corner_nodes(cell)
+                .into_iter()
+                .any(|node| expansions[&node].len() > 1)
+        }),
+        "constrained Nitsche support must carry a genuinely non-identity expansion"
+    );
+
+    let inverse_ids: BTreeMap<_, _> = nitsche
+        .node_ids()
+        .iter()
+        .map(|(&node, &id)| (id, node))
+        .collect();
+    let mut transformed_basis: Vec<BTreeMap<NodeKey, [f64; 2]>> =
+        Vec::with_capacity(nitsche.dof_count());
+    let mut naive_basis: Vec<BTreeMap<NodeKey, [f64; 2]>> = Vec::with_capacity(nitsche.dof_count());
+    for dof in 0..nitsche.dof_count() {
+        let terminal_id = dof / 2;
+        let component = dof % 2;
+        let transformed = expansions
+            .iter()
+            .map(|(&node, expansion)| {
+                let mut value = [0.0; 2];
+                value[component] = expansion
+                    .iter()
+                    .find_map(|&(id, weight)| (id == terminal_id).then_some(weight))
+                    .unwrap_or(0.0);
+                (node, value)
+            })
+            .collect();
+        let mut naive: BTreeMap<_, _> = nodes.iter().map(|&node| (node, [0.0; 2])).collect();
+        naive
+            .get_mut(&inverse_ids[&terminal_id])
+            .expect("terminal node belongs to the active nodal set")[component] = 1.0;
+        transformed_basis.push(transformed);
+        naive_basis.push(naive);
+    }
+
+    assert_bit_symmetric(&nitsche);
+    assert_bit_symmetric(&natural);
+    let (lambda, mu) = mat.lame();
+    let mut max_naive_matrix_error = 0.0f64;
+    let mut max_naive_rhs_error = 0.0f64;
+    for (column, (trial_transformed, trial_naive)) in
+        transformed_basis.iter().zip(&naive_basis).enumerate()
+    {
+        let mut coefficient = vec![0.0; nitsche.dof_count()];
+        coefficient[column] = 1.0;
+        let with_nitsche = nitsche.apply_vec(&coefficient);
+        let without_nitsche = natural.apply_vec(&coefficient);
+        for (row, (test_transformed, test_naive)) in
+            transformed_basis.iter().zip(&naive_basis).enumerate()
+        {
+            let (expected, _) = independent_nitsche_forms(
+                &grid,
+                &nitsche,
+                test_transformed,
+                trial_transformed,
+                &data,
+                nitsche_problem.nitsche_beta,
+                lambda,
+                mu,
+            );
+            let (naive, _) = independent_nitsche_forms(
+                &grid,
+                &nitsche,
+                test_naive,
+                trial_naive,
+                &data,
+                nitsche_problem.nitsche_beta,
+                lambda,
+                mu,
+            );
+            let actual = with_nitsche[row] - without_nitsche[row];
+            let scale = actual.abs().max(expected.abs()).max(1.0);
+            assert!(
+                (actual - expected).abs() <= 2e-12 * scale,
+                "reduced Nitsche matrix mismatch at ({row}, {column}): actual={actual:e}, expected={expected:e}"
+            );
+            max_naive_matrix_error = max_naive_matrix_error.max((expected - naive).abs());
+        }
+    }
+    for (row, (test_transformed, test_naive)) in
+        transformed_basis.iter().zip(&naive_basis).enumerate()
+    {
+        let (_, expected) = independent_nitsche_forms(
+            &grid,
+            &nitsche,
+            test_transformed,
+            test_transformed,
+            &data,
+            nitsche_problem.nitsche_beta,
+            lambda,
+            mu,
+        );
+        let (_, naive) = independent_nitsche_forms(
+            &grid,
+            &nitsche,
+            test_naive,
+            test_naive,
+            &data,
+            nitsche_problem.nitsche_beta,
+            lambda,
+            mu,
+        );
+        let actual = nitsche.rhs()[row] - natural.rhs()[row];
+        let scale = actual.abs().max(expected.abs()).max(1.0);
+        assert!(
+            (actual - expected).abs() <= 2e-12 * scale,
+            "reduced Nitsche RHS mismatch at {row}: actual={actual:e}, expected={expected:e}"
+        );
+        max_naive_rhs_error = max_naive_rhs_error.max((expected - naive).abs());
+    }
+    assert!(
+        max_naive_matrix_error > 1e-8,
+        "fixture did not distinguish T^T K T from a naive terminal submatrix"
+    );
+    assert!(
+        max_naive_rhs_error > 1e-8,
+        "fixture did not distinguish T^T f from a naive terminal subvector"
+    );
+}
+
+#[test]
+fn graded_body_reduces_and_outer_traction_conserves_terminal_loads() {
     let mut grid = Quadtree::with_room(1, 3);
     grid.refine_where(3, &|lo, _| lo[0] < 0.5 && lo[1] < 0.5);
     let sdf = HalfPlane {
@@ -970,6 +1225,17 @@ fn graded_body_and_outer_traction_loads_reduce_to_terminal_blocks() {
     assert_matrix_bits_eq(&combined, &traction_only);
     let nodes = active_nodes(&grid, &combined);
     assert!(combined.node_ids().len() < nodes.len());
+    let extent = grid.node_extent();
+    for &cell in traction_only.active_cells() {
+        for node in grid.corner_nodes(cell) {
+            if node.0 == 0 || node.0 == extent || node.1 == 0 || node.1 == extent {
+                assert!(
+                    traction_only.node_ids().contains_key(&node),
+                    "outer-box traction node {node:?} must be an unconstrained terminal"
+                );
+            }
+        }
+    }
     assert!(body_only.rhs().iter().any(|value| *value != 0.0));
     assert!(traction_only.rhs().iter().any(|value| *value != 0.0));
     let expected_body = independent_full_domain_load(&grid, &body_only, body_value, None);
@@ -990,6 +1256,170 @@ fn graded_body_and_outer_traction_loads_reduce_to_terminal_blocks() {
         let scale = combined.abs().max(body.abs()).max(traction.abs()).max(1.0);
         assert!((combined - body - traction).abs() <= 32.0 * f64::EPSILON * scale);
     }
+}
+
+#[test]
+fn typed_boundary_edge_bands_are_checked() {
+    for (start, end) in [
+        (f64::NAN, 0.5),
+        (0.5, f64::INFINITY),
+        (-f64::EPSILON, 0.5),
+        (0.5, 1.0 + f64::EPSILON),
+        (0.75, 0.25),
+    ] {
+        assert!(matches!(
+            EdgeBand::new(DesignBoxEdge::Right, start, end),
+            Err(CutFemError::InvalidElasticityInput { .. })
+        ));
+    }
+
+    let point = EdgeBand::new(DesignBoxEdge::Top, 0.5, 0.5)
+        .expect("measure-zero closed support remains representable");
+    assert_eq!(point.edge(), DesignBoxEdge::Top);
+    assert_eq!(point.start().to_bits(), 0.5f64.to_bits());
+    assert_eq!(point.end().to_bits(), 0.5f64.to_bits());
+}
+
+#[test]
+fn typed_right_edge_band_certifies_only_its_exact_support() {
+    let grid = Quadtree::uniform(2);
+    let sdf = HalfPlane {
+        normal: [0.0, 1.0],
+        offset: 0.5,
+    };
+    let mat = material();
+    let cut = CutElasticity {
+        ghost_gamma: 0.0,
+        traction_free_interface: true,
+        ..problem(&grid, &sdf, &mat, 0.0)
+    };
+    let traction = |_: f64, _: f64| [0.0, 1.0];
+    let zero = |_: f64, _: f64| [0.0, 0.0];
+    let disjoint_band =
+        EdgeBand::new(DesignBoxEdge::Right, 0.0, 0.25).expect("valid lower-right support");
+    let operator = cut
+        .assemble_with_boundary_traction(
+            &zero,
+            &zero,
+            BoundaryTraction::EdgeBand {
+                support: disjoint_band,
+                value: &traction,
+            },
+        )
+        .expect("support disjoint from the right-edge SDF cut must assemble");
+    let total_x: f64 = operator.rhs().iter().step_by(2).sum();
+    let total_y: f64 = operator.rhs().iter().skip(1).step_by(2).sum();
+    assert_eq!(total_x.to_bits(), 0.0f64.to_bits());
+    assert!((total_y - (disjoint_band.end() - disjoint_band.start())).abs() <= f64::EPSILON);
+
+    let cut_band =
+        EdgeBand::new(DesignBoxEdge::Right, 0.25, 0.75).expect("valid straddling support");
+    assert!(matches!(
+        cut.assemble_with_boundary_traction(
+            &zero,
+            &zero,
+            BoundaryTraction::EdgeBand {
+                support: cut_band,
+                value: &traction,
+            },
+        ),
+        Err(CutFemError::InvalidElasticityInput { .. })
+    ));
+
+    let endpoint_contact = EdgeBand::new(DesignBoxEdge::Right, 0.5, 0.75)
+        .expect("valid support touching the SDF crossing");
+    assert!(matches!(
+        cut.assemble_with_boundary_traction(
+            &zero,
+            &zero,
+            BoundaryTraction::EdgeBand {
+                support: endpoint_contact,
+                value: &traction,
+            },
+        ),
+        Err(CutFemError::InvalidElasticityInput { .. })
+    ));
+
+    let zero_traction = |_: f64, _: f64| [0.0, 0.0];
+    assert!(matches!(
+        cut.assemble_with_boundary_traction(
+            &zero,
+            &zero,
+            BoundaryTraction::Uncertified(&zero_traction),
+        ),
+        Err(CutFemError::InvalidElasticityInput { .. })
+    ));
+}
+
+#[test]
+fn aligned_typed_edge_band_matches_legacy_callback_bits() {
+    let grid = Quadtree::uniform(2);
+    let sdf = HalfPlane {
+        normal: [1.0, 0.0],
+        offset: 2.0,
+    };
+    let mat = material();
+    let value = [0.25, -0.75];
+    let legacy_traction = |x: f64, y: f64| {
+        if x == 1.0 && (0.25..=0.75).contains(&y) {
+            value
+        } else {
+            [0.0, 0.0]
+        }
+    };
+    let supported_traction = |_: f64, _: f64| value;
+    let zero = |_: f64, _: f64| [0.0, 0.0];
+    let legacy = CutElasticity {
+        ghost_gamma: 0.0,
+        boundary_traction: Some(&legacy_traction),
+        traction_free_interface: true,
+        ..problem(&grid, &sdf, &mat, 0.0)
+    }
+    .assemble(&zero, &zero)
+    .expect("legacy aligned callback");
+    let typed_problem = CutElasticity {
+        ghost_gamma: 0.0,
+        traction_free_interface: true,
+        ..problem(&grid, &sdf, &mat, 0.0)
+    };
+    let typed = typed_problem
+        .assemble_with_boundary_traction(
+            &zero,
+            &zero,
+            BoundaryTraction::EdgeBand {
+                support: EdgeBand::new(DesignBoxEdge::Right, 0.25, 0.75).expect("aligned support"),
+                value: &supported_traction,
+            },
+        )
+        .expect("typed aligned callback");
+    assert_operator_evidence_bits_eq(&legacy, &typed);
+
+    let occupied = CutElasticity {
+        boundary_traction: Some(&legacy_traction),
+        ..typed_problem
+    };
+    assert!(matches!(
+        occupied.assemble_with_boundary_traction(
+            &zero,
+            &zero,
+            BoundaryTraction::EdgeBand {
+                support: EdgeBand::new(DesignBoxEdge::Right, 0.25, 0.75).expect("aligned support"),
+                value: &supported_traction,
+            },
+        ),
+        Err(CutFemError::InvalidElasticityInput { .. })
+    ));
+    assert!(matches!(
+        occupied.solve_with_boundary_traction(
+            &zero,
+            &zero,
+            BoundaryTraction::EdgeBand {
+                support: EdgeBand::new(DesignBoxEdge::Right, 0.25, 0.75).expect("aligned support"),
+                value: &supported_traction,
+            },
+        ),
+        Err(CutFemError::InvalidElasticityInput { .. })
+    ));
 }
 
 #[test]

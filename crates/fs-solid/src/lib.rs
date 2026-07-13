@@ -4,8 +4,8 @@
 //! frontends (topology optimization solves THIS physics on octrees).
 //!
 //! Layer: L3. Constitutive laws live in fs-material (energies, exact
-//! AD stresses, consistent tangents); this crate owns KINEMATICS,
-//! WEAK FORMS, and NEWTON LOOPS:
+//! AD stresses, consistent tangents); this crate owns body-fitted
+//! KINEMATICS, WEAK FORMS, and NEWTON LOOPS:
 //! - [`mesh2`]: structured 2D body-fitted meshes — P1 triangles, Q1
 //!   quads, and mapped quadrilateral panels (Cook's membrane).
 //! - [`linear`]: plane-strain/plane-stress small-strain elasticity;
@@ -15,9 +15,9 @@
 //!   fs-material cards (Neo-Hookean, Mooney–Rivlin): exact residuals
 //!   and consistent tangents from the 3D deformation gradient,
 //!   Newton with backtracking line search and load stepping.
-//! - [`cutfront`]: the CutFEM frontend — vector Q1 on fs-cutfem
-//!   background quadtrees, symmetric Nitsche displacement conditions,
-//!   componentwise ghost penalty.
+//! - [`cutfront`]: a source-compatible legacy constructor that validates an
+//!   fs-material card and delegates vector Q1 CutFEM operations to the
+//!   canonical fs-cutfem implementation.
 //!
 //! Element-selection guidance (fs-regime's structural indicators feed
 //! these thresholds): [`select_formulation`] returns B-bar whenever
@@ -43,7 +43,7 @@ pub mod stability;
 
 pub use beamcol::{ForceBasedElement, PushoverStep};
 pub use continuation::{ArcSettings, PathEvent, PathResidual, PathState, advance, switch_branch};
-pub use cutfront::{CutElasticity, CutSolution};
+pub use cutfront::{BoundaryTraction, CutElasticity, CutSolution, DesignBoxEdge, EdgeBand};
 pub use fiber::{Fiber, FiberLaw, Section, SectionState, update_sections_batched};
 pub use hyper2d::{HyperProblem, NewtonReport, NewtonSettings};
 pub use linear::{Formulation, LinearProblem, PlaneKind};
@@ -100,6 +100,13 @@ pub enum SolidError {
         /// What was invalid.
         what: String,
     },
+    /// A lower-level solver invariant was violated even though caller input
+    /// had already passed validation. This indicates an implementation or
+    /// retained-topology defect, not a repairable user parameter.
+    InternalInvariant {
+        /// The invariant failure reported by the owning implementation.
+        what: String,
+    },
 }
 
 impl core::fmt::Display for SolidError {
@@ -133,6 +140,9 @@ impl core::fmt::Display for SolidError {
                 "fs-scenario condition outside the elasticity surface: {what}"
             ),
             SolidError::InvalidInput { what } => write!(f, "invalid input: {what}"),
+            SolidError::InternalInvariant { what } => {
+                write!(f, "internal solver invariant failed: {what}")
+            }
         }
     }
 }
