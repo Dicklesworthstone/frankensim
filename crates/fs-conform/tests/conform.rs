@@ -8,6 +8,7 @@ use fs_conform::{
     Composition, ConformanceSuite, Converter, ManufacturedCase, Tier, certify, check_adjoint,
     check_functoriality, check_identity, check_tolerance_honesty,
 };
+use fs_propcheck::{Shrink, check};
 
 fn dot(a: &[f64], b: &[f64]) -> f64 {
     a.iter().zip(b).map(|(x, y)| x * y).sum()
@@ -245,5 +246,85 @@ fn tiers_track_the_declared_error_and_r6_severity_is_uniform() {
     assert_eq!(
         certify(&first_party_liar, &full_suite()).tier,
         Tier::Rejected
+    );
+}
+
+// ---------------------------------------------------------------------------
+// G0 property adoption (bead frankensim-4nh8): generated functor and identity
+// laws with deterministic shrinking. The fixed cases above remain regression
+// pins; these exact small-integer cases cover the space between them.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug)]
+struct FunctorCase([i64; 10]);
+
+impl Shrink for FunctorCase {
+    fn shrink_candidates(&self) -> Vec<Self> {
+        let mut out = Vec::new();
+        for (index, value) in self.0.iter().enumerate() {
+            for candidate in value.shrink_candidates() {
+                let mut next = self.clone();
+                next.0[index] = candidate;
+                out.push(next);
+            }
+        }
+        out
+    }
+}
+
+fn integer_mtx(id: &str, [a00, a01, a10, a11]: [i64; 4]) -> Mtx {
+    Mtx::honest(
+        id,
+        vec![vec![a00 as f64, a01 as f64], vec![a10 as f64, a11 as f64]],
+        0.0,
+    )
+}
+
+#[test]
+fn g0_generated_functoriality_holds_exactly() {
+    check(
+        "restriction-map-functoriality",
+        0xC0F0_4A48_0001,
+        512,
+        |stream| FunctorCase(std::array::from_fn(|_| stream.int_in(-8, 8))),
+        |case| {
+            let [f00, f01, f10, f11, g00, g01, g10, g11, p0, p1] = case.0;
+            let f = integer_mtx("generated-f", [f00, f01, f10, f11]);
+            let g = integer_mtx("generated-g", [g00, g01, g10, g11]);
+            let direct = integer_mtx(
+                "generated-f-after-g",
+                [
+                    f00 * g00 + f01 * g10,
+                    f00 * g01 + f01 * g11,
+                    f10 * g00 + f11 * g10,
+                    f10 * g01 + f11 * g11,
+                ],
+            );
+            let composition = Composition {
+                after: &f,
+                direct: &direct,
+                probes: vec![vec![p0 as f64, p1 as f64]],
+            };
+            check_functoriality(&g, &composition, 0.0)
+        },
+    );
+}
+
+#[test]
+fn g0_generated_identity_holds_exactly() {
+    check(
+        "restriction-map-identity",
+        0xC0F0_4A48_0002,
+        512,
+        |stream| {
+            (
+                stream.int_in(-1_000_000, 1_000_000),
+                stream.int_in(-1_000_000, 1_000_000),
+            )
+        },
+        |&(x, y)| {
+            let identity = integer_mtx("generated-identity", [1, 0, 0, 1]);
+            check_identity(&identity, &[vec![x as f64, y as f64]], 0.0)
+        },
     );
 }

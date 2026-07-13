@@ -97,7 +97,14 @@ None.
 
 `tests/conformance.rs` (JSON verdicts, suite `fs-ga/conformance`):
 
-- **ga-001** identity battery (200 randomized rounds, PGA + CGA).
+- **ga-001** fixed identity battery (seed `0x6A_0001`, 200 rounds):
+  associativity, distributivity, grade partition, reverse, and vector-wedge
+  antisymmetry in PGA; associativity and reverse in CGA. Bead 4nh8 adds the
+  missing complete generated coverage without changing this fixed pin:
+  five 400-case PGA suites (`0x6A_1001..0x6A_1005`) and five 400-case CGA
+  suites (`0x6A_2001..0x6A_2005`), all shrink-armed. Approximate residuals
+  require every coefficient to be finite before applying the 1e−12 PGA or
+  1e−11 CGA bound; grade partitions compare exactly.
 - **ga-002** 1200 motor sandwiches vs Rodrigues+translation; kernel vs
   dense cross-check; `Mat34` lowering; tiny-rotation (1e−13 rad)
   stability near the screw-axis singularity.
@@ -145,3 +152,7 @@ correctness cross-checks and one-off transforms.
   compose increments.
 - Timing numbers above are from a shared, sometimes-loaded worker;
   ratios (not absolute ns) are the claim.
+- The generated dense G0 battery covers coefficients in `[−1, 1)` and is a
+  replayable defect detector, not a formal proof over arbitrary-magnitude f64
+  multivectors. Exhaustive blade-table tests remain the exact algebraic
+  structure check.

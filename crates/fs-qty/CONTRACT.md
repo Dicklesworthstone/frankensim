@@ -69,7 +69,9 @@ public API unchanged).
 ## Conformance tests
 `tests/conformance.rs`: Appendix C literal battery (qty-001), typed/erased
 bit-agreement (qty-002), JSON round-trip (qty-003), dimension safety
-(qty-004), parser totality over garbage (qty-005). Unit tests: 29 cases
+(qty-004), parser totality over garbage (qty-005), plus 1,200 deterministic
+fs-propcheck cases for dimension-vector commutation, inverse, and distributive
+laws with shrinking enabled and the fixed cases retained. Unit tests: 29 cases
 including the 20k-case seeded garbage battery and boundary battery.
 Compile-fail doctests prove the type-level rejections.
 

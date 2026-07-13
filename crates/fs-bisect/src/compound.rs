@@ -397,12 +397,15 @@ fn validate_admission_rule(rule: Option<&str>) -> Result<(), CompoundError> {
     Ok(())
 }
 
-/// Deterministic shrinking: candidates strictly "smaller" than `self`, in a
-/// FIXED order. An empty vector means fully shrunk.
-pub trait Shrink: Clone {
-    /// Smaller candidate inputs, most aggressive first (convention).
-    fn shrink_candidates(&self) -> Vec<Self>;
-}
+/// Shared deterministic shrinking contract: candidates are strictly smaller,
+/// most-aggressive-first, in a fixed order; an empty vector is a fixpoint.
+///
+/// `fs-bisect` publicly re-exports the dependency-free UTIL trait so existing
+/// failure-family inputs keep one implementation. This module's minimizer
+/// retains its stronger semantics: `fails(input) == true` means FAILURE,
+/// canonical identity is bracketed around callbacks, and hard work limits are
+/// enforced.
+pub use fs_propcheck::Shrink;
 
 /// The result of [`minimize`].
 #[derive(Debug, Clone)]

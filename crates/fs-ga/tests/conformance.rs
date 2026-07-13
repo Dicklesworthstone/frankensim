@@ -9,6 +9,46 @@ use fs_ga::{
     Cga, Mat34, Motor, Pga, Plane, Point, Quat, Vec3, cga, exp_bivector, motor_log,
     pga::{Line, axis_bivector, ideal_bivector},
 };
+use fs_propcheck::Shrink;
+
+#[derive(Clone, Debug)]
+struct GaCoeffs<const N: usize>([f64; N]);
+
+impl<const N: usize> Shrink for GaCoeffs<N> {
+    fn shrink_candidates(&self) -> Vec<Self> {
+        let mut candidates = Vec::new();
+        for (index, value) in self.0.iter().enumerate() {
+            for candidate in value.shrink_candidates() {
+                let mut coefficients = self.0;
+                coefficients[index] = candidate;
+                candidates.push(GaCoeffs(coefficients));
+            }
+        }
+        candidates
+    }
+}
+
+fn generate_coefficients<const N: usize>(stream: &mut fs_propcheck::Stream) -> GaCoeffs<N> {
+    GaCoeffs(core::array::from_fn(|_| stream.f64_in(-1.0, 1.0)))
+}
+
+fn as_pga(coefficients: &GaCoeffs<16>) -> Pga {
+    Pga(coefficients.0)
+}
+
+fn as_cga(coefficients: &GaCoeffs<32>) -> Cga {
+    Cga(coefficients.0)
+}
+
+fn pga_residual_within(residual: &Pga, tolerance: f64) -> bool {
+    // max_abs deliberately ignores unordered NaN comparisons, so finiteness
+    // is a separate, load-bearing part of every generated numeric law.
+    residual.0.iter().all(|value| value.is_finite()) && residual.max_abs() < tolerance
+}
+
+fn cga_residual_within(residual: &Cga, tolerance: f64) -> bool {
+    residual.0.iter().all(|value| value.is_finite()) && residual.max_abs() < tolerance
+}
 
 fn verdict(case: &str, detail: &str) {
     println!(
@@ -109,7 +149,181 @@ fn ga_001_identity_battery() {
     }
     verdict(
         "ga-001",
-        "200 rounds: associativity/distributivity/grade-partition/reverse laws in PGA+CGA",
+        "200 fixed rounds: five PGA laws; associativity and reverse in CGA",
+    );
+}
+
+/// G0 property adoption (bead frankensim-4nh8): the five dense PGA laws with
+/// integrated shrinking. The fixed ga-001 loop above remains unchanged.
+#[test]
+fn generated_pga_identity_laws() {
+    fs_propcheck::check(
+        "pga-geometric-product-associates",
+        0x6A_1001,
+        400,
+        |s| {
+            (
+                generate_coefficients::<16>(s),
+                generate_coefficients::<16>(s),
+                generate_coefficients::<16>(s),
+            )
+        },
+        |(a, b, c)| {
+            let (a, b, c) = (as_pga(a), as_pga(b), as_pga(c));
+            pga_residual_within(&a.gp(&b).gp(&c).sub(&a.gp(&b.gp(&c))), 1e-12)
+        },
+    );
+    fs_propcheck::check(
+        "pga-geometric-product-left-distributes",
+        0x6A_1002,
+        400,
+        |s| {
+            (
+                generate_coefficients::<16>(s),
+                generate_coefficients::<16>(s),
+                generate_coefficients::<16>(s),
+            )
+        },
+        |(a, b, c)| {
+            let (a, b, c) = (as_pga(a), as_pga(b), as_pga(c));
+            pga_residual_within(&a.gp(&b.add(&c)).sub(&a.gp(&b).add(&a.gp(&c))), 1e-12)
+        },
+    );
+    fs_propcheck::check(
+        "pga-grade-projections-partition",
+        0x6A_1003,
+        400,
+        generate_coefficients::<16>,
+        |coefficients| {
+            let value = as_pga(coefficients);
+            let reconstructed =
+                (0..=4).fold(Pga::zero(), |sum, grade| sum.add(&value.grade_part(grade)));
+            value.0.iter().all(|coefficient| coefficient.is_finite()) && reconstructed == value
+        },
+    );
+    fs_propcheck::check(
+        "pga-reverse-is-antiautomorphism",
+        0x6A_1004,
+        400,
+        |s| {
+            (
+                generate_coefficients::<16>(s),
+                generate_coefficients::<16>(s),
+            )
+        },
+        |(a, b)| {
+            let (a, b) = (as_pga(a), as_pga(b));
+            pga_residual_within(
+                &a.gp(&b).reverse().sub(&b.reverse().gp(&a.reverse())),
+                1e-12,
+            )
+        },
+    );
+    fs_propcheck::check(
+        "pga-vector-wedge-is-antisymmetric",
+        0x6A_1005,
+        400,
+        |s| {
+            (
+                generate_coefficients::<16>(s),
+                generate_coefficients::<16>(s),
+            )
+        },
+        |(a, b)| {
+            let (a, b) = (as_pga(a).grade_part(1), as_pga(b).grade_part(1));
+            pga_residual_within(&a.wedge(&b).add(&b.wedge(&a)), 1e-12)
+        },
+    );
+    verdict(
+        "ga-g0-propcheck-pga",
+        "five PGA laws x 400 generated cases, shrink-armed",
+    );
+}
+
+/// The same complete five-law battery for CGA. This supplies the three CGA
+/// laws the historical fixed ga-001 loop did not actually exercise.
+#[test]
+fn generated_cga_identity_laws() {
+    fs_propcheck::check(
+        "cga-geometric-product-associates",
+        0x6A_2001,
+        400,
+        |s| {
+            (
+                generate_coefficients::<32>(s),
+                generate_coefficients::<32>(s),
+                generate_coefficients::<32>(s),
+            )
+        },
+        |(a, b, c)| {
+            let (a, b, c) = (as_cga(a), as_cga(b), as_cga(c));
+            cga_residual_within(&a.gp(&b).gp(&c).sub(&a.gp(&b.gp(&c))), 1e-11)
+        },
+    );
+    fs_propcheck::check(
+        "cga-geometric-product-left-distributes",
+        0x6A_2002,
+        400,
+        |s| {
+            (
+                generate_coefficients::<32>(s),
+                generate_coefficients::<32>(s),
+                generate_coefficients::<32>(s),
+            )
+        },
+        |(a, b, c)| {
+            let (a, b, c) = (as_cga(a), as_cga(b), as_cga(c));
+            cga_residual_within(&a.gp(&b.add(&c)).sub(&a.gp(&b).add(&a.gp(&c))), 1e-11)
+        },
+    );
+    fs_propcheck::check(
+        "cga-grade-projections-partition",
+        0x6A_2003,
+        400,
+        generate_coefficients::<32>,
+        |coefficients| {
+            let value = as_cga(coefficients);
+            let reconstructed =
+                (0..=5).fold(Cga::zero(), |sum, grade| sum.add(&value.grade_part(grade)));
+            value.0.iter().all(|coefficient| coefficient.is_finite()) && reconstructed == value
+        },
+    );
+    fs_propcheck::check(
+        "cga-reverse-is-antiautomorphism",
+        0x6A_2004,
+        400,
+        |s| {
+            (
+                generate_coefficients::<32>(s),
+                generate_coefficients::<32>(s),
+            )
+        },
+        |(a, b)| {
+            let (a, b) = (as_cga(a), as_cga(b));
+            cga_residual_within(
+                &a.gp(&b).reverse().sub(&b.reverse().gp(&a.reverse())),
+                1e-11,
+            )
+        },
+    );
+    fs_propcheck::check(
+        "cga-vector-wedge-is-antisymmetric",
+        0x6A_2005,
+        400,
+        |s| {
+            (
+                generate_coefficients::<32>(s),
+                generate_coefficients::<32>(s),
+            )
+        },
+        |(a, b)| {
+            let (a, b) = (as_cga(a).grade_part(1), as_cga(b).grade_part(1));
+            cga_residual_within(&a.wedge(&b).add(&b.wedge(&a)), 1e-11)
+        },
+    );
+    verdict(
+        "ga-g0-propcheck-cga",
+        "five CGA laws x 400 generated cases, shrink-armed",
     );
 }
 

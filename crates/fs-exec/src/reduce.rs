@@ -277,6 +277,75 @@ pub fn audit_accumulator(
 mod tests {
     use super::*;
 
+    /// Test-only syntax tree whose merge records the exact reduction shape.
+    /// Empty is a lawful two-sided identity, as required by `Reduce`.
+    #[derive(Debug, PartialEq, Eq)]
+    enum Shape {
+        Empty,
+        Leaf(u64),
+        Node(Box<Shape>, Box<Shape>),
+    }
+
+    impl Reduce for Shape {
+        fn identity() -> Self {
+            Shape::Empty
+        }
+
+        fn merge(self, other: Self) -> Self {
+            match (self, other) {
+                (Shape::Empty, right) => right,
+                (left, Shape::Empty) => left,
+                (left, right) => Shape::Node(Box::new(left), Box::new(right)),
+            }
+        }
+    }
+
+    /// Independent statement of the contract: for n >= 2,
+    /// next_power_of_two(n) / 2 is the largest power of two below n.
+    fn expected_shape(start: u64, n: usize) -> Shape {
+        match n {
+            0 => Shape::Empty,
+            1 => Shape::Leaf(start),
+            _ => {
+                let split = n.next_power_of_two() / 2;
+                Shape::Node(
+                    Box::new(expected_shape(start, split)),
+                    Box::new(expected_shape(
+                        start + u64::try_from(split).expect("bounded split fits u64"),
+                        n - split,
+                    )),
+                )
+            }
+        }
+    }
+
+    #[test]
+    fn generated_tree_shapes_match_the_independent_length_oracle() {
+        fs_propcheck::check(
+            "pairwise-fold-length-keyed-shape",
+            0xE008_0001,
+            512,
+            |s| {
+                if s.next_u64() & 1 == 0 {
+                    let exponent =
+                        u32::try_from(s.int_in(0, 12)).expect("exponent is non-negative");
+                    let power = 1_i64 << exponent;
+                    u64::try_from((power + s.int_in(-2, 2)).clamp(0, 4_096))
+                        .expect("clamped length fits u64")
+                } else {
+                    u64::try_from(s.int_in(0, 4_096)).expect("length is non-negative")
+                }
+            },
+            |n| {
+                let n = usize::try_from(*n).expect("generated length fits usize");
+                let leaves: Vec<Shape> = (0..n)
+                    .map(|index| Shape::Leaf(u64::try_from(index).expect("bounded index fits u64")))
+                    .collect();
+                pairwise_fold(leaves) == expected_shape(0, n)
+            },
+        );
+    }
+
     /// Double-double oracle for compensated-sum accuracy (test-only; the
     /// production dd ladder is fs-ivl's).
     fn dd_sum(xs: &[f64]) -> f64 {

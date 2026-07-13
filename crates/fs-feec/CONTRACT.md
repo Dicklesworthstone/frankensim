@@ -212,6 +212,13 @@ orders ≈ 2.0 on the n = 4/8/16 Kuhn ladder; Hodge star positivity +
 dual-volume partition (Σ = |Ω|); Cochain container semantics (dims
 tag through d, container dd = 0, 128-byte alignment); cross-ISA
 golden hash.
+Bead 4nh8 adds a separate 600-case G0 property suite rooted at seed
+`0xFEEC_4A48_0001`: it selects the same deterministic fixture zoo and cycles
+shrinkable integer seeds into exact vertex/edge cochain extents (empty seeds
+mean the zero cochain), then requires integer `d₁d₀ = 0` and `d₂d₁ = 0`
+exactly. The historical three Philox trials per fixture and golden
+`0xa973_ca6b_07c3_9639` remain unchanged; this generated suite is scoped to
+the fixture zoo rather than claiming exhaustive topology coverage.
 `tests/highorder_battery.rs` (slice 1): Gauss–Legendre exactness to
 degree 2n−1 (n = 1..10) + node symmetry; Lobatto endpoint structure;
 sum-factorized apply vs the dense assembled Kronecker reference to

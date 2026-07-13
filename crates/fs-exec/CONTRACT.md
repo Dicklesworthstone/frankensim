@@ -366,6 +366,11 @@ a chaotic trajectory), exec-012 (kill-handle drains a deep tree,
 latency ledgered), and exec-013 (calibrate -> persist -> consume round
 trip; fingerprint keying and mismatch refusal; strict row domains;
 idempotent recalibration; canonical pinned replay).
+The `reduce` unit suite also runs bead 4nh8's G0 property harness: 512
+shrink-armed lengths in `0..=4096`, biased around powers of two, compare the
+complete `pairwise_fold` syntax tree against an independently stated
+`next_power_of_two(n) / 2` recursion (seed `0xE008_0001`). Existing fixed and
+G5 reduction pins remain unchanged.
 tests/constellation_smoke.rs pins the
 asupersync Budget vocabulary. In-module unit suites cover the gate, keys,
 Reduce laws, partitioning, victim orders, self-cancellation, and pool

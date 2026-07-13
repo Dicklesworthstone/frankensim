@@ -18,6 +18,7 @@ fs-obs = { path = "../fs-obs" }
 fs-substrate = { path = "../fs-substrate" }
 
 [dev-dependencies]
+fs-propcheck = { path = "../fs-propcheck" }
 
 [lints]
 workspace = true

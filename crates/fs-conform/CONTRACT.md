@@ -5,7 +5,8 @@ certify chart-to-chart converters into tiers by the sheaf axioms. Owns risk R6.
 
 ## Purpose and layer
 
-Layer L2 (restriction maps / Rep Router edges). No dependencies — pure Rust.
+Layer L2 (restriction maps / Rep Router edges). No runtime dependencies — pure
+Rust; `fs-propcheck` is test-only.
 
 ## Public types and semantics
 
@@ -57,19 +58,21 @@ None.
 
 ## Conformance tests
 
-`tests/conform.rs` (Proposal 7, 8 cases): adjoint consistency catches a lying
-transpose; tolerance honesty catches an understated error model; functoriality
-holds for a real composition and breaks on a wrong direct; identity
-recognition; a conformant converter is certified into a tier; a dishonest
-converter is Rejected; a failing functoriality witness rejects; tiers track
-declared error and R6 severity is uniform (a dishonest first-party converter is
-still Rejected).
+`tests/conform.rs`: nine fixed Proposal 7 regression tests plus two generated G0
+laws (512 cases each, deterministic seeds and integrated shrinking). The fixed
+tests cover adjoint consistency, tolerance honesty, correct and incorrect
+functoriality witnesses, identity recognition and false-identity rejection,
+tiering, and uniform first-party/third-party R6 severity. The generated laws
+exercise exact functor composition and identity action between the fixed pins.
 
 ## No-claim boundaries
 
 - Converters are modeled as finite-dimensional linear operators for the
   conformance harness; the SDK surface (the `Converter` trait) is what a real
   chart-to-chart trace/conversion operator implements.
+- The generated G0 laws use small, exactly representable 2x2 integer matrices
+  and probes. They do not certify arbitrary nonlinear converters or general
+  floating-point associativity.
 - The suite is SUPPLIED here (probes, manufactured cases, composition witness);
   AUTO-GENERATING it from a chart pair's sheaf axioms is the generator's job (a
   downstream producer feeding this harness).

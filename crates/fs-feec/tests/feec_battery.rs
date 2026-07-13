@@ -37,6 +37,16 @@ fn zoo() -> Vec<(&'static str, TetComplex, Vec<[f64; 3]>)> {
     ]
 }
 
+fn cycle_integer_cochain(seed_values: &[i64], len: usize) -> Vec<i64> {
+    if seed_values.is_empty() {
+        vec![0; len]
+    } else {
+        (0..len)
+            .map(|index| seed_values[index % seed_values.len()])
+            .collect()
+    }
+}
+
 #[test]
 fn dd_is_zero_exactly_on_the_zoo() {
     let mut stream = StreamKey {
@@ -74,6 +84,43 @@ fn dd_is_zero_exactly_on_the_zoo() {
         assert!(dense21.iter().all(|&v| v == 0.0), "{name}: CSR d2 d1 != 0");
         log("dd-zero", "pass", name);
     }
+}
+
+/// G0 generated exact-sequence battery (bead frankensim-4nh8). The existing
+/// three fixed Philox trials per fixture remain unchanged; this harness adds
+/// replay seeds and shrinking over both fixture selection and cochain values.
+#[test]
+fn generated_integer_cochains_satisfy_dd_zero_on_the_zoo() {
+    let fixtures = zoo();
+    fs_propcheck::check(
+        "feec-integer-dd-zero-on-fixture-zoo",
+        0xFEEC_4A48_0001,
+        600,
+        |s| {
+            (
+                s.next_u64(),
+                s.vec_of(32, |s| s.int_in(-1_000, 1_000)),
+                s.vec_of(32, |s| s.int_in(-1_000, 1_000)),
+            )
+        },
+        |(fixture_index, vertex_seed, edge_seed)| {
+            let fixture_index = usize::try_from(
+                *fixture_index % u64::try_from(fixtures.len()).expect("fixture count fits u64"),
+            )
+            .expect("reduced fixture index fits usize");
+            let (_, complex, _) = &fixtures[fixture_index];
+            let x0 = cycle_integer_cochain(vertex_seed, complex.vertex_count);
+            let x1 = cycle_integer_cochain(edge_seed, complex.edges.len());
+            let (d0, d1, d2) = (complex.d0(), complex.d1(), complex.d2());
+            d1.apply(&d0.apply(&x0)).iter().all(|&value| value == 0)
+                && d2.apply(&d1.apply(&x1)).iter().all(|&value| value == 0)
+        },
+    );
+    log(
+        "dd-zero-propcheck",
+        "pass",
+        "600 generated fixture/cochain cases, shrink-armed",
+    );
 }
 
 #[test]
@@ -483,7 +530,10 @@ fn on_unit_cube_boundary_detects_reconstructed_far_faces() {
     // the coordinate `kuhn_cube` stores for the i = n plane.
     for &n in &[49usize, 98, 103, 107] {
         let far = n as f64 * (1.0 / n as f64);
-        assert!(far < 1.0, "n={n}: far-face reconstruction must be < 1.0 (the bug trigger)");
+        assert!(
+            far < 1.0,
+            "n={n}: far-face reconstruction must be < 1.0 (the bug trigger)"
+        );
         assert!(
             on_unit_cube_boundary([far, 0.5, 0.5]),
             "n={n}: x = {far} (the i=n plane) must be on the cube boundary"

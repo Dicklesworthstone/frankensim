@@ -12,6 +12,7 @@ layer = "L6"
 
 [dependencies]
 fs-blake3 = { path = "../fs-blake3" }
+fs-propcheck = { path = "../fs-propcheck" }
 
 [dev-dependencies]
 # Test-only independent JSON/duplicate-key oracle for emitted manifests. These

@@ -85,7 +85,11 @@ chi-square/moment gates (uniform/normal/exponential), Lemire bias +
 rejection-replay, checkpoint-resume equality. Bead 1za9: `tests/ziggurat.rs`
 (ziggurat moments + bit-determinism + two-sample KS vs Box–Muller) and
 `tests/stream_battery.rs` (DEV-ONLY: uniform χ², lag-1 serial correlation,
-monobit balance, inter-stream correlation matrix).
+monobit balance, the fixed 8-stream × 100,000 inter-stream correlation
+matrix, and bead 4nh8's 128-case shrink-armed logical-identity battery).
+The generated battery checks distinct blocks at counters 0, 1, and 2⁶⁴−1
+plus a 4,096-sample `|correlation| < 0.10` smoke band; seed
+`0xF5_AA_0001` is the replay root.
 
 ## QMC (qmc module)
 - `Sobol::new(dim)` / `Sobol::scrambled(dim, seed)` — base-2 Sobol,
@@ -118,7 +122,8 @@ monobit balance, inter-stream correlation matrix).
   so the vectorized capsule is a separate hardware-gated effort.
 - A FULL PractRand/TestU01 port: `tests/stream_battery.rs` ships a
   representative dev-only subset (χ²/serial/monobit/inter-stream); the complete
-  suite + CI wiring remain a follow-up.
+  suite + CI wiring remain a follow-up. Finite sampled correlation bands are
+  defect detectors, not proofs of statistical independence.
 
 ## Exec key bridge (bead wf9.7.1, v1)
 

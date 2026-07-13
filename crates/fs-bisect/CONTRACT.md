@@ -6,9 +6,11 @@ minimize every counterexample into a permanent regression family.
 
 ## Purpose and layer
 
-Layer L6 (version control / orchestration). No numerical dependencies — pure
-control flow over a caller-supplied `CommitOracle`, and pure data plumbing for
-`compound`'s capture → minimize → probe → family → replay pipeline.
+Layer L6 (version control / orchestration). Runtime dependencies are the
+in-tree `fs-blake3` content hash and dependency-free UTIL `fs-propcheck` shrink
+trait — no numerical stack. The implementation remains pure control flow over
+a caller-supplied `CommitOracle` and data plumbing for `compound`'s capture →
+minimize → probe → family → replay pipeline.
 
 ## Public types and semantics
 
@@ -30,8 +32,10 @@ control flow over a caller-supplied `CommitOracle`, and pure data plumbing for
   culprit is `confirmed = true` (a *verified* localization vs the *estimated*
   single-fidelity one).
 - `compound` module (bead 6nb.9): `FailureCase<I>` (id, seed, typed input,
-  `InvariantClass`, contract surface, detail); `Shrink` (deterministic
-  candidate order) + `minimize` (greedy first-failing descent to a fixpoint or
+  `InvariantClass`, contract surface, detail); public re-export of
+  `fs_propcheck::Shrink` (one deterministic candidate contract across G0 and
+  permanent failure families) + `minimize` (`fails == true` means FAILURE;
+  greedy first-failing descent to a fixpoint or
   step budget, `converged` flag, typed `NotFailing` refusal on a passing input,
   and hard per-step/aggregate evaluation ceilings including the seed call);
   `probe_neighborhood` over a count- and aggregate-byte-bounded, uniquely
@@ -150,9 +154,14 @@ they are not linked into `fs-bisect` production code.
 - `compound` does not enact admission rules: `recommended_admission` is
   carried prose (as check-powi was born from the powi incident); enacting it
   is the responding agent's task.
-- `minimize` finds A minimal failing input under the caller's `Shrink` order,
+- `minimize` finds A minimal failing input under the caller's shared `Shrink`
+  order,
   not THE global minimum (greedy, not exhaustive); `converged = false` marks a
-  budget-limited descent honestly.
+  budget-limited descent honestly. It deliberately retains a distinct,
+  stricter operational contract than `fs_propcheck::minimize`: the predicate
+  uses the opposite polarity (`true` means failure), and fs-bisect additionally
+  enforces canonical callback bracketing, identifier validation, and hard
+  candidate/evaluation limits.
 - Caller callbacks (`fails`, `shrink_candidates`, `neighbors_of`, and `Canon`
   implementations) execute outside FrankenSim's control and must enforce their
   own cancellation and internal allocation budgets. `CanonWriter` bounds bytes

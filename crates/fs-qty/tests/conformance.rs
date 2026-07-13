@@ -134,7 +134,7 @@ fn to_dims(v: &[i64]) -> fs_qty::Dims {
 fn g0_dims_plus_commutes_and_minus_inverts() {
     fs_propcheck::check(
         "dims-plus-commutes",
-        0x9_71_0001,
+        0x971_0001,
         400,
         |s| (gen_dims(s), gen_dims(s)),
         |(a, b)| {
@@ -144,7 +144,7 @@ fn g0_dims_plus_commutes_and_minus_inverts() {
     );
     fs_propcheck::check(
         "dims-minus-inverts-plus",
-        0x9_71_0002,
+        0x971_0002,
         400,
         |s| (gen_dims(s), gen_dims(s)),
         |(a, b)| {
@@ -152,14 +152,16 @@ fn g0_dims_plus_commutes_and_minus_inverts() {
             da.plus(db).minus(db) == da
         },
     );
-    println!("{{\"suite\":\"fs-qty\",\"case\":\"g0-dims-laws\",\"verdict\":\"pass\",\"detail\":\"800 generated cases, shrink-armed\"}}");
+    println!(
+        "{{\"suite\":\"fs-qty\",\"case\":\"g0-dims-laws\",\"verdict\":\"pass\",\"detail\":\"800 generated cases, shrink-armed\"}}"
+    );
 }
 
 #[test]
 fn g0_dims_times_distributes_over_plus() {
     fs_propcheck::check(
         "dims-times-distributes",
-        0x9_71_0003,
+        0x971_0003,
         400,
         |s| (gen_dims(s), gen_dims(s), s.int_in(-3, 3)),
         |args| {
@@ -168,5 +170,7 @@ fn g0_dims_times_distributes_over_plus() {
             da.plus(db).times(n) == da.times(n).plus(db.times(n))
         },
     );
-    println!("{{\"suite\":\"fs-qty\",\"case\":\"g0-times-distributes\",\"verdict\":\"pass\",\"detail\":\"400 generated cases\"}}");
+    println!(
+        "{{\"suite\":\"fs-qty\",\"case\":\"g0-times-distributes\",\"verdict\":\"pass\",\"detail\":\"400 generated cases\"}}"
+    );
 }
