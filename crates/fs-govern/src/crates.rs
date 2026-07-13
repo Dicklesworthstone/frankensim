@@ -93,9 +93,12 @@ pub struct CrateAudit {
 
 impl CrateAudit {
     /// Does every crate declare a purpose, an owner, and a no-claim boundary?
+    /// Fails closed on an empty scope and requires the complete count to equal
+    /// the nonzero total, mirroring [`crate::RiskAudit`]: a zero-row audit is a
+    /// coverage gap, never a green.
     #[must_use]
     pub fn ok(&self) -> bool {
-        self.gaps.is_empty()
+        self.total > 0 && self.complete == self.total && self.gaps.is_empty()
     }
 }
 

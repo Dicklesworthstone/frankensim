@@ -1,7 +1,7 @@
 //! Battery for the addendum doctrine (P1–P8 + 4 governance rules) and the
 //! nineteen-proposal governance registry + audit.
 
-use fs_govern::{governance_audit, principles, proposals, proposals_json, rules};
+use fs_govern::{GovernanceAudit, governance_audit, principles, proposals, proposals_json, rules};
 use std::collections::BTreeSet;
 
 #[test]
@@ -94,6 +94,50 @@ fn governance_audit_is_schema_complete_but_operationally_red() {
     assert_eq!(a.verified_instrumented, 0);
     assert!(!a.operationally_managed());
     assert_eq!(a.operational_gaps.len(), 19);
+}
+
+#[test]
+fn empty_or_inconsistent_governance_audit_fails_closed() {
+    // Regression: `declared_schema_ok`/`operationally_managed` were a bare
+    // `*_gaps.is_empty()`, so a zero-row audit (no rows ⇒ no gaps) rendered
+    // GREEN — the empty-scope false-green that `RiskAudit` already guards. A
+    // zero-row audit is a MEASUREMENT GAP, never OK; and the operational
+    // verdict must assert `verified_instrumented == total`, not just an empty
+    // gap list, so an inconsistently-populated struct cannot report green.
+    let empty = GovernanceAudit {
+        total: 0,
+        with_kill_metric_and_owner: 0,
+        verified_instrumented: 0,
+        schema_gaps: vec![],
+        operational_gaps: vec![],
+    };
+    assert!(!empty.declared_schema_ok(), "empty scope must not be schema-ok");
+    assert!(!empty.operationally_managed(), "empty scope must not be managed");
+
+    // Rows declared but NONE verified, yet an empty operational_gaps list: the
+    // count check (not just the list) has to catch it.
+    let inconsistent = GovernanceAudit {
+        total: 3,
+        with_kill_metric_and_owner: 3,
+        verified_instrumented: 0,
+        schema_gaps: vec![],
+        operational_gaps: vec![],
+    };
+    assert!(inconsistent.declared_schema_ok(), "3/3 declared is schema-ok");
+    assert!(
+        !inconsistent.operationally_managed(),
+        "0/3 verified must fail even with an empty gap list"
+    );
+
+    // The genuine full-green path still passes (guard is not over-tight).
+    let green = GovernanceAudit {
+        total: 2,
+        with_kill_metric_and_owner: 2,
+        verified_instrumented: 2,
+        schema_gaps: vec![],
+        operational_gaps: vec![],
+    };
+    assert!(green.declared_schema_ok() && green.operationally_managed());
 }
 
 #[test]

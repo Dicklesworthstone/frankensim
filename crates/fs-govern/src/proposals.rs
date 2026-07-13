@@ -232,19 +232,26 @@ pub struct GovernanceAudit {
 impl GovernanceAudit {
     /// Does every proposal DECLARE a kill metric and an owner? (Schema
     /// only — says nothing about whether the kill switch would fire.)
+    /// Fails closed on an empty scope and requires the declared count to
+    /// equal the nonzero total, mirroring [`crate::RiskAudit`]: a
+    /// zero-row audit is a measurement gap, never a green.
     #[must_use]
     pub fn declared_schema_ok(&self) -> bool {
-        self.schema_gaps.is_empty()
+        self.total > 0 && self.with_kill_metric_and_owner == self.total && self.schema_gaps.is_empty()
     }
 
     /// Is every proposal OPERATIONALLY managed — declared AND its kill
     /// metric carries a fresh, identity-consistent receipt? Fails
     /// closed on any uninstrumented, stale, or bad-receipt entry: an
     /// uninstrumented kill measurement counts as killed or unmanaged,
-    /// never as green.
+    /// never as green. The `verified_instrumented == total` check is
+    /// independent of `operational_gaps` so an inconsistently-populated
+    /// struct cannot report green with zero verified rows.
     #[must_use]
     pub fn operationally_managed(&self) -> bool {
-        self.declared_schema_ok() && self.operational_gaps.is_empty()
+        self.declared_schema_ok()
+            && self.verified_instrumented == self.total
+            && self.operational_gaps.is_empty()
     }
 }
 

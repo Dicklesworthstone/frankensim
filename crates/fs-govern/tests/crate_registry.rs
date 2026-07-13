@@ -2,7 +2,7 @@
 //! the crate-contracts governance bead): completeness, unique names, expected
 //! inventory, owner mapping, the audit, and deterministic JSON.
 
-use fs_govern::{addendum_crates, crate_audit, crates_json};
+use fs_govern::{CrateAudit, addendum_crates, crate_audit, crates_json};
 use std::collections::BTreeSet;
 
 #[test]
@@ -56,6 +56,36 @@ fn crate_audit_is_complete() {
         "every crate must declare purpose + owner + no-claim"
     );
     assert!(a.ok(), "no gaps: {:?}", a.gaps);
+}
+
+#[test]
+fn empty_crate_audit_fails_closed() {
+    // Regression: `CrateAudit::ok` was a bare `gaps.is_empty()`, so a zero-row
+    // audit (no rows ⇒ no gaps) rendered GREEN. An empty scope is a coverage
+    // gap, never OK; `ok()` must require `complete == total > 0`.
+    let empty = CrateAudit {
+        total: 0,
+        complete: 0,
+        gaps: vec![],
+    };
+    assert!(!empty.ok(), "empty scope must not be ok");
+
+    // Rows present but not all complete, with an (inconsistently) empty gap
+    // list: the count check must still fail it.
+    let inconsistent = CrateAudit {
+        total: 3,
+        complete: 1,
+        gaps: vec![],
+    };
+    assert!(!inconsistent.ok(), "1/3 complete must fail even with no listed gaps");
+
+    // The genuine complete path still passes.
+    let green = CrateAudit {
+        total: 2,
+        complete: 2,
+        gaps: vec![],
+    };
+    assert!(green.ok());
 }
 
 #[test]
