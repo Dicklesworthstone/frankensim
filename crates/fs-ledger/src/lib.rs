@@ -1926,6 +1926,7 @@ impl LedgerError {
 }
 
 impl std::fmt::Display for LedgerError {
+    #[allow(clippy::too_many_lines)] // One exhaustive agent-facing error vocabulary must stay visibly aligned with code().
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             LedgerError::Open { path, detail } => {
@@ -3504,6 +3505,7 @@ impl Ledger {
         }
     }
 
+    #[allow(clippy::unused_self)] // Shared impl modules call this stateless validator as a Ledger method.
     fn require_op_field_bound(
         &self,
         field: &str,
@@ -4167,6 +4169,7 @@ impl Ledger {
         self.materialize_artifact_with_info(h, &info).map(Some)
     }
 
+    #[allow(clippy::unused_self)] // Mirrors the method-shaped streaming/materialization validators.
     fn require_artifact_read_limit(
         &self,
         h: &ContentHash,
