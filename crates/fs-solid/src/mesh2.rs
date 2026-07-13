@@ -107,13 +107,31 @@ impl Mesh2 {
         // stress — the solve "works" and every sign is wrong. Fail closed
         // at construction with the remedy named.
         for (k, conn) in elems.iter().enumerate() {
-            let p0 = nodes[conn[0]];
-            let p1 = nodes[conn[1]];
-            let p3 = nodes[conn[3]];
-            let cross = (p1[0] - p0[0]) * (p3[1] - p0[1]) - (p1[1] - p0[1]) * (p3[0] - p0[0]);
+            let p = [
+                nodes[conn[0]],
+                nodes[conn[1]],
+                nodes[conn[2]],
+                nodes[conn[3]],
+            ];
+            // det J of a bilinear Q1 map is itself bilinear, so it attains its
+            // extrema at the FOUR reference corners; a single-corner check can
+            // pass a non-convex quad that folds (det J < 0) at another corner.
+            // Require the signed corner area (2·det J at that corner) > 0 at all
+            // four — that guarantees det J > 0 EVERYWHERE and rejects folds too.
+            // At vertex i the incident edges go to i+1 and i-1.
+            let mut worst = f64::INFINITY;
+            for i in 0..4 {
+                let a = p[i];
+                let b = p[(i + 1) % 4];
+                let d = p[(i + 3) % 4];
+                let cross = (b[0] - a[0]) * (d[1] - a[1]) - (b[1] - a[1]) * (d[0] - a[0]);
+                worst = worst.min(cross);
+            }
             assert!(
-                cross > 0.0,
-                "mapped_quads: element {k} is orientation-reversing (corner cross                  product {cross:.3e} <= 0) — the map flips handedness; swap the two                  parameters or reverse one axis so det J > 0 everywhere"
+                worst > 0.0,
+                "mapped_quads: element {k} is orientation-reversing or non-convex (min corner \
+                 cross product {worst:.3e} <= 0) — the map flips handedness or folds; swap the \
+                 two parameters or reverse one axis so det J > 0 everywhere"
             );
         }
         Mesh2 {
