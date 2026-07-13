@@ -66,6 +66,8 @@ import sys
 status, head, dirty, snapshot_before, snapshot_after, rustc, cargo, lock_hash, provenance, detail, log = sys.argv[1:]
 optional = lambda value: None if value in ("<unavailable>", "<snapshot-failed>") else value
 print(json.dumps({
+    "identity_domain": "org.frankensim.ci.x86-cross-verdict.v1",
+    "identity_version": 1,
     "check": "quality-lane",
     "lane": "x86-cross-all-targets",
     "status": status,

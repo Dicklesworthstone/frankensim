@@ -7,6 +7,7 @@
 //! - `check-unsafe`   — unsafe code only in registered capsules (<300 lines, SAFETY.md).
 //! - `check-powi`     — no build-mode-dependent `f64::powi` in deterministic paths (bead 4xnt).
 //! - `check-goldens`  — golden hashes declare upstream couplings; drift re-freezes deliberately (bead y4pt).
+//! - `check-identities` — identity schemas classify fields and link mutation coverage (bead iu5l).
 //! - `check-claims`   — README hashes/crates/sentinels must exist in code (bead 06yc).
 //! - `check-closures` — closed bug beads must cite regression evidence or a disposition (bead hx4p).
 //! - `check-all`      — all of the above; non-zero exit on any violation.
@@ -24,6 +25,7 @@
 mod claims;
 mod closures;
 mod depgraph;
+mod identities;
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -170,15 +172,53 @@ struct Violation {
 }
 
 fn parse_manifest(path: &Path, text: &str) -> Result<Manifest, String> {
+    fn value_delimiter_delta(value: &str) -> i32 {
+        let mut quote = None;
+        let mut escaped = false;
+        let mut delta = 0i32;
+        for byte in value.bytes() {
+            if let Some(delimiter) = quote {
+                if escaped {
+                    escaped = false;
+                } else if byte == b'\\' && delimiter == b'"' {
+                    escaped = true;
+                } else if byte == delimiter {
+                    quote = None;
+                }
+                continue;
+            }
+            match byte {
+                b'\'' | b'"' => quote = Some(byte),
+                b'[' | b'{' => delta += 1,
+                b']' | b'}' => delta -= 1,
+                b'#' => break,
+                _ => {}
+            }
+        }
+        delta
+    }
+
     let mut section = String::new();
     let mut name = None;
     let mut layer = None;
     let mut runtime_deps = Vec::new();
     let mut dev_deps = Vec::new();
+    let mut multiline_value_depth = 0i32;
 
     for (lineno, raw) in text.lines().enumerate() {
         let line = raw.trim();
         if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if multiline_value_depth > 0 {
+            multiline_value_depth += value_delimiter_delta(line);
+            if multiline_value_depth < 0 {
+                return Err(format!(
+                    "{}:{}: multiline value closes more delimiters than it opens",
+                    path.display(),
+                    lineno + 1
+                ));
+            }
             continue;
         }
         if line.starts_with('[') {
@@ -194,6 +234,14 @@ fn parse_manifest(path: &Path, text: &str) -> Result<Manifest, String> {
         };
         let key = line[..eq].trim().trim_matches('"').to_string();
         let value = line[eq + 1..].trim();
+        multiline_value_depth = value_delimiter_delta(value);
+        if multiline_value_depth < 0 {
+            return Err(format!(
+                "{}:{}: value closes more delimiters than it opens",
+                path.display(),
+                lineno + 1
+            ));
+        }
         match section.as_str() {
             "[package]" if key == "name" => name = Some(value.trim_matches('"').to_string()),
             "[package.metadata.frankensim]" if key == "layer" => {
@@ -207,6 +255,12 @@ fn parse_manifest(path: &Path, text: &str) -> Result<Manifest, String> {
             "[dev-dependencies]" => dev_deps.push(key),
             _ => {}
         }
+    }
+    if multiline_value_depth != 0 {
+        return Err(format!(
+            "{}: unterminated multiline manifest value",
+            path.display()
+        ));
     }
 
     Ok(Manifest {
@@ -449,7 +503,13 @@ fn render_lock_rows(rows: &[LockRow], lock_hash: &str) -> String {
     let mut s = String::new();
     s.push_str("{\n  \"schema\": \"");
     s.push_str(CONSTELLATION_LOCK_SCHEMA);
-    s.push_str("\",\n  \"lock_hash\": \"");
+    s.push_str("\",\n  \"identity_domain\": \"");
+    s.push_str(CONSTELLATION_LOCK_IDENTITY_DOMAIN);
+    let _ = write!(
+        s,
+        "\",\n  \"identity_version\": {CONSTELLATION_LOCK_IDENTITY_VERSION}"
+    );
+    s.push_str(",\n  \"lock_hash\": \"");
     s.push_str(lock_hash);
     s.push_str("\",\n  \"note\": \"");
     s.push_str(&json_escape(CONSTELLATION_LOCK_NOTE));
@@ -917,9 +977,9 @@ fn emit(
 fn check_goldens(root: &Path) -> Vec<Violation> {
     // One-line-per-entry registry; extract string/number fields by key.
     fn field<'a>(line: &'a str, key: &str) -> Option<&'a str> {
-        let tag = format!("\"{key}\": ");
+        let tag = format!("\"{key}\"");
         let start = line.find(&tag)? + tag.len();
-        let rest = &line[start..];
+        let rest = line[start..].trim_start().strip_prefix(':')?.trim_start();
         if let Some(stripped) = rest.strip_prefix('"') {
             stripped.split('"').next()
         } else {
@@ -938,6 +998,22 @@ fn check_goldens(root: &Path) -> Vec<Violation> {
         ));
         return violations;
     };
+    let external_versions = if root.join("identity-authorities.json").is_file() {
+        match identities::external_coupling_versions(root) {
+            Ok(versions) => Some(versions),
+            Err(errors) => {
+                violations.extend(errors.into_iter().map(|error| {
+                    bail(format!(
+                        "external identity coupling {}: {}",
+                        error.crate_name, error.detail
+                    ))
+                }));
+                None
+            }
+        }
+    } else {
+        None
+    };
     // Surfaces: id -> (registry version, dependents filled later).
     let mut surface_versions: Vec<(String, u32)> = Vec::new();
     let mut in_surfaces = false;
@@ -955,10 +1031,9 @@ fn check_goldens(root: &Path) -> Vec<Violation> {
             continue;
         }
         if in_surfaces && line.trim_start().starts_with('{') {
-            let (Some(id), Some(file), Some(name), Some(ver)) = (
+            let (Some(id), Some(file), Some(ver)) = (
                 field(line, "id"),
                 field(line, "file"),
-                field(line, "const"),
                 field(line, "version"),
             ) else {
                 violations.push(bail(format!("malformed surface row: {line}")));
@@ -966,6 +1041,21 @@ fn check_goldens(root: &Path) -> Vec<Violation> {
             };
             let Ok(reg_ver) = ver.parse::<u32>() else {
                 violations.push(bail(format!("surface {id}: bad version {ver:?}")));
+                continue;
+            };
+            if let Some(symbol) = field(line, "symbol") {
+                if let Some(versions) = &external_versions
+                    && versions.get(id) != Some(&reg_ver)
+                {
+                    violations.push(bail(format!(
+                        "external surface {id}: {file}#{symbol} v{reg_ver} is not an exact validated identity authority coupling"
+                    )));
+                }
+                surface_versions.push((id.to_string(), reg_ver));
+                continue;
+            }
+            let Some(name) = field(line, "const") else {
+                violations.push(bail(format!("malformed surface row: {line}")));
                 continue;
             };
             let needle = format!("pub const {name}: u32 = ");
@@ -988,9 +1078,66 @@ fn check_goldens(root: &Path) -> Vec<Violation> {
                     .collect();
                 violations.push(bail(format!(
                     "surface {id} version drifted: source declares {actual}, registry pins \
-                     {reg_ver} — an upstream semantic change must deliberately re-freeze its \
+                    {reg_ver} — an upstream semantic change must deliberately re-freeze its \
                      dependents {dependents:?} (docs/GOLDEN_POLICY.md), then update both pins"
                 )));
+            }
+            if let Some(domain_const) = field(line, "domain_const") {
+                let Some(expected_domain) = field(line, "domain") else {
+                    violations.push(bail(format!(
+                        "surface {id}: domain_const {domain_const} requires a domain literal"
+                    )));
+                    continue;
+                };
+                let (domain_file, domain_symbol) =
+                    if let Some((path, symbol)) = domain_const.split_once('#') {
+                        let path = Path::new(path);
+                        if symbol.is_empty()
+                            || path.is_absolute()
+                            || path.components().any(|component| {
+                                !matches!(component, std::path::Component::Normal(_))
+                            })
+                        {
+                            violations.push(bail(format!(
+                                "surface {id}: domain_const {domain_const:?} is not a safe \
+                                 repo-relative path#symbol reference"
+                            )));
+                            continue;
+                        }
+                        (path.to_path_buf(), symbol)
+                    } else {
+                        (PathBuf::from(file), domain_const)
+                    };
+                let domain_src =
+                    std::fs::read_to_string(root.join(&domain_file)).unwrap_or_default();
+                let domain_needle = format!("const {domain_symbol}: &str =");
+                let actual_domain = domain_src
+                    .find(&domain_needle)
+                    .and_then(|at| {
+                        domain_src[at + domain_needle.len()..]
+                            .trim_start()
+                            .strip_prefix('"')
+                    })
+                    .and_then(|rest| rest.split('"').next());
+                if actual_domain != Some(expected_domain) {
+                    violations.push(bail(format!(
+                        "surface {id} domain drifted: {} must declare \
+                         `{domain_needle} \"{expected_domain}\";` — domain rotations require a \
+                         semantic version bump and deliberate golden-coupling annotation",
+                        domain_file.display(),
+                    )));
+                }
+                let explicit_version = expected_domain == "fsid"
+                    || expected_domain
+                        .split(['.', ':', '-'])
+                        .any(|segment| segment == format!("v{reg_ver}"));
+                if !explicit_version {
+                    violations.push(bail(format!(
+                        "surface {id}: domain {expected_domain:?} must carry an exact \
+                         v{reg_ver} dot/colon segment; schema/domain \
+                         versions may not drift independently"
+                    )));
+                }
             }
             surface_versions.push((id.to_string(), reg_ver));
         }
@@ -1071,6 +1218,8 @@ struct LockRow {
 }
 
 const CONSTELLATION_LOCK_SCHEMA: &str = "frankensim-constellation-lock-v2";
+const CONSTELLATION_LOCK_IDENTITY_VERSION: u32 = 1;
+const CONSTELLATION_LOCK_IDENTITY_DOMAIN: &str = "org.frankensim.xtask.constellation-lock.v1";
 const CONSTELLATION_LOCK_NOTE: &str = "lock_hash covers (lib, version, git_head) only — paths are per-machine; remote is transport for bootstrap-constellation (content identity is the git head)";
 const MAX_CONSTELLATION_LOCK_BYTES: usize = 1_048_576;
 
@@ -1230,6 +1379,11 @@ fn parse_lock_rows(text: &str) -> Result<(String, Vec<LockRow>), String> {
     let mut parser = CanonicalJsonParser::new(text);
     parser.expect("{\n  \"schema\": ")?;
     let schema = parser.string()?;
+    parser.expect(",\n  \"identity_domain\": ")?;
+    let identity_domain = parser.string()?;
+    parser.expect(&format!(
+        ",\n  \"identity_version\": {CONSTELLATION_LOCK_IDENTITY_VERSION}"
+    ))?;
     parser.expect(",\n  \"lock_hash\": ")?;
     let lock_hash = parser.string()?;
     parser.expect(",\n  \"note\": ")?;
@@ -1282,6 +1436,11 @@ fn parse_lock_rows(text: &str) -> Result<(String, Vec<LockRow>), String> {
 
     if schema != CONSTELLATION_LOCK_SCHEMA {
         return Err(format!("unsupported constellation lock schema {schema:?}"));
+    }
+    if identity_domain != CONSTELLATION_LOCK_IDENTITY_DOMAIN {
+        return Err(format!(
+            "unsupported constellation lock identity domain {identity_domain:?}"
+        ));
     }
     if note != CONSTELLATION_LOCK_NOTE {
         return Err("constellation.lock carries a non-canonical identity note".to_string());
@@ -1442,6 +1601,9 @@ fn hidden_index_entry(index_flags: &str) -> Option<&str> {
 
 const BOOTSTRAP_INCOMPLETE_KEY: &str = "frankensim.bootstrapIncomplete";
 const BOOTSTRAP_PROVENANCE_SCHEMA: &str = "frankensim-constellation-bootstrap-v2";
+const BOOTSTRAP_PROVENANCE_IDENTITY_VERSION: u32 = 1;
+const BOOTSTRAP_PROVENANCE_IDENTITY_DOMAIN: &str =
+    "org.frankensim.xtask.constellation-bootstrap-provenance.v1";
 
 fn clear_bootstrap_marker(target: &Path) -> Result<(), String> {
     git_run(
@@ -1843,9 +2005,11 @@ fn cmd_bootstrap(root: &Path) -> ExitCode {
     }
     // Build provenance: the lock hash + every fetched/verified identity.
     let prov = format!(
-        "{{\n\"schema\": \"{BOOTSTRAP_PROVENANCE_SCHEMA}\",\n\"lock_hash\": \"{lock_hash}\",\n\"dest\": \"{}\",\n\"libraries\": [\n{}\n]\n}}\n",
+        "{{\n\"schema\": \"{BOOTSTRAP_PROVENANCE_SCHEMA}\",\n\"identity_domain\": \"{identity_domain}\",\n\"identity_version\": {identity_version},\n\"lock_hash\": \"{lock_hash}\",\n\"dest\": \"{}\",\n\"libraries\": [\n{}\n]\n}}\n",
         json_escape(&dest.display().to_string()),
-        provenance.join(",\n")
+        provenance.join(",\n"),
+        identity_domain = BOOTSTRAP_PROVENANCE_IDENTITY_DOMAIN,
+        identity_version = BOOTSTRAP_PROVENANCE_IDENTITY_VERSION,
     );
     let prov_path = dest.join("constellation-bootstrap.json");
     if let Err(e) = std::fs::write(&prov_path, prov) {
@@ -1883,6 +2047,7 @@ fn main() -> ExitCode {
         "lock-constellation" => return cmd_constellation(&root, false),
         "check-constellation" => return cmd_constellation(&root, true),
         "bootstrap-constellation" => return cmd_bootstrap(&root),
+        "generate-identities" => return identities::generate_identities(&root),
         "depgraph-receipt" => {
             let rest: Vec<String> = std::env::args().skip(2).collect();
             return match depgraph::cmd_depgraph_receipt(&root, &rest) {
@@ -1909,6 +2074,10 @@ fn main() -> ExitCode {
         "check-unsafe" => (check_unsafe(&root), vec!["unsafe-capsules"]),
         "check-powi" => (check_powi(&root), vec!["powi-determinism"]),
         "check-goldens" => (check_goldens(&root), vec!["golden-couplings"]),
+        "check-identities" => (
+            identities::check_identities(&root),
+            vec!["semantic-identities"],
+        ),
         "check-claims" => (claims::check_claims(&root), vec!["claim-state"]),
         "check-closures" => (closures::check_closures(&root), vec!["closure-evidence"]),
         "check-all" => {
@@ -1918,6 +2087,7 @@ fn main() -> ExitCode {
             v.extend(check_unsafe(&root));
             v.extend(check_powi(&root));
             v.extend(check_goldens(&root));
+            v.extend(identities::check_identities(&root));
             v.extend(claims::check_claims(&root));
             v.extend(closures::check_closures(&root));
             (
@@ -1929,6 +2099,7 @@ fn main() -> ExitCode {
                     "unsafe-capsules",
                     "powi-determinism",
                     "golden-couplings",
+                    "semantic-identities",
                     "claim-state",
                     "closure-evidence",
                 ],
@@ -1938,7 +2109,8 @@ fn main() -> ExitCode {
             eprintln!(
                 "unknown command {other:?}; use check-layers|check-deps|check-contracts|\
                  check-unsafe|check-powi|check-goldens|check-claims|check-closures|\
-                 check-all|lock-constellation|check-constellation"
+                 check-identities|check-all|generate-identities|lock-constellation|\
+                 check-constellation"
             );
             return ExitCode::FAILURE;
         }
@@ -1967,7 +2139,7 @@ mod tests {
         );
         write(
             "golden-couplings.json",
-            "{\n\"surfaces\": [\n{\"id\": \"mini:semantics\", \"file\": \"crates/mini/src/lib.rs\", \"const\": \"MINI_SEMANTICS_VERSION\", \"version\": 1}\n],\n\"goldens\": [\n{\"golden\": \"mini:golden\", \"file\": \"crates/mini/src/lib.rs\", \"const\": \"GOLDEN_HASH\", \"depends_on\": \"mini:semantics=1\", \"justification\": \"recorded at fixture landing, both modes, committed tree\"}\n]\n}\n",
+            "{\n\"surfaces\": [\n{\"id\":\"mini:semantics\",\"file\":\"crates/mini/src/lib.rs\",\"const\":\"MINI_SEMANTICS_VERSION\",\"version\":1}\n],\n\"goldens\": [\n{\"golden\":\"mini:golden\",\"file\":\"crates/mini/src/lib.rs\",\"const\":\"GOLDEN_HASH\",\"depends_on\":\"mini:semantics=1\",\"justification\":\"recorded at fixture landing, both modes, committed tree\"}\n]\n}\n",
         );
         assert!(
             check_goldens(&root).is_empty(),
@@ -2005,6 +2177,62 @@ mod tests {
         assert!(v[0].detail.contains("GOLDEN_POLICY"), "{}", v[0].detail);
     }
 
+    #[test]
+    fn goldens_resolve_qualified_domain_constants_fail_closed() {
+        let root = std::env::temp_dir().join(format!(
+            "xtask-goldens-qualified-domain-{}",
+            std::process::id()
+        ));
+        let write = |rel: &str, text: &str| {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().expect("fixture parent")).expect("fixture dirs");
+            std::fs::write(path, text).expect("fixture write");
+        };
+        write(
+            "crates/owner/src/lib.rs",
+            "pub const OWNER_VERSION: u32 = 2;\nconst GOLDEN_HASH: u64 = 7;\n",
+        );
+        write(
+            "crates/shared/src/lib.rs",
+            "pub const SHARED_DOMAIN: &str = \"fs-recompute-node-v2\";\n",
+        );
+        let registry = "{\n\"surfaces\": [\n{\"id\": \"owner:identity\", \"file\": \"crates/owner/src/lib.rs\", \"const\": \"OWNER_VERSION\", \"version\": 2, \"domain_const\": \"crates/shared/src/lib.rs#SHARED_DOMAIN\", \"domain\": \"fs-recompute-node-v2\"}\n],\n\"goldens\": [\n{\"golden\": \"owner:golden\", \"file\": \"crates/owner/src/lib.rs\", \"const\": \"GOLDEN_HASH\", \"depends_on\": \"owner:identity=2\", \"justification\": \"recorded at fixture landing, both modes, committed tree\"}\n]\n}\n";
+        write("golden-couplings.json", registry);
+        assert!(
+            check_goldens(&root).is_empty(),
+            "qualified domain fixture must pass: {:?}",
+            check_goldens(&root)
+        );
+
+        write(
+            "crates/shared/src/lib.rs",
+            "pub const SHARED_DOMAIN: &str = \"fs-recompute-node-v3\";\n",
+        );
+        let violations = check_goldens(&root);
+        assert!(
+            violations
+                .iter()
+                .any(|violation| violation.detail.contains("domain drifted")
+                    && violation.detail.contains("crates/shared/src/lib.rs")),
+            "qualified domain drift must name the external source: {violations:?}"
+        );
+
+        write(
+            "golden-couplings.json",
+            &registry.replace(
+                "crates/shared/src/lib.rs#SHARED_DOMAIN",
+                "../outside.rs#SHARED_DOMAIN",
+            ),
+        );
+        let violations = check_goldens(&root);
+        assert!(
+            violations
+                .iter()
+                .any(|violation| violation.detail.contains("not a safe repo-relative")),
+            "unsafe qualified domain reference must fail closed: {violations:?}"
+        );
+    }
+
     use super::*;
 
     fn manifest(name: &str, layer: &str, deps: &[&str]) -> Manifest {
@@ -2027,6 +2255,25 @@ mod tests {
             m.runtime_deps,
             vec!["fs-qty".to_string(), "asupersync".to_string()]
         );
+    }
+
+    #[test]
+    fn manifest_parser_skips_multiline_feature_arrays() {
+        let toml = concat!(
+            "[package]\n",
+            "name = \"fs-x\"\n",
+            "[package.metadata.frankensim]\n",
+            "layer = \"L1\"\n",
+            "[dependencies]\n",
+            "fs-qty = { path = \"../fs-qty\", optional = true }\n",
+            "[features]\n",
+            "frontier = [\n",
+            "  \"dep:fs-qty\",\n",
+            "]\n",
+        );
+        let parsed = parse_manifest(Path::new("crates/fs-x/Cargo.toml"), toml)
+            .expect("multiline feature arrays are valid TOML");
+        assert_eq!(parsed.runtime_deps, vec!["fs-qty"]);
     }
 
     #[test]
@@ -2548,6 +2795,18 @@ mod tests {
             1,
         );
         assert!(parse_lock_rows(&wrong_schema).is_err());
+        let wrong_identity_domain = tracked.replacen(
+            CONSTELLATION_LOCK_IDENTITY_DOMAIN,
+            "org.frankensim.xtask.constellation-lock.v0",
+            1,
+        );
+        assert!(parse_lock_rows(&wrong_identity_domain).is_err());
+        let wrong_identity_version = tracked.replacen(
+            &format!("\"identity_version\": {CONSTELLATION_LOCK_IDENTITY_VERSION}"),
+            "\"identity_version\": 0",
+            1,
+        );
+        assert!(parse_lock_rows(&wrong_identity_version).is_err());
         assert!(parse_lock_rows(&format!("{tracked}trailing-junk\n")).is_err());
 
         let escaped = render_lockfile(

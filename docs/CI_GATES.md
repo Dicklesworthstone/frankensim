@@ -53,11 +53,15 @@ criteria.
   runtime behavior or generated machine-code quality - real x86 execution still
   lives on the Threadripper lanes.
 - The `scripts/ci/x86_runtime_sweep.sh` lane (bead yuyy) closes that runtime
-  gap for the pre-release flow: full workspace tests (`--no-fail-fast`) on
-  the first quiet, reachable Threadripper (ts1/ts2), fast-forwarded to
-  origin/main, load-gated with bounded retries (the workers double as rch
-  lanes whose background traffic can kill long runs), and dirty/diverged
-  clones refused with a named host diagnostic. Local and remote pre/post dirt
+  gap for the pre-release flow: on the first quiet, reachable Threadripper
+  (ts1/ts2), fast-forwarded to origin/main, it first runs `cargo run --locked
+  -p xtask -- check-identities`, which recomputes and byte-compares the
+  committed `identity-schemas.json`, then runs the full workspace tests
+  (`--no-fail-fast`). Both commands use the same hermetic target directory,
+  their exact statuses are retained, and either failure fails the lane. The
+  lane is load-gated with bounded retries (the workers double as rch lanes
+  whose background traffic can kill long runs), and dirty/diverged clones are
+  refused with a named host diagnostic. Local and remote pre/post dirt
   probes disable global excludes, independently enumerate untracked paths using
   only repository `.gitignore` rules, and reject hidden index flags. Exactly one terminal JSONL
   verdict represents the overall run. The lane never stashes, drops, or
@@ -66,7 +70,8 @@ criteria.
   `scripts/ci/checkout_constellation.sh --snapshot` identity; after Cargo it
   captures the identity again and requires equality. That binds exact root
   content, `constellation.lock`, and every pinned/clean path-dependency sibling.
-  Cargo runs with `--locked`, and a pass requires its exact exit status, an
+  Both Cargo commands run with `--locked`, and a pass requires each exact exit
+  status, an
   unchanged before/after HEAD and snapshot, clean post-test remote and local
   worktrees, at least one
   completed suite, no failed suite, and a successfully retained full log. The
@@ -99,6 +104,7 @@ criteria.
 | `check-unsafe` | unsafe outside registered <300-line capsules with SAFETY.md |
 | `check-powi` | optimization-level-dependent `f64::powi` on determinism paths |
 | `check-goldens` | golden hashes whose upstream semantic surfaces drifted without a deliberate re-freeze (`golden-couplings.json`, docs/GOLDEN_POLICY.md) |
+| `check-identities` | persisted/replayed identity schemas with unclassified source fields, missing exact-field mutations or replay-version refusal guard targets, stale generated coverage, or schema/domain drift without a golden-coupling bump (`identity-schemas.json`) |
 | `check-claims` | claim-state drift in the tracker mirror |
 
 Each is also runnable alone (same names). Golden re-pins follow

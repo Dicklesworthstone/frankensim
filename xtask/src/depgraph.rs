@@ -20,6 +20,7 @@ use std::thread;
 use std::os::unix::fs::MetadataExt as _;
 
 #[path = "../../crates/fs-la/depgraph_receipt_format.rs"]
+#[allow(dead_code)] // xtask consumes only the receipt grammar; fs-la owns identity helpers.
 mod receipt_format;
 
 const CLOSURE_ROOT: &str = "fs-la";
@@ -659,22 +660,23 @@ fn cargo_identity(cargo: &Path) -> Result<receipt_format::CargoIdentity, String>
 }
 
 #[derive(Debug)]
-enum JsonValue {
+pub(super) enum JsonValue {
     Null,
     String(String),
     Array(Vec<JsonValue>),
     Object(BTreeMap<String, JsonValue>),
-    Ignored,
+    Bool,
+    Number(String),
 }
 
-struct JsonParser<'a> {
+pub(super) struct JsonParser<'a> {
     input: &'a str,
     cursor: usize,
     nodes: usize,
 }
 
 impl<'a> JsonParser<'a> {
-    fn new(input: &'a str) -> Self {
+    pub(super) fn new(input: &'a str) -> Self {
         Self {
             input,
             cursor: 0,
@@ -687,7 +689,7 @@ impl<'a> JsonParser<'a> {
             .input
             .as_bytes()
             .get(self.cursor)
-            .is_some_and(u8::is_ascii_whitespace)
+            .is_some_and(|byte| matches!(byte, b' ' | b'\t' | b'\r' | b'\n'))
         {
             self.cursor += 1;
         }
@@ -795,6 +797,82 @@ impl<'a> JsonParser<'a> {
         Ok(out)
     }
 
+    fn number(&mut self) -> Result<String, String> {
+        let start = self.cursor;
+        if self.input.as_bytes().get(self.cursor) == Some(&b'-') {
+            self.cursor += 1;
+        }
+        match self.input.as_bytes().get(self.cursor).copied() {
+            Some(b'0') => {
+                self.cursor += 1;
+                if self
+                    .input
+                    .as_bytes()
+                    .get(self.cursor)
+                    .is_some_and(u8::is_ascii_digit)
+                {
+                    return Err("invalid Cargo metadata number with a leading zero".to_string());
+                }
+            }
+            Some(b'1'..=b'9') => {
+                self.cursor += 1;
+                while self
+                    .input
+                    .as_bytes()
+                    .get(self.cursor)
+                    .is_some_and(u8::is_ascii_digit)
+                {
+                    self.cursor += 1;
+                }
+            }
+            _ => return Err("invalid Cargo metadata number".to_string()),
+        }
+        if self.input.as_bytes().get(self.cursor) == Some(&b'.') {
+            self.cursor += 1;
+            let fraction = self.cursor;
+            while self
+                .input
+                .as_bytes()
+                .get(self.cursor)
+                .is_some_and(u8::is_ascii_digit)
+            {
+                self.cursor += 1;
+            }
+            if self.cursor == fraction {
+                return Err("invalid Cargo metadata number fraction".to_string());
+            }
+        }
+        if self
+            .input
+            .as_bytes()
+            .get(self.cursor)
+            .is_some_and(|byte| matches!(byte, b'e' | b'E'))
+        {
+            self.cursor += 1;
+            if self
+                .input
+                .as_bytes()
+                .get(self.cursor)
+                .is_some_and(|byte| matches!(byte, b'+' | b'-'))
+            {
+                self.cursor += 1;
+            }
+            let exponent = self.cursor;
+            while self
+                .input
+                .as_bytes()
+                .get(self.cursor)
+                .is_some_and(u8::is_ascii_digit)
+            {
+                self.cursor += 1;
+            }
+            if self.cursor == exponent {
+                return Err("invalid Cargo metadata number exponent".to_string());
+            }
+        }
+        Ok(self.input[start..self.cursor].to_string())
+    }
+
     fn value(&mut self, depth: usize) -> Result<JsonValue, String> {
         if depth > 128 || self.nodes >= 2_000_000 {
             return Err("Cargo metadata JSON exceeds depth/node bounds".to_string());
@@ -854,24 +932,13 @@ impl<'a> JsonParser<'a> {
             }
             Some(b't') => {
                 self.expect(b"true")?;
-                Ok(JsonValue::Ignored)
+                Ok(JsonValue::Bool)
             }
             Some(b'f') => {
                 self.expect(b"false")?;
-                Ok(JsonValue::Ignored)
+                Ok(JsonValue::Bool)
             }
-            Some(b'-' | b'0'..=b'9') => {
-                let start = self.cursor;
-                while self.input.as_bytes().get(self.cursor).is_some_and(|byte| {
-                    byte.is_ascii_digit() || matches!(byte, b'-' | b'+' | b'.' | b'e' | b'E')
-                }) {
-                    self.cursor += 1;
-                }
-                self.input[start..self.cursor]
-                    .parse::<f64>()
-                    .map_err(|_| "invalid Cargo metadata number".to_string())?;
-                Ok(JsonValue::Ignored)
-            }
+            Some(b'-' | b'0'..=b'9') => self.number().map(JsonValue::Number),
             _ => Err(format!(
                 "unexpected Cargo metadata token at byte {}",
                 self.cursor
@@ -879,7 +946,7 @@ impl<'a> JsonParser<'a> {
         }
     }
 
-    fn finish(mut self) -> Result<JsonValue, String> {
+    pub(super) fn finish(mut self) -> Result<JsonValue, String> {
         let value = self.value(0)?;
         self.skip_space();
         if self.cursor != self.input.len() {

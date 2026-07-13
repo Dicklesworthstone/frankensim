@@ -6,8 +6,9 @@
 # differently on x86 — per-ISA schedule engagement (the obq0 fs-cheb
 # golden divergence), storage/page-size behavior (u8og), capsule
 # dispatch, fsqlite MVCC differences. It picks the first REACHABLE and
-# QUIET Threadripper, fast-forwards its clone to origin/main, and runs
-# the full workspace test suite there (--no-fail-fast), reporting one
+# QUIET Threadripper, fast-forwards its clone to origin/main, recomputes
+# and byte-compares the committed identity-schemas.json, then runs the
+# full workspace test suite there (--no-fail-fast), reporting one
 # quality-lane JSONL verdict bound to the tested HEAD and machine.
 #
 # Operational lessons encoded (from the hand runs this lane replaces):
@@ -55,6 +56,8 @@ import sys
 
 status, host, head, detail, log = sys.argv[1:]
 print(json.dumps({
+    "identity_domain": "org.frankensim.ci.x86-runtime-verdict.v1",
+    "identity_version": 1,
     "check": "quality-lane",
     "lane": "x86-runtime-workspace-tests",
     "status": status,
@@ -198,8 +201,18 @@ set +e
 # artifact races. The sweep owns its own warm dir inside the clone.
 setsid env PATH="$HOME/.cargo/bin:$PATH" \
   CARGO_TARGET_DIR="$clone/target/x86-runtime-sweep" \
+  cargo run --locked -p xtask -- check-identities >>"$log" 2>&1
+identity_status=$?
+setsid env PATH="$HOME/.cargo/bin:$PATH" \
+  CARGO_TARGET_DIR="$clone/target/x86-runtime-sweep" \
   cargo test --locked --workspace --no-fail-fast >>"$log" 2>&1
-status=$?
+workspace_test_status=$?
+status=$identity_status
+if test "$status" -eq 0; then
+  status=$workspace_test_status
+fi
+printf '\nFSIM_IDENTITY_EXIT=%s\nFSIM_CARGO_EXIT=%s\nFSIM_LANE_EXIT=%s\n' \
+  "$identity_status" "$workspace_test_status" "$status" >>"$log"
 set -e
 final_head=$(git rev-parse HEAD) || exit 123
 final_worktree=$(repo_dirt) || exit 124
@@ -215,8 +228,8 @@ if test -n "$final_worktree"; then
 else
   worktree_state=clean
 fi
-printf '\nFSIM_CARGO_EXIT=%s\nFSIM_HEAD_BEFORE=%s\nFSIM_HEAD_AFTER=%s\nFSIM_WORKTREE_AFTER=%s\nFSIM_SNAPSHOT_AFTER_STATUS=%s\nFSIM_SNAPSHOT_AFTER=%s\n' \
-  "$status" "$expected_head" "$final_head" "$worktree_state" \
+printf 'FSIM_HEAD_BEFORE=%s\nFSIM_HEAD_AFTER=%s\nFSIM_WORKTREE_AFTER=%s\nFSIM_SNAPSHOT_AFTER_STATUS=%s\nFSIM_SNAPSHOT_AFTER=%s\n' \
+  "$expected_head" "$final_head" "$worktree_state" \
   "$snapshot_after_status" "$snapshot_after" >>"$log"
 if test -n "$final_worktree"; then
   printf 'FSIM_WORKTREE_PORCELAIN_BEGIN\n%s\nFSIM_WORKTREE_PORCELAIN_END\n' \
@@ -238,7 +251,9 @@ REMOTE_RUN
     fi
     ok=$(grep -cE 'test result: ok' "$log" || true)
     failed=$(grep -cE 'test result: FAILED' "$log" || true)
+    identity_status=$(sed -n 's/^FSIM_IDENTITY_EXIT=//p' "$log" | tail -1)
     recorded_status=$(sed -n 's/^FSIM_CARGO_EXIT=//p' "$log" | tail -1)
+    lane_status=$(sed -n 's/^FSIM_LANE_EXIT=//p' "$log" | tail -1)
     before=$(sed -n 's/^FSIM_HEAD_BEFORE=//p' "$log" | tail -1)
     after=$(sed -n 's/^FSIM_HEAD_AFTER=//p' "$log" | tail -1)
     worktree=$(sed -n 's/^FSIM_WORKTREE_AFTER=//p' "$log" | tail -1)
@@ -251,7 +266,9 @@ REMOTE_RUN
       local_dirt_after="<inspection-failed>"
     fi
     if [ "$remote_status" -eq 0 ] \
+        && [ "$identity_status" = "0" ] \
         && [ "$recorded_status" = "0" ] \
+        && [ "$lane_status" = "0" ] \
         && [ "$before" = "$head" ] \
         && [ "$after" = "$head" ] \
         && [ "$worktree" = "clean" ] \
@@ -263,11 +280,12 @@ REMOTE_RUN
         && [ -z "$local_dirt_after" ] \
         && [ "$failed" -eq 0 ] \
         && [ "$ok" -gt 0 ]; then
-      row "pass" "$host" "$head" "workspace runtime tests green on x86: ${ok} suites" "$log"
+      row "pass" "$host" "$head" \
+        "identity registry and workspace runtime tests green on x86: ${ok} suites" "$log"
       exit 0
     fi
     row "fail" "$host" "$head" \
-      "x86 runtime command status=${remote_status}/${recorded_status:-missing}, heads=${before:-missing}/${after:-missing}, worktree=${worktree:-missing}, snapshots=${snapshot_before_status:-missing}/${snapshot_after_status:-missing}:${snapshot_before:-missing}/${snapshot_after:-missing}, local=${LOCAL_HEAD}/${local_after}:${local_dirt_after:+dirty}, suites=${failed} red/${ok} green" "$log"
+      "x86 runtime command status=${remote_status}/${lane_status:-missing} (identities=${identity_status:-missing}, workspace-tests=${recorded_status:-missing}), heads=${before:-missing}/${after:-missing}, worktree=${worktree:-missing}, snapshots=${snapshot_before_status:-missing}/${snapshot_after_status:-missing}:${snapshot_before:-missing}/${snapshot_after:-missing}, local=${LOCAL_HEAD}/${local_after}:${local_dirt_after:+dirty}, suites=${failed} red/${ok} green" "$log"
     exit 1
   done
   if [ "$attempt" -lt "$RETRIES" ]; then

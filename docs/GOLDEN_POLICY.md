@@ -24,6 +24,13 @@ golden that must be deliberately re-frozen. An upstream semantic
 change therefore POINTS AT its downstream goldens instead of
 surprising them.
 
+Identity-owning surfaces additionally pin their exact domain constant and
+literal in the same surface row. `check-goldens` rejects a domain/value drift,
+and `check-identities` requires every generated identity declaration to name a
+matching surface/version. Changing an identity schema or domain therefore
+requires one deliberate version/coupling update; regenerating
+`identity-schemas.json` alone cannot bless a silent re-key.
+
 ## The justified-bump protocol
 
 A golden re-pin is valid only when ALL of the following hold:

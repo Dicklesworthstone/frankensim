@@ -107,6 +107,8 @@ import sys
 head, dirty, before, after, lock_hash, prefix_hash, provenance, status, log_dir = sys.argv[1:]
 optional = lambda value: None if value == "<unavailable>" else value
 print(json.dumps({
+    "identity_domain": "org.frankensim.ci.quality-proof-record.v1",
+    "identity_version": 1,
     "check": "quality-proof-seal",
     "provenance_state": provenance,
     "status": status,

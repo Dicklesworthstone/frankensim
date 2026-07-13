@@ -1,5 +1,7 @@
 {
   "schema": "frankensim-constellation-lock-v2",
+  "identity_domain": "org.frankensim.xtask.constellation-lock.v1",
+  "identity_version": 1,
   "lock_hash": "b971d153e9ae8c7f",
   "note": "lock_hash covers (lib, version, git_head) only — paths are per-machine; remote is transport for bootstrap-constellation (content identity is the git head)",
   "libraries": [
