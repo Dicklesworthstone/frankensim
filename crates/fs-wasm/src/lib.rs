@@ -281,17 +281,29 @@ pub fn chebyshev_spectrum(kind: u32) -> Vec<f64> {
 ///
 /// The last two bracket the TRUE range with a machine-checkable guarantee —
 /// not a float estimate. Real `fs-ivl` interval + Taylor-model arithmetic.
+/// Non-finite inputs or a bounded Taylor allocation refusal return an empty
+/// vector, which carries no enclosure claim.
 pub fn taylor_bound(center: f64, radius: f64, order_in: usize) -> Vec<f64> {
+    if !center.is_finite() || !radius.is_finite() {
+        return Vec::new();
+    }
     let c = center.clamp(-3.0, 3.0);
     let r = radius.clamp(1.0e-3, 2.0);
     let k = order_in.clamp(1, 16);
     let dom = Interval::new(c - r, c + r);
-    let mut out = Vec::with_capacity(k + 2);
+    let mut out = Vec::new();
+    if out.try_reserve_exact(k + 2).is_err() {
+        return out;
+    }
     let mut lo = f64::NAN;
     let mut hi = f64::NAN;
     for order in 1..=k {
-        let x = TaylorModel1::variable(dom, order);
-        let f = x.sin().exp(); // exp∘sin — genuinely nonlinear, non-monotone
+        let Ok(x) = TaylorModel1::variable(dom, order) else {
+            return Vec::new();
+        };
+        let Ok(f) = x.sin().and_then(|sine| sine.exp()) else {
+            return Vec::new();
+        }; // exp∘sin — genuinely nonlinear, non-monotone
         out.push(f.remainder().width());
         if order == k {
             let b = f.bound();
@@ -715,6 +727,18 @@ pub fn compensated_sum(count_in: usize, log10_big_in: i32) -> Vec<f64> {
 
 /* ----------------------------------------------------------------------- */
 /*  The JavaScript boundary (wasm32 only)                                   */
+#[cfg(test)]
+mod tests {
+    use super::taylor_bound;
+
+    #[test]
+    fn taylor_bound_refuses_non_finite_inputs_without_trapping() {
+        assert!(taylor_bound(f64::NAN, 1.0, 5).is_empty());
+        assert!(taylor_bound(0.0, f64::INFINITY, 5).is_empty());
+        assert_eq!(taylor_bound(0.0, 0.25, 5).len(), 7);
+    }
+}
+
 /* ----------------------------------------------------------------------- */
 
 #[cfg(target_arch = "wasm32")]

@@ -434,13 +434,14 @@ pub fn schedule_campaign(
 /// A lean, **fnx-free** ground structure — exactly the fields the truss LP and
 /// the critical-path logic actually read (`nodes`, `members`, `lengths`).
 ///
-/// WHY THIS EXISTS: `fs_truss::GroundStructure::grid` additionally builds an
-/// `fnx_classes::Graph`, and that construction calls `std::time::Instant::now()`
-/// / `SystemTime::now()` (fine natively) which *compile but TRAP at runtime* on
-/// `wasm32-unknown-unknown` ("time not implemented on this platform") — killing
-/// the page. The truss LP never reads that graph, so the grid generator, the
-/// LP `assemble`, and the PDHG `solve`/`diagnostics` (all fs-sparse-only) are
-/// transcribed here so the wasm runtime path never touches fnx. It shares the
+/// WHY THIS EXISTS: `fs_truss::GroundStructure::try_grid` additionally builds
+/// an `fnx_classes::Graph`, whose internal compatibility-evidence path reads a
+/// wall clock during construction (fine natively) that *compiles but TRAPS at
+/// runtime* on `wasm32-unknown-unknown` ("time not implemented on this
+/// platform") — killing the page. The truss LP never reads that graph, so the
+/// grid enumeration, the numerical core of LP `try_assemble`, and the PDHG
+/// `solve`/`diagnostics` are transcribed here so the wasm runtime path never
+/// touches fnx. It shares the
 /// same bounded tropical analysis, but cross-implementation bit identity is not
 /// claimed until a retained native/WASM golden verifies it.
 struct LeanGround {
@@ -449,7 +450,8 @@ struct LeanGround {
     lengths: Vec<f64>,
 }
 
-/// Replicates `fs_truss::GroundStructure::grid` (ground.rs) WITHOUT the fnx
+/// Replicates the candidate enumeration in `GroundStructure::try_grid`
+/// (ground.rs) WITHOUT the fnx
 /// `Graph`: the node grid, the length-bound filter, and the collinear-through-
 /// node skip. (Our rules carry an empty `angles` set, so the direction filter
 /// is a no-op and is omitted.)
@@ -522,7 +524,8 @@ struct LeanReport {
 }
 
 impl LeanLp {
-    /// Faithful transcription of `fs_truss::LayoutLp::assemble` (lp.rs).
+    /// Numerical transcription of `fs_truss::LayoutLp::try_assemble` (lp.rs),
+    /// without the native admitted-value and `Cx` boundary.
     fn assemble(
         gs: &LeanGround,
         supported: &dyn Fn(usize, usize) -> bool,

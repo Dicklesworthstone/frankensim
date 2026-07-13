@@ -17,9 +17,10 @@
 //! `NaN` / an empty vector, and every documented panic precondition of the
 //! composed crates is respected. Nothing here can trap — a wasm trap would kill
 //! the whole page. In particular the LAYOUT stage of the frame flagship uses a
-//! FAITHFUL fnx-free vendor of the truss LP (an `fnx` `Graph` construction in
-//! `fs_truss::GroundStructure::grid` reads `SystemTime::now()`, which compiles
-//! but TRAPS at runtime on `wasm32-unknown-unknown`); the trap-free racing path
+//! fnx-free vendor of the truss numerical core (the compatibility-evidence path
+//! reached while `fs_truss::GroundStructure::try_grid` builds its `fnx` graph
+//! reads a wall clock, which compiles but TRAPS at runtime on
+//! `wasm32-unknown-unknown`); the trap-free racing path
 //! (`fs_race::race_field` over an empty `KillRegistry`) never reads a clock.
 //!
 //! Determinism: no clocks, no entropy RNG. All stochastic paths are
@@ -967,8 +968,9 @@ struct FrameGround {
     lengths: Vec<f64>,
 }
 
-/// Replicates `fs_truss::GroundStructure::grid` WITHOUT the fnx `Graph` (that
-/// construction reads `SystemTime::now()` — a wasm runtime trap).
+/// Replicates the candidate enumeration in
+/// `fs_truss::GroundStructure::try_grid` WITHOUT the fnx `Graph` (whose
+/// construction-evidence path reads a wall clock — a wasm runtime trap).
 fn frame_grid(nx: usize, ny: usize, w: f64, h: f64, min_len: f64, max_len: f64) -> FrameGround {
     let mut nodes = Vec::with_capacity(nx * ny);
     for j in 0..ny {
