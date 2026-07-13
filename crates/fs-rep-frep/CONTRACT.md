@@ -38,16 +38,17 @@ about THAT region — no silent promotion to "exact distance".
     selected branch's subgradient (ties to the left operand).
   - `lipschitz()` — primitives 1; rigid/scale/offset preserve; Booleans
     take `max(La, Lb)` (blend weights are convex). Valid EVERYWHERE.
-  - `interval(box)` — exact distance ranges for sphere/half-space,
-    conservative interval arithmetic elsewhere; rotated boxes covered
-    by corner AABBs; Booleans use monotonicity of min/smin.
+  - `interval(box)` — outward-rounded distance/field ranges; rotated inputs
+    use a deliberately wide interval evaluation of Rodrigues without assuming
+    a platform-libm ULP budget; Booleans use monotonicity of min/smin.
 - Design levers: `params()` enumerates every numeric in the DAG as
   `(ParamId, name, value)`; `set_param` validates like the builder;
   `d_value_d_param` is the Jacobian action (symmetric FD v1 — see
   no-claims).
 - `Chart` impl: composed Lipschitz bound in every sample; certificate
   honesty — pure sphere/half-space/cylinder/box/valid-ring-torus chains under
-  rigid/uniform-scale transforms stamp `Exact`;
+  rigid/uniform-scale transforms retain `ExactDistance` geometry but stamp a
+  rigorous `Enclosure` around their rounded binary64 evaluation;
   spindle tori, offsets, and anything with a Boolean stamp `Estimate` (the value is a conservative
   bound: exact SIGN, `|f(p)| ≤ dist(p, ∂Ω)` — exactly the
   sphere-tracing safety contract). The matching typed

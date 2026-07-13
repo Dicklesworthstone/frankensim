@@ -26,7 +26,9 @@
 //! bound is precisely the sphere-tracing safety contract; the magnitude
 //! is NOT the exact distance once a Boolean or erosion is involved, so
 //! composite samples carry an `Estimate` certificate (see CONTRACT.md
-//! no-claims). Only primitive paths proven by `is_exact` stay `Exact`.
+//! no-claims). Primitive paths proven by `is_exact` retain the exact-distance
+//! theorem but publish outward evaluation enclosures rather than false
+//! binary64 singletons.
 
 mod ival;
 
@@ -1026,6 +1028,17 @@ fn write_slot(node: &mut Node, node_ix: u32, slot: u8, value: f64) -> Result<(),
 impl Chart for Frep {
     fn eval(&self, x: Point3, _cx: &Cx<'_>) -> ChartSample {
         let (f, gradient) = self.value_grad(x);
+        let exact_evaluation_enclosure = || {
+            if !f.is_finite() || !x.x.is_finite() || !x.y.is_finite() || !x.z.is_finite() {
+                return NumericalCertificate::no_claim();
+            }
+            let (lo, hi) = self.interval(&Aabb::new(x, x));
+            if lo.is_finite() && hi.is_finite() && lo <= hi {
+                NumericalCertificate::enclosure(lo.min(f), hi.max(f))
+            } else {
+                NumericalCertificate::no_claim()
+            }
+        };
         ChartSample {
             signed_distance: f,
             gradient,
@@ -1033,7 +1046,11 @@ impl Chart for Frep {
             // Composite fields are a conservative bound, not the exact
             // distance (module docs): sign exact, |f| ≤ true distance.
             error: if self.is_exact() {
-                NumericalCertificate::exact(f)
+                // The real field is an exact distance, but its binary64 DAG
+                // evaluation is not generally exact. Retain the geometric
+                // theorem while enclosing every rounded primitive/transform
+                // operation used to obtain this sample.
+                exact_evaluation_enclosure()
             } else {
                 NumericalCertificate::estimate(f, f)
             },

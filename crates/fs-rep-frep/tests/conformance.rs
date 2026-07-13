@@ -577,13 +577,14 @@ fn frep_005_sphere_tracing_safety() {
         "frep-005",
         safety_violations == 0
             && hits > 200
-            && exact_kind == fs_evidence::NumericalKind::Exact
+            && exact_kind == fs_evidence::NumericalKind::Enclosure
             && csg_kind == fs_evidence::NumericalKind::Estimate
             && c_class == Differentiability::C1,
         &format!(
             "0 tunneling violations over {rays} rays on 12 random DAGs \
              ({hits} oracle-confirmed hits, {stalls} grazing stalls, worst standoff \
-             {worst_late:.1e}); rigid chains certify Exact, CSG downgrades to \
+             {worst_late:.1e}); rigid chains enclose rounded exact-distance \
+             evaluations, CSG downgrades to \
              Estimate, pure-blend DAGs advertise C1; seed 0x1001_2026_0706_0015"
         ),
     );
