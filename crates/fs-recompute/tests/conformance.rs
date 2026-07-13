@@ -10,7 +10,10 @@ use fs_exec::Reduce;
 use fs_exec::reduce::{det_sum, pairwise_fold};
 use fs_ledger::hash_bytes;
 use fs_recompute::{
-    NodeRecord, ParamValue, PinReason, PutOutcome, SkipDecision, Store, StoreError,
+    ARTIFACT_CONTENT_IDENTITY_DOMAIN, ARTIFACT_CONTENT_IDENTITY_VERSION,
+    NODE_RECORD_IDENTITY_DOMAIN, NODE_RECORD_IDENTITY_VERSION, NodeRecord, ParamValue, PinReason,
+    PutOutcome, SNAPSHOT_FORMAT_DOMAIN, SNAPSHOT_FORMAT_VERSION, SkipDecision,
+    SnapshotAdmissionError, SnapshotIdentity, Store, StoreError,
 };
 use std::sync::{Arc, Mutex};
 
@@ -57,6 +60,279 @@ fn record(op: &str, seed: u64, achieved: f64, required: f64) -> NodeRecord {
         achieved_error: achieved,
         required_tolerance: required,
     }
+}
+
+const SNAPSHOT_V3_HEADER: &str = "fsrecompute v3\n\
+node_identity_version=2\n\
+node_identity_domain=fs-recompute-node-v2\n\
+artifact_identity_version=1\n\
+artifact_identity_domain=org.frankensim.fs-recompute.artifact-content.v1\n\
+--\n";
+
+#[test]
+fn node_record_op_id_moves_identity() {
+    let base = record("assemble-stiffness", 42, 1e-6, 1e-4);
+    let mut changed = base.clone();
+    changed.op_id = "assemble-mass".to_string();
+    assert_ne!(base.content_hash(), changed.content_hash());
+}
+
+#[test]
+fn node_record_input_hashes_move_identity() {
+    let base = record("assemble-stiffness", 42, 1e-6, 1e-4);
+    let mut changed = base.clone();
+    changed.input_hashes[0] = hash_bytes(b"input-c");
+    assert_ne!(base.content_hash(), changed.content_hash());
+    let mut reordered = base.clone();
+    reordered.input_hashes.reverse();
+    assert_ne!(
+        base.content_hash(),
+        reordered.content_hash(),
+        "input hashes are an ordered semantic sequence"
+    );
+}
+
+#[test]
+fn node_record_parameters_move_identity() {
+    let base = record("assemble-stiffness", 42, 1e-6, 1e-4);
+    let mut changed = base.clone();
+    changed.params[0].1 = ParamValue::f(0.051);
+    assert_ne!(base.content_hash(), changed.content_hash());
+}
+
+#[test]
+fn node_record_parameter_input_order_does_not_move_identity() {
+    let base = record("assemble-stiffness", 42, 1e-6, 1e-4);
+    let mut reordered = base.clone();
+    reordered.params.reverse();
+    assert_eq!(base.content_hash(), reordered.content_hash());
+}
+
+#[test]
+fn node_record_code_version_moves_identity() {
+    let base = record("assemble-stiffness", 42, 1e-6, 1e-4);
+    let mut changed = base.clone();
+    changed.code_version_hash = hash_bytes(b"code-v2");
+    assert_ne!(base.content_hash(), changed.content_hash());
+}
+
+#[test]
+fn node_record_rng_seed_moves_identity() {
+    let base = record("assemble-stiffness", 42, 1e-6, 1e-4);
+    let mut changed = base.clone();
+    changed.rng_seed = 43;
+    assert_ne!(base.content_hash(), changed.content_hash());
+}
+
+#[test]
+fn node_record_achieved_error_moves_identity() {
+    let base = record("assemble-stiffness", 42, 1e-6, 1e-4);
+    let mut changed = base.clone();
+    changed.achieved_error = 2e-6;
+    assert_ne!(base.content_hash(), changed.content_hash());
+}
+
+#[test]
+fn node_record_required_tolerance_moves_identity() {
+    let base = record("assemble-stiffness", 42, 1e-6, 1e-4);
+    let mut changed = base.clone();
+    changed.required_tolerance = 2e-4;
+    assert_ne!(base.content_hash(), changed.content_hash());
+}
+
+#[test]
+fn artifact_content_bytes_move_identity() {
+    let record = record("artifact-content", 42, 1e-6, 1e-4);
+    let mut first = Store::new();
+    let mut second = Store::new();
+    first
+        .put(record.clone(), b"artifact-a")
+        .expect("first artifact must be admitted");
+    second
+        .put(record.clone(), b"artifact-b")
+        .expect("second artifact must be admitted in an independent store");
+
+    let first_hash = first
+        .lookup(&record)
+        .expect("first artifact stored")
+        .artifact_hash;
+    let second_hash = second
+        .lookup(&record)
+        .expect("second artifact stored")
+        .artifact_hash;
+    assert_ne!(first_hash, second_hash);
+    assert_ne!(first_hash, hash_bytes(b"artifact-a"));
+    assert_ne!(second_hash, hash_bytes(b"artifact-b"));
+}
+
+#[test]
+fn snapshot_v3_admission_validates_identity_metadata_before_exposing_rows() {
+    assert_eq!(SNAPSHOT_FORMAT_DOMAIN, "fsrecompute");
+    assert_eq!(SNAPSHOT_FORMAT_VERSION, 3);
+    assert_eq!(NODE_RECORD_IDENTITY_VERSION, 2);
+    assert_eq!(NODE_RECORD_IDENTITY_DOMAIN, "fs-recompute-node-v2");
+    assert_eq!(ARTIFACT_CONTENT_IDENTITY_VERSION, 1);
+    assert_eq!(
+        ARTIFACT_CONTENT_IDENTITY_DOMAIN,
+        "org.frankensim.fs-recompute.artifact-content.v1"
+    );
+
+    let mut store = Store::new();
+    store
+        .put(record("snapshot-admission", 73, 1e-8, 1e-6), b"artifact")
+        .expect("fixture row");
+    let snapshot = store.snapshot();
+    assert_eq!(
+        snapshot,
+        format!("{SNAPSHOT_V3_HEADER}{}\n", store.rows()[0])
+    );
+    let admitted = Store::admit_snapshot(&snapshot).expect("canonical v3 snapshot");
+    assert_eq!(admitted.rows(), &[store.rows()[0].as_str()]);
+
+    let opaque = format!("{SNAPSHOT_V3_HEADER}not-json\nstill-opaque");
+    let admitted_opaque = Store::admit_snapshot(&opaque).expect("rows stay opaque");
+    assert_eq!(admitted_opaque.rows(), &["not-json", "still-opaque"]);
+
+    assert!(matches!(
+        Store::admit_snapshot("fsrecompute v2\n"),
+        Err(SnapshotAdmissionError::LegacyV2 { declared: 2 })
+    ));
+    assert!(matches!(
+        Store::admit_snapshot("fsrecompute v1\n"),
+        Err(SnapshotAdmissionError::StaleVersion {
+            identity: SnapshotIdentity::SnapshotFormat,
+            declared: 1,
+            supported: 3,
+        })
+    ));
+    assert!(matches!(
+        Store::admit_snapshot("fsrecompute v4\n"),
+        Err(SnapshotAdmissionError::FutureVersion {
+            identity: SnapshotIdentity::SnapshotFormat,
+            declared: 4,
+            supported: 3,
+        })
+    ));
+    assert!(matches!(
+        Store::admit_snapshot("fsrecompute v3\nnode_identity_version=1\n"),
+        Err(SnapshotAdmissionError::StaleVersion {
+            identity: SnapshotIdentity::NodeRecord,
+            declared: 1,
+            supported: 2,
+        })
+    ));
+    assert!(matches!(
+        Store::admit_snapshot("fsrecompute v3\nnode_identity_version=3\n"),
+        Err(SnapshotAdmissionError::FutureVersion {
+            identity: SnapshotIdentity::NodeRecord,
+            declared: 3,
+            supported: 2,
+        })
+    ));
+    assert!(matches!(
+        Store::admit_snapshot(
+            "fsrecompute v3\n\
+             node_identity_version=2\n\
+             node_identity_domain=fs-recompute-node-v2\n\
+             artifact_identity_version=0\n"
+        ),
+        Err(SnapshotAdmissionError::StaleVersion {
+            identity: SnapshotIdentity::ArtifactContent,
+            declared: 0,
+            supported: 1,
+        })
+    ));
+    assert!(matches!(
+        Store::admit_snapshot(
+            "fsrecompute v3\n\
+             node_identity_version=2\n\
+             node_identity_domain=fs-recompute-node-v2\n\
+             artifact_identity_version=2\n"
+        ),
+        Err(SnapshotAdmissionError::FutureVersion {
+            identity: SnapshotIdentity::ArtifactContent,
+            declared: 2,
+            supported: 1,
+        })
+    ));
+
+    assert!(matches!(
+        Store::admit_snapshot("foreign-recompute v3\n"),
+        Err(SnapshotAdmissionError::DomainMismatch {
+            identity: SnapshotIdentity::SnapshotFormat,
+            ..
+        })
+    ));
+    assert!(matches!(
+        Store::admit_snapshot(
+            "fsrecompute v3\n\
+             node_identity_version=2\n\
+             node_identity_domain=shadow-node-domain\n"
+        ),
+        Err(SnapshotAdmissionError::DomainMismatch {
+            identity: SnapshotIdentity::NodeRecord,
+            ..
+        })
+    ));
+    assert!(matches!(
+        Store::admit_snapshot(
+            "fsrecompute v3\n\
+             node_identity_version=2\n\
+             node_identity_domain=fs-recompute-node-v2\n\
+             artifact_identity_version=1\n\
+             artifact_identity_domain=shadow-artifact-domain\n"
+        ),
+        Err(SnapshotAdmissionError::DomainMismatch {
+            identity: SnapshotIdentity::ArtifactContent,
+            ..
+        })
+    ));
+
+    assert!(matches!(
+        Store::admit_snapshot("fsrecompute vthree\n"),
+        Err(SnapshotAdmissionError::MalformedHeader { line: 1, .. })
+    ));
+    assert!(matches!(
+        Store::admit_snapshot("fsrecompute v3"),
+        Err(SnapshotAdmissionError::MalformedHeader { line: 2, .. })
+    ));
+    assert!(matches!(
+        Store::admit_snapshot(
+            "fsrecompute v3\n\
+             node_identity_domain=fs-recompute-node-v2\n\
+             node_identity_version=2\n"
+        ),
+        Err(SnapshotAdmissionError::NonCanonicalHeader { line: 2, .. })
+    ));
+    assert!(matches!(
+        Store::admit_snapshot("fsrecompute v03\n"),
+        Err(SnapshotAdmissionError::NonCanonicalHeader { line: 1, .. })
+    ));
+    assert!(matches!(
+        Store::admit_snapshot("fsrecompute v3\nnode_identity_version=02\n"),
+        Err(SnapshotAdmissionError::NonCanonicalHeader { line: 2, .. })
+    ));
+    assert!(matches!(
+        Store::admit_snapshot(
+            "fsrecompute v3\n\
+             node_identity_version=2\n\
+             node_identity_domain=fs-recompute-node-v2\n\
+             artifact_identity_version=01\n"
+        ),
+        Err(SnapshotAdmissionError::NonCanonicalHeader { line: 4, .. })
+    ));
+    assert!(matches!(
+        Store::admit_snapshot(
+            "fsrecompute v3\n\
+             node_identity_version=2\n\
+             node_identity_domain=fs-recompute-node-v2\n\
+             artifact_identity_version=1\n\
+             artifact_identity_domain=org.frankensim.fs-recompute.artifact-content.v1\n\
+             extra-header-line\n\
+             --\nrow\n"
+        ),
+        Err(SnapshotAdmissionError::NonCanonicalHeader { line: 6, .. })
+    ));
 }
 
 /// rcs-001 — hashing: stable across repeats, sensitive to EVERY one of
@@ -111,7 +387,7 @@ fn rcs_001_hashing_stability() {
     let injection_safe = injected.content_hash() != structured.content_hash();
     // Negative slack is representable and first-class.
     let over_budget = record("expensive-op", 7, 1e-3, 1e-4);
-    let over_budget_row = over_budget.to_row(&hash_bytes(b"x"));
+    let over_budget_row = over_budget.to_row(b"x");
     let negative = over_budget.slack() < 0.0
         && over_budget_row.contains("\"slack\":-")
         && over_budget_row.contains("\"slack_bits\":");
@@ -363,9 +639,9 @@ fn rcs_005_pinning() {
     );
 }
 
-/// rcs-006 — rows + fork stability: ledger rows carry all seven fields
-/// plus slack, snapshots are bitwise-deterministic, and the obs event
-/// ships the slack table.
+/// rcs-006 — rows + fork stability: ledger rows carry all seven fields,
+/// identity metadata, and slack; snapshots are bitwise-deterministic,
+/// and the obs event ships the slack table.
 #[test]
 fn rcs_006_rows_and_fork() {
     let build = || -> (Store, Vec<String>) {
@@ -380,11 +656,20 @@ fn rcs_006_rows_and_fork() {
     let (s1, r1) = build();
     let (s2, r2) = build();
     let rows_deterministic = r1 == r2;
-    let fork_stable =
-        s1.snapshot() == s2.snapshot() && s1.snapshot().starts_with("fsrecompute v2\n");
+    let snapshot1 = s1.snapshot();
+    let snapshot2 = s2.snapshot();
+    let fork_stable = snapshot1 == snapshot2
+        && snapshot1.starts_with(SNAPSHOT_V3_HEADER)
+        && Store::admit_snapshot(&snapshot1).is_ok();
     let has_fields = r1[0].contains("\"op\":")
         && r1[0].contains("\"node\":")
         && r1[0].contains("\"artifact\":")
+        && r1[0].contains(
+            "\"node_identity\":{\"version\":2,\"domain\":\"fs-recompute-node-v2\"}",
+        )
+        && r1[0].contains(
+            "\"artifact_identity\":{\"version\":1,\"domain\":\"org.frankensim.fs-recompute.artifact-content.v1\"}",
+        )
         && r1[0].contains("\"seed\":")
         && r1[0].contains("\"achieved\":")
         && r1[0].contains("\"required\":")
@@ -394,7 +679,7 @@ fn rcs_006_rows_and_fork() {
         "quoted\"key".to_string(),
         ParamValue::Str("line1\nline2".to_string()),
     ));
-    let escaped = escaped_record.to_row(&hash_bytes(b"escaped"));
+    let escaped = escaped_record.to_row(b"escaped");
     let row_is_structured = escaped.contains("quoted \\\"op\\\"\\nnext")
         && escaped.contains("line1\\nline2")
         && !escaped.contains("line1\nline2")
@@ -417,9 +702,9 @@ fn rcs_006_rows_and_fork() {
     verdict(
         "rcs-006",
         rows_deterministic && fork_stable && has_fields && row_is_structured,
-        "ledger rows carry all seven fields plus slack, identical builds give \
-         bitwise-identical rows, caller strings are JSON-escaped, and snapshots are \
-         fork-stable",
+        "ledger rows carry all seven fields, exact node/artifact identity metadata, \
+         and slack; identical builds give bitwise-identical rows, caller strings are \
+         JSON-escaped, and canonical v3 snapshots are fork-stable and admissible",
     );
 }
 

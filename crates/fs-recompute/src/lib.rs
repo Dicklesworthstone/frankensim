@@ -33,6 +33,243 @@ use std::fmt::Write as _;
 /// Crate version, re-exported for provenance stamping.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Canonical retained-row snapshot format version.
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 3;
+
+/// Exact domain token at the start of every canonical snapshot header.
+pub const SNAPSHOT_FORMAT_DOMAIN: &str = "fsrecompute";
+
+/// Semantic version of the canonical node-record content identity.
+pub const NODE_RECORD_IDENTITY_VERSION: u32 = 2;
+
+/// Exact domain prefix framed before every canonical node-record payload.
+pub const NODE_RECORD_IDENTITY_DOMAIN: &str = "fs-recompute-node-v2";
+
+/// Owner-local declaration consumed by `xtask check-identities`.
+pub const NODE_RECORD_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
+    "frankensim-identity-schema-v1",
+    "id=fs-recompute:node-record",
+    "version_const=NODE_RECORD_IDENTITY_VERSION",
+    "version=2",
+    "domain=fs-recompute-node-v2",
+    "domain_const=NODE_RECORD_IDENTITY_DOMAIN",
+    "encoder=NodeRecord::content_hash",
+    "encoder_helpers=NodeRecord::content_hash_with_domain,push_u64,push_bytes,push_string",
+    "schema_functions=node_record_identity_version_is_supported,Store::admit_snapshot,crates/fs-blake3/src/lib.rs#ContentHash::as_bytes,crates/fs-blake3/src/lib.rs#hash_bytes",
+    "schema_constants=SNAPSHOT_FORMAT_VERSION,SNAPSHOT_FORMAT_DOMAIN,NODE_RECORD_IDENTITY_VERSION,NODE_RECORD_IDENTITY_DOMAIN",
+    "schema_dependencies=none",
+    "digest=fs-blake3",
+    "encoding=typed-binary",
+    "sources=NodeRecord",
+    "source_fields=NodeRecord.op_id:semantic,NodeRecord.input_hashes:semantic,NodeRecord.params:semantic,NodeRecord.code_version_hash:semantic,NodeRecord.rng_seed:semantic,NodeRecord.achieved_error:semantic,NodeRecord.required_tolerance:semantic",
+    "source_bindings=NodeRecord.op_id>op-id,NodeRecord.input_hashes>ordered-input-hashes,NodeRecord.params>canonical-parameters,NodeRecord.code_version_hash>code-version-hash,NodeRecord.rng_seed>rng-seed,NodeRecord.achieved_error>achieved-error-bits,NodeRecord.required_tolerance>required-tolerance-bits",
+    "external_semantic_fields=artifact-domain",
+    "semantic_fields=artifact-domain,op-id,ordered-input-hashes,canonical-parameters,code-version-hash,rng-seed,achieved-error-bits,required-tolerance-bits",
+    "excluded_fields=parameter-input-order:canonical-parameter-order-only",
+    "consumers=Store::put,Store::can_skip,NodeRecord::to_row,Store::snapshot,Store::admit_snapshot,AdmittedSnapshot::rows",
+    "mutations=artifact-domain:crates/fs-recompute/src/lib.rs#node_record_domain_moves_identity,op-id:crates/fs-recompute/tests/conformance.rs#node_record_op_id_moves_identity,ordered-input-hashes:crates/fs-recompute/tests/conformance.rs#node_record_input_hashes_move_identity,canonical-parameters:crates/fs-recompute/tests/conformance.rs#node_record_parameters_move_identity,code-version-hash:crates/fs-recompute/tests/conformance.rs#node_record_code_version_moves_identity,rng-seed:crates/fs-recompute/tests/conformance.rs#node_record_rng_seed_moves_identity,achieved-error-bits:crates/fs-recompute/tests/conformance.rs#node_record_achieved_error_moves_identity,required-tolerance-bits:crates/fs-recompute/tests/conformance.rs#node_record_required_tolerance_moves_identity",
+    "nonsemantic_mutations=parameter-input-order:crates/fs-recompute/tests/conformance.rs#node_record_parameter_input_order_does_not_move_identity",
+    "field_guard=classify_node_record_identity_fields",
+    "transport_guard=NodeRecord::content_hash",
+    "version_guard=crates/fs-recompute/tests/conformance.rs#snapshot_v3_admission_validates_identity_metadata_before_exposing_rows",
+    "coupling_surface=fs-recompute:node-record",
+];
+
+/// Semantic version of the canonical artifact-content address.
+pub const ARTIFACT_CONTENT_IDENTITY_VERSION: u32 = 1;
+
+/// Exact domain framed before every canonical artifact-content payload.
+pub const ARTIFACT_CONTENT_IDENTITY_DOMAIN: &str =
+    "org.frankensim.fs-recompute.artifact-content.v1";
+
+/// Owner-local declaration consumed by `xtask check-identities`.
+pub const ARTIFACT_CONTENT_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
+    "frankensim-identity-schema-v1",
+    "id=fs-recompute:artifact-content",
+    "version_const=ARTIFACT_CONTENT_IDENTITY_VERSION",
+    "version=1",
+    "domain=org.frankensim.fs-recompute.artifact-content.v1",
+    "domain_const=ARTIFACT_CONTENT_IDENTITY_DOMAIN",
+    "encoder=artifact_content_hash",
+    "encoder_helpers=artifact_content_hash_with_domain,push_u64,push_bytes,push_string",
+    "schema_functions=artifact_content_identity_version_is_supported,Store::put,Store::admit_snapshot,crates/fs-blake3/src/lib.rs#hash_bytes",
+    "schema_constants=SNAPSHOT_FORMAT_VERSION,SNAPSHOT_FORMAT_DOMAIN,ARTIFACT_CONTENT_IDENTITY_VERSION,ARTIFACT_CONTENT_IDENTITY_DOMAIN",
+    "schema_dependencies=none",
+    "digest=fs-blake3",
+    "encoding=typed-binary",
+    "sources=ArtifactContentIdentityInput",
+    "source_fields=ArtifactContentIdentityInput.bytes:semantic",
+    "source_bindings=ArtifactContentIdentityInput.bytes>artifact-bytes",
+    "external_semantic_fields=artifact-domain,identity-version",
+    "semantic_fields=artifact-domain,identity-version,artifact-bytes",
+    "excluded_fields=none",
+    "consumers=Store::put,StoredNode::artifact_hash,NodeRecord::to_row,Store::snapshot,Store::admit_snapshot,AdmittedSnapshot::rows,Store::state_fingerprint",
+    "mutations=artifact-domain:crates/fs-recompute/src/lib.rs#artifact_content_domain_and_version_move_identity,identity-version:crates/fs-recompute/src/lib.rs#artifact_content_domain_and_version_move_identity,artifact-bytes:crates/fs-recompute/tests/conformance.rs#artifact_content_bytes_move_identity",
+    "nonsemantic_mutations=none",
+    "field_guard=classify_artifact_content_identity_fields",
+    "transport_guard=artifact_content_hash",
+    "version_guard=crates/fs-recompute/tests/conformance.rs#snapshot_v3_admission_validates_identity_metadata_before_exposing_rows",
+    "coupling_surface=fs-recompute:artifact-content",
+];
+
+struct ArtifactContentIdentityInput<'a> {
+    bytes: &'a [u8],
+}
+
+/// Whether retained node-record identity bytes were produced under the one
+/// semantic version understood by this build.
+#[must_use]
+pub const fn node_record_identity_version_is_supported(declared: u32) -> bool {
+    declared == NODE_RECORD_IDENTITY_VERSION
+}
+
+/// Whether retained artifact content addresses use the one semantic version
+/// understood by this build.
+#[must_use]
+pub const fn artifact_content_identity_version_is_supported(declared: u32) -> bool {
+    declared == ARTIFACT_CONTENT_IDENTITY_VERSION
+}
+
+/// Identity-bearing section of a retained-row snapshot header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnapshotIdentity {
+    /// The `fsrecompute vN` envelope itself.
+    SnapshotFormat,
+    /// Canonical [`NodeRecord`] content identity.
+    NodeRecord,
+    /// Canonical artifact-content address.
+    ArtifactContent,
+}
+
+impl core::fmt::Display for SnapshotIdentity {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            SnapshotIdentity::SnapshotFormat => f.write_str("snapshot format"),
+            SnapshotIdentity::NodeRecord => f.write_str("node-record identity"),
+            SnapshotIdentity::ArtifactContent => f.write_str("artifact-content identity"),
+        }
+    }
+}
+
+/// Structured refusal returned before any retained snapshot row is exposed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SnapshotAdmissionError {
+    /// The unversioned-identity v2 envelope is deliberately not admitted.
+    LegacyV2 {
+        /// Version found in the first header line.
+        declared: u32,
+    },
+    /// A retained identity predates the only version understood here.
+    StaleVersion {
+        /// Identity whose version was stale.
+        identity: SnapshotIdentity,
+        /// Version declared by the retained snapshot.
+        declared: u32,
+        /// Only version supported by this build.
+        supported: u32,
+    },
+    /// A retained identity was produced by a newer, unknown schema.
+    FutureVersion {
+        /// Identity whose version was from the future.
+        identity: SnapshotIdentity,
+        /// Version declared by the retained snapshot.
+        declared: u32,
+        /// Only version supported by this build.
+        supported: u32,
+    },
+    /// A retained identity names a different domain from this build.
+    DomainMismatch {
+        /// Identity whose domain did not match.
+        identity: SnapshotIdentity,
+        /// Domain declared by the retained snapshot.
+        declared: String,
+        /// Exact domain supported by this build.
+        supported: &'static str,
+    },
+    /// Required header structure or a decimal version was malformed.
+    MalformedHeader {
+        /// One-based header line number.
+        line: usize,
+        /// Stable diagnostic category for agents.
+        reason: &'static str,
+    },
+    /// The header carried recognizable information in a noncanonical form.
+    NonCanonicalHeader {
+        /// One-based header line number.
+        line: usize,
+        /// Canonical shape or value required at this line.
+        expected: String,
+        /// Exact line that was refused.
+        found: String,
+    },
+}
+
+impl core::fmt::Display for SnapshotAdmissionError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            SnapshotAdmissionError::LegacyV2 { declared } => write!(
+                f,
+                "legacy fs-recompute snapshot v{declared} has no identity metadata and is not admitted; regenerate it as canonical v{SNAPSHOT_FORMAT_VERSION}"
+            ),
+            SnapshotAdmissionError::StaleVersion {
+                identity,
+                declared,
+                supported,
+            } => write!(
+                f,
+                "stale {identity} version {declared}; this build admits only version {supported}"
+            ),
+            SnapshotAdmissionError::FutureVersion {
+                identity,
+                declared,
+                supported,
+            } => write!(
+                f,
+                "future {identity} version {declared}; this build admits only version {supported}"
+            ),
+            SnapshotAdmissionError::DomainMismatch {
+                identity,
+                declared,
+                supported,
+            } => write!(
+                f,
+                "{identity} domain mismatch: retained snapshot declares {declared:?}, this build requires {supported:?}"
+            ),
+            SnapshotAdmissionError::MalformedHeader { line, reason } => {
+                write!(f, "malformed snapshot header at line {line}: {reason}")
+            }
+            SnapshotAdmissionError::NonCanonicalHeader {
+                line,
+                expected,
+                found,
+            } => write!(
+                f,
+                "noncanonical snapshot header at line {line}: expected {expected:?}, found {found:?}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SnapshotAdmissionError {}
+
+/// Identity-validated retained rows borrowed from a canonical v3 snapshot.
+///
+/// Rows are intentionally opaque: admission proves only that their transport
+/// envelope names the exact identity versions and domains understood by this
+/// build. It does not parse rows or restore a [`Store`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdmittedSnapshot<'a> {
+    rows: Vec<&'a str>,
+}
+
+impl<'a> AdmittedSnapshot<'a> {
+    /// Opaque rows, in retained transport order.
+    #[must_use]
+    pub fn rows(&self) -> &[&'a str] {
+        &self.rows
+    }
+}
+
 /// A canonical parameter value (floats travel as bits).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ParamValue {
@@ -65,6 +302,31 @@ fn push_string(buf: &mut Vec<u8>, value: &str) {
     push_bytes(buf, value.as_bytes());
 }
 
+fn artifact_content_hash(bytes: &[u8]) -> ContentHash {
+    artifact_content_hash_with_domain(
+        ARTIFACT_CONTENT_IDENTITY_DOMAIN,
+        ARTIFACT_CONTENT_IDENTITY_VERSION,
+        &ArtifactContentIdentityInput { bytes },
+    )
+}
+
+fn artifact_content_hash_with_domain(
+    domain: &str,
+    version: u32,
+    input: &ArtifactContentIdentityInput<'_>,
+) -> ContentHash {
+    let mut buf = Vec::new();
+    push_string(&mut buf, domain);
+    push_u64(&mut buf, u64::from(version));
+    push_bytes(&mut buf, input.bytes);
+    hash_bytes(&buf)
+}
+
+#[allow(dead_code)] // exhaustive source-shape guard consumed by xtask
+fn classify_artifact_content_identity_fields(input: &ArtifactContentIdentityInput<'_>) {
+    let ArtifactContentIdentityInput { bytes: _ } = input;
+}
+
 pub(crate) fn json_string(value: &str) -> String {
     let mut out = String::with_capacity(value.len() + 2);
     out.push('"');
@@ -93,6 +355,134 @@ pub(crate) fn json_f64(value: f64) -> String {
     } else {
         "null".to_string()
     }
+}
+
+fn header_line<'a>(
+    line: Option<&'a str>,
+    line_number: usize,
+) -> Result<&'a str, SnapshotAdmissionError> {
+    line.ok_or(SnapshotAdmissionError::MalformedHeader {
+        line: line_number,
+        reason: "required header line is missing",
+    })
+}
+
+fn parse_canonical_version(
+    raw: &str,
+    line_number: usize,
+    line: &str,
+    canonical_prefix: &str,
+) -> Result<u32, SnapshotAdmissionError> {
+    if raw.is_empty() || !raw.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(SnapshotAdmissionError::MalformedHeader {
+            line: line_number,
+            reason: "identity version must be an unsigned decimal integer",
+        });
+    }
+    let declared = raw
+        .parse::<u32>()
+        .map_err(|_| SnapshotAdmissionError::MalformedHeader {
+            line: line_number,
+            reason: "identity version is outside the u32 range",
+        })?;
+    let expected = format!("{canonical_prefix}{declared}");
+    if line != expected {
+        return Err(SnapshotAdmissionError::NonCanonicalHeader {
+            line: line_number,
+            expected,
+            found: line.to_string(),
+        });
+    }
+    Ok(declared)
+}
+
+fn parse_snapshot_format_version(line: &str) -> Result<u32, SnapshotAdmissionError> {
+    let Some((domain, raw_version)) = line.split_once(" v") else {
+        return Err(SnapshotAdmissionError::NonCanonicalHeader {
+            line: 1,
+            expected: format!("{SNAPSHOT_FORMAT_DOMAIN} v<canonical-u32>"),
+            found: line.to_string(),
+        });
+    };
+    if domain != SNAPSHOT_FORMAT_DOMAIN {
+        return Err(SnapshotAdmissionError::DomainMismatch {
+            identity: SnapshotIdentity::SnapshotFormat,
+            declared: domain.to_string(),
+            supported: SNAPSHOT_FORMAT_DOMAIN,
+        });
+    }
+    parse_canonical_version(raw_version, 1, line, &format!("{SNAPSHOT_FORMAT_DOMAIN} v"))
+}
+
+fn parse_identity_version(
+    line: &str,
+    line_number: usize,
+    key: &str,
+) -> Result<u32, SnapshotAdmissionError> {
+    let Some(raw_version) = line.strip_prefix(key) else {
+        return Err(SnapshotAdmissionError::NonCanonicalHeader {
+            line: line_number,
+            expected: format!("{key}<canonical-u32>"),
+            found: line.to_string(),
+        });
+    };
+    parse_canonical_version(raw_version, line_number, line, key)
+}
+
+fn validate_supported_version(
+    identity: SnapshotIdentity,
+    declared: u32,
+    supported: u32,
+    is_supported: bool,
+) -> Result<(), SnapshotAdmissionError> {
+    if is_supported {
+        return Ok(());
+    }
+    if identity == SnapshotIdentity::SnapshotFormat && declared == 2 {
+        return Err(SnapshotAdmissionError::LegacyV2 { declared });
+    }
+    if declared < supported {
+        return Err(SnapshotAdmissionError::StaleVersion {
+            identity,
+            declared,
+            supported,
+        });
+    }
+    if declared > supported {
+        return Err(SnapshotAdmissionError::FutureVersion {
+            identity,
+            declared,
+            supported,
+        });
+    }
+    Err(SnapshotAdmissionError::MalformedHeader {
+        line: 1,
+        reason: "version support predicate disagrees with its declared version",
+    })
+}
+
+fn validate_identity_domain(
+    line: &str,
+    line_number: usize,
+    key: &str,
+    identity: SnapshotIdentity,
+    supported: &'static str,
+) -> Result<(), SnapshotAdmissionError> {
+    let Some(declared) = line.strip_prefix(key) else {
+        return Err(SnapshotAdmissionError::NonCanonicalHeader {
+            line: line_number,
+            expected: format!("{key}<identity-domain>"),
+            found: line.to_string(),
+        });
+    };
+    if declared != supported {
+        return Err(SnapshotAdmissionError::DomainMismatch {
+            identity,
+            declared: declared.to_string(),
+            supported,
+        });
+    }
+    Ok(())
 }
 
 /// The seven-field node record (the Merkle DAG schema).
@@ -127,11 +517,16 @@ impl NodeRecord {
     /// floats as bits, params sorted by key).
     #[must_use]
     pub fn content_hash(&self) -> ContentHash {
+        self.content_hash_with_domain(NODE_RECORD_IDENTITY_DOMAIN)
+    }
+
+    fn content_hash_with_domain(&self, domain: &str) -> ContentHash {
         // Versioned, length-prefixed binary encoding. Delimiter-based text
         // encoding is not injective when caller-controlled strings can contain
         // newlines or field-looking prefixes.
         let mut buf = Vec::new();
-        buf.extend_from_slice(b"fs-recompute-node-v2\0");
+        buf.extend_from_slice(domain.as_bytes());
+        buf.push(0);
         push_string(&mut buf, &self.op_id);
         push_u64(&mut buf, self.input_hashes.len() as u64);
         for h in &self.input_hashes {
@@ -164,9 +559,17 @@ impl NodeRecord {
         hash_bytes(&buf)
     }
 
-    /// Canonical ledger row (node fields + slack).
+    /// Canonical ledger row (node fields + slack) for raw artifact bytes.
+    ///
+    /// The artifact address is derived here so a caller cannot label an
+    /// arbitrary digest as an artifact-content-v1 identity.
     #[must_use]
-    pub fn to_row(&self, artifact: &ContentHash) -> String {
+    pub fn to_row(&self, artifact_bytes: &[u8]) -> String {
+        let artifact = artifact_content_hash(artifact_bytes);
+        self.to_row_with_artifact_identity(&artifact)
+    }
+
+    fn to_row_with_artifact_identity(&self, artifact: &ContentHash) -> String {
         let input_hashes = self
             .input_hashes
             .iter()
@@ -197,6 +600,8 @@ impl NodeRecord {
         let slack = self.slack();
         format!(
             "{{\"op\":{},\"node\":\"{}\",\"artifact\":\"{}\",\
+             \"node_identity\":{{\"version\":{},\"domain\":{}}},\
+             \"artifact_identity\":{{\"version\":{},\"domain\":{}}},\
              \"input_hashes\":[{input_hashes}],\"params\":[{params}],\
              \"code_version\":\"{}\",\"seed\":{},\"achieved\":{},\
              \"achieved_bits\":\"{:016X}\",\"required\":{},\
@@ -205,6 +610,10 @@ impl NodeRecord {
             json_string(&self.op_id),
             self.content_hash().to_hex(),
             artifact.to_hex(),
+            NODE_RECORD_IDENTITY_VERSION,
+            json_string(NODE_RECORD_IDENTITY_DOMAIN),
+            ARTIFACT_CONTENT_IDENTITY_VERSION,
+            json_string(ARTIFACT_CONTENT_IDENTITY_DOMAIN),
             self.code_version_hash.to_hex(),
             self.rng_seed,
             json_f64(self.achieved_error),
@@ -215,6 +624,19 @@ impl NodeRecord {
             slack.to_bits()
         )
     }
+}
+
+#[allow(dead_code)] // exhaustive source-shape guard consumed by xtask
+fn classify_node_record_identity_fields(record: &NodeRecord) {
+    let NodeRecord {
+        op_id: _,
+        input_hashes: _,
+        params: _,
+        code_version_hash: _,
+        rng_seed: _,
+        achieved_error: _,
+        required_tolerance: _,
+    } = record;
 }
 
 /// Why a node is pinned (never evicted).
@@ -444,6 +866,86 @@ impl Store {
         &self.rows
     }
 
+    /// Validate a canonical v3 retained-row snapshot envelope.
+    ///
+    /// Metadata is checked in fixed order before any row slices are exposed.
+    /// The returned rows remain opaque; this API does not restore store state.
+    ///
+    /// # Errors
+    ///
+    /// [`SnapshotAdmissionError`] names legacy, stale, future, mismatched,
+    /// malformed, and noncanonical metadata without partially admitting rows.
+    pub fn admit_snapshot<'a>(
+        snapshot: &'a str,
+    ) -> Result<AdmittedSnapshot<'a>, SnapshotAdmissionError> {
+        let mut lines = snapshot.splitn(7, '\n');
+
+        let format_line = header_line(lines.next(), 1)?;
+        let format_version = parse_snapshot_format_version(format_line)?;
+        validate_supported_version(
+            SnapshotIdentity::SnapshotFormat,
+            format_version,
+            SNAPSHOT_FORMAT_VERSION,
+            format_version == SNAPSHOT_FORMAT_VERSION,
+        )?;
+
+        let node_version_line = header_line(lines.next(), 2)?;
+        let node_version = parse_identity_version(node_version_line, 2, "node_identity_version=")?;
+        validate_supported_version(
+            SnapshotIdentity::NodeRecord,
+            node_version,
+            NODE_RECORD_IDENTITY_VERSION,
+            node_record_identity_version_is_supported(node_version),
+        )?;
+
+        let node_domain_line = header_line(lines.next(), 3)?;
+        validate_identity_domain(
+            node_domain_line,
+            3,
+            "node_identity_domain=",
+            SnapshotIdentity::NodeRecord,
+            NODE_RECORD_IDENTITY_DOMAIN,
+        )?;
+
+        let artifact_version_line = header_line(lines.next(), 4)?;
+        let artifact_version =
+            parse_identity_version(artifact_version_line, 4, "artifact_identity_version=")?;
+        validate_supported_version(
+            SnapshotIdentity::ArtifactContent,
+            artifact_version,
+            ARTIFACT_CONTENT_IDENTITY_VERSION,
+            artifact_content_identity_version_is_supported(artifact_version),
+        )?;
+
+        let artifact_domain_line = header_line(lines.next(), 5)?;
+        validate_identity_domain(
+            artifact_domain_line,
+            5,
+            "artifact_identity_domain=",
+            SnapshotIdentity::ArtifactContent,
+            ARTIFACT_CONTENT_IDENTITY_DOMAIN,
+        )?;
+
+        let separator = header_line(lines.next(), 6)?;
+        if separator != "--" {
+            return Err(SnapshotAdmissionError::NonCanonicalHeader {
+                line: 6,
+                expected: "--".to_string(),
+                found: separator.to_string(),
+            });
+        }
+        let rows = lines
+            .next()
+            .ok_or(SnapshotAdmissionError::MalformedHeader {
+                line: 6,
+                reason: "the -- separator must be newline-terminated",
+            })?
+            .split_terminator('\n')
+            .collect();
+
+        Ok(AdmittedSnapshot { rows })
+    }
+
     /// Monotonic mutation revision used to bind pure plans to the state
     /// against which their certificates were computed.
     #[must_use]
@@ -492,7 +994,7 @@ impl Store {
             });
         }
         let node_hash = record.content_hash();
-        let artifact_hash = hash_bytes(artifact_bytes);
+        let artifact_hash = artifact_content_hash(artifact_bytes);
         if let Some(existing) = self.nodes.get(&key(&node_hash)) {
             if existing.artifact_hash == artifact_hash {
                 return Ok(PutOutcome::Deduped(node_hash));
@@ -503,7 +1005,8 @@ impl Store {
                 got: artifact_hash.to_hex(),
             });
         }
-        self.rows.push(record.to_row(&artifact_hash));
+        self.rows
+            .push(record.to_row_with_artifact_identity(&artifact_hash));
         self.nodes.insert(
             key(&node_hash),
             StoredNode {
@@ -698,15 +1201,104 @@ impl Store {
         }
     }
 
-    /// Serialize the store to its canonical text form (round-trips;
-    /// "hash stability under fork").
+    /// Serialize retained rows in the canonical identity-bearing v3 envelope.
+    ///
+    /// [`Store::admit_snapshot`] validates the envelope and exposes its rows,
+    /// but deliberately does not claim to restore this store's runtime state.
     #[must_use]
     pub fn snapshot(&self) -> String {
-        let mut out = String::from("fsrecompute v2\n");
+        let mut out = String::new();
+        let _ = writeln!(out, "{SNAPSHOT_FORMAT_DOMAIN} v{SNAPSHOT_FORMAT_VERSION}");
+        let _ = writeln!(out, "node_identity_version={NODE_RECORD_IDENTITY_VERSION}");
+        let _ = writeln!(out, "node_identity_domain={NODE_RECORD_IDENTITY_DOMAIN}");
+        let _ = writeln!(
+            out,
+            "artifact_identity_version={ARTIFACT_CONTENT_IDENTITY_VERSION}"
+        );
+        let _ = writeln!(
+            out,
+            "artifact_identity_domain={ARTIFACT_CONTENT_IDENTITY_DOMAIN}"
+        );
+        out.push_str("--\n");
         for node in self.nodes.values() {
-            let _ = writeln!(out, "{}", node.record.to_row(&node.artifact_hash));
+            let _ = writeln!(
+                out,
+                "{}",
+                node.record
+                    .to_row_with_artifact_identity(&node.artifact_hash)
+            );
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+
+    fn fixture() -> NodeRecord {
+        NodeRecord {
+            op_id: "identity-fixture".to_string(),
+            input_hashes: vec![hash_bytes(b"input")],
+            params: vec![("order".to_string(), ParamValue::Int(2))],
+            code_version_hash: hash_bytes(b"code"),
+            rng_seed: 7,
+            achieved_error: 1.0e-8,
+            required_tolerance: 1.0e-6,
+        }
+    }
+
+    #[test]
+    fn node_record_domain_moves_identity() {
+        let record = fixture();
+        assert_ne!(
+            record.content_hash(),
+            record.content_hash_with_domain("fs-recompute-node-v2-alternate")
+        );
+    }
+
+    #[test]
+    fn node_record_identity_version_fails_closed() {
+        assert_eq!(NODE_RECORD_IDENTITY_VERSION, 2);
+        assert_eq!(NODE_RECORD_IDENTITY_DOMAIN, "fs-recompute-node-v2");
+        assert!(node_record_identity_version_is_supported(2));
+        assert!(!node_record_identity_version_is_supported(1));
+        assert!(!node_record_identity_version_is_supported(3));
+    }
+
+    #[test]
+    fn artifact_content_domain_and_version_move_identity() {
+        let input = ArtifactContentIdentityInput { bytes: b"payload" };
+        let current = artifact_content_hash_with_domain(
+            ARTIFACT_CONTENT_IDENTITY_DOMAIN,
+            ARTIFACT_CONTENT_IDENTITY_VERSION,
+            &input,
+        );
+        let changed_domain = artifact_content_hash_with_domain(
+            "org.frankensim.fs-recompute.shadow-artifact-content.v1",
+            ARTIFACT_CONTENT_IDENTITY_VERSION,
+            &input,
+        );
+        let changed_version = artifact_content_hash_with_domain(
+            ARTIFACT_CONTENT_IDENTITY_DOMAIN,
+            ARTIFACT_CONTENT_IDENTITY_VERSION + 1,
+            &input,
+        );
+        assert_ne!(current, changed_domain);
+        assert_ne!(current, changed_version);
+        assert_ne!(changed_domain, changed_version);
+    }
+
+    #[test]
+    fn artifact_content_identity_version_fails_closed() {
+        assert_eq!(ARTIFACT_CONTENT_IDENTITY_VERSION, 1);
+        assert_eq!(
+            ARTIFACT_CONTENT_IDENTITY_DOMAIN,
+            "org.frankensim.fs-recompute.artifact-content.v1"
+        );
+        assert!(artifact_content_identity_version_is_supported(1));
+        assert!(!artifact_content_identity_version_is_supported(0));
+        assert!(!artifact_content_identity_version_is_supported(2));
     }
 }
 

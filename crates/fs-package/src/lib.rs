@@ -19,7 +19,7 @@
 //!
 //! The Merkle tree uses the in-house BLAKE3 content hash from [`fs_blake3`]
 //! (pure safe Rust, zero deps — Franken-compliant), with every leaf and node
-//! DOMAIN-SEPARATED under `fs-package:v7:…` tags, yielding a
+//! DOMAIN-SEPARATED under `fs-package:v8:…` tags, yielding a
 //! 32-byte [`ContentHash`] root; signature bytes are DETACHED and OPTIONAL, and
 //! become authenticated only through an injected purpose-bound policy.
 //! Everything is deterministic: the same package yields the same root and
@@ -47,8 +47,417 @@ pub use origin::{
     NoWaiverVerifier, OriginError, PolicyFingerprint, SignatureIntent, SignaturePurpose,
     SignatureRequest, SignatureVerification, SignatureVerifier, SourceCertificateRequest,
     SourceCertificateVerifier, VerificationCapabilities, VerificationDecision, WaiverGrant,
-    WaiverVerification, WaiverVerifier, signature_subject_hash,
+    WaiverVerification, WaiverVerifier, admit_retained_signature_subject_hash,
+    signature_subject_hash,
 };
+
+/// Semantic version of the portable semantic-witness content identity.
+pub const SEMANTIC_WITNESS_IDENTITY_VERSION: u32 = 8;
+/// Exact final BLAKE3 domain for a portable semantic witness.
+pub const SEMANTIC_WITNESS_IDENTITY_DOMAIN: &str = "fs-package:v8:semantic-witness";
+const SEMANTIC_WITNESS_FAMILY_IDENTITY_DOMAIN: &str = "fs-package:v8:semantic-witness-family";
+const SEMANTIC_WITNESS_PAYLOAD_IDENTITY_DOMAIN: &str = "fs-package:v8:semantic-witness-payload";
+
+/// Semantic version of the complete raw claim-declaration content identity.
+pub const CLAIM_DECLARATION_IDENTITY_VERSION: u32 = 8;
+/// BLAKE3 derive-key domain for a complete raw claim declaration.
+pub const CLAIM_DECLARATION_IDENTITY_DOMAIN: &str = "fs-package:v8:claim";
+
+/// Semantic version of the address-free falsifier/derivation claim subject.
+pub const CLAIM_VERIFICATION_SUBJECT_IDENTITY_VERSION: u32 = 8;
+/// BLAKE3 derive-key domain for the falsifier/derivation claim subject.
+pub const CLAIM_VERIFICATION_SUBJECT_IDENTITY_DOMAIN: &str =
+    "fs-package:v8:claim-verification-subject";
+
+/// Semantic version of the address-free source-certificate claim subject.
+pub const SOURCE_CERTIFICATE_SUBJECT_IDENTITY_VERSION: u32 = 8;
+/// BLAKE3 derive-key domain for the source-certificate claim subject.
+pub const SOURCE_CERTIFICATE_SUBJECT_IDENTITY_DOMAIN: &str =
+    "fs-package:v8:source-certificate-subject";
+
+/// Semantic version of the package Merkle-root identity.
+pub const PACKAGE_ROOT_IDENTITY_VERSION: u32 = 8;
+/// Exact header-leaf BLAKE3 domain that starts a package root.
+pub const PACKAGE_ROOT_IDENTITY_DOMAIN: &str = "fs-package:v8:header";
+const PACKAGE_NODE_IDENTITY_DOMAIN: &str = "fs-package:v8:node";
+
+/// Semantic version of the exact waiver-authorization message bytes.
+pub const WAIVER_AUTHORIZATION_SUBJECT_IDENTITY_VERSION: u32 = 8;
+/// Prefix/domain carried in every exact waiver-authorization message.
+pub const WAIVER_AUTHORIZATION_SUBJECT_IDENTITY_DOMAIN: &str = "fs-package:v8:waiver-authorization";
+const AUTHORIZATION_CONTEXT_IDENTITY_DOMAIN: &str = "fs-package:v8:authorization-context";
+
+/// Semantic version of a policy-bound package verification receipt.
+pub const VERIFICATION_RECEIPT_IDENTITY_VERSION: u32 = 8;
+/// BLAKE3 derive-key domain for a policy-bound verification receipt.
+pub const VERIFICATION_RECEIPT_IDENTITY_DOMAIN: &str = "fs-package:v8:verification-receipt";
+
+/// Semantic version of the pre-signature release-admission context.
+pub const RELEASE_ADMISSION_CONTEXT_IDENTITY_VERSION: u32 = 8;
+/// BLAKE3 derive-key domain for the pre-signature release-admission context.
+pub const RELEASE_ADMISSION_CONTEXT_IDENTITY_DOMAIN: &str =
+    "fs-package:v8:release-admission-context";
+
+/// Owner-local declaration consumed by `xtask check-identities`.
+#[allow(dead_code)]
+pub const SEMANTIC_WITNESS_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
+    "frankensim-identity-schema-v1",
+    "id=fs-package:semantic-witness",
+    "version_const=SEMANTIC_WITNESS_IDENTITY_VERSION",
+    "version=8",
+    "domain=fs-package:v8:semantic-witness",
+    "domain_const=SEMANTIC_WITNESS_IDENTITY_DOMAIN",
+    "encoder=SemanticWitness::content_hash",
+    "encoder_helpers=semantic_witness_content_hash_with_domains,admit_retained_content_hash",
+    "schema_constants=SEMANTIC_WITNESS_IDENTITY_VERSION,SEMANTIC_WITNESS_IDENTITY_DOMAIN,SEMANTIC_WITNESS_FAMILY_IDENTITY_DOMAIN,SEMANTIC_WITNESS_PAYLOAD_IDENTITY_DOMAIN,crates/fs-blake3/src/lib.rs#IV,crates/fs-blake3/src/lib.rs#MSG_PERMUTATION,crates/fs-blake3/src/lib.rs#BLOCK_LEN,crates/fs-blake3/src/lib.rs#CHUNK_LEN,crates/fs-blake3/src/lib.rs#CHUNK_START,crates/fs-blake3/src/lib.rs#CHUNK_END,crates/fs-blake3/src/lib.rs#PARENT,crates/fs-blake3/src/lib.rs#ROOT,crates/fs-blake3/src/lib.rs#DERIVE_KEY_CONTEXT,crates/fs-blake3/src/lib.rs#DERIVE_KEY_MATERIAL,crates/fs-blake3/src/lib.rs#MAX_DEPTH",
+    "schema_functions=crates/fs-blake3/src/lib.rs#hash_domain,crates/fs-blake3/src/lib.rs#g,crates/fs-blake3/src/lib.rs#round,crates/fs-blake3/src/lib.rs#permute,crates/fs-blake3/src/lib.rs#compress,crates/fs-blake3/src/lib.rs#words_from_block,crates/fs-blake3/src/lib.rs#first_8_words,crates/fs-blake3/src/lib.rs#Output::chaining_value,crates/fs-blake3/src/lib.rs#Output::root_hash,crates/fs-blake3/src/lib.rs#parent_output,crates/fs-blake3/src/lib.rs#ChunkState::new,crates/fs-blake3/src/lib.rs#ChunkState::len,crates/fs-blake3/src/lib.rs#ChunkState::start_flag,crates/fs-blake3/src/lib.rs#ChunkState::update,crates/fs-blake3/src/lib.rs#ChunkState::output,crates/fs-blake3/src/lib.rs#Blake3::new_internal,crates/fs-blake3/src/lib.rs#Blake3::push_stack,crates/fs-blake3/src/lib.rs#Blake3::pop_stack,crates/fs-blake3/src/lib.rs#Blake3::add_chunk_chaining_value,crates/fs-blake3/src/lib.rs#Blake3::update,crates/fs-blake3/src/lib.rs#Blake3::finalize",
+    "schema_dependencies=none",
+    "digest=blake3-derive-key",
+    "encoding=typed-binary",
+    "sources=SemanticWitness",
+    "source_fields=SemanticWitness.family:semantic,SemanticWitness.schema_version:semantic,SemanticWitness.canonical_payload:semantic",
+    "source_bindings=SemanticWitness.family>family-byte-count+family-utf8,SemanticWitness.schema_version>witness-schema-version,SemanticWitness.canonical_payload>payload-byte-count+payload-bytes",
+    "external_semantic_fields=identity-version,digest-domain,family-digest-domain,payload-digest-domain",
+    "semantic_fields=identity-version,digest-domain,family-digest-domain,payload-digest-domain,family-byte-count,family-utf8,witness-schema-version,payload-byte-count,payload-bytes",
+    "excluded_fields=none",
+    "consumers=SemanticWitness::content_hash,Claim::from_portable_certificate,Claim::with_semantic_witness,Claim::canonical_body,SourceCertificateRequest,fs-checker-semantic-plugins",
+    "mutations=identity-version:crates/fs-package/tests/package.rs#package_identity_versions_and_transports_fail_closed,digest-domain:crates/fs-package/src/lib.rs#semantic_witness_identity_fields_move_independently,family-digest-domain:crates/fs-package/src/lib.rs#semantic_witness_identity_fields_move_independently,payload-digest-domain:crates/fs-package/src/lib.rs#semantic_witness_identity_fields_move_independently,family-byte-count:crates/fs-package/src/lib.rs#semantic_witness_identity_fields_move_independently,family-utf8:crates/fs-package/src/lib.rs#semantic_witness_identity_fields_move_independently,witness-schema-version:crates/fs-package/src/lib.rs#semantic_witness_identity_fields_move_independently,payload-byte-count:crates/fs-package/src/lib.rs#semantic_witness_identity_fields_move_independently,payload-bytes:crates/fs-package/src/lib.rs#semantic_witness_identity_fields_move_independently",
+    "nonsemantic_mutations=none",
+    "field_guard=classify_semantic_witness_identity_fields",
+    "transport_guard=SemanticWitness::admit_retained_content_hash",
+    "version_guard=crates/fs-package/tests/package.rs#package_identity_versions_and_transports_fail_closed",
+    "coupling_surface=fs-package:semantic-witness",
+];
+
+/// Owner-local declaration consumed by `xtask check-identities`.
+#[allow(dead_code)]
+pub const CLAIM_DECLARATION_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
+    "frankensim-identity-schema-v1",
+    "id=fs-package:claim-declaration",
+    "version_const=CLAIM_DECLARATION_IDENTITY_VERSION",
+    "version=8",
+    "domain=fs-package:v8:claim",
+    "domain_const=CLAIM_DECLARATION_IDENTITY_DOMAIN",
+    "encoder=Claim::declared_content_hash_unverified",
+    "encoder_helpers=Claim::declared_content_hash_with_domain,Claim::canonical,Claim::canonical_body,push_atom,op_name",
+    "schema_constants=CLAIM_DECLARATION_IDENTITY_VERSION,CLAIM_DECLARATION_IDENTITY_DOMAIN,FORMAT_VERSION,crates/fs-evidence/src/color.rs#COLOR_ALGEBRA_VERSION",
+    "schema_functions=crates/fs-package/src/origin.rs#ClaimOrigin::kind,crates/fs-package/src/origin.rs#ClaimOrigin::canonical_parts,crates/fs-evidence/src/lib.rs#ValidityDomain::bounds,crates/fs-blake3/src/lib.rs#ContentHash::to_hex",
+    "schema_dependencies=fs-package:semantic-witness",
+    "digest=blake3-derive-key",
+    "encoding=typed-binary",
+    "sources=Claim",
+    "source_fields=Claim.id:semantic,Claim.statement:semantic,Claim.color:semantic,Claim.receipt:semantic,Claim.falsifiers:semantic,Claim.anchors:semantic,Claim.semantic_witness:semantic,Claim.origin:semantic",
+    "source_bindings=Claim.id>claim-id,Claim.statement>statement-utf8,Claim.color>exact-color-payload,Claim.receipt>composition-receipt,Claim.falsifiers>ordered-falsifier-records,Claim.anchors>ordered-anchor-records,Claim.semantic_witness>semantic-witness-presence+semantic-witness-content-address,Claim.origin>claim-origin",
+    "external_semantic_fields=identity-version,digest-domain",
+    "semantic_fields=identity-version,digest-domain,claim-id,statement-utf8,exact-color-payload,composition-receipt,ordered-falsifier-records,ordered-anchor-records,semantic-witness-presence,semantic-witness-content-address,claim-origin",
+    "excluded_fields=none",
+    "consumers=Claim::declared_content_hash_unverified,EvidencePackage::merkle_root_unchecked,DerivationRequest::parent_claim_hashes,package-json-merkle-root",
+    "mutations=identity-version:crates/fs-package/tests/package.rs#package_identity_versions_and_transports_fail_closed,digest-domain:crates/fs-package/src/lib.rs#claim_declaration_identity_fields_move_independently,claim-id:crates/fs-package/src/lib.rs#claim_declaration_identity_fields_move_independently,statement-utf8:crates/fs-package/src/lib.rs#claim_declaration_identity_fields_move_independently,exact-color-payload:crates/fs-package/src/lib.rs#claim_declaration_identity_fields_move_independently,composition-receipt:crates/fs-package/src/lib.rs#claim_declaration_identity_fields_move_independently,ordered-falsifier-records:crates/fs-package/src/lib.rs#claim_declaration_identity_fields_move_independently,ordered-anchor-records:crates/fs-package/src/lib.rs#claim_declaration_identity_fields_move_independently,semantic-witness-presence:crates/fs-package/src/lib.rs#claim_declaration_identity_fields_move_independently,semantic-witness-content-address:crates/fs-package/src/lib.rs#claim_declaration_identity_fields_move_independently,claim-origin:crates/fs-package/src/lib.rs#claim_declaration_identity_fields_move_independently",
+    "nonsemantic_mutations=none",
+    "field_guard=classify_claim_identity_fields",
+    "transport_guard=Claim::admit_retained_declaration_hash",
+    "version_guard=crates/fs-package/tests/package.rs#package_identity_versions_and_transports_fail_closed",
+    "coupling_surface=fs-package:claim-declaration",
+];
+
+/// Owner-local declaration consumed by `xtask check-identities`.
+#[allow(dead_code)]
+pub const CLAIM_VERIFICATION_SUBJECT_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
+    "frankensim-identity-schema-v1",
+    "id=fs-package:claim-verification-subject",
+    "version_const=CLAIM_VERIFICATION_SUBJECT_IDENTITY_VERSION",
+    "version=8",
+    "domain=fs-package:v8:claim-verification-subject",
+    "domain_const=CLAIM_VERIFICATION_SUBJECT_IDENTITY_DOMAIN",
+    "encoder=Claim::declared_verification_subject_hash_unverified",
+    "encoder_helpers=Claim::declared_verification_subject_hash_with_domain,Claim::authorization_canonical",
+    "schema_constants=CLAIM_VERIFICATION_SUBJECT_IDENTITY_VERSION,CLAIM_VERIFICATION_SUBJECT_IDENTITY_DOMAIN,FORMAT_VERSION,crates/fs-evidence/src/color.rs#COLOR_ALGEBRA_VERSION",
+    "schema_functions=crates/fs-package/src/origin.rs#ClaimOrigin::kind,crates/fs-package/src/origin.rs#ClaimOrigin::canonical_parts,crates/fs-evidence/src/lib.rs#ValidityDomain::bounds,crates/fs-blake3/src/lib.rs#ContentHash::to_hex",
+    "schema_dependencies=fs-package:claim-declaration",
+    "digest=blake3-derive-key",
+    "encoding=typed-binary",
+    "sources=Claim",
+    "source_fields=Claim.id:semantic,Claim.statement:semantic,Claim.color:semantic,Claim.receipt:semantic,Claim.falsifiers:semantic,Claim.anchors:semantic,Claim.semantic_witness:semantic,Claim.origin:semantic",
+    "source_bindings=Claim.id>claim-id,Claim.statement>statement-utf8,Claim.color>exact-color-payload,Claim.receipt>composition-receipt-without-artifact-address,Claim.falsifiers>ordered-falsifier-records-without-artifact-addresses,Claim.anchors>ordered-anchor-records,Claim.semantic_witness>semantic-witness-presence+semantic-witness-content-address,Claim.origin>claim-origin-without-waiver-mac",
+    "external_semantic_fields=identity-version,digest-domain",
+    "semantic_fields=identity-version,digest-domain,claim-id,statement-utf8,exact-color-payload,composition-receipt-without-artifact-address,ordered-falsifier-records-without-artifact-addresses,ordered-anchor-records,semantic-witness-presence,semantic-witness-content-address,claim-origin-without-waiver-mac",
+    "excluded_fields=receipt-artifact-address:external-artifact-self-address,falsifier-artifact-addresses:external-artifact-self-addresses,waiver-mac-bytes:authorization-output-not-subject-input",
+    "consumers=Claim::declared_verification_subject_hash_unverified,FalsifierRequest::claim_subject_hash,DerivationRequest::child_subject_hash",
+    "mutations=identity-version:crates/fs-package/tests/package.rs#package_identity_versions_and_transports_fail_closed,digest-domain:crates/fs-package/src/lib.rs#claim_verification_subject_identity_fields_move_independently,claim-id:crates/fs-package/src/lib.rs#claim_verification_subject_identity_fields_move_independently,statement-utf8:crates/fs-package/src/lib.rs#claim_verification_subject_identity_fields_move_independently,exact-color-payload:crates/fs-package/src/lib.rs#claim_verification_subject_identity_fields_move_independently,composition-receipt-without-artifact-address:crates/fs-package/src/lib.rs#claim_verification_subject_identity_fields_move_independently,ordered-falsifier-records-without-artifact-addresses:crates/fs-package/src/lib.rs#claim_verification_subject_identity_fields_move_independently,ordered-anchor-records:crates/fs-package/src/lib.rs#claim_verification_subject_identity_fields_move_independently,semantic-witness-presence:crates/fs-package/src/lib.rs#claim_verification_subject_identity_fields_move_independently,semantic-witness-content-address:crates/fs-package/src/lib.rs#claim_verification_subject_identity_fields_move_independently,claim-origin-without-waiver-mac:crates/fs-package/src/lib.rs#claim_verification_subject_identity_fields_move_independently",
+    "nonsemantic_mutations=receipt-artifact-address:crates/fs-package/src/lib.rs#claim_verification_subject_exclusions_do_not_move_identity,falsifier-artifact-addresses:crates/fs-package/src/lib.rs#claim_verification_subject_exclusions_do_not_move_identity,waiver-mac-bytes:crates/fs-package/src/lib.rs#claim_verification_subject_exclusions_do_not_move_identity",
+    "field_guard=classify_claim_identity_fields",
+    "transport_guard=Claim::admit_retained_verification_subject_hash",
+    "version_guard=crates/fs-package/tests/package.rs#package_identity_versions_and_transports_fail_closed",
+    "coupling_surface=fs-package:claim-verification-subject",
+];
+
+/// Owner-local declaration consumed by `xtask check-identities`.
+#[allow(dead_code)]
+pub const SOURCE_CERTIFICATE_SUBJECT_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
+    "frankensim-identity-schema-v1",
+    "id=fs-package:source-certificate-subject",
+    "version_const=SOURCE_CERTIFICATE_SUBJECT_IDENTITY_VERSION",
+    "version=8",
+    "domain=fs-package:v8:source-certificate-subject",
+    "domain_const=SOURCE_CERTIFICATE_SUBJECT_IDENTITY_DOMAIN",
+    "encoder=Claim::declared_source_certificate_subject_hash_unverified",
+    "encoder_helpers=Claim::declared_source_certificate_subject_hash_with_domain",
+    "schema_constants=SOURCE_CERTIFICATE_SUBJECT_IDENTITY_VERSION,SOURCE_CERTIFICATE_SUBJECT_IDENTITY_DOMAIN,FORMAT_VERSION,crates/fs-evidence/src/color.rs#COLOR_ALGEBRA_VERSION,crates/fs-blake3/src/lib.rs#IV,crates/fs-blake3/src/lib.rs#MSG_PERMUTATION,crates/fs-blake3/src/lib.rs#BLOCK_LEN,crates/fs-blake3/src/lib.rs#CHUNK_LEN,crates/fs-blake3/src/lib.rs#CHUNK_START,crates/fs-blake3/src/lib.rs#CHUNK_END,crates/fs-blake3/src/lib.rs#PARENT,crates/fs-blake3/src/lib.rs#ROOT,crates/fs-blake3/src/lib.rs#DERIVE_KEY_CONTEXT,crates/fs-blake3/src/lib.rs#DERIVE_KEY_MATERIAL,crates/fs-blake3/src/lib.rs#MAX_DEPTH",
+    "schema_functions=crates/fs-package/src/origin.rs#ClaimOrigin::kind,crates/fs-package/src/origin.rs#ClaimOrigin::canonical_parts,crates/fs-evidence/src/lib.rs#ValidityDomain::bounds,crates/fs-blake3/src/lib.rs#hash_domain,crates/fs-blake3/src/lib.rs#g,crates/fs-blake3/src/lib.rs#round,crates/fs-blake3/src/lib.rs#permute,crates/fs-blake3/src/lib.rs#compress,crates/fs-blake3/src/lib.rs#words_from_block,crates/fs-blake3/src/lib.rs#first_8_words,crates/fs-blake3/src/lib.rs#Output::chaining_value,crates/fs-blake3/src/lib.rs#Output::root_hash,crates/fs-blake3/src/lib.rs#parent_output,crates/fs-blake3/src/lib.rs#ChunkState::new,crates/fs-blake3/src/lib.rs#ChunkState::len,crates/fs-blake3/src/lib.rs#ChunkState::start_flag,crates/fs-blake3/src/lib.rs#ChunkState::update,crates/fs-blake3/src/lib.rs#ChunkState::output,crates/fs-blake3/src/lib.rs#Blake3::new_internal,crates/fs-blake3/src/lib.rs#Blake3::push_stack,crates/fs-blake3/src/lib.rs#Blake3::pop_stack,crates/fs-blake3/src/lib.rs#Blake3::add_chunk_chaining_value,crates/fs-blake3/src/lib.rs#Blake3::update,crates/fs-blake3/src/lib.rs#Blake3::finalize",
+    "schema_dependencies=none",
+    "digest=blake3-derive-key",
+    "encoding=typed-binary",
+    "sources=Claim",
+    "source_fields=Claim.id:semantic,Claim.statement:semantic,Claim.color:semantic,Claim.receipt:semantic,Claim.falsifiers:semantic,Claim.anchors:semantic,Claim.semantic_witness:semantic,Claim.origin:semantic",
+    "source_bindings=Claim.id>claim-id,Claim.statement>statement-utf8,Claim.color>exact-color-payload,Claim.receipt>composition-receipt-without-artifact-address,Claim.falsifiers>ordered-falsifier-records-without-artifact-addresses,Claim.anchors>ordered-anchor-identities-without-content-addresses,Claim.semantic_witness>portable-family-presence+portable-family-identity+portable-schema-version,Claim.origin>claim-origin-without-source-certificate-address-or-waiver-mac",
+    "external_semantic_fields=identity-version,digest-domain",
+    "semantic_fields=identity-version,digest-domain,claim-id,statement-utf8,exact-color-payload,composition-receipt-without-artifact-address,ordered-falsifier-records-without-artifact-addresses,ordered-anchor-identities-without-content-addresses,portable-family-presence,portable-family-identity,portable-schema-version,claim-origin-without-source-certificate-address-or-waiver-mac",
+    "excluded_fields=source-certificate-address:external-artifact-self-address,receipt-artifact-address:external-artifact-self-address,falsifier-artifact-addresses:external-artifact-self-addresses,anchor-content-addresses:external-artifact-addresses,portable-witness-payload-and-address:external-artifact-self-address,waiver-mac-bytes:authorization-output-not-subject-input",
+    "consumers=Claim::declared_source_certificate_subject_hash_unverified,SourceCertificateRequest::claim_subject_hash,portable-source-certificates",
+    "mutations=identity-version:crates/fs-package/tests/package.rs#package_identity_versions_and_transports_fail_closed,digest-domain:crates/fs-package/src/lib.rs#source_certificate_subject_identity_fields_move_independently,claim-id:crates/fs-package/src/lib.rs#source_certificate_subject_identity_fields_move_independently,statement-utf8:crates/fs-package/src/lib.rs#source_certificate_subject_identity_fields_move_independently,exact-color-payload:crates/fs-package/src/lib.rs#source_certificate_subject_identity_fields_move_independently,composition-receipt-without-artifact-address:crates/fs-package/src/lib.rs#source_certificate_subject_identity_fields_move_independently,ordered-falsifier-records-without-artifact-addresses:crates/fs-package/src/lib.rs#source_certificate_subject_identity_fields_move_independently,ordered-anchor-identities-without-content-addresses:crates/fs-package/src/lib.rs#source_certificate_subject_identity_fields_move_independently,portable-family-presence:crates/fs-package/src/lib.rs#source_certificate_subject_identity_fields_move_independently,portable-family-identity:crates/fs-package/src/lib.rs#source_certificate_subject_identity_fields_move_independently,portable-schema-version:crates/fs-package/src/lib.rs#source_certificate_subject_identity_fields_move_independently,claim-origin-without-source-certificate-address-or-waiver-mac:crates/fs-package/src/lib.rs#source_certificate_subject_identity_fields_move_independently",
+    "nonsemantic_mutations=source-certificate-address:crates/fs-package/src/lib.rs#source_certificate_subject_exclusions_do_not_move_identity,receipt-artifact-address:crates/fs-package/src/lib.rs#source_certificate_subject_exclusions_do_not_move_identity,falsifier-artifact-addresses:crates/fs-package/src/lib.rs#source_certificate_subject_exclusions_do_not_move_identity,anchor-content-addresses:crates/fs-package/src/lib.rs#source_certificate_subject_exclusions_do_not_move_identity,portable-witness-payload-and-address:crates/fs-package/src/lib.rs#source_certificate_subject_exclusions_do_not_move_identity,waiver-mac-bytes:crates/fs-package/src/lib.rs#source_certificate_subject_exclusions_do_not_move_identity",
+    "field_guard=classify_claim_identity_fields",
+    "transport_guard=Claim::admit_retained_source_certificate_subject_hash",
+    "version_guard=crates/fs-package/tests/package.rs#package_identity_versions_and_transports_fail_closed",
+    "coupling_surface=fs-package:source-certificate-subject",
+];
+
+/// Owner-local declaration consumed by `xtask check-identities`.
+#[allow(dead_code)]
+pub const PACKAGE_ROOT_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
+    "frankensim-identity-schema-v1",
+    "id=fs-package:package-root",
+    "version_const=PACKAGE_ROOT_IDENTITY_VERSION",
+    "version=8",
+    "domain=fs-package:v8:header",
+    "domain_const=PACKAGE_ROOT_IDENTITY_DOMAIN",
+    "encoder=EvidencePackage::try_merkle_root",
+    "encoder_helpers=EvidencePackage::merkle_root_with_schema,EvidencePackage::package_header,combine",
+    "schema_constants=PACKAGE_ROOT_IDENTITY_VERSION,PACKAGE_ROOT_IDENTITY_DOMAIN,PACKAGE_NODE_IDENTITY_DOMAIN,CURRENT_PACKAGE_ROOT_SCHEMA,FORMAT_VERSION",
+    "schema_functions=EvidencePackage::merkle_root_unchecked",
+    "schema_dependencies=fs-package:claim-declaration",
+    "digest=blake3-derive-key-merkle-tree",
+    "encoding=typed-binary",
+    "sources=EvidencePackage,Provenance,PackageRootSchema",
+    "source_fields=EvidencePackage.format_version:semantic,EvidencePackage.claims:semantic,EvidencePackage.provenance:derived:expanded-into-provenance-fields,EvidencePackage.signature:nonsemantic:detached-signature-excluded-from-root,Provenance.code_version:semantic,Provenance.constellation_lock:semantic,PackageRootSchema.header_domain:semantic,PackageRootSchema.node_domain:semantic,PackageRootSchema.carry_odd_node:semantic",
+    "source_bindings=EvidencePackage.format_version>format-version,EvidencePackage.claims>claim-count+ordered-claim-declaration-hashes,Provenance.code_version>code-version,Provenance.constellation_lock>constellation-lock,PackageRootSchema.header_domain>header-domain,PackageRootSchema.node_domain>node-domain,PackageRootSchema.carry_odd_node>odd-node-carry-rule",
+    "external_semantic_fields=identity-version",
+    "semantic_fields=identity-version,format-version,claim-count,ordered-claim-declaration-hashes,code-version,constellation-lock,header-domain,node-domain,odd-node-carry-rule",
+    "excluded_fields=none",
+    "consumers=EvidencePackage::try_merkle_root,EvidencePackage::verify_structural_integrity,PackageReport::merkle_root,VerificationReceipt::package_root,package-json-merkle-root,fs-checker",
+    "mutations=identity-version:crates/fs-package/tests/package.rs#package_identity_versions_and_transports_fail_closed,format-version:crates/fs-package/src/lib.rs#package_root_identity_fields_move_independently,claim-count:crates/fs-package/src/lib.rs#package_root_identity_fields_move_independently,ordered-claim-declaration-hashes:crates/fs-package/src/lib.rs#package_root_identity_fields_move_independently,code-version:crates/fs-package/src/lib.rs#package_root_identity_fields_move_independently,constellation-lock:crates/fs-package/src/lib.rs#package_root_identity_fields_move_independently,header-domain:crates/fs-package/src/lib.rs#package_root_identity_fields_move_independently,node-domain:crates/fs-package/src/lib.rs#package_root_identity_fields_move_independently,odd-node-carry-rule:crates/fs-package/src/lib.rs#package_root_identity_fields_move_independently",
+    "nonsemantic_mutations=EvidencePackage.signature:crates/fs-package/tests/package.rs#a_signature_is_optional_and_detached",
+    "field_guard=classify_package_root_identity_fields",
+    "transport_guard=EvidencePackage::admit_retained_package_root",
+    "version_guard=crates/fs-package/tests/package.rs#package_identity_versions_and_transports_fail_closed",
+    "coupling_surface=fs-package:package-root",
+];
+
+/// Owner-local declaration consumed by `xtask check-identities`.
+#[allow(dead_code)]
+pub const WAIVER_AUTHORIZATION_SUBJECT_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
+    "frankensim-identity-schema-v1",
+    "id=fs-package:waiver-authorization-subject",
+    "version_const=WAIVER_AUTHORIZATION_SUBJECT_IDENTITY_VERSION",
+    "version=8",
+    "domain=fs-package:v8:waiver-authorization",
+    "domain_const=WAIVER_AUTHORIZATION_SUBJECT_IDENTITY_DOMAIN",
+    "encoder=EvidencePackage::waiver_message",
+    "encoder_helpers=EvidencePackage::authorization_context,EvidencePackage::authorization_context_with_domain,EvidencePackage::waiver_message_with_context,EvidencePackage::waiver_message_with_context_and_domain",
+    "schema_constants=WAIVER_AUTHORIZATION_SUBJECT_IDENTITY_VERSION,WAIVER_AUTHORIZATION_SUBJECT_IDENTITY_DOMAIN,AUTHORIZATION_CONTEXT_IDENTITY_DOMAIN,FORMAT_VERSION,crates/fs-evidence/src/color.rs#COLOR_ALGEBRA_VERSION",
+    "schema_functions=crates/fs-package/src/origin.rs#ClaimOrigin::kind,crates/fs-package/src/origin.rs#ClaimOrigin::canonical_parts,crates/fs-evidence/src/lib.rs#ValidityDomain::bounds,crates/fs-blake3/src/lib.rs#ContentHash::to_hex",
+    "schema_dependencies=fs-package:claim-declaration",
+    "digest=none-exact-canonical-subject",
+    "encoding=canonical-transport-exact-bits",
+    "sources=EvidencePackage,Provenance",
+    "source_fields=EvidencePackage.format_version:semantic,EvidencePackage.claims:semantic,EvidencePackage.provenance:derived:expanded-into-provenance-fields,EvidencePackage.signature:nonsemantic:detached-signature-excluded-from-authorization,Provenance.code_version:semantic,Provenance.constellation_lock:semantic",
+    "source_bindings=EvidencePackage.format_version>format-version,EvidencePackage.claims>ordered-authorization-claim-bytes+target-claim-body+waiver-id+expiry-day,Provenance.code_version>code-version,Provenance.constellation_lock>constellation-lock",
+    "external_semantic_fields=identity-version,subject-domain,authorization-context-domain,target-claim-index",
+    "semantic_fields=identity-version,subject-domain,authorization-context-domain,target-claim-index,format-version,ordered-authorization-claim-bytes,target-claim-body,waiver-id,expiry-day,code-version,constellation-lock",
+    "excluded_fields=all-waiver-mac-bytes:authorization-outputs-not-subject-input",
+    "consumers=EvidencePackage::waiver_message,WaiverVerifier::verify,VerificationReceipt::waiver_registry",
+    "mutations=identity-version:crates/fs-package/tests/package.rs#package_identity_versions_and_transports_fail_closed,subject-domain:crates/fs-package/src/lib.rs#waiver_authorization_subject_identity_fields_move_independently,authorization-context-domain:crates/fs-package/src/lib.rs#waiver_authorization_subject_identity_fields_move_independently,target-claim-index:crates/fs-package/src/lib.rs#waiver_authorization_subject_identity_fields_move_independently,format-version:crates/fs-package/src/lib.rs#waiver_authorization_subject_identity_fields_move_independently,ordered-authorization-claim-bytes:crates/fs-package/src/lib.rs#waiver_authorization_subject_identity_fields_move_independently,target-claim-body:crates/fs-package/src/lib.rs#waiver_authorization_subject_identity_fields_move_independently,waiver-id:crates/fs-package/src/lib.rs#waiver_authorization_subject_identity_fields_move_independently,expiry-day:crates/fs-package/src/lib.rs#waiver_authorization_subject_identity_fields_move_independently,code-version:crates/fs-package/src/lib.rs#waiver_authorization_subject_identity_fields_move_independently,constellation-lock:crates/fs-package/src/lib.rs#waiver_authorization_subject_identity_fields_move_independently",
+    "nonsemantic_mutations=EvidencePackage.signature:crates/fs-package/src/lib.rs#waiver_authorization_subject_exclusions_do_not_move_identity,all-waiver-mac-bytes:crates/fs-package/src/lib.rs#waiver_authorization_subject_exclusions_do_not_move_identity",
+    "field_guard=classify_waiver_authorization_identity_fields",
+    "transport_guard=EvidencePackage::admit_retained_waiver_authorization_subject",
+    "version_guard=crates/fs-package/tests/package.rs#package_identity_versions_and_transports_fail_closed",
+    "coupling_surface=fs-package:waiver-authorization-subject",
+];
+
+/// Owner-local declaration consumed by `xtask check-identities`.
+#[allow(dead_code)]
+pub const VERIFICATION_RECEIPT_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
+    "frankensim-identity-schema-v1",
+    "id=fs-package:verification-receipt",
+    "version_const=VERIFICATION_RECEIPT_IDENTITY_VERSION",
+    "version=8",
+    "domain=fs-package:v8:verification-receipt",
+    "domain_const=VERIFICATION_RECEIPT_IDENTITY_DOMAIN",
+    "encoder=VerificationReceipt::recomputed_hash",
+    "encoder_helpers=verification_receipt_hash,verification_receipt_hash_with_domain",
+    "schema_constants=VERIFICATION_RECEIPT_IDENTITY_VERSION,VERIFICATION_RECEIPT_IDENTITY_DOMAIN,FORMAT_VERSION",
+    "schema_functions=AdmissionOriginKind::tag",
+    "schema_dependencies=fs-package:package-root",
+    "digest=blake3-derive-key-stream",
+    "encoding=typed-binary",
+    "sources=VerificationReceipt",
+    "source_fields=VerificationReceipt.package_root:semantic,VerificationReceipt.policy_fingerprints:semantic,VerificationReceipt.waiver_day:semantic,VerificationReceipt.signature:semantic,VerificationReceipt.admissions:semantic,VerificationReceipt.waiver_registry:semantic,VerificationReceipt.receipt_hash:derived:recomputed-from-semantic-fields",
+    "source_bindings=VerificationReceipt.package_root>package-root,VerificationReceipt.policy_fingerprints>policy-fingerprints,VerificationReceipt.waiver_day>waiver-day,VerificationReceipt.signature>signature-status-and-purpose,VerificationReceipt.admissions>ordered-claim-admissions,VerificationReceipt.waiver_registry>ordered-waiver-registry",
+    "external_semantic_fields=identity-version,digest-domain",
+    "semantic_fields=identity-version,digest-domain,package-root,policy-fingerprints,waiver-day,signature-status-and-purpose,ordered-claim-admissions,ordered-waiver-registry",
+    "excluded_fields=none",
+    "consumers=VerificationReceipt::receipt_hash,VerificationReceipt::validate_hash,PackagePresenceReport::receipt,PackageCoverageReport::receipt,VerifiedPackage::validate_binding,fs-checker",
+    "mutations=identity-version:crates/fs-package/tests/package.rs#package_identity_versions_and_transports_fail_closed,digest-domain:crates/fs-package/src/lib.rs#verification_receipt_identity_fields_move_independently,package-root:crates/fs-package/src/lib.rs#verification_receipt_identity_fields_move_independently,policy-fingerprints:crates/fs-package/src/lib.rs#verification_receipt_identity_fields_move_independently,waiver-day:crates/fs-package/src/lib.rs#verification_receipt_identity_fields_move_independently,signature-status-and-purpose:crates/fs-package/src/lib.rs#verification_receipt_identity_fields_move_independently,ordered-claim-admissions:crates/fs-package/src/lib.rs#verification_receipt_identity_fields_move_independently,ordered-waiver-registry:crates/fs-package/src/lib.rs#verification_receipt_identity_fields_move_independently",
+    "nonsemantic_mutations=none",
+    "field_guard=classify_verification_receipt_identity_fields",
+    "transport_guard=VerificationReceipt::admit_retained_hash",
+    "version_guard=crates/fs-package/tests/package.rs#package_identity_versions_and_transports_fail_closed",
+    "coupling_surface=fs-package:verification-receipt",
+];
+
+/// Owner-local declaration consumed by `xtask check-identities`.
+#[allow(dead_code)]
+pub const RELEASE_ADMISSION_CONTEXT_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
+    "frankensim-identity-schema-v1",
+    "id=fs-package:release-admission-context",
+    "version_const=RELEASE_ADMISSION_CONTEXT_IDENTITY_VERSION",
+    "version=8",
+    "domain=fs-package:v8:release-admission-context",
+    "domain_const=RELEASE_ADMISSION_CONTEXT_IDENTITY_DOMAIN",
+    "encoder=VerificationReceipt::release_admission_context",
+    "encoder_helpers=release_admission_context_hash,release_admission_context_hash_with_domain",
+    "schema_constants=RELEASE_ADMISSION_CONTEXT_IDENTITY_VERSION,RELEASE_ADMISSION_CONTEXT_IDENTITY_DOMAIN,VERIFICATION_RECEIPT_IDENTITY_DOMAIN,FORMAT_VERSION",
+    "schema_functions=none",
+    "schema_dependencies=fs-package:package-root",
+    "digest=blake3-derive-key-over-unsigned-receipt",
+    "encoding=typed-binary",
+    "sources=VerificationReceipt",
+    "source_fields=VerificationReceipt.package_root:semantic,VerificationReceipt.policy_fingerprints:semantic,VerificationReceipt.waiver_day:semantic,VerificationReceipt.signature:nonsemantic:normalized-to-unsigned-before-hashing,VerificationReceipt.admissions:semantic,VerificationReceipt.waiver_registry:semantic,VerificationReceipt.receipt_hash:derived:recomputed-receipt-not-read",
+    "source_bindings=VerificationReceipt.package_root>package-root,VerificationReceipt.policy_fingerprints>non-signature-policy-fingerprints,VerificationReceipt.waiver_day>waiver-day,VerificationReceipt.admissions>ordered-claim-admissions,VerificationReceipt.waiver_registry>ordered-waiver-registry",
+    "external_semantic_fields=identity-version,digest-domain",
+    "semantic_fields=identity-version,digest-domain,package-root,non-signature-policy-fingerprints,waiver-day,ordered-claim-admissions,ordered-waiver-registry",
+    "excluded_fields=signature-policy-fingerprint:excluded-to-avoid-self-referential-signature-subject",
+    "consumers=VerificationReceipt::release_admission_context,SignaturePurpose::ReleaseApproval,signature_subject_hash,fs-checker-release-gate",
+    "mutations=identity-version:crates/fs-package/tests/package.rs#package_identity_versions_and_transports_fail_closed,digest-domain:crates/fs-package/src/lib.rs#release_admission_context_identity_fields_move_independently,package-root:crates/fs-package/src/lib.rs#release_admission_context_identity_fields_move_independently,non-signature-policy-fingerprints:crates/fs-package/src/lib.rs#release_admission_context_identity_fields_move_independently,waiver-day:crates/fs-package/src/lib.rs#release_admission_context_identity_fields_move_independently,ordered-claim-admissions:crates/fs-package/src/lib.rs#release_admission_context_identity_fields_move_independently,ordered-waiver-registry:crates/fs-package/src/lib.rs#release_admission_context_identity_fields_move_independently",
+    "nonsemantic_mutations=VerificationReceipt.signature:crates/fs-package/src/lib.rs#release_admission_context_signature_fields_do_not_move_identity,signature-policy-fingerprint:crates/fs-package/src/lib.rs#release_admission_context_signature_fields_do_not_move_identity",
+    "field_guard=classify_verification_receipt_identity_fields",
+    "transport_guard=VerificationReceipt::admit_retained_release_admission_context",
+    "version_guard=crates/fs-package/tests/package.rs#package_identity_versions_and_transports_fail_closed",
+    "coupling_surface=fs-package:release-admission-context",
+];
+
+/// Maximum UTF-8 byte length of a portable semantic-witness family identity.
+pub const MAX_SEMANTIC_WITNESS_FAMILY_BYTES: usize = 128;
+/// Maximum decoded canonical payload carried by one semantic witness.
+pub const MAX_SEMANTIC_WITNESS_PAYLOAD_BYTES: usize = 256 * 1024;
+/// Maximum number of witness-bearing claims in one package.
+pub const MAX_SEMANTIC_WITNESSES: usize = 4096;
+/// Maximum aggregate decoded semantic-witness payload in one package.
+pub const MAX_SEMANTIC_WITNESS_TOTAL_BYTES: usize = 8 * 1024 * 1024;
+
+/// An inline, portable witness for one independently re-checkable certificate
+/// family. `fs-package` validates and content-addresses this envelope but does
+/// not interpret the family-owned canonical payload; standalone checker
+/// plugins own those semantics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SemanticWitness {
+    family: String,
+    schema_version: u32,
+    canonical_payload: Vec<u8>,
+}
+
+#[allow(dead_code)]
+fn classify_semantic_witness_identity_fields(witness: &SemanticWitness) {
+    let SemanticWitness {
+        family,
+        schema_version,
+        canonical_payload,
+    } = witness;
+    let _ = (family, schema_version, canonical_payload);
+}
+
+fn admit_retained_content_hash(
+    found_version: u32,
+    expected_version: u32,
+    bytes: &[u8],
+) -> Option<ContentHash> {
+    if found_version != expected_version || bytes.len() != 32 {
+        return None;
+    }
+    let mut exact = [0_u8; 32];
+    exact.copy_from_slice(bytes);
+    Some(ContentHash(exact))
+}
+
+fn semantic_witness_content_hash_with_domains(
+    witness: &SemanticWitness,
+    digest_domain: &str,
+    family_digest_domain: &str,
+    payload_digest_domain: &str,
+) -> ContentHash {
+    let family_digest = hash_domain(family_digest_domain, witness.family.as_bytes());
+    let payload_digest = hash_domain(payload_digest_domain, &witness.canonical_payload);
+    let mut canonical = Vec::with_capacity(100);
+    canonical.extend_from_slice(&(witness.family.len() as u128).to_le_bytes());
+    canonical.extend_from_slice(family_digest.as_bytes());
+    canonical.extend_from_slice(&witness.schema_version.to_le_bytes());
+    canonical.extend_from_slice(&(witness.canonical_payload.len() as u128).to_le_bytes());
+    canonical.extend_from_slice(payload_digest.as_bytes());
+    hash_domain(digest_domain, &canonical)
+}
+
+impl SemanticWitness {
+    /// Construct a witness envelope. Shape and resource limits are enforced by
+    /// claim attachment and package structural verification.
+    #[must_use]
+    pub fn new(family: impl Into<String>, schema_version: u32, canonical_payload: Vec<u8>) -> Self {
+        Self {
+            family: family.into(),
+            schema_version,
+            canonical_payload,
+        }
+    }
+
+    /// Stable checker-plugin family identity.
+    #[must_use]
+    pub fn family(&self) -> &str {
+        &self.family
+    }
+
+    /// Closed payload schema version interpreted by the family plugin.
+    #[must_use]
+    pub const fn schema_version(&self) -> u32 {
+        self.schema_version
+    }
+
+    /// Exact family-owned canonical payload bytes.
+    #[must_use]
+    pub fn canonical_payload(&self) -> &[u8] {
+        &self.canonical_payload
+    }
+
+    /// Domain-separated content address of the exact family, schema version,
+    /// and payload bytes. The potentially large fields are hashed first, then
+    /// their digests and 128-bit length prefixes are bound in a fixed-size
+    /// binary envelope, so hashing an untrusted in-memory witness does not copy
+    /// its payload.
+    #[must_use]
+    pub fn content_hash(&self) -> ContentHash {
+        semantic_witness_content_hash_with_domains(
+            self,
+            SEMANTIC_WITNESS_IDENTITY_DOMAIN,
+            SEMANTIC_WITNESS_FAMILY_IDENTITY_DOMAIN,
+            SEMANTIC_WITNESS_PAYLOAD_IDENTITY_DOMAIN,
+        )
+    }
+
+    /// Admit a retained semantic-witness digest only under this exact schema
+    /// version and fixed-width binary transport.
+    #[must_use]
+    pub fn admit_retained_content_hash(version: u32, bytes: &[u8]) -> Option<ContentHash> {
+        admit_retained_content_hash(version, SEMANTIC_WITNESS_IDENTITY_VERSION, bytes)
+    }
+}
 
 /// A COMPOSITION RECEIPT (schema v3, bead xfxq): this claim's color was
 /// derived from earlier claims in the package, and the standalone
@@ -112,7 +521,32 @@ pub struct Claim {
     pub(crate) receipt: Option<CompositionReceipt>,
     pub(crate) falsifiers: Vec<FalsifierRecord>,
     pub(crate) anchors: Vec<AnchorRecord>,
+    pub(crate) semantic_witness: Option<SemanticWitness>,
     pub(crate) origin: ClaimOrigin,
+}
+
+#[allow(dead_code)]
+fn classify_claim_identity_fields(claim: &Claim) {
+    let Claim {
+        id,
+        statement,
+        color,
+        receipt,
+        falsifiers,
+        anchors,
+        semantic_witness,
+        origin,
+    } = claim;
+    let _ = (
+        id,
+        statement,
+        color,
+        receipt,
+        falsifiers,
+        anchors,
+        semantic_witness,
+        origin,
+    );
 }
 
 impl Claim {
@@ -129,6 +563,7 @@ impl Claim {
             receipt: None,
             falsifiers: Vec::new(),
             anchors: Vec::new(),
+            semantic_witness: None,
             origin,
         }
     }
@@ -152,6 +587,25 @@ impl Claim {
                 certificate_hash: certificate_hash.into(),
             },
         )
+    }
+
+    /// A VERIFIED source certificate carrying the canonical bytes needed by a
+    /// standalone semantic checker plugin. The source-certificate artifact
+    /// address is the witness-envelope hash, binding origin authentication to
+    /// the exact family, schema version, and payload.
+    #[must_use]
+    pub fn from_portable_certificate(
+        id: impl Into<String>,
+        statement: impl Into<String>,
+        lo: f64,
+        hi: f64,
+        producer: impl Into<String>,
+        witness: SemanticWitness,
+    ) -> Claim {
+        let certificate_hash = witness.content_hash().to_hex();
+        let mut claim = Claim::from_certificate(id, statement, lo, hi, producer, certificate_hash);
+        claim.semantic_witness = Some(witness);
+        claim
     }
 
     /// A VALIDATED claim anchored to its reference dataset: the origin
@@ -259,19 +713,45 @@ impl Claim {
     pub fn declared_color_unverified(&self) -> &Color {
         &self.color
     }
+    /// Raw Verified interval declaration before origin or semantic admission.
+    /// Other color classes return `None`.
+    #[must_use]
+    pub fn declared_verified_interval_unverified(&self) -> Option<(f64, f64)> {
+        match &self.color {
+            Color::Verified { lo, hi } => Some((*lo, *hi)),
+            Color::Validated { .. } | Color::Estimated { .. } => None,
+        }
+    }
     /// Domain-separated hash of the complete raw claim declaration. This is an
     /// artifact address, not an admission decision.
     #[must_use]
     pub fn declared_content_hash_unverified(&self) -> ContentHash {
-        hash_domain("fs-package:v7:claim", self.canonical().as_bytes())
+        self.declared_content_hash_with_domain(CLAIM_DECLARATION_IDENTITY_DOMAIN)
+    }
+
+    fn declared_content_hash_with_domain(&self, domain: &str) -> ContentHash {
+        hash_domain(domain, self.canonical().as_bytes())
+    }
+
+    /// Admit a retained raw claim-declaration digest only under the exact
+    /// schema version and fixed-width binary transport.
+    #[must_use]
+    pub fn admit_retained_declaration_hash(version: u32, bytes: &[u8]) -> Option<ContentHash> {
+        admit_retained_content_hash(version, CLAIM_DECLARATION_IDENTITY_VERSION, bytes)
     }
 
     /// Domain-separated subject hash for external falsifier/derivation
-    /// artifacts. External artifact addresses and waiver MAC bytes are omitted
-    /// so an artifact may embed this digest without a fixed-point cycle; the
-    /// package root separately binds the complete declaration.
+    /// artifacts. Receipt and falsifier artifact addresses and waiver MAC bytes
+    /// are omitted so an artifact may embed this digest without a fixed-point
+    /// cycle; the package root separately binds the complete declaration.
     #[must_use]
     pub fn declared_verification_subject_hash_unverified(&self) -> ContentHash {
+        self.declared_verification_subject_hash_with_domain(
+            CLAIM_VERIFICATION_SUBJECT_IDENTITY_DOMAIN,
+        )
+    }
+
+    fn declared_verification_subject_hash_with_domain(&self, domain: &str) -> ContentHash {
         let mut subject = self.clone();
         if let Some(receipt) = &mut subject.receipt {
             receipt.artifact_hash.clear();
@@ -279,10 +759,81 @@ impl Claim {
         for falsifier in &mut subject.falsifiers {
             falsifier.artifact_hash.clear();
         }
-        hash_domain(
-            "fs-package:v7:claim-verification-subject",
-            subject.authorization_canonical().as_bytes(),
+        hash_domain(domain, subject.authorization_canonical().as_bytes())
+    }
+
+    /// Admit a retained falsifier/derivation subject digest only under the
+    /// exact schema version and fixed-width binary transport.
+    #[must_use]
+    pub fn admit_retained_verification_subject_hash(
+        version: u32,
+        bytes: &[u8],
+    ) -> Option<ContentHash> {
+        admit_retained_content_hash(version, CLAIM_VERIFICATION_SUBJECT_IDENTITY_VERSION, bytes)
+    }
+
+    /// Domain-separated subject hash for a source-certificate artifact.
+    ///
+    /// For a source-certificate claim, every external artifact address is
+    /// omitted, including the source certificate address itself, so a
+    /// content-addressed certificate may embed this digest without a
+    /// fixed-point cycle. Other public claim-origin variants retain their
+    /// non-source origin tuple except for waiver MAC output. For a portable
+    /// witness, the subject retains only the family and schema identity; the
+    /// payload and its address remain separately bound by the typed verifier
+    /// request and package root.
+    #[must_use]
+    pub fn declared_source_certificate_subject_hash_unverified(&self) -> ContentHash {
+        self.declared_source_certificate_subject_hash_with_domain(
+            SOURCE_CERTIFICATE_SUBJECT_IDENTITY_DOMAIN,
         )
+    }
+
+    fn declared_source_certificate_subject_hash_with_domain(&self, domain: &str) -> ContentHash {
+        let mut subject = self.clone();
+        let semantic_identity = subject
+            .semantic_witness
+            .take()
+            .map(|witness| (witness.family, witness.schema_version));
+        match &mut subject.origin {
+            ClaimOrigin::SourceCertificate {
+                certificate_hash, ..
+            } => certificate_hash.clear(),
+            ClaimOrigin::AnchoredSource { .. }
+            | ClaimOrigin::EstimatedSource { .. }
+            | ClaimOrigin::Derived
+            | ClaimOrigin::AuthenticatedWaiver(_) => {}
+        }
+        if let Some(receipt) = &mut subject.receipt {
+            receipt.artifact_hash.clear();
+        }
+        for falsifier in &mut subject.falsifiers {
+            falsifier.artifact_hash.clear();
+        }
+        for anchor in &mut subject.anchors {
+            anchor.content_hash.clear();
+        }
+        let mut canonical = subject.authorization_canonical();
+        match semantic_identity {
+            Some((family, schema_version)) => {
+                canonical.push_str("portable-semantic-identity|");
+                push_atom(&mut canonical, &family);
+                use core::fmt::Write as _;
+                let _ = write!(canonical, "{schema_version}|");
+            }
+            None => canonical.push_str("no-portable-semantic-identity|"),
+        }
+        hash_domain(domain, canonical.as_bytes())
+    }
+
+    /// Admit a retained source-certificate subject digest only under the exact
+    /// schema version and fixed-width binary transport.
+    #[must_use]
+    pub fn admit_retained_source_certificate_subject_hash(
+        version: u32,
+        bytes: &[u8],
+    ) -> Option<ContentHash> {
+        admit_retained_content_hash(version, SOURCE_CERTIFICATE_SUBJECT_IDENTITY_VERSION, bytes)
     }
     /// The composition receipt, when derived.
     #[must_use]
@@ -298,6 +849,12 @@ impl Claim {
     #[must_use]
     pub fn declared_anchors_unverified(&self) -> &[AnchorRecord] {
         &self.anchors
+    }
+    /// Inline portable semantic witness, before any checker plugin admits its
+    /// mathematical meaning.
+    #[must_use]
+    pub fn declared_semantic_witness_unverified(&self) -> Option<&SemanticWitness> {
+        self.semantic_witness.as_ref()
     }
     /// Where this claim's certificate came from.
     #[must_use]
@@ -324,6 +881,39 @@ impl Claim {
             content_hash: content_hash.into(),
         });
         self
+    }
+
+    /// Attach a portable semantic witness to a Verified source certificate and
+    /// rebind its certificate artifact address to the exact witness hash.
+    ///
+    /// # Errors
+    /// [`PackageError::InvalidSemanticWitness`] when the witness shape is
+    /// invalid or this claim is not a Verified source certificate.
+    pub fn with_semantic_witness(
+        mut self,
+        witness: SemanticWitness,
+    ) -> Result<Claim, PackageError> {
+        validate_semantic_witness_shape(&self.id, &witness)?;
+        if !matches!(&self.color, Color::Verified { .. }) {
+            return Err(PackageError::InvalidSemanticWitness {
+                claim: self.id.clone(),
+                field: "claim.color",
+                reason: "portable witnesses require a Verified claim",
+            });
+        }
+        let ClaimOrigin::SourceCertificate {
+            certificate_hash, ..
+        } = &mut self.origin
+        else {
+            return Err(PackageError::InvalidSemanticWitness {
+                claim: self.id.clone(),
+                field: "claim.origin",
+                reason: "portable witnesses require a source-certificate origin",
+            });
+        };
+        *certificate_hash = witness.content_hash().to_hex();
+        self.semantic_witness = Some(witness);
+        Ok(self)
     }
 
     /// Whether this validated claim carries a canonical content-hash anchor
@@ -387,8 +977,8 @@ impl Claim {
         matches!(&self.color, Color::Validated { .. })
     }
 
-    /// The schema-v7 canonical body (id, statement, color, receipt,
-    /// falsifiers, anchors), excluding the claim origin.
+    /// The schema-v8 canonical body (id, statement, color, receipt,
+    /// falsifiers, anchors, semantic witness), excluding the claim origin.
     fn canonical_body(&self) -> String {
         use core::fmt::Write as _;
         let mut out = String::from("claim|");
@@ -444,10 +1034,17 @@ impl Claim {
             push_atom(&mut out, &a.dataset_id);
             push_atom(&mut out, &a.content_hash);
         }
+        match &self.semantic_witness {
+            Some(witness) => {
+                out.push_str("semantic-witness|");
+                push_atom(&mut out, &witness.content_hash().to_hex());
+            }
+            None => out.push_str("no-semantic-witness|"),
+        }
         out
     }
 
-    /// Full canonical string (schema v7): the claim body plus the origin.
+    /// Full canonical string (schema v8): the claim body plus the origin.
     fn canonical(&self) -> String {
         let mut out = self.canonical_body();
         out.push_str("origin|");
@@ -534,6 +1131,78 @@ pub struct EvidencePackage {
     pub provenance: Provenance,
     /// An OPTIONAL detached signature over a canonical typed signature subject.
     pub signature: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PackageRootSchema {
+    header_domain: &'static str,
+    node_domain: &'static str,
+    carry_odd_node: bool,
+}
+
+const CURRENT_PACKAGE_ROOT_SCHEMA: PackageRootSchema = PackageRootSchema {
+    header_domain: PACKAGE_ROOT_IDENTITY_DOMAIN,
+    node_domain: PACKAGE_NODE_IDENTITY_DOMAIN,
+    carry_odd_node: true,
+};
+
+#[allow(dead_code)]
+fn classify_package_root_identity_fields(
+    package: &EvidencePackage,
+    provenance_fields: &Provenance,
+    schema: &PackageRootSchema,
+) {
+    let EvidencePackage {
+        format_version,
+        claims,
+        provenance,
+        signature,
+    } = package;
+    let Provenance {
+        code_version,
+        constellation_lock,
+    } = provenance_fields;
+    let PackageRootSchema {
+        header_domain,
+        node_domain,
+        carry_odd_node,
+    } = schema;
+    let _ = (
+        format_version,
+        claims,
+        provenance,
+        signature,
+        code_version,
+        constellation_lock,
+        header_domain,
+        node_domain,
+        carry_odd_node,
+    );
+}
+
+#[allow(dead_code)]
+fn classify_waiver_authorization_identity_fields(
+    package: &EvidencePackage,
+    provenance_fields: &Provenance,
+) {
+    let EvidencePackage {
+        format_version,
+        claims,
+        provenance,
+        signature,
+    } = package;
+    let Provenance {
+        code_version,
+        constellation_lock,
+    } = provenance_fields;
+    let _ = (
+        format_version,
+        claims,
+        provenance,
+        signature,
+        code_version,
+        constellation_lock,
+    );
 }
 
 /// The by-color budget pie over a package's ADMITTED claims.
@@ -791,6 +1460,28 @@ pub struct VerificationReceipt {
     receipt_hash: ContentHash,
 }
 
+#[allow(dead_code)]
+fn classify_verification_receipt_identity_fields(receipt: &VerificationReceipt) {
+    let VerificationReceipt {
+        package_root,
+        policy_fingerprints,
+        waiver_day,
+        signature,
+        admissions,
+        waiver_registry,
+        receipt_hash,
+    } = receipt;
+    let _ = (
+        package_root,
+        policy_fingerprints,
+        waiver_day,
+        signature,
+        admissions,
+        waiver_registry,
+        receipt_hash,
+    );
+}
+
 impl VerificationReceipt {
     /// Exact package root admitted by this decision.
     #[must_use]
@@ -842,6 +1533,16 @@ impl VerificationReceipt {
             &self.waiver_registry,
         )
     }
+
+    /// Admit a retained release-admission context only under the exact schema
+    /// version and fixed-width binary transport.
+    #[must_use]
+    pub fn admit_retained_release_admission_context(
+        version: u32,
+        bytes: &[u8],
+    ) -> Option<ContentHash> {
+        admit_retained_content_hash(version, RELEASE_ADMISSION_CONTEXT_IDENTITY_VERSION, bytes)
+    }
     /// Recompute the integrity digest over every receipt field.
     ///
     /// This is an unkeyed integrity check, not independent authenticity; trust
@@ -856,6 +1557,13 @@ impl VerificationReceipt {
             &self.admissions,
             &self.waiver_registry,
         )
+    }
+
+    /// Admit a retained verification-receipt digest only under the exact
+    /// schema version and fixed-width binary transport.
+    #[must_use]
+    pub fn admit_retained_hash(version: u32, bytes: &[u8]) -> Option<ContentHash> {
+        admit_retained_content_hash(version, VERIFICATION_RECEIPT_IDENTITY_VERSION, bytes)
     }
 
     /// Whether the stored receipt digest matches all receipt fields.
@@ -1288,6 +1996,17 @@ pub enum PackageError {
         /// The invalid field (`"dataset_id"` or `"content_hash"`).
         field: &'static str,
     },
+    /// An inline portable semantic witness is malformed, attached to an
+    /// unsupported claim/origin class, or not bound to its source-certificate
+    /// artifact address.
+    InvalidSemanticWitness {
+        /// Claim carrying the invalid witness declaration.
+        claim: String,
+        /// Localized witness or claim field.
+        field: &'static str,
+        /// Stable fail-closed reason.
+        reason: &'static str,
+    },
 }
 
 impl core::fmt::Display for PackageError {
@@ -1308,15 +2027,70 @@ impl core::error::Error for PackageError {}
 /// capability-gated anchoring datasets and signatures, policy-bound
 /// verification receipts, transitive waiver admission, and waiver-separated
 /// magnitude accounting; v7 binds the color-algebra version into every
-/// composition receipt. Earlier transports are refused by version.
-pub const FORMAT_VERSION: u32 = 7;
+/// composition receipt; v8 adds inline portable semantic witnesses and binds
+/// release signatures to an explicit semantic-checker context. Earlier
+/// transports are refused by version.
+pub const FORMAT_VERSION: u32 = 8;
 const _: () = assert!(FORMAT_VERSION == fs_crosswalk::SUPPORTED_PACKAGE_FORMAT);
+const _: () = assert!(FORMAT_VERSION == SEMANTIC_WITNESS_IDENTITY_VERSION);
+const _: () = assert!(FORMAT_VERSION == CLAIM_DECLARATION_IDENTITY_VERSION);
+const _: () = assert!(FORMAT_VERSION == CLAIM_VERIFICATION_SUBJECT_IDENTITY_VERSION);
+const _: () = assert!(FORMAT_VERSION == SOURCE_CERTIFICATE_SUBJECT_IDENTITY_VERSION);
+const _: () = assert!(FORMAT_VERSION == PACKAGE_ROOT_IDENTITY_VERSION);
+const _: () = assert!(FORMAT_VERSION == WAIVER_AUTHORIZATION_SUBJECT_IDENTITY_VERSION);
+const _: () = assert!(FORMAT_VERSION == VERIFICATION_RECEIPT_IDENTITY_VERSION);
+const _: () = assert!(FORMAT_VERSION == RELEASE_ADMISSION_CONTEXT_IDENTITY_VERSION);
 
 /// Domain-separated integrity digest for the independently distributed
 /// checker's gate-context receipt. This is integrity-only, not a signature.
+pub const CHECKER_DECISION_IDENTITY_DOMAIN: &str = "fs-package:v8:checker-decision";
+
+/// Hash one canonical checker-decision payload under the shared ABI domain.
 #[must_use]
 pub fn hash_checker_decision(payload: &[u8]) -> ContentHash {
-    hash_domain("fs-package:v7:checker-decision", payload)
+    hash_domain(CHECKER_DECISION_IDENTITY_DOMAIN, payload)
+}
+
+fn validate_semantic_witness_shape(
+    claim_id: &str,
+    witness: &SemanticWitness,
+) -> Result<(), PackageError> {
+    if witness.family().len() > MAX_SEMANTIC_WITNESS_FAMILY_BYTES {
+        return Err(PackageError::InvalidSemanticWitness {
+            claim: claim_id.to_string(),
+            field: "semantic_witness.family",
+            reason: "family exceeds the portable identity limit",
+        });
+    }
+    if identity_reason(witness.family()).is_some() {
+        return Err(PackageError::InvalidSemanticWitness {
+            claim: claim_id.to_string(),
+            field: "semantic_witness.family",
+            reason: "family must be a canonical non-placeholder identity",
+        });
+    }
+    if witness.schema_version() == 0 {
+        return Err(PackageError::InvalidSemanticWitness {
+            claim: claim_id.to_string(),
+            field: "semantic_witness.schema_version",
+            reason: "schema version must be positive",
+        });
+    }
+    if witness.canonical_payload().is_empty() {
+        return Err(PackageError::InvalidSemanticWitness {
+            claim: claim_id.to_string(),
+            field: "semantic_witness.payload",
+            reason: "canonical payload must be nonempty",
+        });
+    }
+    if witness.canonical_payload().len() > MAX_SEMANTIC_WITNESS_PAYLOAD_BYTES {
+        return Err(PackageError::InvalidSemanticWitness {
+            claim: claim_id.to_string(),
+            field: "semantic_witness.payload",
+            reason: "canonical payload exceeds the per-witness limit",
+        });
+    }
+    Ok(())
 }
 
 fn verify_attached_records(claim: &Claim) -> Result<(), PackageError> {
@@ -1355,6 +2129,9 @@ fn verify_attached_records(claim: &Claim) -> Result<(), PackageError> {
                 field,
             });
         }
+    }
+    if let Some(witness) = &claim.semantic_witness {
+        validate_semantic_witness_shape(&claim.id, witness)?;
     }
     Ok(())
 }
@@ -1490,6 +2267,32 @@ fn verify_origin_binding(claim: &Claim) -> Result<(), PackageError> {
             origin: claim.origin.kind(),
         });
     }
+    if let Some(witness) = &claim.semantic_witness {
+        if !matches!(&claim.color, Color::Verified { .. }) {
+            return Err(PackageError::InvalidSemanticWitness {
+                claim: claim.id.clone(),
+                field: "claim.color",
+                reason: "portable witnesses require a Verified claim",
+            });
+        }
+        let ClaimOrigin::SourceCertificate {
+            certificate_hash, ..
+        } = &claim.origin
+        else {
+            return Err(PackageError::InvalidSemanticWitness {
+                claim: claim.id.clone(),
+                field: "claim.origin",
+                reason: "portable witnesses require a source-certificate origin",
+            });
+        };
+        if certificate_hash != &witness.content_hash().to_hex() {
+            return Err(PackageError::InvalidSemanticWitness {
+                claim: claim.id.clone(),
+                field: "claim.origin.certificate_hash",
+                reason: "source-certificate hash does not bind the semantic witness",
+            });
+        }
+    }
     Ok(())
 }
 
@@ -1559,6 +2362,29 @@ fn add_record_transport(
     for anchor in &claim.anchors {
         add_transport_text(bytes, "anchor.dataset_id", &anchor.dataset_id)?;
         add_transport_text(bytes, "anchor.content_hash", &anchor.content_hash)?;
+    }
+    if let Some(witness) = &claim.semantic_witness {
+        validate_semantic_witness_shape(&claim.id, witness)?;
+        add_transport_nodes(nodes, 4)?;
+        add_transport_text(bytes, "semantic_witness.family", witness.family())?;
+        let encoded_payload_bytes = witness
+            .canonical_payload()
+            .len()
+            .checked_mul(2)
+            .ok_or_else(|| PackageError::TransportLimit {
+                what: "semantic witness hexadecimal payload".to_string(),
+                limit: MAX_PACKAGE_BYTES,
+            })?;
+        let witness_bytes =
+            encoded_payload_bytes
+                .checked_add(96)
+                .ok_or_else(|| PackageError::TransportLimit {
+                    what: "semantic witness transport envelope".to_string(),
+                    limit: MAX_PACKAGE_BYTES,
+                })?;
+        add_transport_bytes(bytes, witness_bytes)?;
+    } else {
+        add_transport_nodes(nodes, 1)?;
     }
     Ok(())
 }
@@ -1667,7 +2493,7 @@ impl EvidencePackage {
 
     /// Compute the BLAKE3 Merkle content address after enforcing the standalone
     /// transport byte, node, string, and container limits. Every leaf and
-    /// internal node is domain-separated under `fs-package:v7:...`; detached
+    /// internal node is domain-separated under `fs-package:v8:...`; detached
     /// signatures are excluded so signing does not change the address.
     ///
     /// # Errors
@@ -1675,36 +2501,44 @@ impl EvidencePackage {
     /// bounded package envelope.
     pub fn try_merkle_root(&self) -> Result<ContentHash, PackageError> {
         self.verify_transport_limits()?;
-        Ok(self.merkle_root_unchecked())
+        Ok(self.merkle_root_with_schema(&CURRENT_PACKAGE_ROOT_SCHEMA))
+    }
+
+    /// Admit a retained package-root digest only under the exact schema
+    /// version and fixed-width binary transport.
+    #[must_use]
+    pub fn admit_retained_package_root(version: u32, bytes: &[u8]) -> Option<ContentHash> {
+        admit_retained_content_hash(version, PACKAGE_ROOT_IDENTITY_VERSION, bytes)
     }
 
     fn merkle_root_unchecked(&self) -> ContentHash {
+        self.merkle_root_with_schema(&CURRENT_PACKAGE_ROOT_SCHEMA)
+    }
+
+    fn merkle_root_with_schema(&self, schema: &PackageRootSchema) -> ContentHash {
         let mut level: Vec<ContentHash> = Vec::with_capacity(self.claims.len() + 1);
         level.push(hash_domain(
-            "fs-package:v7:header",
+            schema.header_domain,
             self.package_header().as_bytes(),
         ));
         level.extend(
             self.claims
                 .iter()
-                .map(|c| hash_domain("fs-package:v7:claim", c.canonical().as_bytes())),
+                .map(Claim::declared_content_hash_unverified),
         );
         while level.len() > 1 {
             let mut next = Vec::with_capacity(level.len().div_ceil(2));
             for pair in level.chunks(2) {
                 match pair {
-                    [a, b] => next.push(combine(a, b)),
-                    [a] => next.push(*a), // odd node carries up
+                    [a, b] => next.push(combine(a, b, schema.node_domain)),
+                    [a] if schema.carry_odd_node => next.push(*a),
+                    [a] => next.push(combine(a, a, schema.node_domain)),
                     _ => {}
                 }
             }
             level = next;
         }
-        match level.as_slice() {
-            [root] => *root,
-            [] => hash_domain("fs-package:v7:empty-internal-level", b""),
-            _ => hash_domain("fs-package:v7:invalid-internal-level", b""),
-        }
+        level[0]
     }
 
     fn package_header(&self) -> String {
@@ -1722,11 +2556,15 @@ impl EvidencePackage {
     }
 
     fn authorization_context(&self) -> ContentHash {
+        self.authorization_context_with_domain(AUTHORIZATION_CONTEXT_IDENTITY_DOMAIN)
+    }
+
+    fn authorization_context_with_domain(&self, domain: &str) -> ContentHash {
         let mut canonical = self.package_header();
         for claim in &self.claims {
             push_atom(&mut canonical, &claim.authorization_canonical());
         }
-        hash_domain("fs-package:v7:authorization-context", canonical.as_bytes())
+        hash_domain(domain, canonical.as_bytes())
     }
 
     /// Stable, domain-separated bytes authenticated by a waiver MAC at
@@ -1749,19 +2587,49 @@ impl EvidencePackage {
         claim_index: usize,
         authorization_context: ContentHash,
     ) -> Option<Vec<u8>> {
+        self.waiver_message_with_context_and_domain(
+            claim_index,
+            authorization_context,
+            WAIVER_AUTHORIZATION_SUBJECT_IDENTITY_DOMAIN,
+        )
+    }
+
+    fn waiver_message_with_context_and_domain(
+        &self,
+        claim_index: usize,
+        authorization_context: ContentHash,
+        domain: &str,
+    ) -> Option<Vec<u8>> {
         use core::fmt::Write as _;
 
         let claim = self.claims.get(claim_index)?;
         let ClaimOrigin::AuthenticatedWaiver(grant) = &claim.origin else {
             return None;
         };
-        let mut message = String::from("fs-package:v7:waiver-authorization|");
+        let mut message = domain.to_string();
+        message.push('|');
         push_atom(&mut message, &authorization_context.to_hex());
         let _ = write!(message, "claim-index:{claim_index}|");
         push_atom(&mut message, &claim.canonical_body());
         push_atom(&mut message, &grant.waiver_id);
         let _ = write!(message, "expiry-day:{}|", grant.expiry_day);
         Some(message.into_bytes())
+    }
+
+    /// Admit retained waiver-authorization bytes only when the schema version
+    /// is current and this package recomputes the exact same target subject.
+    #[must_use]
+    pub fn admit_retained_waiver_authorization_subject(
+        &self,
+        version: u32,
+        claim_index: usize,
+        candidate: &[u8],
+    ) -> bool {
+        if version != WAIVER_AUTHORIZATION_SUBJECT_IDENTITY_VERSION {
+            return false;
+        }
+        self.waiver_message(claim_index)
+            .is_ok_and(|expected| candidate == expected.as_slice())
     }
 
     /// Install the final authenticator for one waiver-origin claim. The
@@ -2040,13 +2908,17 @@ impl EvidencePackage {
                     };
                     let request = SourceCertificateRequest {
                         package_provenance: &self.provenance,
+                        package_root: merkle_root,
                         claim_index,
                         claim_id: &claim.id,
                         statement: &claim.statement,
+                        claim_subject_hash: claim
+                            .declared_source_certificate_subject_hash_unverified(),
                         lo: *lo,
                         hi: *hi,
                         producer,
                         certificate_hash,
+                        semantic_witness: claim.semantic_witness.as_ref(),
                     };
                     let decision = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         verifier.verify(&request)
@@ -2374,6 +3246,7 @@ impl EvidencePackage {
             SignatureIntent::ReleaseApproval {
                 checker_protocol,
                 expected_root,
+                semantic_context,
             } => {
                 if expected_root != merkle_root {
                     return Err(PackageError::SignatureRefused {
@@ -2385,6 +3258,7 @@ impl EvidencePackage {
                     checker_protocol,
                     expected_root,
                     admission_context,
+                    semantic_context,
                 }
             }
         };
@@ -2434,6 +3308,17 @@ impl EvidencePackage {
     /// [`PackageError`] on an unsupported format or an incomplete claim.
     pub fn verify(&self) -> Result<PackageReport, PackageError> {
         self.verify_with(&VerificationCapabilities::deny_all())
+    }
+
+    /// Re-check only callback-free schema, transport, content-binding, and
+    /// claim-structure invariants, returning the recomputed content root.
+    /// This grants no scientific authority to external origins or witnesses.
+    ///
+    /// # Errors
+    /// Any structural [`PackageError`].
+    pub fn verify_structural_integrity(&self) -> Result<ContentHash, PackageError> {
+        self.verify_structural()?;
+        Ok(self.merkle_root_unchecked())
     }
 
     /// Consume an in-memory package and retain it with the exact report/receipt
@@ -2559,6 +3444,8 @@ impl EvidencePackage {
 
     fn transport_usage(&self) -> Result<(usize, usize), PackageError> {
         check_transport_count("claims", self.claims.len())?;
+        let mut semantic_witnesses = 0usize;
+        let mut semantic_payload_bytes = 0usize;
         let mut bytes = 512usize;
         let mut nodes = 13usize;
         add_transport_text(
@@ -2575,6 +3462,33 @@ impl EvidencePackage {
             add_transport_text(&mut bytes, "signature", signature)?;
         }
         for (index, claim) in self.claims.iter().enumerate() {
+            if let Some(witness) = &claim.semantic_witness {
+                validate_semantic_witness_shape(&claim.id, witness)?;
+                semantic_witnesses = semantic_witnesses.checked_add(1).ok_or_else(|| {
+                    PackageError::TransportLimit {
+                        what: "semantic witness count".to_string(),
+                        limit: MAX_SEMANTIC_WITNESSES,
+                    }
+                })?;
+                if semantic_witnesses > MAX_SEMANTIC_WITNESSES {
+                    return Err(PackageError::TransportLimit {
+                        what: "semantic witness count".to_string(),
+                        limit: MAX_SEMANTIC_WITNESSES,
+                    });
+                }
+                semantic_payload_bytes = semantic_payload_bytes
+                    .checked_add(witness.canonical_payload().len())
+                    .ok_or_else(|| PackageError::TransportLimit {
+                        what: "aggregate semantic witness payload".to_string(),
+                        limit: MAX_SEMANTIC_WITNESS_TOTAL_BYTES,
+                    })?;
+                if semantic_payload_bytes > MAX_SEMANTIC_WITNESS_TOTAL_BYTES {
+                    return Err(PackageError::TransportLimit {
+                        what: "aggregate semantic witness payload".to_string(),
+                        limit: MAX_SEMANTIC_WITNESS_TOTAL_BYTES,
+                    });
+                }
+            }
             add_claim_transport(index, claim, &mut bytes, &mut nodes)?;
             if bytes > MAX_PACKAGE_BYTES {
                 return Err(PackageError::TransportLimit {
@@ -2693,7 +3607,8 @@ impl EvidencePackage {
     }
 
     /// Emit the package as deterministic, self-describing JSON —
-    /// schema v7: complete color payloads, algebra-versioned receipts, and typed origins
+    /// schema v8: complete color payloads, algebra-versioned receipts, typed origins,
+    /// and portable semantic witnesses
     /// (floats as bit-exact hex),
     /// provenance, signature, the 64-hex BLAKE3 content root, and the
     /// magnitude budget. [`EvidencePackage::from_json`] round-trips this
@@ -2827,6 +3742,16 @@ pub(crate) fn is_canonical_content_hash(hash: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
 }
 
+fn lower_hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len().saturating_mul(2));
+    for &byte in bytes {
+        encoded.push(char::from(DIGITS[usize::from(byte >> 4)]));
+        encoded.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
+    }
+    encoded
+}
+
 fn push_origin_json(out: &mut String, origin: &ClaimOrigin) {
     use core::fmt::Write as _;
 
@@ -2958,7 +3883,20 @@ fn push_claim_json(out: &mut String, claim: &Claim) {
             json_escape(&anchor.content_hash)
         );
     }
-    out.push_str("],\"origin\":");
+    out.push_str("],\"semantic_witness\":");
+    match &claim.semantic_witness {
+        Some(witness) => {
+            let _ = write!(
+                out,
+                "{{\"family\":\"{}\",\"schema_version\":{},\"payload_hex\":\"{}\"}}",
+                json_escape(witness.family()),
+                witness.schema_version(),
+                lower_hex(witness.canonical_payload())
+            );
+        }
+        None => out.push_str("null"),
+    }
+    out.push_str(",\"origin\":");
     push_origin_json(out, &claim.origin);
     out.push('}');
 }
@@ -3003,6 +3941,24 @@ fn bind_policy_fingerprint(
 
 fn release_admission_context_hash(
     package_root: ContentHash,
+    policies: VerificationPolicyFingerprints,
+    waiver_day: Option<u64>,
+    admissions: &[ClaimAdmission],
+    waiver_registry: &[ReceiptWaiver],
+) -> ContentHash {
+    release_admission_context_hash_with_domain(
+        RELEASE_ADMISSION_CONTEXT_IDENTITY_DOMAIN,
+        package_root,
+        policies,
+        waiver_day,
+        admissions,
+        waiver_registry,
+    )
+}
+
+fn release_admission_context_hash_with_domain(
+    domain: &str,
+    package_root: ContentHash,
     mut policies: VerificationPolicyFingerprints,
     waiver_day: Option<u64>,
     admissions: &[ClaimAdmission],
@@ -3020,10 +3976,7 @@ fn release_admission_context_hash(
         admissions,
         waiver_registry,
     );
-    hash_domain(
-        "fs-package:v7:release-admission-context",
-        provisional_receipt.as_bytes(),
-    )
+    hash_domain(domain, provisional_receipt.as_bytes())
 }
 
 fn verification_receipt_hash(
@@ -3034,9 +3987,29 @@ fn verification_receipt_hash(
     admissions: &[ClaimAdmission],
     waiver_registry: &[ReceiptWaiver],
 ) -> ContentHash {
+    verification_receipt_hash_with_domain(
+        VERIFICATION_RECEIPT_IDENTITY_DOMAIN,
+        package_root,
+        policies,
+        waiver_day,
+        signature,
+        admissions,
+        waiver_registry,
+    )
+}
+
+fn verification_receipt_hash_with_domain(
+    domain: &str,
+    package_root: ContentHash,
+    policies: VerificationPolicyFingerprints,
+    waiver_day: Option<u64>,
+    signature: &SignatureStatus,
+    admissions: &[ClaimAdmission],
+    waiver_registry: &[ReceiptWaiver],
+) -> ContentHash {
     fn stable_usize(value: usize) -> [u8; 8] {
         u64::try_from(value)
-            .expect("schema-v7 transport bounds fit u64")
+            .expect("schema-v8 transport bounds fit u64")
             .to_le_bytes()
     }
 
@@ -3054,7 +4027,8 @@ fn verification_receipt_hash(
     }
 
     let mut hasher = fs_blake3::Blake3::new();
-    hasher.update(b"fs-package:v7:verification-receipt\0");
+    hasher.update(domain.as_bytes());
+    hasher.update(&[0]);
     push_atom_hash(&mut hasher, package_root.as_bytes());
     push_policy(
         &mut hasher,
@@ -3091,11 +4065,13 @@ fn verification_receipt_hash(
                     checker_protocol,
                     expected_root,
                     admission_context,
+                    semantic_context,
                 } => {
                     push_atom_hash(&mut hasher, b"release-approval");
                     push_atom_hash(&mut hasher, &checker_protocol.to_le_bytes());
                     push_atom_hash(&mut hasher, expected_root.as_bytes());
                     push_atom_hash(&mut hasher, admission_context.as_bytes());
+                    push_atom_hash(&mut hasher, semantic_context.as_bytes());
                 }
             }
         }
@@ -3133,15 +4109,15 @@ fn verification_receipt_hash(
         }
     }
     let inner = hasher.finalize();
-    hash_domain("fs-package:v7:verification-receipt", inner.as_bytes())
+    hash_domain(domain, inner.as_bytes())
 }
 
 /// Combine two child hashes into a domain-separated parent node hash.
-fn combine(a: &ContentHash, b: &ContentHash) -> ContentHash {
+fn combine(a: &ContentHash, b: &ContentHash, domain: &str) -> ContentHash {
     let mut buf = [0u8; 64];
     buf[..32].copy_from_slice(a.as_bytes());
     buf[32..].copy_from_slice(b.as_bytes());
-    hash_domain("fs-package:v7:node", &buf)
+    hash_domain(domain, &buf)
 }
 
 fn push_atom(out: &mut String, value: &str) {
@@ -3172,7 +4148,7 @@ fn json_escape(s: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Strict schema-v7 parser: the package is a PROOF
+// Strict schema-v8 parser: the package is a PROOF
 // ARTIFACT, so parsing fails closed — unknown fields, missing fields,
 // wrong types, bad hex, NaN/inverted certificates, a magnitude budget
 // that does not re-derive, or an embedded root that does not recompute
@@ -3513,7 +4489,7 @@ fn no_leftovers(fields: &[(String, Jv)], what: &str) -> Result<(), ParseError> {
     if let Some((k, _)) = fields.first() {
         return Err(ParseError {
             what: what.to_string(),
-            why: format!("unknown field {k:?} (schema v7 is closed — fail closed)"),
+            why: format!("unknown field {k:?} (schema v8 is closed — fail closed)"),
         });
     }
     Ok(())
@@ -3693,11 +4669,18 @@ fn parse_claims(fields: &mut Vec<(String, Jv)>) -> Result<Vec<Claim>, ParseError
             });
         }
     };
-    values
-        .into_iter()
-        .enumerate()
-        .map(|(index, value)| parse_claim(value, index))
-        .collect()
+    let mut claims = Vec::with_capacity(values.len());
+    let mut semantic_witnesses = 0usize;
+    let mut semantic_payload_bytes = 0usize;
+    for (index, value) in values.into_iter().enumerate() {
+        claims.push(parse_claim(
+            value,
+            index,
+            &mut semantic_witnesses,
+            &mut semantic_payload_bytes,
+        )?);
+    }
+    Ok(claims)
 }
 
 fn verify_declarations(
@@ -3733,7 +4716,7 @@ fn verify_declarations(
     Ok(())
 }
 
-/// Parse the embedded content root: exactly 64 hex chars (schema v7).
+/// Parse the embedded content root: exactly 64 hex chars (schema v8).
 /// A 16-hex value is the legacy v3 FNV root and is named in the refusal.
 fn parse_declared_root(fields: &mut Vec<(String, Jv)>) -> Result<ContentHash, ParseError> {
     let raw = match take_field(fields, "merkle_root", "package")? {
@@ -3753,7 +4736,7 @@ fn parse_declared_root(fields: &mut Vec<(String, Jv)>) -> Result<ContentHash, Pa
         return Err(ParseError {
             what: "merkle_root".to_string(),
             why: match raw.len() {
-                16 => "a 16-hex root is the legacy v3 FNV content address; schema v7 requires \
+                16 => "a 16-hex root is the legacy v3 FNV content address; schema v8 requires \
                        the 64-hex lowercase BLAKE3 root"
                     .to_string(),
                 64 => "the 64-char root must use lowercase hexadecimal".to_string(),
@@ -3764,7 +4747,7 @@ fn parse_declared_root(fields: &mut Vec<(String, Jv)>) -> Result<ContentHash, Pa
     ContentHash::from_hex(&raw).ok_or_else(|| ParseError {
         what: "merkle_root".to_string(),
         why: match raw.len() {
-            16 => "a 16-hex root is the legacy v3 FNV content address; schema v7 requires \
+            16 => "a 16-hex root is the legacy v3 FNV content address; schema v8 requires \
                    the 64-hex lowercase BLAKE3 root"
                 .to_string(),
             64 => "the 64-char root contains non-lowercase-hex characters".to_string(),
@@ -3774,7 +4757,7 @@ fn parse_declared_root(fields: &mut Vec<(String, Jv)>) -> Result<ContentHash, Pa
 }
 
 impl EvidencePackage {
-    /// Parse the deterministic schema-v7 FrankenSim JSON profile structurally:
+    /// Parse the deterministic schema-v8 FrankenSim JSON profile structurally:
     /// every field
     /// mapped, unknown fields refused, floats reconstructed bit-exactly,
     /// the magnitude budget re-derived and compared, and the embedded
@@ -3833,7 +4816,12 @@ impl EvidencePackage {
     }
 }
 
-fn parse_claim(v: Jv, index: usize) -> Result<Claim, ParseError> {
+fn parse_claim(
+    v: Jv,
+    index: usize,
+    semantic_witnesses: &mut usize,
+    semantic_payload_bytes: &mut usize,
+) -> Result<Claim, ParseError> {
     let what = format!("claims[{index}]");
     let mut f = obj_fields(v, &what)?;
     let id = as_str(take_field(&mut f, "id", &what)?, &what)?;
@@ -3842,6 +4830,7 @@ fn parse_claim(v: Jv, index: usize) -> Result<Claim, ParseError> {
     let receipt_v = take_field(&mut f, "receipt", &what)?;
     let falsifiers_v = take_field(&mut f, "falsifiers", &what)?;
     let anchors_v = take_field(&mut f, "anchors", &what)?;
+    let semantic_witness_v = take_field(&mut f, "semantic_witness", &what)?;
     let origin_v = take_field(&mut f, "origin", &what)?;
     no_leftovers(&f, &what)?;
     Ok(Claim {
@@ -3851,8 +4840,141 @@ fn parse_claim(v: Jv, index: usize) -> Result<Claim, ParseError> {
         receipt: parse_receipt(receipt_v, &what)?,
         falsifiers: parse_falsifiers(falsifiers_v, &what)?,
         anchors: parse_anchors(anchors_v, &what)?,
+        semantic_witness: parse_semantic_witness(
+            semantic_witness_v,
+            &what,
+            semantic_witnesses,
+            semantic_payload_bytes,
+        )?,
         origin: parse_origin(origin_v, &what)?,
     })
+}
+
+fn parse_semantic_witness(
+    value: Jv,
+    what: &str,
+    semantic_witnesses: &mut usize,
+    semantic_payload_bytes: &mut usize,
+) -> Result<Option<SemanticWitness>, ParseError> {
+    let Jv::Obj(mut fields) = value else {
+        return match value {
+            Jv::Null => Ok(None),
+            other => Err(ParseError {
+                what: format!("{what}.semantic_witness"),
+                why: format!(
+                    "semantic_witness must be an exact object or null, got {}",
+                    other.kind()
+                ),
+            }),
+        };
+    };
+    let witness_what = format!("{what}.semantic_witness");
+    let family = as_str(
+        take_field(&mut fields, "family", &witness_what)?,
+        &witness_what,
+    )?;
+    if family.len() > MAX_SEMANTIC_WITNESS_FAMILY_BYTES {
+        return Err(ParseError {
+            what: format!("{witness_what}.family"),
+            why: format!("family exceeds {MAX_SEMANTIC_WITNESS_FAMILY_BYTES} UTF-8 bytes"),
+        });
+    }
+    if let Some(reason) = identity_reason(&family) {
+        return Err(ParseError {
+            what: format!("{witness_what}.family"),
+            why: format!("family is not a canonical identity: {reason}"),
+        });
+    }
+    let raw_version = decimal_u64(
+        take_field(&mut fields, "schema_version", &witness_what)?,
+        &witness_what,
+    )?;
+    let schema_version = u32::try_from(raw_version).map_err(|_| ParseError {
+        what: format!("{witness_what}.schema_version"),
+        why: format!("schema version {raw_version} does not fit u32"),
+    })?;
+    if schema_version == 0 {
+        return Err(ParseError {
+            what: format!("{witness_what}.schema_version"),
+            why: "schema version must be positive".to_string(),
+        });
+    }
+    let payload_hex = as_str(
+        take_field(&mut fields, "payload_hex", &witness_what)?,
+        &witness_what,
+    )?;
+    no_leftovers(&fields, &witness_what)?;
+    if payload_hex.is_empty() || payload_hex.len() % 2 != 0 {
+        return Err(ParseError {
+            what: format!("{witness_what}.payload_hex"),
+            why: "payload_hex must be nonempty and have even length".to_string(),
+        });
+    }
+    if !payload_hex
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(ParseError {
+            what: format!("{witness_what}.payload_hex"),
+            why: "payload_hex must use canonical lowercase hexadecimal".to_string(),
+        });
+    }
+    let decoded_len = payload_hex.len() / 2;
+    if decoded_len > MAX_SEMANTIC_WITNESS_PAYLOAD_BYTES {
+        return Err(ParseError {
+            what: format!("{witness_what}.payload_hex"),
+            why: format!("decoded payload exceeds {MAX_SEMANTIC_WITNESS_PAYLOAD_BYTES} bytes"),
+        });
+    }
+    let next_witness_count = semantic_witnesses
+        .checked_add(1)
+        .ok_or_else(|| ParseError {
+            what: witness_what.clone(),
+            why: "semantic witness count overflowed".to_string(),
+        })?;
+    if next_witness_count > MAX_SEMANTIC_WITNESSES {
+        return Err(ParseError {
+            what: witness_what.clone(),
+            why: format!("semantic witness count exceeds {MAX_SEMANTIC_WITNESSES}"),
+        });
+    }
+    let next_payload_bytes = semantic_payload_bytes
+        .checked_add(decoded_len)
+        .ok_or_else(|| ParseError {
+            what: format!("{witness_what}.payload_hex"),
+            why: "aggregate decoded semantic witness payload overflowed".to_string(),
+        })?;
+    if next_payload_bytes > MAX_SEMANTIC_WITNESS_TOTAL_BYTES {
+        return Err(ParseError {
+            what: format!("{witness_what}.payload_hex"),
+            why: format!(
+                "aggregate decoded semantic witness payload exceeds {MAX_SEMANTIC_WITNESS_TOTAL_BYTES} bytes"
+            ),
+        });
+    }
+
+    // Both decoded-size caps are committed before this is the first payload
+    // allocation. The parser has already bounded the encoded JSON string.
+    *semantic_witnesses = next_witness_count;
+    *semantic_payload_bytes = next_payload_bytes;
+    let bytes = payload_hex.as_bytes();
+    let mut canonical_payload = Vec::with_capacity(decoded_len);
+    for pair in bytes.chunks_exact(2) {
+        canonical_payload.push((hex_nibble(pair[0]) << 4) | hex_nibble(pair[1]));
+    }
+    Ok(Some(SemanticWitness::new(
+        family,
+        schema_version,
+        canonical_payload,
+    )))
+}
+
+fn hex_nibble(byte: u8) -> u8 {
+    match byte {
+        b'0'..=b'9' => byte - b'0',
+        b'a'..=b'f' => byte - b'a' + 10,
+        _ => 0,
+    }
 }
 
 fn parse_origin(value: Jv, what: &str) -> Result<ClaimOrigin, ParseError> {
@@ -4099,6 +5221,7 @@ mod tests {
                 receipt: None,
                 falsifiers: Vec::new(),
                 anchors: Vec::new(),
+                semantic_witness: None,
                 origin: ClaimOrigin::Derived,
             };
             let package = EvidencePackage::new(Provenance::new("commit", "lock")).with_claim(claim);
@@ -4134,6 +5257,7 @@ mod tests {
                 dataset_id: "wind-tunnel".to_string(),
                 content_hash: unrelated_hash,
             }],
+            semantic_witness: None,
             origin: ClaimOrigin::AnchoredSource {
                 dataset_id: "wind-tunnel".to_string(),
                 content_hash: origin_hash,
@@ -4151,6 +5275,59 @@ mod tests {
     }
 
     #[test]
+    fn structural_integrity_refuses_a_witness_certificate_hash_mismatch() {
+        let witness = SemanticWitness::new("fs-ivl/interval", 1, vec![1, 2, 3]);
+        let mut claim = Claim::from_portable_certificate(
+            "portable",
+            "portable interval",
+            0.0,
+            1.0,
+            "fs-ivl/certificate",
+            witness,
+        );
+        let ClaimOrigin::SourceCertificate {
+            certificate_hash, ..
+        } = &mut claim.origin
+        else {
+            unreachable!("portable constructor installs a source certificate");
+        };
+        *certificate_hash = "11".repeat(32);
+        let package = EvidencePackage::new(Provenance::new("commit", "lock")).with_claim(claim);
+        assert!(matches!(
+            package.verify_structural_integrity(),
+            Err(PackageError::InvalidSemanticWitness {
+                field: "claim.origin.certificate_hash",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn semantic_witness_parser_checks_aggregate_cap_before_decoding() {
+        let witness_json = || {
+            Jv::Obj(vec![
+                ("family".to_string(), Jv::Str("fs-ivl/interval".to_string())),
+                ("schema_version".to_string(), Jv::Num("1".to_string())),
+                ("payload_hex".to_string(), Jv::Str("00".to_string())),
+            ])
+        };
+        let mut count = 0usize;
+        let mut decoded = MAX_SEMANTIC_WITNESS_TOTAL_BYTES;
+        let error = parse_semantic_witness(witness_json(), "claim", &mut count, &mut decoded)
+            .expect_err("aggregate byte cap refuses before payload allocation");
+        assert!(error.why.contains("aggregate decoded"), "{error}");
+        assert_eq!(count, 0, "refusal must not commit the witness counter");
+        assert_eq!(decoded, MAX_SEMANTIC_WITNESS_TOTAL_BYTES);
+
+        let mut count = MAX_SEMANTIC_WITNESSES;
+        let mut decoded = 0usize;
+        let error = parse_semantic_witness(witness_json(), "claim", &mut count, &mut decoded)
+            .expect_err("aggregate witness-count cap refuses before payload allocation");
+        assert!(error.why.contains("witness count exceeds"), "{error}");
+        assert_eq!(decoded, 0, "refusal must not commit decoded bytes");
+    }
+
+    #[test]
     fn transport_node_accounting_matches_emitted_json_shapes() {
         let empty = EvidencePackage::new(Provenance::new("commit", "lock"));
         assert_eq!(
@@ -4165,7 +5342,7 @@ mod tests {
                 .transport_usage()
                 .expect("bounded estimated package")
                 .1,
-            26
+            27
         );
 
         let verified = EvidencePackage::new(Provenance::new("commit", "lock")).with_claim(
@@ -4183,7 +5360,710 @@ mod tests {
                 .transport_usage()
                 .expect("bounded certificate package")
                 .1,
-            27
+            28
         );
+
+        let portable = EvidencePackage::new(Provenance::new("commit", "lock")).with_claim(
+            Claim::from_portable_certificate(
+                "portable",
+                "bounded",
+                0.0,
+                1.0,
+                "producer",
+                SemanticWitness::new("fs-ivl/interval", 1, vec![1]),
+            ),
+        );
+        assert_eq!(
+            portable
+                .transport_usage()
+                .expect("bounded portable package")
+                .1,
+            31
+        );
+    }
+
+    fn identity_fixture_claim() -> Claim {
+        Claim {
+            id: "identity-claim".to_string(),
+            statement: "all identity-bearing claim fields".to_string(),
+            color: Color::Verified { lo: -1.0, hi: 2.0 },
+            receipt: Some(CompositionReceipt {
+                color_algebra_version: fs_evidence::COLOR_ALGEBRA_VERSION,
+                parents: vec![0],
+                op: IntervalOp::Hull,
+                artifact_hash: "11".repeat(32),
+            }),
+            falsifiers: vec![FalsifierRecord {
+                name: "boundary-probe".to_string(),
+                attempts: 7,
+                refuted: false,
+                detail: "no counterexample".to_string(),
+                artifact_hash: "22".repeat(32),
+            }],
+            anchors: vec![AnchorRecord {
+                dataset_id: "dataset-a".to_string(),
+                content_hash: "33".repeat(32),
+            }],
+            semantic_witness: Some(SemanticWitness::new("family-a", 3, vec![1, 2, 3])),
+            origin: ClaimOrigin::SourceCertificate {
+                producer: "producer-a".to_string(),
+                certificate_hash: "44".repeat(32),
+            },
+        }
+    }
+
+    fn assert_hash_moves(base: ContentHash, candidate: ContentHash, field: &str) {
+        assert_ne!(
+            base, candidate,
+            "semantic field did not move identity: {field}"
+        );
+    }
+
+    #[test]
+    fn semantic_witness_identity_fields_move_independently() {
+        let witness = SemanticWitness::new("family-a", 3, vec![1, 2, 3]);
+        let hash = witness.content_hash();
+        for (field, candidate) in [
+            (
+                "digest-domain",
+                semantic_witness_content_hash_with_domains(
+                    &witness,
+                    "fs-package:v8:alternate-semantic-witness",
+                    SEMANTIC_WITNESS_FAMILY_IDENTITY_DOMAIN,
+                    SEMANTIC_WITNESS_PAYLOAD_IDENTITY_DOMAIN,
+                ),
+            ),
+            (
+                "family-digest-domain",
+                semantic_witness_content_hash_with_domains(
+                    &witness,
+                    SEMANTIC_WITNESS_IDENTITY_DOMAIN,
+                    "fs-package:v8:alternate-semantic-witness-family",
+                    SEMANTIC_WITNESS_PAYLOAD_IDENTITY_DOMAIN,
+                ),
+            ),
+            (
+                "payload-digest-domain",
+                semantic_witness_content_hash_with_domains(
+                    &witness,
+                    SEMANTIC_WITNESS_IDENTITY_DOMAIN,
+                    SEMANTIC_WITNESS_FAMILY_IDENTITY_DOMAIN,
+                    "fs-package:v8:alternate-semantic-witness-payload",
+                ),
+            ),
+            (
+                "family-byte-count",
+                SemanticWitness::new("family-longer", 3, vec![1, 2, 3]).content_hash(),
+            ),
+            (
+                "family-utf8",
+                SemanticWitness::new("family-b", 3, vec![1, 2, 3]).content_hash(),
+            ),
+            (
+                "witness-schema-version",
+                SemanticWitness::new("family-a", 4, vec![1, 2, 3]).content_hash(),
+            ),
+            (
+                "payload-byte-count",
+                SemanticWitness::new("family-a", 3, vec![1, 2, 3, 4]).content_hash(),
+            ),
+            (
+                "payload-bytes",
+                SemanticWitness::new("family-a", 3, vec![1, 2, 4]).content_hash(),
+            ),
+        ] {
+            assert_hash_moves(hash, candidate, field);
+        }
+    }
+
+    #[test]
+    fn claim_declaration_identity_fields_move_independently() {
+        let claim = identity_fixture_claim();
+        let hash = claim.declared_content_hash_unverified();
+        let mut variants = Vec::new();
+
+        let mut changed = claim.clone();
+        changed.id.push('b');
+        variants.push(("claim-id", changed));
+        let mut changed = claim.clone();
+        changed.statement.push('b');
+        variants.push(("statement-utf8", changed));
+        let mut changed = claim.clone();
+        changed.color = Color::Verified { lo: -2.0, hi: 2.0 };
+        variants.push(("exact-color-payload", changed));
+        let mut changed = claim.clone();
+        changed.receipt.as_mut().expect("fixture receipt").op = IntervalOp::Add;
+        variants.push(("composition-receipt", changed));
+        let mut changed = claim.clone();
+        changed.falsifiers[0].attempts += 1;
+        variants.push(("ordered-falsifier-records", changed));
+        let mut changed = claim.clone();
+        changed.anchors[0].dataset_id.push('b');
+        variants.push(("ordered-anchor-records", changed));
+        let mut changed = claim.clone();
+        changed.semantic_witness = None;
+        variants.push(("semantic-witness-presence", changed));
+        let mut changed = claim.clone();
+        changed.semantic_witness = Some(SemanticWitness::new("family-a", 3, vec![1, 2, 4]));
+        variants.push(("semantic-witness-content-address", changed));
+        let mut changed = claim.clone();
+        changed.origin = ClaimOrigin::SourceCertificate {
+            producer: "producer-b".to_string(),
+            certificate_hash: "44".repeat(32),
+        };
+        variants.push(("claim-origin", changed));
+
+        for (field, changed) in variants {
+            assert_hash_moves(hash, changed.declared_content_hash_unverified(), field);
+        }
+        assert_hash_moves(
+            hash,
+            claim.declared_content_hash_with_domain("fs-package:v8:alternate-claim"),
+            "digest-domain",
+        );
+    }
+
+    #[test]
+    fn claim_verification_subject_identity_fields_move_independently() {
+        let claim = identity_fixture_claim();
+        let hash = claim.declared_verification_subject_hash_unverified();
+        let mut variants = Vec::new();
+
+        let mut changed = claim.clone();
+        changed.id.push('b');
+        variants.push(("claim-id", changed));
+        let mut changed = claim.clone();
+        changed.statement.push('b');
+        variants.push(("statement-utf8", changed));
+        let mut changed = claim.clone();
+        changed.color = Color::Verified { lo: -2.0, hi: 2.0 };
+        variants.push(("exact-color-payload", changed));
+        let mut changed = claim.clone();
+        changed.receipt.as_mut().expect("fixture receipt").op = IntervalOp::Add;
+        variants.push(("composition-receipt", changed));
+        let mut changed = claim.clone();
+        changed.falsifiers[0].detail.push('b');
+        variants.push(("ordered-falsifier-records", changed));
+        let mut changed = claim.clone();
+        changed.anchors[0].content_hash = "55".repeat(32);
+        variants.push(("ordered-anchor-records", changed));
+        let mut changed = claim.clone();
+        changed.semantic_witness = None;
+        variants.push(("semantic-witness-presence", changed));
+        let mut changed = claim.clone();
+        changed.semantic_witness = Some(SemanticWitness::new("family-a", 3, vec![1, 2, 4]));
+        variants.push(("semantic-witness-content-address", changed));
+        let mut changed = claim.clone();
+        changed.origin = ClaimOrigin::SourceCertificate {
+            producer: "producer-b".to_string(),
+            certificate_hash: "44".repeat(32),
+        };
+        variants.push(("claim-origin", changed));
+
+        for (field, changed) in variants {
+            assert_hash_moves(
+                hash,
+                changed.declared_verification_subject_hash_unverified(),
+                field,
+            );
+        }
+        assert_hash_moves(
+            hash,
+            claim.declared_verification_subject_hash_with_domain(
+                "fs-package:v8:alternate-claim-verification-subject",
+            ),
+            "digest-domain",
+        );
+    }
+
+    #[test]
+    fn claim_verification_subject_exclusions_do_not_move_identity() {
+        let claim = identity_fixture_claim();
+        let hash = claim.declared_verification_subject_hash_unverified();
+        let mut changed = claim.clone();
+        changed
+            .receipt
+            .as_mut()
+            .expect("fixture receipt")
+            .artifact_hash = "aa".repeat(32);
+        assert_eq!(
+            hash,
+            changed.declared_verification_subject_hash_unverified(),
+            "receipt artifact self-address is excluded"
+        );
+        let mut changed = claim.clone();
+        changed.falsifiers[0].artifact_hash = "bb".repeat(32);
+        assert_eq!(
+            hash,
+            changed.declared_verification_subject_hash_unverified(),
+            "falsifier artifact self-address is excluded"
+        );
+
+        let waived = |mac: &str| {
+            Claim::waived(
+                "waived",
+                "administrative exception",
+                Color::Estimated {
+                    estimator: "probe".to_string(),
+                    dispersion: 1.0,
+                },
+                WaiverGrant {
+                    waiver_id: "waiver-a".to_string(),
+                    expiry_day: 10,
+                    mac: mac.to_string(),
+                },
+            )
+        };
+        assert_eq!(
+            waived("mac-a").declared_verification_subject_hash_unverified(),
+            waived("mac-b").declared_verification_subject_hash_unverified(),
+            "waiver authenticator output is excluded"
+        );
+    }
+
+    #[test]
+    fn source_certificate_subject_identity_fields_move_independently() {
+        let claim = identity_fixture_claim();
+        let hash = claim.declared_source_certificate_subject_hash_unverified();
+        let mut variants = Vec::new();
+
+        let mut changed = claim.clone();
+        changed.id.push('b');
+        variants.push(("claim-id", changed));
+        let mut changed = claim.clone();
+        changed.statement.push('b');
+        variants.push(("statement-utf8", changed));
+        let mut changed = claim.clone();
+        changed.color = Color::Verified { lo: -2.0, hi: 2.0 };
+        variants.push(("exact-color-payload", changed));
+        let mut changed = claim.clone();
+        changed.receipt.as_mut().expect("fixture receipt").op = IntervalOp::Add;
+        variants.push(("composition-receipt", changed));
+        let mut changed = claim.clone();
+        changed.falsifiers[0].name.push('b');
+        variants.push(("ordered-falsifier-records", changed));
+        let mut changed = claim.clone();
+        changed.anchors[0].dataset_id.push('b');
+        variants.push(("ordered-anchor-identities", changed));
+        let mut changed = claim.clone();
+        changed.semantic_witness = None;
+        variants.push(("portable-family-presence", changed));
+        let mut changed = claim.clone();
+        changed.semantic_witness = Some(SemanticWitness::new("family-b", 3, vec![1, 2, 3]));
+        variants.push(("portable-family-identity", changed));
+        let mut changed = claim.clone();
+        changed.semantic_witness = Some(SemanticWitness::new("family-a", 4, vec![1, 2, 3]));
+        variants.push(("portable-schema-version", changed));
+        let mut changed = claim.clone();
+        changed.origin = ClaimOrigin::SourceCertificate {
+            producer: "producer-b".to_string(),
+            certificate_hash: "44".repeat(32),
+        };
+        variants.push(("source-producer", changed));
+
+        for (field, changed) in variants {
+            assert_hash_moves(
+                hash,
+                changed.declared_source_certificate_subject_hash_unverified(),
+                field,
+            );
+        }
+        assert_hash_moves(
+            hash,
+            claim.declared_source_certificate_subject_hash_with_domain(
+                "fs-package:v8:alternate-source-certificate-subject",
+            ),
+            "digest-domain",
+        );
+    }
+
+    #[test]
+    fn source_certificate_subject_exclusions_do_not_move_identity() {
+        let claim = identity_fixture_claim();
+        let hash = claim.declared_source_certificate_subject_hash_unverified();
+        let mut changed = claim.clone();
+        let ClaimOrigin::SourceCertificate {
+            certificate_hash, ..
+        } = &mut changed.origin
+        else {
+            panic!("fixture source origin");
+        };
+        *certificate_hash = "aa".repeat(32);
+        assert_eq!(
+            hash,
+            changed.declared_source_certificate_subject_hash_unverified()
+        );
+
+        let mut changed = claim.clone();
+        changed
+            .receipt
+            .as_mut()
+            .expect("fixture receipt")
+            .artifact_hash = "aa".repeat(32);
+        assert_eq!(
+            hash,
+            changed.declared_source_certificate_subject_hash_unverified()
+        );
+        let mut changed = claim.clone();
+        changed.falsifiers[0].artifact_hash = "aa".repeat(32);
+        assert_eq!(
+            hash,
+            changed.declared_source_certificate_subject_hash_unverified()
+        );
+        let mut changed = claim.clone();
+        changed.anchors[0].content_hash = "aa".repeat(32);
+        assert_eq!(
+            hash,
+            changed.declared_source_certificate_subject_hash_unverified()
+        );
+
+        let mut changed = claim;
+        changed.semantic_witness = Some(SemanticWitness::new("family-a", 3, vec![9, 9, 9]));
+        let replacement_address = changed
+            .semantic_witness
+            .as_ref()
+            .expect("replacement witness")
+            .content_hash()
+            .to_hex();
+        let ClaimOrigin::SourceCertificate {
+            certificate_hash, ..
+        } = &mut changed.origin
+        else {
+            panic!("fixture source origin");
+        };
+        *certificate_hash = replacement_address;
+        assert_eq!(
+            hash,
+            changed.declared_source_certificate_subject_hash_unverified()
+        );
+
+        let waived = |mac: &str| {
+            Claim::waived(
+                "waived",
+                "administrative exception",
+                Color::Estimated {
+                    estimator: "probe".to_string(),
+                    dispersion: 1.0,
+                },
+                WaiverGrant {
+                    waiver_id: "waiver-a".to_string(),
+                    expiry_day: 10,
+                    mac: mac.to_string(),
+                },
+            )
+        };
+        assert_eq!(
+            waived("mac-a").declared_source_certificate_subject_hash_unverified(),
+            waived("mac-b").declared_source_certificate_subject_hash_unverified(),
+            "waiver authenticator output is excluded"
+        );
+    }
+
+    #[test]
+    fn package_root_identity_fields_move_independently() {
+        let package = EvidencePackage::new(Provenance::new("commit-a", "lock-a"))
+            .with_claim(Claim::estimated("a", "first", "probe-a", 1.0))
+            .with_claim(Claim::estimated("b", "second", "probe-b", 2.0));
+        let hash = package.merkle_root_unchecked();
+        let mut changed = package.clone();
+        changed.format_version += 1;
+        assert_hash_moves(hash, changed.merkle_root_unchecked(), "format-version");
+        let changed = package
+            .clone()
+            .with_claim(Claim::estimated("c", "third", "probe-c", 3.0));
+        assert_hash_moves(hash, changed.merkle_root_unchecked(), "claim-count");
+        let changed = EvidencePackage::new(package.provenance.clone())
+            .with_claim(package.claims[1].clone())
+            .with_claim(package.claims[0].clone());
+        assert_hash_moves(
+            hash,
+            changed.merkle_root_unchecked(),
+            "ordered-claim-declaration-hashes",
+        );
+        let mut changed = package.clone();
+        changed.provenance.code_version.push('b');
+        assert_hash_moves(hash, changed.merkle_root_unchecked(), "code-version");
+        let mut changed = package.clone();
+        changed.provenance.constellation_lock.push('b');
+        assert_hash_moves(hash, changed.merkle_root_unchecked(), "constellation-lock");
+
+        for (field, schema) in [
+            (
+                "header-domain",
+                PackageRootSchema {
+                    header_domain: "fs-package:v8:alternate-header",
+                    ..CURRENT_PACKAGE_ROOT_SCHEMA
+                },
+            ),
+            (
+                "node-domain",
+                PackageRootSchema {
+                    node_domain: "fs-package:v8:alternate-node",
+                    ..CURRENT_PACKAGE_ROOT_SCHEMA
+                },
+            ),
+            (
+                "odd-node-carry-rule",
+                PackageRootSchema {
+                    carry_odd_node: false,
+                    ..CURRENT_PACKAGE_ROOT_SCHEMA
+                },
+            ),
+        ] {
+            assert_hash_moves(hash, package.merkle_root_with_schema(&schema), field);
+        }
+    }
+
+    fn pending_identity_waiver_package() -> EvidencePackage {
+        EvidencePackage::new(Provenance::new("commit-a", "lock-a"))
+            .with_claim(Claim::waived(
+                "waiver-a",
+                "first authorization",
+                Color::Verified { lo: 0.0, hi: 1.0 },
+                WaiverGrant {
+                    waiver_id: "grant-a".to_string(),
+                    expiry_day: 10,
+                    mac: "pending-a".to_string(),
+                },
+            ))
+            .with_claim(Claim::waived(
+                "waiver-b",
+                "second authorization",
+                Color::Verified { lo: 2.0, hi: 3.0 },
+                WaiverGrant {
+                    waiver_id: "grant-b".to_string(),
+                    expiry_day: 20,
+                    mac: "pending-b".to_string(),
+                },
+            ))
+    }
+
+    fn waiver_subject_for(package: &EvidencePackage, index: usize) -> Vec<u8> {
+        package
+            .waiver_message_with_context(index, package.authorization_context())
+            .expect("identity waiver target")
+    }
+
+    #[test]
+    fn waiver_authorization_subject_identity_fields_move_independently() {
+        let package = pending_identity_waiver_package();
+        let subject = waiver_subject_for(&package, 0);
+
+        let alternate_context = package
+            .authorization_context_with_domain("fs-package:v8:alternate-authorization-context");
+        assert_ne!(
+            subject,
+            package
+                .waiver_message_with_context(0, alternate_context)
+                .expect("alternate authorization context")
+        );
+        assert_ne!(
+            subject,
+            package
+                .waiver_message_with_context_and_domain(
+                    0,
+                    package.authorization_context(),
+                    "fs-package:v8:alternate-waiver-authorization",
+                )
+                .expect("alternate subject domain")
+        );
+        assert_ne!(
+            subject,
+            waiver_subject_for(&package, 1),
+            "target claim index"
+        );
+
+        let mut variants = Vec::new();
+        let mut changed = package.clone();
+        changed.format_version += 1;
+        variants.push(("format-version", changed));
+        let mut changed = package.clone();
+        changed.claims[1].statement.push('c');
+        variants.push(("ordered-authorization-claim-bytes", changed));
+        let mut changed = package.clone();
+        changed.claims[0].statement.push('c');
+        variants.push(("target-claim-body", changed));
+        let mut changed = package.clone();
+        let ClaimOrigin::AuthenticatedWaiver(grant) = &mut changed.claims[0].origin else {
+            panic!("fixture waiver origin");
+        };
+        grant.waiver_id.push('c');
+        variants.push(("waiver-id", changed));
+        let mut changed = package.clone();
+        let ClaimOrigin::AuthenticatedWaiver(grant) = &mut changed.claims[0].origin else {
+            panic!("fixture waiver origin");
+        };
+        grant.expiry_day += 1;
+        variants.push(("expiry-day", changed));
+        let mut changed = package.clone();
+        changed.provenance.code_version.push('c');
+        variants.push(("code-version", changed));
+        let mut changed = package.clone();
+        changed.provenance.constellation_lock.push('c');
+        variants.push(("constellation-lock", changed));
+        for (field, changed) in variants {
+            assert_ne!(subject, waiver_subject_for(&changed, 0), "{field}");
+        }
+    }
+
+    #[test]
+    fn waiver_authorization_subject_exclusions_do_not_move_identity() {
+        let package = pending_identity_waiver_package();
+        let subject = waiver_subject_for(&package, 0);
+        assert_eq!(
+            subject,
+            waiver_subject_for(&package.clone().signed("detached-signature"), 0),
+            "detached signature bytes are excluded"
+        );
+        let mut changed = package.clone();
+        let ClaimOrigin::AuthenticatedWaiver(grant) = &mut changed.claims[0].origin else {
+            panic!("fixture waiver origin");
+        };
+        grant.mac = "different-authenticator".to_string();
+        assert_eq!(
+            subject,
+            waiver_subject_for(&changed, 0),
+            "target waiver MAC output is excluded"
+        );
+        let mut changed = package;
+        let ClaimOrigin::AuthenticatedWaiver(grant) = &mut changed.claims[1].origin else {
+            panic!("fixture sibling waiver origin");
+        };
+        grant.mac = "different-sibling-authenticator".to_string();
+        assert_eq!(
+            subject,
+            waiver_subject_for(&changed, 0),
+            "sibling waiver MAC output is excluded"
+        );
+    }
+
+    fn identity_fixture_receipt() -> VerificationReceipt {
+        let mut receipt = VerificationReceipt {
+            package_root: ContentHash([1; 32]),
+            policy_fingerprints: VerificationPolicyFingerprints {
+                source_certificates: Some(ContentHash([2; 32])),
+                anchored_sources: Some(ContentHash([3; 32])),
+                falsifiers: Some(ContentHash([4; 32])),
+                derivations: Some(ContentHash([5; 32])),
+                waivers: Some(ContentHash([6; 32])),
+                signatures: Some(ContentHash([7; 32])),
+            },
+            waiver_day: Some(8),
+            signature: SignatureStatus::Unverified("signature-a".to_string()),
+            admissions: vec![ClaimAdmission {
+                claim_index: 0,
+                claim_id: "claim-a".to_string(),
+                origin_kind: AdmissionOriginKind::AuthenticatedWaiver,
+                class: AdmissionClass::WaiverDependent,
+                direct_waiver: Some(0),
+                waiver_parents: Vec::new(),
+            }],
+            waiver_registry: vec![ReceiptWaiver {
+                registry_index: 0,
+                claim_index: 0,
+                waiver_id: "waiver-a".to_string(),
+            }],
+            receipt_hash: ContentHash([0; 32]),
+        };
+        receipt.receipt_hash = receipt.recomputed_hash();
+        receipt
+    }
+
+    #[test]
+    fn verification_receipt_identity_fields_move_independently() {
+        let receipt = identity_fixture_receipt();
+        let hash = receipt.recomputed_hash();
+        assert_hash_moves(
+            hash,
+            verification_receipt_hash_with_domain(
+                "fs-package:v8:alternate-verification-receipt",
+                receipt.package_root,
+                receipt.policy_fingerprints,
+                receipt.waiver_day,
+                &receipt.signature,
+                &receipt.admissions,
+                &receipt.waiver_registry,
+            ),
+            "digest-domain",
+        );
+        let mut changed = receipt.clone();
+        changed.package_root = ContentHash([9; 32]);
+        assert_hash_moves(hash, changed.recomputed_hash(), "package-root");
+        let mut changed = receipt.clone();
+        changed.policy_fingerprints.source_certificates = Some(ContentHash([9; 32]));
+        assert_hash_moves(hash, changed.recomputed_hash(), "policy-fingerprints");
+        let mut changed = receipt.clone();
+        changed.waiver_day = Some(9);
+        assert_hash_moves(hash, changed.recomputed_hash(), "waiver-day");
+        let mut changed = receipt.clone();
+        changed.signature = SignatureStatus::Unsigned;
+        assert_hash_moves(
+            hash,
+            changed.recomputed_hash(),
+            "signature-status-and-purpose",
+        );
+        let mut changed = receipt.clone();
+        changed.admissions[0].claim_id.push('b');
+        assert_hash_moves(hash, changed.recomputed_hash(), "ordered-claim-admissions");
+        let mut changed = receipt;
+        changed.waiver_registry[0].waiver_id.push('b');
+        assert_hash_moves(hash, changed.recomputed_hash(), "ordered-waiver-registry");
+    }
+
+    #[test]
+    fn release_admission_context_identity_fields_move_independently() {
+        let receipt = identity_fixture_receipt();
+        let hash = receipt.release_admission_context();
+        assert_hash_moves(
+            hash,
+            release_admission_context_hash_with_domain(
+                "fs-package:v8:alternate-release-admission-context",
+                receipt.package_root,
+                receipt.policy_fingerprints,
+                receipt.waiver_day,
+                &receipt.admissions,
+                &receipt.waiver_registry,
+            ),
+            "digest-domain",
+        );
+        let mut changed = receipt.clone();
+        changed.package_root = ContentHash([9; 32]);
+        assert_hash_moves(hash, changed.release_admission_context(), "package-root");
+        let mut changed = receipt.clone();
+        changed.policy_fingerprints.source_certificates = Some(ContentHash([9; 32]));
+        assert_hash_moves(
+            hash,
+            changed.release_admission_context(),
+            "non-signature-policy-fingerprints",
+        );
+        let mut changed = receipt.clone();
+        changed.waiver_day = Some(9);
+        assert_hash_moves(hash, changed.release_admission_context(), "waiver-day");
+        let mut changed = receipt.clone();
+        changed.admissions[0].claim_id.push('b');
+        assert_hash_moves(
+            hash,
+            changed.release_admission_context(),
+            "ordered-claim-admissions",
+        );
+        let mut changed = receipt;
+        changed.waiver_registry[0].waiver_id.push('b');
+        assert_hash_moves(
+            hash,
+            changed.release_admission_context(),
+            "ordered-waiver-registry",
+        );
+    }
+
+    #[test]
+    fn release_admission_context_signature_fields_do_not_move_identity() {
+        let receipt = identity_fixture_receipt();
+        let hash = receipt.release_admission_context();
+        let mut changed = receipt.clone();
+        changed.signature = SignatureStatus::Unsigned;
+        assert_eq!(hash, changed.release_admission_context());
+        let mut changed = receipt;
+        changed.policy_fingerprints.signatures = Some(ContentHash([99; 32]));
+        assert_eq!(hash, changed.release_admission_context());
     }
 }

@@ -18,10 +18,16 @@ CONTRACT (risk R2 owned here).
   skips), `content_hash()` (versioned length-prefixed binary canonical
   serialization: params sorted by key, floats by BITS, inputs in order,
   fs-ledger's Blake3-class tree hash), and `to_row()` (valid JSON carrying
-  all seven fields + slack, including bit forms). Caller strings cannot
-  inject field delimiters or collide with structured fields.
-- `Store::put(record, artifact_bytes)`: content-addressed insert;
-  identical record + identical artifact is a write-time memo hit
+  all seven fields + slack, including bit forms, plus exact
+  `node_identity` v2 and `artifact_identity` v1 metadata objects). Its public
+  input is the raw artifact bytes, from which it derives the typed v1 address;
+  callers cannot attach v1 metadata to an arbitrary digest. Caller strings
+  cannot inject field delimiters or collide with structured fields.
+- `Store::put(record, artifact_bytes)`: content-addressed insert under the
+  typed `org.frankensim.fs-recompute.artifact-content.v1` identity. Its
+  canonical preimage length-frames that domain, identity version `1`, and the
+  exact artifact bytes before BLAKE3 hashing. Identical record + identical
+  artifact is a write-time memo hit
   (`Deduped`); identical record + DIFFERENT artifact bytes is
   `StoreError::DeterminismViolation` — the trip-wire that makes the
   determinism contract self-policing. STOP-THE-LINE, not a warning:
@@ -36,7 +42,14 @@ CONTRACT (risk R2 owned here).
   nodes are NEVER evicted; `evict_unpinned(keep)` removes oldest
   unpinned first (deterministic) and cannot touch pins by
   construction.
-- `snapshot()`: canonical text form (fork/round-trip stability).
+- `snapshot()`: canonical retained-row v3 text envelope. Its fixed, ordered
+  header is exactly `fsrecompute v3`, node identity version/domain, artifact
+  identity version/domain, then `--`; rows follow without reinterpretation.
+- `Store::admit_snapshot(snapshot)`: validates every v3 header field before
+  returning `AdmittedSnapshot::rows()`. It rejects legacy v2, stale/future
+  snapshot or identity versions, domain mismatches, malformed headers,
+  reordered fields, and noncanonical decimal versions through the structured
+  `SnapshotAdmissionError`. Admitted rows are borrowed and opaque.
 
 ## Invariants
 
@@ -44,7 +57,9 @@ CONTRACT (risk R2 owned here).
    to EVERY one of the seven fields (floats by bits); negative slack
    is first-class; 1000-deep chains are hash-stable; empty/single-node
    stores behave (rcs-001).
-2. The determinism trip-wire: identical (record, artifact) dedupes;
+2. The determinism trip-wire: the typed artifact-content v1 address changes
+   when its domain, version, or artifact bytes change; identical
+   (record, artifact) dedupes;
    identical record with different bytes errors with both artifact
    hashes named (rcs-002).
 3. Skip decisions carry slack certificates, the exact boundary is a
@@ -58,10 +73,14 @@ CONTRACT (risk R2 owned here).
    contract (rcs-004).
 5. Pins survive eviction; eviction is deterministic oldest-unpinned-
    first; pinning unknown nodes teaches (rcs-005).
-6. Ledger rows carry all seven fields + slack; rows and snapshots are
-   bitwise-deterministic across builds (rcs-006).
+6. Ledger rows carry all seven fields + slack and exact node/artifact identity
+   metadata; rows and canonical v3 snapshots are bitwise-deterministic across
+   builds (rcs-006).
 7. Error budgets and slack burns are finite, non-negative magnitudes;
    malformed values refuse without mutation (rcs-007).
+8. Snapshot v3 admission is all-or-nothing at the identity envelope: all six
+   header lines must be canonical and supported before any opaque row is
+   exposed (`snapshot_v3_admission_validates_identity_metadata_before_exposing_rows`).
 
 ## Tolerance-aware invalidation (bead lmp4.7, feature-gated)
 
@@ -130,7 +149,9 @@ fit check (api-006).
 `StoreError::DeterminismViolation` (stop-the-line, with likely-cause
 teaching text: unordered reduction, unstable sort, uninitialized
 padding), `UnknownNode`, malformed error/burn refusals, and `StalePlan`.
-Nothing panics across the boundary.
+`SnapshotAdmissionError` separately names legacy v2, stale/future versions,
+identity-domain mismatches, malformed headers, and noncanonical ordering or
+spelling. Nothing panics across the boundary.
 
 ## Determinism class
 
@@ -158,8 +179,9 @@ stay green. Adds fs-evidence (the verified-color skip claims).
 
 ## Conformance tests
 
-`tests/conformance.rs`, cases rcs-001..rcs-007 — JSON-line verdicts,
-seeded LCG randomness, the fs-obs slack-table event. Any
+`tests/conformance.rs`, cases rcs-001..rcs-007 plus the snapshot-v3 admission
+matrix — JSON-line verdicts, seeded LCG randomness, the fs-obs slack-table
+event, and fail-closed legacy/version/domain/canonical-header cases. Any
 reimplementation must pass the suite unchanged.
 
 ## No-claim boundaries
@@ -170,11 +192,17 @@ reimplementation must pass the suite unchanged.
 - Invalidation traversal (dirty propagation through the DAG) and the
   cache-policy surface are the recompute-invalidate / recompute-api
   beads; this store supplies their pinning hooks.
-- The SQLite-backed persistent form (fs-ledger schema v5 tables) is
-  deferred; `snapshot()` v2 is the interim durable form.
+- The SQLite-backed persistent form (fs-ledger schema v5 tables) is deferred.
+  Snapshot v3 is retained-row envelope admission only: `AdmittedSnapshot`
+  does not parse row JSON, revalidate row hashes, recover artifact bytes,
+  restore pins/sequence/burn/revision state, or construct a `Store`.
 - Slack SPENDING policies (which skips to take under a budget) are
   the recompute-api bead's.
 - Sensitivity bounds are SUPPLIED (interval-derived by callers);
   adjoint-sharpened bounds (Proposal 1) tighten the loose ones.
 - Path-sum accumulation is conservative for shared subpaths (no
   common-subexpression tightening yet).
+- Artifact-content v1 intentionally rotates the former raw
+  `BLAKE3(artifact_bytes)` address. No legacy artifact-hash migration or
+  mixed-version admission is claimed; legacy snapshot v2 is refused rather
+  than guessed or upgraded.

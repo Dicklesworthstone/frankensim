@@ -18,7 +18,7 @@ use fs_opt::{
     DeltaPerturbationStep, Endpoint, EscalationKind, EscalationStep, GoodhartGuard, GuardStatus,
     StepOutcome,
 };
-use fs_package::{Claim, EvidencePackage, Provenance};
+use fs_package::{Claim, EvidencePackage, Provenance, SemanticWitness};
 
 struct FixtureSourceVerifier(Vec<u8>);
 
@@ -35,6 +35,16 @@ impl SourceOriginVerifier for FixtureSourceVerifier {
 
 struct PackageSourceVerifier;
 struct PackageSignatureVerifier;
+
+fn drag_interval_witness() -> SemanticWitness {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&1_u32.to_le_bytes());
+    payload.push(1);
+    payload.extend_from_slice(&0.31_f64.to_bits().to_le_bytes());
+    payload.extend_from_slice(&0.33_f64.to_bits().to_le_bytes());
+    payload.extend_from_slice(&0_u32.to_le_bytes());
+    SemanticWitness::new(fs_checker::EXACT_INTERVAL_FAMILY, 1, payload)
+}
 
 /// Counts dispatches; used to prove the checker NEVER hands
 /// attacker-selected certificate addresses to a trusted capability
@@ -58,16 +68,19 @@ impl fs_checker::SourceCertificateVerifier for PackageSourceVerifier {
         &self,
         request: &fs_checker::SourceCertificateRequest<'_>,
     ) -> fs_checker::VerificationDecision {
+        let witness = drag_interval_witness();
         let accepted = request.package_provenance.code_version == "frankensim@3fab970"
             && request.package_provenance.constellation_lock == "lock-digest-77"
+            && request.package_root != fs_checker::ContentHash([0; 32])
             && request.claim_index == 0
             && request.claim_id == "drag"
             && request.statement == "Cd in [0.31, 0.33] at Re 2e5"
+            && request.claim_subject_hash != fs_checker::ContentHash([0; 32])
             && request.lo.to_bits() == 0.31f64.to_bits()
             && request.hi.to_bits() == 0.33f64.to_bits()
             && request.producer == "test-solver/cert"
-            && request.certificate_hash.to_hex()
-                == "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+            && request.certificate_hash == witness.content_hash()
+            && request.semantic_witness == Some(&witness);
         let fingerprint = hash_bytes(b"fs-checker:epi-package-source-policy:v1");
         if accepted {
             fs_checker::VerificationDecision::accept(fingerprint)
@@ -495,13 +508,13 @@ fn epi_e2e_battery() {
 
     // ---- STAGE 5: the evidence-package round-trip -----------------------
     let unsigned = EvidencePackage::new(Provenance::new("frankensim@3fab970", "lock-digest-77"))
-        .with_claim(Claim::from_certificate(
+        .with_claim(Claim::from_portable_certificate(
             "drag",
             "Cd in [0.31, 0.33] at Re 2e5",
             0.31,
             0.33,
             "test-solver/cert",
-            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            drag_interval_witness(),
         ))
         .with_claim(Claim::estimated(
             "fatigue",
@@ -536,6 +549,24 @@ fn epi_e2e_battery() {
         report.signature(),
         fs_checker::SignatureStatus::Authenticated(_)
     ));
+    assert_eq!(
+        report.semantic_status(),
+        fs_checker::SemanticStatus::Verified
+    );
+    assert_eq!(
+        report.origin_status(),
+        fs_checker::OriginStatus::Authenticated
+    );
+    let json_report = fs_checker::check_json_with_capabilities(
+        &package.to_json().expect("portable package JSON"),
+        Some(root),
+        Some(&package_signature_verifier),
+        &capabilities,
+    );
+    assert_eq!(
+        json_report, report,
+        "portable witness survives JSON round-trip"
+    );
     let pie = report.render_pie();
     assert!(
         pie.contains("verified") && pie.contains("estimated"),
@@ -563,10 +594,10 @@ fn epi_e2e_battery() {
             "fs-checker:epi-subject:{}",
             signature_subject.to_hex()
         ));
-    // DELIBERATE CONTRACT UPDATE (bead x2ch): pre-v7 this expected a
+    // DELIBERATE CONTRACT UPDATE (bead x2ch): before the authenticated
     // source-certificate-refused finding here — which required the
     // checker to hand the ATTACKER-SELECTED certificate hash to the
-    // trusted capability before the package authenticated. The v7
+    // trusted capability before the package authenticated. The checker
     // preflight boundary (correctly) refuses to dispatch any injected
     // capability on unauthenticated bytes, so the contract is now the
     // STRONGER one: tamper fails closed on the content root alone, and
@@ -613,7 +644,7 @@ fn epi_e2e_battery() {
     log.log(
         "package",
         "\"event\":\"round-trip\",\"claims\":2,\"reverified\":true,\
-         \"tamper_localized\":true",
+         \"portable_semantics\":\"verified\",\"tamper_localized\":true",
     );
     verdict(
         "stage-5",

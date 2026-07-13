@@ -20,6 +20,80 @@ use fs_crosswalk::{
 };
 use fs_evidence::{Color, ColorRank};
 
+/// Semantic version of the receipt-bearing package-presence decision.
+pub const PRESENCE_DECISION_IDENTITY_VERSION: u32 = 8;
+/// Exact BLAKE3 domain for the package-presence decision.
+pub const PRESENCE_DECISION_IDENTITY_DOMAIN: &str = "fs-package:v8:presence-decision";
+
+/// Semantic version of the receipt-bearing standards-coverage decision.
+pub const COVERAGE_DECISION_IDENTITY_VERSION: u32 = 8;
+/// Exact BLAKE3 domain for the standards-coverage decision.
+pub const COVERAGE_DECISION_IDENTITY_DOMAIN: &str = "fs-package:v8:coverage-decision";
+const _: () = assert!(PRESENCE_DECISION_IDENTITY_VERSION == crate::FORMAT_VERSION);
+const _: () = assert!(COVERAGE_DECISION_IDENTITY_VERSION == crate::FORMAT_VERSION);
+
+/// Owner-local declaration consumed by `xtask check-identities`.
+#[allow(dead_code)]
+pub const PRESENCE_DECISION_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
+    "frankensim-identity-schema-v1",
+    "id=fs-package:presence-decision",
+    "version_const=PRESENCE_DECISION_IDENTITY_VERSION",
+    "version=8",
+    "domain=fs-package:v8:presence-decision",
+    "domain_const=PRESENCE_DECISION_IDENTITY_DOMAIN",
+    "encoder=presence_report_hash",
+    "encoder_helpers=presence_report_hash_with_domain,append_presence_atom,admit_decision_hash",
+    "schema_constants=PRESENCE_DECISION_IDENTITY_VERSION,PRESENCE_DECISION_IDENTITY_DOMAIN,crates/fs-package/src/lib.rs#FORMAT_VERSION,crates/fs-crosswalk/src/lib.rs#CROSSWALK_VERSION,crates/fs-crosswalk/src/lib.rs#SUPPORTED_PACKAGE_FORMAT",
+    "schema_functions=admit_decision_hash,crates/fs-crosswalk/src/lib.rs#PackageConcept::label,package_presence_with,package_presence_from_report,concept_presence,is_scientific,anchoring_dataset_presence,signature_presence,rank_presence,certificate_presence,falsifier_presence,regime_presence,provenance_presence,claim_origin_presence,waiver_authorization_presence",
+    "schema_dependencies=fs-package:verification-receipt",
+    "digest=blake3-derive-key",
+    "encoding=typed-binary",
+    "sources=PackagePresenceReport,ConceptPresence",
+    "source_fields=PackagePresenceReport.rows:derived:expanded-into-concept-presence-fields,PackagePresenceReport.receipt:semantic,PackagePresenceReport.decision_hash:derived:recomputed-from-semantic-fields,ConceptPresence.concept:semantic,ConceptPresence.present:semantic,ConceptPresence.why:semantic",
+    "source_bindings=PackagePresenceReport.receipt>receipt-presence-and-hash,ConceptPresence.concept>ordered-concept-labels,ConceptPresence.present>ordered-presence-bits,ConceptPresence.why>ordered-rationale-utf8",
+    "external_semantic_fields=identity-version,digest-domain,row-count",
+    "semantic_fields=identity-version,digest-domain,row-count,receipt-presence-and-hash,ordered-concept-labels,ordered-presence-bits,ordered-rationale-utf8",
+    "excluded_fields=none",
+    "consumers=PackagePresenceReport::decision_hash,PackagePresenceReport::validate_decision_hash,package_presence,package_presence_with,verified_package_presence,coverage_from_presence",
+    "mutations=identity-version:crates/fs-package/tests/package.rs#package_identity_versions_and_transports_fail_closed,digest-domain:crates/fs-package/src/coverage.rs#presence_decision_identity_fields_move_independently,row-count:crates/fs-package/src/coverage.rs#presence_decision_identity_fields_move_independently,receipt-presence-and-hash:crates/fs-package/src/coverage.rs#presence_decision_identity_fields_move_independently,ordered-concept-labels:crates/fs-package/src/coverage.rs#presence_decision_identity_fields_move_independently,ordered-presence-bits:crates/fs-package/src/coverage.rs#presence_decision_identity_fields_move_independently,ordered-rationale-utf8:crates/fs-package/src/coverage.rs#presence_decision_identity_fields_move_independently",
+    "nonsemantic_mutations=none",
+    "field_guard=classify_presence_decision_identity_fields",
+    "transport_guard=PackagePresenceReport::admit_retained_decision_hash",
+    "version_guard=crates/fs-package/tests/package.rs#package_identity_versions_and_transports_fail_closed",
+    "coupling_surface=fs-package:presence-decision",
+];
+
+/// Owner-local declaration consumed by `xtask check-identities`.
+#[allow(dead_code)]
+pub const COVERAGE_DECISION_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
+    "frankensim-identity-schema-v1",
+    "id=fs-package:coverage-decision",
+    "version_const=COVERAGE_DECISION_IDENTITY_VERSION",
+    "version=8",
+    "domain=fs-package:v8:coverage-decision",
+    "domain_const=COVERAGE_DECISION_IDENTITY_DOMAIN",
+    "encoder=coverage_report_hash",
+    "encoder_helpers=coverage_report_hash_with_domain,CoverageDecisionRow::from_tuple",
+    "schema_constants=COVERAGE_DECISION_IDENTITY_VERSION,COVERAGE_DECISION_IDENTITY_DOMAIN,crates/fs-package/src/lib.rs#FORMAT_VERSION,crates/fs-crosswalk/src/lib.rs#CROSSWALK_VERSION,crates/fs-crosswalk/src/lib.rs#SUPPORTED_PACKAGE_FORMAT",
+    "schema_functions=admit_decision_hash,crates/fs-crosswalk/src/lib.rs#PackageConcept::label,crates/fs-crosswalk/src/lib.rs#Standard::label,crates/fs-blake3/src/lib.rs#ContentHash::to_hex,coverage_from_presence,crates/fs-crosswalk/src/lib.rs#crosswalk",
+    "schema_dependencies=fs-package:verification-receipt",
+    "digest=blake3-derive-key",
+    "encoding=typed-binary",
+    "sources=PackageCoverageReport,CoverageDecisionRow",
+    "source_fields=PackageCoverageReport.rows:derived:expanded-into-coverage-row-fields,PackageCoverageReport.receipt:semantic,PackageCoverageReport.standard:semantic,PackageCoverageReport.crosswalk_version:semantic,PackageCoverageReport.package_format:semantic,PackageCoverageReport.decision_hash:derived:recomputed-from-semantic-fields,CoverageDecisionRow.concept:semantic,CoverageDecisionRow.status:semantic,CoverageDecisionRow.why:semantic",
+    "source_bindings=PackageCoverageReport.receipt>receipt-presence-and-hash,PackageCoverageReport.standard>standard-label,PackageCoverageReport.crosswalk_version>crosswalk-version,PackageCoverageReport.package_format>package-format,CoverageDecisionRow.concept>ordered-concept-labels,CoverageDecisionRow.status>ordered-status-tags,CoverageDecisionRow.why>ordered-rationale-byte-counts-and-utf8",
+    "external_semantic_fields=identity-version,digest-domain,row-count",
+    "semantic_fields=identity-version,digest-domain,row-count,receipt-presence-and-hash,standard-label,crosswalk-version,package-format,ordered-concept-labels,ordered-status-tags,ordered-rationale-byte-counts-and-utf8",
+    "excluded_fields=none",
+    "consumers=PackageCoverageReport::decision_hash,PackageCoverageReport::validate_decision_hash,package_coverage,package_coverage_with,verified_package_coverage,standards-release-reports",
+    "mutations=identity-version:crates/fs-package/tests/package.rs#package_identity_versions_and_transports_fail_closed,digest-domain:crates/fs-package/src/coverage.rs#coverage_decision_identity_fields_move_independently,row-count:crates/fs-package/src/coverage.rs#coverage_decision_identity_fields_move_independently,receipt-presence-and-hash:crates/fs-package/src/coverage.rs#coverage_decision_identity_fields_move_independently,standard-label:crates/fs-package/src/coverage.rs#coverage_decision_identity_fields_move_independently,crosswalk-version:crates/fs-package/src/coverage.rs#coverage_decision_identity_fields_move_independently,package-format:crates/fs-package/src/coverage.rs#coverage_decision_identity_fields_move_independently,ordered-concept-labels:crates/fs-package/src/coverage.rs#coverage_decision_identity_fields_move_independently,ordered-status-tags:crates/fs-package/src/coverage.rs#coverage_decision_identity_fields_move_independently,ordered-rationale-byte-counts-and-utf8:crates/fs-package/src/coverage.rs#coverage_decision_identity_fields_move_independently",
+    "nonsemantic_mutations=none",
+    "field_guard=classify_coverage_decision_identity_fields",
+    "transport_guard=PackageCoverageReport::admit_retained_decision_hash",
+    "version_guard=crates/fs-package/tests/package.rs#package_identity_versions_and_transports_fail_closed",
+    "coupling_surface=fs-package:coverage-decision",
+];
+
 /// Whether one concept is actually evidenced by a package, with the
 /// reason either way.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,6 +140,37 @@ pub struct PackagePresenceReport {
     decision_hash: crate::ContentHash,
 }
 
+#[allow(dead_code)]
+fn classify_presence_decision_identity_fields(
+    report: &PackagePresenceReport,
+    row: &ConceptPresence,
+) {
+    let PackagePresenceReport {
+        rows,
+        receipt,
+        decision_hash,
+    } = report;
+    let ConceptPresence {
+        concept,
+        present,
+        why,
+    } = row;
+    let _ = (rows, receipt, decision_hash, concept, present, why);
+}
+
+fn admit_decision_hash(
+    found_version: u32,
+    expected_version: u32,
+    bytes: &[u8],
+) -> Option<crate::ContentHash> {
+    if found_version != expected_version || bytes.len() != 32 {
+        return None;
+    }
+    let mut exact = [0_u8; 32];
+    exact.copy_from_slice(bytes);
+    Some(crate::ContentHash(exact))
+}
+
 impl PackagePresenceReport {
     /// One sealed decision per package concept.
     #[must_use]
@@ -89,6 +194,13 @@ impl PackagePresenceReport {
     #[must_use]
     pub const fn decision_hash(&self) -> crate::ContentHash {
         self.decision_hash
+    }
+
+    /// Admit a retained presence-decision digest only under the exact schema
+    /// version and fixed-width binary transport.
+    #[must_use]
+    pub fn admit_retained_decision_hash(version: u32, bytes: &[u8]) -> Option<crate::ContentHash> {
+        admit_decision_hash(version, PRESENCE_DECISION_IDENTITY_VERSION, bytes)
     }
 
     /// Recompute the digest over every authority-bearing field.
@@ -406,27 +518,34 @@ fn package_presence_from_report(
     presence
 }
 
-fn presence_report_hash(report: &PackagePresenceReport) -> crate::ContentHash {
-    fn atom(bytes: &mut Vec<u8>, value: &[u8]) {
-        bytes.extend_from_slice(&(value.len() as u64).to_le_bytes());
-        bytes.extend_from_slice(value);
-    }
+fn append_presence_atom(bytes: &mut Vec<u8>, value: &[u8]) {
+    bytes.extend_from_slice(&(value.len() as u64).to_le_bytes());
+    bytes.extend_from_slice(value);
+}
 
+fn presence_report_hash(report: &PackagePresenceReport) -> crate::ContentHash {
+    presence_report_hash_with_domain(report, PRESENCE_DECISION_IDENTITY_DOMAIN)
+}
+
+fn presence_report_hash_with_domain(
+    report: &PackagePresenceReport,
+    domain: &str,
+) -> crate::ContentHash {
     let mut canonical = Vec::new();
-    atom(&mut canonical, &(report.rows.len() as u64).to_le_bytes());
+    append_presence_atom(&mut canonical, &(report.rows.len() as u64).to_le_bytes());
     match &report.receipt {
         Some(receipt) => {
-            atom(&mut canonical, b"receipt");
-            atom(&mut canonical, receipt.receipt_hash().as_bytes());
+            append_presence_atom(&mut canonical, b"receipt");
+            append_presence_atom(&mut canonical, receipt.receipt_hash().as_bytes());
         }
-        None => atom(&mut canonical, b"no-package-receipt"),
+        None => append_presence_atom(&mut canonical, b"no-package-receipt"),
     }
     for row in &report.rows {
-        atom(&mut canonical, row.concept.label().as_bytes());
-        atom(&mut canonical, &[u8::from(row.present)]);
-        atom(&mut canonical, row.why.as_bytes());
+        append_presence_atom(&mut canonical, row.concept.label().as_bytes());
+        append_presence_atom(&mut canonical, &[u8::from(row.present)]);
+        append_presence_atom(&mut canonical, row.why.as_bytes());
     }
-    fs_blake3::hash_domain("fs-package:v7:presence-decision", &canonical)
+    fs_blake3::hash_domain(domain, &canonical)
 }
 
 /// Derive coverage rows from an already verified package without invoking any
@@ -449,6 +568,27 @@ pub enum CoverageStatus {
     NoClaim,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct CoverageDecisionRow<'a> {
+    concept: PackageConcept,
+    status: &'static str,
+    why: &'a str,
+}
+
+impl<'a> CoverageDecisionRow<'a> {
+    fn from_tuple(row: &'a (PackageConcept, CoverageStatus, String)) -> Self {
+        Self {
+            concept: row.0,
+            status: match &row.1 {
+                CoverageStatus::Covered => "covered",
+                CoverageStatus::MappedButAbsent => "mapped-but-absent",
+                CoverageStatus::NoClaim => "no-claim",
+            },
+            why: &row.2,
+        }
+    }
+}
+
 /// Receipt-bearing standards coverage decision.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackageCoverageReport {
@@ -465,6 +605,37 @@ pub struct PackageCoverageReport {
     /// Domain-separated integrity digest over mapping context, rows, and the
     /// package verification receipt.
     decision_hash: crate::ContentHash,
+}
+
+#[allow(dead_code)]
+fn classify_coverage_decision_identity_fields(
+    report: &PackageCoverageReport,
+    row: &CoverageDecisionRow<'_>,
+) {
+    let PackageCoverageReport {
+        rows,
+        receipt,
+        standard,
+        crosswalk_version,
+        package_format,
+        decision_hash,
+    } = report;
+    let CoverageDecisionRow {
+        concept,
+        status,
+        why,
+    } = row;
+    let _ = (
+        rows,
+        receipt,
+        standard,
+        crosswalk_version,
+        package_format,
+        decision_hash,
+        concept,
+        status,
+        why,
+    );
 }
 
 impl PackageCoverageReport {
@@ -502,6 +673,12 @@ impl PackageCoverageReport {
     #[must_use]
     pub const fn decision_hash(&self) -> crate::ContentHash {
         self.decision_hash
+    }
+    /// Admit a retained coverage-decision digest only under the exact schema
+    /// version and fixed-width binary transport.
+    #[must_use]
+    pub fn admit_retained_decision_hash(version: u32, bytes: &[u8]) -> Option<crate::ContentHash> {
+        admit_decision_hash(version, COVERAGE_DECISION_IDENTITY_VERSION, bytes)
     }
     /// Whether the stored digest binds every report field.
     #[must_use]
@@ -591,6 +768,13 @@ fn coverage_from_presence(
 }
 
 fn coverage_report_hash(report: &PackageCoverageReport) -> crate::ContentHash {
+    coverage_report_hash_with_domain(report, COVERAGE_DECISION_IDENTITY_DOMAIN)
+}
+
+fn coverage_report_hash_with_domain(
+    report: &PackageCoverageReport,
+    domain: &str,
+) -> crate::ContentHash {
     use core::fmt::Write as _;
 
     let mut canonical = String::new();
@@ -607,22 +791,19 @@ fn coverage_report_hash(report: &PackageCoverageReport) -> crate::ContentHash {
         None => canonical.push_str("no-package-receipt"),
     }
     canonical.push('|');
-    for (concept, status, why) in &report.rows {
+    for tuple in &report.rows {
+        let row = CoverageDecisionRow::from_tuple(tuple);
         let _ = write!(
             canonical,
             "{}:{}:{}:",
-            concept.label(),
-            match status {
-                CoverageStatus::Covered => "covered",
-                CoverageStatus::MappedButAbsent => "mapped-but-absent",
-                CoverageStatus::NoClaim => "no-claim",
-            },
-            why.len()
+            row.concept.label(),
+            row.status,
+            row.why.len()
         );
-        canonical.push_str(why);
+        canonical.push_str(row.why);
         canonical.push('|');
     }
-    fs_blake3::hash_domain("fs-package:v7:coverage-decision", canonical.as_bytes())
+    fs_blake3::hash_domain(domain, canonical.as_bytes())
 }
 
 /// Derive standards coverage from an already verified package without
@@ -633,4 +814,173 @@ pub fn verified_package_coverage(
     standard: Standard,
 ) -> PackageCoverageReport {
     coverage_from_presence(standard, verified_package_presence(verified))
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+
+    fn empty_package_receipt() -> VerificationReceipt {
+        EvidencePackage::new(crate::Provenance::new("commit-a", "lock-a"))
+            .verify()
+            .expect("an empty bounded package admits under deny-all policy")
+            .receipt()
+            .clone()
+    }
+
+    fn presence_fixture() -> PackagePresenceReport {
+        let mut report = PackagePresenceReport {
+            rows: vec![ConceptPresence {
+                concept: PackageConcept::MerkleRoot,
+                present: true,
+                why: "bounded package root recomputed".to_string(),
+            }],
+            receipt: None,
+            decision_hash: crate::ContentHash([0; 32]),
+        };
+        report.decision_hash = presence_report_hash(&report);
+        report
+    }
+
+    fn coverage_fixture() -> PackageCoverageReport {
+        let mut report = PackageCoverageReport {
+            rows: vec![(
+                PackageConcept::MerkleRoot,
+                CoverageStatus::Covered,
+                "mapped root and package evidence agree".to_string(),
+            )],
+            receipt: None,
+            standard: Standard::AsmeVvV10,
+            crosswalk_version: CROSSWALK_VERSION,
+            package_format: SUPPORTED_PACKAGE_FORMAT,
+            decision_hash: crate::ContentHash([0; 32]),
+        };
+        report.decision_hash = coverage_report_hash(&report);
+        report
+    }
+
+    fn assert_hash_moves(baseline: crate::ContentHash, changed: crate::ContentHash, field: &str) {
+        assert_ne!(
+            baseline, changed,
+            "semantic identity field did not move: {field}"
+        );
+    }
+
+    #[test]
+    fn presence_decision_identity_fields_move_independently() {
+        let report = presence_fixture();
+        let baseline = presence_report_hash(&report);
+        assert_hash_moves(
+            baseline,
+            presence_report_hash_with_domain(&report, "fs-package:v8:alternate-presence-decision"),
+            "digest-domain",
+        );
+
+        let mut changed = report.clone();
+        changed.rows.push(ConceptPresence {
+            concept: PackageConcept::Provenance,
+            present: false,
+            why: "missing reproducibility identity".to_string(),
+        });
+        assert_hash_moves(baseline, presence_report_hash(&changed), "row-count");
+
+        let mut changed = report.clone();
+        changed.receipt = Some(empty_package_receipt());
+        assert_hash_moves(
+            baseline,
+            presence_report_hash(&changed),
+            "receipt-presence-and-hash",
+        );
+
+        let mut changed = report.clone();
+        changed.rows[0].concept = PackageConcept::Provenance;
+        assert_hash_moves(
+            baseline,
+            presence_report_hash(&changed),
+            "ordered-concept-labels",
+        );
+
+        let mut changed = report.clone();
+        changed.rows[0].present = false;
+        assert_hash_moves(
+            baseline,
+            presence_report_hash(&changed),
+            "ordered-presence-bits",
+        );
+
+        let mut changed = report;
+        changed.rows[0].why.push_str(" under schema v8");
+        assert_hash_moves(
+            baseline,
+            presence_report_hash(&changed),
+            "ordered-rationale-utf8",
+        );
+    }
+
+    #[test]
+    fn coverage_decision_identity_fields_move_independently() {
+        let report = coverage_fixture();
+        let baseline = coverage_report_hash(&report);
+        assert_hash_moves(
+            baseline,
+            coverage_report_hash_with_domain(&report, "fs-package:v8:alternate-coverage-decision"),
+            "digest-domain",
+        );
+
+        let mut changed = report.clone();
+        changed.rows.push((
+            PackageConcept::Provenance,
+            CoverageStatus::MappedButAbsent,
+            "mapped but missing".to_string(),
+        ));
+        assert_hash_moves(baseline, coverage_report_hash(&changed), "row-count");
+
+        let mut changed = report.clone();
+        changed.receipt = Some(empty_package_receipt());
+        assert_hash_moves(
+            baseline,
+            coverage_report_hash(&changed),
+            "receipt-presence-and-hash",
+        );
+
+        let mut changed = report.clone();
+        changed.standard = Standard::AsmeVvV20;
+        assert_hash_moves(baseline, coverage_report_hash(&changed), "standard-label");
+
+        let mut changed = report.clone();
+        changed.crosswalk_version += 1;
+        assert_hash_moves(
+            baseline,
+            coverage_report_hash(&changed),
+            "crosswalk-version",
+        );
+
+        let mut changed = report.clone();
+        changed.package_format += 1;
+        assert_hash_moves(baseline, coverage_report_hash(&changed), "package-format");
+
+        let mut changed = report.clone();
+        changed.rows[0].0 = PackageConcept::Provenance;
+        assert_hash_moves(
+            baseline,
+            coverage_report_hash(&changed),
+            "ordered-concept-labels",
+        );
+
+        let mut changed = report.clone();
+        changed.rows[0].1 = CoverageStatus::NoClaim;
+        assert_hash_moves(
+            baseline,
+            coverage_report_hash(&changed),
+            "ordered-status-tags",
+        );
+
+        let mut changed = report;
+        changed.rows[0].2.push_str(" under schema v8");
+        assert_hash_moves(
+            baseline,
+            coverage_report_hash(&changed),
+            "ordered-rationale-byte-counts-and-utf8",
+        );
+    }
 }

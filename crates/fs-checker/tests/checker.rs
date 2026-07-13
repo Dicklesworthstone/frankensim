@@ -7,21 +7,20 @@
 use fs_checker::{
     AnchoredSourceRequest, AnchoredSourceVerifier, CHECKER_PROTOCOL_VERSION, ColorBreakdown,
     ContentHash, DerivationRequest, DerivationVerifier, FalsifierRequest, FalsifierVerifier,
-    SignaturePurpose, SignatureRequest, SignatureStatus, SignatureVerifier,
-    SourceCertificateRequest, SourceCertificateVerifier, Verdict, VerificationCapabilities,
-    VerificationDecision, WaiverGrant, WaiverVerifier, check, check_against_root,
-    check_for_release_with_capabilities, check_json, check_json_for_release_with_capabilities,
-    check_json_release_preflight, check_json_with_capabilities, check_release_preflight,
-    check_with_capabilities,
+    IntegrityStatus, OriginStatus, SemanticFailureKind, SemanticStatus, SignaturePurpose,
+    SignatureRequest, SignatureStatus, SignatureVerifier, SourceCertificateRequest,
+    SourceCertificateVerifier, Verdict, VerificationCapabilities, VerificationDecision,
+    WaiverGrant, WaiverVerifier, check, check_against_root, check_for_release_with_capabilities,
+    check_json, check_json_for_release_with_capabilities, check_json_release_preflight,
+    check_json_with_capabilities, check_release_preflight, check_with_capabilities,
 };
 use fs_evidence::{Color, IntervalOp, ValidityDomain};
-use fs_package::{Claim, EvidencePackage, FalsifierRecord, Provenance};
+use fs_package::{Claim, EvidencePackage, FalsifierRecord, Provenance, SemanticWitness};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 const ARTIFACT_HASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
-/// A deliberately corrupted content root (one byte flipped): the v5
-/// 32-byte replacement for the old `root ^ 0xdead` tamper idiom.
+/// A deliberately corrupted 32-byte content root (one byte flipped).
 fn flip(root: ContentHash) -> ContentHash {
     let mut bytes = *root.as_bytes();
     bytes[0] ^= 0xde;
@@ -168,6 +167,9 @@ fn a_valid_package_passes_with_no_findings() {
     let report = check_with_capabilities(&pkg, None, None, &capabilities);
     assert!(report.passed());
     assert!(!report.release_admitted());
+    assert_eq!(report.integrity_status(), IntegrityStatus::Verified);
+    assert_eq!(report.semantic_status(), SemanticStatus::NotProvided);
+    assert_eq!(report.origin_status(), OriginStatus::Authenticated);
     assert!(report.validate_decision_hash());
     assert_eq!(report.verdict(), Verdict::Pass);
     assert!(report.findings().is_empty());
@@ -254,6 +256,9 @@ fn content_address_mismatch_is_caught() {
     // a wrong expected root (a tampered/substituted package) fails.
     let report = check_against_root(&pkg, flip(real_root));
     assert!(!report.passed());
+    assert_eq!(report.integrity_status(), IntegrityStatus::Refused);
+    assert_eq!(report.semantic_status(), SemanticStatus::NotRun);
+    assert_eq!(report.origin_status(), OriginStatus::NotRun);
     assert!(
         report
             .findings()
@@ -328,9 +333,11 @@ impl fs_checker::SignatureVerifier for ReleaseVerifier {
                     checker_protocol,
                     expected_root,
                     admission_context,
+                    semantic_context,
                 } if expected_root == request.package_root
                     && checker_protocol == CHECKER_PROTOCOL_VERSION
                     && admission_context != ContentHash([0; 32])
+                    && semantic_context != ContentHash([0; 32])
             );
         let policy = policy_fingerprint("release-verifier");
         if accepted {
@@ -345,6 +352,15 @@ fn signed_for_release(
     package: EvidencePackage,
     capabilities: &VerificationCapabilities<'_>,
 ) -> EvidencePackage {
+    let semantic_context = fs_checker::verify_portable_semantics(&package).context_hash();
+    signed_for_release_with_semantic_context(package, capabilities, semantic_context)
+}
+
+fn signed_for_release_with_semantic_context(
+    package: EvidencePackage,
+    capabilities: &VerificationCapabilities<'_>,
+    semantic_context: ContentHash,
+) -> EvidencePackage {
     let root = package_root(&package);
     let unsigned = package
         .verify_with(capabilities)
@@ -353,6 +369,7 @@ fn signed_for_release(
         checker_protocol: CHECKER_PROTOCOL_VERSION,
         expected_root: root,
         admission_context: unsigned.receipt().release_admission_context(),
+        semantic_context,
     };
     package.signed(format!(
         "release-test:{}",
@@ -519,6 +536,555 @@ fn all_unexpected_capabilities(callbacks: &UnexpectedCallbacks) -> VerificationC
         .with_derivations(callbacks)
         .with_waivers(callbacks, 100)
         .with_signatures(callbacks)
+}
+
+struct PortableSourceVerifier;
+
+impl SourceCertificateVerifier for PortableSourceVerifier {
+    fn verify(&self, request: &SourceCertificateRequest<'_>) -> VerificationDecision {
+        let accepted = request.package_provenance == &prov()
+            && request.package_root != ContentHash([0; 32])
+            && request.claim_index == 0
+            && request.claim_id == "portable"
+            && request.statement == "portable result"
+            && request.claim_subject_hash != ContentHash([0; 32])
+            && request.producer == "portable-test/cert"
+            && request.semantic_witness.is_some_and(|witness| {
+                let family = witness.family();
+                witness.content_hash() == request.certificate_hash
+                    && (family == fs_checker::EXACT_INTERVAL_FAMILY
+                        || family == fs_checker::BOUNDED_LINF_RESIDUAL_FAMILY)
+            });
+        if accepted {
+            VerificationDecision::accept(ContentHash([0xb4; 32]))
+        } else {
+            VerificationDecision::reject(ContentHash([0xb4; 32]))
+        }
+    }
+}
+
+fn exact_sum_payload(left: i64, right: i64) -> Vec<u8> {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&3_u32.to_le_bytes());
+    payload.push(0);
+    payload.extend_from_slice(&left.to_le_bytes());
+    payload.push(0);
+    payload.extend_from_slice(&right.to_le_bytes());
+    payload.push(2);
+    payload.extend_from_slice(&0_u32.to_le_bytes());
+    payload.extend_from_slice(&1_u32.to_le_bytes());
+    payload.extend_from_slice(&2_u32.to_le_bytes());
+    payload
+}
+
+fn exact_division_payload(numerator: i64, denominator: i64) -> Vec<u8> {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&3_u32.to_le_bytes());
+    payload.push(0);
+    payload.extend_from_slice(&numerator.to_le_bytes());
+    payload.push(0);
+    payload.extend_from_slice(&denominator.to_le_bytes());
+    payload.push(5);
+    payload.extend_from_slice(&0_u32.to_le_bytes());
+    payload.extend_from_slice(&1_u32.to_le_bytes());
+    payload.extend_from_slice(&2_u32.to_le_bytes());
+    payload
+}
+
+fn interval_binary_payload(tag: u8, left: (f64, f64), right: (f64, f64)) -> Vec<u8> {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&3_u32.to_le_bytes());
+    for (lo, hi) in [left, right] {
+        payload.push(1);
+        payload.extend_from_slice(&lo.to_bits().to_le_bytes());
+        payload.extend_from_slice(&hi.to_bits().to_le_bytes());
+    }
+    payload.push(tag);
+    payload.extend_from_slice(&0_u32.to_le_bytes());
+    payload.extend_from_slice(&1_u32.to_le_bytes());
+    payload.extend_from_slice(&2_u32.to_le_bytes());
+    payload
+}
+
+fn residual_1x1_payload(matrix: f64, candidate: f64, right_hand_side: f64) -> Vec<u8> {
+    let mut payload = vec![0];
+    payload.extend_from_slice(&1_u32.to_le_bytes());
+    payload.extend_from_slice(&1_u32.to_le_bytes());
+    payload.extend_from_slice(&matrix.to_bits().to_le_bytes());
+    payload.extend_from_slice(&candidate.to_bits().to_le_bytes());
+    payload.extend_from_slice(&right_hand_side.to_bits().to_le_bytes());
+    payload
+}
+
+fn residual_2x1_payload() -> Vec<u8> {
+    let mut payload = vec![0];
+    payload.extend_from_slice(&2_u32.to_le_bytes());
+    payload.extend_from_slice(&1_u32.to_le_bytes());
+    for value in [1.0_f64, 2.0, 1.0, 2.0, 4.0] {
+        payload.extend_from_slice(&value.to_bits().to_le_bytes());
+    }
+    payload
+}
+
+fn exact_one_work_payload(multiplications: usize, hulls: usize) -> Vec<u8> {
+    let nodes = 1 + multiplications + hulls;
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&(nodes as u32).to_le_bytes());
+    payload.push(0);
+    payload.extend_from_slice(&1_i64.to_le_bytes());
+    for current in 1..=multiplications {
+        payload.push(4);
+        payload.extend_from_slice(&((current - 1) as u32).to_le_bytes());
+        payload.extend_from_slice(&0_u32.to_le_bytes());
+    }
+    for current in (multiplications + 1)..nodes {
+        payload.push(7);
+        payload.extend_from_slice(&((current - 1) as u32).to_le_bytes());
+        payload.extend_from_slice(&0_u32.to_le_bytes());
+    }
+    payload.extend_from_slice(&((nodes - 1) as u32).to_le_bytes());
+    payload
+}
+
+fn portable_package(witness: SemanticWitness, lo: f64, hi: f64) -> EvidencePackage {
+    EvidencePackage::new(prov()).with_claim(Claim::from_portable_certificate(
+        "portable",
+        "portable result",
+        lo,
+        hi,
+        "portable-test/cert",
+        witness,
+    ))
+}
+
+#[test]
+fn built_in_semantic_families_verify_in_memory_and_json() {
+    let fixtures = [
+        (
+            SemanticWitness::new(
+                fs_checker::EXACT_INTERVAL_FAMILY,
+                fs_checker::INITIAL_SEMANTIC_SCHEMA_VERSION,
+                exact_sum_payload(1, 2),
+            ),
+            3.0,
+            3.0,
+        ),
+        // Interval leaves deliberately bypass the exact-i53 shortcut. Raw
+        // [1, 2] + [3, 4] is [4, 6], expanded by exactly one adjacent value.
+        (
+            SemanticWitness::new(
+                fs_checker::EXACT_INTERVAL_FAMILY,
+                fs_checker::INITIAL_SEMANTIC_SCHEMA_VERSION,
+                interval_binary_payload(2, (1.0, 2.0), (3.0, 4.0)),
+            ),
+            f64::from_bits(0x400f_ffff_ffff_ffff),
+            f64::from_bits(0x4018_0000_0000_0001),
+        ),
+        // Raw positive products span [2*4, 3*5] = [8, 15].
+        (
+            SemanticWitness::new(
+                fs_checker::EXACT_INTERVAL_FAMILY,
+                fs_checker::INITIAL_SEMANTIC_SCHEMA_VERSION,
+                interval_binary_payload(4, (2.0, 3.0), (4.0, 5.0)),
+            ),
+            f64::from_bits(0x401f_ffff_ffff_ffff),
+            f64::from_bits(0x402e_0000_0000_0001),
+        ),
+        // Raw positive quotients span [6/4, 8/2] = [1.5, 4].
+        (
+            SemanticWitness::new(
+                fs_checker::EXACT_INTERVAL_FAMILY,
+                fs_checker::INITIAL_SEMANTIC_SCHEMA_VERSION,
+                interval_binary_payload(5, (6.0, 8.0), (2.0, 4.0)),
+            ),
+            f64::from_bits(0x3ff7_ffff_ffff_ffff),
+            f64::from_bits(0x4010_0000_0000_0001),
+        ),
+        // A=[[1],[2]], x=[1], b=[2,4] has residual [1,2]. The
+        // independently hand-derived local enclosure ends two ulps above 2.
+        (
+            SemanticWitness::new(
+                fs_checker::BOUNDED_LINF_RESIDUAL_FAMILY,
+                fs_checker::INITIAL_SEMANTIC_SCHEMA_VERSION,
+                residual_2x1_payload(),
+            ),
+            0.0,
+            f64::from_bits(0x4000_0000_0000_0002),
+        ),
+    ];
+    let source_verifier = PortableSourceVerifier;
+    let capabilities =
+        VerificationCapabilities::deny_all().with_source_certificates(&source_verifier);
+
+    for (witness, lo, hi) in fixtures {
+        let package = portable_package(witness, lo, hi);
+        let missing_origin = check(&package);
+        assert_eq!(missing_origin.integrity_status(), IntegrityStatus::Verified);
+        assert_eq!(missing_origin.semantic_status(), SemanticStatus::Verified);
+        assert_eq!(missing_origin.origin_status(), OriginStatus::Refused);
+        assert_eq!(missing_origin.breakdown(), &ColorBreakdown::default());
+
+        let in_memory = check_with_capabilities(&package, None, None, &capabilities);
+        assert!(in_memory.passed(), "{:?}", in_memory.findings());
+        assert_eq!(in_memory.integrity_status(), IntegrityStatus::Verified);
+        assert_eq!(in_memory.semantic_status(), SemanticStatus::Verified);
+        assert_eq!(in_memory.origin_status(), OriginStatus::Authenticated);
+        assert!(in_memory.semantic_report().validate_context_hash());
+        assert_eq!(
+            in_memory.semantic_report().claims()[0].status(),
+            fs_checker::SemanticClaimStatus::Verified
+        );
+
+        let from_json =
+            check_json_with_capabilities(&package_json(&package), None, None, &capabilities);
+        assert_eq!(from_json, in_memory);
+    }
+}
+
+#[test]
+fn semantic_refusals_precede_every_external_callback() {
+    let mut trailing = exact_sum_payload(1, 2);
+    trailing.push(0xff);
+    let mut nan_leaf = Vec::new();
+    nan_leaf.extend_from_slice(&1_u32.to_le_bytes());
+    nan_leaf.push(1);
+    nan_leaf.extend_from_slice(&f64::NAN.to_bits().to_le_bytes());
+    nan_leaf.extend_from_slice(&1.0_f64.to_bits().to_le_bytes());
+    nan_leaf.extend_from_slice(&0_u32.to_le_bytes());
+    let oversized_node_count = (fs_checker::MAX_INTERVAL_NODES as u32 + 1)
+        .to_le_bytes()
+        .to_vec();
+    let mut forward_reference = Vec::new();
+    forward_reference.extend_from_slice(&3_u32.to_le_bytes());
+    forward_reference.push(0);
+    forward_reference.extend_from_slice(&1_i64.to_le_bytes());
+    forward_reference.push(2);
+    forward_reference.extend_from_slice(&2_u32.to_le_bytes());
+    forward_reference.extend_from_slice(&0_u32.to_le_bytes());
+    let mut self_reference = Vec::new();
+    self_reference.extend_from_slice(&2_u32.to_le_bytes());
+    self_reference.push(0);
+    self_reference.extend_from_slice(&1_i64.to_le_bytes());
+    self_reference.push(2);
+    self_reference.extend_from_slice(&1_u32.to_le_bytes());
+    self_reference.extend_from_slice(&0_u32.to_le_bytes());
+    let mut truncated = Vec::new();
+    truncated.extend_from_slice(&1_u32.to_le_bytes());
+    truncated.push(0);
+    truncated.extend_from_slice(&[1, 2, 3]);
+    let mut oversized_dimension = vec![0];
+    oversized_dimension
+        .extend_from_slice(&(fs_checker::MAX_RESIDUAL_DIMENSION as u32 + 1).to_le_bytes());
+    oversized_dimension.extend_from_slice(&1_u32.to_le_bytes());
+    let mut residual_extra_element = residual_1x1_payload(0.0, 0.0, 0.0);
+    residual_extra_element.extend_from_slice(&0.0_f64.to_bits().to_le_bytes());
+
+    let fixtures = [
+        (
+            SemanticWitness::new(
+                fs_checker::EXACT_INTERVAL_FAMILY,
+                1,
+                exact_sum_payload(1, 2),
+            ),
+            4.0,
+            4.0,
+            SemanticFailureKind::ClaimMismatch,
+            "semantic-claim-mismatch",
+        ),
+        (
+            SemanticWitness::new(
+                fs_checker::BOUNDED_LINF_RESIDUAL_FAMILY,
+                1,
+                residual_1x1_payload(2.0, 3.0, 5.0),
+            ),
+            0.0,
+            0.0,
+            SemanticFailureKind::ClaimMismatch,
+            "semantic-claim-mismatch",
+        ),
+        (
+            SemanticWitness::new("frankensim/unknown-proof", 1, exact_sum_payload(1, 2)),
+            3.0,
+            3.0,
+            SemanticFailureKind::UnknownFamily,
+            "semantic-unknown-family",
+        ),
+        (
+            SemanticWitness::new(
+                fs_checker::EXACT_INTERVAL_FAMILY,
+                2,
+                exact_sum_payload(1, 2),
+            ),
+            3.0,
+            3.0,
+            SemanticFailureKind::UnsupportedVersion,
+            "semantic-unsupported-version",
+        ),
+        (
+            SemanticWitness::new(fs_checker::EXACT_INTERVAL_FAMILY, 1, trailing),
+            3.0,
+            3.0,
+            SemanticFailureKind::MalformedPayload,
+            "semantic-malformed-witness",
+        ),
+        (
+            SemanticWitness::new(
+                fs_checker::BOUNDED_LINF_RESIDUAL_FAMILY,
+                1,
+                residual_1x1_payload(f64::NAN, 0.0, 0.0),
+            ),
+            0.0,
+            0.0,
+            SemanticFailureKind::MalformedPayload,
+            "semantic-malformed-witness",
+        ),
+        (
+            SemanticWitness::new(fs_checker::EXACT_INTERVAL_FAMILY, 1, nan_leaf),
+            0.0,
+            1.0,
+            SemanticFailureKind::MalformedPayload,
+            "semantic-malformed-witness",
+        ),
+        (
+            SemanticWitness::new(
+                fs_checker::EXACT_INTERVAL_FAMILY,
+                1,
+                exact_division_payload(1, 0),
+            ),
+            0.0,
+            0.0,
+            SemanticFailureKind::MalformedPayload,
+            "semantic-malformed-witness",
+        ),
+        (
+            SemanticWitness::new(fs_checker::EXACT_INTERVAL_FAMILY, 1, oversized_node_count),
+            0.0,
+            0.0,
+            SemanticFailureKind::ResourceLimit,
+            "semantic-resource-limit",
+        ),
+        (
+            SemanticWitness::new(fs_checker::EXACT_INTERVAL_FAMILY, 1, forward_reference),
+            1.0,
+            1.0,
+            SemanticFailureKind::MalformedPayload,
+            "semantic-malformed-witness",
+        ),
+        (
+            SemanticWitness::new(fs_checker::EXACT_INTERVAL_FAMILY, 1, self_reference),
+            1.0,
+            1.0,
+            SemanticFailureKind::MalformedPayload,
+            "semantic-malformed-witness",
+        ),
+        (
+            SemanticWitness::new(fs_checker::EXACT_INTERVAL_FAMILY, 1, truncated),
+            1.0,
+            1.0,
+            SemanticFailureKind::MalformedPayload,
+            "semantic-malformed-witness",
+        ),
+        (
+            SemanticWitness::new(
+                fs_checker::BOUNDED_LINF_RESIDUAL_FAMILY,
+                1,
+                oversized_dimension,
+            ),
+            0.0,
+            0.0,
+            SemanticFailureKind::ResourceLimit,
+            "semantic-resource-limit",
+        ),
+        (
+            SemanticWitness::new(
+                fs_checker::BOUNDED_LINF_RESIDUAL_FAMILY,
+                1,
+                residual_extra_element,
+            ),
+            0.0,
+            f64::from_bits(3),
+            SemanticFailureKind::MalformedPayload,
+            "semantic-malformed-witness",
+        ),
+    ];
+
+    for (witness, lo, hi, failure_kind, finding_kind) in fixtures {
+        let package = portable_package(witness, lo, hi);
+        let callbacks = UnexpectedCallbacks::default();
+        let capabilities = all_unexpected_capabilities(&callbacks);
+        let report =
+            check_with_capabilities(&package, Some(package_root(&package)), None, &capabilities);
+        callbacks.assert_never_called();
+        assert_eq!(report.integrity_status(), IntegrityStatus::Verified);
+        assert_eq!(report.semantic_status(), SemanticStatus::Refused);
+        assert_eq!(report.origin_status(), OriginStatus::NotRun);
+        assert_eq!(report.breakdown(), &ColorBreakdown::default());
+        assert!(report.receipt().is_none());
+        assert!(report.validate_decision_hash());
+        assert_eq!(report.semantic_report().failures()[0].kind(), failure_kind);
+        assert!(
+            report
+                .findings()
+                .iter()
+                .any(|finding| finding.kind == finding_kind),
+            "missing {finding_kind}: {:?}",
+            report.findings()
+        );
+    }
+}
+
+#[test]
+fn semantic_payload_tamper_with_a_recomputed_root_still_refuses() {
+    let original = portable_package(
+        SemanticWitness::new(
+            fs_checker::EXACT_INTERVAL_FAMILY,
+            1,
+            exact_sum_payload(1, 2),
+        ),
+        3.0,
+        3.0,
+    );
+    let tampered = portable_package(
+        SemanticWitness::new(
+            fs_checker::EXACT_INTERVAL_FAMILY,
+            1,
+            exact_sum_payload(1, 3),
+        ),
+        3.0,
+        3.0,
+    );
+    assert_ne!(package_root(&original), package_root(&tampered));
+
+    let callbacks = UnexpectedCallbacks::default();
+    let capabilities = all_unexpected_capabilities(&callbacks);
+    let expected = package_root(&tampered);
+    let in_memory = check_with_capabilities(&tampered, Some(expected), None, &capabilities);
+    callbacks.assert_never_called();
+    assert_eq!(in_memory.merkle_root(), expected);
+    assert_eq!(in_memory.semantic_status(), SemanticStatus::Refused);
+    assert!(
+        in_memory
+            .findings()
+            .iter()
+            .any(|finding| finding.kind == "semantic-claim-mismatch")
+    );
+
+    let from_json = check_json_with_capabilities(
+        &package_json(&tampered),
+        Some(expected),
+        None,
+        &capabilities,
+    );
+    callbacks.assert_never_called();
+    assert_eq!(from_json, in_memory);
+}
+
+#[test]
+fn aggregate_semantic_operation_budget_refuses_at_limit_plus_one() {
+    // Thirty maximum-size multiplication programs charge 982,830 operations.
+    // The final program charges exactly 17,171 more, so its last hull would
+    // cross the package budget from 1,000,000 to 1,000,001.
+    let maximum_work = exact_one_work_payload(fs_checker::MAX_INTERVAL_NODES - 1, 0);
+    let limit_plus_one_work = exact_one_work_payload(2_146, 2);
+    let mut package = EvidencePackage::new(prov());
+    for index in 0..30 {
+        package = package.with_claim(Claim::from_portable_certificate(
+            format!("operation-budget-{index}"),
+            "bounded exact multiplication work",
+            1.0,
+            1.0,
+            "portable-test/cert",
+            SemanticWitness::new(fs_checker::EXACT_INTERVAL_FAMILY, 1, maximum_work.clone()),
+        ));
+    }
+    package = package.with_claim(Claim::from_portable_certificate(
+        "operation-budget-limit-plus-one",
+        "bounded exact multiplication work",
+        1.0,
+        1.0,
+        "portable-test/cert",
+        SemanticWitness::new(fs_checker::EXACT_INTERVAL_FAMILY, 1, limit_plus_one_work),
+    ));
+
+    let callbacks = UnexpectedCallbacks::default();
+    let report = check_with_capabilities(
+        &package,
+        Some(package_root(&package)),
+        None,
+        &all_unexpected_capabilities(&callbacks),
+    );
+    callbacks.assert_never_called();
+    assert_eq!(report.semantic_status(), SemanticStatus::Refused);
+    assert_eq!(
+        report.semantic_report().operations(),
+        fs_checker::MAX_SEMANTIC_OPERATIONS
+    );
+    assert_eq!(
+        report
+            .semantic_report()
+            .failures()
+            .last()
+            .map(|failure| failure.kind()),
+        Some(SemanticFailureKind::ResourceLimit)
+    );
+    assert!(
+        report
+            .semantic_report()
+            .failures()
+            .last()
+            .is_some_and(|failure| failure.detail().contains("operation limit"))
+    );
+}
+
+#[test]
+fn release_signature_cannot_replay_a_different_semantic_context() {
+    let witness = SemanticWitness::new(
+        fs_checker::EXACT_INTERVAL_FAMILY,
+        1,
+        exact_sum_payload(1, 2),
+    );
+    let package = EvidencePackage::new(prov())
+        .with_claim(
+            Claim::from_portable_certificate(
+                "portable",
+                "portable result",
+                3.0,
+                3.0,
+                "portable-test/cert",
+                witness,
+            )
+            .with_falsifier(passed_falsifier()),
+        )
+        .with_claim(estimated("context-companion"));
+    let source_verifier = PortableSourceVerifier;
+    let capabilities = VerificationCapabilities::deny_all()
+        .with_source_certificates(&source_verifier)
+        .with_falsifiers(&EXACT_FALSIFIER_VERIFIER);
+
+    let replayed = signed_for_release_with_semantic_context(
+        package.clone(),
+        &capabilities,
+        ContentHash([0x42; 32]),
+    );
+    let refused = check_for_release_with_capabilities(
+        &replayed,
+        package_root(&replayed),
+        &ReleaseVerifier,
+        &capabilities,
+    );
+    assert_eq!(refused.semantic_status(), SemanticStatus::Verified);
+    assert_eq!(refused.origin_status(), OriginStatus::Authenticated);
+    assert_capability_refusal(&refused, "signature-invalid");
+
+    let correctly_signed = signed_for_release(package, &capabilities);
+    let admitted = check_for_release_with_capabilities(
+        &correctly_signed,
+        package_root(&correctly_signed),
+        &ReleaseVerifier,
+        &capabilities,
+    );
+    assert!(admitted.release_admitted(), "{:?}", admitted.findings());
+    assert!(admitted.release_independently_verified());
 }
 
 fn mixed_origin_signed_fixture() -> EvidencePackage {
@@ -1402,8 +1968,8 @@ fn release_gate_rejects_derived_validated_anchor_substitution() {
 
 #[test]
 fn the_checker_advertises_its_protocol_version() {
-    assert_eq!(CHECKER_PROTOCOL_VERSION, 5);
-    assert_eq!(fs_checker::CHECKER_SUPPORTED_PACKAGE_FORMAT, 7);
+    assert_eq!(CHECKER_PROTOCOL_VERSION, 6);
+    assert_eq!(fs_checker::CHECKER_SUPPORTED_PACKAGE_FORMAT, 8);
     assert_eq!(
         fs_checker::CHECKER_SUPPORTED_PACKAGE_FORMAT,
         fs_package::FORMAT_VERSION

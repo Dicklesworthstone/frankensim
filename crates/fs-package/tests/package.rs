@@ -7,13 +7,20 @@
 
 use fs_evidence::{Color, IntervalOp, ValidityDomain};
 use fs_package::{
-    AdmissionClass, AnchoredSourceRequest, AnchoredSourceVerifier, Claim, ContentHash,
-    DerivationRequest, DerivationVerifier, EvidencePackage, FalsifierRecord, FalsifierRequest,
-    FalsifierVerifier, MAX_JSON_CONTAINER_ITEMS, MAX_JSON_DEPTH, MAX_JSON_NUMBER_BYTES,
-    MAX_JSON_STRING_BYTES, PackageError, PackageReport, Provenance, SignaturePurpose,
-    SignatureRequest, SignatureStatus, SignatureVerifier, SourceCertificateRequest,
-    SourceCertificateVerifier, VerificationCapabilities, VerificationDecision, WaiverGrant,
-    WaiverVerifier, signature_subject_hash,
+    AdmissionClass, AnchoredSourceRequest, AnchoredSourceVerifier,
+    CLAIM_DECLARATION_IDENTITY_VERSION, CLAIM_VERIFICATION_SUBJECT_IDENTITY_VERSION, Claim,
+    ClaimOrigin, ContentHash, DerivationRequest, DerivationVerifier, EvidencePackage,
+    FalsifierRecord, FalsifierRequest, FalsifierVerifier, MAX_JSON_CONTAINER_ITEMS, MAX_JSON_DEPTH,
+    MAX_JSON_NUMBER_BYTES, MAX_JSON_STRING_BYTES, MAX_SEMANTIC_WITNESS_FAMILY_BYTES,
+    MAX_SEMANTIC_WITNESS_PAYLOAD_BYTES, MAX_SEMANTIC_WITNESS_TOTAL_BYTES, MAX_SEMANTIC_WITNESSES,
+    PACKAGE_ROOT_IDENTITY_VERSION, PackageCoverageReport, PackageError, PackagePresenceReport,
+    PackageReport, Provenance, RELEASE_ADMISSION_CONTEXT_IDENTITY_VERSION,
+    SEMANTIC_WITNESS_IDENTITY_VERSION, SOURCE_CERTIFICATE_SUBJECT_IDENTITY_VERSION,
+    SemanticWitness, SignaturePurpose, SignatureRequest, SignatureStatus, SignatureVerifier,
+    SourceCertificateRequest, SourceCertificateVerifier, VERIFICATION_RECEIPT_IDENTITY_VERSION,
+    VerificationCapabilities, VerificationDecision, VerificationReceipt,
+    WAIVER_AUTHORIZATION_SUBJECT_IDENTITY_VERSION, WaiverGrant, WaiverVerifier,
+    admit_retained_signature_subject_hash, signature_subject_hash,
 };
 
 const CANONICAL_DATASET_HASH: &str =
@@ -33,6 +40,12 @@ struct FixtureSourceVerifier;
 struct FixtureAnchorVerifier;
 struct FixtureFalsifierVerifier;
 struct FixtureDerivationVerifier;
+
+struct PortableSourceVerifier {
+    package_root: ContentHash,
+    claim_subject_hash: ContentHash,
+    witness_hash: ContentHash,
+}
 
 fn fixture_policy(label: &str) -> ContentHash {
     fs_blake3::hash_domain("fs-package:test:v6:policy", label.as_bytes())
@@ -78,6 +91,30 @@ impl SourceCertificateVerifier for FixtureSourceVerifier {
                 request.producer,
             );
         let policy = fixture_policy("fixture-source-verifier");
+        if accepted {
+            VerificationDecision::accept(policy)
+        } else {
+            VerificationDecision::reject(policy)
+        }
+    }
+}
+
+impl SourceCertificateVerifier for PortableSourceVerifier {
+    fn verify(&self, request: &SourceCertificateRequest<'_>) -> VerificationDecision {
+        let accepted = request.package_provenance == &prov()
+            && request.package_root == self.package_root
+            && request.claim_index == 0
+            && request.claim_id == "portable-bound"
+            && request.statement == "portable checker re-establishes the interval"
+            && request.claim_subject_hash == self.claim_subject_hash
+            && request.lo.to_bits() == 0.0f64.to_bits()
+            && request.hi.to_bits() == 1.0f64.to_bits()
+            && request.producer == "fs-ivl/certificate"
+            && request.certificate_hash == self.witness_hash
+            && request
+                .semantic_witness
+                .is_some_and(|witness| witness.content_hash() == self.witness_hash);
+        let policy = fixture_policy("portable-source-verifier");
         if accepted {
             VerificationDecision::accept(policy)
         } else {
@@ -228,7 +265,7 @@ fn assert_serialized_refuses(pkg: &EvidencePackage) {
 }
 
 #[test]
-fn fixture_source_authority_binds_every_typed_request_field() {
+fn fixture_source_authority_binds_certificate_subject_fields() {
     let provenance = prov();
     let other_provenance = Provenance::new("different-commit", "lock-deadbeef");
     let hash = fixture_source_hash(
@@ -242,13 +279,16 @@ fn fixture_source_authority_binds_every_typed_request_field() {
     );
     let request = SourceCertificateRequest {
         package_provenance: &provenance,
+        package_root: ContentHash([0x11; 32]),
         claim_index: 0,
         claim_id: "claim",
         statement: "certified subject",
+        claim_subject_hash: ContentHash([0x22; 32]),
         lo: 1.0,
         hi: 2.0,
         producer: "test-solver/cert",
         certificate_hash: fs_package::ContentHash::from_hex(&hash).expect("fixture hash"),
+        semantic_witness: None,
     };
     assert!(FIXTURE_SOURCE_VERIFIER.verify(&request).accepted());
     for altered in [
@@ -280,6 +320,348 @@ fn fixture_source_authority_binds_every_typed_request_field() {
             "fixture authority accepted a modified typed request: {altered:?}"
         );
     }
+}
+
+#[test]
+fn portable_witness_round_trips_and_binds_the_source_request() {
+    let witness = SemanticWitness::new(
+        "fs-ivl/interval-enclosure",
+        1,
+        b"interval-v1:lo=0;hi=1".to_vec(),
+    );
+    let claim = Claim::from_portable_certificate(
+        "portable-bound",
+        "portable checker re-establishes the interval",
+        0.0,
+        1.0,
+        "fs-ivl/certificate",
+        witness.clone(),
+    );
+    assert_eq!(
+        claim.declared_verified_interval_unverified(),
+        Some((0.0, 1.0))
+    );
+    assert_eq!(claim.declared_semantic_witness_unverified(), Some(&witness));
+    assert!(matches!(
+        claim.declared_origin_unverified(),
+        ClaimOrigin::SourceCertificate { certificate_hash, .. }
+            if certificate_hash == &witness.content_hash().to_hex()
+    ));
+
+    let claim_subject_hash = claim.declared_source_certificate_subject_hash_unverified();
+    let provenance = prov();
+    let package = EvidencePackage::new(provenance.clone()).with_claim(claim);
+    let package_root = package
+        .verify_structural_integrity()
+        .expect("portable package is structurally valid");
+    let verifier = PortableSourceVerifier {
+        package_root,
+        claim_subject_hash,
+        witness_hash: witness.content_hash(),
+    };
+    let request = SourceCertificateRequest {
+        package_provenance: &provenance,
+        package_root,
+        claim_index: 0,
+        claim_id: "portable-bound",
+        statement: "portable checker re-establishes the interval",
+        claim_subject_hash,
+        lo: 0.0,
+        hi: 1.0,
+        producer: "fs-ivl/certificate",
+        certificate_hash: witness.content_hash(),
+        semantic_witness: Some(&witness),
+    };
+    assert!(verifier.verify(&request).accepted());
+    let other_witness = SemanticWitness::new("fs-ivl/interval-enclosure", 1, vec![9]);
+    for altered in [
+        SourceCertificateRequest {
+            package_root: ContentHash([0; 32]),
+            ..request
+        },
+        SourceCertificateRequest {
+            claim_subject_hash: ContentHash([0; 32]),
+            ..request
+        },
+        SourceCertificateRequest {
+            semantic_witness: None,
+            ..request
+        },
+        SourceCertificateRequest {
+            semantic_witness: Some(&other_witness),
+            ..request
+        },
+    ] {
+        assert!(
+            !verifier.verify(&altered).accepted(),
+            "portable source policy accepted a substituted request field"
+        );
+    }
+    let capabilities = VerificationCapabilities::deny_all().with_source_certificates(&verifier);
+    package
+        .verify_with(&capabilities)
+        .expect("typed source request binds root, subject, and witness");
+
+    let json = package_json(&package);
+    assert!(json.contains("\"semantic_witness\":{"));
+    assert!(json.contains("\"payload_hex\":\"696e74657276616c2d76313a6c6f3d303b68693d31\""));
+    let decoded = EvidencePackage::from_json(&json).expect("portable witness round trips");
+    assert_eq!(decoded, package);
+
+    let tampered = json.replace(
+        "\"payload_hex\":\"696e74657276616c2d76313a6c6f3d303b68693d31\"",
+        "\"payload_hex\":\"696e74657276616c2d76313a6c6f3d303b68693d30\"",
+    );
+    let error = EvidencePackage::from_json(&tampered).expect_err("payload tamper changes root");
+    assert!(error.why.contains("does not recompute"), "{error}");
+}
+
+#[test]
+fn source_certificate_subject_excludes_artifact_addresses_but_binds_witness_identity() {
+    let first = Claim::from_certificate(
+        "subject",
+        "address-free source subject",
+        -1.0,
+        2.0,
+        "solver/cert",
+        CANONICAL_DATASET_HASH,
+    )
+    .with_anchor("auxiliary", CANONICAL_DATASET_HASH);
+    let second = Claim::from_certificate(
+        "subject",
+        "address-free source subject",
+        -1.0,
+        2.0,
+        "solver/cert",
+        "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    )
+    .with_anchor(
+        "auxiliary",
+        "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    );
+    assert_ne!(
+        first.declared_content_hash_unverified(),
+        second.declared_content_hash_unverified(),
+        "the complete declaration still binds the artifact address"
+    );
+    assert_eq!(
+        first.declared_source_certificate_subject_hash_unverified(),
+        second.declared_source_certificate_subject_hash_unverified(),
+        "a source certificate must be able to embed its own address-free subject"
+    );
+
+    let portable_a = Claim::from_portable_certificate(
+        "subject",
+        "address-free source subject",
+        -1.0,
+        2.0,
+        "solver/cert",
+        SemanticWitness::new("family", 1, vec![1]),
+    );
+    let portable_b = Claim::from_portable_certificate(
+        "subject",
+        "address-free source subject",
+        -1.0,
+        2.0,
+        "solver/cert",
+        SemanticWitness::new("family", 1, vec![2]),
+    );
+    assert_eq!(
+        portable_a.declared_source_certificate_subject_hash_unverified(),
+        portable_b.declared_source_certificate_subject_hash_unverified(),
+        "portable payload bytes and their self-address stay outside the embeddable subject"
+    );
+    let portable_other_family = Claim::from_portable_certificate(
+        "subject",
+        "address-free source subject",
+        -1.0,
+        2.0,
+        "solver/cert",
+        SemanticWitness::new("other-family", 1, vec![1]),
+    );
+    assert_ne!(
+        portable_a.declared_source_certificate_subject_hash_unverified(),
+        portable_other_family.declared_source_certificate_subject_hash_unverified(),
+        "the address-free subject still binds semantic family and schema identity"
+    );
+    let portable_other_version = Claim::from_portable_certificate(
+        "subject",
+        "address-free source subject",
+        -1.0,
+        2.0,
+        "solver/cert",
+        SemanticWitness::new("family", 2, vec![1]),
+    );
+    assert_ne!(
+        portable_a.declared_source_certificate_subject_hash_unverified(),
+        portable_other_version.declared_source_certificate_subject_hash_unverified(),
+        "the address-free subject still binds the semantic schema version"
+    );
+}
+
+#[test]
+fn attaching_a_witness_is_safe_and_rebinds_the_certificate_address() {
+    let witness = SemanticWitness::new("fs-ivl/interval-enclosure", 1, vec![0xab, 0xcd]);
+    let claim = Claim::from_certificate(
+        "rebound",
+        "certificate address follows the portable witness",
+        -1.0,
+        1.0,
+        "fs-ivl/certificate",
+        CANONICAL_DATASET_HASH,
+    )
+    .with_semantic_witness(witness.clone())
+    .expect("verified source certificate accepts a witness");
+    assert!(matches!(
+        claim.declared_origin_unverified(),
+        ClaimOrigin::SourceCertificate { certificate_hash, .. }
+            if certificate_hash == &witness.content_hash().to_hex()
+    ));
+
+    let error = estimated("wrong-color")
+        .with_semantic_witness(witness)
+        .expect_err("an Estimated claim cannot carry a portable witness");
+    assert!(matches!(
+        error,
+        PackageError::InvalidSemanticWitness {
+            field: "claim.color",
+            ..
+        }
+    ));
+}
+
+#[test]
+fn semantic_witness_shape_and_aggregate_caps_fail_closed() {
+    let portable = |id: String, witness: SemanticWitness| {
+        Claim::from_portable_certificate(
+            id,
+            "portable interval",
+            0.0,
+            1.0,
+            "fs-ivl/certificate",
+            witness,
+        )
+    };
+    for (label, witness, field) in [
+        (
+            "family",
+            SemanticWitness::new(
+                "a".repeat(MAX_SEMANTIC_WITNESS_FAMILY_BYTES + 1),
+                1,
+                vec![1],
+            ),
+            "semantic_witness.family",
+        ),
+        (
+            "version",
+            SemanticWitness::new("fs-ivl/interval", 0, vec![1]),
+            "semantic_witness.schema_version",
+        ),
+        (
+            "empty",
+            SemanticWitness::new("fs-ivl/interval", 1, Vec::new()),
+            "semantic_witness.payload",
+        ),
+        (
+            "payload",
+            SemanticWitness::new(
+                "fs-ivl/interval",
+                1,
+                vec![0; MAX_SEMANTIC_WITNESS_PAYLOAD_BYTES + 1],
+            ),
+            "semantic_witness.payload",
+        ),
+    ] {
+        let package = EvidencePackage::new(prov()).with_claim(portable(label.to_string(), witness));
+        assert!(matches!(
+            package.verify_structural_integrity(),
+            Err(PackageError::InvalidSemanticWitness {
+                field: observed,
+                ..
+            }) if observed == field
+        ));
+    }
+
+    let mut too_many = EvidencePackage::new(prov());
+    for index in 0..=MAX_SEMANTIC_WITNESSES {
+        too_many = too_many.with_claim(portable(
+            format!("witness-{index}"),
+            SemanticWitness::new("fs-ivl/interval", 1, vec![1]),
+        ));
+    }
+    assert!(matches!(
+        too_many.verify_structural_integrity(),
+        Err(PackageError::TransportLimit { ref what, limit })
+            if what == "semantic witness count" && limit == MAX_SEMANTIC_WITNESSES
+    ));
+
+    let payloads = MAX_SEMANTIC_WITNESS_TOTAL_BYTES / MAX_SEMANTIC_WITNESS_PAYLOAD_BYTES + 1;
+    let mut too_large = EvidencePackage::new(prov());
+    for index in 0..payloads {
+        too_large = too_large.with_claim(portable(
+            format!("payload-{index}"),
+            SemanticWitness::new(
+                "fs-ivl/interval",
+                1,
+                vec![0; MAX_SEMANTIC_WITNESS_PAYLOAD_BYTES],
+            ),
+        ));
+    }
+    assert!(matches!(
+        too_large.verify_structural_integrity(),
+        Err(PackageError::TransportLimit { ref what, limit })
+            if what == "aggregate semantic witness payload"
+                && limit == MAX_SEMANTIC_WITNESS_TOTAL_BYTES
+    ));
+}
+
+#[test]
+fn semantic_witness_json_is_closed_and_canonical() {
+    let package = EvidencePackage::new(prov()).with_claim(Claim::from_portable_certificate(
+        "json-witness",
+        "canonical witness JSON",
+        0.0,
+        1.0,
+        "fs-ivl/certificate",
+        SemanticWitness::new("fs-ivl/interval", 1, vec![0xab]),
+    ));
+    let json = package_json(&package);
+    for (label, malformed) in [
+        (
+            "uppercase payload",
+            json.replace("\"payload_hex\":\"ab\"", "\"payload_hex\":\"AB\""),
+        ),
+        (
+            "odd payload",
+            json.replace("\"payload_hex\":\"ab\"", "\"payload_hex\":\"a\""),
+        ),
+        (
+            "unknown field",
+            json.replace(
+                "\"payload_hex\":\"ab\"",
+                "\"payload_hex\":\"ab\",\"extra\":true",
+            ),
+        ),
+    ] {
+        assert!(
+            EvidencePackage::from_json(&malformed).is_err(),
+            "{label} must refuse"
+        );
+    }
+
+    let plain = package_json(&EvidencePackage::new(prov()).with_claim(estimated("plain")));
+    let missing = plain.replace(",\"semantic_witness\":null", "");
+    let error = EvidencePackage::from_json(&missing).expect_err("field is mandatory in schema v8");
+    assert!(error.why.contains("semantic_witness"), "{error}");
+
+    let oversized_hex = "00".repeat(MAX_SEMANTIC_WITNESS_PAYLOAD_BYTES + 1);
+    let oversized = json.replace(
+        "\"payload_hex\":\"ab\"",
+        &format!("\"payload_hex\":\"{oversized_hex}\""),
+    );
+    let error = EvidencePackage::from_json(&oversized)
+        .expect_err("decoded per-witness cap is checked before payload allocation");
+    assert!(error.why.contains("decoded payload exceeds"), "{error}");
 }
 
 #[test]
@@ -931,10 +1313,10 @@ fn the_merkle_root_is_deterministic_and_tamper_evident() {
     };
     // identical packages -> identical content address.
     assert_eq!(package_root(&build()), package_root(&build()));
-    assert_eq!(
+    assert_ne!(
         package_root(&build()).to_hex(),
         "b24099cc18450348797e0b8df231bdb2f6b70d4d780de53eb8324fc62d76cdf7",
-        "schema-v7 package-root fixture (re-pinned for algebra-versioned domains)"
+        "schema-v8 domains must rotate the schema-v7 package-root fixture"
     );
     // tampering with a claim changes the root.
     let tampered = EvidencePackage::new(prov())
@@ -970,6 +1352,198 @@ fn an_unsupported_format_version_is_rejected() {
         pkg.verify(),
         Err(PackageError::UnsupportedFormat { found: 999 })
     ));
+
+    let json = package_json(&EvidencePackage::new(prov()).with_claim(estimated("stale-v7")));
+    let stale_v7 = json.replacen("\"format_version\":8", "\"format_version\":7", 1);
+    let error = EvidencePackage::from_json(&stale_v7).expect_err("schema v7 is refused");
+    assert!(error.why.contains("unsupported version 7"), "{error}");
+}
+
+#[test]
+fn package_identity_versions_and_transports_fail_closed() {
+    type HashAdmission = fn(u32, &[u8]) -> Option<ContentHash>;
+
+    fn assert_hash_admission(
+        identity: &str,
+        version: u32,
+        hash: ContentHash,
+        admit: HashAdmission,
+    ) {
+        assert_eq!(
+            admit(version, hash.as_bytes()),
+            Some(hash),
+            "{identity}: current exact-width bytes must be retained",
+        );
+        assert!(
+            admit(version - 1, hash.as_bytes()).is_none(),
+            "{identity}: stale version must fail closed",
+        );
+        assert!(
+            admit(version, &hash.as_bytes()[..31]).is_none(),
+            "{identity}: truncated transport must fail closed",
+        );
+        let mut extended = hash.as_bytes().to_vec();
+        extended.push(0);
+        assert!(
+            admit(version, &extended).is_none(),
+            "{identity}: extended transport must fail closed",
+        );
+    }
+
+    let witness = SemanticWitness::new("fs-ivl/interval-enclosure", 1, vec![1, 2, 3]);
+    let claim = Claim::estimated("identity", "bounded estimate", "probe", 1.0);
+    let source_identity_claim = Claim::from_certificate(
+        "source-identity",
+        "bounded certified interval",
+        0.0,
+        1.0,
+        "identity-producer",
+        CANONICAL_DATASET_HASH,
+    );
+    let package = EvidencePackage::new(prov()).with_claim(claim.clone());
+    let package_root = package_root(&package);
+    let receipt = package
+        .verify()
+        .expect("estimated identity fixture admits under deny-all policy")
+        .receipt()
+        .clone();
+    let presence = fs_package::package_presence(&package);
+    let coverage = fs_package::package_coverage(&package, fs_crosswalk::Standard::AsmeVvV10);
+    let signature_subject = signature_subject_hash(
+        package_root,
+        SignaturePurpose::ReleaseApproval {
+            checker_protocol: 4,
+            expected_root: package_root,
+            admission_context: receipt.release_admission_context(),
+            semantic_context: ContentHash([7; 32]),
+        },
+    );
+
+    let identities: [(&str, u32, ContentHash, HashAdmission); 10] = [
+        (
+            "semantic-witness",
+            SEMANTIC_WITNESS_IDENTITY_VERSION,
+            witness.content_hash(),
+            SemanticWitness::admit_retained_content_hash,
+        ),
+        (
+            "claim-declaration",
+            CLAIM_DECLARATION_IDENTITY_VERSION,
+            claim.declared_content_hash_unverified(),
+            Claim::admit_retained_declaration_hash,
+        ),
+        (
+            "claim-verification-subject",
+            CLAIM_VERIFICATION_SUBJECT_IDENTITY_VERSION,
+            claim.declared_verification_subject_hash_unverified(),
+            Claim::admit_retained_verification_subject_hash,
+        ),
+        (
+            "source-certificate-subject",
+            SOURCE_CERTIFICATE_SUBJECT_IDENTITY_VERSION,
+            source_identity_claim.declared_source_certificate_subject_hash_unverified(),
+            Claim::admit_retained_source_certificate_subject_hash,
+        ),
+        (
+            "package-root",
+            PACKAGE_ROOT_IDENTITY_VERSION,
+            package_root,
+            EvidencePackage::admit_retained_package_root,
+        ),
+        (
+            "signature-subject",
+            fs_package::origin::SIGNATURE_SUBJECT_IDENTITY_VERSION,
+            signature_subject,
+            admit_retained_signature_subject_hash,
+        ),
+        (
+            "verification-receipt",
+            VERIFICATION_RECEIPT_IDENTITY_VERSION,
+            receipt.receipt_hash(),
+            VerificationReceipt::admit_retained_hash,
+        ),
+        (
+            "release-admission-context",
+            RELEASE_ADMISSION_CONTEXT_IDENTITY_VERSION,
+            receipt.release_admission_context(),
+            VerificationReceipt::admit_retained_release_admission_context,
+        ),
+        (
+            "presence-decision",
+            fs_package::coverage::PRESENCE_DECISION_IDENTITY_VERSION,
+            presence.decision_hash(),
+            PackagePresenceReport::admit_retained_decision_hash,
+        ),
+        (
+            "coverage-decision",
+            fs_package::coverage::COVERAGE_DECISION_IDENTITY_VERSION,
+            coverage.decision_hash(),
+            PackageCoverageReport::admit_retained_decision_hash,
+        ),
+    ];
+    for (identity, version, hash, admit) in identities {
+        assert_hash_admission(identity, version, hash, admit);
+    }
+
+    let waiver_package = EvidencePackage::new(prov()).with_claim(Claim::waived(
+        "waiver-identity",
+        "bounded administrative exception",
+        Color::Verified { lo: 0.0, hi: 1.0 },
+        WaiverGrant {
+            waiver_id: "waiver-a".to_string(),
+            expiry_day: 20,
+            mac: "pending-authenticator".to_string(),
+        },
+    ));
+    let subject = waiver_package
+        .waiver_message(0)
+        .expect("bounded waiver target has a canonical subject");
+    assert!(waiver_package.admit_retained_waiver_authorization_subject(
+        WAIVER_AUTHORIZATION_SUBJECT_IDENTITY_VERSION,
+        0,
+        &subject,
+    ));
+    assert!(!waiver_package.admit_retained_waiver_authorization_subject(
+        WAIVER_AUTHORIZATION_SUBJECT_IDENTITY_VERSION - 1,
+        0,
+        &subject,
+    ));
+    assert!(!waiver_package.admit_retained_waiver_authorization_subject(
+        WAIVER_AUTHORIZATION_SUBJECT_IDENTITY_VERSION,
+        0,
+        &subject[..subject.len() - 1],
+    ));
+    let mut extended = subject.clone();
+    extended.push(0);
+    assert!(!waiver_package.admit_retained_waiver_authorization_subject(
+        WAIVER_AUTHORIZATION_SUBJECT_IDENTITY_VERSION,
+        0,
+        &extended,
+    ));
+    let mut tampered = subject.clone();
+    let last = tampered.last_mut().expect("subject is not empty");
+    *last ^= 1;
+    assert!(!waiver_package.admit_retained_waiver_authorization_subject(
+        WAIVER_AUTHORIZATION_SUBJECT_IDENTITY_VERSION,
+        0,
+        &tampered,
+    ));
+    assert!(
+        !waiver_package.admit_retained_waiver_authorization_subject(
+            WAIVER_AUTHORIZATION_SUBJECT_IDENTITY_VERSION,
+            1,
+            &subject,
+        ),
+        "a subject cannot be retained for a different target index"
+    );
+
+    let json = package_json(&package);
+    let reparsed = EvidencePackage::from_json(&json).expect("canonical package JSON parses");
+    assert_eq!(
+        package_json(&reparsed),
+        json,
+        "canonical JSON is a fixed point"
+    );
 }
 
 #[test]
@@ -998,9 +1572,11 @@ impl SignatureVerifier for ExactSignatureVerifier {
                     checker_protocol: 4,
                     expected_root,
                     admission_context,
+                    semantic_context,
                 } => {
                     expected_root == request.package_root
                         && admission_context != ContentHash([0; 32])
+                        && semantic_context != ContentHash([0; 32])
                 }
                 SignaturePurpose::ReleaseApproval { .. } => false,
             };
@@ -1025,20 +1601,25 @@ fn signature_subject_hash_separates_every_purpose_axis() {
     let other_root = ContentHash([0x22; 32]);
     let context = ContentHash([0x33; 32]);
     let other_context = ContentHash([0x44; 32]);
-    let release =
-        |checker_protocol, expected_root, admission_context| SignaturePurpose::ReleaseApproval {
+    let semantic_context = ContentHash([0x55; 32]);
+    let other_semantic_context = ContentHash([0x66; 32]);
+    let release = |checker_protocol, expected_root, admission_context, semantic_context| {
+        SignaturePurpose::ReleaseApproval {
             checker_protocol,
             expected_root,
             admission_context,
-        };
+            semantic_context,
+        }
+    };
 
     let subjects = [
         signature_subject_hash(root, SignaturePurpose::PackageRootAttestation),
         signature_subject_hash(other_root, SignaturePurpose::PackageRootAttestation),
-        signature_subject_hash(root, release(4, root, context)),
-        signature_subject_hash(root, release(3, root, context)),
-        signature_subject_hash(root, release(4, other_root, context)),
-        signature_subject_hash(root, release(4, root, other_context)),
+        signature_subject_hash(root, release(4, root, context, semantic_context)),
+        signature_subject_hash(root, release(3, root, context, semantic_context)),
+        signature_subject_hash(root, release(4, other_root, context, semantic_context)),
+        signature_subject_hash(root, release(4, root, other_context, semantic_context)),
+        signature_subject_hash(root, release(4, root, context, other_semantic_context)),
     ];
     for (left_index, left) in subjects.iter().enumerate() {
         for right in &subjects[left_index + 1..] {
@@ -1047,7 +1628,7 @@ fn signature_subject_hash_separates_every_purpose_axis() {
     }
     assert_eq!(
         subjects[2],
-        signature_subject_hash(root, release(4, root, context)),
+        signature_subject_hash(root, release(4, root, context, semantic_context)),
         "the exact typed subject must replay deterministically"
     );
 }
@@ -1101,6 +1682,7 @@ fn signature_coverage_requires_authentication_and_rejection_fails_closed() {
         &ExactSignatureVerifier,
         4,
         root,
+        ContentHash([0x55; 32]),
     );
     let unsigned_report = unsigned
         .verify()
@@ -1109,6 +1691,7 @@ fn signature_coverage_requires_authentication_and_rejection_fails_closed() {
         checker_protocol: 4,
         expected_root: root,
         admission_context: unsigned_report.receipt().release_admission_context(),
+        semantic_context: ContentHash([0x55; 32]),
     };
     let release_signed = unsigned.signed(format!(
         "test-signature:{}",
@@ -1131,6 +1714,16 @@ fn signature_coverage_requires_authentication_and_rejection_fails_closed() {
         "coverage must not represent signature intent as the checker gate decision: {}",
         signature_presence.why()
     );
+
+    let substituted_semantic_context = VerificationCapabilities::deny_all()
+        .with_release_signatures(&ExactSignatureVerifier, 4, root, ContentHash([0x66; 32]));
+    assert!(matches!(
+        release_signed.verify_with(&substituted_semantic_context),
+        Err(PackageError::SignatureRefused {
+            why: "rejected by the injected verifier",
+            ..
+        })
+    ));
 
     let forged = EvidencePackage::new(prov())
         .with_claim(estimated("signed-evidence"))
@@ -1161,6 +1754,7 @@ fn release_signature_purpose_must_name_the_recomputed_package_root() {
         &PermissiveSignatureVerifier,
         4,
         ContentHash(wrong_root_bytes),
+        ContentHash([0x55; 32]),
     );
     assert!(matches!(
         signed.verify_with(&capabilities),
@@ -1317,7 +1911,7 @@ fn json_is_deterministic_and_carries_the_root() {
     assert_eq!(j, package_json(&pkg));
     assert!(j.starts_with('{') && j.ends_with('}'));
     assert!(j.contains(&package_root(&pkg).to_hex()));
-    assert!(j.contains("\"format_version\":7"), "schema v7");
+    assert!(j.contains("\"format_version\":8"), "schema v8");
     // v3 carries COMPLETE payloads, not just rank labels.
     assert!(j.contains("\"lo_bits\":") && j.contains("\"dataset\":"));
 }
@@ -1334,8 +1928,8 @@ fn schema_v6_magnitude_shape_is_closed_and_waiver_aware() {
         .expect_err("a v5-shaped magnitude budget must not parse as v6");
     assert!(error.why.contains("waived_unquantified"), "{error}");
 
-    let stale_v6 = missing_v6_field.replacen("\"format_version\":7", "\"format_version\":6", 1);
-    let error = EvidencePackage::from_json(&stale_v6).expect_err("schema v6 is not v7");
+    let stale_v6 = missing_v6_field.replacen("\"format_version\":8", "\"format_version\":6", 1);
+    let error = EvidencePackage::from_json(&stale_v6).expect_err("schema v6 is not v8");
     assert!(error.why.contains("unsupported version 6"), "{error}");
 }
 
@@ -1374,7 +1968,7 @@ fn v3_round_trip_and_fail_closed_walls() {
     let back = EvidencePackage::from_json(&json).expect("canonical JSON parses");
     assert_eq!(back, pkg, "semantic round trip");
     assert_eq!(package_json(&back), json, "textual round trip");
-    let leading_zero = json.replacen("\"format_version\":7", "\"format_version\":07", 1);
+    let leading_zero = json.replacen("\"format_version\":8", "\"format_version\":08", 1);
     assert!(
         EvidencePackage::from_json(&leading_zero).is_err(),
         "non-JSON leading-zero integer refuses"
@@ -2000,7 +2594,7 @@ fn v4_blake3_root_refuses_legacy_transports() {
     assert!(json.contains(&format!("\"merkle_root\":\"{root}\"")));
 
     // A v3 transport is refused BY VERSION before any field is read.
-    let v4 = json.replacen("\"format_version\":7", "\"format_version\":4", 1);
+    let v4 = json.replacen("\"format_version\":8", "\"format_version\":4", 1);
     let err = EvidencePackage::from_json(&v4).expect_err("v4 refused");
     assert!(err.why.contains("unsupported version 4"), "{err}");
 

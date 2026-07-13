@@ -15,12 +15,27 @@
 //! CANNOT run a solve. It carries its own protocol version
 //! ([`CHECKER_PROTOCOL_VERSION`]) because it is distributed independently.
 //!
-//! What it re-verifies: format support + per-claim completeness (delegated to
-//! [`EvidencePackage::verify_with`]), the content address (Merkle root,
-//! optionally against an expected value — tamper detection), and signature
-//! validity when an external capability is supplied. It renders a by-color
+//! What it re-verifies, in authority order: the content address (optionally
+//! against an expected value), callback-free package structure, every attached
+//! portable semantic witness through a closed built-in registry, then external
+//! origins and signatures through explicit capabilities. It renders a by-color
 //! budget pie only after package verification succeeds. Everything is
 //! deterministic for deterministic injected capabilities.
+
+mod semantic;
+
+pub use semantic::{
+    BOUNDED_LINF_RESIDUAL_FAMILY, EXACT_INTERVAL_FAMILY, INITIAL_SEMANTIC_SCHEMA_VERSION,
+    MAX_INTERVAL_NODES, MAX_RESIDUAL_DIMENSION, MAX_RESIDUAL_MATRIX_ENTRIES,
+    MAX_SEMANTIC_OPERATIONS, MAX_SEMANTIC_PAYLOAD_BYTES, MAX_SEMANTIC_WITNESS_BYTES,
+    MAX_SEMANTIC_WITNESSES, SEMANTIC_IMPLEMENTATION_VERSION, SEMANTIC_PLUGIN_IDENTITY_DOMAIN,
+    SEMANTIC_PLUGIN_IDENTITY_VERSION, SEMANTIC_REGISTRY_IDENTITY_DOMAIN,
+    SEMANTIC_REGISTRY_IDENTITY_VERSION, SEMANTIC_REPORT_IDENTITY_DOMAIN,
+    SEMANTIC_REPORT_IDENTITY_VERSION, SemanticClaimReceipt, SemanticClaimStatus, SemanticFailure,
+    SemanticFailureKind, SemanticPluginDescriptor, SemanticReport, SemanticStatus,
+    admit_retained_semantic_registry_fingerprint, semantic_plugin_registry,
+    semantic_registry_fingerprint, verify_portable_semantics,
+};
 
 pub use fs_package::{
     AdmissionClass, AdmissionOriginKind, AnchoredSourceRequest, AnchoredSourceVerifier,
@@ -36,15 +51,52 @@ pub use fs_package::{
 };
 
 /// The checker's own protocol version (it is distributed independently).
-pub const CHECKER_PROTOCOL_VERSION: u32 = 5;
+pub const CHECKER_PROTOCOL_VERSION: u32 = 6;
 
 /// The one evidence-package format understood by this checker protocol.
 ///
 /// Keep this as an explicit protocol literal rather than deriving it from
 /// `fs-package`: a package-format change must make this crate fail to compile
 /// until the independently distributed checker ABI is reviewed and versioned.
-pub const CHECKER_SUPPORTED_PACKAGE_FORMAT: u32 = 7;
+pub const CHECKER_SUPPORTED_PACKAGE_FORMAT: u32 = 8;
 const _: () = assert!(CHECKER_SUPPORTED_PACKAGE_FORMAT == fs_package::FORMAT_VERSION);
+
+/// Semantic version of the retained checker-decision digest.
+pub const CHECKER_DECISION_IDENTITY_VERSION: u32 = 8;
+/// Exact derive-key domain used by `fs-package` for checker decisions.
+pub use fs_package::CHECKER_DECISION_IDENTITY_DOMAIN;
+const _: () = assert!(CHECKER_DECISION_IDENTITY_VERSION == CHECKER_SUPPORTED_PACKAGE_FORMAT);
+
+/// Owner-local checker-decision declaration consumed by `xtask check-identities`.
+#[allow(dead_code)]
+pub const CHECKER_DECISION_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
+    "frankensim-identity-schema-v1",
+    "id=fs-checker:decision-report",
+    "version_const=CHECKER_DECISION_IDENTITY_VERSION",
+    "version=8",
+    "domain=fs-package:v8:checker-decision",
+    "domain_const=crates/fs-package/src/lib.rs#CHECKER_DECISION_IDENTITY_DOMAIN",
+    "encoder=checker_report_hash",
+    "encoder_helpers=checker_report_hash_with_protocol,checker_decision_atom,append_signature_identity,append_authenticated_signature_identity",
+    "schema_constants=CHECKER_DECISION_IDENTITY_VERSION,CHECKER_PROTOCOL_VERSION,CHECKER_SUPPORTED_PACKAGE_FORMAT,crates/fs-package/src/lib.rs#CHECKER_DECISION_IDENTITY_DOMAIN,crates/fs-package/src/lib.rs#FORMAT_VERSION",
+    "schema_functions=CheckReport::admit_retained_decision_hash,CheckReport::validate_decision_hash,crates/fs-checker/src/semantic.rs#SemanticReport::validate_context_hash,crates/fs-package/src/lib.rs#hash_checker_decision",
+    "schema_dependencies=fs-checker:semantic-report,fs-package:package-root,fs-package:signature-subject,fs-package:verification-receipt,fs-package:release-admission-context",
+    "digest=blake3-derive-key",
+    "encoding=typed-binary",
+    "sources=CheckReport,Finding",
+    "source_fields=CheckReport.verdict:semantic,CheckReport.merkle_root:semantic,CheckReport.breakdown:semantic,CheckReport.integrity_status:semantic,CheckReport.semantic_report:semantic,CheckReport.origin_status:semantic,CheckReport.signature:semantic,CheckReport.receipt:semantic,CheckReport.findings:semantic,CheckReport.policy:semantic,CheckReport.expected_root:semantic,CheckReport.decision_hash:derived:recomputed-from-semantic-fields,Finding.kind:semantic,Finding.detail:semantic",
+    "source_bindings=CheckReport.verdict>verdict,CheckReport.merkle_root>package-root,CheckReport.breakdown>verified-count+validated-count+estimated-count+waived-count,CheckReport.integrity_status>integrity-status,CheckReport.semantic_report>semantic-status+semantic-context-hash,CheckReport.origin_status>origin-status,CheckReport.signature>signature-status+signature-payload+signature-purpose,CheckReport.receipt>verification-receipt-presence+verification-receipt-hash,CheckReport.findings>finding-count+finding-order,CheckReport.policy>policy,CheckReport.expected_root>expected-root-presence+expected-root,Finding.kind>finding-kind,Finding.detail>finding-detail",
+    "external_semantic_fields=identity-version,digest-domain,checker-protocol-version",
+    "semantic_fields=identity-version,digest-domain,checker-protocol-version,verdict,package-root,verified-count,validated-count,estimated-count,waived-count,integrity-status,semantic-status,semantic-context-hash,origin-status,signature-status,signature-payload,signature-purpose,verification-receipt-presence,verification-receipt-hash,finding-count,finding-order,policy,expected-root-presence,expected-root,finding-kind,finding-detail",
+    "excluded_fields=none",
+    "consumers=CheckReport::decision_hash,CheckReport::validate_decision_hash,CheckReport::release_admitted,release-approval-auditors",
+    "mutations=identity-version:crates/fs-checker/src/lib.rs#checker_decision_identity_versions_and_transports_fail_closed,digest-domain:crates/fs-checker/src/lib.rs#checker_decision_identity_versions_and_transports_fail_closed,checker-protocol-version:crates/fs-checker/src/lib.rs#checker_decision_identity_versions_and_transports_fail_closed,verdict:crates/fs-checker/src/lib.rs#decision_hash_binds_every_checker_authority_field,package-root:crates/fs-checker/src/lib.rs#decision_hash_binds_every_checker_authority_field,verified-count:crates/fs-checker/src/lib.rs#decision_hash_binds_every_checker_authority_field,validated-count:crates/fs-checker/src/lib.rs#decision_hash_binds_every_checker_authority_field,estimated-count:crates/fs-checker/src/lib.rs#decision_hash_binds_every_checker_authority_field,waived-count:crates/fs-checker/src/lib.rs#decision_hash_binds_every_checker_authority_field,integrity-status:crates/fs-checker/src/lib.rs#decision_hash_binds_every_checker_authority_field,semantic-status:crates/fs-checker/src/lib.rs#decision_hash_binds_every_checker_authority_field,semantic-context-hash:crates/fs-checker/src/lib.rs#decision_hash_binds_every_checker_authority_field,origin-status:crates/fs-checker/src/lib.rs#decision_hash_binds_every_checker_authority_field,signature-status:crates/fs-checker/src/lib.rs#decision_hash_binds_every_checker_authority_field,signature-payload:crates/fs-checker/src/lib.rs#decision_hash_binds_every_checker_authority_field,signature-purpose:crates/fs-checker/src/lib.rs#decision_hash_binds_every_checker_authority_field,verification-receipt-presence:crates/fs-checker/src/lib.rs#decision_hash_binds_every_checker_authority_field,verification-receipt-hash:crates/fs-checker/src/lib.rs#decision_hash_binds_every_checker_authority_field,finding-count:crates/fs-checker/src/lib.rs#decision_hash_binds_every_checker_authority_field,finding-order:crates/fs-checker/src/lib.rs#decision_hash_binds_every_checker_authority_field,policy:crates/fs-checker/src/lib.rs#decision_hash_binds_every_checker_authority_field,expected-root-presence:crates/fs-checker/src/lib.rs#decision_hash_binds_every_checker_authority_field,expected-root:crates/fs-checker/src/lib.rs#decision_hash_binds_every_checker_authority_field,finding-kind:crates/fs-checker/src/lib.rs#decision_hash_binds_every_checker_authority_field,finding-detail:crates/fs-checker/src/lib.rs#decision_hash_binds_every_checker_authority_field",
+    "nonsemantic_mutations=none",
+    "field_guard=classify_checker_decision_identity_fields",
+    "transport_guard=CheckReport::admit_retained_decision_hash",
+    "version_guard=crates/fs-checker/src/lib.rs#checker_decision_identity_versions_and_transports_fail_closed",
+    "coupling_surface=fs-checker:decision-report",
+];
 
 /// The checker's overall verdict.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,8 +114,28 @@ pub enum CheckPolicy {
     Integrity,
     /// Non-admitting release readiness inventory.
     ReleasePreflight,
-    /// Strong release admission under protocol v5.
+    /// Strong release admission under protocol v6.
     ReleaseAdmission,
+}
+
+/// Callback-free package-integrity stage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntegrityStatus {
+    /// Transport, format, content binding, and claim structure were rechecked.
+    Verified,
+    /// Integrity refused before semantic or origin authority could be granted.
+    Refused,
+}
+
+/// External-origin authentication stage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OriginStatus {
+    /// Package admission, including every required external origin, succeeded.
+    Authenticated,
+    /// An invoked package/origin capability refused admission.
+    Refused,
+    /// An earlier integrity or semantic stage stopped callback dispatch.
+    NotRun,
 }
 
 /// One reason a check failed.
@@ -84,6 +156,12 @@ pub struct CheckReport {
     merkle_root: ContentHash,
     /// The by-color budget pie.
     breakdown: ColorBreakdown,
+    /// Callback-free package-integrity outcome.
+    integrity_status: IntegrityStatus,
+    /// Independent portable-witness transcript.
+    semantic_report: SemanticReport,
+    /// External-origin authentication outcome.
+    origin_status: OriginStatus,
     /// Signature presence.
     signature: SignatureStatus,
     /// Policy-bound package receipt. Present only after successful package
@@ -98,6 +176,50 @@ pub struct CheckReport {
     /// Domain-separated integrity digest over checker protocol, gate context,
     /// package receipt, verdict, and findings.
     decision_hash: ContentHash,
+}
+
+#[allow(dead_code)]
+fn classify_checker_decision_identity_fields(report: &CheckReport, finding: &Finding) {
+    let CheckReport {
+        verdict,
+        merkle_root,
+        breakdown,
+        integrity_status,
+        semantic_report,
+        origin_status,
+        signature,
+        receipt,
+        findings,
+        policy,
+        expected_root,
+        decision_hash,
+    } = report;
+    let ColorBreakdown {
+        verified,
+        validated,
+        estimated,
+        waived,
+    } = breakdown;
+    let Finding { kind, detail } = finding;
+    let _ = (
+        verdict,
+        merkle_root,
+        verified,
+        validated,
+        estimated,
+        waived,
+        integrity_status,
+        semantic_report,
+        origin_status,
+        signature,
+        receipt,
+        findings,
+        policy,
+        expected_root,
+        decision_hash,
+        kind,
+        detail,
+    );
 }
 
 impl CheckReport {
@@ -115,6 +237,26 @@ impl CheckReport {
     #[must_use]
     pub const fn breakdown(&self) -> &ColorBreakdown {
         &self.breakdown
+    }
+    /// Callback-free package-integrity outcome.
+    #[must_use]
+    pub const fn integrity_status(&self) -> IntegrityStatus {
+        self.integrity_status
+    }
+    /// Independent portable-witness package outcome.
+    #[must_use]
+    pub const fn semantic_status(&self) -> SemanticStatus {
+        self.semantic_report.status()
+    }
+    /// Full sealed portable-witness transcript.
+    #[must_use]
+    pub const fn semantic_report(&self) -> &SemanticReport {
+        &self.semantic_report
+    }
+    /// External-origin authentication outcome.
+    #[must_use]
+    pub const fn origin_status(&self) -> OriginStatus {
+        self.origin_status
     }
     /// Detached-signature decision.
     #[must_use]
@@ -146,6 +288,18 @@ impl CheckReport {
     pub const fn decision_hash(&self) -> ContentHash {
         self.decision_hash
     }
+
+    /// Admit retained checker-decision bytes only under the exact v8 schema
+    /// and fixed-width digest transport. Stale and future versions refuse.
+    #[must_use]
+    pub fn admit_retained_decision_hash(version: u32, bytes: &[u8]) -> Option<ContentHash> {
+        if version != CHECKER_DECISION_IDENTITY_VERSION || bytes.len() != 32 {
+            return None;
+        }
+        let mut exact = [0_u8; 32];
+        exact.copy_from_slice(bytes);
+        Some(ContentHash(exact))
+    }
     /// Did the package pass?
     #[must_use]
     pub fn passed(&self) -> bool {
@@ -160,7 +314,21 @@ impl CheckReport {
         self.policy == CheckPolicy::ReleaseAdmission
             && self.passed()
             && self.receipt.is_some()
+            && self.integrity_status == IntegrityStatus::Verified
+            && matches!(
+                self.semantic_report.status(),
+                SemanticStatus::NotProvided | SemanticStatus::Verified
+            )
+            && self.semantic_report.validate_context_hash()
+            && self.origin_status == OriginStatus::Authenticated
             && self.validate_decision_hash()
+    }
+
+    /// Whether release admission also independently recomputed at least one
+    /// attached portable semantic witness.
+    #[must_use]
+    pub fn release_independently_verified(&self) -> bool {
+        self.release_admitted() && self.semantic_report.status() == SemanticStatus::Verified
     }
 
     /// Recompute the checker gate-context integrity digest.
@@ -172,7 +340,8 @@ impl CheckReport {
     /// Whether the stored checker decision digest matches the report fields.
     #[must_use]
     pub fn validate_decision_hash(&self) -> bool {
-        self.decision_hash == self.recomputed_decision_hash()
+        self.semantic_report.validate_context_hash()
+            && self.decision_hash == self.recomputed_decision_hash()
     }
 
     /// Render the by-color budget pie as a deterministic text chart.
@@ -206,14 +375,68 @@ impl CheckReport {
 }
 
 fn checker_report_hash(report: &CheckReport) -> ContentHash {
-    fn atom(out: &mut Vec<u8>, bytes: &[u8]) {
-        out.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
-        out.extend_from_slice(bytes);
-    }
+    checker_report_hash_with_protocol(report, CHECKER_PROTOCOL_VERSION)
+}
 
+fn checker_decision_atom(out: &mut Vec<u8>, bytes: &[u8]) {
+    out.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+    out.extend_from_slice(bytes);
+}
+
+fn append_authenticated_signature_identity(
+    canonical: &mut Vec<u8>,
+    signature: &str,
+    purpose: SignaturePurpose,
+) {
+    checker_decision_atom(canonical, signature.as_bytes());
+    match purpose {
+        SignaturePurpose::PackageRootAttestation => {
+            checker_decision_atom(canonical, b"package-root-attestation");
+        }
+        SignaturePurpose::ReleaseApproval {
+            checker_protocol,
+            expected_root,
+            admission_context,
+            semantic_context,
+        } => {
+            checker_decision_atom(canonical, b"release-approval");
+            checker_decision_atom(canonical, &checker_protocol.to_le_bytes());
+            checker_decision_atom(canonical, expected_root.as_bytes());
+            checker_decision_atom(canonical, admission_context.as_bytes());
+            checker_decision_atom(canonical, semantic_context.as_bytes());
+        }
+    }
+}
+
+fn append_signature_identity(canonical: &mut Vec<u8>, signature: &SignatureStatus) {
+    match signature {
+        SignatureStatus::Unsigned => checker_decision_atom(canonical, b"signature:unsigned"),
+        SignatureStatus::Refused { reason } => {
+            checker_decision_atom(canonical, b"signature:refused");
+            checker_decision_atom(canonical, reason.as_bytes());
+        }
+        SignatureStatus::Unverified(signature) => {
+            checker_decision_atom(canonical, b"signature:unverified");
+            checker_decision_atom(canonical, signature.as_bytes());
+        }
+        SignatureStatus::Authenticated(authenticated) => {
+            checker_decision_atom(canonical, b"signature:authenticated");
+            append_authenticated_signature_identity(
+                canonical,
+                authenticated.signature(),
+                authenticated.purpose(),
+            );
+        }
+    }
+}
+
+fn checker_report_hash_with_protocol(
+    report: &CheckReport,
+    checker_protocol_version: u32,
+) -> ContentHash {
     let mut canonical = Vec::new();
-    atom(&mut canonical, &CHECKER_PROTOCOL_VERSION.to_le_bytes());
-    atom(
+    checker_decision_atom(&mut canonical, &checker_protocol_version.to_le_bytes());
+    checker_decision_atom(
         &mut canonical,
         match report.policy {
             CheckPolicy::Integrity => b"integrity",
@@ -222,11 +445,39 @@ fn checker_report_hash(report: &CheckReport) -> ContentHash {
         },
     );
     match report.expected_root {
-        Some(root) => atom(&mut canonical, root.as_bytes()),
-        None => atom(&mut canonical, b"no-expected-root"),
+        Some(root) => checker_decision_atom(&mut canonical, root.as_bytes()),
+        None => checker_decision_atom(&mut canonical, b"no-expected-root"),
     }
-    atom(&mut canonical, report.merkle_root.as_bytes());
-    atom(
+    checker_decision_atom(&mut canonical, report.merkle_root.as_bytes());
+    checker_decision_atom(
+        &mut canonical,
+        match report.integrity_status {
+            IntegrityStatus::Verified => b"integrity:verified",
+            IntegrityStatus::Refused => b"integrity:refused",
+        },
+    );
+    checker_decision_atom(
+        &mut canonical,
+        match report.semantic_report.status() {
+            SemanticStatus::NotProvided => b"semantics:not-provided",
+            SemanticStatus::Verified => b"semantics:verified",
+            SemanticStatus::Refused => b"semantics:refused",
+            SemanticStatus::NotRun => b"semantics:not-run",
+        },
+    );
+    checker_decision_atom(
+        &mut canonical,
+        report.semantic_report.context_hash().as_bytes(),
+    );
+    checker_decision_atom(
+        &mut canonical,
+        match report.origin_status {
+            OriginStatus::Authenticated => b"origin:authenticated",
+            OriginStatus::Refused => b"origin:refused",
+            OriginStatus::NotRun => b"origin:not-run",
+        },
+    );
+    checker_decision_atom(
         &mut canonical,
         match report.verdict {
             Verdict::Pass => b"pass",
@@ -234,54 +485,26 @@ fn checker_report_hash(report: &CheckReport) -> ContentHash {
         },
     );
     match &report.receipt {
-        Some(receipt) => atom(&mut canonical, receipt.receipt_hash().as_bytes()),
-        None => atom(&mut canonical, b"no-package-receipt"),
+        Some(receipt) => checker_decision_atom(&mut canonical, receipt.receipt_hash().as_bytes()),
+        None => checker_decision_atom(&mut canonical, b"no-package-receipt"),
     }
-    match &report.signature {
-        SignatureStatus::Unsigned => atom(&mut canonical, b"signature:unsigned"),
-        SignatureStatus::Refused { reason } => {
-            atom(&mut canonical, b"signature:refused");
-            atom(&mut canonical, reason.as_bytes());
-        }
-        SignatureStatus::Unverified(signature) => {
-            atom(&mut canonical, b"signature:unverified");
-            atom(&mut canonical, signature.as_bytes());
-        }
-        SignatureStatus::Authenticated(authenticated) => {
-            atom(&mut canonical, b"signature:authenticated");
-            atom(&mut canonical, authenticated.signature().as_bytes());
-            match authenticated.purpose() {
-                SignaturePurpose::PackageRootAttestation => {
-                    atom(&mut canonical, b"package-root-attestation");
-                }
-                SignaturePurpose::ReleaseApproval {
-                    checker_protocol,
-                    expected_root,
-                    admission_context,
-                } => {
-                    atom(&mut canonical, b"release-approval");
-                    atom(&mut canonical, &checker_protocol.to_le_bytes());
-                    atom(&mut canonical, expected_root.as_bytes());
-                    atom(&mut canonical, admission_context.as_bytes());
-                }
-            }
-        }
+    append_signature_identity(&mut canonical, &report.signature);
+    let ColorBreakdown {
+        verified,
+        validated,
+        estimated,
+        waived,
+    } = report.breakdown;
+    for count in [verified, validated, estimated, waived] {
+        checker_decision_atom(&mut canonical, &(count as u64).to_le_bytes());
     }
-    for count in [
-        report.breakdown.verified,
-        report.breakdown.validated,
-        report.breakdown.estimated,
-        report.breakdown.waived,
-    ] {
-        atom(&mut canonical, &(count as u64).to_le_bytes());
-    }
-    atom(
+    checker_decision_atom(
         &mut canonical,
         &(report.findings.len() as u64).to_le_bytes(),
     );
     for finding in &report.findings {
-        atom(&mut canonical, finding.kind.as_bytes());
-        atom(&mut canonical, finding.detail.as_bytes());
+        checker_decision_atom(&mut canonical, finding.kind.as_bytes());
+        checker_decision_atom(&mut canonical, finding.detail.as_bytes());
     }
     hash_checker_decision(&canonical)
 }
@@ -306,7 +529,7 @@ pub fn check_against_root(pkg: &EvidencePackage, expected_root: ContentHash) -> 
 }
 
 /// The full third-party entry point (bead qmao.6.1): parse the
-/// serialized package under the deterministic schema-v7 JSON profile (the parser itself
+/// serialized package under the deterministic schema-v8 JSON profile (the parser itself
 /// recomputes the content root and re-derives the magnitude budget
 /// from the parsed claims), then re-verify semantics, optionally
 /// against an expected root and a signature capability. A package that
@@ -398,17 +621,17 @@ pub fn check_release_preflight(
     expected_root: ContentHash,
     verifier: &dyn SignatureVerifier,
 ) -> CheckReport {
-    let merkle_root =
+    let preflight =
         preflight_content_address(pkg, Some(expected_root), CheckPolicy::ReleasePreflight);
-    let mut report = match merkle_root {
-        Ok(root) => {
+    let mut report = match preflight {
+        Ok(preflight) => {
             let mut report = build_report_from_preflight(
                 pkg,
                 Some(expected_root),
                 Some(verifier),
                 &VerificationCapabilities::deny_all(),
                 CheckPolicy::ReleasePreflight,
-                root,
+                preflight,
             );
             append_release_findings(pkg, &mut report);
             report
@@ -440,12 +663,17 @@ pub fn check_for_release_with_capabilities(
     verifier: &dyn SignatureVerifier,
     capabilities: &VerificationCapabilities<'_>,
 ) -> CheckReport {
-    let merkle_root =
+    let preflight =
         match preflight_content_address(pkg, Some(expected_root), CheckPolicy::ReleaseAdmission) {
-            Ok(root) => root,
+            Ok(preflight) => preflight,
             Err(report) => return *report,
         };
-    if let Some(report) = release_shape_refusal(pkg, expected_root, merkle_root) {
+    if let Some(report) = release_shape_refusal(
+        pkg,
+        expected_root,
+        preflight.merkle_root,
+        &preflight.semantic_report,
+    ) {
         return report;
     }
     let mut report = build_report_from_preflight(
@@ -454,7 +682,7 @@ pub fn check_for_release_with_capabilities(
         Some(verifier),
         capabilities,
         CheckPolicy::ReleaseAdmission,
-        merkle_root,
+        preflight,
     );
     append_release_findings(pkg, &mut report);
     report.decision_hash = checker_report_hash(&report);
@@ -502,6 +730,9 @@ fn parse_refusal(
         // deterministic placeholder.
         merkle_root: ContentHash([0u8; 32]),
         breakdown: ColorBreakdown::default(),
+        integrity_status: IntegrityStatus::Refused,
+        semantic_report: SemanticReport::not_run(error.to_string()),
+        origin_status: OriginStatus::NotRun,
         signature: SignatureStatus::Unsigned,
         receipt: None,
         findings: vec![Finding {
@@ -532,8 +763,36 @@ fn release_signature_required_finding() -> Finding {
         kind: "release-signature-required",
         detail: "release admission requires a policy-authenticated detached release-approval \
                  signature bound to this checker protocol, expected content root, and exact \
-                 scientific admission context"
+                 scientific admission context and exact semantic-checker transcript"
             .to_string(),
+    }
+}
+
+fn semantic_failure_finding(failure: &SemanticFailure) -> Finding {
+    let kind = match failure.kind() {
+        SemanticFailureKind::StructuralIntegrity => "semantic-structural-integrity",
+        SemanticFailureKind::UnknownFamily => "semantic-unknown-family",
+        SemanticFailureKind::UnsupportedVersion => "semantic-unsupported-version",
+        SemanticFailureKind::MalformedPayload => "semantic-malformed-witness",
+        SemanticFailureKind::ResourceLimit => "semantic-resource-limit",
+        SemanticFailureKind::ClaimMismatch => "semantic-claim-mismatch",
+        SemanticFailureKind::VerifierPanic => "semantic-verifier-panic",
+    };
+    let subject = match (failure.claim_index(), failure.claim_id()) {
+        (Some(index), Some(id)) => format!("claim {index} ('{id}')"),
+        (Some(index), None) => format!("claim {index}"),
+        (None, Some(id)) => format!("claim '{id}'"),
+        (None, None) => "package".to_string(),
+    };
+    let dispatch = match (failure.family(), failure.schema_version()) {
+        (Some(family), Some(version)) => format!(" family '{family}' schema {version}"),
+        (Some(family), None) => format!(" family '{family}'"),
+        (None, Some(version)) => format!(" schema {version}"),
+        (None, None) => String::new(),
+    };
+    Finding {
+        kind,
+        detail: format!("{subject}{dispatch}: {}", failure.detail()),
     }
 }
 
@@ -627,6 +886,7 @@ fn release_shape_refusal(
     pkg: &EvidencePackage,
     expected_root: ContentHash,
     merkle_root: ContentHash,
+    semantic_report: &SemanticReport,
 ) -> Option<CheckReport> {
     let findings = release_shape_findings(pkg)?;
     if findings.is_empty() {
@@ -638,6 +898,9 @@ fn release_shape_refusal(
         merkle_root,
         unverified_signature_status(pkg),
         findings,
+        IntegrityStatus::Verified,
+        semantic_report.clone(),
+        OriginStatus::NotRun,
     ))
 }
 
@@ -675,9 +938,11 @@ fn append_release_findings(pkg: &EvidencePackage, report: &mut CheckReport) {
                 checker_protocol,
                 expected_root,
                 admission_context,
+                semantic_context,
             } if checker_protocol == CHECKER_PROTOCOL_VERSION
                 && Some(expected_root) == report.expected_root
-                && Some(admission_context) == receipt_admission_context)
+                && Some(admission_context) == receipt_admission_context
+                && semantic_context == report.semantic_report.context_hash())
     );
     if !release_signature {
         push_unique_finding(report, release_signature_required_finding());
@@ -693,11 +958,17 @@ fn callback_free_refusal(
     merkle_root: ContentHash,
     signature: SignatureStatus,
     findings: Vec<Finding>,
+    integrity_status: IntegrityStatus,
+    semantic_report: SemanticReport,
+    origin_status: OriginStatus,
 ) -> CheckReport {
     let mut report = CheckReport {
         verdict: Verdict::Fail,
         merkle_root,
         breakdown: ColorBreakdown::default(),
+        integrity_status,
+        semantic_report,
+        origin_status,
         signature,
         receipt: None,
         findings,
@@ -709,11 +980,16 @@ fn callback_free_refusal(
     report
 }
 
+struct CheckerPreflight {
+    merkle_root: ContentHash,
+    semantic_report: SemanticReport,
+}
+
 fn preflight_content_address(
     pkg: &EvidencePackage,
     expected_root: Option<ContentHash>,
     policy: CheckPolicy,
-) -> Result<ContentHash, Box<CheckReport>> {
+) -> Result<CheckerPreflight, Box<CheckReport>> {
     let merkle_root = pkg.try_merkle_root().map_err(|error| {
         Box::new(callback_free_refusal(
             policy,
@@ -723,6 +999,9 @@ fn preflight_content_address(
                 reason: "package transport envelope refused",
             },
             vec![describe(&error)],
+            IntegrityStatus::Refused,
+            SemanticReport::not_run("content root unavailable before semantic verification"),
+            OriginStatus::NotRun,
         ))
     })?;
     if let Some(expected) = expected_root
@@ -737,9 +1016,73 @@ fn preflight_content_address(
                 kind: "content-address-mismatch",
                 detail: format!("recomputed root {merkle_root} != expected {expected}"),
             }],
+            IntegrityStatus::Refused,
+            SemanticReport::not_run(
+                "expected-root mismatch stopped structural and semantic verification",
+            ),
+            OriginStatus::NotRun,
         )));
     }
-    Ok(merkle_root)
+
+    let structural_root = match pkg.verify_structural_integrity() {
+        Ok(root) => root,
+        Err(error) => {
+            return Err(Box::new(callback_free_refusal(
+                policy,
+                expected_root,
+                merkle_root,
+                unverified_signature_status(pkg),
+                vec![describe(&error)],
+                IntegrityStatus::Refused,
+                SemanticReport::not_run(error.to_string()),
+                OriginStatus::NotRun,
+            )));
+        }
+    };
+    if structural_root != merkle_root {
+        return Err(Box::new(callback_free_refusal(
+            policy,
+            expected_root,
+            merkle_root,
+            unverified_signature_status(pkg),
+            vec![Finding {
+                kind: "structural-root-drift",
+                detail: format!(
+                    "transport root {merkle_root} differs from structural root {structural_root}"
+                ),
+            }],
+            IntegrityStatus::Refused,
+            SemanticReport::not_run("structural verification recomputed a different root"),
+            OriginStatus::NotRun,
+        )));
+    }
+
+    let semantic_report = semantic::verify_portable_semantics_after_integrity(pkg, structural_root);
+    if matches!(
+        semantic_report.status(),
+        SemanticStatus::Refused | SemanticStatus::NotRun
+    ) {
+        let findings = semantic_report
+            .failures()
+            .iter()
+            .map(semantic_failure_finding)
+            .collect();
+        return Err(Box::new(callback_free_refusal(
+            policy,
+            expected_root,
+            merkle_root,
+            unverified_signature_status(pkg),
+            findings,
+            IntegrityStatus::Verified,
+            semantic_report,
+            OriginStatus::NotRun,
+        )));
+    }
+
+    Ok(CheckerPreflight {
+        merkle_root,
+        semantic_report,
+    })
 }
 
 /// The full report builder. Missing origin capabilities fail closed only for
@@ -756,8 +1099,8 @@ fn build_report(
     // finding. Reject an oversized or substituted package before dispatching
     // any injected capability: those callbacks may fetch attacker-selected
     // artifact addresses or perform other trusted side effects.
-    let merkle_root = match preflight_content_address(pkg, expected_root, policy) {
-        Ok(root) => root,
+    let preflight = match preflight_content_address(pkg, expected_root, policy) {
+        Ok(preflight) => preflight,
         Err(report) => return *report,
     };
 
@@ -767,7 +1110,7 @@ fn build_report(
         signature_verifier,
         capabilities,
         policy,
-        merkle_root,
+        preflight,
     )
 }
 
@@ -777,8 +1120,12 @@ fn build_report_from_preflight(
     signature_verifier: Option<&dyn SignatureVerifier>,
     capabilities: &VerificationCapabilities<'_>,
     policy: CheckPolicy,
-    merkle_root: ContentHash,
+    preflight: CheckerPreflight,
 ) -> CheckReport {
+    let CheckerPreflight {
+        merkle_root,
+        semantic_report,
+    } = preflight;
     let mut findings = Vec::new();
 
     // Signature verification is now part of the package capability ledger.
@@ -793,6 +1140,7 @@ fn build_report_from_preflight(
                     SignatureIntent::ReleaseApproval {
                         checker_protocol: CHECKER_PROTOCOL_VERSION,
                         expected_root: expected_root.unwrap_or(ContentHash([0; 32])),
+                        semantic_context: semantic_report.context_hash(),
                     }
                 }
             },
@@ -807,8 +1155,8 @@ fn build_report_from_preflight(
         signatures,
     };
 
-    // 1. Delegate format, claim semantics, and capability-gated origin
-    // authentication to the package format. There is no permissive fallback.
+    // Package-format structural and portable semantic checks already completed
+    // callback-free. Only now may origin/signature capabilities run.
     let verified = pkg.verify_with(&effective_capabilities);
     let breakdown = match &verified {
         Ok(report) => *report.breakdown(),
@@ -848,6 +1196,13 @@ fn build_report_from_preflight(
         .as_ref()
         .ok()
         .map(|report| report.receipt().clone());
+    let origin_status = match &verified {
+        Ok(_)
+        | Err(PackageError::SignatureRefused { .. } | PackageError::InvalidSignature { .. }) => {
+            OriginStatus::Authenticated
+        }
+        Err(_) => OriginStatus::Refused,
+    };
 
     let verdict = if findings.is_empty() {
         Verdict::Pass
@@ -858,6 +1213,9 @@ fn build_report_from_preflight(
         verdict,
         merkle_root,
         breakdown,
+        integrity_status: IntegrityStatus::Verified,
+        semantic_report,
+        origin_status,
         signature,
         receipt,
         findings,
@@ -1103,6 +1461,14 @@ fn describe(e: &PackageError) -> Finding {
                  non-canonical"
             ),
         },
+        PackageError::InvalidSemanticWitness {
+            claim,
+            field,
+            reason,
+        } => Finding {
+            kind: "invalid-semantic-witness",
+            detail: format!("claim '{claim}' has invalid {field}: {reason}"),
+        },
     }
 }
 
@@ -1116,13 +1482,95 @@ mod tests {
             EvidencePackage::new(Provenance::new("checker-test", "lock-test")).with_claim(
                 Claim::estimated("estimate", "bounded estimate", "test-estimator", 1.0),
             );
-        check(&package)
+        let mut report = check(&package);
+        report.findings = vec![
+            Finding {
+                kind: "fixture-one",
+                detail: "first fixture finding".to_string(),
+            },
+            Finding {
+                kind: "fixture-two",
+                detail: "second fixture finding".to_string(),
+            },
+        ];
+        report.decision_hash = checker_report_hash(&report);
+        report
+    }
+
+    #[test]
+    fn checker_decision_identity_versions_and_transports_fail_closed() {
+        assert_eq!(CHECKER_DECISION_IDENTITY_VERSION, 8);
+        assert_eq!(
+            CHECKER_DECISION_IDENTITY_VERSION,
+            CHECKER_SUPPORTED_PACKAGE_FORMAT
+        );
+        assert_eq!(CHECKER_SUPPORTED_PACKAGE_FORMAT, fs_package::FORMAT_VERSION);
+        assert_eq!(
+            CHECKER_DECISION_IDENTITY_DOMAIN,
+            "fs-package:v8:checker-decision"
+        );
+        assert_eq!(CHECKER_PROTOCOL_VERSION, 6);
+        assert_ne!(CHECKER_PROTOCOL_VERSION, CHECKER_DECISION_IDENTITY_VERSION);
+
+        let report = report_fixture();
+        assert_eq!(
+            CheckReport::admit_retained_decision_hash(
+                CHECKER_DECISION_IDENTITY_VERSION,
+                report.decision_hash().as_bytes(),
+            ),
+            Some(report.decision_hash())
+        );
+        for stale in [0, 7, 9, u32::MAX] {
+            assert_eq!(
+                CheckReport::admit_retained_decision_hash(stale, report.decision_hash().as_bytes(),),
+                None
+            );
+        }
+        for malformed in [&[0_u8; 31][..], &[0_u8; 33][..]] {
+            assert_eq!(
+                CheckReport::admit_retained_decision_hash(
+                    CHECKER_DECISION_IDENTITY_VERSION,
+                    malformed,
+                ),
+                None
+            );
+        }
+        assert_ne!(
+            checker_report_hash_with_protocol(&report, CHECKER_PROTOCOL_VERSION + 1),
+            report.decision_hash()
+        );
     }
 
     #[test]
     fn decision_hash_binds_every_checker_authority_field() {
         let report = report_fixture();
         assert!(report.validate_decision_hash());
+
+        let authenticated_signature_hash = |signature: &str, purpose: SignaturePurpose| {
+            let mut canonical = Vec::new();
+            checker_decision_atom(&mut canonical, b"signature:authenticated");
+            append_authenticated_signature_identity(&mut canonical, signature, purpose);
+            hash_checker_decision(&canonical)
+        };
+        let package_root_purpose = SignaturePurpose::PackageRootAttestation;
+        let release_purpose = SignaturePurpose::ReleaseApproval {
+            checker_protocol: CHECKER_PROTOCOL_VERSION,
+            expected_root: ContentHash([3; 32]),
+            admission_context: ContentHash([4; 32]),
+            semantic_context: ContentHash([5; 32]),
+        };
+        let authenticated_baseline =
+            authenticated_signature_hash("authenticated-payload-a", package_root_purpose);
+        assert_ne!(
+            authenticated_baseline,
+            authenticated_signature_hash("authenticated-payload-b", package_root_purpose),
+            "signature payload must move while purpose stays fixed"
+        );
+        assert_ne!(
+            authenticated_baseline,
+            authenticated_signature_hash("authenticated-payload-a", release_purpose),
+            "signature purpose must move while payload stays fixed"
+        );
 
         macro_rules! assert_mutation_refused {
             ($mutation:expr) => {{
@@ -1137,20 +1585,70 @@ mod tests {
             |changed: &mut CheckReport| changed.merkle_root = ContentHash([0; 32])
         );
         assert_mutation_refused!(|changed: &mut CheckReport| changed.breakdown.verified = 1);
+        assert_mutation_refused!(|changed: &mut CheckReport| changed.breakdown.validated = 1);
+        assert_mutation_refused!(|changed: &mut CheckReport| changed.breakdown.estimated += 1);
+        assert_mutation_refused!(|changed: &mut CheckReport| changed.breakdown.waived = 1);
+        assert_mutation_refused!(
+            |changed: &mut CheckReport| changed.integrity_status = IntegrityStatus::Refused
+        );
+        assert_mutation_refused!(|changed: &mut CheckReport| changed.semantic_report =
+            SemanticReport::not_run("mutated semantic transcript"));
+        assert_mutation_refused!(
+            |changed: &mut CheckReport| changed.origin_status = OriginStatus::NotRun
+        );
         assert_mutation_refused!(|changed: &mut CheckReport| changed.signature =
             SignatureStatus::Refused {
                 reason: "mutated test status"
             });
         assert_mutation_refused!(|changed: &mut CheckReport| changed.receipt = None);
+        let replacement_receipt = {
+            let replacement_package =
+                EvidencePackage::new(Provenance::new("checker-test", "replacement-lock"))
+                    .with_claim(Claim::estimated(
+                        "replacement-estimate",
+                        "replacement bounded estimate",
+                        "replacement-estimator",
+                        2.0,
+                    ));
+            check(&replacement_package)
+                .receipt
+                .expect("replacement fixture must retain a receipt")
+        };
+        assert_ne!(
+            report
+                .receipt
+                .as_ref()
+                .expect("fixture must retain a receipt")
+                .receipt_hash(),
+            replacement_receipt.receipt_hash()
+        );
+        assert_mutation_refused!(
+            |changed: &mut CheckReport| changed.receipt = Some(replacement_receipt.clone())
+        );
         assert_mutation_refused!(|changed: &mut CheckReport| changed.findings.push(Finding {
             kind: "mutated",
             detail: "mutated finding".to_string(),
         }));
+        assert_mutation_refused!(|changed: &mut CheckReport| changed.findings.swap(0, 1));
+        assert_mutation_refused!(|changed: &mut CheckReport| changed.findings[0].kind = "mutated");
+        assert_mutation_refused!(|changed: &mut CheckReport| changed.findings[0].detail.push('x'));
         assert_mutation_refused!(
             |changed: &mut CheckReport| changed.policy = CheckPolicy::ReleasePreflight
         );
         assert_mutation_refused!(
             |changed: &mut CheckReport| changed.expected_root = Some(ContentHash([7; 32]))
+        );
+        let mut present_expected_root = report.clone();
+        present_expected_root.expected_root = Some(ContentHash([7; 32]));
+        present_expected_root.decision_hash = checker_report_hash(&present_expected_root);
+        assert!(present_expected_root.validate_decision_hash());
+        present_expected_root.expected_root = Some(ContentHash([9; 32]));
+        assert!(
+            !present_expected_root.validate_decision_hash(),
+            "expected-root value must move while option presence stays fixed"
+        );
+        assert_mutation_refused!(
+            |changed: &mut CheckReport| changed.decision_hash = ContentHash([8; 32])
         );
     }
 

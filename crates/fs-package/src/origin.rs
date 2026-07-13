@@ -41,7 +41,44 @@
 use core::fmt;
 use fs_evidence::color_leaf_identity_reason;
 
-use crate::{ContentHash, Provenance};
+use crate::{ContentHash, Provenance, SemanticWitness};
+
+/// Semantic version of the typed detached-signature subject identity.
+pub const SIGNATURE_SUBJECT_IDENTITY_VERSION: u32 = 8;
+/// Exact BLAKE3 domain for the typed detached-signature subject.
+pub const SIGNATURE_SUBJECT_IDENTITY_DOMAIN: &str = "fs-package:v8:signature-subject";
+const _: () = assert!(SIGNATURE_SUBJECT_IDENTITY_VERSION == crate::FORMAT_VERSION);
+
+/// Owner-local declaration consumed by `xtask check-identities`.
+#[allow(dead_code)]
+pub const SIGNATURE_SUBJECT_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
+    "frankensim-identity-schema-v1",
+    "id=fs-package:signature-subject",
+    "version_const=SIGNATURE_SUBJECT_IDENTITY_VERSION",
+    "version=8",
+    "domain=fs-package:v8:signature-subject",
+    "domain_const=SIGNATURE_SUBJECT_IDENTITY_DOMAIN",
+    "encoder=signature_subject_hash",
+    "encoder_helpers=signature_subject_hash_with_domain,SignatureSubjectFields::from_inputs",
+    "schema_constants=SIGNATURE_SUBJECT_IDENTITY_VERSION,SIGNATURE_SUBJECT_IDENTITY_DOMAIN,crates/fs-package/src/lib.rs#FORMAT_VERSION",
+    "schema_functions=crates/fs-package/src/lib.rs#admit_retained_content_hash",
+    "schema_dependencies=fs-package:package-root,fs-package:release-admission-context",
+    "digest=blake3-derive-key",
+    "encoding=typed-binary",
+    "sources=SignatureSubjectFields",
+    "source_fields=SignatureSubjectFields.package_root:semantic,SignatureSubjectFields.purpose_tag:semantic,SignatureSubjectFields.checker_protocol:semantic,SignatureSubjectFields.expected_root:semantic,SignatureSubjectFields.admission_context:semantic,SignatureSubjectFields.semantic_context:semantic",
+    "source_bindings=SignatureSubjectFields.package_root>package-root,SignatureSubjectFields.purpose_tag>purpose-tag,SignatureSubjectFields.checker_protocol>checker-protocol-presence-and-value,SignatureSubjectFields.expected_root>expected-root-presence-and-value,SignatureSubjectFields.admission_context>admission-context-presence-and-value,SignatureSubjectFields.semantic_context>semantic-context-presence-and-value",
+    "external_semantic_fields=identity-version,digest-domain",
+    "semantic_fields=identity-version,digest-domain,package-root,purpose-tag,checker-protocol-presence-and-value,expected-root-presence-and-value,admission-context-presence-and-value,semantic-context-presence-and-value",
+    "excluded_fields=detached-signature-bytes:signature-output-not-subject-input",
+    "consumers=signature_subject_hash,SignatureRequest::subject_hash,SignatureVerifier::verify,release-signature-producers",
+    "mutations=identity-version:crates/fs-package/tests/package.rs#package_identity_versions_and_transports_fail_closed,digest-domain:crates/fs-package/src/origin.rs#signature_subject_identity_fields_move_independently,package-root:crates/fs-package/src/origin.rs#signature_subject_identity_fields_move_independently,purpose-tag:crates/fs-package/src/origin.rs#signature_subject_identity_fields_move_independently,checker-protocol-presence-and-value:crates/fs-package/src/origin.rs#signature_subject_identity_fields_move_independently,expected-root-presence-and-value:crates/fs-package/src/origin.rs#signature_subject_identity_fields_move_independently,admission-context-presence-and-value:crates/fs-package/src/origin.rs#signature_subject_identity_fields_move_independently,semantic-context-presence-and-value:crates/fs-package/src/origin.rs#signature_subject_identity_fields_move_independently",
+    "nonsemantic_mutations=detached-signature-bytes:crates/fs-package/src/origin.rs#signature_subject_excludes_detached_signature_bytes",
+    "field_guard=classify_signature_subject_identity_fields",
+    "transport_guard=admit_retained_signature_subject_hash",
+    "version_guard=crates/fs-package/tests/package.rs#package_identity_versions_and_transports_fail_closed",
+    "coupling_surface=fs-package:signature-subject",
+];
 
 /// A stable identity for one external verification policy.
 ///
@@ -139,7 +176,7 @@ pub struct NoWaiverVerifier;
 impl WaiverVerifier for NoWaiverVerifier {
     fn verify(&self, _mac: &str, _message: &[u8]) -> VerificationDecision {
         VerificationDecision::reject(fs_blake3::hash_domain(
-            "fs-package:v7:policy",
+            "fs-package:v8:policy",
             b"deny-all-waivers",
         ))
     }
@@ -154,12 +191,17 @@ impl WaiverVerifier for NoWaiverVerifier {
 pub struct SourceCertificateRequest<'a> {
     /// Package provenance under which the certificate is being admitted.
     pub package_provenance: &'a Provenance,
+    /// Recomputed root binding the certificate decision to this package.
+    pub package_root: ContentHash,
     /// Stable position of the claim in the package.
     pub claim_index: usize,
     /// Claim identity.
     pub claim_id: &'a str,
     /// Human-readable assertion bound to the certificate.
     pub statement: &'a str,
+    /// Source-specific claim subject excluding every external artifact address,
+    /// including this source certificate's address.
+    pub claim_subject_hash: ContentHash,
     /// Certified interval lower bound.
     pub lo: f64,
     /// Certified interval upper bound.
@@ -168,6 +210,8 @@ pub struct SourceCertificateRequest<'a> {
     pub producer: &'a str,
     /// Parsed content address of the certificate artifact.
     pub certificate_hash: ContentHash,
+    /// Inline portable witness, when the source certificate carries one.
+    pub semantic_witness: Option<&'a SemanticWitness>,
 }
 
 /// Capability that re-verifies a source certificate artifact against the
@@ -185,7 +229,7 @@ pub struct NoSourceCertificateVerifier;
 impl SourceCertificateVerifier for NoSourceCertificateVerifier {
     fn verify(&self, _request: &SourceCertificateRequest<'_>) -> VerificationDecision {
         VerificationDecision::reject(fs_blake3::hash_domain(
-            "fs-package:v7:policy",
+            "fs-package:v8:policy",
             b"deny-all-source-certificates",
         ))
     }
@@ -227,7 +271,7 @@ pub struct NoAnchoredSourceVerifier;
 impl AnchoredSourceVerifier for NoAnchoredSourceVerifier {
     fn verify(&self, _request: &AnchoredSourceRequest<'_>) -> VerificationDecision {
         VerificationDecision::reject(fs_blake3::hash_domain(
-            "fs-package:v7:policy",
+            "fs-package:v8:policy",
             b"deny-all-anchored-sources",
         ))
     }
@@ -317,7 +361,7 @@ pub struct NoDerivationVerifier;
 impl DerivationVerifier for NoDerivationVerifier {
     fn verify(&self, _request: &DerivationRequest<'_>) -> VerificationDecision {
         VerificationDecision::reject(fs_blake3::hash_domain(
-            "fs-package:v7:policy",
+            "fs-package:v8:policy",
             b"deny-all-derivations",
         ))
     }
@@ -330,7 +374,7 @@ pub struct NoFalsifierVerifier;
 impl FalsifierVerifier for NoFalsifierVerifier {
     fn verify(&self, _request: &FalsifierRequest<'_>) -> VerificationDecision {
         VerificationDecision::reject(fs_blake3::hash_domain(
-            "fs-package:v7:policy",
+            "fs-package:v8:policy",
             b"deny-all-falsifiers",
         ))
     }
@@ -352,6 +396,8 @@ pub enum SignaturePurpose {
         /// Domain-separated digest over non-signature policy fingerprints,
         /// waiver clock, admissions, and the compact waiver graph.
         admission_context: ContentHash,
+        /// Caller-supplied semantic-checker/plugin-set context.
+        semantic_context: ContentHash,
     },
 }
 
@@ -362,13 +408,74 @@ pub enum SignatureIntent {
     /// Authenticate the package root only.
     PackageRootAttestation,
     /// Authenticate a release decision under an explicit checker protocol and
-    /// expected root. `fs-package` adds the computed admission-context digest.
+    /// expected root and caller-supplied semantic-checker context.
+    /// `fs-package` adds the computed admission-context digest.
     ReleaseApproval {
         /// Independently distributed checker protocol.
         checker_protocol: u32,
         /// Root expected by the release gate.
         expected_root: ContentHash,
+        /// Exact semantic-checker/plugin-set context approved by the caller.
+        semantic_context: ContentHash,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SignatureSubjectFields {
+    package_root: ContentHash,
+    purpose_tag: u8,
+    checker_protocol: Option<u32>,
+    expected_root: Option<ContentHash>,
+    admission_context: Option<ContentHash>,
+    semantic_context: Option<ContentHash>,
+}
+
+impl SignatureSubjectFields {
+    fn from_inputs(package_root: ContentHash, purpose: SignaturePurpose) -> Self {
+        match purpose {
+            SignaturePurpose::PackageRootAttestation => Self {
+                package_root,
+                purpose_tag: 0,
+                checker_protocol: None,
+                expected_root: None,
+                admission_context: None,
+                semantic_context: None,
+            },
+            SignaturePurpose::ReleaseApproval {
+                checker_protocol,
+                expected_root,
+                admission_context,
+                semantic_context,
+            } => Self {
+                package_root,
+                purpose_tag: 1,
+                checker_protocol: Some(checker_protocol),
+                expected_root: Some(expected_root),
+                admission_context: Some(admission_context),
+                semantic_context: Some(semantic_context),
+            },
+        }
+    }
+}
+
+#[allow(dead_code)]
+fn classify_signature_subject_identity_fields(fields: &SignatureSubjectFields) {
+    let SignatureSubjectFields {
+        package_root,
+        purpose_tag,
+        checker_protocol,
+        expected_root,
+        admission_context,
+        semantic_context,
+    } = fields;
+    let _ = (
+        package_root,
+        purpose_tag,
+        checker_protocol,
+        expected_root,
+        admission_context,
+        semantic_context,
+    );
 }
 
 /// Typed signature subject.
@@ -392,29 +499,71 @@ impl SignatureRequest<'_> {
 
 /// Canonical digest for producing or verifying detached signature bytes.
 ///
-/// Release subjects include the scientific admission-context digest, preventing
-/// a package-root signature from being replayed under different verifier
-/// policies, waiver time, or admission decisions.
+/// Release subjects include separate scientific admission and semantic-checker
+/// context digests, preventing replay under different verifier policies,
+/// waiver time, admission decisions, or plugin sets.
 #[must_use]
 pub fn signature_subject_hash(package_root: ContentHash, purpose: SignaturePurpose) -> ContentHash {
-    let mut subject = Vec::with_capacity(108);
-    subject.extend_from_slice(package_root.as_bytes());
-    match purpose {
-        SignaturePurpose::PackageRootAttestation => {
+    signature_subject_hash_with_domain(
+        &SignatureSubjectFields::from_inputs(package_root, purpose),
+        SIGNATURE_SUBJECT_IDENTITY_DOMAIN,
+    )
+}
+
+fn signature_subject_hash_with_domain(
+    fields: &SignatureSubjectFields,
+    domain: &str,
+) -> ContentHash {
+    let mut subject = Vec::with_capacity(140);
+    subject.extend_from_slice(fields.package_root.as_bytes());
+    match (
+        fields.purpose_tag,
+        fields.checker_protocol,
+        fields.expected_root,
+        fields.admission_context,
+        fields.semantic_context,
+    ) {
+        (0, None, None, None, None) => {
             subject.extend_from_slice(b"package-root-attestation");
         }
-        SignaturePurpose::ReleaseApproval {
-            checker_protocol,
-            expected_root,
-            admission_context,
-        } => {
+        (
+            1,
+            Some(checker_protocol),
+            Some(expected_root),
+            Some(admission_context),
+            Some(semantic_context),
+        ) => {
             subject.extend_from_slice(b"release-approval");
             subject.extend_from_slice(&checker_protocol.to_le_bytes());
             subject.extend_from_slice(expected_root.as_bytes());
             subject.extend_from_slice(admission_context.as_bytes());
+            subject.extend_from_slice(semantic_context.as_bytes());
+        }
+        invalid => {
+            subject.extend_from_slice(b"invalid-purpose-shape");
+            subject.push(invalid.0);
+            if let Some(value) = invalid.1 {
+                subject.extend_from_slice(&value.to_le_bytes());
+            }
+            for value in [invalid.2, invalid.3, invalid.4] {
+                match value {
+                    Some(value) => {
+                        subject.push(1);
+                        subject.extend_from_slice(value.as_bytes());
+                    }
+                    None => subject.push(0),
+                }
+            }
         }
     }
-    fs_blake3::hash_domain("fs-package:v7:signature-subject", &subject)
+    fs_blake3::hash_domain(domain, &subject)
+}
+
+/// Admit a retained signature-subject digest only under the exact schema
+/// version and fixed-width binary transport.
+#[must_use]
+pub fn admit_retained_signature_subject_hash(version: u32, bytes: &[u8]) -> Option<ContentHash> {
+    crate::admit_retained_content_hash(version, SIGNATURE_SUBJECT_IDENTITY_VERSION, bytes)
 }
 
 /// The signature-verification capability. `fs-package` deliberately ships no
@@ -432,7 +581,7 @@ pub struct NoSignatureVerifier;
 impl SignatureVerifier for NoSignatureVerifier {
     fn verify(&self, _request: &SignatureRequest<'_>) -> VerificationDecision {
         VerificationDecision::reject(fs_blake3::hash_domain(
-            "fs-package:v7:policy",
+            "fs-package:v8:policy",
             b"deny-all-signatures",
         ))
     }
@@ -548,12 +697,14 @@ impl<'a> VerificationCapabilities<'a> {
         verifier: &'a dyn SignatureVerifier,
         checker_protocol: u32,
         expected_root: ContentHash,
+        semantic_context: ContentHash,
     ) -> Self {
         self.signatures = Some(SignatureVerification {
             verifier,
             intent: SignatureIntent::ReleaseApproval {
                 checker_protocol,
                 expected_root,
+                semantic_context,
             },
         });
         self
@@ -859,13 +1010,16 @@ mod tests {
         let provenance = Provenance::new("v", "lock");
         let request = SourceCertificateRequest {
             package_provenance: &provenance,
+            package_root: ContentHash([0; 32]),
             claim_index: 0,
             claim_id: "c",
             statement: "bounded",
+            claim_subject_hash: ContentHash([0; 32]),
             lo: 0.0,
             hi: 1.0,
             producer: "solver/cert",
             certificate_hash: ContentHash([0; 32]),
+            semantic_witness: None,
         };
         assert!(!NoSourceCertificateVerifier.verify(&request).accepted());
     }
@@ -890,6 +1044,97 @@ mod tests {
             purpose: SignaturePurpose::PackageRootAttestation,
         };
         assert!(!NoSignatureVerifier.verify(&signature).accepted());
+    }
+
+    #[test]
+    fn signature_subject_identity_fields_move_independently() {
+        let fields = SignatureSubjectFields {
+            package_root: ContentHash([1; 32]),
+            purpose_tag: 1,
+            checker_protocol: Some(4),
+            expected_root: Some(ContentHash([2; 32])),
+            admission_context: Some(ContentHash([3; 32])),
+            semantic_context: Some(ContentHash([4; 32])),
+        };
+        let baseline =
+            signature_subject_hash_with_domain(&fields, SIGNATURE_SUBJECT_IDENTITY_DOMAIN);
+        assert_ne!(
+            baseline,
+            signature_subject_hash_with_domain(
+                &fields,
+                "fs-package:v8:alternate-signature-subject"
+            ),
+            "digest-domain",
+        );
+
+        let mut changed = fields;
+        changed.package_root = ContentHash([9; 32]);
+        assert_ne!(
+            baseline,
+            signature_subject_hash_with_domain(&changed, SIGNATURE_SUBJECT_IDENTITY_DOMAIN),
+            "package-root",
+        );
+
+        let mut changed = fields;
+        changed.purpose_tag = 0;
+        assert_ne!(
+            baseline,
+            signature_subject_hash_with_domain(&changed, SIGNATURE_SUBJECT_IDENTITY_DOMAIN),
+            "purpose-tag",
+        );
+
+        let mut changed = fields;
+        changed.checker_protocol = None;
+        assert_ne!(
+            baseline,
+            signature_subject_hash_with_domain(&changed, SIGNATURE_SUBJECT_IDENTITY_DOMAIN),
+            "checker-protocol-presence-and-value",
+        );
+
+        let mut changed = fields;
+        changed.expected_root = Some(ContentHash([9; 32]));
+        assert_ne!(
+            baseline,
+            signature_subject_hash_with_domain(&changed, SIGNATURE_SUBJECT_IDENTITY_DOMAIN),
+            "expected-root-presence-and-value",
+        );
+
+        let mut changed = fields;
+        changed.admission_context = None;
+        assert_ne!(
+            baseline,
+            signature_subject_hash_with_domain(&changed, SIGNATURE_SUBJECT_IDENTITY_DOMAIN),
+            "admission-context-presence-and-value",
+        );
+
+        let mut changed = fields;
+        changed.semantic_context = Some(ContentHash([9; 32]));
+        assert_ne!(
+            baseline,
+            signature_subject_hash_with_domain(&changed, SIGNATURE_SUBJECT_IDENTITY_DOMAIN),
+            "semantic-context-presence-and-value",
+        );
+    }
+
+    #[test]
+    fn signature_subject_excludes_detached_signature_bytes() {
+        let purpose = SignaturePurpose::ReleaseApproval {
+            checker_protocol: 4,
+            expected_root: ContentHash([2; 32]),
+            admission_context: ContentHash([3; 32]),
+            semantic_context: ContentHash([4; 32]),
+        };
+        let left = SignatureRequest {
+            package_root: ContentHash([1; 32]),
+            signature: "detached-a",
+            purpose,
+        };
+        let right = SignatureRequest {
+            package_root: left.package_root,
+            signature: "detached-b",
+            purpose,
+        };
+        assert_eq!(left.subject_hash(), right.subject_hash());
     }
 
     #[test]

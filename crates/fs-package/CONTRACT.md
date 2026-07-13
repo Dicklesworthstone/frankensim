@@ -15,21 +15,30 @@ Injected verifier implementations are caller-owned synchronous capabilities.
 ## Public types and semantics
 
 - `Claim` — a sealed claim plus its epistemic color and typed `ClaimOrigin`.
-  Construction is through `from_certificate`, `anchored`, `estimated`,
-  `derived`, or `waived`; callers cannot assemble an origin-free claim from a
-  public `Color`. Claim ids are canonical, non-placeholder, and unique within a
+  Construction is through `from_certificate`, `from_portable_certificate`,
+  `anchored`, `estimated`, `derived`, or `waived`; callers cannot assemble an
+  origin-free claim from a public `Color`. Claim ids are canonical,
+  non-placeholder, and unique within a
   package; statements are non-blank and cannot be reserved placeholder text.
   Raw declarations are exposed only by explicitly named `*_unverified`
   accessors. Scientific callers consume `VerifiedPackage::admitted_claims`,
   where waiver-dependent descendants have no `scientific_color()`.
+- `SemanticWitness { family, schema_version, canonical_payload }` — a sealed,
+  portable envelope whose family-owned canonical bytes can be interpreted by a
+  standalone semantic-checker plugin. `content_hash()` binds field lengths,
+  family/version, and payload through schema-v8 derive-key domains without
+  copying the payload. Package structure authenticates the envelope address;
+  only a plugin can admit its mathematical meaning.
 - `Provenance { code_version, constellation_lock }`.
 - `VerificationCapabilities` — explicit source-certificate, anchoring-dataset,
   falsifier-artifact, derivation-artifact, waiver, and detached-signature
   verification capabilities. `deny_all()` is the default. A
   `SourceCertificateVerifier` receives a typed `SourceCertificateRequest`
-  containing the exact claim, package provenance, index, producer, and parsed
-  artifact hash. An `AnchoredSourceVerifier` receives the same subject identity
-  plus the exact validity regime, dataset id, and parsed dataset hash. A
+  containing the exact claim, package provenance and root, claim subject hash,
+  index, producer, parsed artifact hash, and optional semantic witness. An
+  `AnchoredSourceVerifier` receives the exact claim provenance, index,
+  statement, validity regime, dataset id, and parsed dataset hash; its current
+  request does not carry the package root or source-certificate subject hash. A
   `FalsifierVerifier` and `DerivationVerifier` receive the exact package root,
   claim subject, ordered records/parents, and parsed proof-artifact hash. A
   `WaiverVerification` pairs a `WaiverVerifier` with an explicit Unix-day clock
@@ -52,6 +61,10 @@ Injected verifier implementations are caller-owned synchronous capabilities.
   - `verify_with(&capabilities)` performs structural verification and then
     authenticates every capability-gated origin before returning a positive
     `PackageReport`.
+  - `verify_structural_integrity()` is the callback-free boundary: it checks
+    schema, transport limits, root-bound claim structure, origin/witness
+    consistency, and returns the recomputed root without granting scientific
+    authority.
   - `color_breakdown()` and `color_breakdown_with(..)` return a budget pie only
     through their corresponding verification path.
   - `waiver_message(index) -> Result<Vec<u8>, PackageError>` constructs bounded,
@@ -128,7 +141,21 @@ Injected verifier implementations are caller-owned synchronous capabilities.
 - SOURCE CERTIFICATES: a canonical certificate hash is only an artifact
   address. Positive verification requires an injected verifier to establish
   the exact typed claim request. Merely naming a producer and 64-hex hash never
-  produces a report or coverage.
+  produces a report or coverage. The request's source-specific subject hash
+  omits every external artifact address, including that certificate hash, so a
+  content-addressed certificate can embed the subject without a fixed-point
+  cycle. Portable subjects retain the semantic family/schema identity but omit
+  the witness payload address; the typed request and package root still bind
+  the full witness and complete declaration.
+- PORTABLE SEMANTIC WITNESSES: only a `Verified` source-certificate claim may
+  carry one. Its source `certificate_hash` must exactly equal the witness
+  content hash. Family identity is canonical and at most 128 UTF-8 bytes;
+  schema version is positive; payload is nonempty and at most 256 KiB. A
+  package carries at most 4,096 witnesses and 8 MiB of aggregate decoded
+  payload, with checked arithmetic. JSON requires `semantic_witness` on every
+  claim (`null` or the exact closed object `family`, `schema_version`,
+  `payload_hex`); payload hex is lowercase, even-length, and decoded limits are
+  checked incrementally before payload allocation.
 - WAIVERS: authorization requires an injected verifier and explicit date. The
   MAC message binds a domain tag, package provenance, ordered authorization
   context, target index, complete target claim, waiver id, and expiry. It
@@ -147,14 +174,17 @@ Injected verifier implementations are caller-owned synchronous capabilities.
   only. Signature coverage requires a `ReleaseApproval` purpose bound to an
   explicit checker protocol, expected root, and `release_admission_context`
   covering every non-signature policy fingerprint, waiver day, admission, and
-  compact waiver edge. Producers obtain that context from an unsigned
+  compact waiver edge, plus a separate caller-supplied `semantic_context` that
+  identifies the approved semantic checker/plugin set. Producers obtain the
+  admission context from an unsigned
   verification receipt, sign the public canonical subject hash, attach the
   bytes, and run the final gate. Coverage records authenticated signature intent;
   it does not establish that `fs-checker` admitted the package. No signer
   identity, role, or authorization is claimed.
   A release purpose naming any root other than the recomputed package root is
   refused before the callback, even if a permissive verifier would accept it;
-  an approval from another policy or waiver day has a different subject hash.
+  an approval from another policy, waiver day, or semantic context has a
+  different subject hash.
 - POLICY RECEIPTS: invoked verifier fingerprints and waiver day are decision inputs,
   not ambient process state. They, the root, signature result, origin class,
   admission class, compact waiver registry, and immediate taint edges are bound
@@ -188,7 +218,8 @@ values, 100,000 members per container, 1 MiB decoded strings, and 128-byte
 number tokens. In-memory verification enforces the corresponding transport
 envelope before a package can pass, so a verified object remains serializable
 and checkable under those bounds. Accounting aborts at the first exceeded
-byte/node budget, including inside one large claim. Limit violations are
+byte/node budget, including inside one large claim. Semantic decoded-byte and
+witness-count budgets are enforced separately and incrementally. Limit violations are
 structured refusals.
 
 ## Determinism class
@@ -216,7 +247,7 @@ None.
 
 ## Conformance tests
 
-`tests/package.rs` (51 cases, Proposal 12): complete mixed-color package with injected
+`tests/package.rs` (Proposal 12): complete mixed-color package with injected
 source verification;
 all-estimated boundary (valid + round-trips); validated-missing-regime and
 validated-missing-dataset completeness failures; verified bad-interval
@@ -229,10 +260,54 @@ waiver behavior; exact typed source-subject checks; package-context waiver
 replay resistance; duplicate waiver ids; capability-aware coverage; exact
 falsifier/derivation artifact subjects; policy-fingerprint drift; signed-zero
 receipt identity; compact waiver-taint DAGs; sealed verified-package binding;
-and origin transport/identity limits. The compile-fail battery proves that an
+portable-witness construction, request binding, strict JSON, tamper detection,
+shape and aggregate caps; semantic-context signature substitution; stale-v7
+refusal; and origin transport/identity limits. The compile-fail battery proves that an
 authenticated signature payload cannot be constructed downstream.
 
-## Schema v7: algebra-versioned derivations
+## Schema v8: portable semantic witnesses and semantic release context
+
+Format 8 rotates every active `fs-package:v8:*` derive-key domain. Claims add a
+mandatory JSON `semantic_witness` field and bind the witness content address
+into the canonical body, Merkle root, origin certificate hash, authorization
+context, source-verifier request, and transport accounting. Witness payloads
+remain opaque to this crate; semantic plugins own interpretation and admission.
+Release-approval signatures now bind `semantic_context` independently from the
+package-computed origin-policy `release_admission_context`. Format 7 and earlier
+are refused by the one-version contract.
+
+### Schema-v8 identity owners
+
+The crate owns the following closed identities. Every public domain constant
+names the exact primary `fs-package:v8:*` context consumed by its encoder;
+secondary family, payload, node, and authorization-context constants likewise
+name complete contexts. Declaring these existing contexts does not change any
+schema-v8 digest or authorization bytes.
+
+| Identity | Canonical encoder and exact context | Semantic source | Intentional exclusions | Schema dependencies |
+| --- | --- | --- | --- | --- |
+| `semantic-witness` | `SemanticWitness::content_hash`; `fs-package:v8:semantic-witness`, `...:semantic-witness-family`, `...:semantic-witness-payload` | family UTF-8 and length, witness schema, payload bytes and length | none | none |
+| `claim-declaration` | `Claim::declared_content_hash_unverified`; `fs-package:v8:claim` | complete claim declaration, including every artifact address and witness address | none | `semantic-witness` |
+| `claim-verification-subject` | `Claim::declared_verification_subject_hash_unverified`; `fs-package:v8:claim-verification-subject` | claim subject and witness address | receipt/falsifier artifact addresses and waiver MAC output | `claim-declaration` |
+| `source-certificate-subject` | `Claim::declared_source_certificate_subject_hash_unverified`; `fs-package:v8:source-certificate-subject` | claim/color metadata, address-free receipt/falsifier/attached-anchor metadata, portable family/schema, claim origin with source-certificate address and waiver MAC omitted | source-certificate, receipt, falsifier, attached-anchor, and witness payload addresses; witness payload; waiver MAC output | none; shared canonicalization and BLAKE3 closure are fingerprinted directly |
+| `package-root` | `EvidencePackage::try_merkle_root`; `fs-package:v8:header`, dependent claim leaves, and `fs-package:v8:node` | format, claim count/order, declaration hashes, provenance, odd-node carry rule | detached package signature | `claim-declaration` |
+| `waiver-authorization-subject` | `EvidencePackage::waiver_message`; exact `fs-package:v8:waiver-authorization\|...` bytes plus `fs-package:v8:authorization-context` digest | package header/provenance, ordered address-free claims, target index/body, waiver id, expiry | detached signature and every waiver MAC output | `claim-declaration` |
+| `signature-subject` | `signature_subject_hash`; `fs-package:v8:signature-subject` | package root, purpose tag, and every release-purpose axis | detached signature bytes | `package-root`, `release-admission-context` |
+| `verification-receipt` | `VerificationReceipt::recomputed_hash`; inner tag and outer `fs-package:v8:verification-receipt` context | root, all six policy slots, waiver day, signature status/purpose, ordered admissions and waiver registry | stored receipt hash is derived | `package-root` |
+| `release-admission-context` | `VerificationReceipt::release_admission_context`; `fs-package:v8:release-admission-context` | root, five non-signature policy slots, waiver day, ordered admissions and waiver registry | signature status, signature policy slot, and stored receipt hash | `package-root`; provisional receipt encoding is fingerprinted directly |
+| `presence-decision` | sealed presence-report digest; `fs-package:v8:presence-decision` | row count/order, concept, presence bit, rationale, optional receipt hash | stored decision hash is derived | `verification-receipt` |
+| `coverage-decision` | sealed coverage-report digest; `fs-package:v8:coverage-decision` | standard, crosswalk/package versions, row count/order, concept, status, rationale, optional receipt hash | stored decision hash is derived | `verification-receipt` |
+
+Retained digest transport is exactly 32 bytes paired out of band with identity
+version 8. A stale version or any short/extended digest fails closed. Waiver
+authorization is an exact canonical byte subject rather than a fixed-width
+digest: retention requires version 8, byte equality with a freshly recomputed
+subject, and the exact schema-v8 prefix. Package JSON is retained only through
+the strict closed parser; accepted canonical JSON is a textual fixed point under
+decode then encode. None of these integrity admissions grants artifact trust,
+scientific truth, waiver authority, or signer authority.
+
+## Schema v7: algebra-versioned derivations (historical)
 
 Format 7 rotates current `fs-package:v7:*` domains and adds the exact
 `fs-evidence` color-algebra version to every composition receipt. Both strict
@@ -313,7 +388,7 @@ with a structured `ParseError`. The parser re-derives the magnitude
 budget from the parsed claims and RECOMPUTES the content root from the
 parsed fields: a package whose embedded root does not recompute is
 tampered in transit and never loads. This is an integrity check, not the
-schema-v7 external-origin admission (inherited from v6) named above.
+schema-v8 external-origin admission (inherited from v6) named above.
 Decode-encode is both
 semantically and textually stable (tested). Ordered infinite Verified endpoints
 are accepted as rigorous but vacuous enclosures; coverage and magnitude

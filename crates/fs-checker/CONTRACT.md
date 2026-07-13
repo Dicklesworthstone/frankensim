@@ -10,12 +10,46 @@ cone contains `fs-evidence`, dependency-free `fs-blake3`, and the static
 `fs-crosswalk` vocabulary. A HARD
 distribution constraint (Proposal 12): NO solver stack, geometry kernel, or
 license gate anywhere in the graph. By construction the checker cannot run a
-solve. It carries `CHECKER_PROTOCOL_VERSION = 5` for the algebra-versioned
-admission-receipt ABI
-(distributed independently). `CHECKER_SUPPORTED_PACKAGE_FORMAT = 7` is an
+solve. It carries `CHECKER_PROTOCOL_VERSION = 6` for the admission-receipt,
+closed semantic-registry, and semantic-context ABI
+(distributed independently). `CHECKER_SUPPORTED_PACKAGE_FORMAT = 8` is an
 explicit protocol literal with a compile-time assertion against
 `fs_package::FORMAT_VERSION`, so a package schema bump cannot silently retain
 an incompatible checker ABI.
+
+## Semantic identity contracts
+
+Four owner-local typed-binary identities seal every checker authority surface:
+
+- `fs-checker:decision-report` is identity version 8 under
+  `fs-package:v8:checker-decision`. Its identity version is a literal tied by
+  compile-time assertion to `CHECKER_SUPPORTED_PACKAGE_FORMAT`; the independent
+  `CHECKER_PROTOCOL_VERSION = 6` is also fingerprinted and is not substituted
+  for the package-format identity version. The decision binds every
+  `CheckReport` and `Finding` field, nested semantic-context and verification
+  receipt hashes, signature purpose/payload, collection length/order, and the
+  derived decision hash rule.
+- `fs-checker:semantic-plugin` remains identity version 1 under
+  `fs-checker:semantic-plugin:v1`. Its bytes bind the exact family/schema,
+  payload cap, implementation revision, family-specific arithmetic limits, and
+  registry revision.
+- `fs-checker:semantic-registry` remains identity version 1 under
+  `fs-checker:semantic-registry:v1`. Its bytes bind the registry revision,
+  implementation version, every global resource limit, and the exact compiled
+  plugin count, order, descriptors, and fingerprints.
+- `fs-checker:semantic-report` remains identity version 1 under
+  `fs-checker:semantic-report:v1`. Its bytes bind the package root, registry,
+  package status, aggregate charges, ordered claim/failure counts and rows, all
+  nested receipt/failure fields, and every closed status/failure variant;
+  `context_hash` is derived and never trusted as an independent input.
+
+The three established v1 logical domains and canonical byte order are retained
+unchanged. Retained decision, plugin, registry, and report digests are admitted
+only at their exact declared identity version and only as exactly 32 bytes.
+Stale, future, truncated, and extended transports refuse; there is no implicit
+cross-version migration or best-effort reinterpretation. A migration must
+re-verify the source artifact under the new implementation and emit a newly
+versioned identity.
 
 ## Public types and semantics
 
@@ -31,7 +65,7 @@ an incompatible checker ABI.
   artifacts, waivers, and signatures. The separate signature argument selects
   the exact checker-purpose context and overrides a signature capability in the
   set.
-- `check_json(...)` and `check_json_with_capabilities(...)` — strict schema-v7
+- `check_json(...)` and `check_json_with_capabilities(...)` — strict schema-v8
   transport counterparts. Plain `check_json` denies external origins; the
   capability-aware form authenticates them after structural parsing.
 - `check_release_preflight(&EvidencePackage, expected_root, verifier)` — a
@@ -54,16 +88,37 @@ an incompatible checker ABI.
 - `check_json_for_release_with_capabilities(...)` — the strict-parser release
   entry point with explicit origin capabilities.
 - `CheckReport` is sealed and exposes read-only verdict, bounded recomputed root,
-  breakdown, signature, receipt, findings, policy, expected root, and
-  `decision_hash`. The hash binds checker protocol, policy, expected root,
-  package root/receipt, signature purpose, summary, verdict, and findings.
+  `IntegrityStatus`, `SemanticReport`, `OriginStatus`, breakdown, signature,
+  receipt, findings, policy, expected root, and `decision_hash`. The three
+  stages cannot be confused: semantic refusal leaves integrity `Verified` and
+  origin `NotRun`; an origin refusal preserves the independently computed
+  semantic transcript. The hash binds checker protocol, every stage status,
+  semantic context, policy, expected root, package root/receipt, signature
+  purpose, summary, verdict, and findings.
   `receipt` is `Some` only after successful package verification. `passed()` is
   policy-local; release consumers use `release_admitted()`, which additionally
-  requires the ReleaseAdmission policy, receipt, and valid decision hash.
+  requires the ReleaseAdmission policy, receipt, admissible semantic status,
+  authenticated origin, and valid decision/transcript hashes.
+  `release_independently_verified()` additionally requires
+  `SemanticStatus::Verified`; witnessless legacy packages may still satisfy
+  `release_admitted()` with the explicit `NotProvided` status.
+- `verify_portable_semantics(&EvidencePackage) -> SemanticReport` performs the
+  callback-free semantic stage for producers and auditors. The sealed report
+  exposes ordered per-claim decisions and failures, registry fingerprint,
+  package root, aggregate resource charges, and `context_hash`. The exact
+  context is required when producing a release-approval signature.
+- `semantic_plugin_registry()` is a closed, compiled-in registry. Protocol v6
+  implements exact family/version dispatch for
+  `frankensim/exact-interval@1` and
+  `frankensim/bounded-linf-residual@1`; unknown families and versions refuse.
 - `Verdict { Pass, Fail }`;
   `SignatureStatus { Unsigned, Refused, Unverified, Authenticated(payload) }`;
   the authenticated payload has private fields and read-only accessors.
-  `Finding { kind, detail }`.
+  `Finding { kind, detail }`;
+  `SemanticStatus { NotProvided, Verified, Refused, NotRun }`;
+  `SemanticFailureKind { StructuralIntegrity, UnknownFamily,
+  UnsupportedVersion, MalformedPayload, ResourceLimit, ClaimMismatch,
+  VerifierPanic }`.
 - Any package-verification or origin-capability refusal carries a zeroed
   breakdown, so unauthenticated evidence cannot retain a normal-looking
   positive pie alongside the failure finding.
@@ -74,37 +129,72 @@ an incompatible checker ABI.
 
 ## What it re-verifies
 
-1. Format support, per-claim completeness, sealed origin/color consistency, and
-   receipt re-derivation (delegated to `EvidencePackage::verify_with` — no
-   solver).
-2. Source-certificate, anchoring-dataset, falsifier-artifact,
-   derivation-artifact, waiver, and signature decisions only through exact
-   typed `VerificationCapabilities`. Plain integrity entry points use
-   `deny_all()`.
-3. The content address through bounded `try_merkle_root`, optionally checked
+The authority order is fixed and fail-closed:
+
+1. The content address through bounded `try_merkle_root`, optionally checked
    against an expected value before any source, anchor, falsifier, derivation,
    waiver, or signature capability dispatch. A transport refusal uses a zero
    refusal sentinel in the sealed report and never hashes or clones rejected
    oversized bytes. A mismatched bounded package reports its actual and expected
    roots but carries no receipt or admitted breakdown.
-4. Signature validity only through an injected `SignatureVerifier` over a typed
+2. Callback-free format, transport, content-binding, per-claim completeness,
+   sealed origin/color consistency, receipt structure, and portable-witness
+   envelope validation through `EvidencePackage::verify_structural_integrity`.
+3. Every attached portable witness through the exact compiled family/version.
+   The checker recomputes the mathematical result from canonical primitive
+   inputs and requires bitwise equality with the claim's ordered finite
+   `Verified` interval. Any false, unsupported, malformed, over-budget, or
+   panicking plugin refuses the whole semantic stage and suppresses every
+   external callback. Witnessless claims receive an explicit `NotProvided`
+   decision; they are never described as independently verified.
+4. Source-certificate, anchoring-dataset, falsifier-artifact,
+   derivation-artifact, waiver, and signature decisions only through exact
+   typed `VerificationCapabilities`. Plain integrity entry points use
+   `deny_all()`. Package verification rechecks structural semantics, but no
+   callback is reachable until stages 1–3 succeed.
+5. Signature validity only through an injected `SignatureVerifier` over a typed
    purpose. Integrity uses `PackageRootAttestation`; release uses
-   `ReleaseApproval { checker_protocol, expected_root, admission_context }`.
-   The context binds every non-signature policy fingerprint, waiver day,
-   admission, and compact waiver edge; policy or clock replay changes the
-   canonical signature subject and refuses. Purpose substitution refuses. No
-   signer identity or role is inferred.
-5. A policy-bound verification receipt: package root, policy fingerprints,
+   `ReleaseApproval { checker_protocol, expected_root, admission_context,
+   semantic_context }`. The contexts separately bind every non-signature policy
+   fingerprint, waiver day, admission, compact waiver edge, package root,
+   plugin implementation/limits, and complete semantic transcript. Policy,
+   clock, witness, plugin-set, or semantic-context replay changes the canonical
+   signature subject and refuses. Purpose substitution refuses. No signer
+   identity or role is inferred.
+6. A policy-bound verification receipt: package root, policy fingerprints,
    waiver day, signature status, and ordered origin/admission/waiver decisions.
-6. For explicit release admission only: at least one scientific finite
+7. For explicit release admission only: at least one scientific finite
    `Verified` interval or authenticated `Validated` claim, purpose-bound
    approval, authenticated per-certificate falsifiers, and exact authenticated
    per-Validated anchors. Empty, unsigned, all-waiver-dependent, unpaired
    certificate-class, and unanchored `Validated` declarations are conclusive
    structural blockers: they return a zeroed breakdown, no receipt, and at most
    raw `Unverified` signature bytes without invoking a verifier. Structurally
-   complete candidates reuse the already-computed content root for authority
-   verification rather than hashing the bounded package twice.
+   complete candidates may be rehashed by the package verifier, but every such
+   pass remains behind the same bounded transport envelope and precedes or
+   accompanies the exact authority decision it protects.
+
+### Built-in canonical witness schemas
+
+- `exact-interval@1` is a little-endian, iterative straight-line program with
+  at most 4,096 nodes. Leaves are exact signed integers in the IEEE-754 exact
+  `i53` range or finite ordered binary64 intervals. Closed tags implement add,
+  subtract, multiply, divide, negate, and hull over strictly backward node
+  references, followed by one in-range result index and no trailing bytes.
+  Exact integer arithmetic remains exact while representable; other arithmetic
+  expands endpoints by one adjacent binary64 value. Division by an interval
+  containing zero refuses.
+- `bounded-linf-residual@1` is a little-endian dense residual witness: norm tag
+  zero, nonzero row/column counts, row-major finite binary64 `A`, finite `x`,
+  and finite `b`, with no trailing bytes. The checker independently encloses
+  `b - A*x` using local outward interval arithmetic and returns
+  `[+0, max_i |r_i|]`. Each dimension is at most 128 and the matrix is at most
+  16,384 entries.
+- Per-witness payload is at most 256 KiB; a package has at most 4,096 witnesses,
+  8 MiB aggregate witness bytes, and 1,000,000 charged primitive operations.
+  Checker caps reuse the public `fs-package` envelope caps with compile-time
+  equality assertions. All family-specific and aggregate limits plus the
+  implementation version are bound into plugin/registry fingerprints.
 
 ## Invariants
 
@@ -117,10 +207,18 @@ an incompatible checker ABI.
   Certificate-shaped bytes and waiver fields never authorize themselves. Only
   the explicitly capability-bearing release functions can grant admission.
 - Source-certificate verification receives the complete typed request: package
-  provenance, claim index and id, statement, interval, producer, and artifact
-  hash. Waiver verification receives the package-owned authorization message
-  and an explicit date context. Anchored-source verification additionally binds
-  the exact validity regime, dataset identity, and parsed dataset hash.
+  provenance and recomputed root, claim index/id/subject hash, statement,
+  interval, producer, artifact hash, and optional portable witness. Waiver
+  verification receives the package-owned authorization message and an explicit
+  date context. Anchored-source verification additionally binds the exact
+  validity regime, dataset identity, and parsed dataset hash.
+- Integrity, semantic, origin, and signature authority are separately visible
+  and hash-bound. Semantic failure never invokes an external verifier; origin
+  or signature refusal never erases a completed semantic transcript.
+- Every semantic context binds the exact package root, registry fingerprint,
+  ordered claim/content/witness/plugin identities, per-claim status and failure,
+  operation charges, aggregate counters, and package status. Stored context
+  hashes are revalidated before a checker decision is considered valid.
 - Direct and transitively derived waiver-dependent claims appear only in the
   fourth pie bucket and never in scientific rank or magnitude summaries.
 - Every successful package verification retains its `VerificationReceipt`;
@@ -151,20 +249,26 @@ an incompatible checker ABI.
   scanned for independent declaration-level blockers when no receipt exists.
 - `render_pie`, reports, and decision hashes are deterministic; pie arithmetic
   widens counts to `u128` before multiplication.
+- Canonical semantic parsers are iterative, reject trailing/truncated input,
+  forward/self references, nonfinite residual scalars, invalid dimensions, and
+  arithmetic singularities, and cannot allocate beyond validated bounds.
 
 ## Error model
 
 The checker does not error — it REPORTS: failures become bounded `Finding`s in
 a sealed `CheckReport` with `Verdict::Fail`. External verifier panics become
-structured package refusals. No rejected transport is reserialized or scanned
-again for release diagnostics.
+structured package refusals; a built-in semantic verifier panic becomes a
+callback-free `VerifierPanic` refusal. No rejected transport is reserialized or
+scanned again for release diagnostics.
 
 ## Determinism class
 
-The deny-all report, rendered pie, and checker decision hash are deterministic
-pure functions of the package and explicit gate context. Capability-aware
-reports additionally depend on atomic verifier decisions and explicit waiver
-date; reproducible deployments must use pinned deterministic policies.
+The registry order, iterative payload decoders, arithmetic, semantic transcript,
+deny-all report, rendered pie, and checker decision hash are deterministic pure
+functions of the package and explicit gate context on the same binary64
+implementation. Capability-aware reports additionally depend on atomic verifier
+decisions and explicit waiver date; reproducible deployments must use pinned
+deterministic policies.
 
 ## Cancellation behavior
 
@@ -180,7 +284,7 @@ None.
 
 ## Conformance tests
 
-`tests/checker.rs` plus crate unit tests (32 integration cases, Proposal 12): clean pass with no findings;
+`tests/checker.rs`, `tests/epi_e2e.rs`, plus crate unit tests (Proposal 12): clean pass with no findings;
 incomplete-validated-claim failure; content-address (Merkle) tamper detection;
 including provenance tamper; malformed falsifier refusal with fail-closed pie;
 signature-presence and verifier-capability reporting; deterministic budget-pie
@@ -200,6 +304,16 @@ capability for both in-memory and strict-JSON integrity/release paths. A
 six-case release-shape battery proves callback-free refusal for empty, unsigned,
 all-waived, unpaired, and unanchored inputs, then proves a complete mixed-origin
 candidate dispatches every capability with identical in-memory and JSON reports.
+The semantic battery covers both positive built-in families through in-memory
+and schema-v8 JSON paths, including hand-derived expected-bit goldens for
+outward-rounded interval addition, multiplication, and division plus a nonzero
+rectangular dense residual; witnessless status separation; false exact and
+dense residual mathematics; unknown family/version; payload/root tamper with a
+newly computed root; trailing, truncated, nonfinite, divide-by-zero,
+forward/self reference, node/dimension/element overflow; exact aggregate
+operation-budget overflow; callback suppression; report/context determinism;
+and release signature replay under a different semantic context. The EPI
+round-trip carries and independently recomputes a portable interval witness.
 
 ## Independent re-verification (bead qmao.6.1)
 
@@ -220,6 +334,11 @@ solver and the checker cannot run a solve by construction.
 
 ## No-claim boundaries
 
+- Identity validation proves exact versioned byte binding only. It does not
+  authenticate a signer, make a semantic refusal scientifically true, or
+  upgrade package evidence. A stale identity is refused rather than migrated;
+  refusal itself supplies no claim about the old producer beyond
+  incompatibility with the current schema.
 - This crate ships no cryptographic primitive or signer registry. It records
   only that the injected policy accepted an exact typed signature subject; it
   does not establish signer identity, organizational role, or authorship.
@@ -227,8 +346,10 @@ solver and the checker cannot run a solve by construction.
   fetch source certificates or anchoring datasets. Injected verifiers may
   retrieve and independently validate addressed artifacts; the checker only
   supplies exact typed subjects and fails closed without those capabilities.
-- Schema v7 additionally binds the color-algebra version into derived receipts;
-  the checker refuses any stale algebra before re-running composition. Schema v6
+- Schema v8 carries portable witnesses and binds release approval to their
+  independent semantic transcript. It inherits schema v7's binding of the
+  color-algebra version into derived receipts; the checker refuses any stale
+  algebra before re-running composition. Schema v6
   sealed every claim behind a typed origin and emitted a policy-bound
   admission receipt. Content addressing proves
   package integrity, not scientific truth. Successful source verification
@@ -240,3 +361,10 @@ solver and the checker cannot run a solve by construction.
   signature obligations but does not re-run the source solver or independently
   establish experimental quality. Preflight is an inventory only and is never
   release authority.
+- `exact-interval@1` proves only the result of its supplied bounded expression
+  under the documented binary64 enclosure rules; it does not prove that the
+  expression models the claimed physical system. `bounded-linf-residual@1`
+  proves only a dense finite binary64 L-infinity residual enclosure for the
+  supplied `A`, `x`, and `b`; it does not establish conditioning, uniqueness,
+  discretization error, convergence, or model fidelity. Origin authentication
+  remains a separate mandatory authority boundary for source certificates.
