@@ -38,7 +38,7 @@
 use fs_exec::{
     CancelGate, GEMM_KERNEL_PREFIX, GemmBlockPlan, GemmExecutionIdentity, GemmTuneKey,
     PreparedGemmDecision, PreparedGemmRow, TilePool, TuneError, TuneEvidence, TuneObservation,
-    TuneSource, Tuner,
+    TuneRow, TuneSource, Tuner,
 };
 use fs_ledger::Ledger;
 
@@ -154,6 +154,112 @@ const GEMM_SWEEP_RUN_DOMAIN: &str = "org.frankensim.fs-session.gemm-sweep-run.v1
 /// receipts.
 pub const GEMM_TUNE_ROW_RECEIPT_DOMAIN: &str = "org.frankensim.fs-session.gemm-tune-row-receipt.v2";
 
+/// Current schema carried by retained GEMM tune-row receipt metadata.
+pub const GEMM_TUNE_ROW_RECEIPT_IDENTITY_VERSION: u32 = 2;
+
+/// Maximum exact retained tune-row receipt admitted by the replay parser.
+const MAX_GEMM_TUNE_ROW_RECEIPT_BYTES: usize = 128 * 1024;
+/// Maximum one outer receipt string admitted by the replay parser.
+const MAX_GEMM_TUNE_ROW_RECEIPT_STRING_BYTES: usize = 64 * 1024;
+/// Maximum nesting admitted while validating the embedded canonical row JSON.
+const MAX_GEMM_TUNE_ROW_RECEIPT_JSON_DEPTH: usize = 64;
+
+/// Schema of the tagged binary transport for deterministic GEMM execution facts.
+pub const GEMM_EXECUTION_RECEIPT_IDENTITY_VERSION: u32 = 1;
+/// BLAKE3 derive-key context for the deterministic GEMM execution receipt.
+pub const GEMM_EXECUTION_RECEIPT_DOMAIN: &str =
+    "org.frankensim.fs-session.gemm-execution-receipt.v1";
+const GEMM_EXECUTION_RECEIPT_MAGIC: &[u8] = b"frankensim-gemm-execution-receipt";
+const MAX_GEMM_EXECUTION_RECEIPT_BYTES: usize = 64 * 1024 * 1024;
+const MAX_GEMM_EXECUTION_RECEIPT_PANELS: usize = 1 << 20;
+const MAX_GEMM_EXECUTION_RECEIPT_STRING_BYTES: usize = 64 * 1024;
+
+const EXEC_TAG_DOMAIN: u8 = 0x01;
+const EXEC_TAG_VERSION: u8 = 0x02;
+const EXEC_TAG_DECLARED_RUN: u8 = 0x10;
+const EXEC_TAG_COMPLETED_TILES: u8 = 0x11;
+const EXEC_TAG_TOTAL_TILES: u8 = 0x12;
+const EXEC_TAG_MEMORY: u8 = 0x20;
+const EXEC_TAG_MEMORY_LIMIT: u8 = 0x21;
+const EXEC_TAG_MEMORY_STAGING: u8 = 0x22;
+const EXEC_TAG_MEMORY_B_PACK: u8 = 0x23;
+const EXEC_TAG_MEMORY_BAND_METADATA: u8 = 0x24;
+const EXEC_TAG_MEMORY_POOL_RUN: u8 = 0x25;
+const EXEC_TAG_MEMORY_ARENA_PER_WORKER: u8 = 0x26;
+const EXEC_TAG_MEMORY_ACTIVE_WORKERS: u8 = 0x27;
+const EXEC_TAG_MEMORY_ARENA: u8 = 0x28;
+const EXEC_TAG_MEMORY_REQUESTED: u8 = 0x29;
+const EXEC_TAG_PANELS: u8 = 0x30;
+const EXEC_TAG_PANEL: u8 = 0x31;
+const EXEC_TAG_PANEL_KERNEL: u8 = 0x32;
+const EXEC_TAG_PANEL_MODE: u8 = 0x33;
+const EXEC_TAG_PANEL_DECLARED_RUN: u8 = 0x34;
+const EXEC_TAG_PANEL_COMPLETED: u8 = 0x35;
+const EXEC_TAG_PANEL_TOTAL: u8 = 0x36;
+const EXEC_TAG_END: u8 = 0xff;
+
+/// Owner-local tune-row receipt declaration consumed by `xtask check-identities`.
+#[allow(dead_code)]
+pub const GEMM_TUNE_ROW_RECEIPT_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
+    "frankensim-identity-schema-v1",
+    "id=fs-session:gemm-tune-row-receipt",
+    "version_const=GEMM_TUNE_ROW_RECEIPT_IDENTITY_VERSION",
+    "version=2",
+    "domain=org.frankensim.fs-session.gemm-tune-row-receipt.v2",
+    "domain_const=GEMM_TUNE_ROW_RECEIPT_DOMAIN",
+    "encoder=ValidatedGemmTuneRow::receipt_identity",
+    "encoder_helpers=ValidatedGemmTuneRow::receipt_json,push_json_string,tune_metadata_plan::receipt_fragment,tune_metadata_plan::requested_bytes,parse_validated_gemm_tune_row_receipt,ExactJsonCursor::take,ExactJsonCursor::is_finished,ExactJsonCursor::canonical_string,ExactJsonCursor::take_hex_quad,ExactJsonCursor::canonical_u64,ExactJsonCursor::canonical_u128,ExactJsonCursor::canonical_value,ExactJsonCursor::parse_value,ExactJsonCursor::parse_number",
+    "schema_constants=GEMM_TUNE_ROW_RECEIPT_IDENTITY_VERSION,GEMM_TUNE_ROW_RECEIPT_DOMAIN,GEMM_TUNE_METADATA_PLAN_SCHEMA,GEMM_TUNER_SCHEMA_VERSION,SWEEP_MC,SWEEP_NC_CAP,SWEEP_SAMPLES,PROBE_MK_DIM_CAP,PROBE_N_DIM_CAP,MAX_GEMM_TUNE_ROW_RECEIPT_BYTES,MAX_GEMM_TUNE_ROW_RECEIPT_STRING_BYTES,MAX_GEMM_TUNE_ROW_RECEIPT_JSON_DEPTH,crates/fs-exec/src/tune.rs#GEMM_TUNE_KEY_IDENTITY_VERSION,crates/fs-exec/src/tune.rs#TUNE_ROW_IDENTITY_VERSION,crates/fs-exec/src/tune.rs#TUNING_DECISION_IDENTITY_VERSION,crates/fs-exec/src/tune.rs#GEMM_TUNE_KEY_IDENTITY_DOMAIN,crates/fs-exec/src/tune.rs#TUNE_ROW_IDENTITY_DOMAIN,crates/fs-exec/src/tune.rs#TUNING_DECISION_IDENTITY_DOMAIN,crates/fs-blake3/src/lib.rs#IV,crates/fs-blake3/src/lib.rs#MSG_PERMUTATION,crates/fs-blake3/src/lib.rs#BLOCK_LEN,crates/fs-blake3/src/lib.rs#CHUNK_LEN,crates/fs-blake3/src/lib.rs#CHUNK_START,crates/fs-blake3/src/lib.rs#CHUNK_END,crates/fs-blake3/src/lib.rs#PARENT,crates/fs-blake3/src/lib.rs#ROOT,crates/fs-blake3/src/lib.rs#DERIVE_KEY_CONTEXT,crates/fs-blake3/src/lib.rs#DERIVE_KEY_MATERIAL,crates/fs-blake3/src/lib.rs#MAX_DEPTH",
+    "schema_functions=ValidatedGemmTuneRow::from_prepared,ValidatedGemmTuneRow::matches_decision,ValidatedGemmTuneRow::matches_ledger_row,ValidatedGemmTuneRow::admit_receipt_json,parse_validated_gemm_tune_row_receipt,ExactJsonCursor::take,ExactJsonCursor::canonical_string,ExactJsonCursor::canonical_u64,ExactJsonCursor::canonical_u128,ExactJsonCursor::canonical_value,ExactJsonCursor::parse_value,ExactJsonCursor::parse_number,probe_buffer_bytes_for_dims,crates/fs-exec/src/tune.rs#PreparedGemmRow::key,crates/fs-exec/src/tune.rs#PreparedGemmRow::params_json,crates/fs-exec/src/tune.rs#PreparedGemmRow::row_json,crates/fs-exec/src/tune.rs#PreparedGemmDecision::key,crates/fs-exec/src/tune.rs#PreparedGemmDecision::plan,crates/fs-exec/src/tune.rs#PreparedGemmDecision::source,crates/fs-exec/src/tune.rs#GemmTuneKey::kernel,crates/fs-exec/src/tune.rs#GemmTuneKey::shape_class,crates/fs-exec/src/tune.rs#GemmTuneKey::execution,crates/fs-exec/src/tune.rs#TuneRow::from_canonical_json,crates/fs-exec/src/tune.rs#TuneRow::to_canonical_json,crates/fs-exec/src/tune.rs#TuneRow::kernel,crates/fs-exec/src/tune.rs#TuneRow::shape_class,crates/fs-exec/src/tune.rs#TuneRow::machine,crates/fs-exec/src/tune.rs#TuneRow::params,crates/fs-blake3/src/lib.rs#hash_domain,crates/fs-blake3/src/lib.rs#g,crates/fs-blake3/src/lib.rs#round,crates/fs-blake3/src/lib.rs#permute,crates/fs-blake3/src/lib.rs#compress,crates/fs-blake3/src/lib.rs#words_from_block,crates/fs-blake3/src/lib.rs#first_8_words,crates/fs-blake3/src/lib.rs#Output::chaining_value,crates/fs-blake3/src/lib.rs#Output::root_hash,crates/fs-blake3/src/lib.rs#parent_output,crates/fs-blake3/src/lib.rs#ChunkState::new,crates/fs-blake3/src/lib.rs#ChunkState::len,crates/fs-blake3/src/lib.rs#ChunkState::start_flag,crates/fs-blake3/src/lib.rs#ChunkState::update,crates/fs-blake3/src/lib.rs#ChunkState::output,crates/fs-blake3/src/lib.rs#Blake3::new_internal,crates/fs-blake3/src/lib.rs#Blake3::push_stack,crates/fs-blake3/src/lib.rs#Blake3::pop_stack,crates/fs-blake3/src/lib.rs#Blake3::add_chunk_chaining_value,crates/fs-blake3/src/lib.rs#Blake3::update,crates/fs-blake3/src/lib.rs#Blake3::finalize",
+    "schema_dependencies=fs-exec:gemm-tune-key,fs-exec:tune-row,fs-exec:tuning-decision",
+    "digest=fs-blake3",
+    "encoding=canonical-transport-exact-bits",
+    "sources=ValidatedGemmTuneRow",
+    "source_fields=ValidatedGemmTuneRow.kernel:semantic,ValidatedGemmTuneRow.shape_class:semantic,ValidatedGemmTuneRow.machine:semantic,ValidatedGemmTuneRow.params:semantic,ValidatedGemmTuneRow.measured:semantic,ValidatedGemmTuneRow.memory_limit_bytes:semantic,ValidatedGemmTuneRow.probe_buffer_bytes:semantic",
+    "source_bindings=ValidatedGemmTuneRow.kernel>kernel,ValidatedGemmTuneRow.shape_class>shape-class,ValidatedGemmTuneRow.machine>machine-fingerprint,ValidatedGemmTuneRow.params>selected-params,ValidatedGemmTuneRow.measured>measured-row,ValidatedGemmTuneRow.memory_limit_bytes>memory-limit-bytes,ValidatedGemmTuneRow.probe_buffer_bytes>probe-buffer-bytes",
+    "external_semantic_fields=artifact-domain,identity-version,canonical-field-order,machine-hex-width,metadata-plan-schema,metadata-plan-requested-bytes",
+    "semantic_fields=artifact-domain,identity-version,canonical-field-order,kernel,shape-class,machine-fingerprint,machine-hex-width,selected-params,measured-row,memory-limit-bytes,probe-buffer-bytes,metadata-plan-schema,metadata-plan-requested-bytes",
+    "excluded_fields=none",
+    "consumers=ValidatedGemmTuneRow::matches_decision,ValidatedGemmTuneRow::publish_to_ledger,ValidatedGemmTuneRow::publish_if_absent_or_identical,ValidatedGemmTuneRow::persist,ValidatedGemmTuneRow::replace_cache_row,install_sweep_row,adopt_cached_row,fs-roofline::KernelExecutionBinding",
+    "mutations=artifact-domain:crates/fs-session/src/gemm_tune.rs#gemm_tune_row_receipt_identity_fields_move_independently,identity-version:crates/fs-session/src/gemm_tune.rs#gemm_tune_row_receipt_identity_fields_move_independently,canonical-field-order:crates/fs-session/src/gemm_tune.rs#gemm_tune_row_receipt_identity_fields_move_independently,kernel:crates/fs-session/src/gemm_tune.rs#gemm_tune_row_receipt_identity_fields_move_independently,shape-class:crates/fs-session/src/gemm_tune.rs#gemm_tune_row_receipt_identity_fields_move_independently,machine-fingerprint:crates/fs-session/src/gemm_tune.rs#gemm_tune_row_receipt_identity_fields_move_independently,machine-hex-width:crates/fs-session/src/gemm_tune.rs#gemm_tune_row_receipt_identity_fields_move_independently,selected-params:crates/fs-session/src/gemm_tune.rs#gemm_tune_row_receipt_identity_fields_move_independently,measured-row:crates/fs-session/src/gemm_tune.rs#gemm_tune_row_receipt_identity_fields_move_independently,memory-limit-bytes:crates/fs-session/src/gemm_tune.rs#gemm_tune_row_receipt_identity_fields_move_independently,probe-buffer-bytes:crates/fs-session/src/gemm_tune.rs#gemm_tune_row_receipt_identity_fields_move_independently,metadata-plan-schema:crates/fs-session/src/gemm_tune.rs#gemm_tune_row_receipt_identity_fields_move_independently,metadata-plan-requested-bytes:crates/fs-session/src/gemm_tune.rs#gemm_tune_row_receipt_identity_fields_move_independently",
+    "nonsemantic_mutations=none",
+    "field_guard=classify_validated_gemm_tune_row_identity_fields",
+    "transport_guard=ValidatedGemmTuneRow::admit_receipt_json",
+    "version_guard=crates/fs-session/src/gemm_tune.rs#gemm_tune_row_receipt_versions_fail_closed",
+    "coupling_surface=fs-session:gemm-tune-row-receipt",
+];
+
+/// Owner-local execution-receipt declaration consumed by `xtask check-identities`.
+#[allow(dead_code)]
+pub const GEMM_EXECUTION_RECEIPT_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
+    "frankensim-identity-schema-v1",
+    "id=fs-session:gemm-execution-receipt",
+    "version_const=GEMM_EXECUTION_RECEIPT_IDENTITY_VERSION",
+    "version=1",
+    "domain=org.frankensim.fs-session.gemm-execution-receipt.v1",
+    "domain_const=GEMM_EXECUTION_RECEIPT_DOMAIN",
+    "encoder=GemmExecutionReceipt::receipt_identity",
+    "encoder_helpers=GemmDispatch::execution_receipt,GemmMemoryReceipt::from,GemmExecutionReceipt::from_report,GemmExecutionReceipt::canonical_bytes,GemmExecutionReceipt::canonical_bytes_with_schema,GemmExecutionReceipt::is_complete,GemmExecutionReceiptCodecError::fmt,execution_receipt_codec_error,checked_receipt_len_add,execution_receipt_encoded_len,push_execution_text,push_execution_u32,push_execution_u64,push_execution_u128,ExecutionReceiptCursor::take_exact,ExecutionReceiptCursor::take_tag,ExecutionReceiptCursor::fixed,ExecutionReceiptCursor::u32,ExecutionReceiptCursor::u64,ExecutionReceiptCursor::u128,ExecutionReceiptCursor::text,ExecutionReceiptCursor::is_finished",
+    "schema_constants=GEMM_EXECUTION_RECEIPT_IDENTITY_VERSION,GEMM_EXECUTION_RECEIPT_DOMAIN,GEMM_EXECUTION_RECEIPT_MAGIC,MAX_GEMM_EXECUTION_RECEIPT_BYTES,MAX_GEMM_EXECUTION_RECEIPT_PANELS,MAX_GEMM_EXECUTION_RECEIPT_STRING_BYTES,EXEC_TAG_DOMAIN,EXEC_TAG_VERSION,EXEC_TAG_DECLARED_RUN,EXEC_TAG_COMPLETED_TILES,EXEC_TAG_TOTAL_TILES,EXEC_TAG_MEMORY,EXEC_TAG_MEMORY_LIMIT,EXEC_TAG_MEMORY_STAGING,EXEC_TAG_MEMORY_B_PACK,EXEC_TAG_MEMORY_BAND_METADATA,EXEC_TAG_MEMORY_POOL_RUN,EXEC_TAG_MEMORY_ARENA_PER_WORKER,EXEC_TAG_MEMORY_ACTIVE_WORKERS,EXEC_TAG_MEMORY_ARENA,EXEC_TAG_MEMORY_REQUESTED,EXEC_TAG_PANELS,EXEC_TAG_PANEL,EXEC_TAG_PANEL_KERNEL,EXEC_TAG_PANEL_MODE,EXEC_TAG_PANEL_DECLARED_RUN,EXEC_TAG_PANEL_COMPLETED,EXEC_TAG_PANEL_TOTAL,EXEC_TAG_END,crates/fs-la/src/gemm.rs#GEMM_PANEL_RUN_DOMAIN,crates/fs-blake3/src/lib.rs#IV,crates/fs-blake3/src/lib.rs#MSG_PERMUTATION,crates/fs-blake3/src/lib.rs#BLOCK_LEN,crates/fs-blake3/src/lib.rs#CHUNK_LEN,crates/fs-blake3/src/lib.rs#CHUNK_START,crates/fs-blake3/src/lib.rs#CHUNK_END,crates/fs-blake3/src/lib.rs#PARENT,crates/fs-blake3/src/lib.rs#ROOT,crates/fs-blake3/src/lib.rs#DERIVE_KEY_CONTEXT,crates/fs-blake3/src/lib.rs#DERIVE_KEY_MATERIAL,crates/fs-blake3/src/lib.rs#MAX_DEPTH",
+    "schema_functions=GemmExecutionReceipt::from_report,GemmExecutionReceipt::from_canonical_bytes,GemmExecutionReceipt::is_complete,GemmMemoryReceipt::from,execution_receipt_encoded_len,ExecutionReceiptCursor::take_tag,ExecutionReceiptCursor::take_exact,ExecutionReceiptCursor::u32,ExecutionReceiptCursor::u64,ExecutionReceiptCursor::u128,ExecutionReceiptCursor::text,crates/fs-la/src/gemm.rs#gemm_panel_run_id,crates/fs-blake3/src/lib.rs#hash_domain,crates/fs-blake3/src/lib.rs#g,crates/fs-blake3/src/lib.rs#round,crates/fs-blake3/src/lib.rs#permute,crates/fs-blake3/src/lib.rs#compress,crates/fs-blake3/src/lib.rs#words_from_block,crates/fs-blake3/src/lib.rs#first_8_words,crates/fs-blake3/src/lib.rs#Output::chaining_value,crates/fs-blake3/src/lib.rs#Output::root_hash,crates/fs-blake3/src/lib.rs#parent_output,crates/fs-blake3/src/lib.rs#ChunkState::new,crates/fs-blake3/src/lib.rs#ChunkState::len,crates/fs-blake3/src/lib.rs#ChunkState::start_flag,crates/fs-blake3/src/lib.rs#ChunkState::update,crates/fs-blake3/src/lib.rs#ChunkState::output,crates/fs-blake3/src/lib.rs#Blake3::new_internal,crates/fs-blake3/src/lib.rs#Blake3::push_stack,crates/fs-blake3/src/lib.rs#Blake3::pop_stack,crates/fs-blake3/src/lib.rs#Blake3::add_chunk_chaining_value,crates/fs-blake3/src/lib.rs#Blake3::update,crates/fs-blake3/src/lib.rs#Blake3::finalize",
+    "schema_dependencies=none",
+    "digest=fs-blake3",
+    "encoding=typed-binary",
+    "sources=GemmExecutionReceipt,GemmMemoryReceipt,GemmPanelReceipt",
+    "source_fields=GemmExecutionReceipt.declared_run:semantic,GemmExecutionReceipt.completed_tiles:semantic,GemmExecutionReceipt.total_tiles:semantic,GemmExecutionReceipt.memory:derived:nested-memory-fields-classified-separately,GemmExecutionReceipt.panels:semantic,GemmMemoryReceipt.limit_bytes:semantic,GemmMemoryReceipt.staging_bytes:semantic,GemmMemoryReceipt.b_pack_bytes:semantic,GemmMemoryReceipt.band_metadata_bytes:semantic,GemmMemoryReceipt.pool_run_bytes:semantic,GemmMemoryReceipt.arena_bytes_per_worker:semantic,GemmMemoryReceipt.active_arena_workers:semantic,GemmMemoryReceipt.arena_bytes:semantic,GemmMemoryReceipt.requested_bytes:semantic,GemmPanelReceipt.kernel:semantic,GemmPanelReceipt.mode:semantic,GemmPanelReceipt.declared_run:semantic,GemmPanelReceipt.completed:semantic,GemmPanelReceipt.total:semantic",
+    "source_bindings=GemmExecutionReceipt.declared_run>declared-run,GemmExecutionReceipt.completed_tiles>completed-tiles,GemmExecutionReceipt.total_tiles>total-tiles,GemmExecutionReceipt.panels>panel-count+panel-order,GemmMemoryReceipt.limit_bytes>memory-limit-bytes,GemmMemoryReceipt.staging_bytes>memory-staging-bytes,GemmMemoryReceipt.b_pack_bytes>memory-b-pack-bytes,GemmMemoryReceipt.band_metadata_bytes>memory-band-metadata-bytes,GemmMemoryReceipt.pool_run_bytes>memory-pool-run-bytes,GemmMemoryReceipt.arena_bytes_per_worker>memory-arena-bytes-per-worker,GemmMemoryReceipt.active_arena_workers>memory-active-arena-workers,GemmMemoryReceipt.arena_bytes>memory-arena-bytes,GemmMemoryReceipt.requested_bytes>memory-requested-bytes,GemmPanelReceipt.kernel>panel-kernel,GemmPanelReceipt.mode>panel-mode,GemmPanelReceipt.declared_run>panel-declared-run,GemmPanelReceipt.completed>panel-completed,GemmPanelReceipt.total>panel-total",
+    "external_semantic_fields=artifact-domain,identity-version,canonical-field-order",
+    "semantic_fields=artifact-domain,identity-version,canonical-field-order,declared-run,completed-tiles,total-tiles,memory-limit-bytes,memory-staging-bytes,memory-b-pack-bytes,memory-band-metadata-bytes,memory-pool-run-bytes,memory-arena-bytes-per-worker,memory-active-arena-workers,memory-arena-bytes,memory-requested-bytes,panel-count,panel-order,panel-kernel,panel-mode,panel-declared-run,panel-completed,panel-total",
+    "excluded_fields=schedule-steals:observed-scheduling-only,schedule-cross-ccd-steals:observed-scheduling-only,schedule-cancel-latencies:observed-scheduling-only,schedule-worker-distribution:observed-scheduling-only,schedule-memory-peak:observed-allocation-only,schedule-memory-refused:failure-path-only",
+    "consumers=GemmDispatch::execution_receipt,GemmExecutionReceipt::is_complete,fs-roofline::KernelExecutionBinding,fs-roofline::execution_path_shape_eq",
+    "mutations=artifact-domain:crates/fs-session/src/gemm_tune.rs#gemm_execution_receipt_identity_fields_move_independently,identity-version:crates/fs-session/src/gemm_tune.rs#gemm_execution_receipt_identity_fields_move_independently,canonical-field-order:crates/fs-session/src/gemm_tune.rs#gemm_execution_receipt_identity_fields_move_independently,declared-run:crates/fs-session/src/gemm_tune.rs#gemm_execution_receipt_identity_fields_move_independently,completed-tiles:crates/fs-session/src/gemm_tune.rs#gemm_execution_receipt_identity_fields_move_independently,total-tiles:crates/fs-session/src/gemm_tune.rs#gemm_execution_receipt_identity_fields_move_independently,memory-limit-bytes:crates/fs-session/src/gemm_tune.rs#gemm_execution_receipt_identity_fields_move_independently,memory-staging-bytes:crates/fs-session/src/gemm_tune.rs#gemm_execution_receipt_identity_fields_move_independently,memory-b-pack-bytes:crates/fs-session/src/gemm_tune.rs#gemm_execution_receipt_identity_fields_move_independently,memory-band-metadata-bytes:crates/fs-session/src/gemm_tune.rs#gemm_execution_receipt_identity_fields_move_independently,memory-pool-run-bytes:crates/fs-session/src/gemm_tune.rs#gemm_execution_receipt_identity_fields_move_independently,memory-arena-bytes-per-worker:crates/fs-session/src/gemm_tune.rs#gemm_execution_receipt_identity_fields_move_independently,memory-active-arena-workers:crates/fs-session/src/gemm_tune.rs#gemm_execution_receipt_identity_fields_move_independently,memory-arena-bytes:crates/fs-session/src/gemm_tune.rs#gemm_execution_receipt_identity_fields_move_independently,memory-requested-bytes:crates/fs-session/src/gemm_tune.rs#gemm_execution_receipt_identity_fields_move_independently,panel-count:crates/fs-session/src/gemm_tune.rs#gemm_execution_receipt_identity_fields_move_independently,panel-order:crates/fs-session/src/gemm_tune.rs#gemm_execution_receipt_identity_fields_move_independently,panel-kernel:crates/fs-session/src/gemm_tune.rs#gemm_execution_receipt_identity_fields_move_independently,panel-mode:crates/fs-session/src/gemm_tune.rs#gemm_execution_receipt_identity_fields_move_independently,panel-declared-run:crates/fs-session/src/gemm_tune.rs#gemm_execution_receipt_identity_fields_move_independently,panel-completed:crates/fs-session/src/gemm_tune.rs#gemm_execution_receipt_identity_fields_move_independently,panel-total:crates/fs-session/src/gemm_tune.rs#gemm_execution_receipt_identity_fields_move_independently",
+    "nonsemantic_mutations=schedule-steals:crates/fs-session/src/gemm_tune.rs#execution_receipt_excludes_schedule_measurements,schedule-cross-ccd-steals:crates/fs-session/src/gemm_tune.rs#execution_receipt_excludes_schedule_measurements,schedule-cancel-latencies:crates/fs-session/src/gemm_tune.rs#execution_receipt_excludes_schedule_measurements,schedule-worker-distribution:crates/fs-session/src/gemm_tune.rs#execution_receipt_excludes_schedule_measurements,schedule-memory-peak:crates/fs-session/src/gemm_tune.rs#execution_receipt_excludes_schedule_measurements,schedule-memory-refused:crates/fs-session/src/gemm_tune.rs#execution_receipt_excludes_schedule_measurements",
+    "field_guard=classify_gemm_execution_receipt_identity_fields",
+    "transport_guard=GemmExecutionReceipt::from_canonical_bytes",
+    "version_guard=crates/fs-session/src/gemm_tune.rs#gemm_execution_receipt_versions_fail_closed",
+    "coupling_surface=fs-session:gemm-execution-receipt",
+];
+
 /// Build/dependency identity available to a root before it admits or publishes
 /// GEMM tune evidence.
 ///
@@ -205,6 +311,219 @@ fn push_json_string(out: &mut String, value: &str) {
         }
     }
     out.push('"');
+}
+
+/// Cursor for the exact, whitespace-free JSON subset emitted by the tune-row
+/// receipt writer. It validates embedded JSON without normalizing any retained
+/// bytes, so a successful parse can be checked as a writer/parser fixed point.
+struct ExactJsonCursor<'a> {
+    input: &'a str,
+    offset: usize,
+}
+
+impl ExactJsonCursor<'_> {
+    fn take(&mut self, expected: &str) -> Option<()> {
+        self.input
+            .get(self.offset..)?
+            .starts_with(expected)
+            .then(|| self.offset += expected.len())
+    }
+
+    fn is_finished(&self) -> bool {
+        self.offset == self.input.len()
+    }
+
+    fn canonical_string(&mut self) -> Option<String> {
+        let start = self.offset;
+        self.take("\"")?;
+        let mut value = String::new();
+        loop {
+            let rest = self.input.get(self.offset..)?;
+            let ch = rest.chars().next()?;
+            match ch {
+                '"' => {
+                    self.offset += 1;
+                    break;
+                }
+                '\\' => {
+                    self.offset += 1;
+                    let escape = self.input.get(self.offset..)?.chars().next()?;
+                    self.offset += escape.len_utf8();
+                    match escape {
+                        '"' => value.push('"'),
+                        '\\' => value.push('\\'),
+                        'n' => value.push('\n'),
+                        'r' => value.push('\r'),
+                        't' => value.push('\t'),
+                        'u' => {
+                            let first = self.take_hex_quad()?;
+                            let scalar = if (0xd800..=0xdbff).contains(&first) {
+                                self.take("\\u")?;
+                                let second = self.take_hex_quad()?;
+                                if !(0xdc00..=0xdfff).contains(&second) {
+                                    return None;
+                                }
+                                0x1_0000
+                                    + ((u32::from(first) - 0xd800) << 10)
+                                    + (u32::from(second) - 0xdc00)
+                            } else if (0xdc00..=0xdfff).contains(&first) {
+                                return None;
+                            } else {
+                                u32::from(first)
+                            };
+                            value.push(char::from_u32(scalar)?);
+                        }
+                        _ => return None,
+                    }
+                }
+                c if c.is_control() => return None,
+                c => {
+                    value.push(c);
+                    self.offset += c.len_utf8();
+                }
+            }
+            if value.len() > MAX_GEMM_TUNE_ROW_RECEIPT_STRING_BYTES {
+                return None;
+            }
+        }
+        let consumed = self.input.get(start..self.offset)?;
+        let mut canonical = String::new();
+        push_json_string(&mut canonical, &value);
+        (canonical == consumed).then_some(value)
+    }
+
+    fn take_hex_quad(&mut self) -> Option<u16> {
+        let hex = self.input.get(self.offset..self.offset.checked_add(4)?)?;
+        if !hex
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return None;
+        }
+        self.offset += 4;
+        u16::from_str_radix(hex, 16).ok()
+    }
+
+    fn canonical_u64(&mut self) -> Option<u64> {
+        let value = self.canonical_u128()?;
+        u64::try_from(value).ok()
+    }
+
+    fn canonical_u128(&mut self) -> Option<u128> {
+        let start = self.offset;
+        while self
+            .input
+            .as_bytes()
+            .get(self.offset)
+            .is_some_and(u8::is_ascii_digit)
+        {
+            self.offset += 1;
+        }
+        let digits = self.input.get(start..self.offset)?;
+        if digits.is_empty() || (digits.len() > 1 && digits.starts_with('0')) {
+            return None;
+        }
+        let value = digits.parse::<u128>().ok()?;
+        (value.to_string() == digits).then_some(value)
+    }
+
+    fn canonical_value(&mut self) -> Option<&str> {
+        let start = self.offset;
+        self.parse_value(0)?;
+        self.input.get(start..self.offset)
+    }
+
+    fn parse_value(&mut self, depth: usize) -> Option<()> {
+        if depth > MAX_GEMM_TUNE_ROW_RECEIPT_JSON_DEPTH {
+            return None;
+        }
+        match *self.input.as_bytes().get(self.offset)? {
+            b'"' => self.canonical_string().map(|_| ()),
+            b'{' => {
+                self.offset += 1;
+                if self.input.as_bytes().get(self.offset) == Some(&b'}') {
+                    self.offset += 1;
+                    return Some(());
+                }
+                let mut keys = std::collections::BTreeSet::new();
+                loop {
+                    if !keys.insert(self.canonical_string()?) {
+                        return None;
+                    }
+                    self.take(":")?;
+                    self.parse_value(depth + 1)?;
+                    match self.input.as_bytes().get(self.offset)? {
+                        b',' => self.offset += 1,
+                        b'}' => {
+                            self.offset += 1;
+                            return Some(());
+                        }
+                        _ => return None,
+                    }
+                }
+            }
+            b'[' => {
+                self.offset += 1;
+                if self.input.as_bytes().get(self.offset) == Some(&b']') {
+                    self.offset += 1;
+                    return Some(());
+                }
+                loop {
+                    self.parse_value(depth + 1)?;
+                    match self.input.as_bytes().get(self.offset)? {
+                        b',' => self.offset += 1,
+                        b']' => {
+                            self.offset += 1;
+                            return Some(());
+                        }
+                        _ => return None,
+                    }
+                }
+            }
+            b't' => self.take("true"),
+            b'f' => self.take("false"),
+            b'n' => self.take("null"),
+            b'-' | b'0'..=b'9' => self.parse_number(),
+            _ => None,
+        }
+    }
+
+    fn parse_number(&mut self) -> Option<()> {
+        let start = self.offset;
+        let negative = self.input.as_bytes().get(self.offset) == Some(&b'-');
+        if negative {
+            self.offset += 1;
+        }
+        match self.input.as_bytes().get(self.offset)? {
+            b'0' => {
+                self.offset += 1;
+                if negative {
+                    return None;
+                }
+                if self
+                    .input
+                    .as_bytes()
+                    .get(self.offset)
+                    .is_some_and(u8::is_ascii_digit)
+                {
+                    return None;
+                }
+            }
+            b'1'..=b'9' => {
+                self.offset += 1;
+                while self
+                    .input
+                    .as_bytes()
+                    .get(self.offset)
+                    .is_some_and(u8::is_ascii_digit)
+                {
+                    self.offset += 1;
+                }
+            }
+            _ => return None,
+        }
+        (self.offset > start).then_some(())
+    }
 }
 
 /// A structured autotune-loop failure. Every variant fails closed: sweep
@@ -560,6 +879,149 @@ pub struct GemmMemoryReceipt {
     pub requested_bytes: u128,
 }
 
+/// Refusal from the bounded execution-receipt codec.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GemmExecutionReceiptCodecError {
+    detail: &'static str,
+}
+
+impl core::fmt::Display for GemmExecutionReceiptCodecError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.detail)
+    }
+}
+
+impl std::error::Error for GemmExecutionReceiptCodecError {}
+
+fn execution_receipt_codec_error(detail: &'static str) -> GemmExecutionReceiptCodecError {
+    GemmExecutionReceiptCodecError { detail }
+}
+
+fn checked_receipt_len_add(total: &mut usize, add: usize) -> Option<()> {
+    *total = total.checked_add(add)?;
+    (*total <= MAX_GEMM_EXECUTION_RECEIPT_BYTES).then_some(())
+}
+
+fn execution_receipt_encoded_len(receipt: &GemmExecutionReceipt, domain: &str) -> Option<usize> {
+    if receipt.panels.len() > MAX_GEMM_EXECUTION_RECEIPT_PANELS
+        || domain.len() > MAX_GEMM_EXECUTION_RECEIPT_STRING_BYTES
+    {
+        return None;
+    }
+    let mut total = GEMM_EXECUTION_RECEIPT_MAGIC.len();
+    checked_receipt_len_add(&mut total, 1 + 4 + domain.len())?;
+    checked_receipt_len_add(&mut total, 1 + 4)?;
+    checked_receipt_len_add(&mut total, 3 * (1 + 8))?;
+    checked_receipt_len_add(&mut total, 1)?;
+    checked_receipt_len_add(&mut total, 1 + 8)?;
+    checked_receipt_len_add(&mut total, 4 * (1 + 16))?;
+    checked_receipt_len_add(&mut total, 1 + 8)?;
+    checked_receipt_len_add(&mut total, 1 + 8)?;
+    checked_receipt_len_add(&mut total, 2 * (1 + 16))?;
+    checked_receipt_len_add(&mut total, 1 + 8)?;
+    for panel in &receipt.panels {
+        if panel.kernel.len() > MAX_GEMM_EXECUTION_RECEIPT_STRING_BYTES
+            || panel.mode.len() > MAX_GEMM_EXECUTION_RECEIPT_STRING_BYTES
+        {
+            return None;
+        }
+        checked_receipt_len_add(&mut total, 1)?;
+        checked_receipt_len_add(&mut total, 1 + 4 + panel.kernel.len())?;
+        checked_receipt_len_add(&mut total, 1 + 4 + panel.mode.len())?;
+        checked_receipt_len_add(&mut total, 3 * (1 + 8))?;
+    }
+    checked_receipt_len_add(&mut total, 1)?;
+    Some(total)
+}
+
+fn push_execution_u32(out: &mut Vec<u8>, tag: u8, value: u32) {
+    out.push(tag);
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_execution_u64(out: &mut Vec<u8>, tag: u8, value: u64) {
+    out.push(tag);
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_execution_u128(out: &mut Vec<u8>, tag: u8, value: u128) {
+    out.push(tag);
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_execution_text(
+    out: &mut Vec<u8>,
+    tag: u8,
+    value: &str,
+) -> Result<(), GemmExecutionReceiptCodecError> {
+    let len = u32::try_from(value.len())
+        .ok()
+        .filter(|&len| {
+            usize::try_from(len).is_ok_and(|len| len <= MAX_GEMM_EXECUTION_RECEIPT_STRING_BYTES)
+        })
+        .ok_or_else(|| execution_receipt_codec_error("execution receipt string exceeds its cap"))?;
+    out.push(tag);
+    out.extend_from_slice(&len.to_le_bytes());
+    out.extend_from_slice(value.as_bytes());
+    Ok(())
+}
+
+struct ExecutionReceiptCursor<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+}
+
+impl ExecutionReceiptCursor<'_> {
+    fn take_exact(&mut self, expected: &[u8]) -> Option<()> {
+        let end = self.offset.checked_add(expected.len())?;
+        (self.bytes.get(self.offset..end)? == expected).then(|| self.offset = end)
+    }
+
+    fn take_tag(&mut self, expected: u8) -> Option<()> {
+        (self.bytes.get(self.offset).copied()? == expected).then(|| self.offset += 1)
+    }
+
+    fn fixed<const N: usize>(&mut self) -> Option<[u8; N]> {
+        let end = self.offset.checked_add(N)?;
+        let value = self.bytes.get(self.offset..end)?.try_into().ok()?;
+        self.offset = end;
+        Some(value)
+    }
+
+    fn u32(&mut self, tag: u8) -> Option<u32> {
+        self.take_tag(tag)?;
+        Some(u32::from_le_bytes(self.fixed()?))
+    }
+
+    fn u64(&mut self, tag: u8) -> Option<u64> {
+        self.take_tag(tag)?;
+        Some(u64::from_le_bytes(self.fixed()?))
+    }
+
+    fn u128(&mut self, tag: u8) -> Option<u128> {
+        self.take_tag(tag)?;
+        Some(u128::from_le_bytes(self.fixed()?))
+    }
+
+    fn text(&mut self, tag: u8) -> Option<String> {
+        self.take_tag(tag)?;
+        let len = usize::try_from(u32::from_le_bytes(self.fixed()?)).ok()?;
+        if len > MAX_GEMM_EXECUTION_RECEIPT_STRING_BYTES {
+            return None;
+        }
+        let end = self.offset.checked_add(len)?;
+        let value = core::str::from_utf8(self.bytes.get(self.offset..end)?)
+            .ok()?
+            .to_string();
+        self.offset = end;
+        Some(value)
+    }
+
+    fn is_finished(&self) -> bool {
+        self.offset == self.bytes.len()
+    }
+}
+
 impl From<fs_la::GemmMemoryReport> for GemmMemoryReceipt {
     fn from(report: fs_la::GemmMemoryReport) -> Self {
         Self {
@@ -600,6 +1062,213 @@ impl GemmExecutionReceipt {
         }
     }
 
+    fn canonical_bytes_with_schema(
+        &self,
+        domain: &str,
+        identity_version: u32,
+    ) -> Result<Vec<u8>, GemmExecutionReceiptCodecError> {
+        let encoded_len = execution_receipt_encoded_len(self, domain).ok_or_else(|| {
+            execution_receipt_codec_error("execution receipt exceeds its canonical transport cap")
+        })?;
+        let declared_run = self.declared_run;
+        let completed_tiles = u64::try_from(self.completed_tiles).map_err(|_| {
+            execution_receipt_codec_error("completed tile count does not fit canonical u64")
+        })?;
+        let total_tiles = u64::try_from(self.total_tiles).map_err(|_| {
+            execution_receipt_codec_error("total tile count does not fit canonical u64")
+        })?;
+        let active_arena_workers =
+            u64::try_from(self.memory.active_arena_workers).map_err(|_| {
+                execution_receipt_codec_error(
+                    "active arena worker count does not fit canonical u64",
+                )
+            })?;
+        let panel_count = u64::try_from(self.panels.len())
+            .map_err(|_| execution_receipt_codec_error("panel count does not fit canonical u64"))?;
+
+        let mut out = Vec::new();
+        out.try_reserve_exact(encoded_len).map_err(|_| {
+            execution_receipt_codec_error("execution receipt allocation was refused")
+        })?;
+        out.extend_from_slice(GEMM_EXECUTION_RECEIPT_MAGIC);
+        push_execution_text(&mut out, EXEC_TAG_DOMAIN, domain)?;
+        push_execution_u32(&mut out, EXEC_TAG_VERSION, identity_version);
+        push_execution_u64(&mut out, EXEC_TAG_DECLARED_RUN, declared_run);
+        push_execution_u64(&mut out, EXEC_TAG_COMPLETED_TILES, completed_tiles);
+        push_execution_u64(&mut out, EXEC_TAG_TOTAL_TILES, total_tiles);
+        out.push(EXEC_TAG_MEMORY);
+        push_execution_u64(&mut out, EXEC_TAG_MEMORY_LIMIT, self.memory.limit_bytes);
+        push_execution_u128(&mut out, EXEC_TAG_MEMORY_STAGING, self.memory.staging_bytes);
+        push_execution_u128(&mut out, EXEC_TAG_MEMORY_B_PACK, self.memory.b_pack_bytes);
+        push_execution_u128(
+            &mut out,
+            EXEC_TAG_MEMORY_BAND_METADATA,
+            self.memory.band_metadata_bytes,
+        );
+        push_execution_u128(
+            &mut out,
+            EXEC_TAG_MEMORY_POOL_RUN,
+            self.memory.pool_run_bytes,
+        );
+        push_execution_u64(
+            &mut out,
+            EXEC_TAG_MEMORY_ARENA_PER_WORKER,
+            self.memory.arena_bytes_per_worker,
+        );
+        push_execution_u64(
+            &mut out,
+            EXEC_TAG_MEMORY_ACTIVE_WORKERS,
+            active_arena_workers,
+        );
+        push_execution_u128(&mut out, EXEC_TAG_MEMORY_ARENA, self.memory.arena_bytes);
+        push_execution_u128(
+            &mut out,
+            EXEC_TAG_MEMORY_REQUESTED,
+            self.memory.requested_bytes,
+        );
+        push_execution_u64(&mut out, EXEC_TAG_PANELS, panel_count);
+        for panel in &self.panels {
+            out.push(EXEC_TAG_PANEL);
+            push_execution_text(&mut out, EXEC_TAG_PANEL_KERNEL, &panel.kernel)?;
+            push_execution_text(&mut out, EXEC_TAG_PANEL_MODE, &panel.mode)?;
+            push_execution_u64(&mut out, EXEC_TAG_PANEL_DECLARED_RUN, panel.declared_run);
+            push_execution_u64(&mut out, EXEC_TAG_PANEL_COMPLETED, panel.completed);
+            push_execution_u64(&mut out, EXEC_TAG_PANEL_TOTAL, panel.total);
+        }
+        out.push(EXEC_TAG_END);
+        if out.len() != encoded_len {
+            return Err(execution_receipt_codec_error(
+                "execution receipt encoded length disagrees with its checked plan",
+            ));
+        }
+        Ok(out)
+    }
+
+    /// Exact tagged binary transport for deterministic execution facts.
+    ///
+    /// The frame carries its domain and version, uses fixed-width little-endian
+    /// integers, length-prefixes every string and collection, and preserves
+    /// panel order. It is identical across ISAs for equal receipt values.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a platform-sized count cannot fit the fixed-width
+    /// schema, a string or collection exceeds its cap, or allocation fails.
+    #[must_use]
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, GemmExecutionReceiptCodecError> {
+        self.canonical_bytes_with_schema(
+            GEMM_EXECUTION_RECEIPT_DOMAIN,
+            GEMM_EXECUTION_RECEIPT_IDENTITY_VERSION,
+        )
+    }
+
+    /// Parse one exact current tagged binary transport.
+    ///
+    /// Stale domains/versions, missing or reordered tags, oversized lengths,
+    /// invalid UTF-8, trailing bytes, and any non-fixed-point spelling fail
+    /// closed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless `bytes` are the exact current bounded transport.
+    #[must_use]
+    pub fn from_canonical_bytes(bytes: &[u8]) -> Result<Self, GemmExecutionReceiptCodecError> {
+        let fail = || {
+            execution_receipt_codec_error(
+                "execution receipt is not an exact current canonical transport",
+            )
+        };
+        if bytes.len() > MAX_GEMM_EXECUTION_RECEIPT_BYTES {
+            return Err(fail());
+        }
+        let mut parser = ExecutionReceiptCursor { bytes, offset: 0 };
+        parser
+            .take_exact(GEMM_EXECUTION_RECEIPT_MAGIC)
+            .ok_or_else(fail)?;
+        if parser.text(EXEC_TAG_DOMAIN).ok_or_else(fail)? != GEMM_EXECUTION_RECEIPT_DOMAIN {
+            return Err(fail());
+        }
+        if parser.u32(EXEC_TAG_VERSION).ok_or_else(fail)? != GEMM_EXECUTION_RECEIPT_IDENTITY_VERSION
+        {
+            return Err(fail());
+        }
+        let declared_run = parser.u64(EXEC_TAG_DECLARED_RUN).ok_or_else(fail)?;
+        let completed_tiles =
+            usize::try_from(parser.u64(EXEC_TAG_COMPLETED_TILES).ok_or_else(fail)?)
+                .map_err(|_| fail())?;
+        let total_tiles = usize::try_from(parser.u64(EXEC_TAG_TOTAL_TILES).ok_or_else(fail)?)
+            .map_err(|_| fail())?;
+        parser.take_tag(EXEC_TAG_MEMORY).ok_or_else(fail)?;
+        let memory = GemmMemoryReceipt {
+            limit_bytes: parser.u64(EXEC_TAG_MEMORY_LIMIT).ok_or_else(fail)?,
+            staging_bytes: parser.u128(EXEC_TAG_MEMORY_STAGING).ok_or_else(fail)?,
+            b_pack_bytes: parser.u128(EXEC_TAG_MEMORY_B_PACK).ok_or_else(fail)?,
+            band_metadata_bytes: parser
+                .u128(EXEC_TAG_MEMORY_BAND_METADATA)
+                .ok_or_else(fail)?,
+            pool_run_bytes: parser.u128(EXEC_TAG_MEMORY_POOL_RUN).ok_or_else(fail)?,
+            arena_bytes_per_worker: parser
+                .u64(EXEC_TAG_MEMORY_ARENA_PER_WORKER)
+                .ok_or_else(fail)?,
+            active_arena_workers: usize::try_from(
+                parser
+                    .u64(EXEC_TAG_MEMORY_ACTIVE_WORKERS)
+                    .ok_or_else(fail)?,
+            )
+            .map_err(|_| fail())?,
+            arena_bytes: parser.u128(EXEC_TAG_MEMORY_ARENA).ok_or_else(fail)?,
+            requested_bytes: parser.u128(EXEC_TAG_MEMORY_REQUESTED).ok_or_else(fail)?,
+        };
+        let panel_count = usize::try_from(parser.u64(EXEC_TAG_PANELS).ok_or_else(fail)?)
+            .ok()
+            .filter(|&count| count <= MAX_GEMM_EXECUTION_RECEIPT_PANELS)
+            .ok_or_else(fail)?;
+        let mut panels = Vec::new();
+        panels.try_reserve_exact(panel_count).map_err(|_| fail())?;
+        for _ in 0..panel_count {
+            parser.take_tag(EXEC_TAG_PANEL).ok_or_else(fail)?;
+            panels.push(GemmPanelReceipt {
+                kernel: parser.text(EXEC_TAG_PANEL_KERNEL).ok_or_else(fail)?,
+                mode: parser.text(EXEC_TAG_PANEL_MODE).ok_or_else(fail)?,
+                declared_run: parser.u64(EXEC_TAG_PANEL_DECLARED_RUN).ok_or_else(fail)?,
+                completed: parser.u64(EXEC_TAG_PANEL_COMPLETED).ok_or_else(fail)?,
+                total: parser.u64(EXEC_TAG_PANEL_TOTAL).ok_or_else(fail)?,
+            });
+        }
+        parser.take_tag(EXEC_TAG_END).ok_or_else(fail)?;
+        if !parser.is_finished() {
+            return Err(fail());
+        }
+        let receipt = Self {
+            declared_run,
+            completed_tiles,
+            total_tiles,
+            memory,
+            panels,
+        };
+        if receipt.canonical_bytes().map_err(|_| fail())? != bytes {
+            return Err(fail());
+        }
+        Ok(receipt)
+    }
+
+    /// Domain-separated digest of [`Self::canonical_bytes`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the same transport-construction errors as
+    /// [`Self::canonical_bytes`].
+    #[must_use]
+    pub fn receipt_identity(
+        &self,
+    ) -> Result<fs_ledger::ContentHash, GemmExecutionReceiptCodecError> {
+        let bytes = self.canonical_bytes()?;
+        Ok(fs_blake3::hash_domain(
+            GEMM_EXECUTION_RECEIPT_DOMAIN,
+            &bytes,
+        ))
+    }
+
     /// Whether every panel completed and carries the exact child RunId derived
     /// from this receipt's declared operation identity and panel ordinal.
     #[must_use]
@@ -623,6 +1292,60 @@ impl GemmExecutionReceipt {
                     && panel.completed == panel.total
             })
     }
+}
+
+#[allow(dead_code)]
+fn classify_gemm_execution_receipt_identity_fields(
+    receipt: &GemmExecutionReceipt,
+    memory_source: &GemmMemoryReceipt,
+    panel_source: &GemmPanelReceipt,
+) {
+    let GemmExecutionReceipt {
+        declared_run,
+        completed_tiles,
+        total_tiles,
+        memory,
+        panels,
+    } = receipt;
+    let GemmMemoryReceipt {
+        limit_bytes,
+        staging_bytes,
+        b_pack_bytes,
+        band_metadata_bytes,
+        pool_run_bytes,
+        arena_bytes_per_worker,
+        active_arena_workers,
+        arena_bytes,
+        requested_bytes,
+    } = memory_source;
+    let GemmPanelReceipt {
+        kernel,
+        mode,
+        declared_run: panel_declared_run,
+        completed,
+        total,
+    } = panel_source;
+    let _ = (
+        declared_run,
+        completed_tiles,
+        total_tiles,
+        memory,
+        panels,
+        limit_bytes,
+        staging_bytes,
+        b_pack_bytes,
+        band_metadata_bytes,
+        pool_run_bytes,
+        arena_bytes_per_worker,
+        active_arena_workers,
+        arena_bytes,
+        requested_bytes,
+        kernel,
+        mode,
+        panel_declared_run,
+        completed,
+        total,
+    );
 }
 
 /// Explicit access policy for the durable GEMM tune cache.
@@ -664,6 +1387,79 @@ pub struct ValidatedGemmTuneRow {
     measured: String,
     memory_limit_bytes: u64,
     probe_buffer_bytes: u128,
+}
+
+fn parse_validated_gemm_tune_row_receipt(receipt_json: &str) -> Option<ValidatedGemmTuneRow> {
+    if receipt_json.len() > MAX_GEMM_TUNE_ROW_RECEIPT_BYTES {
+        return None;
+    }
+    let mut parser = ExactJsonCursor {
+        input: receipt_json,
+        offset: 0,
+    };
+    parser.take("{\"kernel\":")?;
+    let kernel = parser.canonical_string()?;
+    parser.take(",\"shape_class\":")?;
+    let shape_class = parser.canonical_string()?;
+    parser.take(",\"machine\":")?;
+    let machine_hex = parser.canonical_string()?;
+    if machine_hex.len() != 16
+        || !machine_hex
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return None;
+    }
+    let machine_value = u64::from_str_radix(&machine_hex, 16).ok()?;
+    let machine = machine_value.to_le_bytes();
+    parser.take(",\"params\":")?;
+    let params_value = parser.canonical_string()?;
+    let mut params = String::new();
+    push_json_string(&mut params, &params_value);
+    parser.take(",\"measured\":")?;
+    let measured = parser.canonical_value()?.to_string();
+    if !measured.starts_with('{')
+        || measured.len() > tune_metadata_plan::MEASURED_BYTES_CAP
+        || params.len() > tune_metadata_plan::PARAMS_BYTES_CAP
+        || kernel.len() > MAX_GEMM_TUNE_ROW_RECEIPT_STRING_BYTES
+        || shape_class.len() > MAX_GEMM_TUNE_ROW_RECEIPT_STRING_BYTES
+    {
+        return None;
+    }
+    let measured_row = TuneRow::from_canonical_json(&measured).ok()?;
+    if measured_row.kernel() != kernel.as_str()
+        || measured_row.shape_class() != shape_class.as_str()
+        || measured_row.machine() != machine_value
+        || measured_row.params() != params_value.as_str()
+    {
+        return None;
+    }
+    parser.take(",\"memory_limit_bytes\":")?;
+    let memory_limit_bytes = parser.canonical_u64()?;
+    parser.take(",\"probe_buffer_bytes\":")?;
+    let probe_buffer_bytes = parser.canonical_u128()?;
+    parser.take(",\"metadata_plan\":{\"schema\":")?;
+    if parser.canonical_string()? != GEMM_TUNE_METADATA_PLAN_SCHEMA {
+        return None;
+    }
+    parser.take(",\"requested_bytes\":")?;
+    if parser.canonical_u128()? != gemm_tune_metadata_plan_bytes() {
+        return None;
+    }
+    parser.take("}}")?;
+    if !parser.is_finished() {
+        return None;
+    }
+    let row = ValidatedGemmTuneRow {
+        kernel,
+        shape_class,
+        machine,
+        params,
+        measured,
+        memory_limit_bytes,
+        probe_buffer_bytes,
+    };
+    (row.receipt_json() == receipt_json).then_some(row)
 }
 
 impl ValidatedGemmTuneRow {
@@ -740,6 +1536,29 @@ impl ValidatedGemmTuneRow {
     #[must_use]
     pub fn receipt_identity(&self) -> fs_ledger::ContentHash {
         fs_blake3::hash_domain(GEMM_TUNE_ROW_RECEIPT_DOMAIN, self.receipt_json().as_bytes())
+    }
+
+    /// Admit retained tune-row receipt bytes under explicit schema metadata.
+    ///
+    /// The v2 receipt preimage stays byte-for-byte compatible with the shipped
+    /// writer. Replay carries the domain/version beside those bytes; this path
+    /// refuses stale metadata, re-adopts the embedded fs-exec tune row through
+    /// its exact semantic parser, cross-checks every duplicated key field,
+    /// requires the current metadata-plan fragment, rebuilds the sealed private
+    /// tuple, and accepts only a byte-identical writer/parser fixed point.
+    #[must_use]
+    pub fn admit_receipt_json(
+        identity_domain: &str,
+        identity_version: u32,
+        receipt_json: &str,
+    ) -> Option<fs_ledger::ContentHash> {
+        if identity_domain != GEMM_TUNE_ROW_RECEIPT_DOMAIN
+            || identity_version != GEMM_TUNE_ROW_RECEIPT_IDENTITY_VERSION
+        {
+            return None;
+        }
+        let row = parse_validated_gemm_tune_row_receipt(receipt_json)?;
+        Some(row.receipt_identity())
     }
 
     /// Whether this sealed row is the exact evidence behind one dispatched
@@ -861,6 +1680,28 @@ impl ValidatedGemmTuneRow {
             )))
         }
     }
+}
+
+#[allow(dead_code)]
+fn classify_validated_gemm_tune_row_identity_fields(row: &ValidatedGemmTuneRow) {
+    let ValidatedGemmTuneRow {
+        kernel,
+        shape_class,
+        machine,
+        params,
+        measured,
+        memory_limit_bytes,
+        probe_buffer_bytes,
+    } = row;
+    let _ = (
+        kernel,
+        shape_class,
+        machine,
+        params,
+        measured,
+        memory_limit_bytes,
+        probe_buffer_bytes,
+    );
 }
 
 /// The kernel key for this build's GEMM accumulation contract.
@@ -1902,6 +2743,446 @@ mod tests {
         assert!(v2.kernel().contains("fs-session-tuner-v2"));
     }
 
+    fn identity_test_measured_tune_row(
+        kernel: &str,
+        shape_class: &str,
+        machine: u64,
+        refresh: u32,
+    ) -> String {
+        let winner = GemmBlockPlan::new(16, 512).expect("winner plan");
+        let runner_up = GemmBlockPlan::new(32, 512).expect("runner-up plan");
+        let evidence = TuneEvidence::ranked_wall_times(vec![
+            TuneObservation::wall_time(winner.canonical(), vec![10, 11, 12])
+                .expect("winner evidence"),
+            TuneObservation::wall_time(runner_up.canonical(), vec![20, 21, 22])
+                .expect("runner-up evidence"),
+        ])
+        .expect("ranked evidence");
+        TuneRow::new(
+            kernel,
+            shape_class,
+            machine,
+            winner.canonical(),
+            evidence,
+            refresh,
+        )
+        .expect("valid measured GEMM tune row")
+        .to_canonical_json()
+        .expect("canonical measured GEMM tune row")
+    }
+
+    fn identity_test_validated_tune_row() -> ValidatedGemmTuneRow {
+        let memory_limit_bytes = 1 << 30;
+        let key = gemm_tune_key_budgeted(
+            4,
+            320,
+            288,
+            300,
+            fs_la::GemmMemoryEnvelope {
+                limit_bytes: memory_limit_bytes,
+            },
+        )
+        .expect("identity-test key");
+        let machine = 0x0102_0304_0506_0708_u64;
+        let selected = GemmBlockPlan::new(16, 512)
+            .expect("selected plan")
+            .canonical();
+        let mut params = String::new();
+        push_json_string(&mut params, &selected);
+        let probe_buffer_bytes = probe_buffer_bytes_for_dims(key.execution().probe_dims())
+            .expect("identity-test probe plan");
+        ValidatedGemmTuneRow {
+            kernel: key.kernel().to_string(),
+            shape_class: key.shape_class().to_string(),
+            machine: machine.to_le_bytes(),
+            params,
+            measured: identity_test_measured_tune_row(key.kernel(), key.shape_class(), machine, 1),
+            memory_limit_bytes,
+            probe_buffer_bytes,
+        }
+    }
+
+    #[test]
+    fn gemm_tune_row_receipt_identity_fields_move_independently() {
+        let base_row = identity_test_validated_tune_row();
+        let base_json = base_row.receipt_json();
+        let base_identity = base_row.receipt_identity();
+        assert_eq!(
+            ValidatedGemmTuneRow::admit_receipt_json(
+                GEMM_TUNE_ROW_RECEIPT_DOMAIN,
+                GEMM_TUNE_ROW_RECEIPT_IDENTITY_VERSION,
+                &base_json,
+            ),
+            Some(base_identity),
+            "the current writer must be an exact parser fixed point"
+        );
+
+        let mut variants = Vec::new();
+        let mut kernel = base_row.clone();
+        kernel.kernel.push_str("-v2");
+        variants.push(("kernel", kernel, false));
+        let mut shape = base_row.clone();
+        shape.shape_class.push_str("-v2");
+        variants.push(("shape-class", shape, false));
+        let mut machine = base_row.clone();
+        machine.machine[0] ^= 1;
+        variants.push(("machine-fingerprint", machine, false));
+        let mut params = base_row.clone();
+        params.params = "\"mc=32,nc-cap=512\"".to_string();
+        variants.push(("selected-params", params, false));
+        let mut measured = base_row.clone();
+        measured.measured = identity_test_measured_tune_row(
+            &base_row.kernel,
+            &base_row.shape_class,
+            u64::from_le_bytes(base_row.machine),
+            2,
+        );
+        variants.push(("measured-row", measured, true));
+        let mut memory_limit = base_row.clone();
+        memory_limit.memory_limit_bytes += 1;
+        variants.push(("memory-limit-bytes", memory_limit, true));
+        let mut probe_buffers = base_row.clone();
+        probe_buffers.probe_buffer_bytes += 1;
+        variants.push(("probe-buffer-bytes", probe_buffers, true));
+
+        let mut identities = std::collections::BTreeSet::new();
+        for (field, variant, should_admit) in variants {
+            let json = variant.receipt_json();
+            let identity = variant.receipt_identity();
+            assert_ne!(identity, base_identity, "{field} did not move identity");
+            assert!(
+                identities.insert(identity.to_string()),
+                "{field} collided with another independent field mutation"
+            );
+            let admitted = ValidatedGemmTuneRow::admit_receipt_json(
+                GEMM_TUNE_ROW_RECEIPT_DOMAIN,
+                GEMM_TUNE_ROW_RECEIPT_IDENTITY_VERSION,
+                &json,
+            );
+            if should_admit {
+                assert_eq!(
+                    admitted,
+                    Some(identity),
+                    "{field} did not survive the exact current transport"
+                );
+            } else {
+                assert!(
+                    admitted.is_none(),
+                    "outer-only {field} mutation disagrees with the embedded fs-exec row"
+                );
+            }
+        }
+
+        let stale_domain = "org.frankensim.fs-session.gemm-tune-row-receipt.v3";
+        assert!(
+            ValidatedGemmTuneRow::admit_receipt_json(
+                stale_domain,
+                GEMM_TUNE_ROW_RECEIPT_IDENTITY_VERSION,
+                &base_json,
+            )
+            .is_none(),
+            "artifact-domain mutation must be refused"
+        );
+        assert!(
+            ValidatedGemmTuneRow::admit_receipt_json(
+                GEMM_TUNE_ROW_RECEIPT_DOMAIN,
+                GEMM_TUNE_ROW_RECEIPT_IDENTITY_VERSION + 1,
+                &base_json,
+            )
+            .is_none(),
+            "identity-version mutation must be refused"
+        );
+
+        let mut kernel_json = String::new();
+        push_json_string(&mut kernel_json, &base_row.kernel);
+        let mut shape_json = String::new();
+        push_json_string(&mut shape_json, &base_row.shape_class);
+        let kernel_field = format!("\"kernel\":{kernel_json}");
+        let shape_field = format!("\"shape_class\":{shape_json}");
+        let reordered = base_json.replacen(
+            &format!("{kernel_field},{shape_field}"),
+            &format!("{shape_field},{kernel_field}"),
+            1,
+        );
+        let machine_hex = format!("{:016x}", u64::from_le_bytes(base_row.machine));
+        let narrow_machine = base_json.replacen(
+            &format!("\"machine\":\"{machine_hex}\""),
+            &format!("\"machine\":\"{}\"", machine_hex.trim_start_matches('0')),
+            1,
+        );
+        let moved_plan_schema = base_json.replacen(
+            GEMM_TUNE_METADATA_PLAN_SCHEMA,
+            "fs-session-tune-metadata-plan-v2",
+            1,
+        );
+        let requested = gemm_tune_metadata_plan_bytes();
+        let moved_plan_bytes = base_json.replacen(
+            &format!("\"requested_bytes\":{requested}"),
+            &format!("\"requested_bytes\":{}", requested + 1),
+            1,
+        );
+        for (field, hostile) in [
+            ("canonical-field-order", reordered),
+            ("machine-hex-width", narrow_machine),
+            ("metadata-plan-schema", moved_plan_schema),
+            ("metadata-plan-requested-bytes", moved_plan_bytes),
+        ] {
+            assert_ne!(hostile, base_json, "{field} mutation did not change bytes");
+            assert!(
+                ValidatedGemmTuneRow::admit_receipt_json(
+                    GEMM_TUNE_ROW_RECEIPT_DOMAIN,
+                    GEMM_TUNE_ROW_RECEIPT_IDENTITY_VERSION,
+                    &hostile,
+                )
+                .is_none(),
+                "{field} mutation must fail exact replay admission"
+            );
+        }
+    }
+
+    #[test]
+    fn gemm_tune_row_receipt_versions_fail_closed() {
+        let row = identity_test_validated_tune_row();
+        let json = row.receipt_json();
+        for (domain, version) in [
+            (
+                "org.frankensim.fs-session.gemm-tune-row-receipt.v1",
+                GEMM_TUNE_ROW_RECEIPT_IDENTITY_VERSION,
+            ),
+            (
+                GEMM_TUNE_ROW_RECEIPT_DOMAIN,
+                GEMM_TUNE_ROW_RECEIPT_IDENTITY_VERSION - 1,
+            ),
+            ("", GEMM_TUNE_ROW_RECEIPT_IDENTITY_VERSION),
+        ] {
+            assert!(
+                ValidatedGemmTuneRow::admit_receipt_json(domain, version, &json).is_none(),
+                "stale receipt metadata {domain:?} v{version} must fail closed"
+            );
+        }
+        assert!(
+            ValidatedGemmTuneRow::admit_receipt_json(
+                GEMM_TUNE_ROW_RECEIPT_DOMAIN,
+                GEMM_TUNE_ROW_RECEIPT_IDENTITY_VERSION,
+                &format!("{json} "),
+            )
+            .is_none(),
+            "trailing display content is not an exact retained transport"
+        );
+
+        let stale_nested_domain = row.receipt_json().replacen(
+            "org.frankensim.fs-exec.tune-row.v2",
+            "org.frankensim.fs-exec.tune-row.v1",
+            1,
+        );
+        let stale_nested_version =
+            row.receipt_json()
+                .replacen("\"identity_version\":2", "\"identity_version\":1", 1);
+        for stale in [stale_nested_domain, stale_nested_version] {
+            assert!(
+                ValidatedGemmTuneRow::admit_receipt_json(
+                    GEMM_TUNE_ROW_RECEIPT_DOMAIN,
+                    GEMM_TUNE_ROW_RECEIPT_IDENTITY_VERSION,
+                    &stale,
+                )
+                .is_none(),
+                "stale embedded fs-exec tune-row metadata must fail closed"
+            );
+        }
+    }
+
+    fn identity_test_execution_receipt() -> GemmExecutionReceipt {
+        let operation = fs_exec::RunId(17);
+        GemmExecutionReceipt {
+            declared_run: operation.0,
+            completed_tiles: 23,
+            total_tiles: 23,
+            memory: GemmMemoryReceipt {
+                limit_bytes: 1 << 30,
+                staging_bytes: 101,
+                b_pack_bytes: 102,
+                band_metadata_bytes: 103,
+                pool_run_bytes: 104,
+                arena_bytes_per_worker: 105,
+                active_arena_workers: 7,
+                arena_bytes: 106,
+                requested_bytes: 107,
+            },
+            panels: vec![
+                GemmPanelReceipt {
+                    kernel: "fs-la/gemm-panel-a".to_string(),
+                    mode: "deterministic".to_string(),
+                    declared_run: fs_la::gemm_panel_run_id(operation, 0).0,
+                    completed: 11,
+                    total: 11,
+                },
+                GemmPanelReceipt {
+                    kernel: "fs-la/gemm-panel-b".to_string(),
+                    mode: "deterministic".to_string(),
+                    declared_run: fs_la::gemm_panel_run_id(operation, 1).0,
+                    completed: 12,
+                    total: 12,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // one table proves every independently framed source field
+    fn gemm_execution_receipt_identity_fields_move_independently() {
+        let base = identity_test_execution_receipt();
+        let base_bytes = base.canonical_bytes().expect("canonical execution receipt");
+        let base_identity = base.receipt_identity().expect("execution identity");
+        assert_eq!(
+            GemmExecutionReceipt::from_canonical_bytes(&base_bytes),
+            Ok(base.clone()),
+            "the writer and parser must be an exact field-preserving fixed point"
+        );
+
+        let mut variants = Vec::new();
+        let mut declared_run = base.clone();
+        declared_run.declared_run += 1;
+        variants.push(("declared-run", declared_run));
+        let mut completed_tiles = base.clone();
+        completed_tiles.completed_tiles += 1;
+        variants.push(("completed-tiles", completed_tiles));
+        let mut total_tiles = base.clone();
+        total_tiles.total_tiles += 1;
+        variants.push(("total-tiles", total_tiles));
+        let mut limit = base.clone();
+        limit.memory.limit_bytes += 1;
+        variants.push(("memory-limit-bytes", limit));
+        let mut staging = base.clone();
+        staging.memory.staging_bytes += 1;
+        variants.push(("memory-staging-bytes", staging));
+        let mut b_pack = base.clone();
+        b_pack.memory.b_pack_bytes += 1;
+        variants.push(("memory-b-pack-bytes", b_pack));
+        let mut band_metadata = base.clone();
+        band_metadata.memory.band_metadata_bytes += 1;
+        variants.push(("memory-band-metadata-bytes", band_metadata));
+        let mut pool_run = base.clone();
+        pool_run.memory.pool_run_bytes += 1;
+        variants.push(("memory-pool-run-bytes", pool_run));
+        let mut arena_per_worker = base.clone();
+        arena_per_worker.memory.arena_bytes_per_worker += 1;
+        variants.push(("memory-arena-bytes-per-worker", arena_per_worker));
+        let mut active_workers = base.clone();
+        active_workers.memory.active_arena_workers += 1;
+        variants.push(("memory-active-arena-workers", active_workers));
+        let mut arena = base.clone();
+        arena.memory.arena_bytes += 1;
+        variants.push(("memory-arena-bytes", arena));
+        let mut requested = base.clone();
+        requested.memory.requested_bytes += 1;
+        variants.push(("memory-requested-bytes", requested));
+        let mut panel_count = base.clone();
+        panel_count.panels.push(GemmPanelReceipt {
+            kernel: "fs-la/gemm-panel-c".to_string(),
+            mode: "deterministic".to_string(),
+            declared_run: 99,
+            completed: 1,
+            total: 1,
+        });
+        variants.push(("panel-count", panel_count));
+        let mut panel_order = base.clone();
+        panel_order.panels.swap(0, 1);
+        variants.push(("panel-order", panel_order));
+        let mut panel_kernel = base.clone();
+        panel_kernel.panels[0].kernel.push_str("-v2");
+        variants.push(("panel-kernel", panel_kernel));
+        let mut panel_mode = base.clone();
+        panel_mode.panels[0].mode = "fast".to_string();
+        variants.push(("panel-mode", panel_mode));
+        let mut panel_run = base.clone();
+        panel_run.panels[0].declared_run += 1;
+        variants.push(("panel-declared-run", panel_run));
+        let mut panel_completed = base.clone();
+        panel_completed.panels[0].completed += 1;
+        variants.push(("panel-completed", panel_completed));
+        let mut panel_total = base.clone();
+        panel_total.panels[0].total += 1;
+        variants.push(("panel-total", panel_total));
+
+        let mut identities = std::collections::BTreeSet::new();
+        for (field, variant) in variants {
+            let bytes = variant
+                .canonical_bytes()
+                .unwrap_or_else(|error| panic!("{field} canonical bytes: {error}"));
+            let identity = variant
+                .receipt_identity()
+                .unwrap_or_else(|error| panic!("{field} identity: {error}"));
+            assert_ne!(identity, base_identity, "{field} did not move identity");
+            assert!(
+                identities.insert(identity.to_string()),
+                "{field} collided with another field mutation"
+            );
+            assert_eq!(
+                GemmExecutionReceipt::from_canonical_bytes(&bytes),
+                Ok(variant),
+                "{field} did not preserve its exact typed transport"
+            );
+        }
+
+        let stale_domain = base
+            .canonical_bytes_with_schema(
+                "org.frankensim.fs-session.gemm-execution-receipt.v2",
+                GEMM_EXECUTION_RECEIPT_IDENTITY_VERSION,
+            )
+            .expect("stale-domain fixture");
+        assert!(
+            GemmExecutionReceipt::from_canonical_bytes(&stale_domain).is_err(),
+            "artifact-domain mutation must be refused"
+        );
+        let stale_version = base
+            .canonical_bytes_with_schema(
+                GEMM_EXECUTION_RECEIPT_DOMAIN,
+                GEMM_EXECUTION_RECEIPT_IDENTITY_VERSION + 1,
+            )
+            .expect("stale-version fixture");
+        assert!(
+            GemmExecutionReceipt::from_canonical_bytes(&stale_version).is_err(),
+            "identity-version mutation must be refused"
+        );
+
+        let prefix_len = GEMM_EXECUTION_RECEIPT_MAGIC.len()
+            + 1
+            + 4
+            + GEMM_EXECUTION_RECEIPT_DOMAIN.len()
+            + 1
+            + 4;
+        let mut reordered = base_bytes;
+        assert_eq!(reordered[prefix_len], EXEC_TAG_DECLARED_RUN);
+        assert_eq!(reordered[prefix_len + 9], EXEC_TAG_COMPLETED_TILES);
+        reordered[prefix_len..prefix_len + 18].rotate_left(9);
+        assert!(
+            GemmExecutionReceipt::from_canonical_bytes(&reordered).is_err(),
+            "canonical-field-order mutation must be refused by exact tags"
+        );
+    }
+
+    #[test]
+    fn gemm_execution_receipt_versions_fail_closed() {
+        let receipt = identity_test_execution_receipt();
+        let stale_domain = receipt
+            .canonical_bytes_with_schema(
+                "org.frankensim.fs-session.gemm-execution-receipt.v0",
+                GEMM_EXECUTION_RECEIPT_IDENTITY_VERSION,
+            )
+            .expect("stale domain fixture");
+        let stale_version = receipt
+            .canonical_bytes_with_schema(
+                GEMM_EXECUTION_RECEIPT_DOMAIN,
+                GEMM_EXECUTION_RECEIPT_IDENTITY_VERSION + 1,
+            )
+            .expect("stale version fixture");
+        let mut trailing = receipt.canonical_bytes().expect("current fixture");
+        trailing.push(0);
+        for stale in [stale_domain, stale_version, trailing] {
+            assert!(GemmExecutionReceipt::from_canonical_bytes(&stale).is_err());
+        }
+    }
+
     #[test]
     fn execution_receipt_excludes_schedule_measurements() {
         let operation_run = fs_exec::RunId(7);
@@ -1952,6 +3233,15 @@ mod tests {
             GemmExecutionReceipt::from_report(&first),
             GemmExecutionReceipt::from_report(&second),
             "steal, latency, and worker-distribution envelopes are not replay identity"
+        );
+        assert_eq!(
+            GemmExecutionReceipt::from_report(&first)
+                .receipt_identity()
+                .expect("first identity"),
+            GemmExecutionReceipt::from_report(&second)
+                .receipt_identity()
+                .expect("second identity"),
+            "schedule-only and observed-memory mutations must not move the canonical identity"
         );
         assert!(GemmExecutionReceipt::from_report(&first).is_complete());
         let mut different_memory_plan = second.clone();

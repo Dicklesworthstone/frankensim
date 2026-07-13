@@ -148,6 +148,16 @@ fn durable_ledger_path(case: &str) -> String {
         .into_owned()
 }
 
+fn meter_snapshot_tuple(snapshot: fs_session::MeterSnapshot) -> (f64, u64, f64, u32, u32) {
+    (
+        snapshot.core_s,
+        snapshot.mem_peak_bytes,
+        snapshot.wall_s,
+        snapshot.throttled,
+        snapshot.paused,
+    )
+}
+
 const SPOUT: &str = r#"(study "spout-laminar-v3"
   (seed 0x5EED0001) (versions (constellation :lock "2026-07"))
   (budget (wall 2h) (mem 96GiB) (qoi-rel-error 2e-2))
@@ -1221,16 +1231,28 @@ fn ss_003n_pressure_action_replays_across_pause_lifecycle_and_refuses_stale_ids(
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // One barrier-controlled causal inversion plus its durable replay proof.
 fn ss_003o_submission_meter_commit_order_is_completion_order_and_atomic() {
-    let governor = Arc::new(SessionGovernor::new());
+    let path = durable_ledger_path("causal-inversion");
+    let nonce = DurableGovernorNonce::from_bytes([0x38; 32]);
+    let ledger = fs_ledger::Ledger::open(&path).expect("causal file ledger");
+    let governor =
+        Arc::new(SessionGovernor::new_durable(&ledger, nonce).expect("durable causal governor"));
     let session = SessionId(38);
+    let session_token = token(38, 20.0, 1e9);
     let open_id = governor
         .session_open_id(session, "causal-open")
         .expect("open authority");
-    let permit = governor
-        .open_session(open_id, token(38, 20.0, 1e9))
-        .expect("open session")
-        .flush_permit();
+    let open_receipt = governor
+        .open_session(open_id, session_token.clone())
+        .expect("open session");
+    let permit = open_receipt.flush_permit();
+    let open_flush = governor
+        .flush_scope_to_ledger(&permit, &ledger)
+        .expect("durable open prerequisite");
+    assert_eq!(open_flush.committed_terminals, 1);
+    assert_eq!(open_flush.appended_rows, 1);
+    assert!(!open_flush.remaining_dirty);
     let request_a = governor
         .submission_request_id(session, "caller-a", "program-a")
         .expect("request A");
@@ -1252,8 +1274,11 @@ fn ss_003o_submission_meter_commit_order_is_completion_order_and_atomic() {
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let worker = {
         let governor = Arc::clone(&governor);
+        let worker_path = path.clone();
         std::thread::spawn(move || {
-            governor.submit_once(request_a, || {
+            let worker_ledger =
+                fs_ledger::Ledger::open(&worker_path).expect("worker causal ledger handle");
+            governor.submit_once_durable(&worker_ledger, request_a, "program-a", || {
                 started_tx.send(()).expect("test receiver");
                 release_rx.recv().expect("release sender");
                 Charge {
@@ -1265,14 +1290,14 @@ fn ss_003o_submission_meter_commit_order_is_completion_order_and_atomic() {
     };
     started_rx.recv().expect("request A admitted first");
     assert!(matches!(
-        governor.submit_once(conflicting_a, Charge::default),
+        governor.submit_once_durable(&ledger, conflicting_a, "different-program", Charge::default,),
         Err(SessionError::MutationConflict {
-            kind: "submission-request",
+            kind: "submission",
             ..
         })
     ));
     let outcome_b = governor
-        .submit_once(request_b, || Charge {
+        .submit_once_durable(&ledger, request_b, "program-b", || Charge {
             core_s: 5.0,
             ..Charge::default()
         })
@@ -1282,22 +1307,26 @@ fn ss_003o_submission_meter_commit_order_is_completion_order_and_atomic() {
         .join()
         .expect("request A worker")
         .expect("request A completes second");
-    let (admission_a, meter_a) = match outcome_a {
+    let (admission_a, receipt_a, meter_a) = match outcome_a {
         SubmitOutcome::Executed {
             admission_ordinal,
+            receipt,
             meter_receipt,
             ..
-        } => (admission_ordinal, meter_receipt),
+        } => (admission_ordinal, receipt, meter_receipt),
         other => panic!("request A must execute, got {other:?}"),
     };
-    let (admission_b, meter_b) = match outcome_b {
+    let (admission_b, receipt_b, meter_b) = match outcome_b {
         SubmitOutcome::Executed {
             admission_ordinal,
+            receipt,
             meter_receipt,
             ..
-        } => (admission_ordinal, meter_receipt),
+        } => (admission_ordinal, receipt, meter_receipt),
         other => panic!("request B must execute, got {other:?}"),
     };
+    assert_eq!((admission_a, admission_b), (1, 2));
+    assert_eq!((meter_b.commit_ordinal(), meter_a.commit_ordinal()), (1, 2));
     assert!(admission_a < admission_b, "A was admitted first");
     assert!(
         meter_b.commit_ordinal() < meter_a.commit_ordinal(),
@@ -1320,7 +1349,9 @@ fn ss_003o_submission_meter_commit_order_is_completion_order_and_atomic() {
     let before_duplicate = governor.consumption(session).expect("meter state");
     assert!(matches!(
         governor
-            .submit_once(request_a, || panic!("duplicate reran"))
+            .submit_once_durable(&ledger, request_a, "program-a", || {
+                panic!("duplicate reran")
+            })
             .expect("exact replay"),
         SubmitOutcome::Duplicate {
             enforcement,
@@ -1333,21 +1364,125 @@ fn ss_003o_submission_meter_commit_order_is_completion_order_and_atomic() {
         before_duplicate
     );
 
-    let ledger = fs_ledger::Ledger::open(":memory:").expect("causal ledger");
-    loop {
-        let report = governor
-            .flush_scope_to_ledger(&permit, &ledger)
-            .expect("bounded flush");
-        if !report.remaining_dirty {
-            break;
-        }
-    }
+    let terminal_flush = governor
+        .flush_scope_to_ledger(&permit, &ledger)
+        .expect("causal terminal flush");
+    assert_eq!(terminal_flush.committed_terminals, 2);
+    assert_eq!(terminal_flush.appended_rows, 2);
+    assert!(!terminal_flush.remaining_dirty);
     assert_eq!(
         ledger.table_count("events").expect("event count"),
         3,
         "one open receipt and two self-contained causal terminal receipts"
     );
     assert!(ledger.lint().expect("ledger lint").is_clean());
+    let durable_counts = (
+        ledger.table_count("session_claims").unwrap(),
+        ledger.table_count("session_terminals").unwrap(),
+        ledger.table_count("session_terminal_events").unwrap(),
+        ledger.table_count("session_flush_batches").unwrap(),
+        ledger.table_count("session_flush_batch_members").unwrap(),
+        ledger.table_count("events").unwrap(),
+    );
+    assert_eq!(durable_counts, (3, 3, 3, 2, 3, 3));
+    drop(governor);
+    drop(ledger);
+
+    let ledger = fs_ledger::Ledger::open(&path).expect("reopened causal ledger");
+    let governor = SessionGovernor::new_durable(&ledger, nonce).expect("reopened governor");
+    assert!(matches!(
+        governor.recover_open(&ledger, open_id, token(39, 20.0, 1e9), None),
+        Err(SessionError::MutationAuthorityMismatch {
+            kind: "session-open",
+            ..
+        })
+    ));
+    let mut foreign_scope_token = session_token.clone();
+    foreign_scope_token.ledger_scope = "foreign-scope".to_string();
+    assert!(matches!(
+        governor.recover_open(&ledger, open_id, foreign_scope_token, None),
+        Err(SessionError::MutationConflict {
+            kind: "session-open",
+            ..
+        })
+    ));
+    let recovered_open = governor
+        .recover_open(&ledger, open_id, session_token, None)
+        .expect("recover causal open");
+    assert_eq!(recovered_open.content_hash(), open_receipt.content_hash());
+
+    assert!(matches!(
+        governor.submit_once_durable(&ledger, request_a, "program-a", || {
+            panic!("out-of-order recovery invoked caller work")
+        }),
+        Err(SessionError::RecoveryCausalGap {
+            session: 38,
+            expected: 1,
+            found: 2,
+        })
+    ));
+    assert_eq!(
+        governor.consumption(session).unwrap(),
+        meter_snapshot_tuple(meter_b.before())
+    );
+    let replay_b = governor
+        .submit_once_durable(&ledger, request_b, "program-b", || {
+            panic!("durable request B replay invoked caller work")
+        })
+        .expect("recover earlier meter commit first");
+    assert!(matches!(
+        replay_b,
+        SubmitOutcome::Duplicate {
+            admission_ordinal,
+            receipt,
+            ref meter_receipt,
+            ..
+        } if admission_ordinal == admission_b
+            && receipt == receipt_b
+            && meter_receipt == &meter_b
+    ));
+    assert_eq!(
+        governor.consumption(session).unwrap(),
+        meter_snapshot_tuple(meter_b.after())
+    );
+    let replay_a = governor
+        .submit_once_durable(&ledger, request_a, "program-a", || {
+            panic!("durable request A replay invoked caller work")
+        })
+        .expect("recover later meter commit second");
+    assert!(matches!(
+        replay_a,
+        SubmitOutcome::Duplicate {
+            admission_ordinal,
+            receipt,
+            ref meter_receipt,
+            ..
+        } if admission_ordinal == admission_a
+            && receipt == receipt_a
+            && meter_receipt == &meter_a
+    ));
+    assert_eq!(
+        governor.consumption(session).unwrap(),
+        meter_snapshot_tuple(meter_a.after())
+    );
+    let no_op = governor
+        .flush_scope_to_ledger(&recovered_open.flush_permit(), &ledger)
+        .expect("replayed causal state is clean");
+    assert_eq!(no_op.committed_terminals, 0);
+    assert_eq!(no_op.appended_rows, 0);
+    assert!(!no_op.remaining_dirty);
+    assert_eq!(
+        (
+            ledger.table_count("session_claims").unwrap(),
+            ledger.table_count("session_terminals").unwrap(),
+            ledger.table_count("session_terminal_events").unwrap(),
+            ledger.table_count("session_flush_batches").unwrap(),
+            ledger.table_count("session_flush_batch_members").unwrap(),
+            ledger.table_count("events").unwrap(),
+        ),
+        durable_counts,
+        "durable causal replay changes no registry, witness, or audit row"
+    );
 }
 
 #[test]
@@ -2798,6 +2933,14 @@ fn ss_013_durable_meter_and_l3_lifecycle_reopen_without_state_or_row_drift() {
     let open_receipt = governor
         .open_session_gated(open_id, token.clone(), Arc::clone(&initial_gate))
         .expect("gated open");
+    let companion_session = SessionId(9_014);
+    let companion_token = token_in_scope(companion_session.0, "durable-lifecycle");
+    let companion_open_id = governor
+        .session_open_id(companion_session, "durable-companion-open")
+        .expect("companion open authority");
+    governor
+        .open_session(companion_open_id, companion_token.clone())
+        .expect("companion open");
     let permit = open_receipt.flush_permit();
     governor
         .flush_scope_to_ledger(&permit, &ledger)
@@ -2830,6 +2973,12 @@ fn ss_013_durable_meter_and_l3_lifecycle_reopen_without_state_or_row_drift() {
         .iter()
         .find_map(|event| event.pause_request_id)
         .expect("L3 request authority");
+    let companion_action_id = governor
+        .pressure_action_id(companion_session, "interleaved-companion-l1")
+        .expect("interleaved companion action authority");
+    let companion_l1 = governor
+        .apply_memory_pressure(companion_action_id, 1)
+        .expect("interleaved companion action");
     let acknowledgement = governor
         .acknowledge_pause(pause_request, "durable-checkpoint")
         .expect("pause acknowledgement");
@@ -2868,8 +3017,8 @@ fn ss_013_durable_meter_and_l3_lifecycle_reopen_without_state_or_row_drift() {
     let flushed = governor
         .flush_scope_to_ledger(&permit, &ledger)
         .expect("meter and lifecycle terminal batch");
-    assert_eq!(flushed.committed_terminals, 9);
-    assert_eq!(flushed.appended_rows, 13);
+    assert_eq!(flushed.committed_terminals, 10);
+    assert_eq!(flushed.appended_rows, 14);
     assert!(!flushed.remaining_dirty);
     let counts = (
         ledger.table_count("session_claims").unwrap(),
@@ -2879,10 +3028,10 @@ fn ss_013_durable_meter_and_l3_lifecycle_reopen_without_state_or_row_drift() {
         ledger.table_count("session_flush_batch_members").unwrap(),
         ledger.table_count("events").unwrap(),
     );
-    assert_eq!(counts.0, 10);
-    assert_eq!(counts.1, 10);
-    assert_eq!(counts.2, 14);
-    assert_eq!(counts.5, 14);
+    assert_eq!(counts.0, 12);
+    assert_eq!(counts.1, 12);
+    assert_eq!(counts.2, 16);
+    assert_eq!(counts.5, 16);
     drop(governor);
     drop(ledger);
 
@@ -2897,6 +3046,9 @@ fn ss_013_durable_meter_and_l3_lifecycle_reopen_without_state_or_row_drift() {
             Some(Arc::clone(&recovered_initial_gate)),
         )
         .expect("recover gated open");
+    governor
+        .recover_open(&ledger, companion_open_id, companion_token.clone(), None)
+        .expect("recover companion open");
     assert_eq!(recovered_open.content_hash(), open_receipt.content_hash());
     assert_eq!(
         governor
@@ -2924,6 +3076,21 @@ fn ss_013_durable_meter_and_l3_lifecycle_reopen_without_state_or_row_drift() {
     );
     assert!(recovered_initial_gate.is_requested());
     let recovered_resume_gate = Arc::new(CancelGate::new());
+    assert!(matches!(
+        governor.recover_pause_acknowledgement(
+            &ledger,
+            pause_request,
+            "durable-checkpoint",
+            Arc::clone(&recovered_resume_gate),
+        ),
+        Err(SessionError::TerminalCorrupt { .. })
+    ));
+    assert_eq!(
+        governor
+            .recover_pressure(&ledger, companion_action_id, 1)
+            .expect("recover interleaved companion action"),
+        companion_l1
+    );
     let recovered_acknowledgement = governor
         .recover_pause_acknowledgement(
             &ledger,
@@ -3074,6 +3241,9 @@ fn ss_013_durable_meter_and_l3_lifecycle_reopen_without_state_or_row_drift() {
         )
         .expect("historical-order open");
     governor
+        .recover_open(&ledger, companion_open_id, companion_token, None)
+        .expect("historical companion open");
+    governor
         .recover_pressure(&ledger, l1_id, 1)
         .expect("historical L1");
     governor
@@ -3082,6 +3252,9 @@ fn ss_013_durable_meter_and_l3_lifecycle_reopen_without_state_or_row_drift() {
     governor
         .recover_pressure(&ledger, l3_id, 3)
         .expect("historical first L3");
+    governor
+        .recover_pressure(&ledger, companion_action_id, 1)
+        .expect("historical interleaved companion action");
     let historical_gate_one = Arc::new(CancelGate::new());
     let historical_ack_one = governor
         .recover_pause_acknowledgement(

@@ -194,6 +194,13 @@ pub enum SessionError {
         /// Restart-stable authority.
         authority: fs_blake3::ContentHash,
     },
+    /// A restarted durable governor has not reconstructed every immutable
+    /// claim observed at construction, so fresh mutations remain fenced.
+    DurableRecoveryIncomplete {
+        /// Number of historical claims still requiring typed recovery or
+        /// explicit reconciliation.
+        remaining_claims: u64,
+    },
     /// A durable execution claim exists without a terminal receipt. Caller
     /// work may have produced side effects, so it is never run automatically.
     IndeterminateMutation {
@@ -412,7 +419,11 @@ impl fmt::Display for SessionError {
             ),
             SessionError::RecoveryRequired { kind, authority } => write!(
                 f,
-                "durable {kind} authority {authority} has no terminal receipt; explicit recovery or reconciliation is required"
+                "durable {kind} authority {authority} requires explicit typed recovery or reconciliation"
+            ),
+            SessionError::DurableRecoveryIncomplete { remaining_claims } => write!(
+                f,
+                "durable governor recovery is incomplete: {remaining_claims} historical mutation claims remain; fresh mutation is refused"
             ),
             SessionError::IndeterminateMutation { kind, authority } => write!(
                 f,

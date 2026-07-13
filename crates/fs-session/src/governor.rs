@@ -20,6 +20,42 @@ const HARD_FACTOR_NUMERATOR: u32 = 6;
 const HARD_FACTOR_DENOMINATOR: u32 = 5;
 #[allow(clippy::cast_lossless)] // small policy integers are exactly representable as f64
 const HARD_FACTOR: f64 = HARD_FACTOR_NUMERATOR as f64 / HARD_FACTOR_DENOMINATOR as f64;
+/// Semantic version of the restart-stable governor namespace.
+pub const DURABLE_GOVERNOR_IDENTITY_VERSION: u32 = 1;
+/// Semantic version of a retryable session-open authority.
+pub const SESSION_OPEN_IDENTITY_VERSION: u32 = 2;
+/// Semantic version of the canonical capability-token digest.
+pub const SESSION_TOKEN_IDENTITY_VERSION: u32 = 1;
+/// Semantic version shared by initial and resumed gate bindings.
+pub const GATE_BINDING_IDENTITY_VERSION: u32 = 1;
+/// Semantic version shared by client and submission meter authorities.
+pub const METER_REPORT_IDENTITY_VERSION: u32 = 2;
+/// Semantic version of a retryable pressure-action authority.
+pub const PRESSURE_ACTION_IDENTITY_VERSION: u32 = 2;
+/// Semantic version of the bounded submission-agent key digest.
+pub const SUBMISSION_AGENT_KEY_IDENTITY_VERSION: u32 = 1;
+/// Semantic version of the bounded canonical-program digest.
+pub const SUBMISSION_PROGRAM_IDENTITY_VERSION: u32 = 1;
+/// Semantic version of a retryable submission slot authority.
+pub const SUBMISSION_REQUEST_IDENTITY_VERSION: u32 = 2;
+/// Semantic version of retained diagnostic evidence.
+pub const RETAINED_EVIDENCE_IDENTITY_VERSION: u32 = 1;
+/// Semantic version of a pause-acknowledgement authority.
+pub const PAUSE_ACKNOWLEDGEMENT_IDENTITY_VERSION: u32 = 1;
+/// Semantic version of a resume-activation authority.
+pub const RESUME_ACTIVATION_IDENTITY_VERSION: u32 = 1;
+/// Semantic version of an admitted session-open receipt.
+pub const SESSION_OPEN_RECEIPT_IDENTITY_VERSION: u32 = 1;
+/// Semantic version of a committed meter receipt.
+pub const METER_RECEIPT_IDENTITY_VERSION: u32 = 1;
+/// Semantic version of a committed pressure receipt.
+pub const PRESSURE_RECEIPT_IDENTITY_VERSION: u32 = 1;
+/// Semantic version of a terminal submission receipt.
+pub const SUBMISSION_RECEIPT_IDENTITY_VERSION: u32 = 3;
+/// Semantic version of a pause-acknowledgement receipt.
+pub const PAUSE_ACKNOWLEDGEMENT_RECEIPT_IDENTITY_VERSION: u32 = 1;
+/// Semantic version of a resume-activation receipt.
+pub const RESUME_ACTIVATION_RECEIPT_IDENTITY_VERSION: u32 = 1;
 const IDEMPOTENCY_KEY_DOMAIN: &str = "org.frankensim.fs-session.idempotency-key.v3";
 const IDEMPOTENCY_AGENT_DOMAIN: &str = "org.frankensim.fs-session.idempotency-agent.v1";
 const IDEMPOTENCY_PROGRAM_DOMAIN: &str = "org.frankensim.fs-session.idempotency-program.v1";
@@ -43,6 +79,1649 @@ const RESUME_ACTIVATION_RECEIPT_DOMAIN: &str =
     "org.frankensim.fs-session.resume-activation-receipt.v1";
 const EPHEMERAL_GOVERNOR_ID_DOMAIN: &str = "org.frankensim.fs-session.ephemeral-governor-id.v1";
 const DURABLE_GOVERNOR_ID_DOMAIN: &str = "org.frankensim.fs-session.durable-governor-id.v1";
+const SESSION_OPEN_AUDIT_SCHEMA: &str = "fs-session-open-v1";
+const SESSION_METER_AUDIT_SCHEMA: &str = "fs-session-meter-report-v1";
+const SESSION_SUBMISSION_AUDIT_SCHEMA: &str = "fs-session-idempotency-v5";
+const SESSION_DEGRADATION_AUDIT_SCHEMA: &str = "fs-session-degradation-v5";
+
+// These private witness shapes make every byte-level identity input explicit
+// in this owner file. The production encoders remain authoritative and are
+// fingerprinted by the declarations below; the witnesses let the identity
+// gate reject an unclassified field before registry data can drift.
+#[allow(dead_code)]
+#[derive(Clone, PartialEq, Eq)]
+struct DurableGovernorIdentitySource {
+    ledger_instance_id: [u8; 16],
+    nonce: [u8; 32],
+}
+
+#[allow(dead_code)]
+#[derive(Clone, PartialEq, Eq)]
+struct SessionOpenIdIdentitySource {
+    governor_id: fs_blake3::ContentHash,
+    session: u64,
+    client_key_digest: fs_blake3::ContentHash,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, PartialEq, Eq)]
+struct SessionTokenIdentitySource {
+    session: u64,
+    core_s_bits: u64,
+    mem_bytes: u64,
+    wall_s_bits: u64,
+    cores: u64,
+    ledger_scope: Vec<u8>,
+    operations: Vec<Vec<u8>>,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, PartialEq, Eq)]
+enum GateBindingIdentitySource {
+    Session {
+        open_id: fs_blake3::ContentHash,
+    },
+    Resumed {
+        governor_id: fs_blake3::ContentHash,
+        session: u64,
+        gate_generation: u64,
+        requested_ordinal: i64,
+        resume_generation: u64,
+    },
+}
+
+#[allow(dead_code)]
+#[derive(Clone, PartialEq, Eq)]
+enum MeterReportIdIdentitySource {
+    Client {
+        governor_id: fs_blake3::ContentHash,
+        session: u64,
+        session_open: fs_blake3::ContentHash,
+        generation: u64,
+        client_key_digest: fs_blake3::ContentHash,
+    },
+    Submission {
+        request_id: fs_blake3::ContentHash,
+    },
+}
+
+#[allow(dead_code)]
+#[derive(Clone, PartialEq, Eq)]
+struct PressureActionIdIdentitySource {
+    governor_id: fs_blake3::ContentHash,
+    session: u64,
+    session_open: fs_blake3::ContentHash,
+    generation: u64,
+    client_key_digest: fs_blake3::ContentHash,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, PartialEq, Eq)]
+struct SubmissionAgentKeyIdentitySource {
+    value: Vec<u8>,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, PartialEq, Eq)]
+struct SubmissionProgramIdentitySource {
+    value: Vec<u8>,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, PartialEq, Eq)]
+struct SubmissionRequestIdIdentitySource {
+    governor_id: fs_blake3::ContentHash,
+    session: u64,
+    session_open: fs_blake3::ContentHash,
+    generation: u64,
+    key_hash: fs_blake3::ContentHash,
+    request_hash: fs_blake3::ContentHash,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, PartialEq, Eq)]
+struct RetainedEvidenceIdentitySource {
+    value: Vec<u8>,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, PartialEq, Eq)]
+struct PauseAcknowledgementIdIdentitySource {
+    governor_id: fs_blake3::ContentHash,
+    session: u64,
+    gate_generation: u64,
+    requested_ordinal: i64,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, PartialEq, Eq)]
+struct ResumeActivationIdIdentitySource {
+    governor_id: fs_blake3::ContentHash,
+    session: u64,
+    session_open: fs_blake3::ContentHash,
+    acknowledgement_hash: fs_blake3::ContentHash,
+    resume_generation: u64,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, PartialEq, Eq)]
+struct SessionOpenReceiptIdentitySource {
+    open_id: fs_blake3::ContentHash,
+    token_digest: fs_blake3::ContentHash,
+    gate_identity: Option<fs_blake3::ContentHash>,
+    ledger_scope: Vec<u8>,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct ChargeIdentitySource {
+    core_s_bits: u64,
+    mem_peak_bytes: u64,
+    wall_s_bits: u64,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct MeterSnapshotIdentitySource {
+    core_s_bits: u64,
+    mem_peak_bytes: u64,
+    wall_s_bits: u64,
+    throttled: u32,
+    paused: u32,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, PartialEq, Eq)]
+enum EnforcementIdentitySource {
+    Ok,
+    Throttled {
+        resource: Vec<u8>,
+        used_bits: u64,
+        granted_bits: u64,
+    },
+    Paused {
+        resource: Vec<u8>,
+        used_bits: u64,
+        granted_bits: u64,
+        resume_hint: Vec<u8>,
+    },
+}
+
+#[allow(dead_code)]
+#[derive(Clone, PartialEq, Eq)]
+struct MeterReceiptIdentitySource {
+    report_id: fs_blake3::ContentHash,
+    commit_ordinal: u64,
+    delta: ChargeIdentitySource,
+    before: MeterSnapshotIdentitySource,
+    after: MeterSnapshotIdentitySource,
+    enforcement: EnforcementIdentitySource,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, PartialEq, Eq)]
+struct RetainedEvidenceReceiptIdentitySource {
+    preview: Vec<u8>,
+    byte_len: u64,
+    digest: fs_blake3::ContentHash,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, PartialEq, Eq)]
+struct PressureEventIdentitySource {
+    session: u64,
+    step_tag: u8,
+    pressure_level: u8,
+    phase_tag: u8,
+    attribution: Vec<u8>,
+    ordinal: i64,
+    requested_ordinal: Option<i64>,
+    checkpoint: Option<RetainedEvidenceReceiptIdentitySource>,
+    gate_generation: Option<u64>,
+    pause_request_id: Option<PauseRequestId>,
+    pressure_action_id: Option<PressureActionId>,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, PartialEq, Eq)]
+struct PressureReceiptIdentitySource {
+    action_id: fs_blake3::ContentHash,
+    level: u8,
+    events: Vec<PressureEventIdentitySource>,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, PartialEq, Eq)]
+enum SubmissionReceiptIdentitySource {
+    Done {
+        request_id: fs_blake3::ContentHash,
+        ledger_scope: Vec<u8>,
+        admission_ordinal: u64,
+        charge: ChargeIdentitySource,
+        meter_receipt: fs_blake3::ContentHash,
+    },
+    Failed {
+        request_id: fs_blake3::ContentHash,
+        ledger_scope: Vec<u8>,
+        admission_ordinal: u64,
+        evidence: RetainedEvidenceReceiptIdentitySource,
+    },
+}
+
+#[allow(dead_code)]
+#[derive(Clone, PartialEq, Eq)]
+struct PauseAcknowledgementReceiptIdentitySource {
+    governor_id: fs_blake3::ContentHash,
+    session: u64,
+    gate_generation: u64,
+    requested_ordinal: i64,
+    event: PressureEventIdentitySource,
+    resume_generation: u64,
+    gate_binding: fs_blake3::ContentHash,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, PartialEq, Eq)]
+struct ResumeActivationReceiptIdentitySource {
+    activation_id: fs_blake3::ContentHash,
+    acknowledgement_hash: fs_blake3::ContentHash,
+    gate_binding: fs_blake3::ContentHash,
+}
+
+#[allow(dead_code)]
+fn identity_push_framed(payload: &mut Vec<u8>, bytes: &[u8]) {
+    payload.extend_from_slice(
+        &u64::try_from(bytes.len())
+            .expect("bounded identity field fits u64")
+            .to_le_bytes(),
+    );
+    payload.extend_from_slice(bytes);
+}
+
+#[allow(dead_code)]
+fn identity_push_hash(payload: &mut Vec<u8>, hash: fs_blake3::ContentHash) {
+    payload.extend_from_slice(hash.as_bytes());
+}
+
+#[allow(dead_code)]
+fn identity_push_snapshot(payload: &mut Vec<u8>, snapshot: MeterSnapshotIdentitySource) {
+    payload.extend_from_slice(&snapshot.core_s_bits.to_le_bytes());
+    payload.extend_from_slice(&snapshot.mem_peak_bytes.to_le_bytes());
+    payload.extend_from_slice(&snapshot.wall_s_bits.to_le_bytes());
+    payload.extend_from_slice(&snapshot.throttled.to_le_bytes());
+    payload.extend_from_slice(&snapshot.paused.to_le_bytes());
+}
+
+#[allow(dead_code)]
+fn identity_push_enforcement(payload: &mut Vec<u8>, source: &EnforcementIdentitySource) {
+    match source {
+        EnforcementIdentitySource::Ok => payload.push(0),
+        EnforcementIdentitySource::Throttled {
+            resource,
+            used_bits,
+            granted_bits,
+        } => {
+            payload.push(1);
+            identity_push_framed(payload, resource);
+            payload.extend_from_slice(&used_bits.to_le_bytes());
+            payload.extend_from_slice(&granted_bits.to_le_bytes());
+        }
+        EnforcementIdentitySource::Paused {
+            resource,
+            used_bits,
+            granted_bits,
+            resume_hint,
+        } => {
+            payload.push(2);
+            identity_push_framed(payload, resource);
+            payload.extend_from_slice(&used_bits.to_le_bytes());
+            payload.extend_from_slice(&granted_bits.to_le_bytes());
+            identity_push_framed(payload, resume_hint);
+        }
+    }
+}
+
+#[allow(dead_code)]
+fn identity_push_pressure_event(payload: &mut Vec<u8>, source: &PressureEventIdentitySource) {
+    payload.extend_from_slice(&source.session.to_le_bytes());
+    payload.push(source.step_tag);
+    payload.push(source.pressure_level);
+    payload.push(source.phase_tag);
+    identity_push_framed(payload, &source.attribution);
+    payload.extend_from_slice(&source.ordinal.to_le_bytes());
+    match source.requested_ordinal {
+        Some(value) => {
+            payload.push(1);
+            payload.extend_from_slice(&value.to_le_bytes());
+        }
+        None => payload.push(0),
+    }
+    match &source.checkpoint {
+        Some(checkpoint) => {
+            payload.push(1);
+            payload.extend_from_slice(&checkpoint.byte_len.to_le_bytes());
+            identity_push_hash(payload, checkpoint.digest);
+        }
+        None => payload.push(0),
+    }
+    match source.gate_generation {
+        Some(value) => {
+            payload.push(1);
+            payload.extend_from_slice(&value.to_le_bytes());
+        }
+        None => payload.push(0),
+    }
+}
+
+#[allow(dead_code)]
+fn durable_governor_identity(source: &DurableGovernorIdentitySource) -> fs_blake3::ContentHash {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&source.ledger_instance_id);
+    payload.extend_from_slice(&source.nonce);
+    fs_blake3::hash_domain(DURABLE_GOVERNOR_ID_DOMAIN, &payload)
+}
+
+#[allow(dead_code)]
+fn session_open_authority_identity(source: &SessionOpenIdIdentitySource) -> fs_blake3::ContentHash {
+    let mut payload = Vec::new();
+    identity_push_hash(&mut payload, source.governor_id);
+    payload.extend_from_slice(&source.session.to_le_bytes());
+    identity_push_hash(&mut payload, source.client_key_digest);
+    fs_blake3::hash_domain(SESSION_OPEN_ID_DOMAIN, &payload)
+}
+
+#[allow(dead_code)]
+fn session_token_identity(source: &SessionTokenIdentitySource) -> fs_blake3::ContentHash {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&source.session.to_le_bytes());
+    payload.extend_from_slice(&source.core_s_bits.to_le_bytes());
+    payload.extend_from_slice(&source.mem_bytes.to_le_bytes());
+    payload.extend_from_slice(&source.wall_s_bits.to_le_bytes());
+    payload.extend_from_slice(&source.cores.to_le_bytes());
+    identity_push_framed(&mut payload, &source.ledger_scope);
+    payload.extend_from_slice(
+        &u64::try_from(source.operations.len())
+            .expect("bounded operator count fits u64")
+            .to_le_bytes(),
+    );
+    for operation in &source.operations {
+        identity_push_framed(&mut payload, operation);
+    }
+    fs_blake3::hash_domain(SESSION_TOKEN_IDENTITY_DOMAIN, &payload)
+}
+
+#[allow(dead_code)]
+fn gate_binding_identity(source: &GateBindingIdentitySource) -> fs_blake3::ContentHash {
+    let mut payload = Vec::new();
+    match source {
+        GateBindingIdentitySource::Session { open_id } => {
+            identity_push_hash(&mut payload, *open_id);
+        }
+        GateBindingIdentitySource::Resumed {
+            governor_id,
+            session,
+            gate_generation,
+            requested_ordinal,
+            resume_generation,
+        } => {
+            identity_push_hash(&mut payload, *governor_id);
+            payload.extend_from_slice(&session.to_le_bytes());
+            payload.extend_from_slice(&gate_generation.to_le_bytes());
+            payload.extend_from_slice(&requested_ordinal.to_le_bytes());
+            payload.extend_from_slice(&resume_generation.to_le_bytes());
+        }
+    }
+    fs_blake3::hash_domain(GATE_BINDING_ID_DOMAIN, &payload)
+}
+
+#[allow(dead_code)]
+fn meter_report_authority_identity(source: &MeterReportIdIdentitySource) -> fs_blake3::ContentHash {
+    let mut payload = Vec::new();
+    match source {
+        MeterReportIdIdentitySource::Client {
+            governor_id,
+            session,
+            session_open,
+            generation,
+            client_key_digest,
+        } => {
+            identity_push_hash(&mut payload, *governor_id);
+            payload.extend_from_slice(&session.to_le_bytes());
+            identity_push_hash(&mut payload, *session_open);
+            payload.extend_from_slice(&generation.to_le_bytes());
+            identity_push_hash(&mut payload, *client_key_digest);
+        }
+        MeterReportIdIdentitySource::Submission { request_id } => {
+            identity_push_hash(&mut payload, *request_id);
+        }
+    }
+    fs_blake3::hash_domain(METER_REPORT_ID_DOMAIN, &payload)
+}
+
+#[allow(dead_code)]
+fn pressure_action_authority_identity(
+    source: &PressureActionIdIdentitySource,
+) -> fs_blake3::ContentHash {
+    let mut payload = Vec::new();
+    identity_push_hash(&mut payload, source.governor_id);
+    payload.extend_from_slice(&source.session.to_le_bytes());
+    identity_push_hash(&mut payload, source.session_open);
+    payload.extend_from_slice(&source.generation.to_le_bytes());
+    identity_push_hash(&mut payload, source.client_key_digest);
+    fs_blake3::hash_domain(PRESSURE_ACTION_ID_DOMAIN, &payload)
+}
+
+#[allow(dead_code)]
+fn submission_agent_key_identity(
+    source: &SubmissionAgentKeyIdentitySource,
+) -> fs_blake3::ContentHash {
+    fs_blake3::hash_domain(IDEMPOTENCY_AGENT_DOMAIN, &source.value)
+}
+
+#[allow(dead_code)]
+fn submission_program_identity(source: &SubmissionProgramIdentitySource) -> fs_blake3::ContentHash {
+    fs_blake3::hash_domain(IDEMPOTENCY_PROGRAM_DOMAIN, &source.value)
+}
+
+#[allow(dead_code)]
+fn submission_request_authority_identity(
+    source: &SubmissionRequestIdIdentitySource,
+) -> fs_blake3::ContentHash {
+    let mut payload = Vec::new();
+    identity_push_hash(&mut payload, source.governor_id);
+    payload.extend_from_slice(&source.session.to_le_bytes());
+    identity_push_hash(&mut payload, source.session_open);
+    payload.extend_from_slice(&source.generation.to_le_bytes());
+    identity_push_hash(&mut payload, source.key_hash);
+    fs_blake3::hash_domain(SUBMISSION_REQUEST_ID_DOMAIN, &payload)
+}
+
+#[allow(dead_code)]
+fn retained_evidence_identity(source: &RetainedEvidenceIdentitySource) -> fs_blake3::ContentHash {
+    fs_blake3::hash_domain(RETAINED_EVIDENCE_DOMAIN, &source.value)
+}
+
+#[allow(dead_code)]
+fn pause_acknowledgement_authority_identity(
+    source: &PauseAcknowledgementIdIdentitySource,
+) -> fs_blake3::ContentHash {
+    let mut payload = Vec::new();
+    identity_push_hash(&mut payload, source.governor_id);
+    payload.extend_from_slice(&source.session.to_le_bytes());
+    payload.extend_from_slice(&source.gate_generation.to_le_bytes());
+    payload.extend_from_slice(&source.requested_ordinal.to_le_bytes());
+    fs_blake3::hash_domain(PAUSE_ACKNOWLEDGEMENT_ID_DOMAIN, &payload)
+}
+
+#[allow(dead_code)]
+fn resume_activation_authority_identity(
+    source: &ResumeActivationIdIdentitySource,
+) -> fs_blake3::ContentHash {
+    let mut payload = Vec::new();
+    identity_push_hash(&mut payload, source.governor_id);
+    payload.extend_from_slice(&source.session.to_le_bytes());
+    identity_push_hash(&mut payload, source.session_open);
+    identity_push_hash(&mut payload, source.acknowledgement_hash);
+    payload.extend_from_slice(&source.resume_generation.to_le_bytes());
+    fs_blake3::hash_domain(RESUME_ACTIVATION_ID_DOMAIN, &payload)
+}
+
+#[allow(dead_code)]
+fn session_open_receipt_identity(
+    source: &SessionOpenReceiptIdentitySource,
+) -> fs_blake3::ContentHash {
+    let mut payload = Vec::new();
+    identity_push_hash(&mut payload, source.open_id);
+    identity_push_hash(&mut payload, source.token_digest);
+    match source.gate_identity {
+        Some(identity) => {
+            payload.push(1);
+            identity_push_hash(&mut payload, identity);
+        }
+        None => payload.push(0),
+    }
+    identity_push_framed(&mut payload, &source.ledger_scope);
+    fs_blake3::hash_domain(SESSION_OPEN_RECEIPT_DOMAIN, &payload)
+}
+
+#[allow(dead_code)]
+fn meter_receipt_identity(source: &MeterReceiptIdentitySource) -> fs_blake3::ContentHash {
+    let mut payload = Vec::new();
+    identity_push_hash(&mut payload, source.report_id);
+    payload.extend_from_slice(&source.commit_ordinal.to_le_bytes());
+    payload.extend_from_slice(&source.delta.core_s_bits.to_le_bytes());
+    payload.extend_from_slice(&source.delta.mem_peak_bytes.to_le_bytes());
+    payload.extend_from_slice(&source.delta.wall_s_bits.to_le_bytes());
+    identity_push_snapshot(&mut payload, source.before);
+    identity_push_snapshot(&mut payload, source.after);
+    identity_push_enforcement(&mut payload, &source.enforcement);
+    fs_blake3::hash_domain(METER_RECEIPT_DOMAIN, &payload)
+}
+
+#[allow(dead_code)]
+fn pressure_receipt_identity(source: &PressureReceiptIdentitySource) -> fs_blake3::ContentHash {
+    let mut payload = Vec::new();
+    identity_push_hash(&mut payload, source.action_id);
+    payload.push(source.level);
+    payload.extend_from_slice(
+        &u64::try_from(source.events.len())
+            .expect("bounded degradation event count fits u64")
+            .to_le_bytes(),
+    );
+    for event in &source.events {
+        identity_push_pressure_event(&mut payload, event);
+    }
+    fs_blake3::hash_domain(PRESSURE_RECEIPT_DOMAIN, &payload)
+}
+
+#[allow(dead_code)]
+fn submission_receipt_identity(source: &SubmissionReceiptIdentitySource) -> fs_blake3::ContentHash {
+    let mut payload = Vec::new();
+    match source {
+        SubmissionReceiptIdentitySource::Done {
+            request_id,
+            ledger_scope,
+            admission_ordinal,
+            charge,
+            meter_receipt,
+        } => {
+            identity_push_hash(&mut payload, *request_id);
+            identity_push_framed(&mut payload, ledger_scope);
+            payload.extend_from_slice(&admission_ordinal.to_le_bytes());
+            payload.push(0);
+            payload.extend_from_slice(&charge.core_s_bits.to_le_bytes());
+            payload.extend_from_slice(&charge.mem_peak_bytes.to_le_bytes());
+            payload.extend_from_slice(&charge.wall_s_bits.to_le_bytes());
+            identity_push_hash(&mut payload, *meter_receipt);
+        }
+        SubmissionReceiptIdentitySource::Failed {
+            request_id,
+            ledger_scope,
+            admission_ordinal,
+            evidence,
+        } => {
+            identity_push_hash(&mut payload, *request_id);
+            identity_push_framed(&mut payload, ledger_scope);
+            payload.extend_from_slice(&admission_ordinal.to_le_bytes());
+            payload.push(1);
+            payload.extend_from_slice(&evidence.byte_len.to_le_bytes());
+            identity_push_hash(&mut payload, evidence.digest);
+        }
+    }
+    fs_blake3::hash_domain(SUBMISSION_RECEIPT_DOMAIN, &payload)
+}
+
+#[allow(dead_code)]
+fn pause_acknowledgement_receipt_identity(
+    source: &PauseAcknowledgementReceiptIdentitySource,
+) -> fs_blake3::ContentHash {
+    let mut payload = Vec::new();
+    identity_push_hash(&mut payload, source.governor_id);
+    payload.extend_from_slice(&source.session.to_le_bytes());
+    payload.extend_from_slice(&source.gate_generation.to_le_bytes());
+    payload.extend_from_slice(&source.requested_ordinal.to_le_bytes());
+    identity_push_pressure_event(&mut payload, &source.event);
+    payload.extend_from_slice(&source.resume_generation.to_le_bytes());
+    identity_push_hash(&mut payload, source.gate_binding);
+    fs_blake3::hash_domain(PAUSE_ACKNOWLEDGEMENT_RECEIPT_DOMAIN, &payload)
+}
+
+#[allow(dead_code)]
+fn resume_activation_receipt_identity(
+    source: &ResumeActivationReceiptIdentitySource,
+) -> fs_blake3::ContentHash {
+    let mut payload = Vec::new();
+    identity_push_hash(&mut payload, source.activation_id);
+    identity_push_hash(&mut payload, source.acknowledgement_hash);
+    identity_push_hash(&mut payload, source.gate_binding);
+    fs_blake3::hash_domain(RESUME_ACTIVATION_RECEIPT_DOMAIN, &payload)
+}
+
+#[allow(dead_code)]
+fn session_identity_transport_is_current(
+    terminal_schema_version: u32,
+    audit_schema: Option<&str>,
+) -> bool {
+    if terminal_schema_version != recovery::TERMINAL_SCHEMA_VERSION {
+        return false;
+    }
+    match audit_schema {
+        None => true,
+        Some(schema) => matches!(
+            schema,
+            SESSION_OPEN_AUDIT_SCHEMA
+                | SESSION_METER_AUDIT_SCHEMA
+                | SESSION_SUBMISSION_AUDIT_SCHEMA
+                | SESSION_DEGRADATION_AUDIT_SCHEMA
+        ),
+    }
+}
+
+#[allow(dead_code)]
+fn classify_durable_governor_identity_fields(source: &DurableGovernorIdentitySource) {
+    let DurableGovernorIdentitySource {
+        ledger_instance_id,
+        nonce,
+    } = source;
+    let _ = (ledger_instance_id, nonce);
+}
+
+#[allow(dead_code)]
+fn classify_session_open_id_identity_fields(source: &SessionOpenIdIdentitySource) {
+    let SessionOpenIdIdentitySource {
+        governor_id,
+        session,
+        client_key_digest,
+    } = source;
+    let _ = (governor_id, session, client_key_digest);
+}
+
+#[allow(dead_code)]
+fn classify_session_token_identity_fields(source: &SessionTokenIdentitySource) {
+    let SessionTokenIdentitySource {
+        session,
+        core_s_bits,
+        mem_bytes,
+        wall_s_bits,
+        cores,
+        ledger_scope,
+        operations,
+    } = source;
+    let _ = (
+        session,
+        core_s_bits,
+        mem_bytes,
+        wall_s_bits,
+        cores,
+        ledger_scope,
+        operations,
+    );
+}
+
+#[allow(dead_code)]
+fn classify_gate_binding_identity_fields(source: &GateBindingIdentitySource) {
+    match source {
+        GateBindingIdentitySource::Session { open_id } => {
+            let _ = open_id;
+        }
+        GateBindingIdentitySource::Resumed {
+            governor_id,
+            session,
+            gate_generation,
+            requested_ordinal,
+            resume_generation,
+        } => {
+            let _ = (
+                governor_id,
+                session,
+                gate_generation,
+                requested_ordinal,
+                resume_generation,
+            );
+        }
+    }
+}
+
+#[allow(dead_code)]
+fn classify_meter_report_id_identity_fields(source: &MeterReportIdIdentitySource) {
+    match source {
+        MeterReportIdIdentitySource::Client {
+            governor_id,
+            session,
+            session_open,
+            generation,
+            client_key_digest,
+        } => {
+            let _ = (
+                governor_id,
+                session,
+                session_open,
+                generation,
+                client_key_digest,
+            );
+        }
+        MeterReportIdIdentitySource::Submission { request_id } => {
+            let _ = request_id;
+        }
+    }
+}
+
+#[allow(dead_code)]
+fn classify_pressure_action_id_identity_fields(source: &PressureActionIdIdentitySource) {
+    let PressureActionIdIdentitySource {
+        governor_id,
+        session,
+        session_open,
+        generation,
+        client_key_digest,
+    } = source;
+    let _ = (
+        governor_id,
+        session,
+        session_open,
+        generation,
+        client_key_digest,
+    );
+}
+
+#[allow(dead_code)]
+fn classify_submission_agent_key_identity_fields(source: &SubmissionAgentKeyIdentitySource) {
+    let SubmissionAgentKeyIdentitySource { value } = source;
+    let _ = value;
+}
+
+#[allow(dead_code)]
+fn classify_submission_program_identity_fields(source: &SubmissionProgramIdentitySource) {
+    let SubmissionProgramIdentitySource { value } = source;
+    let _ = value;
+}
+
+#[allow(dead_code)]
+fn classify_submission_request_id_identity_fields(source: &SubmissionRequestIdIdentitySource) {
+    let SubmissionRequestIdIdentitySource {
+        governor_id,
+        session,
+        session_open,
+        generation,
+        key_hash,
+        request_hash,
+    } = source;
+    let _ = (
+        governor_id,
+        session,
+        session_open,
+        generation,
+        key_hash,
+        request_hash,
+    );
+}
+
+#[allow(dead_code)]
+fn classify_retained_evidence_identity_fields(source: &RetainedEvidenceIdentitySource) {
+    let RetainedEvidenceIdentitySource { value } = source;
+    let _ = value;
+}
+
+#[allow(dead_code)]
+fn classify_pause_acknowledgement_id_identity_fields(
+    source: &PauseAcknowledgementIdIdentitySource,
+) {
+    let PauseAcknowledgementIdIdentitySource {
+        governor_id,
+        session,
+        gate_generation,
+        requested_ordinal,
+    } = source;
+    let _ = (governor_id, session, gate_generation, requested_ordinal);
+}
+
+#[allow(dead_code)]
+fn classify_resume_activation_id_identity_fields(source: &ResumeActivationIdIdentitySource) {
+    let ResumeActivationIdIdentitySource {
+        governor_id,
+        session,
+        session_open,
+        acknowledgement_hash,
+        resume_generation,
+    } = source;
+    let _ = (
+        governor_id,
+        session,
+        session_open,
+        acknowledgement_hash,
+        resume_generation,
+    );
+}
+
+#[allow(dead_code)]
+fn classify_session_open_receipt_identity_fields(source: &SessionOpenReceiptIdentitySource) {
+    let SessionOpenReceiptIdentitySource {
+        open_id,
+        token_digest,
+        gate_identity,
+        ledger_scope,
+    } = source;
+    let _ = (open_id, token_digest, gate_identity, ledger_scope);
+}
+
+#[allow(dead_code)]
+fn classify_meter_receipt_identity_fields(
+    source: &MeterReceiptIdentitySource,
+    charge: &ChargeIdentitySource,
+    snapshot: &MeterSnapshotIdentitySource,
+    enforcement: &EnforcementIdentitySource,
+) {
+    let MeterReceiptIdentitySource {
+        report_id,
+        commit_ordinal,
+        delta,
+        before,
+        after,
+        enforcement: receipt_enforcement,
+    } = source;
+    let ChargeIdentitySource {
+        core_s_bits,
+        mem_peak_bytes,
+        wall_s_bits,
+    } = charge;
+    let MeterSnapshotIdentitySource {
+        core_s_bits: snapshot_core_s_bits,
+        mem_peak_bytes: snapshot_mem_peak_bytes,
+        wall_s_bits: snapshot_wall_s_bits,
+        throttled,
+        paused,
+    } = snapshot;
+    match enforcement {
+        EnforcementIdentitySource::Ok => {}
+        EnforcementIdentitySource::Throttled {
+            resource,
+            used_bits,
+            granted_bits,
+        } => {
+            let _ = (resource, used_bits, granted_bits);
+        }
+        EnforcementIdentitySource::Paused {
+            resource,
+            used_bits,
+            granted_bits,
+            resume_hint,
+        } => {
+            let _ = (resource, used_bits, granted_bits, resume_hint);
+        }
+    }
+    let _ = (
+        report_id,
+        commit_ordinal,
+        delta,
+        before,
+        after,
+        receipt_enforcement,
+        core_s_bits,
+        mem_peak_bytes,
+        wall_s_bits,
+        snapshot_core_s_bits,
+        snapshot_mem_peak_bytes,
+        snapshot_wall_s_bits,
+        throttled,
+        paused,
+    );
+}
+
+#[allow(dead_code)]
+fn classify_retained_evidence_receipt_identity_fields(
+    source: &RetainedEvidenceReceiptIdentitySource,
+) {
+    let RetainedEvidenceReceiptIdentitySource {
+        preview,
+        byte_len,
+        digest,
+    } = source;
+    let _ = (preview, byte_len, digest);
+}
+
+#[allow(dead_code)]
+fn classify_pressure_event_identity_fields(source: &PressureEventIdentitySource) {
+    let PressureEventIdentitySource {
+        session,
+        step_tag,
+        pressure_level,
+        phase_tag,
+        attribution,
+        ordinal,
+        requested_ordinal,
+        checkpoint,
+        gate_generation,
+        pause_request_id,
+        pressure_action_id,
+    } = source;
+    let _ = (
+        session,
+        step_tag,
+        pressure_level,
+        phase_tag,
+        attribution,
+        ordinal,
+        requested_ordinal,
+        checkpoint,
+        gate_generation,
+        pause_request_id,
+        pressure_action_id,
+    );
+}
+
+#[allow(dead_code)]
+fn classify_pressure_receipt_identity_fields(
+    source: &PressureReceiptIdentitySource,
+    event: &PressureEventIdentitySource,
+    evidence: &RetainedEvidenceReceiptIdentitySource,
+) {
+    let PressureReceiptIdentitySource {
+        action_id,
+        level,
+        events,
+    } = source;
+    let PressureEventIdentitySource {
+        session,
+        step_tag,
+        pressure_level,
+        phase_tag,
+        attribution,
+        ordinal,
+        requested_ordinal,
+        checkpoint,
+        gate_generation,
+        pause_request_id,
+        pressure_action_id,
+    } = event;
+    let RetainedEvidenceReceiptIdentitySource {
+        preview,
+        byte_len,
+        digest,
+    } = evidence;
+    let _ = (
+        action_id,
+        level,
+        events,
+        session,
+        step_tag,
+        pressure_level,
+        phase_tag,
+        attribution,
+        ordinal,
+        requested_ordinal,
+        checkpoint,
+        gate_generation,
+        pause_request_id,
+        pressure_action_id,
+        preview,
+        byte_len,
+        digest,
+    );
+}
+
+#[allow(dead_code)]
+fn classify_submission_receipt_identity_fields(
+    source: &SubmissionReceiptIdentitySource,
+    charge: &ChargeIdentitySource,
+    evidence: &RetainedEvidenceReceiptIdentitySource,
+) {
+    match source {
+        SubmissionReceiptIdentitySource::Done {
+            request_id,
+            ledger_scope,
+            admission_ordinal,
+            charge: terminal_charge,
+            meter_receipt,
+        } => {
+            let _ = (
+                request_id,
+                ledger_scope,
+                admission_ordinal,
+                terminal_charge,
+                meter_receipt,
+            );
+        }
+        SubmissionReceiptIdentitySource::Failed {
+            request_id,
+            ledger_scope,
+            admission_ordinal,
+            evidence: terminal_evidence,
+        } => {
+            let _ = (
+                request_id,
+                ledger_scope,
+                admission_ordinal,
+                terminal_evidence,
+            );
+        }
+    }
+    let ChargeIdentitySource {
+        core_s_bits,
+        mem_peak_bytes,
+        wall_s_bits,
+    } = charge;
+    let RetainedEvidenceReceiptIdentitySource {
+        preview,
+        byte_len,
+        digest,
+    } = evidence;
+    let _ = (
+        core_s_bits,
+        mem_peak_bytes,
+        wall_s_bits,
+        preview,
+        byte_len,
+        digest,
+    );
+}
+
+#[allow(dead_code)]
+fn classify_pause_acknowledgement_receipt_identity_fields(
+    source: &PauseAcknowledgementReceiptIdentitySource,
+    event: &PressureEventIdentitySource,
+    evidence: &RetainedEvidenceReceiptIdentitySource,
+) {
+    let PauseAcknowledgementReceiptIdentitySource {
+        governor_id,
+        session,
+        gate_generation,
+        requested_ordinal,
+        event: receipt_event,
+        resume_generation,
+        gate_binding,
+    } = source;
+    let PressureEventIdentitySource {
+        session: event_session,
+        step_tag,
+        pressure_level,
+        phase_tag,
+        attribution,
+        ordinal,
+        requested_ordinal: event_requested_ordinal,
+        checkpoint,
+        gate_generation: event_gate_generation,
+        pause_request_id,
+        pressure_action_id,
+    } = event;
+    let RetainedEvidenceReceiptIdentitySource {
+        preview,
+        byte_len,
+        digest,
+    } = evidence;
+    let _ = (
+        governor_id,
+        session,
+        gate_generation,
+        requested_ordinal,
+        receipt_event,
+        resume_generation,
+        gate_binding,
+        event_session,
+        step_tag,
+        pressure_level,
+        phase_tag,
+        attribution,
+        ordinal,
+        event_requested_ordinal,
+        checkpoint,
+        event_gate_generation,
+        pause_request_id,
+        pressure_action_id,
+        preview,
+        byte_len,
+        digest,
+    );
+}
+
+#[allow(dead_code)]
+fn classify_resume_activation_receipt_identity_fields(
+    source: &ResumeActivationReceiptIdentitySource,
+) {
+    let ResumeActivationReceiptIdentitySource {
+        activation_id,
+        acknowledgement_hash,
+        gate_binding,
+    } = source;
+    let _ = (activation_id, acknowledgement_hash, gate_binding);
+}
+
+/// Owner-local durable-governor declaration consumed by `xtask check-identities`.
+#[allow(dead_code)]
+pub const DURABLE_GOVERNOR_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
+    "frankensim-identity-schema-v1",
+    "id=fs-session:durable-governor-id",
+    "version_const=DURABLE_GOVERNOR_IDENTITY_VERSION",
+    "version=1",
+    "domain=org.frankensim.fs-session.durable-governor-id.v1",
+    "domain_const=DURABLE_GOVERNOR_ID_DOMAIN",
+    "encoder=durable_governor_identity",
+    "encoder_helpers=none",
+    "schema_constants=DURABLE_GOVERNOR_IDENTITY_VERSION,DURABLE_GOVERNOR_ID_DOMAIN,crates/fs-session/src/governor/recovery.rs#TERMINAL_SCHEMA_VERSION",
+    "schema_functions=Governor::new_durable,crates/fs-blake3/src/lib.rs#hash_domain",
+    "schema_dependencies=fs-ledger:physical-instance",
+    "digest=fs-blake3",
+    "encoding=typed-binary",
+    "sources=DurableGovernorIdentitySource",
+    "source_fields=DurableGovernorIdentitySource.ledger_instance_id:semantic,DurableGovernorIdentitySource.nonce:semantic",
+    "source_bindings=DurableGovernorIdentitySource.ledger_instance_id>ledger-instance-id,DurableGovernorIdentitySource.nonce>durable-nonce",
+    "external_semantic_fields=identity-version,digest-domain,canonical-field-order",
+    "semantic_fields=identity-version,digest-domain,canonical-field-order,ledger-instance-id,durable-nonce",
+    "excluded_fields=none",
+    "consumers=Governor::identity,Governor::session_open_id,Governor::meter_report_id,Governor::submission_request_id,Governor::pressure_action_id",
+    "mutations=identity-version:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,digest-domain:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,canonical-field-order:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,ledger-instance-id:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,durable-nonce:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently",
+    "nonsemantic_mutations=none",
+    "field_guard=classify_durable_governor_identity_fields",
+    "transport_guard=session_identity_transport_is_current",
+    "version_guard=crates/fs-session/src/governor.rs#governor_identity_versions_and_transports_fail_closed",
+    "coupling_surface=fs-session:durable-governor-id",
+];
+
+/// Owner-local session-open authority declaration.
+#[allow(dead_code)]
+pub const SESSION_OPEN_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
+    "frankensim-identity-schema-v1",
+    "id=fs-session:session-open-id",
+    "version_const=SESSION_OPEN_IDENTITY_VERSION",
+    "version=2",
+    "domain=org.frankensim.fs-session.open-id.v2",
+    "domain_const=SESSION_OPEN_ID_DOMAIN",
+    "encoder=session_open_authority_identity",
+    "encoder_helpers=identity_push_hash",
+    "schema_constants=SESSION_OPEN_IDENTITY_VERSION,SESSION_OPEN_ID_DOMAIN,MAX_IDEMPOTENCY_INPUT_BYTES,crates/fs-session/src/governor/recovery.rs#TERMINAL_SCHEMA_VERSION",
+    "schema_functions=Governor::session_open_id,bounded_request_digest,crates/fs-session/src/governor/recovery.rs#encode_open_payload,crates/fs-session/src/governor/recovery.rs#decode_open_payload,crates/fs-session/src/governor/recovery.rs#encode_open_receipt,crates/fs-session/src/governor/recovery.rs#decode_open_receipt,crates/fs-blake3/src/lib.rs#hash_domain",
+    "schema_dependencies=fs-session:durable-governor-id",
+    "digest=fs-blake3",
+    "encoding=typed-binary",
+    "sources=SessionOpenIdIdentitySource",
+    "source_fields=SessionOpenIdIdentitySource.governor_id:semantic,SessionOpenIdIdentitySource.session:semantic,SessionOpenIdIdentitySource.client_key_digest:semantic",
+    "source_bindings=SessionOpenIdIdentitySource.governor_id>governor-id,SessionOpenIdIdentitySource.session>session,SessionOpenIdIdentitySource.client_key_digest>client-key-digest",
+    "external_semantic_fields=identity-version,digest-domain,canonical-field-order",
+    "semantic_fields=identity-version,digest-domain,canonical-field-order,governor-id,session,client-key-digest",
+    "excluded_fields=none",
+    "consumers=Governor::open_session,Governor::open_session_gated,SessionOpenReceipt,fs-ledger::session_registry::SessionMutationClaim",
+    "mutations=identity-version:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,digest-domain:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,canonical-field-order:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,governor-id:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,session:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,client-key-digest:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently",
+    "nonsemantic_mutations=none",
+    "field_guard=classify_session_open_id_identity_fields",
+    "transport_guard=session_identity_transport_is_current",
+    "version_guard=crates/fs-session/src/governor.rs#governor_identity_versions_and_transports_fail_closed",
+    "coupling_surface=fs-session:session-open-id",
+];
+
+/// Owner-local capability-token identity declaration.
+#[allow(dead_code)]
+pub const SESSION_TOKEN_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
+    "frankensim-identity-schema-v1",
+    "id=fs-session:session-token-identity",
+    "version_const=SESSION_TOKEN_IDENTITY_VERSION",
+    "version=1",
+    "domain=org.frankensim.fs-session.token-identity.v1",
+    "domain_const=SESSION_TOKEN_IDENTITY_DOMAIN",
+    "encoder=session_token_identity",
+    "encoder_helpers=identity_push_framed",
+    "schema_constants=SESSION_TOKEN_IDENTITY_VERSION,SESSION_TOKEN_IDENTITY_DOMAIN,crates/fs-session/src/governor/recovery.rs#TERMINAL_SCHEMA_VERSION",
+    "schema_functions=capability_token_identity,crates/fs-session/src/token.rs#CapabilityToken::validate_operator_grants,crates/fs-session/src/token.rs#CapabilityToken::validate_ledger_scope,crates/fs-session/src/governor/recovery.rs#encode_open_payload,crates/fs-session/src/governor/recovery.rs#decode_open_payload,buffered_open_receipt,crates/fs-blake3/src/lib.rs#hash_domain",
+    "schema_dependencies=none",
+    "digest=fs-blake3",
+    "encoding=typed-binary",
+    "sources=SessionTokenIdentitySource",
+    "source_fields=SessionTokenIdentitySource.session:semantic,SessionTokenIdentitySource.core_s_bits:semantic,SessionTokenIdentitySource.mem_bytes:semantic,SessionTokenIdentitySource.wall_s_bits:semantic,SessionTokenIdentitySource.cores:semantic,SessionTokenIdentitySource.ledger_scope:semantic,SessionTokenIdentitySource.operations:semantic",
+    "source_bindings=SessionTokenIdentitySource.session>session,SessionTokenIdentitySource.core_s_bits>core-seconds-bits,SessionTokenIdentitySource.mem_bytes>memory-bytes,SessionTokenIdentitySource.wall_s_bits>wall-seconds-bits,SessionTokenIdentitySource.cores>cores,SessionTokenIdentitySource.ledger_scope>ledger-scope,SessionTokenIdentitySource.operations>operation-count+operation-order+operation-bytes",
+    "external_semantic_fields=identity-version,digest-domain,canonical-field-order,length-framing",
+    "semantic_fields=identity-version,digest-domain,canonical-field-order,length-framing,session,core-seconds-bits,memory-bytes,wall-seconds-bits,cores,ledger-scope,operation-count,operation-order,operation-bytes",
+    "excluded_fields=none",
+    "consumers=Governor::open_session,Governor::open_session_gated,SessionOpenReceipt::token_digest,buffered_open_receipt",
+    "mutations=identity-version:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,digest-domain:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,canonical-field-order:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,length-framing:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,session:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,core-seconds-bits:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,memory-bytes:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,wall-seconds-bits:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,cores:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,ledger-scope:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,operation-count:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,operation-order:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,operation-bytes:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently",
+    "nonsemantic_mutations=none",
+    "field_guard=classify_session_token_identity_fields",
+    "transport_guard=session_identity_transport_is_current",
+    "version_guard=crates/fs-session/src/governor.rs#governor_identity_versions_and_transports_fail_closed",
+    "coupling_surface=fs-session:session-token-identity",
+];
+
+/// Owner-local gate-binding identity declaration.
+#[allow(dead_code)]
+pub const GATE_BINDING_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
+    "frankensim-identity-schema-v1",
+    "id=fs-session:gate-binding-id",
+    "version_const=GATE_BINDING_IDENTITY_VERSION",
+    "version=1",
+    "domain=org.frankensim.fs-session.gate-binding-id.v1",
+    "domain_const=GATE_BINDING_ID_DOMAIN",
+    "encoder=gate_binding_identity",
+    "encoder_helpers=identity_push_hash",
+    "schema_constants=GATE_BINDING_IDENTITY_VERSION,GATE_BINDING_ID_DOMAIN,crates/fs-session/src/governor/recovery.rs#TERMINAL_SCHEMA_VERSION",
+    "schema_functions=session_gate_binding,resumed_gate_binding,crates/fs-session/src/governor/recovery.rs#encode_open_payload,crates/fs-session/src/governor/recovery.rs#decode_open_payload,crates/fs-session/src/governor/recovery.rs#encode_pause_ack_terminal_receipt,crates/fs-session/src/governor/recovery.rs#decode_pause_ack_terminal_receipt,crates/fs-session/src/governor/recovery.rs#encode_activation_payload,crates/fs-session/src/governor/recovery.rs#decode_activation_payload,crates/fs-blake3/src/lib.rs#hash_domain",
+    "schema_dependencies=fs-session:pause-acknowledgement-id,fs-session:session-open-id",
+    "digest=fs-blake3",
+    "encoding=typed-binary",
+    "sources=GateBindingIdentitySource",
+    "source_fields=GateBindingIdentitySource.variant:semantic,GateBindingIdentitySource.open_id:semantic,GateBindingIdentitySource.governor_id:semantic,GateBindingIdentitySource.session:semantic,GateBindingIdentitySource.gate_generation:semantic,GateBindingIdentitySource.requested_ordinal:semantic,GateBindingIdentitySource.resume_generation:semantic",
+    "source_bindings=GateBindingIdentitySource.variant>shape-tag,GateBindingIdentitySource.open_id>open-id,GateBindingIdentitySource.governor_id>governor-id,GateBindingIdentitySource.session>session,GateBindingIdentitySource.gate_generation>gate-generation,GateBindingIdentitySource.requested_ordinal>requested-ordinal,GateBindingIdentitySource.resume_generation>resume-generation",
+    "external_semantic_fields=identity-version,digest-domain,canonical-field-order",
+    "semantic_fields=identity-version,digest-domain,canonical-field-order,shape-tag,open-id,governor-id,session,gate-generation,requested-ordinal,resume-generation",
+    "excluded_fields=none",
+    "consumers=SessionOpenReceipt::gate_identity,PauseAcknowledgement::gate_binding,ResumeActivationReceipt::gate_binding",
+    "mutations=identity-version:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,digest-domain:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,canonical-field-order:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,shape-tag:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,open-id:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,governor-id:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,session:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,gate-generation:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,requested-ordinal:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,resume-generation:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently",
+    "nonsemantic_mutations=none",
+    "field_guard=classify_gate_binding_identity_fields",
+    "transport_guard=session_identity_transport_is_current",
+    "version_guard=crates/fs-session/src/governor.rs#governor_identity_versions_and_transports_fail_closed",
+    "coupling_surface=fs-session:gate-binding-id",
+];
+
+/// Owner-local meter-report authority declaration.
+#[allow(dead_code)]
+pub const METER_REPORT_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
+    "frankensim-identity-schema-v1",
+    "id=fs-session:meter-report-id",
+    "version_const=METER_REPORT_IDENTITY_VERSION",
+    "version=2",
+    "domain=org.frankensim.fs-session.meter-report-id.v2",
+    "domain_const=METER_REPORT_ID_DOMAIN",
+    "encoder=meter_report_authority_identity",
+    "encoder_helpers=identity_push_hash",
+    "schema_constants=METER_REPORT_IDENTITY_VERSION,METER_REPORT_ID_DOMAIN,MAX_IDEMPOTENCY_INPUT_BYTES,crates/fs-session/src/governor/recovery.rs#TERMINAL_SCHEMA_VERSION",
+    "schema_functions=Governor::meter_report_id,Governor::submission_meter_report_id,bounded_request_digest,crates/fs-session/src/governor/recovery.rs#encode_meter_payload,crates/fs-session/src/governor/recovery.rs#decode_meter_payload,crates/fs-session/src/governor/recovery.rs#encode_meter_terminal_receipt,crates/fs-session/src/governor/recovery.rs#decode_meter_terminal_receipt,buffered_meter_receipt,crates/fs-blake3/src/lib.rs#hash_domain",
+    "schema_dependencies=fs-session:session-open-id,fs-session:submission-request-id",
+    "digest=fs-blake3",
+    "encoding=typed-binary",
+    "sources=MeterReportIdIdentitySource",
+    "source_fields=MeterReportIdIdentitySource.variant:semantic,MeterReportIdIdentitySource.governor_id:semantic,MeterReportIdIdentitySource.session:semantic,MeterReportIdIdentitySource.session_open:semantic,MeterReportIdIdentitySource.generation:semantic,MeterReportIdIdentitySource.client_key_digest:semantic,MeterReportIdIdentitySource.request_id:semantic",
+    "source_bindings=MeterReportIdIdentitySource.variant>shape-tag,MeterReportIdIdentitySource.governor_id>governor-id,MeterReportIdIdentitySource.session>session,MeterReportIdIdentitySource.session_open>session-open,MeterReportIdIdentitySource.generation>generation,MeterReportIdIdentitySource.client_key_digest>client-key-digest,MeterReportIdIdentitySource.request_id>submission-request-id",
+    "external_semantic_fields=identity-version,digest-domain,canonical-field-order",
+    "semantic_fields=identity-version,digest-domain,canonical-field-order,shape-tag,governor-id,session,session-open,generation,client-key-digest,submission-request-id",
+    "excluded_fields=none",
+    "consumers=Governor::charge,MeterReceipt::report_id,buffered_meter_receipt,SubmissionReceipt",
+    "mutations=identity-version:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,digest-domain:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,canonical-field-order:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,shape-tag:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,governor-id:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,session:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,session-open:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,generation:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,client-key-digest:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,submission-request-id:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently",
+    "nonsemantic_mutations=none",
+    "field_guard=classify_meter_report_id_identity_fields",
+    "transport_guard=session_identity_transport_is_current",
+    "version_guard=crates/fs-session/src/governor.rs#governor_identity_versions_and_transports_fail_closed",
+    "coupling_surface=fs-session:meter-report-id",
+];
+
+/// Owner-local pressure-action authority declaration.
+#[allow(dead_code)]
+pub const PRESSURE_ACTION_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
+    "frankensim-identity-schema-v1",
+    "id=fs-session:pressure-action-id",
+    "version_const=PRESSURE_ACTION_IDENTITY_VERSION",
+    "version=2",
+    "domain=org.frankensim.fs-session.pressure-action-id.v2",
+    "domain_const=PRESSURE_ACTION_ID_DOMAIN",
+    "encoder=pressure_action_authority_identity",
+    "encoder_helpers=identity_push_hash",
+    "schema_constants=PRESSURE_ACTION_IDENTITY_VERSION,PRESSURE_ACTION_ID_DOMAIN,MAX_IDEMPOTENCY_INPUT_BYTES,crates/fs-session/src/governor/recovery.rs#TERMINAL_SCHEMA_VERSION",
+    "schema_functions=Governor::pressure_action_id,bounded_request_digest,crates/fs-session/src/governor/recovery.rs#encode_pressure_payload,crates/fs-session/src/governor/recovery.rs#decode_pressure_payload,crates/fs-session/src/governor/recovery.rs#encode_pressure_terminal_receipt,crates/fs-session/src/governor/recovery.rs#decode_pressure_terminal_receipt,buffered_degradation_event,crates/fs-blake3/src/lib.rs#hash_domain",
+    "schema_dependencies=fs-session:session-open-id",
+    "digest=fs-blake3",
+    "encoding=typed-binary",
+    "sources=PressureActionIdIdentitySource",
+    "source_fields=PressureActionIdIdentitySource.governor_id:semantic,PressureActionIdIdentitySource.session:semantic,PressureActionIdIdentitySource.session_open:semantic,PressureActionIdIdentitySource.generation:semantic,PressureActionIdIdentitySource.client_key_digest:semantic",
+    "source_bindings=PressureActionIdIdentitySource.governor_id>governor-id,PressureActionIdIdentitySource.session>session,PressureActionIdIdentitySource.session_open>session-open,PressureActionIdIdentitySource.generation>generation,PressureActionIdIdentitySource.client_key_digest>client-key-digest",
+    "external_semantic_fields=identity-version,digest-domain,canonical-field-order",
+    "semantic_fields=identity-version,digest-domain,canonical-field-order,governor-id,session,session-open,generation,client-key-digest",
+    "excluded_fields=none",
+    "consumers=Governor::apply_memory_pressure,PressureReceipt::action_id,DegradationEvent::pressure_action_id,buffered_degradation_event",
+    "mutations=identity-version:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,digest-domain:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,canonical-field-order:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,governor-id:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,session:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,session-open:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,generation:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,client-key-digest:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently",
+    "nonsemantic_mutations=none",
+    "field_guard=classify_pressure_action_id_identity_fields",
+    "transport_guard=session_identity_transport_is_current",
+    "version_guard=crates/fs-session/src/governor.rs#governor_identity_versions_and_transports_fail_closed",
+    "coupling_surface=fs-session:pressure-action-id",
+];
+
+/// Owner-local bounded submission-agent key declaration.
+#[allow(dead_code)]
+pub const SUBMISSION_AGENT_KEY_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
+    "frankensim-identity-schema-v1",
+    "id=fs-session:submission-agent-key",
+    "version_const=SUBMISSION_AGENT_KEY_IDENTITY_VERSION",
+    "version=1",
+    "domain=org.frankensim.fs-session.idempotency-agent.v1",
+    "domain_const=IDEMPOTENCY_AGENT_DOMAIN",
+    "encoder=submission_agent_key_identity",
+    "encoder_helpers=none",
+    "schema_constants=SUBMISSION_AGENT_KEY_IDENTITY_VERSION,IDEMPOTENCY_AGENT_DOMAIN,MAX_IDEMPOTENCY_INPUT_BYTES,crates/fs-session/src/governor/recovery.rs#TERMINAL_SCHEMA_VERSION",
+    "schema_functions=bounded_request_digest,Governor::submission_request_id,Governor::idempotency_key,crates/fs-session/src/governor/recovery.rs#encode_submission_payload,crates/fs-session/src/governor/recovery.rs#decode_submission_payload,crates/fs-blake3/src/lib.rs#hash_domain",
+    "schema_dependencies=none",
+    "digest=fs-blake3",
+    "encoding=typed-binary",
+    "sources=SubmissionAgentKeyIdentitySource",
+    "source_fields=SubmissionAgentKeyIdentitySource.value:semantic",
+    "source_bindings=SubmissionAgentKeyIdentitySource.value>agent-key-bytes",
+    "external_semantic_fields=identity-version,digest-domain",
+    "semantic_fields=identity-version,digest-domain,agent-key-bytes",
+    "excluded_fields=none",
+    "consumers=Governor::submission_request_id,Governor::idempotency_key,SubmissionRequestId::content_hash",
+    "mutations=identity-version:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,digest-domain:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,agent-key-bytes:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently",
+    "nonsemantic_mutations=none",
+    "field_guard=classify_submission_agent_key_identity_fields",
+    "transport_guard=session_identity_transport_is_current",
+    "version_guard=crates/fs-session/src/governor.rs#governor_identity_versions_and_transports_fail_closed",
+    "coupling_surface=fs-session:submission-agent-key",
+];
+
+/// Owner-local bounded canonical-program declaration.
+#[allow(dead_code)]
+pub const SUBMISSION_PROGRAM_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
+    "frankensim-identity-schema-v1",
+    "id=fs-session:submission-program",
+    "version_const=SUBMISSION_PROGRAM_IDENTITY_VERSION",
+    "version=1",
+    "domain=org.frankensim.fs-session.idempotency-program.v1",
+    "domain_const=IDEMPOTENCY_PROGRAM_DOMAIN",
+    "encoder=submission_program_identity",
+    "encoder_helpers=none",
+    "schema_constants=SUBMISSION_PROGRAM_IDENTITY_VERSION,IDEMPOTENCY_PROGRAM_DOMAIN,MAX_IDEMPOTENCY_INPUT_BYTES,crates/fs-session/src/governor/recovery.rs#TERMINAL_SCHEMA_VERSION",
+    "schema_functions=bounded_request_digest,Governor::submission_request_id,Governor::idempotency_key,Governor::submit_once_durable,crates/fs-session/src/governor/recovery.rs#encode_submission_payload,crates/fs-session/src/governor/recovery.rs#decode_submission_payload,crates/fs-blake3/src/lib.rs#hash_domain",
+    "schema_dependencies=none",
+    "digest=fs-blake3",
+    "encoding=typed-binary",
+    "sources=SubmissionProgramIdentitySource",
+    "source_fields=SubmissionProgramIdentitySource.value:semantic",
+    "source_bindings=SubmissionProgramIdentitySource.value>canonical-program-bytes",
+    "external_semantic_fields=identity-version,digest-domain",
+    "semantic_fields=identity-version,digest-domain,canonical-program-bytes",
+    "excluded_fields=none",
+    "consumers=Governor::submission_request_id,Governor::submit_once_durable,SubmissionRequestId",
+    "mutations=identity-version:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,digest-domain:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,canonical-program-bytes:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently",
+    "nonsemantic_mutations=none",
+    "field_guard=classify_submission_program_identity_fields",
+    "transport_guard=session_identity_transport_is_current",
+    "version_guard=crates/fs-session/src/governor.rs#governor_identity_versions_and_transports_fail_closed",
+    "coupling_surface=fs-session:submission-program",
+];
+
+/// Owner-local retryable submission authority declaration.
+#[allow(dead_code)]
+pub const SUBMISSION_REQUEST_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
+    "frankensim-identity-schema-v1",
+    "id=fs-session:submission-request-id",
+    "version_const=SUBMISSION_REQUEST_IDENTITY_VERSION",
+    "version=2",
+    "domain=org.frankensim.fs-session.submission-request-id.v2",
+    "domain_const=SUBMISSION_REQUEST_ID_DOMAIN",
+    "encoder=submission_request_authority_identity",
+    "encoder_helpers=identity_push_hash",
+    "schema_constants=SUBMISSION_REQUEST_IDENTITY_VERSION,SUBMISSION_REQUEST_ID_DOMAIN,crates/fs-session/src/governor/recovery.rs#TERMINAL_SCHEMA_VERSION",
+    "schema_functions=Governor::submission_request_id,Governor::submit_once,Governor::submit_once_durable,crates/fs-session/src/governor/recovery.rs#encode_submission_payload,crates/fs-session/src/governor/recovery.rs#decode_submission_payload,crates/fs-session/src/governor/recovery.rs#encode_submission_terminal_receipt,crates/fs-session/src/governor/recovery.rs#decode_submission_terminal_receipt,buffered_submission_success,buffered_submission_failure,crates/fs-blake3/src/lib.rs#hash_domain",
+    "schema_dependencies=fs-session:session-open-id,fs-session:submission-agent-key,fs-session:submission-program",
+    "digest=fs-blake3",
+    "encoding=typed-binary",
+    "sources=SubmissionRequestIdIdentitySource",
+    "source_fields=SubmissionRequestIdIdentitySource.governor_id:semantic,SubmissionRequestIdIdentitySource.session:semantic,SubmissionRequestIdIdentitySource.session_open:semantic,SubmissionRequestIdIdentitySource.generation:semantic,SubmissionRequestIdIdentitySource.key_hash:semantic,SubmissionRequestIdIdentitySource.request_hash:nonsemantic:checked-payload-not-slot-identity",
+    "source_bindings=SubmissionRequestIdIdentitySource.governor_id>governor-id,SubmissionRequestIdIdentitySource.session>session,SubmissionRequestIdIdentitySource.session_open>session-open,SubmissionRequestIdIdentitySource.generation>generation,SubmissionRequestIdIdentitySource.key_hash>agent-key-hash",
+    "external_semantic_fields=identity-version,digest-domain,canonical-field-order",
+    "semantic_fields=identity-version,digest-domain,canonical-field-order,governor-id,session,session-open,generation,agent-key-hash",
+    "excluded_fields=none",
+    "consumers=Governor::submit_once,Governor::submit_once_durable,SubmissionReceipt,MeterReportId,fs-ledger::session_registry::SessionMutationClaim",
+    "mutations=identity-version:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,digest-domain:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,canonical-field-order:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,governor-id:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,session:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,session-open:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,generation:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,agent-key-hash:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently",
+    "nonsemantic_mutations=SubmissionRequestIdIdentitySource.request_hash:crates/fs-session/src/governor.rs#governor_identity_nonsemantic_fields_do_not_move",
+    "field_guard=classify_submission_request_id_identity_fields",
+    "transport_guard=session_identity_transport_is_current",
+    "version_guard=crates/fs-session/src/governor.rs#governor_identity_versions_and_transports_fail_closed",
+    "coupling_surface=fs-session:submission-request-id",
+];
+
+/// Owner-local retained-evidence declaration.
+#[allow(dead_code)]
+pub const RETAINED_EVIDENCE_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
+    "frankensim-identity-schema-v1",
+    "id=fs-session:retained-evidence",
+    "version_const=RETAINED_EVIDENCE_IDENTITY_VERSION",
+    "version=1",
+    "domain=org.frankensim.fs-session.retained-evidence.v1",
+    "domain_const=RETAINED_EVIDENCE_DOMAIN",
+    "encoder=retained_evidence_identity",
+    "encoder_helpers=none",
+    "schema_constants=RETAINED_EVIDENCE_IDENTITY_VERSION,RETAINED_EVIDENCE_DOMAIN,MAX_RETAINED_EVIDENCE_BYTES,MAX_CHECKPOINT_CLAIM_BYTES,crates/fs-session/src/governor/recovery.rs#TERMINAL_SCHEMA_VERSION",
+    "schema_functions=RetainedEvidence::capture,utf8_prefix,crates/fs-session/src/governor/recovery.rs#encode_evidence,crates/fs-session/src/governor/recovery.rs#decode_evidence,evidence_json,crates/fs-blake3/src/lib.rs#hash_domain",
+    "schema_dependencies=none",
+    "digest=fs-blake3",
+    "encoding=typed-binary",
+    "sources=RetainedEvidenceIdentitySource",
+    "source_fields=RetainedEvidenceIdentitySource.value:semantic",
+    "source_bindings=RetainedEvidenceIdentitySource.value>complete-evidence-bytes",
+    "external_semantic_fields=identity-version,digest-domain",
+    "semantic_fields=identity-version,digest-domain,complete-evidence-bytes",
+    "excluded_fields=none",
+    "consumers=SubmissionReceipt,DegradationEvent,PauseAcknowledgement,buffered_degradation_event",
+    "mutations=identity-version:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,digest-domain:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,complete-evidence-bytes:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently",
+    "nonsemantic_mutations=none",
+    "field_guard=classify_retained_evidence_identity_fields",
+    "transport_guard=session_identity_transport_is_current",
+    "version_guard=crates/fs-session/src/governor.rs#governor_identity_versions_and_transports_fail_closed",
+    "coupling_surface=fs-session:retained-evidence",
+];
+
+/// Owner-local pause-acknowledgement authority declaration.
+#[allow(dead_code)]
+pub const PAUSE_ACKNOWLEDGEMENT_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
+    "frankensim-identity-schema-v1",
+    "id=fs-session:pause-acknowledgement-id",
+    "version_const=PAUSE_ACKNOWLEDGEMENT_IDENTITY_VERSION",
+    "version=1",
+    "domain=org.frankensim.fs-session.pause-acknowledgement-id.v1",
+    "domain_const=PAUSE_ACKNOWLEDGEMENT_ID_DOMAIN",
+    "encoder=pause_acknowledgement_authority_identity",
+    "encoder_helpers=identity_push_hash",
+    "schema_constants=PAUSE_ACKNOWLEDGEMENT_IDENTITY_VERSION,PAUSE_ACKNOWLEDGEMENT_ID_DOMAIN,crates/fs-session/src/governor/recovery.rs#TERMINAL_SCHEMA_VERSION",
+    "schema_functions=crates/fs-session/src/governor/recovery.rs#pause_ack_authority,Governor::acknowledge_pause,crates/fs-session/src/governor/recovery.rs#encode_pause_ack_payload,crates/fs-session/src/governor/recovery.rs#decode_pause_ack_payload,crates/fs-session/src/governor/recovery.rs#encode_pause_ack_terminal_receipt,crates/fs-session/src/governor/recovery.rs#decode_pause_ack_terminal_receipt,crates/fs-blake3/src/lib.rs#hash_domain",
+    "schema_dependencies=fs-session:pressure-action-id",
+    "digest=fs-blake3",
+    "encoding=typed-binary",
+    "sources=PauseAcknowledgementIdIdentitySource",
+    "source_fields=PauseAcknowledgementIdIdentitySource.governor_id:semantic,PauseAcknowledgementIdIdentitySource.session:semantic,PauseAcknowledgementIdIdentitySource.gate_generation:semantic,PauseAcknowledgementIdIdentitySource.requested_ordinal:semantic",
+    "source_bindings=PauseAcknowledgementIdIdentitySource.governor_id>governor-id,PauseAcknowledgementIdIdentitySource.session>session,PauseAcknowledgementIdIdentitySource.gate_generation>gate-generation,PauseAcknowledgementIdIdentitySource.requested_ordinal>requested-ordinal",
+    "external_semantic_fields=identity-version,digest-domain,canonical-field-order",
+    "semantic_fields=identity-version,digest-domain,canonical-field-order,governor-id,session,gate-generation,requested-ordinal",
+    "excluded_fields=none",
+    "consumers=Governor::acknowledge_pause,PauseAcknowledgement::request_id,DegradationEvent::pause_request_id,fs-ledger::session_registry::SessionMutationClaim",
+    "mutations=identity-version:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,digest-domain:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,canonical-field-order:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,governor-id:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,session:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,gate-generation:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,requested-ordinal:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently",
+    "nonsemantic_mutations=none",
+    "field_guard=classify_pause_acknowledgement_id_identity_fields",
+    "transport_guard=session_identity_transport_is_current",
+    "version_guard=crates/fs-session/src/governor.rs#governor_identity_versions_and_transports_fail_closed",
+    "coupling_surface=fs-session:pause-acknowledgement-id",
+];
+
+/// Owner-local resume-activation authority declaration.
+#[allow(dead_code)]
+pub const RESUME_ACTIVATION_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
+    "frankensim-identity-schema-v1",
+    "id=fs-session:resume-activation-id",
+    "version_const=RESUME_ACTIVATION_IDENTITY_VERSION",
+    "version=1",
+    "domain=org.frankensim.fs-session.resume-activation-id.v1",
+    "domain_const=RESUME_ACTIVATION_ID_DOMAIN",
+    "encoder=resume_activation_authority_identity",
+    "encoder_helpers=identity_push_hash",
+    "schema_constants=RESUME_ACTIVATION_IDENTITY_VERSION,RESUME_ACTIVATION_ID_DOMAIN,crates/fs-session/src/governor/recovery.rs#TERMINAL_SCHEMA_VERSION",
+    "schema_functions=resume_activation_id,Governor::activate_resume,crates/fs-session/src/governor/recovery.rs#encode_activation_payload,crates/fs-session/src/governor/recovery.rs#decode_activation_payload,crates/fs-session/src/governor/recovery.rs#encode_activation_terminal_receipt,crates/fs-session/src/governor/recovery.rs#decode_activation_terminal_receipt,crates/fs-blake3/src/lib.rs#hash_domain",
+    "schema_dependencies=fs-session:gate-binding-id,fs-session:pause-acknowledgement-receipt,fs-session:session-open-id",
+    "digest=fs-blake3",
+    "encoding=typed-binary",
+    "sources=ResumeActivationIdIdentitySource",
+    "source_fields=ResumeActivationIdIdentitySource.governor_id:semantic,ResumeActivationIdIdentitySource.session:semantic,ResumeActivationIdIdentitySource.session_open:semantic,ResumeActivationIdIdentitySource.acknowledgement_hash:semantic,ResumeActivationIdIdentitySource.resume_generation:semantic",
+    "source_bindings=ResumeActivationIdIdentitySource.governor_id>governor-id,ResumeActivationIdIdentitySource.session>session,ResumeActivationIdIdentitySource.session_open>session-open,ResumeActivationIdIdentitySource.acknowledgement_hash>acknowledgement-hash,ResumeActivationIdIdentitySource.resume_generation>resume-generation",
+    "external_semantic_fields=identity-version,digest-domain,canonical-field-order",
+    "semantic_fields=identity-version,digest-domain,canonical-field-order,governor-id,session,session-open,acknowledgement-hash,resume-generation",
+    "excluded_fields=none",
+    "consumers=Governor::activate_resume,ResumeActivationReceipt::activation_id,fs-ledger::session_registry::SessionMutationClaim",
+    "mutations=identity-version:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,digest-domain:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,canonical-field-order:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,governor-id:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,session:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,session-open:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,acknowledgement-hash:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently,resume-generation:crates/fs-session/src/governor.rs#governor_authority_identity_fields_move_independently",
+    "nonsemantic_mutations=none",
+    "field_guard=classify_resume_activation_id_identity_fields",
+    "transport_guard=session_identity_transport_is_current",
+    "version_guard=crates/fs-session/src/governor.rs#governor_identity_versions_and_transports_fail_closed",
+    "coupling_surface=fs-session:resume-activation-id",
+];
+
+/// Owner-local session-open receipt declaration.
+#[allow(dead_code)]
+pub const SESSION_OPEN_RECEIPT_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
+    "frankensim-identity-schema-v1",
+    "id=fs-session:session-open-receipt",
+    "version_const=SESSION_OPEN_RECEIPT_IDENTITY_VERSION",
+    "version=1",
+    "domain=org.frankensim.fs-session.open-receipt.v1",
+    "domain_const=SESSION_OPEN_RECEIPT_DOMAIN",
+    "encoder=session_open_receipt_identity",
+    "encoder_helpers=identity_push_framed,identity_push_hash",
+    "schema_constants=SESSION_OPEN_RECEIPT_IDENTITY_VERSION,SESSION_OPEN_RECEIPT_DOMAIN,SESSION_OPEN_AUDIT_SCHEMA,crates/fs-session/src/governor/recovery.rs#TERMINAL_SCHEMA_VERSION",
+    "schema_functions=session_open_receipt_hash,Governor::register_session,crates/fs-session/src/governor/recovery.rs#encode_open_payload,crates/fs-session/src/governor/recovery.rs#decode_open_payload,crates/fs-session/src/governor/recovery.rs#encode_open_receipt,crates/fs-session/src/governor/recovery.rs#decode_open_receipt,buffered_open_receipt,scoped_payload,crates/fs-blake3/src/lib.rs#hash_domain",
+    "schema_dependencies=fs-session:gate-binding-id,fs-session:session-open-id,fs-session:session-token-identity",
+    "digest=fs-blake3",
+    "encoding=typed-binary",
+    "sources=SessionOpenReceiptIdentitySource",
+    "source_fields=SessionOpenReceiptIdentitySource.open_id:semantic,SessionOpenReceiptIdentitySource.token_digest:semantic,SessionOpenReceiptIdentitySource.gate_identity:semantic,SessionOpenReceiptIdentitySource.ledger_scope:semantic",
+    "source_bindings=SessionOpenReceiptIdentitySource.open_id>open-id,SessionOpenReceiptIdentitySource.token_digest>token-digest,SessionOpenReceiptIdentitySource.gate_identity>gate-presence+gate-identity,SessionOpenReceiptIdentitySource.ledger_scope>ledger-scope",
+    "external_semantic_fields=identity-version,digest-domain,canonical-field-order,length-framing",
+    "semantic_fields=identity-version,digest-domain,canonical-field-order,length-framing,open-id,token-digest,gate-presence,gate-identity,ledger-scope",
+    "excluded_fields=none",
+    "consumers=Governor::open_session,Governor::open_session_gated,ScopeFlushPermit,buffered_open_receipt,fs-ledger::session_registry::SessionTerminalRow",
+    "mutations=identity-version:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,digest-domain:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,canonical-field-order:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,length-framing:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,open-id:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,token-digest:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,gate-presence:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,gate-identity:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,ledger-scope:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently",
+    "nonsemantic_mutations=none",
+    "field_guard=classify_session_open_receipt_identity_fields",
+    "transport_guard=session_identity_transport_is_current",
+    "version_guard=crates/fs-session/src/governor.rs#governor_identity_versions_and_transports_fail_closed",
+    "coupling_surface=fs-session:session-open-receipt",
+];
+
+/// Owner-local meter receipt declaration.
+#[allow(dead_code)]
+pub const METER_RECEIPT_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
+    "frankensim-identity-schema-v1",
+    "id=fs-session:meter-receipt",
+    "version_const=METER_RECEIPT_IDENTITY_VERSION",
+    "version=1",
+    "domain=org.frankensim.fs-session.meter-receipt.v1",
+    "domain_const=METER_RECEIPT_DOMAIN",
+    "encoder=meter_receipt_identity",
+    "encoder_helpers=identity_push_enforcement,identity_push_framed,identity_push_hash,identity_push_snapshot",
+    "schema_constants=METER_RECEIPT_IDENTITY_VERSION,METER_RECEIPT_DOMAIN,SESSION_METER_AUDIT_SCHEMA,crates/fs-session/src/governor/recovery.rs#TERMINAL_SCHEMA_VERSION",
+    "schema_functions=meter_receipt_hash,push_meter_snapshot,push_enforcement_identity,Governor::commit_meter_locked,crates/fs-session/src/governor/recovery.rs#encode_meter_receipt,crates/fs-session/src/governor/recovery.rs#decode_meter_receipt,crates/fs-session/src/governor/recovery.rs#encode_meter_terminal_receipt,crates/fs-session/src/governor/recovery.rs#decode_meter_terminal_receipt,buffered_meter_receipt,enforcement_json,meter_snapshot_json,scoped_payload,crates/fs-blake3/src/lib.rs#hash_domain",
+    "schema_dependencies=fs-session:meter-report-id",
+    "digest=fs-blake3",
+    "encoding=typed-binary",
+    "sources=MeterReceiptIdentitySource,ChargeIdentitySource,MeterSnapshotIdentitySource,EnforcementIdentitySource",
+    "source_fields=MeterReceiptIdentitySource.report_id:semantic,MeterReceiptIdentitySource.commit_ordinal:semantic,MeterReceiptIdentitySource.delta:derived:nested-charge-fields-classified-separately,MeterReceiptIdentitySource.before:derived:nested-snapshot-fields-classified-separately,MeterReceiptIdentitySource.after:derived:nested-snapshot-fields-classified-separately,MeterReceiptIdentitySource.enforcement:derived:nested-enforcement-fields-classified-separately,ChargeIdentitySource.core_s_bits:semantic,ChargeIdentitySource.mem_peak_bytes:semantic,ChargeIdentitySource.wall_s_bits:semantic,MeterSnapshotIdentitySource.core_s_bits:semantic,MeterSnapshotIdentitySource.mem_peak_bytes:semantic,MeterSnapshotIdentitySource.wall_s_bits:semantic,MeterSnapshotIdentitySource.throttled:semantic,MeterSnapshotIdentitySource.paused:semantic,EnforcementIdentitySource.variant:semantic,EnforcementIdentitySource.resource:semantic,EnforcementIdentitySource.used_bits:semantic,EnforcementIdentitySource.granted_bits:semantic,EnforcementIdentitySource.resume_hint:semantic",
+    "source_bindings=MeterReceiptIdentitySource.report_id>report-id,MeterReceiptIdentitySource.commit_ordinal>commit-ordinal,ChargeIdentitySource.core_s_bits>delta-core-seconds-bits,ChargeIdentitySource.mem_peak_bytes>delta-memory-bytes,ChargeIdentitySource.wall_s_bits>delta-wall-seconds-bits,MeterSnapshotIdentitySource.core_s_bits>before-core-seconds-bits+after-core-seconds-bits,MeterSnapshotIdentitySource.mem_peak_bytes>before-memory-bytes+after-memory-bytes,MeterSnapshotIdentitySource.wall_s_bits>before-wall-seconds-bits+after-wall-seconds-bits,MeterSnapshotIdentitySource.throttled>before-throttled+after-throttled,MeterSnapshotIdentitySource.paused>before-paused+after-paused,EnforcementIdentitySource.variant>enforcement-tag,EnforcementIdentitySource.resource>enforcement-resource,EnforcementIdentitySource.used_bits>enforcement-used-bits,EnforcementIdentitySource.granted_bits>enforcement-granted-bits,EnforcementIdentitySource.resume_hint>enforcement-resume-hint",
+    "external_semantic_fields=identity-version,digest-domain,canonical-field-order",
+    "semantic_fields=identity-version,digest-domain,canonical-field-order,report-id,commit-ordinal,delta-core-seconds-bits,delta-memory-bytes,delta-wall-seconds-bits,before-core-seconds-bits,after-core-seconds-bits,before-memory-bytes,after-memory-bytes,before-wall-seconds-bits,after-wall-seconds-bits,before-throttled,after-throttled,before-paused,after-paused,enforcement-tag,enforcement-resource,enforcement-used-bits,enforcement-granted-bits,enforcement-resume-hint",
+    "excluded_fields=none",
+    "consumers=Governor::charge,SubmitOutcome,SubmissionReceipt,buffered_meter_receipt,fs-ledger::session_registry::SessionTerminalRow",
+    "mutations=identity-version:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,digest-domain:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,canonical-field-order:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,report-id:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,commit-ordinal:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,delta-core-seconds-bits:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,delta-memory-bytes:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,delta-wall-seconds-bits:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,before-core-seconds-bits:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,after-core-seconds-bits:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,before-memory-bytes:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,after-memory-bytes:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,before-wall-seconds-bits:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,after-wall-seconds-bits:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,before-throttled:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,after-throttled:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,before-paused:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,after-paused:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,enforcement-tag:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,enforcement-resource:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,enforcement-used-bits:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,enforcement-granted-bits:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,enforcement-resume-hint:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently",
+    "nonsemantic_mutations=none",
+    "field_guard=classify_meter_receipt_identity_fields",
+    "transport_guard=session_identity_transport_is_current",
+    "version_guard=crates/fs-session/src/governor.rs#governor_identity_versions_and_transports_fail_closed",
+    "coupling_surface=fs-session:meter-receipt",
+];
+
+/// Owner-local pressure receipt declaration.
+#[allow(dead_code)]
+pub const PRESSURE_RECEIPT_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
+    "frankensim-identity-schema-v1",
+    "id=fs-session:pressure-receipt",
+    "version_const=PRESSURE_RECEIPT_IDENTITY_VERSION",
+    "version=1",
+    "domain=org.frankensim.fs-session.pressure-receipt.v1",
+    "domain_const=PRESSURE_RECEIPT_DOMAIN",
+    "encoder=pressure_receipt_identity",
+    "encoder_helpers=identity_push_framed,identity_push_hash,identity_push_pressure_event",
+    "schema_constants=PRESSURE_RECEIPT_IDENTITY_VERSION,PRESSURE_RECEIPT_DOMAIN,SESSION_DEGRADATION_AUDIT_SCHEMA,crates/fs-session/src/governor/recovery.rs#TERMINAL_SCHEMA_VERSION",
+    "schema_functions=pressure_receipt_hash,push_pressure_event_identity,Governor::apply_memory_pressure,crates/fs-session/src/governor/recovery.rs#encode_pressure_terminal_receipt,crates/fs-session/src/governor/recovery.rs#decode_pressure_terminal_receipt,crates/fs-session/src/governor/recovery.rs#encode_degradation_event,crates/fs-session/src/governor/recovery.rs#decode_degradation_event,buffered_degradation_event,scoped_payload,crates/fs-blake3/src/lib.rs#hash_domain",
+    "schema_dependencies=fs-session:pressure-action-id,fs-session:retained-evidence",
+    "digest=fs-blake3",
+    "encoding=typed-binary",
+    "sources=PressureReceiptIdentitySource,PressureEventIdentitySource,RetainedEvidenceReceiptIdentitySource",
+    "source_fields=PressureReceiptIdentitySource.action_id:semantic,PressureReceiptIdentitySource.level:semantic,PressureReceiptIdentitySource.events:semantic,PressureEventIdentitySource.session:semantic,PressureEventIdentitySource.step_tag:semantic,PressureEventIdentitySource.pressure_level:semantic,PressureEventIdentitySource.phase_tag:semantic,PressureEventIdentitySource.attribution:semantic,PressureEventIdentitySource.ordinal:semantic,PressureEventIdentitySource.requested_ordinal:semantic,PressureEventIdentitySource.checkpoint:derived:nested-evidence-fields-classified-separately,PressureEventIdentitySource.gate_generation:semantic,PressureEventIdentitySource.pause_request_id:nonsemantic:event-routing-authority-not-receipt-preimage,PressureEventIdentitySource.pressure_action_id:nonsemantic:event-routing-authority-already-bound-by-receipt,RetainedEvidenceReceiptIdentitySource.preview:nonsemantic:diagnostic-preview-not-identity,RetainedEvidenceReceiptIdentitySource.byte_len:semantic,RetainedEvidenceReceiptIdentitySource.digest:semantic",
+    "source_bindings=PressureReceiptIdentitySource.action_id>action-id,PressureReceiptIdentitySource.level>level,PressureReceiptIdentitySource.events>event-count+event-order,PressureEventIdentitySource.session>event-session,PressureEventIdentitySource.step_tag>event-step-tag,PressureEventIdentitySource.pressure_level>event-pressure-level,PressureEventIdentitySource.phase_tag>event-phase-tag,PressureEventIdentitySource.attribution>event-attribution,PressureEventIdentitySource.ordinal>event-ordinal,PressureEventIdentitySource.requested_ordinal>requested-ordinal-presence+requested-ordinal,PressureEventIdentitySource.gate_generation>gate-generation-presence+gate-generation,RetainedEvidenceReceiptIdentitySource.byte_len>checkpoint-byte-length,RetainedEvidenceReceiptIdentitySource.digest>checkpoint-digest",
+    "external_semantic_fields=identity-version,digest-domain,canonical-field-order,length-framing",
+    "semantic_fields=identity-version,digest-domain,canonical-field-order,length-framing,action-id,level,event-count,event-order,event-session,event-step-tag,event-pressure-level,event-phase-tag,event-attribution,event-ordinal,requested-ordinal-presence,requested-ordinal,gate-generation-presence,gate-generation,checkpoint-byte-length,checkpoint-digest",
+    "excluded_fields=none",
+    "consumers=Governor::apply_memory_pressure,PressureReceipt::content_hash,buffered_degradation_event,fs-ledger::session_registry::SessionTerminalRow",
+    "mutations=identity-version:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,digest-domain:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,canonical-field-order:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,length-framing:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,action-id:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,level:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,event-count:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,event-order:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,event-session:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,event-step-tag:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,event-pressure-level:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,event-phase-tag:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,event-attribution:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,event-ordinal:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,requested-ordinal-presence:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,requested-ordinal:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,gate-generation-presence:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,gate-generation:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,checkpoint-byte-length:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,checkpoint-digest:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently",
+    "nonsemantic_mutations=PressureEventIdentitySource.pause_request_id:crates/fs-session/src/governor.rs#governor_identity_nonsemantic_fields_do_not_move,PressureEventIdentitySource.pressure_action_id:crates/fs-session/src/governor.rs#governor_identity_nonsemantic_fields_do_not_move,RetainedEvidenceReceiptIdentitySource.preview:crates/fs-session/src/governor.rs#governor_identity_nonsemantic_fields_do_not_move",
+    "field_guard=classify_pressure_receipt_identity_fields",
+    "transport_guard=session_identity_transport_is_current",
+    "version_guard=crates/fs-session/src/governor.rs#governor_identity_versions_and_transports_fail_closed",
+    "coupling_surface=fs-session:pressure-receipt",
+];
+
+/// Owner-local terminal submission receipt declaration.
+#[allow(dead_code)]
+pub const SUBMISSION_RECEIPT_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
+    "frankensim-identity-schema-v1",
+    "id=fs-session:submission-receipt",
+    "version_const=SUBMISSION_RECEIPT_IDENTITY_VERSION",
+    "version=3",
+    "domain=org.frankensim.fs-session.submission-receipt.v3",
+    "domain_const=SUBMISSION_RECEIPT_DOMAIN",
+    "encoder=submission_receipt_identity",
+    "encoder_helpers=identity_push_framed,identity_push_hash",
+    "schema_constants=SUBMISSION_RECEIPT_IDENTITY_VERSION,SUBMISSION_RECEIPT_DOMAIN,SESSION_SUBMISSION_AUDIT_SCHEMA,crates/fs-session/src/governor/recovery.rs#TERMINAL_SCHEMA_VERSION",
+    "schema_functions=submission_receipt,SubmissionReceipt::matches_success,SubmissionReceipt::matches_failure,crates/fs-session/src/governor/recovery.rs#encode_submission_payload,crates/fs-session/src/governor/recovery.rs#decode_submission_payload,crates/fs-session/src/governor/recovery.rs#encode_submission_terminal_receipt,crates/fs-session/src/governor/recovery.rs#decode_submission_terminal_receipt,buffered_submission_success,buffered_submission_failure,scoped_payload,crates/fs-blake3/src/lib.rs#hash_domain",
+    "schema_dependencies=fs-session:meter-receipt,fs-session:retained-evidence,fs-session:submission-request-id",
+    "digest=fs-blake3",
+    "encoding=typed-binary",
+    "sources=SubmissionReceiptIdentitySource,ChargeIdentitySource,RetainedEvidenceReceiptIdentitySource",
+    "source_fields=SubmissionReceiptIdentitySource.variant:semantic,SubmissionReceiptIdentitySource.request_id:semantic,SubmissionReceiptIdentitySource.ledger_scope:semantic,SubmissionReceiptIdentitySource.admission_ordinal:semantic,SubmissionReceiptIdentitySource.charge:derived:nested-charge-fields-classified-separately,SubmissionReceiptIdentitySource.meter_receipt:semantic,SubmissionReceiptIdentitySource.evidence:derived:nested-evidence-fields-classified-separately,ChargeIdentitySource.core_s_bits:semantic,ChargeIdentitySource.mem_peak_bytes:semantic,ChargeIdentitySource.wall_s_bits:semantic,RetainedEvidenceReceiptIdentitySource.preview:nonsemantic:diagnostic-preview-not-identity,RetainedEvidenceReceiptIdentitySource.byte_len:semantic,RetainedEvidenceReceiptIdentitySource.digest:semantic",
+    "source_bindings=SubmissionReceiptIdentitySource.variant>terminal-tag,SubmissionReceiptIdentitySource.request_id>request-id,SubmissionReceiptIdentitySource.ledger_scope>ledger-scope,SubmissionReceiptIdentitySource.admission_ordinal>admission-ordinal,SubmissionReceiptIdentitySource.meter_receipt>meter-receipt,ChargeIdentitySource.core_s_bits>charge-core-seconds-bits,ChargeIdentitySource.mem_peak_bytes>charge-memory-bytes,ChargeIdentitySource.wall_s_bits>charge-wall-seconds-bits,RetainedEvidenceReceiptIdentitySource.byte_len>evidence-byte-length,RetainedEvidenceReceiptIdentitySource.digest>evidence-digest",
+    "external_semantic_fields=identity-version,digest-domain,canonical-field-order,length-framing",
+    "semantic_fields=identity-version,digest-domain,canonical-field-order,length-framing,terminal-tag,request-id,ledger-scope,admission-ordinal,meter-receipt,charge-core-seconds-bits,charge-memory-bytes,charge-wall-seconds-bits,evidence-byte-length,evidence-digest",
+    "excluded_fields=none",
+    "consumers=SubmitOutcome,Governor::submit_once,Governor::submit_once_durable,buffered_submission_success,buffered_submission_failure,fs-ledger::session_registry::SessionTerminalRow",
+    "mutations=identity-version:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,digest-domain:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,canonical-field-order:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,length-framing:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,terminal-tag:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,request-id:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,ledger-scope:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,admission-ordinal:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,meter-receipt:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,charge-core-seconds-bits:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,charge-memory-bytes:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,charge-wall-seconds-bits:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,evidence-byte-length:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,evidence-digest:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently",
+    "nonsemantic_mutations=RetainedEvidenceReceiptIdentitySource.preview:crates/fs-session/src/governor.rs#governor_identity_nonsemantic_fields_do_not_move",
+    "field_guard=classify_submission_receipt_identity_fields",
+    "transport_guard=session_identity_transport_is_current",
+    "version_guard=crates/fs-session/src/governor.rs#governor_identity_versions_and_transports_fail_closed",
+    "coupling_surface=fs-session:submission-receipt",
+];
+
+/// Owner-local pause-acknowledgement receipt declaration.
+#[allow(dead_code)]
+pub const PAUSE_ACKNOWLEDGEMENT_RECEIPT_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
+    "frankensim-identity-schema-v1",
+    "id=fs-session:pause-acknowledgement-receipt",
+    "version_const=PAUSE_ACKNOWLEDGEMENT_RECEIPT_IDENTITY_VERSION",
+    "version=1",
+    "domain=org.frankensim.fs-session.pause-acknowledgement-receipt.v1",
+    "domain_const=PAUSE_ACKNOWLEDGEMENT_RECEIPT_DOMAIN",
+    "encoder=pause_acknowledgement_receipt_identity",
+    "encoder_helpers=identity_push_framed,identity_push_hash,identity_push_pressure_event",
+    "schema_constants=PAUSE_ACKNOWLEDGEMENT_RECEIPT_IDENTITY_VERSION,PAUSE_ACKNOWLEDGEMENT_RECEIPT_DOMAIN,SESSION_DEGRADATION_AUDIT_SCHEMA,crates/fs-session/src/governor/recovery.rs#TERMINAL_SCHEMA_VERSION",
+    "schema_functions=pause_acknowledgement_hash,Governor::acknowledge_pause,crates/fs-session/src/governor/recovery.rs#encode_pause_ack_payload,crates/fs-session/src/governor/recovery.rs#decode_pause_ack_payload,crates/fs-session/src/governor/recovery.rs#encode_pause_ack_terminal_receipt,crates/fs-session/src/governor/recovery.rs#decode_pause_ack_terminal_receipt,crates/fs-session/src/governor/recovery.rs#encode_degradation_event,crates/fs-session/src/governor/recovery.rs#decode_degradation_event,buffered_degradation_event,crates/fs-blake3/src/lib.rs#hash_domain",
+    "schema_dependencies=fs-session:gate-binding-id,fs-session:pause-acknowledgement-id,fs-session:retained-evidence",
+    "digest=fs-blake3",
+    "encoding=typed-binary",
+    "sources=PauseAcknowledgementReceiptIdentitySource,PressureEventIdentitySource,RetainedEvidenceReceiptIdentitySource",
+    "source_fields=PauseAcknowledgementReceiptIdentitySource.governor_id:semantic,PauseAcknowledgementReceiptIdentitySource.session:semantic,PauseAcknowledgementReceiptIdentitySource.gate_generation:semantic,PauseAcknowledgementReceiptIdentitySource.requested_ordinal:semantic,PauseAcknowledgementReceiptIdentitySource.event:derived:nested-event-fields-classified-separately,PauseAcknowledgementReceiptIdentitySource.resume_generation:semantic,PauseAcknowledgementReceiptIdentitySource.gate_binding:semantic,PressureEventIdentitySource.session:semantic,PressureEventIdentitySource.step_tag:semantic,PressureEventIdentitySource.pressure_level:semantic,PressureEventIdentitySource.phase_tag:semantic,PressureEventIdentitySource.attribution:semantic,PressureEventIdentitySource.ordinal:semantic,PressureEventIdentitySource.requested_ordinal:semantic,PressureEventIdentitySource.checkpoint:derived:nested-evidence-fields-classified-separately,PressureEventIdentitySource.gate_generation:semantic,PressureEventIdentitySource.pause_request_id:nonsemantic:event-routing-authority-not-receipt-preimage,PressureEventIdentitySource.pressure_action_id:nonsemantic:event-routing-authority-not-receipt-preimage,RetainedEvidenceReceiptIdentitySource.preview:nonsemantic:diagnostic-preview-not-identity,RetainedEvidenceReceiptIdentitySource.byte_len:semantic,RetainedEvidenceReceiptIdentitySource.digest:semantic",
+    "source_bindings=PauseAcknowledgementReceiptIdentitySource.governor_id>governor-id,PauseAcknowledgementReceiptIdentitySource.session>request-session,PauseAcknowledgementReceiptIdentitySource.gate_generation>request-gate-generation,PauseAcknowledgementReceiptIdentitySource.requested_ordinal>request-ordinal,PauseAcknowledgementReceiptIdentitySource.resume_generation>resume-generation,PauseAcknowledgementReceiptIdentitySource.gate_binding>gate-binding,PressureEventIdentitySource.session>event-session,PressureEventIdentitySource.step_tag>event-step-tag,PressureEventIdentitySource.pressure_level>event-pressure-level,PressureEventIdentitySource.phase_tag>event-phase-tag,PressureEventIdentitySource.attribution>event-attribution,PressureEventIdentitySource.ordinal>event-ordinal,PressureEventIdentitySource.requested_ordinal>event-requested-ordinal-presence+event-requested-ordinal,PressureEventIdentitySource.gate_generation>event-gate-generation-presence+event-gate-generation,RetainedEvidenceReceiptIdentitySource.byte_len>checkpoint-byte-length,RetainedEvidenceReceiptIdentitySource.digest>checkpoint-digest",
+    "external_semantic_fields=identity-version,digest-domain,canonical-field-order,length-framing",
+    "semantic_fields=identity-version,digest-domain,canonical-field-order,length-framing,governor-id,request-session,request-gate-generation,request-ordinal,resume-generation,gate-binding,event-session,event-step-tag,event-pressure-level,event-phase-tag,event-attribution,event-ordinal,event-requested-ordinal-presence,event-requested-ordinal,event-gate-generation-presence,event-gate-generation,checkpoint-byte-length,checkpoint-digest",
+    "excluded_fields=none",
+    "consumers=Governor::acknowledge_pause,PauseAcknowledgement::content_hash,Governor::activate_resume,fs-ledger::session_registry::SessionTerminalRow",
+    "mutations=identity-version:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,digest-domain:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,canonical-field-order:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,length-framing:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,governor-id:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,request-session:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,request-gate-generation:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,request-ordinal:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,resume-generation:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,gate-binding:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,event-session:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,event-step-tag:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,event-pressure-level:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,event-phase-tag:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,event-attribution:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,event-ordinal:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,event-requested-ordinal-presence:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,event-requested-ordinal:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,event-gate-generation-presence:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,event-gate-generation:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,checkpoint-byte-length:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,checkpoint-digest:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently",
+    "nonsemantic_mutations=PressureEventIdentitySource.pause_request_id:crates/fs-session/src/governor.rs#governor_identity_nonsemantic_fields_do_not_move,PressureEventIdentitySource.pressure_action_id:crates/fs-session/src/governor.rs#governor_identity_nonsemantic_fields_do_not_move,RetainedEvidenceReceiptIdentitySource.preview:crates/fs-session/src/governor.rs#governor_identity_nonsemantic_fields_do_not_move",
+    "field_guard=classify_pause_acknowledgement_receipt_identity_fields",
+    "transport_guard=session_identity_transport_is_current",
+    "version_guard=crates/fs-session/src/governor.rs#governor_identity_versions_and_transports_fail_closed",
+    "coupling_surface=fs-session:pause-acknowledgement-receipt",
+];
+
+/// Owner-local resume-activation receipt declaration.
+#[allow(dead_code)]
+pub const RESUME_ACTIVATION_RECEIPT_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
+    "frankensim-identity-schema-v1",
+    "id=fs-session:resume-activation-receipt",
+    "version_const=RESUME_ACTIVATION_RECEIPT_IDENTITY_VERSION",
+    "version=1",
+    "domain=org.frankensim.fs-session.resume-activation-receipt.v1",
+    "domain_const=RESUME_ACTIVATION_RECEIPT_DOMAIN",
+    "encoder=resume_activation_receipt_identity",
+    "encoder_helpers=identity_push_hash",
+    "schema_constants=RESUME_ACTIVATION_RECEIPT_IDENTITY_VERSION,RESUME_ACTIVATION_RECEIPT_DOMAIN,crates/fs-session/src/governor/recovery.rs#TERMINAL_SCHEMA_VERSION",
+    "schema_functions=resume_activation_receipt,Governor::activate_resume,crates/fs-session/src/governor/recovery.rs#encode_activation_payload,crates/fs-session/src/governor/recovery.rs#decode_activation_payload,crates/fs-session/src/governor/recovery.rs#encode_activation_terminal_receipt,crates/fs-session/src/governor/recovery.rs#decode_activation_terminal_receipt,crates/fs-blake3/src/lib.rs#hash_domain",
+    "schema_dependencies=fs-session:gate-binding-id,fs-session:pause-acknowledgement-receipt,fs-session:resume-activation-id",
+    "digest=fs-blake3",
+    "encoding=typed-binary",
+    "sources=ResumeActivationReceiptIdentitySource",
+    "source_fields=ResumeActivationReceiptIdentitySource.activation_id:semantic,ResumeActivationReceiptIdentitySource.acknowledgement_hash:semantic,ResumeActivationReceiptIdentitySource.gate_binding:semantic",
+    "source_bindings=ResumeActivationReceiptIdentitySource.activation_id>activation-id,ResumeActivationReceiptIdentitySource.acknowledgement_hash>acknowledgement-hash,ResumeActivationReceiptIdentitySource.gate_binding>gate-binding",
+    "external_semantic_fields=identity-version,digest-domain,canonical-field-order",
+    "semantic_fields=identity-version,digest-domain,canonical-field-order,activation-id,acknowledgement-hash,gate-binding",
+    "excluded_fields=none",
+    "consumers=Governor::activate_resume,ResumeActivationReceipt::content_hash,fs-ledger::session_registry::SessionTerminalRow",
+    "mutations=identity-version:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,digest-domain:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,canonical-field-order:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,activation-id:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,acknowledgement-hash:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently,gate-binding:crates/fs-session/src/governor.rs#governor_receipt_identity_fields_move_independently",
+    "nonsemantic_mutations=none",
+    "field_guard=classify_resume_activation_receipt_identity_fields",
+    "transport_guard=session_identity_transport_is_current",
+    "version_guard=crates/fs-session/src/governor.rs#governor_identity_versions_and_transports_fail_closed",
+    "coupling_surface=fs-session:resume-activation-receipt",
+];
 /// Maximum bytes hashed from either canonical-idempotency-key input.
 pub const MAX_IDEMPOTENCY_INPUT_BYTES: usize = 1024 * 1024;
 // Fixed-width conservative framing for t, three byte lengths, and the two
@@ -974,7 +2653,7 @@ fn buffered_open_receipt(
         t: 0,
         kind: "session.open",
         payload: scoped_payload(
-            "fs-session-open-v1",
+            SESSION_OPEN_AUDIT_SCHEMA,
             ledger_scope,
             &format!(
                 "\"open_id\":\"{}\",\"token_digest\":\"{}\",\"gate_identity\":{gate_identity},\"receipt\":\"{}\",\"core_s_bits\":\"{:016x}\",\"mem_bytes\":{},\"wall_s_bits\":\"{:016x}\",\"cores\":{},\"ops\":{}",
@@ -1007,7 +2686,7 @@ fn buffered_meter_receipt(
         })?,
         kind: "session.meter-report",
         payload: scoped_payload(
-            "fs-session-meter-report-v1",
+            SESSION_METER_AUDIT_SCHEMA,
             ledger_scope,
             &format!(
                 "\"session_open\":\"{}\",\"report_id\":\"{}\",\"generation\":{},\"commit_ordinal\":{},\"core_s_bits\":\"{:016x}\",\"mem_peak_bytes\":{},\"wall_s_bits\":\"{:016x}\",\"before\":{{\"core_s_bits\":\"{:016x}\",\"mem_peak_bytes\":{},\"wall_s_bits\":\"{:016x}\",\"throttled\":{},\"paused\":{}}},\"after\":{{\"core_s_bits\":\"{:016x}\",\"mem_peak_bytes\":{},\"wall_s_bits\":\"{:016x}\",\"throttled\":{},\"paused\":{}}},\"enforcement\":{},\"receipt\":\"{}\"",
@@ -1094,7 +2773,7 @@ fn buffered_submission_success(
             observed_at_least: usize::MAX,
         })?,
         kind: "session.idempotent-execution",
-        payload: scoped_payload("fs-session-idempotency-v5", ledger_scope, &body),
+        payload: scoped_payload(SESSION_SUBMISSION_AUDIT_SCHEMA, ledger_scope, &body),
     };
     Ok((event, (*admission_ordinal, *receipt, event_ordinal)))
 }
@@ -1137,7 +2816,7 @@ fn buffered_submission_failure(
             observed_at_least: usize::MAX,
         })?,
         kind: "session.idempotent-failure",
-        payload: scoped_payload("fs-session-idempotency-v5", ledger_scope, &body),
+        payload: scoped_payload(SESSION_SUBMISSION_AUDIT_SCHEMA, ledger_scope, &body),
     };
     Ok((event, (*admission_ordinal, *receipt, *admission_ordinal)))
 }
@@ -1170,7 +2849,7 @@ fn buffered_degradation_event(
         t: event.ordinal,
         kind: "session.degradation",
         payload: scoped_payload(
-            "fs-session-degradation-v5",
+            SESSION_DEGRADATION_AUDIT_SCHEMA,
             ledger_scope,
             &format!(
                 "\"session_open\":\"{}\",\"generation\":{},\"action_id\":\"{}\",\"action_receipt\":\"{}\",\"step\":\"{}\",\"level\":{},\"phase\":\"{}\",\"attribution\":\"{}\",\"requested_ordinal\":{requested},\"checkpoint\":{checkpoint},\"gate_generation\":{gate_generation}",
@@ -1873,6 +3552,33 @@ struct ScopeState {
     retained_bytes: usize,
 }
 
+fn has_dirty_submission_predecessor(
+    scope: &ScopeState,
+    pause_request: PauseRequestId,
+    selected_terminals: &[BufferedTerminal],
+) -> bool {
+    let is_draining_generation = |request_id: SubmissionRequestId| {
+        request_id.session == pause_request.session
+            && request_id.generation == pause_request.gate_generation
+    };
+    let is_selected = |request_id: SubmissionRequestId| {
+        selected_terminals.iter().any(|terminal| {
+            terminal.kind == recovery::KIND_SUBMISSION
+                && terminal.authority == request_id.content_hash
+        })
+    };
+    scope.dirty_causal.iter().any(|(_, mutation)| {
+        matches!(
+            mutation,
+            DirtyCausalMutation::Submission(request_id)
+                if is_draining_generation(*request_id) && !is_selected(*request_id)
+        )
+    }) || scope
+        .dirty_submission_failures
+        .iter()
+        .any(|(_, request_id)| is_draining_generation(*request_id) && !is_selected(*request_id))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PendingPause {
     request_id: PauseRequestId,
@@ -1934,6 +3640,7 @@ struct Inner {
     pressure_action_ids: BTreeMap<u64, BTreeSet<PressureActionId>>,
     idempotency: BTreeMap<SubmissionRequestId, IdemState>,
     idempotency_keys: BTreeMap<u64, BTreeMap<fs_blake3::ContentHash, SubmissionRequestId>>,
+    submission_admissions: BTreeMap<u64, SubmissionRequestId>,
     pending_submissions: BTreeMap<u64, usize>,
     scopes: BTreeMap<String, ScopeState>,
     next_submission_ordinal: u64,
@@ -1943,6 +3650,8 @@ struct Inner {
     reserved_pause_ordinals: usize,
     next_flush_reservation: u64,
     retained_bytes: usize,
+    durable_claims_at_open: u64,
+    recovered_durable_claims: BTreeSet<fs_blake3::ContentHash>,
 }
 
 fn checked_retained_add(current: usize, added: usize) -> usize {
@@ -2046,8 +3755,10 @@ impl Governor {
     /// ledger instance and one explicit caller-persisted nonce.
     ///
     /// Repeating this call after reopening the same ledger with the same nonce
-    /// reconstructs the exact authority namespace. A replacement or foreign
-    /// ledger derives a different identity.
+    /// reconstructs the exact authority namespace. The constructor snapshots
+    /// its complete durable claim count; fresh mutation stays fenced until the
+    /// typed recovery APIs have rebuilt that governor-wide history. A
+    /// replacement or foreign ledger derives a different identity.
     ///
     /// # Errors
     /// Corrupt or unavailable physical-ledger identity fails closed.
@@ -2063,11 +3774,45 @@ impl Governor {
         let mut payload = Vec::new();
         payload.extend_from_slice(&sink.as_bytes());
         payload.extend_from_slice(&nonce.as_bytes());
+        let id = fs_blake3::hash_domain(DURABLE_GOVERNOR_ID_DOMAIN, &payload);
+        let durable_claims_at_open =
+            ledger
+                .session_mutation_claim_count(id)
+                .map_err(|error| SessionError::Persistence {
+                    what: format!("durable governor recovery-fence snapshot failed: {error}"),
+                })?;
+        let inner = Inner {
+            durable_claims_at_open,
+            ..Inner::default()
+        };
         Ok(Self {
-            id: fs_blake3::hash_domain(DURABLE_GOVERNOR_ID_DOMAIN, &payload),
+            id,
             durable_sink: Some(sink),
-            inner: Mutex::new(Inner::default()),
+            inner: Mutex::new(inner),
         })
+    }
+
+    fn ensure_durable_recovery_complete(&self, inner: &Inner) -> Result<(), SessionError> {
+        if self.durable_sink.is_none() {
+            return Ok(());
+        }
+        let recovered = u64::try_from(inner.recovered_durable_claims.len()).map_err(|_| {
+            SessionError::Persistence {
+                what: "recovered durable-claim count overflowed u64".to_string(),
+            }
+        })?;
+        if recovered < inner.durable_claims_at_open {
+            return Err(SessionError::DurableRecoveryIncomplete {
+                remaining_claims: inner.durable_claims_at_open - recovered,
+            });
+        }
+        Ok(())
+    }
+
+    fn mark_durable_claim_recovered(&self, inner: &mut Inner, authority: fs_blake3::ContentHash) {
+        if self.durable_sink.is_some() {
+            inner.recovered_durable_claims.insert(authority);
+        }
     }
 
     /// Opaque governor identity carried by every typed mutation authority.
@@ -2104,6 +3849,7 @@ impl Governor {
         open_id: SessionOpenId,
         mut token: CapabilityToken,
         gate: Option<Arc<CancelGate>>,
+        recovering: bool,
     ) -> Result<SessionOpenReceipt, SessionError> {
         if open_id.governor_id != self.id || open_id.session != token.session {
             return Err(SessionError::MutationAuthorityMismatch {
@@ -2143,6 +3889,9 @@ impl Governor {
                 kind: "session-open",
                 id: open_id.content_hash,
             });
+        }
+        if !recovering {
+            self.ensure_durable_recovery_complete(&g)?;
         }
         if gate.as_ref().is_some_and(|gate| gate.is_requested()) {
             return Err(SessionError::PreRequestedGate { id: session });
@@ -2256,7 +4005,7 @@ impl Governor {
         open_id: SessionOpenId,
         token: CapabilityToken,
     ) -> Result<SessionOpenReceipt, SessionError> {
-        self.register_session(open_id, token, None)
+        self.register_session(open_id, token, None, false)
     }
 
     /// Register a session's token WITH its cancellation capability
@@ -2277,7 +4026,7 @@ impl Governor {
         token: CapabilityToken,
         gate: Arc<CancelGate>,
     ) -> Result<SessionOpenReceipt, SessionError> {
-        self.register_session(open_id, token, Some(gate))
+        self.register_session(open_id, token, Some(gate), false)
     }
 
     /// The token for a session.
@@ -2409,6 +4158,7 @@ impl Governor {
                 id: report_id.content_hash,
             });
         }
+        self.ensure_durable_recovery_complete(g)?;
         let token = self.validate_meter_authority(g, report_id)?;
         let report_count = g
             .meter_report_ids
@@ -2680,6 +4430,13 @@ impl Governor {
                 ),
             });
         }
+        if g.submission_admissions.get(&admission_ordinal) != Some(&request_id) {
+            return Err(SessionError::Persistence {
+                what: format!(
+                    "submission admission ordinal {admission_ordinal} changed owner during claim rollback"
+                ),
+            });
+        }
         let scope_retained = g
             .scopes
             .get(ledger_scope)
@@ -2700,6 +4457,7 @@ impl Governor {
             .get_mut(&session.0)
             .expect("submission-key index checked above")
             .remove(&request_id.key_hash);
+        g.submission_admissions.remove(&admission_ordinal);
         *g.pending_submissions
             .get_mut(&session.0)
             .expect("pending-submission counter checked above") -= 1;
@@ -2773,6 +4531,8 @@ impl Governor {
     /// because external side effects cannot be inferred. An existing terminal
     /// is recovered and replayed without invoking `work`. The terminal receipt
     /// and its audit event become restart-replayable when the scope is flushed.
+    /// A new authority cannot run until the restarted governor has recovered
+    /// every claim in its construction snapshot, across all sessions/scopes.
     ///
     /// # Errors
     /// A non-durable governor, foreign ledger, altered canonical program,
@@ -2844,8 +4604,21 @@ impl Governor {
             )
         };
         self.recover_open(ledger, open_id, token, gate)?;
-        if historical_generation {
+        let claim_exists = ledger
+            .session_mutation_claim(&request_id.content_hash)
+            .map_err(|error| SessionError::Persistence {
+                what: format!(
+                    "durable submission claim preflight {} failed: {error}",
+                    request_id.content_hash
+                ),
+            })?
+            .is_some();
+        if historical_generation || claim_exists {
             return self.recover_submission(ledger, request_id, canonical_program);
+        }
+        {
+            let inner = self.inner.lock().expect("governor lock");
+            self.ensure_durable_recovery_complete(&inner)?;
         }
         self.submit_once_inner(
             request_id,
@@ -3022,7 +4795,17 @@ impl Governor {
                     observed_at_least: i64::MAX as usize,
                 });
             }
+            if let Some(existing) = g.submission_admissions.get(&admission_ordinal) {
+                return Err(SessionError::Persistence {
+                    what: format!(
+                        "submission admission ordinal {admission_ordinal} is already owned by {}",
+                        existing.content_hash
+                    ),
+                });
+            }
             g.next_submission_ordinal = admission_ordinal;
+            g.submission_admissions
+                .insert(admission_ordinal, request_id);
             g.reserved_meter_ordinals += 1;
             *g.reserved_meter_reports
                 .get_mut(&session.0)
@@ -3059,7 +4842,7 @@ impl Governor {
                 session: request_id.session.0,
                 ledger_scope: &ledger_scope,
                 generation: request_id.generation,
-                causal_ordinal: None,
+                causal_ordinal: Some(admission_ordinal),
                 payload: &payload,
             };
             let claim_result = match ledger.claim_session_mutation(&claim) {
@@ -3405,6 +5188,7 @@ impl Governor {
                 content_hash: replay.content_hash,
             });
         }
+        self.ensure_durable_recovery_complete(&g)?;
         let current_open = Self::current_open_identity(&g, session)?;
         if action_id.session_open != current_open {
             return Err(SessionError::MutationAuthorityMismatch {
@@ -3786,6 +5570,7 @@ impl Governor {
                 content_hash: completed.acknowledgement_hash,
             });
         }
+        self.ensure_durable_recovery_complete(&g)?;
         let pending_submissions = g
             .pending_submissions
             .get(&session.0)
@@ -4039,6 +5824,7 @@ impl Governor {
         );
         match g.gate_phases.get(&session).copied() {
             Some(GatePhase::ReadyToResume) => {
+                self.ensure_durable_recovery_complete(&g)?;
                 if current_gate.is_requested() {
                     return Err(SessionError::ResumeGateAlreadyRequested {
                         id: session,
@@ -4400,7 +6186,7 @@ impl Governor {
                                         kind: recovery::KIND_SUBMISSION,
                                         session: request_id.session,
                                         generation: request_id.generation,
-                                        causal_ordinal: None,
+                                        causal_ordinal: Some(generation.0),
                                         payload: recovery::encode_submission_payload(request_id),
                                         receipt: recovery::encode_submission_terminal_receipt(
                                             state,
@@ -4462,7 +6248,7 @@ impl Governor {
                                 kind: recovery::KIND_SUBMISSION,
                                 session: request_id.session,
                                 generation: request_id.generation,
-                                causal_ordinal: None,
+                                causal_ordinal: Some(generation.0),
                                 payload: recovery::encode_submission_payload(request_id),
                                 receipt: recovery::encode_submission_terminal_receipt(state)?,
                                 events: vec![event],
@@ -4495,7 +6281,22 @@ impl Governor {
                             let has_more = scope.dirty_control.len() > dirty.len();
                             (dirty, has_more)
                         };
+                        let mut deferred_pause = false;
                         for (indexed_ordinal, mutation) in dirty {
+                            if let DirtyControlMutation::PauseAcknowledgement(request_id) = mutation
+                            {
+                                let scope =
+                                    g.scopes.get(&ledger_scope).expect("scope checked above");
+                                if has_dirty_submission_predecessor(scope, request_id, &terminals) {
+                                    // The ledger rejects a pause acknowledgement while any
+                                    // omitted draining-generation submission remains Pending.
+                                    // A predecessor already selected into this atomic batch is
+                                    // admissible; otherwise defer before sizing so lane rotation
+                                    // cannot repeatedly prepare the same inadmissible prefix.
+                                    deferred_pause = true;
+                                    break;
+                                }
+                            }
                             let causal_ordinal =
                                 u64::try_from(indexed_ordinal).map_err(|_| {
                                     SessionError::Persistence {
@@ -4713,7 +6514,7 @@ impl Governor {
                                 owned_events,
                             ));
                         }
-                        if has_more {
+                        if has_more && !deferred_pause {
                             break 'lanes;
                         }
                     }
@@ -4958,6 +6759,879 @@ impl Governor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn identity_test_hash(byte: u8) -> fs_blake3::ContentHash {
+        fs_blake3::hash_domain("fs-session-identity-test", &[byte])
+    }
+
+    #[test]
+    fn governor_identity_versions_and_transports_fail_closed() {
+        assert_eq!(DURABLE_GOVERNOR_IDENTITY_VERSION, 1);
+        assert_eq!(SESSION_OPEN_IDENTITY_VERSION, 2);
+        assert_eq!(SESSION_TOKEN_IDENTITY_VERSION, 1);
+        assert_eq!(GATE_BINDING_IDENTITY_VERSION, 1);
+        assert_eq!(METER_REPORT_IDENTITY_VERSION, 2);
+        assert_eq!(PRESSURE_ACTION_IDENTITY_VERSION, 2);
+        assert_eq!(SUBMISSION_AGENT_KEY_IDENTITY_VERSION, 1);
+        assert_eq!(SUBMISSION_PROGRAM_IDENTITY_VERSION, 1);
+        assert_eq!(SUBMISSION_REQUEST_IDENTITY_VERSION, 2);
+        assert_eq!(RETAINED_EVIDENCE_IDENTITY_VERSION, 1);
+        assert_eq!(PAUSE_ACKNOWLEDGEMENT_IDENTITY_VERSION, 1);
+        assert_eq!(RESUME_ACTIVATION_IDENTITY_VERSION, 1);
+        assert_eq!(SESSION_OPEN_RECEIPT_IDENTITY_VERSION, 1);
+        assert_eq!(METER_RECEIPT_IDENTITY_VERSION, 1);
+        assert_eq!(PRESSURE_RECEIPT_IDENTITY_VERSION, 1);
+        assert_eq!(SUBMISSION_RECEIPT_IDENTITY_VERSION, 3);
+        assert_eq!(PAUSE_ACKNOWLEDGEMENT_RECEIPT_IDENTITY_VERSION, 1);
+        assert_eq!(RESUME_ACTIVATION_RECEIPT_IDENTITY_VERSION, 1);
+        for (domain, version) in [
+            (DURABLE_GOVERNOR_ID_DOMAIN, 1),
+            (SESSION_OPEN_ID_DOMAIN, 2),
+            (SESSION_TOKEN_IDENTITY_DOMAIN, 1),
+            (GATE_BINDING_ID_DOMAIN, 1),
+            (METER_REPORT_ID_DOMAIN, 2),
+            (PRESSURE_ACTION_ID_DOMAIN, 2),
+            (IDEMPOTENCY_AGENT_DOMAIN, 1),
+            (IDEMPOTENCY_PROGRAM_DOMAIN, 1),
+            (SUBMISSION_REQUEST_ID_DOMAIN, 2),
+            (RETAINED_EVIDENCE_DOMAIN, 1),
+            (PAUSE_ACKNOWLEDGEMENT_ID_DOMAIN, 1),
+            (RESUME_ACTIVATION_ID_DOMAIN, 1),
+            (SESSION_OPEN_RECEIPT_DOMAIN, 1),
+            (METER_RECEIPT_DOMAIN, 1),
+            (PRESSURE_RECEIPT_DOMAIN, 1),
+            (SUBMISSION_RECEIPT_DOMAIN, 3),
+            (PAUSE_ACKNOWLEDGEMENT_RECEIPT_DOMAIN, 1),
+            (RESUME_ACTIVATION_RECEIPT_DOMAIN, 1),
+        ] {
+            assert!(domain.ends_with(&format!("v{version}")));
+        }
+        assert!(session_identity_transport_is_current(
+            recovery::TERMINAL_SCHEMA_VERSION,
+            None,
+        ));
+        for schema in [
+            SESSION_OPEN_AUDIT_SCHEMA,
+            SESSION_METER_AUDIT_SCHEMA,
+            SESSION_SUBMISSION_AUDIT_SCHEMA,
+            SESSION_DEGRADATION_AUDIT_SCHEMA,
+        ] {
+            assert!(session_identity_transport_is_current(
+                recovery::TERMINAL_SCHEMA_VERSION,
+                Some(schema),
+            ));
+        }
+        assert!(!session_identity_transport_is_current(0, None));
+        assert!(!session_identity_transport_is_current(
+            recovery::TERMINAL_SCHEMA_VERSION + 1,
+            None,
+        ));
+        assert!(!session_identity_transport_is_current(
+            recovery::TERMINAL_SCHEMA_VERSION,
+            Some("fs-session-open-v2"),
+        ));
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn governor_authority_identity_fields_move_independently() {
+        let h = identity_test_hash;
+
+        let durable = DurableGovernorIdentitySource {
+            ledger_instance_id: [1; 16],
+            nonce: [2; 32],
+        };
+        let durable_hash = durable_governor_identity(&durable);
+        let mut changed = durable.clone();
+        changed.ledger_instance_id[0] ^= 1;
+        assert_ne!(durable_hash, durable_governor_identity(&changed));
+        changed = durable.clone();
+        changed.nonce[0] ^= 1;
+        assert_ne!(durable_hash, durable_governor_identity(&changed));
+
+        let open = SessionOpenIdIdentitySource {
+            governor_id: h(1),
+            session: 2,
+            client_key_digest: h(3),
+        };
+        let open_hash = session_open_authority_identity(&open);
+        let mut changed = open.clone();
+        changed.governor_id = h(4);
+        assert_ne!(open_hash, session_open_authority_identity(&changed));
+        changed = open.clone();
+        changed.session += 1;
+        assert_ne!(open_hash, session_open_authority_identity(&changed));
+        changed = open.clone();
+        changed.client_key_digest = h(5);
+        assert_ne!(open_hash, session_open_authority_identity(&changed));
+
+        let token = SessionTokenIdentitySource {
+            session: 4,
+            core_s_bits: 1.0_f64.to_bits(),
+            mem_bytes: 5,
+            wall_s_bits: 2.0_f64.to_bits(),
+            cores: 6,
+            ledger_scope: b"scope".to_vec(),
+            operations: vec![b"a".to_vec(), b"b".to_vec()],
+        };
+        let token_hash = session_token_identity(&token);
+        let mut changed = token.clone();
+        changed.session += 1;
+        assert_ne!(token_hash, session_token_identity(&changed));
+        changed = token.clone();
+        changed.core_s_bits ^= 1;
+        assert_ne!(token_hash, session_token_identity(&changed));
+        changed = token.clone();
+        changed.mem_bytes += 1;
+        assert_ne!(token_hash, session_token_identity(&changed));
+        changed = token.clone();
+        changed.wall_s_bits ^= 1;
+        assert_ne!(token_hash, session_token_identity(&changed));
+        changed = token.clone();
+        changed.cores += 1;
+        assert_ne!(token_hash, session_token_identity(&changed));
+        changed = token.clone();
+        changed.ledger_scope.push(b'x');
+        assert_ne!(token_hash, session_token_identity(&changed));
+        changed = token.clone();
+        changed.operations.swap(0, 1);
+        assert_ne!(token_hash, session_token_identity(&changed));
+        changed = token.clone();
+        changed.operations.push(b"c".to_vec());
+        assert_ne!(token_hash, session_token_identity(&changed));
+
+        let initial_gate = GateBindingIdentitySource::Session { open_id: h(7) };
+        let initial_gate_hash = gate_binding_identity(&initial_gate);
+        assert_ne!(
+            initial_gate_hash,
+            gate_binding_identity(&GateBindingIdentitySource::Session { open_id: h(8) })
+        );
+        let resumed_gate = GateBindingIdentitySource::Resumed {
+            governor_id: h(9),
+            session: 10,
+            gate_generation: 11,
+            requested_ordinal: 12,
+            resume_generation: 13,
+        };
+        let resumed_gate_hash = gate_binding_identity(&resumed_gate);
+        assert_ne!(initial_gate_hash, resumed_gate_hash);
+        if let GateBindingIdentitySource::Resumed {
+            governor_id,
+            session,
+            gate_generation,
+            requested_ordinal,
+            resume_generation,
+        } = resumed_gate.clone()
+        {
+            for source in [
+                GateBindingIdentitySource::Resumed {
+                    governor_id: h(14),
+                    session,
+                    gate_generation,
+                    requested_ordinal,
+                    resume_generation,
+                },
+                GateBindingIdentitySource::Resumed {
+                    governor_id,
+                    session: session + 1,
+                    gate_generation,
+                    requested_ordinal,
+                    resume_generation,
+                },
+                GateBindingIdentitySource::Resumed {
+                    governor_id,
+                    session,
+                    gate_generation: gate_generation + 1,
+                    requested_ordinal,
+                    resume_generation,
+                },
+                GateBindingIdentitySource::Resumed {
+                    governor_id,
+                    session,
+                    gate_generation,
+                    requested_ordinal: requested_ordinal + 1,
+                    resume_generation,
+                },
+                GateBindingIdentitySource::Resumed {
+                    governor_id,
+                    session,
+                    gate_generation,
+                    requested_ordinal,
+                    resume_generation: resume_generation + 1,
+                },
+            ] {
+                assert_ne!(resumed_gate_hash, gate_binding_identity(&source));
+            }
+        }
+
+        let meter = MeterReportIdIdentitySource::Client {
+            governor_id: h(15),
+            session: 16,
+            session_open: h(17),
+            generation: 18,
+            client_key_digest: h(19),
+        };
+        let meter_hash = meter_report_authority_identity(&meter);
+        for source in [
+            MeterReportIdIdentitySource::Client {
+                governor_id: h(20),
+                session: 16,
+                session_open: h(17),
+                generation: 18,
+                client_key_digest: h(19),
+            },
+            MeterReportIdIdentitySource::Client {
+                governor_id: h(15),
+                session: 17,
+                session_open: h(17),
+                generation: 18,
+                client_key_digest: h(19),
+            },
+            MeterReportIdIdentitySource::Client {
+                governor_id: h(15),
+                session: 16,
+                session_open: h(18),
+                generation: 18,
+                client_key_digest: h(19),
+            },
+            MeterReportIdIdentitySource::Client {
+                governor_id: h(15),
+                session: 16,
+                session_open: h(17),
+                generation: 19,
+                client_key_digest: h(19),
+            },
+            MeterReportIdIdentitySource::Client {
+                governor_id: h(15),
+                session: 16,
+                session_open: h(17),
+                generation: 18,
+                client_key_digest: h(21),
+            },
+            MeterReportIdIdentitySource::Submission { request_id: h(22) },
+        ] {
+            assert_ne!(meter_hash, meter_report_authority_identity(&source));
+        }
+
+        let pressure = PressureActionIdIdentitySource {
+            governor_id: h(23),
+            session: 24,
+            session_open: h(25),
+            generation: 26,
+            client_key_digest: h(27),
+        };
+        let pressure_hash = pressure_action_authority_identity(&pressure);
+        let mut changed = pressure.clone();
+        changed.governor_id = h(28);
+        assert_ne!(pressure_hash, pressure_action_authority_identity(&changed));
+        changed = pressure.clone();
+        changed.session += 1;
+        assert_ne!(pressure_hash, pressure_action_authority_identity(&changed));
+        changed = pressure.clone();
+        changed.session_open = h(29);
+        assert_ne!(pressure_hash, pressure_action_authority_identity(&changed));
+        changed = pressure.clone();
+        changed.generation += 1;
+        assert_ne!(pressure_hash, pressure_action_authority_identity(&changed));
+        changed = pressure.clone();
+        changed.client_key_digest = h(30);
+        assert_ne!(pressure_hash, pressure_action_authority_identity(&changed));
+
+        assert_ne!(
+            submission_agent_key_identity(&SubmissionAgentKeyIdentitySource {
+                value: b"agent-a".to_vec(),
+            }),
+            submission_agent_key_identity(&SubmissionAgentKeyIdentitySource {
+                value: b"agent-b".to_vec(),
+            }),
+        );
+        assert_ne!(
+            submission_program_identity(&SubmissionProgramIdentitySource {
+                value: b"program-a".to_vec(),
+            }),
+            submission_program_identity(&SubmissionProgramIdentitySource {
+                value: b"program-b".to_vec(),
+            }),
+        );
+
+        let submission = SubmissionRequestIdIdentitySource {
+            governor_id: h(31),
+            session: 32,
+            session_open: h(33),
+            generation: 34,
+            key_hash: h(35),
+            request_hash: h(36),
+        };
+        let submission_hash = submission_request_authority_identity(&submission);
+        let mut changed = submission.clone();
+        changed.governor_id = h(37);
+        assert_ne!(
+            submission_hash,
+            submission_request_authority_identity(&changed)
+        );
+        changed = submission.clone();
+        changed.session += 1;
+        assert_ne!(
+            submission_hash,
+            submission_request_authority_identity(&changed)
+        );
+        changed = submission.clone();
+        changed.session_open = h(38);
+        assert_ne!(
+            submission_hash,
+            submission_request_authority_identity(&changed)
+        );
+        changed = submission.clone();
+        changed.generation += 1;
+        assert_ne!(
+            submission_hash,
+            submission_request_authority_identity(&changed)
+        );
+        changed = submission.clone();
+        changed.key_hash = h(39);
+        assert_ne!(
+            submission_hash,
+            submission_request_authority_identity(&changed)
+        );
+
+        assert_ne!(
+            retained_evidence_identity(&RetainedEvidenceIdentitySource {
+                value: b"evidence-a".to_vec(),
+            }),
+            retained_evidence_identity(&RetainedEvidenceIdentitySource {
+                value: b"evidence-b".to_vec(),
+            }),
+        );
+
+        let pause = PauseAcknowledgementIdIdentitySource {
+            governor_id: h(40),
+            session: 41,
+            gate_generation: 42,
+            requested_ordinal: 43,
+        };
+        let pause_hash = pause_acknowledgement_authority_identity(&pause);
+        let mut changed = pause.clone();
+        changed.governor_id = h(44);
+        assert_ne!(
+            pause_hash,
+            pause_acknowledgement_authority_identity(&changed)
+        );
+        changed = pause.clone();
+        changed.session += 1;
+        assert_ne!(
+            pause_hash,
+            pause_acknowledgement_authority_identity(&changed)
+        );
+        changed = pause.clone();
+        changed.gate_generation += 1;
+        assert_ne!(
+            pause_hash,
+            pause_acknowledgement_authority_identity(&changed)
+        );
+        changed = pause.clone();
+        changed.requested_ordinal += 1;
+        assert_ne!(
+            pause_hash,
+            pause_acknowledgement_authority_identity(&changed)
+        );
+
+        let activation = ResumeActivationIdIdentitySource {
+            governor_id: h(45),
+            session: 46,
+            session_open: h(47),
+            acknowledgement_hash: h(48),
+            resume_generation: 49,
+        };
+        let activation_hash = resume_activation_authority_identity(&activation);
+        let mut changed = activation.clone();
+        changed.governor_id = h(50);
+        assert_ne!(
+            activation_hash,
+            resume_activation_authority_identity(&changed)
+        );
+        changed = activation.clone();
+        changed.session += 1;
+        assert_ne!(
+            activation_hash,
+            resume_activation_authority_identity(&changed)
+        );
+        changed = activation.clone();
+        changed.session_open = h(51);
+        assert_ne!(
+            activation_hash,
+            resume_activation_authority_identity(&changed)
+        );
+        changed = activation.clone();
+        changed.acknowledgement_hash = h(52);
+        assert_ne!(
+            activation_hash,
+            resume_activation_authority_identity(&changed)
+        );
+        changed = activation;
+        changed.resume_generation += 1;
+        assert_ne!(
+            activation_hash,
+            resume_activation_authority_identity(&changed)
+        );
+
+        assert_ne!(
+            fs_blake3::hash_domain(SESSION_OPEN_ID_DOMAIN, b"canonical-order"),
+            fs_blake3::hash_domain(SESSION_OPEN_ID_DOMAIN, b"order-canonical"),
+        );
+        assert_ne!(
+            fs_blake3::hash_domain(SESSION_OPEN_ID_DOMAIN, b"domain"),
+            fs_blake3::hash_domain(SESSION_TOKEN_IDENTITY_DOMAIN, b"domain"),
+        );
+    }
+
+    fn receipt_test_evidence(byte: u8) -> RetainedEvidenceReceiptIdentitySource {
+        RetainedEvidenceReceiptIdentitySource {
+            preview: vec![byte],
+            byte_len: 1,
+            digest: identity_test_hash(byte),
+        }
+    }
+
+    fn receipt_test_event(byte: u8) -> PressureEventIdentitySource {
+        PressureEventIdentitySource {
+            session: u64::from(byte),
+            step_tag: 0,
+            pressure_level: 1,
+            phase_tag: 0,
+            attribution: vec![byte],
+            ordinal: i64::from(byte),
+            requested_ordinal: Some(i64::from(byte) + 1),
+            checkpoint: Some(receipt_test_evidence(byte)),
+            gate_generation: Some(u64::from(byte) + 2),
+            pause_request_id: None,
+            pressure_action_id: None,
+        }
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn governor_receipt_identity_fields_move_independently() {
+        let h = identity_test_hash;
+
+        let open = SessionOpenReceiptIdentitySource {
+            open_id: h(1),
+            token_digest: h(2),
+            gate_identity: Some(h(3)),
+            ledger_scope: b"scope".to_vec(),
+        };
+        let open_hash = session_open_receipt_identity(&open);
+        let mut changed = open.clone();
+        changed.open_id = h(4);
+        assert_ne!(open_hash, session_open_receipt_identity(&changed));
+        changed = open.clone();
+        changed.token_digest = h(5);
+        assert_ne!(open_hash, session_open_receipt_identity(&changed));
+        changed = open.clone();
+        changed.gate_identity = None;
+        assert_ne!(open_hash, session_open_receipt_identity(&changed));
+        changed = open.clone();
+        changed.gate_identity = Some(h(6));
+        assert_ne!(open_hash, session_open_receipt_identity(&changed));
+        changed = open.clone();
+        changed.ledger_scope.push(b'x');
+        assert_ne!(open_hash, session_open_receipt_identity(&changed));
+
+        let meter = MeterReceiptIdentitySource {
+            report_id: h(7),
+            commit_ordinal: 8,
+            delta: ChargeIdentitySource {
+                core_s_bits: 1.0_f64.to_bits(),
+                mem_peak_bytes: 9,
+                wall_s_bits: 2.0_f64.to_bits(),
+            },
+            before: MeterSnapshotIdentitySource {
+                core_s_bits: 3.0_f64.to_bits(),
+                mem_peak_bytes: 10,
+                wall_s_bits: 4.0_f64.to_bits(),
+                throttled: 11,
+                paused: 12,
+            },
+            after: MeterSnapshotIdentitySource {
+                core_s_bits: 5.0_f64.to_bits(),
+                mem_peak_bytes: 13,
+                wall_s_bits: 6.0_f64.to_bits(),
+                throttled: 14,
+                paused: 15,
+            },
+            enforcement: EnforcementIdentitySource::Ok,
+        };
+        let meter_hash = meter_receipt_identity(&meter);
+        let mut changed = meter.clone();
+        changed.report_id = h(16);
+        assert_ne!(meter_hash, meter_receipt_identity(&changed));
+        changed = meter.clone();
+        changed.commit_ordinal += 1;
+        assert_ne!(meter_hash, meter_receipt_identity(&changed));
+        changed = meter.clone();
+        changed.delta.core_s_bits ^= 1;
+        assert_ne!(meter_hash, meter_receipt_identity(&changed));
+        changed = meter.clone();
+        changed.delta.mem_peak_bytes += 1;
+        assert_ne!(meter_hash, meter_receipt_identity(&changed));
+        changed = meter.clone();
+        changed.delta.wall_s_bits ^= 1;
+        assert_ne!(meter_hash, meter_receipt_identity(&changed));
+        changed = meter.clone();
+        changed.before.core_s_bits ^= 1;
+        assert_ne!(meter_hash, meter_receipt_identity(&changed));
+        changed = meter.clone();
+        changed.before.mem_peak_bytes += 1;
+        assert_ne!(meter_hash, meter_receipt_identity(&changed));
+        changed = meter.clone();
+        changed.before.wall_s_bits ^= 1;
+        assert_ne!(meter_hash, meter_receipt_identity(&changed));
+        changed = meter.clone();
+        changed.before.throttled += 1;
+        assert_ne!(meter_hash, meter_receipt_identity(&changed));
+        changed = meter.clone();
+        changed.before.paused += 1;
+        assert_ne!(meter_hash, meter_receipt_identity(&changed));
+        changed = meter.clone();
+        changed.after.core_s_bits ^= 1;
+        assert_ne!(meter_hash, meter_receipt_identity(&changed));
+        changed = meter.clone();
+        changed.after.mem_peak_bytes += 1;
+        assert_ne!(meter_hash, meter_receipt_identity(&changed));
+        changed = meter.clone();
+        changed.after.wall_s_bits ^= 1;
+        assert_ne!(meter_hash, meter_receipt_identity(&changed));
+        changed = meter.clone();
+        changed.after.throttled += 1;
+        assert_ne!(meter_hash, meter_receipt_identity(&changed));
+        changed = meter.clone();
+        changed.after.paused += 1;
+        assert_ne!(meter_hash, meter_receipt_identity(&changed));
+        changed = meter.clone();
+        changed.enforcement = EnforcementIdentitySource::Throttled {
+            resource: b"core-seconds".to_vec(),
+            used_bits: 7.0_f64.to_bits(),
+            granted_bits: 8.0_f64.to_bits(),
+        };
+        let throttled_hash = meter_receipt_identity(&changed);
+        assert_ne!(meter_hash, throttled_hash);
+        let throttled = changed.clone();
+        if let EnforcementIdentitySource::Throttled { resource, .. } = &mut changed.enforcement {
+            resource.push(b'x');
+        }
+        assert_ne!(throttled_hash, meter_receipt_identity(&changed));
+        changed = throttled.clone();
+        if let EnforcementIdentitySource::Throttled { used_bits, .. } = &mut changed.enforcement {
+            *used_bits ^= 1;
+        }
+        assert_ne!(throttled_hash, meter_receipt_identity(&changed));
+        changed = throttled;
+        if let EnforcementIdentitySource::Throttled { granted_bits, .. } = &mut changed.enforcement
+        {
+            *granted_bits ^= 1;
+        }
+        assert_ne!(throttled_hash, meter_receipt_identity(&changed));
+        changed = meter.clone();
+        changed.enforcement = EnforcementIdentitySource::Paused {
+            resource: b"memory-bytes".to_vec(),
+            used_bits: 9.0_f64.to_bits(),
+            granted_bits: 10.0_f64.to_bits(),
+            resume_hint: b"resume".to_vec(),
+        };
+        let paused_hash = meter_receipt_identity(&changed);
+        if let EnforcementIdentitySource::Paused { resume_hint, .. } = &mut changed.enforcement {
+            resume_hint.push(b'x');
+        }
+        assert_ne!(paused_hash, meter_receipt_identity(&changed));
+
+        let mut event = receipt_test_event(17);
+        let pressure = PressureReceiptIdentitySource {
+            action_id: h(18),
+            level: 2,
+            events: vec![event.clone()],
+        };
+        let pressure_hash = pressure_receipt_identity(&pressure);
+        let mut changed_pressure = pressure.clone();
+        changed_pressure.action_id = h(19);
+        assert_ne!(pressure_hash, pressure_receipt_identity(&changed_pressure));
+        changed_pressure = pressure.clone();
+        changed_pressure.level += 1;
+        assert_ne!(pressure_hash, pressure_receipt_identity(&changed_pressure));
+        changed_pressure = pressure.clone();
+        changed_pressure.events.push(receipt_test_event(18));
+        assert_ne!(pressure_hash, pressure_receipt_identity(&changed_pressure));
+        changed_pressure.events.swap(0, 1);
+        assert_ne!(pressure_hash, pressure_receipt_identity(&changed_pressure));
+        let event_hash = pressure_receipt_identity(&pressure);
+        event.session += 1;
+        changed_pressure = pressure.clone();
+        changed_pressure.events[0] = event.clone();
+        assert_ne!(event_hash, pressure_receipt_identity(&changed_pressure));
+        event = receipt_test_event(17);
+        event.step_tag += 1;
+        changed_pressure.events[0] = event.clone();
+        assert_ne!(event_hash, pressure_receipt_identity(&changed_pressure));
+        event = receipt_test_event(17);
+        event.pressure_level += 1;
+        changed_pressure.events[0] = event.clone();
+        assert_ne!(event_hash, pressure_receipt_identity(&changed_pressure));
+        event = receipt_test_event(17);
+        event.phase_tag += 1;
+        changed_pressure.events[0] = event.clone();
+        assert_ne!(event_hash, pressure_receipt_identity(&changed_pressure));
+        event = receipt_test_event(17);
+        event.attribution.push(b'x');
+        changed_pressure.events[0] = event.clone();
+        assert_ne!(event_hash, pressure_receipt_identity(&changed_pressure));
+        event = receipt_test_event(17);
+        event.ordinal += 1;
+        changed_pressure.events[0] = event.clone();
+        assert_ne!(event_hash, pressure_receipt_identity(&changed_pressure));
+        event = receipt_test_event(17);
+        event.requested_ordinal = None;
+        changed_pressure.events[0] = event.clone();
+        assert_ne!(event_hash, pressure_receipt_identity(&changed_pressure));
+        event = receipt_test_event(17);
+        event.requested_ordinal = Some(99);
+        changed_pressure.events[0] = event.clone();
+        assert_ne!(event_hash, pressure_receipt_identity(&changed_pressure));
+        event = receipt_test_event(17);
+        event.checkpoint.as_mut().expect("checkpoint").byte_len += 1;
+        changed_pressure.events[0] = event.clone();
+        assert_ne!(event_hash, pressure_receipt_identity(&changed_pressure));
+        event = receipt_test_event(17);
+        event.checkpoint.as_mut().expect("checkpoint").digest = h(20);
+        changed_pressure.events[0] = event.clone();
+        assert_ne!(event_hash, pressure_receipt_identity(&changed_pressure));
+        event = receipt_test_event(17);
+        event.gate_generation = None;
+        changed_pressure.events[0] = event.clone();
+        assert_ne!(event_hash, pressure_receipt_identity(&changed_pressure));
+        event = receipt_test_event(17);
+        event.gate_generation = Some(100);
+        changed_pressure.events[0] = event;
+        assert_ne!(event_hash, pressure_receipt_identity(&changed_pressure));
+
+        let done = SubmissionReceiptIdentitySource::Done {
+            request_id: h(21),
+            ledger_scope: b"scope".to_vec(),
+            admission_ordinal: 22,
+            charge: ChargeIdentitySource {
+                core_s_bits: 1.0_f64.to_bits(),
+                mem_peak_bytes: 23,
+                wall_s_bits: 2.0_f64.to_bits(),
+            },
+            meter_receipt: h(24),
+        };
+        let done_hash = submission_receipt_identity(&done);
+        let mut changed_done = done.clone();
+        if let SubmissionReceiptIdentitySource::Done { request_id, .. } = &mut changed_done {
+            *request_id = h(25);
+        }
+        assert_ne!(done_hash, submission_receipt_identity(&changed_done));
+        changed_done = done.clone();
+        if let SubmissionReceiptIdentitySource::Done { ledger_scope, .. } = &mut changed_done {
+            ledger_scope.push(b'x');
+        }
+        assert_ne!(done_hash, submission_receipt_identity(&changed_done));
+        changed_done = done.clone();
+        if let SubmissionReceiptIdentitySource::Done {
+            admission_ordinal, ..
+        } = &mut changed_done
+        {
+            *admission_ordinal += 1;
+        }
+        assert_ne!(done_hash, submission_receipt_identity(&changed_done));
+        changed_done = done.clone();
+        if let SubmissionReceiptIdentitySource::Done { charge, .. } = &mut changed_done {
+            charge.core_s_bits ^= 1;
+        }
+        assert_ne!(done_hash, submission_receipt_identity(&changed_done));
+        changed_done = done.clone();
+        if let SubmissionReceiptIdentitySource::Done { charge, .. } = &mut changed_done {
+            charge.mem_peak_bytes += 1;
+        }
+        assert_ne!(done_hash, submission_receipt_identity(&changed_done));
+        changed_done = done.clone();
+        if let SubmissionReceiptIdentitySource::Done { charge, .. } = &mut changed_done {
+            charge.wall_s_bits ^= 1;
+        }
+        assert_ne!(done_hash, submission_receipt_identity(&changed_done));
+        changed_done = done.clone();
+        if let SubmissionReceiptIdentitySource::Done { meter_receipt, .. } = &mut changed_done {
+            *meter_receipt = h(26);
+        }
+        assert_ne!(done_hash, submission_receipt_identity(&changed_done));
+        let failed = SubmissionReceiptIdentitySource::Failed {
+            request_id: h(21),
+            ledger_scope: b"scope".to_vec(),
+            admission_ordinal: 22,
+            evidence: receipt_test_evidence(27),
+        };
+        let failed_hash = submission_receipt_identity(&failed);
+        assert_ne!(done_hash, failed_hash);
+        let mut changed_failed = failed.clone();
+        if let SubmissionReceiptIdentitySource::Failed { evidence, .. } = &mut changed_failed {
+            evidence.byte_len += 1;
+        }
+        assert_ne!(failed_hash, submission_receipt_identity(&changed_failed));
+        changed_failed = failed.clone();
+        if let SubmissionReceiptIdentitySource::Failed { evidence, .. } = &mut changed_failed {
+            evidence.digest = h(28);
+        }
+        assert_ne!(failed_hash, submission_receipt_identity(&changed_failed));
+
+        let acknowledgement = PauseAcknowledgementReceiptIdentitySource {
+            governor_id: h(29),
+            session: 30,
+            gate_generation: 31,
+            requested_ordinal: 32,
+            event: receipt_test_event(33),
+            resume_generation: 34,
+            gate_binding: h(35),
+        };
+        let acknowledgement_hash = pause_acknowledgement_receipt_identity(&acknowledgement);
+        let mut changed = acknowledgement.clone();
+        changed.governor_id = h(36);
+        assert_ne!(
+            acknowledgement_hash,
+            pause_acknowledgement_receipt_identity(&changed)
+        );
+        changed = acknowledgement.clone();
+        changed.session += 1;
+        assert_ne!(
+            acknowledgement_hash,
+            pause_acknowledgement_receipt_identity(&changed)
+        );
+        changed = acknowledgement.clone();
+        changed.gate_generation += 1;
+        assert_ne!(
+            acknowledgement_hash,
+            pause_acknowledgement_receipt_identity(&changed)
+        );
+        changed = acknowledgement.clone();
+        changed.requested_ordinal += 1;
+        assert_ne!(
+            acknowledgement_hash,
+            pause_acknowledgement_receipt_identity(&changed)
+        );
+        changed = acknowledgement.clone();
+        changed.event.ordinal += 1;
+        assert_ne!(
+            acknowledgement_hash,
+            pause_acknowledgement_receipt_identity(&changed)
+        );
+        changed = acknowledgement.clone();
+        changed.resume_generation += 1;
+        assert_ne!(
+            acknowledgement_hash,
+            pause_acknowledgement_receipt_identity(&changed)
+        );
+        changed = acknowledgement.clone();
+        changed.gate_binding = h(37);
+        assert_ne!(
+            acknowledgement_hash,
+            pause_acknowledgement_receipt_identity(&changed)
+        );
+
+        let activation = ResumeActivationReceiptIdentitySource {
+            activation_id: h(38),
+            acknowledgement_hash: h(39),
+            gate_binding: h(40),
+        };
+        let activation_hash = resume_activation_receipt_identity(&activation);
+        let mut changed = activation.clone();
+        changed.activation_id = h(41);
+        assert_ne!(
+            activation_hash,
+            resume_activation_receipt_identity(&changed)
+        );
+        changed = activation.clone();
+        changed.acknowledgement_hash = h(42);
+        assert_ne!(
+            activation_hash,
+            resume_activation_receipt_identity(&changed)
+        );
+        changed = activation;
+        changed.gate_binding = h(43);
+        assert_ne!(
+            activation_hash,
+            resume_activation_receipt_identity(&changed)
+        );
+
+        assert_ne!(
+            fs_blake3::hash_domain(SESSION_OPEN_RECEIPT_DOMAIN, b"canonical-order"),
+            fs_blake3::hash_domain(SESSION_OPEN_RECEIPT_DOMAIN, b"order-canonical"),
+        );
+        assert_ne!(
+            fs_blake3::hash_domain(SESSION_OPEN_RECEIPT_DOMAIN, b"domain"),
+            fs_blake3::hash_domain(METER_RECEIPT_DOMAIN, b"domain"),
+        );
+    }
+
+    #[test]
+    fn governor_identity_nonsemantic_fields_do_not_move() {
+        let h = identity_test_hash;
+        let request = SubmissionRequestIdIdentitySource {
+            governor_id: h(1),
+            session: 2,
+            session_open: h(3),
+            generation: 4,
+            key_hash: h(5),
+            request_hash: h(6),
+        };
+        let mut changed_request = request.clone();
+        changed_request.request_hash = h(7);
+        assert_eq!(
+            submission_request_authority_identity(&request),
+            submission_request_authority_identity(&changed_request),
+        );
+
+        let event = receipt_test_event(8);
+        let pressure = PressureReceiptIdentitySource {
+            action_id: h(9),
+            level: 1,
+            events: vec![event.clone()],
+        };
+        let mut changed_pressure = pressure.clone();
+        changed_pressure.events[0].pause_request_id = Some(PauseRequestId {
+            governor_id: h(10),
+            session: SessionId(11),
+            gate_generation: 12,
+            requested_ordinal: 13,
+        });
+        changed_pressure.events[0].pressure_action_id = Some(PressureActionId {
+            governor_id: h(14),
+            session: SessionId(15),
+            session_open: h(16),
+            generation: 17,
+            content_hash: h(18),
+        });
+        changed_pressure.events[0]
+            .checkpoint
+            .as_mut()
+            .expect("checkpoint")
+            .preview
+            .push(b'x');
+        assert_eq!(
+            pressure_receipt_identity(&pressure),
+            pressure_receipt_identity(&changed_pressure),
+        );
+
+        let failure = SubmissionReceiptIdentitySource::Failed {
+            request_id: h(19),
+            ledger_scope: b"scope".to_vec(),
+            admission_ordinal: 20,
+            evidence: receipt_test_evidence(21),
+        };
+        let mut changed_failure = failure.clone();
+        if let SubmissionReceiptIdentitySource::Failed { evidence, .. } = &mut changed_failure {
+            evidence.preview.push(b'x');
+        }
+        assert_eq!(
+            submission_receipt_identity(&failure),
+            submission_receipt_identity(&changed_failure),
+        );
+    }
 
     struct LegacyGovernor {
         governor: super::Governor,
@@ -5827,14 +8501,10 @@ mod tests {
             permit.get_or_insert(opened);
         }
         governor
-            .submit_once(
-                SessionId(0),
-                "terminal",
-                Charge {
-                    core_s: 1.0,
-                    ..Charge::default()
-                },
-            )
+            .submit_once(SessionId(0), "terminal", || Charge {
+                core_s: 1.0,
+                ..Charge::default()
+            })
             .expect("terminal fixture");
         governor
             .apply_memory_pressure(SessionId(0), 1)
@@ -5934,6 +8604,85 @@ mod tests {
             scope.dirty_causal.len(),
             1,
             "one causal row remains because the open prerequisite occupied the first batch slot"
+        );
+    }
+
+    #[test]
+    fn pause_flush_defers_until_dirty_draining_submissions_commit() {
+        let ledger = fs_ledger::Ledger::open(":memory:").expect("fixture ledger");
+        let governor =
+            super::Governor::new_durable(&ledger, DurableGovernorNonce::from_bytes([0x91; 32]))
+                .expect("durable governor");
+        let session = SessionId(92);
+        let token = test_token(session.0, "pause-predecessor-flush");
+        let open_id = governor
+            .session_open_id(session, "pause-predecessor-open")
+            .expect("open authority");
+        let open_receipt = governor
+            .open_session_gated(open_id, token, Arc::new(CancelGate::new()))
+            .expect("gated session");
+        let permit = open_receipt.flush_permit();
+        governor
+            .flush_scope_to_ledger(&permit, &ledger)
+            .expect("open prerequisite");
+
+        let submission_id = governor
+            .submission_request_id(session, "draining-submission", "bounded-work")
+            .expect("submission authority");
+        governor
+            .submit_once_durable(&ledger, submission_id, "bounded-work", Charge::default)
+            .expect("completed durable submission remains dirty");
+        let action_id = governor
+            .pressure_action_id(session, "pause-after-submission")
+            .expect("pressure authority");
+        let pressure = governor
+            .apply_memory_pressure(action_id, 3)
+            .expect("pause request");
+        let pause_request = pressure
+            .events()
+            .iter()
+            .find_map(|event| event.pause_request_id)
+            .expect("pause request authority");
+        governor
+            .acknowledge_pause(pause_request, "checkpoint-after-bounded-work")
+            .expect("pause acknowledgement");
+        let pause_authority = recovery::pause_ack_authority(pause_request);
+        {
+            let mut inner = governor.inner.lock().expect("governor lock");
+            inner
+                .scopes
+                .get_mut("pause-predecessor-flush")
+                .expect("fixture scope")
+                .next_flush_lane = 3;
+        }
+
+        let predecessor_flush = governor
+            .flush_scope_to_ledger(&permit, &ledger)
+            .expect("predecessor flush");
+        assert!(predecessor_flush.remaining_dirty);
+        assert!(
+            ledger
+                .session_terminal(&submission_id.content_hash)
+                .expect("verified submission terminal")
+                .is_some()
+        );
+        assert!(
+            ledger
+                .session_terminal(&pause_authority)
+                .expect("pause remains Pending-free and absent")
+                .is_none(),
+            "the control-first lane must not commit the pause ahead of its dirty predecessor"
+        );
+
+        let pause_flush = governor
+            .flush_scope_to_ledger(&permit, &ledger)
+            .expect("deferred pause flush");
+        assert!(!pause_flush.remaining_dirty);
+        assert!(
+            ledger
+                .session_terminal(&pause_authority)
+                .expect("verified pause terminal")
+                .is_some()
         );
     }
 
@@ -6214,7 +8963,7 @@ mod tests {
             session: session.0,
             ledger_scope: &token.ledger_scope,
             generation: request_id.generation,
-            causal_ordinal: None,
+            causal_ordinal: Some(1),
             payload: &payload,
         };
         assert!(matches!(
@@ -6242,6 +8991,7 @@ mod tests {
                 inner.reserved_meter_reports[&session.0],
                 inner.idempotency.len(),
                 inner.idempotency_keys[&session.0].len(),
+                inner.submission_admissions.len(),
                 inner.retained_bytes,
                 inner.scopes["durable-pending"].retained_bytes,
             )
@@ -6267,6 +9017,7 @@ mod tests {
                 inner.reserved_meter_reports[&session.0],
                 inner.idempotency.len(),
                 inner.idempotency_keys[&session.0].len(),
+                inner.submission_admissions.len(),
                 inner.retained_bytes,
                 inner.scopes["durable-pending"].retained_bytes,
             )
@@ -6289,20 +9040,17 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::too_many_lines)] // Constructs a crash-only Pending/L3 combination across a real reopen.
-    fn recovered_pause_refuses_while_draining_generation_has_a_durable_pending_claim() {
-        let path = durable_test_ledger_path("pending-pause");
+    fn durable_pending_submission_rejects_pause_flush_atomically() {
         let nonce = DurableGovernorNonce::from_bytes([0x63; 32]);
-        let ledger = fs_ledger::Ledger::open(&path).expect("on-disk ledger");
+        let ledger = fs_ledger::Ledger::open(":memory:").expect("fixture ledger");
         let governor = super::Governor::new_durable(&ledger, nonce).expect("durable governor");
         let session = SessionId(953);
         let token = test_token(session.0, "durable-pending-pause");
-        let initial_gate = Arc::new(CancelGate::new());
         let open_id = governor
             .session_open_id(session, "durable-open")
             .expect("open authority");
         let open_receipt = governor
-            .open_session_gated(open_id, token.clone(), Arc::clone(&initial_gate))
+            .open_session_gated(open_id, token.clone(), Arc::new(CancelGate::new()))
             .expect("gated open");
         let permit = open_receipt.flush_permit();
         governor
@@ -6321,7 +9069,7 @@ mod tests {
             session: session.0,
             ledger_scope: &token.ledger_scope,
             generation: request_id.generation,
-            causal_ordinal: None,
+            causal_ordinal: Some(1),
             payload: &payload,
         };
         assert!(matches!(
@@ -6344,76 +9092,38 @@ mod tests {
         let _acknowledgement = governor
             .acknowledge_pause(pause_request, "checkpoint-after-unknown-work")
             .expect("fixture terminal acknowledgement");
-        governor
+        let before = (
+            ledger.table_count("session_claims").unwrap(),
+            ledger.table_count("session_terminals").unwrap(),
+            ledger.table_count("session_flush_batches").unwrap(),
+            ledger.table_count("events").unwrap(),
+        );
+        let error = governor
             .flush_scope_to_ledger(&permit, &ledger)
-            .expect("persist pressure and acknowledgement terminals");
-        drop(governor);
-        drop(ledger);
-
-        let ledger = fs_ledger::Ledger::open(&path).expect("reopened ledger");
-        let governor = super::Governor::new_durable(&ledger, nonce).expect("reopened governor");
-        let recovered_initial_gate = Arc::new(CancelGate::new());
-        governor
-            .recover_open(
-                &ledger,
-                open_id,
-                token,
-                Some(Arc::clone(&recovered_initial_gate)),
-            )
-            .expect("recover open");
-        governor
-            .recover_pressure(&ledger, action_id, 3)
-            .expect("recover pause request");
-        let before = {
-            let inner = governor.inner.lock().expect("governor lock");
-            (
-                inner.gate_generations[&session.0],
-                inner.gate_phases[&session.0],
-                inner.next_ordinal,
-                inner.reserved_pause_ordinals,
-                inner.scopes["durable-pending-pause"].reserved_pause_completions,
-                inner.scopes["durable-pending-pause"].events.len(),
-                inner.retained_bytes,
-            )
-        };
-        assert!(matches!(
-            governor.recover_pause_acknowledgement(
-                &ledger,
-                pause_request,
-                "checkpoint-after-unknown-work",
-                Arc::new(CancelGate::new()),
-            ),
-            Err(SessionError::IndeterminateMutation {
-                kind: recovery::KIND_SUBMISSION,
-                authority,
-            }) if authority == request_id.content_hash
-        ));
+            .expect_err("omitted Pending work fences the complete control batch");
+        assert!(error.to_string().contains("durably Pending"));
         let after = {
             let inner = governor.inner.lock().expect("governor lock");
+            let scope = &inner.scopes["durable-pending-pause"];
+            assert!(scope.in_flight.is_none());
+            assert_eq!(scope.dirty_control.len(), 2);
+            assert!(scope.dirty_causal.is_empty());
             (
-                inner.gate_generations[&session.0],
-                inner.gate_phases[&session.0],
-                inner.next_ordinal,
-                inner.reserved_pause_ordinals,
-                inner.scopes["durable-pending-pause"].reserved_pause_completions,
-                inner.scopes["durable-pending-pause"].events.len(),
-                inner.retained_bytes,
+                ledger.table_count("session_claims").unwrap(),
+                ledger.table_count("session_terminals").unwrap(),
+                ledger.table_count("session_flush_batches").unwrap(),
+                ledger.table_count("events").unwrap(),
             )
         };
         assert_eq!(after, before);
-        assert!(recovered_initial_gate.is_requested());
-        assert_eq!(ledger.table_count("session_terminals").unwrap(), 3);
-        assert_eq!(ledger.table_count("events").unwrap(), 5);
     }
 
     #[test]
     fn future_and_truncated_terminal_codecs_fail_before_recovery_mutation() {
         let ledger = fs_ledger::Ledger::open(":memory:").expect("fixture ledger");
-        let governor = super::Governor::new_durable(
-            &ledger,
-            DurableGovernorNonce::from_bytes([0x79; 32]),
-        )
-        .expect("durable governor");
+        let governor =
+            super::Governor::new_durable(&ledger, DurableGovernorNonce::from_bytes([0x79; 32]))
+                .expect("durable governor");
         let session = SessionId(954);
         let token = test_token(session.0, "codec-refusal");
         let open_id = governor
@@ -6435,9 +9145,9 @@ mod tests {
         let truncated_id = governor
             .meter_report_id(session, "truncated-codec")
             .expect("truncated authority");
-        for (report_id, receipt) in [
-            (future_id, 2_u32.to_le_bytes().to_vec()),
-            (truncated_id, vec![1, 0]),
+        for (report_id, receipt, ordinal) in [
+            (future_id, 2_u32.to_le_bytes().to_vec(), 1),
+            (truncated_id, vec![1, 0], 2),
         ] {
             let payload = recovery::encode_meter_payload(delta);
             let claim = fs_ledger::session_registry::SessionMutationClaim {
@@ -6449,7 +9159,7 @@ mod tests {
                 session: session.0,
                 ledger_scope: &token.ledger_scope,
                 generation: report_id.generation,
-                causal_ordinal: Some(1),
+                causal_ordinal: Some(ordinal),
                 payload: &payload,
             };
             let group = fs_ledger::session_registry::SessionTerminalGroup {
@@ -6462,9 +9172,9 @@ mod tests {
             };
             let groups = [group];
             ledger
-                .append_session_terminal_batch(
-                    &fs_ledger::session_registry::SessionTerminalBatch { groups: &groups },
-                )
+                .append_session_terminal_batch(&fs_ledger::session_registry::SessionTerminalBatch {
+                    groups: &groups,
+                })
                 .expect("store structurally bounded hostile codec");
         }
         let before = {
@@ -6706,6 +9416,7 @@ mod tests {
                 inner.reserved_meter_reports[&session.0],
                 inner.idempotency.len(),
                 inner.idempotency_keys[&session.0].len(),
+                inner.submission_admissions.len(),
                 inner.retained_bytes,
                 inner.scopes["durable-terminal"].retained_bytes,
             )
@@ -6731,6 +9442,7 @@ mod tests {
                 inner.reserved_meter_reports[&session.0],
                 inner.idempotency.len(),
                 inner.idempotency_keys[&session.0].len(),
+                inner.submission_admissions.len(),
                 inner.retained_bytes,
                 inner.scopes["durable-terminal"].retained_bytes,
             )
@@ -6779,5 +9491,168 @@ mod tests {
             ),
             counts
         );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // Two-session real reopen proves the governor-global fence end to end.
+    fn durable_restart_fences_cross_session_work_until_global_history_is_recovered() {
+        let path = durable_test_ledger_path("global-recovery-fence");
+        let nonce = DurableGovernorNonce::from_bytes([0xB4; 32]);
+        let ledger = fs_ledger::Ledger::open(&path).expect("on-disk ledger");
+        let governor = super::Governor::new_durable(&ledger, nonce).expect("durable governor");
+        let session_a = SessionId(960);
+        let session_b = SessionId(961);
+        let token_a = test_token(session_a.0, "global-recovery-fence");
+        let token_b = test_token(session_b.0, "global-recovery-fence");
+        let open_a = governor
+            .session_open_id(session_a, "open-a")
+            .expect("open A authority");
+        let open_b = governor
+            .session_open_id(session_b, "open-b")
+            .expect("open B authority");
+        let permit = governor
+            .open_session(open_a, token_a.clone())
+            .expect("open A")
+            .flush_permit();
+        governor
+            .open_session(open_b, token_b.clone())
+            .expect("open B");
+        governor
+            .flush_scope_to_ledger(&permit, &ledger)
+            .expect("durable open prerequisites");
+        let request_a = governor
+            .submission_request_id(session_a, "history-a", "program-a")
+            .expect("submission A authority");
+        governor
+            .submit_once_durable(&ledger, request_a, "program-a", || Charge {
+                core_s: 1.0,
+                mem_peak_bytes: 2,
+                wall_s: 3.0,
+            })
+            .expect("historical A submission");
+        governor
+            .flush_scope_to_ledger(&permit, &ledger)
+            .expect("historical A terminal");
+        drop(governor);
+        drop(ledger);
+
+        let ledger = fs_ledger::Ledger::open(&path).expect("reopened ledger");
+        let governor = super::Governor::new_durable(&ledger, nonce).expect("restarted governor");
+        governor
+            .recover_open(&ledger, open_b, token_b, None)
+            .expect("recover only session B open");
+        let request_b = governor
+            .submission_request_id(session_b, "fresh-b", "program-b")
+            .expect("fresh B authority");
+        let executions = AtomicU64::new(0);
+        assert!(matches!(
+            governor.submit_once_durable(&ledger, request_b, "program-b", || {
+                executions.fetch_add(1, Ordering::SeqCst);
+                Charge::default()
+            }),
+            Err(SessionError::DurableRecoveryIncomplete {
+                remaining_claims: 2
+            })
+        ));
+        assert_eq!(executions.load(Ordering::SeqCst), 0);
+
+        governor
+            .recover_open(&ledger, open_a, token_a, None)
+            .expect("recover session A open");
+        governor
+            .recover_submission(&ledger, request_a, "program-a")
+            .expect("recover A terminal and its global meter commit");
+        assert!(matches!(
+            governor
+                .submit_once_durable(&ledger, request_b, "program-b", || {
+                    executions.fetch_add(1, Ordering::SeqCst);
+                    Charge::default()
+                })
+                .expect("fresh B runs after complete global recovery"),
+            SubmitOutcome::Executed {
+                admission_ordinal: 2,
+                ..
+            }
+        ));
+        assert_eq!(executions.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // Real durable setup is required before injecting the collision owner.
+    fn recovered_submission_refuses_an_admission_ordinal_owned_by_another_request() {
+        let path = durable_test_ledger_path("admission-collision");
+        let nonce = DurableGovernorNonce::from_bytes([0xC5; 32]);
+        let ledger = fs_ledger::Ledger::open(&path).expect("on-disk ledger");
+        let governor = super::Governor::new_durable(&ledger, nonce).expect("durable governor");
+        let session = SessionId(962);
+        let token = test_token(session.0, "admission-collision");
+        let open_id = governor
+            .session_open_id(session, "open")
+            .expect("open authority");
+        let permit = governor
+            .open_session(open_id, token.clone())
+            .expect("open session")
+            .flush_permit();
+        governor
+            .flush_scope_to_ledger(&permit, &ledger)
+            .expect("open prerequisite");
+        let historical = governor
+            .submission_request_id(session, "historical", "historical-program")
+            .expect("historical authority");
+        assert!(matches!(
+            governor
+                .submit_once_durable(&ledger, historical, "historical-program", || {
+                    panic!("historical failure")
+                })
+                .expect("panic becomes terminal"),
+            SubmitOutcome::Failed {
+                admission_ordinal: 1,
+                ..
+            }
+        ));
+        governor
+            .flush_scope_to_ledger(&permit, &ledger)
+            .expect("historical terminal");
+        drop(governor);
+        drop(ledger);
+
+        let ledger = fs_ledger::Ledger::open(&path).expect("reopened ledger");
+        let governor = super::Governor::new_durable(&ledger, nonce).expect("restarted governor");
+        governor
+            .recover_open(&ledger, open_id, token, None)
+            .expect("recover open");
+        let conflicting = governor
+            .submission_request_id(session, "conflicting", "other-program")
+            .expect("conflicting authority");
+        let before = {
+            let mut inner = governor.inner.lock().expect("governor lock");
+            inner.submission_admissions.insert(1, conflicting);
+            (
+                inner.next_submission_ordinal,
+                inner.idempotency.len(),
+                inner.idempotency_keys[&session.0].len(),
+                inner.next_meter_commit_ordinal,
+                inner.retained_bytes,
+                inner.recovered_durable_claims.len(),
+            )
+        };
+        assert!(matches!(
+            governor.recover_submission(&ledger, historical, "historical-program"),
+            Err(SessionError::TerminalCorrupt { detail, .. })
+                if detail.contains("admission ordinal 1")
+        ));
+        let inner = governor.inner.lock().expect("governor lock");
+        assert_eq!(
+            (
+                inner.next_submission_ordinal,
+                inner.idempotency.len(),
+                inner.idempotency_keys[&session.0].len(),
+                inner.next_meter_commit_ordinal,
+                inner.retained_bytes,
+                inner.recovered_durable_claims.len(),
+            ),
+            before
+        );
+        assert_eq!(inner.submission_admissions.get(&1), Some(&conflicting));
     }
 }

@@ -149,14 +149,6 @@ impl<'a> Decoder<'a> {
         Ok(self.take::<1>()?[0])
     }
 
-    fn bool(&mut self) -> Result<bool, SessionError> {
-        match self.u8()? {
-            0 => Ok(false),
-            1 => Ok(true),
-            value => Err(self.corrupt(format!("invalid boolean tag {value}"))),
-        }
-    }
-
     fn u32(&mut self) -> Result<u32, SessionError> {
         Ok(u32::from_le_bytes(self.take()?))
     }
@@ -868,6 +860,11 @@ fn decode_submission_terminal_receipt(
     let mut decoder = Decoder::new(bytes, KIND_SUBMISSION, request_id.content_hash)?;
     let tag = decoder.u8()?;
     let admission_ordinal = decoder.u64()?;
+    if admission_ordinal == 0 || admission_ordinal > i64::MAX as u64 {
+        return Err(decoder.corrupt(format!(
+            "submission admission ordinal {admission_ordinal} is outside 1..=i64::MAX"
+        )));
+    }
     let receipt = SubmissionReceipt(decoder.hash()?);
     let recovered = match tag {
         0 => {
@@ -1371,7 +1368,7 @@ impl Governor {
             &expected_rows,
         )?;
 
-        let receipt = self.register_session(open_id, token, gate)?;
+        let receipt = self.register_session(open_id, token, gate, true)?;
         if receipt != stored_receipt {
             return Err(SessionError::TerminalCorrupt {
                 kind: KIND_OPEN,
@@ -1386,6 +1383,7 @@ impl Governor {
             .expect("recovered open registered its scope");
         scope.dirty_open_receipts.remove(&open_id);
         scope.sink.get_or_insert(ledger_instance_id);
+        self.mark_durable_claim_recovered(&mut inner, open_id.content_hash);
         Ok(receipt)
     }
 
@@ -1557,6 +1555,7 @@ impl Governor {
             .sink
             .get_or_insert(ledger_instance_id);
         commit_retained_bytes(&mut inner, &ledger_scope, MAX_METER_RECEIPT_RETAINED_BYTES);
+        self.mark_durable_claim_recovered(&mut inner, report_id.content_hash);
         Ok(receipt)
     }
 
@@ -1681,7 +1680,6 @@ impl Governor {
                         || claim.session != request_id.session.0
                         || claim.ledger_scope != expected_scope
                         || claim.generation != request_id.generation
-                        || claim.causal_ordinal.is_some()
                     {
                         return Err(SessionError::TerminalCorrupt {
                             kind: KIND_SUBMISSION,
@@ -1735,6 +1733,25 @@ impl Governor {
             }
         };
         let expected_rows = [event.as_row()];
+        let admission_ordinal = match &recovered {
+            RecoveredSubmission::Done {
+                admission_ordinal, ..
+            }
+            | RecoveredSubmission::Failed {
+                admission_ordinal, ..
+            } => *admission_ordinal,
+        };
+        if let Some(claim_ordinal) = terminal.claim.causal_ordinal
+            && claim_ordinal != admission_ordinal
+        {
+            return Err(SessionError::TerminalCorrupt {
+                kind: KIND_SUBMISSION,
+                authority: request_id.content_hash,
+                detail: format!(
+                    "submission claim admission ordinal {claim_ordinal} disagrees with terminal ordinal {admission_ordinal}"
+                ),
+            });
+        }
         self.validate_recovered_terminal(
             &terminal,
             ledger_instance_id,
@@ -1744,7 +1761,7 @@ impl Governor {
             &ledger_scope,
             request_id.session_open,
             request_id.generation,
-            None,
+            terminal.claim.causal_ordinal,
             &payload,
             &expected_rows,
         )?;
@@ -1841,6 +1858,18 @@ impl Governor {
             } => (*admission_ordinal, evidence.preview.len(), None),
             IdemState::Pending { .. } => unreachable!("decoded terminal is never pending"),
         };
+        if let Some(existing) = inner.submission_admissions.get(&admission_ordinal)
+            && existing != &request_id
+        {
+            return Err(SessionError::TerminalCorrupt {
+                kind: KIND_SUBMISSION,
+                authority: request_id.content_hash,
+                detail: format!(
+                    "admission ordinal {admission_ordinal} is already owned by submission {}",
+                    existing.content_hash
+                ),
+            });
+        }
         let retained_bytes = SUBMISSION_REQUEST_RETAINED_BYTES
             .checked_add(terminal_bytes)
             .and_then(|bytes| {
@@ -1917,6 +1946,9 @@ impl Governor {
         }
         inner.next_submission_ordinal = inner.next_submission_ordinal.max(admission_ordinal);
         inner
+            .submission_admissions
+            .insert(admission_ordinal, request_id);
+        inner
             .idempotency_keys
             .get_mut(&request_id.session.0)
             .expect("recovered open created idempotency index")
@@ -1929,6 +1961,7 @@ impl Governor {
             .sink
             .get_or_insert(ledger_instance_id);
         commit_retained_bytes(&mut inner, &ledger_scope, retained_bytes);
+        self.mark_durable_claim_recovered(&mut inner, request_id.content_hash);
 
         match recovered {
             RecoveredSubmission::Done {
@@ -2289,6 +2322,7 @@ impl Governor {
             .sink
             .get_or_insert(ledger_instance_id);
         commit_retained_bytes(&mut inner, &ledger_scope, retained_bytes);
+        self.mark_durable_claim_recovered(&mut inner, action_id.content_hash);
         Ok(receipt)
     }
 
@@ -2572,6 +2606,7 @@ impl Governor {
             &ledger_scope,
             pending.reserved_retained_bytes - event_bytes,
         );
+        self.mark_durable_claim_recovered(&mut inner, authority);
         Ok(acknowledgement)
     }
 
@@ -2708,6 +2743,7 @@ impl Governor {
             .expect("recovered scope")
             .sink
             .get_or_insert(ledger_instance_id);
+        self.mark_durable_claim_recovered(&mut inner, activation_id.content_hash);
         Ok(receipt)
     }
 }

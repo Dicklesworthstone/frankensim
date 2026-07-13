@@ -109,7 +109,10 @@ Consumers: the P2 marquee demo, the HELM e2e suite (gp3.11).
   A durable governor refuses a fresh `submit_once` execution and requires
   `submit_once_durable(ledger, request_id, canonical_program, work)`. That path
   first verifies that the exact session-open terminal already exists on the
-  bound physical ledger, then atomically inserts an immutable Pending claim.
+  bound physical ledger, then atomically inserts an immutable Pending claim
+  that binds the governor-global admission ordinal. The ledger enforces one
+  owner per governor/kind/ordinal and refuses a submission terminal whose
+  pre-execution claim or positive permit is absent.
   Only the caller receiving fs-ledger's private positive claim permit may run
   `work`. An identical recovered Pending claim returns
   `IndeterminateMutation` without invoking work; an existing terminal is
@@ -220,8 +223,19 @@ Consumers: the P2 marquee demo, the HELM e2e suite (gp3.11).
   or defers it. fs-ledger binds every claim to the checked physical ledger,
   durable governor, session-open identity, kind, scope, generation, exact
   payload, terminal receipt, and authenticated owned-event sequence. Its
-  internally derived batch identity and immutable membership witnesses make a
-  retry after database commit but before cursor publication append zero rows.
+  internally derived batch identity and fully rehashed complete membership
+  preimages make a retry after database commit but before cursor publication
+  append zero rows. A terminal may carry up to 1,024 independently verified
+  batch witnesses because a mixed retry can legitimately re-witness an
+  already committed terminal beside a new one; every witness must reproduce
+  its complete ordered batch identity. Submission claim insertion
+  and pause-acknowledgement terminalization also carry reciprocal generation
+  fences: old-generation work cannot claim after the successor pause terminal,
+  and a pause terminal cannot commit while an omitted draining-generation
+  submission remains Pending. Flush preparation likewise defers a control-first
+  pause acknowledgement until each dirty predecessor is already selected into
+  that transaction or committed by an earlier flush, preventing a size-limited
+  lane prefix from retrying forever.
   `FlushReport` names appended audit rows, committed-or-verified terminals,
   encoded bytes, and whether more state remains dirty; each call admits at
   most 1,024 terminal groups, 1,024 owned events, and 4 MiB of conservatively
@@ -253,15 +267,38 @@ Consumers: the P2 marquee demo, the HELM e2e suite (gp3.11).
 - `recover_open`, `recover_meter`, `recover_submission`, `recover_pressure`,
   `recover_pause_acknowledgement`, and `recover_resume_activation` rebuild one
   authenticated typed terminal at a time without dirtying a flush cursor.
-  Open state is recovered first. Meter and successful-submission receipts must
+  `Governor::new_durable` snapshots the total immutable claim count for its
+  restart-stable governor namespace. The ledger accepts that count only when
+  its primary claims and independently indexed immutable discovery witnesses
+  agree; every filtered recovery probe unions both indexes and authenticates
+  the yielded authority, so single-table semantic corruption cannot lower the
+  fence or hide Pending work. Until every observed authority has been
+  installed by one of these typed recovery APIs, all fresh opens, charges,
+  submissions, pressure actions, pause completions, and activations refuse
+  with `DurableRecoveryIncomplete`; exact recovery and already-installed replay
+  remain available. This governor-wide phase spans every session, scope, kind,
+  and generation, so the global admission, meter-commit, and degradation
+  counters are reconstructed before new work can reuse them. Open state is
+  recovered first. Meter and successful-submission receipts must
   be installed in their contiguous global meter-commit order, but an
   authenticated terminal from an older gate generation remains recoverable
-  after lifecycle recovery advances the current gate. Degradation and pause
+  after lifecycle recovery advances the current gate. Submission admission
+  recovery may be out of order, but a bounded owner index rejects two distinct
+  authorities for one ordinal and every decoded ordinal must be in
+  `1..=i64::MAX`. New V7 submission claims always bind this ordinal. Reading a
+  V6 submission claim with a NULL ordinal is retained only as defensive
+  compatibility for the previously shipped table shape (which had no wired
+  public registry writer): a Pending row remains indeterminate, while a
+  terminal recovery takes the authenticated ordinal from its receipt.
+  Degradation and pause
   terminals form one dense global event-ordinal prefix, so skipped or
   interleaved actions refuse before mutation. Before rotating a recovered
-  pause, fs-session performs an indexed, one-row bounded ledger probe for any
-  unterminated submission claim in the draining generation; finding one
-  returns `IndeterminateMutation`. Exact cached acknowledgement/activation
+  pause, fs-session performs an indexed, bounded keyset-page ledger probe for
+  any unterminated submission claim in the draining generation. The probe
+  verifies every preceding terminal and all of its batch/event witnesses, is
+  capped at 4,096 submission claims, and returns `IndeterminateMutation` when
+  it finds Pending work; corrupt terminal presence fails closed. Exact cached
+  acknowledgement/activation
   replay requires the current completed generation and exact process-local
   gate `Arc`, while a prior activation remains replayable after the next L3
   request asks that still-current gate to drain.
@@ -319,6 +356,16 @@ Consumers: the P2 marquee demo, the HELM e2e suite (gp3.11).
   kernel/shape/machine/params/measured/memory-limit/probe-buffer-plan preimage;
   a public globally unique
   derive-key domain hashes those exact bytes, and
+  `admit_receipt_json(domain, version, bytes)` is the strict retained-replay
+  boundary. It accepts only the current v2 domain/version, parses the exact
+  whitespace-free outer JSON, semantically re-adopts the embedded fs-exec
+  `TuneRow`, and cross-checks its kernel, shape class, machine, and selected
+  params against the duplicated outer values. It also requires the current
+  metadata-plan schema and byte total, reconstructs the private tuple, and then
+  requires a byte-identical writer/parser fixed point. This adds replay admission without
+  rotating the already-shipped v2 preimage bytes. Stale metadata, reordered
+  fields, noncanonical machine width, malformed nested JSON, or trailing bytes
+  refuse rather than being guessed into the current schema.
   `publish_to_ledger` participates in an already-open wider transaction.
   Cache adoption returns the same sealed identity on its first dispatch so
   downstream evidence can bind adopted and freshly measured rows uniformly.
@@ -335,6 +382,17 @@ Consumers: the P2 marquee demo, the HELM e2e suite (gp3.11).
   declared panel ordinal, completed/total counts, and the deterministic memory
   plan into `GemmExecutionReceipt`, explicitly excluding steal, latency,
   worker-distribution, peak-use, and refusal measurements from replay identity.
+  `GemmExecutionReceipt::canonical_bytes()` is the canonical v1 transport: a
+  domain/version-bearing tagged binary frame with fixed-width little-endian
+  integers, explicit UTF-8 byte lengths, an explicit panel count, and retained
+  panel order. `from_canonical_bytes()` is bounded (64 MiB, 1,048,576 panels,
+  64 KiB/string), requires every tag in schema order, rejects stale versions
+  and trailing bytes, and proves a byte-identical fixed point before admission;
+  `receipt_identity()` hashes exactly that frame under the v1 derive-key
+  domain. Every top-level, nested memory, and nested panel field is semantic.
+  Collection length and order are semantic. Schedule observations excluded
+  above remain available only in the full run report and cannot silently enter
+  this replay identity.
   `GemmDispatch.kernel` is the exact replay key; replay pins the recorded key
   and params rather than reconstructing a weaker base key.
 
@@ -433,7 +491,8 @@ Consumers: the P2 marquee demo, the HELM e2e suite (gp3.11).
 `PreRequestedGate`, `PauseRequestMismatch`, `PauseAcknowledgementConflict`,
 `ResumeNotActivated`, `ResumeAcknowledgementMismatch`,
 `ResumeGateAlreadyRequested`, `InvalidResource`, `Submission`, `Persistence`,
-`DurableLedgerRequired`, `RecoveryRequired`, `IndeterminateMutation`, `TerminalCorrupt`,
+`DurableLedgerRequired`, `RecoveryRequired`, `DurableRecoveryIncomplete`,
+`IndeterminateMutation`, `TerminalCorrupt`,
 `UnsupportedTerminalSchema`, `RecoveryLedgerMismatch`,
 `RecoveryGovernorMismatch`, and `RecoveryCausalGap`.
 `GemmTuneError`: cancellation with
@@ -512,7 +571,11 @@ exact payload conflicts and foreign authority, pressure replay across
 pending/ready/activated phases plus stale unused generation, same caller
 key/different program conflict, and barrier-controlled inverted submission
 completion whose meter receipts preserve the required `B=Ok`, `A=Throttled`
-causal sequence and flush exactly once. The pause-drain regression proves a
+causal sequence and flush exactly once. ss-003o persists that inversion to a
+real file, refuses foreign session/scope recovery, then reopens and proves the
+meter-completion order must be recovered before admission order; exact client
+replay invokes no work and changes no registry, witness, meter, or audit row.
+The pause-drain regression proves a
 pending submission must meter and terminalize before acknowledgement can rotate
 its gate generation, new work is refused throughout draining/ready phases, and
 exact terminal replay remains available during both;
@@ -587,6 +650,12 @@ armed and runs when an x86 host picks it up.
   reconstruction, and commit-before-cursor append-once are claimed here;
   study-scale kill storms and application-specific side-effect reconciliation
   remain gp3.11 responsibilities.
+- **One active governor owns a durable nonce at a time**: restart recovery is
+  proven for a predecessor that has stopped. Claim uniqueness and reciprocal
+  submission/pause checks reject already-visible stale state, but they are not
+  a renewable process lease and simultaneous transactions from two live
+  `Governor::new_durable` instances using the same nonce are not claimed safe.
+  General split-brain ownership and takeover are gp3.11 orchestration work.
 - **Energy is a declared-constant model** (45 W/core), not measured
   power telemetry; the calibration channel is where reality lands.
 - **Terminal durability still follows explicit scope flush**: the
@@ -607,6 +676,16 @@ armed and runs when an x86 host picks it up.
   not upgrade it: correspondence between an operator-supplied receipt and the
   invoking Cargo build remains operator-trusted. Root publication from a
   development-salt build is not claimed as receipt-backed evidence.
+- Tune-row receipt admission proves the current v2 identity framing and exact
+  retained bytes. It semantically re-adopts the embedded fs-exec `TuneRow` and
+  cross-checks every duplicated key field, but returns only the outer
+  domain-separated identity; it does not turn replay bytes into a live
+  `ValidatedGemmTuneRow`. Live publication and dispatch authority still
+  require the private `PreparedGemmRow` validation path.
+- Execution-receipt canonicalization proves complete field binding and exact
+  transport, not that caller-constructed public receipt values came from a
+  successful kernel. `is_complete()` and the enclosing producer/evidence gate
+  remain separate admission requirements.
 - A mutex self-deadlock in the calibration renderer was found by the
   conformance run and fixed (single lock scope). That renderer remains
   non-reentrant; governor idempotency separately guarantees that same-thread
