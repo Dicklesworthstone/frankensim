@@ -378,6 +378,13 @@ fn pl_007_family_mesh_candidate_and_cost_admission_are_fail_closed() {
     assert!(CachedAnswer::new(vec![0.0, 0.0], -1.0, vec![0.0, 1.0]).is_err());
     assert!(CachedAnswer::new(vec![0.0], 0.1, vec![0.0, 1.0]).is_err());
     assert!(CachedAnswer::new(vec![1.0, 0.0], 0.1, vec![0.0, 1.0]).is_err());
+    // A cell so narrow that 1/(b-a) overflows to +inf must be refused HERE,
+    // matching fs-verify admit_mesh's NonFiniteReciprocal — this build used to
+    // admit it and only reject it downstream at replay (an admit_mesh divergence).
+    assert!(
+        CachedAnswer::new(vec![0.0, 0.0, 0.0], 0.1, vec![0.0, 1e-310, 1.0]).is_err(),
+        "a near-degenerate mesh cell (non-finite reciprocal width) must be refused up front"
+    );
     let normalized_cache = CachedAnswer::new(vec![-0.0, 0.0], 0.1, vec![-0.0, 1.0]).unwrap();
     assert_eq!(normalized_cache.nodal()[0].to_bits(), 0.0_f64.to_bits());
     assert_eq!(normalized_cache.mesh()[0].to_bits(), 0.0_f64.to_bits());

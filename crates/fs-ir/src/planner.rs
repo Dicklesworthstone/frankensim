@@ -736,6 +736,18 @@ fn validate_mesh(mesh: &[f64]) -> Result<(), PlanError> {
                 reason: "nodes must be strictly increasing",
             });
         }
+        // Align with fs-verify's `admit_mesh` (fem1d `NonFiniteReciprocal`): a
+        // cell so narrow that `1/(b-a)` overflows to ±inf blows up the P1
+        // stiffness assembly. fs-verify rejects it, so fs-ir must too — else a
+        // CachedAnswer with such a mesh is admitted here but rejected at replay
+        // (a divergence against this hardening's own "aligned with admit_mesh"
+        // goal), and it can never be discharged into a certificate.
+        if !(1.0 / (pair[1] - pair[0])).is_finite() {
+            return Err(PlanError::InvalidMesh {
+                index: Some(index + 1),
+                reason: "cell is too narrow: 1/(b-a) is non-finite (fs-verify admit_mesh rejects it)",
+            });
+        }
     }
     Ok(())
 }
