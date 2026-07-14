@@ -1387,7 +1387,7 @@ fn gq_005a_thickness_authority_and_validation() {
                 gate: &gate,
                 during: CancelDuring::Eval,
             },
-            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(1.5, 0.0, 0.0),
             &cx,
         )
     });
@@ -1639,7 +1639,7 @@ struct PanicEvalChart;
 
 impl Chart for PanicEvalChart {
     fn eval(&self, _x: Point3, _cx: &Cx<'_>) -> ChartSample {
-        panic!("separation must reject an overflowing work count before chart evaluation")
+        panic!("query input must be rejected before chart evaluation")
     }
 
     fn support(&self) -> Aabb {
@@ -1892,5 +1892,21 @@ fn refusals_teach() {
         let off = thickness_at(&exact, Point3::new(1.5, 0.0, 0.0), cx).expect_err("off boundary");
         assert!(matches!(off, QueryError::NotOnBoundary { .. }), "{off}");
         assert!(off.to_string().contains("project"), "{off}");
+
+        let nonfinite = thickness_at(&PanicEvalChart, Point3::new(f64::NAN, 0.0, 0.0), cx)
+            .expect_err("a non-finite point must refuse before chart evaluation");
+        assert!(
+            matches!(nonfinite, QueryError::InvalidThicknessSample { .. }),
+            "{nonfinite}"
+        );
+
+        let clipped_out = thickness_at_clipped(
+            &exact,
+            Point3::new(1.0, 0.0, 0.0),
+            Aabb::new(Point3::new(-0.5, -0.5, -0.5), Point3::new(0.5, 0.5, 0.5)),
+            cx,
+        )
+        .expect_err("an actual boundary outside the admitted clip cannot be marched");
+        assert!(matches!(clipped_out, QueryError::NoOppositeWall));
     });
 }

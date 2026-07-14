@@ -1448,8 +1448,10 @@ fn thickness_at_in_domain(
     cx: &Cx<'_>,
 ) -> Result<Thickness, QueryError> {
     let dom = domain.bounds();
-    if !point_is_finite(p) || !dom.contains(p) {
-        return Err(QueryError::NoOppositeWall);
+    if !point_is_finite(p) {
+        return Err(QueryError::InvalidThicknessSample {
+            at: [p.x, p.y, p.z],
+        });
     }
     query_checkpoint(cx)?;
     let s = chart.eval(p, cx);
@@ -1463,6 +1465,9 @@ fn thickness_at_in_domain(
         return Err(QueryError::NotOnBoundary {
             sd: s.signed_distance,
         });
+    }
+    if !dom.contains(p) {
+        return Err(QueryError::NoOppositeWall);
     }
     let fd_step = 1e-6 * domain.max_span().max(1.0);
     if !fd_step.is_finite() || fd_step <= 0.0 {
