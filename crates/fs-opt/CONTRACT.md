@@ -42,15 +42,30 @@ structure; FLUX/UQ execute it.
   (P4, enforced by consumers).
 - Serialization: `serialize` writes the canonical six-base `fsopt v2`
   line-based text form and `parse` round-trips it BITWISE (floats travel as
-  bit patterns). The reader also accepts exact legacy five-base `fsopt v1`
-  bytes, mapping the absent amount exponent to `mol = 0`;
-  `parse_with_version` returns the declared `WireVersion` and embedded source
-  hash so a ledger-owning caller can record the required immutable
-  old-hash-to-new-hash semantic-crosswalk receipt;
+  bit patterns). `parse_with_version` also accepts strict explicit `fsopt v1`
+  bytes emitted by either known historical v1 token writer, maps the absent
+  amount exponent to `mol = 0`, and returns an immutable
+  `DimensionCrosswalkReceipt`. Headerless input is refused because no
+  historical writer emitted it and it has no authoritative schema identity.
+  The receipt
+  binds BLAKE3 hashes of the complete old artifact and complete canonical v2
+  artifact under the sole `AppendMoleZero` rule; `parse` refuses v1 because it
+  cannot return that mandatory evidence. `ParsedProblem` keeps its fields
+  private and exposes read-only provenance accessors plus `into_parts`, so an
+  inconsistent source-version/hash/receipt tuple cannot be constructed through
+  the public API. Every admitted artifact has exactly one terminal `hash`
+  directive;
   `problem_hash` (in-house FNV-1a 64 over the canonical body) is the
-  study identity; parsing REBUILDS through the validating builder and
-  verifies the integrity hash — tampered or ill-typed files refuse
-  with line numbers.
+  study identity. Legacy FNV identity is verified over the historical v1 body
+  without normalization into v2. The reader rebuilds an exact canonical v1
+  artifact using both known historical v1 token encodings and requires complete
+  byte equality with one of them before it may issue the sole-rule receipt;
+  v2 receives the same complete-byte comparison against `serialize`. CRLF,
+  blank/missing-final-newline forms, noncanonical token spellings, malformed
+  escapes, wrong IDs, extra fields, and duplicate/missing budget directives
+  therefore refuse even when their recomputed FNV is internally consistent.
+  Parsing REBUILDS through the validating builder and verifies the integrity
+  hash — tampered or ill-typed files refuse with line numbers.
 - `eval`: memoized evaluation of algebraic subgraphs; PDE/stochastic
   nodes refuse with `Unevaluable` NAMING their executor.
 - `GoodhartGuard` (addendum Proposal D): treats an optimizer `Endpoint`
@@ -77,9 +92,16 @@ structure; FLUX/UQ execute it.
    model exactly (opt-001).
 2. build→serialize→parse through canonical `fsopt v2` yields an IDENTICAL
    problem; hashes are stable across identical builds, differ across edits,
-   and guard integrity. Exact five-dimension `fsopt v1` inputs remain
-   readable with `mol = 0`, while v1/v2 dimension arities are otherwise
-   strict (opt-002 plus focused serializer unit tests).
+   and guard integrity. Exact explicit five-dimension v1 inputs from both known
+   historical writers remain readable through the receipt-bearing API with
+   `mol = 0`; their
+   historical FNV is unchanged, their complete old/new artifacts are bound by
+   BLAKE3, dimension arities are strict, and missing, duplicate, nonterminal,
+   or malformed hash directives fail closed. Recomputed-FNV adversarial tests
+   also lock rejection of extra fields/operands, wrong variable IDs, non-Boolean
+   flags, malformed or invalid-UTF-8 escapes, CRLF/blank/missing-final-newline
+   forms, missing/duplicate budgets, and noncanonical v2 spellings (opt-002 plus
+   focused serializer unit tests).
 3. Hash-consing gives CSE identity; substitution commutes with
    evaluation BITWISE; `neg∘neg` and `min(x,x)` are bitwise identities
    (opt-003).

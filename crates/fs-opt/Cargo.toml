@@ -15,6 +15,7 @@ layer = "L4"
 parked-ir-battery = []
 
 [dependencies]
+fs-blake3 = { path = "../fs-blake3" }
 fs-exec = { path = "../fs-exec" }
 fs-math = { path = "../fs-math" }
 fs-obs = { path = "../fs-obs" }
