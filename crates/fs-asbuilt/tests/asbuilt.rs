@@ -4,8 +4,37 @@
 //! estimated candidate until calibration authority exists.
 
 use fs_asbuilt::{
-    Color, Fiducial, Point2, RegError, Registration, as_built_diff, register, well_posed,
+    AS_BUILT_POLL_POLICY_VERSION, AS_BUILT_POLL_STRIDE_POINTS, Color, Fiducial, Point2, RegError,
+    Registration, as_built_diff, register, well_posed,
 };
+use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
+
+fn with_cx<R>(cancelled: bool, mode: ExecMode, budget: Budget, f: impl FnOnce(&Cx<'_>) -> R) -> R {
+    let gate = CancelGate::new_clock_free();
+    if cancelled {
+        gate.request();
+    }
+    let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+    pool.scope(|arena| {
+        let cx = Cx::new(
+            &gate,
+            arena,
+            StreamKey {
+                seed: 0xA5B0_117,
+                kernel_id: 1,
+                tile: 0,
+                iteration: 0,
+            },
+            budget,
+            mode,
+        );
+        f(&cx)
+    })
+}
+
+fn with_default_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
+    with_cx(false, ExecMode::Deterministic, Budget::INFINITE, f)
+}
 
 /// Apply a ground-truth rigid transform to a design point (for building scans).
 fn xform(p: Point2, theta: f64, tx: f64, ty: f64) -> Point2 {
@@ -32,7 +61,7 @@ fn registration_recovers_a_known_rigid_transform() {
         .iter()
         .map(|&d| Fiducial::new(d, xform(d, theta, tx, ty)))
         .collect();
-    let reg = register(&fids).unwrap();
+    let reg = with_default_cx(|cx| register(&fids, cx)).unwrap();
     assert!(
         (reg.rotation_rad() - theta).abs() < 1e-9,
         "theta {}",
@@ -59,7 +88,7 @@ fn noisy_measurements_carry_a_positive_residual() {
             Fiducial::new(d, point(m.x() + nx, m.y() + ny))
         })
         .collect();
-    let reg = register(&fids).unwrap();
+    let reg = with_default_cx(|cx| register(&fids, cx)).unwrap();
     // the registration error is carried forward, not discarded.
     assert!(reg.residual_rms() > 0.0 && reg.residual_rms() < 0.1);
 }
@@ -72,7 +101,7 @@ fn registration_is_ill_posed_without_enough_non_collinear_fiducials() {
         Fiducial::new(point(1.0, 0.0), point(2.0, 1.0)),
     ];
     assert!(matches!(
-        register(&two),
+        with_default_cx(|cx| register(&two, cx)),
         Err(RegError::TooFewFiducials { have: 2, need: 3 })
     ));
     // collinear design points (all on the x-axis) are rank-deficient.
@@ -80,7 +109,10 @@ fn registration_is_ill_posed_without_enough_non_collinear_fiducials() {
         .iter()
         .map(|&x| Fiducial::new(point(x, 0.0), point(x + 0.3, 5.0)))
         .collect();
-    assert_eq!(register(&collinear), Err(RegError::CollinearFiducials));
+    assert_eq!(
+        with_default_cx(|cx| register(&collinear, cx)),
+        Err(RegError::CollinearFiducials)
+    );
 }
 
 #[test]
@@ -93,7 +125,8 @@ fn registration_rank_gate_is_scale_invariant_for_small_geometry() {
         .map(|datum| Fiducial::new(datum, datum))
         .collect();
 
-    let registration = register(&fiducials).expect("small non-collinear triangle is rank two");
+    let registration = with_default_cx(|cx| register(&fiducials, cx))
+        .expect("small non-collinear triangle is rank two");
     assert_eq!(registration.rotation_rad().to_bits(), 0.0f64.to_bits());
     assert_eq!(registration.tx().to_bits(), 0.0f64.to_bits());
     assert_eq!(registration.ty().to_bits(), 0.0f64.to_bits());
@@ -117,10 +150,13 @@ fn the_as_built_diff_is_an_estimated_candidate_with_a_proposed_regime() {
     let reg = registration(0.0, 0.0, 0.0, 0.0);
     let design = vec![point(0.0, 0.0), point(1.0, 1.0)];
     let scanned = vec![point(0.0, 0.1), point(1.0, 1.0)];
-    let diff = as_built_diff(&reg, &design, &scanned, 0.2, 0.05, "metrology-cal-2026").unwrap();
+    let diff = with_default_cx(|cx| {
+        as_built_diff(&reg, &design, &scanned, 0.2, 0.05, "metrology-cal-2026", cx)
+    })
+    .unwrap();
     assert!((diff.max_deviation() - 0.1).abs() < 1e-12);
-    assert!(diff.within_tolerance()); // 0.1 <= 0.2
-    assert!(diff.above_noise_floor()); // 0.1 > 0.05 (distinguishable from noise)
+    assert!(diff.within_tolerance()); // 0.1 + 0.05 <= 0.2 (advisory one-dispersion screen)
+    assert!(diff.above_noise_floor()); // 0.1 > combined dispersion 0.05
     assert_eq!(
         diff.proposed_regime().bound("measurement_noise"),
         Some((0.0, 0.05))
@@ -134,7 +170,7 @@ fn the_as_built_diff_is_an_estimated_candidate_with_a_proposed_regime() {
             estimator,
             dispersion,
         } => {
-            assert!(estimator.starts_with("asbuilt-diff-v2:"));
+            assert!(estimator.starts_with("asbuilt-diff-v3:"));
             assert_eq!(dispersion.to_bits(), 0.05f64.to_bits());
         }
         other => panic!("expected estimated candidate, got {other:?}"),
@@ -147,19 +183,39 @@ fn a_deviation_below_the_noise_floor_is_flagged() {
     let design = vec![point(0.0, 0.0), point(1.0, 1.0)];
     let scanned = vec![point(0.0, 0.01), point(1.0, 1.0)];
     // deviation 0.01 is below the 0.05 measurement noise floor.
-    let diff = as_built_diff(&reg, &design, &scanned, 0.2, 0.05, "cal").unwrap();
+    let diff =
+        with_default_cx(|cx| as_built_diff(&reg, &design, &scanned, 0.2, 0.05, "cal", cx)).unwrap();
     assert!(!diff.above_noise_floor());
+}
+
+#[test]
+fn registration_residual_is_included_in_advisory_deviation_screens() {
+    let reg = registration(0.0, 0.0, 0.0, 0.08);
+    let design = [point(0.0, 0.0)];
+    let scanned = [point(0.0, 0.1)];
+    let diff = with_default_cx(|cx| as_built_diff(&reg, &design, &scanned, 0.2, 0.06, "cal", cx))
+        .expect("finite as-built inputs");
+
+    assert!((diff.max_deviation() - 0.1).abs() < 1e-12);
+    assert!(!diff.within_tolerance());
+    assert!(!diff.above_noise_floor());
+    match diff.color() {
+        Color::Estimated { dispersion, .. } => {
+            assert!((*dispersion - 0.14).abs() < 1e-12);
+        }
+        other => panic!("expected estimated candidate, got {other:?}"),
+    }
 }
 
 #[test]
 fn as_built_diff_rejects_malformed_input() {
     let reg = registration(0.0, 0.0, 0.0, 0.0);
     assert_eq!(
-        as_built_diff(&reg, &[], &[], 0.1, 0.01, "c"),
+        with_default_cx(|cx| as_built_diff(&reg, &[], &[], 0.1, 0.01, "c", cx)),
         Err(RegError::Empty)
     );
     assert!(matches!(
-        as_built_diff(&reg, &[point(0.0, 0.0)], &[], 0.1, 0.01, "c"),
+        with_default_cx(|cx| { as_built_diff(&reg, &[point(0.0, 0.0)], &[], 0.1, 0.01, "c", cx) }),
         Err(RegError::LengthMismatch { .. })
     ));
 }
@@ -170,7 +226,9 @@ fn registration_is_deterministic() {
         .iter()
         .map(|&d| Fiducial::new(d, xform(d, 0.3, 1.0, 2.0)))
         .collect();
-    assert_eq!(register(&fids), register(&fids));
+    let first = with_default_cx(|cx| register(&fids, cx));
+    let replay = with_default_cx(|cx| register(&fids, cx));
+    assert_eq!(first, replay);
 }
 
 fn estimator_identity(diff: &fs_asbuilt::AsBuiltDiff) -> &str {
@@ -178,6 +236,126 @@ fn estimator_identity(diff: &fs_asbuilt::AsBuiltDiff) -> &str {
         Color::Estimated { estimator, .. } => estimator,
         other => panic!("default diff must remain estimated, got {other:?}"),
     }
+}
+
+fn fixture_diff(mode: ExecMode, budget: Budget) -> fs_asbuilt::AsBuiltDiff {
+    let reg = registration(0.1, 2.0, -3.0, 0.01);
+    let design = [point(0.0, 0.0), point(1.0, 1.0), point(-2.0, 3.0)];
+    let scanned = [
+        reg.apply(design[0]).unwrap(),
+        point(reg.apply(design[1]).unwrap().x() + 0.02, 0.0),
+        reg.apply(design[2]).unwrap(),
+    ];
+    with_cx(false, mode, budget, |cx| {
+        as_built_diff(
+            &reg,
+            &design,
+            &scanned,
+            10.0,
+            0.05,
+            "identity-context-fixture",
+            cx,
+        )
+    })
+    .expect("valid context-bound diff")
+}
+
+fn numeric_signature(diff: &fs_asbuilt::AsBuiltDiff) -> (Vec<u64>, u64, bool, bool, u64) {
+    let dispersion = match diff.color() {
+        Color::Estimated { dispersion, .. } => dispersion.to_bits(),
+        other => panic!("default diff must remain estimated, got {other:?}"),
+    };
+    (
+        diff.deviations()
+            .iter()
+            .map(|value| value.to_bits())
+            .collect(),
+        diff.max_deviation().to_bits(),
+        diff.within_tolerance(),
+        diff.above_noise_floor(),
+        dispersion,
+    )
+}
+
+#[test]
+fn g4_pre_cancelled_entry_points_report_exact_zero_progress() {
+    let fiducials: Vec<_> = triangle()
+        .into_iter()
+        .map(|datum| Fiducial::new(datum, datum))
+        .collect();
+    assert_eq!(
+        with_cx(true, ExecMode::Deterministic, Budget::INFINITE, |cx| {
+            register(&fiducials, cx)
+        },),
+        Err(RegError::Cancelled {
+            phase: "register.initial",
+            completed_work: 0,
+            planned_work: 12,
+        })
+    );
+
+    let reg = registration(0.0, 0.0, 0.0, 0.0);
+    let design = [point(0.0, 0.0), point(1.0, 1.0)];
+    assert_eq!(
+        with_cx(true, ExecMode::Deterministic, Budget::INFINITE, |cx| {
+            as_built_diff(&reg, &design, &design, 0.1, 0.01, "cal", cx)
+        },),
+        Err(RegError::Cancelled {
+            phase: "as-built-diff.initial",
+            completed_work: 0,
+            planned_work: 6,
+        })
+    );
+}
+
+#[test]
+fn g5_identity_binds_mode_and_every_budget_field_without_changing_numerics() {
+    let baseline = fixture_diff(ExecMode::Deterministic, Budget::new());
+    let baseline_identity = estimator_identity(&baseline).to_owned();
+    let baseline_numeric = numeric_signature(&baseline);
+    let variants = [
+        fixture_diff(ExecMode::Fast, Budget::new()),
+        fixture_diff(ExecMode::Deterministic, Budget::with_deadline_at_ns(17)),
+        fixture_diff(ExecMode::Deterministic, Budget::new().with_poll_quota(31)),
+        fixture_diff(ExecMode::Deterministic, Budget::new().with_cost_quota(47)),
+        fixture_diff(ExecMode::Deterministic, Budget::new().with_priority(199)),
+    ];
+
+    for variant in variants {
+        assert_ne!(estimator_identity(&variant), baseline_identity);
+        assert_eq!(numeric_signature(&variant), baseline_numeric);
+    }
+
+    for (left, right) in [
+        (
+            fixture_diff(ExecMode::Deterministic, Budget::with_deadline_at_ns(17)),
+            fixture_diff(ExecMode::Deterministic, Budget::with_deadline_at_ns(18)),
+        ),
+        (
+            fixture_diff(ExecMode::Deterministic, Budget::new().with_poll_quota(31)),
+            fixture_diff(ExecMode::Deterministic, Budget::new().with_poll_quota(32)),
+        ),
+        (
+            fixture_diff(ExecMode::Deterministic, Budget::new().with_cost_quota(47)),
+            fixture_diff(ExecMode::Deterministic, Budget::new().with_cost_quota(48)),
+        ),
+        (
+            fixture_diff(ExecMode::Deterministic, Budget::new().with_priority(199)),
+            fixture_diff(ExecMode::Deterministic, Budget::new().with_priority(200)),
+        ),
+    ] {
+        assert_ne!(estimator_identity(&left), estimator_identity(&right));
+        assert_eq!(numeric_signature(&left), baseline_numeric);
+        assert_eq!(numeric_signature(&right), baseline_numeric);
+    }
+}
+
+#[test]
+fn g5_retained_identity_declares_the_v1_256_point_poll_policy() {
+    assert_eq!(AS_BUILT_POLL_POLICY_VERSION, 1);
+    assert_eq!(AS_BUILT_POLL_STRIDE_POINTS, 256);
+    let diff = fixture_diff(ExecMode::Deterministic, Budget::INFINITE);
+    assert!(estimator_identity(&diff).starts_with("asbuilt-diff-v3:"));
 }
 
 #[test]
@@ -236,7 +414,7 @@ fn registration_rejects_finite_inputs_whose_intermediates_overflow() {
         Fiducial::new(point(-f64::MAX, 0.0), point(0.0, 1.0)),
     ];
     assert!(matches!(
-        register(&extreme),
+        with_default_cx(|cx| register(&extreme, cx)),
         Err(RegError::NonFinite { .. })
     ));
 }
@@ -291,7 +469,9 @@ fn diff_rejects_negative_or_non_finite_tolerance_and_noise() {
         ),
     ] {
         assert_eq!(
-            as_built_diff(&reg, &design, &scanned, tolerance, noise, "cal-2026"),
+            with_default_cx(|cx| {
+                as_built_diff(&reg, &design, &scanned, tolerance, noise, "cal-2026", cx)
+            }),
             Err(expected)
         );
     }
@@ -313,7 +493,9 @@ fn malformed_calibration_identities_are_refused_without_cloning_them() {
         too_long.as_str(),
     ] {
         assert!(matches!(
-            as_built_diff(&reg, &design, &scanned, 0.1, 0.01, identity),
+            with_default_cx(|cx| {
+                as_built_diff(&reg, &design, &scanned, 0.1, 0.01, identity, cx)
+            }),
             Err(RegError::InvalidCalibrationIdentity { .. })
         ));
     }
@@ -323,14 +505,17 @@ fn malformed_calibration_identities_are_refused_without_cloning_them() {
 fn forged_calibration_text_cannot_promote_the_default_diff() {
     let reg = registration(0.0, 0.0, 0.0, 0.0);
     let design = [point(0.0, 0.0)];
-    let diff = as_built_diff(
-        &reg,
-        &design,
-        &design,
-        0.1,
-        0.01,
-        "forged-calibration-claim",
-    )
+    let diff = with_default_cx(|cx| {
+        as_built_diff(
+            &reg,
+            &design,
+            &design,
+            0.1,
+            0.01,
+            "forged-calibration-claim",
+            cx,
+        )
+    })
     .expect("well-formed text remains usable only as candidate provenance");
     assert!(matches!(diff.color(), Color::Estimated { .. }));
 }
@@ -340,9 +525,14 @@ fn estimator_identity_is_deterministic_bounded_and_delimiter_safe() {
     let reg = registration(0.1, 2.0, -3.0, 0.01);
     let design = [point(0.0, 0.0), point(1.0, 1.0)];
     let scanned = [reg.apply(design[0]).unwrap(), reg.apply(design[1]).unwrap()];
-    let first = as_built_diff(&reg, &design, &scanned, 0.2, 0.05, "cal+a").unwrap();
-    let replay = as_built_diff(&reg, &design, &scanned, 0.2, 0.05, "cal+a").unwrap();
-    let delimiter_neighbor = as_built_diff(&reg, &design, &scanned, 0.2, 0.05, "cal").unwrap();
+    let first =
+        with_default_cx(|cx| as_built_diff(&reg, &design, &scanned, 0.2, 0.05, "cal+a", cx))
+            .unwrap();
+    let replay =
+        with_default_cx(|cx| as_built_diff(&reg, &design, &scanned, 0.2, 0.05, "cal+a", cx))
+            .unwrap();
+    let delimiter_neighbor =
+        with_default_cx(|cx| as_built_diff(&reg, &design, &scanned, 0.2, 0.05, "cal", cx)).unwrap();
     assert_eq!(estimator_identity(&first), estimator_identity(&replay));
     assert_ne!(
         estimator_identity(&first),
@@ -358,23 +548,29 @@ fn estimator_identity_canonicalizes_signed_zero() {
     let positive_points = [point(0.0, 0.0)];
     let negative_points = [point(-0.0, -0.0)];
 
-    let positive = as_built_diff(
-        &positive_registration,
-        &positive_points,
-        &positive_points,
-        0.0,
-        0.0,
-        "cal-zero",
-    )
+    let positive = with_default_cx(|cx| {
+        as_built_diff(
+            &positive_registration,
+            &positive_points,
+            &positive_points,
+            0.0,
+            0.0,
+            "cal-zero",
+            cx,
+        )
+    })
     .unwrap();
-    let negative = as_built_diff(
-        &negative_registration,
-        &negative_points,
-        &negative_points,
-        -0.0,
-        -0.0,
-        "cal-zero",
-    )
+    let negative = with_default_cx(|cx| {
+        as_built_diff(
+            &negative_registration,
+            &negative_points,
+            &negative_points,
+            -0.0,
+            -0.0,
+            "cal-zero",
+            cx,
+        )
+    })
     .unwrap();
 
     assert_eq!(estimator_identity(&positive), estimator_identity(&negative));
