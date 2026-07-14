@@ -42,10 +42,13 @@ use fs_geom::{
 use fs_mesh::delaunay;
 use fs_rep_mesh::Soup;
 
+mod codim;
 mod convex;
 mod features;
 mod gap;
 mod moments;
+
+pub use codim::{CodimGap, CodimThickness, CodimVerdict, codim_gap, codim_gap_from_separation};
 
 pub use features::{Feature, FeatureComplex, MAX_COMPLEX_FEATURES, ccd_candidates};
 pub use gap::{GapSample, ImplicitGapOracle};
@@ -251,6 +254,16 @@ pub enum QueryError {
         /// The caller's cap.
         max: usize,
     },
+    /// A codimensional thickness radius was non-finite or negative.
+    CodimInvalidThickness {
+        /// Exact IEEE-754 bits of the rejected radius.
+        thickness_bits: u64,
+    },
+    /// A midsurface distance enclosure was structurally unusable.
+    CodimInvalidDistance {
+        /// Actionable deterministic refusal reason.
+        reason: &'static str,
+    },
     /// Cancelled mid-scan.
     Cancelled,
     /// Delaunay refused (carried through from fs-mesh).
@@ -414,6 +427,14 @@ impl core::fmt::Display for QueryError {
                 "CCD candidate pairs exceed the caller's cap of {max}; raising the cap or \
                  shrinking the motion window keeps the superset guarantee intact"
             ),
+            QueryError::CodimInvalidThickness { thickness_bits } => write!(
+                f,
+                "codimensional thickness must be finite and nonnegative \
+                 (bits {thickness_bits:#018x})"
+            ),
+            QueryError::CodimInvalidDistance { reason } => {
+                write!(f, "codimensional gap refused: {reason}")
+            }
             QueryError::Cancelled => write!(f, "cancelled mid-query"),
             QueryError::Mesh(m) => write!(f, "medial sampling failed: {m}"),
         }

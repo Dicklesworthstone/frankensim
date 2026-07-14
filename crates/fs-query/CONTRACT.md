@@ -74,6 +74,16 @@ answers to the MULTI-CHART AGREEMENT discipline (same abstract region
   `normal` is an uncertified Estimate-class contact axis that is
   absent whenever a gradient is honestly declined. Malformed evidence
   refuses per sample; cancellation is checked after each chart call.
+- `CodimThickness` / `codim_gap` / `codim_gap_from_separation` →
+  `CodimGap` with `CodimVerdict::{ProvenClear, ProvenContact,
+  Unresolved}`: shell/rod contact as an outward-rounded effective-gap
+  bracket `dist(midsurfaces) − (t_a + t_b)` over a caller-certified
+  midsurface distance enclosure. Soundness is directional: clear
+  proofs need only a true lower bound (convex-hull separations
+  qualify), contact proofs need the upper bound realized between
+  actual midsurface points — the separation composition DOWNGRADES
+  contact to `Unresolved` when the caller cannot vouch for the
+  witnesses. A straddling bracket claims nothing.
 - `OffsetChart` / `minkowski_ball`: dilation/erosion as a chart
   wrapper (`φ − r`); the ball case of the Minkowski sum IS the offset
   (bitwise), which is the fillet/clearance workhorse. Construction is fallible
@@ -198,7 +208,8 @@ bound), `ConvexInvalidShape` (non-finite/degenerate convex geometry or
 a zero iteration budget), `ConvexInvalidSupport` (non-finite support
 evaluation or bound arithmetic), `FeatureComplexTooLarge`,
 `FeatureInvalidInflation`, `FeatureTooManyPairs` (cap refusal, never
-silent truncation), `Cancelled`,
+silent truncation), `CodimInvalidThickness`, `CodimInvalidDistance`,
+`Cancelled`,
 `Mesh` (fs-mesh refusals carried through). Honest gaps refuse; nothing guesses.
 
 ## Determinism class
@@ -250,6 +261,11 @@ identical replay, and refusal drills.
 containment and true-distance upper bounding on disjoint spheres,
 certified common-ball witnesses on overlap, claim/evidence/point/
 cancellation refusals, and no normal claim without gradients.
+`tests/codim.rs`, cases gd-001..gd-004 — codimensional gating:
+bracket containment with all three verdicts on their exact sides,
+shelled-sphere composition against analytic offset-body geometry with
+hull-only contact downgrades, thickening monotonicity, and refusal
+drills.
 
 ## No-claim boundaries
 
@@ -279,8 +295,12 @@ cancellation refusals, and no normal claim without gradients.
   downstream (fs-matdb consumers), never here. Rotation covariance and
   spatially-varying weighting are deferred surfaces —
   [`GeometricMoments::translated`] covers translation only. The bead
-  rjnd remainder (codimensional thickness, deformation hooks) is not
-  yet claimed by this crate.
+  rjnd remainder (deformation hooks) is not yet claimed by this crate.
+- `codim_gap` verdicts inherit the caller's midsurface-distance
+  certificate: a lying enclosure or an overstated thickness radius
+  produces confident nonsense the routine cannot detect. Thickness is
+  a single isotropic radius — anisotropic shells, tapered rods, and
+  swept/rotating codimensional bodies are deferred surfaces.
 - `ImplicitGapOracle` is pointwise: `separation_upper` bounds the
   distance between the two bodies from above at ONE probe, and
   `overlap_inradius` witnesses a common ball at ONE probe. Neither
