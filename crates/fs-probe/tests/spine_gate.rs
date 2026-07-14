@@ -127,15 +127,15 @@ fn spine_exit_3_tombstone_protocol() {
     let mut params = BTreeMap::new();
     params.insert(
         "velocity".to_string(),
-        QtyAny::new(24.0, Dims([1, 0, -1, 0, 0])),
+        QtyAny::new(24.0, Dims([1, 0, -1, 0, 0, 0])),
     );
     params.insert(
         "length".to_string(),
-        QtyAny::new(0.12, Dims([1, 0, 0, 0, 0])),
+        QtyAny::new(0.12, Dims([1, 0, 0, 0, 0, 0])),
     );
     params.insert(
         "viscosity".to_string(),
-        QtyAny::new(1.5e-5, Dims([2, 0, -1, 0, 0])),
+        QtyAny::new(1.5e-5, Dims([2, 0, -1, 0, 0, 0])),
     );
     let dead = Descriptor {
         name: "bracket crossflow".to_string(),
@@ -170,7 +170,7 @@ fn spine_exit_3_tombstone_protocol() {
     let mut novel_params = params;
     novel_params.insert(
         "velocity".to_string(),
-        QtyAny::new(2.0, Dims([1, 0, -1, 0, 0])),
+        QtyAny::new(2.0, Dims([1, 0, -1, 0, 0, 0])),
     );
     let novel = Descriptor {
         name: "bracket creepflow".to_string(),

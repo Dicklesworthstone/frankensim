@@ -11,13 +11,13 @@ use fs_ir::query::{FieldRegistry, Qoi, Query, Target};
 use fs_qty::Dims;
 
 // von Mises stress: Pa = kg·m⁻¹·s⁻²  → [M,KG,S,K,A]
-const PA: Dims = Dims([-1, 1, -2, 0, 0]);
+const PA: Dims = Dims([-1, 1, -2, 0, 0, 0]);
 // temperature: K
-const KELVIN: Dims = Dims([0, 0, 0, 1, 0]);
+const KELVIN: Dims = Dims([0, 0, 0, 1, 0, 0]);
 // seconds (time) — a deliberately WRONG dimension for a stress tolerance.
-const SECONDS: Dims = Dims([0, 0, 1, 0, 0]);
+const SECONDS: Dims = Dims([0, 0, 1, 0, 0, 0]);
 // volume: m³
-const VOLUME: Dims = Dims([3, 0, 0, 0, 0]);
+const VOLUME: Dims = Dims([3, 0, 0, 0, 0, 0]);
 
 fn design() -> FieldRegistry {
     FieldRegistry::new()

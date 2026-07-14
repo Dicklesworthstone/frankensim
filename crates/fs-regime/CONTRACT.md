@@ -18,7 +18,8 @@ lattice-scaling assistant, FLUX conformance, conformal hardening buckets.
 ## Public types and semantics
 
 - `pi`: `pi_groups(&[Input]) -> PiBasis` — the integer nullspace of the
-  5×n SI dimension matrix by exact fraction-free elimination over i128.
+  6×n SI dimension matrix `[m, kg, s, K, A, mol]` by exact fraction-free
+  elimination over i128.
   `PiGroup` exponents are reduced (gcd 1, leading positive); values are
   products of SI input values (hence unit-free). Exact exponents outside
   the current deterministic i32 power domain are refused before numerical
@@ -30,7 +31,8 @@ lattice-scaling assistant, FLUX conformance, conformal hardening buckets.
   dimension arithmetic and REFUSES if not dimensionless (wrongly-tagged
   inputs cannot silently produce a "group").
 - `scaling`: `ScalingMap::recommend` (L* from Length, T* = L*/U*,
-  M* = ρL*³), `apply`/`unapply` via per-dimension scale factors;
+  M* = ρL*³, with explicit K*, A*, and mol* base scales), `apply`/`unapply`
+  via per-dimension scale factors;
   `condition_number` — an exact 2-norm condition probe (cyclic Jacobi on
   AᵀA) for fixture-scale measurements.
 - `cards`: `flux_model_cards()` — the built-in registry (Stokes/creeping,
@@ -52,12 +54,15 @@ lattice-scaling assistant, FLUX conformance, conformal hardening buckets.
    combination is verified against the dimension matrix (exact integer
    arithmetic); every named group's formula is dimension-checked.
 2. **Buckingham count**: group count = inputs − rank, always.
-3. **G3 unit-rescaling invariance**: group values and Pi bases are
+3. **Six-base atomicity**: amount of substance is an independent matrix
+   row and scaling axis; mol-free inputs retain their prior rank, Pi basis,
+   and values because the appended exponent is exactly zero.
+4. **G3 unit-rescaling invariance**: group values and Pi bases are
    EXACTLY invariant under any coherent rescaling of the SI base units
    (tested with raw rescaled numbers, not just re-parsed spellings).
-4. **Refusals are actionable**: an inadmissible model yields the violated
+5. **Refusals are actionable**: an inadmissible model yields the violated
    bounds by name and value plus a full ranked alternative list.
-5. **Reports are reproducible**: same inputs → identical report and
+6. **Reports are reproducible**: same inputs → identical report and
    identical provenance hash.
 
 ## Error model
@@ -89,11 +94,13 @@ None.
 
 `tests/conformance.rs` (JSON verdicts, suite `fs-regime/conformance`):
 
-- **rg-001** textbook batteries (pipe flow, drag, heat convection):
-  rank, Buckingham count, exact integer dimensionlessness of every group.
+- **rg-001** textbook batteries (pipe flow, drag, heat convection, molar
+  concentration): rank, Buckingham count, exact six-base integer
+  dimensionlessness of every group.
 - **rg-002** the definitive G3 test: base-unit rescaling (mm/g/min-ish
-  factors applied through raw exponent arithmetic) leaves named groups
-  and Pi bases exactly invariant (< 1e−12 relative).
+  factors plus a nontrivial mol scale applied through raw exponent
+  arithmetic) leaves legacy mol-free named groups and Pi bases exactly
+  invariant (< 1e−12 relative).
 - **rg-003** seeded misuse: creeping-flow solver at Re = 10⁴ refused with
   the violated bound named; LES ranked as a distance-0 alternative; a
   valid LBM case admits; unknown models are structured errors.
@@ -107,8 +114,9 @@ None.
   slenderness/ζ.
 
 Unit tests cover the Pi machinery directly (Reynolds/pendulum/drag
-recovery, mass isolation, degenerate refusals) and the condition probe
-against known diagonals.
+recovery, mol-free basis invariance, mass isolation, nonzero-mol rank and
+residual cancellation, degenerate refusals), all six scaling axes, and the
+condition probe against known diagonals.
 
 ## No-claim boundaries
 

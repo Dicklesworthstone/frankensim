@@ -1356,8 +1356,8 @@ fn frame_size_and_snap(
 }
 
 /// The `[m, kg, s, K, A]` dimension of time (s) and rate (1/s).
-const TIME: Dims = Dims([0, 0, 1, 0, 0]);
-const RATE: Dims = Dims([0, 0, -1, 0, 0]);
+const TIME: Dims = Dims([0, 0, 1, 0, 0, 0]);
+const RATE: Dims = Dims([0, 0, -1, 0, 0, 0]);
 
 /// Build the seismic ensemble (Kanai–Tajimi), sized for interactivity.
 fn frame_ensemble(seed: u32, members: u32, duration: f64, dt: f64) -> StochasticEnsemble {
@@ -1832,7 +1832,9 @@ mod tests {
         );
         assert!(
             v[cvar_start..cvar_start + 3 * cvar_rows]
-                .chunks_exact(3)
+                .as_chunks::<3>()
+                .0
+                .iter()
                 .all(|row| row[2].is_finite()),
             "canonical CVaR returned a non-finite value for a finite vessel fluid band"
         );

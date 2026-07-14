@@ -101,16 +101,16 @@ pub enum Expectation {
     Unsupported,
 }
 
-/// SI exponents (m, kg, s, K, A) for the common quantities.
+/// SI exponents (m, kg, s, K, A, mol) for the common quantities.
 mod dims {
     use fs_qty::Dims;
-    pub const VELOCITY: Dims = Dims([1, 0, -1, 0, 0]);
-    pub const MASS_FLOW: Dims = Dims([0, 1, -1, 0, 0]);
-    pub const PRESSURE: Dims = Dims([-1, 1, -2, 0, 0]);
-    pub const TEMPERATURE: Dims = Dims([0, 0, 0, 1, 0]);
-    pub const HEAT_FLUX: Dims = Dims([0, 1, -3, 0, 0]);
-    pub const HTC: Dims = Dims([0, 1, -3, -1, 0]);
-    pub const DISPLACEMENT: Dims = Dims([1, 0, 0, 0, 0]);
+    pub const VELOCITY: Dims = Dims([1, 0, -1, 0, 0, 0]);
+    pub const MASS_FLOW: Dims = Dims([0, 1, -1, 0, 0, 0]);
+    pub const PRESSURE: Dims = Dims([-1, 1, -2, 0, 0, 0]);
+    pub const TEMPERATURE: Dims = Dims([0, 0, 0, 1, 0, 0]);
+    pub const HEAT_FLUX: Dims = Dims([0, 1, -3, 0, 0, 0]);
+    pub const HTC: Dims = Dims([0, 1, -3, -1, 0, 0]);
+    pub const DISPLACEMENT: Dims = Dims([1, 0, 0, 0, 0, 0]);
 }
 
 /// The dimensional contract of every supported (physics, kind) pair.
@@ -161,7 +161,7 @@ impl BoundaryCondition {
                     code: "bc-value-missing",
                     what: format!("{ctx}: no value supplied"),
                     fix: format!(
-                        "supply a value with SI exponents {:?} (m, kg, s, K, A)",
+                        "supply a value with SI exponents {:?} (m, kg, s, K, A, mol)",
                         expected.0
                     ),
                 }),

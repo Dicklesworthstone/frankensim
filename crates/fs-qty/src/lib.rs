@@ -5,11 +5,11 @@
 //! Appendix B): a pressure cannot be added to a stress IN THE TYPE SYSTEM,
 //! and runtime-loaded data carries its dimensions as checked values.
 //!
-//! Dimension vector: `(M, KG, S, K, A)` — metre, kilogram, second, kelvin,
-//! ampere exponents as `i8`. Angles are dimensionless (radians); `deg`
-//! parses with numeric conversion. Amount (mol) and luminous intensity (cd)
-//! are out of scope for FrankenSim's physics and are a documented no-claim,
-//! as are information/monetary units (`GiB` budgets belong to fs-ir).
+//! Dimension vector: `(M, KG, S, K, A, MOL)` — metre, kilogram, second,
+//! kelvin, ampere, and amount-of-substance exponents as `i8`. Angles are
+//! dimensionless (radians); `deg` parses with numeric conversion. Luminous
+//! intensity (cd) remains out of scope until photometry is real, as do
+//! information/monetary units (`GiB` budgets belong to fs-ir).
 //!
 //! Nightly note: multiplication/division dimension arithmetic uses
 //! `generic_const_exprs` (a documented nightly liability, see CONTRACT.md;
@@ -30,17 +30,20 @@ use core::ops::{Add, Div, Mul, Neg, Sub};
 /// Crate version, re-exported for provenance stamping.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Number of admitted SI base dimensions: `[m, kg, s, K, A, mol]`.
+pub const DIMENSION_COUNT: usize = 6;
+
 // ---------------------------------------------------------------------------
 // Dims: the runtime dimension vector shared by Qty (const) and QtyAny (value).
 // ---------------------------------------------------------------------------
 
-/// A dimension vector `[m, kg, s, K, A]` of SI base-unit exponents.
+/// A dimension vector `[m, kg, s, K, A, mol]` of SI base-unit exponents.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Dims(pub [i8; 5]);
+pub struct Dims(pub [i8; DIMENSION_COUNT]);
 
 impl Dims {
     /// The dimensionless vector.
-    pub const NONE: Dims = Dims([0; 5]);
+    pub const NONE: Dims = Dims([0; DIMENSION_COUNT]);
 
     /// Component-wise sum (dimension of a product). SATURATING at the `i8`
     /// bounds: this type flows through agent-facing paths (parser, IR), so
@@ -58,6 +61,7 @@ impl Dims {
             a[2].saturating_add(b[2]),
             a[3].saturating_add(b[3]),
             a[4].saturating_add(b[4]),
+            a[5].saturating_add(b[5]),
         ])
     }
 
@@ -73,6 +77,7 @@ impl Dims {
             a[2].saturating_sub(b[2]),
             a[3].saturating_sub(b[3]),
             a[4].saturating_sub(b[4]),
+            a[5].saturating_sub(b[5]),
         ])
     }
 
@@ -87,22 +92,30 @@ impl Dims {
             a[2].saturating_mul(n),
             a[3].saturating_mul(n),
             a[4].saturating_mul(n),
+            a[5].saturating_mul(n),
         ])
     }
 
     /// True if all exponents are zero.
     #[must_use]
     pub const fn is_none(self) -> bool {
-        matches!(self.0, [0, 0, 0, 0, 0])
+        matches!(self.0, [0, 0, 0, 0, 0, 0])
     }
 
     /// Canonical unit string, e.g. `kg·m^-1·s^-2`; `1` for dimensionless.
-    /// Order follows SI custom for mechanics: kg, m, s, K, A.
+    /// Order follows SI custom for mechanics: kg, m, s, K, A, mol.
     #[must_use]
     pub fn unit_string(self) -> String {
-        let [m, kg, s, k, a] = self.0;
+        let [m, kg, s, k, a, mol] = self.0;
         let mut parts: Vec<String> = Vec::new();
-        for (sym, e) in [("kg", kg), ("m", m), ("s", s), ("K", k), ("A", a)] {
+        for (sym, e) in [
+            ("kg", kg),
+            ("m", m),
+            ("s", s),
+            ("K", k),
+            ("A", a),
+            ("mol", mol),
+        ] {
             match e {
                 0 => {}
                 1 => parts.push(sym.to_string()),
@@ -127,7 +140,7 @@ impl fmt::Debug for Dims {
 // Qty: compile-time dimensioned scalar.
 // ---------------------------------------------------------------------------
 
-/// A dimensioned `f64`: `Qty<M, KG, S, K, A>` carries SI base-unit exponents
+/// A dimensioned `f64`: `Qty<M, KG, S, K, A, MOL>` carries SI base-unit exponents
 /// in its type. Same-dimension addition/subtraction/comparison compile;
 /// mixed-dimension ones do not (see the compile-fail doctests below).
 ///
@@ -153,11 +166,26 @@ impl fmt::Debug for Dims {
 /// let _: Volume = Length::new(2.0) * Length::new(3.0); // ERROR: Area, not Volume
 /// ```
 #[derive(Clone, Copy, PartialEq, PartialOrd, Default)]
-pub struct Qty<const M: i8, const KG: i8, const S: i8, const K: i8, const A: i8>(pub f64);
+pub struct Qty<
+    const M: i8,
+    const KG: i8,
+    const S: i8,
+    const K: i8,
+    const A: i8,
+    const MOL: i8,
+>(pub f64);
 
-impl<const M: i8, const KG: i8, const S: i8, const K: i8, const A: i8> Qty<M, KG, S, K, A> {
+impl<
+    const M: i8,
+    const KG: i8,
+    const S: i8,
+    const K: i8,
+    const A: i8,
+    const MOL: i8,
+> Qty<M, KG, S, K, A, MOL>
+{
     /// This type's dimension vector as a value.
-    pub const DIMS: Dims = Dims([M, KG, S, K, A]);
+    pub const DIMS: Dims = Dims([M, KG, S, K, A, MOL]);
 
     /// Wrap a raw value already expressed in coherent SI base units.
     #[must_use]
@@ -206,45 +234,87 @@ impl<const M: i8, const KG: i8, const S: i8, const K: i8, const A: i8> Qty<M, KG
     }
 }
 
-impl<const M: i8, const KG: i8, const S: i8, const K: i8, const A: i8> fmt::Debug
-    for Qty<M, KG, S, K, A>
+impl<
+    const M: i8,
+    const KG: i8,
+    const S: i8,
+    const K: i8,
+    const A: i8,
+    const MOL: i8,
+> fmt::Debug for Qty<M, KG, S, K, A, MOL>
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{} {}", self.0, Self::DIMS.unit_string())
     }
 }
 
-impl<const M: i8, const KG: i8, const S: i8, const K: i8, const A: i8> fmt::Display
-    for Qty<M, KG, S, K, A>
+impl<
+    const M: i8,
+    const KG: i8,
+    const S: i8,
+    const K: i8,
+    const A: i8,
+    const MOL: i8,
+> fmt::Display for Qty<M, KG, S, K, A, MOL>
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Debug::fmt(self, f)
     }
 }
 
-impl<const M: i8, const KG: i8, const S: i8, const K: i8, const A: i8> Add for Qty<M, KG, S, K, A> {
+impl<
+    const M: i8,
+    const KG: i8,
+    const S: i8,
+    const K: i8,
+    const A: i8,
+    const MOL: i8,
+> Add for Qty<M, KG, S, K, A, MOL>
+{
     type Output = Self;
     fn add(self, rhs: Self) -> Self {
         Qty(self.0 + rhs.0)
     }
 }
 
-impl<const M: i8, const KG: i8, const S: i8, const K: i8, const A: i8> Sub for Qty<M, KG, S, K, A> {
+impl<
+    const M: i8,
+    const KG: i8,
+    const S: i8,
+    const K: i8,
+    const A: i8,
+    const MOL: i8,
+> Sub for Qty<M, KG, S, K, A, MOL>
+{
     type Output = Self;
     fn sub(self, rhs: Self) -> Self {
         Qty(self.0 - rhs.0)
     }
 }
 
-impl<const M: i8, const KG: i8, const S: i8, const K: i8, const A: i8> Neg for Qty<M, KG, S, K, A> {
+impl<
+    const M: i8,
+    const KG: i8,
+    const S: i8,
+    const K: i8,
+    const A: i8,
+    const MOL: i8,
+> Neg for Qty<M, KG, S, K, A, MOL>
+{
     type Output = Self;
     fn neg(self) -> Self {
         Qty(-self.0)
     }
 }
 
-impl<const M: i8, const KG: i8, const S: i8, const K: i8, const A: i8> Mul<f64>
-    for Qty<M, KG, S, K, A>
+impl<
+    const M: i8,
+    const KG: i8,
+    const S: i8,
+    const K: i8,
+    const A: i8,
+    const MOL: i8,
+> Mul<f64> for Qty<M, KG, S, K, A, MOL>
 {
     type Output = Self;
     fn mul(self, rhs: f64) -> Self {
@@ -252,17 +322,29 @@ impl<const M: i8, const KG: i8, const S: i8, const K: i8, const A: i8> Mul<f64>
     }
 }
 
-impl<const M: i8, const KG: i8, const S: i8, const K: i8, const A: i8> Mul<Qty<M, KG, S, K, A>>
-    for f64
+impl<
+    const M: i8,
+    const KG: i8,
+    const S: i8,
+    const K: i8,
+    const A: i8,
+    const MOL: i8,
+> Mul<Qty<M, KG, S, K, A, MOL>> for f64
 {
-    type Output = Qty<M, KG, S, K, A>;
-    fn mul(self, rhs: Qty<M, KG, S, K, A>) -> Qty<M, KG, S, K, A> {
+    type Output = Qty<M, KG, S, K, A, MOL>;
+    fn mul(self, rhs: Qty<M, KG, S, K, A, MOL>) -> Qty<M, KG, S, K, A, MOL> {
         Qty(self * rhs.0)
     }
 }
 
-impl<const M: i8, const KG: i8, const S: i8, const K: i8, const A: i8> Div<f64>
-    for Qty<M, KG, S, K, A>
+impl<
+    const M: i8,
+    const KG: i8,
+    const S: i8,
+    const K: i8,
+    const A: i8,
+    const MOL: i8,
+> Div<f64> for Qty<M, KG, S, K, A, MOL>
 {
     type Output = Self;
     fn div(self, rhs: f64) -> Self {
@@ -277,17 +359,33 @@ impl<
     const S1: i8,
     const K1: i8,
     const A1: i8,
+    const MOL1: i8,
     const M2: i8,
     const KG2: i8,
     const S2: i8,
     const K2: i8,
     const A2: i8,
-> Mul<Qty<M2, KG2, S2, K2, A2>> for Qty<M1, KG1, S1, K1, A1>
+    const MOL2: i8,
+> Mul<Qty<M2, KG2, S2, K2, A2, MOL2>> for Qty<M1, KG1, S1, K1, A1, MOL1>
 where
-    Qty<{ M1 + M2 }, { KG1 + KG2 }, { S1 + S2 }, { K1 + K2 }, { A1 + A2 }>: Sized,
+    Qty<
+        { M1 + M2 },
+        { KG1 + KG2 },
+        { S1 + S2 },
+        { K1 + K2 },
+        { A1 + A2 },
+        { MOL1 + MOL2 },
+    >: Sized,
 {
-    type Output = Qty<{ M1 + M2 }, { KG1 + KG2 }, { S1 + S2 }, { K1 + K2 }, { A1 + A2 }>;
-    fn mul(self, rhs: Qty<M2, KG2, S2, K2, A2>) -> Self::Output {
+    type Output = Qty<
+        { M1 + M2 },
+        { KG1 + KG2 },
+        { S1 + S2 },
+        { K1 + K2 },
+        { A1 + A2 },
+        { MOL1 + MOL2 },
+    >;
+    fn mul(self, rhs: Qty<M2, KG2, S2, K2, A2, MOL2>) -> Self::Output {
         Qty(self.0 * rhs.0)
     }
 }
@@ -299,17 +397,33 @@ impl<
     const S1: i8,
     const K1: i8,
     const A1: i8,
+    const MOL1: i8,
     const M2: i8,
     const KG2: i8,
     const S2: i8,
     const K2: i8,
     const A2: i8,
-> Div<Qty<M2, KG2, S2, K2, A2>> for Qty<M1, KG1, S1, K1, A1>
+    const MOL2: i8,
+> Div<Qty<M2, KG2, S2, K2, A2, MOL2>> for Qty<M1, KG1, S1, K1, A1, MOL1>
 where
-    Qty<{ M1 - M2 }, { KG1 - KG2 }, { S1 - S2 }, { K1 - K2 }, { A1 - A2 }>: Sized,
+    Qty<
+        { M1 - M2 },
+        { KG1 - KG2 },
+        { S1 - S2 },
+        { K1 - K2 },
+        { A1 - A2 },
+        { MOL1 - MOL2 },
+    >: Sized,
 {
-    type Output = Qty<{ M1 - M2 }, { KG1 - KG2 }, { S1 - S2 }, { K1 - K2 }, { A1 - A2 }>;
-    fn div(self, rhs: Qty<M2, KG2, S2, K2, A2>) -> Self::Output {
+    type Output = Qty<
+        { M1 - M2 },
+        { KG1 - KG2 },
+        { S1 - S2 },
+        { K1 - K2 },
+        { A1 - A2 },
+        { MOL1 - MOL2 },
+    >;
+    fn div(self, rhs: Qty<M2, KG2, S2, K2, A2, MOL2>) -> Self::Output {
         Qty(self.0 / rhs.0)
     }
 }
@@ -340,49 +454,71 @@ impl From<Dimensionless> for f64 {
 // ---------------------------------------------------------------------------
 
 /// Pure number.
-pub type Dimensionless = Qty<0, 0, 0, 0, 0>;
+pub type Dimensionless = Qty<0, 0, 0, 0, 0, 0>;
 /// Metres.
-pub type Length = Qty<1, 0, 0, 0, 0>;
+pub type Length = Qty<1, 0, 0, 0, 0, 0>;
 /// Square metres.
-pub type Area = Qty<2, 0, 0, 0, 0>;
+pub type Area = Qty<2, 0, 0, 0, 0, 0>;
 /// Cubic metres.
-pub type Volume = Qty<3, 0, 0, 0, 0>;
+pub type Volume = Qty<3, 0, 0, 0, 0, 0>;
 /// Seconds.
-pub type Time = Qty<0, 0, 1, 0, 0>;
+pub type Time = Qty<0, 0, 1, 0, 0, 0>;
 /// Hertz.
-pub type Frequency = Qty<0, 0, -1, 0, 0>;
+pub type Frequency = Qty<0, 0, -1, 0, 0, 0>;
 /// Metres per second.
-pub type Velocity = Qty<1, 0, -1, 0, 0>;
+pub type Velocity = Qty<1, 0, -1, 0, 0, 0>;
 /// Metres per second squared.
-pub type Acceleration = Qty<1, 0, -2, 0, 0>;
+pub type Acceleration = Qty<1, 0, -2, 0, 0, 0>;
 /// Kilograms.
-pub type Mass = Qty<0, 1, 0, 0, 0>;
+pub type Mass = Qty<0, 1, 0, 0, 0, 0>;
 /// Kilograms per cubic metre.
-pub type Density = Qty<-3, 1, 0, 0, 0>;
+pub type Density = Qty<-3, 1, 0, 0, 0, 0>;
 /// Newtons (kg·m·s⁻²).
-pub type Force = Qty<1, 1, -2, 0, 0>;
+pub type Force = Qty<1, 1, -2, 0, 0, 0>;
 /// Pascals (kg·m⁻¹·s⁻²). Stress and pressure share a dimension.
-pub type Stress = Qty<-1, 1, -2, 0, 0>;
+pub type Stress = Qty<-1, 1, -2, 0, 0, 0>;
 /// Alias of [`Stress`].
 pub type Pressure = Stress;
 /// Joules (kg·m²·s⁻²).
-pub type Energy = Qty<2, 1, -2, 0, 0>;
+pub type Energy = Qty<2, 1, -2, 0, 0, 0>;
 /// Watts (kg·m²·s⁻³).
-pub type Power = Qty<2, 1, -3, 0, 0>;
+pub type Power = Qty<2, 1, -3, 0, 0, 0>;
 /// Dynamic viscosity, Pa·s (kg·m⁻¹·s⁻¹).
-pub type DynViscosity = Qty<-1, 1, -1, 0, 0>;
+pub type DynViscosity = Qty<-1, 1, -1, 0, 0, 0>;
 /// Kinematic viscosity, m²/s.
-pub type KinViscosity = Qty<2, 0, -1, 0, 0>;
+pub type KinViscosity = Qty<2, 0, -1, 0, 0, 0>;
 /// Surface tension, N/m (kg·s⁻²).
-pub type SurfaceTension = Qty<0, 1, -2, 0, 0>;
+pub type SurfaceTension = Qty<0, 1, -2, 0, 0, 0>;
 /// Kelvin.
-pub type Temperature = Qty<0, 0, 0, 1, 0>;
+pub type Temperature = Qty<0, 0, 0, 1, 0, 0>;
 /// Amperes.
-pub type Current = Qty<0, 0, 0, 0, 1>;
+pub type Current = Qty<0, 0, 0, 0, 1, 0>;
+/// Coulombs (A·s).
+pub type ElectricCharge = Qty<0, 0, 1, 0, 1, 0>;
+/// Volts (kg·m²·s⁻³·A⁻¹).
+pub type Voltage = Qty<2, 1, -3, 0, -1, 0>;
+/// Webers (kg·m²·s⁻²·A⁻¹).
+pub type MagneticFlux = Qty<2, 1, -2, 0, -1, 0>;
+/// Henries (kg·m²·s⁻²·A⁻²).
+pub type Inductance = Qty<2, 1, -2, 0, -2, 0>;
+/// Ohms (kg·m²·s⁻³·A⁻²).
+pub type Resistance = Qty<2, 1, -3, 0, -2, 0>;
+/// Siemens (kg⁻¹·m⁻²·s³·A²).
+pub type Conductance = Qty<-2, -1, 3, 0, 2, 0>;
+/// Farads (kg⁻¹·m⁻²·s⁴·A²).
+pub type Capacitance = Qty<-2, -1, 4, 0, 2, 0>;
+/// Teslas (kg·s⁻²·A⁻¹).
+pub type MagneticFluxDensity = Qty<0, 1, -2, 0, -1, 0>;
+/// Moles.
+pub type Amount = Qty<0, 0, 0, 0, 0, 1>;
+/// Kilograms per mole.
+pub type MolarMass = Qty<0, 1, 0, 0, 0, -1>;
+/// Moles per cubic metre.
+pub type AmountConcentration = Qty<-3, 0, 0, 0, 0, 1>;
 /// Kilograms per second.
-pub type MassFlowRate = Qty<0, 1, -1, 0, 0>;
+pub type MassFlowRate = Qty<0, 1, -1, 0, 0, 0>;
 /// Cubic metres per second.
-pub type VolumetricFlowRate = Qty<3, 0, -1, 0, 0>;
+pub type VolumetricFlowRate = Qty<3, 0, -1, 0, 0, 0>;
 /// Radians per second (angle is dimensionless).
 pub type AngularVelocity = Frequency;
 /// Angle in radians (dimensionless by SI convention; `deg` parses with
@@ -392,8 +528,10 @@ pub type Angle = Dimensionless;
 /// Unit-bearing constructors, all returning coherent-SI values.
 pub mod units {
     use super::{
-        Angle, DynViscosity, Energy, Force, Frequency, Length, Mass, Power, Pressure, Qty,
-        SurfaceTension, Temperature, Time, Velocity, Volume, VolumetricFlowRate,
+        Amount, AmountConcentration, Angle, Capacitance, Conductance, DynViscosity,
+        ElectricCharge, Energy, Force, Frequency, Inductance, Length, MagneticFlux,
+        MagneticFluxDensity, Mass, MolarMass, Power, Pressure, Qty, Resistance, SurfaceTension,
+        Temperature, Time, Velocity, Voltage, Volume, VolumetricFlowRate,
     };
 
     /// Metres.
@@ -419,6 +557,21 @@ pub mod units {
     /// Kilograms.
     #[must_use]
     pub const fn kilograms(v: f64) -> Mass {
+        Qty(v)
+    }
+    /// Moles.
+    #[must_use]
+    pub const fn moles(v: f64) -> Amount {
+        Qty(v)
+    }
+    /// Kilograms per mole.
+    #[must_use]
+    pub const fn kilograms_per_mole(v: f64) -> MolarMass {
+        Qty(v)
+    }
+    /// Moles per cubic metre.
+    #[must_use]
+    pub const fn moles_per_cubic_meter(v: f64) -> AmountConcentration {
         Qty(v)
     }
     /// Kelvin.
@@ -454,6 +607,46 @@ pub mod units {
     /// Watts.
     #[must_use]
     pub const fn watts(v: f64) -> Power {
+        Qty(v)
+    }
+    /// Coulombs.
+    #[must_use]
+    pub const fn coulombs(v: f64) -> ElectricCharge {
+        Qty(v)
+    }
+    /// Volts.
+    #[must_use]
+    pub const fn volts(v: f64) -> Voltage {
+        Qty(v)
+    }
+    /// Webers.
+    #[must_use]
+    pub const fn webers(v: f64) -> MagneticFlux {
+        Qty(v)
+    }
+    /// Henries.
+    #[must_use]
+    pub const fn henries(v: f64) -> Inductance {
+        Qty(v)
+    }
+    /// Ohms.
+    #[must_use]
+    pub const fn ohms(v: f64) -> Resistance {
+        Qty(v)
+    }
+    /// Siemens.
+    #[must_use]
+    pub const fn siemens(v: f64) -> Conductance {
+        Qty(v)
+    }
+    /// Farads.
+    #[must_use]
+    pub const fn farads(v: f64) -> Capacitance {
+        Qty(v)
+    }
+    /// Teslas.
+    #[must_use]
+    pub const fn teslas(v: f64) -> MagneticFluxDensity {
         Qty(v)
     }
     /// Hertz.
@@ -620,7 +813,7 @@ impl QtyAny {
     /// # Errors
     /// [`DimensionOverflow`] when any scaled exponent would leave `i8`.
     pub fn powi(self, n: i8) -> Result<QtyAny, DimensionOverflow> {
-        let mut scaled = [0i8; 5];
+        let mut scaled = [0i8; DIMENSION_COUNT];
         for (out, &e) in scaled.iter_mut().zip(&self.dims.0) {
             *out = e.checked_mul(n).ok_or(DimensionOverflow {
                 op: "powi",
@@ -639,10 +832,17 @@ impl QtyAny {
     /// # Errors
     /// Returns [`DimensionMismatch`] when this value's dimension differs
     /// from the target type's.
-    pub fn to_typed<const M: i8, const KG: i8, const S: i8, const K: i8, const A: i8>(
+    pub fn to_typed<
+        const M: i8,
+        const KG: i8,
+        const S: i8,
+        const K: i8,
+        const A: i8,
+        const MOL: i8,
+    >(
         self,
-    ) -> Result<Qty<M, KG, S, K, A>, DimensionMismatch> {
-        let want = Qty::<M, KG, S, K, A>::DIMS;
+    ) -> Result<Qty<M, KG, S, K, A, MOL>, DimensionMismatch> {
+        let want = Qty::<M, KG, S, K, A, MOL>::DIMS;
         if self.dims == want {
             Ok(Qty(self.value))
         } else {
@@ -755,7 +955,7 @@ mod tests {
         let a = Area::new(2.0);
         let p: Pressure = f / a;
         assert!((p.value() - 5.0).abs() < 1e-12);
-        assert_eq!(Pressure::DIMS, Dims([-1, 1, -2, 0, 0]));
+        assert_eq!(Pressure::DIMS, Dims([-1, 1, -2, 0, 0, 0]));
     }
 
     #[test]
@@ -773,16 +973,16 @@ mod tests {
 
     #[test]
     fn qty_any_power_refuses_dimension_saturation() {
-        let q = QtyAny::new(2.0, Dims([2, 0, 0, 0, 0]));
+        let q = QtyAny::new(2.0, Dims([2, 0, 0, 0, 0, 0]));
         // det-ok: QtyAny::powi — routes to powi_pinned (4xnt)
         let err = q.powi(64).expect_err("m^128 cannot fit runtime dims");
         assert_eq!(err.factor, 64);
 
-        let admitted = QtyAny::new(2.0, Dims([1, 0, 0, 0, 0]))
+        let admitted = QtyAny::new(2.0, Dims([1, 0, 0, 0, 0, 0]))
             // det-ok: QtyAny::powi — routes to powi_pinned (4xnt)
             .powi(101)
             .expect("m^101 is representable");
-        assert_eq!(admitted.dims, Dims([101, 0, 0, 0, 0]));
+        assert_eq!(admitted.dims, Dims([101, 0, 0, 0, 0, 0]));
         assert_eq!(powi_pinned(2.0, -1024).to_bits(), 1_u64 << 50);
     }
 
@@ -830,6 +1030,7 @@ mod tests {
     fn units_module_constructors() {
         assert!((units::millimeters(3.0).value() - 0.003).abs() < 1e-15);
         assert!((units::hours(2.0).value() - 7200.0).abs() < 1e-9);
+        assert_eq!(units::moles(2.0).erase().dims, Amount::DIMS);
         assert!((units::celsius(20.0).value() - 293.15).abs() < 1e-9);
         assert!((units::degrees(180.0).value() - core::f64::consts::PI).abs() < 1e-12);
         assert!((units::liters_per_second(0.5).value() - 5e-4).abs() < 1e-15);

@@ -20,7 +20,7 @@ fn verdict(case: &str, detail: &str) {
     );
 }
 
-fn role(role: Role, value: f64, dims: [i8; 5]) -> RoleInput {
+fn role(role: Role, value: f64, dims: [i8; 6]) -> RoleInput {
     RoleInput {
         role,
         qty: QtyAny::new(value, Dims(dims)),
@@ -30,36 +30,36 @@ fn role(role: Role, value: f64, dims: [i8; 5]) -> RoleInput {
 /// The spout-pour fluid state (viscous suspension, mid-tilt).
 fn spout_inputs() -> Vec<RoleInput> {
     vec![
-        role(Role::Density, 1200.0, [-3, 1, 0, 0, 0]),
-        role(Role::Velocity, 0.3, [1, 0, -1, 0, 0]),
-        role(Role::Length, 0.02, [1, 0, 0, 0, 0]),
-        role(Role::DynViscosity, 8.0, [-1, 1, -1, 0, 0]),
-        role(Role::SurfaceTension, 0.06, [0, 1, -2, 0, 0]),
-        role(Role::Gravity, 9.806_65, [1, 0, -2, 0, 0]),
+        role(Role::Density, 1200.0, [-3, 1, 0, 0, 0, 0]),
+        role(Role::Velocity, 0.3, [1, 0, -1, 0, 0, 0]),
+        role(Role::Length, 0.02, [1, 0, 0, 0, 0, 0]),
+        role(Role::DynViscosity, 8.0, [-1, 1, -1, 0, 0, 0]),
+        role(Role::SurfaceTension, 0.06, [0, 1, -2, 0, 0, 0]),
+        role(Role::Gravity, 9.806_65, [1, 0, -2, 0, 0, 0]),
     ]
 }
 
 /// Battery of textbook sets: (inputs, expected rank, expected count).
 fn textbook_batteries() -> Vec<(Vec<Input>, usize, usize)> {
-    let q = |v: f64, d: [i8; 5]| QtyAny::new(v, Dims(d));
+    let q = |v: f64, d: [i8; 6]| QtyAny::new(v, Dims(d));
     vec![
         (
             vec![
                 Input {
                     name: "rho".into(),
-                    qty: q(998.0, [-3, 1, 0, 0, 0]),
+                    qty: q(998.0, [-3, 1, 0, 0, 0, 0]),
                 },
                 Input {
                     name: "v".into(),
-                    qty: q(1.5, [1, 0, -1, 0, 0]),
+                    qty: q(1.5, [1, 0, -1, 0, 0, 0]),
                 },
                 Input {
                     name: "d".into(),
-                    qty: q(0.1, [1, 0, 0, 0, 0]),
+                    qty: q(0.1, [1, 0, 0, 0, 0, 0]),
                 },
                 Input {
                     name: "mu".into(),
-                    qty: q(1e-3, [-1, 1, -1, 0, 0]),
+                    qty: q(1e-3, [-1, 1, -1, 0, 0, 0]),
                 },
             ],
             3,
@@ -70,23 +70,23 @@ fn textbook_batteries() -> Vec<(Vec<Input>, usize, usize)> {
             vec![
                 Input {
                     name: "f".into(),
-                    qty: q(12.0, [1, 1, -2, 0, 0]),
+                    qty: q(12.0, [1, 1, -2, 0, 0, 0]),
                 },
                 Input {
                     name: "rho".into(),
-                    qty: q(1.225, [-3, 1, 0, 0, 0]),
+                    qty: q(1.225, [-3, 1, 0, 0, 0, 0]),
                 },
                 Input {
                     name: "v".into(),
-                    qty: q(8.0, [1, 0, -1, 0, 0]),
+                    qty: q(8.0, [1, 0, -1, 0, 0, 0]),
                 },
                 Input {
                     name: "l".into(),
-                    qty: q(0.12, [1, 0, 0, 0, 0]),
+                    qty: q(0.12, [1, 0, 0, 0, 0, 0]),
                 },
                 Input {
                     name: "mu".into(),
-                    qty: q(1.81e-5, [-1, 1, -1, 0, 0]),
+                    qty: q(1.81e-5, [-1, 1, -1, 0, 0, 0]),
                 },
             ],
             3,
@@ -97,35 +97,54 @@ fn textbook_batteries() -> Vec<(Vec<Input>, usize, usize)> {
             vec![
                 Input {
                     name: "h".into(),
-                    qty: q(25.0, [0, 1, -3, -1, 0]),
+                    qty: q(25.0, [0, 1, -3, -1, 0, 0]),
                 },
                 Input {
                     name: "k".into(),
-                    qty: q(0.6, [1, 1, -3, -1, 0]),
+                    qty: q(0.6, [1, 1, -3, -1, 0, 0]),
                 },
                 Input {
                     name: "l".into(),
-                    qty: q(0.05, [1, 0, 0, 0, 0]),
+                    qty: q(0.05, [1, 0, 0, 0, 0, 0]),
                 },
                 Input {
                     name: "rho".into(),
-                    qty: q(998.0, [-3, 1, 0, 0, 0]),
+                    qty: q(998.0, [-3, 1, 0, 0, 0, 0]),
                 },
                 Input {
                     name: "mu".into(),
-                    qty: q(1e-3, [-1, 1, -1, 0, 0]),
+                    qty: q(1e-3, [-1, 1, -1, 0, 0, 0]),
                 },
                 Input {
                     name: "cp".into(),
-                    qty: q(4184.0, [2, 0, -2, -1, 0]),
+                    qty: q(4184.0, [2, 0, -2, -1, 0, 0]),
                 },
                 Input {
                     name: "v".into(),
-                    qty: q(0.8, [1, 0, -1, 0, 0]),
+                    qty: q(0.8, [1, 0, -1, 0, 0, 0]),
                 },
             ],
             4,
             3,
+        ),
+        (
+            // Amount-bearing battery: (n, L, c) with c in mol/m³.
+            vec![
+                Input {
+                    name: "n".into(),
+                    qty: q(2.0, [0, 0, 0, 0, 0, 1]),
+                },
+                Input {
+                    name: "l".into(),
+                    qty: q(3.0, [1, 0, 0, 0, 0, 0]),
+                },
+                Input {
+                    name: "c".into(),
+                    qty: q(2.0 / 27.0, [-3, 0, 0, 0, 0, 1]),
+                },
+            ],
+            2,
+            1,
         ),
     ]
 }
@@ -142,19 +161,19 @@ fn rg_001_pi_batteries_are_algebraically_correct() {
         );
         // Every group is exactly dimensionless by integer arithmetic.
         for g in &basis.groups {
-            let mut residual = [0i64; 5];
+            let mut residual = [0i64; 6];
             for (input, &e) in inputs.iter().zip(&g.exponents) {
                 for (slot, &d) in residual.iter_mut().zip(&input.qty.dims.0) {
                     *slot += i64::from(d) * e;
                 }
             }
-            assert_eq!(residual, [0; 5], "battery {i}: group not dimensionless");
+            assert_eq!(residual, [0; 6], "battery {i}: group not dimensionless");
             assert!(g.value.is_finite() && g.value > 0.0);
         }
     }
     verdict(
         "rg-001",
-        "pipe/drag/convection batteries: rank, Buckingham count, integer dimensionlessness",
+        "pipe/drag/convection/amount batteries: rank, Buckingham count, integer dimensionlessness",
     );
 }
 
@@ -164,7 +183,9 @@ fn rg_002_unit_rescaling_invariance_is_exact() {
     // coherent unit system (scale factors per SI base dim) and recompute
     // the groups from the RAW rescaled numbers. Dimensionless products
     // must be invariant because the scale factors cancel exactly.
-    let scales = [1000.0f64, 0.001, 60.0, 1.8, 3.0]; // mm-ish, g-ish, min-ish...
+    // The amount scale is deliberately nontrivial; these legacy mol-free
+    // fixtures must remain invariant because their sixth exponent is zero.
+    let scales = [1000.0f64, 0.001, 60.0, 1.8, 3.0, 7.0];
     let rescale = |q: QtyAny| -> QtyAny {
         let mut v = q.value;
         for (&s, d) in scales.iter().zip(q.dims.0) {
@@ -330,9 +351,9 @@ fn rg_004_recommended_scaling_improves_conditioning() {
     // magnitudes (GPa stiffness, mm displacements, kN loads) vs the same
     // physics assembled in regime-recommended nondimensional variables.
     let inputs = vec![
-        role(Role::Density, 7850.0, [-3, 1, 0, 0, 0]),
-        role(Role::Velocity, 2.0, [1, 0, -1, 0, 0]),
-        role(Role::Length, 0.004, [1, 0, 0, 0, 0]),
+        role(Role::Density, 7850.0, [-3, 1, 0, 0, 0, 0]),
+        role(Role::Velocity, 2.0, [1, 0, -1, 0, 0, 0]),
+        role(Role::Length, 0.004, [1, 0, 0, 0, 0, 0]),
     ];
     let map = ScalingMap::recommend(&inputs).expect("scales");
     // Raw system: rows mix stiffness (Pa·m ~ 1e9), geometry (1e-3) and a
@@ -354,8 +375,8 @@ fn rg_004_recommended_scaling_improves_conditioning() {
     // scale and length-like columns by L* — here rows were built from
     // (stiffness, length, unity) quantities, so scale them by their
     // dimension factors.
-    let f_force = map.factor([0, 1, -2, 0, 0]); // force scale
-    let f_len = map.factor([1, 0, 0, 0, 0]);
+    let f_force = map.factor([0, 1, -2, 0, 0, 0]); // force scale
+    let f_len = map.factor([1, 0, 0, 0, 0, 0]);
     let scaled = [
         raw[0] * f_len / f_force,
         raw[1] * f_len / f_force,
@@ -386,10 +407,10 @@ fn rg_004_recommended_scaling_improves_conditioning() {
 #[test]
 fn rg_005_similarity_engine_finds_the_neighbor() {
     let inputs = vec![
-        role(Role::Density, 1.225, [-3, 1, 0, 0, 0]),
-        role(Role::Velocity, 1.47, [1, 0, -1, 0, 0]),
-        role(Role::Length, 0.001, [1, 0, 0, 0, 0]),
-        role(Role::DynViscosity, 1.834e-5, [-1, 1, -1, 0, 0]),
+        role(Role::Density, 1.225, [-3, 1, 0, 0, 0, 0]),
+        role(Role::Velocity, 1.47, [1, 0, -1, 0, 0, 0]),
+        role(Role::Length, 0.001, [1, 0, 0, 0, 0, 0]),
+        role(Role::DynViscosity, 1.834e-5, [-1, 1, -1, 0, 0, 0]),
     ];
     // Re = 1.225*1.47*0.001/1.834e-5 ~ 98.2 — near the Re=100 benchmark.
     let ev = assess(&inputs).expect("assess");
@@ -455,12 +476,12 @@ fn rg_006_flagship_fixtures_match_hand_calculations() {
 
     // Ornithoid gait: Re, Ma, St from (air, V=8, chord=0.12, f=4Hz).
     let ornithoid = vec![
-        role(Role::Density, 1.225, [-3, 1, 0, 0, 0]),
-        role(Role::Velocity, 8.0, [1, 0, -1, 0, 0]),
-        role(Role::Length, 0.12, [1, 0, 0, 0, 0]),
-        role(Role::DynViscosity, 1.81e-5, [-1, 1, -1, 0, 0]),
-        role(Role::SoundSpeed, 343.0, [1, 0, -1, 0, 0]),
-        role(Role::Frequency, 4.0, [0, 0, -1, 0, 0]),
+        role(Role::Density, 1.225, [-3, 1, 0, 0, 0, 0]),
+        role(Role::Velocity, 8.0, [1, 0, -1, 0, 0, 0]),
+        role(Role::Length, 0.12, [1, 0, 0, 0, 0, 0]),
+        role(Role::DynViscosity, 1.81e-5, [-1, 1, -1, 0, 0, 0]),
+        role(Role::SoundSpeed, 343.0, [1, 0, -1, 0, 0, 0]),
+        role(Role::Frequency, 4.0, [0, 0, -1, 0, 0, 0]),
     ];
     let og = standard_groups(&ornithoid).expect("ornithoid");
     let find = |n: &str| og.iter().find(|g| g.name == n).expect("group").value;
@@ -470,11 +491,11 @@ fn rg_006_flagship_fixtures_match_hand_calculations() {
 
     // Frame member: slenderness + damping ratio.
     let frame = vec![
-        role(Role::Length, 3.2, [1, 0, 0, 0, 0]),
-        role(Role::GyrationRadius, 0.04, [1, 0, 0, 0, 0]),
-        role(Role::Damping, 800.0, [0, 1, -1, 0, 0]),
-        role(Role::Stiffness, 2.0e6, [0, 1, -2, 0, 0]),
-        role(Role::Mass, 500.0, [0, 1, 0, 0, 0]),
+        role(Role::Length, 3.2, [1, 0, 0, 0, 0, 0]),
+        role(Role::GyrationRadius, 0.04, [1, 0, 0, 0, 0, 0]),
+        role(Role::Damping, 800.0, [0, 1, -1, 0, 0, 0]),
+        role(Role::Stiffness, 2.0e6, [0, 1, -2, 0, 0, 0]),
+        role(Role::Mass, 500.0, [0, 1, 0, 0, 0, 0]),
     ];
     let fg = standard_groups(&frame).expect("frame");
     let findf = |n: &str| fg.iter().find(|g| g.name == n).expect("group").value;

@@ -493,7 +493,7 @@ fn as_dims_at(items: &[Sx]) -> Result<Dims, ScenarioError> {
     if items.len() != 5 {
         return Err(err(0, "expected five dimension exponents"));
     }
-    let mut d = [0i8; 5];
+    let mut d = [0i8; 6];
     for (slot, sx) in d.iter_mut().zip(items) {
         *slot = as_i8(sx)?;
     }

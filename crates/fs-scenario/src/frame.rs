@@ -19,7 +19,7 @@ pub struct FrameId(pub u32);
 pub const WORLD: FrameId = FrameId(0);
 
 /// Angular-rate dimensions (rad/s ⇒ s⁻¹ in SI exponents).
-pub const RATE_DIMS: Dims = Dims([0, 0, -1, 0, 0]);
+pub const RATE_DIMS: Dims = Dims([0, 0, -1, 0, 0, 0]);
 
 /// How a frame moves relative to its parent.
 #[derive(Debug, Clone, PartialEq)]

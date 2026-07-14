@@ -24,16 +24,16 @@ fn bracket(name: &str, rho: f64, v: f64, l: f64, mu: f64) -> Descriptor {
     let mut params = BTreeMap::new();
     params.insert(
         "density".to_string(),
-        QtyAny::new(rho, Dims([-3, 1, 0, 0, 0])),
+        QtyAny::new(rho, Dims([-3, 1, 0, 0, 0, 0])),
     );
     params.insert(
         "velocity".to_string(),
-        QtyAny::new(v, Dims([1, 0, -1, 0, 0])),
+        QtyAny::new(v, Dims([1, 0, -1, 0, 0, 0])),
     );
-    params.insert("length".to_string(), QtyAny::new(l, Dims([1, 0, 0, 0, 0])));
+    params.insert("length".to_string(), QtyAny::new(l, Dims([1, 0, 0, 0, 0, 0])));
     params.insert(
         "viscosity".to_string(),
-        QtyAny::new(mu, Dims([-1, 1, -1, 0, 0])),
+        QtyAny::new(mu, Dims([-1, 1, -1, 0, 0, 0])),
     );
     Descriptor {
         name: name.to_string(),
@@ -199,7 +199,7 @@ fn tb_004_gate_blocks_and_validates_distinguishers() {
     let mut novel = retry.clone();
     novel.params.insert(
         "velocity".to_string(),
-        QtyAny::new(90.0, Dims([1, 0, -1, 0, 0])),
+        QtyAny::new(90.0, Dims([1, 0, -1, 0, 0, 0])),
     );
     index
         .fund_with_distinguisher(&novel, neighbor, "velocity")

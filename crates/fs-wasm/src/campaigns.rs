@@ -754,7 +754,7 @@ pub fn trusspath(nx: usize, ny: usize, gap_tol: f64) -> Vec<f64> {
     let nn = gs.nodes.len();
 
     let support_nodes: Vec<usize> = (0..ny).map(|row| row * nx).collect();
-    let supported = |node: usize, _comp: usize| node % nx == 0;
+    let supported = |node: usize, _comp: usize| node.is_multiple_of(nx);
     let load_node = nx - 1;
     let loads = |node: usize| {
         if node == load_node {

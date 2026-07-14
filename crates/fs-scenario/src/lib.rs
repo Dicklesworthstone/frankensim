@@ -38,10 +38,10 @@ pub enum ScenarioError {
     Dimensions {
         /// What was being evaluated.
         context: String,
-        /// Expected SI exponents (m, kg, s, K, A).
-        expected: [i8; 5],
+        /// Expected SI exponents (m, kg, s, K, A, mol).
+        expected: [i8; 6],
         /// Supplied exponents.
-        got: [i8; 5],
+        got: [i8; 6],
     },
     /// A frame reference could not be resolved.
     Frame {

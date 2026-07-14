@@ -10,9 +10,9 @@ use crate::ensemble::StochasticEnsemble;
 use crate::frame::FrameTree;
 use fs_qty::{Dims, QtyAny};
 
-const ACCEL_DIMS: Dims = Dims([1, 0, -2, 0, 0]);
-const TEMP_DIMS: Dims = Dims([0, 0, 0, 1, 0]);
-const PRESSURE_DIMS: Dims = Dims([-1, 1, -2, 0, 0]);
+const ACCEL_DIMS: Dims = Dims([1, 0, -2, 0, 0, 0]);
+const TEMP_DIMS: Dims = Dims([0, 0, 0, 1, 0, 0]);
+const PRESSURE_DIMS: Dims = Dims([-1, 1, -2, 0, 0, 0]);
 /// Net-flux tolerance relative to the gross flux magnitude.
 const FLUX_REL_TOL: f64 = 1e-9;
 
@@ -60,7 +60,7 @@ impl Environment {
                 out.push(Violation {
                     code: "env-gravity-dims",
                     what: format!("gravity component {i} has dimensions {:?}", g.dims.0),
-                    fix: "express gravity in m/s² (SI exponents [1,0,-2,0,0])".to_string(),
+                    fix: "express gravity in m/s² (SI exponents [1,0,-2,0,0,0])".to_string(),
                 });
             }
         }

@@ -17,8 +17,8 @@ fn verdict(name: &str, pass: bool, details: &str) {
     assert!(pass, "{name}: {details}");
 }
 
-const TIME: Dims = Dims([0, 0, 1, 0, 0]);
-const RATE: Dims = Dims([0, 0, -1, 0, 0]);
+const TIME: Dims = Dims([0, 0, 1, 0, 0, 0]);
+const RATE: Dims = Dims([0, 0, -1, 0, 0, 0]);
 
 fn with_cx<R>(cancelled: bool, f: impl FnOnce(&Cx<'_>) -> R) -> R {
     let gate = CancelGate::new();
@@ -310,7 +310,7 @@ fn frame_006_replay_and_drills() {
     let bad_beta = empirical_cvar(&[1.0, 2.0], 1.0);
     verdict(
         "frame-006-bad-beta-drill",
-        matches!(bad_beta, Err(RobustError::BadAlpha { alpha }) if alpha == 1.0),
+        matches!(bad_beta, Err(RobustError::BadAlpha { alpha }) if alpha.to_bits() == 1.0f64.to_bits()),
         "invalid CVaR beta returns a structured refusal before quantile indexing",
     );
     let nan_beta = empirical_cvar(&[1.0, 2.0], f64::NAN);

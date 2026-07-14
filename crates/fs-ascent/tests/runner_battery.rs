@@ -13,7 +13,7 @@ fn verdict(name: &str, pass: bool, details: &str) {
     assert!(pass, "{name}: {details}");
 }
 
-const D0: Dims = Dims([0, 0, 0, 0, 0]);
+const D0: Dims = Dims([0, 0, 0, 0, 0, 0]);
 
 /// (a·x + b) as a scalar node from a component.
 fn affine(b: &mut ProblemBuilder, x: NodeId, a: f64, off: f64) -> NodeId {

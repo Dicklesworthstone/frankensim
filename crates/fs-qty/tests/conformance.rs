@@ -18,20 +18,21 @@ fn verdict(case: &str, pass: bool, detail: &str) {
 /// for every literal form the plan's example studies use (Appendix C).
 #[test]
 fn qty_001_appendix_c_literal_battery() {
-    let cases: &[(&str, f64, [i8; 5])] = &[
-        ("0.12Pa*s", 0.12, [-1, 1, -1, 0, 0]),
-        ("0.061N/m", 0.061, [0, 1, -2, 0, 0]),
-        ("0.5L/s", 5e-4, [3, 0, -1, 0, 0]),
-        ("12mm", 0.012, [1, 0, 0, 0, 0]),
+    let cases: &[(&str, f64, [i8; 6])] = &[
+        ("0.12Pa*s", 0.12, [-1, 1, -1, 0, 0, 0]),
+        ("0.061N/m", 0.061, [0, 1, -2, 0, 0, 0]),
+        ("0.5L/s", 5e-4, [3, 0, -1, 0, 0, 0]),
+        ("12mm", 0.012, [1, 0, 0, 0, 0, 0]),
         (
             "65deg",
             65.0 * core::f64::consts::PI / 180.0,
-            [0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0, 0],
         ),
-        ("2h", 7200.0, [0, 0, 1, 0, 0]),
-        ("0.03m2/s3", 0.03, [2, 0, -3, 0, 0]),
-        ("15rad/s", 15.0, [0, 0, -1, 0, 0]),
-        ("2e-2", 0.02, [0, 0, 0, 0, 0]),
+        ("2h", 7200.0, [0, 0, 1, 0, 0, 0]),
+        ("0.03m2/s3", 0.03, [2, 0, -3, 0, 0, 0]),
+        ("15rad/s", 15.0, [0, 0, -1, 0, 0, 0]),
+        ("2e-2", 0.02, [0, 0, 0, 0, 0, 0]),
+        ("1mol", 1.0, [0, 0, 0, 0, 0, 1]),
     ];
     for (text, value, dims) in cases {
         let q = parse_qty(text).unwrap_or_else(|e| panic!("{text}: {e}"));
@@ -61,12 +62,34 @@ fn qty_002_typed_erased_agreement() {
 fn qty_003_json_round_trip() {
     let q = DynViscosity::new(0.12).erase();
     let text = fs_qty::json::to_json(q).expect("finite");
-    let canonical = text == r#"{"value":0.12,"dims":[-1,1,-1,0,0]}"#;
+    let canonical =
+        text == r#"{"schema_version":2,"value":0.12,"dims":[-1,1,-1,0,0,0]}"#;
     let back = fs_qty::json::from_json(&text).expect("parses");
     verdict(
         "qty-003/round-trip",
         canonical && back.value.to_bits() == q.value.to_bits() && back.dims == q.dims,
         &text,
+    );
+}
+
+/// qty-003b: legacy bytes survive unchanged and decode only with an immutable
+/// five-to-six semantic-crosswalk receipt.
+#[test]
+fn qty_003b_legacy_json_crosswalk() {
+    const OLD: &str = r#"{"value":0.12,"dims":[-1,1,-1,0,0]}"#;
+    let decoded = fs_qty::json::decode_json(OLD).expect("legacy decode");
+    let receipt = decoded.migration().expect("receipt required");
+    let new = fs_qty::json::to_json(decoded.qty()).expect("canonical v2");
+    verdict(
+        "qty-003b/legacy-crosswalk",
+        decoded.qty().dims == Dims([-1, 1, -1, 0, 0, 0])
+            && fs_qty::json::to_legacy_json(decoded.qty()).as_deref() == Ok(OLD)
+            && receipt.verifies(OLD.as_bytes(), new.as_bytes()),
+        &format!(
+            "old_hash={} new_hash={}",
+            receipt.old_hash(),
+            receipt.new_hash()
+        ),
     );
 }
 
@@ -119,11 +142,11 @@ fn qty_005_parser_total_over_garbage() {
 /// Generate a small Dims vector (exponents in [-3, 3] — the physically
 /// meaningful range; overflow semantics are a separate documented bound).
 fn gen_dims(s: &mut fs_propcheck::Stream) -> Vec<i64> {
-    (0..5).map(|_| s.int_in(-3, 3)).collect()
+    (0..6).map(|_| s.int_in(-3, 3)).collect()
 }
 
 fn to_dims(v: &[i64]) -> fs_qty::Dims {
-    let mut a = [0i8; 5];
+    let mut a = [0i8; 6];
     for (slot, &x) in a.iter_mut().zip(v) {
         *slot = x as i8;
     }

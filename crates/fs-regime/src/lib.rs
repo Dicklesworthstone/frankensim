@@ -32,8 +32,8 @@ pub enum RegimeError {
     NotDimensionless {
         /// Which group/product.
         context: String,
-        /// The residual SI exponents.
-        residual: [i128; 5],
+        /// The residual SI exponents `[m, kg, s, K, A, mol]`.
+        residual: [i128; 6],
     },
     /// An exact Pi exponent exceeds the deterministic numerical evaluator.
     ExponentOutOfRange {

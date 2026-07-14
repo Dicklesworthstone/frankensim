@@ -21,10 +21,10 @@ fn verdict(case: &str, detail: &str) {
     );
 }
 
-const MASS_FLOW: Dims = Dims([0, 1, -1, 0, 0]);
-const PRESSURE: Dims = Dims([-1, 1, -2, 0, 0]);
-const RATE: Dims = Dims([0, 0, -1, 0, 0]);
-const TIME: Dims = Dims([0, 0, 1, 0, 0]);
+const MASS_FLOW: Dims = Dims([0, 1, -1, 0, 0, 0]);
+const PRESSURE: Dims = Dims([-1, 1, -2, 0, 0, 0]);
+const RATE: Dims = Dims([0, 0, -1, 0, 0, 0]);
+const TIME: Dims = Dims([0, 0, 1, 0, 0, 0]);
 
 /// The fixture's ensemble battery (all three model families).
 fn fixture_ensembles() -> Vec<StochasticEnsemble> {
@@ -48,9 +48,9 @@ fn fixture_ensembles() -> Vec<StochasticEnsemble> {
             duration: QtyAny::new(10.0, TIME),
             dt: QtyAny::new(0.05, TIME),
             model: SpectrumModel::Dryden {
-                sigma: QtyAny::new(1.8, Dims([1, 0, -1, 0, 0])),
-                length_scale: QtyAny::new(200.0, Dims([1, 0, 0, 0, 0])),
-                mean_speed: QtyAny::new(12.0, Dims([1, 0, -1, 0, 0])),
+                sigma: QtyAny::new(1.8, Dims([1, 0, -1, 0, 0, 0])),
+                length_scale: QtyAny::new(200.0, Dims([1, 0, 0, 0, 0, 0])),
+                mean_speed: QtyAny::new(12.0, Dims([1, 0, -1, 0, 0, 0])),
             },
         },
         StochasticEnsemble {
@@ -61,12 +61,12 @@ fn fixture_ensembles() -> Vec<StochasticEnsemble> {
             dt: QtyAny::new(1.0, TIME),
             model: SpectrumModel::CarreauBand {
                 eta_zero: [
-                    QtyAny::new(8.0, Dims([-1, 1, -1, 0, 0])),
-                    QtyAny::new(15.0, Dims([-1, 1, -1, 0, 0])),
+                    QtyAny::new(8.0, Dims([-1, 1, -1, 0, 0, 0])),
+                    QtyAny::new(15.0, Dims([-1, 1, -1, 0, 0, 0])),
                 ],
                 eta_inf: [
-                    QtyAny::new(0.08, Dims([-1, 1, -1, 0, 0])),
-                    QtyAny::new(0.15, Dims([-1, 1, -1, 0, 0])),
+                    QtyAny::new(0.08, Dims([-1, 1, -1, 0, 0, 0])),
+                    QtyAny::new(0.15, Dims([-1, 1, -1, 0, 0, 0])),
                 ],
                 lambda: [QtyAny::new(0.5, TIME), QtyAny::new(2.0, TIME)],
                 n: [0.3, 0.6],
@@ -113,7 +113,7 @@ fn fixture_base_bcs() -> Vec<BoundaryCondition> {
         kind: BcKind::Dirichlet,
         value: Some(BcValue::Profile(ChebProfile {
             cheb: fs_cheb::Cheb1::build(&|x: f64| 350.0 + 5.0 * x * x, 0.0, 1.0, 8),
-            dims: Dims([0, 0, 0, 1, 0]),
+            dims: Dims([0, 0, 0, 1, 0, 0]),
         })),
         compatibility: None,
         frame: 0,
@@ -288,7 +288,7 @@ fn sc_002_compatibility_checks_catch_seeded_violations() {
         region: "in".to_string(),
         physics: Physics::IncompressibleFlow,
         kind: BcKind::Dirichlet,
-        value: Some(BcValue::Uniform(QtyAny::new(300.0, Dims([0, 0, 0, 1, 0])))),
+        value: Some(BcValue::Uniform(QtyAny::new(300.0, Dims([0, 0, 0, 1, 0, 0])))),
         compatibility: None,
         frame: 7, // undefined frame
     });
@@ -449,9 +449,9 @@ fn sc_002c_ensemble_rejects_nan_producing_spectra() {
         duration: QtyAny::new(1.0, TIME),
         dt: QtyAny::new(0.1, TIME),
         model: SpectrumModel::Dryden {
-            sigma: QtyAny::new(1.0, Dims([1, 0, -1, 0, 0])),
-            length_scale: QtyAny::new(10.0, Dims([1, 0, 0, 0, 0])),
-            mean_speed: QtyAny::new(0.0, Dims([1, 0, -1, 0, 0])),
+            sigma: QtyAny::new(1.0, Dims([1, 0, -1, 0, 0, 0])),
+            length_scale: QtyAny::new(10.0, Dims([1, 0, 0, 0, 0, 0])),
+            mean_speed: QtyAny::new(0.0, Dims([1, 0, -1, 0, 0, 0])),
         },
     });
     let v = s.validate();
@@ -497,7 +497,7 @@ fn sc_002d_signal_failure_is_not_misreported_as_a_frame_cycle() {
             center: Vec3::new(0.0, 0.0, 0.0),
             angle: TimeSignal::Table {
                 interp: Interp::Linear,
-                dims: Dims([0, 0, 0, 0, 0]),
+                dims: Dims([0, 0, 0, 0, 0, 0]),
                 times: vec![],
                 values: vec![],
             },
@@ -721,7 +721,7 @@ fn sc_006_unit_rescaling_coherence() {
     });
     assert_eq!(a.validate(), Vec::new());
     let mut b = a.clone();
-    b.base_bcs[0].value = Some(BcValue::Uniform(QtyAny::new(350.0, Dims([0, 0, 0, 1, 0]))));
+    b.base_bcs[0].value = Some(BcValue::Uniform(QtyAny::new(350.0, Dims([0, 0, 0, 1, 0, 0]))));
     assert_eq!(
         write_ir(&a),
         write_ir(&b),

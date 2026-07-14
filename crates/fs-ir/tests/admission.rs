@@ -87,16 +87,16 @@ fn token() -> SessionCapability {
 /// The spout pour's regime report (Re ≈ 60: free-surface LBM valid,
 /// LES invalid) computed through fs-regime itself.
 fn spout_regime() -> fs_regime::RegimeReport {
-    let role = |r, v, d: [i8; 5]| fs_regime::RoleInput {
+    let role = |r, v, d: [i8; 6]| fs_regime::RoleInput {
         role: r,
         qty: QtyAny::new(v, Dims(d)),
     };
     fs_regime::assess(&[
-        role(fs_regime::Role::Density, 1200.0, [-3, 1, 0, 0, 0]),
-        role(fs_regime::Role::Velocity, 0.3, [1, 0, -1, 0, 0]),
-        role(fs_regime::Role::Length, 0.02, [1, 0, 0, 0, 0]),
-        role(fs_regime::Role::DynViscosity, 0.12, [-1, 1, -1, 0, 0]),
-        role(fs_regime::Role::SoundSpeed, 1450.0, [1, 0, -1, 0, 0]),
+        role(fs_regime::Role::Density, 1200.0, [-3, 1, 0, 0, 0, 0]),
+        role(fs_regime::Role::Velocity, 0.3, [1, 0, -1, 0, 0, 0]),
+        role(fs_regime::Role::Length, 0.02, [1, 0, 0, 0, 0, 0]),
+        role(fs_regime::Role::DynViscosity, 0.12, [-1, 1, -1, 0, 0, 0]),
+        role(fs_regime::Role::SoundSpeed, 1450.0, [1, 0, -1, 0, 0, 0]),
     ])
     .expect("regime assess")
     .value
@@ -747,16 +747,16 @@ fn ad_006_regime_gating_enforced_and_policy_graded() {
     // A creeping-pour regime (mu = 8 Pa·s ⇒ Re ≈ 0.9): free-surface LBM
     // is OUTSIDE its validity box (Re >= 1) — the study's flux verb must
     // be rejected with alternatives, or warned under the Warn policy.
-    let role = |r, v, d: [i8; 5]| fs_regime::RoleInput {
+    let role = |r, v, d: [i8; 6]| fs_regime::RoleInput {
         role: r,
         qty: QtyAny::new(v, Dims(d)),
     };
     let creeping = fs_regime::assess(&[
-        role(fs_regime::Role::Density, 1200.0, [-3, 1, 0, 0, 0]),
-        role(fs_regime::Role::Velocity, 0.3, [1, 0, -1, 0, 0]),
-        role(fs_regime::Role::Length, 0.02, [1, 0, 0, 0, 0]),
-        role(fs_regime::Role::DynViscosity, 8.0, [-1, 1, -1, 0, 0]),
-        role(fs_regime::Role::SoundSpeed, 1450.0, [1, 0, -1, 0, 0]),
+        role(fs_regime::Role::Density, 1200.0, [-3, 1, 0, 0, 0, 0]),
+        role(fs_regime::Role::Velocity, 0.3, [1, 0, -1, 0, 0, 0]),
+        role(fs_regime::Role::Length, 0.02, [1, 0, 0, 0, 0, 0]),
+        role(fs_regime::Role::DynViscosity, 8.0, [-1, 1, -1, 0, 0, 0]),
+        role(fs_regime::Role::SoundSpeed, 1450.0, [1, 0, -1, 0, 0, 0]),
     ])
     .expect("assess")
     .value;

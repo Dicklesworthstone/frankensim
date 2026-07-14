@@ -417,7 +417,7 @@ fn check_dimensional(study: &Study<'_>, out: &mut Vec<Finding>) {
 
 fn qty_seconds(node: &Node) -> Option<f64> {
     if let NodeKind::Qty { value, dims, .. } = &node.kind
-        && *dims == Dims([0, 0, 1, 0, 0])
+        && *dims == Dims([0, 0, 1, 0, 0, 0])
     {
         return Some(*value);
     }

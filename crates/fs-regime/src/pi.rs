@@ -1,11 +1,13 @@
 //! Buckingham-Pi machinery: from Qty-typed inputs, compute a basis of
 //! the dimensionless products ALGEBRAICALLY — the integer nullspace of
-//! the 5×n dimension matrix (SI exponents m, kg, s, K, A), found by
+//! the 6×n dimension matrix (SI exponents m, kg, s, K, A, mol), found by
 //! exact fraction-free elimination over i128. Groups are dimensionless
 //! BY CONSTRUCTION and verified so.
 
 use crate::RegimeError;
 use fs_qty::QtyAny;
+
+const BASE_DIMENSION_COUNT: usize = 6;
 
 /// One named, dimensioned problem input.
 #[derive(Debug, Clone, PartialEq)]
@@ -48,12 +50,12 @@ fn echelon(mut m: Vec<Vec<i128>>, n: usize) -> (Vec<Vec<i128>>, Vec<(usize, usiz
     let mut pivots: Vec<(usize, usize)> = Vec::new();
     let mut row = 0usize;
     for col in 0..n {
-        let Some(pivot_row) = (row..5).find(|&r| m[r][col] != 0) else {
+        let Some(pivot_row) = (row..BASE_DIMENSION_COUNT).find(|&r| m[r][col] != 0) else {
             continue;
         };
         m.swap(row, pivot_row);
         let p = m[row][col];
-        for r in 0..5 {
+        for r in 0..BASE_DIMENSION_COUNT {
             if r != row && m[r][col] != 0 {
                 let factor = m[r][col];
                 let pivot_row_copy = m[row].clone();
@@ -70,7 +72,7 @@ fn echelon(mut m: Vec<Vec<i128>>, n: usize) -> (Vec<Vec<i128>>, Vec<(usize, usiz
         }
         pivots.push((row, col));
         row += 1;
-        if row == 5 {
+        if row == BASE_DIMENSION_COUNT {
             break;
         }
     }
@@ -103,8 +105,8 @@ pub fn pi_groups(inputs: &[Input]) -> Result<PiBasis, RegimeError> {
             });
         }
     }
-    // Dimension matrix: 5 rows (SI base dims) × n columns (inputs).
-    let m: Vec<Vec<i128>> = (0..5)
+    // Dimension matrix: 6 rows (SI base dims) × n columns (inputs).
+    let m: Vec<Vec<i128>> = (0..BASE_DIMENSION_COUNT)
         .map(|d| inputs.iter().map(|i| i128::from(i.qty.dims.0[d])).collect())
         .collect();
     let (m, pivots) = echelon(m, n);
@@ -147,13 +149,13 @@ pub fn pi_groups(inputs: &[Input]) -> Result<PiBasis, RegimeError> {
             }
         }
         // Dimensionless-by-construction self-check (G0).
-        let mut residual = [0i128; 5];
+        let mut residual = [0i128; BASE_DIMENSION_COUNT];
         for (input, &e) in inputs.iter().zip(&exps) {
             for (slot, &d) in residual.iter_mut().zip(&input.qty.dims.0) {
                 *slot += i128::from(d) * e;
             }
         }
-        if residual != [0; 5] {
+        if residual != [0; BASE_DIMENSION_COUNT] {
             return Err(RegimeError::NotDimensionless {
                 context: format!("pi group over free column {f}"),
                 residual,
@@ -189,7 +191,7 @@ mod tests {
     use super::*;
     use fs_qty::Dims;
 
-    fn input(name: &str, value: f64, dims: [i8; 5]) -> Input {
+    fn input(name: &str, value: f64, dims: [i8; BASE_DIMENSION_COUNT]) -> Input {
         Input {
             name: name.to_string(),
             qty: QtyAny::new(value, Dims(dims)),
@@ -198,16 +200,16 @@ mod tests {
 
     #[test]
     fn oversized_exact_exponents_refuse_instead_of_wrapping() {
-        // Valid 5x6 i8 dimension matrix with primitive null exponents
+        // Valid 6x6 i8 dimension matrix with a zero mol row and primitive null exponents
         // [246398765, 1209471509, 174635022, -831044588,
         //  -4691840893, -4000421645]. The final two exceed i32.
         let inputs = [
-            input("x0", 1.0, [-67, -88, 107, -71, -83]),
-            input("x1", 1.0, [-50, -104, -53, 6, 84]),
-            input("x2", 1.0, [-101, -110, 77, 10, -100]),
-            input("x3", 1.0, [57, -122, 126, -35, -60]),
-            input("x4", 1.0, [-26, -25, 68, -57, -73]),
-            input("x5", 1.0, [-5, 13, -112, 72, 114]),
+            input("x0", 1.0, [-67, -88, 107, -71, -83, 0]),
+            input("x1", 1.0, [-50, -104, -53, 6, 84, 0]),
+            input("x2", 1.0, [-101, -110, 77, 10, -100, 0]),
+            input("x3", 1.0, [57, -122, 126, -35, -60, 0]),
+            input("x4", 1.0, [-26, -25, 68, -57, -73, 0]),
+            input("x5", 1.0, [-5, 13, -112, 72, 114, 0]),
         ];
         assert!(matches!(
             pi_groups(&inputs),
@@ -218,18 +220,20 @@ mod tests {
 
     #[test]
     fn pipe_flow_recovers_reynolds() {
-        // (ρ, V, D, μ): rank 3, one group ∝ Re = ρVD/μ.
+        // (ρ, V, D, μ): rank 3, one group ∝ Re = ρVD/μ. The appended
+        // zero mol row must leave the legacy five-base basis unchanged.
         let inputs = [
-            input("rho", 1000.0, [-3, 1, 0, 0, 0]),
-            input("v", 2.0, [1, 0, -1, 0, 0]),
-            input("d", 0.05, [1, 0, 0, 0, 0]),
-            input("mu", 1e-3, [-1, 1, -1, 0, 0]),
+            input("rho", 1000.0, [-3, 1, 0, 0, 0, 0]),
+            input("v", 2.0, [1, 0, -1, 0, 0, 0]),
+            input("d", 0.05, [1, 0, 0, 0, 0, 0]),
+            input("mu", 1e-3, [-1, 1, -1, 0, 0, 0]),
         ];
         let basis = pi_groups(&inputs).expect("pi");
         assert_eq!(basis.rank, 3);
         assert_eq!(basis.groups.len(), 1);
         let g = &basis.groups[0];
         // Exponents ∝ (1, 1, 1, −1) — Re up to normalization.
+        assert_eq!(g.exponents, [1, 1, 1, -1]);
         let re = 1000.0 * 2.0 * 0.05 / 1e-3;
         let val = g.value;
         assert!(
@@ -243,10 +247,10 @@ mod tests {
         // (T, L, g, m): mass is dimensionally isolated ⇒ rank 3, one
         // group ∝ T²g/L (mass cannot appear).
         let inputs = [
-            input("t", 2.007_1, [0, 0, 1, 0, 0]),
-            input("l", 1.0, [1, 0, 0, 0, 0]),
-            input("g", 9.806_65, [1, 0, -2, 0, 0]),
-            input("m", 0.3, [0, 1, 0, 0, 0]),
+            input("t", 2.007_1, [0, 0, 1, 0, 0, 0]),
+            input("l", 1.0, [1, 0, 0, 0, 0, 0]),
+            input("g", 9.806_65, [1, 0, -2, 0, 0, 0]),
+            input("m", 0.3, [0, 1, 0, 0, 0, 0]),
         ];
         let basis = pi_groups(&inputs).expect("pi");
         assert_eq!(basis.rank, 3);
@@ -267,11 +271,11 @@ mod tests {
     fn drag_problem_has_two_groups() {
         // (F, ρ, V, L, μ) → n − r = 2 (drag coefficient and Reynolds).
         let inputs = [
-            input("f", 12.0, [1, 1, -2, 0, 0]),
-            input("rho", 1.225, [-3, 1, 0, 0, 0]),
-            input("v", 8.0, [1, 0, -1, 0, 0]),
-            input("l", 0.12, [1, 0, 0, 0, 0]),
-            input("mu", 1.81e-5, [-1, 1, -1, 0, 0]),
+            input("f", 12.0, [1, 1, -2, 0, 0, 0]),
+            input("rho", 1.225, [-3, 1, 0, 0, 0, 0]),
+            input("v", 8.0, [1, 0, -1, 0, 0, 0]),
+            input("l", 0.12, [1, 0, 0, 0, 0, 0]),
+            input("mu", 1.81e-5, [-1, 1, -1, 0, 0, 0]),
         ];
         let basis = pi_groups(&inputs).expect("pi");
         assert_eq!(basis.rank, 3);
@@ -279,8 +283,33 @@ mod tests {
     }
 
     #[test]
+    fn mole_axis_contributes_to_rank_and_cancels_exactly() {
+        // (n, L, c) with c in mol/m³ has two independent base rows:
+        // length and amount. The sole Pi group is n/(L³c).
+        let inputs = [
+            input("n", 2.0, [0, 0, 0, 0, 0, 1]),
+            input("l", 3.0, [1, 0, 0, 0, 0, 0]),
+            input("c", 2.0 / 27.0, [-3, 0, 0, 0, 0, 1]),
+        ];
+        let basis = pi_groups(&inputs).expect("molar pi");
+        assert_eq!(basis.rank, 2, "mol must be an independent matrix row");
+        assert_eq!(basis.groups.len(), 1);
+        let group = &basis.groups[0];
+        assert_eq!(group.exponents, [1, -3, -1]);
+
+        let mut residual = [0i128; BASE_DIMENSION_COUNT];
+        for (input, &exponent) in inputs.iter().zip(&group.exponents) {
+            for (slot, &dimension) in residual.iter_mut().zip(&input.qty.dims.0) {
+                *slot += i128::from(dimension) * i128::from(exponent);
+            }
+        }
+        assert_eq!(residual, [0; BASE_DIMENSION_COUNT]);
+        assert!((group.value - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
     fn degenerate_inputs_refuse() {
         assert!(pi_groups(&[]).is_err());
-        assert!(pi_groups(&[input("bad", -1.0, [1, 0, 0, 0, 0])]).is_err());
+        assert!(pi_groups(&[input("bad", -1.0, [1, 0, 0, 0, 0, 0])]).is_err());
     }
 }

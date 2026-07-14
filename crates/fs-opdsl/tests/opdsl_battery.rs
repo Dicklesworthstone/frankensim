@@ -238,7 +238,7 @@ fn type_errors_are_structural() {
     let (complex, positions) = kuhn_cube(1);
     let geo = element_geometry(&complex, &positions);
     let dims = Dims::NONE;
-    let secs = Dims([0, 0, 1, 0, 0]);
+    let secs = Dims([0, 0, 1, 0, 0, 0]);
     let space = Space {
         degree: 0,
         n: complex.vertex_count,

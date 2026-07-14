@@ -485,15 +485,15 @@ fn wedge_descriptor(name: &str, velocity: f64, scale: f64) -> Descriptor {
     let mut params = BTreeMap::new();
     params.insert(
         "velocity".to_string(),
-        QtyAny::new(velocity, Dims([1, 0, -1, 0, 0])),
+        QtyAny::new(velocity, Dims([1, 0, -1, 0, 0, 0])),
     );
     params.insert(
         "length".to_string(),
-        QtyAny::new(scale, Dims([1, 0, 0, 0, 0])),
+        QtyAny::new(scale, Dims([1, 0, 0, 0, 0, 0])),
     );
     params.insert(
         "viscosity".to_string(),
-        QtyAny::new(1.8e-5, Dims([2, 0, -1, 0, 0])),
+        QtyAny::new(1.8e-5, Dims([2, 0, -1, 0, 0, 0])),
     );
     Descriptor {
         name: name.to_string(),

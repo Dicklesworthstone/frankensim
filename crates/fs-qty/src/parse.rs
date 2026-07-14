@@ -22,7 +22,8 @@
 //!   teaching error (differences of Celsius are kelvin — say `K/s`).
 //! - Information/monetary units (`GiB`, `B`, …) are rejected here with a
 //!   pointer to fs-ir budget syntax; they are not physical dimensions.
-//! - `mol`/`cd` are outside FrankenSim's 5-dimension vector (no-claim).
+//! - `mol` is the sixth admitted base dimension; `cd` remains outside the
+//!   vector until photometry is real (no-claim).
 
 use crate::{Dims, QtyAny};
 use core::fmt;
@@ -76,18 +77,27 @@ struct Unit {
     dims: Dims,
 }
 
-const D_NONE: Dims = Dims([0, 0, 0, 0, 0]);
-const D_M: Dims = Dims([1, 0, 0, 0, 0]);
-const D_KG: Dims = Dims([0, 1, 0, 0, 0]);
-const D_S: Dims = Dims([0, 0, 1, 0, 0]);
-const D_K: Dims = Dims([0, 0, 0, 1, 0]);
-const D_A: Dims = Dims([0, 0, 0, 0, 1]);
-const D_N: Dims = Dims([1, 1, -2, 0, 0]);
-const D_PA: Dims = Dims([-1, 1, -2, 0, 0]);
-const D_J: Dims = Dims([2, 1, -2, 0, 0]);
-const D_W: Dims = Dims([2, 1, -3, 0, 0]);
-const D_HZ: Dims = Dims([0, 0, -1, 0, 0]);
-const D_M3: Dims = Dims([3, 0, 0, 0, 0]);
+const D_NONE: Dims = Dims([0, 0, 0, 0, 0, 0]);
+const D_M: Dims = Dims([1, 0, 0, 0, 0, 0]);
+const D_KG: Dims = Dims([0, 1, 0, 0, 0, 0]);
+const D_S: Dims = Dims([0, 0, 1, 0, 0, 0]);
+const D_K: Dims = Dims([0, 0, 0, 1, 0, 0]);
+const D_A: Dims = Dims([0, 0, 0, 0, 1, 0]);
+const D_MOL: Dims = Dims([0, 0, 0, 0, 0, 1]);
+const D_N: Dims = Dims([1, 1, -2, 0, 0, 0]);
+const D_PA: Dims = Dims([-1, 1, -2, 0, 0, 0]);
+const D_J: Dims = Dims([2, 1, -2, 0, 0, 0]);
+const D_W: Dims = Dims([2, 1, -3, 0, 0, 0]);
+const D_HZ: Dims = Dims([0, 0, -1, 0, 0, 0]);
+const D_M3: Dims = Dims([3, 0, 0, 0, 0, 0]);
+const D_V: Dims = Dims([2, 1, -3, 0, -1, 0]);
+const D_C: Dims = Dims([0, 0, 1, 0, 1, 0]);
+const D_WB: Dims = Dims([2, 1, -2, 0, -1, 0]);
+const D_H: Dims = Dims([2, 1, -2, 0, -2, 0]);
+const D_OHM: Dims = Dims([2, 1, -3, 0, -2, 0]);
+const D_SIEMENS: Dims = Dims([-2, -1, 3, 0, 2, 0]);
+const D_F: Dims = Dims([-2, -1, 4, 0, 2, 0]);
+const D_T: Dims = Dims([0, 1, -2, 0, -1, 0]);
 
 /// Longest-match table. Order does not matter (lookup takes the longest
 /// symbol that matches the whole token before falling back to prefix+unit).
@@ -118,6 +128,11 @@ const UNITS: &[Unit] = &[
         dims: D_A,
     },
     Unit {
+        symbol: "mol",
+        scale: 1.0,
+        dims: D_MOL,
+    },
+    Unit {
         symbol: "N",
         scale: 1.0,
         dims: D_N,
@@ -136,6 +151,46 @@ const UNITS: &[Unit] = &[
         symbol: "W",
         scale: 1.0,
         dims: D_W,
+    },
+    Unit {
+        symbol: "V",
+        scale: 1.0,
+        dims: D_V,
+    },
+    Unit {
+        symbol: "C",
+        scale: 1.0,
+        dims: D_C,
+    },
+    Unit {
+        symbol: "Wb",
+        scale: 1.0,
+        dims: D_WB,
+    },
+    Unit {
+        symbol: "H",
+        scale: 1.0,
+        dims: D_H,
+    },
+    Unit {
+        symbol: "Ohm",
+        scale: 1.0,
+        dims: D_OHM,
+    },
+    Unit {
+        symbol: "S",
+        scale: 1.0,
+        dims: D_SIEMENS,
+    },
+    Unit {
+        symbol: "F",
+        scale: 1.0,
+        dims: D_F,
+    },
+    Unit {
+        symbol: "T",
+        scale: 1.0,
+        dims: D_T,
     },
     Unit {
         symbol: "Hz",
@@ -233,7 +288,8 @@ fn resolve_token(input: &str, at: usize, tok: &str) -> Result<(f64, Dims), Parse
         input,
         at,
         ParseErrorKind::UnknownUnit(tok.to_string()),
-        "expected an SI unit like m, kg, s, K, A, N, Pa, J, W, Hz, L, min, h, rad, deg, % \
+        "expected an SI unit like m, kg, s, K, A, mol, N, Pa, J, W, V, C, Wb, H, Ohm, S, F, T, \
+         Hz, L, min, h, rad, deg, % \
          with an optional prefix (p n u m c d k M G T)",
     ))
 }
@@ -448,20 +504,20 @@ mod tests {
             ("0.12Pa*s", 0.12, DynViscosity::DIMS),
             ("0.061N/m", 0.061, SurfaceTension::DIMS),
             ("0.5L/s", 5e-4, VolumetricFlowRate::DIMS),
-            ("3mm", 3e-3, Dims([1, 0, 0, 0, 0])),
-            ("12mm", 12e-3, Dims([1, 0, 0, 0, 0])),
+            ("3mm", 3e-3, Dims([1, 0, 0, 0, 0, 0])),
+            ("12mm", 12e-3, Dims([1, 0, 0, 0, 0, 0])),
             ("0deg", 0.0, Dims::NONE),
             ("65deg", 65.0 * core::f64::consts::PI / 180.0, Dims::NONE),
             ("3s", 3.0, Time::DIMS),
             ("2h", 7200.0, Time::DIMS),
-            ("0.03m2/s3", 0.03, Dims([2, 0, -3, 0, 0])),
-            ("15rad/s", 15.0, Dims([0, 0, -1, 0, 0])),
-            ("8m/s", 8.0, Dims([1, 0, -1, 0, 0])),
+            ("0.03m2/s3", 0.03, Dims([2, 0, -3, 0, 0, 0])),
+            ("15rad/s", 15.0, Dims([0, 0, -1, 0, 0, 0])),
+            ("8m/s", 8.0, Dims([1, 0, -1, 0, 0, 0])),
             ("2e-2", 0.02, Dims::NONE),
             ("5e-3", 5e-3, Dims::NONE),
             ("1e-5", 1e-5, Dims::NONE),
             ("30s", 30.0, Time::DIMS),
-            ("24m", 24.0, Dims([1, 0, 0, 0, 0])),
+            ("24m", 24.0, Dims([1, 0, 0, 0, 0, 0])),
         ];
         for (text, want_value, want_dims) in cases {
             let q = parse_qty(text).unwrap_or_else(|e| panic!("{text}: {e}"));
@@ -478,10 +534,10 @@ mod tests {
     #[test]
     fn caret_exponents_and_negative_exponents() {
         let q = parse_qty("9.81m/s^2").expect("parses");
-        assert_eq!(q.dims, Dims([1, 0, -2, 0, 0]));
+        assert_eq!(q.dims, Dims([1, 0, -2, 0, 0, 0]));
         assert!((q.value - 9.81).abs() < 1e-12);
         let q = parse_qty("2.5s^-1").expect("parses");
-        assert_eq!(q.dims, Dims([0, 0, -1, 0, 0]));
+        assert_eq!(q.dims, Dims([0, 0, -1, 0, 0, 0]));
     }
 
     #[test]
@@ -497,23 +553,60 @@ mod tests {
         // kg is prefix k + gram.
         let kg = parse_qty("1.2kg").expect("parses");
         assert!((kg.value - 1.2).abs() < 1e-12);
-        assert_eq!(kg.dims, Dims([0, 1, 0, 0, 0]));
+        assert_eq!(kg.dims, Dims([0, 1, 0, 0, 0, 0]));
+    }
+
+    #[test]
+    fn six_base_and_electrical_tokens_resolve_without_prefix_collisions() {
+        let cases = [
+            ("2mol", 2.0, D_MOL),
+            ("3V", 3.0, D_V),
+            ("4C", 4.0, D_C),
+            ("5Wb", 5.0, D_WB),
+            ("6H", 6.0, D_H),
+            ("7Ohm", 7.0, D_OHM),
+            ("8S", 8.0, D_SIEMENS),
+            ("9F", 9.0, D_F),
+            ("10T", 10.0, D_T),
+            ("11mT", 0.011, D_T),
+            ("12TW", 12e12, D_W),
+            ("13mS", 0.013, D_SIEMENS),
+            ("14mH", 0.014, D_H),
+            ("15mWb", 0.015, D_WB),
+            ("16kOhm", 16e3, D_OHM),
+            ("17uF", 17e-6, D_F),
+        ];
+        for (text, value, dims) in cases {
+            let parsed = parse_qty(text).unwrap_or_else(|e| panic!("{text}: {e}"));
+            assert_eq!(parsed.dims, dims, "{text}");
+            assert!(
+                (parsed.value - value).abs() <= 1e-12 * value.abs().max(1.0),
+                "{text}: {} != {value}",
+                parsed.value
+            );
+        }
+
+        // `degC` remains the affine temperature token, while lone `C` is
+        // coulomb. Whole-token matching must beat prefix interpretation.
+        let celsius = parse_qty("20degC").expect("affine temperature");
+        assert_eq!(celsius.dims, D_K);
+        assert_eq!(parse_qty("1THz").expect("tera-hertz").dims, D_HZ);
     }
 
     #[test]
     fn compound_chains_apply_strict_left_to_right() {
         // kg/m/s == kg·m⁻¹·s⁻¹ under strict left-to-right division.
         let q = parse_qty("1kg/m/s").expect("parses");
-        assert_eq!(q.dims, Pressure::DIMS.plus(Dims([0, 0, 1, 0, 0])));
+        assert_eq!(q.dims, Pressure::DIMS.plus(Dims([0, 0, 1, 0, 0, 0])));
         // density: kg/m3
         let d = parse_qty("1000kg/m3").expect("parses");
-        assert_eq!(d.dims, Dims([-3, 1, 0, 0, 0]));
+        assert_eq!(d.dims, Dims([-3, 1, 0, 0, 0, 0]));
     }
 
     #[test]
     fn celsius_is_affine_and_lone_only() {
         let t = parse_qty("20degC").expect("parses");
-        assert_eq!(t.dims, Dims([0, 0, 0, 1, 0]));
+        assert_eq!(t.dims, Dims([0, 0, 0, 1, 0, 0]));
         assert!((t.value - 293.15).abs() < 1e-9);
         let e = parse_qty("20degC/s").unwrap_err();
         assert_eq!(e.kind, ParseErrorKind::AffineUnitInCompound);

@@ -11,7 +11,7 @@ use fs_math::det;
 use fs_qty::{Dims, QtyAny};
 use fs_rand::StreamKey;
 
-const TIME_DIMS: Dims = Dims([0, 0, 1, 0, 0]);
+const TIME_DIMS: Dims = Dims([0, 0, 1, 0, 0, 0]);
 /// fs-rand kernel ids for ensemble draws (stable across runs — part of
 /// the logical identity, never a thread id).
 const KERNEL_GUST: u32 = 0x5C01;
@@ -241,15 +241,21 @@ impl StochasticEnsemble {
                 length_scale,
                 mean_speed,
             } => {
-                expect_dims(&ctx, "sigma", sigma, Dims([1, 0, -1, 0, 0]), out);
+                expect_dims(&ctx, "sigma", sigma, Dims([1, 0, -1, 0, 0, 0]), out);
                 expect_dims(
                     &ctx,
                     "length scale",
                     length_scale,
-                    Dims([1, 0, 0, 0, 0]),
+                    Dims([1, 0, 0, 0, 0, 0]),
                     out,
                 );
-                expect_dims(&ctx, "mean speed", mean_speed, Dims([1, 0, -1, 0, 0]), out);
+                expect_dims(
+                    &ctx,
+                    "mean speed",
+                    mean_speed,
+                    Dims([1, 0, -1, 0, 0, 0]),
+                    out,
+                );
                 // `psd` divides by `mean_speed` (`x = l·ω/v`, and `2l/(πv)`), so
                 // a zero/negative/non-finite speed makes every realization
                 // inf/NaN — validate must reject it, not admit a NaN ensemble.
@@ -270,7 +276,7 @@ impl StochasticEnsemble {
                 omega_g,
                 zeta_g,
             } => {
-                expect_dims(&ctx, "omega_g", omega_g, Dims([0, 0, -1, 0, 0]), out);
+                expect_dims(&ctx, "omega_g", omega_g, Dims([0, 0, -1, 0, 0, 0]), out);
                 // `psd` divides by `omega_g` (`r = ω/ω_g`), so a zero/negative
                 // ground frequency makes every realization NaN — reject it
                 // alongside S0 and zeta_g rather than admit a NaN ensemble.
@@ -290,7 +296,7 @@ impl StochasticEnsemble {
                 lambda,
                 n,
             } => {
-                let visc = Dims([-1, 1, -1, 0, 0]);
+                let visc = Dims([-1, 1, -1, 0, 0, 0]);
                 expect_dims(&ctx, "eta_zero lo", &eta_zero[0], visc, out);
                 expect_dims(&ctx, "eta_zero hi", &eta_zero[1], visc, out);
                 expect_dims(&ctx, "eta_inf lo", &eta_inf[0], visc, out);

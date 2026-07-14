@@ -10,8 +10,8 @@ use fs_math::det;
 use fs_qty::QtyAny;
 
 /// Recommended base scales (SI): every quantity nondimensionalizes as
-/// `value / (m_scale^a · kg_scale^b · s_scale^c · K_scale^d · A_scale^e)`
-/// with `(a..e)` its dimension exponents.
+/// `value / (m_scale^a · kg_scale^b · s_scale^c · K_scale^d · A_scale^e ·
+/// mol_scale^f)` with `(a..f)` its dimension exponents.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScalingMap {
     /// Length scale L* (m).
@@ -24,6 +24,8 @@ pub struct ScalingMap {
     pub temperature: f64,
     /// Current scale (A); 1 unless electromagnetics enters.
     pub current: f64,
+    /// Amount-of-substance scale (mol); 1 unless chemistry enters.
+    pub amount: f64,
 }
 
 impl ScalingMap {
@@ -57,18 +59,20 @@ impl ScalingMap {
             time,
             temperature: 1.0,
             current: 1.0,
+            amount: 1.0,
         })
     }
 
     /// The scale factor for a dimension vector.
     #[must_use]
-    pub fn factor(&self, dims: [i8; 5]) -> f64 {
+    pub fn factor(&self, dims: [i8; 6]) -> f64 {
         let base = [
             self.length,
             self.mass,
             self.time,
             self.temperature,
             self.current,
+            self.amount,
         ];
         base.iter()
             .zip(dims)
@@ -84,7 +88,7 @@ impl ScalingMap {
 
     /// Redimensionalize a unit-free number back to SI.
     #[must_use]
-    pub fn unapply(&self, value: f64, dims: [i8; 5]) -> QtyAny {
+    pub fn unapply(&self, value: f64, dims: [i8; 6]) -> QtyAny {
         QtyAny::new(value * self.factor(dims), fs_qty::Dims(dims))
     }
 }
@@ -189,11 +193,32 @@ mod tests {
             time: 0.066_667,
             temperature: 1.0,
             current: 1.0,
+            amount: 4.0,
         };
-        let q = QtyAny::new(101_325.0, Dims([-1, 1, -2, 0, 0]));
+        let q = QtyAny::new(101_325.0, Dims([-1, 1, -2, 0, 0, 0]));
         let nd = map.apply(q);
-        let back = map.unapply(nd, [-1, 1, -2, 0, 0]);
+        let back = map.unapply(nd, [-1, 1, -2, 0, 0, 0]);
         assert!((back.value - q.value).abs() / q.value < 1e-12);
         assert_eq!(back.dims, q.dims);
+    }
+
+    #[test]
+    fn amount_scale_applies_to_molar_concentration() {
+        let map = ScalingMap {
+            length: 2.0,
+            mass: 1.0,
+            time: 1.0,
+            temperature: 1.0,
+            current: 1.0,
+            amount: 4.0,
+        };
+        let concentration = QtyAny::new(3.0, Dims([-3, 0, 0, 0, 0, 1]));
+        assert!((map.factor(concentration.dims.0) - 0.5).abs() < 1e-15);
+        assert!((map.apply(concentration) - 6.0).abs() < 1e-15);
+        assert_eq!(
+            map.unapply(6.0, concentration.dims.0),
+            concentration,
+            "amount and length scales must both participate"
+        );
     }
 }

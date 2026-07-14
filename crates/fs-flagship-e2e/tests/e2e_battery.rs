@@ -22,8 +22,8 @@ fn verdict(name: &str, pass: bool, details: &str) {
     assert!(pass, "{name}: {details}");
 }
 
-const TIME: Dims = Dims([0, 0, 1, 0, 0]);
-const RATE: Dims = Dims([0, 0, -1, 0, 0]);
+const TIME: Dims = Dims([0, 0, 1, 0, 0, 0]);
+const RATE: Dims = Dims([0, 0, -1, 0, 0, 0]);
 
 fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
     let gate = CancelGate::new();

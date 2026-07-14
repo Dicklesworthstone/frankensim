@@ -11,6 +11,7 @@ description = "Compile-time dimensional analysis (Qty) plus runtime-checked QtyA
 layer = "UTIL"
 
 [dependencies]
+fs-blake3 = { path = "../fs-blake3" }
 
 [dev-dependencies]
 fs-propcheck = { path = "../fs-propcheck" }

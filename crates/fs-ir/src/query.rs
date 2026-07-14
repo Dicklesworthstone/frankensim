@@ -38,9 +38,9 @@ use crate::{IrError, IrErrorKind};
 use fs_qty::Dims;
 
 /// Volume dimensions (`m³`) — the measure a spatial integral multiplies by.
-const VOLUME_DIMS: Dims = Dims([3, 0, 0, 0, 0]);
+const VOLUME_DIMS: Dims = Dims([3, 0, 0, 0, 0, 0]);
 /// Time dimensions (`s`) — the deadline's expected dimension.
-const TIME_DIMS: Dims = Dims([0, 0, 1, 0, 0]);
+const TIME_DIMS: Dims = Dims([0, 0, 1, 0, 0, 0]);
 
 /// The QoI functional menu (v0). A fixed set of forms covering the wedge
 /// vertical's real questions — NOT a general programming surface.
