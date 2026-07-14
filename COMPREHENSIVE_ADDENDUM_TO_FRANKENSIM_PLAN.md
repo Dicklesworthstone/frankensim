@@ -6,11 +6,35 @@
 **Assumes:** The base plan's vocabulary and architecture — the Rep Router, the Error Ledger, Bet 11's cellular sheaves over the patch-adjacency complex, the FEEC-based physics kernel, BDDC/FETI-DP domain decomposition, interval-verified certificates, the Gauntlet, deterministic tile execution, and agent-swarm operation.
 **Provenance:** This document is the consolidated output of an extended adversarial design review of the base plan. It contains nineteen proposals (numbered **1–13** and lettered **A–F**, preserving the IDs under which they were originally scored), a scoring system with full rationale, an implementation blueprint for each proposal, a sequenced roadmap, and a risk register. Every proposal ships with its own kill criterion, because a plan that cannot specify what would falsify it is not a plan.
 
+## Ratified expansion deltas
+
+The later new-domain expansion charter,
+`COMPREHENSIVE_PLAN_TO_EXTEND_FRANKENSIM_TO_NEW_DOMAINS.md`, amends this
+addendum only for the six named rows below. This register and the local notes in
+the affected sections ratify those changes under Bead
+`frankensim-ext-ratification-register-ozq0`.
+
+| Delta | Sections amended in this addendum | Ratified rule |
+|---|---|---|
+| Coupling and passivity | Part 0; Proposal 13 | Only the Dirac interconnection is lossless by construction; components, discretization, transfer, iteration, sources/dissipation, and the closed accounting-window audit determine a coupled passivity claim (extension charter §3.7 and §6). |
+| Contact ownership | Proposal 13 | Reusable detection/response protocols belong to L3 `fs-contact`; `fs-solid` and `fs-mbd` consume adapters, while generic conic/nonlinear algorithms stay in L1 `fs-solver` (extension charter §4.1 and §5.3). |
+| Spectral ownership | Proposal 5 | Generic operator spectra, nullity, continuation health, and multiplier extraction belong to L1 `fs-spectral`; domain crates assemble and interpret operators (extension charter §3.2, §4.2, and §7.1). |
+| Dimensional algebra | Proposal 9 | Amount of substance becomes the sixth base dimension atomically, with versioned five-to-six wire migration, immutable hash crosswalks, and semantic quantity kinds (extension charter §7.3). |
+| Phase sequencing | Part IV.2 | The expansion charter's E0-E8 prerequisite DAG governs new-domain work, including the dry-tribology baseline before the E2 Geneva exit (extension charter §10). |
+| Research governance | Part 0; Part II.3; Part IV.2-IV.3; Risk R10 | One unproven mechanism is allowed per independently falsifiable proof lane, with multiple lanes governed by an explicit portfolio WIP/budget cap (extension charter §2, D12). |
+
+Document precedence must not resurrect three falsified readings: exact
+incidence alone does not remove every spurious mode; IPC is not
+unconditionally intersection-free; and a Dirac interconnection does not make
+an arbitrary partitioned time discretization passive (extension charter §3.1,
+§5.3, and §3.7). These exclusions are part of
+`frankensim-ext-ratification-register-ozq0`, not optional commentary.
+
 ---
 
 # Part 0 — Executive Summary
 
-The base plan builds a system whose **composition is trustworthy**: multi-representation geometry glued by cellular sheaf cohomology, physics coupled through certified interfaces, and error bounds that survive every seam because they compose algebraically instead of dying at file-exchange boundaries. That property is real, rare, and architecturally unavailable to incumbents, whose seams are held together by human operators.
+The base plan builds a system whose **composition is trustworthy**: multi-representation geometry glued by cellular sheaf cohomology, physics coupled through certified interfaces, and error bounds that survive every seam because they compose algebraically instead of dying at file-exchange boundaries. For power coupling, "trustworthy" means the Dirac interconnection is lossless and the full component/discretization/transfer/iteration/accounting-window obligations are audited; it does not mean arbitrary partitioned coupling is passive by topology alone. **Ratification note:** `frankensim-ext-ratification-register-ozq0`, extension charter §3.7 and §6. That property is real, rare, and architecturally unavailable to incumbents, whose seams are held together by human operators.
 
 This addendum's thesis is that trustworthy composition is the *foundation*, not the product. Once composition is algebra, everything done **with** the composed object — optimizing it, re-solving variants of it, budgeting evidence about it, doubting it, merging concurrent edits to it, defending it to a regulator — inherits the algebraic structure. The nineteen proposals here systematically claim that inheritance. Their combined effect is an identity shift:
 
@@ -27,7 +51,7 @@ Speculation makes answers cheap; incremental recompute makes variants cheap; ver
 
 Wrapped around the loop is an **epistemic type system** (Proposals 3, F, 6, D, 12) that prevents the failure mode certificates otherwise invite — being precisely wrong with a pedigree. Every quantity is colored *verified*, *validated*, or *estimated*; the objective function itself is subject to the same typing; every certificate ships with an independent falsifier; optimizer endpoints are distrusted by default; and results export as machine-checkable evidence packages a regulator can audit without trusting the vendor.
 
-The sequencing philosophy, argued quantitatively in Part II and laid out in Part IV: **ship the practical spine immediately** (schema and policy work: 3, 6, D, E-tombstones, 13's type checker), **fund exactly one research-grade bet** (9, whose single hard analysis problem — certified a-posteriori bounds — unlocks the entire speculation economy and is partially purchasable off the shelf), and **let the radical interfaces arrive as thin layers over proven machinery** (8 over 9's economics, B over 1's adjoints). Radical systems die of breadth more often than of ambition; this addendum's governance rule is one research bet at a time, kill criteria enforced quarterly.
+The sequencing philosophy, argued quantitatively in Part II and laid out in Part IV: **ship the practical spine immediately** (schema and policy work: 3, 6, D, E-tombstones, 13's type checker), **admit at most one unproven mechanism inside each independently falsifiable proof lane** (9 is the flywheel lane's mechanism, whose certified a-posteriori bounds unlock the speculation economy), and **let radical interfaces arrive as thin layers over proven machinery** (8 over 9's economics, B over 1's adjoints). Multiple proof lanes may proceed only under an explicit portfolio WIP/budget cap, with quarterly lane-specific kill criteria. **Ratification note:** `frankensim-ext-ratification-register-ozq0`, extension charter §2, D12.
 
 ---
 
@@ -129,7 +153,7 @@ Sorted by composite Mean. IDs are stable and used throughout Part III.
 
 **Finding 1 — The top four form a closed loop; that is why they are the top four.** Speculation (9) makes queries cheap; cheap queries make the incremental cache (2) hot; the cache and the certified corpus feed the query planner (8) real cost data; version control (10) makes the corpus safe for a swarm to generate concurrently; swarm memory (E) makes the whole thing cumulative. Each accelerates the others. This loop is the flywheel, and it is also the artificial sensorimotor system that substitutes for the embodied intuition an agent operator lacks.
 
-**Finding 2 — Practicality and innovation anti-correlate across the set**, which dictates a portfolio structure rather than a priority list. Proposals 8, 9, 11, A, C are high-innovation/lower-practicality (each contains an open problem); proposals 5, 6, 7, D, 13 are the reverse. The correct move is not to execute the ranking top-down but to ship the practical spine immediately, fund exactly one research bet, and let the radical interfaces arrive as layers over proven machinery.
+**Finding 2 — Practicality and innovation anti-correlate across the set**, which dictates a portfolio structure rather than a priority list. Proposals 8, 9, 11, A, C are high-innovation/lower-practicality (each contains an open problem); proposals 5, 6, 7, D, 13 are the reverse. The correct move is not to execute the ranking top-down but to ship the practical spine immediately, isolate one unproven mechanism per falsifiable proof lane, cap the portfolio's aggregate WIP/budget, and let radical interfaces arrive as layers over proven machinery. **Ratification note:** `frankensim-ext-ratification-register-ozq0`, extension charter §2, D12.
 
 **Finding 3 — The lens changes the ranking, and both lenses are right about different things.** Through the operator-agent lens, 8 earns the table's only 1000 (it is the agent's native interface: questions and budgets, not meshes and timesteps) while 7 and 12 score 300–500. Through the Ex-A business lens, 12 rises to effectively 6th and 7 into the 725 band, because regulatory capture and ecosystem moats are how the *company* wins even though they change nothing about a Tuesday-night design session. The synthesis is a slogan with operational content: **build in composite order, sell in Ex-A order.**
 
@@ -181,7 +205,7 @@ The nineteen proposals are organized into five architectural layers rather than 
 
 *Precision discipline:* speculate low (fp16/fp8), verify high (interval or fixed high precision), in the mixed-precision iterative-refinement pattern. The verifier's precision is what the certificate inherits; the proposer's precision is nobody's business.
 
-*The knowledge apex — dimensional mining:* with a units-typed schema on all ledger quantities, run automated Buckingham-π extraction plus symbolic regression over the certified corpus to conjecture closed-form scaling laws. Conjectures enter the ledger as *estimated*-color with a validity envelope equal to the convex hull of supporting data in π-space, and are promoted only by surviving the falsification budget (Proposal 6). The system does not merely answer design questions; it accumulates engineering knowledge with pedigrees.
+*The knowledge apex — dimensional mining:* with a units-typed schema on all ledger quantities, run automated Buckingham-π extraction plus symbolic regression over the certified corpus to conjecture closed-form scaling laws. The dimensional substrate is `[m,kg,s,K,A,mol]`; five-vector legacy records decode only through a versioned semantic-crosswalk receipt that preserves old bytes/hashes and records `old_hash→new_hash`. Semantic quantity kinds remain distinct even when dimensions agree. **Ratification note:** `frankensim-ext-ratification-register-ozq0`, extension charter §7.3. Conjectures enter the ledger as *estimated*-color with a validity envelope equal to the convex hull of supporting data in π-space, and are promoted only by surviving the falsification budget (Proposal 6). The system does not merely answer design questions; it accumulates engineering knowledge with pedigrees.
 
 **Dependencies.** Ledger telemetry schema (3); falsification budget (6) for promotion of mined laws; adjoint cache (1) upgrades proposer #1 but is not required for v0.
 
@@ -462,6 +486,18 @@ The nineteen proposals are organized into five architectural layers rather than 
 
 **Implementation blueprint.** *Types:* Arnold's FEEC periodic table is literally the type lattice — H(grad), H(curl), H(div), L², plus regularity tags. A static checker over the coupling graph validates trace pairings and element compatibility against a registry of inf-sup-certified discretization pairings before anything runs. Coupling a pressure to a displacement trace in an illegal pairing becomes a red squiggle, not a silently garbage solve — and this converts the largest class of silent agent-generated nonsense into compile-time errors, which is why the Agent score is 850: humans catch these by experience, and agents have no experience. *Symmetry:* detection via graph automorphism on the patch complex plus geometric hashing (approximate symmetry detected with a certified asymmetry residual); block-diagonalization by isotypic projection using character tables for the common finite groups (cyclic and dihedral cover turbomachinery, fasteners, and most architectural regularity); the asymmetric remainder enters as a right-hand-side perturbation with an interval bound, so **approximate** symmetry yields a symmetrized solve plus a certified perturbation correction rather than a binary applicable/not. Falsifier (per 6): occasional full solves on random instances. Win condition: k-fold symmetry ≈ k× on dominant solves.
 
+**Coupling/contact ratification note
+(`frankensim-ext-ratification-register-ozq0`):** the type graph distinguishes a
+lossless Dirac interconnection from storage, dissipation, source, transfer,
+iteration, and time-discretization laws; passivity is claimed only after the
+closed accounting-window audit (extension charter §3.7 and §6). Reusable
+contact detection/response is an L3 `fs-contact` protocol consumed through
+`fs-solid`/`fs-mbd` adapters; generic conic/nonlinear algorithms remain in L1
+`fs-solver` (extension charter §4.1 and §5.3). IPC nonintersection remains
+conditional on the admitted initial state, conservative candidate sets,
+accepted CCD-limited steps, successful optimization, and declared
+model/refinement assumptions.
+
 **Dependencies.** FEEC kernel (base plan). **Amendments.** The coupling-graph compiler and the legal-pairings registry become named base-plan components. **Kill criterion.** *Types:* none — the checker is cheap insurance. *Symmetry:* if across the first vertical fewer than 15% of real workloads present exploitable exact-or-approximate symmetry, keep detection (it costs little and feeds A's coarsening) and defer the isotypic solver.
 
 ---
@@ -471,6 +507,15 @@ The nineteen proposals are organized into five architectural layers rather than 
 **Claim.** The harmonic/coboundary split — the "fixable vs. structural" triage that merge (10) and repair depend on — is only as trustworthy as the sheaf Laplacian's spectral gap, so instrument the gap as a runtime health metric and let the Rep Router route by end-to-end conditioning, not just per-op fitness.
 
 **Implementation blueprint.** Track λ-gap per assembly region with a few Lanczos/LOBPCG vectors (cheap on sparse Laplacians, amortized across edits by warm-starting eigenvectors from the previous state); health = gap/scale ratio with hysteresis thresholds; below threshold the system (i) tags all harmonic/coboundary triage in that region low-confidence — including merge adjudications (10), which must surface the flag — and (ii) proposes re-decomposition of the offending patches. Generalize: every op already carries an error bound; add its **amplification factor** (local condition estimate) so the ledger can compose an end-to-end conditioning estimate per pipeline, and give the Rep Router a conditioning term — the router stops asking only "which representation is cheap here" and starts asking "which path through representation space keeps the whole pipeline well-posed." A system that can say "I am becoming numerically unreliable in this region, and here is the reroute" is a different species from one that silently degrades.
+
+**Spectral ownership ratification note
+(`frankensim-ext-ratification-register-ozq0`):** L1 `fs-spectral` owns this
+generic resumable operator-spectral service—spectra, nullity,
+continuation-health, and multiplier extraction—over `fs-la` numerical kernels.
+Domain crates assemble operators and interpret results; they do not own or
+duplicate eigensolver services. Exact incidence alone is not a
+no-spurious-mode theorem; the formulation-specific stability obligations remain
+separate gates (extension charter §3.1-3.2, §4.2, and §7.1).
 
 **Dependencies.** Bet 11 Laplacians. **Amendments.** Gauntlet gains an adversarial degraded-gap suite (deliberately ill-conditioned assemblies where the triage must *refuse confidence* rather than misclassify — the refusal is the pass condition). **Kill criterion.** If gap collapse is never observed outside synthetic cases after a quarter at volume, demote monitoring to sampled spot checks; keep the router conditioning term regardless (it is independently justified).
 
@@ -606,16 +651,28 @@ Proposal 7 (wedge + plugin surface) runs in parallel with everything as the comm
 
 ## IV.2 Phase Plan
 
+This proposal-local Phase 0-3 order remains valid inside the addendum, but the
+new-domain expansion is governed by the extension charter's E0-E8 prerequisite
+DAG and exit gates. In particular, its E2 Geneva exit requires the dry-tribology
+baseline. **Ratification note:**
+`frankensim-ext-ratification-register-ozq0`, extension charter §10.
+
 | Phase | Contents | Character | Exit test |
 |---|---|---|---|
 | **0 — Spine** | 3 (schema), 6 (registry + budget), D (policy), E-tombstones, 13 (type checker) | Weeks-scale schema and policy work over existing machinery; Pract ≥ 800 throughout | Laundering tests pass; no-falsifier-no-ship gate live; tombstone protocol enforced in orchestrator |
-| **1 — Flywheel** | 2, 10, 5, and **9 as the sole research bet** (equilibrated estimators on the elliptic/FEEC class first, warm-start economics from day one) | The economic engine; determinism and stable entity IDs promoted to certified contracts | Skip-yield and accept-rate dashboards live; merge demo on swarm trials; 9's six-month checkpoint |
+| **1 — Flywheel** | 2, 10, 5, and **9 as this proof lane's sole unproven mechanism** (equilibrated estimators on the elliptic/FEEC class first, warm-start economics from day one) | The economic engine; determinism and stable entity IDs promoted to certified contracts | Skip-yield and accept-rate dashboards live; merge demo on swarm trials; 9's six-month checkpoint |
 | **2 — Leverage** | 1, 8 (interface + greedy planner), E-contracts, F, B-v0 (drag decomposition flagship), 12 | Radical interfaces arriving as thin layers over Phase-1 machinery | Adjoint-vs-derivative-free benchmark; planner-vs-baseline benchmark; first evidence package audited externally |
 | **3 — Horizon** | 11, C, A (RB beachhead), 4, 13's symmetry solver | Each individually gated by its own activation condition (see kill criteria) | Per-proposal |
 
+The Phase-1 wording scopes Proposal 9 as the flywheel lane's only unproven
+mechanism; it is not a portfolio-wide ban on independent proof lanes. Multiple
+lanes still require the aggregate WIP/budget cap and separate falsifiers.
+**Ratification note:** `frankensim-ext-ratification-register-ozq0`, extension
+charter §2, D12.
+
 ## IV.3 Governance Rules
 
-1. **One research bet at a time** (P7-the-principle, not proposal 7). Phase 1's bet is Proposal 9, chosen because its single hard problem — certified a-posteriori bounds — is partially purchasable from the equilibrated-estimator literature, and what it unlocks (the speculation economy, the planner's cost model, the ignorance market's cheap sweeps) is the widest downstream cone in the table. Proposal 8's planner and Proposal A's general certification explicitly do **not** open as research programs; they wait for the flywheel's telemetry and the RB beachhead respectively.
+1. **One unproven mechanism per independently falsifiable proof lane.** The flywheel lane's mechanism is Proposal 9, chosen because its certified a-posteriori-bound problem is partially purchasable from the equilibrated-estimator literature and unlocks the widest downstream cone in the table. Other lanes may run concurrently only under a named portfolio WIP/budget cap; no gate may hide two unproven mechanisms behind one result. Proposal 8's planner and Proposal A's general certification remain separate gated lanes that wait for the flywheel's telemetry and the RB beachhead respectively. **Ratification note:** `frankensim-ext-ratification-register-ozq0`, extension charter §2, D12.
 2. **Kill criteria are enforced quarterly**, in writing, against the measurements named in Part III. A proposal whose kill measurement was never instrumented counts as killed — unmeasured survival is not survival.
 3. **Build in composite order, sell in Ex-A order.** Engineering priority follows the Mean column; commercial narrative and partnership investment follow the Ex-A column (12 and 7 lead the sell-side despite mid-table composite ranks).
 4. **The circularity discount stands until lifted by evidence.** Proposals A, B, C, D's top-tier standing is conditional on agents actually being the dominant operator; if the first vertical ships human-driven, they are formally deferred to Phase 3 regardless of their scores.
@@ -644,7 +701,7 @@ Each entry: the risk, the mitigation already embedded in Part III, and the early
 
 **R9 — Standards-body latency (12).** Machine-checkable evidence may sit ahead of what auditors will engage with. *Mitigation:* the crosswalk speaks their vocabulary; the package doubles as internal QA and B2B diligence collateral, so investment is not stranded. *Early warning:* auditor engagement rate in the first regulated-vertical cycle.
 
-**R10 — Breadth death.** Nineteen proposals is a portfolio; executed as nineteen parallel programs it is an obituary. *Mitigation:* the governance rules of IV.3 — one research bet, quarterly kill enforcement, phase gating. *Early warning:* headcount-weighted work-in-progress outside the current phase; the honest metric of a plan losing its discipline.
+**R10 — Breadth death.** Nineteen proposals is a portfolio; executed as nineteen unconstrained parallel programs it is an obituary. *Mitigation:* the governance rules of IV.3 — one unproven mechanism per falsifiable lane, an aggregate portfolio WIP/budget cap, quarterly kill enforcement, and phase gating. *Early warning:* headcount-weighted work-in-progress outside admitted proof lanes or over the portfolio cap; the honest metric of a plan losing its discipline. **Ratification note:** `frankensim-ext-ratification-register-ozq0`, extension charter §2, D12.
 
 ---
 

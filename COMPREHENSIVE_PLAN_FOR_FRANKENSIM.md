@@ -16,6 +16,31 @@ Ambition is calibrated with three tags used throughout:
 
 The mix is deliberate: the spine of FrankenSim is [S], the leapfrog features are [F], and a handful of [M] bets are what make the system unlike anything else. Nothing tagged [M] sits on the critical path of the roadmap.
 
+### 0.1 Ratified expansion deltas
+
+`COMPREHENSIVE_PLAN_TO_EXTEND_FRANKENSIM_TO_NEW_DOMAINS.md` is authoritative
+for the six named deltas below and for no implied exception beyond them. This
+register ratifies those deltas into the master plan under Bead
+`frankensim-ext-ratification-register-ozq0`; the cited sections are the
+governing charter text.
+
+| Delta | Sections amended in this plan | Ratified rule |
+|---|---|---|
+| Coupling and passivity | §3 Bet 3; §8 introduction; §8.4 | A Dirac interconnection is lossless by construction. Coupled passivity additionally depends on component storage, dissipation and source laws, time discretization, transfer, iteration, and the closed accounting-window audit (extension charter §3.7 and §6). |
+| Contact ownership | §8.2; Appendix A | Reusable detection and response protocols belong to L3 `fs-contact`; `fs-solid` and `fs-mbd` consume adapters, while generic conic and nonlinear algorithms remain in L1 `fs-solver` (extension charter §4.1 and §5.3). |
+| Spectral ownership | §6.1; §8.2; §8.9; Appendix A | Generic operator spectra, nullity, continuation health, and multiplier extraction belong to L1 `fs-spectral`; domain crates assemble operators and interpret results (extension charter §3.2, §4.2, and §7.1). |
+| Dimensional algebra | §11.1; §11.5; Appendix B | Amount of substance is the sixth base dimension, migrated atomically with versioned five-to-six wire decoding and semantic crosswalks; dimensional equality does not erase quantity-kind distinctions (extension charter §7.3). |
+| Phase sequencing | §16.1 | The E0-E8 prerequisite DAG governs the new-domain expansion, including a dry-tribology baseline before the E2 Geneva exit (extension charter §10). |
+| Research governance | §16.2 | Admit one unproven mechanism per independently falsifiable proof lane, while multiple lanes may run under an explicit portfolio WIP and budget cap (extension charter §2, D12). |
+
+Three falsified readings are therefore permanently excluded: exact incidence
+alone is not a no-spurious-mode theorem; IPC is not unconditionally
+intersection-free; and a Dirac interconnection does not make an arbitrary
+partitioned time discretization passive (extension charter §3.1, §5.3, and
+§3.7). This paragraph and every local ratification note below point back to
+`frankensim-ext-ratification-register-ozq0` so document precedence cannot
+resurrect those claims.
+
 ---
 
 ## 1. Thesis: why a blank slate wins
@@ -42,7 +67,7 @@ FrankenSim's founding move is to make **one typed algebra** in which geometry, f
 
 **P4 — Budgets first.** Every operation accepts an explicit budget — accuracy, time, memory — and the system maintains an **Error Ledger** and a **Time Ledger** that compose budgets end-to-end across the pipeline (§11.4). "How accurate is this drag number and where did the error come from" is a query, not a research project.
 
-**P5 — Structure preservation over brute force.** Discretizations preserve the exact sequences of exterior calculus (div∘curl = 0 holds *exactly* on the discrete level); time integrators are symplectic/variational where the physics is Hamiltonian; multiphysics coupling goes through power-conserving ports. Structure preservation is the cheapest accuracy money can't buy: it eliminates whole classes of spurious modes, drift, and instability before a single flop is tuned.
+**P5 — Structure preservation over brute force.** Discretizations preserve the exact sequences of exterior calculus (div∘curl = 0 holds *exactly* on the discrete level); time integrators are symplectic/variational where the physics is Hamiltonian; multiphysics coupling goes through power-conserving ports. Structure preservation is the cheapest accuracy money can't buy: it eliminates whole classes of algebraic defects, drift, and instability before a single flop is tuned. Exact incidence alone does not establish stability or remove every spurious mode; the formulation-specific subcomplex, bounded commuting projection, boundary/gauge treatment, and coercivity or inf-sup obligations remain executable gates. **Ratification note:** `frankensim-ext-ratification-register-ozq0`, extension charter §3.1.
 
 **P6 — Matrix-free and roofline-honest.** We never assemble what we can apply, never store what we can recompute cheaper than a cache miss, and every kernel ships with its arithmetic-intensity analysis and a target expressed as a percentage of the roofline for the machine it's running on (§14).
 
@@ -64,7 +89,7 @@ These are the theses that make FrankenSim a leapfrog rather than a re-implementa
 
 **Bet 2 — Geometric algebra as the coordinate-free core. [S/F]** Rigid motions, screws, joints, and incidence live in projective geometric algebra Cl(3,0,1); sphere/tangency-rich constructions live in conformal geometric algebra Cl(4,1). Points, lines, planes, circles, and spheres are all blades; intersections are meets; motions are versor sandwiches; twists and wrenches are bivectors. One algebra replaces the usual zoo of quaternion/matrix/Plücker special cases, kills gimbal-class bugs by construction, and makes kinematic constraints for mechanisms and flapping-wing linkages compositional. (§7.7)
 
-**Bet 3 — Structure-preserving physics: FEEC + CutFEM + variational integrators + port-Hamiltonian coupling. [F]** The physics kernel is built on Finite Element Exterior Calculus from day one — fields are differential forms, discrete de Rham complexes are exact, Hodge theory is native — with **cut-cell embedded discretizations (CutFEM with ghost-penalty stabilization) directly on signed distance fields**, so a level-set geometry can be simulated *without ever generating a body-fitted mesh*. Time integration is variational/symplectic where applicable; multiphysics subsystems compose through power-conjugate ports with Dirac-structure interconnection, so partitioned coupling is passive (provably non-energy-creating) by construction. This trio is the single biggest accuracy-and-robustness leapfrog over legacy FEM/CFD. (§8)
+**Bet 3 — Structure-preserving physics: FEEC + CutFEM + variational integrators + port-Hamiltonian coupling. [F]** The physics kernel is built on Finite Element Exterior Calculus from day one — fields are differential forms, discrete de Rham complexes are exact, Hodge theory is native — with **cut-cell embedded discretizations (CutFEM with ghost-penalty stabilization) directly on signed distance fields**, so a level-set geometry can be simulated *without ever generating a body-fitted mesh*. Time integration is variational/symplectic where applicable; multiphysics subsystems compose through power-conjugate ports whose Dirac interconnection is lossless. Any passivity claim additionally closes component storage/dissipation/source laws, time integration, transfer, iteration, and the accounting window. **Ratification note:** `frankensim-ext-ratification-register-ozq0`, extension charter §3.7 and §6. This trio is the single biggest accuracy-and-robustness leapfrog over legacy FEM/CFD. (§8)
 
 **Bet 4 — Adjoint-native, goal-driven everything. [S/F]** Discrete adjoints are designed in from the first line of every solver (differentiate *through the solution*, via the implicit function theorem, never through solver iterations), and mesh/grid adaptivity is driven by dual-weighted-residual estimates of the *design objective* — the simulator spends resolution only where it changes the answer the optimizer cares about. (§8.7, §8.6)
 
@@ -215,9 +240,17 @@ Everything here is written in-house, in safe Rust with audited SIMD leaves, beca
 
 - **GEMM in the BLIS style**: an arch-specific register microkernel (e.g., 2×… — shapes chosen by the autotuner, typically 8–14 rows × 2–4 vector columns) wrapped in autotuned KC/MC/NC cache blocking with packing into arena buffers. Targets in §14. f64, f32, and f32-storage/f64-accumulate mixed mode.
 - **Batched small dense** is a first-class citizen, because FEM element matrices (6×6 … 48×48) dominate assembly-adjacent work: the layout interleaves *across* the batch so SIMD lanes run across elements, not within one tiny matrix — routinely 5–15× over loop-over-LAPACK-calls patterns.
-- Blocked Cholesky/LU/QR; **TSQR** (tree QR) for tall-skinny blocks (Krylov basis orthogonalization, POD snapshots); one-sided Jacobi SVD for accuracy-critical small problems; randomized range finders + randomized SVD/Nyström for big low-rank work [F]; **LOBPCG** and Lanczos (with selective reorthogonalization) as the eigen-solvers — chosen precisely because they are matrix-free-native (modal analysis, buckling, stability eigenproblems all reduce to operator applications).
+- Blocked Cholesky/LU/QR; **TSQR** (tree QR) for tall-skinny blocks (Krylov basis orthogonalization, POD snapshots); one-sided Jacobi SVD for accuracy-critical small problems; randomized range finders + randomized SVD/Nyström for big low-rank work [F]; **LOBPCG** and Lanczos (with selective reorthogonalization) as matrix-free numerical kernels beneath the generic `fs-spectral` operator service.
 - **Mixed precision with iterative refinement** as a default policy: factor/precondition in f32, refine to f64, escalate to double-double (in-house error-free-transformation arithmetic) only where the Error Ledger demands it.
 - Randomized NLA utilities: sketch-and-precondition least squares, Hutchinson/Hutch++ stochastic trace estimation (log-det, sensitivity aggregation in topology optimization) [F].
+
+**Ratification note (`frankensim-ext-ratification-register-ozq0`; extension
+charter §3.2, §4.2, and §7.1):** `fs-la` supplies reusable linear-algebra
+kernels, including Lanczos/LOBPCG primitives. L1 `fs-spectral` owns the generic
+resumable operator-spectral service, nullity and continuation-health semantics,
+and multiplier extraction. L2/L3 crates assemble their operators, send
+dimensionless/scaled inputs downward, and interpret returned spectra; no domain
+crate duplicates or owns the generic eigensolver service.
 
 ### 6.2 Sparse (`fs-sparse`) [S]
 
@@ -307,13 +340,13 @@ Beyond watertightness (§7.3): manifoldness checks; self-intersection freedom vi
 
 ## 8. L3 — FLUX: the physics kernel
 
-FLUX's job: turn charts into discrete complexes and cochains, apply and invert physical operators at roofline speed, integrate in time with preserved structure, couple physics passively, and hand ASCENT exact discrete gradients and honest error bars.
+FLUX's job: turn charts into discrete complexes and cochains, apply and invert physical operators at roofline speed, integrate in time with preserved structure, compose physics through typed power ports with explicit balance audits, and hand ASCENT exact discrete gradients and honest error bars. **Ratification note:** `frankensim-ext-ratification-register-ozq0`, extension charter §3.7 and §6.
 
 ### 8.1 The unifying formalism: exterior calculus on complexes [F]
 
 Fields are cochains (discrete differential forms) on cell complexes; operators are built from the exterior derivative d (exact, purely combinatorial — an incidence matrix) and discrete Hodge stars (where all metric information and all approximation lives). Element families follow **Finite Element Exterior Calculus**: Whitney forms at lowest order, hierarchical high-order P_rΛ^k / P_r⁻Λ^k families on simplices, tensor-product families on cubes/octree cells. Why this is the spine and not a garnish:
 
-- The discrete de Rham sequence is **exact**: grad→curl→div identities hold to machine precision, killing spurious pressure modes, spurious EM modes, and checkerboarding *by construction* rather than by stabilization folklore.
+- The discrete de Rham sequence is **exact**: grad→curl→div identities hold to machine precision and remove the corresponding algebraic-complex defects. Absence of spurious pressure or EM modes additionally requires the correct subcomplex, bounded commuting projection, boundary/gauge treatment, and formulation stability; exact incidence alone is not that theorem. **Ratification note:** `frankensim-ext-ratification-register-ozq0`, extension charter §3.1.
 - **Cohomology is computable and used**: harmonic cochains give the correct treatment of multiply-connected domains (circulation around a wing → lift; pressure fields in domains with handles), where naive FEM silently produces the wrong answer or an underdetermined system.
 - One assembly/apply machinery serves elasticity, flow, heat, and (later) electromagnetics — the "generic, abstract, maximally reusable mechanics" requirement is satisfied by choosing the formalism in which those physics *are already the same code*.
 
@@ -325,7 +358,7 @@ Three discretization frontends share this machinery:
 
 ### 8.2 Solid mechanics [S/F]
 
-Linear elasticity through finite-strain hyperelasticity (Neo-Hookean, Mooney–Rivlin, Ogden), with locking-free mixed formulations (TDNNS-style / weakly imposed symmetry) where near-incompressibility or bending-domination demands it. Reduced models: geometrically exact **Cosserat rods** (Lie-group state on SE(3)) for members and struts; Kirchhoff–Love IGA shells. Inelasticity: J2 plasticity with return mapping; fiber-section beam elements with Mander concrete + Menegotto–Pinto steel laws for the reinforced-concrete frame use-case. Stability: geometric-stiffness buckling eigenproblems (LOBPCG), **pseudo-arclength continuation** through limit points, and Koiter-style post-buckling asymptotics [F] — because the steel-minimizing frame that ignores buckling is a paperclip. Contact: SDF-native barrier formulation in the Incremental Potential Contact family [F] — smooth, robust, intersection-free by construction, and unusually easy for us because penetration depth queries against SDF charts are MORPH one-liners.
+Linear elasticity through finite-strain hyperelasticity (Neo-Hookean, Mooney–Rivlin, Ogden), with locking-free mixed formulations (TDNNS-style / weakly imposed symmetry) where near-incompressibility or bending-domination demands it. Reduced models: geometrically exact **Cosserat rods** (Lie-group state on SE(3)) for members and struts; Kirchhoff–Love IGA shells. Inelasticity: J2 plasticity with return mapping; fiber-section beam elements with Mander concrete + Menegotto–Pinto steel laws for the reinforced-concrete frame use-case. Stability: geometric-stiffness buckling eigenproblems (through the generic L1 `fs-spectral` service), **pseudo-arclength continuation** through limit points, and Koiter-style post-buckling asymptotics [F] — because the steel-minimizing frame that ignores buckling is a paperclip. Reusable contact detection and response live in L3 `fs-contact`; `fs-solid` consumes the solid-mechanics adapter, and generic conic/nonlinear algorithms remain in L1 `fs-solver`. Its smooth IPC-family lane may claim nonintersection only under an admissible initial state, conservative candidate sets, accepted CCD-limited steps, successful optimization, and the declared refinement/model assumptions—not by construction unconditionally. **Ratification note:** `frankensim-ext-ratification-register-ozq0`, extension charter §4.1, §4.2, §5.3, and §7.1.
 
 ### 8.3 Fluids [S/F]
 
@@ -339,7 +372,7 @@ Multiple solvers, deliberately, because the flagship problems span regimes:
 
 ### 8.4 Multiphysics composition: port-Hamiltonian Dirac structures [F]
 
-Subsystems (structure, fluid, thermal, later EM) expose **power-conjugate ports** (effort/flow pairs: force/velocity, pressure/flux, temperature/entropy-flow); composition is interconnection through a Dirac structure, which conserves power *exactly* at the discrete level. Consequences: partitioned coupling schemes are **passive by construction** — the added-mass instabilities and energy-drift pathologies of ad-hoc FSI staggering are structurally excluded — and multirate co-simulation (fast fluid, slow structure) inherits stability guarantees. Interface acceleration via Aitken and interface quasi-Newton (IQN-ILS) when strong coupling is needed. Compositionally, this is the "wiring diagram of open systems" picture made executable: FrankenSim assemblies are literally morphism composition in the category of open port-Hamiltonian systems — the category theory is not decorative, it is the coupling API's type discipline.
+Subsystems (structure, fluid, thermal, later EM) expose **power-conjugate ports** (effort/flow pairs: force/velocity, pressure/flux, temperature/entropy-flow); composition is interconnection through a Dirac structure, whose interconnection relation conserves power *exactly*. That fact does not make an arbitrary component model, transfer, iteration, multirate schedule, or partitioned time discretization passive. A coupled passivity claim closes the component storage, dissipation, and source laws; time discretization; interface transfer; nonlinear/partitioned iteration; and the full accounting-window audit. Aitken and interface quasi-Newton (IQN-ILS) remain acceleration mechanisms, not passivity proofs. Compositionally, this is the "wiring diagram of open systems" picture made executable: FrankenSim assemblies are literally morphism composition in the category of open port-Hamiltonian systems — the category theory is not decorative, it is the coupling API's type discipline. **Ratification note:** `frankensim-ext-ratification-register-ozq0`, extension charter §3.7 and §6.
 
 ### 8.5 Time integration [S/F]
 
@@ -363,6 +396,12 @@ Random inputs as Karhunen–Loève expansions of random fields (material scatter
 ### 8.9 Solvers and preconditioning [S/F]
 
 The default stack is **matrix-free p-multigrid** (high-order FEEC operators applied via sum-factorization) with smoothed-aggregation AMG on the assembled lowest-order coarse problem, Chebyshev smoothing, wrapped in CG/GMRES/MINRES with mixed-precision inner work + f64 refinement. Saddle-point systems (Stokes, contact, incompressibility) get block preconditioners with Schur-complement approximations. Domain decomposition (BDDC/FETI-DP family) provides the extreme-core-count path; its coarse space is computed as approximate **harmonic sections of the interface sheaf** — the same cellular-sheaf machinery as §7.3, now earning its keep twice (Bet 11). All solvers: resumable, cancellable, deterministic-mode capable, adjoint-equipped.
+
+Generic operator spectra, nullity, continuation health, and multiplier
+extraction are consumed from L1 `fs-spectral`; this solver layer may re-export
+that service but does not create a domain-owned eigensolver fork. **Ratification
+note:** `frankensim-ext-ratification-register-ozq0`, extension charter §4.2 and
+§7.1.
 
 ---
 
@@ -449,7 +488,7 @@ Everything below this layer is *callable*. HELM makes it **programmable, replaya
 
 The system's one true interface is a **typed, versioned intermediate representation**, not a pile of function signatures. Two isomorphic concrete syntaxes — canonical s-expressions and a lossless JSON mapping — so agents emit whichever their tooling prefers; both parse to the same typed AST. Values in the IR are the system's real nouns: dimensioned quantities, Regions and charts, fields, operators, budgets, studies, capability tokens.
 
-Before anything executes, the IR passes **static admission**: dimensional analysis (a pressure cannot be added to a stress *in the type system*, via const-generic `Qty` types — Appendix B), chart-compatibility checking through the Rep Router, budget-feasibility screening against learned cost models, and capability sufficiency. An ill-typed study is rejected in milliseconds with a structured diagnosis, not discovered at hour six.
+Before anything executes, the IR passes **static admission**: six-base dimensional analysis plus semantic quantity-kind checks (pressure and stress share dimensions but are not interchangeable kinds; absolute and difference temperatures are distinct), chart-compatibility checking through the Rep Router, budget-feasibility screening against learned cost models, and capability sufficiency. Versioned five-vector inputs decode to a six-vector with `mol=0` only through an immutable semantic-crosswalk receipt; new canonical forms use `[m,kg,s,K,A,mol]`. **Ratification note:** `frankensim-ext-ratification-register-ozq0`, extension charter §7.3. An ill-typed study is rejected in milliseconds with a structured diagnosis, not discovered at hour six.
 
 A flavor of the surface (the spout study, abbreviated; fuller example in Appendix C):
 
@@ -506,7 +545,7 @@ That turns budget allocation into an optimization problem HELM solves *about its
 
 ### 11.5 Agent ergonomics, the last mile [S/F]
 
-The **Five Explicits** (units, seeds, budgets, versions, capabilities) are mandatory fields of every op — an agent literally cannot express an ambiguous request. Compile-time dimensional analysis via `Qty<const M:i8, const KG:i8, const S:i8, …>` (Appendix B) extends into the IR checker so unit errors die at admission. **Semantic design diffs**: `diff(a, b)` between two shapes returns not a file diff but a geometric one — varifold/OT distance, transport plan visualization, per-region attribution ("Pareto-31 moved lip curvature −18%, thinned wall 0.4mm") using the §9.9 machinery. **Automatic lab notebook**: every study emits, via FrankenPandas over the ledger, a human-readable report — objective traces, ledger attributions, LUMEN renders, convergence tables, the exact IR to reproduce — because reproducibility should be a side effect, not a virtue. And everything conversational (catalog, estimates, ledger queries, `explain`) is served from the latency lane in ≤100ms even while a campaign saturates the throughput lane — the agent never waits behind its own physics.
+The **Five Explicits** (units, seeds, budgets, versions, capabilities) are mandatory fields of every op — an agent literally cannot express an ambiguous request. Compile-time dimensional analysis via `Qty<const M:i8, const KG:i8, const S:i8, const K:i8, const A:i8, const MOL:i8>` (Appendix B) extends into the IR checker, while semantic quantity kinds reject dimensionally legal basis, phase, affine-temperature, pressure/stress, torque/energy, and RMS/peak confusions. **Ratification note:** `frankensim-ext-ratification-register-ozq0`, extension charter §7.3. **Semantic design diffs**: `diff(a, b)` between two shapes returns not a file diff but a geometric one — varifold/OT distance, transport plan visualization, per-region attribution ("Pareto-31 moved lip curvature −18%, thinned wall 0.4mm") using the §9.9 machinery. **Automatic lab notebook**: every study emits, via FrankenPandas over the ledger, a human-readable report — objective traces, ledger attributions, LUMEN renders, convergence tables, the exact IR to reproduce — because reproducibility should be a side effect, not a virtue. And everything conversational (catalog, estimates, ledger queries, `explain`) is served from the latency lane in ≤100ms even while a campaign saturates the throughput lane — the agent never waits behind its own physics.
 
 ---
 
@@ -621,6 +660,12 @@ Deliverable: frame + fragility curves + an **anytime-valid certificate** that th
 
 ### 16.1 Phases [S]
 
+The P0-P6 table remains the build order for the original core. For the
+new-domain expansion, the E0-E8 prerequisite DAG and exit gates in the
+extension charter §10 govern relative sequencing. In particular, the E2
+Geneva exit cannot precede the dry-tribology baseline. **Ratification note:**
+`frankensim-ext-ratification-register-ozq0`.
+
 | Phase | Weeks | Scope | Exit criterion (Gauntlet-enforced) |
 |---|---|---|---|
 | P0 — Bedrock | 0–6 | fs-substrate, fs-exec (two-lane), fs-alloc, fs-la, fs-sparse, fs-fft, fs-ivl, fs-rand, ledger v0 | G0+G4 green; GEMM/SpMV/FFT within 80% of §14.1 targets on both ISAs; deterministic mode bit-stable |
@@ -636,6 +681,13 @@ Phases overlap deliberately (geometry hardens while physics starts); each phase 
 ### 16.2 Team-of-agents methodology [F]
 
 FrankenSim is sized for a swarm of AI coding agents with human architectural review. The load-bearing practices: **one crate = one contract** (`CONTRACT.md` + executable conformance suite, §13.3); **IR as the integration language** — agents integrate against frozen IR semantics, never against each other's internals; **golden ledgers** — every merged feature lands with a replayable ledger of its acceptance run; **the Decalogue as tie-breaker** — disputes between agents resolve by principle number, not seniority. The repository is organized so the maximum context an agent needs is one crate + its contracts + the IR spec — deliberately smaller than a frontier context window.
+
+Research concurrency is governed per proof lane: one independently
+falsifiable lane admits at most one unproven mechanism against a boring
+baseline, while multiple lanes may proceed under an explicit portfolio WIP and
+budget cap. Each lane retains activation, kill, and fallback criteria; no gate
+may hide two research mechanisms behind one result. **Ratification note:**
+`frankensim-ext-ratification-register-ozq0`, extension charter §2, D12.
 
 ---
 
@@ -660,9 +712,21 @@ FrankenSim is sized for a swarm of AI coding agents with human architectural rev
 
 ### Appendix A — The crate atlas
 
-`fs-substrate` (arch detect, fingerprints, dispatch tables) · `fs-simd` (portable/NEON/AVX-512/SME2 tiers) · `fs-alloc` (scope arenas, hugepages, pools) · `fs-exec` (two-lane executor, speculative races, deterministic reductions, on asupersync) · `fs-la` (GEMM, batched small dense, TSQR, LOBPCG/Lanczos, mixed precision, Hutch++) · `fs-sparse` (BSR/SELL-C-σ, SpMV/SpMM, AMG) · `fs-fft` (Stockham, real transforms, pencils) · `fs-ivl` (interval/affine/Taylor models, exact predicates, double-double oracle) · `fs-cheb` (function objects, spectral 1D–3D, eigenproblems) · `fs-ad` (duals, tape bridge to FrankenTorch, adjoint-by-construction, revolve checkpointing) · `fs-rand` (Philox, Sobol/Owen, distributions) · `fs-ga` (PGA/CGA, const-evaluated ops) · `fs-geom` (Regions, charts, Rep Router, sheaf certificates) · `fs-rep-sdf` / `fs-rep-frep` / `fs-rep-nurbs` / `fs-rep-mesh` / `fs-rep-voxel` / `fs-rep-neural` · `fs-xform` (FFD, RBF, level-set velocity, manifold harmonics, SIMP fields) · `fs-mesh` (dual contouring, Delaunay/Ruppert, anisotropic remesh, frame-field hex [F]) · `fs-feec` (Whitney/Nédélec/RT families, sum-factorized apply, DWR) · `fs-cutfem` (ghost penalty, cut quadrature) · `fs-iga` (splines-as-elements, shells) · `fs-solid` (hyperelastic, TDNNS, rods, fiber beams, contact/IPC) · `fs-lbm` (cumulant, sparse VDB, free surface, thermal, scaling assistant) · `fs-bem` / `fs-fmm` (panels, Kutta, bbFMM) · `fs-vpm` (vortex particles) · `fs-time` (variational/symplectic/SE(3), arclength) · `fs-couple` (Dirac ports, IQN-ILS) · `fs-adjoint` (discrete adjoints, shape gradients, Sobolev smoothing) · `fs-uq` (KL, PCE, QMC, MLMC, Kanai–Tajimi, CVaR) · `fs-eproc` (e-processes, e-BH, conformal e-prediction) · `fs-opt` (L-BFGS, TR-Newton–Krylov, AL, CMA-ES/BIPOP, DIRECT, GP/TuRBO, NSGA, PDHG LP/SOCP) · `fs-topo` (SIMP, level-set, ground structure, homogenization, persistence constraints) · `fs-sos` (moment/SOS, Burer–Monteiro SDP, Lyapunov) · `fs-surrogate` (FNO/DeepONet/POD-DEIM/Koopman, certify-or-escalate) · `fs-render` (spectral PT, sphere/NURBS tracing, diff-render) · `fs-viz` (isosurface, DVR, LIC, glyphs, Morse–Smale) · `fs-img` (PNG/EXR) · `fs-ir` (FrankenScript, catalog, admission) · `fs-session` (capabilities, governor, idempotency) · `fs-ledger` (schema, content addressing, time travel, explain) · `fs-plan` (cost/error models, budget allocator, tropical analytics) · `fs-report` (lab notebooks via FrankenPandas).
+`fs-substrate` (arch detect, fingerprints, dispatch tables) · `fs-simd` (portable/NEON/AVX-512/SME2 tiers) · `fs-alloc` (scope arenas, hugepages, pools) · `fs-exec` (two-lane executor, speculative races, deterministic reductions, on asupersync) · `fs-la` (GEMM, batched small dense, TSQR, eigensolver kernels, mixed precision, Hutch++) · `fs-solver` (generic Krylov, nonlinear, and conic algorithms) · `fs-spectral` (resumable spectra, nullity, and continuation-health service over `fs-la` kernels) · `fs-sparse` (BSR/SELL-C-σ, SpMV/SpMM, AMG) · `fs-fft` (Stockham, real transforms, pencils) · `fs-ivl` (interval/affine/Taylor models, exact predicates, double-double oracle) · `fs-cheb` (function objects, spectral 1D–3D, eigenproblems) · `fs-ad` (duals, tape bridge to FrankenTorch, adjoint-by-construction, revolve checkpointing) · `fs-rand` (Philox, Sobol/Owen, distributions) · `fs-ga` (PGA/CGA, const-evaluated ops) · `fs-geom` (Regions, charts, Rep Router, sheaf certificates) · `fs-rep-sdf` / `fs-rep-frep` / `fs-rep-nurbs` / `fs-rep-mesh` / `fs-rep-voxel` / `fs-rep-neural` · `fs-xform` (FFD, RBF, level-set velocity, manifold harmonics, SIMP fields) · `fs-mesh` (dual contouring, Delaunay/Ruppert, anisotropic remesh, frame-field hex [F]) · `fs-feec` (Whitney/Nédélec/RT families, sum-factorized apply, DWR) · `fs-cutfem` (ghost penalty, cut quadrature) · `fs-iga` (splines-as-elements, shells) · `fs-contact` (reusable candidate generation, CCD, and contact response) · `fs-solid` (hyperelastic, TDNNS, rods, fiber beams, `fs-contact` adapter) · `fs-lbm` (cumulant, sparse VDB, free surface, thermal, scaling assistant) · `fs-bem` / `fs-fmm` (panels, Kutta, bbFMM) · `fs-vpm` (vortex particles) · `fs-time` (variational/symplectic/SE(3), arclength) · `fs-couple` (Dirac ports, IQN-ILS) · `fs-adjoint` (discrete adjoints, shape gradients, Sobolev smoothing) · `fs-uq` (KL, PCE, QMC, MLMC, Kanai–Tajimi, CVaR) · `fs-eproc` (e-processes, e-BH, conformal e-prediction) · `fs-opt` (L-BFGS, TR-Newton–Krylov, AL, CMA-ES/BIPOP, DIRECT, GP/TuRBO, NSGA, PDHG LP/SOCP) · `fs-topo` (SIMP, level-set, ground structure, homogenization, persistence constraints) · `fs-sos` (moment/SOS, Burer–Monteiro SDP, Lyapunov) · `fs-surrogate` (FNO/DeepONet/POD-DEIM/Koopman, certify-or-escalate) · `fs-render` (spectral PT, sphere/NURBS tracing, diff-render) · `fs-viz` (isosurface, DVR, LIC, glyphs, Morse–Smale) · `fs-img` (PNG/EXR) · `fs-ir` (FrankenScript, catalog, admission) · `fs-session` (capabilities, governor, idempotency) · `fs-ledger` (schema, content addressing, time travel, explain) · `fs-plan` (cost/error models, budget allocator, tropical analytics) · `fs-report` (lab notebooks via FrankenPandas).
+
+**Ratification note (`frankensim-ext-ratification-register-ozq0`):** the atlas
+now assigns the reusable contact protocol to L3 `fs-contact`, generic solver
+algorithms to L1 `fs-solver`, and generic spectral health to L1 `fs-spectral`;
+domain crates consume those services and interpret their results (extension
+charter §4.1, §4.2, §5.3, and §7.1).
 
 ### Appendix B — Load-bearing trait sketches
+
+The dimensional sketch below is widened atomically to
+`[m,kg,s,K,A,mol]`; versioned five-vector inputs require an immutable semantic
+crosswalk, and semantic-kind wrappers remain stricter than raw dimensional
+equality. **Ratification note:**
+`frankensim-ext-ratification-register-ozq0`, extension charter §7.3.
 
 ```rust
 /// A chart presents a Region through one representation. (§7.1)
@@ -681,11 +745,28 @@ pub trait Convert<Dst: Chart>: Chart + Sized {
 
 /// Compile-time dimensional analysis: the Five Explicits, unit edition. (§11.5)
 #[derive(Clone, Copy)]
-pub struct Qty<const M: i8, const KG: i8, const S: i8, const K: i8, const A: i8>(pub f64);
-pub type Length   = Qty<1, 0, 0, 0, 0>;
-pub type Stress   = Qty<-1, 1, -2, 0, 0>;   // Pa = kg·m⁻¹·s⁻²
-impl<const M: i8, const KG: i8, const S: i8, const K: i8, const A: i8>
-    core::ops::Add for Qty<M, KG, S, K, A> { /* same dims or it does not compile */ }
+pub struct Qty<
+    const M: i8,
+    const KG: i8,
+    const S: i8,
+    const K: i8,
+    const A: i8,
+    const MOL: i8,
+>(pub f64);
+pub type Length = Qty<1, 0, 0, 0, 0, 0>;
+pub type StressDimension = Qty<-1, 1, -2, 0, 0, 0>; // Pa = kg·m⁻¹·s⁻²
+pub struct Stress(pub StressDimension);
+pub struct Pressure(pub StressDimension); // same dimension, distinct semantic kind
+impl<
+    const M: i8,
+    const KG: i8,
+    const S: i8,
+    const K: i8,
+    const A: i8,
+    const MOL: i8,
+> core::ops::Add for Qty<M, KG, S, K, A, MOL> {
+    /* same dimensions or compile fails; kind-aware wrappers gate semantic adds */
+}
 
 /// Every kernel is a tile program under a context. (§5.2; TileKernel shown there.)
 pub struct Cx<'scope> {
