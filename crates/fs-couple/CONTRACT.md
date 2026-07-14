@@ -1,7 +1,7 @@
 # CONTRACT: fs-couple
 
-Multiphysics composition through port-Hamiltonian Dirac structures: partitioned
-coupling that is passive by construction.
+Multiphysics composition through port-Hamiltonian Dirac structures: a lossless
+interface relation plus caller-supplied scalar balance instrumentation.
 
 ## Purpose and layer
 
@@ -17,8 +17,10 @@ Layer L3 (multiphysics coupling). No dependencies — pure Rust.
   CoupleError>` — a Dirac structure (shared effort, opposite flow) whose
   `interface_power` is `0` exactly (power-conserving by construction); refuses
   incompatible ports. `interface_power(&[Port])` = `Σ effort·flow`.
-- `EnergyAudit` — `record`, `max_generation`, `is_passive(tol)`: the
-  passivity claim is MEASURED every exchange (a nonzero balance is a bug alarm).
+- `EnergyAudit` — `record`, `max_generation`, `is_passive(tol)`: the legacy
+  `is_passive` name checks only caller-supplied scalar interface imbalance at
+  each recorded exchange. A nonzero balance is a bug alarm, not a proof of
+  whole-system or closed-window passivity.
 - `AitkenRelaxation::new(omega_init, omega_max)` + `next_omega(residual)` — the
   scalar Δ² dynamic relaxation factor, magnitude-capped.
 - `iterate_fixed_relaxation` / `iterate_aitken` — the added-mass interface
@@ -29,8 +31,8 @@ Layer L3 (multiphysics coupling). No dependencies — pure Rust.
 
 - The Dirac interconnection conserves interface power EXACTLY (to roundoff) —
   the G0 law; incompatible ports are refused.
-- The energy audit reports non-passive exactly when some exchange generates
-  power above `tol`.
+- The energy audit reports an interface-balance failure exactly when some
+  caller-supplied exchange has absolute imbalance above `tol` or is non-finite.
 - On the added-mass fixture (`μ ≥ 1`): naive staggering (`ω = 1`) diverges while
   Aitken-relaxed coupling converges to `x* = c/(1+μ)`; Aitken never takes more
   steps than a stable fixed under-relaxation.
@@ -59,8 +61,8 @@ None.
 ## Conformance tests
 
 `tests/couple.rs` (8 cases): power-conjugate ports; exact interface power
-conservation + incompatible-port refusal; the energy audit measures passivity
-+ alarms on generation; the Aitken Δ² factor; naive staggering diverges where
+conservation + incompatible-port refusal; the energy audit measures interface
+imbalance + alarms on non-finite or above-tolerance input; the Aitken Δ² factor; naive staggering diverges where
 Aitken stays stable (the added-mass claim); Aitken accelerates over a stable
 fixed relaxation; light added mass converges even naively; determinism.
 
@@ -76,3 +78,7 @@ fixed relaxation; light added mass converges even naively; determinism.
   over general port-Hamiltonian systems are staged with the interface here.
 - The energy audit's balances are supplied by the caller each exchange; wiring
   them onto the ledger is the coupling driver's integration.
+- Dirac interface losslessness does not establish passivity of component
+  storage/dissipation/source laws, spatial or temporal discretization,
+  interface transfer, nonlinear iteration, multirate windows, or the coupled
+  system. Those obligations require a signed, closed-window energy audit.

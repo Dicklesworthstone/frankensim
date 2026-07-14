@@ -2,12 +2,12 @@
 //! structures. Layer: L3.
 //!
 //! Ad-hoc FSI staggering suffers added-mass instabilities and energy drift.
-//! Port-Hamiltonian coupling is PASSIVE BY CONSTRUCTION: subsystems expose
-//! power-conjugate [`Port`]s (effort × flow = power), a DIRAC interconnection
-//! composes them conserving interface power EXACTLY, and an [`EnergyAudit`]
-//! MEASURES that conservation every exchange — the "passive by construction"
-//! claim is continuously checked, not assumed; any nonzero interface power
-//! generation is a bug alarm (the G0 law).
+//! The implemented DIRAC interconnection is LOSSLESS BY CONSTRUCTION:
+//! power-conjugate [`Port`]s use equal effort and opposite flow, so their net
+//! interface power is exactly zero. [`EnergyAudit`] records caller-supplied
+//! interface balances as a G0 bug alarm. Neither invariant alone proves that
+//! the coupled components, discretizations, transfers, iterations, time
+//! integrators, sources, or a finite accounting window are passive.
 //!
 //! For the hard, strongly-coupled cases, [`AitkenRelaxation`] gives dynamic
 //! interface relaxation: on the classic ADDED-MASS-INSTABILITY fixture (a light
@@ -115,8 +115,11 @@ pub fn interface_power(ports: &[Port]) -> f64 {
     ports.iter().map(Port::power).sum()
 }
 
-/// The continuously-measured energy audit: the passive-by-construction claim is
-/// checked every exchange, never assumed.
+/// A caller-fed interface-balance audit.
+///
+/// The legacy [`EnergyAudit::is_passive`] name checks only whether every
+/// recorded scalar interface imbalance stays within tolerance. It is not a
+/// whole-system passivity certificate.
 #[derive(Debug, Clone, Default)]
 pub struct EnergyAudit {
     balances: Vec<f64>,
@@ -141,10 +144,10 @@ impl EnergyAudit {
     /// A recorded NaN interface power means the coupling numerically broke
     /// down — the single worst thing this audit exists to catch. `f64::max`
     /// SILENTLY DROPS NaN (`f64::max(0.0, NaN) == 0.0`), so a plain fold would
-    /// report zero generation and `is_passive` would certify the blown-up
-    /// coupling as passive — a false certificate. Poison instead: any NaN
-    /// balance makes the metric NaN, and `NaN <= tol` is false, so the audit
-    /// fails closed. (`±∞` already survives `f64::max` and alarms correctly.)
+    /// report zero imbalance and let the legacy `is_passive` predicate return
+    /// true for a blown-up coupling. Poison instead: any NaN balance makes the
+    /// metric NaN, and `NaN <= tol` is false, so the audit fails closed.
+    /// (`±∞` already survives `f64::max` and alarms correctly.)
     #[must_use]
     pub fn max_generation(&self) -> f64 {
         if self.balances.iter().any(|b| b.is_nan()) {
@@ -153,7 +156,10 @@ impl EnergyAudit {
         self.balances.iter().map(|b| b.abs()).fold(0.0, f64::max)
     }
 
-    /// Is the coupling passive — no interface power generation above `tol`?
+    /// Is every recorded interface-power imbalance within `tol`?
+    ///
+    /// This legacy name does not establish component or closed-window
+    /// passivity; callers must audit those obligations separately.
     #[must_use]
     pub fn is_passive(&self, tol: f64) -> bool {
         self.max_generation() <= tol

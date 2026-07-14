@@ -1,17 +1,21 @@
 //! SDF-native barrier contact (bead tfz.16, plan §8.2 [F]): the
-//! Incremental Potential Contact family — a log barrier on the
-//! CERTIFIED distance to the obstacle that diverges before
-//! penetration, so trajectories are INTERSECTION-FREE BY CONSTRUCTION
-//! (no penetrate-then-push-out cheats). Distances are CutSdf one-liner
-//! queries at deformed node positions — where generic IPC fights
+//! Incremental Potential Contact family — a log barrier on the obstacle
+//! level-set value that diverges as a sampled node approaches zero gap.
+//! This fixed-obstacle lane first requires a finite,
+//! strictly positive nodal gap, then accepts only trial iterates whose
+//! sampled SDF queries remain positive (no penetrate-then-push-out cheats).
+//! That is a conditional discrete-iterate guarantee, not an unconditional
+//! continuous-trajectory nonintersection theorem. Distances are CutSdf
+//! one-liner queries at deformed node positions — where generic IPC fights
 //! mesh-distance computation, the chart hands us φ and ∇φ.
 //!
 //! Newton runs on E(u) = E_elastic(u) + Σ b(φ(x+u)) with a FILTERED
 //! line search: the step is first capped by the SDF normal-closing
 //! component, then every trial is audited with an actual φ > 0 query
 //! before Armijo on the total energy. Rigorous interval CCD for curved
-//! SDFs is recorded successor scope. Every accepted iterate keeps the
-//! minimum gap ever seen as part of the solution record. Friction is
+//! SDFs, continuous paths between iterates, and reusable contact-candidate
+//! certification are recorded successor scope. Every accepted iterate keeps
+//! the minimum sampled nodal gap seen as part of the solution record. Friction is
 //! the lagged smoothed Coulomb of IPC: normal forces from the previous
 //! outer round, a Huber-smoothed tangential potential — stick/slip is
 //! gated by the battery, not asserted here. The barrier Hessian keeps
@@ -166,8 +170,8 @@ pub struct ContactSolution {
     pub iterations: u32,
     /// Minimum gap at the SOLUTION.
     pub min_gap: f64,
-    /// Minimum gap over EVERY accepted iterate — the intersection-free
-    /// audit trail (must be > 0 always).
+    /// Minimum sampled nodal gap over every accepted iterate — the
+    /// positive-gap audit trail (must be > 0 always).
     pub min_gap_ever: f64,
     /// Barrier energy at the solution (the ledger row).
     pub barrier_energy: f64,

@@ -3,8 +3,9 @@
 //!
 //! Integrators that preserve what the physics preserves: symplectic
 //! (Störmer–Verlet, with its discrete-Lagrangian equivalence documented
-//! and tested), Lie-group SE(3)/SO(3) via exponential-map updates (no
-//! renormalization hacks), generalized-α with CONTROLLABLE dissipation,
+//! and tested), Lie-group SO(3) quaternion updates via the exponential map
+//! (SE(3)/motor states are deferred; no renormalization hacks), generalized-α
+//! with CONTROLLABLE dissipation,
 //! IMEX and exponential integrators for stiffness, and embedded-pair
 //! adaptivity with a PI controller.
 //!
