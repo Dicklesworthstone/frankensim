@@ -143,7 +143,7 @@ fn forged_name_through_the_public_path_is_stamped_custom_registry() {
         .expect("public path records");
 
     // ...but the operation is permanently stamped custom-registry, never
-    // production-v2, and carries no run nonce: non-citable by construction.
+    // production-v3, and carries no run nonce: non-citable by construction.
     let op_row = ledger.op(op).unwrap().expect("op row");
     let recorded_at = op_row.t_end.expect("finished custom operation");
     let ir = op_row.ir;
@@ -151,7 +151,7 @@ fn forged_name_through_the_public_path_is_stamped_custom_registry() {
         ir.contains("\"protocol\":\"custom-registry\""),
         "public-path evidence must be stamped custom-registry: {ir}"
     );
-    assert!(!ir.contains("production-v2"));
+    assert!(!ir.contains("production-v3"));
     assert!(!ir.contains("run_nonce"));
     assert_eq!(
         staleness_at(

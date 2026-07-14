@@ -10,6 +10,7 @@
 //! - `check-identities` — identity schemas classify fields and link mutation coverage (bead iu5l).
 //! - `check-claims`   — README hashes/crates/sentinels must exist in code (bead 06yc).
 //! - `check-closures` — closed bug beads must cite regression evidence or a disposition (bead hx4p).
+//! - `check-citable-producers` — exhaustively inventory authority-gated `citation_eligible` sinks.
 //! - `check-all`      — all of the above; non-zero exit on any violation.
 //! - `lock-constellation` / `check-constellation` — pin/verify the Franken library states.
 //!
@@ -905,6 +906,684 @@ fn check_powi(root: &Path) -> Vec<Violation> {
     violations
 }
 
+// ---------------------------------------------------------------------------
+// Citable-producer inventory (bead pd16): a positive citation bit is a
+// security boundary. Every Rust string/debug field that can emit that bit is
+// discovered mechanically and must remain at one audited, authority-gated
+// sink. A fixed-false report-only serializer is classified separately: it
+// cannot make a positive claim, but it still needs an explicit allowlist row
+// so a later edit cannot silently turn it into a positive-capable sink.
+// ---------------------------------------------------------------------------
+
+const CITABLE_PRODUCER_CHECK: &str = "citable-producer-inventory";
+const CITATION_FIELD_NAME: &str = concat!("citation_", "eligible");
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CitationFieldMode {
+    PositiveCapable,
+    ReportOnlyFalse,
+}
+
+impl CitationFieldMode {
+    fn name(self) -> &'static str {
+        match self {
+            Self::PositiveCapable => "positive-capable",
+            Self::ReportOnlyFalse => "report-only-fixed-false",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CitationFieldOccurrence {
+    path: String,
+    owner: String,
+    anchor_text: String,
+    mode: CitationFieldMode,
+    line: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CitableProducerSpec {
+    path: &'static str,
+    owner: &'static str,
+    /// A stable schema/metric marker in the same string literal. The Debug
+    /// field has no schema marker, so path + owner + exact multiplicity is its
+    /// stable identity.
+    anchor: &'static str,
+    mode: CitationFieldMode,
+    /// File-local source-shape guards that tie a positive-capable serializer
+    /// to the typed authority path. These are deliberately semantic markers,
+    /// not line numbers.
+    authority_markers: &'static [&'static str],
+    /// Markers proving the same entry point has an explicit fixed-false
+    /// report-only branch (or a separate candidate namespace).
+    report_only_markers: &'static [&'static str],
+}
+
+const CITABLE_PRODUCER_ALLOWLIST: &[CitableProducerSpec] = &[
+    CitableProducerSpec {
+        path: "crates/fs-roofline/src/production.rs",
+        owner: "fmt",
+        anchor: "",
+        mode: CitationFieldMode::PositiveCapable,
+        authority_markers: &[
+            concat!("&self.citation_", "eligible()"),
+            "self.admission_error().is_none()",
+            "CitationAuthority::Receipt(binding)",
+        ],
+        report_only_markers: &[
+            "pub struct ReportOnlyProductionRun",
+            "crate::EvidenceNamespace::Custom",
+        ],
+    },
+    CitableProducerSpec {
+        path: "crates/fs-roofline/src/bin/roofline.rs",
+        owner: "evidence_admission_json",
+        anchor: "fs-roofline-evidence-admission-v2",
+        mode: CitationFieldMode::PositiveCapable,
+        authority_markers: &[
+            concat!(
+                "let (citation_",
+                "eligible, admission_error) = run.evidence_admission();"
+            ),
+            "Self::Attested(run) => {",
+            "(refusal.is_none(), refusal)",
+        ],
+        report_only_markers: &["Self::ReportOnly(run) => (false, run.admission_error())"],
+    },
+    CitableProducerSpec {
+        path: "crates/fs-roofline/src/bin/roofline.rs",
+        owner: "main",
+        anchor: "fs-roofline-recorded-evidence-v1",
+        mode: CitationFieldMode::PositiveCapable,
+        authority_markers: &[
+            concat!(
+                "let (citation_",
+                "eligible, admission_error) = run.evidence_admission();"
+            ),
+            "let op = match run.record(&ledger)",
+            concat!("let mut citable = citation_", "eligible;"),
+        ],
+        report_only_markers: &["Self::ReportOnly(run) => (false, run.admission_error())"],
+    },
+    CitableProducerSpec {
+        path: "crates/fs-feec/tests/perf_lane.rs",
+        owner: "sum_factorized_attainment",
+        anchor: "feec-gate",
+        mode: CitationFieldMode::PositiveCapable,
+        authority_markers: &[
+            "configured_citable_ledger(",
+            "classify_gate_admission(&snapshot, configuration_refusal)",
+            "GateAdmission::Citable => (true, None)",
+            "Ok(path) if !path.is_empty() && path != \":memory:\"",
+            "record_external_perf_gate_at_path(",
+            concat!("\\\"recorded\\\":{citation_", "eligible}"),
+        ],
+        report_only_markers: &["GateAdmission::ReportOnly(reason) => (false, Some(reason))"],
+    },
+    CitableProducerSpec {
+        path: "crates/fs-fft/tests/perf_lane.rs",
+        owner: "fft_attainment",
+        anchor: "fft-gate",
+        mode: CitationFieldMode::PositiveCapable,
+        authority_markers: &[
+            "configured_citable_ledger(",
+            "classify_gate_admission(&snapshot, configuration_refusal)",
+            "GateAdmission::Citable => (true, None)",
+            "Ok(path) if !path.is_empty() && path != \":memory:\"",
+            "record_external_perf_gate_at_path(",
+            concat!("\\\"recorded\\\":{citation_", "eligible}"),
+        ],
+        report_only_markers: &["GateAdmission::ReportOnly(reason) => (false, Some(reason))"],
+    },
+];
+
+#[derive(Debug, Clone, Copy)]
+struct RustStringLiteral<'a> {
+    start: usize,
+    end: usize,
+    content: &'a str,
+}
+
+fn char_literal_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let first = *bytes.get(start + 1)?;
+    if first.is_ascii_alphabetic() || first == b'_' {
+        let mut after_ident = start + 2;
+        while bytes
+            .get(after_ident)
+            .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+        {
+            after_ident += 1;
+        }
+        // `'a`/`'static`/labels are lifetimes, while `'a'` is a char.
+        if bytes.get(after_ident) != Some(&b'\'') {
+            return None;
+        }
+    }
+
+    let mut escaped = false;
+    for (offset, byte) in bytes[start + 1..].iter().copied().enumerate() {
+        let index = start + 1 + offset;
+        if escaped {
+            escaped = false;
+        } else if byte == b'\\' {
+            escaped = true;
+        } else if byte == b'\'' {
+            return Some(index + 1);
+        } else if byte == b'\n' {
+            return None;
+        }
+    }
+    None
+}
+
+fn raw_string_open(bytes: &[u8], start: usize) -> Option<(usize, usize)> {
+    if start > 0
+        && bytes
+            .get(start - 1)
+            .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+    {
+        return None;
+    }
+    let mut cursor = start;
+    if matches!(bytes.get(cursor), Some(b'b' | b'c')) {
+        cursor += 1;
+    }
+    if bytes.get(cursor) != Some(&b'r') {
+        return None;
+    }
+    cursor += 1;
+    let hash_start = cursor;
+    while bytes.get(cursor) == Some(&b'#') {
+        cursor += 1;
+    }
+    (bytes.get(cursor) == Some(&b'"')).then_some((cursor, cursor - hash_start))
+}
+
+/// Extract Rust string literals while ignoring line/block comments and char
+/// literals. Both cooked and raw strings are supported because a raw JSON
+/// literal is just as capable of creating a new evidence producer.
+fn rust_string_literals(source: &str) -> Result<Vec<RustStringLiteral<'_>>, String> {
+    let bytes = source.as_bytes();
+    let mut literals = Vec::new();
+    let mut cursor = 0usize;
+    while cursor < bytes.len() {
+        if bytes.get(cursor..cursor + 2) == Some(b"//") {
+            cursor = source[cursor..]
+                .find('\n')
+                .map_or(bytes.len(), |offset| cursor + offset + 1);
+            continue;
+        }
+        if bytes.get(cursor..cursor + 2) == Some(b"/*") {
+            let mut depth = 1usize;
+            cursor += 2;
+            while cursor < bytes.len() && depth > 0 {
+                if bytes.get(cursor..cursor + 2) == Some(b"/*") {
+                    depth += 1;
+                    cursor += 2;
+                } else if bytes.get(cursor..cursor + 2) == Some(b"*/") {
+                    depth -= 1;
+                    cursor += 2;
+                } else {
+                    cursor += 1;
+                }
+            }
+            if depth != 0 {
+                return Err("unterminated block comment while scanning Rust strings".to_string());
+            }
+            continue;
+        }
+        if bytes[cursor] == b'\''
+            && let Some(end) = char_literal_end(bytes, cursor)
+        {
+            cursor = end;
+            continue;
+        }
+        if let Some((quote, hashes)) = raw_string_open(bytes, cursor) {
+            let content_start = quote + 1;
+            let mut close = content_start;
+            let end = loop {
+                let Some(relative) = source[close..].find('"') else {
+                    return Err("unterminated raw string while scanning producers".to_string());
+                };
+                let quote_end = close + relative;
+                let suffix_end = quote_end + 1 + hashes;
+                if suffix_end <= bytes.len()
+                    && bytes[quote_end + 1..suffix_end]
+                        .iter()
+                        .all(|byte| *byte == b'#')
+                {
+                    break suffix_end;
+                }
+                close = quote_end + 1;
+            };
+            literals.push(RustStringLiteral {
+                start: cursor,
+                end,
+                content: &source[content_start..end - 1 - hashes],
+            });
+            cursor = end;
+            continue;
+        }
+        if bytes[cursor] == b'"' {
+            let content_start = cursor + 1;
+            let mut escaped = false;
+            let mut end = None;
+            for (offset, byte) in bytes[content_start..].iter().copied().enumerate() {
+                let index = content_start + offset;
+                if escaped {
+                    escaped = false;
+                } else if byte == b'\\' {
+                    escaped = true;
+                } else if byte == b'"' {
+                    end = Some(index + 1);
+                    break;
+                }
+            }
+            let Some(end) = end else {
+                return Err("unterminated cooked string while scanning producers".to_string());
+            };
+            literals.push(RustStringLiteral {
+                start: cursor,
+                end,
+                content: &source[content_start..end - 1],
+            });
+            cursor = end;
+            continue;
+        }
+        cursor += 1;
+    }
+    Ok(literals)
+}
+
+fn enclosing_function_name(source: &str, offset: usize) -> String {
+    for raw in source[..offset].lines().rev() {
+        let mut line = raw.trim_start();
+        if line.starts_with("//") || line.starts_with("/*") || line.starts_with('*') {
+            continue;
+        }
+        if line.starts_with("pub(")
+            && let Some(close) = line.find(')')
+        {
+            line = line[close + 1..].trim_start();
+        } else if let Some(rest) = line.strip_prefix("pub ") {
+            line = rest.trim_start();
+        }
+        for qualifier in ["async ", "const ", "unsafe "] {
+            if let Some(rest) = line.strip_prefix(qualifier) {
+                line = rest.trim_start();
+            }
+        }
+        let Some(rest) = line.strip_prefix("fn ") else {
+            continue;
+        };
+        let name: String = rest
+            .chars()
+            .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+            .collect();
+        if !name.is_empty() {
+            return name;
+        }
+    }
+    "<module>".to_string()
+}
+
+fn matcher_only_literal(source: &str, offset: usize) -> bool {
+    let line_start = source[..offset].rfind('\n').map_or(0, |index| index + 1);
+    let prefix = source[line_start..offset].trim_end();
+    [".contains(", ".starts_with(", ".ends_with("]
+        .iter()
+        .any(|matcher| prefix.ends_with(matcher))
+}
+
+fn parser_key_literal(source: &str, literal: RustStringLiteral<'_>) -> bool {
+    literal.content == CITATION_FIELD_NAME && source[literal.end..].trim_start().starts_with("=>")
+}
+
+fn literal_is_citation_field(literal: RustStringLiteral<'_>) -> bool {
+    if literal.content == CITATION_FIELD_NAME {
+        return true;
+    }
+    let compact: String = literal
+        .content
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect();
+    let escaped_key = format!("\\\"{CITATION_FIELD_NAME}\\\":");
+    let raw_key = format!("\"{CITATION_FIELD_NAME}\":");
+    compact.contains(&escaped_key) || compact.contains(&raw_key)
+}
+
+/// Whether `offset` is still inside the braced scope beginning at `open`.
+/// The small lexer mirrors `rust_string_literals`: braces in comments,
+/// strings, raw strings, and char literals do not affect the scope depth.
+fn rust_scope_contains(source: &str, open: usize, offset: usize) -> Result<bool, String> {
+    let bytes = source.as_bytes();
+    let mut cursor = open;
+    let mut depth = 0usize;
+    while cursor < offset {
+        if bytes.get(cursor..cursor + 2) == Some(b"//") {
+            cursor = source[cursor..]
+                .find('\n')
+                .map_or(offset, |relative| (cursor + relative + 1).min(offset));
+            continue;
+        }
+        if bytes.get(cursor..cursor + 2) == Some(b"/*") {
+            let mut comment_depth = 1usize;
+            cursor += 2;
+            while cursor < offset && comment_depth > 0 {
+                if bytes.get(cursor..cursor + 2) == Some(b"/*") {
+                    comment_depth += 1;
+                    cursor += 2;
+                } else if bytes.get(cursor..cursor + 2) == Some(b"*/") {
+                    comment_depth -= 1;
+                    cursor += 2;
+                } else {
+                    cursor += 1;
+                }
+            }
+            if comment_depth != 0 {
+                return Err("unterminated block comment while finding test scope".to_string());
+            }
+            continue;
+        }
+        if bytes[cursor] == b'\''
+            && let Some(end) = char_literal_end(bytes, cursor)
+        {
+            cursor = end.min(offset);
+            continue;
+        }
+        if let Some((quote, hashes)) = raw_string_open(bytes, cursor) {
+            let mut close = quote + 1;
+            let end = loop {
+                let Some(relative) = source[close..].find('"') else {
+                    return Err("unterminated raw string while finding test scope".to_string());
+                };
+                let quote_end = close + relative;
+                let suffix_end = quote_end + 1 + hashes;
+                if suffix_end <= bytes.len()
+                    && bytes[quote_end + 1..suffix_end]
+                        .iter()
+                        .all(|byte| *byte == b'#')
+                {
+                    break suffix_end;
+                }
+                close = quote_end + 1;
+            };
+            cursor = end.min(offset);
+            continue;
+        }
+        if bytes[cursor] == b'"' {
+            let mut escaped = false;
+            let mut end = None;
+            for (relative, byte) in bytes[cursor + 1..].iter().copied().enumerate() {
+                let index = cursor + 1 + relative;
+                if escaped {
+                    escaped = false;
+                } else if byte == b'\\' {
+                    escaped = true;
+                } else if byte == b'"' {
+                    end = Some(index + 1);
+                    break;
+                }
+            }
+            let Some(end) = end else {
+                return Err("unterminated cooked string while finding test scope".to_string());
+            };
+            cursor = end.min(offset);
+            continue;
+        }
+        match bytes[cursor] {
+            b'{' => depth += 1,
+            b'}' => {
+                let Some(next) = depth.checked_sub(1) else {
+                    return Ok(false);
+                };
+                depth = next;
+                if depth == 0 {
+                    return Ok(false);
+                }
+            }
+            _ => {}
+        }
+        cursor += 1;
+    }
+    Ok(depth > 0)
+}
+
+fn cfg_test_only_literal(source: &str, offset: usize) -> Result<bool, String> {
+    let mut search_end = offset;
+    while let Some(attribute) = source[..search_end].rfind("#[cfg(test)]") {
+        let after_attribute = &source[attribute + "#[cfg(test)]".len()..offset];
+        let Some(module) = after_attribute.find("mod tests") else {
+            search_end = attribute;
+            continue;
+        };
+        let after_module = attribute + "#[cfg(test)]".len() + module + "mod tests".len();
+        let Some(relative_open) = source[after_module..offset].find('{') else {
+            search_end = attribute;
+            continue;
+        };
+        let open = after_module + relative_open;
+        if rust_scope_contains(source, open, offset)? {
+            return Ok(true);
+        }
+        search_end = attribute;
+    }
+    Ok(false)
+}
+
+fn citation_field_mode(source: &str, literal: RustStringLiteral<'_>) -> CitationFieldMode {
+    let compact: String = literal
+        .content
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect();
+    let escaped_false = format!("\\\"{CITATION_FIELD_NAME}\\\":false");
+    let raw_false = format!("\"{CITATION_FIELD_NAME}\":false");
+    let field_call_is_false = literal.content == CITATION_FIELD_NAME
+        && source[literal.end..].trim_start().starts_with(", &false");
+    if compact.contains(&escaped_false) || compact.contains(&raw_false) || field_call_is_false {
+        CitationFieldMode::ReportOnlyFalse
+    } else {
+        CitationFieldMode::PositiveCapable
+    }
+}
+
+fn scan_citable_producer_source(
+    path: &str,
+    source: &str,
+) -> Result<Vec<CitationFieldOccurrence>, String> {
+    let mut occurrences = Vec::new();
+    for literal in rust_string_literals(source)? {
+        if !literal_is_citation_field(literal)
+            || matcher_only_literal(source, literal.start)
+            || parser_key_literal(source, literal)
+            || cfg_test_only_literal(source, literal.start)?
+        {
+            continue;
+        }
+        occurrences.push(CitationFieldOccurrence {
+            path: path.to_string(),
+            owner: enclosing_function_name(source, literal.start),
+            anchor_text: literal.content.to_string(),
+            mode: citation_field_mode(source, literal),
+            line: source[..literal.start]
+                .bytes()
+                .filter(|byte| *byte == b'\n')
+                .count()
+                + 1,
+        });
+    }
+    Ok(occurrences)
+}
+
+#[allow(clippy::too_many_lines)] // exact five-sink inventory + authority/report-only proofs
+fn audit_citable_producer_sources(sources: &BTreeMap<String, String>) -> Vec<Violation> {
+    let mut violations = Vec::new();
+    let mut occurrences = Vec::new();
+    for (path, source) in sources {
+        match scan_citable_producer_source(path, source) {
+            Ok(found) => occurrences.extend(found),
+            Err(error) => violations.push(Violation {
+                check: CITABLE_PRODUCER_CHECK,
+                crate_name: path.clone(),
+                detail: format!("cannot exhaustively scan {path}: {error}"),
+            }),
+        }
+    }
+
+    let mut matched = vec![0usize; occurrences.len()];
+    for spec in CITABLE_PRODUCER_ALLOWLIST {
+        let matching: Vec<usize> = occurrences
+            .iter()
+            .enumerate()
+            .filter(|(_, occurrence)| {
+                occurrence.path == spec.path
+                    && occurrence.owner == spec.owner
+                    && occurrence.mode == spec.mode
+                    && occurrence.anchor_text.contains(spec.anchor)
+            })
+            .map(|(index, _)| index)
+            .collect();
+        match matching.as_slice() {
+            [_] => {}
+            [] => violations.push(Violation {
+                check: CITABLE_PRODUCER_CHECK,
+                crate_name: spec.path.to_string(),
+                detail: format!(
+                    "audited {} sink {}#{} (anchor {:?}) is missing, moved, or changed mode; update the authority proof and allowlist together",
+                    spec.mode.name(),
+                    spec.path,
+                    spec.owner,
+                    spec.anchor,
+                ),
+            }),
+            _ => violations.push(Violation {
+                check: CITABLE_PRODUCER_CHECK,
+                crate_name: spec.path.to_string(),
+                detail: format!(
+                    "audited sink {}#{} (anchor {:?}) occurs {} times; every producer needs a distinct reviewed allowlist row",
+                    spec.path,
+                    spec.owner,
+                    spec.anchor,
+                    matching.len(),
+                ),
+            }),
+        }
+        for index in matching {
+            matched[index] += 1;
+        }
+
+        let Some(source) = sources.get(spec.path) else {
+            continue;
+        };
+        for marker in spec.authority_markers {
+            if !source.contains(marker) {
+                violations.push(Violation {
+                    check: CITABLE_PRODUCER_CHECK,
+                    crate_name: spec.path.to_string(),
+                    detail: format!(
+                        "audited sink {}#{} lost authority marker {:?}; positive citation output must remain downstream of admitted authority and durable recording",
+                        spec.path, spec.owner, marker,
+                    ),
+                });
+            }
+        }
+        for marker in spec.report_only_markers {
+            if !source.contains(marker) {
+                violations.push(Violation {
+                    check: CITABLE_PRODUCER_CHECK,
+                    crate_name: spec.path.to_string(),
+                    detail: format!(
+                        "audited sink {}#{} lost report-only marker {:?}; candidate/refused paths must serialize a fixed false citation state",
+                        spec.path, spec.owner, marker,
+                    ),
+                });
+            }
+        }
+    }
+
+    for (occurrence, match_count) in occurrences.iter().zip(matched) {
+        if match_count == 1 {
+            continue;
+        }
+        let classification = if occurrence.mode == CitationFieldMode::ReportOnlyFalse {
+            "this fixed-false serializer cannot make a positive claim, but must still be explicitly audited"
+        } else {
+            "a positive-capable producer must be downstream of admitted authority and durable recording"
+        };
+        violations.push(Violation {
+            check: CITABLE_PRODUCER_CHECK,
+            crate_name: occurrence.path.clone(),
+            detail: format!(
+                "unexpected {} citation field at {}:{} in fn {}: {classification}; add a precise path/function/schema allowlist row only after reviewing both positive and report-only branches",
+                occurrence.mode.name(),
+                occurrence.path,
+                occurrence.line,
+                occurrence.owner,
+            ),
+        });
+    }
+    violations
+}
+
+/// Scan every repository-owned Rust source root directly. This deliberately
+/// does not ask Git for a file list: a newly-created source file enters the
+/// inventory immediately, before it can be staged or committed.
+fn workspace_rust_sources(root: &Path) -> Result<BTreeMap<String, String>, String> {
+    let mut stack: Vec<PathBuf> = ["crates", "tools", "xtask"]
+        .into_iter()
+        .map(|directory| root.join(directory))
+        .collect();
+    let mut paths = Vec::new();
+    while let Some(directory) = stack.pop() {
+        let entries = std::fs::read_dir(&directory)
+            .map_err(|error| format!("cannot read {}: {error}", directory.display()))?;
+        for entry in entries {
+            let entry = entry
+                .map_err(|error| format!("cannot enumerate {}: {error}", directory.display()))?;
+            let path = entry.path();
+            let file_type = entry
+                .file_type()
+                .map_err(|error| format!("cannot inspect {}: {error}", path.display()))?;
+            if file_type.is_dir() {
+                if path.file_name().is_none_or(|name| name != "target") {
+                    stack.push(path);
+                }
+            } else if file_type.is_file() && path.extension().is_some_and(|ext| ext == "rs") {
+                paths.push(path);
+            }
+        }
+    }
+    paths.sort();
+
+    let mut sources = BTreeMap::new();
+    for path in paths {
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|error| format!("{} escaped workspace root: {error}", path.display()))?
+            .display()
+            .to_string()
+            .replace('\\', "/");
+        let source = std::fs::read_to_string(&path)
+            .map_err(|error| format!("cannot read Rust source {relative}: {error}"))?;
+        sources.insert(relative, source);
+    }
+    Ok(sources)
+}
+
+fn check_citable_producers(root: &Path) -> Vec<Violation> {
+    match workspace_rust_sources(root) {
+        Ok(sources) => audit_citable_producer_sources(&sources),
+        Err(detail) => vec![Violation {
+            check: CITABLE_PRODUCER_CHECK,
+            crate_name: "<repo>".to_string(),
+            detail,
+        }],
+    }
+}
+
 fn json_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 8);
     for c in s.chars() {
@@ -1631,6 +2310,8 @@ fn is_repository_root(target: &Path) -> bool {
     target == top_level
 }
 
+/// Admit a destination without deleting or repurposing existing content.
+/// Returns true only when this invocation initialized the repository.
 fn ensure_bootstrap_repository(target: &Path, offline: bool) -> Result<bool, String> {
     let existed = target.exists();
     if existed {
@@ -1656,7 +2337,7 @@ fn ensure_bootstrap_repository(target: &Path, offline: bool) -> Result<bool, Str
     }
 
     if is_repository_root(target) {
-        return Ok(existed);
+        return Ok(false);
     }
     if existed && !directory_is_empty(target)? {
         return Err(format!(
@@ -1675,7 +2356,34 @@ fn ensure_bootstrap_repository(target: &Path, offline: bool) -> Result<bool, Str
         target,
         &["config", "--local", BOOTSTRAP_INCOMPLETE_KEY, "true"],
     )?;
-    Ok(existed)
+    git_run(target, &["config", "--local", "core.autocrlf", "false"])?;
+    Ok(true)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BootstrapOutcome {
+    state: &'static str,
+    transport_used: bool,
+}
+
+impl BootstrapOutcome {
+    const fn pinned(marker_present: bool) -> Self {
+        Self {
+            state: if marker_present {
+                "resumed"
+            } else {
+                "verified"
+            },
+            transport_used: false,
+        }
+    }
+
+    const fn materialized(initialized: bool, offline: bool) -> Self {
+        Self {
+            state: if initialized { "cloned" } else { "resumed" },
+            transport_used: !offline,
+        }
+    }
 }
 
 /// Materialize or resume one exact-pin checkout without deleting or silently
@@ -1688,8 +2396,8 @@ fn bootstrap_checkout(
     target: &Path,
     url: &str,
     offline: bool,
-) -> Result<&'static str, String> {
-    let existed = ensure_bootstrap_repository(target, offline)?;
+) -> Result<BootstrapOutcome, String> {
+    let initialized = ensure_bootstrap_repository(target, offline)?;
 
     let marker_present = git_out(
         target,
@@ -1702,12 +2410,13 @@ fn bootstrap_checkout(
             verify_pinned_clean(row, target)?;
             if marker_present {
                 clear_bootstrap_marker(target)?;
-                return Ok("resumed");
+                return Ok(BootstrapOutcome::pinned(true));
             }
-            return Ok("verified");
+            return Ok(BootstrapOutcome::pinned(false));
         }
         if !marker_present {
-            return check_pinned_clean_observation(row, target, head, "").map(|()| "verified");
+            return check_pinned_clean_observation(row, target, head, "")
+                .map(|()| BootstrapOutcome::pinned(false));
         }
     }
 
@@ -1759,7 +2468,7 @@ fn bootstrap_checkout(
     git_run(target, &["checkout", "--quiet", "--detach", &row.git_head])?;
     verify_pinned_clean(row, target)?;
     clear_bootstrap_marker(target)?;
-    Ok(if existed { "resumed" } else { "cloned" })
+    Ok(BootstrapOutcome::materialized(initialized, offline))
 }
 
 fn may_resume_unborn_checkout(
@@ -1974,16 +2683,21 @@ fn cmd_bootstrap(root: &Path) -> ExitCode {
             .from
             .as_ref()
             .map_or_else(|| row.remote.clone(), |base| format!("{base}/{dirname}"));
-        let state = bootstrap_checkout(row, &target, &url, options.offline);
-        match state {
-            Ok(st) => {
-                let transport_used = st != "verified" && !options.offline;
+        let outcome = bootstrap_checkout(row, &target, &url, options.offline);
+        match outcome {
+            Ok(outcome) => {
+                let state = outcome.state;
                 println!(
-                    "{{\"check\":\"constellation-bootstrap\",\"lib\":\"{}\",\"state\":\"{st}\",\"head\":\"{}\"}}",
+                    "{{\"check\":\"constellation-bootstrap\",\"lib\":\"{}\",\"state\":\"{state}\",\"head\":\"{}\"}}",
                     json_escape(&row.lib),
                     json_escape(&row.git_head),
                 );
-                provenance.push(bootstrap_provenance_row(row, &url, transport_used, st));
+                provenance.push(bootstrap_provenance_row(
+                    row,
+                    &url,
+                    outcome.transport_used,
+                    state,
+                ));
             }
             Err(why) => {
                 println!(
@@ -2080,6 +2794,7 @@ fn main() -> ExitCode {
         ),
         "check-claims" => (claims::check_claims(&root), vec!["claim-state"]),
         "check-closures" => (closures::check_closures(&root), vec!["closure-evidence"]),
+        "check-citable-producers" => (check_citable_producers(&root), vec![CITABLE_PRODUCER_CHECK]),
         "check-all" => {
             let mut v = check_layers(&manifests);
             v.extend(check_deps(&manifests));
@@ -2090,6 +2805,7 @@ fn main() -> ExitCode {
             v.extend(identities::check_identities(&root));
             v.extend(claims::check_claims(&root));
             v.extend(closures::check_closures(&root));
+            v.extend(check_citable_producers(&root));
             (
                 v,
                 vec![
@@ -2102,6 +2818,7 @@ fn main() -> ExitCode {
                     "semantic-identities",
                     "claim-state",
                     "closure-evidence",
+                    CITABLE_PRODUCER_CHECK,
                 ],
             )
         }
@@ -2109,8 +2826,8 @@ fn main() -> ExitCode {
             eprintln!(
                 "unknown command {other:?}; use check-layers|check-deps|check-contracts|\
                  check-unsafe|check-powi|check-goldens|check-claims|check-closures|\
-                 check-identities|check-all|generate-identities|lock-constellation|\
-                 check-constellation"
+                 check-identities|check-citable-producers|check-all|generate-identities|\
+                 lock-constellation|check-constellation"
             );
             return ExitCode::FAILURE;
         }
@@ -2234,6 +2951,122 @@ mod tests {
     }
 
     use super::*;
+
+    fn audited_citable_source_fixture() -> BTreeMap<String, String> {
+        [
+            (
+                "crates/fs-roofline/src/production.rs",
+                include_str!("../../crates/fs-roofline/src/production.rs"),
+            ),
+            (
+                "crates/fs-roofline/src/lib.rs",
+                include_str!("../../crates/fs-roofline/src/lib.rs"),
+            ),
+            (
+                "crates/fs-roofline/src/bin/roofline.rs",
+                include_str!("../../crates/fs-roofline/src/bin/roofline.rs"),
+            ),
+            (
+                "crates/fs-feec/tests/perf_lane.rs",
+                include_str!("../../crates/fs-feec/tests/perf_lane.rs"),
+            ),
+            (
+                "crates/fs-fft/tests/perf_lane.rs",
+                include_str!("../../crates/fs-fft/tests/perf_lane.rs"),
+            ),
+        ]
+        .into_iter()
+        .map(|(path, source)| (path.to_string(), source.to_string()))
+        .collect()
+    }
+
+    #[test]
+    fn citable_producer_inventory_accepts_exact_five_audited_sinks() {
+        assert_eq!(CITABLE_PRODUCER_ALLOWLIST.len(), 5);
+        let violations = audit_citable_producer_sources(&audited_citable_source_fixture());
+        assert!(
+            violations.is_empty(),
+            "the five audited authority-gated sinks must be exact: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn citable_producer_inventory_is_clean_on_the_real_workspace_tree() {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let root = manifest_dir
+            .parent()
+            .expect("xtask lives under workspace root");
+        let violations = check_citable_producers(root);
+        assert!(
+            violations.is_empty(),
+            "the command must accept the actual workspace inventory: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn external_gate_recorder_parser_diagnostics_and_test_fixtures_are_not_producers() {
+        let source = include_str!("../../crates/fs-roofline/src/lib.rs");
+        let occurrences = scan_citable_producer_source("crates/fs-roofline/src/lib.rs", source)
+            .expect("recorder source is valid Rust");
+        assert!(
+            occurrences.is_empty(),
+            "parser keys, diagnostics, and cfg(test) gate fixtures are consumers/oracles: {occurrences:?}"
+        );
+    }
+
+    #[test]
+    fn citable_producer_inventory_rejects_an_unknown_sixth_producer() {
+        let mut sources = audited_citable_source_fixture();
+        sources.insert(
+            "crates/fs-new/src/lib.rs".to_string(),
+            concat!(
+                "\nfn serialize_sixth(citation_",
+                "eligible: bool) -> String {\n    format!(\"{{\\\"schema\\\":\\\"new-producer-v1\\\",\\\"citation_",
+                "eligible\\\":{citation_",
+                "eligible}}}\")\n}\n",
+            )
+            .to_string(),
+        );
+        let violations = audit_citable_producer_sources(&sources);
+        let sixth: Vec<_> = violations
+            .iter()
+            .filter(|violation| violation.crate_name == "crates/fs-new/src/lib.rs")
+            .collect();
+        assert_eq!(
+            sixth.len(),
+            1,
+            "unknown sixth sink must fail once: {violations:?}"
+        );
+        assert!(
+            sixth[0].detail.contains("positive-capable")
+                && sixth[0].detail.contains("serialize_sixth"),
+            "failure must name the positive producer and its owner: {}",
+            sixth[0].detail
+        );
+    }
+
+    #[test]
+    fn citable_producer_scanner_separates_fixed_false_output_from_matchers() {
+        let source = concat!(
+            "\nfn report_only() {\n    println!(\"{{\\\"citation_",
+            "eligible\\\":false,\\\"reason\\\":\\\"candidate\\\"}}\")\n}\n\n",
+            "fn matcher_only(payload: &str) {\n    assert!(payload.contains(\"\\\"citation_",
+            "eligible\\\":true\"));\n}\n",
+        );
+        let occurrences = scan_citable_producer_source("crates/fs-new/src/lib.rs", source)
+            .expect("valid Rust-shaped fixture");
+        assert_eq!(occurrences.len(), 1, "matcher strings are not producers");
+        assert_eq!(occurrences[0].owner, "report_only");
+        assert_eq!(occurrences[0].mode, CitationFieldMode::ReportOnlyFalse);
+    }
+
+    #[test]
+    fn citable_producer_guard_does_not_inventory_its_own_literals() {
+        let source = include_str!("main.rs");
+        let occurrences = scan_citable_producer_source("xtask/src/main.rs", source)
+            .expect("the guard source is valid Rust");
+        assert!(occurrences.is_empty(), "guard self-match: {occurrences:?}");
+    }
 
     fn manifest(name: &str, layer: &str, deps: &[&str]) -> Manifest {
         let mut toml = format!(
@@ -2663,6 +3496,140 @@ mod tests {
         assert!(receipt.contains("\"selected_transport\": \"/airgap/mirror/fixture\""));
         assert!(receipt.contains("\"transport_used\": true"));
         assert_ne!(row.remote, "/airgap/mirror/fixture");
+    }
+
+    #[test]
+    fn bootstrap_outcomes_match_standalone_state_and_transport_semantics() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("wall clock is after the Unix epoch")
+            .as_nanos();
+        let base = std::env::temp_dir().join(format!(
+            "xtask-bootstrap-outcome-{}-{unique}",
+            std::process::id(),
+        ));
+        let upstream = base.join("upstream");
+        std::fs::create_dir_all(&upstream).expect("create isolated upstream");
+        git_run(&upstream, &["init", "--quiet"]).expect("initialize upstream");
+        git_run(
+            &upstream,
+            &[
+                "config",
+                "--local",
+                "user.email",
+                "bootstrap@frankensim.test",
+            ],
+        )
+        .expect("configure upstream email");
+        git_run(
+            &upstream,
+            &["config", "--local", "user.name", "bootstrap parity"],
+        )
+        .expect("configure upstream name");
+        git_run(&upstream, &["config", "--local", "commit.gpgsign", "false"])
+            .expect("disable fixture signing");
+        std::fs::write(upstream.join("fixture.rs"), "pub fn pinned() {}\n")
+            .expect("write pinned fixture");
+        git_run(&upstream, &["add", "fixture.rs"]).expect("stage pinned fixture");
+        git_run(&upstream, &["commit", "--quiet", "-m", "pinned"]).expect("commit pinned fixture");
+        let pinned_head = git_out(&upstream, &["rev-parse", "HEAD"]).expect("read fixture head");
+        let selected = format!("file://{}", upstream.display());
+        let row = LockRow {
+            lib: "fixture".to_string(),
+            version: "1.0.0".to_string(),
+            git_head: pinned_head,
+            remote: selected.clone(),
+            path: "/constellation/fixture".to_string(),
+        };
+
+        let marked_target = base.join("marked-at-pin");
+        std::fs::create_dir_all(&marked_target).expect("create marked destination");
+        git_run(&marked_target, &["init", "--quiet"]).expect("initialize marked destination");
+        git_run(
+            &marked_target,
+            &["remote", "add", "origin", selected.as_str()],
+        )
+        .expect("configure marked origin");
+        git_run(
+            &marked_target,
+            &[
+                "fetch",
+                "--quiet",
+                "--depth",
+                "1",
+                "origin",
+                row.git_head.as_str(),
+            ],
+        )
+        .expect("fetch marked pin");
+        git_run(
+            &marked_target,
+            &["checkout", "--quiet", "--detach", row.git_head.as_str()],
+        )
+        .expect("checkout marked pin");
+        git_run(
+            &marked_target,
+            &["config", "--local", BOOTSTRAP_INCOMPLETE_KEY, "true"],
+        )
+        .expect("mark interrupted checkout");
+        let marked_at_pin = bootstrap_checkout(
+            &row,
+            &marked_target,
+            "/unreachable-transport-must-not-be-used",
+            false,
+        )
+        .expect("already-pinned marked checkout resumes without transport");
+        assert_eq!(marked_at_pin.state, "resumed");
+        assert!(!marked_at_pin.transport_used);
+        assert!(
+            git_out(
+                &marked_target,
+                &["config", "--local", "--get", BOOTSTRAP_INCOMPLETE_KEY],
+            )
+            .is_err(),
+            "successful pinned replay clears the incomplete marker",
+        );
+        assert_eq!(
+            bootstrap_provenance_row(
+                &row,
+                "/unreachable-transport-must-not-be-used",
+                marked_at_pin.transport_used,
+                marked_at_pin.state,
+            ),
+            format!(
+                "{{\"lib\": \"fixture\", \"git_head\": \"{}\", \"remote\": \"{}\", \"selected_transport\": \"/unreachable-transport-must-not-be-used\", \"transport_used\": false, \"state\": \"resumed\"}}",
+                row.git_head, row.remote,
+            ),
+            "clearing an already-pinned marker must not claim network or mirror use",
+        );
+
+        let empty_target = base.join("pre-existing-empty");
+        std::fs::create_dir_all(&empty_target).expect("create empty destination");
+        let initialized_empty = bootstrap_checkout(&row, &empty_target, &selected, false)
+            .expect("pre-existing empty destination materializes at the pin");
+        assert_eq!(initialized_empty.state, "cloned");
+        assert!(initialized_empty.transport_used);
+        assert_eq!(
+            git_out(
+                &empty_target,
+                &["config", "--local", "--get", "core.autocrlf"],
+            )
+            .expect("initialized repository pins checkout byte policy"),
+            "false",
+        );
+        assert_eq!(
+            bootstrap_provenance_row(
+                &row,
+                &selected,
+                initialized_empty.transport_used,
+                initialized_empty.state,
+            ),
+            format!(
+                "{{\"lib\": \"fixture\", \"git_head\": \"{}\", \"remote\": \"{}\", \"selected_transport\": \"{}\", \"transport_used\": true, \"state\": \"cloned\"}}",
+                row.git_head, row.remote, selected,
+            ),
+            "a pre-existing empty directory initialized by this invocation is a clone, not a resume",
+        );
     }
 
     #[test]

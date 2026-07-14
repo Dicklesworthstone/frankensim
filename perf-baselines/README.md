@@ -1,29 +1,50 @@
-# Fleet reference baseline stores (bead c40j)
+# Fleet reference baseline candidates (bead c40j)
 
-Governed machine-axis baselines for citable roofline gates (dfh3
-design): each JSONL row is a `promote_baseline` record — ≥3 mutually
-agreeing quiet probes, named operator, justification, promotion day,
-age policy. Gates consume via `FRANKENSIM_BASELINE_STORE=<file>` +
-`FRANKENSIM_FIRMWARE_ID=<id>`, or `roofline --baseline <file>`.
+These files are operator-promoted machine-axis **candidates**, not authority-
+admitted citable baselines. Each plain JSONL row is a `promote_baseline` record
+from at least three mutually agreeing quiet probes, with a named operator,
+justification, promotion day, and age policy. Plain rows can ground diagnostic
+comparison, but they are structurally report-only even when every axis is
+inside its band.
 
-Bootstrap/update a machine (re-promotion is the only update path):
+Perf lanes read a candidate or attested store via
+`FRANKENSIM_BASELINE_STORE=<file>` plus `FRANKENSIM_FIRMWARE_ID=<id>`; the
+`roofline` CLI uses `--baseline <file>` plus `--firmware <id>`. A positive
+authority-admitted run additionally needs the configured promotion-authority
+policy and retained source-receipt inputs. Perf lanes name them
+`FRANKENSIM_PROMOTION_AUTHORITY_POLICY=<tsv-file>` and
+`FRANKENSIM_RETAINED_SOURCE_RECEIPTS=<sorted-lowerhex-lines-file>`; the CLI uses
+`--authority-policy <tsv-file>` and `--retained-receipts
+<sorted-lowerhex-lines-file>`. If any authority input is absent, malformed,
+denied, revoked, or inconsistent, measurement may continue but the result
+remains explicitly report-only.
+
+Bootstrap/update a candidate (re-promotion is the only update path):
 
     roofline promote --store perf-baselines/<machine>.jsonl \
       --firmware "<os-kernel-id>" --operator "<who>" \
       --justification "<why>" [--probes 3] [--age-days 90]
 
-A loaded host REFUSES promotion (drift bands) — measure quiet.
+A loaded host REFUSES promotion (drift bands) — measure quiet. Promotion emits
+a plain candidate; it does not mint an attestation or authority decision.
 
 Promotion reads the existing store through the 1 MiB parser bound, serializes
 same-store writers with an OS file lock, durably writes a same-directory staging
 generation, and atomically renames it over the prior store. A crash before the
-rename leaves the prior authority store intact; a later promotion safely
+rename leaves the prior candidate store intact; a later promotion safely
 overwrites the staging generation.
 
-TRUST BOUNDARY: these stores are operator-trusted and tamper-evident
-(content-hashed), NOT independently verified — promotion-authority
-signatures are bead fz2.7's layer. Do not present gate results as
-third-party-verifiable until that lands.
+TRUST BOUNDARY: the committed files are operator-trusted and tamper-evident
+(content-hashed), but contain neither an attestation nor an atomic authority-
+policy decision. Do not describe a run using only one of these files as
+`citation_eligible` or citable. An attested envelope is admitted only when the
+configured verifier accepts it and every named source hash is declared present
+in the protected inventory; the exact decision snapshot must travel with the
+run's retained output.
+
+The retained-source file is a protected operator inventory declaration. This
+entrypoint checks canonical hash membership only; it does not fetch, rehash, or
+independently prove that the named source bytes remain retrievable.
 
 DEPENDENCY-GRAPH RECEIPTS (bead fz2.6): evidence-bearing perf builds must also
 carry the resolved dependency+feature receipt so tune rows cannot cross

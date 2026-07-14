@@ -1,6 +1,6 @@
 # CONTRACT: fs-roofline
 
-> Status: ACTIVE (ledger row v4, production protocol v2). Owns the roofline measurement discipline of
+> Status: ACTIVE (ledger row v4, production protocol v3). Owns the roofline measurement discipline of
 > plan §14: measured axes, intensity-derived limits, dispersion-reported
 > attainment, fingerprint-and-baseline-keyed ledger rows, staleness detection.
 
@@ -33,10 +33,55 @@ crates plus `std`.
   kernel: warmups are bounded to 1000, repetitions to `1..=1000`, registries
   to 256 kernels, and aggregate kernel invocations to 250,000 with checked
   arithmetic. Result and sample buffers use fallible reservations.
+- `AxisBaselinePolicy` / `AttestedAxisBaselinePolicy` /
+  `AxisAdmissionSnapshot` — the historical-axis trust boundary. A plain
+  `AxisBaselinePolicy` can only freeze a `candidate` snapshot and is structurally
+  report-only, even when its numerical verdict is `Trusted`.
+  `AttestedBaselineStore::policy_for_run` is the only public mint for an owned
+  attested policy: it checks exact run identity, membership of every named
+  source hash in the protected retention-inventory declaration, and one atomic
+  `ConfiguredPromotionAuthority` decision before measurement. The public mint
+  obtains its epoch day internally; callers cannot backdate admission. Its
+  consumed `decide` call obtains the day again and freezes that decision with
+  the exact pre/post probes. An unavailable clock or a policy held across an
+  epoch-day boundary yields an unauthorized snapshot rather than extending the
+  old decision. Finalization, output, and ledger recording reuse those canonical snapshot
+  bytes verbatim.
+- `ExternalPerfGateLane` / `ExternalPerfGateReceipt` /
+  `record_external_perf_gate_at_path` — the shared positive-recording boundary
+  for the FEEC and FFT performance lanes. The configured durable path is named
+  once by `EXTERNAL_PERF_GATE_LEDGER_ENV`
+  (`FRANKENSIM_ROOFLINE_LEDGER`); an empty path, `:memory:`, or any SQLite
+  `file:` URI is outside this deliberately narrow durable-path boundary. The
+  gate JSON is bounded to `MAX_EXTERNAL_PERF_GATE_JSON_BYTES`, must be one
+  valid object for the typed lane (`feec-gate` or `fft-gate`), has at most 64
+  top-level fields and 64 nested containers, and must carry exactly one top-level
+  `citation_eligible:true`, `recorded:true`, `report_only:false`, and the exact
+  supplied admission receipt. Candidate, stale, denied, malformed,
+  mismatched-lane, and report-only inputs are refusals. The Ledger-typed
+  `record_external_perf_gate_in_ledger` is the in-memory test seam; FEEC/FFT use
+  the path wrapper and need no direct fs-ledger dependency.
+
+  One recorder-owned transaction stores the exact axis-admission bytes as a
+  content-addressed `In` artifact and the exact final-gate JSON as a
+  content-addressed `Out` artifact, links both to one successful operation,
+  appends one lane-qualified diagnostic event projecting that op, both hashes,
+  and the exact gate, and returns a structured receipt containing the local
+  op/event ids, lane, and both hashes. Artifact write receipts, exact bounded
+  byte re-reads, role-qualified edges, and every operation-envelope field must
+  all agree before commit. The append-only event API has no general payload
+  reader; the recorder therefore checks its positive row id and an exact
+  one-row event count increment in-transaction. Those checks prove insertion,
+  not the stored event payload; the event is non-authoritative, while the
+  content-addressed artifact and op IR are the byte-exact re-read authority. A
+  caller-owned transaction is refused. Admission freshness is checked again
+  after all writes and immediately before commit, so a UTC-day
+  rollover rolls back the complete gate instead of extending yesterday's
+  authority. Both the operation start and completion wall timestamps must be
+  monotone and map to that same decision day.
 - `run_admission_error` / `run_passes_measurement_admission` — the aggregate
-  measurement boundary:
-  require an explicit `AxisBaselinePolicy` whose selected baseline trusts both
-  exact pre/post probes, private timed provenance, positive
+  measurement boundary: require a frozen snapshot whose selected baseline
+  trusts both exact pre/post probes, private timed provenance, positive
   work count and sample durations, raw-sample re-derivation, unmodified
   spec/derived fields, and unique kernel identities. Passing this predicate is
   necessary but not sufficient for citation: only the sealed production
@@ -63,7 +108,7 @@ crates plus `std`.
   exact sealed session row from their stable binding (fresh or adopted), plus
   metrics, `benchmark_result` events, and
   roofline `tune` rows keyed (kernel ×
-  `roofline-v7:<kernel-version>:run=<finalized-receipt>:op=<operation-id>` × fingerprint LE bytes
+  `roofline-v8:<kernel-version>:run=<finalized-receipt>:op=<operation-id>` × fingerprint LE bytes
   × 32-byte baseline hash). Rows are append-only per finalized receipt and bind
   the exact executable-content identity, operation, baseline, repetition count,
   and post-probe axes. Every measured payload is also stored as a
@@ -79,7 +124,9 @@ crates plus `std`.
   or tuning evidence; storage failures roll back the entire write set.
   The public custom-registry path uses the disjoint
   `roofline-candidate-v1:<kernel-version>:run=...` namespace; exploratory rows
-  therefore cannot satisfy or poison the production `roofline-v7` scan.
+  therefore cannot satisfy or poison the production `roofline-v8` scan. Retained
+  v7 rows coexist as historical data but are outside the v8 production keyspace
+  and cannot satisfy a current lookup.
 - `staleness` / `staleness_at` — `Fresh` / `Expired` / `ClockRollback` /
   `FingerprintDrift` / `BaselineUnavailable` / `BaselineDrift` / `BuildDrift` /
   `CorruptEvidence` / `NeverMeasured` per kernel version, fingerprint, selected
@@ -91,7 +138,7 @@ crates plus `std`.
   and dependency receipts at fs-la's producer-owned 1 MiB ceiling, with a
   source-pin test that fails on independent producer drift. A bound
   refusal is corrupt evidence, never an engine failure. Validation also
-  requires the canonical `production-v2` stamp,
+  requires the canonical `production-v3` stamp,
   well-formed nonce/pre-probe/post-probe fields, exact dependency artifact
   kind/metadata/bytes, an `In` lineage edge, and a digest recomputed with
   `fs_session::GEMM_DEPGRAPH_RECEIPT_DOMAIN`. Historical rows validate against
@@ -105,14 +152,18 @@ crates plus `std`.
   timestamps all revalidate.
   `staleness_at` takes explicit wall nanoseconds for deterministic replay;
   `staleness` supplies the current clock.
-- Sealed production protocol (bead fz2.5): `production::ProductionProbe` /
-  `ProductionRun` is the only API path to a production citation candidate. `observe()` performs
+- Sealed production protocol: `production::ProductionProbe` / `ProductionRun`
+  is the only API path to a production citation candidate. `observe()` performs
   the pre-probe and mints a per-run nonce (callers may read the axes for
-  baseline selection but never supply them); `run()` owns production
-  registry selection, timed warmup/repetitions, the post-probe (observed
-  strictly after the timed loop), aggregate admission, and tune
-  finalization; `record()` consumes the run and stamps the operation `ir`
-  with `"protocol":"production-v2"`, the nonce, content hashes of both
+  baseline selection but never supply them). `run()` accepts only an opaque
+  `AttestedAxisBaselinePolicy`, owns production registry selection, timed
+  warmup/repetitions, the post-probe (observed strictly after the timed loop),
+  one frozen admission snapshot, aggregate admission, and tune finalization.
+  `run_report_only()` accepts `AxisBaselinePolicy` and returns a distinct
+  `ReportOnlyProductionRun` with no `citation_eligible()` method and no ability
+  to publish production metrics or tune rows. Both `record()` methods consume
+  the run and retain the exact snapshot; only the attested type stamps the
+  operation `ir` with `"protocol":"production-v3"`, the nonce, content hashes of both
   observed axis receipts, and the dependency-receipt artifact/digest. Its
   `citation_eligible()` pre-commit predicate additionally refuses the default
   development salt with a structured report-only reason; CLI output cannot set
@@ -161,7 +212,7 @@ crates plus `std`.
   run binds a versioned `result_manifest` (ordinal × kernel × version ×
   payload content hash, canonical JSON) into the operation `ir` and folds its
   domain-separated hash into the finalized run receipt
-  (`finalized-run.v2`). Kernel/version identifiers are bounded to 1..=128
+  (`finalized-run.v3`). Kernel/version identifiers are bounded to 1..=128
   canonical ASCII bytes and JSON-escaped before any admission decision, so a
   refused custom registry cannot corrupt the retained operation envelope.
   Staleness revalidation reconstructs the entire receipt
@@ -204,9 +255,19 @@ crates plus `std`.
   evidence. Execution is sequential through exclusive `&mut RooflineKernel`;
   no wrapper lock hides tune state.
 - `roofline` CLI bin — axes line, per-kernel JSONL, §14.1 coverage table,
-  optional `--baseline <jsonl>` plus required `--firmware <identity>`, and
-  optional `--ledger` recording + composite staleness report. Omitting the
-  baseline is an explicit report-only candidate run (`citable:false`).
+  optional `--baseline <jsonl>`, `--firmware <identity>`,
+  `--authority-policy <tsv>`, `--retained-receipts <lowerhex-lines>`, and
+  optional `--ledger` recording + composite staleness report. Plain stores are
+  auto-detected and always call `run_report_only`. An attested envelope calls
+  `run` only when both strict, bounded configuration files parse and
+  `policy_for_run` admits the exact machine. Missing, partial, malformed,
+  denied, revoked, tampered, or cross-machine input is measured through
+  `run_report_only`, emits `citation_eligible:false`, and retains its candidate
+  snapshot in the same `--ledger`; there is no separate ledger setting. A
+  configuration refusal longer than the durable diagnostic ceiling is retained
+  as a UTF-8-safe prefix plus its original byte length and a domain-separated
+  digest, so diagnostic size cannot discard an already completed report-only
+  measurement.
 
 - `regress` module (plan §14.4, bead fz2.4): the regression layer.
   `gate` — DISPERSION-AWARE bands (k·σ against the rolling baseline,
@@ -305,18 +366,29 @@ crates plus `std`.
    traversals with sequential declared run ordinals, so NC/KC panels have
    distinct deterministic stream identities, while excluding nondeterministic
    steal, worker-distribution, and latency samples.
-10. Citable admission additionally requires an explicit `AxisBaselinePolicy`
-    whose selected baseline returns `Trusted` for both exact pre/post axis
-    receipts. `record_run` binds the bit-exact axis records, declared
-    environment/day, canonical baseline preimage, domain hash, and verdict in
-    the same transaction. `None` is an explicit unbaselined candidate policy,
-    never a permissive default; it publishes no metrics or tune rows.
+10. Citable admission requires an `AttestedAxisBaselinePolicy` minted by
+    `AttestedBaselineStore::policy_for_run`, followed by a frozen snapshot whose
+    selected baseline returns `Trusted` for both exact pre/post axis receipts.
+    The snapshot binds the bit-exact axis records, declared environment/day,
+    canonical baseline preimage and hash, attestation, sorted retained-source
+    set, internally observed mint/decision day, and atomic authority verdict
+    plus policy receipt. `AxisBaselinePolicy`
+    (including `None`) is explicitly candidate/report-only and cannot publish
+    production metrics or tune rows.
 11. The ledger op's versions field contains a domain-separated hash of the
     actual current executable bytes, not a checkout label or ambient CI
     variable. Each roofline row binds that identity and staleness revalidates it
     against both the successful op and the executable currently asking, so two
     rebuilt binaries cannot share provenance merely because their source
     revision string matches.
+12. An external FEEC/FFT gate can claim `recorded:true` only after the shared
+    recorder accepts an authority-admitted snapshot and a lane-matched positive
+    recording envelope. The exact snapshot (including attestation key,
+    signature, authority-policy receipt, and complete sorted source-receipt
+    set) and exact final gate remain separately content-addressed and connected
+    to one operation and projected by its lane-qualified diagnostic event. Any
+    validation, write, re-read, edge, event receipt/count, operation, commit,
+    or same-day revalidation failure is one atomic refusal.
 
 ## Error model
 
@@ -332,7 +404,9 @@ cannot survive into registry reuse. The production GEMM propagates session,
 tune-key, and execution-receipt refusals through this path rather than panicking.
 Observations such as zero rates remain successful measurements with invalid
 evidence normalized to finite JSON plus an explicit reason. Ledger interaction returns `fs_ledger::LedgerError`
-(structured, machine-actionable). The CLI refuses malformed arguments with
+(structured, machine-actionable). The external gate recorder uses the same
+error vocabulary for invalid lane/payload/admission, non-durable paths, caller
+transactions, and exact write/read mismatches. The CLI refuses malformed arguments with
 a structured JSON error on stderr and a nonzero exit.
 
 ## Determinism class
@@ -404,9 +478,9 @@ canonical `axis_baseline_admission` event.
   and thermal controls are future scope (v0 measures whole-machine axes).
 - Static floors plus pre/post agreement cannot detect a host that is already
   degraded before the first probe and remains equally degraded through the
-  second. Every citable API and the CLI now require a separately admitted
-  `BaselineAxes` through `AxisBaselinePolicy`; reporting-only lanes may run
-  unbaselined but their measurements are candidate evidence, never citable.
+  second. Every citable API and the CLI therefore require a separately attested
+  `BaselineAxes` through `AttestedBaselineStore::policy_for_run`; plain or
+  unbaselined measurements are candidate evidence, never citable.
 - `RooflineKernel::elements()` and intensity are asserted by the registered
   implementation. The measurement receipt proves what was timed and how the arithmetic was
   derived; it does not prove a custom trait implementation performed the work
@@ -420,7 +494,7 @@ canonical `axis_baseline_admission` event.
   tuning sweep and machine-axis probes add control/calibration work outside the
   four registry intensity rows.
 - Dependency receipts are operator-observed, structurally validated evidence,
-  not Cargo-authenticated invocation proofs or signatures. Protocol v2 proves
+  not Cargo-authenticated invocation proofs. Protocol v3 proves
   that the exact bytes compiled into fs-session were retained, rehashed, linked
   to the operation. The receipt command admits only byte-identical results from
   two complete Cargo-discovery-plus-package-hashing derivations, so detected
@@ -433,27 +507,35 @@ canonical `axis_baseline_admission` event.
   the actual rustc invocation remains an explicit no-claim.
 - Verdict gating in CI is deliberately absent on shared runners; bands
   bind only on ledgered reference machines (nightly lane, later).
-- Baseline promotion authority (bead fz2.7): the `authority` module adds
-  a `PromotionAuthorityVerifier` capability with typed verdicts
-  (authorized / wrong-signature / unknown-key / revoked-key) over a
-  `PromotionAttestation` signed on the record's content hash — which
-  binds the canonical schema/domain hash, sorted source receipts,
-  band/drift policy, machine identity, and promotion time, so editing
-  ANY of them (including the free-text `promoted_by`) invalidates the
-  signature. `AttestedBaselineStore::admit_verified` refuses
-  unattested/forged/edited records, unknown or revoked keys, and
-  promotions whose named source receipts are not in the retained set;
-  `citable_axis_admission_authorized` (and
-  `AxisBaselinePolicy::with_authority`) re-verify before EVERY citable
-  decision and bind the verifying key identity into the admission
-  receipt. Rotation = authorize the new key and re-promote; revocation
-  retroactively demands re-promotion. TRUST CLASS, stated honestly: the
-  in-tree `StaticKeyRegistry` is an operator-governed registry with
-  domain-separated keyed-hash tags — tamper-EVIDENT, not unforgeable
-  (its tag function is public); unforgeable signatures require an
-  EXTERNAL verifier implementation injected through the same trait. The
-  UNBOUND `AxisBaselinePolicy` tier remains operator-trusted and its
-  receipts say `"authority":"operator-trusted"`.
+- The external gate recorder certifies atomic retention and correspondence of
+  an authority-admitted axis snapshot, typed lane envelope, and exact gate
+  bytes. It does not independently re-run the FEEC/FFT kernel, validate either
+  lane's FLOP/traffic model, prove the target threshold, authenticate a
+  malicious general ledger writer, or provide post-record revocation and
+  freshness. Those measurement semantics remain owned by the lane tests and
+  their crate contracts; the recorder deliberately permits a retained citable
+  gate whose measured target is false.
+- Baseline promotion authority is configured at the entrypoint through
+  `ConfiguredPromotionAuthority::from_text`. Its bounded canonical TSV policy
+  names exact authorized messages and revoked key IDs; every atomic
+  `PromotionAuthorityDecision` binds the verdict and a hash of those exact
+  policy bytes. `AttestedBaselineStore::policy_for_run` selects one exact
+  machine baseline, verifies the envelope against that policy, requires every
+  canonical source hash in the strictly sorted protected retention inventory,
+  and mints one owned policy. Missing records, edited envelopes, wrong authorization,
+  unknown or revoked keys, missing sources, and identity drift are refusals.
+  The resulting admission receipt freezes baseline, attestation, sources,
+  authority verdict, policy receipt, and probe pair. This snapshot proves the
+  decision made for that run; it does not provide later live revocation or
+  post-record freshness. The mint and consumed decision each read the system
+  epoch day; clock failure or a day-boundary mismatch freezes an unauthorized
+  snapshot. `AxisBaselinePolicy` stays structurally `candidate`
+  and never carries positive authority.
+- The retained-source input is a protected operator declaration of hash
+  membership, not a source-artifact reader. `fs-roofline` does not fetch or
+  rehash the named bytes at admission time and makes no independent claim that
+  those bytes remain retrievable; artifact-backed availability proof belongs to
+  a later retention service boundary.
 
 ## Trusted historical axis baselines (bead dfh3)
 
@@ -474,10 +556,12 @@ Trust laws:
    promoted value is the per-axis maximum over the runs (a too-low
    baseline would inflate later attainment). Updates are re-promotions;
    no in-place mutation API exists.
-3. `citable_axis_admission(pre, post, baseline, identity, now_day)`
+3. `candidate_axis_admission(pre, post, baseline, identity, now_day)`
    composes absolute floors (last-resort sanity, unchanged) + pre/post
-   agreement + baseline bands. Only `BaselineVerdict::Trusted` supports
-   citable gates. Distinct refusals: `Degraded` (an axis below 0.70 of
+   agreement + baseline bands for a report-only numerical assessment.
+   `BaselineVerdict::Trusted` is still non-citable until an opaque attested
+   policy freezes the same assessment with positive authority. Distinct
+   refusals: `Degraded` (an axis below 0.70 of
    baseline — the 6-GB/s-on-a-100-GB/s-host counterexample), `Suspect`
    (above 1.15× — not the machine the baseline describes), `Stale`
    (past the age policy), `IdentityDrift` (fingerprint/topology/OS/
@@ -545,9 +629,11 @@ queries per kernel:
 - `checkpoint_staleness_history(ledger, kernel, version, fingerprint,
   baseline)` runs the exhaustive per-row verifier once and appends a
   checkpoint row to the tune table under the reserved kernel
-  `roofline-staleness-checkpoint:<kernel>` (invisible to production row
-  queries, machine-keyed identically to the rows it covers). The body is
-  canonical JSON: per covered row a domain-separated content hash over the
+  `roofline-staleness-checkpoint:<kernel>` with a v2 shape prefix (invisible to
+  production row queries, machine-keyed identically to the rows it covers).
+  Free-form kernel, version, and shape bytes are lowercase-hex framed in the
+  canonical JSON body, so JSON delimiters cannot collide. Per covered row it
+  retains a domain-separated content hash over the
   row's full stored identity (kernel ‖ shape_class ‖ machine ‖ params ‖
   measured, length-prefixed), the validated build identity, the op-bound
   dependency-receipt digests, the recorded timestamp, and a verdict.
@@ -555,10 +641,36 @@ queries per kernel:
   prev_digest ‖ body)`; ordinals are dense from 0 and the row's params
   restate the expected digest. Insertion is `tune_put_if_absent` plus a
   read-back equality check, so a colliding ordinal can never overwrite
-  sealed history.
+  sealed history. Load, comparison, insertion, and a final strict chain
+  re-read share one transaction owned by the sealing call. Sealing refuses an
+  already-open caller transaction, because without savepoints a post-insert
+  verification failure could otherwise leave a row for the caller to commit;
+  every owned error path attempts rollback and reports a rollback failure
+  explicitly.
+- Both durable digest layers are registered identities rather than implicit
+  helper hashes. `fs-roofline:staleness-row-content` v1 binds the exact five
+  stored tune-row fields with ordered u64 length prefixes.
+  `fs-roofline:staleness-checkpoint-chain` v2 binds the canonical body schema,
+  kernel/version/ordinal, previous-digest presence and value, ordered entry
+  count and every entry field; it declares the row-content, executable-build,
+  and dependency-receipt child identities. Mutation batteries cover every
+  semantic field, lowercase-hex framing, domain, and version, while strict
+  `load_chain` canonical reserialization is the transport guard. The identity
+  closure explicitly binds the content-hash byte/hex/parser primitives.
+- Retained v1 shapes under the same reserved kernel remain binding evidence.
+  Their frozen v1 parser and digest are verified first. Because the historical
+  v1 writer authenticated snapshots but not snapshot transitions, migration
+  conservatively normalizes the union of every v1 entry: shapes never
+  disappear, only byte-identical valid metadata remains valid, and any corrupt
+  verdict, valid rewrite, or temporary omission becomes a canonical permanent
+  tombstone. Later v1 snapshots cannot move that tombstone's row hash or
+  restore it to valid. A v2 genesis restarts its own ordinal at zero, names the
+  exact verified v1 tip as `prev`, and carries that normalized union. Any later
+  v1 append, truncation, or mutation breaks the bridge; v1 history cannot be
+  laundered by an upgrade.
 - `staleness_at_checkpointed(...)` mirrors `staleness_at` exactly on the
   selection lattice (NeverMeasured/FingerprintDrift/BaselineUnavailable/
-  BaselineDrift decided identically, before any chain access). With a
+  BaselineDrift decided identically when no exact-machine seal exists). With a
   verified chain, covered rows are checked by content hash and replayed
   through the build/dependency scan from sealed metadata — two bounded
   read queries total, independent of history depth (tested at 40 retained
@@ -566,18 +678,29 @@ queries per kernel:
   validator. Any anomaly FAILS CLOSED: a missing, gapped, duplicate,
   reparse-failing, digest-mismatching, or params-inconsistent chain routes
   the probe to the exhaustive path, and a covered row that was altered or
-  removed classifies CorruptEvidence.
+  removed classifies CorruptEvidence. Exact-machine history is loaded before a
+  no-row lattice return, so deletion of *every* covered production row is
+  CorruptEvidence rather than NeverMeasured.
 - Tombstones are permanent: a row sealed `corrupt` stays corrupt in every
   later checkpoint (re-sealing inherits tombstones before re-validating),
   and restoring the original bytes never un-corrupts the fast-path verdict
   — an operator who trusts checkpoints keeps seeing the incident.
 - Sealing over a chain that fails verification is refused
   (`LedgerError::Invalid`): a broken chain is permanent evidence, never
-  extended and never overwritten.
+  extended and never overwritten. Each new snapshot is monotonic: prior valid
+  rows cannot disappear or change bytes, prior corrupt rows remain tombstones
+  even when their production row is absent or restored, and new rows are
+  exhaustively verified.
 - No-claim: the chain authenticates against *later mutation of covered
   history*; it is tamper-EVIDENT, not unforgeable. A writer with tune-table
   access can mint a fresh chain for uncovered history; what they cannot do
   is alter rows under an existing seal (or truncate them) without the next
-  checkpointed probe classifying CorruptEvidence. Chain length shares the
-  ledger's per-kernel tune-row bound (1024); compaction of old checkpoints
-  is future work and must preserve tombstone permanence.
+  checkpointed probe classifying CorruptEvidence. Suffix truncation of the
+  newest checkpoint itself still requires an independently retained head
+  anchor to detect; the in-ledger chain makes no such external-retention claim.
+  The shared reserved-kernel read is bounded over the aggregate of v1 and v2
+  rows across every machine and version for that production kernel: 1024 rows
+  and 16 MiB total, not 1024 rows per individual chain. An unrelated-machine
+  or unrelated-version flood can therefore make sealing/probing refuse early;
+  an exact machine/prefix query and compaction are future work and must preserve
+  tombstone permanence.

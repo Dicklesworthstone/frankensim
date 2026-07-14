@@ -3,6 +3,7 @@
 //! Usage:
 //!   roofline [--n <elements>] [--warmup <k>] [--reps <k>] [--ledger <db>]
 //!            [--baseline <jsonl>] [--firmware <identity>]
+//!            [--authority-policy <tsv>] [--retained-receipts <txt>]
 //!   roofline promote --store <jsonl> --firmware <identity>
 //!            --operator <name> --justification <text>
 //!            [--probes <k≥3>] [--age-days <d>]
@@ -12,11 +13,17 @@
 //! and — when `--ledger` is given — records the run as ledger provenance
 //! and reports staleness for every registered kernel.
 
-use fs_roofline::production::{ProductionProbe, ProductionRunConfig};
-use fs_roofline::{
-    AxisBaselinePolicy, BaselineIdentity, BaselineStore, MachineAxes, PRODUCTION_PROTOCOL_VERSION,
-    SECTION_14_1_TARGETS, STALENESS_MAX_AGE_NS, days_since_epoch_now, staleness,
+use fs_roofline::authority::ConfiguredPromotionAuthority;
+use fs_roofline::production::{
+    ProductionProbe, ProductionRun, ProductionRunConfig, ReportOnlyProductionRun,
 };
+use fs_roofline::{
+    AttestedAxisBaselinePolicy, AttestedBaselineStore, AxisBaselinePolicy, BaselineAxes,
+    BaselineIdentity, BaselineStore, CUSTOM_REGISTRY_PROTOCOL_VERSION, ContentHash, MachineAxes,
+    PRODUCTION_PROTOCOL_VERSION, SECTION_14_1_TARGETS, STALENESS_MAX_AGE_NS, days_since_epoch_now,
+    staleness,
+};
+use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -70,6 +77,8 @@ struct CliArgs {
     ledger_path: Option<String>,
     baseline_path: Option<String>,
     firmware: Option<String>,
+    authority_policy_path: Option<String>,
+    retained_receipts_path: Option<String>,
 }
 
 impl Default for CliArgs {
@@ -81,6 +90,8 @@ impl Default for CliArgs {
             ledger_path: None,
             baseline_path: None,
             firmware: None,
+            authority_policy_path: None,
+            retained_receipts_path: None,
         }
     }
 }
@@ -95,13 +106,16 @@ fn positive_usize(flag: &str, value: &str) -> Result<usize, String> {
 
 const MAX_PROMOTION_PROBES: usize = 1_000;
 const MAX_BASELINE_AGE_DAYS: u32 = 36_500;
+const MAX_AUTHORITY_INPUT_BYTES: usize =
+    fs_roofline::authority::MAX_PROMOTION_AUTHORITY_POLICY_BYTES;
+const MAX_RETAINED_RECEIPTS_INPUT_BYTES: usize = fs_roofline::baseline::MAX_BASELINE_STORE_BYTES;
 
 /// `roofline promote` — the operator bootstrap for governed baselines
 /// (bead c40j): probe the machine axes N ≥ 3 times, build candidates,
 /// run [`fs_roofline::promote_baseline`] (which REFUSES on a loaded
 /// host — the drift bands are the point), and create-or-update the
-/// JSONL store. Until fz2.7 lands signatures, the store is
-/// operator-trusted/tamper-evident, not independently verified.
+/// JSONL store. This creates an operator-promoted candidate; attestation
+/// and promotion-authority admission are separate operations.
 struct PromoteArgs {
     store: String,
     firmware: String,
@@ -183,9 +197,9 @@ fn run_promote(args: &PromoteArgs) -> Result<(), String> {
         println!("{}", axes.to_jsonl());
         let identity = BaselineIdentity::current(&axes, args.firmware.clone())
             .map_err(|error| format!("probe {ordinal}: {error}"))?;
-        // A content-derived source receipt: the probe's own canonical
-        // bytes under a CLI-specific domain (structural traceability;
-        // authentication is fz2.7's layer, stated in the store README).
+        // A content-derived source receipt: the probe's own canonical bytes
+        // under a CLI-specific domain. Promotion remains a plain candidate;
+        // attestation and configured authority admission are separate steps.
         let receipt = fs_blake3::hash_domain(
             "fs-roofline.cli-baseline-source.v1",
             axes.to_jsonl().as_bytes(),
@@ -556,7 +570,14 @@ fn parse_args(args: &[String]) -> Result<CliArgs, String> {
     while let Some(flag) = args.next() {
         if !matches!(
             flag.as_str(),
-            "--n" | "--warmup" | "--reps" | "--ledger" | "--baseline" | "--firmware"
+            "--n"
+                | "--warmup"
+                | "--reps"
+                | "--ledger"
+                | "--baseline"
+                | "--firmware"
+                | "--authority-policy"
+                | "--retained-receipts"
         ) {
             return Err(format!("unknown roofline argument {flag:?}"));
         }
@@ -577,11 +598,10 @@ fn parse_args(args: &[String]) -> Result<CliArgs, String> {
             "--ledger" => parsed.ledger_path = Some(value.clone()),
             "--baseline" => parsed.baseline_path = Some(value.clone()),
             "--firmware" => parsed.firmware = Some(value.clone()),
+            "--authority-policy" => parsed.authority_policy_path = Some(value.clone()),
+            "--retained-receipts" => parsed.retained_receipts_path = Some(value.clone()),
             _ => return Err(format!("unknown roofline argument {flag:?}")),
         }
-    }
-    if parsed.baseline_path.is_some() && parsed.firmware.is_none() {
-        return Err("--firmware is required when --baseline is supplied".to_string());
     }
     ProductionRunConfig {
         n: parsed.n,
@@ -592,66 +612,326 @@ fn parse_args(args: &[String]) -> Result<CliArgs, String> {
     Ok(parsed)
 }
 
-struct BaselineInputs {
-    store: Option<BaselineStore>,
-    identity: BaselineIdentity,
-    now_day: u64,
+enum BaselineSource {
+    None,
+    Plain(BaselineStore),
+    Attested(AttestedBaselineStore),
+    Invalid(String),
 }
 
-impl BaselineInputs {
-    fn policy(&self, fingerprint: u64) -> AxisBaselinePolicy<'_> {
-        AxisBaselinePolicy::new(
-            self.store
-                .as_ref()
-                .and_then(|store| store.for_fingerprint(fingerprint)),
-            &self.identity,
-            self.now_day,
-        )
+impl BaselineSource {
+    fn candidate_for_fingerprint(&self, fingerprint: u64) -> Option<&BaselineAxes> {
+        match self {
+            Self::Plain(store) => store.for_fingerprint(fingerprint),
+            Self::Attested(store) => store.for_fingerprint(fingerprint),
+            Self::None | Self::Invalid(_) => None,
+        }
     }
 }
 
-fn parse_bounded_baseline_store(reader: impl Read, source: &str) -> Result<BaselineStore, String> {
-    let limit = fs_roofline::baseline::MAX_BASELINE_STORE_BYTES;
+struct BaselineInputs {
+    source: BaselineSource,
+    identity: BaselineIdentity,
+    now_day: u64,
+    preliminary_refusal: Option<String>,
+    authority: Result<ConfiguredPromotionAuthority, String>,
+    retained_receipts: Result<BTreeSet<ContentHash>, String>,
+}
+
+enum RunBaselinePolicy<'a> {
+    Attested(AttestedAxisBaselinePolicy),
+    ReportOnly {
+        policy: AxisBaselinePolicy<'a>,
+        refusal: String,
+    },
+}
+
+impl BaselineInputs {
+    fn report_only(&self, fingerprint: u64, refusal: String) -> RunBaselinePolicy<'_> {
+        RunBaselinePolicy::ReportOnly {
+            policy: AxisBaselinePolicy::new(
+                self.source.candidate_for_fingerprint(fingerprint),
+                &self.identity,
+                self.now_day,
+            ),
+            refusal,
+        }
+    }
+
+    fn policy(&self, fingerprint: u64) -> RunBaselinePolicy<'_> {
+        if let Some(refusal) = &self.preliminary_refusal {
+            let source_context = match &self.source {
+                BaselineSource::None => Some("no baseline store was supplied"),
+                BaselineSource::Plain(_) => {
+                    Some("plain baseline stores are candidate/report-only inputs")
+                }
+                BaselineSource::Invalid(error) => Some(error.as_str()),
+                BaselineSource::Attested(_) => None,
+            };
+            return self.report_only(
+                fingerprint,
+                source_context.map_or_else(
+                    || refusal.clone(),
+                    |context| format!("{refusal}; {context}"),
+                ),
+            );
+        }
+        let BaselineSource::Attested(store) = &self.source else {
+            let refusal = match &self.source {
+                BaselineSource::None => "no baseline store was supplied".to_string(),
+                BaselineSource::Plain(_) => {
+                    "plain baseline stores are candidate/report-only inputs".to_string()
+                }
+                BaselineSource::Invalid(error) => error.clone(),
+                BaselineSource::Attested(_) => unreachable!(),
+            };
+            return self.report_only(fingerprint, refusal);
+        };
+        let authority = match &self.authority {
+            Ok(authority) => authority,
+            Err(error) => return self.report_only(fingerprint, error.clone()),
+        };
+        let retained_receipts = match &self.retained_receipts {
+            Ok(receipts) => receipts,
+            Err(error) => return self.report_only(fingerprint, error.clone()),
+        };
+        match store.policy_for_run(&self.identity, authority, retained_receipts) {
+            Ok(policy) => RunBaselinePolicy::Attested(policy),
+            Err(error) => self.report_only(
+                fingerprint,
+                format!("attested baseline authority refused: {error}"),
+            ),
+        }
+    }
+}
+
+fn read_bounded_utf8(
+    reader: impl Read,
+    source: &str,
+    kind: &str,
+    limit: usize,
+) -> Result<String, String> {
     let bounded_bytes = limit
         .checked_add(1)
-        .ok_or_else(|| "baseline-store read bound overflows usize".to_string())?;
-    let read_limit = u64::try_from(bounded_bytes)
-        .map_err(|_| "baseline-store read bound does not fit u64".to_string())?;
+        .ok_or_else(|| format!("{kind} read bound overflows usize"))?;
+    let read_limit =
+        u64::try_from(bounded_bytes).map_err(|_| format!("{kind} read bound does not fit u64"))?;
     let mut bytes = Vec::with_capacity(bounded_bytes);
     reader
         .take(read_limit)
         .read_to_end(&mut bytes)
-        .map_err(|error| format!("cannot read baseline store {source:?}: {error}"))?;
+        .map_err(|error| format!("cannot read {kind} {source:?}: {error}"))?;
     if bytes.len() > limit {
-        return Err(format!(
-            "baseline store {source:?} exceeds the {limit}-byte bound"
-        ));
+        return Err(format!("{kind} {source:?} exceeds the {limit}-byte bound"));
     }
-    let text =
-        String::from_utf8(bytes).map_err(|_| format!("baseline store {source:?} is not UTF-8"))?;
+    String::from_utf8(bytes).map_err(|_| format!("{kind} {source:?} is not UTF-8"))
+}
+
+fn parse_bounded_baseline_store(reader: impl Read, source: &str) -> Result<BaselineStore, String> {
+    let text = read_bounded_utf8(
+        reader,
+        source,
+        "baseline store",
+        fs_roofline::baseline::MAX_BASELINE_STORE_BYTES,
+    )?;
     BaselineStore::from_jsonl(&text).map_err(|error| error.to_string())
 }
 
-fn load_baseline_inputs(args: &CliArgs, axes: &MachineAxes) -> Result<BaselineInputs, String> {
-    let identity = BaselineIdentity::current(
-        axes,
-        args.firmware.as_deref().unwrap_or("unbaselined-candidate"),
-    )
-    .map_err(|error| error.to_string())?;
-    let now_day = days_since_epoch_now().map_err(|error| error.to_string())?;
-    let store = match args.baseline_path.as_deref() {
-        Some(path) => {
-            let file = std::fs::File::open(path)
-                .map_err(|error| format!("cannot read baseline store {path:?}: {error}"))?;
-            Some(parse_bounded_baseline_store(file, path)?)
+fn read_bounded_path(path: &str, kind: &str, limit: usize) -> Result<String, String> {
+    let file = std::fs::File::open(path)
+        .map_err(|error| format!("cannot read {kind} {path:?}: {error}"))?;
+    read_bounded_utf8(file, path, kind, limit)
+}
+
+fn parse_baseline_source(text: &str) -> Result<BaselineSource, String> {
+    if text.starts_with("{\"record\":") {
+        AttestedBaselineStore::from_jsonl(text)
+            .map(BaselineSource::Attested)
+            .map_err(|error| format!("invalid attested baseline store: {error}"))
+    } else {
+        BaselineStore::from_jsonl(text)
+            .map(BaselineSource::Plain)
+            .map_err(|error| format!("invalid plain baseline store: {error}"))
+    }
+}
+
+fn parse_retained_receipts(
+    reader: impl Read,
+    source: &str,
+) -> Result<BTreeSet<ContentHash>, String> {
+    let text = read_bounded_utf8(
+        reader,
+        source,
+        "retained-receipt set",
+        MAX_RETAINED_RECEIPTS_INPUT_BYTES,
+    )?;
+    let body = text.strip_suffix('\n').ok_or_else(|| {
+        "retained-receipt set must be canonical newline-terminated lowercase hex".to_string()
+    })?;
+    if body.is_empty() {
+        return Err("retained-receipt set must contain at least one receipt".to_string());
+    }
+    let mut receipts = BTreeSet::new();
+    let mut previous = None;
+    for (index, line) in body.split('\n').enumerate() {
+        if line.len() != 64
+            || !line
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(format!(
+                "retained-receipt line {} must be exactly 64 lowercase hexadecimal bytes",
+                index + 1
+            ));
         }
-        None => None,
+        let receipt = ContentHash::from_hex(line)
+            .ok_or_else(|| format!("retained-receipt line {} is not a content hash", index + 1))?;
+        if previous.is_some_and(|prior| receipt <= prior) {
+            return Err(format!(
+                "retained-receipt line {} is not in strict ascending order",
+                index + 1
+            ));
+        }
+        previous = Some(receipt);
+        let inserted = receipts.insert(receipt);
+        debug_assert!(inserted);
+    }
+    Ok(receipts)
+}
+
+fn load_baseline_inputs(args: &CliArgs, axes: &MachineAxes) -> Result<BaselineInputs, String> {
+    let declared_firmware = args.firmware.as_deref();
+    let mut preliminary_refusal = declared_firmware
+        .is_none()
+        .then(|| "--firmware was not supplied".to_string());
+    let identity =
+        match BaselineIdentity::current(axes, declared_firmware.unwrap_or("unbaselined-candidate"))
+        {
+            Ok(identity) => identity,
+            Err(error) => {
+                preliminary_refusal = Some(format!("invalid baseline identity: {error}"));
+                BaselineIdentity::current(axes, "unbaselined-candidate")
+                    .map_err(|fallback_error| fallback_error.to_string())?
+            }
+        };
+    let now_day = match days_since_epoch_now() {
+        Ok(day) => day,
+        Err(error) => {
+            let clock_refusal = format!("cannot establish baseline age: {error}");
+            preliminary_refusal = Some(match preliminary_refusal {
+                Some(prior) => format!("{prior}; {clock_refusal}"),
+                None => clock_refusal,
+            });
+            0
+        }
     };
+    let source = match args.baseline_path.as_deref() {
+        Some(path) => match read_bounded_path(
+            path,
+            "baseline store",
+            fs_roofline::baseline::MAX_BASELINE_STORE_BYTES,
+        ) {
+            Ok(text) => parse_baseline_source(&text).unwrap_or_else(BaselineSource::Invalid),
+            Err(error) => BaselineSource::Invalid(error),
+        },
+        None => BaselineSource::None,
+    };
+    let authority = args.authority_policy_path.as_deref().map_or_else(
+        || Err("--authority-policy was not supplied".to_string()),
+        |path| {
+            read_bounded_path(
+                path,
+                "promotion-authority policy",
+                MAX_AUTHORITY_INPUT_BYTES,
+            )
+            .and_then(|text| {
+                ConfiguredPromotionAuthority::from_text(&text)
+                    .map_err(|error| format!("invalid promotion-authority policy: {error}"))
+            })
+        },
+    );
+    let retained_receipts = args.retained_receipts_path.as_deref().map_or_else(
+        || Err("--retained-receipts was not supplied".to_string()),
+        |path| {
+            let file = std::fs::File::open(path)
+                .map_err(|error| format!("cannot read retained-receipt set {path:?}: {error}"))?;
+            parse_retained_receipts(file, path)
+        },
+    );
     Ok(BaselineInputs {
-        store,
+        source,
         identity,
         now_day,
+        preliminary_refusal,
+        authority,
+        retained_receipts,
     })
+}
+
+enum CliProductionRun {
+    Attested(ProductionRun),
+    ReportOnly(ReportOnlyProductionRun),
+}
+
+impl CliProductionRun {
+    fn axes(&self) -> &MachineAxes {
+        match self {
+            Self::Attested(run) => run.axes(),
+            Self::ReportOnly(run) => run.axes(),
+        }
+    }
+
+    fn post_axes(&self) -> &MachineAxes {
+        match self {
+            Self::Attested(run) => run.post_axes(),
+            Self::ReportOnly(run) => run.post_axes(),
+        }
+    }
+
+    fn results(&self) -> &[fs_roofline::Attainment] {
+        match self {
+            Self::Attested(run) => run.results(),
+            Self::ReportOnly(run) => run.results(),
+        }
+    }
+
+    fn receipt_json(&self) -> &str {
+        match self {
+            Self::Attested(run) => run.receipt_json(),
+            Self::ReportOnly(run) => run.receipt_json(),
+        }
+    }
+
+    fn baseline_hash(&self) -> Option<ContentHash> {
+        match self {
+            Self::Attested(run) => run.baseline_hash(),
+            Self::ReportOnly(run) => run.baseline_hash(),
+        }
+    }
+
+    fn evidence_admission(&self) -> (bool, Option<String>) {
+        match self {
+            Self::Attested(run) => {
+                let refusal = run.admission_error();
+                (refusal.is_none(), refusal)
+            }
+            Self::ReportOnly(run) => (false, run.admission_error()),
+        }
+    }
+
+    fn protocol(&self) -> &'static str {
+        match self {
+            Self::Attested(_) => PRODUCTION_PROTOCOL_VERSION,
+            Self::ReportOnly(_) => CUSTOM_REGISTRY_PROTOCOL_VERSION,
+        }
+    }
+
+    fn record(self, ledger: &fs_ledger::Ledger) -> Result<i64, fs_ledger::LedgerError> {
+        match self {
+            Self::Attested(run) => run.record(ledger),
+            Self::ReportOnly(run) => run.record(ledger),
+        }
+    }
 }
 
 fn main() -> std::process::ExitCode {
@@ -692,14 +972,24 @@ fn main() -> std::process::ExitCode {
         warmup: args.warmup,
         reps: args.reps,
     };
-    let run = match probe.run(config, baseline_policy, tune_ledger) {
-        Ok(run) => run,
-        Err(error) => return fail(&error),
+    let run = match baseline_policy {
+        RunBaselinePolicy::Attested(policy) => match probe.run(config, policy, tune_ledger) {
+            Ok(run) => CliProductionRun::Attested(run),
+            Err(error) => return fail(&error),
+        },
+        RunBaselinePolicy::ReportOnly { policy, refusal } => {
+            match probe
+                .run_report_only(config, policy, tune_ledger)
+                .and_then(|run| run.with_configuration_refusal(refusal))
+            {
+                Ok(run) => CliProductionRun::ReportOnly(run),
+                Err(error) => return fail(&error),
+            }
+        }
     };
     println!("{}", run.post_axes().to_jsonl());
     println!("{}", run.receipt_json());
-    let citation_eligible = run.citation_eligible();
-    let admission_error = run.admission_error();
+    let (citation_eligible, admission_error) = run.evidence_admission();
     println!(
         "{}",
         evidence_admission_json(citation_eligible, admission_error.as_deref())
@@ -727,19 +1017,15 @@ fn main() -> std::process::ExitCode {
             .iter()
             .map(|r| (r.kernel.clone(), r.version.clone()))
             .collect();
+        let baseline_hash = run.baseline_hash();
+        let protocol = run.protocol();
         let op = match run.record(&ledger) {
             Ok(op) => op,
             Err(e) => return fail(&e.to_string()),
         };
         let mut citable = citation_eligible;
         for (kernel, version) in &kernel_ids {
-            match staleness(
-                &ledger,
-                kernel,
-                version,
-                fingerprint,
-                baseline_policy.baseline_hash(),
-            ) {
+            match staleness(&ledger, kernel, version, fingerprint, baseline_hash) {
                 Ok(s) => {
                     citable &= s == fs_roofline::Staleness::Fresh;
                     println!(
@@ -758,7 +1044,7 @@ fn main() -> std::process::ExitCode {
             "\"admission_refused\""
         };
         println!(
-            "{{\"schema\":\"fs-roofline-recorded-evidence-v1\",\"ledgered\":true,\"citation_eligible\":{citation_eligible},\"citable\":{citable},\"reason\":{reason},\"protocol\":\"{PRODUCTION_PROTOCOL_VERSION}\",\"op\":{op},\"db\":\"{}\"}}",
+            "{{\"schema\":\"fs-roofline-recorded-evidence-v1\",\"ledgered\":true,\"citation_eligible\":{citation_eligible},\"citable\":{citable},\"reason\":{reason},\"protocol\":\"{protocol}\",\"op\":{op},\"db\":\"{}\"}}",
             json_escape(&db)
         );
     }
@@ -768,17 +1054,55 @@ fn main() -> std::process::ExitCode {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_BASELINE_AGE_DAYS, MAX_PROMOTION_PROBES, evidence_admission_json, json_escape,
-        load_baseline_inputs, parse_args, parse_bounded_baseline_store, parse_promote_args,
-        promotion_lock_path, sidecar_path,
+        BaselineInputs, BaselineSource, MAX_BASELINE_AGE_DAYS, MAX_PROMOTION_PROBES,
+        RunBaselinePolicy, evidence_admission_json, json_escape, load_baseline_inputs, parse_args,
+        parse_baseline_source, parse_bounded_baseline_store, parse_promote_args,
+        parse_retained_receipts, promotion_lock_path, sidecar_path,
     };
     #[cfg(unix)]
     use super::{open_promotion_store, promotion_staging_path};
-    use fs_roofline::MachineAxes;
+    use fs_roofline::authority::{ConfiguredPromotionAuthority, PromotionAttestation};
+    use fs_roofline::{
+        AttestedBaselineStore, AxisAdmissionSnapshot, BaselineCandidate, BaselineIdentity,
+        MachineAxes, days_since_epoch_now, promote_baseline,
+    };
     use std::io::Cursor;
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    fn stable_attested_snapshot(
+        store_text: &str,
+        identity: &BaselineIdentity,
+        authority_text: &str,
+        retained: &std::collections::BTreeSet<fs_blake3::ContentHash>,
+        axes: &MachineAxes,
+    ) -> AxisAdmissionSnapshot {
+        for _attempt in 0..2 {
+            let day_before = days_since_epoch_now().expect("test clock follows the Unix epoch");
+            let inputs = BaselineInputs {
+                source: BaselineSource::Attested(
+                    AttestedBaselineStore::from_jsonl(store_text)
+                        .expect("attested store round trip"),
+                ),
+                identity: identity.clone(),
+                now_day: day_before,
+                preliminary_refusal: None,
+                authority: Ok(ConfiguredPromotionAuthority::from_text(authority_text)
+                    .expect("canonical configured authority")),
+                retained_receipts: Ok(retained.clone()),
+            };
+            let RunBaselinePolicy::Attested(policy) = inputs.policy(axes.fingerprint) else {
+                panic!("the fully configured CLI path must mint an opaque attested policy");
+            };
+            let snapshot = policy.decide(axes, axes);
+            let day_after = days_since_epoch_now().expect("test clock follows the Unix epoch");
+            if day_before == day_after {
+                return snapshot;
+            }
+        }
+        panic!("test clock crossed UTC midnight twice while minting an attested snapshot");
     }
 
     #[test]
@@ -804,7 +1128,7 @@ mod tests {
     }
 
     #[test]
-    fn baseline_store_requires_explicit_firmware_identity() {
+    fn missing_firmware_or_baseline_remains_report_only() {
         let axes = MachineAxes {
             fingerprint: 1,
             cpu_brand: "synthetic".to_string(),
@@ -814,18 +1138,207 @@ mod tests {
             peak_single_gflops: 10.0,
             peak_all_core_gflops: 10.0,
         };
-        let error = parse_args(&args(&["roofline", "--baseline", "x"]))
-            .expect_err("firmware omission must fail before file access");
-        assert!(error.contains("--firmware"));
+        let incomplete = parse_args(&args(&["roofline", "--baseline", "x"]))
+            .expect("partial authority configuration remains measurable");
+        let inputs = load_baseline_inputs(&incomplete, &axes)
+            .expect("partial authority configuration is report-only");
+        assert!(matches!(
+            inputs.policy(axes.fingerprint),
+            RunBaselinePolicy::ReportOnly { .. }
+        ));
 
         let parsed = parse_args(&args(&["roofline"])).expect("default invocation parses");
         let candidate =
             load_baseline_inputs(&parsed, &axes).expect("report-only invocation remains available");
+        assert!(matches!(
+            candidate.policy(axes.fingerprint),
+            RunBaselinePolicy::ReportOnly { .. }
+        ));
+    }
+
+    #[test]
+    fn configured_cli_policy_mints_exact_snapshot_and_refusals_stay_report_only() {
+        let axes = MachineAxes {
+            fingerprint: 0xC11,
+            cpu_brand: "synthetic-cli-authority".to_string(),
+            logical_cpus: 4,
+            bandwidth_single_gbs: 100.0,
+            bandwidth_all_core_gbs: 200.0,
+            peak_single_gflops: 300.0,
+            peak_all_core_gflops: 600.0,
+        };
+        let identity =
+            BaselineIdentity::current(&axes, "cli-firmware-a").expect("synthetic CLI identity");
+        let now_day = days_since_epoch_now().expect("test clock follows the Unix epoch");
+        let mut retained = std::collections::BTreeSet::new();
+        let candidates = (0_u64..3)
+            .map(|ordinal| {
+                let receipt = fs_blake3::hash_domain(
+                    "fs-roofline.cli-configured-test-source.v1",
+                    &ordinal.to_le_bytes(),
+                );
+                assert!(retained.insert(receipt));
+                BaselineCandidate::from_receipt(axes.clone(), identity.clone(), receipt)
+                    .expect("synthetic retained candidate")
+            })
+            .collect::<Vec<_>>();
+        let baseline = promote_baseline(
+            &candidates,
+            "cli-test-operator",
+            "configured CLI authority fixture",
+            now_day,
+            90,
+        )
+        .expect("synthetic CLI baseline");
+        let authority_text = format!(
+            "authorize\tops/cli-test\t{}\tcli-test-signature\n",
+            baseline.content_hash()
+        );
+        let authority = ConfiguredPromotionAuthority::from_text(&authority_text)
+            .expect("canonical configured authority");
+        let policy_receipt = authority.policy_receipt();
+        let mut store = AttestedBaselineStore::new();
+        store
+            .admit_verified(
+                baseline.clone(),
+                PromotionAttestation::new("ops/cli-test", "cli-test-signature"),
+                &authority,
+                &retained,
+            )
+            .expect("configured authority admits the exact baseline");
+        let store_text = store.to_jsonl();
+
+        let snapshot =
+            stable_attested_snapshot(&store_text, &identity, &authority_text, &retained, &axes);
+        assert!(snapshot.authority_admitted());
+        assert!(snapshot.verdict().trusted());
+        assert!(snapshot.baseline_citation_eligible());
+        assert!(snapshot.receipt_json().contains("\"tier\":\"attested\""));
         assert!(
-            !candidate
-                .policy(axes.fingerprint)
-                .verdict(&axes, &axes)
-                .trusted()
+            snapshot
+                .receipt_json()
+                .contains(&format!("\"policy_receipt\":\"{policy_receipt}\""))
+        );
+
+        let rotated_authority_text = format!(
+            "authorize\tops/cli-rotated\t{}\tcli-rotated-signature\nrevoke\tops/cli-test\n",
+            baseline.content_hash()
+        );
+        let rotated_authority = ConfiguredPromotionAuthority::from_text(&rotated_authority_text)
+            .expect("canonical rotated authority");
+        let rotated_policy_receipt = rotated_authority.policy_receipt();
+        let mut rotated_store = AttestedBaselineStore::new();
+        rotated_store
+            .admit_verified(
+                baseline.clone(),
+                PromotionAttestation::new("ops/cli-rotated", "cli-rotated-signature"),
+                &rotated_authority,
+                &retained,
+            )
+            .expect("the same immutable baseline can be re-attested under the rotated key");
+        let rotated_store_text = rotated_store.to_jsonl();
+        let rotated_snapshot = stable_attested_snapshot(
+            &rotated_store_text,
+            &identity,
+            &rotated_authority_text,
+            &retained,
+            &axes,
+        );
+        assert_eq!(
+            rotated_snapshot.baseline_hash(),
+            Some(baseline.content_hash()),
+            "rotation re-endorses the same immutable baseline"
+        );
+        assert!(rotated_snapshot.baseline_citation_eligible());
+        assert!(
+            rotated_snapshot
+                .receipt_json()
+                .contains("\"key_id\":\"ops/cli-rotated\"")
+        );
+        assert!(
+            rotated_snapshot
+                .receipt_json()
+                .contains(&format!("\"policy_receipt\":\"{rotated_policy_receipt}\""))
+        );
+
+        let assert_report_only = |candidate_store: &str,
+                                  candidate_identity: BaselineIdentity,
+                                  policy_text: &str,
+                                  available: std::collections::BTreeSet<fs_blake3::ContentHash>,
+                                  expected: &str| {
+            let inputs = BaselineInputs {
+                source: BaselineSource::Attested(
+                    AttestedBaselineStore::from_jsonl(candidate_store)
+                        .expect("structural attested store"),
+                ),
+                identity: candidate_identity,
+                now_day,
+                preliminary_refusal: None,
+                authority: ConfiguredPromotionAuthority::from_text(policy_text)
+                    .map_err(|error| error.to_string()),
+                retained_receipts: Ok(available),
+            };
+            match inputs.policy(axes.fingerprint) {
+                RunBaselinePolicy::ReportOnly { refusal, .. } => assert!(
+                    refusal.contains(expected),
+                    "unexpected CLI authority refusal: {refusal}"
+                ),
+                RunBaselinePolicy::Attested(_) => {
+                    panic!("{expected} fixture must remain report-only")
+                }
+            }
+        };
+        assert_report_only(
+            &store_text,
+            identity.clone(),
+            "",
+            retained.clone(),
+            "unknown-key",
+        );
+        assert_report_only(
+            &store_text,
+            identity.clone(),
+            "revoke\tops/cli-test\n",
+            retained.clone(),
+            "revoked-key",
+        );
+        assert_report_only(
+            &store_text,
+            identity.clone(),
+            &rotated_authority_text,
+            retained.clone(),
+            "revoked-key",
+        );
+        let tampered = store_text.replace("cli-test-signature", "tampered-signature");
+        assert_report_only(
+            &tampered,
+            identity.clone(),
+            &authority_text,
+            retained.clone(),
+            "wrong-signature",
+        );
+        let mut missing = retained.clone();
+        let dropped = *baseline
+            .provenance()
+            .source_receipts()
+            .first()
+            .expect("promoted source receipt");
+        assert!(missing.remove(&dropped));
+        assert_report_only(
+            &store_text,
+            identity.clone(),
+            &authority_text,
+            missing,
+            &dropped.to_string(),
+        );
+        let cross_machine =
+            BaselineIdentity::current(&axes, "cli-firmware-b").expect("cross-machine CLI identity");
+        assert_report_only(
+            &store_text,
+            cross_machine,
+            &authority_text,
+            retained,
+            "does not match",
         );
     }
 
@@ -852,6 +1365,8 @@ mod tests {
         let defaults = parse_args(&args(&["roofline"])).expect("defaults");
         assert!(defaults.baseline_path.is_none());
         assert!(defaults.ledger_path.is_none());
+        assert!(defaults.authority_policy_path.is_none());
+        assert!(defaults.retained_receipts_path.is_none());
 
         let parsed = parse_args(&args(&[
             "roofline",
@@ -867,6 +1382,10 @@ mod tests {
             "axes.jsonl",
             "--firmware",
             "os-build-1",
+            "--authority-policy",
+            "authority.tsv",
+            "--retained-receipts",
+            "receipts.txt",
         ]))
         .expect("complete argv");
         assert_eq!(parsed.n, 8);
@@ -875,6 +1394,14 @@ mod tests {
         assert_eq!(parsed.ledger_path.as_deref(), Some("run.db"));
         assert_eq!(parsed.baseline_path.as_deref(), Some("axes.jsonl"));
         assert_eq!(parsed.firmware.as_deref(), Some("os-build-1"));
+        assert_eq!(
+            parsed.authority_policy_path.as_deref(),
+            Some("authority.tsv")
+        );
+        assert_eq!(
+            parsed.retained_receipts_path.as_deref(),
+            Some("receipts.txt")
+        );
     }
 
     #[test]
@@ -939,6 +1466,50 @@ mod tests {
         let error = parse_bounded_baseline_store(Cursor::new(oversized), "oversized.jsonl")
             .expect_err("oversized input must fail before parsing");
         assert!(error.contains("exceeds"));
+    }
+
+    #[test]
+    fn retained_receipts_require_canonical_unique_lowercase_lines() {
+        let first = "00".repeat(32);
+        let second = "ab".repeat(32);
+        let canonical = format!("{first}\n{second}\n");
+        let parsed = parse_retained_receipts(Cursor::new(canonical), "receipts.txt")
+            .expect("canonical retained receipts");
+        assert_eq!(parsed.len(), 2);
+
+        for malformed in [
+            first.clone(),
+            format!("{}\n", "AB".repeat(32)),
+            format!("{first}\n{first}\n"),
+            format!("{first}\n\n"),
+            format!("{second}\n{first}\n"),
+        ] {
+            assert!(
+                parse_retained_receipts(Cursor::new(malformed), "receipts.txt").is_err(),
+                "malformed retained-receipt set must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn retained_receipt_reader_stops_at_the_input_bound_plus_one_byte() {
+        let oversized = vec![b'0'; super::MAX_RETAINED_RECEIPTS_INPUT_BYTES + 1];
+        let error = parse_retained_receipts(Cursor::new(oversized), "oversized.txt")
+            .expect_err("oversized retained-receipt input must fail before parsing");
+        assert!(error.contains("exceeds"));
+    }
+
+    #[test]
+    fn baseline_envelope_prefix_selects_attested_parser_without_a_new_flag() {
+        let attested = parse_baseline_source("{\"record\":malformed}\n")
+            .err()
+            .expect("malformed attested envelope must be refused");
+        assert!(attested.contains("attested"), "{attested}");
+
+        let plain = parse_baseline_source("malformed\n")
+            .err()
+            .expect("malformed plain store must be refused");
+        assert!(plain.contains("plain"), "{plain}");
     }
 
     #[test]

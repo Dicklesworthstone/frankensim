@@ -46,14 +46,18 @@ fi
 
 # Lock JSON -> validated tab-separated rows. Tabs/newlines are forbidden so the
 # shell loop cannot reinterpret a repository identity.
-if ! entries="$(python3 - "$lock" <<'PY'
+if ! validated_lock="$(python3 - "$lock" <<'PY'
+import hashlib
 import json
 import pathlib
 import re
 import sys
+import unicodedata
 
 path = pathlib.Path(sys.argv[1])
-if path.stat().st_size > 1_048_576:
+with path.open("rb") as source:
+    raw = source.read(1_048_577)
+if len(raw) > 1_048_576:
     raise SystemExit("constellation lock exceeds the 1 MiB parser bound")
 
 def unique_object(pairs):
@@ -64,12 +68,27 @@ def unique_object(pairs):
         result[key] = value
     return result
 
-document = json.loads(path.read_text(), object_pairs_hook=unique_object)
-expected_top_keys = {"schema", "lock_hash", "note", "libraries"}
+text = raw.decode("utf-8")
+document = json.loads(text, object_pairs_hook=unique_object)
+expected_top_keys = {
+    "schema", "identity_domain", "identity_version", "lock_hash", "note", "libraries",
+}
 if set(document) != expected_top_keys:
     raise SystemExit("constellation lock has missing or unknown top-level fields")
 if document.get("schema") != "frankensim-constellation-lock-v2":
     raise SystemExit("unsupported constellation lock schema")
+identity_domain = document.get("identity_domain")
+if not isinstance(identity_domain, str):
+    raise SystemExit("constellation lock identity domain must be a string")
+if identity_domain != "org.frankensim.xtask.constellation-lock.v1":
+    raise SystemExit("unsupported constellation lock identity domain")
+identity_version = document.get("identity_version")
+# bool is an int subclass in Python; exact type admission keeps true from
+# impersonating identity version 1.
+if type(identity_version) is not int:
+    raise SystemExit("constellation lock identity version must be an integer")
+if identity_version != 1:
+    raise SystemExit("unsupported constellation lock identity version")
 note = (
     "lock_hash covers (lib, version, git_head) only — paths are per-machine; "
     "remote is transport for bootstrap-constellation (content identity is the git head)"
@@ -87,6 +106,7 @@ expected = {
     "frankenscipy", "frankensqlite", "frankentorch",
 }
 seen = set()
+entry_lines = []
 for row in rows:
     if not isinstance(row, dict) or set(row) != {"lib", "version", "git_head", "remote", "path"}:
         raise SystemExit("constellation lock row has missing or unknown fields")
@@ -99,9 +119,12 @@ for row in rows:
     seen.add(lib)
     if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", head):
         raise SystemExit(f"invalid git head for {lib}")
-    if any(any(ord(character) < 32 or ord(character) == 127 for character in value) for value in values):
+    if any(
+        any(unicodedata.category(character) in {"Cc", "Cs"} for character in value)
+        for value in values
+    ):
         raise SystemExit(f"control character in lock row for {lib}")
-    print("\t".join((lib, version, head, remote)))
+    entry_lines.append("\t".join((lib, version, head, remote)))
 if seen != expected:
     missing = sorted(expected - seen)
     extra = sorted(seen - expected)
@@ -117,9 +140,51 @@ for byte in identity.encode():
     value = (value * 0x100000001b3) & 0xffffffffffffffff
 if f"{value:016x}" != lock_hash:
     raise SystemExit("constellation lock hash disagrees with its declared rows")
+
+# The Rust consumers accept one exact byte grammar, not merely an equivalent
+# JSON object. Re-render with the same key order, spacing, escaping, and
+# caller-supplied library order so whitespace or object-key rearrangement
+# cannot create a shell-only accepted lock.
+def quoted(value):
+    return json.dumps(value, ensure_ascii=False)
+
+canonical_rows = []
+for row in rows:
+    canonical_rows.append(
+        "    {\"lib\": " + quoted(row["lib"])
+        + ", \"version\": " + quoted(row["version"])
+        + ", \"git_head\": " + quoted(row["git_head"])
+        + ", \"remote\": " + quoted(row["remote"])
+        + ", \"path\": " + quoted(row["path"])
+        + "}"
+    )
+canonical = (
+    "{\n"
+    + "  \"schema\": " + quoted(document["schema"]) + ",\n"
+    + "  \"identity_domain\": " + quoted(identity_domain) + ",\n"
+    + f"  \"identity_version\": {identity_version},\n"
+    + "  \"lock_hash\": " + quoted(lock_hash) + ",\n"
+    + "  \"note\": " + quoted(document["note"]) + ",\n"
+    + "  \"libraries\": [\n"
+    + ",\n".join(canonical_rows)
+    + "\n  ]\n}\n"
+)
+if text != canonical:
+    raise SystemExit("constellation lock is valid JSON but not canonical")
+print(f"@lock-sha256\t{hashlib.sha256(raw).hexdigest()}")
+print("\n".join(entry_lines))
 PY
 )"; then
     echo "FATAL: could not parse $lock" >&2
+    exit 1
+fi
+lock_header="${validated_lock%%$'\n'*}"
+entries="${validated_lock#*$'\n'}"
+validated_lock_sha256="${lock_header#@lock-sha256$'\t'}"
+if [[ "$lock_header" == "$validated_lock" ]] \
+    || [[ "$lock_header" != @lock-sha256$'\t'* ]] \
+    || [[ ! "$validated_lock_sha256" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "FATAL: constellation lock validator produced no canonical identity" >&2
     exit 1
 fi
 if [[ -z "$entries" ]]; then
@@ -183,7 +248,7 @@ verify_clean() { # directory expected-head
 }
 
 snapshot_identity() {
-    python3 - "$repo_root" "$parent" "$lock" <<'PY'
+    python3 - "$repo_root" "$parent" "$lock" "$validated_lock_sha256" <<'PY'
 import hashlib
 import json
 import os
@@ -191,7 +256,19 @@ import stat
 import subprocess
 import sys
 
-root, parent, lock_path = sys.argv[1:]
+root, parent, lock_path, validated_lock_sha256 = sys.argv[1:]
+try:
+    with open(lock_path, "rb") as source:
+        lock_bytes = source.read(1_048_577)
+    if len(lock_bytes) > 1_048_576:
+        raise RuntimeError("constellation lock exceeds the 1 MiB parser bound")
+    if hashlib.sha256(lock_bytes).hexdigest() != validated_lock_sha256:
+        raise RuntimeError("constellation lock moved after strict validation")
+    document = json.loads(lock_bytes)
+except (OSError, RuntimeError, TypeError, json.JSONDecodeError) as error:
+    print(f"FATAL: cannot capture validated constellation lock: {error}", file=sys.stderr)
+    raise SystemExit(1)
+
 digest = hashlib.sha256()
 
 def add(label, data):
@@ -286,9 +363,7 @@ try:
                 f"unsupported working-tree entry type: {os.fsdecode(relative)!r}"
             )
 
-    lock_bytes = open(lock_path, "rb").read()
     add("constellation-lock", lock_bytes)
-    document = json.loads(lock_bytes)
     for row in sorted(document["libraries"], key=lambda candidate: candidate["lib"]):
         sibling = os.path.join(parent, row["lib"])
         actual = git(sibling, "rev-parse", "HEAD").decode().strip()

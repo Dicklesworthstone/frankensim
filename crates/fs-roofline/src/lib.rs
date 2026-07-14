@@ -18,17 +18,19 @@ pub mod kernels;
 pub mod production;
 pub mod stats;
 
+#[cfg(test)]
+pub use authority::StaticKeyRegistry;
 pub use authority::{
-    KeyVerdict, NoPromotionAuthority, PromotionAttestation, PromotionAuthorityVerifier,
-    StaticKeyRegistry,
+    ConfiguredPromotionAuthority, KeyVerdict, NoPromotionAuthority, PromotionAttestation,
+    PromotionAuthorityConfigError, PromotionAuthorityDecision, PromotionAuthorityVerifier,
 };
 pub use axes::MachineAxes;
 pub use baseline::{
     AttestedBaselineStore, BASELINE_SCHEMA_VERSION, BaselineAxes, BaselineCandidate,
     BaselineClockError, BaselineIdentity, BaselineProvenance, BaselineStore, BaselineVerdict,
-    PromotionError, citable_axis_admission, citable_axis_admission_authorized,
-    days_since_epoch_now, promote_baseline,
+    PromotionError, candidate_axis_admission, days_since_epoch_now, promote_baseline,
 };
+pub use fs_blake3::ContentHash;
 
 use fs_ledger::{EdgeRole, EventRow, FiveExplicits, Ledger, LedgerError, OpOutcome, now_wall_ns};
 
@@ -38,18 +40,27 @@ pub mod regress;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Semantic version of the finalized registry-run identity.
-pub const FINALIZED_RUN_IDENTITY_VERSION: u32 = 2;
+pub const FINALIZED_RUN_IDENTITY_VERSION: u32 = 3;
 /// BLAKE3 derive-key domain for the finalized registry-run identity.
-pub const FINALIZED_RUN_DOMAIN: &str = "org.frankensim.fs-roofline.finalized-run.v2";
+pub const FINALIZED_RUN_DOMAIN: &str = "org.frankensim.fs-roofline.finalized-run.v3";
 /// Semantic version of the ordered result-manifest child digest.
 pub const RESULT_MANIFEST_IDENTITY_VERSION: u32 = 1;
 /// BLAKE3 derive-key domain for the ordered result-manifest child digest.
 pub const RESULT_MANIFEST_DOMAIN: &str = "org.frankensim.fs-roofline.run-result-manifest.v1";
 const RESULT_MANIFEST_SCHEMA: &str = "fs-roofline-run-manifest-v1";
 /// Ledger protocol version for receipt-backed production roofline evidence.
-pub const PRODUCTION_PROTOCOL_VERSION: &str = "production-v2";
-pub(crate) const PRODUCTION_PROTOCOL_FIELD: &str = "\"protocol\":\"production-v2\"";
+pub const PRODUCTION_PROTOCOL_VERSION: &str = "production-v3";
+pub(crate) const PRODUCTION_PROTOCOL_FIELD: &str = "\"protocol\":\"production-v3\"";
+/// Ledger protocol version for exploratory/report-only roofline evidence.
+pub const CUSTOM_REGISTRY_PROTOCOL_VERSION: &str = "custom-registry";
 const CUSTOM_REGISTRY_PROTOCOL_FIELD: &str = "\"protocol\":\"custom-registry\"";
+/// Configured durable ledger path used by external FEEC/FFT performance gates.
+pub const EXTERNAL_PERF_GATE_LEDGER_ENV: &str = "FRANKENSIM_ROOFLINE_LEDGER";
+/// Maximum exact final-gate JSON retained by the external gate recorder.
+///
+/// The operation IR embeds the JSON value as well as its content hash, so the
+/// bound leaves headroom beneath fs-ledger's one-MiB operation-field ceiling.
+pub const MAX_EXTERNAL_PERF_GATE_JSON_BYTES: usize = 1_000_000;
 const CUSTOM_TUNE_SHAPE_CLASS: &str = "roofline-candidate-v1";
 const DEPGRAPH_RECEIPT_ARTIFACT_KIND: &str = "fs-la-depgraph-receipt";
 const DEPGRAPH_RECEIPT_ARTIFACT_META: &str =
@@ -104,14 +115,14 @@ pub const FINALIZED_RUN_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
     "frankensim-identity-schema-v1",
     "id=fs-roofline:finalized-run",
     "version_const=FINALIZED_RUN_IDENTITY_VERSION",
-    "version=2",
-    "domain=org.frankensim.fs-roofline.finalized-run.v2",
+    "version=3",
+    "domain=org.frankensim.fs-roofline.finalized-run.v3",
     "domain_const=FINALIZED_RUN_DOMAIN",
     "encoder=finalized_run_receipt",
     "encoder_helpers=FinalizedRunIdentityInput::from_run,finalized_run_receipt_from_input,push_receipt_field,run_result_manifest_json,manifest_entry_json",
     "schema_constants=FINALIZED_RUN_IDENTITY_VERSION,FINALIZED_RUN_DOMAIN,RESULT_MANIFEST_IDENTITY_VERSION,RESULT_MANIFEST_DOMAIN,RESULT_MANIFEST_SCHEMA",
-    "schema_functions=parse_result_manifest,valid_manifest_identifier,receipt_recomputes_from_stored_rows,Attainment::to_jsonl,AxisBaselinePolicy::receipt_json,crates/fs-blake3/src/lib.rs#hash_domain,crates/fs-blake3/src/lib.rs#hash_bytes",
-    "schema_dependencies=fs-roofline:baseline-record,fs-roofline:production-axes-receipt,fs-roofline:execution-binding",
+    "schema_functions=parse_result_manifest,valid_manifest_identifier,receipt_recomputes_from_stored_rows,Attainment::to_jsonl,AxisAdmissionSnapshot::receipt_json,crates/fs-blake3/src/lib.rs#hash_domain,crates/fs-blake3/src/lib.rs#hash_bytes",
+    "schema_dependencies=fs-roofline:baseline-record,fs-roofline:promotion-authority-policy,fs-roofline:production-axes-receipt,fs-roofline:execution-binding",
     "digest=fs-blake3",
     "encoding=canonical-transport-exact-bits",
     "sources=FinalizedRunIdentityInput",
@@ -244,24 +255,18 @@ impl FinalizedRegistryRun {
     }
 }
 
-/// Explicit historical-baseline policy for one roofline run.
+/// Operator-trusted historical-baseline policy for one REPORT-ONLY run.
 ///
-/// `None` is not a permissive default: it represents a first/unbaselined run,
-/// which may be reported as candidate evidence but cannot publish citable
-/// metrics or tune rows. Without [`AxisBaselinePolicy::with_authority`], the
-/// referenced store is an OPERATOR-TRUSTED root (tamper-evident, not
-/// independently verified); binding gates bind an attestation and an
-/// injected [`PromotionAuthorityVerifier`] (bead fz2.7), which re-verifies
-/// the promotion signature before every citable decision.
+/// `None` is not a permissive default: it represents a first/unbaselined run.
+/// Even when this policy's numerical verdict is [`BaselineVerdict::Trusted`],
+/// it carries no promotion-authority proof and therefore cannot enter the
+/// citable production protocol. Use an [`AttestedAxisBaselinePolicy`] minted
+/// by [`AttestedBaselineStore::policy_for_run`] for that protocol.
 #[derive(Clone, Copy)]
 pub struct AxisBaselinePolicy<'a> {
     baseline: Option<&'a BaselineAxes>,
     identity: &'a BaselineIdentity,
     now_day: u64,
-    authority: Option<(
-        Option<&'a PromotionAttestation>,
-        &'a dyn PromotionAuthorityVerifier,
-    )>,
 }
 
 impl<'a> AxisBaselinePolicy<'a> {
@@ -277,39 +282,13 @@ impl<'a> AxisBaselinePolicy<'a> {
             baseline,
             identity,
             now_day,
-            authority: None,
         }
     }
 
-    /// Bind the promotion attestation and an injected authority (bead
-    /// fz2.7): the verdict then requires an AUTHORIZED signature over
-    /// the baseline's content hash before any band math, and the
-    /// receipt binds the verifying key identity.
-    #[must_use]
-    pub fn with_authority(
-        mut self,
-        attestation: Option<&'a PromotionAttestation>,
-        authority: &'a dyn PromotionAuthorityVerifier,
-    ) -> Self {
-        self.authority = Some((attestation, authority));
-        self
-    }
-
-    /// Evaluate the complete pre/probe/post baseline policy.
+    /// Evaluate the pre/probe/post baseline math without promotion authority.
     #[must_use]
     pub fn verdict(&self, pre: &MachineAxes, post: &MachineAxes) -> BaselineVerdict {
-        match self.authority {
-            Some((attestation, authority)) => citable_axis_admission_authorized(
-                pre,
-                post,
-                self.baseline,
-                attestation,
-                self.identity,
-                self.now_day,
-                authority,
-            ),
-            None => citable_axis_admission(pre, post, self.baseline, self.identity, self.now_day),
-        }
+        candidate_axis_admission(pre, post, self.baseline, self.identity, self.now_day)
     }
 
     /// Domain-separated identity of the selected baseline, if one exists.
@@ -321,34 +300,343 @@ impl<'a> AxisBaselinePolicy<'a> {
     /// Canonical, self-contained receipt for the baseline admission decision.
     #[must_use]
     pub fn receipt_json(&self, pre: &MachineAxes, post: &MachineAxes) -> String {
-        let baseline = self
-            .baseline
-            .map_or_else(|| "null".to_string(), BaselineAxes::canonical_json);
-        let baseline_hash = self.baseline_hash().map_or_else(
-            || "null".to_string(),
-            |hash| format!("\"{}\"", hash.to_hex()),
-        );
-        // Authority binding (bead fz2.7): the verifying key identity (or
-        // the explicit operator-trusted tier) travels in the receipt.
-        let authority = match self.authority {
-            None => "\"operator-trusted\"".to_string(),
-            Some((attestation, _)) => attestation.map_or_else(
-                || "{\"key_id\":null}".to_string(),
-                |a| format!("{{\"key_id\":\"{}\"}}", json_escape(a.key_id())),
-            ),
-        };
-        format!(
-            "{{\"schema\":\"fs-roofline-axis-admission-v1\",\"now_day\":{},\"identity\":{},\"pre\":{},\"post\":{},\"baseline_hash\":{},\"baseline\":{},\"authority\":{},\"verdict\":{}}}",
+        self.snapshot(pre, post).receipt_json().to_string()
+    }
+
+    /// Freeze this operator-trusted decision into the same immutable receipt
+    /// shape used by the production protocol, but with tier `candidate`.
+    #[must_use]
+    pub fn snapshot(&self, pre: &MachineAxes, post: &MachineAxes) -> AxisAdmissionSnapshot {
+        AxisAdmissionSnapshot::candidate(
+            self.baseline,
+            self.identity,
             self.now_day,
-            baseline_identity_json(self.identity),
-            machine_axes_receipt_json(pre),
-            machine_axes_receipt_json(post),
-            baseline_hash,
-            baseline,
-            authority,
-            self.verdict(pre, post).to_jsonl(),
+            pre,
+            post,
+            self.verdict(pre, post),
         )
     }
+}
+
+/// An owned, authority-attested baseline policy for exactly one production
+/// run. Fields are private and there is no public constructor: the attested
+/// store checks source retention and captures one atomic authority decision
+/// before minting this value.
+pub struct AttestedAxisBaselinePolicy {
+    baseline: BaselineAxes,
+    identity: BaselineIdentity,
+    now_day: u64,
+    attestation: PromotionAttestation,
+    source_receipts: Vec<fs_blake3::ContentHash>,
+    authority_decision: PromotionAuthorityDecision,
+}
+
+impl AttestedAxisBaselinePolicy {
+    /// Crate-internal minting boundary used by `AttestedBaselineStore` after
+    /// it has checked attestation structure, exact authority, and source
+    /// receipt availability.
+    #[must_use]
+    pub(crate) fn from_verified(
+        baseline: BaselineAxes,
+        identity: BaselineIdentity,
+        now_day: u64,
+        attestation: PromotionAttestation,
+        source_receipts: Vec<fs_blake3::ContentHash>,
+        authority_decision: PromotionAuthorityDecision,
+    ) -> Self {
+        Self {
+            baseline,
+            identity,
+            now_day,
+            attestation,
+            source_receipts,
+            authority_decision,
+        }
+    }
+
+    /// Domain-separated identity of the exact selected baseline.
+    #[must_use]
+    pub fn baseline_hash(&self) -> fs_blake3::ContentHash {
+        self.baseline.content_hash()
+    }
+
+    /// Consume the one-run policy and freeze the verifier decision together
+    /// with both observed probes. No live verifier survives this boundary.
+    #[must_use]
+    pub fn decide(self, pre: &MachineAxes, post: &MachineAxes) -> AxisAdmissionSnapshot {
+        let decision_day = days_since_epoch_now().ok();
+        self.decide_on_day(pre, post, decision_day)
+    }
+
+    fn decide_on_day(
+        self,
+        pre: &MachineAxes,
+        post: &MachineAxes,
+        decision_day: Option<u64>,
+    ) -> AxisAdmissionSnapshot {
+        let sources_match =
+            self.source_receipts.as_slice() == self.baseline.provenance().source_receipts();
+        let authority_verdict = self.authority_decision.verdict();
+        let attestation_well_formed = self.attestation.well_formed();
+        let verdict = if decision_day.is_none() {
+            BaselineVerdict::Unauthorized {
+                verdict: "clock-unavailable",
+            }
+        } else if decision_day != Some(self.now_day) {
+            BaselineVerdict::Unauthorized {
+                verdict: "policy-day-mismatch",
+            }
+        } else if !attestation_well_formed {
+            BaselineVerdict::Unauthorized {
+                verdict: "malformed-attestation",
+            }
+        } else if authority_verdict != KeyVerdict::Authorized {
+            BaselineVerdict::Unauthorized {
+                verdict: authority_verdict.name(),
+            }
+        } else if !sources_match {
+            BaselineVerdict::InvalidBaseline {
+                reason:
+                    "attested policy source receipts differ from the canonical baseline provenance"
+                        .to_string(),
+            }
+        } else {
+            candidate_axis_admission(
+                pre,
+                post,
+                Some(&self.baseline),
+                &self.identity,
+                self.now_day,
+            )
+        };
+        AxisAdmissionSnapshot::attested(
+            self.baseline,
+            self.identity,
+            self.now_day,
+            self.attestation,
+            self.source_receipts,
+            self.authority_decision,
+            decision_day,
+            pre,
+            post,
+            verdict,
+        )
+    }
+
+    #[cfg(test)]
+    fn decide_at(
+        self,
+        pre: &MachineAxes,
+        post: &MachineAxes,
+        decision_day: u64,
+    ) -> AxisAdmissionSnapshot {
+        self.decide_on_day(pre, post, Some(decision_day))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AxisAdmissionTier {
+    Candidate,
+    Attested,
+}
+
+/// Immutable, owned admission evidence for one exact pre/post probe pair.
+///
+/// The canonical bytes are created once. Finalization, eligibility, finalized
+/// run identity, and ledger recording all reuse those bytes verbatim.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AxisAdmissionSnapshot {
+    tier: AxisAdmissionTier,
+    receipt: String,
+    baseline_hash: Option<fs_blake3::ContentHash>,
+    verdict: BaselineVerdict,
+    authority_admitted: bool,
+    decision_day: Option<u64>,
+}
+
+impl AxisAdmissionSnapshot {
+    fn candidate(
+        baseline: Option<&BaselineAxes>,
+        identity: &BaselineIdentity,
+        now_day: u64,
+        pre: &MachineAxes,
+        post: &MachineAxes,
+        verdict: BaselineVerdict,
+    ) -> Self {
+        let baseline_json =
+            baseline.map_or_else(|| "null".to_string(), BaselineAxes::canonical_json);
+        let baseline_hash = baseline.map(BaselineAxes::content_hash);
+        let baseline_hash_json =
+            baseline_hash.map_or_else(|| "null".to_string(), |hash| format!("\"{hash}\""));
+        let required_sources = match baseline {
+            Some(record) => record.provenance().source_receipts(),
+            None => &[],
+        };
+        let receipt = format!(
+            "{{\"schema\":\"fs-roofline-axis-admission-v2\",\"tier\":\"candidate\",\"now_day\":{now_day},\"decision_day\":null,\"identity\":{},\"pre\":{},\"post\":{},\"baseline_hash\":{baseline_hash_json},\"baseline\":{baseline_json},\"attestation\":null,\"required_source_receipts\":{},\"authority\":{{\"verdict\":\"not-attested\",\"policy_receipt\":null}},\"verdict\":{}}}",
+            baseline_identity_json(identity),
+            machine_axes_receipt_json(pre),
+            machine_axes_receipt_json(post),
+            source_receipts_json(required_sources),
+            verdict.to_jsonl(),
+        );
+        Self {
+            tier: AxisAdmissionTier::Candidate,
+            receipt,
+            baseline_hash,
+            verdict,
+            authority_admitted: false,
+            decision_day: None,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn attested(
+        baseline: BaselineAxes,
+        identity: BaselineIdentity,
+        now_day: u64,
+        attestation: PromotionAttestation,
+        source_receipts: Vec<fs_blake3::ContentHash>,
+        authority_decision: PromotionAuthorityDecision,
+        decision_day: Option<u64>,
+        pre: &MachineAxes,
+        post: &MachineAxes,
+        verdict: BaselineVerdict,
+    ) -> Self {
+        let baseline_hash = baseline.content_hash();
+        let authority_verdict = authority_decision.verdict();
+        let authority_admitted = attestation.well_formed()
+            && authority_verdict == KeyVerdict::Authorized
+            && decision_day == Some(now_day)
+            && source_receipts.as_slice() == baseline.provenance().source_receipts();
+        let decision_day_json =
+            decision_day.map_or_else(|| "null".to_string(), |day| day.to_string());
+        let receipt = format!(
+            "{{\"schema\":\"fs-roofline-axis-admission-v2\",\"tier\":\"attested\",\"now_day\":{now_day},\"decision_day\":{decision_day_json},\"identity\":{},\"pre\":{},\"post\":{},\"baseline_hash\":\"{baseline_hash}\",\"baseline\":{},\"attestation\":{{\"key_id\":\"{}\",\"signature\":\"{}\"}},\"required_source_receipts\":{},\"authority\":{{\"verdict\":\"{}\",\"policy_receipt\":\"{}\"}},\"verdict\":{}}}",
+            baseline_identity_json(&identity),
+            machine_axes_receipt_json(pre),
+            machine_axes_receipt_json(post),
+            baseline.canonical_json(),
+            json_escape(attestation.key_id()),
+            json_escape(attestation.signature()),
+            source_receipts_json(&source_receipts),
+            authority_verdict.name(),
+            authority_decision.policy_receipt(),
+            verdict.to_jsonl(),
+        );
+        Self {
+            tier: AxisAdmissionTier::Attested,
+            receipt,
+            baseline_hash: Some(baseline_hash),
+            verdict,
+            authority_admitted,
+            decision_day,
+        }
+    }
+
+    /// Exact canonical receipt bytes retained at the decision boundary.
+    #[must_use]
+    pub fn receipt_json(&self) -> &str {
+        &self.receipt
+    }
+
+    /// Final baseline verdict frozen into this snapshot.
+    #[must_use]
+    pub fn verdict(&self) -> &BaselineVerdict {
+        &self.verdict
+    }
+
+    /// Selected baseline identity, if this run selected one.
+    #[must_use]
+    pub fn baseline_hash(&self) -> Option<fs_blake3::ContentHash> {
+        self.baseline_hash
+    }
+
+    /// True only when an attested tier carried a well-formed attestation, an
+    /// Authorized atomic authority decision, and the retained source list
+    /// matched canonical provenance.
+    #[must_use]
+    pub fn authority_admitted(&self) -> bool {
+        self.tier == AxisAdmissionTier::Attested && self.authority_admitted
+    }
+
+    /// Whether this frozen baseline decision still supports citation now.
+    ///
+    /// This combines the attested tier, the trusted numerical verdict, and a
+    /// fresh live epoch-day check. It is necessary but not sufficient for a
+    /// citable measurement: kernel binding, timing, and recording provenance
+    /// remain separate obligations.
+    #[must_use]
+    pub fn baseline_citation_eligible(&self) -> bool {
+        self.baseline_citation_error().is_none()
+    }
+
+    /// Structured reason this snapshot cannot support baseline citation now.
+    #[must_use]
+    pub fn baseline_citation_error(&self) -> Option<String> {
+        let live_day_error = self.live_day_error();
+        self.baseline_citation_error_with_live_day(live_day_error)
+    }
+
+    fn baseline_citation_error_with_live_day(
+        &self,
+        live_day_error: Option<String>,
+    ) -> Option<String> {
+        if !self.verdict.trusted() {
+            return Some(format!(
+                "historical baseline admission refused: {}",
+                self.verdict.to_jsonl()
+            ));
+        }
+        if !self.authority_admitted() {
+            return Some(
+                "baseline admission snapshot lacks authorized promotion authority".to_string(),
+            );
+        }
+        live_day_error
+    }
+
+    /// Unix-epoch day observed when the attested policy was consumed. A
+    /// candidate snapshot has no decision day.
+    #[must_use]
+    pub fn decision_day(&self) -> Option<u64> {
+        self.decision_day
+    }
+
+    pub(crate) fn live_day_error(&self) -> Option<String> {
+        if self.tier != AxisAdmissionTier::Attested {
+            return None;
+        }
+        let Some(decision_day) = self.decision_day else {
+            return Some(
+                "attested baseline admission could not establish a decision day".to_string(),
+            );
+        };
+        match days_since_epoch_now() {
+            Ok(current_day) => self.day_error_at(current_day),
+            Err(error) => Some(format!(
+                "cannot revalidate attested baseline admission day: {error}"
+            )),
+        }
+    }
+
+    fn day_error_at(&self, current_day: u64) -> Option<String> {
+        let decision_day = self.decision_day?;
+        (current_day != decision_day).then(|| {
+            format!(
+                "attested baseline admission was frozen on day {decision_day}, but current day is {current_day}"
+            )
+        })
+    }
+}
+
+fn source_receipts_json(receipts: &[fs_blake3::ContentHash]) -> String {
+    let entries = receipts
+        .iter()
+        .map(|receipt| format!("\"{receipt}\""))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("[{entries}]")
 }
 
 fn baseline_identity_json(identity: &BaselineIdentity) -> String {
@@ -369,7 +657,7 @@ fn machine_axes_receipt_json(axes: &MachineAxes) -> String {
 
 /// Shape-class prefix under which versioned roofline rows land in the ledger
 /// `tune` table.
-pub const TUNE_SHAPE_CLASS: &str = "roofline-v7";
+pub const TUNE_SHAPE_CLASS: &str = "roofline-v8";
 
 /// Versioned ledger shape-class key for a kernel implementation.
 #[must_use]
@@ -1548,7 +1836,8 @@ pub fn run_passes_measurement_admission(
     baseline: AxisBaselinePolicy<'_>,
     results: &[Attainment],
 ) -> bool {
-    run_admission_error(axes, post_axes, baseline, results).is_none()
+    let snapshot = baseline.snapshot(axes, post_axes);
+    run_admission_error_for_snapshot(axes, &snapshot, results).is_none()
 }
 
 fn push_receipt_field(payload: &mut Vec<u8>, bytes: &[u8]) {
@@ -1575,14 +1864,9 @@ struct FinalizedRunIdentityInput {
 }
 
 impl FinalizedRunIdentityInput {
-    fn from_run(
-        axes: &MachineAxes,
-        post_axes: &MachineAxes,
-        baseline: AxisBaselinePolicy<'_>,
-        results: &[Attainment],
-    ) -> Self {
+    fn from_run(admission: &AxisAdmissionSnapshot, results: &[Attainment]) -> Self {
         Self {
-            baseline_receipt: baseline.receipt_json(axes, post_axes),
+            baseline_receipt: admission.receipt_json().to_string(),
             result_payloads: results.iter().map(Attainment::to_jsonl).collect(),
             result_manifest: run_result_manifest_json(results),
         }
@@ -1707,12 +1991,10 @@ fn finalized_run_receipt_from_input(
 }
 
 fn finalized_run_receipt(
-    axes: &MachineAxes,
-    post_axes: &MachineAxes,
-    baseline: AxisBaselinePolicy<'_>,
+    admission: &AxisAdmissionSnapshot,
     results: &[Attainment],
 ) -> fs_blake3::ContentHash {
-    let input = FinalizedRunIdentityInput::from_run(axes, post_axes, baseline, results);
+    let input = FinalizedRunIdentityInput::from_run(admission, results);
     finalized_run_receipt_from_input(&input, FINALIZED_RUN_DOMAIN, RESULT_MANIFEST_DOMAIN)
 }
 
@@ -1732,6 +2014,16 @@ pub fn finalize_registry_tuning(
     axes: &MachineAxes,
     post_axes: &MachineAxes,
     baseline: AxisBaselinePolicy<'_>,
+    results: &[Attainment],
+) -> Result<FinalizedRegistryRun, String> {
+    let admission = baseline.snapshot(axes, post_axes);
+    finalize_registry_tuning_with_snapshot(registry, axes, &admission, results)
+}
+
+pub(crate) fn finalize_registry_tuning_with_snapshot(
+    registry: &mut [Box<dyn RooflineKernel>],
+    axes: &MachineAxes,
+    admission: &AxisAdmissionSnapshot,
     results: &[Attainment],
 ) -> Result<FinalizedRegistryRun, String> {
     let mut diagnostics = Vec::new();
@@ -1772,7 +2064,7 @@ pub fn finalize_registry_tuning(
         }
     }
     let admitted =
-        registry_matches && run_admission_error(axes, post_axes, baseline, results).is_none();
+        registry_matches && run_admission_error_for_snapshot(axes, admission, results).is_none();
     for (index, kernel) in registry.iter_mut().enumerate() {
         if let Err(error) = kernel.finalize_tuning(admitted) {
             diagnostics.push(format!("kernel[{index}]: {error}"));
@@ -1792,7 +2084,7 @@ pub fn finalize_registry_tuning(
         ));
     }
     Ok(FinalizedRegistryRun {
-        receipt: finalized_run_receipt(axes, post_axes, baseline, results),
+        receipt: finalized_run_receipt(admission, results),
         admitted,
         consumed: false,
     })
@@ -1807,10 +2099,47 @@ pub fn run_admission_error(
     baseline: AxisBaselinePolicy<'_>,
     results: &[Attainment],
 ) -> Option<String> {
+    let snapshot = baseline.snapshot(axes, post_axes);
+    run_admission_error_for_snapshot(axes, &snapshot, results)
+}
+
+pub(crate) fn run_admission_error_for_snapshot(
+    axes: &MachineAxes,
+    admission: &AxisAdmissionSnapshot,
+    results: &[Attainment],
+) -> Option<String> {
+    let live_day_error = admission.live_day_error();
+    run_admission_error_for_snapshot_with_live_error(axes, admission, results, live_day_error)
+}
+
+pub(crate) fn citable_run_admission_error_for_snapshot(
+    axes: &MachineAxes,
+    admission: &AxisAdmissionSnapshot,
+    results: &[Attainment],
+) -> Option<String> {
+    let live_day_error = admission.live_day_error();
+    run_admission_error_for_snapshot_with_live_error(
+        axes,
+        admission,
+        results,
+        live_day_error.clone(),
+    )
+    .or_else(|| admission.baseline_citation_error_with_live_day(live_day_error))
+}
+
+fn run_admission_error_for_snapshot_with_live_error(
+    axes: &MachineAxes,
+    admission: &AxisAdmissionSnapshot,
+    results: &[Attainment],
+    live_day_error: Option<String>,
+) -> Option<String> {
     if results.is_empty() {
         return Some("registry produced no measured kernels".to_string());
     }
-    let baseline_verdict = baseline.verdict(axes, post_axes);
+    if let Some(error) = live_day_error {
+        return Some(error);
+    }
+    let baseline_verdict = admission.verdict();
     if !baseline_verdict.trusted() {
         return Some(format!(
             "historical baseline admission refused: {}",
@@ -1921,7 +2250,10 @@ pub const SECTION_14_1_TARGETS: &[TargetRow] = &[
 
 // v4 adds the exact dependency-receipt artifact and domain digest. Earlier
 // rows cannot prove which resolved normal/build graph produced the GEMM code,
-// so roofline-v7 does not reuse their shape keys.
+// so roofline-v8 does not reuse their shape keys. The v8 namespace also
+// retires production-v2 rows: their admission proof is not valid under the
+// attested production-v3 protocol, and append-only v7 history must not poison
+// later v3 evidence.
 const ROOFLINE_ROW_SCHEMA: &str = "fs-roofline-ledger-row-v4";
 const ROOFLINE_PAYLOAD_ARTIFACT_KIND: &str = "roofline-benchmark-result";
 const ROOFLINE_PAYLOAD_ARTIFACT_META: &str = "{\"schema\":\"fs-roofline-benchmark-result-v1\"}";
@@ -2170,6 +2502,670 @@ fn parse_roofline_row_params(text: &str) -> Option<RooflineRowParams> {
 // Ledger integration and staleness
 // ---------------------------------------------------------------------------
 
+const EXTERNAL_PERF_GATE_ADMISSION_ARTIFACT_KIND: &str = "fs-roofline-axis-admission-receipt";
+const EXTERNAL_PERF_GATE_ADMISSION_ARTIFACT_META: &str =
+    "{\"schema\":\"fs-roofline-axis-admission-v2\",\"role\":\"external-perf-gate-input\"}";
+const EXTERNAL_PERF_GATE_RESULT_ARTIFACT_KIND: &str = "fs-roofline-external-perf-gate";
+const EXTERNAL_PERF_GATE_RESULT_ARTIFACT_META: &str =
+    "{\"schema\":\"fs-roofline-external-perf-gate-v1\"}";
+const EXTERNAL_PERF_GATE_SESSION: &[u8] = b"roofline-external-gate";
+const EXTERNAL_PERF_GATE_SEED: &[u8] = b"external-perf-gate";
+const MAX_EXTERNAL_PERF_GATE_FIELDS: usize = 64;
+const MAX_EXTERNAL_PERF_GATE_NESTING: usize = 64;
+
+/// External performance lane admitted by the centralized positive-gate
+/// recorder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalPerfGateLane {
+    /// High-order FEEC sum-factorization lane.
+    Feec,
+    /// Memory-resident Stockham FFT lane.
+    Fft,
+}
+
+impl ExternalPerfGateLane {
+    /// Stable lower-case lane identity retained in the ledger receipt.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Feec => "feec",
+            Self::Fft => "fft",
+        }
+    }
+
+    const fn metric(self) -> &'static str {
+        match self {
+            Self::Feec => "feec-gate",
+            Self::Fft => "fft-gate",
+        }
+    }
+
+    const fn event_kind(self) -> &'static str {
+        match self {
+            Self::Feec => "external_perf_gate_feec",
+            Self::Fft => "external_perf_gate_fft",
+        }
+    }
+}
+
+/// Receipt for one atomically retained external performance gate.
+///
+/// The operation and event ids are ledger-local. The two content hashes
+/// identify the exact admission and final-gate bytes independently of those
+/// local row ids.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalPerfGateReceipt {
+    operation_id: i64,
+    event_id: i64,
+    lane: ExternalPerfGateLane,
+    admission_artifact: fs_blake3::ContentHash,
+    final_gate_artifact: fs_blake3::ContentHash,
+    receipt: String,
+}
+
+impl ExternalPerfGateReceipt {
+    fn new(
+        operation_id: i64,
+        event_id: i64,
+        lane: ExternalPerfGateLane,
+        admission_artifact: fs_blake3::ContentHash,
+        final_gate_artifact: fs_blake3::ContentHash,
+    ) -> Self {
+        let receipt = format!(
+            "{{\"schema\":\"fs-roofline-external-perf-gate-receipt-v1\",\"op\":{operation_id},\"event\":{event_id},\"lane\":\"{}\",\"admission_artifact\":\"{admission_artifact}\",\"final_gate_artifact\":\"{final_gate_artifact}\"}}",
+            lane.as_str(),
+        );
+        Self {
+            operation_id,
+            event_id,
+            lane,
+            admission_artifact,
+            final_gate_artifact,
+            receipt,
+        }
+    }
+
+    /// Ledger-local operation id linking both artifacts.
+    #[must_use]
+    pub const fn operation_id(&self) -> i64 {
+        self.operation_id
+    }
+
+    /// Ledger-local row id of the lane-qualified diagnostic event.
+    #[must_use]
+    pub const fn event_id(&self) -> i64 {
+        self.event_id
+    }
+
+    /// Typed external performance lane.
+    #[must_use]
+    pub const fn lane(&self) -> ExternalPerfGateLane {
+        self.lane
+    }
+
+    /// Content identity of the exact axis-admission receipt bytes.
+    #[must_use]
+    pub const fn admission_artifact(&self) -> fs_blake3::ContentHash {
+        self.admission_artifact
+    }
+
+    /// Content identity of the exact final-gate JSON bytes.
+    #[must_use]
+    pub const fn final_gate_artifact(&self) -> fs_blake3::ContentHash {
+        self.final_gate_artifact
+    }
+
+    /// Canonical structured receipt for logging and later lookup.
+    #[must_use]
+    pub fn receipt_json(&self) -> &str {
+        &self.receipt
+    }
+}
+
+#[derive(Default)]
+struct ExternalPerfGateFields<'a> {
+    metric: Option<&'a str>,
+    citation_eligible: Option<&'a str>,
+    recorded: Option<&'a str>,
+    report_only: Option<&'a str>,
+    admission: Option<&'a str>,
+}
+
+fn external_gate_invalid(problem: impl Into<String>) -> LedgerError {
+    LedgerError::Invalid {
+        field: "external_perf_gate".to_string(),
+        problem: problem.into(),
+    }
+}
+
+fn skip_json_whitespace(bytes: &[u8], mut cursor: usize) -> usize {
+    while bytes
+        .get(cursor)
+        .is_some_and(|byte| matches!(byte, b' ' | b'\n' | b'\r' | b'\t'))
+    {
+        cursor += 1;
+    }
+    cursor
+}
+
+fn scan_json_string(bytes: &[u8], start: usize) -> Option<usize> {
+    if bytes.get(start) != Some(&b'"') {
+        return None;
+    }
+    let mut cursor = start + 1;
+    while let Some(byte) = bytes.get(cursor).copied() {
+        match byte {
+            b'"' => return Some(cursor + 1),
+            b'\\' => {
+                cursor = cursor.checked_add(2)?;
+            }
+            0x00..=0x1f => return None,
+            _ => cursor += 1,
+        }
+    }
+    None
+}
+
+fn scan_json_value(bytes: &[u8], start: usize) -> Option<usize> {
+    match bytes.get(start).copied()? {
+        b'"' => scan_json_string(bytes, start),
+        b'{' | b'[' => {
+            let mut stack = [0_u8; MAX_EXTERNAL_PERF_GATE_NESTING];
+            let mut depth = 0_usize;
+            let mut cursor = start;
+            while let Some(byte) = bytes.get(cursor).copied() {
+                match byte {
+                    b'"' => cursor = scan_json_string(bytes, cursor)?,
+                    b'{' | b'[' => {
+                        if depth == stack.len() {
+                            return None;
+                        }
+                        stack[depth] = byte;
+                        depth = depth.checked_add(1)?;
+                        cursor += 1;
+                    }
+                    b'}' | b']' => {
+                        let opener = *stack.get(depth.checked_sub(1)?)?;
+                        if !matches!((opener, byte), (b'{', b'}') | (b'[', b']')) {
+                            return None;
+                        }
+                        depth = depth.checked_sub(1)?;
+                        cursor += 1;
+                        if depth == 0 {
+                            return Some(cursor);
+                        }
+                    }
+                    _ => cursor += 1,
+                }
+            }
+            None
+        }
+        _ => {
+            let mut cursor = start;
+            while bytes
+                .get(cursor)
+                .is_some_and(|byte| !matches!(byte, b',' | b'}'))
+            {
+                cursor += 1;
+            }
+            let end = (start..cursor)
+                .rev()
+                .find(|index| !bytes[*index].is_ascii_whitespace())?
+                + 1;
+            (end > start).then_some(end)
+        }
+    }
+}
+
+fn set_external_gate_field<'a>(
+    field: &mut Option<&'a str>,
+    key: &str,
+    value: &'a str,
+) -> Result<(), LedgerError> {
+    if field.replace(value).is_some() {
+        return Err(external_gate_invalid(format!(
+            "duplicate top-level {key:?} field is ambiguous"
+        )));
+    }
+    Ok(())
+}
+
+fn parse_external_gate_fields(text: &str) -> Result<ExternalPerfGateFields<'_>, LedgerError> {
+    let bytes = text.as_bytes();
+    let mut cursor = skip_json_whitespace(bytes, 0);
+    if bytes.get(cursor) != Some(&b'{') {
+        return Err(external_gate_invalid(
+            "final_gate_json must be one top-level JSON object",
+        ));
+    }
+    cursor += 1;
+    let mut fields = ExternalPerfGateFields::default();
+    let mut field_count = 0_usize;
+    loop {
+        cursor = skip_json_whitespace(bytes, cursor);
+        if bytes.get(cursor) == Some(&b'}') {
+            cursor += 1;
+            break;
+        }
+        field_count = field_count
+            .checked_add(1)
+            .ok_or_else(|| external_gate_invalid("top-level field count overflowed"))?;
+        if field_count > MAX_EXTERNAL_PERF_GATE_FIELDS {
+            return Err(external_gate_invalid(format!(
+                "final_gate_json exceeds the {MAX_EXTERNAL_PERF_GATE_FIELDS}-field top-level bound"
+            )));
+        }
+        let key_start = cursor;
+        let key_end = scan_json_string(bytes, key_start)
+            .ok_or_else(|| external_gate_invalid("malformed top-level JSON field name"))?;
+        let key = &text[key_start + 1..key_end - 1];
+        if key.is_empty()
+            || !key
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        {
+            return Err(external_gate_invalid(
+                "top-level field names must use canonical lower-case ASCII identifiers",
+            ));
+        }
+        cursor = skip_json_whitespace(bytes, key_end);
+        if bytes.get(cursor) != Some(&b':') {
+            return Err(external_gate_invalid(format!(
+                "top-level field {key:?} lacks a value separator"
+            )));
+        }
+        cursor = skip_json_whitespace(bytes, cursor + 1);
+        let value_start = cursor;
+        let value_end = scan_json_value(bytes, value_start).ok_or_else(|| {
+            external_gate_invalid(format!("top-level field {key:?} has no complete value"))
+        })?;
+        let value = text[value_start..value_end].trim_end();
+        match key {
+            "metric" => set_external_gate_field(&mut fields.metric, key, value)?,
+            "citation_eligible" => {
+                set_external_gate_field(&mut fields.citation_eligible, key, value)?;
+            }
+            "recorded" => set_external_gate_field(&mut fields.recorded, key, value)?,
+            "report_only" => set_external_gate_field(&mut fields.report_only, key, value)?,
+            "admission" => set_external_gate_field(&mut fields.admission, key, value)?,
+            _ => {}
+        }
+        cursor = skip_json_whitespace(bytes, value_end);
+        match bytes.get(cursor) {
+            Some(b',') => cursor += 1,
+            Some(b'}') => {
+                cursor += 1;
+                break;
+            }
+            _ => {
+                return Err(external_gate_invalid(format!(
+                    "top-level field {key:?} is not followed by a comma or object end"
+                )));
+            }
+        }
+    }
+    cursor = skip_json_whitespace(bytes, cursor);
+    if cursor != bytes.len() {
+        return Err(external_gate_invalid(
+            "bytes follow the final-gate JSON object",
+        ));
+    }
+    Ok(fields)
+}
+
+fn validate_external_perf_gate_inputs(
+    lane: ExternalPerfGateLane,
+    admission: &AxisAdmissionSnapshot,
+    final_gate_json: &str,
+) -> Result<(), LedgerError> {
+    if let Some(reason) = admission.baseline_citation_error() {
+        return Err(external_gate_invalid(format!(
+            "authority-admitted baseline snapshot required: {reason}"
+        )));
+    }
+    if final_gate_json.len() > MAX_EXTERNAL_PERF_GATE_JSON_BYTES {
+        return Err(external_gate_invalid(format!(
+            "final_gate_json is {} bytes, exceeding the {MAX_EXTERNAL_PERF_GATE_JSON_BYTES}-byte bound",
+            final_gate_json.len()
+        )));
+    }
+    let fields = parse_external_gate_fields(final_gate_json)?;
+    let expected_metric = format!("\"{}\"", lane.metric());
+    if fields.metric != Some(expected_metric.as_str()) {
+        return Err(external_gate_invalid(format!(
+            "lane {:?} requires top-level metric {expected_metric}",
+            lane
+        )));
+    }
+    if fields.citation_eligible != Some("true") {
+        return Err(external_gate_invalid(
+            "top-level citation_eligible must be the literal true",
+        ));
+    }
+    if fields.recorded != Some("true") {
+        return Err(external_gate_invalid(
+            "top-level recorded must be the literal true",
+        ));
+    }
+    if fields.report_only != Some("false") {
+        return Err(external_gate_invalid(
+            "top-level report_only must be the literal false",
+        ));
+    }
+    if fields.admission != Some(admission.receipt_json()) {
+        return Err(external_gate_invalid(
+            "top-level admission must preserve the exact supplied AxisAdmissionSnapshot receipt",
+        ));
+    }
+    Ok(())
+}
+
+fn checked_external_gate_len(field: &str, bytes: &[u8]) -> Result<u64, LedgerError> {
+    u64::try_from(bytes.len()).map_err(|_| {
+        external_gate_invalid(format!("{field} byte length cannot be represented as u64"))
+    })
+}
+
+fn require_exact_external_gate_artifact(
+    ledger: &Ledger,
+    field: &str,
+    hash: &fs_blake3::ContentHash,
+    expected: &[u8],
+    expected_kind: &str,
+    expected_meta: &str,
+) -> Result<(), LedgerError> {
+    let bound = checked_external_gate_len(field, expected)?;
+    let info = ledger.artifact_info(hash)?.ok_or_else(|| {
+        external_gate_invalid(format!("{field} artifact envelope disappeared after write"))
+    })?;
+    if info.hash != *hash
+        || info.len != bound
+        || info.kind != expected_kind
+        || info.meta.as_deref() != Some(expected_meta)
+    {
+        return Err(external_gate_invalid(format!(
+            "{field} artifact envelope differs on exact re-read"
+        )));
+    }
+    let stored = ledger.get_artifact_bounded(hash, bound)?.ok_or_else(|| {
+        external_gate_invalid(format!("{field} artifact disappeared after write"))
+    })?;
+    if stored.as_slice() != expected {
+        return Err(external_gate_invalid(format!(
+            "{field} artifact bytes differ from the exact supplied bytes"
+        )));
+    }
+    Ok(())
+}
+
+fn rollback_external_gate_error(ledger: &Ledger, error: LedgerError) -> LedgerError {
+    if !ledger.in_transaction() {
+        return error;
+    }
+    match ledger.rollback() {
+        Ok(()) => error,
+        Err(rollback) => external_gate_invalid(format!(
+            "external gate write failed ({error}); rollback also failed ({rollback})"
+        )),
+    }
+}
+
+fn external_gate_path_is_nondurable(path: &str) -> bool {
+    path.eq_ignore_ascii_case(":memory:")
+        || path
+            .get(..5)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("file:"))
+}
+
+/// Open a durable ledger path and atomically retain one authority-admitted
+/// external performance gate.
+///
+/// Empty paths, SQLite's `:memory:` sentinel, and all `file:` URI forms are
+/// refused: FEEC/FFT cannot emit recorded/citable evidence unless the receipt
+/// survives the process. URI interpretation is deliberately outside this
+/// narrow durable-path boundary.
+/// The supplied gate must be a bounded JSON object for the selected lane with
+/// literal positive citation/recording fields and the exact admission receipt.
+///
+/// # Errors
+/// Invalid paths, non-authoritative admission, report-only or malformed gate
+/// JSON, and all ledger write/read failures are returned as `LedgerError`.
+pub fn record_external_perf_gate_at_path(
+    path: &str,
+    lane: ExternalPerfGateLane,
+    admission: &AxisAdmissionSnapshot,
+    final_gate_json: &str,
+) -> Result<ExternalPerfGateReceipt, LedgerError> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() || external_gate_path_is_nondurable(trimmed) {
+        return Err(external_gate_invalid(
+            "a non-empty non-URI durable ledger path is required; SQLite memory/URI modes are refused",
+        ));
+    }
+    // Refuse authority, lane, and bounded structural mismatches before opening
+    // (and potentially creating) a path. The Ledger-backed core repeats these
+    // checks, and begin_op supplies the engine's complete JSON validation.
+    validate_external_perf_gate_inputs(lane, admission, final_gate_json)?;
+    let ledger = Ledger::open(path)?;
+    record_external_perf_gate_in_ledger(&ledger, lane, admission, final_gate_json)
+}
+
+/// Atomically retain one authority-admitted external performance gate in an
+/// already-open ledger.
+///
+/// This Ledger-typed entry point is the in-memory test seam. Production FEEC
+/// and FFT callers use [`record_external_perf_gate_at_path`] and therefore do
+/// not need a direct fs-ledger dependency. The recorder owns its transaction;
+/// an already-open caller transaction is refused rather than committed or
+/// rolled back. Both exact artifacts and their role-qualified edges, plus the
+/// completed operation envelope, are re-read before commit. A lane-qualified
+/// non-authoritative diagnostic event projects that op and the same
+/// artifacts/gate. Its positive row id and exact one-row count increment prove
+/// insertion only: fs-ledger intentionally exposes no general event-payload
+/// reader, so the exact artifact and op IR remain the byte-authoritative
+/// records. Admission is checked again after those writes so a UTC-day
+/// rollover aborts the complete transaction.
+///
+/// # Errors
+/// Non-authoritative or mismatched inputs, caller transaction ownership,
+/// write/read disagreement, and ledger failures are all fail-closed errors.
+#[allow(clippy::too_many_lines)] // one visible all-or-nothing evidence boundary
+pub fn record_external_perf_gate_in_ledger(
+    ledger: &Ledger,
+    lane: ExternalPerfGateLane,
+    admission: &AxisAdmissionSnapshot,
+    final_gate_json: &str,
+) -> Result<ExternalPerfGateReceipt, LedgerError> {
+    validate_external_perf_gate_inputs(lane, admission, final_gate_json)?;
+    if ledger.in_transaction() {
+        return Err(external_gate_invalid(
+            "recorder must own its transaction; commit or roll back the caller transaction first",
+        ));
+    }
+
+    let admission_bytes = admission.receipt_json().as_bytes();
+    let gate_bytes = final_gate_json.as_bytes();
+    let admission_hash = fs_ledger::hash_bytes(admission_bytes);
+    let final_gate_hash = fs_ledger::hash_bytes(gate_bytes);
+    if admission_hash == final_gate_hash {
+        return Err(external_gate_invalid(
+            "admission and final-gate artifacts must have distinct content identities",
+        ));
+    }
+    let admission_len = checked_external_gate_len("admission", admission_bytes)?;
+    let final_gate_len = checked_external_gate_len("final_gate_json", gate_bytes)?;
+    let total_bytes = admission_len
+        .checked_add(final_gate_len)
+        .ok_or_else(|| external_gate_invalid("combined artifact byte count overflowed"))?;
+    let versions = format!("{{\"fs-roofline\":\"{VERSION}\",\"external_perf_gate_protocol\":1}}");
+    let budget = format!("{{\"artifact_bytes\":{total_bytes}}}");
+    let capability = format!(
+        "{{\"ops\":[\"perf.external-gate\"],\"lane\":\"{}\"}}",
+        lane.as_str()
+    );
+    // Embedding the exact final gate delegates full JSON validation to the
+    // same engine that stores the operation, while the content hash and Out
+    // edge bind its independently retained artifact.
+    let ir = format!(
+        "{{\"op\":\"perf.external-gate\",\"schema\":\"fs-roofline-external-perf-gate-op-v1\",\"lane\":\"{}\",\"admission_artifact\":\"{admission_hash}\",\"final_gate_artifact\":\"{final_gate_hash}\",\"final_gate\":{final_gate_json}}}",
+        lane.as_str(),
+    );
+    let explicits = FiveExplicits {
+        seed: EXTERNAL_PERF_GATE_SEED,
+        versions: &versions,
+        budget: &budget,
+        capability: &capability,
+    };
+    let recorded_at = now_wall_ns();
+    let decision_day = admission
+        .decision_day()
+        .ok_or_else(|| external_gate_invalid("authority-admitted snapshot lacks a decision day"))?;
+    if wall_ns_day(recorded_at) != Some(decision_day) {
+        return Err(external_gate_invalid(
+            "external gate start timestamp is outside the attested admission day",
+        ));
+    }
+
+    ledger.begin()?;
+    if !ledger.in_transaction() {
+        return Err(external_gate_invalid(
+            "ledger reported a successful begin without an open transaction",
+        ));
+    }
+    let write_result: Result<(i64, i64), LedgerError> = (|| {
+        let op = ledger.begin_op(
+            Some(EXTERNAL_PERF_GATE_SESSION),
+            &ir,
+            &explicits,
+            recorded_at,
+        )?;
+        let stored_admission = ledger.put_artifact(
+            EXTERNAL_PERF_GATE_ADMISSION_ARTIFACT_KIND,
+            admission_bytes,
+            Some(EXTERNAL_PERF_GATE_ADMISSION_ARTIFACT_META),
+        )?;
+        if stored_admission.hash != admission_hash || stored_admission.len != admission_len {
+            return Err(external_gate_invalid(
+                "stored admission artifact receipt differs from the exact write request",
+            ));
+        }
+        let stored_gate = ledger.put_artifact(
+            EXTERNAL_PERF_GATE_RESULT_ARTIFACT_KIND,
+            gate_bytes,
+            Some(EXTERNAL_PERF_GATE_RESULT_ARTIFACT_META),
+        )?;
+        if stored_gate.hash != final_gate_hash || stored_gate.len != final_gate_len {
+            return Err(external_gate_invalid(
+                "stored final-gate artifact receipt differs from the exact write request",
+            ));
+        }
+        ledger.link(op, &admission_hash, EdgeRole::In)?;
+        ledger.link(op, &final_gate_hash, EdgeRole::Out)?;
+        require_exact_external_gate_artifact(
+            ledger,
+            "admission",
+            &admission_hash,
+            admission_bytes,
+            EXTERNAL_PERF_GATE_ADMISSION_ARTIFACT_KIND,
+            EXTERNAL_PERF_GATE_ADMISSION_ARTIFACT_META,
+        )?;
+        require_exact_external_gate_artifact(
+            ledger,
+            "final_gate_json",
+            &final_gate_hash,
+            gate_bytes,
+            EXTERNAL_PERF_GATE_RESULT_ARTIFACT_KIND,
+            EXTERNAL_PERF_GATE_RESULT_ARTIFACT_META,
+        )?;
+        if !ledger.edge_exists(op, &admission_hash, EdgeRole::In)?
+            || !ledger.edge_exists(op, &final_gate_hash, EdgeRole::Out)?
+        {
+            return Err(external_gate_invalid(
+                "role-qualified admission/final-gate lineage edge failed exact re-read",
+            ));
+        }
+        let event_count_before = ledger.table_count("events")?;
+        let event_payload = format!(
+            "{{\"schema\":\"fs-roofline-external-perf-gate-event-v1\",\"op\":{op},\"lane\":\"{}\",\"admission_artifact\":\"{admission_hash}\",\"final_gate_artifact\":\"{final_gate_hash}\",\"final_gate\":{final_gate_json}}}",
+            lane.as_str(),
+        );
+        let event_id = ledger.append_event(&EventRow {
+            session: Some(EXTERNAL_PERF_GATE_SESSION),
+            t: recorded_at,
+            kind: lane.event_kind(),
+            payload: Some(&event_payload),
+        })?;
+        let expected_event_count = event_count_before
+            .checked_add(1)
+            .ok_or_else(|| external_gate_invalid("event count overflowed"))?;
+        if event_id <= 0 || ledger.table_count("events")? != expected_event_count {
+            return Err(external_gate_invalid(
+                "lane-qualified diagnostic event write receipt failed its precommit existence check",
+            ));
+        }
+        let completed_at = now_wall_ns();
+        if completed_at < recorded_at
+            || wall_ns_day(completed_at) != Some(decision_day)
+            || wall_ns_day(recorded_at) != Some(decision_day)
+        {
+            return Err(external_gate_invalid(
+                "external gate timestamps must be monotone and remain within the attested admission day",
+            ));
+        }
+        ledger.finish_op(op, OpOutcome::Ok, None, completed_at)?;
+        let stored_op = ledger.op(op)?.ok_or_else(|| {
+            external_gate_invalid("external performance-gate operation disappeared after write")
+        })?;
+        if stored_op.session.as_deref() != Some(EXTERNAL_PERF_GATE_SESSION)
+            || stored_op.ir != ir
+            || stored_op.seed.as_slice() != EXTERNAL_PERF_GATE_SEED
+            || stored_op.versions != versions
+            || stored_op.budget != budget
+            || stored_op.capability != capability
+            || stored_op.t_start != recorded_at
+            || stored_op.t_end != Some(completed_at)
+            || stored_op.outcome.as_deref() != Some("ok")
+            || stored_op.diag.is_some()
+        {
+            return Err(external_gate_invalid(
+                "completed external performance-gate operation differs on exact re-read",
+            ));
+        }
+        if let Some(reason) = admission.baseline_citation_error() {
+            return Err(external_gate_invalid(format!(
+                "admission ceased to be citation-eligible before commit: {reason}"
+            )));
+        }
+        if !ledger.in_transaction() {
+            return Err(external_gate_invalid(
+                "ledger transaction ended before the atomic gate commit",
+            ));
+        }
+        Ok((op, event_id))
+    })();
+
+    let (op, event_id) = match write_result {
+        Ok(receipt) => receipt,
+        Err(error) => return Err(rollback_external_gate_error(ledger, error)),
+    };
+    if let Err(error) = ledger.commit() {
+        return Err(rollback_external_gate_error(ledger, error));
+    }
+    if ledger.in_transaction() {
+        let error = external_gate_invalid(
+            "ledger reported a successful commit but retained an open transaction",
+        );
+        return Err(rollback_external_gate_error(ledger, error));
+    }
+    Ok(ExternalPerfGateReceipt::new(
+        op,
+        event_id,
+        lane,
+        admission_hash,
+        final_gate_hash,
+    ))
+}
+
 /// Record a harness run atomically in the ledger. Admitted timed rows receive
 /// metrics, `benchmark_result` events, content-addressed output artifacts, and
 /// versioned tune rows. Rejected input receives an exact baseline-admission
@@ -2185,7 +3181,7 @@ fn parse_roofline_row_params(text: &str) -> Option<RooflineRowParams> {
 /// the timed repetitions. Custom-registry evidence is explicitly
 /// NON-CITABLE for performance claims; the sealed
 /// [`production::ProductionRun`] protocol is the only path that records
-/// `"protocol":"production-v2"` together with a retained dependency receipt.
+/// `"protocol":"production-v3"` together with a retained dependency receipt.
 ///
 /// # Errors
 /// Ledger errors propagate and roll back the whole write set.
@@ -2197,11 +3193,12 @@ pub fn record_run(
     finalized: &mut FinalizedRegistryRun,
     results: &mut [Attainment],
 ) -> Result<i64, LedgerError> {
+    let admission = baseline.snapshot(axes, post_axes);
     record_run_with_protocol(
         ledger,
         axes,
         post_axes,
-        baseline,
+        &admission,
         finalized,
         results,
         CUSTOM_REGISTRY_PROTOCOL_FIELD,
@@ -2217,7 +3214,7 @@ pub(crate) fn record_run_with_protocol(
     ledger: &Ledger,
     axes: &MachineAxes,
     post_axes: &MachineAxes,
-    baseline: AxisBaselinePolicy<'_>,
+    admission: &AxisAdmissionSnapshot,
     finalized: &mut FinalizedRegistryRun,
     results: &mut [Attainment],
     protocol_ir_fields: &str,
@@ -2226,11 +3223,26 @@ pub(crate) fn record_run_with_protocol(
     evidence_namespace: EvidenceNamespace,
     captured_build_identity: Option<fs_blake3::ContentHash>,
 ) -> Result<i64, LedgerError> {
-    let measurement_error = run_admission_error(axes, post_axes, baseline, results);
+    let live_day_error = admission.live_day_error();
+    let measurement_error = run_admission_error_for_snapshot_with_live_error(
+        axes,
+        admission,
+        results,
+        live_day_error.clone(),
+    );
     let measurement_admitted = measurement_error.is_none();
-    let admission_error = measurement_error
-        .clone()
-        .or_else(|| citation_refusal.map(str::to_string));
+    let delayed_day_refusal = finalized.admitted
+        && !measurement_admitted
+        && live_day_error.is_some()
+        && measurement_error == live_day_error;
+    let admission_error = match (citation_refusal, measurement_error.as_deref()) {
+        (Some(forced), Some(measurement)) if forced != measurement => {
+            Some(format!("{forced}; {measurement}"))
+        }
+        (Some(forced), _) => Some(forced.to_string()),
+        (None, Some(measurement)) => Some(measurement.to_string()),
+        (None, None) => None,
+    };
     let run_valid = admission_error.is_none();
     if finalized.consumed {
         return Err(LedgerError::Invalid {
@@ -2238,8 +3250,10 @@ pub(crate) fn record_run_with_protocol(
             problem: "the finalized roofline run was already recorded".to_string(),
         });
     }
-    let expected_receipt = finalized_run_receipt(axes, post_axes, baseline, results);
-    if finalized.receipt != expected_receipt || finalized.admitted != measurement_admitted {
+    let expected_receipt = finalized_run_receipt(admission, results);
+    if finalized.receipt != expected_receipt
+        || (finalized.admitted != measurement_admitted && !delayed_day_refusal)
+    {
         return Err(LedgerError::Invalid {
             field: "finalized_run".to_string(),
             problem:
@@ -2247,7 +3261,7 @@ pub(crate) fn record_run_with_protocol(
                     .to_string(),
         });
     }
-    let baseline_receipt = baseline.receipt_json(axes, post_axes);
+    let baseline_receipt = admission.receipt_json().to_string();
     let build_identity = if let Some(captured) = captured_build_identity {
         let observed = read_executable_build_identity()?;
         require_stable_executable_identity(captured, observed)?
@@ -2297,7 +3311,7 @@ pub(crate) fn record_run_with_protocol(
             payload: Some(&baseline_receipt),
         })?;
         if run_valid {
-            let baseline_hash = baseline
+            let baseline_hash = admission
                 .baseline_hash()
                 .ok_or_else(|| LedgerError::Invalid {
                     field: "baseline".to_string(),
@@ -2395,7 +3409,17 @@ pub(crate) fn record_run_with_protocol(
                     });
                 }
             }
-            ledger.finish_op(op, OpOutcome::Ok, None, now_wall_ns())?;
+            let completed_at = now_wall_ns();
+            if evidence_namespace == EvidenceNamespace::Production
+                && wall_ns_day(completed_at) != admission.decision_day()
+            {
+                return Err(LedgerError::Invalid {
+                    field: "baseline_admission.decision_day".to_string(),
+                    problem: "roofline recording crossed the attested admission day boundary"
+                        .to_string(),
+                });
+            }
+            ledger.finish_op(op, OpOutcome::Ok, None, completed_at)?;
         } else {
             let reason = admission_error
                 .as_deref()
@@ -2824,20 +3848,45 @@ fn parse_canonical_production_op(ir: &str) -> Option<CanonicalProductionOp> {
 }
 
 struct BaselineReceiptView<'a> {
+    now_day: u64,
+    decision_day: u64,
+    identity: &'a str,
     pre: &'a str,
     post: &'a str,
     baseline_hash: fs_blake3::ContentHash,
+    baseline: &'a str,
+    required_sources: Vec<fs_blake3::ContentHash>,
 }
 
 fn parse_baseline_receipt_view(text: &str) -> Option<BaselineReceiptView<'_>> {
-    if !text.starts_with("{\"schema\":\"fs-roofline-axis-admission-v1\",")
+    let prefix = "{\"schema\":\"fs-roofline-axis-admission-v2\",\"tier\":\"attested\",\"now_day\":";
+    if !text.starts_with(prefix)
         || text.matches(",\"pre\":").count() != 1
         || text.matches(",\"post\":").count() != 1
         || text.matches(",\"baseline_hash\":").count() != 1
+        || text.matches(",\"attestation\":").count() != 1
+        || text.matches(",\"required_source_receipts\":").count() != 1
+        || text.matches(",\"authority\":").count() != 1
+        || text.matches(",\"verdict\":").count() != 1
     {
         return None;
     }
-    let (_, pre_and_later) = text.split_once(",\"pre\":")?;
+    let day_and_later = text.strip_prefix(prefix)?;
+    let (now_day_text, decision_and_later) = day_and_later.split_once(",\"decision_day\":")?;
+    let (decision_day_text, identity_and_later) =
+        decision_and_later.split_once(",\"identity\":")?;
+    let now_day = now_day_text.parse::<u64>().ok()?;
+    let decision_day = decision_day_text.parse::<u64>().ok()?;
+    if now_day.to_string() != now_day_text
+        || decision_day.to_string() != decision_day_text
+        || now_day != decision_day
+    {
+        return None;
+    }
+    let (identity, pre_and_later) = identity_and_later.split_once(",\"pre\":")?;
+    if !identity.starts_with('{') || !identity.ends_with('}') {
+        return None;
+    }
     let (pre, post_and_later) = pre_and_later.split_once(",\"post\":")?;
     let (post, baseline_and_later) = post_and_later.split_once(",\"baseline_hash\":")?;
     if !pre.starts_with('{')
@@ -2847,12 +3896,62 @@ fn parse_baseline_receipt_view(text: &str) -> Option<BaselineReceiptView<'_>> {
     {
         return None;
     }
-    let (baseline_hash, _) = baseline_and_later.split_once(",\"baseline\":")?;
+    let (baseline_hash, later) = baseline_and_later.split_once(",\"baseline\":")?;
     let baseline_hash = baseline_hash.strip_prefix('"')?.strip_suffix('"')?;
+    let parsed_baseline_hash = fs_blake3::ContentHash::from_hex(baseline_hash)?;
+    if parsed_baseline_hash.to_hex() != baseline_hash {
+        return None;
+    }
+    let (baseline, attestation_and_sources) = later.split_once(",\"attestation\":")?;
+    if !baseline.starts_with('{') || !baseline.ends_with('}') {
+        return None;
+    }
+    let (attestation, sources_and_authority) =
+        attestation_and_sources.split_once(",\"required_source_receipts\":")?;
+    let attestation_body = attestation
+        .strip_prefix("{\"key_id\":\"")?
+        .strip_suffix("\"}")?;
+    let (key_id, signature) = attestation_body.split_once("\",\"signature\":\"")?;
+    if key_id.is_empty() || signature.is_empty() {
+        return None;
+    }
+    let (required_sources, authority_and_verdict) =
+        sources_and_authority.split_once(",\"authority\":")?;
+    let source_body = required_sources.strip_prefix('[')?.strip_suffix(']')?;
+    let mut previous_source = None;
+    let mut parsed_sources = Vec::new();
+    for encoded in source_body.split(',') {
+        let hex = encoded.strip_prefix('"')?.strip_suffix('"')?;
+        let source = fs_blake3::ContentHash::from_hex(hex)?;
+        if source.to_string() != hex || previous_source.is_some_and(|previous| previous >= source) {
+            return None;
+        }
+        previous_source = Some(source);
+        parsed_sources.push(source);
+    }
+    if parsed_sources.len() < baseline::MIN_PROMOTION_RUNS {
+        return None;
+    }
+    let (authority, verdict) = authority_and_verdict.split_once(",\"verdict\":")?;
+    let policy_receipt = authority
+        .strip_prefix("{\"verdict\":\"authorized\",\"policy_receipt\":\"")?
+        .strip_suffix("\"}")?;
+    let parsed_policy_receipt = fs_blake3::ContentHash::from_hex(policy_receipt)?;
+    if parsed_policy_receipt.to_hex() != policy_receipt {
+        return None;
+    }
+    if verdict != "{\"baseline\":\"trusted\"}}" {
+        return None;
+    }
     Some(BaselineReceiptView {
+        now_day,
+        decision_day,
+        identity,
         pre,
         post,
-        baseline_hash: fs_blake3::ContentHash::from_hex(baseline_hash)?,
+        baseline_hash: parsed_baseline_hash,
+        baseline,
+        required_sources: parsed_sources,
     })
 }
 
@@ -2924,6 +4023,7 @@ struct ValidatedProtocolAxes {
     pre_logical_cpus: u64,
     pre_axis_bits: [u64; 4],
     post_axis_bits: [u64; 4],
+    decision_day: u64,
 }
 
 fn validate_protocol_axes(
@@ -2935,10 +4035,18 @@ fn validate_protocol_axes(
     let (pre_fingerprint, pre_logical_cpus, pre_axis_bits) =
         parse_machine_axes_receipt(baseline.pre)?;
     let (post_fingerprint, _, post_axis_bits) = parse_machine_axes_receipt(baseline.post)?;
+    let parsed_baseline = BaselineStore::from_jsonl(baseline.baseline).ok()?;
+    let exact_baseline = parsed_baseline.for_fingerprint(pre_fingerprint)?;
+    let exact_identity = baseline_identity_json(exact_baseline.identity());
     if protocol.fingerprint != current_fingerprint
         || pre_fingerprint != current_fingerprint
         || protocol.post_fingerprint != post_fingerprint
         || baseline.baseline_hash != current_baseline
+        || exact_baseline.content_hash() != baseline.baseline_hash
+        || exact_baseline.canonical_json() != baseline.baseline
+        || baseline.identity != exact_identity.as_str()
+        || baseline.required_sources.as_slice() != exact_baseline.provenance().source_receipts()
+        || baseline.now_day != baseline.decision_day
         || fs_blake3::hash_domain(
             production::PRODUCTION_AXES_RECEIPT_DOMAIN,
             baseline.pre.as_bytes(),
@@ -2947,9 +4055,6 @@ fn validate_protocol_axes(
             production::PRODUCTION_AXES_RECEIPT_DOMAIN,
             baseline.post.as_bytes(),
         ) != protocol.post_axes_receipt
-        || !protocol
-            .baseline_admission
-            .ends_with(",\"verdict\":{\"baseline\":\"trusted\"}}")
     {
         return None;
     }
@@ -2957,7 +4062,14 @@ fn validate_protocol_axes(
         pre_logical_cpus,
         pre_axis_bits,
         post_axis_bits,
+        decision_day: baseline.decision_day,
     })
+}
+
+const WALL_NS_PER_DAY: u64 = 86_400 * 1_000_000_000;
+
+fn wall_ns_day(wall_ns: i64) -> Option<u64> {
+    Some(u64::try_from(wall_ns).ok()? / WALL_NS_PER_DAY)
 }
 
 fn artifact_bytes_for_validation(
@@ -3068,7 +4180,8 @@ fn validate_roofline_row(
     else {
         return Ok(None);
     };
-    if !dependency_receipt_is_structurally_valid(ledger, params.op, &protocol)?
+    if wall_ns_day(recorded_at_ns) != Some(validated_axes.decision_day)
+        || !dependency_receipt_is_structurally_valid(ledger, params.op, &protocol)?
         || op.id != params.op
         || !production_op_envelope_is_valid(&op, params.build_identity)
         || protocol.finalized_run_receipt != params.run_receipt
@@ -3460,6 +4573,17 @@ mod tests {
     }
 
     fn trusted_baseline(axes: &MachineAxes) -> (BaselineAxes, BaselineIdentity) {
+        trusted_baseline_at(axes, 20_000)
+    }
+
+    fn live_trusted_baseline(axes: &MachineAxes) -> (BaselineAxes, BaselineIdentity) {
+        trusted_baseline_at(axes, test_day().saturating_sub(10))
+    }
+
+    fn trusted_baseline_at(
+        axes: &MachineAxes,
+        promoted_day: u64,
+    ) -> (BaselineAxes, BaselineIdentity) {
         let identity =
             BaselineIdentity::current(axes, "test-firmware").expect("valid synthetic identity");
         let candidates: Vec<_> = (0_u64..3)
@@ -3479,11 +4603,36 @@ mod tests {
             &candidates,
             "test-operator",
             "deterministic lib receipt fixture",
-            20_000,
+            promoted_day,
             90,
         )
         .expect("valid synthetic baseline");
         (baseline, identity)
+    }
+
+    fn test_day() -> u64 {
+        days_since_epoch_now().expect("unit-test clock after Unix epoch")
+    }
+
+    fn attested_policy(
+        baseline: &BaselineAxes,
+        identity: &BaselineIdentity,
+        now_day: u64,
+    ) -> AttestedAxisBaselinePolicy {
+        AttestedAxisBaselinePolicy::from_verified(
+            baseline.clone(),
+            identity.clone(),
+            now_day,
+            PromotionAttestation::new("test-authority", "test-signature"),
+            baseline.provenance().source_receipts().to_vec(),
+            PromotionAuthorityDecision::new(
+                KeyVerdict::Authorized,
+                fs_blake3::hash_domain(
+                    "fs-roofline.lib-test-policy.v1",
+                    baseline.content_hash().as_bytes(),
+                ),
+            ),
+        )
     }
 
     fn timed_receipt_fixture() -> (MachineAxes, BaselineAxes, BaselineIdentity, Attainment) {
@@ -3495,6 +4644,347 @@ mod tests {
         };
         let timed = measure(&mut kernel, 0, 3, &axes).expect("bounded receipt measurement");
         (axes, baseline, identity, timed)
+    }
+
+    #[test]
+    fn attested_policy_and_snapshot_are_scoped_to_one_epoch_day() {
+        let axes = synthetic_axes();
+        let (baseline, identity) = live_trusted_baseline(&axes);
+        let today = test_day();
+        let admitted = attested_policy(&baseline, &identity, today).decide_at(&axes, &axes, today);
+        assert!(admitted.authority_admitted());
+        assert!(admitted.baseline_citation_eligible());
+        assert_eq!(admitted.decision_day(), Some(today));
+        assert!(admitted.day_error_at(today).is_none());
+        assert!(admitted.day_error_at(today.saturating_add(1)).is_some());
+
+        let delayed = attested_policy(&baseline, &identity, today).decide_at(
+            &axes,
+            &axes,
+            today.saturating_add(1),
+        );
+        assert!(!delayed.authority_admitted());
+        assert!(!delayed.baseline_citation_eligible());
+        assert_eq!(
+            delayed.verdict(),
+            &BaselineVerdict::Unauthorized {
+                verdict: "policy-day-mismatch"
+            }
+        );
+        assert!(delayed.receipt_json().contains(&format!(
+            "\"now_day\":{today},\"decision_day\":{}",
+            today.saturating_add(1)
+        )));
+    }
+
+    #[test]
+    fn attested_baseline_receipt_requires_lowercase_child_hashes() {
+        let axes = synthetic_axes();
+        let today = test_day();
+        let (baseline, identity) = trusted_baseline_at(&axes, today.saturating_sub(10));
+        let policy_receipt = fs_blake3::hash_domain(
+            "fs-roofline.lib-test-canonical-policy.v1",
+            baseline.content_hash().as_bytes(),
+        );
+        let snapshot = AttestedAxisBaselinePolicy::from_verified(
+            baseline.clone(),
+            identity,
+            today,
+            PromotionAttestation::new("test-authority", "test-signature"),
+            baseline.provenance().source_receipts().to_vec(),
+            PromotionAuthorityDecision::new(KeyVerdict::Authorized, policy_receipt),
+        )
+        .decide_at(&axes, &axes, today);
+        let canonical = snapshot.receipt_json();
+        assert!(parse_baseline_receipt_view(canonical).is_some());
+
+        let baseline_hex = baseline.content_hash().to_hex();
+        let uppercase_baseline = canonical.replacen(
+            &format!("\"baseline_hash\":\"{baseline_hex}\""),
+            &format!(
+                "\"baseline_hash\":\"{}\"",
+                baseline_hex.to_ascii_uppercase()
+            ),
+            1,
+        );
+        assert_ne!(uppercase_baseline, canonical);
+        assert!(parse_baseline_receipt_view(&uppercase_baseline).is_none());
+
+        let policy_hex = policy_receipt.to_hex();
+        let uppercase_policy = canonical.replacen(
+            &format!("\"policy_receipt\":\"{policy_hex}\""),
+            &format!("\"policy_receipt\":\"{}\"", policy_hex.to_ascii_uppercase()),
+            1,
+        );
+        assert_ne!(uppercase_policy, canonical);
+        assert!(parse_baseline_receipt_view(&uppercase_policy).is_none());
+    }
+
+    fn external_gate_snapshot(
+        axes: &MachineAxes,
+        key_id: &str,
+    ) -> (BaselineAxes, AxisAdmissionSnapshot, fs_blake3::ContentHash) {
+        for _ in 0..3 {
+            let today = test_day();
+            let (baseline, identity) = trusted_baseline_at(axes, today.saturating_sub(10));
+            let policy_receipt = fs_blake3::hash_domain(
+                "fs-roofline.lib-test-external-gate-policy.v1",
+                key_id.as_bytes(),
+            );
+            let snapshot = AttestedAxisBaselinePolicy::from_verified(
+                baseline.clone(),
+                identity,
+                today,
+                PromotionAttestation::new(key_id, "external-gate-test-signature"),
+                baseline.provenance().source_receipts().to_vec(),
+                PromotionAuthorityDecision::new(KeyVerdict::Authorized, policy_receipt),
+            )
+            .decide_at(axes, axes, today);
+            if test_day() == today && snapshot.baseline_citation_eligible() {
+                return (baseline, snapshot, policy_receipt);
+            }
+        }
+        panic!("could not construct an external-gate fixture within one stable epoch day");
+    }
+
+    fn external_gate_json(lane: ExternalPerfGateLane, admission: &AxisAdmissionSnapshot) -> String {
+        format!(
+            "{{\"metric\":\"{}\",\"target_met\":true,\"citation_eligible\":true,\"recorded\":true,\"report_only\":false,\"reason\":null,\"admission\":{}}}",
+            lane.metric(),
+            admission.receipt_json(),
+        )
+    }
+
+    #[test]
+    fn external_gate_recorder_preserves_exact_authority_and_gate_receipts() {
+        let axes = synthetic_axes();
+        let key_id = "rotated-external-gate-key";
+        let (baseline, snapshot, policy_receipt) = external_gate_snapshot(&axes, key_id);
+        let gate_json = external_gate_json(ExternalPerfGateLane::Feec, &snapshot);
+        let expected_admission = snapshot.receipt_json().as_bytes().to_vec();
+        let expected_gate = gate_json.as_bytes().to_vec();
+        let ledger = Ledger::open(":memory:").expect("in-memory external-gate ledger");
+
+        let receipt = record_external_perf_gate_in_ledger(
+            &ledger,
+            ExternalPerfGateLane::Feec,
+            &snapshot,
+            &gate_json,
+        )
+        .expect("authority-admitted external gate must record atomically");
+
+        assert_eq!(receipt.lane(), ExternalPerfGateLane::Feec);
+        assert!(receipt.event_id() > 0);
+        assert_eq!(ledger.table_count("events").expect("count events"), 1);
+        assert_eq!(
+            receipt.admission_artifact(),
+            fs_ledger::hash_bytes(&expected_admission)
+        );
+        assert_eq!(
+            receipt.final_gate_artifact(),
+            fs_ledger::hash_bytes(&expected_gate)
+        );
+        assert_eq!(
+            ledger
+                .get_artifact_bounded(
+                    &receipt.admission_artifact(),
+                    u64::try_from(expected_admission.len()).expect("bounded fixture"),
+                )
+                .expect("read admission artifact")
+                .expect("admission artifact retained"),
+            expected_admission
+        );
+        assert_eq!(
+            ledger
+                .get_artifact_bounded(
+                    &receipt.final_gate_artifact(),
+                    u64::try_from(expected_gate.len()).expect("bounded fixture"),
+                )
+                .expect("read gate artifact")
+                .expect("gate artifact retained"),
+            expected_gate
+        );
+        assert!(
+            ledger
+                .edge_exists(
+                    receipt.operation_id(),
+                    &receipt.admission_artifact(),
+                    EdgeRole::In,
+                )
+                .expect("admission edge query")
+        );
+        assert!(
+            ledger
+                .edge_exists(
+                    receipt.operation_id(),
+                    &receipt.final_gate_artifact(),
+                    EdgeRole::Out,
+                )
+                .expect("gate edge query")
+        );
+        let stored_op = ledger
+            .op(receipt.operation_id())
+            .expect("operation query")
+            .expect("operation retained");
+        assert!(
+            stored_op
+                .ir
+                .contains(&format!("\"final_gate\":{gate_json}"))
+        );
+        assert!(receipt.receipt_json().contains("\"lane\":\"feec\""));
+        assert!(
+            receipt
+                .receipt_json()
+                .contains(&format!("\"event\":{}", receipt.event_id()))
+        );
+
+        let stored_admission = String::from_utf8(
+            ledger
+                .get_artifact_bounded(
+                    &receipt.admission_artifact(),
+                    u64::try_from(snapshot.receipt_json().len()).expect("bounded fixture"),
+                )
+                .expect("read admission artifact")
+                .expect("admission artifact retained"),
+        )
+        .expect("canonical admission UTF-8");
+        assert!(stored_admission.contains(&format!("\"key_id\":\"{key_id}\"")));
+        assert!(stored_admission.contains("\"signature\":\"external-gate-test-signature\""));
+        assert!(stored_admission.contains(&format!("\"policy_receipt\":\"{policy_receipt}\"")));
+        for source in baseline.provenance().source_receipts() {
+            assert!(
+                stored_admission.contains(&format!("\"{source}\"")),
+                "source receipt {source} must survive byte-for-byte"
+            );
+        }
+    }
+
+    #[test]
+    fn external_gate_recorder_refuses_candidate_and_leaves_no_rows() {
+        let axes = synthetic_axes();
+        let today = test_day();
+        let (baseline, identity) = trusted_baseline_at(&axes, today.saturating_sub(10));
+        let candidate =
+            AxisBaselinePolicy::new(Some(&baseline), &identity, today).snapshot(&axes, &axes);
+        assert!(!candidate.authority_admitted());
+        let gate_json = external_gate_json(ExternalPerfGateLane::Fft, &candidate);
+        let ledger = Ledger::open(":memory:").expect("in-memory external-gate ledger");
+
+        let error = record_external_perf_gate_in_ledger(
+            &ledger,
+            ExternalPerfGateLane::Fft,
+            &candidate,
+            &gate_json,
+        )
+        .expect_err("candidate admission must stay report-only");
+        assert!(
+            error
+                .to_string()
+                .contains("lacks authorized promotion authority")
+        );
+        assert_eq!(ledger.table_count("ops").expect("count ops"), 0);
+        assert_eq!(ledger.table_count("artifacts").expect("count artifacts"), 0);
+        assert_eq!(ledger.table_count("edges").expect("count edges"), 0);
+        assert_eq!(ledger.table_count("events").expect("count events"), 0);
+        assert!(!ledger.in_transaction());
+    }
+
+    #[test]
+    fn external_gate_recorder_rejects_nonpositive_or_mismatched_payloads() {
+        let axes = synthetic_axes();
+        let (_, snapshot, _) = external_gate_snapshot(&axes, "external-gate-key");
+        let valid = external_gate_json(ExternalPerfGateLane::Feec, &snapshot);
+        let wrong_admission = valid.replacen(snapshot.receipt_json(), "{}", 1);
+        let duplicate_citation = valid.replacen('{', "{\"citation_eligible\":true,", 1);
+        let trailing_comma = format!(
+            "{},}}",
+            valid
+                .strip_suffix('}')
+                .expect("fixture is a top-level object")
+        );
+        let deeply_nested = format!(
+            "{{\"nested\":{}null{},{}",
+            "[".repeat(MAX_EXTERNAL_PERF_GATE_NESTING + 1),
+            "]".repeat(MAX_EXTERNAL_PERF_GATE_NESTING + 1),
+            &valid[1..],
+        );
+        let invalid = [
+            valid.replacen("\"feec-gate\"", "\"fft-gate\"", 1),
+            valid.replacen(
+                "\"citation_eligible\":true",
+                "\"citation_eligible\":false",
+                1,
+            ),
+            valid.replacen("\"recorded\":true", "\"recorded\":false", 1),
+            valid.replacen("\"report_only\":false", "\"report_only\":true", 1),
+            wrong_admission,
+            duplicate_citation,
+            trailing_comma,
+            deeply_nested,
+            format!("{valid} false"),
+        ];
+        let ledger = Ledger::open(":memory:").expect("in-memory external-gate ledger");
+        for payload in invalid {
+            record_external_perf_gate_in_ledger(
+                &ledger,
+                ExternalPerfGateLane::Feec,
+                &snapshot,
+                &payload,
+            )
+            .expect_err("nonpositive or mismatched external gate must be refused");
+        }
+        assert_eq!(ledger.table_count("ops").expect("count ops"), 0);
+        assert_eq!(ledger.table_count("artifacts").expect("count artifacts"), 0);
+    }
+
+    #[test]
+    fn external_gate_recorder_refuses_caller_transactions_and_memory_paths() {
+        let axes = synthetic_axes();
+        let (_, snapshot, _) = external_gate_snapshot(&axes, "external-gate-key");
+        let gate_json = external_gate_json(ExternalPerfGateLane::Fft, &snapshot);
+        let ledger = Ledger::open(":memory:").expect("in-memory external-gate ledger");
+        ledger.begin().expect("caller-owned transaction");
+        record_external_perf_gate_in_ledger(
+            &ledger,
+            ExternalPerfGateLane::Fft,
+            &snapshot,
+            &gate_json,
+        )
+        .expect_err("recorder must not compose with a caller transaction");
+        assert!(ledger.in_transaction(), "caller transaction remains owned");
+        ledger.rollback().expect("caller rollback");
+
+        for path in [
+            "",
+            "   ",
+            ":memory:",
+            "  :memory:  ",
+            "file::memory:",
+            "file::memory:?cache=shared",
+            "file:gate?mode=memory&cache=shared",
+            "FILE:gate?MODE=MEMORY",
+            "file:persistent.db",
+        ] {
+            record_external_perf_gate_at_path(
+                path,
+                ExternalPerfGateLane::Fft,
+                &snapshot,
+                &gate_json,
+            )
+            .expect_err("positive evidence requires a durable ledger path");
+        }
+    }
+
+    #[test]
+    fn production_protocol_version_and_field_are_locked_together() {
+        assert_eq!(
+            PRODUCTION_PROTOCOL_FIELD,
+            format!("\"protocol\":\"{PRODUCTION_PROTOCOL_VERSION}\"")
+        );
+        assert_eq!(
+            CUSTOM_REGISTRY_PROTOCOL_FIELD,
+            format!("\"protocol\":\"{CUSTOM_REGISTRY_PROTOCOL_VERSION}\"")
+        );
     }
 
     #[test]
@@ -3540,7 +5030,7 @@ mod tests {
             original,
             finalized_run_receipt_from_input(
                 &input,
-                "org.frankensim.fs-roofline.finalized-run-foreign.v2",
+                "org.frankensim.fs-roofline.finalized-run-foreign.v3",
                 RESULT_MANIFEST_DOMAIN,
             ),
             "the finalized-run digest domain is semantic"
@@ -3602,8 +5092,8 @@ mod tests {
 
     #[test]
     fn finalized_run_identity_versions_fail_closed() {
-        assert_eq!(FINALIZED_RUN_IDENTITY_VERSION, 2);
-        assert!(FINALIZED_RUN_DOMAIN.ends_with(".v2"));
+        assert_eq!(FINALIZED_RUN_IDENTITY_VERSION, 3);
+        assert!(FINALIZED_RUN_DOMAIN.ends_with(".v3"));
         assert_eq!(RESULT_MANIFEST_IDENTITY_VERSION, 1);
         assert!(RESULT_MANIFEST_DOMAIN.ends_with(".v1"));
         let current = format!("{{\"schema\":\"{RESULT_MANIFEST_SCHEMA}\",\"entries\":[]}}");
@@ -3621,7 +5111,7 @@ mod tests {
             finalized_run_receipt_from_input(&input, FINALIZED_RUN_DOMAIN, RESULT_MANIFEST_DOMAIN,),
             finalized_run_receipt_from_input(
                 &input,
-                "org.frankensim.fs-roofline.finalized-run.v3",
+                "org.frankensim.fs-roofline.finalized-run.v4",
                 RESULT_MANIFEST_DOMAIN,
             ),
             "a version/domain rotation must move the finalized-run identity"
@@ -4340,8 +5830,8 @@ mod tests {
             "fixture must exercise the producer's exact 1 MiB receipt cap"
         );
         let axes = synthetic_axes();
-        let (baseline, identity) = trusted_baseline(&axes);
-        let baseline_policy = AxisBaselinePolicy::new(Some(&baseline), &identity, 20_010);
+        let (baseline, identity) = live_trusted_baseline(&axes);
+        let baseline_policy = attested_policy(&baseline, &identity, test_day());
         let registry: Vec<Box<dyn RooflineKernel>> = vec![Box::new(ReceiptKernel {
             elements: 64,
             value: 0,
@@ -4409,8 +5899,8 @@ mod tests {
         let synthetic_receipt: &'static str =
             Box::leak(format!("{{\"d\":\"{}\"}}", "x".repeat(receipt_len - 8)).into_boxed_str());
         let axes = synthetic_axes();
-        let (baseline, identity) = trusted_baseline(&axes);
-        let baseline_policy = AxisBaselinePolicy::new(Some(&baseline), &identity, 20_010);
+        let (baseline, identity) = live_trusted_baseline(&axes);
+        let baseline_policy = attested_policy(&baseline, &identity, test_day());
         let registry: Vec<Box<dyn RooflineKernel>> = vec![Box::new(ReceiptKernel {
             elements: 64,
             value: 0,
@@ -4504,8 +5994,8 @@ mod tests {
     fn staleness_refuses_a_different_current_executable() {
         const SYNTHETIC_RECEIPT: &str = "{\"schema\":\"fs-roofline-synthetic-dependency-receipt-v1\",\"purpose\":\"build-drift-unit-test\"}";
         let axes = synthetic_axes();
-        let (baseline, identity) = trusted_baseline(&axes);
-        let baseline_policy = AxisBaselinePolicy::new(Some(&baseline), &identity, 20_010);
+        let (baseline, identity) = live_trusted_baseline(&axes);
+        let baseline_policy = attested_policy(&baseline, &identity, test_day());
         let registry: Vec<Box<dyn RooflineKernel>> = vec![Box::new(ReceiptKernel {
             elements: 1,
             value: 0,

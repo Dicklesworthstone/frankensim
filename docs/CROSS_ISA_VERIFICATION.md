@@ -60,7 +60,7 @@ cargo test -p fs-substrate --release      # BMI2 Morton, os_affinity, prefetch c
 # full-workspace `cargo test` times out under swarm build-lock contention):
 cargo test -p fs-fft -p fs-sparse -p fs-la -p fs-topo -p fs-evidence --release
 
-# Perf attainment (release, #[ignore]'d, needs the fz2.7 baseline store — see §5):
+# Perf attainment (release, #[ignore]'d; authority configuration is in §5):
 cargo test -p fs-fft --release --test perf_lane -- --ignored --nocapture
 ```
 
@@ -109,14 +109,42 @@ cargo test -p fs-fft --release --test perf_lane -- --ignored --nocapture
 
 ---
 
-## 5. Perf-baseline infra (fz2.7)
+## 5. Perf-baseline and authority inputs
 
-Perf lanes (`fs-fft`, `fs-feec`, …) require `FRANKENSIM_BASELINE_STORE` (a promoted
-per-machine JSONL, e.g. `perf-baselines/ts1-5975wx-linux.jsonl`) + a
-`FRANKENSIM_FIRMWARE_ID`, or they refuse rather than emit an ungrounded attainment.
-Promotion needs ≥3 spaced probes that mutually agree within a drift band — **promote
-only on a genuinely quiet host**; a contention-deflated baseline poisons future
-"quiet" runs by flagging them Suspect.
+Perf lanes (`fs-fft`, `fs-feec`, …) use `FRANKENSIM_BASELINE_STORE` plus
+`FRANKENSIM_FIRMWARE_ID` for historical-axis comparison. The committed files in
+`perf-baselines/` are plain promoted candidates: by themselves they are always
+report-only and cannot authorize a positive gate.
+
+An authority-admitted run also requires an attested store envelope, a configured
+promotion-authority policy, and the retained source-receipt set named by that
+baseline. Missing, partial, malformed, denied, revoked, tampered, or cross-machine
+authority inputs downgrade the run to measured/report-only; they never silently
+fall back to a positive gate. The retained JSON output binds the one frozen
+authority decision used for that run. The FEEC and FFT lanes also require
+`FRANKENSIM_ROOFLINE_LEDGER=<db>` before they can emit a positive gate. Their
+shared recorder commits the exact admission receipt and exact final-gate JSON
+atomically; a missing ledger path is report-only and a failed write fails
+closed.
+
+The retained-source input is a protected operator inventory declaration, not a
+byte-availability oracle: these lanes check exact hash membership but do not
+fetch or independently rehash the source artifacts.
+
+For the custom perf lanes, configure
+`FRANKENSIM_PROMOTION_AUTHORITY_POLICY=<tsv-file>` and
+`FRANKENSIM_RETAINED_SOURCE_RECEIPTS=<strictly-sorted-lowerhex-lines-file>`, plus
+`FRANKENSIM_ROOFLINE_LEDGER=<db>` for a citable FEEC or FFT gate.
+The `roofline` CLI takes the corresponding `--authority-policy <tsv-file>` and
+`--retained-receipts <strictly-sorted-lowerhex-lines-file>` flags and its own
+`--ledger <db>` output argument. Authority configuration and durable output are
+separate requirements; stdout alone is never citable retained evidence.
+
+Promotion needs at least three spaced probes that mutually agree within a drift
+band — **promote only on a genuinely quiet host**; a contention-deflated baseline
+poisons future "quiet" runs by flagging them Suspect. `roofline promote` creates a
+plain candidate. Attestation and authority admission are separate operations; do
+not manufacture an in-tree tag and call it independent authority.
 
 ---
 

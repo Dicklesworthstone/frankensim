@@ -19,7 +19,7 @@
 //!    the timed loop), aggregate admission, and tune finalization, yielding
 //!    a [`ProductionRun`]. [`ProductionRun::record`] commits atomically and
 //!    consumes the run; the operation `ir` carries
-//!    `"protocol":"production-v2"`, the nonce, content hashes of both
+//!    `"protocol":"production-v3"`, the nonce, content hashes of both
 //!    observed axis receipts, and the retained dependency-receipt binding.
 //!
 //! Trust model: the nonce is a process-unique challenge, not cryptographic
@@ -34,9 +34,11 @@ use fs_ledger::{Ledger, LedgerError};
 
 use crate::kernels::production_registry_with_ledger;
 use crate::{
-    Attainment, AxisBaselinePolicy, DependencyReceiptBinding, FinalizedRegistryRun, MachineAxes,
-    PRODUCTION_PROTOCOL_FIELD, RooflineKernel, finalize_registry_tuning, json_escape,
-    record_run_with_protocol, run_admission_error, run_registry,
+    Attainment, AttestedAxisBaselinePolicy, AxisAdmissionSnapshot, AxisBaselinePolicy,
+    CUSTOM_REGISTRY_PROTOCOL_FIELD, DependencyReceiptBinding, FinalizedRegistryRun, MachineAxes,
+    PRODUCTION_PROTOCOL_FIELD, RooflineKernel, citable_run_admission_error_for_snapshot,
+    finalize_registry_tuning_with_snapshot, json_escape, record_run_with_protocol,
+    run_admission_error_for_snapshot, run_registry,
 };
 
 const RUN_NONCE_DOMAIN: &str = "org.frankensim.fs-roofline.production-run-nonce.v1";
@@ -68,7 +70,7 @@ pub const PRODUCTION_AXES_RECEIPT_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
     "external_semantic_fields=digest-domain,identity-version",
     "semantic_fields=digest-domain,identity-version,machine-fingerprint,cpu-brand-utf8,logical-cpus,bandwidth-single-bits,bandwidth-all-core-bits,peak-single-bits,peak-all-core-bits",
     "excluded_fields=none",
-    "consumers=ProductionRun::protocol_fields,validate_protocol_axes,AxisBaselinePolicy::receipt_json",
+    "consumers=ProductionRun::record,ReportOnlyProductionRun::record,validate_protocol_axes,AxisAdmissionSnapshot::receipt_json",
     "mutations=digest-domain:crates/fs-roofline/src/production.rs#production_axes_receipt_identity_fields_move_independently,identity-version:crates/fs-roofline/src/production.rs#production_axes_receipt_versions_fail_closed,machine-fingerprint:crates/fs-roofline/src/production.rs#production_axes_receipt_identity_fields_move_independently,cpu-brand-utf8:crates/fs-roofline/src/production.rs#production_axes_receipt_identity_fields_move_independently,logical-cpus:crates/fs-roofline/src/production.rs#production_axes_receipt_identity_fields_move_independently,bandwidth-single-bits:crates/fs-roofline/src/production.rs#production_axes_receipt_identity_fields_move_independently,bandwidth-all-core-bits:crates/fs-roofline/src/production.rs#production_axes_receipt_identity_fields_move_independently,peak-single-bits:crates/fs-roofline/src/production.rs#production_axes_receipt_identity_fields_move_independently,peak-all-core-bits:crates/fs-roofline/src/production.rs#production_axes_receipt_identity_fields_move_independently",
     "nonsemantic_mutations=none",
     "field_guard=classify_production_axes_receipt_identity_fields",
@@ -127,6 +129,11 @@ fn classify_production_axes_receipt_identity_fields(input: &ProductionAxesReceip
 const DEVELOPMENT_SALT_REFUSAL: &str = "dependency graph uses the development equivalence salt; production citation requires an exact operator-observed normal/build receipt";
 
 static NONCE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+const REPORT_ONLY_REFUSAL: &str =
+    "operator-trusted candidate baseline has no attested promotion authority";
+const MAX_REPORT_ONLY_REFUSAL_BYTES: usize = 4096;
+const REPORT_ONLY_REFUSAL_DIGEST_DOMAIN: &str = "org.frankensim.fs-roofline.report-only-refusal.v1";
+const SEALED_FINALIZATION_REFUSAL: &str = "sealed registry finalization did not admit this run";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CitationAuthority {
@@ -288,15 +295,45 @@ impl ProductionProbe {
     /// Structured diagnostics from tuning finalization; admission refusal is
     /// NOT an error — the run comes back with `citation_eligible() == false`
     /// and can be recorded as an explicit rejection.
+    ///
+    /// An operator-trusted candidate policy is rejected by the type system:
+    ///
+    /// ```compile_fail
+    /// use fs_roofline::{AxisBaselinePolicy, BaselineIdentity};
+    /// use fs_roofline::production::{ProductionProbe, ProductionRunConfig};
+    ///
+    /// let probe = ProductionProbe::observe();
+    /// let identity = BaselineIdentity::current(probe.axes(), "declared-firmware")
+    ///     .expect("valid declared identity");
+    /// let candidate = AxisBaselinePolicy::new(None, &identity, 0);
+    /// let config = ProductionRunConfig { n: 1, warmup: 0, reps: 1 };
+    /// let _ = probe.run(config, candidate, None).expect("type-sealed run");
+    /// ```
     pub fn run(
+        self,
+        config: ProductionRunConfig,
+        baseline: AttestedAxisBaselinePolicy,
+        tune_ledger: Option<Ledger>,
+    ) -> Result<ProductionRun, String> {
+        config.validate()?;
+        let registry = production_registry_with_ledger(config.n, &self.axes, tune_ledger)?;
+        self.run_with_parts(config, baseline, registry, MachineAxes::probe)
+    }
+
+    /// Measure the sealed registry with an operator-trusted baseline while
+    /// making the non-citable boundary explicit in the return type.
+    ///
+    /// The returned value deliberately has no `citation_eligible` method and
+    /// records only candidate/report-only evidence with a structured refusal.
+    pub fn run_report_only(
         self,
         config: ProductionRunConfig,
         baseline: AxisBaselinePolicy<'_>,
         tune_ledger: Option<Ledger>,
-    ) -> Result<ProductionRun<'_>, String> {
+    ) -> Result<ReportOnlyProductionRun, String> {
         config.validate()?;
         let registry = production_registry_with_ledger(config.n, &self.axes, tune_ledger)?;
-        self.run_with_parts(config, baseline, registry, MachineAxes::probe)
+        self.run_report_only_with_parts(config, baseline, registry, MachineAxes::probe)
     }
 
     /// Protocol core with injected registry and post-probe (`pub(crate)`
@@ -305,10 +342,10 @@ impl ProductionProbe {
     pub(crate) fn run_with_parts(
         self,
         config: ProductionRunConfig,
-        baseline: AxisBaselinePolicy<'_>,
+        baseline: AttestedAxisBaselinePolicy,
         registry: Vec<Box<dyn RooflineKernel>>,
         post_probe: impl FnOnce() -> MachineAxes,
-    ) -> Result<ProductionRun<'_>, String> {
+    ) -> Result<ProductionRun, String> {
         self.run_with_parts_and_authority(
             config,
             baseline,
@@ -321,24 +358,29 @@ impl ProductionProbe {
     fn run_with_parts_and_authority(
         self,
         config: ProductionRunConfig,
-        baseline: AxisBaselinePolicy<'_>,
+        baseline: AttestedAxisBaselinePolicy,
         mut registry: Vec<Box<dyn RooflineKernel>>,
         post_probe: impl FnOnce() -> MachineAxes,
         citation_authority: CitationAuthority,
-    ) -> Result<ProductionRun<'_>, String> {
+    ) -> Result<ProductionRun, String> {
         config.validate()?;
         let build_identity = crate::read_executable_build_identity().map_err(|error| {
             format!("cannot capture pre-measurement executable identity: {error}")
         })?;
         let results = run_registry(&mut registry, config.warmup, config.reps, &self.axes)?;
         let post_axes = post_probe();
-        let finalized =
-            finalize_registry_tuning(&mut registry, &self.axes, &post_axes, baseline, &results)?;
+        let admission = baseline.decide(&self.axes, &post_axes);
+        let finalized = finalize_registry_tuning_with_snapshot(
+            &mut registry,
+            &self.axes,
+            &admission,
+            &results,
+        )?;
         drop(registry);
         Ok(ProductionRun {
             axes: self.axes,
             post_axes,
-            baseline,
+            admission,
             nonce: self.nonce,
             results,
             finalized,
@@ -347,15 +389,48 @@ impl ProductionProbe {
         })
     }
 
-    #[cfg(test)]
-    pub(crate) fn run_with_test_receipt<'a>(
+    pub(crate) fn run_report_only_with_parts(
         self,
         config: ProductionRunConfig,
-        baseline: AxisBaselinePolicy<'a>,
+        baseline: AxisBaselinePolicy<'_>,
+        mut registry: Vec<Box<dyn RooflineKernel>>,
+        post_probe: impl FnOnce() -> MachineAxes,
+    ) -> Result<ReportOnlyProductionRun, String> {
+        config.validate()?;
+        let build_identity = crate::read_executable_build_identity().map_err(|error| {
+            format!("cannot capture pre-measurement executable identity: {error}")
+        })?;
+        let results = run_registry(&mut registry, config.warmup, config.reps, &self.axes)?;
+        let post_axes = post_probe();
+        let admission = baseline.snapshot(&self.axes, &post_axes);
+        let finalized = finalize_registry_tuning_with_snapshot(
+            &mut registry,
+            &self.axes,
+            &admission,
+            &results,
+        )?;
+        drop(registry);
+        Ok(ReportOnlyProductionRun {
+            axes: self.axes,
+            post_axes,
+            admission,
+            nonce: self.nonce,
+            results,
+            finalized,
+            build_identity,
+            report_only_refusal: REPORT_ONLY_REFUSAL.to_string(),
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn run_with_test_receipt(
+        self,
+        config: ProductionRunConfig,
+        baseline: AttestedAxisBaselinePolicy,
         registry: Vec<Box<dyn RooflineKernel>>,
         post_probe: impl FnOnce() -> MachineAxes,
         receipt: &'static str,
-    ) -> Result<ProductionRun<'a>, String> {
+    ) -> Result<ProductionRun, String> {
         let digest =
             fs_blake3::hash_domain(fs_session::GEMM_DEPGRAPH_RECEIPT_DOMAIN, receipt.as_bytes());
         let binding = DependencyReceiptBinding::from_parts(receipt, digest)
@@ -376,10 +451,10 @@ impl ProductionProbe {
 /// neither `Clone` nor `Copy`: the only way to obtain one is
 /// [`ProductionProbe::run`], which performed both probes and timed the
 /// production registry itself. [`ProductionRun::record`] consumes the run.
-pub struct ProductionRun<'a> {
+pub struct ProductionRun {
     axes: MachineAxes,
     post_axes: MachineAxes,
-    baseline: AxisBaselinePolicy<'a>,
+    admission: AxisAdmissionSnapshot,
     nonce: fs_blake3::ContentHash,
     results: Vec<Attainment>,
     finalized: FinalizedRegistryRun,
@@ -387,7 +462,7 @@ pub struct ProductionRun<'a> {
     build_identity: fs_blake3::ContentHash,
 }
 
-impl std::fmt::Debug for ProductionRun<'_> {
+impl std::fmt::Debug for ProductionRun {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ProductionRun")
             .field(
@@ -401,7 +476,7 @@ impl std::fmt::Debug for ProductionRun<'_> {
     }
 }
 
-impl ProductionRun<'_> {
+impl ProductionRun {
     /// The pre-run axis probe observed by the protocol.
     #[must_use]
     pub fn axes(&self) -> &MachineAxes {
@@ -431,24 +506,39 @@ impl ProductionRun<'_> {
     /// that evidence was durably recorded or remains fresh.
     #[must_use]
     pub fn citation_eligible(&self) -> bool {
-        self.finalized.admitted() && self.citation_authority.refusal().is_none()
+        self.admission_error().is_none()
     }
 
     /// Why admission refused this run, if it did.
     #[must_use]
     pub fn admission_error(&self) -> Option<String> {
-        run_admission_error(&self.axes, &self.post_axes, self.baseline, &self.results)
+        citable_run_admission_error_for_snapshot(&self.axes, &self.admission, &self.results)
+            .or_else(|| {
+                (!self.finalized.admitted()).then(|| SEALED_FINALIZATION_REFUSAL.to_string())
+            })
             .or_else(|| self.citation_authority.refusal().map(str::to_string))
     }
 
     /// The baseline-admission receipt for this run's exact probe pair.
     #[must_use]
-    pub fn receipt_json(&self) -> String {
-        self.baseline.receipt_json(&self.axes, &self.post_axes)
+    pub fn receipt_json(&self) -> &str {
+        self.admission.receipt_json()
+    }
+
+    /// Immutable admission decision retained by the run.
+    #[must_use]
+    pub fn admission_snapshot(&self) -> &AxisAdmissionSnapshot {
+        &self.admission
+    }
+
+    /// Selected baseline identity, when present.
+    #[must_use]
+    pub fn baseline_hash(&self) -> Option<fs_blake3::ContentHash> {
+        self.admission.baseline_hash()
     }
 
     /// Record the run atomically, consuming it. The operation `ir` carries
-    /// `"protocol":"production-v2"`, the per-run nonce, content hashes of
+    /// `"protocol":"production-v3"`, the per-run nonce, content hashes of
     /// both observed axis receipts, and dependency-receipt provenance.
     ///
     /// # Errors
@@ -477,13 +567,175 @@ impl ProductionRun<'_> {
             ledger,
             &self.axes,
             &self.post_axes,
-            self.baseline,
+            &self.admission,
             &mut self.finalized,
             &mut self.results,
             &protocol_fields,
             self.citation_authority.receipt(),
             self.citation_authority.refusal(),
             crate::EvidenceNamespace::Production,
+            Some(self.build_identity),
+        )
+    }
+}
+
+/// One measured sealed-registry run that intentionally carries only
+/// candidate/report-only baseline trust.
+///
+/// This type has no `citation_eligible` API and cannot record into the
+/// production evidence namespace.
+///
+/// ```compile_fail
+/// use fs_roofline::{AxisBaselinePolicy, BaselineIdentity};
+/// use fs_roofline::production::{ProductionProbe, ProductionRunConfig};
+///
+/// let probe = ProductionProbe::observe();
+/// let identity = BaselineIdentity::current(probe.axes(), "declared-firmware")
+///     .expect("valid declared identity");
+/// let candidate = AxisBaselinePolicy::new(None, &identity, 0);
+/// let config = ProductionRunConfig { n: 1, warmup: 0, reps: 1 };
+/// let run = probe
+///     .run_report_only(config, candidate, None)
+///     .expect("report-only run");
+/// let _ = run.citation_eligible();
+/// ```
+pub struct ReportOnlyProductionRun {
+    axes: MachineAxes,
+    post_axes: MachineAxes,
+    admission: AxisAdmissionSnapshot,
+    nonce: fs_blake3::ContentHash,
+    results: Vec<Attainment>,
+    finalized: FinalizedRegistryRun,
+    build_identity: fs_blake3::ContentHash,
+    report_only_refusal: String,
+}
+
+impl std::fmt::Debug for ReportOnlyProductionRun {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReportOnlyProductionRun")
+            .field(
+                "fingerprint",
+                &format_args!("{:016x}", self.axes.fingerprint),
+            )
+            .field("kernels", &self.results.len())
+            .field("nonce", &self.nonce)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ReportOnlyProductionRun {
+    /// The pre-run axis probe observed by the sealed runner.
+    #[must_use]
+    pub fn axes(&self) -> &MachineAxes {
+        &self.axes
+    }
+
+    /// The post-run axis probe observed after timing.
+    #[must_use]
+    pub fn post_axes(&self) -> &MachineAxes {
+        &self.post_axes
+    }
+
+    /// Measured results in registry order.
+    #[must_use]
+    pub fn results(&self) -> &[Attainment] {
+        &self.results
+    }
+
+    /// Per-run nonce bound into the candidate operation.
+    #[must_use]
+    pub fn nonce(&self) -> fs_blake3::ContentHash {
+        self.nonce
+    }
+
+    /// Structured report-only refusal (or a more specific measurement
+    /// refusal when the baseline or rows also fail).
+    #[must_use]
+    pub fn admission_error(&self) -> Option<String> {
+        Some(
+            run_admission_error_for_snapshot(&self.axes, &self.admission, &self.results)
+                .map_or_else(
+                    || self.report_only_refusal.clone(),
+                    |measurement| format!("{}; {measurement}", self.report_only_refusal),
+                ),
+        )
+    }
+
+    /// Exact candidate-tier admission snapshot bytes.
+    #[must_use]
+    pub fn receipt_json(&self) -> &str {
+        self.admission.receipt_json()
+    }
+
+    /// Immutable admission decision retained by the run.
+    #[must_use]
+    pub fn admission_snapshot(&self) -> &AxisAdmissionSnapshot {
+        &self.admission
+    }
+
+    /// Selected baseline identity, when present.
+    #[must_use]
+    pub fn baseline_hash(&self) -> Option<fs_blake3::ContentHash> {
+        self.admission.baseline_hash()
+    }
+
+    /// Retain the entrypoint refusal that forced this already-report-only
+    /// run out of the attested path. Refusals beyond the durable diagnostic
+    /// bound retain a UTF-8-safe prefix plus the original byte length and a
+    /// domain-separated digest, so an already completed report-only
+    /// measurement cannot be discarded merely because its source/path error
+    /// was long. This can only specialize diagnostics on a type that has no
+    /// production-evidence writer.
+    pub fn with_configuration_refusal(mut self, refusal: String) -> Result<Self, String> {
+        if refusal.is_empty() {
+            return Err("report-only configuration refusal must be nonempty".to_string());
+        }
+        self.report_only_refusal = if refusal.len() <= MAX_REPORT_ONLY_REFUSAL_BYTES {
+            refusal
+        } else {
+            let original_bytes = refusal.len();
+            let digest =
+                fs_blake3::hash_domain(REPORT_ONLY_REFUSAL_DIGEST_DOMAIN, refusal.as_bytes());
+            let suffix = format!(
+                "...[truncated; original_bytes={original_bytes}; full_refusal_digest={digest}]"
+            );
+            let prefix_limit = MAX_REPORT_ONLY_REFUSAL_BYTES
+                .checked_sub(suffix.len())
+                .expect("bounded refusal suffix fits its owner-local ceiling");
+            let mut prefix_end = prefix_limit.min(refusal.len());
+            while !refusal.is_char_boundary(prefix_end) {
+                prefix_end -= 1;
+            }
+            let mut bounded = refusal[..prefix_end].to_string();
+            bounded.push_str(&suffix);
+            debug_assert!(bounded.len() <= MAX_REPORT_ONLY_REFUSAL_BYTES);
+            bounded
+        };
+        Ok(self)
+    }
+
+    /// Record only a structured candidate/report-only rejection. No metrics,
+    /// benchmark-result events, production tune rows, or dependency receipt
+    /// artifacts are published.
+    pub fn record(mut self, ledger: &Ledger) -> Result<i64, LedgerError> {
+        let protocol_fields = format!(
+            "{CUSTOM_REGISTRY_PROTOCOL_FIELD},\"run_nonce\":\"{}\",\"pre_axes_receipt\":\"{}\",\"post_axes_receipt\":\"{}\",\"citation_refusal\":\"{}\"",
+            self.nonce,
+            axes_receipt(&self.axes),
+            axes_receipt(&self.post_axes),
+            json_escape(&self.report_only_refusal),
+        );
+        record_run_with_protocol(
+            ledger,
+            &self.axes,
+            &self.post_axes,
+            &self.admission,
+            &mut self.finalized,
+            &mut self.results,
+            &protocol_fields,
+            None,
+            Some(&self.report_only_refusal),
+            crate::EvidenceNamespace::Custom,
             Some(self.build_identity),
         )
     }
@@ -653,11 +905,41 @@ mod tests {
             &candidates,
             "test-operator",
             "deterministic production-protocol fixture",
-            20_000,
+            test_day().saturating_sub(10),
             90,
         )
         .expect("valid synthetic baseline");
         (baseline, identity)
+    }
+
+    fn attested_policy(
+        baseline: &BaselineAxes,
+        identity: &BaselineIdentity,
+    ) -> AttestedAxisBaselinePolicy {
+        attested_policy_on_day(baseline, identity, test_day())
+    }
+
+    fn attested_policy_on_day(
+        baseline: &BaselineAxes,
+        identity: &BaselineIdentity,
+        now_day: u64,
+    ) -> AttestedAxisBaselinePolicy {
+        let policy_receipt = fs_blake3::hash_domain(
+            "fs-roofline.test-promotion-policy.v1",
+            baseline.content_hash().as_bytes(),
+        );
+        AttestedAxisBaselinePolicy::from_verified(
+            baseline.clone(),
+            identity.clone(),
+            now_day,
+            crate::PromotionAttestation::new("test-authority", "test-signature"),
+            baseline.provenance().source_receipts().to_vec(),
+            crate::PromotionAuthorityDecision::new(crate::KeyVerdict::Authorized, policy_receipt),
+        )
+    }
+
+    fn test_day() -> u64 {
+        crate::days_since_epoch_now().expect("unit-test clock after Unix epoch")
     }
 
     fn temp_db(tag: &str) -> String {
@@ -1066,7 +1348,7 @@ mod tests {
     fn post_probe_is_observed_strictly_after_every_timed_repetition() {
         let axes = synthetic_axes(0xB);
         let (baseline, identity) = trusted_baseline(&axes);
-        let policy = AxisBaselinePolicy::new(Some(&baseline), &identity, 20_010);
+        let policy = attested_policy(&baseline, &identity);
         let runs = Rc::new(Cell::new(0_usize));
         let registry: Vec<Box<dyn crate::RooflineKernel>> = vec![Box::new(CountingKernel {
             runs: Rc::clone(&runs),
@@ -1096,7 +1378,7 @@ mod tests {
     fn drifted_post_probe_refuses_citation_and_records_a_rejection() {
         let axes = synthetic_axes(0xC);
         let (baseline, identity) = trusted_baseline(&axes);
-        let policy = AxisBaselinePolicy::new(Some(&baseline), &identity, 20_010);
+        let policy = attested_policy(&baseline, &identity);
         let mut drifted = axes.clone();
         drifted.bandwidth_single_gbs *= 0.3;
         drifted.bandwidth_all_core_gbs *= 0.3;
@@ -1124,10 +1406,10 @@ mod tests {
         let kernel = run.results()[0].kernel.clone();
         let version = run.results()[0].version.clone();
         let fingerprint = run.axes().fingerprint;
-        let baseline_hash = policy.baseline_hash();
+        let baseline_hash = Some(baseline.content_hash());
         let op = run.record(&ledger).expect("record rejection");
         let ir = ledger.op(op).unwrap().expect("op row").ir;
-        assert!(ir.contains("\"protocol\":\"production-v2\""));
+        assert!(ir.contains("\"protocol\":\"production-v3\""));
         assert!(ir.contains("\"admitted\":false"));
         // A rejected run publishes no tune evidence.
         assert_eq!(
@@ -1142,7 +1424,7 @@ mod tests {
     fn partial_finalizer_failure_yields_no_recordable_run() {
         let axes = synthetic_axes(0xD);
         let (baseline, identity) = trusted_baseline(&axes);
-        let policy = AxisBaselinePolicy::new(Some(&baseline), &identity, 20_010);
+        let policy = attested_policy(&baseline, &identity);
         let registry: Vec<Box<dyn crate::RooflineKernel>> = vec![Box::new(FailingFinalizeKernel {
             inner: CountingKernel {
                 runs: Rc::new(Cell::new(0)),
@@ -1164,7 +1446,8 @@ mod tests {
     fn development_salt_is_report_only_even_when_measurements_admit() {
         let axes = synthetic_axes(0xD1);
         let (baseline, identity) = trusted_baseline(&axes);
-        let policy = AxisBaselinePolicy::new(Some(&baseline), &identity, 20_010);
+        let policy = attested_policy(&baseline, &identity);
+        let baseline_hash = Some(baseline.content_hash());
         let probe = ProductionProbe::from_observed(axes.clone());
         let post = axes.clone();
         let run = probe
@@ -1202,7 +1485,7 @@ mod tests {
                 &kernel,
                 &version,
                 axes.fingerprint,
-                policy.baseline_hash(),
+                baseline_hash,
                 row.t_end.expect("finished refusal"),
             )
             .expect("staleness"),
@@ -1212,11 +1495,299 @@ mod tests {
     }
 
     #[test]
+    fn candidate_policy_records_only_structured_report_only_refusal() {
+        const CONFIGURATION_REFUSAL: &str =
+            "configured promotion authority key ops/perf-fixture is revoked";
+        let axes = synthetic_axes(0xD2);
+        let (baseline, identity) = trusted_baseline(&axes);
+        let policy = AxisBaselinePolicy::new(Some(&baseline), &identity, test_day());
+        let baseline_hash = Some(baseline.content_hash());
+        let post = axes.clone();
+        let run = ProductionProbe::from_observed(axes.clone())
+            .run_report_only_with_parts(
+                CONFIG,
+                policy,
+                default_registry(1 << 10).expect("bounded registry fixture"),
+                move || post,
+            )
+            .expect("report-only run")
+            .with_configuration_refusal(CONFIGURATION_REFUSAL.to_string())
+            .expect("bounded configured refusal");
+        assert!(run.finalized.admitted(), "the numerical measurement admits");
+        assert!(run.receipt_json().contains("\"tier\":\"candidate\""));
+        assert_eq!(
+            run.admission_error().as_deref(),
+            Some(CONFIGURATION_REFUSAL)
+        );
+        let kernel = run.results()[0].kernel.clone();
+
+        let ledger = Ledger::open(":memory:").expect("in-memory ledger");
+        let op = run.record(&ledger).expect("record report-only refusal");
+        let row = ledger.op(op).unwrap().expect("report-only op");
+        assert!(row.ir.contains("\"protocol\":\"custom-registry\""));
+        assert!(
+            row.ir
+                .contains(&format!("\"citation_refusal\":\"{CONFIGURATION_REFUSAL}\""))
+        );
+        assert!(row.ir.contains("\"measurement_admitted\":true"));
+        assert!(row.ir.contains("\"admitted\":false"));
+        assert_eq!(row.outcome.as_deref(), Some("error"));
+        assert!(
+            row.diag
+                .as_deref()
+                .is_some_and(|diag| diag.contains(CONFIGURATION_REFUSAL)),
+            "the durable rejection diagnostic retains the exact configured refusal"
+        );
+        assert!(
+            ledger
+                .tune_rows(&kernel)
+                .expect("candidate tune rows")
+                .is_empty(),
+            "report-only recording must not publish candidate or production tune rows"
+        );
+        assert!(
+            ledger
+                .op_artifact_hashes(op)
+                .expect("report-only artifact edges")
+                .is_empty(),
+            "report-only recording must not retain result or dependency artifacts"
+        );
+        assert_eq!(
+            staleness_at(
+                &ledger,
+                &kernel,
+                "v1",
+                axes.fingerprint,
+                baseline_hash,
+                row.t_end.expect("finished refusal"),
+            )
+            .expect("report-only staleness"),
+            Staleness::NeverMeasured,
+        );
+    }
+
+    #[test]
+    fn oversized_configuration_refusal_is_bounded_and_remains_recordable() {
+        let axes = synthetic_axes(0xD21);
+        let (baseline, identity) = trusted_baseline(&axes);
+        let policy = AxisBaselinePolicy::new(Some(&baseline), &identity, test_day());
+        let post = axes.clone();
+        let refusal = format!("configuration path {}", "é".repeat(3_000));
+        let original_bytes = refusal.len();
+        let digest = fs_blake3::hash_domain(REPORT_ONLY_REFUSAL_DIGEST_DOMAIN, refusal.as_bytes());
+        let run = ProductionProbe::from_observed(axes)
+            .run_report_only_with_parts(
+                CONFIG,
+                policy,
+                default_registry(1 << 10).expect("bounded registry fixture"),
+                move || post,
+            )
+            .expect("report-only run")
+            .with_configuration_refusal(refusal)
+            .expect("an oversized refusal is canonicalized, not rejected");
+        assert!(run.report_only_refusal.len() <= MAX_REPORT_ONLY_REFUSAL_BYTES);
+        assert!(
+            run.report_only_refusal
+                .contains(&format!("original_bytes={original_bytes}"))
+        );
+        assert!(
+            run.report_only_refusal
+                .contains(&format!("full_refusal_digest={digest}"))
+        );
+
+        let ledger = Ledger::open(":memory:").expect("in-memory ledger");
+        let op = run
+            .record(&ledger)
+            .expect("bounded report-only refusal remains recordable");
+        let row = ledger.op(op).unwrap().expect("report-only operation");
+        assert_eq!(row.outcome.as_deref(), Some("error"));
+        assert!(row.ir.contains("\"citation_refusal\":"));
+    }
+
+    #[test]
+    fn production_freezes_one_authority_decision_and_reuses_exact_snapshot() {
+        struct CountingPromotionAuthority {
+            calls: Cell<usize>,
+            policy_receipt: fs_blake3::ContentHash,
+        }
+
+        impl crate::PromotionAuthorityVerifier for CountingPromotionAuthority {
+            fn verify(
+                &self,
+                _key_id: &str,
+                _signature: &str,
+                _message: &[u8],
+            ) -> crate::PromotionAuthorityDecision {
+                self.calls.set(self.calls.get() + 1);
+                crate::PromotionAuthorityDecision::new(
+                    crate::KeyVerdict::Authorized,
+                    self.policy_receipt,
+                )
+            }
+        }
+
+        let axes = synthetic_axes(0xD3);
+        let (baseline, identity) = trusted_baseline(&axes);
+        let retained: std::collections::BTreeSet<_> = baseline
+            .provenance()
+            .source_receipts()
+            .iter()
+            .copied()
+            .collect();
+        let authority = CountingPromotionAuthority {
+            calls: Cell::new(0),
+            policy_receipt: fs_blake3::hash_domain(
+                "fs-roofline.counting-policy.v1",
+                b"one atomic decision",
+            ),
+        };
+        let attestation = crate::PromotionAttestation::new("counting-key", "signature");
+        let mut store = crate::AttestedBaselineStore::new();
+        store
+            .admit_verified(baseline.clone(), attestation, &authority, &retained)
+            .expect("admit fixture");
+        authority.calls.set(0);
+        let policy = store
+            .policy_for_run(&identity, &authority, &retained)
+            .expect("mint one-run policy");
+        assert_eq!(authority.calls.get(), 1, "policy mint verifies once");
+
+        let post = axes.clone();
+        let run = ProductionProbe::from_observed(axes)
+            .run_with_test_receipt(
+                CONFIG,
+                policy,
+                default_registry(1 << 10).expect("bounded registry fixture"),
+                move || post,
+                TEST_DEPGRAPH_RECEIPT,
+            )
+            .expect("production run");
+        let exact_snapshot = run.receipt_json().to_string();
+        assert_eq!(
+            authority.calls.get(),
+            1,
+            "timing/finalization never reverify"
+        );
+
+        let ledger = Ledger::open(":memory:").expect("in-memory ledger");
+        let op = run.record(&ledger).expect("record exact snapshot");
+        assert_eq!(authority.calls.get(), 1, "recording never reverify");
+        let ir = ledger.op(op).unwrap().expect("production op").ir;
+        assert!(
+            ir.ends_with(&format!("\"baseline_admission\":{exact_snapshot}}}")),
+            "the exact frozen snapshot must be the operation's terminal admission receipt"
+        );
+    }
+
+    #[test]
+    fn delayed_finalized_run_records_only_a_structured_day_refusal() {
+        let axes = synthetic_axes(0xD4);
+        let (baseline, identity) = trusted_baseline(&axes);
+        let today = test_day();
+        let yesterday = today.checked_sub(1).expect("current epoch day is positive");
+        let admission = attested_policy_on_day(&baseline, &identity, yesterday)
+            .decide_at(&axes, &axes, yesterday);
+        assert!(admission.authority_admitted());
+        assert!(admission.verdict().trusted());
+        assert!(!admission.baseline_citation_eligible());
+
+        let mut registry = default_registry(1 << 10).expect("bounded registry fixture");
+        let results = run_registry(&mut registry, 0, 1, &axes).expect("bounded delayed run");
+        let finalized = FinalizedRegistryRun {
+            receipt: crate::finalized_run_receipt(&admission, &results),
+            admitted: true,
+            consumed: false,
+        };
+        let kernel = results[0].kernel.clone();
+        let run = ProductionRun {
+            axes: axes.clone(),
+            post_axes: axes,
+            admission,
+            nonce: fs_blake3::hash_domain("fs-roofline.delayed-run-test-nonce.v1", b"yesterday"),
+            results,
+            finalized,
+            citation_authority: test_receipt_authority(),
+            build_identity: crate::read_executable_build_identity()
+                .expect("capture test executable identity"),
+        };
+
+        let ledger = Ledger::open(":memory:").expect("in-memory ledger");
+        let op = run
+            .record(&ledger)
+            .expect("record delayed structured refusal");
+        let row = ledger.op(op).unwrap().expect("delayed refusal op");
+        assert!(row.ir.contains("\"measurement_admitted\":false"));
+        assert!(row.ir.contains("\"admitted\":false"));
+        assert_eq!(row.outcome.as_deref(), Some("error"));
+        assert!(
+            row.diag
+                .as_deref()
+                .is_some_and(|diag| diag.contains("current day")),
+            "structured refusal must identify the expired decision day"
+        );
+        assert!(
+            ledger
+                .tune_rows(&kernel)
+                .expect("delayed tune rows")
+                .is_empty()
+        );
+        assert!(
+            ledger
+                .op_artifact_hashes(op)
+                .expect("delayed artifact edges")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn frozen_finalization_refusal_controls_eligibility_and_diagnostic_together() {
+        for _attempt in 0..2 {
+            let today = test_day();
+            let axes = synthetic_axes(0xD41);
+            let (baseline, identity) = trusted_baseline(&axes);
+            let admission =
+                attested_policy_on_day(&baseline, &identity, today).decide_at(&axes, &axes, today);
+            let mut registry = default_registry(1 << 10).expect("bounded registry fixture");
+            let results = run_registry(&mut registry, 0, 1, &axes).expect("bounded frozen run");
+            let finalized = FinalizedRegistryRun {
+                receipt: crate::finalized_run_receipt(&admission, &results),
+                admitted: false,
+                consumed: false,
+            };
+            let run = ProductionRun {
+                axes: axes.clone(),
+                post_axes: axes,
+                admission,
+                nonce: fs_blake3::hash_domain(
+                    "fs-roofline.finalization-refusal-test-nonce.v1",
+                    b"not-admitted",
+                ),
+                results,
+                finalized,
+                citation_authority: test_receipt_authority(),
+                build_identity: crate::read_executable_build_identity()
+                    .expect("capture test executable identity"),
+            };
+
+            let refusal = run.admission_error();
+            let eligible = run.citation_eligible();
+            if test_day() != today {
+                continue;
+            }
+            assert_eq!(refusal.as_deref(), Some(SEALED_FINALIZATION_REFUSAL));
+            assert!(!eligible);
+            return;
+        }
+        panic!("test clock crossed UTC midnight twice while checking finalization refusal");
+    }
+
+    #[test]
     #[allow(clippy::too_many_lines)] // one end-to-end protocol and staleness state matrix
     fn successful_production_run_records_nonce_and_both_axis_receipts() {
         let axes = synthetic_axes(0xE);
         let (baseline, identity) = trusted_baseline(&axes);
-        let policy = AxisBaselinePolicy::new(Some(&baseline), &identity, 20_010);
+        let policy = attested_policy(&baseline, &identity);
+        let baseline_hash = Some(baseline.content_hash());
         let probe = ProductionProbe::from_observed(axes.clone());
         let nonce = probe.nonce;
         let post = axes.clone();
@@ -1243,11 +1814,10 @@ mod tests {
         let ledger = Ledger::open(&db).expect("open ledger");
         let kernel = run.results()[0].kernel.clone();
         let version = run.results()[0].version.clone();
-        let baseline_hash = policy.baseline_hash();
         let op = run.record(&ledger).expect("record production run");
         let row = ledger.op(op).unwrap().expect("op row");
         let recorded_at = row.t_end.expect("finished op");
-        assert!(row.ir.contains("\"protocol\":\"production-v2\""));
+        assert!(row.ir.contains("\"protocol\":\"production-v3\""));
         assert!(
             row.ir
                 .contains("\"dependency_graph_evidence\":\"operator-observed-receipt\"")
@@ -1405,7 +1975,7 @@ mod tests {
         let ledger = Ledger::open(db).expect("open ledger");
         let axes = synthetic_axes(0xBEEF);
         let (baseline, identity) = trusted_baseline(&axes);
-        let policy = AxisBaselinePolicy::new(Some(&baseline), &identity, 20_010);
+        let policy = attested_policy(&baseline, &identity);
         let probe = ProductionProbe::from_observed(axes.clone());
         let post = axes.clone();
         let run = probe
@@ -1446,7 +2016,7 @@ mod tests {
         let axes = synthetic_axes(0xBEEF);
         let identity = BaselineIdentity::current(&axes, "test-firmware")
             .expect("synthetic identity agrees with the retained baseline");
-        let policy = AxisBaselinePolicy::new(Some(&production.baseline), &identity, 20_010);
+        let policy = AxisBaselinePolicy::new(Some(&production.baseline), &identity, test_day());
         let mut registry = default_registry(1 << 10).expect("bounded registry fixture");
         let mut results =
             run_registry(&mut registry, 0, 1, &axes).expect("bounded exploratory registry run");
@@ -1652,9 +2222,72 @@ mod tests {
             .ir;
         let parsed = crate::parse_canonical_production_op(&ir).expect("canonical production IR");
         assert_eq!(parsed.to_json(), ir);
+        let legacy_protocol = ir.replacen(
+            "\"protocol\":\"production-v3\"",
+            "\"protocol\":\"production-v2\"",
+            1,
+        );
+        assert!(
+            crate::parse_canonical_production_op(&legacy_protocol).is_none(),
+            "operator-trusted production-v2 history must never re-enter the v3 citable parser"
+        );
+        let legacy_admission = ir.replacen(
+            "fs-roofline-axis-admission-v2",
+            "fs-roofline-axis-admission-v1",
+            1,
+        );
+        assert!(
+            crate::parse_canonical_production_op(&legacy_admission)
+                .and_then(|legacy| crate::validate_protocol_axes(
+                    &legacy,
+                    0xBEEF,
+                    run.baseline.content_hash(),
+                ))
+                .is_none(),
+            "axis-admission-v1 history must fail the v3 attestation boundary"
+        );
         assert!(
             crate::validate_protocol_axes(&parsed, 0xBEEF, run.baseline.content_hash(),).is_some(),
             "canonical pre/post receipts must bind the recorded fingerprints, axes, and baseline"
+        );
+
+        let source = run.baseline.provenance().source_receipts()[0];
+        let foreign_source = fs_blake3::hash_domain(
+            "fs-roofline.substituted-source-receipt.v1",
+            source.as_bytes(),
+        );
+        let substituted_source_ir = ir.replacen(
+            &format!("\"required_source_receipts\":[\"{source}\""),
+            &format!("\"required_source_receipts\":[\"{foreign_source}\""),
+            1,
+        );
+        let substituted_source = crate::parse_canonical_production_op(&substituted_source_ir)
+            .expect("source substitution remains transport-canonical");
+        assert!(
+            crate::validate_protocol_axes(
+                &substituted_source,
+                0xBEEF,
+                run.baseline.content_hash(),
+            )
+            .is_none(),
+            "required source receipts must exactly equal canonical baseline provenance"
+        );
+
+        let substituted_identity_ir = ir.replacen(
+            "\"firmware\":\"test-firmware\"",
+            "\"firmware\":\"substituted-firmware\"",
+            1,
+        );
+        let substituted_identity = crate::parse_canonical_production_op(&substituted_identity_ir)
+            .expect("identity substitution remains transport-canonical");
+        assert!(
+            crate::validate_protocol_axes(
+                &substituted_identity,
+                0xBEEF,
+                run.baseline.content_hash(),
+            )
+            .is_none(),
+            "snapshot identity must exactly equal the canonical baseline identity"
         );
 
         let mut substituted_axes_receipt = parsed.clone();
@@ -1683,6 +2316,34 @@ mod tests {
             1,
         );
         assert!(crate::parse_canonical_production_op(&reordered).is_none());
+        cleanup_db(&db);
+    }
+
+    #[test]
+    fn production_v2_tune_namespace_cannot_poison_v3_history() {
+        let db = temp_db("legacy-production-namespace");
+        let run = recorded_manifest_run(&db);
+        let (kernel, version) = run.kernels[0].clone();
+        let current = roofline_row(&run.ledger, &kernel);
+        let legacy_shape = current
+            .shape_class
+            .replacen(crate::TUNE_SHAPE_CLASS, "roofline-v7", 1);
+        assert_ne!(legacy_shape, current.shape_class);
+        run.ledger
+            .tune_put(
+                &current.kernel,
+                &legacy_shape,
+                &current.machine,
+                &current.params,
+                &current.measured,
+            )
+            .expect("retain append-only production-v2 row");
+
+        assert_eq!(
+            manifest_probe(&run, &kernel, &version),
+            Staleness::Fresh,
+            "retained roofline-v7 history must be outside the production-v3 scan"
+        );
         cleanup_db(&db);
     }
 
@@ -1747,7 +2408,7 @@ mod tests {
 
         let axes = synthetic_axes(0xBEEF);
         let (baseline, identity) = trusted_baseline(&axes);
-        let policy = AxisBaselinePolicy::new(Some(&baseline), &identity, 20_010);
+        let policy = attested_policy(&baseline, &identity);
         let probe = ProductionProbe::from_observed(axes.clone());
         let post = axes.clone();
         let run = probe

@@ -15,23 +15,26 @@
 //! an age policy,
 //! and the environment identity (OS/arch/firmware declaration) it is
 //! valid for. Citable gates then require the CURRENT axes to sit inside
-//! declared bands around the trusted baseline.
+//! declared bands around the separately authorized baseline.
 //!
 //! Trust discipline (the acceptance's four laws):
 //! 1. First-run measurements are CANDIDATE evidence — nothing a probe
 //!    measures about itself can authorize itself.
 //! 2. Promotion is explicit and governed: at least
 //!    [`MIN_PROMOTION_RUNS`] mutually-agreeing candidate runs plus a
-//!    named operator annotation and a non-blank justification. The annotation
-//!    is not an authenticated signature; protected-store/operator authority is
-//!    an explicit trust boundary until a verifier capability is wired.
+//!    named operator annotation and a non-blank justification. That record is
+//!    still candidate evidence until an [`AttestedBaselineStore`] pairs it
+//!    with an authorized exact-message attestation and retained source
+//!    receipts for the specific run.
 //! 3. Admission against the baseline refuses degraded, suspiciously
 //!    fast, stale, and identity-drifted axes — each with a distinct,
 //!    teaching verdict.
 //! 4. Baseline updates go through the same promotion gate; there is no
 //!    in-place mutation API.
 
-use crate::authority::{KeyVerdict, PromotionAttestation, PromotionAuthorityVerifier};
+use crate::authority::{
+    KeyVerdict, PromotionAttestation, PromotionAuthorityDecision, PromotionAuthorityVerifier,
+};
 use crate::axes::{MAX_AXIS_REPROBE_DRIFT, MachineAxes};
 use fs_blake3::{ContentHash, hash_domain};
 use std::collections::{BTreeMap, BTreeSet};
@@ -93,7 +96,7 @@ pub const BASELINE_RECORD_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
     "external_semantic_fields=digest-domain,low-band-policy,high-band-policy,promotion-drift-policy",
     "semantic_fields=digest-domain,schema-version,low-band-policy,high-band-policy,promotion-drift-policy,machine-fingerprint,cpu-brand-utf8,logical-cpus,os-utf8,arch-utf8,firmware-utf8,bandwidth-single-bits,bandwidth-all-core-bits,peak-single-bits,peak-all-core-bits,source-receipt-count,ordered-source-receipts,promoted-by-utf8,justification-utf8,promoted-day,age-policy-days",
     "excluded_fields=none",
-    "consumers=BaselineStore::admit,BaselineStore::from_jsonl,BaselineAxes::promotion_message,PromotionAuthorityVerifier,AxisBaselinePolicy::receipt_json",
+    "consumers=BaselineStore::admit,BaselineStore::from_jsonl,BaselineAxes::promotion_message,PromotionAuthorityVerifier,AttestedBaselineStore::policy_for_run,AxisBaselinePolicy::receipt_json,AxisAdmissionSnapshot::receipt_json,validate_protocol_axes",
     "mutations=digest-domain:crates/fs-roofline/src/baseline.rs#baseline_record_identity_fields_move_independently,schema-version:crates/fs-roofline/src/baseline.rs#baseline_record_identity_fields_move_independently,low-band-policy:crates/fs-roofline/src/baseline.rs#baseline_record_identity_fields_move_independently,high-band-policy:crates/fs-roofline/src/baseline.rs#baseline_record_identity_fields_move_independently,promotion-drift-policy:crates/fs-roofline/src/baseline.rs#baseline_record_identity_fields_move_independently,machine-fingerprint:crates/fs-roofline/src/baseline.rs#baseline_record_identity_fields_move_independently,cpu-brand-utf8:crates/fs-roofline/src/baseline.rs#baseline_record_identity_fields_move_independently,logical-cpus:crates/fs-roofline/src/baseline.rs#baseline_record_identity_fields_move_independently,os-utf8:crates/fs-roofline/src/baseline.rs#baseline_record_identity_fields_move_independently,arch-utf8:crates/fs-roofline/src/baseline.rs#baseline_record_identity_fields_move_independently,firmware-utf8:crates/fs-roofline/src/baseline.rs#baseline_record_identity_fields_move_independently,bandwidth-single-bits:crates/fs-roofline/src/baseline.rs#baseline_record_identity_fields_move_independently,bandwidth-all-core-bits:crates/fs-roofline/src/baseline.rs#baseline_record_identity_fields_move_independently,peak-single-bits:crates/fs-roofline/src/baseline.rs#baseline_record_identity_fields_move_independently,peak-all-core-bits:crates/fs-roofline/src/baseline.rs#baseline_record_identity_fields_move_independently,source-receipt-count:crates/fs-roofline/src/baseline.rs#baseline_record_identity_fields_move_independently,ordered-source-receipts:crates/fs-roofline/src/baseline.rs#baseline_record_identity_fields_move_independently,promoted-by-utf8:crates/fs-roofline/src/baseline.rs#baseline_record_identity_fields_move_independently,justification-utf8:crates/fs-roofline/src/baseline.rs#baseline_record_identity_fields_move_independently,promoted-day:crates/fs-roofline/src/baseline.rs#baseline_record_identity_fields_move_independently,age-policy-days:crates/fs-roofline/src/baseline.rs#baseline_record_identity_fields_move_independently",
     "nonsemantic_mutations=none",
     "field_guard=classify_baseline_record_identity_fields",
@@ -248,7 +251,9 @@ pub struct BaselineProvenance {
     /// Promotion day (days since the Unix epoch — see
     /// [`days_since_epoch_now`]).
     promoted_day: u64,
-    /// Sorted, unique identities of the retained candidate receipts.
+    /// Sorted, unique identities asserted to belong to retained candidate
+    /// receipts. Hash membership alone is not proof that their bytes remain
+    /// available or authentic.
     source_receipts: Vec<ContentHash>,
 }
 
@@ -272,7 +277,9 @@ impl BaselineProvenance {
         self.promoted_day
     }
 
-    /// Sorted, unique source-receipt identities.
+    /// Sorted, unique source-receipt identities. The inventory that checks
+    /// these hashes is a protected external assertion, not byte-retention
+    /// proof.
     #[must_use]
     pub fn source_receipts(&self) -> &[ContentHash] {
         &self.source_receipts
@@ -285,7 +292,9 @@ impl BaselineProvenance {
     }
 }
 
-/// A trusted, admitted baseline for one machine fingerprint.
+/// A promoted baseline record for one machine fingerprint. The record becomes
+/// citable only inside an opaque policy minted by
+/// [`AttestedBaselineStore::policy_for_run`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct BaselineAxes {
     /// Canonical record schema.
@@ -433,6 +442,16 @@ impl AttestedBaselineStore {
     /// content hash, and every source receipt the provenance names must
     /// be AVAILABLE (present in the retained-receipt set) — a promotion
     /// whose evidence has vanished is refused, not trusted.
+    /// `available_receipts` is itself a protected caller assertion: hash
+    /// membership does not prove that the receipt bytes are present,
+    /// authentic, or retrievable. Deployments must construct this inventory
+    /// from their protected artifact store.
+    ///
+    /// Re-admitting the exact same record with an attestation from a newly
+    /// authorized key is an explicit rotation re-endorsement. It replaces the
+    /// old attestation without changing the record's promotion day or content
+    /// identity; a changed record remains subject to the ordinary monotone
+    /// promotion-update rules.
     ///
     /// # Errors
     /// [`PromotionError`] naming the refusal: unattested records,
@@ -446,40 +465,128 @@ impl AttestedBaselineStore {
         authority: &dyn PromotionAuthorityVerifier,
         available_receipts: &BTreeSet<ContentHash>,
     ) -> Result<(), PromotionError> {
-        if !attestation.well_formed() {
-            return Err(PromotionError {
-                detail: "promotion attestation has a blank key id or signature".to_string(),
-            });
-        }
-        match baseline.authority_verdict(Some(&attestation), authority) {
-            KeyVerdict::Authorized => {}
-            refused => {
-                return Err(PromotionError {
-                    detail: format!(
-                        "promotion authority refused key {:?}: {}",
-                        attestation.key_id(),
-                        refused.name()
-                    ),
-                });
-            }
-        }
-        if let Some(missing) = baseline
-            .provenance()
-            .source_receipts()
-            .iter()
-            .find(|receipt| !available_receipts.contains(receipt))
-        {
-            return Err(PromotionError {
-                detail: format!(
-                    "source receipt {} named by the promotion is not available in the \
-                     retained-receipt set — evidence must outlive the promotion it backs",
-                    missing.to_hex()
-                ),
-            });
-        }
+        let _ = verify_attested_baseline(&baseline, &attestation, authority, available_receipts)?;
+        self.check_projected_attested_size(&baseline, &attestation)?;
         let fingerprint = baseline.identity().fingerprint();
         self.store.admit(baseline)?;
         self.attestations.insert(fingerprint, attestation);
+        Ok(())
+    }
+
+    /// Mint the only citable policy for one run. The selected baseline and
+    /// attestation are cloned into an owned, opaque policy after structural
+    /// validation, exact environment matching, retained-source checks, and
+    /// one atomic authority decision. The current epoch day is read inside
+    /// this method; callers cannot inject a convenient historical day. No live
+    /// verifier reference escapes this boundary.
+    ///
+    /// `available_receipts` is a protected caller assertion of retained hash
+    /// identities, not proof that the corresponding bytes are present or
+    /// authentic.
+    ///
+    /// # Errors
+    /// Refuses an absent baseline/attestation, structural corruption,
+    /// cross-machine selection, unavailable source evidence, a wall clock
+    /// before the Unix epoch, or any non-authorized authority decision.
+    pub fn policy_for_run(
+        &self,
+        identity: &BaselineIdentity,
+        authority: &dyn PromotionAuthorityVerifier,
+        available_receipts: &BTreeSet<ContentHash>,
+    ) -> Result<crate::AttestedAxisBaselinePolicy, PromotionError> {
+        let now_day = days_since_epoch_now().map_err(|error| PromotionError {
+            detail: format!("cannot mint an attested run policy: {error}"),
+        })?;
+        self.policy_for_run_on_day(identity, now_day, authority, available_receipts)
+    }
+
+    /// Deterministic-day variant available only to crate unit tests.
+    #[cfg(test)]
+    pub(crate) fn policy_for_run_at(
+        &self,
+        identity: &BaselineIdentity,
+        now_day: u64,
+        authority: &dyn PromotionAuthorityVerifier,
+        available_receipts: &BTreeSet<ContentHash>,
+    ) -> Result<crate::AttestedAxisBaselinePolicy, PromotionError> {
+        self.policy_for_run_on_day(identity, now_day, authority, available_receipts)
+    }
+
+    fn policy_for_run_on_day(
+        &self,
+        identity: &BaselineIdentity,
+        now_day: u64,
+        authority: &dyn PromotionAuthorityVerifier,
+        available_receipts: &BTreeSet<ContentHash>,
+    ) -> Result<crate::AttestedAxisBaselinePolicy, PromotionError> {
+        validate_identity(identity)?;
+        let fingerprint = identity.fingerprint();
+        let baseline = self
+            .for_fingerprint(fingerprint)
+            .ok_or_else(|| PromotionError {
+                detail: format!(
+                    "no attested baseline exists for machine fingerprint {fingerprint:016x}"
+                ),
+            })?;
+        validate_baseline(baseline)?;
+        if baseline.identity() != identity {
+            return Err(PromotionError {
+                detail: "attested baseline environment does not match the requested run identity"
+                    .to_string(),
+            });
+        }
+        let attestation = self
+            .attestation_for(fingerprint)
+            .ok_or_else(|| PromotionError {
+                detail: format!(
+                    "attested baseline for machine fingerprint {fingerprint:016x} has no promotion attestation"
+                ),
+            })?;
+        let authority_decision =
+            verify_attested_baseline(baseline, attestation, authority, available_receipts)?;
+        Ok(crate::AttestedAxisBaselinePolicy::from_verified(
+            baseline.clone(),
+            identity.clone(),
+            now_day,
+            attestation.clone(),
+            baseline.provenance().source_receipts().to_vec(),
+            authority_decision,
+        ))
+    }
+
+    fn check_projected_attested_size(
+        &self,
+        baseline: &BaselineAxes,
+        attestation: &PromotionAttestation,
+    ) -> Result<(), PromotionError> {
+        let fingerprint = baseline.identity().fingerprint();
+        let replaced_bytes = self
+            .store
+            .for_fingerprint(fingerprint)
+            .zip(self.attestation_for(fingerprint))
+            .map_or(0, |(old_baseline, old_attestation)| {
+                attested_line(old_baseline, old_attestation).len() + 1
+            });
+        let retained_bytes = self
+            .to_jsonl()
+            .len()
+            .checked_sub(replaced_bytes)
+            .ok_or_else(|| PromotionError {
+                detail: "attested baseline store has inconsistent replacement accounting"
+                    .to_string(),
+            })?;
+        let projected = retained_bytes
+            .checked_add(attested_line(baseline, attestation).len() + 1)
+            .ok_or_else(|| PromotionError {
+                detail: "attested baseline store size overflow".to_string(),
+            })?;
+        if projected > MAX_BASELINE_STORE_BYTES {
+            return Err(PromotionError {
+                detail: format!(
+                    "attested baseline store exceeds the {MAX_BASELINE_STORE_BYTES}-byte bound"
+                ),
+            });
+        }
         Ok(())
     }
 
@@ -491,21 +598,17 @@ impl AttestedBaselineStore {
             let Some(baseline) = self.store.for_fingerprint(*fingerprint) else {
                 continue;
             };
-            out.push_str("{\"record\":");
-            out.push_str(&baseline.canonical_json());
-            out.push_str(",\"attestation\":{\"key_id\":");
-            push_json_string(&mut out, attestation.key_id());
-            out.push_str(",\"signature\":");
-            push_json_string(&mut out, attestation.signature());
-            out.push_str("}}\n");
+            out.push_str(&attested_line(baseline, attestation));
+            out.push('\n');
         }
         out
     }
 
     /// Parse attested JSON lines STRICTLY. Parsing does NOT verify —
-    /// no capability exists at parse time; every CITABLE USE re-verifies
-    /// through [`citable_axis_admission_authorized`], so a tampered
-    /// store line is caught at the decision point, deterministically.
+    /// no capability exists at parse time; every citable use goes through
+    /// [`Self::policy_for_run`], so a tampered store line is caught before an
+    /// opaque policy can be minted. The full transport, including deterministic
+    /// line order and final newlines, must be byte-identical to [`Self::to_jsonl`].
     ///
     /// # Errors
     /// [`PromotionError`] naming the offending line.
@@ -523,10 +626,8 @@ impl AttestedBaselineStore {
             let rest = line
                 .strip_prefix("{\"record\":")
                 .ok_or_else(|| refuse("missing the record envelope"))?;
-            // The canonical record is a FLAT object: it ends at the first '}'.
-            let record_end = rest
-                .find('}')
-                .ok_or_else(|| refuse("unterminated record object"))?;
+            let record_end =
+                json_object_end(rest).ok_or_else(|| refuse("unterminated record object"))?;
             let record_json = &rest[..=record_end];
             let record_store = BaselineStore::from_jsonl(record_json)
                 .map_err(|e| refuse(&format!("record part: {e}")))?;
@@ -546,9 +647,14 @@ impl AttestedBaselineStore {
             }
             let attestation = PromotionAttestation::new(key_id, signature);
             if !attestation.well_formed() {
-                return Err(refuse("blank key id or signature"));
+                return Err(refuse("malformed key id or signature"));
             }
             for (fingerprint, baseline) in record_store.baselines {
+                if attested_line(&baseline, &attestation) != line {
+                    return Err(refuse(
+                        "envelope is not byte-identical to its canonical reserialization",
+                    ));
+                }
                 if attested.attestations.contains_key(&fingerprint) {
                     return Err(refuse(&format!("duplicate fingerprint {fingerprint:016x}")));
                 }
@@ -558,38 +664,105 @@ impl AttestedBaselineStore {
                     .insert(fingerprint, attestation.clone());
             }
         }
+        if attested.to_jsonl() != text {
+            return Err(PromotionError {
+                detail:
+                    "attested store transport is not byte-identical to canonical reserialization"
+                        .to_string(),
+            });
+        }
         Ok(attested)
     }
 }
 
-/// [`citable_axis_admission`] plus MANDATORY promotion-authority
-/// verification (bead fz2.7): the citable tier for binding gates. The
-/// baseline (when present) must carry an attestation the injected
-/// authority accepts over its exact content hash; unattested, forged,
-/// edited, unknown-key, and revoked-key records all refuse with a
-/// typed [`BaselineVerdict::Unauthorized`] BEFORE any band math.
-#[must_use]
-#[allow(clippy::too_many_arguments)] // the complete admission context, spelled out
-pub fn citable_axis_admission_authorized(
-    pre: &MachineAxes,
-    post: &MachineAxes,
-    baseline: Option<&BaselineAxes>,
-    attestation: Option<&PromotionAttestation>,
-    identity: &BaselineIdentity,
-    now_day: u64,
-    authority: &dyn PromotionAuthorityVerifier,
-) -> BaselineVerdict {
-    if let Some(baseline) = baseline {
-        match baseline.authority_verdict(attestation, authority) {
-            KeyVerdict::Authorized => {}
-            refused => {
-                return BaselineVerdict::Unauthorized {
-                    verdict: refused.name(),
-                };
+fn attested_line(baseline: &BaselineAxes, attestation: &PromotionAttestation) -> String {
+    let record = baseline.canonical_json();
+    let mut out = String::with_capacity(
+        record.len() + attestation.key_id().len() + attestation.signature().len() + 72,
+    );
+    out.push_str("{\"record\":");
+    out.push_str(&record);
+    out.push_str(",\"attestation\":{\"key_id\":");
+    push_json_string(&mut out, attestation.key_id());
+    out.push_str(",\"signature\":");
+    push_json_string(&mut out, attestation.signature());
+    out.push_str("}}");
+    out
+}
+
+/// Return the byte index of the closing brace matching the first object.
+/// Braces inside quoted strings are data, and an escaped quote cannot end the
+/// string. Full JSON validity remains the canonical record parser's job.
+fn json_object_end(text: &str) -> Option<usize> {
+    if !text.starts_with('{') {
+        return None;
+    }
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (index, byte) in text.bytes().enumerate() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
             }
+            continue;
+        }
+        match byte {
+            b'"' => in_string = true,
+            b'{' => depth = depth.checked_add(1)?,
+            b'}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
         }
     }
-    citable_axis_admission(pre, post, baseline, identity, now_day)
+    None
+}
+
+fn verify_attested_baseline(
+    baseline: &BaselineAxes,
+    attestation: &PromotionAttestation,
+    authority: &dyn PromotionAuthorityVerifier,
+    available_receipts: &BTreeSet<ContentHash>,
+) -> Result<PromotionAuthorityDecision, PromotionError> {
+    validate_baseline(baseline)?;
+    if !attestation.well_formed() {
+        return Err(PromotionError {
+            detail: "promotion attestation has a malformed key id or signature".to_string(),
+        });
+    }
+    if let Some(missing) = baseline
+        .provenance()
+        .source_receipts()
+        .iter()
+        .find(|receipt| !available_receipts.contains(receipt))
+    {
+        return Err(PromotionError {
+            detail: format!(
+                "source receipt {} named by the promotion is not available in the \
+                 retained-receipt set — evidence must outlive the promotion it backs",
+                missing.to_hex()
+            ),
+        });
+    }
+    let decision = baseline.authority_verdict(Some(attestation), authority);
+    if decision.verdict() != KeyVerdict::Authorized {
+        return Err(PromotionError {
+            detail: format!(
+                "promotion authority refused key {:?}: {}",
+                attestation.key_id(),
+                decision.verdict().name()
+            ),
+        });
+    }
+    Ok(decision)
 }
 
 /// Take one JSON string literal off the front of `text`; returns the
@@ -627,12 +800,14 @@ fn take_json_string(text: &str) -> Option<(String, &str)> {
     }
 }
 
-/// The verdict of checking current axes against a trusted baseline.
-/// Only [`BaselineVerdict::Trusted`] supports citable gates.
+/// The verdict of checking current axes against a promoted baseline.
+/// [`BaselineVerdict::Trusted`] proves the numeric/identity/age checks only;
+/// citable use additionally requires an opaque attested policy.
 #[derive(Debug, Clone, PartialEq)]
 pub enum BaselineVerdict {
     /// Every axis sits inside the declared bands: the host is behaving
-    /// like its trusted self.
+    /// like the promoted record. This verdict alone conveys no promotion
+    /// authority.
     Trusted,
     /// No admitted baseline exists for this fingerprint: current
     /// measurements are CANDIDATE evidence only.
@@ -1127,15 +1302,19 @@ impl BaselineAxes {
         &self,
         attestation: Option<&PromotionAttestation>,
         authority: &dyn PromotionAuthorityVerifier,
-    ) -> KeyVerdict {
-        match attestation {
-            None => KeyVerdict::UnknownKey,
-            Some(attestation) if !attestation.well_formed() => KeyVerdict::UnknownKey,
+    ) -> PromotionAuthorityDecision {
+        let decision = match attestation {
+            None => authority.verify("", "", &self.promotion_message()),
             Some(attestation) => authority.verify(
                 attestation.key_id(),
                 attestation.signature(),
                 &self.promotion_message(),
             ),
+        };
+        if attestation.is_some_and(PromotionAttestation::well_formed) {
+            decision
+        } else {
+            PromotionAuthorityDecision::new(KeyVerdict::UnknownKey, decision.policy_receipt())
         }
     }
 
@@ -1184,8 +1363,8 @@ fn mutually_agreeing_maxima(
     Ok(promoted)
 }
 
-/// Promote a trusted baseline from candidate runs — THE only way a
-/// baseline comes to exist.
+/// Promote a baseline record from candidate runs — THE only way a baseline
+/// record comes to exist. Promotion authority is a separate attestation step.
 ///
 /// Requirements (each refused with a teaching detail):
 /// - at least [`MIN_PROMOTION_RUNS`] candidates with unique retained receipt
@@ -1295,12 +1474,14 @@ pub fn promote_baseline(
     Ok(baseline)
 }
 
-/// The combined citable-axis admission: absolute floors (last-resort
-/// sanity), pre/post agreement, AND baseline trust. `baseline = None`
-/// yields [`BaselineVerdict::Unbaselined`] — measurements proceed as
-/// candidate evidence but nothing citable may be minted from them.
+/// Candidate/report-only axis assessment: absolute floors (last-resort
+/// sanity), pre/post agreement, and promoted-record bands. This function
+/// deliberately conveys no promotion authority; even
+/// [`BaselineVerdict::Trusted`] remains non-citable without an opaque policy
+/// minted by [`AttestedBaselineStore::policy_for_run`]. `baseline = None`
+/// yields [`BaselineVerdict::Unbaselined`].
 #[must_use]
-pub fn citable_axis_admission(
+pub fn candidate_axis_admission(
     pre: &MachineAxes,
     post: &MachineAxes,
     baseline: Option<&BaselineAxes>,
@@ -1671,6 +1852,7 @@ fn parse_baseline_line(line: &str) -> Option<BaselineAxes> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
 
     fn quiet_axes() -> MachineAxes {
         MachineAxes {
@@ -1739,7 +1921,7 @@ mod tests {
             BaselineVerdict::Trusted
         );
         assert!(
-            citable_axis_admission(&current, &current, Some(&baseline), &identity(), 20_010)
+            candidate_axis_admission(&current, &current, Some(&baseline), &identity(), 20_010)
                 .trusted()
         );
     }
@@ -1758,7 +1940,7 @@ mod tests {
         assert!(crushed.reprobe_error(&crushed).is_none());
         // ...but the baseline sees a 0.06 ratio.
         let verdict =
-            citable_axis_admission(&crushed, &crushed, Some(&baseline), &identity(), 20_010);
+            candidate_axis_admission(&crushed, &crushed, Some(&baseline), &identity(), 20_010);
         assert!(
             matches!(
                 verdict,
@@ -1848,7 +2030,7 @@ mod tests {
     #[test]
     fn first_run_measurements_are_candidates_not_baselines() {
         let current = quiet_axes();
-        let verdict = citable_axis_admission(&current, &current, None, &identity(), 20_010);
+        let verdict = candidate_axis_admission(&current, &current, None, &identity(), 20_010);
         assert_eq!(verdict, BaselineVerdict::Unbaselined);
         assert!(!verdict.trusted());
     }
@@ -1858,7 +2040,7 @@ mod tests {
         let baseline = promoted();
         let mut invalid = quiet_axes();
         invalid.bandwidth_single_gbs = f64::NAN;
-        let invalid_verdict = citable_axis_admission(
+        let invalid_verdict = candidate_axis_admission(
             &invalid,
             &quiet_axes(),
             Some(&baseline),
@@ -1874,7 +2056,7 @@ mod tests {
 
         let mut drifted = quiet_axes();
         drifted.bandwidth_single_gbs *= 0.5;
-        let reprobe = citable_axis_admission(
+        let reprobe = candidate_axis_admission(
             &quiet_axes(),
             &drifted,
             Some(&baseline),
@@ -2235,6 +2417,39 @@ mod tests {
             .collect()
     }
 
+    struct CountingAuthority<'a> {
+        inner: &'a crate::StaticKeyRegistry,
+        calls: Cell<usize>,
+    }
+
+    impl PromotionAuthorityVerifier for CountingAuthority<'_> {
+        fn verify(
+            &self,
+            key_id: &str,
+            signature: &str,
+            message: &[u8],
+        ) -> PromotionAuthorityDecision {
+            self.calls.set(self.calls.get() + 1);
+            self.inner.verify(key_id, signature, message)
+        }
+    }
+
+    struct AlwaysAuthority;
+
+    impl PromotionAuthorityVerifier for AlwaysAuthority {
+        fn verify(
+            &self,
+            _key_id: &str,
+            _signature: &str,
+            _message: &[u8],
+        ) -> PromotionAuthorityDecision {
+            PromotionAuthorityDecision::new(
+                KeyVerdict::Authorized,
+                hash_domain("fs-roofline.test.always-authority.v1", b"policy"),
+            )
+        }
+    }
+
     /// Authorized admission round-trips through the attested store and
     /// re-verifies identically after reload (deterministic replay).
     #[test]
@@ -2256,18 +2471,226 @@ mod tests {
         let fingerprint = baseline.identity().fingerprint();
         assert_eq!(back.for_fingerprint(fingerprint), Some(&baseline));
         assert_eq!(back.attestation_for(fingerprint), Some(&attestation));
-        // Citable use re-verifies the reloaded record end-to-end.
-        let verdict = citable_axis_admission_authorized(
-            &quiet_axes(),
-            &quiet_axes(),
-            back.for_fingerprint(fingerprint),
-            back.attestation_for(fingerprint),
-            &identity(),
-            20_010,
-            &authority,
-        );
-        assert_eq!(verdict, BaselineVerdict::Trusted);
+        let _policy = back
+            .policy_for_run_at(&identity(), 20_010, &authority, &retained(&baseline))
+            .expect("authorized policy mint");
         assert_eq!(back.to_jsonl(), text, "replay is byte-identical");
+    }
+
+    #[test]
+    fn attested_parser_is_object_aware_and_envelope_canonical() {
+        let baseline = promote_baseline(
+            &quiet_candidates("brace"),
+            "operator-a",
+            "an escaped quote \" and slash \\ before brace } in valid provenance text",
+            20_000,
+            90,
+        )
+        .expect("brace-bearing baseline");
+        let authority = authority_with("ops/2026-q3");
+        let attestation = attest(&baseline, "ops/2026-q3");
+        let mut store = AttestedBaselineStore::new();
+        store
+            .admit_verified(
+                baseline.clone(),
+                attestation,
+                &authority,
+                &retained(&baseline),
+            )
+            .expect("authorized admission");
+        let text = store.to_jsonl();
+        let back = AttestedBaselineStore::from_jsonl(&text).expect("brace is string data");
+        assert_eq!(back.to_jsonl(), text);
+        assert!(
+            AttestedBaselineStore::from_jsonl(text.trim_end_matches('\n')).is_err(),
+            "canonical transport includes its final newline"
+        );
+
+        let alternate_escape = text.replace("ops/2026-q3", "ops/2026-q\\u0033");
+        assert_ne!(alternate_escape, text);
+        let refused = AttestedBaselineStore::from_jsonl(&alternate_escape)
+            .expect_err("alternate Unicode spelling is not canonical");
+        assert!(
+            refused.detail.contains("canonical reserialization"),
+            "{refused}"
+        );
+    }
+
+    #[test]
+    fn attested_envelope_accounting_accepts_exact_cap_and_refuses_limit_plus_one() {
+        let template = promoted();
+        let authority = AlwaysAuthority;
+        let minimal_attestation = PromotionAttestation::new("k", "x");
+        let mut store = AttestedBaselineStore::new();
+        let mut used = 0usize;
+        let mut next_fingerprint = 0x1_000u64;
+        let mut last_baseline = None;
+        // Seed a canonical near-cap state directly; exercising admission for
+        // every prefix would make this boundary test quadratic in store size.
+        let overflow_baseline = loop {
+            let mut baseline = template.clone();
+            baseline.identity.fingerprint = next_fingerprint;
+            next_fingerprint += 1;
+            let line_bytes = attested_line(&baseline, &minimal_attestation).len() + 1;
+            if used + line_bytes >= MAX_BASELINE_STORE_BYTES {
+                break baseline;
+            }
+            used += line_bytes;
+            assert!(
+                store
+                    .store
+                    .baselines
+                    .insert(baseline.identity.fingerprint(), baseline.clone())
+                    .is_none()
+            );
+            assert!(
+                store
+                    .attestations
+                    .insert(baseline.identity.fingerprint(), minimal_attestation.clone())
+                    .is_none()
+            );
+            last_baseline = Some(baseline);
+        };
+        assert_eq!(store.to_jsonl().len(), used);
+
+        let remaining = MAX_BASELINE_STORE_BYTES - used;
+        assert!(remaining > 0);
+        let last_baseline = last_baseline.expect("at least one retained baseline");
+        let last_receipts = retained(&last_baseline);
+        let mut exact_signature = String::from("x");
+        if remaining >= 2 {
+            exact_signature.push('\\');
+            exact_signature.push_str(&"x".repeat(remaining - 2));
+        } else {
+            exact_signature.push('x');
+        }
+        let exact_attestation = PromotionAttestation::new("k", exact_signature.clone());
+        assert!(exact_attestation.well_formed());
+        store
+            .admit_verified(
+                last_baseline.clone(),
+                exact_attestation,
+                &authority,
+                &last_receipts,
+            )
+            .expect("the exact byte cap is admitted");
+        let exact = store.to_jsonl();
+        assert_eq!(exact.len(), MAX_BASELINE_STORE_BYTES);
+        let reparsed = AttestedBaselineStore::from_jsonl(&exact).expect("exact-cap round trip");
+        assert_eq!(reparsed.to_jsonl(), exact);
+
+        exact_signature.push('x');
+        let too_large = PromotionAttestation::new("k", exact_signature);
+        assert!(too_large.well_formed());
+        let refused = store
+            .admit_verified(last_baseline, too_large, &authority, &last_receipts)
+            .expect_err("limit plus one re-attestation refuses");
+        assert!(refused.detail.contains("byte bound"), "{refused}");
+        assert_eq!(store.to_jsonl(), exact, "refusal is non-mutating");
+
+        let overflow_receipts = retained(&overflow_baseline);
+        let refused = store
+            .admit_verified(
+                overflow_baseline,
+                minimal_attestation,
+                &authority,
+                &overflow_receipts,
+            )
+            .expect_err("a new admission above the cap refuses");
+        assert!(refused.detail.contains("byte bound"), "{refused}");
+        assert_eq!(store.to_jsonl(), exact, "refusal is non-mutating");
+    }
+
+    #[test]
+    fn policy_mint_observes_one_atomic_authority_decision() {
+        let baseline = promoted();
+        let registry = authority_with("ops/2026-q3");
+        let attestation = attest(&baseline, "ops/2026-q3");
+        let mut store = AttestedBaselineStore::new();
+        store
+            .admit_verified(
+                baseline.clone(),
+                attestation,
+                &registry,
+                &retained(&baseline),
+            )
+            .expect("authorized admission");
+        let authority = CountingAuthority {
+            inner: &registry,
+            calls: Cell::new(0),
+        };
+        let _policy = store
+            .policy_for_run_at(&identity(), 20_010, &authority, &retained(&baseline))
+            .expect("policy");
+        assert_eq!(authority.calls.get(), 1);
+
+        authority.calls.set(0);
+        let mut incomplete = retained(&baseline);
+        let missing = *baseline
+            .provenance()
+            .source_receipts()
+            .first()
+            .expect("source receipt");
+        incomplete.remove(&missing);
+        let refused = store
+            .policy_for_run_at(&identity(), 20_010, &authority, &incomplete)
+            .err()
+            .expect("missing source refuses policy mint");
+        assert!(refused.detail.contains(&missing.to_hex()), "{refused}");
+        assert_eq!(
+            authority.calls.get(),
+            0,
+            "source retention is checked before consulting authority"
+        );
+
+        let refused = store
+            .policy_for_run_at(
+                &identity(),
+                20_010,
+                &crate::NoPromotionAuthority,
+                &retained(&baseline),
+            )
+            .err()
+            .expect("deny-all authority refuses");
+        assert!(refused.detail.contains("unknown-key"), "{refused}");
+    }
+
+    #[test]
+    fn policy_mint_refuses_cross_machine_identity_and_missing_attestation() {
+        let baseline = promoted();
+        let authority = authority_with("ops/2026-q3");
+        let attestation = attest(&baseline, "ops/2026-q3");
+        let mut store = AttestedBaselineStore::new();
+        store
+            .admit_verified(
+                baseline.clone(),
+                attestation,
+                &authority,
+                &retained(&baseline),
+            )
+            .expect("authorized admission");
+        let mut drifted = identity();
+        drifted.firmware = "different-firmware".to_string();
+        let refused = store
+            .policy_for_run_at(&drifted, 20_010, &authority, &retained(&baseline))
+            .err()
+            .expect("cross-machine identity refused");
+        assert!(refused.detail.contains("does not match"), "{refused}");
+
+        assert!(
+            store
+                .attestations
+                .remove(&baseline.identity().fingerprint())
+                .is_some()
+        );
+        let refused = store
+            .policy_for_run_at(&identity(), 20_010, &authority, &retained(&baseline))
+            .err()
+            .expect("missing attestation refused");
+        assert!(
+            refused.detail.contains("no promotion attestation"),
+            "{refused}"
+        );
     }
 
     /// FORGED OPERATOR / EDITED RECORD: the signature covers the content
@@ -2288,7 +2711,9 @@ mod tests {
         )
         .expect("structurally valid");
         assert_eq!(
-            forged.authority_verdict(Some(&attestation), &authority),
+            forged
+                .authority_verdict(Some(&attestation), &authority)
+                .verdict(),
             KeyVerdict::WrongSignature,
             "operator edits move the signed hash"
         );
@@ -2302,7 +2727,9 @@ mod tests {
         )
         .expect("structurally valid");
         assert_eq!(
-            edited.authority_verdict(Some(&attestation), &authority),
+            edited
+                .authority_verdict(Some(&attestation), &authority)
+                .verdict(),
             KeyVerdict::WrongSignature
         );
         let mut store = AttestedBaselineStore::new();
@@ -2354,29 +2781,36 @@ mod tests {
         let tag_a = crate::StaticKeyRegistry::tag("ops/a", &baseline.promotion_message());
         let claimed_as_b = PromotionAttestation::new("ops/b", tag_a);
         assert_eq!(
-            baseline.authority_verdict(Some(&claimed_as_b), &authority),
+            baseline
+                .authority_verdict(Some(&claimed_as_b), &authority)
+                .verdict(),
             KeyVerdict::WrongSignature
         );
         let unknown = attest(&baseline, "ops/never-registered");
         assert_eq!(
-            baseline.authority_verdict(Some(&unknown), &authority),
+            baseline
+                .authority_verdict(Some(&unknown), &authority)
+                .verdict(),
             KeyVerdict::UnknownKey
         );
         // Unattested is never authorized, under ANY authority.
         assert_eq!(
-            baseline.authority_verdict(None, &authority),
+            baseline.authority_verdict(None, &authority).verdict(),
             KeyVerdict::UnknownKey
         );
         assert_eq!(
-            baseline.authority_verdict(None, &crate::NoPromotionAuthority),
+            baseline
+                .authority_verdict(None, &crate::NoPromotionAuthority)
+                .verdict(),
             KeyVerdict::UnknownKey
         );
     }
 
-    /// REVOKED KEY + VALID ROTATION: revocation retroactively demands
-    /// re-promotion; a rotation to a newly authorized key re-verifies.
+    /// REVOKED KEY + VALID ROTATION: the old attestation refuses, while an
+    /// explicit re-endorsement of the same immutable record under the new key
+    /// is valid. Rotation does not fabricate a new promotion event.
     #[test]
-    fn revocation_demands_repromotion_and_rotation_recovers() {
+    fn revocation_demands_reendorsement_and_rotation_recovers() {
         let baseline = promoted();
         let mut authority = authority_with("ops/2026-q3");
         let old = attest(&baseline, "ops/2026-q3");
@@ -2390,39 +2824,29 @@ mod tests {
             )
             .expect("initially authorized");
         authority.revoke("ops/2026-q3");
-        let verdict = citable_axis_admission_authorized(
-            &quiet_axes(),
-            &quiet_axes(),
-            store.for_fingerprint(baseline.identity().fingerprint()),
-            store.attestation_for(baseline.identity().fingerprint()),
-            &identity(),
-            20_010,
-            &authority,
-        );
-        assert_eq!(
-            verdict,
-            BaselineVerdict::Unauthorized {
-                verdict: "revoked-key"
-            },
-            "revoked keys stop citable use BEFORE any band math"
-        );
-        // Rotation: authorize the new key, RE-PROMOTE (newer day), re-attest.
+        let refused = store
+            .policy_for_run_at(&identity(), 20_010, &authority, &retained(&baseline))
+            .err()
+            .expect("revoked key cannot mint a citable policy");
+        assert!(refused.detail.contains("revoked-key"), "{refused}");
+        // Rotation: authorize a new key and explicitly re-attest the exact
+        // same record. Its promotion day and content identity do not move.
         authority.authorize("ops/2026-q4");
-        let rotated = promoted_at(20_005, "rotated");
-        let fresh = attest(&rotated, "ops/2026-q4");
+        let baseline_hash = baseline.content_hash();
+        let fresh = attest(&baseline, "ops/2026-q4");
         store
-            .admit_verified(rotated.clone(), fresh, &authority, &retained(&rotated))
-            .expect("rotated admission");
-        let verdict = citable_axis_admission_authorized(
-            &quiet_axes(),
-            &quiet_axes(),
-            store.for_fingerprint(rotated.identity().fingerprint()),
-            store.attestation_for(rotated.identity().fingerprint()),
-            &identity(),
-            20_010,
-            &authority,
+            .admit_verified(baseline.clone(), fresh, &authority, &retained(&baseline))
+            .expect("same-record re-endorsement");
+        assert_eq!(
+            store
+                .for_fingerprint(baseline.identity().fingerprint())
+                .expect("record retained")
+                .content_hash(),
+            baseline_hash
         );
-        assert_eq!(verdict, BaselineVerdict::Trusted);
+        let _policy = store
+            .policy_for_run_at(&identity(), 20_010, &authority, &retained(&baseline))
+            .expect("rotated key mints a policy");
     }
 
     /// Tampered attested-store lines refuse at parse or at re-verify.
@@ -2444,22 +2868,11 @@ mod tests {
         // Record tamper: the line still PARSES but citable re-verify refuses.
         let tampered = text.replace("operator-a", "operator-b");
         let back = AttestedBaselineStore::from_jsonl(&tampered).expect("parses structurally");
-        let fingerprint = baseline.identity().fingerprint();
-        let verdict = citable_axis_admission_authorized(
-            &quiet_axes(),
-            &quiet_axes(),
-            back.for_fingerprint(fingerprint),
-            back.attestation_for(fingerprint),
-            &identity(),
-            20_010,
-            &authority,
-        );
-        assert_eq!(
-            verdict,
-            BaselineVerdict::Unauthorized {
-                verdict: "wrong-signature"
-            }
-        );
+        let refused = back
+            .policy_for_run_at(&identity(), 20_010, &authority, &retained(&baseline))
+            .err()
+            .expect("tampered baseline cannot mint a policy");
+        assert!(refused.detail.contains("wrong-signature"), "{refused}");
         // Envelope tamper: refused at parse.
         assert!(
             AttestedBaselineStore::from_jsonl(&text.replace("\"attestation\"", "\"x\"")).is_err()

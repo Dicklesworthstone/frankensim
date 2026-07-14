@@ -849,9 +849,10 @@ mod tests {
         baseline: crate::AxisBaselinePolicy<'_>,
         results: &[crate::Attainment],
     ) -> crate::FinalizedRegistryRun {
+        let admission = baseline.snapshot(axes, axes);
         crate::FinalizedRegistryRun {
-            receipt: crate::finalized_run_receipt(axes, axes, baseline, results),
-            admitted: crate::run_admission_error(axes, axes, baseline, results).is_none(),
+            receipt: crate::finalized_run_receipt(&admission, results),
+            admitted: crate::run_admission_error_for_snapshot(axes, &admission, results).is_none(),
             consumed: false,
         }
     }

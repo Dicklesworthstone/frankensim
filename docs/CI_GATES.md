@@ -155,16 +155,26 @@ builds before the root workspace resolves, fetches every repo from
 `constellation.lock`'s recorded remotes at the pinned revisions, applies the
 same pinned-head and clean-tree verification to existing and newly cloned
 siblings, and refuses a noncanonical/oversized lock, duplicate or unknown
-library, mismatched lock hash, or path-unsafe library identity before deriving
-any destination. Clean verification disables global ignores, catches files
-hidden by repository-local excludes, and rejects `assume-unchanged` or
-`skip-worktree` index entries. It supports `--offline` cache verification and `--from` mirrors, and
-writes v2 fetch provenance that distinguishes the canonical upstream remote from
-the selected mirror/transport and records whether that transport was actually
-used. `cargo run -p xtask -- bootstrap-constellation`
-remains the in-workspace command after the sibling paths already resolve.
+library, mismatched lock hash, path-unsafe library identity, or missing, wrong,
+duplicate, unknown, or type-invalid top-level identity metadata before deriving
+or accessing any destination. The canonical v2 lock identity is
+`org.frankensim.xtask.constellation-lock.v1` at integer version `1`; its existing
+row-only hash still covers `(lib, version, git_head)`. Clean verification
+disables global ignores, catches files hidden by repository-local excludes, and
+rejects `assume-unchanged` or `skip-worktree` index entries. It supports
+`--offline` cache verification and `--from` mirrors, and writes v2 fetch
+provenance with identity domain
+`org.frankensim.xtask.constellation-bootstrap-provenance.v1` at version `1`; the
+standalone and in-workspace producers share the same top-level and row shape,
+distinguish the canonical upstream remote from the selected mirror/transport,
+and record whether that transport was actually used. `cargo run -p xtask --
+bootstrap-constellation` remains the in-workspace command after the sibling
+paths already resolve.
 `scripts/ci/checkout_constellation.sh` remains the shell-only
-equivalent used by the manual workflow specs; both it and `xtask
+equivalent used by the manual workflow specs. It admits the same exact lock
+schema/domain/version and refuses malformed identity metadata before any sibling
+operation; retained synthetic coverage runs checkout, verify-only, and snapshot
+through that parser. Both it and `xtask
 check-constellation` now require every sibling to be at the pinned head with a
 clean tracked/untracked working tree. The script's `--snapshot` mode is the
 canonical repo-local CI content identity. Snapshot v2 length-frames HEAD, index
