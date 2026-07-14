@@ -44,9 +44,11 @@ use fs_rep_mesh::Soup;
 
 mod convex;
 mod features;
+mod gap;
 mod moments;
 
 pub use features::{Feature, FeatureComplex, MAX_COMPLEX_FEATURES, ccd_candidates};
+pub use gap::{GapSample, ImplicitGapOracle};
 
 pub use convex::{
     CONVEX_SEPARATION_DEFAULT_ITERATIONS, CONVEX_SEPARATION_MAX_ITERATIONS, ConvexBox,

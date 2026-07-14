@@ -63,6 +63,17 @@ answers to the MULTI-CHART AGREEMENT discipline (same abstract region
   inputs), and exceeding the caller's pair cap refuses rather than
   truncates. Degenerate triangles, bad indices, non-finite positions
   or inflations, and the `MAX_COMPLEX_FEATURES` ceiling refuse typed.
+- `ImplicitGapOracle` → `GapSample`: pointwise SDF-pair contact
+  queries over two exact-distance charts (weaker claims refuse at
+  construction, reusing `SeparationRequiresExactDistance`). The
+  outward-rounded `[sum_lo, sum_hi]` encloses `φ_A(p) + φ_B(p)`;
+  `separation_upper` (triangle inequality) exists exactly when the
+  point is certified outside both bodies; `overlap_inradius` is a
+  certified common-ball radius exactly when `max(φ_A, φ_B)` is
+  certified negative — a pointwise witness, never a penetration depth;
+  `normal` is an uncertified Estimate-class contact axis that is
+  absent whenever a gradient is honestly declined. Malformed evidence
+  refuses per sample; cancellation is checked after each chart call.
 - `OffsetChart` / `minkowski_ball`: dilation/erosion as a chart
   wrapper (`φ − r`); the ball case of the Minkowski sum IS the offset
   (bitwise), which is the fillet/clearance workhorse. Construction is fallible
@@ -235,6 +246,10 @@ candidates: canonical construction, BVH-equals-brute-force oracle
 agreement, guaranteed inclusion of the closest pair inside the motion
 window, translation invariance and window monotonicity metamorphics,
 identical replay, and refusal drills.
+`tests/gap.rs`, cases gg-001..gg-004 — implicit gap oracle: analytic
+containment and true-distance upper bounding on disjoint spheres,
+certified common-ball witnesses on overlap, claim/evidence/point/
+cancellation refusals, and no normal claim without gradients.
 
 ## No-claim boundaries
 
@@ -264,8 +279,14 @@ identical replay, and refusal drills.
   downstream (fs-matdb consumers), never here. Rotation covariance and
   spatially-varying weighting are deferred surfaces —
   [`GeometricMoments::translated`] covers translation only. The bead
-  rjnd remainder (gap oracles, codimensional thickness, deformation
-  hooks) is not yet claimed by this crate.
+  rjnd remainder (codimensional thickness, deformation hooks) is not
+  yet claimed by this crate.
+- `ImplicitGapOracle` is pointwise: `separation_upper` bounds the
+  distance between the two bodies from above at ONE probe, and
+  `overlap_inradius` witnesses a common ball at ONE probe. Neither
+  aggregates into a global gap field, a penetration depth, or a
+  time-of-impact claim, and the `normal` estimate carries no
+  certificate whatsoever.
 - `ccd_candidates` is a broad phase only: candidates are a
   conservative SUPERSET under the caller's declared motion bounds, and
   no narrow-phase, time-of-impact, or contact claim is made. The
