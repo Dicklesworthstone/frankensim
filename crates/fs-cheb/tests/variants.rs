@@ -96,22 +96,47 @@ fn cheb_104_certification() {
     let p = Cheb1::build(&|x: f64| (x - 0.3) * (x + 0.62) * (x - 0.91), -1.0, 1.0, 16);
     let boxes = certified_roots(&p, 1e-12);
     let want = [-0.62f64, 0.3, 0.91];
-    let mut certified = 0;
+    let certified_boxes: Vec<_> = boxes
+        .iter()
+        .filter_map(|root| match root {
+            RootBox::Certified(interval) => Some(interval),
+            RootBox::Possible(_) => None,
+        })
+        .collect();
     let mut widths = 0.0f64;
-    for b in &boxes {
-        if let RootBox::Certified(iv) = b
-            && want.iter().any(|&r| iv.lo() <= r && r <= iv.hi())
-        {
-            certified += 1;
-            widths = widths.max(iv.hi() - iv.lo());
-        }
+    for interval in &certified_boxes {
+        widths = widths.max(interval.hi() - interval.lo());
     }
+    let simple_roots_distinct = want.iter().all(|&root| {
+        certified_boxes
+            .iter()
+            .filter(|interval| interval.contains(root))
+            .count()
+            == 1
+    });
+    let simple_boxes_valid = boxes.iter().all(|root| {
+        let interval = root.interval();
+        interval.lo().is_finite()
+            && interval.hi().is_finite()
+            && interval.lo() >= -1.0
+            && interval.hi() <= 1.0
+    });
     // The double root: certification must NOT claim it.
     let pd = Cheb1::build(&|x: f64| (x - 0.25) * (x - 0.25) * (x + 0.7), -1.0, 1.0, 16);
     let dboxes = certified_roots(&pd, 1e-9);
     let double_certified = dboxes
         .iter()
         .any(|b| matches!(b, RootBox::Certified(iv) if iv.lo() <= 0.25 && 0.25 <= iv.hi()));
+    let double_possible = dboxes
+        .iter()
+        .any(|b| matches!(b, RootBox::Possible(iv) if iv.contains(0.25)));
+    let double_boxes_valid = dboxes.iter().all(|root| {
+        let interval = root.interval();
+        interval.lo().is_finite()
+            && interval.hi().is_finite()
+            && interval.lo() >= -1.0
+            && interval.hi() <= 1.0
+    });
     let shifted = Cheb1::build(&|x: f64| (x - 2.4) * (x - 3.25) * (x - 4.7), 2.0, 5.0, 32);
     let shifted_boxes = certified_roots(&shifted, 1e-12);
     let shifted_want = [2.4, 3.25, 4.7];
@@ -125,9 +150,14 @@ fn cheb_104_certification() {
         .all(|b| b.interval().lo() >= 2.0 && b.interval().hi() <= 5.0);
     verdict(
         "cheb-104-certification",
-        certified == 3
+        boxes.len() == 3
+            && certified_boxes.len() == 3
+            && simple_roots_distinct
+            && simple_boxes_valid
             && widths < 1e-10
             && !double_certified
+            && double_possible
+            && double_boxes_valid
             && shifted_contains
             && shifted_in_domain,
         &format!(
@@ -305,6 +335,48 @@ fn cheb_108_contract_guards() {
         }))
         .is_err(),
         "malformed hand-built Cheb2 objects must fail fast"
+    );
+    let zero_pivot_cheb2 = Cheb2 {
+        cols: vec![Cheb1::from_coeffs(0.0, 1.0, vec![2.0])],
+        rows: vec![Cheb1::from_coeffs(-1.0, 1.0, vec![2.0])],
+        inv_pivots: vec![0.0],
+        residual: 0.0,
+    };
+    assert!(
+        catch_unwind(AssertUnwindSafe(|| zero_pivot_cheb2.rank())).is_err(),
+        "zero inverse pivots must fail fast"
+    );
+    let mismatched_column_domains = Cheb2 {
+        cols: vec![
+            Cheb1::from_coeffs(0.0, 1.0, vec![2.0]),
+            Cheb1::from_coeffs(0.0, 2.0, vec![2.0]),
+        ],
+        rows: vec![
+            Cheb1::from_coeffs(-1.0, 1.0, vec![2.0]),
+            Cheb1::from_coeffs(-1.0, 1.0, vec![2.0]),
+        ],
+        inv_pivots: vec![1.0, 1.0],
+        residual: 0.0,
+    };
+    assert!(
+        catch_unwind(AssertUnwindSafe(|| mismatched_column_domains.rank())).is_err(),
+        "Cheb2 columns with different x-domains must fail fast"
+    );
+    let mismatched_row_domains = Cheb2 {
+        cols: vec![
+            Cheb1::from_coeffs(0.0, 1.0, vec![2.0]),
+            Cheb1::from_coeffs(0.0, 1.0, vec![2.0]),
+        ],
+        rows: vec![
+            Cheb1::from_coeffs(-1.0, 1.0, vec![2.0]),
+            Cheb1::from_coeffs(-2.0, 1.0, vec![2.0]),
+        ],
+        inv_pivots: vec![1.0, 1.0],
+        residual: 0.0,
+    };
+    assert!(
+        catch_unwind(AssertUnwindSafe(|| mismatched_row_domains.rank())).is_err(),
+        "Cheb2 rows with different y-domains must fail fast"
     );
     assert!(
         catch_unwind(AssertUnwindSafe(|| {

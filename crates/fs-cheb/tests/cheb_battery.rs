@@ -3,7 +3,202 @@
 //! collocation-matrix spectral accuracy, the Dirichlet eigen demo, and
 //! the per-ISA deterministic golden hash (the x86-64 row remains armed).
 
+use fs_cheb::cheb2::Cheb2;
+use fs_cheb::colleague::{ColleaguePolicy, certified_roots, colleague_roots};
 use fs_cheb::{Cheb1, diff_matrix, dirichlet_laplace_eigs, lobatto_points};
+use std::panic::{AssertUnwindSafe, catch_unwind};
+
+#[test]
+fn extreme_finite_domains_do_not_overflow_the_affine_map() {
+    let a = -f64::MAX;
+    let b = f64::MAX;
+    let constant = Cheb1::from_coeffs(a, b, vec![2.0]);
+    for x in [a, 0.0, b] {
+        assert_eq!(constant.eval(x), 1.0, "constant failed at {x}");
+    }
+
+    let reference_linear = Cheb1::from_coeffs(a, b, vec![0.0, 1.0]);
+    assert_eq!(reference_linear.eval(a), -1.0);
+    assert_eq!(reference_linear.eval(0.0), 0.0);
+    assert_eq!(reference_linear.eval(b), 1.0);
+    let derivative = reference_linear.differentiate().eval(0.0);
+    assert_eq!(derivative.to_bits(), (1.0 / f64::MAX).to_bits());
+
+    // Coefficient and domain scaling must be combined before either side can
+    // overflow: MAX*T1(x/MAX) is the physical identity f(x)=x.
+    let physical_identity = Cheb1::from_coeffs(a, b, vec![0.0, f64::MAX]);
+    assert!((physical_identity.eval(1.0) - 1.0).abs() <= f64::EPSILON);
+    assert_eq!(physical_identity.differentiate().eval(0.0), 1.0);
+
+    // A finite width does not make the traditional doubled numerator safe.
+    // Both same-sign and one-sided extreme intervals must take the exceptional
+    // center/radius path for large interior coordinates.
+    let one_sided = Cheb1::from_coeffs(0.0, f64::MAX, vec![0.0, 1.0]);
+    let one_sided_value = one_sided.eval(0.75 * f64::MAX);
+    assert!(one_sided_value.is_finite() && (one_sided_value - 0.5).abs() <= f64::EPSILON);
+    let same_sign = Cheb1::from_coeffs(f64::MAX / 4.0, f64::MAX, vec![0.0, 1.0]);
+    assert!((same_sign.eval(0.875 * f64::MAX) - 2.0 / 3.0).abs() <= 2.0 * f64::EPSILON);
+
+    // The tiny reference-coordinate offset 1/MAX corresponds to physical
+    // x=1. Fractional/convex affine formulas absorb it and report a false root
+    // at zero; the center/radius path must preserve it end to end.
+    let unit_root = Cheb1::from_coeffs(a, b, vec![-2.0 / f64::MAX, 1.0]);
+    assert!(unit_root.eval(1.0).abs() <= f64::from_bits(1));
+    let colleague = colleague_roots(&unit_root, ColleaguePolicy::default());
+    assert_eq!(colleague.len(), 1);
+    assert!((colleague[0] - 1.0).abs() <= f64::EPSILON);
+    let certified = certified_roots(&unit_root, 1e-12);
+    assert!(
+        certified
+            .iter()
+            .any(|root| root.is_certified() && root.interval().contains(1.0)),
+        "the physical certificate must contain x=1: {certified:?}"
+    );
+
+    let rebuilt = Cheb1::build(
+        &|x| {
+            assert!(x.is_finite() && a <= x && x <= b);
+            1.0
+        },
+        a,
+        b,
+        16,
+    );
+    assert_eq!(rebuilt.eval(a), 1.0);
+    assert_eq!(rebuilt.eval(b), 1.0);
+    let zero = Cheb1::from_coeffs(a, b, vec![0.0]);
+    assert_eq!(zero.integral(), 0.0);
+
+    let min_subnormal = f64::from_bits(1);
+    let subnormal_constant = Cheb1::from_coeffs(0.0, min_subnormal, vec![2.0]);
+    assert_eq!(
+        subnormal_constant.integral().to_bits(),
+        min_subnormal.to_bits()
+    );
+
+    // The reference-coordinate sum is 4/3*MAX and overflows before a tiny
+    // domain radius is applied, although the bounded polynomial and physical
+    // integral are both representable.
+    let min_normal = f64::MIN_POSITIVE;
+    let scaled_integral = Cheb1::from_coeffs(0.0, min_normal, vec![f64::MAX, 0.0, -f64::MAX / 2.0]);
+    assert!((scaled_integral.integral() - 8.0 / 3.0).abs() < 2e-15);
+
+    // A normalized fallback must also survive an overflowing prefix followed
+    // by cancellation when the final physical integral is representable.
+    let cancellation_integral = Cheb1::from_coeffs(
+        -0.8,
+        0.8,
+        vec![
+            f64::MAX,
+            0.0,
+            -f64::MAX / 2.0,
+            0.0,
+            f64::MAX,
+            0.0,
+            f64::MAX,
+            0.0,
+            f64::MAX,
+        ],
+    );
+    let expected = (8.0 / 9.0) * f64::MAX;
+    assert!(((cancellation_integral.integral() - expected) / expected).abs() <= 4.0 * f64::EPSILON);
+
+    // Every naive prefix is finite, but (1 + 2^-54) rounds back to one before
+    // the later -1 arrives. The exact-real integral is the representable
+    // residual 2^-54 and must survive expansion summation.
+    let absorbed_residual = 2.0f64.powi(-54);
+    let finite_prefix_cancellation =
+        Cheb1::from_coeffs(-1.0, 1.0, vec![1.0, 0.0, -3.0 * 2.0f64.powi(-55), 0.0, 7.5]);
+    assert_eq!(
+        finite_prefix_cancellation.integral().to_bits(),
+        absorbed_residual.to_bits()
+    );
+
+    let tiny = Cheb1::from_coeffs(-1.0, 1.0, vec![-2.0 * 0.123e-200, 1e-200]);
+    assert!(
+        tiny.roots()
+            .iter()
+            .any(|root| (*root - 0.123).abs() < 1e-12),
+        "sign-change detection must not multiply two tiny values"
+    );
+
+    let reference_root = 0.123_456_789;
+    let extreme_simple = Cheb1::from_coeffs(a, b, vec![-2.0 * reference_root, 1.0]);
+    let simple_roots = extreme_simple.roots();
+    assert_eq!(simple_roots.len(), 1);
+    let expected_physical = reference_root * f64::MAX;
+    assert!(
+        ((simple_roots[0] - expected_physical) / expected_physical).abs() <= 4.0 * f64::EPSILON
+    );
+
+    // A rounded zero of a shifted triple root is not an accurate root
+    // certificate. The fallback scanner must refuse its ill-conditioning
+    // instead of magnifying a reference error across the extreme domain.
+    let r = reference_root;
+    let triple = Cheb1::from_coeffs(
+        a,
+        b,
+        vec![
+            -3.0 * r - 2.0 * r * r * r,
+            0.75 + 3.0 * r * r,
+            -1.5 * r,
+            0.25,
+        ],
+    );
+    assert!(
+        catch_unwind(AssertUnwindSafe(|| triple.roots())).is_err(),
+        "multiple/ill-conditioned roots require an error-bearing root API"
+    );
+
+    let scaled_colleague = Cheb1::from_coeffs(-1.0, 1.0, vec![f64::MAX, 0.0, f64::MAX]);
+    let roots = colleague_roots(&scaled_colleague, ColleaguePolicy::default());
+    assert_eq!(roots.len(), 2);
+    assert!((roots[0] + 0.5).abs() < 1e-12 && (roots[1] - 0.5).abs() < 1e-12);
+
+    // Trimming is relative to the mathematical series, where the stored c0
+    // is halved. Scaling by the stored c0 would incorrectly turn this linear
+    // polynomial into a constant and panic rather than return no in-domain
+    // candidates.
+    let trim_boundary = Cheb1::from_coeffs(-1.0, 1.0, vec![1.0, 7.5e-14]);
+    assert!(
+        colleague_roots(&trim_boundary, ColleaguePolicy::default()).is_empty(),
+        "the retained linear root is far outside the reference domain"
+    );
+
+    assert!(
+        catch_unwind(AssertUnwindSafe(|| zero.roots())).is_err(),
+        "an identically zero polynomial needs a continuum-valued result type"
+    );
+
+    let surface = Cheb2::build(&|_, _| 1.0, (a, b, a, b), 1e-12, 2, 16);
+    assert_eq!(surface.eval(1.0, -1.0), 1.0);
+
+    // u*v underflows if Cheb2 commits to that pair before applying 1/pivot.
+    let small_surface = Cheb2::build(&|_, _| 1e-200, (-1.0, 1.0, -1.0, 1.0), 1e-12, 2, 16);
+    assert_eq!(small_surface.rank(), 1);
+    assert!((small_surface.eval(0.25, -0.5) / 1e-200 - 1.0).abs() < 1e-12);
+}
+
+#[test]
+fn algebra_refuses_distinct_domains_and_unrepresentable_coefficients() {
+    let unit = Cheb1::from_coeffs(0.0, 1.0, vec![2.0]);
+    let adjacent_endpoint =
+        Cheb1::from_coeffs(0.0, f64::from_bits(1.0_f64.to_bits() + 1), vec![2.0]);
+    assert!(
+        catch_unwind(AssertUnwindSafe(|| unit.add(&adjacent_endpoint))).is_err(),
+        "algebra must not silently identify adjacent but distinct domains"
+    );
+    assert!(
+        catch_unwind(AssertUnwindSafe(|| unit.mul(&adjacent_endpoint))).is_err(),
+        "algebra must not resample an operand on a different domain"
+    );
+
+    let maximal = Cheb1::from_coeffs(0.0, 1.0, vec![f64::MAX]);
+    assert!(
+        catch_unwind(AssertUnwindSafe(|| maximal.add(&maximal))).is_err(),
+        "Cheb1 algebra must preserve its finite-coefficient invariant"
+    );
+}
 
 #[test]
 fn machine_precision_recovery_and_degree_growth() {
@@ -190,13 +385,16 @@ fn dirichlet_eigenvalues_match_analytic() {
     );
 }
 
-/// JUSTIFIED BUMP (bead 27d3, 2026-07-11): fs-fft commit 535aa839 moved
+/// LAST ADMITTED VALUE (bead 27d3, 2026-07-11): fs-fft commit 535aa839 moved
 /// the DCT substrate from mixed radix-4/2 to mixed radix-8/4/2 Stockham.
 /// That deliberately changes butterfly and twiddle order; the unchanged
 /// DCT oracle, recovery, calculus, root, and eigenvalue tests remain green.
 /// Debug and release both produce this value on M4 Pro. The upstream FFT
-/// stage-path golden is verified in all four ISA/profile quadrants; this
-/// downstream x86-64 row remains armed pending a successful RCH admission.
+/// stage-path golden was verified in all four ISA/profile quadrants. The
+/// current reference-coordinate root-refinement and exceptional integral
+/// changes intentionally invalidate this downstream value; it remains armed
+/// and known-red until a current admitted debug/release, two-ISA replay can
+/// justify the replacement. Never copy a value from a stale local binary.
 /// HISTORY: radix-2 0xaee4_8002_1eea_9097 (M4 Pro + trj); radix-4/2
 /// 0x22e7_ea21_58c9_e587 (M4 Pro only).
 const GOLDEN_HASH: u64 = 0xeea0_4b0a_01de_46cd;

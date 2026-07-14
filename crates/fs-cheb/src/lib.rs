@@ -45,6 +45,301 @@ pub struct Cheb1 {
 /// during bring-up: sin(20x) resolved at 1090 instead of ~45).
 const PLATEAU_REL: f64 = 2.2e-15;
 
+/// Map a physical coordinate to the reference interval without forming an
+/// overflowing `b - a`. Exact endpoints remain exact.
+pub(crate) fn affine_to_reference(x: f64, a: f64, b: f64) -> f64 {
+    if x == a {
+        return -1.0;
+    }
+    if x == b {
+        return 1.0;
+    }
+    let width = b - a;
+    if width.is_finite() {
+        // Preserve the established rounding path whenever its doubled
+        // numerator is representable. A finite width alone is insufficient:
+        // on [0, MAX], 2*(0.75*MAX) overflows although t=0.5 is representable.
+        let doubled_delta = 2.0 * (x - a);
+        if doubled_delta.is_finite() {
+            return doubled_delta / width - 1.0;
+        }
+    }
+    // The center/radius form handles either an overflowing width or an
+    // overflowing doubled delta. It also preserves tiny offsets around the
+    // center: x=1 on [-MAX, MAX] maps to 1/MAX instead of being absorbed while
+    // forming a fractional coordinate.
+    let center = f64::midpoint(a, b);
+    (x - center) / half_width(a, b)
+}
+
+/// Map a reference coordinate back to `[a, b]` with a stable center/radius
+/// form, avoiding the overflowing width used by the textbook affine formula.
+pub(crate) fn affine_from_reference(t: f64, a: f64, b: f64) -> f64 {
+    if t == -1.0 {
+        return a;
+    }
+    if t == 1.0 {
+        return b;
+    }
+    let center = f64::midpoint(a, b);
+    let width = b - a;
+    let radius = if width.is_finite() {
+        width / 2.0
+    } else {
+        half_width(a, b)
+    };
+    // This is the pre-existing sampling expression whenever b-a is finite,
+    // preserving ordinary-domain golden bits. Unlike convex weights, it does
+    // not lose a tiny t in the rounded expressions 1±t on extreme domains.
+    let mapped = center + t * radius;
+    if (-1.0..=1.0).contains(&t) {
+        mapped.clamp(a, b)
+    } else {
+        mapped
+    }
+}
+
+fn half_width(a: f64, b: f64) -> f64 {
+    let width = b - a;
+    if width.is_finite() {
+        width / 2.0
+    } else {
+        b / 2.0 - a / 2.0
+    }
+}
+
+/// Largest power of two no greater than a positive finite value.
+pub(crate) fn normalization_power_of_two(value: f64) -> f64 {
+    debug_assert!(value.is_finite() && value > 0.0);
+    let bits = value.to_bits();
+    let exponent = (bits >> 52) & 0x7ff;
+    if exponent != 0 {
+        f64::from_bits(exponent << 52)
+    } else {
+        let mantissa = bits & ((1_u64 << 52) - 1);
+        let highest_bit = 63_u32 - mantissa.leading_zeros();
+        f64::from_bits(1_u64 << highest_bit)
+    }
+}
+
+/// Normalize finite coefficients by a common exact power of two. Refuse an
+/// exponent range for which the scaled f64 would lose information.
+pub(crate) fn normalize_coefficients_exact(coeffs: &mut [f64], operation: &str) -> f64 {
+    let cmax = coeffs
+        .iter()
+        .fold(0.0f64, |scale, coefficient| scale.max(coefficient.abs()));
+    assert!(
+        cmax.is_finite() && cmax > 0.0,
+        "finite non-zero coefficients required for {operation}"
+    );
+    let scale = normalization_power_of_two(cmax);
+    for coefficient in coeffs {
+        let original = *coefficient;
+        let normalized = original / scale;
+        assert!(
+            normalized.is_finite() && normalized * scale == original,
+            "{operation} cannot normalize this coefficient exponent range without information loss"
+        );
+        *coefficient = normalized;
+    }
+    scale
+}
+
+/// Expansion summation of finite terms. The error-free `two_sum` residuals are
+/// retained as non-overlapping partials, then collapsed with the final-rounding
+/// step used by robust floating-point summation algorithms. `None` means an
+/// intermediate overflow requires a common power-of-two rescale.
+fn expansion_sum<F>(len: usize, term: &F, scale: f64, exact_scale: bool) -> Option<f64>
+where
+    F: Fn(usize) -> f64,
+{
+    let mut partials: Vec<f64> = Vec::with_capacity(len);
+    for index in 0..len {
+        let value = term(index);
+        assert!(value.is_finite(), "summation terms must be finite");
+        let mut x = value / scale;
+        if exact_scale {
+            assert!(
+                x.is_finite() && x * scale == value,
+                "summation cannot normalize its term exponent range without information loss"
+            );
+        }
+        let mut write = 0usize;
+        for read in 0..partials.len() {
+            let mut y = partials[read];
+            if x.abs() < y.abs() {
+                core::mem::swap(&mut x, &mut y);
+            }
+            let hi = x + y;
+            if !hi.is_finite() {
+                return None;
+            }
+            let lo = y - (hi - x);
+            if lo != 0.0 {
+                partials[write] = lo;
+                write += 1;
+            }
+            x = hi;
+        }
+        partials.truncate(write);
+        partials.push(x);
+    }
+
+    let mut count = partials.len();
+    if count == 0 {
+        return Some(0.0);
+    }
+    count -= 1;
+    let mut hi = partials[count];
+    let mut lo = 0.0;
+    while count > 0 {
+        let x = hi;
+        count -= 1;
+        let y = partials[count];
+        hi = x + y;
+        if !hi.is_finite() {
+            return None;
+        }
+        let rounded_y = hi - x;
+        lo = y - rounded_y;
+        if lo != 0.0 {
+            break;
+        }
+    }
+    // Preserve the last half-even rounding correction when the remaining
+    // partial has the same sign as the low residual.
+    if count > 0
+        && ((lo < 0.0 && partials[count - 1] < 0.0) || (lo > 0.0 && partials[count - 1] > 0.0))
+    {
+        let doubled = lo * 2.0;
+        let corrected = hi + doubled;
+        if corrected.is_finite() && corrected - hi == doubled {
+            hi = corrected;
+        }
+    }
+    Some(hi)
+}
+
+/// Accumulate finite terms without losing a representable cancellation
+/// residual merely because every naive prefix happened to stay finite. A raw
+/// expansion is tried first; only a prefix overflow triggers an exact common
+/// power-of-two rescale.
+pub(crate) fn stable_finite_sum<F>(len: usize, term: F, operation: &str) -> f64
+where
+    F: Fn(usize) -> f64,
+{
+    if let Some(result) = expansion_sum(len, &term, 1.0, false) {
+        return result;
+    }
+
+    let mut largest = 0.0f64;
+    for index in 0..len {
+        let value = term(index);
+        assert!(value.is_finite(), "{operation} terms must be finite");
+        largest = largest.max(value.abs());
+    }
+    assert!(
+        largest > 0.0,
+        "{operation} overflowed with no non-zero term"
+    );
+    let scale = normalization_power_of_two(largest);
+    let normalized = expansion_sum(len, &term, scale, true)
+        .expect("power-of-two-normalized expansion must not overflow");
+    let result = normalized * scale;
+    assert!(result.is_finite(), "{operation} result must be finite");
+    result
+}
+
+/// Multiply three finite factors while avoiding a lossy subnormal,
+/// overflowing, or underflowing first pair whenever another pairing keeps the
+/// intermediate normal. Ordinary callers retain their established first
+/// pairing.
+pub(crate) fn stable_finite_product3(a: f64, b: f64, c: f64, operation: &str) -> f64 {
+    assert!(
+        a.is_finite() && b.is_finite() && c.is_finite(),
+        "{operation} factors must be finite"
+    );
+    let factors = [(a, b, c), (a, c, b), (b, c, a)];
+    let exact_zero = a == 0.0 || b == 0.0 || c == 0.0;
+    let mut finite_fallback = None;
+    for (left, right, last) in factors {
+        let intermediate = left * right;
+        let candidate = intermediate * last;
+        if !candidate.is_finite() {
+            continue;
+        }
+        if candidate != 0.0 && finite_fallback.is_none() {
+            finite_fallback = Some(candidate);
+        }
+        if (intermediate.is_normal() || (intermediate == 0.0 && exact_zero))
+            && (candidate != 0.0 || exact_zero)
+        {
+            return candidate;
+        }
+    }
+    if let Some(candidate) = finite_fallback {
+        return candidate;
+    }
+    let direct = (a * b) * c;
+    assert!(
+        direct.is_finite(),
+        "{operation} is not representable as finite f64"
+    );
+    direct
+}
+
+fn scaled_derivative_term(coefficient: f64, degree: usize, a: f64, b: f64) -> f64 {
+    // The physical derivative recurrence contributes
+    //     (2*k*c_k) * 2/(b-a) = 4*k*c_k/(b-a).
+    // Combine the domain scale before either 2*k*c_k or b-a can overflow.
+    let factor = 4.0 * degree as f64;
+    let width = b - a;
+    if width.is_finite() {
+        let scaled_first = coefficient * factor;
+        if scaled_first.is_finite() && (scaled_first != 0.0 || coefficient == 0.0) {
+            scaled_first / width
+        } else {
+            (coefficient / width) * factor
+        }
+    } else {
+        let scale = a.abs().max(b.abs());
+        let normalized_width = (b / scale) - (a / scale);
+        let scaled_first = coefficient * factor;
+        if scaled_first.is_finite() && (scaled_first != 0.0 || coefficient == 0.0) {
+            (scaled_first / scale) / normalized_width
+        } else {
+            ((coefficient / scale) * factor) / normalized_width
+        }
+    }
+}
+
+fn scaled_integral_term(coefficient: f64, reference_weight: f64, a: f64, b: f64) -> f64 {
+    let width = b - a;
+    let radius = half_width(a, b);
+    if width.is_finite() && radius == 0.0 && width > 0.0 {
+        // Preserve a subnormal physical width by applying the factor 1/2 to
+        // the coefficient/weight side first.
+        return (coefficient * (reference_weight / 2.0)) * width;
+    }
+
+    // Try the geometric scale first. If it overflows, apply the (at most
+    // unit-magnitude) Chebyshev integration weight before the large radius.
+    // If it underflows, the alternate ordering can still retain a subnormal.
+    let geometric_first = coefficient * radius;
+    let weighted = if geometric_first.is_finite()
+        && (geometric_first != 0.0 || coefficient == 0.0 || radius == 0.0)
+    {
+        geometric_first * reference_weight
+    } else {
+        (coefficient * reference_weight) * radius
+    };
+    assert!(
+        weighted.is_finite(),
+        "physical Chebyshev integral term is not representable as finite f64"
+    );
+    weighted
+}
+
 impl Cheb1 {
     /// Build adaptively from a scalar function on [a, b]: sample at
     /// first-kind Chebyshev grids of doubling size until the trailing
@@ -96,6 +391,10 @@ impl Cheb1 {
         for v in &mut c {
             *v *= scale;
         }
+        assert!(
+            c.iter().all(|coefficient| coefficient.is_finite()),
+            "Chebyshev transform coefficients must be representable as finite f64"
+        );
         c
     }
 
@@ -135,7 +434,7 @@ impl Cheb1 {
     /// Evaluate by Clenshaw recurrence (fixed order, fused).
     #[must_use]
     pub fn eval(&self, x: f64) -> f64 {
-        let t = 2.0 * (x - self.a) / (self.b - self.a) - 1.0;
+        let t = affine_to_reference(x, self.a, self.b);
         fma::cheb_eval_dispatch(self, t)
     }
 
@@ -168,21 +467,44 @@ impl Cheb1 {
                 coeffs: vec![0.0],
             };
         }
-        // Series with halved-c0 semantics: work on the "true" coefficients.
-        let mut d = vec![0.0f64; n];
-        // Standard recurrence: d[k-1] = d[k+1] + 2k·c[k] (true c series),
-        // where the stored c[0] is un-halved but T0's coefficient never
-        // enters the derivative sums.
-        for k in (1..n).rev() {
-            let above = if k + 2 < n { d[k + 1] } else { 0.0 };
-            d[k - 1] = (2.0 * k as f64).mul_add(self.coeffs[k], above);
+        // Preserve the established arithmetic/golden path whenever every
+        // traditional intermediate is finite. Extreme domains and coefficient
+        // scales fall through to the jointly-scaled recurrence below.
+        let width = self.b - self.a;
+        let traditional_scale = 2.0 / width;
+        if width.is_finite() && traditional_scale.is_finite() && traditional_scale != 0.0 {
+            let mut reference = vec![0.0f64; n];
+            let mut finite = true;
+            for k in (1..n).rev() {
+                let above = if k + 2 < n { reference[k + 1] } else { 0.0 };
+                reference[k - 1] = (2.0 * k as f64).mul_add(self.coeffs[k], above);
+                finite &= reference[k - 1].is_finite();
+            }
+            if finite {
+                let traditional: Vec<f64> = reference[..n - 1]
+                    .iter()
+                    .map(|value| value * traditional_scale)
+                    .collect();
+                if traditional.iter().all(|value| value.is_finite()) {
+                    return Cheb1 {
+                        a: self.a,
+                        b: self.b,
+                        coeffs: traditional,
+                    };
+                }
+            }
         }
-        // Chain rule for [a,b] → factor 2/(b−a); d[0] doubles under the
-        // Σ' storage convention (stored un-halved).
-        let scale = 2.0 / (self.b - self.a);
-        let mut out: Vec<f64> = d[..n - 1].iter().map(|&v| v * scale).collect();
-        if out.is_empty() {
-            out.push(0.0);
+        // Run the standard recurrence after folding in the physical chain
+        // rule. This avoids constructing an overflowing reference derivative
+        // only to multiply it by a tiny domain scale afterward.
+        let mut out = vec![0.0f64; n - 1];
+        for k in (1..n).rev() {
+            let above = if k + 1 < out.len() { out[k + 1] } else { 0.0 };
+            out[k - 1] = scaled_derivative_term(self.coeffs[k], k, self.a, self.b) + above;
+            assert!(
+                out[k - 1].is_finite(),
+                "physical Chebyshev derivative is not representable as finite f64 coefficients"
+            );
         }
         Cheb1 {
             a: self.a,
@@ -195,25 +517,78 @@ impl Cheb1 {
     /// contribute (∫₋₁¹ Tₖ = 2/(1−k²) for even k, else 0).
     #[must_use]
     pub fn integral(&self) -> f64 {
-        let mut acc = self.coeffs[0]; // (½·c0)·2 = c0 with stored-un-halved
+        let mut terms = Vec::with_capacity((self.coeffs.len() + 1) / 2);
+        terms.push(self.coeffs[0]); // (½·c0)·2 = c0 with stored-un-halved
+        let mut direct_terms_are_finite = true;
         for (k, &c) in self.coeffs.iter().enumerate().skip(2).step_by(2) {
-            acc += 2.0 * c / (1.0 - (k as f64) * (k as f64));
+            let term = 2.0 * c / (1.0 - (k as f64) * (k as f64));
+            if !term.is_finite() {
+                direct_terms_are_finite = false;
+                break;
+            }
+            terms.push(term);
         }
-        acc * (self.b - self.a) / 2.0
+        if direct_terms_are_finite {
+            let reference_sum = stable_finite_sum(
+                terms.len(),
+                |index| terms[index],
+                "Chebyshev integral accumulation",
+            );
+            return scaled_integral_term(reference_sum, 1.0, self.a, self.b);
+        }
+
+        // Scaling the reference-coordinate sum only after accumulation can
+        // overflow even when the final physical integral is finite. Normalize
+        // every coefficient by one exact power of two, sum at that bounded
+        // scale, then combine the common coefficient and domain scales.
+        let mut normalized = self.coeffs.clone();
+        let coefficient_scale =
+            normalize_coefficients_exact(&mut normalized, "Chebyshev integral fallback");
+        let mut normalized_terms = Vec::with_capacity((normalized.len() + 1) / 2);
+        normalized_terms.push(normalized[0]);
+        for (k, &coefficient) in normalized.iter().enumerate().skip(2).step_by(2) {
+            let degree = k as f64;
+            let reference_weight = 2.0 / (1.0 - degree * degree);
+            let term = coefficient * reference_weight;
+            assert!(term.is_finite(), "normalized integral term must be finite");
+            normalized_terms.push(term);
+        }
+        let normalized_sum = stable_finite_sum(
+            normalized_terms.len(),
+            |index| normalized_terms[index],
+            "normalized Chebyshev integral accumulation",
+        );
+        let width = self.b - self.a;
+        if width.is_finite() && width / 2.0 == 0.0 && width > 0.0 {
+            stable_finite_product3(
+                normalized_sum / 2.0,
+                coefficient_scale,
+                width,
+                "physical Chebyshev integral",
+            )
+        } else {
+            stable_finite_product3(
+                normalized_sum,
+                coefficient_scale,
+                half_width(self.a, self.b),
+                "physical Chebyshev integral",
+            )
+        }
     }
 
     /// Sum of two functions on the same domain.
     #[must_use]
     pub fn add(&self, o: &Cheb1) -> Cheb1 {
-        assert!(
-            (self.a - o.a).abs() < 1e-14 && (self.b - o.b).abs() < 1e-14,
-            "domain mismatch"
-        );
+        assert!(self.a == o.a && self.b == o.b, "domain mismatch");
         let n = self.coeffs.len().max(o.coeffs.len());
         let mut coeffs = vec![0.0f64; n];
         for (i, c) in coeffs.iter_mut().enumerate() {
             *c = self.coeffs.get(i).copied().unwrap_or(0.0)
                 + o.coeffs.get(i).copied().unwrap_or(0.0);
+            assert!(
+                c.is_finite(),
+                "Chebyshev sum coefficient is not representable as finite f64"
+            );
         }
         Cheb1 {
             a: self.a,
@@ -225,10 +600,7 @@ impl Cheb1 {
     /// Product via resampling at a grid resolving the sum of degrees.
     #[must_use]
     pub fn mul(&self, o: &Cheb1) -> Cheb1 {
-        assert!(
-            (self.a - o.a).abs() < 1e-14 && (self.b - o.b).abs() < 1e-14,
-            "domain mismatch"
-        );
+        assert!(self.a == o.a && self.b == o.b, "domain mismatch");
         let n = (self.coeffs.len() + o.coeffs.len())
             .next_power_of_two()
             .max(16);
@@ -250,43 +622,94 @@ impl Cheb1 {
         }
     }
 
-    /// All real roots in [a, b] by recursive subdivision on sign changes
-    /// of the interpolant with Newton polish. v1 limitation (documented):
-    /// roots of even multiplicity (no sign change) are not found —
-    /// colleague-matrix rootfinding joins the follow-up bead.
+    /// Sign-changing, numerically isolated roots on a fixed reference grid,
+    /// refined by safeguarded bisection/Newton in reference coordinates.
+    ///
+    /// v1 limitations (documented): even-multiplicity roots and an even number
+    /// of roots inside one scan cell are not found, and the returned vector is
+    /// not a complete root-set certificate. A detected candidate with a small
+    /// reference-space slope is refused by a conditioning heuristic; returned
+    /// physical coordinates remain uncertified `f64` candidates. Use the
+    /// colleague/certified APIs for candidate generation and per-box evidence.
     #[must_use]
     pub fn roots(&self) -> Vec<f64> {
-        let mut out = Vec::new();
-        // Scan a fine deterministic grid for sign changes.
-        let samples = (8 * self.coeffs.len()).max(64);
-        let mut prev_x = self.a;
-        let mut prev_v = self.eval(prev_x);
+        assert!(
+            self.coeffs.iter().any(|&coefficient| coefficient != 0.0),
+            "the identically zero polynomial has a continuum of roots"
+        );
+        // Common exact normalization prevents coefficient/domain scale from
+        // contaminating sign and conditioning decisions. Root refinement then
+        // stays in t-space, where an extreme physical domain cannot underflow
+        // the derivative or magnify a premature rounded zero.
+        let mut reference_coeffs = self.coeffs.clone();
+        normalize_coefficients_exact(&mut reference_coeffs, "Chebyshev root scan");
+        let reference = Cheb1 {
+            a: -1.0,
+            b: 1.0,
+            coeffs: reference_coeffs,
+        };
+        let derivative = reference.differentiate();
+
+        let mut roots_t = Vec::new();
+        let samples = self.coeffs.len().saturating_mul(8).max(64);
+        let mut prev_t = -1.0;
+        let mut prev_v = reference.eval_reference(prev_t);
+        assert!(prev_v.is_finite(), "root scan evaluation became non-finite");
         for k in 1..=samples {
-            let x = self.a + (self.b - self.a) * (k as f64) / (samples as f64);
-            let v = self.eval(x);
+            let t = 2.0 * (k as f64) / (samples as f64) - 1.0;
+            let v = reference.eval_reference(t);
+            assert!(v.is_finite(), "root scan evaluation became non-finite");
             if prev_v == 0.0 {
-                out.push(prev_x);
-            } else if prev_v * v < 0.0 {
-                out.push(self.bisect_newton(prev_x, x));
+                reference.assert_resolvable_simple_root(&derivative, prev_t);
+                roots_t.push(prev_t);
+            } else if v != 0.0 && prev_v.is_sign_negative() != v.is_sign_negative() {
+                roots_t.push(reference.bisect_newton_reference(&derivative, prev_t, t));
             }
-            prev_x = x;
+            prev_t = t;
             prev_v = v;
         }
         if prev_v == 0.0 {
-            out.push(prev_x);
+            reference.assert_resolvable_simple_root(&derivative, prev_t);
+            roots_t.push(prev_t);
         }
-        out
+        roots_t
+            .into_iter()
+            .map(|t| affine_from_reference(t, self.a, self.b))
+            .collect()
     }
 
-    fn bisect_newton(&self, mut lo: f64, mut hi: f64) -> f64 {
-        let d = self.differentiate();
+    fn eval_reference(&self, t: f64) -> f64 {
+        fma::cheb_eval_dispatch(self, t)
+    }
+
+    fn assert_resolvable_simple_root(&self, derivative: &Cheb1, t: f64) {
+        let slope = derivative.eval_reference(t);
+        let degree_scale = self.degree().max(1) as f64;
+        let slope_floor = 64.0 * 1.490_116_119_384_765_6e-8 * degree_scale;
+        assert!(
+            slope.is_finite() && slope.abs() > slope_floor,
+            "fixed-grid root scan cannot resolve a multiple or ill-conditioned root; use colleague/certified root evidence"
+        );
+    }
+
+    fn bisect_newton_reference(&self, derivative: &Cheb1, mut lo: f64, mut hi: f64) -> f64 {
         for _ in 0..40 {
             let mid = f64::midpoint(lo, hi);
-            let v = self.eval(mid);
+            let v = self.eval_reference(mid);
+            assert!(
+                v.is_finite(),
+                "root refinement evaluation became non-finite"
+            );
             if v == 0.0 {
+                self.assert_resolvable_simple_root(derivative, mid);
                 return mid;
             }
-            if self.eval(lo) * v < 0.0 {
+            let lo_value = self.eval_reference(lo);
+            assert!(
+                lo_value.is_finite(),
+                "root refinement evaluation became non-finite"
+            );
+            if lo_value != 0.0 && lo_value.is_sign_negative() != v.is_sign_negative() {
                 hi = mid;
             } else {
                 lo = mid;
@@ -295,13 +718,26 @@ impl Cheb1 {
         // Newton polish from the bisection estimate.
         let mut x = f64::midpoint(lo, hi);
         for _ in 0..4 {
-            let dv = d.eval(x);
+            let value = self.eval_reference(x);
+            let dv = derivative.eval_reference(x);
+            assert!(
+                value.is_finite() && dv.is_finite(),
+                "root refinement evaluation became non-finite"
+            );
             if dv == 0.0 {
                 break;
             }
-            x -= self.eval(x) / dv;
-            x = x.clamp(self.a, self.b);
+            let step = value / dv;
+            if !step.is_finite() {
+                break;
+            }
+            let candidate = x - step;
+            if !candidate.is_finite() || candidate < lo || candidate > hi {
+                break;
+            }
+            x = candidate;
         }
+        self.assert_resolvable_simple_root(derivative, x);
         x
     }
 }
@@ -313,7 +749,7 @@ fn sample_first_kind<F: Fn(f64) -> f64>(f: &F, a: f64, b: f64, n: usize) -> Vec<
         .map(|k| {
             let theta = std::f64::consts::PI * (k as f64 + 0.5) / (n as f64);
             let t = fs_math::det::cos(theta);
-            let x = f64::midpoint(a, b) + t * (b - a) / 2.0;
+            let x = affine_from_reference(t, a, b);
             let y = f(x);
             assert!(y.is_finite(), "Cheb1 samples must be finite");
             y

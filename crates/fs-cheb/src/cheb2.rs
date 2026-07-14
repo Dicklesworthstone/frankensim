@@ -6,8 +6,75 @@
 //! rank (gated); smooth non-separable ones converge spectrally in
 //! rank. Integration is the separable product of 1D integrals.
 
-use crate::Cheb1;
+use crate::{Cheb1, affine_from_reference, stable_finite_product3, stable_finite_sum};
 use fs_math::det;
+
+/// Multiply one low-rank component without committing to an intermediate that
+/// overflows or underflows even though the final three-factor product is
+/// representable. The established `(u*v)*inv_pivot` order remains first so
+/// ordinary-domain bits do not move.
+fn stable_component_product(u: f64, v: f64, inverse_pivot: f64) -> f64 {
+    stable_finite_product3(u, v, inverse_pivot, "Cheb2 component product")
+}
+
+fn stable_component_sum<F>(len: usize, component: F, operation: &str) -> f64
+where
+    F: Fn(usize) -> f64,
+{
+    stable_finite_sum(len, component, operation)
+}
+
+#[cfg(test)]
+mod stable_product_tests {
+    use super::{fixed_cheb, stable_component_product, stable_component_sum};
+
+    #[test]
+    fn rescaling_does_not_magnify_a_rounded_subnormal_intermediate() {
+        let u = 1e-200;
+        let v = 3.7e-124;
+        let inverse_pivot = 1e300;
+        let stable_order = (u * inverse_pivot) * v;
+        let underflowed_order = (u * v) * inverse_pivot;
+        assert_ne!(stable_order.to_bits(), underflowed_order.to_bits());
+        assert_eq!(
+            stable_component_product(u, v, inverse_pivot).to_bits(),
+            stable_order.to_bits()
+        );
+    }
+
+    #[test]
+    fn representable_sum_survives_an_overflowing_prefix() {
+        let half_max = f64::MAX / 2.0;
+        let values = [half_max, half_max, half_max, -half_max];
+        let result = stable_component_sum(values.len(), |index| values[index], "test sum");
+        assert!(result.is_finite());
+        assert!((f64::MAX - result) / f64::MAX <= f64::EPSILON);
+    }
+
+    #[test]
+    fn representable_residual_survives_finite_prefix_cancellation() {
+        let residual = 2.0f64.powi(-54);
+        let values = [1.0, residual, -1.0];
+        assert_eq!(1.0 + residual, 1.0, "fixture must exercise absorption");
+        assert_eq!(
+            stable_component_sum(values.len(), |index| values[index], "test sum").to_bits(),
+            residual.to_bits()
+        );
+    }
+
+    #[test]
+    fn fixed_dct_applies_its_scale_before_a_prefix_can_overflow() {
+        let value = f64::MAX / 4.0;
+        let interpolant = fixed_cheb(&|_| value, -1.0, 1.0, 16);
+        assert_eq!(interpolant.coeffs()[0].to_bits(), (2.0 * value).to_bits());
+        assert!(
+            interpolant
+                .coeffs()
+                .iter()
+                .all(|coefficient| coefficient.is_finite())
+        );
+    }
+}
 
 /// Fixed-resolution Chebyshev interpolant of a slice function: sample
 /// at `n` first-kind points, direct DCT-II, light trailing truncation.
@@ -22,20 +89,23 @@ fn fixed_cheb<F: Fn(f64) -> f64>(f: &F, a: f64, b: f64, n: usize) -> Cheb1 {
         .map(|k| {
             let theta = std::f64::consts::PI * (2.0 * k as f64 + 1.0) / (2.0 * n as f64);
             let t = det::cos(theta);
-            let y = f(f64::midpoint(a, b) + t * (b - a) / 2.0);
+            let y = f(affine_from_reference(t, a, b));
             assert!(y.is_finite(), "Cheb2 slice samples must be finite");
             y
         })
         .collect();
     let mut coeffs = vec![0.0f64; n];
+    let dct_scale = 2.0 / n as f64;
     for (j, cj) in coeffs.iter_mut().enumerate() {
-        let mut acc = 0.0;
-        for (k, &v) in vals.iter().enumerate() {
-            acc += v * det::cos(
-                std::f64::consts::PI * j as f64 * (2.0 * k as f64 + 1.0) / (2.0 * n as f64),
-            );
-        }
-        *cj = 2.0 * acc / n as f64;
+        *cj = stable_finite_sum(
+            vals.len(),
+            |k| {
+                let angle =
+                    std::f64::consts::PI * j as f64 * (2.0 * k as f64 + 1.0) / (2.0 * n as f64);
+                stable_finite_product3(vals[k], det::cos(angle), dct_scale, "Cheb2 fixed DCT term")
+            },
+            "Cheb2 fixed DCT accumulation",
+        );
     }
     let cmax = coeffs.iter().fold(0.0f64, |m, &c| m.max(c.abs()));
     let keep = coeffs
@@ -65,9 +135,21 @@ impl Cheb2 {
             "Cheb2 rank component lengths must match"
         );
         assert!(
-            self.inv_pivots.iter().all(|p| p.is_finite()),
-            "Cheb2 inverse pivots must be finite"
+            self.inv_pivots.iter().all(|p| p.is_finite() && *p != 0.0),
+            "Cheb2 inverse pivots must be finite and non-zero"
         );
+        if let Some(domain) = self.cols.first().map(Cheb1::domain) {
+            assert!(
+                self.cols.iter().all(|column| column.domain() == domain),
+                "all Cheb2 columns must share one x-domain"
+            );
+        }
+        if let Some(domain) = self.rows.first().map(Cheb1::domain) {
+            assert!(
+                self.rows.iter().all(|row| row.domain() == domain),
+                "all Cheb2 rows must share one y-domain"
+            );
+        }
         assert!(
             self.residual.is_finite() && self.residual >= 0.0,
             "Cheb2 residual must be finite and non-negative"
@@ -80,7 +162,13 @@ impl Cheb2 {
     /// `max_rank` is hit.
     ///
     /// # Panics
-    /// If the domain is degenerate (caller contract).
+    /// If a domain endpoint or tolerance is non-finite, either domain is
+    /// degenerate, `tol < 0`, `max_rank == 0`, the derived deterministic sample
+    /// grid or transform size overflows, a sampled/pivot value is non-finite,
+    /// a pivot is zero where inversion is required, or the resulting public
+    /// low-rank factors violate their shared-domain/shape invariants. These are
+    /// legacy assertion-based preconditions; the budgeted fallible constructor
+    /// is tracked separately.
     #[must_use]
     pub fn build<F: Fn(f64, f64) -> f64>(
         f: &F,
@@ -104,13 +192,13 @@ impl Cheb2 {
         let xs: Vec<f64> = (0..=ns)
             .map(|k| {
                 let t = det::cos(std::f64::consts::PI * k as f64 / ns as f64);
-                f64::midpoint(a, b) + t * (b - a) / 2.0
+                affine_from_reference(t, a, b)
             })
             .collect();
         let ys: Vec<f64> = (0..=ns)
             .map(|k| {
                 let t = det::cos(std::f64::consts::PI * k as f64 / ns as f64);
-                f64::midpoint(c, d) + t * (d - c) / 2.0
+                affine_from_reference(t, c, d)
             })
             .collect();
         let mut cols: Vec<Cheb1> = Vec::new();
@@ -122,11 +210,11 @@ impl Cheb2 {
             // Residual on the sample grid; deterministic argmax
             // (first-in-scan-order tie break).
             let approx = |x: f64, y: f64, cols: &[Cheb1], rows: &[Cheb1], ip: &[f64]| -> f64 {
-                let mut s = 0.0;
-                for k in 0..cols.len() {
-                    s += cols[k].eval(x) * rows[k].eval(y) * ip[k];
-                }
-                s
+                stable_component_sum(
+                    cols.len(),
+                    |k| stable_component_product(cols[k].eval(x), rows[k].eval(y), ip[k]),
+                    "Cheb2 approximation accumulation",
+                )
             };
             let mut best = (0usize, 0usize, 0.0f64);
             for (i, &x) in xs.iter().enumerate() {
@@ -142,7 +230,7 @@ impl Cheb2 {
             if first_pivot == 0.0 {
                 first_pivot = best.2;
             }
-            if best.2 <= tol * first_pivot.max(1e-300) || best.2 == 0.0 {
+            if best.2 <= tol * first_pivot || best.2 == 0.0 {
                 break;
             }
             let (xp, yp) = (xs[best.0], ys[best.1]);
@@ -166,7 +254,12 @@ impl Cheb2 {
             );
             cols.push(u);
             rows.push(v);
-            inv_pivots.push(1.0 / pivot);
+            let inverse_pivot = 1.0 / pivot;
+            assert!(
+                inverse_pivot.is_finite(),
+                "Cheb2 inverse pivot is not representable as finite f64"
+            );
+            inv_pivots.push(inverse_pivot);
         }
         Cheb2 {
             cols,
@@ -191,11 +284,17 @@ impl Cheb2 {
             x.is_finite() && y.is_finite(),
             "Cheb2 evaluation point must be finite"
         );
-        let mut s = 0.0;
-        for k in 0..self.cols.len() {
-            s += self.cols[k].eval(x) * self.rows[k].eval(y) * self.inv_pivots[k];
-        }
-        s
+        stable_component_sum(
+            self.cols.len(),
+            |k| {
+                stable_component_product(
+                    self.cols[k].eval(x),
+                    self.rows[k].eval(y),
+                    self.inv_pivots[k],
+                )
+            },
+            "Cheb2 evaluation accumulation",
+        )
     }
 
     /// ∫∫ f over the domain: Σ_k (∫u_k)(∫v_k)/p_k — the separable
@@ -203,10 +302,16 @@ impl Cheb2 {
     #[must_use]
     pub fn integral(&self) -> f64 {
         self.assert_valid();
-        let mut s = 0.0;
-        for k in 0..self.cols.len() {
-            s += self.cols[k].integral() * self.rows[k].integral() * self.inv_pivots[k];
-        }
-        s
+        stable_component_sum(
+            self.cols.len(),
+            |k| {
+                stable_component_product(
+                    self.cols[k].integral(),
+                    self.rows[k].integral(),
+                    self.inv_pivots[k],
+                )
+            },
+            "Cheb2 integral accumulation",
+        )
     }
 }

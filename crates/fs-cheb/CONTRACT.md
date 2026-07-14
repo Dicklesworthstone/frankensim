@@ -15,12 +15,13 @@ fs-ivl (interval root certification).
 - `Cheb1` — coefficients over FIRST-KIND Chebyshev points (roots grid):
   values ↔ coefficients is exactly fs-fft's DCT-II/III pair. `build`
   doubles the grid until the trailing quarter of coefficients sits at
-  the machine-precision plateau (8.9e-16 relative), then truncates;
+  the configured numerical plateau (2.2e-15 relative), then truncates;
   unresolvable functions panic at `max_degree` with a structured
   message. `eval` (Clenshaw), `differentiate` (coefficient recurrence,
   domain chain rule), `integral` (even-coefficient formula), `add`,
-  `mul` (resample + rebuild), `roots` (subdivision + bisection +
-  Newton polish).
+  `mul` (resample + rebuild), `roots` (fixed reference-grid sign scan +
+  safeguarded reference-coordinate bisection/Newton polish for isolated,
+  well-conditioned sign-changing roots).
 - `lobatto_points`, `diff_matrix` — Chebyshev–Lobatto collocation:
   Trefethen construction with the negative-sum-trick diagonal (rows sum
   to EXACT zero, tested bitwise).
@@ -43,21 +44,53 @@ fs-ivl (interval root certification).
    (40, 200]) — tested.
 2. Calculus identities: d/dx exp = exp to 1e-11; definite integrals to
    1e-12 with domain scaling — tested.
+   Affine domain maps preserve the established ordinary-domain rounding path
+   while avoiding either an overflowing `b-a` or a finite-width doubled
+   numerator overflow on extreme one-sided and same-sign domains.
+   Center/radius evaluation retains representable offsets around the center;
+   calculus scaling is combined before intermediate overflow/underflow;
+   integral accumulation uses an error-free partial expansion so representable
+   cancellation residuals survive even when every naive prefix is finite, then
+   falls back to exact common power-of-two normalization when an expansion
+   prefix would overflow. Tests cover constants,
+   physical/reference linears, subnormal and scale-separated integrals, and
+   roots across the finite endpoint range. Polynomial values or derivatives whose
+   final f64 result is itself unrepresentable remain an explicit no-claim.
 3. Plateau detection does NOT chase noise floors (tested with a
    deterministic ~1e-18 jitter fixture).
 4. `diff_matrix` rows sum to exact zero (differentiation annihilates
    constants bitwise).
 5. Deterministic per ISA: all state is built on strict fs-math cos/sin
-   and fixed-order arithmetic. The radix-8/4/2 downstream golden is
-   identical in debug and release on M4 Pro; x86-64 equality is armed
-   pending RCH admission. The upstream FFT stage-path golden is verified
-   in all four ISA/profile quadrants.
-6. Colleague roots agree with the subdivision scanner on simple roots,
-   recover even-multiplicity roots the scanner cannot see, and
+   and fixed-order arithmetic. The last admitted radix-8/4/2 downstream
+   golden was identical in debug and release on M4 Pro. Current root/integral
+   semantics intentionally invalidate it; replacement and x86-64 equality are
+   pending an admitted two-profile, two-ISA replay. The upstream FFT stage-path
+   golden remains independently verified in all four ISA/profile quadrants.
+6. Policy-filtered colleague candidates agree with the sign scanner on the
+   admitted isolated fixtures, recover the retained even-multiplicity fixtures
+   the scanner cannot see, and
    certification boxes are reported in physical-domain coordinates.
+   Approximate colleague coefficients use exact power-of-two normalization and
+   refuse any coefficient exponent range, matrix half-ratio, or recurrence-row
+   addition that would lose a non-zero term before eigenanalysis. Certified roots likewise refuse
+   coefficient information loss, perform the c0/2
+   convention in interval arithmetic, and enclose the exact-real derivative
+   through interval automatic differentiation. Affine
+   images are outward-rounded with interval arithmetic and clamped to the
+   finite physical domain; a widened physical box is revalidated over its
+   full inverse image before retaining Certified existence-and-uniqueness
+   authority. `certified_roots` currently interprets `min_width` in the
+   dimensionless reference coordinate; a typed physical-width API is tracked
+   separately.
 7. `Cheb2` captures separable rank exactly on fixture functions, keeps
    deterministic pivot tie-breaking, and converges spectrally on the
-   smooth non-separable fixture.
+   smooth non-separable fixture. All public components have one common x-domain,
+   one common y-domain, and finite non-zero inverse pivots. Three-factor component products try the
+   established order first and then safe pairings so a representable result is
+   not silently lost to an overflowing or underflowing intermediate. Component
+   sums use the same error-free expansion as 1D integration, and fixed-slice DCT
+   terms apply `2/n` before accumulation so a representable coefficient is not
+   rejected merely because its unscaled prefix would overflow.
 8. `FourierSeries` exactly recovers trigonometric fixture modes,
    differentiates `sin` to `cos`, and uses c₀ for the periodic integral.
 
@@ -65,16 +98,29 @@ fs-ivl (interval root certification).
 Structured panics for programmer/modeling errors: non-finite or
 inverted domains, non-finite samples/coefficients, unresolved functions
 at `max_degree`, domain mismatches in algebra, invalid colleague
-policies, non-positive certification widths, malformed public `Cheb2`
-or `FourierSeries` fields, and non-power-of-two Fourier sample counts.
+policies, an unrepresentable colleague normalization, matrix half-ratio, or
+recurrence-row addition,
+non-positive certification widths, non-identical algebra domains,
+an unrepresentable algebra/transform coefficient or Cheb2 inverse pivot,
+an exact root normalization (scanner or certifier) that would lose coefficient information,
+a root query on the identically-zero polynomial (whose root set is a
+continuum), a detected root candidate whose local slope the fixed-grid
+fallback cannot resolve honestly, a physical
+derivative whose coefficient representation is not finite `f64`, malformed
+public `Cheb2` or `FourierSeries` fields, and non-power-of-two Fourier sample
+counts.
 
 ## Determinism class
 Bit-deterministic per ISA by construction. The golden hashes coefficients
 + integral + derivative sample + roots + collocation eigenvalues. The
-current radix-8/4/2 value is recorded in both build profiles on
-aarch64-apple and must match on x86-64 before the cross-ISA row is restored
-to verified. It is registered in `golden-couplings.json` against
-`fs-fft:transform-bits=1` so later transform changes cannot strand it.
+last admitted radix-8/4/2 value was recorded in both build profiles on
+aarch64-apple, but the current reference-coordinate root-refinement and
+exceptional integral semantics intentionally invalidate that downstream
+value. The test remains armed and known-red pending a current admitted
+debug/release replay on both reference ISAs; no replacement value or G5 claim
+is accepted from a stale binary. The coupling remains registered in
+`golden-couplings.json` against `fs-fft:transform-bits=1` so later transform
+changes cannot strand it.
 
 ## Cancellation behavior
 Construction is bounded (max_degree cap); no poll points needed at v1
@@ -110,16 +156,19 @@ collocation accuracy, eigen demo, golden hash).
   −1/(2aₙ)), eigenvalues via the fs-la complex nonsymmetric stack,
   filtered by a DOCUMENTED [`ColleaguePolicy`] (trailing-coefficient
   trim, imaginary tolerance, domain slack, √ε-scale cluster dedupe —
-  a double root's eigenvalue pair splits at ~5e-9, measured). This
-  RESOLVES the v1 even-multiplicity no-claim: (x−r)²(x−s) fixtures
-  the sign scanner provably misses are found (cheb-102). Cheb1 stores
+  a double root's eigenvalue pair splits at ~5e-9, measured). This COVERS the
+  retained even-multiplicity fixture that motivated the path: an
+  (x−r)²(x−s) case the sign scanner misses is found under the retained policy
+  (cheb-102). Close candidates can be clustered or filtered, so this API does
+  not claim complete enumeration. Cheb1 stores
   the Σ′ convention (c₀ un-halved) — the colleague and interval
   paths halve it on entry (a measured 2.2e-1 root error before).
 - `colleague::certified_roots` — fs-ivl interval Newton on Clenshaw
-  evaluated in interval arithmetic: simple roots come back CERTIFIED
-  (unique-root proofs, widths ~6e-15 measured); multiple roots come
-  back honestly `Possible` (their derivative encloses zero, as it
-  must). Returned boxes are mapped back to the physical Cheb1 domain.
+  evaluated in interval arithmetic: eligible isolated interior roots can come
+  back CERTIFIED (unique-root proofs, widths ~6e-15 measured). Multiple or
+  endpoint roots, `min_width` termination, and the finite subdivision budget
+  can return honest `Possible` boxes. Returned boxes are mapped back to the
+  physical Cheb1 domain.
 - `cheb2::Cheb2` — Chebfun2-style adaptive cross approximation:
   deterministic max-residual pivots, rank-1 slice updates at FIXED
   resolution (ACA residual slices carry absolute cancellation noise,
@@ -142,9 +191,13 @@ for invalid policies, domains, samples, widths, and public spectral
 structs.
 
 ## No-claim boundaries
-- Even-multiplicity roots: RESOLVED for the colleague path (above);
-  the v1 subdivision `roots` keeps its documented limitation and
-  remains the zero-dependency fallback.
+- Even-multiplicity roots: the colleague path recovers the retained admitted
+  fixtures under its declared filtering policy, including a case missed by the
+  sign-grid path. It does not establish generic recovery, multiplicity, root
+  count, or completeness. The v1 sign-grid `roots` keeps documented no-claims
+  for even-multiplicity,
+  clustered, and multiple/ill-conditioned roots, and does not certify that its
+  returned vector is complete. It remains the zero-dependency fallback.
 - No 3D low-rank (2D ships; tensor-train is the successor), no
   complex-root REPORTING policy (real-only surfaced, documented), no
   Fourier rootfinding-on-the-circle, no Qty-dimensioned functions,
