@@ -79,6 +79,41 @@ fn rotation_about(axis: [f64; 3], center: Vec3, angle: f64) -> Motor {
     to_center.compose(&rot).compose(&back)
 }
 
+fn vec3_is_finite(vector: Vec3) -> bool {
+    vector.x.is_finite() && vector.y.is_finite() && vector.z.is_finite()
+}
+
+fn axis_squared_norm(axis: &[f64; 3]) -> f64 {
+    axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]
+}
+
+fn axis_is_unit(axis: &[f64; 3]) -> bool {
+    let squared_norm = axis_squared_norm(axis);
+    axis.iter().all(|component| component.is_finite())
+        && squared_norm.is_finite()
+        && (squared_norm - 1.0).abs() <= 1e-9
+}
+
+fn quat_squared_norm(quaternion: Quat) -> f64 {
+    quaternion.w * quaternion.w
+        + quaternion.x * quaternion.x
+        + quaternion.y * quaternion.y
+        + quaternion.z * quaternion.z
+}
+
+fn quat_is_unit(quaternion: Quat) -> bool {
+    let squared_norm = quat_squared_norm(quaternion);
+    [quaternion.w, quaternion.x, quaternion.y, quaternion.z]
+        .iter()
+        .all(|component| component.is_finite())
+        && squared_norm.is_finite()
+        && (squared_norm - 1.0).abs() <= 1e-9
+}
+
+fn motor_is_finite(motor: &Motor) -> bool {
+    motor.0.0.iter().all(|coefficient| coefficient.is_finite())
+}
+
 impl FrameTree {
     /// An empty tree (world only).
     #[must_use]
@@ -95,18 +130,67 @@ impl FrameTree {
         self.frames.iter().find(|f| f.id == id)
     }
 
+    fn find_unique(&self, id: FrameId) -> Result<&Frame, ScenarioError> {
+        let mut matches = self.frames.iter().filter(|frame| frame.id == id);
+        let frame = matches.next().ok_or_else(|| ScenarioError::Frame {
+            what: format!("frame id {} not found", id.0),
+        })?;
+        if matches.next().is_some() {
+            return Err(ScenarioError::Frame {
+                what: format!(
+                    "frame id {} is ambiguous because it is defined more than once",
+                    id.0
+                ),
+            });
+        }
+        Ok(frame)
+    }
+
     /// The motor mapping this frame's coordinates into its PARENT's at
     /// time `t` (seconds).
     ///
     /// # Errors
     /// [`ScenarioError`] for bad schedules or dimension defects.
     pub fn local_pose(frame: &Frame, t: f64) -> Result<Motor, ScenarioError> {
-        match &frame.motion {
+        if !t.is_finite() {
+            return Err(ScenarioError::Evaluate {
+                what: format!("frame {:?}: non-finite evaluation time {t}", frame.name),
+            });
+        }
+        let motor = match &frame.motion {
             FrameMotion::Fixed {
                 orientation,
                 translation,
-            } => Ok(Motor::from_parts(*orientation, *translation)),
+            } => {
+                if !quat_is_unit(*orientation) {
+                    return Err(ScenarioError::Frame {
+                        what: format!(
+                            "frame {:?}: fixed orientation is non-finite or not unit length",
+                            frame.name
+                        ),
+                    });
+                }
+                if !vec3_is_finite(*translation) {
+                    return Err(ScenarioError::Frame {
+                        what: format!("frame {:?}: fixed translation is non-finite", frame.name),
+                    });
+                }
+                Motor::from_parts(*orientation, *translation)
+            }
             FrameMotion::Rotating { axis, center, rate } => {
+                if !axis_is_unit(axis) {
+                    return Err(ScenarioError::Frame {
+                        what: format!(
+                            "frame {:?}: rotating axis is non-finite or not unit length",
+                            frame.name
+                        ),
+                    });
+                }
+                if !vec3_is_finite(*center) {
+                    return Err(ScenarioError::Frame {
+                        what: format!("frame {:?}: rotating center is non-finite", frame.name),
+                    });
+                }
                 if rate.dims != RATE_DIMS {
                     return Err(ScenarioError::Dimensions {
                         context: format!("frame {:?} angular rate", frame.name),
@@ -114,13 +198,40 @@ impl FrameTree {
                         got: rate.dims.0,
                     });
                 }
-                Ok(rotation_about(*axis, *center, rate.value * t))
+                if !rate.value.is_finite() {
+                    return Err(ScenarioError::Evaluate {
+                        what: format!("frame {:?}: angular rate is non-finite", frame.name),
+                    });
+                }
+                let angle = rate.value * t;
+                if !angle.is_finite() {
+                    return Err(ScenarioError::Evaluate {
+                        what: format!(
+                            "frame {:?}: angular-rate/time product overflowed",
+                            frame.name
+                        ),
+                    });
+                }
+                rotation_about(*axis, *center, angle)
             }
             FrameMotion::Tilt {
                 axis,
                 center,
                 angle,
             } => {
+                if !axis_is_unit(axis) {
+                    return Err(ScenarioError::Frame {
+                        what: format!(
+                            "frame {:?}: tilt axis is non-finite or not unit length",
+                            frame.name
+                        ),
+                    });
+                }
+                if !vec3_is_finite(*center) {
+                    return Err(ScenarioError::Frame {
+                        what: format!("frame {:?}: tilt center is non-finite", frame.name),
+                    });
+                }
                 let a = angle.eval(t)?;
                 if !a.dims.is_none() {
                     return Err(ScenarioError::Dimensions {
@@ -129,9 +240,18 @@ impl FrameTree {
                         got: a.dims.0,
                     });
                 }
-                Ok(rotation_about(*axis, *center, a.value))
+                rotation_about(*axis, *center, a.value)
             }
+        };
+        if !motor_is_finite(&motor) {
+            return Err(ScenarioError::Frame {
+                what: format!(
+                    "frame {:?}: finite inputs produced non-finite motor coefficients",
+                    frame.name
+                ),
+            });
         }
+        Ok(motor)
     }
 
     /// The motor mapping `id`'s coordinates into WORLD coordinates at
@@ -140,14 +260,25 @@ impl FrameTree {
     /// # Errors
     /// [`ScenarioError::Frame`] on unresolvable or cyclic chains.
     pub fn world_pose(&self, id: FrameId, t: f64) -> Result<Motor, ScenarioError> {
+        if !t.is_finite() {
+            return Err(ScenarioError::Evaluate {
+                what: format!("frame id {}: non-finite evaluation time {t}", id.0),
+            });
+        }
         let mut pose = Motor::identity();
         let mut current = id;
         let mut hops = 0usize;
         while current != WORLD {
-            let frame = self.find(current).ok_or_else(|| ScenarioError::Frame {
-                what: format!("frame id {} not found", current.0),
-            })?;
+            let frame = self.find_unique(current)?;
             pose = Self::local_pose(frame, t)?.compose(&pose);
+            if !motor_is_finite(&pose) {
+                return Err(ScenarioError::Frame {
+                    what: format!(
+                        "frame id {}: parent-chain composition produced non-finite motor coefficients",
+                        id.0
+                    ),
+                });
+            }
             current = frame.parent;
             hops += 1;
             if hops > self.frames.len() {
@@ -193,15 +324,50 @@ impl FrameTree {
                 });
             }
             match &f.motion {
-                FrameMotion::Fixed { .. } => {}
-                FrameMotion::Rotating { axis, rate, .. } => {
+                FrameMotion::Fixed {
+                    orientation,
+                    translation,
+                } => {
+                    if !quat_is_unit(*orientation) {
+                        out.push(Violation {
+                            code: "frame-orientation-invalid",
+                            what: format!(
+                                "{ctx}: fixed orientation has squared norm {} or a non-finite component",
+                                quat_squared_norm(*orientation)
+                            ),
+                            fix: "supply a finite unit quaternion".to_string(),
+                        });
+                    }
+                    if !vec3_is_finite(*translation) {
+                        out.push(Violation {
+                            code: "frame-translation-nonfinite",
+                            what: format!("{ctx}: fixed translation is non-finite"),
+                            fix: "replace every translation component with a finite value"
+                                .to_string(),
+                        });
+                    }
+                }
+                FrameMotion::Rotating { axis, center, rate } => {
                     check_axis(axis, &ctx, out);
+                    check_center(*center, &ctx, out);
                     if rate.dims != RATE_DIMS {
                         out.push(dims_violation(&ctx, "angular rate", RATE_DIMS, rate.dims));
                     }
+                    if !rate.value.is_finite() {
+                        out.push(Violation {
+                            code: "frame-rate-nonfinite",
+                            what: format!("{ctx}: angular rate {} is non-finite", rate.value),
+                            fix: "replace the angular rate with a finite value".to_string(),
+                        });
+                    }
                 }
-                FrameMotion::Tilt { axis, angle, .. } => {
+                FrameMotion::Tilt {
+                    axis,
+                    center,
+                    angle,
+                } => {
                     check_axis(axis, &ctx, out);
+                    check_center(*center, &ctx, out);
                     angle.check(&ctx, out);
                     if !angle.dims().is_none() {
                         out.push(dims_violation(&ctx, "tilt angle", Dims::NONE, angle.dims()));
@@ -245,12 +411,24 @@ impl FrameTree {
 }
 
 fn check_axis(axis: &[f64; 3], ctx: &str, out: &mut Vec<Violation>) {
-    let n2 = axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2];
-    if (n2 - 1.0).abs() > 1e-9 {
+    let squared_norm = axis_squared_norm(axis);
+    if !axis_is_unit(axis) {
         out.push(Violation {
             code: "frame-axis-not-unit",
-            what: format!("{ctx}: rotation axis has squared norm {n2}"),
-            fix: "normalize the rotation axis to unit length".to_string(),
+            what: format!(
+                "{ctx}: rotation axis has squared norm {squared_norm} or a non-finite component"
+            ),
+            fix: "supply a finite rotation axis normalized to unit length".to_string(),
+        });
+    }
+}
+
+fn check_center(center: Vec3, ctx: &str, out: &mut Vec<Violation>) {
+    if !vec3_is_finite(center) {
+        out.push(Violation {
+            code: "frame-center-nonfinite",
+            what: format!("{ctx}: rotation center is non-finite"),
+            fix: "replace every center component with a finite value".to_string(),
         });
     }
 }

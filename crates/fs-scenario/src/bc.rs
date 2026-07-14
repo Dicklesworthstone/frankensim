@@ -5,6 +5,7 @@
 //! consistency can be verified at admission, not discovered as a diverged
 //! solve.
 
+use crate::ScenarioError;
 use crate::scenario::Violation;
 use crate::signal::{ChebProfile, TimeSignal};
 use fs_qty::{Dims, QtyAny};
@@ -140,6 +141,21 @@ impl BoundaryCondition {
             "bc on {:?} ({:?}/{:?})",
             self.region, self.physics, self.kind
         );
+        if let Some(value) = &self.value {
+            match value {
+                BcValue::Uniform(quantity) => {
+                    if !quantity.value.is_finite() {
+                        out.push(Violation {
+                            code: "bc-value-nonfinite",
+                            what: format!("{ctx}: uniform value {} is non-finite", quantity.value),
+                            fix: "replace the boundary value with a finite value".to_string(),
+                        });
+                    }
+                }
+                BcValue::Signal(signal) => signal.check(&ctx, out),
+                BcValue::Profile(profile) => profile.check(&ctx, out),
+            }
+        }
         match expectation(self.physics, self.kind) {
             Expectation::Unsupported => out.push(Violation {
                 code: "bc-kind-unsupported",
@@ -166,9 +182,6 @@ impl BoundaryCondition {
                     ),
                 }),
                 Some(v) => {
-                    if let BcValue::Signal(s) = v {
-                        s.check(&ctx, out);
-                    }
                     if v.dims() != expected {
                         out.push(Violation {
                             code: "bc-dims",
@@ -193,20 +206,89 @@ impl BoundaryCondition {
                     .to_string(),
             });
         }
+        if self.kind != BcKind::MassFlowInlet && self.compatibility.is_some() {
+            out.push(Violation {
+                code: "bc-compat-forbidden",
+                what: format!("{ctx}: only mass-flow inlets may declare a compatibility regime"),
+                fix: "remove compatibility from this boundary condition".to_string(),
+            });
+        }
+        if self.kind == BcKind::MassFlowInlet && matches!(&self.value, Some(BcValue::Profile(_))) {
+            out.push(Violation {
+                code: "bc-mass-flow-profile",
+                what: format!(
+                    "{ctx}: a spatial profile cannot yet certify a total mass-flow contribution"
+                ),
+                fix: "supply a uniform or time-signal total in kg/s; velocity-profile surface integration belongs at the geometry-bound solver boundary"
+                    .to_string(),
+            });
+        }
     }
 
     /// Signed mass-flow contribution of this condition at time `t`
     /// (inlets positive, pressure outlets are flux-free), used by the
     /// net-flux compatibility check.
-    #[must_use]
-    pub fn mass_flow_at(&self, t: f64) -> Option<f64> {
-        if self.physics != Physics::IncompressibleFlow || self.kind != BcKind::MassFlowInlet {
-            return None;
+    ///
+    /// # Errors
+    /// Returns [`ScenarioError`] when a declared total-flow value has the wrong
+    /// dimensions, is non-finite, cannot be evaluated, or is a spatial profile
+    /// for which this layer has no geometry-backed surface integral.
+    pub fn mass_flow_at(&self, t: f64) -> Result<Option<f64>, ScenarioError> {
+        if self.kind != BcKind::MassFlowInlet {
+            return Ok(None);
+        }
+        if self.physics != Physics::IncompressibleFlow {
+            return Err(ScenarioError::Evaluate {
+                what: format!(
+                    "mass-flow inlet on {:?} is attached to unsupported physics {:?}",
+                    self.region, self.physics
+                ),
+            });
+        }
+        if !t.is_finite() {
+            return Err(ScenarioError::Evaluate {
+                what: format!("mass-flow evaluation time {t} is non-finite"),
+            });
         }
         match &self.value {
-            Some(BcValue::Uniform(q)) => Some(q.value),
-            Some(BcValue::Signal(s)) => s.eval(t).ok().map(|q| q.value),
-            _ => None,
+            Some(BcValue::Uniform(quantity)) => {
+                if quantity.dims != dims::MASS_FLOW {
+                    return Err(ScenarioError::Dimensions {
+                        context: format!("mass-flow inlet on {:?}", self.region),
+                        expected: dims::MASS_FLOW.0,
+                        got: quantity.dims.0,
+                    });
+                }
+                if !quantity.value.is_finite() {
+                    return Err(ScenarioError::Evaluate {
+                        what: format!(
+                            "mass-flow inlet on {:?} has non-finite value {}",
+                            self.region, quantity.value
+                        ),
+                    });
+                }
+                Ok(Some(quantity.value))
+            }
+            Some(BcValue::Signal(signal)) => {
+                let quantity = signal.eval(t)?;
+                if quantity.dims != dims::MASS_FLOW {
+                    return Err(ScenarioError::Dimensions {
+                        context: format!("mass-flow inlet signal on {:?}", self.region),
+                        expected: dims::MASS_FLOW.0,
+                        got: quantity.dims.0,
+                    });
+                }
+                Ok(Some(quantity.value))
+            }
+            Some(BcValue::Profile(_)) => Err(ScenarioError::Evaluate {
+                what: format!(
+                    "mass-flow inlet on {:?} uses a spatial profile without a geometry-backed surface integral",
+                    self.region
+                ),
+            }),
+            None => Err(ScenarioError::Evaluate {
+                what: format!("mass-flow inlet on {:?} has no declared value", self.region),
+            }),
         }
     }
 }

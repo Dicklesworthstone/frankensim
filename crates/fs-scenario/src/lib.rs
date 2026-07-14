@@ -6,8 +6,8 @@
 //! conditions are where simulations quietly become invalid; this crate
 //! makes that class of mistake a structured, fixable refusal instead.
 //!
-//! Layer: L3 (FLUX support). Runtime deps: `std`, fs-qty, fs-rand,
-//! fs-cheb, fs-ga, fs-math. The Design Ledger stores scenarios as
+//! Layer: L3 (FLUX support). Runtime deps: `std`, fs-blake3, fs-qty,
+//! fs-rand, fs-cheb, fs-ga, fs-math. The Design Ledger stores scenarios as
 //! canonical-IR artifacts — that integration lives ABOVE this layer
 //! (exercised here via a dev-dependency in conformance tests).
 
@@ -19,7 +19,9 @@ pub mod scenario;
 pub mod signal;
 
 pub use bc::{BcKind, BcValue, BoundaryCondition, Compat, Physics};
-pub use ensemble::{Realization, SpectrumModel, StochasticEnsemble};
+pub use ensemble::{
+    DEFAULT_REALIZATION_BUDGET, Realization, RealizationBudget, SpectrumModel, StochasticEnsemble,
+};
 pub use frame::{Frame, FrameId, FrameMotion, FrameTree, WORLD};
 pub use scenario::{
     Combination, ContactLaw, ContactModel, Environment, LoadCase, Scenario, Violation,

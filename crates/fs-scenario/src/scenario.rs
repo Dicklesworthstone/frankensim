@@ -63,6 +63,13 @@ impl Environment {
                     fix: "express gravity in m/s² (SI exponents [1,0,-2,0,0,0])".to_string(),
                 });
             }
+            if !g.value.is_finite() {
+                out.push(Violation {
+                    code: "env-gravity-nonfinite",
+                    what: format!("gravity component {i} is non-finite ({})", g.value),
+                    fix: "replace every gravity component with a finite acceleration".to_string(),
+                });
+            }
         }
         if self.ambient_temperature.dims != TEMP_DIMS {
             out.push(Violation {
@@ -74,6 +81,16 @@ impl Environment {
                 fix: "express ambient temperature in kelvin".to_string(),
             });
         }
+        if !(self.ambient_temperature.value.is_finite() && self.ambient_temperature.value >= 0.0) {
+            out.push(Violation {
+                code: "env-temperature-range",
+                what: format!(
+                    "ambient absolute temperature {} K is non-finite or below absolute zero",
+                    self.ambient_temperature.value
+                ),
+                fix: "use a finite absolute temperature greater than or equal to 0 K".to_string(),
+            });
+        }
         if self.ambient_pressure.dims != PRESSURE_DIMS {
             out.push(Violation {
                 code: "env-pressure-dims",
@@ -82,6 +99,16 @@ impl Environment {
                     self.ambient_pressure.dims.0
                 ),
                 fix: "express ambient pressure in pascals".to_string(),
+            });
+        }
+        if !(self.ambient_pressure.value.is_finite() && self.ambient_pressure.value >= 0.0) {
+            out.push(Violation {
+                code: "env-pressure-range",
+                what: format!(
+                    "ambient absolute pressure {} Pa is non-finite or negative",
+                    self.ambient_pressure.value
+                ),
+                fix: "use a finite, nonnegative absolute pressure".to_string(),
             });
         }
     }
@@ -222,7 +249,7 @@ impl Scenario {
         }
         for c in &self.contacts {
             if let ContactModel::Coulomb { mu_s, mu_k } = c.model
-                && !(mu_k >= 0.0 && mu_s >= mu_k && mu_s.is_finite())
+                && !(mu_s.is_finite() && mu_k.is_finite() && mu_k >= 0.0 && mu_s >= mu_k)
             {
                 out.push(Violation {
                     code: "contact-coulomb-range",
@@ -281,16 +308,53 @@ impl Scenario {
             let has_pressure_outlet = set.iter().any(|bc| {
                 bc.physics == Physics::IncompressibleFlow && bc.kind == BcKind::PressureOutlet
             });
-            if has_pressure_outlet {
-                continue; // the outlet absorbs whatever the inlets push in
-            }
             let mut net = 0.0f64;
             let mut gross = 0.0f64;
+            let mut aggregation_finite = true;
+            let mut evaluation_failed = false;
             for bc in &set {
-                if let Some(flux) = bc.mass_flow_at(0.0) {
-                    net += flux;
-                    gross += flux.abs();
+                match bc.mass_flow_at(0.0) {
+                    Ok(Some(flux)) => {
+                        net += flux;
+                        gross += flux.abs();
+                        if !flux.is_finite() || !net.is_finite() || !gross.is_finite() {
+                            aggregation_finite = false;
+                            break;
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        out.push(Violation {
+                            code: "flux-evaluation",
+                            what: format!(
+                                "set {label:?}: declared mass flow could not be evaluated: {error}"
+                            ),
+                            fix: "repair the total-flow value or use a uniform/time-signal kg/s declaration that is finite at the compatibility checkpoint"
+                                .to_string(),
+                        });
+                        evaluation_failed = true;
+                        break;
+                    }
                 }
+            }
+            if evaluation_failed {
+                continue;
+            }
+            if !aggregation_finite {
+                out.push(Violation {
+                    code: "flux-aggregation-nonfinite",
+                    what: format!(
+                        "set {label:?}: declared mass-flow aggregation overflowed or contained a non-finite value"
+                    ),
+                    fix: "rescale or partition the declared mass flows so their finite net/gross balance can be certified"
+                        .to_string(),
+                });
+                continue;
+            }
+            if has_pressure_outlet {
+                // The outlet may absorb a finite imbalance, but it cannot make
+                // malformed or unevaluable inlet declarations admissible.
+                continue;
             }
             if gross > 0.0 && net.abs() > FLUX_REL_TOL * gross {
                 out.push(Violation {

@@ -11,6 +11,7 @@ description = "Typed boundary-condition and load-case algebra: dimensioned BCs, 
 layer = "L3"
 
 [dependencies]
+fs-blake3 = { path = "../fs-blake3" }
 fs-cheb = { path = "../fs-cheb" }
 fs-ga = { path = "../fs-ga" }
 fs-math = { path = "../fs-math" }

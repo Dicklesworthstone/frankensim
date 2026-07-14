@@ -1,9 +1,10 @@
 //! Stochastic scenario ensembles: seeded, replayable-from-seed generators
 //! for environmental variability — wind gusts (Dryden spectra), ground
 //! motions (Kanai–Tajimi spectral model), fluid-property bands (Carreau
-//! parameter families). Realizations are BITWISE reproducible: member k
-//! of ensemble (seed s) is a pure function of (s, model, k) via Philox
-//! streams keyed by logical identity (fs-rand).
+//! parameter families). Realizations are BITWISE reproducible functions of
+//! the complete canonical ensemble specification, member identity, and the
+//! versioned Philox stream/synthesis semantics. The explicit recipe receipt
+//! and seed-tree policy remain tracked by `frankensim-sj31i.39`.
 
 use crate::ScenarioError;
 use crate::scenario::Violation;
@@ -56,17 +57,49 @@ pub enum SpectrumModel {
 }
 
 impl SpectrumModel {
-    /// One-sided target PSD at angular frequency ω (rad/s); zero for
-    /// band models.
-    #[must_use]
-    pub fn psd(&self, omega: f64) -> f64 {
-        match self {
+    /// One-sided target PSD at angular frequency ω (rad/s). Parameter-band
+    /// models are not spectra and are refused.
+    ///
+    /// # Errors
+    /// Returns [`ScenarioError`] when the frequency or any model parameter is
+    /// non-finite, dimensionally invalid, outside its physical domain, or the
+    /// finite inputs produce an unrepresentable PSD value.
+    pub fn try_psd(&self, omega: f64) -> Result<f64, ScenarioError> {
+        if !omega.is_finite() || omega < 0.0 {
+            return Err(ScenarioError::Evaluate {
+                what: format!(
+                    "one-sided PSD angular frequency {omega} must be finite and non-negative"
+                ),
+            });
+        }
+        let value = match self {
             SpectrumModel::Dryden {
                 sigma,
                 length_scale,
                 mean_speed,
             } => {
+                let velocity_dims = Dims([1, 0, -1, 0, 0, 0]);
+                let length_dims = Dims([1, 0, 0, 0, 0, 0]);
+                if sigma.dims != velocity_dims
+                    || mean_speed.dims != velocity_dims
+                    || length_scale.dims != length_dims
+                {
+                    return Err(ScenarioError::Evaluate {
+                        what: "Dryden PSD parameters have invalid physical dimensions".to_string(),
+                    });
+                }
                 let (s, l, v) = (sigma.value, length_scale.value, mean_speed.value);
+                if !(s.is_finite()
+                    && l.is_finite()
+                    && v.is_finite()
+                    && s > 0.0
+                    && l > 0.0
+                    && v > 0.0)
+                {
+                    return Err(ScenarioError::Evaluate {
+                        what: "Dryden PSD parameters must be finite and positive".to_string(),
+                    });
+                }
                 let x = l * omega / v;
                 s * s * (2.0 * l / (core::f64::consts::PI * v)) / (1.0 + x * x)
             }
@@ -75,13 +108,42 @@ impl SpectrumModel {
                 omega_g,
                 zeta_g,
             } => {
+                if omega_g.dims != Dims([0, 0, -1, 0, 0, 0]) {
+                    return Err(ScenarioError::Evaluate {
+                        what: "Kanai–Tajimi ground frequency has invalid physical dimensions"
+                            .to_string(),
+                    });
+                }
+                if !(s0.is_finite()
+                    && omega_g.value.is_finite()
+                    && zeta_g.is_finite()
+                    && *s0 > 0.0
+                    && omega_g.value > 0.0
+                    && *zeta_g > 0.0)
+                {
+                    return Err(ScenarioError::Evaluate {
+                        what: "Kanai–Tajimi PSD parameters must be finite and positive".to_string(),
+                    });
+                }
                 let r = omega / omega_g.value;
                 let r2 = r * r;
                 let four_z2_r2 = 4.0 * zeta_g * zeta_g * r2;
                 s0 * (1.0 + four_z2_r2) / ((1.0 - r2) * (1.0 - r2) + four_z2_r2)
             }
-            SpectrumModel::CarreauBand { .. } => 0.0,
+            SpectrumModel::CarreauBand { .. } => {
+                return Err(ScenarioError::Evaluate {
+                    what: "Carreau parameter bands do not define a spectral density".to_string(),
+                });
+            }
+        };
+        if !value.is_finite() || value < 0.0 {
+            return Err(ScenarioError::Evaluate {
+                what: format!(
+                    "finite model inputs produced an invalid PSD at angular frequency {omega}"
+                ),
+            });
         }
+        Ok(value)
     }
 
     fn kernel(&self) -> u32 {
@@ -120,14 +182,81 @@ pub struct Realization {
     pub values: Vec<f64>,
 }
 
+/// Explicit admission budget for one realization.
+///
+/// `max_work` counts generated sample timestamps, coefficient pairs, and
+/// sample-by-harmonic accumulation steps. It is deliberately independent of
+/// wall-clock speed so the same request is admitted on every machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RealizationBudget {
+    /// Maximum number of output samples.
+    /// Band-model realizations have zero samples.
+    pub max_samples: usize,
+    /// Maximum deterministic work units.
+    pub max_work: usize,
+}
+
+/// Conservative default used by [`StochasticEnsemble::realize`].
+pub const DEFAULT_REALIZATION_BUDGET: RealizationBudget = RealizationBudget {
+    max_samples: 65_536,
+    max_work: 16_777_216,
+};
+
+impl Default for RealizationBudget {
+    fn default() -> Self {
+        DEFAULT_REALIZATION_BUDGET
+    }
+}
+
+fn reserve_exact<T>(values: &mut Vec<T>, count: usize, context: &str) -> Result<(), ScenarioError> {
+    values
+        .try_reserve_exact(count)
+        .map_err(|allocation_error| ScenarioError::Evaluate {
+            what: format!(
+                "{context}: allocation for {count} elements was refused: {allocation_error}"
+            ),
+        })
+}
+
 impl StochasticEnsemble {
-    /// Realize member `member` — a pure, bitwise-reproducible function of
-    /// `(seed, model, member)` via the spectral representation method with
-    /// Gaussian coefficients: `x(t) = Σₖ √(S(ωₖ)Δω)·(aₖ cos ωₖt + bₖ sin ωₖt)`.
+    /// Realize member `member` — a bitwise-reproducible function of the full
+    /// canonical ensemble specification, member identity, and implementation
+    /// stream/synthesis semantics. The spectral representation is
+    /// `x(t) = Σₖ √(S(ωₖ)Δω)·(aₖ cos ωₖt + bₖ sin ωₖt)`.
     ///
     /// # Errors
     /// [`ScenarioError`] for dimension/shape defects in the spec.
     pub fn realize(&self, member: u32) -> Result<Realization, ScenarioError> {
+        self.realize_with_budget(member, RealizationBudget::default())
+    }
+
+    /// Realize a member under an explicit deterministic sample/work budget.
+    ///
+    /// Public fields make it possible to construct malformed ensembles
+    /// without calling [`StochasticEnsemble::check`]. This method therefore
+    /// validates the complete model independently before drawing or
+    /// allocating anything.
+    ///
+    /// # Errors
+    /// [`ScenarioError`] for invalid dimensions/domains, out-of-range members,
+    /// arithmetic overflow, budget refusal, or allocation refusal.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_precision_loss,
+        clippy::cast_sign_loss
+    )]
+    pub fn realize_with_budget(
+        &self,
+        member: u32,
+        budget: RealizationBudget,
+    ) -> Result<Realization, ScenarioError> {
+        let mut violations = Vec::new();
+        self.check(&mut violations);
+        if let Some(first) = violations.first() {
+            return Err(ScenarioError::Evaluate {
+                what: format!("ensemble {:?} is invalid: {}", self.name, first.what),
+            });
+        }
         if member >= self.members {
             return Err(ScenarioError::Evaluate {
                 what: format!(
@@ -149,58 +278,155 @@ impl StochasticEnsemble {
             n,
         } = &self.model
         {
+            if budget.max_work < 4 {
+                return Err(ScenarioError::Evaluate {
+                    what: format!(
+                        "ensemble {:?}: requested work 4 exceeds budget {}",
+                        self.name, budget.max_work
+                    ),
+                });
+            }
             let draw = |lo: f64, hi: f64, s: &mut fs_rand::Stream| lo + (hi - lo) * s.next_f64();
-            let values = vec![
-                draw(eta_zero[0].value, eta_zero[1].value, &mut stream),
-                draw(eta_inf[0].value, eta_inf[1].value, &mut stream),
-                draw(lambda[0].value, lambda[1].value, &mut stream),
-                draw(n[0], n[1], &mut stream),
-            ];
+            let mut values = Vec::new();
+            reserve_exact(&mut values, 4, "Carreau realization")?;
+            values.push(draw(eta_zero[0].value, eta_zero[1].value, &mut stream));
+            values.push(draw(eta_inf[0].value, eta_inf[1].value, &mut stream));
+            values.push(draw(lambda[0].value, lambda[1].value, &mut stream));
+            values.push(draw(n[0], n[1], &mut stream));
+            if values.iter().any(|value| !value.is_finite()) {
+                return Err(ScenarioError::Evaluate {
+                    what: format!("ensemble {:?}: Carreau draw became non-finite", self.name),
+                });
+            }
             return Ok(Realization {
                 times: Vec::new(),
                 values,
             });
         }
-        if self.dt.dims != TIME_DIMS || self.duration.dims != TIME_DIMS {
-            return Err(ScenarioError::Dimensions {
-                context: format!("ensemble {:?} duration/dt", self.name),
-                expected: TIME_DIMS.0,
-                got: self.dt.dims.0,
-            });
-        }
-        let dt_ok = self.dt.value.is_finite() && self.dt.value > 0.0;
-        if !dt_ok || self.duration.value < self.dt.value {
+        let ratio = self.duration.value / self.dt.value;
+        if !ratio.is_finite() || ratio < 1.0 {
             return Err(ScenarioError::Evaluate {
-                what: format!("ensemble {:?}: need 0 < dt <= duration", self.name),
+                what: format!(
+                    "ensemble {:?}: duration/dt ratio {ratio} must be finite and >= 1",
+                    self.name
+                ),
             });
         }
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let n_samples = (self.duration.value / self.dt.value).round() as usize;
+        let rounded_samples = ratio.round();
+        if rounded_samples < 2.0 {
+            return Err(ScenarioError::Evaluate {
+                what: format!(
+                    "ensemble {:?}: spectral grid rounds to {rounded_samples:.0} sample; at least 2 are required",
+                    self.name
+                ),
+            });
+        }
+        if rounded_samples >= usize::MAX as f64 {
+            return Err(ScenarioError::Evaluate {
+                what: format!(
+                    "ensemble {:?}: sample count cannot be represented as usize",
+                    self.name
+                ),
+            });
+        }
+        if rounded_samples > budget.max_samples as f64 {
+            return Err(ScenarioError::Evaluate {
+                what: format!(
+                    "ensemble {:?}: requested {:.0} samples exceeds budget {}",
+                    self.name, rounded_samples, budget.max_samples
+                ),
+            });
+        }
+        let n_samples = rounded_samples as usize;
         let n_harmonics = n_samples / 2;
+        let synthesis_work =
+            n_samples
+                .checked_mul(n_harmonics)
+                .ok_or_else(|| ScenarioError::Evaluate {
+                    what: format!("ensemble {:?}: realization work overflowed", self.name),
+                })?;
+        let work = synthesis_work
+            .checked_add(n_harmonics)
+            .and_then(|work| work.checked_add(n_samples))
+            .ok_or_else(|| ScenarioError::Evaluate {
+                what: format!("ensemble {:?}: realization work overflowed", self.name),
+            })?;
+        if work > budget.max_work {
+            return Err(ScenarioError::Evaluate {
+                what: format!(
+                    "ensemble {:?}: requested work {work} exceeds budget {}",
+                    self.name, budget.max_work
+                ),
+            });
+        }
         let d_omega = 2.0 * core::f64::consts::PI / (n_samples as f64 * self.dt.value);
+        if !d_omega.is_finite() || d_omega <= 0.0 {
+            return Err(ScenarioError::Evaluate {
+                what: format!("ensemble {:?}: frequency spacing is invalid", self.name),
+            });
+        }
         // Draw the Gaussian coefficient pairs in a fixed order (bitwise
         // determinism comes from the fixed draw and summation order).
-        let mut coeffs = Vec::with_capacity(n_harmonics);
+        let mut coeffs = Vec::new();
+        reserve_exact(&mut coeffs, n_harmonics, "spectral coefficients")?;
         for k in 1..=n_harmonics {
             let omega = k as f64 * d_omega;
-            let amp = det::sqrt(self.model.psd(omega) * d_omega);
-            coeffs.push((
-                omega,
-                amp * stream.next_normal(),
-                amp * stream.next_normal(),
-            ));
+            let spectral_density =
+                self.model
+                    .try_psd(omega)
+                    .map_err(|error| ScenarioError::Evaluate {
+                        what: format!(
+                            "ensemble {:?}: PSD is invalid at angular frequency {omega}: {error}",
+                            self.name
+                        ),
+                    })?;
+            let amp = det::sqrt(spectral_density * d_omega);
+            if !amp.is_finite() {
+                return Err(ScenarioError::Evaluate {
+                    what: format!(
+                        "ensemble {:?}: spectral amplitude overflowed at angular frequency {omega}",
+                        self.name
+                    ),
+                });
+            }
+            let cosine_coefficient = amp * stream.next_normal();
+            let sine_coefficient = amp * stream.next_normal();
+            if !cosine_coefficient.is_finite() || !sine_coefficient.is_finite() {
+                return Err(ScenarioError::Evaluate {
+                    what: format!(
+                        "ensemble {:?}: spectral coefficient overflowed at angular frequency {omega}",
+                        self.name
+                    ),
+                });
+            }
+            coeffs.push((omega, cosine_coefficient, sine_coefficient));
         }
-        let times: Vec<f64> = (0..n_samples).map(|j| j as f64 * self.dt.value).collect();
-        let values: Vec<f64> = times
-            .iter()
-            .map(|&t| {
-                let mut acc = 0.0f64;
-                for &(omega, a, b) in &coeffs {
-                    acc += a * det::cos(omega * t) + b * det::sin(omega * t);
-                }
-                acc
-            })
-            .collect();
+        let mut times = Vec::new();
+        reserve_exact(&mut times, n_samples, "realization times")?;
+        for sample in 0..n_samples {
+            let time = sample as f64 * self.dt.value;
+            if !time.is_finite() {
+                return Err(ScenarioError::Evaluate {
+                    what: format!("ensemble {:?}: sample time overflowed", self.name),
+                });
+            }
+            times.push(time);
+        }
+        let mut values = Vec::new();
+        reserve_exact(&mut values, n_samples, "realization values")?;
+        for &time in &times {
+            let mut accumulated = 0.0f64;
+            for &(omega, cosine_coefficient, sine_coefficient) in &coeffs {
+                accumulated += cosine_coefficient * det::cos(omega * time)
+                    + sine_coefficient * det::sin(omega * time);
+            }
+            if !accumulated.is_finite() {
+                return Err(ScenarioError::Evaluate {
+                    what: format!("ensemble {:?}: synthesized sample is non-finite", self.name),
+                });
+            }
+            values.push(accumulated);
+        }
         Ok(Realization { times, values })
     }
 
@@ -214,24 +440,42 @@ impl StochasticEnsemble {
                 fix: "request at least one member".to_string(),
             });
         }
-        let spectral = !matches!(self.model, SpectrumModel::CarreauBand { .. });
-        if spectral {
-            if self.dt.dims != TIME_DIMS || self.duration.dims != TIME_DIMS {
+        // Band models do not sample this grid, but duration/dt still travel in
+        // canonical IR and therefore remain part of the public artifact. They
+        // must be finite, dimensionally coherent placeholders so an admitted
+        // ensemble can always be serialized and reparsed losslessly.
+        if self.dt.dims != TIME_DIMS || self.duration.dims != TIME_DIMS {
+            out.push(Violation {
+                code: "ensemble-time-dims",
+                what: format!("{ctx}: duration/dt must be times (seconds)"),
+                fix: "give duration and dt the SI dimensions of time".to_string(),
+            });
+        }
+        let dt_ok = self.dt.value.is_finite() && self.dt.value > 0.0;
+        let duration_ok = self.duration.value.is_finite()
+            && self.duration.value > 0.0
+            && self.duration.value >= self.dt.value;
+        if !dt_ok || !duration_ok {
+            out.push(Violation {
+                code: "ensemble-time-range",
+                what: format!(
+                    "{ctx}: dt {} vs duration {}",
+                    self.dt.value, self.duration.value
+                ),
+                fix: "choose finite values satisfying 0 < dt <= duration".to_string(),
+            });
+        }
+        if dt_ok && duration_ok && !matches!(self.model, SpectrumModel::CarreauBand { .. }) {
+            let ratio = self.duration.value / self.dt.value;
+            let rounded = ratio.round();
+            if !ratio.is_finite() || rounded < 2.0 || rounded >= usize::MAX as f64 {
                 out.push(Violation {
-                    code: "ensemble-time-dims",
-                    what: format!("{ctx}: duration/dt must be times (seconds)"),
-                    fix: "give duration and dt the SI dimensions of time".to_string(),
-                });
-            }
-            let dt_ok = self.dt.value.is_finite() && self.dt.value > 0.0;
-            if !dt_ok || self.duration.value < self.dt.value {
-                out.push(Violation {
-                    code: "ensemble-time-range",
+                    code: "ensemble-spectral-grid",
                     what: format!(
-                        "{ctx}: dt {} vs duration {}",
-                        self.dt.value, self.duration.value
+                        "{ctx}: spectral duration/dt ratio {ratio} does not define a representable grid with at least two samples"
                     ),
-                    fix: "choose 0 < dt <= duration".to_string(),
+                    fix: "choose finite duration/dt whose rounded sample count is in [2, usize::MAX)"
+                        .to_string(),
                 });
             }
         }
@@ -261,11 +505,15 @@ impl StochasticEnsemble {
                 // inf/NaN — validate must reject it, not admit a NaN ensemble.
                 // sigma (intensity) and length scale must likewise be positive.
                 let positive = |v: f64| v.is_finite() && v > 0.0;
-                if !positive(sigma.value) || !positive(length_scale.value) || !positive(mean_speed.value)
+                if !positive(sigma.value)
+                    || !positive(length_scale.value)
+                    || !positive(mean_speed.value)
                 {
                     out.push(Violation {
                         code: "ensemble-dryden-params",
-                        what: format!("{ctx}: sigma, length scale, and mean speed must be positive"),
+                        what: format!(
+                            "{ctx}: sigma, length scale, and mean speed must be positive"
+                        ),
                         fix: "supply positive Dryden intensity, length scale, and mean speed"
                             .to_string(),
                     });
@@ -285,8 +533,9 @@ impl StochasticEnsemble {
                     out.push(Violation {
                         code: "ensemble-kt-params",
                         what: format!("{ctx}: S0, zeta_g, and omega_g must be positive"),
-                        fix: "supply positive Kanai–Tajimi intensity, damping, and ground frequency"
-                            .to_string(),
+                        fix:
+                            "supply positive Kanai–Tajimi intensity, damping, and ground frequency"
+                                .to_string(),
                     });
                 }
             }
@@ -307,15 +556,61 @@ impl StochasticEnsemble {
                     (eta_zero[0].value, eta_zero[1].value, "eta_zero"),
                     (eta_inf[0].value, eta_inf[1].value, "eta_inf"),
                     (lambda[0].value, lambda[1].value, "lambda"),
-                    (n[0], n[1], "n"),
                 ] {
-                    if lo > hi {
+                    if !(lo.is_finite() && hi.is_finite() && lo > 0.0 && hi > 0.0) {
+                        out.push(Violation {
+                            code: "ensemble-carreau-positive-finite",
+                            what: format!(
+                                "{ctx}: {name} band [{lo}, {hi}] must contain finite positive values"
+                            ),
+                            fix: "use finite, strictly positive Carreau viscosity/time bounds"
+                                .to_string(),
+                        });
+                    } else if lo > hi {
                         out.push(Violation {
                             code: "ensemble-band-order",
                             what: format!("{ctx}: {name} band [{lo}, {hi}] is inverted"),
                             fix: "order every band as [low, high]".to_string(),
                         });
                     }
+                }
+                if !(n[0].is_finite()
+                    && n[1].is_finite()
+                    && n[0] > 0.0
+                    && n[1] > 0.0
+                    && n[0] <= 1.0
+                    && n[1] <= 1.0)
+                {
+                    out.push(Violation {
+                        code: "ensemble-carreau-power-index",
+                        what: format!(
+                            "{ctx}: shear-thinning power-index band [{}, {}] must lie in (0, 1]",
+                            n[0], n[1]
+                        ),
+                        fix:
+                            "use finite Carreau power-index bounds satisfying 0 < low <= high <= 1"
+                                .to_string(),
+                    });
+                } else if n[0] > n[1] {
+                    out.push(Violation {
+                        code: "ensemble-band-order",
+                        what: format!("{ctx}: n band [{}, {}] is inverted", n[0], n[1]),
+                        fix: "order every band as [low, high]".to_string(),
+                    });
+                }
+                if eta_zero[0].value.is_finite()
+                    && eta_inf[1].value.is_finite()
+                    && eta_zero[0].value < eta_inf[1].value
+                {
+                    out.push(Violation {
+                        code: "ensemble-carreau-viscosity-order",
+                        what: format!(
+                            "{ctx}: eta_zero low {} is below eta_inf high {}; independent draws could violate eta_zero >= eta_inf",
+                            eta_zero[0].value, eta_inf[1].value
+                        ),
+                        fix: "separate the bands so every zero-shear viscosity is at least every infinite-shear viscosity"
+                            .to_string(),
+                    });
                 }
             }
         }

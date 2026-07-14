@@ -7,6 +7,18 @@ use crate::scenario::Violation;
 use fs_cheb::Cheb1;
 use fs_qty::{Dims, QtyAny};
 
+fn interpolation_fraction(value: f64, start: f64, end: f64) -> f64 {
+    let width = end - start;
+    if width.is_finite() {
+        (value - start) / width
+    } else {
+        // Opposite-sign finite endpoints can have an infinite direct
+        // difference. Scaling first preserves their finite affine ratio.
+        let scale = start.abs().max(end.abs()).max(value.abs());
+        ((value / scale) - (start / scale)) / ((end / scale) - (start / scale))
+    }
+}
+
 /// Interpolation contract for tabulated signals.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Interp {
@@ -30,6 +42,38 @@ impl PartialEq for ChebProfile {
         self.dims == other.dims
             && self.cheb.domain() == other.cheb.domain()
             && self.cheb.coeffs() == other.cheb.coeffs()
+    }
+}
+
+impl ChebProfile {
+    /// Validate the function object's finite domain and coefficients.
+    ///
+    /// `fs-cheb` enforces these properties in its constructors today, but
+    /// `ChebProfile` is a public authority-boundary type. Keeping the checks
+    /// here makes downstream `Result` APIs fail closed even if another
+    /// constructor is added later.
+    pub(crate) fn check(&self, context: &str, out: &mut Vec<Violation>) {
+        let (a, b) = self.cheb.domain();
+        if !(a.is_finite() && b.is_finite() && a < b) {
+            out.push(Violation {
+                code: "signal-chebfun-domain",
+                what: format!("{context}: chebfun domain [{a}, {b}] is invalid"),
+                fix: "build the function object on a finite, nonempty interval".to_string(),
+            });
+        }
+        if self.cheb.coeffs().is_empty()
+            || self
+                .cheb
+                .coeffs()
+                .iter()
+                .any(|coefficient| !coefficient.is_finite())
+        {
+            out.push(Violation {
+                code: "signal-chebfun-coefficients",
+                what: format!("{context}: chebfun coefficients are empty or non-finite"),
+                fix: "supply at least one finite Chebyshev coefficient".to_string(),
+            });
+        }
     }
 }
 
@@ -88,24 +132,29 @@ impl TimeSignal {
                 what: format!("non-finite evaluation time {t}"),
             });
         }
-        match self {
-            TimeSignal::Constant(q) => Ok(*q),
+        let mut violations = Vec::new();
+        self.check("signal evaluation", &mut violations);
+        if let Some(first) = violations.first() {
+            return Err(ScenarioError::Evaluate {
+                what: first.what.clone(),
+            });
+        }
+        let value = match self {
+            TimeSignal::Constant(q) => *q,
             TimeSignal::Ramp {
                 t_start,
                 t_end,
                 from,
                 to,
             } => {
-                let clamped = t.clamp(*t_start, *t_end);
-                let alpha = if t_end > t_start {
-                    (clamped - t_start) / (t_end - t_start)
+                if t <= *t_start {
+                    *from
+                } else if t >= *t_end {
+                    *to
                 } else {
-                    1.0
-                };
-                Ok(QtyAny::new(
-                    from.value + alpha * (to.value - from.value),
-                    from.dims,
-                ))
+                    let alpha = interpolation_fraction(t, *t_start, *t_end);
+                    QtyAny::new((1.0 - alpha) * from.value + alpha * to.value, from.dims)
+                }
             }
             TimeSignal::Table {
                 times,
@@ -125,35 +174,49 @@ impl TimeSignal {
                     Err(i) => match interp {
                         Interp::Hold => values[i - 1],
                         Interp::Linear => {
-                            let alpha = (t - times[i - 1]) / (times[i] - times[i - 1]);
-                            values[i - 1] + alpha * (values[i] - values[i - 1])
+                            let alpha = interpolation_fraction(t, times[i - 1], times[i]);
+                            (1.0 - alpha) * values[i - 1] + alpha * values[i]
                         }
                     },
                 };
-                Ok(QtyAny::new(v, *dims))
+                QtyAny::new(v, *dims)
             }
             TimeSignal::Chebfun(profile) => {
                 let (a, b) = profile.cheb.domain();
-                Ok(QtyAny::new(profile.cheb.eval(t.clamp(a, b)), profile.dims))
+                QtyAny::new(profile.cheb.eval(t.clamp(a, b)), profile.dims)
             }
+        };
+        if !value.value.is_finite() {
+            return Err(ScenarioError::Evaluate {
+                what: "signal evaluation produced a non-finite value".to_string(),
+            });
         }
+        Ok(value)
     }
 
     /// Structural validation, accumulated as [`Violation`]s.
     pub fn check(&self, context: &str, out: &mut Vec<Violation>) {
         match self {
-            TimeSignal::Constant(_) => {}
+            TimeSignal::Constant(q) => {
+                if !q.value.is_finite() {
+                    out.push(Violation {
+                        code: "signal-value-nonfinite",
+                        what: format!("{context}: constant value {} is non-finite", q.value),
+                        fix: "replace the constant with a finite value".to_string(),
+                    });
+                }
+            }
             TimeSignal::Ramp {
                 t_start,
                 t_end,
                 from,
                 to,
             } => {
-                if t_end < t_start || !t_start.is_finite() || !t_end.is_finite() {
+                if !t_start.is_finite() || !t_end.is_finite() || t_start >= t_end {
                     out.push(Violation {
                         code: "signal-ramp-times",
                         what: format!("{context}: ramp interval [{t_start}, {t_end}] is invalid"),
-                        fix: "order the ramp times so t_start <= t_end and both are finite"
+                        fix: "order the ramp times so t_start < t_end and both are finite"
                             .to_string(),
                     });
                 }
@@ -165,6 +228,16 @@ impl TimeSignal {
                             from.dims.0, to.dims.0
                         ),
                         fix: "give both ramp endpoints the same physical dimensions".to_string(),
+                    });
+                }
+                if !from.value.is_finite() || !to.value.is_finite() {
+                    out.push(Violation {
+                        code: "signal-value-nonfinite",
+                        what: format!(
+                            "{context}: ramp endpoint values [{}, {}] must be finite",
+                            from.value, to.value
+                        ),
+                        fix: "replace both ramp endpoints with finite values".to_string(),
                     });
                 }
             }
@@ -180,7 +253,24 @@ impl TimeSignal {
                         fix: "supply one value per sample time (at least one sample)".to_string(),
                     });
                 }
-                if times.windows(2).any(|w| w[1] <= w[0]) {
+                if times.iter().any(|time| !time.is_finite()) {
+                    out.push(Violation {
+                        code: "signal-table-time-nonfinite",
+                        what: format!("{context}: table contains a non-finite sample time"),
+                        fix: "replace every sample time with a finite value".to_string(),
+                    });
+                }
+                if values.iter().any(|value| !value.is_finite()) {
+                    out.push(Violation {
+                        code: "signal-value-nonfinite",
+                        what: format!("{context}: table contains a non-finite sample value"),
+                        fix: "replace every sample value with a finite value".to_string(),
+                    });
+                }
+                if times
+                    .windows(2)
+                    .any(|window| !(window[0].is_finite() && window[1] > window[0]))
+                {
                     out.push(Violation {
                         code: "signal-table-order",
                         what: format!("{context}: table times are not strictly increasing"),
@@ -189,15 +279,7 @@ impl TimeSignal {
                 }
             }
             TimeSignal::Chebfun(profile) => {
-                let (a, b) = profile.cheb.domain();
-                let ordered = a.is_finite() && b.is_finite() && a < b;
-                if !ordered {
-                    out.push(Violation {
-                        code: "signal-chebfun-domain",
-                        what: format!("{context}: chebfun domain [{a}, {b}] is empty"),
-                        fix: "build the function object on a nonempty time interval".to_string(),
-                    });
-                }
+                profile.check(context, out);
             }
         }
     }

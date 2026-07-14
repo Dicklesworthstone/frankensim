@@ -5,13 +5,17 @@
 //! statistically; frame transforms obey G0 composition laws; unit
 //! coherence holds through non-SI spellings (G3).
 
+use fs_blake3::ContentHash;
 use fs_ga::{Motor, Point, Quat, Vec3};
 use fs_qty::{Dims, QtyAny};
 use fs_scenario::{
     BcKind, BcValue, BoundaryCondition, ChebProfile, Combination, Compat, ContactLaw, ContactModel,
-    Environment, Frame, FrameId, FrameMotion, Interp, LoadCase, Physics, Scenario, SpectrumModel,
-    StochasticEnsemble, TimeSignal,
-    ir::{parse_ir, write_ir},
+    Environment, Frame, FrameId, FrameMotion, Interp, LoadCase, Physics, RealizationBudget,
+    Scenario, SpectrumModel, StochasticEnsemble, TimeSignal,
+    ir::{
+        FiveToSixRule, IrParseBudget, LEGACY_SCENARIO_IR_VERSION, SCENARIO_IR_VERSION, parse_ir,
+        parse_ir_with_budget, write_ir,
+    },
 };
 
 fn verdict(case: &str, detail: &str) {
@@ -25,6 +29,12 @@ const MASS_FLOW: Dims = Dims([0, 1, -1, 0, 0, 0]);
 const PRESSURE: Dims = Dims([-1, 1, -2, 0, 0, 0]);
 const RATE: Dims = Dims([0, 0, -1, 0, 0, 0]);
 const TIME: Dims = Dims([0, 0, 1, 0, 0, 0]);
+const LEGACY_MINIMAL_IR: &str = concat!(
+    "(scenario \"legacy-v1\" 7 (environment ",
+    "(qty 0 1 0 -2 0 0) (qty 0 1 0 -2 0 0) (qty -9.80665 1 0 -2 0 0) ",
+    "(qty 293.15 0 0 0 1 0) (qty 101325 -1 1 -2 0 0)) ",
+    "(frames) (bcs) (cases) (combos) (ensembles) (contacts))"
+);
 
 /// The fixture's ensemble battery (all three model families).
 fn fixture_ensembles() -> Vec<StochasticEnsemble> {
@@ -203,9 +213,15 @@ fn sc_001_ir_round_trip_memory_and_ledger() {
     let s = rich_scenario();
     assert_eq!(s.validate(), Vec::new(), "the fixture must be admissible");
     let text = write_ir(&s);
+    assert!(
+        text.starts_with("(scenario :version 2 "),
+        "canonical scenario IR must carry its semantic version"
+    );
     assert_eq!(text, write_ir(&s), "canonical IR must be byte-stable");
     let back = parse_ir(&text).expect("canonical IR parses");
-    assert_eq!(back, s, "IR round trip must be lossless");
+    assert_eq!(back.source_version(), SCENARIO_IR_VERSION);
+    assert_eq!(back.migration(), None);
+    assert_eq!(back.scenario(), &s, "IR round trip must be lossless");
     // Ledger round trip (dev-dependency: the L6 integration exercised
     // from tests, keeping the L3 runtime dependency graph clean).
     let dir = std::env::temp_dir().join(format!("fs-scenario-{}", std::process::id()));
@@ -220,12 +236,214 @@ fn sc_001_ir_round_trip_memory_and_ledger() {
         .expect("fetch")
         .expect("present");
     let from_ledger = parse_ir(std::str::from_utf8(&bytes).expect("utf8")).expect("parses");
-    assert_eq!(from_ledger, s, "ledger round trip must be lossless");
+    assert_eq!(
+        from_ledger.scenario(),
+        &s,
+        "ledger round trip must be lossless"
+    );
     let _ = std::fs::remove_dir_all(&dir);
     verdict(
         "sc-001",
         "scenario == parse(write(scenario)) in memory and through a ledger artifact",
     );
+}
+
+#[test]
+fn sc_001a_legacy_five_base_ir_decodes_with_receipt() {
+    let implicit = parse_ir(LEGACY_MINIMAL_IR).expect("implicit historical v1 parses");
+    assert_eq!(implicit.source_version(), LEGACY_SCENARIO_IR_VERSION);
+    let implicit_receipt = implicit
+        .migration()
+        .expect("legacy migration receipt is mandatory");
+    assert_eq!(
+        implicit_receipt.source_version(),
+        LEGACY_SCENARIO_IR_VERSION
+    );
+    assert_eq!(implicit_receipt.target_version(), SCENARIO_IR_VERSION);
+    assert_eq!(implicit_receipt.source_width(), 5);
+    assert_eq!(implicit_receipt.target_width(), 6);
+    assert_eq!(implicit_receipt.rule(), FiveToSixRule::AppendMoleZero);
+    assert_eq!(
+        implicit_receipt.old_hash(),
+        ContentHash::from_hex("a9d2537cc4717dae81a760d18f11f5f4876b5f8fc77535156f29f44004f37a22")
+            .expect("pinned implicit-v1 hash")
+    );
+    assert_eq!(
+        implicit.scenario().environment.ambient_pressure.dims,
+        Dims([-1, 1, -2, 0, 0, 0]),
+        "the immutable crosswalk appends mol=0"
+    );
+
+    let explicit_text = LEGACY_MINIMAL_IR.replacen("(scenario ", "(scenario :version 1 ", 1);
+    let explicit = parse_ir(&explicit_text).expect("explicit historical v1 parses");
+    assert_eq!(explicit.source_version(), LEGACY_SCENARIO_IR_VERSION);
+    let explicit_receipt = explicit
+        .migration()
+        .expect("explicit v1 also requires a receipt");
+    assert_eq!(
+        explicit_receipt.old_hash(),
+        ContentHash::from_hex("1ca63b192cbac63086a4447cf9adfd5f87b081505aafb17107a0538e42428415")
+            .expect("pinned explicit-v1 hash")
+    );
+    assert_ne!(explicit_receipt.old_hash(), implicit_receipt.old_hash());
+    assert_eq!(explicit.scenario(), implicit.scenario());
+
+    let canonical = write_ir(implicit.scenario());
+    assert!(canonical.starts_with("(scenario :version 2 "));
+    assert_ne!(
+        canonical, LEGACY_MINIMAL_IR,
+        "legacy bytes are never rewritten in place"
+    );
+    let pinned_canonical =
+        ContentHash::from_hex("f74494d0152c0587c611cdab5dcc2f96baca05bfe50fa13a18f4a64ada15bffc")
+            .expect("pinned canonical-v2 hash");
+    assert_eq!(implicit_receipt.new_hash(), pinned_canonical);
+    assert_eq!(explicit_receipt.new_hash(), pinned_canonical);
+    assert!(implicit_receipt.verifies(LEGACY_MINIMAL_IR.as_bytes(), canonical.as_bytes()));
+    assert!(explicit_receipt.verifies(explicit_text.as_bytes(), canonical.as_bytes()));
+    assert!(!implicit_receipt.verifies(b"tampered", canonical.as_bytes()));
+    let reparsed = parse_ir(&canonical).expect("migrated canonical v2 parses");
+    assert_eq!(reparsed.source_version(), SCENARIO_IR_VERSION);
+    assert_eq!(reparsed.migration(), None);
+    assert_eq!(reparsed.scenario(), implicit.scenario());
+}
+
+#[test]
+fn sc_001c_version_and_dimension_arity_fail_closed() {
+    let explicit_v1 = LEGACY_MINIMAL_IR.replacen("(scenario ", "(scenario :version 1 ", 1);
+    let v1_six = explicit_v1.replacen("(qty 0 1 0 -2 0 0)", "(qty 0 1 0 -2 0 0 0)", 1);
+    assert_ne!(v1_six, explicit_v1, "the v1 fixture mutation must apply");
+    let error = parse_ir(&v1_six).expect_err("v1 must reject six dimension exponents");
+    assert!(
+        error.to_string().contains("5 exponents"),
+        "unexpected v1 arity diagnosis: {error}"
+    );
+
+    let legacy = parse_ir(LEGACY_MINIMAL_IR).expect("legacy fixture parses");
+    let canonical = write_ir(legacy.scenario());
+    let v2_five = canonical.replacen("(qty 0 1 0 -2 0 0 0)", "(qty 0 1 0 -2 0 0)", 1);
+    assert_ne!(v2_five, canonical, "the v2 fixture mutation must apply");
+    let error = parse_ir(&v2_five).expect_err("v2 must reject five dimension exponents");
+    assert!(
+        error.to_string().contains("6 exponents"),
+        "unexpected v2 arity diagnosis: {error}"
+    );
+
+    let current_tag = format!(":version {SCENARIO_IR_VERSION}");
+    for unsupported in [0, 3, u32::MAX] {
+        let bad = canonical.replacen(&current_tag, &format!(":version {unsupported}"), 1);
+        assert_ne!(bad, canonical, "the version mutation must apply");
+        let error = parse_ir(&bad).expect_err("unsupported versions must fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported scenario IR version"),
+            "unexpected version diagnosis for {unsupported}: {error}"
+        );
+    }
+}
+
+#[test]
+fn sc_001d_legacy_crosswalk_reaches_nested_quantities_and_dims() {
+    const LEGACY_NESTED: &str = concat!(
+        "(scenario :version 1 \"nested-v1\" 7 ",
+        "(environment ",
+        "(qty 0 1 0 -2 0 0) (qty 0 1 0 -2 0 0) (qty -9.8 1 0 -2 0 0) ",
+        "(qty 293 0 0 0 1 0) (qty 101325 -1 1 -2 0 0)) ",
+        "(frames (frame 1 \"rotor\" 0 ",
+        "(rotating (vec 0 0 1) (vec 0 0 0) (qty 2 0 0 -1 0 0)))) ",
+        "(bcs (bc \"feed\" incompressible-flow mass-flow-inlet 1 ",
+        "(signal (table linear (dims 0 1 -1 0 0) (times 0 1) (values 0 1))) ",
+        "incompressible)) ",
+        "(cases) (combos) ",
+        "(ensembles (ensemble \"gust\" 9 2 ",
+        "(qty 1 0 0 1 0 0) (qty 0.1 0 0 1 0 0) ",
+        "(dryden (qty 1 1 0 -1 0 0) (qty 2 1 0 0 0 0) ",
+        "(qty 3 1 0 -1 0 0)))) ",
+        "(contacts))"
+    );
+
+    let decoded = parse_ir(LEGACY_NESTED).expect("nested explicit v1 parses");
+    assert_eq!(decoded.source_version(), LEGACY_SCENARIO_IR_VERSION);
+    let receipt = decoded
+        .migration()
+        .expect("nested legacy input requires a receipt");
+    let scenario = decoded.scenario();
+
+    let FrameMotion::Rotating { rate, .. } = &scenario.frames.frames[0].motion else {
+        panic!("the nested fixture must retain its rotating frame");
+    };
+    assert_eq!(rate.dims.0[5], 0);
+
+    let Some(BcValue::Signal(TimeSignal::Table { dims, .. })) = scenario.base_bcs[0].value.as_ref()
+    else {
+        panic!("the nested fixture must retain its table signal");
+    };
+    assert_eq!(dims.0[5], 0);
+
+    let ensemble = &scenario.ensembles[0];
+    let SpectrumModel::Dryden {
+        sigma,
+        length_scale,
+        mean_speed,
+    } = &ensemble.model
+    else {
+        panic!("the nested fixture must retain its Dryden model");
+    };
+    for quantity in [
+        &ensemble.duration,
+        &ensemble.dt,
+        sigma,
+        length_scale,
+        mean_speed,
+    ] {
+        assert_eq!(quantity.dims.0[5], 0);
+    }
+
+    let canonical = write_ir(scenario);
+    assert!(receipt.verifies(LEGACY_NESTED.as_bytes(), canonical.as_bytes()));
+}
+
+#[test]
+fn sc_001e_v2_preserves_nonzero_mole_exponents_in_nested_paths() {
+    let mut scenario = rich_scenario();
+
+    let FrameMotion::Rotating { rate, .. } = &mut scenario.frames.frames[1].motion else {
+        panic!("rich fixture must contain its rotating frame");
+    };
+    rate.dims.0[5] = 1;
+
+    let Some(BcValue::Signal(TimeSignal::Table { dims, .. })) = scenario.base_bcs[0].value.as_mut()
+    else {
+        panic!("rich fixture must contain its table signal");
+    };
+    dims.0[5] = -1;
+
+    let SpectrumModel::Dryden { sigma, .. } = &mut scenario.ensembles[1].model else {
+        panic!("rich fixture must contain its Dryden ensemble");
+    };
+    sigma.dims.0[5] = 2;
+
+    let text = write_ir(&scenario);
+    let decoded = parse_ir(&text).expect("canonical v2 with mole exponents parses");
+    assert_eq!(decoded.source_version(), SCENARIO_IR_VERSION);
+    assert_eq!(decoded.migration(), None);
+    assert_eq!(decoded.scenario(), &scenario);
+
+    let FrameMotion::Rotating { rate, .. } = &decoded.scenario().frames.frames[1].motion else {
+        panic!("decoded fixture must retain its rotating frame");
+    };
+    assert_eq!(rate.dims.0[5], 1);
+    let Some(BcValue::Signal(TimeSignal::Table { dims, .. })) =
+        decoded.scenario().base_bcs[0].value.as_ref()
+    else {
+        panic!("decoded fixture must retain its table signal");
+    };
+    assert_eq!(dims.0[5], -1);
+    let SpectrumModel::Dryden { sigma, .. } = &decoded.scenario().ensembles[1].model else {
+        panic!("decoded fixture must retain its Dryden ensemble");
+    };
+    assert_eq!(sigma.dims.0[5], 2);
 }
 
 #[test]
@@ -288,7 +506,10 @@ fn sc_002_compatibility_checks_catch_seeded_violations() {
         region: "in".to_string(),
         physics: Physics::IncompressibleFlow,
         kind: BcKind::Dirichlet,
-        value: Some(BcValue::Uniform(QtyAny::new(300.0, Dims([0, 0, 0, 1, 0, 0])))),
+        value: Some(BcValue::Uniform(QtyAny::new(
+            300.0,
+            Dims([0, 0, 0, 1, 0, 0]),
+        ))),
         compatibility: None,
         frame: 7, // undefined frame
     });
@@ -360,10 +581,75 @@ fn sc_001b_non_ascii_names_round_trip() {
     });
     let text = write_ir(&s);
     let back = parse_ir(&text).expect("non-ASCII IR parses");
-    assert_eq!(back, s, "non-ASCII names must round-trip losslessly");
+    assert_eq!(
+        back.scenario(),
+        &s,
+        "non-ASCII names must round-trip losslessly"
+    );
     verdict(
         "sc-001b",
         "scenario/frame/region names with non-ASCII (é, ü, –, ✓, CJK) round-trip losslessly",
+    );
+}
+
+#[test]
+fn sc_001c_string_escapes_are_canonical_and_unambiguous() {
+    let mut scenario = Scenario::new(r#"quoted "name" and \ path"#, 7, Environment::earth_lab());
+    scenario.frames.add(Frame {
+        id: FrameId(1),
+        name: r#"frame \ "one""#.to_string(),
+        parent: FrameId(0),
+        motion: FrameMotion::Fixed {
+            orientation: Quat::identity(),
+            translation: Vec3::new(0.0, 0.0, 0.0),
+        },
+    });
+    let canonical = write_ir(&scenario);
+    let decoded = parse_ir(&canonical).expect("writer escapes must parse");
+    assert_eq!(decoded.scenario(), &scenario);
+    assert_eq!(write_ir(decoded.scenario()), canonical);
+
+    let unknown_escape = canonical.replacen("quoted", r"quo\qted", 1);
+    assert_ne!(unknown_escape, canonical, "escape mutation must apply");
+    let error = parse_ir(&unknown_escape).expect_err("unknown escapes are non-canonical");
+    assert!(
+        error.to_string().contains("unsupported string escape"),
+        "unexpected diagnostic: {error}"
+    );
+    verdict(
+        "sc-001c",
+        "IR accepts exactly the writer's quote/backslash escapes and rejects alias encodings",
+    );
+}
+
+#[test]
+fn sc_001d_canonical_ir_normalizes_physically_irrelevant_signed_zero() {
+    let positive_zero = Scenario::new("zero", 11, Environment::earth_lab());
+    let mut negative_zero = positive_zero.clone();
+    negative_zero.environment.gravity[0].value = -0.0;
+
+    assert_eq!(
+        positive_zero, negative_zero,
+        "derived semantic equality aliases signed zero"
+    );
+    assert_eq!(
+        write_ir(&positive_zero),
+        write_ir(&negative_zero),
+        "equal scenarios must have one canonical byte identity"
+    );
+    let canonical = write_ir(&negative_zero);
+    assert_eq!(
+        write_ir(
+            parse_ir(&canonical)
+                .expect("canonical signed-zero form parses")
+                .scenario()
+        ),
+        canonical,
+        "canonical writer must be idempotent"
+    );
+    verdict(
+        "sc-001d",
+        "semantic float equality and canonical scenario identity agree for signed zero",
     );
 }
 
@@ -564,7 +850,7 @@ fn sc_003_ensembles_reproduce_bitwise_from_seed() {
     }
     verdict(
         "sc-003",
-        "KT/Dryden/Carreau members bitwise from (seed, model, member); bands respected",
+        "KT/Dryden/Carreau members replay bitwise from the complete retained ensemble spec; bands respected",
     );
 }
 
@@ -604,7 +890,10 @@ fn sc_004_kanai_tajimi_matches_target_spectrum() {
     let mut rel_sum = 0.0f64;
     let mut rel_max = 0.0f64;
     for (avg, &k) in est.iter().map(|e| e / f64::from(members)).zip(band.iter()) {
-        let target = ens.model.psd(k as f64 * d_omega);
+        let target = ens
+            .model
+            .try_psd(k as f64 * d_omega)
+            .expect("validated fixture has a finite PSD");
         let rel = (avg - target).abs() / target;
         rel_sum += rel;
         rel_max = rel_max.max(rel);
@@ -721,7 +1010,10 @@ fn sc_006_unit_rescaling_coherence() {
     });
     assert_eq!(a.validate(), Vec::new());
     let mut b = a.clone();
-    b.base_bcs[0].value = Some(BcValue::Uniform(QtyAny::new(350.0, Dims([0, 0, 0, 1, 0, 0]))));
+    b.base_bcs[0].value = Some(BcValue::Uniform(QtyAny::new(
+        350.0,
+        Dims([0, 0, 0, 1, 0, 0]),
+    )));
     assert_eq!(
         write_ir(&a),
         write_ir(&b),
@@ -730,5 +1022,650 @@ fn sc_006_unit_rescaling_coherence() {
     verdict(
         "sc-006",
         "deg/rad and mm/m spellings converge; validation + canonical IR are spelling-blind",
+    );
+}
+
+#[test]
+fn sc_007_ir_budgets_and_chebyshev_inputs_fail_closed() {
+    let minimal = Scenario::new("budget", 1, Environment::earth_lab());
+    let canonical = write_ir(&minimal);
+    let defaults = IrParseBudget::default();
+
+    // Every configurable dimension has a demonstrated exact-pass / one-less
+    // refusal boundary on this retained canonical fixture.
+    let exact_bytes = IrParseBudget {
+        max_bytes: canonical.len(),
+        ..defaults
+    };
+    parse_ir_with_budget(&canonical, exact_bytes).expect("exact byte budget admits fixture");
+    let error = parse_ir_with_budget(
+        &canonical,
+        IrParseBudget {
+            max_bytes: canonical.len() - 1,
+            ..defaults
+        },
+    )
+    .expect_err("byte budget minus one must refuse");
+    assert!(error.to_string().contains("byte budget"));
+
+    for (dimension, exact, below) in [
+        ("depth", 4usize, 3usize),
+        ("atom", 11usize, 10usize),
+        ("list", 12usize, 11usize),
+    ] {
+        let exact_budget = match dimension {
+            "depth" => IrParseBudget {
+                max_depth: exact,
+                ..defaults
+            },
+            "atom" => IrParseBudget {
+                max_atom_bytes: exact,
+                ..defaults
+            },
+            "list" => IrParseBudget {
+                max_list_items: exact,
+                ..defaults
+            },
+            _ => unreachable!(),
+        };
+        parse_ir_with_budget(&canonical, exact_budget)
+            .unwrap_or_else(|error| panic!("exact {dimension} budget must pass: {error}"));
+        let below_budget = match dimension {
+            "depth" => IrParseBudget {
+                max_depth: below,
+                ..defaults
+            },
+            "atom" => IrParseBudget {
+                max_atom_bytes: below,
+                ..defaults
+            },
+            "list" => IrParseBudget {
+                max_list_items: below,
+                ..defaults
+            },
+            _ => unreachable!(),
+        };
+        let error = parse_ir_with_budget(&canonical, below_budget)
+            .expect_err("budget minus one must refuse");
+        assert!(
+            error.to_string().contains("budget"),
+            "{dimension} refusal must identify its budget: {error}"
+        );
+    }
+
+    let exact_nodes = (1usize..=256)
+        .find(|&max_nodes| {
+            parse_ir_with_budget(
+                &canonical,
+                IrParseBudget {
+                    max_nodes,
+                    ..defaults
+                },
+            )
+            .is_ok()
+        })
+        .expect("minimal fixture has a small finite node count");
+    assert_eq!(
+        exact_nodes, 65,
+        "wire-shape node count is retained evidence"
+    );
+    let error = parse_ir_with_budget(
+        &canonical,
+        IrParseBudget {
+            max_nodes: exact_nodes - 1,
+            ..defaults
+        },
+    )
+    .expect_err("node budget minus one must refuse");
+    assert!(error.to_string().contains("node budget"));
+    let error = parse_ir_with_budget(
+        &canonical,
+        IrParseBudget {
+            max_depth: fs_scenario::ir::MAX_IR_PARSE_DEPTH + 1,
+            ..defaults
+        },
+    )
+    .expect_err("callers cannot raise the recursive hard-safety ceiling");
+    assert!(error.to_string().contains("hard safety limit"));
+
+    // The public parser must never unwind through Cheb1's asserting
+    // constructor. Exercise every constructor precondition using malformed
+    // authority bytes derived from a valid retained fixture.
+    let profile_ir = write_ir(&rich_scenario());
+    let empty_coefficients = truncate_form(&profile_ir, "(coeffs");
+    let reversed_domain = profile_ir.replacen(") 0 1 (coeffs", ") 1 0 (coeffs", 1);
+    assert_ne!(reversed_domain, profile_ir, "domain mutation must apply");
+    let nonfinite_coefficient = profile_ir.replacen("(coeffs ", "(coeffs NaN ", 1);
+    assert_ne!(
+        nonfinite_coefficient, profile_ir,
+        "coefficient mutation must apply"
+    );
+    for (name, malformed) in [
+        ("empty coefficients", empty_coefficients),
+        ("reversed domain", reversed_domain),
+        ("non-finite coefficient", nonfinite_coefficient),
+    ] {
+        let error = parse_ir(&malformed).expect_err("malformed profile must return Parse");
+        assert!(
+            matches!(&error, fs_scenario::ScenarioError::Parse { .. }),
+            "{name} returned the wrong error family: {error}"
+        );
+    }
+    verdict(
+        "sc-007",
+        "byte/depth/node/atom/list budgets enforce exact boundaries; malformed Chebyshev IR returns Parse without unwind",
+    );
+}
+
+#[test]
+fn sc_008_result_apis_and_validation_refuse_nonfinite_public_values() {
+    let bad_signals = [
+        TimeSignal::Constant(QtyAny::dimensionless(f64::NAN)),
+        TimeSignal::Ramp {
+            t_start: 0.0,
+            t_end: 1.0,
+            from: QtyAny::dimensionless(0.0),
+            to: QtyAny::dimensionless(f64::INFINITY),
+        },
+        TimeSignal::Table {
+            times: vec![0.0, f64::NAN],
+            values: vec![0.0, 1.0],
+            dims: Dims::NONE,
+            interp: Interp::Linear,
+        },
+        TimeSignal::Table {
+            times: vec![0.0, 1.0],
+            values: vec![0.0, f64::NEG_INFINITY],
+            dims: Dims::NONE,
+            interp: Interp::Hold,
+        },
+    ];
+    for signal in &bad_signals {
+        assert!(
+            signal.eval(0.5).is_err(),
+            "direct signal evaluation must independently refuse {signal:?}"
+        );
+    }
+    let overflowing_ramp = TimeSignal::Ramp {
+        t_start: 0.0,
+        t_end: 1.0,
+        from: QtyAny::dimensionless(f64::MAX),
+        to: QtyAny::dimensionless(-f64::MAX),
+    };
+    assert_eq!(
+        overflowing_ramp
+            .eval(-1.0)
+            .expect("left clamp")
+            .value
+            .to_bits(),
+        f64::MAX.to_bits(),
+        "clamped endpoints must not evaluate the overflowing delta"
+    );
+    assert_eq!(
+        overflowing_ramp
+            .eval(2.0)
+            .expect("right clamp")
+            .value
+            .to_bits(),
+        (-f64::MAX).to_bits(),
+        "clamped endpoints must be returned exactly"
+    );
+    assert_eq!(
+        overflowing_ramp.eval(0.5).expect("stable midpoint").value,
+        0.0,
+        "interior convex interpolation must not overflow opposite-sign endpoints"
+    );
+    let huge_time_table = TimeSignal::Table {
+        times: vec![-f64::MAX, f64::MAX],
+        values: vec![f64::MAX, -f64::MAX],
+        dims: Dims::NONE,
+        interp: Interp::Linear,
+    };
+    assert_eq!(
+        huge_time_table
+            .eval(0.0)
+            .expect("scaled affine ratio")
+            .value,
+        0.0,
+        "table interpolation must remain finite when direct time/value deltas overflow"
+    );
+    let degenerate_ramp = TimeSignal::Ramp {
+        t_start: 1.0,
+        t_end: 1.0,
+        from: QtyAny::dimensionless(0.0),
+        to: QtyAny::dimensionless(1.0),
+    };
+    assert!(
+        degenerate_ramp.eval(0.0).is_err(),
+        "a linear ramp requires a strict nonempty time interval"
+    );
+
+    let fixed_bad_quaternion = Frame {
+        id: FrameId(1),
+        name: "bad-quaternion".to_string(),
+        parent: FrameId(0),
+        motion: FrameMotion::Fixed {
+            orientation: Quat {
+                w: 2.0,
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            translation: Vec3::new(0.0, 0.0, 0.0),
+        },
+    };
+    assert!(
+        fs_scenario::FrameTree::local_pose(&fixed_bad_quaternion, 0.0).is_err(),
+        "non-unit fixed quaternions must not reach Motor::from_parts"
+    );
+    let rotating_bad_axis = Frame {
+        id: FrameId(2),
+        name: "bad-axis".to_string(),
+        parent: FrameId(0),
+        motion: FrameMotion::Rotating {
+            axis: [f64::NAN, 0.0, 1.0],
+            center: Vec3::new(0.0, f64::INFINITY, 0.0),
+            rate: QtyAny::new(f64::INFINITY, RATE),
+        },
+    };
+    assert!(
+        fs_scenario::FrameTree::local_pose(&rotating_bad_axis, 1.0).is_err(),
+        "invalid rotating geometry/rate must fail before motor construction"
+    );
+    let derived_overflow = Frame {
+        id: FrameId(3),
+        name: "derived-overflow".to_string(),
+        parent: FrameId(0),
+        motion: FrameMotion::Rotating {
+            axis: [
+                0.577_350_269_189_625_8,
+                0.577_350_269_189_625_8,
+                0.577_350_269_189_625_8,
+            ],
+            center: Vec3::new(f64::MAX, -f64::MAX, 0.0),
+            rate: QtyAny::new(std::f64::consts::PI, RATE),
+        },
+    };
+    assert!(
+        fs_scenario::FrameTree::local_pose(&derived_overflow, 1.0).is_err(),
+        "finite center/rate inputs that overflow motor coefficients must be refused"
+    );
+    let mut overflowing_chain = fs_scenario::FrameTree::new();
+    for (id, parent) in [(1, 0), (2, 1), (3, 2)] {
+        overflowing_chain.add(Frame {
+            id: FrameId(id),
+            name: format!("huge-translation-{id}"),
+            parent: FrameId(parent),
+            motion: FrameMotion::Fixed {
+                orientation: Quat::identity(),
+                translation: Vec3::new(f64::MAX, 0.0, 0.0),
+            },
+        });
+    }
+    assert!(
+        overflowing_chain.world_pose(FrameId(3), 0.0).is_err(),
+        "finite local motors whose parent composition overflows must be refused"
+    );
+    assert!(
+        fs_scenario::FrameTree::new()
+            .world_pose(FrameId(0), f64::NAN)
+            .is_err(),
+        "even the world-frame fast path must reject non-finite time"
+    );
+    let duplicate_frame = Frame {
+        id: FrameId(9),
+        name: "duplicate-a".to_string(),
+        parent: FrameId(0),
+        motion: FrameMotion::Fixed {
+            orientation: Quat::identity(),
+            translation: Vec3::new(0.0, 0.0, 0.0),
+        },
+    };
+    let mut ambiguous_tree = fs_scenario::FrameTree::new();
+    ambiguous_tree.add(duplicate_frame.clone());
+    ambiguous_tree.add(Frame {
+        name: "duplicate-b".to_string(),
+        ..duplicate_frame
+    });
+    assert!(
+        ambiguous_tree.world_pose(FrameId(9), 0.0).is_err(),
+        "the direct pose API must not resolve duplicate ids by first match"
+    );
+
+    let mut scenario = Scenario::new("nonfinite", 9, Environment::earth_lab());
+    scenario.environment.gravity[0].value = f64::INFINITY;
+    scenario.environment.ambient_temperature.value = -1.0;
+    scenario.environment.ambient_pressure.value = f64::NAN;
+    scenario.frames.add(fixed_bad_quaternion);
+    scenario.frames.add(rotating_bad_axis);
+    scenario.base_bcs.push(BoundaryCondition {
+        region: "hot".to_string(),
+        physics: Physics::Thermal,
+        kind: BcKind::Dirichlet,
+        value: Some(BcValue::Uniform(QtyAny::new(
+            f64::INFINITY,
+            Dims([0, 0, 0, 1, 0, 0]),
+        ))),
+        compatibility: Some(Compat::Incompressible),
+        frame: 0,
+    });
+    scenario.base_bcs.push(BoundaryCondition {
+        region: "trace".to_string(),
+        physics: Physics::Thermal,
+        kind: BcKind::Dirichlet,
+        value: Some(BcValue::Signal(TimeSignal::Table {
+            times: vec![0.0, 1.0],
+            values: vec![293.0, f64::NAN],
+            dims: Dims([0, 0, 0, 1, 0, 0]),
+            interp: Interp::Linear,
+        })),
+        compatibility: None,
+        frame: 0,
+    });
+    scenario.contacts.push(ContactLaw {
+        region_a: "a".to_string(),
+        region_b: "b".to_string(),
+        model: ContactModel::Coulomb {
+            mu_s: 0.5,
+            mu_k: f64::NAN,
+        },
+    });
+    let violations = scenario.validate();
+    for code in [
+        "env-gravity-nonfinite",
+        "env-temperature-range",
+        "env-pressure-range",
+        "frame-orientation-invalid",
+        "frame-axis-not-unit",
+        "frame-center-nonfinite",
+        "frame-rate-nonfinite",
+        "bc-value-nonfinite",
+        "bc-compat-forbidden",
+        "signal-value-nonfinite",
+        "contact-coulomb-range",
+    ] {
+        assert!(
+            violations.iter().any(|violation| violation.code == code),
+            "missing fail-closed validation code {code}; got {violations:#?}"
+        );
+    }
+
+    let mut overflowing_flux = Scenario::new("overflowing-flux", 1, Environment::earth_lab());
+    for region in ["a", "b"] {
+        overflowing_flux.base_bcs.push(BoundaryCondition {
+            region: region.to_string(),
+            physics: Physics::IncompressibleFlow,
+            kind: BcKind::MassFlowInlet,
+            value: Some(BcValue::Uniform(QtyAny::new(f64::MAX, MASS_FLOW))),
+            compatibility: Some(Compat::Incompressible),
+            frame: 0,
+        });
+    }
+    assert!(
+        overflowing_flux
+            .validate()
+            .iter()
+            .any(|violation| violation.code == "flux-aggregation-nonfinite"),
+        "finite mass-flow values whose sum overflows must not bypass compatibility admission"
+    );
+
+    let profile_flow = BoundaryCondition {
+        region: "profile-inlet".to_string(),
+        physics: Physics::IncompressibleFlow,
+        kind: BcKind::MassFlowInlet,
+        value: Some(BcValue::Profile(ChebProfile {
+            cheb: fs_cheb::Cheb1::from_coeffs(0.0, 1.0, vec![2.0]),
+            dims: MASS_FLOW,
+        })),
+        compatibility: Some(Compat::Incompressible),
+        frame: 0,
+    };
+    let mut profile_violations = Vec::new();
+    profile_flow.check(&mut profile_violations);
+    assert!(
+        profile_violations
+            .iter()
+            .any(|violation| violation.code == "bc-mass-flow-profile"),
+        "a profile is not a certified total kg/s contribution: {profile_violations:#?}"
+    );
+    assert!(
+        profile_flow.mass_flow_at(0.0).is_err(),
+        "the direct compatibility API must not silently reinterpret a profile as zero flow"
+    );
+    let missing_flow = BoundaryCondition {
+        region: "missing-total".to_string(),
+        physics: Physics::IncompressibleFlow,
+        kind: BcKind::MassFlowInlet,
+        value: None,
+        compatibility: Some(Compat::Incompressible),
+        frame: 0,
+    };
+    assert!(
+        missing_flow.mass_flow_at(0.0).is_err(),
+        "a direct total-flow query must not conflate a missing value with an irrelevant BC"
+    );
+    let wrong_physics_flow = BoundaryCondition {
+        physics: Physics::Thermal,
+        value: Some(BcValue::Uniform(QtyAny::new(1.0, MASS_FLOW))),
+        ..missing_flow
+    };
+    assert!(
+        wrong_physics_flow.mass_flow_at(0.0).is_err(),
+        "a MassFlowInlet attached to unsupported physics must not disappear from a direct query"
+    );
+
+    let unevaluable_flow = BoundaryCondition {
+        region: "overflowing-signal".to_string(),
+        physics: Physics::IncompressibleFlow,
+        kind: BcKind::MassFlowInlet,
+        value: Some(BcValue::Signal(TimeSignal::Chebfun(ChebProfile {
+            cheb: fs_cheb::Cheb1::from_coeffs(-1.0, 1.0, vec![f64::MAX, 0.0, -f64::MAX]),
+            dims: MASS_FLOW,
+        }))),
+        compatibility: Some(Compat::Incompressible),
+        frame: 0,
+    };
+    assert!(
+        unevaluable_flow.mass_flow_at(0.0).is_err(),
+        "finite signal coefficients can still overflow during evaluation"
+    );
+    let mut unevaluable_flux = Scenario::new("unevaluable-flux", 1, Environment::earth_lab());
+    unevaluable_flux.base_bcs.push(unevaluable_flow.clone());
+    let unevaluable_violations = unevaluable_flux.validate();
+    assert!(
+        unevaluable_violations
+            .iter()
+            .any(|violation| violation.code == "flux-evaluation"),
+        "signal evaluation failure must block compatibility admission: {unevaluable_violations:#?}"
+    );
+    unevaluable_flux.base_bcs.push(BoundaryCondition {
+        region: "pressure-relief".to_string(),
+        physics: Physics::IncompressibleFlow,
+        kind: BcKind::PressureOutlet,
+        value: Some(BcValue::Uniform(QtyAny::new(101_325.0, PRESSURE))),
+        compatibility: None,
+        frame: 0,
+    });
+    let outlet_violations = unevaluable_flux.validate();
+    assert!(
+        outlet_violations
+            .iter()
+            .any(|violation| violation.code == "flux-evaluation"),
+        "a pressure outlet may absorb finite imbalance but must not hide an unevaluable inlet: {outlet_violations:#?}"
+    );
+    verdict(
+        "sc-008",
+        "direct signal/frame/flux APIs and whole-scenario validation reject non-finite/domain-invalid public values",
+    );
+}
+
+#[test]
+fn sc_008a_realization_budgets_and_carreau_domains_fail_closed() {
+    let spectral = fixture_ensembles()[0].clone();
+    let requested_samples = 512usize;
+    let requested_work =
+        requested_samples * (requested_samples / 2) + requested_samples + requested_samples / 2;
+    let error = spectral
+        .realize_with_budget(
+            0,
+            RealizationBudget {
+                max_samples: requested_samples - 1,
+                max_work: usize::MAX,
+            },
+        )
+        .expect_err("sample cap minus one must refuse before allocation");
+    assert!(error.to_string().contains("samples exceeds budget"));
+    let error = spectral
+        .realize_with_budget(
+            0,
+            RealizationBudget {
+                max_samples: requested_samples,
+                max_work: requested_work - 1,
+            },
+        )
+        .expect_err("work cap minus one must refuse before allocation");
+    assert!(error.to_string().contains("work"));
+    let admitted = spectral
+        .realize_with_budget(
+            0,
+            RealizationBudget {
+                max_samples: requested_samples,
+                max_work: requested_work,
+            },
+        )
+        .expect("exact sample/work budgets admit the realization");
+    assert_eq!(admitted.times.len(), requested_samples);
+    assert!(admitted.values.iter().all(|value| value.is_finite()));
+
+    let mut nonfinite_duration = spectral.clone();
+    nonfinite_duration.duration.value = f64::NAN;
+    assert!(nonfinite_duration.realize(0).is_err());
+    let mut one_sample_spectrum = spectral.clone();
+    one_sample_spectrum.duration.value = one_sample_spectrum.dt.value;
+    let one_sample_error = one_sample_spectrum
+        .realize(0)
+        .expect_err("a one-sample spectral grid has no random harmonic and must refuse");
+    assert!(one_sample_error.to_string().contains("spectral"));
+    let mut one_sample_violations = Vec::new();
+    one_sample_spectrum.check(&mut one_sample_violations);
+    assert!(
+        one_sample_violations
+            .iter()
+            .any(|violation| violation.code == "ensemble-spectral-grid"),
+        "whole-scenario admission must catch the same degenerate grid"
+    );
+    let mut unrepresentable_ratio = spectral.clone();
+    unrepresentable_ratio.duration.value = f64::MAX;
+    unrepresentable_ratio.dt.value = f64::MIN_POSITIVE;
+    assert!(
+        unrepresentable_ratio.realize(0).is_err(),
+        "infinite duration/dt ratio must refuse without a capacity attempt"
+    );
+    let mut unrepresentable_violations = Vec::new();
+    unrepresentable_ratio.check(&mut unrepresentable_violations);
+    assert!(
+        unrepresentable_violations
+            .iter()
+            .any(|violation| violation.code == "ensemble-spectral-grid"),
+        "structural admission must reject the same unrepresentable spectral grid"
+    );
+    let mut invalid_model = spectral.clone();
+    let SpectrumModel::KanaiTajimi { omega_g, .. } = &mut invalid_model.model else {
+        unreachable!();
+    };
+    omega_g.value = 0.0;
+    assert!(
+        invalid_model.realize(0).is_err(),
+        "direct realize must not rely on Scenario::validate"
+    );
+    assert!(
+        invalid_model.model.try_psd(1.0).is_err(),
+        "the direct PSD API must independently refuse invalid public model values"
+    );
+    assert!(
+        spectral.model.try_psd(f64::NAN).is_err(),
+        "the direct PSD API must refuse non-finite frequencies"
+    );
+    assert!(
+        spectral.model.try_psd(-1.0).is_err(),
+        "a one-sided PSD must refuse negative angular frequencies"
+    );
+
+    let valid_carreau = fixture_ensembles()[2].clone();
+    assert!(
+        valid_carreau.model.try_psd(1.0).is_err(),
+        "a parameter-band model must not masquerade as a zero spectral density"
+    );
+    for member in 0..valid_carreau.members {
+        let realization = valid_carreau.realize(member).expect("valid Carreau member");
+        assert!(realization.values.iter().all(|value| value.is_finite()));
+        assert!(
+            realization.values[0] >= realization.values[1],
+            "every independently sampled member must preserve eta_zero >= eta_inf"
+        );
+    }
+    let mut nonfinite_band_grid = valid_carreau.clone();
+    nonfinite_band_grid.duration.value = f64::NAN;
+    let mut grid_violations = Vec::new();
+    nonfinite_band_grid.check(&mut grid_violations);
+    assert!(
+        grid_violations
+            .iter()
+            .any(|violation| violation.code == "ensemble-time-range"),
+        "ignored band-grid placeholders still travel in canonical IR and must be finite"
+    );
+    assert!(nonfinite_band_grid.realize(0).is_err());
+    assert!(
+        parse_ir(&write_ir(&Scenario {
+            ensembles: vec![nonfinite_band_grid],
+            ..Scenario::new("bad-band-grid", 1, Environment::earth_lab())
+        }))
+        .is_err(),
+        "the retained malformed fixture demonstrates why admission must reject non-finite band-grid fields"
+    );
+
+    let mut nonpositive = valid_carreau.clone();
+    let SpectrumModel::CarreauBand { eta_zero, .. } = &mut nonpositive.model else {
+        unreachable!();
+    };
+    eta_zero[0].value = 0.0;
+    let mut invalid_n = valid_carreau.clone();
+    let SpectrumModel::CarreauBand { n, .. } = &mut invalid_n.model else {
+        unreachable!();
+    };
+    *n = [0.0, 1.2];
+    let mut crossing_viscosities = valid_carreau.clone();
+    let SpectrumModel::CarreauBand {
+        eta_zero, eta_inf, ..
+    } = &mut crossing_viscosities.model
+    else {
+        unreachable!();
+    };
+    eta_zero[0].value = 0.1;
+    eta_zero[1].value = 0.2;
+    eta_inf[0].value = 0.15;
+    eta_inf[1].value = 0.25;
+
+    for (ensemble, expected_code) in [
+        (nonpositive, "ensemble-carreau-positive-finite"),
+        (invalid_n, "ensemble-carreau-power-index"),
+        (crossing_viscosities, "ensemble-carreau-viscosity-order"),
+    ] {
+        let mut violations = Vec::new();
+        ensemble.check(&mut violations);
+        assert!(
+            violations
+                .iter()
+                .any(|violation| violation.code == expected_code),
+            "missing {expected_code}: {violations:#?}"
+        );
+        assert!(
+            ensemble.realize(0).is_err(),
+            "direct realization must reject {expected_code}"
+        );
+    }
+    verdict(
+        "sc-008a",
+        "sample/work exact boundaries, ratio overflow, direct model validation, and physical Carreau domains fail closed",
     );
 }
