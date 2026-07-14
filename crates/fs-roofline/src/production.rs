@@ -38,8 +38,7 @@ use crate::{
     CUSTOM_REGISTRY_PROTOCOL_FIELD, DependencyReceiptBinding, FinalizedRegistryRun, MachineAxes,
     PRODUCTION_PROTOCOL_FIELD, RooflineKernel, citable_run_admission_error_for_snapshot,
     finalize_registry_tuning, finalize_registry_tuning_with_snapshot, json_escape,
-    record_run_with_protocol,
-    run_admission_error_for_snapshot, run_registry,
+    record_run_with_protocol, run_admission_error_for_snapshot, run_registry,
 };
 
 const RUN_NONCE_DOMAIN: &str = "org.frankensim.fs-roofline.production-run-nonce.v1";

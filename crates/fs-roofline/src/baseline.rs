@@ -2517,6 +2517,92 @@ mod tests {
     }
 
     #[test]
+    fn attested_transport_round_trips_multibyte_and_refuses_control_and_escape_abuse() {
+        let baseline = promote_baseline(
+            &quiet_candidates("unicode"),
+            "operator-Ω",
+            "μbench justification with ünïcode ✓ and π in valid provenance text",
+            20_000,
+            90,
+        )
+        .expect("multibyte provenance is valid text");
+        let key = "ops/2026-q3-Ω";
+        let authority = authority_with(key);
+        let attestation = attest(&baseline, key);
+        let mut store = AttestedBaselineStore::new();
+        store
+            .admit_verified(
+                baseline.clone(),
+                attestation,
+                &authority,
+                &retained(&baseline),
+            )
+            .expect("multibyte fields are admissible");
+        let text = store.to_jsonl();
+        let back = AttestedBaselineStore::from_jsonl(&text).expect("multibyte round trip");
+        assert_eq!(
+            back.to_jsonl(),
+            text,
+            "multibyte transport is byte-identical"
+        );
+
+        // A raw control byte inside a quoted string is corruption, not data.
+        let raw_control = text.replace(key, "ops/2026-q3-\u{1}Ω");
+        assert_ne!(raw_control, text);
+        assert!(
+            AttestedBaselineStore::from_jsonl(&raw_control).is_err(),
+            "raw control bytes inside strings must refuse"
+        );
+
+        // A lone surrogate escape can never decode to a char.
+        let surrogate = text.replace(key, "\\ud800");
+        assert_ne!(surrogate, text);
+        assert!(
+            AttestedBaselineStore::from_jsonl(&surrogate).is_err(),
+            "surrogate \\u escapes must refuse"
+        );
+
+        // Non-hex digits inside a \u escape are malformed.
+        let bad_hex = text.replace(key, "\\u00zz");
+        assert_ne!(bad_hex, text);
+        assert!(
+            AttestedBaselineStore::from_jsonl(&bad_hex).is_err(),
+            "non-hex \\u escapes must refuse"
+        );
+    }
+
+    #[test]
+    fn control_bearing_attestations_refuse_admission_without_mutation() {
+        let baseline = promoted();
+        let authority = AlwaysAuthority;
+        let mut store = AttestedBaselineStore::new();
+        store
+            .admit_verified(
+                baseline.clone(),
+                PromotionAttestation::new("k", "x"),
+                &authority,
+                &retained(&baseline),
+            )
+            .expect("seed admission");
+        let before = store.to_jsonl();
+        for bad in [
+            PromotionAttestation::new("k\u{1}", "x"),
+            PromotionAttestation::new("k", "x\u{7f}"),
+            PromotionAttestation::new("k\n", "x"),
+        ] {
+            assert!(!bad.well_formed());
+            let refused = store
+                .admit_verified(baseline.clone(), bad, &authority, &retained(&baseline))
+                .expect_err("control characters cannot enter the attested store");
+            assert!(
+                refused.detail.contains("malformed key id or signature"),
+                "{refused}"
+            );
+            assert_eq!(store.to_jsonl(), before, "refusal is non-mutating");
+        }
+    }
+
+    #[test]
     fn attested_envelope_accounting_accepts_exact_cap_and_refuses_limit_plus_one() {
         let template = promoted();
         let authority = AlwaysAuthority;
@@ -2578,6 +2664,11 @@ mod tests {
         assert_eq!(exact.len(), MAX_BASELINE_STORE_BYTES);
         let reparsed = AttestedBaselineStore::from_jsonl(&exact).expect("exact-cap round trip");
         assert_eq!(reparsed.to_jsonl(), exact);
+
+        let oversized = format!("{exact}x");
+        let refused = AttestedBaselineStore::from_jsonl(&oversized)
+            .expect_err("a transport one byte above the cap refuses before parsing");
+        assert!(refused.detail.contains("byte bound"), "{refused}");
 
         exact_signature.push('x');
         let too_large = PromotionAttestation::new("k", exact_signature);

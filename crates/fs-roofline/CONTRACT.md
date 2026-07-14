@@ -459,6 +459,14 @@ pre/post admission decision and drains every hook after a middle failure.
 Baseline integration tests prove an unbaselined first run and stable sustained
 contention cannot cross `run_passes_measurement_admission`, while admitted ledger rows carry one
 canonical `axis_baseline_admission` event.
+Attested-store transport drills pin the self-round-tripping bound: string-aware
+balanced-object parsing treats braces/quotes/backslashes inside strings as data,
+multibyte UTF-8 fields round-trip byte-identically, raw control bytes and
+surrogate or non-hex `\u` escapes refuse at parse, non-canonical spellings
+refuse against the reserialized envelope, the exact `MAX_BASELINE_STORE_BYTES`
+transport is admitted while parse- and admission-side limit+1 refuse, and every
+refusal (including malformed attestation fields at `admit_verified`) leaves the
+store unchanged.
 
 ## No-claim boundaries
 
