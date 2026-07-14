@@ -460,7 +460,7 @@ fn hodge_stars_positive_and_consistent() {
 fn cochain_container_semantics() {
     let (complex, _positions) = kuhn_cube(2);
     let vals: Vec<f64> = (0..complex.vertex_count).map(|v| v as f64 * 0.5).collect();
-    let dims = Dims([0, 0, 1, 0, 0]); // seconds, say
+    let dims = Dims([0, 0, 1, 0, 0, 0]); // seconds, say
     let c = Cochain::from_values(&complex, 0, &vals, dims);
     assert_eq!(c.degree(), 0);
     assert_eq!(c.dims(), dims);

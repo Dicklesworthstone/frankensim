@@ -43,7 +43,7 @@ impl Cochain {
         Cochain {
             values,
             degree,
-            dims: Dims([0; 5]),
+            dims: Dims([0; 6]),
         }
     }
 

@@ -9,8 +9,12 @@ stars, and exact-sequence operator assembly. The exterior derivative
 is fs-rep-mesh's INTEGER incidence operator — dd = 0 is exact by
 construction (their contract invariant, re-verified here on the zoo);
 every metric statement and every approximation lives in the mass
-matrices and stars. This is what kills spurious pressure/EM modes and
-checkerboarding structurally instead of by stabilization folklore.
+matrices and stars. Exact incidence eliminates algebraic-complex defects;
+it does not alone eliminate spurious pressure/EM modes or checkerboarding.
+Those formulation-level claims additionally require a conforming subcomplex,
+a bounded commuting projection, correct boundary and gauge treatment,
+admissible quadrature and coefficient assumptions, and coercivity or inf-sup
+evidence. The deferred mixed and curl-curl solve batteries remain the gate.
 
 ## Public types and semantics
 
@@ -231,8 +235,10 @@ that single-cell symmetric fixtures superconverge at even r (a metric
 trap, so MMS ladders start at m ≥ 2).
 `tests/perf_lane.rs` (bead cwjn, release + `--ignored` only):
 sum-factorized apply throughput vs the fs-roofline MEASURED machine
-peak — the ≥30%-of-peak gate at p = 4 plus the throughput-vs-p sweep
-(r = 1..6), JSON-ledgered.
+peak — the ≥30%-of-peak target at p = 4 plus the throughput-vs-p sweep
+(r = 1..6), emitted as retained JSON. A positive gate additionally requires
+one frozen authority-admitted baseline snapshot; plain or refused inputs are
+reported as candidate measurements only.
 `tests/vecfam_battery.rs` (bead dcng): vec-001 dims + Euler
 alternating sum; vec-002 dof-Kronecker + mass SPD; vec-003
 tangential/normal conformity; vec-004 dd = 0 through grad/curl/div;
@@ -261,29 +267,51 @@ gate, measured ≈ r + 1; D: ≥ r − 0.4 gate, measured ≈ r) — these
 drive all four 3D tensor space types' rates; Legendre mass closed
 form; its own golden hash.
 
-## Perf-lane evidence (bead cwjn: the ≥30% both-ISA gate is MET, citable)
+## Perf-lane observations (bead cwjn: authority-admitted both-ISA gate open)
 
-- BOTH reference ISAs hold citable, baseline-admitted gate passes on the
-  committed register-accumulator/index-loop contraction kernels
-  (2026-07-11, governed baseline stores in perf-baselines/):
+- BOTH reference ISAs have historical operator-baseline candidate observations
+  on the committed register-accumulator/index-loop contraction kernels
+  (2026-07-11, plain baseline stores in `perf-baselines/`):
   macos-aarch64 (M4 Pro, fingerprint 80cb534fbaf60b50): p = 4 attainment
   0.404 (20.8 GFLOP/s); linux-x86_64 (5975WX ts1, fingerprint
-  614b09f101a1e33b): p = 4 attainment 0.439 (15.6 GFLOP/s), quiet host.
+  614b09f101a1e33b): p = 4 attainment 0.439 (15.6 GFLOP/s), quiet host. These
+  numbers remain useful measurements, but their plain stores do not carry the
+  authority admission required for a citable claim.
 - The x86 journey, for the record: 0.026 (baseline libm-fma calls) →
   0.046 (a55x fma capsule, scalar vfmadds) → 0.091 (register-array
   accumulators) → 0.44–0.59 (const-bound index loops — the shape x86 SLP
   finally packs). Every step bit-identical: the ascending-l per-element
   order is pinned and the sf-kron golden never moved.
-- Sweep at the citable ts1 run (18p⁴+3p³ flop model): r = 1: 9.9,
+- Sweep from the historical ts1 candidate run (18p⁴+3p³ flop model): r = 1: 9.9,
   r = 2: 8.7, r = 3: 20.9, r = 4: 23.9, r = 5: 21.4, r = 6: 22.0 GFLOP/s
   (low orders are gather/scatter-bound — recorded follow-up, not gated).
-- The gate is admission-guarded end-to-end: `FRANKENSIM_BASELINE_STORE`
-  (absolute path) + `FRANKENSIM_FIRMWARE_ID`, pre/post probes admitted
-  against the governed baseline before the 30% test — a contaminated
-  window is environment_invalid, neither pass nor fail (observed live:
-  the first ts1 attempt was refused during its own compile burst). The
-  store is the protected operator trust root; signature verification
-  remains `frankensim-epic-perf-fz2.7`.
+- The current lane distinguishes comparison from authority. A plain
+  `FRANKENSIM_BASELINE_STORE`, absent/partial authority configuration, or any
+  denied, revoked, tampered, missing-source, or cross-machine attestation emits
+  a report-only receipt and cannot produce a positive gate. A fully configured
+  attested store uses `FRANKENSIM_PROMOTION_AUTHORITY_POLICY` plus
+  `FRANKENSIM_RETAINED_SOURCE_RECEIPTS`, captures one atomic authority decision,
+  and embeds the full frozen pre/post snapshot in the final gate JSON so the
+  measured claim cannot be detached from its admission decision. A positive
+  gate additionally requires `FRANKENSIM_ROOFLINE_LEDGER`: the lane atomically
+  records the exact admission receipt and exact final-gate JSON through the
+  shared `fs-roofline` external-gate protocol before it emits
+  `citation_eligible:true`. A missing or empty ledger path keeps the completed
+  measurement report-only; a ledger write or exact re-read failure fails closed
+  and cannot emit a positive gate.
+  The citable policy owns its clock: an unavailable clock or an epoch-day
+  rollover between mint and post-probe invalidates attested evidence and ends
+  the lane as `environment_invalid`; configuration refusals alone remain
+  measured report-only observations.
+  The retained-source file is a protected hash-inventory declaration; this lane
+  does not fetch or independently prove availability of the named bytes.
+  Its conformance matrix removes one named receipt to prove that missing source
+  evidence stays report-only, then re-endorses the identical baseline under a
+  rotated key and proves that the baseline hash stays fixed while the key and
+  authority-policy receipt move.
+  Contaminated axes
+  remain `environment_invalid`, neither pass nor fail (observed live: the first
+  ts1 attempt was refused during its own compile burst).
 
 ## No-claim boundaries
 
@@ -301,8 +329,8 @@ form; its own golden hash.
   interpolation ladders stand in, labeled. The tensor-product side
   covers all four space types (slices 1–2). Unstructured-hex
   orientation is later-slice scope; the cross-ISA ≥30%-peak perf gate remains
-  open (bead cwjn, see Perf-lane evidence). `HexComplex` incidence is still not
-  consumed.
+  open (bead cwjn, see Perf-lane observations). `HexComplex` incidence is still
+  not consumed.
 - MMS covers the PRIMAL Poisson form; the mixed-form MMS (flux
   variable through M₂/d₂) joins the solver-stack lane (tfz.10) where
   saddle-point solvers live.

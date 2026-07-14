@@ -6,9 +6,12 @@
 //! bitwise is its contract invariant — inherited, not re-proven here);
 //! ALL metric information and ALL approximation lives in the Hodge
 //! stars and Whitney mass matrices. The payoff: grad→curl→div
-//! identities hold to machine precision BY CONSTRUCTION, so spurious
-//! pressure/EM modes and checkerboarding are killed structurally, not
-//! by stabilization folklore.
+//! identities hold to machine precision BY CONSTRUCTION, eliminating
+//! algebraic-complex defects. That identity alone does not eliminate
+//! spurious pressure/EM modes or checkerboarding: such formulation-level
+//! claims additionally require a conforming subcomplex, a bounded commuting
+//! projection, correct boundary and gauge treatment, admissible quadrature
+//! and coefficients, and coercivity or inf-sup evidence.
 //!
 //! Element geometry (Jacobians, determinants, inverses, grams) runs
 //! through fs-la's batched small-dense kernels — the layout consumer
