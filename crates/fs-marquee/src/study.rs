@@ -18,7 +18,7 @@
 use std::collections::BTreeMap;
 
 use fs_cutfem::sdf::CutSdf;
-use fs_cutfem::{FemParams, Quadtree, Space};
+use fs_cutfem::{FemParams, Quadtree, ScalarSample, Space};
 use fs_dwr::{GoalContext, estimate, goal_value};
 use fs_evidence::{Color, IntervalOp, compose};
 use fs_ledger::hash_bytes;
@@ -256,7 +256,19 @@ fn solve_and_grade(
             // det-ok: base 2, exact (4xnt)
             let h = 2.0f64.powi(-(i32::try_from(level).unwrap_or(6)) - 2);
             let q = [px + h * th.cos(), py + h * th.sin()];
-            let u_q = sample_nodal(&grid, &nodal, q);
+            // Canonical fail-closed sampling (ay40): missing or
+            // non-finite active evidence refuses instead of reading as
+            // a plausible zero. A probe that leaves the solid past the
+            // cooled hole boundary lands in a certified-Outside leaf,
+            // where the homogeneous Dirichlet exterior value u = 0 is
+            // the explicit physical meaning, not a fallback. The rim
+            // clamp keeps legal probes inside the half-open background
+            // box; validated hole layouts keep probes interior anyway.
+            let q = [q[0].clamp(1e-9, 1.0 - 1e-9), q[1].clamp(1e-9, 1.0 - 1e-9)];
+            let u_q = match space.sample_scalar(&nodal, q)? {
+                ScalarSample::Active(v) => v,
+                ScalarSample::CertifiedOutside => 0.0,
+            };
             let dudn = u_q / h; // u = 0 on the hole boundary
             acc += dudn * dudn;
         }
@@ -266,27 +278,6 @@ fn solve_and_grade(
     }
     let cert = [0.0, dwr.eta_abs, sol.rel_residual * j.abs().max(1.0)];
     Ok((j, grads, cert, sol.iters, nodal))
-}
-
-/// Bilinear sample of the nodal field at a point (level-`grid` cells).
-fn sample_nodal(grid: &Quadtree, nodal: &BTreeMap<(u32, u32), f64>, p: [f64; 2]) -> f64 {
-    // The background lattice at the quadtree's max depth.
-    let n = (1u32 << grid.max_level()) + 1;
-    #[allow(clippy::cast_precision_loss)]
-    let scale = f64::from(n - 1);
-    let fx = (p[0].clamp(0.0, 1.0)) * scale;
-    let fy = (p[1].clamp(0.0, 1.0)) * scale;
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let (ix, iy) = (
-        (fx.floor() as u32).min(n - 2),
-        (fy.floor() as u32).min(n - 2),
-    );
-    let (tx, ty) = (fx - f64::from(ix), fy - f64::from(iy));
-    let v = |a: u32, b: u32| nodal.get(&(a, b)).copied().unwrap_or(0.0);
-    (1.0 - tx) * (1.0 - ty) * v(ix, iy)
-        + tx * (1.0 - ty) * v(ix + 1, iy)
-        + tx * ty * v(ix + 1, iy + 1)
-        + (1.0 - tx) * ty * v(ix, iy + 1)
 }
 
 /// Run the marquee study: projected gradient on hole radii at a fixed

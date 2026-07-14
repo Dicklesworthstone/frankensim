@@ -871,3 +871,97 @@ fn cut_008_hanging_nodes_and_adaptivity() {
 fn space_node_pos(grid: &Quadtree, n: (u32, u32)) -> [f64; 2] {
     grid.node_pos(n)
 }
+
+/// cut-009 G0 (bead ay40): the canonical scalar sampler never
+/// fabricates a zero. Active reads are fully evidenced bilinear values,
+/// outside reads are build-time classification certificates, and every
+/// degraded input — out-of-box or non-finite points, missing corner
+/// evidence, non-finite corner evidence — refuses as
+/// `InvalidFemInput`.
+#[test]
+fn cut_009_scalar_sampler_fails_closed() {
+    use fs_cutfem::ScalarSample;
+    use std::collections::BTreeMap;
+
+    let grid = Quadtree::uniform(3);
+    // Solid x < 0.6: left columns Inside, the [0.5, 0.625) column Cut,
+    // columns right of 0.625 certified Outside.
+    let sdf = HalfPlane {
+        normal: [1.0, 0.0],
+        offset: 0.6,
+    };
+    let space = Space::build(&grid, &sdf, FemParams::default()).expect("half-plane builds");
+
+    // Evidence for every lattice node: the linear field u = x + 2y,
+    // which leaf bilinear interpolation reproduces exactly.
+    let extent = grid.node_extent();
+    let mut nodal: BTreeMap<(u32, u32), f64> = BTreeMap::new();
+    for i in 0..=extent {
+        for j in 0..=extent {
+            let p = space_node_pos(&grid, (i, j));
+            nodal.insert((i, j), p[0] + 2.0 * p[1]);
+        }
+    }
+
+    let active = space
+        .sample_scalar(&nodal, [0.3, 0.3])
+        .expect("active sample");
+    let active_err = match active {
+        ScalarSample::Active(v) => (v - (0.3 + 2.0 * 0.3)).abs(),
+        ScalarSample::CertifiedOutside => f64::INFINITY,
+    };
+
+    let outside = space
+        .sample_scalar(&nodal, [0.9, 0.5])
+        .expect("outside classifies");
+    let outside_ok = outside == ScalarSample::CertifiedOutside;
+
+    // Missing corner evidence on an active leaf refuses by name.
+    let victim_leaf = grid.find_leaf_at(0.15, 0.15).expect("interior leaf");
+    let victim_node = grid.corner_nodes(victim_leaf)[0];
+    let mut missing = nodal.clone();
+    missing.remove(&victim_node);
+    let missing_refusal = space.sample_scalar(&missing, [0.15, 0.15]);
+    let missing_ok = matches!(&missing_refusal, Err(CutFemError::InvalidFemInput { .. }))
+        && format!("{}", missing_refusal.unwrap_err()).contains("no nodal evidence");
+
+    // Non-finite corner evidence refuses by name.
+    let mut poisoned = nodal.clone();
+    poisoned.insert(victim_node, f64::NAN);
+    let poisoned_refusal = space.sample_scalar(&poisoned, [0.15, 0.15]);
+    let poisoned_ok = matches!(&poisoned_refusal, Err(CutFemError::InvalidFemInput { .. }))
+        && format!("{}", poisoned_refusal.unwrap_err()).contains("non-finite");
+
+    // Points the grid cannot classify refuse instead of clamping.
+    let out_of_box = matches!(
+        space.sample_scalar(&nodal, [1.5, 0.5]),
+        Err(CutFemError::InvalidFemInput { .. })
+    );
+    let box_rim = matches!(
+        space.sample_scalar(&nodal, [1.0, 0.5]),
+        Err(CutFemError::InvalidFemInput { .. })
+    );
+    let non_finite_point = matches!(
+        space.sample_scalar(&nodal, [f64::NAN, 0.5]),
+        Err(CutFemError::InvalidFemInput { .. })
+    );
+
+    let pass = active_err < 1e-12
+        && outside_ok
+        && missing_ok
+        && poisoned_ok
+        && out_of_box
+        && box_rim
+        && non_finite_point;
+    verdict(
+        "cut-009",
+        pass,
+        &format!(
+            "\"detail\":\"canonical scalar sampler fails closed (ay40)\",\
+             \"active_err\":{active_err:.3e},\"outside_certified\":{outside_ok},\
+             \"missing_refuses\":{missing_ok},\"non_finite_refuses\":{poisoned_ok},\
+             \"out_of_box_refuses\":{out_of_box},\"rim_refuses\":{box_rim},\
+             \"nan_point_refuses\":{non_finite_point}"
+        ),
+    );
+}

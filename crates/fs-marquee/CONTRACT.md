@@ -51,7 +51,13 @@ filesystem.
 
 Default status queries are infallible. With `marquee`, invalid study inputs
 panic during admission before solver work starts. Valid study runs return
-`fs_cutfem::CutFemError` for CutFEM build/solve failures.
+`fs_cutfem::CutFemError` for CutFEM build/solve failures. Shape-gradient
+boundary probes read the solved field only through the canonical
+fail-closed `Space::sample_scalar` (bead ay40): missing or non-finite
+active nodal evidence surfaces as `InvalidFemInput` instead of a
+plausible zero, and the only zero read without evidence is a
+certified-Outside classification, mapped explicitly to the homogeneous
+Dirichlet exterior value at the use site.
 
 ## Determinism class
 

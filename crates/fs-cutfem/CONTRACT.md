@@ -40,6 +40,16 @@ same certified cuts; its constitutive parameters come from
   Read-only `grid`, `active_cells`, and `cut_rules` accessors let
   goal/error estimators consume the exact topology and certified rules
   retained by the built space instead of reconstructing a second view.
+- `Space::sample_scalar(nodal, p)` → `ScalarSample`: the one supported
+  pointwise scalar read over a nodal field (bead ay40). `Active(v)` is
+  a bilinear value backed by four present, finite corner values on the
+  containing active leaf; `CertifiedOutside` is a build-time
+  classification certificate (the leaf's SDF enclosure proved φ > 0),
+  never a value default — callers own its physical meaning explicitly.
+  Out-of-box or non-finite points, missing corner evidence, and
+  non-finite corner evidence refuse as `InvalidFemInput`; zero is never
+  fabricated. The background box is half-open, so rim probes must be
+  clamped by the caller deliberately.
 - `FemParams`: `nitsche_beta` (applied as β/h), `ghost_gamma` (0
   disables), `quad_depth`, `agg: Option<AggPolicy>`, `strong_outer`,
   solver knobs.
@@ -252,8 +262,11 @@ accuracy within 2×, policy logged); cut-007b graded interface-band
 aggregation with ghost OFF (successful build/linear patch, zero ghost
 faces); cut-008 hanging-node patch test
 (exact to 1e-8) + estimate-driven refinement efficiency (within 2× of
-uniform-fine error at < 0.55× its DOFs). Grid unit tests: 2:1 balance,
-leaf partition of unity.
+uniform-fine error at < 0.55× its DOFs); cut-009 canonical scalar
+sampler fails closed (linear field reproduced on active leaves,
+certified-outside classification, missing/non-finite corner evidence
+and out-of-box/rim/non-finite points all refuse as `InvalidFemInput`).
+Grid unit tests: 2:1 balance, leaf partition of unity.
 
 `tests/elasticity.rs`: cte-001 affine-basis vector patch law over three
 exactly represented piecewise-linear closed cuts, with a roundoff-scale

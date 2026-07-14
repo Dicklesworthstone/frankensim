@@ -147,6 +147,23 @@ pub struct Solution {
     pub rel_residual: f64,
 }
 
+/// One canonical scalar-sample outcome from [`Space::sample_scalar`].
+///
+/// `CertifiedOutside` is not a value fallback: it reports that the
+/// containing leaf was classified `Outside` by the build-time SDF
+/// enclosure, so the point verifiably carries no nodal evidence. The
+/// caller owns the physical meaning of that certificate (for a
+/// homogeneous Dirichlet exterior, typically `u = 0`) and must make
+/// the mapping explicit at the use site.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ScalarSample {
+    /// Bilinear interpolation of four present, finite corner values on
+    /// the containing active (`Inside` or `Cut`) leaf.
+    Active(f64),
+    /// The containing leaf is certified `Outside` the physical domain.
+    CertifiedOutside,
+}
+
 /// A built CutFEM space over a background quadtree.
 pub struct Space<'g> {
     grid: &'g Quadtree,
@@ -612,6 +629,85 @@ impl<'g> Space<'g> {
                 (*n, v)
             })
             .collect()
+    }
+
+    /// Canonical fallible scalar sampler over a nodal field: the one
+    /// supported way to read pointwise scalar values out of a solve.
+    /// Zero is never fabricated — missing or non-finite corner
+    /// evidence on an active leaf refuses, and a point the grid cannot
+    /// classify refuses — so a returned `Active` number is always
+    /// backed by four present, finite nodal values on the containing
+    /// leaf, and an outside read is a classification certificate, not
+    /// a default.
+    ///
+    /// The background box is half-open (`[0,1)²`); callers that probe
+    /// near the rim must clamp deliberately and own that choice.
+    ///
+    /// # Errors
+    /// [`CutFemError::InvalidFemInput`]: non-finite sample
+    /// coordinates; a point outside the background box; an active leaf
+    /// whose corner node is absent from `nodal`; a non-finite stored
+    /// corner value; or a leaf the space never classified
+    /// (`Space`/grid mismatch).
+    pub fn sample_scalar(
+        &self,
+        nodal: &BTreeMap<NodeKey, f64>,
+        p: [f64; 2],
+    ) -> Result<ScalarSample, CutFemError> {
+        if !(p[0].is_finite() && p[1].is_finite()) {
+            return Err(CutFemError::InvalidFemInput {
+                what: format!("scalar sample point ({}, {}) is not finite", p[0], p[1]),
+            });
+        }
+        let Some(leaf) = self.grid.find_leaf_at(p[0], p[1]) else {
+            return Err(CutFemError::InvalidFemInput {
+                what: format!(
+                    "scalar sample point ({}, {}) lies outside the half-open background box",
+                    p[0], p[1]
+                ),
+            });
+        };
+        let Some(class) = self.class.get(&leaf) else {
+            return Err(CutFemError::InvalidFemInput {
+                what: format!("leaf {leaf:?} has no classification (Space/grid mismatch)"),
+            });
+        };
+        if *class == CellClass::Outside {
+            return Ok(ScalarSample::CertifiedOutside);
+        }
+        let (lo, hi) = self.grid.rect(leaf);
+        let corners = self.grid.corner_nodes(leaf);
+        let mut vals = [0.0f64; 4];
+        for (v, node) in vals.iter_mut().zip(corners) {
+            let Some(stored) = nodal.get(&node).copied() else {
+                return Err(CutFemError::InvalidFemInput {
+                    what: format!(
+                        "active leaf corner node ({}, {}) has no nodal evidence at \
+                         sample point ({}, {})",
+                        node.0, node.1, p[0], p[1]
+                    ),
+                });
+            };
+            if !stored.is_finite() {
+                return Err(CutFemError::InvalidFemInput {
+                    what: format!(
+                        "active leaf corner node ({}, {}) holds non-finite evidence \
+                         {stored} at sample point ({}, {})",
+                        node.0, node.1, p[0], p[1]
+                    ),
+                });
+            }
+            *v = stored;
+        }
+        let tx = ((p[0] - lo[0]) / (hi[0] - lo[0])).clamp(0.0, 1.0);
+        let ty = ((p[1] - lo[1]) / (hi[1] - lo[1])).clamp(0.0, 1.0);
+        // corner_nodes order is CCW: 0=(lo,lo) 1=(hi,lo) 2=(hi,hi) 3=(lo,hi).
+        Ok(ScalarSample::Active(
+            (1.0 - tx) * (1.0 - ty) * vals[0]
+                + tx * (1.0 - ty) * vals[1]
+                + tx * ty * vals[2]
+                + (1.0 - tx) * ty * vals[3],
+        ))
     }
 
     /// L2 and H1-seminorm errors against an exact solution, integrated

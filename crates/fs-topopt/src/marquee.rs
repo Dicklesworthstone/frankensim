@@ -13,7 +13,7 @@
 //! estimated error mass lies on the design boundary.
 
 use fs_cutfem::sdf::CutSdf;
-use fs_cutfem::{CellKey, FemParams, Quadtree, Space};
+use fs_cutfem::{CellKey, FemParams, Quadtree, ScalarSample, Space};
 use fs_dwr::{GoalContext, estimate, goal_value};
 use fs_ivl::Interval;
 use std::cell::RefCell;
@@ -543,28 +543,23 @@ pub fn run_marquee(
         // boundary wants to grow there, mye.1's shape derivative),
         // low flux² → fill; then project back to the volume target.
         let n = design.n;
-        let u_at = |x: f64, y: f64| -> f64 {
-            // Bilinear through the containing leaf's corner nodes
-            // (guaranteed present in the nodal map — probing the raw
-            // fine lattice missed the sparse keys and froze the whole
-            // update in the first draft).
-            let Some(leaf) =
-                grid.find_leaf_at(x.clamp(1e-9, 1.0 - 1e-9), y.clamp(1e-9, 1.0 - 1e-9))
-            else {
-                return 0.0;
-            };
-            let (lo, hi) = grid.rect(leaf);
-            let corners = grid.corner_nodes(leaf);
-            let v = |k: usize| nodal.get(&corners[k]).copied().unwrap_or(0.0);
-            let tx = ((x - lo[0]) / (hi[0] - lo[0])).clamp(0.0, 1.0);
-            let ty = ((y - lo[1]) / (hi[1] - lo[1])).clamp(0.0, 1.0);
-            // corner_nodes order is CCW: 0=(lo,lo) 1=(hi,lo) 2=(hi,hi) 3=(lo,hi)
-            (1.0 - tx) * (1.0 - ty) * v(0)
-                + tx * (1.0 - ty) * v(1)
-                + tx * ty * v(2)
-                + (1.0 - tx) * ty * v(3)
+        let u_at = |x: f64, y: f64| -> Result<f64, fs_cutfem::CutFemError> {
+            // Bilinear through the containing leaf's corner nodes via
+            // the canonical fail-closed sampler (ay40): missing or
+            // non-finite active evidence refuses instead of reading as
+            // a plausible zero (probing the raw fine lattice missed
+            // the sparse keys and froze the whole update in the first
+            // draft; zero-filling then hid exactly that class of bug).
+            // A certified-Outside leaf reads the homogeneous Dirichlet
+            // exterior u = 0 explicitly. The rim clamp keeps probes
+            // inside the half-open background box.
+            let p = [x.clamp(1e-9, 1.0 - 1e-9), y.clamp(1e-9, 1.0 - 1e-9)];
+            match space.sample_scalar(&nodal, p)? {
+                ScalarSample::Active(v) => Ok(v),
+                ScalarSample::CertifiedOutside => Ok(0.0),
+            }
         };
-        let flux_at = |x: f64, y: f64| -> f64 {
+        let flux_at = |x: f64, y: f64| -> Result<f64, fs_cutfem::CutFemError> {
             // Probe u a fixed depth INSIDE the solid measured from the
             // INTERFACE, from either side: first-order signed distance
             // s = phi/|grad phi| (positive in the void), then step
@@ -577,8 +572,8 @@ pub fn run_marquee(
             let sdist = design.value([x, y]) / norm;
             let h = 0.05;
             let depth = sdist + h;
-            let u = u_at(x - depth * gph[0] / norm, y - depth * gph[1] / norm);
-            (u / h).powi(2)
+            let u = u_at(x - depth * gph[0] / norm, y - depth * gph[1] / norm)?;
+            Ok((u / h).powi(2))
         };
         let mut moves = vec![0.0f64; n * n];
         let mut flux_sum = 0.0f64;
@@ -608,7 +603,7 @@ pub fn run_marquee(
             if near {
                 #[allow(clippy::cast_precision_loss)]
                 let (x, y) = (i as f64 / lattice_scale, jj as f64 / lattice_scale);
-                let fl = flux_at(x, y);
+                let fl = flux_at(x, y)?;
                 *slot = fl.max(1e-12);
                 flux_sum += fl;
                 flux_cnt += 1;

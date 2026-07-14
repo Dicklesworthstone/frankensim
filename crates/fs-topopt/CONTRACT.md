@@ -107,6 +107,13 @@ The public DWR band-planning helper is fail-closed: it validates its
 complete supplied indicator map and plans recursive halo refinement on a
 clone, so a structured input refusal leaves both the caller's grid and
 band level unchanged.
+The marquee flux probes read the solved field only through the canonical
+fail-closed `fs_cutfem::Space::sample_scalar` (bead ay40): missing or
+non-finite active nodal evidence propagates as
+`CutFemError::InvalidFemInput` out of `run_marquee` instead of reading
+as a plausible zero flux; a certified-Outside leaf reads the
+homogeneous Dirichlet exterior u = 0 as an explicit mapping, not a
+fallback.
 
 ## Determinism class
 

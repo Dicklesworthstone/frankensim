@@ -59,7 +59,7 @@ pub use elastic::{
 pub use elastic::{
     ELASTICITY_APPLY_VJP_OP, elasticity_apply_vjp_key, register_elasticity_apply_vjp,
 };
-pub use fem::{BuildStats, CellClass, FemParams, Solution, Space};
+pub use fem::{BuildStats, CellClass, FemParams, ScalarSample, Solution, Space};
 pub use grid::{CellKey, NodeKey, Quadtree};
 pub use quad::{CutRules, cut_cell_rules};
 pub use sdf::{Circle, CutSdf, HalfPlane};
