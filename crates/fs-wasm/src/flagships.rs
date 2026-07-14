@@ -1355,7 +1355,7 @@ fn frame_size_and_snap(
     }
 }
 
-/// The `[m, kg, s, K, A]` dimension of time (s) and rate (1/s).
+/// The `[m, kg, s, K, A, mol]` dimension of time (s) and rate (1/s).
 const TIME: Dims = Dims([0, 0, 1, 0, 0, 0]);
 const RATE: Dims = Dims([0, 0, -1, 0, 0, 0]);
 
@@ -1772,6 +1772,22 @@ mod wasm {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn standalone_qty_dependency_round_trips_nonzero_mole_axis() {
+        let amount = QtyAny::new(2.5, Dims([0, 0, 0, 0, 0, 1]));
+        let canonical = fs_qty::json::to_json(amount).expect("finite amount encodes");
+        assert_eq!(
+            canonical,
+            r#"{"schema_version":2,"value":2.5,"dims":[0,0,0,0,0,1]}"#
+        );
+        let decoded = fs_qty::json::decode_json(&canonical).expect("canonical v2 decodes");
+        assert_eq!(decoded.qty(), amount);
+        assert!(
+            decoded.migration().is_none(),
+            "canonical six-base input must not mint a legacy crosswalk receipt"
+        );
+    }
 
     #[test]
     fn ornithoid_headline() {

@@ -899,6 +899,7 @@ dependencies = [
 name = "fs-opt"
 version = "0.0.1"
 dependencies = [
+ "fs-blake3",
  "fs-exec",
  "fs-math",
  "fs-obs",
@@ -923,6 +924,9 @@ dependencies = [
 [[package]]
 name = "fs-qty"
 version = "0.0.1"
+dependencies = [
+ "fs-blake3",
+]
 
 [[package]]
 name = "fs-race"
@@ -1011,6 +1015,7 @@ dependencies = [
 name = "fs-scenario"
 version = "0.0.1"
 dependencies = [
+ "fs-blake3",
  "fs-cheb",
  "fs-ga",
  "fs-math",

@@ -44,7 +44,7 @@ pub mod pde;
 
 pub use campaigns::{
     anytimebo, flowcert, fluttercert, grammarforge, metamatcert, neuroshape, proofrobust,
-    schedule_campaign, sensorforge, trusspath,
+    schedule_campaign, sensorforge, sensorforge_with_cx, trusspath,
 };
 pub use certified::mandelbrot_certified;
 pub use deep::{

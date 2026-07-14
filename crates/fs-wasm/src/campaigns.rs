@@ -886,7 +886,11 @@ pub fn trusspath(nx: usize, ny: usize, gap_tol: f64) -> Vec<f64> {
 /// whose measurement most sharpens the DECISION, fuses it with the exact scalar
 /// Kalman update, and STOPS the instant the decision is robust. This calls the
 /// checked `fs_oed_e2e::run_campaign` directly and serializes its native EVPI
-/// trace, posterior summaries, and allocation. Uses the fixed `demo_candidates()`
+/// trace, posterior summaries, and allocation. Rust callers that already own
+/// an execution scope should use [`sensorforge_with_cx`] so cancellation,
+/// budgets, mode, and stream identity propagate without a hidden wrapper.
+/// This browser-facing adapter supplies the fixed clock-free deterministic
+/// context required by the JavaScript ABI. Uses the fixed `demo_candidates()`
 /// (A/B/C/D), with B's prior mean and truth set to `b_prior_mean`.
 ///
 /// `threshold` — EVPI stop threshold (clamped `1e-6..=1.0`, default 0.01);
@@ -910,6 +914,21 @@ pub fn trusspath(nx: usize, ny: usize, gap_tol: f64) -> Vec<f64> {
 /// - then `C` blocks of 2: `[posterior_mean, posterior_var]`.
 /// - then `C` allocation tolerances (candidate order; NaN if unconstrained).
 pub fn sensorforge(threshold: f64, max_sensors: usize, b_prior_mean: f64) -> Vec<f64> {
+    with_certificate_cx(|cx| sensorforge_with_cx(threshold, max_sensors, b_prior_mean, cx))
+}
+
+/// Run the SensorForge browser serialization under a caller-owned execution
+/// context.
+///
+/// Cancellation or budget refusal returns an empty browser payload, matching
+/// the crate's fallible-kernel ABI policy, while the native campaign retains
+/// its structured error for direct Rust users.
+pub fn sensorforge_with_cx(
+    threshold: f64,
+    max_sensors: usize,
+    b_prior_mean: f64,
+    cx: &Cx<'_>,
+) -> Vec<f64> {
     let threshold = if threshold.is_finite() {
         threshold.clamp(1e-6, 1.0)
     } else {
@@ -940,11 +959,11 @@ pub fn sensorforge(threshold: f64, max_sensors: usize, b_prior_mean: f64) -> Vec
     };
     cands[1] = b;
     let c = cands.len();
-    let Ok(report) = fs_oed_e2e::run_campaign(&cands, threshold, max_sensors) else {
+    let Ok(report) = fs_oed_e2e::run_campaign(&cands, threshold, max_sensors, cx) else {
         return Vec::new();
     };
     let Some(placements): Option<Vec<usize>> = report
-        .placements
+        .placements()
         .iter()
         .map(|name| cands.iter().position(|candidate| candidate.name() == name))
         .collect()
@@ -953,37 +972,37 @@ pub fn sensorforge(threshold: f64, max_sensors: usize, b_prior_mean: f64) -> Vec
     };
     let chosen_idx = cands
         .iter()
-        .position(|candidate| candidate.name() == report.chosen_design)
+        .position(|candidate| candidate.name() == report.chosen_design())
         .map_or(-1.0, |index| index as f64);
-    if report.posteriors.len() != c {
+    if report.posteriors().len() != c {
         return Vec::new();
     }
     let allocation: std::collections::BTreeMap<&str, f64> = report
-        .allocation
+        .allocation()
         .iter()
         .map(|(name, tolerance)| (name.as_str(), *tolerance))
         .collect();
 
     let s = placements.len();
-    let t = report.evpi_trace.len();
+    let t = report.evpi_trace().len();
     let mut out = Vec::with_capacity(10 + t + s + 2 * c + c);
     out.push(c as f64);
     out.push(s as f64);
-    out.push(fon(report.prior_total_variance));
-    out.push(fon(report.posterior_total_variance));
-    out.push(fon(report.variance_reduction));
-    out.push(fon(report.initial_evpi));
-    out.push(fon(report.final_evpi));
-    out.push(if report.decision_robust { 1.0 } else { 0.0 });
+    out.push(fon(report.prior_total_variance()));
+    out.push(fon(report.posterior_total_variance()));
+    out.push(fon(report.variance_reduction()));
+    out.push(fon(report.initial_evpi()));
+    out.push(fon(report.final_evpi()));
+    out.push(if report.decision_robust() { 1.0 } else { 0.0 });
     out.push(chosen_idx);
     out.push(t as f64);
-    for &e in &report.evpi_trace {
+    for &e in report.evpi_trace() {
         out.push(fon(e));
     }
     for &i in &placements {
         out.push(i as f64);
     }
-    for posterior in &report.posteriors {
+    for posterior in report.posteriors() {
         out.push(fon(posterior.mean));
         out.push(fon(posterior.variance));
     }
@@ -1703,6 +1722,32 @@ mod tests {
         let trace_last = v[10 + t - 1];
         assert!((trace0 - initial).abs() < 1e-12);
         assert!((trace_last - final_evpi).abs() < 1e-12);
+    }
+
+    #[test]
+    fn sensorforge_explicit_context_matches_the_adapter_and_observes_cancellation() {
+        let explicit = with_certificate_cx(|cx| sensorforge_with_cx(0.01, 12, 0.65, cx));
+        assert_eq!(explicit, sensorforge(0.01, 12, 0.65));
+
+        let gate = CancelGate::new_clock_free();
+        gate.request();
+        let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+        let cancelled = pool.scope(|arena| {
+            let cx = Cx::new(
+                &gate,
+                arena,
+                StreamKey {
+                    seed: 0x7A55_5741_534D_0001,
+                    kernel_id: 1,
+                    tile: 0,
+                    iteration: 0,
+                },
+                Budget::INFINITE,
+                ExecMode::Deterministic,
+            );
+            sensorforge_with_cx(0.01, 12, 0.65, &cx)
+        });
+        assert!(cancelled.is_empty());
     }
 
     #[test]
