@@ -39,7 +39,10 @@ their own battery: fs-truss (layout LP + sizing), fs-solid/fs-material
   HARD sub-Gaussian bound for indicators, not a plug-in); the study
   stops itself when the radius is decision-grade — validity AT the
   stopping time is the CS's construction, not a correction. An fs-uq
-  MLMC report over dt levels rides along as level-design evidence.
+  MLMC report over dt levels rides along as level-design evidence. The
+  smoke-tier entry point accepts only a non-empty Kanai–Tajimi
+  ground-acceleration ensemble; wind spectra and material-parameter bands are
+  refused before their untyped realization vectors can reach the integrator.
 - `cvar::empirical_cvar` and `cvar::cvar` are direct re-exports of the
   canonical `fs-robust` report and scalar surfaces, respectively. The report
   retains deterministic VaR/minimizer and fractional-boundary metadata; empty
@@ -122,7 +125,8 @@ frame-002 sizing code
 rows plus pre-cancelled construction refusal; frame-003 elastic stability + hysteretic dissipation;
 frame-004 e-stopped fragility coverage + ledgered savings; frame-005
 CVaR monotonicity + design; frame-006 replay, infeasibility, and structured
-canonical-CVaR refusal drills.
+canonical-CVaR refusal drills; frame-007 wrong-physics and empty-ensemble
+refusals at the realization boundary.
 
 ## No-claim boundaries
 

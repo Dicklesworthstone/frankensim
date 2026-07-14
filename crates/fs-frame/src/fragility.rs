@@ -1,13 +1,13 @@
 //! Stage 4: ANYTIME-VALID fragility — P(peak drift ratio > limit)
 //! over a Kanai–Tajimi ensemble, estimated with an fs-eproc
 //! confidence sequence that is valid AT the data-dependent stopping
-//! time by construction: the study stops itself the moment the
-//! interval is decision-grade (radius below the requested margin or
-//! the limit excluded). An fs-uq MLMC report over dt-refinement
+//! time by construction: the study stops itself once the confidence-sequence
+//! radius is below the requested margin. An fs-uq MLMC report over dt-refinement
 //! levels rides along for the level-design evidence. Exceedance
 //! indicators are ½-sub-Gaussian, so σ = ½ is a hard bound, not a
 //! plug-in estimate.
 
+use crate::assert_ground_motion_ensemble;
 use crate::history::{StoryFrame, StoryParams, peak_drift};
 use fs_eproc::GaussianMixtureCs;
 use fs_scenario::ensemble::StochasticEnsemble;
@@ -31,9 +31,9 @@ pub struct FragilityReport {
 
 /// Run the e-stopped fragility study: consume ensemble members one at
 /// a time, feed exceedance indicators to the confidence sequence, and
-/// stop when decision-grade (radius ≤ `margin`, or the whole interval
-/// is on one side of nothing-to-decide). `alpha` is the anytime
-/// validity level.
+/// stop when decision-grade (`radius ≤ margin`). `alpha` is the anytime
+/// validity level. This API has no decision threshold distinct from the
+/// physical `drift_limit`, so it makes no one-sided-decision stopping claim.
 ///
 /// # Panics
 /// On ensemble realization errors (spec defects — programmer
@@ -46,6 +46,7 @@ pub fn e_stopped_fragility(
     alpha: f64,
     margin: f64,
 ) -> FragilityReport {
+    assert_ground_motion_ensemble(ensemble);
     let dt = ensemble.dt.value;
     let mut cs = GaussianMixtureCs::new(0.5, 8.0, alpha);
     let mut exceedances = 0u32;
@@ -62,12 +63,11 @@ pub fn e_stopped_fragility(
         }
         cs.observe(x);
         used = member + 1;
-        if let Some((center, radius)) = cs.interval() {
+        if let Some((_, radius)) = cs.interval() {
             // Decision-grade: the interval is tight enough, and we've
             // seen enough members for the asymptotics to mean anything.
             if used >= 8 && radius <= margin {
                 stopped_early = used < ensemble.members;
-                let _ = center;
                 break;
             }
         }

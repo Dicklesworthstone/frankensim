@@ -29,5 +29,26 @@ pub use fragility::{FragilityReport, e_stopped_fragility};
 pub use history::{StoryFrame, StoryParams, peak_drift};
 pub use layout::{LayoutError, LayoutReport, layout_and_size};
 
+use fs_scenario::ensemble::{SpectrumModel, StochasticEnsemble};
+
+/// Refuse ensemble payloads whose scalar vector cannot honestly be interpreted
+/// as a non-empty Kanai-Tajimi ground-acceleration history.
+///
+/// The smoke-tier public APIs still use programmer-contract panics for malformed
+/// study specifications. Keeping this check here gives every fragility/CVaR
+/// entry point the same fail-closed physics boundary until fs-scenario exposes
+/// the typed realization artifact tracked by `frankensim-sj31i.39`.
+pub(crate) fn assert_ground_motion_ensemble(ensemble: &StochasticEnsemble) {
+    assert!(
+        ensemble.members > 0,
+        "frame studies require at least one ground-motion ensemble member"
+    );
+    assert!(
+        matches!(ensemble.model, SpectrumModel::KanaiTajimi { .. }),
+        "frame studies require a Kanai-Tajimi ground-acceleration ensemble; \
+         wind spectra and material-parameter bands are not structural motions"
+    );
+}
+
 /// Crate version, re-exported for provenance stamping.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

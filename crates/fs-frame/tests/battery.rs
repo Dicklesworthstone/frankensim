@@ -326,3 +326,37 @@ fn frame_006_replay_and_drills() {
         "non-finite CVaR losses return a structured refusal before tail aggregation",
     );
 }
+
+/// G0/G3: physically different fs-scenario realization payloads must not be
+/// accepted merely because they share the same `Vec<f64>` representation.
+#[test]
+fn frame_007_refuses_non_ground_motion_and_empty_ensembles() {
+    let params = StoryParams::default();
+    let mut ensemble = kt_ensemble(0, 0.05, 7);
+    let empty_fragility =
+        std::panic::catch_unwind(|| e_stopped_fragility(&ensemble, params, 2e-2, 0.05, 0.1));
+    assert!(
+        empty_fragility.is_err(),
+        "a zero-member study must refuse before confidence-sequence finalization"
+    );
+
+    ensemble.members = 1;
+    ensemble.model = SpectrumModel::CarreauBand {
+        eta_zero: [
+            QtyAny::new(1.0, Dims([-1, 1, -1, 0, 0, 0])),
+            QtyAny::new(2.0, Dims([-1, 1, -1, 0, 0, 0])),
+        ],
+        eta_inf: [
+            QtyAny::new(0.1, Dims([-1, 1, -1, 0, 0, 0])),
+            QtyAny::new(0.2, Dims([-1, 1, -1, 0, 0, 0])),
+        ],
+        lambda: [QtyAny::new(0.5, TIME), QtyAny::new(1.0, TIME)],
+        n: [0.3, 0.8],
+    };
+    let material_as_motion =
+        std::panic::catch_unwind(|| ensemble_cvar(&ensemble, params, 1.0, 0.9));
+    assert!(
+        material_as_motion.is_err(),
+        "Carreau viscosity parameters must never become a structural acceleration history"
+    );
+}

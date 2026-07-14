@@ -8,6 +8,7 @@
 //! The chosen scale then snaps UP to the section catalog and the
 //! snapped design is INDEPENDENTLY re-checked.
 
+use crate::assert_ground_motion_ensemble;
 use crate::history::{StoryFrame, StoryParams, peak_drift};
 pub use fs_robust::{EmpiricalCvarReport, RobustError, cvar, empirical_cvar};
 use fs_scenario::ensemble::StochasticEnsemble;
@@ -39,6 +40,7 @@ pub fn ensemble_cvar(ensemble: &StochasticEnsemble, base: StoryParams, s: f64, b
 
 /// Peak-drift losses over the whole ensemble at section scale `s`.
 fn losses(ensemble: &StochasticEnsemble, base: StoryParams, s: f64) -> Vec<f64> {
+    assert_ground_motion_ensemble(ensemble);
     let dt = ensemble.dt.value;
     let mut out = Vec::with_capacity(ensemble.members as usize);
     for member in 0..ensemble.members {
