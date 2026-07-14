@@ -8,6 +8,26 @@
 
 use fs_package::{Claim, EvidencePackage, Provenance};
 
+fn with_cx<R>(f: impl FnOnce(&fs_exec::Cx<'_>) -> R) -> R {
+    let gate = fs_exec::CancelGate::new();
+    let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+    pool.scope(|arena| {
+        let cx = fs_exec::Cx::new(
+            &gate,
+            arena,
+            fs_exec::StreamKey {
+                seed: 0x7068_6173_6533_0005,
+                kernel_id: 1,
+                tile: 0,
+                iteration: 0,
+            },
+            fs_exec::Budget::INFINITE,
+            fs_exec::ExecMode::Deterministic,
+        );
+        f(&cx)
+    })
+}
+
 const HORIZON_COVERAGE_SCHEMA_VERSION: u64 = 1;
 const HORIZON_COVERAGE_ALGORITHM: &str = "fs-surrogate.rb-coverage/one-solve-per-mu-v2";
 const HORIZON_COVERAGE_MODEL: &str = "fs-surrogate.truth-model/p1-piecewise-affine-elliptic-v1";
@@ -375,7 +395,7 @@ fn p3_005_proposal_11_r8_gate_and_the_holding_pen() -> Result<(), fs_asbuilt::Re
             ))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let reg = register(&good)?;
+    let reg = with_cx(|cx| register(&good, cx))?;
     assert!(
         well_posed(&reg, 0.05),
         "clean registration certifies 0.05 deviations"
@@ -394,7 +414,7 @@ fn p3_005_proposal_11_r8_gate_and_the_holding_pen() -> Result<(), fs_asbuilt::Re
             ))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let reg = register(&sloppy)?;
+    let reg = with_cx(|cx| register(&sloppy, cx))?;
     assert!(
         !well_posed(&reg, 0.05),
         "sloppy registration cannot certify what it cannot resolve"

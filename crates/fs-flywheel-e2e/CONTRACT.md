@@ -90,7 +90,10 @@ fw-008 defines finite neutral speedups for a zero-work request;
 tests/dbg.rs —
 config-sweep smoke; tests/phase1_gate.rs — THE PHASE-1 MILESTONE GATE
 (xpck.3): skip-yield dashboard live, accept-rate telemetry stratified
-by proposer × regime, the merge swarm kill check (<25% harmonic), and
+by proposer × regime, the merge candidate-remainder diagnostic (<25% in its
+synthetic corpus and seeded live fixtures; explicitly not the full unresolved-
+merge kill criterion, which also needs retained escalation, refusal, and
+type-conflict counts), and
 Proposal 9's six-month checkpoint (accept rate > 30% AND median
 warm-start savings ≥ 1.5× at the calibrated realistic tolerance, with
 a hostile control proving the measurement can fail);

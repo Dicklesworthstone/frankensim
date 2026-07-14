@@ -14,9 +14,11 @@ layer = "L6"
 fs-evidence = { path = "../fs-evidence" }
 fs-asbuilt = { path = "../fs-asbuilt" }
 fs-assimilate = { path = "../fs-assimilate" }
+fs-exec = { path = "../fs-exec" }
 fs-toleralloc = { path = "../fs-toleralloc" }
 
 [dev-dependencies]
+fs-alloc = { path = "../fs-alloc" }
 
 [lints]
 workspace = true

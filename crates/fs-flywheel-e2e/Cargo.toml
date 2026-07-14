@@ -23,6 +23,7 @@ fs-verify = { path = "../fs-verify", features = ["certified-speculation"] }
 [dev-dependencies]
 asupersync = { path = "../../../asupersync", features = ["test-internals"] }
 fs-adjoint = { path = "../fs-adjoint", features = ["explanation-objects"] }
+fs-alloc = { path = "../fs-alloc" }
 fs-asbuilt = { path = "../fs-asbuilt" }
 fs-checker = { path = "../fs-checker" }
 fs-surrogate = { path = "../fs-surrogate", features = ["abstraction-ladder"] }
@@ -34,6 +35,7 @@ fs-package = { path = "../fs-package" }
 fs-robust = { path = "../fs-robust" }
 fs-verify = { path = "../fs-verify", features = ["certified-speculation"] }
 fs-ledger = { path = "../fs-ledger" }
+fs-exec = { path = "../fs-exec" }
 
 [features]
 # [F]-gated per the Ambition-Tag rule: the flagship loop harness ships

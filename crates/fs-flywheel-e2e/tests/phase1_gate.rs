@@ -1,14 +1,15 @@
 //! ADDENDUM PHASE 1 — THE FLYWHEEL GATE (milestone xpck.3), as one
 //! executable state: the skip-yield dashboard live (Proposal 2), the
 //! proposer accept-rate dashboard stratified by kernel × regime
-//! (Proposal 9 telemetry), the merge swarm trial with its <25% kill
-//! check (Proposal 10), and THE SIX-MONTH CHECKPOINT — the single
+//! (Proposal 9 telemetry), the merge swarm candidate-remainder diagnostic
+//! (one input to Proposal 10's broader unresolved-merge gate), and THE
+//! SIX-MONTH CHECKPOINT — the single
 //! measurement most of the addendum's weight rests on: accept rates
 //! above ~30% AND median warm-start savings ≥ 1.5× at realistic
 //! tolerances, on the verifier's kernel classes.
 #![cfg(feature = "flywheel-e2e")]
 
-use fs_geom::sheaf_merge::harmonic_conflict_rate;
+use fs_geom::sheaf_merge::candidate_remainder_conflict_rate;
 use fs_geom::sheaf_repair::SheafSkeleton;
 use fs_recompute::api::RecomputeApi;
 use fs_recompute::invalidate::Edge;
@@ -200,12 +201,13 @@ fn p1_002_accept_rate_dashboard_stratified() {
 }
 
 #[test]
-fn p1_003_merge_swarm_kill_check() {
-    // The corpus's recorded merge trials PLUS the live harness: both
-    // sides of the kill check under the 25% line.
+fn p1_003_merge_swarm_candidate_diagnostic() {
+    // Synthetic corpus fixtures exercise the measurement API; the live seeded
+    // harness measures candidate remainders. Neither substitutes for retained
+    // realistic traces that also count escalations, refusals, and type conflicts.
     for trial in fs_benchmark::merge_trials() {
         #[allow(clippy::cast_precision_loss)]
-        let rate = trial.harmonic_conflicts as f64 / trial.total_merges as f64;
+        let rate = trial.candidate_remainder_conflicts as f64 / trial.total_merges as f64;
         assert!(
             rate < 0.25,
             "corpus trial {} under the kill line: {rate:.3}",
@@ -217,16 +219,17 @@ fn p1_003_merge_swarm_kill_check() {
         edges: vec![(0, 1), (1, 2), (2, 3), (0, 3)],
         triangles: vec![],
     };
-    let live = harmonic_conflict_rate(&ring, 60, 0.1, 0x9a7e);
+    let live = candidate_remainder_conflict_rate(&ring, 60, 0.1, 0x9a7e)
+        .expect("well-formed seeded candidate diagnostic");
     assert!(
         live < 0.25,
-        "live swarm-trial rate under the kill line: {live}"
+        "live candidate-remainder conflict rate under the kill line: {live}"
     );
-    println!("{{\"metric\":\"merge-kill-check\",\"live_rate\":{live:.3},\"line\":0.25}}");
+    println!("{{\"metric\":\"merge-candidate-diagnostic\",\"live_rate\":{live:.3},\"line\":0.25}}");
     verdict(
         "p1-003",
-        "corpus merge trials and the live harness both sit under the 25% harmonic kill \
-         line",
+        "synthetic corpus fixtures and the live candidate diagnostic sit under 25%; \
+         full gate still requires retained escalation/refusal/type-conflict counts",
     );
 }
 
