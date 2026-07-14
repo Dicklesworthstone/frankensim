@@ -1177,6 +1177,7 @@ dependencies = [
  "asupersync",
  "fs-alloc",
  "fs-constraint",
+ "fs-evidence",
  "fs-exec",
  "fs-geom",
  "fs-obs",
@@ -1480,6 +1481,7 @@ version = "0.0.1"
 name = "fs-qty"
 version = "0.0.1"
 dependencies = [
+ "fs-blake3",
  "fs-propcheck",
 ]
 
@@ -1705,6 +1707,7 @@ version = "0.0.1"
 dependencies = [
  "fs-blake3",
  "fs-exec",
+ "fs-govern",
  "fs-ir",
  "fs-la",
  "fs-ledger",
@@ -1863,6 +1866,7 @@ version = "0.0.1"
 dependencies = [
  "asupersync",
  "fs-alloc",
+ "fs-evidence",
  "fs-exec",
  "fs-geom",
  "fs-ivl",
