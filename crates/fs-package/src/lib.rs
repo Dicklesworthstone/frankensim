@@ -549,6 +549,7 @@ fn classify_claim_identity_fields(claim: &Claim) {
     );
 }
 
+#[allow(clippy::items_after_statements)]
 impl Claim {
     fn sealed(
         id: impl Into<String>,
@@ -4904,28 +4905,7 @@ fn parse_semantic_witness(
         &witness_what,
     )?;
     no_leftovers(&fields, &witness_what)?;
-    if payload_hex.is_empty() || payload_hex.len() % 2 != 0 {
-        return Err(ParseError {
-            what: format!("{witness_what}.payload_hex"),
-            why: "payload_hex must be nonempty and have even length".to_string(),
-        });
-    }
-    if !payload_hex
-        .bytes()
-        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
-        return Err(ParseError {
-            what: format!("{witness_what}.payload_hex"),
-            why: "payload_hex must use canonical lowercase hexadecimal".to_string(),
-        });
-    }
-    let decoded_len = payload_hex.len() / 2;
-    if decoded_len > MAX_SEMANTIC_WITNESS_PAYLOAD_BYTES {
-        return Err(ParseError {
-            what: format!("{witness_what}.payload_hex"),
-            why: format!("decoded payload exceeds {MAX_SEMANTIC_WITNESS_PAYLOAD_BYTES} bytes"),
-        });
-    }
+    let decoded_len = validate_semantic_payload_hex(&payload_hex, &witness_what)?;
     let next_witness_count = semantic_witnesses
         .checked_add(1)
         .ok_or_else(|| ParseError {
@@ -4957,16 +4937,46 @@ fn parse_semantic_witness(
     // allocation. The parser has already bounded the encoded JSON string.
     *semantic_witnesses = next_witness_count;
     *semantic_payload_bytes = next_payload_bytes;
-    let bytes = payload_hex.as_bytes();
     let mut canonical_payload = Vec::with_capacity(decoded_len);
-    for pair in bytes.chunks_exact(2) {
-        canonical_payload.push((hex_nibble(pair[0]) << 4) | hex_nibble(pair[1]));
+    let (pairs, trailing) = payload_hex.as_bytes().as_chunks::<2>();
+    debug_assert!(trailing.is_empty());
+    for &[high, low] in pairs {
+        canonical_payload.push((hex_nibble(high) << 4) | hex_nibble(low));
     }
     Ok(Some(SemanticWitness::new(
         family,
         schema_version,
         canonical_payload,
     )))
+}
+
+fn validate_semantic_payload_hex(
+    payload_hex: &str,
+    witness_what: &str,
+) -> Result<usize, ParseError> {
+    if payload_hex.is_empty() || !payload_hex.len().is_multiple_of(2) {
+        return Err(ParseError {
+            what: format!("{witness_what}.payload_hex"),
+            why: "payload_hex must be nonempty and have even length".to_string(),
+        });
+    }
+    if !payload_hex
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(ParseError {
+            what: format!("{witness_what}.payload_hex"),
+            why: "payload_hex must use canonical lowercase hexadecimal".to_string(),
+        });
+    }
+    let decoded_len = payload_hex.len() / 2;
+    if decoded_len > MAX_SEMANTIC_WITNESS_PAYLOAD_BYTES {
+        return Err(ParseError {
+            what: format!("{witness_what}.payload_hex"),
+            why: format!("decoded payload exceeds {MAX_SEMANTIC_WITNESS_PAYLOAD_BYTES} bytes"),
+        });
+    }
+    Ok(decoded_len)
 }
 
 fn hex_nibble(byte: u8) -> u8 {

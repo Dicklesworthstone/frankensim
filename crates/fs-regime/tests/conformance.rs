@@ -307,14 +307,20 @@ fn rg_003b_unbounded_above_cards_admit_in_range_points() {
     slender.insert("slenderness".to_string(), 30.0);
     let v = admit(&registry, &slender, "solid.euler-bernoulli").expect("known model");
     assert!(v.allowed, "slenderness=30 is valid for Euler-Bernoulli");
-    assert!(v.reasons.is_empty(), "an admitted card has no reasons: {:?}", v.reasons);
+    assert!(
+        v.reasons.is_empty(),
+        "an admitted card has no reasons: {:?}",
+        v.reasons
+    );
 
     // "Unbounded above" really is unbounded: an astronomically slender member
     // must still admit (the pre-fix INFINITY made even this fail).
     let mut very_slender = BTreeMap::new();
     very_slender.insert("slenderness".to_string(), 1.0e6);
     assert!(
-        admit(&registry, &very_slender, "solid.euler-bernoulli").expect("model").allowed,
+        admit(&registry, &very_slender, "solid.euler-bernoulli")
+            .expect("model")
+            .allowed,
         "there is no upper slenderness limit for Euler-Bernoulli"
     );
 
@@ -322,7 +328,9 @@ fn rg_003b_unbounded_above_cards_admit_in_range_points() {
     let mut hi_re = BTreeMap::new();
     hi_re.insert("Re".to_string(), 5.0e4);
     assert!(
-        admit(&registry, &hi_re, "flux.potential-flow").expect("model").allowed,
+        admit(&registry, &hi_re, "flux.potential-flow")
+            .expect("model")
+            .allowed,
         "Re=5e4 is valid for potential flow"
     );
 
@@ -331,7 +339,10 @@ fn rg_003b_unbounded_above_cards_admit_in_range_points() {
     let mut stubby = BTreeMap::new();
     stubby.insert("slenderness".to_string(), 10.0);
     let refused = admit(&registry, &stubby, "solid.euler-bernoulli").expect("model");
-    assert!(!refused.allowed, "slenderness=10 is below Euler-Bernoulli's floor");
+    assert!(
+        !refused.allowed,
+        "slenderness=10 is below Euler-Bernoulli's floor"
+    );
     assert!(
         refused.reasons.iter().any(|r| r.contains("slenderness")),
         "refusal must name the violated bound, not be empty: {:?}",
