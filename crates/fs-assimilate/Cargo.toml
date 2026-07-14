@@ -13,8 +13,10 @@ layer = "L4"
 [dependencies]
 fs-blake3 = { path = "../fs-blake3" }
 fs-evidence = { path = "../fs-evidence" }
+fs-exec = { path = "../fs-exec" }
 
 [dev-dependencies]
+fs-alloc = { path = "../fs-alloc" }
 
 [lints]
 workspace = true

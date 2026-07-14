@@ -1,11 +1,90 @@
-//! G0/G3 battery for checked data assimilation (addendum Proposal 11).
+//! G0/G3/G4/G5 battery for checked, cancellation-correct data assimilation
+//! (addendum Proposal 11).
 
 use fs_assimilate::{
     AssimError, AssimilatedPosterior, Belief, Color, MAX_DENSE_OBSERVATIONS, MAX_DENSE_STATE_DIM,
-    MAX_DENSE_UPDATE_CUBIC_WORK, Observation, assimilate, assimilate_all, assimilate_colored,
-    misfit, point_sensor, scan_observation,
+    MAX_DENSE_UPDATE_CUBIC_WORK, Observation, assimilate as assimilate_with_cx,
+    assimilate_all as assimilate_all_with_cx, assimilate_colored as assimilate_colored_with_cx,
+    assimilate_colored_with_shared_poll_quota, misfit as misfit_with_cx, point_sensor,
+    scan_observation,
 };
 use fs_evidence::{MAX_COLOR_IDENTITY_BYTES, color_leaf_identity_reason};
+use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
+
+const TEST_STREAM: StreamKey = StreamKey {
+    seed: 0xA5_51_11_A7_E,
+    kernel_id: 0xA551,
+    tile: 0,
+    iteration: 0,
+};
+
+fn with_stream_cx<R>(
+    gate: &CancelGate,
+    budget: Budget,
+    mode: ExecMode,
+    stream: StreamKey,
+    f: impl FnOnce(&Cx<'_>) -> R,
+) -> R {
+    let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+    pool.scope(|arena| {
+        let cx = Cx::new(gate, arena, stream, budget, mode);
+        f(&cx)
+    })
+}
+
+fn with_configured_cx<R>(
+    gate: &CancelGate,
+    budget: Budget,
+    mode: ExecMode,
+    f: impl FnOnce(&Cx<'_>) -> R,
+) -> R {
+    with_stream_cx(gate, budget, mode, TEST_STREAM, f)
+}
+
+fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
+    with_configured_cx(
+        &CancelGate::new(),
+        Budget::INFINITE,
+        ExecMode::Deterministic,
+        f,
+    )
+}
+
+fn belief(mean: Vec<f64>, covariance: Vec<Vec<f64>>) -> Result<Belief, AssimError> {
+    with_cx(|cx| Belief::new(mean, covariance, cx))
+}
+
+fn diagonal(means: Vec<f64>, variances: &[f64]) -> Result<Belief, AssimError> {
+    with_cx(|cx| Belief::diagonal(means, variances, cx))
+}
+
+fn validate(belief: &Belief) -> Result<(), AssimError> {
+    with_cx(|cx| belief.validate(cx))
+}
+
+fn assimilate(prior: &Belief, observation: &Observation) -> Result<Belief, AssimError> {
+    with_cx(|cx| assimilate_with_cx(prior, observation, cx))
+}
+
+fn assimilate_all(prior: &Belief, observations: &[Observation]) -> Result<Belief, AssimError> {
+    with_cx(|cx| assimilate_all_with_cx(prior, observations, cx))
+}
+
+fn misfit(prior: &Belief, observations: &[Observation]) -> Result<f64, AssimError> {
+    with_cx(|cx| misfit_with_cx(prior, observations, cx))
+}
+
+fn assimilate_colored(
+    prior: &Belief,
+    observations: &[Observation],
+    regime_param: &str,
+    regime_lo: f64,
+    regime_hi: f64,
+) -> Result<AssimilatedPosterior, AssimError> {
+    with_cx(|cx| {
+        assimilate_colored_with_cx(prior, observations, regime_param, regime_lo, regime_hi, cx)
+    })
+}
 
 fn scalar(mean: f64, variance: f64) -> Belief {
     Belief::scalar(mean, variance).expect("valid scalar fixture")
@@ -22,6 +101,43 @@ fn estimator_identity(posterior: &AssimilatedPosterior) -> &str {
     }
 }
 
+fn assert_same_non_identity_posterior(left: &AssimilatedPosterior, right: &AssimilatedPosterior) {
+    assert_eq!(left.belief(), right.belief());
+    assert_eq!(left.regime(), right.regime());
+    assert_eq!(
+        left.misfit_before().to_bits(),
+        right.misfit_before().to_bits()
+    );
+    assert_eq!(
+        left.misfit_after().to_bits(),
+        right.misfit_after().to_bits()
+    );
+    match (left.color(), right.color()) {
+        (
+            Color::Estimated {
+                dispersion: left_dispersion,
+                ..
+            },
+            Color::Estimated {
+                dispersion: right_dispersion,
+                ..
+            },
+        ) => assert_eq!(left_dispersion.to_bits(), right_dispersion.to_bits()),
+        other => panic!("expected matching Estimated colors, got {other:?}"),
+    }
+}
+
+fn assert_initial_cancelled<T: core::fmt::Debug>(result: Result<T, AssimError>) {
+    assert!(matches!(
+        result,
+        Err(AssimError::Cancelled {
+            phase: "initial",
+            completed: 0,
+            planned,
+        }) if planned > 0
+    ));
+}
+
 #[test]
 fn a_measurement_shifts_the_mean_and_shrinks_the_variance() {
     let prior = scalar(0.0, 10.0);
@@ -35,7 +151,7 @@ fn a_measurement_shifts_the_mean_and_shrinks_the_variance() {
 
 #[test]
 fn assimilation_reduces_the_model_data_misfit() {
-    let prior = Belief::diagonal(vec![0.0, 0.0], &[10.0, 10.0]).unwrap();
+    let prior = diagonal(vec![0.0, 0.0], &[10.0, 10.0]).unwrap();
     let obs = vec![
         sensor(0, 2, 5.0, 1.0, "gauge-x"),
         sensor(1, 2, -3.0, 1.0, "gauge-y"),
@@ -101,7 +217,7 @@ fn the_assimilated_posterior_is_an_honest_bounded_estimate() {
             estimator,
             dispersion,
         } => {
-            assert!(estimator.starts_with("assimilation-candidate:v1:"));
+            assert!(estimator.starts_with("assimilation-candidate:v3:"));
             assert!(estimator.len() <= MAX_COLOR_IDENTITY_BYTES);
             assert_eq!(color_leaf_identity_reason(estimator), None);
             assert!(dispersion.is_infinite() && dispersion.is_sign_positive());
@@ -112,20 +228,21 @@ fn the_assimilated_posterior_is_an_honest_bounded_estimate() {
 
 #[test]
 fn belief_construction_rejects_empty_ragged_and_nonfinite_state() {
-    assert_eq!(Belief::new(vec![], vec![]), Err(AssimError::EmptyBelief));
+    assert_eq!(belief(vec![], vec![]), Err(AssimError::EmptyBelief));
+    assert_eq!(diagonal(vec![], &[]), Err(AssimError::EmptyBelief));
     assert_eq!(
-        Belief::diagonal(vec![0.0, 1.0], &[1.0]),
+        diagonal(vec![0.0, 1.0], &[1.0]),
         Err(AssimError::DiagonalDimensionMismatch {
             means: 2,
             variances: 1,
         })
     );
     assert_eq!(
-        Belief::new(vec![0.0], vec![]),
+        belief(vec![0.0], vec![]),
         Err(AssimError::CovarianceDimensionMismatch { state: 1, rows: 0 })
     );
     assert_eq!(
-        Belief::new(vec![0.0, 0.0], vec![vec![1.0], vec![0.0, 1.0]]),
+        belief(vec![0.0, 0.0], vec![vec![1.0], vec![0.0, 1.0]]),
         Err(AssimError::CovarianceRowDimensionMismatch {
             row: 0,
             expected: 2,
@@ -143,23 +260,45 @@ fn belief_construction_rejects_empty_ragged_and_nonfinite_state() {
 }
 
 #[test]
+fn g4_empty_diagonal_preflight_precedes_cancellation_and_zero_poll_budget() {
+    let cancelled = CancelGate::new();
+    cancelled.request();
+    let pre_cancelled = with_configured_cx(
+        &cancelled,
+        Budget::INFINITE,
+        ExecMode::Deterministic,
+        |cx| Belief::diagonal(Vec::new(), &[], cx),
+    );
+    assert_eq!(pre_cancelled, Err(AssimError::EmptyBelief));
+
+    let healthy = CancelGate::new();
+    let zero_quota = with_configured_cx(
+        &healthy,
+        Budget::INFINITE.with_poll_quota(0),
+        ExecMode::Deterministic,
+        |cx| Belief::diagonal(Vec::new(), &[], cx),
+    );
+    assert_eq!(zero_quota, Err(AssimError::EmptyBelief));
+}
+
+#[test]
 fn belief_construction_enforces_covariance_semantics() {
     assert_eq!(
         Belief::scalar(0.0, -1.0),
         Err(AssimError::NegativeVariance { index: 0 })
     );
     assert_eq!(
-        Belief::new(vec![0.0, 0.0], vec![vec![1.0, 0.5], vec![0.4, 1.0]]),
+        belief(vec![0.0, 0.0], vec![vec![1.0, 0.5], vec![0.4, 1.0]]),
         Err(AssimError::NonSymmetricCovariance { row: 0, column: 1 })
     );
     assert_eq!(
-        Belief::new(vec![0.0, 0.0], vec![vec![1.0, 2.0], vec![2.0, 1.0]]),
+        belief(vec![0.0, 0.0], vec![vec![1.0, 2.0], vec![2.0, 1.0]]),
         Err(AssimError::CovarianceNotPositiveSemidefinite)
     );
     // A global magnitude must not hide invalid coupling to a zero-variance
     // component in the semidefinite tolerance.
     assert_eq!(
-        Belief::new(
+        belief(
             vec![0.0, 0.0, 0.0],
             vec![
                 vec![1e300, 0.0, 0.0],
@@ -170,9 +309,9 @@ fn belief_construction_enforces_covariance_semantics() {
         Err(AssimError::CovarianceNotPositiveSemidefinite)
     );
     // Unit scaling does not reject a valid high-dynamic-range covariance.
-    Belief::new(vec![0.0, 0.0], vec![vec![1e300, 0.0], vec![0.0, 1e-300]]).unwrap();
+    belief(vec![0.0, 0.0], vec![vec![1e300, 0.0], vec![0.0, 1e-300]]).unwrap();
     // Singular positive-semidefinite covariance is valid.
-    let semidefinite = Belief::new(vec![0.0, 0.0], vec![vec![1.0, 1.0], vec![1.0, 1.0]]).unwrap();
+    let semidefinite = belief(vec![0.0, 0.0], vec![vec![1.0, 1.0], vec![1.0, 1.0]]).unwrap();
     assert_eq!(semidefinite.variance(1), Ok(1.0));
 }
 
@@ -184,7 +323,7 @@ fn dense_state_dimension_is_bounded_before_quadratic_allocation() {
         max: MAX_DENSE_STATE_DIM,
     };
     assert_eq!(
-        Belief::diagonal(vec![0.0; oversized], &vec![1.0; oversized]),
+        diagonal(vec![0.0; oversized], &vec![1.0; oversized]),
         Err(expected.clone())
     );
     assert_eq!(
@@ -204,7 +343,7 @@ fn psd_admission_never_tolerance_clamps_negative_curvature() {
     // tolerance, laundering a mathematically indefinite matrix into Belief.
     let correlation = 1.0 + 1e-14;
     assert_eq!(
-        Belief::new(
+        belief(
             vec![0.0, 0.0],
             vec![vec![1.0, correlation], vec![correlation, 1.0]],
         ),
@@ -216,7 +355,7 @@ fn psd_admission_never_tolerance_clamps_negative_curvature() {
     // the underlying binary-rational products exactly before correlation
     // scaling, so this sub-ulp negative 2x2 minor is still refused.
     assert_eq!(
-        Belief::new(
+        belief(
             vec![0.0, 0.0],
             vec![vec![1.0 + f64::EPSILON, 1.0], vec![1.0, 1.0 - f64::EPSILON],],
         ),
@@ -382,7 +521,7 @@ fn dense_aggregate_work_is_bounded_before_canonicalization_or_updates() {
     );
 
     let dimension = MAX_DENSE_STATE_DIM;
-    let dense_prior = Belief::diagonal(vec![0.0; dimension], &vec![1.0; dimension])
+    let dense_prior = diagonal(vec![0.0; dimension], &vec![1.0; dimension])
         .expect("maximum admitted dense state");
     let dense_observation = sensor(0, dimension, 0.0, 1.0, "bounded-work");
     let observations = vec![dense_observation; 5];
@@ -450,8 +589,8 @@ fn candidate_identity_is_unambiguous_and_binds_multiplicity() {
 
 #[test]
 fn signed_zero_is_canonicalized_before_hashing_and_computation() {
-    let negative = Belief::new(vec![-0.0], vec![vec![-0.0]]).unwrap();
-    let positive = Belief::new(vec![0.0], vec![vec![0.0]]).unwrap();
+    let negative = belief(vec![-0.0], vec![vec![-0.0]]).unwrap();
+    let positive = belief(vec![0.0], vec![vec![0.0]]).unwrap();
     assert_eq!(negative.mean()[0].to_bits(), 0.0_f64.to_bits());
     assert_eq!(negative.covariance()[0][0].to_bits(), 0.0_f64.to_bits());
     assert_eq!(negative, positive);
@@ -494,7 +633,7 @@ fn covariance_update_avoids_an_unnecessary_intermediate_overflow() {
 
 #[test]
 fn correlated_update_preserves_exact_covariance_symmetry() {
-    let prior = Belief::new(vec![0.0, 0.0], vec![vec![2.0, 0.5], vec![0.5, 1.0]]).unwrap();
+    let prior = belief(vec![0.0, 0.0], vec![vec![2.0, 0.5], vec![0.5, 1.0]]).unwrap();
     let obs = Observation::new(vec![1.0, 2.0], 1.0, 0.25, "x").unwrap();
     let posterior = assimilate(&prior, &obs).unwrap();
     assert_eq!(
@@ -507,7 +646,7 @@ fn correlated_update_preserves_exact_covariance_symmetry() {
 
 #[test]
 fn joseph_update_preserves_psd_for_the_cancellation_counterexample() {
-    let prior = Belief::new(
+    let prior = belief(
         vec![0.0, 0.0],
         vec![
             vec![333_391_946_697.748_96, -472_122_745_149_250.6],
@@ -524,9 +663,7 @@ fn joseph_update_preserves_psd_for_the_cancellation_counterexample() {
     .unwrap();
 
     let posterior = assimilate(&prior, &observation).expect("Joseph update must stay admissible");
-    posterior
-        .validate()
-        .expect("every returned posterior must pass public belief validation");
+    validate(&posterior).expect("every returned posterior must pass public belief validation");
     assert_eq!(
         posterior.covariance()[0][1].to_bits(),
         posterior.covariance()[1][0].to_bits(),
@@ -581,7 +718,7 @@ fn randomized_well_conditioned_updates_always_return_valid_beliefs() {
             let mean = (0..dimension)
                 .map(|_| sample(&mut seed) * 10.0)
                 .collect::<Vec<_>>();
-            let prior = Belief::new(mean, covariance).expect("constructed SPD prior");
+            let prior = belief(mean, covariance).expect("constructed SPD prior");
             let mut operator = (0..dimension)
                 .map(|_| sample(&mut seed))
                 .collect::<Vec<_>>();
@@ -597,7 +734,7 @@ fn randomized_well_conditioned_updates_always_return_valid_beliefs() {
             let posterior = assimilate(&prior, &observation).unwrap_or_else(|error| {
                 panic!("dimension {dimension}, case {case}: update refused: {error}")
             });
-            posterior.validate().unwrap_or_else(|error| {
+            validate(&posterior).unwrap_or_else(|error| {
                 panic!("dimension {dimension}, case {case}: invalid posterior: {error}")
             });
             for row in 0..dimension {
@@ -615,11 +752,390 @@ fn randomized_well_conditioned_updates_always_return_valid_beliefs() {
 
 #[test]
 fn assimilation_is_deterministic() {
-    let prior = Belief::diagonal(vec![0.0, 0.0], &[5.0, 5.0]).unwrap();
+    let prior = diagonal(vec![0.0, 0.0], &[5.0, 5.0]).unwrap();
     let obs = vec![sensor(0, 2, 2.0, 0.5, "a"), sensor(1, 2, 1.0, 0.5, "b")];
     assert_eq!(assimilate_all(&prior, &obs), assimilate_all(&prior, &obs));
     assert_eq!(
         assimilate_colored(&prior, &obs, "Re", 1.0, 2.0),
         assimilate_colored(&prior, &obs, "Re", 1.0, 2.0)
     );
+}
+
+#[test]
+fn g4_pre_cancelled_entry_points_publish_nothing() {
+    let gate = CancelGate::new();
+    gate.request();
+    let prior = scalar(0.0, 1.0);
+    let observations = [sensor(0, 1, 1.0, 0.25, "pre-cancelled")];
+
+    let colored = with_configured_cx(&gate, Budget::INFINITE, ExecMode::Deterministic, |cx| {
+        assimilate_colored_with_cx(&prior, &observations, "Re", 1.0, 2.0, cx)
+    });
+    assert_initial_cancelled(colored);
+
+    let constructor = with_configured_cx(&gate, Budget::INFINITE, ExecMode::Deterministic, |cx| {
+        Belief::new(vec![0.0], vec![vec![1.0]], cx)
+    });
+    assert_initial_cancelled(constructor);
+
+    let diagonal = with_configured_cx(&gate, Budget::INFINITE, ExecMode::Deterministic, |cx| {
+        Belief::diagonal(vec![0.0], &[1.0], cx)
+    });
+    assert_initial_cancelled(diagonal);
+
+    let validation = with_configured_cx(&gate, Budget::INFINITE, ExecMode::Deterministic, |cx| {
+        prior.validate(cx)
+    });
+    assert_initial_cancelled(validation);
+
+    let measured = with_configured_cx(&gate, Budget::INFINITE, ExecMode::Deterministic, |cx| {
+        misfit_with_cx(&prior, &observations, cx)
+    });
+    assert_initial_cancelled(measured);
+
+    let single = with_configured_cx(&gate, Budget::INFINITE, ExecMode::Deterministic, |cx| {
+        assimilate_with_cx(&prior, &observations[0], cx)
+    });
+    assert_initial_cancelled(single);
+
+    let aggregate = with_configured_cx(&gate, Budget::INFINITE, ExecMode::Deterministic, |cx| {
+        assimilate_all_with_cx(&prior, &observations, cx)
+    });
+    assert_initial_cancelled(aggregate);
+}
+
+#[test]
+fn g4_hostile_maximum_cancels_at_a_bounded_mid_operation_checkpoint() {
+    let dimension = MAX_DENSE_STATE_DIM;
+    let prior =
+        diagonal(vec![0.0; dimension], &vec![1.0; dimension]).expect("maximum admitted prior");
+    let observations = (0..4)
+        .map(|component| {
+            sensor(
+                component,
+                dimension,
+                component as f64,
+                1.0,
+                "hostile-boundary",
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        (dimension as u128).pow(3) * observations.len() as u128,
+        MAX_DENSE_UPDATE_CUBIC_WORK
+    );
+
+    let gate = CancelGate::new();
+    let result = with_configured_cx(
+        &gate,
+        Budget::new().with_poll_quota(1),
+        ExecMode::Deterministic,
+        |cx| assimilate_colored_with_cx(&prior, &observations, "Re", 1.0, 2.0, cx),
+    );
+    assert!(matches!(
+        result,
+        Err(AssimError::Cancelled {
+            phase: "observation-validation",
+            completed,
+            planned,
+        }) if completed > 0 && completed < planned
+    ));
+}
+
+#[test]
+fn g4_canonical_merge_polls_inside_a_maximum_record_comparison() {
+    let dimension = MAX_DENSE_STATE_DIM;
+    let prior =
+        diagonal(vec![0.0; dimension], &vec![1.0; dimension]).expect("maximum admitted prior");
+    let observations = (0..4)
+        .map(|_| {
+            Observation::new(vec![1.0; dimension], 0.0, 1.0, "merge-equal-")
+                .expect("maximum-width comparison fixture")
+        })
+        .collect::<Vec<_>>();
+
+    let cancelled = with_configured_cx(
+        &CancelGate::new(),
+        Budget::INFINITE.with_poll_quota(3_899),
+        ExecMode::Deterministic,
+        |cx| misfit_with_cx(&prior, &observations, cx),
+    );
+    assert!(matches!(
+        cancelled,
+        Err(AssimError::Cancelled {
+            phase: "canonical-compare",
+            completed: 64_376,
+            planned: 190_032,
+        })
+    ));
+
+    let baseline = misfit(&prior, &observations).expect("healthy comparison baseline");
+    let replay = misfit(&prior, &observations).expect("cancelled comparison retains no state");
+    assert_eq!(baseline.to_bits(), replay.to_bits());
+}
+
+#[test]
+fn g4_quota_sweep_reaches_update_psd_hash_and_commit_then_replays_cleanly() {
+    let prior = diagonal(vec![0.0; 8], &[1.0; 8]).expect("bounded prior");
+    let observations = [sensor(3, 8, 1.0, 0.25, "phase-sweep")];
+    let baseline =
+        assimilate_colored(&prior, &observations, "Re", 1.0, 2.0).expect("baseline assimilation");
+    let targets = [
+        "joseph-update",
+        "posterior-psd",
+        "candidate-hash",
+        "finalize",
+    ];
+    let mut seen = Vec::new();
+    let mut completed = false;
+
+    for quota in 1..=4_096 {
+        let result = with_configured_cx(
+            &CancelGate::new(),
+            Budget::new().with_poll_quota(quota),
+            ExecMode::Deterministic,
+            |cx| assimilate_colored_with_cx(&prior, &observations, "Re", 1.0, 2.0, cx),
+        );
+        match result {
+            Err(AssimError::Cancelled {
+                phase,
+                completed: completed_work,
+                planned,
+            }) => {
+                assert!(completed_work <= planned);
+                if targets.contains(&phase) && !seen.contains(&phase) {
+                    seen.push(phase);
+                    let recovered = assimilate_colored(&prior, &observations, "Re", 1.0, 2.0)
+                        .expect("healthy replay after refusal");
+                    assert_eq!(recovered, baseline);
+                }
+            }
+            Ok(_) => {
+                completed = true;
+                break;
+            }
+            Err(other) => panic!("unexpected phase-sweep failure: {other}"),
+        }
+    }
+
+    assert!(completed, "a sufficient finite quota must complete");
+    for phase in targets {
+        assert!(seen.contains(&phase), "quota sweep missed {phase}");
+    }
+}
+
+#[test]
+fn g4_final_checkpoint_can_refuse_publication_after_local_completion() {
+    let prior = scalar(0.0, 1.0);
+    let observations = [sensor(0, 1, 1.0, 0.25, "final-boundary")];
+    let mut final_refusal = None;
+
+    for quota in 1..=512 {
+        let gate = CancelGate::new();
+        let result = with_configured_cx(
+            &gate,
+            Budget::new().with_poll_quota(quota),
+            ExecMode::Deterministic,
+            |cx| assimilate_colored_with_cx(&prior, &observations, "Re", 1.0, 2.0, cx),
+        );
+        match result {
+            Err(
+                error @ AssimError::Cancelled {
+                    phase: "finalize", ..
+                },
+            ) => {
+                final_refusal = Some(error);
+                break;
+            }
+            Err(AssimError::Cancelled { .. }) | Ok(_) => {}
+            Err(other) => panic!("unexpected final-boundary result: {other}"),
+        }
+    }
+
+    assert!(matches!(
+        final_refusal,
+        Some(AssimError::Cancelled {
+            phase: "finalize",
+            completed,
+            planned,
+        }) if completed <= planned && planned > 0
+    ));
+
+    let recovered = assimilate_colored(&prior, &observations, "Re", 1.0, 2.0)
+        .expect("healthy replay after final refusal");
+    let baseline =
+        assimilate_colored(&prior, &observations, "Re", 1.0, 2.0).expect("clean baseline");
+    assert_eq!(recovered, baseline);
+}
+
+#[test]
+fn g4_shared_poll_quota_is_consumed_once_across_nested_assimilations() {
+    let prior = scalar(0.0, 1.0);
+    let observations = [sensor(0, 1, 1.0, 0.25, "shared-poll-quota")];
+    for (ambient, requested) in [(0, 1), (1, 2)] {
+        let mut inflated_remaining = requested;
+        let inflated = with_configured_cx(
+            &CancelGate::new(),
+            Budget::INFINITE.with_poll_quota(ambient),
+            ExecMode::Deterministic,
+            |cx| {
+                assimilate_colored_with_shared_poll_quota(
+                    &prior,
+                    &observations,
+                    "Re",
+                    1.0,
+                    2.0,
+                    cx,
+                    &mut inflated_remaining,
+                )
+            },
+        );
+        assert_eq!(
+            inflated,
+            Err(AssimError::PollQuotaExceedsAmbient { requested, ambient })
+        );
+        assert_eq!(inflated_remaining, requested);
+    }
+
+    let required = (1..=512)
+        .find(|quota| {
+            let mut remaining = *quota;
+            with_cx(|cx| {
+                assimilate_colored_with_shared_poll_quota(
+                    &prior,
+                    &observations,
+                    "Re",
+                    1.0,
+                    2.0,
+                    cx,
+                    &mut remaining,
+                )
+                .is_ok()
+            })
+        })
+        .expect("bounded scalar assimilation has a finite poll requirement");
+
+    let mut remaining = required;
+    let (first, second) = with_cx(|cx| {
+        let first = assimilate_colored_with_shared_poll_quota(
+            &prior,
+            &observations,
+            "Re",
+            1.0,
+            2.0,
+            cx,
+            &mut remaining,
+        );
+        let second = assimilate_colored_with_shared_poll_quota(
+            &prior,
+            &observations,
+            "Re",
+            1.0,
+            2.0,
+            cx,
+            &mut remaining,
+        );
+        (first, second)
+    });
+    let shared = first.expect("first nested assimilation consumes the shared slice");
+    assert_eq!(remaining, 0);
+    assert!(matches!(
+        second,
+        Err(AssimError::Cancelled {
+            phase: "initial",
+            completed: 0,
+            ..
+        })
+    ));
+    let ambient =
+        assimilate_colored(&prior, &observations, "Re", 1.0, 2.0).expect("ambient-budget baseline");
+    assert_same_non_identity_posterior(&ambient, &shared);
+    assert_ne!(estimator_identity(&ambient), estimator_identity(&shared));
+}
+
+#[test]
+fn g5_candidate_identity_binds_mode_budget_and_every_stream_field() {
+    let prior = scalar(0.0, 1.0);
+    let observations = [sensor(0, 1, 1.0, 0.25, "identity-provenance")];
+    let base = Budget::new()
+        .with_poll_quota(10_000)
+        .with_cost_quota(20_000)
+        .with_priority(73);
+    let deadline = Budget::with_deadline_at_ns(123_456)
+        .with_poll_quota(10_000)
+        .with_cost_quota(20_000)
+        .with_priority(73);
+    let variants = [
+        (ExecMode::Deterministic, base, TEST_STREAM),
+        (ExecMode::Fast, base, TEST_STREAM),
+        (ExecMode::Deterministic, deadline, TEST_STREAM),
+        (
+            ExecMode::Deterministic,
+            base.with_poll_quota(10_001),
+            TEST_STREAM,
+        ),
+        (
+            ExecMode::Deterministic,
+            base.with_cost_quota(20_001),
+            TEST_STREAM,
+        ),
+        (ExecMode::Deterministic, base.with_priority(74), TEST_STREAM),
+        (
+            ExecMode::Deterministic,
+            base,
+            StreamKey {
+                seed: TEST_STREAM.seed + 1,
+                ..TEST_STREAM
+            },
+        ),
+        (
+            ExecMode::Deterministic,
+            base,
+            StreamKey {
+                kernel_id: TEST_STREAM.kernel_id + 1,
+                ..TEST_STREAM
+            },
+        ),
+        (
+            ExecMode::Deterministic,
+            base,
+            StreamKey {
+                tile: TEST_STREAM.tile + 1,
+                ..TEST_STREAM
+            },
+        ),
+        (
+            ExecMode::Deterministic,
+            base,
+            StreamKey {
+                iteration: TEST_STREAM.iteration + 1,
+                ..TEST_STREAM
+            },
+        ),
+    ];
+    let variant_count = variants.len();
+
+    let mut identities = Vec::new();
+    let mut reference = None;
+    for (mode, budget, stream) in variants {
+        let gate = CancelGate::new();
+        let output = with_stream_cx(&gate, budget, mode, stream, |cx| {
+            assimilate_colored_with_cx(&prior, &observations, "Re", 1.0, 2.0, cx)
+        })
+        .expect("provenance variant must complete");
+        if let Some(reference) = &reference {
+            assert_same_non_identity_posterior(reference, &output);
+        } else {
+            reference = Some(output.clone());
+        }
+        identities.push(estimator_identity(&output).to_owned());
+    }
+    assert!(
+        identities
+            .iter()
+            .all(|identity| identity.starts_with("assimilation-candidate:v3:"))
+    );
+    identities.sort();
+    identities.dedup();
+    assert_eq!(identities.len(), variant_count);
 }
