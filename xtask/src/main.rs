@@ -1,3 +1,5 @@
+#![cfg_attr(windows, feature(windows_by_handle))]
+
 //! FrankenSim repository policy checks (`cargo run -p xtask -- <command>`).
 //!
 //! Commands:
@@ -23,16 +25,30 @@
 //! It fails loudly on shapes it does not understand rather than guessing — these are
 //! our files, and the conventions are enforced, not inferred.
 
+mod bootstrap_provenance;
 mod claims;
 mod closures;
+mod constellation_cleanliness;
 mod depgraph;
 mod identities;
 
+use bootstrap_provenance::{
+    BootstrapProvenanceRow, bootstrap_provenance_support_preflight, provenance_path_text,
+    write_bootstrap_provenance,
+};
+use constellation_cleanliness::{
+    is_redirecting_entry, pinned_repository_worktree_status, repository_worktree_status,
+    sanitized_git_command, verify_two_complete_passes,
+};
+
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::io::Read as _;
+use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static NEXT_CONSTELLATION_LOCK_TEMP_SUFFIX: AtomicU64 = AtomicU64::new(0);
 
 /// Layers, in the plan's order. `Util` crates (fs-qty, fs-obs) are usable by every
 /// layer; `Tool` crates (xtask) are outside the shipped dependency graph entirely.
@@ -457,28 +473,9 @@ fn constellation_entries(workspace_root: &Path) -> Result<Vec<ConstellationEntry
         let text = std::fs::read_to_string(&manifest)
             .map_err(|e| format!("constellation repo {lib} missing at {}: {e}", dir.display()))?;
         let version = first_version_in(&text).unwrap_or_else(|| "unversioned-workspace".into());
-        let head = std::process::Command::new("git")
-            .arg("-C")
-            .arg(&dir)
-            .args(["rev-parse", "HEAD"])
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map_or_else(
-                || "no-git".to_string(),
-                |o| String::from_utf8_lossy(&o.stdout).trim().to_string(),
-            );
-        let remote = std::process::Command::new("git")
-            .arg("-C")
-            .arg(&dir)
-            .args(["remote", "get-url", "origin"])
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map_or_else(
-                || "no-remote".to_string(),
-                |o| String::from_utf8_lossy(&o.stdout).trim().to_string(),
-            );
+        let head = git_out(&dir, &["rev-parse", "HEAD"]).unwrap_or_else(|_| "no-git".to_string());
+        let remote = git_out(&dir, &["remote", "get-url", "origin"])
+            .unwrap_or_else(|_| "no-remote".to_string());
         out.push(ConstellationEntry {
             lib: (*lib).to_string(),
             dir,
@@ -544,6 +541,88 @@ fn render_lockfile(entries: &[ConstellationEntry], hash: u64) -> String {
         })
         .collect::<Vec<_>>();
     render_lock_rows(&rows, &format!("{hash:016x}"))
+}
+
+fn write_constellation_lock(
+    path: &Path,
+    entries: &[ConstellationEntry],
+    hash: u64,
+) -> std::io::Result<()> {
+    let identity_domain = CONSTELLATION_LOCK_WRITER_IDENTITY_DOMAIN;
+    let identity_version = CONSTELLATION_LOCK_WRITER_IDENTITY_VERSION;
+    let document = render_lockfile(entries, hash);
+    debug_assert!(!document.contains(&format!("\"identity_domain\": \"{identity_domain}\"")));
+    let file_name = path.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "constellation lock path has no file name",
+        )
+    })?;
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let (temporary, mut staging) = (0..128)
+        .find_map(|_| {
+            let suffix = NEXT_CONSTELLATION_LOCK_TEMP_SUFFIX.fetch_add(1, Ordering::Relaxed);
+            let mut temporary_name = file_name.to_os_string();
+            temporary_name.push(format!(".tmp.{}.{suffix}", std::process::id()));
+            let temporary = parent.join(temporary_name);
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)
+            {
+                Ok(file) => Some(Ok((temporary, file))),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => None,
+                Err(error) => Some(Err(error)),
+            }
+        })
+        .transpose()?
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!(
+                    "constellation lock writer {identity_domain}@{identity_version} could not reserve a staging file beside {}",
+                    path.display()
+                ),
+            )
+        })?;
+    staging.write_all(document.as_bytes()).map_err(|error| {
+        std::io::Error::new(
+            error.kind(),
+            format!(
+                "constellation lock writer {identity_domain}@{identity_version} could not stage {} in retained file {}: {error}",
+                path.display(),
+                temporary.display()
+            ),
+        )
+    })?;
+    staging.sync_all().map_err(|error| {
+        std::io::Error::new(
+            error.kind(),
+            format!(
+                "constellation lock writer {identity_domain}@{identity_version} could not make retained staging file {} durable for {}: {error}",
+                temporary.display(),
+                path.display()
+            ),
+        )
+    })?;
+    drop(staging);
+    std::fs::rename(&temporary, path).map_err(|error| {
+        std::io::Error::new(
+            error.kind(),
+            format!(
+                "constellation lock writer {identity_domain}@{identity_version} could not atomically replace {} from retained staging file {}: {error}",
+                path.display(),
+                temporary.display()
+            ),
+        )
+    })?;
+    if let Ok(directory) = std::fs::File::open(parent) {
+        let _ = directory.sync_all();
+    }
+    Ok(())
 }
 
 /// `lock-constellation` writes the lockfile; `check-constellation` verifies
@@ -630,7 +709,7 @@ fn cmd_constellation(root: &Path, check: bool) -> ExitCode {
             eprintln!("refusing to lock a dirty or unreadable constellation: {detail}");
             return ExitCode::FAILURE;
         }
-        match std::fs::write(&lock_path, render_lockfile(&entries, hash)) {
+        match write_constellation_lock(&lock_path, &entries, hash) {
             Ok(()) => {
                 println!(
                     "{{\"check\":\"constellation-lock\",\"verdict\":\"written\",\"hash\":\"{hash:016x}\"}}"
@@ -1899,6 +1978,9 @@ struct LockRow {
 const CONSTELLATION_LOCK_SCHEMA: &str = "frankensim-constellation-lock-v2";
 const CONSTELLATION_LOCK_IDENTITY_VERSION: u32 = 1;
 const CONSTELLATION_LOCK_IDENTITY_DOMAIN: &str = "org.frankensim.xtask.constellation-lock.v1";
+const CONSTELLATION_LOCK_WRITER_IDENTITY_VERSION: u32 = 2;
+const CONSTELLATION_LOCK_WRITER_IDENTITY_DOMAIN: &str =
+    "org.frankensim.xtask.constellation-lock-writer.v2";
 const CONSTELLATION_LOCK_NOTE: &str = "lock_hash covers (lib, version, git_head) only — paths are per-machine; remote is transport for bootstrap-constellation (content identity is the git head)";
 const MAX_CONSTELLATION_LOCK_BYTES: usize = 1_048_576;
 
@@ -2169,72 +2251,57 @@ fn lock_rows_identity(rows: &[LockRow]) -> Result<String, String> {
 }
 
 fn git_out(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
+    let output = sanitized_git_command(dir, args)
         .output()
         .map_err(|e| format!("git {args:?} failed to spawn: {e}"))?;
-    if out.status.success() {
-        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    if output.status.success() {
+        let stdout = std::str::from_utf8(&output.stdout).map_err(|error| {
+            format!(
+                "git {args:?} in {} returned non-UTF-8 stdout: {error}",
+                dir.display()
+            )
+        })?;
+        Ok(stdout.trim().to_string())
     } else {
+        let stderr = std::str::from_utf8(&output.stderr).map_err(|error| {
+            format!(
+                "git {args:?} in {} returned non-UTF-8 stderr: {error}",
+                dir.display()
+            )
+        })?;
         Err(format!(
             "git {args:?} in {} failed: {}",
             dir.display(),
-            String::from_utf8_lossy(&out.stderr).trim()
+            stderr.trim()
         ))
     }
 }
 
 fn git_run(dir: &Path, args: &[&str]) -> Result<(), String> {
-    let output = std::process::Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
+    let output = sanitized_git_command(dir, args)
         .output()
         .map_err(|error| format!("git {args:?} failed to spawn: {error}"))?;
     if output.status.success() {
+        std::str::from_utf8(&output.stdout).map_err(|error| {
+            format!(
+                "git {args:?} in {} returned non-UTF-8 stdout: {error}",
+                dir.display()
+            )
+        })?;
         Ok(())
     } else {
+        let stderr = std::str::from_utf8(&output.stderr).map_err(|error| {
+            format!(
+                "git {args:?} in {} returned non-UTF-8 stderr: {error}",
+                dir.display()
+            )
+        })?;
         Err(format!(
             "git {args:?} in {} failed: {}",
             dir.display(),
-            String::from_utf8_lossy(&output.stderr).trim()
+            stderr.trim()
         ))
     }
-}
-
-fn repository_worktree_status(target: &Path) -> Result<String, String> {
-    let tracked = git_out(
-        target,
-        &[
-            "-c",
-            "core.fileMode=true",
-            "-c",
-            "core.excludesFile=/dev/null",
-            "status",
-            "--porcelain",
-            "-z",
-            "--untracked-files=all",
-        ],
-    )?;
-    let untracked = git_out(
-        target,
-        &[
-            "-c",
-            "core.excludesFile=/dev/null",
-            "ls-files",
-            "-z",
-            "--others",
-            "--exclude-per-directory=.gitignore",
-        ],
-    )?;
-    let index_flags = git_out(target, &["ls-files", "-v"])?;
-    let hidden_index_entry = hidden_index_entry(&index_flags);
-    Ok(match hidden_index_entry {
-        Some(entry) => format!("{tracked}{untracked}\nindex flag hides worktree state: {entry}"),
-        None => format!("{tracked}{untracked}"),
-    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2243,10 +2310,13 @@ struct RepositoryObservation {
     status: String,
 }
 
-fn repository_observation(target: &Path) -> Result<RepositoryObservation, String> {
+fn repository_observation(
+    target: &Path,
+    expected_head: &str,
+) -> Result<RepositoryObservation, String> {
     let head_before = git_out(target, &["rev-parse", "HEAD"])
         .map_err(|error| format!("{}: {error}", target.display()))?;
-    let status = repository_worktree_status(target)?;
+    let status = pinned_repository_worktree_status(target, expected_head)?;
     let head_after = git_out(target, &["rev-parse", "HEAD"])
         .map_err(|error| format!("{}: {error}", target.display()))?;
     coherent_repository_observation(target, &head_before, status, head_after)
@@ -2270,19 +2340,7 @@ fn coherent_repository_observation(
     })
 }
 
-fn hidden_index_entry(index_flags: &str) -> Option<&str> {
-    index_flags.lines().find(|line| {
-        line.as_bytes()
-            .first()
-            .is_some_and(|tag| *tag == b'S' || tag.is_ascii_lowercase())
-    })
-}
-
 const BOOTSTRAP_INCOMPLETE_KEY: &str = "frankensim.bootstrapIncomplete";
-const BOOTSTRAP_PROVENANCE_SCHEMA: &str = "frankensim-constellation-bootstrap-v2";
-const BOOTSTRAP_PROVENANCE_IDENTITY_VERSION: u32 = 2;
-const BOOTSTRAP_PROVENANCE_IDENTITY_DOMAIN: &str =
-    "org.frankensim.xtask.constellation-bootstrap-provenance.v2";
 
 fn clear_bootstrap_marker(target: &Path) -> Result<(), String> {
     git_run(
@@ -2297,17 +2355,15 @@ fn directory_is_empty(path: &Path) -> Result<bool, String> {
     Ok(entries.next().is_none())
 }
 
-fn is_repository_root(target: &Path) -> bool {
-    let Ok(top_level) = git_out(target, &["rev-parse", "--show-toplevel"]) else {
-        return false;
-    };
-    let Ok(target) = target.canonicalize() else {
-        return false;
-    };
-    let Ok(top_level) = PathBuf::from(top_level).canonicalize() else {
-        return false;
-    };
-    target == top_level
+fn is_repository_root(target: &Path) -> Result<bool, String> {
+    match std::fs::symlink_metadata(target.join(".git")) {
+        Ok(_) => repository_worktree_status(target).map(|_| true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!(
+            "cannot inspect repository marker in {}: {error}",
+            target.display()
+        )),
+    }
 }
 
 /// Admit a destination without deleting or repurposing existing content.
@@ -2318,7 +2374,7 @@ fn ensure_bootstrap_repository(target: &Path, offline: bool) -> Result<bool, Str
         let metadata = target
             .symlink_metadata()
             .map_err(|error| format!("cannot inspect {}: {error}", target.display()))?;
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        if is_redirecting_entry(&metadata) || !metadata.is_dir() {
             return Err(format!(
                 "{} exists but is not an ordinary directory",
                 target.display()
@@ -2336,7 +2392,7 @@ fn ensure_bootstrap_repository(target: &Path, offline: bool) -> Result<bool, Str
             .map_err(|error| format!("cannot create {}: {error}", target.display()))?;
     }
 
-    if is_repository_root(target) {
+    if is_repository_root(target)? {
         return Ok(false);
     }
     if existed && !directory_is_empty(target)? {
@@ -2351,7 +2407,7 @@ fn ensure_bootstrap_repository(target: &Path, offline: bool) -> Result<bool, Str
             target.display()
         ));
     }
-    git_run(target, &["init", "--quiet"])?;
+    git_run(target, &["init", "--quiet", "--template="])?;
     git_run(
         target,
         &["config", "--local", BOOTSTRAP_INCOMPLETE_KEY, "true"],
@@ -2434,8 +2490,8 @@ fn bootstrap_checkout(
     let status = repository_worktree_status(target)?;
     if !status.is_empty() {
         return Err(format!(
-            "{} is an incomplete bootstrap with worktree changes; refusing to overwrite it",
-            target.display()
+            "{} is an incomplete bootstrap with worktree changes; refusing to overwrite it:\n{status}",
+            target.display(),
         ));
     }
     if !offline && url == "no-remote" {
@@ -2462,10 +2518,29 @@ fn bootstrap_checkout(
     if !offline {
         git_run(
             target,
-            &["fetch", "--quiet", "--depth", "1", "origin", &row.git_head],
+            &[
+                "fetch",
+                "--no-auto-maintenance",
+                "--no-recurse-submodules",
+                "--quiet",
+                "--depth",
+                "1",
+                "origin",
+                &row.git_head,
+            ],
         )?;
     }
-    git_run(target, &["checkout", "--quiet", "--detach", &row.git_head])?;
+    git_run(
+        target,
+        &[
+            "checkout",
+            "--no-recurse-submodules",
+            "--quiet",
+            "--no-overwrite-ignore",
+            "--detach",
+            &row.git_head,
+        ],
+    )?;
     verify_pinned_clean(row, target)?;
     clear_bootstrap_marker(target)?;
     Ok(BootstrapOutcome::materialized(initialized, offline))
@@ -2497,8 +2572,8 @@ fn check_pinned_clean_observation(
         return Err(format!(
             "{} is DIRTY at the locked head — a modified working tree is not the pinned \
              source (a case-folding checkout collision also surfaces here); restore or \
-             replace that sibling deliberately",
-            target.display()
+             replace that sibling deliberately:\n{status}",
+            target.display(),
         ));
     }
     Ok(())
@@ -2522,7 +2597,9 @@ where
 }
 
 fn verify_pinned_clean(row: &LockRow, target: &Path) -> Result<(), String> {
-    verify_pinned_clean_with(row, target, || repository_observation(target))
+    verify_pinned_clean_with(row, target, || {
+        repository_observation(target, &row.git_head)
+    })
 }
 
 fn verify_constellation_rows(root: &Path, rows: &[LockRow]) -> Result<(), String> {
@@ -2616,15 +2693,45 @@ fn bootstrap_provenance_row(
     selected_transport: &str,
     transport_used: bool,
     state: &str,
-) -> String {
-    format!(
-        "{{\"lib\": \"{}\", \"git_head\": \"{}\", \"remote\": \"{}\", \"selected_transport\": \"{}\", \"transport_used\": {transport_used}, \"state\": \"{}\"}}",
-        json_escape(&row.lib),
-        json_escape(&row.git_head),
-        json_escape(&row.remote),
-        json_escape(selected_transport),
-        json_escape(state),
+) -> BootstrapProvenanceRow {
+    BootstrapProvenanceRow::new(
+        &row.lib,
+        &row.git_head,
+        &row.remote,
+        selected_transport,
+        transport_used,
+        state,
     )
+}
+
+fn require_unchanged_bootstrap_lock(
+    lock_path: &Path,
+    original_lock_text: &str,
+) -> Result<(), String> {
+    let observed = read_constellation_lock(lock_path)?;
+    if observed == original_lock_text {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} changed after bootstrap admission; refusing to publish provenance for a mixed lock epoch",
+            lock_path.display()
+        ))
+    }
+}
+
+fn verify_provenance_publication_barrier(
+    lock_path: &Path,
+    original_lock_text: &str,
+    dest: &Path,
+    rows: &[LockRow],
+) -> Result<(), String> {
+    require_unchanged_bootstrap_lock(lock_path, original_lock_text)?;
+    verify_two_complete_passes(rows, |row| {
+        require_unchanged_bootstrap_lock(lock_path, original_lock_text)?;
+        verify_pinned_clean(row, &dest.join(dirname_of(&row.lib)))?;
+        require_unchanged_bootstrap_lock(lock_path, original_lock_text)
+    })?;
+    require_unchanged_bootstrap_lock(lock_path, original_lock_text)
 }
 
 /// `bootstrap-constellation [--offline] [--from <base>]`.
@@ -2660,7 +2767,19 @@ fn cmd_bootstrap(root: &Path) -> ExitCode {
         );
         return ExitCode::FAILURE;
     }
-    let lock_text = match read_constellation_lock(&root.join("constellation.lock")) {
+    if let Err(error) = bootstrap_provenance_support_preflight() {
+        eprintln!("bootstrap-constellation: {error}");
+        return ExitCode::FAILURE;
+    }
+    let dest_text = match provenance_path_text(&dest) {
+        Ok(dest_text) => dest_text,
+        Err(error) => {
+            eprintln!("bootstrap-constellation: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let lock_path = root.join("constellation.lock");
+    let lock_text = match read_constellation_lock(&lock_path) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("error: constellation.lock unreadable: {e} — the lock IS the input");
@@ -2717,16 +2836,12 @@ fn cmd_bootstrap(root: &Path) -> ExitCode {
         );
         return ExitCode::FAILURE;
     }
-    // Build provenance: the lock hash + every fetched/verified identity.
-    let prov = format!(
-        "{{\n\"schema\": \"{BOOTSTRAP_PROVENANCE_SCHEMA}\",\n\"identity_domain\": \"{identity_domain}\",\n\"identity_version\": {identity_version},\n\"lock_hash\": \"{lock_hash}\",\n\"dest\": \"{}\",\n\"libraries\": [\n{}\n]\n}}\n",
-        json_escape(&dest.display().to_string()),
-        provenance.join(",\n"),
-        identity_domain = BOOTSTRAP_PROVENANCE_IDENTITY_DOMAIN,
-        identity_version = BOOTSTRAP_PROVENANCE_IDENTITY_VERSION,
-    );
     let prov_path = dest.join("constellation-bootstrap.json");
-    if let Err(e) = std::fs::write(&prov_path, prov) {
+    if let Err(e) =
+        write_bootstrap_provenance(&prov_path, &lock_hash, dest_text, &provenance, || {
+            verify_provenance_publication_barrier(&lock_path, &lock_text, &dest, &rows)
+        })
+    {
         eprintln!("error writing bootstrap provenance: {e}");
         return ExitCode::FAILURE;
     }
@@ -3270,7 +3385,6 @@ mod tests {
             v.iter().any(|x| x.detail.contains("lines")),
             "LOC cap must trip: {v:?}"
         );
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -3341,7 +3455,6 @@ mod tests {
             v.iter().all(|x| x.detail.contains("det-ok")),
             "fix hint expected: {v:?}"
         );
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -3423,23 +3536,6 @@ mod tests {
     }
 
     #[test]
-    fn hidden_index_flags_are_always_dirty() {
-        assert_eq!(hidden_index_entry("H ordinary.rs\n"), None);
-        assert_eq!(
-            hidden_index_entry("H ordinary.rs\nS skipped.rs\nH later.rs\n"),
-            Some("S skipped.rs")
-        );
-        assert_eq!(
-            hidden_index_entry("H ordinary.rs\nh assumed.rs\n"),
-            Some("h assumed.rs")
-        );
-        assert_eq!(
-            hidden_index_entry("m lowercase-modified.rs\n"),
-            Some("m lowercase-modified.rs")
-        );
-    }
-
-    #[test]
     fn constellation_lock_decode_is_bounded_and_utf8_only() {
         assert_eq!(
             decode_constellation_lock(b"canonical".to_vec()).expect("bounded UTF-8"),
@@ -3467,7 +3563,7 @@ mod tests {
             .expect("git init ancestor");
         assert!(init_ancestor.status.success());
         assert!(
-            !is_repository_root(&target),
+            !is_repository_root(&target).expect("inspect empty child"),
             "an empty child must not inherit its ancestor's repository identity"
         );
 
@@ -3478,8 +3574,239 @@ mod tests {
             .output()
             .expect("git init target");
         assert!(init_target.status.success());
-        assert!(is_repository_root(&target));
+        assert!(is_repository_root(&target).expect("inspect initialized target"));
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // retained matrix covers every nested concealment mode
+    fn pinned_cleanliness_forces_nested_submodule_visibility() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("wall clock is after the Unix epoch")
+            .as_nanos();
+        let base = std::env::temp_dir().join(format!(
+            "xtask-submodule-cleanliness-{}-{unique}",
+            std::process::id(),
+        ));
+        let nested_upstream = base.join("sqlite-upstream");
+        let outer = base.join("frankensqlite");
+        std::fs::create_dir_all(&nested_upstream).expect("create nested upstream");
+        std::fs::create_dir_all(&outer).expect("create outer repository");
+        for repository in [&nested_upstream, &outer] {
+            git_run(repository, &["init", "--quiet", "-b", "main"])
+                .expect("initialize fixture repository");
+            git_run(
+                repository,
+                &[
+                    "config",
+                    "--local",
+                    "user.email",
+                    "submodule@frankensim.test",
+                ],
+            )
+            .expect("configure fixture email");
+            git_run(
+                repository,
+                &["config", "--local", "user.name", "submodule fixture"],
+            )
+            .expect("configure fixture name");
+            git_run(
+                repository,
+                &["config", "--local", "commit.gpgsign", "false"],
+            )
+            .expect("disable fixture signing");
+        }
+
+        std::fs::write(
+            nested_upstream.join("sqlite3.c"),
+            "/* pinned sqlite fixture */\n",
+        )
+        .expect("write nested pin");
+        git_run(&nested_upstream, &["add", "sqlite3.c"]).expect("stage nested pin");
+        git_run(&nested_upstream, &["commit", "--quiet", "-m", "nested pin"])
+            .expect("commit nested pin");
+
+        std::fs::write(outer.join("lib.rs"), "pub fn outer() {}\n").expect("write outer fixture");
+        git_run(&outer, &["add", "lib.rs"]).expect("stage outer fixture");
+        git_run(&outer, &["commit", "--quiet", "-m", "outer base"]).expect("commit outer base");
+        let nested_url = nested_upstream.to_str().expect("UTF-8 fixture path");
+        git_run(
+            &outer,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "--quiet",
+                nested_url,
+                "legacy_sqlite_code/sqlite",
+            ],
+        )
+        .expect("add nested submodule");
+        git_run(
+            &outer,
+            &[
+                "config",
+                "-f",
+                ".gitmodules",
+                "submodule.legacy_sqlite_code/sqlite.ignore",
+                "dirty",
+            ],
+        )
+        .expect("install committed ignore=dirty policy");
+        git_run(&outer, &["add", ".gitmodules", "legacy_sqlite_code/sqlite"])
+            .expect("stage gitlink");
+        git_run(&outer, &["commit", "--quiet", "-m", "pin nested sqlite"]).expect("commit gitlink");
+
+        let row = LockRow {
+            lib: "frankensqlite".to_string(),
+            version: "fixture".to_string(),
+            git_head: git_out(&outer, &["rev-parse", "HEAD"]).expect("outer head"),
+            remote: nested_url.to_string(),
+            path: outer.display().to_string(),
+        };
+        assert_eq!(repository_worktree_status(&outer), Ok(String::new()));
+        verify_pinned_clean(&row, &outer).expect("clean initialized submodule verifies");
+        assert_eq!(
+            bootstrap_checkout(&row, &outer, "/unused", true),
+            Ok(BootstrapOutcome::pinned(false)),
+            "already-pinned offline bootstrap must verify the same clean nested state"
+        );
+
+        let nested_checkout = outer.join("legacy_sqlite_code/sqlite");
+        std::fs::write(
+            nested_checkout.join("sqlite3.c"),
+            "/* concealed tracked nested dirt */\n",
+        )
+        .expect("write concealed nested dirt");
+        assert_eq!(
+            git_out(&outer, &["status", "--porcelain"]),
+            Ok(String::new()),
+            "ordinary status must demonstrate committed ignore=dirty concealment"
+        );
+        assert!(
+            !repository_worktree_status(&outer)
+                .expect("forced nested status")
+                .is_empty()
+        );
+        let dirty = verify_pinned_clean(&row, &outer)
+            .expect_err("tracked nested dirt must refuse despite ignore=dirty");
+        assert!(dirty.contains("DIRTY"), "{dirty}");
+        assert!(dirty.contains("legacy_sqlite_code/sqlite"), "{dirty}");
+        std::fs::write(
+            nested_checkout.join("sqlite3.c"),
+            "/* pinned sqlite fixture */\n",
+        )
+        .expect("restore fixture bytes");
+        assert_eq!(repository_worktree_status(&outer), Ok(String::new()));
+
+        git_run(
+            &nested_checkout,
+            &["update-index", "--assume-unchanged", "sqlite3.c"],
+        )
+        .expect("install nested assume-unchanged flag");
+        std::fs::write(
+            nested_checkout.join("sqlite3.c"),
+            "/* concealed assume-unchanged dirt */\n",
+        )
+        .expect("write concealed assume-unchanged dirt");
+        assert_eq!(
+            git_out(&nested_checkout, &["status", "--porcelain"]),
+            Ok(String::new()),
+            "ordinary nested status must demonstrate index-flag concealment"
+        );
+        let hidden_index =
+            repository_worktree_status(&outer).expect("recursive hidden-index inspection");
+        assert!(hidden_index.contains("legacy_sqlite_code/sqlite"));
+        assert!(hidden_index.contains("index flag hides worktree state"));
+        verify_pinned_clean(&row, &outer).expect_err("nested assume-unchanged dirt must refuse");
+        git_run(
+            &nested_checkout,
+            &["update-index", "--no-assume-unchanged", "sqlite3.c"],
+        )
+        .expect("clear nested assume-unchanged flag");
+        std::fs::write(
+            nested_checkout.join("sqlite3.c"),
+            "/* pinned sqlite fixture */\n",
+        )
+        .expect("restore fixture after hidden-index case");
+        assert_eq!(repository_worktree_status(&outer), Ok(String::new()));
+
+        std::fs::write(
+            nested_upstream.join("sqlite3.c"),
+            "/* drifted sqlite fixture */\n",
+        )
+        .expect("write nested drift");
+        git_run(&nested_upstream, &["add", "sqlite3.c"]).expect("stage nested drift");
+        git_run(
+            &nested_upstream,
+            &["commit", "--quiet", "-m", "nested drift"],
+        )
+        .expect("commit nested drift");
+        let drift_head =
+            git_out(&nested_upstream, &["rev-parse", "HEAD"]).expect("nested drift head");
+        git_run(
+            &outer,
+            &[
+                "config",
+                "--local",
+                "submodule.legacy_sqlite_code/sqlite.ignore",
+                "all",
+            ],
+        )
+        .expect("install repository-local ignore=all policy");
+        git_run(
+            &nested_checkout,
+            &["fetch", "--quiet", "origin", drift_head.as_str()],
+        )
+        .expect("fetch nested drift");
+        git_run(
+            &nested_checkout,
+            &["checkout", "--quiet", "--detach", drift_head.as_str()],
+        )
+        .expect("checkout nested drift");
+        assert_eq!(
+            git_out(&outer, &["status", "--porcelain"]),
+            Ok(String::new()),
+            "ordinary status must demonstrate repository-local ignore=all concealment"
+        );
+        assert!(
+            !repository_worktree_status(&outer)
+                .expect("forced nested HEAD status")
+                .is_empty()
+        );
+        let drift = bootstrap_checkout(&row, &outer, "/unused", true)
+            .expect_err("nested HEAD drift must refuse despite ignore=all");
+        assert!(drift.contains("DIRTY"), "{drift}");
+
+        let local_exclude = PathBuf::from(
+            git_out(
+                &nested_checkout,
+                &["rev-parse", "--git-path", "info/exclude"],
+            )
+            .expect("resolve nested local exclude"),
+        );
+        let local_exclude = if local_exclude.is_absolute() {
+            local_exclude
+        } else {
+            nested_checkout.join(local_exclude)
+        };
+        std::fs::write(&local_exclude, "hidden-local.c\n").expect("install nested local exclusion");
+        std::fs::write(
+            nested_checkout.join("hidden-local.c"),
+            "/* locally excluded nested source */\n",
+        )
+        .expect("write locally excluded nested source");
+        assert_eq!(
+            git_out(&nested_checkout, &["status", "--porcelain"]),
+            Ok(String::new()),
+            "ordinary nested status must demonstrate local-exclude concealment"
+        );
+        let hidden_untracked =
+            repository_worktree_status(&outer).expect("recursive hidden-untracked inspection");
+        assert!(hidden_untracked.contains("legacy_sqlite_code/sqlite"));
+        assert!(hidden_untracked.contains("hidden-local.c"));
     }
 
     #[test]
@@ -3491,7 +3818,9 @@ mod tests {
             remote: "https://canonical.invalid/fixture.git".to_string(),
             path: "/constellation/fixture".to_string(),
         };
-        let receipt = bootstrap_provenance_row(&row, "/airgap/mirror/fixture", true, "cloned");
+        let receipt = bootstrap_provenance::render_bootstrap_provenance_row(
+            &bootstrap_provenance_row(&row, "/airgap/mirror/fixture", true, "cloned"),
+        );
         assert!(receipt.contains("\"remote\": \"https://canonical.invalid/fixture.git\""));
         assert!(receipt.contains("\"selected_transport\": \"/airgap/mirror/fixture\""));
         assert!(receipt.contains("\"transport_used\": true"));
@@ -3590,12 +3919,12 @@ mod tests {
             "successful pinned replay clears the incomplete marker",
         );
         assert_eq!(
-            bootstrap_provenance_row(
+            bootstrap_provenance::render_bootstrap_provenance_row(&bootstrap_provenance_row(
                 &row,
                 "/unreachable-transport-must-not-be-used",
                 marked_at_pin.transport_used,
                 marked_at_pin.state,
-            ),
+            )),
             format!(
                 "{{\"lib\": \"fixture\", \"git_head\": \"{}\", \"remote\": \"{}\", \"selected_transport\": \"/unreachable-transport-must-not-be-used\", \"transport_used\": false, \"state\": \"resumed\"}}",
                 row.git_head, row.remote,
@@ -3618,12 +3947,12 @@ mod tests {
             "false",
         );
         assert_eq!(
-            bootstrap_provenance_row(
+            bootstrap_provenance::render_bootstrap_provenance_row(&bootstrap_provenance_row(
                 &row,
                 &selected,
                 initialized_empty.transport_used,
                 initialized_empty.state,
-            ),
+            )),
             format!(
                 "{{\"lib\": \"fixture\", \"git_head\": \"{}\", \"remote\": \"{}\", \"selected_transport\": \"{}\", \"transport_used\": true, \"state\": \"cloned\"}}",
                 row.git_head, row.remote, selected,
@@ -3748,6 +4077,13 @@ mod tests {
     #[test]
     fn tracked_constellation_lock_is_self_consistent_and_schema_bound() {
         let tracked = include_str!("../../constellation.lock");
+        assert_eq!(CONSTELLATION_LOCK_IDENTITY_VERSION, 1);
+        assert_eq!(CONSTELLATION_LOCK_WRITER_IDENTITY_VERSION, 2);
+        assert_ne!(
+            CONSTELLATION_LOCK_IDENTITY_DOMAIN,
+            CONSTELLATION_LOCK_WRITER_IDENTITY_DOMAIN
+        );
+        assert!(!tracked.contains(CONSTELLATION_LOCK_WRITER_IDENTITY_DOMAIN));
         let (recorded, mut rows) = parse_lock_rows(tracked).expect("tracked lock is canonical");
         let identity = lock_rows_identity(&rows).expect("tracked rows are unique");
         assert_eq!(recorded, format!("{:016x}", fnv1a64(identity.as_bytes())));
@@ -3788,6 +4124,42 @@ mod tests {
         );
         assert!(escaped.contains("quoted\\\"path"));
         assert!(escaped.contains("quoted\\\"remote"));
+    }
+
+    #[test]
+    fn constellation_lock_identity_metadata_matrix_refuses_before_pin_access() {
+        let tracked = include_str!("../../constellation.lock");
+        let domain_line =
+            format!("  \"identity_domain\": \"{CONSTELLATION_LOCK_IDENTITY_DOMAIN}\",\n");
+        let version_line =
+            format!("  \"identity_version\": {CONSTELLATION_LOCK_IDENTITY_VERSION},\n");
+        let malformed = [
+            tracked.replacen(&domain_line, "", 1),
+            tracked.replacen(&domain_line, &format!("{domain_line}{domain_line}"), 1),
+            tracked.replacen(
+                &format!("\"identity_domain\": \"{CONSTELLATION_LOCK_IDENTITY_DOMAIN}\""),
+                "\"identity_domain\": 1",
+                1,
+            ),
+            tracked.replacen(&version_line, "", 1),
+            tracked.replacen(&version_line, &format!("{version_line}{version_line}"), 1),
+            tracked.replacen(
+                &format!("\"identity_version\": {CONSTELLATION_LOCK_IDENTITY_VERSION}"),
+                "\"identity_version\": true",
+                1,
+            ),
+            tracked.replacen(
+                &version_line,
+                &format!("{version_line}  \"identity_epoch\": 1,\n"),
+                1,
+            ),
+        ];
+        for document in malformed {
+            assert!(
+                parse_lock_rows(&document).is_err(),
+                "identity metadata defect reached a lock row: {document}"
+            );
+        }
     }
 
     #[test]

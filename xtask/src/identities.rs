@@ -6421,6 +6421,17 @@ fn discover_identity_candidates(
     root: &Path,
     manifest: &AuthorityManifest,
 ) -> Result<Vec<IdentityCandidate>, Vec<Violation>> {
+    fn is_reserved_tool_script_tree(root: &Path, path: &Path) -> bool {
+        if path.parent() != Some(root) {
+            return false;
+        }
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            return false;
+        };
+        matches!(name, ".rch-tmp" | ".rch-target" | "beads_compliance_audit")
+            || name.starts_with(".rch-target-")
+    }
+
     fn visit_scripts(
         root: &Path,
         path: &Path,
@@ -6461,6 +6472,14 @@ fn discover_identity_candidates(
         entries.sort_by_key(std::fs::DirEntry::file_name);
         for entry in entries {
             let path = entry.path();
+            // RCH and Beads own these root-level transfer/audit trees. Prune
+            // them before file-type inspection so their symlinks and binary
+            // payloads cannot masquerade as controlled repository sources.
+            // Explicit manifest paths are appended after traversal below and
+            // therefore retain fail-closed validation.
+            if is_reserved_tool_script_tree(root, &path) {
+                continue;
+            }
             let relative = path
                 .strip_prefix(root)
                 .unwrap_or(&path)
@@ -9431,6 +9450,9 @@ impl Verifier for DenyAll {
             &format!("#!/usr/bin/env -S python3 -u\n{python}"),
         );
         write("target/hidden.sh", shell);
+        write(".rch-target-fmd-pool-0/hidden.sh", shell);
+        write(".rch-tmp/session/hidden.py", python);
+        write("beads_compliance_audit/bin/hidden", shell);
         write("vendor/nested/.git/HEAD", "ref: refs/heads/main\n");
         write("vendor/nested/hidden.py", python);
 
@@ -9448,6 +9470,55 @@ impl Verifier for DenyAll {
                 ("tools/proof", "emit_shell"),
             ]),
             "scripts outside scripts/, including supported extensionless shebangs, must be independently owned: {candidates:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reserved_tool_script_trees_are_pruned_before_path_and_content_validation() {
+        use std::os::unix::fs::symlink;
+
+        let root = fixture_root("reserved-tool-script-trees");
+        std::fs::create_dir_all(root.join(".rch-tmp")).expect("RCH staging directory");
+        std::fs::create_dir_all(root.join("beads_compliance_audit/bin"))
+            .expect("Beads audit directory");
+        symlink("missing-rch-target", root.join(".rch-target-fmd-pool-0"))
+            .expect("RCH target symlink");
+        let oversized =
+            std::fs::File::create(root.join(".rch-tmp/huge.sh")).expect("oversized RCH fixture");
+        oversized
+            .set_len(MAX_SOURCE_BYTES + 1)
+            .expect("sparse oversized RCH fixture");
+        std::fs::write(root.join(".rch-tmp/bad.py"), [0xff]).expect("invalid UTF-8 RCH fixture");
+        symlink(
+            "/missing/tool-owned/xargs",
+            root.join("beads_compliance_audit/bin/xargs"),
+        )
+        .expect("Beads audit helper symlink");
+
+        let candidates = super::discover_identity_candidates(&root, &empty_authority_manifest())
+            .expect("tool-owned trees are outside repository-wide discovery");
+        assert!(candidates.is_empty(), "{candidates:?}");
+
+        let manifest = AuthorityManifest {
+            required_ids: BTreeSet::new(),
+            external_owners: vec![ExternalOwner {
+                id: "ci:explicit-rch-source".to_string(),
+                path: ".rch-tmp/bad.py".to_string(),
+                symbol: "<script>".to_string(),
+                version: 1,
+                domain: "org.frankensim.ci.explicit-rch-source.v1".to_string(),
+            }],
+            exemptions: Vec::new(),
+        };
+        let violations = super::discover_identity_candidates(&root, &manifest)
+            .expect_err("explicit manifest targets must bypass tool-tree pruning");
+        assert!(
+            violations.iter().any(|violation| {
+                violation.crate_name == ".rch-tmp/bad.py"
+                    && violation.detail.contains("not valid UTF-8")
+            }),
+            "{violations:?}"
         );
     }
 
@@ -9833,13 +9904,32 @@ impl Verifier for DenyAll {
             );
         }
 
-        let bootstrap = discover_rust_candidates("xtask/src/main.rs", include_str!("main.rs"))
-            .into_iter()
-            .filter(|candidate| candidate.symbol == "cmd_bootstrap")
-            .collect::<Vec<_>>();
+        let bootstrap = discover_rust_candidates(
+            "xtask/src/bootstrap_provenance.rs",
+            include_str!("bootstrap_provenance.rs"),
+        )
+        .into_iter()
+        .filter(|candidate| candidate.symbol == "write_bootstrap_provenance")
+        .collect::<Vec<_>>();
         assert_eq!(bootstrap.len(), 1, "{bootstrap:?}");
         assert_eq!(bootstrap[0].identity_signal, "identity_domain");
-        assert_eq!(bootstrap[0].sink_signal, "std::fs::write");
+        assert_eq!(bootstrap[0].sink_signal, ".write_all(");
+
+        let lock_candidates =
+            discover_rust_candidates("xtask/src/main.rs", include_str!("main.rs"));
+        let lock_writer = lock_candidates
+            .iter()
+            .filter(|candidate| candidate.symbol == "write_constellation_lock")
+            .collect::<Vec<_>>();
+        assert_eq!(lock_writer.len(), 1, "{lock_candidates:?}");
+        assert_eq!(lock_writer[0].identity_signal, "identity_domain");
+        assert_eq!(lock_writer[0].sink_signal, ".write_all(");
+        assert!(
+            lock_candidates
+                .iter()
+                .all(|candidate| candidate.symbol != "cmd_constellation"),
+            "the command orchestrator must not remain a second durable lock producer: {lock_candidates:?}"
+        );
     }
 
     #[test]

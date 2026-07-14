@@ -1,3 +1,5 @@
+#![cfg_attr(windows, feature(windows_by_handle))]
+
 //! frankensim-bootstrap (bead 1t8i): the clean-machine constellation
 //! bootstrap.
 //!
@@ -25,8 +27,9 @@
 //!   worktrees are created anywhere.
 //! - `--offline` never touches the network: missing siblings are
 //!   structured failures (the offline-cache replay contract).
-//! - Idempotent: a second run over a successful first run verifies
-//!   every sibling and rewrites identical provenance.
+//! - Idempotent: repeated verification runs over the same terminal source
+//!   state rewrite byte-identical provenance. The initial clone receipt and
+//!   its first verification receipt legitimately record different states.
 //!
 //! Output: one JSON line per library plus
 //! `constellation-bootstrap.json` (schema
@@ -35,16 +38,26 @@
 //! remains the in-workspace verifier once the workspace can build; this
 //! binary is the pre-Cargo entry point for machines that cannot.
 
+#[path = "../../../xtask/src/bootstrap_provenance.rs"]
+mod bootstrap_provenance;
+#[path = "../../../xtask/src/constellation_cleanliness.rs"]
+mod constellation_cleanliness;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-const BOOTSTRAP_PROVENANCE_SCHEMA: &str = "frankensim-constellation-bootstrap-v2";
-const BOOTSTRAP_PROVENANCE_IDENTITY_VERSION: u32 = 2;
-const BOOTSTRAP_PROVENANCE_IDENTITY_DOMAIN: &str =
-    "org.frankensim.xtask.constellation-bootstrap-provenance.v2";
+use bootstrap_provenance::BootstrapProvenanceRow;
+use bootstrap_provenance::{
+    bootstrap_provenance_support_preflight, provenance_path_text, write_bootstrap_provenance,
+};
+use constellation_cleanliness::{
+    is_redirecting_entry, pinned_repository_worktree_status, repository_worktree_status,
+    sanitized_git_command, verify_two_complete_passes,
+};
+
 const BOOTSTRAP_INCOMPLETE_KEY: &str = "frankensim.bootstrapIncomplete";
 const CONSTELLATION_LOCK_SCHEMA: &str = "frankensim-constellation-lock-v2";
 const CONSTELLATION_LOCK_IDENTITY_VERSION: u32 = 1;
@@ -369,25 +382,57 @@ fn read_lock(path: &Path) -> Result<String, String> {
 }
 
 fn git_out(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
+    let output = sanitized_git_command(dir, args)
         .output()
         .map_err(|e| format!("git {args:?} failed to spawn: {e}"))?;
-    if out.status.success() {
-        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    if output.status.success() {
+        let stdout = std::str::from_utf8(&output.stdout).map_err(|error| {
+            format!(
+                "git {args:?} in {} returned non-UTF-8 stdout: {error}",
+                dir.display()
+            )
+        })?;
+        Ok(stdout.trim().to_string())
     } else {
+        let stderr = std::str::from_utf8(&output.stderr).map_err(|error| {
+            format!(
+                "git {args:?} in {} returned non-UTF-8 stderr: {error}",
+                dir.display()
+            )
+        })?;
         Err(format!(
             "git {args:?} in {} failed: {}",
             dir.display(),
-            String::from_utf8_lossy(&out.stderr).trim()
+            stderr.trim()
         ))
     }
 }
 
 fn git_run(dir: &Path, args: &[&str]) -> Result<(), String> {
-    git_out(dir, args).map(|_| ())
+    let output = sanitized_git_command(dir, args)
+        .output()
+        .map_err(|error| format!("git {args:?} failed to spawn: {error}"))?;
+    if output.status.success() {
+        std::str::from_utf8(&output.stdout).map_err(|error| {
+            format!(
+                "git {args:?} in {} returned non-UTF-8 stdout: {error}",
+                dir.display()
+            )
+        })?;
+        Ok(())
+    } else {
+        let stderr = std::str::from_utf8(&output.stderr).map_err(|error| {
+            format!(
+                "git {args:?} in {} returned non-UTF-8 stderr: {error}",
+                dir.display()
+            )
+        })?;
+        Err(format!(
+            "git {args:?} in {} failed: {}",
+            dir.display(),
+            stderr.trim()
+        ))
+    }
 }
 
 fn dirname_of(lib: &str) -> &str {
@@ -422,15 +467,45 @@ fn bootstrap_provenance_row(
     selected_transport: &str,
     transport_used: bool,
     state: &str,
-) -> String {
-    format!(
-        "{{\"lib\": \"{}\", \"git_head\": \"{}\", \"remote\": \"{}\", \"selected_transport\": \"{}\", \"transport_used\": {transport_used}, \"state\": \"{}\"}}",
-        json_escape(&row.lib),
-        json_escape(&row.git_head),
-        json_escape(&row.remote),
-        json_escape(selected_transport),
-        json_escape(state),
+) -> BootstrapProvenanceRow {
+    BootstrapProvenanceRow::new(
+        &row.lib,
+        &row.git_head,
+        &row.remote,
+        selected_transport,
+        transport_used,
+        state,
     )
+}
+
+fn require_unchanged_bootstrap_lock(
+    lock_path: &Path,
+    original_lock_text: &str,
+) -> Result<(), String> {
+    let observed = read_lock(lock_path)?;
+    if observed == original_lock_text {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} changed after bootstrap admission; refusing to publish provenance for a mixed lock epoch",
+            lock_path.display()
+        ))
+    }
+}
+
+fn verify_provenance_publication_barrier(
+    lock_path: &Path,
+    original_lock_text: &str,
+    dest: &Path,
+    rows: &[LockRow],
+) -> Result<(), String> {
+    require_unchanged_bootstrap_lock(lock_path, original_lock_text)?;
+    verify_two_complete_passes(rows, |row| {
+        require_unchanged_bootstrap_lock(lock_path, original_lock_text)?;
+        verify_pinned_clean(row, &dest.join(dirname_of(&row.lib)))?;
+        require_unchanged_bootstrap_lock(lock_path, original_lock_text)
+    })?;
+    require_unchanged_bootstrap_lock(lock_path, original_lock_text)
 }
 
 fn usage() -> &'static str {
@@ -449,42 +524,20 @@ fn required_option_value<'a>(flag: &str, value: Option<&'a String>) -> Result<&'
     }
 }
 
-fn repository_worktree_status(target: &Path) -> Result<String, String> {
-    let tracked = git_out(
-        target,
-        &[
-            "-c",
-            "core.fileMode=true",
-            "-c",
-            "core.excludesFile=/dev/null",
-            "status",
-            "--porcelain",
-            "--untracked-files=all",
-        ],
-    )?;
-    let untracked = git_out(
-        target,
-        &[
-            "-c",
-            "core.excludesFile=/dev/null",
-            "ls-files",
-            "--others",
-            "--exclude-per-directory=.gitignore",
-        ],
-    )?;
-    let index_flags = git_out(target, &["ls-files", "-v"])?;
-    let hidden_index_entry = hidden_index_entry(&index_flags);
-    Ok(match hidden_index_entry {
-        Some(entry) => format!("{tracked}{untracked}\nindex flag hides worktree state: {entry}"),
-        None => format!("{tracked}{untracked}"),
-    })
-}
-
-fn hidden_index_entry(index_flags: &str) -> Option<&str> {
-    index_flags.lines().find(|line| {
-        line.as_bytes()
-            .first()
-            .is_some_and(|tag| *tag == b'S' || tag.is_ascii_lowercase())
+fn canonical_bootstrap_root(root: &Path) -> Result<PathBuf, String> {
+    let metadata = std::fs::symlink_metadata(root)
+        .map_err(|error| format!("cannot inspect bootstrap root {}: {error}", root.display()))?;
+    if is_redirecting_entry(&metadata) || !metadata.is_dir() {
+        return Err(format!(
+            "bootstrap root {} must be an ordinary directory",
+            root.display()
+        ));
+    }
+    root.canonicalize().map_err(|error| {
+        format!(
+            "cannot canonicalize bootstrap root {}: {error}",
+            root.display()
+        )
     })
 }
 
@@ -494,17 +547,15 @@ fn directory_is_empty(path: &Path) -> Result<bool, String> {
     Ok(entries.next().is_none())
 }
 
-fn is_repository_root(target: &Path) -> bool {
-    let Ok(top_level) = git_out(target, &["rev-parse", "--show-toplevel"]) else {
-        return false;
-    };
-    let Ok(target) = target.canonicalize() else {
-        return false;
-    };
-    let Ok(top_level) = PathBuf::from(top_level).canonicalize() else {
-        return false;
-    };
-    target == top_level
+fn is_repository_root(target: &Path) -> Result<bool, String> {
+    match std::fs::symlink_metadata(target.join(".git")) {
+        Ok(_) => repository_worktree_status(target).map(|_| true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!(
+            "cannot inspect repository marker in {}: {error}",
+            target.display()
+        )),
+    }
 }
 
 /// Admit a destination without deleting or repurposing existing content.
@@ -515,13 +566,13 @@ fn ensure_bootstrap_repository(target: &Path, offline: bool) -> Result<bool, Str
         let metadata = target
             .symlink_metadata()
             .map_err(|error| format!("cannot inspect {}: {error}", target.display()))?;
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        if is_redirecting_entry(&metadata) || !metadata.is_dir() {
             return Err(format!(
                 "{} exists but is not an ordinary directory; refusing to repurpose it",
                 target.display()
             ));
         }
-        if is_repository_root(target) {
+        if is_repository_root(target)? {
             return Ok(false);
         }
         if !directory_is_empty(target)? {
@@ -547,7 +598,7 @@ fn ensure_bootstrap_repository(target: &Path, offline: bool) -> Result<bool, Str
             .map_err(|error| format!("cannot create {}: {error}", target.display()))?;
     }
 
-    git_run(target, &["init", "--quiet"])?;
+    git_run(target, &["init", "--quiet", "--template="])?;
     git_run(
         target,
         &["config", "--local", BOOTSTRAP_INCOMPLETE_KEY, "true"],
@@ -582,13 +633,13 @@ fn verify_pinned_clean(row: &LockRow, target: &Path) -> Result<(), String> {
             row.git_head
         ));
     }
-    let status = repository_worktree_status(target)?;
+    let status = pinned_repository_worktree_status(target, &row.git_head)?;
     if !status.is_empty() {
         return Err(format!(
             "{} is DIRTY at the locked head — a modified working tree is not the pinned \
              source (a case-folding checkout collision also surfaces here); restore or \
-             replace that sibling deliberately",
-            target.display()
+             replace that sibling deliberately:\n{status}",
+            target.display(),
         ));
     }
     let confirmed_head = git_out(target, &["rev-parse", "HEAD"])?;
@@ -665,8 +716,8 @@ fn bootstrap_one(
     let status = repository_worktree_status(&target)?;
     if !status.is_empty() {
         return Err(format!(
-            "{} is an incomplete bootstrap with worktree or hidden-index changes; refusing to overwrite it",
-            target.display()
+            "{} is an incomplete bootstrap with worktree or hidden-index changes; refusing to overwrite it:\n{status}",
+            target.display(),
         ));
     }
     if !offline && selected_transport == "no-remote" {
@@ -686,10 +737,30 @@ fn bootstrap_one(
     if !offline {
         git_run(
             &target,
-            &["fetch", "--quiet", "--depth", "1", "origin", &row.git_head],
+            &[
+                "fetch",
+                "--no-auto-maintenance",
+                "--no-recurse-submodules",
+                "--quiet",
+                "--depth",
+                "1",
+                "origin",
+                &row.git_head,
+            ],
         )?;
     }
-    git_run(&target, &["checkout", "--quiet", "--detach", &row.git_head]).map_err(|error| {
+    git_run(
+        &target,
+        &[
+            "checkout",
+            "--no-recurse-submodules",
+            "--quiet",
+            "--no-overwrite-ignore",
+            "--detach",
+            &row.git_head,
+        ],
+    )
+    .map_err(|error| {
         format!(
             "locked revision {} unavailable from {selected_transport}: {error}",
             row.git_head
@@ -739,8 +810,12 @@ fn main() -> ExitCode {
             }
         }
     }
+    if let Err(error) = bootstrap_provenance_support_preflight() {
+        eprintln!("frankensim-bootstrap: {error}");
+        return ExitCode::FAILURE;
+    }
     // Default root: the frankensim checkout this binary lives in, or cwd.
-    let root = root.unwrap_or_else(|| {
+    let requested_root = root.unwrap_or_else(|| {
         let cwd = std::env::current_dir().expect("cwd");
         if cwd.join("constellation.lock").is_file() {
             cwd
@@ -755,6 +830,13 @@ fn main() -> ExitCode {
                 .unwrap_or(cwd)
         }
     });
+    let root = match canonical_bootstrap_root(&requested_root) {
+        Ok(root) => root,
+        Err(error) => {
+            eprintln!("error: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
     let lock_path = root.join("constellation.lock");
     let lock_text = match read_lock(&lock_path) {
         Ok(t) => t,
@@ -773,6 +855,13 @@ fn main() -> ExitCode {
     let Some(dest) = root.parent().map(Path::to_path_buf) else {
         eprintln!("error: {} has no parent directory", root.display());
         return ExitCode::FAILURE;
+    };
+    let dest_text = match provenance_path_text(&dest) {
+        Ok(dest_text) => dest_text,
+        Err(error) => {
+            eprintln!("frankensim-bootstrap: {error}");
+            return ExitCode::FAILURE;
+        }
     };
     let mut provenance = Vec::new();
     let mut failures = 0usize;
@@ -814,16 +903,12 @@ fn main() -> ExitCode {
         );
         return ExitCode::FAILURE;
     }
-    let prov = format!(
-        "{{\n\"schema\": \"{BOOTSTRAP_PROVENANCE_SCHEMA}\",\n\"identity_domain\": \"{identity_domain}\",\n\"identity_version\": {identity_version},\n\"lock_hash\": \"{}\",\n\"dest\": \"{}\",\n\"libraries\": [\n{}\n]\n}}\n",
-        json_escape(&lock_hash),
-        json_escape(&dest.display().to_string()),
-        provenance.join(",\n"),
-        identity_domain = BOOTSTRAP_PROVENANCE_IDENTITY_DOMAIN,
-        identity_version = BOOTSTRAP_PROVENANCE_IDENTITY_VERSION,
-    );
     let prov_path = dest.join("constellation-bootstrap.json");
-    if let Err(e) = std::fs::write(&prov_path, prov) {
+    if let Err(e) =
+        write_bootstrap_provenance(&prov_path, &lock_hash, dest_text, &provenance, || {
+            verify_provenance_publication_barrier(&lock_path, &lock_text, &dest, &rows)
+        })
+    {
         eprintln!("error writing bootstrap provenance: {e}");
         return ExitCode::FAILURE;
     }

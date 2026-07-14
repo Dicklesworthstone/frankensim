@@ -159,15 +159,96 @@ library, mismatched lock hash, path-unsafe library identity, or missing, wrong,
 duplicate, unknown, or type-invalid top-level identity metadata before deriving
 or accessing any destination. The canonical v2 lock identity is
 `org.frankensim.xtask.constellation-lock.v1` at integer version `1`; its existing
-row-only hash still covers `(lib, version, git_head)`. Clean verification
-disables global ignores, catches files hidden by repository-local excludes, and
-rejects `assume-unchanged` or `skip-worktree` index entries. It supports
-`--offline` cache verification and `--from` mirrors, and writes v2 fetch
+row-only hash still covers `(lib, version, git_head)`. The Rust writer's
+retained implementation coupling advances independently under
+`org.frankensim.xtask.constellation-lock-writer.v2` at authority version `2`;
+that writer epoch is not serialized into the lock and does not expand its
+portable identity. The writer fsyncs a uniquely staged same-directory document
+before atomic replacement, so a failed write or rename retains the prior valid
+lock. Clean verification
+disables global ignores, catches files hidden by repository-local excludes,
+rejects untracked `.gitignore` authorities plus `assume-unchanged`,
+`skip-worktree`, and persisted FSMonitor index authority. Ordinary observations
+disable fsmonitor and the untracked cache. The verifier instead reads the raw
+primary index: versions 2 and 3 are structurally parsed, any `FSMN` extension is
+refused without a per-entry decoding claim, the trailing SHA-1 or SHA-256
+checksum is authenticated, and raw Git path grammar is conservatively validated
+before any worktree join. Case-insensitive `.git` components, symlink
+`.gitmodules`, and every UTF-8 sequence Git documents as HFS-ignored refuse on
+all platforms; Windows also refuses native separators, rooted or
+drive/stream-qualified paths, and short-name `.git` or symlink `.gitmodules`
+aliases. Malformed, truncated, or
+checksum-invalid indexes, version 4, split-index `link`, sparse-index `sdir`,
+every other unsupported required extension, or ambiguous object-hash/checksum
+boundaries fail closed.
+A missing primary index is valid only with an empty Git
+inventory. This avoids a false clean result when Git refreshes an unavailable
+monitor and clears its in-memory fsmonitor-valid bits before `ls-files -f` can
+report them. Normalize FSMonitor or split-index state deliberately before
+running the gate. Raw tracked file/symlink object IDs are independently
+checked with `hash-object --no-filters`, so local filters, EOL transforms, and
+working-tree-encoding cannot normalize changed source into a false clean result.
+Before raw hashing, every materialized logical index prefix is inspected:
+intermediate components must be ordinary directories, and distinct logical
+prefixes may not resolve to one filesystem identity on Unix; Windows requires
+exact preserved directory-entry spelling and rejects non-symbolic reparse points.
+Case/normalization collisions, Unix tracked hard-link aliases, and ancestor-link
+redirection therefore refuse before external or collapsed bytes can be admitted.
+Every clean-tree
+decision also recursively forces initialized nested submodules visible despite
+repository or `.gitmodules` ignore policy: at every depth their HEAD must match
+the containing index gitlink, their tracked and untracked worktrees must be
+clean, and local exclude/index flags cannot conceal changes. This does not
+initialize absent submodules or expand `constellation.lock` identity. It supports
+only exact ordinary-directory repository roots, strips inherited Git
+repository/worktree/index/object redirection, pathspec-mode controls, and
+standard-handle and attribute-source overrides; it disables trace destinations
+and replacement objects, and isolates global/system configuration, templates,
+hooks, attributes, and
+credential helpers. Transport admission is default-deny and enables only
+`file`, `https`, and `ssh`; `http`, `git`, custom remote helpers, and other
+protocols refuse before helper execution. Embedded shell Python runs isolated
+from `PYTHONPATH`. Local executable or transport Git authorities, including
+remote-VCS helper and bundle/packfile-URI selection, replace
+refs, grafts, and `extensions.refStorage` refuse before filter-aware observation
+or mutation. `GIT_REFERENCE_BACKEND` is removed alongside inherited object/ref
+format defaults. Resume
+checkout uses `--no-overwrite-ignore`, preserving owner-controlled ignored
+collisions. Fetch disables automatic maintenance and submodule recursion;
+checkout also disables submodule recursion, so initialized nested repositories
+are verified without outer-bootstrap network or worktree mutation. Recursive
+admission reaches every initialized descendant before each parent status forces
+gitlink visibility with `--ignore-submodules=none`; a non-content cached diff
+independently retains staged-gitlink detection. Provenance
+publication stages and fsyncs the candidate first, then
+runs two complete whole-constellation revalidation passes plus an exact final
+lock-byte check immediately before atomic rename. Every Git subprocess sets
+`GIT_NO_LAZY_FETCH=1`, so offline or verification paths cannot implicitly fill
+missing promisor objects. It supports `--offline` cache verification and `--from`
+mirrors, and writes fetch
 provenance with identity domain
-`org.frankensim.xtask.constellation-bootstrap-provenance.v2` at version `2`; the
-standalone and in-workspace producers share the same top-level and row shape,
+`org.frankensim.xtask.constellation-bootstrap-provenance.v3` at version `3`
+(the top-level schema string remains `frankensim-constellation-bootstrap-v2`);
+the standalone and in-workspace producers share one canonical encoder and the
+same top-level and row shape,
 distinguish the canonical upstream remote from the selected mirror/transport,
-and record whether that transport was actually used. `cargo run -p xtask --
+record whether that transport was actually used, and stage the complete receipt
+beside its destination before atomic replacement. The written and fsynced
+staging handle remains live across the final validation barrier. Immediately
+before rename, Unix verifies its sealed device/inode, single-link state, and
+mutation-sensitive metadata against the visible non-symlink entry; Windows
+verifies the corresponding volume serial, file index, link count, attributes,
+size, and timestamps without following reparse points. This closes the long
+validation-window substitution risk on both platform families. Safe `std`
+still exposes only a pathname rename, so the gate makes no claim against the
+narrow final identity-check-to-rename race when an untrusted concurrent writer
+controls the destination directory. Cooperating concurrent invocations remain
+complete and use last-successful-rename-wins ordering. Other targets fail a
+support preflight before sibling repository mutation because no safe portable
+file-object identity is available. A failed validation or staging write leaves
+earlier verified provenance intact; failed temp/rename paths remain
+non-authoritative diagnostic artifacts, and parent-directory fsync is
+best-effort. `cargo run -p xtask --
 bootstrap-constellation` remains the in-workspace command after the sibling
 paths already resolve.
 `scripts/ci/checkout_constellation.sh` remains the shell-only
@@ -177,14 +258,26 @@ operation; retained synthetic coverage runs checkout, verify-only, and snapshot
 through that parser. Both it and `xtask
 check-constellation` now require every sibling to be at the pinned head with a
 clean tracked/untracked working tree. The script's `--snapshot` mode is the
-canonical repo-local CI content identity. Snapshot v2 length-frames HEAD, index
+canonical repo-local CI content identity. Snapshot v3 length-frames HEAD, index
 state, sorted paths, Git-semantic modes, regular-file SHA-256s, symlink target
 bytes, explicit missing entries, the exact lock bytes, and every clean pinned
-sibling head/tree. It never hashes rendered `git diff` text and fails closed on
-unsupported special files. Cleanliness forces executable-bit and full untracked
+sibling head/tree. Initialized root gitlinks are recursively framed with their
+parent index records, actual HEAD, complete nested index/index flags, and exact
+worktree bytes; uninitialized gitlinks receive an explicit state marker and are
+not initialized. Snapshot traversal applies the same ordinary-prefix and
+filesystem-alias barrier before hashing. Thus equal-shape porcelain states with different dirty bytes
+or nested indexes cannot collide. Sibling cleanliness probes use the same
+recursive boundary semantics and override `ignore=dirty` and `ignore=all`. The
+snapshot never hashes rendered `git diff` text and
+fails closed on unsupported special files. Cleanliness forces executable-bit and full untracked
 reporting, disables global excludes, then independently enumerates untracked
 paths using only the repository's `.gitignore` rules; ignored build artifacts
-are intentionally outside source identity. Stable dirty FrankenSim roots are
+are intentionally outside source identity, but untracked `.gitignore` files are
+refused as unpinned policy at the root and every initialized nested repository.
+Two complete root-plus-all-siblings captures must match before the digest is
+emitted, so adjacent per-repository checks cannot masquerade as one coherent
+constellation observation. Raw stage-zero tracked bytes are checked independently
+of Git filters, fsmonitor, and the untracked cache. Stable dirty FrankenSim roots are
 therefore hashed exactly, while any dirty sibling is refused.
 
 The standalone Rust, shell, and in-workspace xtask bootstrap paths initialize
