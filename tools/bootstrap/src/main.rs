@@ -42,9 +42,9 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 const BOOTSTRAP_PROVENANCE_SCHEMA: &str = "frankensim-constellation-bootstrap-v2";
-const BOOTSTRAP_PROVENANCE_IDENTITY_VERSION: u32 = 1;
+const BOOTSTRAP_PROVENANCE_IDENTITY_VERSION: u32 = 2;
 const BOOTSTRAP_PROVENANCE_IDENTITY_DOMAIN: &str =
-    "org.frankensim.xtask.constellation-bootstrap-provenance.v1";
+    "org.frankensim.xtask.constellation-bootstrap-provenance.v2";
 const BOOTSTRAP_INCOMPLETE_KEY: &str = "frankensim.bootstrapIncomplete";
 const CONSTELLATION_LOCK_SCHEMA: &str = "frankensim-constellation-lock-v2";
 const CONSTELLATION_LOCK_IDENTITY_VERSION: u32 = 1;

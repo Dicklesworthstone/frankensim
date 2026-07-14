@@ -29,8 +29,8 @@ const LOCK_NOTE: &str = "lock_hash covers (lib, version, git_head) only — path
 const LOCK_IDENTITY_DOMAIN: &str = "org.frankensim.xtask.constellation-lock.v1";
 const LOCK_IDENTITY_VERSION: u32 = 1;
 const BOOTSTRAP_PROVENANCE_IDENTITY_DOMAIN: &str =
-    "org.frankensim.xtask.constellation-bootstrap-provenance.v1";
-const BOOTSTRAP_PROVENANCE_IDENTITY_VERSION: u32 = 1;
+    "org.frankensim.xtask.constellation-bootstrap-provenance.v2";
+const BOOTSTRAP_PROVENANCE_IDENTITY_VERSION: u32 = 2;
 const TRACKED_LOCK: &str = include_str!("../../../constellation.lock");
 const CHECKOUT_CONSTELLATION_SH: &str =
     include_str!("../../../scripts/ci/checkout_constellation.sh");

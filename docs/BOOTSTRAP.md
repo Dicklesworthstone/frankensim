@@ -46,8 +46,8 @@ enumerates untracked files hidden by repository-local excludes, and rejects
 cannot conceal source drift. The tool then writes
 `constellation-bootstrap.json` provenance (schema
 `frankensim-constellation-bootstrap-v2`, identity domain
-`org.frankensim.xtask.constellation-bootstrap-provenance.v1`, identity version
-`1`) beside the siblings. The
+`org.frankensim.xtask.constellation-bootstrap-provenance.v2`, identity version
+`2`) beside the siblings. The
 sibling layout itself is the reproducible Cargo
 configuration: no config files are generated or mutated. Idempotent:
 re-runs verify. Hermetic replay drills cover producer-to-consumer parsing of the

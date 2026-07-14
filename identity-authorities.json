@@ -68,6 +68,7 @@
 {"id":"fs-session:pause-acknowledgement-receipt"},
 {"id":"fs-session:pressure-action-id"},
 {"id":"fs-session:pressure-receipt"},
+{"id":"fs-session:program-risk-report-id"},
 {"id":"fs-session:resume-activation-id"},
 {"id":"fs-session:resume-activation-receipt"},
 {"id":"fs-session:retained-evidence"},
@@ -89,11 +90,11 @@
 {"id":"xtask:constellation-lock"}
 ],
 "external_owners": [
-{"id":"ci:content-snapshot","path":"scripts/ci/checkout_constellation.sh","symbol":"snapshot_identity","version":1,"domain":"org.frankensim.ci.content-snapshot.v1"},
+{"id":"ci:content-snapshot","path":"scripts/ci/checkout_constellation.sh","symbol":"snapshot_identity","version":2,"domain":"org.frankensim.ci.content-snapshot.v2"},
 {"id":"ci:quality-proof-record","path":"scripts/ci/quality_lanes.sh","symbol":"emit_proof_seal","version":1,"domain":"org.frankensim.ci.quality-proof-record.v1"},
 {"id":"ci:x86-cross-verdict","path":"scripts/ci/x86_cross_check.sh","symbol":"row","version":1,"domain":"org.frankensim.ci.x86-cross-verdict.v1"},
 {"id":"ci:x86-runtime-verdict","path":"scripts/ci/x86_runtime_sweep.sh","symbol":"row","version":1,"domain":"org.frankensim.ci.x86-runtime-verdict.v1"},
-{"id":"xtask:constellation-bootstrap-provenance","path":"xtask/src/main.rs","symbol":"cmd_bootstrap","version":1,"domain":"org.frankensim.xtask.constellation-bootstrap-provenance.v1"},
+{"id":"xtask:constellation-bootstrap-provenance","path":"xtask/src/main.rs","symbol":"cmd_bootstrap","version":2,"domain":"org.frankensim.xtask.constellation-bootstrap-provenance.v2"},
 {"id":"xtask:constellation-lock","path":"xtask/src/main.rs","symbol":"cmd_constellation","version":1,"domain":"org.frankensim.xtask.constellation-lock.v1"}
 ],
 "exemptions": [
@@ -116,6 +117,7 @@
 {"path":"crates/fs-session/src/governor/recovery.rs","symbol":"Governor::recover_pressure","reason":"identity-consumer-not-producer","covered_by":"none"},
 {"path":"crates/fs-session/src/governor/recovery.rs","symbol":"Governor::recover_resume_activation","reason":"identity-consumer-not-producer","covered_by":"none"},
 {"path":"crates/fs-session/src/governor/recovery.rs","symbol":"Governor::recover_submission","reason":"identity-consumer-not-producer","covered_by":"none"},
+{"path":"crates/fs-session/src/program_risk.rs","symbol":"ensure_lineage_op","reason":"identity-consumer-not-producer","covered_by":"none"},
 {"path":"scripts/ci/checkout_constellation.sh","symbol":"file_digest","reason":"child-digest-helper","covered_by":"ci:content-snapshot"},
 {"path":"scripts/ci/quality_lanes.sh","symbol":"<script>","reason":"child-digest-helper","covered_by":"ci:quality-proof-record"},
 {"path":"scripts/ci/quality_lanes.sh","symbol":"add","reason":"child-digest-helper","covered_by":"ci:quality-proof-record"},

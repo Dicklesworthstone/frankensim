@@ -2280,9 +2280,9 @@ fn hidden_index_entry(index_flags: &str) -> Option<&str> {
 
 const BOOTSTRAP_INCOMPLETE_KEY: &str = "frankensim.bootstrapIncomplete";
 const BOOTSTRAP_PROVENANCE_SCHEMA: &str = "frankensim-constellation-bootstrap-v2";
-const BOOTSTRAP_PROVENANCE_IDENTITY_VERSION: u32 = 1;
+const BOOTSTRAP_PROVENANCE_IDENTITY_VERSION: u32 = 2;
 const BOOTSTRAP_PROVENANCE_IDENTITY_DOMAIN: &str =
-    "org.frankensim.xtask.constellation-bootstrap-provenance.v1";
+    "org.frankensim.xtask.constellation-bootstrap-provenance.v2";
 
 fn clear_bootstrap_marker(target: &Path) -> Result<(), String> {
     git_run(

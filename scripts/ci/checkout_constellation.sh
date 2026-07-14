@@ -306,8 +306,8 @@ def file_digest(path):
     return length, hashed.digest()
 
 try:
-    add("identity-domain", "org.frankensim.ci.content-snapshot.v1")
-    add("identity-version", (1).to_bytes(4, "big"))
+    add("identity-domain", "org.frankensim.ci.content-snapshot.v2")
+    add("identity-version", (2).to_bytes(4, "big"))
     add("schema", "frankensim-ci-content-snapshot-v2")
     add("root-head", git(root, "rev-parse", "HEAD").strip())
     index = git(root, "ls-files", "--stage", "-z")

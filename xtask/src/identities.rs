@@ -90,6 +90,7 @@ const REQUIRED_IDENTITY_IDS: &[&str] = &[
     "fs-session:pause-acknowledgement-receipt",
     "fs-session:pressure-action-id",
     "fs-session:pressure-receipt",
+    "fs-session:program-risk-report-id",
     "fs-session:resume-activation-id",
     "fs-session:resume-activation-receipt",
     "fs-session:retained-evidence",

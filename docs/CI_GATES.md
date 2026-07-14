@@ -164,7 +164,7 @@ disables global ignores, catches files hidden by repository-local excludes, and
 rejects `assume-unchanged` or `skip-worktree` index entries. It supports
 `--offline` cache verification and `--from` mirrors, and writes v2 fetch
 provenance with identity domain
-`org.frankensim.xtask.constellation-bootstrap-provenance.v1` at version `1`; the
+`org.frankensim.xtask.constellation-bootstrap-provenance.v2` at version `2`; the
 standalone and in-workspace producers share the same top-level and row shape,
 distinguish the canonical upstream remote from the selected mirror/transport,
 and record whether that transport was actually used. `cargo run -p xtask --
