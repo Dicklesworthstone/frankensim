@@ -42,8 +42,13 @@ use fs_geom::{
 use fs_mesh::delaunay;
 use fs_rep_mesh::Soup;
 
+mod convex;
 mod moments;
 
+pub use convex::{
+    CONVEX_SEPARATION_DEFAULT_ITERATIONS, CONVEX_SEPARATION_MAX_ITERATIONS, ConvexBox,
+    ConvexSeparation, ConvexSphere, ConvexSupportMap, convex_separation,
+};
 pub use moments::{
     GeometricMoments, MAX_MOMENT_CELLS, MomentEnclosure, SecondMoments, geometric_moments,
 };
@@ -211,6 +216,17 @@ pub enum QueryError {
         /// The certified volume lower bound that failed the requirement.
         volume_lo: f64,
     },
+    /// A convex support map or its configuration is structurally
+    /// invalid (non-finite geometry, degenerate extents, zero budget).
+    ConvexInvalidShape {
+        /// Actionable deterministic refusal reason.
+        reason: &'static str,
+    },
+    /// A convex support evaluation or bound arithmetic went non-finite.
+    ConvexInvalidSupport {
+        /// The offending value triple.
+        at: [f64; 3],
+    },
     /// Cancelled mid-scan.
     Cancelled,
     /// Delaunay refused (carried through from fs-mesh).
@@ -350,6 +366,14 @@ impl core::fmt::Display for QueryError {
                 f,
                 "center of mass needs a strictly positive certified volume lower bound \
                  (got {volume_lo:.3e})"
+            ),
+            QueryError::ConvexInvalidShape { reason } => {
+                write!(f, "convex support refused: {reason}")
+            }
+            QueryError::ConvexInvalidSupport { at } => write!(
+                f,
+                "convex support evaluation produced non-finite values ({}, {}, {})",
+                at[0], at[1], at[2]
             ),
             QueryError::Cancelled => write!(f, "cancelled mid-query"),
             QueryError::Mesh(m) => write!(f, "medial sampling failed: {m}"),

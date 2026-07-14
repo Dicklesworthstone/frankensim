@@ -41,6 +41,17 @@ answers to the MULTI-CHART AGREEMENT discipline (same abstract region
   volume; `translated` applies the exact translation-covariance /
   parallel-axis laws with outward rounding. The domain must contain the
   chart's support box: moments are whole-region claims.
+- `ConvexSupportMap` (`ConvexSphere`, `ConvexBox`) and
+  `convex_separation` → `ConvexSeparation`: certified `[lo, hi]`
+  distance enclosures between compact convex sets via deterministic
+  Frank-Wolfe on the Minkowski difference. The upper bound is the
+  outward-rounded norm of a realized support-point difference plus the
+  shapes' declared support slack; the lower bound is the
+  outward-rounded support-plane separation minus slack, clamped at
+  zero. `separation_proven` is exactly `lo > 0`; every early stop
+  (iteration cap, nonsmooth `1/k` residual) widens the bracket, never
+  falsifies it. Constructors validate geometry; degraded arithmetic
+  refuses typed.
 - `OffsetChart` / `minkowski_ball`: dilation/erosion as a chart
   wrapper (`φ − r`); the ball case of the Minkowski sum IS the offset
   (bitwise), which is the fillet/clearance workhorse. Construction is fallible
@@ -161,7 +172,9 @@ the sd found and the advice to project first), `NoOppositeWall`,
 (the deterministic `MAX_MOMENT_CELLS` ceiling), `MomentsInvalidSample`
 (Estimate/NoClaim-class evidence cannot feed a certified integral),
 `MomentsVolumeUnproven` (COM needs a positive certified volume lower
-bound), `Cancelled`,
+bound), `ConvexInvalidShape` (non-finite/degenerate convex geometry or
+a zero iteration budget), `ConvexInvalidSupport` (non-finite support
+evaluation or bound arithmetic), `Cancelled`,
 `Mesh` (fs-mesh refusals carried through). Honest gaps refuse; nothing guesses.
 
 ## Determinism class
@@ -200,6 +213,10 @@ the translation-covariance metamorphic (outward-rounded law vs direct
 recomputation must overlap), capability/input/work refusals, and
 cancellation. `geometric_moments` is Enclosure-class: every returned
 bracket contains the true unit-density integral of the chart's region.
+`tests/convex.rs`, cases gc-001..gc-005 — certified convex separation:
+analytic sphere/box distance containment, nonsmooth box-box honesty,
+touching/overlap never claiming separation, bit-identical replay, and
+constructor/budget/cancellation refusals.
 
 ## No-claim boundaries
 
@@ -229,8 +246,14 @@ bracket contains the true unit-density integral of the chart's region.
   downstream (fs-matdb consumers), never here. Rotation covariance and
   spatially-varying weighting are deferred surfaces —
   [`GeometricMoments::translated`] covers translation only. The bead
-  rjnd remainder (support maps, GJK/EPA, feature complexes, gap
-  oracles, codimensional thickness, deformation hooks) is not yet
-  claimed by this crate.
+  rjnd remainder (feature complexes, gap oracles, codimensional
+  thickness, deformation hooks) is not yet claimed by this crate.
+- `convex_separation` proves separation only (`lo > 0`); an enclosure
+  containing zero claims NOTHING about overlap, and penetration-depth
+  certificates (EPA-style lower bounds) are a deferred rjnd surface.
+  No convergence rate is claimed: nonsmooth pairs may return wide,
+  honest brackets at the iteration cap. Support maps must satisfy the
+  declared slack contract; the routine cannot detect a lying
+  `support_slack()`.
 - Chart-native fast paths (mesh BVH closest-point dispatch instead of
   generic Newton) are perf-lane work; answers here are correct first.
