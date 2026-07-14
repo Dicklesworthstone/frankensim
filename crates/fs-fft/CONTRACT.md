@@ -129,8 +129,31 @@ round-trip + separability + N-D Parseval + 2D convolution theorem +
 determinism, determinism + golden hash, and structured rejection of bad sizes.
 The frontier dispatch battery also rejects non-power-of-two lookalikes. The
 performance lane binds its two-pass traffic count to evidence version
-`27d3-6s-fused2`. Any reimplementation must pass this suite bit-for-bit on the
-golden-hash cases.
+`27d3-6s-fused2`. Its historical-axis input is report-only unless the baseline
+is an attested envelope accepted under the configured promotion-authority
+policy from `FRANKENSIM_PROMOTION_AUTHORITY_POLICY`, with all named source
+receipts supplied in `FRANKENSIM_RETAINED_SOURCE_RECEIPTS`. The lane captures
+one atomic authority decision and embeds the full frozen pre/post snapshot in
+the final gate JSON so the measured claim cannot be detached from its decision.
+A positive gate additionally requires `FRANKENSIM_ROOFLINE_LEDGER`: before
+emitting `citation_eligible:true`, the lane atomically records the exact
+admission receipt and exact final-gate JSON through the shared `fs-roofline`
+external-gate protocol and verifies the stored bytes. A missing or empty ledger
+path leaves the completed measurement report-only; a write or re-read failure
+fails closed and cannot emit a positive gate.
+The citable policy owns its clock; clock failure or an epoch-day rollover
+between mint and post-probe invalidates attested evidence and ends the lane as
+`environment_invalid`. Configuration refusals alone remain measured
+report-only observations.
+Missing, partial, malformed, denied, revoked,
+tampered, or cross-machine authority inputs never produce a positive gate. Any
+reimplementation must pass this suite bit-for-bit on the golden-hash cases.
+The retained-source file is a protected hash-inventory declaration; the lane
+does not fetch or independently prove availability of the named source bytes.
+Its conformance matrix removes one named receipt to prove that missing source
+evidence stays report-only, then re-endorses the identical baseline under a
+rotated key and proves that the baseline hash stays fixed while the key and
+authority-policy receipt move.
 
 ## No-claim boundaries
 - **The ≥40% roofline gate is NOT met** (measured 2026-07-10, radix-8/4/2,
@@ -145,9 +168,12 @@ golden-hash cases.
   not claimed. Higher-radix golden bumps are pre-authorized with justification
   — bumped twice so far (radix-2→4/2→8/4/2), each recorded at the golden and
   the current value four-quadrant verified (M4 + ts2 × debug + release).
-  The explicit perf lane reports that target and currently enforces only a 15%
-  anti-collapse floor; an environment-invalid measurement fails closed rather
-  than returning a green test with no admissible evidence.
+  The explicit perf lane reports that target and, on an authority-admitted
+  snapshot, enforces only a 15% anti-collapse floor. The committed plain
+  baseline files make historical rows candidate observations, not
+  authority-admitted citations; an
+  environment-invalid measurement fails closed rather than returning a green
+  test with no admissible evidence.
 - The N-D transform is CORRECT and separable but not yet cache/execution
   optimized: it gathers each pencil into a temporary line (allocated per axis,
   reused across pencils) rather than blocking transposes or tiling on fs-exec.
