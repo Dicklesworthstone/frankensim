@@ -772,8 +772,10 @@ name = "fs-adjoint"
 version = "0.0.1"
 dependencies = [
  "fs-ad",
+ "fs-alloc",
  "fs-blake3",
  "fs-evidence",
+ "fs-exec",
  "fs-feec",
  "fs-geom",
  "fs-ivl",
@@ -802,8 +804,10 @@ version = "0.0.1"
 name = "fs-asbuilt"
 version = "0.0.1"
 dependencies = [
+ "fs-alloc",
  "fs-blake3",
  "fs-evidence",
+ "fs-exec",
 ]
 
 [[package]]
@@ -827,8 +831,10 @@ dependencies = [
 name = "fs-assimilate"
 version = "0.0.1"
 dependencies = [
+ "fs-alloc",
  "fs-blake3",
  "fs-evidence",
+ "fs-exec",
 ]
 
 [[package]]
@@ -971,9 +977,11 @@ dependencies = [
 name = "fs-diffreal-e2e"
 version = "0.0.1"
 dependencies = [
+ "fs-alloc",
  "fs-asbuilt",
  "fs-assimilate",
  "fs-evidence",
+ "fs-exec",
  "fs-toleralloc",
 ]
 
@@ -1118,10 +1126,12 @@ version = "0.0.1"
 dependencies = [
  "asupersync",
  "fs-adjoint",
+ "fs-alloc",
  "fs-asbuilt",
  "fs-benchmark",
  "fs-checker",
  "fs-evidence",
+ "fs-exec",
  "fs-geom",
  "fs-ir",
  "fs-ledger",
@@ -1387,9 +1397,11 @@ version = "0.0.1"
 name = "fs-oed-e2e"
 version = "0.0.1"
 dependencies = [
+ "fs-alloc",
  "fs-assimilate",
  "fs-blake3",
  "fs-evidence",
+ "fs-exec",
  "fs-toleralloc",
  "fs-voi",
 ]
@@ -1416,6 +1428,7 @@ version = "0.0.1"
 dependencies = [
  "asupersync",
  "fs-alloc",
+ "fs-blake3",
  "fs-exec",
  "fs-math",
  "fs-obs",
@@ -1669,6 +1682,7 @@ dependencies = [
 name = "fs-scenario"
 version = "0.0.1"
 dependencies = [
+ "fs-blake3",
  "fs-cheb",
  "fs-ga",
  "fs-ledger",
