@@ -367,7 +367,7 @@ fn sh_000c_interface_sampler_polls_cancellation_directly() {
                 Err(SheafBuildError::Cancelled {
                     stage: "interface-sampling",
                     patches: Some((0, 1)),
-                    completed_draws: 1,
+                    completed_draws: 0,
                 })
             ),
             "the sheaf sampler itself must observe cancellation from a non-polling chart: \
