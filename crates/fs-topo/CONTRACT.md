@@ -26,10 +26,19 @@ constraints will consume.
   A PASS is a PROOF (exact arithmetic — false PASS impossible); exact
   contact reports the conservative `Touching` kind (the bounded,
   LISTED false-FAIL class the acceptance contract allows).
-- `cubical::voxelize` / `betti` / `persistence0` /
-  `count_persistent` / `verify_topology`:
+- `cubical::voxelize` / `voxelize_clipped` / `betti` / `persistence0` /
+  `count_persistent` / `verify_topology` / `verify_topology_clipped`:
+  - chart voxelization admits a finite positive-volume sampling domain and a
+    nonzero longest-axis resolution before evaluation, derives every dimension
+    with checked arithmetic, and refuses fields above the deterministic
+    1,000,000-cell cap; ratio-first per-axis center placement stays inside the
+    exact admitted spans even for extreme aspect ratios, and each derived
+    dimension is incremented when nearest quotient arithmetic would make its
+    realized width exceed the reported maximum `h`; non-finite source samples
+    refuse; the paired clipped APIs sample the geometric
+    intersection `chart ∩ clip`, not merely a replacement extent;
   - `betti`: exact Betti triple of the voxel solid — `b0` by
-    6-connected union-find, `b2` as bounded complement components
+    26-connected union-find, `b2` as 6-connected bounded complement components
     against a virtual outside, `b1 = b0 + b2 − χ` with χ counted
     EXACTLY on the closed cubical complex (a k-cell is present iff an
     incident voxel is filled);
@@ -75,12 +84,23 @@ constraints will consume.
    (topo-005).
 6. Persistence is BITWISE reproducible, and the ~10⁶-voxel scale run
    is ledgered with timings (topo-006).
+7. Edge- and corner-touching closed voxels form one 26-connected
+   contractible component and do not manufacture phantom tunnels
+   (topo-007).
+8. Sampling admission (topo-008): default voxelization and topology
+   verification reject unresolved extended support before evaluation; paired
+   clipped APIs sample the actual geometric intersection; zero resolution and
+   checked voxel-cap refusals precede evaluation; translated chart+clip pairs
+   preserve occupancy and Betti numbers (G3).
 
 ## Error model
 
-Certificates are total over their inputs; voxelization carries
-`Cancelled` through. Conservative flags (`Touching`) are typed and
-listed rather than silently merged with strict crossings.
+Certificates are total over admitted inputs. `VoxelizeError` wraps
+`SamplingDomainError` and names zero resolution, nonrepresentable cell size,
+checked count overflow, deterministic work-cap refusal, non-finite chart
+samples, and cancellation with completed-voxel progress.
+Conservative flags (`Touching`) are typed and listed rather than silently
+merged with strict crossings.
 
 ## Determinism class
 
@@ -90,8 +110,9 @@ order. Identical inputs give identical reports bitwise (topo-006).
 
 ## Cancellation behavior
 
-`voxelize` (and therefore `verify_topology`) polls `cx.checkpoint()`
-per z-slab. Mesh certificates are single-pass and non-blocking.
+`voxelize` (and therefore `verify_topology`) polls `cx.checkpoint()` at most
+every 256 completed voxels and once before publication. Mesh certificates are
+single-pass and non-blocking.
 
 ## Unsafe boundary
 
@@ -105,7 +126,7 @@ None. `#![forbid(unsafe_code)]` via workspace lints; no capsules.
 
 ## Conformance tests
 
-`tests/conformance.rs`, cases topo-001..topo-006 — JSON-line
+`tests/conformance.rs`, cases topo-001..topo-008 — JSON-line
 verdicts, seeded LCG randomness, the fs-obs scale ledger. Any
 reimplementation must pass the suite unchanged.
 
@@ -122,8 +143,8 @@ reimplementation must pass the suite unchanged.
   certificates bead's.
 - Geometric manifoldness is red-flag level (degeneracies, fold-overs);
   full local-injectivity proofs join the interval machinery.
-- Voxel connectivity is the 6/6 pair (solid/complement); alternative
-  connectivity conventions (26/6) are not exposed.
+- Voxel connectivity is the closed-cube-consistent 26/6 pair
+  (solid/complement); alternative connectivity conventions are not exposed.
 
 ## No-claim boundaries (penalty)
 

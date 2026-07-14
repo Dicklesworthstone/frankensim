@@ -9,7 +9,7 @@
 use asupersync::types::Budget;
 use fs_exec::{CancelGate, Cx, ExecMode, StreamKey};
 use fs_geom::{Aabb, Chart, Differentiability, Point3, TraceStepClaim, Vec3};
-use fs_rep_frep::{BoolOp, BoolStyle, Frep, FrepBuilder, NodeId, smin_weights};
+use fs_rep_frep::{BoolOp, BoolStyle, Frep, FrepBuilder, FrepError, NodeId, smin_weights};
 
 fn verdict(case: &str, pass: bool, detail: &str) {
     println!(
@@ -482,6 +482,7 @@ fn oracle(f: &Frep, o: Point3, dir: Vec3, tmax: f64) -> Option<f64> {
 /// claims a hit beyond it. Violation count must be 0. Also pins the
 /// chart-level honesty (certificate kinds, Lipschitz, C-class).
 #[test]
+#[allow(clippy::too_many_lines)] // One seeded safety campaign keeps its counters and oracle checks unified.
 fn frep_005_sphere_tracing_safety() {
     let mut rng = Lcg(0x1001_2026_0706_0015);
     let mut rays = 0u64;
@@ -895,5 +896,120 @@ fn frep_006_metamorphic_and_params() {
          to 1e-12; radius/offset levers differentiate exactly (-1), the blend-radius \
          lever is 0 far from the seam and -1/4 on it, and invalid lever values teach; \
          seed 0x1001_2026_0706_0016",
+    );
+}
+
+/// frep-007 — genuinely unbounded primitives publish extended supports,
+/// while intersections with bounded operands recover finite supports.
+#[test]
+#[allow(clippy::too_many_lines)] // One support-honesty regression compares every unbounded primitive together.
+fn frep_007_honest_unbounded_supports() {
+    let halfspace = {
+        let mut b = FrepBuilder::new();
+        let root = b
+            .half_space(Vec3::new(1.0, 0.0, 0.0), 0.0)
+            .expect("halfspace");
+        b.finish(root).expect("frep")
+    };
+    let far_halfspace_point = Point3::new(-1.0e300, 2.0, -3.0);
+    let halfspace_honest = halfspace.value(far_halfspace_point) < 0.0
+        && halfspace.support().contains(far_halfspace_point)
+        && halfspace.support() == Aabb::WHOLE_SPACE;
+
+    let cylinder = {
+        let mut b = FrepBuilder::new();
+        let root = b
+            .cylinder(Point3::new(0.25, -0.5, 7.0), 0.75)
+            .expect("cylinder");
+        b.finish(root).expect("frep")
+    };
+    let far_cylinder_point = Point3::new(0.25, -0.5, 1.0e300);
+    let cylinder_support = cylinder.support();
+    let cylinder_honest = cylinder.value(far_cylinder_point) < 0.0
+        && cylinder_support.contains(far_cylinder_point)
+        && cylinder_support.min.z.is_infinite()
+        && cylinder_support.min.z.is_sign_negative()
+        && cylinder_support.max.z.is_infinite()
+        && cylinder_support.max.z.is_sign_positive();
+
+    let bounded_intersection = |style: BoolStyle| {
+        let mut b = FrepBuilder::new();
+        let unbounded = b
+            .half_space(Vec3::new(1.0, 0.0, 0.0), 0.0)
+            .expect("halfspace");
+        let bounded = b
+            .box_prim(Point3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 2.0, 3.0))
+            .expect("box");
+        let root = b
+            .boolean(BoolOp::Intersect, style, unbounded, bounded)
+            .expect("intersection");
+        b.finish(root).expect("frep").support()
+    };
+    let hard = bounded_intersection(BoolStyle::Hard);
+    let blended = bounded_intersection(BoolStyle::Blend { radius: 0.2 });
+    let intersections_finite = hard.is_finite() && blended.is_finite();
+
+    let nonfinite_rejected = {
+        let mut b = FrepBuilder::new();
+        let bad_center = matches!(
+            b.sphere(Point3::new(f64::NAN, 0.0, 0.0), 1.0),
+            Err(FrepError::NonFinite {
+                field: "center.x",
+                ..
+            })
+        );
+        let bad_plane = matches!(
+            b.half_space(Vec3::new(1.0, 0.0, 0.0), f64::INFINITY),
+            Err(FrepError::NonFinite {
+                field: "offset",
+                ..
+            })
+        );
+        let root = b
+            .sphere(Point3::new(0.0, 0.0, 0.0), 1.0)
+            .expect("valid root");
+        let bad_translate = matches!(
+            b.translate(root, Vec3::new(0.0, f64::NAN, 0.0)),
+            Err(FrepError::NonFinite {
+                field: "offset.y",
+                ..
+            })
+        );
+        let bad_rotate = matches!(
+            b.rotate(root, Vec3::new(0.0, 0.0, 1.0), f64::NEG_INFINITY,),
+            Err(FrepError::NonFinite { field: "angle", .. })
+        );
+        let bad_offset = matches!(
+            b.offset(root, f64::NAN),
+            Err(FrepError::NonFinite {
+                field: "distance",
+                ..
+            })
+        );
+        let mut editable = b.finish(root).expect("valid editable F-rep");
+        let before = editable.support();
+        let center_x = editable
+            .params()
+            .into_iter()
+            .find(|(_, name, _)| *name == "center.x")
+            .expect("sphere center parameter")
+            .0;
+        let bad_edit = matches!(
+            editable.set_param(center_x, f64::NAN),
+            Err(FrepError::NonFinite {
+                field: "center.x",
+                ..
+            })
+        ) && editable.support() == before;
+        bad_center && bad_plane && bad_translate && bad_rotate && bad_offset && bad_edit
+    };
+
+    verdict(
+        "frep-007",
+        halfspace_honest && cylinder_honest && intersections_finite && nonfinite_rejected,
+        "negative points at magnitude 1e300 remain inside the published halfspace/cylinder \
+         supports; halfspace support is whole-space, cylinder z support is infinite, and \
+         hard/blended intersections with a finite box recover finite supports; constructors \
+         and parameter edits reject non-finite geometry without mutating cached support",
     );
 }

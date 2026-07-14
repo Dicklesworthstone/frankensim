@@ -6,33 +6,38 @@
 //! geometry supplies values and derivatives; ASCENT owns the constraint
 //! SEMANTICS.
 //!
-//! - [`min_thickness_soft`] — the anti-paperclip constraint: a smooth
-//!   p-norm aggregation of fs-query thickness samples (C¹ where walls
-//!   are smooth), with violations LOCALIZED to their samples;
+//! - [`min_thickness_soft`] / [`min_thickness_soft_clipped`] — the
+//!   anti-paperclip constraint: a smooth p-norm aggregation of fs-query
+//!   thickness samples (C¹ where walls
+//!   are smooth), with `Estimate` authority preserved and estimated
+//!   violations LOCALIZED to their samples;
 //! - [`draft_violations`] — casting/molding: normals versus the pull
 //!   direction, smooth hinge² penalty plus EXACT violating regions
 //!   (undercuts flagged separately and harder);
-//! - [`QuotientChart`] — symmetry ENFORCED BY CONSTRUCTION: the
-//!   evaluation point folds into the group's fundamental domain, so
-//!   the shape is invariant for ARBITRARY design levers — violation is
-//!   structurally impossible, not penalized (the plan's preferred
-//!   mechanism);
+//! - [`QuotientChart`] — symmetry ENFORCED BY CONSTRUCTION: the evaluation
+//!   point folds into the group's validated fundamental domain, so the nominal
+//!   presentation is invariant for arbitrary design levers. Fold seams retain
+//!   conservative `Estimate`/`NoClaim` authority rather than inheriting an
+//!   inner distance theorem;
 //! - [`envelope_violation`] — containment/keep-out via SDF composition
 //!   over boundary samples, with a smooth softmax aggregate for
 //!   derivatives and the sampled-max reported alongside;
-//! - [`volume_certified`] / [`volume_smooth`] — a RIGOROUS volume
-//!   enclosure (sure-inside cells vs Lipschitz uncertainty band) next
-//!   to a smoothed-Heaviside estimate whose lever derivative matches
-//!   the Hadamard formula on fixtures.
+//! - [`volume_certified`] — a rigorous volume enclosure for charts carrying
+//!   the global exact-distance theorem and rigorous per-cell evidence, with
+//!   outward-rounded partition geometry, cell radii, measures, and totals;
+//!   [`volume_smooth`] is the separate smoothed-Heaviside estimate whose lever
+//!   derivative matches the Hadamard formula on fixtures. Both admit the
+//!   explicit finite integration box before checked, capped grid construction.
 
 mod primitives;
 mod quotient;
 
 pub use primitives::{
-    DraftReport, EnvelopeReport, ThicknessReport, VolumeEnclosure, draft_violations,
-    envelope_violation, min_thickness_soft, volume_certified, volume_smooth,
+    DraftReport, EnvelopeReport, ThicknessReport, VOLUME_MAX_CELLS, VolumeEnclosure, VolumeError,
+    draft_violations, envelope_violation, min_thickness_soft, min_thickness_soft_clipped,
+    volume_certified, volume_smooth,
 };
-pub use quotient::{QuotientChart, SymmetryGroup};
+pub use quotient::{QuotientChart, SymmetryError, SymmetryGroup};
 
 use fs_constraint::{ConstraintKind, PenaltyLaw, ProofKind};
 use fs_opt::Class;

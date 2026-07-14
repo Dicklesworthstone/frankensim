@@ -13,14 +13,17 @@ about THAT region — no silent promotion to "exact distance".
 ## Public types and semantics
 
 - `FrepBuilder` → `Frep`: arena-style DAG construction. Node ids are a
-  topological order; SHARING a subexpression is reusing its id.
+  topological order; SHARING a subexpression is reusing its id. Every signed
+  coordinate, transform angle/vector, and offset is finite-validated before a
+  node is published; lever edits apply the same gate transactionally.
 - Primitives: exact unit-Lipschitz `sphere`, `box_prim`, and `cylinder`
   (infinite, +z); coordinate-axis `half_space` is exact, while a generic
   rounded normalized half-space uses a certified norm upper bound and an
   implicit-field claim. `torus` (+z axis) is exact for ring geometry
   (`major > minor`) and otherwise retains only its exact sign/zero set.
-  Unbounded supports are
-  reported as ±`UNBOUNDED_HALF` boxes; intersections shrink them back.
+  Unbounded supports use honest extended AABBs: half-spaces report whole
+  space and cylinders report infinite z extent. Boolean intersections with
+  bounded operands shrink those extended boxes back to finite support.
 - Transforms: `translate`, `rotate` (axis-angle Rodrigues; GA motors
   join with fs-ga), `scale` (uniform, SDF-preserving `s·f(p/s)`),
   `offset` (exact sign/zero set; magnitude remains conservative until a reach
@@ -100,10 +103,12 @@ about THAT region — no silent promotion to "exact distance".
 ## Error model
 
 Construction and lever edits return `FrepError` teaching errors:
-`NonPositive` (radii/scales/blend radii), `ZeroVector` (degenerate
-directions), `BadNode` (unknown id), `BadParam` (unknown slot) — each
-says what to fix. Evaluation itself is total: honest gaps surface as
-`None` gradients and `Estimate` certificates, never as panics.
+`NonFinite` (coordinates/transforms/signed offsets), `NonPositive`
+(radii/scales/blend radii), `ZeroVector` (degenerate directions), `BadNode`
+(unknown id), `BadParam` (unknown slot) — each says what to fix. A rejected
+lever edit leaves both the DAG and cached support unchanged. Evaluation itself
+is total: honest gaps surface as `None` gradients and `Estimate` certificates,
+never as panics.
 
 ## Determinism class
 
@@ -129,7 +134,7 @@ None.
 
 ## Conformance tests
 
-`tests/conformance.rs`, cases frep-001..frep-006 — JSON-line verdicts,
+`tests/conformance.rs`, cases frep-001..frep-007 — JSON-line verdicts,
 seeded LCG randomness, per-case fs-obs Custom events (interval
 tightness, seam gradient stats, ray-safety counts). Any
 reimplementation must pass the suite unchanged.
@@ -147,6 +152,9 @@ reimplementation must pass the suite unchanged.
   rather than overstate progress. Rotation support likewise inverts the
   interval inverse-map matrix only when its determinant excludes zero;
   otherwise it deliberately returns an infinite AABB.
+- Extended support endpoints are geometry, not a sampling license. Any
+  midpoint/span/count consumer must first resolve a finite sampling domain;
+  the fs-geom admission layer refuses an unresolved infinite axis.
 - `d_value_d_param` is symmetric finite difference; exact parameter
   adjoints (chain rule through the DAG) join with fs-xform.
 - Revolved/extruded fs-cheb profiles ("revolve THIS function") join

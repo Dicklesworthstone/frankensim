@@ -9,10 +9,12 @@ use fs_evidence::ProvenanceHash;
 use fs_exec::{CancelGate, Cancelled, Cx, ExecMode, StreamKey};
 use fs_geom::fixtures::{BoxChart, LyingSphereChart, SphereChart, TorusChart};
 use fs_geom::{
-    Aabb, AgreementConfig, AgreementStatus, Chart, Convert, ConvertDiag, ErrBudget, Point3, Region,
-    Vec3,
+    Aabb, AgreementConfig, AgreementScope, AgreementStatus, AgreementUnknownReason, Axis, Chart,
+    ClippedChart, Convert, ConvertDiag, ErrBudget, Point3, Region, SamplingDomain,
+    SamplingDomainError, Vec3,
 };
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn verdict(case: &str, pass: bool, detail: &str) {
     println!(
@@ -299,22 +301,357 @@ fn geo_004c_zero_error_budget_refuses_instead_of_overflowing() {
         radius: 1.2,
     };
     let gate = CancelGate::new();
-    let refusal = with_cx(&gate, |cx| sphere.convert(ErrBudget { abs_sd_error: 0.0 }, cx));
-    let ok = matches!(
-        &refusal,
-        Err(ConvertDiag::BudgetInfeasible { need_resolution, cap, .. })
-            if need_resolution > cap // > 0, not the release wrap-to-0
-    );
+    let refusal = with_cx(&gate, |cx| {
+        sphere.convert(ErrBudget { abs_sd_error: 0.0 }, cx)
+    });
+    let ok = matches!(&refusal, Err(ConvertDiag::InvalidBudget { .. }));
     assert!(
         ok,
-        "a zero error budget must refuse as infeasible with a sane resolution, not panic \
-         or wrap to zero: {refusal:?}"
+        "a zero error budget must refuse as invalid before support/evaluation/count math: \
+         {refusal:?}"
     );
     verdict(
         "geo-004c",
         ok,
-        "zero error budget refuses as infeasible without integer overflow",
+        "zero error budget refuses before evaluation or integer count arithmetic",
     );
+}
+
+#[test]
+fn geo_004j_translated_tiny_exact_domain_keeps_outward_enclosures() {
+    // Regression for proof arithmetic at a scale where adding an ideal grid
+    // fraction to the translated minimum loses many low bits. The conversion
+    // must interpolate against the ACTUAL retained nodes and every published
+    // enclosure must contain an independently evaluated exact-distance chart,
+    // including the outward extension beyond sampled support.
+    let base = 1.0e12;
+    let width = 0.031_25;
+    let source = BoxChart {
+        aabb: Aabb::new(
+            Point3::new(base, base + width, base - width),
+            Point3::new(base + width, base + 2.0 * width, base),
+        ),
+    };
+    let budget = 0.05;
+    let gate = CancelGate::new();
+    with_cx(&gate, |cx| {
+        let converted = source
+            .convert(
+                ErrBudget {
+                    abs_sd_error: budget,
+                },
+                cx,
+            )
+            .expect("translated tiny exact-distance domain is representable");
+        assert!(converted.qoi <= budget);
+        for axis in [Axis::X, Axis::Y, Axis::Z] {
+            let nodes = converted.value.axis_nodes(axis);
+            assert_eq!(nodes.len(), converted.value.resolution() as usize);
+            assert!(nodes.windows(2).all(|pair| pair[0] < pair[1]));
+        }
+        let support = converted.value.support();
+        let point_at = |tx: f64, ty: f64, tz: f64| {
+            Point3::new(
+                support.min.x + (support.max.x - support.min.x) * tx,
+                support.min.y + (support.max.y - support.min.y) * ty,
+                support.min.z + (support.max.z - support.min.z) * tz,
+            )
+        };
+        let mut points = Vec::new();
+        for t in [0.0, 0.031_25, 0.2, 0.5, 0.812_5, 1.0] {
+            points.push(point_at(t, 1.0 - t, (3.0 * t).fract()));
+        }
+        points.extend([
+            support.min,
+            support.max,
+            Point3::new(
+                support.max.x + 0.02,
+                f64::midpoint(support.min.y, support.max.y),
+                f64::midpoint(support.min.z, support.max.z),
+            ),
+            Point3::new(
+                f64::midpoint(support.min.x, support.max.x),
+                support.min.y - 0.02,
+                support.max.z + 0.02,
+            ),
+        ]);
+
+        for point in points {
+            let independent = source.eval(point, cx);
+            let sampled = converted.value.eval(point, cx);
+            assert_eq!(sampled.error.kind, fs_evidence::NumericalKind::Enclosure);
+            assert!(sampled.signed_distance.is_finite(), "at {point:?}");
+            assert!(
+                sampled.error.lo <= independent.error.lo
+                    && independent.error.hi <= sampled.error.hi,
+                "sampled interval [{}, {}] failed to contain independent source interval \
+                 [{}, {}] at {point:?}",
+                sampled.error.lo,
+                sampled.error.hi,
+                independent.error.lo,
+                independent.error.hi
+            );
+        }
+        let non_finite_query = converted.value.eval(Point3::new(f64::NAN, base, base), cx);
+        assert!(non_finite_query.signed_distance.is_nan());
+        assert_eq!(
+            non_finite_query.error.kind,
+            fs_evidence::NumericalKind::NoClaim
+        );
+    });
+}
+
+#[test]
+fn geo_004k_conversion_refuses_a_nonrepresentable_dense_grid() {
+    // Around 1e16 adjacent f64 values are two units apart. Padding this
+    // one-ulp box for a unit budget leaves only three representable coordinates
+    // per axis, while the full-cell-diagonal proof requires a denser grid.
+    // Coincident ideal nodes must be a typed refusal, never silently sampled.
+    let min = 1.0e16_f64;
+    let max = min.next_up();
+    let source = BoxChart {
+        aabb: Aabb::new(Point3::new(min, min, min), Point3::new(max, max, max)),
+    };
+    let gate = CancelGate::new();
+    let refusal = with_cx(&gate, |cx| {
+        source.convert(ErrBudget { abs_sd_error: 1.0 }, cx)
+    });
+    assert!(
+        matches!(
+            refusal,
+            Err(ConvertDiag::UnrepresentableGrid {
+                resolution,
+                min_bits,
+                max_bits,
+                ..
+            }) if resolution > 3 && min_bits < max_bits
+        ),
+        "a dense grid with coincident representable nodes must refuse: {refusal:?}"
+    );
+}
+
+struct UnboundedHalfSpace;
+
+impl Chart for UnboundedHalfSpace {
+    fn eval(&self, x: Point3, _cx: &Cx<'_>) -> fs_geom::ChartSample {
+        fs_geom::ChartSample {
+            signed_distance: x.x,
+            gradient: Some(Vec3::new(1.0, 0.0, 0.0)),
+            lipschitz: Some(1.0),
+            error: fs_evidence::NumericalCertificate::exact(x.x),
+        }
+    }
+
+    fn support(&self) -> Aabb {
+        Aabb::WHOLE_SPACE
+    }
+
+    fn name(&self) -> &'static str {
+        "test/unbounded-half-space"
+    }
+}
+
+#[test]
+fn geo_004d_region_agreement_requires_an_explicit_finite_scope() {
+    let region = Region::from_chart(
+        Arc::new(UnboundedHalfSpace),
+        ProvenanceHash::of_bytes(b"unbounded-a"),
+    )
+    .with_chart(
+        Arc::new(UnboundedHalfSpace),
+        ProvenanceHash::of_bytes(b"unbounded-b"),
+    );
+    let clip = Aabb::new(Point3::new(-1.0, -1.0, -1.0), Point3::new(1.0, 1.0, 1.0));
+    let gate = CancelGate::new();
+    with_cx(&gate, |cx| {
+        let unresolved = region
+            .check_agreement(&AgreementConfig::default(), cx)
+            .expect("not cancelled");
+        assert_eq!(unresolved.status, AgreementStatus::Unknown);
+        assert_eq!(unresolved.scope, AgreementScope::GlobalSupport);
+        assert!(unresolved.sampling_domain.is_none());
+        assert!(unresolved.unknowns.iter().any(|unknown| matches!(
+            unknown.reason,
+            AgreementUnknownReason::SamplingDomain(SamplingDomainError::UnboundedSupport { .. })
+        )));
+
+        let local = region
+            .check_agreement(
+                &AgreementConfig {
+                    sampling_clip: Some(clip),
+                    ..AgreementConfig::default()
+                },
+                cx,
+            )
+            .expect("not cancelled");
+        assert_eq!(local.status, AgreementStatus::Agreed);
+        assert_eq!(local.scope, AgreementScope::ExplicitClip);
+        assert_eq!(local.sampling_domain, Some(clip));
+    });
+}
+
+#[test]
+fn geo_004e_unbounded_conversion_requires_a_geometric_clip() {
+    let source = UnboundedHalfSpace;
+    let clip = Aabb::new(Point3::new(-1.0, -1.0, -1.0), Point3::new(1.0, 1.0, 1.0));
+    let gate = CancelGate::new();
+    with_cx(&gate, |cx| {
+        let global: Result<fs_evidence::Certified<fs_geom::SampledSdf>, _> =
+            source.convert(ErrBudget { abs_sd_error: 0.25 }, cx);
+        assert!(matches!(
+            global,
+            Err(ConvertDiag::SamplingDomain(
+                SamplingDomainError::UnboundedSupport { .. }
+            ))
+        ));
+
+        let clipped = ClippedChart::new(&source, clip).expect("finite clip is admissible");
+        assert_eq!(clipped.support(), clip);
+        assert!(
+            clipped
+                .eval(Point3::new(-0.5, 0.0, 0.0), cx)
+                .signed_distance
+                < 0.0
+        );
+        let outside = clipped.eval(Point3::new(-2.0, 0.0, 0.0), cx);
+        assert!(
+            outside.signed_distance > 0.0,
+            "clip participates in the field"
+        );
+        assert_eq!(outside.error.kind, fs_evidence::NumericalKind::NoClaim);
+
+        let local: fs_evidence::Evidence<fs_geom::SampledSdf> = source
+            .convert_clipped(ErrBudget { abs_sd_error: 0.25 }, clip, cx)
+            .expect("finite clipped composite is convertible");
+        assert!(local.value.support().is_finite());
+        assert!(local.value.nominal_field_bound().is_finite());
+        assert_eq!(
+            local.value.abstract_distance_kind(),
+            fs_evidence::NumericalKind::NoClaim
+        );
+        assert_eq!(local.value.abstract_distance_bound(), None);
+        assert_eq!(local.numerical.kind, fs_evidence::NumericalKind::NoClaim);
+        assert_eq!(
+            local.value.eval(Point3::new(-0.5, 0.0, 0.0), cx).error.kind,
+            fs_evidence::NumericalKind::NoClaim
+        );
+        assert!(matches!(
+            local.clone().certified(),
+            Err(fs_evidence::CertifyError::NotRigorous {
+                kind: fs_evidence::NumericalKind::NoClaim
+            })
+        ));
+    });
+}
+
+struct BoundedNoClaim;
+
+impl Chart for BoundedNoClaim {
+    fn eval(&self, x: Point3, _cx: &Cx<'_>) -> fs_geom::ChartSample {
+        fs_geom::ChartSample {
+            signed_distance: x.x,
+            gradient: Some(Vec3::new(1.0, 0.0, 0.0)),
+            lipschitz: Some(1.0),
+            error: fs_evidence::NumericalCertificate::no_claim(),
+        }
+    }
+
+    fn support(&self) -> Aabb {
+        Aabb::new(Point3::new(-1.0, -1.0, -1.0), Point3::new(1.0, 1.0, 1.0))
+    }
+
+    fn name(&self) -> &'static str {
+        "test/bounded-no-claim"
+    }
+}
+
+struct BoundedLocalOnly;
+
+impl Chart for BoundedLocalOnly {
+    fn eval(&self, x: Point3, _cx: &Cx<'_>) -> fs_geom::ChartSample {
+        fs_geom::ChartSample {
+            signed_distance: x.x,
+            gradient: Some(Vec3::new(1.0, 0.0, 0.0)),
+            lipschitz: Some(1.0),
+            error: fs_evidence::NumericalCertificate::enclosure(x.x, x.x),
+        }
+    }
+
+    fn support(&self) -> Aabb {
+        Aabb::new(Point3::new(-1.0, -1.0, -1.0), Point3::new(1.0, 1.0, 1.0))
+    }
+
+    fn name(&self) -> &'static str {
+        "test/bounded-local-only"
+    }
+}
+
+#[test]
+fn geo_004i_bounded_no_claim_source_cannot_be_laundered_by_sampling() {
+    let gate = CancelGate::new();
+    with_cx(&gate, |cx| {
+        let source = BoundedNoClaim;
+        let refusal = source.convert(ErrBudget { abs_sd_error: 0.5 }, cx);
+        assert!(matches!(
+            refusal,
+            Err(ConvertDiag::NoAbstractDistanceClaim {
+                kind: fs_evidence::NumericalKind::NoClaim
+            })
+        ));
+
+        let evidence = source
+            .convert_with_domain(ErrBudget { abs_sd_error: 0.5 }, None, cx)
+            .expect("plain field evidence remains available");
+        assert_eq!(evidence.numerical.kind, fs_evidence::NumericalKind::NoClaim);
+        assert_eq!(
+            evidence
+                .value
+                .eval(Point3::new(0.0, 0.0, 0.0), cx)
+                .error
+                .kind,
+            fs_evidence::NumericalKind::NoClaim
+        );
+
+        let local_only = BoundedLocalOnly;
+        assert!(matches!(
+            local_only.convert(ErrBudget { abs_sd_error: 0.5 }, cx),
+            Err(ConvertDiag::NoAbstractDistanceClaim {
+                kind: fs_evidence::NumericalKind::Estimate
+            })
+        ));
+        let local_evidence = local_only
+            .convert_with_domain(ErrBudget { abs_sd_error: 0.5 }, None, cx)
+            .expect("nominal estimate remains available");
+        assert_eq!(
+            local_evidence.numerical.kind,
+            fs_evidence::NumericalKind::Estimate
+        );
+        assert_eq!(
+            local_evidence.value.abstract_distance_kind(),
+            fs_evidence::NumericalKind::Estimate
+        );
+    });
+}
+
+#[test]
+fn geo_004f_sampling_domain_rejects_nan_and_span_overflow() {
+    let malformed = Aabb::new(
+        Point3::new(f64::NAN, -1.0, -1.0),
+        Point3::new(1.0, 1.0, 1.0),
+    );
+    assert!(matches!(
+        SamplingDomain::admit(malformed, None),
+        Err(SamplingDomainError::InvalidSupport { .. })
+    ));
+
+    let overflowing = Aabb::new(
+        Point3::new(-f64::MAX, -1.0, -1.0),
+        Point3::new(f64::MAX, 1.0, 1.0),
+    );
+    assert!(matches!(
+        SamplingDomain::admit(overflowing, None),
+        Err(SamplingDomainError::NonFiniteSpan { .. })
+    ));
 }
 
 /// An HONEST chart whose LOCAL Lipschitz varies: 1 near the origin, 50 in a
@@ -358,6 +695,98 @@ fn geo_004b_convert_bounds_global_lipschitz_not_the_center() {
     assert!(
         matches!(refusal, Err(ConvertDiag::BudgetInfeasible { .. })),
         "convert must refuse (grid Lipschitz 50 >> center 1), got {refusal:?}"
+    );
+}
+
+struct NonFiniteGridChart;
+
+impl Chart for NonFiniteGridChart {
+    fn eval(&self, x: Point3, _cx: &Cx<'_>) -> fs_geom::ChartSample {
+        let signed_distance = if x == Point3::new(0.0, 0.0, 0.0) {
+            0.0
+        } else {
+            f64::NAN
+        };
+        fs_geom::ChartSample {
+            signed_distance,
+            gradient: None,
+            lipschitz: Some(1.0),
+            error: fs_evidence::NumericalCertificate::no_claim(),
+        }
+    }
+
+    fn support(&self) -> Aabb {
+        Aabb::new(Point3::new(-1.0, -1.0, -1.0), Point3::new(1.0, 1.0, 1.0))
+    }
+
+    fn name(&self) -> &'static str {
+        "test/non-finite-grid"
+    }
+}
+
+#[test]
+fn geo_004g_conversion_refuses_non_finite_grid_values() {
+    let gate = CancelGate::new();
+    let refusal = with_cx(&gate, |cx| {
+        NonFiniteGridChart.convert(ErrBudget { abs_sd_error: 0.5 }, cx)
+    });
+    assert!(
+        matches!(
+            refusal,
+            Err(ConvertDiag::NonFiniteSignedDistance { value_bits, .. })
+                if value_bits == f64::NAN.to_bits()
+        ),
+        "a non-finite source field must never produce a certified conversion: {refusal:?}"
+    );
+}
+
+struct CancellingGridChart<'a> {
+    gate: &'a CancelGate,
+    evaluations: AtomicUsize,
+}
+
+impl Chart for CancellingGridChart<'_> {
+    fn eval(&self, x: Point3, _cx: &Cx<'_>) -> fs_geom::ChartSample {
+        if self.evaluations.fetch_add(1, Ordering::Relaxed) == 1 {
+            self.gate.request();
+        }
+        fs_geom::ChartSample {
+            signed_distance: x.x,
+            gradient: Some(Vec3::new(1.0, 0.0, 0.0)),
+            lipschitz: Some(1.0),
+            error: fs_evidence::NumericalCertificate::exact(x.x),
+        }
+    }
+
+    fn support(&self) -> Aabb {
+        Aabb::new(Point3::new(-1.0, -1.0, -1.0), Point3::new(1.0, 1.0, 1.0))
+    }
+
+    fn name(&self) -> &'static str {
+        "test/cancelling-grid"
+    }
+}
+
+#[test]
+fn geo_004h_conversion_grid_polls_cancellation_directly() {
+    let gate = CancelGate::new();
+    let chart = CancellingGridChart {
+        gate: &gate,
+        evaluations: AtomicUsize::new(0),
+    };
+    let refusal = with_cx(&gate, |cx| {
+        chart.convert(ErrBudget { abs_sd_error: 0.5 }, cx)
+    });
+    assert!(
+        matches!(
+            refusal,
+            Err(ConvertDiag::Cancelled {
+                stage: "sampling-grid",
+                completed_samples: 0,
+            })
+        ),
+        "the converter itself must observe cancellation triggered by a non-polling source: \
+         {refusal:?}"
     );
 }
 

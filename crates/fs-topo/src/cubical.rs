@@ -8,7 +8,96 @@
 //! the perf lane.
 
 use fs_exec::Cx;
-use fs_geom::{Chart, Point3};
+use fs_geom::{Aabb, Chart, ClippedChart, Point3, SamplingDomain, SamplingDomainError};
+
+/// Deterministic upper bound on cells admitted by chart voxelization.
+pub const MAX_VOXELIZE_CELLS: u64 = 1_000_000;
+
+/// Structured chart-voxelization failure.
+#[derive(Debug, Clone, PartialEq)]
+pub enum VoxelizeError {
+    /// The source support or explicit clip is not an admissible finite
+    /// three-dimensional sampling domain.
+    SamplingDomain(SamplingDomainError),
+    /// The longest-axis cell resolution was zero.
+    InvalidResolution {
+        /// The offending resolution.
+        n: u32,
+    },
+    /// The requested resolution produced a non-finite or zero cell size.
+    InvalidCellSize {
+        /// The requested longest-axis resolution.
+        n: u32,
+        /// Longest admitted domain span.
+        longest: f64,
+    },
+    /// Per-axis dimension derivation or checked multiplication overflowed.
+    VoxelCountOverflow {
+        /// Per-axis dimensions involved in the overflow.
+        dims: [u64; 3],
+    },
+    /// The requested field exceeds the deterministic voxel-work cap.
+    VoxelLimit {
+        /// Per-axis cell dimensions.
+        dims: [u64; 3],
+        /// Total cells required.
+        need: u128,
+        /// Deterministic cell cap.
+        cap: u64,
+    },
+    /// A chart returned a non-finite nominal field value.
+    InvalidSample {
+        /// Point at which evaluation failed.
+        point: Point3,
+        /// Raw bits of the rejected value.
+        value_bits: u64,
+    },
+    /// Voxelization observed cancellation at a bounded polling point.
+    Cancelled {
+        /// Voxels fully evaluated before cancellation was observed.
+        completed_voxels: u64,
+    },
+}
+
+impl core::fmt::Display for VoxelizeError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::SamplingDomain(error) => write!(f, "{error}"),
+            Self::InvalidResolution { n } => write!(
+                f,
+                "voxelization refused: longest-axis resolution must be positive, got {n}"
+            ),
+            Self::InvalidCellSize { n, longest } => write!(
+                f,
+                "voxelization refused: span {longest} at resolution {n} has no finite positive cell size"
+            ),
+            Self::VoxelCountOverflow { dims } => write!(
+                f,
+                "voxelization refused: cell dimensions {dims:?} overflow the addressable field"
+            ),
+            Self::VoxelLimit { dims, need, cap } => write!(
+                f,
+                "voxelization refused: field {dims:?} requires {need} cells, exceeding the {cap} cell cap; lower n or shrink the clip"
+            ),
+            Self::InvalidSample { point, value_bits } => write!(
+                f,
+                "voxelization refused: chart sample at {point:?} is non-finite (f64 bits {value_bits:#018x})"
+            ),
+            Self::Cancelled { completed_voxels } => write!(
+                f,
+                "voxelization cancelled after {completed_voxels} completed voxels"
+            ),
+        }
+    }
+}
+
+impl core::error::Error for VoxelizeError {}
+
+impl From<SamplingDomainError> for VoxelizeError {
+    fn from(error: SamplingDomainError) -> Self {
+        Self::SamplingDomain(error)
+    }
+}
 
 /// A dense voxel field (values at cell centers, `x` fastest).
 #[derive(Debug, Clone)]
@@ -17,13 +106,18 @@ pub struct VoxelField {
     pub dims: [u32; 3],
     /// Cell-center values (signed distance or density).
     pub values: Vec<f64>,
-    /// Physical cell size (metadata).
+    /// Requested maximum cell width (metadata). Each axis is partitioned over
+    /// its exact span, so shorter-axis widths may be smaller.
     pub h: f64,
 }
 
 impl VoxelField {
     fn idx(&self, x: u32, y: u32, z: u32) -> usize {
-        ((z * self.dims[1] + y) * self.dims[0] + x) as usize
+        (usize::try_from(z).expect("u32 fits usize")
+            * usize::try_from(self.dims[1]).expect("u32 fits usize")
+            + usize::try_from(y).expect("u32 fits usize"))
+            * usize::try_from(self.dims[0]).expect("u32 fits usize")
+            + usize::try_from(x).expect("u32 fits usize")
     }
 
     /// Occupancy at threshold: `value < level`.
@@ -33,35 +127,127 @@ impl VoxelField {
 }
 
 /// Voxelize a chart's signed distance over its support at `n` cells on
-/// the longest axis (cubic cells).
+/// the longest axis. Every axis is partitioned over its exact admitted span;
+/// cell widths are at most the longest-axis `h` and centers remain inside the
+/// support even for extreme aspect ratios.
 ///
 /// # Errors
-/// Cancellation between slabs.
-pub fn voxelize(chart: &dyn Chart, n: u32, cx: &Cx<'_>) -> Result<VoxelField, fs_exec::Cancelled> {
-    let b = chart.support();
-    let ext = [b.max.x - b.min.x, b.max.y - b.min.y, b.max.z - b.min.z];
-    let longest = ext[0].max(ext[1]).max(ext[2]);
+/// [`VoxelizeError`] when the resolution, finite sampling domain, checked
+/// cell count, or deterministic work cap is inadmissible, or when
+/// cancellation is observed at a bounded polling point.
+pub fn voxelize(chart: &dyn Chart, n: u32, cx: &Cx<'_>) -> Result<VoxelField, VoxelizeError> {
+    if n == 0 {
+        return Err(VoxelizeError::InvalidResolution { n });
+    }
+    let domain = SamplingDomain::admit(chart.support(), None)?;
+    let b = domain.bounds();
+    let spans = domain.spans();
+    let ext = [spans.x, spans.y, spans.z];
+    let longest = domain.max_span();
     let h = longest / f64::from(n);
-    let dims = [
-        (ext[0] / h).ceil().max(1.0) as u32,
-        (ext[1] / h).ceil().max(1.0) as u32,
-        (ext[2] / h).ceil().max(1.0) as u32,
-    ];
-    let mut values = Vec::with_capacity((dims[0] * dims[1] * dims[2]) as usize);
+    if !h.is_finite() || h <= 0.0 {
+        return Err(VoxelizeError::InvalidCellSize { n, longest });
+    }
+    let mut dims_u64 = [0u64; 3];
+    for axis in 0..3 {
+        let cells = (ext[axis] / h).ceil().max(1.0);
+        if !cells.is_finite() || cells > f64::from(u32::MAX) {
+            dims_u64[axis] = u64::MAX;
+            return Err(VoxelizeError::VoxelCountOverflow { dims: dims_u64 });
+        }
+        let mut cells = cells as u64;
+        // A nearest-rounded quotient can land exactly on an integer even when
+        // the realized stored width is one ulp larger than the public `h`.
+        // Validate the actual per-axis width and increment until the metadata
+        // promise is true in the same f64 arithmetic consumers observe.
+        loop {
+            let width_cells = u32::try_from(cells)
+                .map_err(|_| VoxelizeError::VoxelCountOverflow { dims: dims_u64 })?;
+            let realized_width = ext[axis] / f64::from(width_cells);
+            if !realized_width.is_finite() {
+                dims_u64[axis] = u64::MAX;
+                return Err(VoxelizeError::VoxelCountOverflow { dims: dims_u64 });
+            }
+            if realized_width <= h {
+                break;
+            }
+            cells = cells
+                .checked_add(1)
+                .ok_or(VoxelizeError::VoxelCountOverflow { dims: dims_u64 })?;
+            if cells > u64::from(u32::MAX) {
+                dims_u64[axis] = cells;
+                return Err(VoxelizeError::VoxelCountOverflow { dims: dims_u64 });
+            }
+        }
+        dims_u64[axis] = cells;
+    }
+    let need = dims_u64
+        .iter()
+        .try_fold(1u128, |product, &dim| product.checked_mul(u128::from(dim)))
+        .ok_or(VoxelizeError::VoxelCountOverflow { dims: dims_u64 })?;
+    if need > u128::from(MAX_VOXELIZE_CELLS) {
+        return Err(VoxelizeError::VoxelLimit {
+            dims: dims_u64,
+            need,
+            cap: MAX_VOXELIZE_CELLS,
+        });
+    }
+    let total =
+        usize::try_from(need).map_err(|_| VoxelizeError::VoxelCountOverflow { dims: dims_u64 })?;
+    let dims = dims_u64.map(|dim| u32::try_from(dim).expect("u32 dimension checked"));
+    let mut values = Vec::with_capacity(total);
+    let coordinate = |axis: usize, index: u32| {
+        let lo = match axis {
+            0 => b.min.x,
+            1 => b.min.y,
+            _ => b.min.z,
+        };
+        let fraction = (f64::from(index) + 0.5) / f64::from(dims[axis]);
+        lo + ext[axis] * fraction
+    };
+    let mut completed_voxels = 0u64;
     for z in 0..dims[2] {
-        cx.checkpoint()?;
         for y in 0..dims[1] {
             for x in 0..dims[0] {
-                let p = Point3::new(
-                    b.min.x + (f64::from(x) + 0.5) * h,
-                    b.min.y + (f64::from(y) + 0.5) * h,
-                    b.min.z + (f64::from(z) + 0.5) * h,
-                );
-                values.push(chart.eval(p, cx).signed_distance);
+                if completed_voxels.is_multiple_of(256) {
+                    cx.checkpoint()
+                        .map_err(|_| VoxelizeError::Cancelled { completed_voxels })?;
+                }
+                let p = Point3::new(coordinate(0, x), coordinate(1, y), coordinate(2, z));
+                let value = chart.eval(p, cx).signed_distance;
+                if !value.is_finite() {
+                    return Err(VoxelizeError::InvalidSample {
+                        point: p,
+                        value_bits: value.to_bits(),
+                    });
+                }
+                values.push(value);
+                completed_voxels += 1;
             }
         }
     }
+    cx.checkpoint()
+        .map_err(|_| VoxelizeError::Cancelled { completed_voxels })?;
     Ok(VoxelField { dims, values, h })
+}
+
+/// Voxelize the geometric intersection `chart ∩ clip` at `n` cells on the
+/// longest axis. The explicit clip is part of the sampled chart field.
+///
+/// # Errors
+/// [`VoxelizeError`] under the same conditions as [`voxelize`], plus an
+/// invalid, empty, or degenerate explicit clip.
+pub fn voxelize_clipped(
+    chart: &dyn Chart,
+    n: u32,
+    clip: Aabb,
+    cx: &Cx<'_>,
+) -> Result<VoxelField, VoxelizeError> {
+    if n == 0 {
+        return Err(VoxelizeError::InvalidResolution { n });
+    }
+    let clipped = ClippedChart::new(chart, clip)?;
+    voxelize(&clipped, n, cx)
 }
 
 struct UnionFind {
@@ -105,7 +291,7 @@ impl UnionFind {
 #[allow(clippy::too_many_lines)] // b0, b2, and the exact Euler count are one derivation
 pub fn betti(field: &VoxelField, level: f64) -> (u32, u32, u32) {
     let [nx, ny, nz] = field.dims;
-    let total = (nx * ny * nz) as usize;
+    let total = field.values.len();
     // b0: components of filled cells under 26-CONNECTIVITY. The solid is a
     // union of CLOSED unit cubes, so cubes sharing a face, EDGE, or corner are
     // topologically connected — the digital-topology partner of the 6-connected
@@ -393,12 +579,27 @@ pub fn count_persistent(bars: &[Bar], tau: f64) -> usize {
 /// proof (interval-certified topology is the sheaf bead's).
 ///
 /// # Errors
-/// Cancellation between slabs.
+/// [`VoxelizeError`] under the same conditions as [`voxelize`].
 pub fn verify_topology(
     chart: &dyn Chart,
     n: u32,
     cx: &Cx<'_>,
-) -> Result<(u32, u32, u32), fs_exec::Cancelled> {
+) -> Result<(u32, u32, u32), VoxelizeError> {
     let field = voxelize(chart, n, cx)?;
+    Ok(betti(&field, 0.0))
+}
+
+/// Verified-at-resolution Betti numbers for the geometric intersection
+/// `chart ∩ clip`.
+///
+/// # Errors
+/// [`VoxelizeError`] under the same conditions as [`voxelize_clipped`].
+pub fn verify_topology_clipped(
+    chart: &dyn Chart,
+    n: u32,
+    clip: Aabb,
+    cx: &Cx<'_>,
+) -> Result<(u32, u32, u32), VoxelizeError> {
+    let field = voxelize_clipped(chart, n, clip, cx)?;
     Ok(betti(&field, 0.0))
 }

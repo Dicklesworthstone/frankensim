@@ -14,9 +14,11 @@
 //!   BETWEEN CHARTS IS A CHECKABLE PROPOSITION
 //!   ([`Region::check_agreement`]) with localized diagnostics, not an
 //!   assumption;
-//! - every conversion's error is explicit and composable: [`Convert`]
-//!   returns a [`Certified`] receipt (fs-evidence) feeding the Error
-//!   Ledger (Decalogue P4);
+//! - every conversion's error and authority are explicit and composable:
+//!   [`Convert`] always returns evidence feeding the Error Ledger, while only
+//!   rigorous global conversions may promote that evidence to
+//!   [`fs_evidence::Certified`]
+//!   (Decalogue P4);
 //! - no chart type is privileged, ever — the Rep Router (a later bead)
 //!   picks per OPERATION from declared capabilities.
 //!
@@ -47,12 +49,13 @@ pub mod sheaf_repair;
 pub use convert::{Convert, ConvertDiag, ErrBudget, SampledSdf};
 pub use ident::{EntityId, IdTransform, IdentityMap};
 pub use region::{
-    AgreementConfig, AgreementReport, AgreementStatus, AgreementUnknown, AgreementUnknownReason,
-    Disagreement, Region, RegionChart,
+    AgreementConfig, AgreementReport, AgreementScope, AgreementStatus, AgreementUnknown,
+    AgreementUnknownReason, Disagreement, Region, RegionChart,
 };
 pub use sheaf::{
-    Interface, InterfaceBound, InterfaceSample, SheafComplex, SheafVerdict, TripleCell,
-    ray_parity_falsifier,
+    Interface, InterfaceBound, InterfaceSample, RAY_PARITY_MAX_EVALUATIONS, RayEndpoint,
+    RayParityError, SHEAF_MAX_TRIPLE_CANDIDATES, SheafBuildError, SheafComplex, SheafVerdict,
+    TripleCell, ray_parity_falsifier,
 };
 
 pub use router::{
@@ -157,12 +160,23 @@ pub struct Aabb {
 }
 
 impl Aabb {
+    /// The whole extended Euclidean space. Infinite endpoints are an honest
+    /// support declaration for an unbounded region; samplers must resolve such
+    /// a support through [`SamplingDomain`] before doing span arithmetic.
+    pub const WHOLE_SPACE: Self = Self {
+        min: Point3::new(f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY),
+        max: Point3::new(f64::INFINITY, f64::INFINITY, f64::INFINITY),
+    };
+
     /// Box from corners (normalized componentwise, total function).
     #[must_use]
     pub fn new(a: Point3, b: Point3) -> Self {
+        let (min_x, max_x) = normalize_axis(a.x, b.x);
+        let (min_y, max_y) = normalize_axis(a.y, b.y);
+        let (min_z, max_z) = normalize_axis(a.z, b.z);
         Aabb {
-            min: Point3::new(a.x.min(b.x), a.y.min(b.y), a.z.min(b.z)),
-            max: Point3::new(a.x.max(b.x), a.y.max(b.y), a.z.max(b.z)),
+            min: Point3::new(min_x, min_y, min_z),
+            max: Point3::new(max_x, max_y, max_z),
         }
     }
 
@@ -180,6 +194,15 @@ impl Aabb {
     /// Smallest box containing both.
     #[must_use]
     pub fn union(&self, other: &Aabb) -> Aabb {
+        // Set operations must not turn malformed public AABB fields into a
+        // plausible finite support. Preserve the first invalid operand so the
+        // shared sampling-domain gate can report its exact axis and bits.
+        if !self.is_well_formed() {
+            return *self;
+        }
+        if !other.is_well_formed() {
+            return *other;
+        }
         Aabb::new(
             Point3::new(
                 self.min.x.min(other.min.x),
@@ -202,6 +225,329 @@ impl Aabb {
             Point3::new(self.max.x + pad, self.max.y + pad, self.max.z + pad),
         )
     }
+
+    /// Whether this is a valid extended AABB. Correctly oriented infinite
+    /// endpoints are allowed; NaNs, inverted axes, `+inf` minima, and `-inf`
+    /// maxima are not.
+    #[must_use]
+    pub fn is_well_formed(&self) -> bool {
+        axis_bounds(*self).into_iter().all(|(_, lo, hi)| {
+            !lo.is_nan()
+                && !hi.is_nan()
+                && lo <= hi
+                && lo != f64::INFINITY
+                && hi != f64::NEG_INFINITY
+        })
+    }
+
+    /// Whether every endpoint is finite as well as well formed.
+    ///
+    /// This deliberately does not promise that `max - min` is finite; use
+    /// [`SamplingDomain::resolve`] before midpoint, span, diagonal, or count
+    /// arithmetic.
+    #[must_use]
+    pub fn is_finite(&self) -> bool {
+        self.is_well_formed()
+            && axis_bounds(*self)
+                .into_iter()
+                .all(|(_, lo, hi)| lo.is_finite() && hi.is_finite())
+    }
+
+    /// Closed intersection of two well-formed extended boxes. Touching boxes
+    /// produce a degenerate intersection; finite-volume samplers subsequently
+    /// reject that through [`SamplingDomainError::DegenerateDomain`].
+    #[must_use]
+    pub fn intersection(&self, other: &Aabb) -> Option<Aabb> {
+        if !self.is_well_formed() || !other.is_well_formed() {
+            return None;
+        }
+        let min = Point3::new(
+            self.min.x.max(other.min.x),
+            self.min.y.max(other.min.y),
+            self.min.z.max(other.min.z),
+        );
+        let max = Point3::new(
+            self.max.x.min(other.max.x),
+            self.max.y.min(other.max.y),
+            self.max.z.min(other.max.z),
+        );
+        (min.x <= max.x && min.y <= max.y && min.z <= max.z).then_some(Aabb { min, max })
+    }
+}
+
+fn normalize_axis(a: f64, b: f64) -> (f64, f64) {
+    // `f64::min`/`max` deliberately select the numeric operand when the other
+    // is NaN. That behavior would launder malformed support before admission.
+    if a.is_nan() || b.is_nan() || a <= b {
+        (a, b)
+    } else {
+        (b, a)
+    }
+}
+
+/// Coordinate axis used by structured sampling-domain refusals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Axis {
+    /// x axis.
+    X,
+    /// y axis.
+    Y,
+    /// z axis.
+    Z,
+}
+
+impl Axis {
+    fn name(self) -> &'static str {
+        match self {
+            Self::X => "x",
+            Self::Y => "y",
+            Self::Z => "z",
+        }
+    }
+}
+
+fn axis_bounds(box_: Aabb) -> [(Axis, f64, f64); 3] {
+    [
+        (Axis::X, box_.min.x, box_.max.x),
+        (Axis::Y, box_.min.y, box_.max.y),
+        (Axis::Z, box_.min.z, box_.max.z),
+    ]
+}
+
+/// Why an extended chart support could not be admitted as a finite sampling
+/// domain. Every variant is detected before evaluation or allocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SamplingDomainError {
+    /// Chart support contained NaN, inverted bounds, or wrongly oriented
+    /// infinity.
+    InvalidSupport {
+        /// First invalid axis in x/y/z order.
+        axis: Axis,
+        /// Exact lower-endpoint bits.
+        min_bits: u64,
+        /// Exact upper-endpoint bits.
+        max_bits: u64,
+    },
+    /// The caller's explicit clip was not a finite, ordered AABB.
+    InvalidClip {
+        /// First invalid axis in x/y/z order.
+        axis: Axis,
+        /// Exact lower-endpoint bits.
+        min_bits: u64,
+        /// Exact upper-endpoint bits.
+        max_bits: u64,
+    },
+    /// No clip resolved an infinite support axis.
+    UnboundedSupport {
+        /// First unresolved axis in x/y/z order.
+        axis: Axis,
+    },
+    /// Support and explicit clip have no closed intersection.
+    EmptyIntersection,
+    /// The admitted box has zero width on an axis and cannot drive a 3-D
+    /// midpoint/span/count sampler.
+    DegenerateDomain {
+        /// First zero-width axis in x/y/z order.
+        axis: Axis,
+    },
+    /// Finite endpoints nevertheless overflowed their subtraction.
+    NonFiniteSpan {
+        /// First overflowing axis in x/y/z order.
+        axis: Axis,
+        /// Exact lower-endpoint bits.
+        min_bits: u64,
+        /// Exact upper-endpoint bits.
+        max_bits: u64,
+    },
+    /// The three finite spans have no representable finite Euclidean diagonal.
+    NonFiniteDiagonal,
+}
+
+impl core::fmt::Display for SamplingDomainError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match *self {
+            Self::InvalidSupport { axis, .. } => {
+                write!(
+                    f,
+                    "sampling refused: invalid chart support on {} axis",
+                    axis.name()
+                )
+            }
+            Self::InvalidClip { axis, .. } => write!(
+                f,
+                "sampling refused: explicit clip must have finite ordered bounds on {} axis",
+                axis.name()
+            ),
+            Self::UnboundedSupport { axis } => write!(
+                f,
+                "sampling refused: unbounded support on {} axis; provide an explicit finite clip AABB",
+                axis.name()
+            ),
+            Self::EmptyIntersection => {
+                write!(
+                    f,
+                    "sampling refused: explicit clip does not intersect chart support"
+                )
+            }
+            Self::DegenerateDomain { axis } => write!(
+                f,
+                "sampling refused: admitted domain has zero width on {} axis",
+                axis.name()
+            ),
+            Self::NonFiniteSpan { axis, .. } => write!(
+                f,
+                "sampling refused: finite {} endpoints overflow their span",
+                axis.name()
+            ),
+            Self::NonFiniteDiagonal => write!(
+                f,
+                "sampling refused: admitted finite spans have no finite representable diagonal"
+            ),
+        }
+    }
+}
+
+impl core::error::Error for SamplingDomainError {}
+
+/// A validated finite, strictly three-dimensional domain. Its private fields
+/// ensure midpoint/span/count consumers cannot accidentally accept an extended
+/// support without first resolving it against an explicit finite clip.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SamplingDomain {
+    bounds: Aabb,
+    spans: Vec3,
+    diagonal: f64,
+}
+
+impl SamplingDomain {
+    /// Validate an extended support without requiring it to be finite. This is
+    /// useful before union/intersection/inflation, whose arithmetic must not
+    /// launder a malformed raw chart support.
+    pub fn validate_support(support: Aabb) -> Result<(), SamplingDomainError> {
+        validate_support(support)
+    }
+
+    /// Resolve `support`, optionally through a finite clip, before any sampling
+    /// arithmetic. The effective domain is `support intersection clip` when a
+    /// clip is supplied.
+    ///
+    /// # Errors
+    /// [`SamplingDomainError`] identifies the first deterministic admission
+    /// failure. No chart evaluation or allocation is performed here.
+    pub fn admit(support: Aabb, explicit_clip: Option<Aabb>) -> Result<Self, SamplingDomainError> {
+        validate_support(support)?;
+        let bounds = if let Some(clip) = explicit_clip {
+            validate_clip(clip)?;
+            support
+                .intersection(&clip)
+                .ok_or(SamplingDomainError::EmptyIntersection)?
+        } else {
+            support
+        };
+
+        let mut span_values = [0.0; 3];
+        for (index, (axis, lo, hi)) in axis_bounds(bounds).into_iter().enumerate() {
+            if !lo.is_finite() || !hi.is_finite() {
+                return Err(SamplingDomainError::UnboundedSupport { axis });
+            }
+            let span = hi - lo;
+            if !span.is_finite() {
+                return Err(SamplingDomainError::NonFiniteSpan {
+                    axis,
+                    min_bits: lo.to_bits(),
+                    max_bits: hi.to_bits(),
+                });
+            }
+            if span <= 0.0 {
+                return Err(SamplingDomainError::DegenerateDomain { axis });
+            }
+            span_values[index] = span;
+        }
+        let spans = Vec3::new(span_values[0], span_values[1], span_values[2]);
+        let scale = spans.x.max(spans.y).max(spans.z);
+        let diagonal = scale
+            * ((spans.x / scale) * (spans.x / scale)
+                + (spans.y / scale) * (spans.y / scale)
+                + (spans.z / scale) * (spans.z / scale))
+                .sqrt();
+        if !diagonal.is_finite() {
+            return Err(SamplingDomainError::NonFiniteDiagonal);
+        }
+        Ok(Self {
+            bounds,
+            spans,
+            diagonal,
+        })
+    }
+
+    /// Alias emphasizing that an extended support is being resolved into a
+    /// finite domain.
+    pub fn resolve(
+        support: Aabb,
+        explicit_clip: Option<Aabb>,
+    ) -> Result<Self, SamplingDomainError> {
+        Self::admit(support, explicit_clip)
+    }
+
+    /// The admitted finite bounds.
+    #[must_use]
+    pub const fn bounds(&self) -> Aabb {
+        self.bounds
+    }
+
+    /// Finite positive per-axis spans.
+    #[must_use]
+    pub const fn spans(&self) -> Vec3 {
+        self.spans
+    }
+
+    /// Finite Euclidean diagonal.
+    #[must_use]
+    pub const fn diagonal(&self) -> f64 {
+        self.diagonal
+    }
+
+    /// Overflow-safe midpoint of the admitted bounds.
+    #[must_use]
+    pub fn midpoint(&self) -> Point3 {
+        Point3::new(
+            self.bounds.min.x + 0.5 * self.spans.x,
+            self.bounds.min.y + 0.5 * self.spans.y,
+            self.bounds.min.z + 0.5 * self.spans.z,
+        )
+    }
+
+    /// Largest finite axis span.
+    #[must_use]
+    pub fn max_span(&self) -> f64 {
+        self.spans.x.max(self.spans.y).max(self.spans.z)
+    }
+}
+
+fn validate_support(support: Aabb) -> Result<(), SamplingDomainError> {
+    for (axis, lo, hi) in axis_bounds(support) {
+        if lo.is_nan() || hi.is_nan() || lo > hi || lo == f64::INFINITY || hi == f64::NEG_INFINITY {
+            return Err(SamplingDomainError::InvalidSupport {
+                axis,
+                min_bits: lo.to_bits(),
+                max_bits: hi.to_bits(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_clip(clip: Aabb) -> Result<(), SamplingDomainError> {
+    for (axis, lo, hi) in axis_bounds(clip) {
+        if !lo.is_finite() || !hi.is_finite() || lo > hi {
+            return Err(SamplingDomainError::InvalidClip {
+                axis,
+                min_bits: lo.to_bits(),
+                max_bits: hi.to_bits(),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Betti-number bounds `(lower, upper)` per dimension — the topology hint
@@ -355,6 +701,132 @@ pub trait Chart: Send + Sync {
     }
 }
 
+/// A finite geometric intersection between an arbitrary source chart and an
+/// explicit clip AABB. Unlike merely replacing `support()`, this wrapper also
+/// intersects the represented negative set: its field is
+/// `max(source_field, finite_box_sdf)`, so it is negative exactly where both
+/// the source and clip are inside.
+///
+/// The hard maximum and box edges make the wrapper C0. Its sign and support
+/// are honest, but v1 deliberately makes no abstract-distance or certified ray
+/// step claim for the composite magnitude.
+pub struct ClippedChart<'a> {
+    source: &'a dyn Chart,
+    clip: Aabb,
+    domain: SamplingDomain,
+}
+
+impl<'a> ClippedChart<'a> {
+    /// Intersect `source` with a finite clip before any evaluation.
+    ///
+    /// # Errors
+    /// [`SamplingDomainError`] when source support or clip cannot produce a
+    /// finite, positive-volume domain.
+    pub fn new(source: &'a dyn Chart, clip: Aabb) -> Result<Self, SamplingDomainError> {
+        let domain = SamplingDomain::resolve(source.support(), Some(clip))?;
+        Ok(Self {
+            source,
+            clip,
+            domain,
+        })
+    }
+
+    /// The admitted finite intersection domain.
+    #[must_use]
+    pub fn domain(&self) -> SamplingDomain {
+        self.domain
+    }
+
+    /// The caller-supplied finite box whose exact SDF participates in the
+    /// composite field.
+    #[must_use]
+    pub fn clip(&self) -> Aabb {
+        self.clip
+    }
+
+    /// The wrapped source chart.
+    #[must_use]
+    pub fn source(&self) -> &'a dyn Chart {
+        self.source
+    }
+}
+
+impl Chart for ClippedChart<'_> {
+    fn eval(&self, x: Point3, cx: &Cx<'_>) -> ChartSample {
+        let source = self.source.eval(x, cx);
+        let clip_distance = signed_distance_to_box(x, self.clip);
+        let (signed_distance, gradient) = if source.signed_distance > clip_distance {
+            (source.signed_distance, source.gradient)
+        } else if clip_distance > source.signed_distance {
+            (clip_distance, None)
+        } else {
+            (source.signed_distance, None)
+        };
+        ChartSample {
+            signed_distance,
+            gradient,
+            lipschitz: source
+                .lipschitz
+                .filter(|bound| bound.is_finite() && *bound >= 0.0)
+                .map(|bound| bound.max(1.0)),
+            error: NumericalCertificate::no_claim(),
+        }
+    }
+
+    fn support(&self) -> Aabb {
+        self.domain.bounds()
+    }
+
+    fn name(&self) -> &'static str {
+        "geom/clipped"
+    }
+
+    fn differentiability(&self) -> Differentiability {
+        Differentiability::C0
+    }
+}
+
+fn signed_distance_to_box(p: Point3, box_: Aabb) -> f64 {
+    let outside = Vec3::new(
+        if p.x < box_.min.x {
+            box_.min.x - p.x
+        } else if p.x > box_.max.x {
+            p.x - box_.max.x
+        } else {
+            0.0
+        },
+        if p.y < box_.min.y {
+            box_.min.y - p.y
+        } else if p.y > box_.max.y {
+            p.y - box_.max.y
+        } else {
+            0.0
+        },
+        if p.z < box_.min.z {
+            box_.min.z - p.z
+        } else if p.z > box_.max.z {
+            p.z - box_.max.z
+        } else {
+            0.0
+        },
+    );
+    if outside.x > 0.0 || outside.y > 0.0 || outside.z > 0.0 {
+        let scale = outside.x.max(outside.y).max(outside.z);
+        return scale
+            * ((outside.x / scale) * (outside.x / scale)
+                + (outside.y / scale) * (outside.y / scale)
+                + (outside.z / scale) * (outside.z / scale))
+                .sqrt();
+    }
+    let face_distance = (p.x - box_.min.x)
+        .min(box_.max.x - p.x)
+        .min(p.y - box_.min.y)
+        .min(box_.max.y - p.y)
+        .min(p.z - box_.min.z)
+        .min(box_.max.z - p.z);
+    -face_distance
+}
+
 /// A chart with design levers: the differentiable map θ → Region handle
 /// (plan §7.6; fs-xform builds the parameterization zoo on this).
 pub trait DesignChart: Chart {
@@ -384,6 +856,60 @@ mod tests {
         let u = a.union(&b);
         assert!(u.contains(Point3::new(5.5, 5.5, 5.5)) && u.contains(Point3::new(0.0, 1.0, 4.0)));
         assert!(a.inflate(1.0).contains(Point3::new(1.5, 0.5, 4.0)));
+    }
+
+    #[test]
+    fn sampling_domain_refuses_unresolved_and_malformed_support() {
+        let malformed = Aabb::new(
+            Point3::new(f64::NAN, -1.0, -1.0),
+            Point3::new(1.0, 1.0, 1.0),
+        );
+        assert!(malformed.min.x.is_nan(), "Aabb::new must not launder NaN");
+        assert!(matches!(
+            SamplingDomain::resolve(malformed, None),
+            Err(SamplingDomainError::InvalidSupport { axis: Axis::X, .. })
+        ));
+        assert!(matches!(
+            SamplingDomain::resolve(Aabb::WHOLE_SPACE, None),
+            Err(SamplingDomainError::UnboundedSupport { axis: Axis::X })
+        ));
+        let huge = Aabb::new(
+            Point3::new(-f64::MAX, -1.0, -1.0),
+            Point3::new(f64::MAX, 1.0, 1.0),
+        );
+        assert!(matches!(
+            SamplingDomain::resolve(huge, None),
+            Err(SamplingDomainError::NonFiniteSpan { axis: Axis::X, .. })
+        ));
+    }
+
+    #[test]
+    fn finite_clip_resolves_whole_space_without_unstable_arithmetic() {
+        let clip = Aabb::new(Point3::new(-4.0, -3.0, -2.0), Point3::new(6.0, 5.0, 4.0));
+        let domain = SamplingDomain::resolve(Aabb::WHOLE_SPACE, Some(clip))
+            .expect("finite clip admits whole-space support");
+        assert_eq!(domain.bounds(), clip);
+        assert_eq!(domain.spans(), Vec3::new(10.0, 8.0, 6.0));
+        assert_eq!(domain.midpoint(), Point3::new(1.0, 1.0, 1.0));
+        assert!(domain.diagonal().is_finite());
+        let bounded = Aabb::new(Point3::new(-1.0, -1.0, -1.0), Point3::new(1.0, 1.0, 1.0));
+        assert_eq!(Aabb::WHOLE_SPACE.intersection(&bounded), Some(bounded));
+    }
+
+    #[test]
+    fn aabb_union_preserves_malformed_support_for_admission() {
+        let malformed = Aabb {
+            min: Point3::new(f64::NAN, -1.0, -1.0),
+            max: Point3::new(1.0, 1.0, 1.0),
+        };
+        let bounded = Aabb::new(Point3::new(-2.0, -2.0, -2.0), Point3::new(2.0, 2.0, 2.0));
+        for union in [malformed.union(&bounded), bounded.union(&malformed)] {
+            assert!(union.min.x.is_nan());
+            assert!(matches!(
+                SamplingDomain::resolve(union, None),
+                Err(SamplingDomainError::InvalidSupport { axis: Axis::X, .. })
+            ));
+        }
     }
 
     #[test]

@@ -296,10 +296,7 @@ fn inverse_3x3(matrix: [[Iv; 3]; 3]) -> Option<[[Iv; 3]; 3]> {
 }
 
 fn infinite_aabb() -> Aabb {
-    Aabb::new(
-        Point3::new(f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY),
-        Point3::new(f64::INFINITY, f64::INFINITY, f64::INFINITY),
-    )
+    Aabb::WHOLE_SPACE
 }
 
 /// Enclose the preimage `{p | R(-angle) p in child}` used by `Node::Rotate`.
@@ -343,6 +340,7 @@ impl Frep {
         (iv.lo, iv.hi)
     }
 
+    #[allow(clippy::too_many_lines)] // One exhaustive evaluator keeps every Node enclosure rule co-located.
     fn iv_at(&self, id: NodeId, b: &Aabb) -> Iv {
         match self.nodes()[id.0 as usize] {
             Node::Sphere { center, radius } => dist_iv(b, center).add_c(-radius),

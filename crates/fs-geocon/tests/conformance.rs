@@ -7,15 +7,18 @@
 //! table. JSON-line verdicts; seeded cases carry seeds.
 
 use asupersync::types::Budget;
+use fs_evidence::{NumericalCertificate, NumericalKind};
 use fs_exec::{CancelGate, Cx, ExecMode, StreamKey};
 use fs_geocon::{
-    CertKind, GeoPrimitive, QuotientChart, SymmetryGroup, draft_violations, envelope_violation,
-    min_thickness_soft, volume_certified, volume_smooth,
+    CertKind, GeoPrimitive, QuotientChart, SymmetryGroup, VolumeError, draft_violations,
+    envelope_violation, min_thickness_soft, min_thickness_soft_clipped, volume_certified,
+    volume_smooth,
 };
 use fs_geom::fixtures::{BoxChart, SphereChart};
-use fs_geom::{Aabb, Chart, Point3, Vec3};
+use fs_geom::{Aabb, Chart, Point3, SamplingDomainError, TraceStepClaim, Vec3};
 use fs_opt::{DescentOptions, Manifold, descend_fn};
 use fs_rep_frep::{BoolOp, BoolStyle, Frep, FrepBuilder};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn verdict(case: &str, pass: bool, detail: &str) {
     println!(
@@ -64,6 +67,116 @@ fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
         );
         f(&cx)
     })
+}
+
+struct EvalProbe<'a> {
+    evals: &'a AtomicUsize,
+    panic_on_eval: bool,
+    claim: TraceStepClaim,
+    weak_evidence: bool,
+}
+
+struct MalformedSupportChart;
+
+struct MalformedThicknessChart;
+
+struct CertificateProbeChart {
+    certificate: NumericalCertificate,
+    support: Aabb,
+}
+
+impl Chart for MalformedSupportChart {
+    fn eval(&self, _point: Point3, _cx: &Cx<'_>) -> fs_geom::ChartSample {
+        fs_geom::ChartSample {
+            signed_distance: 0.0,
+            gradient: None,
+            lipschitz: Some(1.0),
+            error: NumericalCertificate::exact(0.0),
+        }
+    }
+
+    fn support(&self) -> Aabb {
+        Aabb {
+            min: Point3::new(f64::NAN, -1.0, -1.0),
+            max: Point3::new(1.0, 1.0, 1.0),
+        }
+    }
+
+    fn name(&self) -> &'static str {
+        "geocon/malformed-support-probe"
+    }
+}
+
+impl Chart for MalformedThicknessChart {
+    fn eval(&self, _point: Point3, _cx: &Cx<'_>) -> fs_geom::ChartSample {
+        fs_geom::ChartSample {
+            signed_distance: f64::NAN,
+            gradient: Some(Vec3::new(1.0, 0.0, 0.0)),
+            lipschitz: None,
+            error: NumericalCertificate::no_claim(),
+        }
+    }
+
+    fn support(&self) -> Aabb {
+        Aabb::new(Point3::new(-1.0, -1.0, -1.0), Point3::new(1.0, 1.0, 1.0))
+    }
+
+    fn name(&self) -> &'static str {
+        "geocon/malformed-thickness-probe"
+    }
+}
+
+impl Chart for CertificateProbeChart {
+    fn eval(&self, _point: Point3, _cx: &Cx<'_>) -> fs_geom::ChartSample {
+        fs_geom::ChartSample {
+            signed_distance: 0.0,
+            gradient: None,
+            lipschitz: Some(1.0),
+            error: self.certificate,
+        }
+    }
+
+    fn support(&self) -> Aabb {
+        self.support
+    }
+
+    fn name(&self) -> &'static str {
+        "geocon/certificate-probe"
+    }
+}
+
+impl Chart for EvalProbe<'_> {
+    fn eval(&self, point: Point3, cx: &Cx<'_>) -> fs_geom::ChartSample {
+        self.evals.fetch_add(1, Ordering::Relaxed);
+        assert!(
+            !self.panic_on_eval,
+            "volume preflight reached chart evaluation"
+        );
+        let mut sample = SphereChart {
+            center: Point3::new(0.0, 0.0, 0.0),
+            radius: 1.0,
+        }
+        .eval(point, cx);
+        if self.weak_evidence {
+            sample.error = NumericalCertificate::estimate(
+                sample.signed_distance - 1e-12,
+                sample.signed_distance + 1e-12,
+            );
+        }
+        sample
+    }
+
+    fn support(&self) -> Aabb {
+        Aabb::WHOLE_SPACE
+    }
+
+    fn trace_step_claim(&self) -> TraceStepClaim {
+        self.claim
+    }
+
+    fn name(&self) -> &'static str {
+        "geocon/eval-probe"
+    }
 }
 
 /// Dumbbell with a parametric neck radius (the design lever).
@@ -162,7 +275,8 @@ fn gcp_001_min_thickness() {
         samples.push(Point3::new(-2.0, 0.0, 0.0));
         samples.push(Point3::new(2.0, 0.0, 0.0));
         let rep = min_thickness_soft(&d, &samples, 0.5, 8.0, cx).expect("thickness");
-        let soft_over = rep.soft_min >= rep.hard_min - 1e-12;
+        let soft_over = rep.soft_min >= rep.hard_min - 1e-12
+            && rep.authority == fs_evidence::NumericalKind::Estimate;
         let rep_hard = min_thickness_soft(&d, &samples, 0.5, 40.0, cx).expect("harder p");
         let converges =
             (rep_hard.soft_min - rep.hard_min).abs() < (rep.soft_min - rep.hard_min).abs() + 1e-12;
@@ -217,6 +331,84 @@ fn gcp_001_min_thickness() {
                  the anti-paperclip constraint, closed loop"
             ),
         );
+    });
+}
+
+/// gcp-001b — an infinite extrusion cannot silently turn unresolved-domain
+/// thickness samples into skips. The default aggregate refuses, while an
+/// explicit finite clip enables a deliberately local report.
+#[test]
+fn gcp_001b_unbounded_thickness_requires_clip() {
+    with_cx(|cx| {
+        let cylinder = {
+            let mut builder = FrepBuilder::new();
+            let root = builder
+                .cylinder(Point3::new(0.0, 0.0, 0.0), 1.0)
+                .expect("cylinder");
+            builder.finish(root).expect("frep")
+        };
+        let samples = [Point3::new(1.0, 0.0, 0.0), Point3::new(0.0, 1.0, 0.0)];
+        let refused = min_thickness_soft(&cylinder, &samples, 2.1, 8.0, cx);
+        let clip = Aabb::new(Point3::new(-2.0, -2.0, -2.0), Point3::new(2.0, 2.0, 2.0));
+        let local = min_thickness_soft_clipped(&cylinder, &samples, 2.1, 8.0, clip, cx)
+            .expect("finite clip admits the local thickness aggregate");
+        verdict(
+            "gcp-001b",
+            matches!(
+                refused,
+                Err(fs_query::QueryError::SamplingDomain(
+                    SamplingDomainError::UnboundedSupport { .. }
+                ))
+            ) && (local.hard_min - 2.0).abs() < 1e-9
+                && (local.soft_min - 2.0).abs() < 1e-9
+                && local.authority == fs_evidence::NumericalKind::Estimate
+                && local.violating == vec![0, 1]
+                && local.skipped == 0,
+            "unresolved extended support is a structured refusal rather than a skipped \
+             sample; an explicit finite clip yields the local cylinder thickness report",
+        );
+    });
+}
+
+/// gcp-001c — aggregation preserves Estimate authority and never converts
+/// empty, malformed, or invalid arithmetic into a clean thickness report.
+#[test]
+fn gcp_001c_thickness_aggregation_fails_closed() {
+    with_cx(|cx| {
+        let sphere = SphereChart {
+            center: Point3::new(0.0, 0.0, 0.0),
+            radius: 1.0,
+        };
+        assert!(matches!(
+            min_thickness_soft(&sphere, &[], 0.5, 8.0, cx),
+            Err(fs_query::QueryError::NoThicknessSamples { skipped: 0 })
+        ));
+        assert!(matches!(
+            min_thickness_soft(&sphere, &[Point3::new(0.0, 0.0, 0.0)], 0.5, 8.0, cx,),
+            Err(fs_query::QueryError::NoThicknessSamples { skipped: 1 })
+        ));
+        assert!(matches!(
+            min_thickness_soft(
+                &MalformedThicknessChart,
+                &[Point3::new(1.0, 0.0, 0.0)],
+                0.5,
+                8.0,
+                cx,
+            ),
+            Err(fs_query::QueryError::InvalidThicknessSample { .. })
+        ));
+        for (required, exponent) in [(f64::NAN, 8.0), (0.5, 0.0)] {
+            assert!(matches!(
+                min_thickness_soft(
+                    &sphere,
+                    &[Point3::new(1.0, 0.0, 0.0)],
+                    required,
+                    exponent,
+                    cx,
+                ),
+                Err(fs_query::QueryError::InvalidThicknessArithmetic { .. })
+            ));
+        }
     });
 }
 
@@ -345,11 +537,14 @@ fn gcp_002_draft_angles() {
 /// bitwise for reflection/translation, 1e-9 for cyclic; gradients
 /// chain correctly; asymmetric inners still yield symmetric shapes.
 #[test]
+#[allow(clippy::too_many_lines)] // One seeded quotient campaign shares invariance and gradient state.
 fn gcp_003_symmetry_quotient() {
     with_cx(|cx| {
         let mut rng = Lcg(0x1001_2026_0707_0023);
         let mut invariant = true;
         let mut grad_ok = true;
+        let mut support_ok = true;
+        let mut authority_ok = true;
         for trial in 0..12 {
             // A deliberately ASYMMETRIC inner design.
             let inner = {
@@ -389,13 +584,33 @@ fn gcp_003_symmetry_quotient() {
                     inner: &inner,
                     group,
                 };
+                if matches!(group, SymmetryGroup::Periodic { .. }) {
+                    let support = q.support();
+                    let inner_support = inner.support();
+                    support_ok &= support.min.x.is_infinite()
+                        && support.min.x.is_sign_negative()
+                        && support.max.x.is_infinite()
+                        && support.max.x.is_sign_positive()
+                        && support.min.y.to_bits() == inner_support.min.y.to_bits()
+                        && support.max.y.to_bits() == inner_support.max.y.to_bits()
+                        && support.min.z.to_bits() == inner_support.min.z.to_bits()
+                        && support.max.z.to_bits() == inner_support.max.z.to_bits()
+                        && support.contains(Point3::new(
+                            1.0e300,
+                            f64::midpoint(inner_support.min.y, inner_support.max.y),
+                            f64::midpoint(inner_support.min.z, inner_support.max.z),
+                        ));
+                }
                 for _ in 0..24 {
                     let p = Point3::new(
                         rng.range(-2.0, 2.0),
                         rng.range(-2.0, 2.0),
                         rng.range(-1.0, 1.0),
                     );
-                    let base = q.eval(p, cx).signed_distance;
+                    let sample = q.eval(p, cx);
+                    authority_ok &= sample.lipschitz.is_none()
+                        && sample.error.kind == fs_evidence::NumericalKind::Estimate;
+                    let base = sample.signed_distance;
                     for gp in group.orbit(p) {
                         let moved = q.eval(gp, cx).signed_distance;
                         let tol = match group {
@@ -440,13 +655,114 @@ fn gcp_003_symmetry_quotient() {
                 }
             }
         }
+
+        let valid_inner = SphereChart {
+            center: Point3::new(0.0, 0.0, 0.0),
+            radius: 1.0,
+        };
+        for group in [
+            SymmetryGroup::Cyclic { n: 0 },
+            SymmetryGroup::Periodic { period: 0.0 },
+            SymmetryGroup::Periodic { period: f64::NAN },
+        ] {
+            assert!(group.validate().is_err());
+            let invalid = QuotientChart {
+                inner: &valid_inner,
+                group,
+            };
+            assert!(!invalid.support().is_well_formed());
+            let sample = invalid.eval(Point3::new(0.25, 0.0, 0.0), cx);
+            assert!(sample.signed_distance.is_nan());
+            assert!(sample.lipschitz.is_none());
+            assert_eq!(sample.error.kind, fs_evidence::NumericalKind::NoClaim);
+            assert!(group.orbit(Point3::new(0.25, 0.0, 0.0)).is_empty());
+        }
+        let malformed_orbit = QuotientChart {
+            inner: &MalformedSupportChart,
+            group: SymmetryGroup::ReflectX,
+        }
+        .support();
+        assert!(malformed_orbit.min.x.is_nan());
+
+        let unit_support = Aabb::new(Point3::new(-1.0, -1.0, -1.0), Point3::new(1.0, 1.0, 1.0));
+        for malformed in [
+            NumericalCertificate {
+                kind: NumericalKind::Enclosure,
+                lo: 1.0,
+                hi: -1.0,
+            },
+            NumericalCertificate::enclosure(1.0, 2.0),
+            NumericalCertificate {
+                kind: NumericalKind::Exact,
+                lo: -1.0,
+                hi: 1.0,
+            },
+            NumericalCertificate {
+                kind: NumericalKind::Estimate,
+                lo: f64::NAN,
+                hi: 1.0,
+            },
+        ] {
+            let inner = CertificateProbeChart {
+                certificate: malformed,
+                support: unit_support,
+            };
+            let sample = QuotientChart {
+                inner: &inner,
+                group: SymmetryGroup::ReflectX,
+            }
+            .eval(Point3::new(0.25, 0.0, 0.0), cx);
+            assert_eq!(
+                sample.error.kind,
+                NumericalKind::NoClaim,
+                "quotienting must not repair malformed or nominal-excluding inner evidence"
+            );
+        }
+        let valid_estimate = CertificateProbeChart {
+            certificate: NumericalCertificate::estimate(-1.0, 1.0),
+            support: unit_support,
+        };
+        let quotient_estimate = QuotientChart {
+            inner: &valid_estimate,
+            group: SymmetryGroup::ReflectX,
+        }
+        .eval(Point3::new(0.25, 0.0, 0.0), cx)
+        .error;
+        assert_eq!(quotient_estimate.kind, NumericalKind::Estimate);
+        assert_eq!(quotient_estimate.lo.to_bits(), (-1.0_f64).to_bits());
+        assert_eq!(quotient_estimate.hi.to_bits(), 1.0_f64.to_bits());
+
+        // This mantissa makes nearest `extent * SQRT_2` round below the
+        // mathematical corner radius. The cyclic support must retain an
+        // outward endpoint rather than inherit that nearest-rounding gap.
+        let extent = f64::from_bits(0x0db7_80e7_635e_965f);
+        let tiny_corner = CertificateProbeChart {
+            certificate: NumericalCertificate::exact(0.0),
+            support: Aabb::new(
+                Point3::new(0.0, 0.0, -1.0),
+                Point3::new(extent, extent, 1.0),
+            ),
+        };
+        let cyclic_support = QuotientChart {
+            inner: &tiny_corner,
+            group: SymmetryGroup::Cyclic { n: 4 },
+        }
+        .support();
+        assert!(
+            cyclic_support.max.x >= extent.hypot(extent).next_up(),
+            "cyclic support radius must be rounded outward"
+        );
         verdict(
             "gcp-003",
-            invariant && grad_ok,
+            invariant && grad_ok && support_ok && authority_ok,
             "the quotient shape is invariant under its group for ARBITRARY \
              asymmetric inner designs (bitwise for reflection; fp-scale \
              for cyclic/periodic) across 12 random levers x 3 groups x 24 probes x full \
-             orbits, and folded gradients match finite differences off-seam; \
+             orbits, folded gradients match finite differences off-seam, and periodic \
+             support is honestly infinite along x while retaining finite transverse bounds; \
+             raw quotient fields retain only Estimate/NoClaim authority, malformed inner \
+             evidence cannot be laundered, cyclic support radii round outward, and invalid \
+             group or inner-support inputs fail closed; \
              seed 0x1001_2026_0707_0023 — symmetry violation is structurally \
              impossible",
         );
@@ -594,6 +910,166 @@ fn gcp_005_volume_hadamard() {
                  (V = {final_v:.3} <= 2.05)",
                 coarse.lo, coarse.hi, fine.lo, fine.hi
             ),
+        );
+    });
+}
+
+/// gcp-005b — volume grid admission is fail-closed. Malformed or unbounded
+/// integration boxes, invalid spacing, and excessive/unrepresentable counts
+/// are rejected before chart evaluation; an ordinary finite box still runs.
+#[test]
+#[allow(clippy::too_many_lines)] // One preflight matrix proves every refusal precedes evaluation.
+fn gcp_005b_volume_preflight_refuses_before_eval() {
+    with_cx(|cx| {
+        let evals = AtomicUsize::new(0);
+        let panic_probe = EvalProbe {
+            evals: &evals,
+            panic_on_eval: true,
+            claim: TraceStepClaim::ExactDistance,
+            weak_evidence: false,
+        };
+        let malformed = Aabb::new(
+            Point3::new(f64::NAN, -1.0, -1.0),
+            Point3::new(1.0, 1.0, 1.0),
+        );
+        let finite = Aabb::new(Point3::new(-1.0, -1.0, -1.0), Point3::new(1.0, 1.0, 1.0));
+
+        for result in [
+            volume_certified(&panic_probe, &malformed, 0.25, cx).map(|_| ()),
+            volume_smooth(&panic_probe, &malformed, 0.25, 0.1, cx).map(|_| ()),
+        ] {
+            assert!(matches!(
+                result,
+                Err(VolumeError::SamplingDomain(
+                    SamplingDomainError::InvalidSupport { .. }
+                ))
+            ));
+        }
+        for result in [
+            volume_certified(&panic_probe, &Aabb::WHOLE_SPACE, 0.25, cx).map(|_| ()),
+            volume_smooth(&panic_probe, &Aabb::WHOLE_SPACE, 0.25, 0.1, cx).map(|_| ()),
+        ] {
+            assert!(matches!(
+                result,
+                Err(VolumeError::SamplingDomain(
+                    SamplingDomainError::UnboundedSupport { .. }
+                ))
+            ));
+        }
+        for invalid_h in [0.0, f64::NAN] {
+            assert!(matches!(
+                volume_certified(&panic_probe, &finite, invalid_h, cx),
+                Err(VolumeError::InvalidSpacing { field: "h", .. })
+            ));
+            assert!(matches!(
+                volume_smooth(&panic_probe, &finite, invalid_h, 0.1, cx),
+                Err(VolumeError::InvalidSpacing { field: "h", .. })
+            ));
+        }
+        assert!(matches!(
+            volume_smooth(&panic_probe, &finite, 0.25, 0.0, cx),
+            Err(VolumeError::InvalidSpacing {
+                field: "epsilon",
+                ..
+            })
+        ));
+        for result in [
+            volume_certified(&panic_probe, &finite, 1e-6, cx).map(|_| ()),
+            volume_smooth(&panic_probe, &finite, 1e-6, 0.1, cx).map(|_| ()),
+        ] {
+            assert!(matches!(result, Err(VolumeError::WorkLimit { .. })));
+        }
+        for result in [
+            volume_certified(&panic_probe, &finite, 1e-14, cx).map(|_| ()),
+            volume_smooth(&panic_probe, &finite, 1e-14, 0.1, cx).map(|_| ()),
+        ] {
+            assert!(matches!(
+                result,
+                Err(VolumeError::CellProductOverflow { .. })
+            ));
+        }
+        for result in [
+            volume_certified(&panic_probe, &finite, f64::MIN_POSITIVE, cx).map(|_| ()),
+            volume_smooth(&panic_probe, &finite, f64::MIN_POSITIVE, 0.1, cx).map(|_| ()),
+        ] {
+            assert!(matches!(result, Err(VolumeError::CellCountOverflow { .. })));
+        }
+        assert_eq!(evals.load(Ordering::Relaxed), 0);
+
+        let no_claim_probe = EvalProbe {
+            evals: &evals,
+            panic_on_eval: true,
+            claim: TraceStepClaim::NoClaim,
+            weak_evidence: false,
+        };
+        assert!(matches!(
+            volume_certified(&no_claim_probe, &finite, 1.0, cx),
+            Err(VolumeError::UncertifiedChart {
+                claim: TraceStepClaim::NoClaim
+            })
+        ));
+        assert_eq!(
+            evals.load(Ordering::Relaxed),
+            0,
+            "a weak chart theorem must refuse before evaluation"
+        );
+
+        let weak_evidence_probe = EvalProbe {
+            evals: &evals,
+            panic_on_eval: false,
+            claim: TraceStepClaim::ExactDistance,
+            weak_evidence: true,
+        };
+        assert!(matches!(
+            volume_certified(&weak_evidence_probe, &finite, 1.0, cx),
+            Err(VolumeError::InvalidCertificate { .. })
+        ));
+        assert_eq!(evals.load(Ordering::Relaxed), 1);
+        evals.store(0, Ordering::Relaxed);
+
+        let counting_probe = EvalProbe {
+            evals: &evals,
+            panic_on_eval: false,
+            claim: TraceStepClaim::ExactDistance,
+            weak_evidence: false,
+        };
+        let certified =
+            volume_certified(&counting_probe, &finite, 1.0, cx).expect("finite volume grid");
+        let smooth = volume_smooth(&counting_probe, &finite, 1.0, 0.1, cx)
+            .expect("finite smooth volume grid");
+        verdict(
+            "gcp-005b",
+            certified.lo.is_finite()
+                && certified.hi.is_finite()
+                && certified.lo <= certified.hi
+                && smooth.is_finite()
+                && evals.load(Ordering::Relaxed) == 54,
+            "volume samplers reject malformed, unbounded, invalid-spacing, and excessive grids before evaluation; certified volume also refuses weak chart theorems and weak per-sample evidence; outward count admission uses a conservative 3x3x3 grid and evaluates exactly 27 cells per API",
+        );
+    });
+}
+
+/// gcp-005c — directed proof arithmetic remains honest when the ideal cell
+/// center lies between adjacent representable floats and every cell is surely
+/// inside. The real domain volume is exactly 2, but the certificate must still
+/// publish an outward interval rather than a nearest-rounded singleton.
+#[test]
+fn gcp_005c_volume_nextafter_rounding_is_outward() {
+    with_cx(|cx| {
+        let x_min = f64::from_bits(0x4330_0000_0000_0000); // Exactly 2^52.
+        let x_max = x_min.next_up();
+        let domain = Aabb::new(Point3::new(x_min, -1.0, 0.0), Point3::new(x_max, 1.0, 1.0));
+        let mut builder = FrepBuilder::new();
+        let root = builder
+            .half_space(Vec3::new(1.0, 0.0, 0.0), x_max + 8.0)
+            .expect("axis halfspace");
+        let inside = builder.finish(root).expect("exact halfspace");
+        let enclosure = volume_certified(&inside, &domain, 2.0, cx)
+            .expect("nextafter domain has representable outward proof arithmetic");
+        assert!(enclosure.lo <= 2.0 && 2.0 <= enclosure.hi);
+        assert!(
+            enclosure.lo < enclosure.hi,
+            "an inexact proof pipeline must not publish a singleton measure"
         );
     });
 }

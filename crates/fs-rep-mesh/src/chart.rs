@@ -3,12 +3,13 @@
 //! imperfect input — plus watertight ray-triangle intersection (Woop et
 //! al. 2013, the convention LUMEN's tracer will share).
 //!
-//! Certified honesty: distance-to-a-triangle-set is EXACTLY 1-Lipschitz,
-//! so the chart's Lipschitz claim is rigorous; the declared error covers
-//! floating-point slack only. What the chart does NOT claim: that the
-//! soup bounds a well-defined solid (that is the winding number's
-//! robustness working as designed, and the validity-certificates bead's
-//! job to prove).
+//! Authority honesty: unsigned distance to a triangle set is 1-Lipschitz, but
+//! multiplying it by a generalized-winding sign on an arbitrary open,
+//! self-intersecting, or inconsistently oriented soup need not preserve that
+//! theorem or define the intended solid. The raw chart therefore exposes
+//! nominal `Estimate` evidence and no certified Lipschitz bound. A future
+//! validated wrapper may upgrade both only after sufficient solid-validity,
+//! orientation, nesting, and self-intersection proofs.
 
 use crate::winding::{Soup, WindingOctree};
 use fs_evidence::NumericalCertificate;
@@ -400,14 +401,21 @@ impl Chart for MeshChart {
             1.0
         };
         let sd = sign * dist;
-        // Distance-to-set is exactly 1-Lipschitz; the fp slack is a few
-        // ulps of the coordinate magnitudes.
+        // This is only a nominal accuracy scale. The unsigned magnitude is a
+        // distance-to-set, but the generalized-winding sign can jump on an
+        // invalid soup, so neither global Lipschitz nor abstract-region
+        // distance authority follows from the raw representation.
         let eps = 1e-12 * (1.0 + x.delta_from(self.support.min).norm());
+        let error = if sd.is_finite() && eps.is_finite() {
+            NumericalCertificate::estimate(sd - eps, sd + eps)
+        } else {
+            NumericalCertificate::no_claim()
+        };
         ChartSample {
             signed_distance: sd,
             gradient: None,
-            lipschitz: Some(1.0),
-            error: NumericalCertificate::enclosure(sd - eps, sd + eps),
+            lipschitz: None,
+            error,
         }
     }
 

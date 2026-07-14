@@ -45,10 +45,6 @@ use fs_geom::{
 /// Crate version, re-exported for provenance stamping.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Half-extent standing in for an unbounded support axis (half-spaces,
-/// infinite cylinders). Intersections shrink it back to honest bounds.
-pub const UNBOUNDED_HALF: f64 = 1.0e12;
-
 /// A node handle inside one [`Frep`] DAG (indices are a topological
 /// order: children always precede parents).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -169,6 +165,13 @@ pub enum Node {
 /// Teaching error for malformed DAG construction or parameter edits.
 #[derive(Debug, Clone, PartialEq)]
 pub enum FrepError {
+    /// A signed coordinate, transform, or offset parameter was non-finite.
+    NonFinite {
+        /// Which field.
+        field: &'static str,
+        /// The offending value.
+        value: f64,
+    },
     /// A length/radius/scale that must be strictly positive was not.
     NonPositive {
         /// Which field.
@@ -198,6 +201,9 @@ pub enum FrepError {
 impl core::fmt::Display for FrepError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            FrepError::NonFinite { field, value } => {
+                write!(f, "`{field}` must be finite, got {value}")
+            }
             FrepError::NonPositive { field, value } => write!(
                 f,
                 "`{field}` must be strictly positive, got {value}; zero-thickness \
@@ -260,6 +266,28 @@ impl FrepBuilder {
         }
     }
 
+    fn finite(field: &'static str, value: f64) -> Result<f64, FrepError> {
+        if value.is_finite() {
+            Ok(value)
+        } else {
+            Err(FrepError::NonFinite { field, value })
+        }
+    }
+
+    fn finite_point(point: Point3) -> Result<Point3, FrepError> {
+        Self::finite("center.x", point.x)?;
+        Self::finite("center.y", point.y)?;
+        Self::finite("center.z", point.z)?;
+        Ok(point)
+    }
+
+    fn finite_offset(offset: Vec3) -> Result<Vec3, FrepError> {
+        Self::finite("offset.x", offset.x)?;
+        Self::finite("offset.y", offset.y)?;
+        Self::finite("offset.z", offset.z)?;
+        Ok(offset)
+    }
+
     fn unit(field: &'static str, v: Vec3) -> Result<Vec3, FrepError> {
         let scale = v.x.abs().max(v.y.abs()).max(v.z.abs());
         if !scale.is_finite() || scale == 0.0 {
@@ -276,8 +304,10 @@ impl FrepBuilder {
     /// Sphere primitive.
     ///
     /// # Errors
+    /// [`FrepError::NonFinite`] for a non-finite center and
     /// [`FrepError::NonPositive`] for `radius ≤ 0`.
     pub fn sphere(&mut self, center: Point3, radius: f64) -> Result<NodeId, FrepError> {
+        let center = Self::finite_point(center)?;
         let radius = Self::positive("radius", radius)?;
         Ok(self.push(Node::Sphere { center, radius }))
     }
@@ -285,17 +315,21 @@ impl FrepBuilder {
     /// Half-space primitive (`normal` is normalized here).
     ///
     /// # Errors
-    /// [`FrepError::ZeroVector`] for a degenerate normal.
+    /// [`FrepError::ZeroVector`] for a degenerate normal or
+    /// [`FrepError::NonFinite`] for a non-finite offset.
     pub fn half_space(&mut self, normal: Vec3, offset: f64) -> Result<NodeId, FrepError> {
         let normal = Self::unit("normal", normal)?;
+        let offset = Self::finite("offset", offset)?;
         Ok(self.push(Node::HalfSpace { normal, offset }))
     }
 
     /// Axis-aligned box primitive.
     ///
     /// # Errors
+    /// [`FrepError::NonFinite`] for a non-finite center and
     /// [`FrepError::NonPositive`] for a non-positive half extent.
     pub fn box_prim(&mut self, center: Point3, half: Vec3) -> Result<NodeId, FrepError> {
+        let center = Self::finite_point(center)?;
         for (f, v) in [("half.x", half.x), ("half.y", half.y), ("half.z", half.z)] {
             Self::positive(f, v)?;
         }
@@ -305,8 +339,10 @@ impl FrepBuilder {
     /// Torus primitive (axis +z through `center`).
     ///
     /// # Errors
+    /// [`FrepError::NonFinite`] for a non-finite center and
     /// [`FrepError::NonPositive`] for non-positive radii.
     pub fn torus(&mut self, center: Point3, major: f64, minor: f64) -> Result<NodeId, FrepError> {
+        let center = Self::finite_point(center)?;
         let major = Self::positive("major", major)?;
         let minor = Self::positive("minor", minor)?;
         Ok(self.push(Node::Torus {
@@ -319,8 +355,10 @@ impl FrepBuilder {
     /// Infinite cylinder along +z.
     ///
     /// # Errors
+    /// [`FrepError::NonFinite`] for a non-finite center and
     /// [`FrepError::NonPositive`] for `radius ≤ 0`.
     pub fn cylinder(&mut self, center: Point3, radius: f64) -> Result<NodeId, FrepError> {
+        let center = Self::finite_point(center)?;
         let radius = Self::positive("radius", radius)?;
         Ok(self.push(Node::Cylinder { center, radius }))
     }
@@ -328,19 +366,23 @@ impl FrepBuilder {
     /// Rigid translation.
     ///
     /// # Errors
-    /// [`FrepError::BadNode`] for an unknown child.
+    /// [`FrepError::BadNode`] for an unknown child or
+    /// [`FrepError::NonFinite`] for a non-finite offset.
     pub fn translate(&mut self, child: NodeId, offset: Vec3) -> Result<NodeId, FrepError> {
         self.check_child(child)?;
+        let offset = Self::finite_offset(offset)?;
         Ok(self.push(Node::Translate { child, offset }))
     }
 
     /// Rigid rotation about a unit axis through the origin.
     ///
     /// # Errors
-    /// [`FrepError::BadNode`] / [`FrepError::ZeroVector`].
+    /// [`FrepError::BadNode`] / [`FrepError::ZeroVector`] /
+    /// [`FrepError::NonFinite`].
     pub fn rotate(&mut self, child: NodeId, axis: Vec3, angle: f64) -> Result<NodeId, FrepError> {
         self.check_child(child)?;
         let axis = Self::unit("axis", axis)?;
+        let angle = Self::finite("angle", angle)?;
         Ok(self.push(Node::Rotate { child, axis, angle }))
     }
 
@@ -357,9 +399,11 @@ impl FrepBuilder {
     /// Offset surface (dilate/erode).
     ///
     /// # Errors
-    /// [`FrepError::BadNode`] for an unknown child.
+    /// [`FrepError::BadNode`] for an unknown child or
+    /// [`FrepError::NonFinite`] for a non-finite distance.
     pub fn offset(&mut self, child: NodeId, distance: f64) -> Result<NodeId, FrepError> {
         self.check_child(child)?;
+        let distance = Self::finite("distance", distance)?;
         Ok(self.push(Node::Offset { child, distance }))
     }
 
@@ -829,10 +873,7 @@ impl Frep {
                 center.offset(Vec3::new(-radius, -radius, -radius)),
                 center.offset(Vec3::new(radius, radius, radius)),
             ),
-            Node::HalfSpace { .. } => {
-                let u = UNBOUNDED_HALF;
-                Aabb::new(Point3::new(-u, -u, -u), Point3::new(u, u, u))
-            }
+            Node::HalfSpace { .. } => Aabb::WHOLE_SPACE,
             Node::BoxPrim { center, half } => Aabb::new(
                 center.offset(Vec3::new(-half.x, -half.y, -half.z)),
                 center.offset(half),
@@ -849,8 +890,8 @@ impl Frep {
                 )
             }
             Node::Cylinder { center, radius } => Aabb::new(
-                center.offset(Vec3::new(-radius, -radius, -UNBOUNDED_HALF)),
-                center.offset(Vec3::new(radius, radius, UNBOUNDED_HALF)),
+                Point3::new(center.x - radius, center.y - radius, f64::NEG_INFINITY),
+                Point3::new(center.x + radius, center.y + radius, f64::INFINITY),
             ),
             Node::Translate { child, offset } => {
                 let b = self.support_of(child);
@@ -908,7 +949,8 @@ impl Frep {
     /// Set one lever (validated like the builder; support box refreshed).
     ///
     /// # Errors
-    /// [`FrepError::BadParam`] / [`FrepError::NonPositive`].
+    /// [`FrepError::BadParam`] / [`FrepError::NonFinite`] /
+    /// [`FrepError::NonPositive`].
     pub fn set_param(&mut self, id: ParamId, value: f64) -> Result<(), FrepError> {
         let node = self
             .nodes
@@ -945,6 +987,12 @@ impl Frep {
 }
 
 fn intersect_boxes(a: &Aabb, b: &Aabb) -> Aabb {
+    if !a.is_well_formed() {
+        return *a;
+    }
+    if !b.is_well_formed() {
+        return *b;
+    }
     let min = Point3::new(
         a.min.x.max(b.min.x),
         a.min.y.max(b.min.y),
@@ -1004,6 +1052,13 @@ fn param_slots(node: &Node) -> Vec<(&'static str, f64)> {
 
 #[allow(clippy::too_many_lines)] // slot dispatch is one flat table; splitting obscures it
 fn write_slot(node: &mut Node, node_ix: u32, slot: u8, value: f64) -> Result<(), FrepError> {
+    let finite = |field: &'static str| -> Result<f64, FrepError> {
+        if value.is_finite() {
+            Ok(value)
+        } else {
+            Err(FrepError::NonFinite { field, value })
+        }
+    };
     let positive = |field: &'static str| -> Result<f64, FrepError> {
         if value > 0.0 && value.is_finite() {
             Ok(value)
@@ -1014,9 +1069,9 @@ fn write_slot(node: &mut Node, node_ix: u32, slot: u8, value: f64) -> Result<(),
 
     match node {
         Node::Sphere { center, radius } | Node::Cylinder { center, radius } => match slot {
-            0 => center.x = value,
-            1 => center.y = value,
-            2 => center.z = value,
+            0 => center.x = finite("center.x")?,
+            1 => center.y = finite("center.y")?,
+            2 => center.z = finite("center.z")?,
             3 => *radius = positive("radius")?,
             _ => {
                 return Err(FrepError::BadParam {
@@ -1026,7 +1081,7 @@ fn write_slot(node: &mut Node, node_ix: u32, slot: u8, value: f64) -> Result<(),
             }
         },
         Node::HalfSpace { offset, .. } => match slot {
-            0 => *offset = value,
+            0 => *offset = finite("offset")?,
             _ => {
                 return Err(FrepError::BadParam {
                     node: node_ix,
@@ -1035,9 +1090,9 @@ fn write_slot(node: &mut Node, node_ix: u32, slot: u8, value: f64) -> Result<(),
             }
         },
         Node::BoxPrim { center, half } => match slot {
-            0 => center.x = value,
-            1 => center.y = value,
-            2 => center.z = value,
+            0 => center.x = finite("center.x")?,
+            1 => center.y = finite("center.y")?,
+            2 => center.z = finite("center.z")?,
             3 => half.x = positive("half.x")?,
             4 => half.y = positive("half.y")?,
             5 => half.z = positive("half.z")?,
@@ -1053,9 +1108,9 @@ fn write_slot(node: &mut Node, node_ix: u32, slot: u8, value: f64) -> Result<(),
             major,
             minor,
         } => match slot {
-            0 => center.x = value,
-            1 => center.y = value,
-            2 => center.z = value,
+            0 => center.x = finite("center.x")?,
+            1 => center.y = finite("center.y")?,
+            2 => center.z = finite("center.z")?,
             3 => *major = positive("major")?,
             4 => *minor = positive("minor")?,
             _ => {
@@ -1066,9 +1121,9 @@ fn write_slot(node: &mut Node, node_ix: u32, slot: u8, value: f64) -> Result<(),
             }
         },
         Node::Translate { offset, .. } => match slot {
-            0 => offset.x = value,
-            1 => offset.y = value,
-            2 => offset.z = value,
+            0 => offset.x = finite("offset.x")?,
+            1 => offset.y = finite("offset.y")?,
+            2 => offset.z = finite("offset.z")?,
             _ => {
                 return Err(FrepError::BadParam {
                     node: node_ix,
@@ -1077,7 +1132,7 @@ fn write_slot(node: &mut Node, node_ix: u32, slot: u8, value: f64) -> Result<(),
             }
         },
         Node::Rotate { angle, .. } => match slot {
-            0 => *angle = value,
+            0 => *angle = finite("angle")?,
             _ => {
                 return Err(FrepError::BadParam {
                     node: node_ix,
@@ -1095,7 +1150,7 @@ fn write_slot(node: &mut Node, node_ix: u32, slot: u8, value: f64) -> Result<(),
             }
         },
         Node::Offset { distance, .. } => match slot {
-            0 => *distance = value,
+            0 => *distance = finite("distance")?,
             _ => {
                 return Err(FrepError::BadParam {
                     node: node_ix,

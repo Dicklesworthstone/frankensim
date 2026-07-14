@@ -2,7 +2,7 @@
 //! agreement as a CHECKABLE PROPOSITION (plan §7.1) — sampled, seeded,
 //! deterministic, and localized when it fails.
 
-use crate::{Chart, Point3};
+use crate::{Aabb, Chart, Point3, SamplingDomain, SamplingDomainError};
 use fs_evidence::{NumericalCertificate, NumericalKind, ProvenanceHash};
 use fs_exec::{Cancelled, Cx};
 use std::fmt::Write as _;
@@ -69,7 +69,12 @@ impl Region {
         config: &AgreementConfig,
         cx: &Cx<'_>,
     ) -> Result<AgreementReport, Cancelled> {
-        let mut report = AgreementReport::empty();
+        let scope = if config.sampling_clip.is_some() {
+            AgreementScope::ExplicitClip
+        } else {
+            AgreementScope::GlobalSupport
+        };
+        let mut report = AgreementReport::empty(scope);
         if config.samples == 0 {
             report.record_unknown(
                 AgreementUnknown::global(AgreementUnknownReason::ZeroSamples),
@@ -96,14 +101,14 @@ impl Region {
             return Ok(report);
         }
 
-        let mut support: Option<crate::Aabb> = None;
+        let mut support: Option<Aabb> = None;
         for rc in &self.charts {
             let chart_support = rc.chart.support();
-            if !valid_support(chart_support) {
+            if let Err(error) = SamplingDomain::validate_support(chart_support) {
                 report.record_unknown(
                     AgreementUnknown::chart(
                         rc.chart.name(),
-                        AgreementUnknownReason::InvalidSupport,
+                        AgreementUnknownReason::SamplingDomain(error),
                     ),
                     config.max_diagnostics,
                 );
@@ -119,22 +124,34 @@ impl Region {
         }
         let Some(support) = support else {
             report.record_unknown(
-                AgreementUnknown::global(AgreementUnknownReason::InvalidSupport),
+                AgreementUnknown::global(AgreementUnknownReason::SamplingDomain(
+                    SamplingDomainError::EmptyIntersection,
+                )),
                 config.max_diagnostics,
             );
             return Ok(report);
         };
-        let span = (support.max.x - support.min.x)
-            .max(support.max.y - support.min.y)
-            .max(support.max.z - support.min.z);
-        let box_ = support.inflate(0.1 * span.max(1e-3));
-        if !valid_support(box_) {
-            report.record_unknown(
-                AgreementUnknown::global(AgreementUnknownReason::InvalidSupport),
-                config.max_diagnostics,
-            );
-            return Ok(report);
-        }
+        let domain = if let Some(clip) = config.sampling_clip {
+            SamplingDomain::resolve(support, Some(clip))
+        } else {
+            SamplingDomain::resolve(support, None).and_then(|base| {
+                let padded = base.bounds().inflate(0.1 * base.max_span().max(1e-3));
+                SamplingDomain::resolve(padded, None)
+            })
+        };
+        let domain = match domain {
+            Ok(domain) => domain,
+            Err(error) => {
+                report.record_unknown(
+                    AgreementUnknown::global(AgreementUnknownReason::SamplingDomain(error)),
+                    config.max_diagnostics,
+                );
+                return Ok(report);
+            }
+        };
+        let box_ = domain.bounds();
+        let spans = domain.spans();
+        report.sampling_domain = Some(box_);
 
         let mut state = config.seed | 1;
         let mut unit = move || {
@@ -146,9 +163,9 @@ impl Region {
         for _ in 0..config.samples {
             cx.checkpoint()?;
             let p = Point3::new(
-                box_.min.x + (box_.max.x - box_.min.x) * unit(),
-                box_.min.y + (box_.max.y - box_.min.y) * unit(),
-                box_.min.z + (box_.max.z - box_.min.z) * unit(),
+                box_.min.x + spans.x * unit(),
+                box_.min.y + spans.y * unit(),
+                box_.min.z + spans.z * unit(),
             );
             if !finite_point(p) {
                 report.record_unknown(
@@ -164,6 +181,10 @@ impl Region {
             let mut samples = Vec::with_capacity(self.charts.len());
             for rc in &self.charts {
                 let sample = rc.chart.eval(p, cx);
+                // A chart may request cancellation without polling the gate
+                // itself. Observe that request before validating or reducing
+                // the sample so no post-cancellation verdict is published.
+                cx.checkpoint()?;
                 match validate_sample(&sample) {
                     Ok(()) => samples.push(Some(sample)),
                     Err(reason) => {
@@ -229,6 +250,7 @@ impl Region {
                 }
             }
         }
+        cx.checkpoint()?;
         report.status = if report.disagreement_count > 0 {
             AgreementStatus::Disagreed
         } else if report.unknown_count > 0 || report.checked == 0 {
@@ -242,17 +264,6 @@ impl Region {
 
 fn finite_point(p: Point3) -> bool {
     p.x.is_finite() && p.y.is_finite() && p.z.is_finite()
-}
-
-fn valid_support(support: crate::Aabb) -> bool {
-    finite_point(support.min)
-        && finite_point(support.max)
-        && support.min.x <= support.max.x
-        && support.min.y <= support.max.y
-        && support.min.z <= support.max.z
-        && (support.max.x - support.min.x).is_finite()
-        && (support.max.y - support.min.y).is_finite()
-        && (support.max.z - support.min.z).is_finite()
 }
 
 #[allow(clippy::float_cmp)] // An Exact certificate must have a numerically singleton interval.
@@ -330,6 +341,9 @@ pub struct AgreementConfig {
     pub tolerance_abs: f64,
     /// Cap on localized diagnostics kept (first-K, deterministic).
     pub max_diagnostics: usize,
+    /// Optional finite domain for explicitly local agreement evidence. Without
+    /// one, an unbounded union support makes the proposition unknown.
+    pub sampling_clip: Option<Aabb>,
 }
 
 impl Default for AgreementConfig {
@@ -339,6 +353,7 @@ impl Default for AgreementConfig {
             seed: 0x9E0_A62E,
             tolerance_abs: 1e-9,
             max_diagnostics: 8,
+            sampling_clip: None,
         }
     }
 }
@@ -377,6 +392,26 @@ pub enum AgreementStatus {
     Unknown,
 }
 
+/// Geometric scope of a sampled agreement proposition. Explicitly clipped
+/// evidence is local evidence about that finite region and must never be
+/// interpreted as a claim about the charts' full, possibly unbounded support.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgreementScope {
+    /// The complete finite union of declared chart supports was sampled.
+    GlobalSupport,
+    /// Sampling was restricted to the caller's explicit finite clip.
+    ExplicitClip,
+}
+
+impl AgreementScope {
+    fn name(self) -> &'static str {
+        match self {
+            Self::GlobalSupport => "global-support",
+            Self::ExplicitClip => "explicit-clip",
+        }
+    }
+}
+
 impl AgreementStatus {
     fn name(self) -> &'static str {
         match self {
@@ -403,9 +438,9 @@ pub enum AgreementUnknownReason {
         /// Exact IEEE-754 bits supplied by the caller.
         bits: u64,
     },
-    /// A chart's support was non-finite, inverted, or too wide for finite
-    /// sampling arithmetic.
-    InvalidSupport,
+    /// Extended support or an explicit clip could not be admitted for finite
+    /// sampling.
+    SamplingDomain(SamplingDomainError),
     /// Support interpolation produced a non-finite query point.
     NonFiniteSamplePoint,
     /// A chart returned a non-finite signed distance.
@@ -454,7 +489,7 @@ impl AgreementUnknownReason {
             Self::InsufficientCharts { .. } => "insufficient-charts",
             Self::ZeroSamples => "zero-samples",
             Self::InvalidTolerance { .. } => "invalid-tolerance",
-            Self::InvalidSupport => "invalid-support",
+            Self::SamplingDomain(_) => "sampling-domain",
             Self::NonFiniteSamplePoint => "non-finite-sample-point",
             Self::NonFiniteSignedDistance { .. } => "non-finite-signed-distance",
             Self::NonFiniteGradient { .. } => "non-finite-gradient",
@@ -533,6 +568,12 @@ impl AgreementUnknown {
 pub struct AgreementReport {
     /// Three-valued result. Invalid or absent evidence is never agreement.
     pub status: AgreementStatus,
+    /// Whether the evidence covers complete finite supports or only a caller
+    /// supplied local clip.
+    pub scope: AgreementScope,
+    /// Exact finite box over which this report sampled. `None` means domain
+    /// admission failed before sampling.
+    pub sampling_domain: Option<Aabb>,
     /// Pairwise comparisons performed.
     pub checked: u64,
     /// Worst observed `gap - allowed`; negative values preserve the smallest
@@ -553,9 +594,11 @@ pub struct AgreementReport {
 }
 
 impl AgreementReport {
-    fn empty() -> Self {
+    fn empty(scope: AgreementScope) -> Self {
         Self {
             status: AgreementStatus::Unknown,
+            scope,
+            sampling_domain: None,
             checked: 0,
             worst_excess: None,
             weakest_evidence: None,
@@ -587,11 +630,14 @@ impl AgreementReport {
         let mut s = String::with_capacity(128);
         let _ = write!(
             s,
-            "{{\"checked\":{},\"status\":\"{}\",\"worst_excess\":",
+            "{{\"checked\":{},\"status\":\"{}\",\"scope\":\"{}\",\"worst_excess\":",
             self.checked,
-            self.status.name()
+            self.status.name(),
+            self.scope.name()
         );
         write_optional_f64(&mut s, self.worst_excess);
+        s.push_str(",\"sampling_domain\":");
+        write_optional_aabb(&mut s, self.sampling_domain);
         s.push_str(",\"weakest_evidence\":");
         write_optional_kind(&mut s, self.weakest_evidence);
         s.push_str(",\"strongest_counterexample_evidence\":");
@@ -658,6 +704,26 @@ fn write_optional_f64(out: &mut String, value: Option<f64>) {
     if let Some(value) = value {
         debug_assert!(value.is_finite());
         let _ = write!(out, "{value}");
+    } else {
+        out.push_str("null");
+    }
+}
+
+fn write_optional_aabb(out: &mut String, value: Option<Aabb>) {
+    if let Some(box_) = value {
+        out.push_str("{\"min\":[");
+        write_json_f64(out, box_.min.x);
+        out.push(',');
+        write_json_f64(out, box_.min.y);
+        out.push(',');
+        write_json_f64(out, box_.min.z);
+        out.push_str("],\"max\":[");
+        write_json_f64(out, box_.max.x);
+        out.push(',');
+        write_json_f64(out, box_.max.y);
+        out.push(',');
+        write_json_f64(out, box_.max.z);
+        out.push_str("]}");
     } else {
         out.push_str("null");
     }
@@ -742,8 +808,11 @@ fn write_unknown(out: &mut String, unknown: &AgreementUnknown) {
                 ",\"value_bits\":\"{value_bits:016x}\",\"lo_bits\":\"{lo_bits:016x}\",\"hi_bits\":\"{hi_bits:016x}\""
             );
         }
+        AgreementUnknownReason::SamplingDomain(error) => {
+            out.push_str(",\"detail\":");
+            write_json_string(out, &error.to_string());
+        }
         AgreementUnknownReason::ZeroSamples
-        | AgreementUnknownReason::InvalidSupport
         | AgreementUnknownReason::NonFiniteSamplePoint
         | AgreementUnknownReason::NoClaim
         | AgreementUnknownReason::NonFiniteComparison => {}
@@ -1042,8 +1111,60 @@ mod tests {
         assert_eq!(report.status, AgreementStatus::Unknown);
         assert!(matches!(
             report.unknowns[0].reason,
-            AgreementUnknownReason::InvalidSupport
+            AgreementUnknownReason::SamplingDomain(SamplingDomainError::InvalidSupport { .. })
         ));
+    }
+
+    #[test]
+    fn unbounded_agreement_requires_and_labels_an_explicit_clip() {
+        let unbounded = ProbeChart {
+            name: "unbounded-probe",
+            sample: crate::ChartSample {
+                signed_distance: 0.0,
+                gradient: None,
+                lipschitz: Some(1.0),
+                error: NumericalCertificate::exact(0.0),
+            },
+            support: Aabb::WHOLE_SPACE,
+        };
+        let region = Region::from_chart(
+            Arc::new(unbounded),
+            ProvenanceHash::of_bytes(b"unbounded-a"),
+        )
+        .with_chart(
+            Arc::new(unbounded),
+            ProvenanceHash::of_bytes(b"unbounded-b"),
+        );
+        let gate = CancelGate::new();
+        let global = with_cx(&gate, |cx| {
+            region
+                .check_agreement(&AgreementConfig::default(), cx)
+                .expect("not cancelled")
+        });
+        assert_eq!(global.status, AgreementStatus::Unknown);
+        assert_eq!(global.scope, AgreementScope::GlobalSupport);
+        assert!(matches!(
+            global.unknowns[0].reason,
+            AgreementUnknownReason::SamplingDomain(SamplingDomainError::UnboundedSupport { .. })
+        ));
+
+        let clip = Aabb::new(Point3::new(-1.0, -1.0, -1.0), Point3::new(1.0, 1.0, 1.0));
+        let local = with_cx(&gate, |cx| {
+            region
+                .check_agreement(
+                    &AgreementConfig {
+                        samples: 4,
+                        sampling_clip: Some(clip),
+                        ..AgreementConfig::default()
+                    },
+                    cx,
+                )
+                .expect("not cancelled")
+        });
+        assert_eq!(local.status, AgreementStatus::Agreed);
+        assert_eq!(local.scope, AgreementScope::ExplicitClip);
+        assert_eq!(local.sampling_domain, Some(clip));
+        assert!(local.to_json().contains("\"scope\":\"explicit-clip\""));
     }
 
     #[test]

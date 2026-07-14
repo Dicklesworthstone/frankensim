@@ -9,11 +9,14 @@
 //! - [`Soup`] + generalized winding numbers ([`winding_exact`],
 //!   [`WindingOctree`]): robust inside/outside on broken input, with the
 //!   dipole octree's error MEASURED against exact;
-//! - [`MeshChart`]: BVH-accelerated exact point-triangle distance with
-//!   winding-number sign (a genuinely certified 1-Lipschitz chart) and
-//!   Woop watertight raycasts;
+//! - [`MeshChart`]: BVH-accelerated point-triangle magnitude with a
+//!   generalized-winding sign and Woop watertight raycasts; raw soup exposes
+//!   `NoClaim`, no Lipschitz bound, and Estimate/NoClaim numerical evidence;
 //! - [`repair`]: dedupe/degenerate/orientation/hole pipeline with
 //!   structured receipts;
+//! - [`dual_contour`] + [`bracket_certificate`]: bounded uniform-grid
+//!   extraction and an `ExactDistance`-only, enclosure-backed whole-triangle
+//!   proximity certificate with structured refusal/cancellation progress;
 //! - [`shapes`]: the public mesh fixture vocabulary (cube, icosphere,
 //!   deterministic corruption).
 
@@ -29,8 +32,10 @@ mod winding;
 pub use chart::{Bvh, MeshChart, point_triangle_distance, ray_triangle_watertight};
 pub use complex::{HexComplex, Incidence, TetComplex};
 pub use contour::{
-    BracketFailure, BracketReport, ContourError, DC_MAX_CELLS_PER_AXIS, DcOptions, DcStats,
-    NoLipschitz, Placement, bracket_certificate, dual_contour,
+    BracketCertificateError, BracketEvidenceIssue, BracketFailure, BracketGeometryStage,
+    BracketReport, ContourArithmeticStage, ContourError, ContourSampleStage, DC_MAX_CELLS_PER_AXIS,
+    DcOptions, DcStats, NoLipschitz, Placement, bracket_certificate, dual_contour,
+    dual_contour_clipped,
 };
 pub use convert::{IncrementalMeshSdf, MeshQuality, MeshSdfError, assess_quality, mesh_to_sdf};
 pub use halfedge::{HalfEdge, HalfEdgeMesh, MeshBuildError, NO_FACE};

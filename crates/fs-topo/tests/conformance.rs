@@ -8,11 +8,15 @@
 
 use asupersync::types::Budget;
 use fs_exec::{CancelGate, Cx, ExecMode, StreamKey};
-use fs_geom::{Point3, Vec3};
+use fs_geom::{Aabb, Chart, ChartSample, Differentiability, Point3, SamplingDomainError, Vec3};
 use fs_rep_frep::{BoolOp, BoolStyle, Frep, FrepBuilder};
 use fs_rep_mesh::{Soup, shapes};
-use fs_topo::cubical::{VoxelField, betti, count_persistent, persistence0, verify_topology};
+use fs_topo::cubical::{
+    MAX_VOXELIZE_CELLS, VoxelField, VoxelizeError, betti, count_persistent, persistence0,
+    verify_topology, verify_topology_clipped, voxelize, voxelize_clipped,
+};
 use fs_topo::{IntersectKind, ManifoldDefect, manifold_certificate, self_intersection_certificate};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 fn verdict(case: &str, pass: bool, detail: &str) {
     println!(
@@ -57,6 +61,81 @@ fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
         );
         f(&cx)
     })
+}
+
+struct CountingPlane {
+    chart: Frep,
+    evals: AtomicU64,
+}
+
+impl CountingPlane {
+    fn new(x_offset: f64) -> Self {
+        let mut builder = FrepBuilder::new();
+        let plane = builder
+            .half_space(Vec3::new(1.0, 0.0, 0.0), x_offset)
+            .expect("valid plane");
+        Self {
+            chart: builder.finish(plane).expect("valid plane F-rep"),
+            evals: AtomicU64::new(0),
+        }
+    }
+
+    fn eval_count(&self) -> u64 {
+        self.evals.load(Ordering::Relaxed)
+    }
+}
+
+impl Chart for CountingPlane {
+    fn eval(&self, x: Point3, cx: &Cx<'_>) -> ChartSample {
+        self.evals.fetch_add(1, Ordering::Relaxed);
+        self.chart.eval(x, cx)
+    }
+
+    fn support(&self) -> Aabb {
+        self.chart.support()
+    }
+
+    fn name(&self) -> &'static str {
+        "test/counting-plane"
+    }
+
+    fn differentiability(&self) -> Differentiability {
+        self.chart.differentiability()
+    }
+}
+
+struct BoundsCheckingChart {
+    bounds: Aabb,
+    evals: AtomicU64,
+}
+
+impl Chart for BoundsCheckingChart {
+    fn eval(&self, point: Point3, _cx: &Cx<'_>) -> ChartSample {
+        assert!(
+            point.x.is_finite() && point.y.is_finite() && point.z.is_finite(),
+            "voxel center must be finite: {point:?}"
+        );
+        assert!(
+            self.bounds.contains(point),
+            "voxel center escaped admitted bounds: {point:?} not in {:?}",
+            self.bounds
+        );
+        self.evals.fetch_add(1, Ordering::Relaxed);
+        ChartSample {
+            signed_distance: point.x,
+            gradient: None,
+            lipschitz: Some(1.0),
+            error: fs_evidence::NumericalCertificate::exact(point.x),
+        }
+    }
+
+    fn support(&self) -> Aabb {
+        self.bounds
+    }
+
+    fn name(&self) -> &'static str {
+        "test/bounds-checking-chart"
+    }
 }
 
 /// topo-001 — manifold certificates: clean fixtures certify; every
@@ -439,6 +518,117 @@ fn topo_006_determinism_and_scale() {
              chunked-parallel is the contract no-claim); seed 0x1001_2026_0707_0038",
             bars.len()
         ),
+    );
+}
+
+/// topo-008 — chart voxelization/topology verification require an explicit
+/// finite sampling domain. Invalid resolutions and excessive products refuse
+/// before evaluation; clipped fields sample the geometric intersection and
+/// preserve occupancy and Betti numbers under translation (G3).
+#[test]
+fn topo_008_chart_sampling_domain_is_explicit_and_preflighted() {
+    with_cx(|cx| {
+        let clip = Aabb::new(Point3::new(-0.5, -0.5, -0.5), Point3::new(0.5, 0.5, 0.5));
+
+        let unbounded = CountingPlane::new(0.0);
+        assert!(matches!(
+            voxelize(&unbounded, 24, cx),
+            Err(VoxelizeError::SamplingDomain(
+                SamplingDomainError::UnboundedSupport { .. }
+            ))
+        ));
+        assert_eq!(unbounded.eval_count(), 0, "support refusal precedes eval");
+
+        let verify_unbounded = CountingPlane::new(0.0);
+        assert!(matches!(
+            verify_topology(&verify_unbounded, 24, cx),
+            Err(VoxelizeError::SamplingDomain(
+                SamplingDomainError::UnboundedSupport { .. }
+            ))
+        ));
+        assert_eq!(verify_unbounded.eval_count(), 0);
+
+        let invalid = CountingPlane::new(0.0);
+        assert!(matches!(
+            voxelize_clipped(&invalid, 0, clip, cx),
+            Err(VoxelizeError::InvalidResolution { n: 0 })
+        ));
+        assert_eq!(invalid.eval_count(), 0, "zero resolution precedes eval");
+
+        let too_large = CountingPlane::new(0.0);
+        assert!(matches!(
+            voxelize_clipped(&too_large, 101, clip, cx),
+            Err(VoxelizeError::VoxelLimit {
+                cap: MAX_VOXELIZE_CELLS,
+                ..
+            })
+        ));
+        assert_eq!(too_large.eval_count(), 0, "voxel cap precedes eval");
+
+        let field = voxelize_clipped(&CountingPlane::new(0.0), 24, clip, cx)
+            .expect("clipped half-box voxelizes");
+        let topology = verify_topology_clipped(&CountingPlane::new(0.0), 24, clip, cx)
+            .expect("clipped half-box topology");
+        assert_eq!(topology, (1, 0, 0), "half-box is contractible");
+
+        let shift = Vec3::new(0.25, -0.125, 0.375);
+        let moved_clip = Aabb::new(clip.min.offset(shift), clip.max.offset(shift));
+        let moved = voxelize_clipped(&CountingPlane::new(shift.x), 24, moved_clip, cx)
+            .expect("translated clipped half-box voxelizes");
+        assert_eq!(field.dims, moved.dims);
+        assert_eq!(
+            field
+                .values
+                .iter()
+                .map(|value| *value < 0.0)
+                .collect::<Vec<_>>(),
+            moved
+                .values
+                .iter()
+                .map(|value| *value < 0.0)
+                .collect::<Vec<_>>(),
+            "G3 occupancy mismatch"
+        );
+        assert_eq!(betti(&field, 0.0), betti(&moved, 0.0));
+
+        let extreme_bounds = Aabb::new(
+            Point3::new(-8.5e307, 1.79e308, -1.0),
+            Point3::new(8.5e307, f64::MAX, 1.0),
+        );
+        let extreme = BoundsCheckingChart {
+            bounds: extreme_bounds,
+            evals: AtomicU64::new(0),
+        };
+        let extreme_field = voxelize(&extreme, 10, cx)
+            .expect("ratio-first centers stay inside an extreme-aspect finite AABB");
+        assert_eq!(extreme_field.dims, [10, 1, 1]);
+        assert_eq!(extreme.evals.load(Ordering::Relaxed), 10);
+
+        let threshold_bounds = Aabb::new(
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 0.900_000_000_000_000_1, 0.1),
+        );
+        let threshold = BoundsCheckingChart {
+            bounds: threshold_bounds,
+            evals: AtomicU64::new(0),
+        };
+        let threshold_field = voxelize(&threshold, 10, cx)
+            .expect("near-integer quotient preserves the maximum-width promise");
+        assert_eq!(threshold_field.dims, [10, 10, 1]);
+        for (span, dim) in [1.0, 0.900_000_000_000_000_1, 0.1]
+            .into_iter()
+            .zip(threshold_field.dims)
+        {
+            assert!(
+                span / f64::from(dim) <= threshold_field.h,
+                "realized cell width must not exceed reported h"
+            );
+        }
+    });
+    verdict(
+        "topo-008",
+        true,
+        "voxelize and verify_topology reject unresolved extended support and invalid/excessive resolution before evaluation; paired clipped APIs sample source-intersection-clip and preserve occupancy and Betti numbers under translation (G3); ratio-first centers remain finite and inside extreme-aspect admitted domains, and realized widths stay within reported h across near-integer quotients",
     );
 }
 

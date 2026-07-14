@@ -27,33 +27,75 @@ fs-exec, fs-evidence, fs-alloc, fs-obs.
   leak; exact-edge hits may double-count — documented for parity users),
   `Bvh` (median-split, deterministic tie-break by index; closest-point
   branch-and-bound + nearest-hit raycast).
-- `MeshChart` — sd = BVH closest distance × winding sign; Lipschitz = 1
-  is a RIGOROUS claim (distance-to-set); declared error covers fp slack
-  only; `raycast` watertight.
+- `MeshChart` — sd = BVH closest distance × winding sign. The unsigned
+  distance-to-set magnitude is 1-Lipschitz, but a generic soup's winding sign
+  is not topology-certified and can jump on open/self-intersecting/inconsistently
+  oriented input. Raw `MeshChart` therefore retains the trait-default
+  `TraceStepClaim::NoClaim`, returns `lipschitz: None`, and grades finite
+  nominal samples as `Estimate` (non-finite samples as `NoClaim`) even for a
+  clean-looking closed soup; `raycast` is watertight.
 - `repair(soup, max_hole_edges)` — dedupe → degenerate removal →
   orientation unification (flood fill + centroid winding vote) →
   fan-fill of small boundary loops, each action a `RepairReceipt`
   (defect/location/action, the fs-io quarantine format).
 - `shapes` (PUBLIC fixture vocabulary): `cube`, `icosphere`,
   deterministic `corrupt` (dups/degens/flips/hole).
-- `dual_contour` / `DcOptions` / `bracket_certificate` — the SDF→mesh
+- `dual_contour` / `dual_contour_clipped` / `DcOptions` /
+  `bracket_certificate` — the SDF→mesh
   converter (plan §7.3 edge 2): uniform-grid dual contouring with
+  explicit finite sampling-domain admission, finite positive cell spacing,
+  checked corner-lattice products, and a 256-cells/axis cap before chart
+  evaluation or allocation. Lattice coordinates use normalized interpolation
+  over the admitted span and hit both admitted endpoints exactly, so a
+  ceil-derived cell count cannot step past the admitted maximum. Cell spacing,
+  QEF regularization, every nominal field sample, chart/fallback gradients,
+  and all derived crossing/QEF coordinates are finite-validated. Edge secants
+  scale opposite field magnitudes before division, Hermite means use convex
+  online averaging, and QEF solves in cell-local coordinates, so finite
+  extreme inputs either remain representable or return a structured refusal
+  rather than leaking NaN/overflow into a mesh. Unbounded charts require `dual_contour_clipped`,
+  which contours the geometric intersection `chart ∩ clip`, not merely a
+  replacement grid extent. The converter uses
   Hermite data (secant crossings + chart gradients), regularized 3×3 QEF
   vertex placement (Schaefer mass-point regularization; `MassPoint` is
   the feature-blurring baseline), axis-uniform quad winding (cyclic
   (u,v) rings, circulation normal +d, flipped by crossing sign), and THE
-  certificate: `|φ(centroid)| + L·r ≤ tol` with recursive 4-way
-  subdivision PROVES the surface brackets the zero set everywhere (a
-  rigorous claim leaning on the chart's CERTIFIED Lipschitz bound);
-  failures localize to triangles with margins; uncertified charts are
-  refused (`NoLipschitz`).
-- `mesh_to_sdf` / `assess_quality` / `IncrementalMeshSdf` — the certified
-  mesh→SDF converter (plan §7.3 edge 1): exact-sample distance + winding
-  sign onto fs-rep-sdf dense grids. Certificate honesty: closed 2-manifold
-  input → enclosure-grade `Certified` receipt; boundary/non-manifold edges
-  → Estimate receipt whose model evidence NAMES the winding-sign heuristic
-  and the defect counts. The incremental path re-samples only a dirty box
-  at exactly the original positions (bit-identical to full rebuild — G5).
+  certificate: v1 accepts only the GLOBAL
+  `TraceStepClaim::ExactDistance` theorem (therefore `L = 1`) and requires a
+  finite rigorous `Exact`/`Enclosure` from `trace_value_enclosure` containing
+  every nominal centroid evaluation. Recursive 4-way subdivision proves
+  `max_abs(enclosure(centroid)) + radius ≤ tol` over the surface; local
+  `ChartSample::lipschitz` values, `Estimate`, `NoClaim`, malformed evidence,
+  invalid tolerances/indices, and non-representable geometry cannot produce a
+  pass or fail. Completed rigorous failures localize to triangles with
+  margins. `BracketCertificateError` distinguishes every refusal and
+  cancellation with progress; `NoLipschitz` remains a compatibility type
+  alias.
+- `mesh_to_sdf` / `assess_quality` / `IncrementalMeshSdf` — the authority-graded
+  mesh→SDF converter (plan §7.3 edge 1): point-triangle distance + winding sign
+  sampled onto fs-rep-sdf dense grids. Edge-use, pairwise edge orientation, and
+  aggregate signed-volume checks are diagnostics only: they do not certify
+  per-component orientation/nesting, vertex-link manifoldness, or freedom from
+  self-intersection. A disconnected soup with a large outward component and a
+  smaller inward component can pass every diagnostic. Consequently every
+  generic mesh payload and receipt is capped at Estimate and NAMES the
+  `winding-sign-heuristic`, even when the basic screen passes. Defective inputs
+  additionally record the screen's defect counts; out-of-range public soup
+  indices are counted and force the screen false without being dereferenced or
+  panicking. A private converter-only
+  adapter supplies the unsigned distance-to-set's unit slope solely as a
+  nominal reconstruction heuristic; it explicitly retains
+  `TraceStepClaim::NoClaim`, forwards Estimate/NoClaim sample authority, and
+  cannot authorize sphere tracing or an enclosure. Weak/NoClaim payloads remain
+  NoClaim and can never be promoted by mesh quality. The QoI is the total
+  abstract-distance estimate bound when available, otherwise the finite nominal
+  reconstruction bound paired with a NoClaim certificate. The incremental path
+  transactionally re-samples only a dirty box at exactly the original positions
+  (bit-identical to full rebuild — G5); cancellation or refusal preserves the
+  prior chart, field, authority, and refreshed-sample evidence as one consistent
+  state. Initial and successfully edited `IncrementalMeshSdf` values apply the
+  same Estimate cap before exposing their raw TiledSdf; a prior downgrade is
+  never strengthened by an incremental edit.
 
 ## Invariants
 1. Half-edge invariants survive 2k random flips with the Euler
@@ -61,7 +103,11 @@ fs-exec, fs-evidence, fs-alloc, fs-obs.
 2. `point_triangle_distance` never exceeds any sampled surface distance
    and matches 1830-point brute force within sampling gap; `MeshChart`
    tracks the analytic sphere within the icosphere chord band, satisfies
-   inside ⇔ sd < 0, and honors its 1-Lipschitz claim (rmesh-002).
+   inside ⇔ sd < 0, and exhibits 1-Lipschitz behavior on that fixture
+   (rmesh-002); this measurement is not a generic signed-field theorem.
+   rmesh-002c locks the raw authority boundary on a clean-looking closed cube:
+   default `NoClaim`, no Lipschitz bound, finite `Estimate`, non-finite
+   `NoClaim`, and bracket-certificate refusal.
 3. Winding classification is > 99% correct away from defects on the
    nightmare corpus (duplicates + degenerates + flipped patch + punched
    hole) — robustness on BROKEN input is the point (rmesh-003).
@@ -73,20 +119,44 @@ fs-exec, fs-evidence, fs-alloc, fs-obs.
 6. d1∘d0 = 0 and d2∘d1 = 0 EXACTLY (integer cochains) on fixture
    complexes; axis rays through shared cube edges never leak; chart
    raycasts hit at analytic parameters (rmesh-006).
-7. The converter matches analytic SDFs within its declared envelope, is
+7. The converter matches analytic SDF fixtures within its recorded estimate, is
    translation-equivariant (G3), refreshes incrementally bit-identically
-   (G5), and downgrades honestly on open input (rmesh-007).
+   (G5), keeps generic clean and defective soup at most Estimate, rejects
+   mixed-component authority laundering, and never promotes weak sampled payload
+   authority (rmesh-007 and focused converter unit tests).
 8. Dual-contoured fixtures are manifold, closed, outward-oriented
    (winding +1 at the center — the ring-orientation law), vertex-accurate,
    translation-equivariant, bracket-certified, and the certificate DETECTS
    a seeded bad triangle with localized margins; QEF resolves the box
    corner at least twice as sharply as the mass-point baseline
    (rmesh-008).
+9. Contouring admission (rmesh-009): default contouring rejects unresolved
+   extended support before evaluation; the paired clipped API contours the
+   actual geometric intersection; invalid spacing and checked grid-cap
+   refusals also precede evaluation; every admitted positive axis has at least
+   one cell even when `span / spacing` underflows, and near-integer quotients
+   are incremented when their realized width would exceed the requested `h`;
+   translated chart+clip pairs produce
+   translated meshes with identical connectivity (G3).
+10. Bracket authority (rmesh-010): `Some(1)` on a local sample cannot promote
+    a `NoClaim` theorem, `Estimate`/`NoClaim` evidence, or malformed `Exact`
+    evidence; a chart-requested cancellation is observed directly after the
+    chart evaluation and returned with completed triangle/evaluation progress.
+    Existing sphere/box exact-distance certificate coverage remains in
+    rmesh-008.
 
 ## Error model
-Structured teaching errors (`MeshBuildError`); total functions elsewhere
-(degenerate triangles yield well-defined distances; empty-soup handling
-is the caller's constructor discipline). No panics across the boundary.
+Structured teaching errors (`MeshBuildError`, `ContourError`,
+`BracketCertificateError`, and wrapped `SamplingDomainError`); contour errors
+name invalid spacing/regularization, excessive resolution, checked
+grid/coordinate overflow, non-finite chart samples or gradients,
+non-representable derived arithmetic, cancellation, and empty zero sets.
+Bracket refusals name invalid tolerance,
+unsupported trace theorem, invalid indices/non-finite vertices,
+non-representable geometry, malformed/non-rigorous evidence, and cancellation
+progress. Total functions elsewhere (degenerate triangles yield well-defined
+distances; empty-soup handling is the caller's constructor discipline). No
+panics across the boundary.
 
 ## Determinism class
 Deterministic: BTreeMap orders, index-tie-broken BVH sorts, seeded
@@ -94,9 +164,17 @@ batteries; no clocks, no addresses in results.
 
 ## Cancellation behavior
 `MeshChart::eval` is bounded per query (BVH descent); batch consumers
-poll between queries per the fs-geom discipline. Repair/build are
-bounded preprocessing passes (cancellation hooks join with the fs-io
-quarantine bead where soups get large).
+poll between queries per the fs-geom discipline. Dual contouring polls directly
+through its lattice-sampling, Hermite, vertex-placement, and stitching phases.
+It also polls immediately after every chart evaluation, so a producer that
+requests cancellation without polling cannot have its sample consumed.
+Bracket certification polls `Cx` directly before and after each chart
+evaluation (and after trace-enclosure retrieval), including recursive
+subdivision, and refuses with completed triangle/evaluation progress instead
+of publishing a partial verdict.
+Incremental mesh-to-SDF refreshes stage all samples before committing any
+chart/field state. Repair/build are bounded preprocessing passes (cancellation
+hooks join with the fs-io quarantine bead where soups get large).
 
 ## Unsafe boundary
 None. `unsafe_code` denied workspace-wide.
@@ -105,8 +183,8 @@ None. `unsafe_code` denied workspace-wide.
 None. `[S]` solid-tier.
 
 ## Conformance tests
-tests/conformance.rs, cases rmesh-001..rmesh-008 (JSON-line verdicts;
-seeded cases carry seeds) covering invariants 1–6 with fs-obs-validated
+tests/conformance.rs, cases rmesh-001..rmesh-010 (JSON-line verdicts;
+seeded cases carry seeds) covering invariants 1–9 with fs-obs-validated
 evidence events (dipole error, repair receipts).
 
 ## No-claim boundaries
@@ -118,9 +196,10 @@ evidence events (dipole error, repair receipts).
   its first consumer, with convergence-class documentation there.
 - NO throughput claims (million-triangle dipole performance is the perf
   harness's); the octree's asymptotics are structural.
-- The winding sign convention (+1 inside outward-oriented closed
-  surfaces) is pinned by fixtures, not by a formal proof of the flux
-  form; exact-edge raycast double-counting is documented.
+- The winding sign convention (+1 inside outward-oriented closed surfaces) is
+  pinned by fixtures, not by a formal proof of the flux form. Generic soup has
+  no component/nesting/self-intersection certificate and therefore no global
+  ExactDistance promotion. Exact-edge raycast double-counting is documented.
 - Attribute channels (normals/UVs/per-face data) beyond positions are
   deferred until a consumer (LUMEN materials) defines their semantics.
 - The converter's incremental mode trusts the CALLER's dirty box (it
@@ -129,10 +208,17 @@ evidence events (dipole error, repair receipts).
 - Sparse VDB output and per-tile interval audit certificates for the
   converter join with the fs-ivl integration pass (the dense path's
   fp-envelope analysis is documented in fs-rep-sdf).
+- A nominal sampled-field reconstruction bound is not abstract-region signed
+  distance authority. Basic mesh quality diagnostics cannot strengthen a
+  TiledSdf payload; generic mesh receipts are at best Estimate, and NoClaim
+  payloads remain NoClaim and non-certifiable.
 - Dual contouring is UNIFORM-GRID v1: adaptive octree contouring with
   crack-free stitching, the guaranteed-manifold MDC variant for
   ambiguous topologies, and quality post-passes (min-angle smoothing
   with certificate re-verification) are follow-ups; the fixture zoo's
   manifoldness is verified, not guaranteed for adversarial topology.
-- The Lipschitz-cone bracket is conservative; fs-ivl interval evaluation
-  will tighten it (same certificate surface).
+- The exact-distance centroid/radius bracket is conservative; v1 deliberately
+  refuses `LipschitzImplicit` because that theorem preserves sign/zero set but
+  does not provide a global Euclidean proximity upper bound. More specialized
+  global theorems or fs-ivl triangle evaluation may tighten the same
+  certificate surface later.

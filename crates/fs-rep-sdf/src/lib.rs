@@ -23,8 +23,10 @@ mod band;
 mod dense;
 mod vdb;
 
-pub use adaptive::{AdaptiveSdf, AdaptiveStats};
-pub use band::{BandStats, NarrowBand};
+pub use adaptive::{ADAPTIVE_MAX_NODES, AdaptiveSdf, AdaptiveStats};
+pub use band::{
+    BandStats, NARROW_BAND_MAX_SAMPLES_PER_AXIS, NARROW_BAND_MAX_SCAN_SAMPLES, NarrowBand,
+};
 pub use dense::{DENSE_MAX_SAMPLES_PER_AXIS, EikonalStats, SdfBuildError, TiledSdf};
 pub use vdb::{VdbGrid, VdbStats};
 

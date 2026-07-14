@@ -213,7 +213,7 @@ fn rf_002_boolean_then_refit_watertight_certified() {
             bound: 2.0,
         };
         let charts: Vec<&dyn Chart> = vec![&refit_chart, &csg_chart];
-        let complex = SheafComplex::from_charts(&charts, cx);
+        let complex = SheafComplex::from_charts(&charts, cx).expect("finite patch supports");
         assert!(!complex.interfaces.is_empty(), "shared surface band found");
         let tol = 2.0 * hausdorff;
         let ev = complex.watertightness(tol);

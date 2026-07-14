@@ -5,12 +5,18 @@
 //! watertight rays. JSON-line verdicts; seeded cases carry seeds.
 
 use asupersync::types::Budget;
+use fs_evidence::{NumericalCertificate, NumericalKind};
 use fs_exec::{CancelGate, Cx, ExecMode, StreamKey};
-use fs_geom::{Chart, Point3, Vec3};
-use fs_rep_mesh::{
-    HalfEdgeMesh, MeshChart, TetComplex, WindingOctree, point_triangle_distance,
-    ray_triangle_watertight, repair, shapes, winding_exact,
+use fs_geom::{
+    Aabb, Chart, ChartSample, Differentiability, Point3, SamplingDomainError, TraceStepClaim, Vec3,
 };
+use fs_rep_mesh::{
+    BracketCertificateError, BracketEvidenceIssue, ContourError, DC_MAX_CELLS_PER_AXIS, DcOptions,
+    HalfEdgeMesh, MeshChart, TetComplex, WindingOctree, bracket_certificate, dual_contour,
+    dual_contour_clipped, point_triangle_distance, ray_triangle_watertight, repair, shapes,
+    winding_exact,
+};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 fn verdict(case: &str, pass: bool, detail: &str) {
     println!(
@@ -43,10 +49,14 @@ impl Lcg {
 
 fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
     let gate = CancelGate::new();
+    with_gate_cx(&gate, f)
+}
+
+fn with_gate_cx<R>(gate: &CancelGate, f: impl FnOnce(&Cx<'_>) -> R) -> R {
     let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
     pool.scope(|arena| {
         let cx = Cx::new(
-            &gate,
+            gate,
             arena,
             StreamKey {
                 seed: 0x9E54,
@@ -59,6 +69,119 @@ fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
         );
         f(&cx)
     })
+}
+
+struct CountingPlane {
+    x_offset: f64,
+    evals: AtomicU64,
+}
+
+impl CountingPlane {
+    fn new(x_offset: f64) -> Self {
+        Self {
+            x_offset,
+            evals: AtomicU64::new(0),
+        }
+    }
+
+    fn eval_count(&self) -> u64 {
+        self.evals.load(Ordering::Relaxed)
+    }
+}
+
+impl Chart for CountingPlane {
+    fn eval(&self, x: Point3, _cx: &Cx<'_>) -> ChartSample {
+        self.evals.fetch_add(1, Ordering::Relaxed);
+        let signed_distance = x.x - self.x_offset;
+        ChartSample {
+            signed_distance,
+            gradient: Some(Vec3::new(1.0, 0.0, 0.0)),
+            lipschitz: Some(1.0),
+            error: NumericalCertificate::enclosure(signed_distance, signed_distance),
+        }
+    }
+
+    fn support(&self) -> Aabb {
+        Aabb {
+            min: Point3::new(f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY),
+            max: Point3::new(f64::INFINITY, f64::INFINITY, f64::INFINITY),
+        }
+    }
+
+    fn name(&self) -> &'static str {
+        "test/counting-plane"
+    }
+
+    fn differentiability(&self) -> Differentiability {
+        Differentiability::C0
+    }
+}
+
+#[derive(Clone, Copy)]
+enum BracketAuthorityMode<'a> {
+    NoClaim,
+    Estimate,
+    NoClaimEvidence,
+    MalformedExact,
+    RequestCancellation(&'a CancelGate),
+}
+
+struct BracketAuthorityPlane<'a> {
+    mode: BracketAuthorityMode<'a>,
+    evals: AtomicU64,
+}
+
+impl BracketAuthorityPlane<'_> {
+    fn eval_count(&self) -> u64 {
+        self.evals.load(Ordering::Relaxed)
+    }
+}
+
+impl Chart for BracketAuthorityPlane<'_> {
+    fn eval(&self, x: Point3, _cx: &Cx<'_>) -> ChartSample {
+        let previous = self.evals.fetch_add(1, Ordering::Relaxed);
+        if previous == 0
+            && let BracketAuthorityMode::RequestCancellation(gate) = self.mode
+        {
+            gate.request();
+        }
+        let error = match self.mode {
+            BracketAuthorityMode::Estimate => NumericalCertificate::estimate(x.x, x.x),
+            BracketAuthorityMode::NoClaimEvidence => NumericalCertificate::no_claim(),
+            BracketAuthorityMode::MalformedExact => NumericalCertificate {
+                kind: NumericalKind::Exact,
+                lo: x.x,
+                hi: x.x + 1.0,
+            },
+            BracketAuthorityMode::NoClaim | BracketAuthorityMode::RequestCancellation(_) => {
+                NumericalCertificate::enclosure(x.x, x.x)
+            }
+        };
+        ChartSample {
+            signed_distance: x.x,
+            gradient: Some(Vec3::new(1.0, 0.0, 0.0)),
+            lipschitz: Some(1.0),
+            error,
+        }
+    }
+
+    fn support(&self) -> Aabb {
+        Aabb::new(Point3::new(-1.0, -1.0, -1.0), Point3::new(1.0, 1.0, 1.0))
+    }
+
+    fn trace_step_claim(&self) -> TraceStepClaim {
+        match self.mode {
+            BracketAuthorityMode::NoClaim => TraceStepClaim::NoClaim,
+            BracketAuthorityMode::Estimate
+            | BracketAuthorityMode::NoClaimEvidence
+            | BracketAuthorityMode::MalformedExact
+            | BracketAuthorityMode::RequestCancellation(_) => TraceStepClaim::ExactDistance,
+        }
+    }
+
+    fn name(&self) -> &'static str {
+        "test/bracket-authority-plane"
+    }
 }
 
 #[test]
@@ -125,8 +248,10 @@ fn rmesh_002_point_triangle_distance_matches_brute_force_and_chart_laws() {
             "exact distance can never exceed a sampled distance"
         );
     }
-    // Chart laws on the icosphere: sd within the mesh's approximation band
-    // of the analytic sphere; inside ⇔ sd < 0; 1-Lipschitz claim.
+    // Fixture observations on the icosphere: sd within the mesh's
+    // approximation band of the analytic sphere; inside ⇔ sd < 0; measured
+    // 1-Lipschitz behavior. rmesh-002c separately locks that raw soup does not
+    // advertise this fixture observation as a theorem.
     let (band_ok, lip_ok) = with_cx(|cx| {
         let soup = shapes::icosphere(Point3::new(0.0, 0.0, 0.0), 1.0, 3);
         let chart = MeshChart::new(soup);
@@ -157,7 +282,8 @@ fn rmesh_002_point_triangle_distance_matches_brute_force_and_chart_laws() {
         &format!(
             "exact point-triangle distance under-approximates 1830-sample brute force by at \
              most sampling gap (worst {worst:.4}); chart tracks the analytic sphere and is \
-             1-Lipschitz (seed {SEED:#x})"
+             observed 1-Lipschitz on this fixture without advertising a generic theorem \
+             (seed {SEED:#x})"
         ),
     );
 }
@@ -204,10 +330,10 @@ fn rmesh_002b_degenerate_triangles_yield_finite_correct_distances() {
         // Every family the guard must handle: repeated a=b, repeated b=c,
         // collinear (a, a+d, a+2d), and fully collapsed a=b=c.
         let cases = [
-            (a, a, c),                                    // a == b
-            (a, c, c),                                    // b == c
-            (a, a.offset(d), a.offset(d.scale(2.0))),     // collinear
-            (a, a, a),                                    // single point
+            (a, a, c),                                // a == b
+            (a, c, c),                                // b == c
+            (a, a.offset(d), a.offset(d.scale(2.0))), // collinear
+            (a, a, a),                                // single point
         ];
         for (ta, tb, tc) in cases {
             let fast = point_triangle_distance(p, ta, tb, tc);
@@ -236,6 +362,37 @@ fn rmesh_002b_degenerate_triangles_yield_finite_correct_distances() {
              match brute force (worst {worst:.4}); the a==b repro is {repro:.6} (want 1.0), \
              not NaN (seed {SEED:#x})"
         ),
+    );
+}
+
+#[test]
+fn rmesh_002c_raw_mesh_chart_never_promotes_clean_soup_authority() {
+    with_cx(|cx| {
+        let clean = shapes::cube(Point3::new(0.0, 0.0, 0.0), 1.0);
+        let output = clean.clone();
+        let chart = MeshChart::new(clean);
+
+        assert_eq!(chart.trace_step_claim(), TraceStepClaim::NoClaim);
+        let finite = chart.eval(Point3::new(2.0, 0.0, 0.0), cx);
+        assert_eq!(finite.lipschitz, None);
+        assert_eq!(finite.error.kind, NumericalKind::Estimate);
+        assert!(finite.error.lo.is_finite() && finite.error.hi.is_finite());
+
+        let nonfinite = chart.eval(Point3::new(f64::INFINITY, 0.0, 0.0), cx);
+        assert_eq!(nonfinite.lipschitz, None);
+        assert_eq!(nonfinite.error.kind, NumericalKind::NoClaim);
+
+        assert_eq!(
+            bracket_certificate(&chart, &output, 0.25, cx),
+            Err(BracketCertificateError::UnsupportedTraceClaim {
+                actual: TraceStepClaim::NoClaim,
+            })
+        );
+    });
+    verdict(
+        "rmesh-002c",
+        true,
+        "a raw clean-looking closed soup remains TraceStepClaim::NoClaim with no Lipschitz bound; finite samples are Estimate and non-finite samples are NoClaim",
     );
 }
 
@@ -447,19 +604,40 @@ fn rmesh_006_incidence_satisfies_dd_zero_and_rays_are_watertight() {
 // One end-to-end scenario (build -> equivariance -> incremental -> downgrade);
 // splitting would duplicate the expensive fixture builds.
 #[allow(clippy::too_many_lines)]
-fn rmesh_007_mesh_to_sdf_converter_is_certified_equivariant_and_incremental() {
+fn rmesh_007_mesh_to_sdf_converter_is_honest_equivariant_and_incremental() {
     const SEED: u64 = 0x1007_2026_0706_C0DE;
     let (analytic_ok, equivariant, incremental_identical, downgrade_ok, samples) = with_cx(|cx| {
-        // Certified accuracy: high-res icosphere -> SDF matches the
-        // analytic sphere within the receipt's declared envelope plus the
-        // mesh chord band.
+        // Measured accuracy: high-res icosphere -> SDF matches the analytic
+        // sphere within the receipt's recorded estimate plus the mesh chord
+        // band. Generic soup lacks the global validity certificate needed to
+        // make that envelope rigorous.
         let ico = shapes::icosphere(Point3::new(0.0, 0.0, 0.0), 1.0, 3);
         let chart = MeshChart::new(ico.clone());
         let receipt = fs_rep_mesh::mesh_to_sdf(&chart, 0.08, cx).expect("convert");
         assert_eq!(
             receipt.numerical.kind,
-            fs_evidence::NumericalKind::Enclosure,
-            "closed icosphere gets an enclosure-grade (certifiable) receipt"
+            fs_evidence::NumericalKind::Estimate,
+            "edge and aggregate-volume screens cannot certify generic soup"
+        );
+        assert_eq!(
+            receipt.value.abstract_distance_kind(),
+            fs_evidence::NumericalKind::Estimate
+        );
+        assert_eq!(
+            receipt.qoi.to_bits(),
+            receipt
+                .value
+                .abstract_distance_bound()
+                .expect("sampled estimate carries a finite bound")
+                .to_bits(),
+            "mesh receipt uses the sampled payload's total abstract-distance estimate bound"
+        );
+        assert!(
+            receipt
+                .model
+                .cards
+                .contains(&"winding-sign-heuristic".to_string()),
+            "clean-looking soup still names the uncertified sign model"
         );
         let mut rng = Lcg(SEED);
         let mut analytic_ok = true;
@@ -471,7 +649,7 @@ fn rmesh_007_mesh_to_sdf_converter_is_certified_equivariant_and_incremental() {
             );
             let sd = receipt.value.eval(p, cx).signed_distance;
             let analytic = p.delta_from(Point3::new(0.0, 0.0, 0.0)).norm() - 1.0;
-            // envelope: declared field bound + icosphere-3 chord error.
+            // measured envelope: recorded field estimate + icosphere-3 chord error.
             analytic_ok &= (sd - analytic).abs() <= receipt.qoi + 6e-3 + 1e-9;
         }
         // G3 translation equivariance: translate the mesh AND the queries;
@@ -499,6 +677,10 @@ fn rmesh_007_mesh_to_sdf_converter_is_certified_equivariant_and_incremental() {
             // so samples align and values match to fp noise.
             equivariant &= (a - b).abs() < 1e-6;
         }
+        assert!(
+            receipt.certified().is_err(),
+            "generic mesh receipt must not cross the rigorous-certification boundary"
+        );
         // Incremental == full (G5): edit a vertex patch, refresh the dirty
         // box, compare bitwise against a full rebuild of the edited mesh.
         let mut edited = ico.clone();
@@ -530,8 +712,8 @@ fn rmesh_007_mesh_to_sdf_converter_is_certified_equivariant_and_incremental() {
             let b = full.value.eval(p, cx).signed_distance;
             incremental_identical &= a.to_bits() == b.to_bits();
         }
-        // Downgrade path: adversarial open/slivered soup gets an Estimate
-        // receipt naming the heuristic.
+        // Adversarial open/slivered soup also remains Estimate and names the
+        // heuristic plus failed quality-screen diagnostics.
         let nasty = shapes::corrupt(
             shapes::icosphere(Point3::new(0.0, 0.0, 0.0), 1.0, 1),
             0,
@@ -542,6 +724,7 @@ fn rmesh_007_mesh_to_sdf_converter_is_certified_equivariant_and_incremental() {
         let nasty_receipt =
             fs_rep_mesh::mesh_to_sdf(&MeshChart::new(nasty), 0.15, cx).expect("soup builds");
         let downgrade_ok = nasty_receipt.numerical.kind == fs_evidence::NumericalKind::Estimate
+            && nasty_receipt.value.abstract_distance_kind() == fs_evidence::NumericalKind::Estimate
             && nasty_receipt
                 .model
                 .cards
@@ -571,9 +754,10 @@ fn rmesh_007_mesh_to_sdf_converter_is_certified_equivariant_and_incremental() {
         "rmesh-007",
         analytic_ok && equivariant && incremental_identical && downgrade_ok,
         &format!(
-            "mesh->SDF: analytic match within declared envelope, translation-equivariant (G3), \
+            "mesh->SDF: analytic match within recorded estimate, translation-equivariant (G3), \
              incremental update bit-identical to full rebuild (G5, {samples} samples \
-             refreshed), open-soup receipts honestly downgraded (seed {SEED:#x})"
+             refreshed), generic-soup payloads and receipts honestly capped at Estimate \
+             (seed {SEED:#x})"
         ),
     );
 }
@@ -598,7 +782,7 @@ fn rmesh_008_dual_contouring_reconstructs_certifies_and_detects_bad_triangles() 
                 worst = worst.max((v.delta_from(sphere.center).norm() - 1.0).abs());
             }
             // Bracket certificate: proven within tolerance everywhere.
-            let cert = bracket_certificate(&sphere, &soup, 0.2, cx).expect("lipschitz chart");
+            let cert = bracket_certificate(&sphere, &soup, 0.2, cx).expect("exact-distance chart");
             let (cert_ok, margin) = match cert {
                 Ok(report) => (true, report.worst_margin),
                 Err(fails) => {
@@ -610,7 +794,7 @@ fn rmesh_008_dual_contouring_reconstructs_certifies_and_detects_bad_triangles() 
             let manifold =
                 fs_rep_mesh::HalfEdgeMesh::from_triangles(soup.positions.clone(), &soup.triangles)
                     .is_ok();
-            let closed = fs_rep_mesh::assess_quality(&soup).sign_certified();
+            let closed = fs_rep_mesh::assess_quality(&soup).passes_basic_orientation_checks();
             let w = fs_rep_mesh::winding_exact(&soup, sphere.center);
             // G3 rigid motion: translate the chart; vertices translate.
             let shift = fs_geom::Vec3::new(0.5, 0.25, -0.375); // dyadic: exact fp
@@ -662,7 +846,7 @@ fn rmesh_008_dual_contouring_reconstructs_certifies_and_detects_bad_triangles() 
         // certificate must fail and LOCALIZE.
         let mut broken = qef.clone();
         broken.positions[7] = Point3::new(3.0, 3.0, 3.0);
-        let verdict = bracket_certificate(&bx, &broken, 0.2, cx).expect("lipschitz chart");
+        let verdict = bracket_certificate(&bx, &broken, 0.2, cx).expect("exact-distance chart");
         let detects = matches!(&verdict, Err(fails) if !fails.is_empty()
             && fails.iter().all(|f| f.proven_bound > f.tolerance));
         (corner_dist(&qef), corner_dist(&mass), detects)
@@ -699,5 +883,183 @@ fn rmesh_008_dual_contouring_reconstructs_certifies_and_detects_bad_triangles() 
              {qef_corner_err:.4} vs mass-point {mass_corner_err:.4}; a seeded bad triangle is \
              caught and localized"
         ),
+    );
+}
+
+/// rmesh-009 — dual contouring has an explicit finite-domain boundary:
+/// unresolved extended supports and invalid/excessive grids refuse before
+/// chart evaluation, while the clipped API contours `chart ∩ clip` and is
+/// translation-equivariant (G3).
+#[test]
+fn rmesh_009_dual_contour_sampling_domain_is_explicit_and_preflighted() {
+    with_cx(|cx| {
+        let clip = Aabb::new(Point3::new(-0.5, -0.5, -0.5), Point3::new(0.5, 0.5, 0.5));
+
+        let unbounded = CountingPlane::new(0.0);
+        assert!(matches!(
+            dual_contour(&unbounded, DcOptions::sharp(0.125), cx),
+            Err(ContourError::SamplingDomain(
+                SamplingDomainError::UnboundedSupport { .. }
+            ))
+        ));
+        assert_eq!(unbounded.eval_count(), 0, "support refusal precedes eval");
+
+        let invalid = CountingPlane::new(0.0);
+        assert!(matches!(
+            dual_contour_clipped(&invalid, DcOptions::sharp(0.0), clip, cx),
+            Err(ContourError::InvalidSpacing { .. })
+        ));
+        assert_eq!(invalid.eval_count(), 0, "invalid h precedes eval");
+
+        let too_fine = CountingPlane::new(0.0);
+        assert!(matches!(
+            dual_contour_clipped(&too_fine, DcOptions::sharp(0.001), clip, cx),
+            Err(ContourError::ResolutionTooFine {
+                cap: DC_MAX_CELLS_PER_AXIS,
+                ..
+            })
+        ));
+        assert_eq!(too_fine.eval_count(), 0, "grid cap precedes eval");
+
+        let source = CountingPlane::new(0.0);
+        let (soup, stats) = dual_contour_clipped(&source, DcOptions::sharp(0.125), clip, cx)
+            .expect("clipped half-box contours");
+        assert!(stats.triangles > 0 && !soup.positions.is_empty());
+        assert!(
+            soup.positions
+                .iter()
+                .all(|p| clip.inflate(0.126).contains(*p)),
+            "contour vertices stay in the clipped geometry's sampled halo"
+        );
+
+        let shift = Vec3::new(0.25, -0.125, 0.375);
+        let moved_clip = Aabb::new(clip.min.offset(shift), clip.max.offset(shift));
+        let (moved, _) = dual_contour_clipped(
+            &CountingPlane::new(shift.x),
+            DcOptions::sharp(0.125),
+            moved_clip,
+            cx,
+        )
+        .expect("translated clipped half-box contours");
+        assert_eq!(soup.positions.len(), moved.positions.len());
+        assert_eq!(soup.triangles, moved.triangles);
+        for (a, b) in soup.positions.iter().zip(&moved.positions) {
+            assert!(
+                b.offset(shift.scale(-1.0)).delta_from(*a).norm() < 1e-9,
+                "G3 contour vertex mismatch"
+            );
+        }
+    });
+    verdict(
+        "rmesh-009",
+        true,
+        "dual contouring rejects unresolved extended support and invalid/excessive grids before evaluation; the clipped API contours source-intersection-clip and preserves translation equivariance (G3)",
+    );
+}
+
+/// rmesh-010 — bracket authority is global and evidence-backed: a local
+/// `Some(1)` cannot promote a no-claim/estimate chart, and the bracket
+/// consumer observes cancellation requested by a non-polling chart.
+#[test]
+fn rmesh_010_bracket_authority_fails_closed_and_polls_directly() {
+    let soup = fs_rep_mesh::Soup {
+        positions: vec![
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(0.0, 0.25, 0.0),
+            Point3::new(0.0, 0.0, 0.25),
+        ],
+        triangles: vec![[0, 1, 2]],
+    };
+
+    with_cx(|cx| {
+        let no_claim = BracketAuthorityPlane {
+            mode: BracketAuthorityMode::NoClaim,
+            evals: AtomicU64::new(0),
+        };
+        let error = bracket_certificate(&no_claim, &soup, 0.5, cx)
+            .expect_err("local Some(1) must not upgrade NoClaim");
+        assert_eq!(
+            error,
+            BracketCertificateError::UnsupportedTraceClaim {
+                actual: TraceStepClaim::NoClaim,
+            }
+        );
+        assert_eq!(
+            no_claim.eval_count(),
+            0,
+            "trace-theorem refusal precedes evaluation"
+        );
+
+        let estimate = BracketAuthorityPlane {
+            mode: BracketAuthorityMode::Estimate,
+            evals: AtomicU64::new(0),
+        };
+        let error = bracket_certificate(&estimate, &soup, 0.5, cx)
+            .expect_err("Estimate evidence must not become a verdict");
+        assert!(matches!(
+            error,
+            BracketCertificateError::InvalidTraceEvidence {
+                completed_evaluations: 1,
+                issue: BracketEvidenceIssue::NonRigorous {
+                    kind: NumericalKind::Estimate,
+                },
+                ..
+            }
+        ));
+        assert_eq!(estimate.eval_count(), 1);
+
+        let no_evidence = BracketAuthorityPlane {
+            mode: BracketAuthorityMode::NoClaimEvidence,
+            evals: AtomicU64::new(0),
+        };
+        let error = bracket_certificate(&no_evidence, &soup, 0.5, cx)
+            .expect_err("NoClaim evidence must not become a verdict");
+        assert!(matches!(
+            error,
+            BracketCertificateError::InvalidTraceEvidence {
+                issue: BracketEvidenceIssue::NonRigorous {
+                    kind: NumericalKind::NoClaim,
+                },
+                ..
+            }
+        ));
+
+        let malformed = BracketAuthorityPlane {
+            mode: BracketAuthorityMode::MalformedExact,
+            evals: AtomicU64::new(0),
+        };
+        let error = bracket_certificate(&malformed, &soup, 0.5, cx)
+            .expect_err("malformed Exact evidence must not become a verdict");
+        assert!(matches!(
+            error,
+            BracketCertificateError::InvalidTraceEvidence {
+                issue: BracketEvidenceIssue::MalformedExact,
+                ..
+            }
+        ));
+    });
+
+    let gate = CancelGate::new();
+    let cancelling = BracketAuthorityPlane {
+        mode: BracketAuthorityMode::RequestCancellation(&gate),
+        evals: AtomicU64::new(0),
+    };
+    with_gate_cx(&gate, |cx| {
+        let error = bracket_certificate(&cancelling, &soup, 0.5, cx)
+            .expect_err("bracket consumer must observe requested cancellation");
+        assert_eq!(
+            error,
+            BracketCertificateError::Cancelled {
+                completed_triangles: 0,
+                completed_evaluations: 1,
+            }
+        );
+    });
+    assert_eq!(cancelling.eval_count(), 1);
+
+    verdict(
+        "rmesh-010",
+        true,
+        "NoClaim, Estimate, and malformed evidence cannot borrow authority from a local Lipschitz sample; direct post-evaluation polling reports cancellation progress",
     );
 }

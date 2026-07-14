@@ -10,9 +10,10 @@
 
 use asupersync::types::Budget;
 use fs_exec::{CancelGate, Cx, ExecMode, StreamKey};
-use fs_geom::diff::{IdentifiedPatch, semantic_diff};
+use fs_geom::diff::{IdentifiedPatch, SemanticDiffError, semantic_diff, semantic_diff_clipped};
 use fs_geom::fixtures::SphereChart;
-use fs_geom::{EntityId, IdTransform, IdentityMap, Point3};
+use fs_geom::{Aabb, Chart, EntityId, IdTransform, IdentityMap, Point3, SamplingDomainError, Vec3};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn verdict(case: &str, detail: &str) {
     println!(
@@ -23,10 +24,14 @@ fn verdict(case: &str, detail: &str) {
 
 fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
     let gate = CancelGate::new();
+    with_gate_cx(&gate, f)
+}
+
+fn with_gate_cx<R>(gate: &CancelGate, f: impl FnOnce(&Cx<'_>) -> R) -> R {
     let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
     pool.scope(|arena| {
         let cx = Cx::new(
-            &gate,
+            gate,
             arena,
             StreamKey {
                 seed: 1,
@@ -50,6 +55,174 @@ fn sphere(cx: f64, r: f64) -> SphereChart {
 
 const HULL: EntityId = EntityId(7);
 const KEEL: EntityId = EntityId(8);
+
+struct UnboundedPlane;
+
+impl Chart for UnboundedPlane {
+    fn eval(&self, x: Point3, _cx: &Cx<'_>) -> fs_geom::ChartSample {
+        fs_geom::ChartSample {
+            signed_distance: x.x,
+            gradient: Some(Vec3::new(1.0, 0.0, 0.0)),
+            lipschitz: Some(1.0),
+            error: fs_evidence::NumericalCertificate::exact(x.x),
+        }
+    }
+
+    fn support(&self) -> Aabb {
+        Aabb::WHOLE_SPACE
+    }
+
+    fn name(&self) -> &'static str {
+        "test/unbounded-plane"
+    }
+}
+
+#[test]
+fn df_000_unbounded_comparison_requires_an_explicit_clip() {
+    with_cx(|cx| {
+        let plane = UnboundedPlane;
+        let a = [IdentifiedPatch {
+            id: Some(HULL),
+            chart: &plane,
+        }];
+        let b = [IdentifiedPatch {
+            id: Some(HULL),
+            chart: &plane,
+        }];
+        let identity = IdentityMap::new();
+        assert!(matches!(
+            semantic_diff(&a, &b, &identity, &[], &[], 1e-6, cx),
+            Err(SemanticDiffError::SamplingDomain {
+                source: SamplingDomainError::UnboundedSupport { .. },
+                ..
+            })
+        ));
+        let clip = Aabb::new(Point3::new(-1.0, -1.0, -1.0), Point3::new(1.0, 1.0, 1.0));
+        let local = semantic_diff_clipped(&a, &b, &identity, &[], &[], 1e-6, clip, cx)
+            .expect("finite clip admits unbounded field comparison");
+        assert!(local.objects.is_empty());
+        assert_eq!(local.sampling_clip, Some(clip));
+    });
+}
+
+struct CancellingDiffChart<'a> {
+    gate: &'a CancelGate,
+    evaluations: AtomicUsize,
+}
+
+impl Chart for CancellingDiffChart<'_> {
+    fn eval(&self, x: Point3, _cx: &Cx<'_>) -> fs_geom::ChartSample {
+        if self.evaluations.fetch_add(1, Ordering::Relaxed) == 0 {
+            self.gate.request();
+        }
+        fs_geom::ChartSample {
+            signed_distance: x.x,
+            gradient: Some(Vec3::new(1.0, 0.0, 0.0)),
+            lipschitz: Some(1.0),
+            error: fs_evidence::NumericalCertificate::exact(x.x),
+        }
+    }
+
+    fn support(&self) -> Aabb {
+        Aabb::new(Point3::new(-1.0, -1.0, -1.0), Point3::new(1.0, 1.0, 1.0))
+    }
+
+    fn name(&self) -> &'static str {
+        "test/cancelling-diff"
+    }
+}
+
+#[test]
+fn df_000b_field_sampler_polls_cancellation_directly() {
+    let gate = CancelGate::new();
+    let chart = CancellingDiffChart {
+        gate: &gate,
+        evaluations: AtomicUsize::new(0),
+    };
+    with_gate_cx(&gate, |cx| {
+        let a = [IdentifiedPatch {
+            id: Some(HULL),
+            chart: &chart,
+        }];
+        let b = [IdentifiedPatch {
+            id: Some(HULL),
+            chart: &chart,
+        }];
+        let refusal = semantic_diff(&a, &b, &IdentityMap::new(), &[], &[], 1e-6, cx);
+        assert!(
+            matches!(
+                refusal,
+                Err(SemanticDiffError::Cancelled {
+                    stage: "field-sampling",
+                    entity: Some(HULL),
+                    completed_draws: 0,
+                })
+            ),
+            "semantic diff must poll independently of chart implementations: {refusal:?}"
+        );
+    });
+}
+
+struct MalformedDiffChart {
+    value: f64,
+}
+
+impl Chart for MalformedDiffChart {
+    fn eval(&self, _x: Point3, _cx: &Cx<'_>) -> fs_geom::ChartSample {
+        fs_geom::ChartSample {
+            signed_distance: self.value,
+            gradient: None,
+            lipschitz: None,
+            error: fs_evidence::NumericalCertificate::no_claim(),
+        }
+    }
+
+    fn support(&self) -> Aabb {
+        Aabb::new(Point3::new(-1.0, -1.0, -1.0), Point3::new(1.0, 1.0, 1.0))
+    }
+
+    fn name(&self) -> &'static str {
+        "test/malformed-diff"
+    }
+}
+
+#[test]
+fn df_000c_invalid_tolerance_and_nonfinite_fields_refuse_instead_of_false_clean() {
+    with_cx(|cx| {
+        let finite = sphere(0.0, 1.0);
+        let invalid = MalformedDiffChart { value: f64::NAN };
+        let world_a = [IdentifiedPatch {
+            id: Some(HULL),
+            chart: &invalid,
+        }];
+        let world_b = [IdentifiedPatch {
+            id: Some(HULL),
+            chart: &finite,
+        }];
+        assert!(matches!(
+            semantic_diff(&world_a, &world_b, &IdentityMap::new(), &[], &[], 1e-6, cx,),
+            Err(SemanticDiffError::InvalidFieldSample {
+                entity: Some(HULL),
+                side: fs_geom::diff::SemanticDiffSide::A,
+                ..
+            })
+        ));
+        assert_eq!(
+            semantic_diff(
+                &world_b,
+                &world_b,
+                &IdentityMap::new(),
+                &[],
+                &[],
+                f64::NAN,
+                cx,
+            ),
+            Err(SemanticDiffError::InvalidTolerance {
+                value_bits: f64::NAN.to_bits(),
+            })
+        );
+    });
+}
 
 #[test]
 fn df_001_two_edit_pair_attributes_both_ranked() {
@@ -113,7 +286,9 @@ fn df_001_two_edit_pair_attributes_both_ranked() {
             &[gen1, gen2],
             1e-6,
             cx,
-        );
+        )
+        .expect("bounded semantic-diff domain");
+        assert_eq!(report.sampling_clip, None);
         // Exactly one finding: the hull. The keel (untouched) is quiet.
         assert_eq!(report.objects.len(), 1, "only the edited entity differs");
         let obj = &report.objects[0];
@@ -177,7 +352,8 @@ fn df_002_fallback_is_flagged_and_measured() {
             },
         ];
         let identity = IdentityMap::new();
-        let report = semantic_diff(&world_a, &world_b, &identity, &[], &[], 1e-6, cx);
+        let report = semantic_diff(&world_a, &world_b, &identity, &[], &[], 1e-6, cx)
+            .expect("bounded semantic-diff domain");
         // The legacy difference is found but FLAGGED unattributed.
         let fallback: Vec<_> = report.objects.iter().filter(|o| !o.attributed).collect();
         assert_eq!(fallback.len(), 1, "the legacy pair's difference is found");
@@ -284,8 +460,10 @@ fn df_004_invariance_reindex_and_rigid_motion() {
                 chart: &hull_b,
             },
         ];
-        let r1 = semantic_diff(&wa1, &wb1, &identity, &[7], &[], 1e-6, cx);
-        let r2 = semantic_diff(&wa2, &wb2, &identity, &[7], &[], 1e-6, cx);
+        let r1 = semantic_diff(&wa1, &wb1, &identity, &[7], &[], 1e-6, cx)
+            .expect("bounded semantic-diff domain");
+        let r2 = semantic_diff(&wa2, &wb2, &identity, &[7], &[], 1e-6, cx)
+            .expect("bounded semantic-diff domain");
         assert_eq!(r1.objects.len(), 1);
         assert_eq!(
             r1.objects[0].magnitude.to_bits(),
@@ -317,7 +495,8 @@ fn df_004_invariance_reindex_and_rigid_motion() {
                 chart: &keel_m,
             },
         ];
-        let rm = semantic_diff(&wam, &wbm, &identity, &[7], &[], 1e-6, cx);
+        let rm = semantic_diff(&wam, &wbm, &identity, &[7], &[], 1e-6, cx)
+            .expect("bounded semantic-diff domain");
         assert_eq!(rm.objects.len(), 1);
         assert!(
             (rm.objects[0].magnitude - r1.objects[0].magnitude).abs() < 5e-3,
@@ -361,7 +540,8 @@ fn df_005_created_deleted_and_filtering() {
         ];
         let mut identity = IdentityMap::new();
         identity.record(1, vec![IdTransform::Preserved(HULL)]);
-        let report = semantic_diff(&world_a, &world_b, &identity, &[1], &[], 1e-6, cx);
+        let report = semantic_diff(&world_a, &world_b, &identity, &[1], &[], 1e-6, cx)
+            .expect("bounded semantic-diff domain");
         assert_eq!(report.only_a, vec![EntityId(20)], "deleted entity reported");
         assert_eq!(report.only_b, vec![EntityId(21)], "created entity reported");
         // Filtering: magnitude floor and region window.

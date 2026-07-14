@@ -356,7 +356,7 @@ fn tmesh_004_hull_and_complex_integration() {
         }
         verdict(
             "tmesh-004",
-            quality.sign_certified() && (w - 1.0).abs() < 1e-9 && dd_zero,
+            quality.passes_basic_orientation_checks() && (w - 1.0).abs() < 1e-9 && dd_zero,
             &format!(
                 "hull is closed 2-manifold with winding {w:.6} at an interior point \
                  (outward-oriented) and the oriented tet complex satisfies dd=0 \
@@ -483,7 +483,9 @@ fn icosphere(center: Point3, r: f64, sub: u32) -> fs_rep_mesh::Soup {
     fs_rep_mesh::shapes::icosphere(center, r, sub)
 }
 
-/// Closed-manifold validity: half-edge invariants + edge-use audit.
+/// Closed-manifold validity: half-edge invariants plus a basic orientation
+/// screen. The half-edge audit, not the quality heuristic, carries the
+/// topological check.
 fn valid_closed(soup: &fs_rep_mesh::Soup) -> Result<(), String> {
     let he = HalfEdgeMesh::from_triangles(soup.positions.clone(), &soup.triangles)
         .map_err(|e| format!("from_triangles: {e}"))?;
@@ -491,8 +493,8 @@ fn valid_closed(soup: &fs_rep_mesh::Soup) -> Result<(), String> {
         return Err(format!("invariant: {v}"));
     }
     let q = assess_quality(soup);
-    if !q.sign_certified() {
-        return Err(format!("not closed 2-manifold: {q:?}"));
+    if !q.passes_basic_orientation_checks() {
+        return Err(format!("basic orientation screen failed: {q:?}"));
     }
     Ok(())
 }

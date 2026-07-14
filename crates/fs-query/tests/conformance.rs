@@ -2,19 +2,21 @@
 //! pass). Multi-chart AGREEMENT for closest point and raycasts,
 //! tracer safety vs a dense oracle including tangent rays, offsets and
 //! ball-Minkowski exactness, certified separation bounds, the
-//! thickness oracle on graded fixtures with the medial cross-check and
+//! Estimate-authority thickness marcher on graded fixtures with the medial cross-check and
 //! the design-lever subgradient, and curvature convergence at the
 //! documented order per chart class. JSON-line verdicts; seeded cases
 //! carry seeds.
 
 use asupersync::types::Budget;
-use fs_evidence::NumericalCertificate;
+use fs_evidence::{NumericalCertificate, NumericalKind};
 use fs_exec::{CancelGate, Cx, ExecMode, StreamKey};
 use fs_geom::fixtures::SphereChart;
-use fs_geom::{Aabb, Chart, ChartSample, Point3, TraceStepClaim, Vec3};
+use fs_geom::{Aabb, Chart, ChartSample, Point3, SamplingDomainError, TraceStepClaim, Vec3};
 use fs_query::{
-    CurvatureClass, OffsetChart, QueryError, closest_point, curvature, medial_poles, min_thickness,
-    minkowski_ball, raycast, separation, thickness_at,
+    CurvatureClass, OffsetChart, QueryError, SEPARATION_MAX_CHART_SAMPLES, SeparationScope,
+    closest_point, closest_point_clipped, curvature, medial_poles, min_thickness,
+    min_thickness_clipped, minkowski_ball, raycast, separation, separation_clipped, thickness_at,
+    thickness_at_clipped,
 };
 use fs_rep_frep::{BoolOp, BoolStyle, FrepBuilder};
 
@@ -65,6 +67,134 @@ fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
         );
         f(&cx)
     })
+}
+
+#[derive(Clone, Copy)]
+enum MalformedPointKind {
+    Value,
+    Gradient,
+}
+
+struct MalformedPointChart {
+    kind: MalformedPointKind,
+}
+
+struct OffsetEvidenceChart {
+    certificate: NumericalCertificate,
+}
+
+impl Chart for MalformedPointChart {
+    fn eval(&self, _point: Point3, _cx: &Cx<'_>) -> ChartSample {
+        ChartSample {
+            signed_distance: if matches!(self.kind, MalformedPointKind::Value) {
+                f64::NAN
+            } else {
+                0.0
+            },
+            gradient: Some(if matches!(self.kind, MalformedPointKind::Gradient) {
+                Vec3::new(f64::INFINITY, 0.0, 0.0)
+            } else {
+                Vec3::new(1.0, 0.0, 0.0)
+            }),
+            lipschitz: None,
+            error: NumericalCertificate::no_claim(),
+        }
+    }
+
+    fn support(&self) -> Aabb {
+        Aabb::new(Point3::new(-1.0, -1.0, -1.0), Point3::new(1.0, 1.0, 1.0))
+    }
+
+    fn name(&self) -> &'static str {
+        "test/malformed-point"
+    }
+}
+
+impl Chart for OffsetEvidenceChart {
+    fn eval(&self, _point: Point3, _cx: &Cx<'_>) -> ChartSample {
+        ChartSample {
+            signed_distance: 0.0,
+            gradient: Some(Vec3::new(1.0, 0.0, 0.0)),
+            lipschitz: Some(1.0),
+            error: self.certificate,
+        }
+    }
+
+    fn support(&self) -> Aabb {
+        Aabb::new(Point3::new(-1.0, -1.0, -1.0), Point3::new(1.0, 1.0, 1.0))
+    }
+
+    fn name(&self) -> &'static str {
+        "test/offset-evidence"
+    }
+}
+
+struct HugeNewtonChart;
+
+impl Chart for HugeNewtonChart {
+    fn eval(&self, _point: Point3, _cx: &Cx<'_>) -> ChartSample {
+        ChartSample {
+            signed_distance: f64::MAX,
+            gradient: Some(Vec3::new(f64::MIN_POSITIVE, 0.0, 0.0)),
+            lipschitz: None,
+            error: NumericalCertificate::no_claim(),
+        }
+    }
+
+    fn support(&self) -> Aabb {
+        Aabb::new(Point3::new(-1.0, -1.0, -1.0), Point3::new(1.0, 1.0, 1.0))
+    }
+
+    fn name(&self) -> &'static str {
+        "test/huge-newton"
+    }
+}
+
+struct ExtremeFiniteDifferenceChart;
+
+impl Chart for ExtremeFiniteDifferenceChart {
+    fn eval(&self, _point: Point3, _cx: &Cx<'_>) -> ChartSample {
+        ChartSample {
+            signed_distance: 1.0,
+            gradient: None,
+            lipschitz: None,
+            error: NumericalCertificate::no_claim(),
+        }
+    }
+
+    fn support(&self) -> Aabb {
+        Aabb::new(
+            Point3::new(1.7e308, 1.7e308, 1.7e308),
+            Point3::new(f64::MAX, f64::MAX, f64::MAX),
+        )
+    }
+
+    fn name(&self) -> &'static str {
+        "test/extreme-finite-difference"
+    }
+}
+
+struct ExplosiveCurvatureChart;
+
+impl Chart for ExplosiveCurvatureChart {
+    fn eval(&self, point: Point3, _cx: &Cx<'_>) -> ChartSample {
+        let at_origin = point.x.to_bits() == 0 && point.y.to_bits() == 0 && point.z.to_bits() == 0;
+        let value = if at_origin { 0.0 } else { f64::MAX };
+        ChartSample {
+            signed_distance: value,
+            gradient: Some(Vec3::new(1.0, 0.0, 0.0)),
+            lipschitz: None,
+            error: NumericalCertificate::estimate(value, value),
+        }
+    }
+
+    fn support(&self) -> Aabb {
+        Aabb::new(Point3::new(-1.0, -1.0, -1.0), Point3::new(1.0, 1.0, 1.0))
+    }
+
+    fn name(&self) -> &'static str {
+        "test/explosive-curvature"
+    }
 }
 
 fn frep_sphere(center: Point3, r: f64) -> fs_rep_frep::Frep {
@@ -151,6 +281,156 @@ fn gq_001_closest_point_agreement() {
             ),
         );
     });
+}
+
+/// gq-001a — closest-point queries refuse malformed producer samples,
+/// overflowing Newton updates, overflowing finite-difference points, and
+/// producer-requested cancellation instead of publishing NaN/Inf answers.
+#[test]
+#[allow(clippy::too_many_lines)] // One fail-closed campaign shares the malformed-producer matrix.
+fn gq_001a_closest_point_fails_closed_on_nonfinite_paths() {
+    let malformed_value = with_cx(|cx| {
+        closest_point(
+            &MalformedPointChart {
+                kind: MalformedPointKind::Value,
+            },
+            Point3::new(0.0, 0.0, 0.0),
+            cx,
+        )
+    });
+    let malformed_gradient = with_cx(|cx| {
+        closest_point(
+            &MalformedPointChart {
+                kind: MalformedPointKind::Gradient,
+            },
+            Point3::new(0.0, 0.0, 0.0),
+            cx,
+        )
+    });
+    let newton_overflow =
+        with_cx(|cx| closest_point(&HugeNewtonChart, Point3::new(0.0, 0.0, 0.0), cx));
+    let fd_overflow = with_cx(|cx| {
+        closest_point(
+            &ExtremeFiniteDifferenceChart,
+            Point3::new(f64::MAX, f64::MAX, f64::MAX),
+            cx,
+        )
+    });
+    let gate = CancelGate::new();
+    let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+    let cancelled = pool.scope(|arena| {
+        let cx = Cx::new(
+            &gate,
+            arena,
+            StreamKey {
+                seed: 0x9E4,
+                kernel_id: 11,
+                tile: 0,
+                iteration: 0,
+            },
+            Budget::INFINITE,
+            ExecMode::Deterministic,
+        );
+        closest_point(
+            &CancellingSeparationSphere {
+                gate: &gate,
+                during: CancelDuring::Eval,
+            },
+            Point3::new(2.0, 0.0, 0.0),
+            &cx,
+        )
+    });
+    let medial_boundary = fs_rep_mesh::Soup {
+        positions: vec![
+            Point3::new(-1.0, -1.0, -1.0),
+            Point3::new(1.0, -1.0, 1.0),
+            Point3::new(-1.0, 1.0, 1.0),
+            Point3::new(1.0, 1.0, -1.0),
+        ],
+        triangles: vec![[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]],
+    };
+    let medial_gate = CancelGate::new();
+    let medial_pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+    let cancelled_medial = medial_pool.scope(|arena| {
+        let cx = Cx::new(
+            &medial_gate,
+            arena,
+            StreamKey {
+                seed: 0x9E4,
+                kernel_id: 6,
+                tile: 0,
+                iteration: 0,
+            },
+            Budget::INFINITE,
+            ExecMode::Deterministic,
+        );
+        medial_poles(
+            &CancellingSeparationSphere {
+                gate: &medial_gate,
+                during: CancelDuring::Eval,
+            },
+            &medial_boundary,
+            0.0,
+            &cx,
+        )
+    });
+    let invalid_medial_boundary = with_cx(|cx| {
+        medial_poles(
+            &SphereChart {
+                center: Point3::new(0.0, 0.0, 0.0),
+                radius: 1.0,
+            },
+            &fs_rep_mesh::Soup {
+                positions: vec![Point3::new(0.0, 0.0, 0.0)],
+                triangles: vec![[0, 1, 0]],
+            },
+            1.0,
+            cx,
+        )
+    });
+    let overflowing_medial_threshold = with_cx(|cx| {
+        medial_poles(
+            &SphereChart {
+                center: Point3::new(0.0, 0.0, 0.0),
+                radius: 1.0,
+            },
+            &medial_boundary,
+            f64::MAX,
+            cx,
+        )
+    });
+    verdict(
+        "gq-001a",
+        matches!(malformed_value, Err(QueryError::InvalidPointSample { .. }))
+            && matches!(
+                malformed_gradient,
+                Err(QueryError::InvalidPointSample { .. })
+            )
+            && matches!(
+                newton_overflow,
+                Err(QueryError::InvalidPointArithmetic { .. })
+            )
+            && matches!(fd_overflow, Err(QueryError::InvalidPointSample { .. }))
+            && matches!(cancelled, Err(QueryError::Cancelled))
+            && matches!(cancelled_medial, Err(QueryError::Cancelled))
+            && matches!(
+                invalid_medial_boundary,
+                Err(QueryError::InvalidBoundaryIndex {
+                    triangle: 0,
+                    corner: 1,
+                    index: 1,
+                    positions: 1,
+                })
+            )
+            && matches!(
+                overflowing_medial_threshold,
+                Err(QueryError::InvalidPointArithmetic { .. })
+            ),
+        "closest point rejects nonfinite producer output, extreme FD coordinates, and \
+         overflowing Newton/medial arithmetic; malformed public Soup indices refuse before \
+         Delaunay, and cancellation requested inside closest-point or medial-pole eval wins \
+         before publication",
+    );
 }
 
 /// gq-002 — raycast: analytic agreement across chart types, and SAFETY
@@ -578,9 +858,9 @@ fn gq_003_offset_minkowski() {
         let mut rng = Lcg(0x1001_2026_0707_0013);
         let mut ok = true;
         for (chart, tol) in [(&exact as &dyn Chart, 1e-12), (&frep as &dyn Chart, 1e-12)] {
-            let grown = OffsetChart::new(chart, 0.3);
-            let eroded = OffsetChart::new(chart, -0.2);
-            let mink = minkowski_ball(chart, 0.3);
+            let grown = OffsetChart::new(chart, 0.3).expect("finite dilation");
+            let eroded = OffsetChart::new(chart, -0.2).expect("finite erosion");
+            let mink = minkowski_ball(chart, 0.3).expect("finite ball radius");
             for _ in 0..100 {
                 let p = Point3::new(
                     rng.range(-2.0, 2.0),
@@ -597,15 +877,69 @@ fn gq_003_offset_minkowski() {
         // Offset charts retain differential queries: closest point on the
         // grown sphere lands at radius 1.3. Generic raycast remains an honest
         // NoClaim without a reach/proximity theorem for the offset level set.
-        let grown = OffsetChart::new(&exact, 0.3);
+        let grown = OffsetChart::new(&exact, 0.3).expect("finite dilation");
+        let transformed = grown.eval(Point3::new(2.0, 0.0, 0.0), cx);
+        let transformed_authority = transformed.error.kind == NumericalKind::Estimate
+            && transformed.error.lo <= transformed.signed_distance
+            && transformed.signed_distance <= transformed.error.hi;
+        let banded = OffsetChart::new(
+            &OffsetEvidenceChart {
+                certificate: NumericalCertificate::estimate(-100.0, 100.0),
+            },
+            0.3,
+        )
+        .expect("finite radius")
+        .eval(Point3::new(0.0, 0.0, 0.0), cx);
+        let preserved_band = banded.error.kind == NumericalKind::Estimate
+            && banded.error.lo <= -100.3
+            && banded.error.hi >= 99.7
+            && banded.error.lo < banded.signed_distance
+            && banded.signed_distance < banded.error.hi;
+        let overflowing_band = OffsetChart::new(
+            &OffsetEvidenceChart {
+                certificate: NumericalCertificate::estimate(-f64::MAX, f64::MAX),
+            },
+            f64::MAX,
+        )
+        .expect("maximum finite radius")
+        .eval(Point3::new(0.0, 0.0, 0.0), cx);
+        let malformed = OffsetChart::new(
+            &OffsetEvidenceChart {
+                certificate: NumericalCertificate {
+                    kind: NumericalKind::Exact,
+                    lo: -1.0,
+                    hi: 1.0,
+                },
+            },
+            0.3,
+        )
+        .expect("finite radius")
+        .eval(Point3::new(0.0, 0.0, 0.0), cx);
+        let invalid_radii = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY]
+            .into_iter()
+            .all(|radius| {
+                matches!(
+                    OffsetChart::new(&exact, radius),
+                    Err(QueryError::InvalidOffsetRadius { radius_bits })
+                        if radius_bits == radius.to_bits()
+                )
+            });
         let cp = closest_point(&grown, Point3::new(2.0, 0.5, -0.3), cx).expect("cp");
         let on_grown = (cp.point.delta_from(Point3::new(0.0, 0.0, 0.0)).norm() - 1.3).abs() < 1e-9;
         verdict(
             "gq-003",
-            ok && on_grown,
+            ok && on_grown
+                && transformed_authority
+                && preserved_band
+                && overflowing_band.error.kind == NumericalKind::NoClaim
+                && malformed.error.kind == NumericalKind::NoClaim
+                && invalid_radii,
             "offset spheres are exactly spheres of the summed radius across chart \
              types, erosion shrinks exactly, minkowski_ball is BITWISE the offset \
-             chart, and offset charts retain closest-point queries; \
+             chart, valid inner evidence is outward-translated into an Estimate preserving the \
+             full band and containing the new nominal, malformed or overflowing evidence and \
+             nonfinite radii fail closed, and offset charts \
+             retain closest-point queries; \
              seed 0x1001_2026_0707_0013",
         );
     });
@@ -657,7 +991,135 @@ fn gq_004_separation_certified() {
     });
 }
 
-/// gq-005 — the thickness oracle: exact on a graded slab, finds the
+/// gq-004a — neither plausible local Lipschitz/enclosure fields nor malformed
+/// per-sample evidence can mint a rigorous separation bracket.
+#[test]
+fn gq_004a_separation_requires_global_exact_distance_authority() {
+    with_cx(|cx| {
+        let exact = SphereChart {
+            center: Point3::new(0.0, 0.0, 0.0),
+            radius: 1.0,
+        };
+        let forged = separation(&ForgedLocalSeparationChart, &exact, 2, cx);
+        let estimate = separation(
+            &MalformedSeparationChart {
+                certificate: NumericalCertificate::estimate(-1.0, 1.0),
+            },
+            &exact,
+            2,
+            cx,
+        );
+        let nonfinite = separation(
+            &MalformedSeparationChart {
+                certificate: NumericalCertificate {
+                    kind: NumericalKind::Enclosure,
+                    lo: f64::NAN,
+                    hi: 1.0,
+                },
+            },
+            &exact,
+            2,
+            cx,
+        );
+        verdict(
+            "gq-004a",
+            matches!(
+                forged,
+                Err(QueryError::SeparationRequiresExactDistance {
+                    input: "a",
+                    claim: TraceStepClaim::NoClaim,
+                })
+            ) && matches!(estimate, Err(QueryError::InvalidTraceSample { .. }))
+                && matches!(nonfinite, Err(QueryError::InvalidTraceSample { .. })),
+            "local Lipschitz/enclosure fields do not upgrade NoClaim, and ExactDistance \
+             inputs must still supply finite rigorous per-sample trace enclosures",
+        );
+    });
+}
+
+struct CancellingSeparationSphere<'a> {
+    gate: &'a CancelGate,
+    during: CancelDuring,
+}
+
+impl Chart for CancellingSeparationSphere<'_> {
+    fn eval(&self, point: Point3, cx: &Cx<'_>) -> ChartSample {
+        let sample = SphereChart {
+            center: Point3::new(0.0, 0.0, 0.0),
+            radius: 1.0,
+        }
+        .eval(point, cx);
+        if matches!(self.during, CancelDuring::Eval) {
+            self.gate.request();
+        }
+        sample
+    }
+
+    fn support(&self) -> Aabb {
+        Aabb::new(Point3::new(-1.0, -1.0, -1.0), Point3::new(1.0, 1.0, 1.0))
+    }
+
+    fn trace_step_claim(&self) -> TraceStepClaim {
+        TraceStepClaim::ExactDistance
+    }
+
+    fn trace_value_enclosure(
+        &self,
+        _point: Point3,
+        sample: &ChartSample,
+        _cx: &Cx<'_>,
+    ) -> NumericalCertificate {
+        if matches!(self.during, CancelDuring::TraceEnclosure) {
+            self.gate.request();
+        }
+        sample.error
+    }
+
+    fn name(&self) -> &'static str {
+        "test/cancelling-separation-sphere"
+    }
+}
+
+/// gq-004b — cancellation requested by either separation producer wins
+/// immediately over that producer's otherwise-rigorous evidence.
+#[test]
+fn gq_004b_separation_rechecks_producer_cancellation() {
+    let run = |during| {
+        let gate = CancelGate::new();
+        let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+        pool.scope(|arena| {
+            let cx = Cx::new(
+                &gate,
+                arena,
+                StreamKey {
+                    seed: 0x9E4,
+                    kernel_id: 4,
+                    tile: 0,
+                    iteration: 0,
+                },
+                Budget::INFINITE,
+                ExecMode::Deterministic,
+            );
+            let chart = CancellingSeparationSphere {
+                gate: &gate,
+                during,
+            };
+            separation(&chart, &chart, 2, &cx)
+        })
+    };
+    verdict(
+        "gq-004b",
+        matches!(run(CancelDuring::Eval), Err(QueryError::Cancelled))
+            && matches!(
+                run(CancelDuring::TraceEnclosure),
+                Err(QueryError::Cancelled)
+            ),
+        "separation checkpoints directly after eval and trace_value_enclosure, so \
+         producer-requested cancellation wins before bracket authority",
+    );
+}
+
+/// gq-005 — the thickness estimator agrees with a graded slab, finds the
 /// dumbbell neck, cross-checks against medial poles, and responds to a
 /// DESIGN LEVER with the right subgradient (differentiable-friendly).
 #[test]
@@ -665,7 +1127,7 @@ fn gq_004_separation_certified() {
 fn gq_005_thickness_oracle() {
     with_cx(|cx| {
         // Graded slab via F-rep: |z| ≤ (t0 + g·x)/2 within a box.
-        // Thickness at (x, y, 0-top): t0 + g·x exactly.
+        // Analytic thickness at (x, y, 0-top): t0 + g·x.
         let slab = |t0: f64, g: f64| -> fs_rep_frep::Frep {
             let mut b = FrepBuilder::new();
             let bx = b
@@ -701,7 +1163,8 @@ fn gq_005_thickness_oracle() {
             let t = thickness_at(&s, cp.point, cx).expect("thickness");
             // The inward-normal chord of a wedge is thickness/cos(tilt);
             // tilt is atan(g/2) — tiny; accept 1% relative.
-            ok &= (t.value - expect).abs() / expect < 0.01;
+            ok &=
+                (t.value - expect).abs() / expect < 0.01 && t.authority == NumericalKind::Estimate;
         }
         // Dumbbell: two balls joined by a thin neck (hard union).
         let dumbbell = |neck_r: f64| -> fs_rep_frep::Frep {
@@ -737,8 +1200,12 @@ fn gq_005_thickness_oracle() {
             let th = core::f64::consts::TAU * f64::from(k) / 16.0;
             samples.push(Point3::new(0.0, 0.15 * th.cos(), 0.15 * th.sin()));
         }
-        let (min_t, skipped) = min_thickness(&d, &samples, cx).expect("min thickness");
-        let neck_ok = (min_t - 0.3).abs() < 0.01 && skipped == 0;
+        let minimum = min_thickness(&d, &samples, cx).expect("min thickness");
+        let min_t = minimum.value;
+        let skipped = minimum.skipped;
+        let neck_ok = (min_t - 0.3).abs() < 0.01
+            && skipped == 0
+            && minimum.authority == NumericalKind::Estimate;
         // Medial cross-check on the slab: poles' 2r matches thickness.
         let (hull, _) =
             fs_rep_mesh::dual_contour(&s, fs_rep_mesh::DcOptions::sharp(0.1), cx).expect("dc");
@@ -751,7 +1218,7 @@ fn gq_005_thickness_oracle() {
         let medial_agrees = (mid_pole - 0.4).abs() < 0.08;
         // Design-lever subgradient: d(min neck thickness)/d(neck_r) ≈ 2.
         let h = 1e-4;
-        let (t_hi, _) = min_thickness(
+        let t_hi = min_thickness(
             &dumbbell(0.15 + h),
             &{
                 let mut v = Vec::new();
@@ -767,8 +1234,9 @@ fn gq_005_thickness_oracle() {
             },
             cx,
         )
-        .expect("hi");
-        let (t_lo, _) = min_thickness(
+        .expect("hi")
+        .value;
+        let t_lo = min_thickness(
             &dumbbell(0.15 - h),
             &{
                 let mut v = Vec::new();
@@ -784,7 +1252,8 @@ fn gq_005_thickness_oracle() {
             },
             cx,
         )
-        .expect("lo");
+        .expect("lo")
+        .value;
         let subgrad = (t_hi - t_lo) / (2.0 * h);
         let lever_ok = (subgrad - 2.0).abs() < 1e-3;
         let mut em = fs_obs::Emitter::new("fs-query/conformance", "gq-005/thickness");
@@ -815,6 +1284,126 @@ fn gq_005_thickness_oracle() {
             ),
         );
     });
+}
+
+struct NonfiniteThicknessChart;
+
+struct UnrepresentableThicknessSlab {
+    min_x: f64,
+    max_x: f64,
+}
+
+impl Chart for NonfiniteThicknessChart {
+    fn eval(&self, _point: Point3, _cx: &Cx<'_>) -> ChartSample {
+        ChartSample {
+            signed_distance: 0.0,
+            gradient: Some(Vec3::new(f64::NAN, 0.0, 0.0)),
+            lipschitz: Some(1.0),
+            error: NumericalCertificate::no_claim(),
+        }
+    }
+
+    fn support(&self) -> Aabb {
+        Aabb::new(Point3::new(-1.0, -1.0, -1.0), Point3::new(1.0, 1.0, 1.0))
+    }
+
+    fn name(&self) -> &'static str {
+        "test/nonfinite-thickness"
+    }
+}
+
+impl Chart for UnrepresentableThicknessSlab {
+    fn eval(&self, point: Point3, _cx: &Cx<'_>) -> ChartSample {
+        let value = if point.x <= self.min_x || point.x >= self.max_x {
+            0.0
+        } else {
+            -1.0
+        };
+        ChartSample {
+            signed_distance: value,
+            // The left wall's outward normal is -x, so the inward march is +x.
+            gradient: Some(Vec3::new(-1.0, 0.0, 0.0)),
+            lipschitz: None,
+            error: NumericalCertificate::no_claim(),
+        }
+    }
+
+    fn support(&self) -> Aabb {
+        Aabb::new(
+            Point3::new(self.min_x, -1.0, -1.0),
+            Point3::new(self.max_x, 1.0, 1.0),
+        )
+    }
+
+    fn name(&self) -> &'static str {
+        "test/unrepresentable-thickness-slab"
+    }
+}
+
+/// gq-005a — malformed producer values fail closed, empty aggregates do not
+/// return an infinite nominal, and producer cancellation wins after `eval`.
+#[test]
+fn gq_005a_thickness_authority_and_validation() {
+    let malformed =
+        with_cx(|cx| thickness_at(&NonfiniteThicknessChart, Point3::new(0.0, 0.0, 0.0), cx));
+    let empty = with_cx(|cx| {
+        min_thickness(
+            &SphereChart {
+                center: Point3::new(0.0, 0.0, 0.0),
+                radius: 1.0,
+            },
+            &[],
+            cx,
+        )
+    });
+    let translated = 4_503_599_627_370_496.0;
+    let no_spatial_progress = with_cx(|cx| {
+        thickness_at(
+            &UnrepresentableThicknessSlab {
+                min_x: translated,
+                max_x: translated.next_up(),
+            },
+            Point3::new(translated, 0.0, 0.0),
+            cx,
+        )
+    });
+    let gate = CancelGate::new();
+    let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+    let cancelled = pool.scope(|arena| {
+        let cx = Cx::new(
+            &gate,
+            arena,
+            StreamKey {
+                seed: 0x9E4,
+                kernel_id: 5,
+                tile: 0,
+                iteration: 0,
+            },
+            Budget::INFINITE,
+            ExecMode::Deterministic,
+        );
+        thickness_at(
+            &CancellingSeparationSphere {
+                gate: &gate,
+                during: CancelDuring::Eval,
+            },
+            Point3::new(1.0, 0.0, 0.0),
+            &cx,
+        )
+    });
+    verdict(
+        "gq-005a",
+        matches!(malformed, Err(QueryError::InvalidThicknessSample { .. }))
+            && matches!(empty, Err(QueryError::NoThicknessSamples { skipped: 0 }))
+            && matches!(
+                no_spatial_progress,
+                Err(QueryError::InvalidThicknessArithmetic { .. })
+            )
+            && matches!(cancelled, Err(QueryError::Cancelled)),
+        "thickness refuses nonfinite gradients, empty aggregates, and positive parametric \
+         steps that make no representable geometric progress at a translated one-ulp wall; \
+         cancellation requested inside thickness eval wins before publication",
+    );
 }
 
 /// gq-006 — curvature: analytic values on sphere and torus, measured
@@ -907,6 +1496,389 @@ fn gq_006_curvature_convergence() {
             ),
         );
     });
+}
+
+/// gq-006a — curvature stencils validate every producer result and every
+/// arithmetic stage, and producer cancellation wins before publication.
+#[test]
+fn gq_006a_curvature_fails_closed_on_nonfinite_paths() {
+    let malformed = with_cx(|cx| {
+        curvature(
+            &MalformedPointChart {
+                kind: MalformedPointKind::Gradient,
+            },
+            Point3::new(0.0, 0.0, 0.0),
+            0.01,
+            cx,
+        )
+    });
+    let overflow = with_cx(|cx| {
+        curvature(
+            &ExplosiveCurvatureChart,
+            Point3::new(0.0, 0.0, 0.0),
+            0.01,
+            cx,
+        )
+    });
+    let extreme = with_cx(|cx| {
+        curvature(
+            &ExtendedPlane {
+                offset: 1.0e308,
+                orientation: 1.0,
+                analytic_gradient: false,
+                support: Aabb::new(
+                    Point3::new(f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY),
+                    Point3::new(f64::INFINITY, f64::INFINITY, f64::INFINITY),
+                ),
+            },
+            Point3::new(1.0e308, 0.0, 0.0),
+            0.01,
+            cx,
+        )
+    });
+    let gate = CancelGate::new();
+    let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+    let cancelled = pool.scope(|arena| {
+        let cx = Cx::new(
+            &gate,
+            arena,
+            StreamKey {
+                seed: 0x9E4,
+                kernel_id: 12,
+                tile: 0,
+                iteration: 0,
+            },
+            Budget::INFINITE,
+            ExecMode::Deterministic,
+        );
+        curvature(
+            &CancellingSeparationSphere {
+                gate: &gate,
+                during: CancelDuring::Eval,
+            },
+            Point3::new(1.0, 0.0, 0.0),
+            0.01,
+            &cx,
+        )
+    });
+    verdict(
+        "gq-006a",
+        matches!(malformed, Err(QueryError::InvalidPointSample { .. }))
+            && matches!(overflow, Err(QueryError::InvalidPointArithmetic { .. }))
+            && matches!(extreme, Err(QueryError::InvalidPointArithmetic { .. }))
+            && matches!(cancelled, Err(QueryError::Cancelled)),
+        "curvature refuses malformed samples, overflowing stencil arithmetic, and \
+         extreme coordinates where h makes no representable progress; cancellation \
+         requested inside eval wins before finite scalars are published",
+    );
+}
+
+#[derive(Clone, Copy)]
+struct ExtendedPlane {
+    offset: f64,
+    orientation: f64,
+    analytic_gradient: bool,
+    support: Aabb,
+}
+
+impl Chart for ExtendedPlane {
+    fn eval(&self, x: Point3, _cx: &Cx<'_>) -> ChartSample {
+        let value = self.orientation * (x.x - self.offset);
+        ChartSample {
+            signed_distance: value,
+            gradient: self
+                .analytic_gradient
+                .then_some(Vec3::new(self.orientation, 0.0, 0.0)),
+            lipschitz: Some(1.0),
+            error: NumericalCertificate::exact(value),
+        }
+    }
+
+    fn support(&self) -> Aabb {
+        self.support
+    }
+
+    fn trace_step_claim(&self) -> TraceStepClaim {
+        TraceStepClaim::ExactDistance
+    }
+
+    fn name(&self) -> &'static str {
+        "test/extended-plane"
+    }
+}
+
+struct InfiniteCylinder {
+    radius: f64,
+}
+
+impl Chart for InfiniteCylinder {
+    fn eval(&self, x: Point3, _cx: &Cx<'_>) -> ChartSample {
+        let rho = x.x.hypot(x.y);
+        let value = rho - self.radius;
+        ChartSample {
+            signed_distance: value,
+            gradient: (rho > 0.0).then_some(Vec3::new(x.x / rho, x.y / rho, 0.0)),
+            lipschitz: Some(1.0),
+            error: NumericalCertificate::exact(value),
+        }
+    }
+
+    fn support(&self) -> Aabb {
+        Aabb::new(
+            Point3::new(-self.radius, -self.radius, f64::NEG_INFINITY),
+            Point3::new(self.radius, self.radius, f64::INFINITY),
+        )
+    }
+
+    fn name(&self) -> &'static str {
+        "test/infinite-cylinder"
+    }
+}
+
+struct PanicEvalChart;
+
+impl Chart for PanicEvalChart {
+    fn eval(&self, _x: Point3, _cx: &Cx<'_>) -> ChartSample {
+        panic!("separation must reject an overflowing work count before chart evaluation")
+    }
+
+    fn support(&self) -> Aabb {
+        Aabb::new(Point3::new(-1.0, -1.0, -1.0), Point3::new(1.0, 1.0, 1.0))
+    }
+
+    fn trace_step_claim(&self) -> TraceStepClaim {
+        TraceStepClaim::ExactDistance
+    }
+
+    fn name(&self) -> &'static str {
+        "test/panic-eval"
+    }
+}
+
+struct ForgedLocalSeparationChart;
+
+impl Chart for ForgedLocalSeparationChart {
+    fn eval(&self, x: Point3, _cx: &Cx<'_>) -> ChartSample {
+        ChartSample {
+            signed_distance: x.x,
+            gradient: Some(Vec3::new(1.0, 0.0, 0.0)),
+            // These locally plausible fields deliberately do not upgrade the
+            // trait's default global NoClaim theorem.
+            lipschitz: Some(1.0),
+            error: NumericalCertificate::enclosure(x.x.next_down(), x.x.next_up()),
+        }
+    }
+
+    fn support(&self) -> Aabb {
+        Aabb::new(Point3::new(-1.0, -1.0, -1.0), Point3::new(1.0, 1.0, 1.0))
+    }
+
+    fn trace_value_enclosure(
+        &self,
+        _x: Point3,
+        sample: &ChartSample,
+        _cx: &Cx<'_>,
+    ) -> NumericalCertificate {
+        NumericalCertificate::enclosure(
+            sample.signed_distance.next_down(),
+            sample.signed_distance.next_up(),
+        )
+    }
+
+    fn name(&self) -> &'static str {
+        "test/forged-local-separation"
+    }
+}
+
+struct MalformedSeparationChart {
+    certificate: NumericalCertificate,
+}
+
+impl Chart for MalformedSeparationChart {
+    fn eval(&self, x: Point3, _cx: &Cx<'_>) -> ChartSample {
+        ChartSample {
+            signed_distance: x.x,
+            gradient: Some(Vec3::new(1.0, 0.0, 0.0)),
+            lipschitz: Some(1.0),
+            error: NumericalCertificate::exact(x.x),
+        }
+    }
+
+    fn support(&self) -> Aabb {
+        Aabb::new(Point3::new(-1.0, -1.0, -1.0), Point3::new(1.0, 1.0, 1.0))
+    }
+
+    fn trace_step_claim(&self) -> TraceStepClaim {
+        TraceStepClaim::ExactDistance
+    }
+
+    fn trace_value_enclosure(
+        &self,
+        _x: Point3,
+        _sample: &ChartSample,
+        _cx: &Cx<'_>,
+    ) -> NumericalCertificate {
+        self.certificate
+    }
+
+    fn name(&self) -> &'static str {
+        "test/malformed-separation"
+    }
+}
+
+/// gq-007 — every support-derived sampler resolves a finite domain before
+/// span/count arithmetic. Analytic point queries remain valid on honest
+/// unbounded charts, finite-difference fallbacks use caller scale, clipped
+/// separation carries local authority, and aggregate thickness cannot hide a
+/// domain refusal as a skipped local sample.
+#[test]
+#[allow(clippy::too_many_lines)] // One admission campaign compares all support-derived samplers.
+fn gq_007_unbounded_sampling_admission() {
+    with_cx(|cx| {
+        let unbounded = Aabb::new(
+            Point3::new(f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY),
+            Point3::new(f64::INFINITY, f64::INFINITY, f64::INFINITY),
+        );
+        let analytic = ExtendedPlane {
+            offset: 0.0,
+            orientation: 1.0,
+            analytic_gradient: true,
+            support: unbounded,
+        };
+        let numerical = ExtendedPlane {
+            analytic_gradient: false,
+            ..analytic
+        };
+        let clip = Aabb::new(Point3::new(-2.0, -2.0, -2.0), Point3::new(3.0, 2.0, 2.0));
+
+        let analytic_cp = closest_point(&analytic, Point3::new(2.0, 0.25, -0.5), cx)
+            .expect("analytic closest point needs no finite sampling domain");
+        let fd_default = closest_point(&numerical, Point3::new(2.0, 0.25, -0.5), cx);
+        let fd_clipped = closest_point_clipped(&numerical, Point3::new(2.0, 0.25, -0.5), clip, cx)
+            .expect("explicit clip supplies the FD scale");
+        let closest_ok = analytic_cp.residual < 1e-12
+            && matches!(
+                fd_default,
+                Err(QueryError::SamplingDomain(
+                    SamplingDomainError::UnboundedSupport { .. }
+                ))
+            )
+            && fd_clipped.residual < 1e-10;
+
+        let flat = curvature(&numerical, Point3::new(0.0, 0.2, -0.4), 0.01, cx)
+            .expect("curvature uses its explicit h for the missing gradient");
+        let invalid_steps = [0.0, -0.01, f64::MIN_POSITIVE, f64::INFINITY, f64::NAN]
+            .into_iter()
+            .all(|h| {
+                matches!(
+                    curvature(&analytic, Point3::new(0.0, 0.0, 0.0), h, cx),
+                    Err(QueryError::InvalidFiniteDifferenceStep { .. })
+                )
+            });
+        let curvature_ok = flat.mean.abs() < 1e-12
+            && flat.gaussian.abs() < 1e-12
+            && flat.principal.iter().all(|value| value.abs() < 1e-12)
+            && invalid_steps;
+
+        let opposite = ExtendedPlane {
+            offset: 1.0,
+            orientation: -1.0,
+            analytic_gradient: true,
+            support: unbounded,
+        };
+        let separation_default = separation(&analytic, &opposite, 12, cx);
+        let separation_local = separation_clipped(&analytic, &opposite, 12, clip, cx)
+            .expect("clip resolves both extended supports");
+        let malformed = ExtendedPlane {
+            support: Aabb::new(
+                Point3::new(f64::NAN, f64::NEG_INFINITY, f64::NEG_INFINITY),
+                Point3::new(f64::INFINITY, f64::INFINITY, f64::INFINITY),
+            ),
+            ..analytic
+        };
+        let malformed_pair = separation_clipped(&malformed, &opposite, 4, clip, cx);
+        let too_large = separation(&PanicEvalChart, &PanicEvalChart, u32::MAX, cx);
+        let over_cap = separation(&PanicEvalChart, &PanicEvalChart, 100, cx);
+        let huge_clip = Aabb::new(
+            Point3::new(-2.0e307, -2.0e307, -2.0e307),
+            Point3::new(2.0e307, 2.0e307, 2.0e307),
+        );
+        let huge_local = separation_clipped(&analytic, &opposite, 2, huge_clip, cx)
+            .expect("ratio-first coordinates keep an extreme finite clip representable");
+        let separation_ok = matches!(
+            separation_default,
+            Err(QueryError::SamplingDomain(
+                SamplingDomainError::UnboundedSupport { .. }
+            ))
+        ) && separation_local.scope == SeparationScope::ClippedLocal
+            && separation_local.domain == clip
+            && clip.contains(separation_local.witness)
+            && separation_local.observed.is_finite()
+            && separation_local.lower_bound.is_finite()
+            && matches!(
+                malformed_pair,
+                Err(QueryError::SamplingDomain(
+                    SamplingDomainError::InvalidSupport { .. }
+                ))
+            )
+            && matches!(too_large, Err(QueryError::SamplingGridTooLarge { .. }))
+            && matches!(
+                over_cap,
+                Err(QueryError::SamplingWorkLimitExceeded {
+                    limit: SEPARATION_MAX_CHART_SAMPLES,
+                    ..
+                })
+            )
+            && huge_local.observed.is_finite()
+            && huge_local.lower_bound.is_finite()
+            && point_is_finite_for_test(huge_local.witness);
+
+        let cylinder = InfiniteCylinder { radius: 1.0 };
+        let boundary = Point3::new(1.0, 0.0, 0.0);
+        let thickness_default = thickness_at(&cylinder, boundary, cx);
+        let thickness_local = thickness_at_clipped(&cylinder, boundary, clip, cx)
+            .expect("clip bounds the axial march");
+        let anisotropic_clip = Aabb::new(
+            Point3::new(-2.0, -1.0e6, -1.0e6),
+            Point3::new(2.0, 1.0e6, 1.0e6),
+        );
+        let anisotropic_local = thickness_at_clipped(&cylinder, boundary, anisotropic_clip, cx)
+            .expect("transverse clip scale cannot skip the opposite wall");
+        let minimum_default = min_thickness(&cylinder, &[boundary], cx);
+        let minimum_local = min_thickness_clipped(&cylinder, &[boundary], clip, cx)
+            .expect("clip bounds the aggregate thickness query");
+        let thickness_ok = matches!(
+            thickness_default,
+            Err(QueryError::SamplingDomain(
+                SamplingDomainError::UnboundedSupport { .. }
+            ))
+        ) && (thickness_local.value - 2.0).abs() < 1e-9
+            && (anisotropic_local.value - 2.0).abs() < 1e-9
+            && matches!(
+                minimum_default,
+                Err(QueryError::SamplingDomain(
+                    SamplingDomainError::UnboundedSupport { .. }
+                ))
+            )
+            && thickness_local.authority == NumericalKind::Estimate
+            && anisotropic_local.authority == NumericalKind::Estimate
+            && (minimum_local.value - 2.0).abs() < 1e-9
+            && minimum_local.skipped == 0
+            && minimum_local.authority == NumericalKind::Estimate;
+
+        verdict(
+            "gq-007",
+            closest_ok && curvature_ok && separation_ok && thickness_ok,
+            "analytic point queries bypass finite-domain admission; FD fallbacks use \
+             explicit caller scale; malformed, unbounded, and overflowing separation \
+             domains refuse before evaluation; clipped separation is marked local; and \
+             thickness domain failures propagate instead of becoming skipped samples",
+        );
+    });
+}
+
+fn point_is_finite_for_test(point: Point3) -> bool {
+    point.x.is_finite() && point.y.is_finite() && point.z.is_finite()
 }
 
 /// Teaching-refusal spot checks.
