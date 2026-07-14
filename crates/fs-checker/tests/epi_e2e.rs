@@ -537,7 +537,7 @@ fn epi_e2e_battery() {
         .with_source_certificates(&package_source_verifier);
     let report = fs_checker::check_with_capabilities(
         &package,
-        None,
+        Some(root),
         Some(&package_signature_verifier),
         &capabilities,
     );
