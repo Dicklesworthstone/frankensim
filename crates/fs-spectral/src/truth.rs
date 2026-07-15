@@ -229,7 +229,6 @@ pub enum MultiplicityStatementV1 {
 impl MultiplicityClaimV1 {
     fn validate(self) -> Result<(), SpectralTruthErrorV1> {
         match self {
-            Self::Unknown => Ok(()),
             Self::LowerBound { value: 0, .. }
             | Self::Bounds { lower: 0, .. }
             | Self::Bounds { upper: 0, .. }
@@ -237,24 +236,24 @@ impl MultiplicityClaimV1 {
             Self::Bounds { lower, upper, .. } if lower > upper => {
                 Err(SpectralTruthErrorV1::ReversedMultiplicityBounds)
             }
-            Self::LowerBound { .. } | Self::Bounds { .. } | Self::Exact { .. } => Ok(()),
+            Self::Unknown | Self::LowerBound { .. } | Self::Bounds { .. } | Self::Exact { .. } => {
+                Ok(())
+            }
         }
     }
 
     const fn minimum(self) -> Option<u32> {
         match self {
             Self::Unknown => None,
-            Self::LowerBound { value, .. } => Some(value),
+            Self::LowerBound { value, .. } | Self::Exact { value, .. } => Some(value),
             Self::Bounds { lower, .. } => Some(lower),
-            Self::Exact { value, .. } => Some(value),
         }
     }
 
     const fn maximum(self) -> Option<u32> {
         match self {
             Self::Unknown | Self::LowerBound { .. } => None,
-            Self::Bounds { upper, .. } => Some(upper),
-            Self::Exact { value, .. } => Some(value),
+            Self::Bounds { upper: value, .. } | Self::Exact { value, .. } => Some(value),
         }
     }
 
@@ -559,13 +558,7 @@ impl SpectralClusterV1 {
                 return Err(SpectralTruthErrorV1::InvalidInternalClusterState);
             }
             InternalClusterStateV1::ProvenDegenerate { .. }
-                if algebraic_multiplicity
-                    .minimum()
-                    .is_none_or(|value| value < 2) =>
-            {
-                return Err(SpectralTruthErrorV1::InvalidInternalClusterState);
-            }
-            InternalClusterStateV1::Resolved { .. }
+            | InternalClusterStateV1::Resolved { .. }
                 if algebraic_multiplicity
                     .minimum()
                     .is_none_or(|value| value < 2) =>
@@ -1670,8 +1663,7 @@ fn validate_cluster_evidence(
         match (cluster.localization.authority, cluster.localization.witness) {
             (LocalizationAuthorityV1::Candidate, None) => {}
             (LocalizationAuthorityV1::Candidate, Some(_))
-            | (LocalizationAuthorityV1::Estimated, None)
-            | (LocalizationAuthorityV1::Enclosed, None) => {
+            | (LocalizationAuthorityV1::Estimated | LocalizationAuthorityV1::Enclosed, None) => {
                 issues.push(SpectralTruthErrorV1::AuthorityEvidenceMismatch);
             }
             (authority, Some(witness)) => validate_truth_witness(
@@ -2072,32 +2064,13 @@ pub fn validate_truth_v1(
             {
                 issues.push(SpectralTruthErrorV1::CoverageCardinalityMismatch);
             }
-            match (requested_scope, &draft.boundary) {
-                (
-                    CompletenessScopeV1::Region { .. },
-                    ScopeBoundaryStateV1::Region(RegionBoundaryStateV1::Separated { .. }),
-                ) => {}
-                (
-                    CompletenessScopeV1::Region {
-                        boundary: RegionBoundaryPolicyV1::Closed,
-                        ..
-                    },
-                    ScopeBoundaryStateV1::Region(RegionBoundaryStateV1::IntersectionsResolved {
-                        excluded_algebraic: 0,
-                        ..
-                    }),
-                ) => {}
-                (
-                    CompletenessScopeV1::Region {
-                        boundary: RegionBoundaryPolicyV1::Open,
-                        ..
-                    },
-                    ScopeBoundaryStateV1::Region(RegionBoundaryStateV1::IntersectionsResolved {
-                        included,
-                        ..
-                    }),
-                ) if included.is_empty() => {}
-                _ => issues.push(SpectralTruthErrorV1::BoundaryScopeMismatch),
+            let boundary_compatible = if let ScopeBoundaryStateV1::Region(state) = &draft.boundary {
+                region_boundary_state_is_compatible(requested_scope, state, false)
+            } else {
+                false
+            };
+            if !boundary_compatible {
+                issues.push(SpectralTruthErrorV1::BoundaryScopeMismatch);
             }
             validate_truth_witness(
                 witness,
@@ -2240,6 +2213,29 @@ fn finish_truth(
         })
     } else {
         Err(SpectralTruthReportV1::new(issues))
+    }
+}
+
+fn region_boundary_state_is_compatible(
+    requested_scope: CompletenessScopeV1,
+    state: &RegionBoundaryStateV1,
+    allow_unknown: bool,
+) -> bool {
+    let CompletenessScopeV1::Region { boundary, .. } = requested_scope else {
+        return false;
+    };
+    match state {
+        RegionBoundaryStateV1::Unknown { .. } => allow_unknown,
+        RegionBoundaryStateV1::Separated { .. } => true,
+        RegionBoundaryStateV1::IntersectionsResolved {
+            included,
+            excluded_algebraic,
+            ..
+        } => match boundary {
+            RegionBoundaryPolicyV1::Closed => *excluded_algebraic == 0,
+            RegionBoundaryPolicyV1::Open => included.is_empty(),
+            RegionBoundaryPolicyV1::RefuseIntersection => false,
+        },
     }
 }
 
@@ -2407,33 +2403,8 @@ fn validate_boundary_evidence(
             }
         }
         ScopeBoundaryStateV1::Region(state) => {
-            match (requested_scope, state) {
-                (CompletenessScopeV1::Region { .. }, RegionBoundaryStateV1::Unknown { .. })
-                | (CompletenessScopeV1::Region { .. }, RegionBoundaryStateV1::Separated { .. }) => {
-                }
-                (
-                    CompletenessScopeV1::Region {
-                        boundary: RegionBoundaryPolicyV1::Closed,
-                        ..
-                    },
-                    RegionBoundaryStateV1::IntersectionsResolved {
-                        excluded_algebraic: 0,
-                        ..
-                    },
-                ) => {}
-                (
-                    CompletenessScopeV1::Region {
-                        boundary: RegionBoundaryPolicyV1::Open,
-                        ..
-                    },
-                    RegionBoundaryStateV1::IntersectionsResolved { included, .. },
-                ) if included.is_empty() => {}
-                (CompletenessScopeV1::Region { .. }, _)
-                | (_, RegionBoundaryStateV1::Unknown { .. })
-                | (_, RegionBoundaryStateV1::Separated { .. })
-                | (_, RegionBoundaryStateV1::IntersectionsResolved { .. }) => {
-                    issues.push(SpectralTruthErrorV1::BoundaryScopeMismatch);
-                }
+            if !region_boundary_state_is_compatible(requested_scope, state, true) {
+                issues.push(SpectralTruthErrorV1::BoundaryScopeMismatch);
             }
             match state {
                 RegionBoundaryStateV1::Unknown { .. } => {}

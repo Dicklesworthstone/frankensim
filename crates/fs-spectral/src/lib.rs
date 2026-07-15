@@ -9,8 +9,9 @@
 //! numerically unreliable in this region, and here is the reroute" is a
 //! different species from one that silently degrades. This crate:
 //!
-//! - computes the λ-gap of a (small, dense, symmetric) operator via an in-house
-//!   Jacobi eigensolver — [`symmetric_eigenvalues`], [`spectral_gap`];
+//! - computes a legacy, unauthoritative λ-gap diagnostic for a (small, dense,
+//!   symmetric) operator via an in-house Jacobi eigensolver —
+//!   [`symmetric_eigenvalues`], [`spectral_gap`];
 //! - classifies gap HEALTH with HYSTERESIS thresholds so a marginal region does
 //!   not flap between healthy and degraded — [`GapHealthMonitor`];
 //! - PROPAGATES low confidence: a degraded gap DEMOTES any downstream color
@@ -20,10 +21,18 @@
 //!   estimate and gives the representation router a conditioning term, so it
 //!   prefers paths that keep the whole pipeline well-posed —
 //!   [`compose_conditioning`], [`route`].
+//! - validates versioned spectral problem descriptors, proposition-bound
+//!   authority, and exact method-family prerequisites — [`admission`];
+//! - validates orthogonal set-valued result truth (authority, algebraic
+//!   coverage, cluster/internal separation, projective accounting, and
+//!   termination) against the complete admitted problem — [`truth`].
 //!
 //! Everything is deterministic. `#![deny(unsafe_code)]` via the workspace lint.
 
 use fs_evidence::{Color, ColorRank};
+
+pub mod admission;
+pub mod truth;
 
 /// A structured spectral failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,8 +114,14 @@ pub fn symmetric_eigenvalues(matrix: &[Vec<f64>]) -> Result<Vec<f64>, SpectralEr
     Ok(eig)
 }
 
-/// A spectral-gap reading: the gap above the smallest eigenvalue (the Fiedler /
-/// algebraic-connectivity gap) relative to the spectral spread.
+/// A legacy unauthoritative spectral-gap reading: the gap above the smallest
+/// eigenvalue (the Fiedler / algebraic-connectivity gap) relative to the
+/// spectral spread.
+///
+/// This diagnostic cannot satisfy any [`admission`] witness or [`truth`]
+/// proposition. In particular, callers must not treat its historical
+/// zero-spread ratio as cluster-separation authority; RB.1b owns that numerical
+/// correction while RB.1a keeps the typed truth surface isolated from it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SpectralGap {
     /// The smallest eigenvalue.

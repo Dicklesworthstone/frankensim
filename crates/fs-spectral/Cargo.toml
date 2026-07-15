@@ -5,13 +5,15 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Spectral health monitoring (addendum Proposal 5): track the sheaf-Laplacian lambda-gap as a runtime health metric with hysteresis, propagate low-confidence into merge/triage outputs when the gap collapses, and give the representation router an end-to-end conditioning term. Owns risk R5."
+description = "Versioned spectral problem admission, proposition-bound set-valued truth, and deterministic sheaf-Laplacian gap/conditioning health monitoring."
 
 [package.metadata.frankensim]
 layer = "L1"
 
 [dependencies]
+fs-blake3 = { path = "../fs-blake3" }
 fs-evidence = { path = "../fs-evidence" }
+fs-qty = { path = "../fs-qty" }
 
 [dev-dependencies]
 

@@ -1,82 +1,460 @@
 # CONTRACT: fs-spectral
 
-Spectral health monitoring (plan addendum, Proposal 5): the sheaf-Laplacian
-λ-gap as a runtime health metric, with low-confidence propagation and a router
-conditioning term. Owns risk R5.
+Layer L1 spectral semantics and health monitoring. This crate owns two related,
+but deliberately separate, capabilities:
 
-## Purpose and layer
+1. deterministic sheaf-Laplacian gap health, confidence demotion, conditioning
+   composition, and conditioning-aware route scoring; and
+2. RB.1a versioned spectral problem admission plus proposition-bound,
+   set-valued result truth.
 
-Layer L1. Depends only on `fs-evidence` (UTIL, the `Color` lattice). Pure
-deterministic numerics + epistemics.
+The second capability is a semantic and epistemic boundary. It classifies
+problems, verifies that retained evidence names the exact proposition being
+used, checks method-family prerequisites, and validates result claims. It does
+not compute eigenpairs or manufacture scientific evidence.
 
-## Public types and semantics
+## Dependencies
 
-- `symmetric_eigenvalues(&[Vec<f64>]) -> Result<Vec<f64>, SpectralError>` —
-  ascending eigenvalues of a small dense symmetric matrix (in-house cyclic
-  Jacobi); rejects empty/non-square/non-symmetric.
-- `spectral_gap(&[f64]) -> Option<SpectralGap>` — the Fiedler gap above the
-  smallest eigenvalue and its dimensionless `ratio = gap / spread` in `[0, 1]`.
-- `GapHealthMonitor::new(degrade_below, restore_above)` + `update(ratio) ->
-  Health` / `health()` — a HYSTERESIS classifier (`Healthy` / `Degraded`); a
-  region degrades below the lower threshold and recovers only above the upper
-  one, so it cannot flap. `new` panics on an inverted band.
-- `propagate(color, health) -> Color` — a `Degraded` gap DEMOTES a
-  verified/validated color to estimated and NEVER promotes; `Healthy` passes
-  the color through.
-- `compose_conditioning(&[f64]) -> Result<f64, SpectralError>` — per-op
-  amplification factors multiply into an end-to-end conditioning estimate
-  (empty → 1.0); rejects a negative/non-finite factor.
-- `route(&[RouterPath], conditioning_weight) -> Option<&RouterPath>` — picks the
-  path minimizing `base_cost + weight · ln(max(conditioning, 1))`.
+Production dependencies are limited to:
 
-## Invariants
+- `fs-blake3` for domain-separated canonical identities and the
+  presented -> verified -> admitted authority typestate;
+- `fs-evidence` for the existing gap-health confidence color lattice; and
+- `fs-qty` for compile-time Floquet quantities and runtime-dimensioned
+  normalization boundaries.
 
-- `propagate` is monotone-down under `Degraded`: confidence can only fall, so
-  merge/triage in a degraded region always surfaces low confidence.
-- The health monitor never flaps (`degrade_below < restore_above`).
-- Conditioning composes multiplicatively; a well-conditioned pipeline is `1.0`.
-- The eigensolver is deterministic and validates symmetry.
+There is no FFI and no external numerical runtime.
+
+## Existing spectral-health API
+
+- `symmetric_eigenvalues(&[Vec<f64>])` is a deterministic small dense
+  symmetric Jacobi eigensolver. It rejects empty, non-square, and
+  non-symmetric inputs.
+- `spectral_gap(&[f64])` returns the gap above the smallest eigenvalue,
+  spectral spread, and a dimensionless health ratio.
+- `GapHealthMonitor` applies a hysteresis band so marginal regions do not
+  flap between `Healthy` and `Degraded`.
+- `propagate` can only preserve or demote evidence color when the gap
+  degrades; it never promotes confidence.
+- `compose_conditioning` multiplies finite nonnegative amplification factors.
+- `route` minimizes base cost plus a logarithmic conditioning penalty with
+  deterministic tie behavior.
+
+This pre-RB.1 numeric API is an unauthoritative monitoring heuristic. Its
+`SpectralGap`, `Health`, and router outputs cannot construct an admitted
+problem witness, method token, gap-semantics token, cluster proposition, or
+`SpectralTruthV1`. In particular, its historical zero-spread behavior is not a
+scientific truth input. RB.1b owns the byte-visible correction and permanent
+`[a,a]` regression; RB.1a isolates it behind this explicit no-claim boundary.
+
+## Admission API and semantics
+
+### Product problem schema
+
+`SpectralProblemSpecV1` keeps independent axes independent:
+
+- real or complex scalar field;
+- standard linear, generalized pencil, or exact-grade matrix polynomial
+  representation;
+- ordinary or descriptor role with explicit infinity policy;
+- direct, monodromy/Floquet, or analytic operator-function origin;
+- typed metric/form-supported structure propositions;
+- complete scaling-map identities and runtime spectral dimensions;
+- domain/codomain metrics, gauge convention, and zero-padding convention;
+- a product set of regularity propositions;
+- ordering/target convention; and
+- requested candidate, partial, region, or full-finite coverage.
+
+`validate_problem` is the only constructor for
+`ValidatedSpectralProblemV1`. It canonicalizes order, returns every detected
+issue that can be safely evaluated within the current bounded validation
+phase, and mints no partial token on failure. A resource-cap violation returns
+immediately before sorting, hashing, or pairwise inspection, so hostile
+oversized input cannot force deeper work merely to accumulate secondary
+diagnostics.
+
+### Authority boundary
+
+A favorable proposition cannot be created by selecting an enum value.
+Evidence producers must:
+
+1. build the family-specific canonical proposition receipt;
+2. present that receipt with an external anchor, verifier identity, and policy
+   identity;
+3. pass an injected `AuthorityVerifier`;
+4. separately pass an injected `AuthorityAdmitter`; and
+5. consume the admitted authority to obtain
+   `AdmittedSpectralWitnessV1`.
+
+Every consuming validator recomputes the expected typed proposition ID and its
+independent canonical-preimage root. Both must match. The audit record retains
+anchor, verifier, policy, trust state, and the explicit
+`ScientificCorrectnessNotProven` boundary. Policy admission is not a theorem.
+
+Structure and regularity receipts bind subject, scalar field, representation,
+descriptor role, origin, the complete scaling context (identity, dimensions,
+scale, and every map identity), domain/codomain identities and dimensions, and
+the exact claim payload. Gauge receipts additionally bind the exact
+`SpectralGaugeArtifactId` or `SpectralQuotientMapId`. Zero-padding receipts bind
+the same witness-free gauge/reduction context, so a padding witness produced
+for quotient map A cannot be replayed under quotient map B even when their
+nullities and serialized counts coincide. Metric, gauge, zero-padding,
+cluster, multiplicity, separation, and completeness families have distinct
+canonical payload dialects. Relabeling one family or changing one semantic
+axis changes the proposition identity.
+
+The raw descriptor and canonical claim slices exposed by a validated problem
+are observational views, not detachable authorization capabilities.
+Authority-bearing consumers accept the complete
+`ValidatedSpectralProblemV1`, preserving its problem identity and all
+cross-axis validation.
+
+`SpectralSubjectId` identifies the actual induced operator whose spectrum is
+requested; metric and form IDs identify the actual supporting artifacts.
+Changing that induced operator, metric, or form requires a new ID. Structure
+and regularity evidence is intentionally about the induced subject and its
+post-space IDs, so two reduction lineages that provably yield that same subject
+may reuse it. A proposition specifically about descent through one reduction
+map must instead bind `GaugeContextV1`; gauge and zero-serialization families
+already do so.
+
+### Metrics, forms, and exact structure
+
+Metrics, symplectic forms, Krein forms, conjugations, and form-free
+propositions are nonfungible typed supports even if their digest bytes happen
+to coincide.
+
+`MetricDefinitenessV1::Euclidean` is witness-free only for the unique
+dimension-derived ID produced by `SpectralMetricV1::euclidean`. Caller-chosen
+IDs cannot acquire positive definiteness by selecting the Euclidean variant.
+Other positive-definite, indefinite, and singular metric claims require an
+admitted exact proposition.
+
+Approximate structure claims remain representable for diagnostics and future
+budget-aware routing. V1 structure-preserving method tokens require a
+zero-tolerance witnessed proposition. A contradiction on the selected support
+fails closed. Because zero defect denotes exact structure rather than a
+norm-specific error budget, an exact witnessed property conflicts with a
+same-property/same-support contradiction even when the two claims name
+different norm models. When an obligation accepts any symplectic or Krein
+form, method admission deterministically selects one noncontradicted exact
+support and records it in `AdmittedSpectralMethodClassV1`; contradictions on
+unrelated forms do not erase a valid route.
+
+A real coefficient field and conjugate-pair symmetry do not imply a real
+spectrum. Real ascending/descending ordering requires theorem-closed exact
+real-spectrum authority: either a noncontradicted `RealSpectrum` proposition,
+standard-linear self-adjointness on an admitted positive-definite metric, or a
+Hermitian-definite generalized pencil on such a metric. Indefinite-metric
+self-adjointness and approximate propositions do not discharge this gate.
+
+V1 applies a small exact-theorem closure before minting any problem token. For
+a standard-linear equation on one exact support, self-adjoint implies normal,
+and self-adjoint or normal excludes an admitted nonnormal proposition.
+Self-adjointness on an admitted positive-definite metric additionally implies
+real spectrum. An exact Hermitian-definite pencil requires that its named
+metric descriptor is itself admitted positive-definite; it then implies
+induced-operator self-adjointness and normality in that weight, real spectrum,
+invertibility of the pencil weight, and regularity of the pencil. An admitted
+invertible pencil weight implies a regular pencil, and an admitted exact-grade
+invertible polynomial leading coefficient implies a regular polynomial. These
+consequences are consumed, not merely conflict-checked: they can discharge
+method obligations and make algebraic cardinality available without a
+redundant literal regularity claim.
+An explicitly contradicted consequence makes the profile inconsistent. The
+positive-definite gate is essential: self-adjointness for an indefinite inner
+product alone does not imply a real spectrum. Contradicting
+`FiniteDimensional` is likewise inconsistent with this schema's explicit
+finite metric-space dimensions. This registry is intentionally extensible:
+these solid implications are a floor, not a claim that future
+theorem-discovery work cannot prove stronger results.
+
+Every complex prefix order has explicit secondary tie semantics. Projective
+ordering additionally binds an admitted chart identity and the placement of
+infinity. These choices participate in the problem identity; no solver may
+silently substitute its own ordering convention.
+
+V1 descriptor partial prefixes require `IncludeProjective`. When projective
+infinity may be present, they additionally require
+`SpectralOrderingV1::Projective`, whose chart and explicit infinity placement
+make the prefix auditable. Exact theorem closure can instead exclude infinity:
+an invertible generalized-pencil weight (including the consequence of a
+Hermitian-definite pencil) or an exact-grade invertible polynomial leading
+coefficient then permits an otherwise admissible finite ordering without
+inventing an infinity location. `NoClaim` and `ExcludeWithCount` remain refused
+for partial requests because V1 has no finite-only prefix scope with separate
+infinity accounting. Set-valued ordering is not a prefix order. Full and
+candidate set-valued results remain independent of this prefix-only rule.
+
+Equation-specific propositions are admitted only on their native
+representation: Hermitian-definite structure belongs to a generalized pencil,
+gyroscopic structure to an exact quadratic polynomial, and palindromic
+structure to an exact-grade matrix polynomial. A linearized representation
+must carry an explicit future lineage/theorem bridge rather than reusing an
+inapplicable proposition by label.
+
+### Method-family obligations
+
+`assess_method_class` checks schema prerequisites only; it neither chooses a
+concrete implementation nor claims convergence.
+
+- self-adjoint Lanczos: standard ordinary direct endomorphism, positive metric,
+  exact self-adjoint proposition in that metric, finite-dimensional
+  regularity;
+- generalized self-adjoint Lanczos: ordinary direct generalized pencil,
+  positive metric and an exact Hermitian-definite-pencil proposition, whose
+  theorem closure supplies regular-pencil evidence;
+- general Arnoldi: standard ordinary direct problem and finite-dimensional
+  evidence;
+- polynomial Krylov: direct exact-grade polynomial regularity; descriptor
+  variants additionally require regular-descriptor evidence and an explicit
+  infinity policy;
+- Hamiltonian/symplectic/Krein families: typed exact form proposition,
+  compatible spaces/origin, appropriate even-dimension and regularity gates;
+  the Krein/J-orthogonal family additionally requires an admitted
+  nondegenerate indefinite domain metric;
+- monodromy Arnoldi: typed positive period, consistent multiplier/exponent
+  units and branch semantics, and well-posed-monodromy evidence;
+- descriptor pencil: generalized/polynomial descriptor semantics, explicit
+  infinity policy, regular-descriptor evidence, plus equation-family
+  regularity; and
+- operator-function Krylov: ordinary standard analytic-function origin,
+  non-`NoClaim` branch policy, and analytic regularity evidence.
+
+An `Ordinary` generalized pencil must also carry proposition-bound evidence
+that its weight is invertible, unless the exact Hermitian-definite-pencil
+theorem already supplies that fact. An `Ordinary` matrix polynomial must carry
+grade-bound evidence that its leading coefficient is invertible. Regularity of
+a pencil or polynomial alone does not exclude projective roots, so it cannot
+justify ordinary finite-spectrum semantics.
+
+Domain/codomain metric dimensions always describe the operator spaces on which
+the admitted problem acts. For `Quotiented`, these are already-induced
+post-reduction spaces. The certified nullity belongs to the pre-reduction
+lineage and is never subtracted from the declared dimension a second time.
+Gauge and quotient identities participate in both evidence and problem
+identity. A pre-reduction padded/omitted zero count may consequently exceed the
+target-space dimension under `Quotiented`; it remains bound to the exact
+gauge/reduction context and must equal the certified nullity when gap semantics
+are requested.
+
+`assess_gap_semantics` is deliberately separate from algorithm-family
+admission. It mints a gap-interpretation token only when gauge/nullspace and
+serialized-zero conventions are both proposition-bound and explicit. Any
+declared padded/omitted count must equal the certified gauge nullity; a fixed or
+quotiented problem may instead certify that its resulting sequence contains no
+structural zeros. This prevents a mathematically admissible eigensolver from
+silently interpreting a legacy zero-padded or zero-omitted sequence under the
+wrong gap convention.
+
+## Result-truth API and semantics
+
+`SpectralTruthDraftV1` is validated only against the complete
+`ValidatedSpectralProblemV1`; callers cannot bind truth to a naked problem
+digest. Draft clusters expose only neutral lineage/enclosure inspection.
+Favorable localization, multiplicity, internal-resolution, and defectivity
+inspection exists only on the non-forgeable `ValidatedSpectralClusterV1`
+instances minted inside a successful `SpectralTruthV1`.
+
+### Set-valued clusters
+
+An unvalidated `SpectralClusterV1` draft carries:
+
+- stable lineage identity;
+- finite real interval, finite complex box, or projective-infinity enclosure;
+- candidate, estimated, or enclosed localization authority;
+- independent algebraic and geometric multiplicity claims; and
+- per-cluster internal state: no claim, unknown, simple, proven degenerate, or
+  positively resolved, plus explicit `NoClaimUndefined` when the producer
+  declines to assign internal-separation semantics. The latter does not forge
+  a theorem that separation is mathematically inapplicable.
+
+Favorable localization, multiplicity, and internal-state draft claims carry
+admitted evidence, but construction alone does not establish that the evidence
+belongs to the claim. Validation binds multiplicity/internal evidence to both
+cluster lineage and exact enclosure, preventing a stable lineage ID from being
+replayed onto changed cluster semantics. Only the validated-cluster view can
+report favorable authority or infer defectivity; exact validated
+algebraic/geometric multiplicities determine that inference, and numerical
+value repetition never does.
+
+The cluster lineage ID is also the canonical membership identity: changing the
+represented member set requires a new ID. Internal degeneracy/resolution
+receipts additionally bind witness-free algebraic and geometric multiplicity
+semantics, so changing `Exact(2)` to `Bounds(2,2)`, changing either axis, or
+changing membership/enclosure invalidates the retained internal witness.
+
+### Orthogonal truth axes
+
+Result authority, achieved coverage, scope-boundary state, and termination are
+not collapsed into one total order. In particular, an estimate, a residual
+bound, and a certified enclosure are distinct propositions, not levels in an
+invented lattice.
+
+Coverage is measured in algebraic cardinality:
+
+- partial coverage distinguishes incomplete, exactly satisfied, and a repeated
+  boundary cluster returned whole;
+- region completeness supports a certified empty set;
+- full finite coverage accounts explicitly for finite and projective/infinite
+  multiplicity; and
+- `NoResult` cannot retain clusters, authority, or boundary claims.
+
+Whenever equation/descriptor regularity makes the total algebraic cardinality
+known, both requested prefixes and the sum of returned exact or lower-bound
+multiplicities are bounded by that total. Adding one unknown-multiplicity
+cluster cannot disable this lower-bound sanity check.
+
+Favorable partial-prefix and complete-region truth requires admitted
+equation/descriptor regularity establishing a discrete spectrum. Full finite
+or projective completeness additionally requires the theorem-closed known
+algebraic cardinality to equal the admitted request. A request remains only a
+request: candidate or `NoResult` truth can still be returned when completeness
+regularity is unavailable. Directly or theorem-admitted invertibility of a
+pencil weight or polynomial leading coefficient forces projective-infinity
+multiplicity to zero; included or excluded nonzero infinity accounting is
+refused. The same theorem boundary applies outside full accounting: favorable
+projective localization, multiplicity, internal-resolution, whole-result, or
+achieved-coverage claims are refused, while a raw candidate projective point
+with no favorable membership claim may remain as explicitly non-authoritative
+diagnostic output. Independently witnessed candidate-boundary geometry or
+classification remains orthogonal and does not upgrade that point to spectral
+membership; pairing it with achieved coverage does, and is therefore refused
+by the same gate.
+
+A partial cluster-closure overrun requires a matching repeated exact boundary
+cluster and matching `ClusterClosed` evidence. A satisfied prefix requires
+positive boundary separation. Closed-region intersection resolution cannot
+exclude boundary multiplicity; open-region resolution cannot include boundary
+clusters. Full-spectrum boundary truth exists only with validated full
+accounting. At most one projective-infinity cluster may exist, and it requires
+the descriptor's admitted include policy.
+
+Whole-result evidence binds a canonical, evidence-free
+`SpectralResultSetIdV1`. The result set includes cluster IDs, localizations,
+multiplicity semantics, and internal states, so whole-result claims cannot be
+replayed after any of those change.
+
+`SpectralTruthV1` always describes the mathematical spectrum of the admitted
+problem. Structural roots are not inserted or removed merely because a legacy
+serialized view declared them explicitly padded or omitted; that convention
+is consumed by gap interpretation and later immutable-view migration code.
+Full-spectrum algebraic accounting therefore remains mathematical accounting,
+not byte-layout accounting.
+
+Region boundary policy is checked independently of the achieved-coverage
+claim. Even a candidate-only result cannot retain favorable boundary evidence
+whose included/excluded set contradicts `Closed`, `Open`, or
+`RefuseIntersection`. Under any admitted real-spectrum requirement, including
+real ordering, a certified enclosure must be real-valued or have a complex
+imaginary interval containing zero; an off-axis enclosure cannot inherit
+real-spectrum authority. The unique projective point at infinity is fixed by
+conjugation and is compatible with an extended-real/projective spectrum; it is
+refused only when independent weight/leading-coefficient invertibility
+excludes infinity.
+
+### Resource envelopes
+
+Untrusted profiles are bounded before sorting or quadratic comparison:
+
+- at most `MAX_STRUCTURE_CLAIMS_V1` structure claims;
+- at most `MAX_REGULARITY_CLAIMS_V1` regularity claims;
+- at most `MAX_SPECTRAL_CLUSTERS_V1` result clusters; and
+- at most `MAX_REGION_BOUNDARY_REFERENCES_V1` region-boundary references.
+
+Public receipt builders enforce the same collection limits before cloning or
+sorting. The regularity limit is five, matching the largest compatible V1
+product (for example a generalized descriptor monodromy problem carrying
+finite-dimensional, regular-pencil, invertible-weight, regular-descriptor, and
+well-posed-monodromy evidence). Valid at-limit fixtures reach canonical problem
+identity construction; the caps are not merely early-rejection thresholds.
+
+## Units and normalization
+
+Floquet periods use `fs_qty::Time`; continuous branch anchors use
+`fs_qty::Angle`. Spectral values cross the numerical boundary as
+`QtyAny`. `SpectralScalingContextV1::normalize` requires exact runtime
+dimensions and a finite positive scale; `denormalize` restores the declared
+dimensions. Non-finite input, overflow, and nonzero-to-zero underflow fail
+closed rather than silently erasing a spectral value. Signed zero is
+canonicalized in identity-bearing numeric fields.
 
 ## Error model
 
-Structured `SpectralError`; the only panic is a programmer error (inverted
-hysteresis band).
+Admission and truth return structured reports containing deterministic,
+deduplicated issue vectors. Resource-limit failures occur before expensive
+canonicalization. Diagnostics use a total stable order and adjacent
+deduplication, so malformed equal-rank inputs neither preserve caller order nor
+trigger quadratic duplicate scanning. Canonical identity failures are retained
+as typed `CanonicalError` values. No validation function panics on untrusted
+input.
+
+The legacy hysteresis constructor still panics for an inverted band, which is a
+programmer configuration error.
 
 ## Determinism class
 
-Fully deterministic: eigenvalues, gap, health transitions, and routing are pure
-functions of their inputs.
+Admission, problem IDs, proposition IDs, result-set IDs, issue ordering,
+method-support selection, cluster ordering, truth validation, gap health, and
+route scoring are deterministic pure functions of their inputs. Canonical sets
+make caller permutation irrelevant. Same-ISA floating-point identity inputs
+use stable IEEE-754 bits with signed-zero normalization.
 
 ## Cancellation behavior
 
-None (synchronous pure functions).
+RB.1a validators are bounded synchronous metadata operations and do not accept
+an execution `Cx`. Numerical eigensolvers and long-running evidence producers
+must add tile-boundary cancellation under later beads. Canonical identity
+builders use the non-cancelling bounded encoder because all accepted payloads
+are capped before construction. The result-set encoder's one-mebibyte field
+envelope admits all 4,096 public cluster slots even when every slot uses the
+largest currently legal complex-enclosure, bounded-multiplicity, and
+resolved-separation semantics; the cap test exercises that worst-case shape.
 
 ## Unsafe boundary
 
-None. `#![deny(unsafe_code)]` via the workspace lint.
+None. Workspace `unsafe_code = "deny"` applies.
 
 ## Feature flags
 
-None.
+None. This is solid-spine admission/truth infrastructure, not a moonshot kernel.
 
-## Conformance tests
+## Conformance evidence
 
-`tests/spectral.rs` (Proposal 5, 9 cases): Jacobi recovers known spectra (2×2,
-antisymmetric-off-diagonal, diagonal, tridiagonal Toeplitz) and rejects
-malformed matrices; the gap ratio reflects separation and collapse; hysteresis
-health + inverted-band panic; low-confidence propagation (demote, never
-promote); multiplicative conditioning + bad-factor rejection; the router's
-cheapness-vs-conditioning trade; determinism.
+- `tests/spectral.rs`: existing deterministic Jacobi, gap, hysteresis,
+  confidence propagation, conditioning, and route tests.
+- `tests/admission.rs`: G0/G3/G5 battery covering authority typestate,
+  wrong-preimage/anchor/verifier/policy refusal, proposition relabeling,
+  exact-vs-approximate method gates, typed form nonfungibility, real-spectrum
+  ordering and enclosure consistency, generalized/symplectic/Krein routing,
+  indefinite-metric refusal, descriptor/Floquet/operator-function
+  cross-routing, canonical Euclidean metrics, gauge/padding cross-consistency,
+  unit normalization underflow/overflow, reachable structure/regularity/truth
+  resource caps, theorem closure and tolerance nesting, identity permutation
+  sensitivity, gauge/quotient/padding-lineage replay,
+  problem/result/localization/multiplicity/internal-witness replay, certified
+  empty regions, the full open/closed/refuse boundary-policy matrix,
+  repeated-cluster closure overruns, ordinary and descriptor full accounting,
+  regularity-gated partial/region/full truth, theorem-constrained infinity
+  accounting, projective-prefix placement, algebraic/geometric capacity,
+  explicit undefined-separation no-claim, impossible cluster states, and
+  deterministic malformed-input reports.
 
 ## No-claim boundaries
 
-- The eigensolver is a small DENSE Jacobi for the monitoring path; production
-  tracks the gap on SPARSE Laplacians with a few Lanczos/LOBPCG vectors,
-  WARM-STARTED across edits (fs-la) — this crate provides the health/gap/
-  conditioning logic, not the production sparse solver.
-- `propagate` implements the color DEMOTION; wiring it into Proposal 10's merge
-  adjudication outputs is the merge crate's integration.
-- The router conditioning TERM is provided here; the full Rep Router fitness
-  (cheapness + conditioning + other terms) lives in the router.
-- Per-op amplification factors are supplied by each op's error model; this
-  crate composes them, it does not estimate them.
+RB.1a does not implement or claim:
+
+- Arnoldi, Lanczos, polynomial, descriptor, monodromy, Hamiltonian,
+  symplectic, Krein, or operator-function numerical kernels;
+- residual, enclosure, multiplicity, separation, regularity, or completeness
+  proof generation;
+- scientific correctness of any externally admitted verifier or policy;
+- evidence artifact storage/resolution, revocation, or distributed trust;
+- concrete implementation routing, cost models, resume state, warm starts,
+  cancellation, or convergence;
+- sparse production sheaf-Laplacian eigensolving; or
+- completeness merely because a requested scope exists.
+
+Those belong to RB.1b/RB.1c/RB.1d and later solver, evidence, routing, and
+ledger beads. Until then, missing evidence remains an explicit refusal or
+no-claim state.
