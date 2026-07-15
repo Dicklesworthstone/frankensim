@@ -34,6 +34,7 @@ use crate::router::{CostOracle, RoutePlanError, RouteRequest, Router};
 use crate::sheaf::{
     SHEAF_MAX_CHARTS, SHEAF_MAX_PAIR_CANDIDATES, SHEAF_MAX_TRIPLE_CANDIDATES, SheafComplex,
 };
+use fs_exec::Cx;
 use std::fmt::Write as _;
 
 /// The complex skeleton the decomposition runs over (extractable from a
@@ -469,12 +470,640 @@ pub struct HodgeSplit {
     pub fractions: (f64, f64, f64),
 }
 
+/// Explicit resource envelope for the admitted Hodge diagnostic.
+///
+/// `sweeps` is the exact deterministic sweep count used by each non-empty
+/// least-squares stage. The remaining fields are hard admission ceilings, not
+/// post-hoc observations. Deadline and capability budgets remain carried by
+/// the caller's [`Cx`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SheafRepairBudget {
+    /// Deterministic Gauss-Seidel sweeps per non-empty projection stage.
+    pub sweeps: usize,
+    /// Maximum incidence-operator applications across the entire split.
+    pub max_operator_evaluations: usize,
+    /// Conservative maximum number of simultaneously live/retained scalar
+    /// slots admitted for the split.
+    pub max_scalar_slots: usize,
+    /// Maximum scalar incidence work items between cancellation checkpoints.
+    pub poll_stride: usize,
+}
+
+/// Measured consumption retained with one admitted diagnostic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SheafRepairUsage {
+    /// Projection sweeps completed across exact and coexact stages.
+    pub completed_sweeps: usize,
+    /// Incidence-operator applications performed.
+    pub operator_evaluations: usize,
+    /// Conservative scalar-slot envelope admitted before work began.
+    pub admitted_scalar_slots: usize,
+}
+
+/// A bounded diagnostic plus its resource consumption.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BoundedHodgeSplit {
+    /// The Hodge-inspired diagnostic payload.
+    pub split: HodgeSplit,
+    /// Exact caller-admitted resource envelope used for this run.
+    pub budget: SheafRepairBudget,
+    /// Exact measured work and admitted memory envelope.
+    pub usage: SheafRepairUsage,
+}
+
+/// Structured refusal from the admitted, cancellation-aware repair path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SheafRepairError {
+    /// The admitted skeleton or cochain failed a total incidence operation.
+    Skeleton(SheafSkeletonError),
+    /// A budget field that must be positive was zero.
+    InvalidBudget {
+        /// Stable budget field name.
+        field: &'static str,
+    },
+    /// The deterministic operator schedule exceeds the admitted work cap.
+    WorkBudgetExceeded {
+        /// Conservative required operator-application envelope.
+        required: u128,
+        /// Caller-admitted ceiling.
+        cap: usize,
+    },
+    /// The conservative live/retained scalar envelope exceeds the admitted
+    /// memory cap.
+    MemoryBudgetExceeded {
+        /// Exact required scalar slots.
+        required: u128,
+        /// Caller-admitted ceiling.
+        cap: usize,
+    },
+    /// Checked admission arithmetic exceeded `u128`.
+    BudgetArithmeticOverflow {
+        /// Stable preflight stage.
+        stage: &'static str,
+    },
+    /// Cancellation or deadline expiry was observed at a bounded checkpoint.
+    Cancelled {
+        /// Stable execution stage.
+        stage: &'static str,
+        /// Sweeps fully completed before cancellation.
+        completed_sweeps: usize,
+        /// Operator applications completed before cancellation.
+        operator_evaluations: usize,
+    },
+    /// Finite diagnostic arithmetic overflowed.
+    NumericalOverflow {
+        /// Stable arithmetic stage.
+        stage: &'static str,
+    },
+}
+
+impl core::fmt::Display for SheafRepairError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Skeleton(source) => write!(f, "{source}"),
+            Self::InvalidBudget { field } => {
+                write!(f, "sheaf repair budget field {field} must be positive")
+            }
+            Self::WorkBudgetExceeded { required, cap } => write!(
+                f,
+                "sheaf repair operator envelope requires {required} evaluations above cap {cap}"
+            ),
+            Self::MemoryBudgetExceeded { required, cap } => write!(
+                f,
+                "sheaf repair requires {required} scalar slots above cap {cap}"
+            ),
+            Self::BudgetArithmeticOverflow { stage } => {
+                write!(
+                    f,
+                    "sheaf repair budget arithmetic overflowed during {stage}"
+                )
+            }
+            Self::Cancelled {
+                stage,
+                completed_sweeps,
+                operator_evaluations,
+            } => write!(
+                f,
+                "sheaf repair cancelled during {stage} after {completed_sweeps} sweeps and {operator_evaluations} operator evaluations"
+            ),
+            Self::NumericalOverflow { stage } => {
+                write!(f, "sheaf repair arithmetic overflowed during {stage}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for SheafRepairError {}
+
+impl From<SheafSkeletonError> for SheafRepairError {
+    fn from(source: SheafSkeletonError) -> Self {
+        Self::Skeleton(source)
+    }
+}
+
+struct RepairAccountant<'a, 'cx> {
+    cx: &'a Cx<'cx>,
+    budget: SheafRepairBudget,
+    operator_evaluations: usize,
+    completed_sweeps: usize,
+}
+
+impl<'a, 'cx> RepairAccountant<'a, 'cx> {
+    fn checkpoint(&self, stage: &'static str) -> Result<(), SheafRepairError> {
+        self.cx
+            .checkpoint()
+            .map_err(|_| SheafRepairError::Cancelled {
+                stage,
+                completed_sweeps: self.completed_sweeps,
+                operator_evaluations: self.operator_evaluations,
+            })
+    }
+
+    fn begin_operator(&self, stage: &'static str) -> Result<(), SheafRepairError> {
+        if self.operator_evaluations >= self.budget.max_operator_evaluations {
+            return Err(SheafRepairError::WorkBudgetExceeded {
+                required: self.operator_evaluations as u128 + 1,
+                cap: self.budget.max_operator_evaluations,
+            });
+        }
+        if self
+            .operator_evaluations
+            .is_multiple_of(self.budget.poll_stride)
+        {
+            self.checkpoint(stage)?;
+        }
+        Ok(())
+    }
+
+    fn poll_item(&self, stage: &'static str, completed: usize) -> Result<(), SheafRepairError> {
+        if completed.is_multiple_of(self.budget.poll_stride) {
+            self.checkpoint(stage)?;
+        }
+        Ok(())
+    }
+
+    fn finish_operator(&mut self) -> Result<(), SheafRepairError> {
+        self.operator_evaluations = self.operator_evaluations.checked_add(1).ok_or(
+            SheafRepairError::BudgetArithmeticOverflow {
+                stage: "operator-evaluations",
+            },
+        )?;
+        Ok(())
+    }
+
+    fn complete_sweep(&mut self, stage: &'static str) -> Result<(), SheafRepairError> {
+        self.completed_sweeps = self.completed_sweeps.checked_add(1).ok_or(
+            SheafRepairError::BudgetArithmeticOverflow {
+                stage: "completed-sweeps",
+            },
+        )?;
+        self.checkpoint(stage)
+    }
+}
+
 fn dot(a: &[f64], b: &[f64]) -> f64 {
     a.iter().zip(b).map(|(x, y)| x * y).sum()
 }
 
 fn norm2(a: &[f64]) -> f64 {
     dot(a, a)
+}
+
+fn checked_norm2(
+    values: &[f64],
+    stage: &'static str,
+    accountant: &RepairAccountant<'_, '_>,
+) -> Result<f64, SheafRepairError> {
+    let mut total = 0.0f64;
+    for (index, value) in values.iter().enumerate() {
+        accountant.poll_item(stage, index)?;
+        let square = value * value;
+        total += square;
+        if !(square.is_finite() && total.is_finite()) {
+            return Err(SheafRepairError::NumericalOverflow { stage });
+        }
+    }
+    Ok(total)
+}
+
+fn checked_scalar_envelope(skeleton: &AdmittedSheafSkeleton) -> Result<u128, SheafRepairError> {
+    let dimensions = (skeleton.n_patches as u128)
+        .checked_add(skeleton.edges.len() as u128)
+        .and_then(|value| value.checked_add(skeleton.triangles.len() as u128))
+        .ok_or(SheafRepairError::BudgetArithmeticOverflow {
+            stage: "scalar-envelope-dimensions",
+        })?;
+    dimensions
+        .checked_mul(6)
+        .ok_or(SheafRepairError::BudgetArithmeticOverflow {
+            stage: "scalar-envelope",
+        })
+}
+
+fn projection_operator_evaluations(
+    unknowns: usize,
+    sweeps: usize,
+    pin_first: bool,
+) -> Result<u128, SheafRepairError> {
+    let active = unknowns.saturating_sub(usize::from(pin_first && unknowns > 0)) as u128;
+    let sweep_work = active
+        .checked_mul(sweeps as u128)
+        .and_then(|value| value.checked_mul(2))
+        .ok_or(SheafRepairError::BudgetArithmeticOverflow {
+            stage: "projection-operator-evaluations",
+        })?;
+    1u128
+        .checked_add(unknowns as u128)
+        .and_then(|value| value.checked_add(sweep_work))
+        .and_then(|value| value.checked_add(1))
+        .ok_or(SheafRepairError::BudgetArithmeticOverflow {
+            stage: "projection-operator-evaluations",
+        })
+}
+
+fn checked_operator_schedule(
+    skeleton: &AdmittedSheafSkeleton,
+    sweeps: usize,
+) -> Result<u128, SheafRepairError> {
+    let exact = projection_operator_evaluations(skeleton.n_patches, sweeps, true)?;
+    if skeleton.triangles.is_empty() {
+        return Ok(exact);
+    }
+    exact
+        .checked_add(projection_operator_evaluations(
+            skeleton.triangles.len(),
+            sweeps,
+            false,
+        )?)
+        .ok_or(SheafRepairError::BudgetArithmeticOverflow {
+            stage: "hodge-operator-schedule",
+        })
+}
+
+fn checked_difference(
+    left: &[f64],
+    right: &[f64],
+    stage: &'static str,
+    accountant: &RepairAccountant<'_, '_>,
+) -> Result<Vec<f64>, SheafRepairError> {
+    if left.len() != right.len() {
+        return Err(SheafRepairError::Skeleton(
+            SheafSkeletonError::CochainLength {
+                role: stage,
+                expected: left.len(),
+                actual: right.len(),
+            },
+        ));
+    }
+    let mut output = zeroed_output(left.len(), stage)?;
+    for (index, ((value, a), b)) in output.iter_mut().zip(left).zip(right).enumerate() {
+        accountant.poll_item(stage, index)?;
+        *value = a - b;
+        if !value.is_finite() {
+            return Err(SheafRepairError::NumericalOverflow { stage });
+        }
+    }
+    Ok(output)
+}
+
+fn validate_bounded_cochain(
+    values: &[f64],
+    expected: usize,
+    role: &'static str,
+    stage: &'static str,
+    accountant: &RepairAccountant<'_, '_>,
+) -> Result<(), SheafRepairError> {
+    if values.len() != expected {
+        return Err(SheafSkeletonError::CochainLength {
+            role,
+            expected,
+            actual: values.len(),
+        }
+        .into());
+    }
+    for (index, value) in values.iter().enumerate() {
+        accountant.poll_item(stage, index)?;
+        if !value.is_finite() {
+            return Err(SheafSkeletonError::NonFiniteCochain { role, index }.into());
+        }
+    }
+    Ok(())
+}
+
+fn validate_cochain_length(
+    values: &[f64],
+    expected: usize,
+    role: &'static str,
+) -> Result<(), SheafRepairError> {
+    if values.len() != expected {
+        return Err(SheafSkeletonError::CochainLength {
+            role,
+            expected,
+            actual: values.len(),
+        }
+        .into());
+    }
+    Ok(())
+}
+
+fn bounded_d0(
+    skeleton: &AdmittedSheafSkeleton,
+    values: &[f64],
+    stage: &'static str,
+    accountant: &mut RepairAccountant<'_, '_>,
+) -> Result<Vec<f64>, SheafRepairError> {
+    validate_cochain_length(values, skeleton.n_patches, "vertex")?;
+    accountant.begin_operator(stage)?;
+    let mut output = zeroed_output(skeleton.edges.len(), "bounded-d0-output")?;
+    for (edge, (value, &(u, v))) in output.iter_mut().zip(&skeleton.edges).enumerate() {
+        accountant.poll_item(stage, edge)?;
+        *value = values[v] - values[u];
+        if !value.is_finite() {
+            return Err(SheafRepairError::NumericalOverflow { stage });
+        }
+    }
+    accountant.finish_operator()?;
+    Ok(output)
+}
+
+fn bounded_d0t(
+    skeleton: &AdmittedSheafSkeleton,
+    values: &[f64],
+    stage: &'static str,
+    accountant: &mut RepairAccountant<'_, '_>,
+) -> Result<Vec<f64>, SheafRepairError> {
+    validate_cochain_length(values, skeleton.edges.len(), "edge")?;
+    accountant.begin_operator(stage)?;
+    let mut output = zeroed_output(skeleton.n_patches, "bounded-d0t-output")?;
+    for (edge, &(u, v)) in skeleton.edges.iter().enumerate() {
+        accountant.poll_item(stage, edge)?;
+        output[u] -= values[edge];
+        output[v] += values[edge];
+        if !(output[u].is_finite() && output[v].is_finite()) {
+            return Err(SheafRepairError::NumericalOverflow { stage });
+        }
+    }
+    accountant.finish_operator()?;
+    Ok(output)
+}
+
+fn bounded_d1(
+    skeleton: &AdmittedSheafSkeleton,
+    values: &[f64],
+    stage: &'static str,
+    accountant: &mut RepairAccountant<'_, '_>,
+) -> Result<Vec<f64>, SheafRepairError> {
+    validate_cochain_length(values, skeleton.edges.len(), "edge")?;
+    accountant.begin_operator(stage)?;
+    let mut output = zeroed_output(skeleton.triangles.len(), "bounded-d1-output")?;
+    for (triangle, (value, &(a, b, c))) in output.iter_mut().zip(&skeleton.triangles).enumerate() {
+        accountant.poll_item(stage, triangle)?;
+        let eab = skeleton
+            .edges
+            .binary_search(&(a, b))
+            .map_err(|_| SheafSkeletonError::InvalidTriangle { index: triangle })?;
+        let ebc = skeleton
+            .edges
+            .binary_search(&(b, c))
+            .map_err(|_| SheafSkeletonError::InvalidTriangle { index: triangle })?;
+        let eac = skeleton
+            .edges
+            .binary_search(&(a, c))
+            .map_err(|_| SheafSkeletonError::InvalidTriangle { index: triangle })?;
+        *value = (values[eab] + values[ebc]) - values[eac];
+        if !value.is_finite() {
+            return Err(SheafRepairError::NumericalOverflow { stage });
+        }
+    }
+    accountant.finish_operator()?;
+    Ok(output)
+}
+
+fn bounded_d1t(
+    skeleton: &AdmittedSheafSkeleton,
+    values: &[f64],
+    stage: &'static str,
+    accountant: &mut RepairAccountant<'_, '_>,
+) -> Result<Vec<f64>, SheafRepairError> {
+    validate_cochain_length(values, skeleton.triangles.len(), "triangle")?;
+    accountant.begin_operator(stage)?;
+    let mut output = zeroed_output(skeleton.edges.len(), "bounded-d1t-output")?;
+    for (triangle, &(a, b, c)) in skeleton.triangles.iter().enumerate() {
+        accountant.poll_item(stage, triangle)?;
+        let eab = skeleton
+            .edges
+            .binary_search(&(a, b))
+            .map_err(|_| SheafSkeletonError::InvalidTriangle { index: triangle })?;
+        let ebc = skeleton
+            .edges
+            .binary_search(&(b, c))
+            .map_err(|_| SheafSkeletonError::InvalidTriangle { index: triangle })?;
+        let eac = skeleton
+            .edges
+            .binary_search(&(a, c))
+            .map_err(|_| SheafSkeletonError::InvalidTriangle { index: triangle })?;
+        output[eab] += values[triangle];
+        output[ebc] += values[triangle];
+        output[eac] -= values[triangle];
+        if !(output[eab].is_finite() && output[ebc].is_finite() && output[eac].is_finite()) {
+            return Err(SheafRepairError::NumericalOverflow { stage });
+        }
+    }
+    accountant.finish_operator()?;
+    Ok(output)
+}
+
+#[derive(Clone, Copy)]
+enum ProjectionKind {
+    Exact,
+    Coexact,
+}
+
+fn apply_projection(
+    kind: ProjectionKind,
+    skeleton: &AdmittedSheafSkeleton,
+    values: &[f64],
+    stage: &'static str,
+    accountant: &mut RepairAccountant<'_, '_>,
+) -> Result<Vec<f64>, SheafRepairError> {
+    match kind {
+        ProjectionKind::Exact => bounded_d0(skeleton, values, stage, accountant),
+        ProjectionKind::Coexact => bounded_d1t(skeleton, values, stage, accountant),
+    }
+}
+
+fn apply_projection_transpose(
+    kind: ProjectionKind,
+    skeleton: &AdmittedSheafSkeleton,
+    values: &[f64],
+    stage: &'static str,
+    accountant: &mut RepairAccountant<'_, '_>,
+) -> Result<Vec<f64>, SheafRepairError> {
+    match kind {
+        ProjectionKind::Exact => bounded_d0t(skeleton, values, stage, accountant),
+        ProjectionKind::Coexact => bounded_d1(skeleton, values, stage, accountant),
+    }
+}
+
+fn least_squares_bounded(
+    skeleton: &AdmittedSheafSkeleton,
+    m: &[f64],
+    n_unknowns: usize,
+    kind: ProjectionKind,
+    pin_first: bool,
+    stage: &'static str,
+    accountant: &mut RepairAccountant<'_, '_>,
+) -> Result<Vec<f64>, SheafRepairError> {
+    let mut x = zeroed_output(n_unknowns, "least-squares-solution")?;
+    let rhs = apply_projection_transpose(kind, skeleton, m, stage, accountant)?;
+    let mut diag = zeroed_output(n_unknowns, "least-squares-diagonal")?;
+    for (i, diagonal) in diag.iter_mut().enumerate() {
+        let mut basis = zeroed_output(n_unknowns, "least-squares-basis")?;
+        basis[i] = 1.0;
+        let image = apply_projection(kind, skeleton, &basis, stage, accountant)?;
+        *diagonal = checked_norm2(&image, "least-squares-diagonal", accountant)?;
+    }
+    for _ in 0..accountant.budget.sweeps {
+        for i in 0..n_unknowns {
+            if (pin_first && i == 0) || diag[i] <= 0.0 {
+                continue;
+            }
+            let image = apply_projection(kind, skeleton, &x, stage, accountant)?;
+            let normal_image =
+                apply_projection_transpose(kind, skeleton, &image, stage, accountant)?;
+            let gradient = normal_image[i] - rhs[i];
+            let step = gradient / diag[i];
+            let next = x[i] - step;
+            if !(gradient.is_finite() && step.is_finite() && next.is_finite()) {
+                return Err(SheafRepairError::NumericalOverflow { stage });
+            }
+            x[i] = next;
+        }
+        accountant.complete_sweep(stage)?;
+    }
+    Ok(x)
+}
+
+/// Run the fixed-iteration Hodge-inspired diagnostic over sealed incidence
+/// under one explicit resource envelope and caller cancellation context.
+///
+/// This function retains the same no-claim boundary as [`hodge_decompose`]: a
+/// successful return proves that the declared deterministic arithmetic
+/// completed within budget. It does not certify convergence, orthogonality, or
+/// a topological interpretation of the remainder.
+pub fn hodge_decompose_bounded(
+    skeleton: &AdmittedSheafSkeleton,
+    mismatch: &[f64],
+    budget: SheafRepairBudget,
+    cx: &Cx<'_>,
+) -> Result<BoundedHodgeSplit, SheafRepairError> {
+    validate_cochain_length(mismatch, skeleton.edges.len(), "edge")?;
+    if budget.sweeps == 0 {
+        return Err(SheafRepairError::InvalidBudget { field: "sweeps" });
+    }
+    if budget.poll_stride == 0 {
+        return Err(SheafRepairError::InvalidBudget {
+            field: "poll_stride",
+        });
+    }
+
+    let admitted_scalar_slots = checked_scalar_envelope(skeleton)?;
+    if admitted_scalar_slots > budget.max_scalar_slots as u128 {
+        return Err(SheafRepairError::MemoryBudgetExceeded {
+            required: admitted_scalar_slots,
+            cap: budget.max_scalar_slots,
+        });
+    }
+    let required_operators = checked_operator_schedule(skeleton, budget.sweeps)?;
+    if required_operators > budget.max_operator_evaluations as u128 {
+        return Err(SheafRepairError::WorkBudgetExceeded {
+            required: required_operators,
+            cap: budget.max_operator_evaluations,
+        });
+    }
+
+    let mut accountant = RepairAccountant {
+        cx,
+        budget,
+        operator_evaluations: 0,
+        completed_sweeps: 0,
+    };
+    accountant.checkpoint("admission")?;
+    validate_bounded_cochain(
+        mismatch,
+        skeleton.edges.len(),
+        "edge",
+        "mismatch-validation",
+        &accountant,
+    )?;
+
+    let potential = least_squares_bounded(
+        skeleton,
+        mismatch,
+        skeleton.n_patches,
+        ProjectionKind::Exact,
+        true,
+        "exact-projection",
+        &mut accountant,
+    )?;
+    let exact = bounded_d0(skeleton, &potential, "exact-publication", &mut accountant)?;
+    let first_residual = checked_difference(mismatch, &exact, "exact-residual", &accountant)?;
+
+    let coexact = if skeleton.triangles.is_empty() {
+        zeroed_output(mismatch.len(), "empty-coexact")?
+    } else {
+        let triangle_potential = least_squares_bounded(
+            skeleton,
+            &first_residual,
+            skeleton.triangles.len(),
+            ProjectionKind::Coexact,
+            false,
+            "coexact-projection",
+            &mut accountant,
+        )?;
+        bounded_d1t(
+            skeleton,
+            &triangle_potential,
+            "coexact-publication",
+            &mut accountant,
+        )?
+    };
+    let harmonic = checked_difference(&first_residual, &coexact, "harmonic-residual", &accountant)?;
+    let total = checked_norm2(mismatch, "input-norm", &accountant)?.max(f64::MIN_POSITIVE);
+    let fractions = (
+        checked_norm2(&exact, "exact-norm", &accountant)? / total,
+        checked_norm2(&coexact, "coexact-norm", &accountant)? / total,
+        checked_norm2(&harmonic, "harmonic-norm", &accountant)? / total,
+    );
+    if [fractions.0, fractions.1, fractions.2]
+        .into_iter()
+        .any(|fraction| !fraction.is_finite())
+    {
+        return Err(SheafRepairError::NumericalOverflow {
+            stage: "component-fractions",
+        });
+    }
+    accountant.checkpoint("publication")?;
+    let admitted_scalar_slots = usize::try_from(admitted_scalar_slots).map_err(|_| {
+        SheafRepairError::BudgetArithmeticOverflow {
+            stage: "scalar-envelope-publication",
+        }
+    })?;
+    Ok(BoundedHodgeSplit {
+        split: HodgeSplit {
+            exact,
+            potential,
+            coexact,
+            harmonic,
+            fractions,
+        },
+        budget,
+        usage: SheafRepairUsage {
+            completed_sweeps: accountant.completed_sweeps,
+            operator_evaluations: accountant.operator_evaluations,
+            admitted_scalar_slots,
+        },
+    })
 }
 
 /// Least squares `min ‖m − A x‖²` via Gauss–Seidel on the normal

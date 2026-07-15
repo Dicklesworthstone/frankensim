@@ -10,11 +10,13 @@
 //! orthogonality authority on the fixed-iteration routine.
 #![cfg(feature = "sheaf-repair")]
 
+use asupersync::types::Budget;
+use fs_exec::{CancelGate, Cx, ExecMode, StreamKey};
 use fs_geom::router::{ConverterSpec, ErrorModel, MemoryCostOracle, RouteRequest, Router};
 use fs_geom::sheaf::{Interface, SheafComplex};
 use fs_geom::sheaf_repair::{
-    AdmittedSheafSkeleton, COMPONENT_FLOOR, SheafSkeleton, SheafSkeletonError, apply_gauge,
-    hodge_decompose, plan_repair,
+    AdmittedSheafSkeleton, COMPONENT_FLOOR, SheafRepairBudget, SheafRepairError, SheafSkeleton,
+    SheafSkeletonError, apply_gauge, hodge_decompose, hodge_decompose_bounded, plan_repair,
 };
 
 fn verdict(case: &str, detail: &str) {
@@ -22,6 +24,30 @@ fn verdict(case: &str, detail: &str) {
         "{{\"suite\":\"fs-geom/sheaf-repair\",\"case\":\"{case}\",\"verdict\":\"pass\",\
          \"detail\":\"{detail}\"}}"
     );
+}
+
+fn with_gate_cx<R>(gate: &CancelGate, f: impl FnOnce(&Cx<'_>) -> R) -> R {
+    let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+    pool.scope(|arena| {
+        let cx = Cx::new(
+            gate,
+            arena,
+            StreamKey {
+                seed: 0x5348_4541_4652_4550,
+                kernel_id: 1,
+                tile: 0,
+                iteration: 0,
+            },
+            Budget::INFINITE,
+            ExecMode::Deterministic,
+        );
+        f(&cx)
+    })
+}
+
+fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
+    let gate = CancelGate::new();
+    with_gate_cx(&gate, f)
 }
 
 /// A 3-patch triangle complex (one triple junction).
@@ -588,5 +614,136 @@ fn sr_007_admitted_incidence_is_total_and_finite() {
     verdict(
         "sr-007",
         "admitted incidence rejects shape, non-finite, and overflow inputs without panic and preserves delta-one composed with delta-zero",
+    );
+}
+
+#[test]
+fn sr_008_bounded_decomposition_accounts_before_work() {
+    let skeleton = AdmittedSheafSkeleton::try_new(3, vec![(0, 1), (0, 2), (1, 2)], vec![(0, 1, 2)])
+        .expect("canonical triangle admits");
+    let mismatch = skeleton
+        .d0(&[0.0, 0.5, -0.25])
+        .expect("finite exact fixture");
+    let budget = SheafRepairBudget {
+        sweeps: 8,
+        max_operator_evaluations: 56,
+        max_scalar_slots: 42,
+        poll_stride: 1,
+    };
+    with_cx(|cx| {
+        let bounded = hodge_decompose_bounded(&skeleton, &mismatch, budget, cx)
+            .expect("exact admitted schedule fits its envelope");
+        assert_eq!(bounded.budget, budget);
+        assert_eq!(bounded.usage.completed_sweeps, 16);
+        assert_eq!(bounded.usage.operator_evaluations, 56);
+        assert_eq!(bounded.usage.admitted_scalar_slots, 42);
+        assert!(
+            bounded
+                .split
+                .exact
+                .iter()
+                .chain(&bounded.split.potential)
+                .chain(&bounded.split.coexact)
+                .chain(&bounded.split.harmonic)
+                .all(|value| value.is_finite())
+        );
+
+        assert_eq!(
+            hodge_decompose_bounded(
+                &skeleton,
+                &mismatch,
+                SheafRepairBudget {
+                    max_operator_evaluations: 55,
+                    ..budget
+                },
+                cx,
+            ),
+            Err(SheafRepairError::WorkBudgetExceeded {
+                required: 56,
+                cap: 55,
+            })
+        );
+        assert_eq!(
+            hodge_decompose_bounded(
+                &skeleton,
+                &mismatch,
+                SheafRepairBudget {
+                    max_scalar_slots: 41,
+                    ..budget
+                },
+                cx,
+            ),
+            Err(SheafRepairError::MemoryBudgetExceeded {
+                required: 42,
+                cap: 41,
+            })
+        );
+        assert_eq!(
+            hodge_decompose_bounded(&skeleton, &[0.0, f64::NAN, 0.0], budget, cx,),
+            Err(SheafRepairError::Skeleton(
+                SheafSkeletonError::NonFiniteCochain {
+                    role: "edge",
+                    index: 1,
+                }
+            ))
+        );
+        assert_eq!(
+            hodge_decompose_bounded(
+                &skeleton,
+                &mismatch,
+                SheafRepairBudget {
+                    sweeps: 0,
+                    ..budget
+                },
+                cx,
+            ),
+            Err(SheafRepairError::InvalidBudget { field: "sweeps" })
+        );
+        assert_eq!(
+            hodge_decompose_bounded(
+                &skeleton,
+                &mismatch,
+                SheafRepairBudget {
+                    poll_stride: 0,
+                    ..budget
+                },
+                cx,
+            ),
+            Err(SheafRepairError::InvalidBudget {
+                field: "poll_stride",
+            })
+        );
+    });
+    verdict(
+        "sr-008",
+        "bounded decomposition retains exact work and memory consumption and refuses under-budget or non-finite requests before publication",
+    );
+}
+
+#[test]
+fn sr_009_bounded_decomposition_observes_pre_cancellation() {
+    let skeleton =
+        AdmittedSheafSkeleton::try_new(2, vec![(0, 1)], Vec::new()).expect("single edge admits");
+    let budget = SheafRepairBudget {
+        sweeps: 2,
+        max_operator_evaluations: 32,
+        max_scalar_slots: 32,
+        poll_stride: 1,
+    };
+    let gate = CancelGate::new();
+    gate.request();
+    with_gate_cx(&gate, |cx| {
+        assert_eq!(
+            hodge_decompose_bounded(&skeleton, &[1.0], budget, cx),
+            Err(SheafRepairError::Cancelled {
+                stage: "admission",
+                completed_sweeps: 0,
+                operator_evaluations: 0,
+            })
+        );
+    });
+    verdict(
+        "sr-009",
+        "pre-cancelled diagnostics refuse before allocation or operator work and retain zero consumption",
     );
 }
