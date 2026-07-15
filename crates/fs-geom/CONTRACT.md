@@ -189,6 +189,14 @@ fs-ivl, fs-alloc, fs-obs, fs-sparse.
   constraint, complex, local-model, or stratum collection syntax. Homogeneous
   inclusion paths compose through the exact middle geometry; mixed paths retain
   each inclusion primitive and its factor-local artifacts.
+  `DerivedSpanCorrespondenceIrV1` is deliberately separate from the directed
+  morphism-kind algebra. It declares `source <- apex -> target` by binding exact
+  source/apex/target geometry IDs and two already-admitted morphism receipts
+  oriented `apex -> source` and `apex -> target`, plus an explicit no-authority
+  artifact. The sealed span exposes no direct source-to-target evidence
+  transport. V1 does not compose spans: actual composition requires a separately
+  admitted pullback apex, projections, commuting square, and pullback authority,
+  and associativity is only available under the resulting scoped equivalences.
   Evidence transport is explicitly contravariant restriction or covariant
   balance corestriction and binds exact input/output geometry identities plus
   nominal caller-declared input/output evidence-artifact identities and ranks.
@@ -209,9 +217,9 @@ fs-ivl, fs-alloc, fs-obs, fs-sparse.
   establish payload preservation or validity-domain inclusion, prove theorem
   truth, or establish physical equivalence. Invertible chart transitions,
   geometric/stratified refinements, authenticated subobject inclusions,
-  quasi-isomorphism witnesses, constructible maps, spans/correspondences, and L6
-  Machine-IR crosswalks remain typed RD.1b follow-ups rather than being
-  represented as strict maps.
+  quasi-isomorphism witnesses, constructible maps, composable/authenticated
+  correspondences, and L6 Machine-IR crosswalks remain typed RD.1b follow-ups
+  rather than being represented as strict maps.
 
 - `exit_path` module (RD.X1, `[M]`, behind `derived-geometry`) admits a bounded,
   executable statement language for maximal exit/entrance-path approximation
@@ -538,6 +546,11 @@ fs-ivl, fs-alloc, fs-obs, fs-sparse.
    paths require the exact geometry seam already enforced for every arrow;
    composition retains ordered factor declarations but proves no containment
    theorem.
+9. Standalone declared spans bind exact `source <- apex -> target` geometry
+   identities, exact ordered admitted leg-morphism IDs, the common-apex/outer-
+   endpoint orientation of both sealed legs, and one nonzero no-authority
+   artifact. They do not enter directed-morphism composition or expose a direct
+   evidence transport.
 
 ## Error model
 Structured teaching values throughout: `ConvertDiag` (ranked fixes),
@@ -566,6 +579,9 @@ artifact IDs (including inclusion map/containment declarations), declared-rank
 strengthening, equivalence laundering, typed chart/refinement/evidence seams,
 bounded lineage, allocation, cancellation, and canonical identity failures.
 Refusal publishes no admitted morphism.
+Standalone span admission uses `DerivedSpanCorrespondenceErrorV1` for schema,
+zero no-authority identity, raw-leg/sealed-leg mismatch, leg orientation,
+cancellation, and canonical-identity defects. Refusal publishes no span token.
 
 ## Determinism class
 Deterministic: seeded sampling, insertion-ordered charts, canonical JSON
@@ -595,6 +611,10 @@ Whole-object inclusion primitives likewise use a distinct tag and bind exact
 nominal map and containment-artifact IDs; their homogeneous composite tag plus
 flattened primitive factors preserves family, order, and parenthesization
 without authenticating either artifact.
+Standalone span receipts use a separate schema/domain and encode exact
+source/apex/target geometry IDs, left then right admitted-leg IDs, and the
+no-authority artifact. Replaying the same ordered legs is stable; swapping valid
+distinct equal-endpoint legs changes identity.
 
 ## Cancellation behavior
 Chart evaluation and production sampling paths take `&Cx`.
@@ -621,6 +641,8 @@ immediately before publication. Composition polls at entry, at a fixed stride
 while copying bounded typed-primitive, factor, and no-claim lineage, inside
 identity construction, and before publication. Cancellation exposes no partial
 admitted morphism.
+Standalone span admission polls at entry, before and inside identity encoding,
+and immediately before publication. Cancellation exposes no partial span token.
 RD.X1 statement admission polls before validation, once for every derived
 theorem-lattice node, before identity construction, and inside the streaming
 encoder. Its falsifier set and truncation lattice have hard versioned caps;
@@ -705,6 +727,11 @@ Whole-object inclusion coverage adds frozen family tags, nominal map and
 containment receipt movement, strict-family domain separation, missing-ID and
 authority-laundering refusals, inherited model-version compatibility, exact
 identity/endpoint laws, homogeneous associativity, and mixed-family typed order.
+Standalone span coverage adds deterministic replay and exact accessors, no-claim
+identity movement, left/right order sensitivity, raw-leg ID mismatch, all four
+apex/outer-endpoint orientation refusals, identity-left graph shape, and already-
+requested entry cancellation. No test claims that a graph-shaped span is
+functional or that arbitrary spans compose.
 `tests/exit_path.rs` supplies RD.X1 G0/G3 examples and a bounded-cancellation
 regression: regular-cell poset sufficiency, cone/cusp groupoid-enriched
 one-category fallback, circular-stratum local systems, finite-versus-full
@@ -809,15 +836,23 @@ claim those stronger G4/G5 results.
   evidence. Composition retains an ordered path of nominal factor declarations
   but does not prove transitive containment. Nonzero map and containment IDs are
   nominal only, and `IdentityOnly` is refused.
+- `AdmittedDerivedSpanCorrespondenceV1` proves only that two exact sealed legs
+  share the declared apex and land at the declared outer endpoints. It proves no
+  totality, single-valuedness, functionality, injectivity, surjectivity,
+  nonemptiness, properness, closedness, graph/image truth, physical
+  correspondence, direct outer-endpoint evidence transport, inverse, or
+  equivalence. No pullback, base-change, pull-push, Beck-Chevalley, projection-
+  formula, or composition authority is available. Even an identity-left
+  graph-shaped span remains only a structural declaration.
 - The v1 sublanguage containing identities, generic strict maps, and declared
   chart maps, finite-complex refinements, and whole-object inclusion declarations
   closes mixed map-family composition through ordered typed heterogeneous paths
   whenever its exact geometry, evidence, adjacent-chart, and adjacent-refinement
   seams pass. This removes the implemented-family closure gap but does not
   promote the full RD.1b category claim. Authenticated subobject inclusions,
-  geometric/stratified refinements, correspondences, scoped equivalences, and
-  crosswalks still need distinct primitives and their own seam laws before that
-  broader claim is promotable.
+  geometric/stratified refinements, pullback-composable/authenticated
+  correspondences, scoped equivalences, and crosswalks still need distinct
+  primitives and their own seam laws before that broader claim is promotable.
 - V1 refuses unbounded and infinite-dimensional local models, opaque external
   analytic functions, unknown compactness/regularity, and infinite computation.
   These are admitted-class limits, not claims that the excluded mathematics is

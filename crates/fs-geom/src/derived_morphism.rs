@@ -3,10 +3,11 @@
 //! This RD.1b spine admits category identities, generic strict maps, typed
 //! declared chart maps, finite-complex rank refinements, and whole-object
 //! inclusion declarations; checks structural evidence restriction/corestriction;
-//! and composes ordered typed primitive paths with content-addressed lineage. It
-//! deliberately cannot mint a non-identity equivalence: a witness digest is
-//! data, not a proof of an inverse, quasi-isomorphism, refinement theorem, or
-//! physical crosswalk.
+//! and composes ordered typed primitive paths with content-addressed lineage. A
+//! separate token seals declared spans from two admitted legs without folding
+//! correspondences into directed-map composition. This module deliberately
+//! cannot mint a non-identity equivalence: a witness digest is data, not a proof
+//! of an inverse, quasi-isomorphism, refinement theorem, or physical crosswalk.
 
 use core::fmt;
 
@@ -26,6 +27,8 @@ use crate::derived::{
 
 /// Current schema for structural RD.1b morphism receipts.
 pub const DERIVED_MORPHISM_SCHEMA_VERSION_V1: u32 = 1;
+/// Current schema for standalone declared span-correspondence receipts.
+pub const DERIVED_SPAN_CORRESPONDENCE_SCHEMA_VERSION_V1: u32 = 1;
 /// Maximum primitive nonidentity factors retained in one flattened composition.
 pub const DERIVED_MORPHISM_MAX_FACTORS_V1: usize = 1024;
 const DERIVED_MORPHISM_CANCELLATION_STRIDE_V1: usize = 64;
@@ -53,6 +56,28 @@ impl CanonicalSchema for DerivedMorphismIdentitySchemaV1 {
 
 /// Typed identity of one admitted RD.1b structural morphism.
 pub type DerivedMorphismIdV1 = EvidenceNodeId<DerivedMorphismIdentitySchemaV1>;
+
+/// Domain-separated semantic identity for one admitted declared span.
+pub enum DerivedSpanCorrespondenceIdentitySchemaV1 {}
+
+impl CanonicalSchema for DerivedSpanCorrespondenceIdentitySchemaV1 {
+    const DOMAIN: &'static str = "org.frankensim.fs-geom.derived-span-correspondence.v1";
+    const NAME: &'static str = "derived-geometry-declared-span-correspondence";
+    const VERSION: u32 = DERIVED_SPAN_CORRESPONDENCE_SCHEMA_VERSION_V1;
+    const CONTEXT: &'static str =
+        "exact source, common apex, exact target, ordered admitted legs, and no-authority boundary";
+    const FIELDS: &'static [FieldSpec] = &[
+        FieldSpec::required("source", WireType::Bytes),
+        FieldSpec::required("apex", WireType::Bytes),
+        FieldSpec::required("target", WireType::Bytes),
+        FieldSpec::required("left-leg", WireType::Bytes),
+        FieldSpec::required("right-leg", WireType::Bytes),
+        FieldSpec::required("no-claim", WireType::Bytes),
+    ];
+}
+
+/// Typed identity of one admitted standalone span `source <- apex -> target`.
+pub type DerivedSpanCorrespondenceIdV1 = EvidenceNodeId<DerivedSpanCorrespondenceIdentitySchemaV1>;
 
 /// Nominal artifact implementing one declared chart map.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -433,6 +458,30 @@ pub struct DerivedMorphismIrV1 {
     pub equivalence: DerivedEquivalenceBoundaryV1,
 }
 
+/// Versioned standalone span request `source <- apex -> target`.
+///
+/// `left_leg` and `right_leg` name already-admitted morphisms with orientations
+/// `apex -> source` and `apex -> target`. The request has no direct
+/// source-to-target evidence transport and makes no pullback or functionality
+/// claim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DerivedSpanCorrespondenceIrV1 {
+    /// Decoded schema version.
+    pub schema_version: u32,
+    /// Exact left endpoint.
+    pub source: DerivedGeometryIdV1,
+    /// Exact common source of both admitted legs.
+    pub apex: DerivedGeometryIdV1,
+    /// Exact right endpoint.
+    pub target: DerivedGeometryIdV1,
+    /// Exact admitted `apex -> source` morphism.
+    pub left_leg: DerivedMorphismIdV1,
+    /// Exact admitted `apex -> target` morphism.
+    pub right_leg: DerivedMorphismIdV1,
+    /// Explicit no-correspondence-authority artifact.
+    pub no_claim: DerivedNoClaimIdV1,
+}
+
 /// Structured refusal from RD.1b structural morphism admission/composition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DerivedMorphismErrorV1 {
@@ -540,6 +589,48 @@ impl fmt::Display for DerivedMorphismErrorV1 {
 
 impl core::error::Error for DerivedMorphismErrorV1 {}
 
+/// Structured refusal from standalone declared-span admission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DerivedSpanCorrespondenceErrorV1 {
+    /// Unsupported decoded schema version.
+    UnsupportedSchemaVersion {
+        /// Supplied version.
+        found: u32,
+        /// Sole supported version.
+        supported: u32,
+    },
+    /// The explicit no-authority artifact used the all-zero sentinel.
+    MissingIdentity {
+        /// Stable identity field.
+        field: &'static str,
+    },
+    /// A raw leg ID does not name the supplied sealed admitted leg.
+    LegIdentityMismatch {
+        /// Stable left/right leg field.
+        field: &'static str,
+    },
+    /// One sealed leg does not have the required apex/endpoint orientation.
+    LegOrientationMismatch {
+        /// Stable failed orientation relation.
+        field: &'static str,
+    },
+    /// Cooperative cancellation was observed before publication.
+    Cancelled {
+        /// Stable admission stage.
+        stage: &'static str,
+    },
+    /// Canonical identity construction failed.
+    Identity(CanonicalError),
+}
+
+impl fmt::Display for DerivedSpanCorrespondenceErrorV1 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "derived span correspondence refused: {self:?}")
+    }
+}
+
+impl core::error::Error for DerivedSpanCorrespondenceErrorV1 {}
+
 /// Sealed, content-addressed structural morphism.
 #[derive(Debug, PartialEq, Eq)]
 pub struct AdmittedDerivedMorphismV1 {
@@ -619,6 +710,72 @@ impl AdmittedDerivedMorphismV1 {
     /// Canonical receipt and construction limits.
     #[must_use]
     pub const fn identity_receipt(&self) -> IdentityReceipt<DerivedMorphismIdV1> {
+        self.receipt
+    }
+}
+
+/// Sealed, content-addressed standalone span `source <- apex -> target`.
+///
+/// This token proves only exact leg identity and orientation binding. It does
+/// not expose a direct source-to-target evidence transport or certify that the
+/// span is functional, invertible, a pullback, or physically meaningful.
+#[derive(Debug, PartialEq, Eq)]
+pub struct AdmittedDerivedSpanCorrespondenceV1 {
+    source: DerivedGeometryIdV1,
+    apex: DerivedGeometryIdV1,
+    target: DerivedGeometryIdV1,
+    left_leg: DerivedMorphismIdV1,
+    right_leg: DerivedMorphismIdV1,
+    no_claim: DerivedNoClaimIdV1,
+    receipt: IdentityReceipt<DerivedSpanCorrespondenceIdV1>,
+}
+
+impl AdmittedDerivedSpanCorrespondenceV1 {
+    /// Exact left endpoint.
+    #[must_use]
+    pub const fn source(&self) -> DerivedGeometryIdV1 {
+        self.source
+    }
+
+    /// Exact common apex.
+    #[must_use]
+    pub const fn apex(&self) -> DerivedGeometryIdV1 {
+        self.apex
+    }
+
+    /// Exact right endpoint.
+    #[must_use]
+    pub const fn target(&self) -> DerivedGeometryIdV1 {
+        self.target
+    }
+
+    /// Exact admitted `apex -> source` morphism identity.
+    #[must_use]
+    pub const fn left_leg(&self) -> DerivedMorphismIdV1 {
+        self.left_leg
+    }
+
+    /// Exact admitted `apex -> target` morphism identity.
+    #[must_use]
+    pub const fn right_leg(&self) -> DerivedMorphismIdV1 {
+        self.right_leg
+    }
+
+    /// Explicit no-correspondence-authority artifact.
+    #[must_use]
+    pub const fn no_claim(&self) -> DerivedNoClaimIdV1 {
+        self.no_claim
+    }
+
+    /// Typed standalone span identity.
+    #[must_use]
+    pub const fn id(&self) -> DerivedSpanCorrespondenceIdV1 {
+        self.receipt.id()
+    }
+
+    /// Canonical receipt and construction limits.
+    #[must_use]
+    pub const fn identity_receipt(&self) -> IdentityReceipt<DerivedSpanCorrespondenceIdV1> {
         self.receipt
     }
 }
@@ -1965,6 +2122,107 @@ pub fn compose_derived_morphisms_v1(
     })
 }
 
+fn span_correspondence_receipt(
+    ir: DerivedSpanCorrespondenceIrV1,
+    cx: &Cx<'_>,
+) -> Result<IdentityReceipt<DerivedSpanCorrespondenceIdV1>, DerivedSpanCorrespondenceErrorV1> {
+    if cx.checkpoint().is_err() {
+        return Err(DerivedSpanCorrespondenceErrorV1::Cancelled {
+            stage: "span-identity-entry",
+        });
+    }
+    let map_identity_error = |error| match error {
+        CanonicalError::Cancelled { .. } => DerivedSpanCorrespondenceErrorV1::Cancelled {
+            stage: "span-identity",
+        },
+        other => DerivedSpanCorrespondenceErrorV1::Identity(other),
+    };
+    CanonicalEncoder::<DerivedSpanCorrespondenceIdV1, _>::new(
+        DERIVED_MORPHISM_IDENTITY_LIMITS_V1,
+        || cx.checkpoint().is_err(),
+    )
+    .map_err(map_identity_error)?
+    .bytes(Field::new(0, "source"), ir.source.as_bytes())
+    .and_then(|encoder| encoder.bytes(Field::new(1, "apex"), ir.apex.as_bytes()))
+    .and_then(|encoder| encoder.bytes(Field::new(2, "target"), ir.target.as_bytes()))
+    .and_then(|encoder| encoder.bytes(Field::new(3, "left-leg"), ir.left_leg.as_bytes()))
+    .and_then(|encoder| encoder.bytes(Field::new(4, "right-leg"), ir.right_leg.as_bytes()))
+    .and_then(|encoder| encoder.bytes(Field::new(5, "no-claim"), ir.no_claim.as_bytes()))
+    .and_then(|encoder| encoder.finish())
+    .map_err(map_identity_error)
+}
+
+/// Admit one standalone declared span `source <- apex -> target`.
+///
+/// Both supplied legs must already be sealed RD.1b morphisms. Admission binds
+/// their exact identities and checks orientations `apex -> source` and
+/// `apex -> target`. It does not create a direct source-to-target map or
+/// evidence transport, authenticate leg payloads beyond their sealed structural
+/// receipts, or prove functionality, pullback, equivalence, or physical
+/// correspondence. Span composition requires separately admitted pullback data
+/// and is intentionally absent from v1.
+///
+/// # Errors
+/// Returns a typed refusal for schema, no-claim identity, raw-leg binding,
+/// sealed-leg orientation, cancellation, or canonical-identity defects.
+#[must_use = "a raw span request has no correspondence authority"]
+pub fn admit_derived_span_correspondence_v1(
+    ir: DerivedSpanCorrespondenceIrV1,
+    left_leg: &AdmittedDerivedMorphismV1,
+    right_leg: &AdmittedDerivedMorphismV1,
+    cx: &Cx<'_>,
+) -> Result<AdmittedDerivedSpanCorrespondenceV1, DerivedSpanCorrespondenceErrorV1> {
+    if cx.checkpoint().is_err() {
+        return Err(DerivedSpanCorrespondenceErrorV1::Cancelled {
+            stage: "span-admission-entry",
+        });
+    }
+    if ir.schema_version != DERIVED_SPAN_CORRESPONDENCE_SCHEMA_VERSION_V1 {
+        return Err(DerivedSpanCorrespondenceErrorV1::UnsupportedSchemaVersion {
+            found: ir.schema_version,
+            supported: DERIVED_SPAN_CORRESPONDENCE_SCHEMA_VERSION_V1,
+        });
+    }
+    if is_zero(ir.no_claim.as_bytes()) {
+        return Err(DerivedSpanCorrespondenceErrorV1::MissingIdentity {
+            field: "no-correspondence-claim",
+        });
+    }
+    for (matches, field) in [
+        (ir.left_leg == left_leg.id(), "left-leg"),
+        (ir.right_leg == right_leg.id(), "right-leg"),
+    ] {
+        if !matches {
+            return Err(DerivedSpanCorrespondenceErrorV1::LegIdentityMismatch { field });
+        }
+    }
+    for (matches, field) in [
+        (left_leg.source() == ir.apex, "left-source-apex"),
+        (left_leg.target() == ir.source, "left-target-source"),
+        (right_leg.source() == ir.apex, "right-source-apex"),
+        (right_leg.target() == ir.target, "right-target-target"),
+    ] {
+        if !matches {
+            return Err(DerivedSpanCorrespondenceErrorV1::LegOrientationMismatch { field });
+        }
+    }
+    let receipt = span_correspondence_receipt(ir, cx)?;
+    if cx.checkpoint().is_err() {
+        return Err(DerivedSpanCorrespondenceErrorV1::Cancelled {
+            stage: "span-publication",
+        });
+    }
+    Ok(AdmittedDerivedSpanCorrespondenceV1 {
+        source: ir.source,
+        apex: ir.apex,
+        target: ir.target,
+        left_leg: ir.left_leg,
+        right_leg: ir.right_leg,
+        no_claim: ir.no_claim,
+        receipt,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2233,6 +2491,25 @@ mod tests {
             containment: DerivedWitnessIdV1::from_bytes([artifact_seed.wrapping_add(2); 32]),
         };
         ir
+    }
+
+    fn span_ir(
+        source: GeometryEndpointV1<'_>,
+        apex: GeometryEndpointV1<'_>,
+        target: GeometryEndpointV1<'_>,
+        left_leg: &AdmittedDerivedMorphismV1,
+        right_leg: &AdmittedDerivedMorphismV1,
+        no_claim_seed: u8,
+    ) -> DerivedSpanCorrespondenceIrV1 {
+        DerivedSpanCorrespondenceIrV1 {
+            schema_version: DERIVED_SPAN_CORRESPONDENCE_SCHEMA_VERSION_V1,
+            source: source.id,
+            apex: apex.id,
+            target: target.id,
+            left_leg: left_leg.id(),
+            right_leg: right_leg.id(),
+            no_claim: DerivedNoClaimIdV1::from_bytes([no_claim_seed; 32]),
+        }
     }
 
     fn restriction_ir(
@@ -3864,6 +4141,314 @@ mod tests {
                     DerivedNoClaimIdV1::from_bytes([116; 32]),
                 ]
             );
+        });
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // Replay, exact accessors, and ordered-leg identity.
+    fn standalone_span_binds_ordered_admitted_legs_without_direct_transport() {
+        with_cx(false, |cx| {
+            assert_eq!(
+                <DerivedSpanCorrespondenceIdentitySchemaV1 as CanonicalSchema>::CONTEXT,
+                "exact source, common apex, exact target, ordered admitted legs, and no-authority boundary"
+            );
+            let source = endpoint(190);
+            let apex = endpoint(191);
+            let target = endpoint(192);
+            let left = admit_strict(
+                apex,
+                source,
+                60,
+                ColorRank::Verified,
+                ColorRank::Validated,
+                cx,
+            );
+            let right = admit_strict(
+                apex,
+                target,
+                61,
+                ColorRank::Verified,
+                ColorRank::Estimated,
+                cx,
+            );
+            let ir = span_ir(source, apex, target, &left, &right, 62);
+            let admitted = admit_derived_span_correspondence_v1(ir, &left, &right, cx)
+                .expect("valid standalone span");
+            let replay = admit_derived_span_correspondence_v1(ir, &left, &right, cx)
+                .expect("replayed standalone span");
+            assert_eq!(admitted, replay);
+            assert_eq!(admitted.source(), source.id);
+            assert_eq!(admitted.apex(), apex.id);
+            assert_eq!(admitted.target(), target.id);
+            assert_eq!(admitted.left_leg(), left.id());
+            assert_eq!(admitted.right_leg(), right.id());
+            assert_eq!(
+                admitted.no_claim(),
+                DerivedNoClaimIdV1::from_bytes([62; 32])
+            );
+            assert_eq!(admitted.id(), admitted.identity_receipt().id());
+
+            let mut changed_source = ir;
+            changed_source.source = geometry_id(200);
+            let mut changed_apex = ir;
+            changed_apex.apex = geometry_id(200);
+            let mut changed_target = ir;
+            changed_target.target = geometry_id(200);
+            let mut changed_left_leg = ir;
+            changed_left_leg.left_leg = right.id();
+            let mut changed_right_leg = ir;
+            changed_right_leg.right_leg = left.id();
+            for (field, changed) in [
+                ("source", changed_source),
+                ("apex", changed_apex),
+                ("target", changed_target),
+                ("left-leg", changed_left_leg),
+                ("right-leg", changed_right_leg),
+            ] {
+                let changed = span_correspondence_receipt(changed, cx)
+                    .expect("one-field span receipt mutation");
+                assert_ne!(admitted.id(), changed.id(), "{field} must move identity");
+            }
+
+            let mut changed_no_claim = ir;
+            changed_no_claim.no_claim = DerivedNoClaimIdV1::from_bytes([63; 32]);
+            let changed_no_claim =
+                admit_derived_span_correspondence_v1(changed_no_claim, &left, &right, cx)
+                    .expect("changed no-claim remains a structural span");
+            assert_ne!(admitted.id(), changed_no_claim.id());
+
+            let common_target = endpoint(193);
+            let first_leg = admit_strict(
+                apex,
+                common_target,
+                64,
+                ColorRank::Verified,
+                ColorRank::Validated,
+                cx,
+            );
+            let second_leg = admit_strict(
+                apex,
+                common_target,
+                65,
+                ColorRank::Verified,
+                ColorRank::Estimated,
+                cx,
+            );
+            let ordered_ir = span_ir(
+                common_target,
+                apex,
+                common_target,
+                &first_leg,
+                &second_leg,
+                66,
+            );
+            let ordered =
+                admit_derived_span_correspondence_v1(ordered_ir, &first_leg, &second_leg, cx)
+                    .expect("ordered equal-endpoint span");
+            let swapped_ir = span_ir(
+                common_target,
+                apex,
+                common_target,
+                &second_leg,
+                &first_leg,
+                66,
+            );
+            let swapped =
+                admit_derived_span_correspondence_v1(swapped_ir, &second_leg, &first_leg, cx)
+                    .expect("swapped equal-endpoint span");
+            assert_ne!(
+                ordered.id(),
+                swapped.id(),
+                "left/right leg order is semantic"
+            );
+        });
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // Independent raw-binding and four orientation refusals.
+    fn standalone_span_refuses_raw_leg_and_orientation_mismatches() {
+        with_cx(false, |cx| {
+            let source = endpoint(194);
+            let apex = endpoint(195);
+            let target = endpoint(196);
+            let other = endpoint(197);
+            let left = admit_strict(
+                apex,
+                source,
+                70,
+                ColorRank::Verified,
+                ColorRank::Validated,
+                cx,
+            );
+            let right = admit_strict(
+                apex,
+                target,
+                71,
+                ColorRank::Verified,
+                ColorRank::Estimated,
+                cx,
+            );
+            let base = span_ir(source, apex, target, &left, &right, 72);
+
+            let mut wrong_schema = base;
+            wrong_schema.schema_version += 1;
+            assert_eq!(
+                admit_derived_span_correspondence_v1(wrong_schema, &left, &right, cx),
+                Err(DerivedSpanCorrespondenceErrorV1::UnsupportedSchemaVersion {
+                    found: 2,
+                    supported: DERIVED_SPAN_CORRESPONDENCE_SCHEMA_VERSION_V1,
+                })
+            );
+
+            let mut zero_no_claim = base;
+            zero_no_claim.no_claim = DerivedNoClaimIdV1::from_bytes([0; 32]);
+            assert_eq!(
+                admit_derived_span_correspondence_v1(zero_no_claim, &left, &right, cx),
+                Err(DerivedSpanCorrespondenceErrorV1::MissingIdentity {
+                    field: "no-correspondence-claim"
+                })
+            );
+
+            let mut wrong_left_id = base;
+            wrong_left_id.left_leg = right.id();
+            assert_eq!(
+                admit_derived_span_correspondence_v1(wrong_left_id, &left, &right, cx),
+                Err(DerivedSpanCorrespondenceErrorV1::LegIdentityMismatch { field: "left-leg" })
+            );
+
+            let mut wrong_right_id = base;
+            wrong_right_id.right_leg = left.id();
+            assert_eq!(
+                admit_derived_span_correspondence_v1(wrong_right_id, &left, &right, cx),
+                Err(DerivedSpanCorrespondenceErrorV1::LegIdentityMismatch { field: "right-leg" })
+            );
+
+            let wrong_left_source = admit_strict(
+                other,
+                source,
+                73,
+                ColorRank::Verified,
+                ColorRank::Validated,
+                cx,
+            );
+            let wrong_left_source_ir =
+                span_ir(source, apex, target, &wrong_left_source, &right, 74);
+            assert_eq!(
+                admit_derived_span_correspondence_v1(
+                    wrong_left_source_ir,
+                    &wrong_left_source,
+                    &right,
+                    cx,
+                ),
+                Err(DerivedSpanCorrespondenceErrorV1::LegOrientationMismatch {
+                    field: "left-source-apex"
+                })
+            );
+
+            let wrong_left_target = admit_strict(
+                apex,
+                other,
+                75,
+                ColorRank::Verified,
+                ColorRank::Validated,
+                cx,
+            );
+            let wrong_left_target_ir =
+                span_ir(source, apex, target, &wrong_left_target, &right, 76);
+            assert_eq!(
+                admit_derived_span_correspondence_v1(
+                    wrong_left_target_ir,
+                    &wrong_left_target,
+                    &right,
+                    cx,
+                ),
+                Err(DerivedSpanCorrespondenceErrorV1::LegOrientationMismatch {
+                    field: "left-target-source"
+                })
+            );
+
+            let wrong_right_source = admit_strict(
+                other,
+                target,
+                77,
+                ColorRank::Verified,
+                ColorRank::Estimated,
+                cx,
+            );
+            let wrong_right_source_ir =
+                span_ir(source, apex, target, &left, &wrong_right_source, 78);
+            assert_eq!(
+                admit_derived_span_correspondence_v1(
+                    wrong_right_source_ir,
+                    &left,
+                    &wrong_right_source,
+                    cx,
+                ),
+                Err(DerivedSpanCorrespondenceErrorV1::LegOrientationMismatch {
+                    field: "right-source-apex"
+                })
+            );
+
+            let wrong_right_target = admit_strict(
+                apex,
+                other,
+                79,
+                ColorRank::Verified,
+                ColorRank::Estimated,
+                cx,
+            );
+            let wrong_right_target_ir =
+                span_ir(source, apex, target, &left, &wrong_right_target, 80);
+            assert_eq!(
+                admit_derived_span_correspondence_v1(
+                    wrong_right_target_ir,
+                    &left,
+                    &wrong_right_target,
+                    cx,
+                ),
+                Err(DerivedSpanCorrespondenceErrorV1::LegOrientationMismatch {
+                    field: "right-target-target"
+                })
+            );
+        });
+    }
+
+    #[test]
+    fn standalone_span_admits_graph_shape_and_refuses_entry_cancellation() {
+        with_cx(false, |cx| {
+            let source_and_apex = endpoint(198);
+            let target = endpoint(199);
+            let left_identity = admit_identity(source_and_apex, cx);
+            let right = admit_strict(
+                source_and_apex,
+                target,
+                81,
+                ColorRank::Verified,
+                ColorRank::Validated,
+                cx,
+            );
+            let ir = span_ir(
+                source_and_apex,
+                source_and_apex,
+                target,
+                &left_identity,
+                &right,
+                82,
+            );
+            let graph = admit_derived_span_correspondence_v1(ir, &left_identity, &right, cx)
+                .expect("identity-left graph shape is structurally admissible");
+            assert_eq!(graph.source(), graph.apex());
+            assert_eq!(graph.left_leg(), left_identity.id());
+            assert_eq!(graph.right_leg(), right.id());
+
+            with_cx(true, |cancelled_cx| {
+                assert_eq!(
+                    admit_derived_span_correspondence_v1(ir, &left_identity, &right, cancelled_cx,),
+                    Err(DerivedSpanCorrespondenceErrorV1::Cancelled {
+                        stage: "span-admission-entry"
+                    })
+                );
+            });
         });
     }
 
