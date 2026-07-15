@@ -104,9 +104,9 @@ fs-iga (geometry basis = analysis basis), fs-render NURBS tracing
   legal discontinuous full breaks whose independent endpoints and raised
   multiplicity are preserved; minimal-multiplicity elevation is a follow-up).
 - `NurbsSurface<S>` — sealed tensor-product representation with checked
-  Cartesian/homogeneous construction. Homogeneous
-  `from_homogeneous_with_cx` returns transactional `SurfaceConstructionRun`
-  state and publishes only a completely validated sealed owner. Owning
+  Cartesian/homogeneous construction. Cartesian `new_with_cx` and homogeneous
+  `from_homogeneous_with_cx` return transactional `SurfaceConstructionRun`
+  state and publish only a completely validated sealed owner. Owning
   `try_clone_with_cx` returns
   transactional `SurfaceCloneRun` state and publishes only a complete sealed
   copy after checked work and a 64 MiB retained-output gate.
@@ -422,6 +422,22 @@ publication checkpoint. `SurfaceEvaluationRun::Cancelled` carries no partial
 accumulator or point and drops any allocated basis workspaces. Generic scalar
 operations remain non-preemptible, and neither primitive claims exact
 caller-budget consumption, executor drain/finalize, or resumability.
+`NurbsSurface::new_with_cx` preserves checked aggregate construction-work and
+64 MiB derived row-table plus homogeneous-control payload refusal precedence
+before cancellation. Its work envelope composes U/V knot validation,
+16 units per borrowed control, four additional assembly units per control,
+two row-allocation/publication units per U row, and two fixed phase units.
+The retained envelope covers `U * size_of::<Vec<[S; 4]>>() + U * V *
+size_of::<[S; 4]>()`; transferred knot payloads, borrowed points/weights,
+allocator rounding, and spare capacity are excluded. One gate spans ordered
+U/V knot validation; complete row-local shape, weight, coordinate, underflow,
+and overflow validation before any output allocation; fallible outer/inner
+reservation; U-major/V-minor assembly; and final owned publication.
+Cancellation drops both transferred knot vectors and partial nested output but
+does not own the borrowed inputs. Individual allocator, generic-scalar, and
+destructor operations remain non-preemptible. The primitive adds no exact
+caller-budget, wall-time, drain/finalize, resumability, regularity, topology,
+or geometric-certificate claim.
 `NurbsSurface::from_homogeneous_with_cx` preserves aggregate validation-work
 refusal precedence, then carries one gate through ordered U-knot, V-knot, outer
 and inner grid-shape, weight, finite-lane, Cartesian-projection, row-major

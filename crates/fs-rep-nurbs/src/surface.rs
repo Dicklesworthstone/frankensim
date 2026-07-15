@@ -18,6 +18,7 @@ const SURFACE_KNOT_VALIDATION_WORK_PER_ENTRY: u128 = 16;
 const SURFACE_INSERTION_WORK_PER_CONTROL: u128 = 32;
 const SURFACE_SPAN_BOX_WORK_PER_CONTROL: u128 = 16;
 const SURFACE_SPAN_BOX_MAX_RETAINED_BYTES: u128 = 64 * 1024 * 1024;
+const SURFACE_CONSTRUCTION_MAX_RETAINED_BYTES: u128 = 64 * 1024 * 1024;
 const SURFACE_COPY_MAX_RETAINED_BYTES: u128 = 64 * 1024 * 1024;
 const SURFACE_INSERTION_MAX_RETAINED_BYTES: u128 = 64 * 1024 * 1024;
 const SURFACE_CANCELLATION_STRIDE: usize = 64;
@@ -317,8 +318,7 @@ pub struct AdmittedNurbsSurface<'a, S: Scalar> {
     inner: &'a NurbsSurface<S>,
 }
 
-/// Transactional terminal state of cancellation-aware homogeneous surface
-/// construction.
+/// Transactional terminal state of cancellation-aware surface construction.
 #[must_use]
 #[derive(Debug, PartialEq)]
 pub enum SurfaceConstructionRun<S: Scalar> {
@@ -445,6 +445,150 @@ struct SurfaceInsertionEnvelope {
 enum SurfaceWorkRun<T> {
     Complete(T),
     Cancelled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CartesianSurfaceConstructionPlan {
+    control_count_u: usize,
+    control_count_v: usize,
+    #[cfg(test)]
+    control_count: usize,
+    #[cfg(test)]
+    work_units: u128,
+    #[cfg(test)]
+    retained_bytes: u128,
+}
+
+fn validate_cartesian_surface_inputs_with_poll<S: Scalar>(
+    points: &[Vec<[S; 3]>],
+    weights: &[Vec<S>],
+    control_count_v: usize,
+    should_cancel: &mut impl FnMut() -> bool,
+) -> Result<SurfaceWorkRun<()>, NurbsError> {
+    // Preserve the synchronous constructor's row-local refusal order: shape,
+    // every weight, every Cartesian coordinate, then product underflow and
+    // overflow. A late malformed row is still discovered before any output
+    // allocation, while cancellation may win before a row not yet reached.
+    let mut operations_since_poll = 0usize;
+    for (point_row, weight_row) in points.iter().zip(weights) {
+        if point_row.len() != control_count_v || weight_row.len() != control_count_v {
+            return Err(NurbsError::Structure {
+                what: format!("expected {control_count_v} control columns"),
+            });
+        }
+        if surface_poll_due(&mut operations_since_poll, should_cancel) {
+            return Ok(SurfaceWorkRun::Cancelled);
+        }
+
+        for &weight in weight_row {
+            if !weight.is_admissible_weight() {
+                return Err(NurbsError::Structure {
+                    what: "weights must be finite, positive, and numerically admissible"
+                        .to_string(),
+                });
+            }
+            if surface_poll_due(&mut operations_since_poll, should_cancel) {
+                return Ok(SurfaceWorkRun::Cancelled);
+            }
+        }
+        for point in point_row {
+            for &coordinate in point {
+                if !coordinate.is_finite() {
+                    return Err(NurbsError::Structure {
+                        what: "control-point coordinates must be finite".to_string(),
+                    });
+                }
+                if surface_poll_due(&mut operations_since_poll, should_cancel) {
+                    return Ok(SurfaceWorkRun::Cancelled);
+                }
+            }
+        }
+        for (point, &weight) in point_row.iter().zip(weight_row) {
+            let homogeneous = [
+                point[0] * weight,
+                point[1] * weight,
+                point[2] * weight,
+                weight,
+            ];
+            for (&coordinate, &weighted) in point.iter().zip(&homogeneous) {
+                if coordinate != S::zero() && weighted == S::zero() {
+                    return Err(NurbsError::Structure {
+                        what:
+                            "Cartesian coordinate × weight underflowed a nonzero coordinate to zero"
+                                .to_string(),
+                    });
+                }
+                if surface_poll_due(&mut operations_since_poll, should_cancel) {
+                    return Ok(SurfaceWorkRun::Cancelled);
+                }
+            }
+            for &component in &homogeneous {
+                if !component.is_finite() {
+                    return Err(NurbsError::Structure {
+                        what: "Cartesian coordinate × weight overflowed the homogeneous numeric domain"
+                            .to_string(),
+                    });
+                }
+                if surface_poll_due(&mut operations_since_poll, should_cancel) {
+                    return Ok(SurfaceWorkRun::Cancelled);
+                }
+            }
+        }
+    }
+    if should_cancel() {
+        return Ok(SurfaceWorkRun::Cancelled);
+    }
+    Ok(SurfaceWorkRun::Complete(()))
+}
+
+fn build_cartesian_surface_controls_with_poll<S: Scalar>(
+    points: &[Vec<[S; 3]>],
+    weights: &[Vec<S>],
+    plan: CartesianSurfaceConstructionPlan,
+    should_cancel: &mut impl FnMut() -> bool,
+) -> Result<SurfaceWorkRun<Vec<Vec<[S; 4]>>>, NurbsError> {
+    let mut cpw = Vec::new();
+    cpw.try_reserve_exact(plan.control_count_u)
+        .map_err(|_| NurbsError::Domain {
+            what: "surface control-row allocation was refused".to_string(),
+        })?;
+    if should_cancel() {
+        return Ok(SurfaceWorkRun::Cancelled);
+    }
+
+    let mut operations_since_poll = 0usize;
+    for (point_row, weight_row) in points.iter().zip(weights) {
+        let mut row = Vec::new();
+        row.try_reserve_exact(plan.control_count_v)
+            .map_err(|_| NurbsError::Domain {
+                what: "surface homogeneous-control row allocation was refused".to_string(),
+            })?;
+        if should_cancel() {
+            return Ok(SurfaceWorkRun::Cancelled);
+        }
+        for (point, &weight) in point_row.iter().zip(weight_row) {
+            let mut homogeneous = [S::zero(); 4];
+            for (slot, &coordinate) in homogeneous[..3].iter_mut().zip(point) {
+                *slot = coordinate * weight;
+                if surface_poll_due(&mut operations_since_poll, should_cancel) {
+                    return Ok(SurfaceWorkRun::Cancelled);
+                }
+            }
+            homogeneous[3] = weight;
+            row.push(homogeneous);
+            if surface_poll_due(&mut operations_since_poll, should_cancel) {
+                return Ok(SurfaceWorkRun::Cancelled);
+            }
+        }
+        cpw.push(row);
+        if should_cancel() {
+            return Ok(SurfaceWorkRun::Cancelled);
+        }
+    }
+    if should_cancel() {
+        return Ok(SurfaceWorkRun::Cancelled);
+    }
+    Ok(SurfaceWorkRun::Complete(cpw))
 }
 
 /// Transactional terminal state of cancellation-aware surface span boxes.
@@ -665,6 +809,71 @@ impl<S: Scalar> NurbsSurface<S> {
         Ok(())
     }
 
+    fn cartesian_construction_plan(
+        knots_u: &KnotVector<S>,
+        knots_v: &KnotVector<S>,
+    ) -> Result<CartesianSurfaceConstructionPlan, NurbsError> {
+        let control_count_u = knots_u.control_count();
+        let control_count_v = knots_v.control_count();
+        let control_count = control_count_u
+            .checked_mul(control_count_v)
+            .ok_or_else(|| NurbsError::Domain {
+                what: "Cartesian surface control-count accounting overflows usize".to_string(),
+            })?;
+        let work_units = Self::validation_work_for(knots_u, knots_v)?
+            .checked_add((control_count as u128).checked_mul(4).ok_or_else(|| {
+                NurbsError::Domain {
+                    what: "Cartesian surface assembly-work accounting overflows u128".to_string(),
+                }
+            })?)
+            .and_then(|work| work.checked_add((control_count_u as u128).checked_mul(2)?))
+            .and_then(|work| work.checked_add(2))
+            .ok_or_else(|| NurbsError::Domain {
+                what: "Cartesian surface construction-work accounting overflows u128".to_string(),
+            })?;
+        if work_units > BASIS_MAX_WORK_UNITS {
+            return Err(NurbsError::Domain {
+                what: format!(
+                    "Cartesian surface construction requests {work_units} work units above defensive ceiling {BASIS_MAX_WORK_UNITS}"
+                ),
+            });
+        }
+
+        let row_table_bytes = (control_count_u as u128)
+            .checked_mul(core::mem::size_of::<Vec<[S; 4]>>() as u128)
+            .ok_or_else(|| NurbsError::Domain {
+                what: "Cartesian surface row-table accounting overflows u128".to_string(),
+            })?;
+        let control_bytes = (control_count as u128)
+            .checked_mul(core::mem::size_of::<[S; 4]>() as u128)
+            .ok_or_else(|| NurbsError::Domain {
+                what: "Cartesian surface control-storage accounting overflows u128".to_string(),
+            })?;
+        let retained_bytes =
+            row_table_bytes
+                .checked_add(control_bytes)
+                .ok_or_else(|| NurbsError::Domain {
+                    what: "Cartesian surface retained-byte accounting overflows u128".to_string(),
+                })?;
+        if retained_bytes > SURFACE_CONSTRUCTION_MAX_RETAINED_BYTES {
+            return Err(NurbsError::Domain {
+                what: format!(
+                    "Cartesian surface retains {retained_bytes} derived control-net payload bytes above defensive ceiling {SURFACE_CONSTRUCTION_MAX_RETAINED_BYTES}"
+                ),
+            });
+        }
+        Ok(CartesianSurfaceConstructionPlan {
+            control_count_u,
+            control_count_v,
+            #[cfg(test)]
+            control_count,
+            #[cfg(test)]
+            work_units,
+            #[cfg(test)]
+            retained_bytes,
+        })
+    }
+
     fn insertion_plan_after_parameter(
         &self,
         t: S,
@@ -826,98 +1035,103 @@ impl<S: Scalar> NurbsSurface<S> {
     /// # Errors
     /// [`NurbsError::Structure`] on grid/count mismatches, non-finite
     /// coordinates, or non-positive/non-finite weights; [`NurbsError::Domain`]
-    /// when validation work or a control-net allocation is refused.
+    /// when aggregate construction work, the 64 MiB derived-control envelope,
+    /// or a control-net allocation is refused.
     pub fn new(
         knots_u: KnotVector<S>,
         knots_v: KnotVector<S>,
         points: &[Vec<[S; 3]>],
         weights: &[Vec<S>],
     ) -> Result<Self, NurbsError> {
-        Self::enforce_validation_work(Self::validation_work_for(&knots_u, &knots_v)?)?;
-        knots_u.validate_live()?;
-        knots_v.validate_live()?;
-        let (nu, nv) = (knots_u.control_count(), knots_v.control_count());
-        if points.len() != nu || weights.len() != nu {
+        let mut never_cancel = || false;
+        match Self::new_with_poll(knots_u, knots_v, points, weights, &mut never_cancel)? {
+            SurfaceWorkRun::Complete(surface) => Ok(surface),
+            SurfaceWorkRun::Cancelled => Err(NurbsError::Domain {
+                what: "non-cancelling Cartesian surface construction observed cancellation"
+                    .to_string(),
+            }),
+        }
+    }
+
+    /// Build from borrowed Cartesian controls and weights with bounded
+    /// cancellation polling.
+    ///
+    /// Checked aggregate construction work and a 64 MiB derived row-table plus
+    /// homogeneous-control payload gate precede cancellation. One `Cx` then
+    /// spans ordered U/V knot validation, complete row-local input validation
+    /// before allocation, fallible outer/inner reservation, U-major/V-minor
+    /// assembly, and final owned publication. Cancellation drops both
+    /// transferred knot vectors and any partial derived output; borrowed
+    /// points and weights remain caller-owned. Individual allocator,
+    /// generic-scalar, and destructor operations are not preemptible. This
+    /// primitive does not consume the `Cx` budget or own request -> drain ->
+    /// finalize semantics.
+    ///
+    /// # Errors
+    /// Returns the synchronous constructor's work, retained-memory, knot,
+    /// shape, weight, coordinate, arithmetic, or allocation refusal when it
+    /// wins before an observed cancellation.
+    pub fn new_with_cx(
+        knots_u: KnotVector<S>,
+        knots_v: KnotVector<S>,
+        points: &[Vec<[S; 3]>],
+        weights: &[Vec<S>],
+        cx: &Cx<'_>,
+    ) -> Result<SurfaceConstructionRun<S>, NurbsError> {
+        let mut should_cancel = || cx.checkpoint().is_err();
+        match Self::new_with_poll(knots_u, knots_v, points, weights, &mut should_cancel)? {
+            SurfaceWorkRun::Complete(surface) => Ok(SurfaceConstructionRun::Complete { surface }),
+            SurfaceWorkRun::Cancelled => Ok(SurfaceConstructionRun::Cancelled),
+        }
+    }
+
+    fn new_with_poll(
+        knots_u: KnotVector<S>,
+        knots_v: KnotVector<S>,
+        points: &[Vec<[S; 3]>],
+        weights: &[Vec<S>],
+        should_cancel: &mut impl FnMut() -> bool,
+    ) -> Result<SurfaceWorkRun<Self>, NurbsError> {
+        let plan = Self::cartesian_construction_plan(&knots_u, &knots_v)?;
+        match knots_u.validate_live_with_poll(|| should_cancel())? {
+            KnotValidationOutcome::Complete => {}
+            KnotValidationOutcome::Cancelled => return Ok(SurfaceWorkRun::Cancelled),
+        }
+        match knots_v.validate_live_with_poll(|| should_cancel())? {
+            KnotValidationOutcome::Complete => {}
+            KnotValidationOutcome::Cancelled => return Ok(SurfaceWorkRun::Cancelled),
+        }
+        if points.len() != plan.control_count_u || weights.len() != plan.control_count_u {
             return Err(NurbsError::Structure {
-                what: format!("expected {nu} control rows, got {}", points.len()),
+                what: format!(
+                    "expected {} control rows, got {}",
+                    plan.control_count_u,
+                    points.len()
+                ),
             });
         }
-        // Scan the complete borrowed input before allocating any output row.
-        // A malformed late row must not force a large, doomed prefix allocation.
-        for (prow, wrow) in points.iter().zip(weights) {
-            if prow.len() != nv || wrow.len() != nv {
-                return Err(NurbsError::Structure {
-                    what: format!("expected {nv} control columns"),
-                });
-            }
-            if wrow.iter().copied().any(|w| !w.is_admissible_weight()) {
-                return Err(NurbsError::Structure {
-                    what: "weights must be finite, positive, and numerically admissible"
-                        .to_string(),
-                });
-            }
-            if prow
-                .iter()
-                .flat_map(|point| point.iter())
-                .copied()
-                .any(|coordinate| !coordinate.is_finite())
+        if matches!(
+            validate_cartesian_surface_inputs_with_poll(
+                points,
+                weights,
+                plan.control_count_v,
+                should_cancel,
+            )?,
+            SurfaceWorkRun::Cancelled
+        ) {
+            return Ok(SurfaceWorkRun::Cancelled);
+        }
+        let cpw =
+            match build_cartesian_surface_controls_with_poll(points, weights, plan, should_cancel)?
             {
-                return Err(NurbsError::Structure {
-                    what: "control-point coordinates must be finite".to_string(),
-                });
-            }
-            for (point, &weight) in prow.iter().zip(wrow) {
-                let homogeneous = [
-                    point[0] * weight,
-                    point[1] * weight,
-                    point[2] * weight,
-                    weight,
-                ];
-                if point
-                    .iter()
-                    .zip(homogeneous.iter())
-                    .any(|(&coordinate, &weighted)| {
-                        coordinate != S::zero() && weighted == S::zero()
-                    })
-                {
-                    return Err(NurbsError::Structure {
-                        what:
-                            "Cartesian coordinate × weight underflowed a nonzero coordinate to zero"
-                                .to_string(),
-                    });
-                }
-                if homogeneous
-                    .iter()
-                    .copied()
-                    .any(|component| !component.is_finite())
-                {
-                    return Err(NurbsError::Structure {
-                        what: "Cartesian coordinate × weight overflowed the homogeneous numeric domain"
-                            .to_string(),
-                    });
-                }
-            }
-        }
-        let mut cpw = Vec::new();
-        cpw.try_reserve_exact(nu).map_err(|_| NurbsError::Domain {
-            what: "surface control-row allocation was refused".to_string(),
-        })?;
-        for (prow, wrow) in points.iter().zip(weights) {
-            let mut row = Vec::new();
-            row.try_reserve_exact(nv).map_err(|_| NurbsError::Domain {
-                what: "surface homogeneous-control row allocation was refused".to_string(),
-            })?;
-            for (p, &w) in prow.iter().zip(wrow) {
-                let homogeneous = [p[0] * w, p[1] * w, p[2] * w, w];
-                row.push(homogeneous);
-            }
-            cpw.push(row);
-        }
-        Ok(NurbsSurface {
+                SurfaceWorkRun::Complete(cpw) => cpw,
+                SurfaceWorkRun::Cancelled => return Ok(SurfaceWorkRun::Cancelled),
+            };
+        Ok(SurfaceWorkRun::Complete(NurbsSurface {
             knots_u,
             knots_v,
             cpw,
-        })
+        }))
     }
 
     /// Build from a homogeneous control net, validating the complete sealed
@@ -2441,6 +2655,300 @@ mod tests {
             output,
         )
         .expect("oracle v surface")
+    }
+
+    struct CompactCartesianSurfaceInputs {
+        knots_u: KnotVector<f64>,
+        knots_v: KnotVector<f64>,
+        points: Vec<Vec<[f64; 3]>>,
+        weights: Vec<Vec<f64>>,
+    }
+
+    fn compact_cartesian_surface_inputs() -> CompactCartesianSurfaceInputs {
+        let knots_u = KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).expect("linear u knots");
+        let mut entries_v = vec![0.0, 0.0];
+        entries_v.extend((1..=32).map(|index| index as f64 / 33.0));
+        entries_v.extend([1.0, 1.0]);
+        let knots_v = KnotVector::new(entries_v, 1).expect("long linear v knots");
+        let points = (0..2)
+            .map(|row| {
+                (0..34)
+                    .map(|column| [row as f64, column as f64 / 33.0, 0.0])
+                    .collect()
+            })
+            .collect();
+        let weights = vec![vec![1.0; 34]; 2];
+        CompactCartesianSurfaceInputs {
+            knots_u,
+            knots_v,
+            points,
+            weights,
+        }
+    }
+
+    fn exact_linear_knots(control_count: usize) -> KnotVector<Rat> {
+        let mut knots = vec![Rat::int(0), Rat::int(0)];
+        let denominator = i128::try_from(control_count - 1).expect("control count fits i128");
+        knots.extend((1..control_count - 1).map(|index| {
+            Rat::new(
+                i128::try_from(index).expect("knot index fits i128"),
+                denominator,
+            )
+        }));
+        knots.extend([Rat::int(1), Rat::int(1)]);
+        KnotVector::new(knots, 1).expect("exact linear knots")
+    }
+
+    #[test]
+    fn cartesian_surface_construction_with_cx_is_transactional_and_exact() {
+        let make_knots = || KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).expect("linear knots");
+        let points = vec![
+            vec![[0.0, 0.0, 0.0], [0.0, 1.0, 0.5]],
+            vec![[1.0, 0.0, 0.5], [1.0, 1.0, 1.0]],
+        ];
+        let weights = vec![vec![1.0, 2.0], vec![3.0, 4.0]];
+        let expected = NurbsSurface::new(make_knots(), make_knots(), &points, &weights)
+            .expect("weighted bilinear surface");
+        with_surface_cx(true, |cx| {
+            assert_eq!(
+                NurbsSurface::new_with_cx(make_knots(), make_knots(), &points, &weights, cx)
+                    .expect("valid pre-cancelled construction"),
+                SurfaceConstructionRun::Cancelled
+            );
+        });
+        with_surface_cx(false, |cx| {
+            assert_eq!(
+                NurbsSurface::new_with_cx(make_knots(), make_knots(), &points, &weights, cx)
+                    .expect("active Cartesian construction"),
+                SurfaceConstructionRun::Complete {
+                    surface: expected.try_clone().expect("expected surface copy"),
+                }
+            );
+        });
+
+        let zero = Rat::int(0);
+        let one = Rat::int(1);
+        let two = Rat::int(2);
+        let exact_knots =
+            || KnotVector::new(vec![zero, zero, one, one], 1).expect("exact linear knots");
+        let exact_points = vec![
+            vec![[zero, zero, zero], [zero, one, one]],
+            vec![[one, zero, one], [one, one, two]],
+        ];
+        let exact_weights = vec![vec![one, two], vec![two, one]];
+        let exact = NurbsSurface::new(exact_knots(), exact_knots(), &exact_points, &exact_weights)
+            .expect("exact weighted surface");
+        with_surface_cx(false, |cx| {
+            assert_eq!(
+                NurbsSurface::new_with_cx(
+                    exact_knots(),
+                    exact_knots(),
+                    &exact_points,
+                    &exact_weights,
+                    cx,
+                )
+                .expect("active exact Cartesian construction"),
+                SurfaceConstructionRun::Complete {
+                    surface: exact.try_clone().expect("expected exact surface copy"),
+                }
+            );
+        });
+    }
+
+    #[test]
+    fn cartesian_surface_construction_preflight_prices_work_and_payload() {
+        let make_line_knots =
+            || KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).expect("linear knots");
+        let knots_u = make_line_knots();
+        let knots_v = make_line_knots();
+        let plan = NurbsSurface::<f64>::cartesian_construction_plan(&knots_u, &knots_v)
+            .expect("small construction plan");
+        assert_eq!(plan.control_count_u, 2);
+        assert_eq!(plan.control_count_v, 2);
+        assert_eq!(plan.control_count, 4);
+        assert_eq!(
+            plan.work_units,
+            NurbsSurface::<f64>::validation_work_for(&knots_u, &knots_v)
+                .expect("small validation work")
+                + 4 * 4
+                + 2 * 2
+                + 2
+        );
+        assert_eq!(
+            plan.retained_bytes,
+            2 * core::mem::size_of::<Vec<[f64; 4]>>() as u128
+                + 4 * core::mem::size_of::<[f64; 4]>() as u128
+        );
+
+        let under_memory_u = exact_linear_knots(512);
+        let under_memory_v = exact_linear_knots(1_023);
+        let under_memory =
+            NurbsSurface::<Rat>::cartesian_construction_plan(&under_memory_u, &under_memory_v)
+                .expect("under-cap exact construction plan");
+        assert!(under_memory.retained_bytes <= SURFACE_CONSTRUCTION_MAX_RETAINED_BYTES);
+        assert!(matches!(
+            NurbsSurface::<Rat>::cartesian_construction_plan(
+                &exact_linear_knots(512),
+                &exact_linear_knots(1_024),
+            ),
+            Err(NurbsError::Domain { ref what }) if what.contains("payload bytes")
+        ));
+
+        let control_count = 1_023usize;
+        let make_large_knots = || {
+            let mut entries = Vec::with_capacity(control_count + 2);
+            entries.extend([0.0, 0.0]);
+            for index in 1..control_count - 1 {
+                entries.push(index as f64 / (control_count - 1) as f64);
+            }
+            entries.extend([1.0, 1.0]);
+            KnotVector::new(entries, 1).expect("large linear knots")
+        };
+        with_surface_cx(true, |cx| {
+            assert!(matches!(
+                NurbsSurface::<f64>::new_with_cx(
+                    make_large_knots(),
+                    make_large_knots(),
+                    &[],
+                    &[],
+                    cx,
+                ),
+                Err(NurbsError::Domain { ref what }) if what.contains("work units")
+            ));
+        });
+    }
+
+    #[test]
+    fn cartesian_surface_construction_preserves_row_local_error_order() {
+        let make_knots = || KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).expect("linear knots");
+        let underflow_points = vec![
+            vec![[f64::MIN_POSITIVE, 0.0, 0.0], [0.0, 0.0, 0.0]],
+            vec![[0.0, 0.0, 0.0]],
+        ];
+        let underflow_weights = vec![vec![f64::MIN_POSITIVE, 1.0], vec![1.0]];
+        let legacy_error = NurbsSurface::new(
+            make_knots(),
+            make_knots(),
+            &underflow_points,
+            &underflow_weights,
+        )
+        .expect_err("row-zero underflow must precede late row shape");
+        assert!(matches!(
+            &legacy_error,
+            NurbsError::Structure { what } if what.contains("underflowed")
+        ));
+        with_surface_cx(false, |cx| {
+            assert_eq!(
+                NurbsSurface::new_with_cx(
+                    make_knots(),
+                    make_knots(),
+                    &underflow_points,
+                    &underflow_weights,
+                    cx,
+                )
+                .expect_err("cancellable row-zero underflow"),
+                legacy_error
+            );
+        });
+
+        let overflow_points = vec![
+            vec![[f64::MAX, 0.0, 0.0], [0.0, 0.0, 0.0]],
+            vec![[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
+        ];
+        let overflow_weights = vec![vec![2.0, 1.0], vec![1.0, 1.0]];
+        let overflow_error = NurbsSurface::new(
+            make_knots(),
+            make_knots(),
+            &overflow_points,
+            &overflow_weights,
+        )
+        .expect_err("legacy product overflow");
+        with_surface_cx(false, |cx| {
+            assert_eq!(
+                NurbsSurface::new_with_cx(
+                    make_knots(),
+                    make_knots(),
+                    &overflow_points,
+                    &overflow_weights,
+                    cx,
+                )
+                .expect_err("cancellable product overflow"),
+                overflow_error
+            );
+        });
+    }
+
+    #[test]
+    fn cartesian_surface_construction_cancels_in_validation_assembly_and_publication() {
+        let run = |target| {
+            let CompactCartesianSurfaceInputs {
+                knots_u,
+                knots_v,
+                points,
+                weights,
+            } = compact_cartesian_surface_inputs();
+            let mut polls = 0usize;
+            let mut should_cancel = || {
+                polls += 1;
+                polls == target
+            };
+            let outcome = NurbsSurface::new_with_poll(
+                knots_u,
+                knots_v,
+                &points,
+                &weights,
+                &mut should_cancel,
+            )
+            .expect("valid cancellable construction");
+            assert_eq!(points.len(), 2);
+            assert_eq!(weights[0].len(), 34);
+            (matches!(outcome, SurfaceWorkRun::Cancelled), polls)
+        };
+        assert_eq!(run(13), run(13));
+        assert_eq!(run(13), (true, 13));
+        assert_eq!(run(25), run(25));
+        assert_eq!(run(25), (true, 25));
+
+        let CompactCartesianSurfaceInputs {
+            knots_u,
+            knots_v,
+            points,
+            weights,
+        } = compact_cartesian_surface_inputs();
+        let mut total_polls = 0usize;
+        let mut never_cancel = || {
+            total_polls += 1;
+            false
+        };
+        assert!(matches!(
+            NurbsSurface::new_with_poll(knots_u, knots_v, &points, &weights, &mut never_cancel,)
+                .expect("healthy Cartesian construction"),
+            SurfaceWorkRun::Complete(_)
+        ));
+        assert_eq!(total_polls, 32);
+        let CompactCartesianSurfaceInputs {
+            knots_u,
+            knots_v,
+            points,
+            weights,
+        } = compact_cartesian_surface_inputs();
+        let mut replay_polls = 0usize;
+        let mut cancel_at_publication = || {
+            replay_polls += 1;
+            replay_polls == total_polls
+        };
+        assert!(matches!(
+            NurbsSurface::new_with_poll(
+                knots_u,
+                knots_v,
+                &points,
+                &weights,
+                &mut cancel_at_publication,
+            )
+            .expect("publication cancellation"),
+            SurfaceWorkRun::Cancelled
+        ));
+        assert_eq!(replay_polls, total_polls);
     }
 
     #[test]
