@@ -379,6 +379,36 @@ pub struct EvalBudget {
     pub max_evals: u64,
 }
 
+/// Side of a central finite-difference probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProbeDirection {
+    /// Positive parameter displacement.
+    Positive,
+    /// Negative parameter displacement.
+    Negative,
+}
+
+/// Bounded path attribution for one objective invocation during toy descent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObjectiveEvalSite {
+    /// Initial objective value before any descent step.
+    Initial,
+    /// One central finite-difference probe.
+    Probe {
+        /// Zero-based attempted descent-step index.
+        step: u32,
+        /// Zero-based manifold parameter coordinate.
+        parameter: u32,
+        /// Positive or negative displacement.
+        direction: ProbeDirection,
+    },
+    /// Terminal valuation after the reported number of landed steps.
+    Final {
+        /// Successfully landed steps before finalization.
+        steps_taken: u32,
+    },
+}
+
 /// One declared variable.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Variable {
@@ -552,6 +582,13 @@ pub enum OptError {
         what: &'static str,
         /// The offending value's IEEE-754 bit pattern.
         bits: u64,
+    },
+    /// An ordinary caller-supplied raw descent objective unwind was contained.
+    ObjectivePanicked {
+        /// One-based objective invocation ordinal within this descent call.
+        evaluation: u64,
+        /// Bounded path at which the objective unwound.
+        site: ObjectiveEvalSite,
     },
     /// A runtime variable binding contains a NaN or infinity.
     BindingNonFinite {
@@ -739,6 +776,12 @@ impl core::fmt::Display for OptError {
                 "`{what}` must be finite; got {} (bits {bits:016X}) — non-finite \
                  payloads cannot carry graph authority",
                 f64::from_bits(*bits)
+            ),
+            OptError::ObjectivePanicked { evaluation, site } => write!(
+                f,
+                "raw descent objective panicked at {site:?} during evaluation \
+                 {evaluation}; no descent report was published and the payload was \
+                 not retained in this error"
             ),
             OptError::BindingNonFinite {
                 var,

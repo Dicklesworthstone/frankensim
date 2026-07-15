@@ -11,10 +11,10 @@
 //! work — the seal itself is enforced by the compiler.
 
 use fs_opt::{
-    AdmissionCaps, AdmissionViolation, BilevelRef, BindingFrame, Manifold, NodeId, OptError,
-    ProblemBuilder, ProblemSemanticId, ProblemTag, Sense, VarId, WireVersion,
-    canonical_v2_migration_target, eval, eval_keyed, parse, parse_with_version, problem_hash,
-    serialize, serialize_with_id,
+    AdmissionCaps, AdmissionViolation, BilevelRef, BindingFrame, Manifold, NodeId,
+    ObjectiveEvalSite, OptError, ProbeDirection, ProblemBuilder, ProblemSemanticId, ProblemTag,
+    Sense, VarId, WireVersion, canonical_v2_migration_target, eval, eval_keyed, parse,
+    parse_with_version, problem_hash, serialize, serialize_with_id,
 };
 use fs_qty::Dims;
 
@@ -1499,4 +1499,66 @@ fn adm_022_binding_frame_caps_precede_allocation_and_payload_work() {
             ..
         }) if cap == runtime_caps.max_total_work
     ));
+}
+
+/// adm-023 / G4 — panics from a raw objective are contained at f0,
+/// both finite-difference probes, and terminal valuation. Each refusal
+/// retains a deterministic invocation ordinal and publishes no report.
+#[test]
+fn adm_023_raw_objective_panics_are_typed_and_contained() {
+    let options = fs_opt::DescentOptions {
+        steps: 1,
+        fd_h: 1e-6,
+        lr: 0.1,
+    };
+    for (panic_at, site, seed) in [
+        (1u64, ObjectiveEvalSite::Initial, 0x1A00),
+        (
+            2,
+            ObjectiveEvalSite::Probe {
+                step: 0,
+                parameter: 0,
+                direction: ProbeDirection::Positive,
+            },
+            0x1A01,
+        ),
+        (
+            3,
+            ObjectiveEvalSite::Probe {
+                step: 0,
+                parameter: 0,
+                direction: ProbeDirection::Negative,
+            },
+            0x1A02,
+        ),
+        (4, ObjectiveEvalSite::Final { steps_taken: 1 }, 0x1A03),
+    ] {
+        let gate = fs_exec::CancelGate::new_clock_free();
+        let calls = std::cell::Cell::new(0u64);
+        let error = with_gate_cx(&gate, seed, |cx| {
+            let objective = |x: &[f64]| {
+                let call = calls.get() + 1;
+                calls.set(call);
+                assert_ne!(
+                    call, panic_at,
+                    "injected raw-objective fault at invocation {call}"
+                );
+                x[0] * x[0]
+            };
+            fs_opt::descend_fn(Manifold::Rn { dim: 1 }, &objective, &[1.0], options, 0, cx)
+                .expect_err("the injected panic must prevent report publication")
+        });
+        assert_eq!(
+            error,
+            OptError::ObjectivePanicked {
+                evaluation: panic_at,
+                site,
+            }
+        );
+        assert_eq!(
+            calls.get(),
+            panic_at,
+            "descent must stop at the panicking objective invocation"
+        );
+    }
 }

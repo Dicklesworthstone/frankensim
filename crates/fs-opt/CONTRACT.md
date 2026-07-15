@@ -97,13 +97,20 @@ structure; FLUX/UQ execute it.
   pattern retained in the refusal), and `DescentOptions` must carry
   finite positive `fd_h` and `lr` (a NaN/zero step would divide
   through the FD quotient; a negative rate would silently ascend).
-  The internal objective seam is fallible: non-finite closure results
-  and typed IR evaluation failures propagate without publishing a
-  report or converting the refusal into a panic. Each finite-difference
-  step reserves its full two-probes-per-parameter gradient plus terminal
-  valuation before the first probe, so budget exhaustion cannot leave a
-  partially spent gradient. Cancellation is polled before/after f0,
-  probe evaluations, retraction boundaries, and final publication.
+  The internal objective seam is fallible: non-finite closure results, typed IR
+  evaluation failures, and ordinary unwinding raw-objective panics propagate
+  without publishing a report. Panic refusals retain a deterministic one-based
+  evaluation ordinal and bounded site (`Initial`, signed step/parameter probe,
+  or `Final`); payload contents are not retained in the returned error. The
+  active process panic hook runs before `catch_unwind` and may emit the original
+  payload/location. `panic=abort`, a hook that panics or aborts, and a caught
+  payload whose destructor panics during cleanup are explicit process-level
+  no-claim boundaries. Containment does not roll back side effects performed by
+  the caller closure or hook.
+  Each finite-difference step reserves its full two-probes-per-parameter
+  gradient plus terminal valuation before the first probe, so budget exhaustion
+  cannot leave a partially spent gradient. Cancellation is polled before/after
+  f0, probe evaluations, retraction boundaries, and final publication.
 - Structure: multi-objective (weights), constraint KINDS (`EqZero`,
   `LeZero` — semantics/repair are fs-constraint's), `ProblemTag`
   (multi-fidelity, chance-constrained, bilevel via typed
@@ -281,7 +288,9 @@ mismatches and dimension overflow (with exponent vectors shown; both
 scaling `DimOverflow` and combining `DimSumOverflow`), non-dimensionless
 transcendentals, odd-sqrt dims, bad parameters/indices, non-scalar
 roots, `ManifoldInvalid` (violated policy named), `NonFinite` (payload
-name + exact bit pattern), `BindingNonFinite`/`BindingDomain`/
+name + exact bit pattern), `ObjectivePanicked` (one-based evaluation ordinal +
+bounded site),
+`BindingNonFinite`/`BindingDomain`/
 `EvalNonFinite` (runtime location + exact bits),
 `RetractionLen`/`RetractionNonFinite`/
 `RetractionDomain` (input, manifold rule, location, and measurement),

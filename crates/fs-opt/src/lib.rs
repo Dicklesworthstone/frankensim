@@ -48,8 +48,8 @@ pub use guard::{
 };
 pub use ir::{
     BilevelRef, Class, Constraint, ConstraintKind, EvalBudget, Expr, Manifold, NodeId, Objective,
-    OptError, OptimizerFamily, Problem, ProblemBuilder, ProblemTag, Sense, Shape, VarId, Variable,
-    children,
+    ObjectiveEvalSite, OptError, OptimizerFamily, ProbeDirection, Problem, ProblemBuilder,
+    ProblemTag, Sense, Shape, VarId, Variable, children,
 };
 pub use serial::{
     ContentHash, DimensionCrosswalkReceipt, FiveToSixRule, LegacyProblemHash, ParsedProblem,

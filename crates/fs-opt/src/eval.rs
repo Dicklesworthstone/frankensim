@@ -6,7 +6,9 @@
 //! consumer; exact adjoints are the gradient-stack bead's.
 
 use crate::admission::AdmissionCaps;
-use crate::ir::{Expr, Manifold, NodeId, OptError, Problem, VarId};
+use crate::ir::{
+    Expr, Manifold, NodeId, ObjectiveEvalSite, OptError, ProbeDirection, Problem, VarId,
+};
 use fs_exec::Cx;
 
 /// Squared-norm/dot tolerance for deciding whether a finite stored
@@ -736,11 +738,18 @@ pub struct DescentReport {
 /// honors `max_evals` (0 = unlimited). The manifold, start point
 /// (length AND finite components), and step policy (`fd_h`/`lr`
 /// finite, positive) are leaf-gated BEFORE any descent arithmetic.
+/// With an unwind-capable panic strategy, an ordinary raw-objective
+/// panic whose hook and payload cleanup both complete normally returns
+/// [`OptError::ObjectivePanicked`] with bounded path attribution. The
+/// active panic hook still runs first and may emit the original payload
+/// and location. `panic=abort`, a panicking/aborting hook, and a panic
+/// payload whose destructor panics are process-level no-claim boundaries;
+/// caller and hook side effects are not rolled back.
 ///
 /// # Errors
 /// [`OptError::Cancelled`] / [`OptError::ManifoldInvalid`] /
 /// [`OptError::BindingLen`] / [`OptError::NonFinite`] /
-/// [`OptError::BadParam`].
+/// [`OptError::ObjectivePanicked`] / [`OptError::BadParam`].
 pub fn descend_fn(
     manifold: Manifold,
     f: &dyn Fn(&[f64]) -> f64,
@@ -749,7 +758,19 @@ pub fn descend_fn(
     max_evals: u64,
     cx: &Cx<'_>,
 ) -> Result<DescentReport, OptError> {
-    let checked_f = |x: &[f64]| finite_descent_value(f(x), "descent objective result");
+    let evaluation = std::cell::Cell::new(0u64);
+    let checked_f = |x: &[f64], site: ObjectiveEvalSite| {
+        let ordinal = evaluation.get().saturating_add(1);
+        evaluation.set(ordinal);
+        let value =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(x))).map_err(|_| {
+                OptError::ObjectivePanicked {
+                    evaluation: ordinal,
+                    site,
+                }
+            })?;
+        finite_descent_value(value, "descent objective result")
+    };
     descend_fn_checked(manifold, &checked_f, x0, opts, max_evals, cx)
 }
 
@@ -770,7 +791,7 @@ fn descent_checkpoint(cx: &Cx<'_>) -> Result<(), OptError> {
 
 fn descend_fn_checked(
     manifold: Manifold,
-    f: &dyn Fn(&[f64]) -> Result<f64, OptError>,
+    f: &dyn Fn(&[f64], ObjectiveEvalSite) -> Result<f64, OptError>,
     x0: &[f64],
     opts: DescentOptions,
     max_evals: u64,
@@ -827,11 +848,11 @@ fn descend_fn_checked(
     let mut x = x0.to_vec();
     let mut evals = 0u64;
     let mut budget_stopped = false;
-    let f0 = f(&x)?;
+    let f0 = f(&x, ObjectiveEvalSite::Initial)?;
     evals += 1;
     descent_checkpoint(cx)?;
     let mut steps_taken = 0;
-    'outer: for _ in 0..opts.steps {
+    'outer: for step_index in 0..opts.steps {
         descent_checkpoint(cx)?;
         // One landed step is atomic: reserve its complete central-FD
         // gradient (two probes per parameter) plus the terminal value
@@ -849,13 +870,27 @@ fn descend_fn_checked(
             descent_checkpoint(cx)?;
             let xp = manifold.retract(&x, &t)?;
             descent_checkpoint(cx)?;
-            let fp = f(&xp)?;
+            let fp = f(
+                &xp,
+                ObjectiveEvalSite::Probe {
+                    step: step_index,
+                    parameter: i as u32,
+                    direction: ProbeDirection::Positive,
+                },
+            )?;
             evals += 1;
             descent_checkpoint(cx)?;
             t[i] = -opts.fd_h;
             let xm = manifold.retract(&x, &t)?;
             descent_checkpoint(cx)?;
-            let fm = f(&xm)?;
+            let fm = f(
+                &xm,
+                ObjectiveEvalSite::Probe {
+                    step: step_index,
+                    parameter: i as u32,
+                    direction: ProbeDirection::Negative,
+                },
+            )?;
             evals += 1;
             descent_checkpoint(cx)?;
             *gi = finite_descent_value(
@@ -874,7 +909,7 @@ fn descend_fn_checked(
         f0
     } else {
         descent_checkpoint(cx)?;
-        let value = f(&x)?;
+        let value = f(&x, ObjectiveEvalSite::Final { steps_taken })?;
         evals += 1;
         descent_checkpoint(cx)?;
         value
@@ -921,7 +956,7 @@ pub fn descend_ir(
     // after manifold/start/options leaf validation. Its first successful
     // invocation is f0 and is counted exactly once, including under a
     // one-evaluation budget.
-    let f = |x: &[f64]| -> Result<f64, OptError> {
+    let f = |x: &[f64], _site: ObjectiveEvalSite| -> Result<f64, OptError> {
         let scalar = eval(problem, obj.node, &[x.to_vec()])?
             .scalar()
             .ok_or(OptError::NotScalar { node: obj.node.0 })?;
