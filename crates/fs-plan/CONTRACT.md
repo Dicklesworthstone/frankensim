@@ -212,8 +212,12 @@ the anytime-valid audit threshold used by authenticated authority.
   enumeration. An empty problem is the explicit zero-error/zero-wall
   identity. `allocate` returns only an in-budget plan, otherwise a typed
   malformed-input refusal, `MinimumPlanExceedsBudget`, or a structured
-  `BudgetInfeasible` with ranked, VERIFIED relaxations (re-planning at the
-  suggested budget succeeds — gated). Measured on the fixture matrix:
+  `BudgetInfeasible` with ranked, VERIFIED relaxations. Its in-budget error is
+  the deterministic V1 greedy stall, not an exact optimum or lower bound. For
+  a reachable target, its budget suggestion is the wall clock of the same
+  uncapped greedy prefix: re-planning at exactly that budget follows the same
+  prefix and succeeds (gated), without claiming that the suggestion is the
+  globally minimum feasible budget. Measured on the fixture matrix:
   worst greedy/oracle error ratio 1.134 over 60 random problems; the §11.4
   "drag to 2% in 2h" scenario plans to 1.68% at 3600 s with an 8-line
   rationale, deterministically.

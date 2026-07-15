@@ -62,7 +62,7 @@ fn pl_001_greedy_near_oracle() {
     for _ in 0..60 {
         let p = random_problem(&mut seed);
         // With target 0 the greedy runs until budget-stalled, then
-        // reports infeasible carrying its best-in-budget error.
+        // reports infeasible carrying its greedy stalled error.
         let greedy_err = match allocate(&p) {
             Ok(plan) => plan.total_error,
             Err(AllocationError::BudgetInfeasible(inf)) => inf.best_error_in_budget,
@@ -90,34 +90,54 @@ fn pl_001_greedy_near_oracle() {
 fn pl_002_infeasibility_is_structured_and_actionable() {
     let knobs = vec![
         Knob::new(
-            "mesh",
+            "short-upgrade",
             0,
-            vec![ks("coarse", 1.0, 1.0), ks("fine", 0.1, 10.0)],
+            vec![ks("base", 2.0, 1.0), ks("refined", 1.0, 3.0)],
         )
-        .expect("valid mesh knob"),
-        Knob::new("order", 0, vec![ks("p1", 0.5, 1.0), ks("p3", 0.05, 8.0)])
-            .expect("valid order knob"),
+        .expect("valid short-upgrade knob"),
+        Knob::new(
+            "long-upgrade",
+            0,
+            vec![ks("base", 2.0, 1.0), ks("refined", 0.0, 3.0)],
+        )
+        .expect("valid long-upgrade knob"),
+        Knob::new(
+            "parallel-upgrade",
+            1,
+            vec![ks("base", 5.0, 3.0), ks("refined", 0.0, 5.0)],
+        )
+        .expect("valid parallel-upgrade knob"),
     ];
     let p = AllocProblem {
         knobs,
         budget_s: 3.0,
-        error_target: 0.2,
+        error_target: 2.0,
     };
-    let inf = match allocate(&p).expect_err("3s cannot reach 0.2") {
+    let inf = match allocate(&p).expect_err("3s cannot reach error 2") {
         AllocationError::BudgetInfeasible(inf) => inf,
         other => panic!("expected target infeasibility, got {other}"),
     };
+    assert_eq!(
+        inf.budget_needed_for_target.to_bits(),
+        6.0f64.to_bits(),
+        "the uncapped tropical greedy prefix needs exactly 6s"
+    );
     let feasible_again = allocate(&AllocProblem {
-        budget_s: inf.budget_needed_for_target * 1.0001,
+        budget_s: inf.budget_needed_for_target,
         ..p.clone()
     });
+    let exact_plan = feasible_again
+        .as_ref()
+        .expect("the exact suggested budget must replay successfully");
     verdict(
         "pl-002-structured-infeasibility",
         !inf.relaxations.is_empty()
             && inf.best_error_in_budget > p.error_target
-            && feasible_again.is_ok(),
+            && exact_plan.choice == vec![1, 1, 1]
+            && exact_plan.wall_clock.to_bits() == inf.budget_needed_for_target.to_bits()
+            && exact_plan.total_error <= p.error_target,
         &format!(
-            "best-in-budget {:.3}, budget-for-target {:.1}s, {} ranked relaxations; replan at suggested budget: {}",
+            "greedy stalled error {:.3}, sufficient greedy budget {:.1}s, {} ranked relaxations; exact-budget replan: {}",
             inf.best_error_in_budget,
             inf.budget_needed_for_target,
             inf.relaxations.len(),
@@ -561,5 +581,47 @@ fn pl_013_public_evaluators_are_fallible() {
         "pl-013-fallible-evaluators",
         true,
         "choice length and indices refuse without panicking",
+    );
+}
+
+/// pl-014: the V1 in-budget diagnostic reports its greedy stalled point
+/// honestly; it does not claim the exact optimum found by the fixture oracle.
+#[test]
+fn pl_014_greedy_stall_is_not_an_optimality_claim() {
+    let problem = AllocProblem {
+        knobs: vec![
+            Knob::new(
+                "first-by-utility",
+                0,
+                vec![ks("base", 100.0, 1.0), ks("refined", 60.0, 5.0)],
+            )
+            .expect("valid first knob"),
+            Knob::new(
+                "oracle-choice",
+                0,
+                vec![ks("base", 100.0, 1.0), ks("refined", 30.0, 9.0)],
+            )
+            .expect("valid second knob"),
+        ],
+        budget_s: 10.0,
+        error_target: 90.0,
+    };
+    let infeasible = match allocate(&problem).expect_err("greedy stalls above the target") {
+        AllocationError::BudgetInfeasible(infeasible) => infeasible,
+        other => panic!("expected target infeasibility, got {other}"),
+    };
+    let (oracle_choice, oracle_error) = oracle_min_error(&problem)
+        .expect("valid fixture")
+        .expect("minimum plan fits");
+    verdict(
+        "pl-014-greedy-stall-not-optimum",
+        infeasible.best_error_in_budget.to_bits() == 160.0f64.to_bits()
+            && oracle_choice == vec![0, 1]
+            && oracle_error.to_bits() == 130.0f64.to_bits()
+            && infeasible.best_error_in_budget > oracle_error,
+        &format!(
+            "greedy stalled at {:.1}; exact in-budget oracle reaches {:.1}",
+            infeasible.best_error_in_budget, oracle_error
+        ),
     );
 }

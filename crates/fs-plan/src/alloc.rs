@@ -365,9 +365,14 @@ pub struct Plan {
 /// RANKED relaxations that would make the problem solvable.
 #[derive(Debug, Clone)]
 pub struct BudgetInfeasible {
-    /// Best achievable error within the budget.
+    /// Modeled error at the deterministic greedy allocator's stalled
+    /// in-budget plan. This is a feasible heuristic result, not the exact
+    /// optimum or a lower bound on achievable error.
     pub best_error_in_budget: f64,
-    /// Wall-clock needed to reach the error target (ignoring budget).
+    /// Wall-clock sufficient for the same greedy policy to reach the target
+    /// when the target is reachable. This is not a minimum-budget claim; when
+    /// the target is below the model floor, it is the maximum-setting wall
+    /// clock used to diagnose that floor.
     pub budget_needed_for_target: f64,
     /// Relaxations, ranked by relative distance from the request.
     pub relaxations: Vec<String>,
@@ -402,7 +407,7 @@ impl core::fmt::Display for AllocationError {
             ),
             Self::BudgetInfeasible(error) => write!(
                 f,
-                "best error within budget is {:.3e}; reaching the target requires {:.3e}s",
+                "greedy allocator stalled at in-budget error {}; target-budget diagnostic is {}s (see ranked relaxations)",
                 error.best_error_in_budget, error.budget_needed_for_target
             ),
         }
@@ -539,6 +544,40 @@ fn total_error(knobs: &[Knob], choice: &[usize]) -> f64 {
         .fold(0.0f64, |total, error| total + error)
 }
 
+/// Select the next upgrade under the V1 marginal-utility rule. `None` as the
+/// budget means that every finite upgrade is admitted; a finite budget filters
+/// out trial choices whose tropical wall clock would exceed it. Iteration order
+/// preserves the public lowest-knob-index tie break in both modes.
+fn best_greedy_upgrade(
+    knobs: &[Knob],
+    choice: &[usize],
+    budget_s: Option<f64>,
+) -> Option<(f64, usize, f64, f64)> {
+    let wall = wall_clock(knobs, choice);
+    let mut best: Option<(f64, usize, f64, f64)> = None; // (utility, knob, de, dw)
+    for (ki, knob) in knobs.iter().enumerate() {
+        let current = choice[ki];
+        if current + 1 >= knob.settings.len() {
+            continue;
+        }
+        let mut trial = choice.to_vec();
+        trial[ki] = current + 1;
+        let new_wall = wall_clock(knobs, &trial);
+        if budget_s.is_some_and(|budget_s| new_wall > budget_s) {
+            continue;
+        }
+        let de = knob.settings[current].error - knob.settings[current + 1].error;
+        let dw = new_wall - wall;
+        // Slack upgrades (off the critical path) are free. Equal utilities
+        // retain the earlier knob because replacement is strictly greater.
+        let utility = if dw <= 0.0 { f64::INFINITY } else { de / dw };
+        if best.is_none_or(|(best_utility, _, _, _)| utility > best_utility) {
+            best = Some((utility, ki, de, dw));
+        }
+    }
+    best
+}
+
 /// The greedy-plus-lookup allocator (V1). Deterministic: ties break by
 /// lowest knob index.
 ///
@@ -572,34 +611,9 @@ pub fn allocate(problem: &AllocProblem) -> Result<Plan, AllocationError> {
                 rationale,
             });
         }
-        let wall = wall_clock(knobs, &choice);
-        // Candidate upgrades: next ladder step per knob that fits.
-        let mut best: Option<(f64, usize, f64, f64)> = None; // (utility, knob, de, dw)
-        for (ki, k) in knobs.iter().enumerate() {
-            let c = choice[ki];
-            if c + 1 >= k.settings.len() {
-                continue;
-            }
-            let mut trial = choice.clone();
-            trial[ki] = c + 1;
-            let new_wall = wall_clock(knobs, &trial);
-            if new_wall > problem.budget_s {
-                continue;
-            }
-            let de = k.settings[c].error - k.settings[c + 1].error;
-            let dw = new_wall - wall;
-            // Slack upgrades (off the critical path) are free:
-            // infinite utility, taken immediately in index order.
-            let utility = if dw <= 0.0 { f64::INFINITY } else { de / dw };
-            let better = match best {
-                None => true,
-                Some((u, _, _, _)) => utility > u,
-            };
-            if better {
-                best = Some((utility, ki, de, dw));
-            }
-        }
-        let Some((utility, ki, de, dw)) = best else {
+        let Some((utility, ki, de, dw)) =
+            best_greedy_upgrade(knobs, &choice, Some(problem.budget_s))
+        else {
             // Nothing fits: build the structured infeasibility.
             return Err(AllocationError::BudgetInfeasible(infeasible(
                 problem, &choice,
@@ -622,32 +636,25 @@ pub fn allocate(problem: &AllocProblem) -> Result<Plan, AllocationError> {
 /// Build the structured infeasibility record from the stalled state.
 fn infeasible(problem: &AllocProblem, stalled: &[usize]) -> BudgetInfeasible {
     let knobs = &problem.knobs;
-    // Best error within budget: greedy already maximized error
-    // reduction under the budget; report where it stalled.
+    // Report the actual greedy stalled point. V1 is deliberately heuristic,
+    // so this is neither an exact optimum nor a lower bound.
     let best_error_in_budget = total_error(knobs, stalled);
-    // Budget needed for the target: continue the greedy ladder
-    // ignoring the budget (max settings are the floor of achievable
-    // error; if even that misses the target, say so).
-    let mut choice = stalled.to_vec();
+    // Restart at the minimum plan and replay the exact allocation rule without
+    // a cap. The first target-reaching prefix has nondecreasing wall clock, so
+    // every one of its selected upgrades fits when allocation is rerun at the
+    // final prefix wall. Because the uncapped winner already has maximum
+    // marginal utility (with the same index tie break), the capped rerun follows
+    // the identical prefix. The result is therefore sufficient for this greedy
+    // policy, although it need not be the globally minimum feasible budget.
+    let mut choice = vec![0usize; knobs.len()];
     loop {
         let err = total_error(knobs, &choice);
         if err <= problem.error_target {
             break;
         }
-        let mut best: Option<(f64, usize)> = None;
-        for (ki, k) in knobs.iter().enumerate() {
-            let c = choice[ki];
-            if c + 1 >= k.settings.len() {
-                continue;
-            }
-            let de = k.settings[c].error - k.settings[c + 1].error;
-            let dc = k.settings[c + 1].cost - k.settings[c].cost;
-            let u = if dc <= 0.0 { f64::INFINITY } else { de / dc };
-            if best.is_none_or(|(bu, _)| u > bu) {
-                best = Some((u, ki));
-            }
-        }
-        let Some((_, ki)) = best else { break };
+        let Some((_, ki, _, _)) = best_greedy_upgrade(knobs, &choice, None) else {
+            break;
+        };
         choice[ki] += 1;
     }
     let budget_needed = wall_clock(knobs, &choice);
@@ -659,7 +666,7 @@ fn infeasible(problem: &AllocProblem, stalled: &[usize]) -> BudgetInfeasible {
         ranked.push((
             rel,
             format!(
-                "raise budget to {budget_needed:.3e}s (+{:.1}%) to reach the error target",
+                "raise budget to {budget_needed}s (+{:.1}%) to reach the error target",
                 rel * 100.0
             ),
         ));
@@ -676,7 +683,7 @@ fn infeasible(problem: &AllocProblem, stalled: &[usize]) -> BudgetInfeasible {
     ranked.push((
         rel_t,
         format!(
-            "relax error target to {best_error_in_budget:.3e} (+{:.1}%) to fit the current budget",
+            "relax error target to {best_error_in_budget} (+{:.1}%) to accept the current greedy plan",
             rel_t * 100.0
         ),
     ));
