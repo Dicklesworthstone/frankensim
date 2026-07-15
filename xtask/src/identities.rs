@@ -27,6 +27,8 @@ const REQUIRED_IDENTITY_IDS: &[&str] = &[
     "fs-adjoint:explanation-receipt",
     "fs-alloc:hugepage-decision",
     "fs-bisect:compound-family",
+    "fs-blake3:canonical-identity-frame",
+    "fs-blake3:schema-id",
     "fs-checker:decision-report",
     "fs-checker:semantic-plugin",
     "fs-checker:semantic-registry",

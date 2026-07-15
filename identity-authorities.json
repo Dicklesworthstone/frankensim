@@ -5,6 +5,8 @@
 {"id":"fs-adjoint:explanation-receipt"},
 {"id":"fs-alloc:hugepage-decision"},
 {"id":"fs-bisect:compound-family"},
+{"id":"fs-blake3:canonical-identity-frame"},
+{"id":"fs-blake3:schema-id"},
 {"id":"fs-checker:decision-report"},
 {"id":"fs-checker:semantic-plugin"},
 {"id":"fs-checker:semantic-registry"},

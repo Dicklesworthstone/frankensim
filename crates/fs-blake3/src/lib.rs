@@ -26,6 +26,8 @@
 
 use core::fmt;
 
+pub mod identity;
+
 /// Initialization vector (the SHA-256 IV words, per the BLAKE3 spec).
 const IV: [u32; 8] = [
     0x6A09_E667,
@@ -387,6 +389,17 @@ pub fn hash_bytes(bytes: &[u8]) -> ContentHash {
 /// [`hash_bytes`] artifacts as well as from other domains.
 #[must_use]
 pub fn hash_domain(domain: &str, payload: &[u8]) -> ContentHash {
+    let mut material_hasher = derive_key_hasher(domain);
+    material_hasher.update(payload);
+    material_hasher.finalize()
+}
+
+/// Start the material side of the standard BLAKE3 derive-key construction.
+///
+/// This stays crate-private so callers cannot select raw BLAKE3 mode flags.
+/// The typed identity encoder uses it to hash a canonical preimage without
+/// retaining that preimage in memory.
+pub(crate) fn derive_key_hasher(domain: &str) -> Blake3 {
     let mut context_hasher = Blake3::new_internal(IV, DERIVE_KEY_CONTEXT);
     context_hasher.update(domain.as_bytes());
     let context_key = context_hasher.finalize();
@@ -395,9 +408,7 @@ pub fn hash_domain(domain: &str, payload: &[u8]) -> ContentHash {
     for (word, bytes) in key_words.iter_mut().zip(words) {
         *word = u32::from_le_bytes(*bytes);
     }
-    let mut material_hasher = Blake3::new_internal(key_words, DERIVE_KEY_MATERIAL);
-    material_hasher.update(payload);
-    material_hasher.finalize()
+    Blake3::new_internal(key_words, DERIVE_KEY_MATERIAL)
 }
 
 /// A 32-byte BLAKE3 content hash: the identity of every content-addressed
