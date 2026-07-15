@@ -999,6 +999,37 @@ impl fs_exec::TileKernel for PencilColumnKernel<'_> {
     }
 }
 
+/// Measured facts about one executor-tiled axis pass (bead 3f6c): the
+/// pass geometry and its wall time, for small-kernel granularity
+/// diagnosis. Measurements only — transform results never depend on
+/// them (the P2 law: output is bitwise identical at every worker
+/// count), so `wall_ns` is envelope-class exactly like
+/// [`fs_exec::RunReport`]'s latency samples.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NdPassReport {
+    /// Axis index in `dims` order.
+    pub axis: usize,
+    /// `true` for an inverse-direction pass.
+    pub inverse: bool,
+    /// Executor kernel that ran the pass (the serial degenerate pass
+    /// reports `"fs-fft/ndim-axis-serial-v1"`).
+    pub kernel: &'static str,
+    /// Pencil length (this axis's dimension).
+    pub n: usize,
+    /// Pencil stride (product of trailing dims).
+    pub stride: usize,
+    /// Outer block count (product of leading dims).
+    pub outer: usize,
+    /// Tiles the pass planned (1 for the serial degenerate pass).
+    pub tiles: u64,
+    /// Tiles completed (equals `tiles` on success).
+    pub completed: u64,
+    /// Workers the serving pool exposed to the pass.
+    pub workers: usize,
+    /// Wall time of the pass in ns (saturating; measurement only).
+    pub wall_ns: u64,
+}
+
 impl FftNd {
     /// Executor-tiled forward N-D DFT: bitwise identical to
     /// [`FftNd::forward`] at every worker count (gated). See
@@ -1036,6 +1067,45 @@ impl FftNd {
         self.run_pooled(data, true, pool, gate)
     }
 
+    /// As [`FftNd::forward_pooled`], additionally reporting each axis
+    /// pass's geometry and wall time to `observe` (bead 3f6c
+    /// diagnostics). The observer sees exactly the passes that ran, in
+    /// execution order; it cannot affect results.
+    ///
+    /// # Errors
+    /// As [`FftNd::forward_pooled`]. On cancellation the interrupted
+    /// pass is still observed, with `completed < tiles`.
+    ///
+    /// # Panics
+    /// As [`FftNd::forward_pooled`].
+    pub fn forward_pooled_observed<P: fs_exec::KernelRunner>(
+        &self,
+        data: &mut [C64],
+        pool: &P,
+        gate: &fs_exec::CancelGate,
+        observe: &mut dyn FnMut(NdPassReport),
+    ) -> Result<(), fs_exec::RunError> {
+        self.run_pooled_observed(data, false, pool, gate, observe)
+    }
+
+    /// As [`FftNd::inverse_pooled`] with per-pass observation; see
+    /// [`FftNd::forward_pooled_observed`].
+    ///
+    /// # Errors
+    /// As [`FftNd::inverse_pooled`].
+    ///
+    /// # Panics
+    /// As [`FftNd::inverse_pooled`].
+    pub fn inverse_pooled_observed<P: fs_exec::KernelRunner>(
+        &self,
+        data: &mut [C64],
+        pool: &P,
+        gate: &fs_exec::CancelGate,
+        observe: &mut dyn FnMut(NdPassReport),
+    ) -> Result<(), fs_exec::RunError> {
+        self.run_pooled_observed(data, true, pool, gate, observe)
+    }
+
     /// CANCELLATION CONTRACT: this is a scratch-transform API — on `Err`
     /// the buffer contents are UNSPECIFIED (some axes may be transformed,
     /// some pencils of the interrupted axis may be). Callers needing
@@ -1047,6 +1117,21 @@ impl FftNd {
         inverse: bool,
         pool: &P,
         gate: &fs_exec::CancelGate,
+    ) -> Result<(), fs_exec::RunError> {
+        self.run_pooled_observed(data, inverse, pool, gate, &mut |_| {})
+    }
+
+    /// The pooled axis loop with per-pass observation. Timing wraps only
+    /// the pass itself; the observer runs between passes, outside any
+    /// measured window, and results never depend on it.
+    #[allow(clippy::too_many_lines)]
+    fn run_pooled_observed<P: fs_exec::KernelRunner>(
+        &self,
+        data: &mut [C64],
+        inverse: bool,
+        pool: &P,
+        gate: &fs_exec::CancelGate,
+        observe: &mut dyn FnMut(NdPassReport),
     ) -> Result<(), fs_exec::RunError> {
         let total = self.total();
         assert_eq!(
@@ -1072,6 +1157,7 @@ impl FftNd {
                         total: 1,
                     });
                 }
+                let pass_start = std::time::Instant::now();
                 let mut line = vec![C64::default(); n];
                 let mut scratch = vec![C64::default(); n];
                 line.copy_from_slice(data);
@@ -1081,6 +1167,18 @@ impl FftNd {
                     plan.forward(&mut line, &mut scratch);
                 }
                 data.copy_from_slice(&line);
+                observe(NdPassReport {
+                    axis: ax,
+                    inverse,
+                    kernel: "fs-fft/ndim-axis-serial-v1",
+                    n,
+                    stride,
+                    outer,
+                    tiles: 1,
+                    completed: 1,
+                    workers: pool.workers(),
+                    wall_ns: saturating_ns(pass_start.elapsed()),
+                });
                 continue;
             }
             if outer == 1 {
@@ -1097,7 +1195,20 @@ impl FftNd {
                     group,
                     inverse,
                 };
-                let (outcome, _report) = pool.run_with_gate(&kernel, gate);
+                let pass_start = std::time::Instant::now();
+                let (outcome, report) = pool.run_with_gate(&kernel, gate);
+                observe(NdPassReport {
+                    axis: ax,
+                    inverse,
+                    kernel: report.kernel,
+                    n,
+                    stride,
+                    outer,
+                    tiles: report.total,
+                    completed: report.completed,
+                    workers: pool.workers(),
+                    wall_ns: saturating_ns(pass_start.elapsed()),
+                });
                 outcome?;
                 continue;
             }
@@ -1112,11 +1223,29 @@ impl FftNd {
                 stride,
                 inverse,
             };
-            let (outcome, _report) = pool.run_with_gate(&kernel, gate);
+            let pass_start = std::time::Instant::now();
+            let (outcome, report) = pool.run_with_gate(&kernel, gate);
+            observe(NdPassReport {
+                axis: ax,
+                inverse,
+                kernel: report.kernel,
+                n,
+                stride,
+                outer,
+                tiles: report.total,
+                completed: report.completed,
+                workers: pool.workers(),
+                wall_ns: saturating_ns(pass_start.elapsed()),
+            });
             outcome?;
         }
         Ok(())
     }
+}
+
+/// Envelope-class ns from a duration (saturating; measurement only).
+fn saturating_ns(elapsed: std::time::Duration) -> u64 {
+    u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX)
 }
 
 #[cfg(test)]

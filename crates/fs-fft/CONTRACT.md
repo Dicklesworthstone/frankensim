@@ -41,6 +41,19 @@ is recorded under No-claim boundaries.
   `inverse(&mut [C64])` (`1/total`-normalized so `inverse(forward)=id`). The
   transform is **separable**: the planned 1D `Fft` applied along each axis in
   turn (row–column / pencil algorithm), deterministic by construction.
+- `FftNd::{forward,inverse}_pooled(&mut [C64], &impl fs_exec::KernelRunner,
+  &CancelGate)` — executor-tiled N-D passes (bead 27d3): per-axis pencil work
+  tiled over outer blocks (or axis-0 column groups behind row mutexes), with
+  per-pencil arithmetic and order EXACTLY the serial path's, so output is
+  bitwise identical to `forward`/`inverse` at every worker count (the P2 law,
+  gated by conformance).
+- `FftNd::{forward,inverse}_pooled_observed(..., &mut dyn FnMut(NdPassReport))`
+  (bead 3f6c) — the same transforms, additionally reporting each axis pass's
+  geometry (`axis`, `kernel`, `n`, `stride`, `outer`, `tiles`, `completed`,
+  `workers`) and `wall_ns` to the observer in execution order. `NdPassReport`
+  is MEASUREMENT ONLY — envelope-class like `fs_exec::RunReport`; results
+  never depend on it, and on cancellation the interrupted pass is still
+  observed with `completed < tiles` (0 for a pre-requested gate).
 - `dct2(&[f64])` — unnormalized DCT-II, `X[k] = Σ_j x[j]·cos(πk(2j+1)/(2n))`,
   via even/odd folding + one complex FFT.
 - `dct3(&[f64])` — DCT-III with the k=0 halving convention such that
@@ -92,8 +105,11 @@ with a semantically justified bump.
 
 ## Cancellation behavior
 v1 transforms are single-tile, O(n log n), and short; no cancellation poll
-points inside a single transform. Executor-tiled multi-dimensional transforms
-(follow-up bead) will poll at pencil boundaries per Decalogue P7.
+points inside a single transform. The executor-tiled N-D path polls at pencil
+boundaries per Decalogue P7 and is a SCRATCH-TRANSFORM API: on `Err` the
+buffer contents are unspecified (some axes/pencils may be transformed);
+callers needing transactional output stage a copy first. The structured
+`RunError` and the drained pool are the guarantees.
 
 ## Unsafe boundary
 No local unsafe code. `unsafe_code` is denied in fs-fft. The fused six-step

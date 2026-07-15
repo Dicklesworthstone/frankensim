@@ -958,6 +958,10 @@ struct FftNdRoundTrip<'p, P> {
     data: Vec<C64>,
     pool: &'p P,
     gate: fs_exec::CancelGate,
+    /// Per-axis-pass diagnostics (bead 3f6c): every pass of every
+    /// measured roundtrip, in execution order. Envelope-class
+    /// measurements; printed after measurement, outside the timed path.
+    passes: Vec<fs_fft::NdPassReport>,
 }
 
 impl<'p, P: fs_exec::KernelRunner> FftNdRoundTrip<'p, P> {
@@ -977,6 +981,7 @@ impl<'p, P: fs_exec::KernelRunner> FftNdRoundTrip<'p, P> {
                 .collect(),
             pool,
             gate: fs_exec::CancelGate::new(),
+            passes: Vec::new(),
         }
     }
 }
@@ -1004,11 +1009,21 @@ impl<P: fs_exec::KernelRunner> RooflineKernel for FftNdRoundTrip<'_, P> {
         self.plan.total()
     }
     fn run_once(&mut self) -> Result<(), String> {
-        self.plan
-            .forward_pooled(&mut self.data, self.pool, &self.gate)
+        // Observed variants (bead 3f6c): the observer is a Vec push per
+        // axis pass — nanoseconds against millisecond-scale rows, and
+        // identical work at every worker count, so the measured
+        // roundtrip stays honest while the pass geometry is retained.
+        let Self {
+            plan,
+            data,
+            pool,
+            gate,
+            passes,
+            ..
+        } = self;
+        plan.forward_pooled_observed(data, *pool, gate, &mut |report| passes.push(report))
             .map_err(|error| format!("pooled forward failed: {error}"))?;
-        self.plan
-            .inverse_pooled(&mut self.data, self.pool, &self.gate)
+        plan.inverse_pooled_observed(data, *pool, gate, &mut |report| passes.push(report))
             .map_err(|error| format!("pooled inverse failed: {error}"))?;
         Ok(())
     }
@@ -1060,6 +1075,28 @@ fn fftnd_report_rows(axes: &MachineAxes) -> bool {
                 "{{\"metric\":\"fftnd-roundtrip\",\"dims\":{dims:?},\"workers\":{workers},\
                  \"lane\":\"parked-crew\",\"gated\":false,\"receipt\":{receipt}}}"
             );
+            // Per-axis-pass geometry + wall rows (bead 3f6c): printed
+            // AFTER measurement, outside the timed path. `seq` orders
+            // passes across the warmup+sample roundtrips; the roundtrip
+            // receipt above stays the only attainment-bearing row.
+            for (seq, pass) in kern.passes.drain(..).enumerate() {
+                println!(
+                    "{{\"metric\":\"fftnd-pass\",\"dims\":{dims:?},\"workers\":{workers},\
+                     \"seq\":{seq},\"axis\":{},\"inverse\":{},\"kernel\":\"{}\",\"n\":{},\
+                     \"stride\":{},\"outer\":{},\"tiles\":{},\"completed\":{},\
+                     \"pool_workers\":{},\"wall_ns\":{}}}",
+                    pass.axis,
+                    pass.inverse,
+                    pass.kernel,
+                    pass.n,
+                    pass.stride,
+                    pass.outer,
+                    pass.tiles,
+                    pass.completed,
+                    pass.workers,
+                    pass.wall_ns
+                );
+            }
             env_ok &= att.verdict != fs_roofline::Verdict::EnvironmentInvalid;
         }
         env_ok
