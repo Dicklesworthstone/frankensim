@@ -32,6 +32,8 @@
 //! findings deterministically, so a replayed query reproduces the same
 //! verdict (the addendum's determinism-as-contract requirement).
 
+use std::collections::BTreeMap;
+
 use crate::admission::{Finding, RankedFix, Severity};
 use crate::ast::{Node, NodeKind, Span};
 use crate::{IrError, IrErrorKind};
@@ -512,6 +514,7 @@ impl Query {
     /// # Errors
     /// A structured [`IrError`] pointing at the malformed clause.
     pub fn from_node(node: &Node) -> Result<Query, IrError> {
+        node.validate()?;
         let items = match node.head() {
             Some("query") => node.items().expect("head implies list"),
             _ => {
@@ -536,12 +539,30 @@ impl Query {
                 "add a target, e.g. (confidence 0.95)",
             )
         })?)?;
-        let mut budget_usd = f64::NAN;
-        let mut deadline_s = f64::NAN;
+        let mut budget_usd = None;
+        let mut deadline_s = None;
         for clause in &items[3..] {
             match clause.head() {
-                Some("budget") => budget_usd = clause_number(clause)?,
-                Some("deadline") => deadline_s = clause_seconds(clause)?,
+                Some("budget") => {
+                    if budget_usd.is_some() {
+                        return Err(malformed(
+                            clause.span,
+                            "duplicate query.budget clause",
+                            "provide exactly one (budget N) clause",
+                        ));
+                    }
+                    budget_usd = Some(clause_number(clause)?);
+                }
+                Some("deadline") => {
+                    if deadline_s.is_some() {
+                        return Err(malformed(
+                            clause.span,
+                            "duplicate query.deadline clause",
+                            "provide exactly one (deadline T) clause",
+                        ));
+                    }
+                    deadline_s = Some(clause_seconds(clause)?);
+                }
                 _ => {
                     return Err(malformed(
                         clause.span,
@@ -550,6 +571,30 @@ impl Query {
                     ));
                 }
             }
+        }
+        let budget_usd = budget_usd.ok_or_else(|| {
+            malformed(
+                node.span,
+                "missing query.budget clause",
+                "provide exactly one (budget N) clause",
+            )
+        })?;
+        let deadline_s = deadline_s.ok_or_else(|| {
+            malformed(
+                node.span,
+                "missing query.deadline clause",
+                "provide exactly one (deadline T) clause",
+            )
+        })?;
+        if items.len() != 5
+            || items[3].head() != Some("budget")
+            || items[4].head() != Some("deadline")
+        {
+            return Err(malformed(
+                node.span,
+                "query clauses are not in the exact canonical schema",
+                "use (query <qoi> <target> (budget N) (deadline T))",
+            ));
         }
         Ok(Query {
             qoi,
@@ -563,22 +608,26 @@ impl Query {
     /// Emit the query as its concrete IR form (synthetic spans). Round-trips
     /// with [`Query::from_node`] under `same_shape` (semantic equality
     /// ignores spans and quantity presentation text).
-    #[must_use]
-    pub fn to_node(&self) -> Node {
-        list(vec![
+    pub fn to_node(&self) -> Result<Node, IrError> {
+        let node = list(vec![
             sym("query"),
-            self.qoi_node(),
-            self.target_node(),
+            self.qoi_node()?,
+            self.target_node()?,
             list(vec![
                 sym("budget"),
                 Node::synthetic(NodeKind::Float(self.budget_usd)),
             ]),
-            list(vec![sym("deadline"), qty(self.deadline_s, TIME_DIMS)]),
-        ])
+            list(vec![
+                sym("deadline"),
+                Node::quantity(self.deadline_s, TIME_DIMS)?,
+            ]),
+        ]);
+        node.validate()?;
+        Ok(node)
     }
 
-    fn qoi_node(&self) -> Node {
-        match &self.qoi {
+    fn qoi_node(&self) -> Result<Node, IrError> {
+        Ok(match &self.qoi {
             Qoi::MaxOverRegion { field, region } => list(vec![
                 sym("max"),
                 kw("field"),
@@ -606,16 +655,18 @@ impl Query {
                 kw("region"),
                 str_node(region),
                 kw("threshold"),
-                qty(*threshold, *threshold_dims),
+                Node::quantity(*threshold, *threshold_dims)?,
                 kw("env"),
                 str_node(environment),
             ]),
-        }
+        })
     }
 
-    fn target_node(&self) -> Node {
-        match &self.target {
-            Target::Tolerance { value, dims } => list(vec![sym("tolerance"), qty(*value, *dims)]),
+    fn target_node(&self) -> Result<Node, IrError> {
+        Ok(match &self.target {
+            Target::Tolerance { value, dims } => {
+                list(vec![sym("tolerance"), Node::quantity(*value, *dims)?])
+            }
             Target::Confidence(c) => list(vec![
                 sym("confidence"),
                 Node::synthetic(NodeKind::Float(*c)),
@@ -626,11 +677,11 @@ impl Query {
                 confidence,
             } => list(vec![
                 sym("tolerance"),
-                qty(*value, *dims),
+                Node::quantity(*value, *dims)?,
                 kw("confidence"),
                 Node::synthetic(NodeKind::Float(*confidence)),
             ]),
-        }
+        })
     }
 }
 
@@ -657,62 +708,93 @@ fn str_node(s: &str) -> Node {
 fn list(items: Vec<Node>) -> Node {
     Node::synthetic(NodeKind::List(items))
 }
-fn qty(value: f64, dims: Dims) -> Node {
-    Node::synthetic(NodeKind::Qty {
-        value,
-        dims,
-        text: format!("{value}"),
-    })
-}
-
-/// Collect `:key value` pairs from a form's items (after the head).
-fn keyword_args(items: &[Node]) -> Vec<(&str, &Node)> {
-    let mut out = Vec::new();
-    let mut i = 1;
-    while i + 1 < items.len() {
-        if let NodeKind::Keyword(k) = &items[i].kind {
-            out.push((k.as_str(), &items[i + 1]));
-            i += 2;
-        } else {
-            i += 1;
+/// Parse an exact `:key value` schema without silently skipping positional,
+/// unknown, duplicate, or dangling arguments.
+fn keyword_args<'a>(
+    items: &'a [Node],
+    start: usize,
+    form: &str,
+    allowed: &[&str],
+) -> Result<BTreeMap<&'a str, &'a Node>, IrError> {
+    let mut out = BTreeMap::new();
+    let mut index = start;
+    while index < items.len() {
+        let NodeKind::Keyword(key) = &items[index].kind else {
+            return Err(malformed(
+                items[index].span,
+                &format!("unexpected positional argument at {form}[{index}]"),
+                "use only the documented :key value pairs",
+            ));
+        };
+        if !allowed.contains(&key.as_str()) {
+            return Err(malformed(
+                items[index].span,
+                &format!("unknown {form}.{key} keyword"),
+                &format!("known {form} keywords: {}", allowed.join(", ")),
+            ));
         }
+        let value = items.get(index + 1).ok_or_else(|| {
+            malformed(
+                items[index].span,
+                &format!("dangling {form}.{key} keyword"),
+                "add its value or remove the keyword",
+            )
+        })?;
+        if out.insert(key.as_str(), value).is_some() {
+            return Err(malformed(
+                items[index].span,
+                &format!("duplicate {form}.{key} keyword"),
+                "provide each keyword exactly once",
+            ));
+        }
+        index += 2;
     }
-    out
+    Ok(out)
 }
 
-fn kw_str(args: &[(&str, &Node)], key: &str, span: Span) -> Result<String, IrError> {
-    for (k, v) in args {
-        if *k == key {
-            if let NodeKind::Str(s) = &v.kind {
-                return Ok(s.clone());
-            }
-            return Err(malformed(v.span, "expected a string", "e.g. :field \"vm\""));
+fn kw_str(
+    args: &BTreeMap<&str, &Node>,
+    key: &str,
+    form: &str,
+    span: Span,
+) -> Result<String, IrError> {
+    if let Some(value) = args.get(key) {
+        if let NodeKind::Str(text) = &value.kind {
+            return Ok(text.clone());
         }
+        return Err(malformed(
+            value.span,
+            &format!("expected a string at {form}.{key}"),
+            "e.g. :field \"vm\"",
+        ));
     }
     Err(malformed(
         span,
-        "missing required keyword",
-        "the QoI needs :field and :region",
+        &format!("missing required {form}.{key} keyword"),
+        "provide every required keyword exactly once",
     ))
 }
 
-fn kw_qty(args: &[(&str, &Node)], key: &str, span: Span) -> Result<(f64, Dims), IrError> {
-    for (k, v) in args {
-        if *k == key {
-            if let NodeKind::Qty { value, dims, .. } = &v.kind {
-                return Ok((*value, *dims));
-            }
-            return Err(malformed(
-                v.span,
-                "expected a dimensioned quantity",
-                "e.g. :threshold 180MPa",
-            ));
+fn kw_qty(
+    args: &BTreeMap<&str, &Node>,
+    key: &str,
+    form: &str,
+    span: Span,
+) -> Result<(f64, Dims), IrError> {
+    if let Some(value) = args.get(key) {
+        if let NodeKind::Qty { value, dims, .. } = &value.kind {
+            return Ok((*value, *dims));
         }
+        return Err(malformed(
+            value.span,
+            &format!("expected a dimensioned quantity at {form}.{key}"),
+            "e.g. :threshold 180MPa",
+        ));
     }
     Err(malformed(
         span,
-        "missing required quantity keyword",
-        "add it",
+        &format!("missing required {form}.{key} keyword"),
+        "provide every required keyword exactly once",
     ))
 }
 
@@ -724,24 +806,36 @@ fn parse_qoi(node: &Node) -> Result<Qoi, IrError> {
             "e.g. (max :field \"vm\" :region \"bracket\")",
         )
     })?;
-    let args = keyword_args(items);
     match node.head() {
-        Some("max") => Ok(Qoi::MaxOverRegion {
-            field: kw_str(&args, "field", node.span)?,
-            region: kw_str(&args, "region", node.span)?,
-        }),
-        Some("integral") => Ok(Qoi::Integral {
-            field: kw_str(&args, "field", node.span)?,
-            region: kw_str(&args, "region", node.span)?,
-        }),
+        Some("max") => {
+            let args = keyword_args(items, 1, "query.qoi.max", &["field", "region"])?;
+            Ok(Qoi::MaxOverRegion {
+                field: kw_str(&args, "field", "query.qoi.max", node.span)?,
+                region: kw_str(&args, "region", "query.qoi.max", node.span)?,
+            })
+        }
+        Some("integral") => {
+            let args = keyword_args(items, 1, "query.qoi.integral", &["field", "region"])?;
+            Ok(Qoi::Integral {
+                field: kw_str(&args, "field", "query.qoi.integral", node.span)?,
+                region: kw_str(&args, "region", "query.qoi.integral", node.span)?,
+            })
+        }
         Some("exceedance") => {
-            let (threshold, threshold_dims) = kw_qty(&args, "threshold", node.span)?;
+            let args = keyword_args(
+                items,
+                1,
+                "query.qoi.exceedance",
+                &["field", "region", "threshold", "env"],
+            )?;
+            let (threshold, threshold_dims) =
+                kw_qty(&args, "threshold", "query.qoi.exceedance", node.span)?;
             Ok(Qoi::Exceedance {
-                field: kw_str(&args, "field", node.span)?,
-                region: kw_str(&args, "region", node.span)?,
+                field: kw_str(&args, "field", "query.qoi.exceedance", node.span)?,
+                region: kw_str(&args, "region", "query.qoi.exceedance", node.span)?,
                 threshold,
                 threshold_dims,
-                environment: kw_str(&args, "env", node.span)?,
+                environment: kw_str(&args, "env", "query.qoi.exceedance", node.span)?,
             })
         }
         _ => Err(malformed(
@@ -768,9 +862,9 @@ fn parse_target(node: &Node) -> Result<Target, IrError> {
                     ));
                 }
             };
-            let args = keyword_args(items);
-            if let Some((_, v)) = args.iter().find(|(k, _)| *k == "confidence") {
-                let confidence = float_of(v)?;
+            let args = keyword_args(items, 2, "query.target.tolerance", &["confidence"])?;
+            if let Some(value) = args.get("confidence") {
+                let confidence = float_of(value)?;
                 Ok(Target::ToleranceAndConfidence {
                     value,
                     dims,
@@ -781,6 +875,14 @@ fn parse_target(node: &Node) -> Result<Target, IrError> {
             }
         }
         Some("confidence") => {
+            if items.len() != 2 {
+                let offense = items.get(2).map_or(node.span, |item| item.span);
+                return Err(malformed(
+                    offense,
+                    "query.target.confidence takes exactly one number",
+                    "use (confidence F)",
+                ));
+            }
             let n = items.get(1).ok_or_else(|| {
                 malformed(
                     node.span,
@@ -801,15 +903,41 @@ fn parse_target(node: &Node) -> Result<Target, IrError> {
 fn float_of(node: &Node) -> Result<f64, IrError> {
     match &node.kind {
         NodeKind::Float(f) => Ok(*f),
-        NodeKind::Int(i) => Ok(*i as f64),
+        NodeKind::Int(i) if integer_is_exact_f64(*i) => {
+            #[allow(clippy::cast_precision_loss)]
+            let value = *i as f64;
+            Ok(value)
+        }
+        NodeKind::Int(_) => Err(malformed(
+            node.span,
+            "integer cannot be represented exactly as an f64 query number",
+            "use an exactly representable integer or an explicit finite float",
+        )),
         _ => Err(malformed(node.span, "expected a number", "e.g. 0.95")),
     }
+}
+
+fn integer_is_exact_f64(value: i64) -> bool {
+    let magnitude = value.unsigned_abs();
+    if magnitude == 0 {
+        return true;
+    }
+    let significant = magnitude >> magnitude.trailing_zeros();
+    (u64::BITS - significant.leading_zeros()) <= 53
 }
 
 fn clause_number(clause: &Node) -> Result<f64, IrError> {
     let items = clause
         .items()
         .ok_or_else(|| malformed(clause.span, "malformed clause", "e.g. (budget 50)"))?;
+    if items.len() != 2 {
+        let offense = items.get(2).map_or(clause.span, |item| item.span);
+        return Err(malformed(
+            offense,
+            "query.budget takes exactly one number",
+            "use (budget N)",
+        ));
+    }
     let n = items
         .get(1)
         .ok_or_else(|| malformed(clause.span, "clause needs a value", "e.g. (budget 50)"))?;
@@ -820,6 +948,14 @@ fn clause_seconds(clause: &Node) -> Result<f64, IrError> {
     let items = clause
         .items()
         .ok_or_else(|| malformed(clause.span, "malformed clause", "e.g. (deadline 30s)"))?;
+    if items.len() != 2 {
+        let offense = items.get(2).map_or(clause.span, |item| item.span);
+        return Err(malformed(
+            offense,
+            "query.deadline takes exactly one time",
+            "use (deadline 30s)",
+        ));
+    }
     match items.get(1).map(|n| &n.kind) {
         // accept a time quantity (dims = seconds) or a bare number of seconds.
         Some(NodeKind::Qty { value, dims, .. }) if *dims == TIME_DIMS => Ok(*value),
@@ -828,8 +964,7 @@ fn clause_seconds(clause: &Node) -> Result<f64, IrError> {
             "deadline must have time dimensions",
             "e.g. (deadline 30s) or (deadline 5min)",
         )),
-        Some(NodeKind::Float(f)) => Ok(*f),
-        Some(NodeKind::Int(i)) => Ok(*i as f64),
+        Some(NodeKind::Float(_) | NodeKind::Int(_)) => float_of(&items[1]),
         _ => Err(malformed(
             clause.span,
             "deadline needs a time",

@@ -22,7 +22,7 @@
 //! parser (P1: no serde) with byte spans, depth cap, and finite-only
 //! numbers.
 
-use crate::ast::{Node, NodeKind, Span};
+use crate::ast::{Node, NodeKind, Span, canonical_quantity_text};
 use crate::sexpr::{MAX_DEPTH, classify_atom};
 use crate::{IrError, IrErrorKind};
 
@@ -56,6 +56,7 @@ pub fn parse(src: &str) -> Result<Node, IrError> {
             "a program is exactly one JSON value",
         ));
     }
+    node.validate()?;
     Ok(node)
 }
 
@@ -260,23 +261,61 @@ impl Parser<'_> {
                                 .src
                                 .get(self.pos + 2..self.pos + 6)
                                 .ok_or_else(|| self.u_escape_err(hex_span))?;
-                            let code = u32::from_str_radix(hex, 16)
+                            let code = u16::from_str_radix(hex, 16)
                                 .map_err(|_| self.u_escape_err(hex_span))?;
-                            let ch =
-                                char::from_u32(code).ok_or_else(|| self.u_escape_err(hex_span))?;
-                            out.push(ch);
-                            self.pos += 4; // beyond the standard 2 below
+                            if (0xD800..=0xDBFF).contains(&code) {
+                                let pair_span =
+                                    Span::new(self.pos, (self.pos + 12).min(self.bytes.len()));
+                                if self.bytes.get(self.pos + 6) != Some(&b'\\')
+                                    || self.bytes.get(self.pos + 7) != Some(&b'u')
+                                {
+                                    return Err(self.u_escape_err(pair_span));
+                                }
+                                let low_hex = self
+                                    .src
+                                    .get(self.pos + 8..self.pos + 12)
+                                    .ok_or_else(|| self.u_escape_err(pair_span))?;
+                                let low = u16::from_str_radix(low_hex, 16)
+                                    .map_err(|_| self.u_escape_err(pair_span))?;
+                                if !(0xDC00..=0xDFFF).contains(&low) {
+                                    return Err(self.u_escape_err(pair_span));
+                                }
+                                let scalar = 0x1_0000
+                                    + ((u32::from(code) - 0xD800) << 10)
+                                    + (u32::from(low) - 0xDC00);
+                                out.push(
+                                    char::from_u32(scalar)
+                                        .ok_or_else(|| self.u_escape_err(pair_span))?,
+                                );
+                                self.pos += 10; // plus the common two-byte escape advance below
+                            } else if (0xDC00..=0xDFFF).contains(&code) {
+                                return Err(self.u_escape_err(hex_span));
+                            } else {
+                                out.push(
+                                    char::from_u32(u32::from(code))
+                                        .ok_or_else(|| self.u_escape_err(hex_span))?,
+                                );
+                                self.pos += 4; // plus the common two-byte escape advance below
+                            }
                         }
                         _ => {
                             return Err(err(
                                 Span::new(self.pos, (self.pos + 2).min(self.bytes.len())),
                                 IrErrorKind::BadEscape,
                                 "unknown escape sequence",
-                                r#"supported: \ " / \n \t \r \b \f \uXXXX (no surrogate pairs)"#,
+                                r#"supported: \ " / \n \t \r \b \f \uXXXX (paired when surrogate-encoded)"#,
                             ));
                         }
                     }
                     self.pos += 2;
+                }
+                0x00..=0x1F => {
+                    return Err(err(
+                        Span::new(self.pos, self.pos + 1),
+                        IrErrorKind::JsonSyntax,
+                        "unescaped control character in JSON string",
+                        "encode control characters with a JSON escape such as \\n or \\u000A",
+                    ));
                 }
                 _ => {
                     let ch_len = self.src[self.pos..]
@@ -301,8 +340,8 @@ impl Parser<'_> {
         err(
             span,
             IrErrorKind::BadEscape,
-            "malformed \\uXXXX escape (surrogate halves are rejected)",
-            "use 4 hex digits naming a Unicode scalar value",
+            "malformed \\uXXXX escape or surrogate pair",
+            "use one Unicode scalar or a high-surrogate/low-surrogate pair",
         )
     }
 
@@ -326,23 +365,81 @@ impl Parser<'_> {
                 "\"i\" and \"f\" tags carry JSON numbers",
             ));
         }
-        Ok((
-            self.src[start..self.pos].to_string(),
-            Span::new(start, self.pos),
-        ))
+        let text = &self.src[start..self.pos];
+        if !is_rfc8259_number(text) {
+            return Err(err(
+                Span::new(start, self.pos),
+                IrErrorKind::BadNumber,
+                &format!("{text:?} is not an RFC 8259 JSON number"),
+                "use -?(0|[1-9][0-9]*)(.[0-9]+)?([eE][+-]?[0-9]+)?",
+            ));
+        }
+        Ok((text.to_string(), Span::new(start, self.pos)))
     }
 }
 
-/// Print a node in the canonical JSON mapping; `parse(print(x))` has the
-/// same shape as `x` (round-trip law).
-#[must_use]
-pub fn print(node: &Node) -> String {
-    let mut out = String::new();
-    print_into(node, &mut out);
-    out
+fn is_rfc8259_number(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut index = 0;
+    if bytes.get(index) == Some(&b'-') {
+        index += 1;
+    }
+    match bytes.get(index) {
+        Some(b'0') => index += 1,
+        Some(b'1'..=b'9') => {
+            index += 1;
+            while bytes.get(index).is_some_and(u8::is_ascii_digit) {
+                index += 1;
+            }
+        }
+        _ => return false,
+    }
+    if bytes.get(index) == Some(&b'.') {
+        index += 1;
+        let start = index;
+        while bytes.get(index).is_some_and(u8::is_ascii_digit) {
+            index += 1;
+        }
+        if index == start {
+            return false;
+        }
+    }
+    if matches!(bytes.get(index), Some(b'e' | b'E')) {
+        index += 1;
+        if matches!(bytes.get(index), Some(b'+' | b'-')) {
+            index += 1;
+        }
+        let start = index;
+        while bytes.get(index).is_some_and(u8::is_ascii_digit) {
+            index += 1;
+        }
+        if index == start {
+            return false;
+        }
+    }
+    index == bytes.len()
 }
 
-fn print_into(node: &Node, out: &mut String) {
+/// Validate and print a node in the canonical JSON mapping.
+///
+/// # Errors
+/// Rejects the first invalid atom with its source span and exact tree path.
+pub fn print(node: &Node) -> Result<String, IrError> {
+    print_checked(node)
+}
+
+/// Validate and print one canonical JSON mapping.
+///
+/// # Errors
+/// Rejects the first invalid atom with its source span and exact tree path.
+pub fn print_checked(node: &Node) -> Result<String, IrError> {
+    node.validate()?;
+    let mut out = String::new();
+    print_into(node, &mut out)?;
+    Ok(out)
+}
+
+fn print_into(node: &Node, out: &mut String) -> Result<(), IrError> {
     use std::fmt::Write as _;
     match &node.kind {
         NodeKind::Int(i) => {
@@ -351,9 +448,9 @@ fn print_into(node: &Node, out: &mut String) {
         NodeKind::Float(f) => {
             let _ = write!(out, "{{\"f\":{f:?}}}");
         }
-        NodeKind::Qty { text, .. } => {
+        NodeKind::Qty { value, dims, .. } => {
             let _ = write!(out, "{{\"q\":");
-            print_json_string(text, out);
+            print_json_string(&canonical_quantity_text(*value, *dims, node.span)?, out);
             out.push('}');
         }
         NodeKind::Count { value, unit } => {
@@ -391,11 +488,12 @@ fn print_into(node: &Node, out: &mut String) {
                 if i > 0 {
                     out.push(',');
                 }
-                print_into(item, out);
+                print_into(item, out)?;
             }
             out.push(']');
         }
     }
+    Ok(())
 }
 
 fn print_json_string(s: &str, out: &mut String) {

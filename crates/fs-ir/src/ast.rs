@@ -11,6 +11,10 @@
 
 use fs_qty::Dims;
 
+use crate::{IrError, IrErrorKind};
+
+const MAX_AST_DEPTH: usize = 256;
+
 /// Byte range in the source text a node came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Span {
@@ -355,6 +359,146 @@ impl Node {
         }
     }
 
+    /// Build a synthesized node only when its complete tree is safe to
+    /// serialize through both concrete syntaxes.
+    ///
+    /// # Errors
+    /// Returns a structured error naming the exact tree path of the first
+    /// invalid atom or over-deep child.
+    pub fn try_synthetic(kind: NodeKind) -> Result<Node, IrError> {
+        let node = Node::synthetic(kind);
+        node.validate()?;
+        Ok(node)
+    }
+
+    /// Build a quantity atom in the one canonical SI-base spelling used by
+    /// synthesized IR. Dimensionless quantities use `rad` so they remain
+    /// distinct from bare floating-point atoms.
+    ///
+    /// # Errors
+    /// Rejects non-finite values and dimension vectors outside fs-qty's
+    /// representable grammar.
+    pub fn quantity(value: f64, dims: Dims) -> Result<Node, IrError> {
+        let span = Span::default();
+        let text = canonical_quantity_text(value, dims, span)?;
+        Node::try_synthetic(NodeKind::Qty { value, dims, text })
+    }
+
+    /// Recursively validate a public AST before it crosses a serialization,
+    /// identity, or admission boundary.
+    ///
+    /// Public enum variants intentionally remain available for ergonomic tree
+    /// matching, so boundary code must call this method (or a checked printer)
+    /// rather than trusting a caller-forged atom.
+    ///
+    /// # Errors
+    /// The error span is the offending node's source span and the detail names
+    /// its exact `$[index]...` tree path.
+    pub fn validate(&self) -> Result<(), IrError> {
+        self.validate_at(0, "$".to_string())
+    }
+
+    fn validate_at(&self, depth: usize, path: String) -> Result<(), IrError> {
+        if self.span.start > self.span.end {
+            return Err(IrError {
+                span: Span::new(self.span.end, self.span.start),
+                kind: IrErrorKind::MalformedClause,
+                detail: format!(
+                    "invalid AST at {path}: span start {} exceeds end {}",
+                    self.span.start, self.span.end
+                ),
+                hint: "store spans as ordered half-open byte ranges".to_string(),
+            });
+        }
+        if depth > MAX_AST_DEPTH {
+            return Err(self.validation_error(
+                IrErrorKind::TooDeep,
+                &path,
+                &format!("nesting exceeds the {MAX_AST_DEPTH}-level cap"),
+                "flatten the tree before serialization",
+            ));
+        }
+        match &self.kind {
+            NodeKind::Float(value) if !value.is_finite() => Err(self.validation_error(
+                IrErrorKind::BadNumber,
+                &path,
+                "floating-point atom is not finite",
+                "use a finite f64 literal",
+            )),
+            NodeKind::Qty { value, dims, text } => {
+                if !value.is_finite() {
+                    return Err(self.validation_error(
+                        IrErrorKind::BadQuantity,
+                        &path,
+                        "quantity value is not finite",
+                        "use a finite SI-base value",
+                    ));
+                }
+                if text.is_empty() || text.bytes().any(is_atom_delimiter) {
+                    return Err(self.validation_error(
+                        IrErrorKind::BadQuantity,
+                        &path,
+                        "quantity source text is not one complete atom",
+                        "use Node::quantity or one whitespace-free fs-qty literal",
+                    ));
+                }
+                let parsed =
+                    fs_qty::parse::parse_qty_with_budget(text, fs_qty::parse::ParseBudget::DEFAULT)
+                        .map_err(|error| {
+                            self.validation_error(
+                                IrErrorKind::BadQuantity,
+                                &path,
+                                &format!("quantity source text is invalid: {error}"),
+                                "use Node::quantity or a valid fs-qty literal",
+                            )
+                        })?;
+                if parsed.value.to_bits() != value.to_bits() || parsed.dims != *dims {
+                    return Err(self.validation_error(
+                        IrErrorKind::BadQuantity,
+                        &path,
+                        "quantity source text does not encode its stored value and dimensions",
+                        "rebuild the atom with Node::quantity",
+                    ));
+                }
+                canonical_quantity_text(*value, *dims, self.span).map(|_| ())
+            }
+            NodeKind::Symbol(symbol) if !valid_symbol(symbol) => Err(self.validation_error(
+                IrErrorKind::UnexpectedChar,
+                &path,
+                "symbol cannot round-trip as one symbol atom",
+                "use a nonnumeric, non-keyword atom without whitespace or delimiters",
+            )),
+            NodeKind::Keyword(keyword) if !valid_keyword(keyword) => Err(self.validation_error(
+                IrErrorKind::BadKeyword,
+                &path,
+                "keyword cannot round-trip as one keyword atom",
+                "use a nonempty keyword without whitespace or delimiters",
+            )),
+            NodeKind::List(items) => {
+                for (index, item) in items.iter().enumerate() {
+                    item.validate_at(depth + 1, format!("{path}[{index}]"))?;
+                }
+                Ok(())
+            }
+            NodeKind::Int(_)
+            | NodeKind::Float(_)
+            | NodeKind::Count { .. }
+            | NodeKind::Seed(_)
+            | NodeKind::Str(_)
+            | NodeKind::Symbol(_)
+            | NodeKind::Keyword(_) => Ok(()),
+        }
+    }
+
+    fn validation_error(&self, kind: IrErrorKind, path: &str, detail: &str, hint: &str) -> IrError {
+        IrError {
+            span: self.span,
+            kind,
+            detail: format!("invalid AST at {path}: {detail}"),
+            hint: hint.to_string(),
+        }
+    }
+
     /// Semantic equality: identical trees ignoring spans and Qty unit
     /// presentation (floats compare by bits; NaN never occurs — both
     /// parsers reject non-finite literals).
@@ -421,4 +565,67 @@ impl Node {
             _ => None,
         }
     }
+}
+
+pub(crate) fn canonical_quantity_text(
+    value: f64,
+    dims: Dims,
+    span: Span,
+) -> Result<String, IrError> {
+    if !value.is_finite() {
+        return Err(IrError {
+            span,
+            kind: IrErrorKind::BadQuantity,
+            detail: "cannot encode a non-finite canonical quantity".to_string(),
+            hint: "use a finite SI-base value".to_string(),
+        });
+    }
+    let unit = if dims.is_none() {
+        "rad".to_string()
+    } else {
+        dims.unit_string()
+    };
+    let text = format!("{value:?}{unit}");
+    let parsed = fs_qty::parse::parse_qty_with_budget(&text, fs_qty::parse::ParseBudget::DEFAULT)
+        .map_err(|error| IrError {
+        span,
+        kind: IrErrorKind::BadQuantity,
+        detail: format!("dimension vector has no canonical fs-qty encoding: {error}"),
+        hint: "keep every base-unit exponent within fs-qty's supported range".to_string(),
+    })?;
+    if parsed.value.to_bits() != value.to_bits() || parsed.dims != dims {
+        return Err(IrError {
+            span,
+            kind: IrErrorKind::BadQuantity,
+            detail: "canonical quantity encoding changed its value or dimensions".to_string(),
+            hint: "report this fs-qty canonicalization defect".to_string(),
+        });
+    }
+    Ok(text)
+}
+
+fn is_atom_delimiter(byte: u8) -> bool {
+    byte.is_ascii_whitespace() || matches!(byte, b'(' | b')' | b'"' | b';')
+}
+
+fn valid_keyword(keyword: &str) -> bool {
+    !keyword.is_empty() && !keyword.bytes().any(is_atom_delimiter)
+}
+
+fn valid_symbol(symbol: &str) -> bool {
+    if symbol.is_empty()
+        || symbol.bytes().any(is_atom_delimiter)
+        || symbol.starts_with(':')
+        || symbol.starts_with("0x")
+        || symbol.starts_with("0X")
+    {
+        return false;
+    }
+    let bytes = symbol.as_bytes();
+    let digit_at = |index: usize| bytes.get(index).is_some_and(u8::is_ascii_digit);
+    let numeric_lead = digit_at(0)
+        || ((bytes[0] == b'-' || bytes[0] == b'+')
+            && (digit_at(1) || (bytes.get(1) == Some(&b'.') && digit_at(2))))
+        || (bytes[0] == b'.' && digit_at(1));
+    !numeric_lead
 }

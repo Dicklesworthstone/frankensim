@@ -93,7 +93,7 @@ fn ir_002_sexpr_json_ast_isomorphism_property() {
     for round in 0..200 {
         let node = gen_node(&mut seed, 0);
         // s-expr round trip.
-        let s = sexpr::print(&node);
+        let s = sexpr::print(&node).expect("generated AST is valid");
         let back = sexpr::parse(&s)
             .unwrap_or_else(|e| panic!("round {round}: sexpr reparse failed: {e}\nsrc: {s}"));
         assert!(
@@ -101,7 +101,7 @@ fn ir_002_sexpr_json_ast_isomorphism_property() {
             "round {round}: sexpr shape drift\nsrc: {s}"
         );
         // JSON round trip.
-        let j = json::print(&node);
+        let j = json::print(&node).expect("generated AST is valid");
         let back = json::parse(&j)
             .unwrap_or_else(|e| panic!("round {round}: json reparse failed: {e}\nsrc: {j}"));
         assert!(
@@ -109,14 +109,16 @@ fn ir_002_sexpr_json_ast_isomorphism_property() {
             "round {round}: json shape drift\nsrc: {j}"
         );
         // Cross-syntax: sexpr → AST → json → AST → sexpr → AST.
-        let cross = sexpr::parse(&sexpr::print(&json::parse(&json::print(&node)).unwrap()))
-            .expect("cross-syntax reparse");
+        let json_bytes = json::print(&node).expect("generated AST is valid");
+        let json_node = json::parse(&json_bytes).expect("JSON reparse");
+        let sexpr_bytes = sexpr::print(&json_node).expect("JSON AST is valid");
+        let cross = sexpr::parse(&sexpr_bytes).expect("cross-syntax reparse");
         assert!(cross.same_shape(&node), "round {round}: cross-syntax drift");
     }
     // The fixtures survive the full cross-syntax cycle too.
     for src in [SPOUT, FRAME] {
         let ast = sexpr::parse(src).unwrap();
-        let cycled = json::parse(&json::print(&ast)).unwrap();
+        let cycled = json::parse(&json::print(&ast).expect("fixture AST is valid")).unwrap();
         assert!(cycled.same_shape(&ast), "fixture cross-syntax drift");
     }
     verdict(
@@ -203,7 +205,7 @@ fn ir_005_verb_lowering_is_explicit_and_inspectable() {
                (simulate-pour vessel fluid schedule))";
     let ast = sexpr::parse(src).unwrap();
     let lowered = lower(&ast).expect("lowering succeeds");
-    let printed = sexpr::print(&lowered.node);
+    let printed = sexpr::print(&lowered.node).expect("lowered AST is valid");
     // The shorthand is gone; the explicit ops and injected defaults are in.
     assert!(!printed.contains("optimize-shape"));
     assert!(printed.contains("ascent.optimize"));
@@ -283,20 +285,23 @@ fn ir_0xx_exact_count_literals_survive_admission_and_identity() {
         "2^53 and 2^53+1 bytes must be distinct identities"
     );
     // Canonical print preserves the exact digits (identity binding).
-    assert_eq!(sexpr::print(&hi), "9007199254740993B");
     assert_eq!(
-        json::print(&hi),
+        sexpr::print(&hi).expect("count AST is valid"),
+        "9007199254740993B"
+    );
+    assert_eq!(
+        json::print(&hi).expect("count AST is valid"),
         "{\"c\":\"9007199254740993B\"}",
         "exact digits bind into the JSON identity too"
     );
     // Round trips are lossless in both syntaxes.
     assert!(
-        sexpr::parse(&sexpr::print(&hi))
+        sexpr::parse(&sexpr::print(&hi).expect("count AST is valid"))
             .expect("reparse")
             .same_shape(&hi)
     );
     assert!(
-        json::parse(&json::print(&hi))
+        json::parse(&json::print(&hi).expect("count AST is valid"))
             .expect("reparse")
             .same_shape(&hi)
     );
@@ -348,9 +353,9 @@ fn ir_0xx_exact_count_literals_survive_admission_and_identity() {
     };
     assert!(matches!(value, CountValue::Fractional(_)));
     assert_eq!(value.integral_bytes(*unit), Some(3 << 29));
-    assert_eq!(sexpr::print(&frac), "15e-1GiB");
+    assert_eq!(sexpr::print(&frac).expect("count AST is valid"), "15e-1GiB");
     assert!(
-        sexpr::parse(&sexpr::print(&frac))
+        sexpr::parse(&sexpr::print(&frac).expect("count AST is valid"))
             .expect("decimal canonical reparse")
             .same_shape(&frac)
     );
@@ -360,7 +365,7 @@ fn ir_0xx_exact_count_literals_survive_admission_and_identity() {
     };
     assert_eq!(value.integral_bytes(*unit), Some(1_000));
     assert!(
-        json::parse(&json::print(&exponent))
+        json::parse(&json::print(&exponent).expect("count AST is valid"))
             .expect("exponent JSON reparse")
             .same_shape(&exponent)
     );
@@ -415,8 +420,8 @@ fn ir_006_version_pinning_round_trips() {
     let src = "(study \"v\" (seed 0x2) (versions (constellation :lock \"2026-07\")))";
     let ast = sexpr::parse(src).unwrap();
     // Through BOTH syntaxes, the pin survives verbatim.
-    let via_json = json::parse(&json::print(&ast)).unwrap();
-    let via_sexpr = sexpr::parse(&sexpr::print(&via_json)).unwrap();
+    let via_json = json::parse(&json::print(&ast).expect("fixture AST is valid")).unwrap();
+    let via_sexpr = sexpr::parse(&sexpr::print(&via_json).expect("JSON AST is valid")).unwrap();
     let study = Study::from_node(&via_sexpr).unwrap();
     assert_eq!(study.constellation_lock(), Some("2026-07"));
 
@@ -498,6 +503,70 @@ fn ir_006b_quantity_budget_refusal_is_bounded_and_deterministic() {
         "ir-006b",
         "fs-ir explicitly uses the bounded fs-qty entry point and retains bounded deterministic diagnostics",
     );
+}
+
+#[test]
+fn ir_006c_json_numbers_and_strings_are_strict_rfc_8259() {
+    for source in [
+        r#"{"f":0}"#,
+        r#"{"f":-0}"#,
+        r#"{"f":1}"#,
+        r#"{"f":0.1}"#,
+        r#"{"f":1e2}"#,
+        r#"{"f":1E+2}"#,
+        r#"{"f":1e-2}"#,
+    ] {
+        let node = json::parse(source).unwrap_or_else(|error| panic!("{source}: {error}"));
+        let first = json::print_checked(&node).expect("canonical JSON");
+        let second = json::print_checked(&json::parse(&first).expect("canonical reparse"))
+            .expect("canonical JSON");
+        assert_eq!(first, second, "canonical bytes must be idempotent");
+    }
+
+    for source in [
+        r#"{"f":+1}"#,
+        r#"{"f":01}"#,
+        r#"{"f":-01}"#,
+        r#"{"f":.1}"#,
+        r#"{"f":1.}"#,
+        r#"{"f":1e}"#,
+        r#"{"f":1e+}"#,
+        r#"{"f":--1}"#,
+        r#"{"f":1e9999}"#,
+    ] {
+        let error = json::parse(source).expect_err("non-RFC/nonfinite number must refuse");
+        assert_eq!(error.kind.code(), "IrBadNumber", "{source}: {error}");
+    }
+    let leading_zero = r#"{"f":01}"#;
+    let error = json::parse(leading_zero).expect_err("leading zero must refuse");
+    assert_eq!(&leading_zero[error.span.start..error.span.end], "01");
+
+    let escaped = json::parse(r#"{"s":"line\n\t\r\b\f"}"#).expect("escaped controls parse");
+    assert!(matches!(escaped.kind, NodeKind::Str(_)));
+    let rocket = json::parse(r#"{"s":"\uD83D\uDE80"}"#).expect("surrogate pair parses");
+    assert!(matches!(&rocket.kind, NodeKind::Str(text) if text == "🚀"));
+    for source in [
+        r#"{"s":"\uD83D"}"#,
+        r#"{"s":"\uDE80"}"#,
+        r#"{"s":"\uD83D\u0041"}"#,
+    ] {
+        assert_eq!(
+            json::parse(source)
+                .expect_err("unpaired surrogate must refuse")
+                .kind
+                .code(),
+            "IrBadEscape"
+        );
+    }
+    let raw_control = "{\"s\":\"line\nbreak\"}";
+    let error = json::parse(raw_control).expect_err("raw JSON control must refuse");
+    assert_eq!(error.kind.code(), "IrJsonSyntax");
+    assert_eq!(&raw_control[error.span.start..error.span.end], "\n");
+
+    for source in [r#"{"sym":"1"}"#, r#"{"kw":""}"#] {
+        let error = json::parse(source).expect_err("cross-syntax-invalid atom must refuse");
+        assert!(error.detail.contains("invalid AST at $"));
+    }
 }
 
 // ---------------------------------------------------------------------------

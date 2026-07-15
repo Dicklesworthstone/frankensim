@@ -10,7 +10,7 @@
 //! Comments run `;` to end of line. Recursion depth is capped: adversarial
 //! nesting is a structured rejection, not a stack overflow (fuzz law).
 
-use crate::ast::{CountUnit, Node, NodeKind, Span};
+use crate::ast::{CountUnit, Node, NodeKind, Span, canonical_quantity_text};
 use crate::{IrError, IrErrorKind};
 
 /// Maximum nesting depth (structured rejection beyond — G0 fuzz law).
@@ -37,6 +37,7 @@ pub fn parse(src: &str) -> Result<Node, IrError> {
             hint: "a program is exactly one form; wrap multiple forms in (study ...)".to_string(),
         });
     }
+    node.validate()?;
     Ok(node)
 }
 
@@ -340,16 +341,26 @@ fn classify_numeric(text: &str, span: Span) -> Result<Node, IrError> {
     }
 }
 
-/// Print a node in canonical s-expression form; `parse(print(x))` has the
-/// same shape as `x` (round-trip law).
-#[must_use]
-pub fn print(node: &Node) -> String {
-    let mut out = String::new();
-    print_into(node, &mut out);
-    out
+/// Validate and print a node in canonical s-expression form.
+///
+/// # Errors
+/// Rejects the first invalid atom with its source span and exact tree path.
+pub fn print(node: &Node) -> Result<String, IrError> {
+    print_checked(node)
 }
 
-fn print_into(node: &Node, out: &mut String) {
+/// Validate and print one canonical s-expression.
+///
+/// # Errors
+/// Rejects the first invalid atom with its source span and exact tree path.
+pub fn print_checked(node: &Node) -> Result<String, IrError> {
+    node.validate()?;
+    let mut out = String::new();
+    print_into(node, &mut out)?;
+    Ok(out)
+}
+
+fn print_into(node: &Node, out: &mut String) -> Result<(), IrError> {
     use std::fmt::Write as _;
     match &node.kind {
         NodeKind::Int(i) => {
@@ -358,7 +369,9 @@ fn print_into(node: &Node, out: &mut String) {
         NodeKind::Float(f) => {
             let _ = write!(out, "{f:?}");
         }
-        NodeKind::Qty { text, .. } => out.push_str(text),
+        NodeKind::Qty { value, dims, .. } => {
+            out.push_str(&canonical_quantity_text(*value, *dims, node.span)?);
+        }
         NodeKind::Count { value, unit } => match value {
             crate::ast::CountValue::Exact(v) => {
                 let _ = write!(out, "{v}{}", unit.suffix());
@@ -394,9 +407,10 @@ fn print_into(node: &Node, out: &mut String) {
                 if i > 0 {
                     out.push(' ');
                 }
-                print_into(item, out);
+                print_into(item, out)?;
             }
             out.push(')');
         }
     }
+    Ok(())
 }

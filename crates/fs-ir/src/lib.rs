@@ -56,13 +56,25 @@ pub struct VersionedProgram {
 }
 
 impl VersionedProgram {
-    /// Bind a program to the language version written by this build.
+    /// Bind a trusted program to the language version written by this build.
+    ///
+    /// This compatibility constructor panics for a caller-forged invalid AST.
+    /// New boundary code should use [`VersionedProgram::try_current`].
     #[must_use]
     pub fn current(program: Node) -> Self {
-        Self {
+        Self::try_current(program).expect("invalid AST passed to VersionedProgram::current")
+    }
+
+    /// Validate a program and bind it to the current language version.
+    ///
+    /// # Errors
+    /// Rejects the first invalid AST atom with its exact tree path and span.
+    pub fn try_current(program: Node) -> Result<Self, IrError> {
+        program.validate()?;
+        Ok(Self {
             version: IR_VERSION,
             program,
-        }
+        })
     }
 
     /// Parse and enforce a canonical s-expression envelope.
@@ -88,6 +100,7 @@ impl VersionedProgram {
     /// # Errors
     /// Malformed envelopes and unsupported language versions refuse.
     pub fn from_envelope(node: Node) -> Result<Self, IrError> {
+        node.validate()?;
         let envelope_span = node.span;
         let NodeKind::List(mut items) = node.kind else {
             return Err(version_envelope_error(envelope_span));
@@ -144,13 +157,31 @@ impl VersionedProgram {
     /// Canonical version-bound s-expression.
     #[must_use]
     pub fn print_sexpr(&self) -> String {
-        sexpr::print(&self.envelope_node())
+        self.print_sexpr_checked()
+            .expect("VersionedProgram contains an invalid AST")
+    }
+
+    /// Checked canonical version-bound s-expression.
+    ///
+    /// # Errors
+    /// Refuses an invalid program AST rather than emitting ambiguous bytes.
+    pub fn print_sexpr_checked(&self) -> Result<String, IrError> {
+        sexpr::print_checked(&self.envelope_node())
     }
 
     /// Canonical version-bound JSON mapping.
     #[must_use]
     pub fn print_json(&self) -> String {
-        json::print(&self.envelope_node())
+        self.print_json_checked()
+            .expect("VersionedProgram contains an invalid AST")
+    }
+
+    /// Checked canonical version-bound JSON mapping.
+    ///
+    /// # Errors
+    /// Refuses an invalid program AST rather than emitting ambiguous bytes.
+    pub fn print_json_checked(&self) -> Result<String, IrError> {
+        json::print_checked(&self.envelope_node())
     }
 
     fn envelope_node(&self) -> Node {

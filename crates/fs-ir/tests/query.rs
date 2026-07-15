@@ -5,9 +5,9 @@
 //! dimensional consistency is enforced; admission is deterministic; and the
 //! `(query …)` IR surface round-trips under `same_shape`.
 
-use fs_ir::Node;
 use fs_ir::admission::Severity;
 use fs_ir::query::{FieldRegistry, Qoi, Query, Target};
+use fs_ir::{Node, NodeKind, Span, json, sexpr};
 use fs_qty::Dims;
 
 // von Mises stress: Pa = kg·m⁻¹·s⁻²  → [M,KG,S,K,A,MOL]
@@ -323,7 +323,7 @@ fn admission_is_deterministic() {
 #[test]
 fn tolerance_query_round_trips_through_ir() {
     let q = ok_max_query();
-    let node = q.to_node();
+    let node = q.to_node().expect("query serializes");
     let back = Query::from_node(&node).expect("query parses");
     assert_eq!(back.qoi, q.qoi);
     assert_eq!(back.target, q.target);
@@ -331,7 +331,7 @@ fn tolerance_query_round_trips_through_ir() {
     assert_eq!(back.budget_usd.to_bits(), q.budget_usd.to_bits());
     assert_eq!(back.deadline_s.to_bits(), q.deadline_s.to_bits());
     // and the emitted node equals a re-emission (same_shape isomorphism).
-    assert!(node.same_shape(&back.to_node()));
+    assert!(node.same_shape(&back.to_node().expect("query reserializes")));
 }
 
 #[test]
@@ -352,7 +352,7 @@ fn exceedance_and_confidence_round_trip() {
         50.0,
         30.0,
     );
-    let back = Query::from_node(&q.to_node()).expect("parses");
+    let back = Query::from_node(&q.to_node().expect("query serializes")).expect("parses");
     assert_eq!(back.qoi, q.qoi);
     assert_eq!(back.target, q.target);
 }
@@ -368,5 +368,200 @@ fn non_query_form_is_a_teaching_error() {
         err.hint.contains("query"),
         "hint teaches the query form: {}",
         err.hint
+    );
+}
+
+fn assert_query_semantics(expected: &Query, actual: &Query) {
+    assert_eq!(actual.qoi, expected.qoi);
+    assert_eq!(actual.target, expected.target);
+    assert_eq!(actual.budget_usd.to_bits(), expected.budget_usd.to_bits());
+    assert_eq!(actual.deadline_s.to_bits(), expected.deadline_s.to_bits());
+}
+
+#[test]
+fn every_qoi_and_target_round_trips_through_both_syntaxes() {
+    let qois = [
+        Qoi::MaxOverRegion {
+            field: "vm".into(),
+            region: "bracket".into(),
+        },
+        Qoi::Integral {
+            field: "temperature".into(),
+            region: "volume".into(),
+        },
+        Qoi::Exceedance {
+            field: "vm".into(),
+            region: "bracket".into(),
+            threshold: 180.0e6,
+            threshold_dims: PA,
+            environment: "site-hazard".into(),
+        },
+    ];
+    let targets = [
+        Target::Tolerance {
+            value: 5.0e6,
+            dims: PA,
+        },
+        Target::Confidence(0.95),
+        Target::ToleranceAndConfidence {
+            value: 0.01,
+            dims: Dims::NONE,
+            confidence: 0.99,
+        },
+    ];
+
+    for qoi in qois {
+        for target in &targets {
+            let query = Query::new(qoi.clone(), target.clone(), 50.25, 30.5);
+            let node = query.to_node().expect("finite query serializes");
+            let sexpr_bytes = sexpr::print_checked(&node).expect("valid s-expression");
+            let sexpr_back = sexpr::parse(&sexpr_bytes).expect("s-expression reparses");
+            assert_query_semantics(
+                &query,
+                &Query::from_node(&sexpr_back).expect("s-expression query recognizes"),
+            );
+            let json_bytes = json::print_checked(&node).expect("valid JSON mapping");
+            let json_back = json::parse(&json_bytes).expect("JSON mapping reparses");
+            assert_query_semantics(
+                &query,
+                &Query::from_node(&json_back).expect("JSON query recognizes"),
+            );
+        }
+    }
+}
+
+#[test]
+fn query_grammar_rejects_duplicate_unknown_dangling_and_trailing_fields() {
+    let cases = [
+        (
+            "(query (max :field \"vm\" :field \"other\" :region \"r\") (confidence 0.95) (budget 50) (deadline 30s))",
+            "duplicate query.qoi.max.field",
+        ),
+        (
+            "(query (max :field \"vm\" :region \"r\" :gpu \"yes\") (confidence 0.95) (budget 50) (deadline 30s))",
+            "unknown query.qoi.max.gpu",
+        ),
+        (
+            "(query (max :field \"vm\" :region) (confidence 0.95) (budget 50) (deadline 30s))",
+            "dangling query.qoi.max.region",
+        ),
+        (
+            "(query (max :field \"vm\" :region \"r\" trailing) (confidence 0.95) (budget 50) (deadline 30s))",
+            "unexpected positional argument",
+        ),
+        (
+            "(query (max :field \"vm\" :region \"r\") (confidence 0.95 extra) (budget 50) (deadline 30s))",
+            "confidence takes exactly one",
+        ),
+        (
+            "(query (max :field \"vm\" :region \"r\") (tolerance 5MPa :confidence 0.95 :confidence 0.9) (budget 50) (deadline 30s))",
+            "duplicate query.target.tolerance.confidence",
+        ),
+        (
+            "(query (max :field \"vm\" :region \"r\") (confidence 0.95) (budget 50) (budget 60) (deadline 30s))",
+            "duplicate query.budget",
+        ),
+        (
+            "(query (max :field \"vm\" :region \"r\") (confidence 0.95) (budget 50 extra) (deadline 30s))",
+            "budget takes exactly one",
+        ),
+        (
+            "(query (max :field \"vm\" :region \"r\") (confidence 0.95) (budget 50))",
+            "missing query.deadline",
+        ),
+        (
+            "(query (max :field \"vm\" :region \"r\") (confidence 0.95) (deadline 30s) (budget 50))",
+            "exact canonical schema",
+        ),
+        (
+            "(query (max :field \"vm\" :region \"r\") (confidence 0.95) (budget 9007199254740993) (deadline 30s))",
+            "cannot be represented exactly",
+        ),
+    ];
+    for (source, expected) in cases {
+        let node = sexpr::parse(source).expect("malformed query remains valid syntax");
+        let error = Query::from_node(&node).expect_err("ambiguous query must refuse");
+        assert!(
+            error.detail.contains(expected),
+            "{source}: expected {expected:?}, got {:?}",
+            error.detail
+        );
+    }
+}
+
+#[test]
+fn forged_ast_atoms_refuse_with_exact_tree_paths() {
+    let invalid = Node {
+        kind: NodeKind::List(vec![
+            Node::synthetic(NodeKind::Symbol("query".into())),
+            Node {
+                kind: NodeKind::Float(f64::NAN),
+                span: Span::new(10, 13),
+            },
+        ]),
+        span: Span::new(0, 14),
+    };
+    let error = invalid.validate().expect_err("NaN must refuse");
+    assert_eq!(error.span, Span::new(10, 13));
+    assert!(error.detail.contains("$[1]"));
+    assert!(sexpr::print_checked(&invalid).is_err());
+    assert!(json::print_checked(&invalid).is_err());
+
+    for kind in [
+        NodeKind::Symbol("1not-a-symbol".into()),
+        NodeKind::Keyword(String::new()),
+        NodeKind::Qty {
+            value: 2.0,
+            dims: Dims([1, 0, 0, 0, 0, 0]),
+            text: "1m".into(),
+        },
+    ] {
+        assert!(Node::try_synthetic(kind).is_err());
+    }
+
+    let inverted = Node {
+        kind: NodeKind::Int(1),
+        span: Span::new(9, 4),
+    };
+    let error = inverted.validate().expect_err("inverted span must refuse");
+    assert_eq!(error.span, Span::new(4, 9));
+
+    let mut deep = Node::synthetic(NodeKind::Int(1));
+    for _ in 0..258 {
+        deep = Node::synthetic(NodeKind::List(vec![deep]));
+    }
+    assert_eq!(
+        deep.validate()
+            .expect_err("forged over-deep AST must refuse")
+            .kind
+            .code(),
+        "IrTooDeep"
+    );
+}
+
+#[test]
+fn quantity_identity_uses_one_canonical_encoder() {
+    let short = sexpr::parse("5MPa").expect("quantity parses");
+    let base = sexpr::parse("5000000Pa").expect("equivalent quantity parses");
+    assert!(short.same_shape(&base));
+    assert_eq!(
+        sexpr::print_checked(&short).expect("canonical print"),
+        sexpr::print_checked(&base).expect("canonical print")
+    );
+    assert_eq!(
+        json::print_checked(&short).expect("canonical print"),
+        json::print_checked(&base).expect("canonical print")
+    );
+
+    let dimensionless = Node::quantity(0.95, Dims::NONE).expect("canonical quantity");
+    let printed = sexpr::print_checked(&dimensionless).expect("canonical print");
+    assert!(
+        printed.ends_with("rad"),
+        "dimensionless qty stays typed: {printed}"
+    );
+    assert!(
+        sexpr::parse(&printed)
+            .expect("reparse")
+            .same_shape(&dimensionless)
     );
 }

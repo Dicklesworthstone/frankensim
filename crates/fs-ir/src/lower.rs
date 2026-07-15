@@ -166,7 +166,7 @@ fn lower_optimize_shape(node: &Node, trace: &mut Vec<LowerStep>) -> Result<Node,
         verb: "optimize-shape".to_string(),
         span: node.span,
         injected,
-        expansion: sexpr::print(&explicit),
+        expansion: sexpr::print(&explicit)?,
     });
     Ok(explicit)
 }
@@ -190,7 +190,7 @@ fn lower_simulate_pour(node: &Node, trace: &mut Vec<LowerStep>) -> Result<Node, 
         verb: "simulate-pour".to_string(),
         span: node.span,
         injected: Vec::new(),
-        expansion: sexpr::print(&explicit),
+        expansion: sexpr::print(&explicit)?,
     });
     Ok(explicit)
 }
