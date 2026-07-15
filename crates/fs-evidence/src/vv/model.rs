@@ -856,6 +856,45 @@ pub enum DomainViolation {
     },
 }
 
+impl DomainViolation {
+    fn has_same_canonical_bits(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Missing { axis: left }, Self::Missing { axis: right }) => left == right,
+            (
+                Self::Numeric {
+                    axis: left_axis,
+                    value: left_value,
+                    lo: left_lo,
+                    hi: left_hi,
+                },
+                Self::Numeric {
+                    axis: right_axis,
+                    value: right_value,
+                    lo: right_lo,
+                    hi: right_hi,
+                },
+            ) => {
+                left_axis == right_axis
+                    && left_value.to_bits() == right_value.to_bits()
+                    && left_lo.to_bits() == right_lo.to_bits()
+                    && left_hi.to_bits() == right_hi.to_bits()
+            }
+            (
+                Self::Categorical {
+                    axis: left_axis,
+                    value: left_value,
+                },
+                Self::Categorical {
+                    axis: right_axis,
+                    value: right_value,
+                },
+            ) => left_axis == right_axis && left_value == right_value,
+            (Self::Assumption { id: left }, Self::Assumption { id: right }) => left == right,
+            _ => false,
+        }
+    }
+}
+
 /// Required treatment when applicability fails.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApplicabilityPolicy {
@@ -880,6 +919,21 @@ impl ApplicabilityDecision {
                 ApplicabilityPolicy::Demote => Self::Demoted { violations },
                 ApplicabilityPolicy::Refuse => Self::Refused { violations },
             }
+        }
+    }
+
+    fn has_same_canonical_bits(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::InDomain, Self::InDomain) => true,
+            (Self::Demoted { violations: left }, Self::Demoted { violations: right })
+            | (Self::Refused { violations: left }, Self::Refused { violations: right }) => {
+                left.len() == right.len()
+                    && left
+                        .iter()
+                        .zip(right)
+                        .all(|(left, right)| left.has_same_canonical_bits(right))
+            }
+            _ => false,
         }
     }
 }
@@ -1176,13 +1230,13 @@ pub enum ValidationMetricSpec {
 }
 
 impl ValidationMetricSpec {
-    fn canonical_key(&self) -> (u8, u64) {
+    pub(super) fn canonical_key(&self) -> (u8, u64) {
         match self {
             Self::IntervalAgreement => (0, 0),
-            Self::NormalizedDiscrepancy { maximum } => (1, maximum.to_bits()),
+            Self::NormalizedDiscrepancy { maximum } => (1, canonical_float_key(*maximum)),
             Self::PosteriorPredictive {
                 minimum_tail_probability,
-            } => (2, minimum_tail_probability.to_bits()),
+            } => (2, canonical_float_key(*minimum_tail_probability)),
         }
     }
 
@@ -1209,6 +1263,10 @@ impl ValidationMetricSpec {
             )),
         }
     }
+}
+
+fn canonical_float_key(value: f64) -> u64 {
+    if value == 0.0 { 0 } else { value.to_bits() }
 }
 
 /// Per-QoI validation plan row.
@@ -5075,7 +5133,7 @@ impl VvCase {
                 violations: domain_violations,
             }
         };
-        if prediction.applicability != expected {
+        if !prediction.applicability.has_same_canonical_bits(&expected) {
             violations.push(VvViolation::new(
                 VvRule::ApplicabilityDecision,
                 Some(prediction.id().as_str().to_owned()),

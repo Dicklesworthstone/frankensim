@@ -171,6 +171,8 @@ struct CaseKnobs {
     origin: OriginKind,
     failing_diagnostic: Option<VvRule>,
     outside_domain: bool,
+    context_domain_lo: f64,
+    reported_domain_lo: Option<f64>,
     failing_assumption: Option<&'static str>,
     force_in_domain_claim: bool,
     process_as_uncertainty: bool,
@@ -184,6 +186,8 @@ impl Default for CaseKnobs {
             origin: OriginKind::Physical,
             failing_diagnostic: None,
             outside_domain: false,
+            context_domain_lo: 1.0,
+            reported_domain_lo: None,
             failing_assumption: None,
             force_in_domain_claim: false,
             process_as_uncertainty: false,
@@ -231,8 +235,13 @@ fn closed_case(knobs: CaseKnobs) -> VvCase {
     let regime_axis = axis_id("regime");
     let applicability = ApplicabilityDomain::try_new(
         vec![
-            NumericDomainAxis::try_new(re_axis.clone(), unit_id("unitless"), 1.0, 10.0)
-                .expect("numeric applicability fixture"),
+            NumericDomainAxis::try_new(
+                re_axis.clone(),
+                unit_id("unitless"),
+                knobs.context_domain_lo,
+                10.0,
+            )
+            .expect("numeric applicability fixture"),
         ],
         vec![
             CategoricalDomainAxis::try_new(
@@ -478,7 +487,7 @@ fn closed_case(knobs: CaseKnobs) -> VvCase {
         domain_violations.push(DomainViolation::Numeric {
             axis: re_axis,
             value: 20.0,
-            lo: 1.0,
+            lo: knobs.reported_domain_lo.unwrap_or(knobs.context_domain_lo),
             hi: 10.0,
         });
     }
@@ -1033,6 +1042,113 @@ fn canonical_case_decode_refuses_forged_derived_applicability() {
         error.to_string().contains("vv-applicability-decision"),
         "semantic refusal must preserve the governing rule: {error}"
     );
+}
+
+#[test]
+fn derived_applicability_refuses_signed_zero_aliases() {
+    let honest = closed_case(CaseKnobs {
+        outside_domain: true,
+        context_domain_lo: 0.0,
+        ..CaseKnobs::default()
+    });
+    honest
+        .validate()
+        .expect("bit-exact derived applicability remains valid");
+
+    let forged = closed_case(CaseKnobs {
+        outside_domain: true,
+        context_domain_lo: 0.0,
+        reported_domain_lo: Some(-0.0),
+        ..CaseKnobs::default()
+    });
+    assert_rule(forged.validate(), VvRule::ApplicabilityDecision);
+
+    let bytes = forged
+        .canonical_bytes()
+        .expect("signed-zero alias remains structurally encodable");
+    let error = VvCase::from_canonical_bytes(&bytes)
+        .expect_err("canonical decode must reject a derived signed-zero alias");
+    assert_eq!(error.rule_name(), "vv-canonical-identity");
+    assert!(
+        error.to_string().contains("vv-applicability-decision"),
+        "semantic refusal must preserve the governing rule: {error}"
+    );
+}
+
+#[test]
+fn validation_metric_specs_refuse_signed_zero_duplicates_and_noncanonical_order() {
+    let experiment_ref = reference(ArtifactKind::ExperimentArtifact, "experiment-1");
+    let split_ref = reference(ArtifactKind::CalibrationSplit, "split-1");
+    assert_rule(
+        QoiValidationPlan::try_new(
+            qoi_id("length"),
+            vec![experiment_ref.clone()],
+            split_ref.clone(),
+            vec![
+                ValidationMetricSpec::NormalizedDiscrepancy { maximum: 0.0 },
+                ValidationMetricSpec::NormalizedDiscrepancy { maximum: 1.0 },
+                ValidationMetricSpec::NormalizedDiscrepancy { maximum: -0.0 },
+            ],
+            diagnostic_plan(None),
+        ),
+        VvRule::ValidationMetricUncertainty,
+    );
+
+    let negative_zero = QoiValidationPlan::try_new(
+        qoi_id("length"),
+        vec![experiment_ref.clone()],
+        split_ref.clone(),
+        vec![ValidationMetricSpec::NormalizedDiscrepancy { maximum: -0.0 }],
+        diagnostic_plan(None),
+    )
+    .expect("one exact negative-zero threshold remains representable");
+    let ValidationMetricSpec::NormalizedDiscrepancy { maximum } = &negative_zero.metrics()[0]
+    else {
+        panic!("fixture must retain its normalized-discrepancy metric");
+    };
+    assert_eq!(maximum.to_bits(), (-0.0f64).to_bits());
+
+    let row = QoiValidationPlan::try_new(
+        qoi_id("length"),
+        vec![experiment_ref],
+        split_ref,
+        vec![
+            ValidationMetricSpec::NormalizedDiscrepancy { maximum: 0.0 },
+            ValidationMetricSpec::NormalizedDiscrepancy { maximum: 1.0 },
+            ValidationMetricSpec::NormalizedDiscrepancy { maximum: 2.0 },
+        ],
+        diagnostic_plan(None),
+    )
+    .expect("canonical metric fixture");
+    let plan = ValidationPlan::try_new(
+        header("validation-plan-zero", "unitless"),
+        reference(ArtifactKind::ContextOfUse, "context-1"),
+        vec![row],
+    )
+    .expect("validation plan fixture");
+    let mut bytes = plan.canonical_bytes().expect("canonical validation plan");
+    let mut encoded_metric_tail = Vec::new();
+    encoded_metric_tail.push(1);
+    encoded_metric_tail.extend_from_slice(&1.0f64.to_bits().to_le_bytes());
+    encoded_metric_tail.push(1);
+    encoded_metric_tail.extend_from_slice(&2.0f64.to_bits().to_le_bytes());
+    let offsets = bytes
+        .windows(encoded_metric_tail.len())
+        .enumerate()
+        .filter_map(|(offset, window)| (window == encoded_metric_tail.as_slice()).then_some(offset))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        offsets.len(),
+        1,
+        "fixture must expose one threshold to mutate"
+    );
+    let encoded_two_offset = offsets[0] + 1 + std::mem::size_of::<f64>() + 1;
+    bytes[encoded_two_offset..encoded_two_offset + std::mem::size_of::<f64>()]
+        .copy_from_slice(&(-0.0f64).to_bits().to_le_bytes());
+
+    let error = ValidationPlan::from_canonical_bytes(&bytes)
+        .expect_err("decoder must reject a signed-zero alias out of semantic order");
+    assert_eq!(error.rule_name(), "vv-canonical-identity");
 }
 
 #[test]

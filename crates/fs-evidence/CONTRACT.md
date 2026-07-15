@@ -334,7 +334,10 @@ fixed-order and length-framed; maps/sets use canonical ordering; floating-point
 values preserve their exact IEEE-754 bits. Decoding caps total bytes, counts,
 nesting, and string sizes, and refuses unknown tags, invalid UTF-8, duplicate or
 out-of-order keys, non-canonical encodings, and trailing bytes. An accepted
-decode must re-encode byte-identically. The admission receipt binds the schema
+decode must re-encode byte-identically. Caller-retained applicability decisions
+must also match recomputed numeric violations bit-for-bit, and signed-zero
+metric thresholds share one semantic ordering key so aliases cannot evade
+duplicate detection. The admission receipt binds the schema
 version, artifact content identity, QoI/context identity, and validation-rule
 version; it proves that those structural rules ran, not that referenced
 experimental evidence is authentic or scientifically sufficient.

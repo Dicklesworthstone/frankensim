@@ -1195,16 +1195,6 @@ fn encode_validation_metric_spec(
     }
 }
 
-fn validation_metric_spec_key(value: &ValidationMetricSpec) -> (u8, u64) {
-    match value {
-        ValidationMetricSpec::IntervalAgreement => (0, 0),
-        ValidationMetricSpec::NormalizedDiscrepancy { maximum } => (1, maximum.to_bits()),
-        ValidationMetricSpec::PosteriorPredictive {
-            minimum_tail_probability,
-        } => (2, minimum_tail_probability.to_bits()),
-    }
-}
-
 fn decode_validation_metric_spec(
     decoder: &mut Decoder<'_>,
 ) -> Result<ValidationMetricSpec, VvCodecError> {
@@ -1260,13 +1250,15 @@ fn decode_qoi_validation_plan(
     }
     let split = decode_artifact_ref(decoder)?;
     let count = decoder.count()?;
-    let mut metrics = bounded_vec(decoder, count, "validation metric specifications")?;
+    let mut metrics: Vec<ValidationMetricSpec> =
+        bounded_vec(decoder, count, "validation metric specifications")?;
     for _ in 0..count {
         let offset = decoder.position();
         let metric = decode_validation_metric_spec(decoder)?;
-        if metrics.last().is_some_and(|previous| {
-            validation_metric_spec_key(previous) >= validation_metric_spec_key(&metric)
-        }) {
+        if metrics
+            .last()
+            .is_some_and(|previous| previous.canonical_key() >= metric.canonical_key())
+        {
             return Err(VvCodecError::at(
                 offset,
                 "validation metric specifications are duplicated or out of canonical order",
