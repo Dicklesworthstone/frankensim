@@ -200,7 +200,13 @@ bitwise parity between budgeted and classic construction/eigensolve/
 root paths; real cancellation with deterministic resume equivalence
 and empty-prefix refusal; typed `Unresolved`/`NonFinite` refusals where
 the classic API panics; same-profile receipt determinism. Cross-ISA G5
-evidence remains pending as stated above.
+evidence remains pending as stated above. Slice-2/3 cases
+cb-007..cb-009: colleague admission boundaries + bitwise budgeted/
+classic candidate parity + pre-eigen cancellation drain; admission
+tables for Cheb2/Fourier/Orr-Sommerfeld incl. typed shape refusals and
+huge requests; budgeted builder twins (Fourier bitwise mirror with
+typed non-finite/shape refusals, Cheb2 and OS admission-gated wrappers
+with boundary drains, solver failures mapped to `Numerical`).
 
 ## Variants (bead kw89)
 
@@ -264,15 +270,17 @@ structs.
   refuse the shape violations the classic constructors panic on), and
   the heaviest paths have Cx-threaded budgeted twins (adaptive build,
   Dirichlet eigensolve, sign-grid root scan, colleague candidates).
-  `colleague_roots_budgeted` polls at the boundaries AROUND the
-  admission-bounded eigen tile — the tile itself is one
-  non-preemptible unit, and the classic path's numeric-evidence
-  asserts (exponent-span normalization, fixture-scale eigensolver
-  convergence) are retained inside it. Cx-threaded twins for
-  `Cheb2::build`, `FourierSeries::build`, `growth_rates`, algebra
-  (`add`/`mul`), and calculus remain the bead's outstanding scope; the
-  classic APIs keep their panicking contracts unchanged for existing
-  callers.
+  `colleague_roots_budgeted`, `cheb2_build_budgeted`, and
+  `growth_rates_budgeted` poll at the boundaries AROUND their
+  admission-bounded tiles — each tile is one non-preemptible unit whose
+  classic path runs unchanged inside, numeric-evidence asserts
+  (exponent-span normalization, non-finite samples, zero pivots,
+  fixture-scale eigensolver convergence) retained and documented;
+  `fourier_build_budgeted` is a faithful fallible MIRROR (bitwise
+  spectrum parity, typed non-finite/shape refusals, 4096-sample polls).
+  Algebra (`add`/`mul`) and calculus budgeting remain the bead's
+  outstanding scope; the classic APIs keep their panicking contracts
+  unchanged for existing callers.
 - The abstract op counts in receipts are ADMITTED worst-case bounds,
   not measured cycle counts; no performance claim is attached.
 - `EigsRun` values are fixed-sweep estimates. `Complete` means all

@@ -537,3 +537,109 @@ fn cb_008_remaining_module_admissions() {
         Err(ChebError::Overflow { .. }) | Err(ChebError::CapExceeded { .. })
     ));
 }
+
+/// cb-009 — slice-3 budgeted builder twins: the Fourier mirror is
+/// bitwise-identical with typed refusals where the classic API panics;
+/// the Cheb2 and Orr–Sommerfeld wrappers admit, drain at their tile
+/// boundaries, and map solver failures to typed errors.
+#[test]
+fn cb_009_budgeted_builder_twins() {
+    with_cx(false, |cx| {
+        // Fourier: bitwise mirror parity.
+        let wave = |theta: f64| fs_math::det::sin(theta) + 0.25 * fs_math::det::cos(3.0 * theta);
+        let classic = fs_cheb::fourier::FourierSeries::build(&wave, 64);
+        let budgeted = fs_cheb::fourier_build_budgeted(&wave, 64, &ChebBudget::default(), cx)
+            .expect("admitted synthesis");
+        assert_eq!(budgeted.n, classic.n);
+        assert_eq!(budgeted.coeffs.len(), classic.coeffs.len());
+        for (lhs, rhs) in budgeted.coeffs.iter().zip(&classic.coeffs) {
+            assert_eq!(lhs.re.to_bits(), rhs.re.to_bits(), "spectrum bit parity");
+            assert_eq!(lhs.im.to_bits(), rhs.im.to_bits(), "spectrum bit parity");
+        }
+        // Typed refusals where the classic API panics.
+        assert!(matches!(
+            fs_cheb::fourier_build_budgeted(&wave, 100, &ChebBudget::default(), cx),
+            Err(ChebError::Shape { .. })
+        ));
+        // theta = 0 IS the k = 0 sample point, so the pole is hit
+        // exactly and the refusal is deterministic.
+        let singular = |theta: f64| 1.0 / theta;
+        assert!(matches!(
+            fs_cheb::fourier_build_budgeted(&singular, 64, &ChebBudget::default(), cx),
+            Err(ChebError::NonFinite { .. })
+        ));
+
+        // Cheb2: admitted wrapper matches the classic factors bitwise.
+        let f2 = |x: f64, y: f64| fs_math::det::sin(2.0 * x) * fs_math::det::cos(y);
+        let classic2 = fs_cheb::cheb2::Cheb2::build(&f2, (0.0, 1.0, 0.0, 2.0), 1e-10, 6, 64);
+        let budgeted2 = fs_cheb::cheb2_build_budgeted(
+            &f2,
+            (0.0, 1.0, 0.0, 2.0),
+            1e-10,
+            6,
+            64,
+            &ChebBudget::default(),
+            cx,
+        )
+        .expect("admitted 2D build");
+        assert_eq!(budgeted2.rank(), classic2.rank());
+        assert_eq!(
+            budgeted2.residual.to_bits(),
+            classic2.residual.to_bits(),
+            "accuracy ledger bit parity"
+        );
+
+        // Orr–Sommerfeld: parity with the classic solver + typed
+        // parameter refusal.
+        let classic_os =
+            fs_cheb::orr_sommerfeld::growth_rates(5772.0, 1.02, 32, 3).expect("classic OS");
+        let budgeted_os =
+            fs_cheb::growth_rates_budgeted(5772.0, 1.02, 32, 3, &ChebBudget::default(), cx)
+                .expect("admitted OS");
+        assert_eq!(budgeted_os.len(), classic_os.len());
+        for (lhs, rhs) in budgeted_os.iter().zip(&classic_os) {
+            assert_eq!(lhs.re.to_bits(), rhs.re.to_bits(), "growth-rate bit parity");
+            assert_eq!(lhs.im.to_bits(), rhs.im.to_bits(), "growth-rate bit parity");
+        }
+        assert!(matches!(
+            fs_cheb::growth_rates_budgeted(f64::NAN, 1.02, 32, 3, &ChebBudget::default(), cx),
+            Err(ChebError::NonFinite { .. })
+        ));
+    });
+
+    // Cancellation drains for all three twins (pre-cancelled gates).
+    let wave = |theta: f64| fs_math::det::sin(theta);
+    let f2 = |x: f64, y: f64| x + y;
+    assert!(matches!(
+        with_cx(true, |cx| fs_cheb::fourier_build_budgeted(
+            &wave,
+            64,
+            &ChebBudget::default(),
+            cx
+        )),
+        Err(ChebError::Cancelled)
+    ));
+    assert!(matches!(
+        with_cx(true, |cx| fs_cheb::cheb2_build_budgeted(
+            &f2,
+            (0.0, 1.0, 0.0, 1.0),
+            1e-10,
+            4,
+            64,
+            &ChebBudget::default(),
+            cx
+        )),
+        Err(ChebError::Cancelled)
+    ));
+    assert!(matches!(
+        with_cx(true, |cx| fs_cheb::growth_rates_budgeted(
+            5772.0,
+            1.02,
+            32,
+            3,
+            &ChebBudget::default(),
+            cx
+        )),
+        Err(ChebError::Cancelled)
+    ));
+}

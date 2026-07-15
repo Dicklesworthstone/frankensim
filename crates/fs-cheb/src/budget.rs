@@ -1435,3 +1435,128 @@ pub fn colleague_roots_budgeted(
     }
     Ok(roots)
 }
+
+// ---------------------------------------------------------------------------
+// Slice 3 (bead sj31i.55): budgeted twins for the remaining builders.
+// The Fourier twin is a faithful fallible mirror (public-field type,
+// bitwise-identical sample/transform sequence); the Cheb2 and
+// Orr–Sommerfeld twins follow the colleague precedent — admission gates
+// the tile, polls drain at its boundaries, and the classic path runs
+// unchanged between them with its numeric-evidence asserts retained
+// and documented.
+// ---------------------------------------------------------------------------
+
+/// Budgeted, cancellable, FALLIBLE Fourier synthesis. Admission
+/// preflights the transform; the sample loop polls every 4096 samples
+/// and refuses non-finite samples typed (the classic API panics); the
+/// spectrum is computed by the same radix-2 transform with the same
+/// scaling, so happy-path coefficients are bitwise-identical to
+/// [`crate::fourier::FourierSeries::build`].
+///
+/// # Errors
+/// [`ChebError`] — shape/cap refusals before any sampling,
+/// [`ChebError::NonFinite`] on an unrepresentable sample,
+/// [`ChebError::Cancelled`] at a drain boundary.
+pub fn fourier_build_budgeted<F: Fn(f64) -> f64>(
+    f: &F,
+    n: usize,
+    budget: &ChebBudget,
+    cx: &Cx<'_>,
+) -> Result<crate::fourier::FourierSeries, ChebError> {
+    let _admission = admit_fourier_build(n, budget)?;
+    let mut samples = Vec::with_capacity(n);
+    for k in 0..n {
+        // Bounded tile boundary: one poll per 4096 samples (and one
+        // before the first sample is drawn).
+        if k % 4096 == 0 && cx.checkpoint().is_err() {
+            return Err(ChebError::Cancelled);
+        }
+        let y = f(std::f64::consts::TAU * k as f64 / n as f64);
+        if !y.is_finite() {
+            return Err(ChebError::NonFinite {
+                what: "Fourier sample",
+            });
+        }
+        samples.push(y);
+    }
+    if cx.checkpoint().is_err() {
+        return Err(ChebError::Cancelled);
+    }
+    let fft = fs_fft::RealFft::new(n);
+    let spec = fft.forward(&samples);
+    let scale = 1.0 / n as f64;
+    let coeffs: Vec<fs_math::c64::C64> = spec
+        .into_iter()
+        .map(|c| fs_math::c64::C64::new(c.re * scale, c.im * scale))
+        .collect();
+    Ok(crate::fourier::FourierSeries { coeffs, n })
+}
+
+/// Budgeted, cancellable 2D low-rank construction. Admission gates the
+/// deterministic sample grid, ACA sweep work, and retained slice
+/// coefficients BEFORE allocation; polls drain at the boundaries
+/// around the (admission-bounded) build tile, whose classic path runs
+/// unchanged — its numeric-evidence asserts (non-finite samples, zero
+/// pivots, factor invariants) are retained this slice and documented
+/// in the contract.
+///
+/// # Errors
+/// [`ChebError`] — domain/shape/cap refusals before any work, or
+/// [`ChebError::Cancelled`] at a drain boundary.
+pub fn cheb2_build_budgeted<F: Fn(f64, f64) -> f64>(
+    f: &F,
+    domain: (f64, f64, f64, f64),
+    tol: f64,
+    max_rank: usize,
+    max_degree: usize,
+    budget: &ChebBudget,
+    cx: &Cx<'_>,
+) -> Result<crate::cheb2::Cheb2, ChebError> {
+    let _admission = admit_cheb2_build(domain, tol, max_rank, max_degree, budget)?;
+    if cx.checkpoint().is_err() {
+        return Err(ChebError::Cancelled);
+    }
+    let surface = crate::cheb2::Cheb2::build(f, domain, tol, max_rank, max_degree);
+    if cx.checkpoint().is_err() {
+        return Err(ChebError::Cancelled);
+    }
+    Ok(surface)
+}
+
+/// Budgeted, cancellable Orr–Sommerfeld growth rates. Admission gates
+/// the four dense differentiation products, the complex LU + solves,
+/// and the O(m³) eigensolve BEFORE allocation; non-finite parameters
+/// refuse typed; the solver's own failure (singular B, QR exhaustion)
+/// maps to [`ChebError::Numerical`] instead of surfacing a foreign
+/// error type; polls drain at the tile boundaries.
+///
+/// # Errors
+/// [`ChebError`] — shape/cap/parameter refusals before any work,
+/// [`ChebError::Numerical`] on eigensolve failure,
+/// [`ChebError::Cancelled`] at a drain boundary.
+pub fn growth_rates_budgeted(
+    re: f64,
+    alpha: f64,
+    n: usize,
+    k: usize,
+    budget: &ChebBudget,
+    cx: &Cx<'_>,
+) -> Result<Vec<fs_math::c64::C64>, ChebError> {
+    let _admission = admit_growth_rates(n, k, budget)?;
+    if !(re.is_finite() && alpha.is_finite()) {
+        return Err(ChebError::NonFinite {
+            what: "Orr-Sommerfeld parameters",
+        });
+    }
+    if cx.checkpoint().is_err() {
+        return Err(ChebError::Cancelled);
+    }
+    let eigs =
+        crate::orr_sommerfeld::growth_rates(re, alpha, n, k).map_err(|_| ChebError::Numerical {
+            what: "Orr-Sommerfeld eigensolve failed (singular B or QR exhaustion)",
+        })?;
+    if cx.checkpoint().is_err() {
+        return Err(ChebError::Cancelled);
+    }
+    Ok(eigs)
+}
