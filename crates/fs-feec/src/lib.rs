@@ -21,6 +21,7 @@ pub mod assembly;
 pub mod betti;
 pub mod cochain;
 pub mod cohomology;
+pub mod differential_characters;
 pub mod fixtures;
 pub mod highorder;
 pub mod hodge;

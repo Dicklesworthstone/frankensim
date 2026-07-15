@@ -122,6 +122,31 @@ evidence. The deferred mixed and curl-curl solve batteries remain the gate.
   multiply-connected zoo (rings, multi-hole slabs, hollow shells) with
   compacted vertices.
 
+- `differential_characters` (RA.2a) fixes the finite relative-character
+  vocabulary consumed by later constructive work: versioned oriented
+  primal/dual complexes and mapping-cone relative pairs; integral lattices,
+  finite torsion, real cochains, `R/Lambda` characters, and real curvatures with
+  `Lambda`-period constraints as distinct nominal sectors. A nonempty relative
+  subcomplex `A` requires one degree-`k - 1` trivialization over all of `A`, in
+  addition to the separately named terminal-component trivializations.
+  Hopkins--Singer character degrees may reach `dim(X) + 1`; raw cellular
+  cocycles/cochains stop at `dim(X)`. The vocabulary covers curvature,
+  characteristic class, gauge, cup product, holonomy, boundary restriction,
+  connecting maps, and both standard short exact sequences.
+  Every unary map carries an explicit typed domain, codomain, support,
+  coefficient system, and degree shift. Bilinear maps carry both typed inputs,
+  their typed output, and an explicit coefficient rule. Cup products require a
+  named, versioned coefficient bilinear map plus its immutable artifact
+  identity; equality of coefficient type names never invents a multiplication.
+  Holonomy pairs with canonical dimensionless integral cycles and returns
+  `R/Lambda`; it does not reuse a physical flux or charge lattice as cycle
+  coefficients. `delta^2 = 0` is reserved for cellular cochains and `d^2 = 0`
+  for de Rham representatives. Exact-sequence schemas expose their image/kernel
+  obligations as `RequiresConstructiveWitness`; schema creation never presents
+  an unexecuted exactness check as proof. Budgeted canonical schema bytes have a
+  deterministic 256-bit replay address, explicitly non-cryptographic until
+  wrapped by admitted ledger authority.
+
 ## Invariants
 
 - dd = 0 EXACTLY: integer path (i64 `apply`) and f64 CSR path (sums
@@ -137,6 +162,14 @@ evidence. The deferred mixed and curl-curl solve batteries remain the gate.
   rows (patch test).
 - Assembly is deterministic: canonical cell order + fs-sparse's
   push-order-independent COO accumulation.
+- Relative-character construction rejects degree overflow, coefficient-sector
+  coercion, primal/dual mixing, missing or mistyped whole-`A` and terminal
+  trivializations, non-subcomplex cell counts, and malformed exact-sequence
+  composition. An ambient dimension of 255 is inadmissible because the `u8`
+  degree representation could not encode the required `dim(X) + 1` character
+  degree. Curvature codomains retain the character's lattice-period constraint.
+  Boundary and terminal declarations are canonicalized by identity before
+  hashing, so insertion order cannot change semantics.
 - Vector families (vecfam battery): dimension counts r = 1..4 match
   the closed forms (N: 6/20/45/84, RT: 4/15/36/70 per tet) and the
   exact-sequence Euler identity Σ(−1)ᵏ dim Vᵏ = 1 holds on
@@ -158,10 +191,11 @@ fields; tensor-product lattice, local scratch cube, element-matrix, and global
 DOF extents are checked by its constructor before allocation and panic rather
 than wrapping. Public lattice-index helpers reject indices outside that sealed
 space.
-`betti` panics on i128
-overflow rather than degrade exactness. No Result-based paths in v1 —
-the inputs are meshes that upstream certificates (fs-rep-mesh,
-fs-mesh audits) have already validated.
+`betti` panics on i128 overflow rather than degrade exactness. The legacy mesh
+and operator paths remain panic-on-invalid-programmer-input because upstream
+certificates own their validity. The relative-character schema is an
+agent-facing admission boundary and therefore returns structured
+`CharacterError` refusals instead of panicking.
 
 ## Determinism class
 
@@ -177,12 +211,23 @@ Threadripper (x86_64). No libm anywhere in the hashed pipeline.
 Const-P and runtime-P contractions execute the same ascending-order fused
 operations, including zero coefficients. Exceptional field values therefore
 propagate consistently instead of being hidden only by one degree path.
+Relative-character canonicalization is integer/byte-only: version tags,
+length-framed identifiers, exact dimensions/counts, normalized coefficient
+bits, sorted boundary identities, and explicit budgets feed a stable four-lane
+digest. That digest is deterministic replay evidence, not collision-resistant
+or authenticated authority. The encoder accounts for the logical byte length
+while refusing to extend its materialized buffer past the configured canonical
+byte limit.
 
 ## Cancellation behavior
 
 Bounded synchronous assembly loops; chunking a large mesh to tile
 quanta with Cx poll points between chunks is the fs-exec driver's
 job (the fs-la/fs-simd discipline). No internal threading.
+Relative-character schema construction is bounded by explicit cell,
+boundary-component, canonical-byte, and coefficient-product budgets and
+performs no unbounded search or solver work; the downstream RA.2b/RA.2c
+constructive checkers own Cx polling, drain, checkpoint, and witness budgets.
 
 ## Unsafe boundary
 
@@ -266,6 +311,16 @@ G1 ladders for both 1D families at r = 1..6 (C: order ≥ r + 0.6
 gate, measured ≈ r + 1; D: ≥ r − 0.4 gate, measured ≈ r) — these
 drive all four 3D tensor space types' rates; Legendre mass closed
 form; its own golden hash.
+`tests/differential_characters.rs` (RA.2a, G0/G3 schema battery): circle,
+torus, relative interval/solid-torus, and Moore-like torsion metadata;
+curvature, characteristic, relative-boundary, product, holonomy, and gauge
+domain/codomain checks; explicit pending kernel/image obligations; coefficient,
+degree, primal/dual, whole-subcomplex/terminal, and budget falsifiers;
+dimension-`dim(X) + 1` character coverage; lattice-preserving curvature and
+dimensionless-cycle holonomy checks; and deterministic identity replay plus
+semantic mutations. This is object-semantics evidence only; the constructive
+exactness, torsion algebra, naturality, and refinement checkers are RA.2b/RA.2c
+scope.
 
 ## Perf-lane observations (bead cwjn: authority-admitted both-ISA gate open)
 
@@ -355,3 +410,23 @@ form; its own golden hash.
 - The thin-airfoil WING benchmark (BEM + Kutta condition) belongs to
   fs-bem-fmm (tfz.20), which consumes this module's circulation
   functional; the fixture here is the cylinder-vortex ring.
+
+## No-claim boundaries (relative differential characters)
+
+- RA.2a fixes finite object and map semantics only. It does not yet construct
+  Hopkins--Singer representatives, compute kernels/images, prove either exact
+  sequence, implement Smith normal form or torsion linking, verify gauge-orbit
+  equality, or establish subdivision/refinement naturality; those are the
+  explicit RA.2b/RA.2c gates.
+- Cell counts and named relative components are schemas, not a proof that one
+  cell set is an actual subcomplex of another. A constructive checker must
+  validate incidence closure and exact arithmetic before any exactness status
+  can be promoted.
+- A `CoefficientProductSchema` records an immutable coefficient-map artifact
+  identity and its typed signature, but does not execute that artifact or prove
+  associativity, graded commutativity, unit compatibility, or physical
+  normalization. Product-law witnesses remain constructive-algebra evidence.
+- No smooth/continuum approximation, electromagnetic force, flux
+  quantization, material, topology-change, or performance claim follows from
+  these types. The deterministic algebra ID detects replay drift but is neither
+  collision-resistant nor an authority receipt.
