@@ -99,6 +99,30 @@ mod cheb1_bitwise_equality_tests {
         assert_eq!(left, same);
         assert_ne!(left, different_payload);
     }
+
+    #[test]
+    fn checkpointed_eval_matches_dispatch_bits_and_can_cancel_mid_recurrence() {
+        let cheb = Cheb1::from_coeffs(-2.0, 3.0, vec![2.0, -0.5, 0.25, -0.125, 0.0625, -0.03125]);
+        for x in [-2.0, -0.75, 0.0, 1.25, 3.0] {
+            let mut polls = 0usize;
+            let checkpointed = cheb
+                .eval_with_checkpoint(x, &mut || {
+                    polls += 1;
+                    Ok::<(), core::convert::Infallible>(())
+                })
+                .expect("infallible checkpoint");
+            assert_eq!(checkpointed.to_bits(), cheb.eval(x).to_bits());
+            assert_eq!(polls, cheb.coeffs().len() - 1);
+        }
+
+        let mut polls = 0usize;
+        let cancelled = cheb.eval_with_checkpoint(0.5, &mut || {
+            polls += 1;
+            if polls == 3 { Err("cancelled") } else { Ok(()) }
+        });
+        assert_eq!(cancelled, Err("cancelled"));
+        assert_eq!(polls, 3);
+    }
 }
 
 /// Relative plateau threshold for adaptive truncation. Sits ABOVE the
@@ -498,6 +522,32 @@ impl Cheb1 {
     pub fn eval(&self, x: f64) -> f64 {
         let t = affine_to_reference(x, self.a, self.b);
         fma::cheb_eval_dispatch(self, t)
+    }
+
+    /// Evaluate by the same fixed-order fused Clenshaw recurrence while
+    /// invoking `checkpoint` before every nonconstant coefficient step.
+    ///
+    /// This safe portable twin is bit-identical to [`Self::eval`]. It exists
+    /// for callers whose admitted coefficient vectors require bounded
+    /// cancellation latency; callback failure returns immediately without a
+    /// partial numerical result.
+    ///
+    /// # Errors
+    /// Returns the callback's error at the first refused coefficient step.
+    pub fn eval_with_checkpoint<E>(
+        &self,
+        x: f64,
+        checkpoint: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<f64, E> {
+        let t = affine_to_reference(x, self.a, self.b);
+        let (mut b1, mut b2) = (0.0f64, 0.0f64);
+        for &c in self.coeffs.iter().skip(1).rev() {
+            checkpoint()?;
+            let b0 = (2.0 * t).mul_add(b1, c - b2);
+            b2 = b1;
+            b1 = b0;
+        }
+        Ok(t.mul_add(b1, 0.5f64.mul_add(self.coeffs[0], -b2)))
     }
 
     /// The Clenshaw loop body, extracted so the x86 FMA-codegen capsule

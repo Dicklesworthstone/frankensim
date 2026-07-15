@@ -1532,7 +1532,10 @@ impl Scenario {
             let mut evaluation_failed = false;
             for bc in self.base_bcs.iter().chain(case_bcs.iter()) {
                 checkpoint("net-flux evaluation")?;
-                match bc.mass_flow_at_prevalidated(time) {
+                let evaluated = bc.mass_flow_at_prevalidated_with_checkpoint(time, &mut || {
+                    checkpoint("net-flux Chebyshev evaluation")
+                })?;
+                match evaluated {
                     Ok(Some(flux)) => {
                         net += flux;
                         gross += flux.abs();
@@ -1614,7 +1617,8 @@ mod validation_internal_tests {
     use crate::bc::{BcKind, BcValue, BoundaryCondition, Compat, Physics};
     use crate::ensemble::{SpectrumModel, StochasticEnsemble};
     use crate::frame::{Frame, FrameId, FrameMotion};
-    use crate::signal::{Interp, TimeSignal};
+    use crate::signal::{ChebProfile, Interp, TimeSignal};
+    use fs_cheb::Cheb1;
     use fs_ga::{Quat, Vec3};
     use fs_qty::{Dims, QtyAny};
 
@@ -1743,6 +1747,49 @@ mod validation_internal_tests {
             if calls == 2 { Err("cancelled") } else { Ok(()) }
         });
         assert_eq!(result, Err("cancelled"));
+    }
+
+    #[test]
+    fn chebyshev_net_flux_evaluation_polls_inside_the_recurrence() {
+        let mut scenario = Scenario::new("cheb-cancellation", 7, Environment::earth_lab());
+        scenario.base_bcs.push(BoundaryCondition {
+            region: "cheb-inlet".to_string(),
+            physics: Physics::IncompressibleFlow,
+            kind: BcKind::MassFlowInlet,
+            value: Some(BcValue::Signal(TimeSignal::Chebfun(ChebProfile {
+                cheb: Cheb1::from_coeffs(0.0, 1.0, vec![2.0, 0.5, 0.25, 0.125]),
+                dims: Dims([0, 1, -1, 0, 0, 0]),
+            }))),
+            compatibility: Some(Compat::Incompressible),
+            frame: 0,
+        });
+        let plan = scenario
+            .validation_plan(ValidationBudget::default())
+            .expect("Chebyshev scenario plan");
+
+        let mut recurrence_polls = 0usize;
+        let result = scenario.validate_admitted(plan.finding_capacity, &mut |phase| {
+            if phase == "net-flux Chebyshev evaluation" {
+                recurrence_polls += 1;
+                if recurrence_polls == 2 {
+                    return Err(ValidationError::Cancelled {
+                        phase,
+                        completed: 0,
+                        planned: plan.planned_work,
+                    });
+                }
+            }
+            Ok(())
+        });
+        assert_eq!(recurrence_polls, 2);
+        assert!(matches!(
+            result,
+            Err(ValidationError::Cancelled {
+                phase: "net-flux Chebyshev evaluation",
+                completed: 0,
+                planned,
+            }) if planned == plan.planned_work
+        ));
     }
 
     #[test]

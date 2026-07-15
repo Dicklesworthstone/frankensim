@@ -287,6 +287,38 @@ impl TimeSignal {
         Ok(value)
     }
 
+    /// Prevalidated evaluation with a poll before every Chebyshev recurrence
+    /// step. Non-Chebyshev variants retain the established evaluation path.
+    /// The outer `Result` reports checkpoint refusal; the inner result retains
+    /// ordinary signal-evaluation errors.
+    pub(crate) fn eval_prevalidated_with_checkpoint<E>(
+        &self,
+        t: f64,
+        checkpoint: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<Result<QtyAny, ScenarioError>, E> {
+        let TimeSignal::Chebfun(profile) = self else {
+            return Ok(self.eval_prevalidated(t));
+        };
+        if !t.is_finite() {
+            return Ok(Err(ScenarioError::Evaluate {
+                what: format!("non-finite evaluation time {t}"),
+            }));
+        }
+        let (a, b) = profile.cheb.domain();
+        let value = QtyAny::new(
+            profile
+                .cheb
+                .eval_with_checkpoint(t.clamp(a, b), checkpoint)?,
+            profile.dims,
+        );
+        if !value.value.is_finite() {
+            return Ok(Err(ScenarioError::Evaluate {
+                what: "signal evaluation produced a non-finite value".to_string(),
+            }));
+        }
+        Ok(Ok(value))
+    }
+
     /// Structural validation, accumulated as [`Violation`]s.
     pub fn check(&self, context: &str, out: &mut Vec<Violation>) {
         let mut checkpoint = |_: &'static str| Ok::<(), core::convert::Infallible>(());

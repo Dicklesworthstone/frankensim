@@ -267,6 +267,48 @@ impl BoundaryCondition {
         self.mass_flow_at_impl(t, true)
     }
 
+    /// Prevalidated mass-flow evaluation with bounded Chebyshev cancellation.
+    /// The outer result reports checkpoint refusal while the inner result
+    /// retains the established evaluation errors.
+    pub(crate) fn mass_flow_at_prevalidated_with_checkpoint<E>(
+        &self,
+        t: f64,
+        checkpoint: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<Result<Option<f64>, ScenarioError>, E> {
+        let signal = match &self.value {
+            Some(BcValue::Signal(signal @ TimeSignal::Chebfun(_))) => signal,
+            _ => return Ok(self.mass_flow_at_prevalidated(t)),
+        };
+        if self.kind != BcKind::MassFlowInlet {
+            return Ok(Ok(None));
+        }
+        if self.physics != Physics::IncompressibleFlow {
+            return Ok(Err(ScenarioError::Evaluate {
+                what: format!(
+                    "mass-flow inlet on {:?} is attached to unsupported physics {:?}",
+                    self.region, self.physics
+                ),
+            }));
+        }
+        if !t.is_finite() {
+            return Ok(Err(ScenarioError::Evaluate {
+                what: format!("mass-flow evaluation time {t} is non-finite"),
+            }));
+        }
+        let quantity = match signal.eval_prevalidated_with_checkpoint(t, checkpoint)? {
+            Ok(quantity) => quantity,
+            Err(error) => return Ok(Err(error)),
+        };
+        if quantity.dims != dims::MASS_FLOW {
+            return Ok(Err(ScenarioError::Dimensions {
+                context: format!("mass-flow inlet signal on {:?}", self.region),
+                expected: dims::MASS_FLOW.0,
+                got: quantity.dims.0,
+            }));
+        }
+        Ok(Ok(Some(quantity.value)))
+    }
+
     fn mass_flow_at_impl(
         &self,
         t: f64,

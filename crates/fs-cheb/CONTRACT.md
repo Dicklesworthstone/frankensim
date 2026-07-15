@@ -53,8 +53,10 @@ budgeted, cancellable entry points).
   doubles the grid until the trailing quarter of coefficients sits at
   the configured numerical plateau (2.2e-15 relative), then truncates;
   unresolvable functions panic at `max_degree` with a structured
-  message. `eval` (Clenshaw), `differentiate` (coefficient recurrence,
-  domain chain rule), `integral` (even-coefficient formula), `add`,
+  message. `eval` (Clenshaw), `eval_with_checkpoint` (the bit-identical safe
+  Clenshaw twin with a caller poll before every nonconstant coefficient),
+  `differentiate` (coefficient recurrence, domain chain rule), `integral`
+  (even-coefficient formula), `add`,
   `mul` (resample + rebuild), `roots` (fixed reference-grid sign scan +
   safeguarded reference-coordinate bisection/Newton polish for isolated,
   well-conditioned sign-changing roots).
@@ -159,9 +161,13 @@ is accepted from a stale binary. The coupling remains registered in
 changes cannot strand it.
 
 ## Cancellation behavior
-The classic entry points are bounded (max_degree cap) with no poll
-points — retained unchanged this slice for their existing callers. The
-budgeted twins poll before allocation/evaluation, at adaptive sample
+Classic construction/search entry points are bounded by their degree caps and
+retain their established no-poll behavior. Classic `eval` is caller-bounded
+when coefficients arrive through `from_coeffs` and likewise remains no-poll.
+`Cheb1::eval_with_checkpoint` is the bit-identical alternative for callers
+that admit externally supplied coefficient vectors: it polls before every
+nonconstant Clenshaw step and returns no partial value. The budgeted twins poll
+before allocation/evaluation, at adaptive sample
 boundaries, before/after opaque transforms and dense kernels, per eigen
 shift and 10-sweep tile, throughout root normalization/refinement, and
 per 64 scan cells. A final poll precedes every complete result. They

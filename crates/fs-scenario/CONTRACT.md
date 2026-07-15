@@ -213,8 +213,10 @@ the semantic plan, after planning, after fixed phases, at every frame-index row,
 frame-cycle traversal/finalization step, and frame validation row, at
 BC/case/combination term/ensemble/contact boundaries, at every unordered
 contact-pair classification group (including all-unique inputs), before and
-after each net-flux provider evaluation, at every tabulated signal scalar and Chebyshev
-coefficient, throughout index population/sort steps, and after private
+after each net-flux provider evaluation, at every tabulated signal scalar and
+Chebyshev coefficient during structural scanning, before every nonconstant
+Chebyshev recurrence step during net-flux evaluation, throughout index
+population/sort steps, and after private
 validation before publication. Net-flux checkpoint sorting polls throughout
 the in-place heap sort rather than only after an opaque library sort; set
 classification, checkpoint counting/materialization, and deduplication likewise
@@ -317,6 +319,8 @@ None.
 - A focused evaluator regression proves the prevalidated constant, ramp, table,
   and Chebyshev paths match public evaluation for valid signals while retaining
   malformed-table and non-finite-time guards.
+- A focused Chebyshev flux regression injects cancellation inside the Clenshaw
+  recurrence and proves the private finding buffer is not published.
 - A focused checkpoint-deduplication regression proves per-element polling and
   canonical `+0.0` retention when both signed-zero encodings occur.
 
