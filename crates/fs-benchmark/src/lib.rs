@@ -3195,10 +3195,30 @@ fn count_binding(
     Ok(())
 }
 
-/// Audit an arbitrary borrowed corpus view.
+/// Audit an arbitrary borrowed corpus view under the safe deny-all admission
+/// policy.
+///
+/// Structurally valid Estimated query declarations can pass this audit, but
+/// positive query evidence is refused because no admission authority is
+/// available. Composition roots that hold the real authority must call
+/// [`audit_corpus_with_verifier`] instead.
+#[must_use]
+pub fn audit_corpus(corpus: &BenchmarkCorpus<'_>) -> CorpusAudit {
+    audit_corpus_with_verifier(corpus, &NoAdmissionVerifier)
+}
+
+/// Audit an arbitrary borrowed corpus view with an injected query-evidence
+/// admission authority.
+///
+/// The verifier is consulted only for positive query colors after the retained
+/// record, receipt context, and complete query binding have passed their local
+/// fail-closed checks.
 #[must_use]
 #[allow(clippy::too_many_lines)]
-pub fn audit_corpus(corpus: &BenchmarkCorpus<'_>) -> CorpusAudit {
+pub fn audit_corpus_with_verifier(
+    corpus: &BenchmarkCorpus<'_>,
+    verifier: &dyn AdmissionVerifier,
+) -> CorpusAudit {
     let mut gaps = Vec::new();
     if corpus.version != BENCHMARK_VERSION {
         gaps.push(format!(
@@ -3254,7 +3274,7 @@ pub fn audit_corpus(corpus: &BenchmarkCorpus<'_>) -> CorpusAudit {
         if !query.reference_cost.is_finite() || query.reference_cost <= 0.0 {
             gaps.push(format!("query '{}' has invalid reference cost", query.id));
         }
-        if let Err(error) = resolve_query_reference(corpus, query) {
+        if let Err(error) = resolve_query_reference_with_verifier(corpus, query, verifier) {
             gaps.push(format!("query '{}': {error}", query.id));
         }
     }

@@ -19,30 +19,37 @@ six+ proposals so they are not killed-by-default.
   (`EditTrace`s with known-correct skip sets), `mms_battery()` (`MmsCase`
   elliptic references), `merge_trials()` (synthetic `MergeTrial` fixtures with
   candidate-remainder counts for exercising the corpus shape and rate API).
-- Measurement helpers: `speedup(baseline, candidate)` (Prop 8 / 2, `>= 2×`),
-  `win_rate(&[bool])` (Prop 1, `>= 0.70`), `rate(count, total)` /
-  `conflict_rate(trial)` (Prop 10, `< 0.25`), `accept_rate(accepts, attempts)`
-  (Prop 9). All guard divide-by-zero.
-- `instrumented_proposals()` — the `InstrumentedProposal`s (proposal, dataset,
-  kill metric) this corpus discharges.
-- `corpus_digest() -> u64` — an FNV-1a content digest over the whole corpus
-  (bit-stable → replayable).
-- `audit() -> CorpusAudit` — every dataset non-empty and every instrumented
-  proposal references a real dataset.
+- Measurement helpers: `speedup`, `win_rate`, `rate`, `conflict_rate`, and
+  `accept_rate` return typed failures for absent or invalid denominators instead
+  of manufacturing a zero-valued measurement.
+- `resolve_query_reference` applies the safe deny-all admission policy;
+  `resolve_query_reference_with_verifier` can attach positive authority only
+  after an injected verifier authenticates the exact retained query context.
+- `instrumented_proposals()` declares evaluator schemas. A proposal counts as
+  instrumented only when `evaluate_proposal` reconstructs every typed role from
+  independently referenced retained evidence.
+- `corpus_digest() -> ContentHash` is a schema-versioned, length-framed BLAKE3
+  identity over the complete corpus semantics.
+- `audit_corpus` applies the safe deny-all admission policy.
+  `audit_corpus_with_verifier` allows a composition root to audit valid positive
+  query evidence with its real admission capability. `audit()` remains the
+  deny-all audit of the built-in corpus.
 
 ## Invariants
 
 - DETERMINISM: `corpus_digest` is bit-stable across runs (const data) — the
   replayability the acceptance criteria demand.
-- Every reference answer carries a color class; all three classes appear.
-- GOVERNANCE RULE 2: every instrumented proposal references a real, non-empty
-  dataset and declares a kill metric — no proposal is killed-by-default for
-  lack of an instrument.
-- Measurement helpers never divide by zero (return `0.0`).
+- Positive query authority is impossible without exact retained-evidence
+  resolution, a context-correct receipt, and an accepting injected verifier.
+- GOVERNANCE RULE 2: declaring a non-empty dataset and kill metric is
+  insufficient; all evaluator roles must resolve before instrumentation is
+  available.
+- Measurement helpers never divide by zero; they return a typed refusal.
 
 ## Error model
 
-Total functions; no panics. Completeness gaps surface as `CorpusAudit::gaps`.
+Evidence and metric failures are typed. Completeness and admission gaps surface
+as `CorpusAudit::gaps`; the default audit deliberately refuses positive rank.
 
 ## Determinism class
 
@@ -62,12 +69,10 @@ None.
 
 ## Conformance tests
 
-`tests/benchmark.rs` (Proposal 7, 8 cases): every dataset populated; reference
-answers carry their color (all three classes); the measurement helpers compute
-the kill numbers (speedup / win-rate / accept-rate + divide-by-zero guards);
-the synthetic candidate-remainder diagnostic rate from merge fixtures; the
-skippable fraction from edit traces; Governance-Rule-2 discharge for all eight
-instrumented proposals; the deterministic digest; the complete audit.
+`tests/benchmark.rs`: retained-evidence resolution, positive-query admission,
+default deny-all versus injected-authority audit behavior, typed denominator
+receipts, proposal evaluator reconstruction/refusal, semantic-field mutation
+sensitivity, deterministic identity, and fail-closed completeness auditing.
 
 ## No-claim boundaries
 
@@ -75,8 +80,8 @@ instrumented proposals; the deterministic digest; the complete audit.
   the measurement API; populating them with the full high-precision reference
   solves (and the real recorded traces) is the vertical-kernel work that
   consumes this contract.
-- `reference_color` records the color CLASS (`ColorRank`); the full `Color`
-  certificate payload is materialized by the reference solver.
+- Built-in query references are Estimated declarations. Verified or Validated
+  references require an admission verifier supplied by the composition root.
 - The corpus provides the DATA + the measurement helpers; each proposal's bead
   computes its own kill number by feeding its results through them.
 - Merge-trial counts are synthetic fixtures for the guarded candidate-remainder

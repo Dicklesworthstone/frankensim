@@ -8,11 +8,12 @@ use fs_benchmark::{
     DatasetKind, EvidenceDatum, EvidenceError, EvidenceRecord, EvidenceRef, EvidenceRole,
     InstrumentedProposal, MetricDefinition, MetricError, MetricEvidenceRole, MetricKind,
     MetricRequest, MetricSchema, ProposalEvaluation, ProposalEvaluator, ProposalEvidenceRef,
-    ProposalRefusal, ReferenceAuthority, accept_rate, audit, audit_corpus, benchmark_corpus,
-    conflict_rate, corpus_digest, corpus_digest_for, design_tasks, edit_skip_metric, edit_traces,
-    evaluate_proposal, instrumented_proposals, merge_conflict_metric, merge_trials, mms_battery,
-    query_set, rate, reconstruct_metric, resolve_evidence, resolve_query_reference,
-    resolve_query_reference_with_verifier, retained_evidence, speedup, win_rate,
+    ProposalRefusal, ReferenceAuthority, accept_rate, audit, audit_corpus,
+    audit_corpus_with_verifier, benchmark_corpus, conflict_rate, corpus_digest, corpus_digest_for,
+    design_tasks, edit_skip_metric, edit_traces, evaluate_proposal, instrumented_proposals,
+    merge_conflict_metric, merge_trials, mms_battery, query_set, rate, reconstruct_metric,
+    resolve_evidence, resolve_query_reference, resolve_query_reference_with_verifier,
+    retained_evidence, speedup, win_rate,
 };
 
 fn assert_digest_changed(changed: &BenchmarkCorpus<'_>) {
@@ -635,6 +636,20 @@ fn positive_query_color_requires_injected_admission_even_after_rehashing() {
     assert_eq!(
         admitted_reference.query_context_hash(),
         admitted.query_context_hash()
+    );
+
+    let deny_all_audit = audit_corpus(&corpus);
+    assert!(deny_all_audit.gaps.iter().any(|gap| {
+        gap.starts_with("query 'positive-q1':") && gap.contains("was not admitted")
+    }));
+    let admitted_audit = audit_corpus_with_verifier(&corpus, &ReceiptPolicyVerifier);
+    assert!(
+        !admitted_audit
+            .gaps
+            .iter()
+            .any(|gap| gap.starts_with("query 'positive-q1':")),
+        "injected authority should admit the valid positive query: {:?}",
+        admitted_audit.gaps
     );
 
     let mut replayed_record = records[0].clone();
