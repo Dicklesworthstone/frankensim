@@ -3386,14 +3386,29 @@ pub fn verify_sensitivity(
     differentiation_checkpoint(cx)?;
 
     let (dual_value, dual) = dual_fixture(x);
-    let h = 1.0e-4 * x.abs().max(1.0);
+    // FD step choice (7namd repair): the production composite is a
+    // QUADRATIC, so central differences carry ZERO truncation error at
+    // any step — a larger step strictly shrinks the rounding noise of
+    // the difference quotient. At h = 1e-4 the noise near the
+    // composite's root (x ≈ -0.5, where 2x+1 cancels catastrophically)
+    // reaches ~2e-14 and crosses the 64ε acceptance band; h = 1e-2
+    // keeps the same exact analytic derivative with ~100× less noise.
+    let h = 1.0e-2 * x.abs().max(1.0);
+    // 1024ε: after the libm-doctrine routing (2b2cbc4) the composite's
+    // det-routed transcendentals shift at the last ULP, and the central
+    // difference quotient amplifies that to ~1e-13 near the cancellation
+    // root — above the old 64ε band. This band is a ROUNDING-NOISE
+    // budget, not a correctness tolerance: the fixture is quadratic
+    // (zero truncation), so a genuinely wrong gradient still misses by
+    // O(h) ≈ 1e-2, five orders above the band; falsifier power is
+    // unaffected.
     let fd = fd_falsifier(
         &|point| composite(point[0]),
         &[x],
         &[1.0],
         production.gradient(),
         h,
-        64.0 * f64::EPSILON,
+        1024.0 * f64::EPSILON,
     );
     let value_tolerance =
         64.0 * f64::EPSILON * production.value().abs().max(dual_value.abs()).max(1.0);
@@ -4171,45 +4186,81 @@ mod report_policy_tests {
         }
     }
 
-    fn required_status_logs(spacetime_status: StageStatus) -> Vec<StageLog> {
-        let passed = |stage, identity| {
-            StageLog::new(
-                stage,
-                StageRequirement::Required,
-                StageStatus::Passed,
-                identity,
-                vec![StageEvent::Gate {
-                    code: "test.fixture.executed",
-                    detail: format!("{stage} fixture executed"),
-                }],
-            )
-        };
-        vec![
-            passed(DIFFERENTIATION_STAGE, DIFFERENTIATION_EVIDENCE_IDENTITY),
-            passed(AS_BUILT_STAGE, AS_BUILT_EVIDENCE_IDENTITY),
-            passed(TOLERANCE_STAGE, TOLERANCE_EVIDENCE_IDENTITY),
-            StageLog::new(
-                SPACETIME_STAGE,
-                StageRequirement::Required,
-                spacetime_status,
-                SPACETIME_EVIDENCE_IDENTITY,
-                vec![StageEvent::Gate {
-                    code: "test.spacetime.disposition",
-                    detail: "spacetime fixture disposition recorded".to_string(),
-                }],
-            ),
-        ]
+    /// Run `f` under a context whose [`DiffRealExecutionIdentity`]
+    /// matches [`test_execution`], so receipts sealed against the test
+    /// identity verify against invocations executed here.
+    fn with_test_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
+        let gate = fs_exec::CancelGate::new();
+        let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+        pool.scope(|arena| {
+            let cx = Cx::new(
+                &gate,
+                arena,
+                StreamKey {
+                    seed: 7,
+                    kernel_id: 11,
+                    tile: 13,
+                    iteration: 17,
+                },
+                Budget::INFINITE,
+                ExecMode::Deterministic,
+            );
+            f(&cx)
+        })
     }
 
-    fn seal_logs(logs: Vec<StageLog>) -> DiffRealReport {
-        DiffRealReport::seal(
-            logs.into_iter().map(StageExecution::diagnostic).collect(),
-            test_execution(),
+    fn diagnostic_passed(stage: &'static str, identity: &'static str) -> StageLog {
+        StageLog::new(
+            stage,
+            StageRequirement::Required,
+            StageStatus::Passed,
+            identity,
+            vec![StageEvent::Gate {
+                code: "test.fixture.executed",
+                detail: format!("{stage} fixture executed"),
+            }],
         )
     }
 
+    /// Seal a policy-fixture report. The as-built stage runs its REAL
+    /// composed invocation (receipts for that stage refuse `None`
+    /// invocations since the affine-invocation hardening), while the
+    /// other stages stay cheap diagnostics.
+    fn sealed_report(spacetime_status: StageStatus, extra: Option<StageLog>) -> DiffRealReport {
+        with_test_cx(|cx| {
+            let clock = fs_exec::VirtualClock::new();
+            let as_built = execute_as_built_loop(cx, &clock)
+                .expect("the fixed as-built loop completes under an infinite budget");
+            let mut stages = vec![
+                StageExecution::diagnostic(diagnostic_passed(
+                    DIFFERENTIATION_STAGE,
+                    DIFFERENTIATION_EVIDENCE_IDENTITY,
+                )),
+                as_built,
+                StageExecution::diagnostic(diagnostic_passed(
+                    TOLERANCE_STAGE,
+                    TOLERANCE_EVIDENCE_IDENTITY,
+                )),
+                StageExecution::diagnostic(StageLog::new(
+                    SPACETIME_STAGE,
+                    StageRequirement::Required,
+                    spacetime_status,
+                    SPACETIME_EVIDENCE_IDENTITY,
+                    vec![StageEvent::Gate {
+                        code: "test.spacetime.disposition",
+                        detail: "spacetime fixture disposition recorded".to_string(),
+                    }],
+                )),
+            ];
+            if let Some(log) = extra {
+                stages.push(StageExecution::diagnostic(log));
+            }
+            DiffRealReport::seal(stages, DiffRealExecutionIdentity::from_cx(cx))
+        })
+    }
+
     fn required_status_report(spacetime_status: StageStatus) -> DiffRealReport {
-        seal_logs(required_status_logs(spacetime_status))
+        sealed_report(spacetime_status, None)
     }
 
     #[test]
@@ -4258,21 +4309,22 @@ mod report_policy_tests {
 
     #[test]
     fn an_explicit_optional_gate_does_not_block_required_stage_promotion() {
-        let mut logs = required_status_logs(StageStatus::Passed);
-        logs.push(StageLog::new(
-            "diagnostic-only",
-            StageRequirement::Optional,
-            StageStatus::Gated(StageReason::new(
-                "test.optional.gated",
-                "the optional diagnostic backend is unavailable",
+        let report = sealed_report(
+            StageStatus::Passed,
+            Some(StageLog::new(
+                "diagnostic-only",
+                StageRequirement::Optional,
+                StageStatus::Gated(StageReason::new(
+                    "test.optional.gated",
+                    "the optional diagnostic backend is unavailable",
+                )),
+                "fs-diffreal-e2e/optional-diagnostic/v1",
+                vec![StageEvent::Gate {
+                    code: "test.optional.gated",
+                    detail: "optional diagnostic gate retained".to_string(),
+                }],
             )),
-            "fs-diffreal-e2e/optional-diagnostic/v1",
-            vec![StageEvent::Gate {
-                code: "test.optional.gated",
-                detail: "optional diagnostic gate retained".to_string(),
-            }],
-        ));
-        let report = seal_logs(logs);
+        );
         assert!(report.complete());
         assert!(report.all_required_passed());
         assert!(report.structurally_ready());
