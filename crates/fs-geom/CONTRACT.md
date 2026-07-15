@@ -155,6 +155,18 @@ fs-ivl, fs-alloc, fs-obs, fs-sparse.
   equal physical subject, immutable model version, mathematical category,
   coefficient semantics, frame, and unit system; version/coordinate/unit
   transitions are not silently inferred.
+  `DeclaredChartMap` is a distinct primitive family: it binds source/target
+  chart IDs, one nominal overlap-scope ID, and one nominal forward-map ID.
+  Admission resolves both charts in their exact endpoint objects and requires
+  equal coordinate/ambient dimensions, endpoint frames, coordinate unit
+  systems, quantities, and exact scale bits. These checks establish a typed
+  structural map declaration only; they do not prove that the overlap exists,
+  that the map implements the declaration, or that it is invertible. Homogeneous
+  chart-map paths compose only across an exact middle chart and retain their
+  first/last chart IDs. The sealed token exposes the ordered primitive geometry,
+  chart, overlap, and map IDs so downstream artifact resolution does not depend
+  on the caller's raw request sidecar. Mixed generic-strict/chart-map paths
+  refuse in v1 rather than erasing the primitive family.
   Evidence transport is explicitly contravariant restriction or covariant
   balance corestriction and binds exact input/output geometry identities plus
   nominal caller-declared input/output evidence-artifact identities and ranks.
@@ -484,6 +496,9 @@ fs-ivl, fs-alloc, fs-obs, fs-sparse.
    declared evidence-artifact/rank seams. Primitive morphism identities and
    no-equivalence artifacts remain in semantic order, making receipt identity
    independent of composition parenthesization but sensitive to factor order.
+   Primitive chart-map receipts domain-separate their family and bind exact
+   source chart, target chart, overlap, and forward-map IDs. Homogeneous chart
+   paths additionally require an exact chart seam; mixed map families refuse.
 
 ## Error model
 Structured teaching values throughout: `ConvertDiag` (ranked fixes),
@@ -506,10 +521,11 @@ cross-chart references, mixed units/frames, finite-complex and stratification
 defects, resource exhaustion, cancellation, and canonical identity failures
 publish no admitted token.
 RD.1b uses `DerivedMorphismErrorV1` for schema/endpoint/convention defects,
-model-version drift, evidence orientation, missing nominal evidence IDs,
-declared-rank strengthening, equivalence laundering, composition seams, bounded
-lineage, allocation, cancellation, and canonical identity failures. Refusal
-publishes no admitted morphism.
+model-version drift, chart ownership/dimension/unit defects, evidence
+orientation, missing nominal artifact IDs, declared-rank strengthening,
+equivalence laundering, typed path-family/chart/evidence seams, bounded lineage,
+allocation, cancellation, and canonical identity failures. Refusal publishes no
+admitted morphism.
 
 ## Determinism class
 Deterministic: seeded sampling, insertion-ordered charts, canonical JSON
@@ -526,6 +542,8 @@ RD.1b encodes exact endpoints, map witness/class, structural evidence transport,
 ordered no-equivalence artifacts, and ordered primitive identities. Flattened
 composition makes equal ordered factor sequences replay to the same receipt
 regardless of parenthesization; reversing factors changes identity.
+Declared chart-map primitive class bytes additionally encode the source/target
+chart, nominal overlap, and nominal map IDs under a distinct family tag.
 
 ## Cancellation behavior
 Chart evaluation and production sampling paths take `&Cx`.
@@ -622,6 +640,10 @@ model-version/convention mismatch, the lineage cap/cap+1 boundary, deterministic
 replay, and already-requested entry cancellation. Public wrapper coverage
 against fully admitted RD.1a fixtures and deterministic mid-flight cancellation
 injection remain explicit batch-verification follow-ups.
+It also covers declared chart-map ownership, missing IDs, dimension/frame/unit/
+quantity/scale mutations, typed-ID-bound receipt replay and public primitive
+retention, homogeneous associativity, exact chart seams, identity neutrality,
+and mixed-family refusal.
 `tests/exit_path.rs` supplies RD.X1 G0/G3 examples and a bounded-cancellation
 regression: regular-cell poset sufficiency, cone/cusp groupoid-enriched
 one-category fallback, circular-stratum local systems, finite-versus-full
@@ -705,6 +727,17 @@ claim those stronger G4/G5 results.
   bytes and ranks. RD.1c or a successor admitted-evidence type must bind and
   independently validate payload authority before any evidence-preservation
   claim is promotable.
+- `DeclaredChartMap` proves neither overlap coverage nor any property of the
+  nominal forward-map artifact. It does not supply an inverse, round-trip law,
+  atlas compatibility, coordinate equivalence, or physical correspondence.
+  Those require a separate scoped-equivalence receipt with independently
+  checked inverse laws; `IdentityOnly` is refused for every declared chart map.
+- The v1 union of generic strict paths and declared chart-map paths is not yet a
+  composition-closed admitted category: identity and homogeneous composition
+  are defined, while mixed nonidentity families refuse. A later ordered typed
+  primitive-path representation must close heterogeneous composition without
+  erasing family-specific seam obligations before the full RD.1b category claim
+  is promotable.
 - V1 refuses unbounded and infinite-dimensional local models, opaque external
   analytic functions, unknown compactness/regularity, and infinite computation.
   These are admitted-class limits, not claims that the excluded mathematics is

@@ -1,10 +1,11 @@
 //! Typed structural morphisms between admitted RD.1a geometries (RD.1b).
 //!
-//! This first RD.1b slice admits category identities and strict maps, checks
-//! the direction of evidence restriction/corestriction, and composes admitted
-//! arrows with ordered content-addressed lineage.  It deliberately cannot mint
-//! a non-identity equivalence: a witness digest is data, not a proof of an
-//! inverse, quasi-isomorphism, refinement theorem, or physical crosswalk.
+//! This RD.1b spine admits category identities, generic strict maps, and typed
+//! declared chart maps; checks structural evidence restriction/corestriction;
+//! and composes homogeneous paths with ordered content-addressed lineage. It
+//! deliberately cannot mint a non-identity equivalence: a witness digest is
+//! data, not a proof of an inverse, quasi-isomorphism, refinement theorem, or
+//! physical crosswalk.
 
 use core::fmt;
 
@@ -16,14 +17,14 @@ use fs_evidence::ColorRank;
 use fs_exec::Cx;
 
 use crate::derived::{
-    AdmittedDerivedGeometryV1, CoefficientSystemV1, DerivedFrameIdV1, DerivedGeometryIdV1,
-    DerivedModelVersionIdV1, DerivedNoClaimIdV1, DerivedSubjectIdV1, DerivedUnitSystemIdV1,
-    DerivedWitnessIdV1, GeometricCategoryV1,
+    AdmittedDerivedGeometryV1, CoefficientSystemV1, ConfigurationChartIdV1, ConfigurationChartV1,
+    DerivedFrameIdV1, DerivedGeometryIdV1, DerivedModelVersionIdV1, DerivedNoClaimIdV1,
+    DerivedSubjectIdV1, DerivedUnitSystemIdV1, DerivedWitnessIdV1, GeometricCategoryV1,
 };
 
 /// Current schema for structural RD.1b morphism receipts.
 pub const DERIVED_MORPHISM_SCHEMA_VERSION_V1: u32 = 1;
-/// Maximum primitive strict arrows retained in one flattened composition.
+/// Maximum primitive nonidentity factors retained in one flattened composition.
 pub const DERIVED_MORPHISM_MAX_FACTORS_V1: usize = 1024;
 const DERIVED_MORPHISM_CANCELLATION_STRIDE_V1: usize = 64;
 const DERIVED_MORPHISM_IDENTITY_LIMITS_V1: CanonicalLimits =
@@ -36,6 +37,7 @@ impl CanonicalSchema for DerivedMorphismIdentitySchemaV1 {
     const DOMAIN: &'static str = "org.frankensim.fs-geom.derived-morphism.v1";
     const NAME: &'static str = "derived-geometry-structural-morphism";
     const VERSION: u32 = DERIVED_MORPHISM_SCHEMA_VERSION_V1;
+    // Frozen v1 identity material: change only with a schema-version bump.
     const CONTEXT: &'static str = "typed endpoints, strict map class, evidence variance, no-equivalence boundary, and ordered primitive lineage";
     const FIELDS: &'static [FieldSpec] = &[
         FieldSpec::required("source", WireType::Bytes),
@@ -50,6 +52,42 @@ impl CanonicalSchema for DerivedMorphismIdentitySchemaV1 {
 /// Typed identity of one admitted RD.1b structural morphism.
 pub type DerivedMorphismIdV1 = EvidenceNodeId<DerivedMorphismIdentitySchemaV1>;
 
+/// Nominal artifact implementing one declared chart map.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DerivedChartMapIdV1([u8; 32]);
+
+impl DerivedChartMapIdV1 {
+    /// Construct a nominal chart-map artifact identity from exact bytes.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// Borrow the exact identity bytes.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+/// Nominal scope artifact for the overlap on which a chart map is declared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DerivedChartOverlapIdV1([u8; 32]);
+
+impl DerivedChartOverlapIdV1 {
+    /// Construct a nominal overlap-scope identity from exact bytes.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// Borrow the exact identity bytes.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
 /// Caller-supplied primitive map class.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DerivedMorphismKindV1 {
@@ -60,15 +98,54 @@ pub enum DerivedMorphismKindV1 {
         /// Exact map/construction artifact.
         witness: DerivedWitnessIdV1,
     },
+    /// A declared coordinate map on one nominal overlap, without invertibility.
+    DeclaredChartMap {
+        /// Chart owned by the source geometry.
+        source_chart: ConfigurationChartIdV1,
+        /// Chart owned by the target geometry.
+        target_chart: ConfigurationChartIdV1,
+        /// Exact declared overlap/scope artifact.
+        overlap: DerivedChartOverlapIdV1,
+        /// Exact forward coordinate-map artifact.
+        map: DerivedChartMapIdV1,
+    },
 }
 
-/// Admitted map class. Composition flattens strict primitive lineage.
+/// Admitted map family. Composition flattens homogeneous primitive lineage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdmittedDerivedMorphismClassV1 {
     /// Exact categorical identity.
     Identity,
     /// One or more ordered strict primitive maps.
     Strict,
+    /// One or more ordered declared chart-map primitives.
+    DeclaredChartMapPath,
+}
+
+/// Exact chart endpoints retained for a homogeneous declared chart-map path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DerivedChartPathV1 {
+    /// First source chart in the path.
+    pub source_chart: ConfigurationChartIdV1,
+    /// Last target chart in the path.
+    pub target_chart: ConfigurationChartIdV1,
+}
+
+/// One retained primitive in a homogeneous declared chart-map path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeclaredChartMapPrimitiveV1 {
+    /// Exact admitted geometry owning the source chart.
+    pub source_geometry: DerivedGeometryIdV1,
+    /// Exact admitted geometry owning the target chart.
+    pub target_geometry: DerivedGeometryIdV1,
+    /// Chart owned by the primitive source geometry.
+    pub source_chart: ConfigurationChartIdV1,
+    /// Chart owned by the primitive target geometry.
+    pub target_chart: ConfigurationChartIdV1,
+    /// Nominal overlap/scope artifact.
+    pub overlap: DerivedChartOverlapIdV1,
+    /// Nominal forward coordinate-map artifact.
+    pub map: DerivedChartMapIdV1,
 }
 
 /// Direction in which evidence is transported along an object map `X -> Y`.
@@ -106,8 +183,9 @@ impl DerivedEvidenceArtifactIdV1 {
 /// Structural evidence transport attached to one object map.
 ///
 /// Identity arrows are deliberately rank-neutral, so every admitted geometry
-/// has one categorical identity. Strict variants bind caller-declared evidence
-/// artifact identities and ranks, but do not authenticate either artifact.
+/// has one categorical identity. Nonidentity variants bind caller-declared
+/// evidence artifact identities and ranks, but do not authenticate either
+/// artifact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DerivedEvidenceTransportV1 {
     /// Unique rank-neutral evidence transport on one identity arrow.
@@ -222,25 +300,34 @@ pub enum DerivedMorphismErrorV1 {
         /// Stable endpoint field.
         field: &'static str,
     },
-    /// A required witness, no-claim, or evidence identity used the zero sentinel.
+    /// A required nominal identity used the all-zero sentinel.
     MissingIdentity {
         /// Stable identity field.
         field: &'static str,
     },
     /// An identity arrow changed its object, transport, or boundary.
     InvalidIdentity,
-    /// Strict source and target describe different physical subjects.
+    /// Nonidentity source and target describe different physical subjects.
     SubjectMismatch,
-    /// Strict source and target name different immutable model versions.
+    /// Nonidentity endpoints name different immutable model versions.
     ModelVersionMismatch,
-    /// Strict source and target use different mathematical categories.
+    /// Nonidentity endpoints use different mathematical categories.
     CategoryMismatch,
-    /// Strict source and target use different coefficient semantics.
+    /// Nonidentity endpoints use different coefficient semantics.
     CoefficientMismatch,
-    /// Strict source and target use different coordinate frames.
+    /// Nonidentity endpoints use different coordinate frames.
     FrameMismatch,
-    /// Strict source and target use different unit systems.
+    /// Nonidentity endpoints use different unit systems.
     UnitSystemMismatch,
+    /// A declared chart ID is not owned by its exact endpoint geometry.
+    MissingChart {
+        /// Stable source/target chart field.
+        field: &'static str,
+    },
+    /// Declared chart-map coordinate or ambient dimensions differ.
+    ChartDimensionMismatch,
+    /// Declared chart-map frames or coordinate-unit bindings differ.
+    ChartConventionMismatch,
     /// Evidence endpoints contradict the declared variance.
     EvidenceOrientationMismatch,
     /// Declared evidence metadata attempted to strengthen authority.
@@ -254,8 +341,12 @@ pub enum DerivedMorphismErrorV1 {
     EquivalenceLaundering,
     /// Two arrows do not share the exact middle object.
     CompositionEndpointMismatch,
-    /// Strict arrows use incompatible evidence variance.
+    /// Nonidentity paths use incompatible evidence variance.
     CompositionVarianceMismatch,
+    /// Primitive path families are not composable in this version.
+    CompositionClassMismatch,
+    /// Homogeneous chart paths do not share the exact middle chart.
+    CompositionChartMismatch,
     /// Evidence artifact identity or declared rank at the seam is inconsistent.
     CompositionEvidenceMismatch,
     /// Flattened lineage/no-claim retention exceeded the hard ceiling.
@@ -295,6 +386,8 @@ pub struct AdmittedDerivedMorphismV1 {
     source: DerivedGeometryIdV1,
     target: DerivedGeometryIdV1,
     class: AdmittedDerivedMorphismClassV1,
+    chart_path: Option<DerivedChartPathV1>,
+    declared_chart_maps: Vec<DeclaredChartMapPrimitiveV1>,
     evidence: DerivedEvidenceTransportV1,
     no_equivalence_claims: Vec<DerivedNoClaimIdV1>,
     primitive_factors: Vec<DerivedMorphismIdV1>,
@@ -314,10 +407,22 @@ impl AdmittedDerivedMorphismV1 {
         self.target
     }
 
-    /// Identity versus strict structural class.
+    /// Identity versus admitted nonidentity path family.
     #[must_use]
     pub const fn class(&self) -> AdmittedDerivedMorphismClassV1 {
         self.class
+    }
+
+    /// Chart endpoints for a homogeneous declared chart-map path.
+    #[must_use]
+    pub const fn chart_path(&self) -> Option<DerivedChartPathV1> {
+        self.chart_path
+    }
+
+    /// Ordered typed primitive declarations for a homogeneous chart-map path.
+    #[must_use]
+    pub fn declared_chart_maps(&self) -> &[DeclaredChartMapPrimitiveV1] {
+        &self.declared_chart_maps
     }
 
     /// Checked structural direction, nominal artifact identities, and declared ranks.
@@ -351,8 +456,8 @@ impl AdmittedDerivedMorphismV1 {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct GeometryEndpointV1 {
+#[derive(Debug, Clone, Copy)]
+struct GeometryEndpointV1<'a> {
     id: DerivedGeometryIdV1,
     subject: DerivedSubjectIdV1,
     model_version: DerivedModelVersionIdV1,
@@ -360,10 +465,11 @@ struct GeometryEndpointV1 {
     coefficients: CoefficientSystemV1,
     frame: DerivedFrameIdV1,
     unit_system: DerivedUnitSystemIdV1,
+    charts: &'a [ConfigurationChartV1],
 }
 
-impl GeometryEndpointV1 {
-    fn from_admitted(value: &AdmittedDerivedGeometryV1) -> Self {
+impl<'a> GeometryEndpointV1<'a> {
+    fn from_admitted(value: &'a AdmittedDerivedGeometryV1) -> Self {
         let ir = value.ir();
         Self {
             id: value.id(),
@@ -373,6 +479,7 @@ impl GeometryEndpointV1 {
             coefficients: ir.coefficients,
             frame: ir.frame,
             unit_system: ir.unit_system,
+            charts: &ir.charts,
         }
     }
 }
@@ -382,6 +489,13 @@ enum ReceiptClassV1 {
     Identity,
     PrimitiveStrict(DerivedWitnessIdV1),
     CompositeStrict,
+    PrimitiveDeclaredChartMap {
+        source_chart: ConfigurationChartIdV1,
+        target_chart: ConfigurationChartIdV1,
+        overlap: DerivedChartOverlapIdV1,
+        map: DerivedChartMapIdV1,
+    },
+    CompositeDeclaredChartMap,
 }
 
 fn is_zero(bytes: &[u8; 32]) -> bool {
@@ -471,6 +585,7 @@ fn evidence_bytes(evidence: DerivedEvidenceTransportV1) -> EvidenceBytesV1 {
 enum ClassBytesV1 {
     Tag([u8; 1]),
     Primitive([u8; 33]),
+    DeclaredChartMap([u8; 129]),
 }
 
 impl ClassBytesV1 {
@@ -478,6 +593,7 @@ impl ClassBytesV1 {
         match self {
             Self::Tag(bytes) => bytes,
             Self::Primitive(bytes) => bytes,
+            Self::DeclaredChartMap(bytes) => bytes,
         }
     }
 }
@@ -492,6 +608,21 @@ fn class_bytes(class: ReceiptClassV1) -> ClassBytesV1 {
             ClassBytesV1::Primitive(bytes)
         }
         ReceiptClassV1::CompositeStrict => ClassBytesV1::Tag([2]),
+        ReceiptClassV1::PrimitiveDeclaredChartMap {
+            source_chart,
+            target_chart,
+            overlap,
+            map,
+        } => {
+            let mut bytes = [0_u8; 129];
+            bytes[0] = 3;
+            bytes[1..33].copy_from_slice(source_chart.as_bytes());
+            bytes[33..65].copy_from_slice(target_chart.as_bytes());
+            bytes[65..97].copy_from_slice(overlap.as_bytes());
+            bytes[97..129].copy_from_slice(map.as_bytes());
+            ClassBytesV1::DeclaredChartMap(bytes)
+        }
+        ReceiptClassV1::CompositeDeclaredChartMap => ClassBytesV1::Tag([4]),
     }
 }
 
@@ -620,9 +751,9 @@ fn validate_evidence(
     Ok(())
 }
 
-fn strict_compatibility(
-    source: GeometryEndpointV1,
-    target: GeometryEndpointV1,
+fn shared_nonidentity_compatibility(
+    source: GeometryEndpointV1<'_>,
+    target: GeometryEndpointV1<'_>,
 ) -> Result<(), DerivedMorphismErrorV1> {
     if source.subject != target.subject {
         return Err(DerivedMorphismErrorV1::SubjectMismatch);
@@ -645,17 +776,70 @@ fn strict_compatibility(
     Ok(())
 }
 
+fn declared_chart_path(
+    source: GeometryEndpointV1<'_>,
+    target: GeometryEndpointV1<'_>,
+    source_chart: ConfigurationChartIdV1,
+    target_chart: ConfigurationChartIdV1,
+) -> Result<DerivedChartPathV1, DerivedMorphismErrorV1> {
+    if is_zero(source_chart.as_bytes()) {
+        return Err(DerivedMorphismErrorV1::MissingIdentity {
+            field: "source-chart",
+        });
+    }
+    if is_zero(target_chart.as_bytes()) {
+        return Err(DerivedMorphismErrorV1::MissingIdentity {
+            field: "target-chart",
+        });
+    }
+    let source_spec = source
+        .charts
+        .iter()
+        .find(|chart| chart.id == source_chart)
+        .ok_or(DerivedMorphismErrorV1::MissingChart {
+            field: "source-chart",
+        })?;
+    let target_spec = target
+        .charts
+        .iter()
+        .find(|chart| chart.id == target_chart)
+        .ok_or(DerivedMorphismErrorV1::MissingChart {
+            field: "target-chart",
+        })?;
+    if source_spec.coordinate_dimension != target_spec.coordinate_dimension
+        || source_spec.ambient_dimension != target_spec.ambient_dimension
+    {
+        return Err(DerivedMorphismErrorV1::ChartDimensionMismatch);
+    }
+    if source_spec.frame != source.frame
+        || target_spec.frame != target.frame
+        || source_spec.coordinates.system != source.unit_system
+        || target_spec.coordinates.system != target.unit_system
+        || source_spec.coordinates.quantity != target_spec.coordinates.quantity
+        || source_spec.coordinates.scale_to_canonical.to_bits()
+            != target_spec.coordinates.scale_to_canonical.to_bits()
+    {
+        return Err(DerivedMorphismErrorV1::ChartConventionMismatch);
+    }
+    Ok(DerivedChartPathV1 {
+        source_chart,
+        target_chart,
+    })
+}
+
 #[derive(Debug, Clone, Copy)]
 struct ValidatedMorphismClassV1 {
     admitted: AdmittedDerivedMorphismClassV1,
     receipt: ReceiptClassV1,
     no_claim: Option<DerivedNoClaimIdV1>,
+    chart_path: Option<DerivedChartPathV1>,
+    chart_primitive: Option<DeclaredChartMapPrimitiveV1>,
 }
 
 fn validate_morphism_class(
     ir: DerivedMorphismIrV1,
-    source: GeometryEndpointV1,
-    target: GeometryEndpointV1,
+    source: GeometryEndpointV1<'_>,
+    target: GeometryEndpointV1<'_>,
 ) -> Result<ValidatedMorphismClassV1, DerivedMorphismErrorV1> {
     match (ir.kind, ir.equivalence) {
         (DerivedMorphismKindV1::Identity, DerivedEquivalenceBoundaryV1::IdentityOnly) => {
@@ -666,6 +850,8 @@ fn validate_morphism_class(
                 admitted: AdmittedDerivedMorphismClassV1::Identity,
                 receipt: ReceiptClassV1::Identity,
                 no_claim: None,
+                chart_path: None,
+                chart_primitive: None,
             })
         }
         (
@@ -685,17 +871,63 @@ fn validate_morphism_class(
             if ir.evidence == DerivedEvidenceTransportV1::Identity {
                 return Err(DerivedMorphismErrorV1::EvidenceOrientationMismatch);
             }
-            strict_compatibility(source, target)?;
+            shared_nonidentity_compatibility(source, target)?;
             Ok(ValidatedMorphismClassV1 {
                 admitted: AdmittedDerivedMorphismClassV1::Strict,
                 receipt: ReceiptClassV1::PrimitiveStrict(witness),
                 no_claim: Some(artifact),
+                chart_path: None,
+                chart_primitive: None,
+            })
+        }
+        (
+            DerivedMorphismKindV1::DeclaredChartMap {
+                source_chart,
+                target_chart,
+                overlap,
+                map,
+            },
+            DerivedEquivalenceBoundaryV1::NoClaim { artifact },
+        ) => {
+            for (bytes, field) in [
+                (overlap.as_bytes(), "chart-overlap"),
+                (map.as_bytes(), "chart-map"),
+                (artifact.as_bytes(), "no-equivalence-claim"),
+            ] {
+                if is_zero(bytes) {
+                    return Err(DerivedMorphismErrorV1::MissingIdentity { field });
+                }
+            }
+            if ir.evidence == DerivedEvidenceTransportV1::Identity {
+                return Err(DerivedMorphismErrorV1::EvidenceOrientationMismatch);
+            }
+            shared_nonidentity_compatibility(source, target)?;
+            let chart_path = declared_chart_path(source, target, source_chart, target_chart)?;
+            Ok(ValidatedMorphismClassV1 {
+                admitted: AdmittedDerivedMorphismClassV1::DeclaredChartMapPath,
+                receipt: ReceiptClassV1::PrimitiveDeclaredChartMap {
+                    source_chart,
+                    target_chart,
+                    overlap,
+                    map,
+                },
+                no_claim: Some(artifact),
+                chart_path: Some(chart_path),
+                chart_primitive: Some(DeclaredChartMapPrimitiveV1 {
+                    source_geometry: source.id,
+                    target_geometry: target.id,
+                    source_chart,
+                    target_chart,
+                    overlap,
+                    map,
+                }),
             })
         }
         (DerivedMorphismKindV1::Identity, _) => Err(DerivedMorphismErrorV1::InvalidIdentity),
-        (DerivedMorphismKindV1::Strict { .. }, _) => {
-            Err(DerivedMorphismErrorV1::EquivalenceLaundering)
-        }
+        (
+            DerivedMorphismKindV1::Strict { .. } | DerivedMorphismKindV1::DeclaredChartMap { .. },
+            _,
+        ) => Err(DerivedMorphismErrorV1::EquivalenceLaundering),
     }
 }
 
@@ -714,10 +946,25 @@ fn retain_no_claim(
     Ok(retained)
 }
 
+fn retain_chart_primitive(
+    primitive: Option<DeclaredChartMapPrimitiveV1>,
+) -> Result<Vec<DeclaredChartMapPrimitiveV1>, DerivedMorphismErrorV1> {
+    let mut retained = Vec::new();
+    if let Some(primitive) = primitive {
+        retained
+            .try_reserve_exact(1)
+            .map_err(|_| DerivedMorphismErrorV1::AllocationRefused {
+                field: "declared-chart-map-lineage",
+            })?;
+        retained.push(primitive);
+    }
+    Ok(retained)
+}
+
 fn admit_between_endpoints(
     ir: DerivedMorphismIrV1,
-    source: GeometryEndpointV1,
-    target: GeometryEndpointV1,
+    source: GeometryEndpointV1<'_>,
+    target: GeometryEndpointV1<'_>,
     cx: &Cx<'_>,
 ) -> Result<AdmittedDerivedMorphismV1, DerivedMorphismErrorV1> {
     if cx.checkpoint().is_err() {
@@ -744,6 +991,7 @@ fn admit_between_endpoints(
         return Err(DerivedMorphismErrorV1::Cancelled { stage: "admission" });
     }
     let no_equivalence_claims = retain_no_claim(validated.no_claim)?;
+    let declared_chart_maps = retain_chart_primitive(validated.chart_primitive)?;
     let receipt = morphism_receipt(
         source.id,
         target.id,
@@ -754,7 +1002,7 @@ fn admit_between_endpoints(
         cx,
     )?;
     let mut primitive_factors = Vec::new();
-    if validated.admitted == AdmittedDerivedMorphismClassV1::Strict {
+    if validated.admitted != AdmittedDerivedMorphismClassV1::Identity {
         primitive_factors.try_reserve_exact(1).map_err(|_| {
             DerivedMorphismErrorV1::AllocationRefused {
                 field: "primitive-lineage",
@@ -771,6 +1019,8 @@ fn admit_between_endpoints(
         source: source.id,
         target: target.id,
         class: validated.admitted,
+        chart_path: validated.chart_path,
+        declared_chart_maps,
         evidence: ir.evidence,
         no_equivalence_claims,
         primitive_factors,
@@ -778,12 +1028,13 @@ fn admit_between_endpoints(
     })
 }
 
-/// Admit one primitive identity or strict map against exact RD.1a endpoints.
+/// Admit one primitive identity, generic strict map, or declared chart map.
 ///
 /// This validates only structural compatibility and monotonicity of the
 /// caller-declared evidence ranks. Nominal evidence identities are retained but
 /// not authenticated. A strict witness cannot mint equivalence, inverse,
-/// quasi-isomorphism, physical correspondence, or theorem authority.
+/// quasi-isomorphism, chart-map invertibility, overlap coverage, physical
+/// correspondence, or theorem authority.
 ///
 /// # Errors
 /// Returns a typed refusal for endpoint/model/category/coefficient/frame/unit,
@@ -888,6 +1139,12 @@ fn copy_admitted_morphism(
         &[],
         cx,
     )?;
+    let declared_chart_maps = combine_slices(
+        "declared-chart-map-lineage-copy",
+        &value.declared_chart_maps,
+        &[],
+        cx,
+    )?;
     if cx.checkpoint().is_err() {
         return Err(DerivedMorphismErrorV1::Cancelled {
             stage: "composition-publication",
@@ -897,11 +1154,71 @@ fn copy_admitted_morphism(
         source: value.source,
         target: value.target,
         class: value.class,
+        chart_path: value.chart_path,
+        declared_chart_maps,
         evidence: value.evidence,
         no_equivalence_claims,
         primitive_factors,
         receipt: value.receipt,
     })
+}
+
+fn compose_class(
+    first: &AdmittedDerivedMorphismV1,
+    second: &AdmittedDerivedMorphismV1,
+) -> Result<
+    (
+        AdmittedDerivedMorphismClassV1,
+        ReceiptClassV1,
+        Option<DerivedChartPathV1>,
+    ),
+    DerivedMorphismErrorV1,
+> {
+    match (first.class, second.class) {
+        (AdmittedDerivedMorphismClassV1::Strict, AdmittedDerivedMorphismClassV1::Strict) => Ok((
+            AdmittedDerivedMorphismClassV1::Strict,
+            ReceiptClassV1::CompositeStrict,
+            None,
+        )),
+        (
+            AdmittedDerivedMorphismClassV1::DeclaredChartMapPath,
+            AdmittedDerivedMorphismClassV1::DeclaredChartMapPath,
+        ) => {
+            let first_path = first
+                .chart_path
+                .ok_or(DerivedMorphismErrorV1::CompositionClassMismatch)?;
+            let second_path = second
+                .chart_path
+                .ok_or(DerivedMorphismErrorV1::CompositionClassMismatch)?;
+            let first_primitive = first
+                .declared_chart_maps
+                .last()
+                .ok_or(DerivedMorphismErrorV1::CompositionClassMismatch)?;
+            let second_primitive = second
+                .declared_chart_maps
+                .first()
+                .ok_or(DerivedMorphismErrorV1::CompositionClassMismatch)?;
+            if first_path.target_chart != second_path.source_chart
+                || first_primitive.target_geometry != second_primitive.source_geometry
+                || first_primitive.target_geometry != first.target
+                || second_primitive.source_geometry != second.source
+                || first_primitive.target_chart != second_primitive.source_chart
+                || first_path.target_chart != first_primitive.target_chart
+                || second_path.source_chart != second_primitive.source_chart
+            {
+                return Err(DerivedMorphismErrorV1::CompositionChartMismatch);
+            }
+            Ok((
+                AdmittedDerivedMorphismClassV1::DeclaredChartMapPath,
+                ReceiptClassV1::CompositeDeclaredChartMap,
+                Some(DerivedChartPathV1 {
+                    source_chart: first_path.source_chart,
+                    target_chart: second_path.target_chart,
+                }),
+            ))
+        }
+        _ => Err(DerivedMorphismErrorV1::CompositionClassMismatch),
+    }
 }
 
 fn compose_evidence(
@@ -981,13 +1298,15 @@ fn compose_evidence(
 
 /// Compose `first: X -> Y` followed by `second: Y -> Z`.
 ///
-/// Strict factors and no-equivalence artifacts are flattened in semantic
-/// order, so parenthesization does not change the receipt. Identity arrows are
-/// unique per geometry and rank-neutral, so they are exact composition units.
+/// Homogeneous factors and no-equivalence artifacts are flattened in semantic
+/// order, so parenthesization does not change the receipt. Declared chart-map
+/// paths require an exact middle chart. Identity arrows are unique per geometry
+/// and rank-neutral, so they are exact composition units. Mixed nonidentity map
+/// families refuse until typed heterogeneous composition lands.
 ///
 /// # Errors
-/// Returns a typed refusal for endpoint, variance, evidence-seam, lineage-cap,
-/// allocation, cancellation, or identity-construction defects.
+/// Returns a typed refusal for endpoint, path-family/chart/variance/evidence
+/// seams, lineage caps, allocation, cancellation, or identity defects.
 #[must_use = "composition refusal must not be treated as a morphism"]
 pub fn compose_derived_morphisms_v1(
     first: &AdmittedDerivedMorphismV1,
@@ -1010,6 +1329,7 @@ pub fn compose_derived_morphisms_v1(
         return copy_admitted_morphism(first, cx);
     }
 
+    let (class, receipt_class, chart_path) = compose_class(first, second)?;
     let evidence = compose_evidence(first.evidence, second.evidence)?;
     let primitive_factors = combine_slices(
         "primitive-lineage",
@@ -1023,10 +1343,16 @@ pub fn compose_derived_morphisms_v1(
         &second.no_equivalence_claims,
         cx,
     )?;
+    let declared_chart_maps = combine_slices(
+        "declared-chart-map-lineage",
+        &first.declared_chart_maps,
+        &second.declared_chart_maps,
+        cx,
+    )?;
     let receipt = morphism_receipt(
         first.source,
         second.target,
-        ReceiptClassV1::CompositeStrict,
+        receipt_class,
         evidence,
         &no_equivalence_claims,
         &primitive_factors,
@@ -1040,7 +1366,9 @@ pub fn compose_derived_morphisms_v1(
     Ok(AdmittedDerivedMorphismV1 {
         source: first.source,
         target: second.target,
-        class: AdmittedDerivedMorphismClassV1::Strict,
+        class,
+        chart_path,
+        declared_chart_maps,
         evidence,
         no_equivalence_claims,
         primitive_factors,
@@ -1053,6 +1381,11 @@ mod tests {
     use super::*;
     use asupersync::types::Budget;
     use fs_exec::{CancelGate, ExecMode, StreamKey};
+
+    use crate::derived::{
+        CompactnessV1, ConfigurationChartClassV1, DerivedQuantityKindIdV1, FiniteComputabilityV1,
+        LocalityScopeV1, RegularityClassV1, UnitBindingV1,
+    };
 
     fn with_cx<R>(cancelled: bool, f: impl FnOnce(&Cx<'_>) -> R) -> R {
         let gate = CancelGate::new_clock_free();
@@ -1081,7 +1414,7 @@ mod tests {
         DerivedGeometryIdV1::parse_slice(&[seed; 32]).expect("nonzero geometry identity")
     }
 
-    fn endpoint(seed: u8) -> GeometryEndpointV1 {
+    fn endpoint(seed: u8) -> GeometryEndpointV1<'static> {
         GeometryEndpointV1 {
             id: geometry_id(seed),
             subject: DerivedSubjectIdV1::from_bytes([1; 32]),
@@ -1090,6 +1423,54 @@ mod tests {
             coefficients: CoefficientSystemV1::RationalReal,
             frame: DerivedFrameIdV1::from_bytes([2; 32]),
             unit_system: DerivedUnitSystemIdV1::from_bytes([3; 32]),
+            charts: &[],
+        }
+    }
+
+    fn chart_id(seed: u8) -> ConfigurationChartIdV1 {
+        ConfigurationChartIdV1::from_bytes([seed; 32])
+    }
+
+    fn chart(
+        seed: u8,
+        coordinate_dimension: u32,
+        ambient_dimension: u32,
+        quantity_seed: u8,
+        scale_to_canonical: f64,
+    ) -> ConfigurationChartV1 {
+        let id = chart_id(seed);
+        ConfigurationChartV1 {
+            id,
+            class: ConfigurationChartClassV1::Semialgebraic,
+            coordinate_dimension,
+            ambient_dimension,
+            frame: DerivedFrameIdV1::from_bytes([2; 32]),
+            coordinates: UnitBindingV1 {
+                system: DerivedUnitSystemIdV1::from_bytes([3; 32]),
+                quantity: DerivedQuantityKindIdV1::from_bytes([quantity_seed; 32]),
+                scale_to_canonical,
+            },
+            locality: LocalityScopeV1::GermAt {
+                chart: id,
+                point: DerivedWitnessIdV1::from_bytes([seed.wrapping_add(1); 32]),
+            },
+            compactness: CompactnessV1::RelativelyCompact {
+                witness: DerivedWitnessIdV1::from_bytes([seed.wrapping_add(2); 32]),
+            },
+            regularity: RegularityClassV1::Polynomial,
+            computability: FiniteComputabilityV1::ExactFinite {
+                kernel: DerivedWitnessIdV1::from_bytes([seed.wrapping_add(3); 32]),
+            },
+        }
+    }
+
+    fn endpoint_with_charts<'a>(
+        seed: u8,
+        charts: &'a [ConfigurationChartV1],
+    ) -> GeometryEndpointV1<'a> {
+        GeometryEndpointV1 {
+            charts,
+            ..endpoint(seed)
         }
     }
 
@@ -1098,8 +1479,8 @@ mod tests {
     }
 
     fn strict_ir(
-        source: GeometryEndpointV1,
-        target: GeometryEndpointV1,
+        source: GeometryEndpointV1<'_>,
+        target: GeometryEndpointV1<'_>,
         witness: u8,
         input_rank: ColorRank,
         output_rank: ColorRank,
@@ -1125,9 +1506,28 @@ mod tests {
         }
     }
 
+    fn chart_map_ir(
+        source: GeometryEndpointV1<'_>,
+        target: GeometryEndpointV1<'_>,
+        source_chart: ConfigurationChartIdV1,
+        target_chart: ConfigurationChartIdV1,
+        artifact_seed: u8,
+        input_rank: ColorRank,
+        output_rank: ColorRank,
+    ) -> DerivedMorphismIrV1 {
+        let mut ir = strict_ir(source, target, artifact_seed, input_rank, output_rank);
+        ir.kind = DerivedMorphismKindV1::DeclaredChartMap {
+            source_chart,
+            target_chart,
+            overlap: DerivedChartOverlapIdV1::from_bytes([artifact_seed.wrapping_add(1); 32]),
+            map: DerivedChartMapIdV1::from_bytes([artifact_seed.wrapping_add(2); 32]),
+        };
+        ir
+    }
+
     fn restriction_ir(
-        source: GeometryEndpointV1,
-        target: GeometryEndpointV1,
+        source: GeometryEndpointV1<'_>,
+        target: GeometryEndpointV1<'_>,
         witness: u8,
         input_rank: ColorRank,
         output_rank: ColorRank,
@@ -1145,8 +1545,8 @@ mod tests {
     }
 
     fn admit_strict(
-        source: GeometryEndpointV1,
-        target: GeometryEndpointV1,
+        source: GeometryEndpointV1<'_>,
+        target: GeometryEndpointV1<'_>,
         witness: u8,
         input_rank: ColorRank,
         output_rank: ColorRank,
@@ -1161,7 +1561,35 @@ mod tests {
         .expect("valid strict morphism")
     }
 
-    fn admit_identity(object: GeometryEndpointV1, cx: &Cx<'_>) -> AdmittedDerivedMorphismV1 {
+    #[allow(clippy::too_many_arguments)]
+    fn admit_chart_map(
+        source: GeometryEndpointV1<'_>,
+        target: GeometryEndpointV1<'_>,
+        source_chart: ConfigurationChartIdV1,
+        target_chart: ConfigurationChartIdV1,
+        artifact_seed: u8,
+        input_rank: ColorRank,
+        output_rank: ColorRank,
+        cx: &Cx<'_>,
+    ) -> AdmittedDerivedMorphismV1 {
+        admit_between_endpoints(
+            chart_map_ir(
+                source,
+                target,
+                source_chart,
+                target_chart,
+                artifact_seed,
+                input_rank,
+                output_rank,
+            ),
+            source,
+            target,
+            cx,
+        )
+        .expect("valid declared chart map")
+    }
+
+    fn admit_identity(object: GeometryEndpointV1<'_>, cx: &Cx<'_>) -> AdmittedDerivedMorphismV1 {
         admit_between_endpoints(
             DerivedMorphismIrV1 {
                 schema_version: DERIVED_MORPHISM_SCHEMA_VERSION_V1,
@@ -1314,6 +1742,431 @@ mod tests {
                     input_rank: ColorRank::Verified,
                     output_rank: ColorRank::Validated,
                 }
+            );
+        });
+    }
+
+    #[test]
+    fn declared_chart_maps_compose_as_associative_typed_paths() {
+        with_cx(false, |cx| {
+            let x_charts = [chart(90, 2, 2, 9, 1.0)];
+            let y_charts = [chart(91, 2, 2, 9, 1.0)];
+            let z_charts = [chart(92, 2, 2, 9, 1.0)];
+            let w_charts = [chart(93, 2, 2, 9, 1.0)];
+            let x = endpoint_with_charts(86, &x_charts);
+            let y = endpoint_with_charts(87, &y_charts);
+            let z = endpoint_with_charts(88, &z_charts);
+            let w = endpoint_with_charts(89, &w_charts);
+            let f = admit_chart_map(
+                x,
+                y,
+                x_charts[0].id,
+                y_charts[0].id,
+                100,
+                ColorRank::Verified,
+                ColorRank::Validated,
+                cx,
+            );
+            let g = admit_chart_map(
+                y,
+                z,
+                y_charts[0].id,
+                z_charts[0].id,
+                104,
+                ColorRank::Validated,
+                ColorRank::Validated,
+                cx,
+            );
+            let h = admit_chart_map(
+                z,
+                w,
+                z_charts[0].id,
+                w_charts[0].id,
+                108,
+                ColorRank::Validated,
+                ColorRank::Estimated,
+                cx,
+            );
+
+            let fg = compose_derived_morphisms_v1(&f, &g, cx).expect("f then g");
+            let gh = compose_derived_morphisms_v1(&g, &h, cx).expect("g then h");
+            let left = compose_derived_morphisms_v1(&fg, &h, cx).expect("(fg)h");
+            let right = compose_derived_morphisms_v1(&f, &gh, cx).expect("f(gh)");
+            assert_eq!(left, right);
+            assert_eq!(
+                left.class(),
+                AdmittedDerivedMorphismClassV1::DeclaredChartMapPath
+            );
+            assert_eq!(
+                left.chart_path(),
+                Some(DerivedChartPathV1 {
+                    source_chart: x_charts[0].id,
+                    target_chart: w_charts[0].id,
+                })
+            );
+            assert_eq!(left.primitive_factors(), &[f.id(), g.id(), h.id()]);
+            assert_eq!(
+                left.declared_chart_maps(),
+                &[
+                    f.declared_chart_maps()[0],
+                    g.declared_chart_maps()[0],
+                    h.declared_chart_maps()[0],
+                ]
+            );
+            let identity = admit_identity(x, cx);
+            assert_eq!(
+                compose_derived_morphisms_v1(&identity, &f, cx).expect("identity then f"),
+                f
+            );
+        });
+    }
+
+    #[test]
+    fn declared_chart_map_receipt_binds_family_specific_ids() {
+        with_cx(false, |cx| {
+            let x_charts = [chart(110, 2, 2, 10, 1.0), chart(109, 2, 2, 10, 1.0)];
+            let y_charts = [chart(111, 2, 2, 10, 1.0), chart(117, 2, 2, 10, 1.0)];
+            let x = endpoint_with_charts(112, &x_charts);
+            let y = endpoint_with_charts(113, &y_charts);
+            let base_ir = chart_map_ir(
+                x,
+                y,
+                x_charts[0].id,
+                y_charts[0].id,
+                114,
+                ColorRank::Validated,
+                ColorRank::Estimated,
+            );
+            let base = admit_between_endpoints(base_ir, x, y, cx).expect("base chart map");
+            let replay = admit_between_endpoints(base_ir, x, y, cx).expect("replayed chart map");
+            assert_eq!(base, replay);
+            assert_eq!(
+                base.declared_chart_maps(),
+                &[DeclaredChartMapPrimitiveV1 {
+                    source_geometry: x.id,
+                    target_geometry: y.id,
+                    source_chart: x_charts[0].id,
+                    target_chart: y_charts[0].id,
+                    overlap: DerivedChartOverlapIdV1::from_bytes([115; 32]),
+                    map: DerivedChartMapIdV1::from_bytes([116; 32]),
+                }]
+            );
+
+            let mut changed_source = base_ir;
+            if let DerivedMorphismKindV1::DeclaredChartMap { source_chart, .. } =
+                &mut changed_source.kind
+            {
+                *source_chart = x_charts[1].id;
+            }
+            let changed_source = admit_between_endpoints(changed_source, x, y, cx)
+                .expect("changed source chart remains structural");
+            assert_ne!(base.id(), changed_source.id());
+
+            let mut changed_target = base_ir;
+            if let DerivedMorphismKindV1::DeclaredChartMap { target_chart, .. } =
+                &mut changed_target.kind
+            {
+                *target_chart = y_charts[1].id;
+            }
+            let changed_target = admit_between_endpoints(changed_target, x, y, cx)
+                .expect("changed target chart remains structural");
+            assert_ne!(base.id(), changed_target.id());
+
+            let mut changed_overlap = base_ir;
+            if let DerivedMorphismKindV1::DeclaredChartMap { overlap, .. } =
+                &mut changed_overlap.kind
+            {
+                *overlap = DerivedChartOverlapIdV1::from_bytes([118; 32]);
+            }
+            let changed_overlap = admit_between_endpoints(changed_overlap, x, y, cx)
+                .expect("changed overlap remains structural");
+            assert_ne!(base.id(), changed_overlap.id());
+
+            let mut changed_map = base_ir;
+            if let DerivedMorphismKindV1::DeclaredChartMap { map, .. } = &mut changed_map.kind {
+                *map = DerivedChartMapIdV1::from_bytes([119; 32]);
+            }
+            let changed_map = admit_between_endpoints(changed_map, x, y, cx)
+                .expect("changed map remains structural");
+            assert_ne!(base.id(), changed_map.id());
+
+            let generic_strict =
+                admit_strict(x, y, 114, ColorRank::Validated, ColorRank::Estimated, cx);
+            assert_ne!(base.id(), generic_strict.id());
+        });
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One mutation table for every chart-map admission boundary.
+    fn declared_chart_map_admission_refuses_missing_or_incompatible_charts() {
+        with_cx(false, |cx| {
+            let x_charts = [chart(120, 2, 2, 11, 1.0)];
+            let y_charts = [chart(121, 2, 2, 11, 1.0)];
+            let x = endpoint_with_charts(122, &x_charts);
+            let y = endpoint_with_charts(123, &y_charts);
+            let base = chart_map_ir(
+                x,
+                y,
+                x_charts[0].id,
+                y_charts[0].id,
+                124,
+                ColorRank::Validated,
+                ColorRank::Estimated,
+            );
+
+            let mut missing = base;
+            if let DerivedMorphismKindV1::DeclaredChartMap { source_chart, .. } = &mut missing.kind
+            {
+                *source_chart = chart_id(125);
+            }
+            assert_eq!(
+                admit_between_endpoints(missing, x, y, cx),
+                Err(DerivedMorphismErrorV1::MissingChart {
+                    field: "source-chart"
+                })
+            );
+
+            let mut missing_target = base;
+            if let DerivedMorphismKindV1::DeclaredChartMap { target_chart, .. } =
+                &mut missing_target.kind
+            {
+                *target_chart = chart_id(125);
+            }
+            assert_eq!(
+                admit_between_endpoints(missing_target, x, y, cx),
+                Err(DerivedMorphismErrorV1::MissingChart {
+                    field: "target-chart"
+                })
+            );
+
+            let mut zero_source = base;
+            if let DerivedMorphismKindV1::DeclaredChartMap { source_chart, .. } =
+                &mut zero_source.kind
+            {
+                *source_chart = chart_id(0);
+            }
+            assert_eq!(
+                admit_between_endpoints(zero_source, x, y, cx),
+                Err(DerivedMorphismErrorV1::MissingIdentity {
+                    field: "source-chart"
+                })
+            );
+
+            let mut zero_target = base;
+            if let DerivedMorphismKindV1::DeclaredChartMap { target_chart, .. } =
+                &mut zero_target.kind
+            {
+                *target_chart = chart_id(0);
+            }
+            assert_eq!(
+                admit_between_endpoints(zero_target, x, y, cx),
+                Err(DerivedMorphismErrorV1::MissingIdentity {
+                    field: "target-chart"
+                })
+            );
+
+            let mut zero_overlap = base;
+            if let DerivedMorphismKindV1::DeclaredChartMap { overlap, .. } = &mut zero_overlap.kind
+            {
+                *overlap = DerivedChartOverlapIdV1::from_bytes([0; 32]);
+            }
+            assert_eq!(
+                admit_between_endpoints(zero_overlap, x, y, cx),
+                Err(DerivedMorphismErrorV1::MissingIdentity {
+                    field: "chart-overlap"
+                })
+            );
+
+            let mut zero_map = base;
+            if let DerivedMorphismKindV1::DeclaredChartMap { map, .. } = &mut zero_map.kind {
+                *map = DerivedChartMapIdV1::from_bytes([0; 32]);
+            }
+            assert_eq!(
+                admit_between_endpoints(zero_map, x, y, cx),
+                Err(DerivedMorphismErrorV1::MissingIdentity { field: "chart-map" })
+            );
+
+            let mut laundering = base;
+            laundering.equivalence = DerivedEquivalenceBoundaryV1::IdentityOnly;
+            assert_eq!(
+                admit_between_endpoints(laundering, x, y, cx),
+                Err(DerivedMorphismErrorV1::EquivalenceLaundering)
+            );
+
+            let dimension_chart = [chart(126, 3, 3, 11, 1.0)];
+            let dimension_target = endpoint_with_charts(123, &dimension_chart);
+            assert_eq!(
+                admit_between_endpoints(
+                    chart_map_ir(
+                        x,
+                        dimension_target,
+                        x_charts[0].id,
+                        dimension_chart[0].id,
+                        127,
+                        ColorRank::Validated,
+                        ColorRank::Estimated,
+                    ),
+                    x,
+                    dimension_target,
+                    cx,
+                ),
+                Err(DerivedMorphismErrorV1::ChartDimensionMismatch)
+            );
+
+            let quantity_chart = [chart(128, 2, 2, 12, 1.0)];
+            let quantity_target = endpoint_with_charts(123, &quantity_chart);
+            assert_eq!(
+                admit_between_endpoints(
+                    chart_map_ir(
+                        x,
+                        quantity_target,
+                        x_charts[0].id,
+                        quantity_chart[0].id,
+                        129,
+                        ColorRank::Validated,
+                        ColorRank::Estimated,
+                    ),
+                    x,
+                    quantity_target,
+                    cx,
+                ),
+                Err(DerivedMorphismErrorV1::ChartConventionMismatch)
+            );
+        });
+    }
+
+    #[test]
+    fn declared_chart_map_admission_checks_each_chart_convention_field() {
+        with_cx(false, |cx| {
+            let source_charts = [chart(150, 2, 2, 15, 1.0)];
+            let source = endpoint_with_charts(151, &source_charts);
+
+            let mut wrong_frame = chart(152, 2, 2, 15, 1.0);
+            wrong_frame.frame = DerivedFrameIdV1::from_bytes([99; 32]);
+            let wrong_frame_charts = [wrong_frame];
+            let frame_target = endpoint_with_charts(153, &wrong_frame_charts);
+            assert_eq!(
+                admit_between_endpoints(
+                    chart_map_ir(
+                        source,
+                        frame_target,
+                        source_charts[0].id,
+                        wrong_frame_charts[0].id,
+                        154,
+                        ColorRank::Validated,
+                        ColorRank::Estimated,
+                    ),
+                    source,
+                    frame_target,
+                    cx,
+                ),
+                Err(DerivedMorphismErrorV1::ChartConventionMismatch)
+            );
+
+            let mut wrong_system = chart(155, 2, 2, 15, 1.0);
+            wrong_system.coordinates.system = DerivedUnitSystemIdV1::from_bytes([98; 32]);
+            let wrong_system_charts = [wrong_system];
+            let system_target = endpoint_with_charts(153, &wrong_system_charts);
+            assert_eq!(
+                admit_between_endpoints(
+                    chart_map_ir(
+                        source,
+                        system_target,
+                        source_charts[0].id,
+                        wrong_system_charts[0].id,
+                        158,
+                        ColorRank::Validated,
+                        ColorRank::Estimated,
+                    ),
+                    source,
+                    system_target,
+                    cx,
+                ),
+                Err(DerivedMorphismErrorV1::ChartConventionMismatch)
+            );
+
+            let wrong_scale_charts = [chart(159, 2, 2, 15, f64::from_bits(1.0_f64.to_bits() + 1))];
+            let scale_target = endpoint_with_charts(153, &wrong_scale_charts);
+            assert_eq!(
+                admit_between_endpoints(
+                    chart_map_ir(
+                        source,
+                        scale_target,
+                        source_charts[0].id,
+                        wrong_scale_charts[0].id,
+                        162,
+                        ColorRank::Validated,
+                        ColorRank::Estimated,
+                    ),
+                    source,
+                    scale_target,
+                    cx,
+                ),
+                Err(DerivedMorphismErrorV1::ChartConventionMismatch)
+            );
+        });
+    }
+
+    #[test]
+    fn declared_chart_map_self_map_cannot_use_identity_evidence_transport() {
+        with_cx(false, |cx| {
+            let charts = [chart(146, 2, 2, 14, 1.0), chart(147, 2, 2, 14, 1.0)];
+            let object = endpoint_with_charts(148, &charts);
+            let mut ir = chart_map_ir(
+                object,
+                object,
+                charts[0].id,
+                charts[1].id,
+                149,
+                ColorRank::Validated,
+                ColorRank::Validated,
+            );
+            ir.evidence = DerivedEvidenceTransportV1::Identity;
+            assert_eq!(
+                admit_between_endpoints(ir, object, object, cx),
+                Err(DerivedMorphismErrorV1::EvidenceOrientationMismatch)
+            );
+        });
+    }
+
+    #[test]
+    fn declared_chart_map_composition_refuses_wrong_chart_or_path_class() {
+        with_cx(false, |cx| {
+            let x_charts = [chart(130, 2, 2, 13, 1.0)];
+            let y_charts = [chart(131, 2, 2, 13, 1.0), chart(132, 2, 2, 13, 1.0)];
+            let z_charts = [chart(133, 2, 2, 13, 1.0)];
+            let x = endpoint_with_charts(134, &x_charts);
+            let y = endpoint_with_charts(135, &y_charts);
+            let z = endpoint_with_charts(136, &z_charts);
+            let f = admit_chart_map(
+                x,
+                y,
+                x_charts[0].id,
+                y_charts[0].id,
+                137,
+                ColorRank::Validated,
+                ColorRank::Validated,
+                cx,
+            );
+            let wrong_middle = admit_chart_map(
+                y,
+                z,
+                y_charts[1].id,
+                z_charts[0].id,
+                140,
+                ColorRank::Validated,
+                ColorRank::Estimated,
+                cx,
+            );
+            assert_eq!(
+                compose_derived_morphisms_v1(&f, &wrong_middle, cx),
+                Err(DerivedMorphismErrorV1::CompositionChartMismatch)
+            );
+
+            let strict = admit_strict(x, y, 143, ColorRank::Validated, ColorRank::Validated, cx);
+            assert_eq!(
+                compose_derived_morphisms_v1(&strict, &wrong_middle, cx),
+                Err(DerivedMorphismErrorV1::CompositionClassMismatch)
             );
         });
     }
