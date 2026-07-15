@@ -558,3 +558,35 @@ fn adm_013_max_component_index_reports_instead_of_panicking() {
         other => panic!("expected a shape mismatch, got {other:?}"),
     }
 }
+
+/// adm-014 — Min/Max are scalar-only END TO END: the shared leaf rule
+/// refuses vector operands (both evaluators implement only the scalar
+/// case), so no admitted program can reach their panic arms.
+#[test]
+fn adm_014_vector_min_max_refused_at_the_shared_rule() {
+    let mut b = ProblemBuilder::new();
+    let v = b
+        .var("x", Manifold::Rn { dim: 3 }, Dims::NONE)
+        .expect("var");
+    let r = b.var_ref(v).expect("ref");
+    let err = b.min_of(r, r).expect_err("vector min must refuse");
+    assert!(
+        matches!(
+            err,
+            OptError::ShapeMismatch {
+                op: "min",
+                right: fs_opt::Shape::Scalar,
+                ..
+            }
+        ),
+        "vector min refuses with the scalar requirement, got {err:?}"
+    );
+    let err = b.max_of(r, r).expect_err("vector max must refuse");
+    assert!(matches!(err, OptError::ShapeMismatch { op: "max", .. }));
+    // The scalar case is untouched.
+    let s1 = b.konst(1.0, Dims::NONE).expect("konst");
+    let s2 = b.konst(2.0, Dims::NONE).expect("konst");
+    let m = b.min_of(s1, s2).expect("scalar min admits");
+    b.objective(m, Sense::Minimize, 1.0).expect("objective");
+    b.finish().admit().expect("re-admits");
+}

@@ -759,3 +759,29 @@ fn a_chance_constraint_with_a_bad_delta_or_zero_samples_is_refused() {
         "invalid chance delta / zero samples are refused, not turned into a NaN certificate",
     );
 }
+
+/// Forged/stale NodeIds are typed refusals, never index panics
+/// (batch-verify High #2): interval evaluation checks the arena
+/// boundary before touching any expression.
+#[test]
+fn forged_node_ids_refuse_instead_of_panicking() {
+    let mut b = ProblemBuilder::new();
+    let v = b
+        .var("x", Manifold::Rn { dim: 1 }, fs_qty::Dims::NONE)
+        .expect("var");
+    let r = b.var_ref(v).expect("ref");
+    b.objective(r, fs_opt::Sense::Minimize, 1.0).expect("o");
+    let small = b.finish();
+    let boxes = [(0.0, 1.0)];
+    for forged in [NodeId(u32::MAX), NodeId(1_000)] {
+        let err =
+            interval_eval(&small, forged, &boxes).expect_err("out-of-arena node id must refuse");
+        assert!(
+            matches!(
+                err,
+                fs_constraint::IvalError::UnknownNode { node } if node == forged.0
+            ),
+            "typed UnknownNode refusal expected, got {err:?}"
+        );
+    }
+}

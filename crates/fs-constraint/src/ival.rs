@@ -107,6 +107,12 @@ pub enum IvalError {
         /// Node id.
         node: u32,
     },
+    /// A node id outside the problem's arena: a forged or stale
+    /// `NodeId` is a typed refusal, never an index panic.
+    UnknownNode {
+        /// The refused node id.
+        node: u32,
+    },
     /// Negative `powi` exponents are deferred.
     NegativePow,
     /// Binding count does not cover the variable's components.
@@ -126,6 +132,11 @@ impl core::fmt::Display for IvalError {
             IvalError::Unevaluable { node } => write!(
                 f,
                 "node {node} (PDE/stochastic) has no interval semantics in this engine"
+            ),
+            IvalError::UnknownNode { node } => write!(
+                f,
+                "node id {node} is outside the problem's expression arena; interval \
+                 evaluation refuses forged or stale node references"
             ),
             IvalError::NegativePow => write!(f, "negative integer powers are deferred"),
             IvalError::BadBindings => {
@@ -166,7 +177,14 @@ fn ival_at(problem: &Problem, node: NodeId, boxes: &[(f64, f64)]) -> Result<IvVa
             IvVal::V(_) => unreachable!("builder enforced scalar shapes"),
         }
     };
-    let out = match &problem.exprs()[node.0 as usize] {
+    // Checked fetch (batch-verify High #2): a caller-supplied NodeId
+    // is untrusted data; out-of-arena ids refuse typed instead of
+    // panicking at the index.
+    let expr = problem
+        .exprs()
+        .get(node.0 as usize)
+        .ok_or(IvalError::UnknownNode { node: node.0 })?;
+    let out = match expr {
         Expr::Var(_) => IvVal::V(
             boxes
                 .iter()
