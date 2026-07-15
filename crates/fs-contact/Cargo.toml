@@ -1,0 +1,26 @@
+[package]
+name = "fs-contact"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Capability-routed body-to-body contact: spacetime broad phase over certified motor tubes, convex/SDF narrow-phase routing with typed refusals, and (staged) certified CCD."
+
+[package.metadata.frankensim]
+layer = "L3"
+
+[dependencies]
+fs-exec = { path = "../fs-exec" }
+fs-geom = { path = "../fs-geom" }
+fs-ivl = { path = "../fs-ivl" }
+fs-motion = { path = "../fs-motion" }
+fs-query = { path = "../fs-query" }
+
+[dev-dependencies]
+asupersync = { path = "../../../asupersync" }
+fs-alloc = { path = "../fs-alloc" }
+fs-ga = { path = "../fs-ga" }
+
+[lints]
+workspace = true

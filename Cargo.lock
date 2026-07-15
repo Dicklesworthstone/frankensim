@@ -855,6 +855,7 @@ dependencies = [
 name = "fs-benchmark"
 version = "0.0.1"
 dependencies = [
+ "fs-blake3",
  "fs-evidence",
 ]
 
@@ -928,6 +929,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-contact"
+version = "0.0.1"
+dependencies = [
+ "asupersync",
+ "fs-alloc",
+ "fs-exec",
+ "fs-ga",
+ "fs-geom",
+ "fs-ivl",
+ "fs-motion",
+ "fs-query",
+]
+
+[[package]]
 name = "fs-contract"
 version = "0.0.1"
 dependencies = [
@@ -979,9 +994,12 @@ dependencies = [
 name = "fs-diffreal-e2e"
 version = "0.0.1"
 dependencies = [
+ "fs-ad",
+ "fs-adjoint",
  "fs-alloc",
  "fs-asbuilt",
  "fs-assimilate",
+ "fs-blake3",
  "fs-evidence",
  "fs-exec",
  "fs-toleralloc",
@@ -1393,6 +1411,7 @@ dependencies = [
  "fs-geom",
  "fs-ivl",
  "fs-math",
+ "fs-query",
 ]
 
 [[package]]
@@ -1885,6 +1904,7 @@ dependencies = [
  "fs-ga",
  "fs-la",
  "fs-math",
+ "fs-solver",
 ]
 
 [[package]]
