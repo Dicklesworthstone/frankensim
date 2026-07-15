@@ -116,11 +116,15 @@ struct WorkProgress<'a, 's> {
     polls_remaining: u32,
     shared_polls_remaining: Option<&'a mut u32>,
     invocation_poll: Option<&'a mut dyn fs_exec::InvocationPoll>,
+    ambient: Option<fs_exec::AdmittedBudget<'s>>,
 }
 
 impl<'a, 's> WorkProgress<'a, 's> {
-    fn new(cx: &'a Cx<'s>, plan: WorkPlan) -> Self {
-        Self {
+    fn new(cx: &'a Cx<'s>, plan: WorkPlan) -> Result<Self, AssimError> {
+        let planned_cost = u64::try_from(plan.total).unwrap_or(u64::MAX);
+        let ambient = fs_exec::AdmittedBudget::admit_ambient(cx, planned_cost)
+            .map_err(AssimError::BudgetRefused)?;
+        Ok(Self {
             cx,
             completed: 0,
             planned: plan.total,
@@ -132,7 +136,8 @@ impl<'a, 's> WorkProgress<'a, 's> {
             polls_remaining: cx.budget().poll_quota,
             shared_polls_remaining: None,
             invocation_poll: None,
-        }
+            ambient: Some(ambient),
+        })
     }
 
     fn new_with_shared_poll_quota(
@@ -152,6 +157,7 @@ impl<'a, 's> WorkProgress<'a, 's> {
             polls_remaining: *polls_remaining,
             shared_polls_remaining: Some(polls_remaining),
             invocation_poll: None,
+            ambient: None,
         }
     }
 
@@ -173,6 +179,7 @@ impl<'a, 's> WorkProgress<'a, 's> {
             polls_remaining: polls,
             shared_polls_remaining: None,
             invocation_poll: Some(invocation_poll),
+            ambient: None,
         }
     }
 
@@ -181,6 +188,22 @@ impl<'a, 's> WorkProgress<'a, 's> {
             let result = invocation.invocation_poll(phase);
             self.polls_remaining = invocation.invocation_polls_remaining().get();
             return result.map_err(AssimError::InvocationBudget);
+        }
+        if let Some(ambient) = self.ambient.as_mut() {
+            let completed = self.completed;
+            let planned = self.planned;
+            let result = ambient.checkpoint(phase, self.cx);
+            if self.polls_remaining != 0 && self.polls_remaining != u32::MAX {
+                self.polls_remaining -= 1;
+            }
+            return result.map_err(|refusal| match refusal {
+                fs_exec::BudgetRefusal::Cancelled { .. } => AssimError::Cancelled {
+                    phase,
+                    completed,
+                    planned,
+                },
+                other => AssimError::BudgetRefused(other),
+            });
         }
         if self.polls_remaining == 0 {
             return Err(self.cancelled(phase));
@@ -247,6 +270,11 @@ impl<'a, 's> WorkProgress<'a, 's> {
     }
 
     fn advance(&mut self, phase: &'static str, units: u128) -> Result<(), AssimError> {
+        if let Some(ambient) = self.ambient.as_mut() {
+            ambient
+                .charge_cost(phase, u64::try_from(units).unwrap_or(u64::MAX))
+                .map_err(AssimError::BudgetRefused)?;
+        }
         let attempted = self
             .completed
             .checked_add(units)
@@ -295,7 +323,7 @@ impl Belief {
     ) -> Result<Self, AssimError> {
         preflight_belief_shape(&mean, &cov)?;
         let plan = belief_validation_work_plan(mean.len())?;
-        let mut progress = WorkProgress::new(cx, plan);
+        let mut progress = WorkProgress::new(cx, plan)?;
         progress.checkpoint("initial")?;
         validate_belief_parts(&mean, &cov, "belief-validation", &mut progress)?;
         canonicalize_belief_zeros(&mut mean, &mut cov, &mut progress)?;
@@ -344,7 +372,7 @@ impl Belief {
         let _certificate_bytes =
             checked_square_allocation::<PsdCell>(means.len(), "diagonal PSD certificate")?;
         let plan = belief_validation_work_plan(means.len())?;
-        let mut progress = WorkProgress::new(cx, plan);
+        let mut progress = WorkProgress::new(cx, plan)?;
         Self::diagonal_planned(means, vars, &mut progress)
     }
 
@@ -488,7 +516,7 @@ impl Belief {
     pub fn validate(&self, cx: &Cx<'_>) -> Result<(), AssimError> {
         preflight_belief_shape(&self.mean, &self.cov)?;
         let plan = belief_validation_work_plan(self.dim())?;
-        let mut progress = WorkProgress::new(cx, plan);
+        let mut progress = WorkProgress::new(cx, plan)?;
         progress.checkpoint("initial")?;
         validate_belief_parts(&self.mean, &self.cov, "belief-validation", &mut progress)?;
         progress.checkpoint("finalize")
@@ -740,6 +768,10 @@ pub enum AssimError {
     },
     /// A typed invocation child refused resource accounting.
     InvocationBudget(fs_exec::InvocationError),
+    /// The ambient admitted budget refused admission or further work
+    /// (deadline, poll, or cost); the typed refusal is retained
+    /// verbatim and no partial result is published (bead sj31i.6).
+    BudgetRefused(fs_exec::BudgetRefusal),
     /// The operation observed cancellation or exhausted its poll quota at a
     /// deterministic checkpoint. No partial belief or candidate is published.
     Cancelled {
@@ -904,6 +936,9 @@ impl fmt::Display for AssimError {
             Self::InvocationBudget(error) => {
                 write!(f, "assimilation invocation refused: {error}")
             }
+            Self::BudgetRefused(refusal) => {
+                write!(f, "assimilation budget refused: {refusal}")
+            }
             Self::Cancelled {
                 phase,
                 completed,
@@ -998,6 +1033,7 @@ impl std::error::Error for AssimError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::InvocationBudget(error) => Some(error),
+            Self::BudgetRefused(refusal) => Some(refusal),
             _ => None,
         }
     }
@@ -1029,7 +1065,7 @@ pub fn misfit(
         None,
         cx.mode().name().len(),
     )?;
-    let mut progress = WorkProgress::new(cx, plan);
+    let mut progress = WorkProgress::new(cx, plan)?;
     progress.checkpoint("initial")?;
     let observations = validated_canonical_observations(observations, belief.dim(), &mut progress)?;
     let total = misfit_canonical(belief, &observations, "misfit", &mut progress)?;
@@ -1097,7 +1133,7 @@ pub fn assimilate(prior: &Belief, obs: &Observation, cx: &Cx<'_>) -> Result<Beli
         None,
         cx.mode().name().len(),
     )?;
-    let mut progress = WorkProgress::new(cx, plan);
+    let mut progress = WorkProgress::new(cx, plan)?;
     progress.checkpoint("initial")?;
     let observations = validated_canonical_observations(observations, prior.dim(), &mut progress)?;
     let belief = assimilate_canonical(prior, &observations, &mut progress)?;
@@ -1126,7 +1162,7 @@ pub fn assimilate_all(
         None,
         cx.mode().name().len(),
     )?;
-    let mut progress = WorkProgress::new(cx, plan);
+    let mut progress = WorkProgress::new(cx, plan)?;
     progress.checkpoint("initial")?;
     let observations = validated_canonical_observations(observations, prior.dim(), &mut progress)?;
     let belief = assimilate_canonical(prior, &observations, &mut progress)?;
@@ -1226,7 +1262,7 @@ pub fn assimilate_colored(
         Some((regime_param, regime_lo, regime_hi)),
         cx.mode().name().len(),
     )?;
-    let mut progress = WorkProgress::new(cx, plan);
+    let mut progress = WorkProgress::new(cx, plan)?;
     assimilate_colored_planned(
         prior,
         observations,

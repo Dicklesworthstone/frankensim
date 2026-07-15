@@ -153,10 +153,18 @@ panics. Empty/ragged/indefinite/unresolved/non-finite beliefs, malformed observa
 invalid identities and regimes, non-positive or non-finite noise, dimension
 mismatches, oversized aggregate count/work requests, degenerate innovations,
 and finite-input arithmetic overflow are refused. `WorkPlanOverflow`,
-`WorkPlanExceeded`, `PollQuotaExceedsAmbient`, `InvocationBudget`, and
-`Cancelled` distinguish planning, accounting, compositional-quota, typed
-invocation, and observed-cancellation failures; no partial belief/candidate is
-returned. Scientific preflight and domain refusals are latched fail-closed into
+`WorkPlanExceeded`, `PollQuotaExceedsAmbient`, `InvocationBudget`,
+`BudgetRefused`, and `Cancelled` distinguish planning, accounting,
+compositional-quota, typed invocation, ambient-budget, and
+observed-cancellation failures; no partial belief/candidate is returned.
+Ambient-path entry points (bead sj31i.6) admit `cx.budget()` plus the
+preflighted work plan through `fs_exec::AdmittedBudget` before any work:
+an already-expired deadline (`Budget::ZERO` included), a deadline on a
+context without an ambient time source, or a plan exceeding the cost quota
+refuses at admission; deadline and poll quota are enforced at every
+checkpoint (cancellation takes precedence) and each advanced work unit
+charges one cost unit. Poll exhaustion is a typed
+`BudgetRefused(PollsExhausted)`, no longer conflated with `Cancelled`. Scientific preflight and domain refusals are latched fail-closed into
 the invocation. Allocation failure remains
 Rust's process-level behavior inside the admitted public resource envelope.
 Preflight checks both retained covariance and temporary interval-certificate

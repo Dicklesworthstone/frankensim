@@ -13,8 +13,8 @@ use fs_assimilate::{
 use fs_blake3::hash_domain;
 use fs_evidence::{MAX_COLOR_IDENTITY_BYTES, color_leaf_identity_reason};
 use fs_exec::{
-    Budget, CancelGate, Cx, ExecMode, InvocationAdmitter, InvocationDisposition, InvocationLimits,
-    StreamKey, VirtualClock,
+    Budget, BudgetRefusal, CancelGate, Cx, ExecMode, InvocationAdmitter, InvocationDisposition,
+    InvocationLimits, StreamKey, VirtualClock,
 };
 
 const TEST_STREAM: StreamKey = StreamKey {
@@ -40,8 +40,9 @@ fn with_stream_cx<R>(
     f: impl FnOnce(&Cx<'_>) -> R,
 ) -> R {
     let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+    let clock = fs_exec::VirtualClock::new();
     let result = pool.scope(|arena| {
-        let cx = Cx::new(gate, arena, stream, budget, mode);
+        let cx = Cx::new(gate, arena, stream, budget, mode).with_time_source(&clock);
         f(&cx)
     });
     let stats = pool.stats();
@@ -1090,11 +1091,10 @@ fn g4_hostile_maximum_cancels_at_a_bounded_mid_operation_checkpoint() {
     );
     assert!(matches!(
         result,
-        Err(AssimError::Cancelled {
+        Err(AssimError::BudgetRefused(BudgetRefusal::PollsExhausted {
             phase: "observation-validation",
-            completed,
-            planned,
-        }) if completed > 0 && completed < planned
+            quota: 1,
+        }))
     ));
 }
 
@@ -1118,11 +1118,10 @@ fn g4_canonical_merge_polls_inside_a_maximum_record_comparison() {
     );
     assert!(matches!(
         cancelled,
-        Err(AssimError::Cancelled {
+        Err(AssimError::BudgetRefused(BudgetRefusal::PollsExhausted {
             phase: "canonical-compare",
-            completed: 64_376,
-            planned: 190_032,
-        })
+            quota: 3_899,
+        }))
     ));
 
     let baseline = misfit(&prior, &observations).expect("healthy comparison baseline");
@@ -1153,12 +1152,7 @@ fn g4_quota_sweep_reaches_update_psd_hash_and_commit_then_replays_cleanly() {
             |cx| assimilate_colored_with_cx(&prior, &observations, "Re", 1.0, 2.0, cx),
         );
         match result {
-            Err(AssimError::Cancelled {
-                phase,
-                completed: completed_work,
-                planned,
-            }) => {
-                assert!(completed_work <= planned);
+            Err(AssimError::BudgetRefused(BudgetRefusal::PollsExhausted { phase, .. })) => {
                 if targets.contains(&phase) && !seen.contains(&phase) {
                     seen.push(phase);
                     let recovered = assimilate_colored(&prior, &observations, "Re", 1.0, 2.0)
@@ -1196,25 +1190,25 @@ fn g4_final_checkpoint_can_refuse_publication_after_local_completion() {
         );
         match result {
             Err(
-                error @ AssimError::Cancelled {
-                    phase: "finalize", ..
-                },
+                error @ AssimError::BudgetRefused(BudgetRefusal::PollsExhausted {
+                    phase: "finalize",
+                    ..
+                }),
             ) => {
                 final_refusal = Some(error);
                 break;
             }
-            Err(AssimError::Cancelled { .. }) | Ok(_) => {}
+            Err(AssimError::BudgetRefused(BudgetRefusal::PollsExhausted { .. })) | Ok(_) => {}
             Err(other) => panic!("unexpected final-boundary result: {other}"),
         }
     }
 
     assert!(matches!(
         final_refusal,
-        Some(AssimError::Cancelled {
+        Some(AssimError::BudgetRefused(BudgetRefusal::PollsExhausted {
             phase: "finalize",
-            completed,
-            planned,
-        }) if completed <= planned && planned > 0
+            ..
+        }))
     ));
 
     let recovered = assimilate_colored(&prior, &observations, "Re", 1.0, 2.0)
@@ -1325,23 +1319,17 @@ fn g5_candidate_identity_binds_mode_budget_and_every_stream_field() {
         .with_poll_quota(10_000)
         .with_cost_quota(20_000)
         .with_priority(73);
-    let zero_deadline = Budget::with_deadline_at_ns(0)
-        .with_poll_quota(10_000)
-        .with_cost_quota(20_000)
-        .with_priority(73);
     let no_cost = Budget::new().with_poll_quota(10_000).with_priority(73);
-    let zero_cost = no_cost.with_cost_quota(0);
-    // `None` and `Some(0)` have the same encoded numeric value. Keeping both
-    // pairs in the uniqueness battery makes the presence atoms independently
-    // mutation-sensitive rather than testing presence and value together.
+    // Zero-deadline and zero-cost budgets are refused at admission under the
+    // sj31i.6 accountant (they can never produce evidence), so the presence
+    // atoms are covered by present/absent pairs and the value atoms by
+    // adjacent admissible encodings.
     let variants = [
         (ExecMode::Deterministic, base, TEST_STREAM),
         (ExecMode::Fast, base, TEST_STREAM),
         (ExecMode::Deterministic, deadline, TEST_STREAM),
         (ExecMode::Deterministic, alternate_deadline, TEST_STREAM),
-        (ExecMode::Deterministic, zero_deadline, TEST_STREAM),
         (ExecMode::Deterministic, no_cost, TEST_STREAM),
-        (ExecMode::Deterministic, zero_cost, TEST_STREAM),
         (
             ExecMode::Deterministic,
             base.with_poll_quota(10_001),
