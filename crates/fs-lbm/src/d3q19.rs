@@ -4,15 +4,15 @@
 //! the 3-D sibling of the D2Q9 module in `lib.rs`, which it deliberately
 //! mirrors (and leaves untouched).
 //!
-//! DETERMINISTIC TRAVERSAL (pinned): both the collide and stream loops
-//! visit tiles in ascending tile index (x-fastest, then y, then z over
-//! the tile grid) and cells within a tile in ascending local index
-//! (x-fastest, then y, then z). Single-threaded in this bead; when WS1-D
-//! parallelizes the sweep, per-cell writes stay slot-exclusive (collide
-//! is pointwise; pull-streaming writes only the destination cell), so
-//! this order is documentation of the CANONICAL schedule, not a hidden
-//! result dependence — results must stay bit-identical across worker
-//! counts by construction.
+//! DETERMINISTIC TRAVERSAL (pinned): collision visits tiles in ascending
+//! tile index and cells in ascending local index (x-fastest, then y, then
+//! z). Duct pull-streaming visits directions, z rows, y rows, then x tiles,
+//! moving each four-cell x row as one block. Single-threaded in this bead;
+//! when WS1-D parallelizes the sweep, per-cell writes stay slot-exclusive
+//! (collision is pointwise; pull-streaming writes only the destination
+//! population), so these orders document CANONICAL schedules rather than
+//! hidden result dependencies — results must stay bit-identical across
+//! worker counts by construction.
 //!
 //! Layout: the domain is split into 4×4×4 tiles (64 cells, 512 B per
 //! field per tile, 128-byte aligned). Each of the 19 distribution
@@ -28,7 +28,9 @@ pub use boundary::{
     BoundaryGrid3, BoundaryLink3, BoundarySpec3, D3Q19_BOUNDARY_BIT_SEMANTICS_VERSION, Face3,
     FaceBoundary3, LinkMaskTile3,
 };
-pub use simd::{D3q19BgkSimdTier, d3q19_bgk_simd_tier};
+pub use simd::{
+    D3q19BgkSimdTier, D3q19StreamSimdTier, d3q19_bgk_simd_tier, d3q19_stream_simd_tier,
+};
 
 /// Bit-semantics version of the D3Q19 surface (golden-couplings.json):
 /// covers the velocity/weight/opposite tables and ordering, the
@@ -858,48 +860,9 @@ impl Duct {
             simd::collide_bgk_axial_z_tile(&input, &mut output, self.tau, self.gz)
                 .expect("Duct constructor and prior collision state admit BGK/Guo collision");
         }
-        // Pull streaming: destination (x,y,z) reads post[source] where
-        // source = destination − e_i; crossing an x or y boundary means
-        // the population came off a wall — halfway bounce-back reflects
-        // the OPPOSITE post-collision population of the destination cell
-        // itself; z wraps (periodic). Offsets are ±1 only.
-        for z in 0..self.nz {
-            for y in 0..self.ny {
-                for x in 0..self.nx {
-                    let (dtile, dlane) = self.addr(x, y, z);
-                    for i in 0..Q3 {
-                        let (ex, ey, ez) = E3[i];
-                        let sx = match ex {
-                            1 if x == 0 => None,
-                            1 => Some(x - 1),
-                            -1 if x + 1 == self.nx => None,
-                            -1 => Some(x + 1),
-                            _ => Some(x),
-                        };
-                        let sy = match ey {
-                            1 if y == 0 => None,
-                            1 => Some(y - 1),
-                            -1 if y + 1 == self.ny => None,
-                            -1 => Some(y + 1),
-                            _ => Some(y),
-                        };
-                        let sz = match ez {
-                            1 => (z + self.nz - 1) % self.nz,
-                            -1 => (z + 1) % self.nz,
-                            _ => z,
-                        };
-                        self.f[i][dtile].0[dlane] = match (sx, sy) {
-                            (Some(sx), Some(sy)) => {
-                                let (stile, slane) = self.addr(sx, sy, sz);
-                                self.post[i][stile].0[slane]
-                            }
-                            // wall crossing: bounce back in place.
-                            _ => self.post[OPP3[i]][dtile].0[dlane],
-                        };
-                    }
-                }
-            }
-        }
+        // Pull streaming: SIMD rows are pure moves and retain the scalar
+        // source map bit-for-bit (x/y halfway bounce, periodic z).
+        simd::stream_duct(&self.post, &mut self.f, self.nx, self.ny, self.nz);
     }
 
     /// Run `steps` steps.

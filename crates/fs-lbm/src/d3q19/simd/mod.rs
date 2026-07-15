@@ -14,8 +14,12 @@ use super::{W3, equilibrium3};
 
 #[cfg(all(target_arch = "aarch64", not(miri)))]
 mod neon;
+mod stream;
 #[cfg(all(target_arch = "x86_64", not(miri)))]
 mod x86;
+
+pub(super) use stream::stream_duct;
+pub use stream::{D3q19StreamSimdTier, d3q19_stream_simd_tier};
 
 pub(super) type TileInput<'a> = [&'a [f64; TILE_CELLS]; Q3];
 pub(super) type TileOutput<'a> = [&'a mut [f64; TILE_CELLS]; Q3];

@@ -46,11 +46,15 @@ scaling plan) and deterministic `fs-math` primitives. Pure, deterministic
   body-force core on aligned 4x4x4 SoA tiles, with stationary halfway
   bounce-back x/y walls and periodic z for the rectangular-duct fixture. Its
   axial-z BGK collision dispatches once to a bit-neutral NEON/AVX2 tile capsule
-  or the scalar twin; SIMD lanes are independent cells and the pull stream is
-  unchanged.
+  or the scalar twin. Its separate pull-stream dispatcher moves four-cell x
+  rows through a bit-neutral NEON/AVX2 capsule or the scalar stencil; SIMD
+  lanes are independent cells, and streaming performs no floating arithmetic.
 - `d3q19_bgk_simd_tier` / `D3q19BgkSimdTier` — truthful operation-specific
   receipt for the Duct collision kernel. AVX-512 hosts report AVX2 because this
   capsule deliberately uses four-lane AVX2; x86 without AVX2+FMA reports scalar.
+- `d3q19_stream_simd_tier` / `D3q19StreamSimdTier` — separate receipt for the
+  Duct pull-stream kernel. AArch64 reports NEON; x86 requires only AVX2 for this
+  pure-move capsule and otherwise reports scalar.
 - `d3q19::{CollisionModel3, collide_cell3, CollisionError3}` — the checked
   per-cell collision authority used by `BoundaryGrid3` and public cell calls.
   `Bgk { tau }` retains the frozen general-force projection; the Duct tile
@@ -102,6 +106,9 @@ scaling plan) and deterministic `fs-math` primitives. Pure, deterministic
 - MASS is conserved by a closed-domain step (collision, forcing, streaming,
   and bounce-back all conserve mass). Prescribed velocity/pressure faces are
   open-system flux boundaries and do not claim global mass conservation.
+- Duct SIMD streaming is a pure population-bit permutation. Its x/y wall
+  crossings read the opposite population at the destination cell, including
+  corners and simultaneous z wraps; every non-wall z source is periodic.
 - Steady Poiseuille channel flow matches the analytic parabola to a few percent
   (halfway bounce-back resolves the quadratic profile).
 - `plan_scaling` derives `τ = 3ν + ½`, flags `stable` iff `τ > ½` AND
@@ -176,9 +183,10 @@ transform.
 
 Fully deterministic: fixed cell iteration order for D2Q9 and fixed logical
 tile/cell/direction identities plus face/z/y/x reconstruction order for D3Q19;
-no RNG. The Duct capsule changes only cross-cell execution in fixed lane blocks:
-every cell retains the frozen direction-ascending reductions and scalar
-operation tree bitwise.
+no RNG. Duct collision retains the frozen direction-ascending reductions and
+scalar operation tree in fixed lane blocks. Duct pull-streaming uses a pinned
+direction/z/y/x-tile row schedule, but only moves bits into slot-exclusive
+destinations, so schedule changes cannot create arithmetic reassociation.
 
 ## Cancellation behavior
 
@@ -187,11 +195,13 @@ production kernel's concern.
 
 ## Unsafe boundary
 
-Two registered leaf capsules opt out of the workspace default at module scope:
-`src/d3q19/simd/neon/mod.rs` and `src/d3q19/simd/x86/mod.rs`, each below the
-capsule line cap with an adjacent `SAFETY.md`. Safe fixed-size tile borrows prove
-bounds and aliasing; the x86 one-shot selector admits its private thunk only
-after AVX2+FMA detection. Miri selects the safe scalar twin.
+Four registered leaf capsules opt out of the workspace default at module scope:
+the collision pair under `src/d3q19/simd/{neon,x86}/mod.rs` and the pull-stream
+pair under `src/d3q19/simd/stream/{neon,x86}/mod.rs`. Each stays below the
+capsule line cap with an adjacent `SAFETY.md`. Safe façades validate tile shapes,
+Rust borrows prove aliasing and lifetimes, and x86 one-shot selectors admit
+private thunks only after their operation-specific feature checks. Miri selects
+safe scalar twins.
 
 ## Feature flags
 
@@ -232,11 +242,15 @@ kernel bit-equivalence, BGK/central-moment equal-rate equivalence, split-rate
 conservation, reduced-cumulant equilibrium/nonlinearity/axis-covariance laws,
 and fail-closed inputs.
 
-The D3Q19 SIMD module adds a G0 seeded per-lane differential battery against its
-scalar tile twin, a direct scalar-twin comparison with the frozen axial cell
-authority, first-divergence JSONL receipts, hostile dispatch-selector cases,
-and one-shot table identity. The existing Duct golden remains the end-to-end
-bit-surface gate.
+The D3Q19 SIMD module adds G0 seeded differential batteries for both operations.
+Collision compares every lane to its scalar tile twin and directly locks that
+twin to the frozen axial cell authority. Pull-streaming compares every
+population bit on a single-tile fixture and an asymmetric 2x3x4-tile fixture;
+independent route anchors cover inter-tile x/y/z moves, periodic z, corner
+bounce, and wall precedence over simultaneous z wrap. Both batteries retain
+first-divergence JSONL receipts, hostile dispatch-selector cases, and one-shot
+table identity. The existing Duct golden remains the end-to-end bit-surface
+gate.
 
 `tests/d3q19_boundaries.rs` (bead 40p2) covers all six hand-enumerated planar
 link masks, aligned deterministic mask ordering, the exact 18 links around one
@@ -286,10 +300,11 @@ redistributed.
   `ReducedCumulant` therefore implements only the general cumulant definitions
   for the independent D3Q19 `C220`/`C202`/`C022` projection; it is not a
   "Geier D3Q19" operator and cannot borrow the paper's high-Re evidence.
-- The current SIMD slice accelerates only the all-fluid Duct axial-BGK collision.
-  Pull-stream gather/scatter, `BoundaryGrid3` mixed masks/general forcing, and
-  central-moment/cumulant paths remain scalar. Therefore this slice alone makes
-  no stream+collide GLUP/s claim; both native ISA batteries and the four-quadrant
+- The current SIMD slice accelerates the all-fluid Duct axial-BGK collision and
+  its pure-move pull stream. `BoundaryGrid3` mixed masks/general forcing and the
+  central-moment/cumulant paths remain scalar; collision and streaming are not
+  fused. Therefore this slice alone makes no stream+collide GLUP/s claim. Both
+  native ISA batteries, the unchanged Duct golden, and the four-quadrant
   performance lane remain required before promotion evidence is green.
 - SDF voxelization is midpoint classification followed by stair-step halfway
   bounce-back. It is second-order for the represented flat, lattice-aligned
