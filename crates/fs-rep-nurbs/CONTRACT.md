@@ -36,6 +36,9 @@ fs-iga (geometry basis = analysis basis), fs-render NURBS tracing
   and safe mutation while the view is live is unrepresentable. Owning
   convenience calls remain fallible; basis allocation is fallible and
   triangular degree work shares the defensive legacy ceiling.
+  `KnotVector::new_with_cx` returns transactional `KnotConstructionRun` state
+  and publishes only a completely validated sealed owner after constant-time
+  shape and static work admission.
   `KnotVector::try_clone_with_cx` returns transactional `KnotCloneRun` state
   and publishes only a complete sealed copy after checked work and a 64 MiB
   retained-output gate. The existing trait `Clone` remains a compatibility
@@ -389,13 +392,21 @@ checked static work-refusal precedence, then carries one cancellation gate
 through U-knot validation, V-knot validation, grid-shape and row-major control
 validation, and final authority publication. It allocates no payload and does
 not certify regularity, trimming, topology, closest-point bounds, or rendering.
-Construction, aggregate affine-budget consumption, and executor drain/finalize
-remain caller responsibilities; allocator calls and individual scalar
-operations are not wall-time preemptible. The owning
+Surface construction, aggregate affine-budget consumption, and executor
+drain/finalize remain caller responsibilities; allocator calls and individual
+scalar operations are not wall-time preemptible. The owning
+`KnotVector::new_with_cx` path preserves constant-time degree/length and static
+validation-work refusal precedence, then carries one gate through finite-value,
+ordering, multiplicity, clamping, and nonempty-domain validation plus final
+owned publication. `KnotConstructionRun::Cancelled` exposes no partially
+validated vector and drops the caller-transferred storage. The synchronous
+constructor shares the same validation core. Individual scalar comparisons
+and destruction remain non-preemptible, and the primitive does not consume
+the `Cx` budget or own caller drain/finalize, wall-time, or resumability
+semantics. The owning
 `KnotVector::admit_with_cx` path applies the
 same fixed stride across finite, ordering, multiplicity, and clamping validation
-and gates admitted authority at publication; `KnotVector::new` construction
-remains outside that cancellation claim. The production `fs-render` ray path
+and gates admitted authority at publication. The production `fs-render` ray path
 preflights sealed metadata and cancellation, then binds one admitted surface
 across domain lookup, seed evaluation, and Newton partials.
 Admitted U/V surface insertion preserves open-domain, conservative aggregate
