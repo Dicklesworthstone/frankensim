@@ -204,17 +204,22 @@ converted-curve plus queue/frontier/scratch, and post-release derivative-polish
 phases; the converted curve and queue are dropped before polish. The owning
 wrapper rejects malformed requests before scanning the source, while an
 `AdmittedNurbsCurve` can repeat closest-point calls without rescanning source
-structure. Owning derivative, surface-closest, SDF, and refit construction paths
-are not all migrated yet; they make no claim of caller-budgeted preflight or
-end-to-end validate-once execution. Surface closest-point admission still
-validates the sealed structure, including finite Cartesian projections and
-normal positive floating weights, and charges a stage-faithful knot-insertion,
-expanded-grid, run-scan, and queue-seeding estimate before conversion, including
-when the requested split budget is zero. Degree-scaled de Casteljau split work
-and the worst retained queue/scratch frontier are admitted separately. The SDF
-shell reuses that same split/frontier model and additionally charges
-structure-sensitive polishing, sign-repair, and trim coefficients; a shell for
-which even a zero-split query exceeds the ceiling is not constructible. The
+structure. Surface closest-point execution follows the same malformed-request
+before source-scan order and exposes an admitted repeat path. It reuses that
+source admission through conversion planning and final evaluation, pre-reserves
+the exact `seed_leaves + max_splits` heap extent, bounds every push, and prices
+log-height heap operations. Its stage-faithful knot-insertion, expanded-grid,
+run-scan, and queue-seeding estimate is charged before conversion, including
+when the requested split budget is zero; degree-scaled de Casteljau split work
+and the worst retained queue/scratch frontier are admitted separately. Surface
+conversion storage is not yet composed with that frontier under one retained
+payload ceiling. Owning derivative, SDF, and refit construction paths are not
+all migrated yet; they make no claim of caller-budgeted preflight or end-to-end
+validate-once execution. The SDF shell reuses that same split/frontier model,
+exports worst-case seed and split heap coefficients into its aggregate work
+gate, and additionally charges structure-sensitive polishing, sign-repair, and
+trim coefficients; a shell for which even a zero-split query exceeds the
+ceiling is not constructible. The
 legacy refit path has validated static work/allocation/probe caps but no `Cx`;
 trim classification likewise retains a static process ceiling rather than a
 caller-owned affine budget and has no `Cx`; these APIs are not yet P7

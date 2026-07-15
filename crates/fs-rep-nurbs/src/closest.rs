@@ -10,9 +10,9 @@
 //! a rigorous enclosure until the interval/Taylor upgrade lands.
 
 use crate::NurbsError;
-use crate::basis::KnotVector;
+use crate::basis::AdmittedKnotVector;
 use crate::curve::{AdmittedNurbsCurve, BezierConversionPlan, NurbsCurve};
-use crate::surface::NurbsSurface;
+use crate::surface::{AdmittedNurbsSurface, NurbsSurface};
 use fs_math::{det, next_down, next_up};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
@@ -41,6 +41,7 @@ const CLOSEST_MAX_RETAINED_BYTES: u128 = 256 * 1024 * 1024;
 // validation envelopes. This is an accounting coefficient, not a timing
 // claim for any particular machine.
 const CLOSEST_CURVE_SOURCE_SCAN_WORK_PER_ENTRY: u128 = 16;
+const CLOSEST_SURFACE_SOURCE_SCAN_WORK_PER_CONTROL: u128 = 16;
 
 /// Deterministic minimum-priority entry. `BinaryHeap` is a max-heap, so the
 /// comparisons are reversed: lower bound first, then lower logical ID. IDs
@@ -108,84 +109,30 @@ pub(crate) fn norm3(value: [f64; 3]) -> f64 {
     scale * det::sqrt(normalized_square_sum)
 }
 
-fn validate_live_knots(knots: &KnotVector<f64>) -> Result<(), NurbsError> {
-    let minimum_knots = knots
-        .degree
-        .checked_add(1)
-        .and_then(|value| value.checked_mul(2))
-        .ok_or_else(|| NurbsError::Structure {
-            what: "live knot degree overflows structural arithmetic".to_string(),
-        })?;
-    if knots.degree == 0 || knots.knots.len() < minimum_knots {
-        return Err(NurbsError::Structure {
-            what: "live knot vector has an invalid degree/count relation".to_string(),
-        });
-    }
-    if knots.knots.iter().any(|value| !value.is_finite())
-        || knots.knots.windows(2).any(|pair| pair[1] < pair[0])
-    {
-        return Err(NurbsError::Structure {
-            what: "live knot vector must be finite and non-decreasing".to_string(),
-        });
-    }
-    let endpoint_multiplicity = knots.degree + 1;
-    let mut run_start = 0usize;
-    while run_start < knots.knots.len() {
-        let mut run_end = run_start + 1;
-        while run_end < knots.knots.len() && knots.knots[run_end] == knots.knots[run_start] {
-            run_end += 1;
-        }
-        let multiplicity = run_end - run_start;
-        let endpoint = run_start == 0 || run_end == knots.knots.len();
-        if (endpoint && multiplicity != endpoint_multiplicity)
-            || (!endpoint && multiplicity > endpoint_multiplicity)
-        {
-            return Err(NurbsError::Structure {
-                what: "live knot vector has an invalid knot multiplicity".to_string(),
-            });
-        }
-        run_start = run_end;
-    }
-    for offset in 0..knots.degree {
-        if knots.knots[offset + 1] != knots.knots[0]
-            || knots.knots[knots.knots.len() - 2 - offset] != knots.knots[knots.knots.len() - 1]
-        {
-            return Err(NurbsError::Structure {
-                what: "live knot vector must remain clamped".to_string(),
-            });
-        }
-    }
-    let (lo, hi) = knots.domain()?;
-    if lo >= hi {
-        return Err(NurbsError::Structure {
-            what: "live knot vector must retain a non-empty finite domain".to_string(),
-        });
-    }
-    Ok(())
-}
-
-fn nonempty_span_count(knots: &KnotVector<f64>) -> u128 {
+fn nonempty_span_count(knots: AdmittedKnotVector<'_, f64>) -> u128 {
     knots
-        .knots
+        .knots()
         .windows(2)
         .filter(|pair| pair[1] > pair[0])
         .count() as u128
 }
 
-fn bezier_insertion_count(knots: &KnotVector<f64>) -> Result<u128, NurbsError> {
-    let (lo, hi) = knots.domain()?;
+fn bezier_insertion_count(knots: AdmittedKnotVector<'_, f64>) -> Result<u128, NurbsError> {
+    let (lo, hi) = knots.domain();
+    let entries = knots.knots();
+    let degree = knots.degree();
     let mut insertions = 0u128;
     let mut run_start = 0usize;
-    while run_start < knots.knots.len() {
-        let knot = knots.knots[run_start];
+    while run_start < entries.len() {
+        let knot = entries[run_start];
         let mut run_end = run_start + 1;
-        while run_end < knots.knots.len() && knots.knots[run_end] == knot {
+        while run_end < entries.len() && entries[run_end] == knot {
             run_end += 1;
         }
         let multiplicity = run_end - run_start;
-        if knot > lo && knot < hi && multiplicity < knots.degree {
+        if knot > lo && knot < hi && multiplicity < degree {
             insertions = insertions
-                .checked_add((knots.degree - multiplicity) as u128)
+                .checked_add((degree - multiplicity) as u128)
                 .ok_or_else(|| NurbsError::Domain {
                     what: "Bézier insertion-count accounting overflows u128".to_string(),
                 })?;
@@ -228,6 +175,23 @@ fn curve_source_admission_work<const DIM: usize>(
     checked_sum(&[knot_work, control_work], "curve source admission work")
 }
 
+fn surface_source_admission_work(surface: &NurbsSurface<f64>) -> Result<u128, NurbsError> {
+    let controls = (surface.knots_u.control_count() as u128)
+        .checked_mul(surface.knots_v.control_count() as u128)
+        .and_then(|count| count.checked_mul(CLOSEST_SURFACE_SOURCE_SCAN_WORK_PER_CONTROL))
+        .ok_or_else(|| NurbsError::Domain {
+            what: "surface source-control admission work overflows u128".to_string(),
+        })?;
+    checked_sum(
+        &[
+            surface.knots_u.validation_work()?,
+            surface.knots_v.validation_work()?,
+            controls,
+        ],
+        "surface source admission work",
+    )
+}
+
 fn curve_base_work_units<const DIM: usize>(
     curve: AdmittedNurbsCurve<'_, f64, DIM>,
     source_admission_work: u128,
@@ -256,33 +220,51 @@ fn curve_base_work_units<const DIM: usize>(
     )
 }
 
+#[derive(Debug, Clone, Copy)]
+struct SurfaceBasePlan {
+    work_units: u128,
+    seed_leaves: u128,
+    order_u: u128,
+    order_v: u128,
+}
+
 pub(crate) fn surface_base_work_units(surface: &NurbsSurface<f64>) -> Result<u128, NurbsError> {
-    validate_live_knots(&surface.knots_u)?;
-    validate_live_knots(&surface.knots_v)?;
-    let expected_u = surface.knots_u.control_count();
-    let expected_v = surface.knots_v.control_count();
-    if surface.cpw.len() != expected_u
-        || surface.cpw.iter().any(|row| row.len() != expected_v)
-        || surface.cpw.iter().flatten().any(|control| {
-            !control[3].is_normal()
-                || control[3] <= 0.0
-                || control.iter().any(|component| !component.is_finite())
-                || control[..3]
-                    .iter()
-                    .any(|component| !(*component / control[3]).is_finite())
-        })
-    {
-        return Err(NurbsError::Structure {
-            what: "live surface control net must match its knots and remain finite with positive weights"
-                .to_string(),
-        });
-    }
-    let spans_u = nonempty_span_count(&surface.knots_u);
-    let spans_v = nonempty_span_count(&surface.knots_v);
-    let degree_u = surface.knots_u.degree as u128;
-    let degree_v = surface.knots_v.degree as u128;
-    let insertions_u = bezier_insertion_count(&surface.knots_u)?;
-    let insertions_v = bezier_insertion_count(&surface.knots_v)?;
+    let source_admission_work = surface_source_admission_work(surface)?;
+    enforce_base_work(source_admission_work, "surface source admission")?;
+    let base_plan = surface_base_plan_from_admitted(surface.admit()?, source_admission_work)?;
+    let (_, _, worst_heap_height) = surface_queue_shape(base_plan.seed_leaves, CLOSEST_MAX_SPLITS)?;
+    let seed_heap_work = surface_seed_heap_work(base_plan.seed_leaves, worst_heap_height)?;
+    checked_sum(
+        &[base_plan.work_units, seed_heap_work],
+        "surface base and worst-case seed-heap work",
+    )
+}
+
+fn surface_base_plan_from_admitted(
+    surface: AdmittedNurbsSurface<'_, f64>,
+    source_admission_work: u128,
+) -> Result<SurfaceBasePlan, NurbsError> {
+    let knots_u = surface.knots_u();
+    let knots_v = surface.knots_v();
+    let expected_u = knots_u.control_count();
+    let expected_v = knots_v.control_count();
+    let spans_u = nonempty_span_count(knots_u);
+    let spans_v = nonempty_span_count(knots_v);
+    let degree_u = knots_u.degree() as u128;
+    let degree_v = knots_v.degree() as u128;
+    let order_u = degree_u.checked_add(1).ok_or_else(|| NurbsError::Domain {
+        what: "closest-surface u-order accounting overflows u128".to_string(),
+    })?;
+    let order_v = degree_v.checked_add(1).ok_or_else(|| NurbsError::Domain {
+        what: "closest-surface v-order accounting overflows u128".to_string(),
+    })?;
+    let seed_leaves = spans_u
+        .checked_mul(spans_v)
+        .ok_or_else(|| NurbsError::Domain {
+            what: "closest-surface seed-leaf accounting overflows u128".to_string(),
+        })?;
+    let insertions_u = bezier_insertion_count(knots_u)?;
+    let insertions_v = bezier_insertion_count(knots_v)?;
     let expanded_u = (expected_u as u128)
         .checked_add(insertions_u)
         .ok_or_else(|| NurbsError::Domain {
@@ -293,23 +275,24 @@ pub(crate) fn surface_base_work_units(surface: &NurbsSurface<f64>) -> Result<u12
         .ok_or_else(|| NurbsError::Domain {
             what: "surface v Bézier control-count accounting overflows u128".to_string(),
         })?;
-    let expanded_knots_u = (surface.knots_u.knots.len() as u128)
+    let expanded_knots_u = (knots_u.knots().len() as u128)
         .checked_add(insertions_u)
         .ok_or_else(|| NurbsError::Domain {
             what: "surface u Bézier knot-count accounting overflows u128".to_string(),
         })?;
-    let expanded_knots_v = (surface.knots_v.knots.len() as u128)
+    let expanded_knots_v = (knots_v.knots().len() as u128)
         .checked_add(insertions_v)
         .ok_or_else(|| NurbsError::Domain {
             what: "surface v Bézier knot-count accounting overflows u128".to_string(),
         })?;
     let expanded_grid = checked_product(&[expanded_u, expanded_v], "surface Bézier grid")?;
-    let patch_controls = checked_product(
-        &[spans_u, spans_v, degree_u + 1, degree_v + 1],
-        "surface patch seeding",
-    )?;
+    let patch_controls =
+        checked_product(&[seed_leaves, order_u, order_v], "surface patch seeding")?;
     let input_controls = checked_product(
-        &[surface.cpw.len() as u128, expected_v as u128],
+        &[
+            surface.homogeneous_control_net().len() as u128,
+            expected_v as u128,
+        ],
         "surface input grid",
     )?;
     let u_insertion_work = checked_product(
@@ -324,11 +307,9 @@ pub(crate) fn surface_base_work_units(surface: &NurbsSurface<f64>) -> Result<u12
                             what: "surface u insertion-grid work overflows u128".to_string(),
                         })?,
                     expanded_knots_u,
-                    (degree_u + 1)
-                        .checked_mul(8)
-                        .ok_or_else(|| NurbsError::Domain {
-                            what: "surface u insertion-order work overflows u128".to_string(),
-                        })?,
+                    order_u.checked_mul(8).ok_or_else(|| NurbsError::Domain {
+                        what: "surface u insertion-order work overflows u128".to_string(),
+                    })?,
                 ],
                 "surface u insertion stage",
             )?,
@@ -347,11 +328,9 @@ pub(crate) fn surface_base_work_units(surface: &NurbsSurface<f64>) -> Result<u12
                             what: "surface v insertion-grid work overflows u128".to_string(),
                         })?,
                     expanded_knots_v,
-                    (degree_v + 1)
-                        .checked_mul(8)
-                        .ok_or_else(|| NurbsError::Domain {
-                            what: "surface v insertion-order work overflows u128".to_string(),
-                        })?,
+                    order_v.checked_mul(8).ok_or_else(|| NurbsError::Domain {
+                        what: "surface v insertion-order work overflows u128".to_string(),
+                    })?,
                 ],
                 "surface v insertion stage",
             )?,
@@ -368,11 +347,12 @@ pub(crate) fn surface_base_work_units(surface: &NurbsSurface<f64>) -> Result<u12
         ],
         "surface Bézier run scanning",
     )?;
-    checked_sum(
+    let work_units = checked_sum(
         &[
+            source_admission_work,
             input_controls,
-            surface.knots_u.knots.len() as u128,
-            surface.knots_v.knots.len() as u128,
+            knots_u.knots().len() as u128,
+            knots_v.knots().len() as u128,
             expanded_grid,
             patch_controls,
             u_insertion_work,
@@ -380,7 +360,13 @@ pub(crate) fn surface_base_work_units(surface: &NurbsSurface<f64>) -> Result<u12
             scan_work,
         ],
         "surface base work",
-    )
+    )?;
+    Ok(SurfaceBasePlan {
+        work_units,
+        seed_leaves,
+        order_u,
+        order_v,
+    })
 }
 
 fn enforce_base_work(units: u128, kind: &str) -> Result<(), NurbsError> {
@@ -438,25 +424,6 @@ fn subdivision_frontier_bytes(
         });
     }
     Ok(retained_bytes)
-}
-
-fn enforce_subdivision_envelope(
-    seed_leaves: u128,
-    payload_per_leaf: u128,
-    scratch_leaves: u128,
-    work_per_split: u128,
-    max_splits: u32,
-    kind: &str,
-) -> Result<(), NurbsError> {
-    let frontier_bytes = subdivision_frontier_bytes(
-        seed_leaves,
-        payload_per_leaf,
-        scratch_leaves,
-        work_per_split,
-        max_splits,
-        kind,
-    )?;
-    enforce_retained_bytes(frontier_bytes, kind)
 }
 
 fn enforce_curve_retained_envelope(
@@ -671,6 +638,42 @@ pub(crate) fn surface_subdivision_work_per_split(
         .ok_or_else(|| NurbsError::Domain {
             what: "closest-surface v-order accounting overflows u128".to_string(),
         })?;
+    let seed_capacity = (surface.knots_u.control_count() as u128)
+        .checked_mul(surface.knots_v.control_count() as u128)
+        .ok_or_else(|| NurbsError::Domain {
+            what: "closest-surface seed-capacity accounting overflows u128".to_string(),
+        })?;
+    let (_, _, worst_heap_height) = surface_queue_shape(seed_capacity, CLOSEST_MAX_SPLITS)?;
+    checked_sum(
+        &[
+            surface_geometric_work_per_split(order_u, order_v)?,
+            surface_split_heap_work(worst_heap_height)?,
+        ],
+        "closest-surface worst-case split work",
+    )
+}
+
+fn surface_seed_leaf_count(surface: &NurbsSurface<f64>) -> Result<u128, NurbsError> {
+    let spans_u = surface
+        .knots_u
+        .knots
+        .windows(2)
+        .filter(|pair| pair[1] > pair[0])
+        .count() as u128;
+    let spans_v = surface
+        .knots_v
+        .knots
+        .windows(2)
+        .filter(|pair| pair[1] > pair[0])
+        .count() as u128;
+    spans_u
+        .checked_mul(spans_v)
+        .ok_or_else(|| NurbsError::Domain {
+            what: "closest-surface seed-leaf accounting overflows u128".to_string(),
+        })
+}
+
+fn surface_geometric_work_per_split(order_u: u128, order_v: u128) -> Result<u128, NurbsError> {
     let controls = order_u
         .checked_mul(order_v)
         .ok_or_else(|| NurbsError::Domain {
@@ -703,6 +706,96 @@ pub(crate) fn surface_subdivision_work_per_split(
         })
 }
 
+#[derive(Debug, Clone, Copy)]
+struct SurfaceClosestPlan {
+    seed_leaves: usize,
+    queue_capacity: usize,
+    seed_heap_work: u128,
+}
+
+fn surface_queue_shape(
+    seed_leaves: u128,
+    max_splits: u32,
+) -> Result<(usize, usize, u128), NurbsError> {
+    let seed_leaves = usize::try_from(seed_leaves).map_err(|_| NurbsError::Domain {
+        what: "closest-surface seed-leaf count is not representable as usize".to_string(),
+    })?;
+    let split_capacity = usize::try_from(max_splits).map_err(|_| NurbsError::Domain {
+        what: "closest-surface split count is not representable as usize".to_string(),
+    })?;
+    let queue_capacity =
+        seed_leaves
+            .checked_add(split_capacity)
+            .ok_or_else(|| NurbsError::Domain {
+                what: "closest-surface queue capacity overflows usize".to_string(),
+            })?;
+    Ok((
+        seed_leaves,
+        queue_capacity,
+        binary_heap_height(queue_capacity),
+    ))
+}
+
+fn surface_seed_heap_work(seed_leaves: u128, heap_height: u128) -> Result<u128, NurbsError> {
+    checked_product(
+        &[seed_leaves, heap_height, 16],
+        "closest-surface seed heap work",
+    )
+}
+
+fn surface_split_heap_work(heap_height: u128) -> Result<u128, NurbsError> {
+    checked_product(
+        &[heap_height, 3, 16],
+        "closest-surface pop and child-push heap work",
+    )
+}
+
+fn surface_closest_plan(
+    order_u: u128,
+    order_v: u128,
+    seed_leaves: u128,
+    max_splits: u32,
+) -> Result<SurfaceClosestPlan, NurbsError> {
+    let (seed_leaves, queue_capacity, heap_height) = surface_queue_shape(seed_leaves, max_splits)?;
+    let geometric_work = surface_geometric_work_per_split(order_u, order_v)?;
+    let heap_work = surface_split_heap_work(heap_height)?;
+    let work_per_split = checked_sum(
+        &[geometric_work, heap_work],
+        "closest-surface aggregate split work",
+    )?;
+    let controls = order_u
+        .checked_mul(order_v)
+        .ok_or_else(|| NurbsError::Domain {
+            what: "closest-surface patch payload overflows u128".to_string(),
+        })?;
+    let payload_per_leaf = controls
+        .checked_mul(size_of::<[f64; 4]>() as u128)
+        .and_then(|payload| {
+            order_u
+                .checked_mul(size_of::<Vec<[f64; 4]>>() as u128)
+                .and_then(|headers| payload.checked_add(headers))
+        })
+        .and_then(|payload| payload.checked_add(size_of::<MinEntry<Patch>>() as u128))
+        .ok_or_else(|| NurbsError::Domain {
+            what: "closest-surface leaf payload overflows u128".to_string(),
+        })?;
+    let frontier_bytes = subdivision_frontier_bytes(
+        seed_leaves as u128,
+        payload_per_leaf,
+        3,
+        work_per_split,
+        max_splits,
+        "surface",
+    )?;
+    enforce_retained_bytes(frontier_bytes, "surface")?;
+    let seed_heap_work = surface_seed_heap_work(seed_leaves as u128, heap_height)?;
+    Ok(SurfaceClosestPlan {
+        seed_leaves,
+        queue_capacity,
+        seed_heap_work,
+    })
+}
+
 pub(crate) fn preflight_surface_subdivision(
     surface: &NurbsSurface<f64>,
     max_splits: u32,
@@ -717,48 +810,8 @@ pub(crate) fn preflight_surface_subdivision(
         .ok_or_else(|| NurbsError::Domain {
             what: "closest-surface v-order accounting overflows u128".to_string(),
         })?;
-    let controls = order_u
-        .checked_mul(order_v)
-        .ok_or_else(|| NurbsError::Domain {
-            what: "closest-surface patch payload overflows u128".to_string(),
-        })?;
-    let work_per_split = surface_subdivision_work_per_split(surface)?;
-    let payload_per_leaf = controls
-        .checked_mul(size_of::<[f64; 4]>() as u128)
-        .and_then(|payload| {
-            order_u
-                .checked_mul(size_of::<Vec<[f64; 4]>>() as u128)
-                .and_then(|headers| payload.checked_add(headers))
-        })
-        .and_then(|payload| payload.checked_add(size_of::<MinEntry<Patch>>() as u128))
-        .ok_or_else(|| NurbsError::Domain {
-            what: "closest-surface leaf payload overflows u128".to_string(),
-        })?;
-    let seed_leaves = nonempty_span_count(&surface.knots_u)
-        .checked_mul(nonempty_span_count(&surface.knots_v))
-        .ok_or_else(|| NurbsError::Domain {
-            what: "closest-surface seed-leaf accounting overflows u128".to_string(),
-        })?;
-    enforce_subdivision_envelope(
-        seed_leaves,
-        payload_per_leaf,
-        3,
-        work_per_split,
-        max_splits,
-        "surface",
-    )
-}
-
-fn push_heap<T>(
-    heap: &mut BinaryHeap<MinEntry<T>>,
-    entry: MinEntry<T>,
-    stage: &str,
-) -> Result<(), NurbsError> {
-    heap.try_reserve(1).map_err(|_| NurbsError::Domain {
-        what: format!("{stage} heap allocation was refused"),
-    })?;
-    heap.push(entry);
-    Ok(())
+    let seed_leaves = surface_seed_leaf_count(surface)?;
+    surface_closest_plan(order_u, order_v, seed_leaves, max_splits).map(|_| ())
 }
 
 fn push_heap_within_admitted_capacity<T>(
@@ -769,9 +822,7 @@ fn push_heap_within_admitted_capacity<T>(
 ) -> Result<(), NurbsError> {
     if heap.len() >= admitted_capacity {
         return Err(NurbsError::Domain {
-            what: format!(
-                "{stage} would exceed admitted closest-curve queue capacity {admitted_capacity}"
-            ),
+            what: format!("{stage} would exceed admitted queue capacity {admitted_capacity}"),
         });
     }
     heap.push(entry);
@@ -1178,8 +1229,10 @@ fn split_patch_v(net: &[Vec<[f64; 4]>]) -> Result<(Net, Net), NurbsError> {
 }
 
 /// Decompose a surface to Bézier patches via repeated knot insertion.
-fn to_bezier_surface(surface: &NurbsSurface<f64>) -> Result<NurbsSurface<f64>, NurbsError> {
-    let mut work = surface.try_clone()?;
+fn to_bezier_surface(
+    surface: AdmittedNurbsSurface<'_, f64>,
+) -> Result<NurbsSurface<f64>, NurbsError> {
+    let mut work = surface.source().try_clone()?;
     loop {
         let mut inserted = false;
         for dir_u in [true, false] {
@@ -1223,6 +1276,7 @@ fn seed_patches(
     work: &NurbsSurface<f64>,
     q: [f64; 3],
     queue: &mut BinaryHeap<MinEntry<Patch>>,
+    queue_capacity: usize,
     next_logical_id: &mut u64,
     upper: &mut f64,
     best: &mut [f64; 2],
@@ -1248,7 +1302,7 @@ fn seed_patches(
                 *best = [u0, v0];
             }
             let lb = patch_lb(q, &net);
-            push_heap(
+            push_heap_within_admitted_capacity(
                 queue,
                 MinEntry {
                     key: lb,
@@ -1263,6 +1317,7 @@ fn seed_patches(
                         depth_v: 0,
                     },
                 },
+                queue_capacity,
                 "closest-surface seed",
             )?;
             *next_logical_id += 1;
@@ -1283,21 +1338,84 @@ pub fn closest_point_surface(
     max_splits: u32,
 ) -> Result<DistanceBracketEstimate, NurbsError> {
     validate_closest_request(q, tol, max_splits)?;
-    enforce_base_work(surface_base_work_units(surface)?, "surface")?;
-    preflight_surface_subdivision(surface, max_splits)?;
+    let source_admission_work = surface_source_admission_work(surface)?;
+    enforce_base_work(source_admission_work, "surface source admission")?;
+    closest_point_surface_after_request(surface.admit()?, q, tol, max_splits, source_admission_work)
+}
+
+impl AdmittedNurbsSurface<'_, f64> {
+    /// Measured closest-point estimate while reusing this admitted immutable
+    /// source through conversion planning and final evaluation.
+    ///
+    /// # Errors
+    /// Returns a structured refusal for an invalid request, excessive
+    /// work/frontier payload, allocation failure, or non-finite arithmetic.
+    pub fn closest_point(
+        &self,
+        q: [f64; 3],
+        tol: f64,
+        max_splits: u32,
+    ) -> Result<DistanceBracketEstimate, NurbsError> {
+        validate_closest_request(q, tol, max_splits)?;
+        closest_point_surface_after_request(*self, q, tol, max_splits, 0)
+    }
+}
+
+fn closest_point_surface_after_request(
+    surface: AdmittedNurbsSurface<'_, f64>,
+    q: [f64; 3],
+    tol: f64,
+    max_splits: u32,
+    source_admission_work: u128,
+) -> Result<DistanceBracketEstimate, NurbsError> {
+    let base_plan = surface_base_plan_from_admitted(surface, source_admission_work)?;
+    enforce_base_work(base_plan.work_units, "surface")?;
+    let plan = surface_closest_plan(
+        base_plan.order_u,
+        base_plan.order_v,
+        base_plan.seed_leaves,
+        max_splits,
+    )?;
+    enforce_base_work(
+        base_plan
+            .work_units
+            .checked_add(plan.seed_heap_work)
+            .ok_or_else(|| NurbsError::Domain {
+                what: "closest-surface base and seed-heap work overflows u128".to_string(),
+            })?,
+        "surface",
+    )?;
     let work = to_bezier_surface(surface)?;
     let mut queue: BinaryHeap<MinEntry<Patch>> = BinaryHeap::new();
+    queue
+        .try_reserve_exact(plan.queue_capacity)
+        .map_err(|_| NurbsError::Domain {
+            what: format!(
+                "closest-surface queue allocation was refused for admitted capacity {}",
+                plan.queue_capacity
+            ),
+        })?;
     let mut next_logical_id = 0u64;
     let mut upper = f64::INFINITY;
-    let mut best = [work.knots_u.domain()?.0, work.knots_v.domain()?.0];
+    let mut best = [surface.knots_u().domain().0, surface.knots_v().domain().0];
     seed_patches(
         &work,
         q,
         &mut queue,
+        plan.queue_capacity,
         &mut next_logical_id,
         &mut upper,
         &mut best,
     )?;
+    if queue.len() != plan.seed_leaves {
+        return Err(NurbsError::Structure {
+            what: format!(
+                "closest-surface conversion produced {} seed leaves after admitting {}",
+                queue.len(),
+                plan.seed_leaves
+            ),
+        });
+    }
     if queue.is_empty() || !upper.is_finite() || queue.iter().any(|entry| !entry.key.is_finite()) {
         return Err(NurbsError::Domain {
             what: "closest-surface initial distance bounds are not finite".to_string(),
@@ -1325,13 +1443,14 @@ pub fn closest_point_surface(
             (true, false) => true,
             (false, true) => false,
             (false, false) => {
-                push_heap(
+                push_heap_within_admitted_capacity(
                     &mut queue,
                     MinEntry {
                         key: entry.key,
                         logical_id: entry.logical_id,
                         value: patch,
                     },
+                    plan.queue_capacity,
                     "closest-surface unsplittable leaf",
                 )?;
                 break;
@@ -1339,13 +1458,14 @@ pub fn closest_point_surface(
         };
         let midpoint = if split_u { midpoint_u } else { midpoint_v };
         if !midpoint.is_finite() {
-            push_heap(
+            push_heap_within_admitted_capacity(
                 &mut queue,
                 MinEntry {
                     key: entry.key,
                     logical_id: entry.logical_id,
                     value: patch,
                 },
+                plan.queue_capacity,
                 "closest-surface non-finite midpoint leaf",
             )?;
             break;
@@ -1380,7 +1500,7 @@ pub fn closest_point_surface(
                 });
             }
             if lb < upper {
-                push_heap(
+                push_heap_within_admitted_capacity(
                     &mut queue,
                     MinEntry {
                         key: lb,
@@ -1395,6 +1515,7 @@ pub fn closest_point_surface(
                             depth_v: patch.depth_v + u32::from(!split_u),
                         },
                     },
+                    plan.queue_capacity,
                     "closest-surface child",
                 )?;
                 next_logical_id += 1;
@@ -1433,8 +1554,9 @@ pub fn closest_point_surface(
 mod tests {
     use super::{
         BinaryHeap, CLOSEST_MAX_BASE_WORK_UNITS, CLOSEST_MAX_RETAINED_BYTES, MinEntry,
-        closest_point_curve, curve_subdivision_work_per_split, enforce_curve_retained_envelope,
-        preflight_surface_subdivision, subdivision_frontier_bytes, surface_base_work_units,
+        closest_point_curve, closest_point_surface, curve_subdivision_work_per_split,
+        enforce_curve_retained_envelope, preflight_surface_subdivision, subdivision_frontier_bytes,
+        surface_base_work_units,
     };
     use crate::{KnotVector, NurbsCurve, NurbsSurface};
 
@@ -1475,6 +1597,33 @@ mod tests {
         let repeated = admitted
             .closest_point(query, 1e-9, 8)
             .expect("repeated admitted closest");
+        assert_eq!(first, owning);
+        assert_eq!(repeated, first);
+    }
+
+    #[test]
+    fn surface_closest_owning_and_admitted_paths_match_exactly() {
+        let knots = KnotVector::new(vec![0.0, 0.0, 0.0, 0.5, 1.0, 1.0, 1.0], 2)
+            .expect("two-span quadratic surface knots");
+        let points: Vec<Vec<[f64; 3]>> = (0..4)
+            .map(|u| {
+                (0..4)
+                    .map(|v| [f64::from(u) / 3.0, f64::from(v) / 3.0, 0.0])
+                    .collect()
+            })
+            .collect();
+        let surface = NurbsSurface::new(knots.clone(), knots, &points, &vec![vec![1.0; 4]; 4])
+            .expect("quadratic multispan surface");
+        let query = [0.25, 0.75, 0.5];
+        let owning =
+            closest_point_surface(&surface, query, 1e-9, 8).expect("owning surface closest");
+        let admitted = surface.admit().expect("admitted surface");
+        let first = admitted
+            .closest_point(query, 1e-9, 8)
+            .expect("admitted surface closest");
+        let repeated = admitted
+            .closest_point(query, 1e-9, 8)
+            .expect("repeated admitted surface closest");
         assert_eq!(first, owning);
         assert_eq!(repeated, first);
     }
