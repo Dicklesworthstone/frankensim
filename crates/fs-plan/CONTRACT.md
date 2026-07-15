@@ -13,7 +13,7 @@ this number and where did the error come from" — and "where did the
 seconds go" — are queries over attribution trees. Layer: L6 (HELM).
 Runtime deps: `std`, fs-blake3, fs-geom, fs-ledger; feature-gated VoI uses
 asupersync for cancellation-aware decision-oracle evaluation and fs-eproc for
-anytime-valid audit authority.
+the anytime-valid audit threshold used by authenticated authority.
 
 ## Public types and semantics
 
@@ -158,6 +158,34 @@ anytime-valid audit authority.
   retaining source/final menu roots, policy/snapshot, audit root/e-value
   support, and the exact internal budget transition. `audit_scheduling` is a
   reporting-only replay helper and returns no spending capability.
+  The raw `observe_audit` / `schedule` surface remains explicitly advisory.
+  Ledger authority uses the separate `VoiLedgerContext`,
+  `record_ranked_menu_receipt`, `record_prospective_audit_receipt`, independent
+  `verify_*` functions, opaque `AuthenticatedRankedMenu` /
+  `AuthenticatedAuditRecord` capabilities, and
+  `schedule_authenticated`. Producer-facing artifact-kind/metadata constants,
+  `voi_decision_artifact_metadata`, `voi_model_artifact_metadata`,
+  `voi_probe_catalog_bytes`, and `voi_audit_outcome_bytes` define the exact
+  admitted envelopes. A context binds session, decision/model/policy
+  versions, VCS branch and snapshot root, issuance day, and inclusive expiry.
+  Ranked receipts require decision, model, and canonical complete-catalog
+  artifacts to be finished outputs in the current bound snapshot. Prospective
+  audit receipts bind their zero-based order and exact recommended/alternative
+  outcome artifacts, whose canonical bytes include candidate, matched cost,
+  provenance, and realized decision-change bit. Receipt operations are
+  deterministic finished ledger operations with exact Five Explicits, exact
+  input/output lineage, and a sole sealed output producer. Verification
+  rederives all bytes and envelopes rather than trusting a locator. Authenticated
+  receipt minting is idempotent: retrying an exact canonical request reverifies
+  and returns its existing sole-producer locator, while changed content has a
+  different identity. The logical issuance day is checked for a lossless
+  day-start nanosecond conversion before it is recorded in the ledger op
+  envelope. Authenticated
+  scheduling reverifies the ranked receipt against the current branch head and
+  every audit receipt against its immutable known snapshot before any budget or
+  consumed-snapshot mutation; all evidence must share one session,
+  decision/model/policy version, branch, and exact decision/model artifact
+  identities.
   Decision, sweep, ranking, and scheduling entry points are fallible:
   arity, nonempty bounded collections/names, unique identities, finite
   ordered intervals, nominal containment, callback margins, target
@@ -241,7 +269,9 @@ its result is deterministic when the supplied oracle is deterministic and its
 bounded metadata and declared work are truthful. VoI identity floats bind by
 exact IEEE-754 bits rather than display text; node and audit order are
 semantic, ranked-row order is semantic, and source probe-menu input order is
-the documented canonicalized exception.
+the documented canonicalized exception. Ledger receipt bytes use fixed tagged
+binary encodings; duplicate receipt inputs canonicalize through `BTreeSet`,
+and receipt producer operations run in `ExecMode::Deterministic`.
 
 ## Cancellation behavior
 
@@ -250,7 +280,11 @@ history/evaluation, oracle edges/errors, receipt bytes/depth/nodes/container
 items, op fields, retained artifacts, and tune sample counts each have explicit caps. VoI sweeps are bounded
 by `MAX_VOI_EVALUATIONS`; audits and consumed snapshots are bounded by
 `MAX_VOI_AUDIT_RECORDS` and `MAX_VOI_SCHEDULED_CONTEXTS`; the fixture oracle has
-its own Cartesian-work cap. VoI admits the exact evaluation count and exact
+its own Cartesian-work cap. Canonical receipt and outcome artifacts are bounded
+by `MAX_VOI_LEDGER_RECEIPT_BYTES`, and a complete probe catalog is bounded by
+`MAX_VOI_PROBE_CATALOG_BYTES`; decision/model identity artifacts are fully
+content-hash-checked under `MAX_VOI_AUTHORITY_ARTIFACT_BYTES`. Bounded ledger
+reads precede receipt materialization. VoI admits the exact evaluation count and exact
 declared-work charge against both public caps and the caller's `DecisionBudget`
 before the first oracle call. Every call receives a canonical private permit
 and has a `Cx` checkpoint before and after it; direct `DecisionOracle`
@@ -326,7 +360,11 @@ probe economics, sealed menu/context identity, asymmetric subset contraction,
 structured estimated hints, chronological-order e-process counterexamples,
 bounded append-only matched-cost audits, live activation/demotion, policy and
 snapshot isolation, concurrent duplicate-spend refusal, and cumulative monotone
-budget arithmetic. Owner-unit identity batteries additionally change every
+budget arithmetic. The ledger-authority cases create a real VCS snapshot and
+sealed receipt operations, authenticate a complete catalog and prospective
+matched outcomes, reverify all authority at scheduling, and fail closed for a
+forged locator, model/policy drift, expired context, swapped outcome artifacts,
+and superseded ranked head. Owner-unit identity batteries additionally change every
 registered semantic field, including counts, sequence order, and exact one-ULP
 float-bit mutations whose chosen fixed-precision display text remains
 identical; an explicit non-movement case reverses the source menu.
@@ -366,15 +404,24 @@ and future ranked-source, ranked-menu, and audit-context versions.
   arbitrary callback pure; VoI determinism and replay require the caller to
   supply the declared cached deterministic margin. A callback panic is also
   outside the typed-refusal contract and propagates to its owner.
-- `RankedMenu` identities bind caller-declared policy/snapshot, nodes, source
-  menu, grid, and canonical output rows, but they cannot authenticate the
-  declared policy/snapshot, identify arbitrary callback code, prove external
-  catalog completeness, or prove that a ledger/session snapshot is current.
-- Matched audit records are structurally validated, canonically content-bound,
-  bounded, and enter one live scheduler in append order, but they are
-  caller-supplied rather than ledger-authenticated. A dishonest producer can
-  lie, postselect before constructing a scheduler, or replay the same evidence
-  into a second scheduler. Ledger-enforced unique audit streams, signatures,
-  snapshot freshness, expiry, and independent outcome authentication remain
-  required follow-up work (`frankensim-wk4m`); this crate makes no
-  authenticated or cross-process exactly-once audit claim yet.
+- Raw `RankedMenu`, `MatchedAuditRecord`, `observe_audit`, and `schedule` calls
+  remain caller-supplied advisory data. Only independently verified wrappers
+  passed through `observe_authenticated_audit` and `schedule_authenticated`
+  carry this crate's ledger-backed authority.
+- An authenticated ranked receipt proves exact agreement with the retained
+  decision/model/version envelopes, exact supplied complete-catalog artifact,
+  exact ranked roots, and the VCS registry's current branch head. It does not
+  prove arbitrary callback code pure or correct, nor prove that an external
+  universe contains no probe omitted before the producer declared the catalog
+  complete. The current `Vcs` commit registry is process-local rather than a
+  portable external signature service.
+- An authenticated audit receipt proves that the exact prospectively ordered
+  record agrees with the two retained outcome artifacts and sealed ledger
+  lineage. It does not prove that a producer reported physical reality
+  truthfully, that trials were statistically independent, or that no
+  postselection occurred before the ledger artifacts were created.
+- Expiry is enforced against a caller-supplied logical day (including a
+  not-before check), not an authenticated wall clock. One scheduler prevents
+  duplicate observation IDs and duplicate snapshot spend locally, but receipts
+  can still be replayed into a second process; cross-process exactly-once spend
+  and external issuer signatures remain future session/ledger policy work.

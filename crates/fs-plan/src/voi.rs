@@ -16,7 +16,10 @@
 //! THE KILL CRITERION AS CODE: [`VoiScheduler`] owns one append-only
 //! chronological pairwise e-process, the remaining spend budget, and consumed
 //! decision snapshots. Scheduling consults the CURRENT audit verdict under
-//! exclusive mutation; stale reports carry no spending authority.
+//! exclusive mutation; stale reports carry no spending authority. The raw
+//! path remains advisory; authenticated scheduling additionally reverifies
+//! sealed ledger receipts for the ranked catalog, decision/model identities,
+//! prospective outcomes, branch snapshot, policy versions, and expiry.
 //!
 //! Decision evaluation is cooperatively cancellation-aware: each call is
 //! bracketed by [`Cx`] checkpoints and receives a private declared-work permit
@@ -27,8 +30,10 @@
 use std::collections::BTreeSet;
 
 pub use asupersync::Cx;
-use fs_blake3::{ContentHash, hash_domain};
+use fs_blake3::{ContentHash, hash_bytes, hash_domain};
 use fs_eproc::{LossSpan, PairwiseRace};
+use fs_ledger::vcs::Vcs;
+use fs_ledger::{EdgeRole, ExecMode, FiveExplicits, Ledger, OpArtifactEdge, OpOutcome};
 
 /// Maximum uncertainty nodes in one myopic VoI request.
 pub const MAX_VOI_NODES: usize = 256;
@@ -48,6 +53,27 @@ pub const MAX_VOI_AUDIT_RECORDS: usize = 4096;
 pub const MAX_VOI_SCHEDULED_CONTEXTS: usize = 4096;
 /// Fixed anytime-valid false-activation level for VoI scheduling authority.
 pub const VOI_AUDIT_ALPHA: f64 = 0.05;
+/// Canonical ledger-receipt format shared by ranked menus and audit outcomes.
+pub const VOI_LEDGER_RECEIPT_VERSION: u32 = 1;
+/// Maximum canonical bytes admitted for one VoI ledger receipt.
+pub const MAX_VOI_LEDGER_RECEIPT_BYTES: usize = 64 * 1024;
+/// Maximum canonical bytes admitted for one complete probe catalog artifact.
+pub const MAX_VOI_PROBE_CATALOG_BYTES: usize = 512 * 1024;
+/// Maximum bytes read to authenticate one decision/model identity artifact.
+pub const MAX_VOI_AUTHORITY_ARTIFACT_BYTES: usize = 1024 * 1024;
+/// Ledger artifact kind for the canonical decision/callback identity manifest.
+pub const VOI_DECISION_ARTIFACT_KIND: &str = "fs-plan-voi-decision";
+/// Ledger artifact kind for the canonical model/surrogate identity manifest.
+pub const VOI_MODEL_ARTIFACT_KIND: &str = "fs-plan-voi-model";
+/// Ledger artifact kind for [`voi_probe_catalog_bytes`].
+pub const VOI_PROBE_CATALOG_ARTIFACT_KIND: &str = "fs-plan-voi-probe-catalog";
+/// Exact metadata for a complete canonical probe catalog artifact.
+pub const VOI_PROBE_CATALOG_ARTIFACT_METADATA: &str =
+    "{\"schema\":\"fs-plan-voi-probe-catalog-v1\",\"complete\":true}";
+/// Ledger artifact kind for [`voi_audit_outcome_bytes`].
+pub const VOI_AUDIT_OUTCOME_ARTIFACT_KIND: &str = "fs-plan-voi-outcome";
+/// Exact metadata for a canonical prospective outcome artifact.
+pub const VOI_AUDIT_OUTCOME_ARTIFACT_METADATA: &str = "{\"schema\":\"fs-plan-voi-outcome-v1\"}";
 
 /// Canonical semantics of the validated inputs to a ranked VoI menu.
 pub const VOI_RANKED_SOURCE_IDENTITY_VERSION: u32 = 2;
@@ -59,6 +85,21 @@ pub const VOI_AUDIT_CONTEXT_IDENTITY_VERSION: u32 = 2;
 const RANKED_MENU_SOURCE_DOMAIN: &str = "frankensim.fs-plan.voi-ranked-source.v2";
 const RANKED_MENU_CONTEXT_DOMAIN: &str = "frankensim.fs-plan.voi-ranked-menu.v2";
 const AUDIT_CONTEXT_DOMAIN: &str = "frankensim.fs-plan.voi-audit.v2";
+const RANKED_LEDGER_RECEIPT_MAGIC: &[u8] = b"fs-plan-voi-ranked-ledger-receipt-v1\0";
+const AUDIT_LEDGER_RECEIPT_MAGIC: &[u8] = b"fs-plan-voi-audit-ledger-receipt-v1\0";
+const PROBE_CATALOG_MAGIC: &[u8] = b"fs-plan-voi-probe-catalog-v1\0";
+const AUDIT_OUTCOME_MAGIC: &[u8] = b"fs-plan-voi-audit-outcome-v1\0";
+const RANKED_RECEIPT_KIND: &str = "fs-plan-voi-ranked-receipt";
+const AUDIT_RECEIPT_KIND: &str = "fs-plan-voi-audit-receipt";
+const RANKED_RECEIPT_META: &str =
+    "{\"schema\":\"fs-plan-voi-ranked-ledger-receipt-v1\",\"trust\":\"ledger-lineage\"}";
+const AUDIT_RECEIPT_META: &str =
+    "{\"schema\":\"fs-plan-voi-audit-ledger-receipt-v1\",\"trust\":\"ledger-lineage\"}";
+const RECEIPT_SEED: &[u8] = b"fs-plan-voi-ledger-receipt-v1";
+const RECEIPT_VERSIONS: &str = "{\"fs-plan-voi-ledger-receipt\":1,\"ranked_source_identity\":2,\"ranked_menu_identity\":2,\"audit_context_identity\":2}";
+const RECEIPT_BUDGET: &str = "{\"max_receipt_bytes\":65536,\"max_catalog_bytes\":524288,\"max_authority_artifact_bytes\":1048576}";
+const RECEIPT_CAPABILITY: &str = "{\"ops\":[\"voi.receipt\"]}";
+const NANOSECONDS_PER_DAY: i64 = 86_400_000_000_000;
 
 /// Owner-local ranked-source declaration consumed by `xtask check-identities`.
 pub const VOI_RANKED_SOURCE_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
@@ -81,7 +122,7 @@ pub const VOI_RANKED_SOURCE_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
     "external_semantic_fields=artifact-domain,identity-version,policy-scope,snapshot-id,grid,node-count,node-order,probe-count",
     "semantic_fields=artifact-domain,identity-version,policy-scope,snapshot-id,grid,oracle-arity,work-units-per-evaluation,decision-evaluations,decision-work-units,decision-evaluation-budget,decision-work-budget,node-count,node-order,node-name,node-lo,node-nominal,node-hi,probe-count,probe-name,probe-target,probe-cost,probe-shrink,probe-kind",
     "excluded_fields=source-menu-input-order:canonicalized-by-validated-probe-name,allocation-capacity:representation-only",
-    "consumers=rank_purchases,RankedMenu::source_context_id,RankedMenu::context_id,VoiScheduler::schedule",
+    "consumers=rank_purchases,RankedMenu::source_context_id,RankedMenu::context_id,record_ranked_menu_receipt,verify_ranked_menu_receipt,VoiScheduler::schedule,VoiScheduler::schedule_authenticated",
     "mutations=artifact-domain:crates/fs-plan/src/voi.rs#voi_ranked_source_identity_mutation_battery,identity-version:crates/fs-plan/src/voi.rs#voi_ranked_source_identity_mutation_battery,policy-scope:crates/fs-plan/src/voi.rs#voi_ranked_source_identity_mutation_battery,snapshot-id:crates/fs-plan/src/voi.rs#voi_ranked_source_identity_mutation_battery,grid:crates/fs-plan/src/voi.rs#voi_ranked_source_identity_mutation_battery,oracle-arity:crates/fs-plan/src/voi.rs#voi_ranked_source_identity_mutation_battery,work-units-per-evaluation:crates/fs-plan/src/voi.rs#voi_ranked_source_identity_mutation_battery,decision-evaluations:crates/fs-plan/src/voi.rs#voi_ranked_source_identity_mutation_battery,decision-work-units:crates/fs-plan/src/voi.rs#voi_ranked_source_identity_mutation_battery,decision-evaluation-budget:crates/fs-plan/src/voi.rs#voi_ranked_source_identity_mutation_battery,decision-work-budget:crates/fs-plan/src/voi.rs#voi_ranked_source_identity_mutation_battery,node-count:crates/fs-plan/src/voi.rs#voi_ranked_source_identity_mutation_battery,node-order:crates/fs-plan/src/voi.rs#voi_ranked_source_identity_mutation_battery,node-name:crates/fs-plan/src/voi.rs#voi_ranked_source_identity_mutation_battery,node-lo:crates/fs-plan/src/voi.rs#voi_ranked_source_identity_mutation_battery,node-nominal:crates/fs-plan/src/voi.rs#voi_ranked_source_identity_mutation_battery,node-hi:crates/fs-plan/src/voi.rs#voi_ranked_source_identity_mutation_battery,probe-count:crates/fs-plan/src/voi.rs#voi_ranked_source_identity_mutation_battery,probe-name:crates/fs-plan/src/voi.rs#voi_ranked_source_identity_mutation_battery,probe-target:crates/fs-plan/src/voi.rs#voi_ranked_source_identity_mutation_battery,probe-cost:crates/fs-plan/src/voi.rs#voi_ranked_source_identity_mutation_battery,probe-shrink:crates/fs-plan/src/voi.rs#voi_ranked_source_identity_mutation_battery,probe-kind:crates/fs-plan/src/voi.rs#voi_ranked_source_identity_mutation_battery",
     "nonsemantic_mutations=source-menu-input-order:crates/fs-plan/src/voi.rs#voi_ranked_source_menu_input_order_is_nonsemantic,allocation-capacity:crates/fs-plan/src/voi.rs#voi_identity_allocation_capacity_is_nonsemantic",
     "field_guard=classify_voi_ranked_source_identity_fields",
@@ -111,7 +152,7 @@ pub const VOI_RANKED_MENU_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
     "external_semantic_fields=artifact-domain,identity-version,source-context-root,row-count,row-order",
     "semantic_fields=artifact-domain,identity-version,source-context-root,row-count,row-order,ranked-probe-name,flip-before,flip-after,score",
     "excluded_fields=ranked-probe-payload:already-bound-by-source-context-root,allocation-capacity:representation-only",
-    "consumers=RankedMenu::context_id,QueryHint,VoiScheduler::schedule",
+    "consumers=RankedMenu::context_id,QueryHint,record_ranked_menu_receipt,verify_ranked_menu_receipt,VoiScheduler::schedule,VoiScheduler::schedule_authenticated",
     "mutations=artifact-domain:crates/fs-plan/src/voi.rs#voi_ranked_menu_identity_mutation_battery,identity-version:crates/fs-plan/src/voi.rs#voi_ranked_menu_identity_mutation_battery,source-context-root:crates/fs-plan/src/voi.rs#voi_ranked_menu_identity_mutation_battery,row-count:crates/fs-plan/src/voi.rs#voi_ranked_menu_identity_mutation_battery,row-order:crates/fs-plan/src/voi.rs#voi_ranked_menu_identity_mutation_battery,ranked-probe-name:crates/fs-plan/src/voi.rs#voi_ranked_menu_identity_mutation_battery,flip-before:crates/fs-plan/src/voi.rs#voi_ranked_menu_identity_mutation_battery,flip-after:crates/fs-plan/src/voi.rs#voi_ranked_menu_identity_mutation_battery,score:crates/fs-plan/src/voi.rs#voi_ranked_menu_identity_mutation_battery",
     "nonsemantic_mutations=ranked-probe-payload:crates/fs-plan/src/voi.rs#voi_ranked_menu_probe_payload_is_bound_by_source_context,allocation-capacity:crates/fs-plan/src/voi.rs#voi_identity_allocation_capacity_is_nonsemantic",
     "field_guard=classify_voi_ranked_menu_identity_fields",
@@ -141,7 +182,7 @@ pub const VOI_AUDIT_CONTEXT_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
     "external_semantic_fields=artifact-domain,identity-version,policy-scope,audit-alpha,max-audit-records,record-count,record-order",
     "semantic_fields=artifact-domain,identity-version,policy-scope,audit-alpha,max-audit-records,record-count,record-order,observation-id,recommended-id,alternative-id,provenance,matched-cost,recommended-changed-decision,alternative-changed-decision",
     "excluded_fields=allocation-capacity:representation-only,report-verdict:derived-from-chronological-e-process",
-    "consumers=VoiScheduler::audit_report,VoiScheduler::schedule,audit_scheduling,AuditReport::audit_context_id",
+    "consumers=VoiScheduler::audit_report,VoiScheduler::schedule,VoiScheduler::schedule_authenticated,record_prospective_audit_receipt,verify_prospective_audit_receipt,audit_scheduling,AuditReport::audit_context_id",
     "mutations=artifact-domain:crates/fs-plan/src/voi.rs#voi_audit_context_identity_mutation_battery,identity-version:crates/fs-plan/src/voi.rs#voi_audit_context_identity_mutation_battery,policy-scope:crates/fs-plan/src/voi.rs#voi_audit_context_identity_mutation_battery,audit-alpha:crates/fs-plan/src/voi.rs#voi_audit_context_identity_mutation_battery,max-audit-records:crates/fs-plan/src/voi.rs#voi_audit_context_identity_mutation_battery,record-count:crates/fs-plan/src/voi.rs#voi_audit_context_identity_mutation_battery,record-order:crates/fs-plan/src/voi.rs#voi_audit_context_identity_mutation_battery,observation-id:crates/fs-plan/src/voi.rs#voi_audit_context_identity_mutation_battery,recommended-id:crates/fs-plan/src/voi.rs#voi_audit_context_identity_mutation_battery,alternative-id:crates/fs-plan/src/voi.rs#voi_audit_context_identity_mutation_battery,provenance:crates/fs-plan/src/voi.rs#voi_audit_context_identity_mutation_battery,matched-cost:crates/fs-plan/src/voi.rs#voi_audit_context_identity_mutation_battery,recommended-changed-decision:crates/fs-plan/src/voi.rs#voi_audit_context_identity_mutation_battery,alternative-changed-decision:crates/fs-plan/src/voi.rs#voi_audit_context_identity_mutation_battery",
     "nonsemantic_mutations=allocation-capacity:crates/fs-plan/src/voi.rs#voi_identity_allocation_capacity_is_nonsemantic,report-verdict:crates/fs-plan/src/voi.rs#voi_audit_report_verdict_is_derived_and_nonsemantic",
     "field_guard=classify_voi_audit_context_identity_fields",
@@ -313,6 +354,65 @@ pub enum VoiError {
     },
     /// Scheduling was requested before the live audit crossed its threshold.
     MissingSchedulingAuthority,
+    /// A receipt context token, date interval, or snapshot binding is invalid.
+    InvalidReceiptContext {
+        /// Field that failed validation.
+        field: &'static str,
+        /// Bounded diagnostic.
+        detail: String,
+    },
+    /// A retained receipt or its ledger envelope differs from the expected
+    /// canonical binding.
+    ReceiptMismatch {
+        /// Receipt component that disagreed.
+        field: &'static str,
+    },
+    /// The receipt is presented before its declared issuance day.
+    ReceiptNotYetValid {
+        /// Declared issuance day.
+        issued_day: u32,
+        /// Caller-supplied verification day.
+        current_day: u32,
+    },
+    /// The receipt is presented after its inclusive expiry day.
+    ReceiptExpired {
+        /// Inclusive last valid day.
+        expires_day: u32,
+        /// Caller-supplied verification day.
+        current_day: u32,
+    },
+    /// The receipt's ledger branch no longer has the bound snapshot at its
+    /// current head.
+    StaleLedgerSnapshot {
+        /// Bound snapshot root.
+        expected: ContentHash,
+        /// Current branch head, or `None` for an unknown/uncommitted branch.
+        actual: Option<ContentHash>,
+    },
+    /// A receipt input is not a finished output artifact in its bound snapshot.
+    SnapshotArtifactMissing {
+        /// Semantic role of the missing artifact.
+        role: &'static str,
+        /// Missing content identity.
+        artifact: ContentHash,
+    },
+    /// A prospective receipt is not the next chronological audit record.
+    AuditSequenceMismatch {
+        /// Next sequence required by the scheduler.
+        expected: usize,
+        /// Sequence bound into the receipt.
+        actual: usize,
+    },
+    /// A ledger read/write or VCS lookup failed while issuing or verifying a
+    /// receipt.
+    LedgerEvidence {
+        /// Operation being performed.
+        operation: &'static str,
+        /// Underlying bounded diagnostic.
+        detail: String,
+    },
+    /// Receipt issuance requires ownership of its own transaction.
+    ReceiptTransactionActive,
     /// Retained identity bytes declare semantics unknown to this build.
     UnsupportedIdentityVersion {
         /// Identity surface being admitted.
@@ -454,6 +554,50 @@ impl core::fmt::Display for VoiError {
                 f,
                 "the live VoI audit has not crossed the anytime-valid scheduling threshold"
             ),
+            Self::InvalidReceiptContext { field, detail } => {
+                write!(
+                    f,
+                    "VoI receipt context field {field:?} is invalid: {detail}"
+                )
+            }
+            Self::ReceiptMismatch { field } => {
+                write!(f, "VoI ledger receipt does not match its expected {field}")
+            }
+            Self::ReceiptNotYetValid {
+                issued_day,
+                current_day,
+            } => write!(
+                f,
+                "VoI ledger receipt is not valid before day {issued_day}; verification used day {current_day}"
+            ),
+            Self::ReceiptExpired {
+                expires_day,
+                current_day,
+            } => write!(
+                f,
+                "VoI ledger receipt expired after day {expires_day}; verification used day {current_day}"
+            ),
+            Self::StaleLedgerSnapshot { expected, actual } => write!(
+                f,
+                "VoI receipt binds ledger snapshot {} but the current branch head is {}",
+                expected,
+                actual.map_or_else(|| "<none>".to_string(), |root| root.to_string())
+            ),
+            Self::SnapshotArtifactMissing { role, artifact } => write!(
+                f,
+                "VoI receipt {role} artifact {artifact} is not a finished output in its bound snapshot"
+            ),
+            Self::AuditSequenceMismatch { expected, actual } => write!(
+                f,
+                "VoI audit receipt sequence is {actual}; the live prospective stream requires {expected}"
+            ),
+            Self::LedgerEvidence { operation, detail } => {
+                write!(f, "VoI ledger evidence {operation} failed: {detail}")
+            }
+            Self::ReceiptTransactionActive => write!(
+                f,
+                "VoI receipt issuance owns an atomic ledger transaction; finish the caller transaction first"
+            ),
             Self::UnsupportedIdentityVersion {
                 identity,
                 declared,
@@ -527,6 +671,193 @@ pub fn check_audit_context_identity_version(declared: u32) -> Result<(), VoiErro
         declared,
         VOI_AUDIT_CONTEXT_IDENTITY_VERSION,
     )
+}
+
+fn validate_receipt_token(field: &'static str, value: &str) -> Result<(), VoiError> {
+    if value.is_empty()
+        || value.len() > MAX_VOI_NAME_BYTES
+        || !value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':' | b'/')
+        })
+    {
+        return Err(VoiError::InvalidReceiptContext {
+            field,
+            detail: format!(
+                "expected 1..={MAX_VOI_NAME_BYTES} bytes from [A-Za-z0-9._:/-], got {} bytes",
+                value.len()
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn receipt_time_ns(day: u32) -> Result<i64, VoiError> {
+    i64::from(day)
+        .checked_mul(NANOSECONDS_PER_DAY)
+        .ok_or_else(|| VoiError::InvalidReceiptContext {
+            field: "issued_day",
+            detail: format!("day {day} cannot be represented as a ledger nanosecond timestamp"),
+        })
+}
+
+/// Immutable authority scope bound into every ledger-backed VoI receipt.
+///
+/// The snapshot root is a real [`Vcs`] commit on `branch`; issuance and ranked
+/// scheduling additionally require it to remain that branch's current head.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VoiLedgerContext {
+    session_id: String,
+    decision_version: String,
+    model_version: String,
+    policy_version: String,
+    branch: i64,
+    snapshot_root: ContentHash,
+    issued_day: u32,
+    expires_day: u32,
+}
+
+impl VoiLedgerContext {
+    /// Construct one bounded receipt scope.
+    ///
+    /// # Errors
+    /// [`VoiError::InvalidReceiptContext`] for malformed tokens, a nonpositive
+    /// branch, an all-zero snapshot root, an inverted validity interval, or an
+    /// issuance day that cannot map to the ledger nanosecond domain.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        session_id: impl Into<String>,
+        decision_version: impl Into<String>,
+        model_version: impl Into<String>,
+        policy_version: impl Into<String>,
+        branch: i64,
+        snapshot_root: ContentHash,
+        issued_day: u32,
+        expires_day: u32,
+    ) -> Result<Self, VoiError> {
+        let session_id = session_id.into();
+        let decision_version = decision_version.into();
+        let model_version = model_version.into();
+        let policy_version = policy_version.into();
+        for (field, value) in [
+            ("session_id", session_id.as_str()),
+            ("decision_version", decision_version.as_str()),
+            ("model_version", model_version.as_str()),
+            ("policy_version", policy_version.as_str()),
+        ] {
+            validate_receipt_token(field, value)?;
+        }
+        if branch <= 0 {
+            return Err(VoiError::InvalidReceiptContext {
+                field: "branch",
+                detail: format!("expected a positive branch id, got {branch}"),
+            });
+        }
+        if snapshot_root.as_bytes().iter().all(|byte| *byte == 0) {
+            return Err(VoiError::InvalidReceiptContext {
+                field: "snapshot_root",
+                detail: "all-zero is not a committed ledger snapshot".to_string(),
+            });
+        }
+        if issued_day > expires_day {
+            return Err(VoiError::InvalidReceiptContext {
+                field: "validity",
+                detail: format!("issued day {issued_day} exceeds expiry day {expires_day}"),
+            });
+        }
+        receipt_time_ns(issued_day)?;
+        Ok(Self {
+            session_id: session_id.as_str().to_owned(),
+            decision_version: decision_version.as_str().to_owned(),
+            model_version: model_version.as_str().to_owned(),
+            policy_version: policy_version.as_str().to_owned(),
+            branch,
+            snapshot_root,
+            issued_day,
+            expires_day,
+        })
+    }
+
+    /// Session whose decision/audit stream owns the receipt.
+    #[must_use]
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    /// Exact decision implementation/version identity.
+    #[must_use]
+    pub fn decision_version(&self) -> &str {
+        &self.decision_version
+    }
+
+    /// Exact model/surrogate version identity.
+    #[must_use]
+    pub fn model_version(&self) -> &str {
+        &self.model_version
+    }
+
+    /// Scheduling/audit policy version.
+    #[must_use]
+    pub fn policy_version(&self) -> &str {
+        &self.policy_version
+    }
+
+    /// Ledger branch containing the snapshot.
+    #[must_use]
+    pub fn branch(&self) -> i64 {
+        self.branch
+    }
+
+    /// Bound semantic VCS root.
+    #[must_use]
+    pub fn snapshot_root(&self) -> ContentHash {
+        self.snapshot_root
+    }
+
+    /// First valid logical day.
+    #[must_use]
+    pub fn issued_day(&self) -> u32 {
+        self.issued_day
+    }
+
+    /// Inclusive last valid logical day.
+    #[must_use]
+    pub fn expires_day(&self) -> u32 {
+        self.expires_day
+    }
+}
+
+/// Durable locator for one canonical receipt artifact and its sole producer.
+///
+/// Locators are intentionally constructible for replay/import; they carry no
+/// authority until an independent verifier checks the ledger artifact,
+/// producer operation, lineage, snapshot, and expiry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VoiLedgerReceipt {
+    operation: i64,
+    artifact: ContentHash,
+}
+
+impl VoiLedgerReceipt {
+    /// Reconstruct a retained locator. This does not verify or mint authority.
+    #[must_use]
+    pub const fn from_parts(operation: i64, artifact: ContentHash) -> Self {
+        Self {
+            operation,
+            artifact,
+        }
+    }
+
+    /// Sole ledger operation claimed to have produced the receipt.
+    #[must_use]
+    pub const fn operation(&self) -> i64 {
+        self.operation
+    }
+
+    /// Content-addressed receipt artifact.
+    #[must_use]
+    pub const fn artifact(&self) -> ContentHash {
+        self.artifact
+    }
 }
 
 /// One uncertainty node touching a live decision: a named quantity the
@@ -1227,7 +1558,8 @@ fn classify_voi_ranked_menu_identity_fields(row: &RankedPurchase, probe: &Probe)
 
 /// A complete, canonical ranking for one validated supplied
 /// uncertainty/menu/grid snapshot. Rows and context are private so safe callers
-/// cannot omit, splice, or reorder scheduling authority after ranking.
+/// cannot omit, splice, or reorder rows after ranking. This value alone does
+/// not authenticate the caller-declared provenance.
 #[derive(Debug, PartialEq)]
 pub struct RankedMenu {
     rows: Vec<RankedPurchase>,
@@ -1520,6 +1852,51 @@ fn push_text(out: &mut Vec<u8>, value: &str, subject: &'static str) -> Result<()
     push_u32(out, value.len(), subject)?;
     out.extend_from_slice(value.as_bytes());
     Ok(())
+}
+
+/// Canonical complete probe-catalog artifact bytes used by ledger receipts.
+///
+/// Input order is nonsemantic: unique validated probes are sorted by name and
+/// encoded with an explicit count and exact floating-point bits.
+///
+/// # Errors
+/// [`VoiError`] for an empty/oversized catalog, malformed probe, duplicate
+/// identity, or an impossible receipt-size bound.
+pub fn voi_probe_catalog_bytes(menu: &[Probe]) -> Result<Vec<u8>, VoiError> {
+    validate_size("VoI probe menu", menu.len(), 1, MAX_VOI_PROBES)?;
+    let mut names = BTreeSet::new();
+    for (index, probe) in menu.iter().enumerate() {
+        validate_probe(index, probe)?;
+        validate_name("probe target", index, &probe.target)?;
+        if !names.insert(probe.name.as_str()) {
+            return Err(VoiError::DuplicateName {
+                kind: "probe",
+                name: probe.name.clone(),
+            });
+        }
+    }
+    let mut canonical_menu = menu.iter().collect::<Vec<_>>();
+    canonical_menu.sort_by(|left, right| left.name.cmp(&right.name));
+    let mut canonical = Vec::new();
+    canonical.extend_from_slice(PROBE_CATALOG_MAGIC);
+    canonical.extend_from_slice(&VOI_LEDGER_RECEIPT_VERSION.to_le_bytes());
+    push_u32(&mut canonical, canonical_menu.len(), "probe catalog")?;
+    for probe in canonical_menu {
+        push_text(&mut canonical, &probe.name, "probe name")?;
+        push_text(&mut canonical, &probe.target, "probe target")?;
+        canonical.extend_from_slice(&probe.cost.to_bits().to_le_bytes());
+        canonical.extend_from_slice(&probe.shrink.to_bits().to_le_bytes());
+        canonical.push(probe.kind.identity_tag());
+    }
+    if canonical.len() > MAX_VOI_PROBE_CATALOG_BYTES {
+        return Err(VoiError::SizeLimit {
+            collection: "VoI probe catalog bytes",
+            count: canonical.len(),
+            min: 1,
+            max: MAX_VOI_PROBE_CATALOG_BYTES,
+        });
+    }
+    Ok(canonical)
 }
 
 fn ranked_source_context(
@@ -1992,9 +2369,10 @@ fn classify_voi_audit_context_identity_fields(record: &MatchedAuditRecord) {
     } = record;
 }
 
-/// One authorized, single-epoch scheduling decision. The receipt retains the
-/// ranked snapshot, audit evidence root, and exact budget transition instead of
-/// returning a provenance-free probe row.
+/// One caller-scoped, single-epoch scheduling suggestion. It retains the ranked
+/// snapshot, audit evidence root, and exact budget transition, but remains
+/// caller-supplied and is not ledger authority. Use
+/// [`VoiScheduler::schedule_authenticated`] for an authenticated result.
 #[derive(Debug, PartialEq)]
 pub struct ScheduledPurchase {
     purchase: RankedPurchase,
@@ -2011,7 +2389,8 @@ pub struct ScheduledPurchase {
 }
 
 impl ScheduledPurchase {
-    /// Authorized purchase.
+    /// Suggested purchase (authenticated only when wrapped by
+    /// [`AuthenticatedScheduledPurchase`]).
     #[must_use]
     pub fn purchase(&self) -> &RankedPurchase {
         &self.purchase
@@ -2053,13 +2432,13 @@ impl ScheduledPurchase {
         self.audit_context_id
     }
 
-    /// Matched-cost observation count supporting authority.
+    /// Matched-cost observation count supporting the audit verdict.
     #[must_use]
     pub fn audit_observations(&self) -> usize {
         self.audit_observations
     }
 
-    /// Final log e-value supporting authority.
+    /// Final log e-value supporting the audit verdict.
     #[must_use]
     pub fn audit_log_e_value(&self) -> f64 {
         self.audit_log_e_value
@@ -2075,6 +2454,42 @@ impl ScheduledPurchase {
     #[must_use]
     pub fn remaining_budget_dollars(&self) -> f64 {
         self.remaining_budget_dollars
+    }
+}
+
+/// A scheduling result whose ranked menu and every prospective audit outcome
+/// were independently reverified against immutable ledger receipts.
+#[derive(Debug)]
+pub struct AuthenticatedScheduledPurchase {
+    scheduled: ScheduledPurchase,
+    ranked_receipt: VoiLedgerReceipt,
+    audit_receipts: Vec<VoiLedgerReceipt>,
+    valid_through_day: u32,
+}
+
+impl AuthenticatedScheduledPurchase {
+    /// The fully retained scheduling decision and budget transition.
+    #[must_use]
+    pub fn scheduled(&self) -> &ScheduledPurchase {
+        &self.scheduled
+    }
+
+    /// Receipt authenticating the complete ranked menu and current snapshot.
+    #[must_use]
+    pub const fn ranked_receipt(&self) -> VoiLedgerReceipt {
+        self.ranked_receipt
+    }
+
+    /// Prospectively ordered receipts authenticating every audit observation.
+    #[must_use]
+    pub fn audit_receipts(&self) -> &[VoiLedgerReceipt] {
+        &self.audit_receipts
+    }
+
+    /// Inclusive minimum expiry across ranking and audit receipts.
+    #[must_use]
+    pub const fn valid_through_day(&self) -> u32 {
+        self.valid_through_day
     }
 }
 
@@ -2206,13 +2621,989 @@ fn audit_context_with_declared_count(
     Ok(hash_domain(domain, &canonical))
 }
 
+fn ledger_evidence_error(operation: &'static str, error: fs_ledger::LedgerError) -> VoiError {
+    VoiError::LedgerEvidence {
+        operation,
+        detail: error.to_string(),
+    }
+}
+
+fn verify_receipt_day(context: &VoiLedgerContext, current_day: u32) -> Result<(), VoiError> {
+    if current_day < context.issued_day {
+        return Err(VoiError::ReceiptNotYetValid {
+            issued_day: context.issued_day,
+            current_day,
+        });
+    }
+    if current_day > context.expires_day {
+        return Err(VoiError::ReceiptExpired {
+            expires_day: context.expires_day,
+            current_day,
+        });
+    }
+    Ok(())
+}
+
+fn push_receipt_context(
+    canonical: &mut Vec<u8>,
+    ledger_id: ContentHash,
+    context: &VoiLedgerContext,
+) -> Result<(), VoiError> {
+    canonical.extend_from_slice(&VOI_LEDGER_RECEIPT_VERSION.to_le_bytes());
+    canonical.extend_from_slice(ledger_id.as_bytes());
+    canonical.extend_from_slice(&context.branch.to_le_bytes());
+    canonical.extend_from_slice(context.snapshot_root.as_bytes());
+    push_text(canonical, &context.session_id, "receipt session")?;
+    push_text(
+        canonical,
+        &context.decision_version,
+        "receipt decision version",
+    )?;
+    push_text(canonical, &context.model_version, "receipt model version")?;
+    push_text(canonical, &context.policy_version, "receipt policy version")?;
+    canonical.extend_from_slice(&context.issued_day.to_le_bytes());
+    canonical.extend_from_slice(&context.expires_day.to_le_bytes());
+    Ok(())
+}
+
+fn validate_receipt_len(canonical: Vec<u8>) -> Result<Vec<u8>, VoiError> {
+    if canonical.is_empty() || canonical.len() > MAX_VOI_LEDGER_RECEIPT_BYTES {
+        return Err(VoiError::SizeLimit {
+            collection: "VoI ledger receipt bytes",
+            count: canonical.len(),
+            min: 1,
+            max: MAX_VOI_LEDGER_RECEIPT_BYTES,
+        });
+    }
+    Ok(canonical)
+}
+
+/// Exact metadata for a decision identity artifact.
+///
+/// # Errors
+/// [`VoiError::InvalidReceiptContext`] when `decision_version` is not a
+/// bounded receipt token.
+pub fn voi_decision_artifact_metadata(decision_version: &str) -> Result<String, VoiError> {
+    validate_receipt_token("decision_version", decision_version)?;
+    Ok(format!(
+        "{{\"schema\":\"fs-plan-voi-decision-v1\",\"version\":\"{}\"}}",
+        decision_version
+    ))
+}
+
+/// Exact metadata for a model identity artifact.
+///
+/// # Errors
+/// [`VoiError::InvalidReceiptContext`] when `model_version` is not a bounded
+/// receipt token.
+pub fn voi_model_artifact_metadata(model_version: &str) -> Result<String, VoiError> {
+    validate_receipt_token("model_version", model_version)?;
+    Ok(format!(
+        "{{\"schema\":\"fs-plan-voi-model-v1\",\"version\":\"{}\"}}",
+        model_version
+    ))
+}
+
+fn verify_snapshot(
+    ledger: &Ledger,
+    vcs: &Vcs,
+    context: &VoiLedgerContext,
+    current_day: u32,
+    require_current_head: bool,
+) -> Result<(ContentHash, fs_ledger::ViewSnapshot), VoiError> {
+    verify_receipt_day(context, current_day)?;
+    ledger
+        .checked_instance_id()
+        .map_err(|error| ledger_evidence_error("check physical ledger identity", error))?;
+    let ledger_id = ledger
+        .vcs_identity()
+        .map_err(|error| ledger_evidence_error("read VCS ledger identity", error))?;
+    if require_current_head {
+        let head = vcs
+            .head(ledger, context.branch)
+            .map_err(|error| ledger_evidence_error("read VCS branch head", error))?;
+        if head != Some(context.snapshot_root) {
+            return Err(VoiError::StaleLedgerSnapshot {
+                expected: context.snapshot_root,
+                actual: head,
+            });
+        }
+    }
+    let snapshot = vcs
+        .checkout(ledger, context.branch, &context.snapshot_root)
+        .map_err(|error| ledger_evidence_error("checkout bound VCS snapshot", error))?;
+    Ok((ledger_id, snapshot))
+}
+
+fn require_snapshot_artifact(
+    snapshot: &fs_ledger::ViewSnapshot,
+    role: &'static str,
+    artifact: ContentHash,
+) -> Result<(), VoiError> {
+    if snapshot.artifacts.contains(&artifact) {
+        Ok(())
+    } else {
+        Err(VoiError::SnapshotArtifactMissing { role, artifact })
+    }
+}
+
+fn verify_artifact_envelope(
+    ledger: &Ledger,
+    artifact: ContentHash,
+    expected_kind: &str,
+    expected_meta: &str,
+    expected_bytes: Option<&[u8]>,
+    max_bytes: u64,
+) -> Result<(), VoiError> {
+    let info = ledger
+        .artifact_info(&artifact)
+        .map_err(|error| ledger_evidence_error("read receipt input artifact", error))?
+        .ok_or(VoiError::ReceiptMismatch {
+            field: "artifact presence",
+        })?;
+    if info.kind != expected_kind || info.meta.as_deref() != Some(expected_meta) {
+        return Err(VoiError::ReceiptMismatch {
+            field: "artifact envelope",
+        });
+    }
+    if info.len == 0 {
+        return Err(VoiError::ReceiptMismatch {
+            field: "nonempty artifact bytes",
+        });
+    }
+    let stored = ledger
+        .get_artifact_bounded(&artifact, max_bytes)
+        .map_err(|error| ledger_evidence_error("read bounded receipt input", error))?
+        .ok_or(VoiError::ReceiptMismatch {
+            field: "artifact bytes",
+        })?;
+    if u64::try_from(stored.len()).ok() != Some(info.len) || hash_bytes(&stored) != artifact {
+        return Err(VoiError::ReceiptMismatch {
+            field: "artifact content identity",
+        });
+    }
+    if let Some(expected_bytes) = expected_bytes
+        && stored.as_slice() != expected_bytes
+    {
+        return Err(VoiError::ReceiptMismatch {
+            field: "artifact bytes",
+        });
+    }
+    Ok(())
+}
+
+fn ranked_catalog_bytes(ranked: &RankedMenu) -> Result<Vec<u8>, VoiError> {
+    let probes = ranked
+        .rows
+        .iter()
+        .map(|row| row.probe.clone())
+        .collect::<Vec<_>>();
+    voi_probe_catalog_bytes(&probes)
+}
+
+fn validate_ranked_receipt_inputs(
+    ledger: &Ledger,
+    snapshot: &fs_ledger::ViewSnapshot,
+    ranked: &RankedMenu,
+    context: &VoiLedgerContext,
+    decision_artifact: ContentHash,
+    model_artifact: ContentHash,
+    probe_catalog_artifact: ContentHash,
+) -> Result<Vec<u8>, VoiError> {
+    if ranked.policy_scope != context.policy_version {
+        return Err(VoiError::ReceiptMismatch {
+            field: "ranked policy version",
+        });
+    }
+    if ranked.snapshot_id != context.snapshot_root.to_hex() {
+        return Err(VoiError::ReceiptMismatch {
+            field: "ranked snapshot root",
+        });
+    }
+    let catalog = ranked_catalog_bytes(ranked)?;
+    for (role, artifact) in [
+        ("decision", decision_artifact),
+        ("model", model_artifact),
+        ("probe catalog", probe_catalog_artifact),
+    ] {
+        require_snapshot_artifact(snapshot, role, artifact)?;
+    }
+    verify_artifact_envelope(
+        ledger,
+        decision_artifact,
+        VOI_DECISION_ARTIFACT_KIND,
+        &voi_decision_artifact_metadata(&context.decision_version)?,
+        None,
+        u64::try_from(MAX_VOI_AUTHORITY_ARTIFACT_BYTES).unwrap_or(u64::MAX),
+    )?;
+    verify_artifact_envelope(
+        ledger,
+        model_artifact,
+        VOI_MODEL_ARTIFACT_KIND,
+        &voi_model_artifact_metadata(&context.model_version)?,
+        None,
+        u64::try_from(MAX_VOI_AUTHORITY_ARTIFACT_BYTES).unwrap_or(u64::MAX),
+    )?;
+    verify_artifact_envelope(
+        ledger,
+        probe_catalog_artifact,
+        VOI_PROBE_CATALOG_ARTIFACT_KIND,
+        VOI_PROBE_CATALOG_ARTIFACT_METADATA,
+        Some(&catalog),
+        u64::try_from(MAX_VOI_PROBE_CATALOG_BYTES).unwrap_or(u64::MAX),
+    )?;
+    Ok(catalog)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ranked_receipt_bytes(
+    ledger_id: ContentHash,
+    ranked: &RankedMenu,
+    context: &VoiLedgerContext,
+    decision_artifact: ContentHash,
+    model_artifact: ContentHash,
+    probe_catalog_artifact: ContentHash,
+) -> Result<Vec<u8>, VoiError> {
+    let mut canonical = Vec::new();
+    canonical.extend_from_slice(RANKED_LEDGER_RECEIPT_MAGIC);
+    push_receipt_context(&mut canonical, ledger_id, context)?;
+    canonical.extend_from_slice(&ranked.source_identity_version().to_le_bytes());
+    canonical.extend_from_slice(&ranked.identity_version().to_le_bytes());
+    canonical.extend_from_slice(ranked.source_context_id.as_bytes());
+    canonical.extend_from_slice(ranked.context_id.as_bytes());
+    push_u32(&mut canonical, ranked.rows.len(), "ranked receipt rows")?;
+    canonical.extend_from_slice(decision_artifact.as_bytes());
+    canonical.extend_from_slice(model_artifact.as_bytes());
+    canonical.extend_from_slice(probe_catalog_artifact.as_bytes());
+    validate_receipt_len(canonical)
+}
+
+/// Canonical bytes for one side of a prospective matched-cost outcome.
+///
+/// Retaining these bytes as an `fs-plan-voi-outcome` artifact lets receipt
+/// verification authenticate the exact candidate, cost, provenance, and
+/// realized decision-change bit instead of trusting a caller boolean.
+///
+/// # Errors
+/// [`VoiError`] if a bounded field cannot be encoded.
+pub fn voi_audit_outcome_bytes(
+    record: &MatchedAuditRecord,
+    recommended: bool,
+) -> Result<Vec<u8>, VoiError> {
+    let mut canonical = Vec::new();
+    canonical.extend_from_slice(AUDIT_OUTCOME_MAGIC);
+    canonical.extend_from_slice(&VOI_LEDGER_RECEIPT_VERSION.to_le_bytes());
+    push_text(&mut canonical, &record.observation_id, "audit observation")?;
+    push_text(
+        &mut canonical,
+        if recommended {
+            &record.recommended_id
+        } else {
+            &record.alternative_id
+        },
+        "audit candidate",
+    )?;
+    push_text(&mut canonical, &record.provenance, "audit provenance")?;
+    canonical.extend_from_slice(&record.matched_cost.to_bits().to_le_bytes());
+    canonical.push(u8::from(if recommended {
+        record.recommended_changed_decision
+    } else {
+        record.alternative_changed_decision
+    }));
+    validate_receipt_len(canonical)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn audit_receipt_bytes(
+    ledger_id: ContentHash,
+    record: &MatchedAuditRecord,
+    sequence: usize,
+    context: &VoiLedgerContext,
+    decision_artifact: ContentHash,
+    model_artifact: ContentHash,
+    recommended_outcome_artifact: ContentHash,
+    alternative_outcome_artifact: ContentHash,
+) -> Result<Vec<u8>, VoiError> {
+    let mut canonical = Vec::new();
+    canonical.extend_from_slice(AUDIT_LEDGER_RECEIPT_MAGIC);
+    push_receipt_context(&mut canonical, ledger_id, context)?;
+    canonical.extend_from_slice(&VOI_AUDIT_CONTEXT_IDENTITY_VERSION.to_le_bytes());
+    push_u32(&mut canonical, sequence, "audit receipt sequence")?;
+    push_text(&mut canonical, &record.observation_id, "audit observation")?;
+    push_text(
+        &mut canonical,
+        &record.recommended_id,
+        "recommended purchase",
+    )?;
+    push_text(
+        &mut canonical,
+        &record.alternative_id,
+        "alternative purchase",
+    )?;
+    push_text(&mut canonical, &record.provenance, "audit provenance")?;
+    canonical.extend_from_slice(&record.matched_cost.to_bits().to_le_bytes());
+    canonical.push(u8::from(record.recommended_changed_decision));
+    canonical.push(u8::from(record.alternative_changed_decision));
+    canonical.extend_from_slice(decision_artifact.as_bytes());
+    canonical.extend_from_slice(model_artifact.as_bytes());
+    canonical.extend_from_slice(recommended_outcome_artifact.as_bytes());
+    canonical.extend_from_slice(alternative_outcome_artifact.as_bytes());
+    validate_receipt_len(canonical)
+}
+
+fn receipt_ir(kind: &str, artifact: ContentHash, snapshot: ContentHash) -> String {
+    format!(
+        "{{\"op\":\"voi.receipt\",\"kind\":\"{kind}\",\"artifact\":\"{artifact}\",\"snapshot\":\"{snapshot}\"}}"
+    )
+}
+
+fn persist_receipt(
+    ledger: &Ledger,
+    context: &VoiLedgerContext,
+    kind: &'static str,
+    meta: &'static str,
+    canonical: &[u8],
+    inputs: &[ContentHash],
+) -> Result<VoiLedgerReceipt, VoiError> {
+    if ledger.in_transaction() {
+        return Err(VoiError::ReceiptTransactionActive);
+    }
+    let artifact = hash_bytes(canonical);
+    if let Some(operation) = ledger
+        .artifact_output_seal(&artifact)
+        .map_err(|error| ledger_evidence_error("look up idempotent receipt", error))?
+    {
+        let receipt = VoiLedgerReceipt {
+            operation,
+            artifact,
+        };
+        verify_receipt_envelope(ledger, context, receipt, kind, meta, canonical, inputs)?;
+        return Ok(receipt);
+    }
+    let ir = receipt_ir(kind, artifact, context.snapshot_root);
+    let issued_at_ns = receipt_time_ns(context.issued_day)?;
+    let explicits = FiveExplicits {
+        seed: RECEIPT_SEED,
+        versions: RECEIPT_VERSIONS,
+        budget: RECEIPT_BUDGET,
+        capability: RECEIPT_CAPABILITY,
+    };
+    ledger
+        .begin()
+        .map_err(|error| ledger_evidence_error("begin receipt transaction", error))?;
+    let result = (|| {
+        let operation = ledger
+            .begin_op_on(
+                context.branch,
+                ExecMode::Deterministic,
+                Some(context.session_id.as_bytes()),
+                &ir,
+                &explicits,
+                issued_at_ns,
+            )
+            .map_err(|error| ledger_evidence_error("begin receipt operation", error))?;
+        let mut unique_inputs = BTreeSet::new();
+        for input in inputs {
+            if unique_inputs.insert(*input) {
+                ledger
+                    .link(operation, input, EdgeRole::In)
+                    .map_err(|error| ledger_evidence_error("link receipt input", error))?;
+            }
+        }
+        let stored = ledger
+            .put_artifact(kind, canonical, Some(meta))
+            .map_err(|error| ledger_evidence_error("store receipt artifact", error))?;
+        if stored.hash != artifact
+            || stored.len != u64::try_from(canonical.len()).unwrap_or(u64::MAX)
+        {
+            return Err(VoiError::ReceiptMismatch {
+                field: "stored receipt",
+            });
+        }
+        ledger
+            .link(operation, &artifact, EdgeRole::Out)
+            .map_err(|error| ledger_evidence_error("link receipt output", error))?;
+        ledger
+            .seal_artifact_output(&artifact, operation)
+            .map_err(|error| ledger_evidence_error("seal receipt producer", error))?;
+        ledger
+            .finish_op(operation, OpOutcome::Ok, None, issued_at_ns)
+            .map_err(|error| ledger_evidence_error("finish receipt operation", error))?;
+        Ok(VoiLedgerReceipt {
+            operation,
+            artifact,
+        })
+    })();
+    match result {
+        Ok(receipt) => {
+            if let Err(error) = ledger.commit() {
+                let _ = ledger.rollback();
+                return Err(ledger_evidence_error("commit receipt transaction", error));
+            }
+            Ok(receipt)
+        }
+        Err(error) => {
+            let _ = ledger.rollback();
+            Err(error)
+        }
+    }
+}
+
+fn verify_receipt_envelope(
+    ledger: &Ledger,
+    context: &VoiLedgerContext,
+    receipt: VoiLedgerReceipt,
+    kind: &'static str,
+    meta: &'static str,
+    canonical: &[u8],
+    inputs: &[ContentHash],
+) -> Result<(), VoiError> {
+    let expected_artifact = hash_bytes(canonical);
+    if receipt.operation <= 0 || receipt.artifact != expected_artifact {
+        return Err(VoiError::ReceiptMismatch {
+            field: "receipt locator",
+        });
+    }
+    verify_artifact_envelope(
+        ledger,
+        receipt.artifact,
+        kind,
+        meta,
+        Some(canonical),
+        u64::try_from(MAX_VOI_LEDGER_RECEIPT_BYTES).unwrap_or(u64::MAX),
+    )?;
+    let operation = ledger
+        .op(receipt.operation)
+        .map_err(|error| ledger_evidence_error("read receipt operation", error))?
+        .ok_or(VoiError::ReceiptMismatch {
+            field: "receipt operation",
+        })?;
+    let expected_ir = receipt_ir(kind, receipt.artifact, context.snapshot_root);
+    let issued_at_ns = receipt_time_ns(context.issued_day)?;
+    if operation.session.as_deref() != Some(context.session_id.as_bytes())
+        || operation.ir != expected_ir
+        || operation.seed.as_slice() != RECEIPT_SEED
+        || operation.versions != RECEIPT_VERSIONS
+        || operation.budget != RECEIPT_BUDGET
+        || operation.capability != RECEIPT_CAPABILITY
+        || operation.t_start != issued_at_ns
+        || operation.t_end != Some(issued_at_ns)
+        || operation.outcome.as_deref() != Some("ok")
+        || operation.diag.is_some()
+    {
+        return Err(VoiError::ReceiptMismatch {
+            field: "receipt operation envelope",
+        });
+    }
+    let execution = ledger
+        .op_execution_context(receipt.operation)
+        .map_err(|error| ledger_evidence_error("read receipt execution context", error))?
+        .ok_or(VoiError::ReceiptMismatch {
+            field: "receipt execution context",
+        })?;
+    if execution.branch != context.branch || execution.exec_mode != ExecMode::Deterministic {
+        return Err(VoiError::ReceiptMismatch {
+            field: "receipt execution context",
+        });
+    }
+    let unique_inputs = inputs.iter().copied().collect::<BTreeSet<_>>();
+    for input in &unique_inputs {
+        if !ledger
+            .edge_exists(receipt.operation, input, EdgeRole::In)
+            .map_err(|error| ledger_evidence_error("verify receipt input edge", error))?
+        {
+            return Err(VoiError::ReceiptMismatch {
+                field: "receipt input lineage",
+            });
+        }
+    }
+    if !ledger
+        .edge_exists(receipt.operation, &receipt.artifact, EdgeRole::Out)
+        .map_err(|error| ledger_evidence_error("verify receipt output edge", error))?
+        || ledger
+            .artifact_output_seal(&receipt.artifact)
+            .map_err(|error| ledger_evidence_error("verify receipt producer seal", error))?
+            != Some(receipt.operation)
+    {
+        return Err(VoiError::ReceiptMismatch {
+            field: "receipt output lineage",
+        });
+    }
+    let mut expected_edges = unique_inputs
+        .into_iter()
+        .map(|artifact| OpArtifactEdge {
+            role: EdgeRole::In,
+            artifact,
+        })
+        .collect::<Vec<_>>();
+    expected_edges.push(OpArtifactEdge {
+        role: EdgeRole::Out,
+        artifact: receipt.artifact,
+    });
+    let actual_edges = ledger
+        .op_artifact_edges_bounded(receipt.operation, expected_edges.len())
+        .map_err(|error| ledger_evidence_error("verify exact receipt lineage", error))?;
+    if actual_edges.truncated || actual_edges.edges != expected_edges {
+        return Err(VoiError::ReceiptMismatch {
+            field: "exact receipt lineage",
+        });
+    }
+    Ok(())
+}
+
+/// A ranked menu whose ledger receipt was independently verified.
+#[derive(Debug)]
+pub struct AuthenticatedRankedMenu {
+    ranked: RankedMenu,
+    context: VoiLedgerContext,
+    receipt: VoiLedgerReceipt,
+    decision_artifact: ContentHash,
+    model_artifact: ContentHash,
+    probe_catalog_artifact: ContentHash,
+}
+
+impl AuthenticatedRankedMenu {
+    /// Verified ranked menu for reporting before it is consumed.
+    #[must_use]
+    pub fn ranked(&self) -> &RankedMenu {
+        &self.ranked
+    }
+
+    /// Verified receipt locator.
+    #[must_use]
+    pub const fn receipt(&self) -> VoiLedgerReceipt {
+        self.receipt
+    }
+
+    /// Bound ledger authority scope.
+    #[must_use]
+    pub fn context(&self) -> &VoiLedgerContext {
+        &self.context
+    }
+
+    /// Exact decision identity artifact admitted by the verifier.
+    #[must_use]
+    pub const fn decision_artifact(&self) -> ContentHash {
+        self.decision_artifact
+    }
+
+    /// Exact model identity artifact admitted by the verifier.
+    #[must_use]
+    pub const fn model_artifact(&self) -> ContentHash {
+        self.model_artifact
+    }
+
+    /// Complete canonical probe catalog admitted by the verifier.
+    #[must_use]
+    pub const fn probe_catalog_artifact(&self) -> ContentHash {
+        self.probe_catalog_artifact
+    }
+}
+
+/// Mint or exactly replay one ranked-menu receipt through an atomic,
+/// deterministic ledger operation whose input lineage is the decision, model,
+/// and complete catalog.
+///
+/// # Errors
+/// [`VoiError`] when the context is stale/expired, the ranked menu is not bound
+/// to the exact current root and policy, any input artifact is absent or has a
+/// wrong envelope, or the atomic ledger write fails.
+#[allow(clippy::too_many_arguments)]
+pub fn record_ranked_menu_receipt(
+    ledger: &Ledger,
+    vcs: &Vcs,
+    ranked: &RankedMenu,
+    context: &VoiLedgerContext,
+    decision_artifact: ContentHash,
+    model_artifact: ContentHash,
+    probe_catalog_artifact: ContentHash,
+) -> Result<VoiLedgerReceipt, VoiError> {
+    let (ledger_id, snapshot) = verify_snapshot(ledger, vcs, context, context.issued_day, true)?;
+    let _catalog = validate_ranked_receipt_inputs(
+        ledger,
+        &snapshot,
+        ranked,
+        context,
+        decision_artifact,
+        model_artifact,
+        probe_catalog_artifact,
+    )?;
+    let canonical = ranked_receipt_bytes(
+        ledger_id,
+        ranked,
+        context,
+        decision_artifact,
+        model_artifact,
+        probe_catalog_artifact,
+    )?;
+    persist_receipt(
+        ledger,
+        context,
+        RANKED_RECEIPT_KIND,
+        RANKED_RECEIPT_META,
+        &canonical,
+        &[decision_artifact, model_artifact, probe_catalog_artifact],
+    )
+}
+
+/// Independently verify a ranked receipt and mint the opaque capability used
+/// by authenticated scheduling.
+///
+/// # Errors
+/// [`VoiError`] for any root/policy/catalog/artifact/operation/lineage/expiry
+/// mismatch. The ranked menu is returned only inside the verified wrapper.
+#[allow(clippy::too_many_arguments)]
+pub fn verify_ranked_menu_receipt(
+    ledger: &Ledger,
+    vcs: &Vcs,
+    ranked: RankedMenu,
+    context: VoiLedgerContext,
+    decision_artifact: ContentHash,
+    model_artifact: ContentHash,
+    probe_catalog_artifact: ContentHash,
+    receipt: VoiLedgerReceipt,
+    current_day: u32,
+) -> Result<AuthenticatedRankedMenu, VoiError> {
+    let (ledger_id, snapshot) = verify_snapshot(ledger, vcs, &context, current_day, true)?;
+    let _catalog = validate_ranked_receipt_inputs(
+        ledger,
+        &snapshot,
+        &ranked,
+        &context,
+        decision_artifact,
+        model_artifact,
+        probe_catalog_artifact,
+    )?;
+    let canonical = ranked_receipt_bytes(
+        ledger_id,
+        &ranked,
+        &context,
+        decision_artifact,
+        model_artifact,
+        probe_catalog_artifact,
+    )?;
+    verify_receipt_envelope(
+        ledger,
+        &context,
+        receipt,
+        RANKED_RECEIPT_KIND,
+        RANKED_RECEIPT_META,
+        &canonical,
+        &[decision_artifact, model_artifact, probe_catalog_artifact],
+    )?;
+    Ok(AuthenticatedRankedMenu {
+        ranked,
+        context,
+        receipt,
+        decision_artifact,
+        model_artifact,
+        probe_catalog_artifact,
+    })
+}
+
+/// One audit observation whose outcome artifacts and receipt were verified.
+#[derive(Debug, Clone)]
+pub struct AuthenticatedAuditRecord {
+    record: MatchedAuditRecord,
+    sequence: usize,
+    context: VoiLedgerContext,
+    receipt: VoiLedgerReceipt,
+    decision_artifact: ContentHash,
+    model_artifact: ContentHash,
+    recommended_outcome_artifact: ContentHash,
+    alternative_outcome_artifact: ContentHash,
+}
+
+impl AuthenticatedAuditRecord {
+    /// Exact prospectively ordered record.
+    #[must_use]
+    pub fn record(&self) -> &MatchedAuditRecord {
+        &self.record
+    }
+
+    /// Zero-based prospective sequence bound into the receipt.
+    #[must_use]
+    pub const fn sequence(&self) -> usize {
+        self.sequence
+    }
+
+    /// Verified receipt locator.
+    #[must_use]
+    pub const fn receipt(&self) -> VoiLedgerReceipt {
+        self.receipt
+    }
+
+    /// Bound ledger authority scope.
+    #[must_use]
+    pub fn context(&self) -> &VoiLedgerContext {
+        &self.context
+    }
+
+    /// Exact decision identity artifact admitted by the verifier.
+    #[must_use]
+    pub const fn decision_artifact(&self) -> ContentHash {
+        self.decision_artifact
+    }
+
+    /// Exact model identity artifact admitted by the verifier.
+    #[must_use]
+    pub const fn model_artifact(&self) -> ContentHash {
+        self.model_artifact
+    }
+
+    /// Recommended-side outcome artifact admitted by the verifier.
+    #[must_use]
+    pub const fn recommended_outcome_artifact(&self) -> ContentHash {
+        self.recommended_outcome_artifact
+    }
+
+    /// Alternative-side outcome artifact admitted by the verifier.
+    #[must_use]
+    pub const fn alternative_outcome_artifact(&self) -> ContentHash {
+        self.alternative_outcome_artifact
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_audit_receipt_inputs(
+    ledger: &Ledger,
+    snapshot: &fs_ledger::ViewSnapshot,
+    record: &MatchedAuditRecord,
+    context: &VoiLedgerContext,
+    decision_artifact: ContentHash,
+    model_artifact: ContentHash,
+    recommended_outcome_artifact: ContentHash,
+    alternative_outcome_artifact: ContentHash,
+) -> Result<(Vec<u8>, Vec<u8>), VoiError> {
+    if recommended_outcome_artifact == alternative_outcome_artifact {
+        return Err(VoiError::ReceiptMismatch {
+            field: "distinct matched outcome artifacts",
+        });
+    }
+    let recommended = voi_audit_outcome_bytes(record, true)?;
+    let alternative = voi_audit_outcome_bytes(record, false)?;
+    for (role, artifact) in [
+        ("decision", decision_artifact),
+        ("model", model_artifact),
+        ("recommended outcome", recommended_outcome_artifact),
+        ("alternative outcome", alternative_outcome_artifact),
+    ] {
+        require_snapshot_artifact(snapshot, role, artifact)?;
+    }
+    verify_artifact_envelope(
+        ledger,
+        decision_artifact,
+        VOI_DECISION_ARTIFACT_KIND,
+        &voi_decision_artifact_metadata(&context.decision_version)?,
+        None,
+        u64::try_from(MAX_VOI_AUTHORITY_ARTIFACT_BYTES).unwrap_or(u64::MAX),
+    )?;
+    verify_artifact_envelope(
+        ledger,
+        model_artifact,
+        VOI_MODEL_ARTIFACT_KIND,
+        &voi_model_artifact_metadata(&context.model_version)?,
+        None,
+        u64::try_from(MAX_VOI_AUTHORITY_ARTIFACT_BYTES).unwrap_or(u64::MAX),
+    )?;
+    verify_artifact_envelope(
+        ledger,
+        recommended_outcome_artifact,
+        VOI_AUDIT_OUTCOME_ARTIFACT_KIND,
+        VOI_AUDIT_OUTCOME_ARTIFACT_METADATA,
+        Some(&recommended),
+        u64::try_from(MAX_VOI_LEDGER_RECEIPT_BYTES).unwrap_or(u64::MAX),
+    )?;
+    verify_artifact_envelope(
+        ledger,
+        alternative_outcome_artifact,
+        VOI_AUDIT_OUTCOME_ARTIFACT_KIND,
+        VOI_AUDIT_OUTCOME_ARTIFACT_METADATA,
+        Some(&alternative),
+        u64::try_from(MAX_VOI_LEDGER_RECEIPT_BYTES).unwrap_or(u64::MAX),
+    )?;
+    Ok((recommended, alternative))
+}
+
+/// Mint or exactly replay one prospective matched-outcome receipt through a
+/// sealed ledger op.
+///
+/// # Errors
+/// [`VoiError`] when the snapshot is stale, an outcome artifact does not
+/// authenticate the exact record side, or ledger persistence fails.
+#[allow(clippy::too_many_arguments)]
+pub fn record_prospective_audit_receipt(
+    ledger: &Ledger,
+    vcs: &Vcs,
+    record: &MatchedAuditRecord,
+    sequence: usize,
+    context: &VoiLedgerContext,
+    decision_artifact: ContentHash,
+    model_artifact: ContentHash,
+    recommended_outcome_artifact: ContentHash,
+    alternative_outcome_artifact: ContentHash,
+) -> Result<VoiLedgerReceipt, VoiError> {
+    if sequence >= MAX_VOI_AUDIT_RECORDS {
+        return Err(VoiError::SizeLimit {
+            collection: "VoI audit receipt sequence",
+            count: sequence.saturating_add(1),
+            min: 1,
+            max: MAX_VOI_AUDIT_RECORDS,
+        });
+    }
+    let (ledger_id, snapshot) = verify_snapshot(ledger, vcs, context, context.issued_day, true)?;
+    let _outcomes = validate_audit_receipt_inputs(
+        ledger,
+        &snapshot,
+        record,
+        context,
+        decision_artifact,
+        model_artifact,
+        recommended_outcome_artifact,
+        alternative_outcome_artifact,
+    )?;
+    let canonical = audit_receipt_bytes(
+        ledger_id,
+        record,
+        sequence,
+        context,
+        decision_artifact,
+        model_artifact,
+        recommended_outcome_artifact,
+        alternative_outcome_artifact,
+    )?;
+    persist_receipt(
+        ledger,
+        context,
+        AUDIT_RECEIPT_KIND,
+        AUDIT_RECEIPT_META,
+        &canonical,
+        &[
+            decision_artifact,
+            model_artifact,
+            recommended_outcome_artifact,
+            alternative_outcome_artifact,
+        ],
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn verify_audit_receipt_inner(
+    ledger: &Ledger,
+    vcs: &Vcs,
+    record: &MatchedAuditRecord,
+    sequence: usize,
+    context: &VoiLedgerContext,
+    decision_artifact: ContentHash,
+    model_artifact: ContentHash,
+    recommended_outcome_artifact: ContentHash,
+    alternative_outcome_artifact: ContentHash,
+    receipt: VoiLedgerReceipt,
+    current_day: u32,
+    require_current_head: bool,
+) -> Result<(), VoiError> {
+    if sequence >= MAX_VOI_AUDIT_RECORDS {
+        return Err(VoiError::SizeLimit {
+            collection: "VoI audit receipt sequence",
+            count: sequence.saturating_add(1),
+            min: 1,
+            max: MAX_VOI_AUDIT_RECORDS,
+        });
+    }
+    let (ledger_id, snapshot) =
+        verify_snapshot(ledger, vcs, context, current_day, require_current_head)?;
+    let _outcomes = validate_audit_receipt_inputs(
+        ledger,
+        &snapshot,
+        record,
+        context,
+        decision_artifact,
+        model_artifact,
+        recommended_outcome_artifact,
+        alternative_outcome_artifact,
+    )?;
+    let canonical = audit_receipt_bytes(
+        ledger_id,
+        record,
+        sequence,
+        context,
+        decision_artifact,
+        model_artifact,
+        recommended_outcome_artifact,
+        alternative_outcome_artifact,
+    )?;
+    verify_receipt_envelope(
+        ledger,
+        context,
+        receipt,
+        AUDIT_RECEIPT_KIND,
+        AUDIT_RECEIPT_META,
+        &canonical,
+        &[
+            decision_artifact,
+            model_artifact,
+            recommended_outcome_artifact,
+            alternative_outcome_artifact,
+        ],
+    )
+}
+
+/// Independently verify one prospective outcome receipt before it can enter
+/// the scheduler's authenticated e-process.
+///
+/// # Errors
+/// [`VoiError`] for any snapshot, expiry, outcome byte, receipt, operation, or
+/// lineage mismatch.
+#[allow(clippy::too_many_arguments)]
+pub fn verify_prospective_audit_receipt(
+    ledger: &Ledger,
+    vcs: &Vcs,
+    record: MatchedAuditRecord,
+    sequence: usize,
+    context: VoiLedgerContext,
+    decision_artifact: ContentHash,
+    model_artifact: ContentHash,
+    recommended_outcome_artifact: ContentHash,
+    alternative_outcome_artifact: ContentHash,
+    receipt: VoiLedgerReceipt,
+    current_day: u32,
+) -> Result<AuthenticatedAuditRecord, VoiError> {
+    verify_audit_receipt_inner(
+        ledger,
+        vcs,
+        &record,
+        sequence,
+        &context,
+        decision_artifact,
+        model_artifact,
+        recommended_outcome_artifact,
+        alternative_outcome_artifact,
+        receipt,
+        current_day,
+        true,
+    )?;
+    Ok(AuthenticatedAuditRecord {
+        record,
+        sequence,
+        context,
+        receipt,
+        decision_artifact,
+        model_artifact,
+        recommended_outcome_artifact,
+        alternative_outcome_artifact,
+    })
+}
+
 /// Single-owner live VoI audit and purchase scheduler.
 ///
 /// Audit observations enter one append-only [`PairwiseRace`] in prospective
 /// order. The scheduler owns the remaining budget and the bounded set of
 /// decision snapshots it has already evaluated, so one process cannot reuse a
-/// stale ranking or reset the budget through the safe API. Caller-declared
-/// identities and outcomes remain unauthenticated until `frankensim-wk4m`.
+/// stale ranking or reset the budget through the safe API. The original
+/// [`VoiScheduler::observe_audit`] / [`VoiScheduler::schedule`] path remains an
+/// explicit caller-supplied reporting/advisory surface. Ledger authority is
+/// minted only by [`VoiScheduler::observe_authenticated_audit`] followed by
+/// [`VoiScheduler::schedule_authenticated`].
 #[derive(Debug)]
 pub struct VoiScheduler {
     policy_scope: String,
@@ -2221,6 +3612,7 @@ pub struct VoiScheduler {
     observation_ids: BTreeSet<String>,
     race: PairwiseRace,
     consumed_snapshots: BTreeSet<String>,
+    authenticated_audits: Vec<AuthenticatedAuditRecord>,
 }
 
 impl VoiScheduler {
@@ -2241,6 +3633,7 @@ impl VoiScheduler {
             observation_ids: BTreeSet::new(),
             race: PairwiseRace::new(LossSpan::ONE),
             consumed_snapshots: BTreeSet::new(),
+            authenticated_audits: Vec::new(),
         })
     }
 
@@ -2277,6 +3670,58 @@ impl VoiScheduler {
         self.observation_ids.insert(record.observation_id.clone());
         self.audit_records.push(record);
         self.race = next_race;
+        Ok(())
+    }
+
+    /// Append one independently verified prospective outcome to the only
+    /// audit stream eligible for ledger-backed scheduling authority.
+    ///
+    /// The receipt sequence must equal the current chronological length.
+    /// Mixing caller-supplied records into an authenticated scheduler fails
+    /// closed, as do session/decision/model/policy, branch, or exact
+    /// decision/model artifact changes within one stream.
+    ///
+    /// # Errors
+    /// [`VoiError::AuditSequenceMismatch`] for reordered/skipped receipts;
+    /// [`VoiError::ReceiptMismatch`] for mixed or cross-scope evidence; other
+    /// audit validation errors are inherited from [`Self::observe_audit`].
+    pub fn observe_authenticated_audit(
+        &mut self,
+        evidence: AuthenticatedAuditRecord,
+    ) -> Result<(), VoiError> {
+        let expected = self.audit_records.len();
+        if evidence.sequence != expected {
+            return Err(VoiError::AuditSequenceMismatch {
+                expected,
+                actual: evidence.sequence,
+            });
+        }
+        if self.authenticated_audits.len() != self.audit_records.len() {
+            return Err(VoiError::ReceiptMismatch {
+                field: "mixed authenticated and caller-supplied audit stream",
+            });
+        }
+        if evidence.context.policy_version != self.policy_scope {
+            return Err(VoiError::PolicyScopeMismatch {
+                expected: self.policy_scope.clone(),
+                actual: evidence.context.policy_version.clone(),
+            });
+        }
+        if let Some(first) = self.authenticated_audits.first()
+            && (first.context.session_id != evidence.context.session_id
+                || first.context.decision_version != evidence.context.decision_version
+                || first.context.model_version != evidence.context.model_version
+                || first.context.policy_version != evidence.context.policy_version
+                || first.context.branch != evidence.context.branch
+                || first.decision_artifact != evidence.decision_artifact
+                || first.model_artifact != evidence.model_artifact)
+        {
+            return Err(VoiError::ReceiptMismatch {
+                field: "authenticated audit stream scope",
+            });
+        }
+        self.observe_audit(evidence.record.clone())?;
+        self.authenticated_audits.push(evidence);
         Ok(())
     }
 
@@ -2326,13 +3771,15 @@ impl VoiScheduler {
         self.consumed_snapshots.len()
     }
 
-    /// Evaluate at most one purchase from one previously unseen decision
-    /// snapshot. The current live audit must still be above threshold. All
-    /// validation and arithmetic precede mutation; success (including a
+    /// Evaluate at most one advisory purchase from one previously unseen
+    /// caller-declared decision snapshot. The current live audit must still be
+    /// above threshold. This raw path does not verify ledger provenance; use
+    /// [`Self::schedule_authenticated`] before treating a result as authority.
+    /// All validation and arithmetic precede mutation; success (including a
     /// no-affordable-purchase result) consumes the snapshot atomically.
     ///
     /// # Errors
-    /// [`VoiError`] when audit authority is currently absent, policy scopes
+    /// [`VoiError`] when the audit threshold is currently unmet, policy scopes
     /// differ, the snapshot was already consumed, retained snapshot capacity
     /// is exhausted, or budget arithmetic cannot decrease monotonically.
     pub fn schedule(&mut self, ranked: RankedMenu) -> Result<Option<ScheduledPurchase>, VoiError> {
@@ -2393,6 +3840,124 @@ impl VoiScheduler {
             budget_dollars: budget,
             remaining_budget_dollars: remaining,
         }))
+    }
+
+    /// Reverify the current ranked snapshot and every prospective audit
+    /// receipt, then atomically consume at most one affordable purchase.
+    ///
+    /// The ranked receipt must still bind the current branch head. Historical
+    /// audit roots may be older, but must remain known immutable snapshots on
+    /// the same branch and all receipts must share one session, decision,
+    /// model, and policy scope plus the exact decision/model artifact hashes.
+    /// No scheduler state changes until every receipt and expiry check has
+    /// passed.
+    ///
+    /// # Errors
+    /// [`VoiError`] for incomplete/mixed audit authority, a cross-scope
+    /// receipt, stale or expired evidence, any independently detected ledger
+    /// mismatch, or the validation failures documented by [`Self::schedule`].
+    pub fn schedule_authenticated(
+        &mut self,
+        ledger: &Ledger,
+        vcs: &Vcs,
+        evidence: AuthenticatedRankedMenu,
+        current_day: u32,
+    ) -> Result<Option<AuthenticatedScheduledPurchase>, VoiError> {
+        if self.authenticated_audits.is_empty()
+            || self.authenticated_audits.len() != self.audit_records.len()
+        {
+            return Err(VoiError::MissingSchedulingAuthority);
+        }
+
+        let first_audit = &self.authenticated_audits[0];
+        if evidence.context.session_id != first_audit.context.session_id
+            || evidence.context.decision_version != first_audit.context.decision_version
+            || evidence.context.model_version != first_audit.context.model_version
+            || evidence.context.policy_version != first_audit.context.policy_version
+            || evidence.context.branch != first_audit.context.branch
+            || evidence.decision_artifact != first_audit.decision_artifact
+            || evidence.model_artifact != first_audit.model_artifact
+        {
+            return Err(VoiError::ReceiptMismatch {
+                field: "ranked and audit authority scope",
+            });
+        }
+
+        let (ledger_id, snapshot) =
+            verify_snapshot(ledger, vcs, &evidence.context, current_day, true)?;
+        let _catalog = validate_ranked_receipt_inputs(
+            ledger,
+            &snapshot,
+            &evidence.ranked,
+            &evidence.context,
+            evidence.decision_artifact,
+            evidence.model_artifact,
+            evidence.probe_catalog_artifact,
+        )?;
+        let canonical = ranked_receipt_bytes(
+            ledger_id,
+            &evidence.ranked,
+            &evidence.context,
+            evidence.decision_artifact,
+            evidence.model_artifact,
+            evidence.probe_catalog_artifact,
+        )?;
+        verify_receipt_envelope(
+            ledger,
+            &evidence.context,
+            evidence.receipt,
+            RANKED_RECEIPT_KIND,
+            RANKED_RECEIPT_META,
+            &canonical,
+            &[
+                evidence.decision_artifact,
+                evidence.model_artifact,
+                evidence.probe_catalog_artifact,
+            ],
+        )?;
+
+        let mut valid_through_day = evidence.context.expires_day;
+        let mut audit_receipts = Vec::with_capacity(self.authenticated_audits.len());
+        for audit in &self.authenticated_audits {
+            if audit.context.session_id != evidence.context.session_id
+                || audit.context.decision_version != evidence.context.decision_version
+                || audit.context.model_version != evidence.context.model_version
+                || audit.context.policy_version != evidence.context.policy_version
+                || audit.context.branch != evidence.context.branch
+                || audit.decision_artifact != evidence.decision_artifact
+                || audit.model_artifact != evidence.model_artifact
+            {
+                return Err(VoiError::ReceiptMismatch {
+                    field: "authenticated audit authority scope",
+                });
+            }
+            verify_audit_receipt_inner(
+                ledger,
+                vcs,
+                &audit.record,
+                audit.sequence,
+                &audit.context,
+                audit.decision_artifact,
+                audit.model_artifact,
+                audit.recommended_outcome_artifact,
+                audit.alternative_outcome_artifact,
+                audit.receipt,
+                current_day,
+                false,
+            )?;
+            valid_through_day = valid_through_day.min(audit.context.expires_day);
+            audit_receipts.push(audit.receipt);
+        }
+
+        let ranked_receipt = evidence.receipt;
+        self.schedule(evidence.ranked).map(|scheduled| {
+            scheduled.map(|scheduled| AuthenticatedScheduledPurchase {
+                scheduled,
+                ranked_receipt,
+                audit_receipts,
+                valid_through_day,
+            })
+        })
     }
 }
 

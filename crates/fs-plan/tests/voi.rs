@@ -5,27 +5,45 @@
 //! probe menu unifies computational and physical experiments; the
 //! ranking surfaces as the query hint and the probe scheduler; myopic
 //! one-step only; the prospective-audit kill criterion demotes VoI
-//! when recommendations stop outperforming.
+//! when recommendations stop outperforming. The wk4m cases add G0 authority
+//! construction and G3 tamper/freshness refusals for ledger-backed receipts.
 #![cfg(feature = "voi-queries")]
 
 use std::cell::Cell;
 use std::cell::RefCell;
 
 use asupersync::types::Budget;
+use fs_blake3::{ContentHash, hash_bytes};
+use fs_ledger::vcs::Vcs;
+use fs_ledger::{EdgeRole, ExecMode, FiveExplicits, Ledger, MAIN_BRANCH, OpOutcome};
 use fs_plan::voi::{
-    AuditReport, AuditVerdict, Cx, DecisionBudget, DecisionEvaluationPermit, DecisionOracle,
-    LiveDecision, MAX_VOI_AUDIT_RECORDS, MAX_VOI_EVALUATIONS, MAX_VOI_GRID, MAX_VOI_NAME_BYTES,
-    MAX_VOI_NODES, MAX_VOI_PROBES, MAX_VOI_WORK_UNITS, MatchedAuditRecord, Probe, ProbeKind,
-    RankedMenu, UncertaintyNode, VOI_AUDIT_CONTEXT_IDENTITY_VERSION,
-    VOI_RANKED_MENU_IDENTITY_VERSION, VOI_RANKED_SOURCE_IDENTITY_VERSION, VoiError, VoiScheduler,
-    audit_scheduling as audit_scheduling_scoped, hint_for_query,
-    rank_purchases as rank_purchases_impl,
+    AuditReport, AuditVerdict, AuthenticatedRankedMenu, Cx, DecisionBudget,
+    DecisionEvaluationPermit, DecisionOracle, LiveDecision, MAX_VOI_AUDIT_RECORDS,
+    MAX_VOI_EVALUATIONS, MAX_VOI_GRID, MAX_VOI_NAME_BYTES, MAX_VOI_NODES, MAX_VOI_PROBES,
+    MAX_VOI_WORK_UNITS, MatchedAuditRecord, Probe, ProbeKind, RankedMenu, UncertaintyNode,
+    VOI_AUDIT_CONTEXT_IDENTITY_VERSION, VOI_AUDIT_OUTCOME_ARTIFACT_KIND,
+    VOI_AUDIT_OUTCOME_ARTIFACT_METADATA, VOI_DECISION_ARTIFACT_KIND, VOI_MODEL_ARTIFACT_KIND,
+    VOI_PROBE_CATALOG_ARTIFACT_KIND, VOI_PROBE_CATALOG_ARTIFACT_METADATA,
+    VOI_RANKED_MENU_IDENTITY_VERSION, VOI_RANKED_SOURCE_IDENTITY_VERSION, VoiError,
+    VoiLedgerContext, VoiLedgerReceipt, VoiScheduler, audit_scheduling as audit_scheduling_scoped,
+    hint_for_query, rank_purchases as rank_purchases_impl, record_prospective_audit_receipt,
+    record_ranked_menu_receipt, verify_prospective_audit_receipt, verify_ranked_menu_receipt,
+    voi_audit_outcome_bytes, voi_decision_artifact_metadata, voi_model_artifact_metadata,
+    voi_probe_catalog_bytes,
 };
 
 const POLICY_SCOPE: &str = "fixture-policy-v1";
 const SNAPSHOT_ID: &str = "fixture-snapshot-v1";
 const ORACLE_TEST_EVALUATIONS: usize = 5;
 const ORACLE_TEST_WORK_UNITS: u64 = 5;
+const AUTHENTICATED_AUDIT_WINS: usize = 16;
+
+const LEDGER_FIXTURE_EXPLICITS: FiveExplicits<'static> = FiveExplicits {
+    seed: b"fs-plan-voi-test-fixture-v1",
+    versions: r#"{"fs-plan-voi-test-fixture":1}"#,
+    budget: r#"{"artifacts":64}"#,
+    capability: r#"{"ops":["voi.fixture"]}"#,
+};
 
 fn decision_budget() -> DecisionBudget {
     DecisionBudget::new(MAX_VOI_EVALUATIONS, MAX_VOI_WORK_UNITS)
@@ -178,6 +196,210 @@ fn scheduler_menu() -> RankedMenu {
         probe("a", "drag-gap", 10.0, 0.01),
         probe("b", "drag-gap", 5.0, 0.01),
     ])
+}
+
+struct LedgerAuthorityFixture {
+    ledger: Ledger,
+    vcs: Vcs,
+    context: VoiLedgerContext,
+    decision_artifact: ContentHash,
+    model_artifact: ContentHash,
+    catalog_artifact: ContentHash,
+    outcomes: Vec<(ContentHash, ContentHash)>,
+    menu: Vec<Probe>,
+    records: Vec<MatchedAuditRecord>,
+}
+
+fn fixture_output(
+    ledger: &Ledger,
+    operation: i64,
+    kind: &str,
+    bytes: &[u8],
+    meta: &str,
+) -> ContentHash {
+    let receipt = ledger
+        .put_artifact(kind, bytes, Some(meta))
+        .expect("store VoI authority fixture artifact");
+    ledger
+        .link(operation, &receipt.hash, EdgeRole::Out)
+        .expect("link VoI authority fixture output");
+    receipt.hash
+}
+
+fn ledger_authority_fixture() -> LedgerAuthorityFixture {
+    let ledger = Ledger::open(":memory:").expect("open VoI authority fixture ledger");
+    let menu = vec![
+        probe("authenticated-a", "drag-gap", 10.0, 0.01),
+        probe("authenticated-b", "drag-gap", 5.0, 0.01),
+    ];
+    let records = (0..AUTHENTICATED_AUDIT_WINS)
+        .map(|index| audit_record(index, true))
+        .collect::<Vec<_>>();
+    let operation = ledger
+        .begin_op_on(
+            MAIN_BRANCH,
+            ExecMode::Deterministic,
+            Some(b"voi-authority-fixture".as_slice()),
+            r#"{"op":"voi.fixture"}"#,
+            &LEDGER_FIXTURE_EXPLICITS,
+            1,
+        )
+        .expect("begin VoI authority fixture operation");
+    let decision_meta =
+        voi_decision_artifact_metadata("decision-v1").expect("decision artifact metadata");
+    let model_meta = voi_model_artifact_metadata("model-v1").expect("model artifact metadata");
+    let decision_artifact = fixture_output(
+        &ledger,
+        operation,
+        VOI_DECISION_ARTIFACT_KIND,
+        b"decision-v1-canonical-bytes",
+        &decision_meta,
+    );
+    let model_artifact = fixture_output(
+        &ledger,
+        operation,
+        VOI_MODEL_ARTIFACT_KIND,
+        b"model-v1-canonical-bytes",
+        &model_meta,
+    );
+    let catalog = voi_probe_catalog_bytes(&menu).expect("canonical complete probe catalog");
+    let catalog_artifact = fixture_output(
+        &ledger,
+        operation,
+        VOI_PROBE_CATALOG_ARTIFACT_KIND,
+        &catalog,
+        VOI_PROBE_CATALOG_ARTIFACT_METADATA,
+    );
+    let outcomes = records
+        .iter()
+        .map(|record| {
+            let recommended =
+                voi_audit_outcome_bytes(record, true).expect("recommended outcome bytes");
+            let alternative =
+                voi_audit_outcome_bytes(record, false).expect("alternative outcome bytes");
+            (
+                fixture_output(
+                    &ledger,
+                    operation,
+                    VOI_AUDIT_OUTCOME_ARTIFACT_KIND,
+                    &recommended,
+                    VOI_AUDIT_OUTCOME_ARTIFACT_METADATA,
+                ),
+                fixture_output(
+                    &ledger,
+                    operation,
+                    VOI_AUDIT_OUTCOME_ARTIFACT_KIND,
+                    &alternative,
+                    VOI_AUDIT_OUTCOME_ARTIFACT_METADATA,
+                ),
+            )
+        })
+        .collect::<Vec<_>>();
+    ledger
+        .finish_op(operation, OpOutcome::Ok, None, 2)
+        .expect("finish VoI authority fixture operation");
+    let mut vcs = Vcs::new();
+    let snapshot = vcs
+        .commit(&ledger, MAIN_BRANCH)
+        .expect("commit VoI authority fixture snapshot");
+    let context = VoiLedgerContext::new(
+        "session-v1",
+        "decision-v1",
+        "model-v1",
+        POLICY_SCOPE,
+        MAIN_BRANCH,
+        snapshot.root,
+        10,
+        20,
+    )
+    .expect("valid VoI ledger context");
+    LedgerAuthorityFixture {
+        ledger,
+        vcs,
+        context,
+        decision_artifact,
+        model_artifact,
+        catalog_artifact,
+        outcomes,
+        menu,
+        records,
+    }
+}
+
+fn authenticate_ranked_menu(
+    fixture: &LedgerAuthorityFixture,
+) -> (VoiLedgerReceipt, AuthenticatedRankedMenu) {
+    let ranked = ranked_menu_for_snapshot(&fixture.menu, &fixture.context.snapshot_root().to_hex());
+    let receipt = record_ranked_menu_receipt(
+        &fixture.ledger,
+        &fixture.vcs,
+        &ranked,
+        &fixture.context,
+        fixture.decision_artifact,
+        fixture.model_artifact,
+        fixture.catalog_artifact,
+    )
+    .expect("record ranked-menu authority receipt");
+    let replayed = record_ranked_menu_receipt(
+        &fixture.ledger,
+        &fixture.vcs,
+        &ranked,
+        &fixture.context,
+        fixture.decision_artifact,
+        fixture.model_artifact,
+        fixture.catalog_artifact,
+    )
+    .expect("exact ranked receipt retry is idempotent");
+    assert_eq!(replayed, receipt);
+    let authenticated = verify_ranked_menu_receipt(
+        &fixture.ledger,
+        &fixture.vcs,
+        ranked,
+        fixture.context.clone(),
+        fixture.decision_artifact,
+        fixture.model_artifact,
+        fixture.catalog_artifact,
+        receipt,
+        10,
+    )
+    .expect("independently verify ranked-menu authority receipt");
+    (receipt, authenticated)
+}
+
+fn authenticate_audits(fixture: &LedgerAuthorityFixture, scheduler: &mut VoiScheduler) {
+    for (sequence, (record, (recommended, alternative))) in
+        fixture.records.iter().zip(&fixture.outcomes).enumerate()
+    {
+        let receipt = record_prospective_audit_receipt(
+            &fixture.ledger,
+            &fixture.vcs,
+            record,
+            sequence,
+            &fixture.context,
+            fixture.decision_artifact,
+            fixture.model_artifact,
+            *recommended,
+            *alternative,
+        )
+        .expect("record prospective audit receipt");
+        let authenticated = verify_prospective_audit_receipt(
+            &fixture.ledger,
+            &fixture.vcs,
+            record.clone(),
+            sequence,
+            fixture.context.clone(),
+            fixture.decision_artifact,
+            fixture.model_artifact,
+            *recommended,
+            *alternative,
+            receipt,
+            10,
+        )
+        .expect("independently verify prospective audit receipt");
+        scheduler
+            .observe_authenticated_audit(authenticated)
+            .expect("append authenticated prospective audit");
+    }
 }
 
 #[test]
@@ -1577,6 +1799,223 @@ fn voi_017_oracle_cancellation_and_work_budget_fail_closed() {
     assert_ne!(first.context_id(), second.context_id());
     assert_eq!(first.computation().evaluations(), required_evaluations);
     assert_eq!(first.computation().work_units(), ORACLE_TEST_WORK_UNITS);
+}
+
+#[test]
+fn voi_018_ledger_receipts_mint_authenticated_scheduling_authority() {
+    let fixture = ledger_authority_fixture();
+    let (ranked_receipt, ranked) = authenticate_ranked_menu(&fixture);
+    let mut scheduler =
+        VoiScheduler::new(POLICY_SCOPE, 15.0).expect("authenticated scheduler fixture");
+    authenticate_audits(&fixture, &mut scheduler);
+    assert_eq!(
+        scheduler
+            .audit_report()
+            .expect("authenticated audit report")
+            .verdict(),
+        AuditVerdict::KeepScheduling
+    );
+
+    let authenticated = scheduler
+        .schedule_authenticated(&fixture.ledger, &fixture.vcs, ranked, 10)
+        .expect("all ledger authority independently reverifies")
+        .expect("one authenticated affordable purchase");
+    assert_eq!(authenticated.ranked_receipt(), ranked_receipt);
+    assert_eq!(
+        authenticated.audit_receipts().len(),
+        AUTHENTICATED_AUDIT_WINS
+    );
+    assert_eq!(authenticated.valid_through_day(), 20);
+    assert_eq!(
+        authenticated.scheduled().purchase().probe().name,
+        "authenticated-b"
+    );
+    assert_eq!(
+        authenticated.scheduled().snapshot_id(),
+        fixture.context.snapshot_root().to_hex()
+    );
+    assert_eq!(
+        scheduler.remaining_budget_dollars().to_bits(),
+        10.0f64.to_bits()
+    );
+    verdict(
+        "voi-018",
+        "sealed ranked-menu and prospective matched-outcome receipts bind exact ledger inputs, current snapshot, policy/version scope, expiry, and the authenticated budget transition",
+    );
+}
+
+#[test]
+fn voi_019_ledger_authority_refuses_forgery_expiry_outcome_swap_and_stale_head() {
+    let mut fixture = ledger_authority_fixture();
+    let ranked = ranked_menu_for_snapshot(&fixture.menu, &fixture.context.snapshot_root().to_hex());
+    let ranked_receipt = record_ranked_menu_receipt(
+        &fixture.ledger,
+        &fixture.vcs,
+        &ranked,
+        &fixture.context,
+        fixture.decision_artifact,
+        fixture.model_artifact,
+        fixture.catalog_artifact,
+    )
+    .expect("record ranked receipt");
+
+    let forged = VoiLedgerReceipt::from_parts(
+        ranked_receipt.operation(),
+        hash_bytes(b"not-the-ranked-receipt"),
+    );
+    let forged_result = verify_ranked_menu_receipt(
+        &fixture.ledger,
+        &fixture.vcs,
+        ranked_menu_for_snapshot(&fixture.menu, &fixture.context.snapshot_root().to_hex()),
+        fixture.context.clone(),
+        fixture.decision_artifact,
+        fixture.model_artifact,
+        fixture.catalog_artifact,
+        forged,
+        10,
+    );
+    assert!(matches!(
+        forged_result,
+        Err(VoiError::ReceiptMismatch {
+            field: "receipt locator"
+        })
+    ));
+
+    let wrong_model_context = VoiLedgerContext::new(
+        "session-v1",
+        "decision-v1",
+        "model-v2",
+        POLICY_SCOPE,
+        MAIN_BRANCH,
+        fixture.context.snapshot_root(),
+        10,
+        20,
+    )
+    .expect("well-formed but wrong model scope");
+    let wrong_model_result = verify_ranked_menu_receipt(
+        &fixture.ledger,
+        &fixture.vcs,
+        ranked_menu_for_snapshot(&fixture.menu, &fixture.context.snapshot_root().to_hex()),
+        wrong_model_context,
+        fixture.decision_artifact,
+        fixture.model_artifact,
+        fixture.catalog_artifact,
+        ranked_receipt,
+        10,
+    );
+    assert!(matches!(
+        wrong_model_result,
+        Err(VoiError::ReceiptMismatch {
+            field: "artifact envelope"
+        })
+    ));
+
+    let wrong_policy_context = VoiLedgerContext::new(
+        "session-v1",
+        "decision-v1",
+        "model-v1",
+        "fixture-policy-v2",
+        MAIN_BRANCH,
+        fixture.context.snapshot_root(),
+        10,
+        20,
+    )
+    .expect("well-formed but wrong policy scope");
+    let wrong_policy_result = verify_ranked_menu_receipt(
+        &fixture.ledger,
+        &fixture.vcs,
+        ranked_menu_for_snapshot(&fixture.menu, &fixture.context.snapshot_root().to_hex()),
+        wrong_policy_context,
+        fixture.decision_artifact,
+        fixture.model_artifact,
+        fixture.catalog_artifact,
+        ranked_receipt,
+        10,
+    );
+    assert!(matches!(
+        wrong_policy_result,
+        Err(VoiError::ReceiptMismatch {
+            field: "ranked policy version"
+        })
+    ));
+
+    let expired_result = verify_ranked_menu_receipt(
+        &fixture.ledger,
+        &fixture.vcs,
+        ranked_menu_for_snapshot(&fixture.menu, &fixture.context.snapshot_root().to_hex()),
+        fixture.context.clone(),
+        fixture.decision_artifact,
+        fixture.model_artifact,
+        fixture.catalog_artifact,
+        ranked_receipt,
+        21,
+    );
+    assert!(matches!(
+        expired_result,
+        Err(VoiError::ReceiptExpired {
+            expires_day: 20,
+            current_day: 21
+        })
+    ));
+
+    let record = fixture.records[0].clone();
+    let (recommended, alternative) = fixture.outcomes[0];
+    let audit_receipt = record_prospective_audit_receipt(
+        &fixture.ledger,
+        &fixture.vcs,
+        &record,
+        0,
+        &fixture.context,
+        fixture.decision_artifact,
+        fixture.model_artifact,
+        recommended,
+        alternative,
+    )
+    .expect("record audit receipt");
+    let swapped_result = verify_prospective_audit_receipt(
+        &fixture.ledger,
+        &fixture.vcs,
+        record,
+        0,
+        fixture.context.clone(),
+        fixture.decision_artifact,
+        fixture.model_artifact,
+        alternative,
+        recommended,
+        audit_receipt,
+        10,
+    );
+    assert!(matches!(
+        swapped_result,
+        Err(VoiError::ReceiptMismatch {
+            field: "artifact bytes"
+        })
+    ));
+
+    let advanced = fixture
+        .vcs
+        .commit(&fixture.ledger, MAIN_BRANCH)
+        .expect("advance ledger head after receipt issuance");
+    assert_ne!(advanced.root, fixture.context.snapshot_root());
+    let stale_result = verify_ranked_menu_receipt(
+        &fixture.ledger,
+        &fixture.vcs,
+        ranked_menu_for_snapshot(&fixture.menu, &fixture.context.snapshot_root().to_hex()),
+        fixture.context.clone(),
+        fixture.decision_artifact,
+        fixture.model_artifact,
+        fixture.catalog_artifact,
+        ranked_receipt,
+        10,
+    );
+    assert!(matches!(
+        stale_result,
+        Err(VoiError::StaleLedgerSnapshot { .. })
+    ));
+    verdict(
+        "voi-019",
+        "forged locators, model/policy drift, expired contexts, swapped matched outcomes, and superseded ranked roots all fail closed before scheduler mutation",
+    );
 }
 
 #[test]
