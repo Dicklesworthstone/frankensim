@@ -8,6 +8,8 @@
 use fs_la::eigen::jacobi_eigh;
 use fs_la::factor::{Lu, lu};
 use fs_math::det;
+use fs_solver::{FgmresState, FlexiblePreconditioner, LinearOp, SolveReport};
+use std::fmt;
 
 /// Prefactored operators for the IMEX-θ two-stage (ARS(2,2,2)-style)
 /// scheme on u′ = L·u + N(u).
@@ -87,6 +89,328 @@ pub fn imex2_step<N: Fn(&[f64], &mut [f64])>(im: &Imex2, u: &mut [f64], nonlin: 
     }
     im.solve_gamma.solve(&mut rhs2);
     u.copy_from_slice(&rhs2);
+}
+
+/// Krylov policy for each matrix-free IMEX stage.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ImexSolveConfig {
+    /// True relative-residual target.
+    pub tolerance: f64,
+    /// FGMRES restart length.
+    pub restart: usize,
+    /// Maximum restart cycles per stage.
+    pub max_cycles: usize,
+}
+
+impl Default for ImexSolveConfig {
+    fn default() -> Self {
+        Self {
+            tolerance: 1.0e-11,
+            restart: 24,
+            max_cycles: 8,
+        }
+    }
+}
+
+/// Identity flexible preconditioner for small fixtures and unpreconditioned
+/// operator probes. Field-scale callers should supply a problem-specific
+/// `FlexiblePreconditioner` instead.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct IdentityPreconditioner;
+
+impl FlexiblePreconditioner for IdentityPreconditioner {
+    fn apply(&self, _logical_iteration: usize, residual: &[f64], output: &mut [f64]) {
+        output.copy_from_slice(residual);
+    }
+}
+
+/// Complete iteration receipt for one accepted operator-backed IMEX step.
+#[derive(Debug, Clone)]
+pub struct ImexStepTelemetry {
+    /// Zero-based accepted step index.
+    pub step: usize,
+    /// Time at the beginning of the step.
+    pub t_start: f64,
+    /// Step size.
+    pub h: f64,
+    /// First-stage FGMRES report.
+    pub stage_one: SolveReport,
+    /// Second-stage FGMRES report.
+    pub stage_two: SolveReport,
+}
+
+impl PartialEq for ImexStepTelemetry {
+    fn eq(&self, other: &Self) -> bool {
+        self.step == other.step
+            && self.t_start.to_bits() == other.t_start.to_bits()
+            && self.h.to_bits() == other.h.to_bits()
+            && solve_report_bits_equal(&self.stage_one, &other.stage_one)
+            && solve_report_bits_equal(&self.stage_two, &other.stage_two)
+    }
+}
+
+/// IMEX stage named by a refusal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImexStage {
+    /// Solve of `(I - gamma h L) u1`.
+    One,
+    /// Solve of `(I - gamma h L) u_next`.
+    Two,
+}
+
+/// Typed refusal from an operator-backed IMEX step.
+#[derive(Debug, Clone)]
+pub enum ImexSolveError {
+    /// State/operator dimensions disagree.
+    Dimension {
+        /// Required dimension.
+        expected: usize,
+        /// Supplied dimension.
+        actual: usize,
+    },
+    /// The explicit nonlinearity produced NaN or infinity.
+    NonFiniteNonlinearity {
+        /// Stage whose explicit evaluation failed.
+        stage: ImexStage,
+        /// Entry index.
+        index: usize,
+        /// Exact refused bits.
+        bits: u64,
+    },
+    /// One shifted linear solve exhausted its budget or broke down.
+    NotConverged {
+        /// Failed stage.
+        stage: ImexStage,
+        /// True-residual solve report.
+        report: SolveReport,
+    },
+}
+
+impl fmt::Display for ImexSolveError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Dimension { expected, actual } => write!(
+                f,
+                "IMEX operator/state dimension {actual} differs from method dimension {expected}"
+            ),
+            Self::NonFiniteNonlinearity { stage, index, bits } => write!(
+                f,
+                "IMEX stage {stage:?} nonlinearity entry {index} is non-finite (bits 0x{bits:016x})"
+            ),
+            Self::NotConverged { stage, report } => write!(
+                f,
+                "IMEX stage {stage:?} did not converge after {} Krylov iterations: {:?}",
+                report.iters, report.diagnosis
+            ),
+        }
+    }
+}
+
+impl core::error::Error for ImexSolveError {}
+
+/// Plain-data operator-backed IMEX trajectory checkpoint.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImexState {
+    /// Current time.
+    pub t: f64,
+    /// Current solution.
+    pub u: Vec<f64>,
+    /// Accepted steps.
+    pub steps: usize,
+    /// Complete accepted-step telemetry.
+    pub history: Vec<ImexStepTelemetry>,
+}
+
+impl ImexState {
+    /// Construct a checkpoint at one exact time.
+    #[must_use]
+    pub fn new(t: f64, u: &[f64]) -> Self {
+        Self {
+            t,
+            u: u.to_vec(),
+            steps: 0,
+            history: Vec::new(),
+        }
+    }
+}
+
+/// ARS(2,2,2) over an arbitrary `LinearOp`, with injected flexible
+/// preconditioning for both shifted stage systems.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OperatorImex2 {
+    n: usize,
+    h: f64,
+    gamma: f64,
+    solve: ImexSolveConfig,
+}
+
+impl OperatorImex2 {
+    /// Configure an operator-backed IMEX method.
+    #[must_use]
+    pub fn new(n: usize, h: f64, solve: ImexSolveConfig) -> Self {
+        assert!(n > 0, "IMEX dimension must be positive");
+        assert!(
+            h.is_finite() && h > 0.0,
+            "IMEX h must be positive and finite"
+        );
+        assert!(
+            solve.tolerance.is_finite() && solve.tolerance > 0.0,
+            "IMEX tolerance must be positive and finite"
+        );
+        assert!(solve.restart > 0, "IMEX restart must be positive");
+        assert!(solve.max_cycles > 0, "IMEX cycle budget must be positive");
+        Self {
+            n,
+            h,
+            gamma: 1.0 - std::f64::consts::FRAC_1_SQRT_2,
+            solve,
+        }
+    }
+
+    /// Advance one step. State changes only after both true-residual solves
+    /// converge, so a failed attempt is transaction-like.
+    #[allow(clippy::too_many_lines)] // Both tableau stages form one atomic transaction.
+    pub fn step<L, N, P>(
+        &self,
+        state: &mut ImexState,
+        linear: &L,
+        preconditioner: &P,
+        nonlin: &N,
+    ) -> Result<ImexStepTelemetry, ImexSolveError>
+    where
+        L: LinearOp + ?Sized,
+        N: Fn(&[f64], &mut [f64]),
+        P: FlexiblePreconditioner,
+    {
+        if linear.n() != self.n {
+            return Err(ImexSolveError::Dimension {
+                expected: self.n,
+                actual: linear.n(),
+            });
+        }
+        if state.u.len() != self.n {
+            return Err(ImexSolveError::Dimension {
+                expected: self.n,
+                actual: state.u.len(),
+            });
+        }
+        let shifted = ShiftedLinearOp {
+            linear,
+            shift: -self.gamma * self.h,
+        };
+        let nu = evaluate_nonlinearity(nonlin, &state.u, ImexStage::One)?;
+        let mut rhs_one = vec![0.0; self.n];
+        for i in 0..self.n {
+            rhs_one[i] = self.h.mul_add(self.gamma * nu[i], state.u[i]);
+        }
+        let mut stage_one = FgmresState::new(&rhs_one, self.solve.restart);
+        let report_one = stage_one.run(
+            &shifted,
+            preconditioner,
+            &rhs_one,
+            self.solve.tolerance,
+            self.solve.max_cycles,
+        );
+        if !report_one.converged {
+            return Err(ImexSolveError::NotConverged {
+                stage: ImexStage::One,
+                report: report_one,
+            });
+        }
+        let u_one = stage_one.x;
+        let nu_one = evaluate_nonlinearity(nonlin, &u_one, ImexStage::Two)?;
+        let mut linear_u_one = vec![0.0; self.n];
+        linear.apply(&u_one, &mut linear_u_one);
+        let delta = 1.0 - 1.0 / (2.0 * self.gamma);
+        let mut rhs_two = vec![0.0; self.n];
+        for i in 0..self.n {
+            let explicit = delta.mul_add(nu[i], (1.0 - delta) * nu_one[i]);
+            rhs_two[i] = state.u[i] + self.h * ((1.0 - self.gamma) * linear_u_one[i] + explicit);
+        }
+        let mut stage_two = FgmresState::new(&rhs_two, self.solve.restart);
+        let report_two = stage_two.run(
+            &shifted,
+            preconditioner,
+            &rhs_two,
+            self.solve.tolerance,
+            self.solve.max_cycles,
+        );
+        if !report_two.converged {
+            return Err(ImexSolveError::NotConverged {
+                stage: ImexStage::Two,
+                report: report_two,
+            });
+        }
+        let telemetry = ImexStepTelemetry {
+            step: state.steps,
+            t_start: state.t,
+            h: self.h,
+            stage_one: report_one,
+            stage_two: report_two,
+        };
+        state.u = stage_two.x;
+        state.t += self.h;
+        state.steps += 1;
+        state.history.push(telemetry.clone());
+        Ok(telemetry)
+    }
+}
+
+struct ShiftedLinearOp<'a, L: ?Sized> {
+    linear: &'a L,
+    shift: f64,
+}
+
+impl<L: LinearOp + ?Sized> LinearOp for ShiftedLinearOp<'_, L> {
+    fn n(&self) -> usize {
+        self.linear.n()
+    }
+
+    fn apply(&self, input: &[f64], output: &mut [f64]) {
+        self.linear.apply(input, output);
+        for (value, input_value) in output.iter_mut().zip(input) {
+            *value = self.shift.mul_add(*value, *input_value);
+        }
+    }
+
+    fn apply_transpose(&self, input: &[f64], output: &mut [f64]) {
+        self.linear.apply_transpose(input, output);
+        for (value, input_value) in output.iter_mut().zip(input) {
+            *value = self.shift.mul_add(*value, *input_value);
+        }
+    }
+}
+
+fn evaluate_nonlinearity<N: Fn(&[f64], &mut [f64])>(
+    nonlin: &N,
+    state: &[f64],
+    stage: ImexStage,
+) -> Result<Vec<f64>, ImexSolveError> {
+    let mut output = vec![0.0; state.len()];
+    nonlin(state, &mut output);
+    for (index, value) in output.iter().copied().enumerate() {
+        if !value.is_finite() {
+            return Err(ImexSolveError::NonFiniteNonlinearity {
+                stage,
+                index,
+                bits: value.to_bits(),
+            });
+        }
+    }
+    Ok(output)
+}
+
+fn solve_report_bits_equal(left: &SolveReport, right: &SolveReport) -> bool {
+    left.iters == right.iters
+        && left.rel_residual.to_bits() == right.rel_residual.to_bits()
+        && left.converged == right.converged
+        && left.diagnosis == right.diagnosis
+        && left.history.len() == right.history.len()
+        && left
+            .history
+            .iter()
+            .zip(&right.history)
+            .all(|(left, right)| left.to_bits() == right.to_bits())
 }
 
 /// Exponential Euler for u′ = A·u + N(u), SYMMETRIC A:

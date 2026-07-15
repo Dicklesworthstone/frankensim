@@ -2,7 +2,8 @@
 
 ## Purpose and layer
 
-Layer: **L3 FLUX** (deps: fs-ad, fs-ga, fs-la, fs-math — all L0–L2).
+Layer: **L3 FLUX** (deps: fs-ad, fs-ga, fs-la, fs-math, and the shared
+fs-solver operator/Newton-Krylov spine — all downward or same-layer services).
 Structure-preserving time integration (plan §8.5): integrators that
 preserve what the physics preserves — symplectic (Störmer–Verlet with
 its discrete-Lagrangian equivalence tested), Lie-group SO(3) via
@@ -35,12 +36,37 @@ where claimed below.
   αf = ρ/(ρ+1), γ = ½ − αm + αf, β = ¼(1 − αm + αf)²; one prefactored
   LU of the effective matrix per (M, C, K, h); `f_next` is the load at
   t + (1−αf)h. Newmark correctors update (q, v, a) in place.
+- `galpha::{SecondOrderProblem, LinearSecondOrderSystem}` describe
+  `M a + C v + r(q) = f`; the linear adapter binds the exact shared
+  `fs_solver::LinearOp` interface for M/C/K, while nonlinear problems provide
+  matched internal-force and tangent actions. `OperatorGeneralizedAlpha`
+  solves the same Chung–Hulbert residual through `NewtonKrylovState` and
+  commits a `SecondOrderState` only after convergence.
+- `galpha::FirstOrderGeneralizedAlpha` + `first_order_galpha_step` are the
+  prefactored small-system lane for `M udot + A u = f`.
+  `OperatorFirstOrderGeneralizedAlpha` consumes `FirstOrderProblem` (or the
+  `LinearFirstOrderSystem` adapter) and uses the first-order-system
+  Jansen–Whiting–Hulbert parameters αm = (3−ρ)/(2(1+ρ)), αf = 1/(1+ρ),
+  γ = 1/2 + αm − αf. This is not the structural second-order formulation
+  relabeled: state and rate are first-class and the residual is enforced at
+  `(t_n + αf h, u_n + αf (u_{n+1}−u_n))`.
+- `galpha::{ImplicitSolveConfig, ImplicitStepTelemetry}` retain the full
+  Newton report per accepted step, including outer residual decisions and
+  inner Krylov counts. `SecondOrderState` and `FirstOrderState` retain time,
+  solution/rate variables, accepted-step count, and complete telemetry as
+  cloneable plain data.
 - `stiff::Imex2::new(l, n, h)` + `imex2_step` — ARS(2,2,2),
   γ = 1 − 1/√2, diagonally implicit on L (one LU reused for both
   stages), explicit N, stiffly accurate, R(∞) = 0. Second order in
   BOTH parts: the explicit weights are (δ, 1−δ) with δ = 1 − 1/(2γ);
   trapezoidal (½, ½) is only first order in N (caught during
   construction, locked by the convergence test).
+- `stiff::OperatorImex2` applies that identical ARS(2,2,2) tableau to any
+  `LinearOp`. Each `(I − γhL)` stage uses FGMRES with an injected
+  `FlexiblePreconditioner`; both true-residual reports are recorded in
+  `ImexStepTelemetry`, and `ImexState` changes only if both stages converge.
+  `IdentityPreconditioner` is the explicit unpreconditioned fixture lane, not
+  the field-scale recommendation.
 - `stiff::ExpEuler::new(a, n, h)` + `.step(u, nonlin)` — exponential
   Euler for u′ = Au + N(u), **symmetric A** via the fs-la Jacobi
   eigenbasis; φ₁(x) = expm1(x)/x (cancellation-free). Exact for N ≡ 0.
@@ -97,6 +123,13 @@ where claimed below.
   renormalization anywhere in the crate.
 - Generalized-α: high-frequency per-step contraction → ρ∞; order 2
   across the whole ρ∞ range.
+- Dense and operator-backed generalized-α/IMEX paths use the same parameter
+  formulas, intermediate-time convention, correctors, and ARS weights.
+  Equality across those arithmetic paths is to the declared nonlinear/Krylov
+  tolerance; it is not claimed bitwise.
+- Implicit operator steps are transaction-like: a failed nonlinear or shifted
+  linear solve leaves the public trajectory state unchanged. Every accepted
+  step appends exactly one telemetry row before returning.
 - `AdaptiveState` is COMPLETE: checkpoint = `clone()`; split runs are
   **bitwise-equal** to straight runs, controller memory (`err_prev`)
   and counters included (P7). A step shortened to land exactly on
@@ -106,11 +139,15 @@ where claimed below.
 ## Error model
 
 Construction panics with a structured message when a required
-factorization is singular (`GeneralizedAlpha::new`, `Imex2::new`):
+factorization is singular (`GeneralizedAlpha::new`,
+`FirstOrderGeneralizedAlpha::new`, `Imex2::new`):
 these are modeling errors (h incompatible with the operators), not
-runtime conditions. `verlet_adjoint` inherits `fs_ad::revolve`'s
-budget assertion. Steppers themselves are panic-free on finite input;
-NaN/Inf propagate as NaN/Inf (garbage-in, garbage-out, never UB).
+runtime conditions. Operator-backed methods return typed dimension,
+non-finite explicit-stage, Newton-setup, and not-converged refusals; their
+reports retain the exhausted budget or breakdown diagnosis. `verlet_adjoint`
+inherits `fs_ad::revolve`'s budget assertion. Legacy dense steppers themselves
+are panic-free on finite input; NaN/Inf propagate as NaN/Inf
+(garbage-in, garbage-out, never UB).
 
 ## Determinism class
 
@@ -122,14 +159,20 @@ of the contract. Test-side oracles may use std (disjoint-path rule).
 Golden FNV-64 over Verlet, rigid-body, generalized-α, IMEX, ExpEuler
 and RK45 trajectories (controller state and counters included):
 `0xeae8_ccec_5e2e_cf41`, recorded on Apple M4 Pro (aarch64), verified
-identical on Threadripper (x86_64).
+identical on Threadripper (x86_64). The operator-backed paths use
+`fs-solver`'s deterministic reductions and logical-iteration preconditioner
+contract. Their dense-vs-operator and split-run fixtures are deterministic on
+the exercised build; they do not yet add a retained cross-ISA golden.
 
 ## Cancellation behavior
 
-All entry points are synchronous, allocation-light, and run to
-completion; long integrations are resumable via `AdaptiveState`
-(interrupt between calls, `clone()` to checkpoint, continue bitwise).
-No async, no internal threading, no I/O.
+All entry points are synchronous and run to completion for one bounded step.
+Operator generalized-alpha bounds work by the configured Newton outer and
+FGMRES cycle/restart budgets; operator IMEX bounds each stage by its configured
+FGMRES budget. Long trajectories are resumable by cloning `SecondOrderState`,
+`FirstOrderState`, `ImexState`, or `AdaptiveState` between calls; split runs
+continue bitwise when the same operators, forcing, preconditioner policy, and
+configuration are supplied. No async, no internal threading, no I/O.
 
 ## Unsafe boundary
 
@@ -161,6 +204,15 @@ at two horizons — kept from the probe that diagnosed the period-point
 metric blindness (at t = 2π, cos′ = 0: a q-only error measures phase
 error quadratically and fakes order ≈ 4; the honest metric is
 max(q, v) error).
+`tests/operator_integrators.rs` (bead ra2q; G1/G3, JSON-line measurements):
+second-order structural convergence on prefactored dense and diagonal
+matrix-free `LinearOp`
+paths; dense/operator structural agreement plus bitwise split replay with
+Newton/Krylov telemetry; first-order-system order and dense/operator
+agreement plus bitwise split replay; nonlinear first-order self-convergence;
+and ARS(2,2,2)
+dense/operator agreement, nonlinear logistic order, split replay, and both
+stage iteration counts.
 `tests/slabs.rs` under `time-slabs`: temporal cocycle consistency,
 budget-pie localization, adaptive-vs-uniform cost, G3 repartition
 envelope, activation gate, and fail-fast validation for invalid slab
@@ -203,8 +255,21 @@ free-velocity drift at the measured-order level (se3-008).
   detection; no event location.
 - Adjoints ship for Verlet only (the template); generalized-α/IMEX/
   RK45 adjoints are the fs-ad integration lane (o3ui).
-- `Imex2`/`GeneralizedAlpha` take dense row-major operators; sparse
-  variants belong to the fs-sparse integration lane.
+- Operator-backed generalized-alpha and IMEX remove the dense storage/API
+  ceiling, but no roofline or field-scale iteration-count claim is made.
+  `OperatorGeneralizedAlpha` currently inherits `NewtonKrylovState`'s identity
+  inner preconditioner; an injected nonlinear-preconditioner seam is pending
+  in the shared solver. `OperatorImex2` does accept an injected flexible
+  preconditioner. Dense-vs-operator agreement is tolerance-based, not a claim
+  that LU and Krylov execute identical floating-point reductions.
+- Public trajectory checkpoints are accepted-step boundaries. Although the
+  shared Newton/FGMRES engines are internally resumable, this fs-time API does
+  not yet expose a mid-Newton or mid-IMEX-stage checkpoint artifact.
+- First-order generalized-alpha requires the caller's initial `rate` to be
+  consistent with its modeled residual and the supplied forcing. The crate
+  records but does not independently certify that model consistency. The
+  nonlinear `SecondOrderProblem`/`FirstOrderProblem` implementer likewise owns
+  tangent consistency; this lane does not yet run an automatic JVP audit.
 
 ## No-claim boundaries (slabs)
 

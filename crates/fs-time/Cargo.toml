@@ -15,6 +15,7 @@ fs-ad = { path = "../fs-ad" }
 fs-ga = { path = "../fs-ga" }
 fs-la = { path = "../fs-la" }
 fs-math = { path = "../fs-math" }
+fs-solver = { path = "../fs-solver" }
 
 [dev-dependencies]
 
