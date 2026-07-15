@@ -22,6 +22,7 @@ const CURVE_BEZIER_SCAN_WORK_PER_KNOT: u128 = 4;
 const CURVE_BEZIER_BLEND_WORK_PER_CONTROL: u128 = 32;
 const CURVE_SPAN_BOX_WORK_PER_CONTROL: u128 = 16;
 const CURVE_SPAN_BOX_MAX_RETAINED_BYTES: u128 = 64 * 1024 * 1024;
+const CURVE_CONSTRUCTION_MAX_RETAINED_BYTES: u128 = 64 * 1024 * 1024;
 const CURVE_COPY_MAX_RETAINED_BYTES: u128 = 64 * 1024 * 1024;
 const CURVE_INSERTION_MAX_RETAINED_BYTES: u128 = 64 * 1024 * 1024;
 const CURVE_REMOVAL_MAX_DERIVED_BYTES: u128 = 64 * 1024 * 1024;
@@ -143,6 +144,147 @@ fn preflight_curve_copy<S: Scalar>(
         });
     }
     Ok(())
+}
+
+fn preflight_cartesian_curve_construction<S: Scalar>(
+    control_count: usize,
+) -> Result<(), NurbsError> {
+    let retained_bytes = (control_count as u128)
+        .checked_mul(core::mem::size_of::<[S; 4]>() as u128)
+        .ok_or_else(|| NurbsError::Domain {
+            what: "Cartesian curve control-storage accounting overflows u128".to_string(),
+        })?;
+    if retained_bytes > CURVE_CONSTRUCTION_MAX_RETAINED_BYTES {
+        return Err(NurbsError::Domain {
+            what: format!(
+                "Cartesian curve retains {retained_bytes} homogeneous-control payload bytes above defensive ceiling {CURVE_CONSTRUCTION_MAX_RETAINED_BYTES}"
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn validate_cartesian_curve_inputs_with_poll<S: Scalar, const DIM: usize>(
+    points: &[[S; DIM]],
+    weights: &[S],
+    should_cancel: &mut impl FnMut() -> bool,
+) -> Result<CurveWorkRun<()>, NurbsError> {
+    let mut operations_since_poll = 0usize;
+    for &weight in weights {
+        if !weight.is_admissible_weight() {
+            return Err(NurbsError::Structure {
+                what: "weights must be finite, positive, and numerically admissible".to_string(),
+            });
+        }
+        if curve_poll_due(&mut operations_since_poll, should_cancel) {
+            return Ok(CurveWorkRun::Cancelled);
+        }
+    }
+    if should_cancel() {
+        return Ok(CurveWorkRun::Cancelled);
+    }
+
+    operations_since_poll = 0;
+    for point in points {
+        if DIM == 0 && curve_poll_due(&mut operations_since_poll, should_cancel) {
+            return Ok(CurveWorkRun::Cancelled);
+        }
+        for &coordinate in point {
+            if !coordinate.is_finite() {
+                return Err(NurbsError::Structure {
+                    what: "control-point coordinates must be finite".to_string(),
+                });
+            }
+            if curve_poll_due(&mut operations_since_poll, should_cancel) {
+                return Ok(CurveWorkRun::Cancelled);
+            }
+        }
+    }
+    if should_cancel() {
+        return Ok(CurveWorkRun::Cancelled);
+    }
+    Ok(CurveWorkRun::Complete(()))
+}
+
+fn build_cartesian_curve_controls_with_poll<S: Scalar, const DIM: usize>(
+    points: &[[S; DIM]],
+    weights: &[S],
+    should_cancel: &mut impl FnMut() -> bool,
+) -> Result<CurveWorkRun<Vec<[S; 4]>>, NurbsError> {
+    let mut cpw = Vec::new();
+    cpw.try_reserve_exact(points.len())
+        .map_err(|_| NurbsError::Domain {
+            what: "curve homogeneous-control allocation was refused".to_string(),
+        })?;
+    if should_cancel() {
+        return Ok(CurveWorkRun::Cancelled);
+    }
+
+    let mut operations_since_poll = 0usize;
+    for (point, &weight) in points.iter().zip(weights) {
+        let mut homogeneous = [S::zero(); 4];
+        for (slot, &coordinate) in homogeneous.iter_mut().zip(point.iter()) {
+            *slot = coordinate * weight;
+            if curve_poll_due(&mut operations_since_poll, should_cancel) {
+                return Ok(CurveWorkRun::Cancelled);
+            }
+        }
+        homogeneous[3] = weight;
+        cpw.push(homogeneous);
+        if curve_poll_due(&mut operations_since_poll, should_cancel) {
+            return Ok(CurveWorkRun::Cancelled);
+        }
+    }
+    if should_cancel() {
+        return Ok(CurveWorkRun::Cancelled);
+    }
+    Ok(CurveWorkRun::Complete(cpw))
+}
+
+fn validate_cartesian_curve_products_with_poll<S: Scalar, const DIM: usize>(
+    points: &[[S; DIM]],
+    cpw: &[[S; 4]],
+    should_cancel: &mut impl FnMut() -> bool,
+) -> Result<CurveWorkRun<()>, NurbsError> {
+    let mut operations_since_poll = 0usize;
+    for (point, homogeneous) in points.iter().zip(cpw) {
+        if DIM == 0 && curve_poll_due(&mut operations_since_poll, should_cancel) {
+            return Ok(CurveWorkRun::Cancelled);
+        }
+        for (&coordinate, &weighted) in point.iter().zip(homogeneous) {
+            if coordinate != S::zero() && weighted == S::zero() {
+                return Err(NurbsError::Structure {
+                    what: "Cartesian coordinate × weight underflowed a nonzero coordinate to zero"
+                        .to_string(),
+                });
+            }
+            if curve_poll_due(&mut operations_since_poll, should_cancel) {
+                return Ok(CurveWorkRun::Cancelled);
+            }
+        }
+    }
+    if should_cancel() {
+        return Ok(CurveWorkRun::Cancelled);
+    }
+
+    operations_since_poll = 0;
+    for homogeneous in cpw {
+        for &component in homogeneous {
+            if !component.is_finite() {
+                return Err(NurbsError::Structure {
+                    what: "Cartesian coordinate × weight overflowed the homogeneous numeric domain"
+                        .to_string(),
+                });
+            }
+            if curve_poll_due(&mut operations_since_poll, should_cancel) {
+                return Ok(CurveWorkRun::Cancelled);
+            }
+        }
+    }
+    if should_cancel() {
+        return Ok(CurveWorkRun::Cancelled);
+    }
+    Ok(CurveWorkRun::Complete(()))
 }
 
 fn refinement_work_upper_bound(
@@ -684,8 +826,7 @@ pub struct AdmittedNurbsCurve<'a, S: Scalar, const DIM: usize> {
     inner: &'a NurbsCurve<S, DIM>,
 }
 
-/// Transactional terminal state of cancellation-aware homogeneous curve
-/// construction.
+/// Transactional terminal state of cancellation-aware curve construction.
 #[must_use]
 #[derive(Debug, PartialEq)]
 pub enum CurveConstructionRun<S: Scalar, const DIM: usize> {
@@ -927,12 +1068,60 @@ impl<S: Scalar, const DIM: usize> NurbsCurve<S, DIM> {
     /// # Errors
     /// [`NurbsError::Structure`] on count mismatch, non-finite coordinates, or
     /// non-positive/non-finite weights; [`NurbsError::Domain`] when validation
-    /// work or homogeneous-control allocation is refused.
+    /// work, the 64 MiB derived-control envelope, or homogeneous-control
+    /// allocation is refused.
     pub fn new(
         knots: KnotVector<S>,
         points: &[[S; DIM]],
         weights: &[S],
     ) -> Result<Self, NurbsError> {
+        let mut never_cancel = || false;
+        match Self::new_with_poll(knots, points, weights, &mut never_cancel)? {
+            CurveWorkRun::Complete(curve) => Ok(curve),
+            CurveWorkRun::Cancelled => Err(NurbsError::Domain {
+                what: "non-cancelling Cartesian curve construction observed cancellation"
+                    .to_string(),
+            }),
+        }
+    }
+
+    /// Build from borrowed Cartesian controls and weights with bounded
+    /// cancellation polling.
+    ///
+    /// Dimension, count, aggregate validation-work, and 64 MiB derived-output
+    /// refusals precede cancellation. One `Cx` then spans knot validation,
+    /// ordered weight and coordinate validation, fallible homogeneous-output
+    /// allocation, Cartesian-to-homogeneous multiplication, underflow and
+    /// overflow checks, and final owned publication. Cancellation drops the
+    /// transferred knot vector and any partial derived output; the borrowed
+    /// point and weight slices remain caller-owned. Individual allocator,
+    /// scalar, and destructor operations are not preemptible. This primitive
+    /// does not consume the `Cx` budget or own request -> drain -> finalize
+    /// semantics.
+    ///
+    /// # Errors
+    /// Returns the synchronous constructor's dimension, count, work,
+    /// retained-memory, knot, weight, coordinate, arithmetic, or allocation
+    /// refusal when it wins before an observed cancellation.
+    pub fn new_with_cx(
+        knots: KnotVector<S>,
+        points: &[[S; DIM]],
+        weights: &[S],
+        cx: &Cx<'_>,
+    ) -> Result<CurveConstructionRun<S, DIM>, NurbsError> {
+        let mut should_cancel = || cx.checkpoint().is_err();
+        match Self::new_with_poll(knots, points, weights, &mut should_cancel)? {
+            CurveWorkRun::Complete(curve) => Ok(CurveConstructionRun::Complete { curve }),
+            CurveWorkRun::Cancelled => Ok(CurveConstructionRun::Cancelled),
+        }
+    }
+
+    fn new_with_poll(
+        knots: KnotVector<S>,
+        points: &[[S; DIM]],
+        weights: &[S],
+        should_cancel: &mut impl FnMut() -> bool,
+    ) -> Result<CurveWorkRun<Self>, NurbsError> {
         if DIM > 3 {
             return Err(NurbsError::Structure {
                 what: format!("curve dimension {DIM} exceeds the homogeneous storage limit 3"),
@@ -949,58 +1138,28 @@ impl<S: Scalar, const DIM: usize> NurbsCurve<S, DIM> {
             });
         }
         Self::enforce_validation_work(Self::validation_work_for(&knots, points.len())?)?;
-        knots.validate_live()?;
-        if weights.iter().copied().any(|w| !w.is_admissible_weight()) {
-            return Err(NurbsError::Structure {
-                what: "weights must be finite, positive, and numerically admissible".to_string(),
-            });
+        preflight_cartesian_curve_construction::<S>(points.len())?;
+        match knots.validate_live_with_poll(|| should_cancel())? {
+            KnotValidationOutcome::Complete => {}
+            KnotValidationOutcome::Cancelled => return Ok(CurveWorkRun::Cancelled),
         }
-        if points
-            .iter()
-            .flat_map(|point| point.iter())
-            .copied()
-            .any(|coordinate| !coordinate.is_finite())
-        {
-            return Err(NurbsError::Structure {
-                what: "control-point coordinates must be finite".to_string(),
-            });
+        if matches!(
+            validate_cartesian_curve_inputs_with_poll(points, weights, should_cancel)?,
+            CurveWorkRun::Cancelled
+        ) {
+            return Ok(CurveWorkRun::Cancelled);
         }
-        let mut cpw = Vec::new();
-        cpw.try_reserve_exact(points.len())
-            .map_err(|_| NurbsError::Domain {
-                what: "curve homogeneous-control allocation was refused".to_string(),
-            })?;
-        for (point, &weight) in points.iter().zip(weights) {
-            let mut homogeneous = [S::zero(); 4];
-            for (slot, &coordinate) in homogeneous.iter_mut().zip(point.iter()) {
-                *slot = coordinate * weight;
-            }
-            homogeneous[3] = weight;
-            cpw.push(homogeneous);
+        let cpw = match build_cartesian_curve_controls_with_poll(points, weights, should_cancel)? {
+            CurveWorkRun::Complete(cpw) => cpw,
+            CurveWorkRun::Cancelled => return Ok(CurveWorkRun::Cancelled),
+        };
+        if matches!(
+            validate_cartesian_curve_products_with_poll(points, &cpw, should_cancel)?,
+            CurveWorkRun::Cancelled
+        ) {
+            return Ok(CurveWorkRun::Cancelled);
         }
-        if points.iter().zip(&cpw).any(|(point, homogeneous)| {
-            point
-                .iter()
-                .zip(homogeneous.iter())
-                .any(|(&coordinate, &weighted)| coordinate != S::zero() && weighted == S::zero())
-        }) {
-            return Err(NurbsError::Structure {
-                what: "Cartesian coordinate × weight underflowed a nonzero coordinate to zero"
-                    .to_string(),
-            });
-        }
-        if cpw
-            .iter()
-            .flatten()
-            .copied()
-            .any(|component| !component.is_finite())
-        {
-            return Err(NurbsError::Structure {
-                what: "Cartesian coordinate × weight overflowed the homogeneous numeric domain"
-                    .to_string(),
-            });
-        }
-        Ok(NurbsCurve { knots, cpw })
+        Ok(CurveWorkRun::Complete(NurbsCurve { knots, cpw }))
     }
 
     /// Build from a homogeneous control net, validating every coordinate and
@@ -3225,6 +3384,265 @@ mod tests {
             &weights,
         )
         .expect("high-degree insertion curve")
+    }
+
+    #[test]
+    fn cartesian_curve_construction_with_cx_is_transactional_and_exact() {
+        let points = [[0.0], [1.0]];
+        let weights = [1.0, 2.0];
+        let expected = NurbsCurve::<f64, 1>::new(
+            KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).expect("line knots"),
+            &points,
+            &weights,
+        )
+        .expect("weighted line");
+        with_curve_cx(true, |cx| {
+            assert_eq!(
+                NurbsCurve::<f64, 1>::new_with_cx(
+                    KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).expect("line knots"),
+                    &points,
+                    &weights,
+                    cx,
+                )
+                .expect("valid pre-cancelled construction"),
+                CurveConstructionRun::Cancelled
+            );
+        });
+        with_curve_cx(false, |cx| {
+            assert_eq!(
+                NurbsCurve::<f64, 1>::new_with_cx(
+                    KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).expect("line knots"),
+                    &points,
+                    &weights,
+                    cx,
+                )
+                .expect("active Cartesian construction"),
+                CurveConstructionRun::Complete {
+                    curve: expected.try_clone().expect("expected curve copy"),
+                }
+            );
+        });
+
+        let zero = Rat::int(0);
+        let one = Rat::int(1);
+        let two = Rat::int(2);
+        let exact_points = [[zero], [one]];
+        let exact_weights = [one, two];
+        let exact = NurbsCurve::<Rat, 1>::new(
+            KnotVector::new(vec![zero, zero, one, one], 1).expect("exact line knots"),
+            &exact_points,
+            &exact_weights,
+        )
+        .expect("exact weighted line");
+        with_curve_cx(false, |cx| {
+            assert_eq!(
+                NurbsCurve::<Rat, 1>::new_with_cx(
+                    KnotVector::new(vec![zero, zero, one, one], 1).expect("exact line knots"),
+                    &exact_points,
+                    &exact_weights,
+                    cx,
+                )
+                .expect("active exact Cartesian construction"),
+                CurveConstructionRun::Complete {
+                    curve: exact.try_clone().expect("expected exact curve copy"),
+                }
+            );
+        });
+
+        with_curve_cx(true, |cx| {
+            assert!(matches!(
+                NurbsCurve::<f64, 4>::new_with_cx(
+                    KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).expect("line knots"),
+                    &[[0.0; 4]; 2],
+                    &[1.0; 2],
+                    cx,
+                ),
+                Err(NurbsError::Structure { .. })
+            ));
+            assert!(matches!(
+                NurbsCurve::<f64, 1>::new_with_cx(
+                    KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).expect("line knots"),
+                    &[[0.0]],
+                    &[1.0],
+                    cx,
+                ),
+                Err(NurbsError::Structure { .. })
+            ));
+        });
+
+        let control_bytes = core::mem::size_of::<[Rat; 4]>() as u128;
+        let exact_control_count =
+            usize::try_from(CURVE_CONSTRUCTION_MAX_RETAINED_BYTES / control_bytes)
+                .expect("exact retained count fits usize");
+        preflight_cartesian_curve_construction::<Rat>(exact_control_count)
+            .expect("exact retained ceiling");
+        assert!(matches!(
+            preflight_cartesian_curve_construction::<Rat>(exact_control_count + 1),
+            Err(NurbsError::Domain { .. })
+        ));
+    }
+
+    #[test]
+    fn cartesian_curve_construction_preserves_numeric_error_order() {
+        let line_knots = || KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).expect("line knots");
+        let invalid_weight_points = [[0.0], [1.0]];
+        let invalid_weights = [1.0, 0.0];
+        let invalid_weight_error =
+            NurbsCurve::<f64, 1>::new(line_knots(), &invalid_weight_points, &invalid_weights)
+                .expect_err("legacy weight refusal");
+        with_curve_cx(false, |cx| {
+            assert_eq!(
+                NurbsCurve::<f64, 1>::new_with_cx(
+                    line_knots(),
+                    &invalid_weight_points,
+                    &invalid_weights,
+                    cx,
+                )
+                .expect_err("cancellable weight refusal"),
+                invalid_weight_error
+            );
+        });
+
+        let nonfinite_points = [[0.0], [f64::INFINITY]];
+        let finite_weights = [1.0, 1.0];
+        let nonfinite_error =
+            NurbsCurve::<f64, 1>::new(line_knots(), &nonfinite_points, &finite_weights)
+                .expect_err("legacy coordinate refusal");
+        with_curve_cx(false, |cx| {
+            assert_eq!(
+                NurbsCurve::<f64, 1>::new_with_cx(
+                    line_knots(),
+                    &nonfinite_points,
+                    &finite_weights,
+                    cx,
+                )
+                .expect_err("cancellable coordinate refusal"),
+                nonfinite_error
+            );
+        });
+
+        let underflow_points = [[f64::MIN_POSITIVE], [1.0]];
+        let underflow_weights = [f64::MIN_POSITIVE, 1.0];
+        let underflow_error =
+            NurbsCurve::<f64, 1>::new(line_knots(), &underflow_points, &underflow_weights)
+                .expect_err("legacy underflow refusal");
+        with_curve_cx(false, |cx| {
+            assert_eq!(
+                NurbsCurve::<f64, 1>::new_with_cx(
+                    line_knots(),
+                    &underflow_points,
+                    &underflow_weights,
+                    cx,
+                )
+                .expect_err("cancellable underflow refusal"),
+                underflow_error
+            );
+        });
+
+        let overflow_points = [[f64::MAX], [1.0]];
+        let overflow_weights = [2.0, 1.0];
+        let overflow_error =
+            NurbsCurve::<f64, 1>::new(line_knots(), &overflow_points, &overflow_weights)
+                .expect_err("legacy overflow refusal");
+        with_curve_cx(false, |cx| {
+            assert_eq!(
+                NurbsCurve::<f64, 1>::new_with_cx(
+                    line_knots(),
+                    &overflow_points,
+                    &overflow_weights,
+                    cx,
+                )
+                .expect_err("cancellable overflow refusal"),
+                overflow_error
+            );
+        });
+    }
+
+    #[test]
+    fn cartesian_curve_construction_cancels_in_scans_assembly_and_publication() {
+        let inputs = || {
+            let interior_count = 128usize;
+            let mut knots = Vec::with_capacity(interior_count + 4);
+            knots.extend([0.0, 0.0]);
+            for index in 1..=interior_count {
+                knots.push(index as f64 / (interior_count + 1) as f64);
+            }
+            knots.extend([1.0, 1.0]);
+            let control_count = interior_count + 2;
+            let points: Vec<[f64; 1]> = (0..control_count)
+                .map(|index| [index as f64 / (control_count - 1) as f64])
+                .collect();
+            let weights = vec![1.0; control_count];
+            (
+                KnotVector::new(knots, 1).expect("long line knots"),
+                points,
+                weights,
+            )
+        };
+        let run = |target| {
+            let (knots, points, weights) = inputs();
+            let mut polls = 0usize;
+            let mut should_cancel = || {
+                polls += 1;
+                polls == target
+            };
+            let outcome =
+                NurbsCurve::<f64, 1>::new_with_poll(knots, &points, &weights, &mut should_cancel)
+                    .expect("valid cancellable construction");
+            (matches!(outcome, CurveWorkRun::Cancelled), polls)
+        };
+        assert_eq!(run(12), run(12));
+        assert_eq!(run(12), (true, 12));
+        assert_eq!(run(20), run(20));
+        assert_eq!(run(20), (true, 20));
+
+        let (knots, points, weights) = inputs();
+        let zero_dimensional_points = vec![[]; points.len()];
+        let mut zero_dimensional_polls = 0usize;
+        let mut cancel_inside_empty_points = || {
+            zero_dimensional_polls += 1;
+            zero_dimensional_polls == 15
+        };
+        assert!(matches!(
+            NurbsCurve::<f64, 0>::new_with_poll(
+                knots,
+                &zero_dimensional_points,
+                &weights,
+                &mut cancel_inside_empty_points,
+            )
+            .expect("valid zero-dimensional cancellation"),
+            CurveWorkRun::Cancelled
+        ));
+        assert_eq!(zero_dimensional_polls, 15);
+
+        let (knots, points, weights) = inputs();
+        let mut total_polls = 0usize;
+        let mut never_cancel = || {
+            total_polls += 1;
+            false
+        };
+        assert!(matches!(
+            NurbsCurve::<f64, 1>::new_with_poll(knots, &points, &weights, &mut never_cancel,)
+                .expect("healthy Cartesian construction"),
+            CurveWorkRun::Complete(_)
+        ));
+        let (knots, points, weights) = inputs();
+        let mut replay_polls = 0usize;
+        let mut cancel_at_publication = || {
+            replay_polls += 1;
+            replay_polls == total_polls
+        };
+        assert!(matches!(
+            NurbsCurve::<f64, 1>::new_with_poll(
+                knots,
+                &points,
+                &weights,
+                &mut cancel_at_publication,
+            )
+            .expect("publication cancellation"),
+            CurveWorkRun::Cancelled
+        ));
+        assert_eq!(replay_polls, total_polls);
     }
 
     #[test]

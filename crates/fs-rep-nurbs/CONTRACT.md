@@ -61,9 +61,10 @@ fs-iga (geometry basis = analysis basis), fs-render NURBS tracing
   derivatives through the knot's continuity order and refuses requests that
   would silently mean a one-sided jet;
   checked Cartesian or homogeneous construction seals the knot/control
-  representation. Homogeneous `from_homogeneous_with_cx` returns
-  transactional `CurveConstructionRun` state and publishes only a completely
-  validated sealed owner. Owning `try_clone_with_cx` returns transactional
+  representation. Cartesian `new_with_cx` and homogeneous
+  `from_homogeneous_with_cx` return transactional `CurveConstructionRun`
+  state and publish only a completely validated sealed owner. Owning
+  `try_clone_with_cx` returns transactional
   `CurveCloneRun` state and publishes only a complete sealed copy after a
   checked work and 64 MiB retained-output gate. `AdmittedNurbsCurve` binds a
   validated immutable snapshot and evaluation consumes its admitted knot view
@@ -362,15 +363,30 @@ allocator calls and generic scalar division/comparison remain non-preemptible;
 the APIs add no wall-time, Cx-budget, drain/finalize, tight-box, topology, or
 certificate claim, and the documented exact-scalar overflow boundary is
 unchanged.
+`NurbsCurve::new_with_cx` preserves dimension, count, aggregate validation-work,
+and 64 MiB derived homogeneous-control retained-byte refusal precedence before
+observing cancellation. The retained envelope excludes the transferred sealed
+knot payload, borrowed Cartesian points and weights, allocator rounding, and
+spare capacity. One gate then spans ordered knot, weight, and coordinate
+validation; fallible homogeneous output allocation; control-order
+multiplication; complete underflow and overflow
+checks in the synchronous constructor's error order; and final owned
+publication. The maximum three active coordinates keep those scans and output
+assembly inside the existing conservative 16-work-unit price per control.
+Cancellation drops the transferred knot owner and any partial derived output,
+but does not own the borrowed inputs. Individual allocator, destructor, and
+generic-scalar operations remain non-preemptible, and the primitive adds no
+exact caller-budget, wall-time, drain/finalize, resumability, regularity,
+topology, or geometric-certificate claim.
 `NurbsCurve::from_homogeneous_with_cx` preserves dimension and aggregate
 validation-work refusal precedence, then carries one gate through knot
 validation and every control-count, weight, finite, Cartesian-projection, and
 inactive-lane check plus final owned publication.
 `CurveConstructionRun::Cancelled` exposes no partially validated curve and
-drops both caller-transferred inputs. The synchronous homogeneous constructor
-shares the same validation core. Individual scalar operations and destruction
-remain non-preemptible, and the primitive adds no exact caller-budget,
-wall-time, drain/finalize, resumability, or geometric-certificate claim.
+drops every caller-transferred input. Each synchronous constructor shares its
+corresponding validation core. Individual scalar operations and destruction
+remain non-preemptible, and the primitive adds no exact caller-budget, wall-time,
+drain/finalize, resumability, or geometric-certificate claim.
 `NurbsCurve::admit_with_cx` preserves dimension and static work-refusal
 precedence, then carries one cancellation gate through both knot validation and
 the homogeneous-control weight, finite, quotient, and inactive-lane scans. A
