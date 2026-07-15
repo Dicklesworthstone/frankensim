@@ -22,11 +22,13 @@
 //! WS1 are, and padding is a later concern, not silent slop.
 
 mod boundary;
+mod simd;
 
 pub use boundary::{
     BoundaryGrid3, BoundaryLink3, BoundarySpec3, D3Q19_BOUNDARY_BIT_SEMANTICS_VERSION, Face3,
     FaceBoundary3, LinkMaskTile3,
 };
+pub use simd::{D3q19BgkSimdTier, d3q19_bgk_simd_tier};
 
 /// Bit-semantics version of the D3Q19 surface (golden-couplings.json):
 /// covers the velocity/weight/opposite tables and ordering, the
@@ -384,10 +386,10 @@ impl core::error::Error for CollisionError3 {}
 /// Guo body force.
 ///
 /// The BGK arithmetic deliberately retains the two existing evaluation paths:
-/// this public entry point uses the frozen boundary-grid expression, while
-/// [`Duct`] delegates through its private frozen axial-force expression. This
-/// extraction therefore centralizes authority without silently refreezing
-/// either golden surface.
+/// this public entry point uses the frozen boundary-grid expression, while the
+/// [`Duct`] tile kernel retains its separately frozen axial-force expression.
+/// A test-only axial cell oracle locks the tile scalar/SIMD twins to that
+/// expression without silently refreezing either golden surface.
 ///
 /// # Errors
 /// [`CollisionError3`] for inadmissible model parameters, force, incoming
@@ -400,6 +402,7 @@ pub fn collide_cell3(
     collide_cell3_with_projection(populations, model, force, false)
 }
 
+#[cfg(test)]
 fn collide_axial_z_cell3(
     populations: [f64; Q3],
     model: CollisionModel3,
@@ -850,18 +853,10 @@ impl Duct {
         // populations into `post`, visiting tiles then lanes ascending.
         let tiles = self.f[0].len();
         for tile in 0..tiles {
-            for lane in 0..TILE_CELLS {
-                let populations = core::array::from_fn(|direction| self.f[direction][tile].0[lane]);
-                let post = collide_axial_z_cell3(
-                    populations,
-                    CollisionModel3::Bgk { tau: self.tau },
-                    self.gz,
-                )
+            let input = self.f.each_ref().map(|field| &field[tile].0);
+            let mut output = self.post.each_mut().map(|field| &mut field[tile].0);
+            simd::collide_bgk_axial_z_tile(&input, &mut output, self.tau, self.gz)
                 .expect("Duct constructor and prior collision state admit BGK/Guo collision");
-                for (field, value) in self.post.iter_mut().zip(post) {
-                    field[tile].0[lane] = value;
-                }
-            }
         }
         // Pull streaming: destination (x,y,z) reads post[source] where
         // source = destination − e_i; crossing an x or y boundary means

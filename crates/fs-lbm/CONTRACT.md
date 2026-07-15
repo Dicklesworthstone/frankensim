@@ -44,10 +44,17 @@ scaling plan) and deterministic `fs-math` primitives. Pure, deterministic
   and qualitative dam-break / jet-fragment fixtures.
 - `d3q19::{Duct, equilibrium3, duct_analytic}` — the frozen D3Q19 BGK + Guo
   body-force core on aligned 4x4x4 SoA tiles, with stationary halfway
-  bounce-back x/y walls and periodic z for the rectangular-duct fixture.
-- `d3q19::{CollisionModel3, collide_cell3, CollisionError3}` — the shared
-  checked per-cell collision authority used by both D3Q19 grids. `Bgk { tau }`
-  retains each frozen force-projection arithmetic path. The unforced
+  bounce-back x/y walls and periodic z for the rectangular-duct fixture. Its
+  axial-z BGK collision dispatches once to a bit-neutral NEON/AVX2 tile capsule
+  or the scalar twin; SIMD lanes are independent cells and the pull stream is
+  unchanged.
+- `d3q19_bgk_simd_tier` / `D3q19BgkSimdTier` — truthful operation-specific
+  receipt for the Duct collision kernel. AVX-512 hosts report AVX2 because this
+  capsule deliberately uses four-lane AVX2; x86 without AVX2+FMA reports scalar.
+- `d3q19::{CollisionModel3, collide_cell3, CollisionError3}` — the checked
+  per-cell collision authority used by `BoundaryGrid3` and public cell calls.
+  `Bgk { tau }` retains the frozen general-force projection; the Duct tile
+  scalar/SIMD twin is separately bit-locked to its test-only axial oracle. The unforced
   `CentralMoment` reference rung relaxes a full-rank centered D3Q19 monomial
   basis with independent second/higher-order rates. `ReducedCumulant` applies
   the nonlinear `C220`/`C202`/`C022` corrections to the three independent
@@ -82,9 +89,9 @@ scaling plan) and deterministic `fs-math` primitives. Pure, deterministic
 ## Invariants
 
 - The equilibrium recovers its density + momentum moments exactly.
-- Unforced shared-cell collision preserves density and all three momentum
-  components to roundoff; both grid implementations delegate collision to this
-  one authority path.
+- Unforced collision preserves density and all three momentum components to
+  roundoff. The boundary grid delegates to the public cell authority; the Duct
+  tile scalar/SIMD twin is differential-tested against its frozen axial oracle.
 - Equal-rate central-moment collision reduces to BGK within deterministic
   transform/solve roundoff. Split higher-order relaxation changes
   nonequilibrium modes without relaxing degree-zero/one invariants.
@@ -167,8 +174,11 @@ transform.
 
 ## Determinism class
 
-Fully deterministic: fixed cell iteration order for D2Q9 and fixed
-tile/lane/direction plus face/z/y/x reconstruction order for D3Q19; no RNG.
+Fully deterministic: fixed cell iteration order for D2Q9 and fixed logical
+tile/cell/direction identities plus face/z/y/x reconstruction order for D3Q19;
+no RNG. The Duct capsule changes only cross-cell execution in fixed lane blocks:
+every cell retains the frozen direction-ascending reductions and scalar
+operation tree bitwise.
 
 ## Cancellation behavior
 
@@ -177,7 +187,11 @@ production kernel's concern.
 
 ## Unsafe boundary
 
-None. `#![deny(unsafe_code)]` via the workspace lint.
+Two registered leaf capsules opt out of the workspace default at module scope:
+`src/d3q19/simd/neon/mod.rs` and `src/d3q19/simd/x86/mod.rs`, each below the
+capsule line cap with an adjacent `SAFETY.md`. Safe fixed-size tile borrows prove
+bounds and aliasing; the x86 one-shot selector admits its private thunk only
+after AVX2+FMA detection. Miri selects the safe scalar twin.
 
 ## Feature flags
 
@@ -217,6 +231,12 @@ rectangular-duct flow, replay determinism, the registered core golden, shared
 kernel bit-equivalence, BGK/central-moment equal-rate equivalence, split-rate
 conservation, reduced-cumulant equilibrium/nonlinearity/axis-covariance laws,
 and fail-closed inputs.
+
+The D3Q19 SIMD module adds a G0 seeded per-lane differential battery against its
+scalar tile twin, a direct scalar-twin comparison with the frozen axial cell
+authority, first-divergence JSONL receipts, hostile dispatch-selector cases,
+and one-shot table identity. The existing Duct golden remains the end-to-end
+bit-surface gate.
 
 `tests/d3q19_boundaries.rs` (bead 40p2) covers all six hand-enumerated planar
 link masks, aligned deterministic mask ordering, the exact 18 links around one
@@ -266,6 +286,11 @@ redistributed.
   `ReducedCumulant` therefore implements only the general cumulant definitions
   for the independent D3Q19 `C220`/`C202`/`C022` projection; it is not a
   "Geier D3Q19" operator and cannot borrow the paper's high-Re evidence.
+- The current SIMD slice accelerates only the all-fluid Duct axial-BGK collision.
+  Pull-stream gather/scatter, `BoundaryGrid3` mixed masks/general forcing, and
+  central-moment/cumulant paths remain scalar. Therefore this slice alone makes
+  no stream+collide GLUP/s claim; both native ISA batteries and the four-quadrant
+  performance lane remain required before promotion evidence is green.
 - SDF voxelization is midpoint classification followed by stair-step halfway
   bounce-back. It is second-order for the represented flat, lattice-aligned
   halfway wall, not a second-order certificate against the original continuous

@@ -5,6 +5,8 @@
 {"crate": "fs-alloc", "module": "crates/fs-alloc/src/raw/mod.rs", "safety_md": "crates/fs-alloc/src/raw/SAFETY.md"},
 {"crate": "fs-alloc", "module": "crates/fs-alloc/src/raw/poison/mod.rs", "safety_md": "crates/fs-alloc/src/raw/poison/SAFETY.md"},
 {"crate": "fs-simd", "module": "crates/fs-simd/src/neon/mod.rs", "safety_md": "crates/fs-simd/src/neon/SAFETY.md"},
+{"crate": "fs-lbm", "module": "crates/fs-lbm/src/d3q19/simd/neon/mod.rs", "safety_md": "crates/fs-lbm/src/d3q19/simd/neon/SAFETY.md"},
+{"crate": "fs-lbm", "module": "crates/fs-lbm/src/d3q19/simd/x86/mod.rs", "safety_md": "crates/fs-lbm/src/d3q19/simd/x86/SAFETY.md"},
 {"crate": "fs-substrate", "module": "crates/fs-substrate/src/morton/bmi2/mod.rs", "safety_md": "crates/fs-substrate/src/morton/bmi2/SAFETY.md"},
 {"crate": "fs-substrate", "module": "crates/fs-substrate/src/os_affinity/mod.rs", "safety_md": "crates/fs-substrate/src/os_affinity/SAFETY.md"},
 {"crate": "fs-substrate", "module": "crates/fs-substrate/src/prefetch/mod.rs", "safety_md": "crates/fs-substrate/src/prefetch/SAFETY.md"},
