@@ -1,7 +1,8 @@
 # CONTRACT: fs-vmanifest
 
 The typed VerificationManifest schema for leapfrog G1 claim/evidence freezes,
-with authored draft constructors for I01, I02, I03, I04, I08, I12, and I15.
+with authored draft constructors for I01, I02, I03, I04, I05, I08, I12, and
+I15.
 Sibling G1-freeze beads reuse this schema and add their own instance modules.
 
 ## Purpose and layer
@@ -157,6 +158,27 @@ component encodings retain their v1 subdomains.
 - `i04_draft()` — the I04 (conservation-defect microscope) instance:
   8 claims (4/2/2 with a counterfactual-completeness falsifier), 8
   fixture pins (2 held-out), 5 obligation rows, 1 waiver.
+- `i05_draft()` — the I05 HIL/WCET/fixed-point deployment-twin compiler
+  gate: 12 claims split 7 baseline `[S]`, 2 `[F]`, and 3 `[M]`; 15 fixture
+  and theorem/exhaustiveness-card pins with 6 stage-local held-outs; 7
+  execution leaves; and 1 production-target characterization waiver. The
+  baseline freezes bounded `DeploymentTwinIR` admission, exact-rational
+  fixed-point range/error containment, reproducible safe `no_std` images,
+  non-confusable static/compositional/measured/unavailable timing evidence,
+  interval-valued multi-clock HIL causality, typed fault/safe-state behavior,
+  and directed bounded-horizon target refinement. Frontier lanes attempt
+  complete interference ownership and compositional deadline/age bounds while
+  reconciling authenticated measurements without relabeling samples as WCET.
+  Maximal lanes separately target machine-checked floating-to-binary trace
+  refinement and exact worst-case cycles for a complete finite target model,
+  while a refutation lane attacks false certificates. Version 1 prose cards
+  mint neither theorem nor exhaustive-search authority: successors must first
+  freeze executable proposition/definition/target-semantics or finite-state
+  grammar/transition/cost/coverage artifacts and independent checkers.
+  Generated controller code is safe Rust; unavoidable boot/vector/HAL/
+  interrupt target support is a separate content-addressed, capability-
+  allowlisted, audited runtime capsule and remains an explicit TCB rather than
+  being hidden inside code generation.
 - `i08_draft()` — the I08 (evidence-budget co-design planner) instance:
   8 claims (5/2/1 with a robust multi-horizon optimality falsifier), 9
   fixture pins (2 held-out), 6 obligation rows, 1 waiver.
@@ -280,6 +302,18 @@ refutation-polarity tearing falsifier, an identity distinct from I01's,
 and I02 input-order invariance; and sibling instance smoke checks cover
 I04, I08, I12, and I15.
 
+`tests/i05.rs`: exact I05 7/2/3 lattice, single maximal refutation lane,
+15-fixture/6-held-out corpus and once-only seven-leaf claim map; all nine unit
+case classes, campaign-policy participation, structured lifecycle events,
+entry/replay/DSR bindings, sealed canonical obligation projections, and
+stage-specific tiers; fixed-point signedness/scale/rounding/overflow semantics;
+the four non-confusable timing-evidence kinds; whole-interval clock alignment;
+fault-fidelity/safe-state and regulatory no-claim boundaries; directed target
+refinement; theorem/proposition and finite-target/exhaustiveness successor
+ratchets; G3 assumption/oracle/tolerance/holdout/partition/policy mutations;
+G4 chunked assembly equivalence; G5 input-order invariance; and targeted versus
+global amendment invalidation.
+
 `tests/i03.rs`: exact I03 8/2/6 claim lattice and once-only 4-Core/
 4-Max leaf mapping; exact nine unit-case classes; content-bound campaign
 policy, FailureBundle, and independent-adjudication obligations; exact
@@ -377,6 +411,22 @@ holdout/policy mutations; and targeted versus global amendment invalidation.
   encoded event primitives, total enumeration and exclusion order,
   rank/unrank/sharding algorithms, source digests, independent decoder and
   bijection proofs, cost preflight, and Merkle completeness root.
+- I05 timing evidence never promotes a `MeasuredSampleMaximum` into a WCET
+  upper bound. Static and compositional bounds carry authority only for their
+  exact binary, target, clock/power state, task context, microarchitectural and
+  interference assumptions. HIL clock containment, injected safe-state
+  behavior, and bounded trace agreement are likewise not regulatory safety,
+  physical-plant validation, unbounded stability, or authority on another
+  target/rig profile.
+- I05 version-1 theorem and finite-target cards are ambitious targets, not
+  machine propositions or executable exhaustive grammars. A pre-proof
+  successor must freeze canonical proposition/definition/decoded-target ASTs,
+  total runtime premises, translation and axiom closure. A pre-search successor
+  must freeze complete instruction/microstate/input grammar, initial/valid/
+  transition/cost semantics, unsupported-state closure, enumeration or sound
+  symbolic coverage, quotient obligations, independent decoding, preflight and
+  completeness root. Even a model-exact maximum becomes silicon WCET only
+  after independent model-fidelity qualification on the exact hardware.
 - The adjacent-version `EvidenceKindChanged` guard prevents an immediate
   claim/leaf kind swap. `FrozenManifest` carries no lineage-wide tombstone set;
   a ledger spanning nonadjacent versions must key authority by typed kind plus
