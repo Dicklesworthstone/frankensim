@@ -38,6 +38,7 @@
 mod admit;
 mod crew;
 mod cx;
+mod fault;
 mod invocation;
 mod kernel;
 mod kill;
@@ -54,6 +55,7 @@ pub use cx::{
     DRAIN_FINALIZE_REPORT_IDENTITY_VERSION, DrainFinalizeError, DrainFinalizeReport, DrainTracker,
     DrainWorker, ExecMode, RunId, StreamKey, TileFailure,
 };
+pub use fault::{FaultPlanError, TILE_FAULT_PLAN_VERSION, TileFaultPlan};
 pub use invocation::{
     ChildBudget, ChildReceipt, CostUnits, EvaluationUnits, INVOCATION_RECEIPT_VERSION,
     InvocationAdmission, InvocationAdmitter, InvocationBudget, InvocationDisposition,

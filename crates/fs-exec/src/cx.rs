@@ -440,12 +440,23 @@ pub struct Cancelled;
 pub enum TileFailure {
     /// The tile's scoped arena refused an allocation.
     Allocation(fs_alloc::AllocError),
+    /// A declared G4 plan injected a failure at a numbered kernel touch.
+    InjectedFault {
+        /// Seed from which the tile/touch plan was derived.
+        plan_seed: u64,
+        /// One-based touch within the selected logical tile.
+        touch: u32,
+    },
 }
 
 impl core::fmt::Display for TileFailure {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Allocation(error) => write!(f, "tile arena allocation refused: {error}"),
+            Self::InjectedFault { plan_seed, touch } => write!(
+                f,
+                "declared tile fault injected at touch {touch} (plan seed {plan_seed:#018x})"
+            ),
         }
     }
 }
@@ -454,6 +465,7 @@ impl core::error::Error for TileFailure {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
             Self::Allocation(error) => Some(error),
+            Self::InjectedFault { .. } => None,
         }
     }
 }

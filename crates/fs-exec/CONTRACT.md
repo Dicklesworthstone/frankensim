@@ -36,6 +36,12 @@ fs-blake3, fs-substrate, fs-obs.
 - `TileKernel` (`type Out: Reduce; tiles() -> TilePlan; run(tile, &Cx) ->
   ControlFlow<Cancelled, Out>`) and `TilePlan { tiles, kernel }` with the
   FNV-stable `kernel_id()`.
+- `TileFaultPlan::seeded(seed, tiles, touches_per_tile)` — the versioned G4
+  fault selector (`TILE_FAULT_PLAN_VERSION = 1`). It fail-closes on either
+  empty domain and selects exactly one logical tile plus one one-based touch
+  using only the declared seed and dimensions. `failure_at` yields a typed
+  `TileFailure::InjectedFault { plan_seed, touch }`; the tile itself remains in
+  `RunError::TileFailed`, so retained evidence has complete replay provenance.
 - `Reduce` — fold identity + `merge`, applied over per-tile slots on the
   FIXED-SHAPE pairwise tree: split at the largest power of two below `n`,
   recurse — shape a pure function of the tile count, items visited in
@@ -101,7 +107,8 @@ fs-blake3, fs-substrate, fs-obs.
   Within the selected tile-failure class, deterministic mode reports the
   lowest observed logical tile (and its message/failure), never mutex-arrival
   order. `TileFailure::Allocation` retains the original `fs_alloc::AllocError`
-  as its error source.
+  as its error source. `TileFailure::InjectedFault` retains its declared plan
+  seed and numbered touch without manufacturing an underlying error source.
 - `LatencyLane` — thin configured handle on the asupersync runtime
   (`block_on`, `runtime()`); no fs-exec scheduling policy of its own.
 - `victim_order(worker, workers, topo)` / `weighted_ranges(tiles, weights)`
@@ -264,16 +271,20 @@ fs-blake3, fs-substrate, fs-obs.
    quanta are weight-proportional within one tile (exec-006).
 7. Per-tile arenas come from one `ArenaPool` (chunk-recycled); the pool's
    quiescence oracle is the leak check after every run.
-8. Race losers are FULLY drained before `race` returns (scope join), their
+8. A seeded `TileFaultPlan` selects the same logical tile/touch pair on replay;
+   injection surfaces as `TileFailed`, drains siblings, returns every arena to
+   quiescence, and leaves the same pool usable (tests/fault_storm.rs, 16 seeds,
+   G4).
+9. Race losers are FULLY drained before `race` returns (scope join), their
    arenas reclaimed (quiescence oracle); the winner (index and bits) is
    identical across timing jitter in Deterministic mode (exec-010).
-9. Pause -> serialize -> deserialize -> resume reproduces the
+10. Pause -> serialize -> deserialize -> resume reproduces the
    uninterrupted solver trajectory bit-exactly at any pause depth
    (exec-011, chaotic-map witness); forks are independent and
    serialization-proven at fork time.
-10. A registry kill drains the candidate's whole tree at its next poll
+11. A registry kill drains the candidate's whole tree at its next poll
     points with arenas quiescent (exec-012, latency ledgered).
-11. Tune rows always carry the machine fingerprint; loads drop foreign
+12. Tune rows always carry the machine fingerprint; loads drop foreign
     rows and reject non-canonical, dimensionally ambiguous, or out-of-domain
     rows; wall-time summaries and candidate separation are derived from exact,
     strictly positive samples, never trusted as independent claims;
@@ -289,25 +300,25 @@ fs-blake3, fs-substrate, fs-obs.
     count- and byte-bounded, evicts a deterministic oldest prefix, and exposes
     incompleteness instead of silently claiming replay coverage (exec-013 and
     tuner unit battery).
-12. GEMM rows and pins are scoped to the complete execution identity; imports
+13. GEMM rows and pins are scoped to the complete execution identity; imports
     match the requested scoped key and machine, params are canonical bounded
     plans, selected plans equal the ranked-evidence argmin, parameter families
     cannot shadow one another, and decisions record the exact key used by
     lookup and replay. Row and decision installation are explicit commits so
     failed persistence or cancelled execution cannot fabricate local state or
     a successful-dispatch receipt.
-13. Leased runs refuse before launch when tile counts or root-byte arithmetic
+14. Leased runs refuse before launch when tile counts or root-byte arithmetic
     are unrepresentable, when the lease cannot admit the checked root charge,
     or when fallible root-vector reservation fails. The root charge includes
     the `pairwise_fold` split-buffer peak (`2n-1` output elements for `n>0`)
     and one concurrent victim-order partition in addition to final tables;
     it releases on every return/unwind. This invariant applies only to the
    tracked envelope named above, not arbitrary kernel-owned heap.
-14. A drain/finalize report exists only after its gate was requested and every
+15. A drain/finalize report exists only after its gate was requested and every
     worker registered with that tracker released its guard. Finalization is
     exact-replay idempotent and permanently closes later worker admission, so
     an old live worker cannot coexist with a successful report.
-15. An invocation root with an ambient operation lease reserves its complete
+16. An invocation root with an ambient operation lease reserves its complete
     required memory capacity exactly once before any child can run and holds
     that charge through root finalization. Nested live-memory reservations are
     additionally tracked by the invocation ledger but do not remint ambient
@@ -505,6 +516,11 @@ identity-dimension isolation, exact-key replay, parameter-family collisions,
 and explicit row/decision commit semantics. The pool unit suite also locks the
 complete placement-v2 mutation matrix, independent count-prefix movement,
 seed nonmovement, and fail-closed retained-version admission.
+tests/fault_storm.rs runs 16 declared seeds through the version-1 tile-fault
+plan. Every case checks exact tile/seed/touch provenance, sibling drain via the
+typed refusal path, arena quiescence, and successful reuse of the same pool;
+each seed emits one JSON-line receipt. This bounded battery is G4 evidence, not
+an exhaustive scheduler-state exploration.
 
 ## No-claim boundaries
 - NO 200 µs cancel-latency CLAIM yet: the reference-hardware p99 gate
