@@ -226,10 +226,12 @@ per-combination term entries and every net-flux checkpoint set. The explicit
 per-component cap bounds each opaque string comparison to 4 KiB (8 KiB across
 both components of an unordered contact key). One heap-sift checkpoint covers
 at most two such comparisons; an opaque ordered lookup covers at most
-`usize::BITS + 1` comparisons including final equality. Between surrounding
-record checkpoints the widest path is one two-part contact lookup plus two
-direct component comparisons, conservatively 528 KiB on a 64-bit target; two
-single-component combination-term lookups fit below the same envelope. The
+`usize::BITS + 1` comparisons including final equality. The widest opaque
+comparison envelope between surrounding record checkpoints is one two-part
+contact lookup plus two direct component comparisons, conservatively 528 KiB
+on a 64-bit target; bounded diagnostic rendering is additional work outside
+that comparison envelope. Two single-component combination-term lookups fit
+below the same comparison envelope. The
 explicit `Cx` lane polls
 before preflight, at every top-level and nested record visited while constructing
 the semantic plan, after planning, after fixed phases, at every frame-index row,
