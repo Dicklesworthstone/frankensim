@@ -297,6 +297,42 @@ impl ChildSpec {
         }
     }
 
+    /// Expected child role.
+    #[must_use]
+    pub const fn role(&self) -> IdentityRole {
+        self.role
+    }
+
+    /// Expected child schema domain.
+    #[must_use]
+    pub const fn domain(&self) -> &'static str {
+        self.domain
+    }
+
+    /// Expected child schema name.
+    #[must_use]
+    pub const fn name(&self) -> &'static str {
+        self.name
+    }
+
+    /// Expected child schema version.
+    #[must_use]
+    pub const fn version(&self) -> u32 {
+        self.version
+    }
+
+    /// Expected child schema context.
+    #[must_use]
+    pub const fn context(&self) -> &'static str {
+        self.context
+    }
+
+    /// Expected child field schema (recursive).
+    #[must_use]
+    pub const fn fields(&self) -> &'static [FieldSpec] {
+        self.fields
+    }
+
     /// Check an encoder-supplied identity type against this binding,
     /// returning the first mismatched dimension.
     fn matches<J: StrongIdentity>(&self) -> Result<(), &'static str> {
@@ -315,11 +351,46 @@ impl ChildSpec {
         if self.context != <J::Schema as CanonicalSchema>::CONTEXT {
             return Err("child schema context");
         }
-        if !core::ptr::eq(self.fields, <J::Schema as CanonicalSchema>::FIELDS) {
+        if !fields_schema_match(
+            self.fields,
+            <J::Schema as CanonicalSchema>::FIELDS,
+            MAX_SCHEMA_CHILD_DEPTH,
+        ) {
             return Err("child field schema");
         }
         Ok(())
     }
+}
+
+/// Structural field-schema equality with a recursion depth cap.
+/// Associated consts have NO stable address in Rust (each read may
+/// materialize a fresh anonymous value), so pointer identity is only a
+/// fast path and a cycle guard — structural comparison is the truth.
+/// Exhausting the depth cap refuses (returns false) rather than loops.
+fn fields_schema_match(a: &[FieldSpec], b: &[FieldSpec], depth: u32) -> bool {
+    if core::ptr::eq(a, b) {
+        return true;
+    }
+    if depth == 0 || a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).all(|(left, right)| {
+        left.name == right.name
+            && left.wire_type == right.wire_type
+            && left.presence == right.presence
+            && match (left.child, right.child) {
+                (None, None) => true,
+                (Some(lc), Some(rc)) => {
+                    lc.role.tag() == rc.role.tag()
+                        && lc.domain == rc.domain
+                        && lc.name == rc.name
+                        && lc.version == rc.version
+                        && lc.context == rc.context
+                        && fields_schema_match(lc.fields, rc.fields, depth - 1)
+                }
+                _ => false,
+            }
+    })
 }
 
 impl PartialEq for ChildSpec {
@@ -1947,8 +2018,8 @@ where
         J: StrongIdentity,
     {
         let spec = self.validate_field::<I::Schema>(field, WireType::Child, Presence::Required)?;
-        Self::validate_child_binding::<J>(spec)?;
         self.validate_schema::<J::Schema>()?;
+        Self::validate_child_binding::<J>(spec)?;
         let child_schema_id = self.compute_schema_id::<J::Schema>()?;
         let child_len = typed_child_len::<J>()?;
         self.ensure_field_bytes(child_len)?;
@@ -1972,13 +2043,13 @@ where
     {
         let spec =
             self.validate_field::<I::Schema>(field, WireType::OrderedChildren, Presence::Required)?;
-        Self::validate_child_binding::<J>(spec)?;
         enforce_limit(
             LimitKind::CollectionItems,
             declared_count,
             self.limits.max_collection_items,
         )?;
         self.validate_schema::<J::Schema>()?;
+        Self::validate_child_binding::<J>(spec)?;
         let child_schema_id = self.compute_schema_id::<J::Schema>()?;
         let descriptor_len = typed_child_descriptor_len::<J>()?;
         let payload_len = checked_sum(&[

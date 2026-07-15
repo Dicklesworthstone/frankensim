@@ -447,19 +447,53 @@ fn push_len_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
     out.extend_from_slice(bytes);
 }
 
+fn push_manual_descriptor(
+    out: &mut Vec<u8>,
+    domain: &str,
+    name: &str,
+    version: u32,
+    context: &str,
+    fields: &[FieldSpec],
+) {
+    out.extend_from_slice(b"FSSCHEM\x02");
+    out.extend_from_slice(&CANONICAL_FRAME_VERSION.to_le_bytes());
+    push_len_bytes(out, domain.as_bytes());
+    push_len_bytes(out, name.as_bytes());
+    out.extend_from_slice(&version.to_le_bytes());
+    push_len_bytes(out, context.as_bytes());
+    out.extend_from_slice(&(fields.len() as u64).to_le_bytes());
+    for field in fields {
+        push_len_bytes(out, field.name().as_bytes());
+        out.extend_from_slice(&[field.wire_type().tag(), field.presence().tag()]);
+        // bead sj31i.52.10: the v2 descriptor binds child fields
+        // recursively (0 = unbound scalar, 1 + role + descriptor).
+        match field.child_spec() {
+            None => out.push(0),
+            Some(child) => {
+                out.extend_from_slice(&[1, child.role().tag()]);
+                push_manual_descriptor(
+                    out,
+                    child.domain(),
+                    child.name(),
+                    child.version(),
+                    child.context(),
+                    child.fields(),
+                );
+            }
+        }
+    }
+}
+
 fn manual_schema_descriptor<D: CanonicalSchema>() -> Vec<u8> {
     let mut out = Vec::new();
-    out.extend_from_slice(b"FSSCHEM\x01");
-    out.extend_from_slice(&CANONICAL_FRAME_VERSION.to_le_bytes());
-    push_len_bytes(&mut out, D::DOMAIN.as_bytes());
-    push_len_bytes(&mut out, D::NAME.as_bytes());
-    out.extend_from_slice(&D::VERSION.to_le_bytes());
-    push_len_bytes(&mut out, D::CONTEXT.as_bytes());
-    out.extend_from_slice(&(D::FIELDS.len() as u64).to_le_bytes());
-    for field in D::FIELDS {
-        push_len_bytes(&mut out, field.name().as_bytes());
-        out.extend_from_slice(&[field.wire_type().tag(), field.presence().tag()]);
-    }
+    push_manual_descriptor(
+        &mut out,
+        D::DOMAIN,
+        D::NAME,
+        D::VERSION,
+        D::CONTEXT,
+        D::FIELDS,
+    );
     out
 }
 
