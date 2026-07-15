@@ -1197,7 +1197,7 @@ pub const PHYSICAL_INSTANCE_IDENTITY_SCHEMA_DECLARATION: &[&str] = &[
     "encoder=ledger_physical_instance_identity",
     "encoder_helpers=identity_schema_is_current",
     "schema_constants=PHYSICAL_INSTANCE_IDENTITY_VERSION,PHYSICAL_INSTANCE_IDENTITY_DOMAIN,crates/fs-ledger/src/schema.rs#V4,crates/fs-ledger/src/schema.rs#V5",
-    "schema_functions=fresh_ledger_instance_id,decode_ledger_instance_id,LedgerInstanceId::as_bytes,Ledger::instance_id,Ledger::checked_instance_id,Ledger::open,Ledger::migrate,Ledger::seed_instance_id_if_missing,Ledger::read_current_instance_id,identity_schema_is_current",
+    "schema_functions=fresh_ledger_instance_id,decode_ledger_instance_id,normalize_schema_sql,LedgerInstanceId::as_bytes,Ledger::instance_id,Ledger::checked_instance_id,Ledger::attest_identity_guards,Ledger::open,Ledger::migrate,Ledger::migrate_from_observed_version,Ledger::seed_instance_id_if_missing,Ledger::read_current_instance_id,identity_schema_is_current",
     "schema_dependencies=none",
     "digest=none-opaque-rfc4122-uuid",
     "encoding=fixed-width-key",
@@ -1873,9 +1873,10 @@ pub enum LedgerError {
     /// The on-disk objects do not match the schema its `user_version`
     /// claims (bead gp3.18): pre-existing incompatible tables, a
     /// partially initialized file, wrong columns/affinities, missing
-    /// indexes, or foreign objects. Refused BEFORE any migration
-    /// advances the version — `CREATE TABLE IF NOT EXISTS` must never
-    /// launder an alien schema into a labeled one.
+    /// indexes, foreign objects, or an altered identity guard. Refused
+    /// before migration advances the version or a checked authority boundary
+    /// trusts the identity — `CREATE TABLE IF NOT EXISTS` must never launder
+    /// an alien schema into a labeled one.
     SchemaMismatch {
         /// The `PRAGMA user_version` the file claims.
         claimed_version: i64,
@@ -2027,8 +2028,9 @@ impl std::fmt::Display for LedgerError {
                 f,
                 "LedgerSchemaMismatch: the file claims schema v{claimed_version} but its \
                  objects do not attest ({} violation(s)): {} — refusing to advance \
-                 user_version over an alien or partially initialized schema; migrate the \
-                 data out manually or delete the file if it is disposable",
+                 user_version or trust ledger authority through an alien or partially \
+                 initialized schema; migrate the data out manually or delete the file if \
+                 it is disposable",
                 violations.len(),
                 violations.join("; ")
             ),
@@ -2410,6 +2412,16 @@ fn int_from_u64(n: u64) -> i64 {
     i64::try_from(n).unwrap_or(i64::MAX)
 }
 
+fn normalize_schema_sql(sql: &str) -> String {
+    sql.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+const LEDGER_IDENTITY_GUARDS: [(&str, &str); 3] = [
+    ("trg_ledger_identity_immutable_update", schema::V5[0]),
+    ("trg_ledger_identity_immutable_delete", schema::V5[1]),
+    ("trg_ledger_identity_immutable_reinsert", schema::V5[2]),
+];
+
 /// Every user object in `sqlite_master` as `(type, name) -> normalized
 /// SQL` (whitespace-collapsed; internal `sqlite_*` entries and DDL-less
 /// auto-indexes excluded). The stored SQL text carries STRICT, CHECKs,
@@ -2431,7 +2443,7 @@ fn schema_objects(
             continue;
         }
         let sql = row_text(row, 2, "attest: sqlite_master sql")?;
-        let normalized = sql.split_whitespace().collect::<Vec<_>>().join(" ");
+        let normalized = normalize_schema_sql(&sql);
         objects.insert((kind, name), normalized);
     }
     Ok(objects)
@@ -3219,16 +3231,20 @@ impl Ledger {
     /// handle's cached open-time authority.
     ///
     /// This is the fail-closed accessor for persistence and audit boundaries.
-    /// Ordinary v5 SQL updates/deletes are prevented by attested triggers; the
-    /// comparison also detects a client that bypassed those triggers through
-    /// out-of-band schema manipulation while this handle remained open.
+    /// It cheaply re-attests the three exact v5 identity-guard definitions
+    /// before reading the row. The comparison also detects a client that
+    /// bypassed and then restored those triggers after changing the identity
+    /// while this handle remained open.
     ///
     /// # Errors
-    /// [`LedgerError::InstanceIdentityCorrupt`] if the row is missing,
-    /// malformed, or differs from the cached open-time identity; engine errors
-    /// are returned as [`LedgerError::Sql`] or [`LedgerError::Busy`].
+    /// [`LedgerError::SchemaMismatch`] if an identity guard is missing or
+    /// differs from the shipped definition; [`LedgerError::InstanceIdentityCorrupt`]
+    /// if the row is missing, malformed, or differs from the cached open-time
+    /// identity. Engine errors are returned as [`LedgerError::Sql`] or
+    /// [`LedgerError::Busy`].
     pub fn checked_instance_id(&self) -> Result<LedgerInstanceId, LedgerError> {
         self.note_read_query();
+        self.attest_identity_guards()?;
         let current = self.read_current_instance_id()?;
         if current != self.instance_id {
             return Err(LedgerError::InstanceIdentityCorrupt {
@@ -3255,6 +3271,10 @@ impl Ledger {
 
     fn migrate(&self) -> Result<(), LedgerError> {
         let found = self.schema_version()?;
+        self.migrate_from_observed_version(found)
+    }
+
+    fn migrate_from_observed_version(&self, found: i64) -> Result<(), LedgerError> {
         if found > SCHEMA_VERSION {
             return Err(LedgerError::FutureSchema {
                 found,
@@ -3275,6 +3295,24 @@ impl Ledger {
             self.conn
                 .begin_transaction()
                 .map_err(|e| sql_err("init: begin", &e))?;
+            // The preflight marker may be stale: another opener can finish
+            // legitimate first initialization after our v0 read but before
+            // this transaction begins. Refresh under the transaction before
+            // treating any objects as alien v0 state, then leave the stale
+            // snapshot and run the ordinary attestation/migration path.
+            let found_after_begin = match self.schema_version() {
+                Ok(found_after_begin) => found_after_begin,
+                Err(error) => {
+                    let _ = self.conn.rollback_transaction();
+                    return Err(error);
+                }
+            };
+            if found_after_begin != 0 {
+                self.conn
+                    .rollback_transaction()
+                    .map_err(|error| sql_err("init: roll back stale v0 observation", &error))?;
+                return self.migrate();
+            }
             let init = (|| {
                 let objects = schema_objects(&self.conn)?;
                 if !objects.is_empty() {
@@ -3375,6 +3413,62 @@ impl Ledger {
             }
         }
         Ok(())
+    }
+
+    /// Re-attest the exact identity mutation guards without rebuilding and
+    /// diffing the whole schema. The lookup is bounded to the three reserved
+    /// names plus one duplicate sentinel row; healthy calls issue one small
+    /// sqlite_master query and allocate no unbounded database-derived state.
+    fn attest_identity_guards(&self) -> Result<(), LedgerError> {
+        let rows = self
+            .conn
+            .query(
+                "SELECT type, name, COALESCE(sql, '') FROM sqlite_master \
+                 WHERE name IN ( \
+                   'trg_ledger_identity_immutable_update', \
+                   'trg_ledger_identity_immutable_delete', \
+                   'trg_ledger_identity_immutable_reinsert' \
+                 ) ORDER BY name LIMIT 4",
+            )
+            .map_err(|error| sql_err("attest ledger identity guards", &error))?;
+
+        let mut actual = std::collections::BTreeMap::new();
+        let mut violations = Vec::new();
+        for row in &rows {
+            let kind = row_text(row, 0, "attest identity guard type")?;
+            let name = row_text(row, 1, "attest identity guard name")?;
+            let sql = row_text(row, 2, "attest identity guard SQL")?;
+            if actual
+                .insert(name.clone(), (kind, normalize_schema_sql(&sql)))
+                .is_some()
+            {
+                violations.push(format!("duplicate schema object `{name}`"));
+            }
+        }
+
+        for (name, ddl) in LEDGER_IDENTITY_GUARDS {
+            let expected_sql = normalize_schema_sql(ddl);
+            match actual.get(name) {
+                None => violations.push(format!("missing trigger `{name}`")),
+                Some((kind, _)) if kind.as_str() != "trigger" => {
+                    violations.push(format!(
+                        "identity guard `{name}` is a {kind}, not a trigger"
+                    ));
+                }
+                Some((_, sql)) if sql != &expected_sql => violations.push(format!(
+                    "trigger `{name}` differs from the shipped identity-guard definition"
+                )),
+                Some(_) => {}
+            }
+        }
+
+        if violations.is_empty() {
+            return Ok(());
+        }
+        Err(LedgerError::SchemaMismatch {
+            claimed_version: self.schema_version()?,
+            violations,
+        })
     }
 
     fn seed_instance_id_if_missing(&self) -> Result<(), LedgerError> {
@@ -5725,7 +5819,10 @@ impl Ledger {
     /// battery.
     ///
     /// # Errors
-    /// Engine errors.
+    /// [`LedgerError::SchemaMismatch`] if an identity mutation guard is
+    /// missing or changed; [`LedgerError::InstanceIdentityCorrupt`] if the
+    /// singleton identity row is missing, malformed, or differs from this
+    /// handle's cached authority; engine errors otherwise.
     #[allow(clippy::too_many_lines)] // One ordered, bounded cross-table hygiene report.
     pub fn lint(&self) -> Result<LintReport, LedgerError> {
         let _ = self.checked_instance_id()?;
@@ -7502,6 +7599,64 @@ mod tests {
                 expected,
                 "{table} fresh count"
             );
+        }
+    }
+
+    #[test]
+    fn first_open_rechecks_stale_v0_observation_after_begin() {
+        // G4: deterministically place one opener on each side of the
+        // preflight-v0 -> BEGIN window. The stale observer must attest and
+        // accept the peer's completed initialization, not classify its
+        // canonical objects as alien v0 state.
+        let path = std::env::temp_dir()
+            .join(format!(
+                "fs-ledger-first-open-race-{}-{}.db",
+                std::process::id(),
+                now_wall_ns()
+            ))
+            .display()
+            .to_string();
+        let observer_ready = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let initializer_done = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let observer_path = path.clone();
+        let observer_ready_worker = std::sync::Arc::clone(&observer_ready);
+        let initializer_done_worker = std::sync::Arc::clone(&initializer_done);
+        let observer = std::thread::spawn(move || {
+            let conn = Connection::open(&observer_path).expect("open stale observer");
+            let ledger = Ledger {
+                conn,
+                path: observer_path,
+                instance_id: LedgerInstanceId([0; 16]),
+                read_queries: core::cell::Cell::new(0),
+            };
+            let observed = ledger.schema_version().expect("preflight user_version");
+            assert_eq!(observed, 0, "observer must capture the empty-file marker");
+            observer_ready_worker.wait();
+            initializer_done_worker.wait();
+            ledger
+                .migrate_from_observed_version(observed)
+                .expect("stale v0 observation accepts canonical peer initialization");
+            ledger
+                .attest_schema(SCHEMA_VERSION)
+                .expect("peer-initialized schema remains exact");
+            ledger
+                .read_current_instance_id()
+                .expect("peer-initialized identity")
+        });
+
+        observer_ready.wait();
+        let initialized = Ledger::open(&path);
+        initializer_done.wait();
+        let initialized = initialized.expect("winning first opener");
+        let initialized_id = initialized.instance_id();
+        assert_eq!(
+            observer.join().expect("join stale observer"),
+            initialized_id,
+            "both first-open contenders must accept one physical authority"
+        );
+        drop(initialized);
+        for suffix in ["", "-wal", "-shm", ".fsqlite-wal", ".fsqlite-shm"] {
+            let _ = std::fs::remove_file(format!("{path}{suffix}"));
         }
     }
 

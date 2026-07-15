@@ -285,7 +285,7 @@ pub const V5: &[&str] = &[
      END",
     "CREATE TRIGGER IF NOT EXISTS trg_ledger_identity_immutable_reinsert
      BEFORE INSERT ON ledger_identity
-     WHEN EXISTS(SELECT 1 FROM ledger_identity WHERE singleton = 1)
+     WHEN EXISTS (SELECT 1 FROM ledger_identity WHERE singleton = 1)
      BEGIN
        SELECT RAISE(ABORT, 'ledger_identity is immutable');
      END",

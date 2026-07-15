@@ -619,6 +619,75 @@ fn ledger_003d_checked_identity_detects_stale_open_handles() {
 }
 
 #[test]
+fn ledger_003e_checked_identity_re_attests_exact_mutation_guards() {
+    let db = temp_db("identity-guard-attestation");
+    let ledger = Ledger::open(&db).expect("guard-attested ledger");
+    let original = ledger.instance_id();
+    let guards = [
+        "trg_ledger_identity_immutable_update",
+        "trg_ledger_identity_immutable_delete",
+        "trg_ledger_identity_immutable_reinsert",
+    ];
+    let raw = fsqlite::Connection::open(&db).expect("raw identity-guard fixture");
+
+    for (index, name) in guards.into_iter().enumerate() {
+        raw.execute(&format!("DROP TRIGGER {name}"))
+            .expect("drop one identity guard without changing the row");
+        assert!(matches!(
+            ledger.checked_instance_id(),
+            Err(LedgerError::SchemaMismatch { .. })
+        ));
+        if index == 0 {
+            assert!(matches!(
+                ledger.lint(),
+                Err(LedgerError::SchemaMismatch { .. })
+            ));
+        }
+        raw.execute(fs_ledger::schema::V5[index])
+            .expect("restore exact shipped identity guard");
+        assert_eq!(
+            ledger
+                .checked_instance_id()
+                .expect("restored guard and unchanged row attest"),
+            original
+        );
+    }
+
+    raw.execute("DROP TRIGGER trg_ledger_identity_immutable_update")
+        .expect("drop update guard for changed-definition fixture");
+    raw.execute(
+        "CREATE TRIGGER trg_ledger_identity_immutable_update \
+         BEFORE UPDATE ON ledger_identity WHEN 0 \
+         BEGIN \
+           SELECT RAISE(ABORT, 'ledger_identity is immutable'); \
+         END",
+    )
+    .expect("install same-name weakened identity guard");
+    assert!(matches!(
+        ledger.checked_instance_id(),
+        Err(LedgerError::SchemaMismatch { .. })
+    ));
+    raw.execute("DROP TRIGGER trg_ledger_identity_immutable_update")
+        .expect("drop weakened identity guard");
+    raw.execute(fs_ledger::schema::V5[0])
+        .expect("restore exact update guard");
+    assert_eq!(
+        ledger
+            .checked_instance_id()
+            .expect("exact guards restore checked authority"),
+        original
+    );
+
+    drop(raw);
+    drop(ledger);
+    cleanup_db(&db);
+    verdict(
+        "ledger-003e",
+        "checked identity and lint re-attest all three exact mutation guards before trusting an unchanged row",
+    );
+}
+
+#[test]
 fn ledger_004_dedupe_and_chunked_round_trip() {
     let db = temp_db("chunk");
     let l = Ledger::open(&db).expect("open");

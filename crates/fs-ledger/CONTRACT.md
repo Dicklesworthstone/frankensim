@@ -41,13 +41,19 @@ fine-grained event stream. Layer: L6 (HELM). Runtime deps: `std` + `fsqlite`.
   initial empty-table seed. Reopenings and path aliases of one file
   agree, while replacement files at the same path and independent in-memory
   handles differ. `instance_id()` is the cached open-time value;
-  `checked_instance_id()` re-reads the current row and refuses a missing,
-  malformed, changed, or extra identity row. Validation reads at most two rows
-  across the whole table before requiring exactly one `singleton = 1` row, so
-  constraint-bypassed rows cannot hide outside a filtered query or force an
-  unbounded corruption scan. `lint()` performs that checked
-  comparison. A v4+ ledger with missing or malformed identity refuses
-  open rather than silently rotating authority.
+  `checked_instance_id()` first performs one bounded `sqlite_master` lookup
+  for the three reserved guard names and requires their normalized definitions
+  to equal the shipped v5 DDL, then re-reads the current row and refuses a
+  missing, malformed, changed, or extra identity row. Row validation reads at
+  most two rows across the whole table before requiring exactly one
+  `singleton = 1` row, so constraint-bypassed rows cannot hide outside a
+  filtered query or force an unbounded corruption scan. `lint()` performs the
+  same checked boundary; a missing or weakened guard refuses even while the
+  identity row remains unchanged. A v4+ ledger with missing or malformed
+  identity refuses open rather than silently rotating authority. First
+  initialization refreshes `user_version` after beginning its transaction, so
+  a peer that canonically initialized after the preflight v0 read is attested
+  and accepted instead of being misclassified as alien unversioned state.
 - `ContentHash`, `Blake3`, `hash_bytes` — in-house BLAKE3 (plain hash mode,
   32-byte output), pure safe Rust; artifact identity everywhere. The
   implementation is OWNED by the UTIL crate `fs-blake3` (bead 7uq9) and
@@ -376,8 +382,9 @@ refusal, or verifier panic).
    identities use 122 bits from the operating system's `/dev/urandom` source
    on supported Unix targets, with RFC 4122 version/variant bits overlaid.
    Schema v5 refuses every UPDATE, DELETE, or non-initial INSERT through
-   attested triggers, and the checked accessor detects drift against an
-   already-open handle.
+   attested triggers. The checked accessor re-attests all three exact trigger
+   definitions before trusting the row and detects drift against an already-open
+   handle after a bypassed guard is restored.
 11. A durable session terminal is valid only as the conjunction of its exact
     immutable claim, receipt hash, dense owned-event sequence, rejoined global
     event bytes, and at least one complete authenticated batch witness. Claim,
@@ -474,12 +481,17 @@ caller-transaction rollback, a real two-connection link/finish ordering race,
 immutable sole-producer and exact-op-edge-set seals, raw trigger and orphan
 detection, a real two-connection seal/link race, v8-to-v9 migration
 including stale-marker healing, and `malformed_ops` lint detection.
-The `ledger_003b`/`ledger_003c`/`ledger_003d` identity battery covers handle
+The `ledger_003b`/`ledger_003c`/`ledger_003d`/`ledger_003e` identity battery covers handle
 movement, independent memory ledgers, file reopen and aliasing, same-path file
 replacement, genuine v3 and v4 migrations, UUID shape, v5 update/delete/insert
 refusal for valid UUID-shaped replacements, fail-closed missing/malformed
 identity without advancing the marker, and checked old-handle/lint refusal
-after a deliberate DDL bypass plus restoration of the shipped trigger.
+after a deliberate DDL bypass plus restoration of the shipped trigger. It also
+drops each guard while leaving the identity row unchanged and substitutes a
+same-name weakened definition, proving that checked authority and lint require
+the exact shipped guard set. The inline G4 first-open barrier fixes one opener's
+v0 observation before a peer initializes and proves the stale observer accepts
+the peer's attested schema and physical identity.
 `tests/session_registry.rs` covers preclaim/Pending/terminal state, exact and
 mixed-batch replay, submission admission ownership, reciprocal pause fences,
 real-file reopen, foreign-ledger and altered-byte conflicts, exact cap/limit+1
@@ -672,9 +684,11 @@ The graph is the minting authority for `fs_evidence::AdmittedColor`:
 - Safe std-only identity generation is implemented through `/dev/urandom` on
   Unix. Fresh identity creation on non-Unix targets is explicitly refused;
   existing v4+ ledgers remain readable when their persisted identity and
-  schema attest. A client with arbitrary DDL authority can remove and restore
-  guards; already-open handles detect resulting row drift, but the identity is
-  not cryptographically authenticated against a hostile database owner.
+  schema attest. Checked boundaries detect a guard while it is missing or
+  different, and already-open handles detect row drift after the exact guard is
+  restored. A client with arbitrary DDL authority can still rewrite an identity
+  before a new handle establishes its cache, so the identity is not
+  cryptographically authenticated against a hostile database owner.
 - Throughput numbers are smoke floors, not roofline claims (§14 discipline:
   real claims need machine fingerprints and acceptance bands).
 - Branch DELETION and cross-branch merge (as opposed to merge-view
