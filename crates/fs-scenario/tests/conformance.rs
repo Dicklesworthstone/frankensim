@@ -2010,6 +2010,7 @@ fn sc_010_semantic_validation_plan_hits_every_exact_budget_boundary() {
         "flux checkpoints"
     );
     exact_and_one_short!(max_identity_bytes, plan.identity_bytes, "identity bytes");
+    exact_and_one_short!(max_findings, plan.finding_capacity, "validation findings");
 
     let mut exact_work = ValidationBudget::default();
     exact_work.max_work = plan.planned_work;
@@ -2042,6 +2043,6 @@ fn sc_010_semantic_validation_plan_hits_every_exact_budget_boundary() {
     });
     verdict(
         "sc-010",
-        "every semantic collection/signal/checkpoint/identity/work budget admits at the exact plan and refuses one unit short; pre-requested cancellation publishes no findings",
+        "every semantic collection/signal/checkpoint/identity/finding/work budget admits at the exact plan and refuses one unit short; pre-requested cancellation publishes no findings",
     );
 }

@@ -17,6 +17,14 @@ const TEMP_DIMS: Dims = Dims([0, 0, 0, 1, 0, 0]);
 const PRESSURE_DIMS: Dims = Dims([-1, 1, -2, 0, 0, 0]);
 /// Net-flux tolerance relative to the gross flux magnitude.
 const FLUX_REL_TOL: f64 = 1e-9;
+const FIXED_FINDING_SLOTS: usize = 12;
+const FINDINGS_PER_FRAME: usize = 13;
+const FINDINGS_PER_BC: usize = 8;
+const FINDINGS_PER_CASE: usize = 3;
+const FINDINGS_PER_COMBINATION: usize = 2;
+const FINDINGS_PER_COMBINATION_TERM: usize = 4;
+const FINDINGS_PER_ENSEMBLE: usize = 16;
+const FINDINGS_PER_CONTACT: usize = 4;
 
 /// Explicit deterministic limits for whole-scenario semantic validation.
 ///
@@ -50,6 +58,8 @@ pub struct ValidationBudget {
     pub max_flux_checkpoints: usize,
     /// Maximum bytes across exact string identities and references.
     pub max_identity_bytes: usize,
+    /// Maximum preflighted slots in the private finding buffer.
+    pub max_findings: usize,
     /// Maximum deterministic logical work units.
     pub max_work: u128,
 }
@@ -67,6 +77,7 @@ pub const DEFAULT_VALIDATION_BUDGET: ValidationBudget = ValidationBudget {
     max_signal_scalars: 1_048_576,
     max_flux_checkpoints: 1_048_576,
     max_identity_bytes: 16_777_216,
+    max_findings: 8_388_608,
     max_work: 134_217_728,
 };
 
@@ -101,6 +112,8 @@ pub struct ValidationPlan {
     pub flux_checkpoints: usize,
     /// Exact identity/reference bytes.
     pub identity_bytes: usize,
+    /// Proved worst-case slots for validation findings.
+    pub finding_capacity: usize,
     /// Deterministic logical work units.
     pub planned_work: u128,
 }
@@ -457,6 +470,18 @@ fn checked_count_add(
     Ok(())
 }
 
+fn checked_finding_slots(
+    total: &mut usize,
+    records: usize,
+    per_record: usize,
+    phase: &'static str,
+) -> Result<(), ValidationError> {
+    let slots = records
+        .checked_mul(per_record)
+        .ok_or(ValidationError::WorkPlanOverflow { phase })?;
+    checked_count_add(total, slots, phase)
+}
+
 fn work_units(value: usize, phase: &'static str) -> Result<u128, ValidationError> {
     u128::try_from(value).map_err(|_| ValidationError::WorkPlanOverflow { phase })
 }
@@ -729,6 +754,42 @@ impl Scenario {
         enforce_limit("signal scalars", signal_scalars, budget.max_signal_scalars)?;
         enforce_limit("identity bytes", identity_bytes, budget.max_identity_bytes)?;
 
+        let total_bcs =
+            base_bcs
+                .checked_add(case_bcs)
+                .ok_or(ValidationError::WorkPlanOverflow {
+                    phase: "finding boundary-condition count",
+                })?;
+        let mut finding_capacity = FIXED_FINDING_SLOTS;
+        for (records, per_record, phase) in [
+            (frames, FINDINGS_PER_FRAME, "frame finding capacity"),
+            (
+                total_bcs,
+                FINDINGS_PER_BC,
+                "boundary-condition finding capacity",
+            ),
+            (cases, FINDINGS_PER_CASE, "case finding capacity"),
+            (
+                combinations,
+                FINDINGS_PER_COMBINATION,
+                "combination finding capacity",
+            ),
+            (
+                combination_terms,
+                FINDINGS_PER_COMBINATION_TERM,
+                "combination-term finding capacity",
+            ),
+            (
+                ensembles,
+                FINDINGS_PER_ENSEMBLE,
+                "ensemble finding capacity",
+            ),
+            (contacts, FINDINGS_PER_CONTACT, "contact finding capacity"),
+        ] {
+            checked_finding_slots(&mut finding_capacity, records, per_record, phase)?;
+        }
+        enforce_limit("validation findings", finding_capacity, budget.max_findings)?;
+
         let mut flux_checkpoints = base_flux_checkpoint_contribution.checked_add(1).ok_or(
             ValidationError::WorkPlanOverflow {
                 phase: "base flux checkpoint count",
@@ -871,6 +932,7 @@ impl Scenario {
             signal_scalars,
             flux_checkpoints,
             identity_bytes,
+            finding_capacity,
             planned_work,
         })
     }
@@ -881,9 +943,9 @@ impl Scenario {
     #[must_use]
     pub fn validate(&self) -> Vec<Violation> {
         match self.validation_plan(ValidationBudget::default()) {
-            Ok(_) => {
+            Ok(plan) => {
                 let mut checkpoint = |_: &'static str| Ok(());
-                match self.validate_admitted(&mut checkpoint) {
+                match self.validate_admitted(plan.finding_capacity, &mut checkpoint) {
                     Ok(findings) => findings,
                     Err(error) => vec![error.into_violation()],
                 }
@@ -928,7 +990,7 @@ impl Scenario {
                 planned: plan.planned_work,
             })
         };
-        let findings = self.validate_admitted(&mut checkpoint)?;
+        let findings = self.validate_admitted(plan.finding_capacity, &mut checkpoint)?;
         cx.checkpoint().map_err(|_| ValidationError::Cancelled {
             phase: "pre-publication",
             completed: plan.planned_work,
@@ -939,9 +1001,11 @@ impl Scenario {
 
     fn validate_admitted(
         &self,
+        finding_capacity: usize,
         checkpoint: &mut impl FnMut(&'static str) -> Result<(), ValidationError>,
     ) -> Result<Vec<Violation>, ValidationError> {
         let mut out = Vec::new();
+        reserve_validation(&mut out, finding_capacity, "validation findings")?;
         if self.name.is_empty() {
             out.push(Violation {
                 code: "scenario-name-empty",
@@ -1190,6 +1254,11 @@ impl Scenario {
             checkpoint("contacts")?;
         }
         self.check_net_flux(&mut out, checkpoint)?;
+        if out.len() > finding_capacity {
+            return Err(ValidationError::WorkPlanOverflow {
+                phase: "validation finding capacity invariant",
+            });
+        }
         Ok(out)
     }
 
@@ -1377,7 +1446,7 @@ mod validation_internal_tests {
             .validation_plan(ValidationBudget::default())
             .expect("minimal semantic plan");
         let mut visited = Vec::new();
-        let result = scenario.validate_admitted(&mut |phase| {
+        let result = scenario.validate_admitted(plan.finding_capacity, &mut |phase| {
             visited.push(phase);
             if phase == "environment" {
                 Err(ValidationError::Cancelled {

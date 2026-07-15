@@ -153,9 +153,9 @@ flagships.
 12. **Semantic preflight before validation**: top-level collection caps precede
     nested traversal; checked plans account for aggregate case BCs, combination
     terms, dynamic signal scalars, raw flux checkpoints, exact identity bytes,
-    ordered-index comparisons, checkpoint sorting, and flux evaluation work.
-    Exact requested limits admit and one-unit-short limits refuse for every
-    budget field.
+    worst-case finding slots, ordered-index comparisons, checkpoint sorting,
+    and flux evaluation work. Exact requested limits admit and one-unit-short
+    limits refuse for every budget field.
 
 ## Error model
 
@@ -183,8 +183,8 @@ identity bytes, raw flux-checkpoint allocation shape, and deterministic work
 before executing. Net-flux validation streams base and optional-case slices
 without materializing a vector for every effective set; its exact raw
 checkpoint capacity is fallibly reserved before append/sort. Its
-identity/reference phase uses deterministic O(N log N) indexes and its
-frame ID/name, frame-membership, case, combination, term, ensemble, and
+identity/reference phase uses deterministic O(N log N) indexes. Frame ID/name,
+frame-membership, case, combination, term, ensemble, and
 unordered-contact indexes plus linear cycle traversal scratch are exactly and
 fallibly reserved before population; every index sorts in place with row index
 as the total-order tiebreaker using a deterministic checkpointed heap sort. The
@@ -199,10 +199,11 @@ net-flux provider evaluation, at every tabulated signal scalar and Chebyshev
 coefficient, throughout index population/sort steps, and after private
 validation before publication. Tabulated signal validity and ordering are
 accumulated in one pass while retaining diagnostic order. A request observed at
-any checkpoint publishes no partial findings.
-Fallible finding-output reservation remains active work under
-`frankensim-sj31i.24`. No loop is admitted from an unchecked float-to-size
-conversion.
+any checkpoint publishes no partial findings. Preflight proves a conservative
+finding bound of 12 fixed slots plus 13/frame, 8/BC, 3/case, 2/combination,
+4/term, 16/ensemble, and 4/contact; `max_findings` admits that heap authority and
+the private result vector fallibly reserves it before the first finding. No loop
+is admitted from an unchecked float-to-size conversion.
 
 ## Unsafe boundary
 
@@ -250,8 +251,9 @@ None.
   provenance.
 - **sc-010** the retained semantic plan replays exactly; frames, base/case BCs,
   cases, combinations/terms, ensembles, contacts, signal scalars, raw flux
-  checkpoints, identity bytes, and total work each admit at the exact boundary
-  and refuse one unit short; pre-requested cancellation publishes no findings.
+  checkpoints, identity bytes, finding slots, and total work each admit at the
+  exact boundary and refuse one unit short; pre-requested cancellation publishes
+  no findings.
 - A focused `scenario` unit regression forces checkpoint-capacity overflow and
   proves a typed `AllocationRefused` with the scratch vector left empty.
 - A deterministic injected-checkpoint regression cancels at the environment
