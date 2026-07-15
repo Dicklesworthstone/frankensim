@@ -84,12 +84,27 @@ erasure + latch under Miri when the fs-exec Miri lane runs; the capsule
 uses no intrinsics or FFI, so Miri sees every access. OS-thread condvar
 timing under Miri is slow but sound (bounded rounds: 3 dispatches).
 
-## Model-checking coverage
-The interleavings that matter — publish/observe, last-completion/waiter,
-shutdown/park — are each guarded by a single-mutex predicate loop; the
-G4 storms in `pool.rs` (mid-run cancel drain, panic containment, reuse
-across runs) plus the crew unit tests enumerate the observable outcomes.
-No lock-free state exists to model-check beyond the mutex.
+## Model-checking status and no-claim
+The single-mutex predicate loops above are an invariant argument, not an
+exhaustive enumeration of schedules. Neither this parked-crew protocol nor
+the surrounding `TilePool` protocol, arena-lease handoff, or fault-drain path
+currently has exhaustive schedule/model-checking coverage.
+
+Current source-level evidence is bounded runtime coverage: the crew unit tests
+exercise publication, completion, panic, and shutdown cases; the pool storms
+exercise cancellation drain, panic containment, and reuse; and
+`tests/fault_storm.rs` declares a fixed 16-seed battery whose receipts identify
+the selected seed, tile, and touch. Those cases can falsify defects on the
+schedules they reach, but they do not enumerate every mutex/condvar
+interleaving.
+
+asupersync's own model-checking results apply only to the protocols represented
+in its models. They do not transitively cover FrankenSim's `Crew`, `TilePool`,
+arena leases, or injected-fault drains. A future G4 model must represent job
+publication and revocation, both condition variables, owner unwind, lease
+release, and drain finalization before this capsule can claim exhaustive
+model-checking evidence. Until then, the claim is limited to the bounded
+seeded/runtime batteries above.
 
 ## Fuzz/property coverage
 The safe facade is exercised end-to-end by the pool's G5 determinism
