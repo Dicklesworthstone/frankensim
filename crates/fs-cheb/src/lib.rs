@@ -39,13 +39,64 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// (the k = 0 term is halved — the DCT-II convention).
 /// Equality is exact bitwise structural equality (domain + coefficient
 /// bits) — the replay/parity notion the budgeted paths certify.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct Cheb1 {
     a: f64,
     b: f64,
     /// Chebyshev coefficients, c[0] stored UN-halved (Clenshaw applies
     /// the ½ convention at evaluation).
     coeffs: Vec<f64>,
+}
+
+impl PartialEq for Cheb1 {
+    fn eq(&self, other: &Self) -> bool {
+        self.a.to_bits() == other.a.to_bits()
+            && self.b.to_bits() == other.b.to_bits()
+            && self.coeffs.len() == other.coeffs.len()
+            && self
+                .coeffs
+                .iter()
+                .zip(&other.coeffs)
+                .all(|(left, right)| left.to_bits() == right.to_bits())
+    }
+}
+
+impl Eq for Cheb1 {}
+
+#[cfg(test)]
+mod cheb1_bitwise_equality_tests {
+    use super::Cheb1;
+
+    #[test]
+    fn equality_observes_signed_zero_and_nan_payload_bits() {
+        let positive_zero = Cheb1 {
+            a: -1.0,
+            b: 1.0,
+            coeffs: vec![0.0],
+        };
+        let negative_zero = Cheb1 {
+            a: -1.0,
+            b: 1.0,
+            coeffs: vec![-0.0],
+        };
+        assert_ne!(positive_zero, negative_zero);
+
+        let nan_a = f64::from_bits(0x7ff8_0000_0000_0001);
+        let nan_b = f64::from_bits(0x7ff8_0000_0000_0002);
+        let left = Cheb1 {
+            a: -1.0,
+            b: 1.0,
+            coeffs: vec![nan_a],
+        };
+        let same = left.clone();
+        let different_payload = Cheb1 {
+            a: -1.0,
+            b: 1.0,
+            coeffs: vec![nan_b],
+        };
+        assert_eq!(left, same);
+        assert_ne!(left, different_payload);
+    }
 }
 
 /// Relative plateau threshold for adaptive truncation. Sits ABOVE the

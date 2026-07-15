@@ -5,7 +5,7 @@
 //! BEFORE allocating), typed refusals where the classic APIs panic,
 //! bitwise parity between the budgeted and classic paths, real
 //! cancellation with deterministic RESUME equivalence, and receipt
-//! determinism (G5).
+//! deterministic replay on one admitted execution profile.
 
 use asupersync::types::Budget;
 use fs_cheb::{
@@ -37,25 +37,46 @@ fn with_cx<R>(cancelled: bool, f: impl FnOnce(&Cx<'_>) -> R) -> R {
     })
 }
 
+fn with_gate_cx<R>(f: impl FnOnce(&CancelGate, &Cx<'_>) -> R) -> R {
+    let gate = CancelGate::new();
+    let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+    pool.scope(|arena| {
+        let cx = Cx::new(
+            &gate,
+            arena,
+            StreamKey {
+                seed: 0x55,
+                kernel_id: 8,
+                tile: 0,
+                iteration: 0,
+            },
+            Budget::INFINITE,
+            ExecMode::Deterministic,
+        );
+        f(&gate, &cx)
+    })
+}
+
 /// cb-001 — admission boundaries: each cap refuses one-over and admits
 /// at-cap; `usize::MAX`-shaped requests refuse via CHECKED formulas
 /// before any allocation (no panic, no OOM, no saturation loop).
 #[test]
+#[allow(clippy::too_many_lines)] // one ordered boundary table preserves refusal precedence
 fn cb_001_admission_boundaries() {
     // Adaptive build: coefficients cap exactly at the final grid.
     let mut b = ChebBudget::default();
     b.max_coefficients = 1024;
     admit_adaptive_build(0.0, 1.0, 1024, 16, &b).expect("at-cap admits");
     assert!(matches!(
-        admit_adaptive_build(0.0, 1.0, 1025, 16, &b),
+        admit_adaptive_build(0.0, 1.0, 2048, 16, &b),
         Err(ChebError::CapExceeded {
             what: "retained coefficients",
             ..
         })
     ));
-    // Samples cap: total = 2 * final grid.
+    // Samples cap: exact geometric sum = 2 * final grid - start.
     let mut b = ChebBudget::default();
-    b.max_samples = 2047;
+    b.max_samples = 2031;
     assert!(matches!(
         admit_adaptive_build(0.0, 1.0, 1024, 16, &b),
         Err(ChebError::CapExceeded {
@@ -63,11 +84,11 @@ fn cb_001_admission_boundaries() {
             ..
         })
     ));
-    b.max_samples = 2048;
+    b.max_samples = 2032;
     admit_adaptive_build(0.0, 1.0, 1024, 16, &b).expect("exact sample budget admits");
-    // Temp bytes cap: 2 * grid * 8.
+    // Temp bytes cap includes sampling plus the complete DCT-II envelope.
     let mut b = ChebBudget::default();
-    b.max_temp_bytes = 2 * 1024 * 8 - 1;
+    b.max_temp_bytes = 64 * 1024 - 1;
     assert!(matches!(
         admit_adaptive_build(0.0, 1.0, 1024, 16, &b),
         Err(ChebError::CapExceeded {
@@ -83,6 +104,14 @@ fn cb_001_admission_boundaries() {
     // Eigensolve: usize::MAX dimension refuses before allocation.
     assert!(matches!(
         admit_dirichlet_eigs(usize::MAX, 1, &ChebBudget::default()),
+        Err(ChebError::Overflow { .. })
+    ));
+    let mut enormous = ChebBudget::default();
+    enormous.max_eigen_dim = usize::MAX;
+    enormous.max_temp_bytes = u64::MAX;
+    enormous.max_work_ops = u64::MAX;
+    assert!(matches!(
+        admit_dirichlet_eigs(usize::MAX - 1, 1, &enormous),
         Err(ChebError::Overflow { .. })
     ));
     // Eigensolve dimension cap boundary (m = n + 1).
@@ -109,11 +138,55 @@ fn cb_001_admission_boundaries() {
         admit_dirichlet_eigs(24, 24, &ChebBudget::default()),
         Err(ChebError::Shape { .. })
     ));
-    // Root scan: usize::MAX-coefficient scan refuses via checked mul.
+    // Conservative eigensolve work/temp envelopes admit exactly at their
+    // reported bound and reject one below it.
+    let eig_need = admit_dirichlet_eigs(24, 3, &ChebBudget::default()).expect("baseline admits");
+    let mut eig_budget = ChebBudget::default();
+    eig_budget.max_temp_bytes = eig_need.temp_bytes_admitted() - 1;
+    assert!(matches!(
+        admit_dirichlet_eigs(24, 3, &eig_budget),
+        Err(ChebError::CapExceeded {
+            what: "eigensolve temporary bytes",
+            ..
+        })
+    ));
+    eig_budget.max_temp_bytes = eig_need.temp_bytes_admitted();
+    eig_budget.max_work_ops = eig_need.ops_admitted() - 1;
+    assert!(matches!(
+        admit_dirichlet_eigs(24, 3, &eig_budget),
+        Err(ChebError::CapExceeded {
+            what: "eigensolve work",
+            ..
+        })
+    ));
+    eig_budget.max_work_ops = eig_need.ops_admitted();
+    admit_dirichlet_eigs(24, 3, &eig_budget).expect("exact eigensolve bounds admit");
+    // Root scan: usize::MAX coefficients refuse before size arithmetic.
     assert!(matches!(
         admit_root_scan(usize::MAX, &ChebBudget::default()),
-        Err(ChebError::Overflow { .. })
+        Err(ChebError::CapExceeded { .. }) | Err(ChebError::Overflow { .. })
     ));
+    let root_need = admit_root_scan(32, &ChebBudget::default()).expect("baseline admits");
+    let mut root_budget = ChebBudget::default();
+    root_budget.max_temp_bytes = root_need.temp_bytes_admitted() - 1;
+    assert!(matches!(
+        admit_root_scan(32, &root_budget),
+        Err(ChebError::CapExceeded {
+            what: "root-scan temporary bytes",
+            ..
+        })
+    ));
+    root_budget.max_temp_bytes = root_need.temp_bytes_admitted();
+    root_budget.max_work_ops = root_need.ops_admitted() - 1;
+    assert!(matches!(
+        admit_root_scan(32, &root_budget),
+        Err(ChebError::CapExceeded {
+            what: "root-scan work",
+            ..
+        })
+    ));
+    root_budget.max_work_ops = root_need.ops_admitted();
+    admit_root_scan(32, &root_budget).expect("exact root-scan bounds admit");
     // Zero caps refuse everything (deterministic first violation).
     let mut zero = ChebBudget::default();
     zero.max_coefficients = 0;
@@ -134,6 +207,25 @@ fn cb_002_domain_refusals() {
             .expect_err("invalid domain must refuse");
         assert!(matches!(refusal, ChebError::Domain { .. }), "{refusal}");
     }
+
+    let samples = core::cell::Cell::new(0usize);
+    let refusal = with_cx(false, |cx| {
+        try_build_budgeted(
+            &|_| {
+                samples.set(samples.get() + 1);
+                1.0
+            },
+            0.0,
+            1.0,
+            17,
+            Some(17),
+            &ChebBudget::default(),
+            cx,
+        )
+        .expect_err("rounded resume grids may not bypass max_degree")
+    });
+    assert!(matches!(refusal, ChebError::Shape { .. }), "{refusal}");
+    assert_eq!(samples.get(), 0, "shape refusal precedes evaluation");
 }
 
 /// cb-003 — bitwise parity: on the happy path the budgeted entry
@@ -200,6 +292,26 @@ fn cb_004_cancellation_and_resume() {
     assert_eq!(resume_from, 16, "drains before the first round");
     assert_eq!(receipt.samples_spent, 0, "no work after the drain point");
 
+    let cancelled_during_sampling = with_gate_cx(|gate, cx| {
+        try_build_budgeted(
+            &|_| {
+                gate.request();
+                1.0
+            },
+            -1.0,
+            1.0,
+            64,
+            None,
+            &ChebBudget::default(),
+            cx,
+        )
+        .expect("admitted sampling cancellation is a terminal state")
+    });
+    assert!(matches!(
+        cancelled_during_sampling,
+        BuildRun::Cancelled { .. }
+    ));
+
     let resumed = with_cx(false, |cx| {
         try_build_budgeted(
             &f,
@@ -225,7 +337,7 @@ fn cb_004_cancellation_and_resume() {
         assert_eq!(lhs.to_bits(), rhs.to_bits(), "resume is bitwise-equivalent");
     }
 
-    // Eigensolve: pre-cancelled drains with an EMPTY converged prefix.
+    // Eigensolve: pre-cancelled drains with an EMPTY completed-estimate prefix.
     let run = with_cx(true, |cx| {
         dirichlet_laplace_eigs_budgeted(24, 3, &ChebBudget::default(), cx)
             .expect("admission precedes cancellation")
@@ -269,10 +381,16 @@ fn cb_005_typed_refusals_replace_panics() {
             ),
             "{refusal}"
         );
+
+        let exponent_range = Cheb1::from_coeffs(-1.0, 1.0, vec![f64::MAX, f64::from_bits(1)]);
+        let refusal = exponent_range
+            .roots_budgeted(&ChebBudget::default(), cx)
+            .expect_err("lossy root normalization is a typed refusal, not an assertion panic");
+        assert!(matches!(refusal, ChebError::Numerical { .. }), "{refusal}");
     });
 }
 
-/// cb-006 — receipt determinism (G5): identical budgeted runs produce
+/// cb-006 — local receipt determinism: identical budgeted runs produce
 /// identical receipts and identical terminal states.
 #[test]
 fn cb_006_receipt_determinism() {

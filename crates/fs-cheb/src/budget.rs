@@ -30,7 +30,20 @@ use fs_exec::Cx;
 
 /// Version of the budget/admission schema: bump when a cap default or
 /// a worst-case formula changes meaning.
-pub const CHEB_BUDGET_SCHEMA_VERSION: u32 = 1;
+pub const CHEB_BUDGET_SCHEMA_VERSION: u32 = 2;
+
+const F64_BYTES: u128 = core::mem::size_of::<f64>() as u128;
+const SAMPLE_POLL_STRIDE: usize = 64;
+const ROOT_SCAN_FACTOR: u128 = 8;
+const ROOT_EVALS_PER_CELL: u128 = 90;
+const ROOT_OPS_PER_COEFFICIENT_EVAL: u128 = 16;
+const ADAPTIVE_TEMP_BYTES_PER_GRID_POINT: u128 = 64;
+const ADAPTIVE_OPS_PER_GRID_STAGE: u128 = 4096;
+const FD_SURROGATE_DIM: u128 = 64;
+// fs-la's current blocked LU allocates 163_840 f64 packing scalars per
+// GEMM call. Keep more than 3x headroom in this schema so the admission
+// remains conservative across tuning-only panel changes.
+const LU_PACK_WORKSPACE_SCALARS: u128 = 1 << 19;
 
 /// Typed caps for fs-cheb construction and transform work. Construct
 /// via [`ChebBudget::default`] and override fields; non-exhaustive so
@@ -162,15 +175,16 @@ impl core::fmt::Display for ChebError {
 
 impl std::error::Error for ChebError {}
 
-/// What one admitted, budgeted run actually spent — deterministic and
-/// replayable (fixed traversal order, no time source).
+/// Deterministic diagnostics for one admitted run (fixed traversal
+/// order, no time source). This is not authenticated acceptance
+/// evidence; its public fields deliberately remain ordinary data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WorkReceipt {
     /// Budget schema in force.
     pub schema_version: u32,
     /// Adaptive rounds / eigen shifts / scan chunks completed.
     pub rounds_completed: u32,
-    /// Samples or matrix evaluations actually spent.
+    /// Function samples or inverse-iteration sweeps actually spent.
     pub samples_spent: usize,
     /// Worst-case operations ADMITTED for the run (the preflight bound).
     pub ops_admitted: u64,
@@ -201,19 +215,19 @@ pub enum BuildRun {
 /// Terminal state of a budgeted eigensolve.
 #[derive(Debug, Clone, PartialEq)]
 pub enum EigsRun {
-    /// All requested eigenvalues converged.
+    /// All requested fixed-sweep eigenvalue estimates were produced.
+    /// This state does not certify convergence or residual quality.
     Complete {
         /// The eigenvalues, smallest-first.
         eigs: Vec<f64>,
         /// What the run spent.
         receipt: WorkReceipt,
     },
-    /// Cancellation drained at a shift/sweep boundary. The prefix of
-    /// converged eigenvalues IS scientifically meaningful (each shift
-    /// converges independently) and is retained; the remainder was
-    /// never computed.
+    /// Cancellation drained at a shift/sweep boundary. The retained
+    /// prefix contains completed fixed-sweep estimates only; it is
+    /// diagnostic output, not a convergence certificate.
     Cancelled {
-        /// Eigenvalues converged before the drain (may be empty).
+        /// Fixed-sweep estimates completed before the drain (may be empty).
         partial_eigs: Vec<f64>,
         /// What the run spent before draining.
         receipt: WorkReceipt,
@@ -271,6 +285,20 @@ fn cap_check(what: &'static str, need: u128, cap: u128) -> Result<(), ChebError>
     Ok(())
 }
 
+fn checked_add(what: &'static str, left: u128, right: u128) -> Result<u128, ChebError> {
+    left.checked_add(right).ok_or(ChebError::Overflow { what })
+}
+
+fn checked_mul(what: &'static str, left: u128, right: u128) -> Result<u128, ChebError> {
+    left.checked_mul(right).ok_or(ChebError::Overflow { what })
+}
+
+fn checked_sum(what: &'static str, terms: &[u128]) -> Result<u128, ChebError> {
+    terms
+        .iter()
+        .try_fold(0u128, |sum, &term| checked_add(what, sum, term))
+}
+
 fn admitted_u64(what: &'static str, need: u128) -> Result<u64, ChebError> {
     u64::try_from(need).map_err(|_| ChebError::Overflow { what })
 }
@@ -283,12 +311,15 @@ fn domain_check(a: f64, b: f64) -> Result<(), ChebError> {
     }
 }
 
-/// Worst-case preflight for the adaptive constructor: grid sizes
-/// double from `start` to the power-of-two degree cap, so total
-/// samples are bounded by twice the final grid; per-round transform
-/// work is O(n log n); peak temporaries are two f64 buffers of the
-/// final grid. All formulas are exact `u128` arithmetic — an
-/// unrepresentable request refuses as [`ChebError::Overflow`].
+fn checkpoint(cx: &Cx<'_>) -> Result<(), ChebError> {
+    cx.checkpoint().map_err(|_| ChebError::Cancelled)
+}
+
+/// Worst-case preflight for the adaptive constructor. Grid sizes
+/// double from `start` through the largest power of two not exceeding
+/// `max_degree`. The temporary envelope covers the sampled `f64`
+/// values plus DCT-II complex data/scratch, FFT twiddles, output, and
+/// six-step sub-plan workspace. All arithmetic is checked `u128`.
 ///
 /// # Errors
 /// [`ChebError`] — domain, overflow, or cap refusals.
@@ -301,11 +332,16 @@ pub fn admit_adaptive_build(
 ) -> Result<ChebAdmission, ChebError> {
     domain_check(a, b)?;
     let degree_cap = max_degree.max(16);
-    let final_grid = degree_cap
-        .checked_next_power_of_two()
+    let final_grid = 1usize
+        .checked_shl(degree_cap.ilog2())
         .ok_or(ChebError::Overflow {
-            what: "degree cap next power of two",
+            what: "largest adaptive grid",
         })?;
+    if start < 16 || !start.is_power_of_two() {
+        return Err(ChebError::Shape {
+            what: "resume grid must be a power of two and at least 16",
+        });
+    }
     if start > final_grid {
         return Err(ChebError::Shape {
             what: "resume grid exceeds the admitted degree cap",
@@ -316,8 +352,13 @@ pub fn admit_adaptive_build(
         final_grid as u128,
         budget.max_coefficients as u128,
     )?;
-    // 16 + 32 + ... + final_grid < 2 * final_grid.
-    let total_samples = 2u128 * final_grid as u128;
+    // Exact geometric sum start + 2*start + ... + final_grid.
+    let twice_final = checked_mul("adaptive sample sum", 2, final_grid as u128)?;
+    let total_samples = twice_final
+        .checked_sub(start as u128)
+        .ok_or(ChebError::Overflow {
+            what: "adaptive sample sum",
+        })?;
     cap_check(
         "adaptive samples",
         total_samples,
@@ -326,12 +367,23 @@ pub fn admit_adaptive_build(
     let samples_admitted = usize::try_from(total_samples).map_err(|_| ChebError::Overflow {
         what: "total adaptive samples",
     })?;
-    // Per round: one DCT-II (~5 n log2 n) plus the plateau scan (n).
+    // A deliberately conservative abstract-work envelope: every grid
+    // point receives a fixed allowance for mapping/sampling, strict trig,
+    // FFT-plan twiddles, radix stages, scaling, and the plateau scan. The
+    // geometric factor covers all earlier rounds.
     let log2 = u128::from(final_grid.ilog2().max(1));
-    let ops = 2u128 * (5 * final_grid as u128 * log2 + final_grid as u128);
+    let stage_count = checked_add("adaptive work", log2, 1)?;
+    let ops = checked_mul(
+        "adaptive work",
+        checked_mul("adaptive work", twice_final, stage_count)?,
+        ADAPTIVE_OPS_PER_GRID_STAGE,
+    )?;
     cap_check("adaptive work", ops, u128::from(budget.max_work_ops))?;
-    // Peak temporaries: samples + coefficients at the final grid.
-    let temp_bytes = 2u128 * final_grid as u128 * 8;
+    let temp_bytes = checked_mul(
+        "adaptive temporary bytes",
+        final_grid as u128,
+        ADAPTIVE_TEMP_BYTES_PER_GRID_POINT,
+    )?;
     cap_check(
         "adaptive temporary bytes",
         temp_bytes,
@@ -354,6 +406,7 @@ pub fn admit_adaptive_build(
 ///
 /// # Errors
 /// [`ChebError`] — shape, overflow, or cap refusals.
+#[allow(clippy::too_many_lines)] // every downstream allocation/work term stays explicit and auditable
 pub fn admit_dirichlet_eigs(
     n: usize,
     k: usize,
@@ -388,20 +441,91 @@ pub fn admit_dirichlet_eigs(
                    (the classic API silently shorts here; the budgeted API refuses)",
         });
     }
-    let m2 = (m as u128) * (m as u128);
+    let m_u128 = m as u128;
+    let m2 = checked_mul("collocation dimension squared", m_u128, m_u128)?;
     let ni = (n - 1) as u128;
-    let ni2 = ni * ni;
-    // d + d2 (m² each), a + shifted + LU copy (ni² each), the fixed
-    // 64² FD surrogate, and two ni-length iteration vectors.
-    let temp_bytes = (2 * m2 + 3 * ni2 + 64 * 64 + 2 * ni) * 8;
+    let ni2 = checked_mul("interior dimension squared", ni, ni)?;
+    let ni3 = checked_mul("interior dimension cubed", ni2, ni)?;
+
+    // Persistent D/D², interior/shifted matrices, LU storage and its
+    // worst blocked-update matrix, fixed Jacobi input/copies/eigenvectors,
+    // iteration vectors, pivots, result storage, and fs-la GEMM packs.
+    // Several lifetimes do not overlap; summing them remains deliberately
+    // conservative and stable under harmless scope changes downstream.
+    let two_m2 = checked_mul("eigensolve temporary scalars", 2, m2)?;
+    let five_ni2 = checked_mul("eigensolve temporary scalars", 5, ni2)?;
+    let linear_ni = checked_mul("eigensolve temporary scalars", 128, ni)?;
+    let fixed_jacobi = checked_mul(
+        "eigensolve temporary scalars",
+        8,
+        checked_mul(
+            "eigensolve temporary scalars",
+            FD_SURROGATE_DIM,
+            FD_SURROGATE_DIM,
+        )?,
+    )?;
+    let lu_pack_workspace = if ni > 32 {
+        LU_PACK_WORKSPACE_SCALARS
+    } else {
+        0
+    };
+    let result_scalars = checked_mul("eigensolve temporary scalars", 4, k as u128)?;
+    let temp_scalars = checked_sum(
+        "eigensolve temporary scalars",
+        &[
+            two_m2,
+            five_ni2,
+            linear_ni,
+            fixed_jacobi,
+            lu_pack_workspace,
+            result_scalars,
+            1024,
+        ],
+    )?;
+    let temp_bytes = checked_mul("eigensolve temporary bytes", temp_scalars, F64_BYTES)?;
     cap_check(
         "eigensolve temporary bytes",
         temp_bytes,
         u128::from(budget.max_temp_bytes),
     )?;
-    // dsq O(m³) + surrogate Jacobi (fixed 64³ class) + per shift:
-    // LU ~ni³/3 + 100 solve/normalize sweeps ~ni² each + Rayleigh ~ni².
-    let ops = m2 * (m as u128) + 64u128 * 64 * 64 * 8 + (k as u128) * (ni2 * ni / 3 + 101 * ni2);
+    // Conservative scalar-operation envelope: matrix construction/square,
+    // all 60 cyclic-Jacobi sweeps (including three dense row/column/vector
+    // updates per rotation), blocked LU, 100 two-triangular solves with
+    // normalization, and the final Rayleigh product for every shift.
+    let m3 = checked_mul("collocation dimension cubed", m2, m_u128)?;
+    let matrix_work = checked_sum(
+        "eigensolve work",
+        &[
+            checked_mul("eigensolve work", 4, m3)?,
+            checked_mul("eigensolve work", 32, m2)?,
+        ],
+    )?;
+    let fd_rotations = FD_SURROGATE_DIM * (FD_SURROGATE_DIM - 1) / 2;
+    let jacobi_work = checked_mul(
+        "eigensolve work",
+        checked_mul(
+            "eigensolve work",
+            checked_mul("eigensolve work", 60, fd_rotations)?,
+            FD_SURROGATE_DIM,
+        )?,
+        64,
+    )?;
+    let per_shift_work = checked_sum(
+        "eigensolve work",
+        &[
+            checked_mul("eigensolve work", 8, ni3)?,
+            checked_mul("eigensolve work", 512, ni2)?,
+            checked_mul("eigensolve work", 128, ni)?,
+        ],
+    )?;
+    let ops = checked_sum(
+        "eigensolve work",
+        &[
+            matrix_work,
+            jacobi_work,
+            checked_mul("eigensolve work", k as u128, per_shift_work)?,
+        ],
+    )?;
     cap_check("eigensolve work", ops, u128::from(budget.max_work_ops))?;
     Ok(ChebAdmission {
         schema_version: CHEB_BUDGET_SCHEMA_VERSION,
@@ -413,27 +537,61 @@ pub fn admit_dirichlet_eigs(
 }
 
 /// Worst-case preflight for the fixed-grid root scan: `8·len` scan
-/// samples (each an O(len) Clenshaw evaluation) plus up to 44
-/// refinement evaluations per detected cell.
+/// cells (minimum 64), up to 89 safeguarded-refinement evaluations in
+/// every cell, checked normalization/differentiation, and retained root
+/// candidates. The bound does not assume exact arithmetic limits the
+/// number of observed floating-point sign changes.
 ///
 /// # Errors
 /// [`ChebError`] — overflow or cap refusals.
 pub fn admit_root_scan(coeff_len: usize, budget: &ChebBudget) -> Result<ChebAdmission, ChebError> {
-    let samples = coeff_len
-        .checked_mul(8)
-        .ok_or(ChebError::Overflow {
-            what: "root-scan sample count",
-        })?
-        .max(64);
+    cap_check(
+        "root-scan coefficients",
+        coeff_len as u128,
+        budget.max_coefficients as u128,
+    )?;
+    let samples_u128 = checked_mul(
+        "root-scan sample count",
+        coeff_len as u128,
+        ROOT_SCAN_FACTOR,
+    )?
+    .max(64);
+    let samples = usize::try_from(samples_u128).map_err(|_| ChebError::Overflow {
+        what: "root-scan sample count",
+    })?;
     cap_check(
         "root-scan samples",
         samples as u128,
         budget.max_samples as u128,
     )?;
-    let evals = samples as u128 * 45; // scan + worst-case refinement
-    let ops = evals * (coeff_len as u128);
+    let evals = checked_add(
+        "root-scan evaluation count",
+        checked_mul(
+            "root-scan evaluation count",
+            samples_u128,
+            ROOT_EVALS_PER_CELL,
+        )?,
+        2,
+    )?;
+    let eval_work = checked_mul(
+        "root-scan work",
+        checked_mul("root-scan work", evals, coeff_len as u128)?,
+        ROOT_OPS_PER_COEFFICIENT_EVAL,
+    )?;
+    let linear_work = checked_mul(
+        "root-scan work",
+        128,
+        checked_add("root-scan work", coeff_len as u128, samples_u128)?,
+    )?;
+    let ops = checked_add("root-scan work", eval_work, linear_work)?;
     cap_check("root-scan work", ops, u128::from(budget.max_work_ops))?;
-    let temp_bytes = 2u128 * (coeff_len as u128) * 8; // reference + derivative copies
+    // Reference coefficients + derivative recurrence/output + retained
+    // candidates: three coefficient-length f64 buffers cover every peak.
+    let temp_bytes = checked_mul(
+        "root-scan temporary bytes",
+        checked_mul("root-scan temporary bytes", 3, coeff_len as u128)?,
+        F64_BYTES,
+    )?;
     cap_check(
         "root-scan temporary bytes",
         temp_bytes,
@@ -455,13 +613,21 @@ fn sample_first_kind_checked<F: Fn(f64) -> f64>(
     a: f64,
     b: f64,
     n: usize,
+    cx: &Cx<'_>,
+    samples_spent: &mut usize,
 ) -> Result<Vec<f64>, ChebError> {
+    checkpoint(cx)?;
     let mut vals = Vec::with_capacity(n);
     for k in 0..n {
+        checkpoint(cx)?;
         let theta = std::f64::consts::PI * (k as f64 + 0.5) / (n as f64);
         let t = fs_math::det::cos(theta);
         let x = affine_from_reference(t, a, b);
         let y = f(x);
+        *samples_spent = samples_spent.checked_add(1).ok_or(ChebError::Overflow {
+            what: "adaptive samples spent",
+        })?;
+        checkpoint(cx)?;
         if !y.is_finite() {
             return Err(ChebError::NonFinite {
                 what: "Cheb1 sample",
@@ -477,13 +643,21 @@ fn coeffs_at_checked<F: Fn(f64) -> f64>(
     a: f64,
     b: f64,
     n: usize,
+    cx: &Cx<'_>,
+    samples_spent: &mut usize,
 ) -> Result<Vec<f64>, ChebError> {
-    let vals = sample_first_kind_checked(f, a, b, n)?;
+    let vals = sample_first_kind_checked(f, a, b, n, cx, samples_spent)?;
+    checkpoint(cx)?;
     let mut c = fs_fft::dct2(&vals);
+    checkpoint(cx)?;
     let scale = 2.0 / n as f64;
-    for v in &mut c {
+    for (index, v) in c.iter_mut().enumerate() {
+        if index.is_multiple_of(SAMPLE_POLL_STRIDE) {
+            checkpoint(cx)?;
+        }
         *v *= scale;
     }
+    checkpoint(cx)?;
     if !c.iter().all(|coefficient| coefficient.is_finite()) {
         return Err(ChebError::NonFinite {
             what: "Chebyshev transform coefficient",
@@ -513,6 +687,7 @@ pub fn try_build_budgeted<F: Fn(f64) -> f64>(
     budget: &ChebBudget,
     cx: &Cx<'_>,
 ) -> Result<BuildRun, ChebError> {
+    domain_check(a, b)?;
     let start = start_degree
         .unwrap_or(16)
         .max(16)
@@ -525,21 +700,28 @@ pub fn try_build_budgeted<F: Fn(f64) -> f64>(
     let mut n = start;
     let mut rounds_completed = 0u32;
     let mut samples_spent = 0usize;
+    let cancelled =
+        |resume_from: usize, rounds_completed: u32, samples_spent: usize| BuildRun::Cancelled {
+            resume_from,
+            receipt: WorkReceipt {
+                schema_version: CHEB_BUDGET_SCHEMA_VERSION,
+                rounds_completed,
+                samples_spent,
+                ops_admitted: admission.ops_admitted(),
+            },
+        };
     loop {
         // Bounded tile boundary: one adaptive round.
         if cx.checkpoint().is_err() {
-            return Ok(BuildRun::Cancelled {
-                resume_from: n,
-                receipt: WorkReceipt {
-                    schema_version: CHEB_BUDGET_SCHEMA_VERSION,
-                    rounds_completed,
-                    samples_spent,
-                    ops_admitted: admission.ops_admitted(),
-                },
-            });
+            return Ok(cancelled(n, rounds_completed, samples_spent));
         }
-        let coeffs = coeffs_at_checked(f, a, b, n)?;
-        samples_spent += n;
+        let mut coeffs = match coeffs_at_checked(f, a, b, n, cx, &mut samples_spent) {
+            Ok(coeffs) => coeffs,
+            Err(ChebError::Cancelled) => {
+                return Ok(cancelled(n, rounds_completed, samples_spent));
+            }
+            Err(error) => return Err(error),
+        };
         rounds_completed += 1;
         let maxc = coeffs
             .iter()
@@ -551,12 +733,15 @@ pub fn try_build_budgeted<F: Fn(f64) -> f64>(
                 .iter()
                 .rposition(|&c| c.abs() > PLATEAU_REL * maxc)
                 .map_or(1, |p| p + 1);
+            if cx.checkpoint().is_err() {
+                return Ok(cancelled(n, rounds_completed, samples_spent));
+            }
+            coeffs.truncate(keep);
+            if cx.checkpoint().is_err() {
+                return Ok(cancelled(n, rounds_completed, samples_spent));
+            }
             return Ok(BuildRun::Complete {
-                function: Cheb1 {
-                    a,
-                    b,
-                    coeffs: coeffs[..keep].to_vec(),
-                },
+                function: Cheb1 { a, b, coeffs },
                 receipt: WorkReceipt {
                     schema_version: CHEB_BUDGET_SCHEMA_VERSION,
                     rounds_completed,
@@ -579,8 +764,9 @@ pub fn try_build_budgeted<F: Fn(f64) -> f64>(
 /// Budgeted, cancellable Dirichlet collocation eigensolve. Semantics
 /// match [`crate::dirichlet_laplace_eigs`] bitwise on the happy path;
 /// impossible shapes refuse before allocation; cancellation drains at
-/// shift and 10-sweep boundaries, retaining the independently
-/// converged eigenvalue prefix.
+/// every public allocation/opaque-kernel boundary and every ten inverse
+/// sweeps. A cancelled run retains only fully completed fixed-sweep
+/// estimates; those values do not carry convergence authority.
 ///
 /// # Errors
 /// [`ChebError`] — shape/overflow/cap refusals, or
@@ -593,29 +779,71 @@ pub fn dirichlet_laplace_eigs_budgeted(
     cx: &Cx<'_>,
 ) -> Result<EigsRun, ChebError> {
     let admission = admit_dirichlet_eigs(n, k, budget)?;
+    let cancelled = |partial_eigs: Vec<f64>, rounds: u32, sweeps: usize| EigsRun::Cancelled {
+        partial_eigs,
+        receipt: WorkReceipt {
+            schema_version: CHEB_BUDGET_SCHEMA_VERSION,
+            rounds_completed: rounds,
+            samples_spent: sweeps,
+            ops_admitted: admission.ops_admitted(),
+        },
+    };
+    if cx.checkpoint().is_err() {
+        return Ok(cancelled(Vec::new(), 0, 0));
+    }
     let m = n + 1;
+    if cx.checkpoint().is_err() {
+        return Ok(cancelled(Vec::new(), 0, 0));
+    }
     let d = diff_matrix(n);
+    if cx.checkpoint().is_err() {
+        return Ok(cancelled(Vec::new(), 0, 0));
+    }
     let mut d2 = vec![0.0f64; m * m];
+    if cx.checkpoint().is_err() {
+        return Ok(cancelled(Vec::new(), 0, 0));
+    }
     fma::dsq_into_dispatch(&d, m, &mut d2);
+    if cx.checkpoint().is_err() {
+        return Ok(cancelled(Vec::new(), 0, 0));
+    }
     let ni = n - 1;
     let mut a = vec![0.0f64; ni * ni];
     for i in 0..ni {
+        if i.is_multiple_of(8) && cx.checkpoint().is_err() {
+            return Ok(cancelled(Vec::new(), 0, 0));
+        }
         for j in 0..ni {
             a[i * ni + j] = -d2[(i + 1) * m + (j + 1)];
         }
     }
     let nf = 64usize;
     let h = 2.0 / (nf as f64 + 1.0);
+    if cx.checkpoint().is_err() {
+        return Ok(cancelled(Vec::new(), 0, 0));
+    }
     let mut fd = vec![0.0f64; nf * nf];
     for i in 0..nf {
+        if i.is_multiple_of(8) && cx.checkpoint().is_err() {
+            return Ok(cancelled(Vec::new(), 0, 0));
+        }
         fd[i * nf + i] = 2.0 / (h * h);
         if i + 1 < nf {
             fd[i * nf + i + 1] = -1.0 / (h * h);
             fd[(i + 1) * nf + i] = -1.0 / (h * h);
         }
     }
+    if cx.checkpoint().is_err() {
+        return Ok(cancelled(Vec::new(), 0, 0));
+    }
     let (fd_eigs, _) = fs_la::eigen::jacobi_eigh(&fd, nf);
+    if cx.checkpoint().is_err() {
+        return Ok(cancelled(Vec::new(), 0, 0));
+    }
     let mut eigs = Vec::with_capacity(k);
+    if cx.checkpoint().is_err() {
+        return Ok(cancelled(eigs, 0, 0));
+    }
     let mut shifted = vec![0.0f64; a.len()];
     let mut sweeps_total = 0usize;
     let receipt = |rounds: u32, sweeps: usize| WorkReceipt {
@@ -625,42 +853,75 @@ pub fn dirichlet_laplace_eigs_budgeted(
         ops_admitted: admission.ops_admitted(),
     };
     for (shift_index, &fd_est) in fd_eigs.iter().take(k).enumerate() {
-        // Shift boundary poll: the converged prefix stays valid.
+        // Shift boundary poll: only completed fixed-sweep estimates survive.
         if cx.checkpoint().is_err() {
-            return Ok(EigsRun::Cancelled {
-                partial_eigs: eigs,
-                receipt: receipt(shift_index as u32, sweeps_total),
-            });
+            return Ok(cancelled(eigs, shift_index as u32, sweeps_total));
         }
         let mu = fd_est * 0.95;
         shifted.copy_from_slice(&a);
         for i in 0..ni {
             shifted[i * ni + i] -= mu;
         }
+        if cx.checkpoint().is_err() {
+            return Ok(cancelled(eigs, shift_index as u32, sweeps_total));
+        }
         let lu = fs_la::factor::lu(&shifted, ni).map_err(|_| ChebError::Numerical {
             what: "shifted collocation operator is singular",
         })?;
+        if cx.checkpoint().is_err() {
+            return Ok(cancelled(eigs, shift_index as u32, sweeps_total));
+        }
         let mut v: Vec<f64> = (0..ni)
             .map(|i| 1.0 + 0.25 * (((i * 7 + 3) % 11) as f64))
             .collect();
         for sweep in 0..100 {
             if sweep % 10 == 0 && cx.checkpoint().is_err() {
-                return Ok(EigsRun::Cancelled {
-                    partial_eigs: eigs,
-                    receipt: receipt(shift_index as u32, sweeps_total),
-                });
+                return Ok(cancelled(eigs, shift_index as u32, sweeps_total));
             }
             let nrm = v.iter().map(|x| x * x).sum::<f64>().sqrt();
+            if !nrm.is_finite() || nrm == 0.0 {
+                return Err(ChebError::Numerical {
+                    what: "inverse-iteration vector has no finite non-zero norm",
+                });
+            }
             for x in &mut v {
                 *x /= nrm;
             }
             lu.solve(&mut v);
+            if !v.iter().all(|value| value.is_finite()) {
+                return Err(ChebError::Numerical {
+                    what: "inverse iteration produced a non-finite vector",
+                });
+            }
             sweeps_total += 1;
+            if (sweep + 1) % 10 == 0 && cx.checkpoint().is_err() {
+                return Ok(cancelled(eigs, shift_index as u32, sweeps_total));
+            }
         }
         let nrm2: f64 = v.iter().map(|x| x * x).sum();
+        if !nrm2.is_finite() || nrm2 == 0.0 {
+            return Err(ChebError::Numerical {
+                what: "Rayleigh vector has no finite non-zero squared norm",
+            });
+        }
+        if cx.checkpoint().is_err() {
+            return Ok(cancelled(eigs, shift_index as u32, sweeps_total));
+        }
         let mut av = vec![0.0f64; ni];
         fma::matvec_into_dispatch(&a, &v, ni, &mut av);
-        eigs.push(v.iter().zip(&av).map(|(x, y)| x * y).sum::<f64>() / nrm2);
+        let estimate = v.iter().zip(&av).map(|(x, y)| x * y).sum::<f64>() / nrm2;
+        if !estimate.is_finite() {
+            return Err(ChebError::Numerical {
+                what: "Rayleigh estimate is non-finite",
+            });
+        }
+        if cx.checkpoint().is_err() {
+            return Ok(cancelled(eigs, shift_index as u32, sweeps_total));
+        }
+        eigs.push(estimate);
+    }
+    if cx.checkpoint().is_err() {
+        return Ok(cancelled(eigs, k as u32, sweeps_total));
     }
     Ok(EigsRun::Complete {
         eigs,
@@ -668,13 +929,143 @@ pub fn dirichlet_laplace_eigs_budgeted(
     })
 }
 
+fn normalize_root_coefficients(coeffs: &mut [f64], cx: &Cx<'_>) -> Result<(), ChebError> {
+    checkpoint(cx)?;
+    let cmax = coeffs
+        .iter()
+        .fold(0.0f64, |scale, coefficient| scale.max(coefficient.abs()));
+    if !cmax.is_finite() || cmax == 0.0 {
+        return Err(ChebError::Numerical {
+            what: "root normalization requires finite non-zero coefficients",
+        });
+    }
+    let scale = crate::normalization_power_of_two(cmax);
+    for (index, coefficient) in coeffs.iter_mut().enumerate() {
+        if index.is_multiple_of(SAMPLE_POLL_STRIDE) {
+            checkpoint(cx)?;
+        }
+        let original = *coefficient;
+        let normalized = original / scale;
+        if !normalized.is_finite() || normalized * scale != original {
+            return Err(ChebError::Numerical {
+                what: "root normalization would lose coefficient information",
+            });
+        }
+        *coefficient = normalized;
+    }
+    checkpoint(cx)
+}
+
+fn reference_derivative_checked(reference: &Cheb1, cx: &Cx<'_>) -> Result<Cheb1, ChebError> {
+    checkpoint(cx)?;
+    let n = reference.coeffs.len();
+    if n == 1 {
+        return Ok(Cheb1 {
+            a: -1.0,
+            b: 1.0,
+            coeffs: vec![0.0],
+        });
+    }
+    let mut recurrence = vec![0.0f64; n];
+    for k in (1..n).rev() {
+        if k.is_multiple_of(SAMPLE_POLL_STRIDE) {
+            checkpoint(cx)?;
+        }
+        let above = if k + 2 < n { recurrence[k + 1] } else { 0.0 };
+        recurrence[k - 1] = (2.0 * k as f64).mul_add(reference.coeffs[k], above);
+        if !recurrence[k - 1].is_finite() {
+            return Err(ChebError::Numerical {
+                what: "reference derivative coefficient is non-finite",
+            });
+        }
+    }
+    checkpoint(cx)?;
+    let coefficients: Vec<f64> = recurrence[..n - 1].to_vec();
+    checkpoint(cx)?;
+    Ok(Cheb1 {
+        a: -1.0,
+        b: 1.0,
+        coeffs: coefficients,
+    })
+}
+
+fn finite_root_eval(function: &Cheb1, t: f64) -> Result<f64, ChebError> {
+    let value = function.eval_reference(t);
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err(ChebError::NonFinite {
+            what: "root scan evaluation",
+        })
+    }
+}
+
+fn ensure_resolvable_root(reference: &Cheb1, derivative: &Cheb1, t: f64) -> Result<(), ChebError> {
+    let slope = finite_root_eval(derivative, t)?;
+    let degree_scale = reference.degree().max(1) as f64;
+    let slope_floor = 64.0 * 1.490_116_119_384_765_6e-8 * degree_scale;
+    if slope.abs() > slope_floor {
+        Ok(())
+    } else {
+        Err(ChebError::Numerical {
+            what: "fixed-grid root scan cannot resolve a multiple or ill-conditioned root; use colleague/certified root evidence",
+        })
+    }
+}
+
+fn refine_root_checked(
+    reference: &Cheb1,
+    derivative: &Cheb1,
+    mut lo: f64,
+    mut hi: f64,
+    cx: &Cx<'_>,
+) -> Result<f64, ChebError> {
+    for _ in 0..40 {
+        checkpoint(cx)?;
+        let mid = f64::midpoint(lo, hi);
+        let value = finite_root_eval(reference, mid)?;
+        if value == 0.0 {
+            ensure_resolvable_root(reference, derivative, mid)?;
+            return Ok(mid);
+        }
+        let lo_value = finite_root_eval(reference, lo)?;
+        if lo_value != 0.0 && lo_value.is_sign_negative() != value.is_sign_negative() {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    let mut root = f64::midpoint(lo, hi);
+    for _ in 0..4 {
+        checkpoint(cx)?;
+        let value = finite_root_eval(reference, root)?;
+        let slope = finite_root_eval(derivative, root)?;
+        if slope == 0.0 {
+            break;
+        }
+        let step = value / slope;
+        if !step.is_finite() {
+            break;
+        }
+        let candidate = root - step;
+        if !candidate.is_finite() || candidate < lo || candidate > hi {
+            break;
+        }
+        root = candidate;
+    }
+    checkpoint(cx)?;
+    ensure_resolvable_root(reference, derivative, root)?;
+    Ok(root)
+}
+
 impl Cheb1 {
     /// Budgeted, cancellable root scan. The scan sequence, refinement,
     /// and conditioning rule match [`Cheb1::roots`] bitwise on the
     /// happy path; admission preflights the scan/refinement work;
-    /// cancellation polls every 64 scan cells and refuses WITHOUT a
-    /// partial result — an incomplete scan is not a root-set claim, so
-    /// there is deliberately nothing acceptance-capable to return.
+    /// cancellation polls before allocation/evaluation, throughout
+    /// normalization and refinement, every 64 scan cells, and before
+    /// finalization. It refuses WITHOUT a partial result — an incomplete
+    /// scan is not a root-set claim.
     ///
     /// # Errors
     /// [`ChebError`] — cap/overflow refusals before evaluation;
@@ -682,71 +1073,71 @@ impl Cheb1 {
     /// non-finite evaluations, or an unresolvable multiple root;
     /// [`ChebError::Cancelled`] on a drained cancellation.
     pub fn roots_budgeted(&self, budget: &ChebBudget, cx: &Cx<'_>) -> Result<Vec<f64>, ChebError> {
-        let _admission = admit_root_scan(self.coeffs.len(), budget)?;
+        let admission = admit_root_scan(self.coeffs.len(), budget)?;
+        checkpoint(cx)?;
         if !self.coeffs.iter().any(|&coefficient| coefficient != 0.0) {
             return Err(ChebError::Numerical {
                 what: "the identically zero polynomial has a continuum of roots",
             });
         }
+        checkpoint(cx)?;
         let mut reference_coeffs = self.coeffs.clone();
-        crate::normalize_coefficients_exact(&mut reference_coeffs, "Chebyshev root scan");
+        normalize_root_coefficients(&mut reference_coeffs, cx)?;
         let reference = Cheb1 {
             a: -1.0,
             b: 1.0,
             coeffs: reference_coeffs,
         };
-        let derivative = reference.differentiate();
-        let resolvable = |t: f64| -> Result<(), ChebError> {
-            let slope = derivative.eval_reference(t);
-            let degree_scale = reference.degree().max(1) as f64;
-            let slope_floor = 64.0 * 1.490_116_119_384_765_6e-8 * degree_scale;
-            if slope.is_finite() && slope.abs() > slope_floor {
-                Ok(())
-            } else {
-                Err(ChebError::Numerical {
-                    what: "fixed-grid root scan cannot resolve a multiple or \
-                           ill-conditioned root; use colleague/certified root evidence",
-                })
-            }
-        };
-        let finite = |v: f64| -> Result<f64, ChebError> {
-            if v.is_finite() {
-                Ok(v)
-            } else {
-                Err(ChebError::NonFinite {
-                    what: "root scan evaluation",
-                })
-            }
-        };
-
-        let mut roots_t = Vec::new();
-        let samples = self.coeffs.len().saturating_mul(8).max(64);
+        let derivative = reference_derivative_checked(&reference, cx)?;
+        checkpoint(cx)?;
+        let mut roots_t = Vec::with_capacity(reference.degree());
+        let samples = admission.samples_admitted();
         let mut prev_t = -1.0;
-        let mut prev_v = finite(reference.eval_reference(prev_t))?;
+        let mut prev_v = finite_root_eval(&reference, prev_t)?;
         for k in 1..=samples {
             // Bounded tile boundary: one poll per 64 scan cells.
             if k % 64 == 1 && cx.checkpoint().is_err() {
                 return Err(ChebError::Cancelled);
             }
             let t = 2.0 * (k as f64) / (samples as f64) - 1.0;
-            let v = finite(reference.eval_reference(t))?;
+            let value = finite_root_eval(&reference, t)?;
             if prev_v == 0.0 {
-                resolvable(prev_t)?;
+                ensure_resolvable_root(&reference, &derivative, prev_t)?;
+                if roots_t.len() >= reference.degree() {
+                    return Err(ChebError::Numerical {
+                        what: "floating-point root candidates exceed the polynomial degree bound",
+                    });
+                }
                 roots_t.push(prev_t);
-            } else if v != 0.0 && prev_v.is_sign_negative() != v.is_sign_negative() {
-                let root = reference.bisect_newton_reference(&derivative, prev_t, t);
+            } else if value != 0.0 && prev_v.is_sign_negative() != value.is_sign_negative() {
+                let root = refine_root_checked(&reference, &derivative, prev_t, t, cx)?;
+                if roots_t.len() >= reference.degree() {
+                    return Err(ChebError::Numerical {
+                        what: "floating-point root candidates exceed the polynomial degree bound",
+                    });
+                }
                 roots_t.push(root);
             }
             prev_t = t;
-            prev_v = v;
+            prev_v = value;
         }
         if prev_v == 0.0 {
-            resolvable(prev_t)?;
+            ensure_resolvable_root(&reference, &derivative, prev_t)?;
+            if roots_t.len() >= reference.degree() {
+                return Err(ChebError::Numerical {
+                    what: "floating-point root candidates exceed the polynomial degree bound",
+                });
+            }
             roots_t.push(prev_t);
         }
-        Ok(roots_t
-            .into_iter()
-            .map(|t| affine_from_reference(t, self.a, self.b))
-            .collect())
+        checkpoint(cx)?;
+        for (index, root) in roots_t.iter_mut().enumerate() {
+            if index.is_multiple_of(SAMPLE_POLL_STRIDE) {
+                checkpoint(cx)?;
+            }
+            *root = affine_from_reference(*root, self.a, self.b);
+        }
+        checkpoint(cx)?;
+        Ok(roots_t)
     }
 }
