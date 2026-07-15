@@ -10,8 +10,8 @@
 
 use crate::NurbsError;
 use crate::curve::{
-    AdmittedNurbsCurve, BezierConversionPlan, CurveAdmissionRun, CurveEvaluationRun, NurbsCurve,
-    SpanBox,
+    AdmittedNurbsCurve, BezierConversionPlan, CurveAdmissionRun, CurveCloneRun, CurveEvaluationRun,
+    NurbsCurve, SpanBox,
 };
 use crate::rat::Rat;
 use fs_exec::Cx;
@@ -102,6 +102,20 @@ pub enum TrimLoopAdmissionRun<'a> {
         admitted: AdmittedTrimLoop<'a>,
     },
     /// Cancellation was observed; no admitted authority was published.
+    Cancelled,
+}
+
+/// Transactional terminal state of a cancellation-aware fallible trim-loop
+/// copy.
+#[must_use]
+#[derive(Debug, PartialEq)]
+pub enum TrimLoopCloneRun {
+    /// The complete sealed copy of the exact source representation.
+    Complete {
+        /// Copied exact trim-loop generation.
+        trim_loop: TrimLoop,
+    },
+    /// Cancellation was observed; all partial copy storage was dropped.
     Cancelled,
 }
 
@@ -268,6 +282,28 @@ impl TrimLoop {
         })
     }
 
+    /// Fallibly copy this sealed exact loop with bounded cancellation polling.
+    ///
+    /// The nested curve copy preserves its count-derived work and retained
+    /// output refusals before cancellation, then one `Cx` spans both fallible
+    /// allocations, ordered exact copies, and final loop publication. The
+    /// immutable source is not revalidated. Individual allocator calls,
+    /// exact-rational copies, and destructors are not preemptible. This
+    /// primitive does not consume the `Cx` budget or own request -> drain ->
+    /// finalize semantics.
+    ///
+    /// # Errors
+    /// Returns the synchronous copy's work, retained-memory, or allocation
+    /// refusal when it wins before an observed cancellation.
+    pub fn try_clone_with_cx(&self, cx: &Cx<'_>) -> Result<TrimLoopCloneRun, NurbsError> {
+        let curve_copy = self.curve.try_clone_with_cx(cx)?;
+        let mut should_cancel = || cx.checkpoint().is_err();
+        Ok(finish_trim_loop_clone_with_poll(
+            curve_copy,
+            &mut should_cancel,
+        ))
+    }
+
     /// The same loop with reversed orientation (holes are wound opposite
     /// to outers under the nonzero rule): control points reversed, knot
     /// vector mirrored about the domain.
@@ -278,6 +314,30 @@ impl TrimLoop {
     /// derived closure, continuity, knots, or control net are invalid.
     pub fn reversed_for_hole(&self) -> Result<TrimLoop, NurbsError> {
         self.admit()?.reversed_for_hole()
+    }
+}
+
+fn finish_trim_loop_clone_with_poll(
+    curve_copy: CurveCloneRun<Rat, 2>,
+    should_cancel: &mut impl FnMut() -> bool,
+) -> TrimLoopCloneRun {
+    match curve_copy {
+        CurveCloneRun::Complete { curve } => {
+            publish_trim_loop_clone_with_poll(curve, should_cancel)
+        }
+        CurveCloneRun::Cancelled => TrimLoopCloneRun::Cancelled,
+    }
+}
+
+fn publish_trim_loop_clone_with_poll(
+    curve: NurbsCurve<Rat, 2>,
+    should_cancel: &mut impl FnMut() -> bool,
+) -> TrimLoopCloneRun {
+    if should_cancel() {
+        return TrimLoopCloneRun::Cancelled;
+    }
+    TrimLoopCloneRun::Complete {
+        trim_loop: TrimLoop { curve },
     }
 }
 
@@ -1885,6 +1945,54 @@ mod tests {
                 Err(NurbsError::Structure { ref what }) if what.contains("close exactly")
             ));
         });
+    }
+
+    #[test]
+    fn trim_loop_copy_with_cx_is_transactional_and_exact() {
+        let trim_loop = long_trim_loop();
+        with_trim_cx(true, |cx| {
+            assert_eq!(
+                trim_loop
+                    .try_clone_with_cx(cx)
+                    .expect("valid pre-cancelled trim-loop copy"),
+                TrimLoopCloneRun::Cancelled
+            );
+        });
+        with_trim_cx(false, |cx| {
+            assert_eq!(
+                trim_loop
+                    .try_clone_with_cx(cx)
+                    .expect("active exact trim-loop copy"),
+                TrimLoopCloneRun::Complete {
+                    trim_loop: trim_loop.try_clone().expect("legacy trim-loop copy"),
+                }
+            );
+        });
+    }
+
+    #[test]
+    fn trim_loop_copy_propagates_nested_and_publication_cancellation() {
+        let mut unexpected_publication_polls = 0usize;
+        assert_eq!(
+            finish_trim_loop_clone_with_poll(CurveCloneRun::Cancelled, &mut || {
+                unexpected_publication_polls += 1;
+                false
+            },),
+            TrimLoopCloneRun::Cancelled
+        );
+        assert_eq!(unexpected_publication_polls, 0);
+
+        let trim_loop = point_trim_loop();
+        let curve = trim_loop.curve.try_clone().expect("exact curve copy");
+        let mut publication_polls = 0usize;
+        assert_eq!(
+            publish_trim_loop_clone_with_poll(curve, &mut || {
+                publication_polls += 1;
+                true
+            }),
+            TrimLoopCloneRun::Cancelled
+        );
+        assert_eq!(publication_polls, 1);
     }
 
     #[test]

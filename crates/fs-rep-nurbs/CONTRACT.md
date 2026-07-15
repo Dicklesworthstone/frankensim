@@ -124,7 +124,10 @@ fs-iga (geometry basis = analysis basis), fs-render NURBS tracing
   (closure and continuity validated by rational equality, including exact
   left/right-limit agreement at any full knot break). Loop, curve, and
   subdivision storage is sealed; borrowed admitted views bind closure and
-  structure validation to the immutable source. Admitted
+  structure validation to the immutable source. Owning
+  `try_clone_with_cx` returns transactional `TrimLoopCloneRun` state and
+  publishes only a complete sealed exact copy after the nested curve-copy
+  envelope. Admitted
   `reversed_for_hole_with_cx` returns transactional `TrimLoopReversalRun`
   state and publishes only a complete opposite-orientation loop after checked
   aggregate work/retained-storage admission and full derived validation.
@@ -432,6 +435,16 @@ storage. The borrowed source is excluded from the retained envelope; allocator
 calls, individual exact-rational operations, and destructors are
 non-preemptible. The primitive adds no `Cx` budget consumption, wall-time,
 drain/finalize, resumability, topology, or geometric-certificate claim.
+`TrimLoop::try_clone_with_cx` inherits the nested exact curve copy's
+count-derived work and 64 MiB retained-output refusal precedence, then carries
+the same `Cx` through fallible knot/control allocation, fixed-stride ordered
+copies, and final sealed-loop publication. `TrimLoopCloneRun::Cancelled`
+exposes no partial loop and drops all partial output storage. The borrowed
+source is excluded from the output envelope; allocator calls, exact-rational
+copies, and destructors are non-preemptible, and the copy performs no source
+revalidation. It proves representation identity only: closure, continuity,
+topology, classification, exact caller-budget consumption, wall time,
+drain/finalize, and resumability are outside the claim.
 `TrimmedPatch::admit_with_cx` retains the constant-time minimum loop-count work
 refusal ahead of cancellation, then carries the same caller gate through the
 exact aggregate validation-work scan, every nested loop/curve admission, and
