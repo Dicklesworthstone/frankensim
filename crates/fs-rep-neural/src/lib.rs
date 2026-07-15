@@ -405,9 +405,9 @@ fn scaled_spectral_upper_parts(weights: &[Vec<f64>]) -> (f64, f64) {
         return (0.0, 0.0);
     }
 
-    let mut frobenius_sum = 0.0;
-    let mut max_row_sum = 0.0;
-    let mut column_sums = vec![0.0; n_in];
+    let mut frobenius_sum = 0.0f64;
+    let mut max_row_sum = 0.0f64;
+    let mut column_sums = vec![0.0f64; n_in];
     for row in weights {
         let mut row_sum = 0.0;
         for (column_sum, magnitude) in column_sums.iter_mut().zip(row.iter().map(|w| w.abs())) {
