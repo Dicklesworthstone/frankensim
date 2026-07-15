@@ -146,6 +146,25 @@ fn sample_box(state: &mut u64, half: f64) -> [f64; 3] {
 }
 
 #[test]
+fn ns_000_query_validation_precedes_surface_work() {
+    let shell = ShellSdf::new(vec![sphere()], vec![None], Orientation::Outward).expect("shell");
+    let point_error = shell
+        .distance([f64::NAN, 0.0, 0.0], 1e-6, u32::MAX)
+        .expect_err("non-finite point must refuse before surface work");
+    assert!(
+        point_error.to_string().contains("query point"),
+        "query-point refusal must have deterministic precedence: {point_error}"
+    );
+    let tolerance_error = shell
+        .distance([0.0; 3], f64::INFINITY, u32::MAX)
+        .expect_err("non-finite tolerance must refuse before surface work");
+    assert!(
+        tolerance_error.to_string().contains("tolerance"),
+        "tolerance refusal must have deterministic precedence: {tolerance_error}"
+    );
+}
+
+#[test]
 fn ns_001_containment_battery_vs_analytic() {
     type Case<'a> = (&'a ShellSdf, &'a dyn Fn([f64; 3]) -> f64, f64, &'a str);
     let sph = ShellSdf::new(vec![sphere()], vec![None], Orientation::Outward).expect("shell");

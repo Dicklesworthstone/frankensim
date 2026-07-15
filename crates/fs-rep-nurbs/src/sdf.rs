@@ -10,11 +10,11 @@
 
 use crate::NurbsError;
 use crate::closest::{
-    CLOSEST_MAX_BASE_WORK_UNITS, CLOSEST_MAX_SPLITS, closest_point_surface, norm3,
-    preflight_surface_subdivision, surface_base_work_units, surface_subdivision_work_per_split,
+    CLOSEST_MAX_BASE_WORK_UNITS, CLOSEST_MAX_SPLITS, norm3, preflight_surface_subdivision,
+    surface_base_work_units, surface_subdivision_work_per_split,
 };
 use crate::rat::Rat;
-use crate::surface::NurbsSurface;
+use crate::surface::{AdmittedNurbsSurface, NurbsSurface};
 use crate::trim::{Classification, TRIM_CLASSIFY_MAX_WORK_UNITS, TrimmedPatch};
 use fs_evidence::NumericalCertificate;
 use fs_exec::Cx;
@@ -93,6 +93,20 @@ fn checked_work_product(values: &[u128], stage: &str) -> Result<u128, NurbsError
             what: format!("NURBS shell {stage} work accounting overflows u128"),
         })
     })
+}
+
+fn validate_distance_request(q: [f64; 3], tol: f64) -> Result<(), NurbsError> {
+    if q.iter().any(|coordinate| !coordinate.is_finite()) {
+        return Err(NurbsError::Domain {
+            what: "NURBS SDF query point must be finite".to_string(),
+        });
+    }
+    if !tol.is_finite() || tol < 0.0 {
+        return Err(NurbsError::Domain {
+            what: "NURBS SDF tolerance must be finite and non-negative".to_string(),
+        });
+    }
+    Ok(())
 }
 
 /// Conservative scalar-operation coefficients for one surface after its
@@ -313,8 +327,20 @@ impl ShellSdf {
     /// then trim classification of the winning parameter.
     ///
     /// # Errors
-    /// Propagates surface-evaluation structural errors.
+    /// Returns a domain refusal for malformed query settings or excessive
+    /// admitted work, and propagates surface/trim evaluation errors.
     pub fn distance(&self, q: [f64; 3], tol: f64, max_splits: u32) -> Result<SdfQuery, NurbsError> {
+        self.distance_with_admission(q, tol, max_splits)
+            .map(|(query, _)| query)
+    }
+
+    fn distance_with_admission(
+        &self,
+        q: [f64; 3],
+        tol: f64,
+        max_splits: u32,
+    ) -> Result<(SdfQuery, AdmittedNurbsSurface<'_, f64>), NurbsError> {
+        validate_distance_request(q, tol)?;
         let _ = self.query_work_units(max_splits)?;
         let surface_count = u64::try_from(self.surfaces.len()).map_err(|_| NurbsError::Domain {
             what: "NURBS shell surface count cannot be represented as u64".to_string(),
@@ -329,11 +355,12 @@ impl ShellSdf {
                 what: "NURBS shell worst-case split accounting exceeds u32".to_string(),
             });
         }
-        let mut best: Option<SdfQuery> = None;
+        let mut best: Option<(SdfQuery, AdmittedNurbsSurface<'_, f64>)> = None;
         let mut global_lower = f64::INFINITY;
         let mut total_splits = 0u32;
         for (idx, s) in self.surfaces.iter().enumerate() {
-            let cd = closest_point_surface(s, q, tol, max_splits)?;
+            let admitted = s.admit()?;
+            let cd = admitted.closest_point(q, tol, max_splits)?;
             global_lower = global_lower.min(cd.lower);
             total_splits =
                 total_splits
@@ -341,7 +368,7 @@ impl ShellSdf {
                     .ok_or_else(|| NurbsError::Domain {
                         what: "NURBS shell split accounting exceeds u32".to_string(),
                     })?;
-            let polished = polish_upper(s, q, cd.param, cd.upper);
+            let polished = polish_upper(admitted, q, cd.param, cd.upper);
             let (upper, param, trim_downgrade) = if let Some(trim) = &self.trims[idx] {
                 select_trimmed_witness(trim, (cd.upper, cd.param), polished)?
             } else {
@@ -356,24 +383,24 @@ impl ShellSdf {
                 splits: 0,
             };
             best = Some(match best {
-                None => cand,
+                None => (cand, admitted),
                 // A point on a kept surface is a usable upper witness and
                 // always outranks a numerically closer point that was trimmed
                 // away. Within the same trim class, retain the smaller
                 // evaluated distance deterministically.
-                Some(b) if b.trim_downgrade && !cand.trim_downgrade => cand,
-                Some(b) if !b.trim_downgrade && cand.trim_downgrade => b,
-                Some(b) if cand.upper < b.upper => cand,
-                Some(b) => b,
+                Some((b, _)) if b.trim_downgrade && !cand.trim_downgrade => (cand, admitted),
+                Some((b, b_surface)) if !b.trim_downgrade && cand.trim_downgrade => (b, b_surface),
+                Some((b, _)) if cand.upper < b.upper => (cand, admitted),
+                Some(existing) => existing,
             });
         }
-        let mut out = best.expect("non-empty shell");
+        let (mut out, admitted) = best.expect("non-empty shell");
         out.lower = global_lower.min(out.upper);
         out.splits = total_splits;
         if out.trim_downgrade {
             out.upper = f64::INFINITY;
         }
-        Ok(out)
+        Ok((out, admitted))
     }
 }
 
@@ -436,14 +463,13 @@ fn select_trimmed_witness(
 /// updates the answer, so the returned upper estimate comes from a genuinely
 /// evaluated surface point (still ordinary, non-directed f64 arithmetic).
 fn polish_upper(
-    s: &NurbsSurface<f64>,
+    s: AdmittedNurbsSurface<'_, f64>,
     q: [f64; 3],
     start: [f64; 2],
     upper0: f64,
 ) -> (f64, [f64; 2]) {
-    let (Ok((ulo, uhi)), Ok((vlo, vhi))) = (s.knots_u.domain(), s.knots_v.domain()) else {
-        return (upper0, start);
-    };
+    let (ulo, uhi) = s.knots_u().domain();
+    let (vlo, vhi) = s.knots_v().domain();
     let mut best = (upper0, start);
     let mut uv = start;
     for _ in 0..POLISH_STEPS {
@@ -533,7 +559,9 @@ impl ShellSdfChart {
     /// Signed-or-unsigned distance estimate for one point.
     fn sample(&self, x: Point3) -> Result<ChartSample, NurbsError> {
         let q = [x.x, x.y, x.z];
-        let query = self.shell.distance(q, self.tol, self.max_splits)?;
+        let (query, admitted_surface) =
+            self.shell
+                .distance_with_admission(q, self.tol, self.max_splits)?;
         if query.trim_downgrade {
             // The found point is trimmed away, so it is not a witness on the
             // kept surface. Do not retain its finite value as the chart's
@@ -547,7 +575,7 @@ impl ShellSdfChart {
             });
         }
         let (mut lo, mut hi) = (query.lower, query.upper);
-        let Some((sign, gradient)) = self.sign_and_gradient(q, &query) else {
+        let Some((sign, gradient)) = self.sign_and_gradient(q, &query, admitted_surface) else {
             // A declared orientation cannot assign sign through a singular or
             // contradictory local chart. Preserve no nominal finite value that
             // a consumer could misread while ignoring the certificate.
@@ -575,27 +603,32 @@ impl ShellSdfChart {
     /// parameter triggers a deterministic nearby regular-witness search on an
     /// untrimmed surface. If no consistent regular witness stays within the
     /// measured upper-distance tolerance, oriented sign fails closed.
-    fn sign_and_gradient(&self, q: [f64; 3], query: &SdfQuery) -> Option<(f64, Option<Vec3>)> {
-        let s = &self.shell.surfaces[query.surface];
+    fn sign_and_gradient(
+        &self,
+        q: [f64; 3],
+        query: &SdfQuery,
+        surface: AdmittedNurbsSurface<'_, f64>,
+    ) -> Option<(f64, Option<Vec3>)> {
         match self.shell.orientation {
-            Orientation::Unknown => Some((1.0, unsigned_gradient(s, q, query.param))),
-            Orientation::Outward => {
-                oriented_sign_at(s, q, query.param).or_else(|| self.regular_witness_sign(q, query))
-            }
+            Orientation::Unknown => Some((1.0, unsigned_gradient(surface, q, query.param))),
+            Orientation::Outward => oriented_sign_at(surface, q, query.param)
+                .or_else(|| self.regular_witness_sign(q, query, surface)),
         }
     }
 
-    fn regular_witness_sign(&self, q: [f64; 3], query: &SdfQuery) -> Option<(f64, Option<Vec3>)> {
+    fn regular_witness_sign(
+        &self,
+        q: [f64; 3],
+        query: &SdfQuery,
+        surface: AdmittedNurbsSurface<'_, f64>,
+    ) -> Option<(f64, Option<Vec3>)> {
         // A nearby parameter could cross a trim curve. Until the trim path can
         // certify a connected kept neighborhood, do not use it for sign repair.
         if self.shell.trims[query.surface].is_some() {
             return None;
         }
-        let surface = &self.shell.surfaces[query.surface];
-        let (Ok((ulo, uhi)), Ok((vlo, vhi))) = (surface.knots_u.domain(), surface.knots_v.domain())
-        else {
-            return None;
-        };
+        let (ulo, uhi) = surface.knots_u().domain();
+        let (vlo, vhi) = surface.knots_v().domain();
         let spans = [uhi - ulo, vhi - vlo];
         if spans.iter().any(|span| !span.is_finite() || *span <= 0.0) {
             return None;
@@ -670,7 +703,11 @@ impl ShellSdfChart {
     }
 }
 
-fn unsigned_gradient(surface: &NurbsSurface<f64>, q: [f64; 3], param: [f64; 2]) -> Option<Vec3> {
+fn unsigned_gradient(
+    surface: AdmittedNurbsSurface<'_, f64>,
+    q: [f64; 3],
+    param: [f64; 2],
+) -> Option<Vec3> {
     let (position, _, _) = surface.partials(param[0], param[1]).ok()?;
     let offset = [q[0] - position[0], q[1] - position[1], q[2] - position[2]];
     let norm = norm3(offset);
@@ -685,7 +722,7 @@ fn unsigned_gradient(surface: &NurbsSurface<f64>, q: [f64; 3], param: [f64; 2]) 
 }
 
 fn oriented_sign_at(
-    surface: &NurbsSurface<f64>,
+    surface: AdmittedNurbsSurface<'_, f64>,
     q: [f64; 3],
     param: [f64; 2],
 ) -> Option<(f64, Option<Vec3>)> {
@@ -1024,10 +1061,14 @@ pub fn generate_tile(
                     aabb.min.z + k as f64 * step[2],
                 ];
                 // Cheap pass first; refine only inside the near band.
-                let coarse = chart.shell.distance(q, tol_far, max_splits / 4)?;
-                let query = if coarse.lower <= refine_band {
-                    let fine = chart.shell.distance(q, tol_near, max_splits)?;
-                    tile.total_splits += u64::from(coarse.splits);
+                let coarse = chart
+                    .shell
+                    .distance_with_admission(q, tol_far, max_splits / 4)?;
+                let (query, admitted_surface) = if coarse.0.lower <= refine_band {
+                    let fine = chart
+                        .shell
+                        .distance_with_admission(q, tol_near, max_splits)?;
+                    tile.total_splits += u64::from(coarse.0.splits);
                     fine
                 } else {
                     coarse
@@ -1053,7 +1094,7 @@ pub fn generate_tile(
                     tile.values.push(f32::INFINITY);
                     continue;
                 }
-                let Some((sign, _)) = chart.sign_and_gradient(q, &query) else {
+                let Some((sign, _)) = chart.sign_and_gradient(q, &query, admitted_surface) else {
                     tile.downgraded += 1;
                     tile.sign_downgraded += 1;
                     if near_cell {

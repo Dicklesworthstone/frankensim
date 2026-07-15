@@ -213,16 +213,19 @@ run-scan, and queue-seeding estimate is charged before conversion, including
 when the requested split budget is zero; degree-scaled de Casteljau split work
 and the worst retained queue/scratch frontier are admitted separately. Surface
 conversion storage is not yet composed with that frontier under one retained
-payload ceiling. Owning derivative, SDF, and refit construction paths are not
-all migrated yet; they make no claim of caller-budgeted preflight or end-to-end
-validate-once execution. The SDF shell reuses that same split/frontier model,
-exports worst-case seed and split heap coefficients into its aggregate work
-gate, and additionally charges structure-sensitive polishing, sign-repair, and
-trim coefficients; a shell for which even a zero-split query exceeds the
-ceiling is not constructible. The
-legacy refit path has validated static work/allocation/probe caps but no `Cx`;
-trim classification likewise retains a static process ceiling rather than a
-caller-owned affine budget and has no `Cx`; these APIs are not yet P7
+payload ceiling. Owning derivative and refit construction paths are not all
+migrated yet; they make no claim of caller-budgeted preflight or end-to-end
+validate-once execution. The SDF shell rejects malformed point/tolerance input
+before surface planning, admits each immutable surface once per distance query,
+reuses that admission through closest and Gauss-Newton polish, and carries the
+winning admission into gradient, orientation, and regular-witness sign work.
+It reuses the same split/frontier model, exports worst-case seed and split heap
+coefficients into its aggregate work gate, and additionally charges
+structure-sensitive polishing, sign-repair, and trim coefficients; a shell for
+which even a zero-split query exceeds the ceiling is not constructible. The SDF,
+legacy refit, and trim-classification paths retain static process ceilings
+rather than caller-owned affine budgets and have no effective `Cx`; these APIs
+are not yet P7
 cancellation-correct. The successor budgeted
 interfaces are tracked explicitly and must add bounded polling plus
 request→drain→finalize semantics before promotion.
