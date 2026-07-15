@@ -2877,6 +2877,8 @@ impl VvCase {
                 "transport is structurally valid but not a canonical fixed point",
             ));
         }
+        case.validate()
+            .map_err(|error| model_error(0, "V&V case", error))?;
         Ok(case)
     }
 

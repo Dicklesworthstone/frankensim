@@ -1016,6 +1016,26 @@ fn canonical_transport_refuses_wrong_domain_and_trailing_bytes() {
 }
 
 #[test]
+fn canonical_case_decode_refuses_forged_derived_applicability() {
+    let forged = closed_case(CaseKnobs {
+        outside_domain: true,
+        force_in_domain_claim: true,
+        ..CaseKnobs::default()
+    });
+    let bytes = forged
+        .canonical_bytes()
+        .expect("structurally encodable forged case");
+
+    let error = VvCase::from_canonical_bytes(&bytes)
+        .expect_err("decode must run closed-case semantic validation");
+    assert_eq!(error.rule_name(), "vv-canonical-identity");
+    assert!(
+        error.to_string().contains("vv-applicability-decision"),
+        "semantic refusal must preserve the governing rule: {error}"
+    );
+}
+
+#[test]
 fn admission_receipt_refuses_a_semantically_different_case() {
     let case = closed_case(CaseKnobs::default());
     let (_, receipt) = case
