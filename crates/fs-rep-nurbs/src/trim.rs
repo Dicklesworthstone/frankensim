@@ -118,6 +118,20 @@ pub enum TrimLoopAdmissionRun<'a> {
     Cancelled,
 }
 
+/// Transactional terminal state of cancellation-aware trim-loop construction.
+#[must_use]
+#[derive(Debug, PartialEq)]
+pub enum TrimLoopConstructionRun {
+    /// Validation completed and the sealed exact loop is safe to publish.
+    Complete {
+        /// Newly validated exact trim-loop generation.
+        trim_loop: TrimLoop,
+    },
+    /// Cancellation was observed; the transferred curve was dropped without
+    /// publishing a loop.
+    Cancelled,
+}
+
 /// Transactional terminal state of a cancellation-aware fallible trim-loop
 /// copy.
 #[must_use]
@@ -279,6 +293,40 @@ impl TrimLoop {
         Ok(candidate)
     }
 
+    /// Validate an owned exact curve as a closed trim loop with bounded
+    /// cancellation polling.
+    ///
+    /// One `Cx` spans the existing curve/knot admission, both exact endpoint
+    /// evaluations, full-break continuity traversal, and final owned
+    /// publication. Construction allocates no derived loop payload; endpoint
+    /// basis scratch retains its existing bounded allocation policy.
+    /// Cancellation drops the caller-transferred curve without exposing a
+    /// partially validated loop. Individual allocations, exact-rational
+    /// operations, and destruction are not preemptible. This primitive does
+    /// not consume the `Cx` budget or own request -> drain -> finalize
+    /// semantics.
+    ///
+    /// # Errors
+    /// Returns the synchronous constructor's work, allocation, structural,
+    /// numeric-domain, closure, or continuity refusal when it wins before an
+    /// observed cancellation.
+    pub fn new_with_cx(
+        curve: NurbsCurve<Rat, 2>,
+        cx: &Cx<'_>,
+    ) -> Result<TrimLoopConstructionRun, NurbsError> {
+        let candidate = TrimLoop { curve };
+        let validation = match candidate.admit_with_cx(cx)? {
+            TrimLoopAdmissionRun::Complete { .. } => TrimLoopValidationOutcome::Complete,
+            TrimLoopAdmissionRun::Cancelled => TrimLoopValidationOutcome::Cancelled,
+        };
+        let mut should_cancel = || cx.checkpoint().is_err();
+        Ok(finish_trim_loop_construction_with_poll(
+            candidate,
+            validation,
+            &mut should_cancel,
+        ))
+    }
+
     /// Borrow the sealed exact curve.
     #[must_use]
     pub const fn curve(&self) -> &NurbsCurve<Rat, 2> {
@@ -327,6 +375,25 @@ impl TrimLoop {
     /// derived closure, continuity, knots, or control net are invalid.
     pub fn reversed_for_hole(&self) -> Result<TrimLoop, NurbsError> {
         self.admit()?.reversed_for_hole()
+    }
+}
+
+fn finish_trim_loop_construction_with_poll(
+    candidate: TrimLoop,
+    validation: TrimLoopValidationOutcome,
+    should_cancel: &mut impl FnMut() -> bool,
+) -> TrimLoopConstructionRun {
+    match validation {
+        TrimLoopValidationOutcome::Complete => {
+            if should_cancel() {
+                TrimLoopConstructionRun::Cancelled
+            } else {
+                TrimLoopConstructionRun::Complete {
+                    trim_loop: candidate,
+                }
+            }
+        }
+        TrimLoopValidationOutcome::Cancelled => TrimLoopConstructionRun::Cancelled,
     }
 }
 
@@ -2124,6 +2191,77 @@ mod tests {
                 Err(NurbsError::Structure { ref what }) if what.contains("close exactly")
             ));
         });
+    }
+
+    #[test]
+    fn trim_loop_construction_with_cx_is_transactional_and_exact() {
+        let expected = point_trim_loop();
+        with_trim_cx(true, |cx| {
+            assert_eq!(
+                TrimLoop::new_with_cx(expected.curve.try_clone().expect("curve copy"), cx,)
+                    .expect("valid pre-cancelled loop construction"),
+                TrimLoopConstructionRun::Cancelled
+            );
+        });
+        with_trim_cx(false, |cx| {
+            assert_eq!(
+                TrimLoop::new_with_cx(expected.curve.try_clone().expect("curve copy"), cx,)
+                    .expect("active loop construction"),
+                TrimLoopConstructionRun::Complete {
+                    trim_loop: expected.try_clone().expect("expected loop copy"),
+                }
+            );
+        });
+
+        let open_curve = || {
+            NurbsCurve::new(
+                KnotVector::new(vec![Rat::int(0), Rat::int(0), Rat::int(1), Rat::int(1)], 1)
+                    .expect("open-loop knots"),
+                &[[Rat::int(0), Rat::int(0)], [Rat::int(1), Rat::int(0)]],
+                &[Rat::int(1); 2],
+            )
+            .expect("open curve")
+        };
+        let legacy_error = TrimLoop::new(open_curve()).expect_err("legacy open-loop refusal");
+        with_trim_cx(false, |cx| {
+            assert_eq!(
+                TrimLoop::new_with_cx(open_curve(), cx).expect_err("cancellable open-loop refusal"),
+                legacy_error
+            );
+        });
+    }
+
+    #[test]
+    fn trim_loop_construction_propagates_validation_and_publication_cancellation() {
+        let candidate = point_trim_loop();
+        let mut unexpected_publication_polls = 0usize;
+        assert_eq!(
+            finish_trim_loop_construction_with_poll(
+                candidate,
+                TrimLoopValidationOutcome::Cancelled,
+                &mut || {
+                    unexpected_publication_polls += 1;
+                    false
+                },
+            ),
+            TrimLoopConstructionRun::Cancelled
+        );
+        assert_eq!(unexpected_publication_polls, 0);
+
+        let candidate = point_trim_loop();
+        let mut publication_polls = 0usize;
+        assert_eq!(
+            finish_trim_loop_construction_with_poll(
+                candidate,
+                TrimLoopValidationOutcome::Complete,
+                &mut || {
+                    publication_polls += 1;
+                    true
+                },
+            ),
+            TrimLoopConstructionRun::Cancelled
+        );
+        assert_eq!(publication_polls, 1);
     }
 
     #[test]

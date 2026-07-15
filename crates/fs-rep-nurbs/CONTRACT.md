@@ -133,7 +133,9 @@ fs-iga (geometry basis = analysis basis), fs-render NURBS tracing
   (closure and continuity validated by rational equality, including exact
   left/right-limit agreement at any full knot break). Loop, curve, and
   subdivision storage is sealed; borrowed admitted views bind closure and
-  structure validation to the immutable source. Owning
+  structure validation to the immutable source. Owning `new_with_cx` returns
+  transactional `TrimLoopConstructionRun` state and publishes only a fully
+  validated closed exact loop. Owning
   `try_clone_with_cx` returns transactional `TrimLoopCloneRun` state and
   publishes only a complete sealed exact copy after the nested curve-copy
   envelope. `TrimmedPatch::try_clone_with_cx` returns transactional
@@ -480,6 +482,14 @@ publishes no admitted view. Polling is fixed-stride between logical knot-run
 and continuity checks; an individual exact-rational operation is not
 preemptible. The primitive does not consume caller budget or own surrounding
 request drain/finalize, wall-time, or resumability semantics.
+`TrimLoop::new_with_cx` reuses that full admission pipeline for the
+caller-transferred exact curve, then adds a final checkpoint before publishing
+the owned loop. `TrimLoopConstructionRun::Cancelled` exposes no loop and drops
+the transferred curve. Construction allocates no derived loop payload; the
+sequential endpoint basis scratch retains its existing bounded allocation
+policy. Allocator calls, exact-rational operations, and destructors are
+non-preemptible, and this primitive adds no exact caller-budget, wall-time,
+drain/finalize, resumability, topology, classification, or certificate claim.
 `AdmittedTrimLoop::reversed_for_hole_with_cx` preserves count-derived aggregate
 work and simultaneously-live retained-storage refusal precedence, then carries
 one `Cx` through fallible reversed-knot allocation, exact same-sign-safe knot
