@@ -36,12 +36,14 @@ mod i01;
 mod i02;
 mod i04;
 mod i08;
+mod i12;
 mod i15;
 
 pub use i01::i01_draft;
 pub use i02::i02_draft;
 pub use i04::i04_draft;
 pub use i08::i08_draft;
+pub use i12::i12_draft;
 pub use i15::i15_draft;
 
 /// Manifest schema version (canonical bytes are comparable only within it).
