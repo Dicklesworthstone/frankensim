@@ -111,8 +111,12 @@ fs-iga (geometry basis = analysis basis), fs-render NURBS tracing
   (closure and continuity validated by rational equality, including exact
   left/right-limit agreement at any full knot break). Loop, curve, and
   subdivision storage is sealed; borrowed admitted views bind closure and
-  structure validation to the immutable source. Aggregate loop-count/structure
-  validation is admitted before the first deep scan and spends the same defensive classification budget;
+  structure validation to the immutable source. Admitted
+  `reversed_for_hole_with_cx` returns transactional `TrimLoopReversalRun`
+  state and publishes only a complete opposite-orientation loop after checked
+  aggregate work/retained-storage admission and full derived validation.
+  Aggregate loop-count/structure validation is admitted before the first deep
+  scan and spends the same defensive classification budget;
   shell ingestion shares a bounded construction-validation ledger across all
   trims. `classify` is CERTIFIED:
   outside every Bézier span hull ⇒ the exactly-computed control-polygon
@@ -362,6 +366,16 @@ publishes no admitted view. Polling is fixed-stride between logical knot-run
 and continuity checks; an individual exact-rational operation is not
 preemptible. The primitive does not consume caller budget or own surrounding
 request drain/finalize, wall-time, or resumability semantics.
+`AdmittedTrimLoop::reversed_for_hole_with_cx` preserves count-derived aggregate
+work and simultaneously-live retained-storage refusal precedence, then carries
+one `Cx` through fallible reversed-knot allocation, exact same-sign-safe knot
+mirroring, fallible reversed-control allocation, ordered fixed-stride copies,
+full derived loop admission, and final owned publication.
+`TrimLoopReversalRun::Cancelled` exposes no partial loop and drops all derived
+storage. The borrowed source is excluded from the retained envelope; allocator
+calls, individual exact-rational operations, and destructors are
+non-preemptible. The primitive adds no `Cx` budget consumption, wall-time,
+drain/finalize, resumability, topology, or geometric-certificate claim.
 `TrimmedPatch::admit_with_cx` retains the constant-time minimum loop-count work
 refusal ahead of cancellation, then carries the same caller gate through the
 exact aggregate validation-work scan, every nested loop/curve admission, and

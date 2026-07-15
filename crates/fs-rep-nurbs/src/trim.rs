@@ -56,6 +56,13 @@ struct TrimClassificationQuery {
     max_depth: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TrimLoopReversalPlan {
+    knot_count: usize,
+    control_count: usize,
+    degree: usize,
+}
+
 /// Minimum charge for admitting one sealed loop before inspecting its
 /// knot/control metadata. This makes a huge collection of individually tiny
 /// loops reject in O(1), rather than spending unbounded time merely discovering
@@ -95,6 +102,19 @@ pub enum TrimLoopAdmissionRun<'a> {
         admitted: AdmittedTrimLoop<'a>,
     },
     /// Cancellation was observed; no admitted authority was published.
+    Cancelled,
+}
+
+/// Transactional terminal state of cancellation-aware trim-loop reversal.
+#[must_use]
+#[derive(Debug, PartialEq)]
+pub enum TrimLoopReversalRun {
+    /// The complete sealed and validated opposite-orientation loop.
+    Complete {
+        /// Reversed exact trim-loop generation.
+        trim_loop: TrimLoop,
+    },
+    /// Cancellation was observed; all partial derived storage was dropped.
     Cancelled,
 }
 
@@ -253,36 +273,11 @@ impl TrimLoop {
     /// vector mirrored about the domain.
     ///
     /// # Errors
-    /// [`NurbsError::Structure`] when closure, continuity, knots, or the control
-    /// net are invalid.
+    /// [`NurbsError::Domain`] when checked work, retained storage, or a
+    /// destination allocation is refused; [`NurbsError::Structure`] when the
+    /// derived closure, continuity, knots, or control net are invalid.
     pub fn reversed_for_hole(&self) -> Result<TrimLoop, NurbsError> {
-        let admitted = self.admit()?;
-        let curve = admitted.curve();
-        let admitted_knots = curve.knots();
-        let (lo, hi) = admitted_knots.domain();
-        let mut knots = Vec::new();
-        knots
-            .try_reserve_exact(admitted_knots.knots().len())
-            .map_err(|_| NurbsError::Domain {
-                what: "reversed trim-knot allocation was refused".to_string(),
-            })?;
-        for &knot in admitted_knots.knots().iter().rev() {
-            knots.push(lo + (hi - knot));
-        }
-        let controls = curve.homogeneous_control_points();
-        let mut cpw = Vec::new();
-        cpw.try_reserve_exact(controls.len())
-            .map_err(|_| NurbsError::Domain {
-                what: "reversed trim-control allocation was refused".to_string(),
-            })?;
-        cpw.extend(controls.iter().rev().copied());
-        let reversed_knots = crate::basis::KnotVector::new(knots, admitted_knots.degree())?;
-        let reversed_curve = NurbsCurve::from_homogeneous(reversed_knots, cpw)?;
-        // Reversal of an admitted curve preserves exact endpoint closure and
-        // full-break continuity while only changing orientation.
-        Ok(TrimLoop {
-            curve: reversed_curve,
-        })
+        self.admit()?.reversed_for_hole()
     }
 }
 
@@ -297,6 +292,69 @@ impl<'a> AdmittedTrimLoop<'a> {
     #[must_use]
     pub fn curve(&self) -> crate::curve::AdmittedNurbsCurve<'a, Rat, 2> {
         self.inner.curve.admitted_after_validation()
+    }
+
+    /// Reverse this admitted loop without rescanning the immutable source.
+    ///
+    /// The derived loop is fully revalidated before publication.
+    ///
+    /// # Errors
+    /// Returns checked work, retained-memory, allocation, or derived structural
+    /// refusals.
+    pub fn reversed_for_hole(&self) -> Result<TrimLoop, NurbsError> {
+        let plan = preflight_trim_loop_reversal(*self)?;
+        let mut never_cancel = || false;
+        let candidate = match assemble_reversed_trim_loop_with_poll(*self, plan, &mut never_cancel)?
+        {
+            TrimWorkRun::Complete(candidate) => candidate,
+            TrimWorkRun::Cancelled => {
+                return Err(NurbsError::Domain {
+                    what: "non-cancelling trim-loop reversal observed cancellation".to_string(),
+                });
+            }
+        };
+        candidate.admit()?;
+        match publish_reversed_trim_loop_with_poll(candidate, &mut never_cancel) {
+            TrimLoopReversalRun::Complete { trim_loop } => Ok(trim_loop),
+            TrimLoopReversalRun::Cancelled => Err(NurbsError::Domain {
+                what: "non-cancelling trim-loop reversal publication observed cancellation"
+                    .to_string(),
+            }),
+        }
+    }
+
+    /// Reverse this admitted loop with bounded cancellation polling.
+    ///
+    /// Count-derived work and simultaneously-live retained storage are
+    /// admitted before cancellation. One `Cx` then spans fallible knot/control
+    /// allocation, exact knot mirroring, ordered copies, complete validation
+    /// of the derived loop, and final owned publication. Cancellation exposes
+    /// no partial loop. Individual allocator calls, exact-rational operations,
+    /// and destructors are non-preemptible; this primitive does not consume
+    /// the `Cx` budget or own request -> drain -> finalize semantics.
+    ///
+    /// # Errors
+    /// Returns the synchronous reversal's work, memory, allocation, or
+    /// structural refusal when it wins before an observed cancellation.
+    pub fn reversed_for_hole_with_cx(
+        &self,
+        cx: &Cx<'_>,
+    ) -> Result<TrimLoopReversalRun, NurbsError> {
+        let plan = preflight_trim_loop_reversal(*self)?;
+        let mut should_cancel = || cx.checkpoint().is_err();
+        let candidate =
+            match assemble_reversed_trim_loop_with_poll(*self, plan, &mut should_cancel)? {
+                TrimWorkRun::Complete(candidate) => candidate,
+                TrimWorkRun::Cancelled => return Ok(TrimLoopReversalRun::Cancelled),
+            };
+        match candidate.admit_with_cx(cx)? {
+            TrimLoopAdmissionRun::Complete { .. } => {}
+            TrimLoopAdmissionRun::Cancelled => return Ok(TrimLoopReversalRun::Cancelled),
+        }
+        Ok(publish_reversed_trim_loop_with_poll(
+            candidate,
+            &mut should_cancel,
+        ))
     }
 }
 
@@ -864,14 +922,18 @@ fn validate_classification_box(min: [Rat; 2], max: [Rat; 2]) -> Result<(), Nurbs
     Ok(())
 }
 
-fn trim_loop_validation_work(curve: &NurbsCurve<Rat, 2>) -> Result<u128, NurbsError> {
+fn trim_loop_validation_work_for(
+    knot_count: usize,
+    control_count: usize,
+    degree: usize,
+) -> Result<u128, NurbsError> {
     let control_components =
-        (curve.cpw.len() as u128)
+        (control_count as u128)
             .checked_mul(4)
             .ok_or_else(|| NurbsError::Domain {
                 what: "trim control-validation accounting overflows u128".to_string(),
             })?;
-    let order = (curve.knots.degree as u128)
+    let order = (degree as u128)
         .checked_add(1)
         .ok_or_else(|| NurbsError::Domain {
             what: "trim order-validation accounting overflows u128".to_string(),
@@ -879,7 +941,7 @@ fn trim_loop_validation_work(curve: &NurbsCurve<Rat, 2>) -> Result<u128, NurbsEr
     let basis_triangle = order.checked_mul(order).ok_or_else(|| NurbsError::Domain {
         what: "trim basis-validation accounting overflows u128".to_string(),
     })?;
-    let scanned_entries = (curve.knots.knots.len() as u128)
+    let scanned_entries = (knot_count as u128)
         .checked_add(control_components)
         .and_then(|work| work.checked_add(basis_triangle))
         .ok_or_else(|| NurbsError::Domain {
@@ -894,6 +956,142 @@ fn trim_loop_validation_work(curve: &NurbsCurve<Rat, 2>) -> Result<u128, NurbsEr
         .ok_or_else(|| NurbsError::Domain {
             what: "trim repeated-validation accounting overflows u128".to_string(),
         })
+}
+
+fn trim_loop_validation_work(curve: &NurbsCurve<Rat, 2>) -> Result<u128, NurbsError> {
+    trim_loop_validation_work_for(curve.knots.knots.len(), curve.cpw.len(), curve.knots.degree)
+}
+
+fn preflight_trim_loop_reversal(
+    trim_loop: AdmittedTrimLoop<'_>,
+) -> Result<TrimLoopReversalPlan, NurbsError> {
+    let curve = trim_loop.curve();
+    preflight_trim_loop_reversal_counts(
+        curve.knots().knots().len(),
+        curve.homogeneous_control_points().len(),
+        curve.knots().degree(),
+    )
+}
+
+fn preflight_trim_loop_reversal_counts(
+    knot_count: usize,
+    control_count: usize,
+    degree: usize,
+) -> Result<TrimLoopReversalPlan, NurbsError> {
+    let copy_work = (knot_count as u128)
+        .checked_mul(16)
+        .and_then(|work| work.checked_add((control_count as u128).checked_mul(4)?))
+        .ok_or_else(|| NurbsError::Domain {
+            what: "trim-loop reversal copy-work accounting overflows u128".to_string(),
+        })?;
+    let work_units = copy_work
+        .checked_add(trim_loop_validation_work_for(
+            knot_count,
+            control_count,
+            degree,
+        )?)
+        .and_then(|work| work.checked_add(64))
+        .ok_or_else(|| NurbsError::Domain {
+            what: "trim-loop reversal aggregate work overflows u128".to_string(),
+        })?;
+    if work_units > TRIM_CLASSIFY_MAX_WORK_UNITS {
+        return Err(NurbsError::Domain {
+            what: format!(
+                "trim-loop reversal requests {work_units} work units above defensive ceiling {TRIM_CLASSIFY_MAX_WORK_UNITS}"
+            ),
+        });
+    }
+
+    let order = degree.checked_add(1).ok_or_else(|| NurbsError::Domain {
+        what: "trim-loop reversal basis order overflows usize".to_string(),
+    })?;
+    let basis_workspace = (order as u128)
+        .checked_mul(3)
+        .and_then(|count| count.checked_mul(core::mem::size_of::<Rat>() as u128))
+        .ok_or_else(|| NurbsError::Domain {
+            what: "trim-loop reversal basis-workspace accounting overflows u128".to_string(),
+        })?;
+    let peak_retained_bytes = trim_curve_storage_bytes(knot_count, control_count)?
+        .checked_add(basis_workspace)
+        .ok_or_else(|| NurbsError::Domain {
+            what: "trim-loop reversal retained-byte accounting overflows u128".to_string(),
+        })?;
+    enforce_trim_retained_bytes(peak_retained_bytes, "loop reversal")?;
+    Ok(TrimLoopReversalPlan {
+        knot_count,
+        control_count,
+        degree,
+    })
+}
+
+fn assemble_reversed_trim_loop_with_poll(
+    trim_loop: AdmittedTrimLoop<'_>,
+    plan: TrimLoopReversalPlan,
+    should_cancel: &mut impl FnMut() -> bool,
+) -> Result<TrimWorkRun<TrimLoop>, NurbsError> {
+    let curve = trim_loop.curve();
+    let admitted_knots = curve.knots();
+    let (lo, hi) = admitted_knots.domain();
+    if should_cancel() {
+        return Ok(TrimWorkRun::Cancelled);
+    }
+    let mut knots = Vec::new();
+    knots
+        .try_reserve_exact(plan.knot_count)
+        .map_err(|_| NurbsError::Domain {
+            what: "reversed trim-knot allocation was refused".to_string(),
+        })?;
+    let mut operations_since_poll = 0usize;
+    for &knot in admitted_knots.knots().iter().rev() {
+        knots.push(lo + (hi - knot));
+        if trim_poll_due(&mut operations_since_poll, should_cancel) {
+            return Ok(TrimWorkRun::Cancelled);
+        }
+    }
+    if should_cancel() {
+        return Ok(TrimWorkRun::Cancelled);
+    }
+
+    let controls = curve.homogeneous_control_points();
+    let mut cpw = Vec::new();
+    cpw.try_reserve_exact(plan.control_count)
+        .map_err(|_| NurbsError::Domain {
+            what: "reversed trim-control allocation was refused".to_string(),
+        })?;
+    operations_since_poll = 0;
+    for &control in controls.iter().rev() {
+        cpw.push(control);
+        if trim_poll_due(&mut operations_since_poll, should_cancel) {
+            return Ok(TrimWorkRun::Cancelled);
+        }
+    }
+    if knots.len() != plan.knot_count || cpw.len() != plan.control_count {
+        return Err(NurbsError::Structure {
+            what: "trim-loop reversal assembly disagrees with its admitted shape".to_string(),
+        });
+    }
+    if should_cancel() {
+        return Ok(TrimWorkRun::Cancelled);
+    }
+    Ok(TrimWorkRun::Complete(TrimLoop {
+        curve: NurbsCurve {
+            knots: crate::basis::KnotVector {
+                knots,
+                degree: plan.degree,
+            },
+            cpw,
+        },
+    }))
+}
+
+fn publish_reversed_trim_loop_with_poll(
+    trim_loop: TrimLoop,
+    should_cancel: &mut impl FnMut() -> bool,
+) -> TrimLoopReversalRun {
+    if should_cancel() {
+        return TrimLoopReversalRun::Cancelled;
+    }
+    TrimLoopReversalRun::Complete { trim_loop }
 }
 
 fn exact_midpoint(left: Rat, right: Rat, stage: &str) -> Result<Rat, NurbsError> {
@@ -1639,6 +1837,18 @@ mod tests {
         TrimLoop::new(curve).expect("closed polyline loop")
     }
 
+    fn assemble_reversed_for_test(trim_loop: AdmittedTrimLoop<'_>) -> TrimLoop {
+        let plan = preflight_trim_loop_reversal(trim_loop).expect("reversal preflight");
+        let mut never_cancel = || false;
+        let TrimWorkRun::Complete(candidate) =
+            assemble_reversed_trim_loop_with_poll(trim_loop, plan, &mut never_cancel)
+                .expect("reversal assembly")
+        else {
+            panic!("healthy reversal assembly must complete");
+        };
+        candidate
+    }
+
     #[test]
     fn trim_loop_admission_with_cx_is_transactional_and_lifetime_bound() {
         let trim_loop = point_trim_loop();
@@ -1725,6 +1935,143 @@ mod tests {
             TrimLoopValidationOutcome::Cancelled
         );
         assert_eq!(replay_polls, total_polls);
+    }
+
+    #[test]
+    fn trim_loop_reversal_with_cx_is_transactional_and_exact() {
+        let trim_loop = poly_trim_loop(&[[0, 0], [2, 0], [2, 2], [0, 2]]);
+        let admitted = trim_loop.admit().expect("admitted square loop");
+        let legacy = admitted.reversed_for_hole().expect("legacy reversal");
+        assert_eq!(
+            legacy
+                .admit()
+                .expect("admitted reversed loop")
+                .reversed_for_hole()
+                .expect("double reversal"),
+            trim_loop
+        );
+
+        with_trim_cx(true, |cx| {
+            assert_eq!(
+                admitted
+                    .reversed_for_hole_with_cx(cx)
+                    .expect("valid pre-cancelled reversal"),
+                TrimLoopReversalRun::Cancelled
+            );
+        });
+        with_trim_cx(false, |cx| {
+            assert_eq!(
+                admitted
+                    .reversed_for_hole_with_cx(cx)
+                    .expect("active reversal"),
+                TrimLoopReversalRun::Complete {
+                    trim_loop: legacy.try_clone().expect("expected reversal copy"),
+                }
+            );
+        });
+
+        let query = [Rat::int(1), Rat::int(1)];
+        let mut never_cancel = || false;
+        let TrimWorkRun::Complete(source_winding) = polygon_winding_homogeneous_with_poll(
+            admitted.curve().homogeneous_control_points(),
+            query,
+            &mut never_cancel,
+        ) else {
+            panic!("healthy source winding must complete");
+        };
+        let reversed = legacy.admit().expect("admitted reversed loop");
+        let TrimWorkRun::Complete(reversed_winding) = polygon_winding_homogeneous_with_poll(
+            reversed.curve().homogeneous_control_points(),
+            query,
+            &mut never_cancel,
+        ) else {
+            panic!("healthy reversed winding must complete");
+        };
+        assert_eq!(reversed_winding, -source_winding);
+        assert_ne!(source_winding, 0);
+    }
+
+    #[test]
+    fn trim_loop_reversal_preserves_large_same_sign_domain_with_cx() {
+        let lo = Rat::new(i128::MAX - 10, 1);
+        let hi = Rat::new(i128::MAX - 1, 1);
+        let trim_loop = TrimLoop::new(
+            NurbsCurve::new(
+                KnotVector::new(vec![lo, lo, hi, hi], 1).expect("large same-sign knots"),
+                &[[Rat::int(0), Rat::int(0)]; 2],
+                &[Rat::int(1); 2],
+            )
+            .expect("large-domain curve"),
+        )
+        .expect("large-domain loop");
+        let admitted = trim_loop.admit().expect("admitted large-domain loop");
+        with_trim_cx(false, |cx| {
+            assert!(matches!(
+                admitted
+                    .reversed_for_hole_with_cx(cx)
+                    .expect("active large-domain reversal"),
+                TrimLoopReversalRun::Complete { .. }
+            ));
+        });
+    }
+
+    #[test]
+    fn trim_loop_reversal_cancels_inside_both_copy_phases() {
+        let trim_loop = long_trim_loop();
+        let admitted = trim_loop.admit().expect("admitted long loop");
+        let plan = preflight_trim_loop_reversal(admitted).expect("reversal preflight");
+        let run = |target| {
+            let mut polls = 0usize;
+            let mut should_cancel = || {
+                polls += 1;
+                polls == target
+            };
+            let outcome = assemble_reversed_trim_loop_with_poll(admitted, plan, &mut should_cancel)
+                .expect("bounded reversal assembly");
+            (matches!(outcome, TrimWorkRun::Cancelled), polls)
+        };
+        assert_eq!(run(2), run(2));
+        assert_eq!(run(2), (true, 2));
+        assert_eq!(run(5), run(5));
+        assert_eq!(run(5), (true, 5));
+    }
+
+    #[test]
+    fn trim_loop_reversal_propagates_nested_and_publication_cancellation() {
+        let trim_loop = point_trim_loop();
+        let admitted = trim_loop.admit().expect("admitted point loop");
+        let candidate = assemble_reversed_for_test(admitted);
+        with_trim_cx(true, |cx| {
+            assert!(matches!(
+                candidate
+                    .admit_with_cx(cx)
+                    .expect("pre-cancelled derived admission"),
+                TrimLoopAdmissionRun::Cancelled
+            ));
+        });
+
+        let candidate = assemble_reversed_for_test(admitted);
+        candidate.admit().expect("validated reversal candidate");
+        let mut polls = 0usize;
+        let mut cancel_at_publication = || {
+            polls += 1;
+            polls == 1
+        };
+        assert_eq!(
+            publish_reversed_trim_loop_with_poll(candidate, &mut cancel_at_publication),
+            TrimLoopReversalRun::Cancelled
+        );
+        assert_eq!(polls, 1);
+    }
+
+    #[test]
+    fn trim_loop_reversal_refuses_work_before_retained_bytes() {
+        let error = preflight_trim_loop_reversal_counts(usize::MAX, usize::MAX, 1)
+            .expect_err("work must refuse before retained-byte accounting");
+        assert!(matches!(
+            error,
+            NurbsError::Domain { ref what } if what.contains("work units above defensive ceiling")
+        ));
     }
 
     #[test]
