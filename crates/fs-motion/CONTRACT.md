@@ -174,3 +174,10 @@ clearance volumes, and validated events are separate beads/crates.
   claimed here.
 - No claim of tightness: enclosures are sound, not minimal; segment
   count and Taylor order are the caller's accuracy budget.
+- Double-cover canonicalization is bit-deterministic for identical
+  inputs, but a tube built from `−M` canonicalizes to enclosures that
+  agree with the `M`-built tube only at roundoff scale (≤ 1e−13
+  absolute per endpoint at unit component scale): the Taylor-model
+  negation's outward remainder rounding is not perfectly
+  sign-symmetric. Exact bit-equality ACROSS the double cover is not
+  claimed.
