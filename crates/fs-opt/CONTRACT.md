@@ -99,7 +99,11 @@ structure; FLUX/UQ execute it.
   through the FD quotient; a negative rate would silently ascend).
   The internal objective seam is fallible: non-finite closure results
   and typed IR evaluation failures propagate without publishing a
-  report or converting the refusal into a panic.
+  report or converting the refusal into a panic. Each finite-difference
+  step reserves its full two-probes-per-parameter gradient plus terminal
+  valuation before the first probe, so budget exhaustion cannot leave a
+  partially spent gradient. Cancellation is polled before/after f0,
+  probe evaluations, retraction boundaries, and final publication.
 - Structure: multi-objective (weights), constraint KINDS (`EqZero`,
   `LeZero` — semantics/repair are fs-constraint's), `ProblemTag`
   (multi-fidelity, chance-constrained, bilevel via typed
@@ -230,10 +234,11 @@ structure; FLUX/UQ execute it.
    finds the top invariant subspace (opt-005).
 6. P4/P7: the attached budget stops descent with a RECEIPT (not an
    error), never exceeds its cap, reuses the already-counted initial
-   value when no step lands, and reserves a terminal evaluation before
-   spending an FD pair. Raw manifold descriptors and `x0` lengths refuse
-   before the objective closure is called; cancellation returns the
-   teaching error; PDE/stochastic nodes name their executor when asked
+   value when no step lands, and reserves the complete FD gradient plus
+   terminal evaluation before spending any probe. Raw manifold descriptors
+   and `x0` lengths refuse before the objective closure is called;
+   cancellation returns the teaching error; PDE/stochastic nodes name
+   their executor when asked
    to evaluate (opt-005/006).
 7. G3 unit rescaling: the live `descend_fn` step is equivariant when a
    one-dimensional quadratic's start, target, and finite-difference step are
@@ -265,8 +270,11 @@ mismatches and dimension overflow (with exponent vectors shown; both
 scaling `DimOverflow` and combining `DimSumOverflow`), non-dimensionless
 transcendentals, odd-sqrt dims, bad parameters/indices, non-scalar
 roots, `ManifoldInvalid` (violated policy named), `NonFinite` (payload
-name + exact bit pattern), `CapExceeded` (cap name + count + limit),
-`BindingCount`/`BindingLen` (declared vs supplied),
+name + exact bit pattern), `BindingNonFinite`/`EvalNonFinite` (runtime
+location + exact bits), `RetractionLen`/`RetractionNonFinite`/
+`RetractionDomain` (input, manifold rule, location, and measurement),
+`CapExceeded` (cap name + count + limit), `BindingCount`/`BindingLen`
+(declared vs supplied),
 `WireIncompatible` (historical version + unrepresentable typed construct),
 `NonsmoothForFamily` (node + kind + class),
 `NoAdjoint` (node + study), `Unevaluable` (node + executor), `Parse`
@@ -298,10 +306,13 @@ polarity, horizon, stopping, composition, and budget are domain separated.
 
 ## Cancellation behavior
 
-`descend_fn`/`descend_ir` poll `cx.checkpoint()` every step and
-return `OptError::Cancelled` between steps. Budget exhaustion is a
-RECEIPT (`budget_stopped` in the report), not an error — the iterate
-remains valid and `evals` never exceeds the positive cap (P4).
+`descend_fn`/`descend_ir` poll `cx.checkpoint()` before and after f0,
+each finite-difference probe and retraction boundary, the landed step,
+terminal evaluation, and report publication. Cancellation returns
+`OptError::Cancelled` without publishing a partial report. Budget
+exhaustion is a RECEIPT (`budget_stopped` in the report), not an error;
+the iterate remains valid, no partial gradient is spent, and `evals`
+never exceeds the positive cap (P4).
 
 Game admission polls before proportional scans, during bounded information,
 strategy-dependency, and composition traversal, and at identity publication.

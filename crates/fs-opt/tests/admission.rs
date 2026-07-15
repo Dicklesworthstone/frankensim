@@ -32,6 +32,29 @@ fn simple_problem(constant: f64) -> fs_opt::Problem {
     b.finish()
 }
 
+fn with_gate_cx<R>(
+    gate: &fs_exec::CancelGate,
+    seed: u64,
+    f: impl FnOnce(&fs_exec::Cx<'_>) -> R,
+) -> R {
+    let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+    pool.scope(|arena| {
+        let cx = fs_exec::Cx::new(
+            gate,
+            arena,
+            fs_exec::StreamKey {
+                seed,
+                kernel_id: 1,
+                tile: 0,
+                iteration: 0,
+            },
+            asupersync::types::Budget::INFINITE,
+            fs_exec::ExecMode::Deterministic,
+        );
+        f(&cx)
+    })
+}
+
 /// adm-001 — manifold leaf policies: Rn zero-dim, Sphere ambient
 /// boundaries, Stiefel frame bounds, and CHECKED point/tangent
 /// formulas (no u32 wrap can reach a Problem).
@@ -1172,4 +1195,75 @@ fn adm_018_retraction_domain_is_fail_closed() {
             })
         ));
     });
+}
+
+/// adm-019 — cancellation is observed before f0, after a probe that
+/// requests it, and after final evaluation but before report publication.
+/// No partially authoritative report crosses any of those boundaries.
+#[test]
+fn adm_019_descent_cancellation_boundaries() {
+    let opts = fs_opt::DescentOptions {
+        steps: 1,
+        lr: 0.1,
+        fd_h: 1e-6,
+    };
+
+    let pre_cancelled = fs_exec::CancelGate::new_clock_free();
+    pre_cancelled.request();
+    let pre_calls = std::cell::Cell::new(0u32);
+    with_gate_cx(&pre_cancelled, 0x1900, |cx| {
+        let objective = |x: &[f64]| {
+            pre_calls.set(pre_calls.get() + 1);
+            x[0] * x[0]
+        };
+        assert!(matches!(
+            fs_opt::descend_fn(Manifold::Rn { dim: 1 }, &objective, &[1.0], opts, 0, cx,),
+            Err(OptError::Cancelled)
+        ));
+    });
+    assert_eq!(pre_calls.get(), 0, "pre-cancelled descent must not call f0");
+
+    let probe_cancelled = fs_exec::CancelGate::new_clock_free();
+    let probe_calls = std::cell::Cell::new(0u32);
+    with_gate_cx(&probe_cancelled, 0x1901, |cx| {
+        let objective = |x: &[f64]| {
+            let call = probe_calls.get() + 1;
+            probe_calls.set(call);
+            if call == 2 {
+                probe_cancelled.request();
+            }
+            x[0] * x[0]
+        };
+        assert!(matches!(
+            fs_opt::descend_fn(Manifold::Rn { dim: 1 }, &objective, &[1.0], opts, 0, cx,),
+            Err(OptError::Cancelled)
+        ));
+    });
+    assert_eq!(
+        probe_calls.get(),
+        2,
+        "cancellation after the positive probe must prevent the negative probe"
+    );
+
+    let final_cancelled = fs_exec::CancelGate::new_clock_free();
+    let final_calls = std::cell::Cell::new(0u32);
+    with_gate_cx(&final_cancelled, 0x1902, |cx| {
+        let objective = |x: &[f64]| {
+            let call = final_calls.get() + 1;
+            final_calls.set(call);
+            if call == 4 {
+                final_cancelled.request();
+            }
+            x[0] * x[0]
+        };
+        assert!(matches!(
+            fs_opt::descend_fn(Manifold::Rn { dim: 1 }, &objective, &[1.0], opts, 0, cx,),
+            Err(OptError::Cancelled)
+        ));
+    });
+    assert_eq!(
+        final_calls.get(),
+        4,
+        "cancellation from final evaluation must prevent report publication"
+    );
 }

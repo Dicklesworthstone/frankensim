@@ -571,6 +571,10 @@ fn finite_descent_value(value: f64, what: &'static str) -> Result<f64, OptError>
     }
 }
 
+fn descent_checkpoint(cx: &Cx<'_>) -> Result<(), OptError> {
+    cx.checkpoint().map_err(|_| OptError::Cancelled)
+}
+
 fn descend_fn_checked(
     manifold: Manifold,
     f: &dyn Fn(&[f64]) -> Result<f64, OptError>,
@@ -617,52 +621,72 @@ fn descend_fn_checked(
             value: opts.lr,
         });
     }
+    let param_dim = manifold
+        .param_dim()
+        .ok_or_else(|| OptError::ManifoldInvalid {
+            what: format!("{manifold:?} has no representable descent parameter dimension"),
+        })?;
+    let pd = usize::try_from(param_dim).map_err(|_| OptError::ManifoldInvalid {
+        what: format!("{manifold:?} descent parameter dimension does not fit usize"),
+    })?;
+    let atomic_step_evals = u64::from(param_dim).saturating_mul(2).saturating_add(1);
+    descent_checkpoint(cx)?;
     let mut x = x0.to_vec();
     let mut evals = 0u64;
     let mut budget_stopped = false;
     let f0 = f(&x)?;
     evals += 1;
-    let pd = manifold
-        .param_dim()
-        .and_then(|d| usize::try_from(d).ok())
-        .ok_or_else(|| OptError::ManifoldInvalid {
-            what: format!("{manifold:?} has no representable descent parameter dimension"),
-        })?;
+    descent_checkpoint(cx)?;
     let mut steps_taken = 0;
     'outer: for _ in 0..opts.steps {
-        if cx.checkpoint().is_err() {
-            return Err(OptError::Cancelled);
+        descent_checkpoint(cx)?;
+        // One landed step is atomic: reserve its complete central-FD
+        // gradient (two probes per parameter) plus the terminal value
+        // before spending the first probe. A one-short cap therefore
+        // leaves both x and the evaluation ledger at the prior receipt.
+        if max_evals > 0 && evals.saturating_add(atomic_step_evals) > max_evals {
+            budget_stopped = true;
+            break 'outer;
         }
         let mut g = vec![0.0; pd];
         for (i, gi) in g.iter_mut().enumerate() {
-            // A completed step changes `x`, so reserve one evaluation
-            // for the terminal objective before spending an FD pair.
-            // This also makes a partial-gradient stop fail closed: no
-            // step is taken, but any earlier step can still be valued.
-            if max_evals > 0 && evals.saturating_add(3) > max_evals {
-                budget_stopped = true;
-                break 'outer;
-            }
+            descent_checkpoint(cx)?;
             let mut t = vec![0.0; pd];
             t[i] = opts.fd_h;
+            descent_checkpoint(cx)?;
             let xp = manifold.retract(&x, &t)?;
+            descent_checkpoint(cx)?;
             let fp = f(&xp)?;
+            evals += 1;
+            descent_checkpoint(cx)?;
             t[i] = -opts.fd_h;
             let xm = manifold.retract(&x, &t)?;
+            descent_checkpoint(cx)?;
             let fm = f(&xm)?;
-            evals += 2;
-            *gi = (fp - fm) / (2.0 * opts.fd_h);
+            evals += 1;
+            descent_checkpoint(cx)?;
+            *gi = finite_descent_value(
+                (fp - fm) / (2.0 * opts.fd_h),
+                "finite-difference gradient component",
+            )?;
         }
+        descent_checkpoint(cx)?;
         let step: Vec<f64> = g.iter().map(|v| -opts.lr * v).collect();
+        descent_checkpoint(cx)?;
         x = manifold.retract(&x, &step)?;
+        descent_checkpoint(cx)?;
         steps_taken += 1;
     }
     let f_final = if steps_taken == 0 {
         f0
     } else {
+        descent_checkpoint(cx)?;
+        let value = f(&x)?;
         evals += 1;
-        f(&x)?
+        descent_checkpoint(cx)?;
+        value
     };
+    descent_checkpoint(cx)?;
     Ok(DescentReport {
         x,
         f0,

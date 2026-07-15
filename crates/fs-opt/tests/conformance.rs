@@ -790,6 +790,32 @@ fn opt_006_budget_and_cancellation() {
             && cap4.evals == 4
             && calls4.get() == cap4.evals;
 
+        // A two-coordinate gradient is one atomic step: initial + four
+        // probes + terminal = six. A cap of five must spend no partial
+        // gradient; six lands exactly.
+        let calls5 = std::cell::Cell::new(0u64);
+        let f5 = |x: &[f64]| {
+            calls5.set(calls5.get() + 1);
+            x.iter().map(|value| value * value).sum::<f64>()
+        };
+        let cap5 = descend_fn(Manifold::Rn { dim: 2 }, &f5, &[1.0, -1.0], one_step, 5, cx)
+            .expect("cap-5 atomic receipt");
+        let calls6 = std::cell::Cell::new(0u64);
+        let f6 = |x: &[f64]| {
+            calls6.set(calls6.get() + 1);
+            x.iter().map(|value| value * value).sum::<f64>()
+        };
+        let cap6 = descend_fn(Manifold::Rn { dim: 2 }, &f6, &[1.0, -1.0], one_step, 6, cx)
+            .expect("cap-6 atomic descent");
+        let atomic_edges = cap5.budget_stopped
+            && cap5.steps_taken == 0
+            && cap5.evals == 1
+            && calls5.get() == 1
+            && !cap6.budget_stopped
+            && cap6.steps_taken == 1
+            && cap6.evals == 6
+            && calls6.get() == 6;
+
         // The first IR objective call is f0 inside the leaf-gated,
         // counted descent seam. A cap of one therefore stays exactly
         // at one and returns the unchanged valid point.
@@ -825,11 +851,12 @@ fn opt_006_budget_and_cancellation() {
         );
         verdict(
             "opt-006",
-            receipt && cap_edges && cap1_exact && converged && refuse,
+            receipt && cap_edges && atomic_edges && cap1_exact && converged && refuse,
             &format!(
                 "the attached P4 budget stops descent with a receipt at {} evals \
                  (objective still improved {:.2} -> {:.2}); cap 3 refuses an incomplete \
-                 step at one evaluation, cap 4 lands exactly, and IR cap 1 stays at one; unlimited descent \
+                 step at one evaluation, cap 4 lands exactly, cap 5 spends no partial two-coordinate \
+                 gradient, cap 6 lands exactly, and IR cap 1 stays at one; unlimited descent \
                  converges to {:.1e}; PDE/stochastic nodes refuse evaluation naming \
                  their executor",
                 rep.evals, rep.f0, rep.f_final, rep2.f_final
