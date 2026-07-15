@@ -196,17 +196,25 @@ admitted under a 64 MiB defensive peak before allocation. Offending intervals
 use fallible reservation and winding projects controls on demand without
 retaining a second polygon. An admitted patch can classify repeatedly without
 revalidating its immutable source.
-Owning derivative, closest, SDF, and refit paths are not all migrated yet; they
-make no claim of caller-budgeted preflight or end-to-end validate-once execution.
-Closest-point admission validates the sealed structure,
-including finite Cartesian projections and normal positive floating weights,
-and charges a stage-faithful knot-insertion, expanded-grid, run-scan, and
-queue-seeding estimate before conversion, including when the requested split
-budget is zero. Degree-scaled de Casteljau split work and the worst retained
-queue/scratch frontier are admitted separately. The SDF shell reuses that
-same split/frontier model and additionally charges structure-sensitive
-polishing, sign-repair, and trim coefficients; a shell for which even a
-zero-split query exceeds the ceiling is not constructible. The
+Curve closest-point execution now validates its immutable source once, consumes
+the exact Bezier conversion plan, pre-reserves the admitted heap extent, and
+reuses the admitted source for optional derivative polish. Its 256 MiB payload
+ceiling composes the borrowed source with the maximum of conversion,
+converted-curve plus queue/frontier/scratch, and post-release derivative-polish
+phases; the converted curve and queue are dropped before polish. The owning
+wrapper rejects malformed requests before scanning the source, while an
+`AdmittedNurbsCurve` can repeat closest-point calls without rescanning source
+structure. Owning derivative, surface-closest, SDF, and refit construction paths
+are not all migrated yet; they make no claim of caller-budgeted preflight or
+end-to-end validate-once execution. Surface closest-point admission still
+validates the sealed structure, including finite Cartesian projections and
+normal positive floating weights, and charges a stage-faithful knot-insertion,
+expanded-grid, run-scan, and queue-seeding estimate before conversion, including
+when the requested split budget is zero. Degree-scaled de Casteljau split work
+and the worst retained queue/scratch frontier are admitted separately. The SDF
+shell reuses that same split/frontier model and additionally charges
+structure-sensitive polishing, sign-repair, and trim coefficients; a shell for
+which even a zero-split query exceeds the ceiling is not constructible. The
 legacy refit path has validated static work/allocation/probe caps but no `Cx`;
 trim classification likewise retains a static process ceiling rather than a
 caller-owned affine budget and has no `Cx`; these APIs are not yet P7

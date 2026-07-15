@@ -11,7 +11,7 @@
 
 use crate::NurbsError;
 use crate::basis::KnotVector;
-use crate::curve::NurbsCurve;
+use crate::curve::{AdmittedNurbsCurve, BezierConversionPlan, NurbsCurve};
 use crate::surface::NurbsSurface;
 use fs_math::{det, next_down, next_up};
 use std::cmp::Ordering;
@@ -32,8 +32,15 @@ pub(crate) const CLOSEST_MAX_BASE_WORK_UNITS: u128 = 16_777_216;
 /// Defensive aggregate split-work ceiling for the legacy APIs.
 const CLOSEST_MAX_SPLIT_WORK_UNITS: u128 = 1_073_741_824;
 
-/// Defensive worst-case retained queue/scratch payload ceiling.
+/// Defensive retained-payload ceiling. Curve admission composes source,
+/// conversion, search frontier, and post-release polish phases; the legacy
+/// surface path currently applies it to frontier/scratch payload.
 const CLOSEST_MAX_RETAINED_BYTES: u128 = 256 * 1024 * 1024;
+
+// Keep the source-snapshot charge aligned with the admitted curve/knot
+// validation envelopes. This is an accounting coefficient, not a timing
+// claim for any particular machine.
+const CLOSEST_CURVE_SOURCE_SCAN_WORK_PER_ENTRY: u128 = 16;
 
 /// Deterministic minimum-priority entry. `BinaryHeap` is a max-heap, so the
 /// comparisons are reversed: lower bound first, then lower logical ID. IDs
@@ -204,70 +211,46 @@ fn checked_sum(values: &[u128], what: &str) -> Result<u128, NurbsError> {
     })
 }
 
-fn curve_base_work_units<const DIM: usize>(
+fn curve_source_admission_work<const DIM: usize>(
     curve: &NurbsCurve<f64, DIM>,
 ) -> Result<u128, NurbsError> {
-    validate_live_knots(&curve.knots)?;
-    if curve.cpw.len() != curve.knots.control_count()
-        || curve.cpw.iter().any(|control| {
-            !control[3].is_normal()
-                || control[3] <= 0.0
-                || control.iter().any(|component| !component.is_finite())
-                || control[..DIM.min(3)]
-                    .iter()
-                    .any(|component| !(*component / control[3]).is_finite())
-        })
-    {
-        return Err(NurbsError::Structure {
-            what: "live curve control net must match its knots and remain finite with positive weights"
-                .to_string(),
-        });
-    }
-    let spans = nonempty_span_count(&curve.knots);
-    let degree = curve.knots.degree as u128;
-    let insertions = bezier_insertion_count(&curve.knots)?;
-    let expanded_controls = (curve.cpw.len() as u128)
-        .checked_add(insertions)
+    let knot_work = (curve.knots.knots.len() as u128)
+        .checked_mul(CLOSEST_CURVE_SOURCE_SCAN_WORK_PER_ENTRY)
+        .and_then(|work| work.checked_add(curve.knots.degree as u128))
         .ok_or_else(|| NurbsError::Domain {
-            what: "curve Bézier control-count accounting overflows u128".to_string(),
+            what: "curve source-knot admission work overflows u128".to_string(),
         })?;
-    let expanded_knots = (curve.knots.knots.len() as u128)
-        .checked_add(insertions)
+    let control_work = (curve.cpw.len() as u128)
+        .checked_mul(CLOSEST_CURVE_SOURCE_SCAN_WORK_PER_ENTRY)
         .ok_or_else(|| NurbsError::Domain {
-            what: "curve Bézier knot-count accounting overflows u128".to_string(),
+            what: "curve source-control admission work overflows u128".to_string(),
         })?;
-    let patch_controls = checked_product(&[spans, degree + 1], "curve patch seeding")?;
-    let insertion_work = checked_product(
-        &[
-            insertions,
-            checked_sum(
-                &[
-                    expanded_controls,
-                    expanded_knots,
-                    (degree + 1)
-                        .checked_mul(8)
-                        .ok_or_else(|| NurbsError::Domain {
-                            what: "curve insertion-order work overflows u128".to_string(),
-                        })?,
-                ],
-                "curve insertion stage",
-            )?,
-        ],
-        "curve Bézier insertion",
-    )?;
-    let scan_work = checked_product(
-        &[insertions + 1, expanded_knots],
-        "curve Bézier run scanning",
+    checked_sum(&[knot_work, control_work], "curve source admission work")
+}
+
+fn curve_base_work_units<const DIM: usize>(
+    curve: AdmittedNurbsCurve<'_, f64, DIM>,
+    source_admission_work: u128,
+    conversion: BezierConversionPlan,
+    seed_leaves: u128,
+    order: u128,
+    polish_work: u128,
+    seed_heap_work: u128,
+) -> Result<u128, NurbsError> {
+    let seed_control_visits = checked_product(&[seed_leaves, order], "curve patch seeding")?;
+    let seed_work = checked_product(
+        &[seed_control_visits, 16],
+        "curve seed copy, hull, and queue work",
     )?;
     checked_sum(
         &[
-            curve.cpw.len() as u128,
-            curve.knots.knots.len() as u128,
-            expanded_controls,
-            expanded_knots,
-            patch_controls,
-            insertion_work,
-            scan_work,
+            source_admission_work,
+            conversion.work_units,
+            curve.knots().knots().len() as u128,
+            seed_work,
+            seed_heap_work,
+            seed_leaves,
+            polish_work,
         ],
         "curve base work",
     )
@@ -411,14 +394,25 @@ fn enforce_base_work(units: u128, kind: &str) -> Result<(), NurbsError> {
     Ok(())
 }
 
-fn enforce_subdivision_envelope(
+fn enforce_retained_bytes(retained_bytes: u128, kind: &str) -> Result<(), NurbsError> {
+    if retained_bytes > CLOSEST_MAX_RETAINED_BYTES {
+        return Err(NurbsError::Domain {
+            what: format!(
+                "closest-{kind} request can retain {retained_bytes} bytes above defensive ceiling {CLOSEST_MAX_RETAINED_BYTES}"
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn subdivision_frontier_bytes(
     seed_leaves: u128,
     payload_per_leaf: u128,
     scratch_leaves: u128,
     work_per_split: u128,
     max_splits: u32,
     kind: &str,
-) -> Result<(), NurbsError> {
+) -> Result<u128, NurbsError> {
     let split_count = u128::from(max_splits);
     let retained_leaves = seed_leaves
         .checked_add(split_count)
@@ -431,13 +425,6 @@ fn enforce_subdivision_envelope(
         .ok_or_else(|| NurbsError::Domain {
             what: format!("closest-{kind} retained-byte accounting overflows u128"),
         })?;
-    if retained_bytes > CLOSEST_MAX_RETAINED_BYTES {
-        return Err(NurbsError::Domain {
-            what: format!(
-                "closest-{kind} request can retain {retained_bytes} bytes above defensive ceiling {CLOSEST_MAX_RETAINED_BYTES}"
-            ),
-        });
-    }
     let split_work = split_count
         .checked_mul(work_per_split)
         .ok_or_else(|| NurbsError::Domain {
@@ -450,25 +437,70 @@ fn enforce_subdivision_envelope(
             ),
         });
     }
-    Ok(())
+    Ok(retained_bytes)
 }
 
-fn preflight_curve_subdivision<const DIM: usize>(
-    curve: &NurbsCurve<f64, DIM>,
+fn enforce_subdivision_envelope(
+    seed_leaves: u128,
+    payload_per_leaf: u128,
+    scratch_leaves: u128,
+    work_per_split: u128,
     max_splits: u32,
+    kind: &str,
 ) -> Result<(), NurbsError> {
-    let order = (curve.knots.degree as u128)
-        .checked_add(1)
+    let frontier_bytes = subdivision_frontier_bytes(
+        seed_leaves,
+        payload_per_leaf,
+        scratch_leaves,
+        work_per_split,
+        max_splits,
+        kind,
+    )?;
+    enforce_retained_bytes(frontier_bytes, kind)
+}
+
+fn enforce_curve_retained_envelope(
+    conversion_peak_bytes: u128,
+    persistent_curve_bytes: u128,
+    frontier_bytes: u128,
+    polish_peak_bytes: u128,
+) -> Result<(), NurbsError> {
+    let traversal_peak = persistent_curve_bytes
+        .checked_add(frontier_bytes)
         .ok_or_else(|| NurbsError::Domain {
-            what: "closest-curve order accounting overflows u128".to_string(),
+            what: "closest-curve aggregate retained-byte accounting overflows u128".to_string(),
         })?;
+    enforce_retained_bytes(
+        conversion_peak_bytes
+            .max(traversal_peak)
+            .max(polish_peak_bytes),
+        "curve",
+    )
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CurveClosestPlan {
+    conversion: BezierConversionPlan,
+    seed_leaves: usize,
+    queue_capacity: usize,
+}
+
+fn binary_heap_height(capacity: usize) -> u128 {
+    if capacity <= 1 {
+        0
+    } else {
+        u128::from(usize::BITS - (capacity - 1).leading_zeros())
+    }
+}
+
+fn curve_subdivision_work_per_split(order: u128, heap_height: u128) -> Result<u128, NurbsError> {
     let triangular = order
         .checked_mul(order.saturating_sub(1))
         .map(|product| product / 2)
         .ok_or_else(|| NurbsError::Domain {
             what: "closest-curve split triangle overflows u128".to_string(),
         })?;
-    let work_per_split = triangular
+    let geometric_work = triangular
         .checked_mul(4)
         .and_then(|work| {
             order
@@ -478,20 +510,152 @@ fn preflight_curve_subdivision<const DIM: usize>(
         .ok_or_else(|| NurbsError::Domain {
             what: "closest-curve split work overflows u128".to_string(),
         })?;
+    let heap_work = checked_product(
+        &[heap_height, 3, 16],
+        "closest-curve pop and child-push heap work",
+    )?;
+    checked_sum(
+        &[geometric_work, heap_work],
+        "closest-curve aggregate split work",
+    )
+}
+
+fn preflight_curve_closest<const DIM: usize>(
+    curve: AdmittedNurbsCurve<'_, f64, DIM>,
+    max_splits: u32,
+    source_admission_work: u128,
+) -> Result<CurveClosestPlan, NurbsError> {
+    // This count-only gate precedes the first knot-run scan performed by the
+    // exact conversion planner.
+    let pre_scan_work = curve.bezier_pre_scan_work()?;
+    let work_before_plan_scan = source_admission_work
+        .checked_add(pre_scan_work)
+        .ok_or_else(|| NurbsError::Domain {
+            what: "closest-curve admission and plan-scan work overflows u128".to_string(),
+        })?;
+    enforce_base_work(work_before_plan_scan, "curve plan scan")?;
+    let conversion = curve.bezier_conversion_plan()?;
+    let knots = curve.knots();
+    let order = (knots.degree() as u128)
+        .checked_add(1)
+        .ok_or_else(|| NurbsError::Domain {
+            what: "closest-curve order accounting overflows u128".to_string(),
+        })?;
+    let seed_leaves = knots
+        .knots()
+        .windows(2)
+        .filter(|pair| pair[1] > pair[0])
+        .count();
+    if seed_leaves == 0 {
+        return Err(NurbsError::Structure {
+            what: "closest-curve admitted source has no nonempty knot span".to_string(),
+        });
+    }
+    let split_capacity = usize::try_from(max_splits).map_err(|_| NurbsError::Domain {
+        what: "closest-curve split count is not representable as usize".to_string(),
+    })?;
+    let queue_capacity =
+        seed_leaves
+            .checked_add(split_capacity)
+            .ok_or_else(|| NurbsError::Domain {
+                what: "closest-curve queue capacity overflows usize".to_string(),
+            })?;
+    let heap_height = binary_heap_height(queue_capacity);
+    let seed_heap_work = checked_product(
+        &[seed_leaves as u128, heap_height, 16],
+        "closest-curve seed heap work",
+    )?;
+    let (derivative_work, derivative_bytes) = NurbsCurve::<f64, DIM>::derivative_envelope(
+        curve.homogeneous_control_points().len(),
+        knots.knots().len(),
+        knots.degree(),
+        2,
+    )?;
+    let final_eval_work = checked_sum(
+        &[
+            knots.knots().len() as u128,
+            checked_product(&[order, order, 8], "curve polish evaluation")?,
+        ],
+        "curve final polish evaluation",
+    )?;
+    let polish_work = derivative_work
+        .checked_mul(12)
+        .and_then(|work| work.checked_add(final_eval_work))
+        .ok_or_else(|| NurbsError::Domain {
+            what: "closest-curve polish-work accounting overflows u128".to_string(),
+        })?;
+    enforce_base_work(
+        curve_base_work_units(
+            curve,
+            source_admission_work,
+            conversion,
+            seed_leaves as u128,
+            order,
+            polish_work,
+            seed_heap_work,
+        )?,
+        "curve",
+    )?;
+    let work_per_split = curve_subdivision_work_per_split(order, heap_height)?;
     let payload_per_leaf = order
         .checked_mul(size_of::<[f64; 4]>() as u128)
         .and_then(|payload| payload.checked_add(size_of::<MinEntry<Seg>>() as u128))
         .ok_or_else(|| NurbsError::Domain {
             what: "closest-curve leaf payload overflows u128".to_string(),
         })?;
-    enforce_subdivision_envelope(
-        nonempty_span_count(&curve.knots),
+    let frontier_bytes = subdivision_frontier_bytes(
+        seed_leaves as u128,
         payload_per_leaf,
         3,
         work_per_split,
         max_splits,
         "curve",
-    )
+    )?;
+    let source_knot_bytes = (knots.knots().len() as u128)
+        .checked_mul(size_of::<f64>() as u128)
+        .ok_or_else(|| NurbsError::Domain {
+            what: "closest-curve source-knot byte accounting overflows u128".to_string(),
+        })?;
+    let source_control_bytes = (curve.homogeneous_control_points().len() as u128)
+        .checked_mul(size_of::<[f64; 4]>() as u128)
+        .ok_or_else(|| NurbsError::Domain {
+            what: "closest-curve source-control byte accounting overflows u128".to_string(),
+        })?;
+    let source_bytes = source_knot_bytes
+        .checked_add(source_control_bytes)
+        .ok_or_else(|| NurbsError::Domain {
+            what: "closest-curve source byte accounting overflows u128".to_string(),
+        })?;
+    let conversion_peak_bytes = source_bytes
+        .checked_add(conversion.peak_allocated_bytes)
+        .ok_or_else(|| NurbsError::Domain {
+            what: "closest-curve conversion peak accounting overflows u128".to_string(),
+        })?;
+    let persistent_curve_bytes = source_bytes
+        .checked_add(conversion.converted_bytes)
+        .ok_or_else(|| NurbsError::Domain {
+            what: "closest-curve persistent curve accounting overflows u128".to_string(),
+        })?;
+    let final_eval_bytes = checked_product(
+        &[order, 3, size_of::<f64>() as u128],
+        "closest-curve final-evaluation workspace",
+    )?;
+    let polish_peak_bytes = source_bytes
+        .checked_add(derivative_bytes.max(final_eval_bytes))
+        .ok_or_else(|| NurbsError::Domain {
+            what: "closest-curve polish peak accounting overflows u128".to_string(),
+        })?;
+    enforce_curve_retained_envelope(
+        conversion_peak_bytes,
+        persistent_curve_bytes,
+        frontier_bytes,
+        polish_peak_bytes,
+    )?;
+    Ok(CurveClosestPlan {
+        conversion,
+        seed_leaves,
+        queue_capacity,
+    })
 }
 
 pub(crate) fn surface_subdivision_work_per_split(
@@ -593,6 +757,23 @@ fn push_heap<T>(
     heap.try_reserve(1).map_err(|_| NurbsError::Domain {
         what: format!("{stage} heap allocation was refused"),
     })?;
+    heap.push(entry);
+    Ok(())
+}
+
+fn push_heap_within_admitted_capacity<T>(
+    heap: &mut BinaryHeap<MinEntry<T>>,
+    entry: MinEntry<T>,
+    admitted_capacity: usize,
+    stage: &str,
+) -> Result<(), NurbsError> {
+    if heap.len() >= admitted_capacity {
+        return Err(NurbsError::Domain {
+            what: format!(
+                "{stage} would exceed admitted closest-curve queue capacity {admitted_capacity}"
+            ),
+        });
+    }
     heap.push(entry);
     Ok(())
 }
@@ -705,16 +886,64 @@ pub fn closest_point_curve(
     max_splits: u32,
 ) -> Result<DistanceBracketEstimate, NurbsError> {
     validate_closest_request(q, tol, max_splits)?;
-    enforce_base_work(curve_base_work_units(curve)?, "curve")?;
-    preflight_curve_subdivision(curve, max_splits)?;
-    let bez = curve.to_bezier_form()?;
-    let p = bez.knots.degree;
+    let source_admission_work = curve_source_admission_work(curve)?;
+    enforce_base_work(source_admission_work, "curve source admission")?;
+    closest_point_curve_after_request(curve.admit()?, q, tol, max_splits, source_admission_work)
+}
+
+impl AdmittedNurbsCurve<'_, f64, 3> {
+    /// Measured closest-point estimate while reusing this admitted immutable
+    /// source snapshot across planning, exact conversion, and Newton polish.
+    ///
+    /// # Errors
+    /// Returns a structured refusal for an invalid request, excessive
+    /// work/retained payload, allocation failure, or non-finite arithmetic.
+    pub fn closest_point(
+        &self,
+        q: [f64; 3],
+        tol: f64,
+        max_splits: u32,
+    ) -> Result<DistanceBracketEstimate, NurbsError> {
+        validate_closest_request(q, tol, max_splits)?;
+        closest_point_curve_after_request(*self, q, tol, max_splits, 0)
+    }
+}
+
+fn closest_point_curve_after_request(
+    curve: AdmittedNurbsCurve<'_, f64, 3>,
+    q: [f64; 3],
+    tol: f64,
+    max_splits: u32,
+    source_admission_work: u128,
+) -> Result<DistanceBracketEstimate, NurbsError> {
+    let plan = preflight_curve_closest(curve, max_splits, source_admission_work)?;
+    let bezier_curve = curve.to_bezier_form()?;
+    let bezier = bezier_curve.admitted_after_validation();
+    let knots = bezier.knots();
+    let entries = knots.knots();
+    let controls = bezier.homogeneous_control_points();
+    if entries.len() != plan.conversion.final_knot_count
+        || controls.len() != plan.conversion.final_control_count
+    {
+        return Err(NurbsError::Structure {
+            what: "closest-curve conversion did not match its admitted plan".to_string(),
+        });
+    }
+    let p = knots.degree();
     let mut queue: BinaryHeap<MinEntry<Seg>> = BinaryHeap::new();
+    queue
+        .try_reserve_exact(plan.queue_capacity)
+        .map_err(|_| NurbsError::Domain {
+            what: format!(
+                "closest-curve queue allocation was refused for admitted capacity {}",
+                plan.queue_capacity
+            ),
+        })?;
     let mut next_logical_id = 0u64;
     let mut upper = f64::INFINITY;
-    let mut best_t = bez.knots.domain()?.0;
-    for span in p..bez.knots.control_count() {
-        let (t0, t1) = (bez.knots.knots[span], bez.knots.knots[span + 1]);
+    let mut best_t = knots.domain().0;
+    for span in p..knots.control_count() {
+        let (t0, t1) = (entries[span], entries[span + 1]);
         if t1 <= t0 {
             continue;
         }
@@ -723,7 +952,7 @@ pub fn closest_point_curve(
             .map_err(|_| NurbsError::Domain {
                 what: "closest-curve seed control allocation was refused".to_string(),
             })?;
-        cpw.extend_from_slice(&bez.cpw[span - p..=span]);
+        cpw.extend_from_slice(&controls[span - p..=span]);
         for (h, tt) in [(&cpw[0], t0), (&cpw[p], t1)] {
             let d = dist3(cartesian(h), q);
             if d < upper {
@@ -732,16 +961,26 @@ pub fn closest_point_curve(
             }
         }
         let lb = hull_lower_bound(q, cpw.iter());
-        push_heap(
+        push_heap_within_admitted_capacity(
             &mut queue,
             MinEntry {
                 key: lb,
                 logical_id: next_logical_id,
                 value: Seg { cpw, t0, t1 },
             },
+            plan.queue_capacity,
             "closest-curve seed",
         )?;
         next_logical_id += 1;
+    }
+    if queue.len() != plan.seed_leaves {
+        return Err(NurbsError::Structure {
+            what: format!(
+                "closest-curve conversion produced {} seed leaves after admitting {}",
+                queue.len(),
+                plan.seed_leaves
+            ),
+        });
     }
     if queue.is_empty() || !upper.is_finite() || queue.iter().any(|entry| !entry.key.is_finite()) {
         return Err(NurbsError::Domain {
@@ -765,13 +1004,14 @@ pub fn closest_point_curve(
             // De Casteljau would still create a geometric half-split even
             // though the recorded parameter interval cannot shrink. Retain
             // the leaf so its lower estimate remains part of the bracket.
-            push_heap(
+            push_heap_within_admitted_capacity(
                 &mut queue,
                 MinEntry {
                     key: entry.key,
                     logical_id: entry.logical_id,
                     value: seg,
                 },
+                plan.queue_capacity,
                 "closest-curve unsplittable leaf",
             )?;
             break;
@@ -791,13 +1031,14 @@ pub fn closest_point_curve(
                 });
             }
             if lb < upper {
-                push_heap(
+                push_heap_within_admitted_capacity(
                     &mut queue,
                     MinEntry {
                         key: lb,
                         logical_id: next_logical_id,
                         value: Seg { cpw, t0, t1 },
                     },
+                    plan.queue_capacity,
                     "closest-curve child",
                 )?;
                 next_logical_id += 1;
@@ -806,8 +1047,13 @@ pub fn closest_point_curve(
         iterations += 1;
     }
     let lower = queue.peek().map_or(upper, |entry| entry.key);
+    // The bracket no longer needs the converted generation or frontier.
+    // Release both phases before optional derivative polish so the aggregate
+    // peak is max(conversion, search, polish), not their sum.
+    drop(queue);
+    drop(bezier_curve);
     // Newton polish on g(t) = (C − q)·C' sharpens the upper bound.
-    let (dlo, dhi) = curve.knots.domain()?;
+    let (dlo, dhi) = curve.knots().domain();
     let mut t = best_t;
     for _ in 0..12 {
         // Polishing is an optional improvement to an already valid measured
@@ -1186,8 +1432,9 @@ pub fn closest_point_surface(
 #[cfg(test)]
 mod tests {
     use super::{
-        BinaryHeap, CLOSEST_MAX_BASE_WORK_UNITS, MinEntry, preflight_curve_subdivision,
-        preflight_surface_subdivision, surface_base_work_units,
+        BinaryHeap, CLOSEST_MAX_BASE_WORK_UNITS, CLOSEST_MAX_RETAINED_BYTES, MinEntry,
+        closest_point_curve, curve_subdivision_work_per_split, enforce_curve_retained_envelope,
+        preflight_surface_subdivision, subdivision_frontier_bytes, surface_base_work_units,
     };
     use crate::{KnotVector, NurbsCurve, NurbsSurface};
 
@@ -1209,6 +1456,48 @@ mod tests {
             popped,
             vec![(1.0, 3, 'a'), (1.0, 7, 'b'), (1.0, 9, 'c'), (2.0, 8, 'd')]
         );
+    }
+
+    #[test]
+    fn curve_closest_owning_and_admitted_paths_match_exactly() {
+        let curve = NurbsCurve::<f64, 3>::new(
+            KnotVector::new(vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0], 2).expect("quadratic knots"),
+            &[[0.0, 0.0, 0.0], [1.0, 2.0, 0.0], [2.0, 0.0, 0.0]],
+            &[1.0; 3],
+        )
+        .expect("quadratic curve");
+        let query = [1.0, 0.25, 0.0];
+        let owning = closest_point_curve(&curve, query, 1e-9, 8).expect("owning closest");
+        let admitted = curve.admit().expect("admitted curve");
+        let first = admitted
+            .closest_point(query, 1e-9, 8)
+            .expect("admitted closest");
+        let repeated = admitted
+            .closest_point(query, 1e-9, 8)
+            .expect("repeated admitted closest");
+        assert_eq!(first, owning);
+        assert_eq!(repeated, first);
+    }
+
+    #[test]
+    fn curve_retained_envelope_composes_all_live_phases() {
+        assert!(
+            enforce_curve_retained_envelope(CLOSEST_MAX_RETAINED_BYTES, 0, 0, 0).is_ok(),
+            "the exact conversion-phase cap is admissible"
+        );
+        assert!(
+            enforce_curve_retained_envelope(0, CLOSEST_MAX_RETAINED_BYTES - 1, 1, 0).is_ok(),
+            "persistent plus frontier bytes compose at the exact cap"
+        );
+        let search_error = enforce_curve_retained_envelope(0, CLOSEST_MAX_RETAINED_BYTES, 1, 0)
+            .expect_err("one aggregate search byte above the cap must refuse");
+        assert!(matches!(search_error, crate::NurbsError::Domain { .. }));
+        let polish_error = enforce_curve_retained_envelope(0, 0, 0, CLOSEST_MAX_RETAINED_BYTES + 1)
+            .expect_err("one polish byte above the cap must refuse");
+        assert!(matches!(polish_error, crate::NurbsError::Domain { .. }));
+        let overflow = enforce_curve_retained_envelope(0, u128::MAX, 1, 0)
+            .expect_err("aggregate retained-byte overflow must refuse");
+        assert!(matches!(overflow, crate::NurbsError::Domain { .. }));
     }
 
     #[test]
@@ -1241,17 +1530,11 @@ mod tests {
             "the public surface path must price its worst-case retained frontier"
         );
 
-        let degree = 100_000usize;
-        let mut high_knots = vec![0.0; degree + 1];
-        high_knots.extend(vec![1.0; degree + 1]);
-        let high_curve = NurbsCurve::<f64, 1>::new(
-            KnotVector::new(high_knots, degree).expect("high-degree knots"),
-            &vec![[0.0]; degree + 1],
-            &vec![1.0; degree + 1],
-        )
-        .expect("memory-modest high-degree curve");
+        let high_order = 100_001u128;
+        let split_work =
+            curve_subdivision_work_per_split(high_order, 0).expect("representable split work");
         assert!(
-            preflight_curve_subdivision(&high_curve, 1).is_err(),
+            subdivision_frontier_bytes(1, 1, 3, split_work, 1, "curve").is_err(),
             "one quadratic de Casteljau split must not masquerade as one work unit"
         );
     }
