@@ -2061,6 +2061,11 @@ fn sc_010_semantic_validation_plan_hits_every_exact_budget_boundary() {
         "flux checkpoints"
     );
     exact_and_one_short!(max_identity_bytes, plan.identity_bytes, "identity bytes");
+    exact_and_one_short!(
+        max_identity_component_bytes,
+        plan.identity_component_bytes,
+        "identity component bytes"
+    );
     exact_and_one_short!(max_findings, plan.finding_capacity, "validation findings");
 
     let mut exact_work = ValidationBudget::default();

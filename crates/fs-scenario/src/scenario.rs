@@ -69,6 +69,10 @@ impl fmt::Display for NetFluxSetLabel<'_> {
     }
 }
 
+/// Hard byte tile for one identity/reference component during semantic
+/// validation. Callers may tighten but cannot raise this cancellation bound.
+pub const MAX_VALIDATION_IDENTITY_COMPONENT_BYTES: usize = 4_096;
+
 /// Explicit deterministic limits for whole-scenario semantic validation.
 ///
 /// Collection fields cap public `Vec` authority before validation allocates
@@ -101,6 +105,9 @@ pub struct ValidationBudget {
     pub max_flux_checkpoints: usize,
     /// Maximum bytes across exact string identities and references.
     pub max_identity_bytes: usize,
+    /// Maximum bytes in one exact identity/reference component. This may
+    /// tighten but cannot exceed [`MAX_VALIDATION_IDENTITY_COMPONENT_BYTES`].
+    pub max_identity_component_bytes: usize,
     /// Maximum preflighted slots in the private finding buffer.
     pub max_findings: usize,
     /// Maximum deterministic logical work units.
@@ -120,6 +127,7 @@ pub const DEFAULT_VALIDATION_BUDGET: ValidationBudget = ValidationBudget {
     max_signal_scalars: 1_048_576,
     max_flux_checkpoints: 1_048_576,
     max_identity_bytes: 16_777_216,
+    max_identity_component_bytes: MAX_VALIDATION_IDENTITY_COMPONENT_BYTES,
     max_findings: 8_388_608,
     max_work: 268_435_456,
 };
@@ -155,6 +163,8 @@ pub struct ValidationPlan {
     pub flux_checkpoints: usize,
     /// Exact identity/reference bytes.
     pub identity_bytes: usize,
+    /// Largest exact identity/reference component in bytes.
+    pub identity_component_bytes: usize,
     /// Proved worst-case slots for validation findings.
     pub finding_capacity: usize,
     /// Deterministic logical work units.
@@ -523,6 +533,16 @@ fn checked_count_add(
     Ok(())
 }
 
+fn observe_identity(
+    total: &mut usize,
+    largest: &mut usize,
+    value: &str,
+    phase: &'static str,
+) -> Result<(), ValidationError> {
+    *largest = (*largest).max(value.len());
+    checked_count_add(total, value.len(), phase)
+}
+
 fn checked_finding_slots(
     total: &mut usize,
     records: usize,
@@ -794,6 +814,11 @@ impl Scenario {
         enforce_limit("combinations", combinations, budget.max_combinations)?;
         enforce_limit("ensembles", ensembles, budget.max_ensembles)?;
         enforce_limit("contacts", contacts, budget.max_contacts)?;
+        enforce_limit(
+            "identity component byte budget",
+            budget.max_identity_component_bytes,
+            MAX_VALIDATION_IDENTITY_COMPONENT_BYTES,
+        )?;
         checkpoint("preflight collection caps")?;
 
         let mut case_bcs = 0usize;
@@ -823,6 +848,7 @@ impl Scenario {
         )?;
 
         let mut identity_bytes = self.name.len();
+        let mut identity_component_bytes = self.name.len();
         let mut max_frame_name_bytes = 0usize;
         let mut max_case_name_bytes = 0usize;
         let mut max_combination_name_bytes = 0usize;
@@ -832,9 +858,10 @@ impl Scenario {
         let mut signal_scalars = 0usize;
         for frame in &self.frames.frames {
             max_frame_name_bytes = max_frame_name_bytes.max(frame.name.len().max(1));
-            checked_count_add(
+            observe_identity(
                 &mut identity_bytes,
-                frame.name.len(),
+                &mut identity_component_bytes,
+                frame.name.as_str(),
                 "frame identity bytes",
             )?;
             if let FrameMotion::Tilt { angle, .. } = &frame.motion {
@@ -854,9 +881,10 @@ impl Scenario {
         let mut base_flux_checkpoint_contribution = 0usize;
         let mut base_flux_provider_work = 0u128;
         for bc in &self.base_bcs {
-            checked_count_add(
+            observe_identity(
                 &mut identity_bytes,
-                bc.region.len(),
+                &mut identity_component_bytes,
+                bc.region.as_str(),
                 "base boundary identity bytes",
             )?;
             checked_count_add(
@@ -878,11 +906,17 @@ impl Scenario {
         }
         for case in &self.cases {
             max_case_name_bytes = max_case_name_bytes.max(case.name.len().max(1));
-            checked_count_add(&mut identity_bytes, case.name.len(), "case identity bytes")?;
+            observe_identity(
+                &mut identity_bytes,
+                &mut identity_component_bytes,
+                case.name.as_str(),
+                "case identity bytes",
+            )?;
             for bc in &case.bcs {
-                checked_count_add(
+                observe_identity(
                     &mut identity_bytes,
-                    bc.region.len(),
+                    &mut identity_component_bytes,
+                    bc.region.as_str(),
                     "case boundary identity bytes",
                 )?;
                 checked_count_add(
@@ -897,16 +931,18 @@ impl Scenario {
         for combination in &self.combinations {
             max_combination_name_bytes =
                 max_combination_name_bytes.max(combination.name.len().max(1));
-            checked_count_add(
+            observe_identity(
                 &mut identity_bytes,
-                combination.name.len(),
+                &mut identity_component_bytes,
+                combination.name.as_str(),
                 "combination identity bytes",
             )?;
             for (case, _) in &combination.terms {
                 max_term_reference_bytes = max_term_reference_bytes.max(case.len().max(1));
-                checked_count_add(
+                observe_identity(
                     &mut identity_bytes,
-                    case.len(),
+                    &mut identity_component_bytes,
+                    case.as_str(),
                     "combination reference bytes",
                 )?;
                 checkpoint("preflight combination terms")?;
@@ -915,9 +951,10 @@ impl Scenario {
         }
         for ensemble in &self.ensembles {
             max_ensemble_name_bytes = max_ensemble_name_bytes.max(ensemble.name.len().max(1));
-            checked_count_add(
+            observe_identity(
                 &mut identity_bytes,
-                ensemble.name.len(),
+                &mut identity_component_bytes,
+                ensemble.name.as_str(),
                 "ensemble identity bytes",
             )?;
             checkpoint("preflight ensembles")?;
@@ -932,20 +969,27 @@ impl Scenario {
                     phase: "contact pair key width",
                 })?;
             max_contact_pair_bytes = max_contact_pair_bytes.max(pair_bytes);
-            checked_count_add(
+            observe_identity(
                 &mut identity_bytes,
-                contact.region_a.len(),
+                &mut identity_component_bytes,
+                contact.region_a.as_str(),
                 "contact identity bytes",
             )?;
-            checked_count_add(
+            observe_identity(
                 &mut identity_bytes,
-                contact.region_b.len(),
+                &mut identity_component_bytes,
+                contact.region_b.as_str(),
                 "contact identity bytes",
             )?;
             checkpoint("preflight contacts")?;
         }
         enforce_limit("signal scalars", signal_scalars, budget.max_signal_scalars)?;
         enforce_limit("identity bytes", identity_bytes, budget.max_identity_bytes)?;
+        enforce_limit(
+            "identity component bytes",
+            identity_component_bytes,
+            budget.max_identity_component_bytes,
+        )?;
 
         let total_bcs =
             base_bcs
@@ -1234,6 +1278,7 @@ impl Scenario {
             signal_scalars,
             flux_checkpoints,
             identity_bytes,
+            identity_component_bytes,
             finding_capacity,
             planned_work,
         })
@@ -1796,10 +1841,10 @@ impl Scenario {
 mod validation_internal_tests {
     use super::{
         Combination, ContactLaw, ContactModel, DIAGNOSTIC_IDENTITY_PREVIEW_BYTES,
-        DiagnosticIdentity, Environment, LoadCase, Scenario, ValidationBudget, ValidationError,
-        ValidationIndex, ceil_log2, contact_pair, dedup_validation_times, heap_sort_work,
-        ordered_lookup_work, reserve_validation_times, sort_validation_index,
-        string_index_identity_work,
+        DiagnosticIdentity, Environment, LoadCase, MAX_VALIDATION_IDENTITY_COMPONENT_BYTES,
+        Scenario, ValidationBudget, ValidationError, ValidationIndex, ceil_log2, contact_pair,
+        dedup_validation_times, heap_sort_work, ordered_lookup_work, reserve_validation_times,
+        sort_validation_index, string_index_identity_work,
     };
     use crate::bc::{BcKind, BcValue, BoundaryCondition, Compat, Physics};
     use crate::ensemble::{SpectrumModel, StochasticEnsemble};
@@ -1962,6 +2007,53 @@ mod validation_internal_tests {
             Err(ValidationError::WorkPlanOverflow {
                 phase: "identity comparison overflow",
             })
+        ));
+    }
+
+    #[test]
+    fn opaque_identity_comparisons_have_a_hard_byte_tile() {
+        let shared = "x".repeat(MAX_VALIDATION_IDENTITY_COMPONENT_BYTES - 1);
+        let mut scenario = Scenario::new("identity-tile", 1, Environment::earth_lab());
+        scenario.cases.extend([
+            LoadCase {
+                name: format!("{shared}a"),
+                bcs: Vec::new(),
+            },
+            LoadCase {
+                name: format!("{shared}b"),
+                bcs: Vec::new(),
+            },
+        ]);
+
+        let plan = scenario
+            .validation_plan(ValidationBudget::default())
+            .expect("hard-boundary common-prefix identities must be admitted");
+        assert_eq!(
+            plan.identity_component_bytes,
+            MAX_VALIDATION_IDENTITY_COMPONENT_BYTES
+        );
+
+        scenario.cases[1].name.push('c');
+        assert!(matches!(
+            scenario.validation_plan(ValidationBudget::default()),
+            Err(ValidationError::LimitExceeded {
+                resource: "identity component bytes",
+                requested,
+                limit,
+            }) if requested == MAX_VALIDATION_IDENTITY_COMPONENT_BYTES + 1
+                && limit == MAX_VALIDATION_IDENTITY_COMPONENT_BYTES
+        ));
+
+        let mut widened = ValidationBudget::default();
+        widened.max_identity_component_bytes += 1;
+        assert!(matches!(
+            scenario.validation_plan(widened),
+            Err(ValidationError::LimitExceeded {
+                resource: "identity component byte budget",
+                requested,
+                limit,
+            }) if requested == MAX_VALIDATION_IDENTITY_COMPONENT_BYTES + 1
+                && limit == MAX_VALIDATION_IDENTITY_COMPONENT_BYTES
         ));
     }
 

@@ -174,9 +174,11 @@ flagships.
     references additionally charge the sum of the case/reference maxima for
     their cross-lookup into the case index; contact keys charge both
     canonicalization passes, self-pair comparison, and grouped adjacency.
-    Empty identities retain a one-unit comparison width. Numeric frame/parent
-    and BC-frame index lookups are charged separately. Exact requested limits
-    admit and one-unit-short limits refuse for every budget field.
+    Empty identities retain a one-unit comparison width. Each identity or
+    reference component has a hard 4,096-byte cap that callers may tighten but
+    cannot raise. Numeric frame/parent and BC-frame index lookups are charged
+    separately. Exact requested limits admit and one-unit-short limits refuse
+    for every budget field.
 
 ## Error model
 
@@ -218,6 +220,9 @@ sorts in place with row index as the total-order tiebreaker using a deterministi
 checkpointed heap sort. The preflight work total counts each index population
 item and a conservative heap comparison/swap envelope, including
 per-combination term entries and every net-flux checkpoint set. The explicit
+per-component cap bounds one opaque string comparison to 4 KiB (8 KiB across
+both components of an unordered contact key), forming the maximum comparison
+tile between checkpoints. The explicit
 `Cx` lane polls
 before preflight, at every top-level and nested record visited while constructing
 the semantic plan, after planning, after fixed phases, at every frame-index row,
@@ -298,9 +303,11 @@ None.
   permutations.
 - **sc-010** the retained semantic plan replays exactly; frames, base/case BCs,
   cases, combinations/terms, ensembles, contacts, signal scalars, raw flux
-  checkpoints, identity bytes, finding slots, and total work each admit at the
-  exact boundary and refuse one unit short; pre-requested cancellation publishes
-  no findings.
+  checkpoints, aggregate and per-component identity bytes, finding slots, and
+  total work each admit at the exact boundary and refuse one unit short;
+  pre-requested cancellation publishes no findings. A focused common-prefix
+  regression admits exactly 4,096 bytes and refuses both a 4,097-byte component
+  and any caller attempt to widen the hard comparison tile.
 - **sc-011** all 1,296 four-frame parent graphs match an independent exhaustive
   chain oracle, including world roots, dangling parents, self-cycles, and
   multi-node cycles.
