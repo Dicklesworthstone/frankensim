@@ -7,16 +7,18 @@ regime. Assimilation itself does not claim experimental validation.
 ## Purpose and layer
 
 Layer L4 (inference/UQ). Depends on `fs-evidence` (`Color` and
-`ValidityDomain`) and the in-tree `fs-blake3` identity primitive. Pure and
-deterministic; this is the checked linear-Gaussian core of weak-constraint
-assimilation.
+`ValidityDomain`), `fs-exec` (explicit `Cx`, mode, stream identity, and
+budgets), `fs-ivl` (outward-rounded PSD admission certificates), and the
+in-tree `fs-blake3` identity primitive. This is the checked, deterministic
+linear-Gaussian core of weak-constraint assimilation.
 
 ## Public types and semantics
 
-- `Belief` — a Gaussian state belief with private state. `new`, `scalar`, and
-  `diagonal` return `Result`; admission requires a non-empty finite mean and a
-  finite, square, symmetric, positive-semidefinite covariance within the
-  `MAX_DENSE_STATE_DIM` v0 envelope. `mean` and
+- `Belief` — a Gaussian state belief with private state. `new(..., &Cx)`,
+  `scalar`, `diagonal(..., &Cx)`, and `validate(&Cx)` return `Result`;
+  admission requires a non-empty finite mean and a finite, square, symmetric,
+  positive-semidefinite covariance within the `MAX_DENSE_STATE_DIM` v0
+  envelope. `mean` and
   `covariance` expose read-only slices; `component_mean` and `variance` are
   bounds-checked.
 - `Observation` — a private, checked scalar reading
@@ -29,16 +31,20 @@ assimilation.
 - `scan_observation(..., registration_var, ...) -> Result` — adds a finite,
   non-negative registration variance to strictly positive instrument noise and
   rejects overflow of the total (R8).
-- `misfit(&Belief, &[Observation]) -> Result<f64, AssimError>` —
+- `misfit(&Belief, &[Observation], &Cx) -> Result<f64, AssimError>` —
   `Σ (h·mean − y)² / r`; empty sets and non-finite arithmetic are refused.
-- `assimilate(&Belief, &Observation)` / `assimilate_all(&Belief,
-  &[Observation])` — scalar Kalman fusion. Aggregate fusion uses canonical
+- `assimilate(&Belief, &Observation, &Cx)` / `assimilate_all(&Belief,
+  &[Observation], &Cx)` — scalar Kalman fusion. Aggregate fusion uses canonical
   observation-content order, not caller order. Aggregate admission enforces
   `MAX_DENSE_OBSERVATIONS` and the multiplicative
   `MAX_DENSE_UPDATE_CUBIC_WORK` envelope before sorting or updating.
-- `assimilate_colored(&Belief, &[Observation], regime_param, lo, hi) ->
+- `assimilate_colored(&Belief, &[Observation], regime_param, lo, hi, &Cx) ->
   AssimilatedPosterior { belief, color, misfit_before, misfit_after }` — a
   read-only, regime-tagged **estimated candidate**. Access is through getters.
+- `assimilate_colored_with_shared_poll_quota(..., &Cx, &mut u32)` is the
+  compositional seam for a parent workflow that owns one monotonically
+  decreasing poll slice. It rejects a supplied slice above the ambient quota;
+  a raw counter does not authenticate provenance or prevent caller reissue.
 - `AssimError` — structured invalid-state, dimension, bounds, identity,
   empty-input, noise, covariance, innovation, and non-finite-computation
   refusals. It implements `Display` and `Error`.
@@ -48,14 +54,21 @@ assimilation.
 - Checked `Belief` and `Observation` values cannot be mutated into malformed
   states through the public API.
 - At the external belief-admission boundary, covariance validation is an
-  `O(n^3)` diagonal-pivoted Schur-complement test after dimensionless
-  correlation scaling, with exact zero-variance-row handling. Negative
-  curvature is never tolerance-clamped to zero: a negative pivot or diagonal
-  is refused, and a zero pivot is accepted only with an exactly zero remaining
-  row. Before floating scaling, every 2-by-2 principal minor is checked by an
-  exact comparison of the input `f64` values as binary-rational products, so a
-  sub-ULP negative determinant cannot be rounded onto the correlation boundary.
-  Numerically ambiguous higher-dimensional boundary matrices may be refused.
+  `O(n^3)` diagonal-pivoted Schur-complement certificate after dimensionless
+  correlation scaling, with exact zero-variance-row handling. Every 2-by-2
+  principal minor is first checked by an exact comparison of the input `f64`
+  values as binary-rational products, so a sub-ULP negative determinant cannot
+  be rounded onto the correlation boundary. One- and two-dimensional PSD
+  inputs, including exact rank-one singular matrices, are thereby decided
+  exactly. For active dimension three or greater, every scaled entry and Schur
+  update also carries an outward-rounded `fs-ivl::Interval`; admission requires
+  every pivot enclosure to be finite and wholly positive. A rounded positive
+  point pivot is never authority. Singular PSD boundaries, sufficiently
+  ill-conditioned strictly SPD matrices, and unresolved indefinite cases are
+  refused with
+  `CovarianceCertificationUnresolved`, distinct from a certified indefinite
+  principal minor, rather than tolerance-clamped into a PSD claim or falsely
+  described as indefinite.
 - The scalar Kalman covariance update uses Joseph form
   `(I-KH)P(I-KH)^T + KRK^T`, computes one triangle and mirrors it for bit-exact
   symmetry, then passes the result through the same full validator as an
@@ -78,34 +91,68 @@ assimilation.
   linear-size input can trigger quadratic dense allocation. The cap is 256 for
   this synchronous `O(n^3)` v0 core.
 - The candidate's `Color::Estimated.estimator` is
-  `assimilation-candidate:v1:<64 lowercase hex>`. Its BLAKE3 input uses typed
+  `assimilation-candidate:v4:<64 lowercase hex>`. Its BLAKE3 input uses typed
   length framing and binds the full prior, canonical observation multiset
   (including operator, reading, noise, instrument, and multiplicity), and
   proposed regime. The identity is deterministic, collision-resistant, bounded,
   delimiter-unambiguous, and changes with every bound semantic field.
+- Candidate identity v4 additionally binds PSD admission policy
+  `exact-2x2-interval-schur:v1` and its numeric policy version, execution mode, logical stream
+  identity (all four `StreamKey` fields), every ambient budget field (deadline
+  presence/value, poll quota, cost-quota presence/value, and priority), the
+  effective poll-quota slice, every component of the checked work plan, and
+  poll policy `fixed-stride:v2` with scalar stride 256, record stride 16,
+  canonical-comparison byte stride 1,024,
+  and identity-hash byte stride 1,024. The work plan itself has no separately
+  claimed public “v4” version.
+- For state dimension `n`, observation count `m`, canonical record sizes `b_i`,
+  `b_max = max(b_i)`, and `L = ceil(log2(m))`, preflight accounts exactly for
+  observation validation `m(n+4)`, record materialization `sum(b_i)`, canonical
+  merge ordering `2m + mL + mL*b_max`, and each misfit pass
+  `m(2n+4)`. An updating call also accounts for the prior clone `n+n^2`, each
+  Joseph update `n^3+6n^2+8n+2+(n(n+1)/2)(n+1)`, and each PSD revalidation
+  `n^3+6n^2+2`; colored calls add the exact bounded canonical-identity byte
+  count. All sums/products are checked before work begins.
+- Dense belief validation separately declares `6n+8n^2+n^3` scalar units.
+  `misfit` enables one misfit pass without update/hash; plain assimilation
+  enables update without misfit/hash; colored assimilation enables two misfit
+  passes, update, and hashing. Successful data-dependent paths may consume less
+  than the declared fail-closed bound.
 - Candidate dispersion is `+infinity`, the shared explicit no-spread-claim
   sentinel. No API in this crate directly constructs `Color::Validated`.
 
 ## Error model
 
 Structured `AssimError`; valid public calls return refusals rather than indexing
-panics. Empty/ragged/indefinite/non-finite beliefs, malformed observations,
+panics. Empty/ragged/indefinite/unresolved/non-finite beliefs, malformed observations,
 invalid identities and regimes, non-positive or non-finite noise, dimension
 mismatches, oversized aggregate count/work requests, degenerate innovations,
-and finite-input arithmetic overflow are refused. Allocation failure remains
+and finite-input arithmetic overflow are refused. `WorkPlanOverflow`,
+`WorkPlanExceeded`, `PollQuotaExceedsAmbient`, and `Cancelled` distinguish
+planning, accounting, compositional-quota, and observed-cancellation failures;
+no partial belief/candidate is returned. Allocation failure remains
 Rust's process-level behavior inside the admitted public resource envelope.
+Preflight checks both retained covariance and temporary interval-certificate
+matrix byte shapes before the initial checkpoint.
 
 ## Determinism class
 
-Fully deterministic: fusion, misfit, candidate identity, and posterior are pure
-functions of semantic inputs. Observation permutation is canonicalized, so it
-does not change result bits or identity. Duplicate observations are retained.
+Deterministic for a fixed execution manifest: fusion, misfit, candidate
+identity, and posterior are pure functions of semantic inputs. Observation
+permutation is canonicalized, so it does not change result bits or identity.
+Duplicate observations are retained.
 Changing the canonical schema or numerical algorithm requires a candidate
 identity version/domain bump.
 
 ## Cancellation behavior
 
-None (synchronous pure functions).
+Synchronous and cancellation-aware. Long-running public APIs perform bounded
+shape/work-plan admission before taking an explicit `Cx` checkpoint, then poll
+before numerical work and before publication and within bounded scalar, record,
+comparison-byte, and hash-byte tiles. Poll-quota exhaustion and
+`Cx::checkpoint` cancellation return exact completed/planned logical work and
+publish no partial result. The shared-quota seam supports a parent-owned
+invocation ledger but cannot authenticate the raw counter it receives.
 
 ## Unsafe boundary
 
@@ -117,7 +164,8 @@ None.
 
 ## Conformance tests
 
-`tests/assimilate.rs` (Proposal 11, G0/G3): mean shift and variance reduction;
+`tests/assimilate.rs` (Proposal 11, G0/G3/G4/G5): mean shift and variance
+reduction;
 misfit reduction; point-versus-scan noise; exact permutation stability; honest
 estimated color and bounded identity; empty/ragged/non-finite/indefinite belief
 refusals; checked indexing and point-sensor bounds; malformed observation and
@@ -126,7 +174,11 @@ delimiter-collision and multiplicity identity probes; finite-input overflow;
 strict rejection of near-boundary negative curvature; Joseph-form replay of a
 cancellation-induced invalid-posterior counterexample; seeded randomized
 post-update validation; dense-state, observation-count, and multiplicative-work
-resource admission; and deterministic replay.
+resource admission; deterministic replay; pre-cancel/final-publication
+cancellation; exact quota sweeps through validation, ordering, update, PSD,
+hash, and commit; hostile maximum-work cancellation; shared-quota depletion;
+and execution-mode, every budget field, every stream field, work, and poll
+identity binding.
 
 ## No-claim boundaries
 
@@ -140,20 +192,32 @@ resource admission; and deterministic replay.
   calibrated dataset provenance, retained validation evidence, and an
   authenticated authority. No generic authenticated validation capability is
   currently owned by this crate, so it exposes no promotion API.
-- The semidefinite admission check and Kalman arithmetic are floating-point
-  fail-closed guards, not interval or theorem certificates. Correlation scaling
-  and diagonal pivoting reduce numerical sensitivity, but this crate does not
-  claim rigorous eigenvalue enclosures under roundoff. In particular, it may
-  reject a mathematically semidefinite matrix whose computed Schur complement
-  crosses below zero; it never converts such a negative result into an admitted
-  zero pivot.
+- The semidefinite admission check uses outward-rounded intervals to certify
+  the signs of the particular scaled-elimination pivots it admits. This is not
+  a complete PSD decision procedure, an eigenvalue enclosure, or a theorem
+  about conditioning, and it can return `CovarianceCertificationUnresolved`
+  for a mathematically singular PSD matrix, a sufficiently ill-conditioned
+  strictly SPD matrix, or an indefinite matrix whose sign it cannot resolve.
+  Public admission requires a successful certificate, not merely mathematical
+  positive semidefiniteness. The
+  Joseph update and other Kalman arithmetic remain floating-point and are not
+  interval-certified. No ambiguous or negative pivot is tolerance-clamped into
+  an admitted zero pivot.
 - The dense v0 state cap is a resource contract, not a scientific limit. Larger
   states require a future sparse or matrix-free implementation with explicit
   memory budgets and tile-boundary cancellation rather than raising this cap.
 - The observation operators are SUPPLIED restriction-map rows; deriving them
-  from the sheaf's trace maps is fs-geom's; the registration variance for scan
-  observations comes from fs-asbuilt.
+  from the sheaf's trace maps is fs-geom's. The registration variance accepted
+  by scan observations is likewise a caller-supplied, separately calibrated
+  variance. The current fs-asbuilt residual RMS is a global fit diagnostic,
+  not transform covariance, and MUST NOT be passed as that variance. A typed
+  fs-asbuilt covariance or spatial-uncertainty handoff remains future work.
 - Ledgering the update onto the per-regime model-form posterior (Proposal 3's
   maps), authenticating calibration receipts, and admitting a validated claim
   are fs-ledger/fs-package integration work; this crate produces the estimated
   candidate and proposed validity domain.
+- Logical-work totals and fixed poll strides are accounting/cancellation
+  semantics, not claims about instructions, wall-clock time, allocation peaks,
+  pause/resume state, deadline/cost enforcement, drain latency, or a
+  200-microsecond cancellation bound. G5 is same-process replay for a fixed
+  implementation/toolchain manifest, not cross-ISA bit stability.

@@ -26,14 +26,18 @@ use core::mem::size_of;
 
 pub use fs_evidence::{Color, ValidityDomain};
 use fs_exec::Cx;
+use fs_ivl::Interval;
 
-const CANDIDATE_ID_DOMAIN: &str = "org.frankensim.fs-assimilate.candidate.v3";
-const CANDIDATE_ID_PREFIX: &str = "assimilation-candidate:v3:";
+const CANDIDATE_ID_DOMAIN: &str = "org.frankensim.fs-assimilate.candidate.v4";
+const CANDIDATE_ID_PREFIX: &str = "assimilation-candidate:v4:";
+const PSD_ADMISSION_POLICY_ID: &str = "exact-2x2-interval-schur:v1";
+/// Version of the PSD admission algorithm bound into candidate replay identity.
+pub const PSD_ADMISSION_POLICY_VERSION: u32 = 1;
 const SCALAR_POLL_STRIDE: u128 = 256;
 const RECORD_POLL_STRIDE: u128 = 16;
 const CANONICAL_COMPARE_BYTE_POLL_STRIDE: u128 = 1_024;
 const HASH_BYTE_POLL_STRIDE: usize = 1_024;
-const POLL_POLICY_ID: &str = "fixed-stride:v2";
+const POLL_POLICY_ID: &str = "fixed-stride:v3";
 /// Maximum state dimension admitted by the synchronous dense v0 core.
 ///
 /// The Joseph update is `O(n^3)` and owns several `n x n` work matrices. Larger
@@ -308,6 +312,8 @@ impl Belief {
         }
         validate_state_dimension(means.len())?;
         let _matrix_entries = checked_square_usize(means.len(), "diagonal covariance")?;
+        let _certificate_bytes =
+            checked_square_allocation::<PsdCell>(means.len(), "diagonal PSD certificate")?;
         let plan = belief_validation_work_plan(means.len())?;
         let mut progress = WorkProgress::new(cx, plan);
         progress.checkpoint("initial")?;
@@ -436,19 +442,23 @@ impl Observation {
     /// operator; a non-finite reading; non-positive noise; or an unusable
     /// instrument identity.
     pub fn new(
-        operator: Vec<f64>,
+        mut operator: Vec<f64>,
         value: f64,
         noise_var: f64,
         instrument: impl Into<String>,
     ) -> Result<Self, AssimError> {
-        let observation = Self {
-            operator: operator.into_iter().map(canonicalize_zero).collect(),
+        validate_observation_numeric_parts(&operator, value, noise_var)?;
+        for coefficient in &mut operator {
+            *coefficient = canonicalize_zero(*coefficient);
+        }
+        let instrument = instrument.into();
+        validate_leaf_identity("instrument", &instrument)?;
+        Ok(Self {
+            operator,
             value: canonicalize_zero(value),
             noise_var: canonicalize_zero(noise_var),
-            instrument: instrument.into(),
-        };
-        observation.validate()?;
-        Ok(observation)
+            instrument,
+        })
     }
 
     /// Recheck every observation invariant except equality with a particular
@@ -457,26 +467,7 @@ impl Observation {
     /// # Errors
     /// Returns the first violated invariant.
     pub fn validate(&self) -> Result<(), AssimError> {
-        if self.operator.is_empty() {
-            return Err(AssimError::EmptyObservationOperator);
-        }
-        validate_state_dimension(self.operator.len())?;
-        for (index, coefficient) in self.operator.iter().enumerate() {
-            if !coefficient.is_finite() {
-                return Err(AssimError::NonFiniteObservationOperator { index });
-            }
-        }
-        if self
-            .operator
-            .iter()
-            .all(|coefficient| canonical_f64_bits(*coefficient) == 0)
-        {
-            return Err(AssimError::ZeroObservationOperator);
-        }
-        if !self.value.is_finite() {
-            return Err(AssimError::NonFiniteObservationValue);
-        }
-        validate_noise(self.noise_var)?;
+        validate_observation_numeric_parts(&self.operator, self.value, self.noise_var)?;
         validate_leaf_identity("instrument", &self.instrument)
     }
 
@@ -672,6 +663,11 @@ pub enum AssimError {
     },
     /// The symmetric covariance is not positive semidefinite.
     CovarianceNotPositiveSemidefinite,
+    /// The bounded interval elimination could not certify the covariance sign.
+    /// This can include a singular PSD boundary, a sufficiently ill-conditioned
+    /// strictly SPD matrix, or unresolved indefinite curvature. Admission fails
+    /// closed without falsely claiming any of those conclusions.
+    CovarianceCertificationUnresolved,
     /// An observation operator has no coefficients.
     EmptyObservationOperator,
     /// An observation operator contains no state sensitivity.
@@ -808,6 +804,10 @@ impl fmt::Display for AssimError {
             Self::CovarianceNotPositiveSemidefinite => {
                 write!(f, "covariance is not positive semidefinite")
             }
+            Self::CovarianceCertificationUnresolved => write!(
+                f,
+                "covariance semidefiniteness is unresolved by the bounded interval certificate"
+            ),
             Self::EmptyObservationOperator => write!(f, "observation operator must not be empty"),
             Self::ZeroObservationOperator => {
                 write!(
@@ -925,9 +925,10 @@ fn misfit_canonical(
     Ok(total)
 }
 
-/// Fuse one observation into the belief by the scalar Kalman update. For a
-/// valid covariance, every posterior component variance is at most its prior
-/// value (information only increases).
+/// Fuse one observation into the belief by the scalar Kalman update. In exact
+/// arithmetic a valid scalar Kalman update cannot increase any component
+/// variance. The binary64 Joseph update is revalidated as PSD but does not yet
+/// certify componentwise contraction against the prior.
 ///
 /// # Errors
 /// Returns [`AssimError`] for malformed input, a dimension mismatch, a
@@ -1197,9 +1198,13 @@ fn checked_work_add(left: u128, right: u128, phase: &'static str) -> Result<u128
 }
 
 fn checked_square_usize(value: usize, phase: &'static str) -> Result<usize, AssimError> {
+    checked_square_allocation::<f64>(value, phase)
+}
+
+fn checked_square_allocation<T>(value: usize, phase: &'static str) -> Result<usize, AssimError> {
     value
         .checked_mul(value)
-        .and_then(|entries| entries.checked_mul(size_of::<f64>()))
+        .and_then(|entries| entries.checked_mul(size_of::<T>()))
         .ok_or(AssimError::WorkPlanOverflow { phase })
 }
 
@@ -1263,6 +1268,7 @@ fn preflight_belief_shape(mean: &[f64], cov: &[Vec<f64>]) -> Result<(), AssimErr
         }
     }
     let _dense_bytes = checked_square_usize(n, "belief covariance")?;
+    let _certificate_bytes = checked_square_allocation::<PsdCell>(n, "belief PSD certificate")?;
     Ok(())
 }
 
@@ -1282,17 +1288,10 @@ fn belief_validation_work_plan(n: usize) -> Result<WorkPlan, AssimError> {
     WorkPlan::checked(validation_psd, 0, 0, 0, 0, 0, 0)
 }
 
-fn assimilation_work_plan(
-    prior: &Belief,
+fn canonical_ordering_work(
     observations: &[Observation],
-    misfit_passes: u128,
-    include_update: bool,
-    include_hash: bool,
-    regime: Option<(&str, f64, f64)>,
-    mode_name_len: usize,
-) -> Result<WorkPlan, AssimError> {
-    validate_assimilation_work(prior.dim(), observations.len())?;
-    let _dense_matrix_bytes = checked_square_usize(prior.dim(), "Joseph matrices")?;
+    count: u128,
+) -> Result<(u128, u128), AssimError> {
     let _order_bytes = observations
         .len()
         .checked_mul(size_of::<usize>())
@@ -1300,16 +1299,6 @@ fn assimilation_work_plan(
         .ok_or(AssimError::WorkPlanOverflow {
             phase: "canonical ordering",
         })?;
-    let n = prior.dim() as u128;
-    let count = observations.len() as u128;
-    let n2 = checked_work_mul(n, n, "assimilation preflight")?;
-    let n3 = checked_work_mul(n2, n, "assimilation preflight")?;
-
-    let validation_psd = checked_work_mul(
-        count,
-        checked_work_add(n, 4, "observation validation")?,
-        "observation validation",
-    )?;
     let (record_materialization, maximum_record_bytes) =
         observations
             .iter()
@@ -1339,69 +1328,113 @@ fn assimilation_work_plan(
         comparison_byte_budget,
         "canonical ordering",
     )?;
+    Ok((record_materialization, canonical_ordering))
+}
+
+fn assimilation_update_work(
+    n: u128,
+    n2: u128,
+    n3: u128,
+    count: u128,
+    include_update: bool,
+) -> Result<(u128, u128), AssimError> {
+    if !include_update {
+        return Ok((0, 0));
+    }
+
+    // The posterior is cloned once before the sequential updates. Each
+    // observation then performs dense products plus one computed upper
+    // triangle in the Joseph covariance. Zero-initialization is explicit work
+    // and the triangular term includes both its n-term dot product and the
+    // final noise update.
+    let clone_work = checked_work_add(n, n2, "posterior clone")?;
+    let upper_triangle = checked_work_mul(
+        n,
+        checked_work_add(n, 1, "Joseph upper triangle")?,
+        "Joseph upper triangle",
+    )? / 2;
+    let joseph_per_observation = checked_work_add(
+        checked_work_add(
+            checked_work_add(
+                n3,
+                checked_work_mul(6, n2, "Joseph update")?,
+                "Joseph update",
+            )?,
+            checked_work_mul(8, n, "Joseph update")?,
+            "Joseph update",
+        )?,
+        checked_work_add(
+            2,
+            checked_work_mul(
+                upper_triangle,
+                checked_work_add(n, 1, "Joseph upper triangle")?,
+                "Joseph upper triangle",
+            )?,
+            "Joseph update",
+        )?,
+        "Joseph update",
+    )?;
+    let joseph_update = checked_work_add(
+        clone_work,
+        checked_work_mul(count, joseph_per_observation, "Joseph update")?,
+        "Joseph update",
+    )?;
+    // 6n²+n³ bounds the full structural/PSD/canonicalization pass for n>=2.
+    // The two-unit scalar correction makes the same bound sound at n=1, where
+    // fixed per-belief work otherwise dominates the cubic term.
+    let psd_per_observation = checked_work_add(
+        checked_work_add(
+            checked_work_mul(6, n2, "PSD revalidation")?,
+            n3,
+            "PSD revalidation",
+        )?,
+        2,
+        "PSD revalidation",
+    )?;
+    let psd_revalidation = checked_work_mul(count, psd_per_observation, "PSD revalidation")?;
+    Ok((joseph_update, psd_revalidation))
+}
+
+fn assimilation_work_plan(
+    prior: &Belief,
+    observations: &[Observation],
+    misfit_passes: u128,
+    include_update: bool,
+    include_hash: bool,
+    regime: Option<(&str, f64, f64)>,
+    mode_name_len: usize,
+) -> Result<WorkPlan, AssimError> {
+    if include_update {
+        validate_assimilation_work(prior.dim(), observations.len())?;
+        let _dense_matrix_bytes = checked_square_usize(prior.dim(), "Joseph matrices")?;
+        let _certificate_bytes =
+            checked_square_allocation::<PsdCell>(prior.dim(), "posterior PSD certificate")?;
+    } else {
+        // Read-only misfit evaluation is O(observations × state dimension)
+        // and allocates no Joseph matrix. Applying the update-only cubic cap
+        // here would reject otherwise admitted linear work.
+        validate_observation_count(observations.len())?;
+    }
+    let n = prior.dim() as u128;
+    let count = observations.len() as u128;
+    let n2 = checked_work_mul(n, n, "assimilation preflight")?;
+    let n3 = checked_work_mul(n2, n, "assimilation preflight")?;
+
+    let validation_psd = checked_work_mul(
+        count,
+        checked_work_add(n, 4, "observation validation")?,
+        "observation validation",
+    )?;
+    let (record_materialization, canonical_ordering) =
+        canonical_ordering_work(observations, count)?;
     let one_misfit = checked_work_mul(
         count,
         checked_work_add(checked_work_mul(2, n, "misfit")?, 4, "misfit")?,
         "misfit",
     )?;
     let misfit_work = checked_work_mul(one_misfit, misfit_passes, "misfit passes")?;
-    let (joseph_update, psd_revalidation) = if include_update {
-        // The posterior is cloned once before the sequential updates. Each
-        // observation then performs dense products plus one computed upper
-        // triangle in the Joseph covariance. Zero-initialization is explicit
-        // work and the triangular term includes both its n-term dot product
-        // and the final noise update.
-        let clone_work = checked_work_add(n, n2, "posterior clone")?;
-        let upper_triangle = checked_work_mul(
-            n,
-            checked_work_add(n, 1, "Joseph upper triangle")?,
-            "Joseph upper triangle",
-        )? / 2;
-        let joseph_per_observation = checked_work_add(
-            checked_work_add(
-                checked_work_add(
-                    n3,
-                    checked_work_mul(6, n2, "Joseph update")?,
-                    "Joseph update",
-                )?,
-                checked_work_mul(8, n, "Joseph update")?,
-                "Joseph update",
-            )?,
-            checked_work_add(
-                2,
-                checked_work_mul(
-                    upper_triangle,
-                    checked_work_add(n, 1, "Joseph upper triangle")?,
-                    "Joseph upper triangle",
-                )?,
-                "Joseph update",
-            )?,
-            "Joseph update",
-        )?;
-        let joseph_update = checked_work_add(
-            clone_work,
-            checked_work_mul(count, joseph_per_observation, "Joseph update")?,
-            "Joseph update",
-        )?;
-        // 6n²+n³ bounds the full structural/PSD/canonicalization pass for
-        // n>=2. The two-unit scalar correction makes the same bound sound at
-        // n=1, where fixed per-belief work otherwise dominates the cubic term.
-        let psd_per_observation = checked_work_add(
-            checked_work_add(
-                checked_work_mul(6, n2, "PSD revalidation")?,
-                n3,
-                "PSD revalidation",
-            )?,
-            2,
-            "PSD revalidation",
-        )?;
-        (
-            joseph_update,
-            checked_work_mul(count, psd_per_observation, "PSD revalidation")?,
-        )
-    } else {
-        (0, 0)
-    };
+    let (joseph_update, psd_revalidation) =
+        assimilation_update_work(n, n2, n3, count, include_update)?;
     let hashing = if include_hash {
         let (regime_param, _, _) = regime.ok_or(AssimError::WorkPlanOverflow {
             phase: "candidate regime",
@@ -1429,8 +1462,14 @@ fn validate_belief_parts(
     progress: &mut WorkProgress<'_, '_>,
 ) -> Result<(), AssimError> {
     validate_belief_structure(mean, cov, phase, progress)?;
-    if !covariance_is_positive_semidefinite(cov, phase, progress)? {
-        return Err(AssimError::CovarianceNotPositiveSemidefinite);
+    match certify_covariance_semidefinite(cov, phase, progress)? {
+        PsdCertification::CertifiedPsd => {}
+        PsdCertification::CertifiedIndefinite => {
+            return Err(AssimError::CovarianceNotPositiveSemidefinite);
+        }
+        PsdCertification::Unresolved => {
+            return Err(AssimError::CovarianceCertificationUnresolved);
+        }
     }
     Ok(())
 }
@@ -1538,11 +1577,11 @@ fn validate_assimilation_work(dim: usize, observation_count: usize) -> Result<()
     }
 }
 
-fn covariance_is_positive_semidefinite(
+fn certify_covariance_semidefinite(
     cov: &[Vec<f64>],
     phase: &'static str,
     progress: &mut WorkProgress<'_, '_>,
-) -> Result<bool, AssimError> {
+) -> Result<PsdCertification, AssimError> {
     // Scaling to a correlation matrix makes the Schur-complement test
     // dimensionless. Without this step, one enormous variance can hide an
     // invalid correlation involving a much smaller variance. This boundary is
@@ -1557,7 +1596,7 @@ fn covariance_is_positive_semidefinite(
             for entry in row {
                 progress.scalar(phase, 1)?;
                 if canonical_f64_bits(*entry) != 0 {
-                    return Ok(false);
+                    return Ok(PsdCertification::CertifiedIndefinite);
                 }
             }
         } else {
@@ -1566,50 +1605,79 @@ fn covariance_is_positive_semidefinite(
     }
     let n = active.len();
     if n == 0 {
-        return Ok(true);
+        return Ok(PsdCertification::CertifiedPsd);
     }
 
-    let mut scaled = zero_matrix(n, phase, progress)?;
+    // Every one- and two-dimensional principal covariance can be decided
+    // exactly from its diagonal signs and binary-rational 2x2 determinant.
+    // Do this before interval scaling both to preserve exact singular PSD
+    // cases and to reject correlations that floating division could round
+    // back onto the unit boundary.
     for (scaled_row, &source_row) in active.iter().enumerate() {
-        scaled[scaled_row][scaled_row] = 1.0;
-        progress.scalar(phase, 1)?;
-        for (scaled_column, &source_column) in active.iter().enumerate().skip(scaled_row + 1) {
+        for &source_column in active.iter().skip(scaled_row + 1) {
             progress.scalar(phase, 1)?;
             if !square_is_at_most_product(
                 cov[source_row][source_column].abs(),
                 cov[source_row][source_row],
                 cov[source_column][source_column],
             ) {
-                // This exact binary-rational comparison enforces every 2x2
-                // principal minor before square roots and divisions can round
-                // an invalid correlation back onto the unit boundary.
-                return Ok(false);
+                return Ok(PsdCertification::CertifiedIndefinite);
             }
+        }
+    }
+    if n <= 2 {
+        return Ok(PsdCertification::CertifiedPsd);
+    }
+
+    let mut scaled = psd_cell_matrix(n, phase, progress)?;
+    for (scaled_row, &source_row) in active.iter().enumerate() {
+        scaled[scaled_row][scaled_row] = PsdCell::point(1.0);
+        progress.scalar(phase, 1)?;
+        for (scaled_column, &source_column) in active.iter().enumerate().skip(scaled_row + 1) {
+            progress.scalar(phase, 1)?;
             let row_scale = cov[source_row][source_row].sqrt();
             let column_scale = cov[source_column][source_column].sqrt();
-            let (first_divisor, second_divisor) = if row_scale >= column_scale {
-                (row_scale, column_scale)
-            } else {
-                (column_scale, row_scale)
-            };
-            let correlation = cov[source_row][source_column] / first_divisor / second_divisor;
+            let (first_source, second_source, first_divisor, second_divisor) =
+                if row_scale >= column_scale {
+                    (source_row, source_column, row_scale, column_scale)
+                } else {
+                    (source_column, source_row, column_scale, row_scale)
+                };
+            let covariance = cov[source_row][source_column];
+            let correlation = covariance / first_divisor / second_divisor;
             if !correlation.is_finite() || correlation.abs() > 1.0 {
-                return Ok(false);
+                return Ok(PsdCertification::Unresolved);
             }
-            scaled[scaled_row][scaled_column] = correlation;
-            scaled[scaled_column][scaled_row] = correlation;
+            let enclosure = if canonical_f64_bits(covariance) == 0 {
+                Interval::point(0.0)
+            } else {
+                let raw = Interval::point(covariance)
+                    / Interval::point(cov[first_source][first_source]).sqrt()
+                    / Interval::point(cov[second_source][second_source]).sqrt();
+                let Some(clipped) = raw.intersect(Interval::new(-1.0, 1.0)) else {
+                    return Ok(PsdCertification::Unresolved);
+                };
+                clipped
+            };
+            let cell = PsdCell {
+                point: correlation,
+                enclosure,
+            };
+            scaled[scaled_row][scaled_column] = cell;
+            scaled[scaled_column][scaled_row] = cell;
         }
     }
 
-    // Symmetric diagonal pivoting avoids dividing by a small Schur pivot when
-    // a better-conditioned one remains. The transformation is a sequence of
-    // congruences, so a negative diagonal in any Schur complement is direct
-    // evidence of negative curvature.
+    // Symmetric diagonal pivoting keeps the nominal calculation stable, but
+    // NOMINAL PIVOTS NEVER AUTHORIZE ADMISSION. Each Schur update travels with
+    // an outward-rounded enclosure. Only a finite interval wholly above zero
+    // certifies the congruence step; a negative or zero-containing pivot is
+    // either indefinite or numerically ambiguous and is refused fail-closed.
     for pivot_index in 0..n {
         let mut selected = pivot_index;
         for candidate in (pivot_index + 1)..n {
             progress.scalar(phase, 1)?;
-            if scaled[candidate][candidate] > scaled[selected][selected] {
+            if scaled[candidate][candidate].point > scaled[selected][selected].point {
                 selected = candidate;
             }
         }
@@ -1621,20 +1689,17 @@ fn covariance_is_positive_semidefinite(
         }
 
         let pivot = scaled[pivot_index][pivot_index];
-        if !pivot.is_finite() || pivot < 0.0 {
-            return Ok(false);
+        if !pivot.point.is_finite()
+            || !pivot.enclosure.lo().is_finite()
+            || !pivot.enclosure.hi().is_finite()
+        {
+            return Ok(PsdCertification::Unresolved);
         }
-        if canonical_f64_bits(pivot) == 0 {
-            // A PSD matrix with a zero diagonal has an exactly zero row and
-            // column. Accept exact singular structure, but never manufacture
-            // it by tolerance-clamping a negative pivot.
-            for entry in &scaled[pivot_index][(pivot_index + 1)..] {
-                progress.scalar(phase, 1)?;
-                if canonical_f64_bits(*entry) != 0 {
-                    return Ok(false);
-                }
-            }
-            continue;
+        if pivot.enclosure.hi() < 0.0 {
+            return Ok(PsdCertification::CertifiedIndefinite);
+        }
+        if pivot.enclosure.lo() <= 0.0 {
+            return Ok(PsdCertification::Unresolved);
         }
 
         let mut pivot_column = Vec::with_capacity(n);
@@ -1643,23 +1708,79 @@ fn covariance_is_positive_semidefinite(
             progress.scalar(phase, 1)?;
         }
         for row in (pivot_index + 1)..n {
-            let multiplier = pivot_column[row] / pivot;
+            let multiplier = PsdCell {
+                point: pivot_column[row].point / pivot.point,
+                enclosure: pivot_column[row].enclosure / pivot.enclosure,
+            };
             progress.scalar(phase, 1)?;
-            if !multiplier.is_finite() {
-                return Ok(false);
+            if !multiplier.point.is_finite()
+                || !multiplier.enclosure.lo().is_finite()
+                || !multiplier.enclosure.hi().is_finite()
+            {
+                return Ok(PsdCertification::Unresolved);
             }
             for (column, column_pivot) in pivot_column.iter().enumerate().skip(row) {
-                let updated = (-multiplier).mul_add(*column_pivot, scaled[column][row]);
+                let updated = PsdCell {
+                    point: (-multiplier.point)
+                        .mul_add(column_pivot.point, scaled[column][row].point),
+                    enclosure: scaled[column][row].enclosure
+                        - multiplier.enclosure * column_pivot.enclosure,
+                };
                 progress.scalar(phase, 1)?;
-                if !updated.is_finite() || (row == column && updated < 0.0) {
-                    return Ok(false);
+                if !updated.point.is_finite()
+                    || !updated.enclosure.lo().is_finite()
+                    || !updated.enclosure.hi().is_finite()
+                {
+                    return Ok(PsdCertification::Unresolved);
+                }
+                if row == column && updated.enclosure.hi() < 0.0 {
+                    return Ok(PsdCertification::CertifiedIndefinite);
                 }
                 scaled[column][row] = updated;
                 scaled[row][column] = updated;
             }
         }
     }
-    Ok(true)
+    Ok(PsdCertification::CertifiedPsd)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PsdCertification {
+    CertifiedPsd,
+    CertifiedIndefinite,
+    Unresolved,
+}
+
+#[derive(Clone, Copy)]
+struct PsdCell {
+    point: f64,
+    enclosure: Interval,
+}
+
+impl PsdCell {
+    fn point(value: f64) -> Self {
+        Self {
+            point: value,
+            enclosure: Interval::point(value),
+        }
+    }
+}
+
+fn psd_cell_matrix(
+    dimension: usize,
+    phase: &'static str,
+    progress: &mut WorkProgress<'_, '_>,
+) -> Result<Vec<Vec<PsdCell>>, AssimError> {
+    let mut matrix = Vec::with_capacity(dimension);
+    for _ in 0..dimension {
+        let mut row = Vec::with_capacity(dimension);
+        for _ in 0..dimension {
+            row.push(PsdCell::point(0.0));
+            progress.scalar(phase, 1)?;
+        }
+        matrix.push(row);
+    }
+    Ok(matrix)
 }
 
 fn square_is_at_most_product(value: f64, left: f64, right: f64) -> bool {
@@ -1723,6 +1844,31 @@ fn validate_noise(noise_var: f64) -> Result<(), AssimError> {
     } else {
         Ok(())
     }
+}
+
+fn validate_observation_numeric_parts(
+    operator: &[f64],
+    value: f64,
+    noise_var: f64,
+) -> Result<(), AssimError> {
+    if operator.is_empty() {
+        return Err(AssimError::EmptyObservationOperator);
+    }
+    validate_state_dimension(operator.len())?;
+    let mut any_nonzero = false;
+    for (index, coefficient) in operator.iter().copied().enumerate() {
+        if !coefficient.is_finite() {
+            return Err(AssimError::NonFiniteObservationOperator { index });
+        }
+        any_nonzero |= canonical_f64_bits(coefficient) != 0;
+    }
+    if !any_nonzero {
+        return Err(AssimError::ZeroObservationOperator);
+    }
+    if !value.is_finite() {
+        return Err(AssimError::NonFiniteObservationValue);
+    }
+    validate_noise(noise_var)
 }
 
 fn validate_leaf_identity(field: &'static str, identity: &str) -> Result<(), AssimError> {
@@ -1971,13 +2117,13 @@ fn validated_canonical_observations<'a>(
                     &records[left_index].bytes,
                     &records[right_index].bytes,
                     progress,
-                )? != core::cmp::Ordering::Greater
+                )? == core::cmp::Ordering::Greater
                 {
-                    scratch[output] = left_index;
-                    left += 1;
-                } else {
                     scratch[output] = right_index;
                     right += 1;
+                } else {
+                    scratch[output] = left_index;
+                    left += 1;
                 }
                 output += 1;
                 progress.records("canonical-ordering", 1)?;
@@ -2219,6 +2365,18 @@ fn candidate_identity(
     )?;
     hash_atom(
         &mut hasher,
+        b"psd-admission-policy",
+        PSD_ADMISSION_POLICY_ID.as_bytes(),
+        progress,
+    )?;
+    hash_atom(
+        &mut hasher,
+        b"psd-admission-policy-version",
+        &PSD_ADMISSION_POLICY_VERSION.to_le_bytes(),
+        progress,
+    )?;
+    hash_atom(
+        &mut hasher,
         b"state-dimension",
         &usize_bytes(prior.dim()),
         progress,
@@ -2417,6 +2575,18 @@ fn candidate_identity_work_size(
 ) -> Result<u128, AssimError> {
     let mut total = 0_usize;
     add_identity_atoms(&mut total, b"identity-domain", CANDIDATE_ID_DOMAIN.len(), 1)?;
+    add_identity_atoms(
+        &mut total,
+        b"psd-admission-policy",
+        PSD_ADMISSION_POLICY_ID.len(),
+        1,
+    )?;
+    add_identity_atoms(
+        &mut total,
+        b"psd-admission-policy-version",
+        size_of::<u32>(),
+        1,
+    )?;
     add_identity_atoms(&mut total, b"state-dimension", size_of::<u128>(), 1)?;
     add_identity_atoms(
         &mut total,

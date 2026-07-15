@@ -3,20 +3,28 @@
 
 use fs_assimilate::{
     AssimError, AssimilatedPosterior, Belief, Color, MAX_DENSE_OBSERVATIONS, MAX_DENSE_STATE_DIM,
-    MAX_DENSE_UPDATE_CUBIC_WORK, Observation, assimilate as assimilate_with_cx,
-    assimilate_all as assimilate_all_with_cx, assimilate_colored as assimilate_colored_with_cx,
-    assimilate_colored_with_shared_poll_quota, misfit as misfit_with_cx, point_sensor,
-    scan_observation,
+    MAX_DENSE_UPDATE_CUBIC_WORK, Observation, PSD_ADMISSION_POLICY_VERSION,
+    assimilate as assimilate_with_cx, assimilate_all as assimilate_all_with_cx,
+    assimilate_colored as assimilate_colored_with_cx, assimilate_colored_with_shared_poll_quota,
+    misfit as misfit_with_cx, point_sensor, scan_observation,
 };
 use fs_evidence::{MAX_COLOR_IDENTITY_BYTES, color_leaf_identity_reason};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 
 const TEST_STREAM: StreamKey = StreamKey {
-    seed: 0xA5_51_11_A7_E,
+    seed: 0x000A_5511_1A7E,
     kernel_id: 0xA551,
     tile: 0,
     iteration: 0,
 };
+
+struct PanicOnInstrumentConversion;
+
+impl From<PanicOnInstrumentConversion> for String {
+    fn from(_: PanicOnInstrumentConversion) -> Self {
+        panic!("invalid observation must refuse before converting instrument identity")
+    }
+}
 
 fn with_stream_cx<R>(
     gate: &CancelGate,
@@ -26,10 +34,17 @@ fn with_stream_cx<R>(
     f: impl FnOnce(&Cx<'_>) -> R,
 ) -> R {
     let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
-    pool.scope(|arena| {
+    let result = pool.scope(|arena| {
         let cx = Cx::new(gate, arena, stream, budget, mode);
         f(&cx)
-    })
+    });
+    let stats = pool.stats();
+    assert!(
+        stats.quiescent(),
+        "Cx arena must be quiescent after scope: {}",
+        stats.to_json()
+    );
+    result
 }
 
 fn with_configured_cx<R>(
@@ -127,14 +142,14 @@ fn assert_same_non_identity_posterior(left: &AssimilatedPosterior, right: &Assim
     }
 }
 
-fn assert_initial_cancelled<T: core::fmt::Debug>(result: Result<T, AssimError>) {
+fn assert_initial_cancelled<T: core::fmt::Debug>(result: &Result<T, AssimError>) {
     assert!(matches!(
         result,
         Err(AssimError::Cancelled {
             phase: "initial",
             completed: 0,
             planned,
-        }) if planned > 0
+        }) if *planned > 0
     ));
 }
 
@@ -217,7 +232,7 @@ fn the_assimilated_posterior_is_an_honest_bounded_estimate() {
             estimator,
             dispersion,
         } => {
-            assert!(estimator.starts_with("assimilation-candidate:v3:"));
+            assert!(estimator.starts_with("assimilation-candidate:v4:"));
             assert!(estimator.len() <= MAX_COLOR_IDENTITY_BYTES);
             assert_eq!(color_leaf_identity_reason(estimator), None);
             assert!(dispersion.is_infinite() && dispersion.is_sign_positive());
@@ -332,7 +347,37 @@ fn dense_state_dimension_is_bounded_before_quadratic_allocation() {
     );
     assert_eq!(
         Observation::new(vec![1.0; oversized], 0.0, 1.0, "bounded-sensor"),
-        Err(expected)
+        Err(expected.clone())
+    );
+    assert_eq!(
+        Observation::new(
+            vec![f64::NAN; oversized],
+            0.0,
+            1.0,
+            PanicOnInstrumentConversion,
+        ),
+        Err(expected),
+        "O(1) dimension admission must precede coefficient traversal and identity allocation"
+    );
+}
+
+#[test]
+fn numeric_observation_refusals_precede_instrument_conversion() {
+    assert_eq!(
+        Observation::new(vec![f64::NAN], 0.0, 1.0, PanicOnInstrumentConversion,),
+        Err(AssimError::NonFiniteObservationOperator { index: 0 })
+    );
+    assert_eq!(
+        Observation::new(vec![0.0], 0.0, 1.0, PanicOnInstrumentConversion),
+        Err(AssimError::ZeroObservationOperator)
+    );
+    assert_eq!(
+        Observation::new(vec![1.0], f64::NAN, 1.0, PanicOnInstrumentConversion),
+        Err(AssimError::NonFiniteObservationValue)
+    );
+    assert_eq!(
+        Observation::new(vec![1.0], 0.0, 0.0, PanicOnInstrumentConversion),
+        Err(AssimError::NonPositiveNoise)
     );
 }
 
@@ -361,6 +406,84 @@ fn psd_admission_never_tolerance_clamps_negative_curvature() {
         ),
         Err(AssimError::CovarianceNotPositiveSemidefinite)
     );
+
+    // Exact binary-rational determinant:
+    // -5.512989132778803e-18. The previous f64 Schur update rounded its final
+    // pivot to +8.756852717154576e-17 and therefore admitted this indefinite
+    // matrix. The interval certificate must retain the sign ambiguity and
+    // refuse it rather than treating the rounded point pivot as authority.
+    let a = f64::from_bits(0x3fbe_d0ff_fdea_0dd8);
+    let b = f64::from_bits(0x3fdf_2c07_9e65_54c6);
+    let c = f64::from_bits(0x3fed_9ee6_f280_edc1);
+    assert_eq!(
+        belief(
+            vec![0.0; 3],
+            vec![vec![1.0, a, b], vec![a, 1.0, c], vec![b, c, 1.0]],
+        ),
+        Err(AssimError::CovarianceCertificationUnresolved),
+        "a zero-containing interval pivot is a fail-closed non-admission, not proof of indefiniteness"
+    );
+
+    assert_eq!(
+        belief(
+            vec![0.0; 3],
+            vec![
+                vec![1.0, -0.75, -0.75],
+                vec![-0.75, 1.0, -0.75],
+                vec![-0.75, -0.75, 1.0],
+            ],
+        ),
+        Err(AssimError::CovarianceNotPositiveSemidefinite),
+        "all 2x2 minors pass, but interval elimination must certify the negative 3x3 pivot"
+    );
+
+    assert_eq!(
+        belief(
+            vec![0.0; 3],
+            vec![
+                vec![1.0, 1.0, 0.0],
+                vec![1.0, 1.0, 0.0],
+                vec![0.0, 0.0, 1.0],
+            ],
+        ),
+        Err(AssimError::CovarianceCertificationUnresolved),
+        "an exact singular 3x3 PSD boundary may be incomplete, but must not be mislabeled indefinite"
+    );
+
+    let almost_one = f64::from_bits(1.0f64.to_bits() - 1);
+    assert_eq!(
+        belief(
+            vec![0.0; 3],
+            vec![
+                vec![1.0, almost_one, almost_one],
+                vec![almost_one, 1.0, almost_one],
+                vec![almost_one, almost_one, 1.0],
+            ],
+        ),
+        Err(AssimError::CovarianceCertificationUnresolved),
+        "a mathematically strict-SPD but near-singular covariance may be honestly unresolved"
+    );
+
+    // The stricter certificate must not reject ordinary SPD structure or a
+    // diagonal covariance spanning the representable exponent range.
+    belief(
+        vec![0.0; 3],
+        vec![
+            vec![2.0, 0.25, -0.1],
+            vec![0.25, 1.5, 0.2],
+            vec![-0.1, 0.2, 0.75],
+        ],
+    )
+    .expect("well-conditioned SPD covariance must certify");
+    belief(
+        vec![0.0; 3],
+        vec![
+            vec![1.0e300, 0.0, 0.0],
+            vec![0.0, 1.0, 0.0],
+            vec![0.0, 0.0, 1.0e-300],
+        ],
+    )
+    .expect("high-dynamic-range diagonal covariance must certify");
 }
 
 #[test]
@@ -531,6 +654,11 @@ fn dense_aggregate_work_is_bounded_before_canonicalization_or_updates() {
         requested,
         max: MAX_DENSE_UPDATE_CUBIC_WORK,
     };
+    assert_eq!(
+        misfit(&dense_prior, &observations),
+        Ok(0.0),
+        "read-only O(mn) misfit must not inherit the Joseph update's cubic cap"
+    );
     assert_eq!(
         assimilate_all(&dense_prior, &observations),
         Err(expected_work.clone())
@@ -771,37 +899,37 @@ fn g4_pre_cancelled_entry_points_publish_nothing() {
     let colored = with_configured_cx(&gate, Budget::INFINITE, ExecMode::Deterministic, |cx| {
         assimilate_colored_with_cx(&prior, &observations, "Re", 1.0, 2.0, cx)
     });
-    assert_initial_cancelled(colored);
+    assert_initial_cancelled(&colored);
 
     let constructor = with_configured_cx(&gate, Budget::INFINITE, ExecMode::Deterministic, |cx| {
         Belief::new(vec![0.0], vec![vec![1.0]], cx)
     });
-    assert_initial_cancelled(constructor);
+    assert_initial_cancelled(&constructor);
 
     let diagonal = with_configured_cx(&gate, Budget::INFINITE, ExecMode::Deterministic, |cx| {
         Belief::diagonal(vec![0.0], &[1.0], cx)
     });
-    assert_initial_cancelled(diagonal);
+    assert_initial_cancelled(&diagonal);
 
     let validation = with_configured_cx(&gate, Budget::INFINITE, ExecMode::Deterministic, |cx| {
         prior.validate(cx)
     });
-    assert_initial_cancelled(validation);
+    assert_initial_cancelled(&validation);
 
     let measured = with_configured_cx(&gate, Budget::INFINITE, ExecMode::Deterministic, |cx| {
         misfit_with_cx(&prior, &observations, cx)
     });
-    assert_initial_cancelled(measured);
+    assert_initial_cancelled(&measured);
 
     let single = with_configured_cx(&gate, Budget::INFINITE, ExecMode::Deterministic, |cx| {
         assimilate_with_cx(&prior, &observations[0], cx)
     });
-    assert_initial_cancelled(single);
+    assert_initial_cancelled(&single);
 
     let aggregate = with_configured_cx(&gate, Budget::INFINITE, ExecMode::Deterministic, |cx| {
         assimilate_all_with_cx(&prior, &observations, cx)
     });
-    assert_initial_cancelled(aggregate);
+    assert_initial_cancelled(&aggregate);
 }
 
 #[test]
@@ -1065,10 +1193,27 @@ fn g5_candidate_identity_binds_mode_budget_and_every_stream_field() {
         .with_poll_quota(10_000)
         .with_cost_quota(20_000)
         .with_priority(73);
+    let alternate_deadline = Budget::with_deadline_at_ns(123_457)
+        .with_poll_quota(10_000)
+        .with_cost_quota(20_000)
+        .with_priority(73);
+    let zero_deadline = Budget::with_deadline_at_ns(0)
+        .with_poll_quota(10_000)
+        .with_cost_quota(20_000)
+        .with_priority(73);
+    let no_cost = Budget::new().with_poll_quota(10_000).with_priority(73);
+    let zero_cost = no_cost.with_cost_quota(0);
+    // `None` and `Some(0)` have the same encoded numeric value. Keeping both
+    // pairs in the uniqueness battery makes the presence atoms independently
+    // mutation-sensitive rather than testing presence and value together.
     let variants = [
         (ExecMode::Deterministic, base, TEST_STREAM),
         (ExecMode::Fast, base, TEST_STREAM),
         (ExecMode::Deterministic, deadline, TEST_STREAM),
+        (ExecMode::Deterministic, alternate_deadline, TEST_STREAM),
+        (ExecMode::Deterministic, zero_deadline, TEST_STREAM),
+        (ExecMode::Deterministic, no_cost, TEST_STREAM),
+        (ExecMode::Deterministic, zero_cost, TEST_STREAM),
         (
             ExecMode::Deterministic,
             base.with_poll_quota(10_001),
@@ -1133,8 +1278,9 @@ fn g5_candidate_identity_binds_mode_budget_and_every_stream_field() {
     assert!(
         identities
             .iter()
-            .all(|identity| identity.starts_with("assimilation-candidate:v3:"))
+            .all(|identity| identity.starts_with("assimilation-candidate:v4:"))
     );
+    assert_eq!(PSD_ADMISSION_POLICY_VERSION, 1);
     identities.sort();
     identities.dedup();
     assert_eq!(identities.len(), variant_count);
