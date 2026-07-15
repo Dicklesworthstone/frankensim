@@ -20,6 +20,7 @@ fs-sparse = { path = "../fs-sparse" }
 
 [dev-dependencies]
 asupersync = { path = "../../../asupersync" }
+fs-propcheck = { path = "../fs-propcheck" }
 
 [features]
 # [F]-gated per the Ambition-Tag rule: semantic diff ships disabled until

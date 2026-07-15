@@ -429,6 +429,13 @@ component-rooted graph-gauge fitting, exact dense-overlap preflight with zero
 chart evaluations, endpoint outside-enclosure proof, finite/non-finite producer
 behavior, and cancellation progress units. Allocation-fault injection and
 small-limit exhaustive cap testing remain explicit successor coverage.
+`tests/metamorphic.rs` applies the shared G3 refinement-monotonicity engine to
+the production `SphereChart::convert::<SampledSdf>` edge. Across a bounded
+catalog of feasible exact-distance spheres, it tightens the requested error by
+a nonidentity power of two and requires the certified receipt QoI not to
+increase and the dense grid resolution not to decrease. The fixed conversion,
+cancellation, and refusal pins in `tests/conformance.rs` remain authoritative
+for their individual semantics.
 
 ## No-claim boundaries
 - NO watertightness/manifoldness/self-intersection certificates here —
@@ -449,6 +456,11 @@ small-limit exhaustive cap testing remain explicit successor coverage.
   gradients (rep-sdf's job); its outside-box enclosure relies on the
   source theorem recorded during conversion. For weak sources the same formula
   is only estimate/no-claim evidence, never a rigorous enclosure.
+- The G3 refinement relation covers only the declared finite sphere/budget
+  catalog and receipt monotonicity for this dense converter. It does not prove
+  strict improvement, a convergence order, empirical field accuracy, adaptive
+  representation behavior, a common sampling domain (converter padding depends
+  on the requested budget), or monotonicity for arbitrary charts and budgets.
 - `TraceStepClaim::LipschitzImplicit` certifies no-tunneling step radii, not
   Euclidean proximity from a small normalized residual. Consumers must retain
   that distinction in hit/error language. A short opposite-sign bracket can
