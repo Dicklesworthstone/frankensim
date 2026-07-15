@@ -62,13 +62,17 @@ fs-iga (geometry basis = analysis basis), fs-render NURBS tracing
   `CurveEvaluationRun` state and never publishes a partial Cartesian point.
   Its f64-only admitted `derivatives_with_cx` returns transactional
   `CurveDerivativesRun` state and publishes only a complete Cartesian jet.
+  Its admitted-only `insert_knot_with_cx` returns transactional
+  `CurveInsertionRun` state and publishes only a complete validated exact
+  refinement generation.
   Its admitted `span_boxes_with_cx` returns transactional
   `CurveSpanBoxesRun` state and publishes only the complete ordered box table.
   Its admitted-only `to_bezier_form_with_cx` returns transactional
   `CurveBezierRun` state and publishes only a fully validated exact derived
   generation.
-  EXACT Boehm `insert_knot`; EXACT `remove_knot` (reconstruction checked
-  with scalar EQUALITY — in `Rat` a proof); Bézier decomposition; EXACT
+  EXACT Boehm `insert_knot` under checked aggregate work and a 64 MiB derived
+  output envelope; EXACT `remove_knot` (reconstruction checked with scalar
+  EQUALITY — in `Rat` a proof); Bézier decomposition; EXACT
   `elevate_degree` (per-segment binomial elevation reassembled on a
   full-multiplicity knot vector — valid and evaluation-identical, including
   legal discontinuous full breaks whose independent endpoints and raised
@@ -237,6 +241,15 @@ and drops all scratch. The f64 scalar operations and allocator calls themselves
 are not preemptible, the conservative legacy envelope is not an exact caller
 work-budget ledger, and owning admission, one-sided jets, executor
 drain/finalize, and resumability remain outside the claim.
+`AdmittedNurbsCurve::insert_knot_with_cx` preserves open-domain, checked
+aggregate-work, and 64 MiB derived-output refusal precedence, then carries one
+gate through the admitted span search, output allocations and copies,
+homogeneous blends, both derived structural-validation passes, and final
+generation publication. `CurveInsertionRun::Cancelled` carries no partial
+curve and drops all derived storage. The borrowed source is excluded from the
+output envelope; allocator calls and individual generic-scalar operations are
+not preemptible, and this primitive adds no wall-time, exact caller-budget,
+owning-admission, drain/finalize, resumability, or geometric-certificate claim.
 Admitted curve and surface `span_boxes_with_cx` preserve their existing checked
 traversal-work and 64 MiB retained-output envelopes before carrying bounded
 polling through output allocation, candidate spans (including skipped

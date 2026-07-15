@@ -7,7 +7,8 @@
 
 use crate::NurbsError;
 use crate::basis::{
-    AdmittedKnotVector, BASIS_MAX_WORK_UNITS, BasisRun, KnotValidationOutcome, KnotVector, Scalar,
+    AdmittedKnotVector, BASIS_MAX_WORK_UNITS, BasisRun, KnotSpanRun, KnotValidationOutcome,
+    KnotVector, Scalar,
 };
 use fs_exec::Cx;
 
@@ -21,6 +22,7 @@ const CURVE_BEZIER_SCAN_WORK_PER_KNOT: u128 = 4;
 const CURVE_BEZIER_BLEND_WORK_PER_CONTROL: u128 = 32;
 const CURVE_SPAN_BOX_WORK_PER_CONTROL: u128 = 16;
 const CURVE_SPAN_BOX_MAX_RETAINED_BYTES: u128 = 64 * 1024 * 1024;
+const CURVE_INSERTION_MAX_RETAINED_BYTES: u128 = 64 * 1024 * 1024;
 const CURVE_BEZIER_MAX_RETAINED_BYTES: u128 = 64 * 1024 * 1024;
 const CURVE_CANCELLATION_STRIDE: usize = 64;
 
@@ -57,6 +59,12 @@ pub(crate) struct BezierConversionPlan {
     pub(crate) peak_allocated_bytes: u128,
     /// Retained bytes in the returned converted curve.
     pub(crate) converted_bytes: u128,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CurveInsertionPlan {
+    new_knot_count: usize,
+    new_control_count: usize,
 }
 
 fn curve_storage_bytes<S: Scalar>(
@@ -175,6 +183,61 @@ fn refinement_work_upper_bound(
         .ok_or_else(|| NurbsError::Domain {
             what: "Bezier aggregate refinement work overflows u128".to_string(),
         })
+}
+
+fn enforce_curve_insertion_envelope(
+    work_units: u128,
+    retained_bytes: u128,
+) -> Result<(), NurbsError> {
+    if work_units > BASIS_MAX_WORK_UNITS {
+        return Err(NurbsError::Domain {
+            what: format!(
+                "curve knot insertion requests {work_units} work units above defensive ceiling {BASIS_MAX_WORK_UNITS}"
+            ),
+        });
+    }
+    if retained_bytes > CURVE_INSERTION_MAX_RETAINED_BYTES {
+        return Err(NurbsError::Domain {
+            what: format!(
+                "curve knot insertion retains {retained_bytes} output bytes above defensive ceiling {CURVE_INSERTION_MAX_RETAINED_BYTES}"
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn plan_curve_insertion<S: Scalar, const DIM: usize>(
+    curve: AdmittedNurbsCurve<'_, S, DIM>,
+) -> Result<CurveInsertionPlan, NurbsError> {
+    let new_knot_count =
+        curve
+            .knots()
+            .knots()
+            .len()
+            .checked_add(1)
+            .ok_or_else(|| NurbsError::Domain {
+                what: "inserted knot count overflows usize".to_string(),
+            })?;
+    let new_control_count = curve
+        .homogeneous_control_points()
+        .len()
+        .checked_add(1)
+        .ok_or_else(|| NurbsError::Domain {
+            what: "inserted control count overflows usize".to_string(),
+        })?;
+    let work_units = refinement_work_upper_bound(
+        curve.knots().degree(),
+        curve.knots().knots().len(),
+        curve.homogeneous_control_points().len(),
+        1,
+        0,
+    )?;
+    let retained_bytes = curve_storage_bytes::<S>(new_knot_count, new_control_count)?;
+    enforce_curve_insertion_envelope(work_units, retained_bytes)?;
+    Ok(CurveInsertionPlan {
+        new_knot_count,
+        new_control_count,
+    })
 }
 
 fn bezier_pre_scan_work(knot_count: usize) -> Result<u128, NurbsError> {
@@ -420,6 +483,19 @@ pub enum CurveDerivativesRun<const DIM: usize> {
         derivatives: Vec<[f64; DIM]>,
     },
     /// Cancellation was observed; no partial derivative jet was published.
+    Cancelled,
+}
+
+/// Transactional terminal state of cancellation-aware exact knot insertion.
+#[must_use]
+#[derive(Debug, PartialEq)]
+pub enum CurveInsertionRun<S: Scalar, const DIM: usize> {
+    /// The complete sealed and validated derived generation.
+    Complete {
+        /// Exact refinement of the admitted source curve.
+        curve: NurbsCurve<S, DIM>,
+    },
+    /// Cancellation was observed; all partial derived storage was dropped.
     Cancelled,
 }
 
@@ -952,6 +1028,42 @@ impl<'a, S: Scalar, const DIM: usize> AdmittedNurbsCurve<'a, S, DIM> {
         self.inner.insert_knot_after_validation(t)
     }
 
+    /// Insert one knot with bounded cancellation polling.
+    ///
+    /// Open-domain validation and the checked direct-insertion work/retained
+    /// output envelope precede cancellation. One gate then covers span search,
+    /// output allocation and copies, homogeneous blends, both derived
+    /// structural validation passes, and final generation publication.
+    /// Cancellation drops every partial derived allocation. The caller retains
+    /// responsibility for owning admission, `Cx` budget consumption, and
+    /// request -> drain -> finalize semantics.
+    ///
+    /// # Errors
+    /// Returns the synchronous insertion's parameter, work, retained-memory,
+    /// allocation, numeric-domain, or structural refusal when it wins before
+    /// an observed cancellation.
+    pub fn insert_knot_with_cx(
+        &self,
+        t: S,
+        cx: &Cx<'_>,
+    ) -> Result<CurveInsertionRun<S, DIM>, NurbsError> {
+        let plan = self.inner.insertion_plan_after_parameter(t)?;
+        let span = match self.knots().span_with_cx(t, cx)? {
+            KnotSpanRun::Complete { span } => span,
+            KnotSpanRun::Cancelled => return Ok(CurveInsertionRun::Cancelled),
+        };
+        let mut should_cancel = || cx.checkpoint().is_err();
+        match self.inner.insert_knot_at_span_with_plan_and_poll(
+            t,
+            span,
+            plan,
+            &mut should_cancel,
+        )? {
+            CurveWorkRun::Complete(curve) => Ok(CurveInsertionRun::Complete { curve }),
+            CurveWorkRun::Cancelled => Ok(CurveInsertionRun::Cancelled),
+        }
+    }
+
     /// Convert this admitted generation to exact Bezier form without
     /// repeating structural validation of the unchanged source. Planning still
     /// scans knot runs once to determine the exact refinement envelope.
@@ -1053,7 +1165,7 @@ impl<S: Scalar, const DIM: usize> NurbsCurve<S, DIM> {
         self.admit()?.insert_knot(t)
     }
 
-    fn insert_knot_after_validation(&self, t: S) -> Result<Self, NurbsError> {
+    fn insertion_plan_after_parameter(&self, t: S) -> Result<CurveInsertionPlan, NurbsError> {
         let admitted_knots = self.knots.admitted_after_validation();
         let (lo, hi) = admitted_knots.domain();
         if t <= lo || hi <= t {
@@ -1061,50 +1173,25 @@ impl<S: Scalar, const DIM: usize> NurbsCurve<S, DIM> {
                 what: format!("insertion parameter {t:?} must be interior to {lo:?}..{hi:?}"),
             });
         }
-        let p = self.knots.degree;
-        let k = admitted_knots.span(t)?;
-        let new_control_count =
-            self.cpw
-                .len()
-                .checked_add(1)
-                .ok_or_else(|| NurbsError::Domain {
-                    what: "inserted control count overflows usize".to_string(),
-                })?;
-        let mut new_cpw = Vec::new();
-        new_cpw
-            .try_reserve_exact(new_control_count)
-            .map_err(|_| NurbsError::Domain {
-                what: "inserted curve-control allocation was refused".to_string(),
-            })?;
-        new_cpw.extend_from_slice(&self.cpw[..=k - p]);
-        for i in (k - p + 1)..=k {
-            let denom = self.knots.knots[i + p] - self.knots.knots[i];
-            let alpha = (t - self.knots.knots[i]) / denom;
-            let mut q = [S::zero(); 4];
-            for ((slot, &a), &b) in q.iter_mut().zip(&self.cpw[i - 1]).zip(&self.cpw[i]) {
-                *slot = (S::one() - alpha) * a + alpha * b;
-            }
-            new_cpw.push(q);
+        if !t.is_finite() {
+            return Err(NurbsError::Domain {
+                what: format!("parameter {t:?} outside {lo:?}..{hi:?}"),
+            });
         }
-        new_cpw.extend_from_slice(&self.cpw[k..]);
-        let new_knot_count =
-            self.knots
-                .knots
-                .len()
-                .checked_add(1)
-                .ok_or_else(|| NurbsError::Domain {
-                    what: "inserted knot count overflows usize".to_string(),
-                })?;
-        let mut new_knots = Vec::new();
-        new_knots
-            .try_reserve_exact(new_knot_count)
-            .map_err(|_| NurbsError::Domain {
-                what: "inserted knot-vector allocation was refused".to_string(),
-            })?;
-        new_knots.extend_from_slice(&self.knots.knots[..=k]);
-        new_knots.push(t);
-        new_knots.extend_from_slice(&self.knots.knots[k + 1..]);
-        NurbsCurve::from_homogeneous(KnotVector::new(new_knots, p)?, new_cpw)
+        plan_curve_insertion(self.admitted_after_validation())
+    }
+
+    fn insert_knot_after_validation(&self, t: S) -> Result<Self, NurbsError> {
+        let plan = self.insertion_plan_after_parameter(t)?;
+        let admitted_knots = self.knots.admitted_after_validation();
+        let k = admitted_knots.span(t)?;
+        let mut never_cancel = || false;
+        match self.insert_knot_at_span_with_plan_and_poll(t, k, plan, &mut never_cancel)? {
+            CurveWorkRun::Complete(curve) => Ok(curve),
+            CurveWorkRun::Cancelled => Err(NurbsError::Domain {
+                what: "non-cancelling knot insertion observed cancellation".to_string(),
+            }),
+        }
     }
 
     fn insert_knot_at_span_with_poll(
@@ -1113,26 +1200,24 @@ impl<S: Scalar, const DIM: usize> NurbsCurve<S, DIM> {
         k: usize,
         should_cancel: &mut impl FnMut() -> bool,
     ) -> Result<CurveWorkRun<Self>, NurbsError> {
-        let (lo, hi) = self.knots.admitted_after_validation().domain();
-        if t <= lo || hi <= t {
-            return Err(NurbsError::Domain {
-                what: format!("insertion parameter {t:?} must be interior to {lo:?}..{hi:?}"),
-            });
-        }
+        let plan = self.insertion_plan_after_parameter(t)?;
+        self.insert_knot_at_span_with_plan_and_poll(t, k, plan, should_cancel)
+    }
+
+    fn insert_knot_at_span_with_plan_and_poll(
+        &self,
+        t: S,
+        k: usize,
+        plan: CurveInsertionPlan,
+        should_cancel: &mut impl FnMut() -> bool,
+    ) -> Result<CurveWorkRun<Self>, NurbsError> {
         let p = self.knots.degree;
-        let new_control_count =
-            self.cpw
-                .len()
-                .checked_add(1)
-                .ok_or_else(|| NurbsError::Domain {
-                    what: "inserted control count overflows usize".to_string(),
-                })?;
         if should_cancel() {
             return Ok(CurveWorkRun::Cancelled);
         }
         let mut new_cpw = Vec::new();
         new_cpw
-            .try_reserve_exact(new_control_count)
+            .try_reserve_exact(plan.new_control_count)
             .map_err(|_| NurbsError::Domain {
                 what: "inserted curve-control allocation was refused".to_string(),
             })?;
@@ -1167,20 +1252,12 @@ impl<S: Scalar, const DIM: usize> NurbsCurve<S, DIM> {
             }
         }
 
-        let new_knot_count =
-            self.knots
-                .knots
-                .len()
-                .checked_add(1)
-                .ok_or_else(|| NurbsError::Domain {
-                    what: "inserted knot count overflows usize".to_string(),
-                })?;
         if should_cancel() {
             return Ok(CurveWorkRun::Cancelled);
         }
         let mut new_knots = Vec::new();
         new_knots
-            .try_reserve_exact(new_knot_count)
+            .try_reserve_exact(plan.new_knot_count)
             .map_err(|_| NurbsError::Domain {
                 what: "inserted knot-vector allocation was refused".to_string(),
             })?;
@@ -2367,6 +2444,71 @@ mod tests {
     }
 
     #[test]
+    fn admitted_knot_insertion_with_cx_is_transactional_and_exact() {
+        let curve = line_curve();
+        let admitted = curve.admit().expect("admitted line");
+        let legacy = admitted.insert_knot(0.5).expect("legacy insertion");
+        let endpoint_error = admitted
+            .insert_knot(0.0)
+            .expect_err("legacy endpoint refusal");
+        let non_finite_error = admitted
+            .insert_knot(f64::NAN)
+            .expect_err("legacy non-finite refusal");
+
+        with_curve_cx(true, |cx| {
+            assert_eq!(
+                admitted
+                    .insert_knot_with_cx(0.5, cx)
+                    .expect("valid request reaches cancellation"),
+                CurveInsertionRun::Cancelled
+            );
+            assert_eq!(
+                admitted
+                    .insert_knot_with_cx(0.0, cx)
+                    .expect_err("endpoint refusal must beat cancellation"),
+                endpoint_error
+            );
+            assert_eq!(
+                admitted
+                    .insert_knot_with_cx(f64::NAN, cx)
+                    .expect_err("non-finite refusal must beat cancellation"),
+                non_finite_error
+            );
+        });
+        with_curve_cx(false, |cx| {
+            assert_eq!(
+                admitted
+                    .insert_knot_with_cx(0.5, cx)
+                    .expect("active insertion"),
+                CurveInsertionRun::Complete { curve: legacy }
+            );
+        });
+
+        let exact_curve = NurbsCurve::<Rat, 1>::new(
+            KnotVector::new(vec![Rat::int(0), Rat::int(0), Rat::int(1), Rat::int(1)], 1)
+                .expect("exact line knots"),
+            &[[Rat::int(0)], [Rat::int(1)]],
+            &[Rat::int(1), Rat::int(1)],
+        )
+        .expect("exact line");
+        let exact_admitted = exact_curve.admit().expect("admitted exact line");
+        let half = Rat::new(1, 2);
+        let exact_legacy = exact_admitted
+            .insert_knot(half)
+            .expect("legacy exact insertion");
+        with_curve_cx(false, |cx| {
+            assert_eq!(
+                exact_admitted
+                    .insert_knot_with_cx(half, cx)
+                    .expect("active exact insertion"),
+                CurveInsertionRun::Complete {
+                    curve: exact_legacy,
+                }
+            );
+        });
+    }
+
+    #[test]
     fn admitted_curve_derivatives_with_cx_are_transactional_and_exact() {
         let curve = line_curve();
         let admitted = curve.admit().expect("admitted line");
@@ -2859,6 +3001,31 @@ mod tests {
     }
 
     #[test]
+    fn knot_insertion_final_checkpoint_gates_curve_publication() {
+        let curve = line_curve();
+        let mut total_polls = 0usize;
+        let mut never_cancel = || {
+            total_polls += 1;
+            false
+        };
+        let complete = curve
+            .insert_knot_at_span_with_poll(0.5, 1, &mut never_cancel)
+            .expect("healthy known-span insertion");
+        assert!(matches!(complete, CurveWorkRun::Complete(_)));
+
+        let mut replay_polls = 0usize;
+        let mut cancel_at_publication = || {
+            replay_polls += 1;
+            replay_polls == total_polls
+        };
+        let cancelled = curve
+            .insert_knot_at_span_with_poll(0.5, 1, &mut cancel_at_publication)
+            .expect("publication cancellation");
+        assert!(matches!(cancelled, CurveWorkRun::Cancelled));
+        assert_eq!(replay_polls, total_polls);
+    }
+
+    #[test]
     fn bezier_conversion_with_cx_is_transactional_and_publication_gated() {
         let half = Rat::new(1, 2);
         let knots = KnotVector::new(
@@ -3006,6 +3173,36 @@ mod tests {
         assert!(matches!(
             preflight_span_boxes(600_000, 1, core::mem::size_of::<SpanBox<f64, 3>>()),
             Err(NurbsError::Domain { ref what }) if what.contains("traversal")
+        ));
+    }
+
+    #[test]
+    fn knot_insertion_preflight_prices_work_and_retained_output() {
+        let curve = line_curve();
+        let plan = plan_curve_insertion(curve.admit().expect("admitted line"))
+            .expect("line insertion plan");
+        assert_eq!(plan.new_knot_count, 5);
+        assert_eq!(plan.new_control_count, 3);
+        assert!(
+            enforce_curve_insertion_envelope(
+                BASIS_MAX_WORK_UNITS,
+                CURVE_INSERTION_MAX_RETAINED_BYTES,
+            )
+            .is_ok()
+        );
+        assert!(matches!(
+            enforce_curve_insertion_envelope(
+                BASIS_MAX_WORK_UNITS + 1,
+                CURVE_INSERTION_MAX_RETAINED_BYTES,
+            ),
+            Err(NurbsError::Domain { ref what }) if what.contains("work")
+        ));
+        assert!(matches!(
+            enforce_curve_insertion_envelope(
+                BASIS_MAX_WORK_UNITS,
+                CURVE_INSERTION_MAX_RETAINED_BYTES + 1,
+            ),
+            Err(NurbsError::Domain { ref what }) if what.contains("retain")
         ));
     }
 

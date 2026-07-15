@@ -28,7 +28,7 @@ pub use boolean::{BooleanOp, BooleanPolicy, BooleanRefusal, boolean};
 pub use closest::{DistanceBracketEstimate, closest_point_curve, closest_point_surface};
 pub use curve::{
     AdmittedNurbsCurve, CurveAdmissionRun, CurveBezierRun, CurveDerivativesRun, CurveEvaluationRun,
-    CurveSpanBoxesRun, NurbsCurve,
+    CurveInsertionRun, CurveSpanBoxesRun, NurbsCurve,
 };
 pub use rat::Rat;
 pub use surface::{
