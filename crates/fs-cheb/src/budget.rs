@@ -218,7 +218,7 @@ pub enum EigsRun {
     /// All requested fixed-sweep eigenvalue estimates were produced.
     /// This state does not certify convergence or residual quality.
     Complete {
-        /// The eigenvalues, smallest-first.
+        /// Fixed-sweep estimates in deterministic surrogate-shift order.
         eigs: Vec<f64>,
         /// What the run spent.
         receipt: WorkReceipt,
