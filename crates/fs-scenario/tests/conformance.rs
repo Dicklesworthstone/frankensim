@@ -556,6 +556,123 @@ fn sc_002_compatibility_checks_catch_seeded_violations() {
 }
 
 #[test]
+fn sc_002a_ramp_and_table_from_zero_are_checked_after_t_zero() {
+    let signals = [
+        (
+            "ramp",
+            TimeSignal::Ramp {
+                t_start: 0.0,
+                t_end: 2.0,
+                from: QtyAny::new(0.0, MASS_FLOW),
+                to: QtyAny::new(0.75, MASS_FLOW),
+            },
+        ),
+        (
+            "table",
+            TimeSignal::Table {
+                times: vec![0.0, 1.0, 2.0],
+                values: vec![0.0, 0.75, 0.75],
+                dims: MASS_FLOW,
+                interp: Interp::Linear,
+            },
+        ),
+    ];
+    for (name, signal) in signals {
+        let mut scenario = Scenario::new(name, 1, Environment::earth_lab());
+        scenario.base_bcs.push(BoundaryCondition {
+            region: format!("{name}-inlet"),
+            physics: Physics::IncompressibleFlow,
+            kind: BcKind::MassFlowInlet,
+            value: Some(BcValue::Signal(signal)),
+            compatibility: Some(Compat::Incompressible),
+            frame: 0,
+        });
+        let violations = scenario.validate();
+        let flux = violations
+            .iter()
+            .find(|violation| violation.code == "flux-imbalance")
+            .unwrap_or_else(|| panic!("{name} from zero must fail after t=0: {violations:#?}"));
+        assert!(
+            flux.what.contains("at t=") && !flux.what.contains("t=0.000000e0"),
+            "the imbalance must be tied to a nonzero exact breakpoint: {flux:?}"
+        );
+    }
+    verdict(
+        "sc-002a",
+        "ramp/table mass flows that vanish at t=0 are rejected at their deterministic nonzero breakpoints without a pressure outlet",
+    );
+}
+
+#[test]
+fn sc_002b_mixed_signal_flux_grid_is_deterministic() {
+    let mut scenario = Scenario::new("mixed-flux-grid", 1, Environment::earth_lab());
+    let signals = [
+        (
+            "ramp",
+            TimeSignal::Ramp {
+                t_start: 2.0,
+                t_end: 6.0,
+                from: QtyAny::new(0.0, MASS_FLOW),
+                to: QtyAny::new(1.0, MASS_FLOW),
+            },
+        ),
+        (
+            "table",
+            TimeSignal::Table {
+                times: vec![2.0, 6.0],
+                values: vec![0.0, -1.0],
+                dims: MASS_FLOW,
+                interp: Interp::Linear,
+            },
+        ),
+        (
+            "smooth",
+            TimeSignal::Chebfun(ChebProfile {
+                // On [2, 6], this is 1 - x_ref^2: zero at both exact
+                // breakpoints and positive only inside the declared domain.
+                cheb: fs_cheb::Cheb1::from_coeffs(2.0, 6.0, vec![0.5, 0.0, -0.5]),
+                dims: MASS_FLOW,
+            }),
+        ),
+    ];
+    for (name, signal) in signals {
+        scenario.base_bcs.push(BoundaryCondition {
+            region: format!("{name}-inlet"),
+            physics: Physics::IncompressibleFlow,
+            kind: BcKind::MassFlowInlet,
+            value: Some(BcValue::Signal(signal)),
+            compatibility: Some(Compat::Incompressible),
+            frame: 0,
+        });
+    }
+
+    let first = scenario.validate();
+    let replay = scenario.validate();
+    assert_eq!(
+        first, replay,
+        "mixed-signal checkpoint traversal must replay"
+    );
+    let flux: Vec<_> = first
+        .iter()
+        .filter(|violation| violation.code == "flux-imbalance")
+        .collect();
+    assert_eq!(
+        flux.len(),
+        1,
+        "unexpected mixed-signal findings: {first:#?}"
+    );
+    assert!(
+        flux[0].what.contains("at t=") && !flux[0].what.contains("t=0.000000e0"),
+        "the smooth interior imbalance must be found on its declared-domain grid: {:?}",
+        flux[0]
+    );
+    verdict(
+        "sc-002b",
+        "ramp/table breakpoints plus the bounded Chebfun domain grid replay deterministically and expose an interior-only mixed-signal imbalance",
+    );
+}
+
+#[test]
 fn sc_001b_non_ascii_names_round_trip() {
     // Regression: the IR string parser decoded bytes as Latin-1 (`push(byte as
     // char)`), splitting every multi-byte UTF-8 code point, so any non-ASCII

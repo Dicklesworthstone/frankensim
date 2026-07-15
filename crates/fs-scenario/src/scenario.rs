@@ -5,7 +5,7 @@
 //! fields are explicit constructor arguments: nothing is defaulted
 //! silently.
 
-use crate::bc::{BcKind, BoundaryCondition, Compat, Physics};
+use crate::bc::{BcKind, BcValue, BoundaryCondition, Compat, Physics};
 use crate::ensemble::StochasticEnsemble;
 use crate::frame::FrameTree;
 use fs_qty::{Dims, QtyAny};
@@ -287,8 +287,8 @@ impl Scenario {
     /// Net-flux compatibility (the admission check the bead names): for
     /// every effective BC set (base alone, and base + each case), if any
     /// inlet declares `incompressible`, the declared mass flows must
-    /// balance to tolerance OR a pressure outlet must exist to absorb the
-    /// imbalance.
+    /// balance to tolerance at every deterministic signal checkpoint OR a
+    /// pressure outlet must exist to absorb the imbalance.
     fn check_net_flux(&self, out: &mut Vec<Violation>) {
         let base: Vec<&BoundaryCondition> = self.base_bcs.iter().collect();
         let mut sets: Vec<(String, Vec<&BoundaryCondition>)> =
@@ -308,62 +308,87 @@ impl Scenario {
             let has_pressure_outlet = set.iter().any(|bc| {
                 bc.physics == Physics::IncompressibleFlow && bc.kind == BcKind::PressureOutlet
             });
-            let mut net = 0.0f64;
-            let mut gross = 0.0f64;
-            let mut aggregation_finite = true;
-            let mut evaluation_failed = false;
+            let mut validation_times = vec![0.0f64];
             for bc in &set {
-                match bc.mass_flow_at(0.0) {
-                    Ok(Some(flux)) => {
-                        net += flux;
-                        gross += flux.abs();
-                        if !flux.is_finite() || !net.is_finite() || !gross.is_finite() {
-                            aggregation_finite = false;
+                if bc.kind == BcKind::MassFlowInlet
+                    && let Some(BcValue::Signal(signal)) = &bc.value
+                {
+                    signal.append_net_flux_validation_times(&mut validation_times);
+                }
+            }
+            validation_times.sort_by(|a, b| a.total_cmp(b));
+            validation_times.dedup_by(|a, b| *a == *b);
+
+            let mut first_imbalance = None;
+            let mut compatibility_failed = false;
+            for time in validation_times {
+                let mut net = 0.0f64;
+                let mut gross = 0.0f64;
+                let mut aggregation_finite = true;
+                let mut evaluation_failed = false;
+                for bc in &set {
+                    match bc.mass_flow_at(time) {
+                        Ok(Some(flux)) => {
+                            net += flux;
+                            gross += flux.abs();
+                            if !flux.is_finite() || !net.is_finite() || !gross.is_finite() {
+                                aggregation_finite = false;
+                                break;
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            out.push(Violation {
+                                code: "flux-evaluation",
+                                what: format!(
+                                    "set {label:?} at t={time:.6e} s: declared mass flow could not be evaluated: {error}"
+                                ),
+                                fix: "repair the total-flow value or use a uniform/time-signal kg/s declaration that is finite at every compatibility checkpoint"
+                                    .to_string(),
+                            });
+                            evaluation_failed = true;
                             break;
                         }
                     }
-                    Ok(None) => {}
-                    Err(error) => {
-                        out.push(Violation {
-                            code: "flux-evaluation",
-                            what: format!(
-                                "set {label:?}: declared mass flow could not be evaluated: {error}"
-                            ),
-                            fix: "repair the total-flow value or use a uniform/time-signal kg/s declaration that is finite at the compatibility checkpoint"
-                                .to_string(),
-                        });
-                        evaluation_failed = true;
-                        break;
-                    }
+                }
+                if evaluation_failed {
+                    compatibility_failed = true;
+                    break;
+                }
+                if !aggregation_finite {
+                    out.push(Violation {
+                        code: "flux-aggregation-nonfinite",
+                        what: format!(
+                            "set {label:?} at t={time:.6e} s: declared mass-flow aggregation overflowed or contained a non-finite value"
+                        ),
+                        fix: "rescale or partition the declared mass flows so their finite net/gross balance can be certified"
+                            .to_string(),
+                    });
+                    compatibility_failed = true;
+                    break;
+                }
+                if !has_pressure_outlet
+                    && first_imbalance.is_none()
+                    && gross > 0.0
+                    && net.abs() > FLUX_REL_TOL * gross
+                {
+                    first_imbalance = Some((time, net, gross));
                 }
             }
-            if evaluation_failed {
+            if compatibility_failed || has_pressure_outlet {
+                // The outlet may absorb every finite per-instant imbalance,
+                // but it cannot make malformed or unevaluable declarations
+                // admissible.
                 continue;
             }
-            if !aggregation_finite {
-                out.push(Violation {
-                    code: "flux-aggregation-nonfinite",
-                    what: format!(
-                        "set {label:?}: declared mass-flow aggregation overflowed or contained a non-finite value"
-                    ),
-                    fix: "rescale or partition the declared mass flows so their finite net/gross balance can be certified"
-                        .to_string(),
-                });
-                continue;
-            }
-            if has_pressure_outlet {
-                // The outlet may absorb a finite imbalance, but it cannot make
-                // malformed or unevaluable inlet declarations admissible.
-                continue;
-            }
-            if gross > 0.0 && net.abs() > FLUX_REL_TOL * gross {
+            if let Some((time, net, gross)) = first_imbalance {
                 out.push(Violation {
                     code: "flux-imbalance",
                     what: format!(
-                        "set {label:?}: declared incompressible but net mass flow is \
+                        "set {label:?} at t={time:.6e} s: declared incompressible but net mass flow is \
                          {net:+.6e} kg/s over gross {gross:.6e} kg/s with no pressure outlet"
                     ),
-                    fix: "balance the declared inlet/outlet mass flows or add a \
+                    fix: "balance the declared inlet/outlet mass flows at every instant or add a \
                           pressure outlet to absorb the imbalance"
                         .to_string(),
                 });

@@ -7,6 +7,11 @@ use crate::scenario::Violation;
 use fs_cheb::Cheb1;
 use fs_qty::{Dims, QtyAny};
 
+/// Smooth histories have no finite breakpoint set. Net-flux admission uses
+/// this many equal panels (endpoints included) on each function's declared
+/// domain. This is a bounded deterministic screen, not a proof between points.
+const SMOOTH_NET_FLUX_VALIDATION_PANELS: u32 = 32;
+
 fn interpolation_fraction(value: f64, start: f64, end: f64) -> f64 {
     let width = end - start;
     if width.is_finite() {
@@ -118,6 +123,38 @@ impl TimeSignal {
             TimeSignal::Constant(q) => q.dims,
             TimeSignal::Ramp { from, .. } => from.dims,
             TimeSignal::Table { dims, .. } | TimeSignal::Chebfun(ChebProfile { dims, .. }) => *dims,
+        }
+    }
+
+    /// Append the deterministic time checkpoints needed by net-flux
+    /// compatibility validation.
+    ///
+    /// Ramp and table histories contribute their exact breakpoints. A smooth
+    /// Chebfun history contributes a bounded uniform grid over its actual
+    /// declared domain because it has no finite breakpoint set. Constants add
+    /// no checkpoint; callers always add `t = 0` for the shared baseline.
+    pub(crate) fn append_net_flux_validation_times(&self, times: &mut Vec<f64>) {
+        match self {
+            TimeSignal::Constant(_) => {}
+            TimeSignal::Ramp { t_start, t_end, .. } => {
+                times.push(*t_start);
+                times.push(*t_end);
+            }
+            TimeSignal::Table { times: samples, .. } => times.extend(samples.iter().copied()),
+            TimeSignal::Chebfun(profile) => {
+                let (start, end) = profile.cheb.domain();
+                for panel in 0..=SMOOTH_NET_FLUX_VALIDATION_PANELS {
+                    let time = if panel == 0 {
+                        start
+                    } else if panel == SMOOTH_NET_FLUX_VALIDATION_PANELS {
+                        end
+                    } else {
+                        let alpha = f64::from(panel) / f64::from(SMOOTH_NET_FLUX_VALIDATION_PANELS);
+                        (1.0 - alpha) * start + alpha * end
+                    };
+                    times.push(time);
+                }
+            }
         }
     }
 
