@@ -47,6 +47,7 @@ mod i10;
 mod i11;
 mod i12;
 mod i15;
+mod pd;
 
 pub use i01::i01_draft;
 pub use i02::i02_draft;
@@ -60,6 +61,7 @@ pub use i10::i10_draft;
 pub use i11::i11_draft;
 pub use i12::i12_draft;
 pub use i15::i15_draft;
+pub use pd::pd_draft;
 
 /// Manifest schema version (canonical bytes are comparable only within it).
 pub const VMANIFEST_SCHEMA_VERSION: u32 = 2;
