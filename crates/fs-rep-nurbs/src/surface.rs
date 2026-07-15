@@ -99,6 +99,113 @@ fn preflight_span_boxes(
     Ok(span_capacity)
 }
 
+fn basis_operation_work(control_count: usize, degree: usize) -> Result<u128, NurbsError> {
+    let order = degree.checked_add(1).ok_or_else(|| NurbsError::Domain {
+        what: "surface-partial basis order overflows usize".to_string(),
+    })?;
+    (degree as u128)
+        .checked_mul(order as u128)
+        .map(|product| product / 2)
+        .and_then(|work| work.checked_add(order as u128))
+        .and_then(|work| work.checked_add(control_count as u128))
+        .ok_or_else(|| NurbsError::Domain {
+            what: "surface-partial basis work overflows u128".to_string(),
+        })
+}
+
+fn enforce_partials_envelope(work: u128, retained_bytes: u128) -> Result<(), NurbsError> {
+    if work > NurbsCurve::<f64, 3>::MAX_DERIVATIVE_WORK_UNITS {
+        return Err(NurbsError::Domain {
+            what: format!(
+                "surface partials request {work} work units above defensive ceiling {}",
+                NurbsCurve::<f64, 3>::MAX_DERIVATIVE_WORK_UNITS
+            ),
+        });
+    }
+    if retained_bytes > NurbsCurve::<f64, 3>::MAX_DERIVATIVE_RETAINED_BYTES {
+        return Err(NurbsError::Domain {
+            what: format!(
+                "surface partials retain up to {retained_bytes} bytes above defensive ceiling {}",
+                NurbsCurve::<f64, 3>::MAX_DERIVATIVE_RETAINED_BYTES
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn preflight_partials_envelope(
+    control_count_u: usize,
+    control_count_v: usize,
+    knot_count_u: usize,
+    knot_count_v: usize,
+    degree_u: usize,
+    degree_v: usize,
+) -> Result<(), NurbsError> {
+    let order_u = degree_u.checked_add(1).ok_or_else(|| NurbsError::Domain {
+        what: "surface-partial u order overflows usize".to_string(),
+    })?;
+    let order_v = degree_v.checked_add(1).ok_or_else(|| NurbsError::Domain {
+        what: "surface-partial v order overflows usize".to_string(),
+    })?;
+    let contractions = (control_count_u as u128)
+        .checked_mul(order_v as u128)
+        .and_then(|u_visits| {
+            (control_count_v as u128)
+                .checked_mul(order_u as u128)
+                .and_then(|v_visits| u_visits.checked_add(v_visits))
+        })
+        .and_then(|visits| visits.checked_mul(8))
+        .ok_or_else(|| NurbsError::Domain {
+            what: "surface-partial contraction work overflows u128".to_string(),
+        })?;
+    let (derivative_work_u, derivative_bytes_u) =
+        NurbsCurve::<f64, 3>::derivative_envelope(control_count_u, knot_count_u, degree_u, 1)?;
+    let (derivative_work_v, derivative_bytes_v) =
+        NurbsCurve::<f64, 3>::derivative_envelope(control_count_v, knot_count_v, degree_v, 1)?;
+    let work = basis_operation_work(control_count_u, degree_u)?
+        .checked_add(basis_operation_work(control_count_v, degree_v)?)
+        .and_then(|total| total.checked_add(contractions))
+        // Conservatively charge one full knot extent per axis for the bounded
+        // multiplicity lookups that prove ordinary first-derivative existence.
+        .and_then(|total| total.checked_add(knot_count_u as u128))
+        .and_then(|total| total.checked_add(knot_count_v as u128))
+        .and_then(|total| total.checked_add(derivative_work_u))
+        .and_then(|total| total.checked_add(derivative_work_v))
+        .ok_or_else(|| NurbsError::Domain {
+            what: "surface-partial aggregate work overflows u128".to_string(),
+        })?;
+    let scalar_bytes = core::mem::size_of::<f64>() as u128;
+    let control_bytes = core::mem::size_of::<[f64; 4]>() as u128;
+    let basis_bytes = (order_u as u128)
+        .checked_add(order_v as u128)
+        .and_then(|count| count.checked_mul(scalar_bytes))
+        .ok_or_else(|| NurbsError::Domain {
+            what: "surface-partial retained-basis accounting overflows u128".to_string(),
+        })?;
+    let u_peak = (control_count_u as u128)
+        .checked_mul(control_bytes)
+        .and_then(|bytes| bytes.checked_add(derivative_bytes_u))
+        .and_then(|bytes| bytes.checked_add(basis_bytes))
+        .ok_or_else(|| NurbsError::Domain {
+            what: "surface-partial u-stage retained-byte accounting overflows u128".to_string(),
+        })?;
+    let retained_u_jet = 2u128
+        .checked_mul(core::mem::size_of::<[f64; 3]>() as u128)
+        .ok_or_else(|| NurbsError::Domain {
+            what: "surface-partial retained u-jet accounting overflows u128".to_string(),
+        })?;
+    let v_peak = (control_count_v as u128)
+        .checked_mul(control_bytes)
+        .and_then(|bytes| bytes.checked_add(derivative_bytes_v))
+        .and_then(|bytes| bytes.checked_add(basis_bytes))
+        .and_then(|bytes| bytes.checked_add(retained_u_jet))
+        .ok_or_else(|| NurbsError::Domain {
+            what: "surface-partial v-stage retained-byte accounting overflows u128".to_string(),
+        })?;
+    let retained_bytes = u_peak.max(v_peak);
+    enforce_partials_envelope(work, retained_bytes)
+}
+
 /// A rational tensor-product surface in 3D.
 ///
 /// ```compile_fail
@@ -111,7 +218,7 @@ fn preflight_span_boxes(
 /// ).unwrap();
 /// surface.cpw.clear();
 /// ```
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub struct NurbsSurface<S: Scalar> {
     /// Knots in u.
     pub(crate) knots_u: KnotVector<S>,
@@ -209,10 +316,8 @@ impl<S: Scalar> NurbsSurface<S> {
                 what: format!("expected {nu} control rows, got {}", points.len()),
             });
         }
-        let mut cpw = Vec::new();
-        cpw.try_reserve_exact(nu).map_err(|_| NurbsError::Domain {
-            what: "surface control-row allocation was refused".to_string(),
-        })?;
+        // Scan the complete borrowed input before allocating any output row.
+        // A malformed late row must not force a large, doomed prefix allocation.
         for (prow, wrow) in points.iter().zip(weights) {
             if prow.len() != nv || wrow.len() != nv {
                 return Err(NurbsError::Structure {
@@ -235,13 +340,15 @@ impl<S: Scalar> NurbsSurface<S> {
                     what: "control-point coordinates must be finite".to_string(),
                 });
             }
-            let mut row = Vec::new();
-            row.try_reserve_exact(nv).map_err(|_| NurbsError::Domain {
-                what: "surface homogeneous-control row allocation was refused".to_string(),
-            })?;
-            for (p, &w) in prow.iter().zip(wrow) {
-                let homogeneous = [p[0] * w, p[1] * w, p[2] * w, w];
-                if p.iter()
+            for (point, &weight) in prow.iter().zip(wrow) {
+                let homogeneous = [
+                    point[0] * weight,
+                    point[1] * weight,
+                    point[2] * weight,
+                    weight,
+                ];
+                if point
+                    .iter()
                     .zip(homogeneous.iter())
                     .any(|(&coordinate, &weighted)| {
                         coordinate != S::zero() && weighted == S::zero()
@@ -263,6 +370,19 @@ impl<S: Scalar> NurbsSurface<S> {
                             .to_string(),
                     });
                 }
+            }
+        }
+        let mut cpw = Vec::new();
+        cpw.try_reserve_exact(nu).map_err(|_| NurbsError::Domain {
+            what: "surface control-row allocation was refused".to_string(),
+        })?;
+        for (prow, wrow) in points.iter().zip(weights) {
+            let mut row = Vec::new();
+            row.try_reserve_exact(nv).map_err(|_| NurbsError::Domain {
+                what: "surface homogeneous-control row allocation was refused".to_string(),
+            })?;
+            for (p, &w) in prow.iter().zip(wrow) {
+                let homogeneous = [p[0] * w, p[1] * w, p[2] * w, w];
                 row.push(homogeneous);
             }
             cpw.push(row);
@@ -311,6 +431,34 @@ impl<S: Scalar> NurbsSurface<S> {
     #[must_use]
     pub fn homogeneous_control_net(&self) -> &[Vec<[S; 4]>] {
         &self.cpw
+    }
+
+    /// Fallibly copy this sealed surface without revalidating unchanged data.
+    ///
+    /// # Errors
+    /// [`NurbsError::Domain`] when a destination allocation is refused.
+    pub fn try_clone(&self) -> Result<Self, NurbsError> {
+        let knots_u = self.knots_u.try_clone()?;
+        let knots_v = self.knots_v.try_clone()?;
+        let mut cpw = Vec::new();
+        cpw.try_reserve_exact(self.cpw.len())
+            .map_err(|_| NurbsError::Domain {
+                what: "surface copy row-table allocation was refused".to_string(),
+            })?;
+        for source_row in &self.cpw {
+            let mut row = Vec::new();
+            row.try_reserve_exact(source_row.len())
+                .map_err(|_| NurbsError::Domain {
+                    what: "surface copy control-row allocation was refused".to_string(),
+                })?;
+            row.extend_from_slice(source_row);
+            cpw.push(row);
+        }
+        Ok(NurbsSurface {
+            knots_u,
+            knots_v,
+            cpw,
+        })
     }
 
     /// Validate this exact immutable surface snapshot once.
@@ -581,6 +729,8 @@ impl NurbsSurface<f64> {
     /// # Errors
     /// [`NurbsError::Domain`] outside the domain.
     pub fn partials(&self, u: f64, v: f64) -> Result<SurfacePartials, NurbsError> {
+        self.knots_u.preflight_parameter(u, "surface u-partial")?;
+        self.knots_v.preflight_parameter(v, "surface v-partial")?;
         self.admit()?.partials(u, v)
     }
 }
@@ -592,52 +742,94 @@ impl AdmittedNurbsSurface<'_, f64> {
     /// [`NurbsError::Domain`] outside the domain or when temporary isocurve
     /// construction/evaluation is refused.
     pub fn partials(&self, u: f64, v: f64) -> Result<SurfacePartials, NurbsError> {
-        // u-partial: build the v-evaluated control column, differentiate
-        // as a u-curve; symmetrically for v.
-        let knots_v = self.knots_v();
-        let (sv, bv) = knots_v.basis(v)?;
-        let pv = knots_v.degree();
-        let mut u_net = Vec::new();
-        u_net
-            .try_reserve_exact(self.inner.cpw.len())
-            .map_err(|_| NurbsError::Domain {
-                what: "surface u-isocurve allocation was refused".to_string(),
-            })?;
-        for row in &self.inner.cpw {
-            let mut acc = [0.0f64; 4];
-            for (c, &wv) in bv.iter().enumerate() {
-                let cp = &row[sv - pv + c];
-                for (a, &x) in acc.iter_mut().zip(cp.iter()) {
-                    *a += wv * x;
-                }
-            }
-            u_net.push(acc);
-        }
-        let u_curve =
-            NurbsCurve::<f64, 3>::from_homogeneous(self.inner.knots_u.try_clone()?, u_net)?;
-        let du = u_curve.admitted_after_validation().derivatives(u, 1)?;
+        // Refuse the complete request before the first basis-workspace or
+        // isocurve allocation. The U-first order is deterministic when both
+        // parameters are invalid.
         let knots_u = self.knots_u();
+        let knots_v = self.knots_v();
+        self.inner
+            .knots_u
+            .preflight_parameter(u, "surface u-partial")?;
+        self.inner
+            .knots_v
+            .preflight_parameter(v, "surface v-partial")?;
+        preflight_partials_envelope(
+            knots_u.control_count(),
+            knots_v.control_count(),
+            knots_u.knots().len(),
+            knots_v.knots().len(),
+            knots_u.degree(),
+            knots_v.degree(),
+        )?;
+        NurbsCurve::<f64, 3>::preflight_derivative_request(knots_u, u, 1)?;
+        NurbsCurve::<f64, 3>::preflight_derivative_request(knots_v, v, 1)?;
+
         let (su, bu) = knots_u.basis(u)?;
+        let (sv, bv) = knots_v.basis(v)?;
         let pu = knots_u.degree();
-        let mut v_net = Vec::new();
-        v_net
-            .try_reserve_exact(knots_v.control_count())
-            .map_err(|_| NurbsError::Domain {
-                what: "surface v-isocurve allocation was refused".to_string(),
-            })?;
-        for j in 0..knots_v.control_count() {
-            let mut acc = [0.0f64; 4];
-            for (r, &wu) in bu.iter().enumerate() {
-                let cp = &self.inner.cpw[su - pu + r][j];
-                for (a, &x) in acc.iter_mut().zip(cp.iter()) {
-                    *a += wu * x;
+        let pv = knots_v.degree();
+
+        // u-partial: build the v-evaluated control column, differentiate
+        // as a u-curve; symmetrically for v. Each scope releases its temporary
+        // control net before the next one is allocated.
+        let du = {
+            let mut u_net = Vec::new();
+            u_net
+                .try_reserve_exact(self.inner.cpw.len())
+                .map_err(|_| NurbsError::Domain {
+                    what: "surface u-isocurve allocation was refused".to_string(),
+                })?;
+            for row in &self.inner.cpw {
+                let mut acc = [0.0f64; 4];
+                for (c, &wv) in bv.iter().enumerate() {
+                    let cp = &row[sv - pv + c];
+                    for (a, &x) in acc.iter_mut().zip(cp.iter()) {
+                        *a += wv * x;
+                    }
                 }
+                if acc.iter().any(|component| !component.is_finite())
+                    || !acc[3].is_admissible_weight()
+                {
+                    return Err(NurbsError::Domain {
+                        what: "surface u-isocurve left the admissible homogeneous domain"
+                            .to_string(),
+                    });
+                }
+                u_net.push(acc);
             }
-            v_net.push(acc);
-        }
-        let v_curve =
-            NurbsCurve::<f64, 3>::from_homogeneous(self.inner.knots_v.try_clone()?, v_net)?;
-        let dv = v_curve.admitted_after_validation().derivatives(v, 1)?;
+            NurbsCurve::<f64, 3>::derivatives_from_admitted_parts_after_preflight(
+                knots_u, &u_net, u, 1,
+            )?
+        };
+        let dv = {
+            let mut v_net = Vec::new();
+            v_net
+                .try_reserve_exact(knots_v.control_count())
+                .map_err(|_| NurbsError::Domain {
+                    what: "surface v-isocurve allocation was refused".to_string(),
+                })?;
+            for j in 0..knots_v.control_count() {
+                let mut acc = [0.0f64; 4];
+                for (r, &wu) in bu.iter().enumerate() {
+                    let cp = &self.inner.cpw[su - pu + r][j];
+                    for (a, &x) in acc.iter_mut().zip(cp.iter()) {
+                        *a += wu * x;
+                    }
+                }
+                if acc.iter().any(|component| !component.is_finite())
+                    || !acc[3].is_admissible_weight()
+                {
+                    return Err(NurbsError::Domain {
+                        what: "surface v-isocurve left the admissible homogeneous domain"
+                            .to_string(),
+                    });
+                }
+                v_net.push(acc);
+            }
+            NurbsCurve::<f64, 3>::derivatives_from_admitted_parts_after_preflight(
+                knots_v, &v_net, v, 1,
+            )?
+        };
         Ok((du[0], du[1], dv[1]))
     }
 }
@@ -690,5 +882,159 @@ mod tests {
             retained_error,
             NurbsError::Domain { ref what } if what.contains("retain")
         ));
+    }
+
+    #[test]
+    fn partials_preflight_prices_union_and_preserves_exact_cap_boundaries() {
+        preflight_partials_envelope(2, 2, 4, 4, 1, 1)
+            .expect("bilinear partial request is admitted");
+        let work_error = preflight_partials_envelope(1_001, 1_001, 2_002, 2_002, 1_000, 1_000)
+            .expect_err("high-order tensor work must refuse through the aggregate helper");
+        assert!(matches!(
+            work_error,
+            NurbsError::Domain { ref what } if what.contains("work")
+        ));
+        let retained_error = preflight_partials_envelope(600_000, 2, 600_002, 4, 1, 1)
+            .expect_err("large asymmetric isocurve retention must refuse through the helper");
+        assert!(matches!(
+            retained_error,
+            NurbsError::Domain { ref what } if what.contains("retain")
+        ));
+        assert_eq!(
+            NurbsCurve::<f64, 3>::derivative_envelope(2, 4, 1, 1)
+                .expect("linear derivative envelope"),
+            (44, 304 + 2 * core::mem::size_of::<Vec<[f64; 4]>>() as u128,)
+        );
+        assert!(
+            enforce_partials_envelope(
+                NurbsCurve::<f64, 3>::MAX_DERIVATIVE_WORK_UNITS,
+                NurbsCurve::<f64, 3>::MAX_DERIVATIVE_RETAINED_BYTES,
+            )
+            .is_ok()
+        );
+        assert!(matches!(
+            enforce_partials_envelope(
+                NurbsCurve::<f64, 3>::MAX_DERIVATIVE_WORK_UNITS + 1,
+                NurbsCurve::<f64, 3>::MAX_DERIVATIVE_RETAINED_BYTES,
+            ),
+            Err(NurbsError::Domain { ref what }) if what.contains("work")
+        ));
+        assert!(matches!(
+            enforce_partials_envelope(
+                NurbsCurve::<f64, 3>::MAX_DERIVATIVE_WORK_UNITS,
+                NurbsCurve::<f64, 3>::MAX_DERIVATIVE_RETAINED_BYTES + 1,
+            ),
+            Err(NurbsError::Domain { ref what }) if what.contains("retain")
+        ));
+    }
+
+    #[test]
+    fn admitted_partials_refuse_parameters_u_first_and_accept_endpoints() {
+        let line_u = KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).expect("u knots");
+        let line_v = KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).expect("v knots");
+        let points = vec![
+            vec![[0.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            vec![[1.0, 0.0, 0.0], [1.0, 1.0, 0.0]],
+        ];
+        let weights = vec![vec![1.0; 2]; 2];
+        let surface = NurbsSurface::new(line_u, line_v, &points, &weights).expect("bilinear plane");
+        let admitted = surface.admit().expect("admitted plane");
+
+        let u_error = admitted
+            .partials(-1.0, 2.0)
+            .expect_err("U must win when both parameters are invalid");
+        assert!(matches!(
+            u_error,
+            NurbsError::Domain { ref what } if what.contains("u-partial")
+        ));
+        let v_error = admitted
+            .partials(0.5, 2.0)
+            .expect_err("invalid V must refuse before allocation");
+        assert!(matches!(
+            v_error,
+            NurbsError::Domain { ref what } if what.contains("v-partial")
+        ));
+        assert!(matches!(
+            admitted.partials(f64::NAN, 0.5),
+            Err(NurbsError::Domain { ref what }) if what.contains("u-partial")
+        ));
+        assert!(matches!(
+            admitted.partials(0.5, f64::NAN),
+            Err(NurbsError::Domain { ref what }) if what.contains("v-partial")
+        ));
+        admitted
+            .partials(0.0, 0.0)
+            .expect("lower endpoints are admitted");
+        admitted
+            .partials(1.0, 1.0)
+            .expect("upper endpoints are admitted");
+    }
+
+    #[test]
+    fn admitted_partials_refuse_an_ordinary_derivative_at_a_c0_knot() {
+        let knots_u = KnotVector::new(vec![0.0, 0.0, 0.0, 0.5, 0.5, 1.0, 1.0, 1.0], 2)
+            .expect("C0 quadratic u knots");
+        let knots_v = KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).expect("linear v knots");
+        let points: Vec<Vec<[f64; 3]>> = (0..5)
+            .map(|u| vec![[f64::from(u), 0.0, 0.0], [f64::from(u), 1.0, 0.0]])
+            .collect();
+        let weights = vec![vec![1.0; 2]; 5];
+        let surface = NurbsSurface::new(knots_u, knots_v, &points, &weights).expect("C0 surface");
+        let admitted = surface.admit().expect("admitted C0 surface");
+        admitted
+            .partials(0.25, 0.5)
+            .expect("ordinary partial inside a smooth span");
+        assert!(matches!(
+            admitted.partials(0.5, 0.5),
+            Err(NurbsError::Domain { ref what }) if what.contains("multiplicity 2")
+        ));
+    }
+
+    #[test]
+    fn partial_parameter_refusal_precedes_surface_structure_scan() {
+        let line_u = KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).expect("u knots");
+        let line_v = KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).expect("v knots");
+        let malformed = NurbsSurface::<f64> {
+            knots_u: line_u,
+            knots_v: line_v,
+            cpw: Vec::new(),
+        };
+        let u_error = malformed
+            .partials(-1.0, 2.0)
+            .expect_err("u is refused first when both parameters are invalid");
+        assert!(matches!(
+            u_error,
+            NurbsError::Domain { ref what } if what.contains("u-partial")
+        ));
+        let v_error = malformed
+            .partials(0.5, 2.0)
+            .expect_err("v is refused before malformed controls are scanned");
+        assert!(matches!(
+            v_error,
+            NurbsError::Domain { ref what } if what.contains("v-partial")
+        ));
+    }
+
+    #[test]
+    fn surface_copy_is_fallible_and_late_rows_are_validated_before_output() {
+        let line_u = KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).expect("u knots");
+        let line_v = KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).expect("v knots");
+        let points = vec![vec![[0.0; 3]; 2], vec![[1.0; 3]]];
+        let weights = vec![vec![1.0; 2], vec![1.0]];
+        assert!(matches!(
+            NurbsSurface::new(
+                line_u.try_clone().expect("fallible u-knot copy"),
+                line_v.try_clone().expect("fallible v-knot copy"),
+                &points,
+                &weights,
+            ),
+            Err(NurbsError::Structure { ref what }) if what.contains("control columns")
+        ));
+
+        let valid_points = vec![vec![[0.0; 3]; 2], vec![[1.0; 3]; 2]];
+        let valid_weights = vec![vec![1.0; 2]; 2];
+        let surface = NurbsSurface::new(line_u, line_v, &valid_points, &valid_weights)
+            .expect("bilinear surface");
+        assert_eq!(surface.try_clone().expect("fallible surface copy"), surface);
     }
 }

@@ -29,7 +29,7 @@ const TRIM_MIN_LOOP_VALIDATION_WORK_UNITS: u128 = 64;
 ///
 /// The exact curve is read-only after construction; callers use
 /// [`TrimLoop::curve`] for inspection.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub struct TrimLoop {
     /// The exact 2-D curve.
     pub(crate) curve: NurbsCurve<Rat, 2>,
@@ -115,6 +115,16 @@ impl TrimLoop {
         &self.curve
     }
 
+    /// Fallibly copy this sealed loop without revalidating unchanged data.
+    ///
+    /// # Errors
+    /// [`NurbsError::Domain`] when a destination allocation is refused.
+    pub fn try_clone(&self) -> Result<Self, NurbsError> {
+        Ok(TrimLoop {
+            curve: self.curve.try_clone()?,
+        })
+    }
+
     /// The same loop with reversed orientation (holes are wound opposite
     /// to outers under the nonzero rule): control points reversed, knot
     /// vector mirrored about the domain.
@@ -188,7 +198,7 @@ pub enum Classification {
 /// let mut patch = TrimmedPatch::new(Vec::new());
 /// patch.loops.clear();
 /// ```
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub struct TrimmedPatch {
     /// Outer boundary + hole loops (orientation encodes solidity via the
     /// nonzero-winding rule: outer CCW, holes CW).
@@ -272,6 +282,26 @@ impl TrimmedPatch {
         self.max_subdivision
     }
 
+    /// Fallibly copy this sealed patch without revalidating unchanged loops.
+    ///
+    /// # Errors
+    /// [`NurbsError::Domain`] when a destination allocation is refused.
+    pub fn try_clone(&self) -> Result<Self, NurbsError> {
+        let mut loops = Vec::new();
+        loops
+            .try_reserve_exact(self.loops.len())
+            .map_err(|_| NurbsError::Domain {
+                what: "trimmed-patch copy loop-table allocation was refused".to_string(),
+            })?;
+        for trim_loop in &self.loops {
+            loops.push(trim_loop.try_clone()?);
+        }
+        Ok(TrimmedPatch {
+            loops,
+            max_subdivision: self.max_subdivision,
+        })
+    }
+
     /// Validate this exact immutable patch snapshot once under the defensive
     /// aggregate trim budget.
     ///
@@ -302,13 +332,13 @@ impl TrimmedPatch {
     /// Returns [`NurbsError::Domain`] for an inverted box and propagates
     /// structural errors from exact subdivision.
     pub fn classify_box(&self, min: [Rat; 2], max: [Rat; 2]) -> Result<Classification, NurbsError> {
-        let mut work_remaining = TRIM_CLASSIFY_MAX_WORK_UNITS;
-        let admitted = self.admit_with_budget(&mut work_remaining)?;
         if min[0] > max[0] || min[1] > max[1] {
             return Err(NurbsError::Domain {
                 what: "trim classification box must be componentwise ordered".to_string(),
             });
         }
+        let mut work_remaining = TRIM_CLASSIFY_MAX_WORK_UNITS;
+        let admitted = self.admit_with_budget(&mut work_remaining)?;
         let two = Rat::int(2);
         let witness = [(min[0] + max[0]) / two, (min[1] + max[1]) / two];
         let mut winding = 0i64;
@@ -503,4 +533,36 @@ fn polygon_winding(poly: &[[Rat; 2]], q: [Rat; 2]) -> i64 {
         }
     }
     winding
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::basis::KnotVector;
+
+    #[test]
+    fn inverted_box_refusal_precedes_trim_admission() {
+        let knots = KnotVector::new(vec![Rat::int(0), Rat::int(0), Rat::int(1), Rat::int(1)], 1)
+            .expect("line knots");
+        let malformed_loop = TrimLoop {
+            curve: NurbsCurve {
+                knots,
+                cpw: Vec::new(),
+            },
+        };
+        let patch = TrimmedPatch::new(vec![malformed_loop]);
+        let error = patch
+            .classify_box([Rat::int(1), Rat::int(0)], [Rat::int(0), Rat::int(1)])
+            .expect_err("inverted box must refuse before malformed loop admission");
+        assert!(matches!(
+            error,
+            NurbsError::Domain { ref what } if what.contains("componentwise ordered")
+        ));
+    }
+
+    #[test]
+    fn empty_patch_copy_preserves_sealed_configuration() {
+        let patch = TrimmedPatch::with_max_subdivision(Vec::new(), 7);
+        assert_eq!(patch.try_clone().expect("fallible patch copy"), patch);
+    }
 }

@@ -6,14 +6,71 @@
 //! knot vectors are a documented follow-up).
 
 use crate::NurbsError;
-use crate::basis::{BASIS_MAX_WORK_UNITS, KnotVector, Scalar};
+use crate::basis::{AdmittedKnotVector, BASIS_MAX_WORK_UNITS, KnotVector, Scalar};
 
 // Conservative price for finite/weight/projection/canonical-lane validation of
 // one homogeneous control. Structural admission must precede the full scan.
 const CURVE_VALIDATION_WORK_PER_CONTROL: u128 = 16;
+const CURVE_SPAN_BOX_WORK_PER_CONTROL: u128 = 16;
+const CURVE_SPAN_BOX_MAX_RETAINED_BYTES: u128 = 64 * 1024 * 1024;
 
 /// One span's Cartesian control box: (min, max, t0, t1).
 pub type SpanBox<S, const DIM: usize> = ([S; DIM], [S; DIM], S, S);
+
+fn enforce_span_box_envelope(work: u128, retained_bytes: u128) -> Result<(), NurbsError> {
+    if work > BASIS_MAX_WORK_UNITS {
+        return Err(NurbsError::Domain {
+            what: format!(
+                "curve span-box traversal requests {work} work units above defensive ceiling {BASIS_MAX_WORK_UNITS}"
+            ),
+        });
+    }
+    if retained_bytes > CURVE_SPAN_BOX_MAX_RETAINED_BYTES {
+        return Err(NurbsError::Domain {
+            what: format!(
+                "curve span boxes retain {retained_bytes} bytes above defensive ceiling {CURVE_SPAN_BOX_MAX_RETAINED_BYTES}"
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn preflight_span_boxes(
+    control_count: usize,
+    degree: usize,
+    retained_bytes_per_box: usize,
+) -> Result<usize, NurbsError> {
+    let span_capacity = control_count
+        .checked_sub(degree)
+        .ok_or_else(|| NurbsError::Structure {
+            what: "curve degree exceeds its admitted control count".to_string(),
+        })?;
+    let order = degree.checked_add(1).ok_or_else(|| NurbsError::Domain {
+        what: "curve order overflows usize during span-box admission".to_string(),
+    })?;
+    let control_visits = (span_capacity as u128)
+        .checked_mul(order as u128)
+        .ok_or_else(|| NurbsError::Domain {
+            what: "curve span-box control-scan work overflows u128".to_string(),
+        })?;
+    let traversal_work = (span_capacity as u128)
+        .checked_mul(2)
+        .and_then(|work| {
+            control_visits
+                .checked_mul(CURVE_SPAN_BOX_WORK_PER_CONTROL)
+                .and_then(|control_work| work.checked_add(control_work))
+        })
+        .ok_or_else(|| NurbsError::Domain {
+            what: "curve span-box traversal work overflows u128".to_string(),
+        })?;
+    let retained_bytes = (span_capacity as u128)
+        .checked_mul(retained_bytes_per_box as u128)
+        .ok_or_else(|| NurbsError::Domain {
+            what: "curve span-box retained-byte accounting overflows u128".to_string(),
+        })?;
+    enforce_span_box_envelope(traversal_work, retained_bytes)?;
+    Ok(span_capacity)
+}
 
 /// A rational curve in `DIM` dimensions: homogeneous control points
 /// `(w·x…, w)` over a clamped knot vector.
@@ -24,7 +81,7 @@ pub type SpanBox<S, const DIM: usize> = ([S; DIM], [S; DIM], S, S);
 /// let mut curve = NurbsCurve::new(knots, &[[0.0], [1.0]], &[1.0, 1.0]).unwrap();
 /// curve.cpw.clear();
 /// ```
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub struct NurbsCurve<S: Scalar, const DIM: usize> {
     /// The knot vector.
     pub(crate) knots: KnotVector<S>,
@@ -206,6 +263,21 @@ impl<S: Scalar, const DIM: usize> NurbsCurve<S, DIM> {
     #[must_use]
     pub fn homogeneous_control_points(&self) -> &[[S; 4]] {
         &self.cpw
+    }
+
+    /// Fallibly copy this sealed curve without revalidating unchanged data.
+    ///
+    /// # Errors
+    /// [`NurbsError::Domain`] when a destination allocation is refused.
+    pub fn try_clone(&self) -> Result<Self, NurbsError> {
+        let knots = self.knots.try_clone()?;
+        let mut cpw = Vec::new();
+        cpw.try_reserve_exact(self.cpw.len())
+            .map_err(|_| NurbsError::Domain {
+                what: "curve copy control-net allocation was refused".to_string(),
+            })?;
+        cpw.extend_from_slice(&self.cpw);
+        Ok(NurbsCurve { knots, cpw })
     }
 
     /// Validate this exact immutable curve snapshot once.
@@ -397,7 +469,13 @@ impl<S: Scalar, const DIM: usize> NurbsCurve<S, DIM> {
             .iter()
             .rposition(|&u| u == t)
             .expect("contains checked");
-        let mut new_knots = self.knots.knots.clone();
+        let mut new_knots = Vec::new();
+        new_knots
+            .try_reserve_exact(self.knots.knots.len())
+            .map_err(|_| NurbsError::Domain {
+                what: "knot-removal knot-vector allocation was refused".to_string(),
+            })?;
+        new_knots.extend_from_slice(&self.knots.knots);
         new_knots.remove(r);
         let prior_multiplicity = new_knots.iter().filter(|&&knot| knot == t).count();
         // Insertion produced: Q_i = (1−α_i) P_{i−1} + α_i P_i over the
@@ -466,7 +544,7 @@ impl<S: Scalar, const DIM: usize> NurbsCurve<S, DIM> {
     pub fn to_bezier_form(&self) -> Result<Self, NurbsError> {
         self.validate_live_structure()?;
         let p = self.knots.degree;
-        let mut cur = self.clone();
+        let mut cur = self.try_clone()?;
         loop {
             // Find an interior knot with multiplicity < p.
             let (lo, hi) = cur.knots.domain()?;
@@ -630,7 +708,16 @@ impl<S: Scalar, const DIM: usize> NurbsCurve<S, DIM> {
     pub fn span_boxes(&self) -> Result<Vec<SpanBox<S, DIM>>, NurbsError> {
         self.validate_live_structure()?;
         let p = self.knots.degree;
+        let span_capacity = preflight_span_boxes(
+            self.knots.control_count(),
+            p,
+            core::mem::size_of::<SpanBox<S, DIM>>(),
+        )?;
         let mut out = Vec::new();
+        out.try_reserve_exact(span_capacity)
+            .map_err(|_| NurbsError::Domain {
+                what: "curve span-box allocation was refused".to_string(),
+            })?;
         for span in p..self.knots.control_count() {
             let (t0, t1) = (self.knots.knots[span], self.knots.knots[span + 1]);
             if t1 <= t0 {
@@ -780,10 +867,10 @@ impl<const DIM: usize> NurbsCurve<f64, DIM> {
     const MAX_DERIVATIVE_ORDER: usize = 64;
     /// Combined retained-net, quotient-recurrence, and allocation ceiling for
     /// the legacy whole-net derivative implementation.
-    const MAX_DERIVATIVE_WORK_UNITS: u128 = 16_777_216;
+    pub(crate) const MAX_DERIVATIVE_WORK_UNITS: u128 = 16_777_216;
     /// Hard retained payload bound for homogeneous nets and knot copies. Vec
     /// metadata and temporary basis arrays add a small bounded overhead.
-    const MAX_DERIVATIVE_RETAINED_BYTES: u128 = 67_108_864;
+    pub(crate) const MAX_DERIVATIVE_RETAINED_BYTES: u128 = 67_108_864;
 
     /// Derivatives up to `order` at `t` (rational quotient rule over the
     /// homogeneous derivative curves). Returns `[C(t), C'(t), …]`.
@@ -792,7 +879,12 @@ impl<const DIM: usize> NurbsCurve<f64, DIM> {
     /// [`NurbsError::Domain`] outside the parameter domain or above the
     /// defensive legacy order ceiling.
     pub fn derivatives(&self, t: f64, order: usize) -> Result<Vec<[f64; DIM]>, NurbsError> {
-        self.derivatives_impl(t, order, true)
+        Self::preflight_derivative_shape(t, order)?;
+        self.knots.preflight_parameter(t, "curve derivative")?;
+        self.validate_live_structure()?;
+        let knots = self.knots.admitted_after_validation();
+        Self::preflight_derivative_request(knots, t, order)?;
+        Self::derivatives_from_admitted_parts_after_preflight(knots, &self.cpw, t, order)
     }
 
     fn derivatives_after_validation(
@@ -800,15 +892,15 @@ impl<const DIM: usize> NurbsCurve<f64, DIM> {
         t: f64,
         order: usize,
     ) -> Result<Vec<[f64; DIM]>, NurbsError> {
-        self.derivatives_impl(t, order, false)
+        Self::derivatives_from_admitted_parts(
+            self.knots.admitted_after_validation(),
+            &self.cpw,
+            t,
+            order,
+        )
     }
 
-    fn derivatives_impl(
-        &self,
-        t: f64,
-        order: usize,
-        validate_structure: bool,
-    ) -> Result<Vec<[f64; DIM]>, NurbsError> {
+    fn preflight_derivative_shape(t: f64, order: usize) -> Result<(), NurbsError> {
         if DIM > 3 {
             return Err(NurbsError::Structure {
                 what: format!("curve dimension {DIM} exceeds the homogeneous storage limit 3"),
@@ -827,50 +919,22 @@ impl<const DIM: usize> NurbsCurve<f64, DIM> {
                 what: "derivative parameter must be finite".to_string(),
             });
         }
-        if validate_structure {
-            self.validate_live_structure()?;
-        }
-        let p = self.knots.degree;
-        let homogeneous_order = order.min(p);
-        let structure_extent = (self.cpw.len() as u128)
-            .checked_add(self.knots.knots.len() as u128)
-            .ok_or_else(|| NurbsError::Domain {
-                what: "derivative structure-size accounting overflows u128".to_string(),
-            })?;
-        let retained_nets = structure_extent
-            .checked_mul((homogeneous_order as u128).saturating_add(1))
+        Ok(())
+    }
+
+    pub(crate) fn derivative_envelope(
+        control_count: usize,
+        knot_count: usize,
+        degree: usize,
+        order: usize,
+    ) -> Result<(u128, u128), NurbsError> {
+        let homogeneous_order = order.min(degree);
+        let retained_nets = (control_count as u128)
+            .checked_add(knot_count as u128)
+            .and_then(|extent| extent.checked_mul((homogeneous_order as u128).saturating_add(1)))
             .ok_or_else(|| NurbsError::Domain {
                 what: "derivative retained-net accounting overflows u128".to_string(),
             })?;
-        let retained_bytes = (self.cpw.len() as u128)
-            .checked_mul((homogeneous_order as u128).saturating_add(1))
-            .and_then(|count| count.checked_mul(core::mem::size_of::<[f64; 4]>() as u128))
-            .and_then(|bytes| {
-                (self.knots.knots.len() as u128)
-                    .checked_mul((homogeneous_order as u128).saturating_add(1))
-                    .and_then(|count| count.checked_mul(core::mem::size_of::<f64>() as u128))
-                    .and_then(|knot_bytes| bytes.checked_add(knot_bytes))
-            })
-            .and_then(|bytes| {
-                (p as u128)
-                    .checked_add(1)
-                    .and_then(|basis_len| basis_len.checked_mul(3))
-                    .and_then(|basis_values| {
-                        basis_values.checked_mul(core::mem::size_of::<f64>() as u128)
-                    })
-                    .and_then(|basis_bytes| bytes.checked_add(basis_bytes))
-            })
-            .ok_or_else(|| NurbsError::Domain {
-                what: "derivative retained-byte accounting overflows u128".to_string(),
-            })?;
-        if retained_bytes > Self::MAX_DERIVATIVE_RETAINED_BYTES {
-            return Err(NurbsError::Domain {
-                what: format!(
-                    "derivative request retains up to {retained_bytes} bytes, above ceiling {}",
-                    Self::MAX_DERIVATIVE_RETAINED_BYTES
-                ),
-            });
-        }
         let quotient_extent = (order as u128)
             .checked_add(1)
             .and_then(|side| side.checked_mul(side))
@@ -879,11 +943,13 @@ impl<const DIM: usize> NurbsCurve<f64, DIM> {
                 what: "derivative quotient-work accounting overflows u128".to_string(),
             })?;
         let basis_extent = (0..=homogeneous_order).try_fold(0u128, |total, derivative| {
-            let degree = p - derivative;
-            let basis_order = degree.checked_add(1).ok_or_else(|| NurbsError::Domain {
-                what: "derivative basis-order accounting overflows usize".to_string(),
-            })?;
-            let work = (degree as u128)
+            let reduced_degree = degree - derivative;
+            let basis_order = reduced_degree
+                .checked_add(1)
+                .ok_or_else(|| NurbsError::Domain {
+                    what: "derivative basis-order accounting overflows usize".to_string(),
+                })?;
+            let work = (reduced_degree as u128)
                 .checked_mul(basis_order as u128)
                 .map(|product| product / 2)
                 .and_then(|triangular| triangular.checked_add(basis_order as u128))
@@ -900,17 +966,81 @@ impl<const DIM: usize> NurbsCurve<f64, DIM> {
             .ok_or_else(|| NurbsError::Domain {
                 what: "derivative total-work accounting overflows u128".to_string(),
             })?;
-        if requested_work > Self::MAX_DERIVATIVE_WORK_UNITS {
+
+        let levels = (homogeneous_order as u128).saturating_add(1);
+        let control_bytes = (control_count as u128)
+            .checked_mul(levels)
+            .and_then(|count| count.checked_mul(core::mem::size_of::<[f64; 4]>() as u128))
+            .ok_or_else(|| NurbsError::Domain {
+                what: "derivative retained-control accounting overflows u128".to_string(),
+            })?;
+        // Charge a full knot extent per derivative level even though the
+        // implementation below borrows successively trimmed source slices.
+        // The deliberate overestimate keeps the envelope stable if those
+        // views later become owned again.
+        let knot_bytes = (knot_count as u128)
+            .checked_mul(levels)
+            .and_then(|count| count.checked_mul(core::mem::size_of::<f64>() as u128))
+            .ok_or_else(|| NurbsError::Domain {
+                what: "derivative retained-knot accounting overflows u128".to_string(),
+            })?;
+        let table_bytes = levels
+            .checked_mul(core::mem::size_of::<Vec<[f64; 4]>>() as u128)
+            .ok_or_else(|| NurbsError::Domain {
+                what: "derivative net-table accounting overflows u128".to_string(),
+            })?;
+        let jet_len = (order as u128)
+            .checked_add(1)
+            .ok_or_else(|| NurbsError::Domain {
+                what: "derivative jet-length accounting overflows u128".to_string(),
+            })?;
+        let homogeneous_bytes = jet_len
+            .checked_mul(core::mem::size_of::<[f64; 4]>() as u128)
+            .ok_or_else(|| NurbsError::Domain {
+                what: "derivative homogeneous-jet accounting overflows u128".to_string(),
+            })?;
+        let basis_bytes = (degree as u128)
+            .checked_add(1)
+            .and_then(|basis_len| basis_len.checked_mul(3))
+            .and_then(|basis_values| basis_values.checked_mul(core::mem::size_of::<f64>() as u128))
+            .ok_or_else(|| NurbsError::Domain {
+                what: "derivative basis-workspace accounting overflows u128".to_string(),
+            })?;
+        let cartesian_bytes = jet_len
+            .checked_mul(DIM as u128)
+            .and_then(|count| count.checked_mul(core::mem::size_of::<f64>() as u128))
+            .ok_or_else(|| NurbsError::Domain {
+                what: "derivative Cartesian-jet accounting overflows u128".to_string(),
+            })?;
+        let retained_bytes = control_bytes
+            .checked_add(knot_bytes)
+            .and_then(|bytes| bytes.checked_add(table_bytes))
+            .and_then(|bytes| bytes.checked_add(homogeneous_bytes))
+            .and_then(|bytes| bytes.checked_add(basis_bytes.max(cartesian_bytes)))
+            .ok_or_else(|| NurbsError::Domain {
+                what: "derivative retained-byte accounting overflows u128".to_string(),
+            })?;
+        Ok((requested_work, retained_bytes))
+    }
+
+    pub(crate) fn preflight_derivative_request(
+        knots: AdmittedKnotVector<'_, f64>,
+        t: f64,
+        order: usize,
+    ) -> Result<(), NurbsError> {
+        Self::preflight_derivative_shape(t, order)?;
+        let (lo, hi) = knots.domain();
+        if t < lo || t > hi {
             return Err(NurbsError::Domain {
-                what: format!(
-                    "derivative request needs {requested_work} defensive work units, above ceiling {}",
-                    Self::MAX_DERIVATIVE_WORK_UNITS
-                ),
+                what: format!("derivative parameter {t} outside {lo}..{hi}"),
             });
         }
-        let (lo, hi) = self.knots.admitted_after_validation().domain();
+        let p = knots.degree();
         if t > lo && t < hi {
-            let multiplicity = self.knots.knots.iter().filter(|&&knot| knot == t).count();
+            let entries = knots.knots();
+            let run_start = entries.partition_point(|&knot| knot < t);
+            let run_end = entries.partition_point(|&knot| knot <= t);
+            let multiplicity = run_end - run_start;
             if multiplicity > 0 && (multiplicity > p || order > p - multiplicity) {
                 return Err(NurbsError::Domain {
                     what: format!(
@@ -919,38 +1049,80 @@ impl<const DIM: usize> NurbsCurve<f64, DIM> {
                 });
             }
         }
+        Ok(())
+    }
+
+    pub(crate) fn derivatives_from_admitted_parts(
+        knots: AdmittedKnotVector<'_, f64>,
+        cpw: &[[f64; 4]],
+        t: f64,
+        order: usize,
+    ) -> Result<Vec<[f64; DIM]>, NurbsError> {
+        Self::preflight_derivative_request(knots, t, order)?;
+        Self::derivatives_from_admitted_parts_after_preflight(knots, cpw, t, order)
+    }
+
+    pub(crate) fn derivatives_from_admitted_parts_after_preflight(
+        knots: AdmittedKnotVector<'_, f64>,
+        cpw: &[[f64; 4]],
+        t: f64,
+        order: usize,
+    ) -> Result<Vec<[f64; DIM]>, NurbsError> {
+        if cpw.len() != knots.control_count() {
+            return Err(NurbsError::Structure {
+                what: "admitted derivative control count does not match its knot vector"
+                    .to_string(),
+            });
+        }
+        let p = knots.degree();
+        let homogeneous_order = order.min(p);
+        let (requested_work, retained_bytes) =
+            Self::derivative_envelope(cpw.len(), knots.knots().len(), p, order)?;
+        if retained_bytes > Self::MAX_DERIVATIVE_RETAINED_BYTES {
+            return Err(NurbsError::Domain {
+                what: format!(
+                    "derivative request retains up to {retained_bytes} bytes, above ceiling {}",
+                    Self::MAX_DERIVATIVE_RETAINED_BYTES
+                ),
+            });
+        }
+        if requested_work > Self::MAX_DERIVATIVE_WORK_UNITS {
+            return Err(NurbsError::Domain {
+                what: format!(
+                    "derivative request needs {requested_work} defensive work units, above ceiling {}",
+                    Self::MAX_DERIVATIVE_WORK_UNITS
+                ),
+            });
+        }
         // Homogeneous derivative control nets by repeated differencing.
-        let mut nets: Vec<(Vec<[f64; 4]>, Vec<f64>, usize)> = Vec::new();
+        let mut nets: Vec<Vec<[f64; 4]>> = Vec::new();
         nets.try_reserve_exact(homogeneous_order + 1)
             .map_err(|_| NurbsError::Domain {
                 what: "derivative net-table allocation was refused".to_string(),
             })?;
         let mut initial_net = Vec::new();
         initial_net
-            .try_reserve_exact(self.cpw.len())
+            .try_reserve_exact(cpw.len())
             .map_err(|_| NurbsError::Domain {
                 what: "derivative initial control-net allocation was refused".to_string(),
             })?;
-        initial_net.extend_from_slice(&self.cpw);
-        let mut initial_knots = Vec::new();
-        initial_knots
-            .try_reserve_exact(self.knots.knots.len())
-            .map_err(|_| NurbsError::Domain {
-                what: "derivative initial knot allocation was refused".to_string(),
-            })?;
-        initial_knots.extend_from_slice(&self.knots.knots);
-        nets.push((initial_net, initial_knots, p));
+        initial_net.extend_from_slice(cpw);
+        nets.push(initial_net);
         for k in 1..=homogeneous_order {
-            let (prev, knots, deg) = &nets[k - 1];
+            let prev = &nets[k - 1];
+            let degree = p - (k - 1);
+            let trim = k - 1;
+            let knot_end = knots.knots().len() - trim;
+            let reduced_knots = &knots.knots()[trim..knot_end];
             let mut next = Vec::new();
             next.try_reserve_exact(prev.len() - 1)
                 .map_err(|_| NurbsError::Domain {
                     what: format!("derivative order {k} control-net allocation was refused"),
                 })?;
             #[allow(clippy::cast_precision_loss)]
-            let degf = *deg as f64;
+            let degf = degree as f64;
             for i in 0..prev.len() - 1 {
-                let denom = knots[i + deg + 1] - knots[i + 1];
+                let denom = reduced_knots[i + degree + 1] - reduced_knots[i + 1];
                 let mut d = [0.0f64; 4];
                 if denom != 0.0 {
                     for (slot, (a, b)) in d.iter_mut().zip(prev[i + 1].iter().zip(&prev[i])) {
@@ -959,14 +1131,18 @@ impl<const DIM: usize> NurbsCurve<f64, DIM> {
                 }
                 next.push(d);
             }
-            let mut new_knots = Vec::new();
-            new_knots
-                .try_reserve_exact(knots.len() - 2)
-                .map_err(|_| NurbsError::Domain {
-                    what: format!("derivative order {k} knot allocation was refused"),
-                })?;
-            new_knots.extend_from_slice(&knots[1..knots.len() - 1]);
-            nets.push((next, new_knots, deg - 1));
+            if next
+                .iter()
+                .flatten()
+                .any(|component| !component.is_finite())
+            {
+                return Err(NurbsError::Domain {
+                    what: format!(
+                        "derivative order {k} control net left the finite numeric domain"
+                    ),
+                });
+            }
+            nets.push(next);
         }
         // Evaluate each homogeneous derivative, then the quotient rule:
         // C^(k) = (A^(k) − Σ_{i=1..k} C(k−i) · w^(i) · binom(k,i)) / w.
@@ -975,8 +1151,14 @@ impl<const DIM: usize> NurbsCurve<f64, DIM> {
             .map_err(|_| NurbsError::Domain {
                 what: "derivative homogeneous-jet allocation was refused".to_string(),
             })?;
-        for (net, knots, degree) in &nets {
-            hom.push(evaluate_homogeneous_derivative_net(net, knots, *degree, t)?);
+        for (derivative, net) in nets.iter().enumerate() {
+            let knot_end = knots.knots().len() - derivative;
+            hom.push(evaluate_homogeneous_derivative_net(
+                net,
+                &knots.knots()[derivative..knot_end],
+                p - derivative,
+                t,
+            )?);
         }
         // Polynomial homogeneous derivatives vanish above degree p, but a
         // rational quotient generally has nonzero derivatives of every order.
@@ -1033,5 +1215,70 @@ impl<const DIM: usize> AdmittedNurbsCurve<'_, f64, DIM> {
     /// defensive legacy order/work/allocation ceilings.
     pub fn derivatives(&self, t: f64, order: usize) -> Result<Vec<[f64; DIM]>, NurbsError> {
         self.inner.derivatives_after_validation(t, order)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn span_box_preflight_prices_scan_work_and_retained_output() {
+        assert_eq!(
+            preflight_span_boxes(2, 1, core::mem::size_of::<SpanBox<f64, 3>>())
+                .expect("one linear span"),
+            1
+        );
+        assert!(
+            enforce_span_box_envelope(BASIS_MAX_WORK_UNITS, CURVE_SPAN_BOX_MAX_RETAINED_BYTES)
+                .is_ok()
+        );
+        assert!(matches!(
+            enforce_span_box_envelope(
+                BASIS_MAX_WORK_UNITS + 1,
+                CURVE_SPAN_BOX_MAX_RETAINED_BYTES
+            ),
+            Err(NurbsError::Domain { ref what }) if what.contains("work")
+        ));
+        assert!(matches!(
+            enforce_span_box_envelope(
+                BASIS_MAX_WORK_UNITS,
+                CURVE_SPAN_BOX_MAX_RETAINED_BYTES + 1
+            ),
+            Err(NurbsError::Domain { ref what }) if what.contains("retain")
+        ));
+        assert!(matches!(
+            preflight_span_boxes(600_000, 1, core::mem::size_of::<SpanBox<f64, 3>>()),
+            Err(NurbsError::Domain { ref what }) if what.contains("traversal")
+        ));
+    }
+
+    #[test]
+    fn derivative_parameter_refusal_precedes_live_structure_scan() {
+        let knots = KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).expect("line knots");
+        let malformed = NurbsCurve::<f64, 1> {
+            knots,
+            cpw: Vec::new(),
+        };
+        let error = malformed
+            .derivatives(-1.0, 1)
+            .expect_err("out-of-domain parameter must refuse before malformed controls");
+        assert!(matches!(
+            error,
+            NurbsError::Domain { ref what } if what.contains("parameter")
+        ));
+    }
+
+    #[test]
+    fn derivative_envelope_and_fallible_copy_are_stable() {
+        assert_eq!(
+            NurbsCurve::<f64, 3>::derivative_envelope(2, 4, 1, 1)
+                .expect("linear derivative envelope"),
+            (44, 304 + 2 * core::mem::size_of::<Vec<[f64; 4]>>() as u128,)
+        );
+        let knots = KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).expect("line knots");
+        let curve =
+            NurbsCurve::<f64, 1>::new(knots, &[[0.0], [1.0]], &[1.0, 1.0]).expect("line curve");
+        assert_eq!(curve.try_clone().expect("fallible curve copy"), curve);
     }
 }

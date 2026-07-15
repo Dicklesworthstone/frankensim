@@ -502,7 +502,11 @@ fn nb_003_trim_classification_adversarial_battery() {
         .reversed_for_hole()
         .expect("valid reversed hole");
     let island = poly_loop(&[[45, 45], [55, 45], [55, 55], [45, 55]], 10); // 4.5..5.5 square
-    let patch = TrimmedPatch::new(vec![outer.clone(), hole_cw.clone(), island.clone()]);
+    let patch = TrimmedPatch::new(vec![
+        outer.try_clone().expect("fallible sealed-loop copy"),
+        hole_cw,
+        island,
+    ]);
     let q = |a: i64, b: i64, d: i64| {
         [
             Rat::new(i128::from(a), i128::from(d)),
@@ -591,7 +595,11 @@ fn nb_003_trim_classification_adversarial_battery() {
 #[test]
 fn nb_003a_trim_classification_refuses_many_tiny_loops_before_deep_validation() {
     let trim_loop = poly_loop(&[[0, 0], [1, 0], [1, 1], [0, 1]], 1);
-    let patch = TrimmedPatch::new(vec![trim_loop; 20_000]);
+    let loops = (0..20_000)
+        .map(|_| trim_loop.try_clone())
+        .collect::<Result<Vec<_>, _>>()
+        .expect("fallible sealed-loop copies");
+    let patch = TrimmedPatch::new(loops);
     let error = patch
         .classify([Rat::new(1, 2), Rat::new(1, 2)])
         .expect_err("aggregate live validation must share the classification budget");

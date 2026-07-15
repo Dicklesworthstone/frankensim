@@ -933,7 +933,7 @@ fn split_patch_v(net: &[Vec<[f64; 4]>]) -> Result<(Net, Net), NurbsError> {
 
 /// Decompose a surface to Bézier patches via repeated knot insertion.
 fn to_bezier_surface(surface: &NurbsSurface<f64>) -> Result<NurbsSurface<f64>, NurbsError> {
-    let mut work = surface.clone();
+    let mut work = surface.try_clone()?;
     loop {
         let mut inserted = false;
         for dir_u in [true, false] {

@@ -356,6 +356,53 @@ impl<S: Scalar> KnotVector<S> {
         self.degree
     }
 
+    /// Refuse an invalid parameter in constant time before any structural scan
+    /// or allocation-bearing basis work. Public sealed owners establish these
+    /// endpoint invariants at construction; the checked indexing keeps this
+    /// defensive for crate-internal candidates as well.
+    pub(crate) fn preflight_parameter(
+        &self,
+        parameter: S,
+        operation: &str,
+    ) -> Result<(), NurbsError> {
+        if !parameter.is_finite() {
+            return Err(NurbsError::Domain {
+                what: format!("{operation} parameter must be finite"),
+            });
+        }
+        let Some(&lo) = self.knots.get(self.degree) else {
+            return Err(NurbsError::Structure {
+                what: format!("{operation} knot vector has no lower domain endpoint"),
+            });
+        };
+        let Some(hi_index) = self
+            .knots
+            .len()
+            .checked_sub(1)
+            .and_then(|last| last.checked_sub(self.degree))
+        else {
+            return Err(NurbsError::Structure {
+                what: format!("{operation} knot vector has no upper domain endpoint"),
+            });
+        };
+        let Some(&hi) = self.knots.get(hi_index) else {
+            return Err(NurbsError::Structure {
+                what: format!("{operation} knot vector has no upper domain endpoint"),
+            });
+        };
+        if !lo.is_finite() || !hi.is_finite() || lo >= hi {
+            return Err(NurbsError::Structure {
+                what: format!("{operation} knot vector has an invalid parametric domain"),
+            });
+        }
+        if parameter < lo || parameter > hi {
+            return Err(NurbsError::Domain {
+                what: format!("{operation} parameter {parameter:?} outside {lo:?}..{hi:?}"),
+            });
+        }
+        Ok(())
+    }
+
     /// Fallibly copy this sealed knot vector without revalidating unchanged
     /// entries.
     ///
