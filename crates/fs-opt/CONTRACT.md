@@ -143,9 +143,12 @@ structure; FLUX/UQ execute it.
   numbers.
 - `eval`: memoized evaluation of algebraic subgraphs; the sealed root
   depth and aggregate-work receipts are checked against the default
-  admission schedule before memo allocation, and recursion carries a
-  remaining-depth guard. PDE/stochastic nodes refuse with `Unevaluable`
-  NAMING their executor.
+  admission schedule before memo allocation, and the walk itself is
+  EXPLICIT-STACK (reachability worklist + bottom-up arena-order sweep;
+  bead frankensim-xf8v7) so no admitted graph — at the depth cap or
+  otherwise — can overflow the call stack. `ir::children` is public so
+  downstream evaluators can drive the same iterative traversal.
+  PDE/stochastic nodes refuse with `Unevaluable` NAMING their executor.
 - `GoodhartGuard` (addendum Proposal D): treats an optimizer `Endpoint`
   (`design`, `objective`, `label`; `from_descent` bridges `DescentReport`)
   as an adversarial example. A FIXED four-step escalation ladder

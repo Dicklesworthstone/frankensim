@@ -945,8 +945,12 @@ impl Problem {
 }
 
 /// Child node ids of an expression. The fixed-size representation keeps
-/// validation and cap checks allocation-free.
-pub(crate) fn children(e: &Expr) -> impl Iterator<Item = NodeId> {
+/// validation and cap checks allocation-free. Public so downstream
+/// evaluators (fs-constraint's interval walker, future consumers) can
+/// drive EXPLICIT-STACK traversals instead of recursing (bead
+/// frankensim-xf8v7: recursion over admitted graphs is a stack-overflow
+/// hazard at the depth cap; iterate instead).
+pub fn children(e: &Expr) -> impl Iterator<Item = NodeId> {
     let children = match *e {
         Expr::Var(_) | Expr::Const { .. } | Expr::PdeResidual { .. } => [None, None],
         Expr::Component { of, .. }

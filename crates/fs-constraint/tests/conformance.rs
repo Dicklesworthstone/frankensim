@@ -770,7 +770,10 @@ fn forged_node_ids_refuse_instead_of_panicking() {
         .var("x", Manifold::Rn { dim: 1 }, fs_qty::Dims::NONE)
         .expect("var");
     let r = b.var_ref(v).expect("ref");
-    b.objective(r, fs_opt::Sense::Minimize, 1.0).expect("o");
+    // Objectives are scalar-only under the sealed-IR rules; project the
+    // 1-dim vector ref down before declaring it.
+    let s = b.component(r, 0).expect("scalar component");
+    b.objective(s, fs_opt::Sense::Minimize, 1.0).expect("o");
     let small = b.finish();
     let boxes = [(0.0, 1.0)];
     for forged in [NodeId(u32::MAX), NodeId(1_000)] {

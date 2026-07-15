@@ -83,38 +83,50 @@ pub fn eval(problem: &Problem, node: NodeId, bindings: &[Vec<f64>]) -> Result<Va
     // Arena order guarantees every dependency has a lower id, so a
     // prefix is sufficient; unrelated later nodes cannot force memo
     // allocation for this evaluation.
-    let mut memo: Vec<Option<Value>> = vec![None; node.0 as usize + 1];
-    eval_at(
-        problem,
-        node,
-        bindings,
-        &mut memo,
-        caps.max_graph_depth,
-        caps.max_graph_depth,
-    )
+    //
+    // EXPLICIT-STACK EVALUATION (bead frankensim-xf8v7): the walk is
+    // physically iterative so no admitted graph — at the depth cap or
+    // otherwise — can overflow the call stack. Reachability first (a
+    // worklist; children always have lower ids), then one bottom-up
+    // sweep in arena order, which is a topological order by
+    // construction. Only reachable nodes are evaluated, so unreachable
+    // Unevaluable nodes still cannot poison an evaluation, exactly as
+    // under the recursive walk.
+    let root = node.0 as usize;
+    let mut memo: Vec<Option<Value>> = vec![None; root + 1];
+    let mut reachable = vec![false; root + 1];
+    let mut worklist = vec![node];
+    while let Some(n) = worklist.pop() {
+        let i = n.0 as usize;
+        if !reachable[i] {
+            reachable[i] = true;
+            worklist.extend(crate::ir::children(&problem.exprs[i]));
+        }
+    }
+    for i in 0..=root {
+        if reachable[i] {
+            let value = eval_node(problem, NodeId(i as u32), bindings, &memo)?;
+            memo[i] = Some(value);
+        }
+    }
+    Ok(memo[root]
+        .take()
+        .expect("the root is reachable from itself"))
 }
 
+/// Evaluate ONE node whose children are already in `memo` (guaranteed
+/// by the bottom-up arena-order sweep in [`eval`]). Never recurses.
 #[allow(clippy::too_many_lines)] // one arm per node kind: the evaluator IS the semantics
-fn eval_at(
+fn eval_node(
     problem: &Problem,
     node: NodeId,
     bindings: &[Vec<f64>],
-    memo: &mut Vec<Option<Value>>,
-    remaining_depth: u32,
-    depth_cap: u32,
+    memo: &[Option<Value>],
 ) -> Result<Value, OptError> {
-    if remaining_depth == 0 {
-        return Err(OptError::CapExceeded {
-            what: "graph depth",
-            count: u64::from(depth_cap).saturating_add(1),
-            cap: u64::from(depth_cap),
-        });
-    }
-    if let Some(v) = &memo[node.0 as usize] {
-        return Ok(v.clone());
-    }
-    let ev = |n: NodeId, memo: &mut Vec<Option<Value>>| {
-        eval_at(problem, n, bindings, memo, remaining_depth - 1, depth_cap)
+    let ev = |n: NodeId| -> Value {
+        memo[n.0 as usize]
+            .clone()
+            .expect("arena order: children are evaluated before their parents")
     };
     let scalar = |v: Value| -> f64 {
         match v {
@@ -130,24 +142,24 @@ fn eval_at(
             Value::V(x.clone())
         }
         Expr::Component { of, index } => {
-            let v = ev(*of, memo)?;
+            let v = ev(*of);
             match v {
                 Value::V(xs) => Value::S(xs[*index as usize]),
                 Value::S(_) => unreachable!("builder enforced vector shape"),
             }
         }
         Expr::Const { value, .. } => Value::S(*value),
-        Expr::Add(a, b) => match (ev(*a, memo)?, ev(*b, memo)?) {
+        Expr::Add(a, b) => match (ev(*a), ev(*b)) {
             (Value::S(x), Value::S(y)) => Value::S(x + y),
             (Value::V(x), Value::V(y)) => Value::V(x.iter().zip(&y).map(|(p, q)| p + q).collect()),
             _ => unreachable!("builder enforced matching shapes"),
         },
-        Expr::Sub(a, b) => match (ev(*a, memo)?, ev(*b, memo)?) {
+        Expr::Sub(a, b) => match (ev(*a), ev(*b)) {
             (Value::S(x), Value::S(y)) => Value::S(x - y),
             (Value::V(x), Value::V(y)) => Value::V(x.iter().zip(&y).map(|(p, q)| p - q).collect()),
             _ => unreachable!("builder enforced matching shapes"),
         },
-        Expr::Mul(a, b) => match (ev(*a, memo)?, ev(*b, memo)?) {
+        Expr::Mul(a, b) => match (ev(*a), ev(*b)) {
             (Value::S(x), Value::S(y)) => Value::S(x * y),
             (Value::S(s), Value::V(v)) | (Value::V(v), Value::S(s)) => {
                 Value::V(v.iter().map(|p| p * s).collect())
@@ -155,29 +167,29 @@ fn eval_at(
             _ => unreachable!("builder rejected vector*vector"),
         },
         Expr::Div(a, b) => {
-            let (x, y) = (scalar(ev(*a, memo)?), scalar(ev(*b, memo)?));
+            let (x, y) = (scalar(ev(*a)), scalar(ev(*b)));
             Value::S(x / y)
         }
-        Expr::Neg(a) => match ev(*a, memo)? {
+        Expr::Neg(a) => match ev(*a) {
             Value::S(x) => Value::S(-x),
             Value::V(v) => Value::V(v.iter().map(|p| -p).collect()),
         },
-        Expr::Powi { base, exp } => Value::S(fs_math::det::powi(scalar(ev(*base, memo)?), *exp)),
-        Expr::Sqrt(a) => Value::S(fs_math::det::sqrt(scalar(ev(*a, memo)?))),
-        Expr::Exp(a) => Value::S(fs_math::det::exp(scalar(ev(*a, memo)?))),
-        Expr::Ln(a) => Value::S(fs_math::det::ln(scalar(ev(*a, memo)?))),
-        Expr::Tanh(a) => Value::S(fs_math::det::tanh(scalar(ev(*a, memo)?))),
-        Expr::Dot(a, b) => match (ev(*a, memo)?, ev(*b, memo)?) {
+        Expr::Powi { base, exp } => Value::S(fs_math::det::powi(scalar(ev(*base)), *exp)),
+        Expr::Sqrt(a) => Value::S(fs_math::det::sqrt(scalar(ev(*a)))),
+        Expr::Exp(a) => Value::S(fs_math::det::exp(scalar(ev(*a)))),
+        Expr::Ln(a) => Value::S(fs_math::det::ln(scalar(ev(*a)))),
+        Expr::Tanh(a) => Value::S(fs_math::det::tanh(scalar(ev(*a)))),
+        Expr::Dot(a, b) => match (ev(*a), ev(*b)) {
             (Value::V(x), Value::V(y)) => Value::S(x.iter().zip(&y).map(|(p, q)| p * q).sum()),
             _ => unreachable!("builder enforced vectors"),
         },
-        Expr::NormSq(a) => match ev(*a, memo)? {
+        Expr::NormSq(a) => match ev(*a) {
             Value::V(x) => Value::S(x.iter().map(|p| p * p).sum()),
             Value::S(_) => unreachable!("builder enforced vector"),
         },
-        Expr::Min(a, b) => Value::S(scalar(ev(*a, memo)?).min(scalar(ev(*b, memo)?))),
-        Expr::Max(a, b) => Value::S(scalar(ev(*a, memo)?).max(scalar(ev(*b, memo)?))),
-        Expr::Abs(a) => Value::S(scalar(ev(*a, memo)?).abs()),
+        Expr::Min(a, b) => Value::S(scalar(ev(*a)).min(scalar(ev(*b)))),
+        Expr::Max(a, b) => Value::S(scalar(ev(*a)).max(scalar(ev(*b)))),
+        Expr::Abs(a) => Value::S(scalar(ev(*a)).abs()),
         Expr::PdeResidual { study, .. } => {
             return Err(OptError::Unevaluable {
                 node: node.0,
@@ -193,7 +205,6 @@ fn eval_at(
             });
         }
     };
-    memo[node.0 as usize] = Some(out.clone());
     Ok(out)
 }
 

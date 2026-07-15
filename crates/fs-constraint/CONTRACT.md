@@ -33,8 +33,10 @@ what the constraints MEAN.
   through zero, domain violations, negative powers, PDE/stochastic
   nodes. Before memo allocation it checks the sealed root depth and
   aggregate admission-work receipt against fs-opt's default cap
-  schedule, so a graph built under looser caps cannot drive unbounded
-  recursion; the exact max-depth boundary is a G4 fixture.
+  schedule, and the walk itself is EXPLICIT-STACK (reachability
+  worklist + bottom-up arena-order sweep; bead frankensim-xf8v7), so a
+  graph built under looser caps refuses typed and no admitted graph can
+  overflow the call stack; the exact max-depth boundary is a G4 fixture.
   `prove_interval` turns a provable domain into a `Proven`
   status + `ProofArtifact::IntervalBound`. Robust kinds are proven
   conservatively over their uncertainty boxes the same way, carrying
