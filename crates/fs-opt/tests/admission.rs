@@ -1267,3 +1267,64 @@ fn adm_019_descent_cancellation_boundaries() {
         "cancellation from final evaluation must prevent report publication"
     );
 }
+
+/// adm-020 — runtime bindings carry manifold semantics, not merely a
+/// vector length. Non-unit Sphere/SO(3) points and non-orthonormal
+/// Stiefel frames refuse with variable and Gram/norm attribution.
+#[test]
+fn adm_020_binding_manifold_domains_are_enforced() {
+    let build = |manifold: Manifold| {
+        let mut builder = ProblemBuilder::new();
+        let variable = builder.var("x", manifold, Dims::NONE).expect("variable");
+        let point = builder.var_ref(variable).expect("point");
+        (builder.finish(), point)
+    };
+
+    let (sphere, sphere_point) = build(Manifold::Sphere { ambient: 3 });
+    assert!(matches!(
+        eval(&sphere, sphere_point, &[vec![2.0, 0.0, 0.0]]),
+        Err(OptError::BindingDomain {
+            var: 0,
+            manifold: "Sphere",
+            location: None,
+            measurement_bits,
+            ..
+        }) if measurement_bits == 4.0f64.to_bits()
+    ));
+    eval(&sphere, sphere_point, &[vec![1.0, 0.0, 0.0]]).expect("unit Sphere binding evaluates");
+
+    let (so3, so3_point) = build(Manifold::So3);
+    assert!(matches!(
+        eval(&so3, so3_point, &[vec![0.0; 4]]),
+        Err(OptError::BindingDomain {
+            var: 0,
+            manifold: "SO(3)",
+            location: None,
+            measurement_bits,
+            ..
+        }) if measurement_bits == 0.0f64.to_bits()
+    ));
+    eval(&so3, so3_point, &[vec![1.0, 0.0, 0.0, 0.0]]).expect("unit SO(3) binding evaluates");
+
+    let (stiefel, stiefel_point) = build(Manifold::Stiefel { n: 3, p: 2 });
+    assert!(matches!(
+        eval(
+            &stiefel,
+            stiefel_point,
+            &[vec![1.0, 0.0, 0.0, 1.0, 0.0, 0.0]],
+        ),
+        Err(OptError::BindingDomain {
+            var: 0,
+            manifold: "Stiefel",
+            location: Some((1, 0)),
+            measurement_bits,
+            ..
+        }) if measurement_bits == 1.0f64.to_bits()
+    ));
+    eval(
+        &stiefel,
+        stiefel_point,
+        &[vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0]],
+    )
+    .expect("orthonormal Stiefel binding evaluates");
+}

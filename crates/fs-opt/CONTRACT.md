@@ -159,8 +159,10 @@ structure; FLUX/UQ execute it.
 - `eval`: memoized evaluation of algebraic subgraphs; the sealed root
   depth and aggregate-work receipts are checked against the default
   admission schedule before memo allocation. Supplied runtime bindings
-  are checked for exact manifold point length and finite components first;
-  a refusal identifies the exact variable, component, and IEEE-754 bits.
+  are checked for exact manifold point length, finite components, and the
+  same Sphere/SO(3)/Stiefel membership rules used by retraction; a refusal
+  identifies the exact variable, component or Gram location, and diagnostic
+  IEEE-754 bits.
   Every computed scalar/vector node result is then checked for finiteness
   with node/component attribution before it enters the memo or becomes a
   public result. The walk itself is EXPLICIT-STACK (reachability worklist
@@ -270,8 +272,9 @@ mismatches and dimension overflow (with exponent vectors shown; both
 scaling `DimOverflow` and combining `DimSumOverflow`), non-dimensionless
 transcendentals, odd-sqrt dims, bad parameters/indices, non-scalar
 roots, `ManifoldInvalid` (violated policy named), `NonFinite` (payload
-name + exact bit pattern), `BindingNonFinite`/`EvalNonFinite` (runtime
-location + exact bits), `RetractionLen`/`RetractionNonFinite`/
+name + exact bit pattern), `BindingNonFinite`/`BindingDomain`/
+`EvalNonFinite` (runtime location + exact bits),
+`RetractionLen`/`RetractionNonFinite`/
 `RetractionDomain` (input, manifold rule, location, and measurement),
 `CapExceeded` (cap name + count + limit), `BindingCount`/`BindingLen`
 (declared vs supplied),

@@ -562,6 +562,20 @@ pub enum OptError {
         /// The offending value's exact IEEE-754 bit pattern.
         bits: u64,
     },
+    /// A finite, correctly sized runtime binding is outside its
+    /// declared manifold domain.
+    BindingDomain {
+        /// The variable whose point is malformed.
+        var: u32,
+        /// Manifold family.
+        manifold: &'static str,
+        /// Domain rule that failed.
+        what: &'static str,
+        /// Optional column or column-pair attribution.
+        location: Option<(u32, u32)>,
+        /// Exact bits of the diagnostic norm/dot measurement.
+        measurement_bits: u64,
+    },
     /// Runtime arithmetic produced a NaN or infinity at a graph node.
     EvalNonFinite {
         /// The node whose result is malformed.
@@ -726,6 +740,28 @@ impl core::fmt::Display for OptError {
                  (bits {bits:016X}); runtime points must be finite before evaluation",
                 f64::from_bits(*bits)
             ),
+            OptError::BindingDomain {
+                var,
+                manifold,
+                what,
+                location,
+                measurement_bits,
+            } => {
+                let measurement = f64::from_bits(*measurement_bits);
+                match location {
+                    Some((column, against)) => write!(
+                        f,
+                        "binding for variable {var} is outside {manifold} at columns \
+                         {column}/{against}: {what} (measurement {measurement}, \
+                         bits {measurement_bits:016X})"
+                    ),
+                    None => write!(
+                        f,
+                        "binding for variable {var} is outside {manifold}: {what} \
+                         (measurement {measurement}, bits {measurement_bits:016X})"
+                    ),
+                }
+            }
             OptError::EvalNonFinite {
                 node,
                 component,

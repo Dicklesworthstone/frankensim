@@ -47,7 +47,8 @@ impl Value {
 /// [`OptError::Unevaluable`] / [`OptError::UnknownVar`] /
 /// [`OptError::UnknownNode`] / [`OptError::BindingCount`] /
 /// [`OptError::BindingLen`] / [`OptError::BindingNonFinite`] /
-/// [`OptError::EvalNonFinite`] / [`OptError::CapExceeded`].
+/// [`OptError::BindingDomain`] / [`OptError::EvalNonFinite`] /
+/// [`OptError::CapExceeded`].
 pub fn eval(problem: &Problem, node: NodeId, bindings: &[Vec<f64>]) -> Result<Value, OptError> {
     if node.0 as usize >= problem.exprs.len() {
         return Err(OptError::UnknownNode { id: node.0 });
@@ -96,6 +97,7 @@ pub fn eval(problem: &Problem, node: NodeId, bindings: &[Vec<f64>]) -> Result<Va
                 });
             }
         }
+        var.manifold.validate_binding_domain(binding, i as u32)?;
     }
     // Arena order guarantees every dependency has a lower id, so a
     // prefix is sufficient; unrelated later nodes cannot force memo
@@ -346,6 +348,25 @@ impl Manifold {
                 }
                 Ok(())
             }
+        }
+    }
+
+    fn validate_binding_domain(&self, x: &[f64], var: u32) -> Result<(), OptError> {
+        match self.validate_point_domain(x) {
+            Ok(()) => Ok(()),
+            Err(OptError::RetractionDomain {
+                manifold,
+                what,
+                location,
+                measurement_bits,
+            }) => Err(OptError::BindingDomain {
+                var,
+                manifold,
+                what,
+                location,
+                measurement_bits,
+            }),
+            Err(other) => Err(other),
         }
     }
 
