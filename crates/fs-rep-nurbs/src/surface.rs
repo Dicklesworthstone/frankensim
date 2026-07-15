@@ -626,6 +626,8 @@ impl<S: Scalar> NurbsSurface<S> {
             new_knot_count_u,
             new_knot_count_v,
         )?;
+        #[cfg(not(test))]
+        let _ = envelope;
         Ok(SurfaceInsertionPlan {
             axis,
             new_control_count_u,
@@ -892,6 +894,16 @@ impl<S: Scalar> NurbsSurface<S> {
     pub fn admit(&self) -> Result<AdmittedNurbsSurface<'_, S>, NurbsError> {
         self.validate_live_structure()?;
         Ok(AdmittedNurbsSurface { inner: self })
+    }
+
+    /// Bind an admitted view to a generation already validated by an internal
+    /// transactional constructor.
+    ///
+    /// Compound crate-internal algorithms use this only while carrying the
+    /// invariant from an admitted source through fully validated derived
+    /// publications. Public callers must use [`Self::admit`].
+    pub(crate) const fn admitted_after_validation(&self) -> AdmittedNurbsSurface<'_, S> {
+        AdmittedNurbsSurface { inner: self }
     }
 
     /// Validate this immutable surface with bounded cancellation polling.

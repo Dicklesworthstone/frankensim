@@ -1393,7 +1393,10 @@ fn to_bezier_surface(
             } else {
                 (&work.knots_v, work.knots_v.degree)
             };
-            let (lo, hi) = kv.domain()?;
+            // The cloned source and every derived publication are already
+            // validated; keep that authority for domain lookup as well as the
+            // subsequent insertion instead of rescanning this knot vector.
+            let (lo, hi) = kv.admitted_after_validation().domain();
             let mut target = None;
             let mut run_start = 0usize;
             while run_start < kv.knots.len() {
@@ -1409,10 +1412,16 @@ fn to_bezier_surface(
                 run_start = run_end;
             }
             if let Some(t) = target {
+                // `work` is either the exact clone of the admitted source or
+                // the fully validated publication of the preceding insertion.
+                // Preserve that authority across the conversion instead of
+                // rescanning every intermediate generation through the owning
+                // wrapper.
+                let admitted_work = work.admitted_after_validation();
                 work = if dir_u {
-                    work.insert_knot_u(t)?
+                    admitted_work.insert_knot_u(t)?
                 } else {
-                    work.insert_knot_v(t)?
+                    admitted_work.insert_knot_v(t)?
                 };
                 inserted = true;
             }
@@ -1944,9 +1953,9 @@ mod tests {
             surface_conversion_peak_allocated_bytes(1, 1, u128::MAX, 1, 1, 1),
             Err(crate::NurbsError::Domain { .. })
         ));
-        let late_peak_overflow_knot_count = u128::MAX / (2 * size_of::<f64>() as u128) + 1;
+        let late_peak_overflow_knot_count = u128::MAX / (2 * size_of::<f64>() as u128) + 2;
         assert!(matches!(
-            surface_conversion_peak_allocated_bytes(1, 0, late_peak_overflow_knot_count, 0, 0, 0,),
+            surface_conversion_peak_allocated_bytes(1, 0, late_peak_overflow_knot_count, 2, 2, 1,),
             Err(crate::NurbsError::Domain { .. })
         ));
         assert!(matches!(
