@@ -36,6 +36,9 @@ fs-iga (geometry basis = analysis basis), fs-render NURBS tracing
   and safe mutation while the view is live is unrepresentable. Owning
   convenience calls remain fallible; basis allocation is fallible and
   triangular degree work shares the defensive legacy ceiling.
+  `KnotVector::admit_with_cx` returns `KnotAdmissionRun` and publishes the
+  lifetime-bound admitted authority only after every validation pass and its
+  final checkpoint complete.
   `AdmittedKnotVector::basis_with_cx` returns transactional `BasisRun` state:
   complete span/values or cancellation with no partial row.
 - `NurbsCurve<S, DIM>` — homogeneous de Boor evaluation in dimensions 0–3;
@@ -190,10 +193,13 @@ partials, and span boxes. The admitted-only `basis_with_cx` path preserves
 constant-time parameter/work-refusal precedence, polls before allocation and
 publication plus every 64 logical span/initialization/triangle/finite-check
 operations, and drops all scratch on `BasisRun::Cancelled`. It deliberately
-does not claim cancellation-bounded owning admission, caller-budget
-consumption, or executor drain/finalize authority. The production `fs-render`
-ray path preflights sealed metadata and cancellation, then binds one admitted
-surface across domain lookup, seed evaluation, and Newton partials.
+does not claim caller-budget consumption or executor drain/finalize authority.
+The owning `admit_with_cx` path applies the same fixed stride across finite,
+ordering, multiplicity, and clamping validation and gates admitted authority at
+publication; `KnotVector::new` construction remains outside that cancellation
+claim. The production `fs-render` ray path preflights sealed metadata and
+cancellation, then binds one admitted surface across domain lookup, seed
+evaluation, and Newton partials.
 Owning trim classification now binds one admitted patch/loop/curve generation
 through exact Bezier conversion, span boxes, and winding. Its checked conversion
 plan charges scan/insertion work and old-plus-new curve storage before the first

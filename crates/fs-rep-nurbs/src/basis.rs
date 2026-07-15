@@ -11,10 +11,11 @@ use fs_exec::Cx;
 /// successor work.
 pub const BASIS_MAX_WORK_UNITS: u128 = 16_777_216;
 
-// An admitted basis evaluation polls after at most this many logical span,
-// initialization, triangle, or finite-check operations. The caller still owns
-// request -> drain -> finalize; this primitive only observes the shared gate.
-const BASIS_CANCELLATION_STRIDE: usize = 64;
+// Cancellation-aware knot work polls after at most this many logical
+// validation, span, initialization, triangle, or finite-check operations. The
+// caller still owns request -> drain -> finalize; these primitives only
+// observe the shared gate.
+const KNOT_CANCELLATION_STRIDE: usize = 64;
 
 // Conservative price for finite/order/run/multiplicity/clamping validation of
 // one public knot entry. This intentionally overcounts the simple comparisons:
@@ -128,6 +129,19 @@ pub struct AdmittedKnotVector<'a, S: Scalar> {
     inner: &'a KnotVector<S>,
 }
 
+/// Transactional terminal state of cancellation-aware structural admission.
+#[must_use]
+#[derive(Debug, Clone, Copy)]
+pub enum KnotAdmissionRun<'a, S: Scalar> {
+    /// The exact immutable source snapshot was fully validated.
+    Complete {
+        /// Lifetime-bound authority for the validated generation.
+        admitted: AdmittedKnotVector<'a, S>,
+    },
+    /// Cancellation was observed; no admitted authority was published.
+    Cancelled,
+}
+
 /// Transactional terminal state of one cancellation-aware basis evaluation.
 #[must_use]
 #[derive(Debug, Clone, PartialEq)]
@@ -143,12 +157,18 @@ pub enum BasisRun<S: Scalar> {
     Cancelled,
 }
 
-fn basis_poll_due(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KnotValidationOutcome {
+    Complete,
+    Cancelled,
+}
+
+fn knot_poll_due(
     operations_since_poll: &mut usize,
     should_cancel: &mut impl FnMut() -> bool,
 ) -> bool {
     *operations_since_poll += 1;
-    if *operations_since_poll < BASIS_CANCELLATION_STRIDE {
+    if *operations_since_poll < KNOT_CANCELLATION_STRIDE {
         return false;
     }
     *operations_since_poll = 0;
@@ -236,6 +256,18 @@ impl<S: Scalar> KnotVector<S> {
     /// This remains allocation-free defense for crate-internal construction;
     /// public callers cannot mutate the representation after construction.
     pub(crate) fn validate_live(&self) -> Result<(), NurbsError> {
+        match self.validate_live_with_poll(|| false)? {
+            KnotValidationOutcome::Complete => Ok(()),
+            KnotValidationOutcome::Cancelled => Err(NurbsError::Domain {
+                what: "non-cancelling knot validation observed cancellation".to_string(),
+            }),
+        }
+    }
+
+    fn validate_live_with_poll(
+        &self,
+        mut should_cancel: impl FnMut() -> bool,
+    ) -> Result<KnotValidationOutcome, NurbsError> {
         let endpoint_multiplicity =
             self.degree
                 .checked_add(1)
@@ -257,21 +289,49 @@ impl<S: Scalar> KnotVector<S> {
                 ),
             });
         }
-        if self.knots.iter().copied().any(|knot| !knot.is_finite()) {
-            return Err(NurbsError::Structure {
-                what: "knots must be finite".to_string(),
-            });
+        if should_cancel() {
+            return Ok(KnotValidationOutcome::Cancelled);
         }
-        if self.knots.windows(2).any(|window| window[1] < window[0]) {
-            return Err(NurbsError::Structure {
-                what: "knots must be non-decreasing".to_string(),
-            });
+
+        let mut operations_since_poll = 0usize;
+        for &knot in &self.knots {
+            if !knot.is_finite() {
+                return Err(NurbsError::Structure {
+                    what: "knots must be finite".to_string(),
+                });
+            }
+            if knot_poll_due(&mut operations_since_poll, &mut should_cancel) {
+                return Ok(KnotValidationOutcome::Cancelled);
+            }
         }
+        if should_cancel() {
+            return Ok(KnotValidationOutcome::Cancelled);
+        }
+        operations_since_poll = 0;
+
+        for window in self.knots.windows(2) {
+            if window[1] < window[0] {
+                return Err(NurbsError::Structure {
+                    what: "knots must be non-decreasing".to_string(),
+                });
+            }
+            if knot_poll_due(&mut operations_since_poll, &mut should_cancel) {
+                return Ok(KnotValidationOutcome::Cancelled);
+            }
+        }
+        if should_cancel() {
+            return Ok(KnotValidationOutcome::Cancelled);
+        }
+        operations_since_poll = 0;
+
         let mut run_start = 0usize;
         while run_start < self.knots.len() {
             let mut run_end = run_start + 1;
             while run_end < self.knots.len() && self.knots[run_end] == self.knots[run_start] {
                 run_end += 1;
+                if knot_poll_due(&mut operations_since_poll, &mut should_cancel) {
+                    return Ok(KnotValidationOutcome::Cancelled);
+                }
             }
             let multiplicity = run_end - run_start;
             let endpoint = run_start == 0 || run_end == self.knots.len();
@@ -285,8 +345,16 @@ impl<S: Scalar> KnotVector<S> {
                     ),
                 });
             }
+            if knot_poll_due(&mut operations_since_poll, &mut should_cancel) {
+                return Ok(KnotValidationOutcome::Cancelled);
+            }
             run_start = run_end;
         }
+        if should_cancel() {
+            return Ok(KnotValidationOutcome::Cancelled);
+        }
+        operations_since_poll = 0;
+
         for offset in 0..self.degree {
             if self.knots[offset + 1] != self.knots[0]
                 || self.knots[self.knots.len() - 2 - offset] != self.knots[self.knots.len() - 1]
@@ -295,13 +363,19 @@ impl<S: Scalar> KnotVector<S> {
                     what: "knot vector must be clamped (end multiplicity degree+1)".to_string(),
                 });
             }
+            if knot_poll_due(&mut operations_since_poll, &mut should_cancel) {
+                return Ok(KnotValidationOutcome::Cancelled);
+            }
         }
         if self.knots[self.degree] == self.knots[self.knots.len() - 1 - self.degree] {
             return Err(NurbsError::Structure {
                 what: "knot vector has an empty parametric domain (lo == hi)".to_string(),
             });
         }
-        Ok(())
+        if should_cancel() {
+            return Ok(KnotValidationOutcome::Cancelled);
+        }
+        Ok(KnotValidationOutcome::Complete)
     }
 
     /// Validate and construct.
@@ -466,6 +540,27 @@ impl<S: Scalar> KnotVector<S> {
         Self::enforce_work(self.validation_work()?, "knot-vector admission")?;
         self.validate_live()?;
         Ok(self.admitted_after_validation())
+    }
+
+    /// Validate this immutable source with bounded cancellation polling.
+    ///
+    /// Cheap shape and static work refusal retain their legacy precedence.
+    /// Every full validation pass polls at fixed logical-work strides and a
+    /// final checkpoint gates publication of the lifetime-bound admitted view.
+    /// This does not make [`Self::new`] cancellation-aware and does not consume
+    /// the `Cx` budget or finalize its surrounding executor scope.
+    ///
+    /// # Errors
+    /// Returns a structured refusal when validation work exceeds the defensive
+    /// ceiling or the representation is malformed before cancellation wins.
+    pub fn admit_with_cx(&self, cx: &Cx<'_>) -> Result<KnotAdmissionRun<'_, S>, NurbsError> {
+        Self::enforce_work(self.validation_work()?, "knot-vector admission")?;
+        match self.validate_live_with_poll(|| cx.checkpoint().is_err())? {
+            KnotValidationOutcome::Complete => Ok(KnotAdmissionRun::Complete {
+                admitted: self.admitted_after_validation(),
+            }),
+            KnotValidationOutcome::Cancelled => Ok(KnotAdmissionRun::Cancelled),
+        }
     }
 
     pub(crate) const fn admitted_after_validation(&self) -> AdmittedKnotVector<'_, S> {
@@ -649,7 +744,7 @@ impl<'a, S: Scalar> AdmittedKnotVector<'a, S> {
             let mut span = n_last;
             while inner.knots[span] == inner.knots[span + 1] {
                 span -= 1;
-                if basis_poll_due(&mut operations_since_poll, &mut should_cancel) {
+                if knot_poll_due(&mut operations_since_poll, &mut should_cancel) {
                     return Ok(BasisRun::Cancelled);
                 }
             }
@@ -658,7 +753,7 @@ impl<'a, S: Scalar> AdmittedKnotVector<'a, S> {
             let mut span = p;
             while span < n_last && inner.knots[span + 1] <= t {
                 span += 1;
-                if basis_poll_due(&mut operations_since_poll, &mut should_cancel) {
+                if knot_poll_due(&mut operations_since_poll, &mut should_cancel) {
                     return Ok(BasisRun::Cancelled);
                 }
             }
@@ -684,7 +779,7 @@ impl<'a, S: Scalar> AdmittedKnotVector<'a, S> {
                 })?;
             for _ in 0..order {
                 buffer.push(S::zero());
-                if basis_poll_due(&mut operations_since_poll, &mut should_cancel) {
+                if knot_poll_due(&mut operations_since_poll, &mut should_cancel) {
                     return Ok(BasisRun::Cancelled);
                 }
             }
@@ -693,7 +788,7 @@ impl<'a, S: Scalar> AdmittedKnotVector<'a, S> {
         for j in 1..=p {
             left[j] = t - inner.knots[span + 1 - j];
             right[j] = inner.knots[span + j] - t;
-            if basis_poll_due(&mut operations_since_poll, &mut should_cancel) {
+            if knot_poll_due(&mut operations_since_poll, &mut should_cancel) {
                 return Ok(BasisRun::Cancelled);
             }
             let mut saved = S::zero();
@@ -702,7 +797,7 @@ impl<'a, S: Scalar> AdmittedKnotVector<'a, S> {
                 let temp = n[r] / denom;
                 n[r] = saved + right[r + 1] * temp;
                 saved = left[j - r] * temp;
-                if basis_poll_due(&mut operations_since_poll, &mut should_cancel) {
+                if knot_poll_due(&mut operations_since_poll, &mut should_cancel) {
                     return Ok(BasisRun::Cancelled);
                 }
             }
@@ -714,7 +809,7 @@ impl<'a, S: Scalar> AdmittedKnotVector<'a, S> {
                     what: format!("basis evaluation at {t:?} left the finite numeric domain"),
                 });
             }
-            if basis_poll_due(&mut operations_since_poll, &mut should_cancel) {
+            if knot_poll_due(&mut operations_since_poll, &mut should_cancel) {
                 return Ok(BasisRun::Cancelled);
             }
         }
@@ -759,6 +854,18 @@ mod tests {
         let mut knots = vec![0.0; degree + 1];
         knots.extend(vec![1.0; degree + 1]);
         KnotVector::new(knots, degree).expect("cancellation fixture")
+    }
+
+    fn validation_cancellation_fixture() -> KnotVector<f64> {
+        let interior_count = 256usize;
+        let mut knots = Vec::with_capacity(interior_count + 4);
+        knots.extend([0.0, 0.0]);
+        for index in 1..=interior_count {
+            #[allow(clippy::cast_precision_loss)]
+            knots.push(index as f64 / (interior_count + 1) as f64);
+        }
+        knots.extend([1.0, 1.0]);
+        KnotVector::new(knots, 1).expect("validation cancellation fixture")
     }
 
     #[test]
@@ -868,6 +975,86 @@ mod tests {
             })
             .expect("final-checkpoint cancellation");
         assert_eq!(cancelled, BasisRun::Cancelled);
+        assert_eq!(replay_polls, total_polls);
+    }
+
+    #[test]
+    fn knot_admission_cancellation_is_transactional_and_chains_to_basis() {
+        let knots = validation_cancellation_fixture();
+        with_basis_cx(true, |cx| {
+            assert!(matches!(
+                knots.admit_with_cx(cx).expect("valid source admission"),
+                KnotAdmissionRun::Cancelled
+            ));
+        });
+        with_basis_cx(false, |cx| {
+            let KnotAdmissionRun::Complete { admitted } = knots
+                .admit_with_cx(cx)
+                .expect("healthy cancellable admission")
+            else {
+                panic!("active context must admit the valid fixture");
+            };
+            assert!(core::ptr::eq(admitted.source(), &knots));
+            assert!(matches!(
+                admitted
+                    .basis_with_cx(0.5, cx)
+                    .expect("admitted cancellable basis"),
+                BasisRun::Complete { .. }
+            ));
+        });
+
+        let mut malformed = KnotVector::new(vec![0.0, 0.0, 1.0, 1.0], 1).expect("valid line");
+        malformed.knots.clear();
+        with_basis_cx(true, |cx| {
+            assert!(
+                matches!(
+                    malformed.admit_with_cx(cx),
+                    Err(NurbsError::Structure { .. })
+                ),
+                "constant-time shape refusal must precede cancellation"
+            );
+        });
+    }
+
+    #[test]
+    fn knot_validation_cancellation_replays_inside_run_scan() {
+        let knots = validation_cancellation_fixture();
+        let run = || {
+            let mut polls = 0usize;
+            let outcome = knots
+                .validate_live_with_poll(|| {
+                    polls += 1;
+                    polls == 13
+                })
+                .expect("valid structure");
+            (outcome, polls)
+        };
+        let first = run();
+        let second = run();
+        assert_eq!(first, second);
+        assert_eq!(first, (KnotValidationOutcome::Cancelled, 13));
+    }
+
+    #[test]
+    fn knot_admission_final_checkpoint_gates_authority() {
+        let knots = validation_cancellation_fixture();
+        let mut total_polls = 0usize;
+        let complete = knots
+            .validate_live_with_poll(|| {
+                total_polls += 1;
+                false
+            })
+            .expect("healthy validation");
+        assert_eq!(complete, KnotValidationOutcome::Complete);
+
+        let mut replay_polls = 0usize;
+        let cancelled = knots
+            .validate_live_with_poll(|| {
+                replay_polls += 1;
+                replay_polls == total_polls
+            })
+            .expect("final-checkpoint cancellation");
+        assert_eq!(cancelled, KnotValidationOutcome::Cancelled);
         assert_eq!(replay_polls, total_polls);
     }
 
