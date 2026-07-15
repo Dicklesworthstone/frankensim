@@ -91,9 +91,12 @@ fs-iga (geometry basis = analysis basis), fs-render NURBS tracing
   legal discontinuous full breaks whose independent endpoints and raised
   multiplicity are preserved; minimal-multiplicity elevation is a follow-up).
 - `NurbsSurface<S>` — sealed tensor-product representation with checked
-  Cartesian/homogeneous construction. `AdmittedNurbsSurface` reuses one source
-  validation through tensor evaluation, first partials, and per-span control
-  boxes. Owning `admit_with_cx` returns `SurfaceAdmissionRun` and gates the
+  Cartesian/homogeneous construction. Owning `try_clone_with_cx` returns
+  transactional `SurfaceCloneRun` state and publishes only a complete sealed
+  copy after checked work and a 64 MiB retained-output gate.
+  `AdmittedNurbsSurface` reuses one source validation through tensor evaluation,
+  first partials, and per-span control boxes. Owning `admit_with_cx` returns
+  `SurfaceAdmissionRun` and gates the
   lifetime-bound structural authority after U-knot, V-knot, and row-major
   control-net validation. Its admitted-only `eval_with_cx` returns transactional
   `SurfaceEvaluationRun` state and never publishes a partial Cartesian point;
@@ -264,6 +267,17 @@ envelope; allocator calls, scalar/array copies, and destructors are
 non-preemptible, and the primitive adds no source revalidation, wall-time,
 exact caller-budget, drain/finalize, resumability, or geometric-certificate
 claim.
+`NurbsSurface::try_clone_with_cx` likewise preserves count-derived copy-work
+and 64 MiB retained-output refusal precedence before carrying one gate through
+the ordered U-knot copy, V-knot copy, outer row table, every fallible inner-row
+allocation and row-major control copy, and final publication.
+`SurfaceCloneRun::Cancelled` exposes no partial surface and drops all nested
+output storage. The retained envelope includes both knot payloads, every inner
+row header, and every homogeneous control while excluding the borrowed source.
+Allocator calls, scalar/array copies, and nested-vector destruction are
+non-preemptible; the primitive performs no source revalidation and claims no
+wall-time bound, exact caller-budget consumption, executor drain/finalize,
+resumability, surface regularity, topology, or geometric certificate.
 `AdmittedNurbsCurve::derivatives_with_cx` preserves request, ordinary-continuity,
 checked work, and retained-memory refusal precedence, then polls before every
 allocation and through derivative-net copies and differences, reduced knot and

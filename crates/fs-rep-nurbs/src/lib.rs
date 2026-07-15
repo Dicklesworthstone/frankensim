@@ -34,7 +34,7 @@ pub use curve::{
 };
 pub use rat::Rat;
 pub use surface::{
-    AdmittedNurbsSurface, NurbsSurface, SurfaceAdmissionRun, SurfaceEvaluationRun,
+    AdmittedNurbsSurface, NurbsSurface, SurfaceAdmissionRun, SurfaceCloneRun, SurfaceEvaluationRun,
     SurfaceInsertionRun, SurfacePartialsRun, SurfaceSpanBoxesRun,
 };
 pub use trim::{

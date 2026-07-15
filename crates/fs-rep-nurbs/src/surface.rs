@@ -18,6 +18,7 @@ const SURFACE_KNOT_VALIDATION_WORK_PER_ENTRY: u128 = 16;
 const SURFACE_INSERTION_WORK_PER_CONTROL: u128 = 32;
 const SURFACE_SPAN_BOX_WORK_PER_CONTROL: u128 = 16;
 const SURFACE_SPAN_BOX_MAX_RETAINED_BYTES: u128 = 64 * 1024 * 1024;
+const SURFACE_COPY_MAX_RETAINED_BYTES: u128 = 64 * 1024 * 1024;
 const SURFACE_INSERTION_MAX_RETAINED_BYTES: u128 = 64 * 1024 * 1024;
 const SURFACE_CANCELLATION_STRIDE: usize = 64;
 
@@ -31,6 +32,66 @@ fn surface_poll_due(
     }
     *operations_since_poll = 0;
     should_cancel()
+}
+
+fn preflight_surface_copy<S: Scalar>(
+    knot_count_u: usize,
+    knot_count_v: usize,
+    control_count_u: usize,
+    control_count_v: usize,
+) -> Result<(), NurbsError> {
+    let control_count = (control_count_u as u128)
+        .checked_mul(control_count_v as u128)
+        .ok_or_else(|| NurbsError::Domain {
+            what: "surface-copy control-count accounting overflows u128".to_string(),
+        })?;
+    let work_units = control_count
+        .checked_mul(4)
+        .and_then(|work| work.checked_add(knot_count_u as u128))
+        .and_then(|work| work.checked_add(knot_count_v as u128))
+        .and_then(|work| work.checked_add(control_count_u as u128))
+        .and_then(|work| work.checked_add(4))
+        .ok_or_else(|| NurbsError::Domain {
+            what: "surface-copy work accounting overflows u128".to_string(),
+        })?;
+    if work_units > BASIS_MAX_WORK_UNITS {
+        return Err(NurbsError::Domain {
+            what: format!(
+                "surface copy requests {work_units} work units above defensive ceiling {BASIS_MAX_WORK_UNITS}"
+            ),
+        });
+    }
+
+    let knot_bytes = (knot_count_u as u128)
+        .checked_add(knot_count_v as u128)
+        .and_then(|count| count.checked_mul(core::mem::size_of::<S>() as u128))
+        .ok_or_else(|| NurbsError::Domain {
+            what: "surface-copy knot-storage accounting overflows u128".to_string(),
+        })?;
+    let row_table_bytes = (control_count_u as u128)
+        .checked_mul(core::mem::size_of::<Vec<[S; 4]>>() as u128)
+        .ok_or_else(|| NurbsError::Domain {
+            what: "surface-copy row-table accounting overflows u128".to_string(),
+        })?;
+    let control_bytes = control_count
+        .checked_mul(core::mem::size_of::<[S; 4]>() as u128)
+        .ok_or_else(|| NurbsError::Domain {
+            what: "surface-copy control-storage accounting overflows u128".to_string(),
+        })?;
+    let retained_bytes = knot_bytes
+        .checked_add(row_table_bytes)
+        .and_then(|bytes| bytes.checked_add(control_bytes))
+        .ok_or_else(|| NurbsError::Domain {
+            what: "surface-copy retained-byte accounting overflows u128".to_string(),
+        })?;
+    if retained_bytes > SURFACE_COPY_MAX_RETAINED_BYTES {
+        return Err(NurbsError::Domain {
+            what: format!(
+                "surface copy retains {retained_bytes} output bytes above defensive ceiling {SURFACE_COPY_MAX_RETAINED_BYTES}"
+            ),
+        });
+    }
+    Ok(())
 }
 
 /// One (u-span × v-span) control box: (min, max, (u0, u1), (v0, v1)).
@@ -254,6 +315,19 @@ pub struct NurbsSurface<S: Scalar> {
 #[derive(Debug, Clone, Copy)]
 pub struct AdmittedNurbsSurface<'a, S: Scalar> {
     inner: &'a NurbsSurface<S>,
+}
+
+/// Transactional terminal state of a cancellation-aware fallible surface copy.
+#[must_use]
+#[derive(Debug, PartialEq)]
+pub enum SurfaceCloneRun<S: Scalar> {
+    /// The complete sealed copy of the exact source representation.
+    Complete {
+        /// Copied surface generation.
+        surface: NurbsSurface<S>,
+    },
+    /// Cancellation was observed; all partial nested copy storage was dropped.
+    Cancelled,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -861,29 +935,44 @@ impl<S: Scalar> NurbsSurface<S> {
     /// Fallibly copy this sealed surface without revalidating unchanged data.
     ///
     /// # Errors
-    /// [`NurbsError::Domain`] when a destination allocation is refused.
+    /// [`NurbsError::Domain`] when checked copy work/retained bytes or a
+    /// destination allocation is refused.
     pub fn try_clone(&self) -> Result<Self, NurbsError> {
-        let knots_u = self.knots_u.try_clone()?;
-        let knots_v = self.knots_v.try_clone()?;
-        let mut cpw = Vec::new();
-        cpw.try_reserve_exact(self.cpw.len())
-            .map_err(|_| NurbsError::Domain {
-                what: "surface copy row-table allocation was refused".to_string(),
-            })?;
-        for source_row in &self.cpw {
-            let mut row = Vec::new();
-            row.try_reserve_exact(source_row.len())
-                .map_err(|_| NurbsError::Domain {
-                    what: "surface copy control-row allocation was refused".to_string(),
-                })?;
-            row.extend_from_slice(source_row);
-            cpw.push(row);
+        let mut never_cancel = || false;
+        match self
+            .admitted_after_validation()
+            .try_clone_with_poll(&mut never_cancel)?
+        {
+            Some(surface) => Ok(surface),
+            None => Err(NurbsError::Domain {
+                what: "non-cancelling surface copy observed cancellation".to_string(),
+            }),
         }
-        Ok(NurbsSurface {
-            knots_u,
-            knots_v,
-            cpw,
-        })
+    }
+
+    /// Fallibly copy this sealed surface with bounded cancellation polling.
+    ///
+    /// Count-derived work and a 64 MiB retained-output envelope precede
+    /// cancellation. One gate then covers both knot copies, the outer row
+    /// table and every inner control-row allocation/copy in deterministic
+    /// row-major order, and final publication. The borrowed source is excluded
+    /// from the output envelope. Individual allocator calls, scalar/array
+    /// copies, and nested-vector destruction are not preemptible. This
+    /// primitive does not consume the `Cx` budget or own request -> drain ->
+    /// finalize semantics.
+    ///
+    /// # Errors
+    /// Returns the synchronous copy's work, retained-memory, or allocation
+    /// refusal when it wins before an observed cancellation.
+    pub fn try_clone_with_cx(&self, cx: &Cx<'_>) -> Result<SurfaceCloneRun<S>, NurbsError> {
+        let mut should_cancel = || cx.checkpoint().is_err();
+        match self
+            .admitted_after_validation()
+            .try_clone_with_poll(&mut should_cancel)?
+        {
+            Some(surface) => Ok(SurfaceCloneRun::Complete { surface }),
+            None => Ok(SurfaceCloneRun::Cancelled),
+        }
     }
 
     /// Validate this exact immutable surface snapshot once.
@@ -1277,6 +1366,12 @@ impl<'a, S: Scalar> AdmittedNurbsSurface<'a, S> {
         &self,
         should_cancel: &mut impl FnMut() -> bool,
     ) -> Result<Option<NurbsSurface<S>>, NurbsError> {
+        preflight_surface_copy::<S>(
+            self.inner.knots_u.knots.len(),
+            self.inner.knots_v.knots.len(),
+            self.inner.knots_u.control_count(),
+            self.inner.knots_v.control_count(),
+        )?;
         if should_cancel() {
             return Ok(None);
         }
@@ -2059,6 +2154,35 @@ mod tests {
             &weights,
         )
         .expect("high-degree plane")
+    }
+
+    fn long_linear_surface() -> NurbsSurface<f64> {
+        let control_count = 130usize;
+        let make_knots = || {
+            let mut entries = Vec::with_capacity(control_count + 2);
+            entries.extend([0.0, 0.0]);
+            for index in 1..control_count - 1 {
+                entries.push(index as f64 / (control_count - 1) as f64);
+            }
+            entries.extend([1.0, 1.0]);
+            KnotVector::new(entries, 1).expect("long linear knots")
+        };
+        let points: Vec<Vec<[f64; 3]>> = (0..control_count)
+            .map(|row| {
+                (0..control_count)
+                    .map(|column| {
+                        [
+                            row as f64 / (control_count - 1) as f64,
+                            column as f64 / (control_count - 1) as f64,
+                            0.0,
+                        ]
+                    })
+                    .collect()
+            })
+            .collect();
+        let weights = vec![vec![1.0; control_count]; control_count];
+        NurbsSurface::new(make_knots(), make_knots(), &points, &weights)
+            .expect("long bilinear-grid surface")
     }
 
     fn asymmetric_surface() -> NurbsSurface<f64> {
@@ -3059,5 +3183,111 @@ mod tests {
         let surface = NurbsSurface::new(line_u, line_v, &valid_points, &valid_weights)
             .expect("bilinear surface");
         assert_eq!(surface.try_clone().expect("fallible surface copy"), surface);
+    }
+
+    #[test]
+    fn surface_copy_with_cx_is_transactional_and_exact() {
+        let surface = asymmetric_surface();
+        with_surface_cx(true, |cx| {
+            assert_eq!(
+                surface
+                    .try_clone_with_cx(cx)
+                    .expect("admitted copy request"),
+                SurfaceCloneRun::Cancelled
+            );
+        });
+        with_surface_cx(false, |cx| {
+            assert_eq!(
+                surface.try_clone_with_cx(cx).expect("active surface copy"),
+                SurfaceCloneRun::Complete {
+                    surface: surface.try_clone().expect("legacy surface copy"),
+                }
+            );
+        });
+
+        let exact = exact_asymmetric_surface();
+        with_surface_cx(false, |cx| {
+            assert_eq!(
+                exact.try_clone_with_cx(cx).expect("active exact copy"),
+                SurfaceCloneRun::Complete {
+                    surface: exact.try_clone().expect("legacy exact copy"),
+                }
+            );
+        });
+    }
+
+    #[test]
+    fn surface_copy_cancels_inside_each_nested_copy_and_at_publication() {
+        let surface = long_linear_surface();
+        let admitted = surface.admitted_after_validation();
+        let run = |target| {
+            let mut polls = 0usize;
+            let mut should_cancel = || {
+                polls += 1;
+                polls == target
+            };
+            let outcome = admitted
+                .try_clone_with_poll(&mut should_cancel)
+                .expect("bounded surface copy");
+            (outcome.is_none(), polls)
+        };
+        assert_eq!(run(3), run(3));
+        assert_eq!(run(3), (true, 3));
+        assert_eq!(run(7), run(7));
+        assert_eq!(run(7), (true, 7));
+        assert_eq!(run(13), run(13));
+        assert_eq!(run(13), (true, 13));
+
+        let surface = bilinear_surface();
+        let admitted = surface.admitted_after_validation();
+        let mut total_polls = 0usize;
+        let mut never_cancel = || {
+            total_polls += 1;
+            false
+        };
+        assert!(
+            admitted
+                .try_clone_with_poll(&mut never_cancel)
+                .expect("healthy surface copy")
+                .is_some()
+        );
+        let mut replay_polls = 0usize;
+        let mut cancel_at_publication = || {
+            replay_polls += 1;
+            replay_polls == total_polls
+        };
+        assert!(
+            admitted
+                .try_clone_with_poll(&mut cancel_at_publication)
+                .expect("publication cancellation")
+                .is_none()
+        );
+        assert_eq!(replay_polls, total_polls);
+    }
+
+    #[test]
+    fn surface_copy_preflight_refuses_work_before_nested_retained_bytes() {
+        let excessive_columns = (BASIS_MAX_WORK_UNITS / 4 + 1) as usize;
+        let work_error = preflight_surface_copy::<f64>(0, 0, 1, excessive_columns)
+            .expect_err("work must refuse before retained-byte accounting");
+        assert!(matches!(
+            work_error,
+            NurbsError::Domain { ref what } if what.contains("work units above defensive ceiling")
+        ));
+
+        let row_bytes = core::mem::size_of::<Vec<[f64; 4]>>() as u128;
+        let control_bytes = core::mem::size_of::<[f64; 4]>() as u128;
+        let row_count =
+            (SURFACE_COPY_MAX_RETAINED_BYTES / (row_bytes + control_bytes) + 1) as usize;
+        assert!(
+            (row_count as u128) * control_bytes <= SURFACE_COPY_MAX_RETAINED_BYTES,
+            "control payload alone stays within the envelope"
+        );
+        let memory_error = preflight_surface_copy::<f64>(0, 0, row_count, 1)
+            .expect_err("nested row headers must count toward retained output");
+        assert!(matches!(
+            memory_error,
+            NurbsError::Domain { ref what } if what.contains("retains")
+        ));
     }
 }
