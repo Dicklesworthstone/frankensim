@@ -4,7 +4,7 @@
 //! boxes (the convex-hull property in both directions).
 
 use crate::NurbsError;
-use crate::basis::{BASIS_MAX_WORK_UNITS, BasisRun, KnotVector, Scalar};
+use crate::basis::{BASIS_MAX_WORK_UNITS, BasisRun, KnotValidationOutcome, KnotVector, Scalar};
 use crate::curve::NurbsCurve;
 use fs_exec::Cx;
 
@@ -248,6 +248,25 @@ pub struct AdmittedNurbsSurface<'a, S: Scalar> {
     inner: &'a NurbsSurface<S>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SurfaceValidationOutcome {
+    Complete,
+    Cancelled,
+}
+
+/// Transactional terminal state of cancellation-aware surface admission.
+#[must_use]
+#[derive(Debug, Clone, Copy)]
+pub enum SurfaceAdmissionRun<'a, S: Scalar> {
+    /// The exact immutable source snapshot was fully validated.
+    Complete {
+        /// Lifetime-bound authority for the validated surface generation.
+        admitted: AdmittedNurbsSurface<'a, S>,
+    },
+    /// Cancellation was observed; no admitted authority was published.
+    Cancelled,
+}
+
 /// Transactional terminal state of cancellation-aware Cartesian evaluation.
 #[must_use]
 #[derive(Debug, Clone, PartialEq)]
@@ -293,33 +312,82 @@ impl<S: Scalar> NurbsSurface<S> {
     }
 
     fn validate_live_structure(&self) -> Result<(), NurbsError> {
+        let mut never_cancel = || false;
+        match self.validate_live_structure_with_poll(&mut never_cancel)? {
+            SurfaceValidationOutcome::Complete => Ok(()),
+            SurfaceValidationOutcome::Cancelled => Err(NurbsError::Domain {
+                what: "non-cancelling surface validation observed cancellation".to_string(),
+            }),
+        }
+    }
+
+    fn validate_live_structure_with_poll(
+        &self,
+        should_cancel: &mut impl FnMut() -> bool,
+    ) -> Result<SurfaceValidationOutcome, NurbsError> {
         Self::enforce_validation_work(Self::validation_work_for(&self.knots_u, &self.knots_v)?)?;
-        self.knots_u.validate_live()?;
-        self.knots_v.validate_live()?;
+        match self.knots_u.validate_live_with_poll(|| should_cancel())? {
+            KnotValidationOutcome::Complete => {}
+            KnotValidationOutcome::Cancelled => return Ok(SurfaceValidationOutcome::Cancelled),
+        }
+        match self.knots_v.validate_live_with_poll(|| should_cancel())? {
+            KnotValidationOutcome::Complete => {}
+            KnotValidationOutcome::Cancelled => return Ok(SurfaceValidationOutcome::Cancelled),
+        }
+
+        let invalid_control_net = || NurbsError::Structure {
+            what: concat!(
+                "live surface control net must match both knot vectors and retain finite ",
+                "homogeneous coordinates with admissible weights"
+            )
+            .to_string(),
+        };
         let expected_u = self.knots_u.control_count();
         let expected_v = self.knots_v.control_count();
-        if self.cpw.len() != expected_u
-            || self.cpw.iter().any(|row| {
-                row.len() != expected_v
-                    || row.iter().any(|control| {
-                        !control[3].is_admissible_weight()
-                            || control
-                                .iter()
-                                .copied()
-                                .any(|component| !component.is_finite())
-                            || control[..3]
-                                .iter()
-                                .copied()
-                                .any(|component| !component.quotient_is_finite(control[3]))
-                    })
-            })
-        {
-            return Err(NurbsError::Structure {
-                what: "live surface control net must match both knot vectors and retain finite homogeneous coordinates with admissible weights"
-                    .to_string(),
-            });
+        if self.cpw.len() != expected_u {
+            return Err(invalid_control_net());
         }
-        Ok(())
+        if should_cancel() {
+            return Ok(SurfaceValidationOutcome::Cancelled);
+        }
+
+        let mut operations_since_poll = 0usize;
+        for row in &self.cpw {
+            if row.len() != expected_v {
+                return Err(invalid_control_net());
+            }
+            if surface_poll_due(&mut operations_since_poll, should_cancel) {
+                return Ok(SurfaceValidationOutcome::Cancelled);
+            }
+            for control in row {
+                if !control[3].is_admissible_weight() {
+                    return Err(invalid_control_net());
+                }
+                if surface_poll_due(&mut operations_since_poll, should_cancel) {
+                    return Ok(SurfaceValidationOutcome::Cancelled);
+                }
+                for &component in control {
+                    if !component.is_finite() {
+                        return Err(invalid_control_net());
+                    }
+                    if surface_poll_due(&mut operations_since_poll, should_cancel) {
+                        return Ok(SurfaceValidationOutcome::Cancelled);
+                    }
+                }
+                for &component in &control[..3] {
+                    if !component.quotient_is_finite(control[3]) {
+                        return Err(invalid_control_net());
+                    }
+                    if surface_poll_due(&mut operations_since_poll, should_cancel) {
+                        return Ok(SurfaceValidationOutcome::Cancelled);
+                    }
+                }
+            }
+        }
+        if should_cancel() {
+            return Ok(SurfaceValidationOutcome::Cancelled);
+        }
+        Ok(SurfaceValidationOutcome::Complete)
     }
 
     /// Build from Cartesian control net + weights.
@@ -496,6 +564,31 @@ impl<S: Scalar> NurbsSurface<S> {
     pub fn admit(&self) -> Result<AdmittedNurbsSurface<'_, S>, NurbsError> {
         self.validate_live_structure()?;
         Ok(AdmittedNurbsSurface { inner: self })
+    }
+
+    /// Validate this immutable surface with bounded cancellation polling.
+    ///
+    /// Checked validation-work refusal retains synchronous precedence. The U
+    /// knot, V knot, and row-major homogeneous-control scans share one gate,
+    /// and a final checkpoint gates publication of the lifetime-bound admitted
+    /// view. This method does not make construction cancellation-aware and
+    /// does not consume the `Cx` budget or finalize its executor scope.
+    ///
+    /// # Errors
+    /// Returns the synchronous admission's work, knot, control-grid, weight,
+    /// and finite-arithmetic refusals when they win before an observed
+    /// cancellation.
+    pub fn admit_with_cx<'a>(
+        &'a self,
+        cx: &Cx<'_>,
+    ) -> Result<SurfaceAdmissionRun<'a, S>, NurbsError> {
+        let mut should_cancel = || cx.checkpoint().is_err();
+        match self.validate_live_structure_with_poll(&mut should_cancel)? {
+            SurfaceValidationOutcome::Complete => Ok(SurfaceAdmissionRun::Complete {
+                admitted: AdmittedNurbsSurface { inner: self },
+            }),
+            SurfaceValidationOutcome::Cancelled => Ok(SurfaceAdmissionRun::Cancelled),
+        }
     }
 
     /// Homogeneous evaluation.
@@ -1021,6 +1114,98 @@ mod tests {
             &weights,
         )
         .expect("high-degree plane")
+    }
+
+    #[test]
+    fn surface_admission_with_cx_is_transactional_and_lifetime_bound() {
+        let surface = bilinear_surface();
+        with_surface_cx(true, |cx| {
+            assert!(matches!(
+                surface.admit_with_cx(cx).expect("valid source"),
+                SurfaceAdmissionRun::Cancelled
+            ));
+
+            let mut invalid_u = bilinear_surface();
+            invalid_u.knots_u.knots.clear();
+            assert!(matches!(
+                invalid_u.admit_with_cx(cx),
+                Err(NurbsError::Structure { .. })
+            ));
+        });
+        with_surface_cx(false, |cx| {
+            let SurfaceAdmissionRun::Complete { admitted } = surface
+                .admit_with_cx(cx)
+                .expect("healthy cancellable admission")
+            else {
+                panic!("active context must admit the valid surface");
+            };
+            assert!(core::ptr::eq(admitted.source(), &surface));
+            assert!(matches!(
+                admitted
+                    .eval_with_cx(0.5, 0.5, cx)
+                    .expect("admitted cancellable evaluation"),
+                SurfaceEvaluationRun::Complete { .. }
+            ));
+        });
+
+        let mut malformed = bilinear_surface();
+        malformed.cpw.clear();
+        let legacy_error = malformed.admit().expect_err("malformed legacy admission");
+        with_surface_cx(false, |cx| {
+            assert_eq!(
+                malformed
+                    .admit_with_cx(cx)
+                    .expect_err("malformed cancellable admission"),
+                legacy_error
+            );
+        });
+    }
+
+    #[test]
+    fn surface_admission_replays_inside_controls_and_at_publication() {
+        let surface = high_degree_surface();
+        let run = || {
+            let mut polls = 0usize;
+            let mut should_cancel = || {
+                polls += 1;
+                polls == 12
+            };
+            let outcome = surface
+                .validate_live_structure_with_poll(&mut should_cancel)
+                .expect("valid high-degree surface");
+            (
+                matches!(outcome, SurfaceValidationOutcome::Cancelled),
+                polls,
+            )
+        };
+        assert_eq!(run(), run());
+        assert_eq!(run(), (true, 12));
+
+        let bilinear = bilinear_surface();
+        let mut total_polls = 0usize;
+        let mut never_cancel = || {
+            total_polls += 1;
+            false
+        };
+        assert!(matches!(
+            bilinear
+                .validate_live_structure_with_poll(&mut never_cancel)
+                .expect("healthy admission"),
+            SurfaceValidationOutcome::Complete
+        ));
+        assert_eq!(total_polls, 12);
+        let mut replay_polls = 0usize;
+        let mut cancel_at_publication = || {
+            replay_polls += 1;
+            replay_polls == 12
+        };
+        assert!(matches!(
+            bilinear
+                .validate_live_structure_with_poll(&mut cancel_at_publication)
+                .expect("publication cancellation"),
+            SurfaceValidationOutcome::Cancelled
+        ));
+        assert_eq!(replay_polls, 12);
     }
 
     #[test]

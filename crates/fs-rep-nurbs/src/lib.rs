@@ -30,7 +30,7 @@ pub use curve::{
     AdmittedNurbsCurve, CurveAdmissionRun, CurveBezierRun, CurveEvaluationRun, NurbsCurve,
 };
 pub use rat::Rat;
-pub use surface::{AdmittedNurbsSurface, NurbsSurface, SurfaceEvaluationRun};
+pub use surface::{AdmittedNurbsSurface, NurbsSurface, SurfaceAdmissionRun, SurfaceEvaluationRun};
 pub use trim::{AdmittedTrimLoop, AdmittedTrimmedPatch, Classification, TrimLoop, TrimmedPatch};
 
 use core::fmt;
