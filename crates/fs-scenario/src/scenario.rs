@@ -27,6 +27,28 @@ const FINDINGS_PER_COMBINATION: usize = 2;
 const FINDINGS_PER_COMBINATION_TERM: usize = 4;
 const FINDINGS_PER_ENSEMBLE: usize = 16;
 const FINDINGS_PER_CONTACT: usize = 4;
+/// Maximum source bytes copied from one identity into a validation finding.
+///
+/// Row and term coordinates retain exact provenance when distinct identities
+/// share the same bounded prefix.
+const DIAGNOSTIC_IDENTITY_PREVIEW_BYTES: usize = 128;
+
+#[derive(Clone, Copy)]
+struct DiagnosticIdentity<'a>(&'a str);
+
+impl fmt::Debug for DiagnosticIdentity<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.0.len() <= DIAGNOSTIC_IDENTITY_PREVIEW_BYTES {
+            return fmt::Debug::fmt(self.0, formatter);
+        }
+        let mut end = DIAGNOSTIC_IDENTITY_PREVIEW_BYTES;
+        while !self.0.is_char_boundary(end) {
+            end -= 1;
+        }
+        fmt::Debug::fmt(&self.0[..end], formatter)?;
+        write!(formatter, "…<{} bytes total>", self.0.len())
+    }
+}
 
 /// Explicit deterministic limits for whole-scenario semantic validation.
 ///
@@ -1184,6 +1206,7 @@ impl Scenario {
             checkpoint,
         )?;
         for (combo_index, combo) in self.combinations.iter().enumerate() {
+            let combo_name = DiagnosticIdentity(combo.name.as_str());
             if combo.name.is_empty() {
                 out.push(Violation {
                     code: "combo-name-empty",
@@ -1198,8 +1221,7 @@ impl Scenario {
                 out.push(Violation {
                     code: "combo-name-duplicate",
                     what: format!(
-                        "combination {:?} first appears at row {first} and repeats at row {combo_index}",
-                        combo.name
+                        "combination {combo_name:?} first appears at row {first} and repeats at row {combo_index}"
                     ),
                     fix: "give every combination a unique name".to_string(),
                 });
@@ -1215,12 +1237,12 @@ impl Scenario {
                 checkpoint,
             )?;
             for (term_index, (case, factor)) in combo.terms.iter().enumerate() {
+                let case_name = DiagnosticIdentity(case.as_str());
                 if case.is_empty() {
                     out.push(Violation {
                         code: "combo-case-empty",
                         what: format!(
-                            "combination {:?} term {term_index} has an empty case reference",
-                            combo.name
+                            "combination row {combo_index} {combo_name:?} term {term_index} has an empty case reference"
                         ),
                         fix: "reference a nonempty defined load-case name".to_string(),
                     });
@@ -1232,8 +1254,7 @@ impl Scenario {
                     out.push(Violation {
                         code: "combo-term-duplicate",
                         what: format!(
-                            "combination {:?} references case {case:?} at terms {first} and {term_index}",
-                            combo.name
+                            "combination row {combo_index} {combo_name:?} references case {case_name:?} at terms {first} and {term_index}"
                         ),
                         fix: "combine repeated case factors into one term".to_string(),
                     });
@@ -1242,8 +1263,7 @@ impl Scenario {
                     out.push(Violation {
                         code: "combo-case-missing",
                         what: format!(
-                            "combination {:?} references unknown case {case:?}",
-                            combo.name
+                            "combination row {combo_index} {combo_name:?} term {term_index} references unknown case {case_name:?}"
                         ),
                         fix: "reference only defined load cases".to_string(),
                     });
@@ -1251,7 +1271,9 @@ impl Scenario {
                 if !factor.is_finite() {
                     out.push(Violation {
                         code: "combo-factor",
-                        what: format!("combination {:?} has non-finite factor", combo.name),
+                        what: format!(
+                            "combination row {combo_index} {combo_name:?} term {term_index} has non-finite factor"
+                        ),
                         fix: "use finite combination factors".to_string(),
                     });
                 }
@@ -1581,8 +1603,9 @@ impl Scenario {
 #[cfg(test)]
 mod validation_internal_tests {
     use super::{
-        Combination, ContactLaw, ContactModel, Environment, LoadCase, Scenario, ValidationBudget,
-        ValidationError, dedup_validation_times, reserve_validation_times, sort_validation_index,
+        Combination, ContactLaw, ContactModel, DIAGNOSTIC_IDENTITY_PREVIEW_BYTES,
+        DiagnosticIdentity, Environment, LoadCase, Scenario, ValidationBudget, ValidationError,
+        dedup_validation_times, reserve_validation_times, sort_validation_index,
     };
     use crate::bc::{BcKind, BcValue, BoundaryCondition, Compat, Physics};
     use crate::ensemble::{SpectrumModel, StochasticEnsemble};
@@ -1716,6 +1739,75 @@ mod validation_internal_tests {
             if calls == 2 { Err("cancelled") } else { Ok(()) }
         });
         assert_eq!(result, Err("cancelled"));
+    }
+
+    #[test]
+    fn repeated_combination_diagnostics_bound_parent_identity_rendering() {
+        assert_eq!(format!("{:?}", DiagnosticIdentity("short")), "\"short\"");
+        let unicode = "界".repeat(DIAGNOSTIC_IDENTITY_PREVIEW_BYTES);
+        let unicode_preview = format!("{:?}", DiagnosticIdentity(unicode.as_str()));
+        let unicode_prefix_end =
+            DIAGNOSTIC_IDENTITY_PREVIEW_BYTES - (DIAGNOSTIC_IDENTITY_PREVIEW_BYTES % "界".len());
+        assert_eq!(
+            unicode_preview,
+            format!(
+                "{:?}…<{} bytes total>",
+                &unicode[..unicode_prefix_end],
+                unicode.len()
+            )
+        );
+
+        let combo_name = "x".repeat(DIAGNOSTIC_IDENTITY_PREVIEW_BYTES * 32);
+        let case_prefix = "y".repeat(DIAGNOSTIC_IDENTITY_PREVIEW_BYTES);
+        let term_count = 64usize;
+        let mut scenario = Scenario::new("bounded-diagnostics", 1, Environment::earth_lab());
+        scenario.combinations.push(Combination {
+            name: combo_name.clone(),
+            terms: (0..term_count)
+                .map(|term| (format!("{case_prefix}-missing-{term}"), f64::NAN))
+                .collect(),
+        });
+
+        let findings = scenario.validate();
+        let term_findings = findings
+            .iter()
+            .filter(|finding| matches!(finding.code, "combo-case-missing" | "combo-factor"))
+            .collect::<Vec<_>>();
+        assert_eq!(term_findings.len(), term_count * 2);
+        for finding in term_findings {
+            assert!(finding.what.contains("combination row 0"));
+            assert!(finding.what.contains("term "));
+            assert!(!finding.what.contains(combo_name.as_str()));
+            assert!(!finding.what.contains("-missing-"));
+            assert!(
+                finding.what.len() < DIAGNOSTIC_IDENTITY_PREVIEW_BYTES * 4 + 256,
+                "unbounded diagnostic: {} bytes",
+                finding.what.len()
+            );
+        }
+
+        let shared_prefix = "z".repeat(DIAGNOSTIC_IDENTITY_PREVIEW_BYTES);
+        let mut collision = Scenario::new("preview-collision", 2, Environment::earth_lab());
+        collision.combinations.extend([
+            Combination {
+                name: format!("{shared_prefix}-alpha"),
+                terms: vec![("missing".to_string(), f64::NAN)],
+            },
+            Combination {
+                name: format!("{shared_prefix}-omega"),
+                terms: vec![("missing".to_string(), f64::NAN)],
+            },
+        ]);
+        let factor_findings = collision
+            .validate()
+            .into_iter()
+            .filter(|finding| finding.code == "combo-factor")
+            .map(|finding| finding.what)
+            .collect::<Vec<_>>();
+        assert_eq!(factor_findings.len(), 2);
+        assert!(factor_findings[0].contains("combination row 0"));
+        assert!(factor_findings[1].contains("combination row 1"));
+        assert_ne!(factor_findings[0], factor_findings[1]);
     }
 
     fn phase_matrix_flow(region: &str, value: f64) -> BoundaryCondition {

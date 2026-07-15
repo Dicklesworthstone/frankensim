@@ -150,7 +150,10 @@ flagships.
     exactly one declared model. A pair group with multiple models classifies
     every repeated row as a conflict regardless of declaration permutation; an
     all-equal group classifies repeats as duplicates. Diagnostics retain first
-    and repeated rows.
+    and repeated rows. Combination-term diagnostics copy at most 128 source
+    bytes from each combination or case identity, append the exact original
+    byte length when truncated, and retain combination-row/term coordinates so
+    equal UTF-8-safe previews do not erase exact declaration provenance.
 11. **Indexed structural validation**: frame identity indexes are built once;
     the tri-color parent traversal visits each storage row at most once, and
     follows only uniquely resolved parent ids so duplicate declarations cannot
@@ -341,3 +344,8 @@ None.
   must not reuse syntax limits as an admission receipt. Exact decoded-heap
   accounting plus fallible semantic-index/finding reservation remain active
   work under `frankensim-sj31i.24`.
+- **Finding capacity is not exact diagnostic-heap admission**: bounded identity
+  previews prevent one long combination name from being copied in full into
+  every term finding, but other diagnostic fields and each final `String`
+  allocation are not yet byte-metered. A global diagnostic-byte budget remains
+  active work under `frankensim-sj31i.24`.
