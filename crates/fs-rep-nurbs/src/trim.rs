@@ -63,6 +63,19 @@ struct TrimLoopReversalPlan {
     degree: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TrimmedPatchCopyPlan {
+    loop_count: usize,
+    #[cfg(test)]
+    knot_count: usize,
+    #[cfg(test)]
+    control_count: usize,
+    #[cfg(test)]
+    work_units: u128,
+    #[cfg(test)]
+    retained_bytes: u128,
+}
+
 /// Minimum charge for admitting one sealed loop before inspecting its
 /// knot/control metadata. This makes a huge collection of individually tiny
 /// loops reject in O(1), rather than spending unbounded time merely discovering
@@ -483,10 +496,115 @@ pub enum TrimmedPatchAdmissionRun<'a> {
     Cancelled,
 }
 
+/// Transactional terminal state of a cancellation-aware fallible
+/// trimmed-patch copy.
+#[must_use]
+#[derive(Debug, PartialEq)]
+pub enum TrimmedPatchCloneRun {
+    /// The complete sealed copy of the exact source representation.
+    Complete {
+        /// Copied trimmed-patch generation.
+        trimmed_patch: TrimmedPatch,
+    },
+    /// Cancellation was observed; all partial nested copy storage was dropped.
+    Cancelled,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TrimmedPatchValidationOutcome {
     Complete,
     Cancelled,
+}
+
+fn preflight_trimmed_patch_copy_counts(
+    loop_count: usize,
+    knot_count: usize,
+    control_count: usize,
+) -> Result<TrimmedPatchCopyPlan, NurbsError> {
+    let work_units = (control_count as u128)
+        .checked_mul(4)
+        .and_then(|work| work.checked_add(knot_count as u128))
+        .and_then(|work| work.checked_add((loop_count as u128).checked_mul(4)?))
+        .and_then(|work| work.checked_add(2))
+        .ok_or_else(|| NurbsError::Domain {
+            what: "trimmed-patch copy-work accounting overflows u128".to_string(),
+        })?;
+    if work_units > TRIM_CLASSIFY_MAX_WORK_UNITS {
+        return Err(NurbsError::Domain {
+            what: format!(
+                "trimmed-patch copy requests {work_units} work units above defensive ceiling {TRIM_CLASSIFY_MAX_WORK_UNITS}"
+            ),
+        });
+    }
+
+    let retained_bytes = (loop_count as u128)
+        .checked_mul(core::mem::size_of::<TrimLoop>() as u128)
+        .and_then(|bytes| {
+            bytes
+                .checked_add((knot_count as u128).checked_mul(core::mem::size_of::<Rat>() as u128)?)
+        })
+        .and_then(|bytes| {
+            bytes.checked_add(
+                (control_count as u128).checked_mul(core::mem::size_of::<[Rat; 4]>() as u128)?,
+            )
+        })
+        .ok_or_else(|| NurbsError::Domain {
+            what: "trimmed-patch copy retained-byte accounting overflows u128".to_string(),
+        })?;
+    if retained_bytes > TRIM_CLASSIFY_MAX_RETAINED_BYTES {
+        return Err(NurbsError::Domain {
+            what: format!(
+                "trimmed-patch copy retains {retained_bytes} output bytes above defensive ceiling {TRIM_CLASSIFY_MAX_RETAINED_BYTES}"
+            ),
+        });
+    }
+    Ok(TrimmedPatchCopyPlan {
+        loop_count,
+        #[cfg(test)]
+        knot_count,
+        #[cfg(test)]
+        control_count,
+        #[cfg(test)]
+        work_units,
+        #[cfg(test)]
+        retained_bytes,
+    })
+}
+
+fn preflight_trimmed_patch_copy_with_poll(
+    patch: &TrimmedPatch,
+    should_cancel: &mut impl FnMut() -> bool,
+) -> Result<TrimWorkRun<TrimmedPatchCopyPlan>, NurbsError> {
+    // Refuse an impossible loop table in O(1), before a pre-existing
+    // cancellation can mask the count-derived work/memory envelope.
+    preflight_trimmed_patch_copy_counts(patch.loops.len(), 0, 0)?;
+    if should_cancel() {
+        return Ok(TrimWorkRun::Cancelled);
+    }
+
+    let mut knot_count = 0usize;
+    let mut control_count = 0usize;
+    let mut operations_since_poll = 0usize;
+    for trim_loop in &patch.loops {
+        knot_count = knot_count
+            .checked_add(trim_loop.curve.knots.knots.len())
+            .ok_or_else(|| NurbsError::Domain {
+                what: "trimmed-patch copy knot-count accounting overflows usize".to_string(),
+            })?;
+        control_count = control_count
+            .checked_add(trim_loop.curve.cpw.len())
+            .ok_or_else(|| NurbsError::Domain {
+                what: "trimmed-patch copy control-count accounting overflows usize".to_string(),
+            })?;
+        if trim_poll_due(&mut operations_since_poll, should_cancel) {
+            return Ok(TrimWorkRun::Cancelled);
+        }
+    }
+    let plan = preflight_trimmed_patch_copy_counts(patch.loops.len(), knot_count, control_count)?;
+    if should_cancel() {
+        return Ok(TrimWorkRun::Cancelled);
+    }
+    Ok(TrimWorkRun::Complete(plan))
 }
 
 impl TrimmedPatch {
@@ -605,20 +723,81 @@ impl TrimmedPatch {
     /// Fallibly copy this sealed patch without revalidating unchanged loops.
     ///
     /// # Errors
-    /// [`NurbsError::Domain`] when a destination allocation is refused.
+    /// [`NurbsError::Domain`] when checked aggregate work/retained bytes or a
+    /// destination allocation is refused.
     pub fn try_clone(&self) -> Result<Self, NurbsError> {
+        let mut never_cancel = || false;
+        let mut clone_loop = |trim_loop: &TrimLoop| {
+            Ok(TrimLoopCloneRun::Complete {
+                trim_loop: trim_loop.try_clone()?,
+            })
+        };
+        match self.try_clone_with_nested_and_poll(&mut never_cancel, &mut clone_loop)? {
+            TrimmedPatchCloneRun::Complete { trimmed_patch } => Ok(trimmed_patch),
+            TrimmedPatchCloneRun::Cancelled => Err(NurbsError::Domain {
+                what: "non-cancelling trimmed-patch copy observed cancellation".to_string(),
+            }),
+        }
+    }
+
+    /// Fallibly copy this sealed exact patch with bounded cancellation polling.
+    ///
+    /// A count-only lower bound precedes cancellation. One fixed-stride
+    /// metadata scan then admits aggregate nested copy work and a 64 MiB
+    /// retained-output envelope covering the outer loop table plus every exact
+    /// knot/control payload. The same `Cx` spans outer allocation, ordered
+    /// nested loop copies, table moves, and final publication. The immutable
+    /// source is not revalidated. Individual allocator calls, exact-rational
+    /// copies, and nested destruction are not preemptible. This primitive does
+    /// not consume the `Cx` budget or own request -> drain -> finalize
+    /// semantics.
+    ///
+    /// # Errors
+    /// Returns the synchronous copy's work, retained-memory, or allocation
+    /// refusal when it wins before an observed cancellation.
+    pub fn try_clone_with_cx(&self, cx: &Cx<'_>) -> Result<TrimmedPatchCloneRun, NurbsError> {
+        let mut should_cancel = || cx.checkpoint().is_err();
+        let mut clone_loop = |trim_loop: &TrimLoop| trim_loop.try_clone_with_cx(cx);
+        self.try_clone_with_nested_and_poll(&mut should_cancel, &mut clone_loop)
+    }
+
+    fn try_clone_with_nested_and_poll(
+        &self,
+        should_cancel: &mut impl FnMut() -> bool,
+        clone_loop: &mut impl FnMut(&TrimLoop) -> Result<TrimLoopCloneRun, NurbsError>,
+    ) -> Result<TrimmedPatchCloneRun, NurbsError> {
+        let plan = match preflight_trimmed_patch_copy_with_poll(self, should_cancel)? {
+            TrimWorkRun::Complete(plan) => plan,
+            TrimWorkRun::Cancelled => return Ok(TrimmedPatchCloneRun::Cancelled),
+        };
         let mut loops = Vec::new();
         loops
-            .try_reserve_exact(self.loops.len())
+            .try_reserve_exact(plan.loop_count)
             .map_err(|_| NurbsError::Domain {
                 what: "trimmed-patch copy loop-table allocation was refused".to_string(),
             })?;
-        for trim_loop in &self.loops {
-            loops.push(trim_loop.try_clone()?);
+        if should_cancel() {
+            return Ok(TrimmedPatchCloneRun::Cancelled);
         }
-        Ok(TrimmedPatch {
-            loops,
-            max_subdivision: self.max_subdivision,
+        let mut operations_since_poll = 0usize;
+        for source_loop in &self.loops {
+            let trim_loop = match clone_loop(source_loop)? {
+                TrimLoopCloneRun::Complete { trim_loop } => trim_loop,
+                TrimLoopCloneRun::Cancelled => return Ok(TrimmedPatchCloneRun::Cancelled),
+            };
+            loops.push(trim_loop);
+            if trim_poll_due(&mut operations_since_poll, should_cancel) {
+                return Ok(TrimmedPatchCloneRun::Cancelled);
+            }
+        }
+        if should_cancel() {
+            return Ok(TrimmedPatchCloneRun::Cancelled);
+        }
+        Ok(TrimmedPatchCloneRun::Complete {
+            trimmed_patch: TrimmedPatch {
+                loops,
+                max_subdivision: self.max_subdivision,
+            },
         })
     }
 
@@ -2600,6 +2779,141 @@ mod tests {
     fn empty_patch_copy_preserves_sealed_configuration() {
         let patch = TrimmedPatch::with_max_subdivision(Vec::new(), 7);
         assert_eq!(patch.try_clone().expect("fallible patch copy"), patch);
+    }
+
+    #[test]
+    fn trimmed_patch_copy_with_cx_is_transactional_and_exact() {
+        let patch = TrimmedPatch::with_max_subdivision(vec![point_trim_loop()], 7);
+        with_trim_cx(true, |cx| {
+            assert_eq!(
+                patch
+                    .try_clone_with_cx(cx)
+                    .expect("valid pre-cancelled patch copy"),
+                TrimmedPatchCloneRun::Cancelled
+            );
+        });
+        with_trim_cx(false, |cx| {
+            assert_eq!(
+                patch
+                    .try_clone_with_cx(cx)
+                    .expect("active exact patch copy"),
+                TrimmedPatchCloneRun::Complete {
+                    trimmed_patch: patch.try_clone().expect("legacy patch copy"),
+                }
+            );
+        });
+    }
+
+    #[test]
+    fn trimmed_patch_copy_plan_is_aggregate_and_cancellable() {
+        let patch = TrimmedPatch::new(vec![point_trim_loop()]);
+        let mut never_cancel = || false;
+        let TrimWorkRun::Complete(plan) =
+            preflight_trimmed_patch_copy_with_poll(&patch, &mut never_cancel)
+                .expect("healthy patch-copy plan")
+        else {
+            panic!("active plan must complete");
+        };
+        assert_eq!(plan.loop_count, 1);
+        assert_eq!(plan.knot_count, 4);
+        assert_eq!(plan.control_count, 2);
+        assert_eq!(plan.work_units, 4 + 4 * 2 + 4 + 2);
+        assert_eq!(
+            plan.retained_bytes,
+            core::mem::size_of::<TrimLoop>() as u128
+                + 4 * core::mem::size_of::<Rat>() as u128
+                + 2 * core::mem::size_of::<[Rat; 4]>() as u128
+        );
+
+        let many = TrimmedPatch::new((0..130).map(|_| point_trim_loop()).collect());
+        let run = || {
+            let mut polls = 0usize;
+            let mut should_cancel = || {
+                polls += 1;
+                polls == 2
+            };
+            let outcome = preflight_trimmed_patch_copy_with_poll(&many, &mut should_cancel)
+                .expect("cancellable metadata plan");
+            (matches!(outcome, TrimWorkRun::Cancelled), polls)
+        };
+        assert_eq!(run(), run());
+        assert_eq!(run(), (true, 2));
+
+        let mut polls = 0usize;
+        let mut copied_loops = 0usize;
+        let move_outcome = many
+            .try_clone_with_nested_and_poll(
+                &mut || {
+                    polls += 1;
+                    polls == 6
+                },
+                &mut |trim_loop| {
+                    copied_loops += 1;
+                    Ok(TrimLoopCloneRun::Complete {
+                        trim_loop: trim_loop.try_clone()?,
+                    })
+                },
+            )
+            .expect("cancellable outer table moves");
+        assert_eq!(move_outcome, TrimmedPatchCloneRun::Cancelled);
+        assert_eq!(polls, 6);
+        assert_eq!(copied_loops, 64);
+    }
+
+    #[test]
+    fn trimmed_patch_copy_propagates_nested_and_publication_cancellation() {
+        let patch = TrimmedPatch::new(vec![point_trim_loop(), point_trim_loop()]);
+        let mut nested_calls = 0usize;
+        let outcome = patch
+            .try_clone_with_nested_and_poll(&mut || false, &mut |_trim_loop| {
+                nested_calls += 1;
+                if nested_calls == 1 {
+                    Ok(TrimLoopCloneRun::Cancelled)
+                } else {
+                    panic!("nested cancellation must stop later loop copies")
+                }
+            })
+            .expect("nested patch-copy cancellation");
+        assert_eq!(outcome, TrimmedPatchCloneRun::Cancelled);
+        assert_eq!(nested_calls, 1);
+
+        let empty = TrimmedPatch::with_max_subdivision(Vec::new(), 7);
+        let mut total_polls = 0usize;
+        let mut never_cancel = || {
+            total_polls += 1;
+            false
+        };
+        let mut clone_no_loop = |_trim_loop: &TrimLoop| -> Result<TrimLoopCloneRun, NurbsError> {
+            panic!("empty patch has no nested copy")
+        };
+        assert!(matches!(
+            empty
+                .try_clone_with_nested_and_poll(&mut never_cancel, &mut clone_no_loop)
+                .expect("healthy empty-patch copy"),
+            TrimmedPatchCloneRun::Complete { .. }
+        ));
+        let mut replay_polls = 0usize;
+        let mut cancel_at_publication = || {
+            replay_polls += 1;
+            replay_polls == total_polls
+        };
+        assert_eq!(
+            empty
+                .try_clone_with_nested_and_poll(&mut cancel_at_publication, &mut clone_no_loop,)
+                .expect("empty-patch publication cancellation"),
+            TrimmedPatchCloneRun::Cancelled
+        );
+        assert_eq!(replay_polls, total_polls);
+    }
+
+    #[test]
+    fn trimmed_patch_copy_refuses_work_before_retained_bytes() {
+        let error = preflight_trimmed_patch_copy_counts(usize::MAX, usize::MAX, usize::MAX)
+            .expect_err("work must refuse before retained-byte accounting");
+        assert!(matches!(
+            error,
+            NurbsError::Domain { ref what } if what.contains("work units above defensive ceiling")
+        ));
     }
 
     #[test]

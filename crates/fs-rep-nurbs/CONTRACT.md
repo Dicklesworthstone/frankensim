@@ -135,7 +135,9 @@ fs-iga (geometry basis = analysis basis), fs-render NURBS tracing
   structure validation to the immutable source. Owning
   `try_clone_with_cx` returns transactional `TrimLoopCloneRun` state and
   publishes only a complete sealed exact copy after the nested curve-copy
-  envelope. Admitted
+  envelope. `TrimmedPatch::try_clone_with_cx` returns transactional
+  `TrimmedPatchCloneRun` state after aggregate nested-copy work and retained
+  output admission. Admitted
   `reversed_for_hole_with_cx` returns transactional `TrimLoopReversalRun`
   state and publishes only a complete opposite-orientation loop after checked
   aggregate work/retained-storage admission and full derived validation.
@@ -482,6 +484,19 @@ copies, and destructors are non-preemptible, and the copy performs no source
 revalidation. It proves representation identity only: closure, continuity,
 topology, classification, exact caller-budget consumption, wall time,
 drain/finalize, and resumability are outside the claim.
+`TrimmedPatch::try_clone_with_cx` preserves a constant-time loop-count lower
+bound before cancellation, then uses one fixed-stride metadata pass to admit
+`K + 4C + 4L + 2` aggregate work for `L` loops, `K` knots, and `C` homogeneous
+controls. Work refusal precedes the 64 MiB retained-output gate, which covers
+the outer `TrimLoop` table, all exact knot payloads, and all homogeneous control
+payloads while excluding the borrowed source. The same `Cx` spans fallible
+outer allocation, ordered nested `TrimLoop` copies, table moves, and final
+publication. `TrimmedPatchCloneRun::Cancelled` exposes no partial patch and
+drops all partial nested output. Allocator rounding/spare capacity is outside
+the requested-payload model; allocator calls, exact-rational copies, and nested
+destruction are non-preemptible. The copy revalidates no source and adds no
+topology, classification, exact caller-budget, wall-time, drain/finalize, or
+resumability claim.
 `TrimmedPatch::admit_with_cx` retains the constant-time minimum loop-count work
 refusal ahead of cancellation, then carries the same caller gate through the
 exact aggregate validation-work scan, every nested loop/curve admission, and
