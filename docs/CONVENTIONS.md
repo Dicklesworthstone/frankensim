@@ -83,6 +83,33 @@ Core library code never prints casually. Observability is structured events
 seeds, fixture hashes, and case ids — every failure must be reproducible from
 its log line alone.
 
+## Determinism tiers and the libm doctrine (bead frankensim-lyms)
+
+A crate's `CONTRACT.md` determinism class is the claim surface, and the
+claim decides the code rules:
+
+- **Cross-ISA bitwise** ("fully deterministic", "identical reports
+  bitwise", golden-bearing lower-layer crates): every transcendental
+  (`ln`, `exp`, `sin`, `cos`, `tan`, `atan2`, `hypot`, `powf`, `cbrt`,
+  inverse/hyperbolic forms) must route through `fs_math::det`, which is
+  built from correctly-rounded IEEE-754 ops and is bit-identical across
+  ISAs by construction. Platform libm is NOT correctly rounded and
+  differs by ≥1 ULP across ISAs and libm versions. `sqrt` and exact ops
+  (`abs`, `floor`, `rem_euclid`, `mul_add`, `to_degrees`) are exempt —
+  IEEE-754 requires correct rounding for them. Crates at this tier are
+  registered in `LIBM_DOCTRINE_CRATES` (xtask `check-libm`, part of
+  `check-all`); dev-only oracle comparisons escape with
+  `// det-ok: <reason>` on the same or preceding line.
+- **Same-ISA bitwise**: raw libm is permitted (one build of one libm is
+  self-consistent). The CONTRACT must say "same-ISA" (or otherwise scope
+  the claim) rather than claiming unqualified full determinism.
+- **Statistical / fast-mode**: out of scope for this doctrine.
+
+Migrating a crate from same-ISA to cross-ISA shifts last-ULP outputs:
+re-check every golden in the crate under the golden-bump protocol
+(`docs/GOLDEN_POLICY.md`) in the same change, then add the crate to
+`LIBM_DOCTRINE_CRATES` so the doctrine is enforced, not documented.
+
 ## Compiler checks
 
 After substantive changes:

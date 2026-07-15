@@ -8,6 +8,7 @@
 //! - `check-contracts`— every workspace `fs-*` crate ships a CONTRACT.md with required sections.
 //! - `check-unsafe`   — unsafe code only in registered capsules (<300 lines, SAFETY.md).
 //! - `check-powi`     — no build-mode-dependent `f64::powi` in deterministic paths (bead 4xnt).
+//! - `check-libm`     — cross-ISA-claiming crates route transcendentals via fs_math::det (bead lyms).
 //! - `check-terminology` — enforce the repository's sole-branch vocabulary policy.
 //! - `check-goldens`  — golden hashes declare upstream couplings; drift re-freezes deliberately (bead y4pt).
 //! - `check-identities` — identity schemas classify fields and link mutation coverage (bead iu5l).
@@ -990,6 +991,88 @@ fn check_powi(root: &Path) -> Vec<Violation> {
                     });
                 }
                 prev_raw = raw;
+            }
+        }
+    }
+    violations
+}
+
+/// Crates whose CONTRACT claims CROSS-ISA bitwise determinism and have been
+/// audited onto the det:: routing doctrine (bead frankensim-lyms). Tiered
+/// policy from that bead: a crate claiming cross-ISA/bitwise determinism
+/// must route transcendentals through `fs_math::det` (platform libm differs
+/// by ≥1 ULP across ISAs/libm versions); crates claiming only same-ISA
+/// determinism are exempt and are NOT listed here. Grow this list as crates
+/// are audited — adding a name turns the doctrine on for it.
+const LIBM_DOCTRINE_CRATES: &[&str] = &["fs-geocon", "fs-toleralloc"];
+
+/// Method-call transcendentals that platform libm implements without a
+/// correct-rounding guarantee. `sqrt` is deliberately absent (IEEE-754
+/// requires correct rounding, so it is bit-stable everywhere), as are
+/// exact ops (`abs`, `rem_euclid`, `floor`, ...).
+const LIBM_METHODS: &[&str] = &[
+    "cbrt", "ln", "ln_1p", "log2", "log10", "exp", "exp2", "exp_m1", "expm1", "sin", "cos",
+    "sin_cos", "tan", "asin", "acos", "atan", "atan2", "sinh", "cosh", "tanh", "asinh", "acosh",
+    "atanh", "hypot", "powf",
+];
+
+/// check-libm (bead frankensim-lyms): inside [`LIBM_DOCTRINE_CRATES`],
+/// every raw libm transcendental method call must be migrated to its
+/// `fs_math::det` equivalent or carry a `// det-ok: <reason>` annotation
+/// on the same or preceding line (the escape hatch for dev-only oracle
+/// comparisons). Same annotation discipline as `check-powi`.
+fn check_libm(root: &Path) -> Vec<Violation> {
+    let mut violations = Vec::new();
+    for crate_name in LIBM_DOCTRINE_CRATES {
+        let crate_dir = root.join("crates").join(crate_name);
+        let mut stack = vec![crate_dir];
+        while let Some(dir) = stack.pop() {
+            let Ok(rd) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in rd.flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    if p.file_name().is_none_or(|name| name != "target") {
+                        stack.push(p);
+                    }
+                    continue;
+                }
+                if p.extension().is_none_or(|e| e != "rs") {
+                    continue;
+                }
+                let rel = p.strip_prefix(root).unwrap_or(&p).display().to_string();
+                let Ok(text) = std::fs::read_to_string(&p) else {
+                    continue;
+                };
+                let mut prev_raw = "";
+                for (idx, raw) in text.lines().enumerate() {
+                    let code = strip_line_comments(raw);
+                    let annotated = raw.contains("det-ok:") || prev_raw.contains("det-ok:");
+                    prev_raw = raw;
+                    if annotated {
+                        continue;
+                    }
+                    // `det::sin(x)` is a path call and never matches the
+                    // `.sin(` method needle, so routed code cannot false-flag.
+                    for method in LIBM_METHODS {
+                        let needle = format!(".{method}(");
+                        if code.contains(&needle) {
+                            violations.push(Violation {
+                                check: "libm-determinism",
+                                crate_name: rel.clone(),
+                                detail: format!(
+                                    "{rel}:{}: raw `.{method}(` — platform libm is not \
+                                     correctly rounded and differs across ISAs; this crate's \
+                                     CONTRACT claims cross-ISA bitwise determinism (bead \
+                                     lyms), so use fs_math::det::{method} (or det::pow for \
+                                     cbrt/powf), or annotate `// det-ok: <reason>`",
+                                    idx + 1
+                                ),
+                            });
+                        }
+                    }
+                }
             }
         }
     }
@@ -3051,6 +3134,7 @@ fn main() -> ExitCode {
         "check-contracts" => (check_contracts(&manifests), vec!["contracts"]),
         "check-unsafe" => (check_unsafe(&root), vec!["unsafe-capsules"]),
         "check-powi" => (check_powi(&root), vec!["powi-determinism"]),
+        "check-libm" => (check_libm(&root), vec!["libm-determinism"]),
         "check-terminology" => (check_terminology(&root), vec![TERMINOLOGY_CHECK]),
         "check-goldens" => (check_goldens(&root), vec!["golden-couplings"]),
         "check-identities" => (
@@ -3071,6 +3155,7 @@ fn main() -> ExitCode {
             v.extend(check_contracts(&manifests));
             v.extend(check_unsafe(&root));
             v.extend(check_powi(&root));
+            v.extend(check_libm(&root));
             v.extend(check_terminology(&root));
             v.extend(check_goldens(&root));
             v.extend(identities::check_identities(&root));
@@ -3088,6 +3173,7 @@ fn main() -> ExitCode {
                     "contracts",
                     "unsafe-capsules",
                     "powi-determinism",
+                    "libm-determinism",
                     TERMINOLOGY_CHECK,
                     "golden-couplings",
                     "semantic-identities",

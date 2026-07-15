@@ -12,6 +12,9 @@
 use fs_evidence::{NumericalCertificate, NumericalKind};
 use fs_exec::Cx;
 use fs_geom::{Aabb, Chart, ChartSample, Point3, Vec3};
+// Determinism doctrine (bead frankensim-lyms): transcendentals route
+// through fs_math::det so the CONTRACT's bitwise claim holds cross-ISA.
+use fs_math::det;
 
 /// Invalid public symmetry-group parameters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,12 +102,12 @@ impl SymmetryGroup {
             SymmetryGroup::ReflectX => Point3::new(p.x.abs(), p.y, p.z),
             SymmetryGroup::Cyclic { n } => {
                 let sector = core::f64::consts::TAU / f64::from(n);
-                let r = p.x.hypot(p.y);
+                let r = det::hypot(p.x, p.y);
                 if r < 1e-300 {
                     return p;
                 }
-                let theta = p.y.atan2(p.x).rem_euclid(sector);
-                Point3::new(r * theta.cos(), r * theta.sin(), p.z)
+                let theta = det::atan2(p.y, p.x).rem_euclid(sector);
+                Point3::new(r * det::cos(theta), r * det::sin(theta), p.z)
             }
             SymmetryGroup::Periodic { period } => Point3::new(p.x.rem_euclid(period), p.y, p.z),
         }
@@ -128,10 +131,10 @@ impl SymmetryGroup {
             SymmetryGroup::Cyclic { n } => {
                 // The fold is a rotation by −k·sector; rotate g back.
                 let sector = core::f64::consts::TAU / f64::from(n);
-                let theta = p.y.atan2(p.x);
+                let theta = det::atan2(p.y, p.x);
                 let k = (theta.rem_euclid(core::f64::consts::TAU) / sector).floor();
                 let ang = k * sector;
-                let (s, c) = ang.sin_cos();
+                let (s, c) = (det::sin(ang), det::cos(ang));
                 Vec3::new(c * g.x - s * g.y, s * g.x + c * g.y, g.z)
             }
             SymmetryGroup::Periodic { .. } => g,
@@ -150,7 +153,7 @@ impl SymmetryGroup {
             SymmetryGroup::Cyclic { n } => (1..n)
                 .map(|k| {
                     let ang = core::f64::consts::TAU * f64::from(k) / f64::from(n);
-                    let (s, c) = ang.sin_cos();
+                    let (s, c) = (det::sin(ang), det::cos(ang));
                     Point3::new(c * p.x - s * p.y, s * p.x + c * p.y, p.z)
                 })
                 .collect(),

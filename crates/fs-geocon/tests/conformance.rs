@@ -209,7 +209,7 @@ fn neck_samples(r: f64) -> Vec<Point3> {
     (0..16)
         .map(|k| {
             let th = core::f64::consts::TAU * f64::from(k) / 16.0;
-            Point3::new(0.0, r * th.cos(), r * th.sin())
+            Point3::new(0.0, r * th.cos(), r * th.sin()) // det-ok: test fixture points; both assertion sides share them
         })
         .collect()
 }
@@ -224,7 +224,7 @@ fn envelope_sphere_samples(c: Point3) -> Vec<Point3> {
             let r = (ENVELOPE_SPHERE_RADIUS * ENVELOPE_SPHERE_RADIUS - z * z)
                 .max(0.0)
                 .sqrt();
-            v.push(Point3::new(c.x + r * th.cos(), c.y + r * th.sin(), c.z + z));
+            v.push(Point3::new(c.x + r * th.cos(), c.y + r * th.sin(), c.z + z)); // det-ok: test fixture points; both assertion sides share them
         }
         v.push(Point3::new(c.x, c.y, c.z + ENVELOPE_SPHERE_RADIUS));
         v.push(Point3::new(c.x, c.y, c.z - ENVELOPE_SPHERE_RADIUS));
@@ -431,7 +431,7 @@ fn gcp_002_draft_angles() {
             let mut b = FrepBuilder::new();
             let th = deg.to_radians();
             // Wall normal: tilted from horizontal toward +z by θ.
-            let n = Vec3::new(th.cos(), 0.0, th.sin());
+            let n = Vec3::new(th.cos(), 0.0, th.sin()); // det-ok: test fixture normals; both assertion sides share them
             let hs = b.half_space(n, 0.5).expect("hs");
             let bx = b
                 .box_prim(Point3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 1.0, 1.0))
@@ -514,8 +514,7 @@ fn gcp_002_draft_angles() {
         let fd = (pen(10.0 + h) - pen(10.0 - h)) / (2.0 * h);
         // Analytic: penalty = (sin15° − sin θ)², d/dθdeg = −2(sin15°−sinθ)cosθ·(π/180).
         let th = 10.0f64.to_radians();
-        let analytic =
-            -2.0 * (15.0f64.to_radians().sin() - th.sin()) * th.cos() * core::f64::consts::PI
+        let analytic = -2.0 * (15.0f64.to_radians().sin() - th.sin()) * th.cos() * core::f64::consts::PI // det-ok: analytic reference sharing the fixture inputs
                 / 180.0;
         let deriv_ok = (fd - analytic).abs() < 0.05 * analytic.abs();
         verdict(
@@ -749,7 +748,7 @@ fn gcp_003_symmetry_quotient() {
         }
         .support();
         assert!(
-            cyclic_support.max.x >= extent.hypot(extent).next_up(),
+            cyclic_support.max.x >= extent.hypot(extent).next_up(), // det-ok: test bound only
             "cyclic support radius must be rounded outward"
         );
         verdict(
@@ -787,7 +786,7 @@ fn gcp_004_envelopes() {
         let penetration_ok = (out.worst - 0.2).abs() < 1e-9
             && !out.violating.is_empty()
             && out.soft_worst >= out.worst
-            && out.soft_worst - out.worst <= n_samples.ln() / 40.0 + 1e-9;
+            && out.soft_worst - out.worst <= n_samples.ln() / 40.0 + 1e-9; // det-ok: test tolerance bound only
         // Keep-out: a forbidden ball at the origin.
         let keepout = SphereChart {
             center: Point3::new(0.0, 0.0, 0.0),

@@ -12,6 +12,7 @@ layer = "L4"
 
 [dependencies]
 fs-evidence = { path = "../fs-evidence" }
+fs-math = { path = "../fs-math" }
 
 [dev-dependencies]
 

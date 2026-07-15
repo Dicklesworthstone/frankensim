@@ -67,6 +67,10 @@ ordered comparison over finite values.
 Fully deterministic: the allocation, robustness check, and budget are pure
 functions of the inputs. Accumulation and output use input order; canonical-name
 collision reporting always identifies the first and colliding input positions.
+Bitwise reproducibility holds CROSS-ISA: every transcendental routes through
+`fs_math::det` (bead frankensim-lyms; platform libm is not correctly rounded
+and differs across ISAs), and the crate is registered in the `check-libm`
+doctrine lint. `sqrt` stays primitive (IEEE-754 correct rounding).
 
 ## Cancellation behavior
 

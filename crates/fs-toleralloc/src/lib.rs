@@ -17,9 +17,18 @@
 //! it against the QoI evaluated at sampled tolerance-band EXTREMES and flags
 //! where the linearization fails. Every loosened tolerance in the
 //! [`gdt_report`] carries the certified sensitivity (with its color) that
-//! justifies it. Deterministic; depends only on `fs-evidence`.
+//! justifies it. Deterministic; depends only on `fs-evidence` and the
+//! `fs-math` deterministic scalar kernels.
+//!
+//! DETERMINISM DOCTRINE (bead frankensim-lyms): every transcendental in
+//! this crate routes through `fs_math::det` so the "fully deterministic"
+//! contract holds cross-ISA by construction — platform libm `ln`/`exp`
+//! differ by ≥1 ULP across ISAs and libm versions. `sqrt` stays primitive
+//! (IEEE-754 requires correct rounding for it).
 
 use std::collections::BTreeMap;
+
+use fs_math::det;
 
 pub use fs_evidence::ColorRank;
 
@@ -238,15 +247,15 @@ pub fn allocate(
     // squaring a sensitivity or k. The public tolerance is still refused if
     // its mathematically required value is not representable as a positive
     // finite f64.
-    let log_k = k.ln();
+    let log_k = det::ln(k);
     let log_shapes: Vec<f64> = features
         .iter()
-        .map(|feature| (feature.cost_coeff.ln() - 2.0 * feature.sensitivity.ln()) / 3.0)
+        .map(|feature| (det::ln(feature.cost_coeff) - 2.0 * det::ln(feature.sensitivity)) / 3.0)
         .collect();
     let log_variance_terms: Vec<f64> = features
         .iter()
         .zip(&log_shapes)
-        .map(|(feature, &log_shape)| 2.0 * (feature.sensitivity.ln() - log_k + log_shape))
+        .map(|(feature, &log_shape)| 2.0 * (det::ln(feature.sensitivity) - log_k + log_shape))
         .collect();
     if log_shapes.iter().any(|value| !value.is_finite())
         || log_variance_terms.iter().any(|value| !value.is_finite())
@@ -263,10 +272,10 @@ pub fn allocate(
         .fold(f64::NEG_INFINITY, f64::max);
     let scaled_variance_sum: f64 = log_variance_terms
         .iter()
-        .map(|term| (term - max_log_variance).exp())
+        .map(|term| det::exp(term - max_log_variance))
         .sum();
-    let log_shape_variance = max_log_variance + scaled_variance_sum.ln();
-    let log_scale = 0.5 * (variance_budget.ln() - log_shape_variance);
+    let log_shape_variance = max_log_variance + det::ln(scaled_variance_sum);
+    let log_scale = 0.5 * (det::ln(variance_budget) - log_shape_variance);
     if !log_scale.is_finite() {
         return Err(invalid_derived(
             DerivedQuantity::AllocationNormalization,
@@ -280,10 +289,10 @@ pub fn allocate(
     let mut achieved_variance = 0.0;
     for (index, (feature, &log_shape)) in features.iter().zip(&log_shapes).enumerate() {
         let log_tolerance = log_shape + log_scale;
-        let tolerance = log_tolerance.exp();
+        let tolerance = det::exp(log_tolerance);
         validate_positive_derived(DerivedQuantity::Tolerance, Some(index), tolerance)?;
 
-        let cost_contribution = (feature.cost_coeff.ln() - log_tolerance).exp();
+        let cost_contribution = det::exp(det::ln(feature.cost_coeff) - log_tolerance);
         validate_positive_derived(
             DerivedQuantity::CostContribution,
             Some(index),
@@ -292,8 +301,8 @@ pub fn allocate(
         total_cost += cost_contribution;
         validate_positive_derived(DerivedQuantity::TotalCost, None, total_cost)?;
 
-        let log_variance = 2.0 * (feature.sensitivity.ln() - log_k + log_tolerance);
-        let variance_contribution = log_variance.exp();
+        let log_variance = 2.0 * (det::ln(feature.sensitivity) - log_k + log_tolerance);
+        let variance_contribution = det::exp(log_variance);
         validate_nonnegative_derived(
             DerivedQuantity::VarianceContribution,
             Some(index),
@@ -320,10 +329,10 @@ pub fn allocate(
 }
 
 fn action_for(tolerance: f64, baseline: f64) -> Action {
-    let log_ratio = tolerance.ln() - baseline.ln();
-    if log_ratio > 1.01_f64.ln() {
+    let log_ratio = det::ln(tolerance) - det::ln(baseline);
+    if log_ratio > det::ln(1.01) {
         Action::Loosen
-    } else if log_ratio < 0.99_f64.ln() {
+    } else if log_ratio < det::ln(0.99) {
         Action::Tighten
     } else {
         Action::Unchanged
@@ -696,7 +705,7 @@ fn two_sided_normal_quantile(target: f64) -> f64 {
         target * (0.5 * numerator / denominator)
     } else {
         let upper_tail = (1.0 - target) * 0.5;
-        let q = (-2.0 * upper_tail.ln()).sqrt();
+        let q = (-2.0 * det::ln(upper_tail)).sqrt();
         -(((((C[0] * q + C[1]) * q + C[2]) * q + C[3]) * q + C[4]) * q + C[5])
             / ((((D[0] * q + D[1]) * q + D[2]) * q + D[3]) * q + 1.0)
     }

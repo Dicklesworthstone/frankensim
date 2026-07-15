@@ -6,9 +6,12 @@
 
 use fs_evidence::NumericalKind;
 use fs_exec::Cx;
+// Determinism doctrine (bead frankensim-lyms): transcendentals route
+// through fs_math::det so the CONTRACT's bitwise claim holds cross-ISA.
 use fs_geom::{
     Aabb, Chart, ChartSample, Point3, SamplingDomain, SamplingDomainError, TraceStepClaim, Vec3,
 };
+use fs_math::det;
 use fs_query::{QueryError, thickness_at, thickness_at_clipped};
 
 /// Thickness aggregation over boundary samples.
@@ -113,7 +116,7 @@ fn min_thickness_soft_impl(
                         reason: "the local thickness oracle returned an invalid or unexpectedly authoritative estimate",
                     });
                 }
-                let inverse_power = t.value.powf(-p);
+                let inverse_power = det::pow(t.value, -p);
                 if !inverse_power.is_finite() || inverse_power <= 0.0 {
                     return Err(QueryError::InvalidThicknessArithmetic {
                         reason: "a finite local thickness overflowed the soft-min power",
@@ -152,7 +155,7 @@ fn min_thickness_soft_impl(
     if count == 0 {
         return Err(QueryError::NoThicknessSamples { skipped });
     }
-    let soft_min = (inv_sum / f64::from(count)).powf(-1.0 / p);
+    let soft_min = det::pow(inv_sum / f64::from(count), -1.0 / p);
     if !soft_min.is_finite() || soft_min <= 0.0 || !hard_min.is_finite() || hard_min <= 0.0 {
         return Err(QueryError::InvalidThicknessArithmetic {
             reason: "the aggregated thickness estimate is not finite and positive",
@@ -201,7 +204,7 @@ pub fn draft_violations(
 ) -> Result<DraftReport, fs_query::QueryError> {
     let pn = pull.norm().max(1e-300);
     let d = pull.scale(1.0 / pn);
-    let sin_a = min_draft.sin();
+    let sin_a = det::sin(min_draft);
     let mut penalty = 0.0;
     let mut violating = Vec::new();
     let mut undercuts = Vec::new();
@@ -286,12 +289,12 @@ pub fn envelope_violation(
         if g > 0.0 {
             violating.push(i);
         }
-        acc += ((g - max_g) * beta).exp();
+        acc += det::exp((g - max_g) * beta);
     }
     let soft_worst = if gs.is_empty() {
         0.0
     } else {
-        max_g + acc.ln() / beta
+        max_g + det::ln(acc) / beta
     };
     EnvelopeReport {
         worst,
@@ -776,7 +779,7 @@ pub fn volume_smooth(
                         value_bits: sd.to_bits(),
                     });
                 }
-                acc += grid.cell_volume_estimate / (1.0 + (sd / epsilon).exp());
+                acc += grid.cell_volume_estimate / (1.0 + det::exp(sd / epsilon));
                 completed_cells += 1;
             }
         }

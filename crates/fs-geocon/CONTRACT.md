@@ -117,7 +117,12 @@ samples are structured failures rather than false enclosures or NaN results.
 ## Determinism class
 
 Fully deterministic: fixed sample sets, canonical iteration, no
-randomness. Identical inputs give identical reports bitwise.
+randomness. Identical inputs give identical reports bitwise, CROSS-ISA:
+every transcendental routes through `fs_math::det` (bead frankensim-lyms;
+platform libm is not correctly rounded and differs across ISAs), and the
+crate is registered in the `check-libm` doctrine lint that keeps raw
+libm from reappearing. `sqrt` stays primitive (IEEE-754 correct
+rounding).
 
 ## Cancellation behavior
 
