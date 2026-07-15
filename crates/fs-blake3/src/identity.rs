@@ -104,7 +104,11 @@ pub const CANONICAL_IDENTITY_HASH_DOMAIN: &str =
 pub const SCHEMA_ID_HASH_DOMAIN: &str = "org.frankensim.fs-blake3.schema-id.v1";
 
 const CANONICAL_MAGIC: &[u8; 8] = b"FSID\0\0\0\x01";
-const SCHEMA_MAGIC: &[u8; 8] = b"FSSCHEM\x01";
+// v2 (bead sj31i.52.10): field descriptors bind the expected child
+// role/schema recursively, so every v1 schema id is a DIFFERENT value
+// with an explicit no-authority crosswalk boundary (no silent
+// reinterpretation of v1 identities as child-bound).
+const SCHEMA_MAGIC: &[u8; 8] = b"FSSCHEM\x02";
 const FIELD_MARKER: u8 = 0xf0;
 const END_MARKER: u8 = 0xff;
 const FLOAT_POLICY_FINITE_EXACT_BITS: u8 = 1;
@@ -256,22 +260,153 @@ impl WireType {
     }
 }
 
+/// The parent-declared binding for a child field (bead sj31i.52.10):
+/// the EXACT expected child role and complete schema identity —
+/// domain, name, version, context, and the child's full recursive
+/// field schema. A parent schema admits only this child type; wrong
+/// role/domain/name/version/context/nested schema refuses at encode
+/// time, and the binding is part of the parent schema-id preimage, so
+/// changing the expected child type changes the parent [`SchemaId`].
+///
+/// Field-schema comparison uses `&'static` slice POINTER identity: the
+/// binding built by [`ChildSpec::for_identity`] captures the child
+/// schema's own `FIELDS` static, which is exactly what the encoder
+/// sees for a matching type — while a structurally identical but
+/// DISTINCT schema type stays non-confusable.
+#[derive(Debug, Clone, Copy)]
+pub struct ChildSpec {
+    role: IdentityRole,
+    domain: &'static str,
+    name: &'static str,
+    version: u32,
+    context: &'static str,
+    fields: &'static [FieldSpec],
+}
+
+impl ChildSpec {
+    /// The binding for exactly the identity type `J`.
+    #[must_use]
+    pub const fn for_identity<J: StrongIdentity>() -> Self {
+        Self {
+            role: J::ROLE,
+            domain: <J::Schema as CanonicalSchema>::DOMAIN,
+            name: <J::Schema as CanonicalSchema>::NAME,
+            version: <J::Schema as CanonicalSchema>::VERSION,
+            context: <J::Schema as CanonicalSchema>::CONTEXT,
+            fields: <J::Schema as CanonicalSchema>::FIELDS,
+        }
+    }
+
+    /// Check an encoder-supplied identity type against this binding,
+    /// returning the first mismatched dimension.
+    fn matches<J: StrongIdentity>(&self) -> Result<(), &'static str> {
+        if self.role.tag() != J::ROLE.tag() {
+            return Err("child role");
+        }
+        if self.domain != <J::Schema as CanonicalSchema>::DOMAIN {
+            return Err("child schema domain");
+        }
+        if self.name != <J::Schema as CanonicalSchema>::NAME {
+            return Err("child schema name");
+        }
+        if self.version != <J::Schema as CanonicalSchema>::VERSION {
+            return Err("child schema version");
+        }
+        if self.context != <J::Schema as CanonicalSchema>::CONTEXT {
+            return Err("child schema context");
+        }
+        if !core::ptr::eq(self.fields, <J::Schema as CanonicalSchema>::FIELDS) {
+            return Err("child field schema");
+        }
+        Ok(())
+    }
+}
+
+impl PartialEq for ChildSpec {
+    fn eq(&self, other: &Self) -> bool {
+        // Pointer identity on the recursive tail keeps equality total
+        // even for (pathological) cyclic `&'static` schema graphs.
+        self.role.tag() == other.role.tag()
+            && self.domain == other.domain
+            && self.name == other.name
+            && self.version == other.version
+            && self.context == other.context
+            && core::ptr::eq(self.fields, other.fields)
+    }
+}
+
+impl Eq for ChildSpec {}
+
+impl Hash for ChildSpec {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.role.tag().hash(state);
+        self.domain.hash(state);
+        self.name.hash(state);
+        self.version.hash(state);
+        self.context.hash(state);
+        (self.fields.as_ptr() as usize).hash(state);
+        self.fields.len().hash(state);
+    }
+}
+
 /// One field in a [`CanonicalSchema`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FieldSpec {
     name: &'static str,
     wire_type: WireType,
     presence: Presence,
+    child: Option<&'static ChildSpec>,
 }
 
 impl FieldSpec {
-    /// Declare one required field.
+    /// Declare one required field. Child wire types MUST declare their
+    /// expected child binding through [`FieldSpec::child_of`] /
+    /// [`FieldSpec::ordered_children_of`]; an unbound child field is a
+    /// COMPILE-TIME error in const schema declarations:
+    ///
+    /// ```compile_fail
+    /// use fs_blake3::identity::{FieldSpec, WireType};
+    ///
+    /// const F: FieldSpec = FieldSpec::required("lineage", WireType::Child);
+    /// ```
     #[must_use]
     pub const fn required(name: &'static str, wire_type: WireType) -> Self {
+        match wire_type {
+            WireType::Child | WireType::OrderedChildren => {
+                panic!(
+                    "child fields must declare their expected child schema via child_of/ordered_children_of"
+                )
+            }
+            _ => {}
+        }
         Self {
             name,
             wire_type,
             presence: Presence::Required,
+            child: None,
+        }
+    }
+
+    /// Declare one required child field bound to exactly `spec`.
+    #[must_use]
+    pub const fn child_of(name: &'static str, spec: &'static ChildSpec) -> Self {
+        Self {
+            name,
+            wire_type: WireType::Child,
+            presence: Presence::Required,
+            child: Some(spec),
+        }
+    }
+
+    /// Declare one required ordered-children field bound to exactly
+    /// `spec` (empty collections still validate against the binding).
+    #[must_use]
+    pub const fn ordered_children_of(name: &'static str, spec: &'static ChildSpec) -> Self {
+        Self {
+            name,
+            wire_type: WireType::OrderedChildren,
+            presence: Presence::Required,
+            child: Some(spec),
         }
     }
 
@@ -292,7 +427,14 @@ impl FieldSpec {
             name,
             wire_type: WireType::Bytes,
             presence: Presence::Optional,
+            child: None,
         }
+    }
+
+    /// The declared child binding, when this is a child field.
+    #[must_use]
+    pub const fn child_spec(self) -> Option<&'static ChildSpec> {
+        self.child
     }
 
     /// Stable field name.
@@ -704,20 +846,54 @@ fn classify_schema_descriptor_fields(source: &SchemaDescriptorSource<'_>) {
     } = source;
 }
 
+/// Nested child-binding descriptors deeper than this are POISON-tagged
+/// in the schema-id preimage (still deterministic and well-defined);
+/// the encoder separately refuses to construct under such bindings.
+const MAX_SCHEMA_CHILD_DEPTH: u32 = 16;
+
 fn write_schema_descriptor<E>(
     source: &SchemaDescriptorSource<'_>,
     mut update: impl FnMut(&[u8]) -> Result<(), E>,
 ) -> Result<(), E> {
+    write_schema_descriptor_at(source, &mut update, 0)
+}
+
+fn write_schema_descriptor_at<E>(
+    source: &SchemaDescriptorSource<'_>,
+    update: &mut impl FnMut(&[u8]) -> Result<(), E>,
+    depth: u32,
+) -> Result<(), E> {
     update(SCHEMA_MAGIC)?;
     update(&CANONICAL_FRAME_VERSION.to_le_bytes())?;
-    hash_len_bytes(&mut update, source.domain.as_bytes())?;
-    hash_len_bytes(&mut update, source.name.as_bytes())?;
+    hash_len_bytes(update, source.domain.as_bytes())?;
+    hash_len_bytes(update, source.name.as_bytes())?;
     update(&source.version.to_le_bytes())?;
-    hash_len_bytes(&mut update, source.context.as_bytes())?;
+    hash_len_bytes(update, source.context.as_bytes())?;
     update(&(source.fields.len() as u64).to_le_bytes())?;
     for field in source.fields {
-        hash_len_bytes(&mut update, field.name.as_bytes())?;
+        hash_len_bytes(update, field.name.as_bytes())?;
         update(&[field.wire_type.tag(), field.presence.tag()])?;
+        // bead sj31i.52.10: the expected child binding is part of the
+        // parent schema identity, recursively — changing the expected
+        // child type changes the parent SchemaId.
+        match field.child {
+            None => update(&[0u8])?,
+            Some(_) if depth >= MAX_SCHEMA_CHILD_DEPTH => update(&[2u8])?,
+            Some(child) => {
+                update(&[1u8, child.role.tag()])?;
+                write_schema_descriptor_at(
+                    &SchemaDescriptorSource {
+                        domain: child.domain,
+                        name: child.name,
+                        version: child.version,
+                        context: child.context,
+                        fields: child.fields,
+                    },
+                    update,
+                    depth + 1,
+                )?;
+            }
+        }
     }
     Ok(())
 }
@@ -879,6 +1055,19 @@ pub enum CanonicalError {
         /// Canonical bytes absorbed before cancellation was observed.
         absorbed_bytes: u64,
     },
+    /// A child field was declared without its expected-child binding.
+    ChildBindingMissing {
+        /// The unbound field.
+        field: &'static str,
+    },
+    /// The supplied child identity does not match the parent-declared
+    /// binding.
+    ChildBindingMismatch {
+        /// The bound field.
+        field: &'static str,
+        /// First mismatched dimension.
+        what: &'static str,
+    },
 }
 
 impl fmt::Display for CanonicalError {
@@ -930,6 +1119,16 @@ impl fmt::Display for CanonicalError {
             Self::Cancelled { absorbed_bytes } => write!(
                 f,
                 "canonical identity cancelled after absorbing {absorbed_bytes} bytes"
+            ),
+            Self::ChildBindingMissing { field } => write!(
+                f,
+                "child field `{field}` declares no expected child schema; bind it \
+                 with FieldSpec::child_of or ordered_children_of"
+            ),
+            Self::ChildBindingMismatch { field, what } => write!(
+                f,
+                "child field `{field}` refuses this identity type: {what} does not \
+                 match the parent-declared binding"
             ),
         }
     }
@@ -1304,6 +1503,20 @@ where
     fn append_len_bytes(&mut self, bytes: &[u8]) -> Result<(), CanonicalError> {
         self.append(&as_u64(bytes.len())?.to_le_bytes())?;
         self.append(bytes)
+    }
+
+    /// bead sj31i.52.10: a child field admits ONLY the parent-declared
+    /// child role and complete schema identity.
+    fn validate_child_binding<J: StrongIdentity>(spec: FieldSpec) -> Result<(), CanonicalError> {
+        let Some(expected) = spec.child else {
+            return Err(CanonicalError::ChildBindingMissing { field: spec.name });
+        };
+        expected
+            .matches::<J>()
+            .map_err(|what| CanonicalError::ChildBindingMismatch {
+                field: spec.name,
+                what,
+            })
     }
 
     fn validate_field<D: CanonicalSchema>(
@@ -1734,6 +1947,7 @@ where
         J: StrongIdentity,
     {
         let spec = self.validate_field::<I::Schema>(field, WireType::Child, Presence::Required)?;
+        Self::validate_child_binding::<J>(spec)?;
         self.validate_schema::<J::Schema>()?;
         let child_schema_id = self.compute_schema_id::<J::Schema>()?;
         let child_len = typed_child_len::<J>()?;
@@ -1758,6 +1972,7 @@ where
     {
         let spec =
             self.validate_field::<I::Schema>(field, WireType::OrderedChildren, Presence::Required)?;
+        Self::validate_child_binding::<J>(spec)?;
         enforce_limit(
             LimitKind::CollectionItems,
             declared_count,

@@ -80,6 +80,21 @@ without gaining solver, geometry, FFI, or license surface.
 - Ordered collections preserve caller order. Canonical sets must be strictly
   byte-lexicographic and duplicate-free. Each set item's byte and aggregate
   field budgets are admitted before potentially long ordering comparisons.
+  Child fields are PARENT-BOUND (bead sj31i.52.10): a `FieldSpec` for
+  `Child`/`OrderedChildren` must declare its expected child role and
+  complete schema identity via `FieldSpec::child_of` /
+  `ordered_children_of` + `ChildSpec::for_identity::<J>()` — an unbound
+  child field is a compile-time error, and the encoder refuses any
+  identity whose role/domain/name/version/context/field-schema differs
+  from the declaration (empty ordered collections included). Field-
+  schema comparison uses `&'static` pointer identity, so structurally
+  identical but distinct schema types stay non-confusable. The binding
+  is folded RECURSIVELY (depth-capped with a deterministic poison tag)
+  into the schema-descriptor preimage under `FSSCHEM\x02`, so changing
+  the expected child type changes the parent `SchemaId`; every
+  `FSSCHEM\x01` schema id is therefore a DIFFERENT value with an
+  explicit no-authority crosswalk boundary — v1 ids are correlation
+  history, never silently reinterpreted as child-bound.
   Typed children bind their role, complete schema descriptor identity, and all
   32 digest bytes.
 - Finite `f64` values are encoded by exact IEEE-754 bits. Signed zero remains

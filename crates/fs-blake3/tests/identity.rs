@@ -7,11 +7,11 @@ use std::rc::Rc;
 use fs_blake3::identity::{
     AuthorityAdmitter, AuthorityRef, AuthorityVerifier, ByteObservation, CANONICAL_FRAME_VERSION,
     CANONICAL_IDENTITY_HASH_DOMAIN, CanonicalEncoder, CanonicalError, CanonicalLimits,
-    CanonicalSchema, CheckerId, ContentId, EntityId, EvidenceNodeId, ExternalAnchorRef, Field,
-    FieldSpec, IdentityAdjudication, IdentityRole, KeyPolicyId, LimitKind, ModelId, NeverCancel,
-    NoClaimState, ObservedIdentity, Presence, ProblemSemanticId, SCHEMA_ID_HASH_DOMAIN, SchemaId,
-    SemanticId, SourceByteId, SourceId, StrongIdentity, TrustState, VerifierId, WireContentId,
-    WireType, adjudicate, legacy::LegacyProvenanceV1,
+    CanonicalSchema, CheckerId, ChildSpec, ContentId, EntityId, EvidenceNodeId, ExternalAnchorRef,
+    Field, FieldSpec, IdentityAdjudication, IdentityRole, KeyPolicyId, LimitKind, ModelId,
+    NeverCancel, NoClaimState, ObservedIdentity, Presence, ProblemSemanticId,
+    SCHEMA_ID_HASH_DOMAIN, SchemaId, SemanticId, SourceByteId, SourceId, StrongIdentity,
+    TrustState, VerifierId, WireContentId, WireType, adjudicate, legacy::LegacyProvenanceV1,
 };
 use fs_blake3::{ContentHash, hash_bytes, hash_domain};
 
@@ -200,8 +200,13 @@ impl CanonicalSchema for ChildParent {
     const NAME: &'static str = "identity-test-child-parent";
     const VERSION: u32 = 1;
     const CONTEXT: &'static str = "G0 typed child fixture";
-    const FIELDS: &'static [FieldSpec] = &[FieldSpec::required("child", WireType::Child)];
+    const FIELDS: &'static [FieldSpec] = &[FieldSpec::child_of("child", &LEAF_SEMANTIC_CHILD)];
 }
+
+/// bead sj31i.52.10: the fixtures bind exactly a `SemanticId<LeafV1>`
+/// child; every other role/schema now refuses instead of merely
+/// hashing differently.
+static LEAF_SEMANTIC_CHILD: ChildSpec = ChildSpec::for_identity::<SemanticId<LeafV1>>();
 
 enum ChildrenParent {}
 impl CanonicalSchema for ChildrenParent {
@@ -209,8 +214,10 @@ impl CanonicalSchema for ChildrenParent {
     const NAME: &'static str = "identity-test-children-parent";
     const VERSION: u32 = 1;
     const CONTEXT: &'static str = "G0 ordered children fixture";
-    const FIELDS: &'static [FieldSpec] =
-        &[FieldSpec::required("children", WireType::OrderedChildren)];
+    const FIELDS: &'static [FieldSpec] = &[FieldSpec::ordered_children_of(
+        "children",
+        &LEAF_SEMANTIC_CHILD,
+    )];
 }
 
 enum AllFields {}
@@ -230,8 +237,8 @@ impl CanonicalSchema for AllFields {
         FieldSpec::required("variant", WireType::Variant),
         FieldSpec::required("sequence", WireType::OrderedBytes),
         FieldSpec::required("set", WireType::CanonicalSet),
-        FieldSpec::required("child", WireType::Child),
-        FieldSpec::required("children", WireType::OrderedChildren),
+        FieldSpec::child_of("child", &LEAF_SEMANTIC_CHILD),
+        FieldSpec::ordered_children_of("children", &LEAF_SEMANTIC_CHILD),
     ];
 }
 
@@ -1170,27 +1177,90 @@ fn typed_children_bind_role_schema_order_and_full_digest() {
     let semantic_id = SemanticId::<LeafV1>::parse_slice(&shared_digest).unwrap();
     let source_id = SourceId::<LeafV1>::parse_slice(&shared_digest).unwrap();
     let other_schema_id = SemanticId::<OtherDomain>::parse_slice(&shared_digest).unwrap();
-    let semantic_child = CanonicalEncoder::<SemanticId<ChildParent>, _>::new(LIMITS, NeverCancel)
+    // The declared binding admits exactly SemanticId<LeafV1>...
+    CanonicalEncoder::<SemanticId<ChildParent>, _>::new(LIMITS, NeverCancel)
         .unwrap()
         .child(Field::new(0, "child"), semantic_id)
         .unwrap()
         .finish()
         .unwrap();
-    let source_child = CanonicalEncoder::<SemanticId<ChildParent>, _>::new(LIMITS, NeverCancel)
+    // ...and REFUSES every other role/schema (bead sj31i.52.10): a
+    // wrong child no longer merely hashes differently — it cannot be
+    // constructed under this parent at all.
+    let wrong_role = CanonicalEncoder::<SemanticId<ChildParent>, _>::new(LIMITS, NeverCancel)
         .unwrap()
         .child(Field::new(0, "child"), source_id)
+        .expect_err("a Source child under a Semantic binding refuses");
+    assert!(matches!(
+        wrong_role,
+        CanonicalError::ChildBindingMismatch {
+            field: "child",
+            what: "child role",
+        }
+    ));
+    let wrong_schema = CanonicalEncoder::<SemanticId<ChildParent>, _>::new(LIMITS, NeverCancel)
+        .unwrap()
+        .child(Field::new(0, "child"), other_schema_id)
+        .expect_err("an OtherDomain child under a LeafV1 binding refuses");
+    assert!(matches!(
+        wrong_schema,
+        CanonicalError::ChildBindingMismatch { field: "child", .. }
+    ));
+}
+
+enum ChildParentAltVersion {}
+impl CanonicalSchema for ChildParentAltVersion {
+    const DOMAIN: &'static str = "org.frankensim.test.identity.child-parent.v1";
+    const NAME: &'static str = "identity-test-child-parent";
+    const VERSION: u32 = 1;
+    const CONTEXT: &'static str = "G0 typed child fixture";
+    const FIELDS: &'static [FieldSpec] = &[FieldSpec::child_of("child", &LEAF_V2_SEMANTIC_CHILD)];
+}
+
+enum LeafV2Marker {}
+impl CanonicalSchema for LeafV2Marker {
+    const DOMAIN: &'static str = LeafV1::DOMAIN;
+    const NAME: &'static str = LeafV1::NAME;
+    const VERSION: u32 = 2;
+    const CONTEXT: &'static str = LeafV1::CONTEXT;
+    const FIELDS: &'static [FieldSpec] = LeafV1::FIELDS;
+}
+
+static LEAF_V2_SEMANTIC_CHILD: ChildSpec = ChildSpec::for_identity::<SemanticId<LeafV2Marker>>();
+
+/// bead sj31i.52.10: the expected child binding is part of the parent
+/// schema identity — two parents identical except for the expected
+/// child VERSION have different schema ids — and empty ordered-children
+/// collections still validate their binding.
+#[test]
+fn child_bindings_are_schema_id_bearing_and_checked_when_empty() {
+    let bound_v1 = *SchemaId::<ChildParent>::for_schema().as_bytes();
+    let bound_v2 = *SchemaId::<ChildParentAltVersion>::for_schema().as_bytes();
+    assert_ne!(
+        bound_v1, bound_v2,
+        "changing the expected child type must change the parent schema id"
+    );
+
+    // An EMPTY ordered-children collection still validates the binding:
+    // the right type admits with zero items, the wrong type refuses
+    // before any item is read.
+    CanonicalEncoder::<EvidenceNodeId<ChildrenParent>, _>::new(LIMITS, NeverCancel)
+        .unwrap()
+        .ordered_children::<SemanticId<LeafV1>, _>(Field::new(0, "children"), 0, [])
         .unwrap()
         .finish()
         .unwrap();
-    let other_schema_child =
-        CanonicalEncoder::<SemanticId<ChildParent>, _>::new(LIMITS, NeverCancel)
-            .unwrap()
-            .child(Field::new(0, "child"), other_schema_id)
-            .unwrap()
-            .finish()
-            .unwrap();
-    assert_ne!(semantic_child.id(), source_child.id());
-    assert_ne!(semantic_child.id(), other_schema_child.id());
+    let refusal = CanonicalEncoder::<EvidenceNodeId<ChildrenParent>, _>::new(LIMITS, NeverCancel)
+        .unwrap()
+        .ordered_children::<SemanticId<OtherDomain>, _>(Field::new(0, "children"), 0, [])
+        .expect_err("an empty collection of the wrong child schema still refuses");
+    assert!(matches!(
+        refusal,
+        CanonicalError::ChildBindingMismatch {
+            field: "children",
+            ..
+        }
+    ));
 }
 
 #[test]

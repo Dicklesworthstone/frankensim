@@ -177,6 +177,15 @@ impl CanonicalSchema for TriComplex2LineageSchema {
 /// lineage.
 pub enum TriFeatureSchema {}
 
+/// bead sj31i.52.10: the feature schema admits EXACTLY a
+/// `TriComplex2LineageSchema` entity as its lineage child — any other
+/// role/schema/version refuses at encode time, and this binding is part
+/// of `TriFeatureSchema`'s own schema identity.
+static TRI_FEATURE_LINEAGE_CHILD: fs_blake3::identity::ChildSpec =
+    fs_blake3::identity::ChildSpec::for_identity::<
+        fs_blake3::identity::EntityId<TriComplex2LineageSchema>,
+    >();
+
 impl CanonicalSchema for TriFeatureSchema {
     const DOMAIN: &'static str = "org.frankensim.fs-rep-mesh.tri-feature.v1";
     const NAME: &'static str = "tri-complex2-feature";
@@ -184,7 +193,7 @@ impl CanonicalSchema for TriFeatureSchema {
     const CONTEXT: &'static str =
         "topological feature identity from lineage, dimension, and canonical vertex keys";
     const FIELDS: &'static [FieldSpec] = &[
-        FieldSpec::required("lineage", WireType::Child),
+        FieldSpec::child_of("lineage", &TRI_FEATURE_LINEAGE_CHILD),
         FieldSpec::required("topological-dimension", WireType::U64),
         FieldSpec::required("vertex-keys", WireType::CanonicalSet),
     ];
