@@ -2143,8 +2143,7 @@ fn integrate_clipped_p1(
     // error-free expansions rather than rounded offsets. Other zero results
     // remain fail-closed.
     let zero_is_proven = (endpoint_values[0] == 0.0 && endpoint_values[1] == 0.0)
-        || (endpoint_values[0] == -endpoint_values[1]
-            && two_diff(a, x0) == two_diff(x1, b));
+        || (endpoint_values[0] == -endpoint_values[1] && two_diff(a, x0) == two_diff(x1, b));
     if integral == 0.0 && !zero_is_proven {
         return Err(DwrError::UnresolvedZeroIntegral { quantity, cell });
     }

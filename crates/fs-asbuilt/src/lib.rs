@@ -32,11 +32,14 @@ use fs_ivl::Interval;
 
 const AS_BUILT_ESTIMATOR_DOMAIN: &str = "org.frankensim.fs-asbuilt.diff-estimator.v4";
 const AS_BUILT_ESTIMATOR_SCHEMA: &[u8] = b"fs-asbuilt-diff-estimator-v4";
-const AS_BUILT_WORK_PLAN_VERSION: u32 = 1;
-/// Identity-bound cancellation policy version for resource-driving point scans.
-pub const AS_BUILT_POLL_POLICY_VERSION: u32 = 1;
+/// Identity-bound work-plan version for resource-driving scans and hashing.
+pub const AS_BUILT_WORK_PLAN_VERSION: u32 = 2;
+/// Identity-bound cancellation policy version for resource-driving scans.
+pub const AS_BUILT_POLL_POLICY_VERSION: u32 = 2;
 /// Maximum point visits between cancellation polls inside a complete scan.
 pub const AS_BUILT_POLL_STRIDE_POINTS: usize = 256;
+/// Maximum calibration-identity bytes between cancellation polls.
+pub const AS_BUILT_POLL_STRIDE_BYTES: usize = 256;
 /// Maximum points accepted by registration or one as-built comparison.
 pub const MAX_AS_BUILT_POINTS: usize = 1_000_000;
 
@@ -47,9 +50,11 @@ const REGISTER_SCATTER_PHASE: &str = "register.scatter";
 const REGISTER_RESIDUAL_PHASE: &str = "register.residual";
 const REGISTER_PUBLISH_PHASE: &str = "register.publish";
 const DIFF_INITIAL_PHASE: &str = "as-built-diff.initial";
+const DIFF_CALIBRATION_VALIDATION_PHASE: &str = "as-built-diff.calibration-validation";
 const DIFF_DEVIATIONS_PHASE: &str = "as-built-diff.deviations";
 const DIFF_MAXIMUM_PHASE: &str = "as-built-diff.maximum";
 const DIFF_IDENTITY_PHASE: &str = "as-built-diff.identity";
+const DIFF_CALIBRATION_HASH_PHASE: &str = "as-built-diff.calibration-hash";
 const DIFF_PUBLISH_PHASE: &str = "as-built-diff.publish";
 
 /// A 2-D point (design or measured coordinate).
@@ -134,9 +139,9 @@ pub enum RegError {
     Cancelled {
         /// Stable operation phase at the observing checkpoint.
         phase: &'static str,
-        /// Exact point-visit work completed before the checkpoint.
+        /// Exact logical work units completed before the checkpoint.
         completed_work: u128,
-        /// Exact point-visit work planned by the constant-time preflight.
+        /// Exact logical work units planned by the constant-time preflight.
         planned_work: u128,
     },
     /// Fewer fiducials than needed for a well-posed fit.
@@ -191,10 +196,19 @@ pub enum RegError {
     AllocationFailed,
     /// A canonical identity field length could not be represented as `u64`.
     IdentityEncodingOverflow,
-    /// The complete point-visit work plan could not be represented exactly.
+    /// The complete logical-work plan could not be represented exactly.
     WorkPlanOverflow {
         /// Stable operation name.
         operation: &'static str,
+    },
+    /// Runtime work accounting did not reconcile with its preflight plan.
+    WorkPlanMismatch {
+        /// Stable operation phase where reconciliation failed.
+        phase: &'static str,
+        /// Logical work units observed at reconciliation.
+        completed_work: u128,
+        /// Logical work units expected at reconciliation.
+        planned_work: u128,
     },
 }
 
@@ -207,7 +221,7 @@ impl core::fmt::Display for RegError {
                 planned_work,
             } => write!(
                 formatter,
-                "as-built operation cancelled during {phase} after {completed_work}/{planned_work} point visits"
+                "as-built operation cancelled during {phase} after {completed_work}/{planned_work} logical work units"
             ),
             Self::TooFewFiducials { have, need } => {
                 write!(formatter, "need at least {need} fiducials, got {have}")
@@ -239,8 +253,16 @@ impl core::fmt::Display for RegError {
                 formatter.write_str("canonical identity field length exceeds u64")
             }
             Self::WorkPlanOverflow { operation } => {
-                write!(formatter, "{operation} point-visit work plan exceeds u128")
+                write!(formatter, "{operation} logical-work plan exceeds u128")
             }
+            Self::WorkPlanMismatch {
+                phase,
+                completed_work,
+                planned_work,
+            } => write!(
+                formatter,
+                "as-built work accounting mismatch during {phase}: completed {completed_work}, expected {planned_work} logical work units"
+            ),
         }
     }
 }
@@ -468,6 +490,8 @@ impl RegistrationWorkPlan {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct DiffWorkPlan {
     points_per_scan: u128,
+    calibration_validation_byte_units: u128,
+    calibration_hash_byte_units: u128,
     total: u128,
 }
 
@@ -506,13 +530,30 @@ impl DiffWorkPlan {
             u128::try_from(design_len).map_err(|_| RegError::WorkPlanOverflow {
                 operation: "as-built-diff",
             })?;
-        let total = points_per_scan
+        let calibration_validation_byte_units = u128::try_from(calibration_candidate.len())
+            .map_err(|_| RegError::WorkPlanOverflow {
+                operation: "as-built-diff",
+            })?;
+        let calibration_hash_byte_units = calibration_validation_byte_units;
+        let point_work = points_per_scan
             .checked_mul(3)
+            .ok_or(RegError::WorkPlanOverflow {
+                operation: "as-built-diff",
+            })?;
+        let byte_work = calibration_validation_byte_units
+            .checked_add(calibration_hash_byte_units)
+            .ok_or(RegError::WorkPlanOverflow {
+                operation: "as-built-diff",
+            })?;
+        let total = point_work
+            .checked_add(byte_work)
             .ok_or(RegError::WorkPlanOverflow {
                 operation: "as-built-diff",
             })?;
         Ok(Self {
             points_per_scan,
+            calibration_validation_byte_units,
+            calibration_hash_byte_units,
             total,
         })
     }
@@ -534,15 +575,38 @@ impl WorkProgress {
         }
     }
 
-    fn complete_point(&mut self) -> Result<(), RegError> {
-        self.completed = self
+    fn advance(&mut self, units: u128) -> Result<(), RegError> {
+        let completed = self
             .completed
-            .checked_add(1)
-            .filter(|completed| *completed <= self.planned)
+            .checked_add(units)
             .ok_or(RegError::WorkPlanOverflow {
                 operation: self.operation,
             })?;
+        if completed > self.planned {
+            return Err(RegError::WorkPlanMismatch {
+                phase: self.operation,
+                completed_work: completed,
+                planned_work: self.planned,
+            });
+        }
+        self.completed = completed;
         Ok(())
+    }
+
+    fn complete_point(&mut self) -> Result<(), RegError> {
+        self.advance(1)
+    }
+
+    fn require_completed(self, phase: &'static str, planned_work: u128) -> Result<(), RegError> {
+        if self.completed == planned_work {
+            Ok(())
+        } else {
+            Err(RegError::WorkPlanMismatch {
+                phase,
+                completed_work: self.completed,
+                planned_work,
+            })
+        }
     }
 }
 
@@ -609,7 +673,7 @@ fn register_with_poll(
         &mut progress,
         poll,
     )?;
-    debug_assert_eq!(progress.completed, plan.points_per_scan * 2);
+    progress.require_completed(REGISTER_DESIGN_CENTROID_PHASE, plan.points_per_scan * 2)?;
     operation_checkpoint(REGISTER_MEASURED_CENTROID_PHASE, progress, poll)?;
     let cq = centroid(
         fiducials,
@@ -618,7 +682,7 @@ fn register_with_poll(
         &mut progress,
         poll,
     )?;
-    debug_assert_eq!(progress.completed, plan.points_per_scan * 4);
+    progress.require_completed(REGISTER_MEASURED_CENTROID_PHASE, plan.points_per_scan * 4)?;
     if cp.scale <= 0.0 {
         return Err(RegError::CollinearFiducials);
     }
@@ -672,7 +736,7 @@ fn register_with_poll(
             s_cross_enclosure + dpx_enclosure * dqy_enclosure - dpy_enclosure * dqx_enclosure;
         progress.complete_point()?;
     }
-    debug_assert_eq!(progress.completed, plan.points_per_scan * 5);
+    progress.require_completed(REGISTER_SCATTER_PHASE, plan.points_per_scan * 5)?;
     for (field, value) in [
         ("registration design scatter xx", sxx),
         ("registration design scatter yy", syy),
@@ -746,7 +810,7 @@ fn register_with_poll(
         residuals.add(distance)?;
         progress.complete_point()?;
     }
-    debug_assert_eq!(progress.completed, plan.total);
+    progress.require_completed(REGISTER_RESIDUAL_PHASE, plan.total)?;
     operation_checkpoint(REGISTER_PUBLISH_PHASE, progress, poll)?;
     Registration::new(rotation_rad, tx, ty, residuals.root_mean_square(nf)?)
 }
@@ -1028,11 +1092,13 @@ impl ExecutionIdentity {
 struct PollPolicy {
     version: u32,
     stride_points: usize,
+    stride_bytes: usize,
 }
 
 const CURRENT_POLL_POLICY: PollPolicy = PollPolicy {
     version: AS_BUILT_POLL_POLICY_VERSION,
     stride_points: AS_BUILT_POLL_STRIDE_POINTS,
+    stride_bytes: AS_BUILT_POLL_STRIDE_BYTES,
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -1057,7 +1123,15 @@ fn as_built_diff_with_poll(
     let mut progress = WorkProgress::new(plan.total, "as-built-diff");
     operation_checkpoint(DIFF_INITIAL_PHASE, progress, poll)?;
 
-    if let Some(reason) = color_leaf_identity_reason(calibration_candidate) {
+    operation_checkpoint(DIFF_CALIBRATION_VALIDATION_PHASE, progress, poll)?;
+    let invalid_calibration_reason = color_leaf_identity_reason(calibration_candidate);
+    progress.advance(plan.calibration_validation_byte_units)?;
+    operation_checkpoint(DIFF_CALIBRATION_VALIDATION_PHASE, progress, poll)?;
+    progress.require_completed(
+        DIFF_CALIBRATION_VALIDATION_PHASE,
+        plan.calibration_validation_byte_units,
+    )?;
+    if let Some(reason) = invalid_calibration_reason {
         return Err(RegError::InvalidCalibrationIdentity {
             reason,
             bytes: calibration_candidate.len(),
@@ -1080,6 +1154,10 @@ fn as_built_diff_with_poll(
         deviations.push(reg.apply(*design_point)?.dist(*scanned_point)?);
         progress.complete_point()?;
     }
+    progress.require_completed(
+        DIFF_DEVIATIONS_PHASE,
+        plan.calibration_validation_byte_units + plan.points_per_scan,
+    )?;
 
     operation_checkpoint(DIFF_MAXIMUM_PHASE, progress, poll)?;
     let mut max_deviation = 0.0_f64;
@@ -1094,6 +1172,10 @@ fn as_built_diff_with_poll(
         max_deviation = max_deviation.max(deviation);
         progress.complete_point()?;
     }
+    progress.require_completed(
+        DIFF_MAXIMUM_PHASE,
+        plan.calibration_validation_byte_units + plan.points_per_scan * 2,
+    )?;
     require_finite("maximum as-built deviation", max_deviation)?;
     let proposed_regime = ValidityDomain::unconstrained()
         .with(
@@ -1132,6 +1214,7 @@ fn as_built_diff_with_poll(
     let within_tolerance =
         max_deviation <= design_tolerance && dispersion <= design_tolerance - max_deviation;
     let above_noise_floor = max_deviation > dispersion;
+    progress.require_completed(DIFF_IDENTITY_PHASE, plan.total)?;
     let output = AsBuiltDiff {
         deviations,
         max_deviation,
@@ -1143,7 +1226,6 @@ fn as_built_diff_with_poll(
             dispersion,
         },
     };
-    debug_assert_eq!(progress.completed, plan.total);
     operation_checkpoint(DIFF_PUBLISH_PHASE, progress, poll)?;
     Ok(output)
 }
@@ -1244,7 +1326,17 @@ fn estimator_identity(
     )?;
     unsigned(
         &mut hasher,
-        b"work-plan.total-point-visits",
+        b"work-plan.calibration-validation-byte-units",
+        &work_plan.calibration_validation_byte_units.to_le_bytes(),
+    )?;
+    unsigned(
+        &mut hasher,
+        b"work-plan.calibration-hash-byte-units",
+        &work_plan.calibration_hash_byte_units.to_le_bytes(),
+    )?;
+    unsigned(
+        &mut hasher,
+        b"work-plan.total-work-units",
         &work_plan.total.to_le_bytes(),
     )?;
     unsigned(
@@ -1261,8 +1353,26 @@ fn estimator_identity(
         b"poll-policy.stride-points",
         &stride_points.to_le_bytes(),
     )?;
+    let stride_bytes =
+        u128::try_from(poll_policy.stride_bytes).map_err(|_| RegError::WorkPlanOverflow {
+            operation: "as-built-diff",
+        })?;
+    unsigned(
+        &mut hasher,
+        b"poll-policy.stride-bytes",
+        &stride_bytes.to_le_bytes(),
+    )?;
     field(&mut hasher, b"calibration-candidate")?;
+    operation_checkpoint(DIFF_CALIBRATION_HASH_PHASE, *progress, poll)?;
     field(&mut hasher, calibration_candidate.as_bytes())?;
+    progress.advance(work_plan.calibration_hash_byte_units)?;
+    operation_checkpoint(DIFF_CALIBRATION_HASH_PHASE, *progress, poll)?;
+    progress.require_completed(
+        DIFF_CALIBRATION_HASH_PHASE,
+        work_plan.calibration_validation_byte_units
+            + work_plan.points_per_scan * 2
+            + work_plan.calibration_hash_byte_units,
+    )?;
     number(
         &mut hasher,
         b"registration.rotation_rad",
@@ -1298,6 +1408,7 @@ fn estimator_identity(
         number(&mut hasher, b"scanned.y", scanned_point.y)?;
         progress.complete_point()?;
     }
+    progress.require_completed(DIFF_IDENTITY_PHASE, work_plan.total)?;
     let preimage_hash = hasher.finalize();
     Ok(format!(
         "asbuilt-diff-v4:{}",
@@ -1444,7 +1555,7 @@ mod cancellation_tests {
             &mut |phase, completed_work, planned_work| {
                 assert_eq!(phase, DIFF_INITIAL_PHASE);
                 assert_eq!(completed_work, 0);
-                assert_eq!(planned_work, 3_000_000);
+                assert_eq!(planned_work, 3_000_060);
                 Err(fs_exec::Cancelled)
             },
         )
@@ -1454,7 +1565,7 @@ mod cancellation_tests {
             RegError::Cancelled {
                 phase: DIFF_INITIAL_PHASE,
                 completed_work: 0,
-                planned_work: 3_000_000,
+                planned_work: 3_000_060,
             }
         );
     }
@@ -1505,7 +1616,7 @@ mod cancellation_tests {
             execution(),
             CURRENT_POLL_POLICY,
             &mut |phase, completed, _| {
-                if phase == DIFF_DEVIATIONS_PHASE && completed == 256 {
+                if phase == DIFF_DEVIATIONS_PHASE && completed == 274 {
                     Err(fs_exec::Cancelled)
                 } else {
                     Ok(())
@@ -1517,8 +1628,8 @@ mod cancellation_tests {
             mid_error,
             RegError::Cancelled {
                 phase: DIFF_DEVIATIONS_PHASE,
-                completed_work: 256,
-                planned_work: 771,
+                completed_work: 274,
+                planned_work: 807,
             }
         );
 
@@ -1545,9 +1656,83 @@ mod cancellation_tests {
             final_error,
             RegError::Cancelled {
                 phase: DIFF_PUBLISH_PHASE,
-                completed_work: 3,
-                planned_work: 3,
+                completed_work: 43,
+                planned_work: 43,
             }
+        );
+    }
+
+    #[test]
+    fn g4_calibration_byte_boundaries_have_exact_phase_progress() {
+        let reg = Registration::new(0.0, 0.0, 0.0, 0.0).unwrap();
+        let one = [Point2::new(0.0, 0.0).unwrap()];
+        let calibration = "x".repeat(AS_BUILT_POLL_STRIDE_BYTES);
+
+        let validation_error = as_built_diff_with_poll(
+            &reg,
+            &one,
+            &one,
+            1.0,
+            0.1,
+            &calibration,
+            execution(),
+            CURRENT_POLL_POLICY,
+            &mut |phase, completed, _| {
+                if phase == DIFF_CALIBRATION_VALIDATION_PHASE && completed == 256 {
+                    Err(fs_exec::Cancelled)
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .expect_err("validation must poll after the maximum bounded identity scan");
+        assert_eq!(
+            validation_error,
+            RegError::Cancelled {
+                phase: DIFF_CALIBRATION_VALIDATION_PHASE,
+                completed_work: 256,
+                planned_work: 515,
+            }
+        );
+
+        let hash_error = as_built_diff_with_poll(
+            &reg,
+            &one,
+            &one,
+            1.0,
+            0.1,
+            &calibration,
+            execution(),
+            CURRENT_POLL_POLICY,
+            &mut |phase, completed, _| {
+                if phase == DIFF_CALIBRATION_HASH_PHASE && completed == 514 {
+                    Err(fs_exec::Cancelled)
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .expect_err("identity hashing must poll after the maximum bounded identity scan");
+        assert_eq!(
+            hash_error,
+            RegError::Cancelled {
+                phase: DIFF_CALIBRATION_HASH_PHASE,
+                completed_work: 514,
+                planned_work: 515,
+            }
+        );
+    }
+
+    #[test]
+    fn g0_work_progress_fails_closed_when_runtime_exceeds_preflight() {
+        let mut progress = WorkProgress::new(0, "short-plan-fixture");
+        assert_eq!(
+            progress.complete_point(),
+            Err(RegError::WorkPlanMismatch {
+                phase: "short-plan-fixture",
+                completed_work: 1,
+                planned_work: 0,
+            })
         );
     }
 
@@ -1586,10 +1771,16 @@ mod cancellation_tests {
             stride_points: CURRENT_POLL_POLICY.stride_points + 1,
             ..CURRENT_POLL_POLICY
         });
+        let next_byte_stride = run(PollPolicy {
+            stride_bytes: CURRENT_POLL_POLICY.stride_bytes + 1,
+            ..CURRENT_POLL_POLICY
+        });
         assert_ne!(identity(&baseline), identity(&next_version));
         assert_ne!(identity(&baseline), identity(&next_stride));
+        assert_ne!(identity(&baseline), identity(&next_byte_stride));
         assert_eq!(baseline.deviations, next_version.deviations);
         assert_eq!(baseline.deviations, next_stride.deviations);
+        assert_eq!(baseline.deviations, next_byte_stride.deviations);
         assert_eq!(
             baseline.max_deviation.to_bits(),
             next_version.max_deviation.to_bits()
@@ -1597,6 +1788,10 @@ mod cancellation_tests {
         assert_eq!(
             baseline.max_deviation.to_bits(),
             next_stride.max_deviation.to_bits()
+        );
+        assert_eq!(
+            baseline.max_deviation.to_bits(),
+            next_byte_stride.max_deviation.to_bits()
         );
     }
 }

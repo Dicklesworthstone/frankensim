@@ -4,8 +4,9 @@
 //! estimated candidate until calibration authority exists.
 
 use fs_asbuilt::{
-    AS_BUILT_POLL_POLICY_VERSION, AS_BUILT_POLL_STRIDE_POINTS, Color, Fiducial, Point2, RegError,
-    Registration, as_built_diff, register, well_posed,
+    AS_BUILT_POLL_POLICY_VERSION, AS_BUILT_POLL_STRIDE_BYTES, AS_BUILT_POLL_STRIDE_POINTS,
+    AS_BUILT_WORK_PLAN_VERSION, Color, Fiducial, Point2, RegError, Registration, as_built_diff,
+    register, well_posed,
 };
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 
@@ -15,7 +16,7 @@ fn with_cx<R>(cancelled: bool, mode: ExecMode, budget: Budget, f: impl FnOnce(&C
         gate.request();
     }
     let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
-    pool.scope(|arena| {
+    let result = pool.scope(|arena| {
         let cx = Cx::new(
             &gate,
             arena,
@@ -29,7 +30,14 @@ fn with_cx<R>(cancelled: bool, mode: ExecMode, budget: Budget, f: impl FnOnce(&C
             mode,
         );
         f(&cx)
-    })
+    });
+    let stats = pool.stats();
+    assert!(
+        stats.quiescent(),
+        "Cx arena must be quiescent after scope: {}",
+        stats.to_json()
+    );
+    result
 }
 
 fn with_default_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
@@ -339,7 +347,7 @@ fn g4_pre_cancelled_entry_points_report_exact_zero_progress() {
         Err(RegError::Cancelled {
             phase: "as-built-diff.initial",
             completed_work: 0,
-            planned_work: 6,
+            planned_work: 12,
         })
     );
 }
@@ -387,9 +395,11 @@ fn g5_identity_binds_mode_and_every_budget_field_without_changing_numerics() {
 }
 
 #[test]
-fn g5_retained_identity_declares_the_v1_256_point_poll_policy() {
-    assert_eq!(AS_BUILT_POLL_POLICY_VERSION, 1);
+fn g5_retained_identity_declares_the_v2_work_and_poll_policies() {
+    assert_eq!(AS_BUILT_WORK_PLAN_VERSION, 2);
+    assert_eq!(AS_BUILT_POLL_POLICY_VERSION, 2);
     assert_eq!(AS_BUILT_POLL_STRIDE_POINTS, 256);
+    assert_eq!(AS_BUILT_POLL_STRIDE_BYTES, 256);
     let diff = fixture_diff(ExecMode::Deterministic, Budget::INFINITE);
     assert!(estimator_identity(&diff).starts_with("asbuilt-diff-v4:"));
 }
@@ -432,12 +442,14 @@ fn public_geometry_and_registration_construction_refuse_non_finite_values() {
     // A scaled computation rounds its normalized value back to exactly 1.0;
     // recovery must therefore use an outward range proof rather than treating
     // a finite scaled result as proof that the original affine sum was finite.
-    let midpoint_overflow = Registration::new(0.0, 2.0_f64.powi(970), 0.0, 0.0).unwrap();
+    let overflow_midpoint_increment = f64::from_bits(0x7c90_0000_0000_0000);
+    let midpoint_overflow = Registration::new(0.0, overflow_midpoint_increment, 0.0, 0.0).unwrap();
     assert!(matches!(
         midpoint_overflow.apply(point(f64::MAX, 0.0)),
         Err(RegError::NonFinite { field: "point.x" })
     ));
-    let negative_midpoint_overflow = Registration::new(0.0, -2.0_f64.powi(970), 0.0, 0.0).unwrap();
+    let negative_midpoint_overflow =
+        Registration::new(0.0, -overflow_midpoint_increment, 0.0, 0.0).unwrap();
     assert!(matches!(
         negative_midpoint_overflow.apply(point(-f64::MAX, 0.0)),
         Err(RegError::NonFinite { field: "point.x" })

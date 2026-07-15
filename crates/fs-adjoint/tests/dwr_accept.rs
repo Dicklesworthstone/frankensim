@@ -705,13 +705,9 @@ fn dwr_refuses_finite_inputs_with_unrepresentable_or_unresolved_derived_arithmet
 
     let cancellation_problem =
         admitted_problem("zero-cancellation", vec![0.0], vec![-1.0, 0.0, 1.0, 2.0]);
-    let exact_cancellation = dwr_integral_qoi(
-        &cancellation_problem,
-        &[0.0, 1.0, -1.0, 0.0],
-        0.25,
-        0.75,
-    )
-    .expect("an exactly symmetric clipped P1 integral is admitted");
+    let exact_cancellation =
+        dwr_integral_qoi(&cancellation_problem, &[0.0, 1.0, -1.0, 0.0], 0.25, 0.75)
+            .expect("an exactly symmetric clipped P1 integral is admitted");
     assert_eq!(exact_cancellation.j_primal().to_bits(), 0.0_f64.to_bits());
     assert!(matches!(
         dwr_integral_qoi(

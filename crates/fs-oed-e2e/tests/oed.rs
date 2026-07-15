@@ -25,10 +25,17 @@ fn with_stream_cx<R>(
     f: impl FnOnce(&Cx<'_>) -> R,
 ) -> R {
     let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
-    pool.scope(|arena| {
+    let result = pool.scope(|arena| {
         let cx = Cx::new(gate, arena, stream, budget, mode);
         f(&cx)
-    })
+    });
+    let stats = pool.stats();
+    assert!(
+        stats.quiescent(),
+        "Cx arena must be quiescent after scope: {}",
+        stats.to_json()
+    );
+    result
 }
 
 fn with_cx<R>(
