@@ -508,3 +508,57 @@ fn amendment_requires_successor_version_and_names_invalidated_descendants() {
         "dropped obligation leaves are named: {record:?}"
     );
 }
+
+#[test]
+fn i02_draft_freezes_with_the_declared_lattice_and_coverage() {
+    let frozen = fs_vmanifest::i02_draft()
+        .freeze()
+        .expect("the I02 seed must freeze");
+    assert_eq!(frozen.initiative(), "I02");
+    assert_eq!(frozen.version(), 1);
+    assert_eq!(frozen.claims().len(), 9);
+    let solid = frozen
+        .claims()
+        .iter()
+        .filter(|c| c.ambition == Ambition::Solid)
+        .count();
+    let frontier = frozen
+        .claims()
+        .iter()
+        .filter(|c| c.ambition == Ambition::Frontier)
+        .count();
+    let moonshot = frozen
+        .claims()
+        .iter()
+        .filter(|c| c.ambition == Ambition::Moonshot)
+        .count();
+    assert_eq!((solid, frontier, moonshot), (5, 2, 2));
+    assert_eq!(frozen.fixtures().len(), 7);
+    let held_out = frozen
+        .fixtures()
+        .iter()
+        .filter(|x| x.partition == Partition::HeldOut)
+        .count();
+    assert_eq!(held_out, 2, "DAE and adversarial held-out partitions");
+    assert_eq!(frozen.obligations().len(), 6);
+    assert_eq!(frozen.waivers().len(), 1);
+    // The tearing-optimality falsifier lane is refutation-polarity.
+    let tearing = frozen
+        .claim("i02-globally-optimal-tearing")
+        .expect("moonshot tearing claim");
+    assert_eq!(tearing.polarity, ClaimPolarity::Refutation);
+    // Distinct initiatives have distinct identities; both are stable.
+    let i01 = i01_draft().freeze().expect("freeze");
+    assert_ne!(frozen.digest(), i01.digest());
+    let again = fs_vmanifest::i02_draft().freeze().expect("refreeze");
+    assert_eq!(frozen.digest(), again.digest());
+    // Input-order invariance holds for I02 as well (G5).
+    let mut reordered = fs_vmanifest::i02_draft();
+    reordered.claims.reverse();
+    reordered.fixtures.reverse();
+    reordered.obligations.reverse();
+    assert_eq!(
+        reordered.freeze().expect("freeze").digest(),
+        frozen.digest()
+    );
+}

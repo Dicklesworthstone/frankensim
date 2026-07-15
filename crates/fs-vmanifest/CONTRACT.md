@@ -52,12 +52,21 @@ colors or promotion authority.
 - `claim_digest` / `fixture_digest` / `obligation_digest` /
   `waiver_digest` — per-component canonical identities (length-framed,
   variant-tagged, exact IEEE-754 float bits, domain-separated BLAKE3).
-- `i01_draft()` — the I01 instance: 9 claims (5 baseline [S], 2 [F],
-  2 [M], including a refutation-polarity falsifier lane for the
-  completeness moonshot), 6 fixture pins (2 held-out), 6 obligation rows
-  covering every claim, 1 waiver for the not-yet-licensed external
-  benchmark deck slot. Exposed as a draft so consumers freeze it
-  themselves — no panic path hides in a static initializer.
+- `i01_draft()` — the I01 (multi-field equation/compiler) instance: 9
+  claims (5 baseline [S], 2 [F], 2 [M], including a refutation-polarity
+  falsifier lane for the completeness moonshot), 6 fixture pins (2
+  held-out), 6 obligation rows covering every claim, 1 waiver for the
+  not-yet-licensed external benchmark deck slot. Exposed as a draft so
+  consumers freeze it themselves — no panic path hides in a static
+  initializer.
+- `i02_draft()` — the I02 (machine causalization and structural-index
+  compiler) instance on the same schema: 9 claims (5 [S]: incidence,
+  deterministic matching/DM/SCC/BLT, scoped index reduction, consistent
+  initialization, block plans + repair witnesses; 2 [F]: causal-witness
+  minimality/presentation-invariance, hybrid-mode structural
+  completeness; 2 [M]: certified hidden-constraint discovery and a
+  refutation-polarity globally-optimal-tearing falsifier lane), 7
+  fixture pins (2 held-out), 6 obligation rows, 1 waiver.
 
 ## Invariants
 
@@ -126,7 +135,10 @@ identity; production-oracle reuse fails closed; post-freeze alteration
 has no code path); per-component mutation sensitivity including external
 hex case normalization; amendment semantics (successor version enforced,
 defective successors refused, invalidated descendants named exactly,
-dropped obligations named).
+dropped obligations named); the I02 draft freezes with its own 5/2/2
+lattice, 2 held-out partitions, full coverage, refutation-polarity
+tearing falsifier, an identity distinct from I01's, and I02 input-order
+invariance.
 
 ## No-claim boundaries
 
