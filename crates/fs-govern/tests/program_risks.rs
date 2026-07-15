@@ -1,8 +1,9 @@
 //! G0 governance battery for the expansion-program PR-001--PR-012 register.
 
 use fs_govern::program_risks::{
-    AssessmentStatus, MAX_OBSERVED_UNIT_PREVIEW_BYTES, ProgramRiskId, ProgramRiskObservation,
-    TriggerComparison, assess_program_risks, program_risk_register_json, program_risks,
+    AssessmentStatus, MAX_OBSERVED_UNIT_PREVIEW_BYTES, ObservationDomain, ProgramRiskId,
+    ProgramRiskObservation, TriggerComparison, assess_program_risks, program_risk_register_json,
+    program_risks,
 };
 
 fn clear_observation(id: ProgramRiskId) -> ProgramRiskObservation<'static> {
@@ -233,6 +234,14 @@ fn g0_program_rows_are_schema_complete_and_quantitative() {
 fn g0_trigger_boundaries_follow_the_declared_comparator() {
     for risk in program_risks() {
         let threshold = risk.trigger.threshold;
+        // The one-below probe must stay INSIDE the declared observation
+        // domain: an epsilon nudge off an integer threshold is a
+        // non-integral value that correctly assesses OutOfRange, not a
+        // boundary sample (PR-003 exposed this).
+        let just_below = match risk.trigger.domain {
+            ObservationDomain::NonNegativeInteger => threshold - 1.0,
+            _ => threshold - f64::EPSILON * threshold.max(1.0),
+        };
         match risk.trigger.comparison {
             TriggerComparison::GreaterThanOrEqual => {
                 assert_eq!(
@@ -243,11 +252,8 @@ fn g0_trigger_boundaries_follow_the_declared_comparator() {
                     risk.id.code()
                 );
                 assert_eq!(
-                    risk.trigger.assess(
-                        threshold - f64::EPSILON * threshold.max(1.0),
-                        risk.trigger.min_samples,
-                        risk.trigger.unit,
-                    ),
+                    risk.trigger
+                        .assess(just_below, risk.trigger.min_samples, risk.trigger.unit,),
                     AssessmentStatus::Clear,
                     "{} below boundary",
                     risk.id.code()
@@ -262,11 +268,8 @@ fn g0_trigger_boundaries_follow_the_declared_comparator() {
                     risk.id.code()
                 );
                 assert_eq!(
-                    risk.trigger.assess(
-                        threshold - f64::EPSILON * threshold.max(1.0),
-                        risk.trigger.min_samples,
-                        risk.trigger.unit,
-                    ),
+                    risk.trigger
+                        .assess(just_below, risk.trigger.min_samples, risk.trigger.unit,),
                     AssessmentStatus::Triggered,
                     "{} below boundary",
                     risk.id.code()

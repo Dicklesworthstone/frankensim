@@ -83,6 +83,18 @@ fn policy() -> PortfolioPolicy {
     }
 }
 
+/// A comparison budget that genuinely covers `candidates` reservations
+/// on EVERY axis (each candidate reserves one reviewer slot and one
+/// falsification run through `envelope`).
+fn shared_budget(work: u64, candidates: u64) -> ResourceEnvelope {
+    ResourceEnvelope {
+        work_units: work,
+        memory_bytes: work * 1024,
+        reviewer_slots: candidates,
+        falsification_capacity: candidates,
+    }
+}
+
 fn key(tag: &str) -> IdempotencyKey {
     IdempotencyKey::derive(tag)
 }
@@ -290,7 +302,7 @@ fn lane_003_preregistered_head_to_head() {
     let c2 = lane.mechanism_id("candidate two", 1).expect("id");
     let intruder = lane.mechanism_id("undeclared intruder", 1).expect("id");
 
-    let h2h = HeadToHeadCharter::new(&lane, &[c1, c2], envelope(50), evidence("prereg"))
+    let h2h = HeadToHeadCharter::new(&lane, &[c1, c2], shared_budget(50, 2), evidence("prereg"))
         .expect("comparison charter");
     ledger
         .preregister_comparison(h2h.clone(), key("h2h"))
@@ -688,7 +700,7 @@ fn lane_007_independence_class_backstop() {
     let comparison = HeadToHeadCharter::new(
         &compared,
         &[first, second],
-        envelope(30),
+        shared_budget(30, 2),
         evidence("survivor-comparison"),
     )
     .expect("comparison");
