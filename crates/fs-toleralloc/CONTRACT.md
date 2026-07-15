@@ -91,8 +91,9 @@ repeatability plus input-order tie-breaking.
 
 The stricter robustness/admission policy is evidence-semantic. The consuming
 `fs-diffreal-e2e` tolerance fixture binds it as
-`fs-diffreal-e2e/tolerance-allocation-fixture/v2`; v1 evidence must not be
-silently reinterpreted under this contract.
+`fs-diffreal-e2e/tolerance-allocation-fixture/v3`; v1/v2 evidence must not be
+silently reinterpreted under the sealed-sensitivity, typed-event, sampled-only
+policy.
 
 ## No-claim boundaries
 
